@@ -147,10 +147,8 @@ test('the REAL Direct child follow-up persists the Client-sampled zone on the ch
     provider: 'spawn',
     label: 'request-zone child',
     childId: SessionId(CHILD),
-    request: {
-      prompt: [{ type: 'text', text: 'child initial prompt' }],
-      parent: parentHandle.agent,
-    },
+    prompt: [{ type: 'text', text: 'child initial prompt' }],
+    parent: parentHandle.agent,
     signal: new AbortController().signal,
     delivery: 'parent',
   })
@@ -207,25 +205,32 @@ test('the REAL Direct child follow-up persists the Client-sampled zone on the ch
     rpcId: 'string',
     clientTimeZone: 'Asia/Shanghai',
   }, 'the child source must carry the official human provenance plus the Client-sampled request zone')
-  assert.equal(textOf(userMessages(events).find(message => textOf(message) === 'child initial prompt')!),
-    'child initial prompt', 'the initial delegated prompt stays untouched')
+  // The official rc.2 runtime appends its delegation guidance to the INITIAL
+  // child prompt; the TUI-originated text itself stays byte-identical.
+  const initial = userMessages(events).find(message => textOf(message).startsWith('child initial prompt'))
+  assert.ok(initial !== undefined, 'the child log must carry the initial delegated prompt')
+  assert.equal(textOf(initial).startsWith('child initial prompt'), true,
+    'the initial delegated prompt stays untouched (official delegation guidance may follow it)')
   assert.equal(userMessages(events).filter(message => textOf(message) === 'child follow up').length, 1,
     'the follow-up lands on the child exactly once (no double delivery)')
 
-  // Parent/child authority is unchanged: a follow-up addressed from a different
-  // parent is refused by the official runtime and never reaches the child.
-  const wrongParent = await port.prompt(
+  // Host-side authority is the official service's: an address that does not
+  // name a live continuable child is refused by the REAL runtime and never
+  // reaches any child log. (The viewer's local parent/child currentness is a
+  // Client guard proven by subagent-viewer-submit.test.ts; rc.2 no longer sends
+  // a parent claim on the request.)
+  const unknownChild = await port.prompt(
     {
-      parentSessionId: 'request-zone-child-other-parent',
-      childSessionId: CHILD,
+      parentSessionId: PARENT,
+      childSessionId: 'request-zone-child-missing',
       delivery: 'queue',
       content: [{ type: 'text', text: 'unauthorized follow up' }],
     },
     { makeSignal: () => new AbortController().signal, clientTimeZone: () => 'Asia/Shanghai' },
   )
-  assert.equal(wrongParent.kind, 'rejected', 'a foreign parent must be refused')
-  const afterWrongParent = await readChild()
-  assert.equal(userMessages(afterWrongParent).some(message => textOf(message) === 'unauthorized follow up'), false,
+  assert.equal(unknownChild.kind, 'rejected', 'an unknown child address is refused by the official Host')
+  const afterUnknown = await readChild()
+  assert.equal(userMessages(afterUnknown).some(message => textOf(message) === 'unauthorized follow up'), false,
     'a refused follow-up never reaches the child log')
 
   // The identity is per submit: a second follow-up carries its own requestId.

@@ -30,7 +30,7 @@ export function pituiDisplaySeam(app: TuiApp): SurfaceDisplaySeam {
     commitStatusFacts(facts: DisplayStatusFacts) {
       if (facts.busy !== undefined) app.setBusy(facts.busy)
       if (facts.working !== undefined) app.setWorking(facts.working)
-      if (facts.planMode !== undefined) app.setPlanMode(facts.planMode)
+      if (facts.planMode !== undefined) app.setPlanMode(facts.planMode, facts.planPending)
       // `sessionTitle` may be EXPLICITLY undefined (the Remote current-facts
       // path clears an absent title); distinguish presence from value.
       if ('sessionTitle' in facts) app.setSessionTitle(facts.sessionTitle)
@@ -66,7 +66,7 @@ export function pituiDisplaySeam(app: TuiApp): SurfaceDisplaySeam {
       // text always comes back to the user (steer.test.ts's restore family).
       return true
     },
-    resetInputHistory: (entries, owner) => app.resetInputHistory(entries, owner),
+    resetInputHistory: (entries, owner, writeIds) => app.resetInputHistory(entries, owner, writeIds),
     beginInputHistoryScope: owner => app.beginInputHistoryScope(owner),
     settleScopeInput: settlement => app.settleScopeInput(settlement),
     setSearchResult: (index, count) => app.setSearchResult(index, count),
@@ -81,6 +81,7 @@ export function pituiDisplaySeam(app: TuiApp): SurfaceDisplaySeam {
     },
     setWelcomeCard: facts => app.setWelcomeCard(facts),
     setWelcomeIdle: idle => app.setWelcomeIdle(idle),
+    setWelcomeWorkspace: workspace => app.setWelcomeWorkspace(workspace),
     setTerminalCwd: cwd => app.setTerminalCwd(cwd),
     setPendingInputPresentation: presentation => app.setPendingInputPresentation(presentation),
     getSessionTitle: () => app.getSessionTitle(),

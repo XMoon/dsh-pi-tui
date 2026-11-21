@@ -11,6 +11,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { unavailableAcpAccess, unavailableWebAccess, unavailableMcpServers } from '../support/web-access-fake.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
@@ -52,6 +53,7 @@ import { DirectCatalogPort } from '../../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
+import { unconfiguredPolicyObservation, unconfiguredSessionPolicyPort } from '../support/session-policy-fake.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -221,8 +223,13 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     ctx,
     app,
     deliveredFilesSnapshot: () => undefined,
+    webAccess: unavailableWebAccess(),
+    acpAccess: unavailableAcpAccess(),
+    mcpServers: unavailableMcpServers(),
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
         ...sessionScopeFacts(() => undefined, () => 0),
+        sessionPolicy: unconfiguredSessionPolicyPort(),
+        policy: unconfiguredPolicyObservation(),
         currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -246,8 +253,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     commandRegistry: ctx.get('commands') as import('../../src/commands.ts').CommandRegistryLike | undefined,
     clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
-    hostShellCompletion: true,
-    transcriptExportAvailable: true,
+    hostShellCompletion: { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) },
     interaction: {
       questions: {
         onRequest: () => true,
@@ -257,8 +263,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
         answerContinued: async () => 'not-continued' as const,
       },
       onApprovalRequest: () => {},
-      setApprovalPolicy: () => true,
-    },
+      },
     sessionWriter: {
       prompt: async () => ({ kind: 'committed' as const, value: undefined }),
       updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
@@ -297,7 +302,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, createPluginManagerPage: () => undefined,
+    openTasksBrowser: () => {}, openScheduleWorkspace: () => ({ kind: 'success' } as const), createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -968,4 +973,57 @@ test('authorizationFailureText maps the stable taxonomy', () => {
   assert.equal(authorizationFailureText({ code: 'NOT_COMMITTED' }, 'x'), 'sign-in finished without storing a credential')
   assert.equal(authorizationFailureText({ code: 'DECLINED' }, 'x'), 'login cancelled')
   assert.equal(authorizationFailureText(new Error('boom'), 'safe boom'), 'sign-in failed: safe boom')
+})
+
+// ── transport-lost outcome (unconfirmed) ──────────────────────────────────
+
+test('a transport-lost attempt settles `unconfirmed`, never failed/cancelled/authorized', async () => {
+  let opened = 0
+  let closed = 0
+  const surface: AuthorizationSurface = {
+    openOutputViewer: () => {
+      opened += 1
+      return () => { closed += 1 }
+    },
+    askQuestions: async () => [],
+    openPicker: () => ({ close: () => {} }),
+  }
+  const flow = createAuthorizationFlow(surface, {
+    respond: async () => {},
+    cancel: async () => {},
+  })
+  flow.bind('attempt-lost')
+  flow.onEvent({
+    kind: 'notice',
+    attemptId: 'attempt-lost',
+    notice: { message: 'Open the page', url: 'https://example.test/device' },
+  })
+  assert.equal(opened, 1)
+  flow.onEvent({ kind: 'unconfirmed', attemptId: 'attempt-lost', reason: 'the authorization stream was lost' })
+  const outcome = await flow.outcome
+  assert.deepEqual(outcome, { status: 'unconfirmed', message: 'the authorization stream was lost' })
+  assert.equal(closed, 1, 'the notice panel is retired')
+})
+
+test('a pre-bind unconfirmed terminal is preserved and applied only to its own attempt', async () => {
+  const surface: AuthorizationSurface = {
+    openOutputViewer: () => () => {},
+    askQuestions: async () => [],
+    openPicker: () => ({ close: () => {} }),
+  }
+  const flow = createAuthorizationFlow(surface, {
+    respond: async () => {},
+    cancel: async () => {},
+  })
+  flow.onEvent({ kind: 'unconfirmed', attemptId: 'other', reason: 'other attempt lost' })
+  flow.onEvent({ kind: 'unconfirmed', attemptId: 'mine', reason: 'my attempt lost' })
+  flow.bind('mine')
+  assert.deepEqual(await flow.outcome, { status: 'unconfirmed', message: 'my attempt lost' })
+})
+
+test('authorizationFailureText maps the dispatch-unknown taxonomy', () => {
+  assert.equal(
+    authorizationFailureText({ code: 'DISPATCH_UNKNOWN' }, 'x'),
+    'sign-in outcome unknown — refresh credentials before retrying',
+  )
 })

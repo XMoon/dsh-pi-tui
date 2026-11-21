@@ -55,7 +55,6 @@ import type { TestContext } from 'node:test'
 import { symbols } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { PI_TUI_EXTENSIONS_SERVICE } from '../../src/extensions.ts'
-import { loadRemoteApplicationRuntime } from '../../src/runtime/backend-loader.ts'
 import {
   createRemoteApplicationHostFixture,
   testLifecycle,
@@ -77,9 +76,9 @@ function createHostFixture(life: import('../support/temp-lifecycle.ts').TestLife
   return createRemoteApplicationHostFixture(life, PRESET)
 }
 
-/** Load the Remote application runtime through the sanctioned lazy boundary. */
-function loadApplicationRuntimeModule() {
-  return loadRemoteApplicationRuntime()
+/** The retired M3 aggregate, now a TEST-ONLY fixture module. */
+function loadApplicationRuntimeModule(): Promise<typeof import('../support/m3-inprocess/application-runtime.ts')> {
+  return import('../support/m3-inprocess/application-runtime.ts')
 }
 
 test('A. the aggregate composes ONE Host runtime, ONE Client runtime, ONE Backend and ONE owner registry', async (t) => {
@@ -388,8 +387,11 @@ test('a post-wire application composition failure (Client exists) unwinds the wi
   assert.ok(clientRowsMountedAtInjection, 'the failure was induced while the M3 Host rows (mounted with the Client) existed')
   // The Client-existence ordering is source-locked: the getter is read only
   // in the post-wire stage, after `await createExperimentalRemoteRuntime`.
+  // The retired aggregate now lives in the test-only carrier, so the ordering
+  // lock reads THAT module (the production split module has the same shape but
+  // no wire at all).
   const aggregateSource = await import('node:fs').then(fs =>
-    fs.readFileSync(new URL('../../src/app/remote/application-runtime.ts', import.meta.url), 'utf8'))
+    fs.readFileSync(new URL('../support/m3-inprocess/application-runtime.ts', import.meta.url), 'utf8'))
   const wireAwait = aggregateSource.indexOf('const wire = await createExperimentalRemoteRuntime(')
   const optionsRead = aggregateSource.indexOf('options.promptSerializer')
   assert.ok(wireAwait >= 0 && optionsRead > wireAwait,
@@ -403,26 +405,51 @@ test('a post-wire application composition failure (Client exists) unwinds the wi
   await host.dispose()
 })
 
-test('E. the aggregate performs exactly one of each construction (no duplicate semantics, source-locked)', async () => {
+test('E. exactly one of each construction, split across the stage and the aggregate (source-locked)', async () => {
   // A narrowly targeted structural lock (plan §10.4 allows a source-level
-  // exact check): the aggregate CALLS each existing constructor exactly once
-  // (counting call sites, not import mentions) and constructs no Remote
-  // adapter itself.
-  const source = await import('node:fs').then(fs =>
-    fs.readFileSync(new URL('../../src/app/remote/application-runtime.ts', import.meta.url), 'utf8'))
-  const callCount = (name: string): number =>
-    (source.match(new RegExp(`await ${name}\\(`, 'g')) ?? []).length
-    + (source.match(new RegExp(`= ${name}\\(`, 'g')) ?? []).length
-  assert.equal(callCount('createExperimentalRemoteRuntime'), 1,
-    'exactly ONE wire construction')
-  assert.equal(callCount('createRemoteBackendRuntime'), 1,
-    'exactly ONE backend runtime construction (no second semantic assembly)')
-  assert.equal(callCount('createRemoteSessionOwnerServices'), 1,
-    'exactly ONE owner registry construction')
-  assert.equal((source.match(/createRemoteM3ASemantics\(/g) ?? []).length, 0,
-    'the aggregate never calls the semantic assembly directly')
-  assert.equal((source.match(/new Remote\w+\(/g) ?? []).length, 0,
+  // exact check). After the M3 retirement the constructors are split across
+  // TWO modules, and the split Client depends on the SAME ones:
+  //
+  //   src/app/remote/application-stage.ts  back end + owner registry + stage
+  //   test/support/m3-inprocess/application-runtime.ts  the M3 wire join
+  //
+  // Both are pinned here so "one of each" stays a real exact-count claim and
+  // the retired aggregate cannot grow a second semantic assembly.
+  const fs = await import('node:fs')
+  const aggregate = fs.readFileSync(new URL('../support/m3-inprocess/application-runtime.ts', import.meta.url), 'utf8')
+  const stage = fs.readFileSync(new URL('../../src/app/remote/application-stage.ts', import.meta.url), 'utf8')
+  const split = fs.readFileSync(new URL('../../src/app/remote/application-runtime.ts', import.meta.url), 'utf8')
+  const occurrences = (source: string, pattern: string): number => (source.match(new RegExp(pattern, 'g')) ?? []).length
+
+  // The retired aggregate joins ONE wire and nothing else: no second backend
+  // assembly, no second owner registry, no adapter of its own.
+  assert.equal(occurrences(aggregate, 'await createExperimentalRemoteRuntime\\('), 1,
+    'exactly ONE wire construction in the retired aggregate')
+  for (const forbidden of ['createRemoteBackendRuntime', 'createRemoteSessionOwnerServices', 'createRemoteM3ASemantics']) {
+    assert.equal(aggregate.includes(forbidden), false,
+      `the retired aggregate must not construct ${forbidden} itself`)
+  }
+  assert.equal(occurrences(aggregate, 'new Remote\\w+\\('), 0,
     'the aggregate never constructs a Remote adapter itself')
-  assert.equal((source.match(/\.retain\(/g) ?? []).length, 0,
+  assert.equal(occurrences(aggregate, '\\.retain\\('), 0,
     'the aggregate never opens a Connection/retains a Session itself')
+
+  // The ONE shared stage owns the semantic assembly, exactly once.
+  assert.equal(occurrences(stage, 'await createRemoteBackendRuntime\\('), 1,
+    'exactly ONE backend runtime construction (no second semantic assembly)')
+  assert.equal(occurrences(stage, '= createRemoteSessionOwnerServices\\('), 1,
+    'exactly ONE owner registry construction')
+  assert.equal(occurrences(stage, 'createRemoteM3ASemantics\\('), 0,
+    'the shared stage never calls the semantic assembly directly')
+  assert.equal(occurrences(stage, 'new Remote\\w+\\('), 0,
+    'the shared stage never constructs a Remote adapter itself')
+
+  // The split Client holds exactly ONE stage composition and no wire/backend
+  // or in-process constructor of any kind.
+  assert.equal(occurrences(split, 'await composeRemoteApplicationStage\\('), 1,
+    'the split Client composes exactly ONE shared application stage')
+  for (const forbidden of ['createExperimentalRemoteRuntime', 'createRemoteHostRuntime', 'createRemoteClientRuntime', 'createRemoteBackendRuntime']) {
+    assert.equal(split.includes(forbidden), false,
+      `the split Client module must not reference ${forbidden}`)
+  }
 })

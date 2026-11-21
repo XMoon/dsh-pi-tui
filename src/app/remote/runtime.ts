@@ -1,134 +1,51 @@
 /**
- * M3-1 experimental Remote runtime composition owner.
+ * The shared Remote backend assembly (M3-3B) that the real split Client
+ * consumes: the semantic bundle, the Remote ConfigPort mirror and the Remote
+ * session archive over ONE Client runtime source.
  *
- * The only app-level module that joins the Host-side and Client-side Remote
- * runtimes, in the frozen order:
- *
- * ```text
- * caller Host prerequisites
- *   -> Remote Host composition (additive official rows)
- *   -> Client composition (official wire over the in-process carrier)
- * ```
- *
- * It knows nothing about `TuiApp`, surfaces, `SessionOwnerRef`, the semantic
- * `Backend`, commands, or submission. M3-1 has no production bootstrap call
- * site; the only sanctioned way to reach this module is the lazy
- * `runtime/backend-loader.ts` boundary, and tests may construct it directly.
+ * This module is PRODUCTION code. It contains no in-process Host carrier and no
+ * M3 wire composer: the retired M3 join lives in
+ * `test/support/m3-inprocess/runtime.ts`, and `src/**` cannot reach it.
  *
  * @module app/remote/runtime
  */
 
-import type { Context } from '@deepseek-ai/cordis'
 import type { Backend } from '../../runtime/backend.ts'
 import type { RemotePromptSerializer } from '../../runtime/remote/session-writer-remote.ts'
 import { RemoteConfigPort, type RemoteConfigRuntimeSource } from '../../runtime/remote/config-remote.ts'
+import { RemoteConfigWriteLifetime } from '../../runtime/remote/config-write-lifetime.ts'
+import { RemoteSessionPolicyPort } from '../../runtime/remote/session-policy-remote.ts'
+import { RemoteTeamModePort } from '../../runtime/remote/team-mode-remote.ts'
+import { RemoteTeamBoardReadPort } from '../../runtime/remote/team-board-read-remote.ts'
+import { RemoteMcpServerPort } from '../../runtime/remote/mcp-server-remote.ts'
+import { RemoteCuaAccessPort, type RemoteCuaAccessNamespace } from '../../runtime/remote/cua-access-remote.ts'
 import { RemoteSessionArchive } from '../../runtime/remote/session-archive-remote.ts'
+import { RemoteSessionMarkdown } from '../../runtime/remote/session-markdown-remote.ts'
 import { createRemoteBackend } from '../../runtime/remote/backend-remote.ts'
-import { createRemoteClientRuntime, type RemoteClientRuntime } from './client-runtime.ts'
 import { RemotePromptSerializerProduction } from '../../runtime/remote/prompt-serializer-remote.ts'
+import { createRemoteFileReceiptUploader } from '../../runtime/remote/file-upload-remote.ts'
 import { RemoteHostUserShellPort } from '../../runtime/remote/host-user-shell-remote.ts'
-import { createRemoteHostRuntime, type RemoteHostRuntime } from './host-runtime.ts'
+import { RemoteHostShellCompletionPort } from '../../runtime/remote/host-shell-completion-remote.ts'
+import { RemoteWebAccessPort } from '../../runtime/remote/web-access-remote.ts'
+import { RemoteAcpAccessPort } from '../../runtime/remote/acp-access-remote.ts'
 import { mergeCause } from './dispose-cause.ts'
 import { createRemoteM3ASemantics, remoteM3ARuntimeSourceOf, type RemoteM3ARuntimeSource, type RemoteM3ASemantics } from './m3a-semantics.ts'
 import type { SplitClientInteractionDelivery } from '../../runtime/remote/interaction-remote.ts'
-
-/**
- * Run one disposal step with per-step error isolation: the step's failures
- * are collected (never thrown here) so the remaining cleanup steps always
- * run. Returns every collected error.
- */
-async function collectDisposeErrors(dispose: () => Promise<void> | void): Promise<unknown[]> {
-  try {
-    await dispose()
-  } catch (error) {
-    return [error]
-  }
-  return []
-}
-
-/** Start input for the experimental Remote runtime. */
-export interface ExperimentalRemoteRuntimeOptions {
-  /** The already-running ordinary pi-tui Host Context (never disposed here). */
-  readonly hostContext: Context
-  /** Host bootstrap prerequisite barrier owned by the caller (M3-0 ordering contract). */
-  readonly waitForHostPrerequisites: () => Promise<void>
-  /** Lifecycle signal observed between the Host prerequisite and composition. */
-  readonly signal?: AbortSignal
-}
-
-/** The joined experimental Remote runtime. Not exported from the package root. */
-export interface ExperimentalRemoteRuntime {
-  readonly host: RemoteHostRuntime
-  readonly client: RemoteClientRuntime
-  /** Dispose the Client first, then the Host additive fibers. Idempotent. */
-  dispose(): Promise<void>
-}
-
-/**
- * Start the experimental Remote runtime: wait for the caller's Host
- * prerequisites (the M3-0 `legacy settings migration -> Remote Host
- * composition -> Client readiness` ordering contract), compose the Host
- * rows, then compose the Client over the Host carrier.
- *
- * Failure semantics: a Host construction failure unwinds the partial Host
- * fibers and no Client Context is created; a Client construction failure
- * unwinds the partial Client, disposes the Host runtime, and rethrows the
- * original error.
- */
-export async function createExperimentalRemoteRuntime(
-  options: ExperimentalRemoteRuntimeOptions,
-): Promise<ExperimentalRemoteRuntime> {
-  await options.waitForHostPrerequisites()
-  options.signal?.throwIfAborted()
-
-  const host = await createRemoteHostRuntime(options.hostContext)
-  let client: RemoteClientRuntime
-  try {
-    client = await createRemoteClientRuntime({ carrier: host.carrier, signal: options.signal })
-  } catch (error) {
-    // §17.3: rethrow the original Client failure. A Host disposal failure
-    // must not mask it — the causes aggregate instead.
-    const disposeErrors = await collectDisposeErrors(() => host.dispose())
-    if (disposeErrors.length > 0) {
-      const secondary = disposeErrors.length === 1
-        ? disposeErrors[0]
-        : new AggregateError(disposeErrors, 'remote runtime: host disposal failures during client-failure unwind')
-      throw mergeCause(error instanceof Error ? error : new Error(String(error)), secondary)
-    }
-    throw error
-  }
-
-  let disposed = false
-  return {
-    host,
-    client,
-    async dispose(): Promise<void> {
-      if (disposed) return
-      disposed = true
-      // Client first, then Host — both run even if the first throws; the
-      // first collected error surfaces with the second attached as cause.
-      const errors = [
-        ...await collectDisposeErrors(() => client.dispose()),
-        ...await collectDisposeErrors(() => host.dispose()),
-      ]
-      if (errors.length > 0) {
-        const failure = errors[0] instanceof Error ? errors[0] : new Error(String(errors[0]))
-        if (errors.length > 1) {
-          mergeCause(failure, new AggregateError(errors.slice(1), 'remote runtime: remaining disposal failures'))
-        }
-        throw failure
-      }
-    },
-  }
-}
 
 /** Compile-time proof that the shared Client runtime source satisfies the
  *  Remote ConfigPort's narrow source face (never called; referenced by the
  *  official-contract gate). The M3-1 Client runtime AND the real split
  *  Client's Domain mount are the same structural source; the config-plane
  *  namespaces stay part of the ONE `remote` service, never a second object. */
-export function remoteConfigRuntimeSourceOf(runtime: RemoteM3ARuntimeSource): RemoteConfigRuntimeSource {
-  return runtime
+export function remoteConfigRuntimeSourceOf(
+  runtime: RemoteM3ARuntimeSource,
+  trustedHostOrigin?: string,
+): RemoteConfigRuntimeSource {
+  return {
+    remote: runtime.remote,
+    connection: runtime.connection,
+    ...(trustedHostOrigin === undefined ? {} : { trustedHostOrigin }),
+  }
 }
 
 /** The composition-owned unary Fetch face the archive adapter addresses:
@@ -155,6 +72,10 @@ export interface RemoteBackendRuntimeOptions {
   readonly promptSerializer?: RemotePromptSerializer
   /** The composition-owned fetch the archive adapter addresses. */
   readonly fetch: RemoteBackendFetch
+  /** The authenticated Host listener origin from the verified Client Host identity. */
+  readonly trustedHostOrigin?: string
+  /** The composition-owned surface/process lifetime for pre-prompt preparation. */
+  readonly signal?: AbortSignal
   /** The composition-owned pre-dispatch dispatch admission (the surface-stop
    *  fence the Remote session writer consults immediately before dispatch).
    *  Absent = every pre-dispatch write is admissible (the pre-fence behavior). */
@@ -208,22 +129,41 @@ export async function createRemoteBackendRuntime(
     }
   }
   try {
+    // ONE composition-owned receipt uploader: the production prompt serializer
+    // and the Host command port stage their files through the SAME official
+    // authenticated raw-upload route. A test-injected prompt serializer must
+    // not cost the command path its staging capability.
+    const uploader = createRemoteFileReceiptUploader(options.fetch)
     const semantics = createRemoteM3ASemantics(remoteM3ARuntimeSourceOf(options.runtime), {
       // The production serializer is the DEFAULT (M3-4 PR3): it consumes the
       // application PreparedPrompt and reads recalled durable images through
       // the official binding-scoped attachment read. An explicit injection
       // (composition tests) still wins.
       promptSerializer: options.promptSerializer
-        ?? RemotePromptSerializerProduction.overSessions(options.runtime.sessions),
+        ?? RemotePromptSerializerProduction.overSessions(options.runtime.sessions, uploader),
+      fileReceiptUploader: uploader,
       ...(options.isDispatchAllowed === undefined ? {} : { isDispatchAllowed: options.isDispatchAllowed }),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
       ...(options.delivery === undefined ? {} : { delivery: options.delivery }),
       ...(options.surfaceRevision === undefined ? {} : { surfaceRevision: options.surfaceRevision }),
       ...(options.onQualification === undefined ? {} : { onQualification: options.onQualification }),
     })
     unwind.push(() => semantics.dispose())
-    const config = new RemoteConfigPort(remoteConfigRuntimeSourceOf(options.runtime))
+    // M6-1 F8: the ONE shared accepted-write lifetime. The ConfigPort's
+    // settings/credential writes and the session-policy approval write both
+    // bracket through it, so the Client reload gate observes every accepted
+    // persisted write through ONE fact (never a second counter).
+    const writeLifetime = new RemoteConfigWriteLifetime()
+    const config = new RemoteConfigPort(
+      remoteConfigRuntimeSourceOf(options.runtime, options.trustedHostOrigin),
+      { writeLifetime },
+    )
     unwind.push(() => config.dispose())
     const sessionArchive = new RemoteSessionArchive({ fetch: options.fetch })
+    // S5-PR3: the official authenticated Markdown read over the SAME
+    // composition-owned fetch; the Host-only profile already registers the
+    // official route, so this adapter never mounts a second Host row.
+    const sessionMarkdown = new RemoteSessionMarkdown({ fetch: options.fetch })
     // §2.3/§4.1 config readiness barrier: the mirror's invalidation listeners
     // are already installed (the port's constructor), the M3-1 Client runtime
     // already awaited its own initial readiness (so a Connection generation
@@ -252,10 +192,68 @@ export async function createRemoteBackendRuntime(
         ...semantics,
         config,
         sessionArchive,
-        // M3-4 PR3: the Remote Host user-shell adapter (truthful
-        // unavailable; CARRIER_GAP) — served by the backend, so the
-        // composition root holds no static Remote edge.
-        hostUserShell: new RemoteHostUserShellPort(),
+        sessionMarkdown,
+        hostUserShell: new RemoteHostUserShellPort(
+          options.runtime.remote.piTuiHostUserShell,
+          options.runtime.connection.generation,
+        ),
+        hostShellCompletion: new RemoteHostShellCompletionPort(
+          options.runtime.remote.piTuiHostUserShell,
+          options.runtime.connection.generation,
+        ),
+        // M5-W PR-C: the Split Client's Web frontend control over the package's
+        // ONE private `piTuiWebAccess` namespace and the SAME Connection
+        // generation source every other adapter fences on.
+        webAccess: new RemoteWebAccessPort(
+          options.runtime.remote.piTuiWebAccess,
+          options.runtime.connection.generation,
+        ),
+        // PO-1B: the Split Client's local ACP listener control over the package's
+        // ONE private `piTuiAcpAccess` namespace and the SAME Connection
+        // generation source every other adapter fences on.
+        acpAccess: new RemoteAcpAccessPort(
+          options.runtime.remote.piTuiAcpAccess,
+          options.runtime.connection.generation,
+        ),
+        // M6-1 F8: the exact-Session policy port over the SAME mounted
+        // contribution namespace, the SAME Connection generation source and
+        // the SHARED accepted-write lifetime above.
+        sessionPolicy: new RemoteSessionPolicyPort(
+          options.runtime.remote.piTuiSessionPolicy,
+          options.runtime.connection.generation,
+          writeLifetime,
+        ),
+        // FR1: the official generated `agentTeams` namespace over the SAME
+        // Client sessions service and the SAME Connection generation source.
+        // A missing mounted namespace is a truthful unavailable, never Direct.
+        teamMode: new RemoteTeamModePort({
+          sessions: options.runtime.sessions,
+          remote: { agentTeams: options.runtime.remote.agentTeams },
+          connection: { generation: options.runtime.connection.generation },
+        }),
+        // FR2: the official `agentTeam` projection READ-ONLY board over the SAME
+        // Client sessions + Connection generation source. No generated write
+        // namespace is required (the board is a projection, not an RPC).
+        teamBoard: new RemoteTeamBoardReadPort({
+          sessions: options.runtime.sessions,
+          connection: { generation: options.runtime.connection.generation },
+        }),
+        // FR3: the official generated `mcpManager` namespace (roster stream,
+        // probe, restart) over the SAME Connection generation source. A missing
+        // mounted namespace is a truthful unavailable, never a Direct path.
+        mcpServers: new RemoteMcpServerPort({
+          remote: { mcpManager: options.runtime.remote.mcpManager },
+          connection: { generation: options.runtime.connection.generation },
+        }),
+        // PR-5/MAC-09 v2: the official generated `cuaAccess` namespace over
+        // the SAME Connection generation source. The official generated
+        // contribution is mounted by the Client domain composition; a Host
+        // without the loaded bundle or a missing namespace is a truthful
+        // unavailable, never a Direct fallback or a fabricated denial.
+        cuaAccess: new RemoteCuaAccessPort(
+          (options.runtime.remote as unknown as { cuaAccess?: RemoteCuaAccessNamespace }).cuaAccess,
+          options.runtime.connection.generation,
+        ),
       }),
       semantics,
       dispose,
@@ -278,14 +276,3 @@ export async function createRemoteBackendRuntime(
     throw error
   }
 }
-
-// M3-4 PR1 single-entry re-export: the ONE dynamic boundary
-// (`runtime/backend-loader.ts`) imports THIS module; the application-runtime
-// aggregate joins through this intra-`app/remote` STATIC edge instead of a
-// second dynamic target, keeping the frozen "ONE dynamic edge into
-// app/remote/**" contract intact.
-export {
-  createRemoteApplicationRuntime,
-  type RemoteApplicationRuntime,
-  type RemoteApplicationRuntimeOptions,
-} from './application-runtime.ts'

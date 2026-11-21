@@ -16,7 +16,7 @@ rendering and input routing) and must cover every feature change.
 It is a **complement, not a replacement**: when a real-pane run surfaces a
 problem, add the regression to the headless suite.
 
-It is **not part of `pnpm test` and not in CI** — it needs an external Tern CLI
+It is **not part of `mise run test` and not in CI** — it needs an external Tern CLI
 and it takes minutes. Run it deliberately, for acceptance evidence.
 
 ## What you need
@@ -26,9 +26,9 @@ and it takes minutes. Run it deliberately, for acceptance evidence.
   be on `PATH`. The driver runs `tern --version` first and refuses to continue
   without it, and records that version line in `assertions.json`, so every run's
   evidence says which client produced it.
-- **`pnpm install`** — the locked `@stencil-hq/tern` devDependency (the SDK your
+- **`mise run setup`** — the locked `@stencil-hq/tern` devDependency (the SDK your
   subject renders through) and `tsx`.
-- **`pnpm build` only if your subject imports the bundled `@xmoon76/pi-tui`**
+- **`mise run build` only if your subject imports the bundled `@xmoon76/pi-tui`**
   (`packages/pi-tui/dist` is a build input). A subject that imports `src/**`
   through `tsx` needs no build.
 - The launch goes through a generated bash script, so this runs on Linux/macOS,

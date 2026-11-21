@@ -38,6 +38,20 @@ function fakeService(overrides: Partial<PluginManagerServiceLike> = {}): PluginM
     installBundle: async () => change({ stage: 'install' }),
     waitForInstall: async () => null,
     cancelInstall: async () => ({ status: 'not-running' }),
+    listVersions: async () => ({
+      status: 'listed',
+      installed: '1.0.0',
+      registry: 'https://registry.example/',
+      attempts: [{ registry: 'https://registry.example/' }],
+      versions: [{ version: '1.1.0', tags: ['latest'], prerelease: false, bundle: true }],
+      omitted: 0,
+    }),
+    updateBundle: async (_name, version) => ({
+      from: '1.0.0',
+      to: version,
+      step: 'install',
+      result: { changed: true, application: 'applied', stage: 'install', target: 'pkg', version },
+    }),
     ...overrides,
   } as PluginManagerServiceLike
 }
@@ -46,12 +60,14 @@ function host(service: unknown): { ctx: PluginManagerHostContextLike; listeners:
   const listeners = new Map<string, Set<(payload: unknown) => void>>()
   const ctx: PluginManagerHostContextLike = {
     get: (name: string) => name === 'pluginManager' ? service : undefined,
-    on: (name, listener) => {
+    // The recording double for the framework's typed `on`: the map is keyed by
+    // the official event name so the tests can fan one payload out.
+    on: ((name: string, listener: (payload: unknown) => void) => {
       const set = listeners.get(name) ?? new Set()
       set.add(listener)
       listeners.set(name, set)
-      return () => { set.delete(listener) }
-    },
+      return () => { set.delete(listener); return true }
+    }) as PluginManagerHostContextLike['on'],
   }
   return { ctx, listeners }
 }
@@ -94,6 +110,10 @@ test('snapshot maps bundles/plugins/registries/exemptions onto frozen detached f
   assert.equal(bundle.availability, 'profile')
   assert.equal(bundle.source, 'file:/home/user/plugins/dsh-pi-tui')
   assert.equal(bundle.installTarget, undefined)
+  // A Host bundle always carries the declared update capability…
+  assert.equal(bundle.update, undefined)
+  // …while an absent default-listing decision stays ABSENT (never `false`).
+  assert.equal('listedByDefault' in bundle, false)
   assert.equal(bundle.rows[0]!.title, 'App')
   assert.equal(bundle.rows[0]!.entryId, 'e-app')
   assert.deepEqual([...bundle.overrides], ['tool-bash'])
@@ -184,7 +204,7 @@ test('subscribeInvalidation maps the official plugin-manager/changed and unsubsc
 })
 
 test('a missing pluginManager service fails loud, never silently', async () => {
-  const port = new DirectPluginManagerPort({ get: () => undefined, on: () => () => {} })
+  const port = new DirectPluginManagerPort({ get: () => undefined, on: () => () => false })
   await assert.rejects(() => port.snapshot(), /pluginManager service unavailable/)
 })
 
@@ -214,6 +234,69 @@ test('a missing official catalog entry keeps official/availability/installTarget
   })
   assert.equal(bundle.installed, false)
   assert.equal(bundle.optional, true)
+})
+
+test('the rc.1 default-listing, update capability and platform refusal survive the shared mapping', async () => {
+  const port = new DirectPluginManagerPort(host(fakeService({
+    listBundles: async () => [
+      {
+        name: '@deepseek-ai/dsh-cua-bundle',
+        official: true,
+        availability: 'missing',
+        installTarget: { spec: '@deepseek-ai/dsh-cua-bundle@0.2.2-rc.1', version: '0.2.2-rc.1' },
+        listedByDefault: false,
+        enabled: false,
+        installed: false,
+        optional: false,
+        removable: false,
+        error: { code: 'unsupported-platform', diagnostic: 'This package supports darwin only.' },
+        rows: [],
+        overrides: [],
+      },
+      {
+        name: '@deepseek-ai/dsh-shipped',
+        official: true,
+        availability: 'installation',
+        enabled: false,
+        installed: true,
+        optional: true,
+        removable: false,
+        rows: [],
+        overrides: [],
+      },
+      {
+        name: 'profile-owned',
+        official: false,
+        availability: 'profile',
+        source: 'https://registry.example/profile-owned',
+        listedByDefault: true,
+        enabled: true,
+        installed: true,
+        optional: false,
+        removable: true,
+        update: 'registry',
+        rows: [],
+        overrides: [],
+      },
+    ],
+  })).ctx)
+
+  const snapshot = await port.snapshot()
+  const platformRefused = snapshot.bundles[0]!
+  assert.equal(platformRefused.listedByDefault, false, 'the Host default-listing decision is carried verbatim')
+  assert.equal(platformRefused.update, undefined)
+  // The official code AND its diagnostic text survive; nothing is normalized.
+  assert.deepEqual(platformRefused.error, {
+    code: 'unsupported-platform',
+    diagnostic: 'This package supports darwin only.',
+  })
+  assert.equal(platformRefused.installTarget?.spec, '@deepseek-ai/dsh-cua-bundle@0.2.2-rc.1')
+  // An ABSENT Host decision is never masked with a fabricated default.
+  assert.equal('listedByDefault' in snapshot.bundles[1]!, false)
+  assert.equal('update' in snapshot.bundles[1]!, false, 'a shipped bundle declares no update source unless the Host says so')
+  assert.equal(snapshot.bundles[2]!.listedByDefault, true)
+  assert.equal(snapshot.bundles[2]!.update, 'registry', 'the Host-declared update source is preserved')
+  assert.ok(Object.isFrozen(snapshot.bundles[2]))
 })
 
 test('the detached change result preserves the rc.2 restart/version/build facts', async () => {
@@ -270,4 +353,147 @@ test('the TUI plugin-manager source never touches profile/process internals', ()
       assert.ok(!source.includes(token), `${file} must not reference ${token}`)
     }
   }
+})
+
+// ── S5-PR2: official version listing and update ─────────────────────────────
+
+test('listVersions asks the Host default registry plan and maps every version fact verbatim', async () => {
+  const calls: unknown[] = []
+  const port = new DirectPluginManagerPort(host(fakeService({
+    listVersions: async (name, options, signal) => {
+      calls.push({ name, options, aborted: signal?.aborted })
+      return {
+        status: 'listed',
+        installed: '1.0.0',
+        registry: 'https://registry.example/',
+        attempts: [
+          { registry: 'https://fallback.example/', problem: 'network', reason: 'offline' },
+          { registry: 'https://registry.example/' },
+        ],
+        versions: [
+          {
+            version: '1.1.0',
+            publishedAt: '2026-01-02T03:04:05.000Z',
+            tags: ['latest'],
+            prerelease: false,
+            bundle: true,
+          },
+          {
+            version: '1.2.0-rc.1',
+            tags: ['next'],
+            prerelease: true,
+            deprecated: 'use 1.1.x',
+            bundle: false,
+            incompatible: {
+              name: 'pkg',
+              version: '1.2.0-rc.1',
+              runtimeVersion: '0.2.2-rc.1',
+              requirements: { 'engines.dsh': '>=9' },
+            },
+          },
+        ],
+        omitted: 2,
+      }
+    },
+  })).ctx)
+
+  const signal = new AbortController().signal
+  const list = await port.listVersions('pkg', signal)
+  assert.deepEqual(calls, [{ name: 'pkg', options: {}, aborted: false }],
+    'the Client never supplies a registry to the Host read')
+  assert.equal(list.status, 'listed')
+  if (list.status !== 'listed') return
+  assert.equal(list.installed, '1.0.0')
+  assert.equal(list.registry, 'https://registry.example/')
+  assert.equal(list.omitted, 2)
+  assert.equal(list.attempts.length, 2)
+  assert.equal(list.attempts[0]!.problem, 'network')
+  assert.equal(list.attempts[0]!.reason, 'offline')
+  assert.equal(list.versions[0]!.version, '1.1.0')
+  assert.deepEqual([...list.versions[0]!.tags], ['latest'])
+  assert.equal(list.versions[0]!.publishedAt, '2026-01-02T03:04:05.000Z')
+  assert.equal(list.versions[1]!.prerelease, true)
+  assert.equal(list.versions[1]!.deprecated, 'use 1.1.x')
+  assert.equal(list.versions[1]!.bundle, false)
+  assert.equal(list.versions[1]!.incompatible?.requirements['engines.dsh'], '>=9')
+  assert.ok(Object.isFrozen(list))
+  assert.ok(Object.isFrozen(list.versions))
+  assert.ok(Object.isFrozen(list.versions[0]))
+  assert.ok(Object.isFrozen(list.versions[0]!.tags))
+})
+
+test('listVersions maps a refused Host answer without inventing a status', async () => {
+  const port = new DirectPluginManagerPort(host(fakeService({
+    listVersions: async () => ({
+      status: 'refused',
+      problem: 'not-updatable',
+      reason: 'not a registry dependency',
+      attempts: [],
+    }),
+  })).ctx)
+  const list = await port.listVersions('pkg')
+  assert.deepEqual(list, {
+    status: 'refused',
+    problem: 'not-updatable',
+    reason: 'not a registry dependency',
+    attempts: [],
+  })
+})
+
+test('updateBundle forwards the exact target, registry and request id and maps both outcomes', async () => {
+  const calls: unknown[] = []
+  const port = new DirectPluginManagerPort(host(fakeService({
+    updateBundle: async (name, version, options) => {
+      calls.push({ name, version, options })
+      return {
+        from: '1.0.0',
+        to: version,
+        step: 'install',
+        result: change({
+          stage: 'install',
+          application: 'failed',
+          version: '1.1.0',
+          error: { code: 'operation-error', diagnostic: 'target failed' },
+        }),
+        restore: change({
+          stage: 'install',
+          application: 'applied',
+          version: '1.0.0',
+        }),
+      }
+    },
+  })).ctx)
+
+  const result = await port.updateBundle('pkg', '1.1.0', 'https://registry.example/', 'req-update')
+  assert.deepEqual(calls, [{
+    name: 'pkg',
+    version: '1.1.0',
+    options: { registry: 'https://registry.example/', requestId: 'req-update' },
+  }])
+  assert.equal(result.from, '1.0.0')
+  assert.equal(result.to, '1.1.0')
+  assert.equal(result.step, 'install')
+  assert.equal(result.result.application, 'failed')
+  assert.equal(result.result.error?.diagnostic, 'target failed')
+  assert.equal(result.restore?.application, 'applied', 'the restore outcome is a SEPARATE field')
+  assert.equal(result.restore?.version, '1.0.0')
+  assert.ok(Object.isFrozen(result))
+  assert.ok(Object.isFrozen(result.result))
+  assert.ok(Object.isFrozen(result.restore))
+})
+
+test('subscribeUpdate delivers the detached official update step and unsubscribes', () => {
+  const { ctx, listeners } = host(fakeService())
+  const port = new DirectPluginManagerPort(ctx)
+  const received: unknown[] = []
+  const off = port.subscribeUpdate(progress => received.push(progress))
+  assert.equal([...listeners.get('plugin-manager/update-state')!].length, 1)
+
+  const update = [...listeners.get('plugin-manager/update-state')!][0]!
+  update({ requestId: 'req-update', step: 'restoring' })
+  assert.deepEqual(received, [{ requestId: 'req-update', step: 'restoring' }])
+
+  off()
+  assert.equal([...listeners.get('plugin-manager/update-state')!].length, 0,
+    'the disposer releases exactly the update-state listener')
 })

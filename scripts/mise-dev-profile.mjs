@@ -16,6 +16,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { fileURLToPath } from 'node:url'
 
 import { assertNpmWorktree, resolveDshDevContext } from './dsh-dev-context.mjs'
+import { seedProfileBuildPolicy } from './lib/dsh-profile-build-policy.mjs'
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url)
 const ROOT = resolve(dirname(SCRIPT_PATH), '..')
@@ -70,6 +71,9 @@ export function runMiseDevProfile({ root = ROOT, environment = process.env } = {
   assertNpmWorktree(context.root, context, 'mise run dev:profile')
   assertIsolatedHome(environment, 'mise run dev:profile', context.root)
   assertBuildOutput(root)
+  // pnpm 12 fails an UNDECIDED dependency build script; the isolated profile
+  // records this repository's explicit prebuilt-binary decision first.
+  seedProfileBuildPolicy(environment.DSH_HOME, PROFILE)
   const result = spawnSync('dsh', ['plugin', '--profile', PROFILE, '--', 'add', 'link:.'], {
     cwd: root,
     env: environment,

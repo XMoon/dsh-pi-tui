@@ -48,9 +48,7 @@ function deps(overrides: Partial<SubagentViewerSubmitDeps> = {}): SubagentViewer
 
 interface RecordedCall {
   requestId: string
-  parentSessionId: string
   childSessionId: string
-  mode: string
   delivery: string
   content: readonly SubagentPromptContentPart[]
   clientTimeZone: string | undefined
@@ -62,10 +60,8 @@ function service(calls: RecordedCall[]): SubagentPromptService {
     prompt: async (payload, signal) => {
       calls.push({
         requestId: payload.requestId,
-        parentSessionId: payload.parentSessionId,
         childSessionId: payload.childSessionId,
-        mode: payload.mode,
-         delivery: payload.delivery,
+        delivery: payload.delivery,
         content: payload.content,
         clientTimeZone: payload.clientTimeZone,
         signal,
@@ -87,10 +83,11 @@ test('delivers through the official prompt call with the official request vocabu
   if (outcome.kind === 'ok') assert.equal(outcome.messageId, 'inbox-session-child-1')
   assert.equal(calls.length, 1, 'prompt called exactly once')
   assert.equal(calls[0]!.requestId, 'minted-request-id', 'the caller-minted id is persisted on the call')
-  assert.equal(calls[0]!.parentSessionId, 'session-parent')
   assert.equal(calls[0]!.childSessionId, 'session-child')
-  assert.equal(calls[0]!.mode, 'continuable', 'the browser control address keeps the continuable discriminator')
-   assert.equal(calls[0]!.delivery, 'queue', 'viewer prompts are distinct FIFO continuation turns')
+  assert.equal('parentSessionId' in calls[0]!, false,
+    'the viewer parent relation never crosses the rc.2 official request boundary')
+  assert.equal('mode' in calls[0]!, false, 'the rc.1 continuable discriminator no longer exists on the wire')
+  assert.equal(calls[0]!.delivery, 'queue', 'viewer prompts are distinct FIFO continuation turns')
   assert.deepEqual(calls[0]!.content, request.content)
   assert.equal(calls[0]!.signal, signal, 'the caller-owned signal is forwarded to the official call')
 })
@@ -390,20 +387,19 @@ test('a closed viewer (no viewing child) is STALE', () => {
   })), { kind: 'stale' })
 })
 
-test('review: the canonicalize scope is the VIEWED CHILD workspace, never the parent cwd', () => {
-  // The child may have been born in another directory: rewriting its
-  // `@src/foo.ts` against the PARENT cwd would resolve to the wrong tree.
-  // A known child cwd wins; an unknown cold-child cwd falls back to the
-  // live parent session.
+test('review: the canonicalize scope is the VIEWED CHILD Session, never the parent and never a cwd', () => {
+  // The child may have been born in another workspace: the seam addresses the
+  // CHILD's Session identity when known; an unknown cold child falls back to
+  // the live parent Session. No Client cwd is ever promoted to a Host scope.
   assert.deepEqual(
-    viewerCanonicalizeScope('/repo-b', 'session-parent'),
-    { kind: 'workspace', cwd: '/repo-b' },
-    'a known child cwd is the scope (parent cwd is irrelevant)',
+    viewerCanonicalizeScope('session-child', 'session-parent'),
+    { kind: 'session', sessionId: 'session-child' },
+    'a known child Session is the scope (parent identity is irrelevant)',
   )
   assert.deepEqual(
-    viewerCanonicalizeScope('', 'session-parent'),
+    viewerCanonicalizeScope(undefined, 'session-parent'),
     { kind: 'session', sessionId: 'session-parent' },
-    'an unknown cold-child cwd falls back to the live parent',
+    'an unknown cold-child identity falls back to the live parent',
   )
   assert.deepEqual(
     viewerCanonicalizeScope(undefined, undefined),

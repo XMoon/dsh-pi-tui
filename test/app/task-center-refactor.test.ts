@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { visibleWidth } from '@xmoon76/pi-tui'
+import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { TaskBrowserPanel } from '../../src/tui/panels/task-panel.ts'
 import type { TaskPanelItem } from '../../src/app/surface/task-presentation.ts'
 
@@ -117,6 +117,7 @@ test('acknowledge scope is the VIEWPORT, not the whole projection (PR review M1)
   const panel = new TaskBrowserPanel(failures, 8, {
     mode: 'full', enableSearch: true, header: 'Tasks',
   }, () => {}, () => {}, () => {})
+  panel.handleInput('j') // explicit history disclosure: terminal Jobs are hidden by default
   assert.equal(panel.visibleItems().length, 20,
     'the projection holds every failure')
   assert.equal(panel.viewportItems().length, 8, 'the viewport renders only maxVisible rows')
@@ -140,6 +141,7 @@ test('scrolling new attention rows into view exposes them exactly once (PR revie
     mode: 'full', enableSearch: true, header: 'Tasks',
     onViewportExpose: ids => exposed.push(...ids),
   }, () => {}, () => {}, () => {})
+  panel.handleInput('j') // explicit history disclosure: terminal Jobs are hidden by default
   // First render: the top of the viewport is exposed.
   panel.render(80)
   assert.deepEqual(exposed, Array.from({ length: 8 }, (_, i) => `job:f${i}`))
@@ -173,6 +175,7 @@ test('a STABLE id re-entering failure is exposed again (P2 edge: id reuse)', () 
     mode: 'full', enableSearch: true, header: 'Tasks',
     onViewportExpose: ids => exposed.push(...ids),
   }, () => {}, () => {}, () => {})
+  panel.handleInput('j') // explicit history disclosure: terminal Jobs are hidden by default
   panel.render(80)
   assert.deepEqual(exposed, ['job:j1'], 'first failure is exposed once')
   // The job leaves the failure set (e.g. it is retried and now runs).
@@ -183,6 +186,7 @@ test('a STABLE id re-entering failure is exposed again (P2 edge: id reuse)', () 
   panel.setItems([
     { ...job('job:j1'), status: 'failed', active: false, attention: true },
   ])
+  panel.handleInput('j') // no terminal Job survived the running refresh: re-open history
   panel.render(80)
   assert.deepEqual(exposed, ['job:j1', 'job:j1'],
     'the second failure of the same id must be exposed again (the runtime treats it as new)')
@@ -197,10 +201,10 @@ test('search mode renders its own hint — query actions, never the task actions
     mode: 'full', enableSearch: true, header: 'Tasks',
   }, () => {}, () => {}, () => {})
   panel.handleInput('/')
-  const view = panel.render(100).join('\n')
+  const view = panel.render(100).map(stripTerminalSequences).join('\n')
   // D8 keeps the real Escape outcome last and highest-priority; low-priority
   // query help drops before it when the one-line hint is constrained.
-  const searchHint = 'Enter open · ↑↓ select · ←→ edit · Shift+Tab type · type to filter · Esc back'
+  const searchHint = 'Enter open · ↑↓ select · ←→ edit · type to filter · Esc back'
   assert.ok(view.includes(searchHint), `search-mode hint must advertise the query actions:\n${view}`)
   for (const stale of ['A scope', 'N next running', 'S stop', 'R refresh', '←→ tree']) {
     assert.ok(!view.includes(stale), `search-mode hint must not advertise '${stale}':\n${view}`)
@@ -217,8 +221,8 @@ test('search-mode hint keeps Esc back visible at 80 columns', () => {
   const hintRow = view.split('\n').find(line => line.includes('type to filter'))
   assert.ok(hintRow !== undefined, `search hint missing at 80 cols:\n${view}`)
   assert.ok(hintRow.includes('Esc back'), `Esc back must survive the 80-column hint:\n${view}`)
-  // Reverse type cycling uses the component keymap's canonical label.
-  assert.ok(hintRow.includes('Shift+Tab'), `reverse type cycling must be discoverable:\n${view}`)
+  // The retired reverse type cycle must never reappear in the hint.
+  assert.ok(!hintRow.includes('Shift+Tab'), `the retired reverse type cycle must not reappear:\n${view}`)
   // The ordinary task actions stay out of search mode here too.
   assert.ok(!view.includes('A scope') && !view.includes('S stop'), `no task actions in search mode:\n${view}`)
   panel.dispose()
@@ -268,12 +272,12 @@ test('Quick Tasks whitelist still navigates, filters types and opens rows', () =
   assert.equal(panel.getViewState().selectedId, 'job:b', '↓ moves the selection')
   panel.handleInput('\x1b[A')
   assert.equal(panel.getViewState().selectedId, 'job:a', '↑ moves the selection')
-  panel.handleInput('\t')
-  assert.equal(panel.getViewState().typeFilter, 'bash', 'Tab cycles the type filter forward')
-  panel.handleInput('\t')
-  assert.equal(panel.getViewState().typeFilter, 'subagent')
-  panel.handleInput('\t')
-  assert.equal(panel.getViewState().typeFilter, null)
+  panel.handleInput('f'); panel.handleInput('\x1b[B'); panel.handleInput('\r')
+  assert.equal(panel.getViewState().typeFilter, 'bash', 'the f list applies the bash type')
+  panel.handleInput('f'); panel.handleInput('\x1b[B'); panel.handleInput('\r')
+  assert.equal(panel.getViewState().typeFilter, 'subagent', 'the f list applies the subagent type')
+  panel.handleInput('f'); panel.handleInput('\x1b[A'); panel.handleInput('\x1b[A'); panel.handleInput('\r')
+  assert.equal(panel.getViewState().typeFilter, null, 'the f list can return to All')
   panel.handleInput('\x1b')
   assert.equal(cancelled, 1, 'Esc closes Quick')
   panel.dispose()
@@ -293,6 +297,7 @@ test('Full Task Center: N / Shift+N / T have no effect (removed actions)', () =>
     [{ ...job('job:done', 'completed') }, job('job:r1'), job('job:r2')], 10,
     { mode: 'full', enableSearch: true, header: 'Tasks' },
     () => {}, () => {}, () => {})
+  panel.handleInput('j') // the settled row is hidden by default: open its history group
   assert.equal(panel.getViewState().selectedId, 'job:done')
   panel.handleInput('n')
   assert.equal(panel.getViewState().selectedId, 'job:done', 'N must not jump to running rows')
@@ -305,45 +310,46 @@ test('Full Task Center: N / Shift+N / T have no effect (removed actions)', () =>
   panel.dispose()
 })
 
-test('Full Task Center: Tab and Shift+Tab cycle the type filter in both directions', () => {
+test('Full Task Center: the f list applies types and Tab no longer cycles them', () => {
   const panel = new TaskBrowserPanel([job('job:a'), agentRow('agent:c')], 10,
     { mode: 'full', enableSearch: true, header: 'Tasks' }, () => {}, () => {}, () => {})
   assert.equal(panel.getViewState().typeFilter, null)
+  // Tab without a Team page is inert: it must not touch the type filter.
   panel.handleInput('\t')
+  assert.equal(panel.getViewState().typeFilter, null, 'Tab must not cycle the type filter')
+  panel.handleInput('\x1b[Z')
+  assert.equal(panel.getViewState().typeFilter, null, 'Shift+Tab must not cycle the type filter')
+  // The explicit f list applies a type (candidates: All, bash, subagent).
+  panel.handleInput('f'); panel.handleInput('\x1b[B'); panel.handleInput('\r')
   assert.equal(panel.getViewState().typeFilter, 'bash')
-  panel.handleInput('\t')
+  panel.handleInput('f'); panel.handleInput('\x1b[B'); panel.handleInput('\r')
   assert.equal(panel.getViewState().typeFilter, 'subagent')
-  panel.handleInput('\t')
-  assert.equal(panel.getViewState().typeFilter, null, 'forward past the last type returns to All')
-  // Reverse from All enters at the LAST type and wraps back to All.
-  panel.handleInput('\x1b[Z')
-  assert.equal(panel.getViewState().typeFilter, 'subagent')
-  panel.handleInput('\x1b[Z')
-  assert.equal(panel.getViewState().typeFilter, 'bash')
-  panel.handleInput('\x1b[Z')
-  assert.equal(panel.getViewState().typeFilter, null, 'reverse past the first type returns to All')
+  panel.handleInput('f'); panel.handleInput('\x1b[A'); panel.handleInput('\x1b[A'); panel.handleInput('\r')
+  assert.equal(panel.getViewState().typeFilter, null, 'the f list can return to All')
   panel.dispose()
 })
 
-test('Full search mode: Shift+Tab cycles the type filter backward without becoming query text', () => {
+test('Full search mode: Tab does not append to the query and never becomes query text', () => {
   const panel = new TaskBrowserPanel([job('build-1'), agentRow('agent:c')], 10,
     { mode: 'full', enableSearch: true, header: 'Tasks' }, () => {}, () => {}, () => {})
   panel.handleInput('/')
   panel.handleInput('b')
   panel.handleInput('u')
   assert.equal(panel.getFilter(), 'bu')
+  // Without a Team page, Tab/Shift+Tab switch nothing and MUST NOT become query
+  // text or leave search mode.
   panel.handleInput('\x1b[Z')
-  assert.equal(panel.getViewState().typeFilter, 'subagent', 'Shift+Tab uses the reverse type action')
   assert.equal(panel.getFilter(), 'bu', 'the query must be preserved')
   assert.equal(panel.getViewState().searchMode, true, 'Shift+Tab must not leave search mode')
+  assert.equal(panel.getViewState().typeFilter, null, 'Shift+Tab must not cycle the type filter')
   panel.dispose()
 })
 
 test('Full Task Center hint advertises the management verbs without N/T/R', () => {
   const panel = new TaskBrowserPanel([job('job:a')], 10,
-    { mode: 'full', enableSearch: true, header: 'Tasks' }, () => {}, () => {}, () => {})
-  const view = panel.render(100).join('\n')
-  for (const verb of ['/ search', 'a scope', 'Shift+Tab type', 's stop', 'Esc close']) {
+    { mode: 'full', enableSearch: true, header: 'Tasks', mouseActionsEnabled: () => true }, () => {}, () => {}, () => {})
+  const view = panel.render(100).map(stripTerminalSequences).join('\n')
+  for (const verb of ['/ search', 'a scope', 'Stop [', 'Close [Esc]']) {
     assert.ok(view.includes(verb), `Full hint must advertise '${verb}':\n${view}`)
   }
   for (const stale of ['N next running', 'T Task Center', 'R refresh']) {
@@ -367,7 +373,7 @@ const HOSTILE = '\x1b]52;c;UFdORUQ=\x07echo ok\x1b[2J'
 const hostileFree = (text: string): boolean =>
   !text.includes(']52;c;') && !text.includes('UFdORUQ=') && !text.includes('\x1b[2J')
 
-test('S-01 a hostile Job label is projected to one safe row in the list, the detail and the Stop confirmation', () => {
+test('a hostile Job label is projected to one safe row in the list, the detail and the Stop confirmation', () => {
   const item: TaskPanelItem = { ...job('job:hostile'), label: `bash · ${HOSTILE}` }
   let stopped: string | undefined
   const panel = new TaskBrowserPanel([item], 10, {
@@ -404,7 +410,7 @@ test('S-01 a hostile Job label is projected to one safe row in the list, the det
   panel.dispose()
 })
 
-test('S-01b a long hostile-bearing label is really truncated to a narrow grant, still safely', () => {
+test('a long hostile-bearing label is really truncated to a narrow grant, still safely', () => {
   // 50 readable cells + a sentinel + the hostile sequence: at 60 columns the
   // row must actually DROP the tail (proving truncation really ran), while
   // never emitting the Host bytes; at 160 columns the same label is long
@@ -432,7 +438,7 @@ test('S-01b a long hostile-bearing label is really truncated to a narrow grant, 
   panel.dispose()
 })
 
-test('S-04 the projection preserves ordinary text, one-row geometry and theme ANSI', () => {
+test('the projection preserves ordinary text, one-row geometry and theme ANSI', () => {
   const item: TaskPanelItem = { ...job('job:plain'), label: 'bash · 构建 🚀 done' }
   const panel = new TaskBrowserPanel([item], 10, {
     mode: 'full', enableSearch: true, header: 'Tasks',
@@ -460,7 +466,7 @@ test('S-04 the projection preserves ordinary text, one-row geometry and theme AN
   two.dispose()
 })
 
-test('S-04 the Task Center chrome (header, refresh banner, no-match text) is projected too', () => {
+test('the Task Center chrome (header, refresh banner, no-match text) is projected too', () => {
   const listed = new TaskBrowserPanel([{ ...job('job:a'), label: 'bash · build' }], 10, {
     mode: 'full', enableSearch: true, header: `Tasks · ${HOSTILE}`,
     refreshError: `catalog failed · ${HOSTILE}`,

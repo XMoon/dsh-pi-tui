@@ -32,7 +32,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { createDirectTspFixture, waitFor, waitForInputDelivery, type DirectTspFixture } from '../support/direct-tsp-fixture.ts'
-import { pickerNode, pickerProps, surfaceNodes, surfaceTexts, wireNodes } from '../support/tsp-picker-wire.ts'
+import { pickerNode, pickerProps, sendPickerAction, surfaceNodes, surfaceTexts, wireNodes } from '../support/tsp-picker-wire.ts'
 
 const HUB = 'work-hub-'
 const PARENT = 'a3-parent-session'
@@ -51,10 +51,52 @@ function dockNotices(fixture: DirectTspFixture): string[] {
     .map(node => (typeof node.p.text === 'string' ? node.p.text : ''))
 }
 
-/** The Session ids the dock welcome card currently carries (the hydration signal). */
-function welcomeSessionIds(fixture: DirectTspFixture): string[] {
-  const prefix = 'dock.welcome-'
-  return wireNodes(fixture.pane).filter(node => node.id.startsWith(prefix)).map(node => node.id.slice(prefix.length))
+/**
+ * The projection scope the renderer presents (`s3`), or `undefined` while Main
+ * holds something that paints no scoped transcript row — the TSP-7 Welcome D
+ * empty state or the hydration frame. It says WHICH subject is presented, never
+ * which Session it is; the Session id comes from the Host `agents` registry
+ * through `liveSession`.
+ */
+function projectionScopeId(fixture: DirectTspFixture): string | undefined {
+  for (const node of wireNodes(fixture.pane)) {
+    const match = /main\.(s\d+)-/u.exec(node.id)
+    if (match !== null) return match[1]
+  }
+  return undefined
+}
+
+/** Whether Main currently presents the hydration frame: the switch has NOT
+ *  committed and the composer input is still fenced. */
+function hydrationFramePresented(fixture: DirectTspFixture): boolean {
+  return wireNodes(fixture.pane).some(node => node.id === 'main.loading')
+}
+
+/** Whether Main currently presents the Welcome D empty state (a blank main
+ *  subject). The retired Dock line's "there is an owner" role is now this
+ *  positive presentation fact plus `liveSession`'s registry fact. */
+function welcomeMainPresented(fixture: DirectTspFixture): boolean {
+  return wireNodes(fixture.pane).some(node => node.id.startsWith('main.welcome-'))
+}
+
+/**
+ * Whether a NEW main subject has been formally committed since `frameMark`.
+ *
+ * AUTHORITY: the renderer's own presentation commit
+ * (`src/tui/tsp/session.ts`): a switch paints the hydration frame first, and the
+ * frame that retires it in favour of the incoming subject's OWN Main — a fresh
+ * `main.s<N>-…` transcript scope, or the Welcome D empty state for a blank
+ * subject — is the same commit that lifts the composer input fence
+ * (`hydrating = false` and `scopeEpoch += 1` happen together). The retired Dock
+ * welcome line was the wait gate for exactly this; it carried the id, which is
+ * why the gate is paired with `liveSession` (the Host registry) at each call.
+ */
+function subjectCommitted(fixture: DirectTspFixture, frameMark: number, previousScope: string | undefined): boolean {
+  if (hydrationFramePresented(fixture)) return false
+  const scope = projectionScopeId(fixture)
+  if (scope !== undefined && scope !== previousScope) return true
+  return welcomeMainPresented(fixture)
+    && fixture.pane.frames().slice(frameMark).some(frame => frame.ops.some(op => op[0] === 'add' && op[1] === 'main.loading'))
 }
 
 /** Type one `/` line into the REAL composer and submit it with Enter. */
@@ -76,13 +118,24 @@ function hubIds(fixture: DirectTspFixture): string[] {
   return items.map(item => item.id)
 }
 
+/** The Hub's native action ids, without their frame token. */
+function hubActionIds(fixture: DirectTspFixture): string[] {
+  const actions = (pickerProps(fixture.pane, HUB).actions ?? []) as Array<{ readonly id: string }>
+  return actions.map(action => String(action.id).replace(/#\d+$/u, ''))
+}
+
 /** One picker layer's published facts, as a diagnostic string. */
 function pickerFrame(fixture: DirectTspFixture, prefix: string): string {
   const props = pickerProps(fixture.pane, prefix)
   const items = (props.items ?? []) as Array<{ readonly id: string }>
+  const actions = (props.actions ?? []) as Array<{ readonly id: string }>
   return JSON.stringify({
     state: props.state,
     items: items.map(item => item.id),
+    selected: props.selected,
+    subtitle: props.subtitle,
+    actions: actions.map(action => action.id),
+    frameCount: fixture.pane.frameCount(),
     current: props.current,
     message: props.message,
   })
@@ -112,6 +165,51 @@ async function waitForReadyPicker(
     const props = pickerProps(fixture.pane, prefix)
     if (props.state === 'ready' && isReady(props)) return
     await new Promise(resolve => setTimeout(resolve, 25))
+  }
+  throw new Error(`timed out waiting for ${label}; last ${prefix} frame: ${pickerFrame(fixture, prefix)}`)
+}
+
+/**
+ * Wait until the visible action bar has STOPPED MOVING before sending its token.
+ *
+ * `PickerProps.state === 'ready'` is not by itself the coordinator's final
+ * refresh commit: `TspWorkHub.setItems()` also promotes a loading panel to
+ * `ready` and then the coordinator's own `setRefreshState('ready')` commits the
+ * SAME visible facts under a NEW `#<revision>` action token. A later runtime
+ * refresh can advance the revision again. The native action admission correctly
+ * rejects a superseded token, so the test must send only after the action set
+ * has been unchanged long enough to cover the measured commit burst.
+ *
+ * This is a bounded observation window, never an operation delay: the startup
+ * refresh's consecutive revisions were measured ~12 ms apart; 200 ms is an
+ * order of magnitude beyond that burst. Any change to the state, items or raw
+ * action ids restarts the window.
+ */
+async function waitForStablePickerAction(
+  fixture: DirectTspFixture,
+  label: string,
+  prefix: string,
+  isReady: (props: Record<string, unknown>) => boolean,
+  timeoutMs = 25_000,
+): Promise<void> {
+  const quietMs = 200
+  const deadline = Date.now() + timeoutMs
+  let previousKey: string | undefined
+  let quietSince = Date.now()
+  while (Date.now() < deadline) {
+    const props = pickerProps(fixture.pane, prefix)
+    const key = JSON.stringify({
+      state: props.state,
+      items: ((props.items ?? []) as Array<{ readonly id: string }>).map(item => item.id),
+      actions: ((props.actions ?? []) as Array<{ readonly id: string }>).map(action => action.id),
+    })
+    if (key !== previousKey) {
+      previousKey = key
+      quietSince = Date.now()
+    } else if (Date.now() - quietSince >= quietMs && props.state === 'ready' && isReady(props)) {
+      return
+    }
+    await new Promise(resolve => setTimeout(resolve, 10))
   }
   throw new Error(`timed out waiting for ${label}; last ${prefix} frame: ${pickerFrame(fixture, prefix)}`)
 }
@@ -155,7 +253,11 @@ async function appenderOf(fixture: DirectTspFixture, sessionId: string): Promise
  * The child Session header (parent/origin/depth) is created by the fixture
  * through the official persistence seam, so the identity is a real Session.
  */
-async function seedTaskFacts(fixture: DirectTspFixture): Promise<{ readonly jobId: string }> {
+async function seedTaskFacts(fixture: DirectTspFixture): Promise<{
+  readonly runningJobId: string
+  readonly completedJobId: string
+  readonly failedJobId: string
+}> {
   await liveSession(fixture, PARENT)
   const parent = await appenderOf(fixture, PARENT)
   parent('subagent/catalog', {
@@ -168,21 +270,38 @@ async function seedTaskFacts(fixture: DirectTspFixture): Promise<{ readonly jobI
   const jobs = fixture.ctx.get('jobs') as unknown as {
     start(spec: unknown): string
   }
-  const jobId = jobs.start({
+  // One genuinely ACTIVE Job and the two retained terminal Jobs this PR folds.
+  // The running producer settles only when the registry's own teardown cancels
+  // it, so the test's own Session disposal does not hang.
+  let settleRunning: ((outcome: { status: 'killed' }) => void) | undefined
+  const runningDone = new Promise<{ status: 'killed' }>(resolve => { settleRunning = resolve })
+  const runningJobId = jobs.start({
     kind: 'bash',
     label: 'A3 integration build',
     owner: SessionId(PARENT),
     run: () => ({
-      cancel: () => {},
-      done: Promise.resolve({ status: 'failed', detail: 'exit code 3' }),
+      cancel: () => { settleRunning?.({ status: 'killed' }) },
+      done: runningDone,
     }),
   })
-  return { jobId }
+  const completedJobId = jobs.start({
+    kind: 'bash',
+    label: 'A3 completed lint',
+    owner: SessionId(PARENT),
+    run: () => ({ cancel: () => {}, done: Promise.resolve({ status: 'completed' }) }),
+  })
+  const failedJobId = jobs.start({
+    kind: 'bash',
+    label: 'A3 failed deploy',
+    owner: SessionId(PARENT),
+    run: () => ({ cancel: () => {}, done: Promise.resolve({ status: 'failed', detail: 'exit code 3' }) }),
+  })
+  return { runningJobId, completedJobId, failedJobId }
 }
 
 // ── E01: the registered `/tasks` really opens the Work Hub ──────────────────
 
-test('E01: /tasks from the real editor reaches the ONE TaskRuntime and mounts the native Work Hub', async (t) => {
+test('/tasks from the real editor reaches the ONE TaskRuntime and mounts the native Work Hub', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   // The capability opt-in advertises `picker`/`row`/`overlay`/`text` + `scroll`
@@ -199,15 +318,56 @@ test('E01: /tasks from the real editor reaches the ONE TaskRuntime and mounts th
     startup: { sessionId: PARENT },
   })
   try {
-    const { jobId } = await seedTaskFacts(fixture)
+    const { runningJobId, completedJobId, failedJobId } = await seedTaskFacts(fixture)
     await submitLine(fixture, '/tasks')
     await waitFor('the native Work Hub to mount from the real /tasks entry',
       () => pickerNode(fixture.pane, HUB) !== undefined, 25_000)
     // The rows are the REAL Task Runtime projection of the facts above: one
-    // descendant from the durable catalog and one Job from the official
-    // registry. Nothing here injects a panel item.
-    await waitFor('both real rows to reach the Hub', () =>
-      hubIds(fixture).includes(`agent:${CHILD}`) && hubIds(fixture).includes(`job:${jobId}`), 25_000)
+    // descendant from the durable catalog and one ACTIVE Job from the official
+    // registry; the two terminal Jobs stay behind the manual disclosure. The
+    // wait is the COMMITTED `ready` frame itself: `items` arriving earlier does
+    // not mean the presenter has finally published the interactive frame whose
+    // action token this case sends. The stability wait then covers the second
+    // refresh's own commits, which advance the revision under identical visible
+    // facts.
+    const readyHubWithActiveRoster = (props: Record<string, unknown>): boolean => {
+      const itemIds = ((props.items ?? []) as Array<{ readonly id: string }>).map(item => item.id)
+      const actionIds = ((props.actions ?? []) as Array<{ readonly id: string }>).map(action =>
+        action.id.replace(/#\d+$/u, ''))
+      const subtitle = typeof props.subtitle === 'string' ? props.subtitle : ''
+      return itemIds.length === 2 && itemIds[0] === `agent:${CHILD}` && itemIds[1] === `job:${runningJobId}`
+        && actionIds.length === 3 && actionIds[0] === 'close' && actionIds[1] === 'jobs-history' && actionIds[2] === 'details'
+        && subtitle.includes('1 failed')
+        && subtitle.includes('2 retained Jobs hidden')
+    }
+    await waitForReadyPicker(fixture, 'the /tasks ready Hub with the active roster and native history action', HUB, readyHubWithActiveRoster)
+    await waitForStablePickerAction(fixture, 'the /tasks ready Hub action bar to settle', HUB, readyHubWithActiveRoster)
+    assert.deepEqual(hubIds(fixture), [`agent:${CHILD}`, `job:${runningJobId}`],
+      'the default view is the exact active projection, with no terminal Job row')
+    assert.deepEqual(hubActionIds(fixture), ['close', 'jobs-history', 'details'],
+      'the native bar exposes the fold and the read action')
+    const hiddenSubtitle = String(pickerProps(fixture.pane, HUB).subtitle ?? '')
+    assert.ok(hiddenSubtitle.includes('1 failed') && hiddenSubtitle.includes('2 retained Jobs hidden'),
+      `the full-roster status facts stay truthful while folded: ${hiddenSubtitle}`)
+    // The disclosure is the REAL native action event, not a direct presenter call.
+    const beforeNativeAction = pickerFrame(fixture, HUB)
+    sendPickerAction(fixture.pane, 'jobs-history', HUB)
+    try {
+      await waitForReadyPicker(fixture, 'the ready Hub to reveal both retained terminal Jobs after the native action', HUB,
+        props => {
+          const ids = ((props.items ?? []) as Array<{ readonly id: string }>).map(item => item.id)
+          return ids.includes(`job:${completedJobId}`) && ids.includes(`job:${failedJobId}`)
+        })
+    } catch (error) {
+      throw new Error(`native Job history action did not settle; before=${beforeNativeAction}; after=${pickerFrame(fixture, HUB)}`, { cause: error })
+    }
+    assert.deepEqual(hubIds(fixture).slice(0, 2), [`agent:${CHILD}`, `job:${runningJobId}`],
+      'the expanded view keeps the active projection at its head')
+    assert.deepEqual([...hubIds(fixture).slice(2)].sort(),
+      [`job:${completedJobId}`, `job:${failedJobId}`].sort(),
+      'both real terminal Jobs appear once the disclosure is open')
+    const expandedSubtitle = String(pickerProps(fixture.pane, HUB).subtitle ?? '')
+    assert.ok(!expandedSubtitle.includes('retained Jobs hidden'), `an expanded view claims no hidden count: ${expandedSubtitle}`)
     // The OLD placeholder must never appear: this command reached the opener.
     assert.ok(!fixture.pane.output.text().includes('Work Hub is not available in this renderer yet.'),
       'the capable pane never shows the unavailable placeholder')
@@ -223,7 +383,7 @@ test('E01: /tasks from the real editor reaches the ONE TaskRuntime and mounts th
 
 // ── E02: the registered alias `/subagents` rides the SAME opener ────────────
 
-test('E02: the registered /subagents alias opens the same Hub and no second browser', async (t) => {
+test('the registered /subagents alias opens the same Hub and no second browser', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, {
@@ -257,7 +417,7 @@ test('E02: the registered /subagents alias opens the same Hub and no second brow
 
 // ── E03: select a real row and read it, then return to the SAME Hub ────────
 
-test('E03: Enter opens ONE Reader for the current row and Back returns to the same Hub', async (t) => {
+test('Enter opens ONE Reader for the current row and Back returns to the same Hub', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, {
@@ -269,11 +429,11 @@ test('E03: Enter opens ONE Reader for the current row and Back returns to the sa
     startup: { sessionId: PARENT },
   })
   try {
-    const { jobId } = await seedTaskFacts(fixture)
+    const { runningJobId } = await seedTaskFacts(fixture)
     await submitLine(fixture, '/tasks')
     await waitFor('the native Work Hub to mount', () => pickerNode(fixture.pane, HUB) !== undefined, 25_000)
-    await waitFor('the real Job row reaches the Hub', () => hubIds(fixture).includes(`job:${jobId}`), 25_000)
-    const target = `job:${jobId}`
+    await waitFor('the real active Job row reaches the Hub', () => hubIds(fixture).includes(`job:${runningJobId}`), 25_000)
+    const target = `job:${runningJobId}`
     // Drive the SDK's own SELECT shape for the target row, then prove the Hub
     // really holds that selection before Enter (never an assumed default row).
     fixture.pane.event({
@@ -307,7 +467,7 @@ test('E03: Enter opens ONE Reader for the current row and Back returns to the sa
 
 // ── E05: a pane without the capability refuses the command, draft restored ─
 
-test('E05: a lean pane refuses /tasks, restores the draft, opens no Hub and no Screen', async (t) => {
+test('a lean pane refuses /tasks, restores the draft, opens no Hub and no Screen', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   // The DEFAULT fixture HELLO has no `picker`/`row`/`text`/`scroll`: the real
@@ -332,7 +492,7 @@ test('E05: a lean pane refuses /tasks, restores the draft, opens no Hub and no S
 
 // ── E06: a genuine Host `/tasks` keeps its own sink (never captured) ───────
 
-test('E06: a genuine Host command named tasks keeps its Host sink and never opens the Hub', async (t) => {
+test('a genuine Host command named tasks keeps its Host sink and never opens the Hub', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const calls: string[] = []
@@ -359,7 +519,7 @@ test('E06: a genuine Host command named tasks keeps its Host sink and never open
   }
 })
 
-test('E06b: a genuine Host command named subagents keeps its Host sink on the alias spelling', async (t) => {
+test('a genuine Host command named subagents keeps its Host sink on the alias spelling', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const calls: string[] = []
@@ -387,7 +547,7 @@ test('E06b: a genuine Host command named subagents keeps its Host sink on the al
 
 // ── E04: partial feeds state only what the real source really has ──────────
 
-test('E04: a Job-only roster shows the real Job and invents no descendant row', async (t) => {
+test('a Job-only roster shows the real Job and invents no descendant row', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   // The parent Session carries NO `subagent/catalog` entry: the descendant half
@@ -453,7 +613,7 @@ test('an empty roster states the real empty Hub and invents no work item', async
 
 // ── E12: the Work Hub is read-only over the REAL business sinks ────────────
 
-test('E12: reading every real row never stops a Job, interrupts a subagent or calls onSelect', async (t) => {
+test('reading every real row never stops a Job, interrupts a subagent or calls onSelect', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, {
@@ -465,7 +625,7 @@ test('E12: reading every real row never stops a Job, interrupts a subagent or ca
     startup: { sessionId: PARENT },
   })
   try {
-    const { jobId } = await seedTaskFacts(fixture)
+    const { runningJobId } = await seedTaskFacts(fixture)
     // The REAL business sink: the official Job registry's own `kill`. A Stop
     // from the Hub would have to reach it (the Direct observation port calls
     // `registry.kill`); the recorder is the production method itself.
@@ -479,10 +639,10 @@ test('E12: reading every real row never stops a Job, interrupts a subagent or ca
     try {
       await submitLine(fixture, '/tasks')
       await waitFor('both real rows reach the Hub', () =>
-        hubIds(fixture).includes(`job:${jobId}`) && hubIds(fixture).includes(`agent:${CHILD}`), 25_000)
+        hubIds(fixture).includes(`job:${runningJobId}`) && hubIds(fixture).includes(`agent:${CHILD}`), 25_000)
 
       // Read BOTH rows through the production Reader and return each time.
-      for (const target of [`job:${jobId}`, `agent:${CHILD}`]) {
+      for (const target of [`job:${runningJobId}`, `agent:${CHILD}`]) {
         fixture.pane.event({
           ev: 'select',
           sf: fixture.pane.frames().at(-1)!.sf,
@@ -561,7 +721,7 @@ test('/tasks with NO Session creates the Session through the real submission pat
 
 // ── An extension contribution cannot claim a TUI builtin's name at all ──────
 
-test('E06c: the REAL extension service REFUSES a contribution named tasks, so no extension winner can exist', async (t) => {
+test('the REAL extension service REFUSES a contribution named tasks, so no extension winner can exist', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   // The name conflict is rejected by the extension service itself (it returns a
@@ -584,7 +744,7 @@ test('E06c: the REAL extension service REFUSES a contribution named tasks, so no
   )
 })
 
-test('E06d: the same conflict rule covers the /subagents alias spelling', async (t) => {
+test('the same conflict rule covers the /subagents alias spelling', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   await assert.rejects(
@@ -652,8 +812,18 @@ test('switching Session A→B through the real Browser leaves B with only B rows
       owner: SessionId(A),
       run: () => ({ cancel: () => {}, done: Promise.resolve({ status: 'running' }) }),
     })
+    const jobAOld = jobs.start({
+      kind: 'bash',
+      label: 'A-only completed lint',
+      owner: SessionId(A),
+      run: () => ({ cancel: () => {}, done: Promise.resolve({ status: 'completed' }) }),
+    })
     await submitLine(fixture, '/tasks')
     await waitFor('A\'s Hub shows A\'s real Job', () => hubIds(fixture).includes(`job:${jobA}`), 25_000)
+    // Expand A's retained history: the manual choice is per-open and must not
+    // survive the Session switch.
+    sendPickerAction(fixture.pane, 'jobs-history', HUB)
+    await waitFor('A\'s retained Job is revealed', () => hubIds(fixture).includes(`job:${jobAOld}`), 25_000)
     // Close the Hub so the composer is editable again, then switch through the
     // PRODUCTION Session Browser (`/sessions` → select B → Resume).
     fixture.pane.key('\u001b')
@@ -669,6 +839,21 @@ test('switching Session A→B through the real Browser leaves B with only B rows
     // different Session whose id merely contains B.
     const rowB = `session:${B}`
     const rowA = `session:${A}`
+    // The persisted blank Sessions carry no official Workspace membership, so
+    // they live in the explicit Unassigned Folder, which starts collapsed.
+    await waitForReadyPicker(fixture, 'the real Browser to list the official Folders', BROWSER, props =>
+      ((props.items ?? []) as Array<{ readonly id: string }>).some(item => item.id.startsWith('workspace:')))
+    const collapsed = ((pickerProps(fixture.pane, BROWSER).items ?? []) as Array<Record<string, unknown>>)
+      .filter(item => String(item.id).startsWith('workspace:') && item.open !== true)
+      .map(item => String(item.id))
+    for (const folderId of collapsed) {
+      fixture.pane.event({
+        ev: 'activate',
+        sf: fixture.pane.frames().at(-1)!.sf,
+        id: pickerNode(fixture.pane, BROWSER)!.id,
+        item: folderId,
+      })
+    }
     await waitForReadyPicker(fixture, 'the real Browser to list both persisted sessions', BROWSER, props => {
       const items = (props.items ?? []) as Array<{ readonly id: string }>
       return items.some(item => item.id === rowA) && items.some(item => item.id === rowB)
@@ -685,6 +870,8 @@ test('switching Session A→B through the real Browser leaves B with only B rows
     const resume = ((pickerProps(fixture.pane, BROWSER).actions ?? []) as Array<{ readonly id: string; readonly disabled?: boolean }>)
       .find(action => action.id.startsWith('resume'))
     assert.ok(resume !== undefined && resume.disabled !== true, 'Resume is offered for the persisted B')
+    const switchFrameMark = fixture.pane.frames().length
+    const switchScopeBefore = projectionScopeId(fixture)
     fixture.pane.event({ ev: 'action', sf: fixture.pane.frames().at(-1)!.sf, id: pickerNode(fixture.pane, BROWSER)!.id, act: String(resume!.id) })
     await waitFor('the Browser retired after the switch', () => pickerNode(fixture.pane, BROWSER) === undefined, 25_000)
     // The switch really moved the live owner to B.
@@ -692,10 +879,12 @@ test('switching Session A→B through the real Browser leaves B with only B rows
     await waitFor('B owns the live Agent', () => agents.get(SessionId(B)) !== undefined, 25_000)
 
     // Reopen /tasks. The renderer's hydration fence drops ordinary keys while
-    // the new subject is applied, so the dock naming B is the authoritative
-    // "B is live" gate for typing.
-    await waitFor('the dock names the switched Session B',
-      () => welcomeSessionIds(fixture).includes(B), 25_000)
+    // the new subject is applied, so the WIRE COMMIT is the authoritative gate
+    // for typing: `liveSession`/the Host registry says B owns an Agent, and this
+    // says B's subject is the presented Main (the retired Dock line conflated the
+    // two into one text row).
+    await waitFor('the switched Session B to become the presented Main', () =>
+      subjectCommitted(fixture, switchFrameMark, switchScopeBefore), 25_000)
     // Give B its OWN work BEFORE reopening: a roster that merely happens to be
     // empty cannot distinguish "read B" from "kept reading A's stale subject",
     // so the proof needs a positive B row AND the absence of A's row.
@@ -705,12 +894,19 @@ test('switching Session A→B through the real Browser leaves B with only B rows
       owner: SessionId(B),
       run: () => ({ cancel: () => {}, done: Promise.resolve({ status: 'running' }) }),
     })
+    const jobBOld = jobs.start({
+      kind: 'bash',
+      label: 'B-only completed lint',
+      owner: SessionId(B),
+      run: () => ({ cancel: () => {}, done: Promise.resolve({ status: 'completed' }) }),
+    })
     await submitLine(fixture, '/tasks')
     await waitFor('B\'s OWN Job reaches the Hub', () => hubIds(fixture).includes(`job:${jobB}`), 25_000)
     const idsB = hubIds(fixture)
     assert.ok(idsB.includes(`job:${jobB}`), `B's own Job is listed (got ${idsB.join(',')})`)
     assert.ok(!idsB.includes(`job:${jobA}`), `A's Job never appears in B's Hub (got ${idsB.join(',')})`)
-    assert.deepEqual(idsB, [`job:${jobB}`], 'B lists exactly B\'s own work')
+    assert.ok(!idsB.includes(`job:${jobBOld}`), 'B starts with its own retained Job folded, never A\'s expanded choice')
+    assert.deepEqual(idsB, [`job:${jobB}`], 'B lists exactly B\'s active work')
     assert.equal(screens(fixture), 0, 'the switch left no Reader Screen behind')
   } finally {
     // reason: fixture teardown — waits for the real SDK to release the tty and

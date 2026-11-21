@@ -88,6 +88,13 @@ export interface TranscriptSearchMatch {
   readonly occurrence: number
   readonly source: TranscriptSearchSource
   readonly sourceOccurrence: number
+  /** Half-open UTF-16 offsets in the matching source chunk's normalized text.
+   * Present only when the whole hit is within that chunk; never stable identity
+   * or persistence. */
+  readonly normalizedSourceRange?: {
+    readonly start: number
+    readonly end: number
+  }
 }
 
 /** The stable occurrence identity used by the overlay's stale-refresh
@@ -268,6 +275,43 @@ function rawToNormalizedIndex(raw: string): number[] {
   }
   map[raw.length] = normalized
   return map
+}
+
+/**
+ * Map a NORMALIZED source-local range back to the raw UTF-16 range the source
+ * text really occupies. The folder's `normalizedSourceRange` is a
+ * lowercase-coordinate span; a cell proof needs the ORIGINAL codepoints, and
+ * only a real codepoint boundary is evidence. A range that starts or ends
+ * inside a lowercase expansion (`İ` → `i̇`) or a surrogate pair has no raw
+ * boundary and is rejected — never rounded to the nearest code unit and never
+ * resolved by a reverse `indexOf`.
+ *
+ * The answer is only "which two raw boundaries own this normalized span"; it
+ * deliberately says nothing about whether that span is visible.
+ */
+export function rawSourceRangeForNormalizedMatch(
+  sourceText: string,
+  normalizedRange: { readonly start: number; readonly end: number },
+): { readonly start: number; readonly end: number } | undefined {
+  const { start, end } = normalizedRange
+  if (!Number.isInteger(start) || !Number.isInteger(end)) return undefined
+  const normalizedLength = sourceText.toLowerCase().length
+  if (start < 0 || start >= end || end > normalizedLength) return undefined
+  const map = rawToNormalizedIndex(sourceText)
+  // The boundary map must describe the SAME whole-string lowercase the corpus
+  // is indexed by; a context-sensitive mismatch makes every boundary suspect.
+  if (map[sourceText.length] !== normalizedLength) return undefined
+  let rawStart: number | undefined
+  let rawEnd: number | undefined
+  let index = 0
+  while (true) {
+    if (map[index] === start) rawStart = index
+    if (map[index] === end) rawEnd = index
+    if (index === sourceText.length) break
+    index += (sourceText.codePointAt(index) ?? 0) > 0xffff ? 2 : 1
+  }
+  if (rawStart === undefined || rawEnd === undefined || rawStart >= rawEnd) return undefined
+  return { start: rawStart, end: rawEnd }
 }
 
 /** Resolve the semantic source of one normalized-coordinate occurrence: the

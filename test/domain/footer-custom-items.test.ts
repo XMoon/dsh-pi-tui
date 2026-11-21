@@ -580,6 +580,12 @@ test('command items participate in the ordinary composer layout (rows, budget, h
       { left: [{ id: 'user:environment' }, { id: 'user:clock' }], right: [] },
     ],
   }
+  const baseline = composer.render({
+    snapshot: emptyStatusSnapshot(),
+    layout,
+    width: 80,
+    context: { taskBrowserAvailable: false, extensionFooterText: '' },
+  })
   const rendered = composer.render({
     snapshot: emptyStatusSnapshot(),
     layout,
@@ -587,9 +593,16 @@ test('command items participate in the ordinary composer layout (rows, budget, h
     context: { taskBrowserAvailable: false, extensionFooterText: '' },
     instruction: { id: 'exit', text: [{ text: 'Ctrl+C exit' }], priority: 100 },
   })
-  const lines = rendered.split('\n').filter(line => line !== '')
-  assert.ok(plain(rendered).includes('14:30'), 'the command value must render like any item')
-  assert.ok(plain(rendered).includes('PROD'), 'the custom text item must render alongside')
+  const baselineLines = plain(baseline).split('\n').filter(line => line !== '')
+  const lines = plain(rendered).split('\n').filter(line => line !== '')
+  assert.equal(lines.length, baselineLines.length,
+    `the instruction must not change the Footer height (${JSON.stringify(lines)} vs ${JSON.stringify(baselineLines)})`)
+  assert.ok(plain(baseline).includes('14:30'), 'the command value must render like any item')
+  assert.ok(plain(baseline).includes('PROD'), 'the custom text item must render in the normal layout')
+  // The instruction overlays the LAST physical row, so PROD (row 2) is
+  // temporarily covered while the command value on row 1 stays visible.
+  assert.ok(plain(rendered).includes('14:30'), 'the earlier command row must stay visible')
+  assert.ok(!plain(rendered).includes('PROD'), 'the last row is covered by the instruction')
   assert.ok(lines.length <= 4, `the whole footer must stay within the 4-line budget (got ${lines.length})`)
   assert.ok(lines.every(line => visibleWidth(line) <= 80), 'no line may overflow the width')
   // Beyond the composer's own SGR and the \n line separators, no control

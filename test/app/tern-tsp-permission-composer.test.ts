@@ -19,6 +19,7 @@ interface Calls {
   selects: string[]
   cancels: number
   modelEntries: string[]
+  quickEntries: string[]
   permissionOptions: string[]
 }
 interface Mounted {
@@ -36,8 +37,18 @@ function permissionSnapshot(id: string, label = id, matched = true): StatusSnaps
 
 async function mountPermissionComposer(options: {
   readonly roster?: readonly string[]
+  /** TSP-7 PR-G: advertise the kinds the composer's combined Model·Effort
+   *  quick menu needs, so the two composer menus can be exercised together. */
+  readonly modelQuick?: boolean
+  /** TSP I-E: bind the real History seat, so the Permission control can be
+   *  exercised while ANOTHER owner holds the composer seat. */
+  readonly historySearch?: boolean
 } = {}): Promise<Mounted> {
-  const pane = installTspPane({ composerActions: true })
+  const pane = installTspPane({
+    composerActions: true,
+    ...(options.modelQuick === true ? { modelPicker: true, modelQuick: true } : {}),
+    ...(options.historySearch === true ? { historySearch: true } : {}),
+  })
   const session = await connect({ timeout: 500, exitHooks: false })
   assert.ok(session)
   const renderer = mountTspRenderer(session, {
@@ -49,6 +60,7 @@ async function mountPermissionComposer(options: {
     selects: [],
     cancels: 0,
     modelEntries: [],
+    quickEntries: [],
     permissionOptions: [],
   }
   const roster = options.roster ?? ['read-only', 'workspace-write', 'danger-full-access']
@@ -58,16 +70,36 @@ async function mountPermissionComposer(options: {
     submit() {},
     steer() {},
     pasteMedia() {},
+    pastedPath: () => {},
+    admitPastedPathDelivery: () => true, shouldRememberInput: () => true,
     noteUserInput() {},
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,
     openModelPicker: entry => { calls.modelEntries.push(entry) },
+    openModelQuick: () => { calls.quickEntries.push('quick') },
+    openSessionBrowser: () => {},
+    sessionBrowserAvailable: () => true, openTasksBrowserUi() {}, tasksBrowserUiAvailable: () => true,
     permissionOptions: () => { calls.permissionOptions.push('read'); return roster },
     selectPermission: id => { calls.selects.push(id) },
   })
   let current = permissionSnapshot('workspace-write', 'Workspace Write')
   const reader: StatusSnapshotReader = { snapshot: () => current }
   renderer.bindStatusReader(reader)
+  if (options.historySearch === true) {
+    renderer.bindHistorySearch({
+      source: {
+        search: () => Promise.resolve({
+          results: [{ id: 'h:0', content: 'alpha one', cwd: '/work/alpha', ts: 1_700_000_000_000,
+            sessionId: 'ses_a', sourceFile: 'h', sourceByteOffset: 0 },
+            { id: 'h:1', content: 'beta two', cwd: '/work/alpha', ts: 1_700_000_060_000,
+              sessionId: 'ses_a', sourceFile: 'h', sourceByteOffset: 1 }],
+          exhausted: true,
+        }),
+      },
+      cwd: () => '/work/alpha',
+      captureScope: () => ({ sessionId: 'ses_a', isCurrent: () => true }),
+    })
+  }
   const mounted: Mounted = {
     pane,
     renderer,
@@ -266,4 +298,81 @@ test('permission menu: a disposed renderer never dispatches a late option click'
   pane.event({ ev: 'action', sf: pane.frames().at(-1)!.sf, id: option!.id, act: 'click' })
   await settle(80)
   assert.deepEqual(m.calls.selects, [])
+})
+
+// TSP-7 PR-G: the two composer menus are mutually exclusive, and the quick
+// menu's keys never leak into the Permission menu's keyboard route.
+test('permission menu: the History seat owning the composer refuses both the open and the write', async (t) => {
+  // TSP I-E: the Permission control is a COMPOSER control, so while the History
+  // card owns that seat it must neither open nor select. The projection already
+  // painted it disabled; a click that still reached `selectPermission` behind
+  // the card would be a business write the user cannot see and a second owner
+  // of the seat the plan froze to one card.
+  const mounted = await mountPermissionComposer({ historySearch: true })
+  t.after(() => mounted.dispose())
+  const { pane, calls } = mounted
+  // Positive control: with the composer owning its seat the same click works.
+  click(pane, permissionTrigger(pane))
+  await waitUntil('the permission menu opened', () => permissionOptions(pane).length > 0)
+  const option = permissionOptions(pane)[0]!
+  click(pane, option)
+  await waitUntil('the preset write landed', () => calls.selects.length === 1)
+  const selectsBefore = calls.selects.length
+
+  // Open the History card, then repeat both gestures.
+  pane.key('\u0012')
+  await waitUntil('the history card opened', () => wireNodes(pane).some(node => /history-card-\d+$/.test(String(node.id))))
+  assert.match(textOf(pane, permissionTrigger(pane)), /Permission|Write|read/i,
+    'the trigger is still PAINTED (and painted disabled) while the card owns the seat')
+  click(pane, permissionTrigger(pane))
+  await settle(400) // reason: a refused gesture owes no frame, so absence is the observation window
+  assert.equal(permissionOptions(pane).length, 0, 'no menu opened behind the card')
+  assert.equal(calls.selects.length, selectsBefore, 'and no preset was selected')
+  // A stale option cell from before the card cannot write either.
+  click(pane, option)
+  await settle(400) // reason: same bounded absence window for a refused click
+  assert.equal(calls.selects.length, selectsBefore, 'a stale option click writes nothing')
+
+  // Once the card is gone the control behaves exactly as before.
+  pane.key('\u001b')
+  await waitUntil('the card closed', () => !wireNodes(pane).some(node => /history-card-\d+$/.test(String(node.id))))
+  click(pane, permissionTrigger(pane))
+  await waitUntil('the menu works again after the seat is released', () => permissionOptions(pane).length > 0)
+})
+
+test('permission menu and the model quick menu are never both expanded', async (t) => {
+  const m = await mountPermissionComposer({ modelQuick: true })
+  t.after(() => { void m.dispose() })
+  const { pane, calls } = m
+
+  // Open the model quick menu through the renderer's own presentation seam —
+  // the same call the registered `/model` command makes for a live subject.
+  const presentation = m.renderer.modelPresentation
+  assert.ok(presentation?.openQuick, 'the pane negotiated the quick presentation')
+  presentation!.openQuick!({
+    subject: { sessionless: false },
+    entry: 'models',
+    isCurrent: () => true,
+    retry() {},
+    apply: () => 'committed',
+    runOwned: (_label, task, ownedOptions) => {
+      void Promise.resolve().then(task).then(ownedOptions.onResult, ownedOptions.onError)
+    },
+  })
+  await waitUntil('the quick menu mounted', () => buttonsOfKind(pane, '.composer-quick-menu').length > 0)
+  // Opening Permission revokes it in the same synchronous step.
+  click(pane, permissionTrigger(pane))
+  await waitUntil('the permission menu opened', () => permissionOptions(pane).length === 3)
+  assert.equal(buttonsOfKind(pane, '.composer-quick-menu').length, 0,
+    'the quick menu is retired before the permission frame paints')
+  // Escape closes only the open Permission menu; the Agent is never cancelled.
+  pane.key('\u001b')
+  await settle(80)
+  assert.equal(permissionOptions(pane).length, 0, 'the permission menu closed')
+  assert.equal(m.calls.cancels, 0, 'closing a composer menu is never an Agent cancel')
+  // Ctrl+C still reaches its original owner exactly once.
+  pane.key('\u0003')
+  await settle(80)
+  assert.equal(m.calls.cancels, 1, 'Ctrl+C reached the cancel owner')
+  assert.deepEqual(calls.selects, [], 'no permission write was dispatched by the menu keys')
 })

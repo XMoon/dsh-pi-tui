@@ -20,6 +20,12 @@ export interface TasksCommandDeps {
   registerTuiCommand: RegisterTuiCommand
 }
 
+/** The `/tasks` handler body, returned by {@link registerTasksCommand} so an
+ *  in-process UI entry can run the SAME registered command the typed line
+ *  runs. It owns no state of its own: every admission, scope and Task Runtime
+ *  call stays in the closure above. */
+export type TasksCommandOpener = () => Promise<CommandResult>
+
 export interface PluginsCommandDeps {
   /** The `/plugins` entry: the SAME Settings workspace lease, landing on the
    *  Plugin List. It never creates or switches a Session. */
@@ -30,25 +36,32 @@ export interface PluginsCommandDeps {
 /** `/tasks` (`/subagents`) — the merged Task Center browser behind the
  *  full surface (jobs + subagents in one searchable list). The Task Runtime's
  *  own business layer implements row-level confirmed Stop on the PiTui
- *  renderer; the TSP Work Hub behind the same command is read-only. */
-export function registerTasksCommand({ runner, registerTuiCommand }: TasksCommandDeps): void {
+ *  renderer; the TSP Work Hub behind the same command is read-only.
+ *
+ * Returns the SAME handler reference the registration installed. The
+ * renderer-local UI entries (the TSP Tasks status segment) call it directly
+ * instead of fabricating a `/tasks` submission, so pointer and keyboard reach
+ * one handler body, one Session admission and one Task Runtime. */
+export function registerTasksCommand({ runner, registerTuiCommand }: TasksCommandDeps): TasksCommandOpener {
+  // The merged browser: jobs + subagents in one searchable list — the full
+  // surface behind `/tasks` (runner.openTasksBrowser). Completed jobs and
+  // finished one-shot children are reachable exactly through this path.
+  // The renderer decides what the surface offers: the PiTui Task Center
+  // keeps its row-level confirmed Stop, and the TSP Work Hub reads only.
+  // This handler holds NO renderer branch — the registered command, its
+  // alias and the business entry stay ONE path.
+  const openTasks = async (): Promise<CommandResult> => {
+    await runner.requireLiveSessionScope()
+    runner.openTasksBrowser()
+    return { kind: 'success' }
+  }
   registerTuiCommand({
     name: 'tasks',
     description: 'Browse tasks, subagents and jobs for the current session',
     aliases: ['subagents'],
-    handler: async () => {
-      // The merged browser: jobs + subagents in one searchable list — the full
-      // surface behind `/tasks` (runner.openTasksBrowser). Completed jobs and
-      // finished one-shot children are reachable exactly through this path.
-      // The renderer decides what the surface offers: the PiTui Task Center
-      // keeps its row-level confirmed Stop, and the TSP Work Hub reads only.
-      // This handler holds NO renderer branch — the registered command, its
-      // alias and the business entry stay ONE path.
-      await runner.requireLiveSessionScope()
-      runner.openTasksBrowser()
-      return { kind: 'success' }
-    },
+    handler: openTasks,
   })
+  return openTasks
 }
 
 /** `/plugins` (P1-A / PR2): the canonical sessionless deep link into

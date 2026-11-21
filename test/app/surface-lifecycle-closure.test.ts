@@ -27,6 +27,7 @@ import { TuiApp, type TaskBrowserHandle, type TuiAppOptions } from '../../src/tu
 import { OutputViewerPanel } from '../../src/tui/panels/output-viewer-panel.ts'
 import { JobInspectorPanel } from '../../src/tui/panels/job-inspector-panel.ts'
 import { SettingsWorkspacePanel, type SettingsWorkspaceSource } from '../../src/tui/panels/settings-workspace-panel.ts'
+import { SessionWorkspacePanel } from '../../src/tui/panels/session-workspace-panel.ts'
 import { pituiDisplaySeam } from '../../src/app/surface/display-seam-pitui.ts'
 import { TaskBrowserPanel } from '../../src/tui/panels/task-panel.ts'
 import { createTaskRuntime, type TaskRuntime, type TaskSurfaceSource } from '../../src/app/surface/task-runtime.ts'
@@ -260,7 +261,7 @@ function attachTasks(app: TuiApp, options: { jobIds?: readonly string[]; childId
 
 // ── A-01..A-03: the OutputViewer physical/returned/Esc closure ──────────────
 
-test('A-01 Esc finalizes the output viewer once, removes it, and stops its refresh timer', async () => {
+test('Esc finalizes the output viewer once, removes it, and stops its refresh timer', async () => {
   const { vt, app } = startApp()
   // The owned panel release is the timer owner: count it (pass-through double).
   let panelDisposals = 0
@@ -305,7 +306,7 @@ test('A-01 Esc finalizes the output viewer once, removes it, and stops its refre
   }
 })
 
-test('A-02 the returned closer is idempotent and a self-reentrant onClose cannot loop', async () => {
+test('the returned closer is idempotent and a self-reentrant onClose cannot loop', async () => {
   const { vt, app } = startApp()
   let panelDisposals = 0
   const originalPanelDispose = OutputViewerPanel.prototype.dispose
@@ -336,7 +337,7 @@ test('A-02 the returned closer is idempotent and a self-reentrant onClose cannot
   }
 })
 
-test('A-03 a fullscreen swap finalizes a non-remountable viewer once and never a remountable lease', async () => {
+test('a fullscreen swap finalizes a non-remountable viewer once and never a remountable lease', async () => {
   // Phase 3B / B3-A: the Ctrl+R History surface is an EDITOR-SEAT tenant, not an
   // overlay node, so the managed graph holds only the real overlays — and the
   // tenant still survives the swap on the shared seat mount.
@@ -390,7 +391,7 @@ test('A-03 a fullscreen swap finalizes a non-remountable viewer once and never a
 
 // ── A-04..A-10: the TaskRuntime parent/child ownership closure ──────────────
 
-test('A-04 a parent-only browser close releases the Job child observer once; the Job screen never destroys the browser', async () => {
+test('a parent-only browser close releases the Job child observer once; the Job screen never destroys the browser', async () => {
   const { vt, app } = startApp()
   // Count the real panel release (its 1s elapsed tick lives in the panel):
   // the owning frame must dispose it exactly once, on any close path.
@@ -452,7 +453,7 @@ test('A-04 a parent-only browser close releases the Job child observer once; the
   }
 })
 
-test('A-05 a display-mode switch is refused while the Job screen owns the surface, and the physical browser disposal still retires once afterwards', async () => {
+test('a display-mode switch is refused while the Job screen owns the surface, and the physical browser disposal still retires once afterwards', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -494,7 +495,7 @@ test('A-05 a display-mode switch is refused while the Job screen owns the surfac
   app.stop()
 })
 
-test('A-06 the Workflow-scoped Full browser preserves the dataset scope across a close/reopen cycle', async () => {
+test('the Workflow-scoped Full browser preserves the dataset scope across a close/reopen cycle', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'], childIds: ['child-1', 'child-2'] })
   await flush()
@@ -533,7 +534,7 @@ ${JSON.stringify(scoped.visibleItems!().map(i => i.value))}`)
   app.stop()
 })
 
-test('A-06b the Full browser carries its presentation state across an overlay round-trip', async () => {
+test('the Full browser carries its presentation state across an overlay round-trip', async () => {
   // B4-B: the Quick→Full promotion is retired with the modal Quick. The
   // surviving contract: the Full browser keeps its OWN presentation state
   // (type filter, selection) across a Job-detail overlay round-trip.
@@ -543,10 +544,12 @@ test('A-06b the Full browser carries its presentation state across an overlay ro
   harness.tasks.openTasksBrowser('full', { kind: 'subagents', childIds: ['child-1', 'child-2'] })
   await vt.waitForRender()
   const first = harness.lastBrowser()!
-  // A type filter in the Full (Tab cycles: subagents → ... ).
-  vt.sendInput('\t')
+  // A type filter in the Full via the explicit f list (Tab no longer cycles).
+  vt.sendInput('f')
+  vt.sendInput('\x1b[B')
+  vt.sendInput('\r')
   await vt.waitForRender()
-  assert.notEqual(first.getViewState!().typeFilter, null, 'Tab must set a type filter in the Full')
+  assert.notEqual(first.getViewState!().typeFilter, null, 'the f list must set a type filter in the Full')
   const filtered = first.getViewState!().typeFilter
 
   // Open + close a Job-detail overlay (the same round-trip shape): the
@@ -560,7 +563,7 @@ test('A-06b the Full browser carries its presentation state across an overlay ro
   app.stop()
 })
 
-test('A-07 a same-session Job A → B replacement releases each observer once and B survives A\'s late close', async () => {
+test('a same-session Job A → B replacement releases each observer once and B survives A\'s late close', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a', 'job-b'] })
   await flush()
@@ -605,7 +608,7 @@ test('A-07 a same-session Job A → B replacement releases each observer once an
   app.stop()
 })
 
-test('A-07b a reentrant replacement inside a viewer finalizer wins over the outer replacement', async () => {
+test('a reentrant replacement inside a viewer finalizer wins over the outer replacement', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a', 'job-b', 'job-c'] })
   await flush()
@@ -657,7 +660,7 @@ test('A-07b a reentrant replacement inside a viewer finalizer wins over the oute
   app.stop()
 })
 
-test('A-08 a browser retired inside its own retire callback cannot touch the replacement', async () => {
+test('a browser retired inside its own retire callback cannot touch the replacement', async () => {
   const { vt, app } = startApp()
   const reasons: string[] = []
   let reentered = false
@@ -700,7 +703,7 @@ test('A-08 a browser retired inside its own retire callback cannot touch the rep
   app.stop()
 })
 
-test('A-08b TaskRuntime: a browser opened by a plugin focus callback during the close wins over the retired browser\'s navigation tails', async () => {
+test('TaskRuntime: a browser opened by a plugin focus callback during the close wins over the retired browser\'s navigation tails', async () => {
   // Phase 1 — the Esc (cancel) tail. A REAL advanced-interactive overlay owns
   // the pre-browser focus: closing the Full browser restores plugin focus, and
   // the plugin's onFocus synchronously opens a NEWER browser with its own Job
@@ -795,7 +798,7 @@ test('A-08b TaskRuntime: a browser opened by a plugin focus callback during the 
   }
 })
 
-test('A-08c TaskRuntime: a synchronous session reset during the close retires the pending navigation tail', async () => {
+test('TaskRuntime: a synchronous session reset during the close retires the pending navigation tail', async () => {
   // B4-B: the Quick → Full promotion is retired, so the probed "pending
   // Esc restore into Quick" no longer exists. The surviving contract: a
   // synchronous resetTasks() fired from an overlay focus hook (the physical
@@ -838,7 +841,7 @@ test('A-08c TaskRuntime: a synchronous session reset during the close retires th
   app.stop()
 })
 
-test('A-08d TaskRuntime: a stale browser\'s late close cannot clear the replacement\'s slot, scope or child', async () => {
+test('TaskRuntime: a stale browser\'s late close cannot clear the replacement\'s slot, scope or child', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'], childIds: ['child-1', 'child-2'] })
   await flush()
@@ -886,7 +889,7 @@ test('A-08d TaskRuntime: a stale browser\'s late close cannot clear the replacem
   app.stop()
 })
 
-test('A-09 resetTasks is idempotent: one observer release, one browser disposal, reusable afterwards', async () => {
+test('resetTasks is idempotent: one observer release, one browser disposal, reusable afterwards', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -915,7 +918,7 @@ test('A-09 resetTasks is idempotent: one observer release, one browser disposal,
   app.stop()
 })
 
-test('A-09b a throwing Job finalizer cannot strand the browser disposal during a session reset', async () => {
+test('a throwing Job finalizer cannot strand the browser disposal during a session reset', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -948,7 +951,7 @@ test('A-09b a throwing Job finalizer cannot strand the browser disposal during a
   app.stop()
 })
 
-test('A-09c a throwing browser hide cannot strand the reset mirrors or the dataset scope', async () => {
+test('a throwing browser hide cannot strand the reset mirrors or the dataset scope', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'], childIds: ['child-1', 'child-2'] })
   await flush()
@@ -994,7 +997,7 @@ test('A-09c a throwing browser hide cannot strand the reset mirrors or the datas
   app.stop()
 })
 
-test('A-10 TuiApp.dispose and the explicit observer release are order-independent and release once', async () => {
+test('TuiApp.dispose and the explicit observer release are order-independent and release once', async () => {
   // Order 1: the physical teardown finalizes the viewer first.
   {
     const { vt, app } = startApp()
@@ -1030,7 +1033,7 @@ test('A-10 TuiApp.dispose and the explicit observer release are order-independen
 
 // ── A-11..A-13: failure propagation and callback chaining ───────────────────
 
-test('A-11 a throwing owned-child dispose still finalizes once, preserves the error, and aggregates two failures', async () => {
+test('a throwing owned-child dispose still finalizes once, preserves the error, and aggregates two failures', async () => {
   const { vt, app } = startApp()
   const originalDispose = OutputViewerPanel.prototype.dispose
   const disposeError = new Error('panel dispose boom')
@@ -1115,7 +1118,7 @@ test('A-11 a throwing owned-child dispose still finalizes once, preserves the er
   app.stop()
 })
 
-test('A-12 a late Sign-in notice onClose cannot clear the CURRENT notice handle', async () => {
+test('a late Sign-in notice onClose cannot clear the CURRENT notice handle', async () => {
   // Phase 1 — Esc, a notice SWAP (a re-attempt) and the explicit attempt close.
   {
     const { vt, app } = startApp()
@@ -1227,7 +1230,7 @@ test('A-12 a late Sign-in notice onClose cannot clear the CURRENT notice handle'
   }
 })
 
-test('A-14 a viewer disposed during its own mount never starts its refresh timer', async () => {
+test('a viewer disposed during its own mount never starts its refresh timer', async () => {
   const { vt, app } = startApp()
   // A REAL plugin overlay owns the keyboard first. The new viewer's mount focus
   // transition blurs it, and its onBlur swaps the screen — which physically
@@ -1279,7 +1282,7 @@ test('A-14 a viewer disposed during its own mount never starts its refresh timer
   app.stop()
 })
 
-test('A-13 a throwing owner retire and a throwing parent hide are both attempted; no ghost child remains', async () => {
+test('a throwing owner retire and a throwing parent hide are both attempted; no ghost child remains', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -1452,6 +1455,79 @@ test('TuiApp.dispose releases a leased Settings workspace exactly once', async (
   assert.equal(settingsScreenOpen(app), false)
   app.dispose()
   assert.equal(closes, 1, 'a repeated dispose cannot double-notify')
+})
+
+test('the Session Workspace uses the ONE lease latch: mutual exclusion, pre-emption and exactly one release', async () => {
+  const { vt, app } = startApp()
+  let closes = 0
+  const subject = { currentSessionId: 'session-a', currentCwd: '/ws', isCurrent: () => true }
+  const open = () => app.openSessionWorkspace({
+    subject,
+    onQueryChange: () => {},
+    onResume: () => {},
+    onClose: () => { closes += 1 },
+    initialMode: 'browse',
+    initialBrowseScope: 'all',
+  })
+
+  // The paused surface keeps the SAME object tree, focus and draft.
+  app.setDraft('draft-must-survive')
+  const editorBefore = app.focusedComponentForTest()
+  const first = open()
+  await vt.waitForRender()
+  assert.equal(app.focusedComponentForTest() instanceof SessionWorkspacePanel, true,
+    'the Session Workspace panel is the physical keyboard owner')
+  assert.ok(view(vt).includes('Sessions'))
+  // A different workspace kind is refused while Sessions owns the ONE lease.
+  assert.throws(
+    () => app.openSettingsWorkspace(settingsWorkspaceSource(), { aboutVersionFacts: ABOUT_VERSION_FACTS }),
+    /workspace screen is already leased/,
+  )
+
+  // User Esc closes the lease once and restores the SAME editor/focus/draft
+  // without touching the user's fullscreen preference.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(closes, 1, 'the user close notifies the owner exactly once')
+  assert.equal(app.focusedComponentForTest(), editorBefore, 'the same editor instance is restored')
+  assert.equal(app.getDraft(), 'draft-must-survive', 'the draft survives the workspace round trip')
+  assert.equal(app.isFullscreen(), false, 'the workspace never rewrites the user display preference')
+  assert.ok(!view(vt).includes('Sessions'), 'no Session chrome survives the close')
+
+  // An owner-origin close suppresses the owner notification; a newer lease wins.
+  const second = open()
+  await vt.waitForRender()
+  second.close()
+  await vt.waitForRender()
+  assert.equal(closes, 1, 'an owner-origin close never re-enters the owner')
+  const third = open()
+  await vt.waitForRender()
+  assert.ok(view(vt).includes('Sessions'), 'the newer Session lease owns the screen')
+
+  // A blocking Question closes the lease BEFORE claiming the seat, exactly once.
+  const questions = app.askQuestions([{ id: 'q1', question: 'proceed?', options: [{ label: 'yes' }] }])
+  await vt.waitForRender()
+  assert.equal(closes, 2, 'the blocking owner pre-empts exactly once')
+  assert.ok(view(vt).includes('proceed?'), 'the question owns the restored surface')
+  assert.ok(!view(vt).includes('Sessions'), 'no Session chrome survives behind the question')
+  assert.throws(() => open(), /blocking modal owns the surface/,
+    'a new Session lease is refused while the blocking owner owns the seat')
+
+  vt.sendInput('\x1b')
+  await questions.catch(() => {})
+  await vt.waitForRender()
+  assert.equal(closes, 2, 'the refused lease never resurrects')
+
+  // stop() releases a live lease exactly once; a stale closer is inert.
+  const fourth = open()
+  await vt.waitForRender()
+  app.stop()
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(closes, 3, 'stop releases the live Session lease exactly once')
+  fourth.close()
+  third.close()
+  second.close()
+  assert.equal(closes, 3, 'a repeated/stale close is a strict no-op')
 })
 
 test('a retired Settings lease cannot close a newer lease opened synchronously by onClose', async () => {
@@ -1662,17 +1738,17 @@ test('closing a workspace hands the terminal over without flushing its own docum
   assert.equal(jobScreenOpen(app), true, 'the Job workspace owns the surface')
   // The marker must be CONTIGUOUS in the write stream (the terminal receives
   // per-span diffs, so text split across two chalk spans is not a substring) and
-  // UNIQUE to the departing Job document. The workspace's own action-bar verb
-  // `Esc back` (D13) qualifies on both counts: it is a single span, it is painted
-  // at EVERY width (Esc is never dropped), and no other surface in this
-  // transition paints it — the restored Task Browser paints `Esc close`.
+  // UNIQUE to the departing Job document. The Output bar's `Follow on` state
+  // fact qualifies on both counts: it is ONE span, it is painted on the wide
+  // Output bar, and no other surface in this transition paints it.
   //
   // It is deliberately NOT the shared status group `‣ Running` any more: since
   // B4-A the RESUMED regular surface paints the passive Task Quick window, whose
   // rows carry that same shared `‣` group by design (design language D5+D7), so
   // its presence could no longer tell "the Job document was flushed" apart from
-  // "the restored surface legitimately painted a task row".
-  const jobMark = 'Esc back'
+  // "the restored surface legitimately painted a task row". It is also not the
+  // Esc affordance: PR2 paints the verb and its `[Esc]` keycap as TWO spans.
+  const jobMark = 'Follow on'
   assert.ok(captured().includes(jobMark), 'control: the live Job document is what writes the mark')
   writes.length = 0
   vt.sendInput('\x1b')

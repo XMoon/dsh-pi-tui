@@ -1,4 +1,4 @@
-import { getKeybindings } from "../keybindings.ts";
+import { getKeybindings, getSelectPageIndex } from "../keybindings.ts";
 import type { Component, TuiMouseEvent, TuiMouseEventResult } from "../tui.ts";
 import { truncateToWidth, visibleWidth } from "../utils.ts";
 
@@ -38,6 +38,7 @@ export interface SelectListLayoutOptions {
 }
 
 export class SelectList implements Component {
+	readonly capturesViewportInput: boolean = true;
 	private items: SelectItem[] = [];
 	private filteredItems: SelectItem[] = [];
 	private selectedIndex: number = 0;
@@ -138,7 +139,14 @@ export class SelectList implements Component {
 			const delta = event.wheelDelta < 0 ? -1 : 1;
 			const previousIndex = this.selectedIndex;
 			this.selectedIndex = Math.max(0, Math.min(this.filteredItems.length - 1, this.selectedIndex + delta));
-			if (this.selectedIndex !== previousIndex) this.notifySelectionChange();
+			if (this.selectedIndex !== previousIndex) {
+				// An EFFECTIVE wheel moves the selection under the pressed row:
+				// the release must not activate the item the user pressed before
+				// navigating away (a boundary wheel that cannot move keeps the
+				// existing same-cell contract). (dsh-pi-tui divergence X079.)
+				this.mousePressedItem = undefined;
+				this.notifySelectionChange();
+			}
 			return { handled: true, render: this.selectedIndex !== previousIndex };
 		}
 		// Hover must not change selection: the visible range is centered on it.
@@ -182,6 +190,7 @@ export class SelectList implements Component {
 
 	handleInput(keyData: string): void {
 		const kb = getKeybindings();
+		const pageIndex = getSelectPageIndex(kb, keyData, this.selectedIndex, this.filteredItems.length, this.maxVisible);
 		// Up arrow - wrap to bottom when at top
 		if (kb.matches(keyData, "tui.select.up")) {
 			this.selectedIndex = this.selectedIndex === 0 ? this.filteredItems.length - 1 : this.selectedIndex - 1;
@@ -190,6 +199,12 @@ export class SelectList implements Component {
 		// Down arrow - wrap to top when at bottom
 		else if (kb.matches(keyData, "tui.select.down")) {
 			this.selectedIndex = this.selectedIndex === this.filteredItems.length - 1 ? 0 : this.selectedIndex + 1;
+			this.notifySelectionChange();
+		}
+		// Page up/down - move by one visible page, clamped to the list bounds
+		else if (pageIndex !== undefined) {
+			if (this.filteredItems.length === 0 || pageIndex === this.selectedIndex) return;
+			this.selectedIndex = pageIndex;
 			this.notifySelectionChange();
 		}
 		// Enter

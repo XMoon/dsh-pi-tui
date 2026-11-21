@@ -489,3 +489,70 @@ test('repeat status repaints reuse the SAME compiled presentation (no per-frame 
     assert.equal(pres.registry, registry, `the registry instance survives repaint #${repeat}`)
   }
 })
+
+// ── Mouse PR4: the first-party Tasks action through the REAL config source ──
+//
+// These cases go through `resolveTspNativeFooterConfig` (the persisted
+// document) instead of a hand-built layout object, so the action is proven on
+// the same placement data a real mount uses.
+
+const TASKS_ACTION = 'dsh.footer.tasks.open'
+
+/** Every seg of one projection with the click action it declares. */
+function segClicks(rows: readonly Node[]): Array<{ readonly key: unknown; readonly click: unknown }> {
+  return rows.flatMap(row => children(row).map(node => {
+    const actions = props(node)['actions'] as { readonly click?: unknown } | undefined
+    return { key: props(node).key, click: actions?.click }
+  }))
+}
+
+test('Mouse PR4: the resolved custom layout gives the action to every real Tasks placement and none to lookalikes', () => {
+  const layout = {
+    schemaVersion: 1,
+    rows: [
+      { left: [{ id: 'tasks' }], right: [{ id: 'ext:someone/tasks' }, { id: 'unknown-item', prefix: 'tasks ' }] },
+      { left: [{ id: 'tasks' }, { id: 'user:looks-like-tasks' }], right: [] },
+    ],
+  }
+  const pres = presentation({
+    doc: { footer: 'custom', footerLayout: layout },
+    userItems: {
+      items: [{ schemaVersion: 1, id: 'user:looks-like-tasks', kind: 'text', text: 'tasks 2' }],
+      invalidCount: 0,
+    },
+  })
+  const rows = nativeStatuslineRows(fullSnapshot(), pres, undefined, { tasksAction: TASKS_ACTION })
+  const painted = segClicks(rows)
+  assert.deepEqual(painted.filter(entry => entry.click !== undefined), [
+    { key: 'footer-r1-l0', click: TASKS_ACTION },
+    { key: 'footer-r2-l0', click: TASKS_ACTION },
+  ], 'both configured Tasks placements act; a repeated placement is still one intent')
+  for (const key of ['footer-r1-r0', 'footer-r1-r1', 'footer-r2-l1']) {
+    assert.equal(painted.find(entry => entry.key === key)?.click, undefined,
+      `${key} renders its own text/marker only`)
+  }
+})
+
+test('Mouse PR4: the resolved default and compact presets act on their attention badge only', () => {
+  for (const footer of ['default', 'full', 'compact']) {
+    const rows = nativeStatuslineRows(fullSnapshot(), presentation({ doc: { footer } }), undefined,
+      { tasksAction: TASKS_ACTION })
+    assert.deepEqual(segClicks(rows).filter(entry => entry.click !== undefined),
+      [{ key: 'status-r1-attention', click: TASKS_ACTION }],
+      `${footer}: exactly the attention badge carries the action`)
+  }
+})
+
+test('Mouse PR4: without the option the resolved layout keeps its read-only shape', () => {
+  const layout = { schemaVersion: 1, rows: [{ left: [{ id: 'tasks' }, { id: 'cwd' }], right: [] }] }
+  const pres = presentation({ doc: { footer: 'custom', footerLayout: layout } })
+  const inert = nativeStatuslineRows(fullSnapshot(), pres)
+  assert.deepEqual(segClicks(inert).filter(entry => entry.click !== undefined), [],
+    'a mount that admits no click paints no action at all')
+  const actioned = nativeStatuslineRows(fullSnapshot(), pres, undefined, { tasksAction: TASKS_ACTION })
+  assert.deepEqual(
+    actioned.flatMap(row => children(row).map(seg => props(seg).text)),
+    inert.flatMap(row => children(row).map(seg => props(seg).text)),
+    'the option never changes the painted text',
+  )
+})

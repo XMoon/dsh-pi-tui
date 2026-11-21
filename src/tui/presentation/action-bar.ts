@@ -30,19 +30,45 @@ export interface ActionBarSegment {
  *  There is no per-caller separator option — one family, one separator. */
 export const ACTION_BAR_SEPARATOR = ' · '
 
+export interface ActionBarLayoutSpan {
+  readonly inputIndex: number
+  readonly text: string
+  readonly startCol: number
+  readonly endCol: number
+}
+
+export interface ActionBarLayout {
+  readonly text: string
+  readonly spans: readonly ActionBarLayoutSpan[]
+  readonly truncated: boolean
+}
+
 /**
  * Lay out one Action Bar row: compact shortenable segments first, then drop the
  * lowest-priority segment until the row fits (never the last one).
  * @param segments - the segments in DISPLAY order; each is copied.
  * @param width - the terminal cells available to the row.
- * @returns the unpainted row, padded to the exact width when truncated.
+ * @returns the unpainted row and the complete visible segment spans.
  */
-export function renderActionBarRow(segments: readonly ActionBarSegment[], width: number): string {
-  const list = segments.map(segment => ({ ...segment }))
+export function layoutActionBarRow(segments: readonly ActionBarSegment[], width: number): ActionBarLayout {
+  const list = segments.map((segment, inputIndex) => ({ ...segment, inputIndex }))
+  if (list.length === 0) return { text: '', spans: [], truncated: false }
+
   for (;;) {
     const line = list.map(segment => segment.text).join(ACTION_BAR_SEPARATOR)
     if (visibleWidth(line) <= width || list.length <= 1) {
-      return truncateToWidth(line, width, '…', true)
+      const truncated = visibleWidth(line) > width
+      const text = truncateToWidth(line, width, '…', true)
+      if (truncated) return { text, spans: [], truncated: true }
+
+      const spans: ActionBarLayoutSpan[] = []
+      let startCol = 0
+      for (const segment of list) {
+        const endCol = startCol + visibleWidth(segment.text)
+        spans.push({ inputIndex: segment.inputIndex, text: segment.text, startCol, endCol })
+        startCol = endCol + visibleWidth(ACTION_BAR_SEPARATOR)
+      }
+      return { text, spans, truncated: false }
     }
     const shortenable = list.find(segment => segment.short !== undefined && segment.text !== segment.short)
     if (shortenable !== undefined) {
@@ -55,4 +81,10 @@ export function renderActionBarRow(segments: readonly ActionBarSegment[], width:
     }
     list.splice(lowest, 1)
   }
+}
+
+/** Render the shared Action Bar row without changing its historical text. */
+export function renderActionBarRow(segments: readonly ActionBarSegment[], width: number): string {
+  if (segments.length === 0) return truncateToWidth('', width, '…', true)
+  return layoutActionBarRow(segments, width).text
 }

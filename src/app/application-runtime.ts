@@ -24,11 +24,47 @@
 
 import type { PresentationReader } from '../runtime/presentation-read-port.ts'
 import type { SessionReader } from '../runtime/session-reader-port.ts'
+import type { ImageAttachmentRefLike } from '../domain/media/types.ts'
 import type { TerminalProgressOutcome } from '../domain/terminal-progress/settings.ts'
 import type { SubmissionPresentationSource } from './submission/presentation.ts'
 import type { Backend, BackendKind } from '../runtime/backend.ts'
 import type { SessionOwnerAccess, SessionOwnerRetirement } from './session/owner-access.ts'
 import type { PiTuiExtensionService } from '../extensions.ts'
+import type { SessionBrowserAnswerEligibility } from './command/session-browser-presentation.ts'
+import type { DisplayPreset } from '../domain/display/preset.ts'
+
+/**
+ * The `syncView` ACK the structural presence capability returns: the typed
+ * applied/refused answer of the private Remote method. Declared STRUCTURALLY
+ * (the refusal vocabulary is the wire contract's closed set, mirrored here)
+ * so this transport-neutral module never imports `runtime/remote/**`. The
+ * owning contract module is
+ * `runtime/remote/pi-tui-prompt-presence-contract.ts`.
+ */
+export type RemotePromptPresenceAck =
+  | { readonly kind: 'applied'; readonly revision: number }
+  | {
+      readonly kind: 'refused'
+      readonly reason: 'owner-required' | 'session-not-live' | 'stale-revision' | 'scope-unavailable'
+    }
+
+/**
+ * The ONE narrow Client Remote presence capability (M6 PR-C C3): the mounted
+ * `piTuiPromptPresence.syncView` method and nothing else. A Client's own
+ * session-view presence is asserted through it and the authoritative Host ACK
+ * is awaited; the Client never speaks for another Peer.
+ */
+export interface RemotePromptPresenceCapability {
+  syncView(
+    viewedSessionId: string | null,
+    displayPreset: DisplayPreset,
+    revision: number,
+    signal?: AbortSignal,
+  ): Promise<
+    | { readonly ok: true; readonly value: RemotePromptPresenceAck }
+    | { readonly ok: false; readonly error: unknown }
+  >
+}
 
 /**
  * The one selected application runtime core: the common inputs the bootstrap
@@ -58,40 +94,6 @@ export interface SelectedApplicationRuntime {
 }
 
 /**
- * The Remote application-runtime composition input for the selection seam
- * (M3-4 PR1): exactly the arguments the Remote aggregate needs. The seam owns
- * the LOADING (`runtime/backend-loader.ts` — the sole sanctioned dynamic
- * boundary into the Remote composition); the composition input itself stays
- * transport-descriptive, so this module imports no Remote code.
- */
-export interface RemoteApplicationSelection {
-  /** The already-running ordinary Host Context (never disposed by the graph). */
-  readonly hostContext: object
-  /** Host bootstrap prerequisite barrier owned by the caller (M3-0 ordering
-   *  contract: the Remote composition must not race the Host-local
-   *  legacy-settings migration). */
-  readonly waitForHostPrerequisites: () => Promise<void>
-  /** Lifecycle signal observed between the Host prerequisite and composition. */
-  readonly signal?: AbortSignal
-  /**
-   * The application-owned prompt serializer (the D2.2 writer dependency).
-   * PR1 supplies a real one only in composition tests; the production
-   * serializer is completed in the M3-4 submission PR. There is deliberately
-   * NO default here: a missing serializer is a composition error, never a
-   * fabricated partial Remote writer.
-   */
-  readonly promptSerializer: object
-  /**
-   * The Client-local UI startup facts (M3-6 PR1): the detached
-   * `sessionId`/`presetId` data the Remote application's Client UI subtree
-   * (extension host + first-party builtins on the official Client Context)
-   * mounts under. Data facts ONLY — the Host-only `markSurfaceMounted`
-   * readiness callback never crosses into the Client Context.
-   */
-  readonly clientUiStartup: ClientUiStartupFacts
-}
-
-/**
  * The detached startup facts the Remote Client-local UI subtree consumes
  * (M3-6 PR1 D2): plain data only. It must never contain
  * `markSurfaceMounted`, `appExit`, a Host Context, a Loader,
@@ -101,6 +103,13 @@ export interface RemoteApplicationSelection {
 export interface ClientUiStartupFacts {
   readonly sessionId?: string
   readonly presetId?: string
+  /**
+   * The public CLI Session launch intent (M6-2A). Mutually exclusive with the
+   * exact `sessionId` above; the Client-local `tuiStartup` forwards it to the
+   * existing `bootstrap.ts` Session resolver. Type-only import: this module
+   * stays transport-neutral and never pulls the startup row's runtime deps.
+   */
+  readonly sessionLaunch?: import('../startup.ts').CliSessionLaunchIntent
 }
 
 /**
@@ -223,7 +232,7 @@ export interface RemoteTerminalProgressSource {
 export interface RemoteAttachmentSource {
   readDurableImage(
     sessionId: string,
-    attachmentId: string,
+    attachment: ImageAttachmentRefLike,
     expectedLifetime: RemoteTransportLifetime,
   ): Promise<{ ref: unknown; data: Uint8Array }>
 }
@@ -276,8 +285,9 @@ export interface RemoteLiveIngressFactory {
       onWindowRefoldRequired: (sessionId: string, reason?: 'paging' | 'recovery') => void
       onSessionSnapshotChanged: (sessionId: string) => void
       /** The official PROJECTION store changed: the only channel carrying
-       *  projection-owned current values (the Session snapshot never does). */
-      onProjectionsChanged: (sessionId: string) => void
+       *  projection-owned current values (the Session snapshot never does).
+       *  `changedKeys` is the real key set of this coalesced batch. */
+      onProjectionsChanged: (sessionId: string, changedKeys: readonly string[]) => void
     },
     /** The caller's hydrate/read baseline: the committed revision plus the
      *  EXACT transport identity it was fenced under. A rollover/replacement or
@@ -304,6 +314,41 @@ export interface RemoteLiveIngressFactory {
   }
 }
 
+/**
+ * Split-Client only: the narrow root-delivery capability the runner binds and
+ * the modal-safe navigation entry uses. Declared structurally HERE because this
+ * transport-neutral module must not import the Remote runtime; the concrete
+ * owner (`app/remote-process/client-interaction-delivery`) satisfies it by
+ * structure, and the full seam lives in `runtime/remote/interaction-remote`.
+ */
+export interface SplitClientInteractionDeliveryControl {
+  /**
+   * The official forwarded requests this root currently holds and has not
+   * settled — the ONLY positive answerability fact the Session Workspace
+   * classifier may use. An empty array is "composition present, nothing live";
+   * a Direct/TSP composition never supplies this capability at all.
+   */
+  currentEligibleRequests(): readonly SessionBrowserAnswerEligibility[]
+  /** Observe eligibility add/remove. A UI invalidation notification, never a
+   *  Host event subscription: it never answers and never creates a request. */
+  subscribeEligibility(listener: () => void): () => void
+  /**
+   * Bind the ONE committed-Session authority of the application hosting the
+   * current surface revision. A replacement revision replaces the binding; the
+   * returned disposer is inert once replaced.
+   */
+  bindCommittedSession(
+    currentSessionId: () => string | undefined,
+    subscribeCommittedSession: (listener: () => void) => () => void,
+  ): () => void
+  /**
+   * Mark a presentation-only navigation hold BEFORE a local modal seat is
+   * withdrawn. The returned release is one-shot; Host request lifetimes and
+   * Session ownership are untouched.
+   */
+  beginNavigationHold(): { release(): void }
+}
+
 /** The pre-composed Remote application input for the internal L6
  *  composition entry (M3-4 PR2): the aggregate the caller already built
  *  through `createRemoteApplicationRuntime` (ONE Host/Client/Backend/owner
@@ -319,6 +364,59 @@ export interface RemoteApplicationOverride {
   readonly selected: SelectedApplicationRuntime
   readonly presentation: RemoteApplicationSources
   readonly extensionService: PiTuiExtensionService
+  /** Split-Client only: the Client-root interaction delivery owner. */
+  readonly interactionDelivery?: SplitClientInteractionDeliveryControl
+  /**
+   * Split-Client only: reconcile external PiTui `./tui` entries against ONE
+   * committed official Plugin Manager inventory snapshot. This is a
+   * process-local method pointing at the CURRENT surface revision's own mount
+   * owner; it is never a Gateway/RPC or a cross-process callback.
+   */
+  readonly reconcilePluginInventory?: (snapshot: import('../runtime/plugin-manager-port.ts').PluginManagerSnapshot) => void | Promise<void>
+  /**
+   * Split-Client only: the CURRENT surface revision's read-only Client Loader
+   * observation source (read + revision + subscribe). Process-local; never
+   * serialized across the Host wire and never another Client's state.
+   */
+  readonly clientExtensionObservationSource?: () => import('./client-extensions/mount-owner.ts').ClientExtensionObservationSource | undefined
+  /** Split-Client only: the mounted private session-view presence capability
+   *  (M6 PR-C C3). Direct leaves it absent — the local fold needs no wire ACK. */
+  readonly promptPresence?: RemotePromptPresenceCapability
+  /**
+   * Split-Client only (M6 UX PR2): the ONE process-local daemon administration
+   * capability the real Client entry built from its officially verified Profile
+   * facts. A value borrowed through the in-process composition — never a Host
+   * service, never a Remote wire object, never a public declaration. Absent on
+   * Direct and on every composition without the official local Profile identity.
+   */
+  readonly profileDaemonAdmin?: ProfileDaemonAdminPort
+  /**
+   * Split-Client only (M6 UX PR2 F3): release the ONE installed B1 Client
+   * transport. Used ONLY on the explicit whole-Host Stop exit path, after the
+   * TTY restore and before the control plane runs, so the Host's graceful
+   * shutdown is not held by this Client's still-open connection. The
+   * transport's own latched dispose is idempotent, so the Client root's later
+   * teardown reuses the SAME owner — never a second exit controller.
+   */
+  readonly releaseTransport?: () => Promise<void>
+}
+
+/**
+ * The structural daemon-administration port the composition passes (M6 UX PR2).
+ * Only the two EXPLICIT, user-authorized actions exist: install this Profile's
+ * optional service, and — only on a confirmed whole-Host exit — stop this
+ * Profile's Host. The result is the existing control plane's own result, so the
+ * caller's success claim always rests on the manager/ownership post-proof.
+ */
+export interface ProfileDaemonAdminPort {
+  /** The exact official Profile identity these actions address. */
+  readonly profile: string
+  /** Run ONE already-authorized management verb for {@link profile}. */
+  run(verb: 'install' | 'stop'): Promise<{
+    readonly code: number
+    readonly stdout: string
+    readonly stderr: string
+  }>
 }
 
 /**
@@ -367,6 +465,29 @@ export interface RunnerStartupSettlement {
   surfaceReady(): void
   surfaceFailed(error: unknown): void
   /**
+   * M6 compatible-cross-build UX: the two AUTHENTICATED build identities this
+   * Client process connected under, plus which physical Surface mount this
+   * runner is. `clientBuildId` is the running Client's own `scope.buildId`
+   * (never the installed Profile package) and `hostBuildId` is the Host
+   * identity the existing protocol/DSH/Cookie/kernel authentication chain
+   * verified. Present only on the real split-Client composition; Direct and
+   * every composition without the pair stay silent.
+   */
+  readonly authenticatedBuilds?: {
+    readonly clientBuildId: string
+    readonly hostBuildId: string
+    readonly initialSurface: boolean
+  }
+  /**
+   * M6 PR-C C3: the presence revision scope identity owned by the Client
+   * CONNECTION root (the client Context). The Host stores one strictly
+   * increasing revision per authenticated Peer, so the counter must SURVIVE
+   * the qualification-only Surface replacement — a fresh plugin fiber per
+   * revision is a fresh WeakMap key and would reset the counter into a
+   * `stale-revision` refusal. Absent on Direct (no presence owner exists).
+   */
+  presencePeerScope?: object
+  /**
    * M4 PR4: the split Client's ONE process-owned manual-reload request. It
    * returns the process preflight's synchronous decision; the caller
    * (the `/reload-client` command handler) has already made the Client-local
@@ -385,6 +506,10 @@ export interface RemoteSessionFactsSource {
    *  generation + exact binding object; see the owning module). */
   captureTransportToken(sessionId: string): unknown
   isTransportTokenCurrent(sessionId: string, token: unknown): boolean
+  /** The exact current official main-view retain fact of one Session: its
+   *  already-retained binding is held by the `tuiMainView` owner. A generic
+   *  binding kept alive by another source (operation/child) is NOT a view. */
+  mainViewRetained(sessionId: string): boolean
   /** S3-R0: the read→commit revision/identity proof of one window re-fold
    *  (undefined when a newer window or a replaced identity made the read
    *  superseded; see the owning module). */
@@ -398,12 +523,11 @@ export interface RemoteSessionFactsSource {
   sessionStatsProjection(sessionId: string): unknown
 }
 
-/** The internal application runtime-selection seam input (M3-4 PR1): which
- *  branch to select and HOW to construct it. The Direct branch takes a
- *  FACTORY, never a pre-built runtime; the Remote branch takes the
- *  composition INPUT — the seam itself reaches the Remote aggregate through
- *  the lazy `runtime/backend-loader.ts` boundary, making this seam the sole
- *  product-level Remote application runtime construction owner (plan §5). */
+/** The internal application runtime-selection seam input: which core to adopt
+ *  and how to construct the Direct one. There is deliberately NO Remote
+ *  construction input: the retired in-process Remote aggregate is test-only, so
+ *  a production Remote core can only arrive FULLY ASSEMBLED as `preselected`
+ *  from the internal split Client composition root. */
 export interface ApplicationRuntimeSelection {
   readonly kind: BackendKind
   /** Construct the Direct application runtime (the Direct branch's source). */
@@ -412,14 +536,11 @@ export interface ApplicationRuntimeSelection {
     readonly owners: SessionOwnerAccess
     readonly retirement: SessionOwnerRetirement
   }
-  /** The Remote composition input (internal/test M3-4 paths only). */
-  readonly remote: RemoteApplicationSelection | undefined
   /**
-   * A pre-built selected core the seam adopts VERBATIM (M3-4 PR2 internal
-   * L6 composition): the caller already constructed the ONE Remote
-   * application aggregate through the canonical path; the seam constructs
-   * nothing and returns this core by identity. Internal/test paths only —
-   * the production `apply()` selection never supplies it.
+   * A pre-built selected core the seam adopts VERBATIM: the caller already
+   * constructed the ONE application core (the internal split Client's
+   * `createRemoteApplicationRuntimeFromClient`), so the seam constructs nothing
+   * and returns it by identity. The Direct root never supplies it.
    */
   readonly preselected?: SelectedApplicationRuntime
 }

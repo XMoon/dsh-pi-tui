@@ -50,7 +50,13 @@ export {
 } from "./components/image.ts";
 export { Input } from "./components/input.ts";
 export { Loader, type LoaderIndicatorOptions } from "./components/loader.ts";
-export { type DefaultTextStyle, Markdown, type MarkdownOptions, type MarkdownTheme } from "./components/markdown.ts";
+export {
+	type DefaultTextStyle,
+	Markdown,
+	type MarkdownOptions,
+	type MarkdownSourceCellProof,
+	type MarkdownTheme,
+} from "./components/markdown.ts";
 export { MouseRegion, type MouseRegionHandler } from "./components/mouse-region.ts";
 export {
 	ScrollView,
@@ -83,6 +89,7 @@ export { type FuzzyMatch, fuzzyFilter, fuzzyMatch } from "./fuzzy.ts";
 // Keybindings
 export {
 	getKeybindings,
+	getSelectPageIndex,
 	type Keybinding,
 	type KeybindingConflict,
 	type KeybindingDefinition,
@@ -171,6 +178,7 @@ export {
 	type OverlayMargin,
 	type OverlayOptions,
 	type OverlayUnfocusOptions,
+	renderFakeCursor,
 	type SizeValue,
 	type TUI,
 	type TuiInputListener,
@@ -201,6 +209,7 @@ export {
 export {
 	getGraphemeSegmenter,
 	getOsc8LinkAtColumn,
+	replaceControlCharacters,
 	sliceByColumn,
 	stripTerminalSequences,
 	truncateToWidth,

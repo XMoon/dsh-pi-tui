@@ -14,7 +14,7 @@ import { darkColors, lightColors } from '../../src/domain/display/theme.ts'
 import { PluginManagerController } from '../../src/app/plugin-manager/controller.ts'
 import { PluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
-import type { PluginChangeFact, PluginManagerPort, PluginManagerSnapshot } from '../../src/runtime/plugin-manager-port.ts'
+import type { PluginBundleFact, PluginChangeFact, PluginManagerPort, PluginManagerSnapshot, PluginVersionListFact } from '../../src/runtime/plugin-manager-port.ts'
 import { SELF_BUNDLE } from '../../src/app/plugin-manager/classify.ts'
 import type { TuiApp } from '../../src/tui-app.ts'
 import { EXPERIMENTAL_NAMES, bundle, openWorkspace, plain, row, type WorkspaceHarness } from '../support/plugin-workspace-harness.ts'
@@ -51,7 +51,7 @@ test('the embedded page keeps ONE Settings skeleton and a reachable last-row Act
     assert.match(plain([view[0]!]), /Settings · Plugins/u, `${columns}x${rows} header`)
     assert.match(plain([view[1]!]), /Scope: Host plugins & TUI extensions/u, `${columns}x${rows} metadata`)
     assert.match(plain([view[2]!]), /^─+$/u, `${columns}x${rows} one top rule`)
-    assert.match(plain([view.at(-1)!]), /Esc back/u, `${columns}x${rows} keeps the plugin Esc on the last row`)
+    assert.match(plain([view.at(-1)!]), /Back \[Esc\]/u, `${columns}x${rows} keeps the plugin Esc on the last row`)
     for (const [index, line] of view.entries()) {
       assert.ok(visibleWidth(line) <= columns, `${columns}x${rows} line ${index} exceeds the width: ${JSON.stringify(line)}`)
     }
@@ -202,7 +202,7 @@ test('reader exemption warnings are visible on the page', async () => {
   const harness = await open({ columns: 120, rows: 30, exemptionWarnings: ['unreadable exemption record'] })
   assert.match(harness.view(), /version exemptions: unreadable exemption record/,
     'the model reader warning reaches the plugin notice row')
-  assert.match(plain([harness.viewport().at(-1)!]), /Esc back/u, 'the warning never displaces the last-row Action Bar')
+  assert.match(plain([harness.viewport().at(-1)!]), /Back \[Esc\]/u, 'the warning never displaces the last-row Action Bar')
 })
 
 test('mouse selection is not an action; a second click enters Details and actions dispatch', async () => {
@@ -266,6 +266,9 @@ test('a model refresh whose repaint has NOT run refuses a click on the old Enabl
     waitForInstall: async () => null,
     cancelInstall: async () => ({ status: 'not-running' }),
     subscribeInstall: () => () => {},
+    listVersions: async () => ({ status: 'refused', problem: 'not-updatable', reason: 'the fixture has no updatable bundle', attempts: [] }),
+    updateBundle: async () => { throw new Error('updateBundle is not used by this fixture') },
+    subscribeUpdate: () => () => {},
     subscribeInvalidation: () => () => {},
   }
   const controller = new PluginManagerController(port, {
@@ -458,7 +461,7 @@ test('risk confirmation keeps the frozen warning readable with Cancel default at
       // entire consequence remains readable, and the pinned choices stay.
       harness.vt.sendInput('\x1b[6~')
       await harness.waitForFrame()
-      assert.match(plain([harness.viewport().at(-1)!]), /Esc cancel/)
+      assert.match(plain([harness.viewport().at(-1)!]), /Cancel \[Esc\]/)
     }
     assert.match(confirmFrame, /Disable Auto Review/)
     started.delete(harness)
@@ -502,13 +505,17 @@ test('the B11 surface/risk copy is fully readable (scrolled) at 80×24, 72×24 a
       await harness.waitForFrame()
     }
     assert.match(gather(), /TUI surface/u, `${columns}x${rows} exposes the surface fact via the existing Detail scroll`)
-    for (let page = 0; page < 12 && !gather().includes('May run multiple rounds'); page += 1) {
+    // The Detail legitimately grew (Host default-listing/update facts), so
+    // the paragraph's LAST line is the reachability target, not its first.
+    for (let page = 0; page < 12 && !gather().includes('guaranteed Job'); page += 1) {
       harness.vt.sendInput('\x1b[6~')
       await harness.waitForFrame()
     }
-    const frame = gather()
-    assert.match(frame.replace(/\s+/gu, ' '), /ralph is a Host foreground tool/u)
-    assert.match(frame.replace(/\s+/gu, ' '), /May run multiple rounds and incur model cost\. No dedicated Ralph UI or guaranteed Job\./u)
+    const frame = gather().replace(/\s+/gu, ' ')
+    assert.match(frame, /ralph is a Host foreground tool/u)
+    // A dual List|Details frame interleaves the list column between the wrapped
+    // paragraph's rows, so the copy is matched with one bounded wildcard.
+    assert.match(frame, /May run multiple rounds and incur model cost\.[\s\S]{0,200}?No dedicated Ralph UI or guaranteed Job\./u)
     for (const line of harness.viewport()) {
       assert.ok(visibleWidth(line) <= columns, `${columns}x${rows} capability copy never exceeds the width: ${JSON.stringify(line)}`)
     }
@@ -551,7 +558,260 @@ test('keeps its unverified host limit visible in the real Detail', async () => {
     await harness.waitForFrame()
   }
   const frame = plain(harness.viewport()).replace(/\s+/gu, ' ')
-  assert.match(frame, /Browser\/Node Inspector has no PiTui inspection page\./u)
-  assert.match(frame, /captureFetch may expose unredacted debugging data\. Host activation is not qualified here\./u)
+  // A dual List|Details frame interleaves the list column between the wrapped
+  // fact's rows, so the paragraph is matched with one bounded wildcard.
+  assert.match(frame, /Browser\/Node Inspector has no[\s\S]{0,200}?PiTui inspection page\./u)
+  assert.match(frame, /captureFetch may expose unredacted debugging data\.[\s\S]{0,200}?Host activation is not qualified here\./u)
   assert.doesNotMatch(frame, /Host capability not yet qualified for TUI/u)
+})
+
+test('the hidden-bundle search hint is discoverable WITHOUT scrolling at 80×24, 72×24 and 44×20', async () => {
+  const hidden = '@deepseek-ai/dsh-experimental-hidden-optional'
+  for (const [columns, rows] of [[80, 24], [72, 24], [44, 20]] as const) {
+    // Enough visible cards that a tail-placed hint would sit below the list
+    // viewport: discoverability must not depend on list paging.
+    const visible = Array.from({ length: 14 }, (_, index) => bundle({
+      name: `@vendor/visible-${index}`,
+      title: `Visible bundle ${index}`,
+      source: `file:/tmp/visible-${index}`,
+    }))
+    const harness = await open({
+      columns,
+      rows,
+      bundles: [
+        bundle({ name: SELF_BUNDLE, source: 'file:/tmp/tui', rows: [{ rowId: 'tui-app', moduleName: SELF_BUNDLE, entryId: 'e-tui' }] }),
+        ...visible,
+        bundle({
+          name: hidden,
+          official: true,
+          availability: 'installation',
+          installed: false,
+          enabled: false,
+          optional: true,
+          removable: false,
+          source: undefined,
+          listedByDefault: false,
+        }),
+      ],
+    })
+    // First frame, no key pressed: the untouched list is the Host default
+    // listing and the ONE search hint sits at the TOP of the list body, so it
+    // is painted even though the visible cards exceed the viewport.
+    const view = harness.view()
+    assert.match(view, /\/ searches hidden/u,
+      `${columns}x${rows} must reveal the explicit search route without scrolling:\n${view}`)
+    const hintRow = rowOf(harness, '/ searches hidden')
+    const firstCardRow = rowOf(harness, 'Visible bundle 0')
+    assert.ok(hintRow >= 0, `${columns}x${rows} paints the search hint`)
+    assert.ok(firstCardRow > hintRow,
+      `${columns}x${rows} places the hint above the card list, never below its viewport (hint ${hintRow}, first card ${firstCardRow})`)
+    assert.doesNotMatch(view, new RegExp(hidden.replace('/', '\\/')),
+      `${columns}x${rows} keeps the default-hidden bundle out of the untouched list`)
+    started.delete(harness)
+    harness.app.dispose()
+  }
+})
+
+// ── S5-PR2: the Update page at the frozen terminal matrix ──────────────────
+
+const UPDATE_SIZES = [[200, 50], [120, 40], [100, 40], [80, 24], [80, 10], [72, 24], [44, 20]] as const
+
+/** A painted primary ACTION row (the withheld explanation merely names it). */
+function primaryActionPainted(text: string): boolean {
+  return /^\s*(?:> )?Confirm update\s*$/mu.test(text)
+}
+
+function updatableBundles(): readonly PluginBundleFact[] {
+  return [bundle({
+    name: 'updatable',
+    update: 'registry',
+    version: '1.0.0',
+    source: 'https://registry.example/updatable',
+    enabled: false,
+  })]
+}
+
+function updateVersions(): PluginVersionListFact {
+  return {
+    status: 'listed',
+    installed: '1.0.0',
+    registry: 'https://user:secret@registry.example/really/long/registry/path/',
+    attempts: [{ registry: 'https://user:secret@registry.example/really/long/registry/path/' }],
+    versions: [
+      {
+        version: '1.1.0',
+        publishedAt: '2026-01-02T03:04:05.000Z',
+        tags: ['latest'],
+        prerelease: false,
+        bundle: true,
+      },
+      {
+        version: '1.2.0-rc.1',
+        tags: ['next'],
+        prerelease: true,
+        deprecated: '这是一个较长的弃用说明，仅用于视觉换行验证。',
+        bundle: false,
+      },
+    ],
+    omitted: 0,
+  }
+}
+
+async function enterUpdate(harness: WorkspaceHarness): Promise<void> {
+  harness.vt.sendInput('\r') // Details on the first (only) card
+  await harness.waitForFrame()
+  harness.vt.sendInput('\x1b[B') // Disable… -> Check updates…
+  await harness.waitForFrame()
+  harness.vt.sendInput('\r')
+  await harness.waitForFrame()
+  assert.equal(harness.panel.currentView(), 'update')
+}
+
+test('the Update page keeps the Settings skeleton, ONE cursor, a pinned bar and masked facts at every size', async () => {
+  for (const [columns, rows] of UPDATE_SIZES) {
+    const harness = await open({
+      columns,
+      rows,
+      bundles: updatableBundles(),
+      plugins: [],
+      versionsImpl: async () => updateVersions(),
+    })
+    await enterUpdate(harness)
+    const view = harness.viewport()
+    const text = plain(view)
+    assert.match(plain([view[0]!]), /Settings · Plugins/u, `${columns}x${rows} header`)
+    assert.match(plain([view.at(-1)!]), /Esc/u, `${columns}x${rows} keeps the real Esc on the last row`)
+    for (const [index, line] of view.entries()) {
+      assert.ok(visibleWidth(line) <= columns, `${columns}x${rows} line ${index} exceeds the width`)
+    }
+    assert.equal(text.split('\n').filter(line => /^> /u.test(line)).length, 1,
+      `${columns}x${rows} has exactly ONE active indicator`)
+    assert.ok(text.includes('Update bundle · updatable'), `${columns}x${rows} fixed identity header`)
+    assert.ok(text.includes('1.1.0'), `${columns}x${rows} paints the target version`)
+    if (rows >= 24) {
+      assert.ok(text.includes('Installed'), `${columns}x${rows} paints the installed version fact`)
+    }
+    assert.ok(!text.includes('secret'), `${columns}x${rows} never leaks registry credentials`)
+    if (rows >= 24) {
+      assert.ok(text.includes('bundle: yes'), `${columns}x${rows} paints the bundle fact`)
+      assert.ok(text.includes('prerelease'), `${columns}x${rows} paints the prerelease fact`)
+      assert.ok(text.includes('弃用说明'), `${columns}x${rows} paints the CJK deprecation text`)
+    }
+
+    // Enter selects the version and opens the confirmation; Cancel is default.
+    harness.vt.sendInput('\r')
+    await harness.waitForFrame()
+    assert.equal(harness.controller.updateView()?.phase, 'confirm', `${columns}x${rows} confirmation`)
+    const confirm = plain(harness.viewport())
+    const flatConfirm = confirm.replace(/\s+/gu, ' ')
+    assert.match(confirm, /> Cancel/u, `${columns}x${rows} defaults to Cancel`)
+    if (primaryActionPainted(confirm)) {
+      // The dangerous primary is painted ONLY with its whole consequence.
+      assert.ok(flatConfirm.includes('Plugins may stop during the update.'), `${columns}x${rows} shows the consequence with the primary`)
+      assert.ok(flatConfirm.includes('a restart may be required.'), `${columns}x${rows} shows the whole warning with the primary`)
+    }
+    harness.vt.sendInput('\r') // default Cancel
+    await harness.waitForFrame()
+    assert.equal(harness.controller.updateView()?.phase, 'selecting', `${columns}x${rows} Cancel never writes`)
+    assert.equal(harness.updateCalls.length, 0)
+    started.delete(harness)
+    harness.app.dispose()
+  }
+})
+
+test('a short confirmation frame withholds the dangerous primary until the whole warning fits', async () => {
+  const harness = await open({
+    columns: 120,
+    rows: 40,
+    bundles: updatableBundles(),
+    plugins: [],
+    versionsImpl: async () => ({
+      status: 'listed',
+      installed: '1.0.0',
+      registry: 'https://registry.example/',
+      attempts: [{ registry: 'https://registry.example/' }],
+      versions: [{ version: '1.1.0-rc.1', tags: ['next'], prerelease: true, bundle: true }],
+      omitted: 0,
+    }),
+  })
+  await enterUpdate(harness)
+  // The only target is a prerelease: no default selection, an explicit choice.
+  assert.equal(harness.controller.updateView()?.selectedExactVersion, undefined)
+  harness.vt.sendInput('\r')
+  await harness.waitForFrame()
+  assert.equal(harness.controller.updateView()?.phase, 'confirm')
+
+  // A too-short body cannot show the whole warning: the primary is withheld.
+  harness.panel.setViewport({ width: 80, rows: 5, allowDual: false })
+  const tiny = plain(harness.panel.render(80))
+  assert.ok(!primaryActionPainted(tiny), 'the dangerous primary is not painted when clipped')
+  assert.ok(tiny.includes('Enlarge the terminal'), 'the frame states why the primary is withheld')
+  assert.ok(tiny.includes('> Cancel'), 'Cancel stays the reachable choice')
+
+  // A frame that fits the whole warning paints the primary (and the prerelease warning).
+  harness.panel.setViewport({ width: 80, rows: 24, allowDual: false })
+  const tall = plain(harness.panel.render(80))
+  const flatTall = tall.replace(/\s+/gu, ' ')
+  assert.ok(primaryActionPainted(tall), 'the primary returns when its warning is fully readable')
+  assert.ok(flatTall.includes('This is a prerelease version'), 'the prerelease risk is explicit')
+  assert.ok(flatTall.includes('Plugins may stop during the update.'), 'the standard consequence is explicit')
+  assert.ok(flatTall.includes('a restart may be required.'), 'the whole warning is visible')
+})
+
+test('the SAME Detail paints Host installed/selected and CURRENT Client status separately (PR-4)', async () => {
+  let observations: import('../../src/app/client-extensions/mount-owner.ts').ClientExtensionObservation[] = [
+    { packageName: '@r8/a', phase: 'active', entryId: 'client-a', configRevision: 3 },
+  ]
+  let revision = 1
+  const listeners = new Set<() => void>()
+  const source: import('../../src/app/client-extensions/mount-owner.ts').ClientExtensionObservationSource = {
+    observation: () => observations,
+    revision: () => revision,
+    subscribe: listener => {
+      listeners.add(listener)
+      return () => { listeners.delete(listener) }
+    },
+  }
+  const harness = await open({
+    columns: 120,
+    rows: 40,
+    bundles: [bundle({ name: '@r8/a', enabled: true, installed: true })],
+    plugins: [],
+    clientExtensions: () => source,
+  })
+  // The real 120-column Settings layout paints a 42-column List pane; the
+  // source-labelled Client signal must be reachable BEFORE opening Detail.
+  assert.match(harness.view(), /Client:act/u, 'the real wide List pane carries the compact Client status')
+  harness.vt.sendInput('\r')
+  await harness.waitForFrame()
+  assert.match(harness.view(), /Host package\s+Installed/u)
+  assert.match(harness.view(), /Host profile\s+Selected/u)
+  assert.match(harness.view(), /This Client \.\/tui\s+Active/u)
+
+  observations = [{ packageName: '@r8/a', phase: 'error', entryId: 'client-a', reason: 'apply failed' }]
+  revision += 1
+  for (const listener of [...listeners]) listener()
+  await harness.waitForFrame()
+  assert.match(harness.view(), /This Client \.\/tui\s+Error/u)
+  assert.match(harness.view(), /Client reason\s+apply failed/u)
+  assert.match(harness.view(), /Client:err/u, 'the real List pane follows the same observation revision')
+  assert.match(harness.view(), /Host profile\s+Selected/u, 'a Client error never rewrites the Host selection')
+
+  // A present but EMPTY observation source is the initial inventory-read-failed
+  // shape, not a proven negative opt-in.
+  observations = []
+  revision += 1
+  for (const listener of [...listeners]) listener()
+  await harness.waitForFrame()
+  assert.match(harness.view(), /This Client \.\/tui\s+Unavailable/u)
+  assert.match(harness.view(), /Client reason[\s]+the CURRENT Client has not observed[\s]+this package yet/u)
+  assert.match(harness.view(), /Host profile\s+Selected/u)
+
+  // Only a successful discovery outcome may paint the negative opt-in fact.
+  observations = [{ packageName: '@r8/a', phase: 'not-opted-in' }]
+  revision += 1
+  for (const listener of [...listeners]) listener()
+  await harness.waitForFrame()
+  assert.match(harness.view(), /This Client \.\/tui\s+Not opted in/u)
+  assert.doesNotMatch(harness.view(), /Client reason\s+the CURRENT Client has not observed/u)
 })

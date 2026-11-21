@@ -14,6 +14,7 @@ import {
 } from "./terminal-colors.ts";
 import {
 	getCapabilities,
+	getKittyImagePlacementRows,
 	isImageLine,
 	setCellDimensions,
 	type SixelScreenFootprint,
@@ -193,6 +194,12 @@ export interface Component {
 	wantsKeyRelease?: boolean;
 
 	/**
+	 * If true while focused, fullscreen viewport keys (`tui.altScreen.*` scrolling and prompt jumps) go to this
+	 * component instead of scrolling the transcript, as they do for a focused overlay. Default is false.
+	 */
+	capturesViewportInput?: boolean;
+
+	/**
 	 * Invalidate any cached rendering state.
 	 * Called when theme changes or when component needs to re-render from scratch.
 	 */
@@ -271,6 +278,17 @@ export function isFocusable(component: Component | null): component is Component
  * TUI finds and strips this marker, then positions the hardware cursor there.
  */
 export const CURSOR_MARKER = "\x1b_pi:c\x07";
+
+/** Fake cursor markers - zero-width APC sequences around the text drawn as the cursor. See resolveFakeCursors(). */
+export const FAKE_CURSOR_START = "\x1b_pi:fc\x07";
+export const FAKE_CURSOR_END = "\x1b_pi:/fc\x07";
+// CURSOR_MARKER + FAKE_CURSOR_START + text + FAKE_CURSOR_END. Truncating the line right after the cursor cell drops the end.
+const FOCUSED_FAKE_CURSOR = /(\x1b_pi:c\x07)\x1b_pi:fc\x07(.*?)(?:\x1b_pi:\/fc\x07|$)/s;
+
+/** Wrap text in fake cursor markers. */
+export function renderFakeCursor(text: string): string {
+	return `${FAKE_CURSOR_START}${text}${FAKE_CURSOR_END}`;
+}
 
 export { visibleWidth };
 
@@ -764,6 +782,55 @@ export function compositeTuiLine(
 	return visibleWidth(result) <= totalWidth ? result : sliceByColumn(result, 0, totalWidth, true);
 }
 
+/**
+ * The rows and image id one line's FIRST Kitty APC paints as a device layer,
+ * or undefined when the line is not a Native Kitty placement anchor (X077).
+ *
+ * `a=p` is the managed placement shape and `a=T` the vendored `Image`'s inline
+ * transmit-and-display sibling; every other action (upload, query, delete) is
+ * not a placement. `U=1` is excluded: its pixels belong to the visible
+ * placeholder cells, so a writer-side placement delete cannot remove it.
+ */
+/** The cell rows one Direct iTerm2 (OSC 1337) inline image paints above and
+ *  including its anchor line. The fork `Image` renders `rows - 1` blank lines
+ *  followed by `<cursorUp><OSC 1337 payload>`, so the anchor's own prefix is
+ *  the only height authority. Returns undefined for every other line.
+ *  (dsh-pi-tui divergence X080.) */
+function iterm2ImageBlockRows(line: string): number | undefined {
+	if (!line.includes("\x1b]1337;File=")) return undefined;
+	const up = /^\x1b\[(\d{1,4})A/.exec(line)?.[1];
+	const offset = up === undefined ? 0 : Number.parseInt(up, 10);
+	if (!Number.isInteger(offset) || offset < 0 || offset > 4096) return undefined;
+	return offset + 1;
+}
+
+function nativeKittyBlock(
+	line: string,
+): { rows: number; action: "p" | "T"; imageId: number | undefined; placementId: number | undefined } | undefined {
+	const controls = /\x1b_G([^;]*);/.exec(line)?.[1];
+	if (controls === undefined) return undefined;
+	const action = /(?:^|,)a=([A-Za-z])(?:,|$)/.exec(controls)?.[1];
+	if (action !== "p" && action !== "T") return undefined;
+	if (/(?:^|,)U=1(?:,|$)/.test(controls)) return undefined;
+	const idText = /(?:^|,)i=(\d{1,10})(?:,|$)/.exec(controls)?.[1];
+	const placementText = /(?:^|,)p=(\d{1,10})(?:,|$)/.exec(controls)?.[1];
+	// The protocol treats an absent `p` and `p=0` as "no explicit placement id",
+	// and an image id must not be zero. The admission predicate must match the
+	// Screen's own header parser (which only accepts positive numbers), or a
+	// `p=0` anchor would be preempted and then fall back to a hard delete.
+	const positive = (text: string | undefined): number | undefined => {
+		if (text === undefined) return undefined;
+		const value = Number.parseInt(text, 10);
+		return Number.isInteger(value) && value > 0 && value <= 0xffffffff ? value : undefined;
+	};
+	return {
+		rows: getKittyImagePlacementRows(line) ?? 1,
+		action,
+		imageId: positive(idText),
+		placementId: positive(placementText),
+	};
+}
+
 export type TuiMode = "regular" | "fullscreen";
 
 export interface TuiStopOptions {
@@ -869,6 +936,14 @@ export abstract class TuiBase extends Container implements TUI {
 	 * gesture-liveness check reads the CURRENT painted placement of a
 	 * retained target). */
 	protected renderedOverlayLayouts: RenderedOverlayLayout[] = [];
+	/**
+	 * The Native Kitty image ids THIS frame's projection preempted for a
+	 * visible overlay (X077). They are a per-frame fact, never durable state:
+	 * the Main Screen must remove only their placement and keep the data
+	 * resident, because the block is expected back the moment the overlay
+	 * closes and a foreign occurrence cannot re-transmit its own upload.
+	 */
+	protected preemptedKittyImageIds: ReadonlySet<number> = new Set<number>();
 
 	get hasOverlayEntries(): boolean {
 		return this.overlayStack.length > 0;
@@ -1074,6 +1149,29 @@ export abstract class TuiBase extends Container implements TUI {
 	protected beforeTerminalStop(_options: TuiStopOptions): void {}
 
 	protected afterTerminalStop(_options: TuiStopOptions): void {}
+
+	/** Mode resets written before the terminal's own resets when the process exits without stop(). */
+	protected getExitRestorePrefix(): string {
+		return `${this.terminalColorSchemeNotificationsEnabled ? "\x1b[?2031l" : ""}\x1b[?25h`;
+	}
+
+	/** Mode resets written after the terminal's own resets when the process exits without stop(). */
+	protected getExitRestoreSuffix(): string {
+		return "";
+	}
+
+	/**
+	 * Last-resort restore for exit paths that skip stop(), e.g. a direct process.exit() (#11170).
+	 * Hard kills and native aborts run no JavaScript and cannot be covered.
+	 */
+	private readonly exitRestoreHandler = (): void => {
+		if (this.stopped) return;
+		try {
+			this.terminal.restoreOnExit?.(this.getExitRestorePrefix(), this.getExitRestoreSuffix());
+		} catch {
+			// Never throw from an exit handler.
+		}
+	};
 
 	get fullRedraws(): number {
 		return this.fullRedrawCount;
@@ -1552,6 +1650,8 @@ export abstract class TuiBase extends Container implements TUI {
 
 	start(): void {
 		this.stopped = false;
+		process.off("exit", this.exitRestoreHandler);
+		process.on("exit", this.exitRestoreHandler);
 		this.beforeTerminalStart();
 		this.terminal.start(
 			(data) => this.handleTerminalInput(data),
@@ -1607,6 +1707,7 @@ export abstract class TuiBase extends Container implements TUI {
 
 	stop(options: TuiStopOptions = {}): void {
 		this.stopped = true;
+		process.off("exit", this.exitRestoreHandler);
 		this.terminalStarted = false;
 		this.cancelRenderTimer();
 		// Release a pending narrow background observation: a stopped screen must
@@ -2044,6 +2145,7 @@ export abstract class TuiBase extends Container implements TUI {
 	protected compositeOverlays(lines: string[], termWidth: number, termHeight: number): string[] {
 		if (this.overlayStack.length === 0) {
 			this.renderedOverlayLayouts = [];
+			this.preemptedKittyImageIds = new Set<number>();
 			return lines;
 		}
 		const result = [...lines];
@@ -2064,7 +2166,7 @@ export abstract class TuiBase extends Container implements TUI {
 			const { width, maxHeight } = this.resolveOverlayLayout(options, 0, termWidth, termHeight);
 
 			// Render component at calculated width
-			let overlayLines = component.render(width);
+			let overlayLines = this.resolveFakeCursors(component.render(width));
 
 			// Apply maxHeight if specified
 			if (maxHeight !== undefined && overlayLines.length > maxHeight) {
@@ -2097,6 +2199,76 @@ export abstract class TuiBase extends Container implements TUI {
 		}
 
 		const viewportStart = Math.max(0, workingHeight - termHeight);
+
+		// A Native Kitty placement paints its pixels OVER the cells this frame
+		// writes, and `compositeTuiLine` keeps an image anchor instead of the
+		// overlay text on its row. A visible overlay whose rows intersect the
+		// block therefore makes the WHOLE block yield this frame's projection: one
+		// placement covers every row, so a per-row decision would leave the rest of
+		// the picture over the overlay. The anchor line becomes an empty base, the
+		// overlay then composites normally, and the Screen's existing image
+		// bookkeeping deletes the old placement and re-places the same managed
+		// image once the overlay is gone. An `a=p` placement carries no payload,
+		// so its id is recorded as preempted: the Main Screen MUST remove only
+		// its placement and keep the data resident, or a foreign occurrence (not
+		// owned by this Core) could never be shown again. An `a=T` line carries
+		// its own payload and re-transmits on restore, so it keeps the existing
+		// hard delete. Only this frame's projection changes: the input lines, the
+		// components, the overlay stack and the context are untouched.
+		// (dsh-pi-tui divergence X077.)
+		const preempted = new Set<number>();
+		if (rendered.length > 0) {
+			for (let row = viewportStart; row < result.length; row++) {
+				const block = nativeKittyBlock(result[row] ?? "");
+				if (block === undefined) continue;
+				const first = row - viewportStart;
+				const last = first + block.rows - 1;
+				const covered = rendered.some(
+					({ overlayLines, row: overlayRow }) =>
+						overlayLines.length > 0 && overlayRow <= last && overlayRow + overlayLines.length - 1 >= first,
+				);
+				if (!covered) continue;
+				// An inline `a=T` line carries its own payload and re-transmits on
+				// restore, so it keeps the existing hard-delete path. An `a=p` block is
+				// recorded only when it names its placement: the Screen can then remove
+				// exactly that placement and never widens the deletion to a sibling
+				// placement of the same image. A placement without an id keeps the
+				// pre-existing behaviour instead of guessing an identity.
+				if (block.action === "T") {
+					result[row] = "";
+					continue;
+				}
+				if (block.imageId === undefined || block.placementId === undefined) continue;
+				preempted.add(block.imageId);
+				result[row] = "";
+			}
+		}
+		this.preemptedKittyImageIds = preempted;
+		// Direct iTerm2 (OSC 1337) inline images paint their raster over the
+		// cells from the anchor upward, and `compositeTuiLine` keeps an image
+		// anchor instead of the overlay text on its row. A visible overlay that
+		// intersects the painted block therefore makes the WHOLE block yield this
+		// frame: the anchor is dropped (so no pixels are re-emitted) and every
+		// covered row becomes an empty base, letting the overlay composite
+		// normally. The owning component re-renders the same image on the next
+		// frame, so hiding the overlay restores it. (dsh-pi-tui divergence X080.)
+		if (rendered.length > 0 && getCapabilities().images === "iterm2") {
+			for (let row = viewportStart; row < result.length; row++) {
+				const rows = iterm2ImageBlockRows(result[row] ?? "");
+				if (rows === undefined) continue;
+				const first = row - viewportStart - (rows - 1);
+				const last = row - viewportStart;
+				const covered = rendered.some(
+					({ overlayLines, row: overlayRow }) =>
+						overlayLines.length > 0 && overlayRow <= last && overlayRow + overlayLines.length - 1 >= first,
+				);
+				if (!covered) continue;
+				for (let target = row - (rows - 1); target <= row; target++) {
+					if (target >= 0) result[target] = "";
+				}
+			}
+		}
+
 
 		// Composite each overlay
 		for (const { overlayLines, row, col, w } of rendered) {
@@ -2196,6 +2368,19 @@ export abstract class TuiBase extends Container implements TUI {
 			}
 		}
 		return null;
+	}
+
+	/**
+	 * Resolve fake cursor markers to reverse video. When the hardware cursor is shown, a fake cursor
+	 * directly after CURSOR_MARKER is dropped because the terminal cursor is drawn there. Fake cursors
+	 * of components without focus have no CURSOR_MARKER and stay visible.
+	 */
+	protected resolveFakeCursors(lines: string[]): string[] {
+		return lines.map((line) => {
+			if (!line.includes(FAKE_CURSOR_START)) return line;
+			const resolved = this.showHardwareCursor ? line.replace(FOCUSED_FAKE_CURSOR, "$1$2") : line;
+			return resolved.replaceAll(FAKE_CURSOR_START, "\x1b[7m").replaceAll(FAKE_CURSOR_END, "\x1b[27m");
+		});
 	}
 
 	/**

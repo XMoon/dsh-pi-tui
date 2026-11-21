@@ -31,6 +31,9 @@ export function pituiTaskCenterPresentation(app: TuiApp): TaskCenterPresentation
         // The app's handle keeps `setRefreshState` optional; the port mirrors
         // that exact optional call instead of inventing a failure default.
         setRefreshState: (state, error) => handle.setRefreshState?.(state, error),
+        // The Team page DTO is delegated by identity to the real app handle —
+        // the adapter keeps no cached copy.
+        setTeamPage: value => handle.setTeamPage?.(value),
       }
       return presentation
     },

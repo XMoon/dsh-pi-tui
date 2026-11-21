@@ -30,6 +30,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import AgentRegistry, { installModelSelection } from '@deepseek-ai/dsh-agent'
@@ -74,13 +75,19 @@ async function mountRuntime(): Promise<Context> {
   await ctx.plugin(SessionStore)
   await ctx.plugin(SystemPrompt, {})
   await ctx.plugin(ToolRuntime, {})
+  // The official executor owns batch settlement (DSH 0.2.2 Base installs it;
+  // this standalone fixture must do the same).
+  await ctx.plugin(NativeToolExecutor)
+  // DSH 0.2.2: AgentRegistry injects `sessionProjections`; mount it first so
+  // the `agents` service actually activates.
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(AgentLoop)
   await ctx.plugin(CommandRuntime)
   await ctx.plugin(SkillRegistry, {})
   // alpha.2 agent-presets registers its projection unit at construction and
-  // requires the shared projection registry to be composed first.
-  await ctx.plugin(SessionProjectionRegistry)
+  // requires the shared projection registry to be composed first (mounted
+  // once, above).
   await ctx.plugin(AgentPresetRegistry, { default: 'fixture' })
   // One EMPTY declarative preset (rows would require services outside the
   // bundle dependency tree; shipped-preset row mounts are verified in the
@@ -145,14 +152,13 @@ test('the standing mount is reused: the same key object on re-resolution and aft
     await lease2[Symbol.asyncDispose]()
 
     // A real Agent on the same preset joins the standing generation.
-    const selected = { current: undefined, assembled: undefined }
     const resolvedId = (await presets.resolve('fixture')).id
     const handle = await ctx.agents.create({
       sessionId: SessionId('session-stand-1'),
       meta: { cwd: '/ws', agentPreset: resolvedId },
       agentOptions: {},
       setup: async (agentCtx) => {
-        installModelSelection(agentCtx, selected)
+        installModelSelection(agentCtx)
         // Deliberately NOT returned: the agent-loop treats a returned
         // object as an AgentSetupCommit, and mount resolves to an
         // AgentPreset (no commit()).
@@ -186,14 +192,13 @@ test('the real Agent view matches the standing view for the same composition', a
     const standing = await skills.snapshot({ cwd: '/ws', scope: lease.key })
     await lease[Symbol.asyncDispose]()
 
-    const selected = { current: undefined, assembled: undefined }
     const resolvedId = (await presets.resolve('fixture')).id
     const handle = await ctx.agents.create({
       sessionId: SessionId('session-stand-2'),
       meta: { cwd: '/ws', agentPreset: resolvedId },
       agentOptions: {},
       setup: async (agentCtx) => {
-        installModelSelection(agentCtx, selected)
+        installModelSelection(agentCtx)
         // Deliberately NOT returned: the agent-loop treats a returned
         // object as an AgentSetupCommit, and mount resolves to an
         // AgentPreset (no commit()).

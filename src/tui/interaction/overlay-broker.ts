@@ -506,10 +506,26 @@ export class OverlayBroker {
     return this.visibleModalOverlayCount() === 1
   }
 
-  /** Whether a managed overlay currently holds PHYSICAL keyboard focus — the
-   * keyboard-ownership fact (any policy). */
+  /** Whether a visible managed overlay currently holds PHYSICAL keyboard
+   * focus — the keyboard-ownership fact (any policy). */
   hasFocusedOverlay(): boolean {
     return this.currentlyFocused() !== undefined
+  }
+
+  /** Whether a visible NON-CAPTURING overlay actually paints one screen
+   * cell. Background pointer gestures (the root footer's navigation hits)
+   * must never pierce a passthrough banner/notice drawn over their cells;
+   * the query is read-only and reports the overlay's own last painted
+   * bounds. */
+  coversVisibleNonCapturingCell(x: number, y: number): boolean {
+    for (const node of this.nodes.values()) {
+      if (!node.nonCapturing || node.closed || !this.isVisible(node) || node.explicitHidden) continue
+      const bounds = node.raw?.getBounds()
+      if (bounds === undefined) continue
+      if (y >= bounds.row && y < bounds.row + bounds.height
+        && x >= bounds.col && x < bounds.col + bounds.width) return true
+    }
+    return false
   }
 
   /**

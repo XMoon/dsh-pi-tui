@@ -17,8 +17,10 @@ import { DefaultIntentTracker } from './model-default-intent.ts'
 import { DefaultWriteBarrier } from './model-default-write-barrier.ts'
 import { sameModelSelection, type ModelSelectionValue } from '../../domain/session/model-selection.ts'
 
-/** The TUI-only selection facade shape (structurally the Host
- *  `ModelSelectionRef`, never imported). */
+/** The TUI-only selection facade the footer and `/model` read. DSH 0.2.2 owns
+ *  the Agent's durable selection (`AgentModel` + the `modelSelection`
+ *  projection), so this shape is a presentation facade, NOT an installable
+ *  Host ref: nothing hands it to an Agent context. */
 export interface SelectionRef<Selection> {
   current: Selection | undefined
   assembled: undefined
@@ -63,8 +65,14 @@ export interface ModelSelectionOwner<Selection extends ModelSelectionValue> {
   trackDefaultWrite(write: Promise<unknown>): void
   /** Wait for every in-flight sessionless default write. */
   awaitPendingDefaultWrite(signal?: AbortSignal): Promise<void>
-  /** The persisted default selection (the sessionless base). */
+  /** The persisted default selection (the sessionless base). Clears the
+   *  `defaultUnavailable` fact once an authoritative value is present. */
   currentDefault(): Selection | undefined
+  /** TRUE while a CONFIRMED sessionless default save has no readable Host
+   *  directory yet (the cache is invalidated and the authoritative read has not
+   *  repopulated it). The footer distinguishes this UNKNOWN state from 'no
+   *  model' (a genuinely absent default) — never fabricating the saved value. */
+  defaultUnavailable(): boolean
   /** The exact live Agent's selection. */
   currentOf(agent: unknown): Selection | undefined
 }
@@ -94,7 +102,20 @@ export function createModelSelectionOwner<Selection extends ModelSelectionValue>
 
   const setDefaultIntent = (next: Selection | undefined): void => { defaultIntent.set(next) }
 
-  const settleIntent = (id: number, outcome: 'committed' | 'failed' | 'unresolved'): void => { defaultIntent.settle(id, outcome) }
+  // TRUE while a committed sessionless default save has no readable Host
+  // directory yet: the save's cache invalidation left `currentDefault()`
+  // undefined and the authoritative re-read has not repopulated it. It lets the
+  // footer distinguish UNKNOWN from a genuinely absent default; it is never a
+  // value authority (the requested value is never substituted).
+  let defaultDirectoryUnknown = false
+  const settleIntent = (id: number, outcome: 'committed' | 'failed' | 'unresolved'): void => {
+    defaultIntent.settle(id, outcome)
+    // A committed save invalidated the model directory: if the authoritative
+    // default is not readable right now, the footer is UNKNOWN (not 'no model')
+    // until a read repopulates it. A Direct save reads the live service and so
+    // reports a value here, leaving the flag false.
+    if (outcome === 'committed') defaultDirectoryUnknown = deps.currentDefault() === undefined
+  }
 
   /** Reconcile an UNRESOLVED sessionless default intent against an
    *  authoritative Host read (v2 §0.3.2): the persisted default either
@@ -110,7 +131,7 @@ export function createModelSelectionOwner<Selection extends ModelSelectionValue>
     defaultIntent.reconcile(selection => sameModelSelection(persisted as Selection, selection))
   }
 
-  /** TUI-only facade; this ref is NEVER installed into an Agent context. */
+  /** TUI-only facade; it is NEVER installed into an Agent context. */
   
   const selected: SelectionRef<Selection> = {
     get current(): Selection | undefined {
@@ -204,7 +225,12 @@ export function createModelSelectionOwner<Selection extends ModelSelectionValue>
     currentMarker: currentModelSelectionMarker,
     trackDefaultWrite,
     awaitPendingDefaultWrite,
-    currentDefault: () => deps.currentDefault(),
+    currentDefault: () => {
+      const value = deps.currentDefault()
+      if (value !== undefined) defaultDirectoryUnknown = false
+      return value
+    },
+    defaultUnavailable: () => defaultDirectoryUnknown,
     currentOf: (agent) => deps.currentOf(agent),
   }
 }

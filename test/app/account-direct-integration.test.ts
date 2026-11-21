@@ -2,7 +2,7 @@
  * Phase 3C / C2-MA — the REAL DeepSeek Account browser-callback contract.
  *
  * PRODUCTION PREREQUISITES REPRODUCED:
- *   - the official `@deepseek-ai/dsh-deepseek-account-platform` service, with
+ *   - the official `@deepseek-ai/dsh-deepseek-account` service, with
  *     the official `@deepseek-ai/dsh-authorization` registry and the official
  *     file-backed `@deepseek-ai/dsh-credentials-local` store;
  *   - the official `@deepseek-ai/dsh-host-webserver`, listening on a real
@@ -30,7 +30,7 @@ import { Context } from '@deepseek-ai/cordis'
 import LocalCredentialProvider from '@deepseek-ai/dsh-credentials-local'
 import AuthorizationService from '@deepseek-ai/dsh-authorization'
 import WebServer from '@deepseek-ai/dsh-host-webserver'
-import PlatformAccount from '@deepseek-ai/dsh-deepseek-account-platform'
+import DeepSeekAccount from '@deepseek-ai/dsh-deepseek-account'
 import { DirectAccountConfig, DirectAuthorizationConfig } from '../../src/runtime/direct/config-direct.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { ACCOUNT_AUTHORIZATION_KEY, genericAuthorizationTargets, resolveLoginDestination } from '../../src/app/command/credential-workflow.ts'
@@ -45,17 +45,23 @@ interface PlatformFixture {
   readonly origin: string
   readonly state: { readonly value: string | undefined }
   readonly requests: string[]
+  /** `x-client-version` per request path: the official Host header assembly
+   * must forward the Client's AccountClientMetadata.version unchanged. */
+  readonly clientVersions: { readonly path: string; readonly version: string | undefined }[]
 }
 
 async function startPlatform(): Promise<PlatformFixture> {
   const state: { value: string | undefined } = { value: undefined }
   const requests: string[] = []
+  const clientVersions: { path: string; version: string | undefined }[] = []
   const server = createServer((request, response) => {
     let body = ''
     request.on('data', chunk => { body += String(chunk) })
     request.on('end', () => {
       const url = new URL(request.url ?? '/', 'http://127.0.0.1')
       requests.push(`${request.method ?? 'GET'} ${url.pathname}`)
+      const headerValue = request.headers['x-client-version']
+      clientVersions.push({ path: url.pathname, version: Array.isArray(headerValue) ? headerValue[0] : headerValue })
       const port = (server.address() as AddressInfo).port
       const origin = `http://127.0.0.1:${port}`
       if (request.method === 'POST' && url.pathname === '/auth-api/v0/dsh/auth_init') {
@@ -108,7 +114,7 @@ async function startPlatform(): Promise<PlatformFixture> {
   })
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
   const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
-  return { server, origin, state, requests }
+  return { server, origin, state, requests, clientVersions }
 }
 
 async function waitFor<T>(probe: () => Promise<T | undefined>, timeoutMs = 3000): Promise<T> {
@@ -121,7 +127,7 @@ async function waitFor<T>(probe: () => Promise<T | undefined>, timeoutMs = 3000)
   }
 }
 
-test('REAL PlatformAccount + official WebServer callback: state, PKCE, grant, profile, balance and sign-out', async t => {
+test('REAL DeepSeekAccount + official WebServer callback: state, PKCE, grant, profile, balance and sign-out', async t => {
   const life = testLifecycle(t)
   const platform = await startPlatform()
   life.defer(() => new Promise<void>(resolve => platform.server.close(() => resolve())))
@@ -132,7 +138,7 @@ test('REAL PlatformAccount + official WebServer callback: state, PKCE, grant, pr
     await ctx.plugin(LocalCredentialProvider, { path: join(home, '.credentials.yaml'), watch: false })
     await ctx.plugin(AuthorizationService)
     await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 })
-    await ctx.plugin(PlatformAccount, {
+    await ctx.plugin(DeepSeekAccount, {
       platformOrigin: platform.origin,
       allowLoopbackHttp: true,
       inferenceOrigin: platform.origin,
@@ -156,17 +162,18 @@ test('REAL PlatformAccount + official WebServer callback: state, PKCE, grant, pr
     assert.deepEqual(resolveLoginDestination('deepseek-account', [], targets), { kind: 'account', view: 'page' })
     assert.equal(genericAuthorizationTargets(targets).length, 0, 'the account flow is never offered as a provider-native sign-in')
     assert.equal(adapter.getCallbackOrigin(), callbackOrigin)
-    const metadata = { version: '0.5.3', locale: 'en-US', timezoneOffsetSeconds: 0 }
+    const metadata = { version: '0.2.2-rc.5', locale: 'en-US', timezoneOffsetSeconds: 0 }
     const initial = await adapter.getState()
-    assert.equal(initial.status, 'signed-out')
+    assert.equal(initial.view.status, 'signed-out')
+    assert.equal(adapter.isObservationCurrent(initial.lease), true)
 
-    const started = await adapter.startSignIn(metadata)
-    assert.notEqual(started.attempt, null)
+    const started = await adapter.startSignIn(metadata, initial.lease)
+    assert.notEqual(started.view.attempt, null)
     const waiting = await waitFor(async () => {
-      const view = await adapter.getState()
-      return view.attempt?.phase === 'waiting-browser' ? view : undefined
+      const observation = await adapter.getState()
+      return observation.view.attempt?.phase === 'waiting-browser' ? observation : undefined
     })
-    const attempt = waiting.attempt
+    const attempt = waiting.view.attempt
     assert.ok(attempt !== null && attempt !== undefined)
     assert.match(attempt.authorizeUrl ?? '', /\/dsh\/authorize/u)
     assert.equal(platform.state.value !== undefined, true)
@@ -180,22 +187,22 @@ test('REAL PlatformAccount + official WebServer callback: state, PKCE, grant, pr
     const callback = await fetch(`${callbackOrigin}/oauth/callback?code=code-1&state=${encodeURIComponent(platform.state.value!)}`, { redirect: 'manual' })
     assert.equal(callback.status, 302)
     const stored = await waitFor(async () => {
-      const view = await adapter.getState()
-      return view.status === 'credential-stored' ? view : undefined
+      const observation = await adapter.getState()
+      return observation.view.status === 'credential-stored' ? observation : undefined
     })
-    assert.equal(stored.attempt?.phase, 'succeeded')
+    assert.equal(stored.view.attempt?.phase, 'succeeded')
     assert.equal(platform.requests.includes('POST /auth-api/v0/dsh/auth_exchange'), true)
 
     const credentials = ctx.get('credentials') as { listRecords(): Promise<readonly { key: string; kind?: string }[]> }
     const records = await credentials.listRecords()
     assert.ok(records.some(record => record.key === 'deepseek-account-platform/default' && record.kind === 'grant'))
 
-    const profile = await adapter.getProfile(metadata)
+    const profile = await adapter.getProfile(metadata, stored.lease)
     assert.deepEqual(profile, {
       status: 'ready',
       value: { id: 'user-1', name: 'Moon', contact: 'moon@example.com', avatarUrl: null },
     })
-    const balance = await adapter.getBalance(metadata)
+    const balance = await adapter.getBalance(metadata, stored.lease)
     assert.deepEqual(balance, {
       status: 'ready',
       value: [{ currency: 'CNY', balance: '12.50' }],
@@ -207,30 +214,58 @@ test('REAL PlatformAccount + official WebServer callback: state, PKCE, grant, pr
       describe(ref: string): Promise<{ configured: boolean; source?: string }>
     }
     await credentialsForRef.set('DEEPSEEK_API_KEY', 'sk-keep')
-    const signedOut = await adapter.signOut(metadata)
-    assert.equal(signedOut.status, 'signed-out')
+    const signedOut = await adapter.signOut(metadata, stored.lease)
+    assert.equal(signedOut.view.status, 'signed-out')
     const remaining = await credentials.listRecords()
     assert.equal(remaining.some(record => record.key === 'deepseek-account-platform/default'), false)
     // The remote revocation is a background Host request that must never
     // restore the already-removed local grant.
     await waitFor(async () => platform.requests.includes('POST /auth-api/v0/users/logout') ? true : undefined)
-    assert.equal((await adapter.getState()).status, 'signed-out')
+    const signedOutObservation = await adapter.getState()
+    assert.equal(signedOutObservation.view.status, 'signed-out')
     const keptKey = await credentialsForRef.describe('DEEPSEEK_API_KEY')
     assert.equal(keptKey.configured, true, 'an independent API key survives the account sign-out')
 
     // Cancellation is bound to the exact attempt id: a stale id cancels nothing.
-    const second = await adapter.startSignIn(metadata)
-    const secondWaiting = await waitFor(async () => {
-      const view = await adapter.getState()
-      return view.attempt?.phase === 'waiting-browser' ? view : undefined
+    const firstAttempt = await adapter.startSignIn(metadata, signedOutObservation.lease)
+    const firstWaiting = await waitFor(async () => {
+      const observation = await adapter.getState()
+      return observation.view.attempt?.phase === 'waiting-browser' ? observation : undefined
     })
-    const attemptId = secondWaiting.attempt!.id
-    const stale = await adapter.cancelSignIn('not-the-current-attempt')
-    assert.equal(stale.attempt?.id, attemptId)
-    assert.equal(stale.attempt?.phase, 'waiting-browser')
-    const cancelled = await adapter.cancelSignIn(attemptId)
-    assert.equal(cancelled.attempt?.phase, 'cancelled')
-    assert.notEqual(second.attempt?.id, undefined)
+    const firstAttemptId = firstWaiting.view.attempt!.id
+    const firstCancelled = await adapter.cancelSignIn(firstAttemptId, firstWaiting.lease)
+    assert.equal(firstCancelled.view.attempt?.phase, 'cancelled')
+
+    const secondAttempt = await adapter.startSignIn(metadata, firstCancelled.lease)
+    const secondWaiting = await waitFor(async () => {
+      const observation = await adapter.getState()
+      return observation.view.attempt?.phase === 'waiting-browser' ? observation : undefined
+    })
+    const secondAttemptId = secondWaiting.view.attempt!.id
+    const stale = await adapter.cancelSignIn(firstAttemptId, secondWaiting.lease)
+    assert.equal(stale.view.attempt?.id, secondAttemptId)
+    assert.equal(stale.view.attempt?.phase, 'waiting-browser')
+    const cancelled = await adapter.cancelSignIn(secondAttemptId, secondWaiting.lease)
+    assert.equal(cancelled.view.attempt?.phase, 'cancelled')
+    assert.notEqual(firstAttempt.view.attempt?.id, undefined)
+    assert.notEqual(secondAttempt.view.attempt?.id, undefined)
+
+    // The OFFICIAL Host Account service assembled the Platform request headers
+    // from the Client metadata it received: every Platform request this case
+    // really exercised carried the installed DSH version, never the TUI one.
+    // (The packed smoke owns the four-endpoint coverage.)
+    const exercised = platform.clientVersions.filter(entry =>
+      entry.path.startsWith('/auth-api/') || entry.path.startsWith('/api/'))
+    assert.ok(exercised.length >= 2,
+      `the official Host must have issued metadata-bearing Platform requests; saw ${JSON.stringify(platform.clientVersions)}`)
+    for (const entry of exercised) {
+      assert.equal(entry.version, metadata.version,
+        `the official Host must forward x-client-version=${metadata.version} on ${entry.path}; saw ${JSON.stringify(platform.clientVersions)}`)
+    }
+    assert.ok(exercised.some(entry => entry.path === '/auth-api/v0/dsh/auth_init'),
+      'the browser sign-in must reach the official Platform auth_init')
+    assert.ok(exercised.some(entry => entry.path === '/auth-api/v0/users/logout'),
+      'sign-out must reach the official Platform logout')
 
     // The webserver listener remains alive after sign-out and page closure.
     const after = await fetch(`${callbackOrigin}/oauth/callback?code=x&state=y`)
@@ -240,6 +275,10 @@ test('REAL PlatformAccount + official WebServer callback: state, PKCE, grant, pr
 
 test('the bundle patch mounts the official WebServer with a loopback OS-assigned port under tuiStartup', async () => {
   const patch = await readFile(new URL('../../cordis.patch.yml', import.meta.url), 'utf8')
-  assert.match(patch, /- id: webserver\n\s+name: '@deepseek-ai\/dsh-host-webserver'\n\s+inject: \[tuiStartup\]\n\s+config:\n\s+host: 127\.0\.0\.1\n\s+port: 0/u)
+  // The `disabled:` gate (and its explanatory comments) sits between `inject`
+  // and `config`; the row still proves its name/inject/config wiring.
+  assert.match(patch, /- id: webserver\n\s+name: '@deepseek-ai\/dsh-host-webserver'\n\s+inject: \[tuiStartup\]\n(?:[ \t]*#[^\n]*\n)*\s+disabled: !!js "ctx\.get\('tuiDaemonStartup'\) !== undefined"\n\s+config:\n\s+host: 127\.0\.0\.1\n\s+port: 0/u)
+  assert.match(patch, /- id: webserver\n\s+name: '@deepseek-ai\/dsh-host-webserver'[\s\S]*?\n\s+disabled: !!js "ctx\.get\('tuiDaemonStartup'\) !== undefined"/u,
+    'the webserver row stays disabled only in the daemon supervisor')
   assert.match(patch, /inject: \[[^\]]*deepseekAccount[^\]]*webServer[^\]]*\]/u)
 })

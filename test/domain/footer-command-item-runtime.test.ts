@@ -335,7 +335,7 @@ test('a project-only command definition never spawns (the trust gate, plan §11.
   const projectCommand = item('user:clock', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`)
   const port = new DirectConfigPort({
     get: () => ({ describe: () => [{
-      ns: 'tui-app',
+      ns: 'pi-tui-preferences',
       value: { footerCustomItems: [projectCommand] },
       user: { footerCustomItems: [] },
     }] }),
@@ -365,7 +365,7 @@ test('regression: a PROJECT merged layout can never activate a dormant USER comm
   const projectLayout: FooterLayoutV1 = { schemaVersion: 1, rows: [{ left: [{ id: 'user:deploy' }], right: [] }] }
   const port = new DirectConfigPort({
     get: () => ({ describe: () => [{
-      ns: 'tui-app',
+      ns: 'pi-tui-preferences',
       value: { footer: 'custom', footerLayout: projectLayout, footerCustomItems: [userCommand] },
       user: { footer: 'default', footerCustomItems: [userCommand] },
     }] }),
@@ -403,7 +403,7 @@ test('regression: a STALE USER layout under footer: default authorizes nothing (
   const staleLayout: FooterLayoutV1 = { schemaVersion: 1, rows: [{ left: [{ id: 'user:deploy' }], right: [] }] }
   const port = new DirectConfigPort({
     get: () => ({ describe: () => [{
-      ns: 'tui-app',
+      ns: 'pi-tui-preferences',
       value: { footer: 'custom', footerLayout: staleLayout, footerCustomItems: [userCommand] },
       user: { footer: 'default', footerLayout: staleLayout, footerCustomItems: [userCommand] },
     }] }),
@@ -440,7 +440,7 @@ test('regression: a command hidden by the rendered layout does not keep running 
   const hidingLayout: FooterLayoutV1 = { schemaVersion: 1, rows: [{ left: [{ id: 'model' }], right: [] }] }
   const port = new DirectConfigPort({
     get: () => ({ describe: () => [{
-      ns: 'tui-app',
+      ns: 'pi-tui-preferences',
       value: { footer: 'custom', footerLayout: hidingLayout, footerCustomItems: [userCommand] },
       user: { footer: 'custom', footerLayout: userLayout, footerCustomItems: [userCommand] },
     }] }),
@@ -470,7 +470,7 @@ test('positive: a USER-declared custom layout DOES activate its command items', 
   const userLayout: FooterLayoutV1 = { schemaVersion: 1, rows: [{ left: [{ id: 'user:deploy' }], right: [] }] }
   const port = new DirectConfigPort({
     get: () => ({ describe: () => [{
-      ns: 'tui-app',
+      ns: 'pi-tui-preferences',
       value: { footer: 'custom', footerLayout: userLayout, footerCustomItems: [userCommand] },
       user: { footer: 'custom', footerLayout: userLayout, footerCustomItems: [userCommand] },
     }] }),
@@ -504,7 +504,7 @@ test('regression: a PROJECT-forced command mode cannot turn stale fallback metad
   const staleLayout: FooterLayoutV1 = { schemaVersion: 1, rows: [{ left: [{ id: 'user:deploy' }], right: [] }] }
   const port = new DirectConfigPort({
     get: () => ({ describe: () => [{
-      ns: 'tui-app',
+      ns: 'pi-tui-preferences',
       value: { footer: 'command', footerFallbackMode: 'custom', footerLayout: staleLayout, footerCustomItems: [userCommand] },
       user: { footer: 'default', footerFallbackMode: 'custom', footerLayout: staleLayout, footerCustomItems: [userCommand] },
     }] }),
@@ -546,7 +546,7 @@ test('positive: a command-mode USER with a custom fallback DOES run its fallback
   const fallbackLayout: FooterLayoutV1 = { schemaVersion: 1, rows: [{ left: [{ id: 'user:deploy' }], right: [] }] }
   const port = new DirectConfigPort({
     get: () => ({ describe: () => [{
-      ns: 'tui-app',
+      ns: 'pi-tui-preferences',
       value: { footer: 'command', footerFallbackMode: 'custom', footerLayout: fallbackLayout, footerCustomItems: [userCommand] },
       user: { footer: 'command', footerFallbackMode: 'custom', footerLayout: fallbackLayout, footerCustomItems: [userCommand] },
     }] }),

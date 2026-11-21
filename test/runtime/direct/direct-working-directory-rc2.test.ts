@@ -25,6 +25,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { executeModelToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import { Context } from '@deepseek-ai/cordis'
 import { SessionId, SessionLogOffset, SessionSeq, buildForkSeed, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
@@ -97,7 +98,7 @@ async function boot(life: TestLifecycle): Promise<Fixture> {
 
 /** Execute one tool through the real ToolRuntime pipeline. */
 function callTool(ctx: Context, name: string, args: unknown, agent: Agent) {
-  return ctx.tools.execute({
+  return executeModelToolFixture(ctx, {
     signal,
     callId: ToolCallId(`s2b-wd-${++callCounter}`),
     name,
@@ -224,8 +225,8 @@ test('a REAL fork child keeps the original project in its header and the cut dir
   await callTool(ctx, 'working_directory', { cd: 'moved' }, agent)
 
   // The OFFICIAL fork helper over the REAL log, exactly like the Direct
-  // lifecycle: the cut is the newest event, and the child meta repeats the
-  // source HEADER (the original project).
+  // lifecycle: the cut is the newest event, and the ordinary rc1 child meta
+  // repeats the source HEADER (the original project) with NO parentSession.
   const sourceEvents = agent.session.snapshotEvents() as readonly SessionEvent[]
   const boundary = sourceEvents.length - 1
   const seed = buildForkSeed(sourceEvents, SessionSeq(boundary))
@@ -234,7 +235,7 @@ test('a REAL fork child keeps the original project in its header and the cut dir
     sessionId: childId,
     seed,
     inheritedEventCount: SessionLogOffset(boundary + 1),
-    meta: { cwd: originalProject, parentSession: SessionId(String(agent.session.id)), isSeeded: true },
+    meta: { cwd: originalProject, isSeeded: true },
     setup: () => {},
   })
   const child = handle.agent

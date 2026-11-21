@@ -1,7 +1,9 @@
 /**
  * Contract tests for the D2.2 Remote subagent port: continuation prompts use the
- * official `subagents.prompt` address with a fresh pre-call identity, and
- * interruption uses `interruptByParent` with the exact durable direct parent.
+ * rc.2 official `subagents.prompt` request (child address only, fresh pre-call
+ * identity) and interruption uses `interruptByUser` on the exact child. The
+ * viewer's parent relation stays a Client currentness fact and never appears on
+ * the official request.
  * @module @xmoon76/dsh-pi-tui/remote-subagent-port.test
  */
 
@@ -25,7 +27,7 @@ interface PromptCall {
 interface Harness {
   readonly port: RemoteSubagentPort
   readonly promptCalls: PromptCall[]
-  readonly interruptCalls: { child: string; parent: string; mode: string }[]
+  readonly interruptCalls: { child: string }[]
   setPromptResult(result: { ok: true; value: { messageId: unknown } } | { ok: false; error: unknown }): void
   setInterruptResult(result: { ok: true; value: { accepted: true } } | { ok: false; error: unknown }): void
   setPromptThrows(error: unknown): void
@@ -33,7 +35,7 @@ interface Harness {
 
 function harness(): Harness {
   const promptCalls: PromptCall[] = []
-  const interruptCalls: { child: string; parent: string; mode: string }[] = []
+  const interruptCalls: { child: string }[] = []
   let promptResult: { ok: true; value: { messageId: unknown } } | { ok: false; error: unknown } = {
     ok: true,
     value: { messageId: 'msg-1' },
@@ -49,8 +51,8 @@ function harness(): Harness {
       if (promptThrows !== undefined) throw promptThrows
       return promptResult
     },
-    interruptByParent: async (child, parent, mode) => {
-      interruptCalls.push({ child, parent, mode })
+    interruptByUser: async child => {
+      interruptCalls.push({ child })
       return interruptResult
     },
   }
@@ -72,22 +74,20 @@ function context(overrides: Partial<SubagentPromptContext> = {}): SubagentPrompt
   }
 }
 
-test('the official subagent Remote surface satisfies the adapter boundary structurally', () => {
+test('the official rc.2 subagent Remote surface satisfies the adapter boundary structurally', () => {
   const constructFromOfficial = (source: {
     prompt(
       request: SubagentPromptRequest,
       signal?: AbortSignal,
-    ): Promise<{ ok: true; value: { messageId: string } } | { ok: false; error: unknown }>
-    interruptByParent(
+    ): Promise<{ ok: true; value: { messageId: unknown } } | { ok: false; error: unknown }>
+    interruptByUser(
       childSessionId: SessionId,
-      parentSessionId: SessionId,
-      mode: 'continuable',
     ): Promise<{ ok: true; value: { accepted: true } } | { ok: false; error: unknown }>
   }): RemoteSubagentPort => new RemoteSubagentPort(source)
   assert.equal(typeof constructFromOfficial, 'function')
 })
 
-test('a continuation prompt carries the exact parent/child address and continuable mode', async () => {
+test('a continuation prompt carries only the rc.2 request vocabulary, never a parent claim', async () => {
   const h = harness()
   const outcome = await h.port.prompt(
     { parentSessionId: 'parent-1', childSessionId: 'child-1', delivery: 'queue', content: [{ type: 'text', text: 'hello' }] },
@@ -95,10 +95,12 @@ test('a continuation prompt carries the exact parent/child address and continuab
   )
   assert.deepEqual(outcome, { kind: 'ok', messageId: 'msg-1' })
   assert.equal(h.promptCalls.length, 1)
-  assert.equal(h.promptCalls[0]?.request.parentSessionId, 'parent-1')
-  assert.equal(h.promptCalls[0]?.request.childSessionId, 'child-1')
-  assert.equal(h.promptCalls[0]?.request.mode, 'continuable')
-  assert.equal(h.promptCalls[0]?.request.delivery, 'queue')
+  const request = h.promptCalls[0]!.request
+  assert.equal(request.childSessionId, 'child-1')
+  assert.equal(request.delivery, 'queue')
+  assert.equal('parentSessionId' in request, false,
+    'the viewer parent relation is Client currentness, not an official request field')
+  assert.equal('mode' in request, false, 'the rc.1 continuable discriminator no longer exists on the wire')
 })
 
 test('each human submit mints a fresh pre-call request identity', async () => {
@@ -175,27 +177,27 @@ test('an already-aborted pre-call signal is a cancelled rejection without delive
   assert.equal(h.promptCalls.length, 0)
 })
 
-test('a parent-unavailable refusal is classified without a false sent state', async () => {
+test('a not-resumable child refusal is classified without a false sent state', async () => {
   const h = harness()
-  h.setPromptResult({ ok: false, error: new RemoteError('subagent/parent-unavailable', 'gone', { parentSessionId: 'p' as SessionId }) })
+  h.setPromptResult({ ok: false, error: new RemoteError('subagent/not-resumable', 'gone', { childSessionId: 'c' as SessionId }) })
   const outcome = await h.port.prompt(
     { parentSessionId: 'p', childSessionId: 'c', delivery: 'queue', content: [{ type: 'text', text: 'x' }] },
     context(),
   )
-  assert.deepEqual(outcome, { kind: 'rejected', reason: { kind: 'parent-unavailable' } })
+  assert.deepEqual(outcome, { kind: 'rejected', reason: { kind: 'stale-child' } })
 })
 
-test('interrupt uses interruptByParent with the explicit direct parent and continuable mode', async () => {
+test('interrupt uses interruptByUser with the exact child and no fabricated parent claim', async () => {
   const h = harness()
   const outcome = await h.port.interrupt({ parentSessionId: 'parent-1', childSessionId: 'child-1', mode: 'continuable' })
   assert.deepEqual(outcome, { kind: 'committed' })
-  assert.deepEqual(h.interruptCalls, [{ child: 'child-1', parent: 'parent-1', mode: 'continuable' }])
+  assert.deepEqual(h.interruptCalls, [{ child: 'child-1' }])
 })
 
-test('a deep descendant interrupt addresses its actual durable direct parent', async () => {
+test('a deep descendant interrupt addresses its actual durable child id', async () => {
   const h = harness()
   await h.port.interrupt({ parentSessionId: 'mid-parent', childSessionId: 'deep-child', mode: 'continuable' })
-  assert.deepEqual(h.interruptCalls, [{ child: 'deep-child', parent: 'mid-parent', mode: 'continuable' }])
+  assert.deepEqual(h.interruptCalls, [{ child: 'deep-child' }])
 })
 
 test('an unauthorized interrupt is rejected and never reported as stopped', async () => {
@@ -206,9 +208,9 @@ test('an unauthorized interrupt is rejected and never reported as stopped', asyn
   assert.equal(outcome.kind === 'rejected' ? outcome.reason.kind : undefined, 'unauthorized')
 })
 
-test('a not-found child interrupt is an unavailable rejection, not a false stop', async () => {
+test('a not-resumable child interrupt is an unavailable rejection, not a false stop', async () => {
   const h = harness()
-  h.setInterruptResult({ ok: false, error: new RemoteError('subagent/not-found', 'missing', { parentSessionId: 'p' as SessionId, childSessionId: 'c' as SessionId }) })
+  h.setInterruptResult({ ok: false, error: new RemoteError('subagent/not-resumable', 'missing', { childSessionId: 'c' as SessionId }) })
   const outcome = await h.port.interrupt({ parentSessionId: 'p', childSessionId: 'c', mode: 'continuable' })
   assert.equal(outcome.kind, 'rejected')
   assert.equal(outcome.kind === 'rejected' ? outcome.reason.kind : undefined, 'unavailable')
@@ -216,7 +218,7 @@ test('a not-found child interrupt is an unavailable rejection, not a false stop'
 
 test('a plain wire interrupt failure keeps its human message, not [object Object]', async () => {
   const h = harness()
-  h.setInterruptResult({ ok: false, error: { code: 'subagent/not-found', message: 'child is gone' } })
+  h.setInterruptResult({ ok: false, error: { code: 'subagent/not-resumable', message: 'child is gone' } })
   const outcome = await h.port.interrupt({ parentSessionId: 'p', childSessionId: 'c', mode: 'continuable' })
   assert.equal(outcome.kind, 'rejected')
   assert.deepEqual(outcome.kind === 'rejected' ? outcome.reason : undefined, {
@@ -248,7 +250,7 @@ test('a pre-dispatch canonicalization failure is rejected, never indeterminate',
 
 test('a missing addressed child settles rejected stale-child, not indeterminate', async () => {
   const h = harness()
-  h.setPromptResult({ ok: false, error: { code: 'subagent/not-found', message: 'gone' } })
+  h.setPromptResult({ ok: false, error: { code: 'subagent/not-resumable', message: 'gone' } })
   const outcome = await h.port.prompt(
     { parentSessionId: 'p', childSessionId: 'c', delivery: 'queue', content: [{ type: 'text', text: 'x' }] },
     context(),

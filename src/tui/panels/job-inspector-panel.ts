@@ -40,7 +40,8 @@
 import { Text, VStack, matchesKey, truncateToWidth, visibleWidth, type Component } from '@xmoon76/pi-tui'
 import { componentKeymap } from '../keybindings/component-keymap.ts'
 import { JOB_LOCAL_KEYS, formatHintKeys, formatKeyId } from '../keybindings/hints.ts'
-import { renderActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
+import { ACTION_BAR_SEPARATOR, layoutActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
+import { paintActionSpan } from '../presentation/action-ink.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { sanitizeDisplayLog } from '../presentation/terminal-text.ts'
 import { color, taskStatusColor } from '../theme/runtime.ts'
@@ -304,6 +305,10 @@ export interface JobInspectorPanelIntents {
   /** The live physical row grant. The shell owns the terminal; the panel
    *  reads it per frame and never keeps a second `terminal.rows` copy. */
   readonly rows: () => number
+  /** The live physical column grant. A pointer gesture is revoked when the
+   *  terminal geometry moved before the next paint, so the panel needs the
+   *  LIVE width too (it never guesses it from a painted row). */
+  readonly columns: () => number
   /** Repaint through the owning surface (the panel never paints itself). */
   readonly requestRender: () => void
   /** The app's LIVE transient notice (the ONE notice authority), read per frame.
@@ -798,9 +803,18 @@ interface JobCommandStatusFacts {
  * page hint only for a body row the keys really move. The whole row is painted
  * with the theme's dim token (plan §2.3).
  */
+/** The ONE Esc destination of the CURRENT read page/search state. A click on
+ *  the painted Esc affordance replays exactly this through the panel's own key
+ *  dispatch — never a second close/search state machine. */
+type JobBarEscapeAction = 'leave-find' | 'output' | 'back'
+
 class JobInspectorActionBar implements Component {
   private readonly canStop: () => boolean
   private readonly facts: (width: number) => JobOutputStatusFacts | (JobCommandStatusFacts & { readonly command: true })
+  /** The complete visible Esc affordance of the LAST render (bar-local cells),
+   *  or undefined when the row truncated it. Read by the panel's
+   *  frame-painted boundary to publish the ONE clickable Esc target. */
+  private esc: { readonly action: JobBarEscapeAction; readonly startCol: number; readonly endCol: number } | undefined
 
   constructor(
     canStop: () => boolean,
@@ -810,8 +824,39 @@ class JobInspectorActionBar implements Component {
     this.facts = facts
   }
 
+  /** The complete visible Esc affordance of the LAST render (bar-local cells),
+   *  or undefined when the row truncated it. */
+  escapeSpan(): { readonly action: JobBarEscapeAction; readonly startCol: number; readonly endCol: number } | undefined {
+    return this.esc
+  }
+
+  /** Paint the shared row: the Esc segment keeps the role-scoped Fullscreen ink
+   *  (the secondary `Back/Close/Leave find` verb is dim, its `[Esc]` cap muted)
+   *  while every inert hint and the separator stay `textMuted`. The visible
+   *  width and the unpainted spans are the ONE hit-geometry source. */
+  private paint(segments: readonly ActionBarSegment[], width: number, action: JobBarEscapeAction): string[] {
+    const layout = layoutActionBarRow(segments, width)
+    this.esc = undefined
+    if (layout.truncated || layout.spans.length === 0) return [color.textMuted(layout.text)]
+    const escapeIndex = segments.length - 1
+    const painted = layout.spans.map(span => {
+      if (span.inputIndex !== escapeIndex) return color.textMuted(span.text)
+      this.esc = { action, startCol: span.startCol, endCol: span.endCol }
+      return paintActionSpan(span.text, 'secondary')
+    })
+    const segmentWidth = layout.spans.reduce((sum, span) => sum + visibleWidth(span.text), 0)
+      + Math.max(0, layout.spans.length - 1) * visibleWidth(ACTION_BAR_SEPARATOR)
+    const padding = Math.max(0, visibleWidth(layout.text) - segmentWidth)
+    return [painted.join(color.textMuted(ACTION_BAR_SEPARATOR)) + ' '.repeat(padding)]
+  }
+
   render(width: number): string[] {
     const facts = this.facts(width)
+    // The ONE Esc destination of this frame: a Find (EDIT or NAVIGATE) leaves
+    // the Find, the Command page returns to Output, and the Output page closes
+    // the Job workspace. The affordance names THAT outcome (never a fixed verb).
+    const escapeAction: JobBarEscapeAction = facts.searchActive ? 'leave-find' : 'command' in facts ? 'output' : 'back'
+    const escapeText = escapeAction === 'leave-find' ? 'Leave find [Esc]' : escapeAction === 'output' ? 'Output [Esc]' : 'Back [Esc]'
     // Every segment names a key the workspace really accepts in THIS frame: a
     // Find whose SearchRow the frame cannot grant, or a page hint for a body
     // that is not painted (or belongs to the query input), stays unadvertised
@@ -842,8 +887,8 @@ class JobInspectorActionBar implements Component {
       if (pageHint) segments.push({ text: PAGE_HINT, priority: 0.1 })
       // `Esc` is the LAST segment (design language §7.2, D8) while keeping the
       // highest drop priority, so it is never the thing a tight row loses.
-      segments.push({ text: 'Esc output', priority: 7 })
-      return [color.textMuted(renderActionBarRow(segments, width))]
+      segments.push({ text: escapeText, priority: 7 })
+      return this.paint(segments, width, escapeAction)
     }
     // Drop order: Stop, Follow, GAP, the disclosure and position, Find, then the
     // two B1-C verbs and finally the pure browsing hint (they are the ONLY
@@ -883,10 +928,11 @@ class JobInspectorActionBar implements Component {
       if (facts.canSwitchPage) segments.push({ text: `${formatHintKeys(formatKeyId(JOB_LOCAL_KEYS.switchPage))} switch`, priority: 0.6 })
     }
     if (pageHint) segments.push({ text: PAGE_HINT, priority: 0.1 })
-    segments.push({ text: 'Esc back', priority: 7 })
+    segments.push({ text: escapeText, priority: 7 })
     // Role 13: hints are the WEAKEST readable ink so the bar never competes with
-    // the output it describes.
-    return [color.textMuted(renderActionBarRow(segments, width))]
+    // the output it describes; the scoped Fullscreen Esc affordance carries the
+    // secondary-verb ink (§7.1 dense Action Bar exception).
+    return this.paint(segments, width, escapeAction)
   }
 
   invalidate(): void {
@@ -960,6 +1006,41 @@ function positionFacts(
   return { start: top + 1, end: Math.min(total, top + viewportHeight), total }
 }
 
+/** The chrome geometry of ONE painted frame: the terminal grant, the painted
+ *  header/bar boxes and the LIVE reading-viewport positions. A press records
+ *  it, and the release accepts the gesture only while the LIVE grant still
+ *  matches it, the CURRENT painted frame has the identical geometry and the
+ *  viewports did not move (a resize/repaint/scroll boundary revokes it — an
+ *  effective wheel scrolls content under the press). */
+interface JobChromeFrame {
+  readonly rows: number
+  readonly columns: number
+  readonly headerTop: number
+  /** The Output page's viewport position at the press. */
+  readonly scrollTop: number
+  /** The Command page's viewport position at the press. */
+  readonly commandScrollTop: number
+  readonly bar: { readonly x: number; readonly y: number; readonly width: number; readonly height: number } | undefined
+}
+
+/** The header's pressed affordance: the SAME painted target object the release
+ *  must re-resolve. */
+type JobHeaderPressed = { readonly kind: 'header'; readonly target: JobHeaderHitTarget; readonly chrome: JobChromeFrame }
+
+/** The bar's pressed affordance: the exact cells, the Esc destination and the
+ *  read page/search-state identity the release must still match. */
+interface JobBarPressed {
+  readonly kind: 'bar'
+  readonly action: JobBarEscapeAction
+  readonly row: number
+  readonly startCol: number
+  readonly endCol: number
+  readonly viewKey: string
+  readonly chrome: JobChromeFrame
+}
+
+type JobPressedGesture = JobHeaderPressed | JobBarPressed
+
 /**
  * The Job workspace root: a fixed typed header, the one-epoch Find search row
  * of the CURRENT page, ONE primary ScrollView over the current body, the
@@ -1001,7 +1082,27 @@ export class JobInspectorPanel extends VStack {
    *  top row and the press-time target a same-cell click must re-prove. */
   private paintedTargets: readonly JobHeaderHitTarget[] = []
   private headerTop = 0
-  private pressedTarget: JobHeaderHitTarget | undefined
+  /** The pinned Action Bar instance (the SAME child mounted in the layout) and
+   *  its LAST PAINTED Esc affordance in panel cells. The bar's own render
+   *  records the bar-local span; the frame-painted boundary resolves it against
+   *  the bar's real `paintedBox`, so the click target is never guessed from the
+   *  terminal's bottom row. */
+  private readonly actionBar: JobInspectorActionBar
+  private barHit: {
+    readonly action: JobBarEscapeAction
+    readonly row: number
+    readonly startCol: number
+    readonly endCol: number
+  } | undefined
+  /** The geometry of the LAST PAINTED frame (live terminal grant + the real
+   *  header/bar boxes). Every pointer release re-proves it, so a resize,
+   *  remount or chrome row change between press and release is inert instead of
+   *  replaying an old Esc coordinate. */
+  private paintedChromeFrame: JobChromeFrame = { rows: -1, columns: -1, headerTop: 0, scrollTop: 0, commandScrollTop: 0, bar: undefined }
+  /** The ONE press-time target of the LAST gesture: either the header's painted
+   *  affordance or the bar's Esc affordance. The release re-proves the SAME
+   *  owner, cells, view and search mode before acting. */
+  private pressed: JobPressedGesture | undefined
   private disposed = false
 
   constructor(initial: JobInspectorState, intents: JobInspectorPanelIntents) {
@@ -1071,6 +1172,11 @@ export class JobInspectorPanel extends VStack {
       searchRowVisible: (width) => readState.view === 'command' && plan(width).searchRows === 1,
     })
     holders.commandReader = commandReader
+    // The ONE gesture-boundary notification: any EFFECTIVE viewport move on
+    // either reading page retires a pressed chrome gesture immediately (an
+    // away-and-back scroll before the next paint must not revive it).
+    scrollView.onViewportMoved = () => { this.pressed = undefined }
+    commandReader.setViewportMovedCallback(() => { this.pressed = undefined })
     /** The reading facts of the CURRENT page: the page's disclosure plus the real
      *  measured viewport position, or undefined when the page shows none. */
     const readingFacts = (width: number): { readonly note: string; readonly position?: string } | undefined => {
@@ -1132,6 +1238,7 @@ export class JobInspectorPanel extends VStack {
       { component: bar, shrink: 0 },
     ])
     this.header = header
+    this.actionBar = bar
     this.body = body
     this.search = search
     this.scrollView = scrollView
@@ -1200,7 +1307,7 @@ export class JobInspectorPanel extends VStack {
     else this.commandReader.clearSource()
     if (nextView !== previousView) {
       // The header/action bar project the SAME reading page as the key routing.
-      this.pressedTarget = undefined
+      this.pressed = undefined
       this.intents.focusComponent(this)
     }
     this.invalidate()
@@ -1217,6 +1324,42 @@ export class JobInspectorPanel extends VStack {
     // against: its rows and the clickable regions its last render produced.
     this.headerTop = this.intents.paintedBox(this.header)?.y ?? 0
     this.paintedTargets = this.header.hits()
+    // The pinned bar is the ONE child that stays on the last physical row: its
+    // real painted box (never a guessed terminal bottom row) resolves the
+    // bar-local Esc span it recorded in that same render into panel cells.
+    const barBox = this.intents.paintedBox(this.actionBar)
+    const esc = this.actionBar.escapeSpan()
+    this.barHit = barBox === undefined || esc === undefined
+      ? undefined
+      : { action: esc.action, row: barBox.y, startCol: barBox.x + esc.startCol, endCol: barBox.x + esc.endCol }
+    // The ONE frame identity every pointer release re-proves. The LIVE grant is
+    // read here (this frame was painted at that grant) and the real boxes are
+    // committed, so neither a pre-repaint resize nor a chrome-row move can keep
+    // an old gesture alive. The two reading-viewport positions are part of the
+    // identity: an effective wheel scrolls content under the press, and the
+    // release must not replay a target that no longer sits on the same view.
+    this.paintedChromeFrame = {
+      rows: this.intents.rows(),
+      columns: this.intents.columns(),
+      headerTop: this.headerTop,
+      scrollTop: this.scrollView.scrollTop,
+      commandScrollTop: this.commandReader.scroll.scrollTop,
+      bar: barBox === undefined
+        ? undefined
+        : { x: barBox.x, y: barBox.y, width: barBox.width, height: barBox.height },
+    }
+    if (this.pressed !== undefined) {
+      // Frame-boundary backstop for every scroll path that repainted (wheel,
+      // page keys, scrollbar drag, follow auto-scroll): any viewport move while
+      // the press is alive retires it. The scrollBy hooks below cover a burst
+      // of opposite wheels that returns to the press-time position BEFORE this
+      // paint is committed.
+      if (this.pressed.chrome.scrollTop !== this.scrollView.scrollTop
+        || this.pressed.chrome.commandScrollTop !== this.commandReader.scroll.scrollTop) {
+        this.pressed = undefined
+      }
+    }
+
     if (this.readState.view === 'command') {
       if (this.commandReader.search.mode !== 'inactive' && this.chrome.plan.searchRows === 0) {
         this.exitSearch()
@@ -1430,29 +1573,110 @@ export class JobInspectorPanel extends VStack {
     return this.paintedTargets.find(target => target.row === row && x >= target.startCol && x < target.endCol)
   }
 
-  /** The PRESS half of a same-cell click: remember the target the user pressed,
-   *  without acting. */
-  onHeaderPress(x: number, y: number): void {
+  /** The painted Action Bar Esc affordance at one screen cell, or undefined.
+   *  The span is bar-local; the bar's LAST PAINTED box supplies its origin. */
+  private barTargetAt(x: number, y: number): Omit<JobBarPressed, 'chrome'> | undefined {
+    const hit = this.barHit
+    if (hit === undefined || y !== hit.row) return undefined
+    if (x < hit.startCol || x >= hit.endCol) return undefined
+    return {
+      kind: 'bar',
+      action: hit.action,
+      row: hit.row,
+      startCol: hit.startCol,
+      endCol: hit.endCol,
+      viewKey: this.viewKey(),
+    }
+  }
+
+  /** Snapshot the LAST PAINTED chrome frame for one press. */
+  private chromeFrame(): JobChromeFrame {
+    const frame = this.paintedChromeFrame
+    return {
+      rows: frame.rows,
+      columns: frame.columns,
+      headerTop: frame.headerTop,
+      scrollTop: frame.scrollTop,
+      commandScrollTop: frame.commandScrollTop,
+      bar: frame.bar === undefined
+        ? undefined
+        : { x: frame.bar.x, y: frame.bar.y, width: frame.bar.width, height: frame.bar.height },
+    }
+  }
+
+  /** Whether the gesture's painted frame is still the LIVE one: the terminal
+   *  grant did not move (a resize before the next paint is refused), the
+   *  current painted geometry is identical (a repaint at another width/height
+   *  or with another chrome row layout is refused) and NEITHER reading viewport
+   *  moved under the press (an effective wheel revokes it — content scrolled
+   *  away from the pressed affordance's view). A benign repaint with the same
+   *  geometry and viewport keeps the gesture alive, exactly as §5.2 requires. */
+  private chromeFrameCurrent(chrome: JobChromeFrame): boolean {
+    if (this.intents.rows() !== chrome.rows || this.intents.columns() !== chrome.columns) return false
+    if (this.scrollView.scrollTop !== chrome.scrollTop) return false
+    if (this.commandReader.scroll.scrollTop !== chrome.commandScrollTop) return false
+    const live = this.paintedChromeFrame
+    if (live.rows !== chrome.rows || live.columns !== chrome.columns || live.headerTop !== chrome.headerTop) return false
+    if (live.bar === undefined || chrome.bar === undefined) return live.bar === chrome.bar
+    return live.bar.x === chrome.bar.x
+      && live.bar.y === chrome.bar.y
+      && live.bar.width === chrome.bar.width
+      && live.bar.height === chrome.bar.height
+  }
+
+  /** The exact read page + Find state a bar press was recorded against. A page
+   *  switch, a Find open/close or a different Job document rejects the release. */
+  private viewKey(): string {
+    const search = this.readState.view === 'command' ? this.commandReader.search.mode : this.search.mode
+    return `${this.chrome.view.jobId}\u0000${this.chrome.view.kind}\u0000${this.chrome.view.label}\u0000${this.readState.view}\u0000${search}`
+  }
+
+  /** The PRESS half of a same-cell click: remember the ONE target the user
+   *  pressed (header affordance OR the bar's Esc affordance), without acting. */
+  onChromePress(x: number, y: number): void {
     if (this.disposed) return
-    this.pressedTarget = this.headerTargetAt(x, y)
+    const chrome = this.chromeFrame()
+    const target = this.headerTargetAt(x, y)
+    if (target !== undefined) {
+      this.pressed = { kind: 'header', target, chrome }
+      return
+    }
+    const bar = this.barTargetAt(x, y)
+    this.pressed = bar === undefined ? undefined : { ...bar, chrome }
   }
 
   /** The RELEASE half: the click acts only when the SAME cell still resolves to
-   *  the SAME painted target — same action, same page, same exact Command source
-   *  and the SAME painted row/cell range — so a repaint between press and release
-   *  (another Job, a narrowed button, a different header row) can never fire a
-   *  ghost action. */
-  onHeaderClick(x: number, y: number): void {
+   *  the SAME painted target — same owner, same action, same page/view/search
+   *  mode and the SAME painted row/cell range — so a repaint between press and
+   *  release (another Job, a narrowed button, a different header row, a Find
+   *  opened meanwhile) can never fire a ghost action. A confirmed result never
+   *  falls through to the other owner. */
+  onChromeClick(x: number, y: number): void {
     if (this.disposed) return
-    const pressed = this.pressedTarget
-    this.pressedTarget = undefined
-    const target = this.headerTargetAt(x, y)
-    if (pressed === undefined || target === undefined) return
-    if (target.action !== pressed.action || target.view !== pressed.view || target.documentKey !== pressed.documentKey) return
+    const pressed = this.pressed
+    this.pressed = undefined
+    if (pressed === undefined) return
+    // A resize that has not repainted, a repaint at a different grant, or any
+    // chrome row move revokes the whole gesture before its owner is resolved.
+    if (!this.chromeFrameCurrent(pressed.chrome)) return
+    if (pressed.kind === 'header') {
+      const target = this.headerTargetAt(x, y)
+      if (target === undefined) return
+      if (target.action !== pressed.target.action || target.view !== pressed.target.view || target.documentKey !== pressed.target.documentKey) return
+      if (target.row !== pressed.target.row || target.startCol !== pressed.target.startCol || target.endCol !== pressed.target.endCol) return
+      if (target.action === 'open-command') this.openCommand()
+      else if (target.action === 'open-output') this.showOutput()
+      else this.copyCommandAll()
+      return
+    }
+    const target = this.barTargetAt(x, y)
+    if (target === undefined) return
+    if (target.action !== pressed.action || target.viewKey !== pressed.viewKey) return
     if (target.row !== pressed.row || target.startCol !== pressed.startCol || target.endCol !== pressed.endCol) return
-    if (target.action === 'open-command') this.openCommand()
-    else if (target.action === 'open-output') this.showOutput()
-    else this.copyCommandAll()
+    // The painted affordance names the CURRENT state's Esc outcome; the click
+    // replays that ONE key through the panel's own dispatch (no second
+    // close/search state machine).
+    this.handleInput('\x1b')
   }
 
   /** The terminal lost focus (FOCUS_OUT): an in-flight Command drag can never
@@ -1517,7 +1741,7 @@ export class JobInspectorPanel extends VStack {
     this.header.setState(this.chrome.view, 'command', true)
     // The Command page's exact copy must not race the fork's word selection.
     this.intents.setNativeCopyOnSelect(false)
-    this.pressedTarget = undefined
+    this.pressed = undefined
     this.intents.focusComponent(this)
     this.intents.requestRender()
   }
@@ -1533,7 +1757,7 @@ export class JobInspectorPanel extends VStack {
     this.readState.view = 'output'
     this.header.setState(this.chrome.view, 'output', commandEligible(this.chrome.view))
     this.intents.setNativeCopyOnSelect(true)
-    this.pressedTarget = undefined
+    this.pressed = undefined
     this.intents.focusComponent(this)
     this.intents.requestRender()
   }

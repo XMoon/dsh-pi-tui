@@ -2,14 +2,18 @@
  * Ctrl+R history search — the replaceable search-source seam (plan §10).
  *
  * Scope semantics:
- * - `'session'` — ONE file: `$DSH_HOME/user-history/<md5(cwd)>.jsonl`, like
- *   `'current'`, but ONLY v2 rows whose `sessionId` equals `request.sessionId`
- *   are eligible. v1 rows and v2 rows without (or with a different)
- *   sessionId are EXCLUDED — never guessed: legacy data has no reliable
- *   session proof. A matching row inherits `request.cwd` (the file is keyed
- *   by that cwd — plan §6.1). With `request.sessionId === undefined` nothing
- *   matches (defensive: the panel only defaults to this scope when a live
- *   session identity exists).
+ * - `'session'` — EVERY `*.jsonl` under `$DSH_HOME/user-history/` (a Session
+ *   outlives the working directory it was submitted from, so its rows live in
+ *   several per-cwd files). ONLY v2 rows whose `sessionId` equals
+ *   `request.sessionId` are eligible. v1 rows and v2 rows without (or with a
+ *   different) sessionId are EXCLUDED — never guessed: legacy data has no
+ *   reliable session proof. A matching row's real directory is
+ *   `record.cwd` when it validates against the file, else the SAME file's
+ *   trusted proof (Rule 1/2); with no proof the row is still returned with
+ *   `cwd: null` — never the request cwd, which is only the open-time
+ *   directory. With `request.sessionId === undefined` nothing matches
+ *   (defensive: the panel only defaults to this scope when a live session
+ *   identity exists).
  * - `'current'` — ONE file: `$DSH_HOME/user-history/<md5(cwd)>.jsonl`. Every
  *   row (v1 AND v2) is displayable: legacy rows inherit `request.cwd` (the
  *   file is keyed by that cwd, so the effective cwd is known — plan §6.1).
@@ -69,6 +73,7 @@
 import { readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { historyFilePath, parseHistoryRecordLine, type ParsedHistoryRecord } from './store.ts'
+import { INPUT_RECALL_LIMIT } from './recall-scope.ts'
 import { readJsonlReverseBatch, ReverseJsonlRevisionError, type ReverseJsonlCursor } from './reverse-reader.ts'
 
 /** The three scope categories (`/sessions` vocabulary). */
@@ -112,8 +117,9 @@ export interface HistorySearchResult {
    * without any forward scan). */
   id: string
   content: string
-  /** NULL only for rows excluded in the `all` scope — the panel never
-   * displays "directory unknown" rows (Rule 3). */
+  /** NULL when the row's file has no trusted cwd proof: `all`-scope rows are
+   * then EXCLUDED (Rule 3), while `session`-scope rows keep the content and
+   * show no directory — never the open-time request cwd. */
   cwd: string | null
   /** NULL for legacy (v1) rows — never fabricated. */
   ts: number | null
@@ -186,6 +192,38 @@ export interface HistorySearchSource {
   ): Promise<HistorySearchPage>
 }
 
+/** The cold-session recall seed: the same Client-local history files, filtered
+ *  to ONE session, with NO content dedupe and NO cwd metadata. */
+export interface SessionRecallSeed {
+  /** Newest-first by stored ts; source rows are NOT content-deduped. */
+  readonly entries: readonly string[]
+  /** Same length, positionally aligned; undefined for old v2 records. */
+  readonly writeIds: readonly (string | undefined)[]
+}
+
+/** The narrow cold-read capability the Session presentation consumes. */
+export interface SessionRecallReader {
+  /** Read this Session's recall rows across every Client history file. */
+  readSessionRecall(sessionId: string, signal?: AbortSignal): Promise<SessionRecallSeed>
+}
+
+/** A cold session-recall read diagnostic (per-file failures are isolated; a
+ *  global enumeration failure is reported and thrown). */
+export interface HistorySourceDiagnostic {
+  readonly kind: 'session-recall-partial-file' | 'session-recall-global-failure'
+  readonly file?: string
+  readonly error: string
+}
+
+/** Thrown when the history directory itself cannot be enumerated: the caller
+ *  must fall back to the current cwd file instead of treating it as empty. */
+export class HistorySessionRecallReadError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'HistorySessionRecallReadError'
+  }
+}
+
 /** One candidate history file with its stat metadata (mtime drives the
  * scan order; the final result order never uses it). */
 export interface HistoryFileCandidate {
@@ -250,19 +288,23 @@ export interface FileHistorySearchSourceOptions {
   /** Optional mutable stats sink, reset and filled on every search call
    * (test-only instrumentation). */
   stats?: HistorySearchDebugStats
+  /** Optional cold-read diagnostics: a per-file failure is isolated but
+   * recorded, a global enumeration failure is recorded and thrown. */
+  diagnostics?: (event: HistorySourceDiagnostic) => void
 }
 
 /**
  * The default search source over the canonical JSONL store
  * (`$DSH_HOME/user-history/<md5(cwd)>.jsonl`, history.ts layout).
  */
-export class FileHistorySearchSource implements HistorySearchSource {
+export class FileHistorySearchSource implements HistorySearchSource, SessionRecallReader {
   private readonly dshHome: string
   private readonly knownCwds: ReadonlyMap<string, string> | (() => ReadonlyMap<string, string>)
   private readonly concurrency: number
   private readonly scanLimit: number
   private readonly readChunkBytes: number
   private readonly stats: HistorySearchDebugStats | undefined
+  private readonly diagnostics: ((event: HistorySourceDiagnostic) => void) | undefined
 
   constructor(options: FileHistorySearchSourceOptions) {
     this.dshHome = options.dshHome
@@ -271,6 +313,7 @@ export class FileHistorySearchSource implements HistorySearchSource {
     this.scanLimit = Math.max(1, options.scanLimit ?? HISTORY_SEARCH_SCAN_LIMIT)
     this.readChunkBytes = Math.max(1, options.readChunkBytes ?? HISTORY_SEARCH_READ_CHUNK_BYTES)
     this.stats = options.stats
+    this.diagnostics = options.diagnostics
   }
 
   async search(
@@ -281,12 +324,12 @@ export class FileHistorySearchSource implements HistorySearchSource {
     const scope = request.scope
     const files = continuation !== undefined
       ? [...continuation.files]
-      : scope === 'current' || scope === 'session'
-        // The current/session-scope file is known by path; its stat happens
-        // inside the reader (mtime/size are only used for all-scope
-        // ordering). The session scope NEVER scans other cwds — the file
-        // keyed by the live cwd holds every row of the live session.
+      : scope === 'current'
+        // The current-scope file is known by path; its stat happens inside
+        // the reader (mtime/size are only used for multi-file ordering).
         ? [{ path: historyFilePath(this.dshHome, request.cwd), mtimeMs: 0, size: 0 }]
+        // The session scope scans EVERY history file: one Session can span
+        // several working directories and therefore several JSONL files.
         : await this.listAllFiles()
     const stats = this.stats
     if (stats !== undefined) {
@@ -321,7 +364,7 @@ export class FileHistorySearchSource implements HistorySearchSource {
     let pending: HistorySearchPendingRow[] = continuation !== undefined ? [...continuation.pending] : []
     let fileProof: string | null = continuation !== undefined
       ? continuation.fileProof
-      : scope === 'all' ? this.knownCwdFor(files[0]?.path ?? '') : null
+      : scope === 'all' || scope === 'session' ? this.knownCwdFor(files[0]?.path ?? '') : null
     if (continuation !== undefined && scope === 'all' && fileProof === null) {
       // The knownCwds resolver is read on EVERY search (never a startup
       // snapshot): a cwd learned between pages must apply to the first
@@ -355,7 +398,7 @@ export class FileHistorySearchSource implements HistorySearchSource {
       if (fileIndex > 0) {
         // A fresh file: reset the per-file cwd state.
         pending = []
-        fileProof = scope === 'all' ? this.knownCwdFor(file.path) : null
+        fileProof = scope === 'all' || scope === 'session' ? this.knownCwdFor(file.path) : null
       }
       if (stats !== undefined) stats.filesVisited += 1
       // All-scope rows whose cwd is not yet provable are held pending:
@@ -463,6 +506,122 @@ export class FileHistorySearchSource implements HistorySearchSource {
     }
   }
 
+  /**
+   * Read ONE Session's editor-recall seed from every Client history file.
+   *
+   * This is the COLD HYDRATION reader — not `search()`:
+   * - no content dedupe (the editor kernel owns its adjacent-duplicate rule);
+   * - no `HISTORY_SEARCH_SCAN_LIMIT` (a search window is not a recall window):
+   *   every file is scanned to EOF so the globally newest 100 rows are correct,
+   *   in bounded reverse-reader batches and with only the top 100 rows kept;
+   * - only valid v2 rows whose `sessionId` matches exactly; v1/sessionless/
+   *   other-session/corrupt rows never participate.
+   *
+   * Ordering is the history order: ts DESC (`ts === null` last), sourceFile
+   * ASC, byteOffset DESC. `writeIds` stay positionally aligned with `entries`.
+   * A per-file read failure is isolated and reported; a global enumeration
+   * failure is reported and thrown so the caller can fall back instead of
+   * presenting an empty history as success. A missing history directory is
+   * legitimately empty.
+   */
+  async readSessionRecall(sessionId: string, signal?: AbortSignal): Promise<SessionRecallSeed> {
+    if (signal?.aborted) throw abortError()
+    const files = await this.listAllFilesForRecall(signal)
+    const top: RecallCandidate[] = []
+    const consider = (candidate: RecallCandidate): void => {
+      // Binary insert into the bounded newest-first set: the first position
+      // whose row the candidate BEATS; anything at/after the 100th row is
+      // outside the recall window.
+      let low = 0
+      let high = top.length
+      while (low < high) {
+        const middle = (low + high) >>> 1
+        if (compareRecallCandidates(candidate, top[middle]!) < 0) high = middle
+        else low = middle + 1
+      }
+      if (low >= INPUT_RECALL_LIMIT) return
+      top.splice(low, 0, candidate)
+      if (top.length > INPUT_RECALL_LIMIT) top.pop()
+    }
+    for (const file of files) {
+      if (signal?.aborted) throw abortError()
+      let cursor: ReverseJsonlCursor | undefined
+      let verifyRevision = false
+      try {
+        for (;;) {
+          if (signal?.aborted) throw abortError()
+          const batch = await readJsonlReverseBatch(file.path, {
+            cursor,
+            maxRows: 128,
+            chunkBytes: this.readChunkBytes,
+            signal,
+            verifyRevision,
+          })
+          verifyRevision = false
+          for (const line of batch.lines) {
+            const record = parseHistoryRecordLine(line.text)
+            if (record === null || record.version !== 2 || record.sessionId !== sessionId) continue
+            consider({ record, file: file.path, byteStart: line.byteStart })
+          }
+          if (batch.eof) break
+          cursor = batch.nextCursor
+        }
+      } catch (error) {
+        if (isAbortError(error)) throw error
+        // Per-file isolation: keep the rows already collected, record the
+        // partial read, continue with the remaining files.
+        this.diagnose({
+          kind: 'session-recall-partial-file',
+          file: file.path,
+          error: describeError(error),
+        })
+      }
+    }
+    if (signal?.aborted) throw abortError()
+    return {
+      entries: top.map(candidate => candidate.record.content),
+      writeIds: top.map(candidate => candidate.record.writeId),
+    }
+  }
+
+  private diagnose(event: HistorySourceDiagnostic): void {
+    this.diagnostics?.(event)
+  }
+
+  /** Enumerate the cold-recall candidate files: a missing history directory is
+   *  legitimately empty; any other enumeration failure is reported and thrown
+   *  (never disguised as "no history"). A vanished individual file is a
+   *  recorded partial read, not a global failure. */
+  private async listAllFilesForRecall(signal?: AbortSignal): Promise<HistoryFileCandidate[]> {
+    if (signal?.aborted) throw abortError()
+    let names: string[]
+    try {
+      names = await readdir(join(this.dshHome, 'user-history'))
+    } catch (error) {
+      if (isNotFoundError(error)) return []
+      this.diagnose({ kind: 'session-recall-global-failure', error: describeError(error) })
+      throw new HistorySessionRecallReadError(
+        `cannot enumerate the client history directory: ${describeError(error)}`,
+      )
+    }
+    const candidates = names
+      .filter(name => name.endsWith('.jsonl') && !name.endsWith('.tmp') && !name.endsWith('.lock'))
+      .map(name => join(this.dshHome, 'user-history', name))
+    const stats = await mapBounded(candidates, this.concurrency, async (path) => {
+      if (signal?.aborted) throw abortError()
+      try {
+        const info = await stat(path)
+        return { path, mtimeMs: info.mtimeMs, size: info.size }
+      } catch (error) {
+        this.diagnose({ kind: 'session-recall-partial-file', file: path, error: describeError(error) })
+        return null
+      }
+    })
+    return stats
+      .filter((candidate): candidate is HistoryFileCandidate => candidate !== null)
+      .sort((a, b) => b.mtimeMs - a.mtimeMs || a.path.localeCompare(b.path))
+  }
+
   /** Every candidate file in the `all` scope, stat'd with bounded
    * concurrency and ordered mtime DESC (most recently active first), then
    * path ASC as the deterministic tie-breaker. A file that fails to stat
@@ -502,24 +661,25 @@ export class FileHistorySearchSource implements HistorySearchSource {
   /** Route ONE parsed row into the result state and return the (possibly
    * updated) file proof.
    *
+   * File proof (Rules 1/2) is the SAME for every multi-file scope: a v2 row
+   * whose `cwd` validates against the file it lives in proves the file's hash,
+   * and the known-cwd map recovers a legacy-only file. The proof is
+   * file-scoped, so a row of ANOTHER Session may prove the file even though it
+   * can never enter the session results.
+   *
    * Session scope: ONLY v2 rows whose `sessionId` matches the request are
    * eligible — v1 rows and v2 rows without (or with a different) sessionId
    * are excluded, never guessed (legacy data has no reliable session
-   * proof). The file IS the current cwd's file, so a matching row inherits
-   * `request.cwd` exactly like the current scope.
+   * proof). A matching row's real directory is its own validating `cwd`,
+   * else the SAME file's trusted proof, else `null` (the content stays
+   * searchable; the open-time request cwd is never presented as the row's
+   * directory). A session row is never held pending for a later proof — the
+   * all-scope legacy recovery is deliberately not extended here.
    *
-   * A v2 row's cwd is trusted ONLY when it validates against the file it
-   * lives in (`historyFilePath(home, cwd) === file` — plan §40: an invalid
-   * v2 cwd/hash mismatch is never trusted; it could be a moved directory or
-   * a hand-edited row). In the all scope, the FIRST validating v2 row also
-   * forms the file proof (Rule 1) and flushes the rows held pending so far.
-   * Untrusted metadata degrades to the file-level proof:
-   * - current scope: the file IS the current cwd's file, so every row
-   *   (v1, valid v2, invalid v2) ends up at `request.cwd` — inherited, not
-   *   fabricated (plan §6.1);
-   * - all scope: the row falls back to the file proof (Rule 1/2), and a
-   *   row whose file is still unresolved is held pending — excluded only
-   *   when the file ends without a proof (Rule 3). */
+   * All scope: untrusted metadata degrades to the file-level proof; a row
+   * whose file is still unresolved is held pending — excluded only when the
+   * file ends without a proof (Rule 3). Current scope: every row belongs to
+   * the request cwd's own file, so it inherits `request.cwd`. */
   private consumeRecord(
     request: HistorySearchRequest,
     file: string,
@@ -530,23 +690,31 @@ export class FileHistorySearchSource implements HistorySearchSource {
     map: Map<string, HistorySearchResult>,
     newKeys: Set<string>,
   ): string | null {
-    if (request.scope === 'session') {
-      if (request.sessionId === undefined) return fileProof
-      if (record.version !== 2 || record.sessionId !== request.sessionId) return fileProof
-      if (!matchesQuery(record.content, request.query)) return fileProof
-      this.mergeResult(map, newKeys, this.buildResult(file, record, request.cwd, byteStart), request.scope)
-      return fileProof
-    }
-    if (record.version === 2 && record.cwd !== null && historyFilePath(this.dshHome, record.cwd) === file) {
-      if (request.scope === 'all' && fileProof === null) {
+    // Rule 1: a v2 row validates its file's hash. This proof is file-scoped
+    // and serves BOTH multi-file scopes; it says nothing about which Session
+    // the row belongs to.
+    const validatesFile = record.version === 2 && record.cwd !== null
+      && historyFilePath(this.dshHome, record.cwd) === file
+    if (validatesFile && (request.scope === 'all' || request.scope === 'session') && fileProof === null) {
+      fileProof = record.cwd
+      if (request.scope === 'all') {
         // The proof forms NOW: flush the pending rows with it.
-        fileProof = record.cwd
         for (const held of pending) {
           if (!matchesQuery(held.record.content, request.query)) continue
           this.mergeResult(map, newKeys, this.buildResult(file, held.record, fileProof, held.byteStart), request.scope)
         }
         pending.length = 0
       }
+    }
+    if (request.scope === 'session') {
+      if (request.sessionId === undefined) return fileProof
+      if (record.version !== 2 || record.sessionId !== request.sessionId) return fileProof
+      if (!matchesQuery(record.content, request.query)) return fileProof
+      const cwd = validatesFile ? record.cwd : fileProof
+      this.mergeResult(map, newKeys, this.buildResult(file, record, cwd, byteStart), request.scope)
+      return fileProof
+    }
+    if (validatesFile) {
       if (!matchesQuery(record.content, request.query)) return fileProof
       this.mergeResult(map, newKeys, this.buildResult(file, record, record.cwd, byteStart), request.scope)
       return fileProof
@@ -566,7 +734,7 @@ export class FileHistorySearchSource implements HistorySearchSource {
     return fileProof
   }
 
-  private buildResult(file: string, record: ParsedHistoryRecord, cwd: string, byteStart: number): HistorySearchResult {
+  private buildResult(file: string, record: ParsedHistoryRecord, cwd: string | null, byteStart: number): HistorySearchResult {
     const result: HistorySearchResult = {
       id: `${file}:${byteStart}`,
       content: record.content,
@@ -616,6 +784,37 @@ export class FileHistorySearchSource implements HistorySearchSource {
   }
 }
 
+/** One candidate of the cold session-recall read. */
+interface RecallCandidate {
+  readonly record: ParsedHistoryRecord
+  readonly file: string
+  readonly byteStart: number
+}
+
+/** The session-recall order: ts DESC (unknown ts last), file ASC, byte
+ *  offset DESC — the same history order as the Ctrl+R result comparison. */
+function compareRecallCandidates(left: RecallCandidate, right: RecallCandidate): number {
+  const byTs = compareTimestamps(left.record.ts, right.record.ts)
+  if (byTs !== 0) return byTs
+  const byFile = left.file.localeCompare(right.file)
+  if (byFile !== 0) return byFile
+  return right.byteStart - left.byteStart
+}
+
+function abortError(): Error {
+  const error = new Error('aborted')
+  error.name = 'AbortError'
+  return error
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+}
+
+function isNotFoundError(error: unknown): boolean {
+  return error instanceof Error && (error as NodeJS.ErrnoException).code === 'ENOENT'
+}
+
 /** Case-insensitive literal substring (`''` matches everything). */
 function matchesQuery(content: string, query: string): boolean {
   if (query === '') return true
@@ -632,12 +831,21 @@ function dedupeKey(scope: HistoryScope, result: HistorySearchResult): string {
 /** Newest-first by ts (legacy rows — ts NULL — sort after every timed row),
  * then file ASC, then newest row first within the file (deterministic). */
 function compareResults(left: HistorySearchResult, right: HistorySearchResult): number {
-  const lt = left.ts ?? -1
-  const rt = right.ts ?? -1
-  if (rt !== lt) return rt - lt
+  const byTs = compareTimestamps(left.ts, right.ts)
+  if (byTs !== 0) return byTs
   const byFile = left.sourceFile.localeCompare(right.sourceFile)
   if (byFile !== 0) return byFile
   return right.sourceByteOffset - left.sourceByteOffset
+}
+
+/** Total timestamp order: a real finite `ts` (including negative epochs)
+ *  always sorts before an unknown one; unknown timestamps tie with each
+ *  other. `ts ?? -1` would misplace a legitimate `ts < -1` after NULL. */
+function compareTimestamps(left: number | null, right: number | null): number {
+  if (left === null && right === null) return 0
+  if (left === null) return 1
+  if (right === null) return -1
+  return right - left
 }
 
 /** The abort contract: an aborted search resolves an empty page (the panel

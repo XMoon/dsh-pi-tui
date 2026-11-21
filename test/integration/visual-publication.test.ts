@@ -13,7 +13,7 @@
  * ```
  *
  * The scripted model reads the REAL assembled request text: the positive case
- * proves the model actually received `visual-ref-v1:sv1_…` and then used that
+ * proves the model actually received `visual-ref-v2:sv2_…` and then used that
  * exact value in a later step of the same turn — no test-side ref computation
  * stands in for the production projection.
  *
@@ -253,16 +253,16 @@ function toolResults(events: readonly VisualSessionEvent[]): DurableResult[] {
 /** The reference the MODEL actually received in one of its real requests. */
 function modelVisibleRef(adapter: ScriptedAdapter): string {
   for (const request of adapter.requests) {
-    const match = /visual-ref-v1:(sv1_[0-9a-f]{20})/u.exec(request.promptText)
+    const match = /visual-ref-v2:(sv2_[0-9a-f]{20})/u.exec(request.promptText)
     if (match !== null) return match[1] as string
   }
-  throw new Error('the model never received a visual-ref-v1 line')
+  throw new Error('the model never received a visual-ref-v2 line')
 }
 
 /** A step plan that publishes the model-visible reference it just read. */
 function publishVisibleRef(callId = 'call-present'): StepPlan {
   return (request) => {
-    const match = /visual-ref-v1:(sv1_[0-9a-f]{20})/u.exec(request.promptText)
+    const match = /visual-ref-v2:(sv2_[0-9a-f]{20})/u.exec(request.promptText)
     if (match === null) throw new Error('the publishing step did not receive the visual reference')
     return [{ callId, name: PRESENT_VISUAL_TOOL_NAME, args: { visuals: [{ ref: match[1] as string }] } }]
   }
@@ -287,12 +287,12 @@ test('the model reads a committed chart reference and a later step publishes it 
 
   const events = await harness.observe()
   const ref = modelVisibleRef(harness.adapter)
-  const sources = collectVisualSources(harness.sessionId, events)
+  const sources = collectVisualSources(events)
   assert.equal(sources.length, 1)
   assert.equal(sources[0]?.ref, ref, 'the model-visible ref is the durable source ref')
   assert.equal(sources[0]?.title, 'Request latency')
 
-  const published = collectPublishedVisuals(harness.sessionId, events)
+  const published = collectPublishedVisuals(events)
   assert.equal(published.length, 1, 'the real publication was accepted')
   assert.equal(published[0]?.ref, ref)
   assert.equal(published[0]?.callId, 'call-present')
@@ -319,13 +319,13 @@ test('a real two-figure turn publishes both references in the requested order', 
       { callId: 'call-svg', name: SVG_TOOL_NAME, args: SVG_ARGS },
     ],
     (request) => {
-      const refs = [...request.promptText.matchAll(/visual-ref-v1:(sv1_[0-9a-f]{20})/gu)].map(match => match[1] as string)
+      const refs = [...request.promptText.matchAll(/visual-ref-v2:(sv2_[0-9a-f]{20})/gu)].map(match => match[1] as string)
       assert.equal(refs.length, 2, 'both references reached the model')
       return [{ callId: 'call-present', name: PRESENT_VISUAL_TOOL_NAME, args: { visuals: refs.map(ref => ({ ref })) } }]
     },
   )
   const events = await harness.observe()
-  const published = collectPublishedVisuals(harness.sessionId, events)
+  const published = collectPublishedVisuals(events)
   assert.equal(published.length, 2)
   assert.deepEqual(published.map(entry => entry.source.type), ['chart', 'svg'])
   assert.equal(published[1]?.source.svgSource, SVG_SOURCE, 'the SVG source stays the admitted durable call arguments')
@@ -343,7 +343,7 @@ test('the model sees the publication tool and the exact human values in its requ
   // The generating result reaches the model in the NEXT request of the turn.
   const second = harness.adapter.requests[1]
   assert.ok(second !== undefined)
-  assert.match(second.promptText, /visual-ref-v1:sv1_[0-9a-f]{20}/u, 'the reference is model-visible')
+  assert.match(second.promptText, /visual-ref-v2:sv2_[0-9a-f]{20}/u, 'the reference is model-visible')
   assert.match(second.promptText, /p50 {2}42 ms/u, 'the exact human values stay readable')
 })
 
@@ -355,12 +355,12 @@ test('a policy replacement of the generating result removes every qualification'
   await harness.run(generate('call-chart', CHART_TOOL_NAME, CHART_ARGS), () => [{
     callId: 'call-present',
     name: PRESENT_VISUAL_TOOL_NAME,
-    args: { visuals: [{ ref: 'sv1_0123456789abcdef0123' }] },
+    args: { visuals: [{ ref: 'sv2_0123456789abcdef0123' }] },
   }])
   const events = await harness.observe()
-  assert.deepEqual(collectVisualSources(harness.sessionId, events), [],
+  assert.deepEqual(collectVisualSources(events), [],
     'a replaced generating result is no source at all')
-  assert.deepEqual(collectPublishedVisuals(harness.sessionId, events), [])
+  assert.deepEqual(collectPublishedVisuals(events), [])
   const publishResult = toolResults(events).find(result => result.callId === 'call-present')
   assert.equal(publishResult?.isError, true, 'the publication had nothing to publish')
 })
@@ -371,16 +371,16 @@ test('a content-only rewrite that drops the reference block leaves the fact but 
   await harness.run(generate('call-chart', CHART_TOOL_NAME, CHART_ARGS), () => [{
     callId: 'call-present',
     name: PRESENT_VISUAL_TOOL_NAME,
-    args: { visuals: [{ ref: 'sv1_0123456789abcdef0123' }] },
+    args: { visuals: [{ ref: 'sv2_0123456789abcdef0123' }] },
   }])
   const events = await harness.observe()
   const result = toolResults(events).find(entry => entry.callId === 'call-chart')
   assert.ok(result !== undefined)
   assert.ok(result.texts.some(text => text.startsWith('visual-v1:')), 'the fact line survives the rewrite')
-  assert.ok(!result.texts.some(text => text.startsWith('visual-ref-v1:')), 'the reference block is gone')
-  assert.deepEqual(collectVisualSources(harness.sessionId, events), [],
+  assert.ok(!result.texts.some(text => text.startsWith('visual-ref-v2:')), 'the reference block is gone')
+  assert.deepEqual(collectVisualSources(events), [],
     'a fact without its projected reference is not a publishable source')
-  assert.deepEqual(collectPublishedVisuals(harness.sessionId, events), [])
+  assert.deepEqual(collectPublishedVisuals(events), [])
 })
 
 test('a policy replacement of the publication result makes the publication unreal', async (t) => {
@@ -388,8 +388,8 @@ test('a policy replacement of the publication result makes the publication unrea
   const harness = await boot(life, 'replace-publishing', 'replace-publishing')
   await harness.run(generate('call-chart', CHART_TOOL_NAME, CHART_ARGS), publishVisibleRef())
   const events = await harness.observe()
-  assert.equal(collectVisualSources(harness.sessionId, events).length, 1, 'the source itself is intact')
-  assert.deepEqual(collectPublishedVisuals(harness.sessionId, events), [],
+  assert.equal(collectVisualSources(events).length, 1, 'the source itself is intact')
+  assert.deepEqual(collectPublishedVisuals(events), [],
     'a replaced publication result publishes nothing')
   const result = toolResults(events).find(entry => entry.callId === 'call-present')
   assert.match(result?.texts.join('\n') ?? '', /REPLACED/u)
@@ -400,7 +400,7 @@ test('a blocked publication result publishes nothing even though its feedback ca
   const harness = await boot(life, 'block-publishing', 'block-publishing')
   await harness.run(generate('call-chart', CHART_TOOL_NAME, CHART_ARGS), publishVisibleRef())
   const events = await harness.observe()
-  assert.deepEqual(collectPublishedVisuals(harness.sessionId, events), [])
+  assert.deepEqual(collectPublishedVisuals(events), [])
   const result = toolResults(events).find(entry => entry.callId === 'call-present')
   assert.equal(result?.isError, true)
 })
@@ -413,13 +413,13 @@ test('a publication requested by the generating step is refused by the real tool
   // so this case proves the STEP fence, not the reference identity.
   await harness.run(() => [
     { callId: 'call-chart', name: CHART_TOOL_NAME, args: CHART_ARGS },
-    { callId: 'call-present', name: PRESENT_VISUAL_TOOL_NAME, args: { visuals: [{ ref: 'sv1_0123456789abcdef0123' }] } },
+    { callId: 'call-present', name: PRESENT_VISUAL_TOOL_NAME, args: { visuals: [{ ref: 'sv2_0123456789abcdef0123' }] } },
   ])
   const events = await harness.observe()
   const result = toolResults(events).find(entry => entry.callId === 'call-present')
   assert.ok(result !== undefined)
   assert.equal(result.isError, true, 'a same-step publication never publishes')
-  assert.deepEqual(collectPublishedVisuals(harness.sessionId, events), [])
+  assert.deepEqual(collectPublishedVisuals(events), [])
 })
 
 test('a reference from an earlier turn is refused in the next turn', async (t) => {
@@ -430,7 +430,7 @@ test('a reference from an earlier turn is refused in the next turn', async (t) =
   // A NEW prompt opens a NEW turn; the earlier source no longer qualifies.
   await harness.run(() => [{ callId: 'call-present', name: PRESENT_VISUAL_TOOL_NAME, args: { visuals: [{ ref }] } }])
   const events = await harness.observe()
-  assert.deepEqual(collectPublishedVisuals(harness.sessionId, events), [])
+  assert.deepEqual(collectPublishedVisuals(events), [])
   const result = toolResults(events).find(entry => entry.callId === 'call-present')
   assert.equal(result?.isError, true)
   assert.match(result?.texts.join('\n') ?? '', /belongs to turn/u)
@@ -449,8 +449,8 @@ test('a call to an unmounted tool yields no source and no publication', async (t
   const result = toolResults(events).find(entry => entry.callId === 'call-bash')
   assert.ok(result !== undefined, 'the refusal is itself durable')
   assert.equal(result.isError, true)
-  assert.deepEqual(collectVisualSources(harness.sessionId, events), [])
-  assert.deepEqual(collectPublishedVisuals(harness.sessionId, events), [])
+  assert.deepEqual(collectVisualSources(events), [])
+  assert.deepEqual(collectPublishedVisuals(events), [])
 })
 
 // ── the durable content contract ───────────────────────────────────────────
@@ -465,7 +465,7 @@ test('the durable chart result keeps the human text plus both machine blocks', a
   assert.equal(result.texts.length, 3, 'human text, reference block, fact block')
   assert.match(result.texts[0] ?? '', /Request latency \(ms\)/u)
   assert.match(result.texts[0] ?? '', /p50 {2}42 ms/u)
-  assert.match(result.texts[1] ?? '', /^visual-ref-v1:sv1_[0-9a-f]{20}$/u)
+  assert.match(result.texts[1] ?? '', /^visual-ref-v2:sv2_[0-9a-f]{20}$/u)
   assert.match(result.texts[2] ?? '', /^visual-v1:\{"version":1,"type":"chart"/u)
 })
 
@@ -474,7 +474,7 @@ test('the durable SVG result keeps its credential and never duplicates the sourc
   const harness = await boot(life, 'svg-durable')
   await harness.run(generate('call-svg', SVG_TOOL_NAME, SVG_ARGS))
   const events = await harness.observe()
-  const sources = collectVisualSources(harness.sessionId, events)
+  const sources = collectVisualSources(events)
   assert.equal(sources.length, 1)
   assert.equal(sources[0]?.type, 'svg')
   assert.deepEqual(sources[0]?.svg, svgFactFromArgs(SVG_ARGS))
@@ -482,7 +482,7 @@ test('the durable SVG result keeps its credential and never duplicates the sourc
   const result = toolResults(events).find(entry => entry.callId === 'call-svg')
   assert.ok(result !== undefined)
   assert.ok(result.texts.some(text => text.startsWith('visual-v1:')), 'the fact line is durable')
-  assert.ok(result.texts.some(text => text.startsWith('visual-ref-v1:')), 'the reference line is durable')
+  assert.ok(result.texts.some(text => text.startsWith('visual-ref-v2:')), 'the reference line is durable')
   const factLine = result.texts.find(text => text.startsWith('visual-v1:')) as string
   assert.ok(!factLine.includes('<svg'), 'the result never duplicates the SVG source')
 })
@@ -496,7 +496,7 @@ test('a second publication of the same reference keeps the FIRST occurrence', as
     publishVisibleRef('present-2'),
   )
   const events = await harness.observe()
-  const published = collectPublishedVisuals(harness.sessionId, events)
+  const published = collectPublishedVisuals(events)
   assert.equal(published.length, 1, 'first-wins on the repeated reference')
   assert.equal(published[0]?.callId, 'present-1')
 })
@@ -507,7 +507,7 @@ test('a publisher callId reused in a later turn never inherits the earlier publi
   // Turn 1: a real chart + a real publication under `call-present`.
   await harness.run(generate('call-chart', CHART_TOOL_NAME, CHART_ARGS), publishVisibleRef('call-present'))
   const first = await harness.observe()
-  assert.equal(collectPublishedVisuals(harness.sessionId, first).length, 1, 'the first turn really published')
+  assert.equal(collectPublishedVisuals(first).length, 1, 'the first turn really published')
   const firstRef = modelVisibleRef(harness.adapter)
 
   // Turn 2: the model reuses the SAME publisher callId, pointing at turn 1's
@@ -520,7 +520,7 @@ test('a publisher callId reused in a later turn never inherits the earlier publi
   assert.equal(secondTurnResults.length, 1, 'the second turn has its own durable result')
   assert.equal(secondTurnResults[0]?.data.message.isError, true, 'the reused id never inherits the earlier publication')
   // The replay still reports exactly the FIRST publication, not a second one.
-  const published = collectPublishedVisuals(harness.sessionId, events)
+  const published = collectPublishedVisuals(events)
   assert.equal(published.length, 1)
   assert.equal(published[0]?.turn, 1)
 })
@@ -530,7 +530,7 @@ test('an earlier source from the SAME turn publishes after a later step, and the
   const harness = await boot(life, 'same-turn-later-step')
   await harness.run(generate('call-chart', CHART_TOOL_NAME, CHART_ARGS), publishVisibleRef())
   const events = await harness.observe()
-  const published = collectPublishedVisuals(harness.sessionId, events)
+  const published = collectPublishedVisuals(events)
   assert.equal(published.length, 1)
   const source = published[0]?.source
   const publisher = published[0]
@@ -547,7 +547,7 @@ test('turning Visual Tools Off keeps an already-recorded publication readable an
   const harness = await boot(life, 'off-history')
   await harness.run(generate('call-chart', CHART_TOOL_NAME, CHART_ARGS), publishVisibleRef())
   const recorded = await harness.observe()
-  assert.equal(collectPublishedVisuals(harness.sessionId, recorded).length, 1, 'the publication really happened')
+  assert.equal(collectPublishedVisuals(recorded).length, 1, 'the publication really happened')
   const settledGroup = [CHART_TOOL_NAME, PRESENT_VISUAL_TOOL_NAME, SVG_TOOL_NAME].sort()
   assert.deepEqual(harness.ctx.tools.schemas().map(schema => schema.name).sort(), settledGroup)
 
@@ -561,11 +561,11 @@ test('turning Visual Tools Off keeps an already-recorded publication readable an
 
   // The durable facts are INDEPENDENT of the live registry: replay still reads
   // them while the tools are gone from the catalog.
-  const replay = collectPublishedVisuals(harness.sessionId, recorded)
+  const replay = collectPublishedVisuals(recorded)
   assert.equal(replay.length, 1, 'history is not filtered by the current switch value')
   assert.equal(replay[0]?.source.title, 'Request latency')
   assert.equal(replay[0]?.source.type, 'chart')
-  assert.equal(collectVisualSources(harness.sessionId, recorded).length, 1,
+  assert.equal(collectVisualSources(recorded).length, 1,
     'the generating source stays readable while the tools are unregistered')
   const publishResult = toolResults(recorded).find(entry => entry.callId === 'call-present')
   assert.ok(publishResult !== undefined)

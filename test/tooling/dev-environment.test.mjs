@@ -734,7 +734,7 @@ test('dirty provided distributions are explicitly allowed only for ephemeral pre
   const distribution = join(root, 'distribution')
   mkdirSync(distribution)
   const tarball = join(distribution, 'dsh.tgz')
-  const packed = spawnSync('tar', ['-czf', tarball, '-C', join(root, 'staging'), 'package'], { encoding: 'utf8' })
+  const packed = spawnSync('tar', ['-czf', tarball, '-C', join(root, 'staging'), 'package'], { encoding: 'utf8', env: { ...process.env, COPYFILE_DISABLE: '1' } })
   assert.equal(packed.status, 0, packed.stderr)
   writeFileSync(join(distribution, 'dsh-source-distribution.json'), JSON.stringify({
     schemaVersion: 1,
@@ -820,7 +820,7 @@ test('source distribution rejects source-only dependency specs in package metada
   const pack = join(root, 'pack')
   mkdirSync(pack)
   const tarball = join(pack, 'unsafe.tgz')
-  const result = spawnSync('tar', ['-czf', tarball, '-C', staging, 'package'], { encoding: 'utf8' })
+  const result = spawnSync('tar', ['-czf', tarball, '-C', staging, 'package'], { encoding: 'utf8', env: { ...process.env, COPYFILE_DISABLE: '1' } })
   assert.equal(result.status, 0, result.stderr)
   assert.doesNotThrow(() => assertNoSourceLeak(tarball, { sourcePaths: [root] }))
   writeFileSync(packageJsonPath, JSON.stringify({
@@ -828,7 +828,7 @@ test('source distribution rejects source-only dependency specs in package metada
     version: VERSION,
     dependencies: { hidden: 'file:/secret/source' },
   }))
-  const unsafe = spawnSync('tar', ['-czf', tarball, '-C', staging, 'package'], { encoding: 'utf8' })
+  const unsafe = spawnSync('tar', ['-czf', tarball, '-C', staging, 'package'], { encoding: 'utf8', env: { ...process.env, COPYFILE_DISABLE: '1' } })
   assert.equal(unsafe.status, 0, unsafe.stderr)
   assert.throws(() => assertNoSourceLeak(tarball), /source leak/u)
   assert.throws(() => validateSourceDistribution({

@@ -59,7 +59,7 @@ test('the user shell keeps only the local-card TuiApp members', () => {
   // The remaining app uses are the local-card lifecycle only.
   for (const match of [...source.matchAll(/deps\.app\(\)\.(\w+)/g)]) {
     assert.ok(
-      ['pushLocalMessage', 'updateLocalMessage', 'clearSettledLocalMessages'].includes(match[1]!),
+      ['pushLocalMessage', 'updateLocalMessage', 'removeLocalMessage', 'captureLocalShellPlacement', 'setLocalShellSubmissionState'].includes(match[1]!),
       `unexpected UserShell app member use: ${match[1]}`,
     )
   }
@@ -86,7 +86,7 @@ test('the PiTui composer port is the live app and the presenter is the delegatin
   }
 })
 
-test('the PiTui presenter forwards every member to the app receiver and withdraws nothing itself', async () => {
+test('the PiTui presenter forwards every member to the app receiver and forwards presentation withdrawal', async () => {
   const calls: string[] = []
   const app: PiTuiInteractionApp = {
     // `this` identity is the receiver witness: a spread copy (`{ ...app }`)
@@ -113,6 +113,10 @@ test('the PiTui presenter forwards every member to the app receiver and withdraw
       assert.equal(this, app, 'the presenter must call the app as receiver')
       calls.push(`attention:${count}`)
     },
+    withdrawPresentations(lifetimes) {
+      assert.equal(this, app, 'the presenter must call the app as receiver')
+      calls.push(`withdraw:${lifetimes.length}`)
+    },
   }
   const presenter = pituiSurfaceInteractionPresenter(app)
   const outcome = await presenter.showApprovalPrompt({ toolName: 'bash', reason: 'why' }, true)
@@ -121,8 +125,12 @@ test('the PiTui presenter forwards every member to the app receiver and withdraw
   presenter.setSettledQuestionAnswersLookup(undefined)
   presenter.notify('a notice', 'error')
   presenter.setQuestionAttention(3)
-  // The PiTui cancellation owner is the app's own disposal: the adapter must
-  // NOT invent a second withdrawal path on this branch.
+  // A split-Client presentation withdrawal forwards to the mounted app's OWN
+  // seat owner; the adapter invents nothing.
+  const lifetime = new AbortController().signal
+  presenter.withdrawPresentations([lifetime])
+  // The PiTui teardown cancellation owner is the app's own disposal: the
+  // adapter must NOT invent a second pending withdrawal path on this branch.
   presenter.withdrawPending()
   assert.deepEqual(calls, [
     'approval:bash:true',
@@ -130,10 +138,11 @@ test('the PiTui presenter forwards every member to the app receiver and withdraw
     'lookup:clear',
     'notify:a notice:error',
     'attention:3',
+    'withdraw:1',
   ])
 })
 
-// ── Behavioral: all seven composer members work against a real TuiApp ───────
+// ── Behavioral: every remaining composer member works against a real TuiApp ─
 
 test('every SubmissionComposerPort member is live on a real PiTui app', () => {
   const vt = new VirtualTerminal(100, 24)
@@ -155,8 +164,6 @@ test('every SubmissionComposerPort member is live on a real PiTui app', () => {
     // setSubmitPending shows then clears the ack row (6)
     composer.setSubmitPending('submit')
     composer.setSubmitPending(undefined)
-    // clearSettledLocalMessages is callable on a fresh app (7)
-    composer.clearSettledLocalMessages()
   } finally {
     app.dispose()
   }
@@ -218,9 +225,10 @@ test('the UserShell interrupt error notice routes through the injected renderer-
   // A minimal local-card app double: only the members the run()/card path
   // uses; the interrupt path must never touch them.
   const appDouble = {
+    captureLocalShellPlacement: () => ({ anchor: undefined, turn: undefined, target: 'beginning' as const, acceptedOrder: 0 }),
     pushLocalMessage: (card: unknown) => { cardCalls.push('push'); return card },
     updateLocalMessage: (card: unknown) => { cardCalls.push('update'); return card },
-    clearSettledLocalMessages: () => { cardCalls.push('clear') },
+    removeLocalMessage: () => { cardCalls.push('remove') },
   }
   // A control interrupt whose backend cancel REJECTS, so the interrupt path
   // reaches its onError notice.
@@ -249,7 +257,8 @@ test('the UserShell interrupt error notice routes through the injected renderer-
     },
     requireLiveScope: () => { throw new Error('not exercised') },
     captureLiveScope: () => ({ sessionId: 'session-b0' }) as never,
-    writerSection: (task) => task(),
+    isLiveScopeCurrent: () => true,
+    writerSection: (_scope, task) => task(),
     writer: failingWriter as never,
     status: { sessionCwd: () => '/tmp' },
     tuiSettings: undefined,

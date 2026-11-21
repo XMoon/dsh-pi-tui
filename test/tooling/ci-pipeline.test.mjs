@@ -128,6 +128,82 @@ test('a fully successful npm release-tag run qualifies with split-process succes
   assert.equal(decision.ok, true)
 })
 
+test('workflow_dispatch runs split-process on the selected npm branch only when explicitly requested', () => {
+  const mainRef = 'refs/heads/main'
+  const featureRef = 'refs/heads/fix/split-ci'
+  const requested = { eventName: 'workflow_dispatch', runSplitProcess: true }
+  assert.equal(expectedSplitProcessStatus('npm', mainRef, requested), 'success')
+  assert.equal(expectedSplitProcessStatus('npm', featureRef, requested), 'success',
+    'any npm-mode refs/heads/... branch may run the full candidate-backed proof')
+  assert.equal(expectedSplitProcessStatus('npm', 'refs/heads/next', requested), 'success')
+  assert.equal(expectedSplitProcessStatus('npm', featureRef, { eventName: 'workflow_dispatch' }), 'skipped')
+  assert.equal(expectedSplitProcessStatus('npm', PR_REF, requested), 'skipped')
+  assert.equal(expectedSplitProcessStatus('source', mainRef, requested), 'skipped')
+
+  const passingPhases = withSplitProcess(phasesAt('success', { ref: featureRef }), 'success')
+  const passing = verdict({
+    role: 'qualify',
+    mode: 'npm',
+    ref: featureRef,
+    eventName: 'workflow_dispatch',
+    runSplitProcess: true,
+    phases: passingPhases,
+  })
+  assert.equal(passing.ok, true, passing.failures.join('; '))
+  const cliPass = cli([
+    'qualify', '--mode', 'npm', '--ref', featureRef, '--event', 'workflow_dispatch', '--run-split-process',
+    ...cliPhases(passingPhases),
+  ])
+  assert.equal(cliPass.status, 0, cliPass.stderr)
+
+  const summaryPass = cli([
+    'summary', '--mode', 'npm', '--ref', featureRef, '--event', 'workflow_dispatch', '--run-split-process',
+    ...cliPhases([...passingPhases, { name: 'qualified', result: 'success' }]),
+  ])
+  assert.equal(summaryPass.status, 0, summaryPass.stderr)
+
+  const omitted = verdict({
+    role: 'qualify',
+    mode: 'npm',
+    ref: featureRef,
+    eventName: 'workflow_dispatch',
+    runSplitProcess: true,
+    phases: withSplitProcess(phasesAt('success', { ref: featureRef }), 'skipped'),
+  })
+  assert.equal(omitted.ok, false, 'the requested manual proof must not silently skip')
+  assert.match(omitted.failures.join('\n'), /'split-process' is 'skipped'.*requires 'success'/u)
+
+  const forged = verdict({
+    role: 'qualify',
+    mode: 'npm',
+    ref: featureRef,
+    eventName: 'push',
+    runSplitProcess: true,
+    phases: phasesAt('success', { ref: featureRef }),
+  })
+  assert.equal(forged.ok, false, 'the opt-in must be valid only for workflow_dispatch')
+  assert.match(forged.failures.join('\n'), /manual split-process request/u)
+
+  // A manual request that cannot be honored must FAIL instead of silently
+  // degrading into the ordinary skipped status.
+  for (const [name, mode, ref, eventName] of [
+    ['Source Mode', 'source', featureRef, 'workflow_dispatch'],
+    ['tag dispatch', 'npm', RELEASE_REF, 'workflow_dispatch'],
+    ['pull-request ref', 'npm', PR_REF, 'workflow_dispatch'],
+  ]) {
+    const decision = verdict({
+      role: 'qualify',
+      mode,
+      ref,
+      eventName,
+      runSplitProcess: true,
+      phases: phasesAt('success', { mode, ref }),
+    })
+    assert.equal(decision.ok, false, `${name}: a manual request must be rejected, not skipped`)
+    assert.match(decision.failures.join('\n'), /manual split-process request/u, name)
+  }
+})
+
 test('mise-toolchain is required in both npm and source modes', () => {
   for (const mode of ['npm', 'source']) {
     const phases = phasesAt('success', { mode }).map(phase =>
@@ -179,8 +255,14 @@ test('split-process has exactly one expected status per mode and actual ref', ()
   assert.equal(expectedSplitProcessStatus('npm', PR_REF), 'skipped')
   assert.equal(expectedSplitProcessStatus('npm', 'refs/heads/main'), 'skipped')
   assert.equal(expectedSplitProcessStatus('npm', 'refs/heads/next'), 'skipped')
-  assert.equal(expectedSplitProcessStatus('npm', 'refs/tags/v0.5.5'), 'success')
-  assert.equal(expectedSplitProcessStatus('npm', 'refs/tags/next-v0.5.5-alpha.1'), 'success')
+  assert.equal(expectedSplitProcessStatus('npm', 'refs/heads/fix/split-ci',
+    { eventName: 'workflow_dispatch', runSplitProcess: true }), 'success')
+  assert.equal(expectedSplitProcessStatus('npm', 'refs/heads/fix/split-ci',
+    { eventName: 'workflow_dispatch' }), 'skipped')
+  assert.equal(expectedSplitProcessStatus('npm', RELEASE_REF, { eventName: 'push' }), 'success')
+  assert.equal(expectedSplitProcessStatus('npm', 'refs/tags/next-v0.5.5-alpha.1', { eventName: 'push' }), 'success')
+  assert.equal(expectedSplitProcessStatus('npm', RELEASE_REF, { eventName: 'workflow_dispatch' }), 'skipped',
+    'manually dispatching a tag must not impersonate the release push')
   assert.equal(expectedSplitProcessStatus('source', PR_REF), 'skipped')
   assert.equal(expectedSplitProcessStatus('source', 'refs/tags/v0.5.5'), 'skipped')
   assert.equal(isSupportedRef(PR_REF), true)
@@ -211,6 +293,24 @@ test('the split-process truth table is fail-closed in both directions', () => {
     { name: 'PR npm skipped', mode: 'npm', ref: PR_REF, split: 'skipped', ok: true },
     { name: 'main npm skipped', mode: 'npm', ref: 'refs/heads/main', split: 'skipped', ok: true },
     { name: 'next npm skipped', mode: 'npm', ref: 'refs/heads/next', split: 'skipped', ok: true },
+    // Explicit manual branch dispatch: any npm-mode refs/heads/... branch may
+    // request the proof, and the requested result is mandatory.
+    {
+      name: 'feature dispatch requested success', mode: 'npm', ref: 'refs/heads/fix/split-ci',
+      eventName: 'workflow_dispatch', runSplitProcess: true, split: 'success', ok: true,
+    },
+    {
+      name: 'feature dispatch requested skipped fails', mode: 'npm', ref: 'refs/heads/fix/split-ci',
+      eventName: 'workflow_dispatch', runSplitProcess: true, split: 'skipped', ok: false,
+    },
+    {
+      name: 'feature dispatch without input skipped', mode: 'npm', ref: 'refs/heads/fix/split-ci',
+      eventName: 'workflow_dispatch', split: 'skipped', ok: true,
+    },
+    {
+      name: 'main dispatch requested success', mode: 'npm', ref: 'refs/heads/main',
+      eventName: 'workflow_dispatch', runSplitProcess: true, split: 'success', ok: true,
+    },
     { name: 'PR npm success is drift', mode: 'npm', ref: PR_REF, split: 'success', ok: false },
     { name: 'PR npm failure', mode: 'npm', ref: PR_REF, split: 'failure', ok: false },
     { name: 'PR npm cancelled', mode: 'npm', ref: PR_REF, split: 'cancelled', ok: false },
@@ -233,9 +333,81 @@ test('the split-process truth table is fail-closed in both directions', () => {
   ]
   for (const entry of cases) {
     const phases = withSplitProcess(phasesAt('success', { mode: entry.mode, ref: entry.ref }), entry.split)
-    const decision = verdict({ role: 'qualify', mode: entry.mode, ref: entry.ref, phases })
+    const decision = verdict({
+      role: 'qualify',
+      mode: entry.mode,
+      ref: entry.ref,
+      eventName: entry.eventName,
+      runSplitProcess: entry.runSplitProcess === true,
+      phases,
+    })
     assert.equal(decision.ok, entry.ok, `${entry.name}: ${decision.failures.join('; ')}`)
   }
+})
+
+test('the optional ecosystem phase never changes the hard-gate verdict', () => {
+  // The external pi2dsh probe is informational. Whatever the workflow's
+  // continue-on-error projection reports for it — success, failure, skipped or
+  // no report at all — the qualification verdict must rest on the hard phases.
+  for (const result of ['success', 'failure', 'skipped', undefined]) {
+    for (const role of ['qualify', 'summary']) {
+      const phases = [
+        ...phasesAt('success'),
+        ...(result === undefined ? [] : [{ name: 'ecosystem-compat', result }]),
+        ...(role === 'summary' ? [{ name: 'qualified', result: 'success' }] : []),
+      ]
+      const decision = verdict({ role, mode: 'npm', ref: PR_REF, phases })
+      assert.equal(decision.ok, true, `${role} with ecosystem=${String(result)}: ${decision.failures.join('; ')}`)
+      assert.doesNotMatch(decision.lines.join('\n'), /external pi2dsh compatibility/u,
+        'the pipeline summary must not carry a second ecosystem truth')
+    }
+  }
+
+  // A real hard phase failure still refuses qualification; the optional phase
+  // must not mask it.
+  const hardFailure = phasesAt('success').map(phase => phase.name === 'build' ? { ...phase, result: 'failure' } : phase)
+  const decision = verdict({ role: 'qualify', mode: 'npm', ref: PR_REF, phases: hardFailure })
+  assert.equal(decision.ok, false)
+  assert.match(decision.failures.join('\n'), /'build' is 'failure'/u)
+})
+
+test('the optional ecosystem job is independent, visible and non-blocking', () => {
+  const graph = workflow()
+  const job = graph.jobs['ecosystem-compat']
+  assert.deepEqual(needsOf(job).sort(), ['candidate', 'dsh-context'],
+    'the probe must run whenever a provisional candidate exists, independent of the formal qualification')
+  assert.equal(job['continue-on-error'], true, 'the job failure stays visible but never fails the workflow')
+  assert.equal(job.outputs, undefined, 'there is no disposition transport and therefore no second ecosystem truth')
+
+  const smokeStep = (job.steps ?? []).find(step => typeof step.run === 'string' && step.run.includes('pi2dsh-compat-smoke.mjs'))
+  assert.ok(smokeStep, 'the job must run the pi2dsh compatibility smoke')
+  assert.match(smokeStep.run, /node scripts\/pi2dsh-compat-smoke\.mjs "\$\{TARBALLS\[0\]\}"/u,
+    'the smoke runs the one provisional tarball with no historical flags')
+  for (const forbidden of ['--allow-stale-tui-peer', '--skip-unsupported-dsh-peer-on-pr', '--disposition-file', 'DSH_MODE', '|| true']) {
+    assert.equal(smokeStep.run.includes(forbidden), false, `the smoke step must not contain ${forbidden}`)
+  }
+  assert.equal(smokeStep['continue-on-error'], undefined, 'the real smoke step must not swallow its failure')
+  assert.equal(smokeStep.if, undefined, 'the real smoke step must run unconditionally inside the job')
+  assert.match(smokeStep.env.EXPECTED_SHA256, /needs\.candidate\.outputs\.sha256/u,
+    'the probe must re-prove the candidate bytes it downloaded')
+  assert.match(smokeStep.env.EXPECTED_TARBALL, /needs\.candidate\.outputs\.tarball/u,
+    'the probe must re-prove the candidate filename it downloaded')
+  assert.match(smokeStep.run, /sha256sum/u, 'the probe must compare the downloaded digest')
+  assert.match(smokeStep.run, /basename/u, 'the probe must compare the downloaded filename')
+  assert.equal((job.steps ?? []).some(step => step['continue-on-error'] === true), false,
+    'continue-on-error belongs to the JOB, never to a step')
+
+  for (const name of ['qualified', 'publish', 'summary']) {
+    assert.equal(needsOf(workspaceJob(name)).includes('ecosystem-compat'), false,
+      `${name} must not wait for the optional external probe`)
+  }
+  for (const name of ['qualified', 'summary']) {
+    const verdictStep = graph.jobs[name].steps.find(step => typeof step.run === 'string' && step.run.includes('ci-verdict.mjs'))
+    assert.doesNotMatch(verdictStep.run, /ecosystem-compat|ecosystem-disposition/u,
+      `${name} must not carry a second ecosystem truth`)
+  }
+  assert.ok(REQUIRED_PHASES.includes('official-preset-assembly'),
+    'the official preset gate stays a hard required phase')
 })
 
 test('a missing or malformed GITHUB_REF is a failure, never an implicit PR skip', () => {
@@ -392,30 +564,20 @@ function workflow() {
   return parseYaml(readFileSync(join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8'))
 }
 
+/** One job of the parsed workflow. */
+function workspaceJob(name) {
+  return workflow().jobs[name]
+}
+
 /** A job's needs, normalised to an array. */
 function needsOf(job) {
   return Array.isArray(job.needs) ? job.needs : [job.needs].filter(Boolean)
 }
 
-test('the retired build-and-pack job is GONE, and nothing still waits for it', () => {
-  // A surviving copy would run the whole product lane a second time on every
-  // PR, which is the cost this migration exists to remove — and the tag path
-  // would then have two artifact producers with different names.
-  const jobs = workflow().jobs
-  assert.equal('build-and-pack' in jobs, false, 'the old single-runner pack job must be retired')
-  for (const [name, job] of Object.entries(jobs)) {
-    assert.equal(needsOf(job).includes('build-and-pack'), false, `${name} still waits for build-and-pack`)
-  }
-})
-
-test('the accelerated jobs exist, the pack-equivalence job is GONE, and the artifact has exactly one producer', () => {
+test('the accelerated jobs have exactly one build and artifact producer', () => {
   const jobs = workflow().jobs
   for (const name of ['build', 'typecheck', 'product-shard', 'aggregate', 'candidate', 'qualify', 'split-process', 'qualified']) {
     assert.ok(name in jobs, `the accelerated DAG is missing '${name}'`)
-  }
-  assert.equal('equivalence' in jobs, false, 'the retired pack-equivalence job must not survive')
-  for (const [name, job] of Object.entries(jobs)) {
-    assert.equal(needsOf(job).includes('equivalence'), false, `${name} still waits for equivalence`)
   }
   // One build, one pack. A second `pnpm build` anywhere else means a consumer
   // rebuilds instead of proving the build it received; a second physical pack
@@ -428,16 +590,21 @@ test('the accelerated jobs exist, the pack-equivalence job is GONE, and the arti
   assert.deepEqual(packers.map(([name]) => name), ['candidate'])
 })
 
-test('every consumer downloads the PROVISIONAL artifact and re-proves it', () => {
-  // `provisional` is what the downstream gates are allowed to read; the final
-  // `dsh-pi-tui-tarball` is the only publishable one. Swapping them would let a
-  // gate certify one tarball while another is published.
+test('every downstream consumer downloads a real candidate artifact and re-proves it', () => {
+  // `provisional` is what the post-qualification gates read; the optional
+  // ecosystem probe runs before qualification and reads the `candidate`
+  // artifact (the exact same tarball bytes that qualify later republishes).
+  // The final `dsh-pi-tui-tarball` is the only publishable one.
   const jobs = workflow().jobs
-  for (const name of ['compat-smoke', 'ecosystem-compat', 'official-preset-assembly', 'runtime-boundary']) {
+  for (const name of ['compat-smoke', 'official-preset-assembly', 'runtime-boundary']) {
     const steps = jobs[name].steps
     const download = steps.find(step => step.uses === 'actions/download-artifact@v8' && step.with?.path === 'tarball')
     assert.equal(download?.with?.name, 'dsh-pi-tui-provisional', `${name} must consume the provisional artifact`)
   }
+  const ecosystem = jobs['ecosystem-compat'].steps
+  const ecosystemDownload = ecosystem.find(step => step.uses === 'actions/download-artifact@v8' && step.with?.path === 'tarball')
+  assert.equal(ecosystemDownload?.with?.name, 'dsh-pi-tui-candidate',
+    'the optional probe runs before qualification, so it consumes the candidate producer')
   // And the publish path reads ONLY the qualified artifact.
   for (const name of ['publish', 'release']) {
     const steps = jobs[name].steps
@@ -576,6 +743,27 @@ test('the qualified job RUNS on a failed graph, and the verdict gates before any
   }
 })
 
+test('the official preset job uploads its failure-only evidence without changing the required phase', () => {
+  const job = workflow().jobs['official-preset-assembly']
+  assert.ok(REQUIRED_PHASES.includes('official-preset-assembly'))
+  assert.equal(job.env.OFFICIAL_PRESETS_FAILURE_EVIDENCE, undefined,
+    'runner context is unavailable in job-level env; inject it on the smoke step')
+  const runIndex = job.steps.findIndex(step => step.name === 'Run official preset assembly smoke')
+  const run = job.steps[runIndex]
+  assert.equal(run.env.OFFICIAL_PRESETS_FAILURE_EVIDENCE,
+    '${{ runner.temp }}/dsh-pi-tui-official-preset-failure/failure.json')
+  const uploadIndex = job.steps.findIndex(step => step.name === 'Upload sanitized official preset failure evidence')
+  const upload = job.steps[uploadIndex]
+  assert.equal(uploadIndex, runIndex + 1, 'failure evidence uploads immediately after the required smoke')
+  assert.equal(upload.if, 'always()')
+  assert.equal(upload.uses, 'actions/upload-artifact@v7')
+  assert.equal(upload.with.name, 'official-preset-failure')
+  assert.equal(upload.with.path, '${{ runner.temp }}/dsh-pi-tui-official-preset-failure/failure.json')
+  assert.equal(upload.with['if-no-files-found'], 'ignore', 'successful runs create no placeholder artifact')
+  assert.equal(upload.with.overwrite, true)
+  assert.equal(upload.with['retention-days'], 7)
+})
+
 test('every artifact upload REPLACES its name so a partial re-run can recover', () => {
   // "Re-run failed jobs" re-executes a producer while the successful jobs keep
   // the artifact they already uploaded. A same-name upload without `overwrite`
@@ -627,34 +815,54 @@ test('a SUCCESSFUL shard must produce complete diagnostics before uploading', ()
   }
 })
 
-test('the accelerated DAG is the ONLY product-lane path, on every event', () => {
-  // The migration's reason for existing: no event may still reach a job that
-  // runs the whole product lane to produce a tarball. `ci.yml` has no
-  // event-specific product branch. split-process is deliberately the ONLY
-  // non-release job gated on a tag: it is the release-only OS proof, and the
-  // verdict requires it to be exactly `success` there and exactly `skipped`
-  // everywhere else.
-  const jobs = workflow().jobs
+test('the accelerated DAG keeps Split tag-required and offers an explicit branch manual run', () => {
+  const graph = workflow()
+  const jobs = graph.jobs
   const tagGated = Object.entries(jobs)
     .filter(([, job]) => typeof job.if === 'string' && job.if.includes("refs/tags/"))
     .map(([name]) => name)
     .sort()
   assert.deepEqual(tagGated, ['publish', 'release', 'release-context', 'release-metadata', 'release-packed-check', 'split-process'])
   for (const name of tagGated) {
-    // A release job must still REQUIRE the qualification.
     if (name === 'publish' || name === 'release') {
-      assert.match(jobs[name].if, /needs\.qualified\.result == 'success'/u, `${name} must require the qualified artifact`)
+      assert.match(jobs[name].if, /needs\.qualified\.result == 'success'/u, `${name} must still require qualification`)
     }
   }
   const split = jobs['split-process']
   assert.match(split.if, /startsWith\(github\.ref, 'refs\/tags\/'\)/u,
-    'the split-process job must only run on a release tag')
-  assert.match(split.if, /outputs\.mode == 'npm'/u,
-    'the split-process job must only run in npm mode')
-  assert.match(split.if, /always\(\)/u,
-    'always() must survive so npm mode is not skipped through the transitive source need')
-  // And no job may be gated on the PR event alone: the same graph must run for
-  // a push to main/next.
+    'every npm release tag must run the Split proof')
+  assert.match(split.if, /github\.event_name == 'workflow_dispatch'/u,
+    'manual runs may qualify Split without treating every branch push as a proof')
+  assert.match(split.if, /startsWith\(github\.ref, 'refs\/heads\/'\)/u,
+    'the manual Split proof is allowed on any npm-mode refs/heads/... branch')
+  assert.doesNotMatch(split.if, /github\.ref == 'refs\/heads\/main'/u,
+    'the manual Split proof must not stay restricted to main')
+  assert.match(split.if, /inputs\.run_split_process/u,
+    'manual Split qualification must require the explicit workflow input')
+  assert.match(split.if, /outputs\.mode == 'npm'/u, 'the Split proof is npm-only')
+  assert.match(split.if, /always\(\)/u, 'always() must survive the skipped source-pack dependency')
+
+  const manual = (graph.on ?? graph['on'])?.workflow_dispatch
+  assert.equal(manual?.inputs?.run_split_process?.type, 'boolean')
+  assert.equal(manual.inputs.run_split_process.default, false)
+  assert.equal(manual.inputs.run_split_process.required, false)
+
+  const upload = split.steps.find(step => step.name === 'Upload the product Browser qualification evidence')
+  assert.equal(upload?.uses, 'actions/upload-artifact@v7', 'use the available artifact upload major')
+
+  for (const name of ['release-context', 'release-metadata', 'release-packed-check', 'publish', 'release']) {
+    assert.match(jobs[name].if, /github\.event_name == 'push'/u,
+      `${name} must not run when a tag ref is manually dispatched`)
+  }
+
+  const qualifyStep = jobs.qualified.steps.find(step => typeof step.run === 'string' && step.run.includes('ci-verdict.mjs qualify'))
+  const summaryStep = jobs.summary.steps.find(step => typeof step.run === 'string' && step.run.includes('ci-verdict.mjs summary'))
+  for (const step of [qualifyStep, summaryStep]) {
+    assert.ok(step, 'both CI verdicts must exist')
+    assert.match(step.run, /--event "\$GITHUB_EVENT_NAME"/u, 'verdict must receive the GitHub event')
+    assert.match(step.run, /SPLIT_PROCESS_ARGS.*--run-split-process/su, 'verdict must receive the manual Split opt-in')
+  }
+
   for (const [name, job] of Object.entries(jobs)) {
     const condition = typeof job.if === 'string' ? job.if : ''
     assert.doesNotMatch(condition, /github\.event_name == 'pull_request'/u, `${name} is gated to PR events`)

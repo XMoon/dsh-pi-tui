@@ -35,6 +35,21 @@ const bundleConfig = defineConfig({
     // entry, exactly the performance-host precedent; the root ledger stays
     // closed at seven stable entries.
     { 'visual-tools': './src/app/host/visual-tools.ts' },
+    // M5-W PR-C: the profile-owned Web startup preference row. Same precedent:
+    // the canonical nested Host module is exposed under a flat package subpath.
+    { 'web-preferences': './src/app/host/web-preferences.ts' },
+    // M6-2A: the daemon Coordinator Loader row. Canonical nested module
+    // (app/remote-process), flat dist subpath for the Loader. It is a plugin
+    // entry, never a `bin` and never a public executable export.
+    { 'daemon-launcher': './src/app/remote-process/daemon-launcher.ts' },
+    // PO-1B: the profile-owned ACP startup preference row. Same precedent.
+    { 'acp-preferences': './src/app/host/acp-preferences.ts' },
+    // M6 PR-A: the canonical profile-owned TUI preference row. Same precedent:
+    // the canonical nested app/config module under a flat package subpath.
+    { preferences: './src/app/config/preferences.ts' },
+    // R8-E PR-1: the ONE trusted Config-only carrier row third-party bundles
+    // name from their own per-package profile rows. Same precedent.
+    { 'extension-config': './src/app/host/extension-config-carrier.ts' },
   ],
   format: ['esm'],
   outDir: 'dist',

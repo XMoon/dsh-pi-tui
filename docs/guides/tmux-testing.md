@@ -5,7 +5,8 @@
 **Use headless tests for routine development and regression**
 (`test/`, `@xterm/headless` drives real rendering and
 input routing): fast, deterministic, no TTY or model dependency, CI-runnable.
-Feature changes must be covered by headless tests first.
+Use a headless regression first when it can decisively prove the changed
+behavior; do not invent a headless proxy for a terminal/OS-only contract.
 
 **tmux testing is only for what headless cannot cover**:
 
@@ -15,13 +16,16 @@ Feature changes must be covered by headless tests first.
 | Real dsh end-to-end | Model sessions, `ctx.jobs` background tasks, preset combinations, tool-job completion notifications, real subagent behavior |
 | Interaction "feel" | Keyboard rhythm, modal stacking, ghost-overlay timing/focus issues (hard to catch headless) |
 
-Rule: tmux is a **complement**, not a replacement for headless; when a
-problem surfaces in tmux, add the regression test to headless.
+Rule: tmux is a **complement**, not a replacement for headless. When a problem
+surfaces in tmux, choose the smallest decisive regression evidence: add a
+headless case only if it independently detects the same failure class. Otherwise
+retain the relevant real-terminal qualification and report the evidence limit;
+do not create a weaker proxy test just to satisfy a test-count requirement.
 
 ## Environment prep
 
 - tmux is required; `dsh --profile pi-tui-dev` (link dependency on this
-  repo — `pnpm build` takes effect immediately). **In a WORKTREE that profile
+  repo — `mise run build` takes effect immediately). **In a WORKTREE that profile
   still points at the main checkout**, so it paints the main checkout's build,
   not the worktree's: for worktree verification create a throwaway profile that
   LINKS the worktree instead — `DSH_HOME=<worktree>/temp/dsh-wt` with
@@ -31,7 +35,7 @@ problem surfaces in tmux, add the regression test to headless.
   `dsh.profile.bundles` list that includes `@deepseek-ai/dsh-base` (without it
   the TUI never mounts and the pane only shows the loader warnings), then
   `env -u NO_COLOR DSH_HOME=<worktree>/temp/dsh-wt dsh --profile <name>`. No
-  `pnpm pack` is needed for this.
+  package tarball is needed for this.
 - **This machine's shell exports `NO_COLOR=1`**: the theme autodetect's
   opt-out guard skips detection, so wrap launches with `env -u NO_COLOR`.
 - Model end-to-end needs credentials available in the disposable `DSH_HOME`.
@@ -62,6 +66,45 @@ tmux send-keys -t demo Enter
 
 tmux kill-session -t demo 2>/dev/null              # cleanup
 ```
+
+## Fullscreen pointer-journey check (interactive surface changes)
+
+Use this for a new/changed **PiTui Fullscreen/AltScreen** interaction after its
+headless route and geometry tests. The owning interaction contract is
+[../architecture/overlay-focus.md](../architecture/overlay-focus.md#7-regression-checklist-for-future-changes);
+this is only the reusable real-terminal verification procedure.
+
+1. Open the reachable surface in Fullscreen and capture the **actually painted**
+   frame. Inventory visible primary, confirm, cancel, back/close and recovery
+   actions as applicable. Distinguish clickable segments from pure keyboard
+   hints, disabled actions and clipped/unpainted text. Do **not** assume every
+   `Enter`/`Esc` hint has a mouse hit target.
+2. Using the terminal's mouse (with tmux mouse forwarding enabled when needed),
+   complete one intended pointer-supported primary task **without pressing
+   keyboard Enter to commit**. Where the surface has a pointer back/cancel
+   affordance, exercise its actual state-dependent escape/cancel ladder by
+   clicking it, then reopen and verify the remaining close path. Check that
+   draft-only selections do not cause an early Host write.
+3. Repeat a relevant negative: click a disabled/inert segment or outside the
+   complete painted span; press one target and release on another; change the
+   page, modal owner or viewport before release. Neither a stale business
+   write nor an accidental close may occur. Confirm keyboard navigation and
+   commit/cancel still work as before.
+4. Recheck the changed interaction at its relevant normal and narrow terminal
+   sizes (for example 80×24 and 44×20 where the surface is reachable) and
+   the pending/unknown state if it is part of the feature. Verify the action
+   remains fully painted and the mouse target follows its live location.
+5. Record terminal/version/tmux mode, actual action sequence and the observed
+   state/sink. A real tmux capture proves painted terminal output, **not** a
+   click by itself. Headless SGR injection or a programmatic mouse event is
+   separate evidence from a physical mouse; state the actual input provenance.
+   Record unavailable physical-device checks as `NOT_VERIFIED` rather than
+   silently claiming they ran.
+
+Regular/Main intentionally has no application mouse path; TSP-native control
+injection follows the separate Tern client qualification procedures. Scale the
+check to the changed user journey; no full-surface replay is required for an
+unrelated data-only change.
 
 ## Task Quick terminal check
 

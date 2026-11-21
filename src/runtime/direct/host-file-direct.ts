@@ -11,12 +11,17 @@
  *                                           to)
  *                      explicit `@src/`  -> dsh-pi-tui Host scoped discovery
  *                                           (`host-discovery.ts`)
- * workspace scope -> the Direct-only WORKSPACE compatibility scanner
- *                    (`runtime/direct/file-completion/host-discovery.ts`:
- *                    fd/fdfind whole-tree fuzzy, the bounded recursive
- *                    fallback) — a sessionless compatibility path with NO
- *                    official carrier (the wire answers `unavailable`); it
- *                    must not define the session `@file` semantics
+ * workspace scope -> the registry resolves the confirmed `workspaceId` to its
+ *                    canonical root, then the SAME Host-dialect classifier the
+ *                    Session router uses splits the route:
+ *                      bare `@foo`       -> the officially published
+ *                                           `@deepseek-ai/dsh-file-reference-local/search`
+ *                                           `WorkspaceFileSearch` over that root
+ *                                           (same defaults/ranking/exclusions
+ *                                           as the official Host provider)
+ *                      explicit `@src/`  -> the shared Host scoped discovery
+ *                                           anchored at the registry root
+ *                                           (`..` / absolute / `~/` included)
  * ```
  *
  * The official service owns the workspace root, ranking, result bounds,
@@ -30,22 +35,24 @@
  * @module @xmoon76/dsh-pi-tui/runtime/direct/host-file-direct
  */
 
-import { statSync } from 'node:fs'
+import { accessSync, constants, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { isAbsolute, join, win32 } from 'node:path'
-import { discoverForQuery, type LocalDiscoveryDriver } from '../../domain/file-completion/discovery-policy.ts'
-import { reattachDisplayBase, resolvePathQuery } from '../../domain/file-completion/query.ts'
-import { rankPathCandidates } from '../../domain/file-completion/ranking.ts'
+import { type LocalDiscoveryDriver } from '../../domain/file-completion/discovery-policy.ts'
 import {
   DirectHostDiscoveryDriver,
   hostPathQueryEnvironment,
   resolveFdPath,
 } from './file-completion/host-discovery.ts'
+import { OfficialWorkspaceSearchPool } from './file-completion/official-workspace-search.ts'
 import {
+  isExplicitHostFileQuery,
+  listPiTuiExplicitHostFileReferences,
   listPiTuiHostFileReferences,
   type FileReferencesServiceLike,
   type LiveAgentLike,
 } from './host-file-augmentation-direct.ts'
+import { directWorkspaceRegistry } from './session-lifecycle-direct.ts'
 import { effectiveAgentCwd, type WorkingDirectoryServiceLike } from './working-directory-direct.ts'
 import type {
   HostFileListResult,
@@ -68,6 +75,9 @@ export class DirectHostFilePort implements HostFilePort {
   private readonly ctx: HostContextLike | undefined
   private readonly fdPath: string | null
   private readonly agentFor: (sessionId: string) => unknown | undefined
+  /** The ONE official workspace-index cache this adapter owns (bounded; see
+   *  `official-workspace-search.ts`). */
+  private readonly workspaceSearch = new OfficialWorkspaceSearchPool()
 
   /** @param ctx - the Host context carrying the official
    *   `ctx.fileReferences` service (the bare-query authority). A
@@ -122,9 +132,13 @@ export class DirectHostFilePort implements HostFilePort {
    * cwd falls back to the process cwd — DIRECT-mode parity with the runner's
    * sessionCwd() (the Client machine IS the Host machine); a Remote adapter
    * must NOT inherit this fallback (the plan's locality rule: remote
-   * discovery fails closed on an unresolvable scope). */
+   * discovery fails closed on an unresolvable scope). The workspace scope
+   * resolves its root from the official Host registry, never from a cwd. */
   private scopeCwd(scope: HostFileScope): string | undefined {
-    if (scope.kind === 'workspace') return scope.cwd
+    if (scope.kind === 'workspace') {
+      if (scope.workspaceId === undefined || this.ctx === undefined) return undefined
+      return directWorkspaceRegistry(this.ctx)?.get(scope.workspaceId)?.path
+    }
     const agent = this.agentFor(scope.sessionId) as LiveAgentLike | undefined
     if (agent === undefined) return undefined
     return effectiveAgentCwd(this.workingDirectory(), agent) ?? process.cwd()
@@ -159,36 +173,54 @@ export class DirectHostFilePort implements HostFilePort {
       })
     }
 
-    // WORKSPACE scope: a Direct-only sessionless compatibility path with
-    // NO official carrier (the wire answers `unavailable`). The legacy
-    // scanner (fd/fdfind, bounded recursive fallback) answers behind the
-    // same path-only contract; it must not define the session semantics.
-    // `query` is already the official form (text following `@`): a literal
-    // `@@dir/file` mention normalizes to the query `@dir/file` — no grammar
-    // parsing here, the scanner engine owns scope resolution for the raw
-    // text.
-    const workDir = scope.cwd
-    const signal = options?.signal
-    try {
-      const resolved = resolvePathQuery(query, workDir, hostPathQueryEnvironment())
-      const candidates = await discoverForQuery(resolved, this.hostDiscovery, signal ?? new AbortController().signal)
-      signal?.throwIfAborted()
-      // THE PORT CONTRACT: the candidates cross ALREADY ranked, filtered
-      // and bounded, in the adapter's own order. This compatibility path
-      // has no official authority, so the adapter completes the legacy
-      // ranking itself (the pure neutral rankPathCandidates over the
-      // reattached user-facing paths — no UI DTO round-trip) — the client
-      // never re-ranks what a source returned.
-      const displayed = candidates.map(candidate => reattachDisplayBase(candidate, resolved))
-      const ranked = rankPathCandidates(displayed, resolved.searchTerm)
-      return {
-        kind: 'ok',
-        items: ranked.map(candidate => ({ path: candidate.path, kind: candidate.kind })),
-      }
-    } catch {
-      signal?.throwIfAborted()
-      return { kind: 'unavailable', reason: 'local file discovery failed' }
+    // WORKSPACE scope: the sessionless surface's discovery. The authority is
+    // the Host Workspace registry identity. Once the readable root is proven,
+    // the SAME Host-dialect classifier the Session router uses decides the
+    // route: a BARE query stays the official `WorkspaceFileSearch` (index,
+    // ranking, bounds, exclusions, cache), an EXPLICIT path scope enumerates
+    // the scope the user typed — including a parent `..` or an absolute Host
+    // path OUTSIDE the registered root — through the shared Host scanner with
+    // `cwd = the registry root`. An unselected scope dispatches nothing.
+    if (scope.workspaceId === undefined) {
+      return { kind: 'unavailable', reason: 'Choose a Host workspace first' }
     }
+    const registry = this.ctx === undefined ? undefined : directWorkspaceRegistry(this.ctx)
+    if (registry === undefined) {
+      return { kind: 'unavailable', reason: 'the Host Workspace registry is unavailable' }
+    }
+    const workspace = registry.get(scope.workspaceId)
+    if (workspace === undefined) {
+      return { kind: 'unavailable', reason: `Workspace "${scope.workspaceId}" is not registered on the Host` }
+    }
+    if (!isReadableDirectory(workspace.path)) {
+      return { kind: 'unavailable', reason: 'the Host Workspace directory is unreadable' }
+    }
+    const signal = options?.signal ?? new AbortController().signal
+    const environment = hostPathQueryEnvironment()
+    const answer: HostFileListResult = isExplicitHostFileQuery(query, environment)
+      ? await listPiTuiExplicitHostFileReferences(workspace.path, query, signal, {
+          driver: this.hostDiscovery,
+          environment,
+        })
+      : {
+          kind: 'ok',
+          items: [
+            ...await this.workspaceSearch.list(
+              { workspaceId: scope.workspaceId, path: workspace.path },
+              query,
+              signal,
+            ),
+          ],
+        }
+    signal.throwIfAborted()
+    // The registry stays the authority AFTER the scan: a Workspace removed or
+    // re-rooted while the answer was produced must not present its stale
+    // candidates (the same currentness fence the Remote bridge applies).
+    const current = registry.get(scope.workspaceId)
+    if (current === undefined || current.path !== workspace.path) {
+      return { kind: 'unavailable', reason: 'the Host Workspace changed during discovery' }
+    }
+    return answer
   }
 
   async resolveReference(
@@ -251,6 +283,17 @@ function exists(candidate: string): boolean {
   try {
     statSync(candidate)
     return true
+  } catch {
+    return false
+  }
+}
+
+/** The Host Workspace root must be a readable directory BEFORE an official
+ *  search runs: an unreadable root is an unavailable capability, never the
+ *  authoritative empty `ok([])` a successful enumeration of nothing would be. */
+function isReadableDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory() && accessSync(path, constants.R_OK | constants.X_OK) === undefined
   } catch {
     return false
   }

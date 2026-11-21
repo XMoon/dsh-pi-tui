@@ -1,19 +1,18 @@
 /**
  * The Direct Host discovery implementation (TS8-A, renamed by TS8-HF1): the
  * DIRECT process's filesystem behind the neutral {@link LocalDiscoveryDriver}
- * contract. It has two legitimate consumers:
- *
- * ```text
- * 1. the sessionless `HostFileScope { kind: 'workspace', cwd }` compatibility
- *    path of `DirectHostFilePort` (the cold surface with no official carrier);
- * 2. the explicit-path `@` navigation route of the Session scope
- *    (`runtime/direct/host-file-augmentation-direct.ts`), where the user
- *    explicitly typed the scope (`@src/`, `@../`, `@/abs`, `@~/`).
- * ```
+ * contract. Its ONE legitimate consumer is the explicit-path `@` navigation
+ * route of the Session scope
+ * (`runtime/direct/host-file-augmentation-direct.ts`), where the user
+ * explicitly typed the scope (`@src/`, `@../`, `@/abs`, `@~/`).
  *
  * A BARE Session `@` query (`@foo`) never runs through this adapter — that
  * path is the OFFICIAL Host authority's (`ctx.fileReferences.list` through the
- * port), whose candidates arrive already filtered, ranked and bounded.
+ * port), whose candidates arrive already filtered, ranked and bounded. The
+ * sessionless `HostFileScope { kind: 'workspace', workspaceId }` route is the
+ * OFFICIAL `WorkspaceFileSearch`
+ * (`runtime/direct/file-completion/official-workspace-search.ts`) — this
+ * finder never answers it.
  *
  * It owns the Direct Host process's own PATH/PATHEXT finder detection, its
  * `node:fs` facts and its fd/fdfind process. The small syscall-level
@@ -29,12 +28,13 @@ import { homedir } from 'node:os'
 import { spawn } from 'node:child_process'
 import type { PathQueryEnvironment } from '../../../domain/file-completion/query.ts'
 import {
+  createFinderRecordStream,
   escapeFinderRegex,
-  MAX_FINDER_RESULTS,
-  normalizeFinderRecords,
+  MAX_FINDER_WALL_MS,
   type LocalDirectoryEntry,
   type LocalDiscoveryDriver,
 } from '../../../domain/file-completion/discovery-policy.ts'
+import { createBoundedFinderCandidateCollector } from '../../../domain/file-completion/ranking.ts'
 import type { PathCandidate } from '../../../domain/file-completion/types.ts'
 
 /**
@@ -112,17 +112,23 @@ function entryIsDirectory(
 }
 
 /** Run the Direct Host finder for one scoped query. Returns NULL on finder
- * FAILURE (the neutral policy then runs the bounded fallback), `[]` on a
- * genuine no-match or an abort. */
+ * FAILURE (non-zero exit, spawn error, truncated output, over-bound record,
+ * over-budget run — the neutral policy then runs the bounded fallback), `[]`
+ * on a genuine no-match or an abort.
+ *
+ * Like the Client adapter, the Host finder runs without an argv result cap,
+ * streams every match into the same neutral two-top-50 collector, and owns the
+ * ONE {@link MAX_FINDER_WALL_MS} wall budget (Owner amendment D4). */
 function runHostFinder(
   fdPath: string,
   baseDir: string,
   term: string,
   signal: AbortSignal,
+  finderWallMs: number,
+  now: () => number = performance.now,
 ): Promise<readonly PathCandidate[] | null> {
   const args = [
     '--base-directory', baseDir,
-    '--max-results', String(MAX_FINDER_RESULTS),
     '-i',
     '--full-path',
     '--print0',
@@ -130,6 +136,7 @@ function runHostFinder(
     '--type', 'd',
     '--type', 'l',
     '--hidden',
+    '--no-ignore',
     '--exclude', '.git',
     '--exclude', '.git/*',
     '--exclude', '.git/**',
@@ -147,11 +154,23 @@ function runHostFinder(
       resolve(null)
       return
     }
-    let stdout = ''
+    const collector = createBoundedFinderCandidateCollector(term)
+    // The ONE wall-clock budget (Owner amendment D4): a monotonic deadline the
+    // timer AND the per-record processing both check, so a synchronous
+    // record/stat burst cannot starve the timer and run on unbounded.
+    const deadline = now.call(performance) + finderWallMs
     let settled = false
+    let budgetTimer: NodeJS.Timeout | undefined
+    const stopBudget = (): void => {
+      if (budgetTimer !== undefined) {
+        clearTimeout(budgetTimer)
+        budgetTimer = undefined
+      }
+    }
     const settle = (results: readonly PathCandidate[] | null): void => {
       if (settled) return
       settled = true
+      stopBudget()
       signal.removeEventListener('abort', onAbort)
       resolve(results)
     }
@@ -160,9 +179,53 @@ function runHostFinder(
       settle([])
     }
     signal.addEventListener('abort', onAbort, { once: true })
+    // With the production clock the timer enforces the same wall budget.
+    // A custom clock (tests) controls the deadline deterministically; the
+    // timer is unnecessary there and would race the injected decisions.
+    if (now === performance.now) {
+      budgetTimer = setTimeout(() => {
+        if (child.exitCode === null) child.kill('SIGKILL')
+        settle(null)
+      }, finderWallMs)
+    }
+    // Record classification must re-check the deadline at least every 64
+    // records (amendment D5): the emit callback runs inside the synchronous
+    // stream push, where a timer cannot fire.
+    let recordsSinceDeadlineCheck = 0
+    const records = createFinderRecordStream((record) => {
+      let isDirectory = record.directoryHint
+      if (!isDirectory) {
+        try {
+          isDirectory = statSync(hostJoin(baseDir, record.path)).isDirectory()
+        } catch {
+          isDirectory = false
+        }
+      }
+      collector.offer({ path: record.path, kind: isDirectory ? 'directory' : 'file' })
+      recordsSinceDeadlineCheck += 1
+      if (recordsSinceDeadlineCheck >= 64) {
+        recordsSinceDeadlineCheck = 0
+        if (now.call(performance) >= deadline) {
+          if (child.exitCode === null) child.kill('SIGKILL')
+          settle(null)
+        }
+      }
+    }, { shouldStop: () => settled })
     child.stdout.setEncoding('utf-8')
-    child.stdout.on('data', (chunk: string) => { stdout += chunk })
+    child.stdout.on('data', (chunk: string) => {
+      if (settled) return
+      if (!records.push(chunk)) {
+        if (child.exitCode === null) child.kill('SIGKILL')
+        settle(null)
+      }
+    })
     child.on('error', () => settle(null))
+    child.stdout.on('error', () => {
+      // A stdout stream error is an INCOMPLETE finder run: stop the producer
+      // so nothing keeps filling a dead pipe and settle once as a failure.
+      if (child.exitCode === null) child.kill('SIGKILL')
+      settle(null)
+    })
     child.on('close', (code) => {
       if (signal.aborted) {
         settle([])
@@ -172,19 +235,25 @@ function runHostFinder(
         settle(null)
         return
       }
-      const results: PathCandidate[] = []
-      for (const record of normalizeFinderRecords(stdout)) {
-        let isDirectory = record.directoryHint
-        if (!isDirectory) {
-          try {
-            isDirectory = statSync(hostJoin(baseDir, record.path)).isDirectory()
-          } catch {
-            isDirectory = false
-          }
-        }
-        results.push({ path: record.path, kind: isDirectory ? 'directory' : 'file' })
+      if (now.call(performance) >= deadline) {
+        // The whole finder work — spawn through the last record and the close
+        // itself — owns ONE budget (amendment D4): a late close is a failure,
+        // never a partial success.
+        settle(null)
+        return
       }
-      settle(results)
+      if (!records.finish()) {
+        settle(null)
+        return
+      }
+      // `finish()` synchronously classifies any buffered newline-dialect
+      // records; a slow burst can cross the deadline INSIDE it. Re-check AFTER
+      // the work, so an over-budget run can never settle as a success.
+      if (now.call(performance) >= deadline) {
+        settle(null)
+        return
+      }
+      settle(collector.finish())
     })
   })
 }
@@ -198,9 +267,17 @@ function runHostFinder(
  */
 export class DirectHostDiscoveryDriver implements LocalDiscoveryDriver {
   private readonly fdPathValue: string | null
+  private readonly finderWallMsValue: number
+  private readonly nowValue: () => number
 
-  constructor(fdPath: string | null | undefined = undefined) {
+  constructor(
+    fdPath: string | null | undefined = undefined,
+    finderWallMs: number = MAX_FINDER_WALL_MS,
+    now: () => number = performance.now,
+  ) {
     this.fdPathValue = fdPath === undefined ? resolveFdPath() : fdPath
+    this.finderWallMsValue = finderWallMs
+    this.nowValue = now
   }
 
   /** The pinned/detected Host finder (null = bounded-fallback only). */
@@ -231,6 +308,6 @@ export class DirectHostDiscoveryDriver implements LocalDiscoveryDriver {
 
   async find(baseDir: string, term: string, signal: AbortSignal): Promise<readonly PathCandidate[] | null> {
     if (this.fdPathValue === null) return null
-    return runHostFinder(this.fdPathValue, baseDir, term, signal)
+    return runHostFinder(this.fdPathValue, baseDir, term, signal, this.finderWallMsValue, this.nowValue)
   }
 }

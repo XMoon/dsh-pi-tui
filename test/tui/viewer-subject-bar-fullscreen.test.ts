@@ -250,32 +250,21 @@ test('a glyph press then a Question modal never exits through the bar', async ()
   app.stop()
 })
 
-test('the passthrough search box owns the bar cells it actually covers', async () => {
-  const escapes: number[] = []
-  // 24 columns: the top-right search box (min width 24 clamped to the margin)
-  // covers the bar row from column 1 on, so it overlaps most of the `‹ back`
-  // glyph band but NOT column 0.
-  const { vt, app } = startApp(24, 24, () => { escapes.push(1); return true })
+test('an active child viewer refuses both transcript Find scopes and keeps its subject bar', async () => {
+  const { vt, app } = startApp(24, 24)
   app.setTranscript(longUserMessage().messages())
   enterChildDisplaySubject(app, { ...CHILD })
   app.setFullscreen(true)
   await rows(vt)
-  app.startTranscriptSearch()
-  await rows(vt)
-  const view = await rows(vt)
-  assert.ok(view.join('\n').includes('Find transcript'),
-    `precondition: the search box must be visible:\n${view.join('\n')}`)
-  const barY = view.findIndex(row => row.includes('‹'))
-  assert.ok(barY >= 0, `the subject bar must be visible:\n${view.join('\n')}`)
+  const before = (await rows(vt)).join('\n')
+  assert.ok(before.includes('‹'), `the child subject bar is visible before Search admission:\n${before}`)
 
-  // A covered glyph cell belongs to the box: the bar must not act under it.
-  clickCell(vt, 2, barY)
+  app.startTranscriptSearch('view')
+  app.startTranscriptSearch('full')
   await rows(vt)
-  assert.equal(escapes.length, 0, 'a cell covered by the search box must not exit')
-  // Column 0 is outside the box (its margin): the passthrough keeps it live.
-  clickCell(vt, 0, barY)
-  await rows(vt)
-  assert.equal(escapes.length, 1, 'the uncovered glyph cell must keep working under the box')
+  assert.equal(app.isSearching(), false, 'the parent transcript reader refuses while another display subject owns the viewer')
+  const after = (await rows(vt)).join('\n')
+  assert.ok(after.includes('‹'), `refused Search leaves the active subject bar visible:\n${after}`)
   app.setFullscreen(false)
   app.stop()
 })

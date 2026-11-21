@@ -251,7 +251,7 @@ function registerLiveView(registry: EditorRegistry, id: string, state: { text: s
 // B-14 (RED first): the plugin viewSwap gap while Save Location owns the seat
 // ---------------------------------------------------------------------------
 
-test('B-14: a plugin editor invalidate during Save Location cannot displace the SaveLocationFrame', async () => {
+test('a plugin editor invalidate during Save Location cannot displace the SaveLocationFrame', async () => {
   const registry = new EditorRegistry()
   const { vt, app } = startApp(registry)
   await vt.waitForRender()
@@ -287,7 +287,7 @@ test('B-14: a plugin editor invalidate during Save Location cannot displace the 
   assert.equal(app.seatEditorForTest().id, 'live')
 })
 
-test('B-13: a plugin editor winner change during a Question cannot displace the QuestionFrame', async () => {
+test('a plugin editor winner change during a Question cannot displace the QuestionFrame', async () => {
   const registry = new EditorRegistry()
   const { vt, app } = startApp(registry)
   await vt.waitForRender()
@@ -322,7 +322,7 @@ test('B-13: a plugin editor winner change during a Question cannot displace the 
 // B-01/B-07: activation, real key delivery, and the REFUSE gate
 // ---------------------------------------------------------------------------
 
-test('B-01: an optional tenant becomes the seat occupant, takes real keys, and never touches the host draft', async () => {
+test('an optional tenant becomes the seat occupant, takes real keys, and never touches the host draft', async () => {
   const { vt, app, submissions } = startApp()
   await vt.waitForRender()
   app.setDraft('host draft')
@@ -351,7 +351,7 @@ test('B-01: an optional tenant becomes the seat occupant, takes real keys, and n
   assert.ok(!viewport(vt).includes('optional-tenant:'), 'the tenant must leave the seat')
 })
 
-test('B-07: an optional request while a blocking owner is live is REFUSED without running the factory', async () => {
+test('an optional request while a blocking owner is live is REFUSED without running the factory', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
 
@@ -407,7 +407,7 @@ test('B-07: an optional request while a blocking owner is live is REFUSED withou
 // B-02..B-06: PARK across Question / Save Location / Approval, restore LAST
 // ---------------------------------------------------------------------------
 
-test('B-02: a Question parks the tenant; the SAME instance and its own state return on settle', async () => {
+test('a Question parks the tenant; the SAME instance and its own state return on settle', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const tenant = makeTenant()
@@ -442,7 +442,7 @@ test('B-02: a Question parks the tenant; the SAME instance and its own state ret
   assert.equal(tenant.closeCalls(), 0)
 })
 
-test('B-03: two queued Questions never refocus or re-project the tenant in between', async () => {
+test('two queued Questions never refocus or re-project the tenant in between', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const tenant = makeTenant()
@@ -473,7 +473,7 @@ test('B-03: two queued Questions never refocus or re-project the tenant in betwe
   assert.equal(tenant.closeCalls(), 0)
 })
 
-test('B-04: a Save Location prompt owns the seat while the tenant waits', async () => {
+test('a Save Location prompt owns the seat while the tenant waits', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const tenant = makeTenant()
@@ -500,7 +500,7 @@ test('B-04: a Save Location prompt owns the seat while the tenant waits', async 
   assert.equal(tenant.closeCalls(), 0)
 })
 
-test('B-05: an Approval action sheet owns the keyboard while the tenant is PARKED', async () => {
+test('an Approval action sheet owns the keyboard while the tenant is PARKED', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const tenant = makeTenant()
@@ -526,7 +526,7 @@ test('B-05: an Approval action sheet owns the keyboard while the tenant is PARKE
   assert.equal(tenant.closeCalls(), 0)
 })
 
-test('B-06: a queued A → B approval restores the tenant only after the LAST prompt', async () => {
+test('a queued A → B approval restores the tenant only after the LAST prompt', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const tenant = makeTenant()
@@ -557,7 +557,7 @@ test('B-06: a queued A → B approval restores the tenant only after the LAST pr
 // B-08..B-12: identity, replacement, reentrancy, staleness
 // ---------------------------------------------------------------------------
 
-test('B-08: a newer tenant replaces the old one exactly once; the late lease is inert', async () => {
+test('a newer tenant replaces the old one exactly once; the late lease is inert', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const a = makeTenant('A')
@@ -587,7 +587,7 @@ test('B-08: a newer tenant replaces the old one exactly once; the late lease is 
   assert.equal(b.closeCalls(), 1)
 })
 
-test('B-09: a tenant opened from inside the old close wins; the outer candidate cleans itself up once', async () => {
+test('a tenant opened from inside the old close wins; the outer candidate cleans itself up once', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const a = makeTenant('A')
@@ -621,7 +621,7 @@ test('B-09: a tenant opened from inside the old close wins; the outer candidate 
   assert.equal(app.assertOverlayForestForTest(), undefined)
 })
 
-test('B-10: a factory that synchronously opens a modal invalidates its own request', async () => {
+test('a factory that synchronously opens a modal invalidates its own request', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const tenant = makeTenant()
@@ -645,7 +645,7 @@ test('B-10: a factory that synchronously opens a modal invalidates its own reque
   assert.deepEqual(await inner, [{ id: 'q1', selected: ['Ok'] }])
 })
 
-test('B-11: a caller close while PARKED is not resurrected by the blocking settle', async () => {
+test('a caller close while PARKED is not resurrected by the blocking settle', async () => {
   const registry = new EditorRegistry()
   const { vt, app } = startApp(registry)
   await vt.waitForRender()
@@ -678,7 +678,7 @@ test('B-11: a caller close while PARKED is not resurrected by the blocking settl
   assert.equal(tenant.closeCalls(), 1)
 })
 
-test('B-12: a PARKED tenant whose subject went stale is retired, never restored', async () => {
+test('a PARKED tenant whose subject went stale is retired, never restored', async () => {
   const registry = new EditorRegistry()
   const { vt, app } = startApp(registry)
   await vt.waitForRender()
@@ -710,7 +710,7 @@ test('B-12: a PARKED tenant whose subject went stale is retired, never restored'
 // B-15..B-18: HMR, fullscreen, final disposal and failure aggregation
 // ---------------------------------------------------------------------------
 
-test('B-15: a plugin editor unload while the tenant is PARKED keeps the frame and spares the tenant', async () => {
+test('a plugin editor unload while the tenant is PARKED keeps the frame and spares the tenant', async () => {
   const registry = new EditorRegistry()
   const { vt, app } = startApp(registry)
   await vt.waitForRender()
@@ -765,7 +765,7 @@ test('B-15: a plugin editor unload while the tenant is PARKED keeps the frame an
   assert.equal(tenant.closeCalls(), 0)
 })
 
-test('B-16: regular ↔ fullscreen keeps ONE logical tenant record', async () => {
+test('regular ↔ fullscreen keeps ONE logical tenant record', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const tenant = makeTenant()
@@ -795,7 +795,7 @@ test('B-16: regular ↔ fullscreen keeps ONE logical tenant record', async () =>
   assert.equal(tenant.closeCalls(), 1)
 })
 
-test('B-17: final dispose releases an ACTIVE tenant exactly once', async () => {
+test('final dispose releases an ACTIVE tenant exactly once', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const tenant = makeTenant()
@@ -809,7 +809,7 @@ test('B-17: final dispose releases an ACTIVE tenant exactly once', async () => {
   assert.equal(tenant.closeCalls(), 1, 'dispose is idempotent for the tenant too')
 })
 
-test('B-17b: final dispose releases a PARKED tenant exactly once, before the modal teardown', async () => {
+test('final dispose releases a PARKED tenant exactly once, before the modal teardown', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const tenant = makeTenant()
@@ -821,7 +821,7 @@ test('B-17b: final dispose releases a PARKED tenant exactly once, before the mod
   await assert.rejects(question)
 })
 
-test('B-18: a throwing tenant close and a throwing sibling teardown surface as ordered AggregateError entries', async () => {
+test('a throwing tenant close and a throwing sibling teardown surface as ordered AggregateError entries', async () => {
   const vt = new VirtualTerminal(100, 30)
   const store = {
     snapshot: () => initialStatusSnapshot('0.0.0'),
@@ -864,7 +864,7 @@ test('B-18: a throwing tenant close and a throwing sibling teardown surface as o
 // B-19..B-25: preemption, overlap, focus handoff, History, input routing
 // ---------------------------------------------------------------------------
 
-test('B-19: a Question superseding Save Location never restores the tenant mid-preemption', async () => {
+test('a Question superseding Save Location never restores the tenant mid-preemption', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const tenant = makeTenant()
@@ -894,7 +894,7 @@ test('B-19: a Question superseding Save Location never restores the tenant mid-p
   assert.equal(tenant.closeCalls(), 0)
 })
 
-test('B-20: an Approval superseding Save Location restores the tenant only after the approval', async () => {
+test('an Approval superseding Save Location restores the tenant only after the approval', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const tenant = makeTenant()
@@ -923,7 +923,7 @@ test('B-20: an Approval superseding Save Location restores the tenant only after
   assert.equal(tenant.closeCalls(), 0)
 })
 
-test('B-21: a legal Approval + Question overlap keeps the modal owner and the tenant PARKED', async () => {
+test('a legal Approval + Question overlap keeps the modal owner and the tenant PARKED', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const tenant = makeTenant()
@@ -964,7 +964,7 @@ test('B-21: a legal Approval + Question overlap keeps the modal owner and the te
   assert.equal(tenant.closeCalls(), 0)
 })
 
-test('B-22: a capturing overlay keeps the keyboard; the tenant regains it only when the overlay closes', async () => {
+test('a capturing overlay keeps the keyboard; the tenant regains it only when the overlay closes', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const tenant = makeTenant()
@@ -991,7 +991,7 @@ test('B-22: a capturing overlay keeps the keyboard; the tenant regains it only w
   lease?.close()
 })
 
-test('B-23: History is the first REAL optional-seat tenant; a Question parks and restores the SAME seat', async () => {
+test('History is the first REAL optional-seat tenant; a Question parks and restores the SAME seat', async () => {
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
     historySearchSource: {
@@ -1031,7 +1031,7 @@ test('B-23: History is the first REAL optional-seat tenant; a Question parks and
   assert.ok(!viewport(vt).includes('Input History'), 'the panel keeps its own Esc close contract')
 })
 
-test('B-24: the tenant takes ordinary keys; Host-reserved and protocol input keeps its owner', async () => {
+test('the tenant takes ordinary keys; Host-reserved and protocol input keeps its owner', async () => {
   const { vt, app, submissions, steers, exits } = startApp()
   await vt.waitForRender()
   const tenant = makeTenant()
@@ -1074,7 +1074,7 @@ test('B-24: the tenant takes ordinary keys; Host-reserved and protocol input kee
   assert.equal(app.assertOverlayForestForTest(), undefined)
 })
 
-test('B-25: an approval mount whose focus callback settles it releases the losing mount', async () => {
+test('an approval mount whose focus callback settles it releases the losing mount', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const controller = new AbortController()
@@ -1196,7 +1196,7 @@ function advancedOverlayProbe(text: string, onFocused?: () => void, onBlurred?: 
   }
 }
 
-test('B-03b: a suspended overlay root is never revealed or refocused between two queued Questions', async () => {
+test('a suspended overlay root is never revealed or refocused between two queued Questions', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const tenant = makeTenant()
@@ -1247,7 +1247,7 @@ test('B-03b: a suspended overlay root is never revealed or refocused between two
   assert.equal(tenant.closeCalls(), 0)
 })
 
-test('B-24b: host-classified protocol chunks never reach the tenant on either screen', async () => {
+test('host-classified protocol chunks never reach the tenant on either screen', async () => {
   const { vt, app, focusReports } = startApp()
   await vt.waitForRender()
   const tenant = makeTenant()
@@ -1280,7 +1280,7 @@ test('B-24b: host-classified protocol chunks never reach the tenant on either sc
   assert.equal(app.focusedComponentForTest(), tenant.component)
 })
 
-test('B-26: a capturing overlay opened by the tenant focus callback during the Question restore keeps the keyboard', async () => {
+test('a capturing overlay opened by the tenant focus callback during the Question restore keeps the keyboard', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const overlay = advancedOverlayProbe('newer overlay')
@@ -1307,7 +1307,7 @@ test('B-26: a capturing overlay opened by the tenant focus callback during the Q
   assert.equal(tenant.closeCalls(), 0)
 })
 
-test('B-26b: a capturing overlay opened during the Save Location restore keeps the keyboard', async () => {
+test('a capturing overlay opened during the Save Location restore keeps the keyboard', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const overlay = advancedOverlayProbe('save-tail overlay')
@@ -1332,7 +1332,7 @@ test('B-26b: a capturing overlay opened during the Save Location restore keeps t
   assert.equal(tenant.closeCalls(), 0)
 })
 
-test('B-27: a Save Location disposal that cancels the superseding Question never mounts a dead frame', async () => {
+test('a Save Location disposal that cancels the superseding Question never mounts a dead frame', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const tenant = makeTenant()
@@ -1381,7 +1381,7 @@ test('B-27: a Save Location disposal that cancels the superseding Question never
   assert.deepEqual(await save, { kind: 'cancelled' }, 'the superseded prompt still settles cancelled')
 })
 
-test('B-28: an ACTIVE tenant whose subject goes stale is retired at the input entry', async () => {
+test('an ACTIVE tenant whose subject goes stale is retired at the input entry', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const tenant = makeTenant()
@@ -1398,7 +1398,7 @@ test('B-28: an ACTIVE tenant whose subject goes stale is retired at the input en
   assert.equal(app.focusSeatForTest(), 'editor')
 })
 
-test('B-29: an ACTIVE tenant whose subject goes stale is retired and re-projected at a screen swap', async () => {
+test('an ACTIVE tenant whose subject goes stale is retired and re-projected at a screen swap', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const tenant = makeTenant()
@@ -1421,7 +1421,7 @@ test('B-29: an ACTIVE tenant whose subject goes stale is retired and re-projecte
   assert.equal(app.focusedComponentForTest(), app.seatEditorForTest().component)
 })
 
-test('B-29b: a stale ACTIVE tenant is retired even when a restored overlay keeps the keyboard across the swap', async () => {
+test('a stale ACTIVE tenant is retired even when a restored overlay keeps the keyboard across the swap', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const tenant = makeTenant()
@@ -1448,7 +1448,7 @@ test('B-29b: a stale ACTIVE tenant is retired even when a restored overlay keeps
   assert.equal(app.focusSeatForTest(), 'overlay')
 })
 
-test('B-24c: a stale-but-focused tenant receives no host-classified protocol chunk and is retired', async () => {
+test('a stale-but-focused tenant receives no host-classified protocol chunk and is retired', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const tenant = makeTenant()
@@ -1482,7 +1482,7 @@ test('B-24c: a stale-but-focused tenant receives no host-classified protocol chu
   assert.ok(!viewport(vt).includes('optional-tenant:'))
 })
 
-test('B-27b: a stale tenant retired while parking cannot strand the existing overlay roots', async () => {
+test('a stale tenant retired while parking cannot strand the existing overlay roots', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const overlay = advancedOverlayProbe('park-root')
@@ -1538,7 +1538,7 @@ test('B-27b: a stale tenant retired while parking cannot strand the existing ove
   assert.ok(viewport(vt).includes('park-root'), `the live flow restores the root:\n${viewport(vt)}`)
 })
 
-test('B-27c: an overlay opened by the completion abort during the handoff is resumed by the question', async () => {
+test('an overlay opened by the completion abort during the handoff is resumed by the question', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const overlay = advancedOverlayProbe('handoff-root')
@@ -1580,7 +1580,7 @@ test('B-27c: an overlay opened by the completion abort during the handoff is res
   assert.deepEqual(await save, { kind: 'cancelled' }, 'the superseded prompt still settles cancelled')
 })
 
-test('B-30: a newer overlay opened by the stale-tenant cleanup during an Approval settle keeps the keyboard', async () => {
+test('a newer overlay opened by the stale-tenant cleanup during an Approval settle keeps the keyboard', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const overlay = advancedOverlayProbe('approval-tail-root')
@@ -1640,7 +1640,7 @@ function throwingParkTenant(app: TuiApp): { closeCalls(): number } {
   return { closeCalls: () => closeCalls }
 }
 
-test('B-31: a throwing stale-tenant cleanup while parking rolls the Question owner back', async () => {
+test('a throwing stale-tenant cleanup while parking rolls the Question owner back', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const tenant = throwingParkTenant(app)
@@ -1684,7 +1684,7 @@ test('B-31: a throwing stale-tenant cleanup while parking rolls the Question own
   assert.equal(next.closeCalls(), 0)
 })
 
-test('B-31b: a throwing stale-tenant cleanup while parking rolls the Save Location owner back', async () => {
+test('a throwing stale-tenant cleanup while parking rolls the Save Location owner back', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const tenant = throwingParkTenant(app)
@@ -1713,7 +1713,7 @@ test('B-31b: a throwing stale-tenant cleanup while parking rolls the Save Locati
   assert.equal(app.focusedComponentForTest(), next.component)
 })
 
-test('B-31c: a throwing stale-tenant cleanup while parking rolls the Approval owner back', async () => {
+test('a throwing stale-tenant cleanup while parking rolls the Approval owner back', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const tenant = throwingParkTenant(app)
@@ -1779,7 +1779,7 @@ async function settleOrTimeout<T>(promise: Promise<T>, ms = 300): Promise<T | 'T
   ])
 }
 
-test('B-31d: a NEWER Question opened by the throwing cleanup keeps its owner', async () => {
+test('a NEWER Question opened by the throwing cleanup keeps its owner', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const presentedController = new AbortController()
@@ -1804,7 +1804,7 @@ test('B-31d: a NEWER Question opened by the throwing cleanup keeps its owner', a
   assert.deepEqual(await settleOrTimeout(newer!), [{ id: 'q-new', selected: ['Yes'] }])
 })
 
-test('B-31e: a NEWER Save Location opened by the throwing cleanup keeps its owner', async () => {
+test('a NEWER Save Location opened by the throwing cleanup keeps its owner', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const presentedController = new AbortController()
@@ -1832,7 +1832,7 @@ test('B-31e: a NEWER Save Location opened by the throwing cleanup keeps its owne
   assert.deepEqual(await newer, { kind: 'cancelled' }, 'the newer prompt must stay answerable')
 })
 
-test('B-31f: a NEWER Approval opened by the throwing cleanup keeps its owner', async () => {
+test('a NEWER Approval opened by the throwing cleanup keeps its owner', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const presentedController = new AbortController()
@@ -1861,7 +1861,7 @@ test('B-31f: a NEWER Approval opened by the throwing cleanup keeps its owner', a
   )
 })
 
-test('B-32: a stale close that only cancels the new Save keeps the dead frame out and the live root visible', async () => {
+test('a stale close that only cancels the new Save keeps the dead frame out and the live root visible', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const root = advancedOverlayProbe('save-live-root')
@@ -1903,7 +1903,7 @@ test('B-32: a stale close that only cancels the new Save keeps the dead frame ou
   assert.notEqual(app.focusedComponentForTest(), null)
 })
 
-test('B-33: the Approval A→B handover window refuses a fresh optional opener', async () => {
+test('the Approval A→B handover window refuses a fresh optional opener', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   let arm = false
@@ -1951,7 +1951,7 @@ test('B-33: the Approval A→B handover window refuses a fresh optional opener',
   lateLease?.close()
 })
 
-test('B-33b: a suspended root is not revealed/refocused between two queued Approvals', async () => {
+test('a suspended root is not revealed/refocused between two queued Approvals', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const root = advancedOverlayProbe('a-b-focus-root')
@@ -1990,7 +1990,7 @@ test('B-33b: a suspended root is not revealed/refocused between two queued Appro
   rootLease.close()
 })
 
-test('B-34: a root opened by a cleanup during an abandoned presentation is handed back', async () => {
+test('a root opened by a cleanup during an abandoned presentation is handed back', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const late = advancedOverlayProbe('late-root')
@@ -2031,7 +2031,7 @@ test('B-34: a root opened by a cleanup during an abandoned presentation is hande
   assert.ok(late.focusCount() >= 1, 'the handed-back root takes its focus intent')
 })
 
-test('B-35: the approval rollback still attempts the repaint and re-publishes the live seat', async () => {
+test('the approval rollback still attempts the repaint and re-publishes the live seat', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const tenant = makeTenant()
@@ -2081,7 +2081,7 @@ test('B-35: the approval rollback still attempts the repaint and re-publishes th
   void tenant
 })
 
-test('B-37: the ↓ view affordance is withheld while an ACTIVE tenant owns the seat', async () => {
+test('the ↓ view affordance is withheld while an ACTIVE tenant owns the seat', async () => {
   const { vt, app, openTasks } = startApp()
   // B4-B: the admission needs the Quick projection alongside the badge.
   await vt.waitForRender()
@@ -2117,7 +2117,7 @@ test('B-37: the ↓ view affordance is withheld while an ACTIVE tenant owns the 
   assert.equal(openTasks(), 2, 'the restored ↓ reaches the sink again')
 })
 
-test('B-36: a user-thrown AggregateError from a caller cleanup stays ONE rollback entry', async () => {
+test('a user-thrown AggregateError from a caller cleanup stays ONE rollback entry', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const primary = new Error('primary close boom')
@@ -2164,7 +2164,7 @@ test('B-36: a user-thrown AggregateError from a caller cleanup stays ONE rollbac
   )
 })
 
-test('B-38: a root a throwing cleanup acquired while the owner was live is handed back', async () => {
+test('a root a throwing cleanup acquired while the owner was live is handed back', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const late = advancedOverlayProbe('rolling-root')
@@ -2194,7 +2194,7 @@ test('B-38: a root a throwing cleanup acquired while the owner was live is hande
   )
 })
 
-test('B-39: the broker releasing an old overlay never leaves a retired tenant with the keyboard', async () => {
+test('the broker releasing an old overlay never leaves a retired tenant with the keyboard', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   let tenantIsCurrent = true
@@ -2233,7 +2233,7 @@ test('B-39: the broker releasing an old overlay never leaves a retired tenant wi
   assert.equal(tenant.keys.length, keysBefore, 'a retired tenant receives no key')
 })
 
-test('B-40: a failed Question presentation advances its QUEUED successor', async () => {
+test('a failed Question presentation advances its QUEUED successor', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   let tenantIsCurrent = true
@@ -2268,7 +2268,7 @@ test('B-40: a failed Question presentation advances its QUEUED successor', async
   assert.deepEqual(await settleOrTimeout(queued!), [{ id: 'q-next', selected: ['Yes'] }])
 })
 
-test('B-40b: a failed Approval presentation advances its QUEUED successor', async () => {
+test('a failed Approval presentation advances its QUEUED successor', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   let tenantIsCurrent = true
@@ -2314,7 +2314,7 @@ test('B-40b: a failed Approval presentation advances its QUEUED successor', asyn
 // and the seat's focus-intent observation counts the fork's auto-focus.
 // ---------------------------------------------------------------------------
 
-test('B-41: a doubly-failing Approval park still presents its QUEUED successor', async () => {
+test('a doubly-failing Approval park still presents its QUEUED successor', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   let queued: Promise<unknown> | undefined
@@ -2381,7 +2381,7 @@ test('B-41: a doubly-failing Approval park still presents its QUEUED successor',
   )
 })
 
-test('B-42: a throwing handover step cannot clear the successor it already installed', async () => {
+test('a throwing handover step cannot clear the successor it already installed', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const proto = TuiApp.prototype as unknown as { projectActivity(): void }
@@ -2425,7 +2425,7 @@ test('B-42: a throwing handover step cannot clear the successor it already insta
   }
 })
 
-test('B-43: a failed presentation never dequeues over the newer Question that preempted it', async () => {
+test('a failed presentation never dequeues over the newer Question that preempted it', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const controller = new AbortController()
@@ -2478,7 +2478,7 @@ test('B-43: a failed presentation never dequeues over the newer Question that pr
   assert.deepEqual(await settleOrTimeout(third!), [{ id: 'q-third', selected: ['Yes'] }])
 })
 
-test('B-44: a successor handed over from a failed presentation takes its OWN initial suspension', async () => {
+test('a successor handed over from a failed presentation takes its OWN initial suspension', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   let tenantIsCurrent = true
@@ -2521,7 +2521,7 @@ test('B-44: a successor handed over from a failed presentation takes its OWN ini
   assert.equal(root.blurCount(), blurWhileSuspended, 'no further root blur on restore')
 })
 
-test('B-45: an overlay auto-focused while the stale tenant is retired keeps the keyboard', async () => {
+test('an overlay auto-focused while the stale tenant is retired keeps the keyboard', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   let tenantIsCurrent = true
@@ -2578,7 +2578,7 @@ test('B-45: an overlay auto-focused while the stale tenant is retired keeps the 
   assert.equal(app.focusSeatForTest(), 'overlay')
 })
 
-test('B-46: a successor superseded INSIDE its own initial suspension hides the roots and keeps the live frame', async () => {
+test('a successor superseded INSIDE its own initial suspension hides the roots and keeps the live frame', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   let tenantIsCurrent = true
@@ -2641,7 +2641,7 @@ test('B-46: a successor superseded INSIDE its own initial suspension hides the r
   assert.ok(viewport(vt).includes('reentrant-root'), `the root must be restored afterwards:\n${viewport(vt)}`)
 })
 
-test('B-47: a settled Approval never cancels the Save Location its own cleanup opened', async () => {
+test('a settled Approval never cancels the Save Location its own cleanup opened', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   let tenantIsCurrent = true
@@ -2681,7 +2681,7 @@ test('B-47: a settled Approval never cancels the Save Location its own cleanup o
   )
 })
 
-test('B-48: a throwing seat mount releases the failed Approval and its queue', async () => {
+test('a throwing seat mount releases the failed Approval and its queue', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   // The blocking seat projection is the ONE funnel every approval goes
@@ -2736,7 +2736,7 @@ test('B-48: a throwing seat mount releases the failed Approval and its queue', a
   }
 })
 
-test('B-49: multiple rollback failures sit FLAT behind the primary failure', async () => {
+test('multiple rollback failures sit FLAT behind the primary failure', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const mountProto = TuiApp.prototype as unknown as { mountSeatChild(): void }
@@ -2798,7 +2798,7 @@ test('B-49: multiple rollback failures sit FLAT behind the primary failure', asy
   assert.equal(closeCalls, 1, 'the stale tenant is retired exactly once')
 })
 
-test('B-50: a failed Approval mount restores a parked-but-current optional tenant', async () => {
+test('a failed Approval mount restores a parked-but-current optional tenant', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const tenant = makeTenant()
@@ -2847,7 +2847,7 @@ test('B-50: a failed Approval mount restores a parked-but-current optional tenan
   assert.equal(tenant.closeCalls(), 0)
 })
 
-test('B-51: a throwing seat projection leaves no ghost approval frame', async () => {
+test('a throwing seat projection leaves no ghost approval frame', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   // Fail the SEAT projection (after the suspension committed) ONCE: the frame
@@ -2902,7 +2902,7 @@ test('B-51: a throwing seat projection leaves no ghost approval frame', async ()
   assert.equal(await settleOrTimeout(healthy), 'allowed-once')
 })
 
-test('B-53: a QUEUED Approval whose mount fails rejects its own promise', async () => {
+test('a QUEUED Approval whose mount fails rejects its own promise', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const tenant = makeTenant()
@@ -2970,7 +2970,7 @@ test('B-53: a QUEUED Approval whose mount fails rejects its own promise', async 
   assert.equal(await settleOrTimeout(healthy), 'allowed-once')
 })
 
-test('B-54: a real Advanced blur chain that throws through the host unwind leaves no ghost Approval', async () => {
+test('a real Advanced blur chain that throws through the host unwind leaves no ghost Approval', async () => {
   const registry = new EditorRegistry()
   const { vt, app } = startApp(registry)
   await vt.waitForRender()
@@ -3040,7 +3040,7 @@ test('B-54: a real Advanced blur chain that throws through the host unwind leave
   assert.equal(closeCalls, 0)
 })
 
-test('B-55: a failed Approval mount across a re-entrant fullscreen swap never pops the surviving root', async () => {
+test('a failed Approval mount across a re-entrant fullscreen swap never pops the surviving root', async () => {
   const registry = new EditorRegistry()
   const { vt, app } = startApp(registry)
   await vt.waitForRender()
@@ -3112,7 +3112,7 @@ test('B-55: a failed Approval mount across a re-entrant fullscreen swap never po
   assert.equal(closeCalls, 0)
 })
 
-test('B-56: a fullscreen swap inside the Approval mount still leaves the dialog mounted', async () => {
+test('a fullscreen swap inside the Approval mount still leaves the dialog mounted', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   let chainStarted = false
@@ -3152,7 +3152,7 @@ test('B-56: a fullscreen swap inside the Approval mount still leaves the dialog 
   await vt.waitForRender()
 })
 
-test('B-56b: a Question opened inside the Approval mount keeps the seat and its physical focus', async () => {
+test('a Question opened inside the Approval mount keeps the seat and its physical focus', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   let triggered = false
@@ -3192,7 +3192,7 @@ test('B-56b: a Question opened inside the Approval mount keeps the seat and its 
   await vt.waitForRender()
 })
 
-test('B-57: a callback NEWER focus inside the swap window beats the pre-swap owner', async () => {
+test('a callback NEWER focus inside the swap window beats the pre-swap owner', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   let chainStarted = false
@@ -3246,7 +3246,7 @@ test('B-57: a callback NEWER focus inside the swap window beats the pre-swap own
   assert.equal(app.assertOverlayForestForTest(), undefined)
 })
 
-test('B-57b: a capturing overlay mounted in the swap window stays under the blocking Approval and is revealed after it', async () => {
+test('a capturing overlay mounted in the swap window stays under the blocking Approval and is revealed after it', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   let chainStarted = false
@@ -3290,7 +3290,7 @@ test('B-57b: a capturing overlay mounted in the swap window stays under the bloc
   assert.equal(app.assertOverlayForestForTest(), undefined)
 })
 
-test('B-58: an Advanced overlay whose own mount interleaves a swap is re-projected', async () => {
+test('an Advanced overlay whose own mount interleaves a swap is re-projected', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const late = advancedOverlayProbe('sibling-late-a')
@@ -3324,7 +3324,7 @@ test('B-58: an Advanced overlay whose own mount interleaves a swap is re-project
   await vt.waitForRender()
 })
 
-test('B-60: a NEWER owner that leaves inside the swap window still hands the keyboard to the live Approval', async () => {
+test('a NEWER owner that leaves inside the swap window still hands the keyboard to the live Approval', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   let chainStarted = false
@@ -3359,7 +3359,7 @@ test('B-60: a NEWER owner that leaves inside the swap window still hands the key
   void rootLease
 })
 
-test('B-56: History as the seat tenant restores the plugin editor WINNER without writing the hidden host editor', async () => {
+test('History as the seat tenant restores the plugin editor WINNER without writing the hidden host editor', async () => {
   const registry = new EditorRegistry()
   const history: import('../../src/client/history/search.ts').HistorySearchSource = {
     search: async () => ({
@@ -3412,7 +3412,7 @@ test('B-56: History as the seat tenant restores the plugin editor WINNER without
 // winner change/invalidate and the Question↔Save handoff.
 // ---------------------------------------------------------------------------
 
-test('B-61: the REAL History tenant: a plugin editor winner change + recompile while PARKED never ejects the blocker and Esc keeps the CURRENT winner', async () => {
+test('the REAL History tenant: a plugin editor winner change + recompile while PARKED never ejects the blocker and Esc keeps the CURRENT winner', async () => {
   const registry = new EditorRegistry()
   const history: import('../../src/client/history/search.ts').HistorySearchSource = {
     search: async () => ({
@@ -3470,7 +3470,7 @@ test('B-61: the REAL History tenant: a plugin editor winner change + recompile w
   assert.equal(app.hostEditorTextForTest(), 'host draft', 'the hidden host editor is never written')
 })
 
-test('B-61b: a plugin editor winner change/recompile while Approval owns the seat survives the round trip', async () => {
+test('a plugin editor winner change/recompile while Approval owns the seat survives the round trip', async () => {
   const registry = new EditorRegistry()
   const { vt, app } = startApp(registry)
   await vt.waitForRender()
@@ -3511,7 +3511,7 @@ test('B-61b: a plugin editor winner change/recompile while Approval owns the sea
   assert.equal(app.focusSeatForTest(), 'editor', 'the editor seat owns the derived seat after the Approval')
 })
 
-test('B-62: the REAL History tenant survives a Question↔Save Location handoff and is restored exactly once at the END', async () => {
+test('the REAL History tenant survives a Question↔Save Location handoff and is restored exactly once at the END', async () => {
   const history: import('../../src/client/history/search.ts').HistorySearchSource = {
     search: async () => ({
       results: [{ id: 'h1', content: 'handoff prompt', cwd: '/work/a', ts: 1, sourceFile: '/h.jsonl', sourceByteOffset: 1 }],
@@ -3548,7 +3548,7 @@ test('B-62: the REAL History tenant survives a Question↔Save Location handoff 
   assert.equal(app.seatTextForTest(), 'handoff draft', 'the draft survived the whole handoff')
 })
 
-test('B-63: the REAL History tenant: a throwing stale cleanup while parking an Approval surfaces the error identity and rolls the owner back once', async (t) => {
+test('the REAL History tenant: a throwing stale cleanup while parking an Approval surfaces the error identity and rolls the owner back once', async (t) => {
   const history: import('../../src/client/history/search.ts').HistorySearchSource = {
     search: async () => ({
       results: [{ id: 'h1', content: 'stale cleanup prompt', cwd: '/work/a', ts: 1, sourceFile: '/h.jsonl', sourceByteOffset: 1 }],

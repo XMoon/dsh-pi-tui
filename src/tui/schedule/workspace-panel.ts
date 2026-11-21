@@ -1,0 +1,2719 @@
+/**
+ * The ONE Schedule workspace panel (S5-PR4): a fullscreen, leased layout root
+ * that paints the controller's official catalog snapshot and forwards user
+ * actions as the ONE semantic intent stream. It never reads a Host, never
+ * keeps a second task model and never owns a screen lease — the host leases
+ * the terminal, calls {@link ScheduleWorkspacePanel.setSnapshot} on every
+ * controller change and routes pointer presses/clicks to this root.
+ *
+ * The panel is the focus target of that lease: it receives every key and
+ * decides the mode-local intent (list/detail/history/editor/help/confirm).
+ * `render(width)` is pure over the latest snapshot and panel-local view state
+ * (scroll offsets, search binding, the in-panel chooser); it starts no timer,
+ * calls no Host and dispatches nothing. Mouse actions are resolved only
+ * against the LAST painted frame and a task row is re-proved by its stable id
+ * in the CURRENT snapshot, so a stale frame cannot act.
+ *
+ * @module @xmoon76/dsh-pi-tui/tui/schedule/workspace-panel
+ */
+
+import {
+  CURSOR_MARKER,
+  Input,
+  Key,
+  matchesKey,
+  truncateToWidth,
+  visibleWidth,
+  wrapTextWithAnsi,
+} from '@xmoon76/pi-tui'
+import type { Component, Focusable, TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-tui'
+import {
+  SCHEDULE_COPY,
+  type ScheduleCatalogEntry,
+  type ScheduleConfirm,
+  type ScheduleFilter,
+  type ScheduleIntent,
+  type ScheduleNotice,
+  type ScheduleWorkspaceSnapshot,
+} from '../../app/schedule/presentation.ts'
+import {
+  editorFields,
+  focusedField,
+  SCHEDULE_WEEKDAYS,
+  type ScheduleEditorDraft,
+  type ScheduleFormField,
+  type ScheduleTargetKind,
+  type ScheduleTimingPreset,
+} from '../../domain/schedule/form.ts'
+import {
+  EDITOR_LABEL_WIDTH,
+  editorChooserTitle,
+  editorFieldHint,
+  editorFieldValue,
+  editorFocusIntent,
+  fieldIndexById,
+  isEditorTextInput,
+  sessionChooserOptions,
+  targetChooserOptions,
+  timingChooserOptions,
+  type ScheduleEditorChoice,
+} from './form.ts'
+import {
+  deliveryFacts,
+  formatDeliveryFloor,
+  formatExecutionActivity,
+  formatLocalInstant,
+  formatListOccurrence,
+  formatListRepeat,
+  formatOccurrence,
+  formatRuleSummary,
+  formatSeconds,
+  formatTargetSummary,
+  officialTimeZone,
+  scheduleStatusWord,
+  shortScheduleId,
+  type ScheduleTaskStatus,
+} from './format.ts'
+import {
+  ACTION_BAR_SEPARATOR,
+  renderActionBarRow,
+  type ActionBarSegment,
+} from '../presentation/action-bar.ts'
+import { sanitizedPhysicalLine } from '../presentation/lines.ts'
+import { color } from '../theme/runtime.ts'
+import { formatKeyId } from '../keybindings/hints.ts'
+
+type ScheduleHistoryMessageId = NonNullable<ScheduleWorkspaceSnapshot['history']>['records'][number]['messageId']
+
+/** The two-column layout boundary. */
+export const SCHEDULE_WIDE_COLUMNS = 120
+export const SCHEDULE_WIDE_ROWS = 30
+/** The narrow (<80 columns) action-bar order. */
+const NARROW_COLUMNS = 80
+const FILTER_CYCLE: readonly ScheduleFilter[] = ['active', 'paused', 'ended', 'all']
+const FILTER_CYCLE_HINT = `${formatKeyId(Key.tab)}/${formatKeyId(Key.shift(Key.tab))}`
+
+/** The label column of a detail fact row. */
+const DETAIL_LABEL_WIDTH = 26
+
+/** The responsive shape of one Schedule frame. */
+export type ScheduleWorkspaceLayout = 'single' | 'wide'
+
+/**
+ * Derive the responsive layout from the LIVE terminal size. There is NO
+ * minimum-size refusal gate (design-language §8): the two-column layout needs
+ * ≥120×≥30, every narrower or shorter terminal keeps the fully interactive
+ * single column and degrades its decoration instead.
+ */
+export function scheduleWorkspaceLayout(columns: number, rows: number): ScheduleWorkspaceLayout {
+  const cols = Math.floor(columns)
+  const lines = Math.floor(rows)
+  if (!Number.isFinite(cols) || !Number.isFinite(lines)) return 'single'
+  return cols >= SCHEDULE_WIDE_COLUMNS && lines >= SCHEDULE_WIDE_ROWS ? 'wide' : 'single'
+}
+
+function weekdayChooserOptions(): readonly ScheduleEditorChoice[] {
+  const labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+  return SCHEDULE_WEEKDAYS.map((weekday, index) => ({
+    label: labels[index]!,
+    value: String(weekday),
+  }))
+}
+
+/** The panel's construction inputs. */
+export interface ScheduleWorkspacePanelDeps {
+  /** The CURRENT controller snapshot; called on every frame. */
+  readonly snapshot: () => ScheduleWorkspaceSnapshot
+  /** The ONE semantic intent entry (the controller owns all semantics). */
+  readonly dispatch: (intent: ScheduleIntent) => void
+  /** Repaint request for panel-local state changes (scroll, search focus). */
+  readonly requestRender: () => void
+  /** Live terminal rows. */
+  readonly rows: () => number
+  /** Live terminal columns. */
+  readonly columns: () => number
+  /** Close the workspace (only the list root's Esc does this). */
+  readonly close: () => void
+}
+
+/** A semantic action painted somewhere in the frame. */
+type ScheduleAction =
+  | 'new'
+  | 'refresh'
+  | 'clear-ended'
+  | 'help'
+  | 'search'
+  | 'enter-detail'
+  | 'close'
+  | 'history-more'
+  | 'detail-history'
+  | 'detail-open-conversation'
+  | 'detail-refresh-roster'
+  | 'history-refresh-roster'
+  | 'history-open'
+  | 'history-toggle-expand'
+  | 'detail-edit'
+  | 'detail-toggle'
+  | 'detail-run'
+  | 'detail-delete'
+  | 'back'
+  | 'close-help'
+  | 'confirm'
+  | 'cancel'
+
+/** What one painted pointer region means. */
+type ScheduleHit =
+  | { readonly kind: 'row'; readonly id: string }
+  | { readonly kind: 'history-record'; readonly messageId: string }
+  | { readonly kind: 'history-link'; readonly messageId: string }
+  | { readonly kind: 'detail-link' }
+  | { readonly kind: 'filter'; readonly filter: ScheduleFilter }
+  | { readonly kind: 'search' }
+  | { readonly kind: 'action'; readonly action: ScheduleAction }
+  | { readonly kind: 'field'; readonly id: string }
+
+/** One painted pointer region of the last frame. */
+interface PaintedRegion {
+  readonly row: number
+  readonly from: number
+  readonly to: number
+  readonly hit: ScheduleHit
+}
+
+/** The LAST painted frame; the only geometry a pointer may resolve against. */
+interface PaintedFrame {
+  readonly width: number
+  readonly height: number
+  readonly regions: readonly PaintedRegion[]
+  /** The page this frame was painted for: a click on a frame from another mode
+   *  (or another confirmation identity) is stale and must do nothing. */
+  readonly mode: ScheduleWorkspaceSnapshot['mode']
+  readonly confirmToken: number | undefined
+  /** The TASK the Detail/Editor page was painted for. A same-mode switch to a
+   *  different task (or a different editor instance) makes every hit in this
+   *  frame stale even though mode/confirmation did not change. */
+  readonly subjectId: string | null
+  /** The observed subject FACTS this frame painted (the row the Controller's
+   *  `selectedEntry` precedence would act on: `detail` first, then the catalog
+   *  row) — frozen at paint time, never re-derived at press/release. */
+  readonly subjectFacts: string
+  /** The List selection this frame painted (List actions act on it). */
+  readonly listSelection: string | null
+  /** The History cursor this frame painted (the `more` action pages it). */
+  readonly historyCursor: string | null
+  readonly historySelection: ScheduleHistoryMessageId | null
+  readonly historyFacts: string
+  readonly rosterFacts: string
+  readonly navigationPending: boolean
+  /** The PAGE INSTANCE generation this frame painted. Re-entering a page (an
+   *  editor reopen, a History reopen, a Help reopen) bumps it, so a gesture
+   *  pressed on a closed instance can never act on its reopen even when every
+   *  other painted identity recurs (the ABA identity). */
+  readonly pageEpoch: number
+}
+
+/** One piece of a painted row. */
+interface CellSegment {
+  /** Unpainted text used for fit/truncation and width accounting. */
+  readonly plain: string
+  /** Paints the fitted text. */
+  readonly paint?: (text: string) => string
+  /** Pre-painted text that already fits (the focused text field's Input). */
+  readonly raw?: string
+  readonly hit?: ScheduleHit
+}
+
+/** One logical body row (a row hit or an editor field may cover it whole). */
+interface BodyLine {
+  readonly segments: readonly CellSegment[]
+  readonly rowId?: string
+  readonly fieldId?: string
+  /** The physical row the multi-line field's caret is on (scroll anchor). */
+  readonly caretRow?: boolean
+  /** The open editor chooser's heading, and the selected option's index. */
+  readonly chooserTitle?: boolean
+  readonly chooserIndex?: number
+}
+
+/** The panel-local chooser one editor field opens. */
+interface OpenChooser {
+  readonly kind: 'choice' | 'weekdays'
+  readonly fieldId: string
+  readonly title: string
+  readonly options: readonly ScheduleEditorChoice[]
+  readonly index: number
+  readonly pageEpoch: number
+}
+
+/** The identity of the confirmation the last frame painted. */
+interface PaintedConfirm {
+  readonly kind: ScheduleConfirm['kind']
+  readonly token: number
+}
+
+/** One status/read banner the list paints above its rows. */
+interface PaintedBanner {
+  readonly text: string
+  readonly paint: (text: string) => string
+}
+
+/**
+ * The ONE Schedule workspace panel.
+ */
+export class ScheduleWorkspacePanel implements Component, Focusable {
+  private readonly deps: ScheduleWorkspacePanelDeps
+  private snapshot: ScheduleWorkspaceSnapshot
+  private disposed = false
+  private _focused = false
+  private searchFocused = false
+  private chooser: OpenChooser | undefined
+  private listScroll = 0
+  /** The EFFECTIVE viewport positions of the LAST PAINTED frame (what the
+   *  render actually drew after clamp/reveal). A press records them, and the
+   *  next painted frame retires the press only when one really moved. */
+  private paintedViewport = { list: 0, detail: 0, history: 0, editor: 0, help: 0 }
+  /** A wheel gesture owns the list viewport until the selection changes. */
+  private listScrollPinned = false
+  private detailScroll = 0
+  private historyScroll = 0
+  private historyScrollPinned = false
+  private historySelectedMessageId: ScheduleHistoryMessageId | undefined
+  private readonly historyExpandedMessageIds = new Set<ScheduleHistoryMessageId>()
+  private editorScroll = 0
+  private helpScroll = 0
+  private frame: PaintedFrame | undefined
+  private paintedConfirm: PaintedConfirm | undefined
+  /** One in-flight press: the hit key AND the painted identity it started on. */
+  private pressed: {
+    readonly key: string
+    readonly mode: ScheduleWorkspaceSnapshot['mode']
+    readonly subjectId: string | null
+    readonly confirmToken: number | undefined
+    readonly subjectFacts: string
+    readonly listSelection: string | null
+    readonly historyCursor: string | null
+    readonly historySelection: ScheduleHistoryMessageId | null
+    readonly historyFacts: string
+    readonly rosterFacts: string
+    readonly navigationPending: boolean
+    readonly pageEpoch: number
+    readonly viewport: { readonly list: number; readonly detail: number; readonly history: number; readonly editor: number; readonly help: number }
+  } | undefined
+  private readonly searchInput = new Input({ prompt: '' })
+  private readonly editorInput = new Input({ prompt: '' })
+  private editorFieldId: string | undefined
+  /** The snapshot value the search binding last observed, and the last value
+   *  this panel dispatched. A newer local edit is never overwritten by a
+   *  snapshot that has not caught up with it. */
+  private searchBaseline: string | undefined
+  private searchDispatched: string | undefined
+  /** The same binding facts for the focused editor text field. */
+  private editorBaseline: string | undefined
+  private editorDispatched: string | undefined
+  /** The raw multi-line buffer of the focused RAW field (Prompt/RRULE,
+   *  newlines preserved: the stored bytes are never flattened). */
+  private rawDraft: string | undefined
+  /** The exact value this panel last dispatched for that RAW field. */
+  private rawDispatched: string | undefined
+  /** The raw field's caret, as a CODE-POINT index into {@link rawDraft}. */
+  private rawCursor: number | undefined
+
+  constructor(deps: ScheduleWorkspacePanelDeps) {
+    this.deps = deps
+    this.snapshot = deps.snapshot()
+    this.historySelectedMessageId = this.snapshot.history?.records[0]?.messageId
+  }
+
+  /** Publish a newer controller snapshot (the host calls this on every change). */
+  setSnapshot(snapshot: ScheduleWorkspaceSnapshot): void {
+    if (this.disposed) return
+    const previous = this.snapshot
+    this.snapshot = snapshot
+    if (snapshot.mode !== previous.mode) {
+      this.detailScroll = 0
+      if (!(snapshot.mode === 'help' && previous.mode === 'history')
+        && !(snapshot.mode === 'history' && previous.mode === 'help')) {
+        this.historyScroll = 0
+        this.historyScrollPinned = false
+      }
+      this.editorScroll = 0
+      this.helpScroll = 0
+    }
+    const historyContext = (value: ScheduleWorkspaceSnapshot): boolean =>
+      value.mode === 'history' || (value.mode === 'help' && value.history !== undefined)
+    const currentHistory = snapshot.history?.records ?? []
+    const previousHistory = previous.history?.records ?? []
+    const previousHistorySelection = this.historySelectedMessageId
+    if (!historyContext(snapshot) || !historyContext(previous)
+      || snapshot.selectedId !== previous.selectedId) {
+      this.historySelectedMessageId = currentHistory[0]?.messageId
+      this.historyExpandedMessageIds.clear()
+    } else {
+      const currentIds = new Set(currentHistory.map(record => record.messageId))
+      if (this.historySelectedMessageId !== undefined && !currentIds.has(this.historySelectedMessageId)) {
+        this.historySelectedMessageId = currentHistory[0]?.messageId
+      } else if (this.historySelectedMessageId === undefined && currentHistory.length > 0) {
+        this.historySelectedMessageId = currentHistory[0]?.messageId
+      }
+      for (const messageId of this.historyExpandedMessageIds) {
+        if (!currentIds.has(messageId)) this.historyExpandedMessageIds.delete(messageId)
+      }
+      if (previousHistorySelection !== this.historySelectedMessageId) this.historyScrollPinned = false
+    }
+    if (snapshot.mode !== 'list'
+      || previous.mode !== 'list'
+      || previous.selectedId !== snapshot.selectedId
+      || previous.filter !== snapshot.filter
+      || previous.query !== snapshot.query) {
+      // The selection/filter/search changed: the controller's cursor wins
+      // again over a wheel gesture that pinned the viewport.
+      this.listScrollPinned = false
+    }
+    const editorInstanceChanged = snapshot.editorEpoch !== previous.editorEpoch
+      || snapshot.editor?.id !== previous.editor?.id
+      || snapshot.editor?.mode !== previous.editor?.mode
+      || (snapshot.editor === undefined) !== (previous.editor === undefined)
+    if (editorInstanceChanged || snapshot.editor === undefined) {
+      this.chooser = undefined
+      this.editorFieldId = undefined
+      this.editorBaseline = undefined
+      this.editorDispatched = undefined
+      this.rawDraft = undefined
+      this.rawDispatched = undefined
+      this.rawCursor = undefined
+    } else if (snapshot.mode !== 'editor'
+      || snapshot.pageEpoch !== previous.pageEpoch
+      || (this.chooser !== undefined
+        && !editorFields(snapshot.editor).some(field => field.id === this.chooser?.fieldId))) {
+      // A confirm/help/page-generation change invalidates panel-local chooser
+      // hits, but the same Editor instance still owns its text and caret state.
+      this.chooser = undefined
+    }
+    if (snapshot.mode !== 'list') {
+      this.searchFocused = false
+      this.searchBaseline = undefined
+      this.searchDispatched = undefined
+    }
+    if (snapshot.confirm === undefined) this.paintedConfirm = undefined
+    // Adopt a newer field value BEFORE the next input event: a snapshot change
+    // is committed here, not only on the next frame.
+    if (snapshot.mode === 'editor') this.syncEditorInput()
+  }
+
+  /** Release panel-local state exactly once (idempotent). */
+  dispose(): void {
+    if (this.disposed) return
+    this.disposed = true
+    this.frame = undefined
+    this.pressed = undefined
+    this.historySelectedMessageId = undefined
+    this.historyExpandedMessageIds.clear()
+    this.paintedConfirm = undefined
+    this.chooser = undefined
+    this.editorFieldId = undefined
+    this.editorBaseline = undefined
+    this.editorDispatched = undefined
+    this.rawDraft = undefined
+    this.searchBaseline = undefined
+    this.searchDispatched = undefined
+    this.searchInput.focused = false
+    this.editorInput.focused = false
+  }
+
+  get focused(): boolean {
+    return this._focused
+  }
+
+  set focused(value: boolean) {
+    this._focused = value
+    this.searchInput.focused = value && this.searchFocused
+    this.editorInput.focused = value && this.snapshot.mode === 'editor' && this.chooser === undefined
+  }
+
+  /** The Component contract: no child theme cache to invalidate. */
+  invalidate(): void {
+    this.searchInput.invalidate()
+    this.editorInput.invalidate()
+  }
+
+  // ── input ──────────────────────────────────────────────────────────────────
+
+  handleInput(data: string): void {
+    if (this.disposed) return
+    if (this.snapshot.confirm !== undefined) {
+      this.handleConfirmInput(data)
+      return
+    }
+    if (this.chooser !== undefined) {
+      this.handleChooserInput(data)
+      return
+    }
+    if (this.searchFocused) {
+      this.handleSearchInput(data)
+      return
+    }
+    switch (this.snapshot.mode) {
+      case 'list':
+        this.handleListInput(data)
+        return
+      case 'detail':
+        this.handleDetailInput(data)
+        return
+      case 'history':
+        this.handleHistoryInput(data)
+        return
+      case 'editor':
+        this.handleEditorInput(data)
+        return
+      case 'help':
+        this.handleHelpInput(data)
+        return
+    }
+  }
+
+  private handleConfirmInput(data: string): void {
+    if (this.matchesLetter(data, 'y')) {
+      this.commitPaintedConfirm()
+      return
+    }
+    if (this.matchesLetter(data, 'n') || matchesKey(data, 'escape')) {
+      this.cancelConfirm()
+    }
+  }
+
+  private handleListInput(data: string): void {
+    if (matchesKey(data, 'escape')) {
+      this.deps.close()
+      return
+    }
+    if (matchesKey(data, 'up') || this.matchesLetter(data, 'k')) {
+      this.deps.dispatch({ kind: 'move', delta: -1 })
+      return
+    }
+    if (matchesKey(data, 'down') || this.matchesLetter(data, 'j')) {
+      this.deps.dispatch({ kind: 'move', delta: 1 })
+      return
+    }
+    if (matchesKey(data, 'tab') || matchesKey(data, 'shift+tab')) {
+      const delta = matchesKey(data, 'shift+tab') ? -1 : 1
+      this.deps.dispatch({ kind: 'set-filter', filter: nextListFilter(this.snapshot.filter, delta) })
+      return
+    }
+    if (matchesKey(data, '/')) {
+      this.focusSearch()
+      return
+    }
+    if (this.matchesLetter(data, 'a')) {
+      this.deps.dispatch({ kind: 'set-filter', filter: 'active' })
+      return
+    }
+    if (this.matchesLetter(data, 'p')) {
+      this.deps.dispatch({ kind: 'set-filter', filter: 'paused' })
+      return
+    }
+    if (this.matchesLetter(data, 'e')) {
+      this.deps.dispatch({ kind: 'set-filter', filter: 'ended' })
+      return
+    }
+    if (this.matchesLetter(data, 'l')) {
+      this.deps.dispatch({ kind: 'set-filter', filter: 'all' })
+      return
+    }
+    if (this.matchesLetter(data, 'r')) {
+      this.deps.dispatch({ kind: 'refresh' })
+      return
+    }
+    if (this.matchesLetter(data, 'n')) {
+      this.deps.dispatch({ kind: 'open-create' })
+      return
+    }
+    if (matchesKey(data, 'enter')) {
+      this.deps.dispatch({ kind: 'open-detail' })
+      return
+    }
+    if (this.matchesLetter(data, 'x')) {
+      this.deps.dispatch({ kind: 'ask-clear-ended' })
+      return
+    }
+    if (matchesKey(data, '?')) {
+      this.deps.dispatch({ kind: 'open-help' })
+    }
+  }
+
+  private handleDetailInput(data: string): void {
+    if (matchesKey(data, '?')) {
+      this.deps.dispatch({ kind: 'open-help' })
+      return
+    }
+    if (matchesKey(data, 'escape')) {
+      this.deps.dispatch({ kind: 'back' })
+      return
+    }
+    if (matchesKey(data, 'pageUp') || matchesKey(data, 'pageDown')) {
+      this.pageBody(matchesKey(data, 'pageUp') ? -1 : 1)
+      return
+    }
+    if (this.matchesLetter(data, 'h')) {
+      this.deps.dispatch({ kind: 'open-history' })
+      return
+    }
+    if (this.matchesLetter(data, 'o')) {
+      this.deps.dispatch({ kind: 'open-detail-conversation' })
+      return
+    }
+    if (this.matchesLetter(data, 'r')) {
+      this.deps.dispatch({ kind: 'refresh-session-roster' })
+      return
+    }
+    if (this.matchesLetter(data, 'e')) {
+      this.deps.dispatch({ kind: 'open-edit' })
+      return
+    }
+    if (matchesKey(data, 'space')) {
+      this.deps.dispatch({ kind: 'toggle-active' })
+      return
+    }
+    if (this.matchesLetter(data, 'u')) {
+      this.deps.dispatch({ kind: 'ask-run' })
+      return
+    }
+    if (this.matchesLetter(data, 'd')) {
+      this.deps.dispatch({ kind: 'ask-delete' })
+    }
+  }
+
+  private handleHistoryInput(data: string): void {
+    if (matchesKey(data, '?')) {
+      this.deps.dispatch({ kind: 'open-help' })
+      return
+    }
+    if (matchesKey(data, 'escape')) {
+      this.deps.dispatch({ kind: 'back' })
+      return
+    }
+    if (matchesKey(data, 'pageUp') || matchesKey(data, 'pageDown')) {
+      this.pageBody(matchesKey(data, 'pageUp') ? -1 : 1)
+      return
+    }
+    if (matchesKey(data, 'up') || this.matchesLetter(data, 'k')) {
+      this.moveHistorySelection(-1)
+      return
+    }
+    if (matchesKey(data, 'down') || this.matchesLetter(data, 'j')) {
+      this.moveHistorySelection(1)
+      return
+    }
+    if (matchesKey(data, 'enter')) {
+      const messageId = this.historySelectedMessageId
+      if (messageId !== undefined) this.deps.dispatch({ kind: 'open-delivery-conversation', messageId })
+      return
+    }
+    if (this.matchesLetter(data, 'x')) {
+      this.toggleHistoryExpansion()
+      return
+    }
+    if (this.matchesLetter(data, 'm') && this.snapshot.history?.nextBefore !== undefined) {
+      this.deps.dispatch({ kind: 'history-more' })
+      return
+    }
+    if (this.matchesLetter(data, 'r')) {
+      this.deps.dispatch({ kind: 'refresh-session-roster' })
+    }
+  }
+
+  private moveHistorySelection(delta: -1 | 1): void {
+    const records = this.snapshot.history?.records ?? []
+    if (records.length === 0) return
+    const index = records.findIndex(record => record.messageId === this.historySelectedMessageId)
+    const next = Math.max(0, Math.min(records.length - 1, (index < 0 ? 0 : index) + delta))
+    const messageId = records[next]?.messageId
+    if (messageId === undefined || messageId === this.historySelectedMessageId) return
+    this.historySelectedMessageId = messageId
+    this.historyScrollPinned = false
+    this.deps.requestRender()
+  }
+
+  private toggleHistoryExpansion(): void {
+    const record = this.snapshot.history?.records.find(item => item.messageId === this.historySelectedMessageId)
+    if (record?.prompt === undefined) return
+    if (this.historyExpandedMessageIds.has(record.messageId)) this.historyExpandedMessageIds.delete(record.messageId)
+    else this.historyExpandedMessageIds.add(record.messageId)
+    this.deps.requestRender()
+  }
+
+  private handleEditorInput(data: string): void {
+    const draft = this.snapshot.editor
+    if (draft === undefined) return
+    // The Controller freezes the draft while a Host write is pending; the panel
+    // owns the local input buffers and must honour the SAME contract, or a
+    // rejected `set-field` would leave the visible buffer ahead of the draft.
+    if (this.snapshot.busy) return
+    const focused = focusedField(draft)
+    // Text fields own printable input; help is available only from a choice field.
+    const typing = focused !== undefined && (isEditorTextInput(focused) || this.isRawEditorField(focused))
+    if (matchesKey(data, '?') && !typing) {
+      this.deps.dispatch({ kind: 'open-help' })
+      return
+    }
+    if (matchesKey(data, 'escape')) {
+      this.deps.dispatch({ kind: 'back' })
+      return
+    }
+    if (matchesKey(data, 'ctrl+s')) {
+      this.deps.dispatch({ kind: 'save' })
+      return
+    }
+    if (matchesKey(data, 'ctrl+g')) {
+      if (draft.mode === 'edit' && (this.snapshot.editorRecovery === 'conflict' || this.snapshot.editorRecovery === 'unknown')) {
+        this.deps.dispatch({ kind: 'review-with-my-edits' })
+      }
+      return
+    }
+    if (matchesKey(data, 'ctrl+r')) {
+      if (draft.mode === 'edit' && this.snapshot.editorRecovery !== 'missing') {
+        this.deps.dispatch({ kind: 'reload-latest' })
+      }
+      return
+    }
+    if (matchesKey(data, 'tab')) {
+      this.deps.dispatch(editorFocusIntent(draft, 1))
+      this.deps.requestRender()
+      return
+    }
+    if (matchesKey(data, 'shift+tab')) {
+      this.deps.dispatch(editorFocusIntent(draft, -1))
+      this.deps.requestRender()
+      return
+    }
+    if (focused !== undefined && this.isRawEditorField(focused)) {
+      // A RAW field is MULTI-LINE text: Enter inserts a line, Backspace deletes,
+      // printable input (a paste included) appends verbatim.
+      this.handleRawInput(draft, focused, data)
+      return
+    }
+    if (matchesKey(data, 'enter')) {
+      this.activateField(draft)
+      return
+    }
+    const field = focusedField(draft)
+    if (field === undefined || !isEditorTextInput(field)) return
+    this.syncEditorInput()
+    let input = data
+    if (field.id === 'timing-quantity') {
+      const pasted = data.match(/^\x1b\[200~([\s\S]*)\x1b\[201~$/u)?.[1]
+      if (pasted !== undefined) {
+        if (!/^\d*$/.test(pasted)) return
+        input = pasted
+      } else if (this.isPrintableInput(data) && !/^\d+$/.test(data)) {
+        return
+      }
+    }
+    this.editorInput.handleInput(input)
+    const next = this.editorInput.getValue()
+    if (next !== this.editorDispatched) {
+      this.editorDispatched = next
+      this.deps.dispatch({ kind: 'set-field', fieldId: field.id, value: next })
+      this.deps.requestRender()
+    }
+  }
+
+  /** Prompt and RRULE are RAW multi-line fields: their stored bytes (newlines
+   *  included) are edited verbatim, never through the single-line sanitizer. */
+  private isRawEditorField(field: ScheduleFormField): boolean {
+    return field.id === 'prompt' || field.id === 'timing-rrule'
+  }
+
+  private handleRawInput(draft: ScheduleEditorDraft, field: ScheduleFormField, data: string): void {
+    const buffer = this.rawDraft ?? field.value
+    const points = Array.from(buffer)
+    let caret = Math.max(0, Math.min(this.rawCursor ?? points.length, points.length))
+    const lineStart = (at: number): number => {
+      const newline = points.lastIndexOf('\n', at - 1)
+      return newline < 0 ? 0 : newline + 1
+    }
+    const lineEnd = (at: number): number => {
+      const newline = points.indexOf('\n', at)
+      return newline < 0 ? points.length : newline
+    }
+    let insert: string[] | undefined
+    const pasted = data.match(/^\x1b\[200~([\s\S]*)\x1b\[201~$/u)?.[1]
+    if (pasted !== undefined) insert = Array.from(pasted)
+    else if (matchesKey(data, 'enter')) insert = ['\n']
+    else if (matchesKey(data, 'backspace')) {
+      if (caret > 0) { points.splice(caret - 1, 1); caret -= 1 }
+    } else if (matchesKey(data, 'delete')) {
+      if (caret < points.length) points.splice(caret, 1)
+    } else if (matchesKey(data, 'left')) {
+      caret = Math.max(0, caret - 1)
+    } else if (matchesKey(data, 'right')) {
+      caret = Math.min(points.length, caret + 1)
+    } else if (matchesKey(data, 'home')) {
+      caret = lineStart(caret)
+    } else if (matchesKey(data, 'end')) {
+      caret = lineEnd(caret)
+    } else if (matchesKey(data, 'up') || matchesKey(data, 'down')) {
+      // Keep the VISUAL (terminal-cell) column across lines: a code-point
+      // column would misplace the caret in mixed CJK/Latin text (e.g. after
+      // '汉' the cell column is 2, not 1).
+      const start = lineStart(caret)
+      const columnCells = visibleWidth(points.slice(start, caret).join(''))
+      const indexAtCells = (from: number, to: number): number => {
+        let used = 0
+        let index = from
+        while (index < to) {
+          const width = visibleWidth(points[index] ?? '')
+          if (used + width > columnCells) break
+          used += width
+          index += 1
+        }
+        // A wide glyph straddling the target column: land on its nearer side.
+        if (index < to) {
+          const width = visibleWidth(points[index] ?? '')
+          if (columnCells - used >= width / 2) index += 1
+        }
+        return index
+      }
+      if (matchesKey(data, 'up') && start > 0) {
+        const previousStart = lineStart(start - 1)
+        caret = indexAtCells(previousStart, start - 1)
+      } else if (matchesKey(data, 'down') && lineEnd(caret) < points.length) {
+        const nextStart = lineEnd(caret) + 1
+        caret = indexAtCells(nextStart, lineEnd(nextStart))
+      }
+    } else if (this.isPrintableInput(data)) {
+      insert = Array.from(data)
+    } else {
+      return
+    }
+    if (insert !== undefined) {
+      points.splice(caret, 0, ...insert)
+      caret += insert.length
+    }
+    const next = points.join('')
+    this.rawCursor = caret
+    // Caret-only movement changes no text: it must not publish a draft write.
+    if (next !== buffer) {
+      this.rawDraft = next
+      this.rawDispatched = next
+      this.deps.dispatch({ kind: 'set-field', fieldId: field.id, value: next })
+    }
+    this.deps.requestRender()
+  }
+
+  /** Any printable Unicode input (CJK, emoji, text pastes) — only C0/C1
+   *  control bytes (and the ESC introducer) are input protocol, never text. */
+  private isPrintableInput(data: string): boolean {
+    if (data.length === 0) return false
+    for (const character of data) {
+      const code = character.codePointAt(0) ?? 0
+      if (code === 0x0a) continue
+      if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) return false
+    }
+    return true
+  }
+
+  private handleHelpInput(data: string): void {
+    if (matchesKey(data, 'escape')) {
+      this.deps.dispatch({ kind: 'close-help' })
+      return
+    }
+    if (matchesKey(data, 'pageUp') || matchesKey(data, 'pageDown')) {
+      this.pageBody(matchesKey(data, 'pageUp') ? -1 : 1)
+    }
+  }
+
+  private handleSearchInput(data: string): void {
+    if (matchesKey(data, 'escape')) {
+      this.exitSearch()
+      return
+    }
+    if (matchesKey(data, 'tab') || matchesKey(data, 'shift+tab')) {
+      this.exitSearch()
+      return
+    }
+    this.syncSearchInput()
+    this.searchInput.handleInput(data)
+    const next = this.searchInput.getValue()
+    if (next !== this.searchDispatched) {
+      this.searchDispatched = next
+      this.deps.dispatch({ kind: 'set-query', query: next })
+      this.deps.requestRender()
+    }
+  }
+
+  private handleChooserInput(data: string): void {
+    const chooser = this.chooser
+    if (chooser === undefined) return
+    if (chooser.pageEpoch !== this.snapshot.pageEpoch || this.snapshot.mode !== 'editor') {
+      this.chooser = undefined
+      return
+    }
+    if (matchesKey(data, 'escape')) {
+      this.chooser = undefined
+      this.deps.requestRender()
+      return
+    }
+    if (matchesKey(data, 'tab') || matchesKey(data, 'shift+tab')) {
+      this.chooser = undefined
+      const draft = this.snapshot.editor
+      if (draft !== undefined) this.deps.dispatch(editorFocusIntent(draft, matchesKey(data, 'shift+tab') ? -1 : 1))
+      this.deps.requestRender()
+      return
+    }
+    if (matchesKey(data, 'up') || this.matchesLetter(data, 'k')) {
+      this.chooser = { ...chooser, index: wrapIndex(chooser.index - 1, chooser.options.length) }
+      this.deps.requestRender()
+      return
+    }
+    if (matchesKey(data, 'down') || this.matchesLetter(data, 'j')) {
+      this.chooser = { ...chooser, index: wrapIndex(chooser.index + 1, chooser.options.length) }
+      this.deps.requestRender()
+      return
+    }
+    if (chooser.kind === 'weekdays' && (matchesKey(data, 'space') || matchesKey(data, 'enter'))) {
+      const option = chooser.options[chooser.index]
+      if (option !== undefined) this.deps.dispatch({ kind: 'toggle-weekday', weekday: Number(option.value) })
+      this.deps.requestRender()
+      return
+    }
+    if (chooser.kind === 'choice' && matchesKey(data, 'enter')) this.chooseOption(chooser)
+  }
+
+  private chooseOption(chooser: OpenChooser): void {
+    const option = chooser.options[chooser.index]
+    this.chooser = undefined
+    if (option === undefined) {
+      this.deps.requestRender()
+      return
+    }
+    switch (chooser.fieldId) {
+      case 'timing-kind':
+        this.deps.dispatch({ kind: 'select-timing-preset', preset: option.value as ScheduleTimingPreset })
+        return
+      case 'target-kind':
+        this.deps.dispatch({ kind: 'select-target-kind', target: option.value as ScheduleTargetKind })
+        return
+      case 'target-session':
+        this.deps.dispatch({ kind: 'select-target-session', sessionId: option.value })
+        return
+      default:
+        this.deps.requestRender()
+    }
+  }
+
+  private activateField(draft: ScheduleEditorDraft): void {
+    const field = focusedField(draft)
+    if (field === undefined) return
+    if (field.id === 'timing-kind') {
+      this.openChooser(field, timingChooserOptions())
+      return
+    }
+    if (field.id === 'target-kind') {
+      this.openChooser(field, targetChooserOptions())
+      return
+    }
+    if (field.id === 'target-session') {
+      this.openChooser(field, sessionChooserOptions(this.snapshot.sessions))
+      return
+    }
+    if (field.id === 'timing-weekdays') {
+      this.openChooser(field, weekdayChooserOptions(), 'weekdays')
+      return
+    }
+    if (field.kind === 'toggle') {
+      this.deps.dispatch({ kind: 'toggle-advanced' })
+      this.deps.requestRender()
+    }
+  }
+
+  private openChooser(
+    field: ScheduleFormField,
+    options: readonly ScheduleEditorChoice[],
+    kind: OpenChooser['kind'] = 'choice',
+  ): void {
+    if (options.length === 0) {
+      this.deps.requestRender()
+      return
+    }
+    this.chooser = {
+      kind,
+      fieldId: field.id,
+      title: editorChooserTitle(field),
+      options,
+      index: 0,
+      pageEpoch: this.snapshot.pageEpoch,
+    }
+    this.deps.requestRender()
+  }
+
+  private focusSearch(): void {
+    this.searchFocused = true
+    this.syncSearchInput()
+    this.deps.requestRender()
+  }
+
+  private exitSearch(): void {
+    this.searchFocused = false
+    this.searchInput.focused = false
+    this.deps.requestRender()
+  }
+
+  private commitPaintedConfirm(): void {
+    const confirm = this.snapshot.confirm
+    const painted = this.paintedConfirm
+    if (confirm === undefined || painted === undefined) return
+    if (confirm.kind !== painted.kind || confirm.token !== painted.token) return
+    this.deps.dispatch({ kind: 'confirm' })
+  }
+
+  private cancelConfirm(): void {
+    if (this.snapshot.confirm === undefined) return
+    this.deps.dispatch({ kind: 'cancel' })
+  }
+
+  /** Scroll a non-list body by one visible page. Panel-local, never a Host intent. */
+  private pageBody(direction: -1 | 1): void {
+    const page = Math.max(1, Math.floor(this.deps.rows()) - 4)
+    const frame = this.frame
+    if (frame === undefined) return
+    const layout = scheduleWorkspaceLayout(Math.min(frame.width, Math.max(1, Math.floor(this.deps.columns()))), frame.height)
+    if (this.snapshot.mode === 'detail') {
+      this.detailScroll = Math.max(0, this.detailScroll + direction * page)
+      this.retirePressedOnPendingViewport(frame, layout, 'detail')
+    } else if (this.snapshot.mode === 'history') {
+      this.historyScroll = Math.max(0, this.historyScroll + direction * page)
+      this.historyScrollPinned = true
+      this.retirePressedOnPendingViewport(frame, layout, 'history')
+    } else if (this.snapshot.mode === 'help') {
+      this.helpScroll = Math.max(0, this.helpScroll + direction * page)
+      this.retirePressedOnPendingViewport(frame, layout, 'help')
+    }
+    this.deps.requestRender()
+  }
+
+  private matchesLetter(data: string, letter: 'a' | 'd' | 'e' | 'h' | 'j' | 'k' | 'l' | 'm' | 'n' | 'o' | 'p' | 'r' | 'u' | 'x' | 'y'): boolean {
+    return matchesKey(data, letter) || matchesKey(data, Key.shift(letter))
+  }
+
+  // ── rendering ──────────────────────────────────────────────────────────────
+
+  /** The shared chrome budget of the CURRENT snapshot: which page chrome the
+   *  frame paints and what body height it leaves. `render` paints from it; the
+   *  pointer handlers read `bodyHeight` to predict the pending painted
+   *  viewport with the SAME math (no drift between predict and paint). */
+  private chromeBudget(paintedWidth: number, rows: number): {
+    readonly isListPage: boolean
+    readonly banner: PaintedBanner | undefined
+    readonly editorNotice: ScheduleWorkspaceSnapshot['notice']
+    readonly editorNoticeLines: readonly string[]
+    readonly bodyHeight: number
+  } {
+    const isListPage = this.snapshot.mode === 'list' && this.snapshot.confirm === undefined
+    const banner = this.listBanner()
+    const editorNotice = this.snapshot.mode === 'editor' && this.snapshot.confirm === undefined
+      ? this.snapshot.notice
+      : undefined
+    const wrappedEditorNotice = editorNotice === undefined
+      ? []
+      : wrapTextWithAnsi(
+          sanitizedPhysicalLine(editorNotice.text),
+          Math.max(1, paintedWidth - 2),
+        )
+    const statusBudget = Math.max(1, rows - 1 - (isListPage ? 2 : 0) - 1 - 1)
+    const editorNoticeLines = wrappedEditorNotice.length > statusBudget
+      ? [
+          ...wrappedEditorNotice.slice(0, statusBudget - 1),
+          `${truncateToWidth(
+            wrappedEditorNotice[statusBudget - 1] ?? '',
+            Math.max(1, paintedWidth - 3),
+            '',
+            false,
+          )}…`,
+        ]
+      : wrappedEditorNotice
+    const statusRows = editorNotice !== undefined ? editorNoticeLines.length : banner === undefined ? 0 : 1
+    const chromeRows = 1 + (isListPage ? 2 : 0) + statusRows + 1
+    const bodyHeight = Math.max(0, rows - chromeRows)
+    return { isListPage, banner, editorNotice, editorNoticeLines, bodyHeight }
+  }
+
+  render(width: number): string[] {
+    if (this.disposed) return []
+    const paintedWidth = Math.max(1, Math.floor(width))
+    const rows = Math.max(1, Math.floor(this.deps.rows()))
+    const columns = Math.max(1, Math.floor(this.deps.columns()))
+    const layout = scheduleWorkspaceLayout(Math.min(paintedWidth, columns), rows)
+    this.syncSearchInput()
+    this.syncEditorInput()
+    const snapshot = this.snapshot
+    this.paintedConfirm = snapshot.confirm === undefined
+      ? undefined
+      : { kind: snapshot.confirm.kind, token: snapshot.confirm.token }
+
+    const lines: string[] = []
+    const regions: PaintedRegion[] = []
+    const isListPage = snapshot.mode === 'list' && snapshot.confirm === undefined
+    this.paintTitleRow(lines, regions, paintedWidth)
+    if (isListPage) {
+      this.paintFilterRow(lines, regions, paintedWidth)
+      this.paintSearchRow(lines, regions, paintedWidth)
+    }
+    // A stale/error catalog is a fact about EVERY page: the detail and history
+    // snapshots behind it were read before the invalidation, so the banner is
+    // painted above the body instead of only inside the list.
+    const budget = this.chromeBudget(paintedWidth, rows)
+    const banner = budget.banner
+    const editorNotice = budget.editorNotice
+    const editorNoticeLines = budget.editorNoticeLines
+    if (editorNotice !== undefined) {
+      for (const [index, text] of editorNoticeLines.entries()) {
+        const prefix = index === 0 ? `${editorNotice.kind === 'error' ? '✗' : 'ℹ'} ` : '  '
+        const paint = editorNotice.kind === 'error' ? color.error : color.textMuted
+        lines.push(paint(`${prefix}${text}`))
+      }
+    } else if (banner !== undefined) {
+      lines.push(banner.paint(truncateToWidth(sanitizedPhysicalLine(banner.text), paintedWidth, '…', false)))
+    }
+    const bodyHeight = budget.bodyHeight
+
+    if (snapshot.confirm !== undefined) {
+      this.paintSingleBody(lines, regions, paintedWidth, bodyHeight, this.confirmBody(snapshot.confirm, paintedWidth), 0)
+    } else if (snapshot.mode === 'help') {
+      this.helpScroll = this.scrolled(this.helpScroll, this.helpBody(paintedWidth).length, bodyHeight)
+      this.paintedViewport.help = this.paintSingleBody(lines, regions, paintedWidth, bodyHeight, this.helpBody(paintedWidth), this.helpScroll)
+    } else if (layout === 'wide') {
+      this.paintWideBody(lines, regions, paintedWidth, bodyHeight)
+    } else {
+      this.paintSingleMode(lines, regions, paintedWidth, bodyHeight)
+    }
+
+    this.paintActionBar(lines, regions, paintedWidth)
+    while (lines.length < rows) lines.push(' '.repeat(paintedWidth))
+    if (this.pressed !== undefined) {
+      // An EFFECTIVE wheel is the wheel whose pointed pane's PAINTED viewport
+      // really moved. Comparing the effective positions (after clamp/reveal)
+      // avoids retiring a legitimate press for a wheel the render clamped back
+      // (over-scroll at an edge, caret-follow reveal), while any real window
+      // move retires it (overlay-focus §7 lists scroll among the
+      // press-invalidating changes).
+      const v = this.paintedViewport
+      const p = this.pressed.viewport
+      if (v.list !== p.list || v.detail !== p.detail || v.history !== p.history
+        || v.editor !== p.editor || v.help !== p.help) {
+        this.pressed = undefined
+      }
+    }
+    this.frame = {
+      width: paintedWidth,
+      height: lines.length,
+      regions,
+      mode: snapshot.mode,
+      confirmToken: snapshot.confirm?.token,
+      subjectId: snapshot.mode === 'detail'
+        ? (snapshot.selectedId === undefined ? null : String(snapshot.selectedId))
+        : snapshot.mode === 'editor'
+          ? (snapshot.editor?.id === undefined ? null : String(snapshot.editor.id))
+          : null,
+      // Frozen from the SAME snapshot this frame was painted from, with the
+      // Controller's own precedence (detail first, then the catalog row), so a
+      // press/release can never mix two read generations.
+      subjectFacts: frameSubjectFacts(snapshot),
+      listSelection: snapshot.mode === 'list'
+        ? (snapshot.selectedId === undefined ? null : String(snapshot.selectedId))
+        : null,
+      historyCursor: snapshot.mode === 'history' ? (snapshot.history?.nextBefore ?? null) : null,
+      historySelection: snapshot.mode === 'history' ? (this.historySelectedMessageId ?? null) : null,
+      historyFacts: historyFrameFacts(snapshot, this.historyExpandedMessageIds),
+      rosterFacts: JSON.stringify([snapshot.sessionRosterState, snapshot.availableSessionIds, snapshot.sessions]),
+      navigationPending: snapshot.navigationPending,
+      pageEpoch: snapshot.pageEpoch,
+    }
+    return lines.slice(0, rows)
+  }
+
+  private paintTitleRow(lines: string[], regions: PaintedRegion[], width: number): void {
+    const titles: Record<ScheduleWorkspaceSnapshot['mode'], string> = {
+      list: 'Tasks',
+      detail: 'Details',
+      history: 'History',
+      editor: 'Editor',
+      help: 'Help',
+    }
+    const title = this.snapshot.confirm === undefined
+      ? `Schedule · ${titles[this.snapshot.mode]}`
+      : 'Schedule · Confirm'
+    const segments: CellSegment[] = [{ plain: title, paint: color.textStrong }]
+    if (this.snapshot.mode === 'list' && this.snapshot.confirm === undefined) {
+      segments.push(
+        { plain: '  ' },
+        { plain: 'New [N]', paint: color.primary, hit: { kind: 'action', action: 'new' } },
+        { plain: '  ' },
+        { plain: 'Refresh [R]', paint: color.primary, hit: { kind: 'action', action: 'refresh' } },
+      )
+    }
+    this.pushSegments(lines, regions, width, segments)
+  }
+
+  private paintFilterRow(lines: string[], regions: PaintedRegion[], width: number): void {
+    this.pushSegments(lines, regions, width, this.filterPresentation(width).segments)
+  }
+
+  private filterPresentation(width: number): {
+    readonly segments: readonly CellSegment[]
+    readonly actionBarHint: boolean
+  } {
+    const filters: readonly { readonly filter: ScheduleFilter; readonly label: string }[] = [
+      { filter: 'active', label: 'Enabled' },
+      { filter: 'paused', label: 'Paused' },
+      { filter: 'ended', label: 'Ended' },
+      { filter: 'all', label: 'All' },
+    ]
+    const countsKnown = this.snapshot.status === 'ready' || this.snapshot.status === 'stale'
+    const countFor = (filter: ScheduleFilter): string => {
+      if (!countsKnown) return '—'
+      return String(filter === 'all' ? this.snapshot.total : this.snapshot.statusCounts[filter])
+    }
+    const chip = (filter: ScheduleFilter, label: string, count: string): CellSegment[] => {
+      const hit: ScheduleHit = { kind: 'filter', filter }
+      if (filter === this.snapshot.filter) {
+        const active = (text: string): string => color.textStrong(text, 'primary')
+        return [
+          { plain: `[${label} `, paint: active, hit },
+          { plain: count, paint: color.textMuted, hit },
+          { plain: ']', paint: active, hit },
+        ]
+      }
+      return [
+        { plain: `${label} `, paint: color.textDim, hit },
+        { plain: count, paint: color.textMuted, hit },
+      ]
+    }
+    const segments: CellSegment[] = []
+    for (const [index, entry] of filters.entries()) {
+      if (index > 0) segments.push({ plain: '  ' })
+      segments.push(...chip(entry.filter, entry.label, countFor(entry.filter)))
+    }
+    const widthOf = (items: readonly CellSegment[]): number => items.reduce(
+      (total, item) => total + visibleWidth(item.plain),
+      0,
+    )
+    const fullHint = [...segments, { plain: '  ' }, { plain: `${FILTER_CYCLE_HINT} filters`, paint: color.textMuted }]
+    if (widthOf(fullHint) <= width) return { segments: fullHint, actionBarHint: false }
+    if (widthOf(segments) <= width) {
+      const shortHint = [...segments, { plain: '  ' }, { plain: 'Tab filters', paint: color.textMuted }]
+      return widthOf(shortHint) <= width
+        ? { segments: shortHint, actionBarHint: false }
+        : { segments, actionBarHint: true }
+    }
+
+    const current = filters.find(entry => entry.filter === this.snapshot.filter)!
+    const compact = (count: string): CellSegment[] => [
+      ...chip(current.filter, current.label, count),
+      { plain: '  ' },
+      {
+        plain: 'Next filter [Tab]',
+        paint: color.primary,
+        hit: { kind: 'filter', filter: nextListFilter(this.snapshot.filter, 1) },
+      },
+    ]
+    const compactSegments = compact(countFor(current.filter))
+    if (widthOf(compactSegments) <= width) return { segments: compactSegments, actionBarHint: false }
+    return { segments: compact(countsKnown ? '999+' : '—'), actionBarHint: false }
+  }
+
+  private paintSearchRow(lines: string[], regions: PaintedRegion[], width: number): void {
+    const focused = this.searchFocused
+    const query = this.snapshot.query
+    const prefix = focused ? '> ' : ''
+    const label = 'Search / '
+    const budget = Math.max(1, width - visibleWidth(prefix) - visibleWidth(label))
+    const segments: CellSegment[] = []
+    if (focused) segments.push({ plain: prefix, paint: color.primary })
+    segments.push({ plain: label, paint: color.textDim })
+    if (focused && this._focused) {
+      this.searchInput.focused = true
+      const raw = (this.searchInput.render(budget)[0] ?? '').replaceAll(CURSOR_MARKER, '')
+      segments.push({ plain: query, raw })
+    } else {
+      segments.push(query === ''
+        ? { plain: 'Type to search…', paint: color.textDim }
+        : { plain: sanitizedPhysicalLine(query), paint: color.text })
+    }
+    const row = lines.length
+    this.pushSegments(lines, regions, width, segments)
+    if (this.snapshot.mode === 'list' && this.snapshot.confirm === undefined) {
+      regions.push({ row, from: 0, to: width, hit: { kind: 'search' } })
+    }
+  }
+
+  private paintSingleMode(
+    lines: string[],
+    regions: PaintedRegion[],
+    width: number,
+    bodyHeight: number,
+  ): void {
+    switch (this.snapshot.mode) {
+      case 'list':
+        this.paintListBody(lines, regions, width, bodyHeight)
+        return
+      case 'detail': {
+        const content = this.detailBody(this.detailEntry(), width)
+        this.detailScroll = this.scrolled(this.detailScroll, content.length, bodyHeight)
+        this.paintedViewport.detail = this.paintSingleBody(lines, regions, width, bodyHeight, content, this.detailScroll)
+        return
+      }
+      case 'history': {
+        const content = this.historyBody(width)
+        this.historyScroll = this.revealHistorySelection(content, this.historyScroll, bodyHeight)
+        this.paintedViewport.history = this.paintSingleBody(lines, regions, width, bodyHeight, content, this.historyScroll)
+        return
+      }
+      case 'editor': {
+        const content = this.editorBody(width)
+        this.editorScroll = this.chooser === undefined
+          ? this.revealField(content, this.editorScroll, bodyHeight)
+          : this.revealChooser(content, this.editorScroll, bodyHeight)
+        this.paintedViewport.editor = this.paintSingleBody(lines, regions, width, bodyHeight, content, this.editorScroll)
+        return
+      }
+      case 'help':
+        // Help is painted by its own full-width branch in `render`.
+        return
+    }
+  }
+
+  private paintListBody(
+    lines: string[],
+    regions: PaintedRegion[],
+    width: number,
+    bodyHeight: number,
+  ): void {
+    const content = this.listBody(width)
+    this.listScroll = this.listViewport(content, bodyHeight)
+    this.paintedViewport.list = this.paintSingleBody(lines, regions, width, bodyHeight, content, this.listScroll)
+  }
+
+  private wideLeftWidth(width: number): number {
+    return Math.max(20, Math.floor((width - 2) * 0.4))
+  }
+
+  private paintWideBody(
+    lines: string[],
+    regions: PaintedRegion[],
+    width: number,
+    bodyHeight: number,
+  ): void {
+    const leftWidth = this.wideLeftWidth(width)
+    const rightWidth = Math.max(1, width - 2 - leftWidth)
+    const list = this.listBody(leftWidth)
+    this.listScroll = this.listViewport(list, bodyHeight)
+    this.paintedViewport.list = this.listScroll
+    const right = this.wideRightBody(rightWidth)
+    let rightScroll: number
+    switch (this.snapshot.mode) {
+      case 'list':
+      case 'detail':
+        rightScroll = this.scrolled(this.detailScroll, right.length, bodyHeight)
+        this.detailScroll = rightScroll
+        break
+      case 'history':
+        rightScroll = this.revealHistorySelection(right, this.historyScroll, bodyHeight)
+        this.historyScroll = rightScroll
+        break
+      case 'editor':
+        this.editorScroll = this.chooser === undefined
+          ? this.revealField(right, this.editorScroll, bodyHeight)
+          : this.revealChooser(right, this.editorScroll, bodyHeight)
+        rightScroll = this.editorScroll
+        break
+      default:
+        rightScroll = 0
+    }
+    if (this.snapshot.mode === 'list' || this.snapshot.mode === 'detail') this.paintedViewport.detail = rightScroll
+    else if (this.snapshot.mode === 'history') this.paintedViewport.history = rightScroll
+    else if (this.snapshot.mode === 'editor') this.paintedViewport.editor = rightScroll
+    for (let index = 0; index < bodyHeight; index += 1) {
+      const left = list[this.listScroll + index]
+      const rightLine = right[rightScroll + index]
+      this.pushWideRow(lines, regions, leftWidth, rightWidth, left, rightLine)
+    }
+  }
+
+  private wideRightBody(width: number): readonly BodyLine[] {
+    switch (this.snapshot.mode) {
+      case 'list':
+      case 'detail':
+        return this.detailBody(this.detailEntry(), width)
+      case 'history':
+        return this.historyBody(width)
+      case 'editor':
+        return this.editorBody(width)
+      default:
+        return []
+    }
+  }
+
+  private listBody(width: number): readonly BodyLine[] {
+    const snapshot = this.snapshot
+    const content: BodyLine[] = []
+    if (snapshot.notice !== undefined) content.push(this.noticeLine(snapshot.notice))
+    if (snapshot.rows.length === 0) {
+      const empty = snapshot.total > 0
+        ? 'No tasks match the current filter or search.'
+        : snapshot.status === 'loading' ? 'Loading scheduled tasks…' : 'No scheduled tasks yet.'
+      content.push({ segments: [{ plain: empty, paint: color.textDim }] })
+      return content
+    }
+    for (const entry of snapshot.rows) {
+      const selected = entry.id === snapshot.selectedId
+      content.push({
+        segments: this.listTitleSegments(entry, selected),
+        rowId: entry.id,
+      })
+      content.push({
+        segments: this.listOccurrenceSegments(entry, width),
+        rowId: entry.id,
+      })
+    }
+    return content
+  }
+
+  private listTitleSegments(entry: ScheduleCatalogEntry, selected: boolean): readonly CellSegment[] {
+    return [
+      { plain: selected ? '> ' : '  ', paint: selected ? color.primary : undefined },
+      {
+        plain: sanitizedPhysicalLine(entry.title),
+        paint: selected ? text => color.textStrong(text) : color.text,
+      },
+    ]
+  }
+
+  private listOccurrenceSegments(entry: ScheduleCatalogEntry, width: number): readonly CellSegment[] {
+    const parts = formatListOccurrence(entry).split(' ')
+    const zone = parts.pop()!
+    const time = parts.pop()!
+    const date = parts.pop()!
+    const prefix = parts.join(' ')
+    const prefixText = `${prefix} `
+    const instantText = `${date} ${time}`
+    const beforeZoneWidth = 2 + visibleWidth(prefixText) + visibleWidth(instantText) + 1
+    const zoneBudget = Math.max(0, width - beforeZoneWidth)
+    const zoneFits = visibleWidth(zone) <= zoneBudget
+    const segments: CellSegment[] = [
+      { plain: '  ' },
+      {
+        plain: prefixText,
+        paint: entry.status === 'active' ? color.textDim : this.statusPaint(entry.status),
+      },
+      { plain: instantText, paint: color.textDim },
+      { plain: ' ' },
+      { plain: truncateToWidth(zone, zoneBudget, '…', false), paint: color.textMuted },
+    ]
+    if (zoneFits) {
+      const repeat = ` · ${formatListRepeat(entry)}`
+      if (beforeZoneWidth + visibleWidth(zone) + visibleWidth(repeat) <= width) {
+        segments.push({ plain: repeat, paint: color.textDim })
+      }
+    }
+    return segments
+  }
+
+  private listBanner(): PaintedBanner | undefined {
+    const snapshot = this.snapshot
+    if (snapshot.status === 'ready') return undefined
+    const detail = snapshot.statusMessage === undefined ? '' : ` · ${sanitizedPhysicalLine(snapshot.statusMessage)}`
+    if (snapshot.status === 'loading') {
+      return { text: 'Loading scheduled tasks…', paint: color.textDim }
+    }
+    if (snapshot.status === 'error') {
+      return { text: `Schedule unavailable${detail}`, paint: color.error }
+    }
+    return { text: `Showing the last read catalog${detail}`, paint: color.warning }
+  }
+
+  private detailBody(entry: ScheduleCatalogEntry | undefined, width: number): readonly BodyLine[] {
+    const out: BodyLine[] = [{ segments: [{ plain: 'Details', paint: color.textStrong }] }]
+    if (this.snapshot.notice !== undefined) out.push(...this.noticeBody(this.snapshot.notice, width))
+    if (entry === undefined) {
+      out.push({ segments: [{ plain: 'Loading task…', paint: color.textDim }] })
+      return out
+    }
+    const valueWidth = Math.max(1, width - DETAIL_LABEL_WIDTH - 1)
+    const fact = (label: string, value: string, paint: (text: string) => string = color.text): void => {
+      const wrapped = wrapTextWithAnsi(sanitizedPhysicalLine(value), valueWidth)
+      for (const [index, part] of wrapped.entries()) {
+        out.push({
+          segments: [
+            { plain: index === 0 ? fit(label, DETAIL_LABEL_WIDTH) : ' '.repeat(DETAIL_LABEL_WIDTH), paint: color.textDim },
+            { plain: ' ' },
+            { plain: part, paint },
+          ],
+        })
+      }
+    }
+    fact('Title', entry.title, color.textStrong)
+    fact('Status', scheduleStatusWord(entry.status), this.statusPaint(entry.status))
+    fact('Execution', formatExecutionActivity(entry), entry.executionActive === true ? color.primary : color.textDim)
+    const floor = formatDeliveryFloor(entry)
+    fact('Host minimum interval ends', floor ?? 'No active floor reported', floor === undefined ? color.textDim : color.text)
+    fact('Official timing', formatRuleSummary(entry))
+    fact('Time zone', officialTimeZone(entry), color.textDim)
+    fact('Occurrence', formatOccurrence(entry))
+    fact('Target', formatTargetSummary(entry.target), color.textDim)
+    const conversation = this.detailConversation(entry)
+    const conversationTarget = conversation.title === undefined || conversation.title === conversation.sessionId
+      ? conversation.sessionId
+      : `${conversation.title} · ${conversation.sessionId}`
+    const conversationLabel = conversation.available
+      ? `${conversation.action} · ${conversationTarget}`
+      : conversation.message
+    for (const [index, part] of wrapTextWithAnsi(sanitizedPhysicalLine(conversationLabel), valueWidth).entries()) {
+      out.push({
+        segments: [
+          { plain: index === 0 ? fit('Conversation', DETAIL_LABEL_WIDTH) : ' '.repeat(DETAIL_LABEL_WIDTH), paint: color.textDim },
+          {
+            plain: part,
+            paint: conversation.available ? color.primary : color.textMuted,
+            ...(conversation.available ? { hit: { kind: 'detail-link' } as const } : {}),
+          },
+        ],
+      })
+    }
+    if (entry.executionActive === true) fact('Actions', SCHEDULE_COPY.executionBusy, color.textMuted)
+    else if (entry.deliveryFloorEndsAt !== undefined) fact('Run hint', SCHEDULE_COPY.floorHint, color.textMuted)
+    fact('Id', entry.id, color.textDim)
+    out.push({ segments: [{ plain: '' }] })
+    out.push({ segments: [{ plain: 'Prompt', paint: color.textDim }] })
+    for (const stored of entry.prompt.split('\n')) {
+      const wrapped = wrapTextWithAnsi(sanitizedPhysicalLine(stored), Math.max(1, width))
+      for (const line of wrapped.length === 0 ? [''] : wrapped) {
+        out.push({ segments: [{ plain: line, paint: color.text }] })
+      }
+    }
+    if (entry.lastDelivery !== undefined) {
+      const receipt = deliveryFacts(entry.lastDelivery)
+      out.push({ segments: [{ plain: '' }] })
+      for (const part of wrapTextWithAnsi(SCHEDULE_COPY.deliveryInboxNotCompleted, Math.max(1, width - 2))) {
+        out.push({ segments: [{ plain: part, paint: color.textMuted }] })
+      }
+      fact('Last delivery', receipt.messageId, color.textDim)
+      fact('Scheduled', receipt.scheduledAt)
+      fact('Delivered', receipt.deliveredAt)
+      fact('Target Session', receipt.targetSessionId, color.textDim)
+    }
+    return out
+  }
+
+  private detailConversation(entry: ScheduleCatalogEntry): {
+    readonly available: boolean
+    readonly action: string
+    readonly title: string
+    readonly sessionId: string
+    readonly message: string
+  } {
+    let sessionId: string
+    let action: string
+    if (entry.lastDelivery !== undefined) {
+      sessionId = entry.lastDelivery.targetSessionId
+      action = 'Open latest delivery conversation'
+    } else if (entry.target.kind === 'session') {
+      sessionId = entry.target.sessionId
+      action = 'Open linked conversation'
+    } else {
+      return {
+        available: false,
+        action: '',
+        title: '',
+        sessionId: '',
+        message: entry.target.kind === 'new_once' ? SCHEDULE_COPY.pendingFirstDelivery : SCHEDULE_COPY.noDeliveryYet,
+      }
+    }
+    const title = this.snapshot.sessions.find(session => session.id === sessionId)?.title ?? sessionId
+    return {
+      available: this.snapshot.sessionRosterState === 'ready'
+        && this.snapshot.availableSessionIds.includes(sessionId)
+        && !this.snapshot.navigationPending,
+      action,
+      title,
+      sessionId,
+      message: this.sessionAvailabilityMessage(sessionId),
+    }
+  }
+
+  private sessionAvailabilityMessage(sessionId: string): string {
+    if (this.snapshot.sessionRosterState === 'checking') return SCHEDULE_COPY.sessionChecking
+    if (this.snapshot.sessionRosterState === 'unavailable') return SCHEDULE_COPY.sessionRosterUnavailable
+    if (this.snapshot.sessionRosterState === 'error') return SCHEDULE_COPY.sessionRosterError
+    return this.snapshot.availableSessionIds.includes(sessionId)
+      ? SCHEDULE_COPY.openingConversation
+      : SCHEDULE_COPY.sessionNotListed
+  }
+
+  private historyBody(width: number): readonly BodyLine[] {
+    const out: BodyLine[] = [{ segments: [{ plain: 'Delivery history', paint: color.textStrong }] }]
+    if (this.snapshot.notice !== undefined) out.push(...this.noticeBody(this.snapshot.notice, width))
+    for (const part of wrapTextWithAnsi(SCHEDULE_COPY.deliveryInboxNotCompleted, Math.max(1, width - 2))) {
+      out.push({ segments: [{ plain: part, paint: color.textMuted }] })
+    }
+    const history = this.snapshot.history
+    if (history === undefined) {
+      out.push({ segments: [{ plain: 'Loading deliveries…', paint: color.textDim }] })
+      return out
+    }
+    if (history.status === 'loading') out.push({ segments: [{ plain: 'Loading deliveries…', paint: color.textDim }] })
+    if (history.status === 'error') {
+      out.push({ segments: [{ plain: sanitizedPhysicalLine(history.message ?? 'Delivery history could not be read.'), paint: color.error }] })
+      out.push({ segments: [{ plain: 'Esc back → h reopen History', paint: color.textMuted }] })
+    }
+    if (history.records.length === 0 && history.status === 'ready') {
+      out.push({ segments: [{ plain: 'No saved deliveries.', paint: color.textDim }] })
+    }
+    const valueWidth = Math.max(1, width - DETAIL_LABEL_WIDTH - 1)
+    for (const [index, record] of history.records.entries()) {
+      const selected = record.messageId === this.historySelectedMessageId
+      const rowId = record.messageId
+      if (index > 0) out.push({ segments: [{ plain: '' }] })
+      out.push({
+        segments: [
+          { plain: selected ? '> ' : '  ', paint: selected ? color.primary : undefined },
+          { plain: `#${index + 1} Delivered ${formatLocalInstant(record.deliveredAt)} UTC`, paint: selected ? color.textStrong : color.text },
+        ],
+        rowId,
+      })
+      const fact = (label: string, value: string): void => {
+        for (const [partIndex, part] of wrapTextWithAnsi(sanitizedPhysicalLine(value), valueWidth).entries()) {
+          out.push({
+            segments: [
+              { plain: partIndex === 0 ? fit(label, DETAIL_LABEL_WIDTH) : ' '.repeat(DETAIL_LABEL_WIDTH), paint: color.textDim },
+              { plain: part, paint: color.text },
+            ],
+            rowId,
+          })
+        }
+      }
+      fact('Due', `${formatLocalInstant(record.scheduledAt)} UTC`)
+      fact('Message', record.messageId)
+      const session = this.snapshot.sessions.find(item => item.id === record.targetSessionId)
+      const available = this.snapshot.sessionRosterState === 'ready'
+        && this.snapshot.availableSessionIds.includes(record.targetSessionId)
+        && !this.snapshot.navigationPending
+      const conversationTitle = session?.title
+      const sessionLabel = conversationTitle === undefined || conversationTitle === record.targetSessionId
+        ? record.targetSessionId
+        : `${conversationTitle} · ${record.targetSessionId}`
+      const sessionText = available
+        ? `Open conversation · ${sessionLabel}`
+        : `${this.sessionAvailabilityMessage(record.targetSessionId)} · ${record.targetSessionId}`
+      for (const [partIndex, part] of wrapTextWithAnsi(sanitizedPhysicalLine(sessionText), valueWidth).entries()) {
+        out.push({
+          segments: [
+            { plain: partIndex === 0 ? fit('Sent to', DETAIL_LABEL_WIDTH) : ' '.repeat(DETAIL_LABEL_WIDTH), paint: color.textDim },
+            {
+              plain: part,
+              paint: available ? color.primary : color.textMuted,
+              ...(available ? { hit: { kind: 'history-link', messageId: rowId } as const } : {}),
+            },
+          ],
+          rowId,
+        })
+      }
+      if (record.prompt === undefined) {
+        fact('Instruction', SCHEDULE_COPY.instructionNotRecorded)
+      } else {
+        const wrappedPrompt = record.prompt.split('\n').flatMap(stored => {
+          const wrapped = wrapTextWithAnsi(sanitizedPhysicalLine(stored), valueWidth)
+          return wrapped.length === 0 ? [''] : wrapped
+        })
+        const expanded = this.historyExpandedMessageIds.has(rowId)
+        const visiblePrompt = expanded ? wrappedPrompt : wrappedPrompt.slice(0, 2)
+        for (const [partIndex, part] of visiblePrompt.entries()) {
+          out.push({
+            segments: [
+              { plain: partIndex === 0 ? fit('Instruction', DETAIL_LABEL_WIDTH) : ' '.repeat(DETAIL_LABEL_WIDTH), paint: color.textDim },
+              { plain: !expanded && wrappedPrompt.length > 2 && partIndex === visiblePrompt.length - 1 ? `${truncateToWidth(part, Math.max(1, valueWidth - 1), '', false)}…` : part, paint: color.text },
+            ],
+            rowId,
+          })
+        }
+      }
+    }
+    this.historyNotes(history, out)
+    return out
+  }
+
+  private historyNotes(history: NonNullable<ScheduleWorkspaceSnapshot['history']>, out: BodyLine[]): void {
+    if (history.earlierRecordsUnavailable) {
+      out.push({ segments: [{ plain: 'Earlier deliveries may exist but are unavailable.', paint: color.textMuted }] })
+    }
+    if (history.earlierRecordsPruned && history.nextBefore === undefined) {
+      out.push({ segments: [{ plain: 'Earlier records were removed by retention.', paint: color.textMuted }] })
+    }
+    if (history.retention !== undefined) {
+      out.push({ segments: [{ plain: `Retention ${history.retention.days} days · ${history.retention.records} records`, paint: color.textMuted }] })
+    }
+    if (history.missCode !== undefined) {
+      out.push({ segments: [{ plain: sanitizedPhysicalLine(`Miss  ${history.missCode}`), paint: color.warning }] })
+    }
+    if (history.message !== undefined && history.status !== 'error') {
+      out.push({ segments: [{ plain: sanitizedPhysicalLine(history.message), paint: color.warning }] })
+    }
+  }
+
+  private editorBody(width: number): readonly BodyLine[] {
+    const out: BodyLine[] = []
+    const draft = this.snapshot.editor
+    if (draft === undefined) {
+      out.push({ segments: [{ plain: 'Loading editor…', paint: color.textDim }] })
+      return out
+    }
+    const fact = (label: string, value: string, paint: (text: string) => string = color.text): void => {
+      out.push({
+        segments: [
+          { plain: fit(label, EDITOR_LABEL_WIDTH), paint: color.textDim },
+          { plain: sanitizedPhysicalLine(value), paint },
+        ],
+      })
+    }
+    out.push({ segments: [{
+      plain: draft.mode === 'create' ? 'Create task' : 'Edit task',
+      paint: color.textStrong,
+    }] })
+    const status = this.snapshot.busy
+      ? { text: 'Saving…', paint: color.textDim }
+      : this.snapshot.editorDirty === true
+        ? { text: 'Unsaved changes', paint: color.warning }
+        : { text: 'No changes', paint: color.textMuted }
+    fact('Status', status.text, status.paint)
+    if (draft.target.kind === 'new') {
+      const limits = this.snapshot.limits
+      fact('New-conversation minimum interval', limits === undefined
+        ? 'unknown'
+        : formatSeconds(limits.newSessionIntervalSeconds))
+    }
+
+
+    const fields = editorFields(draft)
+    const focused = Math.max(0, Math.min(draft.focused, Math.max(0, fields.length - 1)))
+    for (const [index, field] of fields.entries()) {
+      const selected = index === focused
+      const hint = editorFieldHint(field)
+      const hintWidth = Math.min(visibleWidth(hint), 20)
+      const valueBudget = Math.max(1, width - 2 - EDITOR_LABEL_WIDTH - 2 - hintWidth - 1)
+      const segments: CellSegment[] = [
+        { plain: selected ? '> ' : '  ', paint: selected ? color.primary : undefined },
+        { plain: fit(field.label, EDITOR_LABEL_WIDTH), paint: color.textDim },
+        { plain: ' ' },
+      ]
+      if (this.isRawEditorField(field)) {
+        // Multi-line raw text: one painted row per stored `\n` (the value keeps
+        // the bytes; only the display wraps).
+        const buffer = selected && this._focused ? (this.rawDraft ?? field.value) : field.value
+        const lines = buffer.split('\n')
+        if (selected && this._focused) {
+          const caret = Math.max(0, Math.min(this.rawCursor ?? Array.from(buffer).length, Array.from(buffer).length))
+          // Locate the caret line/column in CODE POINTS so CJK/emoji are never
+          // split, then paint a window around it (the caret stays visible on a
+          // long line).
+          let consumed = 0
+          let caretLine = 0
+          let caretColumn = 0
+          for (const [lineIndex, value] of lines.entries()) {
+            const length = Array.from(value).length
+            if (caret <= consumed + length) {
+              caretLine = lineIndex
+              caretColumn = caret - consumed
+              break
+            }
+            consumed += length + 1
+            caretLine = lineIndex + 1
+            caretColumn = 0
+          }
+          // The horizontal window is measured in TERMINAL CELLS, not code
+          // points: wide CJK/emoji would otherwise be cut after composeRow()
+          // truncation and hide the caret.
+          const windowCells = Math.max(1, valueBudget - 1)
+          for (const [lineIndex, value] of lines.entries()) {
+            const points = Array.from(value)
+            let shown: string
+            if (lineIndex === caretLine) {
+              const beforePoints = points.slice(0, caretColumn)
+              // Keep the END of the text before the caret, then fill the rest
+              // with text after it; the caret itself always fits.
+              let kept = ''
+              let used = 0
+              for (let index = beforePoints.length - 1; index >= 0; index -= 1) {
+                const width = visibleWidth(beforePoints[index] ?? '')
+                if (used + width > windowCells) break
+                kept = (beforePoints[index] ?? '') + kept
+                used += width
+              }
+              const remaining = Math.max(0, windowCells - used)
+              const after = truncateToWidth(points.slice(caretColumn).join(''), remaining, '', false)
+              shown = `${kept}▏${after}`
+            } else {
+              shown = truncateToWidth(value, windowCells, '', false)
+            }
+            out.push({
+              segments: lineIndex === 0
+                ? [
+                    { plain: '> ', paint: color.primary },
+                    { plain: fit(field.label, EDITOR_LABEL_WIDTH), paint: color.textDim },
+                    { plain: ' ' },
+                    { plain: sanitizedPhysicalLine(shown), paint: color.textStrong },
+                  ]
+                : [
+                    { plain: '  ' },
+                    { plain: ' '.repeat(EDITOR_LABEL_WIDTH) },
+                    { plain: ' ' },
+                    { plain: sanitizedPhysicalLine(shown), paint: color.textStrong },
+                  ],
+              fieldId: field.id,
+              ...(lineIndex === caretLine ? { caretRow: true } : {}),
+            })
+          }
+          continue
+        }
+        segments.push({
+          plain: lines.join(' ⏎ '),
+          paint: selected ? text => color.textStrong(text) : color.text,
+        })
+        segments.push({ plain: '  ' })
+        segments.push({ plain: hint, paint: color.textMuted })
+        out.push({ segments, fieldId: field.id })
+        continue
+      }
+      if (selected && isEditorTextInput(field) && this._focused) {
+        this.editorInput.focused = true
+        segments.push({
+          plain: sanitizedPhysicalLine(field.value),
+          raw: (this.editorInput.render(valueBudget)[0] ?? '').replaceAll(CURSOR_MARKER, ''),
+        })
+      } else {
+        segments.push({
+          plain: sanitizedPhysicalLine(editorFieldValue(field, draft, this.snapshot.sessions)),
+          paint: selected ? text => color.textStrong(text) : color.text,
+        })
+      }
+      segments.push({ plain: '  ' })
+      segments.push({ plain: hint, paint: color.textMuted })
+      out.push({ segments, fieldId: field.id })
+    }
+
+    if (this.chooser !== undefined) {
+      out.push({ segments: [{ plain: '' }] })
+      out.push({
+        segments: [{
+          plain: sanitizedPhysicalLine(this.chooser.kind === 'weekdays'
+            ? `${this.chooser.title} · Space/Enter toggle · Esc close · Tab next field`
+            : `${this.chooser.title} · Enter choose · Esc close`),
+          paint: color.textStrong,
+        }],
+        chooserTitle: true,
+      })
+      for (const [index, option] of this.chooser.options.entries()) {
+        const selected = index === this.chooser.index
+        const currentDay = this.chooser.kind === 'weekdays'
+          && draft.timing.kind === 'weekly'
+          && draft.timing.weekdays.includes(Number(option.value))
+        out.push({
+          segments: [
+            { plain: selected ? '> ' : '  ', paint: selected ? color.primary : undefined },
+            { plain: sanitizedPhysicalLine(option.label), paint: selected ? text => color.textStrong(text) : color.text },
+            ...(currentDay ? [{ plain: ' [current]', paint: color.textMuted }] : []),
+          ],
+          chooserIndex: index,
+        })
+      }
+    }
+    return out
+  }
+
+  private helpBody(width: number): readonly BodyLine[] {
+    const entries: readonly (readonly [string, string])[] = [
+      ['↑/↓, j/k', 'Move the task selection'],
+      ['Enter', 'Open the selected task'],
+      ['N', 'Create a task'],
+      ['R', 'Refresh the Host catalog'],
+      ['/', 'Focus search; Esc returns to the list'],
+      ['A / P / E / L', 'Filter Enabled / Paused / Ended / All'],
+      [`${formatKeyId(Key.tab)} / ${formatKeyId(Key.shift(Key.tab))}`, 'Cycle filters on List; return from Search without changing the filter'],
+      ['X', 'Clear ended tasks'],
+      ['?', 'This help page'],
+      ['H (detail)', 'Delivery history'],
+      ['E (detail)', 'Edit the task'],
+      ['Space (detail)', 'Pause or resume the task'],
+      ['o (detail)', 'Open the linked conversation, or the latest delivery receiver'],
+      ['r (detail/history)', 'Refresh conversation availability'],
+      ['U (detail)', 'Run the task now; Host decides admission'],
+      ['D (detail)', 'Delete the task'],
+      ['↑/↓, j/k (history)', 'Select a delivery receipt'],
+      ['Enter (history)', 'Open the selected receipt conversation'],
+      ['x (history)', 'Expand or collapse the saved instruction'],
+      ['m (history)', 'Load the next page when More is available'],
+      ['Delivered', SCHEDULE_COPY.deliveryInboxNotCompleted],
+      ['PgUp / PgDn', 'Scroll detail, history or help'],
+      [`${formatKeyId(Key.ctrl('s'))} (editor)`, 'Save the schedule'],
+      [`${formatKeyId(Key.ctrl('g'))} (conflict)`, 'Review the latest Host version with your edits; nothing is saved'],
+      [`${formatKeyId(Key.ctrl('r'))} (edit)`, 'Discard your edits and reload the latest Host version (asks first)'],
+      [`${formatKeyId(Key.tab)} / ${formatKeyId(Key.shift(Key.tab))}`, 'Move between logical fields in Editor'],
+      ['Repeat (editor)', 'Once after delay, once at date/time, every minutes/hours/seconds, daily, weekly, Custom Cron or Custom RRULE'],
+      ['Create default', 'One hour after Save · Create and reuse conversation'],
+      ['Existing conversation', 'Deliver to the selected existing conversation'],
+      ['Create and reuse conversation', 'Create one conversation at first delivery and reuse it later'],
+      ['New conversation each run', 'Create a separate conversation at every delivery'],
+      ['Weekdays (editor)', 'Space/Enter toggles a day; Esc closes and keeps changes; Tab moves to the next field'],
+      ['Destination (editor)', 'Existing conversation, create and reuse conversation, or new conversation each run'],
+      ['y / n', 'Confirm or cancel a confirmation'],
+      ['Esc', 'Back one layer; close the workspace at the list root'],
+    ]
+    const out: BodyLine[] = [{ segments: [{ plain: 'Schedule help', paint: color.textStrong }] }]
+    for (const [key, description] of entries) {
+      for (const [index, part] of wrapTextWithAnsi(description, Math.max(1, width - EDITOR_LABEL_WIDTH - 1)).entries()) {
+        out.push({
+          segments: [
+            { plain: index === 0 ? fit(key, EDITOR_LABEL_WIDTH) : ' '.repeat(EDITOR_LABEL_WIDTH), paint: color.primary },
+            { plain: ' ' },
+            { plain: part, paint: color.text },
+          ],
+        })
+      }
+    }
+    return out
+  }
+
+  private confirmBody(confirm: ScheduleConfirm, width: number): readonly BodyLine[] {
+    const question = confirmQuestion(confirm)
+    const out: BodyLine[] = [{ segments: [{ plain: '' }] }]
+    out.push({ segments: [{ plain: 'Confirm', paint: color.textStrong }] })
+    for (const part of wrapTextWithAnsi(sanitizedPhysicalLine(question), Math.max(1, width - 2))) {
+      out.push({ segments: [{ plain: `  ${part}`, paint: color.text }] })
+    }
+    out.push({ segments: [{ plain: '' }] })
+    out.push({
+      segments: [
+        { plain: 'Confirm [Y]', paint: text => color.textStrong(text, 'primary'), hit: { kind: 'action', action: 'confirm' } },
+        { plain: '   ' },
+        { plain: 'Cancel [N]', paint: color.textDim, hit: { kind: 'action', action: 'cancel' } },
+        { plain: '   ' },
+        { plain: 'Esc cancel', paint: color.textMuted },
+      ],
+    })
+    return out
+  }
+
+  private noticeBody(notice: ScheduleNotice, width: number): BodyLine[] {
+    const marker = notice.kind === 'error' ? '!' : 'i'
+    const paint = notice.kind === 'error' ? color.error : color.textMuted
+    return wrapTextWithAnsi(sanitizedPhysicalLine(notice.text), Math.max(1, width - 2)).map((part, index) => ({
+      segments: [{ plain: `${index === 0 ? `${marker} ` : '  '}${part}`, paint }],
+    }))
+  }
+
+  private noticeLine(notice: ScheduleNotice): BodyLine {
+    return {
+      segments: [{
+        plain: sanitizedPhysicalLine(`${notice.kind === 'error' ? '✗' : 'ℹ'} ${notice.text}`),
+        paint: notice.kind === 'error' ? color.error : color.textMuted,
+      }],
+    }
+  }
+
+  private detailEntry(): ScheduleCatalogEntry | undefined {
+    const snapshot = this.snapshot
+    if (snapshot.detail !== undefined) return snapshot.detail
+    return snapshot.rows.find(row => row.id === snapshot.selectedId)
+  }
+
+  private statusPaint(status: ScheduleTaskStatus): (text: string) => string {
+    switch (status) {
+      case 'active': return color.primary
+      case 'paused': return color.warning
+      case 'ended': return color.textDim
+    }
+  }
+
+  // ── body painting helpers ──────────────────────────────────────────────────
+
+  private paintSingleBody(
+    lines: string[],
+    regions: PaintedRegion[],
+    width: number,
+    bodyHeight: number,
+    content: readonly BodyLine[],
+    offset: number,
+  ): number {
+    const start = Math.max(0, Math.min(offset, Math.max(0, content.length - bodyHeight)))
+    for (let index = 0; index < bodyHeight; index += 1) {
+      const line = content[start + index]
+      if (line === undefined) {
+        lines.push(' '.repeat(width))
+        continue
+      }
+      this.pushBodyLine(lines, regions, width, line)
+    }
+    return start
+  }
+
+  private pushBodyLine(
+    lines: string[],
+    regions: PaintedRegion[],
+    width: number,
+    bodyLine: BodyLine,
+  ): void {
+    const row = lines.length
+    const composed = this.composeRow(width, bodyLine.segments)
+    lines.push(composed.line)
+    for (const region of composed.regions) {
+      regions.push({ row, from: region.from, to: region.to, hit: region.hit })
+    }
+    if (bodyLine.rowId !== undefined) {
+      regions.push({
+        row,
+        from: 0,
+        to: width,
+        hit: this.snapshot.mode === 'history'
+          ? { kind: 'history-record', messageId: bodyLine.rowId }
+          : { kind: 'row', id: bodyLine.rowId },
+      })
+    }
+    if (bodyLine.fieldId !== undefined) {
+      regions.push({ row, from: 0, to: width, hit: { kind: 'field', id: bodyLine.fieldId } })
+    }
+  }
+
+  private pushWideRow(
+    lines: string[],
+    regions: PaintedRegion[],
+    leftWidth: number,
+    rightWidth: number,
+    left: BodyLine | undefined,
+    right: BodyLine | undefined,
+  ): void {
+    const row = lines.length
+    const leftComposed = left === undefined
+      ? { line: ' '.repeat(leftWidth), regions: [] as readonly { from: number; to: number; hit: ScheduleHit }[] }
+      : this.composeRow(leftWidth, left.segments)
+    const rightComposed = right === undefined
+      ? { line: ' '.repeat(rightWidth), regions: [] as readonly { from: number; to: number; hit: ScheduleHit }[] }
+      : this.composeRow(rightWidth, right.segments)
+    lines.push(`${leftComposed.line}  ${rightComposed.line}`)
+    for (const region of leftComposed.regions) {
+      regions.push({ row, from: region.from, to: region.to, hit: region.hit })
+    }
+    if (left?.rowId !== undefined) {
+      regions.push({ row, from: 0, to: leftWidth, hit: { kind: 'row', id: left.rowId } })
+    }
+    for (const region of rightComposed.regions) {
+      regions.push({ row, from: region.from + leftWidth + 2, to: region.to + leftWidth + 2, hit: region.hit })
+    }
+    if (right?.rowId !== undefined) {
+      regions.push({
+        row,
+        from: leftWidth + 2,
+        to: leftWidth + 2 + rightWidth,
+        hit: this.snapshot.mode === 'history'
+          ? { kind: 'history-record', messageId: right.rowId }
+          : { kind: 'row', id: right.rowId },
+      })
+    }
+    if (right?.fieldId !== undefined) {
+      regions.push({
+        row,
+        from: leftWidth + 2,
+        to: leftWidth + 2 + rightWidth,
+        hit: { kind: 'field', id: right.fieldId },
+      })
+    }
+  }
+
+  private pushSegments(
+    lines: string[],
+    regions: PaintedRegion[],
+    width: number,
+    segments: readonly CellSegment[],
+  ): void {
+    const row = lines.length
+    const composed = this.composeRow(width, segments)
+    lines.push(composed.line)
+    for (const region of composed.regions) {
+      regions.push({ row, from: region.from, to: region.to, hit: region.hit })
+    }
+  }
+
+  private composeRow(
+    width: number,
+    segments: readonly CellSegment[],
+  ): { readonly line: string; readonly regions: readonly { readonly from: number; readonly to: number; readonly hit: ScheduleHit }[] } {
+    let line = ''
+    let column = 0
+    const regions: { from: number; to: number; hit: ScheduleHit }[] = []
+    for (const segment of segments) {
+      const remaining = width - column
+      if (remaining <= 0) break
+      const painted = segment.raw === undefined
+        ? (() => {
+            const fitted = truncateToWidth(segment.plain, remaining, '…', false)
+            return segment.paint === undefined ? fitted : segment.paint(fitted)
+          })()
+        : truncateToWidth(segment.raw, remaining, '…', false)
+      const paintedWidth = visibleWidth(painted)
+      if (paintedWidth <= 0) continue
+      line += painted
+      if (segment.hit !== undefined) {
+        regions.push({ from: column, to: column + paintedWidth, hit: segment.hit })
+      }
+      column += paintedWidth
+    }
+    if (column < width) line += ' '.repeat(width - column)
+    return { line, regions }
+  }
+
+  // ── action bar ─────────────────────────────────────────────────────────────
+
+  private paintActionBar(lines: string[], regions: PaintedRegion[], width: number): void {
+    const segments: ActionBarSegment[] = []
+    const actions: (ScheduleAction | undefined)[] = []
+    const add = (text: string, priority: number, action?: ScheduleAction, short?: string): void => {
+      segments.push({ text, priority, ...(short === undefined ? {} : { short }) })
+      actions.push(action)
+    }
+    if (this.snapshot.confirm !== undefined) {
+      // The action bar stays `<key> <verb>`; `Esc` is the LAST segment while
+      // keeping the highest retained priority (design-language D8).
+      add('y confirm', 9, 'confirm')
+      add('n cancel', 8, 'cancel')
+      add('Esc cancel', 10, 'cancel')
+    } else {
+      switch (this.snapshot.mode) {
+        case 'list':
+          add('Enter details', 9, 'enter-detail', 'Enter')
+          add('n create', 8, 'new', 'n')
+          add('/ search', 7, 'search', '/')
+          add('x clear ended', 5, 'clear-ended', 'x')
+          add('? help', 4, 'help', '?')
+          add('r refresh', 3, 'refresh', 'r')
+          if (this.filterPresentation(width).actionBarHint) add('Tab filters', 1, undefined, 'Tab')
+          add('Esc close', 10, 'close', 'Esc')
+          break;
+        case 'detail': {
+          if (this.snapshot.navigationPending) {
+            add(SCHEDULE_COPY.openingConversation, 9)
+            add('Esc wait', 10)
+            break
+          }
+          const entry = this.detailEntry()
+          if (entry !== undefined && this.detailConversation(entry).available) {
+            add('o conversation', 9, 'detail-open-conversation')
+          }
+          if (entry?.executionActive !== true && !this.snapshot.busy) add('u run now', 8, 'detail-run')
+          add('h history', 7, 'detail-history')
+          if (!this.snapshot.busy) add('e edit', 6, 'detail-edit')
+          if (entry?.executionActive !== true && !this.snapshot.busy) {
+            add('Space pause/resume', 5, 'detail-toggle')
+            add('d delete', 4, 'detail-delete')
+          }
+          add('? help', 3, 'help')
+          if (!this.snapshot.busy) add('r links', 2, 'detail-refresh-roster')
+          add('Esc back', 10, 'back')
+          break
+        }
+        case 'history':
+          if (this.snapshot.navigationPending) {
+            add(SCHEDULE_COPY.openingConversation, 9)
+            add('Esc wait', 10)
+            break
+          }
+          if (this.snapshot.history?.nextBefore !== undefined) add('m more', 7, 'history-more')
+          if (this.historySelectedMessageId !== undefined
+            && this.snapshot.history?.records.some(record => record.messageId === this.historySelectedMessageId && record.prompt !== undefined)) {
+            add(this.historyExpandedMessageIds.has(this.historySelectedMessageId) ? 'x collapse' : 'x expand', 6, 'history-toggle-expand')
+          }
+          if (this.historySelectedMessageId !== undefined) add('Enter open', 8, 'history-open')
+          add('r links', 4, 'history-refresh-roster')
+          add('? help', 3, 'help')
+          add('Esc back', 10, 'back')
+          break
+        case 'editor': {
+          const recovery = this.snapshot.editorRecovery
+          const mode = this.snapshot.editor?.mode
+          if (this.snapshot.busy) {
+            add('Saving…', 9)
+          } else if (mode === 'edit' && (recovery === 'conflict' || recovery === 'unknown')) {
+            add(`${formatKeyId(Key.ctrl('g'))} review`, 9)
+            add(`${formatKeyId(Key.ctrl('r'))} reload`, 8)
+          } else if (recovery === undefined
+            && (mode === 'create' || this.snapshot.editorDirty !== false)) {
+            add(`${formatKeyId(Key.ctrl('s'))} save`, 9)
+            if (mode === 'edit') add(`${formatKeyId(Key.ctrl('r'))} discard/reload`, 7)
+          } else if (recovery === undefined && mode === 'edit') {
+            add(`${formatKeyId(Key.ctrl('r'))} reload`, 7)
+          }
+          if (!this.snapshot.busy) add(`${formatKeyId(Key.tab)} next field`, 6, undefined, `${formatKeyId(Key.tab)} next`)
+          add(this.snapshot.busy ? 'Esc wait' : 'Esc back', 10, 'back')
+          break
+        }
+        case 'help':
+          add('Esc close help', 10, 'close-help')
+          break
+      }
+    }
+    const rendered = renderActionBarRow(segments, width)
+    const row = lines.length
+    lines.push(color.textMuted(rendered))
+    const parts = rendered.split(ACTION_BAR_SEPARATOR)
+    let x = 0
+    let segmentIndex = 0
+    for (const [index, part] of parts.entries()) {
+      const trimmed = part.trimEnd()
+      while (segmentIndex < segments.length && !actionPartMatches(trimmed, segments[segmentIndex].text)) {
+        segmentIndex += 1
+      }
+      if (segmentIndex >= segments.length) break
+      const action = actions[segmentIndex]
+      if (action !== undefined && trimmed !== '') {
+        regions.push({ row, from: x, to: x + visibleWidth(trimmed), hit: { kind: 'action', action } })
+      }
+      x += visibleWidth(part)
+      if (index < parts.length - 1) x += visibleWidth(ACTION_BAR_SEPARATOR)
+      segmentIndex += 1
+    }
+  }
+
+  // ── pointer ───────────────────────────────────────────────────────────────
+
+  onCellPress(x: number, y: number): void {
+    if (this.disposed || this.chooser !== undefined) {
+      this.pressed = undefined
+      return
+    }
+    const frame = this.frame
+    if (!this.frameIsCurrent(frame) || x < 0 || y < 0 || x >= frame.width || y >= frame.height) {
+      this.pressed = undefined
+      return
+    }
+    const hit = regionAt(frame, x, y)
+    // Freeze the PRESSED hit together with the frame's subject: a release on a
+    // newer frame (same action, different task) must not commit anything.
+    this.pressed = hit === undefined
+      ? undefined
+      : {
+          key: hitKey(hit),
+          mode: frame.mode,
+          subjectId: frame.subjectId,
+          confirmToken: frame.confirmToken,
+          subjectFacts: frame.subjectFacts,
+          listSelection: frame.listSelection,
+          historyCursor: frame.historyCursor,
+          historySelection: frame.historySelection,
+          historyFacts: frame.historyFacts,
+          rosterFacts: frame.rosterFacts,
+          navigationPending: frame.navigationPending,
+          pageEpoch: frame.pageEpoch,
+          viewport: { ...this.paintedViewport },
+        }
+  }
+
+  onCellClick(x: number, y: number): void {
+    if (this.disposed || this.chooser !== undefined) return
+    const frame = this.frame
+    const pressed = this.pressed
+    this.pressed = undefined
+    if (!this.frameIsCurrent(frame) || x < 0 || y < 0 || x >= frame.width || y >= frame.height) return
+    const hit = regionAt(frame, x, y)
+    if (hit === undefined) return
+    // A release is only actionable when a VALID press exists (a bare release
+    // over a button that only appeared after the press window is not a click),
+    // and it must match the PRESS on EVERY painted identity: page mode, task
+    // subject, confirmation token AND action. A press on `Esc discard` in the
+    // Editor therefore cannot become `Esc back` on the same task's Detail, and
+    // a press on a blank cell cannot become whatever later appeared there.
+    if (pressed === undefined
+      || pressed.key !== hitKey(hit)
+      || pressed.mode !== frame.mode
+      || pressed.subjectId !== frame.subjectId
+      || pressed.confirmToken !== frame.confirmToken
+      || pressed.subjectFacts !== frame.subjectFacts
+      || pressed.listSelection !== frame.listSelection
+      || pressed.historyCursor !== frame.historyCursor
+      || pressed.historySelection !== frame.historySelection
+      || pressed.historyFacts !== frame.historyFacts
+      || pressed.rosterFacts !== frame.rosterFacts
+      || pressed.navigationPending !== frame.navigationPending
+      || pressed.pageEpoch !== frame.pageEpoch) {
+      return
+    }
+    this.activateHit(hit)
+  }
+
+  /** The viewport position the NEXT paint will draw for ONE pane, computed
+   *  with the same clamp/reveal math the paint paths use. This lets the wheel
+   *  handler retire a pressed gesture at the MUTATION boundary — before the
+   *  scheduled render runs — while a wheel the paint would clamp back (edge,
+   *  no-overflow content, caret-follow reveal) still keeps the press. */
+  private pendingEffectiveViewport(
+    frame: PaintedFrame,
+    layout: ReturnType<typeof scheduleWorkspaceLayout>,
+    pane: 'list' | 'detail' | 'history' | 'editor' | 'help',
+  ): { readonly pane: 'list' | 'detail' | 'history' | 'editor' | 'help'; readonly value: number } | undefined {
+    if (this.snapshot.confirm !== undefined) return undefined
+    const { bodyHeight } = this.chromeBudget(frame.width, frame.height)
+    if (pane === 'help') {
+      return { pane, value: this.scrolled(this.helpScroll, this.helpBody(frame.width).length, bodyHeight) }
+    }
+    if (layout === 'wide') {
+      const leftWidth = this.wideLeftWidth(frame.width)
+      const rightWidth = Math.max(1, frame.width - 2 - leftWidth)
+      if (pane === 'list') {
+        return { pane, value: this.listViewport(this.listBody(leftWidth), bodyHeight) }
+      }
+      const right = this.wideRightBody(rightWidth)
+      switch (pane) {
+        case 'detail':
+          return { pane, value: this.scrolled(this.detailScroll, right.length, bodyHeight) }
+        case 'history':
+          return { pane, value: this.revealHistorySelection(right, this.historyScroll, bodyHeight) }
+        case 'editor':
+          return {
+            pane,
+            value: this.chooser === undefined
+              ? this.revealField(right, this.editorScroll, bodyHeight)
+              : this.revealChooser(right, this.editorScroll, bodyHeight),
+          }
+        default:
+          return undefined
+      }
+    }
+    switch (pane) {
+      case 'list':
+        return { pane, value: this.listViewport(this.listBody(frame.width), bodyHeight) }
+      case 'detail':
+        return { pane, value: this.scrolled(this.detailScroll, this.detailBody(this.detailEntry(), frame.width).length, bodyHeight) }
+      case 'history': {
+        const content = this.historyBody(frame.width)
+        return { pane, value: this.revealHistorySelection(content, this.historyScroll, bodyHeight) }
+      }
+      case 'editor': {
+        const content = this.editorBody(frame.width)
+        return {
+          pane,
+          value: this.chooser === undefined
+            ? this.revealField(content, this.editorScroll, bodyHeight)
+            : this.revealChooser(content, this.editorScroll, bodyHeight),
+        }
+      }
+      default:
+        return undefined
+    }
+  }
+
+  /** Retire the pressed gesture when the pointed pane's pending painted
+   *  viewport differs from the one on screen: an effective scroll is a gesture
+   *  boundary OBSERVABLE NOW, not only at the next frame (a burst of opposite
+   *  wheels that returns to the press-time position before the paint must not
+   *  revive the press). */
+  private retirePressedOnPendingViewport(frame: PaintedFrame, layout: ReturnType<typeof scheduleWorkspaceLayout>, pane: 'list' | 'detail' | 'history' | 'editor' | 'help'): void {
+    const pending = this.pendingEffectiveViewport(frame, layout, pane)
+    if (pending === undefined) return
+    if (this.paintedViewport[pending.pane] !== pending.value) this.pressed = undefined
+  }
+
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (this.disposed || event.type !== 'wheel') return undefined
+    const frame = this.frame
+    if (frame === undefined || event.width !== frame.width || event.height !== frame.height) return undefined
+    const delta = event.wheelDelta ?? 0
+    if (delta === 0) return undefined
+    const step = delta < 0 ? -1 : 1
+    if (this.snapshot.confirm !== undefined) return undefined
+    const layout = scheduleWorkspaceLayout(Math.min(frame.width, Math.max(1, Math.floor(this.deps.columns()))), frame.height)
+    if (this.snapshot.mode === 'list') {
+      if (layout === 'wide' && event.x >= this.wideLeftWidth(frame.width) + 2) {
+        this.detailScroll = Math.max(0, this.detailScroll + step)
+        this.retirePressedOnPendingViewport(frame, layout, 'detail')
+      } else {
+        this.listScroll = Math.max(0, this.listScroll + step)
+        this.listScrollPinned = true
+        this.retirePressedOnPendingViewport(frame, layout, 'list')
+      }
+    } else if (this.snapshot.mode === 'detail') {
+      this.detailScroll = Math.max(0, this.detailScroll + step)
+      this.retirePressedOnPendingViewport(frame, layout, 'detail')
+    } else if (this.snapshot.mode === 'history') {
+      this.historyScroll = Math.max(0, this.historyScroll + step)
+      this.historyScrollPinned = true
+      this.retirePressedOnPendingViewport(frame, layout, 'history')
+    } else if (this.snapshot.mode === 'editor') {
+      this.editorScroll = Math.max(0, this.editorScroll + step)
+      this.retirePressedOnPendingViewport(frame, layout, 'editor')
+    } else if (this.snapshot.mode === 'help') {
+      this.helpScroll = Math.max(0, this.helpScroll + step)
+      this.retirePressedOnPendingViewport(frame, layout, 'help')
+    }
+    this.deps.requestRender()
+    return { handled: true, render: true }
+  }
+
+
+  /** Whether the LAST painted frame still describes the CURRENT page and
+   *  confirmation identity; anything else is a stale click. */
+  private frameIsCurrent(frame: PaintedFrame | undefined): frame is PaintedFrame {
+    if (frame === undefined) return false
+    if (frame.mode !== this.snapshot.mode) return false
+    if (frame.confirmToken !== this.snapshot.confirm?.token) return false
+    // The painted SUBJECT must still be the current one: a same-mode switch to
+    // another task (or another editor instance) retires every hit in this frame.
+    const currentSubject = this.snapshot.mode === 'detail'
+      ? (this.snapshot.selectedId === undefined ? null : String(this.snapshot.selectedId))
+      : this.snapshot.mode === 'editor'
+        ? (this.snapshot.editor?.id === undefined ? null : String(this.snapshot.editor.id))
+        : null
+    return frame.pageEpoch === this.snapshot.pageEpoch
+      && frame.subjectId === currentSubject
+      && frame.subjectFacts === frameSubjectFacts(this.snapshot)
+      && frame.listSelection === (this.snapshot.mode === 'list'
+        ? (this.snapshot.selectedId === undefined ? null : String(this.snapshot.selectedId))
+        : null)
+      && frame.historyCursor === (this.snapshot.mode === 'history' ? (this.snapshot.history?.nextBefore ?? null) : null)
+      && frame.historySelection === (this.snapshot.mode === 'history' ? (this.historySelectedMessageId ?? null) : null)
+      && frame.historyFacts === historyFrameFacts(this.snapshot, this.historyExpandedMessageIds)
+      && frame.rosterFacts === JSON.stringify([this.snapshot.sessionRosterState, this.snapshot.availableSessionIds, this.snapshot.sessions])
+      && frame.navigationPending === this.snapshot.navigationPending
+  }
+
+  private activateHit(hit: ScheduleHit): void {
+    // A painted confirmation owns the surface: a row/action hit left over from
+    // the PREVIOUS frame can only be the confirmation's own y/n/Esc.
+    if (this.snapshot.confirm !== undefined
+      && (hit.kind !== 'action' || (hit.action !== 'confirm' && hit.action !== 'cancel'))) return
+    switch (hit.kind) {
+      case 'history-record': {
+        if (this.snapshot.mode !== 'history'
+          || !this.snapshot.history?.records.some(record => record.messageId === hit.messageId)) return
+        this.historySelectedMessageId = hit.messageId as ScheduleHistoryMessageId
+        this.historyScrollPinned = false
+        this.deps.requestRender()
+        return
+      }
+      case 'history-link':
+        if (this.snapshot.mode !== 'history'
+          || !this.snapshot.history?.records.some(record => record.messageId === hit.messageId)
+          || this.snapshot.navigationPending) return
+        this.historySelectedMessageId = hit.messageId as ScheduleHistoryMessageId
+        this.historyScrollPinned = false
+        this.deps.dispatch({ kind: 'open-delivery-conversation', messageId: hit.messageId })
+        return
+      case 'detail-link':
+        if (this.snapshot.mode === 'detail' && !this.snapshot.navigationPending) {
+          this.deps.dispatch({ kind: 'open-detail-conversation' })
+        }
+        return
+      case 'row':
+        if (!this.snapshot.rows.some(row => row.id === hit.id)) return
+        this.deps.dispatch({ kind: 'open-detail', id: hit.id })
+        return
+      case 'filter':
+        // The chips are list-page affordances; a stale hit from another page
+        // must never change the filter.
+        if (this.snapshot.mode !== 'list' || this.snapshot.confirm !== undefined) return
+        if (this.searchFocused) this.exitSearch()
+        this.deps.dispatch({ kind: 'set-filter', filter: hit.filter })
+        return
+      case 'search':
+        if (this.snapshot.mode !== 'list' || this.snapshot.confirm !== undefined) return
+        this.focusSearch()
+        return
+      case 'field': {
+        const draft = this.snapshot.editor
+        if (draft === undefined) return
+        const index = fieldIndexById(editorFields(draft), hit.id)
+        if (index === undefined) return
+        this.deps.dispatch({ kind: 'focus-field', index })
+        return
+      }
+      case 'action':
+        this.activateAction(hit.action)
+    }
+  }
+
+  private activateAction(action: ScheduleAction): void {
+    switch (action) {
+      case 'new': this.deps.dispatch({ kind: 'open-create' }); return
+      case 'refresh': this.deps.dispatch({ kind: 'refresh' }); return
+      case 'clear-ended': this.deps.dispatch({ kind: 'ask-clear-ended' }); return
+      case 'help': this.deps.dispatch({ kind: 'open-help' }); return
+      case 'search': this.focusSearch(); return
+      case 'enter-detail': this.deps.dispatch({ kind: 'open-detail' }); return
+      case 'close': this.deps.close(); return
+      case 'history-more':
+        if (this.snapshot.history?.nextBefore !== undefined) this.deps.dispatch({ kind: 'history-more' })
+        return
+      case 'detail-history': this.deps.dispatch({ kind: 'open-history' }); return
+      case 'detail-open-conversation': this.deps.dispatch({ kind: 'open-detail-conversation' }); return
+      case 'detail-refresh-roster':
+      case 'history-refresh-roster': this.deps.dispatch({ kind: 'refresh-session-roster' }); return
+      case 'history-open': {
+        const messageId = this.historySelectedMessageId
+        if (messageId !== undefined) this.deps.dispatch({ kind: 'open-delivery-conversation', messageId })
+        return
+      }
+      case 'history-toggle-expand': this.toggleHistoryExpansion(); return
+      case 'detail-edit': this.deps.dispatch({ kind: 'open-edit' }); return
+      case 'detail-toggle': this.deps.dispatch({ kind: 'toggle-active' }); return
+      case 'detail-run': this.deps.dispatch({ kind: 'ask-run' }); return
+      case 'detail-delete': this.deps.dispatch({ kind: 'ask-delete' }); return
+      case 'back': this.deps.dispatch({ kind: 'back' }); return
+      case 'close-help': this.deps.dispatch({ kind: 'close-help' }); return
+      case 'confirm': this.commitPaintedConfirm(); return
+      case 'cancel': this.cancelConfirm()
+    }
+  }
+
+  // ── panel-local state ──────────────────────────────────────────────────────
+
+  private syncSearchInput(): void {
+    if (!this.searchFocused) {
+      const display = sanitizedPhysicalLine(this.snapshot.query)
+      if (this.searchInput.getValue() !== display) this.searchInput.setValue(display)
+      this.searchBaseline = undefined
+      this.searchDispatched = undefined
+    } else if (this.searchBaseline === undefined) {
+      this.bindSearchInput()
+    } else if (this.snapshot.query !== this.searchBaseline) {
+      // The controller published a newer query: adopt it unless it is the
+      // exact value this panel already dispatched (an echo).
+      const display = sanitizedPhysicalLine(this.snapshot.query)
+      if (display !== this.searchDispatched) this.searchInput.setValue(display)
+      this.searchBaseline = this.snapshot.query
+      this.searchDispatched = display
+    }
+    this.searchInput.focused = this._focused && this.searchFocused
+  }
+
+  private bindSearchInput(): void {
+    const display = sanitizedPhysicalLine(this.snapshot.query)
+    this.searchBaseline = this.snapshot.query
+    this.searchDispatched = display
+    this.searchInput.setValue(display)
+  }
+
+  private syncEditorInput(): void {
+    const draft = this.snapshot.editor
+    const field = draft === undefined ? undefined : focusedField(draft)
+    if (draft === undefined || field === undefined || !isEditorTextInput(field)) {
+      this.editorFieldId = undefined
+      this.editorBaseline = undefined
+      this.editorDispatched = undefined
+      this.editorInput.focused = false
+      return
+    }
+    if (this.isRawEditorField(field)) {
+      // The multi-line field keeps its own raw buffer; a newer published value
+      // (another window, a controller re-read) is adopted unless it is the echo
+      // of what this panel just dispatched.
+      if (this.editorFieldId !== field.id) {
+        this.editorFieldId = field.id
+        this.rawDraft = field.value
+        this.rawDispatched = field.value
+        this.rawCursor = Array.from(field.value).length
+      } else if (field.value !== this.rawDispatched) {
+        this.rawDraft = field.value
+        this.rawDispatched = field.value
+        this.rawCursor = Array.from(field.value).length
+      }
+      this.editorInput.focused = false
+      return
+    }
+    this.rawDraft = undefined
+    this.rawDispatched = undefined
+    this.rawCursor = undefined
+    if (this.editorFieldId !== field.id) {
+      const display = sanitizedPhysicalLine(field.value)
+      this.editorFieldId = field.id
+      this.editorBaseline = field.value
+      this.editorDispatched = display
+      this.editorInput.setValue(display)
+    } else if (field.value !== this.editorBaseline) {
+      // The controller published a newer field value: adopt it unless it is
+      // the exact value this panel already dispatched (an echo).
+      const display = sanitizedPhysicalLine(field.value)
+      if (display !== this.editorDispatched) this.editorInput.setValue(display)
+      this.editorBaseline = field.value
+      this.editorDispatched = display
+    }
+    this.editorInput.focused = this._focused && this.chooser === undefined
+  }
+
+  /**
+   * The visible list window. A wheel gesture pins the viewport until the
+   * selection/filter/search changes; otherwise the controller's selection is
+   * kept visible.
+   */
+  private listViewport(content: readonly BodyLine[], bodyHeight: number): number {
+    if (this.listScrollPinned) return this.scrolled(this.listScroll, content.length, bodyHeight)
+    return this.revealSelection(content, this.listScroll, bodyHeight)
+  }
+
+  private revealSelection(
+    content: readonly BodyLine[],
+    scroll: number,
+    bodyHeight: number,
+  ): number {
+    const selected = content.findIndex(line => line.rowId !== undefined && line.rowId === this.snapshot.selectedId)
+    if (bodyHeight <= 0 || selected < 0) return this.scrolled(scroll, content.length, bodyHeight)
+    const selectedNextLine = content[selected + 1]?.rowId === this.snapshot.selectedId ? selected + 1 : selected
+    let next = scroll
+    if (selected < next) next = selected
+    else if (bodyHeight >= 2 && selectedNextLine > selected && selectedNextLine >= next + bodyHeight) {
+      next = selectedNextLine - bodyHeight + 1
+    } else if (selected >= next + bodyHeight) {
+      next = selected - bodyHeight + 1
+    }
+    return this.scrolled(next, content.length, bodyHeight)
+  }
+
+  private revealHistorySelection(content: readonly BodyLine[], scroll: number, bodyHeight: number): number {
+    if (this.historyScrollPinned) return this.scrolled(scroll, content.length, bodyHeight)
+    const selected = content.findIndex(line => line.rowId === this.historySelectedMessageId)
+    if (bodyHeight <= 0 || selected < 0) return this.scrolled(scroll, content.length, bodyHeight)
+    let next = scroll
+    if (selected < next) next = selected
+    else if (selected >= next + bodyHeight) next = selected - bodyHeight + 1
+    return this.scrolled(next, content.length, bodyHeight)
+  }
+
+  private revealChooser(content: readonly BodyLine[], scroll: number, bodyHeight: number): number {
+    const selected = content.findIndex(line => line.chooserIndex === this.chooser?.index)
+    const title = content.findIndex(line => line.chooserTitle === true)
+    if (bodyHeight <= 0 || selected < 0) return this.scrolled(scroll, content.length, bodyHeight)
+    let next = scroll
+    if (selected < next) next = selected
+    else if (selected >= next + bodyHeight) next = selected - bodyHeight + 1
+    // Keep the chooser heading beside its selected option whenever both fit.
+    if (title >= 0 && title < next && selected - title < bodyHeight) next = title
+    return this.scrolled(next, content.length, bodyHeight)
+  }
+
+  private revealField(content: readonly BodyLine[], scroll: number, bodyHeight: number): number {
+    const draft = this.snapshot.editor
+    if (draft === undefined) return 0
+    const field = focusedField(draft)
+    if (field === undefined) return 0
+    // A multi-line RAW field renders one body row per stored line: scroll to the
+    // row the CARET is on, never merely to the field's first row.
+    const caretIndex = content.findIndex(line => line.fieldId === field.id && line.caretRow === true)
+    const index = caretIndex >= 0 ? caretIndex : content.findIndex(line => line.fieldId === field.id)
+    let next = scroll
+    if (bodyHeight > 0 && index >= 0) {
+      if (index < next) next = index
+      else if (index >= next + bodyHeight) next = index - bodyHeight + 1
+    }
+    return this.scrolled(next, content.length, bodyHeight)
+  }
+
+  private scrolled(scroll: number, contentLength: number, bodyHeight: number): number {
+    return Math.max(0, Math.min(scroll, Math.max(0, contentLength - bodyHeight)))
+  }
+}
+
+/** The ONE confirmation question (the controller owns settlement). */
+function confirmQuestion(confirm: ScheduleConfirm): string {
+  switch (confirm.kind) {
+    case 'delete':
+      return `Delete "${confirm.title}" (${confirm.shortId})? Its saved deliveries are removed too.`
+    case 'clear-ended':
+      return 'Clear every ended task on this Host — not only the filtered rows? This cannot be undone.'
+    case 'run':
+      return `Run "${confirm.title}" now? The next scheduled occurrence is not consumed.`
+    case 'discard':
+      return 'Discard the unsaved schedule changes?'
+    case 'reload':
+      return 'Reload the latest Host revision? Your unsaved changes will be discarded.'
+  }
+}
+
+/** Fit plain text to an exact cell column. */
+function fit(text: string, width: number): string {
+  if (width <= 0) return ''
+  const clamped = truncateToWidth(text, width, '…', false)
+  return clamped + ' '.repeat(Math.max(0, width - visibleWidth(clamped)))
+}
+
+function nextListFilter(filter: ScheduleFilter, delta: 1 | -1): ScheduleFilter {
+  return FILTER_CYCLE[wrapIndex(FILTER_CYCLE.indexOf(filter) + delta, FILTER_CYCLE.length)]!
+}
+
+/** Wrap one index into `[0, length)`. */
+function wrapIndex(index: number, length: number): number {
+  if (length <= 0) return 0
+  return ((index % length) + length) % length
+}
+
+/** Whether an action-bar part is the painted (possibly ellipsized) segment. */
+function actionPartMatches(part: string, text: string): boolean {
+  if (part === text) return true
+  if (part.endsWith('…')) {
+    const core = part.slice(0, -1)
+    return core !== '' && text.startsWith(core)
+  }
+  // A compacted segment paints only its `short` token; the full text still
+  // contains that token (`N` inside `[N] Create`).
+  return text.startsWith(part) || text.includes(part)
+}
+
+/** The stable identity of one hit, used to reject a mismatched press/click. */
+function hitKey(hit: ScheduleHit): string {
+  switch (hit.kind) {
+    case 'row': return `row:${hit.id}`
+    case 'history-record': return `history-record:${hit.messageId}`
+    case 'history-link': return `history-link:${hit.messageId}`
+    case 'detail-link': return 'detail-link'
+    case 'filter': return `filter:${hit.filter}`
+    case 'search': return 'search'
+    case 'action': return `action:${hit.action}`
+    case 'field': return `field:${hit.id}`
+  }
+}
+
+/** The observed subject facts of one snapshot, using the Controller's own
+ *  precedence (`detail` first, then the catalog row): the identity a Detail
+ *  action would act on. Empty when the page has no such row. */
+function frameSubjectFacts(snapshot: ScheduleWorkspaceSnapshot): string {
+  const id = snapshot.mode === 'detail' ? snapshot.selectedId : snapshot.editor?.id
+  if (id === undefined) return ''
+  const row = (snapshot.detail?.id === id ? snapshot.detail : undefined)
+    ?? snapshot.rows.find(candidate => candidate.id === id)
+  if (row === undefined) return ''
+  const delivery = row.lastDelivery
+  return JSON.stringify([
+    row.status,
+    row.updatedAt ?? '',
+    row.executionActive,
+    row.deliveryFloorEndsAt,
+    row.target.kind === 'session' ? row.target.sessionId : row.target.kind,
+    delivery?.messageId,
+    delivery?.targetSessionId,
+    delivery?.scheduledAt,
+    delivery?.deliveredAt,
+  ])
+}
+
+function historyFrameFacts(snapshot: ScheduleWorkspaceSnapshot, expanded: ReadonlySet<ScheduleHistoryMessageId>): string {
+  return JSON.stringify({
+    selectedId: snapshot.selectedId,
+    status: snapshot.history?.status,
+    nextBefore: snapshot.history?.nextBefore,
+    records: snapshot.history?.records.map(record => [
+      record.messageId,
+      record.targetSessionId,
+      record.scheduledAt,
+      record.deliveredAt,
+      record.prompt,
+    ]),
+    expanded: [...expanded].sort(),
+  })
+}
+
+/** Resolve the painted region at one cell of the LAST frame. */
+function regionAt(frame: PaintedFrame, x: number, y: number): ScheduleHit | undefined {
+  return frame.regions.find(region => region.row === y && x >= region.from && x < region.to)?.hit
+}

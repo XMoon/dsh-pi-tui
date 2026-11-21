@@ -6,10 +6,10 @@
  * terminal geometry changes; `render(width)` therefore receives the frame's
  * INNER width and must never paint more rows than the current grant.
  *
- * Layout priority is frozen: the `Esc close` chrome is mandatory and must
- * never be lost while it fits, the identity title is row 1, the metadata and
- * `Esc close` share the bottom row, and the image/status body absorbs the
- * remainder (`maxRows - 2`, possibly zero).
+ * Layout priority is frozen: the exit affordance (`Back [Esc]` / `Close [Esc]`)
+ * is mandatory and must never be lost while it fits, the identity title is row
+ * 1, the metadata and the exit affordance share the bottom row, and the
+ * image/status body absorbs the remainder (`maxRows - 2`, possibly zero).
  *
  * The panel never awaits: it consults the shared {@link ImageLoader}
  * synchronously, asks it to start the async read on the first render, and the
@@ -17,10 +17,10 @@
  * frame. The loader's cache stays owned by the loader — `dispose()` only
  * releases this panel's subscription and its local `Image` instance.
  *
- * PIXELS: Kitty and Direct SIXEL both place PNG payloads through the ONE
- * managed `ImageGraphics` owner (Image-8 / I8-2B); iTerm2 keeps the intentional
- * workspace restriction and paints `Preview unavailable`. SIXEL readiness is
- * the owner's live `canPaint()` answer, never a process-wide capability.
+ * PIXELS: Kitty and Direct SIXEL place PNG payloads through the ONE managed
+ * `ImageGraphics` owner (Image-8 / I8-2B); Direct iTerm2 places the original
+ * MIME through the fork `Image` OSC 1337 path (X080). SIXEL readiness is the
+ * owner's live `canPaint()` answer, never a process-wide capability.
  *
  * KITTY/SIXEL JPEG/WEBP (Image-6B): neither transport can place JPEG/WebP bytes
  * directly, so this panel paints the SAME scoped 6A derived PNG the transcript
@@ -46,13 +46,25 @@ import { color } from '../../theme/runtime.ts'
 
 /** A safe finite row budget before the owning frame grants the real one. */
 const DEFAULT_MAX_ROWS = 22
-/** The mandatory close hint; right-aligned on the bottom row. `back` is used
- * when the Viewer is stacked over the `/view-image` list (Esc returns there),
- * `close` when it was opened directly from the transcript (Esc leaves). */
+/** The mandatory close affordance; right-aligned on the bottom row. `Back`
+ * is used when the Viewer is stacked over the `/view-image` list (Esc returns
+ * there), `Close` when it was opened directly from the transcript (Esc
+ * leaves). The `[Esc]` cap is the complete painted pointer span the owning
+ * `ImageWorkspacePanel` may activate. */
 type ImageViewerCloseHint = 'back' | 'close'
 
-/** One resolved pixel payload the body can place: a raw read (PNG only) or
- * the loader's scoped JPEG/WebP derivative. Both arrive as PNG base64; the
+/** The complete painted exit affordance of the LAST render: the workspace's
+ * screen gesture resolves a click against exactly these cells and this frame. */
+export interface ImageViewerExitHit {
+  readonly row: number
+  readonly startCol: number
+  readonly endCol: number
+  readonly width: number
+  readonly rows: number
+}
+
+/** One resolved pixel payload the body can place: a raw source (original MIME
+ * on iTerm2, PNG on Kitty/SIXEL) or the loader's scoped PNG derivative. The
  * KIND keeps the local `Image` from being reused across a source switch. */
 interface ResolvedPixelSource {
   readonly base64: string
@@ -92,11 +104,15 @@ export class ImageViewerPanel implements Component {
   private readonly theme: { fallbackColor(text: string): string }
   private readonly requestRender: () => void
   private readonly onClose: () => void
-  /** `Esc back` / `Esc close` — names the REAL effect of Esc (D13). */
+  /** `Back [Esc]` / `Close [Esc]` — names the REAL effect of Esc (D13) and is
+   * the complete painted pointer affordance of the bottom/short row. */
   private readonly closeHint: string
   private unsubscribe: (() => void) | undefined
   /** The granted CONTENT row budget (overlay maxHeight minus border rows). */
   private maxRows = DEFAULT_MAX_ROWS
+  /** The complete exit span painted by the LAST render (no hit while a tight
+   * row cannot hold the whole affordance). */
+  private exitHit: ImageViewerExitHit | undefined
   /** The local placement instance; never a cache of loaded bytes. */
   private instance: PixelBody | undefined
   /** Whether `instance` is a managed component (it owns a Core handle). */
@@ -106,7 +122,7 @@ export class ImageViewerPanel implements Component {
   private readonly imageProtocolPreference: ImageProtocolPreference | undefined
   /** The exact inputs the local instance was built for. */
   private instanceAttachmentId: string | undefined
-  private instanceProtocol: 'kitty' | 'sixel' | undefined
+  private instanceProtocol: 'kitty' | 'sixel' | 'iterm2' | undefined
   private instanceKind: 'raw' | 'derived' | undefined
   private instanceWidth: number | undefined
   private instanceBodyRows: number | undefined
@@ -122,7 +138,7 @@ export class ImageViewerPanel implements Component {
     this.theme = input.theme
     this.requestRender = input.requestRender
     this.onClose = input.onClose
-    this.closeHint = input.closeHint === 'back' ? 'Esc back' : 'Esc close'
+    this.closeHint = input.closeHint === 'back' ? 'Back [Esc]' : 'Close [Esc]'
     this.graphics = input.graphics
     this.imageProtocolPreference = input.imageProtocolPreference
     // Subscribe ONCE to THIS (scope, attachment)'s settles only: another
@@ -143,13 +159,26 @@ export class ImageViewerPanel implements Component {
 
   /** Esc closes; every other key is consumed locally and never forwarded. */
   handleInput(data: string): void {
-    if (matchesKey(data, 'escape')) this.onClose()
+    if (matchesKey(data, 'escape')) this.requestClose()
+  }
+
+  /** The ONE close route of this panel: the keyboard Esc and the workspace's
+   * painted exit span both re-enter the immutable `onClose` callback. */
+  requestClose(): void {
+    this.onClose()
+  }
+
+  /** The complete painted exit affordance of the LAST render, or undefined
+   * when the row truncated it (a partial `Close [Es` is never a target). */
+  paintedExitHit(): ImageViewerExitHit | undefined {
+    return this.exitHit
   }
 
   /** Drop the local placement so the next paint rebuilds from current state.
    *  A managed placement's Core handle is released with it (the Core then owns
    *  the hard delete at its next write). */
   invalidate(): void {
+    this.exitHit = undefined
     this.instance?.dispose?.()
     this.instance = undefined
     this.instanceManaged = false
@@ -176,6 +205,19 @@ export class ImageViewerPanel implements Component {
   render(width: number): string[] {
     const safeWidth = Math.max(0, Math.floor(width))
     const titleText = this.titleText()
+    // The complete painted exit span of THIS frame: right-aligned on the last
+    // granted row. A row narrower than the literal hint paints only a prefix,
+    // so it publishes no target (a partial affordance is never clickable).
+    const hintWidth = visibleWidth(this.closeHint)
+    this.exitHit = safeWidth < hintWidth
+      ? undefined
+      : {
+          row: this.maxRows - 1,
+          startCol: safeWidth - hintWidth,
+          endCol: safeWidth,
+          width: safeWidth,
+          rows: this.maxRows,
+        }
     if (this.maxRows === 1) {
       // Short-window priority: one row keeps the identity title on the left
       // and the mandatory close hint right-aligned; metadata is dropped.
@@ -185,10 +227,10 @@ export class ImageViewerPanel implements Component {
     const bottom = this.withCloseHint(this.metadataText(), safeWidth)
     if (this.maxRows === 2) return [title, bottom]
     const bodyRows = this.maxRows - 2
-    // The pane FILLS its grant: title on row 1, the metadata + `Esc close` bar
-    // pinned to the LAST granted row, and the body absorbing every row between
-    // (blank rows are the image's surrounding space, never trailing dead space
-    // that would leave the bar floating under a short image).
+    // The pane FILLS its grant: title on row 1, the metadata + exit affordance
+    // bar pinned to the LAST granted row, and the body absorbing every row
+    // between (blank rows are the image's surrounding space, never trailing dead
+    // space that would leave the bar floating under a short image).
     const body = this.bodyLines(safeWidth, bodyRows)
     const padded = body.length >= bodyRows
       ? body.slice(0, bodyRows)
@@ -208,9 +250,9 @@ export class ImageViewerPanel implements Component {
 
   /**
    * Compose the bottom/short row: the left fact text is truncated first, so
-   * the right-aligned `Esc close` always survives while the row can hold it.
-   * A row narrower than the literal hint paints only the widest prefix that
-   * fits instead of overflowing.
+   * the right-aligned exit affordance always survives while the row can hold
+   * it. A row narrower than the literal hint paints only the widest prefix that
+   * fits instead of overflowing — and publishes no pointer target.
    */
   private withCloseHint(left: string, width: number): string {
     const hint = this.closeHint
@@ -221,7 +263,9 @@ export class ImageViewerPanel implements Component {
     const leftRoom = width - hint.length
     const fitted = truncateToWidth(left, leftRoom, '…')
     const pad = Math.max(0, width - visibleWidth(fitted) - hint.length)
-    return `${fitted}${' '.repeat(pad)}${hint}`
+    // Role 14 affordance ink: the exit is clickable, so it keeps the canonical
+    // primary role (this workspace is not in the DENSE Action Bar exception).
+    return `${fitted}${' '.repeat(pad)}${color.primary(hint)}`
   }
 
   /** The body area: exactly one status row, or the clipped image rows. */
@@ -234,27 +278,18 @@ export class ImageViewerPanel implements Component {
       // managed admission): never start a pointless full-bytes read.
       return [this.failedStatus(width, 'Preview unavailable')]
     }
-    if (protocol !== 'kitty' && protocol !== 'sixel') {
-      // iTerm2 retains the intentional workspace restriction: the leased
-      // AltScreen disables its inline framing (cursor-up sequences the fork's
-      // ANSI width layer does not parse), so native iTerm2 pixels remain
-      // deferred to separate fork/protocol work. Metadata stays visible and
-      // the state is truthful.
-      return [this.failedStatus(width, 'Preview unavailable')]
-    }
     if (this.ref.mediaType === 'image/jpeg' || this.ref.mediaType === 'image/webp') {
-      // Image-6B: neither Kitty nor SIXEL places JPEG/WebP bytes directly, so
-      // JPEG/WebP reuse the SAME scoped 6A derivative the transcript thumbnail
-      // already derives. Never a second decoder, cache or re-read of the
-      // original bytes.
-      return this.derivedBodyLines(width, bodyRows, protocol)
+      // Image-6B: Kitty and SIXEL cannot place JPEG/WebP bytes directly, so
+      // they reuse the SAME scoped 6A derivative the transcript thumbnail
+      // already derives. iTerm2 carries the original MIME (see
+      // `imagePixelsSupported`), so it keeps the raw path below. Never a second
+      // decoder, cache or re-read of the original bytes.
+      if (protocol === 'kitty' || protocol === 'sixel') return this.derivedBodyLines(width, bodyRows, protocol)
     }
     if (!imagePixelsSupported(protocol, this.ref.mediaType)) {
-      // The shared protocol/MIME admission still rejects every other raster
-      // (GIF): both kitty and sixel accept PNG only and this repo installs no
-      // transcoder, so any other format would build an Image that silently
-      // degrades to a text fallback. JPEG/WebP never reach this check (they
-      // take the 6A branch).
+      // The shared protocol/MIME admission rejects every other raster (GIF):
+      // kitty/sixel accept PNG only and this repo installs no transcoder, so
+      // any other format would build an Image that silently degrades to text.
       return [this.failedStatus(width, 'Preview unavailable')]
     }
     const state = this.loader.get(this.ref, this.scope)
@@ -343,8 +378,8 @@ export class ImageViewerPanel implements Component {
     return truncateToWidth(painted, width, '…')
   }
 
-  /** Render one resolved PNG payload at `width` and clip the rows to the grant. */
-  private imageLines(width: number, bodyRows: number, pixel: ResolvedPixelSource, protocol: 'kitty' | 'sixel'): string[] {
+  /** Render the resolved original/derived payload at `width` and clip to the grant. */
+  private imageLines(width: number, bodyRows: number, pixel: ResolvedPixelSource, protocol: 'kitty' | 'sixel' | 'iterm2'): string[] {
     const image = this.imageFor(width, bodyRows, pixel, protocol)
     return image.render(width).slice(0, bodyRows)
   }
@@ -356,7 +391,7 @@ export class ImageViewerPanel implements Component {
    * base64 string and the payload's pixel dimensions. Any change rebuilds
    * instead of rendering stale cached lines from the wrong protocol/source.
    */
-  private imageFor(width: number, bodyRows: number, pixel: ResolvedPixelSource, protocol: 'kitty' | 'sixel'): PixelBody {
+  private imageFor(width: number, bodyRows: number, pixel: ResolvedPixelSource, protocol: 'kitty' | 'sixel' | 'iterm2'): PixelBody {
     const native = this.graphics !== undefined
     if (this.instance === undefined
       || this.instanceAttachmentId !== this.ref.attachmentId
@@ -389,7 +424,7 @@ export class ImageViewerPanel implements Component {
         )
         : new Image(
           pixel.base64,
-          'image/png',
+          protocol === 'iterm2' && pixel.kind === 'raw' ? this.ref.mediaType : 'image/png',
           { fallbackColor: this.theme.fallbackColor },
           {
             maxWidthCells: Math.max(1, width),

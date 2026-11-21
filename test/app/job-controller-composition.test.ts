@@ -16,8 +16,10 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { fakeAgentModel } from '../support/agent-model-double.ts'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { unsupportedInbox } from '@deepseek-ai/dsh-agent-loop-testkit'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import JobController from '@deepseek-ai/dsh-api-job-controller'
@@ -36,6 +38,10 @@ async function flush(times = 12): Promise<void> {
 
 test('the real job stack composes ctx.jobController and observation is non-consuming', async () => {
   const ctx = new Context()
+  // DSH 0.2.2: AgentRegistry injects `sessionProjections` (it registers the
+  // turn-boundary projection in its own init), so the registry must be mounted
+  // for the `agents` service to activate.
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(LocalJobRegistry)
   await ctx.plugin(TypertRegistry)
@@ -50,6 +56,10 @@ test('the real job stack composes ctx.jobController and observation is non-consu
     id,
     options: {},
     session: Session.create(id),
+    // DSH 0.2.2: the Agent owns its model selection (`AgentModel`); these
+    // options name no route, so the read answers undefined exactly like the
+    // production AgentModel would.
+    model: fakeAgentModel(undefined, {}),
     inbox: unsupportedInbox(),
     status: 'idle',
     ctx: scopeFiber.ctx,

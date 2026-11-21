@@ -7,9 +7,9 @@ import { stripVTControlCharacters } from "node:util";
 import { type AutocompleteProvider, CombinedAutocompleteProvider } from "../src/autocomplete.ts";
 import { Editor, wordWrapLine } from "../src/components/editor.ts";
 import { KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "../src/keybindings.ts";
-import type { TUI } from "../src/tui.ts";
+import { FAKE_CURSOR_START, renderFakeCursor, type TUI } from "../src/tui.ts";
 import { TuiMainScreen } from "../src/tui-main-screen.ts";
-import { visibleWidth } from "../src/utils.ts";
+import { stripTerminalSequences, visibleWidth } from "../src/utils.ts";
 import { defaultEditorTheme } from "./test-themes.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
@@ -971,7 +971,7 @@ describe("Editor component", () => {
 			}
 
 			// Verify content split correctly
-			const contentLines = lines.slice(1, -1).map((l) => stripVTControlCharacters(l).trim());
+			const contentLines = lines.slice(1, -1).map((l) => stripTerminalSequences(l).trim());
 			assert.strictEqual(contentLines.length, 2);
 			assert.strictEqual(contentLines[0], "日本語テス"); // 5 chars = 10 columns
 			assert.strictEqual(contentLines[1], "ト"); // 1 char = 2 columns (+ padding)
@@ -1003,7 +1003,7 @@ describe("Editor component", () => {
 
 			// The cursor (reverse video space) should be visible
 			const contentLine = lines[1]!;
-			assert.ok(contentLine.includes("\x1b[7m"), "Should have reverse video cursor");
+			assert.ok(contentLine.includes(FAKE_CURSOR_START), "Should have fake cursor");
 
 			// Line should still be correct width
 			assert.strictEqual(visibleWidth(contentLine), width);
@@ -1034,7 +1034,7 @@ describe("Editor component", () => {
 				let lines = editor.render(width + paddingX);
 				let contentLines = lines.slice(1, -1);
 				assert.strictEqual(contentLines.length, 1, "Should be 1 content line before wrap");
-				assert.ok(contentLines[0]!.endsWith("\x1b[7m \x1b[0m"), "Cursor should be at end of line");
+				assert.ok(contentLines[0]!.endsWith(renderFakeCursor(" ")), "Cursor should be at end of line");
 
 				// Type 1 more → text wraps to second line
 				editor.handleInput("a");
@@ -1054,7 +1054,7 @@ describe("Editor component", () => {
 			const lines = editor.render(width);
 
 			// Get content lines (between borders)
-			const contentLines = lines.slice(1, -1).map((l) => stripVTControlCharacters(l).trim());
+			const contentLines = lines.slice(1, -1).map((l) => stripTerminalSequences(l).trim());
 
 			// Should NOT break mid-word
 			// Line 1 should end with a complete word
@@ -2627,9 +2627,91 @@ describe("Editor component", () => {
 			editor.handleInput("\x1b[45;5u"); // Ctrl+- (undo)
 			assert.strictEqual(editor.getText(), "di");
 		});
+
+		it("onMaySubmit false aborts the submit before the clear and keeps draft and Undo history", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let submitted = 0;
+			let reserveCalls = 0;
+			let retired = 0;
+			editor.onSubmit = () => {
+				submitted += 1;
+			};
+			editor.onBeforeSubmitClear = () => {
+				reserveCalls += 1;
+				return () => {};
+			};
+			editor.onUndoHistoryRetired = () => {
+				retired += 1;
+			};
+			editor.onMaySubmit = (text) => text !== "hold";
+
+			editor.handleInput("h");
+			editor.handleInput("o");
+			editor.handleInput("l");
+			editor.handleInput("d");
+			editor.handleInput("\r");
+
+			assert.strictEqual(editor.getText(), "hold", "the refused gesture leaves the live draft");
+			assert.strictEqual(submitted, 0, "a refused gesture never dispatches a submit");
+			assert.strictEqual(reserveCalls, 0, "the pre-clear reservation never runs for a refused gesture");
+			assert.strictEqual(retired, 0, "the refused gesture does not retire the Undo history");
+
+			// The Undo history is intact: undo still returns to the pre-typing text.
+			editor.handleInput("\x1b[45;5u"); // Ctrl+- (undo)
+			assert.strictEqual(editor.getText(), "");
+		});
+
+		it("onMaySubmit true keeps the ordinary submit: dispatch once and clear the draft", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const seen: string[] = [];
+			editor.onMaySubmit = (text) => {
+				seen.push(text);
+				return true;
+			};
+			editor.onSubmit = (text) => {
+				seen.push(`submit:${text}`);
+			};
+
+			editor.handleInput("o");
+			editor.handleInput("k");
+			editor.handleInput("\r");
+
+			assert.deepStrictEqual(seen, ["ok", "submit:ok"], "the admission sees the same text the submit receives");
+			assert.strictEqual(editor.getText(), "", "an admitted submit still clears the draft");
+		});
 	});
 
 	describe("Autocomplete", () => {
+		it("moves the autocomplete selection with selection page keys (#7629)", async () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let submitted = "";
+			editor.onSubmit = (text) => {
+				submitted = text;
+			};
+			editor.setAutocompleteProvider({
+				getSuggestions: async () => ({
+					items: Array.from({ length: 12 }, (_, index) => ({
+						value: `/command-${index}`,
+						label: `command-${index}`,
+					})),
+					prefix: "/",
+				}),
+				applyCompletion,
+			});
+
+			assert.strictEqual(editor.capturesViewportInput, false);
+			editor.handleInput("/");
+			await flushAutocomplete();
+			assert.strictEqual(editor.capturesViewportInput, true);
+
+			editor.handleInput("\x1b[6~");
+			editor.handleInput("\x1b[6~");
+			editor.handleInput("\x1b[5~");
+			editor.handleInput("\r");
+
+			assert.strictEqual(submitted, "/command-5");
+		});
+
 		it("triggers and debounces symbol completion after CJK punctuation", async (t) => {
 			t.mock.timers.enable({ apis: ["setTimeout"] });
 			for (const before of [

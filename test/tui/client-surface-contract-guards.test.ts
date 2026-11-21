@@ -19,6 +19,8 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { WelcomeCard } from '../../src/tui/components/welcome-card.ts'
+import { WELCOME_WHALE_VARIANTS, renderWelcomeWhaleLines, welcomeWhaleGradientColors, welcomeWhalePlainLines } from '../../src/tui/components/welcome-whale.ts'
+import { hexPaint } from '../../src/tui/theme/runtime.ts'
 
 const source = (relative: string): string =>
   readFileSync(new URL(`../../src/${relative}`, import.meta.url), 'utf8')
@@ -215,52 +217,61 @@ test('the Remote skill gesture never loads a Client skill body', () => {
     'the fallback body is never built on the literal-gesture branch')
 })
 
-test('unavailable Remote approval/sandbox facts are omitted, never guessed', () => {
-  const remoteConfig = code('runtime/remote/config-remote.ts')
-  assert.ok(remoteConfig.includes('approvalOverrideAvailable(): boolean'),
-    'the capability marker exists (the consumer asks it instead of inferring)')
-  const remoteConfigRaw = source('runtime/remote/config-remote.ts')
-  assert.ok(/approvalOverrideAvailable\(\)[^{]*\{\s*\/\/[^\n]*\n\s*return false/u.test(remoteConfigRaw)
-    || remoteConfigRaw.includes('INTENTIONAL_UNSUPPORTED_IN_M3'),
-    'the Remote approval override is explicitly unavailable')
-  // The Remote status branch omits approval/sandbox entirely.
-  const status = code('app/surface/status-runtime.ts')
-  const remoteAccess = status.slice(
-    status.indexOf('} else {\n      // §6.4'),
-    status.indexOf('const collaboration = displaySubject === undefined'),
-  )
-  assert.equal(remoteAccess.includes('approval'), false,
-    'the Remote access branch never renders an approval fact')
-  assert.equal(remoteAccess.includes('sandbox'), false,
-    'the Remote access branch never infers a sandbox mode')
+test('M6-1 F8: approval/sandbox facts come from the ONE observation on BOTH branches, never a guessed default', () => {
+  // The retired synchronous approval contract is GONE from the config port and
+  // the interaction port (one writable semantic only).
+  const configPort = code('runtime/config-port.ts')
+  assert.equal(configPort.includes('approvalOverrideAvailable'), false,
+    'the retired availability flag is not resurrected on the config port')
+  assert.equal(configPort.includes('approvalOverrideOf'), false,
+    'the retired synchronous override read is not resurrected on the config port')
+  const interactionPort = code('runtime/interaction-port.ts')
+  assert.equal(interactionPort.includes('setApprovalPolicy'), false,
+    'the retired synchronous approval write is not resurrected on the interaction port')
+  // The status access derivation reads the observation on BOTH branches and
+  // never derives approval/sandbox from a preset name.
+  const status = source('app/surface/status-runtime.ts')
+  assert.ok(status.includes('policyObservation'), 'the status reads the ONE observation owner')
+  assert.ok(status.includes('readSnapshot(policySubjectId)'), 'the subject id is explicit (main or viewed child)')
+  const domainDerive = source('domain/status/derive-access.ts')
+  assert.equal(domainDerive.includes('resolve('), false,
+    'the domain derive no longer reads the sandbox service (the observation owns the effective mode)')
+  assert.equal(domainDerive.includes('overrideOf('), false,
+    'the domain derive no longer reads the approval service (the observation owns the effective policy)')
 })
 
-/* ───────── PR5: the required transcript-export capability declaration ──── */
+/* ───────── S5-PR3: the transcript renderer capability, not a backend flag ─ */
 
-test('the transcript-export capability is REQUIRED and refused unless exactly true', () => {
-  const commands = code('commands.ts')
-  const declaration = commands.indexOf('readonly transcriptExportAvailable: boolean')
-  assert.ok(declaration !== -1,
-    'the runner capability is a required boolean (no optional marker)')
-  assert.equal(code('commands.ts').includes('transcriptExportAvailable?:'), false,
-    'no optional declaration of the capability may reappear')
-  // TS1 moved the built-in /transcript definition into the artifacts command
-  // owner; the capability DECLARATION stays on the facade.
+test('/transcript gates on the REAL mounted save UI and never on a backend capability flag', () => {
+  // The retired Direct-only `transcriptExportAvailable` business flag must not
+  // reappear: the official Markdown Port serves BOTH backends, and the only
+  // Client capability left is the mounted `TuiApp` save-location dialog.
+  for (const file of [
+    'commands.ts',
+    'app/command/surface.ts',
+    'app/bootstrap.ts',
+    'tui/commands/artifacts.ts',
+  ]) {
+    assert.equal(code(file).includes('transcriptExportAvailable'), false,
+      `${file} must not carry the retired transcript-export capability flag`)
+  }
   const artifacts = code('tui/commands/artifacts.ts')
   const handlerAt = artifacts.indexOf("name: 'transcript'")
   assert.ok(handlerAt !== -1, 'the /transcript definition lives in the artifacts command owner')
   const handler = artifacts.slice(handlerAt)
-  assert.ok(handler.includes('runner.transcriptExportAvailable !== true'),
-    'the /transcript handler refuses unless the declared capability is exactly true')
-  // The production composition declares it per selected runtime, and the
-  // command-surface backend deps type requires it structurally: a new
-  // assembly cannot omit the capability.
-  const bootstrap = code('app/bootstrap.ts')
-  assert.ok(bootstrap.includes('transcriptExportAvailable: selectedRuntime.kind === \'direct\''),
-    'the production composition declares the capability from the selected runtime kind')
-  const surface = code('app/command/surface.ts')
-  assert.ok(surface.includes('readonly transcriptExportAvailable: boolean'),
-    'the command-surface backend deps keep the field required (structural guard)')
+  assert.ok(handler.includes('if (app === undefined)'),
+    'the handler refuses when the renderer mounts no TuiApp (no save location)')
+  assert.ok(handler.includes('TRANSCRIPT_SAVE_UNAVAILABLE_TEXT'),
+    'the app-less refusal returns the ONE shared fixed copy')
+  const capability = code('app/command/tsp-capability.ts')
+  assert.ok(capability.includes(
+    "export const TRANSCRIPT_SAVE_UNAVAILABLE_TEXT = 'transcript file save is unavailable on this renderer'",
+  ), 'the shared copy matches the exact plan text')
+  const controller = code('app/submission/controller.ts')
+  assert.ok(controller.includes('transcript ? TRANSCRIPT_SAVE_UNAVAILABLE_TEXT'),
+    'the real TSP pre-admission emits the same copy for /transcript')
+  assert.ok(handler.includes("'The /transcript command does not accept a path.'"),
+    'the no-argument grammar refusal is unchanged')
 })
 
 /* ── PR5 v2 §1C: origin-aware command authority guards ─────────────────── */
@@ -425,8 +436,10 @@ test('the attachment gate consumes the shared classification alone', () => {
     false, 'no parallel skill predicate may outrank the Host precedence')
   assert.ok(gate.includes("if (classification.kind === 'client-command')"),
     'a Client command refuses staged attachments')
-  assert.ok(gate.includes("if (classification.kind === 'host-command')"),
+  assert.ok(gate.includes("if (classification.kind === 'host-command' && classification.attachments !== true)"),
     'a genuine Host command follows its own attachment declaration')
+  assert.equal(gate.includes('cannot receive file attachments'),
+    false, 'a declared Host command no longer refuses FILE attachments (receipt staging owns them)')
 })
 
 test('the rewind settlement owner is phase-specific', () => {
@@ -524,6 +537,39 @@ test('the Welcome card and the Settings About page share ONE whale source', () =
   assert.ok(whale.includes('pickWelcomeWhaleVariant'), 'the shared module owns the variant pick')
   assert.ok(card.includes('pickWelcomeWhaleVariant()'), 'the Welcome card picks through the shared helper')
   assert.ok(settings.includes('pickWelcomeWhaleVariant()'), 'the About page picks through the shared helper')
+})
+
+test('the native TSP Welcome reads the SAME whale asset as plain rows and owns no second copy', () => {
+  const whale = code('tui/components/welcome-whale.ts')
+  const welcome = code('tui/tsp/welcome-view.ts')
+  // The shared module exposes the read-only views; the TSP view consumes them.
+  assert.ok(whale.includes('export function welcomeWhalePlainLines'), 'the shared module owns the plain-row view')
+  assert.ok(whale.includes('export function welcomeWhaleGradientColors'), 'the shared module owns the ramp view')
+  assert.ok(welcome.includes('welcomeWhalePlainLines') || welcome.includes('whaleLines'),
+    'the TSP Welcome receives its rows from the shared asset')
+  assert.ok(welcome.includes('welcomeWhaleGradientColors'), 'the TSP Welcome colours its rows from the shared ramp')
+  // No second copy of either brand asset may exist in the TSP layer.
+  assert.equal(welcome.includes('WELCOME_WHALES'), false, 'the TSP view keeps no copy of the variants')
+  for (const color of welcomeWhaleGradientColors()) {
+    assert.equal(whale.split(color).length - 1, 1, `the ramp holds exactly one copy of ${color}`)
+    assert.equal(welcome.includes(color), false, `the TSP view never re-declares ${color}`)
+  }
+  // The painted ANSI path is byte-stable: every variant, every row, exactly the
+  // ramp colour of its index over its own text. The Welcome card and the About
+  // page paint THIS, so the plain view cannot change what PiTui draws.
+  const ramp = welcomeWhaleGradientColors()
+  for (let variant = 0; variant < WELCOME_WHALE_VARIANTS; variant += 1) {
+    const plain = welcomeWhalePlainLines(variant)
+    const painted = renderWelcomeWhaleLines(variant)
+    assert.equal(painted.length, plain.length, `variant ${variant}: one painted line per whale row`)
+    for (const [index, row] of plain.entries()) {
+      assert.equal(painted[index], hexPaint(ramp[Math.min(index, ramp.length - 1)]!, row),
+        `variant ${variant} row ${index} keeps the exact ramp colour over the exact text`)
+      assert.equal(//u.test(row), false, `variant ${variant} row ${index} stays ANSI-free`)
+    }
+  }
+  assert.equal(welcomeWhalePlainLines(0).some(row => row.includes('\u001b')), false,
+    'the plain view carries no escape bytes for the native renderer to leak')
 })
 
 test('the About page reads the TUI and the DSH version as TWO independent facts', () => {

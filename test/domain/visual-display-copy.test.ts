@@ -16,8 +16,8 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { visibleAssistantTextForCopy } from '../../src/domain/visual/display-copy.ts'
 import type { PublishedVisual } from '../../src/domain/visual/publication.ts'
 
-const REF_A = `sv1_${'a'.repeat(20)}`
-const REF_B = `sv1_${'b'.repeat(20)}`
+const REF_A = `sv2_${'a'.repeat(20)}`
+const REF_B = `sv2_${'b'.repeat(20)}`
 
 function marker(ref: string): string {
   return `[dsh-visual-${ref}]: <#>`

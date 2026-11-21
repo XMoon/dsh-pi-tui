@@ -90,6 +90,14 @@ export interface SteerDeps {
    * blind "try again". Optional; absent keeps the direct/unit-call behavior.
    */
   onRejected?: (error: WriteError, steeredCount: number) => void
+  /**
+   * PR2: the Host acceptance callback of THIS gesture's draft prompt (the
+   * composer submission attempt's latch). Fired exactly once by the semantic
+   * writer when the Host accepted the draft message; a queue-sweep occurrence
+   * steer (`updateQueue`) never carries it. Optional; absent keeps the
+   * direct/unit-call behavior.
+   */
+  onDraftAccepted?: () => void
 }
 
 /** The notice for a submission refused by the session-transition fence. */
@@ -277,7 +285,12 @@ const deliverPrompt = async (
   subject: SteerSubjectLike,
   message: unknown,
   mode: 'queue' | 'steer',
-): Promise<WriteOutcome> => deps.writer.prompt(subject.session.id, message, mode)
+): Promise<WriteOutcome> => deps.writer.prompt(
+  subject.session.id,
+  message,
+  mode,
+  deps.onDraftAccepted === undefined ? undefined : { onAccepted: deps.onDraftAccepted },
+)
 
 /** Deliver one exact queued occurrence through the official updateQueue
  * steer operation. */

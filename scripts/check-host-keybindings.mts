@@ -178,6 +178,11 @@ export const SCOPED_STRING_ALLOWLIST: ReadonlyArray<{ readonly file: string; rea
   // definition the handler and the derived labels consume.
   { file: 'src/tui/keybindings/hints.ts', line: "select: 'alt+v'," },
   { file: 'src/tui/keybindings/hints.ts', line: "copy: 'alt+c'," },
+  // (8d) The TSP renderer's FIXED Session Search chord (T3-B1): the same
+  // category as (8b) — the TSP surface owns no keymap action, the chord is
+  // dispatched from the raw SDK key stream, and this ONE id feeds both the
+  // handler and the derived label the Quiet Composer paints.
+  { file: 'src/tui/keybindings/hints.ts', line: "export const TSP_SEARCH_CHORD: KeyId = 'alt+shift+s'" },
   // (8c) The TSP composer action row's FIXED keyboard-equivalent labels
   // (TSP-7 PR-C): Send/Stop reuse the composer's existing fixed keys (Enter,
   // Ctrl+C — raw SDK key stream, no keymap action, no remap), and the labels
@@ -205,6 +210,15 @@ export const SCOPED_STRING_ALLOWLIST: ReadonlyArray<{ readonly file: string; rea
   // the panel's handler and its painted hints import it.
   { file: 'src/tui/keybindings/hints.ts', line: "turns: { keys: ['shift+t'], label: 'Shift+T' }," },
   { file: 'src/tui/keybindings/hints.ts', line: "copyPath: { keys: ['shift+c'], label: 'Shift+C' }," },
+  // (12) The PiTui Queue manager overlay's ONE fixed-chord table (PR-Q): the
+  // same category as (10)/(11) — a per-surface COMPONENT contract whose
+  // Ctrl+S/Enter/D/Esc are local to the panel (no keymap action, no remap), so
+  // this table is its key authority and both its handler and action bar use it.
+  { file: 'src/tui/keybindings/hints.ts', line: "save: { keys: ['ctrl+s'], label: 'Ctrl+S' }," },
+  // (13) The Session Workspace tree's ONE fixed Folder-cycle chord (PR2): the
+  // fullscreen component owns Tab/Shift+Tab with no Host keymap action and no
+  // remap, so this table is its key authority and the panel imports the label.
+  { file: 'src/tui/keybindings/hints.ts', line: "folderCycle: { keys: ['tab', 'shift+tab'], label: 'Tab/Shift+Tab' }," },
 ]
 
 /** One detected violation (a host chord or a hard-coded label). */

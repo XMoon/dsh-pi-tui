@@ -12,7 +12,7 @@ The fixture uses only the Pi extension ABI supplied to its factory:
   and `dispose()`.
 
 The component writes lifecycle evidence to the path in
-`PI2DSH_COMPAT_EVIDENCE` and renders stable screen markers. Pressing `q` calls
+`DSH_SMOKE_EVIDENCE` and renders stable screen markers. Pressing `q` calls
 Pi's supplied `done()` callback exactly once before the component is disposed;
 the smoke script checks that callback, both evidence channels, and the Host
 surface against the published `pi2dsh@0.20.0` package and the candidate

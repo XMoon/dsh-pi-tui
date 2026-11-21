@@ -30,6 +30,7 @@ import type { JobObservedSnapshot, JobObservationPort, JobStopOutcome } from '..
 import { parseUserKeybindings } from '../../src/tui/keybindings/config.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { displaySeamStub } from '../support/display-seam-stub.ts'
+import { currentPalette } from '../../src/tui/theme/runtime.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
@@ -65,7 +66,7 @@ const highlightedRowText = (vt: VirtualTerminal): string => {
   const rows = rawView(vt)
   const highlighted = rows.findIndex((_, row) => {
     for (let column = 0; column < 200; column += 1) {
-      if (vt.getCellBgRgb(row, column) !== undefined) return true
+      if (vt.getCellBgRgb(row, column) === Number.parseInt(currentPalette.searchCurrentBg!.slice(1), 16)) return true
     }
     return false
   })
@@ -251,7 +252,7 @@ class Lines implements Component {
   invalidate(): void {}
 }
 
-test('B-01 JobOutputScrollView: every manual scroll pauses, only End re-arms, and relayout never steals the intent', () => {
+test('JobOutputScrollView: every manual scroll pauses, only End re-arms, and relayout never steals the intent', () => {
   const mk = (content: number, viewport: number): JobOutputScrollView => {
     const view = new JobOutputScrollView(new Lines(content), { follow: 'end', primary: true, scrollbar: 'auto' })
     view.updateLayout(content, viewport, () => {})
@@ -326,7 +327,7 @@ test('B-01 JobOutputScrollView: every manual scroll pauses, only End re-arms, an
   view.dispose()
 })
 
-test('B-01b rebaseRetainedAnchor: a pure append keeps the row, an eviction shifts by the proven rows', () => {
+test('rebaseRetainedAnchor: a pure append keeps the row, an eviction shifts by the proven rows', () => {
   const old = ['a', 'b', 'c', 'd', 'e']
   // Pure append: nothing moved.
   assert.equal(rebaseRetainedAnchor({
@@ -360,7 +361,7 @@ test('B-01b rebaseRetainedAnchor: a pure append keeps the row, an eviction shift
 
 // ── B-02: the real Job screen, keyboard scroll and the strict follow ─────────
 
-test('B-02 the real Job screen follows the tail, PgUp/Home/arrows really scroll the Output, End re-arms, and the background never moves', async () => {
+test('the real Job screen follows the tail, PgUp/Home/arrows really scroll the Output, End re-arms, and the background never moves', async () => {
   // 120×40: the frame can carry the LOWEST-priority viewport position too, so
   // the bar's own position fact is read from the user's sink.
   const { vt, app } = startApp({}, {}, 120, 40)
@@ -377,7 +378,7 @@ test('B-02 the real Job screen follows the tail, PgUp/Home/arrows really scroll 
   assert.match(painted, /line 199/, 'the tail is visible on open')
   assert.match(painted, /Follow on/)
   assert.match(painted, /Job · job-a · bash.*‣ Running/)
-  assert.match(painted, /Esc back/)
+  assert.match(painted, /Back \[Esc\]/)
   assert.equal(bodyTop(vt), 'line 165', 'the 35-row Output viewport starts at the retained tail')
 
   // PgUp is an active browse: pause and move the body.
@@ -388,7 +389,7 @@ test('B-02 the real Job screen follows the tail, PgUp/Home/arrows really scroll 
   assert.ok(!/line 199/.test(painted), 'the tail leaves the viewport')
   assert.equal(bodyTop(vt), 'line 134')
   assert.match(painted, /Job · job-a · bash.*‣ Running/, 'the Header stays pinned')
-  assert.match(painted, /Esc back/, 'the Action Bar stays the last row')
+  assert.match(painted, /Back \[Esc\]/, 'the Action Bar stays the last row')
 
   // Home goes to the top of THIS retained preview and stays PAUSED.
   vt.sendInput('\x1b[H')
@@ -420,7 +421,7 @@ test('B-02 the real Job screen follows the tail, PgUp/Home/arrows really scroll 
 
 // ── B-03: pushes while PAUSED, End catch-up, then follow again ──────────────
 
-test('B-03 a newer official snapshot never moves a PAUSED viewport; End catches up and keeps following', async () => {
+test('a newer official snapshot never moves a PAUSED viewport; End catches up and keeps following', async () => {
   const { vt, app } = startApp({}, {}, 120, 40)
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -455,7 +456,7 @@ test('B-03 a newer official snapshot never moves a PAUSED viewport; End catches 
 
 // ── B-04: real terminal wheel input ─────────────────────────────────────────
 
-test('B-04 a real alt-screen wheel pauses follow, and a later append is not followed', async () => {
+test('a real alt-screen wheel pauses follow, and a later append is not followed', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -485,7 +486,7 @@ test('B-04 a real alt-screen wheel pauses follow, and a later append is not foll
 
 // ── B-04b: the real scrollbar thumb press/drag/release ──────────────────────
 
-test('B-04b a real scrollbar press, drag and release move the Output, keep it paused and never re-arm follow', async () => {
+test('a real scrollbar press, drag and release move the Output, keep it paused and never re-arm follow', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -537,7 +538,7 @@ test('B-04b a real scrollbar press, drag and release move the Output, keep it pa
 
 // ── B-05: the effective Find is Job-local ───────────────────────────────────
 
-test('B-05 the effective Find opens the JOB Find over the retained body and never enters the Transcript search', async () => {
+test('the effective Find opens the JOB Find over the retained body and never enters the Transcript search', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -583,9 +584,71 @@ test('B-05 the effective Find opens the JOB Find over the retained body and neve
   app.stop()
 })
 
+// ── PR2: the fullscreen Job bar's ONE Esc affordance ───────────────────────
+
+test('the Job bar Esc affordance closes once and leaves a Find instead of closing it', async () => {
+  const { vt, app } = startApp({}, {}, 80, 24)
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  await openFirstJob(vt, harness)
+  harness.observation.latest()!.emit({ text: numberedLines(0, 9) })
+  await vt.waitForRender()
+
+  const bar = (): string => rawView(vt).at(-1) ?? ''
+  /** One real SGR press+release on the bar cell whose label starts at `label`. */
+  const clickBar = (label: string): void => {
+    const row = rawView(vt).length
+    const col = bar().indexOf(label)
+    assert.ok(col >= 0, `the ${label} affordance is painted on the physical last row:\n${view(vt)}`)
+    vt.sendInput(`\x1b[<0;${col + 1};${row}M`)
+    vt.sendInput(`\x1b[<0;${col + 1};${row}m`)
+  }
+
+  assert.match(bar(), /Back \[Esc\]/, 'the Output page advertises its real Esc outcome')
+  // A Find owns the Esc: the SAME affordance leaves the Search and NEVER closes
+  // the workspace, so the lower business row can never be reached by one click.
+  vt.sendInput('\x06')
+  await vt.waitForRender()
+  assert.match(view(vt), /Find Output:/)
+  assert.match(bar(), /Leave find \[Esc\]/, 'the bar names the CURRENT Esc outcome while a Find is open')
+  clickBar('Leave find')
+  await vt.waitForRender()
+  assert.ok(!/Find Output:/.test(view(vt)), 'the click left the Find')
+  assert.match(view(vt), /Job · job-a · bash/, 'leaving the Find never closed the Job workspace')
+  assert.match(bar(), /Back \[Esc\]/)
+
+  // The real Back closes the workspace exactly once.
+  clickBar('Back')
+  await vt.waitForRender()
+  assert.ok(!rawView(vt).some(line => line.includes('Job · job-a')), 'one click closed the Job workspace')
+  app.stop()
+})
+
+test('a stale Job bar release is inert after a press that the frame invalidated', async () => {
+  const { vt, app } = startApp({}, {}, 80, 24)
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  await openFirstJob(vt, harness)
+  harness.observation.latest()!.emit({ text: numberedLines(0, 9) })
+  await vt.waitForRender()
+  const row = rawView(vt).length
+  const col = (rawView(vt).at(-1) ?? '').indexOf('Back')
+  assert.ok(col >= 0)
+  // PRESS Esc, then open a Find with the keyboard (a different Esc semantic),
+  // and only then RELEASE: the press-time identity must not fire the OLD back.
+  vt.sendInput(`\x1b[<0;${col + 1};${row}M`)
+  vt.sendInput('\x06')
+  await vt.waitForRender()
+  vt.sendInput(`\x1b[<0;${col + 1};${row}m`)
+  await vt.waitForRender()
+  assert.match(view(vt), /Job · job-a · bash/, 'the stale release never closed the Job')
+  assert.match(view(vt), /Find Output:/, 'the keyboard Find is untouched by the stale release')
+  app.stop()
+})
+
 // ── B-05b: the initial (already observed) snapshot is searchable at open ───
 
-test('B-05b a Job opened with an ALREADY observed retained snapshot is searchable and positioned before any push', async () => {
+test('a Job opened with an ALREADY observed retained snapshot is searchable and positioned before any push', async () => {
   // The observation port is allowed to emit its first snapshot synchronously
   // inside `open()` (the Remote adapter does), so the opener's `initial` state
   // may already carry `observed.text` — the workspace must project it into the
@@ -620,7 +683,7 @@ test('B-05b a Job opened with an ALREADY observed retained snapshot is searchabl
 
 // ── B-05c: Stop is not advertised while a Find owns the ordinary keys ──────
 
-test('B-05c the Action Bar stops advertising Stop while a Find is active and restores it after Esc', async () => {
+test('the Action Bar stops advertising Stop while a Find is active and restores it after Esc', async () => {
   const { vt, app } = startApp({}, {}, 120, 40)
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -643,7 +706,7 @@ test('B-05c the Action Bar stops advertising Stop while a Find is active and res
 
 // ── B-05e: the Action Bar does not promise keys the search state consumes ──
 
-test('B-05e the Action Bar drops the inert End/Find hints while the query is being edited', async () => {
+test('the Action Bar drops the inert End/Find hints while the query is being edited', async () => {
   const { vt, app } = startApp({}, {}, 200, 40)
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -679,7 +742,7 @@ test('B-05e the Action Bar drops the inert End/Find hints while the query is bei
 
 // ── B-05d: the fork's own search key never opens a second overlay ──────────
 
-test('B-05d Ctrl+Shift+F (the fork search chord) opens the Job Find, never the fork search overlay', async () => {
+test('Ctrl+Shift+F (the fork search chord) opens the Job Find, never the fork search overlay', async () => {
   const { vt, app } = startApp({}, {}, 120, 40)
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -703,7 +766,7 @@ test('B-05d Ctrl+Shift+F (the fork search chord) opens the Job Find, never the f
 
 // ── B-06: EDIT vs NAVIGATE and n/N ─────────────────────────────────────────
 
-test('B-06 EDIT types n/N as query text, Enter enters result navigation, n/N cycle, and 0 hits stay 0/0', async () => {
+test('EDIT types n/N as query text, Enter enters result navigation, n/N cycle, and 0 hits stay 0/0', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -759,7 +822,7 @@ test('B-06 EDIT types n/N as query text, Enter enters result navigation, n/N cyc
 
 // ── B-06b: End in the query editor stays in the Input ──────────────────────
 
-test('B-06b End while EDITING the query stays in the Input and never resumes follow', async () => {
+test('End while EDITING the query stays in the Input and never resumes follow', async () => {
   const { vt, app } = startApp({}, {}, 120, 40)
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -789,7 +852,7 @@ test('B-06b End while EDITING the query stays in the Input and never resumes fol
 
 // ── B-07: Esc layering and End ─────────────────────────────────────────────
 
-test('B-07 the first Esc leaves only the search (still PAUSED in the same Job) and the second returns to the same browser; End resumes from a search', async () => {
+test('the first Esc leaves only the search (still PAUSED in the same Job) and the second returns to the same browser; End resumes from a search', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -840,54 +903,53 @@ test('B-07 the first Esc leaves only the search (still PAUSED in the same Job) a
 
 // ── B-08: remap / disable / leader ─────────────────────────────────────────
 
-test('B-08 the Job Find follows the EFFECTIVE Find binding: a remap, a disable and a leader completion are all honored', async () => {
-  // A wide frame so the LOWEST-priority Find hint is actually on screen and can
-  // be read as the user's sink (plan §6.2 degradation order).
+test('Job Find applies both effective Search actions, disabled scopes, Full remaps and leader completions', async () => {
+  // A wide frame makes the selected live Find binding visible in the action bar.
   const { vt, app } = startApp({}, {}, 200, 40)
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
   await openFirstJob(vt, harness)
   harness.observation.latest()!.emit({ text: 'needle' })
   await vt.waitForRender()
-  assert.match(view(vt), /Ctrl\+F find/, 'the default direct binding is advertised')
+  assert.match(view(vt), /Ctrl\+F find/, 'View direct is the default highest-priority hint')
 
-  // A disabled Find advertises nothing and Ctrl+F is inert.
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
-    bindings: { 'app.transcript.search': false },
+    'app.transcript.search.view': false,
+    'app.transcript.search': false,
   }))
   await vt.waitForRender()
-  assert.ok(!/Ctrl\+F/.test(view(vt)), 'a disabled Find never advertises Ctrl+F')
-  assert.match(view(vt), /\/ find/, 'the Job-local `/` alias still advertises the only live entry')
+  assert.ok(!/Ctrl\+F|Ctrl\+Shift\+F/.test(view(vt)), 'disabling both scopes advertises neither trigger')
+  assert.match(view(vt), /\/ find/, 'the Job-local alias remains available')
   vt.sendInput('\x06')
   await vt.waitForRender()
-  assert.ok(!/Find Output:/.test(view(vt)), 'a disabled binding does not open the Job Find')
-  // `/` remains the Job-local alias.
+  assert.ok(!/Find Output:/.test(view(vt)))
   vt.sendInput('/')
   await vt.waitForRender()
   assert.match(view(vt), /Find Output:/)
   vt.sendInput('\x1b')
   await vt.waitForRender()
 
-  // A remap is what the Job honors — both the hint and the real key.
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
-    bindings: { 'app.transcript.search': 'ctrl+y' },
+    'app.transcript.search.view': false,
+    'app.transcript.search': 'ctrl+y',
   }))
   await vt.waitForRender()
-  assert.match(view(vt), /Ctrl\+Y find/, 'the hint follows the effective remap')
+  assert.match(view(vt), /Ctrl\+Y find/, 'Full remap is the Job-local trigger when View is disabled')
   vt.sendInput('\x06')
   await vt.waitForRender()
-  assert.ok(!/Find Output:/.test(view(vt)), 'the old key is really inert')
+  assert.ok(!/Find Output:/.test(view(vt)), 'the replaced View default never returns through Full')
   vt.sendInput('\x19')
   await vt.waitForRender()
   assert.match(view(vt), /Find Output:/)
   vt.sendInput('\x1b')
   await vt.waitForRender()
 
-  // A leader-bound Find completes into the Job Find without dispatching the
-  // Transcript search.
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
     leader: 'ctrl+x',
-    bindings: { 'app.transcript.search': '<leader>s' },
+    bindings: {
+      'app.transcript.search.view': false,
+      'app.transcript.search': '<leader>s',
+    },
   }))
   const originalStart = app.startTranscriptSearch
   let transcriptSearches = 0
@@ -900,14 +962,43 @@ test('B-08 the Job Find follows the EFFECTIVE Find binding: a remap, a disable a
   await vt.waitForRender()
   vt.sendInput('s')
   await vt.waitForRender()
-  assert.match(view(vt), /Find Output:/, 'the leader completion opens the Job Find')
+  assert.match(view(vt), /Find Output:/, 'the Full leader completion opens only the Job Find')
   assert.equal(transcriptSearches, 0, 'the Transcript search handler is never dispatched')
+
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    leader: 'ctrl+x',
+    bindings: {
+      'app.transcript.search.view': ['<leader>tab', '<leader>v'],
+      'app.transcript.search': false,
+    },
+  }))
+  await vt.waitForRender()
+  assert.match(view(vt), /Leader V find/, 'the hint skips reserved Tab and names the next usable View leader')
+  assert.ok(!/Leader Tab find/.test(view(vt)), 'the reserved leader completion is never advertised as Find')
+
+  vt.sendInput('\x18')
+  await vt.waitForRender()
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  assert.match(view(vt), /Output \[Esc\]/, 'reserved leader+Tab still reaches the Job page toggle')
+  assert.ok(!/Find Output:/.test(view(vt)), 'reserved leader+Tab never opens Find')
+  assert.equal(transcriptSearches, 0)
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  vt.sendInput('\x18')
+  await vt.waitForRender()
+  vt.sendInput('v')
+  await vt.waitForRender()
+  assert.match(view(vt), /Find Output:/, 'the next non-reserved View leader opens the Job-local Find')
+  assert.equal(transcriptSearches, 0, 'the View leader never enters parent Transcript Search')
   app.stop()
 })
 
 // ── B-08b: a Find remap onto a reserved viewport key cannot shadow End ─────
 
-test('B-08b a Find binding remapped onto the reserved physical End cannot shadow the only follow re-arm or be advertised', async () => {
+test('a Find binding remapped onto the reserved physical End cannot shadow the only follow re-arm or be advertised', async () => {
   // A wide frame so the LOWEST-priority Find hint really fits: with the reserved
   // key filtered out the segment is the bare `/ find`, and without the filter it
   // would advertise the inert `End` as `End find`.
@@ -924,7 +1015,10 @@ test('B-08b a Find binding remapped onto the reserved physical End cannot shadow
   assert.match(bar(), /Ctrl\+F find/)
 
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
-    bindings: { 'app.transcript.search': 'end' },
+    bindings: {
+      'app.transcript.search.view': false,
+      'app.transcript.search': 'end',
+    },
   }))
   await vt.waitForRender()
   assert.match(bar(), /Follow paused · End resume/, 'End still really resumes follow')
@@ -949,7 +1043,7 @@ test('B-08b a Find binding remapped onto the reserved physical End cannot shadow
 
 // ── B-09: CJK / wrapping / ANSI ────────────────────────────────────────────
 
-test('B-09 searching CJK, wrapped and ANSI text keeps the rendered row count and visible width, and highlights the hit', async () => {
+test('searching CJK, wrapped and ANSI text keeps the rendered row count and visible width, and highlights the hit', async () => {
   // A SHORT body so the whole fixture stays inside the Output viewport: the
   // highlight comparison is then a same-row, same-width proof.
   const lines = [
@@ -991,23 +1085,25 @@ test('B-09 searching CJK, wrapped and ANSI text keeps the rendered row count and
   for (const row of rawView(vt)) assert.ok(visibleWidth(row) <= 80)
 
   const rowsWith = (fragment: string): number => rawView(vt).findIndex(row => row.includes(fragment))
-  const scan = (row: number): { background: number; underline: number } => {
-    let background = 0
-    let underline = 0
+  const rgb = (hex: string): number => Number.parseInt(hex.slice(1), 16)
+  const scan = (row: number): { current: number; ordinary: number } => {
+    let current = 0
+    let ordinary = 0
     for (let column = 0; column < 80; column += 1) {
-      if (vt.getCellBgRgb(row, column) !== undefined) background += 1
-      if (vt.getCellUnderline(row, column)) underline += 1
+      const background = vt.getCellBgRgb(row, column)
+      if (background === rgb(currentPalette.searchCurrentBg!)) current += 1
+      if (background === rgb(currentPalette.searchMatchBg!)) ordinary += 1
     }
-    return { background, underline }
+    return { current, ordinary }
   }
   const currentRow = rowsWith('alpha 中文 needle beta')
   assert.ok(currentRow >= 0, 'the current hit row is visible (the reveal ran)')
-  assert.ok(scan(currentRow).background > 0, 'the current hit carries the themed background highlight')
+  assert.ok(scan(currentRow).current > 0, 'the current hit carries the orange exact background')
   const weakRow = rowsWith('red needle tail')
   assert.ok(weakRow >= 0, 'the other occurrence stays visible')
   const weak = scan(weakRow)
-  assert.ok(weak.underline > 0, 'the other occurrence is weak-underlined')
-  assert.equal(weak.background, 0, 'only the current occurrence gets the strong background')
+  assert.ok(weak.ordinary > 0, 'the other occurrence carries the ordinary yellow background')
+  assert.equal(weak.current, 0, 'only the current occurrence gets the strong background')
 
   // A re-search over the ALREADY highlighted render must not see the highlight
   // decoration: the matcher indexes the raw retained rows only.
@@ -1021,7 +1117,7 @@ test('B-09 searching CJK, wrapped and ANSI text keeps the rendered row count and
 
 // ── B-09b: the sanitized body is the ONE search/geometry source ────────────
 
-test('B-09b a CR progress stream paints distinct records and Find navigates to the row actually painted', async () => {
+test('a CR progress stream paints distinct records and Find navigates to the row actually painted', async () => {
   for (const width of [40, 80, 160]) {
     const { vt, app } = startApp({}, {}, width, 24)
     const harness = attachTasks(app, { jobIds: ['job-a'] })
@@ -1063,7 +1159,7 @@ test('B-09b a CR progress stream paints distinct records and Find navigates to t
 
 // ── B-10: bounded retention and the GAP truth ──────────────────────────────
 
-test('B-10 a truncated retained window rebases a provable anchor, never fabricates GAP, and the footer stays preview-relative', async () => {
+test('a truncated retained window rebases a provable anchor, never fabricates GAP, and the footer stays preview-relative', async () => {
   const { vt, app } = startApp({}, {}, 120, 40)
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -1102,7 +1198,7 @@ test('B-10 a truncated retained window rebases a provable anchor, never fabricat
 
 // ── B-10b: a source change between frames never falsifies the anchor ───────
 
-test('B-10b several snapshots before the next frame keep the anchor on the same provable row', async () => {
+test('several snapshots before the next frame keep the anchor on the same provable row', async () => {
   const { vt, app } = startApp({}, {}, 120, 40)
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -1276,7 +1372,7 @@ test('B-10b4 a resize re-wrap drops the unprovable hit identity instead of handi
 
 // ── B-10c: a pending reveal survives a snapshot landing before the paint ───
 
-test('B-10c a pending result reveal survives a snapshot that lands between the keypress and the paint', async () => {
+test('a pending result reveal survives a snapshot that lands between the keypress and the paint', async () => {
   const { vt, app } = startApp({}, {}, 120, 40)
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -1304,7 +1400,7 @@ test('B-10c a pending result reveal survives a snapshot that lands between the k
 
 // ── B-10d: a lost current match falls back to the visible anchor ───────────
 
-test('B-10d a truncation that EVICTS the current match falls back to the nearest provable match at the visible anchor', async () => {
+test('a truncation that EVICTS the current match falls back to the nearest provable match at the visible anchor', async () => {
   const lines = Array.from({ length: 200 }, (_, index) => `line ${String(index).padStart(3, '0')}`)
   lines[10] = 'needle alpha'
   lines[190] = 'needle beta'
@@ -1343,7 +1439,7 @@ test('B-10d a truncation that EVICTS the current match falls back to the nearest
 
 // ── B-11: the short-screen budget ──────────────────────────────────────────
 
-test('B-11 short frames keep one Output row, the Action Bar last, and a Find only where its row can exist', async () => {
+test('short frames keep one Output row, the Action Bar last, and a Find only where its row can exist', async () => {
   const { vt, app } = startApp({}, {}, 44, 4)
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -1352,7 +1448,7 @@ test('B-11 short frames keep one Output row, the Action Bar last, and a Find onl
   await vt.waitForRender()
   let rows = rawView(vt)
   assert.equal(rows.length, 4)
-  assert.match(rows[3]!, /Esc back/, 'the Action Bar is the last row')
+  assert.match(rows[3]!, /Back \[Esc\]/, 'the Action Bar is the last row')
   assert.match(rows[0]!, /Running/, 'the status row survives')
   assert.ok(rows.slice(0, 3).some(row => /line 00/.test(row)), 'at least one Output row stays readable')
 
@@ -1362,7 +1458,7 @@ test('B-11 short frames keep one Output row, the Action Bar last, and a Find onl
   rows = rawView(vt)
   assert.equal(rows.length, 4)
   assert.match(rows[1]!, /Find Output:/, 'the SearchRow is inside the 4-row budget')
-  assert.match(rows[3]!, /Esc back/)
+  assert.match(rows[3]!, /Leave find \[Esc\]/, 'the bar names the CURRENT Esc outcome (leave the Find, not the Job)')
   vt.sendInput('\x1b')
   await vt.waitForRender()
 
@@ -1371,10 +1467,17 @@ test('B-11 short frames keep one Output row, the Action Bar last, and a Find onl
   await vt.waitForRender()
   assert.match(view(vt), /Find Output:/)
   vt.resize(44, 3)
-  await vt.waitForRender()
+  // A frame that cannot host the SearchRow leaves the search in
+  // `onFramePainted`, which requests ONE more repaint. Wait for the frame that
+  // really carries the exited state instead of assuming a single render.
+  for (let frame = 0; frame < 20; frame += 1) {
+    await vt.waitForRender()
+    const text = view(vt)
+    if (!/Find Output:/.test(text) && /Back \[Esc\]/.test(text)) break
+  }
   const tiny = view(vt)
   assert.ok(!/Find Output:/.test(tiny), 'a frame with no SearchRow leaves the search')
-  assert.match(tiny, /Esc back/, 'the Action Bar survives the shrink')
+  assert.match(tiny, /Back \[Esc\]/, 'the Action Bar survives the shrink')
   assert.match(tiny, /job-a/, 'the Job is still the owner')
 
   // Growing again does not silently reopen a hidden editor.
@@ -1386,7 +1489,7 @@ test('B-11 short frames keep one Output row, the Action Bar last, and a Find onl
 
 // ── B-12: lifecycle ────────────────────────────────────────────────────────
 
-test('B-12 a Job replacement/dispose keeps ONE observer per Job and never restores the old query, anchor or focus', async () => {
+test('a Job replacement/dispose keeps ONE observer per Job and never restores the old query, anchor or focus', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a', 'job-b'] })
   await flush()
@@ -1420,7 +1523,7 @@ test('B-12 a Job replacement/dispose keeps ONE observer per Job and never restor
 
 // ── B-13: the strict follow survives a real production push (Direct shape) ──
 
-test('B-13 the strict follow/search work over the production observer push, and the PAUSED state is not reset by a newer snapshot', async () => {
+test('the strict follow/search work over the production observer push, and the PAUSED state is not reset by a newer snapshot', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -1451,7 +1554,7 @@ test('B-13 the strict follow/search work over the production observer push, and 
 
 // ── B-08c: the reserved Tab page toggle outranks a Find remap onto it ───────
 
-test('B-08c a Find binding remapped onto the reserved Tab cannot shadow the page toggle or be advertised', async () => {
+test('a Find binding remapped onto the reserved Tab cannot shadow the page toggle or be advertised', async () => {
   // `Tab` is reserved for the workspace's own page toggle exactly like Home/End: the
   // owner matches it BEFORE the Find check, and the Find hint drops such a binding. A
   // user remap onto `Tab` must therefore change NEITHER what the key does NOR what the
@@ -1467,7 +1570,10 @@ test('B-08c a Find binding remapped onto the reserved Tab cannot shadow the page
   assert.match(view(vt), /Ctrl\+F find/, 'the default direct binding is advertised')
 
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
-    bindings: { 'app.transcript.search': 'tab' },
+    bindings: {
+      'app.transcript.search.view': false,
+      'app.transcript.search': 'tab',
+    },
   }))
   await vt.waitForRender()
 
@@ -1478,10 +1584,10 @@ test('B-08c a Find binding remapped onto the reserved Tab cannot shadow the page
   // …and it cannot shadow the toggle: `Tab` really switches the page, BOTH ways.
   vt.sendInput('\t')
   await vt.waitForRender()
-  assert.match(view(vt), /Esc output/, 'Tab opened the Command page')
+  assert.match(view(vt), /Output \[Esc\]/, 'Tab opened the Command page')
   vt.sendInput('\t')
   await vt.waitForRender()
-  assert.match(view(vt), /Esc back/, 'Tab returned to the Output page')
+  assert.match(view(vt), /Back \[Esc\]/, 'Tab returned to the Output page')
 
   // The search stays reachable through the Job-local alias.
   vt.sendInput('/')
@@ -1503,8 +1609,8 @@ test('B-08c a Find binding remapped onto the reserved Tab cannot shadow the page
 
   vt.sendInput('\t')
   await vt.waitForRender()
-  assert.match(bar(), /Esc back/, 'Tab did NOT switch the page out of a NAVIGATE Find')
-  assert.ok(!/Esc output/.test(view(vt)), 'the Command page was never entered')
+  assert.match(bar(), /Leave find \[Esc\]/, 'Tab did NOT switch the page out of a NAVIGATE Find')
+  assert.ok(!/Output \[Esc\]/.test(view(vt)), 'the Command page was never entered')
   assert.match(bar(), /Follow paused · End resume/, 'Tab did NOT re-enter EDIT')
   vt.sendInput('z')
   await vt.waitForRender()
@@ -1513,10 +1619,10 @@ test('B-08c a Find binding remapped onto the reserved Tab cannot shadow the page
   // The same from the Command page's own Find.
   vt.sendInput('\x1b') // ONE Esc leaves the NAVIGATE search; a second would close the workspace
   await vt.waitForRender()
-  assert.match(bar(), /Esc back/, 'one Esc left only the search, the workspace is still up')
+  assert.match(bar(), /Back \[Esc\]/, 'one Esc left only the search, the workspace is still up')
   vt.sendInput('\t') // now inactive: the reserved toggle switches the page
   await vt.waitForRender()
-  assert.match(view(vt), /Esc output/, 'Tab switched to the Command page')
+  assert.match(view(vt), /Output \[Esc\]/, 'Tab switched to the Command page')
   vt.sendInput('/')
   await vt.waitForRender()
   assert.match(view(vt), /Find Command:/, 'the Job-local `/` opens the Command Find')
@@ -1529,7 +1635,7 @@ test('B-08c a Find binding remapped onto the reserved Tab cannot shadow the page
   assert.ok(commandNavigateRow !== '', 'the Command search row is painted in NAVIGATE')
   vt.sendInput('\t')
   await vt.waitForRender()
-  assert.match(view(vt), /Esc output/, 'Tab did NOT switch the page out of the Command NAVIGATE Find')
+  assert.match(view(vt), /Leave find \[Esc\]/, 'Tab did NOT switch the page out of the Command NAVIGATE Find')
   vt.sendInput('z')
   await vt.waitForRender()
   assert.equal(commandRow(), commandNavigateRow, 'the Command Find is still NAVIGATE, not EDIT')

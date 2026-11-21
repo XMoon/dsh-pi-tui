@@ -92,6 +92,28 @@ const TOOL_TITLES: Record<string, string> = {
   [CHART_TOOL_NAME]: 'Chart',
   [SVG_TOOL_NAME]: 'SVG',
   [PRESENT_VISUAL_TOOL_NAME]: 'Present visuals',
+  // The Schedule family: the live registry's tool-authored `presentCall`
+  // still wins when it is available. This fixed fallback keeps the card
+  // identity when a Direct definition was unloaded, a historical Session has
+  // no live registration, or a Remote Client only has the durable log. The
+  // names are the current four-tool family plus the historical rc5 pair; no
+  // other name is treated as Schedule.
+  schedule_create: 'Create scheduled task',
+  schedule_list: 'List scheduled tasks',
+  schedule_view: 'View scheduled task',
+  schedule_edit: 'Edit scheduled task',
+  schedule_update: 'Update reminder',
+  schedule_delete: 'Delete reminder',
+  // The rc.3 Team task-board family and the wait control carry no
+  // tool-authored `presentCall`, so this fixed fallback keeps the card
+  // identity when a Direct definition was unloaded, a historical Session has
+  // no live registration, or a Remote Client only has the durable log. Exact
+  // names only; an unregistered lookalike keeps the generic Web row.
+  team_task_create: 'Create team task',
+  team_task_list: 'List team tasks',
+  team_task_get: 'View team task',
+  team_task_update: 'Update team task',
+  wait_agent: 'Wait for input',
 }
 
 /**
@@ -123,6 +145,68 @@ const TUI_TOOL_TITLES: Record<string, string> = {
 export const GOAL_TOOL_NAMES: ReadonlySet<string> = new Set(['get_goal', 'create_goal', 'update_goal'])
 
 /**
+ * The Schedule tool names that carry the fixed header fallback and the folded
+ * summarizer: the current four-tool family (`create`/`list`/`view`/`edit`)
+ * plus the historical `update`/`delete` pair.
+ */
+const SCHEDULE_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'schedule_create',
+  'schedule_list',
+  'schedule_view',
+  'schedule_edit',
+  'schedule_update',
+  'schedule_delete',
+])
+
+/** The recurrence kinds the Schedule task schema knows (both generations). */
+const SCHEDULE_TASK_KINDS: ReadonlySet<string> = new Set([
+  'after',
+  'at',
+  'every',
+  'daily',
+  'weekly',
+  'cron',
+  'rrule',
+])
+
+/** The current task status values. */
+const SCHEDULE_TASK_STATUSES: ReadonlySet<string> = new Set(['active', 'paused', 'ended'])
+
+/** The historical rc5 task state values (`state`, never `status`). */
+const SCHEDULE_TASK_STATES: ReadonlySet<string> = new Set(['scheduled', 'overdue'])
+
+/** The official Team task RESULT status values (a result snapshot, not live state). */
+const TEAM_TASK_RESULT_STATUSES: ReadonlySet<string> = new Set([
+  'pending',
+  'in_progress',
+  'completed',
+  'deleted',
+])
+
+/** The official team_task_list status FILTER values (a deleted task is not filterable). */
+const TEAM_TASK_LIST_STATUS_VALUES: ReadonlySet<string> = new Set([
+  'pending',
+  'in_progress',
+  'completed',
+])
+
+/** The official team_task_update action enum. */
+const TEAM_TASK_UPDATE_ACTIONS: ReadonlySet<string> = new Set([
+  'claim',
+  'release',
+  'edit',
+  'set_dependencies',
+  'complete',
+  'reopen',
+  'reassign',
+  'delete',
+])
+
+/** The official wait_agent timeout range, in milliseconds. */
+const WAIT_AGENT_MIN_TIMEOUT_MS = 10_000
+const WAIT_AGENT_MAX_TIMEOUT_MS = 3_600_000
+
+/**
  * Tools whose folded result preview must never leak the raw result JSON
  * (web parity: the web's folded row shows only the args summary, never the
  * result). The TUI keeps its result-preview row but shows a parsed summary
@@ -130,19 +214,23 @@ export const GOAL_TOOL_NAMES: ReadonlySet<string> = new Set(['get_goal', 'create
  *
  * `ralph`'s render already leads with a friendly line ("Ralph worker
  * reported completion after N rounds.") before the JSON report, so its
- * summary IS that first line. The agent-team family is deliberately NOT in
- * the set: it is experimental (not in the production bundle) and two of its
- * tools (`send_message`, `interrupt_agent`) share names with subagent tools
- * whose render text is friendly — a name-keyed set cannot tell them apart.
+ * summary IS that first line. The four rc.3 `team_task_*` result tools and
+ * `wait_agent` are safe to name here: their names collide with no subagent
+ * tool. Only the SHARED `send_message` / `interrupt_agent` names stay
+ * excluded — a name-keyed set cannot tell them apart from subagent tools
+ * whose render text is friendly.
  */
 export const FOLDED_JSON_RESULT_TOOLS: ReadonlySet<string> = new Set([
   'ralph',
-  'schedule_create',
-  'schedule_list',
-  'schedule_delete',
+  ...SCHEDULE_TOOL_NAMES,
   'cordis_inspect_list',
   'cordis_inspect_query',
   'cordis_inspect_self',
+  'team_task_create',
+  'team_task_list',
+  'team_task_get',
+  'team_task_update',
+  'wait_agent',
 ])
 
 /** Parse a result text as JSON, tolerating a friendly prefix line before
@@ -171,6 +259,134 @@ function stringField(value: unknown): string | undefined {
   return typeof value === 'string' && value !== '' ? value : undefined
 }
 
+/** Whether `value` is a non-negative safe integer. */
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+/** The error code of a Schedule result object, when it declares one. */
+function scheduleErrorCode(value: unknown): string | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  return stringField((value as Record<string, unknown>).code)
+}
+
+/**
+ * The folded summary of one canonical Schedule task value: `<kind> · <status>`
+ * for the current schema, `<kind> · <state>` for the historical rc5 schema.
+ * A task whose kind or status/state is absent or outside the upstream enums
+ * is never claimed — the caller then shows no preview.
+ */
+function scheduleTaskSummary(value: unknown): string | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  const kind = stringField(record.kind)
+  if (kind === undefined || !SCHEDULE_TASK_KINDS.has(kind)) return undefined
+  // `status` and `state` are different generations' enums: an rc5-shaped
+  // `state` never validates as a status (and vice versa).
+  const status = record.status
+  const state = record.state
+  if (status !== undefined) {
+    return typeof status === 'string' && SCHEDULE_TASK_STATUSES.has(status) ? `${kind} · ${status}` : undefined
+  }
+  if (typeof state === 'string' && SCHEDULE_TASK_STATES.has(state)) return `${kind} · ${state}`
+  return undefined
+}
+
+/**
+ * The folded summary of one current-schema `schedule_list` page: a page with
+ * no items and no tasks says `no scheduled tasks`, any other page reports
+ * `<shown> of <total> scheduled`. The counts must agree with the items array
+ * and stay non-negative; an offset beyond the last item is a LEGAL empty page
+ * (the service allows it), so no `offset <= total` rule is imposed here.
+ */
+function schedulePageSummary(value: unknown): string | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  const items = record.items
+  if (!Array.isArray(items)) return undefined
+  const shown = record.shown
+  const total = record.total
+  const limit = record.limit
+  const offset = record.offset
+  if (!isNonNegativeInteger(shown) || !isNonNegativeInteger(total)) return undefined
+  if (!isNonNegativeInteger(limit) || limit === 0 || !isNonNegativeInteger(offset)) return undefined
+  if (shown !== items.length || total < shown) return undefined
+  // A list page proves its task rows: a malformed entry (no legal kind, or no
+  // legal status/state) makes the whole page unprovable instead of silently
+  // counting a pseudo-task.
+  if (!items.every(item => scheduleTaskSummary(item) !== undefined)) return undefined
+  return items.length === 0 && total === 0 ? 'no scheduled tasks' : `${shown} of ${total} scheduled`
+}
+
+/**
+ * The folded one-line summary of one official Team task result snapshot
+ * (`team_task_create` / `get` / `update`). Validates only the fields this row
+ * actually prints — `id`, `revision`, `status`, the optional `owner` and
+ * `ready` — never the whole upstream schema. An error-code object, a mixed
+ * error object, an unknown status or a missing/mistyped identity field yields
+ * undefined, so the row keeps its `isError` / error identity and invents no
+ * success phrase. `ownerName` / `ownerId` are NEVER used as an owner fallback;
+ * an absent owner renders `unowned`. `ready` is a pending-only snapshot fact
+ * (ready=false is not "blocked"), and `status:deleted` is a team-task state,
+ * not a filesystem deletion.
+ */
+function teamTaskSummary(value: unknown): string | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  // An error object is the tool's failure identity, not a task snapshot.
+  if (stringField(record.code) !== undefined) return undefined
+  if (typeof record.id !== 'string' || record.id === '') return undefined
+  const revision = record.revision
+  if (!isNonNegativeInteger(revision)) return undefined
+  const status = record.status
+  if (typeof status !== 'string' || !TEAM_TASK_RESULT_STATUSES.has(status)) return undefined
+  const ready = record.ready
+  if (typeof ready !== 'boolean') return undefined
+  const owner = record.owner
+  if (owner !== undefined && typeof owner !== 'string') return undefined
+  const parts: string[] = [status]
+  if (status === 'pending' && ready) parts.push('ready')
+  parts.push(owner !== undefined && owner !== '' ? `owner ${owner}` : 'unowned')
+  parts.push(`rev ${revision}`)
+  return parts.join(' · ')
+}
+
+/**
+ * The folded summary of one `team_task_list` page: `no team tasks`,
+ * `N team task(s)`, with ` · more` when the page reports a next cursor.
+ * Every task must prove the same minimum identity the single card prints — a
+ * single malformed entry makes the WHOLE page unprovable rather than
+ * miscounting a pseudo-task. There is no `N of total`: the official value
+ * carries no total.
+ */
+function teamTaskListSummary(value: unknown): string | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  if (stringField(record.code) !== undefined) return undefined
+  const tasks = record.tasks
+  if (!Array.isArray(tasks)) return undefined
+  if (!tasks.every(task => teamTaskSummary(task) !== undefined)) return undefined
+  const nextCursor = record.nextCursor
+  if (nextCursor !== undefined && !isNonNegativeInteger(nextCursor)) return undefined
+  const base = tasks.length === 0 ? 'no team tasks' : `${tasks.length} team task${tasks.length === 1 ? '' : 's'}`
+  return nextCursor === undefined ? base : `${base} · more`
+}
+
+/**
+ * The folded summary of one `wait_agent` result: `input pending` for
+ * `{timedOut:false}` (new input waits for the model) and `timed out` for
+ * `{timedOut:true}` (the wait window elapsed — NOT a task or agent outcome).
+ * Any other shape yields undefined; this never claims an agent finished.
+ */
+function waitAgentSummary(value: unknown): string | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  if (stringField(record.code) !== undefined) return undefined
+  if (record.timedOut === false) return 'input pending'
+  if (record.timedOut === true) return 'timed out'
+  return undefined
+}
+
 /**
  * The folded preview summary for one of {@link FOLDED_JSON_RESULT_TOOLS}:
  * a short human phrase derived from the parsed result JSON. Returns
@@ -183,9 +399,12 @@ export function foldedResultSummaryFor(name: string, text: string): string | und
   if (name === 'ralph') {
     // The render text leads with a friendly line before the JSON report;
     // that line is the best folded summary. A bare-JSON result (e.g. a
-    // replay without the render prefix) falls back to status/rounds.
-    const line = firstLine(text)
-    if (line !== '' && !line.startsWith('{')) return line
+    // replay without the render prefix) falls back to status/rounds. The
+    // JSON decision is made on the TRIMMED first line so a result that
+    // legally starts with whitespace before its JSON document never leaks
+    // the raw machine text as a human phrase.
+    const line = firstLine(text).trim()
+    if (line !== '' && !line.startsWith('{') && !line.startsWith('[')) return line
     const parsed = parseJsonValue(text)
     if (typeof parsed === 'object' && parsed !== null) {
       const record = parsed as Record<string, unknown>
@@ -197,25 +416,49 @@ export function foldedResultSummaryFor(name: string, text: string): string | und
     return undefined
   }
   const parsed = parseJsonValue(text)
-  if (name === 'schedule_list') {
-    if (Array.isArray(parsed)) return parsed.length === 0 ? 'no scheduled jobs' : `${parsed.length} scheduled`
-    if (typeof parsed === 'object' && parsed !== null) return stringField((parsed as Record<string, unknown>).code)
-    return undefined
+  if (name === 'team_task_create' || name === 'team_task_get' || name === 'team_task_update') {
+    return teamTaskSummary(parsed)
   }
-  if (name === 'schedule_create') {
-    if (typeof parsed !== 'object' || parsed === null) return undefined
-    const record = parsed as Record<string, unknown>
-    const kind = stringField(record.kind)
-    const state = stringField(record.state)
-    const parts = [kind, state].filter((part): part is string => part !== undefined)
-    return parts.length === 0 ? undefined : parts.join(' · ')
+  if (name === 'team_task_list') return teamTaskListSummary(parsed)
+  if (name === 'wait_agent') return waitAgentSummary(parsed)
+  if (name === 'schedule_list') {
+    // The rc5 result is the bare task array (historical replay only); each
+    // entry must still prove a canonical Task, never a pseudo-object.
+    if (Array.isArray(parsed)) {
+      if (!parsed.every(item => scheduleTaskSummary(item) !== undefined)) return undefined
+      return parsed.length === 0 ? 'no scheduled jobs' : `${parsed.length} scheduled`
+    }
+    const code = scheduleErrorCode(parsed)
+    if (code !== undefined) return code
+    return schedulePageSummary(parsed)
+  }
+  if (name === 'schedule_create' || name === 'schedule_view' || name === 'schedule_update') {
+    const code = scheduleErrorCode(parsed)
+    if (code !== undefined) return code
+    return scheduleTaskSummary(parsed)
+  }
+  if (name === 'schedule_edit') {
+    // An error code is the authoritative outcome and is never rendered as a
+    // success phrase; a delete success is the `deleted: true` receipt.
+    const code = scheduleErrorCode(parsed)
+    if (code !== undefined) return code
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      && (parsed as Record<string, unknown>).deleted === true) return 'deleted'
+    return scheduleTaskSummary(parsed)
   }
   if (name === 'schedule_delete') {
-    if (typeof parsed !== 'object' || parsed === null) return undefined
-    const record = parsed as Record<string, unknown>
-    if (record.deleted === true) return 'deleted'
-    if (record.deleted === false) return 'not found'
-    return stringField(record.code)
+    // The rc5 not-found receipt (`deleted:false` + `schedule_not_found`) is
+    // the ONE documented pairing where the boolean receipt is the phrase.
+    // Every OTHER explicit error code is authoritative and is never replaced
+    // by a success-shaped or contradictory boolean field.
+    const code = scheduleErrorCode(parsed)
+    const deleted = typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>).deleted
+      : undefined
+    if (code !== undefined && !(code === 'schedule_not_found' && deleted === false)) return code
+    if (deleted === true) return 'deleted'
+    if (deleted === false) return 'not found'
+    return undefined
   }
   if (name === 'cordis_inspect_list') {
     if (typeof parsed !== 'object' || parsed === null) return undefined
@@ -256,7 +499,10 @@ export interface CompactToolPresentationOptions {
   readonly error?: { readonly name: string; readonly code: string }
 }
 
-/** Counts from one historical `list_agents` result snapshot. */
+/** Counting semantics of one list_agents snapshot. `idle` counts rc.1 replay
+ *  rows; `ready` counts resumable inactive children; every unrecognized or
+ *  damaged row (rc.2 `corrupt`/`unsupported`/`unavailable`, a diagnostic row,
+ *  a malformed entry) is ONLY a diagnostic, never an idle/ready agent. */
 export interface AgentListSummary {
   readonly total: number
   readonly running: number
@@ -280,7 +526,10 @@ export interface InterruptAgentCallPresentation {
 }
 
 export interface ListAgentsCallPresentation {
-  readonly scope: 'children' | 'descendants'
+  /** The historical rc.1 `scope` argument, ONLY when the persisted call
+   *  declared it. rc.2 `list_agents` takes no arguments and lists the whole
+   *  tree (including the root `lead`), so a new call carries no scope. */
+  readonly scope?: 'children' | 'descendants'
 }
 
 /** The declared files in one `present` call, kept separate from execution. */
@@ -300,10 +549,12 @@ export function sendMessageCallPresentation(argsRaw: string): SendMessageCallPre
   const parsed = parseArgs(argsRaw)
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined
   const args = parsed as Record<string, unknown>
-  // The two currently known producers use agent_id and target respectively;
-  // prefer the first non-blank field so malformed optional data cannot hide a
-  // valid Team target during replay.
-  const target = nonBlankString(args.agent_id) ?? nonBlankString(args.target)
+  // Target priority: rc.2 `agent` (the official name/id field) → rc.1 `agent_id`
+  // (historical replay) → `target` (historical Agent Teams rows). Display only:
+  // the persisted model tool call is never rewritten.
+  const target = nonBlankString(args.agent)
+    ?? nonBlankString(args.agent_id)
+    ?? nonBlankString(args.target)
   if (target === undefined || typeof args.message !== 'string') return undefined
   return { target, message: args.message }
 }
@@ -313,7 +564,9 @@ export function interruptAgentCallPresentation(argsRaw: string): InterruptAgentC
   const parsed = parseArgs(argsRaw)
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined
   const args = parsed as Record<string, unknown>
-  const target = nonBlankString(args.agent_id) ?? nonBlankString(args.target)
+  const target = nonBlankString(args.agent)
+    ?? nonBlankString(args.agent_id)
+    ?? nonBlankString(args.target)
   return target === undefined ? undefined : { target }
 }
 
@@ -329,14 +582,15 @@ export function terminalSendCallPresentation(argsRaw: string): TerminalSendCallP
   return { sessionId, text: args.text }
 }
 
-/** Parse list_agents scope without consulting any live registry. */
+/** Parse list_agents arguments without consulting any live registry. */
 export function listAgentsCallPresentation(argsRaw: string): ListAgentsCallPresentation | undefined {
-  // No-parameter tools are recorded as `{}` in normal events, but an older
-  // replay can retain an empty argument string; both mean the default scope.
+  // rc.2 records the no-parameter tool as `{}` (an older replay can retain an
+  // empty argument string): both name no scope. A persisted rc.1 `scope` is
+  // still parsed for historical display only.
   const parsed = argsRaw.trim() === '' ? {} : parseArgs(argsRaw)
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined
   const scope = (parsed as Record<string, unknown>).scope
-  if (scope === undefined) return { scope: 'children' }
+  if (scope === undefined) return {}
   return scope === 'children' || scope === 'descendants' ? { scope } : undefined
 }
 
@@ -411,14 +665,22 @@ export function summarizeAgentListResult(text: string): AgentListSummary | undef
   let diagnostics = 0
   let matched = 0
   for (const line of trimmed.split(/\r\n|\r|\n/)) {
-    if (/\[running\](?:\s|$)/.test(line)) { running += 1; matched += 1; continue }
-    if (/\[idle\](?:\s|$)/.test(line)) { idle += 1; matched += 1; continue }
-    if (/\[ready\](?:\s|$)/.test(line)) { ready += 1; matched += 1; continue }
-    if (/\[diagnostic:[^\]]+\]/.test(line)) { diagnostics += 1; matched += 1; continue }
+    // The official row is `<name> [status] — <description>`. Only the status
+    // FIELD before the description separator is authoritative: an agent
+    // description is untrusted model text and may contain `[running]`,
+    // `[inactive]`, `[corrupt]`, … without changing the row's status.
+    const separator = line.search(/\s—\s/u)
+    const statusField = separator === -1 ? line : line.slice(0, separator)
+    if (/\[running\](?:\s|$)/.test(statusField)) { running += 1; matched += 1; continue }
+    if (/\[idle\](?:\s|$)/.test(statusField)) { idle += 1; matched += 1; continue }
+    // rc.2's real render marks a non-running, resumable child `inactive`.
+    if (/\[inactive\](?:\s|$)/.test(statusField)) { ready += 1; matched += 1; continue }
+    if (/\[ready\](?:\s|$)/.test(statusField)) { ready += 1; matched += 1; continue }
+    if (/\[diagnostic:[^\]]+\]/.test(statusField)) { diagnostics += 1; matched += 1; continue }
     // Any other bracketed status token is an unrecognized row: count it as a
     // diagnostic instead of silently dropping it (mirrors the structured
     // path's default branch, so a mixed snapshot never undercounts `total`).
-    if (/\[[a-z][^\]]*\]/.test(line)) { diagnostics += 1; matched += 1 }
+    if (/\[[a-z][^\]]*\]/.test(statusField)) { diagnostics += 1; matched += 1 }
   }
   if (matched === 0) return undefined
   const total = running + idle + ready + diagnostics
@@ -595,7 +857,8 @@ export function compactToolPresentation(
         return snapshot === undefined ? undefined : formatAgentListSummary(snapshot)
       })()
     return {
-      title: 'List agents', summary: list.scope,
+      title: 'List agents',
+      ...(list.scope === undefined ? {} : { summary: list.scope }),
       ...(summary === undefined ? {} : { result: summary }),
     }
   }
@@ -719,6 +982,86 @@ function deriveSummary(name: string, argsRaw: string): string {
  * @returns the tool-specific summary, or undefined when none applies.
  */
 function summarizeToolArgs(name: string, argsRaw: string): string | undefined {
+  if (
+    name === 'team_task_create'
+    || name === 'team_task_list'
+    || name === 'team_task_get'
+    || name === 'team_task_update'
+  ) {
+    // The fixed rc.3 Team fallback reads ONLY documented identity/filter fields
+    // and never falls through to the generic first-string derivation (which
+    // would leak a description, a prompt-shaped value or raw JSON). An absent,
+    // mistyped or unparseable arguments value keeps the fixed title with an
+    // empty summary.
+    const parsedArgs = parseArgs(argsRaw)
+    if (typeof parsedArgs !== 'object' || parsedArgs === null || Array.isArray(parsedArgs)) return ''
+    const args = parsedArgs as Record<string, unknown>
+    if (name === 'team_task_create') {
+      const subject = args.subject
+      return typeof subject === 'string' ? firstLine(subject) : ''
+    }
+    if (name === 'team_task_get') {
+      const taskId = args.task_id
+      return typeof taskId === 'string' ? firstLine(taskId) : ''
+    }
+    if (name === 'team_task_update') {
+      // The official action enum plus the task id form the one-line identity;
+      // subject/description/owner/expected_revision are request values, never
+      // the identity.
+      const action = args.action
+      const taskId = args.task_id
+      if (typeof action !== 'string' || !TEAM_TASK_UPDATE_ACTIONS.has(action)) return ''
+      if (typeof taskId !== 'string' || taskId === '') return ''
+      return `${action} · ${taskId}`
+    }
+    // team_task_list: only verifiable filters, in the official display order.
+    // cursor/limit are execution parameters, never identity. The official tool
+    // rejects any call where BOTH an owner key and an unowned key are present
+    // (regardless of value, e.g. owner:""), so that pair shows no guessed filter.
+    const parts: string[] = []
+    const status = args.status
+    if (typeof status === 'string' && TEAM_TASK_LIST_STATUS_VALUES.has(status)) parts.push(`status ${status}`)
+    if (args.owner !== undefined && args.unowned !== undefined) return ''
+    const ownerValid = typeof args.owner === 'string' && args.owner !== ''
+    const unownedValid = typeof args.unowned === 'boolean'
+    if (ownerValid) parts.push(`owner ${args.owner as string}`)
+    if (unownedValid) parts.push(`unowned ${args.unowned === true ? 'yes' : 'no'}`)
+    if (typeof args.ready === 'boolean') parts.push(`ready ${args.ready ? 'yes' : 'no'}`)
+    return parts.join(' · ')
+  }
+  if (name === 'wait_agent') {
+    // Only an explicit LEGAL timeout is identity; an omitted/invalid value
+    // shows nothing (never the implied 30s default as a confirmed fact).
+    const parsedArgs = parseArgs(argsRaw)
+    if (typeof parsedArgs !== 'object' || parsedArgs === null || Array.isArray(parsedArgs)) return ''
+    const timeoutMs = (parsedArgs as Record<string, unknown>).timeout_ms
+    if (
+      typeof timeoutMs === 'number'
+      && Number.isSafeInteger(timeoutMs)
+      && timeoutMs >= WAIT_AGENT_MIN_TIMEOUT_MS
+      && timeoutMs <= WAIT_AGENT_MAX_TIMEOUT_MS
+    ) {
+      return `${timeoutMs} ms`
+    }
+    return ''
+  }
+  if (SCHEDULE_TOOL_NAMES.has(name)) {
+    // The fixed Schedule fallback reads ONLY the documented identity field:
+    // never the prompt/instruction (a raw-args fallback would leak it) and
+    // never an arbitrary JSON key. An absent, mistyped or UNPARSEABLE
+    // arguments value keeps the fixed card title with an empty summary
+    // instead of falling through to the generic first-string derivation.
+    const parsedArgs = parseArgs(argsRaw)
+    if (typeof parsedArgs !== 'object' || parsedArgs === null || Array.isArray(parsedArgs)) return ''
+    const args = parsedArgs as Record<string, unknown>
+    if (name === 'schedule_list') return ''
+    if (name === 'schedule_create') {
+      const title = args.title
+      return typeof title === 'string' ? firstLine(title) : ''
+    }
+    const id = args.id
+    return typeof id === 'string' ? firstLine(id) : ''
+  }
   const parsed = parseArgs(argsRaw)
   if (typeof parsed !== 'object' || parsed === null) return undefined
   const args = parsed as Record<string, unknown>
@@ -778,6 +1121,15 @@ function summarizeToolArgs(name: string, argsRaw: string): string | undefined {
   )
   const content = active === undefined ? '' : String((active as Record<string, unknown>).content ?? '')
   return `${done}/${todos.length} done${content === '' ? '' : ` · ${firstLine(content)}`}`
+}
+
+/** The `schedule_edit` delete branch title; every other name has no dynamic
+ *  fallback title (the fixed `TOOL_TITLES` entry applies). */
+function scheduleEditFallbackTitle(name: string, argsRaw: string): string | undefined {
+  if (name !== 'schedule_edit') return undefined
+  const parsed = parseArgs(argsRaw)
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined
+  return (parsed as Record<string, unknown>).action === 'delete' ? 'Delete scheduled task' : undefined
 }
 
 /** Classify a tool name into its row variant; unknown names are `others`. */
@@ -1165,7 +1517,9 @@ export function toolCardHeader(name: string, argsRaw: string, cwd?: string): Too
   if (action !== undefined) return { title: action.title, summary: action.summary ?? '' }
 
   const variant = classifyTool(name)
-  const toolTitle = TOOL_TITLES[name] ?? TUI_TOOL_TITLES[name]
+  // `schedule_edit`'s delete action names the delete; every other Schedule
+  // name keeps its fixed fallback title from TOOL_TITLES.
+  const toolTitle = scheduleEditFallbackTitle(name, argsRaw) ?? TOOL_TITLES[name] ?? TUI_TOOL_TITLES[name]
   // Tool-specific summaries replace the args-derived base before the
   // generic derivation (Web TodoRow parity: `todo_write` reads
   // `2/3 done` instead of a raw args dump).

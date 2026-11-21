@@ -109,7 +109,7 @@ test('sessionPickerItem uses updatedAt when a Remote row has no createdAt', () =
   assert.ok(sessionPickerItem(row, '').description.includes('2d'))
 })
 
-test('sessionPickerItem marks the current session, subagents, forks, live', () => {
+test('sessionPickerItem marks the current session, subagents, live (never fork)', () => {
   const row: SessionPickerRow = {
     id: 'session-0123456789abcdef',
     updatedAt: 1_000,
@@ -121,45 +121,71 @@ test('sessionPickerItem marks the current session, subagents, forks, live', () =
   }
   const item = sessionPickerItem(row, 'session-0123456789abcdef')
   assert.ok(item.label.startsWith('● '), `current marker missing: ${item.label}`)
-  assert.ok(item.description.includes('sub'), `sub marker missing: ${item.description}`)
-  assert.ok(item.description.includes('fork'), `fork marker missing: ${item.description}`)
+  assert.ok(item.description.split(' · ').includes('sub'), `sub marker missing: ${item.description}`)
+  assert.ok(!item.description.split(' · ').includes('fork'),
+    `a subagent must not carry the fork marker: ${item.description}`)
   assert.ok(item.description.includes('live'), `live marker missing: ${item.description}`)
   // Untitled sessions fall back to the short id as the label.
   assert.equal(item.label, '● 01234567')
 })
 
-function treeRow(id: string, parentSession?: string): SessionPickerRow {
+test('sessionPickerItem badges only historical ordinary-fork metadata', () => {
+  // Pre-rc.1 ordinary forks persisted a parentSession; that leftover metadata
+  // keeps its explanatory badge.
+  const legacy: SessionPickerRow = {
+    id: 'session-legacy0000', updatedAt: 1_000, createdAt: 1_000, parentSession: 'session-parent', live: false,
+  }
+  assert.ok(sessionPickerItem(legacy, '').description.split(' · ').includes('fork'))
+  // An rc.1 ordinary fork is an independent Session with no parent at all.
+  const fresh: SessionPickerRow = { id: 'session-fresh0000', updatedAt: 1_000, createdAt: 1_000, live: false }
+  assert.ok(!sessionPickerItem(fresh, '').description.split(' · ').includes('fork'))
+})
+
+function treeRow(id: string, parentSession?: string, origin?: 'subagent'): SessionPickerRow {
   return {
     id,
     updatedAt: 0,
     createdAt: 0,
     live: false,
     ...(parentSession === undefined ? {} : { parentSession }),
+    ...(origin === undefined ? {} : { origin }),
   }
 }
 
-test('buildSessionTree follows Host lineage depth for normal ancestry', () => {
+test('buildSessionTree follows real subagent lineage depth', () => {
   const rows = buildSessionTree([
     treeRow('root'),
-    treeRow('child', 'root'),
-    treeRow('grandchild', 'child'),
+    treeRow('child', 'root', 'subagent'),
+    treeRow('grandchild', 'child', 'subagent'),
   ])
   assert.deepEqual(rows.map(entry => [entry.row.id, entry.depth]), [
     ['root', 0], ['child', 1], ['grandchild', 2],
   ])
 })
 
-test('buildSessionTree degrades an orphan to root depth', () => {
-  const rows = buildSessionTree([treeRow('orphan', 'missing-parent'), treeRow('root')])
+test('buildSessionTree keeps ordinary fork metadata at root depth', () => {
+  const rows = buildSessionTree([
+    treeRow('root'),
+    treeRow('child', 'root'),
+    treeRow('grandchild', 'child'),
+    treeRow('new-fork'),
+  ])
+  assert.deepEqual(rows.map(entry => [entry.row.id, entry.depth]), [
+    ['root', 0], ['child', 0], ['grandchild', 0], ['new-fork', 0],
+  ])
+})
+
+test('buildSessionTree degrades an orphan subagent to root depth', () => {
+  const rows = buildSessionTree([treeRow('orphan', 'missing-parent', 'subagent'), treeRow('root')])
   assert.deepEqual(rows.map(entry => [entry.row.id, entry.depth]), [
     ['orphan', 0], ['root', 0],
   ])
 })
 
-test('buildSessionTree emits cycle members without indentation or infinite traversal', () => {
-  const twoNode = buildSessionTree([treeRow('a', 'b'), treeRow('b', 'a')])
+test('buildSessionTree places guarded cycle members once, without infinite traversal', () => {
+  const twoNode = buildSessionTree([treeRow('a', 'b', 'subagent'), treeRow('b', 'a', 'subagent')])
   assert.deepEqual(twoNode.map(entry => [entry.row.id, entry.depth]), [['a', 0], ['b', 1]])
-  const self = buildSessionTree([treeRow('self', 'self')])
+  const self = buildSessionTree([treeRow('self', 'self', 'subagent')])
   assert.deepEqual(self.map(entry => [entry.row.id, entry.depth]), [['self', 0]])
 })
 
@@ -264,18 +290,63 @@ test('picker Esc cancels', async () => {
   handle.close()
 })
 
-test('findSessionMatch resolves full ids, session- prefixes, and short ids', () => {
+test('findSessionMatch resolves a full exact id ahead of an earlier prefix match', () => {
+  const rows: SessionPickerRow[] = [
+    { id: 'session-alpha-first-main', updatedAt: 3, createdAt: 3, live: false },
+    { id: 'session-alpha', updatedAt: 2, createdAt: 2, live: false },
+    { id: 'session-alpha-second-main', updatedAt: 1, createdAt: 1, live: false },
+  ]
+  assert.equal(findSessionMatch(rows, 'session-alpha')?.id, 'session-alpha',
+    'the exact id wins even though an earlier row carries the same prefix')
+  assert.equal(findSessionMatch(rows, 'session-alpha-second-main')?.id, 'session-alpha-second-main')
+})
+
+test('findSessionMatch resolves only a unique non-empty prefix, never row order', () => {
   const rows: SessionPickerRow[] = [
     { id: 'session-11111111-2222-3333-4444-555555555555', updatedAt: 2, createdAt: 2, live: false },
     { id: 'session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', updatedAt: 3, createdAt: 3, live: false },
     { id: 'session-99999999-8888-7777-6666-555555555555', updatedAt: 1, createdAt: 1, live: false },
   ]
-  assert.equal(findSessionMatch(rows, 'session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')?.id, 'session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')
   assert.equal(findSessionMatch(rows, 'session-aaaaaaaa-bbbb')?.id, 'session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')
   assert.equal(findSessionMatch(rows, 'aaaaaaa')?.id, 'session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')
+  assert.equal(findSessionMatch(rows, 'session-9999')?.id, 'session-99999999-8888-7777-6666-555555555555')
   assert.equal(findSessionMatch(rows, 'nope'), undefined)
+  assert.equal(findSessionMatch(rows, ''), undefined)
+
+  const duplicates: SessionPickerRow[] = [
+    { id: 'session-dupe-newest', updatedAt: 9, createdAt: 9, live: false },
+    { id: 'session-dupe-older', updatedAt: 1, createdAt: 1, live: false },
+  ]
+  assert.equal(findSessionMatch(duplicates, 'session-dupe'), undefined,
+    'a duplicate prefix is ambiguous even when the first row is the newest')
+  assert.equal(findSessionMatch(duplicates, 'dupe'), undefined,
+    'the short-id form is ambiguous exactly like the session- prefix form')
+  assert.equal(findSessionMatch(duplicates, 'session-'), undefined,
+    'an empty session- prefix never matches every listed row')
+  assert.equal(findSessionMatch(duplicates, 'session_'), undefined,
+    'an empty session_ prefix never matches every listed row')
+  assert.equal(findSessionMatch(duplicates, 'session-'), undefined)
+  assert.equal(findSessionMatch([{ id: 'session-only', updatedAt: 1, createdAt: 1, live: false }], 'session-'), undefined,
+    'an empty prefix is not resolved by a single-row roster either')
 })
 
+
+test('findSessionMatch resolves a long session_ prefix, not only the eight-character short id', () => {
+  // F3: the CLI accepts any legal hex prefix length. The old matcher only
+  // compared `session-`-prefixed ids verbatim and otherwise used the EIGHT
+  // character `shortSessionId`, so a longer `session_` prefix never matched.
+  const rows: SessionPickerRow[] = [
+    { id: 'session_abcdef1234567890abcdef1234567890', updatedAt: 2, createdAt: 2, live: false },
+    { id: 'session_fedcba9876543210fedcba9876543210', updatedAt: 1, createdAt: 1, live: false },
+  ]
+  assert.equal(findSessionMatch(rows, 'session_abcdef123')?.id, 'session_abcdef1234567890abcdef1234567890')
+  assert.equal(findSessionMatch(rows, 'abcdef123')?.id, 'session_abcdef1234567890abcdef1234567890')
+  assert.equal(findSessionMatch(rows, 'session_abcdef1234567890abcdef123')?.id,
+    'session_abcdef1234567890abcdef1234567890')
+  assert.equal(findSessionMatch(rows, 'session_ffff'), undefined, 'an unmatched long prefix stays unresolved')
+  assert.equal(findSessionMatch(rows, 'session_abcdef1234567890abcdef1234567890abcdef'), undefined,
+    'a longer-than-id prefix never matches')
+})
 
 test('sanitizeTerminalText strips C0, DEL, C1 and complete ESC sequences', () => {
   // C0: ESC + OSC payload + BEL → the whole sequence is removed by the

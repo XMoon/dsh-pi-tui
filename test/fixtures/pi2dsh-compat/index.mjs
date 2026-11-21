@@ -1,6 +1,6 @@
 import { writeFileSync } from 'node:fs'
 
-const evidencePath = process.env.PI2DSH_COMPAT_EVIDENCE
+const evidencePath = process.env.DSH_SMOKE_EVIDENCE
 const state = {
   commandInvoked: false,
   renderWidths: [],

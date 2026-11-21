@@ -20,7 +20,7 @@ import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 
 const PORT: PluginManagerPort = {
   snapshot: async () => ({
-    bundles: [{ name: 'ordinary', official: false, availability: 'profile', enabled: true, installed: true, optional: false, removable: true, rows: [], overrides: [] }],
+    bundles: [{ name: 'ordinary', official: false, availability: 'profile', enabled: true, installed: true, optional: false, removable: true, update: undefined, rows: [], overrides: [] }],
     plugins: [],
     registries: { registry: null, fallbackRegistries: [], resolved: null },
     exemptions: [],
@@ -34,6 +34,9 @@ const PORT: PluginManagerPort = {
   waitForInstall: async () => null,
   cancelInstall: async () => ({ status: 'not-running' }),
   subscribeInstall: () => () => {},
+  listVersions: async () => ({ status: 'refused', problem: 'not-updatable', reason: 'the fixture has no updatable bundle', attempts: [] }),
+  updateBundle: async () => { throw new Error('updateBundle is not used by this fixture') },
+  subscribeUpdate: () => () => {},
   subscribeInvalidation: () => () => {},
 }
 

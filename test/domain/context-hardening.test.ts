@@ -333,12 +333,14 @@ function foldClaimedSource(source: unknown, text: string): TranscriptMessage | u
   return folder.messages().find(candidate => candidate.kind === 'system' && candidate.context === true)
 }
 
-test('the Working-delivery claim qualifies only the exact tool-jobs/notice and agent-message/relay pairs', () => {
+test('the Working-delivery claim qualifies only the three exact source pairs', () => {
   const cases: ReadonlyArray<readonly [string, unknown, boolean]> = [
     ['tool-jobs notice', { kind: 'tool-jobs', form: 'notice', summary: 'job completed' }, true],
     ['agent-message relay', { kind: 'agent-message', form: 'relay', senderSessionId: 'child-1' }, true],
+    ['subagent-settled notice', { kind: 'subagent-settled', form: 'notice', summary: 'settled', senderSessionId: 'child-1' }, true],
     ['agent-message notice', { kind: 'agent-message', form: 'notice', senderSessionId: 'child-1' }, false],
-    ['subagent-settled notice', { kind: 'subagent-settled', form: 'notice', summary: 'settled', senderSessionId: 'child-1' }, false],
+    ['subagent-settled relay', { kind: 'subagent-settled', form: 'relay', summary: 'settled', senderSessionId: 'child-1' }, false],
+    ['plugin notice', { kind: 'plugin', form: 'notice', plugin: 'foreign' }, false],
     ['plugin relay', { kind: 'plugin', form: 'relay', plugin: 'foreign' }, false],
     ['tool-jobs relay', { kind: 'tool-jobs', form: 'relay' }, false],
     ['relay without sender', { kind: 'agent-message', form: 'relay' }, true],

@@ -15,7 +15,7 @@ import { presetDisplayText } from '../../src/commands.ts'
 import { builtInGuide, GUIDE_SECTION_HEADS } from '../../src/tui/tsp/preset-guide-content.ts'
 import { recordedSessionPreset, selectBlankSessionPreset, sessionPresetOf, turnBoundaryBlank, type SessionObservationLike } from '../../src/runtime/direct/session-preset-direct.ts'
 import { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-preset-registry'
-import type { Agent, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import type { SessionHeader } from '@deepseek-ai/dsh-session'
 
@@ -115,30 +115,11 @@ function recordingAgentCtx(events: string[]): Context {
 const installSelection = (_agentCtx: Context, _agent: Agent): void => {}
 const unpublishedAgent = {} as Agent
 
-test('composeAgent without a roster composes nothing and installs only model selection', async () => {
+test('composeAgent without a roster composes nothing', async () => {
   const ctx = ctxWith(() => undefined)
   const composition = await composeAgent(ctx, installSelection)
   assert.equal(composition.agentPreset, undefined)
   assert.equal(typeof composition.setup, 'function')
-})
-
-test('composeAgent preserves ModelSelectionRef standalone compatibility', async () => {
-  const selection: ModelSelectionRef = { current: undefined, assembled: undefined }
-  const events: string[] = []
-  const composition = await composeAgent(ctxWith(() => undefined), selection)
-  await composition.setup(recordingAgentCtx(events))
-  assert.deepEqual(events, ['system-prompt/assemble', 'agent/request', 'agent/pre-step'])
-})
-
-test('composeAgent installs a legacy selection before mounting a roster', async () => {
-  const fake = roster()
-  const selection: ModelSelectionRef = { current: undefined, assembled: undefined }
-  const events: string[] = []
-  const ctx = ctxWith(name => name === 'agentPresets' ? fake.service : undefined)
-  const composition = await composeAgent(ctx, selection)
-  await composition.setup(recordingAgentCtx(events))
-  assert.deepEqual(events, ['system-prompt/assemble', 'agent/request', 'agent/pre-step'])
-  assert.deepEqual(fake.mounted, ['standard'])
 })
 
 test('composeAgent passes the composed Agent to the explicit installer', async () => {

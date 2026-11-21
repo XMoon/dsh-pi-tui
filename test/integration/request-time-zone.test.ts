@@ -116,7 +116,6 @@ function latestComposerText(wire: string): string | undefined {
   return seen ? text : undefined
 }
 
-/** Run `body` with the process zone set, always restoring the previous one. */
 async function withProcessZone<T>(life: { defer(task: () => unknown): void }, zone: string, body: () => Promise<T>): Promise<T> {
   const previous = process.env.TZ
   process.env.TZ = zone
@@ -217,7 +216,7 @@ test('an unsamplable process zone refuses the Direct send before dispatch and re
   })
 })
 
-test('the rendered surface keeps the ordinary Queue/transcript/composer behaviour while only the Context body changes', async (t) => {
+test('the rendered surface keeps Queue/transcript/composer behaviour while the durable Context body carries the Client zone', async (t) => {
   // The plan §7 UX contract: no new entry point, gesture, control or
   // placement — the ONE intended visible difference is the already-existing
   // Context card's body text. This case asserts that rendered result on the
@@ -232,6 +231,7 @@ test('the rendered surface keeps the ordinary Queue/transcript/composer behaviou
     const held = new Promise<void>(resolve => { releaseStream = resolve })
     const fixture = await createDirectTspFixture(life, {
       deltas: ['zone parity reply'],
+      tuiConfig: { displayPreset: 'full' },
       streamHold: () => held,
     })
     const timeContext = await import('@deepseek-ai/dsh-time-context')
@@ -280,13 +280,22 @@ test('the rendered surface keeps the ordinary Queue/transcript/composer behaviou
         assert.equal(state.some(line => line.includes('parity busy follow-up') && line.includes('steering')), false,
           'a queued submission never renders as a steering row, in any frame')
       }
+      const context = wireNodes(fixture.pane).find(node => node.k === 'section'
+        && node.p.collapsible === true && String(node.p.head).includes('time-context'))
+      assert.ok(context !== undefined, 'the official time-context Context Section is present on the real TSP wire')
+      const frame = fixture.pane.frames().at(-1)
+      assert.ok(frame !== undefined)
+      fixture.pane.event({
+        ev: 'toggle', sf: frame.sf, id: context.id, collapsed: false,
+        key: context.id.slice(context.id.lastIndexOf('.') + 1), raw: {},
+      })
+      await waitFor('the exact time-context Section body to become visible while the turn is busy', () =>
+        renderedLines(fixture).some(line => line.includes('Browser time zone for this request: Asia/Shanghai.')), 25_000)
       const renderedDuringBusy = renderedLines(fixture)
       assert.ok(renderedDuringBusy.some(line => line.includes('queued (followup): parity busy follow-up')),
         `the busy submission must render as the ordinary queue row:\n${renderedDuringBusy.join('\n')}`)
       assert.equal(renderedDuringBusy.some(line => line.includes('parity busy follow-up') && line.includes('steering')),
         false, 'a queued submission never renders as a steering row')
-      assert.ok(renderedDuringBusy.some(line => line.includes('Browser time zone for this request: Asia/Shanghai.')),
-        `the rendered Context body must carry the Client zone:\n${renderedDuringBusy.join('\n')}`)
       assert.equal(renderedLines(fixture).some(line => line === 'parity busy follow-up'), false,
         'the submitted text is consumed from the composer, never left as a draft')
 
@@ -299,12 +308,12 @@ test('the rendered surface keeps the ordinary Queue/transcript/composer behaviou
         return lines.some(line => line === 'parity question')
           && lines.some(line => line === 'parity busy follow-up')
       }, 25_000)
-      const rendered = renderedLines(fixture)
+       const rendered = renderedLines(fixture)
+       assert.ok(rendered.some(line => line.includes('Browser time zone for this request: Asia/Shanghai.')),
+         'the exact time-context body remains visible after the turn settles')
       assert.ok(rendered.some(line => line === 'parity question'), 'the first user row stays in the transcript')
       assert.ok(rendered.some(line => line === 'parity busy follow-up'), 'the queued row becomes a transcript row')
       assert.ok(rendered.some(line => line.includes('zone parity reply')), 'the scripted reply renders')
-      assert.ok(rendered.some(line => line.includes('Browser time zone for this request: Asia/Shanghai.')),
-        'the Context body keeps the Client zone after the turn settles')
       assert.equal(rendered.some(line => line.includes('queued (followup):')), false,
         'the queue row is gone once the queued turn is admitted')
     } finally {

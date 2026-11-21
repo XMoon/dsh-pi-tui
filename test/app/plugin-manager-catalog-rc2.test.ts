@@ -3,31 +3,35 @@
  *
  * The official `PluginManager.listBundles()` Host service is instantiated over
  * a REAL managed profile directory + installation anchor fixture that
- * reproduces the official catalog shape: the 12 project-maintained Optional
- * bundles are shipped by the installation (available, not selected) and the 2
- * on-demand subagent bundles are discoverable as `missing` with a real
- * `installTarget`. The real Host output then travels through the shared
+ * reproduces the official catalog shape: EVERY project-maintained Optional
+ * bundle is shipped by the installation (available, not selected) and every
+ * on-demand catalog entry is discoverable as `missing` with a real
+ * `installTarget`; the catalog size is read from the official rosters, never
+ * hardcoded. The real Host output then travels through the shared
  * mapping -> stable identity/origin/section classifier -> model.
  *
  * `PRODUCTION PREREQUISITES REPRODUCED`: the real `@deepseek-ai/dsh-plugin-manager`
  * Host service, its real profile/patch/installation records, the real
- * `pnpm`-backed profile package operations (local fixture package only), the
- * shared Direct adapter/mapping and the real controller/page below.
- * `TEST STAND-INS`: ephemeral profile/installation directories and local
- * package manifests; no public npm download and no network install.
- * `DELIBERATELY ABSENT`: live npm registries, credentials, a real external
- * bundle consumer and S4-D2/D3 Host/TUI feature qualification.
+ * `pnpm`-backed profile package operations, the shared Direct adapter/mapping,
+ * the real controller/page and the official `listVersions`/`updateBundle`/
+ * `plugin-manager/update-state` update path over a real registry install.
+ * `TEST STAND-INS`: ephemeral profile/installation directories, isolated
+ * HOME/XDG/npm caches, a loopback npm registry and two inert test-only versions
+ * of one registry bundle (the real `pnpm add` still runs).
+ * `DELIBERATELY ABSENT`: public npm credentials/endpoints, user profiles,
+ * native OS permissions, and the physical split-process network qualification.
  * @module @xmoon76/dsh-pi-tui/plugin-manager-catalog-rc2.test
  */
 
 import assert from 'node:assert/strict'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import test from 'node:test'
-import { Context } from '@deepseek-ai/cordis'
+import test, { type TestContext } from 'node:test'
+import { Context, symbols } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import PluginManager, { type BundleInfo } from '@deepseek-ai/dsh-plugin-manager'
-import { OPTIONAL_BUNDLES, OFFICIAL_ON_DEMAND_CATALOG, getDshRuntimeVersion } from '@deepseek-ai/dsh-app-boot'
+import { EXPERIMENTAL_BUNDLES, OFFICIAL_ON_DEMAND_CATALOG, OPTIONAL_BUNDLES } from '@deepseek-ai/dsh-official-bundles'
+import { getDshRuntimeVersion } from '@deepseek-ai/dsh-app-boot'
 import {
   EXPERIMENTAL_BUNDLE_IDS,
   SELF_BUNDLE,
@@ -38,11 +42,25 @@ import { buildPluginDetailView, buildPluginManagerModel, bundleValue } from '../
 import { detachPluginManagerSnapshot } from '../../src/runtime/plugin-manager-mapping.ts'
 import { DirectPluginManagerPort, type PluginManagerServiceLike } from '../../src/runtime/direct/plugin-manager-direct.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
+import { createRemoteApplicationHostFixture } from '../support/remote-application-fixture.ts'
+import { packFixturePackage, startLocalNpmRegistry, type AdditionalRegistryVersion, type LocalNpmRegistryControl } from '../support/local-npm-registry.ts'
 import { PluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
+import type { WorkspaceHarness } from '../support/plugin-workspace-harness.ts'
 import { openWorkspace, plain } from '../support/plugin-workspace-harness.ts'
 import { disposeContext } from '../support/runner-harness.ts'
 
 const ON_DEMAND = OFFICIAL_ON_DEMAND_CATALOG.map(entry => entry.packageName)
+/** The release-only Experimental identities (present upstream, absent from the
+ *  frozen legacy Bxx order), in the REAL Host catalog order: shipped Optional
+ *  order first, then the on-demand entries. The Experimental section appends
+ *  them after the legacy Bxx order in exactly this order. */
+const RELEASE_ONLY_EXPERIMENTAL = [...OPTIONAL_BUNDLES, ...ON_DEMAND]
+  .filter(name => EXPERIMENTAL_BUNDLES.has(name) && !EXPERIMENTAL_BUNDLE_IDS.includes(name))
+/** The legacy Bxx order first, then the release-only members in Host order. */
+const EXPERIMENTAL_CATALOG = [...EXPERIMENTAL_BUNDLE_IDS, ...RELEASE_ONLY_EXPERIMENTAL]
+/** The COMPLETE official catalog this Host advertises: shipped Optional
+ *  bundles plus the on-demand catalog entries, deduplicated by package name. */
+const OFFICIAL_CATALOG = [...new Set([...OPTIONAL_BUNDLES, ...ON_DEMAND])]
 /** The exact installed DSH runtime this checkout develops against. The Host
  *  derives every install target and exemption grant from this same value, so
  *  the fixture must never hardcode a released version of it. */
@@ -61,7 +79,7 @@ function renderAt(
   return page.render(width)
 }
 
-function seedProfile(workRoot: string): {
+function seedProfile(workRoot: string, selectedBundles: readonly string[] = []): {
   profileContext: Record<string, unknown>
   installationAnchor: string
 } {
@@ -74,15 +92,15 @@ function seedProfile(workRoot: string): {
   writeFileSync(installAnchor, JSON.stringify({
     name: 'catalog-fixture-installation',
     private: true,
-    // The installation ships the 12 Optional bundles; the two on-demand
-    // subagent bundles are catalog-only.
+    // The installation ships every official Optional bundle; the on-demand
+    // catalog entries are catalog-only.
     dependencies: Object.fromEntries(OPTIONAL_BUNDLES.map(name => [name, RUNTIME_VERSION])),
   }, null, 2))
   writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
     name: 'catalog-fixture-profile',
     private: true,
     dependencies: {},
-    dsh: { profile: { bundles: [], patch: 'cordis.patch.yml' } },
+    dsh: { profile: { bundles: [...selectedBundles], patch: 'cordis.patch.yml' } },
   }, null, 2))
   writeFileSync(profilePatchPath, '[]\n')
   for (const name of OPTIONAL_BUNDLES) {
@@ -92,7 +110,10 @@ function seedProfile(workRoot: string): {
       name,
       version: RUNTIME_VERSION,
       private: true,
-      dsh: { bundle: { patch: [] } },
+      // Input fact copied from the official package manifest: the CUA bundle is
+      // darwin-only (rc.2 moved it from the on-demand catalog to the shipped
+      // Optional roster, so the Host reads THIS installed manifest).
+      dsh: { bundle: { patch: [], ...(name === CUA_BUNDLE ? { platforms: ['darwin'] } : {}) } },
     }, null, 2))
   }
   return {
@@ -160,7 +181,56 @@ function seedInstallProfile(workRoot: string): {
   }
 }
 
-test('the REAL Host listBundles discovers 14/14 official optional/on-demand bundles', async (t) => {
+const CUA_BUNDLE = '@deepseek-ai/dsh-cua-bundle'
+
+interface RealHostPage {
+  readonly harness: WorkspaceHarness
+  readonly controller: WorkspaceHarness['controller']
+  readonly frame: () => string
+  readonly waitFor: (predicate: () => boolean, label: string, timeoutMs?: number) => Promise<void>
+}
+
+/** The REAL Host service + Direct port + the production Settings→Plugins page
+ *  over ONE fixture profile. The test owns teardown; `ready` means the first
+ *  authoritative inventory read already happened. */
+async function mountRealHostPage(t: TestContext, profileContext: Record<string, unknown>): Promise<RealHostPage> {
+  const life = testLifecycle(t)
+  const ctx = new Context()
+  life.defer(() => disposeContext(ctx))
+  ctx.provide('profileContext', profileContext as never)
+  await ctx.plugin(Loader)
+  await ctx.plugin(PluginManager, {})
+  const service = ctx.get('pluginManager') as unknown as PluginManagerServiceLike
+  const port = new DirectPluginManagerPort({ get: name => name === 'pluginManager' ? service : undefined, on: () => () => false })
+  const harness = await openWorkspace({ port })
+  life.defer(() => {
+    try { harness.close() } catch {}
+    try { harness.controller.dispose() } catch {}
+    try { harness.app.dispose() } catch {}
+  })
+  const frame = (): string => plain(harness.vt.getViewport())
+  const waitFor = async (predicate: () => boolean, label: string, timeoutMs = 30_000): Promise<void> => {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      if (predicate()) return
+      await new Promise<void>(resolve => setTimeout(resolve, 10))
+      await harness.vt.waitForRender()
+    }
+    throw new Error(`timed out waiting for ${label}: ${frame()}`)
+  }
+  await waitFor(() => harness.controller.status().state === 'ready', 'the real Host inventory read')
+  await harness.waitForFrame()
+  return { harness, controller: harness.controller, frame, waitFor }
+}
+
+/** Type a search query through the page's own `/` seat and apply it. */
+function searchFor(harness: WorkspaceHarness, query: string): void {
+  harness.vt.sendInput('/')
+  for (const character of query) harness.vt.sendInput(character)
+  harness.vt.sendInput('\r')
+}
+
+test('the REAL Host listBundles discovers the complete official optional/on-demand catalog', async (t) => {
   const life = testLifecycle(t)
   const workRoot = life.tempDir('catalog-')
   const seeded = seedProfile(workRoot)
@@ -173,8 +243,10 @@ test('the REAL Host listBundles discovers 14/14 official optional/on-demand bund
   const service = ctx.get('pluginManager') as { listBundles(): Promise<BundleInfo[]> }
   const bundles = await service.listBundles()
   const names = bundles.map(bundle => bundle.name)
-  assert.equal(bundles.length, 14, `the real Host must return 14 bundles, got: ${names.join(', ')}`)
-  assert.deepEqual([...names].sort(), [...EXPERIMENTAL_BUNDLE_IDS].sort(), 'catalog identity parity with the frozen rc.2 list')
+  assert.equal(bundles.length, OFFICIAL_CATALOG.length,
+    `the real Host must return every official bundle (${OFFICIAL_CATALOG.length}), got: ${names.join(', ')}`)
+  assert.deepEqual([...names].sort(), [...OFFICIAL_CATALOG].sort(),
+    'catalog identity parity with the official Optional + on-demand rosters')
 
   const byName = new Map(bundles.map(bundle => [bundle.name, bundle]))
   for (const name of OPTIONAL_BUNDLES) {
@@ -186,14 +258,21 @@ test('the REAL Host listBundles discovers 14/14 official optional/on-demand bund
     assert.equal(bundle.enabled, false)
     assert.equal(bundle.removable, false)
   }
-  for (const name of ON_DEMAND) {
-    const bundle = byName.get(name)!
+  for (const entry of OFFICIAL_ON_DEMAND_CATALOG) {
+    const bundle = byName.get(entry.packageName)!
     assert.equal(bundle.official, true)
     assert.equal(bundle.optional, false, 'on-demand catalog entries are not shipped Optional bundles')
     assert.equal(bundle.availability, 'missing')
     assert.equal(bundle.installed, false)
     assert.equal(bundle.installTarget?.version, RUNTIME_VERSION)
-    assert.equal(bundle.installTarget?.spec, `${name}@${RUNTIME_VERSION}`)
+    assert.equal(bundle.installTarget?.spec, `${entry.packageName}@${RUNTIME_VERSION}`)
+    // rc.2 removed the catalog-level default-listing flag: the Host derives
+    // visibility from the package's own manifest and its platform check. A
+    // platform-scoped entry on an unsupported Host stays OUT of the listing,
+    // and no TUI projection may re-derive the decision from catalog data.
+    const platformSupported = entry.platforms === undefined || entry.platforms.includes(process.platform)
+    assert.equal(bundle.listedByDefault, platformSupported ? undefined : false,
+      `${entry.packageName} keeps the Host's own default-listing decision`)
   }
 
   // REAL Host records -> the SHARED mapping -> stable identity -> classifier.
@@ -213,10 +292,21 @@ test('the REAL Host listBundles discovers 14/14 official optional/on-demand bund
   }))
   const model = buildPluginManagerModel(snapshot, classifyPluginPackages(inputs, []))
   const experimental = model.sections.find(section => section.id === 'experimental')!.cards
-  assert.equal(experimental.length, 14, 'the Experimental section carries exactly the real Host items')
-  assert.deepEqual(experimental.map(card => card.name), [...EXPERIMENTAL_BUNDLE_IDS], 'the frozen B01–B14 order')
-  assert.equal(experimental.at(-2)!.name, '@deepseek-ai/dsh-subagent-codex')
-  assert.equal(experimental.at(-1)!.name, '@deepseek-ai/dsh-subagent-claude-code')
+  // The section is DERIVED from the release rosters: the frozen B01–B14 order
+  // first, then every release-added Experimental identity in Host order. A
+  // release that adds or drops a member changes this expectation without a
+  // local fixed-size snapshot.
+  assert.deepEqual(experimental.map(card => card.name), EXPERIMENTAL_CATALOG,
+    'the Experimental section is the legacy Bxx order plus the release-only members')
+  assert.equal(experimental.length, EXPERIMENTAL_CATALOG.length)
+  for (const card of experimental) {
+    assert.ok(OFFICIAL_CATALOG.includes(card.name), `${card.name} is a real official catalog identity`)
+  }
+  // The legacy Bxx block keeps its exact tail (B13/B14) and the release-only
+  // members are appended after it, never interleaved.
+  assert.equal(experimental[EXPERIMENTAL_BUNDLE_IDS.length - 2]!.name, '@deepseek-ai/dsh-subagent-codex')
+  assert.equal(experimental[EXPERIMENTAL_BUNDLE_IDS.length - 1]!.name, '@deepseek-ai/dsh-subagent-claude-code')
+  assert.deepEqual(experimental.slice(EXPERIMENTAL_BUNDLE_IDS.length).map(card => card.name), RELEASE_ONLY_EXPERIMENTAL)
 
   for (const card of experimental) {
     assert.equal(card.section, 'experimental')
@@ -233,21 +323,39 @@ test('the REAL Host listBundles discovers 14/14 official optional/on-demand bund
     assert.ok(upgrade !== undefined, `${card.name} states the F10 route from real Host facts`)
     if (ON_DEMAND.includes(card.name)) {
       assert.equal(card.availability, 'missing')
-      assert.equal(card.canInstall, true)
-      assert.ok(detail.actions.some(action => action.value === 'action:official-install' && action.enabled))
       assert.equal(card.installTarget?.spec, `${card.name}@${RUNTIME_VERSION}`)
-      assert.equal(upgrade!.value,
-        `Install: Use the official offered target ${card.name}@${RUNTIME_VERSION} (version ${RUNTIME_VERSION}); this is not an in-place update.`)
-      assert.match(upgrade!.value, /this is not an in-place update/)
       assert.equal(facts.find(fact => fact.label === 'Current version')?.value, 'unavailable')
+      const installAction = detail.actions.find(action => action.value === 'action:official-install')!
+      if (card.error?.code === 'unsupported-platform') {
+        // The Host's OWN platform refusal (for example the darwin-only CUA
+        // bundle on this Host) is not an install route: the official catalog
+        // Install stays disabled with the Host reason and the guidance says so.
+        assert.equal(card.canInstall, false)
+        assert.match(card.installBlockedReason ?? '', /unsupported-platform/u)
+        assert.equal(installAction.enabled, false)
+        assert.match(installAction.reason ?? '', /unsupported-platform/u)
+        assert.equal(upgrade!.value, `Install unavailable: ${card.installBlockedReason}`)
+      } else {
+        assert.equal(card.canInstall, true)
+        assert.equal(installAction.enabled, true)
+        assert.equal(upgrade!.value,
+          `Install: Use the official offered target ${card.name}@${RUNTIME_VERSION} (version ${RUNTIME_VERSION}); this is not an in-place update.`)
+        assert.match(upgrade!.value, /this is not an in-place update/)
+      }
     } else {
       assert.equal(card.availability, 'installation')
       assert.equal(card.canInstall, false)
-      assert.equal(
-        card.canToggle,
-        true,
-        `${card.name}: ${card.toggleBlockedReason ?? 'no blocked reason'}; Host error: ${JSON.stringify(card.error ?? null)}`,
-      )
+      if (card.error?.code === 'unsupported-platform') {
+        // rc.2 ships CUA as an Optional bundle; on this Host the platform
+        // refusal blocks enabling it while the card stays manageable.
+        assert.equal(card.canToggle, false, `${card.name} cannot be enabled on this Host platform`)
+      } else {
+        assert.equal(
+          card.canToggle,
+          true,
+          `${card.name}: ${card.toggleBlockedReason ?? 'no blocked reason'}; Host error: ${JSON.stringify(card.error ?? null)}`,
+        )
+      }
       assert.equal(card.canRemove, false, 'a shipped bundle is never removable')
       assert.equal(upgrade!.value, 'Upgrade: Shipped with DSH. Upgrade the DSH installation to change this bundle version; Plugin Manager cannot update it in place.')
       assert.ok(!detail.actions.some(action => action.value === 'action:remove'), 'F10 never adds a Remove action to a shipped bundle')
@@ -261,6 +369,68 @@ test('the REAL Host listBundles discovers 14/14 official optional/on-demand bund
     assert.match(risk?.value ?? '', /no Continue\/Resume/u)
     assert.doesNotMatch(risk?.value ?? '', /EXTERNAL_UNVERIFIED/u)
   }
+  // The rc.3 release-only Web-only catalog member reaches the SAME real page
+  // with its Owner-only / Web-only limitation copy and NO TUI import action.
+  const importCard = experimental.find(card => card.name === '@deepseek-ai/dsh-deepseek-chat-import')
+  assert.ok(importCard !== undefined, 'the rc.3 DeepSeek chat import member is a real Host catalog card')
+  assert.equal(importCard!.availability, 'installation')
+  assert.equal(importCard!.official, true)
+  const importFacts = buildPluginDetailView(importCard!).groups.flatMap(group => group.facts)
+  assert.match(importFacts.find(fact => fact.label === 'TUI surface')?.value ?? '',
+    /available through the Web UI, not as a PiTui import action/u)
+  const importRisk = importFacts.find(fact => fact.label === 'Risk')
+  assert.ok(importRisk !== undefined && importRisk.tone === 'warning',
+    'the real page paints the Owner-only upload risk with warning tone')
+  assert.match(importRisk!.value, /Owner-only Web upload/u)
+  assert.ok(!buildPluginDetailView(importCard!).actions.some(action => /import/i.test(action.value)),
+    'the real page exposes no TUI import action for the Web-only member')
+})
+
+test('the mounted Plugin Manager page paints the rc.3 chat-import Web-only disclosure on a real search', async (t) => {
+  // The plan's L2/L6 reachability proof for the rc.3 member: the card the user
+  // reaches through the REAL page (search -> Details -> painted frame), not
+  // only the detached Detail projection asserted above.
+  const IMPORT_BUNDLE = '@deepseek-ai/dsh-deepseek-chat-import'
+  const life = testLifecycle(t)
+  const workRoot = life.tempDir('chat-import-page-')
+  const seeded = seedProfile(workRoot)
+  const page = await mountRealHostPage(t, seeded.profileContext)
+  const cardOf = (): ReturnType<WorkspaceHarness['controller']['model']>['cards'][number] | undefined =>
+    page.controller.model().cards.find(candidate => candidate.name === IMPORT_BUNDLE)
+
+  // The REAL Host facts the page consumes before anything is painted.
+  const card = cardOf()!
+  assert.equal(card.official, true)
+  assert.equal(card.availability, 'installation')
+  assert.equal(card.section, 'experimental')
+  assert.equal(card.canInstall, false, 'a shipped Web-only bundle has no catalog Install route')
+
+  // The REAL user path: explicit search -> Details -> the painted frame.
+  searchFor(page.harness, IMPORT_BUNDLE)
+  await page.harness.waitForFrame()
+  const painted = card.title ?? IMPORT_BUNDLE
+  await page.waitFor(() => page.frame().includes(painted), 'the explicit search finds the Web-only bundle')
+  page.harness.vt.sendInput('\r') // Details
+  await page.waitFor(() => page.frame().includes('[Details]'), 'the Details focus frame')
+  // Scroll the Detail to its Actions block (real focus navigation in the SAME
+  // seat; no second page). The bottom view then paints the whole Compatibility
+  // copy AND the executable Host action in one frame.
+  page.harness.vt.sendInput('\x1b[B')
+  await page.harness.waitForFrame()
+  page.harness.vt.sendInput('\x1b[B')
+  await page.harness.waitForFrame()
+  page.harness.vt.sendInput('\x1b[A')
+  await page.harness.waitForFrame()
+  await page.waitFor(() => /Owner-only Web upload/u.test(page.frame()), 'the Owner-only upload risk is painted')
+  const detail = page.frame()
+  // The terminal wraps the sentence across lines, so match with whitespace.
+  assert.match(detail, /available through\s+the Web UI, not as a PiTui import\s+action/u,
+    'the Web-only TUI surface copy is painted on the mounted page')
+  assert.match(detail, /Owner-only Web upload of a DeepSeek/u)
+  assert.match(detail, /512 MiB per upload\s+by default/u)
+  assert.match(detail, /> Enable…/u, 'the shipped bundle keeps its executable Host Enable action')
+  assert.match(detail, /\bBack\b/u, 'the real Actions block is painted')
+  assert.ok(!/Install…/u.test(detail), 'no phantom Import/Install action is painted for the Web-only member')
 })
 
 test('the TUI self package is the only Current-TUI card when the real Host lists it', async (t) => {
@@ -331,7 +501,7 @@ test('the REAL Host install/toggle/remove lifecycle flows through the ONE Direct
   await ctx.plugin(Loader)
   await ctx.plugin(PluginManager, {})
   const service = ctx.get('pluginManager') as unknown as PluginManagerServiceLike
-  const port = new DirectPluginManagerPort({ get: name => name === 'pluginManager' ? service : undefined, on: () => () => {} })
+  const port = new DirectPluginManagerPort({ get: name => name === 'pluginManager' ? service : undefined, on: () => () => false })
 
   const inspection = await port.inspect(seeded.bundleDir)
   assert.equal(inspection.status, 'accepted')
@@ -392,7 +562,7 @@ test('the REAL Host -> Direct port -> controller -> workspace page install chain
   await ctx.plugin(Loader)
   await ctx.plugin(PluginManager, {})
   const service = ctx.get('pluginManager') as unknown as PluginManagerServiceLike
-  const port = new DirectPluginManagerPort({ get: name => name === 'pluginManager' ? service : undefined, on: () => () => {} })
+  const port = new DirectPluginManagerPort({ get: name => name === 'pluginManager' ? service : undefined, on: () => () => false })
 
   // The ONE real Settings lease hosts the embedded page through the REAL
   // `Settings → Plugins` factory; it owns the controller's claim and grants the
@@ -477,9 +647,12 @@ test('the REAL Host -> Direct port -> controller -> workspace page install chain
     'the real Host disable + authoritative reread')
   // The controller's state leads the repaint: the toggled row is waited for
   // as a FRAME, so the case never reads a frame painted before the change.
-  await waitFor(() => /Enabled\s+No/u.test(frame()),
+  await waitFor(() => /Selected in profile/u.test(frame()) && /> Enable…/u.test(frame()),
     'the toggled row is painted')
-  assert.match(frame(), /Enabled\s+No/)
+  // The value column wraps onto the next physical row on this frame, so the
+  // painted evidence is the honest Status label plus the flipped action.
+  assert.match(frame(), /Selected in profile/)
+  assert.match(frame(), /> Enable…/)
 
   vt.sendInput('\x1b[B') // Enable… -> Remove…
   await settle()
@@ -530,7 +703,7 @@ test('an APPLIED real-Host version exemption reaches the card Detail without an 
   await ctx.plugin(Loader)
   await ctx.plugin(PluginManager, {})
   const service = ctx.get('pluginManager') as unknown as PluginManagerServiceLike
-  const port = new DirectPluginManagerPort({ get: name => name === 'pluginManager' ? service : undefined, on: () => () => {} })
+  const port = new DirectPluginManagerPort({ get: name => name === 'pluginManager' ? service : undefined, on: () => () => false })
 
   const installed = await port.startInstall({
     requestId: 'exempt-install',
@@ -562,4 +735,506 @@ test('an APPLIED real-Host version exemption reaches the card Detail without an 
   assert.ok(detail.groups.some(group => group.facts.some(fact =>
     fact.label === 'Exemption' && fact.tone === 'success' && fact.value.includes(`${seeded.bundleName}@1.0.0`))),
   'the applied real-Host exemption is visible on the card')
+})
+
+test('a real Host platform refusal stays out of the default list and never installs', { skip: process.platform === 'darwin' ? 'the shipped CUA bundle is supported on macOS; this case proves the Linux Host platform refusal' : false }, async (t) => {
+  const life = testLifecycle(t)
+  const workRoot = life.tempDir('cua-default-')
+  const seeded = seedProfile(workRoot)
+  const page = await mountRealHostPage(t, seeded.profileContext)
+  const profileDir = seeded.profileContext.dir as string
+  const refused = process.platform !== 'darwin'
+  const card = page.controller.model().cards.find(candidate => candidate.name === CUA_BUNDLE)!
+  const painted = card.title ?? card.name
+
+  // The REAL Host facts the page consumes.
+  assert.equal(card.enabled, false)
+  assert.equal(card.installed, false)
+  assert.equal(card.listedByDefault, false, 'the Host default-listing decision survives Host -> port -> model')
+  if (refused) {
+    assert.equal(card.error?.code, 'unsupported-platform')
+    assert.equal(card.canInstall, false, 'the Host platform refusal blocks the official catalog Install')
+  }
+
+  // A: the untouched list is the Host default listing, and ONE existing hint
+  // line names the explicit search route without adding a second catalog page.
+  assert.doesNotMatch(page.frame(), new RegExp(painted))
+  assert.match(page.frame(), /\/ searches hidden official bundles/u)
+
+  // The explicit search reads the SAME model card.
+  searchFor(page.harness, CUA_BUNDLE)
+  await page.harness.waitForFrame()
+  await page.waitFor(() => page.frame().includes(painted), 'the explicit search finds the hidden bundle')
+  if (refused) assert.match(page.frame(), /\[error\]/)
+
+  page.harness.vt.sendInput('\r') // Details
+  await page.waitFor(() => page.frame().includes('[Details]'), 'the Details focus frame')
+  // The CUA card's Detail is longer than the pane: the Status/Source facts are
+  // read on the initial frame, then one navigation reveals the Actions block.
+  assert.match(page.frame(), /Default listing/u)
+  page.harness.vt.sendInput('\x1b[B')
+  page.harness.vt.sendInput('\x1b[A')
+  await page.harness.waitForFrame()
+  if (refused) {
+    await page.waitFor(() => /unsupported-platform/u.test(page.frame()), 'the Host error is painted in Detail')
+    // Enter on the disabled Install action explains the Host refusal and
+    // creates NOTHING: no request id, no install dispatch, no profile write.
+    page.harness.vt.sendInput('\r')
+    await page.waitFor(() => /unsupported-platform/u.test(page.frame()), 'the refusal is explained')
+    assert.equal(page.controller.installView(), undefined, 'no official install request was created')
+  } else {
+    assert.match(page.frame(), /> Install…/u, 'a supported platform keeps the real Install route')
+  }
+  const profile = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'))
+  assert.deepEqual(profile.dependencies, {}, 'the refused platform caused no package write')
+  assert.deepEqual(profile.dsh.profile.bundles, [], 'the refused platform caused no selection')
+
+  // Matrix E control: an ordinary on-demand entry the Host does not refuse
+  // keeps its Install capability in the same real catalog.
+  const codex = page.controller.model().cards.find(candidate => candidate.name === '@deepseek-ai/dsh-subagent-codex')!
+  assert.equal(codex.canInstall, true)
+  assert.equal(codex.installBlockedReason, undefined)
+})
+
+test('a selected bundle is disabled through the Host and its default-listing state follows Host support', async (t) => {
+  const life = testLifecycle(t)
+  const workRoot = life.tempDir('cua-selected-')
+  const seeded = seedProfile(workRoot, [CUA_BUNDLE])
+  const page = await mountRealHostPage(t, seeded.profileContext)
+  const profileDir = seeded.profileContext.dir as string
+  const refused = process.platform !== 'darwin'
+  const cardOf = (): ReturnType<WorkspaceHarness['controller']['model']>['cards'][number] | undefined =>
+    page.controller.model().cards.find(candidate => candidate.name === CUA_BUNDLE)
+  const painted = cardOf()!.title ?? CUA_BUNDLE
+
+  // B: a SELECTED bundle stays listed (and manageable) whatever its default
+  // listing says.
+  assert.equal(cardOf()!.enabled, true)
+  await page.waitFor(() => page.frame().includes(painted), 'the selected bundle is painted')
+  if (refused) assert.match(page.frame(), /\[error\]/)
+
+  searchFor(page.harness, CUA_BUNDLE)
+  await page.harness.waitForFrame()
+  page.harness.vt.sendInput('\r') // Details
+  await page.waitFor(() => page.frame().includes('[Details]'), 'the Details focus frame')
+  assert.match(page.frame(), /Selected in profile/u)
+  // rc.2 ships CUA as an Optional installation bundle: its only recovery
+  // action is the executable Disable (there is no Install action for a
+  // shipped package). The card's Detail is longer than the pane, so one
+  // down+up reveals the Actions block while keeping Disable selected.
+  page.harness.vt.sendInput('\x1b[B')
+  page.harness.vt.sendInput('\x1b[A')
+  await page.harness.waitForFrame()
+  const detail = page.frame()
+  assert.match(detail, /> Disable…/u, 'a selected refused bundle keeps an executable Disable')
+  if (refused) assert.match(detail, /unsupported-platform/u)
+
+  page.harness.vt.sendInput('\r') // Disable…
+  await page.waitFor(() => cardOf()?.enabled === false, 'the real Host disable + authoritative reread')
+  // The real profile selection is gone.
+  const profile = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'))
+  assert.deepEqual(profile.dsh.profile.bundles, [])
+  // The explicit query still matches the card, so clearing it (the page's own
+  // Esc-clear seat) is what restores the Host default listing.
+  page.harness.vt.sendInput('/')
+  await page.harness.waitForFrame()
+  page.harness.vt.sendInput('\x1b')
+  await page.harness.waitForFrame()
+  if (refused) {
+    await page.waitFor(() => !page.frame().includes(painted), 'the default list hides the unselected bundle')
+  } else {
+    // A supported CUA bundle is a shipped Optional member, so unselecting it
+    // returns it to the Host default listing instead of hiding it. The list row
+    // paints the package name while the Detail paints the title, so the model's
+    // Host default-listing fact is the stable assertion here.
+    await page.waitFor(() => {
+      const card = cardOf()
+      return card !== undefined && card.listedByDefault !== false
+    }, 'the supported unselected bundle stays in the default listing')
+    assert.equal(cardOf()!.enabled, false, 'the supported bundle stays disabled after the Host disable')
+  }
+
+  // The card is NOT deleted from the Host catalog / model: an explicit search
+  // reads it again with its Host facts intact, and no hidden card becomes the
+  // selected target of the list frame behind it.
+  searchFor(page.harness, CUA_BUNDLE)
+  await page.harness.waitForFrame()
+  await page.waitFor(() => page.frame().includes(painted), 'the explicit search still reaches it')
+  assert.equal(cardOf()!.enabled, false)
+  assert.equal(cardOf()!.error?.code, refused ? 'unsupported-platform' : undefined)
+})
+
+test('a profile-owned bundle the Host refuses keeps Disable and the Host-permitted Remove separately executable', async (t) => {
+  const life = testLifecycle(t)
+  const workRoot = life.tempDir('cua-profile-owned-')
+  // CUA is a SHIPPED Optional bundle in rc.2, so a profile-owned platform
+  // refusal is proven with an independent profile package instead.
+  const PROFILE_REFUSED_BUNDLE = '@fixture/aix-only-profile-bundle'
+  const seeded = seedProfile(workRoot, [PROFILE_REFUSED_BUNDLE])
+  const profileDir = seeded.profileContext.dir as string
+  // Narrow deterministic INPUT control (not darwin hardware evidence): this
+  // profile's OWN dependency declares an AIX-only platform, so the REAL Host
+  // reports availability:'profile', installed:true, selected:true,
+  // removable:true and the unsupported-platform error on every test Host
+  // (Linux, macOS and Windows).
+  const packageDir = join(profileDir, 'node_modules', PROFILE_REFUSED_BUNDLE)
+  mkdirSync(packageDir, { recursive: true })
+  writeFileSync(join(packageDir, 'package.json'), JSON.stringify({
+    name: PROFILE_REFUSED_BUNDLE,
+    version: '1.0.0',
+    dsh: { bundle: { patch: [], platforms: ['aix'] } },
+  }, null, 2))
+  writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
+    name: 'catalog-fixture-profile',
+    private: true,
+    dependencies: { [PROFILE_REFUSED_BUNDLE]: `file:./node_modules/${PROFILE_REFUSED_BUNDLE}` },
+    dsh: { profile: { bundles: [PROFILE_REFUSED_BUNDLE], patch: 'cordis.patch.yml' } },
+  }, null, 2))
+
+  const page = await mountRealHostPage(t, seeded.profileContext)
+  const cardOf = (): ReturnType<WorkspaceHarness['controller']['model']>['cards'][number] | undefined =>
+    page.controller.model().cards.find(candidate => candidate.name === PROFILE_REFUSED_BUNDLE)
+
+  // C: the Host proves every fact the recovery actions depend on.
+  const card = cardOf()!
+  const painted = card.title ?? PROFILE_REFUSED_BUNDLE
+  assert.equal(card.availability, 'profile')
+  assert.equal(card.installed, true)
+  assert.equal(card.enabled, true)
+  assert.equal(card.removable, true)
+  assert.equal(card.error?.code, 'unsupported-platform')
+  assert.equal(card.canToggle, true, 'the enable error does not lock Disable')
+  assert.equal(card.canRemove, true, 'the enable error does not lock Remove')
+
+  searchFor(page.harness, PROFILE_REFUSED_BUNDLE)
+  await page.harness.waitForFrame()
+  page.harness.vt.sendInput('\r') // Details
+  await page.waitFor(() => page.frame().includes('[Details]'), 'the Details focus frame')
+  assert.match(page.frame(), new RegExp(painted))
+  // One navigation reveals the Actions block; the next enters Remove.
+  page.harness.vt.sendInput('\x1b[B') // Disable… -> Remove… (reveals Actions)
+  await page.harness.waitForFrame()
+  const detail = page.frame()
+  assert.match(detail, /> Remove…/u)
+  assert.match(detail, /Disable…/u)
+  assert.match(detail, /unsupported-platform/u)
+  page.harness.vt.sendInput('\r')
+  await page.waitFor(() => page.frame().includes('Cancel'), 'the destructive Remove confirmation')
+  page.harness.vt.sendInput('\x1b') // cancel
+  await page.harness.waitForFrame()
+  assert.match(page.frame(), /> Remove…/u, 'the confirmation returns to the same action')
+  const afterCancel = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'))
+  assert.equal(afterCancel.dependencies[PROFILE_REFUSED_BUNDLE], `file:./node_modules/${PROFILE_REFUSED_BUNDLE}`,
+    'cancel dispatched no Host removal')
+
+  // Disable is independent: the same card is disabled through the real Host
+  // while the Remove capability stays Host-permitted and the refusal visible.
+  page.harness.vt.sendInput('\x1b[A') // Remove… -> Disable…
+  await page.harness.waitForFrame()
+  assert.match(page.frame(), /> Disable…/u)
+  page.harness.vt.sendInput('\r')
+  await page.waitFor(() => cardOf()?.enabled === false, 'the real Host disable + authoritative reread')
+  assert.equal(cardOf()!.error?.code, 'unsupported-platform',
+    'the real Host error is never erased by the local disable result')
+  assert.equal(cardOf()!.canRemove, true, 'Remove remains available after the disable result')
+})
+
+// ── S5-PR2: REAL Host registry update qualification (L5) ────────────────────
+
+/** The test-owned registry bundle name (never a production package). */
+const UPDATE_FIXTURE_BUNDLE = 'dsh-s5-pr2-update-fixture'
+/** The published versions the update tests install and offer. */
+const UPDATE_FIXTURE_FROM = '1.0.0'
+const UPDATE_FIXTURE_TO = '1.1.0'
+
+interface UpdateFixture {
+  readonly host: Awaited<ReturnType<typeof createRemoteApplicationHostFixture>>
+  readonly registry: LocalNpmRegistryControl
+  readonly port: DirectPluginManagerPort
+  readonly profileDir: string
+}
+
+interface UpdateFixtureOptions {
+  /** Publish versions newer than 1.0.0 (default: one compatible bundle 1.1.0). */
+  readonly additional?: readonly {
+    readonly version: string
+    readonly bundle?: boolean
+    readonly enginesDsh?: string
+    readonly deprecated?: string
+    readonly prerelease?: boolean
+  }[]
+  /** Withhold the target tarball body (the deterministic cancel window). */
+  readonly slowTarball?: boolean
+  /** Provide the HMR service the Host's remove/install/restore branch needs. */
+  readonly hmr?: boolean
+}
+
+function updateFixturePackage(
+  root: string,
+  version: string,
+  options: { readonly bundle?: boolean; readonly enginesDsh?: string } = {},
+): { manifest: Record<string, unknown>; packed: ReturnType<typeof packFixturePackage> } {
+  const manifest: Record<string, unknown> = {
+    name: UPDATE_FIXTURE_BUNDLE,
+    version,
+    main: 'index.js',
+    ...(options.bundle === false ? {} : { dsh: { bundle: { patch: 'cordis.patch.yml' } } }),
+    ...(options.enginesDsh === undefined ? {} : { engines: { dsh: options.enginesDsh } }),
+  }
+  const packed = packFixturePackage(root, {
+    name: UPDATE_FIXTURE_BUNDLE,
+    version,
+    manifest,
+    files: options.bundle === false
+      ? { 'index.js': 'export default function noBundle() {}\n' }
+      : { 'cordis.patch.yml': '[]\n', 'index.js': 'export default function bundle() {}\n' },
+  }, { directory: 'package', tarballDirectory: 'tarball' })
+  return { manifest, packed }
+}
+
+/**
+ * A REAL `@deepseek-ai/dsh-plugin-manager` Host over an isolated managed
+ * profile, seeded with a REAL registry install of 1.0.0 from a loopback
+ * registry that also serves the update targets.
+ */
+async function startUpdateFixture(
+  t: TestContext,
+  presetId: string,
+  options: UpdateFixtureOptions = {},
+): Promise<UpdateFixture> {
+  const life = testLifecycle(t)
+  const host = await createRemoteApplicationHostFixture(life, presetId, {
+    pluginManagerProfile: { emptyProfile: true },
+    isolateHome: true,
+  })
+  if (options.hmr !== false) {
+    // The official Host reads this service to decide between its in-place
+    // install and the remove/install/restore branch. The stand-in provides
+    // exactly that seam (exclusive execution + no restart requirement).
+    host.ctx.provide('hmr', {
+      runExclusive: <T>(fn: () => Promise<T>) => fn(),
+      reconcileProfile: async () => ({ warnings: [], pending: [] }),
+    })
+  }
+  const packRoot = life.tempDir(`${presetId}-pack-`)
+  const from = updateFixturePackage(join(packRoot, 'from'), UPDATE_FIXTURE_FROM)
+  const additional = (options.additional ?? [{ version: UPDATE_FIXTURE_TO }]).map((entry) => {
+    const target = updateFixturePackage(join(packRoot, `to-${entry.version}`), entry.version, {
+      ...(entry.bundle === undefined ? {} : { bundle: entry.bundle }),
+      ...(entry.enginesDsh === undefined ? {} : { enginesDsh: entry.enginesDsh }),
+    })
+    const version: AdditionalRegistryVersion = {
+      packed: target.packed,
+      manifest: target.manifest,
+      publishedAt: '2026-02-03T00:00:00.000Z',
+      tags: ['latest'],
+      ...(entry.deprecated === undefined ? {} : { deprecated: entry.deprecated }),
+    }
+    return version
+  })
+  const registry = await startLocalNpmRegistry(from.packed, {
+    manifest: from.manifest,
+    ...(options.slowTarball === true ? { slowTarball: true } : {}),
+    additionalVersions: additional,
+  })
+  life.defer(() => registry.close())
+  const port = new DirectPluginManagerPort(host.ctx)
+  const seeded = await port.startInstall({
+    requestId: 'seed-1.0.0',
+    spec: `${UPDATE_FIXTURE_BUNDLE}@${UPDATE_FIXTURE_FROM}`,
+    registry: registry.url,
+    enabled: true,
+  })
+  assert.equal(seeded.application, options.hmr === false ? 'restart-required' : 'applied')
+  assert.equal(seeded.version, UPDATE_FIXTURE_FROM)
+  return { host, registry, port, profileDir: host.pluginManager!.profileDir }
+}
+
+function readProfileDependencies(profileDir: string): Record<string, string> {
+  const manifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8')) as {
+    dependencies?: Record<string, string>
+  }
+  return manifest.dependencies ?? {}
+}
+
+test('the REAL Host TUI path lists versions, confirms one exact target and updates 1.0.0 → 1.1.0', async (t) => {
+  const fixture = await startUpdateFixture(t, 's5-pr2-real-update-ui')
+  // Count the REAL Host updateBundle dispatches on the unwrapped service.
+  const proxy = fixture.host.ctx.get('pluginManager') as unknown as Record<symbol, unknown> & {
+    updateBundle(name: string, version: string, options?: unknown): Promise<unknown>
+  }
+  const service = (proxy[symbols.original] ?? proxy) as typeof proxy
+  const originalUpdate = service.updateBundle
+  let updateDispatches = 0
+  service.updateBundle = function patchedUpdate(this: unknown, name: string, version: string, options?: unknown): Promise<unknown> {
+    updateDispatches += 1
+    return originalUpdate.call(this, name, version, options)
+  }
+  t.after(() => { service.updateBundle = originalUpdate })
+  const harness = await openWorkspace({ port: fixture.port })
+  t.after(() => {
+    try { harness.close() } catch {}
+    try { harness.controller.dispose() } catch {}
+    try { harness.app.dispose() } catch {}
+  })
+  // A bounded RENDER wait (not a blind sleep): the frame must have landed.
+  const paint = async (rounds = 10): Promise<void> => { await harness.waitForFrame(rounds) }
+  const frame = (): string => plain(harness.vt.getViewport())
+  const waitFor = async (predicate: () => boolean, label: string, timeoutMs = 60_000): Promise<void> => {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      if (predicate()) return
+      await new Promise<void>(resolve => setTimeout(resolve, 10))
+      await harness.vt.waitForRender()
+    }
+    throw new Error(`timed out waiting for ${label}: ${frame()}`)
+  }
+  await waitFor(() => harness.controller.status().state === 'ready', 'the real Host inventory read')
+  await paint()
+  const card = harness.controller.model().cards.find(candidate => candidate.name === UPDATE_FIXTURE_BUNDLE)
+  assert.ok(card !== undefined, 'the real registry install is listed')
+  assert.equal(card.updatable, true, 'the Host declares the profile registry dependency updatable')
+
+  // The REAL user path: search -> Details -> Check updates….
+  searchFor(harness, UPDATE_FIXTURE_BUNDLE)
+  await paint()
+  harness.vt.sendInput('\r') // Details
+  await waitFor(() => frame().includes('[Details]'), 'the Details focus frame')
+  harness.vt.sendInput('\x1b[B') // Disable… -> Check updates…
+  await paint()
+  harness.vt.sendInput('\r')
+  await waitFor(() => harness.panel.currentView() === 'update', 'the Check updates… entry')
+  await waitFor(() => /Update bundle · dsh-s5-pr2-update-fixture/u.test(frame()), 'the Update page identity')
+  await waitFor(() => /\b1\.1\.0\b/u.test(frame()), 'the Host listVersions target')
+  assert.match(frame(), /Installed\s+1\.0\.0/u)
+  assert.match(frame(), /http:\/\/127\.0\.0\.1:\d+\//u, 'the Host-answered registry is shown')
+  assert.doesNotMatch(frame(), /secret/u)
+
+  // Enter: select the exact version and open the confirmation.
+  harness.vt.sendInput('\r')
+  await waitFor(() => harness.controller.updateView()?.phase === 'confirm', 'the confirmation')
+  await waitFor(() => /From\s+1\.0\.0/u.test(frame()), 'the confirmation facts frame')
+  assert.match(frame(), /To\s+1\.1\.0/u)
+  assert.match(frame(), /> Cancel/u, 'Cancel is the default choice')
+  harness.vt.sendInput('\x1b[A') // Cancel -> Confirm update
+  await paint()
+  harness.vt.sendInput('\r')
+  await waitFor(() => harness.controller.updateView()?.phase === 'running', 'the running update')
+  await waitFor(() => harness.controller.updateView()?.readback === 'ready', 'the authoritative reread')
+  await waitFor(() => harness.controller.updateView()?.phase === 'done', 'the official update result')
+  await waitFor(() => /Observed installed version\s+1\.1\.0/u.test(frame()), 'the fresh installed version frame')
+  const view = frame()
+  assert.match(view, /Target result/u)
+  assert.match(view, /Outcome\s+applied/u)
+  assert.match(view, /Restore result/u)
+  assert.match(view, /Not required; the Host did not reinstall the former version\./u)
+
+  // The authoritative Host truth: package version and profile dependency.
+  const reread = await fixture.port.snapshot()
+  assert.equal(reread.bundles.find(candidate => candidate.name === UPDATE_FIXTURE_BUNDLE)?.version, UPDATE_FIXTURE_TO)
+  assert.equal(readProfileDependencies(fixture.profileDir)[UPDATE_FIXTURE_BUNDLE], UPDATE_FIXTURE_TO)
+  assert.equal(updateDispatches, 1, 'the real Host updateBundle ran exactly once')
+})
+
+test('the REAL Host no-HMR update reports restart-required and still installs the target', async (t) => {
+  const fixture = await startUpdateFixture(t, 's5-pr2-real-update-nohmr', { hmr: false })
+  const list = await fixture.port.listVersions(UPDATE_FIXTURE_BUNDLE)
+  assert.equal(list.status, 'listed')
+  if (list.status !== 'listed') return
+  assert.equal(list.versions[0]?.version, UPDATE_FIXTURE_TO)
+  assert.equal(list.registry, `${fixture.registry.url}/`, 'the Host normalizes the answered registry')
+  const result = await fixture.port.updateBundle(UPDATE_FIXTURE_BUNDLE, UPDATE_FIXTURE_TO, list.registry, 'req-nohmr')
+  assert.equal(result.step, 'install')
+  assert.equal(result.result.application, 'restart-required')
+  assert.equal(result.result.restartReason, 'no-hmr')
+  assert.equal(result.restore, undefined, 'no removal/restore happens without HMR')
+  const snapshot = await fixture.port.snapshot()
+  assert.equal(snapshot.bundles.find(candidate => candidate.name === UPDATE_FIXTURE_BUNDLE)?.version, UPDATE_FIXTURE_TO)
+  assert.equal(readProfileDependencies(fixture.profileDir)[UPDATE_FIXTURE_BUNDLE], UPDATE_FIXTURE_TO)
+})
+
+test('the REAL Host refuses an older, a non-bundle and an incompatible target with zero profile writes', async (t) => {
+  const fixture = await startUpdateFixture(t, 's5-pr2-real-update-refusals', {
+    additional: [
+      { version: UPDATE_FIXTURE_TO },
+      { version: '1.2.0', bundle: false },
+      { version: '1.3.0', enginesDsh: '>=9' },
+    ],
+  })
+  const before = readFileSync(join(fixture.profileDir, 'package.json'), 'utf8')
+  const list = await fixture.port.listVersions(UPDATE_FIXTURE_BUNDLE)
+  assert.equal(list.status, 'listed')
+  if (list.status !== 'listed') return
+  const byVersion = new Map(list.versions.map(version => [version.version, version]))
+  assert.equal(byVersion.get('1.2.0')?.bundle, false)
+  assert.equal(byVersion.get('1.3.0')?.incompatible?.requirements['engines.dsh'], '>=9')
+
+  // A version newer than the installed one is required.
+  const older = await fixture.port.updateBundle(UPDATE_FIXTURE_BUNDLE, '0.9.0', list.registry, 'req-older')
+  assert.equal(older.step, 'check')
+  assert.equal(older.result.application, 'failed')
+  assert.match(older.result.error?.diagnostic ?? '', /not a version newer/u)
+  // A published version without a bundle cannot replace one.
+  const nonBundle = await fixture.port.updateBundle(UPDATE_FIXTURE_BUNDLE, '1.2.0', list.registry, 'req-nonbundle')
+  assert.equal(nonBundle.step, 'check')
+  assert.equal(nonBundle.result.error?.code, 'not-bundle')
+  // A Host-incompatible version is refused before any removal.
+  const incompatible = await fixture.port.updateBundle(UPDATE_FIXTURE_BUNDLE, '1.3.0', list.registry, 'req-incompatible')
+  assert.equal(incompatible.step, 'check')
+  assert.equal(incompatible.result.error?.code, 'incompatible-version')
+  assert.equal(incompatible.result.error?.incompatible?.[0]?.requirements['engines.dsh'], '>=9')
+  assert.equal(readFileSync(join(fixture.profileDir, 'package.json'), 'utf8'), before,
+    'every refused target left the profile manifest byte-identical')
+  const snapshot = await fixture.port.snapshot()
+  assert.equal(snapshot.bundles.find(candidate => candidate.name === UPDATE_FIXTURE_BUNDLE)?.version, UPDATE_FIXTURE_FROM)
+})
+
+test('a REAL slow target install cancelled through the Host restores 1.0.0 (independent restore result)', async (t) => {
+  const fixture = await startUpdateFixture(t, 's5-pr2-real-update-cancel', { slowTarball: true })
+  const requestId = 'req-cancel-target'
+  const pending = fixture.port.updateBundle(UPDATE_FIXTURE_BUNDLE, UPDATE_FIXTURE_TO, fixture.registry.url, requestId)
+  await fixture.registry.waitForTarballRequest(60_000)
+  const cancellation = await fixture.port.cancelInstall(requestId)
+  assert.equal(cancellation.status, 'cancelled')
+  const result = await pending
+  assert.equal(result.result.application, 'cancelled', 'the target installation was cancelled')
+  assert.equal(result.restore?.application, 'applied', 'the Host restored the former version separately')
+  assert.equal(result.restore?.version, UPDATE_FIXTURE_FROM)
+  const snapshot = await fixture.port.snapshot()
+  assert.equal(snapshot.bundles.find(candidate => candidate.name === UPDATE_FIXTURE_BUNDLE)?.version, UPDATE_FIXTURE_FROM)
+  assert.equal(readProfileDependencies(fixture.profileDir)[UPDATE_FIXTURE_BUNDLE], UPDATE_FIXTURE_FROM)
+})
+
+test('a REAL failed target install plus a failed restore are reported as two independent failures', async (t) => {
+  const fixture = await startUpdateFixture(t, 's5-pr2-real-update-restore-failure', { slowTarball: true })
+  // Fault injection through the NATIVE Host method: only the restore's exact
+  // previous spec fails; the update target still runs through the real pnpm.
+  const proxy = fixture.host.ctx.get('pluginManager') as unknown as Record<symbol, unknown> & {
+    installBundle(spec: string, options?: { saveExact?: boolean }): Promise<unknown>
+  }
+  const service = (proxy[symbols.original] ?? proxy) as typeof proxy
+  const original = service.installBundle
+  service.installBundle = async function patchedInstall(this: unknown, spec: string, options?: { saveExact?: boolean }): Promise<unknown> {
+    if (spec === `${UPDATE_FIXTURE_BUNDLE}@${UPDATE_FIXTURE_FROM}` && options?.saveExact === true) {
+      return {
+        changed: false,
+        application: 'failed',
+        stage: 'install',
+        target: spec,
+        error: { code: 'operation-error', diagnostic: 'restore fault injected' },
+      }
+    }
+    return original.call(this, spec, options)
+  }
+  t.after(() => { service.installBundle = original })
+
+  const requestId = 'req-restore-failure'
+  const pending = fixture.port.updateBundle(UPDATE_FIXTURE_BUNDLE, UPDATE_FIXTURE_TO, fixture.registry.url, requestId)
+  await fixture.registry.waitForTarballRequest(60_000)
+  const cancellation = await fixture.port.cancelInstall(requestId)
+  assert.equal(cancellation.status, 'cancelled')
+  const result = await pending
+  assert.equal(result.result.application, 'cancelled')
+  assert.equal(result.restore?.application, 'failed', 'a failed restoration is NOT merged into the target result')
+  assert.equal(result.restore?.error?.diagnostic, 'restore fault injected')
 })

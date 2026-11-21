@@ -15,6 +15,8 @@ import {
   resetCapabilitiesCache,
   setCapabilities,
   setCapabilityOverrides,
+  setCellDimensions,
+  TuiMainScreen,
   type Terminal,
   type TerminalProgressState,
 } from '@xmoon76/pi-tui'
@@ -72,6 +74,7 @@ class RecordingTerminal implements Terminal {
   setProgress(): void {}
   setProgramStatus(): void {}
   setProgressState(_state: TerminalProgressState): void {}
+  restoreOnExit?: (before: string, after: string) => void
 }
 
 function harness(options: { onEvent?: (event: KittyGraphicsEvent) => void } = {}) {
@@ -948,5 +951,253 @@ test('a pending tmux U1 probe never registers or paints a virtual occurrence', (
     graphics.dispose()
   } finally {
     cli.dispose()
+  }
+})
+
+/**
+ * U1's Terminal.restoreOnExit is the SYNCHRONOUS process-exit restoration, and
+ * the facade must forward it to the real sink exactly once: a facade that
+ * silently drops it leaves bracketed paste / Kitty keyboard / alt-screen state
+ * behind when the process exits without stop().
+ */
+test('the facade forwards sync exit restoration to the real terminal exactly once', () => {
+  const terminal = new RecordingTerminal()
+  const calls: Array<[string, string]> = []
+  terminal.restoreOnExit = (before, after) => {
+    calls.push([before, after])
+  }
+  const facade = new KittyTerminalFacade(terminal, new KittyGraphicsCore())
+  try {
+    facade.restoreOnExit('BEFORE', 'AFTER')
+    assert.deepEqual(calls, [['BEFORE', 'AFTER']])
+  } finally {
+    facade.dispose()
+  }
+
+  // The member is a RUNTIME capability of the real terminal: forwarding to a
+  // sink that does not implement it is a harmless no-op, never a throw.
+  const bare = new RecordingTerminal()
+  const bareFacade = new KittyTerminalFacade(bare, new KittyGraphicsCore())
+  try {
+    assert.doesNotThrow(() => bareFacade.restoreOnExit('BEFORE', 'AFTER'))
+  } finally {
+    bareFacade.dispose()
+  }
+})
+
+/**
+ * The Client-local source→sink proof for X077: the fork's REAL main screen
+ * composes a real NativeKittyImage through the facade, so the bytes recorded
+ * by the terminal are the ones a user's terminal would receive.
+ */
+test('a visible overlay preempts the managed placement and the same image returns', () => {
+  const { terminal, core, facade } = harness()
+  setCellDimensions({ widthPx: 10, heightPx: 10 })
+  try {
+    const screen = new TuiMainScreen(facade)
+    const image = new NativeKittyImage(core, source(PNG, 60, 60), { maxWidthCells: 6, fallback: '[image]' })
+    screen.addChild({ render: () => ['header'], invalidate: () => {} })
+    screen.addChild(image)
+    screen.start()
+    screen.renderNow()
+
+    const imageId = image.imageId
+    assert.ok(imageId !== undefined, 'the occurrence owns a Core image id')
+    const anchor = image.render(80)[0]!
+    assert.ok(anchor.includes(`a=p,i=${imageId}`), 'the painted line is a native placement')
+    assert.equal(count(terminal.text, 'a=t,f=100'), 1, 'the payload is transmitted once')
+    assert.ok(
+      terminal.text.indexOf('a=t,f=100') < terminal.text.indexOf(anchor),
+      'the transmission precedes the placement',
+    )
+    const body = image.paintedBodyAt(80)
+    assert.ok(body !== undefined, 'the painted body is known')
+
+    // Frame B: the overlay lands on the block's last body row (not the anchor).
+    terminal.writes.length = 0
+    const handle = screen.showOverlay({ render: () => ['MODAL'], invalidate: () => {} }, {
+      row: body.rows,
+      col: 0,
+      width: 20,
+    })
+    screen.renderNow()
+    const covered = terminal.text
+    assert.ok(covered.includes(encodeKittyDeletePlacement(imageId)), 'the writer delete is scoped to the placement')
+    assert.ok(!covered.includes(encodeKittyDeleteImage(imageId)), 'the Core keeps the image data')
+    assert.ok(!covered.includes('\x1b_Ga=d,d=A'), 'no global image delete reaches the terminal')
+    assert.ok(!covered.includes('\x1b[2J'), 'no screen clear')
+    assert.ok(!covered.includes('\x1b[3J'), 'no scrollback clear')
+    assert.ok(covered.includes('MODAL'), 'the overlay text is written')
+    assert.ok(!covered.includes(anchor), 'the original placement is not written alongside the overlay')
+
+    // Frame C: closing restores the SAME id and placement without re-transmitting.
+    terminal.writes.length = 0
+    handle.hide()
+    screen.renderNow()
+    const restored = terminal.text
+    assert.ok(restored.includes(anchor), 'the same image id and placement id return')
+    assert.equal(count(restored, 'a=t,f=100'), 0, 'the resident payload is not re-transmitted')
+    assert.ok(!restored.includes(encodeKittyDeleteImage(imageId)), 'closing frees no Core data')
+    assert.ok(!restored.includes('\x1b_Ga=d,d=A'), 'closing emits no global delete')
+    screen.stop()
+  } finally {
+    setCellDimensions({ widthPx: 9, heightPx: 18 })
+  }
+})
+
+/**
+ * A foreign `a=p` occurrence (uploaded by some other owner, placed with an id
+ * this Core does not own) is preempted by PROTOCOL for the frame, but its data
+ * must survive: the compositor records the id as preempted and the Main Screen
+ * removes only the PLACEMENT. The closed loop is: no data-free ever reaches the
+ * wire for that id, and the same placement is written again when the overlay
+ * closes (its data stayed resident for the foreign owner to re-show).
+ */
+test('a preempted foreign a=p placement is removed by placement only and can be re-shown', () => {
+  const { terminal, core, facade } = harness()
+  setCellDimensions({ widthPx: 10, heightPx: 10 })
+  try {
+    let foreignId = 0x123456
+    while (core.ownsIdSpace(foreignId)) foreignId += 1
+    // The foreign owner uploads its own payload, separate from any placement.
+    facade.write(`\x1b_Ga=t,f=100,i=${foreignId},q=2;AAAA\x1b\\`)
+    const screen = new TuiMainScreen(facade)
+    const foreign = encodeKittyPlacement(foreignId, 9, { columns: 2, rows: 2 })
+    screen.addChild({ render: () => ['header', foreign, ''], invalidate: () => {} })
+    screen.start()
+    screen.renderNow()
+    assert.ok(terminal.text.includes(foreign), 'a placement outside the Core passes through untouched')
+    assert.ok(!terminal.text.includes(encodeKittyDeleteImage(foreignId)), 'the Core never frees a foreign image')
+
+    terminal.writes.length = 0
+    const handle = screen.showOverlay({ render: () => ['MODAL'], invalidate: () => {} }, {
+      row: 2,
+      col: 0,
+      width: 20,
+    })
+    screen.renderNow()
+    const covered = terminal.text
+    assert.ok(covered.includes('MODAL'), 'the overlay is painted over the foreign block')
+    assert.ok(
+      covered.includes(`\x1b_Ga=d,d=i,i=${foreignId},p=9,q=2\x1b\\`),
+      'only the foreign PLACEMENT is removed',
+    )
+    assert.ok(
+      !covered.includes(`\x1b_Ga=d,d=i,i=${foreignId},q=2\x1b\\`),
+      'no image-wide placement delete is emitted',
+    )
+    assert.ok(!covered.includes(encodeKittyDeleteImage(foreignId)), 'the foreign data is never freed')
+    assert.ok(!covered.includes('\x1b_Ga=d,d=A'), 'no global image delete reaches the terminal')
+
+    terminal.writes.length = 0
+    handle.hide()
+    screen.renderNow()
+    const restored = terminal.text
+    assert.ok(restored.includes(foreign), 'the same foreign placement is written again after close')
+    assert.ok(!restored.includes(encodeKittyDeleteImage(foreignId)), 'closing frees no foreign data either')
+    assert.ok(!restored.includes('\x1b_Ga=d,d=A'), 'closing emits no global delete')
+    screen.stop()
+  } finally {
+    setCellDimensions({ widthPx: 9, heightPx: 18 })
+  }
+})
+
+/**
+ * Kitty allows one uploaded image to be placed several times with different
+ * placement ids. Covering one placement must remove ONLY that placement: an
+ * image-wide delete would also remove the sibling placement, whose unchanged
+ * line the Main Screen would never re-send.
+ */
+test('a covered placement never removes a sibling placement of the same image id', () => {
+  const { terminal, core, facade } = harness()
+  setCellDimensions({ widthPx: 10, heightPx: 10 })
+  try {
+    let foreignId = 0x123456
+    while (core.ownsIdSpace(foreignId)) foreignId += 1
+    facade.write(`\x1b_Ga=t,f=100,i=${foreignId},q=2;AAAA\x1b\\`)
+    const screen = new TuiMainScreen(facade)
+    const first = encodeKittyPlacement(foreignId, 1, { columns: 2, rows: 2 })
+    const sibling = encodeKittyPlacement(foreignId, 2, { columns: 2, rows: 2 })
+    screen.addChild({ render: () => ['top', first, '', 'mid', sibling, '', 'bottom'], invalidate: () => {} })
+    screen.start()
+    screen.renderNow()
+    assert.ok(terminal.text.includes(first), 'the first placement is painted')
+    assert.ok(terminal.text.includes(sibling), 'the sibling placement is painted')
+
+    terminal.writes.length = 0
+    const handle = screen.showOverlay({ render: () => ['MODAL'], invalidate: () => {} }, {
+      row: 1,
+      col: 0,
+      width: 20,
+    })
+    screen.renderNow()
+    const covered = terminal.text
+    assert.ok(covered.includes('MODAL'), 'the overlay is painted over the first placement only')
+    assert.ok(
+      covered.includes(`\x1b_Ga=d,d=i,i=${foreignId},p=1,q=2\x1b\\`),
+      'only the covered placement (p=1) is removed',
+    )
+    assert.ok(
+      !covered.includes(`\x1b_Ga=d,d=i,i=${foreignId},q=2\x1b\\`),
+      'the sibling placement is never removed image-wide',
+    )
+    assert.ok(!covered.includes(encodeKittyDeleteImage(foreignId)), 'the shared image data is never freed')
+    assert.ok(!covered.includes('\x1b_Ga=d,d=A'), 'no global image delete reaches the terminal')
+
+    terminal.writes.length = 0
+    handle.hide()
+    screen.renderNow()
+    const restored = terminal.text
+    assert.ok(restored.includes(first), 'the covered placement returns after close')
+    assert.ok(!restored.includes(encodeKittyDeleteImage(foreignId)), 'closing frees no shared data')
+    screen.stop()
+  } finally {
+    setCellDimensions({ widthPx: 9, heightPx: 18 })
+  }
+})
+
+/**
+ * Kitty treats an absent `p` and `p=0` as "no explicit placement id". Such a
+ * placement cannot be addressed exactly, so it must never be preempted: the old
+ * image-wide hard delete would otherwise free the foreign data with no way back.
+ */
+test('a p=0 foreign placement is never preempted and never loses its data', () => {
+  const { terminal, core, facade } = harness()
+  setCellDimensions({ widthPx: 10, heightPx: 10 })
+  try {
+    let foreignId = 0x123456
+    while (core.ownsIdSpace(foreignId)) foreignId += 1
+    facade.write(`\x1b_Ga=t,f=100,i=${foreignId},q=2;AAAA\x1b\\`)
+    const screen = new TuiMainScreen(facade)
+    const zero = `\x1b_Ga=p,i=${foreignId},p=0,c=2,r=2,C=1,q=2;\x1b\\`
+    screen.addChild({ render: () => ['header', zero, ''], invalidate: () => {} })
+    screen.start()
+    screen.renderNow()
+    assert.ok(terminal.text.includes(zero), 'the p=0 placement passes through untouched')
+
+    // The overlay covers ONLY the anchor row: the pre-existing image-line rule
+    // drops the overlay text there and emits nothing. A p=0 admission would
+    // instead blank the anchor and then fall back to the hard delete.
+    terminal.writes.length = 0
+    const handle = screen.showOverlay({ render: () => ['MODAL'], invalidate: () => {} }, {
+      row: 1,
+      col: 0,
+      width: 20,
+    })
+    screen.renderNow()
+    const covered = terminal.text
+    assert.ok(!covered.includes(encodeKittyDeleteImage(foreignId)), 'a p=0 placement never frees data')
+    assert.ok(!covered.includes(`a=d,d=i,i=${foreignId}`), 'a p=0 placement is not deleted at all')
+    assert.ok(!covered.includes('a=d,d=A'), 'no global image delete reaches the terminal')
+    assert.ok(!covered.includes('\x1b_G'), 'a p=0 placement emits no image command')
+    assert.ok(!covered.includes(zero), 'the unaddressable anchor is not re-written')
+
+    terminal.writes.length = 0
+    handle.hide()
+    screen.renderNow()
+    assert.ok(!terminal.text.includes(encodeKittyDeleteImage(foreignId)), 'closing frees no p=0 data either')
+    screen.stop()
+  } finally {
+    setCellDimensions({ widthPx: 9, heightPx: 18 })
   }
 })

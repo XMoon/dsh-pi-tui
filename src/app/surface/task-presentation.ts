@@ -138,6 +138,8 @@ export interface TaskPresentationProjectionOptions {
   readonly autoExpandRunning?: boolean
   /** Quick may surface attention rows when there is no live work. */
   readonly includeAttentionInActive?: boolean
+  /** Full Tracked presentation only: hide terminal Jobs unless the user opens history or searches. */
+  readonly hideInactiveJobs?: boolean
 }
 
 /** A projected row set and the ids that remain visible. */
@@ -296,6 +298,11 @@ export function projectTaskItems(
     }
   } else {
     for (const item of all) {
+      // Full Tracked default: terminal Jobs stay out of the visible rows until
+      // the user opens the history disclosure or searches for them. Only the
+      // source fact and the shared activity classifier decide — never group,
+      // type, kind, label or timing.
+      if (options.hideInactiveJobs === true && item.source === 'job' && !isTaskItemActive(item)) continue
       if (filterMatches(item)) includeWithAncestors(item)
     }
   }
@@ -328,9 +335,9 @@ export function projectTaskItems(
     if (hasMatchingDescendant(item.value)) return true
     if (autoExpandRunning && hasActiveDescendant(item.value)) return true
     if (options.includeAttentionInActive === true && hasAttentionDescendant(item.value)) return true
-    // Settled branches start collapsed. Disclosure is presentation state, so
-    // the user can expand a historical branch without changing the catalog.
-    return false
+    // Tracked Work shows the retained Subagent tree by default. Explicit
+    // collapsedIds above still wins; Active and Quick keep their own scope.
+    return options.scope === 'all' && item.source === 'subagent'
   }
 
   const visible: TaskPanelItem[] = []

@@ -1,11 +1,13 @@
 # Testing guide
 
-This document owns the rules for ADDING and CHANGING tests in this repository.
+This document owns the rules for ADDING, CHANGING, RETAINING and RETIRING
+tests in this repository.
 It is the long-lived contract; the implementation lives in
 `scripts/test-discovery.mjs`, `scripts/test-lanes.mjs` and the tests
 themselves.
 
-Read it before writing a test. The six rules below are the whole policy —
+Read it before writing or revising a test. The seven rules below are the
+whole policy —
 they are deliberately few, because a rule that cannot be applied is a rule
 that gets ignored.
 
@@ -39,7 +41,7 @@ COMPOSITION it exercises, not under every layer it imports.
 discovery by DIRECTORY, so a file placed there is never run as a test
 even if its name looks like one.
 
-## 1. The six rules
+## 1. The seven rules
 
 ### 1. Ownership First
 
@@ -62,6 +64,33 @@ already has. Before adding one, answer:
 A new production function does not imply a new test file. Two tests that
 assert the same contract at the same level are a maintenance cost with no
 detection value.
+
+**Test-worthiness gate — before improving assertions.** When adding, materially
+changing, retaining or retiring a test, decide whether it independently detects
+a current observable failure class that existing tests or real qualification do
+not already protect. Consider the maintenance and execution cost; choose
+**ADD, KEEP, REDUCE or RETIRE** as appropriate. In routine changes this is a
+review judgement, not a mandatory per-case matrix or new CI gate. A plan's test
+roster, a previously green test or a review request does not itself establish
+that a test is worth keeping.
+
+Do not create or preserve tests solely to freeze retired names/paths, historical
+migration steps, implementation-private fields, helper calls, source order,
+incidental construction counts, case inventories, titles or candidate versions.
+Tests that only echo a mock's own answer, reimplement the expected result or
+assert a tautology have no independent detection value. Ask whether a supported
+extension or behavior-preserving refactor would fail the test; if so, its exact
+shape must be part of an explicit **current, durable** contract to justify the
+constraint.
+
+Static/AST guards are still appropriate for **unique load-bearing** security,
+trust-boundary, authority, compatibility or architecture invariants, including
+an exact owner count when uniqueness is the contract. Do not replace a retired
+source-text lock with another regex, roster or proxy test by default. Deleting
+a redundant test is a valid outcome without a replacement; first identify any
+specific surviving contract that would otherwise lose its only proof. When a
+test is retired, also inspect test-only production hooks, fixtures and branches
+for actual remaining consumers before keeping or removing them.
 
 ### 3. Evidence Integrity
 
@@ -279,50 +308,351 @@ manifest that has to be kept in sync with the tree.
 
 ## 2. Running the tests
 
+Use the named `mise run` tasks from `mise.toml` for routine test lanes.
+For specialized scripts without a mise task, use `mise exec -- pnpm ...`
+to keep the repository's pinned Node/pnpm toolchain.
+
+
 | Command | What it runs |
 |---|---|
-| `pnpm test:product` | the product behaviour suite (the packaging safety gate) |
-| `pnpm test:tooling` | the development and release tooling suite |
-| `pnpm test:tmux` | the tmux terminal-tooling suite |
-| `pnpm test:fork` | the vendored `packages/pi-tui` suite |
-| `pnpm test` | all of the above |
-| `pnpm verify:release` | the full explicit release pipeline |
+| `mise run test:product` | the product behaviour suite (the packaging safety gate) |
+| `mise run test:tooling` | the development and release tooling suite |
+| `mise run test:tmux` | the tmux terminal-tooling suite |
+| `mise run test:fork` | the vendored `packages/pi-tui` suite |
+| `mise run test` | all of the above |
+| `mise run verify:release` | the full explicit release pipeline |
 
-`pnpm test:product` is run explicitly by `pack:release` (and therefore by
-`verify:release`). `pnpm test:tooling` is deliberately OUTSIDE the packed
+`mise run test:product` is run explicitly by `pack:release` (and therefore by
+`verify:release`). `mise run test:tooling` is deliberately OUTSIDE the packed
 artifact path: the artifact must never depend on the developer git/CI
 environment.
 
-`pnpm smoke:split-process` is a Linux-only real two-process distribution
-proof, not part of `verify:release`. GitHub CI runs it automatically only on
-an npm release tag; an ordinary PR's `skipped` status is not the proof.
-Host/Client split-process development work must run it manually against the
-actual candidate tarball and record the package SHA, DSH version, command, and
-PASS/FAIL (or `NOT_RUN`).
+`mise exec -- pnpm smoke:split-process` is a real two-process distribution proof, not part
+of `verify:release`. The no-selector DEFAULT form (the complete qualification
+lane) is Linux-only: on any other OS it is refused
+(`INPUT_PLATFORM_FULL_UNSUPPORTED`) before the candidate is inspected. The
+`--list` / `--case` / `--suite` selector forms run on Linux and macOS, where
+macOS executes the SAME registry cases through its own real tmux PTY driver.
+GitHub CI runs the Linux full lane automatically only on an npm release tag;
+an ordinary PR's `skipped` status is not the proof. Any npm-mode remote
+`refs/heads/...` branch can run the same full, candidate-backed proof
+explicitly: use GitHub Actions **Run workflow** on that branch and enable
+`Run full Host/Client Split qualification on the selected npm-mode branch`
+(`run_split_process=true`). The verdict then requires the Split job to succeed
+on that run. The manual input stays opt-in, and Source Mode is rejected rather
+than silently skipped. Host/Client split-process development work may also run
+the lane manually against the actual candidate tarball and record the package
+SHA, DSH version, command, and PASS/FAIL (or `NOT_RUN`).
 
-A single file:
+A failed lane prints the REAL caught error (stack when available) by default;
+`SPLIT_PROCESS_SMOKE_KEEP=1` only preserves the temporary scene and no longer
+decides whether you can see the cause. Each lifecycle scope prints
+`[split] <ISO-UTC> START <step>`, then `DONE <step> durationMs=…` or
+`ERROR <step> durationMs=…`; the failure report records the failing scope as
+`failedStep` and keeps the named case/subscene scopes nested (for example
+`case/recovery.detached-turn-interactions/maintenance-sweep`). The structured
+`failure.json` retains the raw error message/stack; the Web credential
+redactor is applied only to Web-case scopes. `SPLIT_PROCESS_TRACE=<path>` still
+appends optional JSONL business facts and is not required to diagnose a failure.
+
+The lane has one command entry with a strict selector. The DEFAULT form (no
+selector) is the complete qualification of the DEFAULT LANE: it runs every
+registry case that is not marked selectable-only, in registry order, and emits
+T60 only from the actual successful case results. Environment-gated native real-OS
+cases (for example the `managed-host` systemd suite) carry `defaultLane: false`;
+the default lane never invokes them and reports
+`managed-host native cases NOT_RUN (selectable-only)`, so it stays safe and stable
+on hosts with no isolated test environment. Run those cases explicitly with
+`--case` / `--suite`:
 
 ```sh
-node --test test/tui/marquee.test.ts
+mise exec -- pnpm smoke:split-process -- <candidate.tgz>               # complete lane (Linux only)
+mise exec -- pnpm smoke:split-process -- --list                        # the selectable registry (Linux + macOS)
+mise exec -- pnpm smoke:split-process -- <candidate.tgz> --suite <suite>
+mise exec -- pnpm smoke:split-process -- <candidate.tgz> --case <id>
+mise exec -- pnpm smoke:macos-split -- --list                          # macOS: the SAME registry, no legacy scene
+mise exec -- pnpm smoke:macos-split -- <candidate.tgz> --case <id>     # macOS: the shared selected runner
+mise exec -- pnpm smoke:macos-split -- <candidate.tgz> --suite <suite>
+mise exec -- pnpm smoke:macos-split -- <candidate.tgz>                 # macOS: the legacy A/P/M/L parity scene (no selector)
+mise exec -- pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> [--evidence <file>]
+```
+
+The GitHub Actions `CI` workflow also accepts an optional
+`split_process_case` dispatch input: when set together with
+`run_split_process: true` on an npm-mode branch dispatch, the Linux Split job
+runs that ONE registered case instead of the full lane (the ordinary empty
+input keeps the full lane unchanged). This is the repeatable Linux evidence
+path for a selectable-only case that cannot run on a developer's non-Linux
+host.
+
+`--list` prints the full selectable registry — including the selectable-only
+native cases — (`SPLIT_PROCESS_SELECTABLE_CASES scope=SELECTABLE_ONLY`) with a
+trailing `platforms=` fact per row (the registry's executable support range),
+and exits without resolving a candidate, creating a work root or installing
+anything. `--suite` and `--case` run only the registered cases of that
+suite/id through their own isolated installation and print, AFTER the scoped
+servers/processes/work root are quiesced, one
+`SPLIT_PROCESS_SELECTED_PASS id=… scope=SELECTABLE_ONLY platform=<os>` per case
+followed by `SPLIT_PROCESS_SELECTED_FACTS` with the real Host/Client identities
+and the quiescence fact; a non-quiesced run prints neither. That output names
+the selectable subset only — it never claims the complete inventory, a `T60`
+result or a Browser/Web product qualification. A case that deliberately skips
+one qualified boundary (a scene the lane cannot run honestly) prints
+`SPLIT_PROCESS_BOUNDARY_NOT_VERIFIED` with its blocker; it is never silently
+counted as covered. Platform eligibility is a
+registry fact, not a user API: every selected case — and a whole `--suite`,
+refused as a unit, never silently filtered — must support the current OS, and
+an unsupported selection fails closed as
+`INPUT_UNQUALIFIED` / `INPUT_PLATFORM_CASE_UNSUPPORTED` before the candidate is
+inspected, a work root exists or anything is installed. Only the audited shared
+cases whose registry row lists `platforms=linux,darwin` are qualified on both
+Linux and macOS; every other case stays Linux-only until real native evidence
+exists. On macOS the no-selector form of
+`smoke:macos-split` is the legacy A/P/M/L parity scene, unchanged; a
+`--list`/`--case`/`--suite` selector on either entry point dispatches the ONE
+shared registry and the same selected runner, never a macOS copy of the cases
+or the legacy scene. A selector accepts at most one candidate and exactly one
+`--case` or `--suite` (never both, never repeated); `--list` takes neither.
+Unknown options, a missing or repeated selector, an extra positional, and a
+required Browser qualification flag (`SPLIT_PROCESS_REQUIRE_WEB_BROWSER` /
+`SPLIT_PROCESS_REQUIRE_WEB_PRODUCT`) combined with any selection other than
+`--suite web` all fail closed as `INPUT_UNQUALIFIED` /
+`INPUT_SMOKE_SELECTION_INVALID` before any scene exists. The full-only
+whole-lane mutation control (`SPLIT_PROCESS_SMOKE_MUTATION`) is refused in
+selector modes instead of being silently applied.
+
+A selected Web case owns its own Browser requirement: `web.official-composition`
+and `web.runtime-toggle` require the real pinned Playwright Chromium,
+`web.product-browser-tui` requires the complete Browser×TUI Product subset,
+and `web.startup-preference` has no Browser requirement. A missing Playwright
+install is a failure/NOT_RUN, never `SPLIT_PROCESS_SELECTED_PASS`. The
+`--suite web` form may carry both Browser require flags; a Full run without
+those flags keeps the PA/PB Host/HTTP/TTY checks mandatory while their Browser
+case may be `NOT_RUN`, and the Product case may be `NOT_RUN`. Full with the
+require flags demands real Chromium PA/PB PASS and the Product Browser subset
+PASS.
+
+`web.product-browser-tui` proves the current Browser×Split Host/TUI differential
+subset: one packed official Web Browser and a real Split TUI sharing a Host,
+competing writes, stale refusals, crash recovery and three-way file locality.
+It is not an inventory of every official Web UI feature and does not claim the
+real Tern GUI/TSP native gesture path, which remains `NOT_VERIFIED` under its
+separate owner.
+
+The Upgrade lane has its own strict selector over two genuinely different
+packaged builds pinned to the same exact DSH runtime (internal qualification
+samples, not a supported historical user release):
+
+```sh
+mise exec -- pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz>   # complete U01-U09
+mise exec -- pnpm smoke:split-upgrade -- --list
+mise exec -- pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> --suite client-reload
+mise exec -- pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> --case upgrade.cross-build-compatibility
+```
+
+The DEFAULT form is the complete U01-U09 qualification: it runs every
+default-lane registered case and emits only actual case results. Two OS native
+cases are selectable-only and never join the default lane —
+`managed-daemon.cross-build-upgrade-rollback` requires a real isolated Linux
+systemd user manager, and `launchd-managed-daemon.cross-build-upgrade` requires
+a real macOS `gui/<uid>` LaunchAgent. Run either explicitly:
+
+```sh
+mise exec -- pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> \
+  --case managed-daemon.cross-build-upgrade-rollback
+mise exec -- pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> \
+  --case launchd-managed-daemon.cross-build-upgrade
+```
+
+Both artifacts in every upgrade case are internal qualification packages built
+from this repository or the candidate under test, not a supported historical
+user release; the lane does not promise user upgrade or rollback compatibility
+with early unpublished development snapshots.
+
+`--list` prints `SPLIT_UPGRADE_SELECTABLE_CASES scope=SELECTABLE_ONLY` followed
+by one `suite=<suite> case=<id> title=<title>` line per registry entry in
+execution order (including both opt-in native cases:
+`managed-daemon.cross-build-upgrade-rollback` and
+`launchd-managed-daemon.cross-build-upgrade`), without reading a tarball,
+creating a work root or installing DSH. `--case` and `--suite` run only the
+registered cases of that id/suite in their own work root and print one
+`SPLIT_UPGRADE_SELECTED_PASS id=<id> scope=SELECTABLE_ONLY` per executed case;
+their stdout and `--evidence` document are the partial `scope: SELECTABLE_ONLY`
+JSON carrying `selectedCases` and only the executed cases' facts. Each opt-in
+native case only earns that line with a real
+`{status: PASS, scope: REAL_SYSTEMD_USER_L6}` or
+`{status: PASS, scope: REAL_MACOS_GUI_L6}` verdict: a missing isolated systemd
+user-manager or macOS GUI launchd environment returns an honest `NOT_VERIFIED`,
+prints `SPLIT_UPGRADE_SELECTED_NOT_VERIFIED` instead and makes the lane exit
+nonzero. A selected run never emits `SPLIT_UPGRADE_SMOKE_PASS (cross-build-compatible)`,
+`status: PASS` or `verdict: cross-build-compatible`. Only the complete form (no
+selector) runs all three DEFAULT-lane registered cases; the opt-in native cases
+never join it, and the complete form may emit the historical full marker and
+`status: PASS`/`verdict: cross-build-compatible`. Unknown, repeated or combined
+selectors, a missing `--old`/`--new`, and a same-path, same-SHA or differently
+pinned pairing all fail closed before any work root, profile or DSH installation
+exists. The same-package-version rule still binds the complete form and every
+default-lane selection; only an exclusively opt-in native selection may pair
+two builds of one version, and their real difference is the production
+`computeBuildId`, never the SemVer string. `SPLIT_UPGRADE_SMOKE_FAIL_AFTER` accepts only the three fixed
+`<case-id>.after-…-host-spawn` values used by the cases; any other value has no
+effect.
+
+The complete Split lane and the Upgrade lane install packaged payloads and
+drive real Host/Client processes over a PTY, so they share the same input rule.
+A selected case runs only the resources its own contract needs — the
+`bootstrap.host-runtime-disabled` negative starts one real Host and
+deliberately no TUI Client. The DSH runtime of a run is the exact
+`@deepseek-ai/dsh-agent` development pin of this checkout, and every artifact
+must declare that SAME pin in its own `package/package.json` — not a range, not
+a floor, and not the version a file name suggests. The production Client
+refuses a replacement target pinned to a different runtime, so an artifact
+built against another DSH version can never produce the behaviour these lanes
+assert. Such a pairing stops before any work root, install or process exists
+and is reported as `INPUT_UNQUALIFIED` with the role, the artifact identity,
+both exact versions and the reason: it is an invalid test pairing, not a
+product regression, and the fix is to rebuild the artifact against the current
+pin. The full and selected entries use the same preflight; a selected case
+installs nothing until that preflight has qualified the exact pin.
+
+A default run is diagnosable without any environment variable. Both lanes
+announce the qualified artifact identity at startup, one checkpoint per setup
+phase and per business milestone (for example the Web Product group,
+stale-peer and WP11 markers, so a long scene keeps default-visible interim
+progress), and one lifecycle scope per case and Recovery subscene:
+`[split] <ISO-UTC> START <scope>`, then `DONE <scope> durationMs=…` or
+`ERROR <scope> durationMs=…` (nested scopes print their own ERROR; the raw
+stack is printed once). On failure they print a fixed summary plus the REAL
+caught error (its stack when available) and write exactly one default-retained
+artifact — a `failure.json` in a fresh private directory under the OS temp root
+(directory `0700`, file `0600`), never inside the work root the lane deletes
+during cleanup. The report keeps the structural fields (lane, category, stable
+code, checkpoint, `failedStep`, assertion site, wait label, elapsed, target pin,
+artifact name/version/SHA, expected and observed notice, recent lifecycle
+entries, per-process exit and official event names) and appends the caught
+`error.name` / `message` / `stack`, bounded but UTF-8 intact, so the root cause
+does not disappear. A failed lane assertion is locatable through its own
+`<lane>.mjs:<line>` site, derived from the real stack, restricted to the lane
+scripts and their extracted case/support modules, and omitted entirely when
+nothing trusted can be read. The only code a report may name is one the lanes
+declare; an unknown `error.code` leaves the entry at its category instead of
+becoming reported text, and a report write that fails is announced as
+`DIAGNOSTIC_WRITE_FAILURE` with its errno only — never turning a failure into a
+pass or blocking the cleanup. A passing run writes no report.
+
+The only redaction applied to that text is the concrete Web credential policy:
+a failure whose `failedStep` is a `case/web.*` scope passes the existing
+redactor over the launch token, `token=` query value, Cookie/Set-Cookie/
+Authorization header and loopback origin before the terminal and the report.
+Non-Web scopes keep their real error text. The diagnostics never capture raw
+terminal bytes, record contents or session text on their own.
+
+`SPLIT_PROCESS_SMOKE_KEEP=1` and `SPLIT_UPGRADE_KEEP=1` preserve the isolated
+work root, which holds the real profile, session logs and private telemetry of
+the run; they do not gate whether the error text is visible. That directory
+stays local: never attach or upload it as evidence. `--evidence` is a requested
+deliverable, not a diagnostic: the PASS document is written onto a freshly
+created private `0600` inode BEFORE the success marker is printed, so a lane
+that cannot land the evidence its operator asked for fails instead of
+announcing a pass, and a pre-existing target never keeps a looser mode. A
+failure writes the same failure projection to that path instead. Its path is
+outside the work root.
+
+Record a lane result exactly as the lane reports it: the candidate and old
+package SHA256 values, the exact DSH pin, the command, and the per-lane
+PASS/FAIL with the checkpoint a failure reached. Synthetic manifest-only
+tarballs are input-preflight fixtures; they never qualify a pairing.
+
+`mise exec -- pnpm smoke:direct-empty-retirement -- <candidate.tgz>` is a Linux/PTY-only
+real-DSH smoke for the Direct session-retirement contract: it boots the
+candidate tarball in a fully isolated `DSH_HOME` (official dsh + dsh-base +
+candidate only, no model calls) and drives `/new`/`/exit` transitions,
+verifying that no retirement phase hits an already-closed write handle, that
+a committed empty session is durable through the official persistence
+artifact plus a real resume, and that a no-session exit materializes
+nothing. It also asserts the isolated profile composition (exactly the base
+and candidate bundles, an empty user patch layer, the shipped bundle patch,
+no `--patch` overlay), an isolated tmux socket, and the DSH process exit
+status. The candidate tarball argument is required (no published-package
+fallback); it is a manual qualification lane, not part of `verify:release`.
+
+`mise exec -- pnpm smoke:macos-cua -- <candidate.tgz>` is an explicitly selected,
+operator-assisted macOS native qualification for the official Computer use
+bundle. It installs the candidate into ONE isolated `pi-tui` profile, starts
+the real TUI in a private tmux server, and drives the MAC-09 matrix: the real
+Plugin Manager selection, the PTC `cua` tool, macOS Accessibility and Screen
+Recording on the official `DSH Computer Use.app`, the application-consent
+Question, the official Host Attachment Store screenshot and Client image row,
+one bounded TextEdit input, per-Session consent, the Split Client
+disconnect/reconnect path and bundle withdrawal. The operator supplies an
+image-capable model route patch and matching credentials through
+`MACOS_CUA_PROFILE_PATCH` and `MACOS_CUA_CREDENTIALS`; the lane copies both
+into the disposable DSH home with `0600`, never prints them and never grants a
+macOS permission itself. The operator grants the TCC permissions to the exact
+helper path the lane prints and answers each consent Question in the real
+TUI. A missing native prerequisite reports `MACOS_CUA: NOT_VERIFIED` and exits
+non-zero; unrun cases stay `NOT_VERIFIED`. The private JSON report (candidate
+and runtime identities, anonymized Session/tool/Question/attachment digests,
+image dimensions and cleanup facts, never screenshot bytes or credentials) is
+written `0600` under `MACOS_CUA_EVIDENCE_DIR` or a fresh private directory.
+The lane is never part of `mise run test`, `pack:release`, the Split smoke or a
+Linux CI lane. Its L0 input/opt-in guard is
+`test/tooling/macos-cua-parity.test.mjs`.
+
+### Isolated single-file and probe runs
+
+Prefer a repository-owned lane; it already owns and removes its disposable
+temp root:
+
+```sh
+mise exec -- pnpm test:product -- --test-concurrency=4
+```
+
+A single file, or a probe outside any lane, runs through the containment
+runner with a private, worktree-owned temporary base:
+
+```sh
+mkdir -p temp/test-runs
+TMPDIR="$PWD/temp/test-runs" \
+TMP="$PWD/temp/test-runs" \
+TEMP="$PWD/temp/test-runs" \
+node scripts/run-with-temp-root.mjs \
+  node --test test/tui/marquee.test.ts
 ```
 
 The suite is TypeScript and runs under Node's type-stripping loader; a
-`.mjs` test needs no loader.
+`.mjs` test needs no loader. `run-with-temp-root.mjs` creates one run root
+under that base, points the child's `TMPDIR`/`TMP`/`TEMP` at it, and removes
+the root once the run settles — normal exit, handled interruption or spawn
+failure. A root it cannot prove unused is kept and the run is non-zero;
+`DSH_TEST_KEEP_TMP=1` keeps the root for debugging.
+
+Never run a fixture or a delegated review probe against the shared `/tmp`
+root, and never create a shared `/tmp/node_modules` link or any other
+globally visible artifact to make one resolve. Clean up only resources the
+current run owns, and pass these constraints to every subagent you delegate.
+
+A longer private temporary path can break a UI test that assumes a short
+path: fix the test's path assumption instead of reusing the shared `/tmp`
+root.
 
 ## 3. Adding a test — the checklist
 
-1. Name the production owner; put the file in that owner's directory.
-2. Name the failure class; confirm no existing test already covers it.
-3. Name the evidence level the test really reaches.
-4. Reuse an existing narrow fixture; do not widen a fake's capabilities.
-5. Wait on an authoritative signal; justify any time window.
-6. Run the lane that owns the file and confirm it is DISCOVERED (a test that
+1. Name the observable failure class and check existing tests and real
+   qualification for independent coverage; add nothing if no gap remains.
+2. Check that a legitimate extension or refactor does not break the proposed
+   assertions unless their exact shape is itself a durable contract.
+3. Name the production owner; put the file in that owner's directory.
+4. Name the evidence level the test really reaches.
+5. Reuse an existing narrow fixture; do not widen a fake's capabilities.
+6. Wait on an authoritative signal; justify any time window.
+7. Run the lane that owns the file and confirm it is DISCOVERED (a test that
    does not appear in the lane's file list is not running).
 
 ## 4. The objective guards
 
-The rules above are enforced by OBJECTIVE, automatable checks — not by
-review judgement:
+The objectively checkable parts of the rules above have automatable guards;
+test worthiness and assertion quality remain review judgements:
 
 | Rule | Guard | Where |
 |---|---|---|
@@ -330,8 +660,8 @@ review judgement:
 | 6 — Discoverability (the rule itself) | the discovery rule finds the root level and every nested level, never finds the infrastructure directories, never double-discovers, and fails closed on an empty lane | `test/tooling/test-discovery.test.mjs` |
 | 5 — Deterministic async | a file outside the recorded floor cannot introduce an unreasoned fixed wait, and a floor file's wait count cannot grow | `test/tooling/new-test-policy.test.mjs` |
 | 6 — Discoverability (placement) | a new Domain, Integration or Tooling test lands in the right lane and reaches the right verification entry point | `test/tooling/new-test-policy.test.mjs` |
-| 6 — Discoverability (execution) | the lane runner passes the file list relative to the repository root, so the command line fits the Windows limit, and the child runs with the repository root as its working directory | `test/tooling/test-lane-runner.test.mjs` |
-| 1 — Ownership First (the read side) | every production file a test reads by path EXISTS: a renamed or moved production module can never leave a source lock silently pointing at a different file | `pnpm gate:production-reads` |
+| 6 — Discoverability (execution) | the lane runner resolves the file list in its child and passes it in memory to Node's native test API, never on the process command line; Node still owns sharding, and the child runs from the repository root | `test/tooling/test-lane-runner.test.mjs` |
+| 1 — Ownership First (the read side) | every production file a test reads by path EXISTS: a renamed or moved production module can never leave a source lock silently pointing at a different file | `mise exec -- pnpm gate:production-reads` |
 
 The remaining rules (1, 2, 3 and 4) are review judgements, and they
 stay that way on purpose: a mechanical gate for "is this test valuable"
@@ -350,10 +680,10 @@ each has a package-script entry point:
 
 | Command | What it reports |
 |---|---|
-| `pnpm report:execution-topology` | the script → leaf → CI job mapping, and the leaves driven by more than one script |
-| `pnpm report:zero-consumer-exports` | the shared-helper exports that no consumer reads |
-| `pnpm bench:parallel` | the product lane at several concurrency levels, with every run verified |
-| `pnpm baseline:fixed-waits` | regenerates the fixed-wait floor the policy guard compares against |
+| `mise exec -- pnpm report:execution-topology` | the script → leaf → CI job mapping, and the leaves driven by more than one script |
+| `mise exec -- pnpm report:zero-consumer-exports` | the shared-helper exports that no consumer reads |
+| `mise exec -- pnpm bench:parallel` | the product lane at several concurrency levels, with every run verified |
+| `mise exec -- pnpm baseline:fixed-waits` | regenerates the fixed-wait floor the policy guard compares against |
 
 The benchmark is the qualification tool for the parallel policy: it
 verifies every run (exit code, signal, a complete report, `fail === 0`)

@@ -28,10 +28,12 @@ import { readTspBlobMessages } from '../support/tsp-blob-wire.ts'
 import { ImageLoader } from '../../src/client/media/image/loader.ts'
 import type { DraftImage } from '../../src/client/media/image/types.ts'
 import type { ImageAttachmentRefLike } from '../../src/domain/media/types.ts'
-import type { TranscriptMessage } from '../../src/domain/transcript/types.ts'
+import type { TranscriptMessage, TurnActivity } from '../../src/domain/transcript/types.ts'
 import type { SubmissionComposerPort } from '../../src/app/submission/composer-port.ts'
 import { createSurfaceDraftImageProjection } from '../../src/app/surface/runtime.ts'
 import { mountTspRenderer, type TspRenderer } from '../../src/tui/tsp/session.ts'
+import { PENDING_IMAGE_BLOB_ID } from '../../src/tui/tsp/transcript-view.ts'
+import { projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
 
 const ENCODER = new TextEncoder()
 const DECODER = new TextDecoder()
@@ -217,6 +219,7 @@ function toolRowWithImage(...attachments: readonly unknown[]): TranscriptMessage
 async function mountHarness(options: {
   readonly read?: (ref: ImageAttachmentRefLike, scope: unknown) => Promise<{ ref: unknown; data: Uint8Array }>
   readonly hello?: typeof HELLO
+  readonly displayState?: { preset: 'focus' | 'compact' | 'full' }
   /** Make the pane's blob write FAIL (the tty owner died mid-send). */
   readonly failBlobWrite?: boolean
 } = {}): Promise<Harness> {
@@ -231,9 +234,11 @@ async function mountHarness(options: {
     return await options.read(ref, scope)
   })
   const fatalErrors: unknown[] = []
-  const renderer = mountTspRenderer(session, { copyVisual: async () => false,
+  const renderer = mountTspRenderer(session, {
+    copyVisual: async () => false,
     requestExit: () => {},
     onFatal: (error) => { fatalErrors.push(error) },
+    ...(options.displayState === undefined ? {} : { displayState: options.displayState }),
   })
   // PR4: the draft projection is the PRODUCTION construction over a real
   // composer-shaped seat and the live staged store, so the dock's occurrences
@@ -285,6 +290,23 @@ function commit(
   renderer.display.setTranscript(messages, undefined, undefined, undefined, undefined, source)
 }
 
+function commitFocus(
+  renderer: TspRenderer,
+  messages: readonly TranscriptMessage[],
+  source: object,
+): void {
+  const activity: TurnActivity = {
+    turn: 1,
+    startedAt: T0,
+    completed: false,
+    assistantMessages: 0,
+    toolCalls: 0,
+    tools: new Map(),
+    revision: 1,
+  }
+  renderer.display.setTranscript(messages, new Map([[1, activity]]), { mode: 'latest', hasNewer: false }, undefined, undefined, source)
+}
+
 /**
  * Wait for an AUTHORITATIVE condition, bounded by a deadline.
  *
@@ -312,13 +334,26 @@ function drawnImageNodes(tern: ScriptedTern): { id: string; blob?: string }[] {
     }
     for (const child of node.c ?? []) walk(child as never)
   }
+  // Fold the wire like the client: the placeholder image is added once, then
+  // the ready blob replaces it with a `set` under the SAME node id.
+  const live = new Map<string, { id: string; blob?: string }>()
+  const put = (node: { readonly id: string; readonly k: string; readonly p?: Record<string, unknown>; readonly c?: readonly unknown[] }): void => {
+    if (node.k === 'image') {
+      const blob = node.p?.blob
+      live.set(node.id, { id: node.id, ...(typeof blob === 'string' ? { blob } : {}) })
+    }
+    for (const child of node.c ?? []) put(child as never)
+  }
   for (const frame of tern.frames()) {
     for (const op of frame.ops) {
-      if (op[0] !== 'add') continue
-      walk(op[4] as never)
+      if (op[0] === 'add') put(op[4] as never)
+      else if (op[0] === 'set' && typeof (op[2] as Record<string, unknown>).blob === 'string') {
+        const current = live.get(op[1])
+        if (current !== undefined) current.blob = (op[2] as { blob: string }).blob
+      } else if (op[0] === 'del') live.delete(op[1])
     }
   }
-  return drawn
+  return [...live.values()]
 }
 
 /** One live node of the pane's CURRENT tree. */
@@ -383,7 +418,120 @@ function currentImageNodes(tern: ScriptedTern): { id: string; blob?: string }[] 
   return images
 }
 
+
+test('a closed Context Cluster with an adjacent image Tool does not demand bytes until the exact Tool opens', async () => {
+  const harness = await mountHarness({ displayState: { preset: 'full' } })
+  const source = {}
+  const attachment = { ...ATTACHMENT, attachmentId: 'context-adjacent-image' }
+  const contextRows = [0, 1].map(index => ({
+    kind: 'system', turn: 1, text: `ambient context payload ${index}`, context: true,
+    contextPresentation: { role: 'inject', form: 'snapshot', sourceKind: 'plugin' },
+  } as unknown as TranscriptMessage))
+  const imageTool = toolRowWithImage(attachment)
+  const messages: TranscriptMessage[] = [{ kind: 'user', turn: 1, text: 'inspect context and image' }, imageTool, ...contextRows]
+  try {
+    harness.renderer.bindInput({
+      exit() {}, cancel() {}, submit() {}, steer() {}, pasteMedia() {}, pastedPath: () => {},
+      admitPastedPathDelivery: () => true, shouldRememberInput: () => true, noteUserInput() {},
+      listContinuedQuestions: () => [], reopenContinuedQuestion: () => false,
+      openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true, openTasksBrowserUi() {}, tasksBrowserUiAvailable: () => true,
+    })
+    const structure = projectTranscriptStructure(messages)
+    const work = structure.find(block => block.kind === 'work')
+    assert.ok(work?.kind === 'work' && work.span.parts.some(part => part.kind === 'context-cluster'),
+      'the adjacent image Tool and snapshot Context Cluster occupy one canonical Work Fold')
+    commit(harness.renderer, messages, source)
+    await until('the closed native Tool row', () => currentNodes(harness.tern).some(node => node.kind === 'tool'))
+    const cluster = currentNodes(harness.tern).find(node => node.kind === 'section' && String(node.props['key']).includes('ctx-'))
+    assert.ok(cluster !== undefined, 'the nested canonical Context Cluster is a native disclosure')
+    assert.equal(cluster.props['collapsed'], true)
+    const clusterFrame = harness.tern.frames().at(-1)!
+    harness.tern.input.type(`\u001b_tsp;e;${JSON.stringify({ ev: 'toggle', sf: clusterFrame.sf, id: cluster.id, collapsed: false, key: cluster.id.slice(cluster.id.lastIndexOf('.') + 1), raw: {} })}\u001b\\`)
+    await until('the exact Context Cluster to open', () => currentNodes(harness.tern).find(node => node.id === cluster.id)?.props['collapsed'] === false)
+    assert.deepEqual(harness.reads, [], 'opening Context membership does not authorize the separate Tool image body')
+    assert.deepEqual(harness.tern.blobIds(), [])
+    const tool = currentNodes(harness.tern).find(node => node.kind === 'tool')!
+    assert.equal(tool.props['collapsed'], true, 'the same-Work image Tool retains its independent closed owner')
+    const frame = harness.tern.frames().at(-1)!
+    harness.tern.input.type(`\u001b_tsp;e;${JSON.stringify({ ev: 'toggle', sf: frame.sf, id: tool.id, collapsed: false, raw: {} })}\u001b\\`)
+    await until('the exact adjacent image Tool read', () => harness.reads.length === 1)
+    await until('the exact adjacent image Tool blob', () => harness.tern.blobIds().length === 1)
+    const admittedRead = harness.reads as ReadCall[]
+    assert.equal(admittedRead[0]?.id, 'context-adjacent-image')
+    assert.equal(currentImageNodes(harness.tern).length, 1)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('a PTC image child reads only after every exact parent-scoped Tool disclosure opens', async () => {
+  const harness = await mountHarness({ displayState: { preset: 'full' } })
+  const source = {}
+  const attachment = { ...ATTACHMENT, attachmentId: 'ptc-child-image' }
+  const child = {
+    kind: 'tool', turn: 1, name: 'read_image', args: '{"path":"nested.png"}', result: 'child image result',
+    status: 'ok', subCallId: 'nested.child', resultBlocks: [{ type: 'image', attachment }],
+  } as unknown as TranscriptMessage
+  const parent = {
+    kind: 'tool', turn: 1, name: 'run_code', args: '{}', result: 'program output', status: 'ok', subCalls: [child],
+  } as unknown as TranscriptMessage
+  const messages: TranscriptMessage[] = [
+    { kind: 'user', turn: 1, text: 'inspect the nested image' },
+    parent,
+  ]
+  const bind = (): void => harness.renderer.bindInput({
+    exit() {}, cancel() {}, submit() {}, steer() {}, pasteMedia() {}, pastedPath: () => {},
+    admitPastedPathDelivery: () => true, shouldRememberInput: () => true, noteUserInput() {},
+    listContinuedQuestions: () => [], reopenContinuedQuestion: () => false,
+    openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true, openTasksBrowserUi() {}, tasksBrowserUiAvailable: () => true,
+  })
+  const toggle = (id: string, collapsed: boolean): void => {
+    const frame = harness.tern.frames().at(-1)
+    assert.ok(frame !== undefined)
+    harness.tern.input.type(`\u001b_tsp;e;${JSON.stringify({ ev: 'toggle', sf: frame.sf, id, collapsed, raw: {} })}\u001b\\`)
+  }
+  try {
+    bind()
+    commit(harness.renderer, messages, source)
+    await until('the collapsed parent Tool', () => currentNodes(harness.tern).some(node => node.kind === 'tool'))
+    const parentNode = currentNodes(harness.tern).find(node => node.kind === 'tool' && node.props['name'] === 'run_code')!
+    assert.equal(harness.reads.length, 0, 'a closed parent denies its whole PTC image subtree')
+    assert.deepEqual(harness.tern.blobIds(), [])
+    assert.equal(currentImageNodes(harness.tern).length, 0)
+
+    toggle(parentNode.id, false)
+    await until('the parent-scoped collapsed child Tool', () => currentNodes(harness.tern).some(node => node.kind === 'tool' && node.id.endsWith('.sub-nested.child')))
+    const childNode = currentNodes(harness.tern).find(node => node.kind === 'tool' && node.id.endsWith('.sub-nested.child'))!
+    assert.equal(harness.reads.length, 0, 'opening the parent does not grant the child body')
+    assert.deepEqual(harness.tern.blobIds(), [])
+    assert.equal(currentImageNodes(harness.tern).length, 0)
+
+    toggle(childNode.id, false)
+    await until('the PTC child image read', () => harness.reads.length === 1)
+    await until('the PTC child image Blob', () => harness.tern.blobIds().length === 1)
+    assert.deepEqual(harness.reads.map(read => [read.id, read.scope]), [[attachment.attachmentId, harness.scopeValue()]])
+    assert.equal(currentImageNodes(harness.tern).length, 1, 'the real mapped child body owns the image node')
+  } finally {
+    await harness.dispose()
+  }
+})
+
 // ── T4: the loader scope ────────────────────────────────────────────────────
+
+test('a collapsed Focus root never subscribes to or reads its hidden Work image', async () => {
+  const harness = await mountHarness({ displayState: { preset: 'focus' } })
+  const source = {}
+  const prompt: TranscriptMessage = { kind: 'user', turn: 1, text: 'inspect the hidden image' }
+  commitFocus(harness.renderer, [prompt, toolRowWithImage()], source)
+  await until('the collapsed Focus root frame', () => currentNodes(harness.tern).some(node => node.kind === 'section' && node.id.includes('-focus-')))
+
+  assert.deepEqual(harness.reads, [], 'a hidden Focus Work member never reaches the image read port')
+  assert.equal(harness.loader.listenerCount(), 0, 'no hidden attachment subscription is installed')
+  assert.deepEqual(harness.tern.blobIds(), [], 'a collapsed Focus root sends no image blob')
+  assert.equal(currentNodes(harness.tern).some(node => node.kind === 'tool' || node.kind === 'image'), false,
+    'the collapsed root materializes no Tool or image nodes')
+  await harness.dispose()
+})
 
 test('two display subjects with the SAME attachment id read their OWN bytes', async () => {
   const byScope = new Map<unknown, Uint8Array>()
@@ -522,6 +670,62 @@ test('bytes over the 16 MiB blob gate are never sent', async () => {
   await harness.dispose()
 })
 
+test('Focus opens the exact Work image and stops every later read after a fatal blob send', async () => {
+  const harness = await mountHarness({ failBlobWrite: true, displayState: { preset: 'focus' } })
+  const originalLoad = harness.loader.load
+  let loadCalls = 0
+  harness.loader.load = function(this: ImageLoader, ref, scope) {
+    loadCalls += 1
+    return originalLoad.call(this, ref, scope)
+  }
+  const messages: TranscriptMessage[] = [
+    { kind: 'user', turn: 1, text: 'inspect the image' },
+    toolRowWithImage(ATTACHMENT, { ...ATTACHMENT, attachmentId: 'att-focus-second' }),
+  ]
+  const source = {}
+  const toggle = (id: string, collapsed: boolean): void => {
+    const frame = harness.tern.frames().at(-1)
+    assert.ok(frame !== undefined)
+    harness.tern.input.type(`\u001b_tsp;e;${JSON.stringify({ ev: 'toggle', sf: frame.sf, id, collapsed })}\u001b\\`)
+  }
+  try {
+    harness.renderer.bindInput({
+      exit() {}, cancel() {}, submit() {}, steer() {}, pasteMedia() {}, pastedPath: () => {},
+      admitPastedPathDelivery: () => true, shouldRememberInput: () => true, noteUserInput() {},
+      listContinuedQuestions: () => [], reopenContinuedQuestion: () => false,
+      openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true, openTasksBrowserUi() {}, tasksBrowserUiAvailable: () => true,
+    })
+    commitFocus(harness.renderer, messages, source)
+    await until('the collapsed Focus root', () => currentNodes(harness.tern).some(node => node.kind === 'section' && node.id.includes('-focus-')))
+    assert.equal(loadCalls, 0, 'the collapsed root does not start either hidden image read')
+    assert.equal(harness.tern.blobWrites.length, 0, 'the collapsed root sends no image blob')
+
+    const root = currentNodes(harness.tern).find(node => node.kind === 'section' && node.id.includes('-focus-'))!
+    toggle(root.id, false)
+    await until('the nested collapsed Work section', () => currentNodes(harness.tern).some(node => node.kind === 'section' && node.id.startsWith(`${root.id}.s1-work-`)))
+    assert.equal(loadCalls, 0, 'opening the root with Work closed still performs no hidden image reads')
+
+    const work = currentNodes(harness.tern).find(node => node.kind === 'section' && node.id.startsWith(`${root.id}.s1-work-`))!
+    toggle(work.id, false)
+    await until('the nested Work section to open', () => currentNodes(harness.tern).find(node => node.id === work.id)?.props['collapsed'] === false)
+    const tool = currentNodes(harness.tern).find(node => node.kind === 'tool' && node.id.startsWith(`${work.id}.`))!
+    assert.equal(tool.props['collapsible'], true, 'the generic Tool has its own disclosure')
+    assert.equal(tool.props['collapsed'], true, 'its image body stays closed with the Work open')
+    assert.equal(loadCalls, 0, 'opening the Work alone starts no hidden Tool image read')
+    toggle(tool.id, false)
+    await until('the one fatal blob attempt', () => harness.tern.blobWrites.length === 1 && harness.fatalErrors.length === 1)
+    assert.equal(loadCalls, 2, 'the opened Work authorized each of its two visible image members once')
+    const callsAtFatal = loadCalls
+    const writesAtFatal = harness.tern.blobWrites.length
+    commitFocus(harness.renderer, [...messages, { kind: 'tool', turn: 1, name: 'read_image', args: '{}', result: '', status: 'ok' }], source)
+    assert.equal(loadCalls, callsAtFatal, 'a post-fatal Focus repaint starts no further image read')
+    assert.equal(harness.tern.blobWrites.length, writesAtFatal, 'a post-fatal Focus repaint sends no further blob')
+  } finally {
+    harness.loader.load = originalLoad
+    await harness.dispose()
+  }
+})
+
 test('a settle after the disposal sends neither a blob nor a frame', async () => {
   let release!: () => void
   const gate = new Promise<void>(resolve => { release = resolve })
@@ -545,50 +749,75 @@ test('a settle after the disposal sends neither a blob nor a frame', async () =>
   assert.equal(harness.loader.listenerCount(), 0, 'every presentation subscription is released')
 })
 
-test('a blob-send failure is FATAL: reported once, no further blob, and never mislabelled as a read failure', async () => {
+test('a blob-send failure is FATAL: reported once, no further blob or image load, and never mislabelled as a read failure', async () => {
   const harness = await mountHarness({ failBlobWrite: true })
-  // TWO images in ONE result: the first blob fails, and the second must never
-  // be attempted after the fatal.
-  commit(harness.renderer, [toolRowWithImage(ATTACHMENT, { ...ATTACHMENT, attachmentId: 'att-2' })], {})
-  await until('the first blob attempt to fail', () => harness.tern.blobWrites.length >= 1)
-  await until('the fatal to be routed', () => harness.fatalErrors.length >= 1)
+  const originalLoad = harness.loader.load
+  let loadCalls = 0
+  harness.loader.load = function(this: ImageLoader, ref, scope) {
+    loadCalls += 1
+    return originalLoad.call(this, ref, scope)
+  }
+  try {
+    // TWO images in ONE result: the first blob fails, and the second must never
+    // be attempted after the fatal.
+    commit(harness.renderer, [toolRowWithImage(ATTACHMENT, { ...ATTACHMENT, attachmentId: 'att-2' })], {})
+    await until('the first blob attempt to fail', () => harness.tern.blobWrites.length >= 1)
+    await until('the fatal to be routed', () => harness.fatalErrors.length >= 1)
 
-  assert.equal(harness.fatalErrors.length, 1, 'the fatal is reported exactly once')
-  assert.match(String(harness.fatalErrors[0]), /the tty owner is gone/u,
-    'the fatal carries the real failure')
-  assert.equal(harness.tern.blobWrites.length, 1, 'no further blob is attempted after the fatal')
-  assert.equal(harness.loader.get(ATTACHMENT, harness.scopeValue()).state, 'ready',
-    'the READ itself succeeded: the failure was the blob send')
-  const wire = harness.tern.frames().map(frame => JSON.stringify(frame)).join('\n')
-  assert.equal(wire.includes('Image read failed'), false,
-    'a blob-send failure must not be mislabelled as a read failure')
-  assert.equal(wire.includes('Loading image'), true,
-    'the aborted projection left the last committed frame standing')
-  await harness.dispose()
+    assert.equal(harness.fatalErrors.length, 1, 'the fatal is reported exactly once')
+    assert.match(String(harness.fatalErrors[0]), /the tty owner is gone/u,
+      'the fatal carries the real failure')
+    assert.equal(harness.tern.blobWrites.length, 1, 'no further blob is attempted after the fatal')
+    assert.equal(harness.loader.get(ATTACHMENT, harness.scopeValue()).state, 'ready',
+      'the READ itself succeeded: the failure was the blob send')
+    const wire = harness.tern.frames().map(frame => JSON.stringify(frame)).join('\\n')
+    assert.equal(wire.includes('Image read failed'), false,
+      'a blob-send failure must not be mislabelled as a read failure')
+    assert.equal(wire.includes('Loading image'), true,
+      'the aborted projection left the last committed frame standing')
+
+    const loadsAtFatal = loadCalls
+    commit(harness.renderer, [toolRowWithImage({ ...ATTACHMENT, attachmentId: 'att-after-fatal' })], {})
+    assert.equal(loadCalls, loadsAtFatal, 'a later repaint cannot start another image load after fatal')
+    assert.equal(harness.tern.blobWrites.length, 1, 'a later repaint cannot attempt another blob')
+  } finally {
+    harness.loader.load = originalLoad
+    await harness.dispose()
+  }
 })
 
 // ── T8: the source and the rehydration ──────────────────────────────────────
 
 test('a ready repaint of the SAME subject keeps the image node\'s identity', async () => {
-  const harness = await mountHarness()
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const harness = await mountHarness({
+    read: async (ref, scope) => {
+      if ((scope as { scope: string }).scope === 'A') await gate
+      return { ref, data: new Uint8Array([1, 2, 3, 4]) }
+    },
+  })
   const source = {}
-  // The SAME carrier object: a repaint of one subject re-projects the very
-  // same transcript rows, so the presentation identity must not move.
   const messages = [toolRowWithImage()]
   commit(harness.renderer, messages, source)
-  await until('the image node to be drawn', () => drawnImageNodes(harness.tern).length > 0)
+  await until('the pending image node to be drawn', () => drawnImageNodes(harness.tern).length > 0)
   const first = drawnImageNodes(harness.tern).at(-1)
+  assert.equal(first?.blob, PENDING_IMAGE_BLOB_ID, 'the first frame draws the pending placeholder')
 
-  // A repaint that really CHANGES something: the SDK diffs the view, so a
-  // frame follows. An unchanged repaint would send nothing at all, and the
-  // identity assertion would be vacuous.
+  // A REAL same-source repaint: the authorized read settles, so the row's
+  // image state moves from loading to ready. The SAME node id must receive the
+  // content-addressed blob (an unchanged repaint sends no frame at all).
   const framesBefore = harness.tern.frames().length
-  ;(messages[0] as { args: string }).args = '{"path":"other.png"}'
-  commit(harness.renderer, messages, source)
-  await until('the changed repaint to reach the pane', () => harness.tern.frames().length > framesBefore)
+  release()
+  await until('the ready blob to reach the same node', () => {
+    const nodes = drawnImageNodes(harness.tern)
+    return harness.tern.frames().length > framesBefore
+      && nodes.length === 1
+      && nodes[0]?.blob === harness.tern.blobIds()[0]
+  })
   const second = drawnImageNodes(harness.tern).at(-1)
-
   assert.equal(first?.id, second?.id, 'the image node keeps its id across a repaint')
+  assert.equal(second?.blob, harness.tern.blobIds()[0], 'the same node carries the real blob')
   await harness.dispose()
 })
 
@@ -1188,7 +1417,7 @@ test('T02/T03/T08: every explicit protocol performs zero image reads, blobs or i
   }
 })
 
-test('T04: none keeps a staged draft and its count while sending no chip/blob/read', async () => {
+test('none keeps a staged draft and its count while sending no chip/blob/read', async () => {
   const previous = process.env.PI_IMAGE_PROTOCOL
   process.env.PI_IMAGE_PROTOCOL = 'none'
   const harness = await mountHarness()
@@ -1207,7 +1436,7 @@ test('T04: none keeps a staged draft and its count while sending no chip/blob/re
   }
 })
 
-test('T07: an invalid PI_IMAGE_PROTOCOL fails the TSP mount before any frame', async () => {
+test('an invalid PI_IMAGE_PROTOCOL fails the TSP mount before any frame', async () => {
   const previous = process.env.PI_IMAGE_PROTOCOL
   process.env.PI_IMAGE_PROTOCOL = 'sixelx'
   const tern = new ScriptedTern()

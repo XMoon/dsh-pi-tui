@@ -9,13 +9,19 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process'
-import { readFileSync } from 'node:fs'
 import { StringDecoder } from 'node:string_decoder'
 import { truncateToWidth } from '@xmoon76/pi-tui'
 import { sanitizeCommandOutput } from './ansi-sanitize.ts'
 import { buildCommandInput } from '../../domain/footer/command-protocol.ts'
 import type { StatusSnapshot } from '../../domain/status/types.ts'
 import { MAX_COMMAND_TIMEOUT_MS, type FooterCommandConfig } from '../../domain/footer/command-config.ts'
+import {
+  listKernelGroupMembers,
+  readKernelProcess,
+  sameKernelProcess,
+  type KernelObservation,
+  type KernelProcessIdentity,
+} from '../../runtime/native-process/identity.ts'
 
 
 /** The runner's options. */
@@ -33,7 +39,21 @@ export interface FooterCommandRunnerOptions {
    * failure only makes THAT item unavailable — the whole-footer wording
    * names the native fallback). Defaults to the whole-footer wording. */
   readonly failureMessage?: string
+  /** The shared kernel-identity seam used to authorize a process-group
+   * escalation. Defaults to the production native-process reader; a platform
+   * without a verifiable identity (or a failed read) leaves the group unproven
+   * and the runner must never SIGKILL it. Injectable so the fail-closed
+   * branches (missing identity, a reused pid, a different parent, a lost
+   * witness) are provable without manufacturing real pid reuse. */
+  readonly kernelIdentity?: KernelIdentitySource
   readonly signal: AbortSignal
+}
+
+/** The kernel-identity seam (`runtime/native-process/identity.ts`). */
+export interface KernelIdentitySource {
+  readonly read: (pid: number) => KernelObservation
+  readonly listGroupMembers: (pgid: number) => KernelObservation[] | { readonly kind: 'unknown'; readonly code: string }
+  readonly same: (expected: KernelProcessIdentity, observed: KernelObservation) => 'same' | 'different' | 'gone' | 'unknown'
 }
 
 /** The stdout cap (plan §17.9). */
@@ -43,40 +63,36 @@ export const MAX_COMMAND_OUTPUT_BYTES = 16 * 1024
  * orphan — the escalation is the hard kill that actually reclaims it. */
 export const KILL_GRACE_MS = 500
 
-/** A process's starttime (the /proc/&lt;pid&gt;/stat field 22 — a stable
- * process identity). The group-reuse guard reads it: when a group leader
- * dies its pid slot is freed IMMEDIATELY, so a pgid we captured can be
- * reallocated to an UNRELATED process before the escalation fires — a
- * different starttime under the same numeric pid proves the reuse, and
- * the group must then never be signalled. Undefined when /proc is
- * unavailable (non-Linux) or the entry is gone. */
-function statStarttime(pid: number): string | undefined {
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
-    // The comm field (2) may contain spaces/parens — slice past the LAST
-    // ')' before splitting; starttime is field 22, index 19 after comm.
-    const afterComm = stat.slice(stat.lastIndexOf(')') + 2).trim()
-    return afterComm.split(' ')[19]
-  } catch {
-    return undefined
-  }
+/** The production kernel-identity source: the shared native-process seam, so
+ * the footer never carries a second `/proc`/libproc implementation. */
+const DEFAULT_KERNEL_IDENTITY: KernelIdentitySource = Object.freeze({
+  read: readKernelProcess,
+  listGroupMembers: listKernelGroupMembers,
+  same: sameKernelProcess,
+})
+
+/**
+ * Capture ownership witnesses for the group `pgid` while its leader is
+ * verifiable. A witness is any verified member other than the leader; the
+ * reader already requires membership in BOTH the process group and the
+ * session this runner created. An unverifiable scan yields no witness.
+ */
+function captureWitnesses(identity: KernelIdentitySource, pgid: number): KernelProcessIdentity[] | undefined {
+  const listed = identity.listGroupMembers(pgid)
+  if (!Array.isArray(listed)) return undefined
+  return listed.flatMap(observation => observation.kind === 'alive' && observation.identity.pid !== pgid
+    ? [observation.identity]
+    : [])
 }
 
-/** A process's parent pid (the /proc/&lt;pid&gt;/stat field 4) — the SECOND
- * identity factor of the group-reuse guard. The leader was spawned by
- * THIS process, so while it exists (live or as an unreaped zombie — the
- * runner is alive, so the zombie is never reparented) its ppid is our
- * own pid. A same-starttime stranger (jiffy-granularity collisions in
- * exotic pid-namespace setups) is rejected here. */
-function statPpid(pid: number): number | undefined {
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
-    const after = stat.slice(stat.lastIndexOf(')') + 2).trim()
-    const ppid = Number.parseInt(after.split(' ')[1]!, 10)
-    return Number.isFinite(ppid) ? ppid : undefined
-  } catch {
-    return undefined
-  }
+/** Whether one captured witness is still the SAME kernel process inside the
+ * same group and session. */
+function witnessStillOwns(identity: KernelIdentitySource, witness: KernelProcessIdentity, pgid: number): boolean {
+  const current = identity.read(witness.pid)
+  return current.kind === 'alive'
+    && current.identity.pgid === pgid
+    && current.identity.sid === pgid
+    && identity.same(witness, current) === 'same'
 }
 
 /** The footer command runner. */
@@ -89,6 +105,9 @@ export class FooterCommandRunner {
   private timer: NodeJS.Timeout | undefined
   private errorGeneration = 0
   private disposed = false
+  /** The one-shot unproven-group diagnostic latch (a TERM-resistant leftover
+   * would otherwise notify on every refresh). */
+  private unprovenGroupNotified = false
   /** The abort listener, kept as a field so dispose() can remove it: a
    * long-lived process-wide signal must not retain every disposed runner
    * (the review's P2 — command mode toggling creates a runner per arm). */
@@ -316,33 +335,39 @@ export class FooterCommandRunner {
   }
 
   /** Best-effort process-tree termination (the child is a group leader).
-   * SIGTERM first, then — when a TERM-resistant member ignores it — a
-   * hard SIGKILL after a bounded grace. The escalation is GROUP-scoped:
-   * the LEADER may exit on TERM while a TERM-resistant DESCENDANT keeps
-   * the process group alive (the review's P1 scenario: `cmd & wait` with
-   * the background job trapping TERM and its stdio redirected — the
-   * leader's close fires and would cancel a leader-bound timer), so the
-   * grace timer is NOT cancelled by the leader's close: it probes the
-   * WHOLE group (kill(-pgid, 0)) and SIGKILLs it while any member
-   * survives. The timer holds the CAPTURED pgid — a newer child is a
-   * different group and can never be signalled by mistake. */
+   * SIGTERM first, then — when a TERM-resistant member ignores it — a hard
+   * SIGKILL after a bounded grace. The escalation is GROUP-scoped: the LEADER
+   * may exit on TERM while a TERM-resistant DESCENDANT keeps the process group
+   * alive, so the grace timer is NOT cancelled by the leader's close: it probes
+   * the WHOLE group and SIGKILLs it while any member survives.
+   *
+   * OWNERSHIP. A numeric pgid is not an identity: once the leader is reaped its
+   * pid — and therefore the group id — can be handed to an unrelated process.
+   * The FIRST TERM is authorized by the owner's live ChildProcess handle (its
+   * pid slot cannot be reused while it is unreaped) or by a just-read leader
+   * identity that still carries this runner's ppid. The SIGKILL escalation is
+   * authorized ONLY by the leader being re-verified as the SAME kernel process
+   * at escalation time, or by a member witness captured while the leader was
+   * verifiable that is still the same process in the same group+session. A
+   * missing identity (or a failed read) leaves the group UNPROVEN: no group
+   * SIGKILL is sent, a one-shot diagnostic reports it, and the runner never
+   * claims the group was reclaimed. */
   private killChild(): void {
     const child = this.child
     if (child === undefined || this.terminating.has(child)) return
     this.terminating.add(child)
     const pgid = child.pid
-    // The leader's starttime, captured WHILE it is alive: the escalation
-    // later proves the numeric pgid still identifies OUR group (a reused
-    // pid carries a different starttime).
-    const leaderStarttime = pgid === undefined ? undefined : statStarttime(pgid)
+    const identity = this.options.kernelIdentity ?? DEFAULT_KERNEL_IDENTITY
     /** Whether ANY member of the captured process group still exists. */
     const groupAlive = (): boolean => {
       if (pgid === undefined) return false
       try {
         process.kill(-pgid, 0)
         return true
-      } catch {
-        return false
+      } catch (error) {
+        // Only ESRCH proves the group is gone; any other failure names a member
+        // we cannot inspect, which is not the same fact.
+        return (error as NodeJS.ErrnoException).code !== 'ESRCH'
       }
     }
     const signalGroup = (signal: NodeJS.Signals): void => {
@@ -359,36 +384,43 @@ export class FooterCommandRunner {
         // Already gone.
       }
     }
+    if (pgid === undefined) {
+      // The child never spawned, so it has no group to address.
+      signalGroup('SIGTERM')
+      return
+    }
+    // Node has not reaped this child (exitCode/signalCode stay null until the
+    // handle observes the exit), so its pid slot is still allocated.
+    const leaderUnreaped = child.exitCode === null && child.signalCode === null
+    const observed = identity.read(pgid)
+    const leader = leaderUnreaped && observed.kind === 'alive' && observed.identity.ppid === process.pid
+      ? observed.identity
+      : undefined
+    if (!leaderUnreaped && leader === undefined) {
+      // The leader is gone and no identity was captured while it was ours: the
+      // numeric pgid proves nothing and NOTHING may be sent to it.
+      if (groupAlive()) this.reportUnprovenGroup()
+      return
+    }
+    // Captured while the leader is still verifiable: a survivor can prove the
+    // numeric group id still names THIS group after the leader is reaped.
+    const witnesses = leader === undefined ? undefined : captureWitnesses(identity, pgid)
     signalGroup('SIGTERM')
     const escalation = setTimeout(() => {
-      if (pgid === undefined) return
-      // The GROUP probe, never a leader check: the leader may already
-      // have closed while a TERM-resistant descendant still runs.
+      // The GROUP probe, never a leader check: the leader may already have
+      // closed while a TERM-resistant descendant still runs.
       if (!groupAlive()) return
-      // Pgid-reuse guard (the review's P1): once the leader is dead its
-      // pid slot is free, and a fast pid allocator can hand the SAME
-      // numeric pgid to an unrelated process before the grace fires —
-      // that group must never receive OUR SIGKILL. The group is provably
-      // ours while the leader is alive, or when the pid slot is
-      // unallocated (a group whose leader pid is free can only hold the
-      // leader's own descendants — no unrelated process can join it), or
-      // when the current occupant is still the SAME process (a not-yet-
-      // reaped leader zombie). Identity is verified by TWO factors:
-      // 1. starttime (the PRIMARY factor — it also catches the
-      //    inter-generation reuse where OUR OWN next spawn takes the old
-      //    pid: that child's ppid is this process too, so a ppid-only
-      //    check would let the kill through and kill the CURRENT child);
-      // 2. ppid (the SECOND factor — the leader was spawned by THIS
-      //    process, so a live/zombie leader always carries our ppid; a
-      //    same-starttime stranger, the jiffy-granularity corner, is
-      //    rejected here).
-      if (leaderStarttime !== undefined && (child.exitCode !== null || child.signalCode !== null)) {
-        const current = statStarttime(pgid)
-        if (current !== undefined && current !== leaderStarttime) return
-        if (current !== undefined) {
-          const ppid = statPpid(pgid)
-          if (ppid !== undefined && ppid !== process.pid) return
-        }
+      const current = identity.read(pgid)
+      const leaderStillOwns = leader !== undefined
+        && current.kind === 'alive'
+        && current.identity.ppid === process.pid
+        && identity.same(leader, current) === 'same'
+      const witnessStillOwnsGroup = witnesses?.some(witness => witnessStillOwns(identity, witness, pgid)) ?? false
+      if (!leaderStillOwns && !witnessStillOwnsGroup) {
+        // The leader is reaped or replaced and no witness survived: the numeric
+        // pgid may now name a stranger's group. Fail closed.
+        this.reportUnprovenGroup()
+        return
       }
       signalGroup('SIGKILL')
     }, KILL_GRACE_MS)
@@ -399,10 +431,19 @@ export class FooterCommandRunner {
       this.terminating.delete(child)
       // Cancel the escalation ONLY when the WHOLE GROUP is already gone
       // (an empty group id cannot gain new members, so ESRCH here is
-      // final). A live descendant must keep the timer armed — the review
-      // scenario the leader-based clear missed.
+      // final). A live descendant must keep the timer armed.
       if (!groupAlive()) clearTimeout(escalation)
     })
+  }
+
+  /** ONE diagnostic per runner for a group the runner cannot prove it owns.
+   * The command's own failure path already falls back to the native layout;
+   * this notice explains why a lingering descendant was deliberately left
+   * unsignalled instead of silently claiming a complete teardown. */
+  private reportUnprovenGroup(): void {
+    if (this.unprovenGroupNotified) return
+    this.unprovenGroupNotified = true
+    this.options.onNotifyOnce?.('footer command process group could not be proven stopped — it was left running')
   }
 
   /** Dispose: terminate the child, drop the coalescing timer, and release

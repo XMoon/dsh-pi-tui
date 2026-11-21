@@ -34,16 +34,19 @@ import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { renderSkillContent } from '@deepseek-ai/dsh-skill'
-import type { ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import type { ModelSelection } from '@deepseek-ai/dsh-agent'
 import type { CommandInvocation, CommandResult, CommandDescriptor, CommandDefinition } from '@deepseek-ai/dsh-commands'
 import { CommandDefinitionId } from '@deepseek-ai/dsh-commands'
 import { TransitionInProgressError } from './app/session/operation-barrier.ts'
 import { SessionScopeSupersededError, type LiveSessionScope, type SessionScope } from './app/session/scope.ts'
+import type { WorkspaceNextIntentOwner } from './app/session/workspace-next-intent.ts'
 import type { SessionSwitchOutcome } from './app/session/runtime.ts'
 import type { NavigationIntent } from './app/session/transition.ts'
-import type { ClientReloadProcessRefusal } from './app/application-runtime.ts'
+import type { ClientReloadProcessRefusal, ProfileDaemonAdminPort } from './app/application-runtime.ts'
 import type { ClientReloadRefusal } from './app/remote-process/client-reload-safety.ts'
 import type { DefaultIntentRecord } from './app/command/model-default-intent.ts'
+import type { SessionBrowserAnswerEligibility } from './app/command/session-browser-presentation.ts'
+import type { SelectionRef } from './app/command/model-selection.ts'
 import type { Component } from '@xmoon76/pi-tui'
 import type { EmbeddedPluginPage } from './tui/plugin-manager/workspace.ts'
 import type { ComposerSubmitGesture } from './tui-app.ts'
@@ -65,27 +68,56 @@ import { SupersededReadError } from './runtime/read-error.ts'
 import type { SessionStatsFacts } from './domain/status/stats.ts'
 import type { SessionReader } from './runtime/session-reader-port.ts'
 import type { SessionWriter } from './runtime/session-writer-port.ts'
+import type { SessionWorkspaceFactsPort } from './runtime/session-workspace-facts-port.ts'
+import type { HostDirectoryBrowsePort } from './runtime/host-directory-browse-port.ts'
+import type { McpServerPort } from './runtime/mcp-server-port.ts'
+import type { CuaAccessPort } from './runtime/cua-access-port.ts'
+import type { PluginManagerPort } from './runtime/plugin-manager-port.ts'
 import type { InteractionPort } from './runtime/interaction-port.ts'
-import type { CreateSessionRequest, OpenSessionRequest, SessionHandle } from './runtime/session-lifecycle-port.ts'
+import type {
+  CreateSessionRequest,
+  OpenSessionRequest,
+  ResolvedWorkspaceSelection,
+  SessionHandle,
+  WorkspaceSelectionIntent,
+} from './runtime/session-lifecycle-port.ts'
 import type { Catalog } from './runtime/catalog-port.ts'
 import type { SkillDefinitionResult } from './runtime/catalog-port.ts'
 import type { ConfigPort } from './runtime/config-port.ts'
-import type { HostFilePort } from './runtime/host-file-port.ts'
+import type { HostFilePort, HostFileScope } from './runtime/host-file-port.ts'
+import type { WebAccessPort } from './runtime/web-access-port.ts'
+import type { AcpAccessPort } from './runtime/acp-access-port.ts'
+import type { HostShellCompletionPort } from './runtime/host-shell-completion-port.ts'
 import type { CatalogRefreshOutcome, CatalogRefreshSource } from './app/command/catalog-refresh.ts'
 import type { ClientCommandRegistry } from './app/command/client-command-registry.ts'
+import {
+  tspSelectedTuiBuiltinAvailability,
+  type TspBuiltinPickers,
+} from './app/command/tsp-capability.ts'
+import type {
+  TspCommandCompletionExtensionSuggest,
+  TspCommandCompletionInstallation,
+  TspInlineAttachmentStager,
+} from './app/surface/runtime.ts'
 import type { SubmissionComposerPort } from './app/submission/composer-port.ts'
 import { commandSummaryOf, type SurfaceCatalogSnapshot, type SurfaceCommandSummary } from './domain/catalog/surface.ts'
 import { isUserInvocableSkill, type HumanSkillCatalog, type HumanSkillSummary } from './domain/catalog/skill.ts'
 import { registerExitCommand, registerHelpCommand, registerReloadClientCommand } from './tui/commands/utility.ts'
 import { registerPluginsCommand, registerTasksCommand } from './tui/commands/tasks.ts'
+import { registerScheduleCommand } from './tui/commands/schedule.ts'
+import { registerQueueCommand } from './tui/commands/queue.ts'
 import { createModelCommands } from './tui/commands/models.ts'
 import type { ModelPresentation } from './app/command/model-presentation.ts'
+import type { WebAccessPresentation } from './app/command/web-access-presentation.ts'
+import type { AcpAccessPresentation } from './app/command/acp-access-presentation.ts'
 import type { PresetPresentation } from './app/command/preset-presentation.ts'
 import type { SessionBrowserPresentation } from './app/command/session-browser-presentation.ts'
 import { registerReloadCommand, registerSkillCommand, type SkillsCommandDeps } from './tui/commands/skills.ts'
 import { createArtifactsCommands } from './tui/commands/artifacts.ts'
 import { createAuthCommands } from './tui/commands/auth.ts'
 import { createSettingsCommands } from './tui/commands/settings.ts'
+import { createWebAccessCommands } from './tui/commands/web-access.ts'
+import { createAcpAccessCommands } from './tui/commands/acp-access.ts'
 import { createSessionCommands } from './tui/commands/sessions.ts'
 
 
@@ -187,10 +219,6 @@ export type { DefaultIntentRecord } from './app/command/model-default-intent.ts'
 /** The /new session-id constructor: the ONE place the dsh-session `SessionId`
  * value import lives (domain modules consume the typed result, never the package). */
 export type NewSessionId = () => SessionId
-
-/** The /sessions category/search helpers (moved to `src/tui/commands/sessions.ts`,
- * re-exported here to keep the stable command-surface import path). */
-export { sessionPickerCategories, sessionSearchCategory } from './tui/commands/sessions.ts'
 
 /** The shipped-preset display copy (moved to `src/tui/pickers/preset-display.ts`,
  * re-exported here to keep the stable command-surface import path). */
@@ -315,12 +343,18 @@ export interface TuiCommandRunner {  ctx: Context
   requireLiveSessionScope(): Promise<LiveSessionScope>
   /** Create the first session lazily when none exists (deferred start). */
   ensureSession(): Promise<void>
+  /** Await the sessionless mount's in-flight Host Workspace preflight so a
+   *  user create captures its committed intent instead of racing it. */
+  awaitWorkspacePreflight?(): Promise<void>
+  /** Whether the Client-local AUTO launch-cwd evidence is current RIGHT NOW
+   *  (absent on Direct/launch surfaces, whose proposal needs no Client proof). */
+  validateAutoWorkspace?(): Promise<boolean>
   /**
    * TUI-facing live selection facade (footer + /model). It follows the
    * current Agent; with deferred start it holds only the sessionless
    * optimistic choice and never gets installed into an Agent context.
    */
-  readonly selected: ModelSelectionRef
+  readonly selected: SelectionRef<ModelSelection>
   /** Legacy/display facade: the newest SESSIONLESS `/model` intent (pending or
    * unresolved) falling back to the persisted global default. A fresh create
    * NEVER seeds from it — the Direct adapter captures the persisted Host default
@@ -380,10 +414,16 @@ export interface TuiCommandRunner {  ctx: Context
   setModelSelectionPending(selection: ModelSelection | undefined, token?: number, status?: 'pending' | 'unresolved'): void
   /** The TUI settings document, when the settings service is present. */
   readonly tuiSettings: TuiSettingsLike | undefined
+  /** The Client-local next-create intent and its generation-fenced display projection. */
+  readonly workspaceNextIntent?: WorkspaceNextIntentOwner
   /** The session lifecycle port (D2.1): /new and /fork create/open sessions
    * through semantic requests (the Direct adapter resolves the preset
    * composition internally). */
   readonly agents: {
+    /** Resolve ONE Host Workspace before a create (WS-2): pre-selection only,
+     *  so a bad directory / unknown Workspace / offline Host refuses BEFORE any
+     *  owner stop, draft flush or Session dispatch. */
+    resolveWorkspace(intent: WorkspaceSelectionIntent, signal?: AbortSignal): Promise<ResolvedWorkspaceSelection>
     create(options: CreateSessionRequest): Promise<SessionHandle>
     open(options: OpenSessionRequest): Promise<SessionHandle>
   }
@@ -400,6 +440,50 @@ export interface TuiCommandRunner {  ctx: Context
    * the title batches, the context measurement and the export read go
    * through the port, never ctx directly. */
   readonly sessionReader: SessionReader
+  /** The official Host Workspace facts READ port (M5-U-A), internal to the
+   *  command runner. The PiTUI Session Workspace is its only consumer: it
+   *  follows Workspace membership per open and never writes a Workspace,
+   *  never persists a registry and never guesses membership from a cwd. */
+  readonly sessionWorkspaceFacts: SessionWorkspaceFactsPort
+  /**
+   * The official Host directory-browse READ port (Session Workspace PR3). The
+   * PiTUI inline Add editor is its only consumer: it lists the Host home and
+   * one Host level per typed prefix so the user can complete an absolute Host
+   * path. A listing is disposable editor projection, never a Workspace
+   * registration and never a Client-filesystem read.
+   */
+  readonly hostDirectoryBrowse: HostDirectoryBrowsePort
+  /**
+   * M6-1 F8: the exact-Session policy port — the independent
+   * approval/sandbox facts of one live Session and the single official
+   * approval-policy write. The Settings approval row (through the
+   * {@link TuiCommandRunner.policy} observation owner) and the scope-bound
+   * `setSessionApprovalPolicy` are its consumers; it is never a preset
+   * table and never a sandbox enforcement claim.
+   */
+  readonly sessionPolicy: import('./runtime/session-policy-port.ts').SessionPolicyPort
+  /**
+   * FR1: the exact-Root Agent Team mode port — the official saved selection,
+   * the recorded model-request history and the single official Team mode
+   * write. The `/model` picker is its only consumer; it never mirrors an
+   * enabled value and never appends a Session event itself. Absent means the
+   * mounted composition serves no Team seam (the picker then reports the
+   * truthful unavailable row instead of inventing one).
+   */
+  readonly teamMode?: import('./runtime/team-mode-port.ts').TeamModePort
+  /**
+   * Split-Client only (G567's Client-root read view, consumed by M5-U-D): the
+   * official forwarded Question/Approval invocations THIS Client still holds
+   * for an answer. It carries identity only — never a question payload, option,
+   * answer or Host pending record — and it is the ONLY positive answerability
+   * gate the Session Workspace may use for `Needs attention`. Absent on Direct
+   * and on a TSP/native composition: absence means "no official answer
+   * composition here", so no row may be classified answerable.
+   */
+  readonly forwardedAnswerEligibility?: () => readonly SessionBrowserAnswerEligibility[]
+  /** Observe eligibility add/remove. A UI invalidation notification, never a
+   *  Host event subscription and never an answer. */
+  readonly subscribeForwardedAnswerEligibility?: (listener: () => void) => () => void
   /** The session WRITE port (D2.1): ordinary prompts, occurrence-level queue
    * steering/removal, cancel and title ops go through the port. Multi-message
    * gestures use runner-level FIFO orchestration; no batch verb crosses it. */
@@ -419,12 +503,32 @@ export interface TuiCommandRunner {  ctx: Context
    * send-time canonicalization against the HOST filesystem — never the
    * client's fs assumption. */
   readonly hostFile: HostFilePort
-  /** Whether Host-shell completion facts are reachable on this backend
-   * (shell amendment M3-4 PR3): true on Direct (the process IS the Host, so
-   * the compgen bridge reads Host state); false on Remote — no shell carrier
-   * means NO shell-specific suggestions, never Client PATH/filesystem
-   * guesses. Absent defaults to false (no shell completion). */
-  readonly hostShellCompletion: boolean
+  /** The Split-Client Web frontend control port (M5-W PR-C): `/web` reads and
+   * mutates the Host's official Web frontend through this ONE semantic surface
+   * and never reaches a Host service, Connection or Gateway directly. */
+  readonly webAccess: WebAccessPort
+  /** The Split-Client local ACP listener control port (PO-1B): the `/settings →
+   *  Tools → ACP Server` runtime row reads/mutates the Host's private
+   *  `piTuiAcpAccess` service through this ONE semantic surface and never
+   *  reaches a Host service, Connection or Gateway directly. */
+  readonly acpAccess: AcpAccessPort
+  /** The ONE official Host MCP manager's management port (FR3): the Settings
+   *  `Tools → MCP servers` page reads/probes/restarts through it and never a
+   *  Host service, Connection or Gateway directly. Absent in a composition with
+   *  no Host MCP manager (e.g. a native renderer surface), where the row is
+   *  omitted rather than shown as an inert control. */
+  readonly mcpServers: McpServerPort
+  /** The official CUA provider access port (PR-5/MAC-09 v2): the Settings
+   *  Tools · Computer Use page reads/mutates permissions and application
+   *  decisions through this ONE semantic surface. No TCC access and no second
+   *  permission store. */
+  readonly cuaAccess?: CuaAccessPort
+  /** The official Plugin Manager roster (PR-5 bundle selection/availability);
+   *  the Computer Use page reuses it and never infers provider readiness from
+   *  the card's presence. */
+  readonly pluginManager?: PluginManagerPort
+  /** Host-owned/direct/remote shell completion capability, never a Client PATH guess. */
+  readonly hostShellCompletion: HostShellCompletionPort
   /** The minimal commands registry for the TUI's OWN registrations
    * (migration M1.11) — a runner assembly dependency, not a Host
    * capability. On the Remote branch (PR4 §D2) this is `undefined` and the
@@ -432,19 +536,6 @@ export interface TuiCommandRunner {  ctx: Context
    * Direct keeps the Host registration so the in-process dispatch surface
    * (busy-Enter, sessionless execution) is unchanged. */
   readonly commandRegistry: CommandRegistryLike | undefined
-  /** Whether the readable-transcript artifact is renderable on this backend
-   * (M3-4 PR5): `true` on Direct — the Markdown renderer reads the whole
-   * in-process Session event history; `false` on the wire backend, where no
-   * transport-neutral whole-history seam exists yet. This is a business
-   * CAPABILITY, deliberately NOT derived from {@link commandRegistry}: that
-   * field is the Direct Host-registry compatibility mirror whose retirement
-   * is owned by M8, and a business decision must never hang off a
-   * compatibility implementation.
-   *
-   * REQUIRED: every runner assembly declares it explicitly (the production
-   * composition and every typed test stub); the handler refuses unless the
-   * declared value is exactly `true`. */
-  readonly transcriptExportAvailable: boolean
   /** The Client-owned command registry (M3-4 PR4 §D2): every TUI built-in
    *  and dynamic skill-wrapper definition registers here FIRST. On Direct
    *  the same definitions additionally register into the Host commands
@@ -601,9 +692,20 @@ export interface TuiCommandRunner {  ctx: Context
     readonly model: string | undefined
     readonly cwd: string
   }
-  /** The pinned Session's approval-policy override, or `undefined` when it
-   *  has none. A stale scope throws {@link SupersededReadError}. */
-  currentApprovalOverride(scope: LiveSessionScope): 'ask' | 'never' | undefined
+  /** M6-1 F8: the ONE session-policy observation owner — the Settings
+   *  approval row's read source (checking/ready/unavailable/failed) and the
+   *  status/footer sandbox+approval projection, on BOTH backends. The SAME
+   *  object reference the status runtime consumes; there is no second
+   *  synchronous override read anymore. */
+  readonly policy: import('./app/command/session-policy-observation.ts').SessionPolicyObservation
+  /**
+   * M6-1 F8: the opaque CURRENT Connection generation identity (object
+   * identity), used by the Settings write chain to bind an `applied` policy
+   * ACK and its fresh readback to the SAME Host generation. `undefined` on
+   * Direct (no transport generation) and while disconnected; never inferred
+   * from a Host value.
+   */
+  sessionPolicyGeneration?(): unknown
   /**
    * The pinned Session's whole-log stats, or `undefined` when the owner
    * exposes none. Async since M3-4 PR4 §D5: the Remote branch composes the
@@ -643,10 +745,19 @@ export interface TuiCommandRunner {  ctx: Context
     presetId: string,
     signal?: AbortSignal,
   ): Promise<PermissionPresetResult>
-  /** Set the approval-policy override of the owner the scope pins. A stale scope
-   *  is REFUSED (`superseded`) before any dispatch — never retargeted. This write
-   *  is SYNCHRONOUS, so `superseded` always means "nothing ran". */
-  setSessionApprovalPolicy(scope: LiveSessionScope, value: 'ask' | 'never'): 'applied' | 'superseded'
+  /** Set the approval-policy override of the owner the scope pins (M6-1 F8:
+   *  the transport-neutral `SessionPolicyPort.setApproval`). Two INDEPENDENT
+   *  axes: `ownership` says whether the result still owns the current
+   *  surface; `outcome` carries what the port settled (`applied` / `refused`
+   *  / `unconfirmed`). A stale scope BEFORE the dispatch is `superseded`
+   *  with `outcome: undefined` — nothing ran. A dispatched write keeps its
+   *  settlement even when the surface moved on; `unconfirmed` is never
+   *  retried and never reported as "not applied". */
+  setSessionApprovalPolicy(
+    scope: LiveSessionScope,
+    value: 'ask' | 'never',
+    signal?: AbortSignal,
+  ): Promise<{ ownership: 'current' | 'superseded'; outcome: import('./runtime/session-policy-port.ts').SessionPolicySetOutcome | undefined }>
   refreshStatus(): void
   /** PR D2: the explicit About/status context force — measures NOW through
    * the runner's context coordinator (mark dirty + semantic SessionReader),
@@ -672,6 +783,24 @@ export interface TuiCommandRunner {  ctx: Context
    */
   readonly backendKind: 'direct' | 'remote'
   /**
+   * M6 UX PR2: the ONE process-local daemon administration capability, when
+   * this composition can prove the official local Profile identity. It is the
+   * ONLY route the Settings follow-up (`Install service`) may use to reach the
+   * existing profile-scoped control plane; absent everywhere else, so the
+   * follow-up then offers no install action instead of guessing an identity.
+   */
+  readonly profileDaemonAdmin?: ProfileDaemonAdminPort
+  /**
+   * M6 UX PR2: the ONE process-lifetime transient user-conversion intent. The
+   * Settings command submits it ONLY on a verified `daemon → direct` Profile
+   * transition made by THIS Client while it runs the daemon backend, and clears
+   * it on a verified reverse save. It is never persisted, never a configuration
+   * value and never a Host-running fact: it only grants the exit-intent owner
+   * permission to ASK (once, at exit) about stopping the old Profile Host.
+   * HMR/dispose clear it; it is never restored across sessions.
+   */
+  recordBackendExitTransition?(transition: 'daemon-to-direct' | undefined): void
+  /**
    * C3 (owner ruling on RFL-A-017): the ONE session-scope invalidation
    * trigger — the SessionOwnershipCore's payload-less owner/generation
    * notification, forwarded unchanged. It fires after every successful
@@ -690,6 +819,11 @@ export interface TuiCommandRunner {  ctx: Context
   displayPreset?(): DisplayPreset
   /** Apply a canonical display preset through the shared setter. */
   setDisplayPreset?(preset: DisplayPreset): DisplayPresetApplyResult
+  /** M6 PR-C C3: fired after a display-preset mutation whose local state
+   * update bypassed the shared `settings.setDisplayPreset` seam (the Settings
+   * workspace commit path applies through the app directly). The Split-Client
+   * presence owner re-projects the new view to the Host. */
+  onDisplayPresetMutated?(): void
   /** @deprecated Compatibility facade for existing command-only callers. */
   focusEnabled(): boolean
   /** @deprecated Compatibility facade; production commands use setDisplayPreset. */
@@ -729,6 +863,20 @@ export interface TuiCommandRunner {  ctx: Context
    */
   openTasksBrowser(): void
   /**
+   * S5-PR4: lease the ONE Schedule workspace over the selected backend. The
+   * command-side entry behind `/schedule`; it creates no Session, performs no
+   * Host write and returns a REAL error when no PiTui surface is mounted.
+   */
+  openScheduleWorkspace(): CommandResult
+  /**
+   * PR-Q: open the Client's ONE per-occurrence queued-message manager. The
+   * command creates no Session, sends nothing to the agent and performs no
+   * Host write; the application-level controller re-reads the authoritative
+   * `queued` projection and the panel's explicit intents perform the official
+   * edit/remove. A renderer without the manager returns a real error.
+   */
+  openQueueManager?(): CommandResult
+  /**
    * Delivered files (PR1 / M2): the on-demand catalog of the CURRENT display
    * subject's delivered Turns, derived from the selected Folder's full grouped
    * projection. `undefined` when no display subject is selected or the
@@ -747,7 +895,10 @@ export interface TuiCommandRunner {  ctx: Context
    * plain `Component`, and this composition-only signature is where the
    * concrete page type is named.
    */
-  createPluginManagerPage(onYieldNavigation: () => void): EmbeddedPluginPage | undefined
+  createPluginManagerPage(
+    onYieldNavigation: () => void,
+    onManageComputerUse?: () => string | undefined,
+  ): EmbeddedPluginPage | undefined
   /**
    * Open the conversation rewind picker (plan: the ONE entry shared by the
    * idle empty-editor double-Esc and `/rewind`). The runner decides what
@@ -776,10 +927,13 @@ export interface TuiCommandRunner {  ctx: Context
    * `navigation` marks a USER NAVIGATION intent (`/new`, a selected-session
    * switch): the caller captures `runner.captureSessionScope()` synchronously
    * before its first await and passes the intent here. The transition admission
-   * then sends ONE exact-owner stop of that captured generation BEFORE the
-   * admitted writers drain; without it (e.g. the `/preset` swap) nothing is
-   * cancelled. The intent records whether that stop was accepted, so a later
-   * failure can state that the old Turn is already stopped.
+   * applies the BACKEND's navigation ownership BEFORE the admitted writers
+   * drain: a `stop-and-quiesce` backend sends ONE exact-owner stop of that
+   * captured generation (the intent records whether it was accepted, so a
+   * later failure can state that the old Turn is already stopped), while a
+   * `detach-client` backend dispatches no Host stop and waits for no Host
+   * idle. Without `navigation` (e.g. the `/preset` swap) the plain admission
+   * is used and nothing is cancelled.
    */
   withSessionTransition<T>(task: () => Promise<T> | T, navigation?: NavigationIntent): Promise<T>
   /**
@@ -833,6 +987,17 @@ export interface TuiCommandRunner {  ctx: Context
      * states + lastError across EVERY registry incl. renderers/editors).
      * Undefined without the extension service. */
     readonly health: (() => readonly import('./extension/public-types.ts').ContributionHealth[]) | undefined
+    /** R8-E PR-4: the live owner→Loader-entry-id projection of THIS Client's
+     * extension service (the persisted-setting admission requires the exact
+     * fiber owner, never an author-supplied package name). */
+    readonly ownerEntryIds?: () => ReadonlyMap<string, string>
+    /** R8-E PR-4: the CURRENT Client's real per-package Loader observations.
+     *  Read-only; never a Host inventory and never another Client's state. */
+    readonly clientObservations?: () => readonly import('./app/client-extensions/mount-owner.ts').ClientExtensionObservation[]
+    /** R8-E PR-4: request the existing mount-owner reconcile against ONE
+     *  fresh official Host Plugin Manager snapshot (after a verified Host
+     *  Config save). Never a second inventory and never a Host write. */
+    readonly refreshClientExtensions?: () => void
   } | undefined
 }
 
@@ -929,6 +1094,30 @@ export interface TuiCommandPresentation {
    * historical direct-test call sites; every production assembly supplies it.
    */
   readonly composer?: () => SubmissionComposerPort | undefined
+  /**
+   * TSP I-C: publish ONE effective slash-command catalog commit onto the
+   * mounted TSP renderer, at the SAME single commit point where PiTui receives
+   * `setCommandCompletions`. Optional because a headless assembly mounts no
+   * renderer: the command layer then records the skipped install and keeps the
+   * catalog, claims and collision health exactly as before.
+   */
+  readonly installTspCommandCompletions?: (installation: TspCommandCompletionInstallation) => void
+  /**
+   * TSP I-D: install the SAME inline-attachment stager the mounted PiTui app
+   * receives through `setInlineAttachmentStager`, on the mounted TSP renderer
+   * that has no PiTui editor. Optional because a headless/test assembly mounts
+   * no renderer; the production TSP composition supplies it, and the real TSP
+   * Direct path proves the install reached the current mount.
+   */
+  readonly installTspInlineAttachmentStager?: (stager: TspInlineAttachmentStager) => void
+  /**
+   * TSP I-C: which native TUI-builtin presenters the mounted renderer really
+   * installed, read LIVE at each catalog commit (never a version/kind guess).
+   * The candidate screen consults it for rows whose winner is this surface's
+   * OWN TUI registration only; a genuine Host winner or a live Skill wrapper
+   * never consults it.
+   */
+  readonly tspCommandPickerCapabilities?: () => TspBuiltinPickers
 }
 
 export function registerTuiCommands(
@@ -938,6 +1127,11 @@ export function registerTuiCommands(
   modelPresentation?: ModelPresentation,
   presetPresentation?: PresetPresentation,
   presentation?: TuiCommandPresentation,
+  /** M5-W PR-C: the mounted native `/web` presenter, if any (the SAME optional
+   *  parameter shape as the Model/Preset ones). */
+  webPresentation?: WebAccessPresentation,
+  /** PO-5E: the mounted native `/acp` presenter, if any (same optional shape). */
+  acpPresentation?: AcpAccessPresentation,
 ): {
   /** Per-name registration failures (a Host-claimed name degraded loudly;
    *  later registrations still installed). */
@@ -989,6 +1183,49 @@ export function registerTuiCommands(
    * command surface's own notice path.
    */
   openModelPicker?(entry: 'models' | 'effort'): Promise<CommandResult>
+  /**
+   * TSP-7 PR-G: the command-only QUICK entry over the SAME registered `/model`
+   * handler — the composer's combined Model/Effort control calls this. It
+   * forwards to `openModel('models','quick')`: one scope capture, one directory
+   * reader, one writer and one presentation token, and the handler itself
+   * decides the presentation from the Session subject it captured. Undefined
+   * under exactly the same degradation as `openModelPicker`.
+   */
+  openModelQuick?(): Promise<CommandResult>
+  /**
+   * TSP-7 Welcome D: the argument-free UI entry into the SAME registered
+   * `/sessions` Session Browser lifecycle the typed command runs — the Welcome
+   * screen's single Resume action calls this, never a renderer-owned listing,
+   * session id or switch. Undefined when the `/sessions` registration itself
+   * degraded (a Host-owned same-name command): the UI opener then does not
+   * exist and the Welcome paints its disabled form through the command
+   * surface's own availability fact.
+   *
+   * The optional scope is the PiTUI Host Editor gesture's initial browse
+   * scope (`'all'`); the Welcome calls it without one and keeps Current.
+   */
+  openSessionBrowser?(scope?: 'current' | 'all' | {
+    readonly scope?: 'current' | 'all'
+    readonly addDirectory?: boolean
+    /** A CLI startup query: the Browser opens on this global search value
+     *  instead of Browse All, and the startup entry skips the sessionless
+     *  Workspace-preflight wait (the first input frame must not be blocked). */
+    readonly initialQuery?: string
+    /** CLI startup lookup: exact/unique-prefix only, through the existing
+     *  guarded Resume after the roster lands; word queries never auto-resume. */
+    readonly directMatch?: boolean
+  }): Promise<CommandResult>
+  /**
+   * Mouse PR4: the command-only UI entry into the SAME registered `/tasks`
+   * (`/subagents`) handler the typed line runs — the TSP native Tasks status
+   * segment calls this and never a fabricated `/tasks` submission. Undefined
+   * when THAT registration degraded (a genuine Host-owned `/tasks` or
+   * `/subagents` name): the surface entry then refuses through its own notice
+   * path instead of bypassing the Host route, exactly as `/model` above. The
+   * handler keeps every admission (`requireLiveSessionScope`) and the ONE
+   * `TaskRuntime` opener; this entry adds no state of its own.
+   */
+  openTasksBrowserUi?(): Promise<CommandResult>
 } {
   const { ctx, app } = runner
   // PR3-A: `app` is undefined while a non-PiTui renderer owns the terminal
@@ -1214,9 +1451,15 @@ export function registerTuiCommands(
    * its contribution and reported. Never a silent shadow, never a partial
    * list.
    * @param host - the host catalog rows for the current scope.
+   * @param reservedHostNames - genuine Host names retained as the last-good
+   *   reservation during a Remote target transition, even though their rows
+   *   are no longer displayed.
    * @throws when a contribution collides with a host name.
    */
-  const mergeContributions = (host: readonly SurfaceCommandSummary[]): readonly SurfaceCommandSummary[] => {
+  const mergeContributions = (
+    host: readonly SurfaceCommandSummary[],
+    reservedHostNames?: ReadonlySet<string>,
+  ): readonly SurfaceCommandSummary[] => {
     const bridge = runner.extensions?.commands
     if (bridge === undefined) return host
     const contributions = bridge.snapshot().entries
@@ -1241,7 +1484,13 @@ export function registerTuiCommands(
     const collisions: { identity: string; message: string }[] = []
     let firstCollision: Error | undefined
     for (const contribution of contributions) {
-      if (!byName.has(contribution.name)) continue
+      // A target-changing transition hides the previous target's Host rows but
+      // retains `hostOriginDescriptors` as its name reservation until the new
+      // snapshot installs. Extension rows are synthesized in this sibling
+      // pass, so the reservation must participate here too — otherwise an
+      // extension row is advertised for a name the live classifier still
+      // routes to Host, and the old collision health is falsely recovered.
+      if (!byName.has(contribution.name) && reservedHostNames?.has(contribution.name) !== true) continue
       const identity = contributionIdentity(contribution)
       colliding.add(identity)
       const collision = new Error(`command contribution /${contribution.name} collides with a host command`)
@@ -1309,15 +1558,34 @@ export function registerTuiCommands(
    * health entries a successful merge may clear, and only while the record
    * still shows that collision message (see the recovery loop). */
   const collisionHealth = new Map<string, { ref: { slot: string; id: string; owner: string }; message: string }>()
+  /**
+   * Per-skill slash commands (/glab, /find-skills, ...), pi-style: each
+   * human-invocable catalog skill is directly selectable from the editor
+   * autocomplete and delivers its loaded body on Enter (through loadSkill,
+   * which steers the original line and injects the body alongside it). The
+   * description carries a [skill] tag so skill rows stand apart from
+   * built-in commands.
+   *
+   * TSP I-C: declared BEFORE the completion install because the install is
+   * the one place that decides which source a display row really came from —
+   * a live wrapper is a dynamic Skill row, never a TUI builtin to gate. It is
+   * a plain empty-map assignment, so moving it up changes no behavior.
+   */
+  const skillDisposers = new Map<string, () => void>()
   const installCompletions = (
     entries: readonly SurfaceCommandSummary[],
-    options: { display?: 'merged' | 'none'; claimsFrom?: readonly SurfaceCommandSummary[] } = {},
+    options: {
+      display?: 'merged' | 'none'
+      claimsFrom?: readonly SurfaceCommandSummary[]
+      reservedHostNames?: ReadonlySet<string>
+    } = {},
   ): void => {
     const sorted = [...entries].sort((left, right) => left.name < right.name ? -1 : 1)
     // PR4 §D3: the CLAIM set is the Host authority record. On the Remote
-    // branch the display list may be a Client-only merge (an ad-hoc
-    // re-synthesis), so the claims are built from the LAST AUTHORITATIVE Host
-    // catalog instead — a client-only refresh must never erase a Host claim.
+    // branch the display list is the installed Host catalog plus Client rows
+    // (an ad-hoc re-synthesis), so the claims are built from the LAST
+    // AUTHORITATIVE Host catalog instead — a Client-only refresh must never
+    // erase a Host claim.
     // The union of (a) the Host-authoritative catalog and (b) THIS surface's
     // own registrations (TUI built-ins + live skill wrappers). On Direct the
     // Host registry already carries (b), so the union is idempotent; on
@@ -1344,65 +1612,127 @@ export function registerTuiCommands(
     // stay live.
     const display = options.display === 'none'
       ? []
-      : [...mergeContributions(sorted)]
+      : [...mergeContributions(sorted, options.reservedHostNames)]
           .sort((left, right) => left.name < right.name ? -1 : 1)
     // M5: the plugin autocomplete chain (AutocompleteRegistry) is consulted
     // after the host's own provider returns null. The registry's suggest()
     // handles cancellation (latest-only commit) and per-provider isolation.
     const extensionAutocomplete = runner.extensions?.autocomplete
-    if (app === undefined) {
-      runner.diag.info('command completions install skipped: no PiTui editor surface', {})
+    const extensionSuggest: TspCommandCompletionExtensionSuggest | undefined = extensionAutocomplete === undefined
+      ? undefined
+      : async (query) => {
+          const result = await extensionAutocomplete.suggestOwned(query, (id, owner, error) => {
+            recordExtensionError?.({ slot: 'autocomplete', id, owner }, error)
+            try {
+              ctx.logger.warn(`tui-runner: autocomplete provider ${id} failed: ${safeErrorMessage(error)}`)
+            } catch {
+              // The cordis logger must not block completion.
+            }
+          }, (id, owner) => clearExtensionError?.({ slot: 'autocomplete', id, owner }))
+          if (result === null) return null
+          return { items: [...result.items], prefix: result.prefix }
+        }
+    // The completion scope is resolved at SUGGESTION time from the LIVE
+    // session id (session identity when one exists — even mid-transition) or,
+    // sessionless, from the SAME Workspace selection snapshot the create path
+    // uses. The snapshot's `intent` is the create target's IDENTITY authority:
+    // its confirmed `workspaceId` stays usable while a DIFFERENT Add is
+    // verifying or was refused (`status` is transient, review P1). No intent,
+    // no Host discovery — and the Client launch cwd is never sent. The
+    // revision makes A→B→A stale results distinguishable.
+    const completionScope: () => HostFileScope = () => {
+      const sessionId = runner.currentSessionId
+      if (sessionId !== undefined) return { kind: 'session', sessionId }
+      const snapshot = runner.workspaceNextIntent?.snapshot()
+      return {
+        kind: 'workspace',
+        ...(snapshot?.intent?.kind === 'workspace-id'
+          ? { workspaceId: snapshot.intent.workspaceId }
+          : {}),
+        selectionRevision: snapshot?.revision ?? 0,
+      }
+    }
+    // `/attach` and `/image` are Client-local. Direct mode uses the process cwd; a remote
+    // adapter can keep this independent from the Host session scope.
+    const completionLocalCwd = (): string => runner.cwd
+    // The inline skill reference lexicon rides the same install: the
+    // provider completes plain-text `/name` tokens from this detached
+    // list, never from the command registry.
+    const skillReferences = currentSkillReferences
+    // Shell amendment (M3-4 PR3): Host shell completion facts exist only
+    // on Direct; Remote must show no shell-specific suggestions at any
+    // position (command or path).
+    const hostShellCompletion = runner.hostShellCompletion
+    if (app !== undefined) {
+      app.setCommandCompletions(
+        display.map(command => ({
+          name: command.name,
+          description: command.description,
+          argumentHint: command.input?.hint,
+          ...(PATH_ARGUMENT_COMMANDS.has(command.name)
+            ? { getArgumentCompletions: (argument: string) => suggestPathArgument(argument, runner.cwd) }
+            : {}),
+        })),
+        runner.sessionCwd(),
+        // The Host-file port owns the `@`-mention discovery (migration
+        // M1.10) — the command surface never resolves fd itself.
+        runner.hostFile,
+        extensionSuggest,
+        completionScope,
+        completionLocalCwd,
+        skillReferences,
+        hostShellCompletion,
+      )
       return
     }
-    app.setCommandCompletions(
-      display.map(command => ({
+    // TSP I-C: the SAME catalog, the SAME synchronous commit point, the mounted
+    // renderer that has no PiTui editor. Nothing here re-reads the Host,
+    // re-synthesizes a catalog or touches `claims` — the only thing computed is
+    // which already-admitted rows this renderer may SHOW.
+    if (presentation === undefined || presentation.installTspCommandCompletions === undefined) {
+      runner.diag.info('command completions install skipped: no editor surface is mounted', {})
+      return
+    }
+    // The provenance screen. A row is withdrawn ONLY when it is PROVEN to be
+    // this surface's own TUI Client registration whose command family the
+    // mounted renderer cannot run; the order is the existing classifier's
+    // precedence, never a name guess:
+    //   1. a GENUINE Host-origin winner (mirrors already subtracted) keeps its
+    //      row and is never screened by the TUI-builtin gate;
+    //   2. a live dynamic Skill wrapper keeps its row (execution stays with the
+    //      existing skill revalidation);
+    //   3. any other TUI Client registration is offered only while the mount
+    //      can run it — and it never falls through to a same-name extension;
+    //   4. every other admitted row (an extension contribution the merger
+    //      really included, or a row whose source this screen cannot name)
+    //      stays visible exactly as on PiTui, so an unprovenanced row can never
+    //      hide a real command.
+    // Bare `/logout` is not offered because a candidate carries no argument.
+    const pickers = presentation.tspCommandPickerCapabilities?.() ?? {}
+    presentation.installTspCommandCompletions({
+      commands: display.filter(command => {
+        if (hostOriginDescriptors.has(command.name)) return true
+        if (skillDisposers.has(command.name)) return true
+        if (clientCommands.get(command.name) === undefined) return true
+        return tspSelectedTuiBuiltinAvailability(command.name, pickers, '').kind === 'available'
+      }).map(command => ({
         name: command.name,
         description: command.description,
         argumentHint: command.input?.hint,
-        ...(PATH_ARGUMENT_COMMANDS.has(command.name)
-          ? { getArgumentCompletions: (argument: string) => suggestPathArgument(argument, runner.cwd) }
-          : {}),
       })),
-      runner.sessionCwd(),
-      // The Host-file port owns the `@`-mention discovery (migration
-      // M1.10) — the command surface never resolves fd itself.
-      runner.hostFile,
-      extensionAutocomplete === undefined
-        ? undefined
-        : async (query) => {
-            const result = await extensionAutocomplete.suggestOwned(query, (id, owner, error) => {
-              recordExtensionError?.({ slot: 'autocomplete', id, owner }, error)
-              try {
-                ctx.logger.warn(`tui-runner: autocomplete provider ${id} failed: ${safeErrorMessage(error)}`)
-              } catch {
-                // The cordis logger must not block completion.
-              }
-            }, (id, owner) => clearExtensionError?.({ slot: 'autocomplete', id, owner }))
-            if (result === null) return null
-            return { items: [...result.items], prefix: result.prefix }
-          },
-      // The completion scope is resolved at SUGGESTION time from the LIVE
-      // session id (session identity when one exists — even mid-transition —
-      // the workspace cwd otherwise): a session switch or first create is
-      // picked up immediately, never requiring a reinstall.
-      () => {
-        const sessionId = runner.currentSessionId
-        return sessionId === undefined
-          ? { kind: 'workspace', cwd: runner.sessionCwd() }
-          : { kind: 'session', sessionId }
-      },
-      // `/attach` and `/image` are Client-local. Direct mode uses the process cwd; a remote
-      // adapter can keep this independent from the Host session scope.
-      () => runner.cwd,
-      // The inline skill reference lexicon rides the same install: the
-      // provider completes plain-text `/name` tokens from this detached
-      // list, never from the command registry.
-      currentSkillReferences,
-      // Shell amendment (M3-4 PR3): Host shell completion facts exist only
-      // on Direct; Remote must show no shell-specific suggestions at any
-      // position (command or path).
-      runner.hostShellCompletion,
-    )
+      cwd: runner.sessionCwd(),
+      fileReferences: runner.hostFile,
+      extensionSuggest,
+      scope: completionScope,
+      localCwd: completionLocalCwd,
+      skillReferences,
+      hostShellCompletion: undefined,
+      // The ONE signal that distinguishes "this source failed" from "this
+      // catalog is legitimately empty", so the renderer can refuse a plugin
+      // fallback instead of painting a menu for a command source that was
+      // withdrawn. Claims and health accounting above are unaffected.
+      sourceFailed: options.display === 'none',
+    })
   }
   /** The saved probed scoped overrides (see installSurfaceSnapshot). */
   let savedScopedCommands: readonly SurfaceCommandSummary[] = []
@@ -1425,6 +1755,16 @@ export function registerTuiCommands(
    * same-name Client definition never masquerades as Host origin.
    */
   let hostOriginDescriptors = new Map<string, { leadingInput: boolean; attachments: boolean }>()
+  /**
+   * Presentation eligibility of the installed Remote Host catalog for the
+   * CURRENT target. Never an authority for routing or dispatch: it only
+   * answers whether `authoritativeHostCatalog` describes the target the
+   * surface is displaying right now. A target-changing transition clears it
+   * (the retained Host claims are NOT display proof for the new target); a
+   * successful target snapshot restores it. Disconnect and same-target
+   * failures keep it, so the last-good display does not flash empty.
+   */
+  let remoteHostDisplayActive = false
   /** Derive the Host-origin map from a Host catalog view (§1C-3): the
    *  entries whose EFFECTIVE WINNER is one of THIS surface's own Direct
    *  compatibility mirrors (exact `definitionId` membership — the winner
@@ -1466,6 +1806,55 @@ export function registerTuiCommands(
     return [...byName.values()]
   }
   /**
+   * The Remote display synthesis: the installed authoritative Host catalog
+   * FIRST, then the Client rows whose names the Host does not own. Called ONLY
+   * on the Remote branch (`commands === undefined`); the Direct branch keeps
+   * its existing Host registration/compatibility-mirror composition.
+   *
+   * This answers DISPLAY only — never routing or dispatch. During a
+   * target-changing transition the retained Host catalog is still the last
+   * target's claim record, not proof that the new target offers it, so the
+   * Host rows are hidden and a same-named Client registration is withheld
+   * from the gap too (a bare Client twin must not look executable while the
+   * retained Host-origin gate still owns the name).
+   * @param clientRows - the Client registry/standing projection rows.
+   */
+  const mergeRemoteVisibleHostCommands = (
+    clientRows: readonly SurfaceCommandSummary[],
+  ): readonly SurfaceCommandSummary[] => {
+    const byName = new Map<string, SurfaceCommandSummary>()
+    if (remoteHostDisplayActive) {
+      for (const command of authoritativeHostCatalog) byName.set(command.name, command)
+    }
+    for (const command of clientRows) {
+      if (byName.has(command.name)) continue // genuine Host wins name + display metadata
+      if (!remoteHostDisplayActive && hostOriginDescriptors.has(command.name)) continue
+      byName.set(command.name, command)
+    }
+    return [...byName.values()]
+  }
+  /**
+   * The Remote transition's retained Host-name reservation, or undefined on
+   * Direct and while the installed Host catalog is display-active. The
+   * extension-contribution pass consumes this set so its sibling synthesis
+   * cannot advertise a row the Host still owns.
+   */
+  const remoteReservedHostNames = (): ReadonlySet<string> | undefined =>
+    commands === undefined && !remoteHostDisplayActive
+      ? new Set(hostOriginDescriptors.keys())
+      : undefined
+  /** The Remote-only completion options for one install: last-good claims
+   *  (when the caller owns them) plus the retained transition reservation. */
+  const remoteDisplayOptions = (
+    claimsFrom?: readonly SurfaceCommandSummary[],
+  ): { claimsFrom?: readonly SurfaceCommandSummary[]; reservedHostNames?: ReadonlySet<string> } => {
+    const reserved = remoteReservedHostNames()
+    return {
+      ...(claimsFrom === undefined ? {} : { claimsFrom }),
+      ...(reserved === undefined ? {} : { reservedHostNames: reserved }),
+    }
+  }
+  /**
    * Refresh completions from the registry: the LIVE agent's effective view
    * when one exists (global + its scoped shadows), else the global layer
    * overlaid with the saved scoped overrides (sessionless merge). The agent
@@ -1484,7 +1873,10 @@ export function registerTuiCommands(
    */
   const installCompletionsContained = (
     entries: readonly SurfaceCommandSummary[],
-    options: { claimsFrom?: readonly SurfaceCommandSummary[] } = {},
+    options: {
+      claimsFrom?: readonly SurfaceCommandSummary[]
+      reservedHostNames?: ReadonlySet<string>
+    } = {},
   ): void => {
     try {
       installCompletions(entries, options)
@@ -1534,8 +1926,9 @@ export function registerTuiCommands(
     //
     // PR4 §D3: the DISPLAY list and the CLAIM source are separate inputs.
     // The Direct live read IS the Host authority (refresh it); the Remote
-    // branch's view is a Client-side merge, so its claims keep coming from
-    // the last authoritative Host catalog the coordinator installed.
+    // branch's DISPLAY is the installed Host catalog plus the Client rows the
+    // Host does not own, while its claims keep coming from the last
+    // authoritative Host catalog the coordinator installed.
     if (runner.currentSessionId === undefined) {
       const entries = mergeGlobalAndSavedScoped()
       if (commands !== undefined) {
@@ -1557,9 +1950,10 @@ export function registerTuiCommands(
         authoritativeHostCatalog = entries
         deriveHostOriginDescriptors(hostView)
       }
-      installCompletionsContained(entries, commands === undefined
-        ? { claimsFrom: authoritativeHostCatalog }
-        : {})
+      installCompletionsContained(
+        commands === undefined ? mergeRemoteVisibleHostCommands(entries) : entries,
+        commands === undefined ? remoteDisplayOptions(authoritativeHostCatalog) : {},
+      )
       return
     }
     const scoped = runner.listScopedCommands()
@@ -1572,9 +1966,11 @@ export function registerTuiCommands(
     for (const definition of clientCommands.list()) {
       byName.set(definition.name, commandSummaryOf(definition))
     }
-    installCompletionsContained([...byName.values()], commands === undefined
-      ? { claimsFrom: authoritativeHostCatalog }
-      : {})
+    const clientRows = [...byName.values()]
+    installCompletionsContained(
+      commands === undefined ? mergeRemoteVisibleHostCommands(clientRows) : clientRows,
+      commands === undefined ? remoteDisplayOptions(authoritativeHostCatalog) : {},
+    )
   }
   // ── registry-change coalescing ─────────────────────────────────────────
   // `commands.register/dispose` fire `commands/change` SYNCHRONOUSLY per
@@ -1709,6 +2105,29 @@ export function registerTuiCommands(
     captureExtensionHealthRef,
   })
   settingsCommands.registerSettings()
+
+  // M5-W PR-C: the ONE Split-Client Web frontend control entry, immediately
+  // after Settings. It is sessionless/local (see domain/command/policy.ts) and
+  // takes ONE optional native TSP presenter; every read/write stays here.
+  createWebAccessCommands({
+    runner,
+    app: app as TuiApp | undefined,
+    notify,
+    registerOne,
+    ...(webPresentation === undefined ? {} : { webPresentation }),
+  }).registerWeb()
+
+  // PO-5E: the ONE Split-Client ACP listener quick control, immediately after
+  // `/web`. It is sessionless/local (see domain/command/policy.ts), takes ONE
+  // optional native TSP presenter, and every read/write stays here.
+  createAcpAccessCommands({
+    runner,
+    app: app as TuiApp | undefined,
+    notify,
+    registerOne,
+    ...(acpPresentation === undefined ? {} : { acpPresentation }),
+  }).registerAcp()
+
   settingsCommands.registerFooter()
   settingsCommands.registerDisplay()
   settingsCommands.registerFocus()
@@ -1718,7 +2137,6 @@ export function registerTuiCommands(
     app: app as TuiApp,
     registerOne,
     registerTuiCommand,
-    detach,
     recordCommandDraftDisposition,
     newSessionId,
     notify,
@@ -1995,13 +2413,6 @@ export function registerTuiCommands(
     }
   }
 
-  // Per-skill slash commands (/glab, /find-skills, ...), pi-style: each
-  // human-invocable catalog skill is directly selectable from the editor
-  // autocomplete and delivers its loaded body on Enter (through loadSkill,
-  // which steers the original line and injects the body alongside it). The
-  // description carries a [skill] tag so skill rows stand apart from
-  // built-in commands.
-  const skillDisposers = new Map<string, () => void>()
   /**
    * Synchronously replace every direct skill wrapper from a snapshot. Pure
    * install: no catalog fetch, no await — the callers (the initial snapshot
@@ -2093,6 +2504,10 @@ export function registerTuiCommands(
     // Host-origin map derives with the same mirror subtraction (§1C-3).
     authoritativeHostCatalog = snapshot.commands
     deriveHostOriginDescriptors(snapshot.commands)
+    // The display-admission gate moves BEFORE the bulk commit: a synchronous
+    // reentrancy triggered by wrapper registration must already see this
+    // target's Host rows as displayable. Remote only — Direct never reads it.
+    if (commands === undefined) remoteHostDisplayActive = true
     const scopedNames = new Set(snapshot.scopedCommands.map(command => command.name))
     const skillsFailed = snapshot.issues.some(issue => issue.provider === 'skills')
     withCommandCommit(() => {
@@ -2106,26 +2521,34 @@ export function registerTuiCommands(
       savedScopedCommands = snapshot.scopedCommands
       // PR4 §D3: the claim source is branch-dependent. On DIRECT the merge
       // below reads the LIVE Host global layer (TUI registrations + every
-      // in-process Host command), which IS the authority. On REMOTE that
-      // merge is a Client-only view (no Host global layer exists there), so
-      // the claims come from THIS snapshot's command rows instead — a
-      // Client-only re-synthesis must never erase a Host claim.
+      // in-process Host command), which IS the authority. On REMOTE the
+      // DISPLAY is the installed Host catalog plus the Client rows the Host
+      // does not own (one helper), while the claims come from THIS snapshot's
+      // command rows — a Client-only re-synthesis must never erase a Host
+      // claim.
+      const clientRows = mergeGlobalAndSavedScoped()
       installCompletionsContained(
-        mergeGlobalAndSavedScoped(),
+        commands === undefined ? mergeRemoteVisibleHostCommands(clientRows) : clientRows,
         commands === undefined ? { claimsFrom: snapshot.commands } : {},
       )
     })
   }
   /**
-   * The revalidating transition (target/owner change): scoped previews clear
-   * so new inputs complete against the current global view only, and every
-   * old skill wrapper becomes a revalidating transition command whose
-   * handler re-fetches from the CURRENT live agent and re-checks the policy
-   * at execution time. The names survive so an already-submitted skill
-   * command can never become a plain model message mid-switch.
+   * The revalidating transition (target/owner change): scoped previews clear,
+   * the previous target's Remote Host display rows are withdrawn (its claims
+   * stay as last-good dispatch authority), and every old skill wrapper becomes
+   * a revalidating transition command whose handler re-fetches from the
+   * CURRENT live agent and re-checks the policy at execution time. The names
+   * survive so an already-submitted skill command can never become a plain
+   * model message mid-switch.
    */
   const enterCatalogTransition = (): void => {
     const names = [...skillDisposers.keys()]
+    // The old target's Host rows are NOT display authority for the new one.
+    // The authoritative catalog/claims stay (last-good dispatch authority),
+    // but the eligibility gate closes until the new target's snapshot
+    // installs. Remote only — Direct never reads this flag.
+    if (commands === undefined) remoteHostDisplayActive = false
     withCommandCommit(() => {
       for (const dispose of skillDisposers.values()) dispose()
       skillDisposers.clear()
@@ -2155,7 +2578,11 @@ export function registerTuiCommands(
           // Registration raced with another plugin; the picker still works.
         }
       }
-      installCompletionsContained(mergeGlobalAndSavedScoped())
+      const clientRows = mergeGlobalAndSavedScoped()
+      installCompletionsContained(
+        commands === undefined ? mergeRemoteVisibleHostCommands(clientRows) : clientRows,
+        commands === undefined ? remoteDisplayOptions() : {},
+      )
     })
   }
   /** Whether one command name is advertised by the CURRENT completion list
@@ -2251,7 +2678,23 @@ export function registerTuiCommands(
 
   sessionCommands.registerNew()
 
-  registerTasksCommand({ runner, registerTuiCommand })
+  // Mouse PR4: the registration RETURNS its own handler, so the TSP Tasks
+  // status segment's UI entry below is the SAME function body the typed line
+  // and the `/subagents` alias run — one Session admission, one Task Runtime.
+  const openTasksBrowserUi = registerTasksCommand({ runner, registerTuiCommand })
+  // `/queue` (PR-Q): the ONE per-occurrence pending-input manager. It sits
+  // beside the other sessionless panel entries and is NOT a second queue
+  // surface: the panel reads the existing pending-input projection and writes
+  // through the existing `SessionWriter.updateQueue` port.
+  registerQueueCommand({ runner, registerTuiCommand })
+
+  // `/schedule` (S5-PR4): the ONE Host Schedule management entry. It sits
+  // beside the other sessionless workspace entries and is NOT an alias of
+  // `/tasks` (the Job/Subagent Task Center keeps its own semantics).
+  registerScheduleCommand({
+    openScheduleWorkspace: () => runner.openScheduleWorkspace(),
+    registerTuiCommand,
+  })
 
   // `/plugins` (P1-A / PR2): the canonical sessionless deep link into
   // `Settings → Plugins` (see `src/tui/commands/tasks.ts`). It takes the SAME
@@ -2291,11 +2734,14 @@ export function registerTuiCommands(
 
   artifactCommands.registerAttach()
 
-  // The INLINE completion route stages through the SAME intake.
-  // The stager is installed on the mounted app (which owns the editor, the one
-  // undoable in-place edit and the seat fence); a renderer without a PiTui app
-  // has no inline completion plane at all, so nothing is installed.
-  app?.setInlineAttachmentStager(artifactCommands.inlineAttachmentStager())
+  // The INLINE completion route stages through the SAME intake. The stager is
+  // installed on the surface that owns the editor: the mounted PiTui app (its
+  // undoable in-place edit and seat fence), or — TSP I-D — the mounted TSP
+  // renderer through its one narrow install seam. One stager, one intake, one
+  // installation site; an assembly with neither surface installs nothing.
+  const inlineAttachmentStager = artifactCommands.inlineAttachmentStager()
+  if (app !== undefined) app.setInlineAttachmentStager(inlineAttachmentStager)
+  else presentation?.installTspInlineAttachmentStager?.(inlineAttachmentStager)
 
   // Image UX PR2: `/view-image` is a PiTui-local product surface (it lists the
   // CURRENTLY MOUNTED transcript window and opens the PiTui Viewer), so it is
@@ -2417,7 +2863,31 @@ export function registerTuiCommands(
     // bypassing the Host route.
     ...(registrationFailures.some(failure => failure.startsWith('/model:'))
       ? {}
-      : { openModelPicker: (entry: 'models' | 'effort'): Promise<CommandResult> => modelCommands.openModel(entry) }),
+      : {
+          openModelPicker: (entry: 'models' | 'effort'): Promise<CommandResult> => modelCommands.openModel(entry),
+          // TSP-7 PR-G: the quick presentation of the SAME registered handler,
+          // minted from the SAME registrar instance — no second command, no
+          // second catalog owner.
+          openModelQuick: (): Promise<CommandResult> => modelCommands.openModelQuick(),
+        }),
+    // TSP-7 Welcome D: the narrow argument-free UI entry over the SAME
+    // registered `/sessions` body — the Welcome screen's only action. The
+    // identical rule as `/model` above: a Host-owned duplicate name leaves the
+    // entry undefined, so the Welcome paints its disabled form instead of
+    // bypassing the Host route with a second listing of its own.
+    ...(registrationFailures.some(failure => failure.startsWith('/sessions:'))
+      ? {}
+      : {
+          openSessionBrowser: (scope): Promise<CommandResult> => sessionCommands.openSessions(scope),
+        }),
+    // Mouse PR4: the TSP native Tasks status segment's ONLY business entry —
+    // the `/tasks` registration's own handler. The identical degradation rule
+    // as `/model` and `/sessions`: a genuine Host-owned `/tasks` (or its
+    // `/subagents` alias) leaves this entry undefined, so the renderer paints
+    // an inert badge instead of routing around the Host command.
+    ...(registrationFailures.some(failure => failure.startsWith('/tasks:') || failure.startsWith('/subagents:'))
+      ? {}
+      : { openTasksBrowserUi }),
     takeCommandDraftDisposition: (commandId?: string): CommandDraftDisposition | undefined => {
       if (commandId !== undefined) {
         const disposition = commandDraftDispositions.get(commandId)

@@ -15,9 +15,15 @@ import { CommandDefinitionId, type CommandResult } from '@deepseek-ai/dsh-comman
 import type { TuiApp } from '../../tui-app.ts'
 import type { SessionScope } from '../../app/session/scope.ts'
 import { TransitionInProgressError } from '../../app/session/operation-barrier.ts'
+import { SessionScopeSupersededError } from '../../app/session/scope.ts'
 import { isCancellation, runOwned, type OwnedTaskOptions } from '../../runtime/process/tasks.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
-import type { ModelApplyOutcome, ModelPresentation } from '../../app/command/model-presentation.ts'
+import type {
+  ModelApplyOutcome,
+  ModelPickerRequest,
+  ModelPickerTeamControl,
+  ModelPresentation,
+} from '../../app/command/model-presentation.ts'
 import type {
   PresetApplyOutcome,
   PresetDefaultOutcome,
@@ -54,6 +60,7 @@ type ModelCommandRunner = Pick<
   | 'setModelSelectionPending'
   | 'settleIntent'
   | 'signal'
+  | 'teamMode'
   | 'trackDefaultWrite'
   | 'updateWelcomeCard'
   | 'withSessionTransition'
@@ -88,6 +95,15 @@ export interface ModelCommandRegistrars {
    * scope, writer and outcome owner is the registered handler's own.
    */
   openModel(entry: 'models' | 'effort'): Promise<CommandResult>
+  /**
+   * TSP-7 PR-G: the composer's single combined Model/Effort control. It runs
+   * the SAME handler body as `openModel` — the same scope capture, the same
+   * directory reader, the same writer and the same presentation tokens — and
+   * only asks for the QUICK presentation of the panel. A sessionless subject
+   * is routed by THIS command to the full panel (the explicit `Save default`
+   * contract), never to a quick selector that would write a global default.
+   */
+  openModelQuick(): Promise<CommandResult>
 }
 
 /**
@@ -111,6 +127,10 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
   // newer selection supersedes an older one's pending-marker clear and error
   // notice even on the SAME Session generation (v2 §0.2.5).
   let modelOperationToken = 0
+  // ONE shared Team-write latch across every `/model` invocation in this TUI:
+  // while a Team gesture is admitted (confirmation pending) or writing, no
+  // second invocation may dispatch another Team write for the same surface.
+  let teamWriteInFlight = false
   // PRESENTATION ownership for `/model`: a newer invocation supersedes the
   // previous (loading or loaded) panel. It is DISTINCT from
   // modelOperationToken (which owns the WRITE): the surface token decides
@@ -138,9 +158,14 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
   let presetSurfaceToken = 0
 
   /** The shared `/model` body: ONE handler closure per registration lifetime,
-   *  serving the registered command and the command-only UI entry (`openModel`)
-   *  — never two catalog readers or two writer owners. */
-  const openModel = (entry: 'models' | 'effort'): Promise<CommandResult> => (async (): Promise<CommandResult> => {
+   *  serving the registered command, the command-only UI entry (`openModel`)
+   *  and the quick UI entry (`openModelQuick`) — never two catalog readers or
+   *  two writer owners. `presentationMode` selects WHICH presenter renders the
+   *  one request; it is not a second command and never a second writer. */
+  const openModel = (
+    entry: 'models' | 'effort',
+    presentationMode: 'full' | 'quick' = 'full',
+  ): Promise<CommandResult> => (async (): Promise<CommandResult> => {
         const presentation = deps.modelPresentation ?? pituiModelPresentation(app)
         const models = runner.catalog.models
         if (!models.available()) return { kind: 'error', text: 'model service unavailable' }
@@ -179,6 +204,39 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
             // ancestry back to the nearest still-pending operation. The save is
             // AWAITED so the picker reports a truthful settlement (a failed or
             // unsupported default write keeps the picker usable).
+            // ONE authoritative directory re-read owned by THIS operation:
+            // after a committed/indeterminate sessionless save the cached Host
+            // directory is invalidated, so the sessionless footer would read an
+            // empty cache as `no model` right after a CONFIRMED save. The
+            // re-read goes through the official `session.modelCatalog()` port
+            // (never the requested value), lets the tracker reconcile an
+            // UNRESOLVED indeterminate intent against the Host truth, and
+            // repaints only while this operation still owns the surface. A
+            // failed re-read is recorded in the diagnostics and never
+            // downgrades the settled write (the next authoritative read —
+            // reopening /model — repairs the display).
+            const reconcileDefaultDirectory = (): void => {
+              runOwned('model default reconcile', () => models.loadDirectory(runner.signal), {
+                diag: runner.diag,
+                sessionId: () => runner.currentSessionId,
+                isCancellation: (error) => token !== modelOperationToken
+                  || !runner.isSessionScopeCurrent(scope)
+                  || runner.signal.aborted
+                  || error instanceof SupersededReadError,
+                onCancel: () => {},
+                onResult: (directory) => {
+                  if (token !== modelOperationToken) return
+                  if (!runner.isSessionScopeCurrent(scope)) return
+                  // The ONE reconciliation entry point owns the rule: only a
+                  // MATCHING authoritative read confirms the unresolved intent;
+                  // an older snapshot must never fail an in-flight write. This
+                  // caller, the /model panel load and every Retry share it.
+                  runner.reconcileDefaultIntent(directory.default)
+                  runner.refreshStatus()
+                  runner.updateWelcomeCard()
+                },
+              })
+            }
             runner.setDefaultIntent(next)
             const intentId = runner.defaultIntentRecord?.id
             // The sessionless footer marker is DERIVED from the tracker (see the
@@ -210,17 +268,28 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
               const detail = outcome.kind === 'rejected'
                 ? outcome.error.message
                 : outcome.kind === 'indeterminate'
-                  ? `${outcome.error.message} — the default may still land; reopen /model to reconcile`
+                  ? `${outcome.error.message} — the default may still land; the display reconciles from the Host`
                   : outcome.kind === 'unsupported'
                     ? outcome.reason
                     : 'the default model save was cancelled'
               presentation.notify(`model default save: ${detail}`, 'error')
+              // An indeterminate write may still have committed: the SAME
+              // authoritative re-read below reconciles the unresolved intent
+              // (a rejected/cancelled/unsupported outcome invalidated nothing,
+              // so there is nothing to reconcile).
+              if (outcome.kind === 'indeterminate') reconcileDefaultDirectory()
               // An unsupported backend and a proven refusal keep the picker
               // usable; an indeterminate settle dismisses with the notice.
               return outcome.kind
             }
             runner.refreshStatus()
             runner.updateWelcomeCard()
+            // The committed write invalidated the cached model directory: the
+            // sessionless footer would read the EMPTY cache as `no model` even
+            // though the Host just confirmed the save. ONE owned authoritative
+            // re-read repopulates it from the official `session.modelCatalog()`
+            // and repaints; a failed re-read never downgrades the settled save.
+            reconcileDefaultDirectory()
             return 'committed'
           }
           // A live Session model write is NOT a sessionless global-default intent:
@@ -281,23 +350,152 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
           runner.updateWelcomeCard()
           return outcome.kind
         }
-        // A newer `/model` owns the SURFACE: bump the presentation token and
-        // mount the loading panel IMMEDIATELY. The directory read runs as owned
-        // background work, so the user gets instant feedback and may type a
-        // query while it loads.
-        const surfaceToken = ++modelSurfaceToken
         // The write subject is captured BEFORE the first read (v2 §4.1/UX-D15)
         // and is fixed for the panel's whole life: the read never re-derives the
         // subject from a later, possibly different Session.
         const subject = { sessionless: runner.currentSessionId === undefined }
+        // ONE decision, made by THIS command on the subject it captured: before
+        // a Session exists the quick selector would have nothing to write to, so
+        // a sessionless request gets the full panel with its explicit
+        // `Save default` — the product contract, not a capability fallback. A
+        // renderer without a quick presenter is a loud refusal, never a silent
+        // substitution of another presentation and never an accepted write.
+        const effectiveMode = subject.sessionless ? 'full' : presentationMode
+        if (effectiveMode === 'quick' && presentation.openQuick === undefined) {
+          return {
+            kind: 'error',
+            text: 'the quick model selector is not available in this session (the mounted renderer presents only the full /model panel)',
+          }
+        }
+        // A newer `/model` owns the SURFACE: bump the presentation token and
+        // mount the loading panel IMMEDIATELY. The directory read runs as owned
+        // background work, so the user gets instant feedback and may type a
+        // query while it loads. A quick → full handoff takes the SAME token, so
+        // the retired quick panel can never be hydrated or written back.
+        const surfaceToken = ++modelSurfaceToken
         // ONE directory-read owner for the FIRST read and every Retry. The
         // single `reading` latch is the read epoch: a retry while a read is in
         // flight is refused (RETRY LOADING admits no second read), and a
         // settled response can only belong to the latest token+scope read.
         let reading = false
-        const picker = presentation.open({
+        // The ONE Team gesture admission for this `/model` surface. Every
+        // read/write re-verifies the scope captured at OPEN, so a moved Session
+        // can never read or write another owner; the Team write is admitted
+        // through the SAME Session writer barrier as the model write and never
+        // rides on a model `apply()`.
+        const teamModePort = runner.teamMode
+        const teamControl: ModelPickerTeamControl | undefined = teamModePort === undefined ? undefined : {
+          read: () => {
+            if (!runner.isSessionScopeCurrent(scope)) {
+              return { kind: 'stale', reason: 'the Session changed since /model opened' }
+            }
+            const sessionId = scope.sessionId
+            if (sessionId === undefined) {
+              return { kind: 'unavailable', reason: 'open a Session to change Agent Team mode' }
+            }
+            return teamModePort.read(sessionId)
+          },
+          subscribe: (listener) => {
+            const sessionId = scope.sessionId
+            if (sessionId === undefined) return () => {}
+            return teamModePort.subscribe(sessionId, listener)
+          },
+          begin: () => {
+            if (!runner.isSessionScopeCurrent(scope)) {
+              return { kind: 'refused', reason: 'the Session changed since /model opened' }
+            }
+            const sessionId = scope.sessionId
+            if (sessionId === undefined || liveScope === undefined) {
+              return { kind: 'refused', reason: 'open a Session to change Agent Team mode' }
+            }
+            const snapshot = teamModePort.read(sessionId)
+            if (snapshot.kind !== 'ready') return { kind: 'refused', reason: snapshot.reason }
+            // A Team write already owns the surface: never admit a second one
+            // while a confirmation is pending or a write is unsettled.
+            if (teamWriteInFlight) {
+              return { kind: 'refused', reason: 'a Team write is already in progress' }
+            }
+            const enabled = !snapshot.enabled
+            // The latch is owned for the WHOLE admitted gesture, not one run:
+            // a confirmation Retry reuses this same attempt and must stay
+            // inside the same single-writer admission. It is released only by
+            // an explicit `abandon()` once no run is executing.
+            let released = false
+            let state: 'admitted' | 'running' | 'settled' = 'admitted'
+            let abandonRequested = false
+            const release = (): void => {
+              if (released) return
+              released = true
+              teamWriteInFlight = false
+            }
+            const abandon = (): void => {
+              if (released) return
+              // Never relinquish the latch while a Host request is executing;
+              // defer the release until the in-flight run settles.
+              if (state === 'running') {
+                abandonRequested = true
+                return
+              }
+              release()
+            }
+            teamWriteInFlight = true
+            return {
+              kind: 'admitted',
+              attempt: {
+                enabled,
+                // OFF may touch a Session whose model request history is
+                // recorded; that fact comes ONLY from the official projection.
+                confirmRequired: enabled === false && snapshot.modelRequestHistory === 'recorded',
+                abandon,
+                run: async () => {
+                  if (released) {
+                    return { kind: 'cancelled', reason: 'the Team gesture was already released; start a new one' }
+                  }
+                  state = 'running'
+                  try {
+                    if (!runner.isSessionScopeCurrent(scope)) {
+                      return { kind: 'cancelled', reason: 'the Session changed; no Team write was sent' }
+                    }
+                    const fresh = teamModePort.read(sessionId)
+                    if (fresh.kind !== 'ready') return { kind: 'rejected', reason: fresh.reason }
+                    // A fresh official read already proving the target is the
+                    // settlement: never append a duplicate `team/mode` event.
+                    if (fresh.enabled === enabled) return { kind: 'committed' }
+                    try {
+                      // The SAME Session writer barrier the model write uses.
+                      return await runner.withWriter(
+                        liveScope,
+                        () => teamModePort.setEnabled(sessionId, enabled, runner.signal),
+                      )
+                    } catch (error) {
+                      // Both refusals are proven pre-dispatch: nothing was sent.
+                      if (error instanceof TransitionInProgressError) {
+                        return { kind: 'cancelled', reason: 'another Session operation is in progress; try again' }
+                      }
+                      if (error instanceof SessionScopeSupersededError) {
+                        return { kind: 'cancelled', reason: 'the Session changed before the Team write' }
+                      }
+                      return {
+                        kind: 'indeterminate',
+                        reason: `the Team write could not be dispatched: ${safeErrorMessage(error)}`,
+                      }
+                    }
+                  } finally {
+                    state = 'settled'
+                    if (abandonRequested) release()
+                  }
+                },
+              },
+            }
+          },
+        }
+        // ONE request object for BOTH presentations: the quick menu and the full
+        // catalogue share the same subject, entry hint, read owner, writer and
+        // currentness fence, so no quick path can grow a second authority.
+        const request: ModelPickerRequest = {
           subject,
           entry,
+          ...(teamControl === undefined ? {} : { team: teamControl }),
           isCurrent: () => surfaceToken === modelSurfaceToken && ownerCurrent(),
           retry: () => loadOnce(),
           // The picker owns presentation only: brand the effort id here so the
@@ -310,7 +508,10 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
           runOwned: <T>(label: string, task: () => T | Promise<T>, options: Omit<OwnedTaskOptions<T>, 'diag' | 'sessionId'>) => {
             runOwned(label, task, { ...options, diag: runner.diag, sessionId: () => runner.currentSessionId })
           },
-        })
+        }
+        const picker = effectiveMode === 'quick'
+          ? presentation.openQuick!(request)
+          : presentation.open(request)
         const closer = () => { if (surfaceToken === modelSurfaceToken) picker.close() }
         /** Read (or re-read) the directory through the original owner. Never a
          *  second catalog read: the same `loadDirectory`, scope, signal, token
@@ -350,8 +551,12 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
               }
               if (picker.isDisposed()) return
               // An authoritative Host read reconciles a lingering UNRESOLVED
-              // sessionless default intent (v2 §0.3.2) — the read is the truth.
+              // sessionless default intent (v2 §0.3.2) through the ONE shared
+              // confirm-only rule; a matching snapshot may have just cleared a
+              // stale marker, so the status bar is refreshed here too — the
+              // picker paint alone never recomputes the footer.
               runner.reconcileDefaultIntent(directory.default)
+              runner.refreshStatus()
               const sessionId = runner.currentSessionId
               picker.setDirectory({
                 directory,
@@ -389,9 +594,9 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
     registerOne({
       name: 'model',
       description: 'Switch the model (and reasoning effort) for this session; before a session exists, change the default when supported',
-      // The registered command and the command-only UI entry (`openModel`)
-      // share ONE body: the same scope capture, the same catalog reader, the
-      // same writer and the same presentation tokens.
+      // The registered command and the command-only UI entries (`openModel`,
+      // `openModelQuick`) share ONE body: the same scope capture, the same
+      // catalog reader, the same writer and the same presentation tokens.
       handler: () => openModel('models'),
     })
   }
@@ -903,5 +1108,11 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
     })
   }
 
-  return { registerModel, registerYolo, registerPreset, openModel }
+  return {
+    registerModel,
+    registerYolo,
+    registerPreset,
+    openModel,
+    openModelQuick: () => openModel('models', 'quick'),
+  }
 }

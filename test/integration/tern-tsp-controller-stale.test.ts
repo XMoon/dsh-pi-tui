@@ -121,6 +121,9 @@ async function runQueuedSubmitAcrossOwnerChange(options: {
       generation: () => core.generation(),
       captureSubject: () => core.subject(),
       transitionPending: () => false,
+      awaitTransitionSettled: async () => {},
+      beginNavigationIntent: () => () => {},
+      soleNavigationIntentPending: () => false,
     },
     scope: {
       captureLive: () => ({ sessionId: 'session-a', subject: {}, generation: core.generation() }),
@@ -138,6 +141,7 @@ async function runQueuedSubmitAcrossOwnerChange(options: {
       withWriter: async (_scope: unknown, task: () => Promise<unknown>) => task(),
       submitPrompt: async () => {},
       deferQueueRecall: () => {},
+      settleQueueRecalls: () => {},
     },
     command: deepInert,
     commandPlane: { available: () => false, execute: async () => undefined },
@@ -377,6 +381,7 @@ async function runClientCommandErrorAcrossOwnerChange(options: {
       generation: () => core.generation(),
       captureSubject: () => core.subject(),
       transitionPending: () => false,
+      awaitTransitionSettled: async () => {},
     },
     scope: {
       captureLive: () => ({ sessionId: 'session-a', subject: {}, generation: core.generation() }),
@@ -394,6 +399,7 @@ async function runClientCommandErrorAcrossOwnerChange(options: {
       withWriter: async (_scope: unknown, task: () => Promise<unknown>) => task(),
       submitPrompt: async () => {},
       deferQueueRecall: () => {},
+      settleQueueRecalls: () => {},
     },
     command: {
       wasAdvertisedClaim: () => false,

@@ -246,11 +246,11 @@ test('questions.answerContinued maps the official RemoteResult and preserves the
   }
 })
 
-test('setApprovalPolicy fails closed (no public rc.2 carrier) and approval rides the forwarded waterfall', () => {
+test('approval rides the forwarded waterfall (the policy write moved to the session-policy port)', () => {
   const remote = fakeRemote()
   const { port } = portWith(remote)
-  assert.equal(port.setApprovalPolicy('session-a', 'ask'), false)
-  assert.equal(port.setApprovalPolicy('session-a', 'never'), false)
+  assert.equal('setApprovalPolicy' in (port as object), false,
+    'the retired synchronous approval-policy write is gone (M6-1 F8: the Remote session-policy port owns it)')
   const seen: unknown[] = []
   port.onApprovalRequest((request) => { seen.push(request); return 'ok' })
   const handler = remote.listeners.get('approval/request')

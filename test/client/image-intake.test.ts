@@ -7,12 +7,12 @@
  */
 
 import assert from 'node:assert/strict'
-import { symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
-import { ImageDimensionError, ImageTooLargeError, UnsupportedImageTypeError } from '../../src/domain/media/errors.ts'
+import { ImageDimensionError, ImageInputError, ImageTooLargeError, UnsupportedImageTypeError } from '../../src/domain/media/errors.ts'
 import {
   INTAKE_SAFETY_MAX_BYTES, checkImageLimits, expandHome, parseImageMetadata, readImageFile, resolveImagePath, sniffMediaType,
 } from '../../src/client/media/image/intake.ts'
@@ -244,4 +244,29 @@ test('readImageFile without limits still applies the TUI safety cap (review find
   assert.equal(intake.width, 10)
   // An over-cap file is refused BEFORE the read.
   await assert.rejects(readImageFile(file, dir, undefined, 4), ImageTooLargeError)
+})
+
+test('a file that loses read access after resolution reports the basename only', async (t) => {
+  const life = testLifecycle(t)
+  if (process.getuid?.() === 0) {
+    t.skip('root can read a mode-000 file')
+    return
+  }
+  const root = life.tempDir('dsh-image-midread-')
+  const file = join(root, 'gone.png')
+  writeFileSync(file, pngBytes(4, 4))
+  chmodSync(file, 0o000)
+  try {
+    await assert.rejects(
+      () => readImageFile(file, root, LIMITS),
+      (error: unknown) => {
+        assert.ok(error instanceof ImageInputError, `expected ImageInputError, got ${String(error)}`)
+        assert.equal(error.message, 'Image file cannot be read: gone.png')
+        assert.equal(error.message.includes(root), false, 'the full private path never reaches the message')
+        return true
+      },
+    )
+  } finally {
+    chmodSync(file, 0o600)
+  }
 })

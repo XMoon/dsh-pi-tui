@@ -23,6 +23,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { unavailableAcpAccess, unavailableWebAccess, unavailableMcpServers } from '../support/web-access-fake.ts'
 import { afterEach, test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
@@ -44,6 +45,7 @@ import { DraftFileStore } from '../../src/client/media/attachment/file-draft.ts'
 import { SessionScopeSupersededError } from '../../src/app/session/scope.ts'
 import type { TuiCommandRunner } from '../../src/commands.ts'
 import type { HumanSkillCatalog } from '../../src/domain/catalog/skill.ts'
+import { unconfiguredPolicyObservation, unconfiguredSessionPolicyPort } from '../support/session-policy-fake.ts'
 
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => { disposeStartedApps() })
@@ -111,11 +113,19 @@ function setup(mode: Mode): Harness {
   }) as unknown as typeof app.openSettings
 
   const runner: TuiCommandRunner = {
+
+    webAccess: unavailableWebAccess(),
+
+    acpAccess: unavailableAcpAccess(),
+
+    mcpServers: unavailableMcpServers(),
     deliveredFilesSnapshot: () => undefined,
     ctx,
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
     ...sessionScopeFacts(() => agent, () => 1, skillSource as never),
+    sessionPolicy: unconfiguredSessionPolicyPort(),
+    policy: unconfiguredPolicyObservation(),
     backendKind: 'remote',
     currentSessionId: 'session-a',
     ensureSession: async () => {},
@@ -140,8 +150,7 @@ function setup(mode: Mode): Harness {
     commandRegistry: undefined,
     clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
-    hostShellCompletion: true,
-    transcriptExportAvailable: true,
+    hostShellCompletion: { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) },
     interaction: {
       questions: {
         onRequest: () => true,
@@ -151,8 +160,7 @@ function setup(mode: Mode): Harness {
         answerContinued: async () => 'not-continued' as const,
       },
       onApprovalRequest: () => {},
-      setApprovalPolicy: () => true,
-    } as never,
+      } as never,
     sessionWriter: {
       prompt: async (sessionId: string, message: unknown, writeMode: string) => {
         prompts.push({ line: typeof message === 'string' ? message : JSON.stringify(message), mode: writeMode })
@@ -203,7 +211,7 @@ function setup(mode: Mode): Harness {
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, createPluginManagerPage: () => undefined,
+    openTasksBrowser: () => {}, openScheduleWorkspace: () => ({ kind: 'success' } as const), createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),

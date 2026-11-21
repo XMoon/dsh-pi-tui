@@ -243,6 +243,8 @@ export default async function reporter(source, options) {
 
   human.end()
   await new Promise(resolve => human.on('end', resolve))
-  machine?.end()
-  await new Promise(resolve => machine?.on('finish', resolve))
+  if (machine !== undefined) {
+    machine.end()
+    await new Promise(resolve => machine.on('finish', resolve))
+  }
 }

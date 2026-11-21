@@ -825,10 +825,11 @@ function requestHeaderEvent(provider: string, model: string, reasoningEffort?: s
   }
 }
 
-/** The ONE real Direct owner, with a distinctly-labelled global default so a
- *  leak is visible. */
-function modelOwner(defaultSelection?: { provider: string; model: string }) {
-  return new DirectModelSelectionOwner({ currentSelection: () => defaultSelection })
+/** The ONE real Direct owner. Selection reads now come from each Agent's own
+ *  upstream `AgentModel`; this fixture only needs the durable request-header
+ *  reader, so a leftover global default is proven in the assertions instead. */
+function modelOwner(_defaultSelection?: { provider: string; model: string }) {
+  return new DirectModelSelectionOwner()
 }
 
 test('an ABSENT modelSelection key reads THIS child Session’s own request header, other facts intact', () => {

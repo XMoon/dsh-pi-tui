@@ -7,10 +7,12 @@
  */
 
 import { Command } from 'commander'
-import { readFileSync, realpathSync } from 'node:fs'
+import { closeSync, mkdirSync, openSync, readFileSync, realpathSync, writeSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { parseCmdline } from '@deepseek-ai/dsh-cmdline'
+import z from '@deepseek-ai/schemastery'
 import compatMatrix from './dsh-compat-matrix.json' with { type: 'json' }
 
 // ── Inline version helpers (startup must stay a ZERO-DEPENDENCY island) ────
@@ -240,12 +242,30 @@ export function bundleVersionLabel(since: string): string {
   }
 }
 
+/** The official Profile identity composed by the DSH Profile Loader for this
+ * process. Startup messages must name the Profile the user actually launched;
+ * the fixed `pi-tui` help examples are not a runtime identity. */
+function runningProfileName(ctx: Context): string {
+  const name = (ctx.get('profileContext') as { readonly name?: unknown } | undefined)?.name
+  if (typeof name !== 'string' || name === '') {
+    throw new Error('dsh-pi-tui startup: ctx.profileContext.name is required')
+  }
+  return name
+}
+
+/** POSIX-safe single-argument quoting for a copy-paste recovery command. This
+ * module is a zero-dependency island, so the one small formatter stays here. */
+function shellQuoteProfile(profile: string): string {
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/u.test(profile)) return profile
+  return `'${profile.replace(/'/gu, `'\\''`)}'`
+}
+
 /** The actionable compatibility notice printed when the installed harness
  * falls in an incompatible range. `entry` MUST be the entry
  * {@link harnessCompatEntryFor} matched for `installed`. The notice is
  * advisory: DSH Loader mounts profile entries concurrently, so this row cannot
  * guarantee that its output precedes another row's import failure. */
-export function incompatibleHarnessMessage(installed: string, entry: HarnessCompatEntry): string {
+export function incompatibleHarnessMessage(installed: string, entry: HarnessCompatEntry, profile: string): string {
   const recovery: string[] = []
   if (entry.upgradeDsh !== undefined) {
     recovery.push(
@@ -256,7 +276,7 @@ export function incompatibleHarnessMessage(installed: string, entry: HarnessComp
   if (entry.fallbackTui !== undefined) {
     recovery.push(
       'Or keep your current Harness and use the compatible TUI line:',
-      `  dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@${entry.fallbackTui}`,
+      `  dsh plugin --profile ${shellQuoteProfile(profile)} -- add @xmoon76/dsh-pi-tui@${entry.fallbackTui}`,
     )
   }
   if (entry.guidance !== undefined) recovery.push(entry.guidance)
@@ -265,19 +285,41 @@ export function incompatibleHarnessMessage(installed: string, entry: HarnessComp
     `but this installation is running dsh ${installed}.`,
     '',
     ...(recovery.length === 0 ? [] : ['Choose one:', '', ...recovery]),
-    'Then re-run: dsh --profile pi-tui',
+    `Then re-run: dsh --profile ${shellQuoteProfile(profile)}`,
   ].join('\n')
 }
 
 /** Service provided by this plugin and injected by the TUI runner row. */
 export const TUI_STARTUP_SERVICE = 'tuiStartup'
 
+/**
+ * The ONE immutable Session-launch intent `--session <id-or-query>` /
+ * `-c, --continue` parsed. It is resolved against the official Host Session
+ * roster by the runner; it never replaces the exact `sessionId` identity field
+ * used by the internal split-Client channel.
+ */
+export type CliSessionLaunchIntent =
+  /** Bare `--session`, an explicitly empty value, or a whitespace-only query:
+   *  open the Session Browser on Browse All. */
+  | { readonly kind: 'browse'; readonly query: string }
+  /** Any other non-blank value: resolve it as a full/listed id or a unique
+   *  short prefix, otherwise seed the same Browser search with it. */
+  | { readonly kind: 'lookup'; readonly query: string }
+  /** `-c, --continue`: continue the newest readable main Session in the
+   *  CONFIRMED Host Workspace. */
+  | { readonly kind: 'continue' }
+
 /** What the runner row reads from {@link TUI_STARTUP_SERVICE}. */
 export interface TuiStartupValues {
-  /** `--session`, absent when the invocation did not name one. */
+  /** The EXACT Session identity of the internal split-Client channel. The
+   *  public `--session` grammar never fills this field: production CLI
+   *  launches carry {@link sessionLaunch} instead. */
   sessionId?: string
   /** `--preset`, the agent preset a fresh session starts on. */
   presetId?: string
+  /** The public CLI Session launch intent, absent on a plain cold start. It is
+   *  mutually exclusive with the exact fields above. */
+  sessionLaunch?: CliSessionLaunchIntent
   /**
    * Mark the TUI required surface as mounted. `src/index.ts` calls this once
    * its synchronous initialization succeeded and its async startup root is
@@ -291,33 +333,484 @@ export interface TuiStartupValues {
 }
 
 /**
- * The actionable error for a committed startup whose TUI surface never
- * mounted. The launcher proved the tree booted, but `--profile pi-tui` asked
- * for this surface, so the outcome is an error rather than an optional plugin
- * warning.
+ * Service provided when the invocation selects the local daemon backend
+ * (M6-2A). The daemon-launcher row injects it, launches exactly one foreground
+ * Client OS process, and waits for its real exit.
  */
-function surfaceNotMountedMessage(): string {
+export const TUI_DAEMON_STARTUP_SERVICE = 'tuiDaemonStartup'
+
+/**
+ * The ONE public backend selector (M6-2A). `direct` keeps the in-process TUI
+ * of earlier releases; `daemon` launches one foreground Client against a local
+ * Host. The value is chosen per cold launch from the environment override or
+ * the persisted Profile Config — never a CLI flag and never a hot switch.
+ */
+export type PublicBackend = 'direct' | 'daemon'
+
+/** The environment variable that overrides the persisted Profile backend for
+ *  one cold launch. It is never written back to the Profile. */
+const BACKEND_ENV = 'DSH_PI_TUI_BACKEND'
+
+/** The public daemon management verbs (M6-2C). */
+export type DaemonControlVerb = 'status' | 'start' | 'stop' | 'restart' | 'logs' | 'install' | 'uninstall'
+
+/** One immutable daemon management intent parsed by the nested CLI grammar. */
+export interface DaemonControlIntent {
+  readonly verb: DaemonControlVerb
+  /** `logs` only: a validated integer in 1..1000. */
+  readonly lines?: number
+}
+
+/** The client-launch arm of {@link TuiDaemonStartupValues}. */
+export interface TuiDaemonClientStartup {
+  readonly kind: 'client'
+  /** The public CLI Session launch intent, resolved Client-locally against the
+   *  official Host roster (never an exact-id field). */
+  readonly sessionLaunch?: CliSessionLaunchIntent
+  /** `--preset`, the agent preset a fresh session starts on. */
+  readonly presetId?: string
+  /**
+   * The read-only public-backend choice for THIS launch: its value and whether
+   * the environment overrode the Profile. Carried to the Client so its Settings
+   * row can show the real "environment override" source WITHOUT depending on the
+   * deliberately-cleared `DSH_PI_TUI_BACKEND` (and never persisted).
+   */
+  readonly backendSource?: { readonly value: PublicBackend; readonly source: 'env' | 'profile' }
+  /**
+   * Mark the daemon Coordinator (the launcher row) as mounted. The readiness
+   * handshake the daemon branch registers exits nonzero when readiness commits
+   * without it — i.e. the launcher row is missing, failed or pending on
+   * `tuiDaemonStartup`. Optional so structural test providers may omit it.
+   */
+  markCoordinatorMounted?(): void
+}
+
+/** The management arm: no TUI, no Client, exactly one operation. */
+export interface TuiDaemonControlStartup {
+  readonly kind: 'control'
+  readonly control: DaemonControlIntent
+  /** Same one-shot cold-ready handshake as the client arm. */
+  markCoordinatorMounted?(): void
+}
+
+/** The public headless Web CLI verbs (M6 Web CLI). */
+export type WebControlVerb = 'status' | 'enable' | 'disable' | 'url' | 'open'
+
+/** One immutable headless Web control intent parsed by the nested CLI grammar. */
+export interface WebControlIntent {
+  readonly verb: WebControlVerb
+}
+
+/** The headless Web CLI arm: no TUI, no Client, no Host start. */
+export interface TuiWebControlStartup {
+  readonly kind: 'web-control'
+  readonly control: WebControlIntent
+  /** Same one-shot cold-ready handshake as the client arm. */
+  markCoordinatorMounted?(): void
+}
+
+/** What the daemon-launcher row reads from {@link TUI_DAEMON_STARTUP_SERVICE}. */
+export type TuiDaemonStartupValues = TuiDaemonClientStartup | TuiDaemonControlStartup | TuiWebControlStartup
+
+/**
+ * The row's Profile Config: the persisted backend selector. `.volatile()`
+ * projects the field into the official Settings form and keeps it live-editable
+ * (M6-2A writes it through the official revision-checked settings mutation); the
+ * selector reads it back via `config.backend.get()` at cold launch. The value is
+ * a plain string on purpose: an out-of-band illegal value then fails closed in
+ * THIS row with an explicit reason, instead of a Loader schema rejection that
+ * would also block an explicit environment override.
+ */
+export interface Config {
+  readonly backend: { readonly get: () => string }
+}
+export const Config: z<Config> = z.object({
+  backend: z.string().default('direct').volatile(),
+}) as unknown as z<Config>
+
+/** A fail-closed backend-decision error: a stable code plus an actionable line.
+ *  It is delivered on stderr and exits nonzero before any startup side effect. */
+interface BackendDecisionError {
+  readonly kind: 'error'
+  readonly code: string
+  readonly message: string
+}
+
+/** Resolve the daemon platform/tty prerequisite, or undefined when satisfiable.
+ *  Daemon is a local Linux/macOS foreground process that owns a real
+ *  interactive TTY; any other OS or a non-interactive launch must fail closed
+ *  with a reason. The Host process itself is not launched here. */
+function daemonPrerequisiteError(): BackendDecisionError | undefined {
+  if (process.platform !== 'linux' && process.platform !== 'darwin') {
+    return {
+      kind: 'error',
+      code: 'unsupported-platform',
+      message: `the daemon backend is only supported on Linux and macOS (this is ${process.platform}); use DSH_PI_TUI_BACKEND=direct or unset it`,
+    }
+  }
+  if (process.stdin.isTTY !== true || process.stdout.isTTY !== true) {
+    return {
+      kind: 'error',
+      code: 'no-interactive-tty',
+      message: 'the daemon backend requires an interactive terminal: both stdin and stdout must be a TTY (input and output terminal capabilities are checked separately)',
+    }
+  }
+  return undefined
+}
+
+/** Read the persisted Profile backend. An absent config (a structural test
+ *  provider mounting the row without the Loader schema) resolves to the schema
+ *  default, so a bare `apply(ctx)` keeps the historical Direct behavior. */
+function profileBackendOf(config: Config | undefined): string {
+  const ref = config?.backend
+  if (ref === undefined || typeof ref.get !== 'function') return 'direct'
+  return ref.get()
+}
+
+/**
+ * The ONE frozen public-backend decision for a cold launch.
+ *
+ * Precedence is fixed (plan §5): `DSH_PI_TUI_BACKEND` > Profile backend >
+ * `direct`. An empty or unknown environment value is an illegal input, never
+ * "unset" and never a Direct fallback. An illegal Profile value fails closed
+ * unless an explicit valid environment value overrides it for this launch.
+ */
+function resolveBackendDecision(config: Config | undefined): { kind: 'ok'; backend: PublicBackend; source: 'env' | 'profile' } | BackendDecisionError {
+  const envRaw = process.env[BACKEND_ENV]
+  if (envRaw !== undefined) {
+    if (envRaw === 'direct' || envRaw === 'daemon') {
+      if (envRaw === 'daemon') {
+        const error = daemonPrerequisiteError()
+        if (error !== undefined) return error
+      }
+      return { kind: 'ok', backend: envRaw, source: 'env' }
+    }
+    // Empty string or any other value is an illegal input, not "unset".
+    return {
+      kind: 'error',
+      code: 'invalid-backend',
+      message: `${BACKEND_ENV} must be "direct" or "daemon" (got ${JSON.stringify(envRaw)})`,
+    }
+  }
+  const profileRaw = profileBackendOf(config)
+  if (profileRaw === 'direct' || profileRaw === 'daemon') {
+    if (profileRaw === 'daemon') {
+      const error = daemonPrerequisiteError()
+      if (error !== undefined) return error
+    }
+    return { kind: 'ok', backend: profileRaw, source: 'profile' }
+  }
+  return {
+    kind: 'error',
+    code: 'invalid-backend',
+    message: `the tui-startup Profile backend must be "direct" or "daemon" (got ${JSON.stringify(profileRaw)})`,
+  }
+}
+
+/** The actionable error for a committed daemon startup whose Coordinator never
+ *  mounted. The launcher row is missing, failed or still pending on
+ *  `tuiDaemonStartup`; DSH treats that as an optional plugin failure, so the
+ *  explicitly requested launch owns the verdict. */
+function coordinatorNotMountedMessage(profile: string): string {
   return [
-    `dsh-pi-tui ${bundleVersionLabel(CURRENT_DSH_REQUIREMENT.since)} was invoked with --profile pi-tui, but the required TUI surface did not mount.`,
-    'The tui-app row failed to import/apply or stayed pending on a dependency (see the loader warnings above); DSH app-boot treats that as an optional plugin failure.',
-    'This installation cannot run the terminal UI; reinstall the profile or fix its composition, then re-run: dsh --profile pi-tui',
+    `dsh-pi-tui ${bundleVersionLabel(CURRENT_DSH_REQUIREMENT.since)} was invoked for the daemon backend, but the daemon launcher row did not mount.`,
+    'The pi-tui-daemon-launcher row failed to import/apply or stayed pending on tuiDaemonStartup (see the loader warnings above); DSH app-boot treats that as an optional plugin failure.',
+    `This installation cannot start the daemon TUI; reinstall the profile or fix its composition, then re-run: DSH_PI_TUI_BACKEND=daemon dsh --profile ${shellQuoteProfile(profile)}`,
   ].join('\n')
 }
 
+/**
+ * The actionable error for a committed startup whose TUI surface never
+ * mounted. The launcher proved the tree booted, but this Profile asked for
+ * this surface, so the outcome is an error rather than an optional plugin
+ * warning.
+ */
+function surfaceNotMountedMessage(profile: string): string {
+  return [
+    `dsh-pi-tui ${bundleVersionLabel(CURRENT_DSH_REQUIREMENT.since)} was invoked with --profile ${shellQuoteProfile(profile)}, but the required TUI surface did not mount.`,
+    'The tui-app row failed to import/apply or stayed pending on a dependency (see the loader warnings above); DSH app-boot treats that as an optional plugin failure.',
+    `This installation cannot run the terminal UI; reinstall the profile or fix its composition, then re-run: dsh --profile ${shellQuoteProfile(profile)}`,
+  ].join('\n')
+}
+
+/** Force every Commander usage rejection below `command` onto the fixed
+ *  `CLI_USAGE` exit code (2) without changing its printed text. `parseCmdline`
+ *  maps a thrown `CommanderError` to `ctx.appExit(error.exitCode)`. */
+function withUsageExitCode(command: Command): Command {
+  const original = command.error.bind(command)
+  command.error = ((message: string, options?: { readonly exitCode?: number; readonly code?: string }) =>
+    original(message, { ...options, exitCode: 2 })) as Command['error']
+  return command
+}
+
+/** Reject the public Session launch flags on a management invocation.
+ *  Commander parses root options before the subcommand, so a flag placed before
+ *  the verb reaches this action instead of being an unknown subcommand option. */
+function rejectSessionFlags(program: Command, command: Command, family: 'daemon' | 'web'): void {
+  const options = program.opts<{ session?: string | boolean; continue?: boolean; preset?: string }>()
+  if (options.continue === true || options.session !== undefined || options.preset !== undefined) {
+    command.error(`error: --session, --continue and --preset are only valid for a normal TUI launch, not with ${family} commands`)
+  }
+}
+
 /** This app's command: its flags, its description, and its help text. */
-function tuiCommand(): Command {
-  return new Command()
+function tuiCommand(ctx: Context): Command {
+  const program = new Command()
     .name('dsh --profile pi-tui')
     .description('Run the DeepSeek Harness terminal UI.')
     .helpOption('-h, --help', 'show this help')
-    .option('--session <id>', 'resume an existing session instead of creating one')
+    .option('--session [id-or-query]', 'open the session browser; a full session id or a listed unique prefix resumes it')
+    .option('-c, --continue', 'continue the most recent session in the confirmed workspace')
     .option('--preset <id>', 'agent preset for a fresh session (falls back to $DSH_PI_TUI_PRESET, then the saved default)')
-    .addHelpText('after', `
+
+  // The daemon management grammar is nested under the ONE existing command; it
+  // never changes backend selection and never opens the TUI/Client.
+  const daemon = withUsageExitCode(program.command('daemon').description('Manage the local daemon Host for this profile.'))
+  daemon.action(() => {
+    daemon.error('error: a daemon command is required (status, start, stop, restart, logs, install or uninstall)')
+  })
+  const addControlVerb = (
+    name: DaemonControlVerb,
+    description: string,
+    configure?: (command: Command) => void,
+  ): Command => {
+    const command = withUsageExitCode(daemon.command(name).description(description))
+    configure?.(command)
+    command.action((options: { readonly lines?: string } = {}) => {
+      rejectSessionFlags(program, command, 'daemon')
+      // A Host-only process must never acquire the public management route: it
+      // already owns the Host business and would recurse into a second
+      // supervisor. Reject before publishing any service.
+      if (isHostOnlyRole()) command.error('error: daemon management commands are not available in a Host-only process')
+      let lines: number | undefined
+      if (options.lines !== undefined) {
+        if (!/^[0-9]+$/u.test(options.lines)) command.error('error: --lines must be an integer between 1 and 1000')
+        const parsed = Number(options.lines)
+        if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 1000) {
+          command.error('error: --lines must be an integer between 1 and 1000')
+        }
+        lines = parsed
+      }
+      publishDaemonControl(ctx, { verb: name, ...(lines === undefined ? {} : { lines }) })
+    })
+    return command
+  }
+  addControlVerb('status', 'show the manager, unit, Host readiness and compatibility of this profile')
+  addControlVerb('start', 'start the profile Host and wait until it is authenticated')
+  addControlVerb('stop', 'stop this profile Host through its verified supervision owner')
+  addControlVerb('restart', 'stop the profile Host, confirm its exit, then start a new instance')
+  addControlVerb('logs', 'show the current Host log source (systemd journal, launchd logs or the scope host.log)', command => {
+    command.option('--lines <count>', 'number of log lines to show (1-1000, default 100)')
+  })
+  addControlVerb('install', 'install this profile service definition (systemd unit or launchd plist) without starting it')
+  addControlVerb('uninstall', 'remove only this profile managed service definition')
+  daemon.addHelpText('after', `
+Examples:
+  dsh --profile pi-tui daemon status
+  dsh --profile pi-tui daemon start
+  dsh --profile pi-tui daemon stop
+  dsh --profile pi-tui daemon restart
+  dsh --profile pi-tui daemon logs --lines 200
+  dsh --profile pi-tui daemon install
+  dsh --profile pi-tui daemon uninstall
+`)
+
+  // The headless Web CLI is nested under the same ONE command. It never selects
+  // the Direct/daemon backend and never opens a TUI/Client/Host: each verb
+  // publishes one immutable web-control intent for the manager row.
+  const web = withUsageExitCode(program.command('web').description('Inspect or control the running Host\'s official Web frontend.'))
+  web.action(() => {
+    web.error('error: a web command is required (status, enable, disable, url or open)')
+  })
+  const addWebVerb = (name: WebControlVerb, description: string): Command => {
+    const command = withUsageExitCode(web.command(name).description(description))
+    command.action(() => {
+      rejectSessionFlags(program, command, 'web')
+      // A Host-only process already owns the Host business and must never
+      // acquire the public management route.
+      if (isHostOnlyRole()) command.error('error: web commands are not available in a Host-only process')
+      publishDaemonService(ctx, { kind: 'web-control', control: { verb: name } })
+    })
+    return command
+  }
+  addWebVerb('status', 'show the running Host\'s Web frontend state')
+  addWebVerb('enable', 'enable the running Host\'s Web frontend')
+  addWebVerb('disable', 'disable the running Host\'s Web frontend')
+  addWebVerb('url', 'print the authenticated Web URL of the running Host')
+  addWebVerb('open', 'request the local browser opener for the authenticated Web URL')
+  web.addHelpText('after', `
+Examples:
+  dsh --profile pi-tui web status
+  dsh --profile pi-tui web enable
+  dsh --profile pi-tui web disable
+  dsh --profile pi-tui web url
+  dsh --profile pi-tui web open
+`)
+
+  program.addHelpText('after', `
 Examples:
   dsh --profile pi-tui                       start the terminal UI
-  dsh --profile pi-tui --session <id>        resume an existing session
-  dsh --profile pi-tui --preset minimal      fresh session on the minimal preset
+  dsh --profile pi-tui --session             browse all sessions
+  dsh --profile pi-tui --session mysql       search sessions for "mysql"
+  dsh --profile pi-tui --session <id>        resume a listed or full session id
+  dsh --profile pi-tui --continue            continue the last session in this workspace
+  dsh --profile pi-tui --session <id> --preset minimal
+  dsh --profile pi-tui daemon status         inspect the local daemon Host
+  dsh --profile pi-tui web status            inspect the Host's Web frontend
+  dsh --profile pi-tui web url               print the authenticated Web URL
 `)
+  return program
+}
+
+// ── TEMPORARY: official DSH model-listing console output ────────────────
+//
+// TEMPORARY DSH UPSTREAM WORKAROUND (dsh-v0.2.2-rc.1).
+// The official llm-deepseek-account and llm-deepseek-api-key model-listing
+// providers send routine catalog diagnostics through console.error/console.warn,
+// which corrupts the interactive TUI. Route only these tagged messages to a file.
+// REMOVE this interception after the upstream DSH release routes model-listing
+// diagnostics through a non-terminal log sink; verify both providers first.
+// Source: packages/llm/llm-deepseek/src/host.ts:createModelListingCache.
+
+/** The two official provider tags whose model-listing diagnostics leave the
+ * terminal. The tag is the provider plugin name in brackets, exactly as
+ * `createModelListingCache` builds it from its `owner` argument. */
+const MODEL_LISTING_TAGS: readonly string[] = [
+  '[llm-deepseek-account]',
+  '[llm-deepseek-api-key]',
+]
+
+/** One live model-listing log sink. `active` turns false when its last owner
+ * unloads, so a wrapper still held by another owner's later wrapper passes
+ * through instead of reopening a log this workaround no longer owns. */
+interface ModelListingLog {
+  /** Resolved once, when the first owner installs the interception. */
+  logPath: string
+  fileHandle?: number
+  fileDisabled: boolean
+  active: boolean
+}
+
+/**
+ * The process-wide interception. The workaround is a process-global resource:
+ * a row can be RE-APPLIED before its previous fiber unloads (HMR), so
+ * overlapping installs share ONE console chain and ONE log file instead of
+ * nesting wrappers. The log path is resolved once because it is process-scoped
+ * (`<pid>` plus `$DSH_HOME`).
+ */
+let modelListingLog: ModelListingLog | undefined
+let modelListingLogOwners = 0
+let restoreModelListingConsole: (() => void) | undefined
+
+/** Append one diagnostic line to the workaround's log, reporting whether the
+ * write succeeded. A failure disables the file sink for the rest of the
+ * process and lets the caller fall back to the original console. */
+function appendModelListingLine(log: ModelListingLog, tag: string, message: string): boolean {
+  if (log.fileDisabled) return false
+  if (log.fileHandle === undefined) {
+    try {
+      mkdirSync(dirname(log.logPath), { recursive: true })
+      log.fileHandle = openSync(log.logPath, 'a', 0o600)
+    } catch {
+      log.fileDisabled = true
+      return false
+    }
+  }
+  try {
+    writeSync(log.fileHandle, `${new Date().toISOString()} ${tag} ${message}\n`)
+    return true
+  } catch {
+    log.fileDisabled = true
+    return false
+  }
+}
+
+/** Replace `console.error`/`console.warn` with the diverting wrappers for one
+ * log sink and return the disposer that restores them. Only the verified
+ * `(tag, message)` shape of the two official provider tags is diverted; every
+ * other call is handed back to the method captured here. */
+function interceptModelListingConsole(log: ModelListingLog): () => void {
+  const intercept = (original: (...args: unknown[]) => void): (...args: unknown[]) => void => {
+    return (...args: unknown[]): void => {
+      const [tag, message] = args
+      if (log.active && args.length === 2 && typeof tag === 'string' && MODEL_LISTING_TAGS.includes(tag) && typeof message === 'string') {
+        if (appendModelListingLine(log, tag, message)) return
+      }
+      original.apply(console, args)
+    }
+  }
+
+  const originalError = console.error as (...args: unknown[]) => void
+  const originalWarn = console.warn as (...args: unknown[]) => void
+  const errorWrapper = intercept(originalError)
+  const warnWrapper = intercept(originalWarn)
+  console.error = errorWrapper
+  console.warn = warnWrapper
+
+  return () => {
+    // Restore only the methods this handler still owns: a later wrapper
+    // installed by another owner must survive this row's unload.
+    if (console.error === errorWrapper) console.error = originalError
+    if (console.warn === warnWrapper) console.warn = originalWarn
+    if (log.fileHandle !== undefined) {
+      try {
+        closeSync(log.fileHandle)
+      } catch {
+        // A closed descriptor is not a failure.
+      }
+      log.fileHandle = undefined
+    }
+  }
+}
+
+/**
+ * Route the two official providers' model-listing diagnostics to a file
+ * instead of the interactive terminal.
+ *
+ * The interception is deliberately narrow: only a `console.error`/`console.warn`
+ * call with exactly two arguments — one of the two provider tags and a string
+ * message — is diverted. Every other call is handed back to the original
+ * method untouched.
+ *
+ * The log file is opened lazily (only when the first matching line arrives),
+ * so a plain `--help` run or a session that never lists models leaves no
+ * empty file behind. A write failure falls back to the original console
+ * output: a broken diagnostics directory must never keep the TUI from
+ * starting, and the diagnostic must never disappear silently.
+ *
+ * @returns the disposer that releases this owner; the console methods are
+ * restored when the LAST owner unloads.
+ */
+function installModelListingLogInterceptor(): () => void {
+  if (modelListingLogOwners === 0) {
+    const log: ModelListingLog = {
+      logPath: join(
+        process.env.DSH_HOME !== undefined && process.env.DSH_HOME !== ''
+          ? process.env.DSH_HOME
+          : join(homedir(), '.dsh'),
+        'logs',
+        `dsh-model-listing-${process.pid}.log`,
+      ),
+      fileDisabled: false,
+      active: true,
+    }
+    modelListingLog = log
+    restoreModelListingConsole = interceptModelListingConsole(log)
+  }
+  modelListingLogOwners += 1
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    modelListingLogOwners -= 1
+    if (modelListingLogOwners > 0) return
+    const log = modelListingLog
+    modelListingLog = undefined
+    if (log !== undefined) log.active = false
+    const restore = restoreModelListingConsole
+    restoreModelListingConsole = undefined
+    restore?.()
+  }
 }
 
 /**
@@ -326,9 +819,56 @@ Examples:
  * nothing is provided, so no TUI row mounts.
  * @param ctx - plugin context carrying the command line.
  */
-export function apply(ctx: Context): void {
-  const program = tuiCommand()
+export function apply(ctx: Context, config?: Config): void {
+  const program = tuiCommand(ctx)
   program.action(() => {
+    // The CLI grammar is read and validated FIRST: a conflicting Session
+    // launch must fail before the model-listing interception, the
+    // compatibility notice, the readiness handshake, the startup service
+    // publication or any Host Session/Workspace side effect.
+    const options = program.opts<{ session?: string | boolean; continue?: boolean; preset?: string }>()
+    if (options.continue === true && options.session !== undefined) {
+      program.error('error: --session and --continue are mutually exclusive')
+    }
+    // The public CLI never fills the exact `sessionId` identity field: a bare
+    // (or explicitly blank) value browses, any non-blank value is a lookup the
+    // runner resolves against the official roster, and `-c` continues. The
+    // internal split-Client channel keeps publishing an exact `sessionId`
+    // directly (it does not run this action).
+    const sessionLaunch: CliSessionLaunchIntent | undefined = options.continue === true
+      ? { kind: 'continue' }
+      : options.session === undefined
+        ? undefined
+        : typeof options.session === 'string' && options.session.trim() !== ''
+          ? { kind: 'lookup', query: options.session.trim() }
+          : { kind: 'browse', query: '' }
+    // The real M4-A0 Host-only process keeps the historical `tuiStartup` Host
+    // overlay path unchanged: it never consumes the public backend selector.
+    if (!isHostOnlyRole()) {
+      // Resolve the ONE frozen public-backend decision BEFORE any side effect
+      // (no model-listing interception, no readiness handshake, no service
+      // publication, no Host Session/Workspace action). A fail-closed decision
+      // writes only a stable code plus an actionable line and exits nonzero.
+      const decision = resolveBackendDecision(config)
+      if (decision.kind === 'error') {
+        process.stderr.write(`\ndsh-pi-tui: cannot start (${decision.code}): ${decision.message}\n\n`)
+        ctx.get('appExit')?.(1)
+        return
+      }
+      if (decision.backend === 'daemon') {
+        publishDaemonStartup(ctx, sessionLaunch, options.preset, { value: decision.backend, source: decision.source })
+        return
+      }
+    }
+    // The model-listing interception is installed as early as the action
+    // allows: the provider's listing diagnostics arrive while the session
+    // connects, so the interception must be in place before this row
+    // publishes the startup service. `--help` never reaches the action, so
+    // the help path installs nothing. A Host-only process keeps its own
+    // standalone log behavior — the TUI must not change it.
+    if (!isHostOnlyRole()) {
+      ctx.effect(() => installModelListingLogInterceptor(), 'tui-startup model-listing log interception')
+    }
     // Startup compatibility notice: an incompatible harness (see
     // HARNESS_COMPAT) is outside this bundle's peer window, but this row must
     // not make the loader's concurrent mount ordering part of the contract.
@@ -341,7 +881,7 @@ export function apply(ctx: Context): void {
     if (installed !== undefined) {
       const entry = harnessCompatEntryFor(installed)
       if (entry !== undefined) {
-        const message = incompatibleHarnessMessage(installed, entry)
+        const message = incompatibleHarnessMessage(installed, entry, runningProfileName(ctx))
         process.stderr.write(`\n${message}\n\n`)
       }
     }
@@ -392,7 +932,7 @@ export function apply(ctx: Context): void {
         // and owns no startup verdict: the running application keeps running.
         if (!registrationReturned) return
         if (surfaceMounted) return
-        process.stderr.write(`\n${surfaceNotMountedMessage()}\n\n`)
+        process.stderr.write(`\n${surfaceNotMountedMessage(runningProfileName(ctx))}\n\n`)
         ctx.get('appExit')?.(1)
       })
       registrationReturned = true
@@ -403,12 +943,96 @@ export function apply(ctx: Context): void {
       // cancelled instead of judging a startup the row never witnessed.
       ctx.effect(() => () => { cancel() }, 'tui-startup readiness handshake')
     }
-    const options = program.opts<{ session?: string; preset?: string }>()
     ctx.provide(TUI_STARTUP_SERVICE, {
-      ...(options.session !== undefined ? { sessionId: options.session } : {}),
+      ...(sessionLaunch !== undefined ? { sessionLaunch } : {}),
       ...(options.preset !== undefined ? { presetId: options.preset } : {}),
       markSurfaceMounted: () => { surfaceMounted = true },
     } satisfies TuiStartupValues)
   })
   parseCmdline(ctx, program)
+}
+
+/** The actionable error for a committed management startup whose launcher row
+ *  never mounted. A missing/failed supervisor row must not look like a
+ *  successful management command. */
+function controlNotMountedMessage(): string {
+  return [
+    `dsh-pi-tui ${bundleVersionLabel(CURRENT_DSH_REQUIREMENT.since)} was invoked for a daemon management command, but the daemon launcher row did not mount.`,
+    'The pi-tui-daemon-launcher row failed to import/apply or stayed pending on tuiDaemonStartup (see the loader warnings above); DSH app-boot treats that as an optional plugin failure.',
+    'This installation cannot run daemon management commands; reinstall the profile or fix its composition, then re-run the command.',
+  ].join('\n')
+}
+
+/** The actionable error for a committed Web CLI startup whose launcher row
+ *  never mounted. A missing/failed supervisor must not look like a successful
+ *  web command, and the text must not claim the daemon TUI was requested. */
+function webControlNotMountedMessage(profile: string): string {
+  return [
+    `dsh-pi-tui ${bundleVersionLabel(CURRENT_DSH_REQUIREMENT.since)} was invoked for a web CLI command, but the daemon launcher row did not mount.`,
+    'The pi-tui-daemon-launcher row failed to import/apply or stayed pending on tuiDaemonStartup (see the loader warnings above); DSH app-boot treats that as an optional plugin failure.',
+    `This installation cannot run the web CLI; reinstall the profile or fix its composition, then re-run: dsh --profile ${shellQuoteProfile(profile)} web status`,
+  ].join('\n')
+}
+
+/**
+ * Publish the daemon startup service. The daemon-launcher row injects it,
+ * spawns exactly ONE foreground Client OS process and waits for its real exit.
+ *
+ * The daemon supervisor paints no TUI, so it installs no console interception
+ * and never arms the Direct surface handshake. It owns the compatibility notice
+ * and one `coordinatorMounted` cold-ready handshake: readiness that commits
+ * without the launcher row having mounted (missing/failed/pending) is an error,
+ * not a silent optional failure.
+ */
+function publishDaemonService(ctx: Context, values: TuiDaemonStartupValues): void {
+  const installed = installedDshVersion()
+  if (installed !== undefined) {
+    const entry = harnessCompatEntryFor(installed)
+    if (entry !== undefined) process.stderr.write(`\n${incompatibleHarnessMessage(installed, entry, runningProfileName(ctx))}\n\n`)
+  }
+  let coordinatorMounted = false
+  const ready = ctx.get('appReady')
+  if (ready !== undefined) {
+    let registrationReturned = false
+    const cancel = ready.onReady(() => {
+      // A callback that ran INSIDE `onReady` means readiness was committed
+      // before this row existed (an HMR re-apply); this row witnessed no
+      // startup and delivers no verdict.
+      if (!registrationReturned) return
+      if (coordinatorMounted) return
+      const message = values.kind === 'control'
+        ? controlNotMountedMessage()
+        : values.kind === 'web-control'
+          ? webControlNotMountedMessage(runningProfileName(ctx))
+          : coordinatorNotMountedMessage(runningProfileName(ctx))
+      process.stderr.write(`\n${message}\n\n`)
+      ctx.get('appExit')?.(1)
+    })
+    registrationReturned = true
+    ctx.effect(() => () => { cancel() }, 'tui-daemon-startup readiness handshake')
+  }
+  ctx.provide(TUI_DAEMON_STARTUP_SERVICE, {
+    ...values,
+    markCoordinatorMounted: () => { coordinatorMounted = true },
+  } satisfies TuiDaemonStartupValues)
+}
+
+function publishDaemonStartup(
+  ctx: Context,
+  sessionLaunch: CliSessionLaunchIntent | undefined,
+  presetId: string | undefined,
+  backendSource: { value: PublicBackend; source: 'env' | 'profile' } | undefined,
+): void {
+  publishDaemonService(ctx, {
+    kind: 'client',
+    ...(sessionLaunch !== undefined ? { sessionLaunch } : {}),
+    ...(presetId !== undefined ? { presetId } : {}),
+    ...(backendSource !== undefined ? { backendSource } : {}),
+  })
+}
+
+/** Publish the ONE management intent; the launcher row runs it once after the
+ *  real cold-ready commit and never opens the TUI/Client. */
+function publishDaemonControl(ctx: Context, control: DaemonControlIntent): void {
+  publishDaemonService(ctx, { kind: 'control', control })
 }

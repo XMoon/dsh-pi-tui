@@ -13,7 +13,7 @@ import test, { afterEach } from 'node:test'
 import { mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { CURSOR_MARKER, SettingsList, type SettingItem } from '@xmoon76/pi-tui'
+import { CURSOR_MARKER, SettingsList, stripTerminalSequences, type SettingItem } from '@xmoon76/pi-tui'
 import { customThemesDir, loadCustomTheme } from '../../src/client/theme/files.ts'
 import { darkColors } from '../../src/domain/display/theme.ts'
 import { settingsListTheme } from '../../src/tui/theme/runtime.ts'
@@ -629,7 +629,7 @@ test('ThemeSubmenu search Input click positions the search cursor (mouse parity)
   const result = menu.handleMouse(mouse('press', 4, 0, 80, 24))
   assert.ok(result?.handled, 'press on the search row must be handled')
   menu.handleInput('X')
-  const rendered = menu.render(80).map(line => line.replace(/\x1b\[[0-9;]*m/gu, '')).join('\n')
+  const rendered = menu.render(80).map(line => stripTerminalSequences(line)).join('\n')
   assert.ok(rendered.includes('daXrk'), 'typing after the click must insert at the clicked filter column')
 })
 

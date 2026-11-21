@@ -13,35 +13,25 @@
  * @module @xmoon76/dsh-pi-tui/tui/pickers/sessions
  */
 
+import { truncateToWidth } from '@xmoon76/pi-tui'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import {
   buildSessionTree,
+  findSessionMatch,
   sameWorkspace,
   sanitizeSessionSearchInput,
   sessionRowMatchesQuery,
+  shortSessionId,
 } from '../../domain/session/browser.ts'
 export {
   buildSessionTree,
+  findSessionMatch,
   sameWorkspace,
   sanitizeSessionSearchInput,
   SESSION_SEARCH_QUERY_MAX_CHARS,
   sessionRowMatchesQuery,
+  shortSessionId,
 } from '../../domain/session/browser.ts'
-
-/** First-batch size for the progressive projection loader: the visible
- * picker window fills immediately, then the remaining rows load behind it. */
-export const PROJECTION_FIRST_BATCH = 20
-/** Batch size for the remaining projection loads after the first batch. */
-export const PROJECTION_BATCH_SIZE = 50
-/** Content-search debounce (dsh-web parity): a filter must stay stable for
- * this long before the Host content search runs. */
-export const CONTENT_SEARCH_DEBOUNCE_MS = 250
-
-/** Strip the `session-` prefix and keep the first 8 characters, like the
- * kimicode card's short id. */
-export function shortSessionId(id: string): string {
-  return id.replace(/^session[-_]/i, '').slice(0, 8)
-}
 
 /** kimicode-style workspace key: the last two path segments, or a placeholder.
  * The cwd is a Host/persistence boundary value — the group header is
@@ -84,7 +74,8 @@ export interface SessionPickerRow {
   /** Effective agent preset id, when the row has been enriched. Initial
    * lightweight picker rows may omit it while projection replay is pending. */
   preset?: string
-  /** The session this one was forked from, when it has lineage. */
+  /** The parent Session id: retained subagent ancestry, or historical
+   * ordinary-fork metadata from before rc.1's independent-fork semantics. */
   parentSession?: string
   /** Subagent children carry the `sub` marker. */
   origin?: 'subagent'
@@ -121,6 +112,17 @@ export function sanitizeTerminalText(value: string): string {
   return sanitizedPhysicalLine(value)
 }
 
+/** Project the Session Browser's persisted error onto its shared one-row
+ * status/notice text. The raw-log suffix stays in diagnostics, not on screen. */
+export function sessionBrowserErrorNotice(kind: 'search' | 'projection', message: string): string {
+  const safe = sanitizeTerminalText(message).replace(/\s+\(raw log: .*\)$/u, '')
+  const unknownEvent = /contains event type "([^"]+)"/u.exec(safe)?.[1]
+  const text = unknownEvent === undefined
+    ? `${kind === 'search' ? 'Search failed' : 'Session details unavailable'}: ${safe}`
+    : `unknown event ${unknownEvent}`
+  return truncateToWidth(text, 40, '…')
+}
+
 /** Assemble one session row for the picker, marking the current session.
  * @param indent - tree depth for the "All" category: rows hang under their
  *   parent with a `└─` prefix so subagent lineage reads at a glance.
@@ -135,7 +137,9 @@ export function sessionPickerItem(row: SessionPickerRow, currentId: string, inde
   // session id) is projected like every other Host-derived label.
   const meta: string[] = [sanitizeTerminalText(shortSessionId(row.id)), formatSessionAge(row.createdAt ?? row.updatedAt)]
   if (row.origin === 'subagent') meta.push('sub')
-  if (row.parentSession !== undefined) meta.push('fork')
+  // `fork` is HISTORICAL ordinary-fork metadata only. A real subagent never
+  // gets it, and an rc.1 ordinary fork carries no parent at all.
+  else if (row.parentSession !== undefined) meta.push('fork')
   if (row.preset !== undefined) meta.push(`preset:${sanitizeTerminalText(row.preset)}`)
   if (row.live) meta.push('live')
   if (contentHit !== undefined) meta.push(`…${sanitizeTerminalText(contentHit.snippet)}…`)
@@ -145,28 +149,6 @@ export function sessionPickerItem(row: SessionPickerRow, currentId: string, inde
     description: meta.join(' · '),
     group: workspaceKey(row.cwd),
   }
-}
-
-/** Assemble one SEARCH-projection row: the browse presentation plus the
- * workspace in the searchable description. The search projection's
- * membership considers cwd, and the SelectList's substring filter searches
- * value/label/description only (never the group header) — so the search
- * view must carry the cwd in the description, or a cwd query would match
- * the union yet stay invisible. */
-export function sessionSearchItem(
-  row: SessionPickerRow,
-  currentId: string,
-  indent = 0,
-  contentHit?: SessionContentHit,
-): SessionPickerItem {
-  const item = sessionPickerItem(row, currentId, indent, contentHit)
-  // The cwd is a Host/persistence boundary value — sanitize it before it
-  // enters the searchable description (a raw ESC/C1/newline in a workspace
-  // path must never reach the terminal).
-  if (row.cwd !== undefined && row.cwd !== '') {
-    item.description = `${item.description} · ${sanitizeTerminalText(row.cwd)}`
-  }
-  return item
 }
 
 /**
@@ -183,22 +165,4 @@ export function sessionLabelParts(label: string): { prefix: string; title: strin
   const rest = label.slice(tree.length)
   const marker = rest.startsWith('● ') ? '● ' : ''
   return { prefix: tree + marker, title: rest.slice(marker.length) }
-}
-
-/**
- * Resolve one session row for a resume query: an exact id, a
- * `session-`-prefixed prefix, or a short-id prefix. Rows are newest-first,
- * so the first match is the most recent candidate.
- * @param rows - the picker rows, newest first.
- * @param query - the resume query (trimmed).
- * @returns the matching row, or undefined.
- */
-export function findSessionMatch(rows: readonly SessionPickerRow[], query: string): SessionPickerRow | undefined {
-  // Strip an optional session- prefix before prefix matching so both
-  // `session-aaaaaaaa-bbbb` and `aaaaaaaa-bbbb` resolve.
-  const bare = query.replace(/^session[-_]/i, '')
-  return rows.find(row =>
-    row.id === query
-    || row.id.startsWith(`session-${bare}`)
-    || shortSessionId(row.id).startsWith(bare))
 }

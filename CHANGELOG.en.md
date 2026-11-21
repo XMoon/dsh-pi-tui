@@ -7,6 +7,110 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-11-21
+
+### Added
+
+#### Daemon mode (major 0.5.7 feature, Linux/macOS)
+
+- **Independent Host, detachable TUI.** Direct remains the default. Daemon runs the Host independently so disconnecting a terminal does not end ongoing Agent work.
+- **Shared Sessions across clients.** Multiple TUIs, the official Web frontend and local ACP clients can connect to one Host under the same Profile and access the same Agent Session.
+- **How to enable it.** For a one-time Daemon launch, run:
+
+  ```sh
+  DSH_PI_TUI_BACKEND=daemon dsh --profile pi-tui
+  ```
+
+  Or choose `Daemon` in `/settings → General → Backend` and save; it takes effect on the next launch. The environment variable overrides only the current launch.
+- **Host management.** Use `dsh --profile pi-tui daemon status|start|stop|restart|logs` to inspect and manage the Host. Optional `daemon install|uninstall` manages a Linux systemd user service or macOS LaunchAgent; a system service is not required.
+- **Web and ACP access.** `dsh --profile pi-tui web status|enable|disable|url|open` controls the running official Web frontend without starting a TUI. `/acp` enables or disables the optional local ACP v1 listener for compatible clients.
+- **Exit and updates.** In Daemon mode, `/exit` and `/quit` detach the current Client by default, with keep-working or stop choices when work is active. Use `daemon stop` to stop the Host; after a TUI update, `daemon restart` adopts the new Host build.
+
+#### Other additions
+- **Agent Team mode.** `/model` now displays an independent Agent Team toggle alongside separate model and Reasoning Effort controls, with confirmation before disabling a Team with recorded activity.
+- **Work / Team Task Center.** `/tasks` gains Work and Team pages. Work shows current tasks and activity; the Root Session's Team page shows shared Team tasks and members. Each page supports navigation and search, with a type filter in Work. The Team page is read-only.
+- **Clearer Subagent and Job lists.** Tracked Subagent trees expand by default at every level and can still be collapsed manually. Active Jobs remain in view while completed history stays behind a Show/Hide action (`j` in the fullscreen Task Center, `Alt+J` in the TSP Work Hub).
+- **Expanded Settings.** Stage and save Subagent model/limit choices, Agent Loop parallel-tool limits and Shell execution limits. Web Search/Fetch, ACP autostart and Session-log upload settings follow the actual Host configuration with save/reset controls.
+- **MCP and extensions.** Browse, probe, restart and configure MCP servers in Settings. Third-party packages gain Client-local `./tui` entrypoints, per-package configuration and persistent settings, with Host-installed status distinguished from current Client activation.
+- **Workspace and Session navigation.** Session Browser is organized by Workspace folders. New `--session [id-or-query]` and `-c/--continue` launch options join improved sessionless Workspace selection, `@file` completion and Host directory browsing.
+- **Queue and Host tools.** Manage pending prompts with `/queue` and a Dock shortcut; Daemon clients gain Host Shell, command-generated file delivery and official file uploads. Host Skills lists refresh when Workspace skills change.
+- **Transcript reading and images.** More complete Full/Focus/Compact views, `Ctrl+F` visible-view search and `Ctrl+Shift+F` full-transcript search; improved tool/workflow disclosure, message copying, SVG/image previews and narrow layouts. The optional TSP renderer also gains native transcript and Task interactions.
+- **macOS Computer Use settings.** Settings → Tools exposes Computer Use capabilities, OS permissions and application grants, with relevant request and management actions.
+
+### Changed
+
+- **Cancellation.** Busy `Ctrl+C` cancels the current work instead of exiting unexpectedly.
+- **Plan, Goal and task feedback.** Plan Review can open the relevant plan content before deciding; Goal Dock adapts to terminal width; Task, Subagent and tool status is easier to locate in the transcript.
+- **Submission and interaction.** Drafts clear only after the Host accepts them, and input can be queued during Compact. Fullscreen Tasks, History, Images, Settings and Questions have more complete mouse, wheel and back-navigation controls.
+- **Direct/Daemon parity.** Better Remote Provider and account status, approvals, Web settings, Host command completion, Session resume and working-directory behavior.
+
+### Fixed
+
+- Fixed `Submitting…` / `Queued…` notices persisting after an accepted prompt and lost queued input during Compact.
+- Fixed Session ownership and completion around `/new`, plus sessionless defaults not carrying saved model or Reasoning Effort into a new Session.
+- Fixed `Ctrl+R` Current Session history changing with the working directory; improved completion ordering, ignored-file matches and Remote Host command candidates.
+- Fixed terminal flicker and erased scrollback when off-screen content updates, plus Kitty images painting over dialogs.
+- Fixed broken clicks and wheel paths in Question header tabs, Tasks, History, Images and Settings. Transient Footer notices no longer shift the Composer layout.
+- Fixed macOS Daemon connection/startup races, cross-build Host management and Herdr Session recovery issues.
+
+### Install and upgrade
+
+Version 0.5.7 requires **Node.js ≥24.9.0** and **DSH ≥0.2.2-rc.3**. The recommended pairing is **DSH 0.2.2-rc.5**:
+
+~~~sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.5
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.7
+dsh --profile pi-tui
+~~~
+
+Upgrading from 0.5.6 also changes the DSH runtime. Finish in-flight work, stop the previous Host and back up Session/Profile data before installing the new pair. A running Daemon Host requires an explicit `daemon restart` to adopt a newly installed TUI build.
+
+Previous pairings: `@deepseek-ai/dsh@0.2.2-rc.1` + `@xmoon76/dsh-pi-tui@0.5.6`; `@deepseek-ai/dsh@0.2.1-rc.5` + `@xmoon76/dsh-pi-tui@0.5.5`.
+
+## [0.5.6] - 2026-11-08
+
+### Installation and version pairing
+
+This release requires DSH `>=0.2.2-rc.1`, targets `0.2.2-rc.1` for exact validation, and requires Node.js `>=24.9.0`. It is not compatible with DSH `0.2.1-rc.*`. Allow DSH's official native install scripts:
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.1
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.6
+dsh --profile pi-tui
+```
+
+Upgrading from `0.5.5` also requires changing DSH. Let Agent turns and background work finish, exit the old TUI/Host normally, and back up the Profile/patch, raw Session logs, Workspace and necessary Host resources or credential references. Hot upgrade is not supported. Data written under 0.2.2 semantics is not guaranteed readable by rc5 in place. To roll back, restore the backup into a separate directory and start the matching old DSH/TUI pair.
+
+### Upgrade and security notes
+
+- **DSH 0.2.2 no longer requires read-before-write by default.** Upstream now defaults `fs-observation-policy` to Off. Re-enable it with an official Profile override if needed; this extension does not change the setting for you.
+- **`web_fetch` can reach localhost and private addresses.** Use Host network isolation, a proxy/firewall or an official tool pre-execute policy when access must be restricted; do not rely on a TUI URL rule.
+- **Attachment storage is not Session-isolated within one Host.** Gateway/Peer method authorization remains the boundary; use separate Hosts and `DSH_HOME` directories for Session isolation.
+- **Legacy `schedule/change` events do not migrate to Host Scheduled Tasks.** New `schedule_*` tools manage Host-wide tasks; old calls and results remain history.
+- Historical pairings remain: `@deepseek-ai/dsh@0.2.1-rc.5` with `@xmoon76/dsh-pi-tui@0.5.5`, and `@deepseek-ai/dsh@0.2.0-rc.2` with `@xmoon76/dsh-pi-tui@0.5.2-rc.1`.
+
+### Added
+
+- **Host Schedule management.** PiTui Direct `/schedule` manages Host-wide tasks without a Session. The Host owns execution.
+- **PiTui Session Workspace.** `/sessions`, `/search` and `/resume` group Sessions into Needs attention, Working and Recent, with Workspace scopes and a read-only `Space` Peek; `Enter` switches. In Direct mode, new Sessions including `/new` use the official Host Workspace. With a strictly empty main editor, two unmodified `←` presses within 600 ms open All workspaces; the first remains ordinary cursor movement.
+- **Plugin version updates.** The Plugin Manager can inspect versions of third-party Registry Profile bundles the Host marks as updatable, then update after an explicit version choice and confirmation. Results follow the Host read-back; the running TUI cannot update itself from this page.
+- **Shared file-delivery guidance.** Supported Agent presets receive official file-link, image-reference and `present` delivery guidance, independently of Web availability.
+- **Pasted image paths become attachments.** In supported terminals, a recognized local absolute image path can be staged as an image attachment. Sending is blocked while it is read; a failed read keeps the path text.
+
+### Changed
+
+- **Breaking: DSH extension API.** DSH 0.2.2 removed `composeAgent(ctx, ModelSelectionRef)`. Extensions should use the Agent-scoped compose callback and `agent.model`; Profiles using only the built-in TUI need no change.
+- **Breaking: chart/SVG references now use `sv2`.** `sv1_…`, `visual-ref-v1:` and `[dsh-visual-sv1_…]` are not migrated or parsed; old inline figures may fall back to text.
+- **Ordinary Fork/Rewind Sessions are no longer shown as parent/child lineage.** DSH 0.2.2 treats them as independent Sessions; Session lineage represents Subagents only.
+- **`/transcript` now exports official Session Markdown.** In Direct mode it uses the Host format, with user messages as blockquotes and process activity collapsible. `/export` ZIP behavior is unchanged.
+- **Markdown bare-URL punctuation boundary changed.** Bare URLs stop at the first CJK/full-width punctuation, including balanced full-width parentheses. Visible text, explicit Markdown links and copied text are unchanged.
+
+### Fixed
+
+- **Inline attachment completion now reports success.** In the PiTui composer, accepted `/image` and `/attach` candidates show a notice after the draft write commits; refused writes no longer report false success.
+- **Fixed the save race when exiting just after creating a Session.** `/new` followed immediately by `/exit` no longer reports a flush on an already-closed handle.
+- **Clear stale program status on exit where supported.** The clear sequence is sent only when terminal Program Status reporting is enabled.
+
 ## [0.5.5] - 2026-11-03
 
 ### Installation and version pairing
@@ -2146,7 +2250,9 @@ Users who must keep DSH `0.1.1-rc.2` should use `@xmoon76/dsh-pi-tui@0.3`.
 - Fullscreen layout, Ctrl+F transcript search, theme system.
 - Single-package release model.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.5...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.7...HEAD
+[0.5.7]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.6...v0.5.7
+[0.5.6]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.5...v0.5.6
 [0.5.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.5.2-rc.1...v0.5.3

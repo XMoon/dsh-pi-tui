@@ -7,6 +7,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { unavailableAcpAccess, unavailableWebAccess, unavailableMcpServers } from '../support/web-access-fake.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
@@ -32,6 +33,7 @@ import { sessionScopeFacts } from '../support/session-scope-facts.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { selectSettingsCategory } from '../support/settings-rail.ts'
 import { waitForFrame } from '../support/frame-wait.ts'
+import { unconfiguredPolicyObservation, unconfiguredSessionPolicyPort } from '../support/session-policy-fake.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -76,6 +78,7 @@ function captureFooterSaves(app: TuiApp): {
     return {
       close: () => {},
       refreshRow: () => {},
+      invalidateChoice: () => {},
       whenInitialSpecialistSettled: async () => ({ ok: true as const }),
     }
   }) as TuiApp['openSettingsWorkspace']
@@ -285,9 +288,12 @@ test('/footer is sessionless and opens the configurator; S saves and persists', 
   const persistedCustomItems = [...customItems, futureCustomItem, futureFieldCommand]
   app.setFooterCustomItems(customItems)
   const settings = fakeSettings({ footer: 'default', footerCustomItems: persistedCustomItems })
-  ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: { footerCustomItems: persistedCustomItems } }] } as never)
+  ctx.provide('settings', { describe: () => [{ ns: 'pi-tui-preferences', user: { footerCustomItems: persistedCustomItems } }] } as never)
   const applied: Array<{ footer: string; footerLayout?: unknown; footerCustomItems?: unknown }> = []
   const runner: TuiCommandRunner = {
+    webAccess: unavailableWebAccess(),
+    acpAccess: unavailableAcpAccess(),
+    mcpServers: unavailableMcpServers(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,
@@ -295,8 +301,9 @@ test('/footer is sessionless and opens the configurator; S saves and persists', 
     diag: { warn: () => {}, error: () => {}, info: () => {} } as never,
     get defaultIntentOutcome() { return undefined },
     ...sessionScopeFacts(() => undefined, () => 0),
-    hostShellCompletion: true,
-    transcriptExportAvailable: true,
+    sessionPolicy: unconfiguredSessionPolicyPort(),
+    policy: unconfiguredPolicyObservation(),
+    hostShellCompletion: { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) },
     currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -312,7 +319,7 @@ test('/footer is sessionless and opens the configurator; S saves and persists', 
       sessionStatus: () => undefined },
     sessionWriter: { prompt: async () => ({ kind: 'committed' as const, value: undefined }), updateQueue: async () => ({ kind: 'committed' as const, value: undefined }), cancel: async () => ({ kind: 'committed' as const, value: undefined }), rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }), refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
 
-    interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
+    interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {} },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     hostFile: new DirectHostFilePort(() => undefined),
@@ -348,7 +355,7 @@ test('/footer is sessionless and opens the configurator; S saves and persists', 
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, createPluginManagerPage: () => undefined,
+    openTasksBrowser: () => {}, openScheduleWorkspace: () => ({ kind: 'success' } as const), createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -454,7 +461,7 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
     get: () => ({ ...currentDoc, footerCustomItems: userRaw }),
     replace: (next) => new Promise<void>(resolve => pendingWrites.push({ next, resolve })),
   }
-  ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: { footerCustomItems: userRaw } }] } as never)
+  ctx.provide('settings', { describe: () => [{ ns: 'pi-tui-preferences', user: { footerCustomItems: userRaw } }] } as never)
   const capturedFooter = captureFooterSaves(app)
   const saveCallbacks = capturedFooter.saves
   const applied: Array<{ footerLayout?: unknown; footerCustomItems?: unknown }> = []
@@ -462,6 +469,9 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
   const persistedDisplayDocs: Record<string, unknown>[] = []
   let displayPreset: 'full' | 'focus' | 'compact' = 'full'
   const runner: TuiCommandRunner = {
+    webAccess: unavailableWebAccess(),
+    acpAccess: unavailableAcpAccess(),
+    mcpServers: unavailableMcpServers(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,
@@ -477,8 +487,9 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
     diag: { warn: () => {}, error: () => {}, info: () => {} } as never,
     get defaultIntentOutcome() { return undefined },
     ...sessionScopeFacts(() => undefined, () => 0),
-    hostShellCompletion: true,
-    transcriptExportAvailable: true,
+    sessionPolicy: unconfiguredSessionPolicyPort(),
+    policy: unconfiguredPolicyObservation(),
+    hostShellCompletion: { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) },
     currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -493,7 +504,7 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
       turnOutline: () => undefined,
       sessionStatus: () => undefined },
     sessionWriter: { prompt: async () => ({ kind: 'committed' as const, value: undefined }), updateQueue: async () => ({ kind: 'committed' as const, value: undefined }), cancel: async () => ({ kind: 'committed' as const, value: undefined }), rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }), refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
-    interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
+    interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {} },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     hostFile: new DirectHostFilePort(() => undefined),
@@ -529,7 +540,7 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, createPluginManagerPage: () => undefined,
+    openTasksBrowser: () => {}, openScheduleWorkspace: () => ({ kind: 'success' } as const), createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -633,13 +644,17 @@ test('/footer Esc cancels without writing', async () => {
   const settings = fakeSettings({ footer: 'default' })
   const applied: Array<{ footer: string }> = []
   const runner: TuiCommandRunner = {
+    webAccess: unavailableWebAccess(),
+    acpAccess: unavailableAcpAccess(),
+    mcpServers: unavailableMcpServers(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx, app, diag: {} as never,
     get defaultIntentOutcome() { return undefined },
     ...sessionScopeFacts(() => undefined, () => 0),
-    hostShellCompletion: true,
-    transcriptExportAvailable: true,
+    sessionPolicy: unconfiguredSessionPolicyPort(),
+    policy: unconfiguredPolicyObservation(),
+    hostShellCompletion: { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) },
     currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -655,7 +670,7 @@ test('/footer Esc cancels without writing', async () => {
       sessionStatus: () => undefined },
     sessionWriter: { prompt: async () => ({ kind: 'committed' as const, value: undefined }), updateQueue: async () => ({ kind: 'committed' as const, value: undefined }), cancel: async () => ({ kind: 'committed' as const, value: undefined }), rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }), refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
 
-    interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
+    interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {} },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     hostFile: new DirectHostFilePort(() => undefined),
@@ -680,7 +695,7 @@ test('/footer Esc cancels without writing', async () => {
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, currentNotificationMode: () => 'unfocused', currentNotificationMethod: () => 'auto', setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
-    openJobView: () => {}, openTasksBrowser: () => {}, createPluginManagerPage: () => undefined, openRewindPicker: () => {},
+    openJobView: () => {}, openTasksBrowser: () => {}, openScheduleWorkspace: () => ({ kind: 'success' } as const), createPluginManagerPage: () => undefined, openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
     withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
@@ -719,13 +734,17 @@ test('/footer starts from the persisted custom layout when active', async () => 
   }
   const settings = fakeSettings({ footer: 'custom', footerLayout: persisted })
   const runner: TuiCommandRunner = {
+    webAccess: unavailableWebAccess(),
+    acpAccess: unavailableAcpAccess(),
+    mcpServers: unavailableMcpServers(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx, app, diag: {} as never,
     get defaultIntentOutcome() { return undefined },
     ...sessionScopeFacts(() => undefined, () => 0),
-    hostShellCompletion: true,
-    transcriptExportAvailable: true,
+    sessionPolicy: unconfiguredSessionPolicyPort(),
+    policy: unconfiguredPolicyObservation(),
+    hostShellCompletion: { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) },
     currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -741,7 +760,7 @@ test('/footer starts from the persisted custom layout when active', async () => 
       sessionStatus: () => undefined },
     sessionWriter: { prompt: async () => ({ kind: 'committed' as const, value: undefined }), updateQueue: async () => ({ kind: 'committed' as const, value: undefined }), cancel: async () => ({ kind: 'committed' as const, value: undefined }), rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }), refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
 
-    interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
+    interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {} },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     hostFile: new DirectHostFilePort(() => undefined),
@@ -766,7 +785,7 @@ test('/footer starts from the persisted custom layout when active', async () => 
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, currentNotificationMode: () => 'unfocused', currentNotificationMethod: () => 'auto', setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
-    openJobView: () => {}, openTasksBrowser: () => {}, createPluginManagerPage: () => undefined, openRewindPicker: () => {},
+    openJobView: () => {}, openTasksBrowser: () => {}, openScheduleWorkspace: () => ({ kind: 'success' } as const), createPluginManagerPage: () => undefined, openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
     withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
@@ -801,16 +820,20 @@ test('/footer starts from the EFFECTIVE COMPACT layout (a compact user pressing 
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
   const settings = fakeSettings({ footer: 'compact' })
-  ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
+  ctx.provide('settings', { describe: () => [{ ns: 'pi-tui-preferences', user: {} }] } as never)
   const applied: Array<{ footer: string; footerLayout?: unknown }> = []
   const runner: TuiCommandRunner = {
+    webAccess: unavailableWebAccess(),
+    acpAccess: unavailableAcpAccess(),
+    mcpServers: unavailableMcpServers(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx, app, diag: {} as never,
     get defaultIntentOutcome() { return undefined },
     ...sessionScopeFacts(() => undefined, () => 0),
-    hostShellCompletion: true,
-    transcriptExportAvailable: true,
+    sessionPolicy: unconfiguredSessionPolicyPort(),
+    policy: unconfiguredPolicyObservation(),
+    hostShellCompletion: { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) },
     currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -825,7 +848,7 @@ test('/footer starts from the EFFECTIVE COMPACT layout (a compact user pressing 
       turnOutline: () => undefined,
       sessionStatus: () => undefined },
     sessionWriter: { prompt: async () => ({ kind: 'committed' as const, value: undefined }), updateQueue: async () => ({ kind: 'committed' as const, value: undefined }), cancel: async () => ({ kind: 'committed' as const, value: undefined }), rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }), refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
-    interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
+    interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {} },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     hostFile: new DirectHostFilePort(() => undefined),
@@ -850,7 +873,7 @@ test('/footer starts from the EFFECTIVE COMPACT layout (a compact user pressing 
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, currentNotificationMode: () => 'unfocused', currentNotificationMethod: () => 'auto', setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
-    openJobView: () => {}, openTasksBrowser: () => {}, createPluginManagerPage: () => undefined, openRewindPicker: () => {},
+    openJobView: () => {}, openTasksBrowser: () => {}, openScheduleWorkspace: () => ({ kind: 'success' } as const), createPluginManagerPage: () => undefined, openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
     withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
@@ -919,7 +942,7 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
   startedApps.add(app)
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
-  ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
+  ctx.provide('settings', { describe: () => [{ ns: 'pi-tui-preferences', user: {} }] } as never)
   // A settings document whose replace REJECTS (the write fails).
   const doc = { footer: 'default' as string, footerLayout: undefined as unknown }
   const failingSettings: TuiSettingsLike = {
@@ -928,13 +951,17 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
   }
   const applied: Array<{ footer: string }> = []
   const runner: TuiCommandRunner = {
+    webAccess: unavailableWebAccess(),
+    acpAccess: unavailableAcpAccess(),
+    mcpServers: unavailableMcpServers(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx, app, diag: {} as never,
     get defaultIntentOutcome() { return undefined },
     ...sessionScopeFacts(() => undefined, () => 0),
-    hostShellCompletion: true,
-    transcriptExportAvailable: true,
+    sessionPolicy: unconfiguredSessionPolicyPort(),
+    policy: unconfiguredPolicyObservation(),
+    hostShellCompletion: { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) },
     currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -950,7 +977,7 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
       sessionStatus: () => undefined },
     sessionWriter: { prompt: async () => ({ kind: 'committed' as const, value: undefined }), updateQueue: async () => ({ kind: 'committed' as const, value: undefined }), cancel: async () => ({ kind: 'committed' as const, value: undefined }), rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }), refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
 
-    interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
+    interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {} },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     hostFile: new DirectHostFilePort(() => undefined),
@@ -975,7 +1002,7 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, currentNotificationMode: () => 'unfocused', currentNotificationMethod: () => 'auto', setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
-    openJobView: () => {}, openTasksBrowser: () => {}, createPluginManagerPage: () => undefined, openRewindPicker: () => {},
+    openJobView: () => {}, openTasksBrowser: () => {}, openScheduleWorkspace: () => ({ kind: 'success' } as const), createPluginManagerPage: () => undefined, openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
     withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
@@ -1030,7 +1057,7 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
   startedApps.add(app)
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
-  ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
+  ctx.provide('settings', { describe: () => [{ ns: 'pi-tui-preferences', user: {} }] } as never)
   const doc = { footer: 'default' as string, footerLayout: undefined as unknown }
   // The failed write is observed at ITS entry and at ITS settlement: a silence
   // window proves neither. The mock records the document before it rejects.
@@ -1044,6 +1071,9 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
   }
   const applied: Array<{ footer: string }> = []
   const runner: TuiCommandRunner = {
+    webAccess: unavailableWebAccess(),
+    acpAccess: unavailableAcpAccess(),
+    mcpServers: unavailableMcpServers(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,
@@ -1051,8 +1081,9 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
     diag: { warn: () => {}, error: () => {}, info: () => {} } as never,
     get defaultIntentOutcome() { return undefined },
     ...sessionScopeFacts(() => undefined, () => 0),
-    hostShellCompletion: true,
-    transcriptExportAvailable: true,
+    sessionPolicy: unconfiguredSessionPolicyPort(),
+    policy: unconfiguredPolicyObservation(),
+    hostShellCompletion: { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) },
     currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -1067,7 +1098,7 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
       turnOutline: () => undefined,
       sessionStatus: () => undefined },
     sessionWriter: { prompt: async () => ({ kind: 'committed' as const, value: undefined }), updateQueue: async () => ({ kind: 'committed' as const, value: undefined }), cancel: async () => ({ kind: 'committed' as const, value: undefined }), rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }), refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
-    interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
+    interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {} },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: readyConfig(new DirectConfigPort(ctx as never, undefined, () => undefined)),
     hostFile: new DirectHostFilePort(() => undefined),
@@ -1092,7 +1123,7 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, currentNotificationMode: () => 'unfocused', currentNotificationMethod: () => 'auto', setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
-    openJobView: () => {}, openTasksBrowser: () => {}, createPluginManagerPage: () => undefined, openRewindPicker: () => {},
+    openJobView: () => {}, openTasksBrowser: () => {}, openScheduleWorkspace: () => ({ kind: 'success' } as const), createPluginManagerPage: () => undefined, openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
     withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
@@ -1166,17 +1197,21 @@ test('/settings footer change PERSISTS footerFallbackMode (the command-mode rest
   startedApps.add(app)
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
-  ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
+  ctx.provide('settings', { describe: () => [{ ns: 'pi-tui-preferences', user: {} }] } as never)
   const settings = fakeSettings({ footer: 'default' })
   const applied: Array<{ footer: string }> = []
   const runner: TuiCommandRunner = {
+    webAccess: unavailableWebAccess(),
+    acpAccess: unavailableAcpAccess(),
+    mcpServers: unavailableMcpServers(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx, app, diag: {} as never,
     get defaultIntentOutcome() { return undefined },
     ...sessionScopeFacts(() => undefined, () => 0),
-    hostShellCompletion: true,
-    transcriptExportAvailable: true,
+    sessionPolicy: unconfiguredSessionPolicyPort(),
+    policy: unconfiguredPolicyObservation(),
+    hostShellCompletion: { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) },
     currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -1191,7 +1226,7 @@ test('/settings footer change PERSISTS footerFallbackMode (the command-mode rest
       turnOutline: () => undefined,
       sessionStatus: () => undefined },
     sessionWriter: { prompt: async () => ({ kind: 'committed' as const, value: undefined }), updateQueue: async () => ({ kind: 'committed' as const, value: undefined }), cancel: async () => ({ kind: 'committed' as const, value: undefined }), rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }), refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
-    interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
+    interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {} },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: readyConfig(new DirectConfigPort(ctx as never, undefined, () => undefined)),
     hostFile: new DirectHostFilePort(() => undefined),
@@ -1216,7 +1251,7 @@ test('/settings footer change PERSISTS footerFallbackMode (the command-mode rest
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, currentNotificationMode: () => 'unfocused', currentNotificationMethod: () => 'auto', setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
-    openJobView: () => {}, openTasksBrowser: () => {}, createPluginManagerPage: () => undefined, openRewindPicker: () => {},
+    openJobView: () => {}, openTasksBrowser: () => {}, openScheduleWorkspace: () => ({ kind: 'success' } as const), createPluginManagerPage: () => undefined, openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
     withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
@@ -1279,9 +1314,12 @@ test('/footer save failures notify exactly once (validation and write failures)'
     }),
     replace: () => new Promise<void>((_resolve, reject) => { rejectReplace = reject }),
   }
-  ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: { footerCustomItems: [known] } }] } as never)
+  ctx.provide('settings', { describe: () => [{ ns: 'pi-tui-preferences', user: { footerCustomItems: [known] } }] } as never)
   const applied: Array<{ footerLayout?: unknown }> = []
   const runner: TuiCommandRunner = {
+    webAccess: unavailableWebAccess(),
+    acpAccess: unavailableAcpAccess(),
+    mcpServers: unavailableMcpServers(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,
@@ -1289,8 +1327,9 @@ test('/footer save failures notify exactly once (validation and write failures)'
     diag: { warn: () => {}, error: () => {}, info: () => {} } as never,
     get defaultIntentOutcome() { return undefined },
     ...sessionScopeFacts(() => undefined, () => 0),
-    hostShellCompletion: true,
-    transcriptExportAvailable: true,
+    sessionPolicy: unconfiguredSessionPolicyPort(),
+    policy: unconfiguredPolicyObservation(),
+    hostShellCompletion: { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) },
     currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -1305,7 +1344,7 @@ test('/footer save failures notify exactly once (validation and write failures)'
       turnOutline: () => undefined,
       sessionStatus: () => undefined },
     sessionWriter: { prompt: async () => ({ kind: 'committed' as const, value: undefined }), updateQueue: async () => ({ kind: 'committed' as const, value: undefined }), cancel: async () => ({ kind: 'committed' as const, value: undefined }), rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }), refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
-    interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
+    interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {} },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     hostFile: new DirectHostFilePort(() => undefined),
@@ -1341,7 +1380,7 @@ test('/footer save failures notify exactly once (validation and write failures)'
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, createPluginManagerPage: () => undefined,
+    openTasksBrowser: () => {}, openScheduleWorkspace: () => ({ kind: 'success' } as const), createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -1403,16 +1442,20 @@ test('an unsaved custom command draft NEVER executes (preview, resize, Keep Edit
     const commands = fakeCommands()
     ctx.provide('commands', commands.service as never)
     const settings = fakeSettings({ footer: 'default' })
-    ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
+    ctx.provide('settings', { describe: () => [{ ns: 'pi-tui-preferences', user: {} }] } as never)
     const applied: Array<{ footer: string }> = []
     const runner: TuiCommandRunner = {
+      webAccess: unavailableWebAccess(),
+      acpAccess: unavailableAcpAccess(),
+      mcpServers: unavailableMcpServers(),
       beginClientWrite: () => () => {},
       deliveredFilesSnapshot: () => undefined,
       ctx, app, diag: {} as never,
       get defaultIntentOutcome() { return undefined },
       ...sessionScopeFacts(() => undefined, () => 0),
-      hostShellCompletion: true,
-      transcriptExportAvailable: true,
+      sessionPolicy: unconfiguredSessionPolicyPort(),
+      policy: unconfiguredPolicyObservation(),
+      hostShellCompletion: { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) },
       currentSessionId: undefined,
       ensureSession: async () => {},
       get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -1427,7 +1470,7 @@ test('an unsaved custom command draft NEVER executes (preview, resize, Keep Edit
       turnOutline: () => undefined,
       sessionStatus: () => undefined },
       sessionWriter: { prompt: async () => ({ kind: 'committed' as const, value: undefined }), updateQueue: async () => ({ kind: 'committed' as const, value: undefined }), cancel: async () => ({ kind: 'committed' as const, value: undefined }), rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }), refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
-      interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
+      interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {} },
       catalog: new DirectCatalogPort(ctx as never, () => undefined),
       config: new DirectConfigPort(ctx as never, undefined, () => undefined),
       hostFile: new DirectHostFilePort(() => undefined),
@@ -1452,7 +1495,7 @@ test('an unsaved custom command draft NEVER executes (preview, resize, Keep Edit
       reconcileDefaultIntent: () => {},
       sessionBlank: () => undefined,
       refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, currentNotificationMode: () => 'unfocused', currentNotificationMethod: () => 'auto', setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
-      openJobView: () => {}, openTasksBrowser: () => {}, createPluginManagerPage: () => undefined, openRewindPicker: () => {},
+      openJobView: () => {}, openTasksBrowser: () => {}, openScheduleWorkspace: () => ({ kind: 'success' } as const), createPluginManagerPage: () => undefined, openRewindPicker: () => {},
       sessionTransitionPending: () => false,
       withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
       withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
@@ -1548,7 +1591,7 @@ test('a FAILED save never executes the new command (draft preserved, marker abse
   try {
     const commands = fakeCommands()
     ctx.provide('commands', commands.service as never)
-    ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
+    ctx.provide('settings', { describe: () => [{ ns: 'pi-tui-preferences', user: {} }] } as never)
     const doc = { footer: 'default' as string, footerLayout: undefined as unknown, footerCustomItems: undefined as unknown }
     const failingSettings: TuiSettingsLike = {
       get: () => ({ theme: 'auto', iconStyle: 'emoji', footer: doc.footer, footerLayout: doc.footerLayout, footerCustomItems: doc.footerCustomItems as never, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', notificationMode: 'unfocused', terminalProgress: 'on', notificationMethod: 'auto' }),
@@ -1556,13 +1599,17 @@ test('a FAILED save never executes the new command (draft preserved, marker abse
     }
     const applied: Array<{ footer: string }> = []
     const runner: TuiCommandRunner = {
+      webAccess: unavailableWebAccess(),
+      acpAccess: unavailableAcpAccess(),
+      mcpServers: unavailableMcpServers(),
       beginClientWrite: () => () => {},
       deliveredFilesSnapshot: () => undefined,
       ctx, app, diag: {} as never,
       get defaultIntentOutcome() { return undefined },
       ...sessionScopeFacts(() => undefined, () => 0),
-      hostShellCompletion: true,
-      transcriptExportAvailable: true,
+      sessionPolicy: unconfiguredSessionPolicyPort(),
+      policy: unconfiguredPolicyObservation(),
+      hostShellCompletion: { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) },
       currentSessionId: undefined,
       ensureSession: async () => {},
       get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -1577,7 +1624,7 @@ test('a FAILED save never executes the new command (draft preserved, marker abse
       turnOutline: () => undefined,
       sessionStatus: () => undefined },
       sessionWriter: { prompt: async () => ({ kind: 'committed' as const, value: undefined }), updateQueue: async () => ({ kind: 'committed' as const, value: undefined }), cancel: async () => ({ kind: 'committed' as const, value: undefined }), rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }), refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
-      interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
+      interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {} },
       catalog: new DirectCatalogPort(ctx as never, () => undefined),
       config: new DirectConfigPort(ctx as never, undefined, () => undefined),
       hostFile: new DirectHostFilePort(() => undefined),
@@ -1602,7 +1649,7 @@ test('a FAILED save never executes the new command (draft preserved, marker abse
       reconcileDefaultIntent: () => {},
       sessionBlank: () => undefined,
       refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, currentNotificationMode: () => 'unfocused', currentNotificationMethod: () => 'auto', setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
-      openJobView: () => {}, openTasksBrowser: () => {}, createPluginManagerPage: () => undefined, openRewindPicker: () => {},
+      openJobView: () => {}, openTasksBrowser: () => {}, openScheduleWorkspace: () => ({ kind: 'success' } as const), createPluginManagerPage: () => undefined, openRewindPicker: () => {},
       sessionTransitionPending: () => false,
       withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
       withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
@@ -1669,14 +1716,19 @@ test('a SUCCESSFUL save is the ONLY event that arms the runtime (marker appears 
     const commands = fakeCommands()
     ctx.provide('commands', commands.service as never)
     const settings = fakeSettings({ footer: 'default' })
-    ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
+    ctx.provide('settings', { describe: () => [{ ns: 'pi-tui-preferences', user: {} }] } as never)
     const applied: Array<{ footer: string; footerCustomItems?: unknown }> = []
     const runner: TuiCommandRunner = {
+      webAccess: unavailableWebAccess(),
+      acpAccess: unavailableAcpAccess(),
+      mcpServers: unavailableMcpServers(),
       beginClientWrite: () => () => {},
       deliveredFilesSnapshot: () => undefined,
       ctx, app, diag: {} as never,
       get defaultIntentOutcome() { return undefined },
       ...sessionScopeFacts(() => undefined, () => 0),
+      sessionPolicy: unconfiguredSessionPolicyPort(),
+      policy: unconfiguredPolicyObservation(),
       currentSessionId: undefined,
       ensureSession: async () => {},
       get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -1691,12 +1743,11 @@ test('a SUCCESSFUL save is the ONLY event that arms the runtime (marker appears 
       turnOutline: () => undefined,
       sessionStatus: () => undefined },
       sessionWriter: { prompt: async () => ({ kind: 'committed' as const, value: undefined }), updateQueue: async () => ({ kind: 'committed' as const, value: undefined }), cancel: async () => ({ kind: 'committed' as const, value: undefined }), rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }), refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
-      interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
+      interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {} },
       catalog: new DirectCatalogPort(ctx as never, () => undefined),
       config: new DirectConfigPort(ctx as never, undefined, () => undefined),
       hostFile: new DirectHostFilePort(() => undefined),
-      hostShellCompletion: true,
-      transcriptExportAvailable: true,
+      hostShellCompletion: { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) },
       commandRegistry: ctx.get('commands') as never,
       clientCommands: createClientCommandRegistry(parseCommand),
       cwd: '/ws', sessionCwd: () => '/ws', imageStore: {} as never,
@@ -1718,7 +1769,7 @@ test('a SUCCESSFUL save is the ONLY event that arms the runtime (marker appears 
       reconcileDefaultIntent: () => {},
       sessionBlank: () => undefined,
       refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, currentNotificationMode: () => 'unfocused', currentNotificationMethod: () => 'auto', setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
-      openJobView: () => {}, openTasksBrowser: () => {}, createPluginManagerPage: () => undefined, openRewindPicker: () => {},
+      openJobView: () => {}, openTasksBrowser: () => {}, openScheduleWorkspace: () => ({ kind: 'success' } as const), createPluginManagerPage: () => undefined, openRewindPicker: () => {},
       sessionTransitionPending: () => false,
       withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
       withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),

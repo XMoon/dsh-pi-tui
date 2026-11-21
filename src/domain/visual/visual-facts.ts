@@ -135,7 +135,7 @@ export function visualPartsFromText(result: string): VisualParts {
   }
   const hasFact = lastNonEmpty !== -1 && lines[lastNonEmpty]!.startsWith(VISUAL_FACT_PREFIX)
   // The projected reference sits immediately before the fact line; a
-  // `visual-ref-v1:` block without a fact line is not a projected reference.
+  // `visual-ref-v2:` block without a fact line is not a projected reference.
   const referenceLine = hasFact && lastNonEmpty > 0
     ? parseVisualReferenceLine(lines[lastNonEmpty - 1] ?? '')
     : undefined

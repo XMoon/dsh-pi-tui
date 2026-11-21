@@ -1,0 +1,1177 @@
+/**
+ * M5-W PR-B — official Web frontend runtime toggle (L5).
+ *
+ * Evidence level: L5 composition over the REAL pinned Cordis Loader/Entry
+ * (`@deepseek-ai/cordis-plugin-loader@1.0.6`) with lightweight controlled
+ * plugins standing in for the official Web packages. The Loader,
+ * `Entry.update`, fiber activation/disposal/settlement, the fallback seat
+ * semantics and the service registry are the real ones; only the package
+ * modules are fixtures. The two-OS-process HTTP/Browser proof is
+ * `scripts/split-process-smoke.mjs` `t73-web-runtime-toggle`.
+ *
+ * The contract pinned here:
+ *   - the toggle drives exactly the declared rows, in the frozen
+ *     enable/disable order, through `Entry.update({ disabled })`;
+ *   - `disabled` / `enabled` / `changing` / `unavailable` are read from the
+ *     live Loader and the official Web services, never from the request;
+ *   - repeated/concurrent requests never remount a row and never duplicate the
+ *     SPA fallback seat;
+ *   - a failed enable withdraws what it mounted; a failed disable keeps
+ *     closing; an unprovable state is never reported as `disabled`;
+ *   - no persistent Loader write, no profile patch, no ConfigEditor path.
+ *
+ * @module @xmoon76/dsh-pi-tui/app/host/web-access.test
+ */
+
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { Context, type Fiber } from '@deepseek-ai/cordis'
+import Loader from '@deepseek-ai/cordis-plugin-loader'
+import {
+  PI_TUI_WEB_ACCESS_DISABLE_ORDER,
+  PI_TUI_WEB_ACCESS_ENABLE_ORDER,
+  PiTuiWebAccessHostService,
+} from '../../../src/app/host/features/web-access.ts'
+import { PI_TUI_WEB_ACCESS_ROWS } from '../../../src/app/host/features/web-roster.ts'
+import {
+  PI_TUI_WEB_ACCESS_SET_ENABLED,
+  parsePiTuiWebAccessStatus,
+  type PiTuiWebAccessStatus,
+} from '../../../src/runtime/remote/pi-tui-web-access-contract.ts'
+
+/** Cordis `FiberState` values (the enum is a const enum with no runtime value). */
+const FIBER_ACTIVE = 2
+const FIBER_DISPOSED = 4
+
+/** The official Web services whose presence the status vocabulary claims. */
+const WEB_SERVICES = ['webApp', 'clientModules', 'terminalController', 'officeKit'] as const
+
+/**
+ * The SHARED Host rows this Host owns OUTSIDE the Web roster. They are never
+ * toggled: the Web frontend consumes them, and an `enabled` claim requires the
+ * MCP manager to be live. The real row lives in the bundle's
+ * `cordis.patch.yml`, so the fixture declares it as an already-mounted Host
+ * row — exactly the composition the toggle must leave untouched.
+ */
+const SHARED_HOST_ROWS: ReadonlyArray<{ readonly id: string; readonly name: string; readonly provide: string }> = [
+  { id: 'mcp-manager', name: '@deepseek-ai/dsh-mcp-manager', provide: 'mcpManager' },
+]
+
+/** The Host owners that must keep their fiber identity across every toggle. */
+const PROTECTED_ROWS: ReadonlyArray<{ readonly id: string; readonly name: string }> = [
+  { id: 'webserver', name: '@deepseek-ai/dsh-host-webserver' },
+  { id: 'workspace-controller', name: '@deepseek-ai/dsh-api-workspace-controller' },
+  { id: 'split-host-pi-tui-runtime', name: '@xmoon76/dsh-pi-tui/host-runtime' },
+]
+
+/** One controlled lightweight plugin, the shape the Loader really imports. */
+interface ControlledPlugin {
+  readonly name: string
+  readonly inject?: readonly string[]
+  readonly apply: (ctx: Context) => void | Promise<void>
+}
+
+/** Apply/dispose counters for one official package fixture. */
+interface RowFacts {
+  applies: number
+  disposes: number
+}
+
+/** Per-row behaviour a single case needs. */
+interface RowOverride {
+  /** Extra inject requirements (a missing provider keeps the row PENDING). */
+  readonly inject?: readonly string[]
+  /** Replace the apply body; a rejection is a real plugin apply failure. */
+  readonly apply?: (ctx: Context) => void | Promise<void>
+  /** Provide this Cordis service from the row's own fiber. */
+  readonly provide?: string
+  /** Mount the official SPA fallback child plugin (the `web-runtime` shape). */
+  readonly fallback?: boolean
+}
+
+/** The official loopback origin the fixture's Web frontend would serve. */
+const FIXTURE_ORIGIN = 'http://127.0.0.1:4321'
+/** The fixture launch token the official Connection owner appends. */
+const FIXTURE_TOKEN = 'fixture-launch-token'
+
+/** The one loopback listener every Web fixture registers its fallback on. */
+interface WebServerFixture {
+  readonly service: {
+    registerFallback(handler: unknown): () => void
+    /** The official bound origin every launch URL is built from. */
+    getOrigin(): string
+  }
+  facts(): { readonly registered: boolean; readonly registrations: number; readonly disposals: number }
+}
+
+/**
+ * The OFFICIAL `webServer.registerFallback` seat semantics: one seat, a second
+ * registration throws, and the returned disposer releases only that seat.
+ */
+function createWebServerFixture(): WebServerFixture {
+  let holder: unknown
+  let registrations = 0
+  let disposals = 0
+  return {
+    service: {
+      getOrigin: () => FIXTURE_ORIGIN,
+      registerFallback(handler: unknown): () => void {
+        if (holder !== undefined) throw new Error('webserver: fallback already registered')
+        holder = handler
+        registrations += 1
+        return () => {
+          if (holder !== handler) return
+          holder = undefined
+          disposals += 1
+        }
+      },
+    },
+    facts: () => ({ registered: holder !== undefined, registrations, disposals }),
+  }
+}
+
+/** One row of the live Loader as the harness reads it. */
+interface LiveRow {
+  readonly options: { readonly id: string; readonly name: string }
+  readonly fiber?: Fiber
+  readonly disabled: boolean
+}
+
+/** The whole controlled composition one test drives. */
+interface WebAccessFixture {
+  readonly ctx: Context
+  readonly service: PiTuiWebAccessHostService
+  readonly rows: ReadonlyMap<string, LiveRow>
+  readonly webServer: WebServerFixture
+  /** Apply/dispose counters keyed by official package name. */
+  readonly facts: ReadonlyMap<string, RowFacts>
+  /** How many times the persistent Loader write was invoked. */
+  readonly writes: () => number
+  /** The recorded call stacks of every Loader write (diagnosis only). */
+  readonly writeStacks: () => readonly string[]
+  /** How many times `loader.update` / `loader.remove` / `loader.create` ran after boot. */
+  readonly treeMutations: () => number
+  dispose(): Promise<void>
+}
+
+interface FixtureOptions {
+  /** Per-row overrides keyed by roster id (a SHARED Host row id is accepted). */
+  readonly overrides?: ReadonlyMap<string, RowOverride>
+  /** Roster ids the Host deliberately does NOT declare (negative control). */
+  readonly skipRows?: readonly string[]
+  /** Shared Host row ids the composition deliberately does NOT declare. */
+  readonly skipSharedRows?: readonly string[]
+}
+
+/**
+ * Build the real Loader, the declared rows (disabled, exactly like the
+ * Host-only overlay) and the mounted service. `loader.internal` is the Loader's
+ * own documented module-import hook: it lets the REAL `Entry.update` import a
+ * controlled module while every row keeps its exact official package name.
+ */
+async function createFixture(options: FixtureOptions = {}): Promise<WebAccessFixture> {
+  const behaviours = new Map<string, RowOverride>(options.overrides ?? [])
+  const defaults = new Map<string, RowOverride>([
+    // The official shapes the production rows really have.
+    ['web-runtime', { inject: ['webServer'], provide: 'webApp', fallback: true }],
+    ['modules', { provide: 'clientModules' }],
+    ['client-hmr', { inject: ['clientModules', 'webServer'] }],
+    ['terminal-controller', { provide: 'terminalController' }],
+    // rc.2 renamed the Office conversion service; it is a required Host
+    // service for an `enabled` claim. The shared MCP manager is NOT a Web row:
+    // it is mounted by the Host composition (see SHARED_HOST_ROWS).
+    ['office-kit', { provide: 'officeKit' }],
+    // The changed-files Host recorder `ui-deliverables` injects. The fixture
+    // provides the SERVICE (topology only); the real Git recorder is qualified
+    // by the split-process Host lane, never here.
+    ['workspace-changes', { provide: 'workspaceChanges' }],
+    ['ui-deliverables', { inject: ['workspaceChanges'] }],
+  ])
+  for (const [id, behaviour] of defaults) if (!behaviours.has(id)) behaviours.set(id, behaviour)
+  const sharedById = new Map(SHARED_HOST_ROWS.map(row => [row.id, row]))
+  const behaviourForPackage = new Map<string, RowOverride>()
+  for (const [id, behaviour] of behaviours) {
+    const row = PI_TUI_WEB_ACCESS_ROWS.find(candidate => candidate.id === id) ?? sharedById.get(id)
+    if (row === undefined) throw new Error(`the fixture override names an unknown row: ${id}`)
+    behaviourForPackage.set(row.name, behaviour)
+  }
+  // The shared Host rows provide their service with the real composition shape.
+  for (const row of SHARED_HOST_ROWS) {
+    if (!behaviourForPackage.has(row.name)) behaviourForPackage.set(row.name, { provide: row.provide })
+  }
+
+  const webServer = createWebServerFixture()
+  const ctx = new Context()
+  const facts = new Map<string, RowFacts>()
+  for (const row of PI_TUI_WEB_ACCESS_ROWS) facts.set(row.name, { applies: 0, disposes: 0 })
+  for (const row of PROTECTED_ROWS) facts.set(row.name, { applies: 0, disposes: 0 })
+  for (const row of SHARED_HOST_ROWS) facts.set(row.name, { applies: 0, disposes: 0 })
+
+  const modules = new Map<string, ControlledPlugin>()
+  /** The controlled module of one official package. */
+  const moduleFor = (name: string): ControlledPlugin => {
+    const known = modules.get(name)
+    if (known !== undefined) return known
+    const override = behaviourForPackage.get(name)
+    const rowFacts = facts.get(name) as RowFacts
+    const plugin: ControlledPlugin = {
+      name,
+      ...(override?.inject === undefined ? {} : { inject: override.inject }),
+      apply: pluginCtx => {
+        rowFacts.applies += 1
+        pluginCtx.effect(() => () => {
+          rowFacts.disposes += 1
+        }, `${name}: fixture lifeline`)
+        if (override?.fallback === true) {
+          // The official `web-runtime` shape: a CHILD plugin owns the fallback
+          // seat, so the seat leaves with the row's own fiber.
+          pluginCtx.plugin(childCtx => {
+            childCtx.effect(() => childCtx.webServer.registerFallback(() => undefined), 'fixture: fallback seat')
+          })
+        }
+        if (override?.provide !== undefined) pluginCtx.provide(override.provide, { fixture: name })
+        return override?.apply?.(pluginCtx)
+      },
+    }
+    modules.set(name, plugin)
+    return plugin
+  }
+
+  ctx.provide('webServer', webServer.service)
+  // The official Connection owner's ONE public URL builder: the ONLY source of a
+  // Web launch URL. The fixture appends its own launch token so a test can prove
+  // the getter reaches THIS authority (and never invents a URL).
+  ctx.provide('connection', {
+    authenticatedUrl: (baseUrl: string) => `${baseUrl}?token=${FIXTURE_TOKEN}`,
+  })
+  // The structural shape of the official Typert registry. The service only
+  // needs it to exist (the Host Runtime owns the descriptors); the REAL Gateway
+  // dispatch is proven by the split-process lane.
+  ctx.provide('typert', { register: async () => undefined })
+  const loaderFiber = ctx.plugin(Loader)
+  await loaderFiber
+  const loader = ctx.get('loader') as Loader
+  const internal = { version: 'v2', import: async (specifier: string) => moduleFor(specifier) }
+  ;(loader as unknown as { internal: unknown }).internal = internal
+
+  // Recorder around the Loader's OWN persistent surface: the toggle must never
+  // reach it. cordis-plugin-loader 1.1 renamed that tree-level persistence hook
+  // from `write()` to `commit(change)` (a per-entry `Entry.update` does not call
+  // it). Original functions are kept unbound and called with this loader.
+  let writes = 0
+  let treeMutations = 0
+  const writeStacks: string[] = []
+  const commit = loader.commit
+  loader.commit = (...args: Parameters<Loader['commit']>) => {
+    writes += 1
+    writeStacks.push(new Error('loader.commit').stack ?? '')
+    return commit.apply(loader, args)
+  }
+  const update = loader.update
+  loader.update = async (...args: Parameters<Loader['update']>) => {
+    treeMutations += 1
+    return update.apply(loader, args)
+  }
+  const create = loader.create
+  loader.create = async (...args: Parameters<Loader['create']>) => {
+    treeMutations += 1
+    return create.apply(loader, args)
+  }
+  const remove = loader.remove
+  loader.remove = (...args: Parameters<Loader['remove']>) => {
+    treeMutations += 1
+    return remove.apply(loader, args)
+  }
+
+  const skipped = new Set(options.skipRows ?? [])
+  const skippedShared = new Set(options.skipSharedRows ?? [])
+  // `ensureId` honours a supplied id; the published TYPE omits it because a
+  // caller normally lets the tree name a row.
+  const createRow = async (spec: { readonly id: string; readonly name: string; readonly disabled?: boolean }): Promise<void> => {
+    await loader.create(spec as unknown as Parameters<Loader['create']>[0])
+  }
+  for (const row of PI_TUI_WEB_ACCESS_ROWS) {
+    if (skipped.has(row.id)) continue
+    await createRow({ id: row.id, name: row.name, disabled: true })
+  }
+  // The shared Host rows are part of the Host composition, NOT the Web roster:
+  // they are enabled from boot and no toggle ever touches them.
+  for (const row of SHARED_HOST_ROWS) {
+    if (skippedShared.has(row.id)) continue
+    await createRow({ id: row.id, name: row.name })
+  }
+  for (const row of PROTECTED_ROWS) await createRow({ id: row.id, name: row.name })
+  await loader.await()
+  // Boot-time row creation is not a toggle mutation: the recorders start at
+  // zero after the Host's own composition exists.
+  treeMutations = 0
+  writes = 0
+  writeStacks.length = 0
+
+  const serviceFiber = ctx.inject(PiTuiWebAccessHostService.inject, pluginCtx => {
+    new PiTuiWebAccessHostService(pluginCtx)
+  })
+  await serviceFiber
+  const service = ctx.reflect.get('piTuiWebAccess') as PiTuiWebAccessHostService
+  const rows = new Map<string, LiveRow>([...PI_TUI_WEB_ACCESS_ROWS, ...SHARED_HOST_ROWS, ...PROTECTED_ROWS]
+    .filter(row => !skipped.has(row.id) && !skippedShared.has(row.id))
+    .map(row => [row.id, loader.resolve(row.id) as unknown as LiveRow]))
+  return {
+    ctx,
+    service,
+    rows,
+    webServer,
+    facts,
+    writes: () => writes,
+    writeStacks: () => writeStacks,
+    treeMutations: () => treeMutations,
+    dispose: async () => { await ctx.fiber.dispose() },
+  }
+}
+
+/** The live fiber state of one roster row. */
+function fiberState(fixture: WebAccessFixture, id: string): number | undefined {
+  return fixture.rows.get(id)?.fiber?.state
+}
+
+/** Assert every declared Web row is effectively disabled with no active fiber. */
+function assertAllRowsDisabled(fixture: WebAccessFixture): void {
+  for (const row of PI_TUI_WEB_ACCESS_ROWS) {
+    const entry = fixture.rows.get(row.id)
+    if (entry === undefined) continue
+    assert.equal(entry.disabled, true, `"${row.id}" must be effectively disabled`)
+    const state = fiberState(fixture, row.id)
+    assert.ok(state === undefined || state === FIBER_DISPOSED,
+      `"${row.id}" must have no active graph, found state ${String(state)}`)
+  }
+  for (const service of WEB_SERVICES) {
+    assert.equal(fixture.ctx.reflect.get(service), undefined, `the official "${service}" service must be released`)
+  }
+}
+
+/** The shared Host witnesses a fixture's composition mounted. */
+interface SharedHostWitness {
+  readonly uid: number | null | undefined
+  readonly service: unknown
+  readonly applies: number
+}
+
+/** Capture the SHARED Host rows (manager identity + apply count). */
+function sharedHostWitness(fixture: WebAccessFixture): SharedHostWitness {
+  const row = SHARED_HOST_ROWS[0]
+  return {
+    uid: fixture.rows.get(row.id)?.fiber?.uid,
+    service: fixture.ctx.reflect.get(row.provide),
+    applies: fixture.facts.get(row.name)?.applies ?? 0,
+  }
+}
+
+/** Total applies over the Web roster (one per mounted row). */
+function webApplies(fixture: WebAccessFixture): number {
+  return PI_TUI_WEB_ACCESS_ROWS.reduce((total, row) => total + (fixture.facts.get(row.name)?.applies ?? 0), 0)
+}
+
+test('the toggle drives off -> on -> off -> on through the real Entry.update', async t => {
+  const fixture = await createFixture()
+  t.after(() => fixture.dispose())
+
+  assert.deepEqual(await fixture.service.getStatus(), { state: 'disabled' })
+  assert.equal(fixture.webServer.facts().registered, false, 'no fallback may exist before enable')
+  // BEFORE the toggle: the SHARED Host manager the Web frontend reads exists
+  // while the Web frontend is off — it is not a Web row.
+  const shared = sharedHostWitness(fixture)
+  assert.notEqual(shared.service, undefined, 'the shared MCP manager must exist with the Web frontend off')
+  const protectedUids = new Map(PROTECTED_ROWS.map(row => [row.id, fixture.rows.get(row.id)?.fiber?.uid]))
+  const protectedApplies = new Map(PROTECTED_ROWS.map(row => [row.id, fixture.facts.get(row.name)?.applies]))
+
+  // ── enable ───────────────────────────────────────────────────────────────
+  assert.deepEqual(await fixture.service.setEnabled(true), { state: 'enabled' })
+  for (const row of PI_TUI_WEB_ACCESS_ROWS) {
+    assert.equal(fiberState(fixture, row.id), FIBER_ACTIVE, `"${row.id}" must be active after enable`)
+  }
+  assert.deepEqual(fixture.webServer.facts(), { registered: true, registrations: 1, disposals: 0 })
+  // Every declared row applied exactly once: there is no tolerated PENDING row.
+  assert.equal(webApplies(fixture), PI_TUI_WEB_ACCESS_ROWS.length,
+    'each declared row applied exactly once')
+  for (const service of WEB_SERVICES) {
+    assert.notEqual(fixture.ctx.reflect.get(service), undefined, `the official "${service}" service must be live`)
+  }
+  // The shared Host manager is the SAME instance: the enable mounted Browser
+  // rows around it and never remounted or duplicated it.
+  const enabledShared = sharedHostWitness(fixture)
+  assert.equal(enabledShared.uid, shared.uid, 'the shared MCP manager keeps its fiber across Web enable')
+  assert.equal(enabledShared.service, shared.service, 'the shared MCP manager keeps its service identity')
+  assert.equal(enabledShared.applies, shared.applies, 'the shared MCP manager is never re-applied by a Web toggle')
+  for (const row of PROTECTED_ROWS) {
+    assert.equal(fixture.rows.get(row.id)?.fiber?.uid, protectedUids.get(row.id),
+      `the protected "${row.id}" owner must keep its fiber`)
+    assert.equal(fixture.facts.get(row.name)?.applies, protectedApplies.get(row.id),
+      `the protected "${row.id}" owner must not be re-applied`)
+  }
+
+  // ── disable ──────────────────────────────────────────────────────────────
+  assert.deepEqual(await fixture.service.setEnabled(false), { state: 'disabled' })
+  assertAllRowsDisabled(fixture)
+  const disabledShared = sharedHostWitness(fixture)
+  assert.equal(disabledShared.uid, shared.uid, 'the shared MCP manager survives Web disable with the SAME fiber')
+  assert.equal(disabledShared.service, shared.service, 'the shared MCP manager service identity survives Web disable')
+  // A Web-off Host truthfully reports `disabled` even though the shared manager
+  // is still published: Manager presence is not a Web service.
+  assert.deepEqual(await fixture.service.getStatus(), { state: 'disabled' })
+  // The SPA fallback disposer ran EXACTLY once: the seat is gone and no second
+  // registration ever happened.
+  assert.deepEqual(fixture.webServer.facts(), { registered: false, registrations: 1, disposals: 1 })
+
+  // ── enable again on the SAME Loader ──────────────────────────────────────
+  assert.deepEqual(await fixture.service.setEnabled(true), { state: 'enabled' })
+  assert.deepEqual(fixture.webServer.facts(), { registered: true, registrations: 2, disposals: 1 })
+  const reenabledShared = sharedHostWitness(fixture)
+  assert.equal(reenabledShared.uid, shared.uid, 'the shared MCP manager keeps ONE lifetime across off -> on -> off -> on')
+  assert.equal(reenabledShared.service, shared.service, 'the shared MCP manager service identity never changes')
+  for (const row of PROTECTED_ROWS) {
+    assert.equal(fixture.rows.get(row.id)?.fiber?.uid, protectedUids.get(row.id),
+      `the protected "${row.id}" owner must survive the second enable`)
+  }
+
+  // The whole toggle wrote NOTHING persistent: no Loader tree commit, no Loader
+  // tree mutation (no `loader.update`, no `loader.create`, no `loader.remove`).
+  assert.equal(fixture.writes(), 0, `the toggle must not commit the Loader tree: ${fixture.writeStacks().join('\n---\n')}`)
+  assert.equal(fixture.treeMutations(), 0, 'the toggle must not use loader.update/create/remove')
+})
+
+/**
+ * The frozen order contract, shared by the positive assertion and its negative
+ * control: the enable must assemble the browser graph before the SPA fallback
+ * can serve `/`, and the disable must withdraw the fallback before anything
+ * else. Shared so the control proves THIS assertion rejects a mutation.
+ */
+function assertFrozenOrders(enable: readonly string[], disable: readonly string[]): void {
+  const ids = PI_TUI_WEB_ACCESS_ROWS.map(row => row.id)
+  for (const [label, order] of [['enable', enable], ['disable', disable]] as const) {
+    assert.equal(order.length, ids.length, `the ${label} order must name the whole Web roster`)
+    assert.equal(new Set(order).size, ids.length, `the ${label} order must name every row exactly once`)
+    assert.deepEqual([...order].sort(), [...ids].sort(), `the ${label} order must be the roster, not a subset`)
+  }
+  // The browser graph is assembled first, the SPA fallback is mounted last.
+  assert.deepEqual(enable.slice(0, 4), ['modules', 'client-hmr', 'cordis-client-runner', 'terminal-controller'],
+    'the browser graph must be assembled first')
+  assert.equal(enable[enable.length - 1], 'web-runtime', 'the SPA fallback row must be mounted LAST')
+  // The fallback is withdrawn FIRST, the browser graph (and its repository of
+  // browser bundles) LAST, in reverse order.
+  assert.equal(disable[0], 'web-runtime', 'the SPA fallback row must be withdrawn FIRST')
+  assert.deepEqual(disable.slice(-4), ['terminal-controller', 'cordis-client-runner', 'client-hmr', 'modules'],
+    'the browser graph rows must be withdrawn last, in reverse order')
+  // The presentation rows keep the overlay's canonical order on the way out
+  // and its reverse on the way in.
+  const presentation = ids.filter(id => !['web-runtime', 'modules', 'client-hmr', 'cordis-client-runner', 'terminal-controller'].includes(id))
+  assert.deepEqual(enable.slice(4, -1), presentation, 'the presentation rows keep the canonical order on enable')
+  assert.deepEqual(disable.slice(1, -4), [...presentation].reverse(),
+    'the presentation rows are released in reverse canonical order')
+}
+
+/**
+ * The four rc.5 Web-only Host providers this composition restores. Each entry
+ * records the official package, the deployment config the official rc.5 patch
+ * requires, and the Browser consumer that must mount after it.
+ */
+const RC5_WEB_PROVIDERS: ReadonlyArray<{
+  readonly id: string
+  readonly name: string
+  readonly config: Readonly<Record<string, number>>
+  readonly before: string
+}> = [
+  { id: 'open-in-app', name: '@deepseek-ai/dsh-host-open-in-app',
+    config: { probeTimeoutMs: 10000, iconTimeoutMs: 10000, launchWatchMs: 1000 }, before: 'ui-open-in-app' },
+  { id: 'session-reference', name: '@deepseek-ai/dsh-session-reference', config: {}, before: 'ui-reference' },
+  { id: 'plugin-inventory', name: '@deepseek-ai/dsh-host-plugin-inventory', config: {}, before: 'ui-plugin-manager' },
+  { id: 'message-feedback', name: '@deepseek-ai/dsh-message-feedback', config: { maxNoteBytes: 8192 }, before: 'ui-message-feedback' },
+]
+
+/** Assert the rc.5 Host providers' package, required config and provider-first order. */
+function assertRc5WebProviderFacts(
+  rows: ReadonlyArray<{ readonly id: string; readonly name: string; readonly config?: Readonly<Record<string, unknown>> }>,
+): void {
+  const byId = new Map(rows.map(row => [row.id, row]))
+  const index = (id: string): number => rows.findIndex(row => row.id === id)
+  for (const provider of RC5_WEB_PROVIDERS) {
+    assert.equal(byId.get(provider.id)?.name, provider.name,
+      `the "${provider.id}" row must load its exact official package`)
+    if (Object.keys(provider.config).length > 0) {
+      assert.deepEqual(byId.get(provider.id)?.config, provider.config,
+        `the "${provider.id}" row must carry the official rc.5 deployment config`)
+    }
+    assert.ok(index(provider.id) >= 0 && index(provider.id) < index(provider.before),
+      `the "${provider.id}" provider must mount before its "${provider.before}" consumer`)
+  }
+}
+
+test('the Web rows carry their official non-desktop facts and rc.5 Host providers', () => {
+  const byId = new Map(PI_TUI_WEB_ACCESS_ROWS.map(row => [row.id, row]))
+  // Official row facts copied from the installed web-app patch, not derived
+  // from the production table under test.
+  assert.equal(byId.has('mcp-manager'), false,
+    'the shared MCP manager belongs to the Host composition, never to the Web toggle roster')
+  assert.deepEqual(byId.get('skill-office')?.config, { pythonEnvironment: 'user' },
+    'a non-desktop Host-only profile selects the user Python, never a workspace runtime')
+  assert.match(byId.get('office-kit')?.yaml?.join('\n') ?? '',
+    /outputDirectory: !!js dshHomePath\('office-kit', 'outputs'\)/u,
+    'the Office output stays in the Host data location through the official macro')
+  assert.equal(byId.has('office-to-pdf'), false, 'the retired Office package must not be declared')
+  assert.equal(byId.has('workspace-dependencies'), false,
+    'the desktop-only workspace-dependencies row must never be activated by this profile')
+  const index = (id: string): number => PI_TUI_WEB_ACCESS_ROWS.findIndex(row => row.id === id)
+  assert.ok(index('office-kit') >= 0 && index('office-kit') < index('ui-sidebar-documentpreview'),
+    'the Office conversion service must mount before its document-preview UI')
+  assert.ok(index('skill-office') >= 0 && index('skill-office') < index('ui-sidebar-documentpreview'),
+    'the Office skills must mount before the document-preview UI')
+  assert.ok(index('ui-settings-account') >= 0 && index('ui-settings-account') < index('ui-account-notifications'),
+    'the notification UI comes after the settings-account module it injects')
+  assert.ok(index('ui-agent-team') >= 0 && index('ui-agent-team') > index('ui-skill'),
+    'the Team client UI mounts after the always-active base team providers')
+  assertRc5WebProviderFacts(PI_TUI_WEB_ACCESS_ROWS)
+  // Negative controls: the SAME assertion rejects a wrong required config or a
+  // provider mounted after its consumer.
+  assert.throws(
+    () => assertRc5WebProviderFacts(PI_TUI_WEB_ACCESS_ROWS.map(row =>
+      row.id === 'message-feedback' ? { ...row, config: { maxNoteBytes: 1 } } : row)),
+    /official rc\.5 deployment config/u,
+    'a relaxed feedback note limit must fail the official config contract',
+  )
+  const movedProvider = PI_TUI_WEB_ACCESS_ROWS.filter(row => row.id !== 'session-reference')
+  const feedbackIndex = movedProvider.findIndex(row => row.id === 'ui-reference')
+  movedProvider.splice(feedbackIndex + 1, 0, PI_TUI_WEB_ACCESS_ROWS.find(row => row.id === 'session-reference')!)
+  assert.throws(
+    () => assertRc5WebProviderFacts(movedProvider),
+    /provider must mount before its "ui-reference" consumer/u,
+    'a resolver mounted after its Browser consumer must fail the order contract',
+  )
+})
+
+test('the enable and disable orders are the frozen production orders', () => {
+  assertFrozenOrders(PI_TUI_WEB_ACCESS_ENABLE_ORDER, PI_TUI_WEB_ACCESS_DISABLE_ORDER)
+  // Negative controls: the SAME assertion rejects a reordered, dropped or
+  // extended order, so it cannot be satisfied by the current source alone.
+  assert.throws(
+    () => assertFrozenOrders([...PI_TUI_WEB_ACCESS_ENABLE_ORDER].reverse(), PI_TUI_WEB_ACCESS_DISABLE_ORDER),
+    /browser graph must be assembled first/u,
+    'an enable that mounts the SPA row first must be refused',
+  )
+  assert.throws(
+    () => assertFrozenOrders(PI_TUI_WEB_ACCESS_ENABLE_ORDER, [PI_TUI_WEB_ACCESS_DISABLE_ORDER[1], ...PI_TUI_WEB_ACCESS_DISABLE_ORDER.slice(2), PI_TUI_WEB_ACCESS_DISABLE_ORDER[0]]),
+    /withdrawn FIRST/u,
+    'a disable that leaves the SPA row for last must be refused',
+  )
+  assert.throws(
+    () => assertFrozenOrders(PI_TUI_WEB_ACCESS_ENABLE_ORDER.slice(1), PI_TUI_WEB_ACCESS_DISABLE_ORDER),
+    /must name the whole Web roster/u,
+  )
+})
+
+/**
+ * The two official Client dependencies every shipped UI manifest injects
+ * (`ui-context-menu`, `ui-file-drag`) are MANDATORY rows: they mount with the
+ * graph and release with it. No row may stay PENDING: the Web composition
+ * reports `enabled` only when every declared row is ACTIVE.
+ */
+const MANDATORY_CLIENT_ROWS: ReadonlyArray<{ readonly id: string; readonly name: string }> = [
+  { id: 'ui-context-menu', name: '@deepseek-ai/dsh-client-ui-context-menu' },
+  { id: 'ui-file-drag', name: '@deepseek-ai/dsh-client-ui-file-drag' },
+]
+
+test('the mandatory Client dependency rows mount, release and never stay PENDING', async t => {
+  for (const row of MANDATORY_CLIENT_ROWS) {
+    assert.ok(PI_TUI_WEB_ACCESS_ROWS.some(candidate => candidate.id === row.id),
+      `the mandatory "${row.id}" row belongs to the runtime roster`)
+    assert.equal(PI_TUI_WEB_ACCESS_ROWS.find(candidate => candidate.id === row.id)?.name, row.name,
+      `the "${row.id}" row must load its exact official package`)
+  }
+
+  const fixture = await createFixture()
+  t.after(() => fixture.dispose())
+  assert.deepEqual(await fixture.service.setEnabled(true), { state: 'enabled' })
+  for (const row of MANDATORY_CLIENT_ROWS) {
+    assert.equal(fiberState(fixture, row.id), FIBER_ACTIVE,
+      `the mandatory "${row.id}" row must be ACTIVE while the composition reports enabled`)
+    assert.equal(fixture.facts.get(row.name)?.applies, 1, `the "${row.id}" row must apply exactly once`)
+  }
+  assert.deepEqual(await fixture.service.setEnabled(false), { state: 'disabled' })
+  for (const row of MANDATORY_CLIENT_ROWS) {
+    assert.equal(fiberState(fixture, row.id), FIBER_DISPOSED,
+      `the mandatory "${row.id}" row must release with the roster`)
+    assert.equal(fixture.facts.get(row.name)?.disposes, 1, `the "${row.id}" row must dispose exactly once`)
+  }
+
+  // Negative control: a real dependency failure on EITHER mandatory row is a
+  // Web failure, not a tolerated PENDING. The failed enable must withdraw the
+  // whole roster instead of claiming enabled.
+  for (const row of MANDATORY_CLIENT_ROWS) {
+    const pending = await createFixture({
+      overrides: new Map<string, RowOverride>([[row.id, { inject: ['fixtureDependencyThatNeverSettles'] }]]),
+    })
+    try {
+      const status = await pending.service.setEnabled(true)
+      assert.equal(status.state, 'unavailable', `a PENDING "${row.id}" must never report enabled`)
+      assert.match((status as { reason: string }).reason, new RegExp(`"${row.id}"`, 'u'),
+        'the failure must name the mandatory row that could not mount')
+      assertAllRowsDisabled(pending)
+      assert.equal(pending.webServer.facts().registered, false,
+        'a failed enable must withdraw the SPA seat it may have mounted')
+    } finally {
+      await pending.dispose()
+    }
+  }
+})
+
+test('an already-settled state is a no-op: no remount and no second fallback', async t => {
+  const fixture = await createFixture()
+  t.after(() => fixture.dispose())
+
+  assert.deepEqual(await fixture.service.setEnabled(true), { state: 'enabled' })
+  const afterFirst = webApplies(fixture)
+  const enabledUids = new Map(PI_TUI_WEB_ACCESS_ROWS.map(row => [row.id, fixture.rows.get(row.id)?.fiber?.uid]))
+  assert.deepEqual(await fixture.service.setEnabled(true), { state: 'enabled' })
+  assert.equal(webApplies(fixture), afterFirst, 'a duplicate enable must not re-apply any row')
+  for (const row of PI_TUI_WEB_ACCESS_ROWS) {
+    assert.equal(fixture.rows.get(row.id)?.fiber?.uid, enabledUids.get(row.id),
+      `a duplicate enable must not remount "${row.id}"`)
+  }
+  assert.deepEqual(fixture.webServer.facts(), { registered: true, registrations: 1, disposals: 0 })
+
+  assert.deepEqual(await fixture.service.setEnabled(false), { state: 'disabled' })
+  assert.deepEqual(await fixture.service.setEnabled(false), { state: 'disabled' })
+  assert.deepEqual(fixture.webServer.facts(), { registered: false, registrations: 1, disposals: 1 },
+    'a duplicate disable must not touch the released seat again')
+})
+
+test('concurrent requests are serialized, report changing, and settle on the Loader truth', async t => {
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  let entered!: () => void
+  const started = new Promise<void>(resolve => { entered = resolve })
+  const fixture = await createFixture({
+    overrides: new Map<string, RowOverride>([['modules', {
+      provide: 'clientModules',
+      apply: () => {
+        entered()
+        return gate
+      },
+    }]]),
+  })
+  // A failing assertion must still release the held row, or the Host teardown
+  // would wait for it forever.
+  t.after(async () => {
+    release()
+    await fixture.dispose()
+  })
+
+  const enable = fixture.service.setEnabled(true)
+  await started
+  // One mutation is in flight: the status must say so instead of guessing.
+  assert.deepEqual(await fixture.service.getStatus(), { state: 'changing' })
+  // A second, conflicting request is queued behind it.
+  const disable = fixture.service.setEnabled(false)
+  assert.deepEqual(await fixture.service.getStatus(), { state: 'changing' })
+  release()
+  assert.deepEqual(await enable, { state: 'enabled' })
+  // The queued disable ran AFTER the enable and observed the settled Loader.
+  assert.deepEqual(await disable, { state: 'disabled' })
+  assertAllRowsDisabled(fixture)
+  assert.deepEqual(fixture.webServer.facts(), { registered: false, registrations: 1, disposals: 1 },
+    'the conflicting pair must leave exactly one fallback registration and one release')
+  assert.deepEqual(await fixture.service.getStatus(), { state: 'disabled' })
+})
+
+test('two simultaneous enables leave one fallback and one settle each', async t => {
+  let opened = 0
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const fixture = await createFixture({
+    overrides: new Map<string, RowOverride>([['web-runtime', {
+      inject: ['webServer'],
+      provide: 'webApp',
+      fallback: true,
+      apply: () => {
+        opened += 1
+        return gate
+      },
+    }]]),
+  })
+  t.after(async () => {
+    release()
+    await fixture.dispose()
+  })
+  const first = fixture.service.setEnabled(true)
+  const second = fixture.service.setEnabled(true)
+  release()
+  assert.deepEqual(await Promise.all([first, second]), [{ state: 'enabled' }, { state: 'enabled' }])
+  assert.equal(opened, 1, 'the second request must not remount the SPA row')
+  assert.deepEqual(fixture.webServer.facts(), { registered: true, registrations: 1, disposals: 0 })
+})
+
+test('a failed enable withdraws what it mounted and never reports enabled', async t => {
+  const fixture = await createFixture({
+    overrides: new Map<string, RowOverride>([['modules', {
+      provide: 'clientModules',
+      apply: () => { throw new Error('fixture: the module graph refused to compose') },
+    }]]),
+  })
+  t.after(() => fixture.dispose())
+  const status = await fixture.service.setEnabled(true)
+  assert.equal(status.state, 'unavailable', 'a failed enable must never claim enabled')
+  assert.match((status as { reason: string }).reason, /module graph refused to compose/u)
+  // Rollback: the whole roster is back to disabled and NO fallback is served.
+  assertAllRowsDisabled(fixture)
+  assert.deepEqual(fixture.webServer.facts(), { registered: false, registrations: 0, disposals: 0 })
+  assert.deepEqual(await fixture.service.getStatus(), { state: 'disabled' })
+
+  // A later request still runs: the failure did not poison the queue.
+  const retry = await fixture.service.setEnabled(true)
+  assert.equal(retry.state, 'unavailable', 'the same broken row must fail again, not silently pass')
+  assertAllRowsDisabled(fixture)
+})
+
+test('a failed SPA row enable reports unavailable with no served index', async t => {
+  const fixture = await createFixture({
+    overrides: new Map<string, RowOverride>([['web-runtime', {
+      inject: ['webServer'],
+      provide: 'webApp',
+      fallback: true,
+      apply: () => { throw new Error('fixture: the official frontend dist is missing') },
+    }]]),
+  })
+  t.after(() => fixture.dispose())
+  const status = await fixture.service.setEnabled(true)
+  assert.equal(status.state, 'unavailable')
+  assert.match((status as { reason: string }).reason, /frontend dist is missing/u)
+  assertAllRowsDisabled(fixture)
+  assert.equal(fixture.webServer.facts().registered, false, 'a failed SPA mount must not leave a fallback')
+})
+
+test('a missing required Web service keeps the composition unavailable', async t => {
+  const fixture = await createFixture({
+    // The row mounts, but publishes no `clientModules`: a mounted fiber is not
+    // a working browser graph.
+    overrides: new Map<string, RowOverride>([['modules', {}]]),
+  })
+  t.after(() => fixture.dispose())
+  const status = await fixture.service.setEnabled(true)
+  assert.equal(status.state, 'unavailable')
+  assert.match((status as { reason: string }).reason, /clientModules|client-hmr/u)
+  // Recovery keeps closing: no SPA row stays mounted behind an unavailable graph.
+  assert.equal(fixture.webServer.facts().registered, false)
+  assertAllRowsDisabled(fixture)
+})
+
+test('a missing shared MCP manager keeps the Web composition unavailable', async t => {
+  // The manager is NOT a Web row: the Host composition owns it. A Host whose
+  // composition failed to mount it must not advertise a working Web settings
+  // surface (whose MCP page would have no Host authority), and the failed
+  // enable must withdraw everything it mounted.
+  const fixture = await createFixture({ skipSharedRows: ['mcp-manager'] })
+  t.after(() => fixture.dispose())
+  const status = await fixture.service.setEnabled(true)
+  assert.equal(status.state, 'unavailable')
+  assert.match((status as { reason: string }).reason, /shared Host services are missing: mcpManager/u)
+  assert.equal(fixture.webServer.facts().registered, false, 'a missing shared authority must not leave the SPA served')
+  assertAllRowsDisabled(fixture)
+})
+
+test('a PENDING shared MCP manager row is a missing shared service, never enabled', async t => {
+  // The row exists but its fiber never activates (a real install/dependency
+  // regression): the mounted fiber is not a working Host authority.
+  const fixture = await createFixture({
+    overrides: new Map<string, RowOverride>([['mcp-manager', { inject: ['neverProvidedSharedService'] }]]),
+  })
+  t.after(() => fixture.dispose())
+  const status = await fixture.service.setEnabled(true)
+  assert.equal(status.state, 'unavailable')
+  assert.match((status as { reason: string }).reason, /shared Host services are missing: mcpManager/u)
+  assertAllRowsDisabled(fixture)
+})
+
+test('an active Office row without its provider rolls Web back without remounting protected Host owners', async t => {
+  const fixture = await createFixture({ overrides: new Map<string, RowOverride>([['office-kit', {}]]) })
+  t.after(() => fixture.dispose())
+  const protectedUids = new Map(PROTECTED_ROWS.map(row => [row.id, fixture.rows.get(row.id)?.fiber?.uid]))
+  const protectedApplies = new Map(PROTECTED_ROWS.map(row => [row.id, fixture.facts.get(row.name)?.applies]))
+
+  const status = await fixture.service.setEnabled(true)
+  assert.equal(status.state, 'unavailable')
+  assert.match((status as { reason: string }).reason, /officeKit|office-kit/u)
+  assertAllRowsDisabled(fixture)
+  assert.equal(fixture.ctx.reflect.get('officeKit'), undefined)
+  for (const row of PROTECTED_ROWS) {
+    assert.equal(fixture.rows.get(row.id)?.fiber?.uid, protectedUids.get(row.id),
+      `the protected "${row.id}" owner must keep its fiber after Office rollback`)
+    assert.equal(fixture.facts.get(row.name)?.applies, protectedApplies.get(row.id),
+      `the protected "${row.id}" owner must not be re-applied by Office rollback`)
+  }
+})
+
+test('a missing workspaceChanges provider keeps the deliverables consumer from an enabled claim', async t => {
+  // The real dependency loop: `workspace-changes` mounts but publishes no
+  // `workspaceChanges` (an install/order regression), so `ui-deliverables`
+  // cannot become active. The composition must roll back instead of reporting
+  // "enabled without changed files".
+  const fixture = await createFixture({
+    overrides: new Map<string, RowOverride>([['workspace-changes', {}]]),
+  })
+  t.after(() => fixture.dispose())
+  const status = await fixture.service.setEnabled(true)
+  assert.equal(status.state, 'unavailable', 'a PENDING consumer must never report enabled')
+  assert.match((status as { reason: string }).reason, /"ui-deliverables" row is state-0, not active/u,
+    'the failure must name the PENDING consumer with its live fiber state')
+  // The SPA row was mounted LAST and then withdrawn by the rollback: the
+  // listener briefly registered the fallback exactly once and released it.
+  assert.deepEqual(fixture.webServer.facts(), { registered: false, registrations: 1, disposals: 1 },
+    'the rollback must withdraw the SPA fallback instead of leaving a half-enabled Web')
+  assertAllRowsDisabled(fixture)
+  assert.deepEqual(await fixture.service.getStatus(), { state: 'disabled' })
+})
+
+test('a partial teardown is never reported as disabled', async t => {
+  // The `clientModules` owner outlives its row (it is provided from the ROOT
+  // context): the real shape of a teardown that did not close what the graph
+  // owns. The status may not claim `disabled` on the requested boolean.
+  const fixture = await createFixture({
+    overrides: new Map<string, RowOverride>([['modules', {
+      apply: pluginCtx => { pluginCtx.root.provide('clientModules', { fixture: 'root-owned' }) },
+    }]]),
+  })
+  t.after(() => fixture.dispose())
+  assert.deepEqual(await fixture.service.setEnabled(true), { state: 'enabled' })
+  const status = await fixture.service.setEnabled(false)
+  assert.equal(status.state, 'unavailable', 'a leaked Web service must not be reported as disabled')
+  assert.match((status as { reason: string }).reason, /clientModules/u)
+})
+
+test('the status reads the live Loader on every call, never a cached flag', async t => {
+  const fixture = await createFixture()
+  t.after(() => fixture.dispose())
+  assert.deepEqual(await fixture.service.setEnabled(true), { state: 'enabled' })
+  // Someone else changes the graph behind the service's back: a cached
+  // `enabled` boolean would keep lying.
+  await (fixture.rows.get('terminal-controller') as unknown as { update(options: object): Promise<void> })
+    .update({ disabled: true })
+  const status = await fixture.service.getStatus()
+  assert.equal(status.state, 'unavailable')
+  assert.match((status as { reason: string }).reason,
+    new RegExp(`1 of the ${String(PI_TUI_WEB_ACCESS_ROWS.length)} Web rows are disabled`, 'u'))
+  assert.match((status as { reason: string }).reason, /terminal-controller/u,
+    'the partial-state diagnostic must name the rows that left the graph')
+})
+
+test('an unrecognized roster is refused instead of toggled partially', async t => {
+  // 1. A Host whose Loader does not declare the roster at all.
+  const missing = await createFixture({ skipRows: ['terminal-controller', 'ui-plan'] })
+  t.after(() => missing.dispose())
+  const absent = await missing.service.setEnabled(true)
+  assert.equal(absent.state, 'unavailable')
+  assert.match((absent as { reason: string }).reason, /terminal-controller/u)
+  assertAllRowsDisabled(missing)
+  assert.equal(missing.webServer.facts().registered, false)
+
+  // 2. The same preflight over a structural Loader view, so the duplicate and
+  // re-pointed-row branches are driven by the production code path too.
+  const roster = PI_TUI_WEB_ACCESS_ROWS.map(row => pseudoRow(row.id, row.name, true))
+  for (const [label, rows, expected] of [
+    ['a duplicated row', [...roster, pseudoRow('modules', '@deepseek-ai/dsh-client-modules', true)], /more than one "modules" row/u],
+    ['a re-pointed row', roster.map(row => row.options.id === 'web-runtime'
+      ? pseudoRow('web-runtime', '@deepseek-ai/dsh-host-webserver', true)
+      : row), /"web-runtime" row loads/u],
+    ['a missing row', roster.filter(row => row.options.id !== 'ui-trajectory'), /ui-trajectory/u],
+  ] as ReadonlyArray<readonly [string, readonly PseudoRow[], RegExp]>) {
+    const stub = await createFixture({ overrides: new Map() })
+    const status = await driveStub(stub, rows)
+    assert.equal(status.state, 'unavailable', `${label} must be refused`)
+    assert.match((status as { reason: string }).reason, expected, `${label} must name the real cause`)
+  }
+})
+
+/** Minimal Loader entry view for the roster preflight negative controls. */
+interface PseudoRow {
+  readonly options: { readonly id: string; readonly name: string }
+  readonly disabled: boolean
+  update(options: { readonly disabled?: boolean }): Promise<void>
+  readonly fiber?: { readonly uid: number | null; readonly state: number; await(): Promise<unknown> }
+}
+
+/** One row that is declared, disabled and never mounted. */
+function pseudoRow(id: string, name: string, disabled: boolean): PseudoRow {
+  return {
+    options: { id, name },
+    disabled,
+    update: async () => undefined,
+  }
+}
+
+/**
+ * Drive the production service against a structural Loader. The service is
+ * mounted on a context whose `loader` is the structural view; no production
+ * code is replaced.
+ */
+async function driveStub(
+  fixture: WebAccessFixture,
+  rows: readonly PseudoRow[],
+): Promise<Awaited<ReturnType<PiTuiWebAccessHostService['setEnabled']>>> {
+  const ctx = new Context()
+  ctx.provide('typert', { register: async () => undefined })
+  ctx.provide('loader', {
+    entries: () => rows,
+    await: async () => undefined,
+  })
+  const fiber = ctx.inject(PiTuiWebAccessHostService.inject, pluginCtx => {
+    new PiTuiWebAccessHostService(pluginCtx)
+  })
+  await fiber
+  try {
+    return await (ctx.reflect.get('piTuiWebAccess') as PiTuiWebAccessHostService).setEnabled(true)
+  } finally {
+    await ctx.fiber.dispose()
+  }
+}
+
+test('the wire result codec accepts the four states and refuses any other shape', () => {
+  for (const state of ['disabled', 'enabled', 'changing'] as const) {
+    assert.deepEqual(parsePiTuiWebAccessStatus({ state }), { state })
+  }
+  assert.deepEqual(parsePiTuiWebAccessStatus({ state: 'unavailable', reason: 'not tonight' }),
+    { state: 'unavailable', reason: 'not tonight' })
+  for (const [label, value] of [
+    ['a non-object', 'enabled'],
+    ['no state', {}],
+    ['an unknown state', { state: 'on' }],
+    ['a missing reason', { state: 'unavailable' }],
+    ['an empty reason', { state: 'unavailable', reason: '' }],
+    ['a non-string reason', { state: 'unavailable', reason: 1 }],
+    ['a stray field', { state: 'enabled', reason: 'x' }],
+    ['a stray token field', { state: 'disabled', token: 'secret' }],
+  ] as ReadonlyArray<readonly [string, unknown]>) {
+    assert.throws(() => parsePiTuiWebAccessStatus(value), TypeError, `${label} must be refused`)
+  }
+  // The mutation's argument codec admits a boolean and nothing else.
+  const codec = PI_TUI_WEB_ACCESS_SET_ENABLED.parameters[0]?.codec
+  assert.ok(codec !== undefined, 'the mutation must declare its argument codec')
+  const parser = (codec as { create(): { parse(value: unknown): unknown } }).create()
+  assert.equal(parser.parse(true), true)
+  assert.equal(parser.parse(false), false)
+  for (const value of ['true', 1, null, undefined, {}]) {
+    assert.throws(() => parser.parse(value), TypeError, `${JSON.stringify(value)} is not a wire boolean`)
+  }
+})
+
+test('unmounting the Host runtime during a mutation leaves no unhandled rejection', async t => {
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const fixture = await createFixture({
+    overrides: new Map<string, RowOverride>([['modules', { provide: 'clientModules', apply: () => gate }]]),
+  })
+  const rejections: unknown[] = []
+  const onRejection = (reason: unknown): void => { rejections.push(reason) }
+  process.on('unhandledRejection', onRejection)
+  t.after(async () => {
+    process.off('unhandledRejection', onRejection)
+    await fixture.dispose()
+  })
+  const pending = fixture.service.setEnabled(true)
+  // Host shutdown while the transition is in flight. cordis 4.1's disposal
+  // AWAITS the pending plugin lifecycle work, so the fixture gate is released
+  // CONCURRENTLY with the dispose: releasing it afterwards would deadlock the
+  // disposal on the very gate it is waiting for.
+  const disposal = fixture.ctx.fiber.dispose()
+  release()
+  await disposal
+  const settled = await Promise.race([
+    pending,
+    // Bounded window: a hang fails HERE instead of pending forever.
+    new Promise<'timeout'>(resolve => { setTimeout(() => resolve('timeout'), 5_000).unref() }),
+  ])
+  assert.notEqual(settled, 'timeout', 'the in-flight mutation must settle, not hang')
+  // One more turn of the event loop: a late unhandled rejection would surface.
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(rejections, [], 'a Host shutdown during a toggle must not leak a rejection')
+})
+
+/* ── M5-W PR-C: the official authenticated URL getter ─────────────────────── */
+
+test('getAuthenticatedUrl answers only while the frontend is enabled, from the official authority', async t => {
+  const fixture = await createFixture()
+  t.after(() => fixture.dispose())
+
+  // Disabled: no URL is produced at all, and the failure never carries one.
+  await assert.rejects(
+    fixture.service.getAuthenticatedUrl(),
+    (error: unknown) => {
+      assert.match(String(error), /not enabled/u)
+      assert.doesNotMatch(String(error), new RegExp(FIXTURE_TOKEN, 'u'), 'no token in a disabled failure')
+      return true
+    },
+  )
+
+  assert.deepEqual(await fixture.service.setEnabled(true), { state: 'enabled' })
+  const { url } = await fixture.service.getAuthenticatedUrl()
+  assert.equal(url, `${FIXTURE_ORIGIN}/?token=${FIXTURE_TOKEN}`,
+    'the URL is connection.authenticatedUrl(webServer.getOrigin() + "/") — the official path only')
+
+  // The getter never stores or mirrors the value: the status stays the small
+  // availability vocabulary, and a second call reads the authority again.
+  const status = await fixture.service.getStatus()
+  assert.deepEqual(status, { state: 'enabled' })
+  assert.doesNotMatch(JSON.stringify(status), /token|127\.0\.0\.1:4321/u)
+  assert.deepEqual(await fixture.service.getAuthenticatedUrl(), { url })
+
+  // Disabled again: the same getter refuses instead of serving a stale link.
+  assert.deepEqual(await fixture.service.setEnabled(false), { state: 'disabled' })
+  await assert.rejects(fixture.service.getAuthenticatedUrl(), /not enabled/u)
+})
+
+test('getAuthenticatedUrl refuses during a mutation and on an unavailable roster', async t => {
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  let entered!: () => void
+  const started = new Promise<void>(resolve => { entered = resolve })
+  const fixture = await createFixture({
+    overrides: new Map<string, RowOverride>([['modules', {
+      provide: 'clientModules',
+      apply: () => {
+        entered()
+        return gate
+      },
+    }]]),
+  })
+  t.after(async () => {
+    release()
+    await fixture.dispose()
+  })
+  const enabling = fixture.service.setEnabled(true)
+  await started
+  await assert.rejects(fixture.service.getAuthenticatedUrl(), /not enabled/u,
+    'a changing Host must not hand out a URL')
+  release()
+  assert.deepEqual(await enabling, { state: 'enabled' })
+
+  // A partially disabled roster is `unavailable`: no URL either.
+  const row = fixture.rows.get('ui-theme') as unknown as {
+    update(options: { readonly disabled: boolean }): Promise<void>
+  }
+  await row.update({ disabled: true })
+  await assert.rejects(fixture.service.getAuthenticatedUrl(), /unavailable/u)
+})
+
+/* ── M5-W PR-C: profile recomposition preserves the live target ───────────── */
+
+/** Wait for the serialized recomposition repair to reach the expected state. */
+async function waitForStatus(
+  fixture: WebAccessFixture,
+  expected: PiTuiWebAccessStatus['state'],
+  label: string,
+): Promise<PiTuiWebAccessStatus> {
+  const deadline = Date.now() + 10_000
+  let status = await fixture.service.getStatus()
+  while (status.state !== expected && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 10))
+    status = await fixture.service.getStatus()
+  }
+  assert.equal(status.state, expected, `${label}: reached ${JSON.stringify(status)}`)
+  return status
+}
+
+/** Emulate the official recompose's re-application of the overlay rows. */
+async function reapplyOverlayDisabled(fixture: WebAccessFixture): Promise<void> {
+  for (const row of PI_TUI_WEB_ACCESS_ROWS) {
+    const entry = fixture.rows.get(row.id) as unknown as {
+      update(options: { readonly disabled: boolean }): Promise<void>
+    }
+    await entry.update({ disabled: true })
+  }
+}
+
+test('an official profile recomposition restores the last successful enabled target', async t => {
+  const fixture = await createFixture()
+  t.after(() => fixture.dispose())
+
+  // No repair before the first successful toggle: the cold-boot default stands.
+  fixture.ctx.emit('app-boot/config-reload')
+  await waitForStatus(fixture, 'disabled', 'cold boot before any toggle')
+  assert.equal(webApplies(fixture), 0, 'no repair ran before the first successful toggle')
+
+  assert.deepEqual(await fixture.service.setEnabled(true), { state: 'enabled' })
+  const appliesWhileEnabled = webApplies(fixture)
+  assert.equal(fixture.webServer.facts().registered, true)
+
+  // The official Settings write recomposes the profile and re-applies the
+  // overlay's declarative disabled rows, then emits the official event.
+  await reapplyOverlayDisabled(fixture)
+  assert.equal((await fixture.service.getStatus()).state, 'disabled',
+    'the recomposition really disabled the live roster (negative control)')
+  fixture.ctx.emit('app-boot/config-reload')
+  await waitForStatus(fixture, 'enabled', 'recomposition repair')
+  assert.equal(webApplies(fixture) > appliesWhileEnabled, true,
+    'the repair re-mounted the live roster through the same Entry.update path')
+  assert.deepEqual(fixture.webServer.facts(), { registered: true, registrations: 2, disposals: 1 },
+    'the SPA fallback was re-registered exactly once by the repair')
+})
+
+test('a recomposition never re-enables after a successful disable or without a toggle', async t => {
+  const fixture = await createFixture()
+  t.after(() => fixture.dispose())
+  assert.deepEqual(await fixture.service.setEnabled(true), { state: 'enabled' })
+  assert.deepEqual(await fixture.service.setEnabled(false), { state: 'disabled' })
+  const appliesWhileDisabled = webApplies(fixture)
+  await reapplyOverlayDisabled(fixture)
+  fixture.ctx.emit('app-boot/config-reload')
+  await waitForStatus(fixture, 'disabled', 'disabled target after recomposition')
+  assert.equal(webApplies(fixture), appliesWhileDisabled, 'a disabled target must never be re-enabled')
+
+  const fresh = await createFixture()
+  t.after(() => fresh.dispose())
+  fresh.ctx.emit('app-boot/config-reload')
+  await waitForStatus(fresh, 'disabled', 'no toggle at all')
+  assert.equal(webApplies(fresh), 0, 'a never-toggled Host has no target to restore')
+})
+
+test('a failed recomposition repair never claims the restored state', async t => {
+  let failReenable = false
+  const fixture = await createFixture({
+    overrides: new Map<string, RowOverride>([['modules', {
+      provide: 'clientModules',
+      apply: () => {
+        if (failReenable) throw new Error('fixture: the module graph refused to compose again')
+      },
+    }]]),
+  })
+  t.after(() => fixture.dispose())
+  assert.deepEqual(await fixture.service.setEnabled(true), { state: 'enabled' })
+  await reapplyOverlayDisabled(fixture)
+  // The repair's own diagnostic is emitted AFTER the serialized repair settled:
+  // it is the authoritative attempt+settlement witness. The live status alone is
+  // already `disabled` here, so only this witness proves the repair really ran.
+  const warnings: string[] = []
+  // Cordis exposes `ctx.logger` as a CALLABLE logger object: both
+  // `ctx.logger(name)` and the direct fiber diagnostics (`ctx.logger.error`)
+  // must exist, so the test seam is the same hybrid shape.
+  const fakeLogger = Object.assign(
+    (_name: string) => fakeLogger,
+    {
+      debug() {},
+      info() {},
+      warn: (message: string) => { warnings.push(message) },
+      error() {},
+    },
+  )
+  ;(fixture.ctx as unknown as { logger: unknown }).logger = fakeLogger
+  const appliesBefore = webApplies(fixture)
+  failReenable = true
+  fixture.ctx.emit('app-boot/config-reload')
+  const deadline = Date.now() + 10_000
+  while (!warnings.some(message => /repair/u.test(message)) && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  const repaired = warnings.filter(message => /repair/u.test(message))
+  assert.equal(repaired.length, 1, 'the repair really ran and settled with its own diagnostic')
+  assert.match(repaired[0] ?? '', /did not reach the live target|repair failed/u)
+  assert.equal(webApplies(fixture) > appliesBefore, true, 'the repair really attempted to re-enable')
+  const status = await fixture.service.getStatus()
+  assert.equal(status.state, 'disabled', 'the rolled-back live status is the truth')
+  assert.equal(fixture.webServer.facts().registered, false, 'the failed repair left no served fallback')
+})

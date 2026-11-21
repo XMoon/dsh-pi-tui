@@ -27,3 +27,6 @@ artifacts/focus-replay/
 # The Tern client's own shot output (the GUI lane copies what it needs into
 # the run directory; see docs/guides/tern-gui-testing.md)
 target/
+
+# worktree
+.agents/worktrees/

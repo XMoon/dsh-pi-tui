@@ -22,6 +22,7 @@ import type { RemoteRefoldReason } from './remote/live-ingress.ts'
 import type { ContextMeasureReason } from '../domain/status/context-measurement.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent'
+import type { AttachmentId, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
@@ -47,22 +48,22 @@ import type {} from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-token-meter'
 import { selectBlankSessionPreset, sessionPresetOf } from '../runtime/direct/session-preset-direct.ts'
 import { DirectTuiSettings, type SettingsFormsLike } from '../runtime/direct/tui-settings-direct.ts'
-import type { DefaultModelServiceLike } from '../runtime/direct/model-selection-direct.ts'
-import { rawSelectionFromRequestHeader } from '../domain/session/model-selection.ts'
 import { foldSessionTitle } from '@deepseek-ai/dsh-session-title'
 import { TUI_STARTUP_SERVICE } from '../startup.ts'
 import { createSessionPresentation } from './surface/session-presentation.ts'
-import { createStatusRuntime } from './surface/status-runtime.ts'
-import type { StatusRuntime } from './surface/status-runtime.ts'
+import { createStatusRuntime, type StatusRuntime } from './surface/status-runtime.ts'
+import { createSessionPolicyObservation } from './command/session-policy-observation.ts'
 import { createInputHistory } from './surface/input-history.ts'
 import { createSettingsRuntime } from './surface/settings-runtime.ts'
+import { QueueManagerController, queueManagerCommandResult } from './queue/manager.ts'
 import { createApplicationEvents, type ApplicationEventsOwner } from './surface/application-events.ts'
+import { createPastedImageIntakeOwner } from './surface/pasted-image-intake.ts'
 import { createClientActions } from './surface/client-actions.ts'
 import { createModelSelectionOwner } from './command/model-selection.ts'
 import { createCommandSurface, type CommandSurface } from './command/surface.ts'
 import { createClientReloadCommandRequest } from './command/client-reload.ts'
 import { createArtifactSaveOwner } from './command/artifacts.ts'
-import { createUserShell } from './submission/user-shell.ts'
+import { createUserShell, type UserShellOwner } from './submission/user-shell.ts'
 import { preparePrompt } from './submission/prepared-prompt.ts'
 import { createSubmissionController, type LocalCommandHandler } from './submission/controller.ts'
 import { createViewerRuntime, type ViewerChildSource, type ViewerRuntime } from './surface/viewer-runtime.ts'
@@ -72,21 +73,28 @@ import { setTerminalTitle, terminalTitleOf } from '../tui/terminal/title.ts'
 import { createClientToolPresenter } from '../tui/transcript/client-tool-presenter.ts'
 import { parseProgressUpdates, parseResponseStyle, type ProgressUpdatesState, type ResponseStyleState } from '../domain/communication/policy.ts'
 import { parseGitAttributionMode, type GitAttributionState } from '../domain/communication/git-attribution.ts'
-import { resolveDisplayPreset, type DisplayState } from '../domain/display/preset.ts'
+import { isFocusDisplayPreset, resolveDisplayPreset, type DisplayState } from '../domain/display/preset.ts'
 import { guardedStreamWriter } from '../tui/notification/terminal-notifier.ts'
 import { createTerminalNotificationPresentation } from '../tui/notification/runtime.ts'
 import { sessionStatsFactsOf } from '../domain/status/stats.ts'
 import { derivePerformance } from '../domain/status/performance-view.ts'
 import { isAssistantTokenDelta } from '../domain/transcript/usage.ts'
 import { projectedPlanActive, type PlanProjectionLike } from '../domain/status/derive-plan.ts'
-import { migrateLegacySettings } from './bootstrap/legacy-settings-migration.ts'
+import {
+  migrateProfileTuiPreferences,
+  type ProfileConfigEditorLike,
+} from './config/profile-preferences-migration.ts'
+import type { TuiConfigRefs } from '../runtime/direct/tui-settings-direct.ts'
 import { color } from '../tui/theme/runtime.ts'
 import type { TuiApp } from '../tui-app.ts'
 import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from '../extensions.ts'
 import { type CommandRegistryLike, type TuiCommandRunner } from '../commands.ts'
 import { diagFromEnv, dshHome, type Diag } from '../runtime/process/diagnostics.ts'
 import { runDetached, runOwned } from '../runtime/process/tasks.ts'
+import { captureScheduleSessionSwitch, openScheduleWorkspace } from './schedule/runtime.ts'
 import { FileHistorySearchSource } from '../client/history/search.ts'
+import { createHerdrReporter } from '../client/herdr/reporter.ts'
+import { herdrSessionProjection, type HerdrResumeTarget } from '../client/herdr/session.ts'
 import { safeErrorMessage } from '../runtime/process/errors.ts'
 import { DraftImageStore } from '../client/media/image/draft-store.ts'
 import { DraftFileStore } from '../client/media/attachment/file-draft.ts'
@@ -99,7 +107,9 @@ import type { ImageLimitsLike } from '../domain/media/types.ts'
 import { consumeDraftAttachments } from '../client/media/draft-attachments.ts'
 import type { DirectPrepareInputDeps } from './submission/direct-message-preparation.ts'
 import { dshVersion } from '../client/launcher/version.ts'
-import { createExitController } from './bootstrap/exit.ts'
+import { createExitController, daemonResumeBackendOverride, formatDaemonDetachHint } from './bootstrap/exit.ts'
+import { createExitIntentCoordinator, type StopCurrentWorkOutcome } from './bootstrap/exit-intent.ts'
+import { createExitIntentFacts } from './bootstrap/exit-facts.ts'
 import { type SessionRetirementReport } from '../app/session/owner-access.ts'
 import { mergeDraft, refuseByTransitionFence, type SteerSubjectLike } from './submission/steer.ts'
 import { createDirectApplicationRuntime, type DirectApplicationRuntime } from '../app/direct/runtime.ts'
@@ -107,13 +117,18 @@ import type {
   RemoteApplicationOverride,
   RemoteTransportLifetime,
   RunnerStartupSettlement,
+  ProfileDaemonAdminPort,
 } from '../app/application-runtime.ts'
+import { createPromptPresenceClient, type PromptPresenceClient } from './remote/prompt-presence-client.ts'
+import { installTuiPromptTurnLatch } from './agent/turn-policy.ts'
+import { createProfileDaemonAdmin, profileDaemonAdminRun, resolveDirectDaemonAdminProfile } from '../app/remote-process/local-profile-daemon-admin.ts'
 import type { ModelSelectionDto } from '../runtime/catalog-port.ts'
 import { selectApplicationRuntime } from './bootstrap/runtime-selection.ts'
 import { createPresentationBridge } from './bootstrap/presentation-bridge.ts'
 import { createTaskSource } from './bootstrap/task-source.ts'
 import { installRuntimeEventWiring, installSessionEventWiring } from './bootstrap/event-wiring.ts'
 import { armRemoteInitRetry } from './bootstrap/remote-init-retry.ts'
+import { armRemoteProgressWatchGeneration } from './bootstrap/remote-progress-watch.ts'
 import {
   IDLE_REMOTE_REFOLD_REQUEST,
   requestRemoteRefold,
@@ -121,18 +136,20 @@ import {
 } from './bootstrap/remote-refold-request.ts'
 import { createFatalLifecycle, createSurfaceLifecycle } from './bootstrap/lifecycle.ts'
 import { createSessionStartupHelpers, quiesceResumedOwner } from './bootstrap/session-startup.ts'
+import { canonicalFullSessionId, chooseContinueSession } from './bootstrap/session-launch-intent.ts'
+import type { SessionSummary } from '../runtime/session-reader-port.ts'
+import type { SessionWorkspaceFact, WorkspaceFactsHandle } from '../runtime/session-workspace-facts-port.ts'
 import { createSessionOwnershipCore } from '../app/session/ownership-core.ts'
 import { bindSessionRuntime } from '../app/session/runtime.ts'
-import { createSessionScopeAuthority, type LiveSessionScope } from '../app/session/scope.ts'
+import type { LaunchWorkspaceVerdict } from './remote-process/local-workspace-equivalence.ts'
+import { createWorkspaceNextIntentOwner } from '../app/session/workspace-next-intent.ts'
+import { createSessionScopeAuthority, SessionScopeSupersededError, type LiveSessionScope } from '../app/session/scope.ts'
 import type { NavigationIntent } from '../app/session/transition.ts'
 import { bindSubmissionRuntime, type SubmissionRuntime } from '../app/submission/runtime.ts'
 import type { SessionOwnerRef, SessionSubject } from '../app/session/subject.ts'
 import { createSurfaceRuntime } from '../app/surface/runtime.ts'
-import {
-  createVisualEventSnapshotProvider,
-  type VisualEventSnapshotProvider,
-} from './bootstrap/visual-snapshot.ts'
-import { proveVisualLineage, type VisualLineageQuery } from './bootstrap/visual-lineage.ts'
+import { createClientExtensionMountOwner, type ClientExtensionMountOwner } from '../app/client-extensions/mount-owner.ts'
+import { createVisualEventSnapshotProvider, type VisualEventSnapshotProvider } from './bootstrap/visual-snapshot.ts'
 import type { SurfaceRendererMount } from '../app/surface/runtime.ts'
 import { productionTspConnector, selectRendererMount, tspRequested } from './bootstrap/renderer-selection.ts'
 import { createTerminalOutputGate } from './bootstrap/terminal-output.ts'
@@ -144,9 +161,9 @@ import { type SessionQueryLike } from '../runtime/direct/session-direct.ts'
 import { type WorkingDirectoryServiceLike } from '../runtime/direct/working-directory-direct.ts'
 import { serializeTuiSettingsMutation, type TuiSettingsDoc } from '../runtime/config-port.ts'
 import type { AssistantLiveInput } from '../runtime/assistant-stream-port.ts'
-import { requireCreated, requireOpened, type SessionHandle } from '../runtime/session-lifecycle-port.ts'
+import { requireCreated, requireOpened, type SessionHandle, type WorkspaceSelectionIntent } from '../runtime/session-lifecycle-port.ts'
 import { listGlobalCommands, readSurfaceCatalog, type SurfaceCatalogContext, type SurfaceCommandsService } from '../runtime/direct/surface-catalog.ts'
-import { commandSummaryOf, type SurfaceCatalogSnapshot } from '../domain/catalog/surface.ts'
+import { commandSummaryOf, type InitialCatalogResolution, type SurfaceCatalogSnapshot } from '../domain/catalog/surface.ts'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { createClientCommandRegistry } from './command/client-command-registry.ts'
 import { composeRemoteSessionStats, composeRemoteLastAssistantText } from './remote/session-facts-compose.ts'
@@ -156,7 +173,9 @@ import { dangerCommand } from '../domain/shell/danger.ts'
 import { resolveInitialCatalog } from './direct/initial-catalog.ts'
 import { subagentJobTranscriptId, taskRowSelectionDisposition, subagentJobViewHint } from './surface/task-presentation.ts'
 import { queueTextOf } from '../app/surface/pending-presentation.ts'
-import { bundleVersion, packageVersion } from '../client/launcher/version.ts'
+import { HostKeybindingManager } from '../tui/keybindings/manager.ts'
+import { parseUserKeybindings } from '../tui/keybindings/config.ts'
+import { bundleVersion } from '../client/launcher/version.ts'
 import { resumeCommand } from '../client/launcher/profile.ts'
 import { hostRunningProfile, type ProfileContextReadLike } from './bootstrap/profile.ts'
 
@@ -175,6 +194,15 @@ export { hostRunningProfile, type ProfileContextReadLike } from './bootstrap/pro
 interface AppExit {
   (code: number): void
 }
+
+/**
+ * M6 compatible-cross-build UX: the ONE non-blocking notice shown when this
+ * Client authenticated a Host under the same protocol/DSH runtime but a
+ * different PiTui build. It never claims the Host is older, never blocks and
+ * never changes the connection or Host lifecycle.
+ */
+const COMPATIBLE_OTHER_BUILD_NOTICE =
+  'Connected to a compatible Host with a different PiTui build. To use the installed Host build, run `daemon restart` when work is idle.'
 
 /** Read the official `RemoteError` code off a refused preset switch. */
 function presetErrorCode(error: unknown): string | undefined {
@@ -200,6 +228,21 @@ function detachedModelSelection(selection: ModelSelectionDto | undefined): Model
   } as ModelSelection
 }
 
+/**
+ * The first-session Workspace intent: the Client's own launch directory by
+ * default. A qualification-only split-surface override feeds the SAME seam with
+ * a deliberately invalid Host path (the OS lane's negative control) — it can
+ * never inject a pre-validated WorkspaceId, and a normal Direct process ignores
+ * it because the override is gated on the internal surface Client mode.
+ */
+export function initialWorkspaceIntentFromEnvironment(
+  launchCwd: string,
+  env: { readonly SPLIT_PROCESS_CLIENT_MODE?: string; readonly SPLIT_PROCESS_CLIENT_WORKSPACE_INTENT_PATH?: string } = process.env,
+): WorkspaceSelectionIntent {
+  const override = env.SPLIT_PROCESS_CLIENT_MODE === 'surface' ? env.SPLIT_PROCESS_CLIENT_WORKSPACE_INTENT_PATH : undefined
+  return { kind: 'host-path', path: override === undefined || override === '' ? launchCwd : override }
+}
+
 export function applyRunner(ctx: Context, config: Config): void {
   applyRunnerWithRuntime(ctx, config, undefined)
 }
@@ -215,11 +258,30 @@ export function applyRunner(ctx: Context, config: Config): void {
  * public/config/env selector: this parameter is reachable only from
  * process-internal composition code and tests.
  */
+/** The canonical live preference references the Direct runner consumes. The
+ * `tui-app` Loader row hard-injects `piTuiPreferences`, so an absent service is
+ * a broken composition, never a reason to fall back to the legacy row or to
+ * schema defaults. */
+function canonicalPreferenceRefs(ctx: Context): TuiConfigRefs {
+  const refs = ctx.get('piTuiPreferences') as TuiConfigRefs | undefined
+  if (refs === undefined) {
+    throw new Error('tui-runner: the canonical "piTuiPreferences" service is missing from the Direct composition')
+  }
+  return refs
+}
+
+/**
+ * M6 UX PR2: the safe one-line refusal summary for a failed whole-Host stop.
+ * The control plane already sanitizes its stderr (no argv, cookie, private path
+ * or secret), so its first line is the stable reason the terminal may show.
+ */
+
 export function applyRunnerWithRuntime(
   ctx: Context,
   config: Config,
   override: RemoteApplicationOverride | undefined,
   startupSettlement?: RunnerStartupSettlement,
+  launchWorkspace?: LaunchWorkspaceVerdict,
 ): void {
   // Read through the global service store, not the property proxy: appExit is
   // an optional host value, never an injected dependency.
@@ -238,6 +300,24 @@ export function applyRunnerWithRuntime(
     }
     return
   }
+  // M6 compatible-cross-build UX: ONE derived constant over the two
+  // AUTHENTICATED build identities supplied by the real Client composition.
+  // Direct and every composition without the pair stay silent, and two equal
+  // builds are not a "different build". This is a pure derived fact, never
+  // persistent state and never a second compatibility authority: the existing
+  // protocol/DSH/Cookie/kernel admission already completed before this mount.
+  const compatibleOtherBuild = override !== undefined
+    && startupSettlement?.authenticatedBuilds !== undefined
+    && startupSettlement.authenticatedBuilds.clientBuildId !== startupSettlement.authenticatedBuilds.hostBuildId
+  const configuredExactSessionId = config.sessionId !== undefined && config.sessionId !== '' ? config.sessionId : startup.sessionId
+  // Two startup Session targets are mutually exclusive. The exact
+  // `config.sessionId` / internal split-Client `startup.sessionId` identity and
+  // the public CLI launch intent must never silently override one another, so
+  // this refuses BEFORE any Host session or roster read AND before the
+  // diagnostics/log composition (a refused startup owns no side effect).
+  if (startup.sessionLaunch !== undefined && configuredExactSessionId !== undefined) {
+    throw new Error('tui-runner: an exact configured session cannot be combined with a CLI Session launch intent')
+  }
   // The semantic backend (server/client migration M1): the TUI consumes
   // Host domains through narrow ports, never ctx.* directly. Direct is the
   // only backend today; remote/wire adapters join in later milestones
@@ -249,13 +329,45 @@ export function applyRunnerWithRuntime(
   // The patch row carries a static config; the real session id comes from the
   // startup service (no `!!js` expression, so loader hot-reloads cannot race
   // the service's availability while evaluating the row).
-  const sessionId = config.sessionId !== undefined && config.sessionId !== '' ? config.sessionId : startup.sessionId
+  const launchWorkspaceIntent = initialWorkspaceIntentFromEnvironment(process.cwd())
+  if (launchWorkspaceIntent.kind !== 'host-path') throw new Error('the launch workspace intent must be a Host path')
+  // The sessionless next-create proposal (M6-1/F5-B):
+  // - Direct/sessionless: the launch directory IS this Host process's own
+  //   directory, so it keeps its historical `proposed` default.
+  // - Remote: only a VERIFIED local Client/Host directory equivalence may
+  //   propose the Client launch cwd automatically (one-shot `auto`); anything
+  //   else starts UNSELECTED and the Welcome routes to the existing Browser.
+  // - The internal qualification override stays a MANUAL Host path proposal
+  //   (the OS lane's invalid-path negative control — never equivalence proof).
+  const surfaceWorkspaceOverride = process.env.SPLIT_PROCESS_CLIENT_MODE === 'surface'
+    ? process.env.SPLIT_PROCESS_CLIENT_WORKSPACE_INTENT_PATH
+    : undefined
+  const manualWorkspaceOverride = surfaceWorkspaceOverride === undefined || surfaceWorkspaceOverride === ''
+    ? undefined
+    : surfaceWorkspaceOverride
+  const remoteLaunch = override === undefined
+    ? { path: launchWorkspaceIntent.path, provenance: 'launch' as const }
+    : manualWorkspaceOverride !== undefined
+      ? { path: manualWorkspaceOverride, provenance: 'manual' as const }
+      : launchWorkspace?.kind === 'verified' && launchWorkspace.launchCwd !== undefined
+        ? { path: launchWorkspace.launchCwd, provenance: 'auto' as const }
+        : undefined
+  const workspaceNextIntent = createWorkspaceNextIntentOwner(remoteLaunch?.path, remoteLaunch?.provenance)
+  // The auto evidence must be re-observed at the first create boundary: a
+  // Host restart / mount-view change between the mount and the create revokes
+  // the automatic candidate instead of adopting a stale proof.
+  const autoWorkspaceRevalidate: ((signal?: AbortSignal) => Promise<boolean>) | undefined = remoteLaunch?.provenance === 'auto' && launchWorkspace?.kind === 'verified'
+    ? launchWorkspace.revalidate
+    : undefined
+  /** The one automatic Workspace-Browser opening of this mounted surface. */
+  let workspaceChooserPrompted = false
   // Lifecycle cancellation: ONE controller owned by the runner fiber. It is
   // aborted by user exit, by the ctx.effect cleanup (loader hot-reload
   // unloads the row), and by startup failure. Every long-running load shares
   // its signal; per-action cancellation rides child controllers (the local
   // shell) or generation checks (menu latches).
   const lifecycleController = new AbortController()
+  lifecycleController.signal.addEventListener('abort', () => workspaceNextIntent.dispose(), { once: true })
   // Register cancellation before entering the fire-and-forget startup root:
   // loader/HMR disposal can happen before the full TUI cleanup effect exists.
   // This disposer owns the runner lifetime signal ONLY — diag stays open so
@@ -343,6 +455,15 @@ export function applyRunnerWithRuntime(
    * safety instead of fabricating a mounted-surface cleanup.
    */
   let disposeSurfaceRef: (() => void) | undefined
+  /**
+   * Direct only: the ONE Client-extension mount owner of this runner fiber and
+   * the late-bound reconcile entry its surface Plugin Manager callback uses.
+   * Both stay undefined on the Split branch (its surface revision owns them).
+   */
+  let directClientExtensionOwner: ClientExtensionMountOwner | undefined
+  let directClientExtensionReconcile: ((snapshot: import('../runtime/plugin-manager-port.ts').PluginManagerSnapshot) => void) | undefined
+  /** The initial Direct activation task, awaited right before the first surface attach. */
+  let directClientExtensionActivation: Promise<void> | undefined
 
   /**
    * The terminal-total fatal catch (TS2 §11): the orchestration is owned by
@@ -380,6 +501,53 @@ export function applyRunnerWithRuntime(
     // physical-surface readiness is settled through `startupSettlement` once
     // `surface.start` returned; this Host handshake is not that proof.)
     startup.markSurfaceMounted?.()
+    // M6 UX PR2: the ONE process-local daemon administration capability.
+    // Split Client: the value the real Client entry already built from its
+    // officially verified Profile facts. Direct: bound here from the SAME
+    // official Host `profileContext` the CLI cold-control path consumes, with
+    // the SAME installed-package resolution. Construction proves the local
+    // capability but performs NO manager IO — the existing control plane is
+    // reached only when the user explicitly chooses `Install service` or the
+    // confirmed whole-Host exit stop.
+    let profileDaemonAdmin: ProfileDaemonAdminPort | undefined = override?.profileDaemonAdmin
+    if (profileDaemonAdmin === undefined && override === undefined) {
+      const profileContext = ctx.get('profileContext') as {
+        readonly name?: string
+        readonly dir?: string
+        readonly home?: string
+        readonly installAnchor?: string
+      } | undefined
+      if (profileContext?.name !== undefined && profileContext.dir !== undefined
+        && profileContext.home !== undefined && profileContext.installAnchor !== undefined) {
+        // A failure to PROVE the installed bundle is a capability refusal, not
+        // a startup failure: the TUI must still launch and simply offer no
+        // install/stop action (fail closed, never a guessed identity).
+        try {
+          const adminProfile = resolveDirectDaemonAdminProfile({
+            name: profileContext.name,
+            dir: profileContext.dir,
+            home: profileContext.home,
+            installAnchor: profileContext.installAnchor,
+          })
+          if (adminProfile !== undefined) {
+            profileDaemonAdmin = createProfileDaemonAdmin(adminProfile, {
+              run: profileDaemonAdminRun(adminProfile),
+            })
+          }
+        } catch (error) {
+          diag.info('daemon admin capability unavailable', { error: safeErrorMessage(error) })
+        }
+      }
+    }
+    /**
+     * M6 UX PR2: the ONE process-lifetime transient user-conversion intent.
+     * Only a verified `daemon → direct` Profile save made by THIS Client (while
+     * it runs the daemon backend) sets it; a verified reverse save clears it.
+     * It is never persisted and never a configuration value: it only grants the
+     * exit-intent owner permission to ASK, at exit, about stopping the old
+     * Profile Host. HMR/dispose clear it through the owner below.
+     */
+    let backendExitTransition: 'daemon-to-direct' | undefined
     const isRemote = override !== undefined
     if (!isRemote) {
       // Loader siblings mount concurrently. Await the complete application
@@ -461,6 +629,12 @@ export function applyRunnerWithRuntime(
         surface.retireStaleHistorySeat()
       },
     })
+    // Split-Client only: bind the ROOT interaction delivery to this
+    // application's ONE committed-Session authority. A forwarded request is
+    // presented only while its own Session is the committed subject; the same
+    // subscription wakes the root after a real publish (never a UI focus or
+    // Job). A replacement surface revision replaces this binding.
+    const interactionDelivery = override?.interactionDelivery
     // The A3 command/submission scope authority (plan A3 §1.1): ONE synchronous
     // capture of `{ owner subject, generation, sessionId }`, so no consumer can
     // rebuild an identity from separate reads. A sessionless capture is
@@ -496,37 +670,48 @@ export function applyRunnerWithRuntime(
     // The abort-aware quiesce mechanism lives in the Direct owner retirement;
     // the runner only decides WHEN to quiesce.
 
-    // Persisted TUI preferences: the `tui-app` plugin's profile-owned
-    // volatile Config references are the ONE runtime authority (DSH 0.1.7
-    // PR A) — the Direct facade unwraps them into the settings document the
-    // runner surface already consumes, and converts whole-document
-    // get→modify→replace cycles into path-scoped SettingsForms mutations.
-    // The legacy settings.yaml(.imported) migration runs FIRST — before any
-    // display/progress/response/notification startup state resolution and
-    // before any agent compose/resume — so the first model prompt assembly
-    // already sees the migrated Focus/display state (plan §8.4: this
-    // barrier is P0). Reads always work off the plugin references; without
+    // Persisted TUI preferences: the canonical `pi-tui-preferences` row's
+    // profile-owned volatile Config references are the ONE runtime authority —
+    // the Direct facade unwraps them into the settings document the runner
+    // surface already consumes, and converts whole-document get→modify→replace
+    // cycles into path-scoped SettingsForms mutations. The Host-owned canonical
+    // migration (legacy profile rows + settings.yaml(.imported)) runs FIRST —
+    // before any display/progress/response/notification startup state
+    // resolution and before any agent compose/resume — so the first model
+    // prompt assembly already sees the migrated Focus/display state. Reads always work off the plugin references; without
     // the Settings service there is no persistence surface, and a write
     // attempt fails explicitly instead of silently skipping.
     const settingsForms = ctx.get('settings') as SettingsFormsLike | undefined
-    const tuiSettings = new DirectTuiSettings(config, settingsForms)
+    // The split Client adopts the preassembled Remote settings port. It has
+    // no Host Settings service of its own; a Direct writer here would read
+    // schema defaults and reject every preference save.
+    const tuiSettings = override === undefined
+      ? new DirectTuiSettings(canonicalPreferenceRefs(ctx), settingsForms)
+      : override.selected.backend.config.tuiSettings
     // The TUI ships its own /settings surface: keep the Settings service's
-    // auto-generated page off this entry (it would also expose the internal
-    // legacy-migration marker). The optional-inject child names the tui-app
-    // fiber the presentation policy belongs to; the TUI runs without the
-    // Settings service mounted.
+    // auto-generated page off the legacy `tui-app` entry (it would also expose
+    // the internal legacy-migration marker). The canonical row hides its own
+    // page in `app/config/preferences.ts`, and the Host Runtime row hides the
+    // retired Split entry in `app/host/pi-tui-host-runtime.ts`.
     ctx.inject(['settings'], (child) => {
       child.effect(() => child.settings.configure({ auto: false }, ctx.fiber))
     })
-    // The retired settings.yaml migration is a HOST-profile concern: it reads
-    // the Host profile home and writes the Host Settings service. The split
-    // Client has neither (its config plane is the Remote ConfigPort), so this
-    // step is Direct-only; running it there would report a missing Host
-    // service on every Client start and read a Host-profile path Client-side.
+    // The Host-owned migration into the canonical preference row: it reads
+    // the Host Profile / legacy settings document and writes the Host Settings
+    // service. The split Client has neither (its config plane is the Remote
+    // ConfigPort), so this step is Direct-only; running it there would report
+    // a missing Host service on every Client start and read a Host-profile
+    // path Client-side. MUST settle before the first display/Agent read.
     if (override === undefined) {
-      await migrateLegacySettings({
-        home: (ctx.get('profileContext') as { readonly home: string } | undefined)?.home ?? dshHome(process.env),
+      const profileContext = ctx.get('profileContext') as {
+        readonly home?: string
+        readonly patchPath?: string
+      } | undefined
+      await migrateProfileTuiPreferences({
+        patchPath: profileContext?.patchPath ?? '',
+        configEditor: ctx.get('configEditor') as ProfileConfigEditorLike | undefined,
         forms: settingsForms,
+        home: profileContext?.home ?? dshHome(process.env),
         resolvePreset: async (id) => {
           const presets = ctx.get('agentPresets') as { resolve(id?: string): Promise<{ broken?: string }> } | undefined
           if (presets === undefined) throw new Error('agent presets unavailable in this deployment')
@@ -538,7 +723,6 @@ export function applyRunnerWithRuntime(
             throw Object.assign(new Error(resolved.broken), { code: 'agent-preset/invalid' })
           }
         },
-        migrationMarker: config.legacySettingsMigrationVersion,
         diag,
       })
     }
@@ -557,6 +741,51 @@ export function applyRunnerWithRuntime(
     // the section reads it on every assembly.
     const gitAttributionState: GitAttributionState = { mode: parseGitAttributionMode(persistedTuiSettings?.gitAttribution) }
 
+    // M6 PR-C C3: the ONE Client-local session-view presence owner (Split
+    // Client only). The Host folds ACKed per-Peer presence into the per-Turn
+    // TUI prompt decision; the view is re-projected on every navigation commit
+    // and every display mutation, and every prompt admission awaits the
+    // current revision's ACK. Direct leaves the capability absent: its local
+    // fold needs no wire ACK.
+    const promptPresence = override?.promptPresence === undefined
+      ? undefined
+      : createPromptPresenceClient({
+        capability: override.promptPresence,
+        localView: () => ({
+          viewedSessionId: ownership.currentSessionId() ?? null,
+          displayPreset: displayState.preset,
+        }),
+        signal: lifecycleController.signal,
+        // The Peer-lifetime revision scope: the Host stores one strictly
+        // increasing revision per authenticated Peer, and the Client
+        // CONNECTION root (passed through the mount seam) outlives the
+        // qualification-only Surface replacement — the runner's own plugin
+        // fiber is a FRESH object per Surface revision and would reset the
+        // counter into a `stale-revision` refusal.
+        peerScope: startupSettlement?.presencePeerScope ?? ctx,
+        // The existing transport identity capture/compare pair: an ACK carried
+        // by a superseded Connection generation or a replaced binding must
+        // never confirm this Client's presence.
+        transport: {
+          capture: (sessionId) => override.presentation.sessionFacts.captureTransportToken(sessionId) as
+            | { readonly generation: unknown; readonly binding: unknown }
+            | undefined,
+          isCurrent: (sessionId, token) => override.presentation.sessionFacts.isTransportTokenCurrent(sessionId, token),
+          mainViewRetained: (sessionId) => override.presentation.sessionFacts.mainViewRetained(sessionId),
+        },
+        diag,
+      })
+    if (promptPresence !== undefined) {
+      // Resample AFTER the synchronous navigation commit (the coalesced
+      // microtask of the official scope invalidation) and once initially for a
+      // startup Resume that already committed before this subscription. The
+      // owner sends its best-effort withdraw and retires on the lifecycle
+      // abort; the authoritative removal is the old Peer's signal abort.
+      const unsubscribePresence = ownership.subscribeScopeInvalidation(() => promptPresence.resample())
+      lifecycleController.signal.addEventListener('abort', () => { unsubscribePresence() }, { once: true })
+      promptPresence.resample()
+    }
+
     // Completion notifications (plan: Client/TUI presentation capability —
     // settled detection, focus detection, terminal output and settings parsing
     // stay separate modules, never a blob in the runner). A4-4: the notification
@@ -573,11 +802,10 @@ export function applyRunnerWithRuntime(
      * logic lives in the testable wiring helper; Remote returns undefined and
      * keeps PR1's Tool/Work behavior.
      *
-     * The ONE ancestry proof rides the same provider: a forked Session's
-     * inherited prefix is proven once per selected identity through the
-     * official `sessionQuery.observeSession()` read, and a settled proof asks
-     * the mounted surface for one repaint. Remote stays undefined because it
-     * has no trusted complete-log seam.
+     * Fork identity lives INSIDE the committed log as the `session/end-seed`
+     * event epoch, so this wiring owns no ancestry query, no async proof and no
+     * second repaint. Remote stays undefined because it has no trusted
+     * complete-log seam.
      */
     let visualEventSnapshotProvider: VisualEventSnapshotProvider | undefined
     const visualEventSnapshotFor = (subject: {
@@ -588,32 +816,6 @@ export function applyRunnerWithRuntime(
         isRemote: () => remoteSources !== undefined,
         mainAgent: () => agentNow(),
         viewedChildAgent: () => viewerRef?.viewedChildAgent(),
-        lineage: {
-          prove: (sessionId) => {
-            const query = ctx.get('sessionQuery') as VisualLineageQuery | undefined
-            if (query === undefined || typeof query.observeSession !== 'function') {
-              return Promise.resolve({
-                spans: [],
-                unproven: `${sessionId}: the official sessionQuery service is unavailable`,
-              })
-            }
-            return proveVisualLineage(sessionId, query)
-          },
-          run: (label, task) => runDetached(label, task, {
-            diag,
-            sessionId: () => ownership.currentSessionId(),
-          }),
-          isCurrentSubject: (subject, session) => {
-            if (cleanedUp) return false
-            const live = subject.subjectKind === 'main' ? agentNow() : viewerRef?.viewedChildAgent()
-            return live !== undefined && (live as { readonly session?: object }).session === session
-          },
-          requestRepaint: () => {
-            if (cleanedUp) return
-            surface.repaint()
-          },
-          reportProblem: (message) => diag.debug('visual lineage unproven', { message }),
-        },
       })
       return visualEventSnapshotProvider(subject)
     }
@@ -635,6 +837,13 @@ export function applyRunnerWithRuntime(
      * the command itself uses; there is no second async owner here.
      */
     let openRegisteredModelPicker: ((entry: 'models' | 'effort') => void) | undefined
+    /**
+     * TSP-7 PR-G: the ONE late-bound QUICK `/model` UI entry, armed in exactly
+     * the same window as {@link openRegisteredModelPicker} and through the same
+     * `runOwned` seam. The composer's combined Model/Effort control is its only
+     * consumer; the registered command owns every read, write and notice.
+     */
+    let openRegisteredModelQuick: (() => void) | undefined
     /** PR-F: the real `/model` picker business-entry availability (registration,
      *  not just painted chrome); late-bound with the picker opener below. */
     let modelPickerAvailableOwner: (() => boolean) | undefined
@@ -645,12 +854,92 @@ export function applyRunnerWithRuntime(
      * the same dependency direction and time order as the Model picker seam.
      */
     let permissionUiOwner: Pick<StatusRuntime, 'permissionOptions' | 'selectPermission'> | undefined
+    /**
+     * TSP-7 Welcome D: the ONE late-bound READ-ONLY blank authority the
+     * Welcome eligibility consumes. Declared with the same lexical scope as
+     * `surface` (which is created before the backend exists) and bound right
+     * after `selectedRuntime.backend` below. An unbound read is a wrong
+     * startup order, so it FAILS LOUDLY — it is never read as "blank".
+     */
+    let welcomeSessionBlankOwner: ((sessionId: string) => boolean | undefined) | undefined
+    /**
+     * TSP-7 Welcome D: the ONE late-bound `/sessions` UI entry (the Welcome's
+     * Resume action), armed in exactly the same window as
+     * {@link openRegisteredModelQuick} through the same `runOwned` seam. The
+     * registered command owns every listing, switch, notice and settlement;
+     * this slot only opens it.
+     */
+    let openRegisteredSessionBrowser: ((scope?: 'current' | 'all' | { readonly scope?: 'current' | 'all'; readonly addDirectory?: boolean }) => void) | undefined
+    /** TSP-7 Welcome D: the real `/sessions` business-entry availability,
+     *  late-bound with the opener above. */
+    let sessionBrowserAvailableOwner: (() => boolean) | undefined
+    /**
+     * Mouse PR4: the ONE late-bound `/tasks` UI entry (the TSP native Tasks
+     * status segment's pointer entry), armed in exactly the same window as
+     * {@link openRegisteredModelQuick} and through the same `runOwned` seam.
+     * The registered command owns every admission, scope and Task Runtime
+     * call; this slot only opens it. An unbound slot is a startup-order bug
+     * and reaches the surface runtime's loud placeholder.
+     */
+    let openRegisteredTasksBrowser: (() => void) | undefined
+    /** Mouse PR4: the real `/tasks` business-entry availability (registration
+     *  fact + live Task Center capability), late-bound with the opener above. */
+    let tasksBrowserAvailableOwner: (() => boolean) | undefined
+    /**
+     * H1: the ONE Client-local Herdr Pane reporter of this process. Direct owns
+     * its Pane immediately; the Remote branch starts UNqualified, and only a
+     * valid Host progress snapshot/update can register this Pane. A process
+     * outside a complete Herdr environment gets `undefined`, so no hook, no
+     * timer and no child process exists at all.
+     *
+     * The composition root (this function) is the ONLY creator: the Split Host
+     * never imports or constructs a reporter.
+     */
+    const herdrReporter = createHerdrReporter(process.env, override === undefined, diag)
+    /**
+     * H2: the ONE Client-local bridge from the committed main-owner Session to
+     * the H1 reporter. The Direct branch pins the ACTUAL running profile once.
+     * The Split Client uses the SAME process-local `profileDaemonAdmin.profile`
+     * the Client entry derived from its officially verified Profile options,
+     * and reports a daemon resume command that pins the daemon backend: the
+     * Profile may later be saved back to Direct, while the Hosted Session this
+     * recover target belongs to still lives. Without that port only the
+     * Session id is reported — the default Profile is never guessed.
+     *
+     * The owner notification is the official `SessionOwnershipCore` scope
+     * invalidation (coalesced after every successful create/resume/switch/fork
+     * commit and generation-only bump). The initial sample covers a startup
+     * Resume that committed before this subscription; the reporter dedupes the
+     * immediately following notification.
+     */
+    if (herdrReporter !== undefined) {
+      const resumeTarget: HerdrResumeTarget | undefined = override === undefined
+        ? { kind: 'direct', profile: hostRunningProfile(ctx) }
+        : profileDaemonAdmin === undefined
+          ? undefined
+          : { kind: 'daemon', profile: profileDaemonAdmin.profile }
+      const observeCurrentSession = (): void => {
+        herdrReporter.observeSession(herdrSessionProjection(ownership.currentSessionId(), resumeTarget))
+      }
+      const unsubscribe = ownership.subscribeScopeInvalidation(observeCurrentSession)
+      let observing = true
+      lifecycleController.signal.addEventListener('abort', () => {
+        if (!observing) return
+        observing = false
+        unsubscribe()
+      }, { once: true })
+      observeCurrentSession()
+    }
     const surface = createSurfaceRuntime<SessionEvent>({
       tuiVersion: bundleVersion(),
       notificationPresentation,
       notificationMode: tuiSettings?.get().notificationMode,
       notificationMethod: tuiSettings?.get().notificationMethod,
       terminalProgress: tuiSettings?.get().terminalProgress,
+      // H1: the read-only logical-status sink of the MOUNTED PiTui surface.
+      // Only the Client process has this surface; the TSP renderer branch
+      // mounts no TuiApp and therefore never publishes through it.
+      ...(herdrReporter === undefined ? {} : { onProgramStatus: status => herdrReporter.publish(status) }),
       // R1 §5.3: exactly ONE adapter owns the main terminal outcome. Direct
       // keeps the local durable-event evidence; the Remote branch hands the
       // outcome to the Host evidence stream, so the Remote durable ingress
@@ -658,6 +947,11 @@ export function applyRunnerWithRuntime(
       // The internal selection seam passes `override` ONLY for the Remote
       // composition (the surface is created before `remoteSources` below).
       mainProgressAuthority: override === undefined ? 'local-events' : 'host-snapshot',
+      initialSearchCoverage: override === undefined ? 'entire-session' : 'loaded-history',
+      // Split-Client only: the PiTUI forwarded-interaction admission narrows to
+      // this application's ONE committed Session (the runner's authoritative
+      // owner publication), never the unconditional Direct delegation.
+      ...(override === undefined ? {} : { committedSessionId: () => ownership.currentSessionId() }),
       // The terminal-progress evidence fold reports an unknown upstream
       // `turn/end.reason.kind` here instead of guessing an outcome.
       diag,
@@ -665,6 +959,24 @@ export function applyRunnerWithRuntime(
       // implementation; the application surface owner consumes only the injected
       // factory and never imports `tui/**` itself.
       createPluginManagerPanel: createPluginManagerWorkspacePanel,
+      // The Plugin Manager controller's ONE committed-inventory callback:
+      // Direct feeds this runner's own mount owner; a Split Client forwards it
+      // to the CURRENT surface revision through the process-local override.
+      onPluginInventoryCommitted: snapshot => {
+        if (override !== undefined) {
+          const reconcile = override.reconcilePluginInventory
+          if (reconcile === undefined) return
+          runDetached('remote client extension inventory reconcile', () => reconcile(snapshot), { diag })
+          return
+        }
+        directClientExtensionReconcile?.(snapshot)
+      },
+      // R8-E PR-4: the CURRENT Client's real per-package Loader observations,
+      // late-bound (Direct owns the runner-local mount owner; the internal Split
+      // Client reads its current surface revision through the override seam).
+      clientExtensionObservation: () => override === undefined
+        ? directClientExtensionOwner
+        : override.clientExtensionObservationSource?.(),
       // The PR2 read-only visual snapshot supply: Direct main attachment or the
       // mounted viewed child's exact Session, undefined on Remote.
       visualEventSnapshotFor,
@@ -675,6 +987,13 @@ export function applyRunnerWithRuntime(
       openModelPicker: entry => {
         if (openRegisteredModelPicker === undefined) throw new Error('model picker command not registered')
         openRegisteredModelPicker(entry)
+      },
+      // TSP-7 PR-G: the quick entry of the SAME registered `/model` command. A
+      // click before the assignment below reaches the loud placeholder, never a
+      // fabricated request.
+      openModelQuick: () => {
+        if (openRegisteredModelQuick === undefined) throw new Error('model picker command not registered')
+        openRegisteredModelQuick()
       },
       modelPickerAvailable: () => modelPickerAvailableOwner?.() ?? false,
       // TSP-7 PR-E: the LATE-BOUND narrow Permission UI seam (TSP only). A
@@ -687,6 +1006,32 @@ export function applyRunnerWithRuntime(
           permissionUiOwner.selectPermission(id)
         },
       },
+      // TSP-7 Welcome D: the READ-ONLY blank authority (bound from the backend
+      // below). The surface alone decides whether a commit needs it, so the
+      // PiTui path performs no Host read here; an unbound slot is a startup
+      // order bug and fails loudly rather than guessing `true`.
+      welcomeSessionBlank: sessionId => {
+        if (welcomeSessionBlankOwner === undefined) throw new Error('the welcome blank authority is not bound')
+        return welcomeSessionBlankOwner(sessionId)
+      },
+      // TSP-7 Welcome D: the `/sessions` UI entry the Welcome's Resume action
+      // calls. Before the arming below the slot is empty, so a click reaches
+      // the loud placeholder and never a fabricated Browser request.
+      openSessionBrowser: (request) => {
+        if (openRegisteredSessionBrowser === undefined) throw new Error('session browser command not registered')
+        openRegisteredSessionBrowser(request)
+      },
+      sessionBrowserAvailable: () => sessionBrowserAvailableOwner?.() ?? false,
+      // Mouse PR4: the `/tasks` UI entry the TSP native Tasks status segment
+      // calls. Before the arming below the slot is empty, so a click reaches
+      // the loud placeholder and never a fabricated browser request; the
+      // availability fact answers false until the registration really
+      // installed the entry.
+      openTasksBrowserUi: () => {
+        if (openRegisteredTasksBrowser === undefined) throw new Error('tasks browser command not registered')
+        openRegisteredTasksBrowser()
+      },
+      tasksBrowserUiAvailable: () => tasksBrowserAvailableOwner?.() ?? false,
     })
 
     // The live Agent is declared before the TUI-facing facade so every read
@@ -728,7 +1073,7 @@ export function applyRunnerWithRuntime(
         ctx,
         diag,
         tuiSettings,
-        defaultModel: defaultModel as unknown as DefaultModelServiceLike,
+        sessionCwd: () => status.sessionCwd(),
         // The Direct owner pool is built and owned inside the Direct runtime; it
         // reads the ONE ownership-core release ledger through these two seams.
         waitForRelease: ownership.waitForOwnerRelease,
@@ -737,28 +1082,50 @@ export function applyRunnerWithRuntime(
         // Behavior preserved: the same `composeDirectAgent` wiring, now with the
         // runtime's Agent-scoped model-selection install.
         compose: (installSelection, presetId) =>
-          composeDirectAgent(ctx, installSelection, presetId, displayState, diag, progressUpdatesState, responseStyleState, gitAttributionState),
+          composeDirectAgent(ctx, installSelection, presetId, displayState, diag, progressUpdatesState, responseStyleState, gitAttributionState, {
+            // M6 PR-C C2: production Direct installs the FROZEN per-Turn latch
+            // (the public `composeAgent` compatibility entry keeps its
+            // pre-C2 live-display semantics). Eligible = the committed local
+            // main view is exactly this Agent's Session; Focus = the current
+            // local display preset — never a Profile default, never another
+            // Session's or a subagent's view.
+            installTurnPolicy: (agentCtx, agent) => {
+              // A Direct Agent created AFTER the runner lifecycle aborted (a
+              // late non-cooperative transition child) has no live runner
+              // scope: the Session event plane is gone, and subscribing would
+              // register an effect on an INACTIVE context (Cordis
+              // INACTIVE_EFFECT). Fail closed with no policy — the late owner
+              // is retired, never prompted.
+              if (ctx.fiber.uid === null) return { currentTurn: () => undefined }
+              const latch = installTuiPromptTurnLatch(
+                { on: (_event, listener, listenerOptions) => ctx.on('session/event', listener, listenerOptions) },
+                agent.session,
+                () => ({
+                  eligible: ownership.currentSessionId() === agent.session.id,
+                  focus: isFocusDisplayPreset(displayState.preset),
+                }),
+              )
+              agentCtx.effect(() => () => latch.dispose(), 'direct-tui-turn-latch')
+              return latch
+            },
+          }),
         getViewedQueueAgent: () => viewerRef?.viewedQueueAuthority(),
       })
       return constructedDirectRuntime
     }
-    // M3-4 PR1: the internal application runtime-selection seam. The selected
-    // core is the ONE common input the transport-neutral session runtime
-    // consumes (`owners`/`retirement`/`backend`); Direct-only helpers stay
-    // behind `directRuntime()`. Normal package `apply()` stays Direct: there
-    // is no CLI option, config field, env var, cordis.patch row or public
-    // root export that selects Remote — the seam above is the sole
-    // product-level Remote construction owner (through
-    // `runtime/backend-loader.ts`), and only internal/test M3-4 paths hand it
-    // a Remote composition input. The Direct factory runs INSIDE the seam, so
-    // a Remote selection constructs no Direct graph at all (plan §10.2).
+    // The internal application runtime-selection seam. The selected core is the
+    // ONE common input the transport-neutral session runtime consumes
+    // (`owners`/`retirement`/`backend`); Direct-only helpers stay behind
+    // `directRuntime()`. Normal package `apply()` stays Direct: there is no CLI
+    // option, config field, env var, cordis.patch row or public root export that
+    // selects Remote. The internal split Client passes its FULLY ASSEMBLED core
+    // as `preselected`; the Direct factory runs INSIDE the seam, so adopting a
+    // pre-selected Remote core constructs no Direct graph at all.
     const selectedRuntime = await selectApplicationRuntime({
       kind: 'direct',
       createDirect: createDirectApplication,
-      remote: undefined,
-      // M3-4 PR2 internal L6 composition: a pre-built Remote aggregate's
-      // selected core (the production path stays Direct — `apply` passes no
-      // override, so this stays `undefined` in every product boot).
+      // The internal split Client's pre-assembled core. The Direct root passes
+      // no override, so this stays `undefined` in every product boot.
       ...(override === undefined ? {} : { preselected: override.selected }),
     })
     /**
@@ -881,7 +1248,7 @@ export function applyRunnerWithRuntime(
         ? defaultModel.currentSelection() as ModelSelection | undefined
         : detachedModelSelection(backend.catalog.models.defaultSelection()),
       currentOf: (agent) => directRuntime()?.modelSelections.current(agent as Agent),
-      setCurrentOf: (agent, next) => directRuntime()?.modelSelections.setCurrent(agent as Agent, next),
+      setCurrentOf: (agent, next) => { directRuntime()?.modelSelections.select(agent as Agent, next as ModelSelection) },
     })
     const sessionRuntime = bindSessionRuntime(ownership, {
       // M3-4 PR1: the common session-runtime inputs come from the selected
@@ -891,12 +1258,21 @@ export function applyRunnerWithRuntime(
       retirement: selectedRuntime.retirement,
       lifecycle: selectedRuntime.backend.sessionLifecycle,
       lifecycleSignal: lifecycleController.signal,
+      workspaceNextIntent,
+      // M6-1/F5-B: the AUTO launch-cwd candidate's live re-proof (absent for a
+      // Direct/sessionless launch proposal, whose cwd IS this Host process's).
+      ...(autoWorkspaceRevalidate === undefined ? {} : { autoWorkspaceRevalidate }),
       surface: {
         warnRetirement: (report) => {
           // The SEMANTIC outcome decides the wording; the backend's phase labels
           // are printed only as diagnostics.
           const durabilityFailure = report.durabilityFailure
-          if (durabilityFailure !== undefined) {
+          if (durabilityFailure?.phase === 'dispose') {
+            // Shutdown-mode durability: a failed dispose means DSH's durable
+            // close/drain could not be CONFIRMED — not that a flush ran and
+            // failed, and not proof that data was lost.
+            safeTerminalWarning(`\n${color.textDim('Warning:')} session close failed during retirement (${durabilityFailure.error}) — durability could not be confirmed\n`)
+          } else if (durabilityFailure !== undefined) {
             safeTerminalWarning(`\n${color.textDim('Warning:')} session flush failed during retirement (${durabilityFailure.error}) — the latest events may not be persisted\n`)
           } else {
             const phases = report.failures.map(failure => failure.phase).join(', ')
@@ -1003,14 +1379,34 @@ export function applyRunnerWithRuntime(
           ctx.logger.warn(`tui-runner: switch to ${sessionId} failed: ${message}`)
           diag.error('switch failed', { session: sessionId, error: message })
         },
+        warnCommittedDurability: (_sessionId, error) => {
+          // UI authority only: the diagnostic authority is the checkpoint's own
+          // catch (it fires before any long await, so the evidence is fixed
+          // even if the process is torn down mid-transition). Repeating the
+          // same error here would report one failure twice.
+          surface.display.notify(
+            `session committed, but the durability checkpoint failed (${error}) — the new session may not be persisted`,
+            'error',
+          )
+        },
         launchComposition: () => launchComposition(),
         setResumeFailure: (failure) => { resumeFailure = failure },
+        clearResumeFailure: () => { resumeFailure = undefined },
         reportFirstSessionCreateFailure: (message) => {
           ctx.logger.warn(`tui-runner: failed to create the first session: ${message}`)
           diag.warn('first session creation failed', { error: message })
           resumeFailure = `could not create the first session: ${message}`
         },
-        notifyResumeFailure: () => {
+        // M6-1/F5-B: an UNSELECTED sessionless surface routes the user to the
+        // EXISTING Workspace Browser (/sessions chooser mode) exactly ONCE per
+        // mount; a cancelled picker keeps the surface unselected and no render
+        // or reload re-opens it.
+        promptWorkspaceSelection: () => {
+          if (workspaceChooserPrompted) return
+          workspaceChooserPrompted = true
+          openRegisteredSessionBrowser?.()
+        },
+         notifyResumeFailure: () => {
           if (resumeFailure !== undefined) {
             surface.display.notify(resumeFailure, 'error')
             resumeFailure = undefined
@@ -1018,7 +1414,6 @@ export function applyRunnerWithRuntime(
         },
         awaitPendingDefaultWrite: (signal) => model.awaitPendingDefaultWrite(signal),
         newSessionId: () => String(SessionId(`session-${randomUUID()}`)),
-        sessionCreateCwd: () => process.cwd(),
         currentOpening: () => surface.openingJournal.current(),
         resetOpening: () => {
           // The whole journal is dropped (the first-session finally): the SAME
@@ -1041,6 +1436,209 @@ export function applyRunnerWithRuntime(
     // assembly owned by `runtime/direct/backend-direct.ts`); this runner only
     // consumes it.
     const backend = selectedRuntime.backend
+    // ── PR2: the ONE CLI Session launch admission ───────────────────────────
+    // `--session` (bare/query/full id) and `-c` are resolved HERE, after the
+    // semantic backend exists and BEFORE the existing pre-mount
+    // `open → preset → publication → quiesce` block. This admission performs
+    // at most ONE official roster read and NEVER calls `open()` to discover or
+    // validate a candidate: the only open is the real resume below.
+    const sessionLaunch = startup.sessionLaunch
+    let startupResumeSessionId: string | undefined = configuredExactSessionId
+    /** The ONE runner-local startup Browser request, consumed after the command
+     *  registration and before the first bound input. `directMatch` selects the
+     *  strict CLI exact/unique-prefix policy; the read owner performs it after
+     *  the roster lands through its existing guarded Resume. */
+    let startupSessionBrowserRequest: { readonly initialQuery: string; readonly directMatch: boolean } | undefined
+    /** The ONE sessionless launch notice (the launch could not pick a target),
+     *  delivered once after the mount admission. */
+    let startupLaunchNotice: { readonly text: string; readonly kind: 'error' | 'info' } | undefined
+    /** Pre-mount cancellation unwinds exactly like the existing resume
+     *  admission: no owner exists yet and the full fiber disposer is not
+     *  registered, so the diagnostics handle is closed here. */
+    const unwindLaunchResolution = (): void => {
+      diag.dispose()
+      settleSurfaceCancelled('session launch resolution')
+    }
+    /** The async Workspace proof must not let a newer launch intent inherit
+     *  its result: revision, status and WorkspaceId all have to still name the
+     *  launch this resolution captured. */
+    const workspaceIntentStillCurrent = (revision: number, workspaceId: string): boolean => {
+      const after = workspaceNextIntent.snapshot()
+      return after.revision === revision
+        && after.status === 'confirmed'
+        && after.intent?.kind === 'workspace-id'
+        && after.intent.workspaceId === workspaceId
+    }
+    /**
+     * Resolve `-c` against the official authorities: the confirmed Host
+     * WorkspaceId (the existing preflight), the official membership baseline
+     * and the official main roster. Any unavailable authority fails closed
+     * with one truthful notice; it is never read as "empty history".
+     */
+    const resolveContinueLaunchTarget = async (): Promise<
+      | { readonly kind: 'resume'; readonly sessionId: string }
+      | { readonly kind: 'stop'; readonly notice: { readonly text: string; readonly kind: 'error' | 'info' } }
+      /** A newer Workspace revision / connection replaced this launch: publish
+       *  nothing, open nothing and claim nothing. */
+      | { readonly kind: 'superseded' }
+      | 'aborted'
+    > => {
+      // `awaitWorkspacePreflight()` only waits for work that already started;
+      // `-c` owns the ONE preflight that resolves an already-authorized launch
+      // proposal through the existing Host Workspace lifecycle.
+      await sessionRuntime.preflightWorkspace()
+      if (lifecycleController.signal.aborted) return 'aborted'
+      const workspace = workspaceNextIntent.snapshot()
+      if (workspace.intent?.kind !== 'workspace-id' || workspace.status !== 'confirmed') {
+        return {
+          kind: 'stop',
+          notice: { text: 'Cannot continue: the Host workspace is not confirmed for this launch', kind: 'info' },
+        }
+      }
+      const workspaceId = workspace.intent.workspaceId
+      const capturedRevision = workspace.revision
+      const autoProvenance = workspace.provenance === 'auto'
+      const autoProofCurrent = async (): Promise<boolean> =>
+        !autoProvenance || (autoWorkspaceRevalidate !== undefined && await autoWorkspaceRevalidate(lifecycleController.signal) === true)
+      const launchProofNotice = (): { readonly kind: 'stop'; readonly notice: { readonly text: string; readonly kind: 'info' } } => ({
+        kind: 'stop',
+        notice: { text: 'Cannot continue: the verified local workspace changed — choose a Host workspace', kind: 'info' },
+      })
+      const proofCurrent = await autoProofCurrent()
+      // The proof is async: abort or a newer Workspace revision always wins
+      // over a late result, including a late false that would otherwise publish
+      // a stale "choose a workspace" notice against a replaced launch.
+      if (lifecycleController.signal.aborted) return 'aborted'
+      if (!workspaceIntentStillCurrent(capturedRevision, workspaceId)) return { kind: 'superseded' }
+      if (!proofCurrent) return launchProofNotice()
+      // ONE official membership baseline, released exactly once. A stream that
+      // ends/fails before its baseline, or a baseline without the confirmed
+      // WorkspaceId, is NOT an empty membership.
+      let baseline: readonly SessionWorkspaceFact[] | undefined
+      let facts: WorkspaceFactsHandle | undefined
+      try {
+        // The handle stays OPEN across the roster read. Its generation token is
+        // the proof that the membership baseline and the roster came from the
+        // same Remote Connection generation; a replacement in between makes the
+        // paired decision unusable instead of stitching old membership onto a
+        // new roster.
+        try {
+          // Opening the official stream can itself fail closed (for example a
+          // replaced Remote Connection generation): that is an unavailable
+          // membership, never a crash and never an empty Workspace.
+          facts = backend.sessionWorkspaceFacts.followWorkspaces(lifecycleController.signal)
+          const first = await facts[Symbol.asyncIterator]().next()
+          if (first.done !== true && first.value.type === 'baseline') baseline = first.value.items
+        } catch (error) {
+          if (lifecycleController.signal.aborted) return 'aborted'
+          diag.warn('startup continue membership read failed', { error: safeErrorMessage(error) })
+        }
+        if (lifecycleController.signal.aborted) return 'aborted'
+        if (baseline === undefined) {
+          return {
+            kind: 'stop',
+            notice: { text: 'Cannot continue: Host workspace membership is unavailable', kind: 'error' },
+          }
+        }
+        const membership = baseline.find(fact => fact.workspaceId === workspaceId)
+        if (membership === undefined) {
+          return {
+            kind: 'stop',
+            notice: { text: 'Cannot continue: the confirmed Host workspace is no longer reported', kind: 'info' },
+          }
+        }
+        let rows: readonly SessionSummary[] | undefined
+        try {
+          rows = await backend.sessionReader.list(undefined, lifecycleController.signal)
+        } catch (error) {
+          if (lifecycleController.signal.aborted) return 'aborted'
+          diag.warn('startup continue listing failed', { error: safeErrorMessage(error) })
+          return {
+            kind: 'stop',
+            notice: { text: 'Cannot continue: session listing is unavailable', kind: 'error' },
+          }
+        }
+        if (lifecycleController.signal.aborted) return 'aborted'
+        if (rows === undefined) {
+          return {
+            kind: 'stop',
+            notice: { text: 'Cannot continue: session listing is unavailable', kind: 'error' },
+          }
+        }
+        // The membership observation must still be on the SAME Host/Connection
+        // generation as the roster that just landed. A replacement here is a
+        // real authority gap, never an empty or reusable membership.
+        if (facts === undefined || !facts.isCurrent()) {
+          diag.warn('startup continue membership generation changed', { workspace: workspaceId })
+          return {
+            kind: 'stop',
+            notice: { text: 'Cannot continue: the Host connection changed while reading the workspace', kind: 'error' },
+          }
+        }
+        // The Workspace proposal and the automatic proof are fenced AFTER every
+        // await: a replaced A→B→A revision, a Host WorkspaceId change, a revoked
+        // auto proof or a torn-down runner publishes no owner.
+        const after = workspaceNextIntent.snapshot()
+        if (after.revision !== capturedRevision
+          || after.status !== 'confirmed'
+          || after.intent?.kind !== 'workspace-id'
+          || after.intent.workspaceId !== workspaceId) {
+          diag.warn('startup continue target superseded', { workspace: workspaceId })
+          return { kind: 'superseded' }
+        }
+        const proofCurrent = await autoProofCurrent()
+        if (lifecycleController.signal.aborted) return 'aborted'
+        if (!workspaceIntentStillCurrent(capturedRevision, workspaceId)) {
+          diag.warn('startup continue target superseded after the workspace proof', { workspace: workspaceId })
+          return { kind: 'superseded' }
+        }
+        if (!proofCurrent) return launchProofNotice()
+        const continuedSessionId = chooseContinueSession(rows, membership.sessionIds)
+        if (continuedSessionId === undefined) {
+          return {
+            kind: 'stop',
+            notice: { text: 'No readable sessions in this Host workspace', kind: 'info' },
+          }
+        }
+        return { kind: 'resume', sessionId: continuedSessionId }
+      } finally {
+        facts?.dispose()
+      }
+    }
+    if (sessionLaunch?.kind === 'lookup') {
+      if (canonicalFullSessionId(sessionLaunch.query)) {
+        // ONLY the canonical full id keeps the original pre-mount Open
+        // contract: no roster read is required and the id bytes pass through
+        // unchanged.
+        startupResumeSessionId = sessionLaunch.query
+      } else {
+        // Every other value is Browser-first. The Browser opens immediately
+        // (input/Esc never wait for the Host roster); the SAME ReadOwner then
+        // applies the strict CLI exact/unique-prefix policy and performs its
+        // existing guarded Resume once the roster lands. A word-like or
+        // ambiguous query remains one global search.
+        startupSessionBrowserRequest = { initialQuery: sessionLaunch.query, directMatch: true }
+      }
+    } else if (sessionLaunch?.kind === 'browse') {
+      // Bare / explicitly blank `--session`: one Browser on Browse All.
+      startupSessionBrowserRequest = { initialQuery: '', directMatch: false }
+    } else if (sessionLaunch?.kind === 'continue') {
+      const target = await resolveContinueLaunchTarget()
+      if (target === 'aborted') {
+        unwindLaunchResolution()
+        return
+      }
+      if (target.kind === 'resume') startupResumeSessionId = target.sessionId
+      else if (target.kind === 'stop') startupLaunchNotice = target.notice
+      // `superseded` keeps the sessionless surface without a notice.
+    }
+    // TSP-7 Welcome D: the Welcome eligibility's ONE blank authority is the
+    // same semantic `SessionReader.blank` read the `/preset` affordance already
+    // consumes (Direct: the official turn-boundary projection; Remote: the
+    // official Client session-summary bit). Bound here, AFTER the backend
+    // exists and BEFORE the surface can mount, so no repaint can read an
+    // unbound slot; the surface alone decides whether a commit needs it.
+    welcomeSessionBlankOwner = sessionId => backend.sessionReader.blank(sessionId)
     // A5b-2: the settings owner (footer settings + USER-layer trust, the
     // display-preset mutation/persistence, user keybindings and the boot
     // display/theme application).
@@ -1068,7 +1666,7 @@ export function applyRunnerWithRuntime(
     // Migrate legacy/invalid display settings without delaying composition or
     // changing the initial frame. The canonical field always wins at boot;
     // this best-effort write only makes the chosen runtime value durable.
-    if (displayResolution.canonicalize && settingsForms !== undefined) {
+    if (displayResolution.canonicalize && override === undefined && settingsForms !== undefined && tuiSettings !== undefined) {
       runDetached('display preset migration', () => serializeTuiSettingsMutation(
         tuiSettings,
         () => tuiSettings.replace({
@@ -1095,16 +1693,17 @@ export function applyRunnerWithRuntime(
     diag.info('boot', {
       pid: process.pid,
       dsh: dshVersion() ?? 'unknown',
-      bundle: packageVersion(),
+      bundle: bundleVersion(),
       cwd: process.cwd(),
-      session: sessionId ?? '(deferred)',
+      session: startupResumeSessionId ?? (sessionLaunch === undefined ? '(deferred)' : `(launch:${sessionLaunch.kind})`),
       preset: launchPreset ?? 'default',
-      // Host capability check (plan stage K): the services the TUI surface
-      // consumes. Each one degrades locally when absent (presets → default
-      // composition, commands → plain
-      // messages, shell → spawn fallback), so this line is diagnostic, not
-      // a mount gate — the TUI never fails to mount without explanation.
-      services: [
+      // The LOCAL Cordis services this OS process actually observes. Each one
+      // degrades locally when absent (presets → default composition, commands
+      // → plain messages, shell → spawn fallback), so this line is diagnostic,
+      // not a mount gate — the TUI never fails to mount without explanation.
+      // This is NOT a roster of Remote Host capabilities: a Split Client's own
+      // Context sees only its Client-local domains.
+      localCordisServices: [
         'sessionPersistence', 'agents', 'commands', 'tools', 'shell', 'llm',
         'settings', 'skills', 'userQuestions', 'approval', 'permissionPresets',
       ].filter(name => ctx.get(name as never) !== undefined).join(','),
@@ -1154,7 +1753,7 @@ export function applyRunnerWithRuntime(
     // lifecycle await. Once resume resolves, its creation-only signal no
     // longer owns the returned handle (DSH contract).
     let resumeResolved = false
-    if (sessionId !== undefined) {
+    if (startupResumeSessionId !== undefined) {
       // The explicit-resume path is the ONLY pre-mount wait worth
       // explaining: deferred / sessionless starts have nothing to resume.
       startupStatus.show('Resuming session…')
@@ -1171,7 +1770,7 @@ export function applyRunnerWithRuntime(
         // observation seam; the cross-backend open request carries only the
         // Session identity.
         handle = requireOpened(await backend.sessionLifecycle.open({
-          sessionId: String(sessionId),
+          sessionId: String(startupResumeSessionId),
           signal: lifecycleController.signal,
         }))
         resumeResolved = true
@@ -1195,7 +1794,7 @@ export function applyRunnerWithRuntime(
         if (resumedDirectAgent !== undefined) {
           const recorded = sessionPresetOf(ctx, resumedDirectAgent.session)
           diag.info('resume ok', {
-            session: sessionId,
+            session: startupResumeSessionId,
             seq: Number(resumedDirectAgent.session.seq),
             preset: recorded ?? 'default',
           })
@@ -1208,13 +1807,13 @@ export function applyRunnerWithRuntime(
             } catch (error) {
               startupStatus.clear()
               if (presetErrorCode(error) === 'agent-preset/locked') {
-                const message = `session ${sessionId} has started; its agent preset ${recorded} is fixed, ignoring --preset ${launchPreset}`
+                const message = `session ${startupResumeSessionId} has started; its agent preset ${recorded} is fixed, ignoring --preset ${launchPreset}`
                 ctx.logger.warn(`tui-runner: ${message}`)
-                diag.warn('preset ignored on resume', { session: sessionId, preset: launchPreset })
+                diag.warn('preset ignored on resume', { session: startupResumeSessionId, preset: launchPreset })
               } else {
                 const message = `--preset ${launchPreset} not applied on resume: ${safeErrorMessage(error)}`
                 ctx.logger.warn(`tui-runner: ${message}`)
-                diag.warn('preset not applied on resume', { session: sessionId, preset: launchPreset, error: safeErrorMessage(error) })
+                diag.warn('preset not applied on resume', { session: startupResumeSessionId, preset: launchPreset, error: safeErrorMessage(error) })
               }
             }
           }
@@ -1225,7 +1824,7 @@ export function applyRunnerWithRuntime(
           // `PresetCatalog.selectSessionPreset` port the /preset command
           // uses — the Host owns blankness and the `agent-preset/locked`
           // refusal; a started Session keeps its recorded preset and warns.
-          const sessionIdText = String(sessionId)
+          const sessionIdText = String(startupResumeSessionId)
           const recorded = backend.sessionReader.sessionStatus(sessionIdText)?.preset
           if (launchPreset !== undefined && launchPreset !== recorded) {
             const outcome = await backend.catalog.presets.selectSessionPreset(
@@ -1270,14 +1869,14 @@ export function applyRunnerWithRuntime(
             }
           }
           diag.info('resume ok', {
-            session: sessionId,
+            session: startupResumeSessionId,
             preset: backend.sessionReader.sessionStatus(sessionIdText)?.preset ?? recorded ?? 'default',
           })
         }
       } catch (error) {
         if (lifecycleController.signal.aborted && !resumeResolved) {
           startupStatus.clear()
-          diag.debug('startup resume cancelled', { session: sessionId })
+          diag.debug('startup resume cancelled', { session: startupResumeSessionId })
           // No owner was published and the full fiber disposer is not
           // registered: close the diagnostics handle (idempotent).
           diag.dispose()
@@ -1296,11 +1895,19 @@ export function applyRunnerWithRuntime(
         // input creates a new session; the failure is surfaced as a
         // notify line.
         const message = safeErrorMessage(error)
-        ctx.logger.warn(`tui-runner: resume ${sessionId} failed: ${message}`)
-        diag.error('resume failed', { session: sessionId, error: message })
+        ctx.logger.warn(`tui-runner: resume ${startupResumeSessionId} failed: ${message}`)
+        diag.error('resume failed', { session: startupResumeSessionId, error: message })
         resumeFailure = /already owned/i.test(message)
-          ? `session ${sessionId} is already owned by another DSH writer/process`
-          : `session ${sessionId} could not be resumed: ${message}`
+          ? `session ${startupResumeSessionId} is already owned by another DSH writer/process`
+          : `session ${startupResumeSessionId} could not be resumed: ${message}`
+        // A `--session` Open that really failed keeps the original Host error
+        // visible and opens the SAME Browser once with the original query as a
+        // MANUAL recovery entry. This is not a second automatic Resume: the
+        // owner never existed, so nothing is covered up. `-c` never opens a
+        // Browser and never retries another historical row.
+        if (!resumeResolved && sessionLaunch?.kind === 'lookup') {
+          startupSessionBrowserRequest = { initialQuery: sessionLaunch.query, directMatch: false }
+        }
       }
     } else {
       // Deferred session creation: without --session the TUI opens with NO
@@ -1364,21 +1971,41 @@ export function applyRunnerWithRuntime(
           diag.warn('preset resolution failed at startup', { error: safeErrorMessage(error) })
         }
       }
-      const resolution = await resolveInitialCatalog({
-        liveAgent: agentNow(),
-        presetId: effectivePresetId,
-        signal: lifecycleController.signal,
-        ctx: ctx as unknown as SurfaceCatalogContext,
-        diag,
-        // The catalog read may emit its own failure warn: suspend the
-        // status right before it (the barrier itself keeps the status
-        // on screen).
-        onLog: () => startupStatus.clear(),
-      })
+      // The pre-mount cold read is DIRECT-only: on the Remote branch there is no
+      // Direct agent and no Host-authoritative workspace yet, so reading the
+      // Client process cwd here would present Client filesystem as Host
+      // catalog authority. The Remote standing catalog installs through the
+      // coordinator once a Host Workspace is confirmed (and the live catalog
+      // through `refreshLiveCatalogById` for a resumed Session).
+      const resolution: InitialCatalogResolution = remoteSources === undefined
+        ? await resolveInitialCatalog({
+          liveAgent: agentNow(),
+          presetId: effectivePresetId,
+          signal: lifecycleController.signal,
+          ctx: ctx as unknown as SurfaceCatalogContext,
+          diag,
+          // The catalog read may emit its own failure warn: suspend the
+          // status right before it (the barrier itself keeps the status
+          // on screen).
+          onLog: () => startupStatus.clear(),
+        })
+        : {}
       initialSnapshot = resolution.snapshot
       initialSkills = resolution.skills
       surfaceNotice = resolution.notice
     }
+    // Ctrl+R input-history search AND the cold cross-cwd session-recall
+    // reader: ONE Client-local FileHistorySearchSource instance per
+    // composition. It is constructed here (before the presentation owner) so
+    // the SAME object backs both the History panel source and the editor
+    // hydration seed; never a second reader authority.
+    const historySearchSource = new FileHistorySearchSource({
+      dshHome: dshHome(process.env),
+      // A RESOLVER, not a snapshot: the all-scope search must see the newest
+      // known cwds (sessions created/switched after startup).
+      knownCwds: () => history.knownCwds(),
+      diagnostics: event => diag.warn('history source diagnostic', { ...event }),
+    })
     // A5b-1: the live-session presentation owner (main transcript/stats folds,
     // the main presentation target, the generation reset and the ONE cold
     // hydration path) is constructed here, where its folds used to live.
@@ -1394,6 +2021,7 @@ export function applyRunnerWithRuntime(
       // share it).
       summaryKeys: toolSummaryKeys,
       isCleanedUp: () => cleanedUp,
+      lifecycleSignal: lifecycleController.signal,
       refreshStatusCheap: () => status.refresh(),
       folds: { title: (events) => foldSessionTitle(events)?.title },
       direct: {
@@ -1424,6 +2052,20 @@ export function applyRunnerWithRuntime(
         currentCwd: () => status.sessionCwd(),
         records: (cwd) => history.records(cwd),
         setLastContent: (content) => history.setLastContent(content),
+        readSessionRecall: (sessionId, signal) => historySearchSource.readSessionRecall(sessionId, signal),
+      },
+      // The exact ownership fence for the asynchronous cold recall read. The
+      // generation is captured before the read and re-checked after it; on the
+      // Remote branch the transport token adds the Connection/binding identity.
+      currentness: {
+        captureGeneration: () => ownership.generation(),
+        isStillCurrent: (sessionId, generation) =>
+          ownership.currentSessionId() === sessionId && ownership.generation() === generation,
+        ...(remoteSources === undefined ? {} : {
+          captureTransportToken: (sessionId) => remoteSources.sessionFacts.captureTransportToken(sessionId),
+          isTransportTokenCurrent: (sessionId, token) =>
+            remoteSources.sessionFacts.isTransportTokenCurrent(sessionId, token),
+        }),
       },
       commands: { register: () => command.register({ snapshot: initialSnapshot, skills: initialSkills }) },
       submission: { clearPending: () => submission.clearPending() },
@@ -1439,7 +2081,7 @@ export function applyRunnerWithRuntime(
         remote: {
           read: (sessionId) => remoteSources.presentationReader.read(sessionId, lifecycleController.signal),
           running: (sessionId) => presentationBridge.remoteRunningOf(sessionId),
-          plan: (sessionId) => remoteSources.sessionFacts.plan(sessionId)?.active,
+          plan: (sessionId) => remoteSources.sessionFacts.plan(sessionId),
           // The §6.5 visible-commit fence (EXACT GENERATION, never
           // sessionId alone): the token is captured before the reader
           // await; every owner commit — switch/new/fork/resume, INCLUDING a
@@ -1516,9 +2158,31 @@ export function applyRunnerWithRuntime(
      *  history boundary seam coalesces repeated gestures for the SAME subject
      *  into one official page; another subject pages independently). */
     let remoteHistoryLoadingFor: string | undefined
-    /** R2 §7.1: the ONE Remote Host terminal-progress watch of the CURRENT main
-     *  session owner. Its controller is the watch's cancellation lifetime. */
+    /** R2 §7.1 + H1: the ONE Remote Host terminal-progress watch of the
+     *  CURRENT main session owner. A Connection generation rollover voids the
+     *  captured watch identity; the SAME owner re-establishes exactly one watch
+     *  on the official new generation (never a second authority). */
     let remoteProgressHandle: { dispose(): void } | undefined
+    /** H1: the official-generation subscription that re-establishes that ONE
+     *  watch after a transport rollover. Owned by the live surface; disposed
+     *  with it. No timer, no poll and no separate running/status owner. */
+    let remoteProgressGenerationHandle: { dispose(): void } | undefined
+    /** Retire that lifecycle without letting a throwing official unsubscribe
+     *  escape an abort listener; the failure is still recorded through diag. */
+    const retireRemoteProgressGeneration = (): void => {
+      const handle = remoteProgressGenerationHandle
+      remoteProgressGenerationHandle = undefined
+      if (handle === undefined) return
+      try {
+        handle.dispose()
+      } catch (error) {
+        try {
+          diag.error('remote progress generation unsubscribe failed', { error: safeErrorMessage(error) })
+        } catch {
+          // No lower sink.
+        }
+      }
+    }
     /** S3-R0: the ONE pending re-init of a Remote live surface whose hydrate
      *  could not commit because the transport was unavailable. Driven by the
      *  OFFICIAL Connection generation channel — never a timer or a poll. */
@@ -1528,7 +2192,14 @@ export function applyRunnerWithRuntime(
       remoteInitRetryHandle = undefined
     }
     const disposeRemoteLiveSurface = (): void => {
+      // H1: a retired Remote live surface (owner switch, generation rollover,
+      // watch re-init, teardown) no longer proves the Host Agent state. Stop
+      // accepting it as this Pane's registered status FIRST; an already
+      // registered Pane is withdrawn with an ordered `release-agent` while the
+      // old watch is still the authority (never a fabricated `idle`).
+      herdrReporter?.setQualified(false)
       disposeRemoteInitRetry()
+      retireRemoteProgressGeneration()
       remoteIngressHandle?.dispose()
       remoteIngressHandle = undefined
       remoteProgressHandle?.dispose()
@@ -1592,12 +2263,15 @@ export function applyRunnerWithRuntime(
             // in-flight recovery reconcile still keeps its no-measure decision).
             const measure = remoteRefoldRequest.measure
             remoteRefoldRequest = IDLE_REMOTE_REFOLD_REQUEST
-            const proof = await presentation.rehydrateFromWindow(sessionId, { measure })
+            const outcome = await presentation.rehydrateFromWindow(sessionId, { measure })
             if (cleanedUp || remoteIngressHandle !== handle) return
             // An uncommitted re-fold (fence-dropped read) leaves the handle
             // recovering: the next official revision / open transition wakes us.
-            if (proof === undefined) continue
-            if (handle.acknowledgeWindowRefold(proof)) return
+            if (outcome === undefined) continue
+            if (handle.acknowledgeWindowRefold(outcome.proof)) {
+              surface.setTranscriptSearchCoverage(outcome.hasMore ? 'loaded-history-with-more' : 'loaded-history')
+              return
+            }
           }
         } finally {
           remoteRefoldInFlight = false
@@ -1677,6 +2351,7 @@ export function applyRunnerWithRuntime(
       }
       // A committed init releases the attempt's retry budget.
       lastInitRetry = undefined
+      surface.setTranscriptSearchCoverage(hydrate.hasMore ? 'loaded-history-with-more' : 'loaded-history')
       // Seed the compaction working-fold cache from the PROVEN cold-hydrate
       // fold (no first-use gap: the first settle reads the authoritative
       // complete-window answer, never the bare running bit).
@@ -1717,17 +2392,37 @@ export function applyRunnerWithRuntime(
           if (id !== ownership.currentSessionId() || cleanedUp) return
           surface.refreshPendingInput()
         },
-        onProjectionsChanged: (id) => {
+        onProjectionsChanged: (id, changedKeys) => {
           // The official projection faces carry current values the Session
           // snapshot NEVER does (the Session snapshot has no projection
           // values): a model/preset/title/goal/todos/usage/context change made
           // by the Host or another Client must reach this surface now, not at
-          // the next unrelated refresh. Re-apply the projection-owned facts and
-          // refresh the status/welcome from the official sources.
+          // the next unrelated refresh.
           if (id !== ownership.currentSessionId() || cleanedUp) return
-          presentation.applySessionCurrentFacts(id)
+          // Re-apply only the `title`/`goal`/`todos` current facts this path
+          // owns. The commit writes `sessionTitle` through the app, whose
+          // setter always fires the title-change callback; running it for
+          // unrelated high-frequency projections (tokenUsage/context/...)
+          // would rewrite OSC 0 on every such frame. `status.refresh()` below
+          // still paints every other projection fact.
+          if (changedKeys.includes('title') || changedKeys.includes('goal') || changedKeys.includes('todos')) {
+            presentation.applySessionCurrentFacts(id)
+          }
           status.refresh()
           status.updateWelcomeCard()
+          // The effective working directory owns the OSC 0 identity fallback:
+          // refresh it only when THIS batch really carried the
+          // `workingDirectory` projection. The projection notification cannot
+          // assume the `working-directory/change` event has already routed
+          // (the two channels publish independently), and unrelated
+          // token/context updates must never rewrite the title. OSC 7 stays
+          // Remote fail-closed: no `refreshTerminalCwd()` here.
+          if (changedKeys.includes('workingDirectory')) status.refreshTerminalTitle()
+          // The ingress also follows the official `inbox` projection: a queued
+          // or steering occurrence written by ANOTHER Client reaches the ONE
+          // pending pane only after that projection value lands, so re-join the
+          // presentation here instead of guessing from the durable event.
+          surface.refreshPendingInput()
         },
         onWindowRefoldRequired: (id, reason) => {
           // S3-R0: the incremental sequence is no longer trustworthy (generation
@@ -1759,44 +2454,93 @@ export function applyRunnerWithRuntime(
       // re-asserts the Host's authoritative display state; a settled snapshot is
       // committed by `Surface.applyRemoteMainProgress` (never notified).
       surface.setCompletionOwner(sessionId)
-      const progressController = new AbortController()
-      remoteProgressHandle = {
-        dispose: () => { progressController.abort(new Error('remote terminal progress watch disposed')) },
-      }
-      runDetached('remote terminal progress watch', async () => {
-        let failed = true
-        try {
-          // The consumption RE-ESTABLISHES the authority when the Host retires
-          // the watch (an Agent disposal / same-id replacement) while this owner
-          // is still current; only an owner switch, a generation change, an abort
-          // or a real failure stops it (plan §6.4/§7.1).
-          await consumeRemoteTerminalProgress(
-            remoteSources.terminalProgress,
-            sessionId,
-            progressController.signal,
-            {
-              isCurrent: () => !cleanedUp
-                && ownership.currentSessionId() === sessionId
-                && ownership.generation() === initGeneration,
-              onFact: fact => { surface.applyRemoteMainProgress(fact, sessionId) },
-            },
-          )
-          failed = false
-        } finally {
-          // A FAILED stream (contract violation, lost transport identity, a Host
-          // that never answers) must not leave a stale `working` on the terminal:
-          // fail closed to idle. An expected stop (abort / owner or generation
-          // change) leaves the Host's last authoritative state untouched.
-          if (failed && !cleanedUp
-            && ownership.currentSessionId() === sessionId
-            && ownership.generation() === initGeneration) {
-            surface.applyRemoteMainProgress(
-              { kind: 'snapshot', restart: true, running: false, outcome: 'idle' },
-              sessionId,
-            )
-          }
+      /** Start the ONE progress watch pinned to one official generation. */
+      const startProgressWatch = (watchedGeneration: unknown): void => {
+        remoteProgressHandle?.dispose()
+        remoteProgressHandle = undefined
+        const progressController = new AbortController()
+        remoteProgressHandle = {
+          dispose: () => { progressController.abort(new Error('remote terminal progress watch disposed')) },
         }
-      }, { diag, sessionId: () => sessionId })
+        runDetached('remote terminal progress watch', async () => {
+          let failed = true
+          try {
+            await consumeRemoteTerminalProgress(
+              remoteSources.terminalProgress,
+              sessionId,
+              progressController.signal,
+              {
+                isCurrent: () => !cleanedUp
+                  && ownership.currentSessionId() === sessionId
+                  && ownership.generation() === initGeneration,
+                onFact: fact => {
+                  surface.applyRemoteMainProgress(fact, sessionId)
+                  // H1: only a frame the existing currentness/binding fences
+                  // accepted can qualify this Pane. The publish that follows reads
+                  // the JUST-COMMITTED logical status, so a stale queued state from
+                  // a previous qualification is never replayed.
+                  herdrReporter?.setQualified(true)
+                },
+              },
+            )
+            failed = false
+          } catch (error) {
+            // A generation change voids the watch's captured identity: the
+            // generation lifecycle owns the replacement, not the detached task.
+            if (!Object.is(remoteSources.commandSource.connectionGeneration(), watchedGeneration)) {
+              failed = false
+              return
+            }
+            throw error
+          } finally {
+            // A real stream failure must not leave a stale `working` on the
+            // terminal. A generation change is handled by the official
+            // lifecycle above and never fabricates an idle completion.
+            if (failed && !cleanedUp
+              && ownership.currentSessionId() === sessionId
+              && ownership.generation() === initGeneration
+              && !progressController.signal.aborted
+              && Object.is(remoteSources.commandSource.connectionGeneration(), watchedGeneration)) {
+              herdrReporter?.setQualified(false)
+              surface.applyRemoteMainProgress(
+                { kind: 'snapshot', restart: true, running: false, outcome: 'idle' },
+                sessionId,
+              )
+            }
+          }
+        }, { diag, sessionId: () => sessionId })
+      }
+      /** The ONE generation lifecycle of this owner attempt: valid -> undefined
+       *  releases immediately; undefined -> valid starts the first/next watch;
+       *  a first arm that is already `undefined` keeps the official listener. */
+      const progressGeneration = armRemoteProgressWatchGeneration({
+        isCleanedUp: () => cleanedUp,
+        currentSessionId: () => ownership.currentSessionId(),
+        ownerGeneration: () => ownership.generation(),
+        sessionId,
+        ownerGenerationAtInit: initGeneration,
+        connectionGeneration: () => remoteSources.commandSource.connectionGeneration(),
+        subscribeConnectionGeneration: listener => remoteSources.commandSource.subscribeConnectionGeneration(listener),
+        // H1 plan Step 4: revoke the external qualification FIRST, then run
+        // the ORIGINAL terminal presentation fail-closed, so the conservative
+        // idle can never be published to the Pane while the native OSC 9;4 /
+        // 7501 state is still cleaned up. A new generation requalifies only
+        // through the next watch's authoritative Host snapshot.
+        revokeQualification: () => { herdrReporter?.setQualified(false) },
+        failClosedPresentation: () => {
+          surface.applyRemoteMainProgress(
+            { kind: 'snapshot', restart: true, running: false, outcome: 'idle' },
+            sessionId,
+          )
+        },
+        disposeWatch: () => {
+          remoteProgressHandle?.dispose()
+          remoteProgressHandle = undefined
+        },
+        startWatch: generation => { startProgressWatch(generation) },
+      })
+      remoteProgressGenerationHandle = progressGeneration
+      progressGeneration.observeCurrent()
     }
 
     /** The transition gate protects ordinary session surface changes — `/new`,
@@ -1840,6 +2584,13 @@ export function applyRunnerWithRuntime(
     // reach it late-bound and the mount below can hand its adapter over. It is
     // ASSIGNED once every owner it depends on exists, before `surface.start`.
     let applicationEvents: ApplicationEventsOwner
+    /**
+     * PR-Q: the ONE application-level Queue manager. Declared before the
+     * command surface (whose `/queue` seam reads it late-bound) and assigned
+     * before `surface.start`, which attaches the mounted renderer's
+     * presentation.
+     */
+    let queueManager: QueueManagerController | undefined
     // A5b-3b-2: the command authority/state machine + the TuiCommandRunner
     // facade owner. Constructed before the surface cleanup closure can run; the
     // runner facade is built later, after the semantic command runtime binds.
@@ -1847,12 +2598,80 @@ export function applyRunnerWithRuntime(
     // irrelevant and no capability can go stale.
     // Explicit annotation: the Direct seams below read the owner back
     // (late-bound through `command`), so the initializer cannot drive inference.
+    // M6-1 F8: the ONE per-runner session-policy observation owner, created
+    // BEFORE both consumers (the command surface here, the status runtime
+    // below) so they share the SAME object reference. Its invalidation
+    // triggers: session-scope owner changes, Connection generation changes
+    // (Remote), and the canonical session-event knob routing below. The
+    // late-bound `statusRuntimeRef` lets the observation repaint the footer
+    // without a creation-order cycle (the status runtime is constructed
+    // after this block).
+    let statusRuntimeRef: StatusRuntime | undefined
+    // The Direct branch's stand-in generation identity: one frozen object per
+    // process. Direct has no Connection generation to compare; the per-boot
+    // singleton keeps the observation's identity comparison total (the
+    // process IS the generation boundary there).
+    const directPolicyGenerationToken = {}
+    const sessionPolicyObservation = createSessionPolicyObservation({
+      read: (sessionId, signal) => backend.sessionPolicy.read(sessionId, signal),
+      // Direct has no Connection generation object; a per-boot singleton
+      // token stands in so the identity comparison stays meaningful (a
+      // Direct reboot is a new process anyway).
+      generation: (): object | undefined => remoteSources === undefined
+        ? directPolicyGenerationToken
+        : (remoteSources.commandSource.connectionGeneration() as object | undefined),
+      isSubjectCurrent: sessionId => ownership.currentSessionId() === sessionId || viewerRef?.read()?.id === sessionId,
+      // The F8 read-admission fence: a transition/owner commit holds the
+      // gate, so its callbacks only paint `checking`; the next safe display
+      // refresh starts the controlled read. This is the SECOND sanctioned
+      // reader of the transition gate (the other is the attachments intake UX
+      // fence); writer admission stays with SessionRuntime.withWriter.
+      canStartRead: () => !ownership.gate.busy,
+      diag,
+    })
+    // The status owner repaints only on COMMITTED reads. A revocation inside
+    // an owner-commit callback must not trigger a full status refresh (it
+    // could read the published-but-uninitialized owner's Host projections);
+    // the status facts still leave the screen at the generation boundary via
+    // the command surface's explicit `refresh()`, and every later display
+    // refresh sees the revoked `checking` snapshot.
+    const disposePolicyObservation = sessionPolicyObservation.subscribe(event => {
+      if (event === 'committed') statusRuntimeRef?.refresh()
+    })
+    // Scope/generation changes revoke every committed snapshot WITHOUT a
+    // synchronous re-read: the next display refresh starts the new subject's
+    // controlled read (the subject-keyed lazy read). A refresh started inside
+    // this owner-commit callback would otherwise read the published-but-not-
+    // yet-initialized owner's Host projections during the transition window.
+    const disposePolicyScopeInvalidation = ownership.subscribeScopeInvalidation(() => {
+      // The owner commit's synchronous stack must never reach a Host
+      // projection read: revoke the truth (the open Settings page repaints to
+      // `checking`) and request ONE display refresh only AFTER the transition
+      // settles, when the read-admission fence opens and the new subject's
+      // controlled read may start.
+      sessionPolicyObservation.invalidate()
+      runDetached('session policy refresh', async () => {
+        await ownership.gate.whenSettled()
+        statusRuntimeRef?.refresh()
+      }, { diag, sessionId: () => ownership.currentSessionId() })
+    })
+    lifecycleController.signal.addEventListener('abort', () => {
+      disposePolicyObservation()
+      disposePolicyScopeInvalidation()
+      sessionPolicyObservation.dispose()
+    }, { once: true })
     const command: CommandSurface<ModelSelection, Agent> = createCommandSurface<ModelSelection, SessionId, Agent>({
       ctx,
       diag,
       signal: lifecycleController.signal,
       app: () => app,
       modelPresentation: () => surface.modelPresentation,
+      // M5-W PR-C: the mounted native `/web` presenter (absent on PiTui and on
+      // a TSP pane that did not negotiate its kinds).
+      webPresentation: () => surface.webPresentation,
+      // PO-5E: the mounted native `/acp` presenter, read through the SAME live
+      // surface getter.
+      acpPresentation: () => surface.acpPresentation,
               sessionBrowserPresentation: () => surface.sessionBrowserPresentation,
       presetPresentation: () => surface.presetPresentation,
       // PR3-A: registration/refresh failures are background-reachable under a
@@ -1863,11 +2682,14 @@ export function applyRunnerWithRuntime(
       ownership,
       transition: {
         pending: () => ownership.gate.busy,
-        // A user navigation goes through the session runtime's admission: the
-        // barrier stops the captured old generation BEFORE the admitted-writer
-        // drain. Everything else (`/preset`, and any transition that is not a
-        // user leaving its Session) keeps the plain admission and never
-        // cancels the owner it replaces.
+        // A user navigation goes through the session runtime's admission:
+        // after the barrier freeze it applies the BACKEND's navigation
+        // ownership — a `stop-and-quiesce` backend stops the captured old
+        // generation BEFORE the admitted-writer drain, while a `detach-client`
+        // backend dispatches no Host stop and waits for no Host idle. The
+        // admitted writers then drain. Everything else (`/preset`, and any
+        // transition that is not a user leaving its Session) keeps the plain
+        // admission and never cancels the owner it replaces.
         run: <T>(task: () => Promise<T> | T, navigation?: NavigationIntent): Promise<T> =>
           navigation === undefined
             ? ownership.gate.run(() => ownership.barrier.runTransition(async () => task()))
@@ -1923,36 +2745,129 @@ export function applyRunnerWithRuntime(
         setTerminalProgressMode: (mode) => surface.setTerminalProgressMode(mode),
         openJobView: (jobId) => surface.openJobView(jobId),
         openTasksBrowser: (viewMode) => surface.openTasksBrowser(viewMode),
+        // S5-PR4: the ONE Schedule workspace entry. The controller is built
+        // from the SELECTED backend's Schedule port and Session reader inside
+        // this composition zone (never from `runner.ctx.schedule`), and every
+        // Host write it performs runs through the app-owned `runOwned` entry.
+        openScheduleWorkspace: () => openScheduleWorkspace({
+          port: backend.schedule,
+          sessionReader: backend.sessionReader,
+          app: () => surface.app,
+          runOwned: (label, task) => { runOwned(label, task, { diag }) },
+          captureSessionSwitch: captureScheduleSessionSwitch(
+            () => sessionScope.capture(),
+            (sessionId, scope) => sessionRuntime.switchSessionOutcome(sessionId, scope),
+          ),
+        }),
         // Image UX PR3-B: the LIVE composer of the mounted renderer. Command
         // registration runs AFTER the mount, so this getter (never an eagerly
         // captured value) is what the attachment intake reads.
         composer: () => surface.composer,
+        // PR-Q: `/queue` forwards to the ONE application-level manager. The
+        // command itself creates no Session and performs no Host write; the
+        // manager re-reads the authoritative queued projection and states the
+        // empty/unavailable state itself.
+        openQueueManager: () => {
+          const controller = queueManager
+          if (controller === undefined) return { kind: 'error', text: 'Queue management is unavailable' }
+          return queueManagerCommandResult(controller.open())
+        },
         // Delivered files (PR1 / M2): the surface's own display-subject
         // decision, exposed as a function-type read capability. The runner
         // forwards it to `/deliverables`; no Folder instance crosses the seam.
         deliveredFilesSnapshot: () => surface.deliveredFilesSnapshot(),
+        // TSP I-C: the ONE catalog commit forwarded to the currently mounted TSP
+        // renderer. No prefetch, no await, no second catalog: the surface keeps
+        // only the mount's installer reference. The PiTui branch never reaches
+        // this seam (its catalog keeps going through `app.setCommandCompletions`).
+        installTspCommandCompletions: (installation) => {
+          surface.installTspCommandCompletions(installation)
+        },
+        // TSP I-D: the ONE inline-attachment stager, forwarded to the CURRENT
+        // mount through the same live surface read. No stager, stake, draft or
+        // attachment state is kept here.
+        installTspInlineAttachmentStager: (stager) => {
+          surface.installTspInlineAttachmentStager(stager)
+        },
+        // TSP I-C: the SAME live capability reads the submission admission already
+        // uses — the mounted presenters and the display seam's ONE Task Center
+        // reachability truth — sampled per catalog commit, never cached and never
+        // inferred from a Tern version or a command name.
+        tspCommandPickerCapabilities: () => ({
+          modelPicker: surface.modelPresentation !== undefined,
+          presetPicker: surface.presetPresentation !== undefined,
+          acpPicker: surface.acpPresentation !== undefined,
+          sessionBrowser: surface.sessionBrowserPresentation !== undefined,
+          queueManager: surface.queuePresentationAvailable(),
+          taskCenter: surface.display.supportsTaskCenter,
+        }),
       },
       backend: {
         kind: selectedRuntime.kind,
         sessionReader: backend.sessionReader,
+        // PR-5/MAC-09 v2: the official CUA access port and the official
+        // Plugin Manager roster the Settings Computer Use page reuses.
+        cuaAccess: backend.cuaAccess,
+        pluginManager: backend.pluginManager,
+        // M5-U-C: the SAME official Host read port the backend resolved; the
+        // command runner forwards it unchanged to the PiTUI Session Workspace.
+        sessionWorkspaceFacts: backend.sessionWorkspaceFacts,
+        // Session Workspace PR3: the SAME read-only Host browse port. The
+        // inline Add editor lists the Host home/levels; a listing never
+        // registers a Workspace or reads a Client filesystem.
+        hostDirectoryBrowse: backend.hostDirectoryBrowse,
+        // M6-1 F8: the SAME exact-Session policy port both the observation
+        // owner and the scope-bound approval write consume.
+        sessionPolicy: backend.sessionPolicy,
+        // FR1: the SAME selected backend's exact-Root Team mode port. The
+        // `/model` command owns the Team gesture admission and the independent
+        // confirmation seat; no picker reaches the Host directly.
+        teamMode: backend.teamMode,
+        // Split-Client only: the Client-root forwarded-answer eligibility read
+        // view. The Session Workspace uses it ONLY as the positive
+        // answerability gate for `Needs attention`; a Direct/TSP composition
+        // never installs the root delivery owner, so absence is the truthful
+        // "no official answer composition here".
+        ...(interactionDelivery === undefined
+          ? {}
+          : {
+              forwardedAnswerEligibility: () => interactionDelivery.currentEligibleRequests(),
+              subscribeForwardedAnswerEligibility: (listener: () => void) => interactionDelivery.subscribeEligibility(listener),
+            }),
         sessionWriter: backend.sessionWriter,
         interaction: backend.interaction,
         catalog: backend.catalog,
         config: backend.config,
         hostFile: backend.hostFile,
-        // Shell amendment (M3-4 PR3): Host-shell completion facts exist only
-        // where the TUI process IS the Host (Direct). Remote has no qualified
-        // shell carrier, so it must show no shell-specific suggestions.
-        hostShellCompletion: selectedRuntime.kind === 'direct',
-        // The readable-transcript business capability (PR4 round 5): the
-        // Markdown renderer reads the whole in-process Session event
-        // history — Direct only until a transport-neutral whole-history
-        // seam exists. Deliberately NOT derived from the commands-registry
-        // compatibility mirror (its retirement is owned by M8).
-        transcriptExportAvailable: selectedRuntime.kind === 'direct',
+        // M5-W PR-C: the Split-Client Web frontend control (`/web`).
+        webAccess: backend.webAccess,
+        // PO-1B: the Split-Client local ACP listener control (Settings row).
+        acpAccess: backend.acpAccess,
+        // FR3: the ONE official Host MCP manager port for the Settings page.
+        mcpServers: backend.mcpServers,
+        // The selected backend's live semantic completion authority. Direct
+        // compgen stays on the in-process compatibility path; Remote calls Host.
+        hostShellCompletion: backend.hostShellCompletion,
+        // M6 UX PR2: the process-local daemon administration capability, when
+        // this composition proved the official local Profile identity. The
+        // Settings follow-up is its ONLY consumer; it never reaches a Host
+        // service, the Remote wire or an extension declaration.
+        ...(profileDaemonAdmin === undefined ? {} : { profileDaemonAdmin }),
+        // M6 UX PR2: the ONE transient user-conversion intent. The Settings
+        // command submits the verified transition; the exit-intent owner reads
+        // it as a permission to ASK (never a command to stop).
+        recordBackendExitTransition: (transition) => {
+          if (lifecycleController.signal.aborted) return
+          backendExitTransition = transition
+        },
       },
       session: {
+        workspaceNextIntent,
         ensureSession: () => sessionRuntime.ensureSession(),
+        awaitWorkspacePreflight: () => sessionRuntime.awaitWorkspacePreflight(),
+        // M6-1/F5-B (review P2): the create-side AUTO evidence check the `/new`
+        // path consults at its own consumption boundary.
+        validateAutoWorkspace: () => sessionRuntime.isAutoWorkspaceCurrent(),
         withWriter: (scope, task) => sessionRuntime.withWriter(scope, task),
         switchSession: (sessionId, expectedScope) => sessionRuntime.switchSession(sessionId, expectedScope),
         switchSessionOutcome: (sessionId, expectedScope) => sessionRuntime.switchSessionOutcome(sessionId, expectedScope),
@@ -1979,7 +2894,18 @@ export function applyRunnerWithRuntime(
       },
       settings: {
         applyFooterSettings: (doc, saved) => settings.applyFooterSettings(doc, saved),
-        setDisplayPreset: (preset) => settings.setDisplayPreset(preset),
+        setDisplayPreset: (preset) => {
+          const result = settings.setDisplayPreset(preset)
+          // M6 PR-C C3: `/display` and `/focus` mutate the shared DisplayState
+          // synchronously through the unified seam; re-project the new view to
+          // the Host right after (independent from the detached Profile save).
+          promptPresence?.resample()
+          return result
+        },
+        // M6 PR-C C3: the Settings workspace's display-preset commit applies
+        // through the app DIRECTLY (its own persistence sequence), bypassing
+        // the unified seam above — it re-projects through this notification.
+        onDisplayPresetMutated: () => promptPresence?.resample(),
       },
       model,
       viewer: {
@@ -2003,6 +2929,29 @@ export function applyRunnerWithRuntime(
             editors: service.editors,
             api: () => service.api(),
             health: () => service._ledger().healthSnapshot(),
+            // R8-E PR-4: the CURRENT Client's exact ownership facts. Direct
+            // reads its runner-owned mount owner; the internal Split Client
+            // reads the current surface revision's process-local owner through
+            // the existing override seam (never the Host wire).
+            ownerEntryIds: () => service._ownerEntryIds(),
+            clientObservations: () => override === undefined
+              ? directClientExtensionOwner?.observation() ?? []
+              : override.clientExtensionObservationSource?.()?.observation() ?? [],
+            refreshClientExtensions: () => {
+              if (override === undefined) {
+                const reconcile = directClientExtensionReconcile
+                if (reconcile === undefined) return
+                runDetached('direct client extension config re-read', async () => {
+                  reconcile(await backend.pluginManager.snapshot())
+                }, { diag })
+                return
+              }
+              const reconcile = override.reconcilePluginInventory
+              if (reconcile === undefined) return
+              runDetached('client extension config re-read', async () => {
+                await reconcile(await backend.pluginManager.snapshot())
+              }, { diag })
+            },
           }
         },
         recordError: (ref, error) => extensionService?._recordRegistryError(ref, error),
@@ -2031,7 +2980,9 @@ export function applyRunnerWithRuntime(
       get agents() { return lifecycleAgents },
       imageLimits: () => directImageLimits(),
       openRewindPicker: () => applicationEvents.openRewindPicker(),
-      requestExit: () => requestExit(),
+      // M6 UX PR1: `/exit` and `/quit` enter the ONE exit-intent classifier
+      // (the exit controller stays the final commit below).
+      requestExit: () => exitIntent.request('slash'),
       // M4 PR4: the ONE `/reload-client` implementation. The Client-local
       // safety facts are read HERE — when the user handler runs, never at
       // registration and never cached — and the process-owned request is
@@ -2113,6 +3064,18 @@ export function applyRunnerWithRuntime(
             Promise.resolve(task()) as Promise<T>,
         }),
       },
+      // M6-1 F8: the ONE per-runner session-policy observation owner. The
+      // SAME object reference goes to the status runtime (footer access
+      // facts) and the command runtime (the Settings approval row) — one
+      // snapshot source, never two. Reads ride the backend's neutral
+      // SessionPolicyPort; currentness keys on the Connection generation
+      // (Remote) and the session-scope authority (both branches).
+      policy: sessionPolicyObservation,
+      // M6-1 F8: the SAME Connection generation identity the observation
+      // fences on — the Settings write chain binds its ACK/readback to it.
+      policyGeneration: () => remoteSources === undefined
+        ? undefined
+        : remoteSources.commandSource.connectionGeneration(),
       // TS8-E: the narrow Direct catalog capability. The Direct catalog context
       // and the in-process `commands.list(undefined)` convention are captured
       // ONCE here and adapted into neutral-DTO operations, so the application
@@ -2142,6 +3105,10 @@ export function applyRunnerWithRuntime(
     const status = createStatusRuntime({
       surface,
       diag,
+      // M6-1 F8: the SAME session-policy observation object the command
+      // surface holds — the footer's sandbox/approval facts and the Settings
+      // approval row read ONE snapshot source.
+      policyObservation: sessionPolicyObservation,
       // The composition owns the terminal policy: the status owner supplies
       // the semantic identity facts and this applies OSC 0 (width/ANSI
       // mechanics stay in `tui/terminal/title.ts`).
@@ -2203,6 +3170,7 @@ export function applyRunnerWithRuntime(
         selection: () => model.selected.current,
         currentOf: (agent) => model.currentOf(agent),
         defaultSelection: () => model.currentDefault(),
+        defaultUnavailable: () => model.defaultUnavailable(),
         marker: () => model.currentMarker(),
         preset: () => currentPreset(),
       },
@@ -2218,7 +3186,8 @@ export function applyRunnerWithRuntime(
       },
       viewer: { read: () => viewerRef?.read() },
       clientCwd: cwd,
-      // M3-4 PR2: the Remote-ONLY official Session facts (the plan wire view).
+      nextWorkspaceIntent: () => workspaceNextIntent.snapshot(),
+       // M3-4 PR2: the Remote-ONLY official Session facts (the plan wire view).
       // The SessionStatus read is the shared `sessionStatus` capability above.
       ...(remoteSources === undefined ? {} : {
         remote: {
@@ -2230,6 +3199,9 @@ export function applyRunnerWithRuntime(
     // can deliver the first click/key. The renderer only reaches this owner
     // through the narrow surface seam above.
     permissionUiOwner = status
+    // M6-1 F8: the observation owner's repaint hook now points at the live
+    // status runtime (declared late to avoid a creation-order cycle).
+    statusRuntimeRef = status
     // A5b-2: the client-local input-history owner (known cwds, the canonical
     // last row and the per-session recall projection). Constructed before the
     // mount; it only touches the display seam inside `activateBootRecall`.
@@ -2363,26 +3335,37 @@ export function applyRunnerWithRuntime(
     // submit time.
     const draftImages = new DraftImageStore()
     const draftFiles = new DraftFileStore()
+    // The ONE application intake owner of a terminal bracketed pasted image
+    // file path (Tern/Hedr paste a local path as text; Ctrl+V is a different
+    // input source and keeps its own owner). Client-local by contract: the
+    // file is read on THIS machine and never through a Host path.
+    const pastedImageIntake = createPastedImageIntakeOwner({
+      drafts: { get images() { return draftImages }, get files() { return draftFiles } },
+      composer: () => surface.composer,
+      clientCwd: () => cwd,
+      imageLimits: () => directImageLimits(),
+      lifecycle: {
+        generation: () => ownership.generation(),
+        currentSessionId: () => ownership.currentSessionId(),
+        isCleanedUp: () => cleanedUp,
+        runOwned: (label, task, options) => runOwned(label, task, { ...options, diag }),
+      },
+    })
     // All command/fork/rewind lifecycle calls share this composition-root
     // bridge so no child-creation path can bypass the runner lifetime.
     const lifecycleAgents: TuiCommandRunner['agents'] = {
+      // The /new pre-selection: the SAME backend lifecycle port resolves the
+      // Host Workspace. This bridge adds no second Workspace owner and no
+      // composition-root registry query.
+      resolveWorkspace: (intent, signal) => backend.sessionLifecycle.resolveWorkspace(intent, signal),
       create: async (options) => requireCreated(await backend.sessionLifecycle.create({ ...options, signal })),
       open: async (options) => requireOpened(await backend.sessionLifecycle.open({ ...options, signal })),
     }
-    // A5b-4 + shell amendment (M3-4 PR3): the user-shell owner (`!` / `!!` +
-    // the shared live-Agent interrupt). Execution is Host-owned behind the
-    // branch-selected Host adapter: Direct runs in-process (spawn behind
-    // adapter ownership; the sandbox policy runs the dsh shell executor and
-    // fails closed when absent); Remote is the truthful-unavailable adapter
-    // (CARRIER_GAP at rc.2 — zero Client spawn, zero ctx.shell escape).
-    // Constructed BEFORE the surface cleanup closure can run; its submission
-    // acknowledgement seams are late-bound (the controller is built below).
-    // Both Host user-shell adapters are served by the selected BACKEND
-    // (Direct in-process / Remote truthful-unavailable) — the composition
-    // root holds neither a static Remote edge nor direct spawn ownership
-    // (M3-4 PR3 shell amendment; the frozen selection-boundary contract).
+    // Host execution stays behind the selected backend. Direct uses its
+    // in-process adapter; Remote uses the authenticated one-shot Host stream.
+    // Busy turn cancellation uses the shared exact-scope SessionRuntime port.
     const userShellPort = backend.hostUserShell
-    const localShell = createUserShell<Agent>({
+    const localShell: UserShellOwner = createUserShell<Agent>({
       app: () => app as TuiApp,
       // PR3-B §B0-7: failure/interrupt notices are renderer-neutral. The Esc
       // interrupt path can run under a non-PiTui renderer (the turn cancel is
@@ -2403,8 +3386,15 @@ export function applyRunnerWithRuntime(
       },
       requireLiveScope,
       captureLiveScope: () => sessionScope.captureLive(),
-      writerSection: (task) => submission.withWriterSection(task),
+      isLiveScopeCurrent: scope => sessionScope.isCurrent(scope),
+      writerSection: (scope, task) => submission.withShellWriterSection(scope, task),
       writer: backend.sessionWriter,
+      ...(remoteSources === undefined ? {} : {
+        prepareTransportMessage: async (sessionId: string, text: string) => preparePrompt(sessionId, text, {
+          images: { values: () => [] },
+          files: { values: () => [] },
+        }),
+      }),
       status: { sessionCwd: () => status.sessionCwd() },
       tuiSettings,
       shell: userShellPort,
@@ -2433,6 +3423,12 @@ export function applyRunnerWithRuntime(
     // §11/§12): the orchestration is owned by `app/bootstrap/lifecycle.ts`;
     // every released resource is an already-owned callback. The frozen §12
     // relative order is preserved inside that module.
+    /**
+     * M6 UX PR1: late-bound disposal of the exit-intent coordinator (created
+     * beside the exit controller below, after this lifecycle owner). A startup
+     * failure before that assignment has nothing to retire.
+     */
+    let exitIntentDisposeRef: (() => void) | undefined
     const surfaceLifecycle = createSurfaceLifecycle({
       diag,
       isCleanedUp: () => cleanedUp,
@@ -2447,6 +3443,9 @@ export function applyRunnerWithRuntime(
       whenRendererAcquired: () => rendererAcquisition,
       surface,
       abortLifecycle: () => lifecycleController.abort(),
+      // Late-bound: the coordinator is created beside the exit controller
+      // below; a startup failure before that assignment has nothing to retire.
+      disposeExitIntent: () => exitIntentDisposeRef?.(),
       disposeViewer: () => viewerRef?.dispose(),
       clearDraftImages: () => draftImages.clear(),
       clearDraftFiles: () => draftFiles.clear(),
@@ -2454,6 +3453,11 @@ export function applyRunnerWithRuntime(
       cancelDeferredStatus: () => status.cancelDeferred(),
       disposeFooterCommand: () => settings.disposeFooterCommand(),
       disposeLocalShell: () => localShell.dispose(),
+      disposePastedImageIntake: () => pastedImageIntake.dispose(),
+      // H1: the ONE Client-local Pane reporter is released inside the same
+      // ordered, non-truncating surface batch (before the mounted app dies).
+      disposeHerdrReporter: () => { herdrReporter?.dispose() },
+      disposeRemoteProgressGeneration: retireRemoteProgressGeneration,
       retireOwnedSession: sessionRuntime.retireOwnedSession,
       disposeSelectedTransport,
       registerDisposal: (dispose) => { ctx.effect(function* () { yield dispose }) },
@@ -2462,6 +3466,67 @@ export function applyRunnerWithRuntime(
     // through this ref (M3-6 PR3 D3), assigned now — before `surface.start`
     // and any later startup operation can fail with the surface owner live.
     disposeSurfaceRef = surfaceLifecycle.disposeSurface
+    /**
+     * M6 UX PR1: the EXACT-owner daemon Stop used by the Busy Exit Choice.
+     * The control admission wraps ONLY the official cancel request; the idle
+     * proof then runs OUTSIDE that section on the SAME captured owner. An ACK
+     * alone never means "stopped": only `whenIdleOrAbort === false` (the exact
+     * generation observed idle) does, and every other settlement is reported
+     * as unconfirmed with no automatic retry.
+     */
+    const stopDaemonWorkForExit = async (
+      scope: LiveSessionScope,
+      signal: AbortSignal,
+    ): Promise<StopCurrentWorkOutcome> => {
+      if (selectedRuntime.kind !== 'remote') {
+        throw new Error('the daemon Stop is only reachable on the Remote backend')
+      }
+      const control = await sessionRuntime.withControl(scope, async owner => ({
+        owner,
+        outcome: await selectedRuntime.retirement.cancel(owner),
+      })).then(
+        value => ({ ok: true as const, value }),
+        (error: unknown) => ({ ok: false as const, error }),
+      )
+      if (!control.ok) {
+        if (control.error instanceof SessionScopeSupersededError) {
+          return { kind: 'unconfirmed', detail: 'The captured session is no longer current.' }
+        }
+        throw control.error
+      }
+      const { owner, outcome } = control.value
+      if (outcome.kind !== 'committed') {
+        const detail = outcome.kind === 'rejected'
+          ? outcome.error.message
+          : outcome.kind === 'unsupported'
+            ? outcome.reason
+            : outcome.kind === 'cancelled'
+              ? 'The stop request was cancelled before the session confirmed it.'
+              : 'The stop request was dispatched but its result could not be confirmed.'
+        return { kind: 'unconfirmed', detail }
+      }
+      // The control admission is RELEASED before this wait: holding the
+      // barrier across the idle proof would block the very transition that
+      // settles the captured owner. `whenIdleOrAbort` fences the exact
+      // Connection generation and binding identity internally.
+      const idle = await selectedRuntime.retirement.whenIdleOrAbort(owner, signal)
+      if (idle === false) return { kind: 'stopped' }
+      return {
+        kind: 'unconfirmed',
+        detail: idle === 'unobservable'
+          ? 'The captured session generation is no longer observable.'
+          : 'The wait for the session to become idle was aborted.',
+      }
+    }
+    // M6 UX PR1: whether the committed exit carries a PROVEN "current work
+    // stopped" fact. The daemon detach hint prints the stopped line only then.
+    let exitWorkStopped = false
+    /**
+     * M6 UX PR2: the outcome of the ONE explicit whole-Host stop (only for a
+     * confirmed verdict). It is set by the final exit root's admin step and
+     * read by the resume hint so the two texts never contradict each other.
+     */
+    let exitHostStop: { readonly confirmed: boolean; readonly detail?: string } | undefined
     // The ONE exit orchestration, shared by every exit entry (the exit keys,
     // /exit, /quit): latch once → dispose/restore the Client surface →
     // synchronously pre-cancel the exact current Direct owner → resume-hint
@@ -2475,17 +3540,167 @@ export function applyRunnerWithRuntime(
       diag,
       cleanup: surfaceLifecycle.disposeSurface,
       prepareRetirement: sessionRuntime.preCancelOwnedSession,
+      // M6 UX PR2 (F3): the ONE installed B1 Client transport, released only on
+      // the explicit whole-Host Stop path, after the TTY restore and before the
+      // control plane runs. Idempotent: the Client root teardown reuses it.
+      ...(override?.releaseTransport === undefined ? {} : { releaseTransport: override.releaseTransport }),
+      // M6 UX PR2 (N1): the destructive Host stop requires the PROVEN terminal
+      // restore, so the exit root asks the SAME teardown transaction the TTY
+      // release settled on — never a second teardown owner.
+      rendererReleased: surfaceLifecycle.surfaceReleased,
       hint: (message) => process.stdout.write(`\n${message}\n`),
       resumeHint: () => {
-        // The Host's profileContext names the profile for EVERY launch form,
-        // including the positional `dsh <name>` (see hostRunningProfile): the
-        // argv scrape alone would answer the pi-tui fallback there and hand the
-        // user a resume command for the wrong profile.
-        const resume = resumeCommand(hostRunningProfile(ctx), agentNow()?.session.id ?? '')
+        const sessionId = ownership.currentSessionId() ?? agentNow()?.session.id ?? ''
+        // M6 UX PR1: leaving a daemon Client is NOT stopping the Host. Print
+        // the exact management facts and never claim a Host state or PID the
+        // Client cannot observe. Direct keeps its original resume line.
+        if (selectedRuntime.kind === 'remote') {
+          // A Split Client's profile identity is the official Client launch
+          // fact carried by its process-local admin port. hostRunningProfile()
+          // would read the Host profileContext (absent here) or the internal
+          // local-client.mjs argv (which never carries the outer CLI flag),
+          // and would answer the pi-tui default for a non-default Profile.
+          const profile = profileDaemonAdmin?.profile
+          if (profile === undefined) {
+            // The optional port is absent only for a composition that cannot
+            // prove the local Profile identity. Never guess pi-tui, and never
+            // throw here: the exit controller deliberately contains a hint
+            // failure, so this visible line is the only honest channel.
+            diag.warn('daemon resume hint: profile identity unavailable', {})
+            return [
+              'Disconnected from dsh-pi-tui (daemon client).',
+              'Profile identity unavailable; resume and daemon management commands were not generated.',
+            ].join('\n')
+          }
+          return formatDaemonDetachHint({
+            profile,
+            sessionId,
+            workStopped: exitWorkStopped,
+            // M6 compatible-cross-build UX: the SAME derived fact that produced
+            // the initial notice; a whole-Host Stop (verified or unknown) never
+            // carries the adoption suggestion.
+            compatibleOtherBuild,
+            // RFL-016C: the pin answers "how do I get back to the Host this
+            // Client left" and must NOT trust the last-known config mirror.
+            // Leave/ordinary detach pin; a confirmed stop never does; an
+            // unconfirmed stop is UNKNOWN and follows the Profile with a
+            // `daemon status` pointer instead.
+            backendOverride: daemonResumeBackendOverride(exitHostStop),
+
+            ...(exitHostStop === undefined ? {} : { hostStop: exitHostStop }),
+          })
+        }
+        // The Direct Host's official profileContext names the profile for EVERY
+        // launch form, including the positional `dsh <name>` (see
+        // hostRunningProfile): the argv scrape alone would answer the pi-tui
+        // fallback there and hand the user a resume command for the wrong
+        // profile.
+        const profile = hostRunningProfile(ctx)
+        const resume = resumeCommand(profile, sessionId)
         return resume === undefined ? undefined : `${color.textDim('To resume this session:')} ${resume}`
       },
       exit,
+      // M6 UX PR2: the ONE explicit whole-Host stop, bound to the SAME
+      // process-local admin port the Settings follow-up uses. It runs ONLY for
+      // a confirmed verdict, after the terminal restore; the control plane's
+      // own pre/post proof is the ONLY success source, and the result feeds
+      // both the truthful hint and the exit code. A thrown call still records
+      // the truthful "not confirmed" state so the hint never claims a stop.
+      ...(profileDaemonAdmin === undefined
+        ? {}
+        : {
+            adminStop: async () => await profileDaemonAdmin!.run('stop'),
+            // RFL-017: the exit root publishes the ONE authoritative outcome
+            // (manager result AND every local refusal) to the same hint fact.
+            hostStopOutcome: (outcome) => { exitHostStop = outcome },
+          }),
     })
+    /**
+     * M6 UX PR1: the ONE exit-intent coordinator. It reads the live backend /
+     * exact Session scope / authoritative activity on EVERY request and
+     * confirmation (never a cached Host-running fact), opens the ONE
+     * Client-local choice when needed, and calls the exit controller only at
+     * final commit. Direct `unknown` protects a still-live in-process owner;
+     * Remote `unknown` refuses to pretend the Host is idle.
+     */
+    const exitIntent = createExitIntentCoordinator({
+      diag,
+      // The live facts are their own testable composition seam: the full
+      // Session scope (sessionless generation included), the Remote transport
+      // identity captured on EVERY path, the admission/shell facts and the
+      // official running status. Nothing is cached between calls.
+      facts: createExitIntentFacts({
+        backend: () => selectedRuntime.kind === 'direct' ? 'direct' : 'daemon',
+        scopes: sessionScope,
+        admissionPending: () => submission.composerHoldActive(),
+        shellRunning: () => localShell.isRunning(),
+        ...(selectedRuntime.kind === 'remote'
+          ? {
+            remote: {
+              running: (sessionId: string) => remoteSources?.sessionFacts.running(sessionId),
+              captureTransportToken: (sessionId: string) => remoteSources?.sessionFacts.captureTransportToken(sessionId),
+              isTransportTokenCurrent: (sessionId: string, token: unknown) =>
+                remoteSources?.sessionFacts.isTransportTokenCurrent(sessionId, token) === true,
+            },
+          }
+          : {}),
+        ...(selectedRuntime.kind === 'direct'
+          ? {
+            directAgentRunning: () => {
+              const agent = agentNow()
+              return agent === undefined ? undefined : agent.status === 'running'
+            },
+          }
+          : {}),
+        // M6 UX PR2: the whole-Host stop eligibility. The SYNC intent check decides
+        // whether to intercept at all (transient daemon→direct intent + daemon
+        // backend + the admin capability to actually run the stop). It is
+        // deliberately PERMISSIVE about readiness: a transiently stale mirror at
+        // exit must still reach the fresh read, which re-earns readiness.
+        hostStopIntentCurrent: () => selectedRuntime.kind === 'remote'
+          && backendExitTransition === 'daemon-to-direct'
+          && profileDaemonAdmin !== undefined,
+        // The close-time freshness re-check: it does NOT replace the fresh read
+        // (hostStopEligible does that before the verdict), but it catches the
+        // fresh result being invalidated DURING the close (a
+        // settings/document-updated or disconnect that leaves the config stale).
+        // An unready config must never COMMIT the Host stop.
+        hostStopReadinessCurrent: () => selectedRuntime.kind === 'remote'
+          && backend.config.configReadiness() === 'ready',
+        hostStopEligible: async () => {
+          if (selectedRuntime.kind !== 'remote') return false
+          if (backendExitTransition !== 'daemon-to-direct') return false
+          if (profileDaemonAdmin === undefined) return false
+          const config = backend.config
+          // The FRESH authoritative read: forces a new official settings read on
+          // Remote (or the live Host read on Direct), never just the snapshot.
+          const state = await config.backendStartupPreference.readFresh()
+          // The generation/revision evidence: only a current, ready config that
+          // still reads `direct` confirms the transition. A stale/unready read
+          // is NOT verified and must never authorize the Host stop.
+          if (config.configReadiness() !== 'ready') return false
+          return state?.backend === 'direct'
+        },
+      }),
+      commit: ({ workStopped, hostStopRequested }) => {
+        exitWorkStopped = workStopped
+        requestExit(hostStopRequested === true ? { hostStopRequested: true } : undefined)
+      },
+      presenter: () => surface.exitChoice,
+      stopCurrentWork: stopDaemonWorkForExit,
+    })
+    exitIntentDisposeRef = () => { exitIntent.dispose() }
+    // M6 UX PR1: a committed Session switch (A→B, A→B→A) retires an open
+    // Client choice immediately with zero business action — the selection can
+    // never act on a subject the surface already left.
+    {
+      const unsubscribeExitIntent = ownership.subscribeScopeInvalidation(() => { exitIntent.retireIfStale() })
+      if (lifecycleController.signal.aborted) {
+        unsubscribeExitIntent()
+      } else {
+        ctx.effect(function* () { yield unsubscribeExitIntent })
+      }
+    }
     // A pre-mount unload can happen during the initial resume/catalog awaits;
     // never register a full effect on the already-disposed fiber or fall into
     // the fatal startup path.
@@ -2596,6 +3811,10 @@ export function applyRunnerWithRuntime(
         generation: () => ownership.generation(),
         captureSubject: () => ownership.captureSubject(),
         transitionPending: () => ownership.gate.pending || ownership.barrier.inTransition,
+        awaitTransitionSettled: () => ownership.gate.whenSettled(),
+        beginNavigationIntent: () => ownership.gate.beginIntent(),
+        soleNavigationIntentPending: () => ownership.gate.canSettleIntentRecalls()
+          && !ownership.barrier.inTransition,
       },
       scope: {
         captureLive: () => sessionScope.captureLive(),
@@ -2611,8 +3830,9 @@ export function applyRunnerWithRuntime(
       },
       submissionRuntime: {
         withWriter: (scope, task) => submissionRuntime.withWriter(scope, task),
-        submitPrompt: (promptSubmission) => submissionRuntime.submitPrompt(promptSubmission),
+        submitPrompt: (promptSubmission, options) => submissionRuntime.submitPrompt(promptSubmission, options),
         deferQueueRecall: (recall) => submissionRuntime.deferQueueRecall(recall),
+        settleQueueRecalls: (committed) => submissionRuntime.settleQueueRecalls(committed),
         // M4 PR4: the runtime's OWN accepted-write read (a write that bypasses
         // the controller's FIFO still counts). Read at gesture time only.
         hasUnsettledClientWrite: () => submissionRuntime.hasUnsettledClientWrite(),
@@ -2651,8 +3871,21 @@ export function applyRunnerWithRuntime(
         get images() { return draftImages },
         get files() { return draftFiles },
       },
+      // The final fail-closed pasted-image delivery gate (the editor-side
+      // pre-clear admission is the normal one; this catches a bypass).
+      pendingPastedPath: (text) => pastedImageIntake.blocksDelivery(text),
       status: { sessionCwd: () => status.sessionCwd() },
-      surface: { refreshPendingInput: () => surface.refreshPendingInput() },
+      surface: {
+         refreshPendingInput: () => surface.refreshPendingInput(),
+         openWorkspaceChooserAfterRestore: () => {
+            status.updateWelcomeCard()
+            return command.openSessionBrowser?.({
+              addDirectory: true,
+              initialDirectoryEntry: true,
+              initialDirectoryPath: workspaceNextIntent.snapshot().displayPath,
+            })
+          },
+       },
       history: {
         persist: (record) => history.persist(record),
         persistAfterSession: (resolveSession, persist) => history.persistAfterSession(resolveSession, persist),
@@ -2668,8 +3901,10 @@ export function applyRunnerWithRuntime(
       },
       artifacts: { start: (name, agent) => artifacts.start(name, agent) },
       shell: {
-        run: (text, ackToken, endWrite) => localShell.run(text, ackToken, endWrite),
+        capturePlacement: () => localShell.capturePlacement(),
+        run: (text, ackToken, endWrite, placement) => localShell.run(text, ackToken, endWrite, placement),
         interrupt: () => localShell.interrupt(),
+        cancelRun: () => localShell.cancelRun(),
       },
       // PR3-B B2-5: the TSP renderer has no local-shell cards; the
       // SubmissionController refuses `!`/`!!` at its ORIGINAL shell-branch
@@ -2683,6 +3918,12 @@ export function applyRunnerWithRuntime(
       get supportsTuiBuiltinUi() { return !tspRendererActive },
       supportsModelPickerUi: () => surface.modelPresentation !== undefined,
       supportsPresetPickerUi: () => surface.presetPresentation !== undefined,
+      // PO-5E: the native `/acp` presenter, present only where the mounted TUI
+      // renderer negotiated its kinds (a PiTui Direct mount has no TSP overlay,
+      // so it never reports it). On the Direct backend the registered handler
+      // still refuses the Split-only operation explicitly; an unnegotiated TSP
+      // pane refuses before the handler.
+      supportsAcpPickerUi: () => surface.acpPresentation !== undefined,
        supportsSessionBrowserUi: () => surface.sessionBrowserPresentation !== undefined,
       // B3-A3: the ONE Task Center capability of the CURRENTLY mounted display
       // seam (PiTui = true, TSP = its negotiated kinds). Read live at the
@@ -2716,7 +3957,12 @@ export function applyRunnerWithRuntime(
           return runtime.withPromptAdmission(agent as Agent, hasImages, task)
         },
       },
-      requestExit,
+      // M6 PR-C C3: the Split-Client presence prerequisite for the steer/queue
+      // admission (absent on Direct).
+      ...(promptPresence === undefined ? {} : { ackPromptView: () => promptPresence.ackCurrentView() }),
+      // M6 UX PR1: the bare `exit` word uses the `plain` entry of the SAME
+      // exit-intent decision (it can never bypass a Busy Choice).
+      requestExit: () => exitIntent.request('plain'),
       isPlanActive: (agent) => projectedPlanActive(ctx.get('sessionProjections') as PlanProjectionLike | undefined, (agent as Agent).session) === true,
     })
 
@@ -2729,6 +3975,7 @@ export function applyRunnerWithRuntime(
       signal,
       diag,
       sessionArchive: backend.sessionArchive,
+      sessionMarkdown: backend.sessionMarkdown,
       clientCwd: cwd,
     })
     // M3 runner wiring (F-1): when the extension host service is mounted,
@@ -2748,6 +3995,55 @@ export function applyRunnerWithRuntime(
       ? ctx.get(PI_TUI_EXTENSIONS_SERVICE) as typeof extensionService
       : override.extensionService as typeof extensionService
     if (extensionService !== undefined) surface.attachExtensionHost(extensionService)
+    // Direct is its own Client logical seat: activate external PiTui `./tui`
+    // packages on THIS Host process's existing Context/Loader/package table.
+    // The owner belongs to this runner fiber (`ctx.effect` awaits its disposal)
+    // and never writes `cordis.patch.yml` or a Host plugin row.
+    if (override === undefined && extensionService !== undefined) {
+      const pluginPackages = ctx.get('pluginPackages' as never) as unknown as
+        import('./client-extensions/discovery.ts').CurrentClientPackageLookup | undefined
+      const loader = ctx.get('loader')
+      if (pluginPackages !== undefined && loader !== undefined) {
+        const owner = createClientExtensionMountOwner({
+          context: ctx,
+          loader,
+          pluginPackages,
+          config: backend.config.extensionConfigs,
+          // This module's own installed file is inside the profile tree, so
+          // Node's lookup order already anchors on the profile package table —
+          // never a guessed profile path or a second resolver.
+          parentURL: import.meta.url,
+          notifyReloadRequired: packageName => {
+            ;(extensionService as unknown as {
+              _advancedUiNotify?: (message: string, options?: { readonly type?: 'info' | 'error' }) => void
+            })._advancedUiNotify?.(`Client reload required: restart this Client to load ${packageName}`, { type: 'error' })
+          },
+          signal: lifecycleController.signal,
+          diag,
+        })
+        directClientExtensionOwner = owner
+        directClientExtensionReconcile = snapshot => {
+          runDetached('direct client extension inventory reconcile', () => owner.reconcile(snapshot), { diag })
+        }
+        ctx.effect(async () => {
+          return async () => {
+            directClientExtensionReconcile = undefined
+            if (directClientExtensionOwner === owner) directClientExtensionOwner = undefined
+            await owner.dispose()
+          }
+        }, 'direct client extension mount owner')
+        directClientExtensionActivation = (async () => {
+          try {
+            const snapshot = await backend.pluginManager.snapshot()
+            await owner.reconcile(snapshot)
+          } catch (error) {
+            // External UI packages are an additive Client capability: a failed
+            // inventory read never blocks the already-authoritative Direct TUI.
+            diag.warn('direct client extension activation failed', { error: safeErrorMessage(error) })
+          }
+        })()
+      }
+    }
     // The TUI is about to mount: the pre-mount status line must be gone
     // before the first frame (no stale scrollback line after mount).
     if (lifecycleController.signal.aborted) {
@@ -2770,14 +4066,42 @@ export function applyRunnerWithRuntime(
     // Built from the A5b owner objects plus the narrow runner lifetime
     // callbacks and the rewind/subagent Host-port groups that have no narrower
     // owner today; the mount below receives the produced adapter.
+    /**
+     * PR-Q: the ONE Queue manager controller (shared by PiTui and TSP). Every
+     * write it performs captures the owner/scope synchronously at the intent,
+     * enters the existing `withWriter` admission and settles with the existing
+     * WriteOutcome vocabulary. It owns no Host queue mirror and no renderer.
+     */
+    queueManager = new QueueManagerController({
+      reader: backend.pendingInputReader,
+      writer: backend.sessionWriter,
+      captureSessionId: () => ownership.currentSessionId(),
+      captureSubject: () => ownership.captureSubject(),
+      isSubjectCurrent: token => captureMatches(token as SessionSubject | undefined),
+      captureScope: () => sessionScope.captureLive(),
+      isScopeCurrent: scope => sessionScope.isCurrent(scope),
+      isViewing: () => viewer.isViewing(),
+      withWriter: (scope, task) => sessionRuntime.withWriter(scope, task),
+      beginClientWrite: () => submission.beginClientWrite(),
+      runOwned: (label, task) => { runOwned(label, task, { diag }) },
+      refreshPendingInput: () => surface.refreshPendingInput(),
+      notify: (message, kind) => surface.display.notify(message, kind),
+      dismissLocalSubmission: rpcId => submission.settleLocalSubmission(rpcId),
+      textOf: content => queueTextOf(content as readonly import('@deepseek-ai/dsh-llm').ContentBlock[]),
+    })
+    surface.attachQueueManager(queueManager)
     applicationEvents = createApplicationEvents({
       submission,
+      queueManager: {
+        open: (options) => { queueManager?.open(options) },
+      },
       viewer,
       surface,
       status,
       settings,
       client: clientActions,
       drafts: { get images() { return draftImages }, get files() { return draftFiles } },
+      pastedImageIntake,
       imageLimits: () => directImageLimits() as Parameters<typeof checkImageLimits>[2] | undefined,
       rewind: {
         // PR4 §4: the whole-log picker authority + the loadThrough detail
@@ -2839,7 +4163,9 @@ export function applyRunnerWithRuntime(
           sessionId: options?.sessionId ?? (() => agentNow()?.session.id),
         }),
         isCleanedUp: () => cleanedUp,
-        requestExit,
+        // M6 UX PR1: the keyboard exit path (`onExit`) is one entry of the SAME
+        // exit-intent decision; the final commit stays `requestExit` below.
+        requestExit: () => exitIntent.request('keyboard'),
         // PR4 §4: the application-event owner's live-agent face is
         // transport-neutral — the Remote branch has no Direct Agent, so the
         // identity falls back to the CURRENT owner's session id (the rewind
@@ -2903,6 +4229,20 @@ export function applyRunnerWithRuntime(
     const tspAttempt = tspRequested(process.env)
     if (tspAttempt) terminalOutput.suspend()
     try {
+      // PR-Q: ONE effective keymap instance for the TSP branch. It compiles the
+      // SAME action table + safe mode + persisted user bindings the PiTui
+      // manager uses, so conflicts, `false` and leader-only declarations are
+      // decided by the shared resolver instead of by a raw config read. The TSP
+      // renderer has no leader state machine, so a leader-only binding yields NO
+      // direct key (`keysFor` is empty) and the Dock truthfully paints plain
+      // `Manage` instead of a shortcut TSP cannot execute.
+      const tspQueueKeybindings = new HostKeybindingManager()
+      if (process.env.DSH_PI_TUI_SAFE_KEYBINDINGS === '1') {
+        tspQueueKeybindings.setSafeMode(true)
+      } else {
+        tspQueueKeybindings.setUserConfiguration(parseUserKeybindings(tuiSettings?.get().keybindings))
+      }
+      const queueOpenKeys = (): readonly string[] => tspQueueKeybindings.keysFor('app.queue.open')
       rendererMount = await selectRendererMount({
         log: (message, fields) => diag.info(message, fields),
         // TSP-7 PR-D: the boot-time footer projection source. The resolver is
@@ -2911,8 +4251,20 @@ export function applyRunnerWithRuntime(
         // readiness-gated ConfigPort read.
         resolveFooterConfig: () => settings.resolveTspFooterConfig(),
         connectTsp: productionTspConnector({
-          cwd,
-          requestExit: () => requestExit(),
+          // R13: no boot-time cwd: the production renderer's tool-path root is
+          // the CURRENT formally committed display-subject workspace, sampled
+          // through its bound status reader — never this Client launch cwd.
+          displayState,
+          // PR-Q: the SAME effective `app.queue.open` action the PiTui keymap
+          // compiles (definitions + persisted user overrides + safe mode). The
+          // TSP renderer owns no keymap; this is the one live read its raw key
+          // stream and its Dock label consume.
+          queueOpenKeys,
+          requestExit: () => exitIntent.request('keyboard'),
+          // The pre-bind emergency Ctrl+C and the fatal fallback use the FINAL
+          // exit controller directly: there is no mounted choice surface yet,
+          // and a startup emergency must never wait for one.
+          requestImmediateExit: () => requestExit(),
           onFatal: rendererOnFatal,
           log: (message, fields) => diag.info(message, fields),
           logError: (message, fields) => diag.error(message, fields),
@@ -2973,14 +4325,38 @@ export function applyRunnerWithRuntime(
     // (`supportsLocalShellCards`, `supportsTuiBuiltinUi`) must report the TSP
     // renderer from the first bound key.
     tspRendererActive = rendererMount !== undefined
+    // Split-Client PiTUI ONLY: bind the ROOT interaction delivery to this
+    // application's ONE committed-Session authority. `rendererMount !==
+    // undefined` is the TSP branch, whose native modal seat keeps its own
+    // admission and MUST NOT be upgraded by the new gate; the unbound delivery
+    // therefore preserves its pre-G567 behavior. The binding is installed
+    // before `surface.attachInteraction()` registers the providers.
+    const interactionDeliveryBinding = override !== undefined
+      && rendererMount === undefined
+      && interactionDelivery !== undefined
+      ? interactionDelivery.bindCommittedSession(
+          () => ownership.currentSessionId(),
+          listener => ownership.subscribeScopeInvalidation(listener),
+        )
+      : undefined
+    if (interactionDeliveryBinding !== undefined) {
+      ctx.effect(function* () { yield interactionDeliveryBinding })
+    }
     // A4: mount through the surface owner. The surface builds the surface-local
     // option wiring (image loader, history-search binding, clipboard/link
     // capabilities, extension registries + input routes, resize/workflow hooks)
     // from these narrow injected capabilities and owns the mounted TuiApp from
     // here on.
+    // Direct external `./tui` entries must exist before the first surface
+    // attach; later refreshes reconcile through the Plugin Manager callback.
+    if (directClientExtensionActivation !== undefined) await directClientExtensionActivation
     try {
       surface.start({
-      events: applicationEvents.events,
+      // M6 UX PR1: the LIVE authoritative activity fact for the renderer-level
+      // exit key rule. It is a read, never a cache, and is shared by PiTui and
+      // the TSP input binding.
+      events: { ...applicationEvents.events, sessionActivity: () => exitIntent.activity() },
+      terminalPastedPath: pastedImageIntake,
       ...(rendererMount === undefined ? {} : { renderer: rendererMount }),
       workspaceRoot: cwd,
       // The structural icon palette: read ONCE at startup from the persisted
@@ -2988,15 +4364,11 @@ export function applyRunnerWithRuntime(
       // write path) — never a deep settings read per render.
       iconStyle: iconStyleOf(tuiSettings?.get().iconStyle),
       displayState,
-      // Ctrl+R input-history search: the runner owns the IO (the file-backed
-      // source + the known-cwd identity map), the surface owns the panel
-      // lifecycle (plan §27 — TuiApp never touches the filesystem).
-      historySearchSource: new FileHistorySearchSource({
-        dshHome: dshHome(process.env),
-        // A RESOLVER, not a snapshot: the all-scope search must see the
-        // newest known cwds (sessions created/switched after startup).
-        knownCwds: () => history.knownCwds(),
-      }),
+      // Ctrl+R input-history search: the runner owns the IO (the ONE
+      // file-backed source + the known-cwd identity map), the surface owns the
+      // panel lifecycle (plan §27 — TuiApp never touches the filesystem). The
+      // SAME source instance also backs the cold session-recall reader above.
+      historySearchSource,
       // The durable-image read (plan M8/M10): history images resolve through
       // `ctx.attachments.readImage` only — never the draft store. The read
       // callback is a late-bound service access (AGENTS.md: never a bare
@@ -3071,7 +4443,7 @@ export function applyRunnerWithRuntime(
           }
           return remoteSources.attachments.readDurableImage(
             subject.sessionId,
-            ref.attachmentId,
+            ref,
             subject.transportToken as RemoteTransportLifetime,
           )
         }
@@ -3079,7 +4451,14 @@ export function applyRunnerWithRuntime(
         if (attachments === undefined) {
           throw new ImageLoadError('Image attachments are unavailable in this deployment.')
         }
-        return attachments.readImage(ref as never) as Promise<{ ref: unknown; data: Uint8Array }>
+        // The Direct seam is the official AttachmentStore: brand the opaque,
+        // already-verified id and pass the FULL reference (the store verifies
+        // id/mediaType/bytes/width/height, so a partial object must never be
+        // synthesized here).
+        return attachments.readImage({
+          ...ref,
+          attachmentId: ref.attachmentId as AttachmentId,
+        } satisfies ImageAttachmentRef)
       },
       present,
       sessionCwd: () => status.sessionCwd(),
@@ -3132,6 +4511,7 @@ export function applyRunnerWithRuntime(
       // Headless-test seam (M3-4 PR3 image L6): the live image draft store.
       // Production paths never read it.
       draftImageStoreForTest: draftImages,
+      draftFileStoreForTest: draftFiles,
       // Image UX PR1: the composer preview reads the SAME store through a
       // READ-ONLY projection. The Store owns the bytes and the bounded
       // undo-retention budget; the host fork Editor owns the real Undo
@@ -3212,9 +4592,9 @@ export function applyRunnerWithRuntime(
     // the TuiApp reference (the surface owner keeps the lifetime); the TSP
     // renderer branch has NO TuiApp (the slot stays undefined: command
     // registrations skip their completions install, input-gated execution
-    // paths never run) — every PiTui-only step below (the
+    // paths never run) — the PiTui-only steps in the block below (the
     // keymap/theme/footer boot application, the plugin-keybinding sync, the
-    // extension chrome seams, focus reporting) is skipped for it, exactly as
+    // extension chrome seams, focus reporting) are skipped for it, exactly as
     // the A0 audit classified them (display-preference chrome, never business
     // state: Tern owns its own theme, keymap and chrome).
     const tspRenderer = rendererMount !== undefined
@@ -3256,16 +4636,14 @@ export function applyRunnerWithRuntime(
       // are PiTui chrome; Tern owns the equivalent presentation natively.
       settings.applyBootDisplay()
       settings.applyFooterSettings()
-      // The editor recall seed is PiTui-only on this branch (the read-only
-      // renderer has no editor); the JSONL history store still accumulates.
-      // A startup RESUME publishes its Session owner BEFORE this mount and its
-      // hydration reseeds ↑ from that Session's own rows, so seeding the launch
-      // cwd's whole history here would expose every earlier Session's rows — and
-      // let them be resubmitted into this one — for as long as that reseed takes
-      // (arbitrarily long on Remote, where the read is awaited). A fresh start has
-      // no owner yet, so the boot recall is exactly what it is for.
-      if (ownership.currentSessionId() === undefined) history.activateBootRecall()
     }
+    // The editor recall seed is a formal boot fact of the mounted surface, not
+    // PiTui-only chrome: PiTui and TSP share the same InputHistory owner and
+    // display seam. A startup RESUME already published its Session owner before
+    // this point, so the guard keeps the cwd pool out of a live-session reseed
+    // window. A fresh/sessionless start has no owner and receives the launch
+    // cwd's recall seed.
+    if (ownership.currentSessionId() === undefined) history.activateBootRecall()
     // Fresh/deferred startup title: no session yet — cwd identity only. The
     // terminal-local cwd is published alongside it (OSC 7; no-op off Tern).
     status.refreshTerminalTitle()
@@ -3335,19 +4713,6 @@ export function applyRunnerWithRuntime(
           : agents.get(SessionId(sessionId)) as Agent | undefined
         let settledViewChildId: string | undefined
         let refreshAgents = false
-        const selectionEvent = event as unknown as { type?: unknown; data?: unknown }
-        if (selectionEvent.type === 'model/selection') {
-          if (runtimeAgent !== undefined) directRuntime()?.modelSelections.observeSelectionEvent(runtimeAgent, selectionEvent)
-        } else if (event.type === 'request/header' && runtimeAgent !== undefined) {
-          const data = event.data as unknown
-          const header = typeof data === 'object' && data !== null
-            ? (data as { header?: unknown }).header
-            : undefined
-          const raw = rawSelectionFromRequestHeader(header)
-          if (raw !== undefined) {
-            directRuntime()?.modelSelections.consumeSelection(runtimeAgent, raw.provider, raw.model, raw.reasoningEffort)
-          }
-        }
         if (event.type === 'tool/call') {
           presentation.setToolArgs(event.data.callId, typeof event.data.arguments === 'string'
             ? event.data.arguments
@@ -3399,6 +4764,16 @@ export function applyRunnerWithRuntime(
       queueTextOf: content => queueTextOf(content as readonly import('@deepseek-ai/dsh-llm').ContentBlock[]),
       exitView: () => { viewer.exitView() },
       refreshStatusCheap: () => status.refresh(),
+      // M6-1 F8: a policy knob event revokes the observation's committed
+      // snapshots and starts ONE controlled re-read of the official Host
+      // store (never a local event-log fold).
+      invalidateSessionPolicy: sessionId => {
+        // Revoke only. The SAME event tick continues with the routing's cheap
+        // status refresh, whose `readSnapshot` starts the one controlled read
+        // (or an open Settings repaint already did) — an explicit refresh here
+        // would double-read and supersede the caller's own read.
+        sessionPolicyObservation.invalidate(sessionId)
+      },
       refreshStatusAndWelcome: () => {
         status.refresh()
         status.updateWelcomeCard()
@@ -3456,6 +4831,18 @@ export function applyRunnerWithRuntime(
       settleLocalSubmitAck: (reason) => submission.settleLocalSubmitAck(reason),
       markSubmitLatency: (sessionId, phase) => { submission.markLatency(sessionId, phase) },
       observeDurableSubmission: (rpcId) => submission.observeDurable(rpcId),
+      // PR1: the Direct pending-echo terminal reconciliation. The official
+      // receipt/index/seq lifecycle is mapped onto the Direct ledger ONLY;
+      // the Remote branch consumes the official Client
+      // `pendingSubmissions` source, so its routing answers false and no
+      // second Direct-style observer ever runs beside it.
+      observeDirectPendingSubmissionEvent: (event, sessionId) => {
+        if (remoteSources !== undefined) return false
+        if (event.type !== 'agent/inbox/spliced'
+          && event.type !== 'request/context'
+          && event.type !== 'turn/end') return false
+        return submission.observeDirectHostEvent(event, sessionId)
+      },
       markContextDirty: () => status.markContextDirty(),
       refreshContextMeasurement: (reason) => status.refreshContextMeasurement(reason),
       // Bound late: these helpers are declared AFTER the startup calls that
@@ -3562,6 +4949,10 @@ export function applyRunnerWithRuntime(
           subscribe: (listener) => remoteSources.task.subscribeJobs(() => listener({ type: 'state' })),
         },
       taskRead: taskSource.taskRead,
+      // FR2: the READ-ONLY Team board of the exact captured Root Session. The
+      // board is an official `agentTeam` projection read, never a Team write
+      // (the `/model` Team mode keeps the ONE write, FR1).
+      teamBoard: backend.teamBoard,
     }, {
       diag,
       isCleanedUp: () => cleanedUp,
@@ -3621,33 +5012,39 @@ export function applyRunnerWithRuntime(
           sessionRuntime.withWriter(scope, task),
         withPromptAdmission: <T>(scope: LiveSessionScope, line: string, task: () => Promise<T>): Promise<T> =>
           command.runner().withPromptAdmission(scope, line, task),
+        // M6 PR-C C3: the Split-Client presence prerequisite (absent on
+        // Direct) — every ordinary/queued prompt admission awaits the current
+        // view's Host ACK before this Client starts its own new Turn.
+        ...(promptPresence === undefined ? {} : { ackPromptView: () => promptPresence.ackCurrentView() }),
         isDisposed: () => cleanedUp,
         isScopeCurrent: (scope) => sessionScope.isCurrent(scope),
+        // PR2: the live composer hold — every restore/merge of the hold's
+        // own text is a no-op (the draft never left the editor).
+        composerHoldActive: () => submission.composerHoldActive(),
         // PR3-B B2: the submission runtime's editor hooks are reachable on
         // BOTH renderers now that the TSP pane submits. They must go through the
         // renderer-neutral composer projection — the PiTui-only `app` binding is
         // undefined on the TSP branch (the B2 review's newly-reachable-consumer
         // requirement).
+        restoreSubmissionDraft: (text, ownerRequestId, originSubject) => {
+          submission.restoreSubmissionDraft(text, ownerRequestId, originSubject)
+        },
+        ownsComposerHold: (requestId) => submission.ownsComposerHold(requestId),
         mergeDraftIntoEditor: (text) => {
           const merged = mergeDraft(surface.composer.getDraft(), text)
           surface.composer.setEditorText(merged)
           return merged === text
         },
-        restoreStaleDraftIntoEditor: (text, capturedSubject) => {
-          // PR3-B §7.3 (F2): suppress ONLY when BOTH facts hold — the OWNER
-          // the submission's subject pinned was genuinely REPLACED (the
-          // ownership core's opaque-ref authority; a same-owner generation
-          // invalidation — e.g. a failed switch kept the old owner — is NOT
-          // a replacement) AND this renderer drops drafts at committed
-          // switches (TSP; its publication already cleared the text). Every
-          // other stale shape merges exactly like the ordinary restore.
+        restoreStaleDraftIntoEditor: (text, capturedSubject, ownerRequestId) => {
+          // PR3-B §7.3 (F2) keeps the suppression policy; PR2/RFL015 adds the
+          // owner proof: the owner-aware submission restore is the ONE seam —
+          // a foreign live hold's document is never written or rewritten and
+          // the restore is deferred to that hold's settlement.
           if (!surface.display.retainsStaleDraftRestore()
             && ownership.subjectAuthority.ownerReplaced(capturedSubject as SessionSubject | undefined)) {
             return 'dropped'
           }
-          const merged = mergeDraft(surface.composer.getDraft(), text)
-          surface.composer.setEditorText(merged)
-          return merged === text ? 'merged-verbatim' : 'merged'
+          return submission.restoreStaleDraftIntoEditor(text, capturedSubject, ownerRequestId)
         },
         consumeDraftAttachments: (text) => consumeDraftAttachments(text, draftImages, draftFiles),
         markDispatch: (sessionId) => submission.markDispatch(sessionId),
@@ -3689,7 +5086,8 @@ export function applyRunnerWithRuntime(
           // Client contract. Both branches share canonicalization + strict
           // placeholder semantics, not one preparation authority.
           : prepareRemotePrompt(text, requestId),
-        prompt: (sessionId, message) => backend.sessionWriter.prompt(sessionId, message, 'queue'),
+        prompt: (sessionId, message, options) =>
+          backend.sessionWriter.prompt(sessionId, message, 'queue', options),
       },
     })
     // The startup surface: a resumed session initializes everything; the
@@ -3711,6 +5109,10 @@ export function applyRunnerWithRuntime(
         status.refresh()
         status.refreshTerminalTitle()
         status.refreshTerminalCwd()
+        runDetached('first workspace preflight', async () => {
+          await sessionRuntime.preflightWorkspace()
+          status.updateWelcomeCard()
+        }, { diag, sessionId: () => ownership.currentSessionId() })
       }
     } else if (startupAgent !== undefined) {
       // The initial owner's catalog was prefetched before mount: no
@@ -3721,6 +5123,10 @@ export function applyRunnerWithRuntime(
       status.refresh()
       status.refreshTerminalTitle()
       status.refreshTerminalCwd()
+      runDetached('first workspace preflight', async () => {
+        await sessionRuntime.preflightWorkspace()
+        status.updateWelcomeCard()
+      }, { diag, sessionId: () => ownership.currentSessionId() })
     }
     // Command registration is sessionless: it must run on BOTH startup
     // surfaces (resume path registers inside initLiveSession; the deferred
@@ -3728,6 +5134,39 @@ export function applyRunnerWithRuntime(
     // The pre-mount snapshot installs SYNCHRONOUSLY inside registration —
     // the first terminal input cannot arrive before this call stack unwinds.
     command.register({ snapshot: initialSnapshot, skills: initialSkills })
+    // Remote sessionless startup: the FIRST standing read waits for the Host
+    // Workspace preflight to commit the confirmed WorkspaceId, then runs the
+    // SAME coordinator refresh the Sessions directory actions use. Without a
+    // confirmed Workspace the read stays a local incomplete projection (the
+    // command surface never sends the Client cwd to the Host).
+    if (remoteSources !== undefined && ownership.currentSessionId() === undefined) {
+      runOwned('sessionless standing catalog refresh', async () => {
+        await sessionRuntime.awaitWorkspacePreflight()
+        // A Session committed while the preflight awaited owns the live
+        // catalog: the standing read must never replace it.
+        if (ownership.currentSessionId() !== undefined) return undefined
+        // The automatic sessionless read is admitted only for a confirmed
+        // Host-issued WorkspaceId. Without one the Welcome/Workspace UX owns
+        // the prompt, and this automatic refresh must not paint a stale
+        // selection notice against a surface that is legitimately unselected.
+        if (workspaceNextIntent.snapshot().intent?.kind !== 'workspace-id') return undefined
+        return command.runner().refreshStandingCatalog(
+          command.runner().effectivePresetId,
+          'invalidation',
+        )
+      }, {
+        diag,
+        sessionId: () => ownership.currentSessionId(),
+        onResult: (outcome) => {
+          if (outcome !== undefined && outcome.kind === 'applied' && outcome.notice !== undefined) {
+            surface.display.notify(outcome.notice, 'error')
+          }
+        },
+        onError: (error) => {
+          diag.warn('sessionless standing catalog refresh failed', { error: safeErrorMessage(error) })
+        },
+      })
+    }
     // PR-C (TSP-7): the `/model` UI entry is armed the moment its registration
     // settled and BEFORE `bindRendererInput()` (the end of this startup) can
     // deliver the first bound input. The entry runs the SAME registered
@@ -3739,7 +5178,81 @@ export function applyRunnerWithRuntime(
         sessionId: () => ownership.currentSessionId(),
       })
     }
+    // TSP-7 PR-G: the quick entry rides the SAME registered command surface, the
+    // SAME owned-task wiring and the same arming window (before
+    // `bindRendererInput()` can deliver the first bound click).
+    openRegisteredModelQuick = () => {
+      runOwned('model quick UI entry', () => command.openModelQuick(), {
+        diag,
+        sessionId: () => ownership.currentSessionId(),
+      })
+    }
     modelPickerAvailableOwner = () => command.modelPickerAvailable()
+    // TSP-7 Welcome D: the Welcome's Resume action rides the SAME registered
+    // `/sessions` command surface, the SAME owned-task wiring and the same
+    // arming window (before `bindRendererInput()` can deliver the first bound
+    // click). The command owns the listing, the switch and every notice; this
+    // entry only opens it.
+    openRegisteredSessionBrowser = (request) => {
+      runOwned('welcome session browser UI entry', () => command.openSessionBrowser(request), {
+        diag,
+        sessionId: () => ownership.currentSessionId(),
+      })
+    }
+    sessionBrowserAvailableOwner = () => command.sessionBrowserAvailable()
+    // Mouse PR4: the TSP native Tasks status segment's pointer entry rides the
+    // SAME registered `/tasks` command surface and the SAME owned-task wiring,
+    // armed in the same window (before `bindRendererInput()` can deliver the
+    // first bound action). The command owns the Session admission, the
+    // capability refusal and the Task Runtime opener; this entry only opens
+    // it. It never injects a `/tasks` line into any editor.
+    openRegisteredTasksBrowser = () => {
+      runOwned('tasks browser UI entry', () => command.openTasksBrowserUi(), {
+        diag,
+        sessionId: () => ownership.currentSessionId(),
+      })
+    }
+    tasksBrowserAvailableOwner = () => command.tasksBrowserUiAvailable()
+    // Split-Client only: the modal-safe Alt+W entry. It commits the root
+    // presentation-only hold, withdraws the local modal seat, then opens the
+    // EXISTING registered `/sessions` Browser through the SAME command action.
+    // No second listing, no Host cancel/answer, no fallback when the Host owns
+    // the name (the command's own availability answers false).
+    if (interactionDelivery !== undefined && rendererMount === undefined) {
+      const delivery = interactionDelivery
+      surface.setNoAnswerNavigation({
+        available: () => command.sessionBrowserAvailable(),
+        begin: () => {
+          const hold = delivery.beginNavigationHold()
+          try {
+            surface.withdrawPresentationForNavigation()
+          } catch (error) {
+            hold.release()
+            throw error
+          }
+          return () => { hold.release() }
+        },
+        open: () => { command.openSessionBrowser() },
+      })
+    }
+    // M5-U-E: the PiTUI Host Editor `←←` gesture's ONLY composition entry,
+    // installed under the same post-registration window as the surfaces above.
+    // The control carries no listing, Session identity or Screen: availability
+    // is the registered `/sessions` entry's own fact, currentness is the A3
+    // scope authority's synchronous capture, and `openAll` is the SAME
+    // registered command body with the frozen All initial browse scope. A TSP
+    // mount (`rendererMount !== undefined`) has no TuiApp and keeps its native
+    // input untouched.
+    if (rendererMount === undefined) {
+      surface.setEditorWorkspaceEntry({
+        available: () => command.sessionBrowserAvailable(),
+        captureIsCurrent: () => {
+          const token = sessionScope.capture()
+          return () => sessionScope.isCurrent(token)
+        },
+        openAll: () => { command.openSessionBrowser('all') },
+      })
+    }
     // PR4 §2.2: the DIRECT branch's Host command catalog arrives through the
     // pre-mount prefetch above; the REMOTE branch has no Direct agent to
     // prefetch, so a RESUMED session installs its authoritative Host catalog
@@ -3758,9 +5271,40 @@ export function applyRunnerWithRuntime(
         }
       }
     }
+    // M6 compatible-cross-build UX: ONE non-blocking info notice on the
+    // INITIAL physical Surface mount of a Client that authenticated a Host
+    // with a different PiTui build. It runs BEFORE every startup notice path
+    // below — including the CLI Session Browser admission — so any real
+    // startup error/notice replaces it in the PiTui single notify slot.
+    if (compatibleOtherBuild && startupSettlement?.authenticatedBuilds?.initialSurface === true) {
+      surface.display.notify(COMPATIBLE_OTHER_BUILD_NOTICE, 'info')
+    }
+    // CLI startup Browser: the ONE admission AFTER `command.register(...)` and
+    // BEFORE the first `bindRendererInput()`. The request is consumed exactly
+    // once; the opener resolves on presenter/lease admission, never on the
+    // list/search content. A refusal is reported once and never retried.
+    if (startupSessionBrowserRequest !== undefined) {
+      const request = startupSessionBrowserRequest
+      startupSessionBrowserRequest = undefined
+      let refusal: string | undefined
+      try {
+        const opened = await command.openStartupSessionBrowser({ scope: 'all', initialQuery: request.initialQuery, directMatch: request.directMatch })
+        if (opened.kind === 'error') refusal = opened.text
+      } catch (error) {
+        refusal = safeErrorMessage(error)
+        diag.warn('startup session browser failed', { error: refusal })
+      }
+      if (refusal !== undefined && refusal !== '') {
+        surface.display.notify(`session browser unavailable: ${refusal}`, 'error')
+      }
+    }
     if (surfaceNotice !== undefined) {
       surface.display.notify(surfaceNotice, 'error')
       surfaceNotice = undefined
+    }
+    if (startupLaunchNotice !== undefined) {
+      surface.display.notify(startupLaunchNotice.text, startupLaunchNotice.kind)
+      startupLaunchNotice = undefined
     }
     if (resumeFailure !== undefined) {
       surface.display.notify(resumeFailure, 'error')

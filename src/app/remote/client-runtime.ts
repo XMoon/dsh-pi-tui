@@ -38,17 +38,22 @@ import commandsRemote from '@deepseek-ai/dsh-commands/remote'
 import subagentsRemote from '@deepseek-ai/dsh-subagent/remote'
 import agentPresetsRemote from '@deepseek-ai/dsh-agent-preset-registry/remote'
 import pluginManagerRemote from '@deepseek-ai/dsh-plugin-manager/remote'
+import mcpManagerRemote from '@deepseek-ai/dsh-mcp-manager/remote'
 import permissionPresetsRemote from '@deepseek-ai/dsh-permission-presets/remote'
 import llmRemote from '@deepseek-ai/dsh-llm/remote'
 import sessionRemote from '@deepseek-ai/dsh-api-session-controller/remote'
 import jobRemote from '@deepseek-ai/dsh-api-job-controller/remote'
 import settingsRemote from '@deepseek-ai/dsh-api-settings-controller/remote'
+import accountRemote from '@deepseek-ai/dsh-deepseek-account/remote'
 import userQuestionsRemote from '@deepseek-ai/dsh-user-questions/remote'
 import fileUploadsRemote from '@deepseek-ai/dsh-client-file-upload/remote'
 import workspaceFilesRemote from '@deepseek-ai/dsh-api-workspace-files/remote'
+import workspaceRemote from '@deepseek-ai/dsh-api-workspace-controller/remote'
+import scheduleRemote from '@deepseek-ai/dsh-schedule/remote'
+import agentTeamsRemote from '@deepseek-ai/dsh-agent-team/remote'
+import cuaRemote from '@deepseek-ai/dsh-cua/remote'
 import { PI_TUI_CLIENT_CONTRIBUTION } from '../../runtime/remote/pi-tui-remote-contribution.ts'
 import { mergeCause } from './dispose-cause.ts'
-import type { InProcessHostCarrier } from './host-runtime.ts'
 
 type TypertClientModule = typeof typertRegistryClient
 type ConnectionClientModule = typeof import('@deepseek-ai/dsh-client-connection/client')
@@ -331,20 +336,47 @@ function freezeOfficialClientModules(captured: Map<string, unknown>): OfficialCl
   return Object.freeze(modules)
 }
 
-/** Explicit generated `/remote` contributions (§2.4.2), never the aggregate. */
-const REMOTE_CONTRIBUTIONS = [
+/** Explicit generated `/remote` contributions (§2.4.2), never the aggregate.
+ *  Exported (module-internal seam, not a package export) so the L5 suite can
+ *  prove these two frozen tables agree package-by-package and that the
+ *  six-bundle Client list stays exactly six. */
+export const REMOTE_CONTRIBUTIONS = [
   sessionRemote,
   jobRemote,
   commandsRemote,
   subagentsRemote,
   agentPresetsRemote,
   pluginManagerRemote,
+  // The official generated `mcpManager` management namespace (FR3): the ONE
+  // Host MCP manager's roster stream, probe and restart. It publishes the
+  // Remote face of the shared Host row the bundle mounts; this Client mounts
+  // no MCP server, client or status store of its own.
+  mcpManagerRemote,
   settingsRemote,
+  accountRemote,
   permissionPresetsRemote,
   llmRemote,
   fileUploadsRemote,
   userQuestionsRemote,
   workspaceFilesRemote,
+  // The official generated `workspace` namespace (the Host Workspace
+  // Controller's Remote face). It supplies `ctx.remote.workspace.create`/
+  // `follow` and nothing else: this Client mounts no Workspace model, store or
+  // UI, so no Client-side Workspace state exists to keep current.
+  workspaceRemote,
+  // The official generated `schedule` namespace (S5-PR4). The Host-only
+  // profile already mounts the ONE `@deepseek-ai/dsh-schedule` row; this
+  // contribution only publishes its Remote face to the authenticated Client,
+  // and `schedule/changed` is already in the forwarded-event allowlist.
+  scheduleRemote,
+  // The official generated `agentTeams` namespace (FR1). The base Host already
+  // mounts the ONE Team service; this contribution only publishes its
+  // Root-only `agentTeams/setEnabled` Remote face to the authenticated Client.
+  agentTeamsRemote,
+  // PR-5/MAC-09 v2: the official generated `cuaAccess` Remote face
+  // (system/applications/PTC/requests). The Host provider remains the only
+  // permission authority; this contribution only publishes its Client face.
+  cuaRemote,
 ] as const
 
 /**
@@ -354,19 +386,25 @@ const REMOTE_CONTRIBUTIONS = [
  * statically imported source-tree copy; both channels produce the one table
  * `mountRemoteClientDomains` mounts.
  */
-const REMOTE_CONTRIBUTION_SPECIFIERS = [
+export const REMOTE_CONTRIBUTION_SPECIFIERS = [
   '@deepseek-ai/dsh-api-session-controller/remote',
   '@deepseek-ai/dsh-api-job-controller/remote',
   '@deepseek-ai/dsh-commands/remote',
   '@deepseek-ai/dsh-subagent/remote',
   '@deepseek-ai/dsh-agent-preset-registry/remote',
   '@deepseek-ai/dsh-plugin-manager/remote',
+  '@deepseek-ai/dsh-mcp-manager/remote',
   '@deepseek-ai/dsh-api-settings-controller/remote',
+  '@deepseek-ai/dsh-deepseek-account/remote',
   '@deepseek-ai/dsh-permission-presets/remote',
   '@deepseek-ai/dsh-llm/remote',
   '@deepseek-ai/dsh-client-file-upload/remote',
   '@deepseek-ai/dsh-user-questions/remote',
   '@deepseek-ai/dsh-api-workspace-files/remote',
+  '@deepseek-ai/dsh-api-workspace-controller/remote',
+  '@deepseek-ai/dsh-schedule/remote',
+  '@deepseek-ai/dsh-agent-team/remote',
+  '@deepseek-ai/dsh-cua/remote',
 ] as const
 
 /** The official Client-side modules and generated `/remote` contributions one
@@ -499,23 +537,6 @@ export interface MountRemoteClientDomainsOptions {
   readonly signal?: AbortSignal
 }
 
-/** The composed official Client runtime. Not exported from the package root. */
-export interface RemoteClientRuntime {
-  readonly context: Context
-  readonly connection: ConnectionHandle
-  readonly sessions: ISessions
-  readonly jobs: IJobs
-  readonly remote: ClientRemote
-  dispose(): Promise<void>
-}
-
-export interface RemoteClientRuntimeOptions {
-  /** Explicit in-process transport from the composed Host runtime. */
-  readonly carrier: InProcessHostCarrier
-  /** Lifecycle signal; aborting rejects the initial-readiness wait. */
-  readonly signal?: AbortSignal
-}
-
 /**
  * Reverse-dispose the recorded `/remote` contribution disposers. Per-step
  * error isolation: one rejecting disposer cannot truncate the remaining
@@ -570,7 +591,7 @@ async function shutdownDomainState(state: RemoteClientDomainState): Promise<unkn
 
 /**
  * Mount the official Client Domain prerequisites on the caller's
- * ALREADY-AUTHENTICATED Client `Context`: the twelve generated `/remote`
+ * ALREADY-AUTHENTICATED Client `Context`: the thirteen generated `/remote`
  * contributions, the private pi-tui contribution, the official fileUpload
  * Client, then the official Session Client (which registers the `agent`
  * `typert.contexts` resolver). It deliberately does NOT wait for a Connection
@@ -627,10 +648,11 @@ export async function mountRemoteClientDomainPrerequisites(
     // The private pi-tui contribution: mounted explicitly, AFTER the official
     // generated contributions and deliberately kept separate from that list.
     // It is the package's ONE contribution (rc.2 admits exactly one per
-    // package), carrying BOTH private descriptors — the
+    // package), carrying every private descriptor — the
     // `piTuiFileReferences` augmentation (the official `fileReferences`
-    // namespace stays mounted and authoritative for bare queries) and the
-    // `piTuiTerminalProgress` status stream.
+    // namespace stays mounted and authoritative for bare queries), the
+    // `piTuiTerminalProgress` status stream, the `piTuiWebAccess` official
+    // Web frontend toggle and the `piTuiSkills` standing/invalidation seam.
     state.contributionDisposers.push(await remote.$mount(PI_TUI_CLIENT_CONTRIBUTION))
     // Domain Clients: fileUpload before Sessions is contractual (the Session
     // Client injects `fileUpload`). Each fiber is assigned BEFORE it is
@@ -718,134 +740,6 @@ export async function mountRemoteClientDomains(
 ): Promise<MountedRemoteClientDomains> {
   const prerequisites = await mountRemoteClientDomainPrerequisites(options)
   return await prerequisites.complete(options.signal === undefined ? {} : { signal: options.signal })
-}
-
-/**
- * Compose one fresh official Client `Context` over the M3 in-process carrier:
- * typert -> Connection (explicit transport) -> Gateway -> the shared Domain
- * mount ({@link mountRemoteClientDomains}, which owns the `/remote`
- * contributions and the fileUpload -> Sessions -> Jobs plugins) -> initial
- * readiness. On construction failure the partial composition unwinds
- * immediately; the loader shim is never active during plugin execution.
- */
-export async function createRemoteClientRuntime(options: RemoteClientRuntimeOptions): Promise<RemoteClientRuntime> {
-  const modules = await loadOfficialClientModulesOnce()
-  const { carrier } = options
-
-  const context = new Context()
-  let typertFiber: Fiber | undefined
-  let connectionFiber: Fiber | undefined
-  let gatewayFiber: Fiber | undefined
-  let domains: MountedRemoteClientDomains | undefined
-  let disposed = false
-
-  /**
-   * The frozen §16 shutdown sequence: the shared Domain mount (Jobs -> Sessions
-   * -> fileUpload -> `/remote` contributions reverse), Gateway/Connection/
-   * Typert (reverse), then the Client root. Unwinding a partial composition
-   * runs the SAME order over whatever subset exists.
-   *
-   * A Domain teardown failure is collected (never allowed to truncate the
-   * remaining cleanup). Cordis contains unload-disposer failures inside
-   * `fiber.dispose()` (they are logged there, never propagated), so the
-   * remaining fiber steps cannot reject.
-   *
-   * @returns the collected cleanup errors.
-   */
-  const shutdown = async (): Promise<unknown[]> => {
-    const errors: unknown[] = []
-    try {
-      await domains?.dispose()
-    } catch (error) {
-      errors.push(error)
-    }
-    for (const fiber of [gatewayFiber, connectionFiber, typertFiber]) {
-      await fiber?.dispose()
-    }
-    await context.fiber.dispose()
-    return errors
-  }
-
-  const unwind = async (): Promise<unknown[]> => {
-    disposed = true
-    return shutdown()
-  }
-
-  try {
-    // Each fiber is assigned to its named stage variable BEFORE awaiting
-    // startup: a plugin whose startup rejects is still owned by `shutdown()`
-    // and unwinds at its frozen §16 position. Assigning after the await (the
-    // previous shape) left the failed fiber to the Client root sweep, which
-    // disposed it late and out of order.
-
-    // 1. Typert registry.
-    typertFiber = context.plugin(modules.typert)
-    await typertFiber
-    // 2. Connection as a Cordis-owned fiber: explicit composition transport,
-    //    never the bundle's page-global default adapter, no location.
-    //    `interactions: 'answer'` is declared explicitly: the official default
-    //    is `answer` only for a page carrier (a location) and `none` for a
-    //    non-browser composition, and this in-process Client is the TUI's ONE
-    //    answering surface — forwarded events and Host waterfalls are refused
-    //    outright under `none`.
-    connectionFiber = context.plugin(connectionContext => {
-      modules.connection.installConnection(connectionContext, {
-        interactions: 'answer',
-        transport: {
-          ownsHost: true,
-          fetch: carrier.fetch,
-          openStream: carrier.openStream,
-        },
-      })
-    })
-    await connectionFiber
-    // 3. API Gateway.
-    gatewayFiber = context.plugin(modules.gateway)
-    await gatewayFiber
-    // 4. The ONE shared official Domain mount.
-    domains = await mountRemoteClientDomains({ context, ...(options.signal === undefined ? {} : { signal: options.signal }) })
-  } catch (error) {
-    // The original construction/readiness error stays the primary failure;
-    // any cleanup failures ride its cause chain instead of masking it.
-    const cleanupErrors = await unwind()
-    const failure = error instanceof Error ? error : new Error(String(error))
-    if (cleanupErrors.length > 0) {
-      const secondary = cleanupErrors.length === 1
-        ? cleanupErrors[0]
-        : new AggregateError(cleanupErrors, 'remote client runtime: unwind disposal failures')
-      mergeCause(failure, secondary)
-    }
-    throw failure
-  }
-  // The catch above always rethrows, so reaching here means construction
-  // (including initial readiness) completed.
-  const mounted = domains!
-
-  const runtime: RemoteClientRuntime = {
-    context,
-    connection: mounted.connection,
-    sessions: mounted.sessions,
-    jobs: mounted.jobs,
-    remote: mounted.remote,
-    async dispose(): Promise<void> {
-      if (disposed) return
-      disposed = true
-      // Exactly the frozen §16 sequence (shared with the failure unwind);
-      // the first cleanup failure surfaces to the caller, with any remaining
-      // failures attached as its cause.
-      const cleanupErrors = await shutdown()
-      if (cleanupErrors.length > 0) {
-        const failure = cleanupErrors[0] instanceof Error
-          ? cleanupErrors[0]
-          : new Error(String(cleanupErrors[0]))
-        if (cleanupErrors.length > 1) {
-          mergeCause(failure, new AggregateError(cleanupErrors.slice(1), 'remote client runtime: remaining disposal failures'))
-        }
-        throw failure
-      }
-    },
-  }
-  return runtime
 }
 
 /**

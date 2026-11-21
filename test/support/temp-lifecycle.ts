@@ -2,7 +2,11 @@
  * Test-owned temporary-directory lifecycle: every fixture root created
  * through here is disposed by the TestContext that created it, so a test
  * file never leaks `dsh-*` directories into the system temp root even when
- * run standalone. Teardown runs in two phases: ALL resource disposers
+ * run standalone. A fixture that must live at a specific base (for example a
+ * checkout-local dir used as a deliberately polluted TMPDIR) passes that base
+ * explicitly; cleanup ownership is unchanged.
+ *
+ * Teardown runs in two phases: ALL resource disposers
  * registered via `defer()` execute first (reverse registration order),
  * and only then are the temp directories removed (reverse creation
  * order) — on Windows a directory held open cannot be removed, so the
@@ -24,10 +28,12 @@ export type Cleanup = () => unknown
 
 /** Per-test lifecycle: temp directories plus deferred resource disposers, all owned by one test. */
 export interface TestLifecycle {
-  /** Create a test-owned temp directory under `os.tmpdir()`; removed (recursively, forced) at teardown. */
-  tempDir(prefix: string): string
+  /** Create a test-owned temp directory under `baseDirectory` (default `os.tmpdir()`); removed (recursively, forced) at teardown. */
+  tempDir(prefix: string, baseDirectory?: string): string
   /** Register a resource disposer; disposers run in reverse registration order, always BEFORE any temp-dir removal. */
   defer(cleanup: Cleanup): void
+  /** Retain this test's temp roots if any disposer fails, so an unproven external resource keeps its source/evidence. */
+  retainOnCleanupFailure(): void
 }
 
 /** `DSH_TEST_KEEP_TMP` is evaluated at teardown time so callers can toggle it around a subtest. */
@@ -55,6 +61,7 @@ function assertSafePrefix(prefix: string): void {
 export function testLifecycle(t: TestContext): TestLifecycle {
   const disposers: Cleanup[] = []
   const tempDirs: string[] = []
+  let retainOnFailure = false
   t.after(async () => {
     const failures: unknown[] = []
     for (let i = disposers.length - 1; i >= 0; i--) {
@@ -64,11 +71,12 @@ export function testLifecycle(t: TestContext): TestLifecycle {
         failures.push(error)
       }
     }
+    const retain = retainOnFailure && failures.length > 0
     for (let i = tempDirs.length - 1; i >= 0; i--) {
       try {
         const dir = tempDirs[i]
-        if (keepTmp()) {
-          process.stderr.write(`[temp-lifecycle] keeping ${dir} (DSH_TEST_KEEP_TMP=1)\n`)
+        if (keepTmp() || retain) {
+          process.stderr.write(`[temp-lifecycle] keeping ${dir} (${keepTmp() ? 'DSH_TEST_KEEP_TMP=1' : 'cleanup failure retention'})\n`)
           continue
         }
         rmSync(dir, { recursive: true, force: true })
@@ -80,14 +88,17 @@ export function testLifecycle(t: TestContext): TestLifecycle {
     if (failures.length > 1) throw new AggregateError(failures, 'test lifecycle cleanup failed')
   })
   return {
-    tempDir(prefix) {
+    tempDir(prefix, baseDirectory = tmpdir()) {
       assertSafePrefix(prefix)
-      const dir = mkdtempSync(join(tmpdir(), prefix))
+      const dir = mkdtempSync(join(baseDirectory, prefix))
       tempDirs.push(dir)
       return dir
     },
     defer(cleanup) {
       disposers.push(cleanup)
+    },
+    retainOnCleanupFailure() {
+      retainOnFailure = true
     },
   }
 }

@@ -19,11 +19,13 @@ The legacy `focusMode` field remains only as a migration input and is preserved
 during whole-document settings writes.
 
 There is no second transcript data model: Compact is a projection over the same
-`TranscriptFolder` rows, sharing one renderer, one measurement path, one
-search index, and one viewport owner. Manual disclosure owners (expanded Work
-spans, Context clusters, tool cards, Thinking) remain separate from preset
-defaults; changing a preset never invents a `lastNonFocusPreset` or transfers
-manual disclosure ownership.
+`TranscriptFolder` rows, sharing one renderer, one measurement path, the Full
+semantic search index, and one viewport owner. View Find has a separate
+short-lived occurrence cursor over the currently mounted components; it is not
+a second Session index or a durable transcript model. Manual disclosure owners
+(expanded Work spans, Context clusters, tool cards, Thinking) remain separate
+from preset defaults; changing a preset never invents a `lastNonFocusPreset` or
+transfers manual disclosure ownership.
 
 **Untrusted-text invariant.** Full, Compact and expanded Focus share ONE safe
 **display** projection: every externally sourced message/tool/context string is
@@ -87,11 +89,13 @@ projectTranscriptStructure()
   Preparing ownership consumes the SAME predicate, so a settled surfaced
   interaction (question / Plan review) closes the trailing run everywhere.
   A same-turn `form:'snapshot'` Context row, a proven Working `tool-jobs`
-  Notice or a proven same-turn `agent-message` relay may be CARRIED by a Work
+  Notice, a proven same-turn `agent-message` relay or a proven same-turn
+  `subagent-settled` Notice may be CARRIED by a Work
   span, but carriage is the separate display predicate
   `isFoldableWorkContext()` (`isFoldableSnapshotContext()` for Snapshots;
   exact source-form pair + the durable same-turn next-step claim flag for
-  `tool-jobs`/`notice` and `agent-message`/`relay`). It never becomes Process,
+  `tool-jobs`/`notice`, `agent-message`/`relay` and `subagent-settled`/`notice`).
+  It never becomes Process,
   never changes this predicate, and never enters Action/timing aggregates.
 - `clusterAdjacentAmbientContext()` remains the single cluster membership
   authority, computed from raw adjacency before any row is hidden. A
@@ -111,6 +115,16 @@ projectTranscriptStructure()
   materialize as their original Context row/cluster when a hard boundary or the
   window end arrives first. The buffer is never long-lived state and never
   creates a Process-free Work span.
+- **A Client-local Shell card is a display-only standalone boundary.** The
+  `!`/`!!` shell card is owned by the TUI mount, not by a Session message: it
+  never enters `this.messages`, `projectCompact`, `projectFocus`,
+  `projectTranscriptStructure` or a `TranscriptFolder`, and therefore never
+  contributes a Work/Activity member, Action count, timing stat, Context
+  cluster or search-corpus hit. It is materialized only by the final
+  projection layer as a standalone `kind:'message'` block at its captured
+  acceptance placement; Work/Thought folding cannot hide it and expanding that
+  folding cannot duplicate it. Its UX, retention and lifecycle contract lives
+  in [surface-behavior.md](./surface-behavior.md).
 - **Post-turn replay evidence is transcript evidence, never aggregation
   evidence.** The fold is the ONLY authority that can know a row
   MATERIALIZED after its owning turn's authoritative `turn/end` (the row's
@@ -119,7 +133,7 @@ projectTranscriptStructure()
   strictly "newly created after the turn completed" — NEVER "touched by a
   post-`turn/end` event": a `tool/result` that finds its own pending/running
   card still settles that card normally and leaves it fully legal evidence.
-  Such a row stays in the transcript (Full, expanded Focus, search,
+  Such a row stays in the transcript (Full preset, expanded Focus, Full search,
   diagnostic), but it is excluded from the settled turn's Process/Action
   aggregates at THREE shared consumers: the Action classifier, Work-span
   membership, and consecutive-read grouping (a synthesized group card would
@@ -242,10 +256,12 @@ Compact:  User · Work(A)      · Assistant A · Work(B)      · Notice · Work(
   Attention rows always end the current span and stay visible at their
   chronological position.
 - Every surfaced Context presentation is a Work boundary **except a foldable
-  Snapshot, a proven Working `tool-jobs` Notice or a proven same-turn
-  `agent-message` relay** (Owner decision): a `form:'snapshot'` singleton, a
-  snapshot-only raw-adjacent cluster, or a `tool-jobs`/`notice` /
-  `agent-message`/`relay` row with the durable same-turn `next-step` claim flag
+  Snapshot, a proven Working `tool-jobs` Notice, a proven same-turn
+  `agent-message` relay or a proven same-turn `subagent-settled` Notice**
+  (Owner decision): a `form:'snapshot'` singleton,
+  snapshot-only raw-adjacent cluster, or a `tool-jobs`/`notice`,
+  `agent-message`/`relay` or `subagent-settled`/`notice` row with the durable
+  same-turn `next-step` claim flag
   is carried by the same-turn Work instead of splitting it. A mixed
   `instructions`/`catalog` + `snapshot` cluster, an unqualified/foreign
   `notice`/`relay`, `recall` and every unknown form remain boundaries. The
@@ -283,6 +299,20 @@ Compact:  User · Work(A)      · Assistant A · Work(B)      · Notice · Work(
   it is omitted only when no member carries a `TranscriptTiming` sidecar
   (unknown is omitted, never `0s`) — never faked or stretched from the
   whole-turn Focus duration.
+- **Header action-subtype order.** The shared
+  `compactActionStatParts()` formatter (Compact Activity and Focus header
+  alike) lists a recorded `send_message` subtype FIRST, then every remaining
+  subtype by call count descending and name ascending. This is a header
+  VISUAL priority only: the `N actions` total, each subtype count,
+  `COMPACT_ACTION_SUMMARY_MAX_TYPES` and the `+N` remainder (which counts the
+  other SUBTYPES, not occurrences) are unchanged, and the chronology-based
+  `Action:` preview still shows the latest real tool by event time. With no
+  `send_message` entry the order and output are exactly as before. On narrow
+  widths both headers trim the stats tail from its RIGHT one part at a time
+  (Compact keeps its existing ladder; Focus drops trailing subtypes and `+N`
+  before the `N actions` total, then the token segment, then the bare
+  identity), so a narrow Focus header can still show
+  `N actions · send_message ×1` instead of dropping every subtype at once.
 - Expanding a `Work` span reveals its raw member rows through the existing
   message renderers; Thinking and tool-local detail keep their own orthogonal
   disclosure.
@@ -442,14 +472,17 @@ the same-turn Work?":
 
 ### Working same-turn delivery follows Work
 
-Two non-Snapshot Context rows have the same narrow carriage: a producer-declared
-`kind:'tool-jobs'` / `form:'notice'` completion Notice, or a producer-declared
-`kind:'agent-message'` / `form:'relay'` message, that the agent inbox delivered
+Three non-Snapshot Context rows have the same narrow carriage: a producer-declared
+`kind:'tool-jobs'` / `form:'notice'` completion Notice, a producer-declared
+`kind:'agent-message'` / `form:'relay'` message, or a producer-declared
+`kind:'subagent-settled'` / `form:'notice'` settlement report, that the agent
+inbox delivered
 through **`next-step` during the same still-working turn**. This is a
 deliberately narrow exception, never a generic notice/relay rule:
 
 - Qualification requires ALL of: surfaced Context + the EXACT source/form pair
-  (`tool-jobs`/`notice` or `agent-message`/`relay`) + the fold's
+  (`tool-jobs`/`notice`, `agent-message`/`relay` or `subagent-settled`/`notice`)
+  + the fold's
   presentation-only `contextPresentation.sameTurnNextStep` flag. That flag is
   derived by the `TranscriptFolder` from the durable `agent/inbox/spliced`
   insert/claim identity chain (the same message id inserted into `next-step`,
@@ -458,14 +491,15 @@ deliberately narrow exception, never a generic notice/relay rule:
   adjacency.
 - A `next-turn` idle wakeup, a next-step message claimed in a DIFFERENT turn,
   a foreign/legacy log, a missing claim, a crossed source/form pair, or any
-  other producer (including `subagent-settled` and every recall/unknown/future
-  producer) keeps the existing independent Context behavior: the delivery
+  other producer (recall, unknown and future
+  producers) keeps the existing independent Context behavior: the delivery
   explains why the agent was woken and must stay visible.
 - The qualified row is carried by the same-turn Work exactly like a Snapshot
   singleton (it can appear at the start, middle or end; it never joins
   `ContextCluster`, which still accepts only raw-adjacent ambient rows). A Work
   still requires at least one real Process row; a Process-free segment keeps
-  the original card (Notice or Agent message) and never mints an Activity.
+  the original card (Notice, Agent message or settlement report) and never mints
+  an Activity.
 - It stays Context: no Action, ActionStats or span timing contribution. Its
   own card identity/header/body disclosure and search reachability are
   preserved (the Agent relay keeps the readable identity contract while it is
@@ -476,8 +510,10 @@ deliberately narrow exception, never a generic notice/relay rule:
   real Thought (the opening user guard still applies: a delivery before the
   first non-steer user, and every `next-turn` wakeup, stays foundation), and
   expanded Focus restores it once in raw order. An unqualified Notice or relay
-  keeps the existing pre/post-Thought rule; a `subagent-settled` Notice is
-  never qualified and therefore always stays independently visible.
+  keeps the existing pre/post-Thought rule. A subagent settlement Notice is
+  folded by this same delivery evidence and by nothing else: success, failure,
+  abort, max-tokens and refusal settlements all behave identically, and no
+  wording, `stopReason`-like field or display state is parsed.
 - The durable claim flag is presentation-only (`sameTurnNextStep` on
   `TranscriptContextPresentation`); it is never written back to the Session
   source, message, model input or Host/Remote wire. Search/click/Ctrl+O,
@@ -541,25 +577,29 @@ class:
   surfaced Context rows) stays above the Thought in both Focus states; a
   mid-turn Context row/cluster returns to its chronological position when the
   Thought is expanded. **Exception:** a foldable Context row (Snapshot, a
-  proven Working `tool-jobs` Notice or a proven same-turn `agent-message`
-  relay) after the initial user stops the foundation boundary and follows the
+  proven Working `tool-jobs` Notice, a proven same-turn `agent-message` relay
+  or a proven same-turn `subagent-settled` Notice) after the initial user stops
+  the foundation boundary and follows the
   Thought instead (hidden while
   collapsed, restored once in raw order when expanded); a mixed
   `instructions`/`catalog` + `snapshot` cluster keeps the foundation position as
   one indivisible unit. A Context row that truly precedes the initial user is
   never moved across that user.
 - Collapsed Focus also hides a foldable Snapshot-only turn (and a proven Working
-  `tool-jobs` Notice or same-turn Agent relay with a Thought owner) inside its
-  real Thought; all remain recoverable there. A same-turn Agent relay
-  additionally requires a REAL Work (Process) owner: the row must be a member
+  `tool-jobs` Notice, same-turn Agent relay or same-turn subagent settlement
+  Notice with a Thought owner) inside its
+  real Thought; all remain recoverable there. A same-turn Agent relay and a
+  subagent settlement Notice additionally require a REAL Work (Process) owner:
+  the row must be a member
   of a canonical Work span, so a Process elsewhere in the same turn is not
-  enough when a hard boundary separates the relay from it. Without that owner
-  the relay stays independently visible (fail open) instead of disappearing
+  enough when a hard boundary separates the row from it. Without that owner
+  the row stays independently visible (fail open) instead of disappearing
   into an activity-only Thought.
 - **Userless (next-turn wakeup) turns:** there is no initial user to anchor the
   foundation. The leading run of NON-foldable Context — the wakeup Notice and
   any `instructions`/`catalog` — is the foundation; the first foldable
-  Snapshot, proven Working `tool-jobs` Notice or same-turn Agent relay starts
+  Snapshot, proven Working `tool-jobs` Notice, same-turn Agent relay or
+  same-turn subagent settlement Notice starts
   Thought content. The wakeup cause therefore stays visible while later
   internal Snapshot / next-step deliveries fold, and expanded Focus restores
   them once in raw order.
@@ -572,11 +612,13 @@ class:
   inside the turn's opening foundation (the `thoughtLeadBoundary()` area) stays
   BEFORE the Thought because it explains why the turn started; an UNQUALIFIED
   mid-turn relay stays visible because it is external Agent-authored input.
-  **Working-delivery exception:** a `tool-jobs`/`notice` or
-  `agent-message`/`relay` row with the durable same-turn `next-step` claim flag
+  **Working-delivery exception:** a `tool-jobs`/`notice`,
+  `agent-message`/`relay` or `subagent-settled`/`notice` row with the durable
+  same-turn `next-step` claim flag
   follows the Thought instead (hidden while collapsed, restored once in raw
   order); `next-turn` wakeups and every unqualified/foreign notice or relay
-  keep this existing post-Thought or foundation rule. Expanded Focus restores
+  keep this existing post-Thought or foundation rule. Settlements of every
+  outcome share this rule. Expanded Focus restores
   every notice/relay at its exact raw position. Compact keeps every UNQUALIFIED
   notice/relay standalone (a qualified Working delivery folds into its
   Activity), and Full keeps the full chronology for every notice/relay.
@@ -585,7 +627,8 @@ class:
   the Thought, so ordinary search addresses it like any other surfaced Context
   card. A match inside the folded Notice payload still opens through the row's
   own ordinary message disclosure. A QUALIFIED Working delivery (tool-jobs
-  Notice or same-turn Agent relay) follows the Work/Thought ancestry instead
+  Notice, same-turn Agent relay or same-turn subagent settlement Notice)
+  follows the Work/Thought ancestry instead
   (the Work/Thought reveal opens it, then its own card disclosure shows the
   payload).
 - Full keeps the original transcript chronology, with ambient clusters
@@ -792,6 +835,30 @@ never completes a button. Both halves of that split belong to ONE contract: a
 row that consumed the press without providing text selection would break the
 browser, and a button that released its press would lose its own gesture.
 
+**Wheel navigation.** While this modal holds the pointer, the AltScreen wheel
+navigates the page under it and is never a press:
+
+- **Files.** A wheel on a CURRENTLY painted list row, inside the list column,
+  moves the selection through the CURRENT filtered results and keeps it visible;
+  the `filter` seat/query, wide side pane and non-list rows stay untouched, and
+  no wheel reads the Host or opens Details.
+- **Turns.** A wheel on a CURRENTLY painted Turns row moves only the
+  UNCOMMITTED cursor; a complete click/`Enter` still commits. A wheel elsewhere
+  changes nothing.
+- **Details.** A wheel over the body scrolls the held page by WRAPPED PHYSICAL
+  rows; header/footer are inert. At most ONE adjacent 120-source-line window is
+  requested per wheel through the existing Preview owner: next only at a proven
+  page bottom with `eof=false`, previous only from the first row with `offset>1`.
+  Both directions require the page the user can actually SEE: a Host reply that
+  has settled but not yet painted never authorizes a hop (the keyboard
+  PgUp/PgDn edge shares that gate). A pending read never re-requests, and
+  metadata/failure/idle/loading scrolls start no read.
+- **Held press.** ANY finite non-zero wheel — chrome, stale frame, boundary or
+  non-scrollable state — revokes the held press first (a fresh press still
+  works), so its release cannot run an old button or Turn row; a zero wheel is a
+  no-op. The opt-in selection in [overlay-focus.md](./overlay-focus.md) §6.1
+  (divergence X068) is unchanged.
+
 **Selecting the panel's own text.** Inside this ONE modal the painted cells of
 its content area are a text-selection source: drag selects them, double-click
 selects the word under the pointer, and triple-click the visible line of the
@@ -882,6 +949,217 @@ promotes every currently necessary node atomically; an explicit collapse revokes
 the temporary reveal so the owner cannot instantly reopen. A flat/fail-open
 container mints no reveal node.
 
+### Transcript Find scopes
+
+PiTui exposes two Find scopes through ONE Search overlay and ONE query Input. The
+overlay paints three rows (title, Input, hint) and adds a fourth `Source-only`
+row only while the current Full target has no proven cell (see below); a
+terminal with at most ten rows folds that status into the third row instead of
+taking a transcript row away:
+
+- **View** searches only the current mounted, rendered transcript batch. Its
+  result count and current occurrence come from `TuiApp.renderedViewSearch`; the
+  reader uses the same mounted block identities, row geometry and viewport as
+  transcript painting. Hidden Markdown links, folded rows, off-window history,
+  and unmaterialized turns are not View results. View navigation steps only this
+  mounted occurrence set and cannot trigger Full semantic search or temporary
+  disclosure.
+- **Full** searches the active `TranscriptFolder` semantic corpus and retains
+  the raw semantic occurrence identity, virtual-window navigation and its
+  existing presentation proof/reveal rules. Direct has a complete Session fold.
+  Remote search is limited to the official Reader snapshot already loaded for the
+  current subject: label it `Loaded history`, and when that same current snapshot
+  proves `hasMore`, say that earlier history was not searched. A missing or stale
+  snapshot is never interpreted as complete coverage. Full never adopts a View
+  occurrence ordinal or painted-row authority.
+- **Full `N/M` counts temporary navigation targets, not raw occurrences.** The
+  index still emits one match per non-overlapping semantic occurrence; the
+  overlay projects those matches into the units `Enter`/`Shift+Enter` can
+  actually reach. A source-proven occurrence stays its own target. A card that
+  has NO rendered query occurrence (a merged read card, or a card whose only
+  hits are hidden link destinations) is wholly unlocatable at this frame and
+  collapses ALL of its same-representative hits into ONE card target — never one
+  target per hidden hit. A card that still has a proving channel WITH a visible
+  query hit on it keeps its unvisited occurrences as separate candidates, so an
+  exact-capable visible cell beside a truncated/unproven sibling stays reachable;
+  repeated visits converge that card to the unresolved run. A card whose query
+  only appears in status-count / header chrome has no such proving hit and stays
+  one card target. Exact and unresolved runs on the same card
+  stay separate. The projection is derived inside the existing Search overlay
+  lifetime from the live Folder read-group membership and the current frame's
+  qualification; it is never persisted, never mutates the corpus and never
+  renders off-window history to stabilise counts. Each unvisited card may
+  re-qualify on its first visit, so the session total `M` can shrink more than
+  once as separate cards are visited; changes are published after the
+  qualification transaction, never as a flicker of a stale total.
+- **Visible auxiliary text is a display hint, not source proof.** When the
+  current card cannot prove its exact source cells but its mounted body really
+  renders the query, those visible words are decorated as ordinary matches and
+  the viewport prefers a candidate already inside the scroll viewport and not
+  covered by the Search box (screen-coordinate occlusion, never document-row
+  comparison); only when none qualifies does it fall back to the nearest
+  candidate and the existing placement solver. A card without an exact region but
+  with a real body (for example a Tool result) scopes that preference through a
+  POSITION-ONLY body region; header chrome, status counters and other UI text are
+  never navigation evidence. The candidate pool stays inside the target's own
+  semantic source: delivered-file tails, PTC sub-calls and other declared field
+  regions are never borrowed as scroll evidence. The card's own visible
+  header/anchor is marked in the current-card role. Neither changes
+  `selection.exact`, the `not-painted`/`unproven` classification or the semantic
+  occurrence ordinal.
+- A layout change that can invalidate a proof (resize, theme/palette, display
+  preset, disclosure or content re-measure) expires the disposable navigation
+  qualifications before the next step; the projection and `N/M` re-derive from
+  the current frame. Ordinary search steps do not expire that cache.
+- The active scope and single query belong to the mounted `SurfaceRuntime`
+  transaction. Scope changes keep the query, retire the old scope's selection
+  and reveal, then select the destination scope's first result from its own
+  authority. Leaving Full clears its temporary reveal before View measures the
+  mounted rows; a View dismiss never promotes a Full reveal, and Full dismiss in
+  a temporary Regular Reader does not persist a reveal into user disclosure.
+- Regular terminal scrollback has no application-owned row address. Opening
+  either scope from Regular therefore leases the existing TuiApp Fullscreen
+  transcript for this Search only; it creates no second TUI or Session owner and
+  writes no fullscreen preference. Closing the Search retires its overlay and
+  presentation before returning the still-current screen to Regular. Admission
+  refuses workspaces, blocking editor-seat owners, active viewers, and other
+  capturing overlays. A newer physical screen owner always wins a re-entrant
+  close/rollback.
+- These PiTui row/cell facts do not qualify native TSP View search. A renderer
+  without its own native View authority must retain its separate Full behavior
+  and must not present PiTui rendered results as TSP results.
+
+### Source-only status of a Full hit
+
+A Full hit's painted cells are either proven (`exact`), provably absent
+(`not-painted`), or not provable in the current render (`unproven`). The status
+is disposable presentation metadata for ONE render epoch: it never feeds the
+match corpus or a stored match/geometry map, and an `exact` selection must carry
+none. While the current Full target is non-exact, the card's REAL visible
+header/anchor (or, for a card without a header, its first visible non-image text
+row) is marked in the current-card role. That anchor is presentation geometry
+only: it is never a source-cell proof, never participates in the exact-channel
+subtraction, and never upgrades the hit to `exact`. A visible homonym on that
+card remains an ordinary visible match, not the current source cell.
+
+`not-painted` is allowed only from real evidence that the matched source text
+has no visible cell: the vendored Markdown proof reporting `NOT_PAINTED` for a
+hidden link destination or markup-only range, or the Host's own consumed Visual
+marker classification. `unproven` covers every other rejection (collapsed or
+transformed body, composite/plugin owner, reflow, unclosed math, a source kind
+with no cell channel). An `unproven` hit must never be described as absent, and
+a visible homonym elsewhere in the card never upgrades either status.
+
+While the current Full target is non-exact, the overlay shows exactly one
+Source-only row: `Source-only · no visible cell · <label>` or
+`Source-only · position unverified · <label>`. The label comes from the static
+source-kind vocabulary (message kind, tool/command/subcall field, workflow
+run/phase/member, deliverable field), never from user content. A snippet is
+attached only for a Host-owned, single-text, non-URL User message or expanded
+Host Thinking whose normalized range projects back to a real raw span: at most
+twelve graphemes of context on each side, projected through the one display
+sanitizer onto a single safe physical row, and omitted entirely when the raw or
+projected context contains control/escape bytes, URL/path-shaped text or markup
+risk. Assistant Markdown (including a hidden href), Tool/Command/Workflow,
+Plugin, Visual, Delivered and composite sources stay label-only. The row shrinks
+by whole segments: the Source-only fact and the close key are never dropped, the
+real loaded-history coverage survives, and a wider layout drops the snippet
+first. The notice is not a permission or secrecy proof; it only describes what
+the current renderer can show.
+
+### Occlusion-aware search navigation
+
+One Search jump is solved against the TWO rectangles the frame really painted:
+the fullscreen `ScrollView` box and the managed Search overlay's
+`getBounds()` rectangle (plus its real row count, so a three-row and a four-row
+box place the target differently). A target cell is readable only when it lies
+inside the painted viewport AND does not horizontally overlap the overlay on the
+same physical row — row overlap alone is never occlusion. The solver is a pure
+function with a fixed, bounded candidate set; it keeps the current scroll
+position when the whole target is already readable, otherwise prefers the most
+readable candidate, then the nearest one, and never claims full readability for
+a partially covered target. A target without proven cells contributes its
+conservative full-width anchor rows, never guessed columns. Missing geometry
+keeps the existing viewport-only placement.
+
+The jump is committed from the current epoch's geometry, and one post-paint
+correction is allowed because the box that painted the jump may have been a
+frame old (the Source-only row can change the box height). That correction is
+bound to the same screen, overlay handle, scope, query, presentation revision
+(which changes with the current navigation-target identity) and terminal size and
+applies at most once; a passive projection, stream settle, wheel drag or ordinary
+repaint never re-aims an old target, and a resize only re-solves while the target
+still belongs to the current Search overlay. Retiring the overlay, leaving the
+scope, switching
+session/subject or replacing the screen discards the pending correction with the
+current target geometry. Search navigation never re-centres an already visible
+target, never re-windows for the same target and never adds a second viewport or
+reader owner.
+
+### Source-cell proof of a rendered search hit
+
+Transcript search exactness is a per-render proof, never a stored position map:
+the current semantic match's source range must map back to real source
+codepoint/grapheme boundaries and be verified against the cells the CURRENT
+Host component actually painted. Plain Host user text and expanded Host Thinking
+may prove their cells through a disposable zero-width witness rendered by the
+SAME text/bubble constructor as the live card; a failed visible-row/width
+comparison, a collapsed or hidden body, a plugin renderer, or mixed/transformed
+content keeps the source-anchor degradation. The witness string never reaches
+the terminal, a mounted component, a log or a persisted field. Exactness never
+changes the search corpus, the raw occurrence identity or reveal ownership; a
+newly proven occurrence does split its temporary navigation projection (see
+Transcript Find scopes), which is derived presentation state. Source-local
+offsets are ephemeral and never stable match identity. Any width,
+source text or layout epoch change re-proves from scratch, and a proven
+selection must not re-enable a reveal the user collapsed.
+
+Markdown cards have exactly ONE source-to-painted-cell authority: the vendored
+`Markdown` component's one-shot `proveSourceSpan(range, width)`. The range is
+component-local UTF-16 over that component's OWN sanitized source (never Session
+raw), and its segments are relative to `Markdown.render(width)`. The component
+re-runs its own parser and renderer with disposable zero-width sentinels around
+the single emitted piece of the target leaf and accepts the proof only when the
+sentinel-stripped rows are byte-identical to the normal render for the same
+source, width, theme and capabilities AND exactly one leaf emitted the requested
+range. It proves ordinary inline text (emphasis, headings, lists, quotes and one
+occurrence that wraps across painted rows), link labels, the printed fallback
+destination when OSC 8 hyperlinks are unavailable, literal `renderLatex:false`
+math, and fenced code whose painted line still equals the source line. A hidden
+link/definition destination is reported as not painted; transformed glyphs,
+unclosed math, block HTML, composite/split owners, grapheme splits and stale
+capability epochs stay explicitly unproven instead of falling back to a visible
+homonym. The proof keeps no stored source map and never changes normal render
+bytes, caches or link targets: its state exists only inside one synchronous
+call, so a text, width, theme or capability change requires a fresh proof. Host
+Card composition (bullet/indent/preceding-segment offsets), composite/plugin
+owner decisions and Full-search selection remain Host responsibilities; a
+component-local proof is embeddable evidence, not a claim that a composite card
+has a single source.
+
+PiTui Full consumes that proof for the CURRENT hit when the whole card is one
+Host-native Assistant Markdown body (the same live `Markdown` instance the
+bullet card renders). The semantic range is projected from normalized source
+coordinates back to raw UTF-16 and through the SAME display sanitizer the card
+paints; only an additive, boundary-aligned projection reaches the proof. The
+bullet/continuation indent is added to the component-local segments and every
+segment is re-read from the CURRENT rendered rows, so a proven strong cell and
+its scroll row always belong to this render epoch. Cards whose whole source is
+not that one native Markdown body — plugin renderers, `VisualAssistantBody`,
+multi-ContentBlock sequences, open-opaque streams, delivered-file/interrupted
+wrappers — stay on the source anchor; a hidden href, markup-only delimiter,
+pending math, rewritten glyph or non-additive projection keeps its semantic
+result without borrowing a visible homonym. Only the current hit is proved: a
+static frame, a scroll-only frame and every other card never trigger a proof.
+A proven range is exact in the painter as well: an overlapping weak rendered
+occurrence keeps only the cells the proof did not claim, so a case-folding
+difference between the semantic corpus and the rendered matcher can never widen
+the strong block. The raw semantic occurrence identity and the search corpus are
+unchanged; the overlay's `N/M` is the temporary navigation-target projection
+(one target per exact occurrence, one per unresolved card run), while View's
+mounted-occurrence authority, reveal ownership and viewport ownership stay
+unchanged.
+
 ## Hardening guarantees
 
 These guarantees hold under bad input, long sessions and rapid live updates:
@@ -913,9 +1191,9 @@ These guarantees hold under bad input, long sessions and rapid live updates:
   mutation re-resolves the current container path instead of a stale identity;
   and an UNQUALIFIED mid-turn notice is already visible outside the collapsed
   Thought, so search reaches it through the ordinary row/message disclosure
-  paths. A proven Working same-turn delivery (`tool-jobs` Notice or Agent
-  relay) is hidden with the Work/Thought and resolves through that ancestor
-  path instead.
+  paths. A proven Working same-turn delivery (`tool-jobs` Notice, Agent relay
+  or subagent settlement Notice) is hidden with the Work/Thought and resolves
+  through that ancestor path instead.
 - **Width / grapheme.** Every transcript row family (Work, pending Preparing rows,
   Context cluster, notice, relay, recall) obeys the framebuffer width contract
   at the current width for ASCII, CJK, emoji, combining marks, ZWJ emoji and
@@ -955,9 +1233,60 @@ Every card renders through the Web parity render intents in
   Lenient `{"goal":…}` parsing; undefined falls back to generic.
 - JSON-result families (`schedule_*`, `cordis_inspect_*`, `ralph`): the expanded
   body stays VERBATIM; the folded preview shows a parsed summary or drops the
-  preview row — never raw JSON. Failed calls never take the summary branch.
-  Agent-team tools are excluded by name because they collide with subagent tool
-  names.
+  preview row — never raw JSON. A failed call's error identity is never replaced
+  by a success phrase: a normal (non-`isError`) result object that carries an
+  error `code` folds to that code, and an `isError` result keeps its structured
+  error while the folded summary may add the code. Only the SHARED
+  `send_message` / `interrupt_agent` subagent-named tools stay excluded: their
+  name collides with subagent tools whose render text is friendly.
+- Team task tools (`team_task_create` / `list` / `get` / `update`) and
+  `wait_agent`: the folded row is a DISPLAY-level result projection only, never
+  live Team state and never a second owner. A single task folds to
+  `<status> [· ready] · <owner|unowned> · rev N` (ready prints only for a
+  pending ready task; an absent owner is `unowned`; a legacy
+  `ownerName`/`ownerId` is never used as an owner fallback; `status:deleted` is
+  a task state, not a filesystem deletion). A list page folds to
+  `no team tasks` / `N team task(s)`, plus ` · more` for a next cursor and NEVER
+  a fabricated `N of total`. `wait_agent` folds `{"timedOut":false}` to
+  `input pending` and `{"timedOut":true}` to `timed out` — never
+  `agent finished`/`task ready`. The call identity is the fixed title plus the
+  documented subject / task id / action (or a legal explicit `timeout_ms`); a
+  description, raw JSON, or an error `code` object never becomes a header or a
+  success summary. The expanded body keeps the complete official JSON and a
+  failed call keeps its `isError` identity.
+- Schedule tools: the current `schedule_create`/`list`/`view`/`edit` family and
+  the historical `schedule_create`/`list`/`update`/`delete` pair share ONE
+  header fallback and ONE folded summarizer (TSP reuses the same header helper;
+  no TSP-only parser). A task folds as `<kind> · <status>` (current schema) or
+  `<kind> · <state>` (historical schema); a current page folds as
+  `<shown> of <total> scheduled` (or `no scheduled tasks` for an empty page),
+  while the historical bare array keeps `no scheduled jobs`/`<n> scheduled`. A
+  delete receipt folds to `deleted`, and an explicit error `code` always wins
+  over any success-shaped field. The fallback header title is the fixed action
+  name; its summary is only the task title (create) or id — never the
+  prompt/instruction. Unparseable arguments or a mistyped identity field keep
+  the fixed title with an empty summary, never the generic first-string
+  derivation. An unparseable result or an unproven shape drops the summary
+  instead of falling back to raw JSON. The live tool-authored
+  `presentCall` remains the preferred Direct presentation; this fallback covers
+  replay after definition unload and Remote logs, where no Host definition is
+  available.
+- `exit_plan_mode` (plan review): the Direct branch renders the Host
+  `presentCall`'s generic card (the plan's first heading as the title, the
+  complete plan markdown as the content). The plan body belongs to the CALL for
+  the card's WHOLE life: it stays visible while the call runs AND after it
+  settles (the settled result is the review OUTCOME shown beside the plan, never
+  a replacement for it), so a replayed Session keeps its long-term reading
+  entry. The Remote Client presenter derives the SAME generic card
+  presentation-only from the logged call arguments (`plan` a non-empty string
+  starting with a `#` heading; anything else keeps the generic tool row), so
+  replay and the Remote branch show the same card. A PTC-dispatched
+  `exit_plan_mode` sub-call renders the presenter's generic body inside its
+  nested card for the same reason (the plan body lives in the call arguments,
+  so a running child is readable before its result exists). The card is the
+  read target of the plan-review Question's one-shot inspection (see
+  `overlay-focus.md` §6.0); a card-less review degrades to the question's own
+  detail text, never a fabricated card.
 
 Must-not: render raw JSON or raw model-facing XML on a folded row; beautify an
 expanded generic JSON body; mutate `TranscriptMessage` or model bytes; let an
@@ -965,8 +1294,18 @@ unknown tool lose the generic path.
 
 Proof: `test/domain/rendering.test.ts` ("web search result views render sources and the
 answer", "folded JSON-result cards show the summary, never the raw JSON",
-"settled ask_user_question cards show the answered count", "goal cards without
-a goal say no goal set").
+"a current-schema schedule list page folds to counts and keeps its exact JSON
+expanded", "a failed rc1 schedule_edit card keeps [error], the error code and
+the result detail", "settled ask_user_question cards show the answered count",
+"goal cards without a goal say no goal set", "a folded team_task_create card
+shows a bounded status note, never the raw JSON or description", "a folded
+team_task_list card reports count and cursor, leaving the full page to the
+expanded body", "a folded wait_agent card reports input state, never an agent or
+task outcome") and
+`test/tui/action-tool-card.test.ts` ("schedule cards use the fixed no-registry
+fallback titles and identities", "team task and wait tools use fixed titles and
+safe call identities", "team task result snapshots fold to bounded facts and
+never infer an owner").
 
 ## Assistant-owned published visuals
 
@@ -978,51 +1317,54 @@ turn's structural latest step, with renderable content, may own a visual.
 Publication refs from a different turn, a window outside the answer, or a
 replaced/forged receipt never enter the row.
 
-### Fork-inherited history and origin provenance
+### Fork-inherited history and event epochs
 
-A forked Session inherits a durable prefix of its parent's log, and those
-events still belong to the ANCESTOR's identity: the `sv1_…` reference of an
-inherited generating result was derived from the ancestor's Session id, not the
-displayed child's. Replay therefore derives references from per-seq ORIGIN
-RANGES (`src/domain/visual/origin.ts`) instead of one session id:
+A forked Session inherits a durable prefix of its source log. The rc.1 ordinary
+fork carries NO `parentSession`, and a visual reference is SESSION-FREE: the
+`sv2_…` locator is the first 20 hex digits of SHA-256 over the NUL-joined
+`['sv2', turn, absolute step/start seq, callId, '']` tuple, so the same
+committed generation keeps the same locator inside the inherited prefix. The
+display never reads an ancestor Session.
 
-- a range attributes a half-open `[startSeq, endSeqExclusive)` window to one
-  Session. Ranges are ordered, non-overlapping and immutable, and a seq that no
-  range covers is UNPROVEN — never "the current Session" and never "the direct
-  parent" (`parentSession ?? current` is forbidden);
-- `src/app/bootstrap/visual-lineage.ts` is the ONE proof. It reads the live
-  Session's `header.isSeeded`, `inheritedEventCount` and the exact child-owned
-  `session/end-seed { inherited: true }` cut, then observes each recorded
-  ancestor through the official `sessionQuery.observeSession()` and requires
-  the observed header identity, the parent's own inherited cut, and full
-  durable event-prefix EQUALITY with the inherited window. An unreadable
-  parent, a mismatched prefix, a missing cut marker, a malformed cut or a
-  repeated Session id in the actual ancestor chain leaves that window unproven
-  and reports a bounded reason; the current Session's own range stays
-  authoritative in every one of those cases;
-- the current Session's own range `[inheritedEventCount, seq)` is proven
-  synchronously, so a child's own new figures work on the first frame, while
-  the inherited window is proven once per selected Session identity off the
-  render path. A settled proof advances one internal provenance revision and
-  requests a single repaint through the exact Agent/Session and
-  surface-currentness fence; a late result for a replaced subject (session
-  switch, A→B→A, disposed surface, new binding) is discarded, and a proven
-  failure is cached for that identity until a real rebind instead of being
-  retried every frame;
-- replay pairs a generating source with its `present_visual` publisher only
-  when BOTH were recorded by the same original Session, in the same turn, with
-  the generating result committed before the publishing call. A child can
-  never publish a figure it merely inherited, a cross-boundary unclosed call
-  never completes, and an unproven occurrence yields no publication at all.
-  The LIVE `decidePublication()` path is unchanged: it still authorizes only
-  the current executing Session's own turn and step.
+- `src/domain/visual/publication.ts` is the ONE authority for the live
+  `decidePublication()` write and the cold `collectPublishedVisuals()` replay.
+  It scans the committed log once and derives an EVENT EPOCH: 0 before the first
+  official `session/end-seed { inherited: true }`, then one increment for every
+  real marker. The epoch is a local index range only; it never enters a Session
+  header, an event, the wire, a cache or a plugin API.
+- A `tool/call` is indexed only inside the open `step/start` of its epoch; its
+  `tool/result` must pair in the SAME epoch and after the call. Synthetic fork
+  closers live after the cut marker and therefore never complete an inherited
+  open call. A generating source and its `present_visual` publisher must also
+  share one epoch and turn, with an EARLIER source step and the source result
+  committed before the publishing call.
+- The inherited SUCCESSFUL publication replays from its own epoch, while a
+  child's `present_visual` request for an inherited GENERATING result is
+  refused: a new publication cannot cross the fork epoch. This keeps the
+  ancestor's published figures visible without granting the child their
+  generation.
+- The absolute `stepStartSeq` (never an epoch-relative position) is one input of
+  `sv2_`. The same tuple in an independent Session may compute the same locator,
+  but it grants nothing without a local committed source and successful receipt
+  pair; a bare marker or receipt is never publication authority.
+- The Direct snapshot entry validates the official seed facts before serving a
+  log: a boolean `header.isSeeded`, a non-negative safe-integer
+  `inheritedEventCount` that fits the real log, and — for a non-empty cut — the
+  official `session/end-seed { inherited: true }` marker at exactly that seq.
+  Inconsistent metadata makes the visual snapshot unavailable (fail closed)
+  instead of treating the log as the current Session's own. There is no async
+  proof and no second repaint: own and inherited figures both work on the first
+  frame.
+- Old `sv1_` / `visual-ref-v1:` machine blocks are NOT migrated and NOT
+  dual-parsed: they remain ordinary readable text (the Tool Card still shows the
+  result) and grant no inline figure.
 
 Remote has no trusted complete-log seam and keeps the pre-existing Tool/Work
-behavior; it never gains an inferred origin.
+behavior; it never gains an inferred fork provenance.
 
 `src/domain/visual/placement.ts` owns the ONE placement projection. The
 Assistant's original `ContentBlock` text is the sole coordinate authority:
-strict `[dsh-visual-sv1_…]: <#>` top-level definitions are consumed as source
+strict `[dsh-visual-sv2_…]: <#>` top-level definitions are consumed as source
 spans, the renderer receives a single ordered `text | visual` sequence with
 explicit empty boundaries, and unconsumed published refs are appended to the
 answer body in first-publication order before the delivered-files tail. Ordinary
@@ -1100,35 +1442,50 @@ unsubscribed variant (`releaseUnused`) — a thumbnail variant other rows still
 watch is never dropped. The target width is derived from the real content grant
 (columns, rows and the admitted viewBox ratio inside the existing 2048px /
 4M-pixel budget), never from a fixed size and never by upscaling the thumbnail.
-Preview pixels render on Kitty and on Direct SIXEL once the terminal's own
-live DA1, cell-size and background facts admit it; iTerm2 remains intentionally
-outside the Viewer/SVG pixel scope. Without a usable protocol the page says
-`Preview unavailable` while Source and Copy remain fully usable. A Direct SIXEL
-thumbnail's clickable body is the Screen-committed footprint read at hit time,
-never the component's render-time candidate.
+Preview pixels render on Kitty, on Direct SIXEL once the terminal's own live
+DA1, cell-size and background facts admit it, and on Direct iTerm2 through the
+fork's OSC 1337 `Image` path (X080). Multiplexer panes and `PI_IMAGE_PROTOCOL=none`
+remain text-only. Without a usable protocol the page says `Preview unavailable`
+while Source and Copy remain fully usable. A Direct SIXEL thumbnail's clickable
+body is the Screen-committed footprint read at hit time, never the component's
+render-time candidate; SVG iTerm2 thumbnail pixels are intentionally
+non-clickable because OSC 1337 has no last-committed geometry authority in that
+surface, while the ordinary raster thumbnail keeps its legacy iTerm2 hit body.
+
+The isolated raster child runs on Linux under the verified virtual-memory cap.
+On macOS the tested finite `RLIMIT_AS` / `RLIMIT_DATA` settings returned
+`EINVAL`; no qualifying kernel-enforced hard bound was proven
+(`MAC-08A = HARD_MEMORY_BOUND_NOT_PROVEN`). The Owner accepted that residual
+native-memory-pressure risk for normal macOS preview capability.
+The process boundary, the 3,000 ms deadline, the single worker lane, the input
+and output budgets, close-before-settle and the Source fallback are the defenses
+that remain, and they are not claimed as an OOM guarantee. Windows and every
+other platform without the isolated lane keep the description/source fallback.
 
 ### Display `/copy` for consumed visual markers
 
-The durable Assistant body keeps its `[dsh-visual-…]: <#>` definition and the
-raw `/transcript` export keeps every byte. `/copy` is a DISPLAY sink, so it
+The durable Assistant body keeps its `[dsh-visual-…]: <#>` definition. The
+official `/transcript` Markdown renders that text block verbatim (the formatter
+never strips it); `/copy` is a DISPLAY sink, so it
 projects the same text the user reads: the latest official
 `assistant/message` is proven to be the committed final row of the SAME Session
 (the Folder's `assistantSettlementSeq(turn, step)` equals the event's `seq`,
 and `eligibleFinalAssistant()` returns the same turn/step/body), then the
 existing `collectPublishedVisuals` authority supplies the publications from the
-SAME verified origin ranges the render used (see "Fork-inherited history and
-origin provenance"), and the shared `planVisualPlacement()` yields the text
-spans. Only consumed marker spans are removed; line terminators, whitespace,
-CJK, emoji, tabs, ordinary definitions and code samples survive exactly, and
-the display-only definitions prefix never enters the payload. A marker-shaped
-body without a publication for its turn is ordinary prose and is copied
-unchanged. A fork-inherited answer whose origin window is not yet proven
-(pending or failed lineage) is an UNAVAILABLE copy: its markers may already be
-consumed by an ancestor publication, so the clipboard write never starts and no
-literal marker bytes are copied. A published marker whose final-row identity
-cannot be proven (torn fold, replaced body, ownership change) fails closed
-instead of guessing which bytes to drop. Remote's bounded-window last-assistant
-read is a different contract and stays byte-exact.
+SAME epoch-aware `PublishedVisual` projection the render used (see
+"Fork-inherited history and event epochs"), and the shared
+`planVisualPlacement()` yields the text spans. Only consumed marker spans are
+removed; line terminators, whitespace, CJK, emoji, tabs, ordinary definitions
+and code samples survive exactly, and the display-only definitions prefix never
+enters the payload. A marker-shaped body without a successful publication for
+its turn is ordinary prose and is copied unchanged. A fork-inherited answer
+with a successful inherited publication strips its consumed marker exactly like
+an own-generation answer; there is no ancestor read and no pending lineage
+stage to wait for. The copy is UNAVAILABLE when the visual snapshot itself is
+unavailable (inconsistent seed flag/count/marker cut) or when identity cannot
+be proven (torn fold, replaced body, ownership/currentness change), instead of
+guessing which bytes to drop. Remote's bounded-window last-assistant read is a
+different contract and stays byte-exact.
 
 ## Long user messages
 
@@ -1159,13 +1516,16 @@ standalone attention diagnostic ("Tool request not started", expanded recovery
 guidance). The requested name is recovered from the durable assistant tool-call
 block fenced by call id + turn + step. It has `callCount = 0` and is not Work,
 Action or stats input; the Host-owned renderer bypasses presenter/plugin paths.
-Markdown export states the fact, never invents a tool heading.
+The `/transcript` Markdown is the official Host-authored Session transcript, not
+a byte copy of this card, so it renders the durable tool result text and does
+not synthesize the TUI diagnostic heading.
 
 `TOOL_OUTCOME_UNKNOWN` keeps normal Tool-card semantics. Do not synthesize a
 `tool/call` or classify the diagnostic as an orphan Action.
 
-Authority: `src/domain/transcript/folder.ts`,
-`src/client/artifact/transcript-markdown.ts`.
+Authority: `src/domain/transcript/folder.ts` (the TUI card). The Markdown
+artifact authority is the official Host `formatSessionMarkdown` behind
+`SessionMarkdownPort` (see `docs/architecture/host-client.md`).
 Proof: `test/client/session-v4-tool-result.test.ts`.
 
 ## Fullscreen jump and scroll intent
@@ -1318,13 +1678,14 @@ independent occurrences with independent fold state.
   stale scope is never authorized against the replacement session.
 - **Protocol scope.** The leased AltScreen renders real pixels
   through Kitty and through Direct SIXEL after the terminal's own live DA1,
-  cell-size and background observations admit it. The pinned AltScreen disables
-  the iTerm2 image capability and its cursor-up framing is outside the fork's
-  ANSI width layer, so the iTerm2 workspace shows the metadata plus
-  `Preview unavailable`; native iTerm2 workspace pixels are deferred to
-  separate renderer/protocol work. Transcript thumbnails keep their per-surface
-  capability behavior; on Kitty and Direct SIXEL both their JPEG/WebP bodies
-  and the Viewer use the SAME bounded derivative above.
+  cell-size and background observations admit it, or through Direct iTerm2's
+  OSC 1337 `Image` path (X080). The pinned AltScreen no longer mutates the
+  process-wide iTerm2 capability. Multiplexer panes and
+  `PI_IMAGE_PROTOCOL=none` remain text-only. Transcript SVG iTerm2 thumbnail
+  pixels are painted without clickable pixel-body geometry; the explicit View
+  action remains the viewer entry. On Kitty and Direct SIXEL both JPEG/WebP
+  bodies and the Viewer use the SAME bounded derivative above; Direct iTerm2
+  carries the original MIME bytes through OSC 1337.
 
 Authority: `TuiApp` (occurrence projection, last-painted hit classifier, leased
 image workspace), `ImageThumbnail` (info/control/body geometry),

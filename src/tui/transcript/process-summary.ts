@@ -178,16 +178,26 @@ export function compactActionStatsOf(messages: readonly TranscriptMessage[]): Co
 export const COMPACT_ACTION_SUMMARY_MAX_TYPES = 3
 
 /**
- * The header stat parts (`7 actions`, `read ×3`, …, `+1`): types sorted
- * count-desc / name-asc, capped at {@link COMPACT_ACTION_SUMMARY_MAX_TYPES},
- * with a `+N` remainder counting the OTHER action SUBTYPES (not
- * occurrences). Focus and Activity share this ONE formatter (addendum v2
- * §12/§15); an empty aggregate yields no parts (never a fake `0 actions`).
+ * The header stat parts (`7 actions`, `read ×3`, …, `+1`): `send_message`
+ * first, then the remaining types count-desc / name-asc, capped at
+ * {@link COMPACT_ACTION_SUMMARY_MAX_TYPES}, with a `+N` remainder counting the
+ * OTHER action SUBTYPES (not occurrences). Focus and Activity share this ONE
+ * formatter (addendum v2 §12/§15); an empty aggregate yields no parts (never a
+ * fake `0 actions`).
+ *
+ * The `send_message` promotion is a header VISUAL priority only — it never
+ * changes the counted total, a type's count, the cap, the `+N` semantics or the
+ * chronology-based latest Action preview. With no `send_message` entry the
+ * order and output stay exactly as before.
  */
 export function compactActionStatParts(stats: CompactActionStats): string[] {
   if (stats.total <= 0) return []
   const parts = [`${stats.total} action${stats.total === 1 ? '' : 's'}`]
-  const types = [...stats.types.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+  const types = [...stats.types.entries()].sort((a, b) => {
+    if (a[0] === 'send_message' && b[0] !== 'send_message') return -1
+    if (b[0] === 'send_message' && a[0] !== 'send_message') return 1
+    return b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)
+  })
   for (const [name, count] of types.slice(0, COMPACT_ACTION_SUMMARY_MAX_TYPES)) {
     parts.push(`${name} ×${count}`)
   }

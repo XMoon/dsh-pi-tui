@@ -55,6 +55,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
   }
   const sessionLifecycle = {
+    resolveWorkspace: async () => ({}) as never,
     create: async () => ({}) as never,
     open: async () => ({}) as never,
     fork: async () => ({}) as never,
@@ -68,8 +69,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
       answerContinued: async () => 'not-continued' as const,
     },
     onApprovalRequest: () => {},
-    setApprovalPolicy: () => true,
-  }
+    }
   const catalog = {
     models: {
       available: () => true,
@@ -95,7 +95,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
       listHumanSkills: async () => undefined,
       resolveSkill: async () => ({ kind: 'unavailable' as const }),
       hostLoadsSkillBody: () => false,
-      onSkillsChange: () => {},
+      onSkillsChange: () => () => {},
     },
   }
   const config = {
@@ -123,6 +123,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     },
     account: {
       available: () => false,
+      isObservationCurrent: () => false,
       getState: async () => { throw new Error('account unavailable') },
       getProfile: async () => null,
       getBalance: async () => null,
@@ -131,7 +132,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
       startSignIn: async () => { throw new Error('account unavailable') },
       cancelSignIn: async () => { throw new Error('account unavailable') },
       signOut: async () => { throw new Error('account unavailable') },
-      hasRunningAccountTasks: () => false,
+      hasRunningAccountTasks: async () => false,
     },
     credentials: {
       recordsSupported: () => true,
@@ -146,6 +147,8 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     authorization: {
       available: () => false,
       listTargets: () => [],
+      refreshTargets: async () => {},
+      targetsState: () => 'unavailable' as const,
       begin: async () => ({ kind: 'unavailable' as const }),
       onEvent: () => () => {},
       respond: async () => {},
@@ -159,10 +162,30 @@ test('the Direct backend is the current production surface and serves EXACTLY th
       approvalOverrideOf: () => undefined,
       applyPermissionPreset: async () => ({ kind: 'applied' as const }),
     },
+    subagentLimits: {
+      read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+      refresh: async () => {},
+      mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+    },
     subagentModelSelection: {
-      available: () => false,
-      get: () => ({ enabled: false, allowedModels: [] }),
-      set: async () => {},
+      read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+      refresh: async () => {},
+      mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+    },
+    agentLoopSettings: {
+      read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+      refresh: async () => {},
+      mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+    },
+    shellExecutionSettings: {
+      read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+      refresh: async () => {},
+      mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+    },
+    sessionLogUpload: {
+      read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+      refresh: async () => {},
+      mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
     },
     presetDefault: {
       available: () => true,
@@ -174,13 +197,42 @@ test('the Direct backend is the current production surface and serves EXACTLY th
       read: async () => undefined,
       setSearchProvider: async () => {},
       setFetchProvider: async () => {},
+      restoreSearchProvider: async () => {},
+      restoreFetchProvider: async () => {},
       setSearchApiCount: async () => {},
       setSendOriginalQuestion: async () => {},
-      setSearchApiBaseURL: async () => {},
+      setSearchBilling: async () => {},
+      setFetchBilling: async () => {},
     },
     visualTools: {
       read: () => undefined,
       setEnabled: async (_enabled: boolean, _revision: number) => {},
+    },
+    webStartupPreference: {
+      read: () => undefined,
+      setAutoStart: async (_value: boolean, _revision: number) => {},
+    },
+    backendStartupPreference: {
+      read: () => undefined, readFresh: async () => undefined,
+      setBackend: async (_value: 'direct' | 'daemon', _revision: number) => {},
+    },
+    acpStartupPreference: {
+      read: () => undefined,
+      setAutoStart: async (_value: boolean, _revision: number) => {},
+    },
+    extensionConfigs: {
+      read: () => ({ kind: 'unavailable' as const, reason: 'no Host settings in this fixture' }),
+      refresh: async () => {},
+      mutate: async () => ({ kind: 'rejected' as const, reason: 'no Host settings in this fixture' }),
+    },
+    mcpServerSources: {
+      read: () => ({ kind: 'unavailable' as const, reason: 'no Host settings in this fixture' }),
+      refresh: async () => {},
+    },
+    mcpServerConfiguration: {
+      read: () => ({ kind: 'unavailable' as const, reason: 'no Host settings in this fixture' }),
+      refresh: async () => {},
+      mutate: async () => ({ kind: 'failed' as const, failure: { kind: 'rejected' as const, reason: 'no Host settings in this fixture' } }),
     },
   }
   const hostFile = {
@@ -191,7 +243,11 @@ test('the Direct backend is the current production surface and serves EXACTLY th
   const sessionArchive = {
     open: async () => ({ kind: 'unavailable' as const }),
   }
+  const sessionMarkdown: import('../../src/runtime/session-markdown-port.ts').SessionMarkdownPort = {
+    read: async () => ({ kind: 'unavailable' as const }),
+  }
   const hostCommand = {
+    stageFileReceipt: async () => ({ receiptId: 'receipt-stub' }),
     execute: async () => ({ kind: 'committed' as const, matched: false as const }),
   }
   const pluginManager = {
@@ -210,6 +266,9 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     waitForInstall: async () => null,
     cancelInstall: async () => ({ status: 'not-running' as const }),
     subscribeInstall: () => () => {},
+    listVersions: async () => ({ status: 'refused' as const, problem: 'not-updatable' as const, reason: 'the fixture has no updatable bundle', attempts: [] }),
+    updateBundle: async () => { throw new Error('updateBundle is not used by this fixture') },
+    subscribeUpdate: () => () => {},
     subscribeInvalidation: () => () => {},
   }
   const jobObservation = {
@@ -224,7 +283,78 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     stat: async () => ({ version: 'v1' }),
     read: async () => ({ stat: { version: 'v1' }, offset: 1, limit: 1, text: '', lines: 0, eof: true }),
   }
-  const backend = createDirectBackend(subagent, sessionReader, pendingInputReader, sessionWriter, sessionLifecycle, interaction, catalog, config, hostFile, sessionArchive, hostCommand, pluginManager, jobObservation, hostUserShell, deliveredFileRead)
+  const webAccess: import('../../src/runtime/web-access-port.ts').WebAccessPort = {
+    getStatus: async () => ({ state: 'unavailable', reason: 'test' }),
+    setEnabled: async () => ({ state: 'unavailable', reason: 'test' }),
+    getAuthenticatedUrl: async () => { throw new Error('test') },
+  }
+  const acpAccess: import('../../src/runtime/acp-access-port.ts').AcpAccessPort = {
+    getStatus: async () => ({ state: 'unavailable', reason: 'test' }),
+    setEnabled: async () => ({ state: 'unavailable', reason: 'test' }),
+    currentGeneration: () => undefined,
+    subscribeGeneration: () => () => {},
+  }
+  const sessionWorkspaceFacts: import('../../src/runtime/session-workspace-facts-port.ts').SessionWorkspaceFactsPort = {
+    readActivity: async () => [],
+    followWorkspaces: () => {
+      throw new Error('the fixture never follows Workspaces')
+    },
+  }
+  const schedule: import('../../src/runtime/schedule-port.ts').SchedulePort = {
+    catalog: async () => [],
+    list: async () => ({ items: [], shown: 0, total: 0, limit: 100, offset: 0 }),
+    view: async request => ({ id: request.id, code: 'schedule_not_found' as const }),
+    history: async request => ({ id: request.id, code: 'delivery_cursor_not_found' as const }),
+    deliveryLimits: async () => ({ newSessionIntervalSeconds: 60 }),
+    create: async () => { throw new Error('the fixture never creates a task') },
+    edit: async () => { throw new Error('the fixture never edits a task') },
+    run: async () => { throw new Error('the fixture never runs a task') },
+    deleteInactive: async () => ({ deleted: 0 }),
+    onChanged: () => () => {},
+  }
+  const hostDirectoryBrowse: import('../../src/runtime/host-directory-browse-port.ts').HostDirectoryBrowsePort = {
+    list: async () => ({ kind: 'unavailable' as const, reason: 'the fixture never browses the Host', code: 'directory-picker/unavailable' }),
+  }
+  // M6-1 F8: the exact-Session policy port (fail-closed fixture).
+  const sessionPolicy: import('../../src/runtime/session-policy-port.ts').SessionPolicyPort = {
+    read: async sessionId => ({ kind: 'unavailable', sessionId, reason: 'session-not-live' }),
+    setApproval: async () => ({ kind: 'refused', reason: 'session-not-live' }),
+  }
+  // FR1: the exact-Root Team mode port (fail-closed fixture).
+  const teamMode: import('../../src/runtime/team-mode-port.ts').TeamModePort = {
+    read: () => ({ kind: 'unavailable', reason: 'no live Team authority in this fixture' }),
+    subscribe: () => () => {},
+    setEnabled: async () => ({ kind: 'rejected', reason: 'no live Team authority in this fixture' }),
+  }
+  // FR2: the exact-Root READ-ONLY Team board port (fail-closed fixture).
+  const teamBoard: import('../../src/runtime/team-board-read-port.ts').TeamBoardReadPort = {
+    read: () => ({ kind: 'unavailable', cause: 'authority-missing', reason: 'no live Team board in this fixture' }),
+    subscribe: () => () => {},
+  }
+  // FR3: the MCP server port (fail-closed fixture): no Host manager here.
+  const mcpServers: import('../../src/runtime/mcp-server-port.ts').McpServerPort = {
+    watch: async function* () {
+      yield { kind: 'invalidated' as const, reason: 'unavailable' as const }
+    },
+    probe: async (_name, _signal) => ({
+      kind: 'failed',
+      generation: {},
+      failure: { kind: 'unavailable', reason: 'no Host MCP manager in this fixture' },
+    }),
+    restart: async (_name, _signal) => ({
+      kind: 'failed',
+      generation: {},
+      failure: { kind: 'unavailable', reason: 'no Host MCP manager in this fixture' },
+    }),
+  }
+  // PR-5/MAC-09 v2: the CUA access port (fail-closed fixture).
+  const cuaAccess = {} as unknown as import('../../src/runtime/cua-access-port.ts').CuaAccessPort
+  // S5-PR3, M5-U-A, S5-PR4 and Session Workspace PR1 add FOUR independent
+  // required ports: the official Session Markdown read, the UI-neutral
+  // read-authority facts, the Host Schedule management surface and the
+  // read-only Host directory browse. All stay wired and asserted below; none
+  // replaces another.
+  const backend = createDirectBackend(subagent, sessionReader, pendingInputReader, sessionWriter, sessionLifecycle, interaction, catalog, config, hostFile, sessionArchive, sessionMarkdown, hostCommand, pluginManager, jobObservation, hostUserShell, { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) }, deliveredFileRead, webAccess, acpAccess, sessionWorkspaceFacts, schedule, hostDirectoryBrowse, sessionPolicy, teamMode, teamBoard, mcpServers, cuaAccess)
   assert.equal(backend.kind, 'direct')
   assert.equal(backend.subagent, subagent)
   assert.equal(backend.sessionReader, sessionReader)
@@ -236,9 +366,17 @@ test('the Direct backend is the current production surface and serves EXACTLY th
   assert.equal(backend.config, config)
   assert.equal(backend.hostFile, hostFile)
   assert.equal(backend.sessionArchive, sessionArchive)
+  assert.equal(backend.sessionMarkdown, sessionMarkdown)
   assert.equal(backend.hostCommand, hostCommand)
   assert.equal(backend.pluginManager, pluginManager)
   assert.equal(backend.jobObservation, jobObservation)
+  assert.equal(backend.sessionWorkspaceFacts, sessionWorkspaceFacts)
+  assert.equal(backend.schedule, schedule)
+  assert.equal(backend.hostDirectoryBrowse, hostDirectoryBrowse)
+  assert.equal(backend.teamMode, teamMode)
+  assert.equal(backend.teamBoard, teamBoard)
+  assert.equal(backend.cuaAccess, cuaAccess)
+  assert.equal(backend.mcpServers, mcpServers)
   // Truthful advertisement: the backend serves EXACTLY the implemented
   // ports — nothing is advertised without a port.
   for (const capability of DIRECT_IMPLEMENTED_CAPABILITIES) {

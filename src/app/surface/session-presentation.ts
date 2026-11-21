@@ -32,7 +32,8 @@
 import { compactionBracketFromLog, foldLiveMeasureEvent, measureEventKey, workingFromLog } from './compaction-presentation.ts'
 import type { ContextMeasureReason } from '../../domain/status/context-measurement.ts'
 import { foldGoal, goalTextOf } from '../../domain/status/derive-goal.ts'
-import { recallHistoryForSession, type ParsedHistoryRecord } from '../../client/history/store.ts'
+import { HISTORY_RECALL_LIMIT, type ParsedHistoryRecord } from '../../client/history/store.ts'
+import type { SessionRecallSeed } from '../../client/history/search.ts'
 import { hydrateSessionUi } from './session-ui-hydrate.ts'
 import { StatsFolder } from '../../domain/status/stats.ts'
 import { applyStreamingToolPreviewEvent, applyStreamingToolPreviewInput, clearStreamingToolPreviewsForStep, type StreamingToolPreview, type ToolSummaryKeys } from './streaming-tool-preparing.ts'
@@ -45,6 +46,7 @@ import type {
   PresentationWindowRefoldProof,
 } from '../../runtime/presentation-read-port.ts'
 import type { TodoItem } from '../../tui-app.ts'
+import { runDetached } from '../../runtime/process/tasks.ts'
 import type { SurfaceDisplaySeam } from './display-seam.ts'
 import type { RoutedSessionEvent, SurfaceMainPresentation, SurfaceRuntime } from './runtime.ts'
 
@@ -93,6 +95,12 @@ export interface RemoteHydrationOutcome {
   readonly working: boolean
   readonly proven: boolean
   readonly transportToken: unknown
+  readonly hasMore: boolean
+}
+
+export interface RemoteWindowRehydrateOutcome {
+  readonly proof: PresentationWindowRefoldProof
+  readonly hasMore: boolean
 }
 
 /** The presentation event shape: exactly the event the transcript fold accepts,
@@ -125,6 +133,9 @@ export interface SessionPresentationDeps<Event extends SessionPresentationEvent>
   readonly summaryKeys: ToolSummaryKeys
   /** True once the runner is disposing: no hydration may start. */
   readonly isCleanedUp: () => boolean
+  /** The runner lifecycle signal: teardown aborts any in-flight cold history
+   *  scan (the per-hydration controller covers session replacement). */
+  readonly lifecycleSignal?: AbortSignal
   /** F10 (round 4): re-derive the footer status from the CURRENT folds —
    *  the composition root's `refreshStatusCheap` (it owns the semantic
    *  derivation and the commit). The re-hydrate path calls it after
@@ -169,6 +180,22 @@ export interface SessionPresentationDeps<Event extends SessionPresentationEvent>
     readonly currentCwd: () => string
     readonly records: (cwd: string) => readonly ParsedHistoryRecord[]
     readonly setLastContent: (content: string | undefined) => void
+    /** The SAME Client-local history source's cold cross-cwd session recall
+     * reader (no content dedupe, all client history files). */
+    readonly readSessionRecall: (sessionId: string, signal?: AbortSignal) => Promise<SessionRecallSeed>
+  }
+  /**
+   * The exact ownership currentness fence for the asynchronous history read:
+   * the generation is captured BEFORE the await and re-checked after it. On
+   * the Remote branch the transport token (Connection generation + exact
+   * binding) is an additional identity that can roll over without a TUI owner
+   * commit.
+   */
+  readonly currentness: {
+    readonly captureGeneration: () => number
+    readonly isStillCurrent: (sessionId: string, generation: number) => boolean
+    readonly captureTransportToken?: (sessionId: string) => unknown
+    readonly isTransportTokenCurrent?: (sessionId: string, token: unknown) => boolean
   }
   /** Late-bound command catalog registration (A5b-3 owns it). */
   readonly commands: {
@@ -195,9 +222,9 @@ export interface SessionPresentationDeps<Event extends SessionPresentationEvent>
     readonly read: (sessionId: string) => Promise<PresentationReadSnapshot | undefined>
     /** The official `running` bit of the exact retained binding. */
     readonly running: (sessionId: string) => boolean | undefined
-    /** The official `plan` projection active bit of the exact retained
-     *  binding (absent capability reads inactive). */
-    readonly plan?: (sessionId: string) => boolean | undefined
+    /** The official `plan` projection wire view (`{active, pending}`) of the
+     *  exact retained binding (absent capability reads inactive). */
+    readonly plan?: (sessionId: string) => { readonly active: boolean; readonly pending: boolean } | undefined
     /** The official CURRENT-VALUE facts (title/goal/todos/cwd) of the exact
      *  retained session: their source events may precede the bounded window,
      *  so the projection — never the window — owns them. On the Remote branch
@@ -295,7 +322,7 @@ export interface SessionPresentation<Event extends SessionPresentationEvent> {
   rehydrateFromWindow(
     sessionId: string,
     options?: { readonly measure?: boolean },
-  ): Promise<PresentationWindowRefoldProof | undefined>
+  ): Promise<RemoteWindowRehydrateOutcome | undefined>
   /** Record a measure boundary the LIVE routing handled, so a later window
    *  reconcile keeps an already-measured boundary measurement-free. */
   noteLiveMeasureEvent(sessionId: string, event: { readonly type: unknown; readonly data?: unknown }): void
@@ -397,6 +424,11 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
   
   const callArgs = new Map<string, string>()
 
+  /** The ONE in-flight cold history scan of the current hydration. A session
+   *  replacement, a generation bump or teardown aborts it; its stale seed can
+   *  never reach the newer owner's recall kernel. */
+  let historyRecallController: AbortController | undefined
+
   /** The newest compaction boundary each session's LAST COMMITTED window showed.
    *  A reconcile compares against it to notice a lifecycle event the outage
    *  swallowed (including a bracket whose start AND end both landed off-window),
@@ -427,6 +459,8 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
   }
 
   const resetForGeneration = (): void => {
+    historyRecallController?.abort()
+    historyRecallController = undefined
     callArgs.clear()
     lastCommittedMeasureEvent.clear()
     liveMeasureBracket.clear()
@@ -435,6 +469,9 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // pending calls from the old session would consume viewer match slots,
     // and dead callId→child maps would silently disable the auto-pop.
     deps.viewer.resetAutoPop()
+    // Remote current coverage is subject-owned: never carry another Session's
+    // `hasMore` fact across a generation while the new Reader hydrates.
+    if (deps.remote !== undefined) deps.surface.setTranscriptSearchCoverage('loaded-history')
     // A4-8: the search presentation state is surface-owned.
     deps.surface.resetSearchPresentation()
     windowController.latest()
@@ -493,6 +530,74 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
    * plus every switch await the coordinator refresh themselves.
    */
   
+  /** The exact identity a cold history read was started under. */
+  interface HydrationRecallFence {
+    readonly generation: number
+    readonly transportToken: unknown
+  }
+
+  /** A cold history seed paired with the identity it was read under. */
+  interface FencedSessionRecallSeed {
+    readonly seed: SessionRecallSeed
+    readonly fence: HydrationRecallFence
+    /** A global reader failure was replaced by the current-cwd fallback. */
+    readonly degraded?: boolean
+  }
+
+  /**
+   * Read the cold cross-cwd session recall seed under ONE exact ownership
+   * fence. The generation (and, on Remote, the transport token) is captured
+   * BEFORE the read; the caller re-validates the returned fence in the SAME
+   * synchronous stack as the recall commit. A global read failure is
+   * diagnosed and falls back to the SAME session's current-cwd records (still
+   * passed through the kernel's writeId normalization) — never to an empty
+   * history and never to an unfiltered cwd pool.
+   */
+  const readSessionRecallForHydration = async (
+    sessionId: string,
+    signal: AbortSignal,
+  ): Promise<FencedSessionRecallSeed | undefined> => {
+    const fence: HydrationRecallFence = {
+      generation: deps.currentness.captureGeneration(),
+      transportToken: deps.remote === undefined
+        ? undefined
+        : deps.currentness.captureTransportToken?.(sessionId),
+    }
+    try {
+      return { seed: await deps.history.readSessionRecall(sessionId, signal), fence }
+    } catch (error) {
+      if (isAbortError(error)) return undefined
+      deps.diag.warn('session recall read failed; falling back to the current cwd file', {
+        sessionId,
+        error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+      })
+      return { seed: currentCwdSessionRecallSeed(sessionId), fence, degraded: true }
+    }
+  }
+
+  /** Whether the captured cold-read identity is still the exact current owner
+   *  (and Remote transport). MUST be called synchronously just before the
+   *  recall commit — never before an await. */
+  const isHistoryRecallFenceCurrent = (sessionId: string, fence: HydrationRecallFence): boolean => {
+    if (deps.isCleanedUp()) return false
+    if (!deps.currentness.isStillCurrent(sessionId, fence.generation)) return false
+    if (fence.transportToken !== undefined
+      && deps.currentness.isTransportTokenCurrent?.(sessionId, fence.transportToken) === false) return false
+    return true
+  }
+
+  /** The current cwd file's session rows in the seed shape (the documented
+   *  fallback when the cross-cwd reader fails globally). */
+  const currentCwdSessionRecallSeed = (sessionId: string): SessionRecallSeed => {
+    const records = deps.history.records(deps.history.currentCwd())
+    const scoped = records.filter(record => record.sessionId === sessionId).slice(-HISTORY_RECALL_LIMIT)
+    const newestFirst = [...scoped].reverse()
+    return {
+      entries: newestFirst.map(record => record.content),
+      writeIds: newestFirst.map(record => record.writeId),
+    }
+  }
+
   /**
    * The shared cold-hydrate body both branches converge on (M3-4 PR2): fold
    * the events into the transcript/stats folders, replay the live baseline,
@@ -500,13 +605,24 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
    * compaction) and commit/repaint. The CALLER owns the event-source
    * resolution (Direct: the full Agent log + its live baseline; Remote: the
    * bounded reader window + its live inputs) and the working/plan values.
+   *
+   * `onLiveFoldInstalled` is the ONE internal Fold-ready handoff seam: it runs
+   * SYNCHRONOUSLY, within this body, at the exact statement where the hydrated
+   * folder/window/stats become the live routing targets (before the first
+   * `await` — this body has none). The Direct caller closes the opening journal
+   * there; see `initLiveSession` for the lost-event window that placement
+   * closes. Remote passes nothing: its live ingress owns delivery and the
+   * composition root closes the journal after the subscription installs.
    */
   const hydratePresentation = async (input: {
     readonly sessionId: string
     readonly cwd: string | undefined
     readonly events: readonly Event[]
     readonly liveBaseline: readonly AssistantLiveInput[]
-    readonly planActive: boolean
+    /** The official plan fact. Direct folds the logged state (boolean); the
+     * Remote branch carries the projection's pending state too when the
+     * official source reports it. */
+    readonly planActive: boolean | { readonly effective: boolean; readonly pending?: boolean }
     readonly working: boolean
     /**
      * The official CURRENT-VALUE facts (M3-4 PR2). Present on the Remote
@@ -516,7 +632,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
      * Absent on Direct, whose `events` is the complete log.
      */
     readonly facts?: PresentationCurrentFacts
-  }): Promise<void> => {
+  }, onLiveFoldInstalled?: () => void): Promise<void> => {
     const events = input.events
     // This is the single cold-hydration path for a live session. Do not
     // pre-apply the same event log during runner wiring: a resumed session
@@ -529,6 +645,17 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     for (const liveInput of input.liveBaseline) {
       applyAssistantLiveInput(folder, statsFolder, mainStreamingToolPreviews, liveInput, deps.summaryKeys)
     }
+    // THE HANDOFF BOUNDARY (Direct): `folder`/`windowController`/`statsFolder`
+    // above are now the live routing targets, so a `session/event` delivered
+    // from this point on is applied incrementally by `routeSessionEvent`.
+    // Closing the opening journal HERE — still inside this synchronous body,
+    // never after `await hydratePresentation()` and never at the end of the
+    // `/new` transaction — makes cut → fold-install → close atomic: an event
+    // that arrives while the transition still settles its catalog/presentation
+    // tail is delivered once, in seq order, instead of being recorded into a
+    // journal whose cut was already consumed (and then discarded by
+    // `clearOpening`).
+    onLiveFoldInstalled?.()
     deps.diag.debug('session bootstrap scan', {
       scan: 'transcript',
       eventCount: events.length,
@@ -539,7 +666,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
       eventCount: events.length,
       elapsedMs: Number(hydrated.scanTimings.statsMs.toFixed(3)),
     })
-    deps.surface.display.commitStatusFacts({ planMode: input.planActive, working: input.working, busy: input.working })
+    deps.surface.display.commitStatusFacts({ ...planFacts(input.planActive), working: input.working, busy: input.working })
     if (input.facts !== undefined) {
       // REMOTE: the official projections ARE the current-value authority. An
       // unavailable one is OMITTED — the bounded window never stands in for a
@@ -597,26 +724,51 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // the all-directory search): a legacy-only history file in this cwd
     // becomes recoverable immediately, even if it predates this process.
     if (input.cwd !== undefined && input.cwd !== '') deps.history.rememberCwd(input.cwd)
-    // The recall history is per-workspace AND per-session: REPLACE it
-    // with the live session's rows ONLY (the CWD file's rows filtered to
-    // this sessionId — session-scoped editor recall), so ↑/↓ in a live
-    // session never recalls another session's inputs from the same cwd.
-    // The CANONICAL last row stays the cwd file's actual last row (the
-    // persistence dedupe anchor stays cwd-scoped — docs/architecture/input-history.md);
-    // only the EDITOR's recall is the session projection.
+    // The current cwd file's ACTUAL last row remains the persistence dedupe
+    // anchor (the write policy stays cwd-scoped). It is deliberately NOT used
+    // as the cross-cwd recall seed: the session's rows may live in several
+    // cwd files, and its true newest rows are the async reader's job below.
     const historyCwd = deps.history.currentCwd()
     const historyRecords = deps.history.records(historyCwd)
     deps.history.setLastContent(historyRecords.at(-1)?.content)
-    // File order is oldest-first; TuiApp's recall API takes newest-first,
-    // so the session-filtered projection is reversed at the seed.
-    const sessionRecall = recallHistoryForSession(historyRecords, input.sessionId)
-    deps.surface.display.resetInputHistory([...sessionRecall].reverse(), input.sessionId)
     // Session identity commit (create/resume/switch): the title AND the
     // terminal-local cwd follow the NEW session.
     deps.status.refreshTerminalTitle()
     deps.status.refreshTerminalCwd()
     deps.status.updateWelcomeCard()
     deps.commands.register()
+    // Cold cross-cwd session recall: ONE detached read per hydration. The
+    // synchronous hydration (first frame, command registration, input
+    // acceptance) is never blocked on the history scan; the scope stays open
+    // and keeps its accepted inputs provisional until this read commits. A
+    // superseded read is dropped before it can touch the kernel.
+    historyRecallController?.abort()
+    historyRecallController = undefined
+    if (input.sessionId !== undefined) {
+      const sessionId = input.sessionId
+      const controller = new AbortController()
+      historyRecallController = controller
+      // Teardown (lifecycle abort) and owner replacement (controller.abort())
+      // both cancel the scan; the fence below rejects a result that survived
+      // an abort race.
+      const signal = deps.lifecycleSignal === undefined
+        ? controller.signal
+        : AbortSignal.any([controller.signal, deps.lifecycleSignal])
+      runDetached('session history recall', async () => {
+        const result = await readSessionRecallForHydration(sessionId, signal)
+        if (result === undefined || historyRecallController !== controller) return
+        // SAME synchronous stack as the commit: no await between this exact
+        // generation/transport re-check and the kernel reset.
+        if (!isHistoryRecallFenceCurrent(sessionId, result.fence)) return
+        if (result.degraded === true) {
+          deps.surface.display.notify(
+            'Input history recall could not read every directory; using the current directory.',
+            'error',
+          )
+        }
+        deps.surface.display.resetInputHistory(result.seed.entries, sessionId, result.seed.writeIds)
+      }, { diag: deps.diag, sessionId: () => sessionId })
+    }
   }
 
   const initLiveSession = async (agent: LiveSessionAgent<Event>): Promise<void> => {
@@ -641,7 +793,13 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
       liveBaseline: deps.direct.assistantStreamBaselineFor(agent),
       planActive: deps.direct.planActive(agent),
       working: workingFromLog(events),
-    })
+      // The Direct opening journal stops RECORDING at the exact Fold-install
+      // boundary of this hydration: the rest of the transition (the awaited
+      // catalog refresh, the switch report) may legitimately produce Session
+      // events, and those must route into the freshly installed live folds
+      // instead of an already-consumed cut. `clearOpening(token)` keeps its
+      // final cleanup job (it drops the entry itself).
+    }, () => deps.surface.openingJournal.close(agent.session.id))
   }
 
   /**
@@ -714,20 +872,42 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
       planActive: planActiveRemote(sessionId),
       working,
     })
+    // The reader fence above is the visible-fold commit boundary. A transport
+    // rollover after that point does not relabel or erase this committed
+    // snapshot: the returned token stays the captured (possibly now stale)
+    // identity, so the working-fold cache correctly misses on its next read.
+    // The official Reader coverage describes the rows just committed to the
+    // display and follows the same owner-generation fence as the caller.
     // The committed window revision: the caller feeds it to the live ingress
     // so the hydrate→subscribe gap is detected and recovered (never lost).
     // The proven fold rides along so the caller seeds its compaction cache on
     // the FIRST hydrate (no first-use running window) — stamped with the
     // SAME transport token this read was fenced under, so a later caller can
     // never label an old window's fold with a newer transport identity.
-    return { revision: snapshot.revision, working, proven: foldProven, transportToken: fenceTransport }
+    return { revision: snapshot.revision, working, proven: foldProven, transportToken: fenceTransport, hasMore: snapshot.hasMore }
   }
 
   /** The Remote-branch plan fact: the official `plan` projection read is
    *  injected by the bootstrap (status facts bundle); absent deps read
    *  inactive. Kept as a late-bound read so the projection updates between
    *  hydration and commit are honored. */
-  const planActiveRemote = (sessionId: string): boolean => deps.remote?.plan?.(sessionId) ?? false
+  const planActiveRemote = (
+    sessionId: string,
+  ): { readonly effective: boolean; readonly pending?: boolean } => {
+    const plan = deps.remote?.plan?.(sessionId)
+    if (plan === undefined) return { effective: false }
+    return plan.pending ? { effective: plan.active, pending: true } : { effective: plan.active }
+  }
+
+  /** Split one official plan fact into the two committed status facts: the
+   * boolean mode and (only when the official view reports it) the pending
+   * selection. */
+  const planFacts = (
+    plan: boolean | { readonly effective: boolean; readonly pending?: boolean },
+  ): { planMode: boolean; planPending?: boolean } =>
+    typeof plan === 'boolean'
+      ? { planMode: plan }
+      : { planMode: plan.effective, ...(plan.pending === undefined ? {} : { planPending: plan.pending }) }
 
   /**
    * Re-hydrate the main transcript from the CURRENT reader window after an
@@ -745,7 +925,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
   const rehydrateFromWindow = async (
     sessionId: string,
     options?: { readonly measure?: boolean },
-  ): Promise<PresentationWindowRefoldProof | undefined> => {
+  ): Promise<RemoteWindowRehydrateOutcome | undefined> => {
     if (deps.isCleanedUp()) return undefined
     if (deps.remote === undefined) return undefined
     const fenceGeneration = deps.remote.captureGeneration?.()
@@ -802,7 +982,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // `applyResumedCompaction(false)` clears only the compaction phase, so
     // without this commit a stale working/busy would stay on screen after an
     // outage-spanning compaction/turn end.
-    deps.surface.display.commitStatusFacts({ planMode: planActive, working, busy: working })
+    deps.surface.display.commitStatusFacts({ ...planFacts(planActive), working, busy: working })
     deps.surface.applyResumedCompaction(resumedCompaction.id, resumedCompaction.active, resumedCompaction.phase)
     // Same parity as the cold hydrate: the routing's bracket is this window's
     // now, so the LIVE tracker must agree — otherwise a later matched live end
@@ -845,11 +1025,12 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
       fold: working,
       proven: foldProven,
     })
+    const outcome = { proof, hasMore: snapshot.hasMore }
     deps.refreshStatusCheap()
     deps.surface.repaint()
     // The committed proof: the caller acknowledges the ingress with it, so
     // incremental delivery resumes exactly at the revision the fold now holds.
-    return proof
+    return outcome
   }
 
   const mainFolder = (): TranscriptFolder => folder
@@ -884,4 +1065,9 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     noteLiveMeasureEvent,
     resetForGeneration,
   }
+}
+
+/** An aborted async read is a discarded read, never a failure to report. */
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError'
 }

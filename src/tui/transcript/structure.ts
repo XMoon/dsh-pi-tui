@@ -17,12 +17,13 @@
  *
  * A Work span may CARRY a foldable Context row as a structural part without
  * making it Process: the row keeps its Context semantics, its source bytes and
- * its own disclosure, but no longer splits one turn's Activity/Thought. Three
+ * its own disclosure, but no longer splits one turn's Activity/Thought. Four
  * narrow forms qualify: a `form:'snapshot'` singleton / snapshot-only raw
- * cluster, a `tool-jobs` Notice with durable same-turn `next-step` delivery
- * evidence, and an `agent-message` relay with the same durable same-turn
- * next-step evidence. A mixed `instructions`/`catalog`/`snapshot` cluster and
- * every other Notice/relay form stay independent Context boundaries.
+ * cluster, a `tool-jobs` Notice, an `agent-message` relay and a
+ * `subagent-settled` Notice, each of the last three with durable same-turn
+ * `next-step` delivery evidence. A mixed
+ * `instructions`/`catalog`/`snapshot` cluster and every other Notice/relay form
+ * stay independent Context boundaries.
  *
  * The projector is a single forward pass plus the linear ambient-clustering
  * pass (O(n)); wrappers are freshly allocated each call, but their
@@ -189,10 +190,37 @@ export function isWorkingAgentRelay(
 }
 
 /**
+ * Whether one row is a same-turn delivered subagent settlement Notice
+ * (`subagent-settled` + `notice`) with durable next-step delivery evidence.
+ *
+ * This is the narrow sibling of {@link isWorkingToolJobsNotice}: the
+ * producer-declared `sourceKind === 'subagent-settled'` AND `form === 'notice'`
+ * are both required, plus the fold's presentation-only `sameTurnNextStep` flag
+ * derived from the durable `agent/inbox/spliced` insert/claim identity chain.
+ * The settlement's textual outcome (`completed` / `error` / `aborted` / …) is
+ * deliberately NOT inspected: every settlement that arrived through the same
+ * proven delivery is carried the same way, and its raw body is never rewritten.
+ * A `next-turn` wakeup, a foreign/legacy log, a crossed source/form pair or a
+ * missing claim carries no flag and therefore stays an independent Context
+ * boundary.
+ */
+export function isWorkingSubagentSettledNotice(
+  message: TranscriptMessage,
+): message is Extract<TranscriptMessage, { kind: 'system' }> & { context: true } {
+  if (!isSurfacedContext(message)) return false
+  const presentation = message.contextPresentation
+  return presentation !== undefined
+    && presentation.sameTurnNextStep === true
+    && presentation.sourceKind === 'subagent-settled'
+    && presentation.form === 'notice'
+}
+
+/**
  * The complete narrow display-layer eligibility: may this Context row be
  * carried by the same-turn Work/Thought instead of ending it? Only a foldable
- * Snapshot, a proven Working `tool-jobs` Notice or a proven same-turn Agent
- * relay qualifies; every other surfaced Context remains a boundary.
+ * Snapshot, a proven Working `tool-jobs` Notice, a proven same-turn Agent
+ * relay or a proven same-turn subagent settlement Notice qualifies; every
+ * other surfaced Context remains a boundary.
  */
 export function isFoldableWorkContext(
   message: TranscriptMessage,
@@ -201,6 +229,7 @@ export function isFoldableWorkContext(
   return isFoldableSnapshotContext(message, clusterByMember)
     || isWorkingToolJobsNotice(message)
     || isWorkingAgentRelay(message)
+    || isWorkingSubagentSettledNotice(message)
 }
 
 /**

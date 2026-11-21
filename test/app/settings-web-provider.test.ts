@@ -22,9 +22,10 @@ import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import test, { afterEach } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
-import { visibleWidth } from '@xmoon76/pi-tui'
+import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import type { TuiCommandRunner } from '../../src/commands.ts'
 import { TuiApp } from '../../src/tui-app.ts'
+import { WebSettingsPage, type WebSettingsFacts } from '../../src/tui/panels/web-settings-page.ts'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import type { TuiSettingsDoc, WebProviderSettings } from '../../src/runtime/config-port.ts'
@@ -35,6 +36,7 @@ import { settingsDirectPageConfig } from '../support/settings-direct-page-stubs.
 import { selectSettingsCategory } from '../support/settings-rail.ts'
 import { SettingsRegistry } from '../../src/extension/internal/settings-registry.ts'
 import { ThemeRegistry } from '../../src/extension/internal/theme-registry.ts'
+import { unconfiguredPolicyObservation } from '../support/session-policy-fake.ts'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
@@ -64,6 +66,45 @@ const DEFAULT_DOC: TuiSettingsDoc = {
   wheelScrollLines: '3',
 }
 
+/** The `web` descriptor's layer facts one page case pins: `baseId` is the
+ *  deployment layer, a present `userId` means the USER layer really owns the
+ *  field (its raw id; `undefined` models a present-but-empty USER value). */
+function providerLayers(options: {
+  readonly searchBase?: string
+  readonly searchUser?: { readonly id?: string }
+  readonly fetchBase?: string
+  readonly fetchUser?: { readonly id?: string }
+} = {}): WebProviderSettings['providerSelection'] {
+  return {
+    search: {
+      baseId: options.searchBase,
+      userSet: options.searchUser !== undefined,
+      userId: options.searchUser?.id,
+    },
+    fetch: {
+      baseId: options.fetchBase,
+      userSet: options.fetchUser !== undefined,
+      userId: options.fetchUser?.id,
+    },
+  }
+}
+
+/** Complete a page settings literal with the layer projection its case means.
+ *  The default is an inherited deployment value (no USER override). */
+function webSettingsOf(
+  settings: Omit<WebProviderSettings, 'providerSelection'> & {
+    readonly providerSelection?: WebProviderSettings['providerSelection']
+  },
+): WebProviderSettings {
+  return {
+    ...settings,
+    providerSelection: settings.providerSelection ?? providerLayers({
+      searchBase: settings.searchProvider,
+      fetchBase: settings.fetchProvider,
+    }),
+  }
+}
+
 interface Harness {
   readonly vt: VirtualTerminal
   /** Every semantic Web write, in order. */
@@ -82,10 +123,6 @@ interface Harness {
     readUndefined: boolean
     /** Artificial delay for one Host write (the FIFO order proof). */
     writeDelayMs: number
-    /** The value the Host actually KEEPS after a successful endpoint write (the
-     *  official store's canonical form of the submitted base); undefined = the
-     *  submitted URL verbatim. */
-    endpointStoredValue: string | undefined
     /** The provider id the Host actually KEEPS after a successful mutation (a
      *  competing external writer / the official store's own answer); undefined =
      *  the submitted id verbatim. */
@@ -110,6 +147,10 @@ interface Harness {
   /** Hold EVERY authority read issued until the returned release is called
    *  (a page entry starts its own fresh read; a one-shot gate would miss it). */
   readonly holdAllReads: () => () => void
+  /** Hold the NEXT official setter call AFTER it has really started (its
+   *  `begin:` record is in {@link log} until the returned release is called:
+   *  the causal FIFO witness (a queued second write cannot start). */
+  readonly holdNextWrite: () => () => void
   /** Move the LIVE backend readiness (the page must gate on it). */
   readonly setReadiness: (next: 'ready' | 'stale' | 'unavailable') => void
   readonly view: () => string
@@ -121,13 +162,29 @@ function setup(options: {
   readonly columns?: number
   readonly rows?: number
   readonly available?: boolean
+  /** The stored `web.searchProvider`. Explicit `undefined` IS the Host's
+   *  AUTOMATIC routing state and is kept as `undefined` — never replaced by
+   *  the historical default provider; omit the field for the stored default. */
   readonly searchProvider?: string
+  /** The stored `web.fetchProvider` (default `http`; the shipped deployment
+   *  value is also the default layer). */
+  readonly fetchProvider?: string
   /** The stored `web-deepseek-api.count` (a value outside the presets stays). */
   readonly count?: number
   /** Whether the official credential reference reads as configured. */
   readonly configured?: boolean
   /** Whether the official credential STORE is mounted (`credentials.available`). */
   readonly credentialStore?: boolean
+  /** The rc.2 YAML-only advanced override facts the Host descriptor reports. */
+  readonly advanced?: WebProviderSettings['advanced']
+  /** The exact `web` layer facts the Host read reports. Defaults to the rc.5
+   *  shipped base (no Search provider) plus a USER pin for a stored Search id,
+   *  and the shipped Fetch base (`http`, no USER override). */
+  readonly selection?: WebProviderSettings['providerSelection']
+  /** The layer facts the Host reports AFTER an official reset (the default is
+   *  the effective "single USER field removed" answer; a case modelling the
+   *  rc.5 sibling-residual behaviour supplies its own). */
+  readonly restoreSelection?: WebProviderSettings['providerSelection']
 }
 = {}): Harness {
   const columns = options.columns ?? 140
@@ -140,6 +197,7 @@ function setup(options: {
   const settledWrites: string[] = []
   let readGate: { readonly promise: Promise<void>; readonly release: () => void } | undefined
   let readHoldAll: { readonly promise: Promise<void>; readonly release: () => void } | undefined
+  let writeGate: { readonly promise: Promise<void>; readonly release: () => void } | undefined
   let readsIssued = 0
   let readsSettled = 0
   let readiness: 'ready' | 'stale' | 'unavailable' = 'ready'
@@ -151,14 +209,27 @@ function setup(options: {
     /** The message a throwing read reports (may carry hostile control text). */
     readErrorMessage: 'settings descriptor unreadable',
     writeDelayMs: 0,
-    endpointStoredValue: undefined as string | undefined,
     keptProviderValue: undefined as string | undefined,
     web: {
-      searchProvider: options.searchProvider ?? 'deepseek-official',
-      fetchProvider: 'http',
-      api: { baseURL: 'https://api.deepseek.com/v1/tools', count: options.count ?? 10, sendOriginalQuestion: true },
+      searchProvider: 'searchProvider' in options ? options.searchProvider : 'deepseek-official',
+      fetchProvider: options.fetchProvider ?? 'http',
+      providerSelection: structuredClone(options.selection ?? providerLayers({
+        // The harness default is a stored USER pin (the shipped rc.5 base has
+        // no Search provider); explicit `searchProvider: undefined` is the
+        // genuine automatic state with no USER override.
+        searchUser: ('searchProvider' in options ? options.searchProvider : 'deepseek-official') === undefined
+          ? undefined
+          : { id: 'searchProvider' in options ? options.searchProvider : 'deepseek-official' },
+        fetchBase: 'http',
+        fetchUser: options.fetchProvider !== undefined && options.fetchProvider !== 'http'
+          ? { id: options.fetchProvider }
+          : undefined,
+      })),
+      api: { searchBilling: 'auto', fetchBilling: 'auto', count: options.count ?? 10, sendOriginalQuestion: true },
+      advanced: options.advanced ?? {},
       credential: options.configured === false ? { configured: false } : { configured: true, source: 'file' },
     } as WebProviderSettings,
+    restoreSelection: options.restoreSelection === undefined ? undefined : structuredClone(options.restoreSelection),
   }
   const doc: TuiSettingsDoc = { ...DEFAULT_DOC }
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -185,6 +256,13 @@ function setup(options: {
     log.push(`begin:${label}`)
     try {
       if (delayMs > 0) await new Promise(resolve => setTimeout(resolve, delayMs))
+      // The causal FIFO gate: the setter has STARTED (its `begin:` record is
+      // already in the log) and stays in flight until the test releases it.
+      const gate = writeGate
+      if (gate !== undefined) {
+        writeGate = undefined
+        await gate.promise
+      }
       if (store.failNext !== undefined) {
         const reason = store.failNext
         store.failNext = undefined
@@ -212,6 +290,7 @@ function setup(options: {
     clearExtensionError: () => {},
     captureExtensionHealthRef: () => () => {},
     currentSessionId: undefined,
+    policy: unconfiguredPolicyObservation(),
     captureLiveSessionScope: () => undefined,
     // C3 About seams: this fixture composes no StatusRuntime, so the
     // sessionless capture is the only reachable state (no scoped read can
@@ -246,7 +325,16 @@ function setup(options: {
       configReadiness: () => readiness,
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
       permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined, approvalOverrideAvailable: () => false },
-      subagentModelSelection: { available: () => false },
+      subagentLimits: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
+      subagentModelSelection: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
       credentials: {
         available: () => options.credentialStore !== false,
         describeReference: async () => ({ configured: true, source: 'file' }),
@@ -260,7 +348,7 @@ function setup(options: {
           const held = readHoldAll
           // A held read stays the snapshot of the moment it was ISSUED: a real
           // Host read cannot observe a write that happens while it is pending.
-          const captured = { ...store.web, api: { ...store.web.api } }
+          const captured = { ...store.web, providerSelection: structuredClone(store.web.providerSelection), api: { ...store.web.api } }
           const throws = store.readThrows
           const unreadable = !store.available || store.readUndefined
           try {
@@ -276,11 +364,53 @@ function setup(options: {
             readsSettled += 1
           }
         },
-        setSearchProvider: async (id: string) => { await write(`search:${id}`, () => { store.web.searchProvider = store.keptProviderValue ?? id }, store.writeDelayMs) },
-        setFetchProvider: async (id: string) => { await write(`fetch:${id}`, () => { store.web.fetchProvider = id }) },
+        setSearchProvider: async (id: string) => {
+          await write(`search:${id}`, () => {
+            const kept = store.keptProviderValue
+            store.web.searchProvider = kept ?? id
+            if (kept === undefined) {
+              store.web.providerSelection = {
+                ...store.web.providerSelection,
+                search: { baseId: store.web.providerSelection.search.baseId, userSet: true, userId: id },
+              }
+            }
+          }, store.writeDelayMs)
+        },
+        setFetchProvider: async (id: string) => {
+          await write(`fetch:${id}`, () => {
+            store.web.fetchProvider = id
+            store.web.providerSelection = {
+              ...store.web.providerSelection,
+              fetch: { baseId: store.web.providerSelection.fetch.baseId, userSet: true, userId: id },
+            }
+          })
+        },
+        restoreSearchProvider: async () => {
+          await write('restore-search', () => {
+            const restored = store.restoreSelection?.search ?? {
+              baseId: store.web.providerSelection.search.baseId,
+              userSet: false,
+              userId: undefined,
+            }
+            store.web.providerSelection = { ...store.web.providerSelection, search: { ...restored } }
+            store.web.searchProvider = restored.baseId
+          })
+        },
+        restoreFetchProvider: async () => {
+          await write('restore-fetch', () => {
+            const restored = store.restoreSelection?.fetch ?? {
+              baseId: store.web.providerSelection.fetch.baseId,
+              userSet: false,
+              userId: undefined,
+            }
+            store.web.providerSelection = { ...store.web.providerSelection, fetch: { ...restored } }
+            store.web.fetchProvider = restored.baseId
+          })
+        },
         setSearchApiCount: async (count: number) => { await write(`count:${count}`, () => { store.web.api.count = count }) },
         setSendOriginalQuestion: async (enabled: boolean) => { await write(`ori:${String(enabled)}`, () => { store.web.api.sendOriginalQuestion = enabled }) },
-        setSearchApiBaseURL: async (url: string) => { await write(`endpoint:${url}`, () => { store.web.api.baseURL = store.endpointStoredValue ?? url }) },
+        setSearchBilling: async (mode: string) => { await write(`searchBilling:${mode}`, () => { store.web.api.searchBilling = mode as 'auto' | 'account' | 'api-key' }, store.writeDelayMs) },
+        setFetchBilling: async (mode: string) => { await write(`fetchBilling:${mode}`, () => { store.web.api.fetchBilling = mode as 'auto' | 'account' | 'api-key' }) },
       },
     }),
     catalog: { models: { available: () => false } },
@@ -337,6 +467,19 @@ function setup(options: {
         },
       }
       readHoldAll = record
+      return record.release
+    },
+    holdNextWrite: () => {
+      let release = (): void => {}
+      const promise = new Promise<void>(resolve => { release = () => resolve() })
+      const record = {
+        promise,
+        release: () => {
+          if (writeGate === record) writeGate = undefined
+          release()
+        },
+      }
+      writeGate = record
       return record.release
     },
     view,
@@ -521,6 +664,16 @@ async function openOtherRows(h: Harness): Promise<void> {
   await key(h, ENTER)
 }
 
+/** Move the Tools rows cursor onto the Web launcher row (label-driven, so a new
+ *  neighbouring row can never silently shift this navigation again). */
+async function highlightWebRow(h: Harness): Promise<void> {
+  for (let step = 0; step < 6; step += 1) {
+    if (/> Web Search \/ Fetch/u.test(h.view())) return
+    await key(h, DOWN)
+  }
+  assert.fail(`the Web launcher row never owned the selection:\n${h.view()}`)
+}
+
 /** Wait for the page's SETTLED facts (the mount triggers a fresh Host read). */
 async function settleWebPage(h: Harness): Promise<string> {
   return settlePainted(h, 'the Web page to paint its settled facts', frame =>
@@ -531,7 +684,9 @@ async function settleWebPage(h: Harness): Promise<string> {
  *  for its settled authority facts. */
 async function openWebPage(h: Harness): Promise<string> {
   await openOtherRows(h)
-  await key(h, DOWN)
+  // Walk the Tools rows until the Web launcher really owns the selection: the
+  // M5-W PR-C preference row sits between Visual tools and it.
+  await highlightWebRow(h)
   await key(h, ENTER)
   return settleWebPage(h)
 }
@@ -541,23 +696,6 @@ async function openWebPage(h: Harness): Promise<string> {
 async function closeWorkspace(h: Harness): Promise<void> {
   for (let attempt = 0; attempt < 8 && h.view().includes('Settings ·'); attempt += 1) await key(h, ESC)
   assert.doesNotMatch(h.view(), /Settings ·/u, 'the workspace really closed')
-}
-
-/** Append to the endpoint editor's seeded draft. The editor opens on the
- *  authoritative value; a REAL write needs a different draft (an unchanged
- *  draft is a zero-write `verified`). */
-async function editEndpointDraft(h: Harness, suffix: string): Promise<void> {
-  for (const character of suffix) await key(h, character)
-}
-
-/** The endpoint editor's settle: its own verdict is PAINTED (a verified save
- *  closes it; Not saved/Outcome unknown stays with its message). */
-async function settleEndpointPanel(h: Harness): Promise<string> {
-  const submitted = `endpoint:${h.store.web.api.baseURL}`
-  return await settlePainted(h, `the endpoint write's painted verdict (${submitted})`, frame =>
-    !frame.includes('Saving…')
-    && (!frame.includes('Enter confirm · Esc cancel')
-      || /Not saved|Outcome unknown/u.test(frame)))
 }
 
 test('the workspace row reports the configured providers and opens the Web page focused', async t => {
@@ -570,14 +708,17 @@ test('the workspace row reports the configured providers and opens the Web page 
   assert.match(h.view(), /Web Search \/ Fetch/u)
   // The launcher's own Detail carries the authoritative summary plus the
   // billing/credential/entry facts (the narrow row column only shows a prefix).
-  await key(h, DOWN)
+  await highlightWebRow(h)
   const rowView = h.view()
   const compactRow = (): string => rowView.replace(/[\u2500-\u257f│]/gu, ' ').replace(/\s+/gu, ' ')
-  assert.match(rowView, /Search: Messages · Fetch: HTTP/u, 'the launcher shows the authoritative provider summary')
+  assert.match(rowView, /Search: DeepSeek server-side search · Fetch: HTTP/u, 'the launcher shows the authoritative provider summary')
   assert.match(rowView, /Configure Web…/u, 'the row Detail paints the ONE page entry')
   assert.match(compactRow(), /billed separately/u)
   assert.match(compactRow(), /not an Optional.*?Bundle/u)
-  assert.match(compactRow(), /Share Original Question is on by default/u)
+  assert.match(compactRow(), /Share Original Question is on by/u,
+    'the launcher explains the default share behaviour')
+  assert.match(compactRow(), /default: it sends up to 128 characters/u,
+    'the default shares a bounded question excerpt')
   assert.match(compactRow(), /up to 128 characters/u)
   assert.match(compactRow(), /authoritative read-back agree/u)
   assert.match(compactRow(), /credential reference/u)
@@ -587,22 +728,23 @@ test('the workspace row reports the configured providers and opens the Web page 
   await key(h, ENTER)
   const page = await settleWebPage(h)
   assert.match(page, /Settings · Tools · Web Search \/ Fetch/u, 'the page is the Tools row sub-view')
-  // The six frozen rows, in order, on one frame (120x40 paints the whole list).
+  // The nine frozen rows, in order, on one frame (120x40 paints the whole list).
   let previous = -1
   for (const label of ['Web Search Provider', 'Web Fetch Provider', 'Search API Result Count',
-    'Share Original Question', 'Search / Fetch API Endpoint', 'DeepSeek API Key']) {
+    'Share Original Question', 'Search Billing', 'Fetch Billing', 'Search API Override',
+    'Fetch API Override', 'DeepSeek API Key']) {
     const at = page.indexOf(label)
     assert.ok(at > previous, `the frozen row order holds (${label}):\n${page}`)
     previous = at
   }
-  assert.match(page, /Current: Messages/u, 'the selected row states the real Host value')
-  assert.match(page, /› Messages · built-in default \[current\]/u,
-    'the current candidate carries the [current] chip')
+  assert.match(page, /Current: DeepSeek server-side search/u, 'the selected row states the real Host value')
+  assert.match(page, /› DeepSeek server-side search \[current\] · server-side · model-token billed/u,
+    'the current candidate carries the whole [current] chip before its note')
   assert.equal(h.readCount() >= 1, true, 'opening the page really read the Host')
 
   // Enter opens the Detail, the highlight moves, Enter confirms EXACTLY once.
   await key(h, ENTER)
-  await chooseCandidate(h, 1) // Messages -> DeepSeek Search API
+  await chooseCandidate(h, 2) // server-side -> DeepSeek Search API
   assert.equal(h.writes.length, 0, 'choosing a candidate never writes')
   await key(h, ENTER)
   await awaitWriteSettlement(h, 'search:deepseek-search-api', 0)
@@ -613,7 +755,7 @@ test('the workspace row reports the configured providers and opens the Web page 
   assert.match(h.view(), /Verified/u, 'the write is verified by the read-back')
   assert.match(h.view(), /› DeepSeek Search API .*\[current\]/u,
     'the [current] chip follows the verified read-back')
-  assert.doesNotMatch(h.view(), /› Messages .*\[current\]/u, 'the old candidate loses the chip')
+  assert.doesNotMatch(h.view(), /› DeepSeek server-side search .*\[current\]/u, 'the old candidate loses the chip')
 })
 
 test('a failed write is reported as Not saved and never claims a save', async t => {
@@ -622,14 +764,14 @@ test('a failed write is reported as Not saved and never claims a save', async t 
   await openWebPage(h)
   h.store.failNext = 'settings mutate rejected'
   await openWebRow(h, 0)
-  await chooseCandidate(h, 1)
+  await chooseCandidate(h, 2)
   await key(h, ENTER)
   const refused = await settlePainted(h, 'the failed write reported as Not saved', frame =>
     frame.includes('Not saved') && !frame.includes('Saving…'))
   assert.equal(h.store.web.searchProvider, 'deepseek-official', 'the Host store keeps the previous value')
   assert.match(refused, /Not saved · settings mutate rejected/u, `the failure is reported as Not saved:\n${refused}`)
   assert.doesNotMatch(refused, /Verified/u, 'a rejected write is never Verified')
-  assert.match(refused, /Current: Messages/u, 'the Detail states the value the Host still holds')
+  assert.match(refused, /Current: DeepSeek server-side search/u, 'the Detail states the value the Host still holds')
 })
 
 test('two confirmed intents commit in FIFO order and never overlap', async t => {
@@ -639,7 +781,7 @@ test('two confirmed intents commit in FIFO order and never overlap', async t => 
   await openWebPage(h)
   // Intent A (search provider): dispatched, deliberately slow.
   await openWebRow(h, 0)
-  await chooseCandidate(h, 1)
+  await chooseCandidate(h, 2)
   await key(h, ENTER)
   // Intent B (count 10 -> 20) while A is still in flight: it joins the SAME
   // single FIFO, so it can only START after A settled.
@@ -666,15 +808,15 @@ test('a resolved provider mutation the Host does not commit is Not saved, never 
   await openWebPage(h)
   h.store.keptProviderValue = 'deepseek-official'
   await openWebRow(h, 0)
-  await chooseCandidate(h, 1)
+  await chooseCandidate(h, 2)
   await key(h, ENTER)
   const refused = await settlePainted(h, 'the refused mutation to paint Not saved', frame =>
     frame.includes('Not saved') && !frame.includes('Saving…'))
   assert.deepEqual(h.writes, ['search:deepseek-search-api'], 'the mutation really ran')
   assert.equal(h.store.web.searchProvider, 'deepseek-official', 'the Host kept its own value')
-  assert.match(refused, /the Host keeps "Messages" instead of the submitted value/u,
+  assert.match(refused, /the Host keeps "DeepSeek server-side search" instead of the submitted value/u,
     `the verdict names the value the Host keeps:\n${refused}`)
-  assert.match(refused, /Current: Messages/u, 'the Detail reports the Host value, never the request')
+  assert.match(refused, /Current: DeepSeek server-side search/u, 'the Detail reports the Host value, never the request')
   assert.doesNotMatch(refused, /Verified/u)
 
   // The highlight returns to the value the Host HOLDS: confirming again submits
@@ -682,7 +824,7 @@ test('a resolved provider mutation the Host does not commit is Not saved, never 
   await webListTop(h)
   await openWebRow(h, 0)
   const markSecond = settledWritesMark(h)
-  await chooseCandidate(h, 1)
+  await chooseCandidate(h, 2)
   await key(h, ENTER)
   await awaitWriteSettlement(h, 'search:deepseek-search-api', markSecond)
   assert.deepEqual(h.writes, ['search:deepseek-search-api', 'search:deepseek-search-api'],
@@ -694,9 +836,9 @@ test('two confirmed selections end on the Host value when the second is not comm
   t.after(h.dispose)
   await openWebPage(h)
 
-  // First: Messages -> DeepSeek Search API (verified).
+  // First: server-side -> DeepSeek Search API (verified).
   await openWebRow(h, 0)
-  await chooseCandidate(h, 1)
+  await chooseCandidate(h, 2)
   const markFirst = settledWritesMark(h)
   await key(h, ENTER)
   await awaitWriteSettlement(h, 'search:deepseek-search-api', markFirst)
@@ -705,11 +847,11 @@ test('two confirmed selections end on the Host value when the second is not comm
   assert.deepEqual(h.writes, ['search:deepseek-search-api'])
   assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
 
-  // Second: back to Messages, but the Host keeps the first selection.
+  // Second: back to server-side, but the Host keeps the first selection.
   await webListTop(h)
   await openWebRow(h, 0)
   h.store.keptProviderValue = 'deepseek-search-api'
-  await chooseCandidate(h, 0)
+  await chooseCandidate(h, 1)
   const markSecond = settledWritesMark(h)
   await key(h, ENTER)
   await awaitWriteSettlement(h, 'search:deepseek-official', markSecond)
@@ -722,7 +864,7 @@ test('two confirmed selections end on the Host value when the second is not comm
   // the OTHER candidate — never the rejected intent again.
   await webListTop(h)
   await openWebRow(h, 0)
-  await chooseCandidate(h, 0)
+  await chooseCandidate(h, 1)
   const markThird = settledWritesMark(h)
   await key(h, ENTER)
   await awaitWriteSettlement(h, 'search:deepseek-official', markThird)
@@ -747,7 +889,17 @@ test('the page deeplink is reachable and Esc cancels without a write', async t =
   await key(h, ESC) // list -> Tools rows
   // The root keeps the row's Detail focus, exactly like the allowlist picker
   // return: the Tools rows are painted again with the Web row selected.
-  assert.match(h.view(), /Rows \(2\)/u, 'Esc from the list returns to the Tools rows')
+  // Assert the RETURN, not the category's row count: a new specialist row must
+  // not make this journey fail. The Tools category paints its own chrome (the
+  // Categories/Rows columns) with the Web row visible, and the Web page's own
+  // header is gone, which is what the escape contract promises.
+  const returned = h.view()
+  assert.match(returned, /Settings · Tools · /u, 'the workspace still shows the Tools scope')
+  // The category view is the ONLY surface that paints both columns; the Web
+  // page itself paints neither, so their presence proves the page was left.
+  assert.match(returned, /Categories \(\d+\)/u, 'Esc from the list returns to the Tools category')
+  assert.match(returned, /Rows \(\d+\)/u, 'the category chrome is painted again')
+  assert.match(returned, /Web Search \/ Fetch/u, 'the Web row is painted again')
   assert.match(h.view(), /Configure Web…/u, 'the Web row owns the frame again')
   assert.deepEqual(h.writes, [], 'the whole cancel path wrote nothing')
 })
@@ -757,7 +909,7 @@ test('closing and reopening the page shows the committed values', async t => {
   t.after(h.dispose)
   await openWebPage(h)
   await openWebRow(h, 0)
-  await chooseCandidate(h, 1)
+  await chooseCandidate(h, 2)
   await key(h, ENTER)
   await awaitWriteSettlement(h, 'search:deepseek-search-api', 0)
   await settlePainted(h, 'the verified write', frame => frame.includes('Verified'))
@@ -777,7 +929,7 @@ test('an unavailable section offers no write and no candidates', async t => {
   assert.match(page, /the Host Web provider settings are not available on this backend/u, 'the Detail names the real reason')
   // Enter opens the read-only Detail; Enter there must not write.
   await openWebRow(h, 0)
-  assert.doesNotMatch(h.view(), /Enter confirm/u, 'no confirm affordance exists without an authority')
+  assert.doesNotMatch(h.view(), /Confirm \[Enter\]/u, 'no confirm affordance exists without an authority')
   await key(h, ENTER)
   await new Promise(resolve => setTimeout(resolve, 10))
   await h.vt.waitForRender()
@@ -788,7 +940,7 @@ test('the credential row shows the reference and hands the Models deeplink to th
   const h = setup()
   t.after(h.dispose)
   await openWebPage(h)
-  await openWebRow(h, 5)
+  await openWebRow(h, 8)
   const detail = h.view()
   assert.match(detail, /Reference: DEEPSEEK_API_KEY/u, 'the official credential reference is named')
   assert.match(detail, /State: Configured · source: file/u, 'presence/source come from the store')
@@ -804,7 +956,117 @@ test('the credential row shows the reference and hands the Models deeplink to th
   assert.deepEqual(h.delegated, [], 'no /login command line was executed by the Web page')
 })
 
-test('a configured custom provider id stays visible and offers no candidate', async t => {
+test('the AUTOMATIC search state reads `Search: Automatic` and an explicit Confirm writes ONCE', async t => {
+  // `searchProvider: undefined` IS the Host's AUTOMATIC routing state: the
+  // launcher and page state it truthfully (never `unavailable`, never a fixed
+  // Search API default, no candidate painted as current), and the FIRST
+  // explicit Confirm issues exactly ONE real Host write verified by read-back.
+  const h = setup({ searchProvider: undefined })
+  t.after(h.dispose)
+  await openOtherRows(h)
+  await highlightWebRow(h)
+  assert.match(h.view(), /Search: Automatic/u, 'the launcher summary states the Automatic state')
+  assert.doesNotMatch(h.view(), /Search: unavailable/u)
+  await key(h, ENTER)
+  const page = await settleWebPage(h)
+  assert.match(page, /Current: Automatic/u, 'the page states the Automatic current fact')
+  assert.match(page, /› Automatic \[current\] · the Host selects per request/u,
+    'the Automatic option is the real current choice, not a fabricated provider')
+  await openWebRow(h, 0)
+  // Confirming the CURRENT Automatic option is a real zero-write Verified: the
+  // USER layer already has no override, so there is nothing to reset.
+  const automaticMark = settledWritesMark(h)
+  await key(h, ENTER)
+  await settlePainted(h, 'the zero-write Automatic verdict', frame => frame.includes('Verified'))
+  assert.deepEqual(h.writes, [], 'confirming the inherited Automatic state writes nothing')
+  assert.equal(h.settledWrites().length, automaticMark)
+  await chooseCandidate(h, 2) // Automatic -> DeepSeek Search API
+  await key(h, ENTER)
+  await awaitWriteSettlement(h, 'search:deepseek-search-api', 0)
+  await settlePainted(h, 'the verified explicit write', frame =>
+    frame.includes('Current: DeepSeek Search API') && frame.includes('Verified'))
+  assert.deepEqual(h.writes, ['search:deepseek-search-api'],
+    'exactly ONE real Host write, never the retired zero-write default verdict')
+  assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
+})
+
+test('the Search Billing row is inert while AUTOMATIC: a stale Confirm writes nothing', async t => {
+  // The official Client offers the dedicated Billing control only while the
+  // DeepSeek Search API is explicitly selected; under Automatic this page
+  // offers NO candidate and a stale Confirm produces ZERO Host writes while
+  // the stored Billing mode stays untouched.
+  const h = setup({ searchProvider: undefined })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 4) // the Search Billing row
+  const detail = h.view()
+  assert.match(detail, /Current: Not selected/u, 'the Billing row states the unselected fact')
+  assert.doesNotMatch(detail, /› /u, 'no billing candidate is offered while Automatic')
+  await key(h, ENTER)
+  await new Promise(resolve => setTimeout(resolve, 10))
+  await h.vt.waitForRender()
+  assert.deepEqual(h.writes, [], 'the Billing row writes nothing while Automatic')
+  assert.equal(h.store.web.api.searchBilling, 'auto', 'the stored Billing mode is kept, never reset')
+})
+
+test('a Billing confirm queued while writable is REFUSED after the Host moved the route, same value included', async t => {
+  // The admission gates run BEFORE the already-current zero-write shortcut:
+  // a Confirm queued while the Search API was explicitly selected must still
+  // be REFUSED (never Verified) when the queue-head's own fresh read observes
+  // a Host the stale presentation no longer describes — for the SAME value
+  // and for a different one, with ZERO Host writes either way.
+  const h = setup({ searchProvider: 'deepseek-search-api' })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 4) // the Search Billing row (writable: explicit Search API)
+  assert.match(h.view(), /› Automatic/u, 'the Billing row offers its candidates')
+
+  // R1 (a workspace refresh read) is held so the page settles on the STALE
+  // writable presentation; the route moves underneath AFTER R1 captured the
+  // old facts and BEFORE the commit's own fresh read R2 is issued — R2 (the
+  // real gate base) then observes AUTOMATIC while the page offers candidates.
+  const release = h.holdRead()
+  t.after(release)
+  await key(h, 'r') // issue the held read R1
+  h.store.web.searchProvider = undefined // another Host writer: explicit -> AUTOMATIC
+  release() // R1 settles its stale snapshot back: the page is ready and writable again
+  await settlePainted(h, 'the stale writable facts to repaint', frame =>
+    frame.includes('› Automatic [current] · follows the conversation route') && !frame.includes('Loading…'))
+  await key(h, ENTER) // Confirm the CURRENT value (`auto`) — R2 is the gate base
+  const refused = await settlePainted(h, 'the same-value stale confirm to be refused', frame =>
+    frame.includes('Not saved') && frame.includes('Current: Not selected') && !frame.includes('Saving…'))
+  assert.match(refused, /EDITABLE HERE/u,
+    `the refusal names the real admission cause:\n${refused}`)
+  assert.doesNotMatch(refused, /Verified/u, 'a refused stale confirm is never Verified')
+  assert.deepEqual(h.writes, [], 'zero Host writes for the same-value stale confirm')
+  assert.equal(h.store.web.api.searchBilling, 'auto', 'the stored Billing mode is untouched')
+
+  // The override gate takes the SAME pre-shortcut path: a confirm offered by
+  // the stale presentation is refused with zero writes once the fresh read
+  // observes a Host YAML override that now owns the capability.
+  h.store.web.searchProvider = 'deepseek-search-api' // another Host writer pins the API again
+  await key(h, ESC)
+  await h.vt.waitForRender()
+  await key(h, 'r')
+  await openWebRow(h, 4)
+  await settlePainted(h, 'the restored writable billing row', frame =>
+    frame.includes('› Automatic [current] · follows the conversation route') && !frame.includes('Loading…'))
+  const release2 = h.holdRead()
+  t.after(release2)
+  await key(h, 'r')
+  h.store.web.advanced = { searchBaseURL: 'https://gateway.example.test/deepseek/v1' } // a Host YAML override lands
+  release2()
+  await settlePainted(h, 'the stale no-override facts to repaint', frame =>
+    frame.includes('› Automatic [current] · follows the conversation route') && !frame.includes('Loading…'))
+  await key(h, ENTER) // Confirm the CURRENT value — the gate base R2 observes the override
+  const refused2 = await settlePainted(h, 'the override stale confirm to be refused', frame =>
+    frame.includes('Not saved') && !frame.includes('Saving…'))
+  assert.match(refused2, /overridden by Host YAML/u)
+  assert.deepEqual(h.writes, [], 'zero Host writes for the override stale confirm')
+  assert.equal(h.store.web.api.searchBilling, 'auto')
+})
+
+test('a configured custom provider stays visible and offers ONLY the deployment reset', async t => {
   const h = setup({ searchProvider: 'acme-search' })
   t.after(h.dispose)
   const page = await openWebPage(h)
@@ -813,39 +1075,45 @@ test('a configured custom provider id stays visible and offers no candidate', as
   const detail = h.view()
   assert.match(detail, /Current: acme-search/u)
   assert.match(detail, /CUSTOM route/u, 'the Detail states that it is not selectable here')
-  assert.doesNotMatch(detail, /› /u, 'no selectable candidate is painted')
-  assert.doesNotMatch(detail, /Enter confirm/u, 'no Confirm affordance exists for a custom route')
+  assert.doesNotMatch(detail, /› DeepSeek (server-side search|Search API)/u,
+    'no official candidate is offered to REPLACE the custom route')
+  assert.match(detail, /› Automatic · the Host selects per request/u,
+    'the deployment composes no Search provider, so the official reset is offered')
+  assert.match(detail, /Confirm \[Enter\]/u, 'the reset entry is really executable')
+  const mark = settledWritesMark(h)
   await key(h, ENTER)
-  await new Promise(resolve => setTimeout(resolve, 10))
-  await h.vt.waitForRender()
-  assert.deepEqual(h.writes, [], 'a custom route is never silently replaced')
+  await awaitWriteSettlement(h, 'restore-search', mark)
+  assert.deepEqual(h.writes, ['restore-search'], 'the ONE official unset runs, never a provider id write')
+  assert.equal(h.store.web.searchProvider, undefined, 'the deployment default (Automatic) applies')
+  assert.match(h.view(), /Current: Automatic/u, 'the read-back is the authority the page paints')
 })
 
-test('the endpoint editor joins the SAME FIFO: no Web write overlaps another', async t => {
+test('a billing write joins the SAME FIFO: no Web write overlaps another', async t => {
   const h = setup()
   t.after(h.dispose)
   h.store.writeDelayMs = 150
   await openWebPage(h)
   // Queue the (slow) provider write first.
   await openWebRow(h, 0)
-  await chooseCandidate(h, 1)
+  await chooseCandidate(h, 2)
   await key(h, ENTER)
-  // Then open the endpoint editor and confirm its draft: with ONE owner FIFO the
-  // endpoint write starts only after the provider write settled.
+  // Then confirm a Search billing choice: with ONE owner FIFO the billing write
+  // starts only after the provider write settled.
   await webListTop(h)
-  await openWebRow(h, 4) // Enter on the endpoint row mounts its editor
-  await editEndpointDraft(h, '/v2')
-  const markEndpoint = settledWritesMark(h)
-  await key(h, ENTER) // confirm the endpoint draft
-  await awaitWriteSettlement(h, 'endpoint:https://api.deepseek.com/v1/tools/v2', markEndpoint)
+  await openWebRow(h, 4) // the Search Billing row
+  await chooseCandidate(h, 1) // Automatic -> Account
+  const markBilling = settledWritesMark(h)
+  await key(h, ENTER)
+  await awaitWriteSettlement(h, 'searchBilling:account', markBilling)
   assert.deepEqual(h.log, [
     'begin:search:deepseek-search-api',
     'search:deepseek-search-api',
-    'begin:endpoint:https://api.deepseek.com/v1/tools/v2',
-    'endpoint:https://api.deepseek.com/v1/tools/v2',
-  ], 'the endpoint write does not even START until the pending selection settled')
+    'begin:searchBilling:account',
+    'searchBilling:account',
+  ], 'the billing write does not even START until the pending selection settled')
   assert.equal(h.maxConcurrentWrites(), 1, 'never two Web writes in flight at once')
   assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
+  assert.equal(h.store.web.api.searchBilling, 'account')
 })
 
 test('an unreadable authority after a successful read drops to Unavailable, never a stale current', async t => {
@@ -857,8 +1125,8 @@ test('an unreadable authority after a successful read drops to Unavailable, neve
   h.store.readThrows = true
   await openOtherRows(h)
   assert.match(h.view(), /Unavailable/u, 'the launcher states the failure')
-  assert.doesNotMatch(h.view(), /Search: Messages/u, 'the old summary never survives as current')
-  await key(h, DOWN)
+  assert.doesNotMatch(h.view(), /Search: DeepSeek ser/u, 'the old summary never survives as current')
+  await highlightWebRow(h)
   await key(h, ENTER)
   const page = await settlePainted(h, 'the page to paint the failed read', frame =>
     frame.includes('Web Search Provider') && !frame.includes('Loading…'))
@@ -897,12 +1165,12 @@ test('a workspace opened while the authority is pending paints Loading…, never
   await key(h, ENTER)
   const firstFrame = h.view()
   assert.match(firstFrame, /Loading…/u, `the reopened workspace is pending:\n${firstFrame}`)
-  assert.doesNotMatch(firstFrame, /Search: Messages/u,
+  assert.doesNotMatch(firstFrame, /Search: DeepSeek ser/u,
     'the previous summary is never presented as the current state')
 
   // Entering the page starts its OWN fresh read, which is held too: the page's
   // first frames state Loading… instead of a last-known value.
-  await key(h, DOWN)
+  await highlightWebRow(h)
   await key(h, ENTER)
   const pendingPage = h.view()
   assert.match(pendingPage, /Web Search Provider/u)
@@ -911,7 +1179,7 @@ test('a workspace opened while the authority is pending paints Loading…, never
 
   release()
   const settled = await settlePainted(h, 'the held reads to settle the page', frame =>
-    frame.includes('Current: Messages') && !frame.includes('Loading…'))
+    frame.includes('Current: DeepSeek server-side search') && !frame.includes('Loading…'))
   assert.match(settled, /\[current\]/u)
 })
 
@@ -932,10 +1200,13 @@ test('a new read clears the previous read ERROR: pending, not a stale Unavailabl
   await key(h, ENTER)
   const firstFrame = h.view()
   assert.match(firstFrame, /Loading…/u, `the reopened workspace is pending again:\n${firstFrame}`)
-  assert.doesNotMatch(firstFrame, /Unavailable/u, 'the previous error state does not survive into the new read')
+  // Scope to the Web launcher row: the neighbouring ACP runtime row legitimately
+  // reports its own Unavailable state here, which is not this Web read's fact.
+  const webLauncherLine = firstFrame.split('\n').find(line => line.includes('Web Search / Fetch')) ?? ''
+  assert.doesNotMatch(webLauncherLine, /Unavailable/u, 'the previous error state does not survive into the new read')
   release()
   await settlePainted(h, 'the new read to paint the facts', frame =>
-    frame.includes('Search: Messages') && !frame.includes('Loading…'))
+    frame.includes('Search: DeepSeek ser') && !frame.includes('Loading…'))
 })
 
 test('the workspace `r` refresh re-enters pending instead of repainting the cached summary', async t => {
@@ -944,17 +1215,17 @@ test('the workspace `r` refresh re-enters pending instead of repainting the cach
   await openWebPage(h)
   await key(h, ESC) // list -> Tools rows (the Web row stays selected)
   assert.match(h.view(), /Settings · Tools/u, 'Esc restored the Workspace rows level')
-  assert.match(h.view(), /Search: Messages/u, 'the settled summary is visible on the rows level')
+  assert.match(h.view(), /Search: DeepSeek ser/u, 'the settled summary is visible on the rows level (the row value column truncates the long label with an ellipsis)')
 
   const release = h.holdAllReads()
   t.after(release)
   await key(h, 'r')
   const pending = h.view()
   assert.match(pending, /Loading…/u, `the refresh enters the pending state:\n${pending}`)
-  assert.doesNotMatch(pending, /Search: Messages/u, 'the cached summary is not repainted while the read is pending')
+  assert.doesNotMatch(pending, /Search: DeepSeek ser/u, 'the cached summary is not repainted while the read is pending')
   release()
   await settlePainted(h, 'the refreshed read to paint the facts', frame =>
-    frame.includes('Search: Messages') && !frame.includes('Loading…'))
+    frame.includes('Search: DeepSeek ser') && !frame.includes('Loading…'))
 })
 
 test('entering the Web page paints Loading…, never the last-known value', async t => {
@@ -975,7 +1246,7 @@ test('entering the Web page paints Loading…, never the last-known value', asyn
     'no row claims a current value while the read is in flight')
   release()
   const settled = await settlePainted(h, 'the mounted read to repaint the verified state', frame =>
-    /\[current\]/u.test(frame) && frame.includes('Current: Messages'))
+    /\[current\]/u.test(frame) && frame.includes('Current: DeepSeek server-side search'))
   assert.doesNotMatch(settled, /Loading…/u)
 })
 
@@ -996,14 +1267,14 @@ test('a page reopened after a FAILED read states Loading…, not the stale error
   assert.doesNotMatch(pending, /Current: Unavailable/u, 'the previous read error does not survive into the new read')
   release()
   await settlePainted(h, 'the reopened page to repaint the settled facts', frame =>
-    frame.includes('Current: Messages') && !frame.includes('Loading…'))
+    frame.includes('Current: DeepSeek server-side search') && !frame.includes('Loading…'))
 })
 
 test('an OLD read settling after a write never repaints the page with the pre-write state', async t => {
   const h = setup()
   t.after(h.dispose)
   await openWebPage(h)
-  assert.match(h.view(), /Current: Messages/u)
+  assert.match(h.view(), /Current: DeepSeek server-side search/u)
   await key(h, ESC) // list -> Tools rows
 
   // R1 observes the pre-write Host and is held; the page's own entry read (R2)
@@ -1014,12 +1285,12 @@ test('an OLD read settling after a write never repaints the page with the pre-wr
   assert.match(h.view(), /Loading…/u, 'R1 is pending on the rows level')
   await key(h, ENTER)
   const settledPage = await settlePainted(h, 'the page entry read R2 to settle', frame =>
-    frame.includes('Current: Messages') && !frame.includes('Loading…'))
+    frame.includes('Current: DeepSeek server-side search') && !frame.includes('Loading…'))
 
   // A real write, then the held R1 settles: its pre-write snapshot must not
   // overwrite the committed facts.
   await openWebRow(h, 0)
-  await chooseCandidate(h, 1)
+  await chooseCandidate(h, 2)
   const markWrite = settledWritesMark(h)
   await key(h, ENTER)
   await awaitWriteSettlement(h, 'search:deepseek-search-api', markWrite)
@@ -1030,7 +1301,7 @@ test('an OLD read settling after a write never repaints the page with the pre-wr
   await awaitReadSettlement(h, settledBeforeRelease + 1, 'the stale pre-write read to settle')
   const after = h.view()
   assert.match(after, /Current: DeepSeek Search API/u, `the committed facts survive the stale settlement:\n${after}`)
-  assert.doesNotMatch(after, /Current: Messages/u, 'the pre-write value never comes back')
+  assert.doesNotMatch(after, /Current: DeepSeek server-side search/u, 'the pre-write value never comes back')
 })
 
 test('a SUPERSEDED write readback never decides the verdict', async t => {
@@ -1042,7 +1313,7 @@ test('a SUPERSEDED write readback never decides the verdict', async t => {
   // an UNREADABLE Host and is held while a NEWER read R2 (the page's `r`)
   // observes the post-write facts.
   await openWebRow(h, 0)
-  await chooseCandidate(h, 1)
+  await chooseCandidate(h, 2)
   const markMutation = settledWritesMark(h)
   const releaseR1 = await dispatchWithHeldUnreadableReadback(h, () => key(h, ENTER))
   t.after(releaseR1)
@@ -1072,7 +1343,7 @@ test('a superseded readback settling while the newer read is STILL pending never
   await openWebPage(h)
 
   await openWebRow(h, 0)
-  await chooseCandidate(h, 1)
+  await chooseCandidate(h, 2)
   const markR1Write = settledWritesMark(h)
   const releaseR1 = await dispatchWithHeldUnreadableReadback(h, () => key(h, ENTER))
   t.after(releaseR1)
@@ -1101,43 +1372,30 @@ test('a superseded readback settling while the newer read is STILL pending never
   assert.doesNotMatch(settled, /Not saved|Outcome unknown/u, `the newest facts win:\n${settled}`)
 })
 
-test('a verified endpoint save closes the editor on the Host value', async t => {
-  const h = setup()
+test('a verified billing write reads back the committed mode on its own row', async t => {
+  const h = setup({ searchProvider: 'deepseek-search-api' })
   t.after(h.dispose)
   await openWebPage(h)
-  await openWebRow(h, 4) // Enter on the endpoint row mounts its editor
-  assert.match(h.view(), /Enter confirm · Esc cancel/u)
-  await editEndpointDraft(h, '/v2')
-  await key(h, ENTER) // confirm the edited draft value
-  await settleEndpointPanel(h)
-  assert.deepEqual(h.writes, ['endpoint:https://api.deepseek.com/v1/tools/v2'], 'the mutation committed')
-  assert.doesNotMatch(h.view(), /Enter confirm · Esc cancel/u, 'the verified save closed the editor')
-  assert.ok(h.view().includes('Current: https://api.deepseek.com/v1/tools'),
-    `the row states the verified endpoint:\n${h.view()}`)
-})
-
-test('the endpoint editor reports Not saved with the value the Host actually kept', async t => {
-  const h = setup()
-  t.after(h.dispose)
-  await openWebPage(h)
-  h.store.endpointStoredValue = 'https://other.example/v1'
-  await openWebRow(h, 4)
-  await editEndpointDraft(h, '/v2')
+  await openWebRow(h, 4) // the Search Billing row
+  assert.match(h.view(), /Current: Automatic/u)
+  assert.match(h.view(), /Confirm \[Enter\]/u)
+  await chooseCandidate(h, 1) // Automatic -> Account
+  const mark = settledWritesMark(h)
   await key(h, ENTER)
-  await settleEndpointPanel(h)
-  const frame = h.view()
-  assert.match(frame, /Not saved/u, `the editor states the Host's own answer:\n${frame}`)
-  assert.ok(frame.includes('the Host keeps "https://other.example/v1"'),
-    `the editor reports the value the Host kept:\n${frame}`)
-  assert.ok(frame.includes('Enter confirm · Esc cancel'), 'the draft stays in the editor for correction')
+  await awaitWriteSettlement(h, 'searchBilling:account', mark)
+  await settlePainted(h, 'the verified billing write', frame =>
+    frame.includes('Verified') && frame.includes('Current: Account'))
+  assert.deepEqual(h.writes, ['searchBilling:account'], 'the mutation committed to the exact field')
+  assert.equal(h.store.web.api.searchBilling, 'account')
+  assert.equal(h.store.web.api.fetchBilling, 'auto', 'the Search billing write never touches Fetch')
 })
 
-test('the endpoint editor reports Outcome unknown when the read-back is unreadable', async t => {
-  const h = setup()
+test('a billing write reports Outcome unknown when the read-back is unreadable', async t => {
+  const h = setup({ searchProvider: 'deepseek-search-api' })
   t.after(h.dispose)
   await openWebPage(h)
   await openWebRow(h, 4)
-  await editEndpointDraft(h, '/v2')
+  await chooseCandidate(h, 1)
   // The pre-read is readable; the write's verification readback is unreadable.
   const releasePre = h.holdRead()
   const readsBefore = h.readCount()
@@ -1148,35 +1406,36 @@ test('the endpoint editor reports Outcome unknown when the read-back is unreadab
   releasePre()
   await waitForFrame(() => h.view(), () => h.readCount() >= readsBefore + 2,
     () => h.vt.waitForRender(), 'the write readback R1 to be issued')
-  await settleEndpointPanel(h)
+  await settlePainted(h, 'the billing Outcome unknown verdict', frame =>
+    frame.includes('Outcome unknown') && !frame.includes('Saving…'))
   const frame = h.view()
   assert.match(frame, /Outcome unknown/u, `an unobservable result is never a save:\n${frame}`)
   assert.ok(frame.includes('the Host write could not be verified'),
-    `the editor states what could not be observed:\n${frame}`)
-  assert.doesNotMatch(frame, /Not saved/u, 'an unreadable read-back is never reported as not-saved')
+    `the Detail states what could not be observed:\n${frame}`)
+  assert.doesNotMatch(frame, /Verified/u, 'an unreadable read-back is never a save')
 })
 
-/** One SUPERSEDED endpoint-readback scenario over the frozen sizes: R1 (the
+/** One SUPERSEDED billing-readback scenario over the frozen sizes: R1 (the
  *  write's verification read) observes an UNREADABLE Host and is held; R2 (the
  *  page's `r`) observes the NEWEST facts and is also held. R1 settles while R2
  *  is pending, then R2 decides. A verdict from the superseded R1 would be wrong
  *  in every scenario. */
-function supersededEndpointCase(
+function supersededBillingCase(
   name: string,
   arrangeNewest: (h: Harness) => void,
   assertVerdict: (frame: string, h: Harness) => Promise<void> | void,
 ): void {
   for (const [columns, rows] of SUPERSEDED_SIZES) {
-    test(`a superseded endpoint readback is judged by the NEWEST read at ${columns}x${rows}: ${name}`, async t => {
-      const h = setup({ columns, rows })
+    test(`a superseded billing readback is judged by the NEWEST read at ${columns}x${rows}: ${name}`, async t => {
+      const h = setup({ columns, rows, searchProvider: 'deepseek-search-api' })
       t.after(h.dispose)
       await openWebPage(h)
-      await openWebRow(h, 4) // Enter on the endpoint row mounts its editor
-      await editEndpointDraft(h, '/v2')
+      await openWebRow(h, 4) // the Search Billing row
+      await chooseCandidate(h, 1) // Automatic -> Account
       // Readable pre-read; the write's readback R1 is unreadable and held.
       const releasePre = h.holdRead()
       const readsBefore = h.readCount()
-      await key(h, ENTER) // dispatch the endpoint write
+      await key(h, ENTER) // dispatch the billing write
       await waitForFrame(() => h.view(), () => h.readCount() >= readsBefore + 1,
         () => h.vt.waitForRender(), 'the queue-head fresh pre-read to be issued')
       h.store.readUndefined = true
@@ -1185,14 +1444,14 @@ function supersededEndpointCase(
       releasePre()
       await waitForFrame(() => h.view(), () => h.readCount() >= readsBefore + 2,
         () => h.vt.waitForRender(), 'the write readback R1 to be issued')
-      await settlePainted(h, 'the endpoint editor to state Saving…', frame => frame.includes('Saving…'))
+      await settlePainted(h, 'the billing row to state Saving…', frame => frame.includes('Saving…'))
 
       h.store.readUndefined = false
       arrangeNewest(h)
       const releaseR2 = h.holdAllReads()
       t.after(releaseR2)
-      // Leave the editor (zero write): the dispatced write keeps settling in the
-      // command owner, and the page's own `r` then starts the NEWER read R2.
+      // Leave the Detail (zero write): the dispatched write keeps settling in
+      // the command owner, and the page's own `r` then starts the NEWER read R2.
       await key(h, ESC)
       await key(h, 'r')
       assert.match(h.view(), /Loading…/u, 'the newer read R2 is pending')
@@ -1216,40 +1475,42 @@ function supersededEndpointCase(
 /** The frozen sizes for the changed verdict sink. */
 const SUPERSEDED_SIZES = [[120, 40], [80, 10], [44, 20]] as const
 
-supersededEndpointCase(
-  'the newest read observed the submitted endpoint',
+supersededBillingCase(
+  'the newest read observed the submitted billing mode',
   () => {},
   async (frame, h) => {
     assert.doesNotMatch(frame, /Not saved|Outcome unknown/u, `a verified write leaves no verdict:\n${frame}`)
-    // The endpoint editor always opens on the authoritative value: seeing it
-    // there proves the newest read decided (the row's own slot truncates).
+    // The billing row's Detail paints the authoritative mode: the candidate
+    // carrying the [current] chip is positioned from the committed identity, so
+    // seeing Account highlighted as current proves the newest read decided
+    // (a tiny viewport may crop the Current: line itself).
     await openWebRow(h, 4)
-    assert.ok(h.view().includes('https://api.deepseek.com/v1/tools'),
-      `the editor opens on the verified endpoint:\n${h.view()}`)
+    assert.match(h.view(), /› Account \[current\] · signed-in account only/u,
+      `the row opens on the verified billing mode:\n${h.view()}`)
     await key(h, ESC)
   },
 )
 
-supersededEndpointCase(
-  'the Host kept another value',
-  h => { h.store.web.api.baseURL = 'https://other.example/v1' },
+supersededBillingCase(
+  'the Host kept another billing mode',
+  h => { h.store.web.api.searchBilling = 'api-key' },
   async (frame, h) => {
     // R1 was UNREADABLE: an `Outcome unknown` here would be the superseded
     // snapshot's answer, so `Not saved` proves the NEWEST facts decided.
     assert.match(frame, /Not saved/u, `a kept value is reported as Not saved:\n${frame}`)
     assert.doesNotMatch(frame, /Outcome unknown/u, `the superseded snapshot never decides:\n${frame}`)
-    if (!frame.includes('the Host keeps "https://other.example/v1"')) {
-      // The narrow page paints only the list, so the kept value is read from
-      // the endpoint editor, which always opens on the authoritative value.
+    if (!frame.includes('the Host keeps "API key"')) {
+      // The narrow page paints only the list, so the kept mode is read from the
+      // row Detail, which always paints the authoritative value.
       await openWebRow(h, 4)
-      assert.ok(h.view().includes('https://other.example/v1'),
-        `the editor opens on the value the Host keeps:\n${h.view()}`)
+      assert.match(h.view(), /Current: API key/u,
+        `the row paints the value the Host keeps:\n${h.view()}`)
       await key(h, ESC)
     }
   },
 )
 
-supersededEndpointCase(
+supersededBillingCase(
   'the newest read could not read the Host',
   h => { h.store.readUndefined = true },
   (frame) => {
@@ -1279,7 +1540,7 @@ test('Clear in Models… is painted as a disabled fact and is never focusable', 
   const h = setup({ configured: false })
   t.after(h.dispose)
   await openWebPage(h)
-  await pageListSelect(h, 5)
+  await pageListSelect(h, 8)
   await key(h, ENTER)
   const detail = h.view()
   assert.match(detail, /State: Not configured/u)
@@ -1299,12 +1560,12 @@ test('no credential action is offered when the store is unavailable, and the bar
   const h = setup({ credentialStore: false })
   t.after(h.dispose)
   await openWebPage(h)
-  await pageListSelect(h, 5)
+  await pageListSelect(h, 8)
   await key(h, ENTER)
   const detail = h.view()
   assert.match(detail, /The official credential store is unavailable/u)
   assert.doesNotMatch(detail, /Enter open in Models/u, 'no false Enter affordance without an action')
-  assert.match(detail, /Esc back/u)
+  assert.match(detail, /Back \[Esc\]/u)
   await key(h, ENTER)
   assert.doesNotMatch(h.view(), /Settings · Models/u)
   assert.deepEqual(h.writes, [])
@@ -1320,16 +1581,16 @@ test('a stale backend keeps the readable facts but offers no candidate and dispa
   await pageListSelect(h, 0)
   await key(h, ENTER)
   const detail = h.view()
-  assert.match(detail, /Current: Messages/u, 'the readable fact is still painted')
+  assert.match(detail, /Current: DeepSeek server-side search/u, 'the readable fact is still painted')
   assert.match(detail, /read-only until it reconnects/u, `the refusal names the reason:\n${detail}`)
-  assert.doesNotMatch(detail, /Enter confirm/u, 'no Confirm affordance exists on a non-current backend')
+  assert.doesNotMatch(detail, /Confirm \[Enter\]/u, 'no Confirm affordance exists on a non-current backend')
   await key(h, ENTER)
   assert.deepEqual(h.writes, [], 'a stale backend dispatches nothing')
   // Recovery: a ready backend + a fresh read restore the candidates.
   h.setReadiness('ready')
   await key(h, 'r')
-  await settlePainted(h, 'the recovered candidates', frame => frame.includes('Enter confirm'))
-  await chooseCandidate(h, 1) // Messages (the current value) -> DeepSeek Search API
+  await settlePainted(h, 'the recovered candidates', frame => frame.includes('Confirm [Enter]'))
+  await chooseCandidate(h, 2) // server-side (the current value) -> DeepSeek Search API
   await key(h, ENTER)
   await settlePainted(h, 'the recovered verified write', frame => frame.includes('Verified'))
   assert.deepEqual(h.writes, ['search:deepseek-search-api'])
@@ -1339,7 +1600,7 @@ test('an external clear while the cursor sits on Clear clamps it to the still-en
   const h = setup()
   t.after(h.dispose)
   await openWebPage(h)
-  await pageListSelect(h, 5)
+  await pageListSelect(h, 8)
   await key(h, ENTER) // credential Detail
   await key(h, DOWN) // Configure -> Clear (both enabled)
   assert.match(h.view(), /› Clear in Models…/u)
@@ -1359,43 +1620,11 @@ test('an external clear while the cursor sits on Clear clamps it to the still-en
   assert.match(h.view(), /DEEPSEEK_API_KEY/u)
 })
 
-test('a stale backend closes an open endpoint draft with zero writes and recovers after reconnect', async t => {
-  const h = setup()
-  t.after(h.dispose)
-  await openWebPage(h)
-  await openWebRow(h, 4) // Enter on the endpoint row mounts its editor
-  assert.match(h.view(), /Enter confirm · Esc cancel/u)
-  h.setReadiness('stale')
-  // The key that discovers the non-current backend must NOT reach the draft.
-  await key(h, 'x')
-  const closed = h.view()
-  assert.doesNotMatch(closed, /Enter confirm · Esc cancel/u, `the draft closed without a Confirm:\n${closed}`)
-  assert.match(closed, /read-only until it reconnects/u, `the reason is painted:\n${closed}`)
-  // The endpoint DETAIL must not advertise the editor either: the backend is
-  // non-current, so the editor would refuse the next Confirm.
-  assert.doesNotMatch(closed, /Enter edit endpoint/u, `the stale Detail advertises no editor:\n${closed}`)
-  assert.match(closed, /r refresh · Esc back/u, 'the bar offers only the read refresh')
-  assert.deepEqual(h.writes, [], 'closing the draft writes nothing')
-  await key(h, ENTER)
-  assert.doesNotMatch(h.view(), /Enter confirm · Esc cancel/u, 'Enter on the stale Detail never opens the editor')
-  assert.deepEqual(h.writes, [], 'Enter on the read-only Detail dispatches nothing')
-  // Recovery: a current backend + a fresh read restore the explicit editor path.
-  h.setReadiness('ready')
-  await key(h, 'r')
-  await settlePainted(h, 'the recovered endpoint row', frame => frame.includes('Enter edit endpoint'))
-  await key(h, ENTER)
-  assert.match(h.view(), /Enter confirm · Esc cancel/u)
-  await editEndpointDraft(h, '/v3')
-  await key(h, ENTER)
-  await settleEndpointPanel(h)
-  assert.deepEqual(h.writes, ['endpoint:https://api.deepseek.com/v1/tools/v3'])
-})
-
 test('a resize that clips the credential actions removes the Enter affordance and the hit target', async t => {
   const h = setup({ columns: 120, rows: 40 })
   t.after(h.dispose)
   await openWebPage(h)
-  await pageListSelect(h, 5)
+  await pageListSelect(h, 8)
   await key(h, ENTER) // credential Detail
   await key(h, DOWN) // Configure -> Clear
   assert.match(h.view(), /Enter open in Models/u)
@@ -1405,7 +1634,7 @@ test('a resize that clips the credential actions removes the Enter affordance an
   await h.vt.waitForRender()
   const clipped = h.view()
   assert.doesNotMatch(clipped, /Enter open in Models/u, `the clipped frame must not advertise Enter:\n${clipped}`)
-  assert.match(clipped, /r refresh · Esc back/u, 'only the read refresh is offered')
+  assert.match(clipped, /r refresh · Back \[Esc\]/u, 'only the read refresh is offered')
   // No hit target either: Enter cannot navigate.
   await key(h, ENTER)
   assert.doesNotMatch(h.view(), /Settings · Models/u, 'Enter on a cropped action never navigates')
@@ -1416,76 +1645,18 @@ test('a resize that clips the credential actions removes the Enter affordance an
   assert.match(h.view(), /Enter open in Models/u, 'the restored frame advertises the Enter')
 })
 
-test('an endpoint grant too short for the trust disclosure refuses the confirm', async t => {
-  const h = setup({ columns: 44, rows: 3 })
-  t.after(h.dispose)
-  await openWebPage(h)
-  await openWebRow(h, 4) // the endpoint row opens its editor with a 1-line body
-  const tiny = h.view()
-  assert.doesNotMatch(tiny, /Enter confirm/u, `a cropped disclosure offers no Confirm:\n${tiny}`)
-  assert.match(tiny, /enlarge for the warning/u, 'the bar states how to reveal the disclosure')
-  await key(h, ENTER)
-  assert.deepEqual(h.writes, [], 'a blind Confirm dispatches nothing')
-  // Revealing the disclosure re-enables the explicit confirm path.
-  h.vt.resize(44, 8)
-  await h.vt.waitForRender()
-  const revealed = await settlePainted(h, 'the revealed disclosure', frame => frame.includes('Enter confirm · Esc cancel'))
-  const disclosure = revealed.replace(/\s+/gu, ' ')
-  assert.match(disclosure, /it receives the API key and the query/u)
-  assert.match(disclosure, /The URL shape is not a trust check/u)
-  await editEndpointDraft(h, '/v4')
-  await key(h, ENTER)
-  await settleEndpointPanel(h)
-  assert.deepEqual(h.writes, ['endpoint:https://api.deepseek.com/v1/tools/v4'])
-})
-
-test('a dispatched write keeps its live state visible on a grant too short for the disclosure', async t => {
-  const h = setup({ columns: 44, rows: 8 })
-  t.after(h.dispose)
-  await openWebPage(h)
-  await openWebRow(h, 4) // editor with the complete disclosure
-  h.store.failNext = 'mutate rejected'
-  const release = h.holdRead() // the refused write's reread stays pending => Saving…
-  t.after(release)
-  await editEndpointDraft(h, '/v5')
-  await key(h, ENTER) // dispatch the write
-  // Shrink below the disclosure: the live state must stay visible and the bar
-  // must not imply the dispatched mutation can be cancelled.
-  h.vt.resize(44, 3)
-  await h.vt.waitForRender()
-  const tinySaving = h.view()
-  assert.match(tinySaving, /Saving…/u, `the in-flight state survives the resize:\n${tinySaving}`)
-  assert.doesNotMatch(tinySaving, /Esc cancel/u,
-    `a dispatched write is never described as cancellable:\n${tinySaving}`)
-  release()
-  // The refusal settles while the grant is still tiny: its verdict stays visible.
-  const tinyRefused = await settlePainted(h, 'the refused verdict on the tiny grant', frame =>
-    frame.includes('Not saved'))
-  assert.match(tinyRefused, /Not saved/u)
-  assert.doesNotMatch(tinyRefused, /Esc cancel/u, 'a refused write is not a cancelled draft')
-  assert.deepEqual(h.writes, [], 'the failed setter dispatched no Host write')
-  // Enlarging reveals the full reason and restores the explicit confirm path;
-  // the draft survives, and a corrected confirm really writes.
-  h.vt.resize(44, 8)
-  await h.vt.waitForRender()
-  assert.match(h.view(), /Not saved · mutate rejected/u, `the full verdict is revealed:\n${h.view()}`)
-  await key(h, ENTER)
-  await settleEndpointPanel(h)
-  assert.deepEqual(h.writes, ['endpoint:https://api.deepseek.com/v1/tools/v5'])
-})
-
 test('an EXTERNAL provider change after the page read is never overwritten by a stale base', async t => {
   const h = setup()
   t.after(h.dispose)
   await openWebPage(h)
   // The page's Detail was built from the official read...
   await openWebRow(h, 0)
-  assert.match(h.view(), /Current: Messages/u)
+  assert.match(h.view(), /Current: DeepSeek server-side search/u)
   // ...another Host writer then installs a CUSTOM route while the page is open.
   h.store.web.searchProvider = 'acme-search'
   // Confirm without refreshing the page: the queue head must re-read the Host
   // and refuse with ZERO writes instead of overwriting the external value.
-  await chooseCandidate(h, 1)
+  await chooseCandidate(h, 2)
   await key(h, ENTER)
   const refused = await settlePainted(h, 'the external custom route refusal', frame =>
     frame.includes('Not saved') && !frame.includes('Saving…'))
@@ -1511,17 +1682,17 @@ test('a HOST error reason with ANSI/OSC/CR/LF is sanitized at the display bounda
   assert.deepEqual(h.writes, [])
 })
 
-test('a HOST failure reason with control text is sanitized inside the endpoint editor', async t => {
-  const h = setup()
+test('a HOST failure reason with control text is sanitized inside the billing verdict', async t => {
+  const h = setup({ searchProvider: 'deepseek-search-api' })
   t.after(h.dispose)
   await openWebPage(h)
   await openWebRow(h, 4)
+  await chooseCandidate(h, 1)
   h.store.failNext = 'rejected \u001b[31mred\u001b[0m \u001b]0;title\u0007'
-  await editEndpointDraft(h, '/v9')
   await key(h, ENTER)
-  const frame = await settlePainted(h, 'the sanitized endpoint error', frame => frame.includes('Not saved'))
+  const frame = await settlePainted(h, 'the sanitized billing error', frame => frame.includes('Not saved'))
   assert.match(frame, /rejected red/u, `the readable reason survives:\n${frame}`)
-  assert.doesNotMatch(frame, /\u001b/u, 'no escape byte reaches the editor frame')
+  assert.doesNotMatch(frame, /\u001b/u, 'no escape byte reaches the frame')
   assert.doesNotMatch(frame, /title/u, 'the OSC payload is never painted')
 })
 
@@ -1539,8 +1710,8 @@ test('the wheel scrolls a cropped list by moving the visible selection (44 and 8
       await narrow.vt.waitForRender()
     }
     const scrolled = narrow.view()
-    assert.match(scrolled, /> Search \/ Fetch API Endpoint/u, `the list really scrolled to the later row:\n${scrolled}`)
-    assert.match(scrolled, /Search \/ Fetch API Endpoint/u)
+    assert.match(scrolled, /> Search Billing/u, `the list really scrolled to the later row:\n${scrolled}`)
+    assert.match(scrolled, /Search Billing/u)
   } finally {
     narrow.dispose()
   }
@@ -1561,22 +1732,22 @@ test('the wheel scrolls a cropped list by moving the visible selection (44 and 8
   }
 })
 
-test('a resize that crops the highlighted candidate removes the Enter confirm affordance', async t => {
+test('a resize that crops the highlighted candidate removes the Confirm [Enter] affordance', async t => {
   const h = setup({ columns: 120, rows: 40 })
   t.after(h.dispose)
   await openWebPage(h)
   await openWebRow(h, 2) // count Detail
   await key(h, DOWN) // 10 -> 20
-  assert.match(h.view(), /Enter confirm/u)
+  assert.match(h.view(), /Confirm \[Enter\]/u)
   h.vt.resize(120, 3)
   await h.vt.waitForRender()
   const cropped = h.view()
-  assert.doesNotMatch(cropped, /Enter confirm/u, `a cropped candidate offers no Confirm:\n${cropped}`)
+  assert.doesNotMatch(cropped, /Confirm \[Enter\]/u, `a cropped candidate offers no Confirm:\n${cropped}`)
   await key(h, ENTER)
   assert.deepEqual(h.writes, [], 'Enter on an invisible candidate dispatches nothing')
   h.vt.resize(120, 40)
   await h.vt.waitForRender()
-  assert.match(h.view(), /Enter confirm · Esc back/u, 'the restored frame advertises the Confirm again')
+  assert.match(h.view(), /Confirm \[Enter\] · Back \[Esc\]/u, 'the restored frame advertises the Confirm again')
   await key(h, ENTER)
   await settlePainted(h, 'the confirmed count write', frame => frame.includes('Verified'))
   assert.deepEqual(h.writes, ['count:20'])
@@ -1587,7 +1758,7 @@ test('a list wheel re-anchors the Detail on the NEW row authoritative candidates
   t.after(h.dispose)
   await openWebPage(h)
   await openWebRow(h, 0) // provider Detail keeps the keyboard
-  await chooseCandidate(h, 1) // DeepSeek Search API highlighted, not confirmed
+  await chooseCandidate(h, 2) // DeepSeek Search API highlighted, not confirmed
   assert.match(h.view(), /› DeepSeek Search API/u)
   const listY = 5 // header + metadata + rule + pane header + row 0 (1-based SGR cell)
   // The wheel moves the list SELECTION while the Detail keeps the keyboard.
@@ -1595,7 +1766,7 @@ test('a list wheel re-anchors the Detail on the NEW row authoritative candidates
   await h.vt.waitForRender()
   const after = h.view()
   assert.match(after, /Current: HTTP/u, 'the Detail followed the scrolled row')
-  assert.match(after, /› HTTP · anonymous default/u,
+  assert.match(after, /› HTTP \[current\] · deployment default/u,
     `the NEW row's current candidate is highlighted, never the stale index:\n${after}`)
   assert.doesNotMatch(after, /› DeepSeek Fetch API/u)
   // Enter confirms the NEW row's CURRENT value (already-current → zero writes).
@@ -1605,11 +1776,11 @@ test('a list wheel re-anchors the Detail on the NEW row authoritative candidates
 
   // The credential row's action cursor converges the same way.
   await key(h, ESC) // Detail -> list
-  await pageListSelect(h, 5)
+  await pageListSelect(h, 8)
   await key(h, ENTER) // credential Detail
   await key(h, DOWN) // Configure -> Clear
   assert.match(h.view(), /› Clear in Models…/u)
-  h.vt.sendInput(`\x1b[<64;5;${listY}M`) // wheel up -> endpoint row
+  h.vt.sendInput(`\x1b[<64;5;${listY}M`) // wheel up -> the billing row
   await h.vt.waitForRender()
   h.vt.sendInput(`\x1b[<65;5;${listY}M`) // wheel down -> credential row again
   await h.vt.waitForRender()
@@ -1619,23 +1790,23 @@ test('a list wheel re-anchors the Detail on the NEW row authoritative candidates
   assert.doesNotMatch(credential, /› Clear in Models…/u)
 })
 
-test('a dispatched choice write never advertises Enter confirm while it is saving', async t => {
+test('a dispatched choice write never advertises Confirm [Enter] while it is saving', async t => {
   const h = setup({ columns: 120, rows: 40 })
   t.after(h.dispose)
   h.store.writeDelayMs = 300
   await openWebPage(h)
   await openWebRow(h, 0)
-  await chooseCandidate(h, 1)
+  await chooseCandidate(h, 2)
   const mark = settledWritesMark(h)
   await key(h, ENTER)
   const saving = h.view()
   assert.match(saving, /Saving…/u, `the in-flight state is painted:\n${saving}`)
-  assert.doesNotMatch(saving, /Enter confirm/u, `no Confirm is advertised while saving:\n${saving}`)
+  assert.doesNotMatch(saving, /Confirm \[Enter\]/u, `no Confirm is advertised while saving:\n${saving}`)
   await key(h, ENTER) // must not dispatch a second intent
   await awaitWriteSettlement(h, 'search:deepseek-search-api', mark)
   assert.equal(h.writes.length, 1, 'Enter while saving dispatched nothing')
   assert.match(h.view(), /Verified/u)
-  await settlePainted(h, 'the settled bar', frame => frame.includes('Enter confirm'))
+  await settlePainted(h, 'the settled bar', frame => frame.includes('Confirm [Enter]'))
   assert.deepEqual(h.writes, ['search:deepseek-search-api'])
 })
 
@@ -1643,7 +1814,7 @@ test('an Enter on a credential action invalidated by a fresh read is refused and
   const h = setup({ columns: 120, rows: 40 })
   t.after(h.dispose)
   await openWebPage(h)
-  await pageListSelect(h, 5)
+  await pageListSelect(h, 8)
   await key(h, ENTER) // credential Detail
   await key(h, DOWN) // Configure -> Clear
   assert.match(h.view(), /› Clear in Models…/u)
@@ -1670,7 +1841,7 @@ test('a Detail scroll projection cannot advance the painted action before the fr
   const h = setup({ columns: 120, rows: 40 })
   t.after(h.dispose)
   await openWebPage(h)
-  await pageListSelect(h, 5)
+  await pageListSelect(h, 8)
   await key(h, ENTER)
   await key(h, DOWN) // cursor on Clear, painted
   h.store.web.credential = { configured: false }
@@ -1694,7 +1865,7 @@ test('a list frame cannot retain the credential action a previous Detail painted
   const h = setup({ columns: 44, rows: 20 }) // narrow: the list frame paints no Detail at all
   t.after(h.dispose)
   await openWebPage(h)
-  await pageListSelect(h, 5)
+  await pageListSelect(h, 8)
   await key(h, ENTER) // credential Detail, Configure painted
   assert.match(h.view(), /› Configure in Models…/u)
   await key(h, ESC) // back to the list; this frame paints NO credential action
@@ -1715,7 +1886,7 @@ test('a mouse click on a credential action invalidated by a fresh read is refuse
   const h = setup({ columns: 120, rows: 40 })
   t.after(h.dispose)
   await openWebPage(h)
-  await pageListSelect(h, 5)
+  await pageListSelect(h, 8)
   await key(h, ENTER)
   await key(h, DOWN) // cursor on Clear
   const line = h.view().split('\n').findIndex(text => text.includes('Clear in Models…'))
@@ -1740,10 +1911,15 @@ test('a long custom provider id is wholly readable in the scrollable Detail', as
   t.after(h.dispose)
   await openWebPage(h)
   await openWebRow(h, 0) // the provider Detail (narrow, 4 body rows)
-  const first = h.view()
-  assert.doesNotMatch(first, /TAIL-ID/u, `the tail is below the first viewport:\n${first}`)
-  // Scroll the Detail: the whole Host id is reachable, never dropped by fit().
-  let scrolled = first
+  // The anchor reveals the CURRENT (Automatic) option, so the FIRST viewport may
+  // start inside the long id; both the head and the tail must stay reachable.
+  let head = h.view()
+  for (let step = 0; step < 4 && !head.includes('acme-'); step += 1) {
+    await key(h, '\x1b[5~') // PgUp
+    head = h.view()
+  }
+  assert.match(head, /acme-/u, `the custom id head is reachable:\n${head}`)
+  let scrolled = h.view()
   for (let step = 0; step < 8 && !scrolled.includes('TAIL-ID'); step += 1) {
     await key(h, '\x1b[6~')
     scrolled = h.view()
@@ -1774,7 +1950,7 @@ test('a long Host failure reason is wholly readable in the Detail', async t => {
   await openWebPage(h)
   await openWebRow(h, 0)
   h.store.failNext = longReason
-  await chooseCandidate(h, 1)
+  await chooseCandidate(h, 2)
   await key(h, ENTER)
   await settlePainted(h, 'the long refused verdict', frame => frame.includes('Not saved'))
   let frame = h.view()
@@ -1786,32 +1962,939 @@ test('a long Host failure reason is wholly readable in the Detail', async t => {
   assert.match(frame, /Not saved/u)
 })
 
-// ── D3-2: the page states the real rc.2 facts ──────────────────────────────
+// ── D3-2: the page states the real rc.5 facts ──────────────────────────────
 
-test('the page states defaults, billing, the ori_question boundary and the endpoint trust warning', async t => {
-  const h = setup()
+test('the page states the automatic routing facts, billing and read-only overrides', async t => {
+  const h = setup({ searchProvider: 'deepseek-search-api' })
   t.after(h.dispose)
   await openWebPage(h)
   const compact = (): string => h.view().replace(/[\u2500-\u257f│]/gu, ' ').replace(/\s+/gu, ' ')
-  assert.match(compact(), /Messages is the official default and does not call the billed Search API/u)
-  assert.match(compact(), /DeepSeek Search API is opt-in and separately billed/u)
   assert.match(compact(), /a Messages plan does not guarantee coverage/u)
   assert.match(compact(), /No write happens without an explicit Enter/u)
   // The Share Original Question row states the packed ON default and the exact
-  // payload boundary (not the full history/system prompt).
+  // payload boundary (not the full history/system prompt). The two-column
+  // frame interleaves list rows with the wrapped Detail column, so the long
+  // boundary sentence is asserted in its wrapped fragments.
   await pageListSelect(h, 3)
   assert.match(compact(), /Current: on/u)
   assert.match(compact(), /packed default for the DeepSeek Search API/u)
-  assert.match(compact(), /up to 128 characters of the triggering human question as ori_question/u)
+  assert.match(compact(), /up to 128 characters of the/u)
+  assert.match(compact(), /triggering human question as ori_question/u)
   assert.match(compact(), /never the full history or the system prompt/u)
-  // The endpoint row is base-owned Web configuration, not a Bundle, and states
-  // the trusted-HTTPS/credential boundary.
+  // The Search provider row states the rc.5 AUTOMATIC routing rule (DeepSeek
+  // models take the server-side search, other routes prefer the billed Search
+  // API) and that an explicit selection always overrides the automatic routing;
+  // it never claims a fixed official default.
+  await pageListSelect(h, 0)
+  assert.match(compact(), /routes AUTOMATICALLY/u)
+  assert.match(compact(), /DeepSeek server-side search \(no per-search charge\)/u)
+  assert.match(compact(), /billed per Search API call/u)
+  assert.match(compact(), /An explicit USER selection always overrides the automatic routing/u)
+  assert.doesNotMatch(compact(), /official default is the/u)
+  // The Search billing row states the three explicit modes' credential claims
+  // and the per-call billing fact; Automatic is a persisted choice, not a reset.
   await pageListSelect(h, 4)
-  assert.match(compact(), /Enter opens the endpoint editor/u)
-  assert.match(compact(), /Changing it sends the/u)
-  assert.match(compact(), /DeepSeek API credential and the query to that target/u)
-  assert.match(compact(), /confirm only a trusted HTTPS base/u)
-  assert.match(compact(), /the URL shape/u)
-  assert.match(compact(), /is checked, not the host's trust/u)
-  assert.match(compact(), /Official base: https:\/\/api\.deepseek\.com\/v1\/tools/u)
+  assert.match(compact(), /Current: Automatic/u)
+  assert.match(compact(), /follows the credential the CURRENT conversation's DeepSeek route selects/u)
+  assert.match(compact(), /Account uses only the signed-in account/u)
+  assert.match(compact(), /API key uses only the DEEPSEEK_API_KEY credential/u)
+  assert.match(compact(), /billed separately per call/u)
+  assert.match(compact(), /Automatic is NOT a reset of an override/u)
+  // The read-only Search override row: the unset fact names the conversation
+  // route (never a fabricated fixed URL) and the legacy keys are stated inert.
+  await pageListSelect(h, 6)
+  assert.match(compact(), /Current: Host YAML: not set — follows current conversation's DeepSeek route/u)
+  assert.match(compact(), /Legacy web-deepseek-api\.baseURL\/apiKeyEnv\/apiKey no longer control Search\/Fetch/u)
+  assert.match(compact(), /no automatic conversion/u)
+  assert.match(compact(), /read-only here, Enter never opens/u)
+  // An OVERRIDE-bearing capability shows its fields (masked URL/env NAME, no
+  // secret) and states that the override owns the configuration over the
+  // billing row. The URL carries userinfo ON PURPOSE: the painted fact must
+  // mask it (and any query/fragment) instead of exposing the credential.
+  const overrideFacts = (): WebSettingsFacts => ({
+    kind: 'ready',
+    settings: {
+      searchProvider: 'deepseek-search-api',
+      fetchProvider: 'http',
+      providerSelection: providerLayers({ searchBase: 'deepseek-search-api', fetchBase: 'http' }),
+      api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
+      advanced: {
+        searchBaseURL: 'https://alice:p1@p2@search.example.test/v1?token=x',
+        searchApiKeyEnv: 'SEARCH_API_KEY_ENV',
+      },
+      credential: { configured: true, source: 'file' },
+    },
+  })
+  const overriddenWrites: string[] = []
+  const overridden = new WebSettingsPage({
+    readFacts: overrideFacts,
+    writableRefusal: () => undefined,
+    credentialAvailable: () => true,
+    commit: async (id, requested) => {
+      overriddenWrites.push(`${id}:${requested}`)
+      return { kind: 'not-saved', reason: 'the commit path must never run' }
+    },
+    refresh: () => {},
+    navigateToModels: () => {},
+    requestRender: () => {},
+    run: () => {},
+    done: () => {},
+  })
+  try {
+    overridden.setMaxRows(24)
+    overridden.render(140)
+    overridden.handleInput('\x1b[H')
+    for (let step = 0; step < 4; step += 1) overridden.handleInput('\x1b[B')
+    overridden.handleInput('\r') // open the Search billing Detail
+    const billingFrame = stripTerminalSequences(overridden.render(140).join('\n'))
+    assert.match(billingFrame, /Overridden by Host YAML \(stored: Automatic\)/u,
+      `the overridden billing row states the override and its stored mode:\n${billingFrame}`)
+    assert.match(billingFrame, /the advanced searchBaseURL and searchApiKeyEnv field\(s\) own this capability/u)
+    assert.match(billingFrame, /searchBaseURL=https:\/\/\*\*\*@search\.example\.test\/v1/u,
+      'the Billing Detail paints the MASKED override URL (userinfo/query never)')
+    assert.match(billingFrame, /searchApiKeyEnv=SEARCH_API_KEY_ENV/u,
+      'the override env NAME is allowed as a fact')
+    assert.doesNotMatch(billingFrame, /secret|user:|token=/u,
+      `no credential material is painted on the billing Detail:\n${billingFrame}`)
+    assert.doesNotMatch(billingFrame, /Confirm \[Enter\]/u,
+      'an overridden billing row offers no Confirm affordance')
+    overridden.handleInput('\r') // Enter with no candidate: zero writes
+    assert.deepEqual(overriddenWrites, [], 'the overridden billing row never dispatches a write')
+    // The Search override row itself paints the masked fields read-only.
+    overridden.handleInput('\x1b')
+    for (let step = 0; step < 2; step += 1) overridden.handleInput('\x1b[B')
+    overridden.handleInput('\r')
+    const advancedFrame = stripTerminalSequences(overridden.render(140).join('\n'))
+    assert.match(advancedFrame, /Current: Host YAML: searchBaseURL=https:\/\/\*\*\*@search\.example\.test\/v1/u)
+    assert.match(advancedFrame, /searchApiKeyEnv=SEARCH_API_KEY_ENV/u)
+    assert.doesNotMatch(advancedFrame, /alice|p1|p2|token=/u,
+      'multiple userinfo @ characters and query never survive the page')
+    assert.doesNotMatch(advancedFrame, /secret|user:|token=/u, 'no credential material is ever painted')
+  } finally {
+    overridden.dispose()
+  }
+})
+
+test('the page bar publishes the complete Esc span in its OWN content columns', () => {
+  const facts: WebSettingsFacts = {
+    kind: 'ready',
+    settings: {
+      searchProvider: 'deepseek-official',
+      fetchProvider: 'http',
+      providerSelection: providerLayers({ searchBase: 'deepseek-official', fetchBase: 'http' }),
+      api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
+      advanced: {},
+      credential: { configured: true, source: 'file' },
+    },
+  }
+  const page = new WebSettingsPage({
+    readFacts: () => facts,
+    writableRefusal: () => undefined,
+    credentialAvailable: () => true,
+    commit: async () => ({ kind: 'verified', actual: '10' }),
+    refresh: () => {},
+    navigateToModels: () => {},
+    requestRender: () => {},
+    run: () => {},
+    done: () => {},
+  })
+  try {
+    // Before ANY paint there is no frame to describe.
+    assert.equal(page.paintedEscapeSpan(), undefined)
+    assert.deepEqual(page.paintedBarSpans(), [], 'no delegated span exists before the first paint')
+    page.setMaxRows(20)
+    // Paint the frame FIRST: the span always describes the last completed paint.
+    const bar = (): string => stripTerminalSequences(page.render(80).at(-1)!)
+    const expectVerb = (verb: string): void => {
+      const painted = bar()
+      const span = page.paintedEscapeSpan()
+      assert.ok(span !== undefined, `the ${verb} affordance is complete`)
+      assert.equal(painted.slice(span.startCol, span.endCol), `${verb} [Esc]`,
+        `the span covers exactly the plain ${verb} token`)
+      assert.equal(span.endCol - span.startCol, visibleWidth(`${verb} [Esc]`),
+        'painting the affordance never changes its visible width')
+    }
+    const confirmSpan = (): { readonly startCol: number; readonly endCol: number } | undefined =>
+      page.paintedBarSpans().find(span => span.id === 'web:confirm')
+    const expectConfirm = (): void => {
+      const painted = bar()
+      const span = confirmSpan()
+      assert.ok(span !== undefined, 'the Detail publishes the delegated Confirm')
+      assert.equal(painted.slice(span.startCol, span.endCol), 'Confirm [Enter]',
+        'the delegated span covers exactly the plain confirm verb')
+      assert.equal(span.endCol - span.startCol, visibleWidth('Confirm [Enter]'))
+    }
+
+    // List region: Esc returns to the Tools rows (the affordance names that Back)
+    // and NO confirm target is painted.
+    expectVerb('Back')
+    assert.equal(confirmSpan(), undefined, 'a list frame publishes no Confirm')
+    // Detail region: Esc returns to the page list. The region/row transition
+    // changes the page's OWN gesture identity even when the bar verb repeats.
+    const listIdentity = page.gestureIdentity()
+    page.handleInput('\r')
+    expectVerb('Back')
+    expectConfirm()
+    assert.notEqual(page.gestureIdentity(), listIdentity,
+      'opening the detail changes the page gesture identity')
+    // 20 columns cannot fit `Confirm [Enter] · Back [Esc]` whole: the commit
+    // verb is dropped, never truncated, and the Esc affordance survives.
+    page.render(20)
+    assert.equal(confirmSpan(), undefined, 'a width that cannot fit the whole verb publishes no Confirm')
+    assert.ok(page.paintedEscapeSpan() !== undefined, 'the Esc affordance survives the drop')
+    page.handleInput('\x1b')
+    expectVerb('Back')
+
+    // No wording fits at all: the bar is empty and carries no geometry.
+    page.render(8)
+    assert.equal(page.paintedEscapeSpan(), undefined, 'a dropped wording advertises no Esc')
+    assert.equal(confirmSpan(), undefined, 'a dropped wording advertises no Confirm')
+  } finally {
+    page.dispose()
+  }
+})
+
+test('the delegated Confirm re-proves the LIVE authority and revokes a stale gesture', async () => {
+  let facts: WebSettingsFacts = {
+    kind: 'ready',
+    settings: {
+      searchProvider: 'deepseek-official',
+      fetchProvider: 'http',
+      providerSelection: providerLayers({ searchBase: 'deepseek-official', fetchBase: 'http' }),
+      api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
+      advanced: {},
+      credential: { configured: true, source: 'file' },
+    },
+  }
+  const commits: string[] = []
+  const page = new WebSettingsPage({
+    readFacts: () => facts,
+    writableRefusal: () => undefined,
+    credentialAvailable: () => true,
+    commit: async (id, requested) => {
+      commits.push(`${id}:${requested}`)
+      return { kind: 'verified', actual: typeof requested === 'string' ? requested : 'restore' }
+    },
+    refresh: () => {},
+    navigateToModels: () => {},
+    requestRender: () => {},
+    run: (_label, task) => { void task() },
+    done: () => {},
+  })
+  const drainCommitSettlement = async (): Promise<void> => {
+    for (let index = 0; index < 20; index += 1) await Promise.resolve()
+  }
+  try {
+    page.setMaxRows(20)
+    page.render(140) // list
+    page.handleInput('\r') // the provider Detail
+    page.render(140)
+    assert.equal(page.paintedBarSpans().length, 1, 'precondition — the Detail publishes Confirm')
+    // The live candidate the authority holds is already current; confirming it
+    // still joins the command owner's FIFO exactly once.
+    page.activateBarSpan('web:confirm')
+    await drainCommitSettlement()
+    assert.equal(commits.length, 1, 'the delegated Confirm runs the original confirmSelected sink exactly once')
+    assert.match(commits[0]!, /^web-search-provider:/u, 'the provider row confirmed its typed intent')
+    assert.match(commits[0]!, /\[object Object\]/u, 'the typed provider intent is not a bare provider id')
+    // A DISPATCHED write owns the row: the same target cannot enqueue a second
+    // intent while the phase is saving.
+    page.activateBarSpan('web:confirm')
+    await drainCommitSettlement()
+    assert.equal(commits.length, 1, 'no second intent is enqueued while saving')
+
+    // The authority becomes pending WITHOUT any page state change: the painted
+    // snapshot is no longer a commit base.
+    page.render(140)
+    const before = page.gestureIdentity()
+    facts = { kind: 'pending' }
+    assert.equal(page.gestureIdentity(), before, 'precondition — the page identity is unchanged')
+    page.activateBarSpan('web:confirm')
+    await drainCommitSettlement()
+    assert.equal(commits.length, 1, 'a pending authority dispatches nothing')
+
+    // An externally CUSTOM route removes every official candidate.
+    facts = {
+      kind: 'ready',
+      settings: {
+        searchProvider: 'custom-route',
+        fetchProvider: 'http',
+        providerSelection: providerLayers({ searchBase: 'custom-route', fetchBase: 'http' }),
+        api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
+        advanced: {},
+        credential: { configured: true, source: 'file' },
+      },
+    }
+    page.activateBarSpan('web:confirm')
+    await drainCommitSettlement()
+    assert.equal(commits.length, 1, 'a custom route dispatches nothing')
+
+    // A wheel starts a new semantic frame even when it scrolls nothing.
+    page.activateBarSpan('web:confirm')
+    await drainCommitSettlement()
+    assert.equal(commits.length, 1, 'a stale target stays inert')
+    page.handleMouse({
+      type: 'wheel', button: 'none', x: 1, y: 1, screenX: 1, screenY: 1,
+      width: 140, height: 20, shift: false, alt: false, ctrl: false, wheelDelta: 1,
+    })
+    page.activateBarSpan('web:confirm')
+    await drainCommitSettlement()
+    assert.equal(commits.length, 1, 'a wheel revokes the pending Confirm target')
+  } finally {
+    page.dispose()
+  }
+  page.activateBarSpan('web:confirm')
+  await drainCommitSettlement()
+  assert.equal(commits.length, 1, 'a disposed page dispatches nothing')
+})
+
+test('a wide Detail whose candidate is cropped by a long verdict publishes no Confirm target', async () => {
+  // width 100 = wide layout: the Detail column is 64 cells while the bar's
+  // projection used to wrap at the full 100. A 200-cell verdict therefore
+  // cropped the highlighted candidate in the REAL Detail pane while the
+  // full-width projection still called it visible.
+  const longReason = 'x'.repeat(200)
+  const facts: WebSettingsFacts = {
+    kind: 'ready',
+    settings: {
+      searchProvider: 'deepseek-official',
+      fetchProvider: 'http',
+      providerSelection: providerLayers({ searchBase: 'deepseek-official', fetchBase: 'http' }),
+      api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
+      advanced: {},
+      credential: { configured: true, source: 'file' },
+    },
+  }
+  const commits: string[] = []
+  const page = new WebSettingsPage({
+    readFacts: () => facts,
+    writableRefusal: () => undefined,
+    credentialAvailable: () => true,
+    commit: async (id, requested) => {
+      commits.push(`${id}:${requested}`)
+      return { kind: 'not-saved', reason: longReason }
+    },
+    refresh: () => {},
+    navigateToModels: () => {},
+    requestRender: () => {},
+    run: (_label, task) => { void task() },
+    done: () => {},
+  })
+  const drainVerdict = async (): Promise<void> => {
+    for (let index = 0; index < 40; index += 1) await Promise.resolve()
+  }
+  try {
+    page.setMaxRows(8)
+    page.render(100)
+    page.handleInput('\r') // the provider Detail
+    page.handleInput('\x1b[B') // highlight DeepSeek Search API
+    page.handleInput('\r') // one dispatched write returns the long not-saved verdict
+    await drainVerdict()
+    const cropped = stripTerminalSequences(page.render(100).join('\n'))
+    assert.match(cropped, /Not saved/u)
+    assert.doesNotMatch(cropped, /Confirm \[Enter\]/u,
+      'a candidate the REAL Detail pane cropped must not advertise a Confirm')
+    assert.deepEqual(page.paintedBarSpans(), [], 'a cropped candidate publishes no delegated span')
+    page.activateBarSpan('web:confirm')
+    await drainVerdict()
+    assert.equal(commits.length, 1, 'only the keyboard dispatch is a commit; the absent span dispatches nothing')
+    assert.match(commits[0]!, /^web-search-provider:/u, 'the keyboard dispatch carried the typed provider intent')
+    // The same state at a roomy grant really paints the candidate and restores
+    // the delegated target; the positive control proves the probe was not
+    // vacuous.
+    page.setMaxRows(20)
+    const roomy = stripTerminalSequences(page.render(100).join('\n'))
+    assert.match(roomy, /Confirm \[Enter\]/u)
+    assert.equal(page.paintedBarSpans().length, 1)
+    page.activateBarSpan('web:confirm')
+    await drainVerdict()
+    assert.equal(commits.length, 2, 'the roomy frame publishes an executable delegated target')
+  } finally {
+    page.dispose()
+  }
+})
+
+test('a wide Detail wheel onto the candidate row keeps the bar and the activation on one projection', async () => {
+  // Same root cause as the cropped-Confirm case, but through the INPUT paths:
+  // the bar projects at the real detail width, so the scroll/activation
+  // projections must use that same width or the painted Confirm and the
+  // activation disagree about where the candidate line really is.
+  const longReason = 'x'.repeat(200)
+  const facts: WebSettingsFacts = {
+    kind: 'ready',
+    settings: {
+      searchProvider: 'deepseek-official',
+      fetchProvider: 'http',
+      providerSelection: providerLayers({ searchBase: 'deepseek-official', fetchBase: 'http' }),
+      api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
+      advanced: {},
+      credential: { configured: true, source: 'file' },
+    },
+  }
+  const commits: string[] = []
+  const page = new WebSettingsPage({
+    readFacts: () => facts,
+    writableRefusal: () => undefined,
+    credentialAvailable: () => true,
+    commit: async (id, requested) => {
+      commits.push(`${id}:${requested}`)
+      return { kind: 'not-saved', reason: longReason }
+    },
+    refresh: () => {},
+    navigateToModels: () => {},
+    requestRender: () => {},
+    run: (_label, task) => { void task() },
+    done: () => {},
+  })
+  const drainVerdict = async (): Promise<void> => {
+    for (let index = 0; index < 40; index += 1) await Promise.resolve()
+  }
+  try {
+    page.setMaxRows(6) // 5 body rows: the wide Detail column is 64 cells
+    page.render(100)
+    page.handleInput('\r') // provider Detail
+    page.handleInput('\x1b[B') // highlight DeepSeek Search API
+    page.handleInput('\r') // one dispatched write returns the long not-saved verdict
+    await drainVerdict()
+    page.handleInput('\x1b[6~') // PgDn once (a full Detail page)
+    page.render(100)
+    for (let step = 0; step < 2; step += 1) {
+      // Wheel inside the Detail column (x = 40 is past the 34-cell list).
+      page.handleMouse({
+        type: 'wheel', button: 'none', x: 40, y: 1, screenX: 40, screenY: 1,
+        width: 100, height: 6, shift: false, alt: false, ctrl: false, wheelDelta: 1,
+      })
+      page.render(100)
+    }
+    const internals = page as unknown as { detailOffset: number }
+    assert.equal(internals.detailOffset, 7, 'precondition — the Detail is scrolled onto the candidate row')
+    const frame = stripTerminalSequences(page.render(100).join('\n'))
+    assert.match(frame, /Confirm \[Enter\]/u, 'the candidate row really owns the first painted Detail row')
+    assert.equal(page.paintedBarSpans().length, 1)
+    page.activateBarSpan('web:confirm')
+    await drainVerdict()
+    assert.equal(commits.length, 2,
+      'the activation uses the SAME real detail projection the bar painted')
+  } finally {
+    page.dispose()
+  }
+})
+
+test('Billing rows are Not selected and inert when their API provider is not the current route', async () => {
+  const facts = (): WebSettingsFacts => ({
+    kind: 'ready',
+    settings: {
+      searchProvider: 'deepseek-official',
+      fetchProvider: 'http',
+      providerSelection: providerLayers({ searchBase: 'deepseek-official', fetchBase: 'http' }),
+      api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
+      advanced: {},
+      credential: { configured: false },
+    },
+  })
+  const writes: string[] = []
+  const page = new WebSettingsPage({
+    readFacts: facts,
+    writableRefusal: () => undefined,
+    credentialAvailable: () => false,
+    commit: async (id, requested) => {
+      writes.push(`${id}:${requested}`)
+      return { kind: 'not-saved', reason: 'the inert row must never dispatch' }
+    },
+    refresh: () => {},
+    navigateToModels: () => {},
+    requestRender: () => {},
+    run: () => {},
+    done: () => {},
+  })
+  try {
+    page.setMaxRows(24)
+    page.render(140)
+    // Rows: search provider, fetch provider, count, question, search billing.
+    page.handleInput('\x1b[H')
+    for (let step = 0; step < 4; step += 1) page.handleInput('\x1b[B')
+    page.handleInput('\r')
+    const search = stripTerminalSequences(page.render(140).join('\n'))
+    assert.match(search, /Current: Not selected/u)
+    assert.match(search, /EDITABLE HERE/u)
+    assert.match(search, /may still execute the Search API for other models' requests/u,
+      'the inert row explains the Automatic routing without claiming a fixed route')
+    assert.doesNotMatch(search, /Automatic · follows/u,
+      'a non-API Search route never paints the billing credential claim')
+    page.handleInput('\r')
+    assert.deepEqual(writes, [], 'the non-API Search route dispatches zero writes')
+    // Back to the list, then the Fetch Billing row (HTTP is not the API route).
+    page.handleInput('\x1b')
+    page.handleInput('\x1b[B')
+    page.handleInput('\r')
+    const fetch = stripTerminalSequences(page.render(140).join('\n'))
+    assert.match(fetch, /Current: Not selected/u)
+    assert.match(fetch, /EDITABLE HERE/u)
+    page.handleInput('\r')
+    assert.deepEqual(writes, [], 'the non-API Fetch route dispatches zero writes')
+  } finally {
+    page.dispose()
+  }
+})
+
+test('Host override values are terminal-sanitized before the Configured override line', async () => {
+  const hostileUrl = 'https://user:secret@search.example.test/v1\x1b[5;5H\x1b]0;pwn-title\x07\r\nnext'
+  const hostileEnv = 'SEARCH_ENV\x1b[5;5H\x1b]0;env-title\x07'
+  const facts = (): WebSettingsFacts => ({
+    kind: 'ready',
+    settings: {
+      searchProvider: 'deepseek-search-api',
+      fetchProvider: 'deepseek-fetch-api',
+      providerSelection: providerLayers({ searchBase: 'deepseek-search-api', fetchBase: 'http' }),
+      api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
+      advanced: { searchBaseURL: hostileUrl, searchApiKeyEnv: hostileEnv },
+      credential: { configured: true, source: 'file' },
+    },
+  })
+  const page = new WebSettingsPage({
+    readFacts: facts,
+    writableRefusal: () => undefined,
+    credentialAvailable: () => true,
+    commit: async () => ({ kind: 'verified', actual: '10' }),
+    refresh: () => {},
+    navigateToModels: () => {},
+    requestRender: () => {},
+    run: () => {},
+    done: () => {},
+  })
+  try {
+    page.setMaxRows(24)
+    page.render(140)
+    page.handleInput('\x1b[H')
+    for (let step = 0; step < 4; step += 1) page.handleInput('\x1b[B')
+    page.handleInput('\r')
+    const raw = page.render(140).join('\n')
+    // An unparseable URL is reported only as configured (never echoed); the
+    // Host-origin values never carry terminal control sequences or row breaks
+    // into the rendered frame.
+    assert.ok(raw.includes('configured URL unavailable'), 'the unparseable URL is reported as configured only')
+    assert.equal(raw.includes('\x1b[5;5H'), false, 'ANSI cursor controls are stripped')
+    assert.equal(raw.includes('\x1b]0;'), false, 'OSC title controls are stripped')
+    assert.equal(raw.includes('pwn-title'), false, 'OSC payload never reaches the terminal')
+    assert.equal(raw.includes('\r'), false, 'raw carriage returns never reach a physical row')
+    assert.equal(raw.includes('SEARCH_ENV'), true, 'the environment NAME remains visible')
+  } finally {
+    page.dispose()
+  }
+})
+
+// ── C2: the delegated mouse Confirm through the real command owner ────────
+
+/** One native SGR left-button press/release pair (1-based terminal cells). */
+function pointerClick(h: Harness, row: number, column: number): void {
+  h.vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
+  h.vt.sendInput(`\x1b[<0;${column + 1};${row + 1}m`)
+}
+
+/** The painted (row, cell) of the LAST line containing `word`. */
+function paintedWordCell(h: Harness, word: string): { readonly row: number; readonly column: number } {
+  const lines = h.view().split('\n')
+  const row = lines.findLastIndex(line => line.includes(word))
+  assert.ok(row >= 0, `${word} is not painted:\n${h.view()}`)
+  const column = lines[row]!.indexOf(word)
+  assert.ok(column >= 0, `${word} has no painted column`)
+  return { row, column }
+}
+
+/**
+ * Wait out the alt screen's DOUBLE_CLICK window before the next gesture on the
+ * same painted word: a fast repeat reads as a word-selection double click, not
+ * a second disclosure (the fork's REAL 500ms contract, not a blind wait).
+ */
+async function settlePointerClick(h: Harness): Promise<void> {
+  // The fork's real DOUBLE_CLICK window contract (500 ms), not an async guess:
+  await new Promise<void>(resolve => setTimeout(resolve, 550))
+  await h.vt.waitForRender()
+}
+
+test('a delegated mouse Confirm is the ONE write through the existing Web FIFO', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 2) // server-side -> DeepSeek Search API (draft only)
+  assert.deepEqual(h.writes, [], 'moving the draft writes nothing')
+  const mark = settledWritesMark(h)
+  const point = paintedWordCell(h, 'Confirm [Enter]')
+  pointerClick(h, point.row, point.column + 1)
+  await awaitWriteSettlement(h, 'search:deepseek-search-api', mark)
+  await settlePainted(h, 'the verified provider Detail', frame =>
+    frame.includes('Current: DeepSeek Search API') && frame.includes('Verified'))
+  assert.deepEqual(h.writes, ['search:deepseek-search-api'], 'exactly ONE official setter')
+  assert.deepEqual(h.log, ['begin:search:deepseek-search-api', 'search:deepseek-search-api'],
+    'the click joined the ONE existing command-owner FIFO')
+  assert.equal(h.maxConcurrentWrites(), 1)
+  assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
+})
+
+test('a Host read between the Confirm press and release writes nothing', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 2)
+  const point = paintedWordCell(h, 'Confirm [Enter]')
+  h.vt.sendInput(`\x1b[<0;${point.column + 1};${point.row + 1}M`)
+  // A Host refresh between the press and the release makes the authority
+  // pending (and starts a new child semantic frame): the release must write
+  // nothing against the pre-refresh snapshot.
+  const releaseRead = h.holdAllReads()
+  await key(h, 'r')
+  h.vt.sendInput(`\x1b[<0;${point.column + 1};${point.row + 1}m`)
+  await h.vt.waitForRender()
+  assert.deepEqual(h.writes, [], 'the stale release never dispatches a write')
+  releaseRead()
+  await settlePainted(h, 'the refreshed Detail', frame =>
+    frame.includes('Confirm [Enter]') && !frame.includes('Loading…'))
+  // A fresh complete gesture writes exactly once.
+  await settlePointerClick(h)
+  const mark = settledWritesMark(h)
+  const fresh = paintedWordCell(h, 'Confirm [Enter]')
+  pointerClick(h, fresh.row, fresh.column + 1)
+  await awaitWriteSettlement(h, 'search:deepseek-search-api', mark)
+  assert.deepEqual(h.writes, ['search:deepseek-search-api'])
+})
+
+test('two mouse Confirms join the ONE FIFO and never overlap', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  // Intent A (search provider): its Host setter STARTS and is held in flight.
+  const releaseA = h.holdNextWrite()
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 2)
+  const first = paintedWordCell(h, 'Confirm [Enter]')
+  pointerClick(h, first.row, first.column + 1)
+  await waitForFrame(() => h.view(), () => h.log.includes('begin:search:deepseek-search-api'),
+    () => h.vt.waitForRender(), 'the first Host write to start')
+  // Intent B (count 10 -> 20) is dispatched while A is still held. It joins the
+  // SAME single FIFO, so its Host setter cannot START until A settles; the
+  // painted saving phase below proves the second confirm really enqueued an
+  // intent (a missing FIFO would start B's setter immediately).
+  await webListTop(h)
+  await openWebRow(h, 2)
+  await chooseCandidate(h, 2) // 5,10,20,50 -> 20
+  await settlePainted(h, 'the second row Detail with Confirm', frame => frame.includes('Confirm [Enter]'))
+  // The bar cell is unchanged between the two Details: pace the second click
+  // past the alt screen's double-click word selection.
+  await settlePointerClick(h)
+  const markB = settledWritesMark(h)
+  const second = paintedWordCell(h, 'Confirm [Enter]')
+  pointerClick(h, second.row, second.column + 1)
+  await settlePainted(h, 'the queued second intent saving', frame => frame.includes('Saving… · Back [Esc]'))
+  assert.deepEqual(h.log, ['begin:search:deepseek-search-api'],
+    'the second intent was dispatched by its page but its setter did not start while A was in flight')
+  assert.equal(h.settledWrites().length, 0, 'nothing settled while A is held')
+  releaseA()
+  await awaitWriteSettlement(h, 'count:20', markB)
+  assert.deepEqual(h.log, [
+    'begin:search:deepseek-search-api',
+    'search:deepseek-search-api',
+    'begin:count:20',
+    'count:20',
+  ], 'the second mouse intent does not even START until the first settled')
+  assert.equal(h.maxConcurrentWrites(), 1, 'never two Web writes in flight at once')
+  assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
+  assert.equal(h.store.web.api.count, 20)
+})
+
+test('closing the page mid-write keeps the command-owned write settling without a false Verified', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  h.store.writeDelayMs = 300
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 2)
+  const mark = settledWritesMark(h)
+  await key(h, ENTER) // dispatch the ONE write through the command owner FIFO
+  await settlePainted(h, 'the saving phase', frame => frame.includes('Saving…'))
+  // Close the whole workspace while the Host write is still in flight.
+  await closeWorkspace(h)
+  await awaitWriteSettlement(h, 'search:deepseek-search-api', mark)
+  assert.equal(h.store.web.searchProvider, 'deepseek-search-api',
+    'the command-owned write still settles after its page was retired')
+  assert.doesNotMatch(h.view(), /Verified/u, 'the closed page never repaints a verdict')
+})
+
+// ── PR2: the official USER-layer restore through the real page/queue ───────
+
+test('the Search Detail restores the deployment default through ONE official unset and re-evaluates Billing', async t => {
+  const h = setup({ searchProvider: 'deepseek-search-api' })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  assert.match(h.view(), /Current: DeepSeek Search API/u)
+  await chooseCandidate(h, 0) // Automatic (the deployment composes no Search provider)
+  assert.match(h.view(), /› Automatic/u, 'the Automatic row is a real confirmable entry')
+  const mark = settledWritesMark(h)
+  await key(h, ENTER)
+  await awaitWriteSettlement(h, 'restore-search', mark)
+  await settlePainted(h, 'the restored Search selection', frame =>
+    frame.includes('Verified') && frame.includes('Current: Automatic'))
+  assert.deepEqual(h.writes, ['restore-search'], 'exactly ONE official unset, never a provider id write')
+  assert.equal(h.store.web.searchProvider, undefined, 'the deployment value applies again')
+  assert.equal(h.store.web.providerSelection.search.userSet, false, 'the only Search USER field is gone')
+  // The Billing row follows the FRESH effective route: Automatic no longer
+  // selects the billed Search API, so it is inert with zero writes.
+  await webListTop(h)
+  await openWebRow(h, 4)
+  assert.match(h.view(), /Current: Not selected/u)
+  assert.doesNotMatch(h.view(), /Confirm \[Enter\]/u, 'Billing is not writable for an Automatic route')
+  await key(h, ENTER)
+  await new Promise(resolve => setTimeout(resolve, 10))
+  await h.vt.waitForRender()
+  assert.deepEqual(h.writes, ['restore-search'], 'the Billing row never writes after the reset')
+})
+
+test('the Fetch Detail restores the deployment HTTP default and the sibling Web fields are untouched', async t => {
+  const h = setup({ fetchProvider: 'deepseek-fetch-api' })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 1)
+  assert.match(h.view(), /Current: DeepSeek Fetch API/u)
+  await chooseCandidate(h, 0) // HTTP — the deployment default row
+  assert.match(h.view(), /› HTTP · deployment default/u,
+    'the highlight moved to the deployment-default row while the API row keeps [current]')
+  const mark = settledWritesMark(h)
+  await key(h, ENTER)
+  await awaitWriteSettlement(h, 'restore-fetch', mark)
+  await settlePainted(h, 'the restored Fetch selection', frame =>
+    frame.includes('Verified') && frame.includes('Current: HTTP'))
+  assert.deepEqual(h.writes, ['restore-fetch'])
+  assert.equal(h.store.web.fetchProvider, 'http')
+  assert.deepEqual(h.store.web.api, { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
+    'the reset never touches the web-deepseek-api section')
+  assert.deepEqual(h.store.web.credential, { configured: true, source: 'file' },
+    'the reset never touches the credential fact')
+  await webListTop(h)
+  await openWebRow(h, 5)
+  assert.match(h.view(), /Current: Not selected/u, 'HTTP is not the billed Fetch API route')
+  // The base HTTP candidate is now the inherited current value: confirming it
+  // is a real zero-write Verified, and the Esc ladder leaves the page.
+  await webListTop(h)
+  await openWebRow(h, 1)
+  await chooseCandidate(h, 0)
+  const inheritedMark = settledWritesMark(h)
+  await key(h, ENTER)
+  await settlePainted(h, 'the zero-write deployment verdict', frame => frame.includes('Verified'))
+  assert.equal(h.settledWrites().length, inheritedMark, 'the inherited deployment value needs no write')
+  await key(h, ESC)
+  await key(h, ESC)
+  assert.doesNotMatch(h.view(), /Search API Result Count/u, 'the provider reset path returns to the Tools rows')
+})
+
+test('the rc.5 sibling residual is reported truthfully: the reset Verifies on the restored effective value', async t => {
+  // The real rc.5 Host keeps an explicit USER value equal to the deployment
+  // base while the same section carries another override. The page must credit
+  // the reset by the FRESH effective value and state the residual, never claim
+  // the USER field vanished.
+  const h = setup({
+    fetchProvider: 'deepseek-fetch-api',
+    restoreSelection: providerLayers({ fetchBase: 'http', fetchUser: { id: 'http' } }),
+  })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 1)
+  await chooseCandidate(h, 0)
+  const mark = settledWritesMark(h)
+  await key(h, ENTER)
+  await awaitWriteSettlement(h, 'restore-fetch', mark)
+  await settlePainted(h, 'the residual reset verdict', frame =>
+    frame.includes('Verified') && frame.includes('Current: HTTP'))
+  assert.deepEqual(h.writes, ['restore-fetch'])
+  assert.equal(h.store.web.providerSelection.fetch.userSet, true, 'the official Host kept the explicit USER value')
+  // The residual is stated in the Detail notes, below the candidate rows.
+  let notes = h.view()
+  for (let step = 0; step < 6 && !notes.includes('USER layer still carries'); step += 1) {
+    await key(h, '\x1b[6~')
+    notes = h.view()
+  }
+  assert.match(notes, /USER layer still carries this value\s+explicitly/u,
+    `the page states the residual instead of claiming a removal:\n${notes}`)
+})
+
+test('a stale restore gesture is refused with ZERO writes after another Writer moves the USER layer', async t => {
+  const h = setup({ searchProvider: 'deepseek-search-api' })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 0) // Automatic, observed against the old Search USER pin
+  // Another Host writer restores the server-side pin between the page read and
+  // the Confirm. The queue head must refuse the stale clear gesture.
+  h.store.web.searchProvider = 'deepseek-official'
+  h.store.web.providerSelection = providerLayers({ searchUser: { id: 'deepseek-official' }, fetchBase: 'http' })
+  await key(h, ENTER)
+  const refused = await settlePainted(h, 'the stale restore refusal', frame =>
+    frame.includes('Not saved') && !frame.includes('Saving…'))
+  assert.match(refused, /the Host USER selection changed since the page read it/u)
+  assert.deepEqual(h.writes, [], 'a stale clear gesture writes NOTHING')
+  assert.equal(h.store.web.searchProvider, 'deepseek-official', 'the external value is preserved')
+})
+
+test('a restore gesture is refused when the deployment selection changed under it', async t => {
+  const h = setup({ searchProvider: 'deepseek-search-api' })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 0) // Automatic under a deployment with no Search provider
+  h.store.web.providerSelection = providerLayers({
+    searchBase: 'deepseek-official',
+    searchUser: { id: 'deepseek-search-api' },
+    fetchBase: 'http',
+  })
+  await key(h, ENTER)
+  const refused = await settlePainted(h, 'the deployment-change refusal', frame =>
+    frame.includes('Not saved') && !frame.includes('Saving…'))
+  assert.match(refused, /the Host deployment selection changed since the page read it/u)
+  assert.deepEqual(h.writes, [], 'a gesture decided against another deployment default writes NOTHING')
+  assert.equal(h.store.web.providerSelection.search.baseId, 'deepseek-official')
+})
+
+test('a rejected restore is attributed from a fresh read and never claims Verified', async t => {
+  const h = setup({ fetchProvider: 'deepseek-fetch-api' })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 1)
+  await chooseCandidate(h, 0)
+  h.store.failNext = 'SETTINGS_CONFLICT: revision moved'
+  const mark = settledWritesMark(h)
+  await key(h, ENTER)
+  await awaitWriteSettlement(h, 'restore-fetch', mark)
+  const refused = await settlePainted(h, 'the rejected restore verdict', frame =>
+    frame.includes('Not saved') && !frame.includes('Saving…'))
+  assert.match(refused, /SETTINGS_CONFLICT/u)
+  assert.doesNotMatch(refused, /Verified/u)
+  assert.deepEqual(h.writes, [], 'the rejected official unset did not land')
+  assert.equal(h.store.web.fetchProvider, 'deepseek-fetch-api', 'the Host keeps its value')
+})
+
+test('a restore whose read-back is unreadable is Outcome unknown, never Verified', async t => {
+  const h = setup({ fetchProvider: 'deepseek-fetch-api' })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 1)
+  await chooseCandidate(h, 0)
+  const releaseReadback = await dispatchWithHeldUnreadableReadback(h, () => key(h, ENTER))
+  t.after(releaseReadback)
+  releaseReadback()
+  const unknown = await settlePainted(h, 'the unreadable restore read-back', frame =>
+    frame.includes('Outcome unknown') && !frame.includes('Saving…'))
+  assert.match(unknown, /could not be read back/u)
+  assert.doesNotMatch(unknown, /Verified/u)
+  assert.deepEqual(h.writes, ['restore-fetch'], 'the official unset really ran')
+})
+
+test('a deployment-composed official Search provider is restored through the official reset, then inherited confirms write nothing', async t => {
+  const h = setup({
+    searchProvider: 'deepseek-search-api',
+    selection: providerLayers({
+      searchBase: 'deepseek-official',
+      searchUser: { id: 'deepseek-search-api' },
+      fetchBase: 'http',
+    }),
+  })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  assert.match(h.view(), /Current: DeepSeek Search API/u)
+  assert.match(h.view(), /DeepSeek server-side search · deployment default/u,
+    'the deployment-composed candidate is named as the deployment default')
+  assert.match(h.view(), /› DeepSeek Search API \[current\]/u,
+    'the USER override owns the current chip until it is reset')
+  // Select the server-side candidate (the deployment value, not an explicit
+  // provider-id write) — the row maps to the official reset.
+  await chooseCandidate(h, 0)
+  const mark = settledWritesMark(h)
+  await key(h, ENTER)
+  await awaitWriteSettlement(h, 'restore-search', mark)
+  await settlePainted(h, 'the deployment-default reset', frame =>
+    frame.includes('Verified') && frame.includes('Current: DeepSeek server-side search'))
+  assert.deepEqual(h.writes, ['restore-search'], 'the deployment value is restored through unset only')
+  assert.equal(h.store.web.providerSelection.search.userSet, false)
+  // Confirming the same inherited candidate again performs no write.
+  const inheritedMark = settledWritesMark(h)
+  await key(h, ENTER)
+  await settlePainted(h, 'the inherited confirm verdict', frame => frame.includes('Verified'))
+  assert.equal(h.settledWrites().length, inheritedMark, 'an inherited value is never re-pinned by a confirm')
+})
+
+test('a custom deployment selection is restorable through its ONE "Use deployment default" entry', async t => {
+  const h = setup({
+    searchProvider: 'acme-search',
+    selection: providerLayers({
+      searchBase: 'acme-provider-v2',
+      searchUser: { id: 'acme-search' },
+      fetchBase: 'http',
+    }),
+  })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  const detail = h.view()
+  assert.match(detail, /Current: acme-search/u)
+  assert.match(detail, /› Use deployment default · deployment default: acme-provider-v2/u,
+    'the custom deployment value is shown safely next to the reset entry')
+  assert.doesNotMatch(detail, /› DeepSeek (server-side search|Search API)/u,
+    'no explicit official candidate is offered while the custom route is effective')
+  await chooseCandidate(h, 0)
+  const mark = settledWritesMark(h)
+  await key(h, ENTER)
+  await awaitWriteSettlement(h, 'restore-search', mark)
+  await settlePainted(h, 'the custom deployment restore', frame =>
+    frame.includes('Verified') && frame.includes('Current: acme-provider-v2'))
+  assert.deepEqual(h.writes, ['restore-search'], 'the custom id is never written as a provider')
+  assert.equal(h.store.web.searchProvider, 'acme-provider-v2')
+})
+
+test('an inherited custom deployment route offers no reset and no write', async t => {
+  const h = setup({
+    searchProvider: 'acme-provider-v2',
+    selection: providerLayers({ searchBase: 'acme-provider-v2', fetchBase: 'http' }),
+  })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  const detail = h.view()
+  assert.match(detail, /Current: acme-provider-v2/u)
+  assert.match(detail, /CUSTOM route/u)
+  assert.doesNotMatch(detail, /› /u, 'an inherited custom route has nothing to reset')
+  assert.doesNotMatch(detail, /Confirm \[Enter\]/u)
+  await key(h, ENTER)
+  await new Promise(resolve => setTimeout(resolve, 10))
+  await h.vt.waitForRender()
+  assert.deepEqual(h.writes, [], 'an inherited custom route is never silently replaced or reset')
+})
+
+test('a USER value equal to the deployment base is still an override: choosing it sends the official reset', async t => {
+  // AC03: the effective/base comparison cannot see this override; only the raw
+  // USER own-field can. Confirming the deployment candidate must therefore run
+  // the official unset (never a zero-write verdict).
+  const h = setup({
+    searchProvider: 'deepseek-official',
+    selection: providerLayers({
+      searchBase: 'deepseek-official',
+      searchUser: { id: 'deepseek-official' },
+      fetchBase: 'http',
+    }),
+  })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  assert.match(h.view(), /Current: DeepSeek server-side search/u)
+  assert.match(h.view(), /DeepSeek server-side search \[current\] · deployment default/u,
+    'the base candidate is current on the EFFECTIVE value')
+  await chooseCandidate(h, 0)
+  const mark = settledWritesMark(h)
+  await key(h, ENTER)
+  await awaitWriteSettlement(h, 'restore-search', mark)
+  await settlePainted(h, 'the same-value override reset', frame =>
+    frame.includes('Verified') && frame.includes('Current: DeepSeek server-side search'))
+  assert.deepEqual(h.writes, ['restore-search'],
+    'a USER own-field equal to the base is not treated as already-inherited')
+  assert.equal(h.store.web.providerSelection.search.userSet, false)
 })

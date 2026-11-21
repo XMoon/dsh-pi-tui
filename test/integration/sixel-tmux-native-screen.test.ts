@@ -26,9 +26,8 @@ import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
 import type { TuiAppEvents } from '../../src/tui-app.ts'
 import { ImageLoader } from '../../src/client/media/image/loader.ts'
 import { SvgRasterLoader } from '../../src/client/media/svg/raster-loader.ts'
-import { rasterizeSvg } from '../../src/client/media/svg/rasterize.ts'
 import { setAssistantVisualPresentation, type VisualPresentationKey } from '../../src/domain/visual/presentation.ts'
-import { svgFactFromArgs } from '../../src/domain/visual/svg.ts'
+import { svgDigest, svgFactFromArgs } from '../../src/domain/visual/svg.ts'
 import type { PublishedVisual } from '../../src/domain/visual/publication.ts'
 import { TranscriptFolder, type TranscriptMessage } from '../../src/transcript.ts'
 import { TuiApp } from '../../src/tui-app.ts'
@@ -293,7 +292,7 @@ function assistantSvgVisual(svg: string, title = 'Service topology', description
         message: {
           id: MessageId('tmux-sixel-assistant-svg'),
           role: 'assistant',
-          content: [{ type: 'text', text: 'Before.\n\n[dsh-visual-sv1_' + 'a'.repeat(20) + ']: <#>\n\nAfter.' }],
+          content: [{ type: 'text', text: 'Before.\n\n[dsh-visual-sv2_' + 'a'.repeat(20) + ']: <#>\n\nAfter.' }],
           source: { kind: 'model', provider: 'p', model: 'm' },
         },
       },
@@ -304,7 +303,7 @@ function assistantSvgVisual(svg: string, title = 'Service topology', description
   const assistant = folder.messages().find(
     (message): message is TranscriptMessage & { kind: 'assistant' } => message.kind === 'assistant',
   )!
-  const ref = `sv1_${'a'.repeat(20)}`
+  const ref = `sv2_${'a'.repeat(20)}`
   const publication: PublishedVisual = {
     ref,
     turn: 0,
@@ -335,7 +334,6 @@ function assistantSvgVisual(svg: string, title = 'Service topology', description
     sourceIdentity: {},
     session: {},
     sessionId: 'session',
-    seq: 10,
     turn: 0,
     step: 1,
     text: '',
@@ -352,7 +350,7 @@ const SAMPLE_WEBP = readFileSync(new URL('../fixtures/images/transcript-sample.w
 
 // ── E01: one complete trusted DCS, decoded ──────────────────────────────────
 
-test('E01: the real app paints a product Draft PNG through the native tmux SIXEL chain', async (t) => {
+test('the real app paints a product Draft PNG through the native tmux SIXEL chain', async (t) => {
   const { terminal, app, store } = await startTmuxSixelApp(t)
   const png = await pngFromRgba(fill(80, 40, (_x, y) => (y < 20 ? [255, 0, 0, 255] : [0, 0, 255, 255])), 80, 40)
   const image = store.add({ bytes: png, mediaType: 'image/png', width: 80, height: 40, name: 'bands.png' })
@@ -378,7 +376,7 @@ test('E01: the real app paints a product Draft PNG through the native tmux SIXEL
 
 // ── E02: Main transcript and Fullscreen Alt, one owner ──────────────────────
 
-test('E02: transcript Main and Fullscreen Alt both paint through the same owner', async (t) => {
+test('transcript Main and Fullscreen Alt both paint through the same owner', async (t) => {
   const red = await pngFromRgba(fill(80, 40, () => [255, 0, 0, 255]), 80, 40)
   const green = await pngFromRgba(fill(80, 40, () => [0, 220, 0, 255]), 80, 40)
   const bytesById = new Map([['att-e02-red', red], ['att-e02-green', green]])
@@ -420,7 +418,7 @@ test('E02: transcript Main and Fullscreen Alt both paint through the same owner'
 
 // ── E03: JPEG/WebP product consumers ────────────────────────────────────────
 
-test('E03: Draft JPEG/WebP and the transcript image Viewer keep their product paths', async (t) => {
+test('Draft JPEG/WebP and the transcript image Viewer keep their product paths', async (t) => {
   const jpegBytes = new Uint8Array(SAMPLE_JPEG)
   const webpBytes = new Uint8Array(SAMPLE_WEBP)
   const { terminal, app, store } = await startTmuxSixelApp(t, {
@@ -430,7 +428,6 @@ test('E03: Draft JPEG/WebP and the transcript image Viewer keep their product pa
       return { ref: {}, data: webpBytes }
     }),
     imageTheme: { fallbackColor: (text: string) => text },
-    svgLoader: new SvgRasterLoader(async (source, options) => rasterizeSvg(source, options)),
   })
 
   const jpeg = store.add({ bytes: jpegBytes, mediaType: 'image/jpeg', width: 120, height: 80, name: 'photo.jpg' })
@@ -460,10 +457,33 @@ test('E03: Draft JPEG/WebP and the transcript image Viewer keep their product pa
   assert.ok(decodeSixel(paintedRasters(terminal).at(-1)!).width > 0)
 })
 
-test('E03b: the Assistant SVG thumbnail keeps the existing raster loader on native tmux SIXEL', async (t) => {
+test('the Assistant SVG thumbnail paints through native tmux SIXEL with a controlled raster', async (t) => {
   const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32"><rect width="64" height="32" fill="#3b82f6"/></svg>'
+  const requestedWidths: number[] = []
+
+  // E04 owns the real Assistant publication -> SvgRasterLoader -> native tmux
+  // SIXEL sink. Native resvg child lifecycle/timeout is qualified separately
+  // by test/client/svg-raster.test.ts, not by this load-sensitive CI integration.
+  // This branch keeps its loader-state observation: the SAME variant the
+  // component requested is read back from the real loader, so a real raster
+  // failure reports itself instead of waiting for a DCS that cannot arrive.
+  const svgLoader = new SvgRasterLoader(async (source, options) => {
+    assert.equal(source, svg, 'the Assistant publication reached the real SVG loader')
+    if (options.signal.aborted) throw new Error('cancelled')
+    const width = options.targetWidth
+    const height = Math.max(1, Math.ceil(width / 2))
+    const png = await pngFromRgba(fill(width, height, () => [59, 130, 246, 255]), width, height)
+    if (options.signal.aborted) throw new Error('cancelled')
+    requestedWidths.push(width)
+    return {
+      png,
+      base64: Buffer.from(png).toString('base64'),
+      widthPx: width,
+      heightPx: height,
+    }
+  })
   const { terminal, app } = await startTmuxSixelApp(t, {
-    svgLoader: new SvgRasterLoader(async (source, options) => rasterizeSvg(source, options)),
+    svgLoader,
     imageTheme: { fallbackColor: (text: string) => text },
   })
   app.setFullscreen(true)
@@ -471,14 +491,23 @@ test('E03b: the Assistant SVG thumbnail keeps the existing raster loader on nati
   app.setTranscript(assistantSvgVisual(svg).messages())
   app.requestRender()
   await until(() => terminal.getViewport().join('\n').includes('Service topology'), 'the Assistant SVG card')
-  await until(() => paintedRasters(terminal).length > 0, 'the SVG thumbnail raster')
+  await until(() => {
+    const width = requestedWidths.at(-1)
+    if (width === undefined) return false
+    const state = svgLoader.get(svgDigest(svg), width)
+    // Report the real raster failure (including its phase diagnostics) instead
+    // of spending the remaining budget waiting for an impossible DCS.
+    if (state.state === 'error') throw state.error
+    return state.state === 'ready' && paintedRasters(terminal).length > 0
+  }, 'the SVG thumbnail raster')
+  assert.ok(requestedWidths.length > 0, 'the Assistant SVG used the loader and a raster width')
   const svgDecoded = decodeSixel(paintedRasters(terminal).at(-1)!)
   assert.ok(svgDecoded.width > 0 && svgDecoded.height > 0, 'the existing SVG loader produced real pixels')
 })
 
 // ── E05: the fork's 1 MiB writer split must never leak a partial DCS ────────
 
-test('E05: a >1 MiB raster split by the main-screen writer is reassembled before the sink', async (t) => {
+test('a >1 MiB raster split by the main-screen writer is reassembled before the sink', async (t) => {
   // Large noise source: the encoded SIXEL payload exceeds one 1 MiB writer
   // chunk, which is the real fork contract this facade must survive.
   const png = await pngFromRgba(fill(800, 600, (x, y) => {
@@ -510,7 +539,7 @@ test('E05: a >1 MiB raster split by the main-screen writer is reassembled before
 
 // ── E06: a client change between two DCS of one physical frame ─────────────
 
-test('E06: a client change between two same-frame DCS lets the second write zero managed bytes', async (t) => {
+test('a client change between two same-frame DCS lets the second write zero managed bytes', async (t) => {
   const red = await pngFromRgba(fill(80, 40, () => [255, 0, 0, 255]), 80, 40)
   const green = await pngFromRgba(fill(80, 40, () => [0, 220, 0, 255]), 80, 40)
   const bytesById = new Map([['att-e06-red', red], ['att-e06-green', green]])
@@ -545,7 +574,7 @@ test('E06: a client change between two same-frame DCS lets the second write zero
 
 // ── E07: a client change in the middle of one split DCS ────────────────────
 
-test('E07: a client change before a split DCS completes writes zero managed prefix bytes', async (t) => {
+test('a client change before a split DCS completes writes zero managed prefix bytes', async (t) => {
   const png = await pngFromRgba(fill(800, 600, (x, y) => {
     const n = (x * 7 + y * 13) % 256
     return [(n * 37) & 255, (n * 97) & 255, (n * 131) & 255, 255]
@@ -586,7 +615,7 @@ test('E07: a client change before a split DCS completes writes zero managed pref
 
 // ── E08: revocation drops paintable facts and forces full text repaint ─────
 
-test('E08: after a live revocation the old raster is not a ghost hit and the surface repaints text', async (t) => {
+test('after a live revocation the old raster is not a ghost hit and the surface repaints text', async (t) => {
   const png = await pngFromRgba(fill(80, 40, () => [255, 0, 0, 255]), 80, 40)
   const { terminal, app, store, cli } = await startTmuxSixelApp(t)
   const image = store.add({ bytes: png, mediaType: 'image/png', width: 80, height: 40, name: 'red.png' })
@@ -610,7 +639,7 @@ test('E08: after a live revocation the old raster is not a ghost hit and the sur
 
 // ── E04: the existing transport precedence is unchanged ────────────────────
 
-test('E12: explicit sixel paints native tmux SIXEL with no tmux Kitty probe', async (t) => {
+test('explicit sixel paints native tmux SIXEL with no tmux Kitty probe', async (t) => {
   const h = await startTmuxSixelApp(t, { environment: { PI_IMAGE_PROTOCOL: 'sixel' } })
   assert.equal(h.cli.calls().some(line => line.startsWith('show-options')), false,
     'the Kitty passthrough probe never ran')
@@ -624,7 +653,7 @@ test('E12: explicit sixel paints native tmux SIXEL with no tmux Kitty probe', as
   assert.ok(decodeSixel(paintedRasters(h.terminal).at(-1)!).width > 0)
 })
 
-test('E04: known-U1 Kitty, hard-off and non-tmux topologies never fall into tmux SIXEL', async (t) => {
+test('known-U1 Kitty, hard-off and non-tmux topologies never fall into tmux SIXEL', async (t) => {
   const { createTmuxKittyGraphics } = await import('../../src/tui/graphics/tmux-image.ts')
   const { createTmuxSixelGraphics } = await import('../../src/tui/graphics/tmux-sixel.ts')
   const cli = createFakeTmuxCli(t)
@@ -663,7 +692,7 @@ test('E04: known-U1 Kitty, hard-off and non-tmux topologies never fall into tmux
 
 // ── E09: Screen epoch and registry bounds on the shared owner ──────────────
 
-test('E09: a resize and Main↔Alt re-sample the owner without leaking a stale worker', async (t) => {
+test('a resize and Main↔Alt re-sample the owner without leaking a stale worker', async (t) => {
   const png = await pngFromRgba(fill(80, 40, () => [255, 0, 0, 255]), 80, 40)
   const { terminal, app, store } = await startTmuxSixelApp(t)
   const image = store.add({ bytes: png, mediaType: 'image/png', width: 80, height: 40, name: 'red.png' })
@@ -688,7 +717,7 @@ test('E09: a resize and Main↔Alt re-sample the owner without leaking a stale w
 })
 // ── E10: ordinary IO errors vs the SIXEL refusal error ─────────────────────
 
-test('E10: an ordinary write error propagates unchanged; only the SIXEL refusal becomes a safe repaint', async (t) => {
+test('an ordinary write error propagates unchanged; only the SIXEL refusal becomes a safe repaint', async (t) => {
   const cli = createFakeTmuxCli(t)
   enableNativeSixel(cli)
   try {
@@ -744,7 +773,7 @@ test('E10: an ordinary write error propagates unchanged; only the SIXEL refusal 
 
 // ── E11: pure text frames never probe the tmux CLI ─────────────────────────
 
-test('E11: a text-only frame stream does not spawn per-frame tmux probes', async (t) => {
+test('a text-only frame stream does not spawn per-frame tmux probes', async (t) => {
   const { terminal, app, cli } = await startTmuxSixelApp(t)
   app.requestRender()
   await tick(60)

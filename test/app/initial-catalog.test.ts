@@ -8,6 +8,7 @@
  * @module @xmoon76/dsh-pi-tui/initial-catalog.test
  */
 
+import { fakeAgentModel } from '../support/agent-model-double.ts'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -17,9 +18,12 @@ import type { SurfaceCatalogContext } from '../../src/runtime/direct/surface-cat
 
 /** A fake agent with a header cwd. */
 function fakeAgent(sessionId = 'session-live'): Agent {
+  const options = { provider: 'p', model: 'm' }
   return {
     session: { id: sessionId, header: { cwd: '/ws' }, events: [] },
-    options: { provider: 'p', model: 'm' },
+    options,
+    // DSH 0.2.2: the Agent owns its model selection (`AgentModel`).
+    model: fakeAgentModel(undefined, options),
   } as unknown as Agent
 }
 

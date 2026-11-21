@@ -22,16 +22,17 @@
  *
  * The Direct adapter may resolve a live Agent because that is its provider
  * implementation detail; the semantic port never exposes that fact. The
- * identity-based `setApprovalPolicy(sessionId)` is resolved to the live Agent
- * HERE (runner-injected resolver); the approval request listener is adapted
- * from the official ApprovalRequest (which carries a same-process Agent) onto
- * the transport-neutral ApprovalRequestLike.
+ * approval request listener is adapted from the official ApprovalRequest
+ * (which carries a same-process Agent) onto the transport-neutral
+ * ApprovalRequestLike; the session approval-policy WRITE moved to the
+ * Direct session-policy port (M6-1 F8).
  *
  * Full contract: docs/architecture/host-client.md + docs/architecture/host-client.md.
  * @module @xmoon76/dsh-pi-tui/runtime/direct/interaction-direct
  */
 
-import type { ApprovalPolicy, ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
+import type { Context } from '@deepseek-ai/cordis'
+import type { ApprovalOutcome, ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
 import type { AskUserQuestionAnswer, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions/types'
 import type {
   ApprovalRequestLike,
@@ -50,12 +51,7 @@ import { QuestionAnswerError, questionAnswerError } from '../interaction-port.ts
  * a package dependency; the services resolve from the dsh installation). */
 export interface HostContextLike {
   get(name: string): unknown
-  on(event: string, listener: unknown): unknown
-}
-
-/** The structural `approval` service surface. */
-export interface ApprovalServiceLike {
-  setPolicy?(agent: unknown, policy: ApprovalPolicy): unknown
+  on: Context['on']
 }
 
 /** The structural hosted agent identity resolved from a session id. */
@@ -141,7 +137,7 @@ class DirectQuestionInteractionPort implements QuestionInteractionPort {
         questions: request.questions,
         ...request.signal === undefined ? {} : { signal: request.signal },
       }, next)
-    }) as unknown)
+    }))
     return true
   }
 
@@ -305,7 +301,10 @@ export class DirectInteractionPort implements InteractionPort {
   }
 
   onApprovalRequest(listener: ApprovalRequestListener): void {
-    this.ctx.on('approval/request', (req: ApprovalRequest, next: unknown) => {
+    // The framework types the waterfall listener; the transport-neutral port
+    // still declares its result as `unknown`, so this adapter is the ONE place
+    // that restores the official outcome type.
+    this.ctx.on('approval/request', (req: ApprovalRequest, next: () => Promise<ApprovalOutcome>) => {
       // Adapt the same-process ApprovalRequest onto the transport-neutral
       // shape the TUI consumes. The request's OWN Agent supplies the Session
       // identity (B3 findings C/F6) so a published replacement can retire this
@@ -318,19 +317,7 @@ export class DirectInteractionPort implements InteractionPort {
         toolName: req.toolName,
         reason: req.reason,
       }
-      return listener(like, next)
+      return listener(like, next) as Promise<ApprovalOutcome>
     })
-  }
-
-  setApprovalPolicy(sessionId: string, policy: ApprovalPolicy): boolean {
-    const approval = this.ctx.get('approval') as ApprovalServiceLike | undefined
-    if (approval === undefined || approval.setPolicy === undefined) return false
-    // Identity → live Agent resolution happens HERE (never across the
-    // port): the Remote backend maps sessionId to the official wire
-    // capability instead and fails closed (no public carrier).
-    const agent = this.agentFor(sessionId)
-    if (agent === undefined) return false
-    approval.setPolicy(agent, policy)
-    return true
   }
 }

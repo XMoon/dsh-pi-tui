@@ -4,16 +4,25 @@
  * stale-callback fencing, and Host-owned fork anchors. */
 
 import assert from 'node:assert/strict'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-subagent'
 import { SESSION_FORMAT_VERSION, SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { createDirectOwnerRegistry } from '../../src/app/direct/owner-registry.ts'
+import { createDirectOwnerRetirement } from '../../src/app/direct/owner-retirement.ts'
+import { bindSessionRuntime, type SessionRuntimeSurface } from '../../src/app/session/runtime.ts'
+import { createSessionOwnershipCore } from '../../src/app/session/ownership-core.ts'
+import type { SessionScope } from '../../src/app/session/scope.ts'
 import { foldPendingModelSelection } from '../../src/domain/session/model-selection.ts'
+import type { Diag } from '../../src/runtime/process/diagnostics.ts'
+import type { SessionHandle, SessionLifecycle } from '../../src/runtime/session-lifecycle-port.ts'
 import {
   disposeContext,
   event,
+  fakeAgent,
   fakeSession,
   makeHarness,
   mountRunner,
@@ -25,7 +34,7 @@ import {
 import { installProbe, liveAgentOf, modelEvent } from '../support/runner-session-fixtures.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import type { TspPane, TspWireFrame } from '../support/tsp-terminal-fixture.ts'
-import { wireNodes } from '../support/tsp-picker-wire.ts'
+import { foldWireNodes, wireNodes } from '../support/tsp-picker-wire.ts'
 import { ownTspBoot, waitUntil, type OwnedTspRunner } from '../support/tsp-runner-harness.ts'
 
 process.env.NO_COLOR = ''
@@ -425,6 +434,22 @@ test('/fork settles when the source disposal fails (contained, never a hang)', a
   const sourceSettlements = harness.commandSettlements.filter(entry => entry.sessionId === source.id)
   assert.deepEqual(sourceSettlements.map(entry => entry.phase), ['run', 'done'],
     'the source command must still settle after a contained dispose failure')
+
+  // Sibling of the deferred ordinary transition: a failed dispose is contained
+  // for the /fork source retirement too, so a LATER /new command against the
+  // adopted child still runs — the failed source retirement neither hangs the
+  // FIFO nor poisons the next command. (The deferred old-owner retirement of a
+  // command-backed /new shares the same queue, ledger and release semantics.)
+  app.setDraft('/new')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  await waitUntil('the fresh Session after the contained failure', () => harness.createdSessions.length === 2, 15_000)
+  await waitUntil('the replaced child retirement', () =>
+    harness.retirementEvents.includes(`dispose:${harness.createdSessions[0]!.id}`), 15_000)
+  const childSettlements = harness.commandSettlements.filter(entry => entry.sessionId === harness.createdSessions[0]!.id)
+  assert.deepEqual(childSettlements.map(entry => entry.phase), ['run', 'done'],
+    'the next /new still settles its replaced Session command')
+  assert.equal(childSettlements.at(-1)?.ownerLive, true,
+    'the deferred retirement keeps the replaced child attached through its command/done')
 })
 
 test('/fork does not release the submit FIFO before the source retirement completes', async (t) => {
@@ -683,7 +708,7 @@ test('/fork retires an unclaimed parked Direct owner during teardown', async (t)
     'an unclaimed parked Direct owner must be disposed exactly once during teardown')
 })
 
-test("an unclaimed parked owner's flush failure still warns the user (merged retirement durability)", async (t) => {
+test("an unclaimed parked owner's dispose failure still warns the user (merged retirement durability)", async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-fork-parked-flush-warn-')
   const previousHome = process.env.DSH_HOME
@@ -718,13 +743,18 @@ test("an unclaimed parked owner's flush failure still warns the user (merged ret
   })
   const harness = makeHarness(home, [source, target], { provider: 'global', model: 'fallback' }, undefined, createGate)
   // The CURRENT owner's retirement stays CLEAN; only the parked fork child's
-  // final flush fails. That durability failure must still reach the user, which
-  // requires the runner to report the MERGED (current + parked) report. The
-  // predicate is timing-independent: the fork child is the only session that is
-  // neither the source nor the resumed target.
-  ;(harness.sessions as { flush: (session?: unknown) => Promise<unknown> }).flush = async (session?: unknown) => {
-    const id = (session as { id?: string } | undefined)?.id
-    if (id !== undefined && id !== source.id && id !== target.id) throw new Error('disk full')
+  // final close/drain fails. The parked owner is retired in SHUTDOWN mode —
+  // durability is settled by AgentHandle.dispose, so the injected failure is
+  // a REJECTING dispose (the harness keys it by session id and throws inside
+  // the fake handle's dispose). The fork child is the only CREATED session in
+  // this test, so failing every created child's dispose is exact.
+  const originalCreate = (harness.agents as {
+    create: (options: { sessionId: unknown }) => Promise<unknown>
+  }).create.bind(harness.agents)
+  ;(harness.agents as { create: (options: { sessionId: unknown }) => Promise<unknown> }).create = async (options) => {
+    const result = await originalCreate(options as never)
+    harness.disposeFailures.add(String(options.sessionId))
+    return result
   }
   const stderrWrites: string[] = []
   const originalWrite = process.stderr.write.bind(process.stderr)
@@ -756,8 +786,10 @@ test("an unclaimed parked owner's flush failure still warns the user (merged ret
   fiber = undefined
   await settle()
   const output = stderrWrites.join('')
-  assert.ok(output.includes('session flush failed during retirement'),
+  assert.ok(output.includes('session close failed during retirement'),
     `the parked owner's durability failure must reach the user: ${JSON.stringify(output)}`)
+  assert.ok(output.includes('durability could not be confirmed'),
+    'the warning must state the unconfirmed durability')
 })
 
 test('/fork suppresses a delayed failure after navigation supersession', async (t) => {
@@ -1594,6 +1626,7 @@ function ctxOf(context: Context): B3CordisPlane & { provide(name: string, value:
 
 /** The Cordis plane the witnesses drive (the official event/waterfall API). */
 interface B3CordisPlane {
+  get(name: string): unknown
   emit(name: string, ...args: unknown[]): void
   waterfall(agent: unknown, name: string, payload: unknown, fallback: () => Promise<unknown>): Promise<unknown>
   /**
@@ -1667,23 +1700,6 @@ function liveLayerModals(frames: readonly TspWireFrame[]): string[] {
   return [...live]
 }
 
-/**
- * The live `layer.modal-*` ids at the FIRST frame that presents `text` (one
- * Session's own identity on the wire). `undefined` when that frame never came,
- * so a publication that never happened can never satisfy the assertion.
- */
-function liveLayerModalsAt(frames: readonly TspWireFrame[], text: string): string[] | undefined {
-  const live = new Set<string>()
-  for (const frame of frames) {
-    for (const op of frame.ops) {
-      if (op[0] === 'add' && /^layer\.modal-\d+$/u.test(op[1])) live.add(op[1])
-      else if (op[0] === 'del' && /^layer\.modal-\d+$/u.test(op[1])) live.delete(op[1])
-    }
-    if (JSON.stringify(frame.ops).includes(text)) return [...live]
-  }
-  return undefined
-}
-
 /** Whether the pane's CURRENT frame owns the dock's continued-Question line. */
 function attentionLineLive(frames: readonly TspWireFrame[]): boolean {
   let live = false
@@ -1704,14 +1720,124 @@ function liveDockNotices(pane: TspPane): string[] {
     .map(node => String(node.p.text ?? ''))
 }
 
-/** The Session ids whose welcome card the renderer has presented, in order. */
-function presentedSessions(pane: TspPane): string[] {
-  const presented: string[] = []
-  for (const match of pane.output.text().matchAll(/DSH session ([^\s\\"]+)/gu)) {
-    const id = match[1] as string
-    if (presented.at(-1) !== id) presented.push(id)
+/**
+ * The projection scope the pane presents RIGHT NOW (`s3`), or `undefined` while
+ * Main holds the hydration frame or a subject that paints no scoped row.
+ *
+ * AUTHORITY: `src/tui/tsp/session.ts` accepts an incoming subject in ONE commit
+ * that both lifts the hydration fence (`hydrating = false`) and re-keys every
+ * transcript node under a fresh `s<epoch>-` prefix. So "the live wire presents a
+ * different scope" IS "this subject became the presented main subject" — the
+ * presentation fact the retired Dock welcome line was waited on. It names the
+ * SUBJECT, never a Session id; the id authority stays the Host side
+ * (`harness.createdSessions`, the real `agents.create` argument).
+ */
+function presentedScope(pane: TspPane): string | undefined {
+  for (const node of wireNodes(pane)) {
+    const match = /main\.(s\d+)-/u.exec(node.id)
+    if (match !== null) return match[1]
   }
-  return presented
+  return undefined
+}
+
+/** Whether the live Main is the hydration frame: a switch is in flight and its
+ *  subject has NOT committed yet. */
+function hydrationPending(pane: TspPane): boolean {
+  return wireNodes(pane).some(node => node.id === 'main.loading')
+}
+
+/** The text the presented Main carries: the live scoped transcript rows, i.e.
+ *  the subject's OWN folded history as the client really sees it. */
+function presentedMainText(pane: TspPane): string {
+  return wireNodes(pane)
+    .filter(node => /^main\.s\d+/u.test(node.id))
+    .map(node => (typeof node.p.text === 'string' ? node.p.text : ''))
+    .join('\n')
+}
+
+/** Whether the wire has presented a subject OTHER than `retiredScope` (the
+ *  hydration frame never counts: the switch has not committed in it). */
+function replacementPresented(pane: TspPane, retiredScope: string | undefined): boolean {
+  if (hydrationPending(pane)) return false
+  const scope = presentedScope(pane)
+  return scope !== undefined && scope !== retiredScope
+}
+
+/** Every projection scope the wire EVER presented a Main row for, in order. The
+ *  frames are replayed into the LIVE node set (the shipped fold) because an
+ *  `add` op carries its subtree nested, so a top-level op scan would miss the
+ *  rows the first frame painted. A subject that was never presented never
+ *  appears here — the negative the retired `DSH session <id>` line used to give. */
+function presentedScopes(pane: TspPane): string[] {
+  const frames = pane.frames()
+  const seen: string[] = []
+  for (let index = 0; index < frames.length; index += 1) {
+    for (const node of foldWireNodes(frames.slice(0, index + 1))) {
+      const match = /^main\.(s\d+)-/u.exec(node.id)
+      if (match !== null && seen.at(-1) !== match[1]) seen.push(match[1])
+    }
+  }
+  return seen
+}
+
+/**
+ * Wait until the presented Main really carries `marker` — the subject's OWN
+ * folded content, not a status line about it — and return the projection scope
+ * it was painted under, for the later replacement witness.
+ */
+async function waitUntilMainPresents(pane: TspPane, marker: string, timeoutMs = 15_000): Promise<string> {
+  let scope: string | undefined
+  await waitUntil(`the Main to present ${JSON.stringify(marker)}`, () => {
+    if (!presentedMainText(pane).includes(marker)) return false
+    scope = presentedScope(pane)
+    return scope !== undefined
+  }, timeoutMs)
+  return scope!
+}
+
+/**
+ * Wait until the pane presents a subject OTHER than `retiredScope` — the
+ * replacement's own publication — and return its scope.
+ */
+async function waitUntilReplacementPresented(
+  pane: TspPane,
+  retiredScope: string | undefined,
+  label: string,
+  timeoutMs = 15_000,
+): Promise<string> {
+  let scope: string | undefined
+  await waitUntil(label, () => {
+    if (!replacementPresented(pane, retiredScope)) return false
+    scope = presentedScope(pane)
+    return scope !== undefined
+  }, timeoutMs)
+  return scope!
+}
+
+/**
+ * The live `layer.modal-*` ids at the FIRST frame that presents a subject other
+ * than `retiredScope` — the replacement's own publication frame. `undefined`
+ * when that frame never came, so a publication that never happened can never
+ * satisfy the assertion. This is the frame marker the retired
+ * `DSH session <id>` text used to give, taken now from the wire's own commit.
+ * Each candidate state is the shipped fold of the frames up to that point, so a
+ * row a later frame retired cannot satisfy it and a subtree delivered nested
+ * still counts as presented.
+ */
+function liveLayerModalsAtReplacement(
+  frames: readonly TspWireFrame[],
+  retiredScope: string | undefined,
+): string[] | undefined {
+  for (let index = 0; index < frames.length; index += 1) {
+    const live = foldWireNodes(frames.slice(0, index + 1))
+    const mainIds = live.filter(node => node.id.startsWith('main.')).map(node => node.id)
+    // The hydration frame is not a commit: the outgoing subject is already gone
+    // and the incoming one has not been presented yet.
+    if (mainIds.includes('main.loading')) continue
+    if (!mainIds.some(id => /^main\.s\d+-/u.test(id) && !id.startsWith(`main.${retiredScope}-`))) continue
+    return live.map(node => node.id).filter(id => /^layer\.modal-\d+$/u.test(id))
+  }
+  return undefined
 }
 
 /** The recorded outcome of one Host tool call (never a bare rejection). */
@@ -1747,7 +1873,10 @@ test('the real /new stops a LIVE Question owner instead of parking until it is a
   const { owned, plane, harness } = await bootB3Tsp({ life, home, standing: sessionA, resume: sessionA.id, idleGates })
   const abort = new AbortController()
   try {
-    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    // A is the presented main subject: the wire really paints A's OWN folded
+    // history, and the scope it was painted under is the marker every later
+    // replacement is measured against.
+    const scopeA = await waitUntilMainPresents(owned.pane, 'A standing state')
     idleGates.set(sessionA.id, new Promise<void>(resolve => { releaseIdle.set(sessionA.id, resolve) }))
     // A held gate always has a fallback release: a failure path must never park
     // the Agent's `whenIdle` on a promise nobody resolves.
@@ -1776,7 +1905,7 @@ test('the real /new stops a LIVE Question owner instead of parking until it is a
     await transition
     await waitUntil('the /new child', () => harness.createdSessions.length === 1, 15_000)
     const sessionB = harness.createdSessions[0]!.id
-    await waitUntil('B publication', () => presentedSessions(owned.pane).at(-1) === sessionB, 15_000)
+    await waitUntilReplacementPresented(owned.pane, scopeA, 'B publication')
     const events = harness.retirementEvents
     assert.equal(events.filter(event => event === `cancel:keepInbox:${sessionA.id}`).length, 1,
       'the navigation stop is ONE keepInbox user cancel of the exact captured owner')
@@ -1816,7 +1945,10 @@ test('the real /fork publication withdraws A\'s live modal while the Host cancel
   })
   const { owned, plane, harness } = await bootB3Tsp({ life, home, standing: sessionA, resume: sessionA.id })
   try {
-    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    // A is the presented main subject: the wire really paints A's OWN folded
+    // history, and the scope it was painted under is the marker every later
+    // replacement is measured against.
+    const scopeA = await waitUntilMainPresents(owned.pane, 'A standing state')
     const abort = new AbortController()
     const aAgent = liveAgentOf(harness, sessionA.id) as { cancel: () => void }
     const originalCancel = aAgent.cancel
@@ -1846,11 +1978,11 @@ test('the real /fork publication withdraws A\'s live modal while the Host cancel
     const fork = commandOf(owned, 'fork')()
     await waitUntil('the fork child', () => harness.createdSessions.length === 1, 15_000)
     const sessionB = harness.createdSessions[0]!.id
-    await waitUntil('B publication', () => presentedSessions(owned.pane).includes(sessionB), 15_000)
+    await waitUntilReplacementPresented(owned.pane, scopeA, 'B publication')
 
     // THE finding-C contract: B's OWN publication frame must not present A's
     // modal — and it must not be the Host cancellation that removed it.
-    assert.deepEqual(liveLayerModalsAt(owned.pane.frames(), `DSH session ${sessionB}`), [],
+    assert.deepEqual(liveLayerModalsAtReplacement(owned.pane.frames(), scopeA), [],
       'B\'s publication frame must not present the replaced subject\'s modal')
     assert.equal(requestOutcome, undefined,
       'A\'s Host request is still in flight: the withdrawal is presentation-only, never a fabricated settlement')
@@ -1907,7 +2039,10 @@ test('a real publication withdraws a MOUNTED continued form and re-scopes its at
   })
   const { owned, plane, harness, ctx } = await bootB3Tsp({ life, home, standing: sessionA, resume: sessionA.id })
   try {
-    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    // A is the presented main subject: the wire really paints A's OWN folded
+    // history, and the scope it was painted under is the marker every later
+    // replacement is measured against.
+    const scopeA = await waitUntilMainPresents(owned.pane, 'A standing state')
     // The Host's durable projection lists one CONTINUED call for A, and a REAL
     // routed event re-derives reachability (the production trigger).
     plane.seedContinued(sessionA.id, 'call-c-switch',
@@ -1937,8 +2072,8 @@ test('a real publication withdraws a MOUNTED continued form and re-scopes its at
     const transition = commandOf(owned, 'new')()
     await waitUntil('the replacement Session', () => harness.createdSessions.length === 1, 15_000)
     const sessionB = harness.createdSessions[0]!.id
-    await waitUntil('B publication', () => presentedSessions(owned.pane).includes(sessionB), 15_000)
-    assert.deepEqual(liveLayerModalsAt(owned.pane.frames(), `DSH session ${sessionB}`), [],
+    await waitUntilReplacementPresented(owned.pane, scopeA, 'B publication')
+    assert.deepEqual(liveLayerModalsAtReplacement(owned.pane.frames(), scopeA), [],
       'the replacement publication frame must not present the continued form')
     assert.equal(attentionLineLive(owned.pane.frames()), false,
       'the replaced subject\'s parked count leaves the dock with its form')
@@ -2026,7 +2161,10 @@ test('a real publication withdraws A\'s live APPROVAL prompt while its request i
   })
   const { owned, harness, ctx } = await bootB3Tsp({ life, home, standing: sessionA, resume: sessionA.id })
   try {
-    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    // A is the presented main subject: the wire really paints A's OWN folded
+    // history, and the scope it was painted under is the marker every later
+    // replacement is measured against.
+    const scopeA = await waitUntilMainPresents(owned.pane, 'A standing state')
     const aAgent = liveAgentOf(harness, sessionA.id) as { cancel: () => void }
     const originalCancel = aAgent.cancel
     // The official Agent cancel ends the in-flight approval request (its signal
@@ -2062,8 +2200,8 @@ test('a real publication withdraws A\'s live APPROVAL prompt while its request i
     const fork = commandOf(owned, 'fork')()
     await waitUntil('the fork child', () => harness.createdSessions.length === 1, 15_000)
     const sessionB = harness.createdSessions[0]!.id
-    await waitUntil('B publication', () => presentedSessions(owned.pane).includes(sessionB), 15_000)
-    assert.deepEqual(liveLayerModalsAt(owned.pane.frames(), `DSH session ${sessionB}`), [],
+    await waitUntilReplacementPresented(owned.pane, scopeA, 'B publication')
+    assert.deepEqual(liveLayerModalsAtReplacement(owned.pane.frames(), scopeA), [],
       'B\'s publication frame must not present the replaced subject\'s approval prompt')
     assert.equal(approvalOutcome, undefined,
       'the approval request is still in flight: the withdrawal is presentation-only, never an implicit allow')
@@ -2109,7 +2247,10 @@ test('a replaced subject\'s request that arrives AFTER the publication is never 
   })
   const { owned, harness, ctx } = await bootB3Tsp({ life, home, standing: sessionA, resume: sessionA.id })
   try {
-    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    // A is the presented main subject: the wire really paints A's OWN folded
+    // history, and the scope it was painted under is the marker every later
+    // replacement is measured against.
+    const scopeA = await waitUntilMainPresents(owned.pane, 'A standing state')
     const aAgent = liveAgentOf(harness, sessionA.id) as { cancel: () => void }
     const originalCancel = aAgent.cancel
     let completeCancellation: (() => void) | undefined
@@ -2159,7 +2300,7 @@ test('a replaced subject\'s request that arrives AFTER the publication is never 
     const fork = commandOf(owned, 'fork')()
     await waitUntil('the fork child', () => harness.createdSessions.length === 1, 15_000)
     const sessionB = harness.createdSessions[0]!.id
-    await waitUntil('B publication', () => presentedSessions(owned.pane).includes(sessionB), 15_000)
+    await waitUntilReplacementPresented(owned.pane, scopeA, 'B publication')
 
     // The delayed request is admitted now: the proof is the REAL admission (not a
     // timer), and it must NEVER be mounted.
@@ -2167,7 +2308,7 @@ test('a replaced subject\'s request that arrives AFTER the publication is never 
     await waitUntil('the delayed request reached the answerer', () => admitted, 15_000)
     await Promise.resolve()
     await Promise.resolve()
-    assert.deepEqual(liveLayerModalsAt(owned.pane.frames(), `DSH session ${sessionB}`), [],
+    assert.deepEqual(liveLayerModalsAtReplacement(owned.pane.frames(), scopeA), [],
       'B\'s publication frame presents nothing of the replaced subject')
     assert.deepEqual(liveLayerModals(owned.pane.frames()), [],
       'the late request is never mounted into the replacement')
@@ -2272,7 +2413,10 @@ test('a REAL opening rollback retires the opening target\'s presentation with NO
   })
   let releaseMiddleware: (() => void) | undefined
   try {
-    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    // A is the presented main subject: the wire really paints A's OWN folded
+    // history, and the scope it was painted under is the marker every later
+    // replacement is measured against.
+    const scopeA = await waitUntilMainPresents(owned.pane, 'A standing state')
     // Discover the opening target's id from the production create call itself (the
     // journal already opened it at admission, before this call).
     const agents = harness.agents as { create: (options: { sessionId: string }) => Promise<unknown> }
@@ -2354,7 +2498,10 @@ test('signal-less live requests are settled by the REAL retirement, not by TUI e
   })
   const { owned, harness, ctx } = await bootB3Tsp({ life, home, standing: sessionA, resume: sessionA.id })
   try {
-    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    // A is the presented main subject: the wire really paints A's OWN folded
+    // history, and the scope it was painted under is the marker every later
+    // replacement is measured against.
+    const scopeA = await waitUntilMainPresents(owned.pane, 'A standing state')
     const aAgent = liveAgentOf(harness, sessionA.id)
     // The official signal is OPTIONAL for both kinds — these requests have no
     // lifetime of their own, so a real subject replacement is their only owner.
@@ -2384,8 +2531,8 @@ test('signal-less live requests are settled by the REAL retirement, not by TUI e
     const fork = commandOf(owned, 'fork')()
     await waitUntil('the fork child', () => harness.createdSessions.length === 1, 15_000)
     const sessionB = harness.createdSessions[0]!.id
-    await waitUntil('B publication', () => presentedSessions(owned.pane).includes(sessionB), 15_000)
-    assert.deepEqual(liveLayerModalsAt(owned.pane.frames(), `DSH session ${sessionB}`), [],
+    await waitUntilReplacementPresented(owned.pane, scopeA, 'B publication')
+    assert.deepEqual(liveLayerModalsAtReplacement(owned.pane.frames(), scopeA), [],
       'B\'s publication frame must not present the replaced subject\'s signal-less request')
 
     await fork
@@ -2409,7 +2556,10 @@ test('an open Alt+Q list does not survive a real Session replacement', async (t)
   })
   const { owned, harness, ctx, plane } = await bootB3Tsp({ life, home, standing: sessionA, resume: sessionA.id })
   try {
-    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    // A is the presented main subject: the wire really paints A's OWN folded
+    // history, and the scope it was painted under is the marker every later
+    // replacement is measured against.
+    const scopeA = await waitUntilMainPresents(owned.pane, 'A standing state')
     // One parked continued call, then the transient list opens over it.
     plane.seedContinued(sessionA.id, 'call-altq-switch',
       [{ id: 'q-altq', question: 'Parked?', options: [{ label: 'yes' }] }])
@@ -2423,9 +2573,9 @@ test('an open Alt+Q list does not survive a real Session replacement', async (t)
     const transition = commandOf(owned, 'new')()
     await waitUntil('the replacement Session', () => harness.createdSessions.length === 1, 15_000)
     const sessionB = harness.createdSessions[0]!.id
-    await waitUntil('B publication', () => presentedSessions(owned.pane).includes(sessionB), 15_000)
+    await waitUntilReplacementPresented(owned.pane, scopeA, 'B publication')
     await transition
-    assert.deepEqual(liveLayerModalsAt(owned.pane.frames(), `DSH session ${sessionB}`), [],
+    assert.deepEqual(liveLayerModalsAtReplacement(owned.pane.frames(), scopeA), [],
       'the transient list must not cross the replacement')
     assert.deepEqual(liveLayerModals(owned.pane.frames()), [], 'no overlay left the replacement seat')
     // The replacement owns the INPUT again: the last caret request the renderer
@@ -2467,7 +2617,10 @@ async function expectPublicationWindowCurrentness(
     },
   })
   try {
-    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    // A is the presented main subject: the wire really paints A's OWN folded
+    // history, and the scope it was painted under is the marker every later
+    // replacement is measured against.
+    const scopeA = await waitUntilMainPresents(owned.pane, 'A standing state')
     const aAgent = liveAgentOf(harness, sessionA.id) as { cancel: () => void }
     const originalCancel = aAgent.cancel
     const approvalAbort = new AbortController()
@@ -2520,7 +2673,7 @@ async function expectPublicationWindowCurrentness(
     // THE WINDOW: the commit published B and the transition is parked in the
     // post-commit child quiesce — nothing has been hydrated yet.
     await waitUntil('the post-commit child quiesce', () => childGateEntered, 15_000)
-    assert.equal(presentedSessions(owned.pane).includes(sessionB), false,
+    assert.equal(replacementPresented(owned.pane, scopeA), false,
       'B is the published owner but not initialized yet (the window is real)')
     assert.equal(approvalOutcome, undefined, 'the held Host cancellation has not completed: A\'s approval is in flight')
     assert.equal(questionOutcome, undefined, 'the held Host cancellation has not completed: A\'s Question is in flight')
@@ -2555,7 +2708,7 @@ async function expectPublicationWindowCurrentness(
     // still owned by their own Host lifetimes.
     releaseChildIdle!()
     await transition
-    await waitUntil('B hydrated', () => presentedSessions(owned.pane).includes(sessionB), 15_000)
+    await waitUntilReplacementPresented(owned.pane, scopeA, 'B hydrated')
     await waitUntil('A retired', () => harness.retirementEvents.includes(`dispose:${sessionA.id}`), 15_000)
     completeCancellation!()
     await waitUntil('A\'s requests settled by their own lifetimes',
@@ -2600,7 +2753,10 @@ test('the commit-time withdrawal performs NO Host projection read (a throwing re
     },
   })
   try {
-    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    // A is the presented main subject: the wire really paints A's OWN folded
+    // history, and the scope it was painted under is the marker every later
+    // replacement is measured against.
+    const scopeA = await waitUntilMainPresents(owned.pane, 'A standing state')
     // A MOUNTED continued form for A: the commit-time drop must have real work to
     // do (the path that used to publish attention, i.e. read the Host).
     plane.seedContinued(sessionA.id, 'call-commit-read',
@@ -2644,7 +2800,7 @@ test('the commit-time withdrawal performs NO Host projection read (a throwing re
     await transition
     await waitUntil('the new owner published', () => harness.createdSessions.length === 1, 15_000)
     const sessionB = harness.createdSessions[0]!.id
-    await waitUntil('B publication', () => presentedSessions(owned.pane).at(-1) === sessionB, 15_000)
+    await waitUntilReplacementPresented(owned.pane, scopeA, 'B publication')
     assert.ok(harness.retirementEvents.includes(`dispose:${sessionA.id}`), 'the replaced owner was retired exactly once')
   } finally {
     releaseCreate?.()
@@ -2679,7 +2835,10 @@ test('two overlapping /new intents admit exactly ONE create; the duplicate is re
     createGate: () => { createStarted(); return createGate },
   })
   try {
-    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    // A is the presented main subject: the wire really paints A's OWN folded
+    // history, and the scope it was painted under is the marker every later
+    // replacement is measured against.
+    const scopeA = await waitUntilMainPresents(owned.pane, 'A standing state')
     const execute = (agent: unknown): Promise<{ result: { kind: string; text?: string } } | undefined> =>
       (harness.commands as { execute(agent: unknown, line: string): Promise<{ result: { kind: string; text?: string } } | undefined> })
         .execute(agent, '/new')
@@ -2698,7 +2857,7 @@ test('two overlapping /new intents admit exactly ONE create; the duplicate is re
     assert.equal((await first)?.result.kind, 'success', 'the first intent commits')
     await waitUntil('exactly one fresh Session', () => harness.createdSessions.length === 1, 15_000)
     const sessionB = harness.createdSessions[0]!.id
-    await waitUntil('B publication', () => presentedSessions(owned.pane).at(-1) === sessionB, 15_000)
+    const scopeB = await waitUntilReplacementPresented(owned.pane, scopeA, 'B publication')
     assert.equal(harness.createdSessions.length, 1, 'the overlap produced exactly ONE child Session')
     assert.ok(!liveDockNotices(owned.pane).includes('already starting'),
       'the refusal belongs to the duplicate command card, never a success notice')
@@ -2710,7 +2869,7 @@ test('two overlapping /new intents admit exactly ONE create; the duplicate is re
     await waitUntil('the second fresh Session', () => harness.createdSessions.length === 2, 15_000)
     const sessionC = harness.createdSessions[1]!.id
     assert.notEqual(sessionC, sessionB)
-    await waitUntil('C publication', () => presentedSessions(owned.pane).at(-1) === sessionC, 15_000)
+    await waitUntilReplacementPresented(owned.pane, scopeB, 'C publication')
   } finally {
     releaseCreate()
     // Bounded fixture teardown (the owned runner is closed, not a timing window).
@@ -2733,7 +2892,10 @@ test('a failed /new releases the in-flight marker, reports the stopped old Turn,
   const releaseIdle = new Map<string, () => void>()
   const { owned, harness } = await bootB3Tsp({ life, home, standing: sessionA, resume: sessionA.id, idleGates })
   try {
-    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    // A is the presented main subject: the wire really paints A's OWN folded
+    // history, and the scope it was painted under is the marker every later
+    // replacement is measured against.
+    const scopeA = await waitUntilMainPresents(owned.pane, 'A standing state')
     idleGates.set(sessionA.id, new Promise<void>(resolve => { releaseIdle.set(sessionA.id, resolve) }))
     life.defer(() => { releaseIdle.get(sessionA.id)?.() })
     const agents = harness.agents as { create: (options: { sessionId: string }) => Promise<unknown> }
@@ -2759,7 +2921,8 @@ test('a failed /new releases the in-flight marker, reports the stopped old Turn,
     assert.doesNotMatch(failed?.result.text ?? '', /turn stop requested \(not yet confirmed\)/,
       'the quiesce completed before the failure, so the stronger claim is the true one')
     assert.equal(harness.createdSessions.length, 0, 'no child was published')
-    await waitUntil('A stays current', () => presentedSessions(owned.pane).at(-1) === sessionA.id, 15_000)
+    await waitUntil('A stays the presented Main', () =>
+      !hydrationPending(owned.pane) && presentedScope(owned.pane) === scopeA, 15_000)
     assert.equal(harness.retirementEvents.filter(event => event === `dispose:${sessionA.id}`).length, 0,
       'a pre-create failure must not retire the still-current old owner')
 
@@ -2768,7 +2931,7 @@ test('a failed /new releases the in-flight marker, reports the stopped old Turn,
     assert.equal(retry?.result.kind, 'success', 'the retry after a failed /new starts normally')
     await waitUntil('the retry child', () => harness.createdSessions.length === 1, 15_000)
     const sessionB = harness.createdSessions[0]!.id
-    await waitUntil('B publication', () => presentedSessions(owned.pane).at(-1) === sessionB, 15_000)
+    await waitUntilReplacementPresented(owned.pane, scopeA, 'B publication')
     assert.equal(harness.retirementEvents.filter(event => event === `dispose:${sessionA.id}`).length, 1,
       'the committed retry retires A exactly once')
   } finally {
@@ -2788,7 +2951,10 @@ test('an accepted stop whose quiesce fails reports "requested, not confirmed" �
   })
   const { owned, harness } = await bootB3Tsp({ life, home, standing: sessionA, resume: sessionA.id })
   try {
-    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    // A is the presented main subject: the wire really paints A's OWN folded
+    // history, and the scope it was painted under is the marker every later
+    // replacement is measured against.
+    const scopeA = await waitUntilMainPresents(owned.pane, 'A standing state')
     const agent = liveAgentOf(harness, sessionA.id) as unknown as { whenIdle: () => Promise<void> }
     const originalWhenIdle = agent.whenIdle
     // The Host ACCEPTED the cancellation (committed) but the pre-commit
@@ -2803,9 +2969,523 @@ test('an accepted stop whose quiesce fails reports "requested, not confirmed" �
     assert.doesNotMatch(result.text ?? '', /old turn stopped \(cannot resume\)/,
       'the failure must not claim the old Turn already stopped')
     assert.equal(harness.createdSessions.length, 0, 'no child is published on a quiesce failure')
-    assert.deepEqual(presentedSessions(owned.pane), [sessionA.id], 'A stays current')
+    // "A stays current" as two wire facts: the wire never painted any other
+    // subject's Main, and A's own scope is still what it presents.
+    assert.deepEqual(presentedScopes(owned.pane), [scopeA], 'no replacement subject was ever painted')
+    assert.equal(presentedScope(owned.pane), scopeA, 'A stays current')
   } finally {
     // Bounded fixture teardown (the owned runner is closed, not a timing window).
     await owned.settle()
   }
+})
+
+// ── WS-2: the Host Workspace pre-selection precedes /new's navigation stop ──
+
+test('a refused /new Host Workspace preflight never stops the old owner, creates no Session, and keeps the draft', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-ws2-new-preflight-')
+  const sessionA = fakeSession({
+    id: 'ws2-new-preflight-a',
+    // A historical Session with neither membership nor a persisted directory:
+    // the pre-selection cannot name a Host Workspace, so it must refuse BEFORE
+    // the navigation stop.
+    header: { id: 'ws2-new-preflight-a', cwd: '', createdAt: 0, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('A standing state'),
+  })
+  const { owned, harness } = await bootB3Tsp({ life, home, standing: sessionA, resume: sessionA.id })
+  try {
+    const scopeA = await waitUntilMainPresents(owned.pane, 'A standing state')
+    const result = await commandOf(owned, 'new')() as { kind: string; text?: string }
+    assert.equal(result.kind, 'error', 'an unresolvable Host Workspace is a reported failure')
+    assert.match(result.text ?? '', /no Host recorded workspace directory/u)
+    assert.equal(harness.createdSessions.length, 0, 'no Session was dispatched')
+    assert.equal(harness.retirementEvents.some(event =>
+      event === `cancel:${sessionA.id}` || event === `flush:${sessionA.id}` || event === `dispose:${sessionA.id}`), false,
+    'the old owner was never stopped, flushed or retired')
+    // "A stays current" as wire facts: no replacement was ever painted.
+    assert.deepEqual(presentedScopes(owned.pane), [scopeA], 'no replacement subject was ever painted')
+    assert.equal(presentedScope(owned.pane), scopeA, 'A stays current')
+  } finally {
+    // Bounded fixture teardown (the owned runner is closed, not a timing window).
+    await owned.settle()
+  }
+})
+
+test('the real /new uses the captured Session Host Workspace membership, never the launch cwd', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-ws2-new-membership-')
+  const sessionA = fakeSession({
+    id: 'ws2-new-membership-a',
+    header: { id: 'ws2-new-membership-a', cwd: home, createdAt: 0, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('A standing state'),
+  })
+  const { owned, harness, ctx } = await bootB3Tsp({ life, home, standing: sessionA, resume: sessionA.id })
+  try {
+    const scopeA = await waitUntilMainPresents(owned.pane, 'A standing state')
+    // A LEGAL Host membership: the Workspace's canonical path equals the
+    // Session's persisted header cwd (the real registry rejects any other
+    // combination). The Client launch directory is a DIFFERENT directory, so a
+    // `/new` that used `runner.cwd`/the launch cwd would create the child
+    // elsewhere; the cross-Workspace launch-vs-membership case is covered on the
+    // real OS wire by the split-process lane (Client cwd C -> Session A -> /new).
+    const workspaceDir = home
+    const registry = ctx.get('workspaceRegistry') as {
+      create(path: string): Promise<{
+        readonly id: string
+        readonly path: string
+        readonly sessionIds: string[]
+        attachSession(sessionId: unknown): Promise<void>
+      }>
+    }
+    const workspaceY = await registry.create(workspaceDir)
+    await workspaceY.attachSession(sessionA.id)
+    const before = [...workspaceY.sessionIds]
+    assert.notEqual(process.cwd(), home, 'the launch directory must differ from the Workspace path')
+
+    const result = await commandOf(owned, 'new')() as { kind: string; text?: string }
+    assert.equal(result.kind, 'success', `the /new must commit: ${result.text ?? ''}`)
+    await waitUntil('the fresh Session', () => harness.createdSessions.length === 1, 15_000)
+    const child = harness.createdSessions[0]!
+    assert.equal(child.header.cwd, workspaceY.path,
+      'the durable cwd is the captured Session’s Host membership, never the Client launch directory')
+    assert.notEqual(child.header.cwd, process.cwd(),
+      'the /new Session must not inherit the Client launch directory')
+    await waitUntilReplacementPresented(owned.pane, scopeA, 'B publication')
+    assert.deepEqual(workspaceY.sessionIds, [child.id, ...before],
+      'the fresh Session is attached to the SAME Workspace as its source')
+  } finally {
+    // Bounded fixture teardown (the owned runner is closed, not a timing window).
+    await owned.settle()
+  }
+})
+
+// ── command-backed /new: the replaced Session's own settlement must land ────
+
+test('/new keeps the replaced Session attached until the command executor appends command/done', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-new-command-settlement-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const source = fakeSession({
+    id: 'new-command-settlement-source',
+    header: { id: 'new-command-settlement-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('source answer'),
+  })
+  const harness = makeHarness(home, source)
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+
+  // The REAL TUI submission path (not the bare registered handler): the Direct
+  // command plane owns `/new`, so the official executor appends `command/run`
+  // to A before the handler and `command/done` to the SAME A after it settles.
+  app.setDraft('/new')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  await waitUntil('the /new child Session', () => harness.createdSessions.length === 1, 15_000)
+  const child = harness.createdSessions[0]!
+  assert.notEqual(child.id, source.id, '/new publishes a DIFFERENT Session')
+  await waitUntil('the source command/done append', () =>
+    harness.commandSettlements.some(entry => entry.sessionId === source.id && entry.phase === 'done'), 15_000)
+  await waitUntil('the replaced owner retirement', () =>
+    harness.retirementEvents.includes(`dispose:${source.id}`), 15_000)
+
+  // The executor's `command/done` must land while A still owns its Session
+  // store: retiring A inside the `/new` handler detaches it first, and the
+  // append then throws "cannot append outside a SessionStore".
+  const settlements = harness.commandSettlements.filter(entry => entry.sessionId === source.id)
+  assert.deepEqual(settlements.map(entry => entry.phase), ['run', 'done'],
+    `the replaced Session keeps exactly one run/done pair: ${JSON.stringify(harness.commandSettlements)}`)
+  assert.equal(settlements.at(-1)?.ownerLive, true,
+    'the replaced owner must stay attached through the command/done append')
+
+  // The REAL durable pairing on A: same commandId, success, run before done.
+  const log = source.snapshotEvents() as unknown as Array<{ type: string; seq: number; data: Record<string, unknown> }>
+  const runs = log.filter(entry => entry.type === 'command/run')
+  const dones = log.filter(entry => entry.type === 'command/done')
+  assert.equal(runs.length, 1, `A must persist exactly one command/run: ${JSON.stringify(log.map(entry => entry.type))}`)
+  assert.equal(dones.length, 1, `A must persist exactly one command/done: ${JSON.stringify(log.map(entry => entry.type))}`)
+  assert.equal(dones[0]!.data.commandId, runs[0]!.data.commandId, 'the done appends must name the run command')
+  assert.equal(dones[0]!.data.kind, 'success', 'the /new command settled successfully')
+  assert.ok(runs[0]!.seq < dones[0]!.seq, 'the run appends before the done')
+
+  // The ONE causal timeline (the harness records the executor appends and the
+  // retirement phases into the same array): A is retired only AFTER its own
+  // command/done, exactly once.
+  const events = harness.retirementEvents
+  assert.ok(events.indexOf(`dispose:${source.id}`) > events.indexOf(`command-done:${source.id}`),
+    `A must be retired after its command/done: ${JSON.stringify(events)}`)
+  assert.equal(events.filter(event => event === `dispose:${source.id}`).length, 1,
+    'the replaced owner is disposed exactly once')
+  assert.equal((harness.agents as { get(id: string): unknown }).get(source.id), undefined,
+    'no live owner may remain for the replaced Session')
+})
+
+test('a teardown during /new\'s command/done window waits for the replaced Session retirement', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-new-command-teardown-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  let releaseSettlement!: () => void
+  let signalSettlementReached!: () => void
+  const settlementReached = new Promise<void>(resolve => { signalSettlementReached = resolve })
+  const source = fakeSession({
+    id: 'new-command-teardown-source',
+    header: { id: 'new-command-teardown-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('source answer'),
+  })
+  const harness = makeHarness(home, source)
+  // Hold the executor's post-handler `command/done` append open: the fresh
+  // Session is already committed, A's own settlement is not.
+  ;(harness.commands as { settlementGate?: () => Promise<void> }).settlementGate = async () => {
+    signalSettlementReached()
+    await new Promise<void>(resolve => { releaseSettlement = resolve })
+  }
+  // A held gate always has a fallback release: a failed assertion must never
+  // park the teardown's command-settlement wait forever.
+  life.defer(() => { releaseSettlement?.() })
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+
+  app.setDraft('/new')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  await settlementReached
+  // Bounded observation window: the fresh Session must be committed here.
+  await settle()
+  assert.equal(harness.createdSessions.length, 1, 'the fresh Session is committed before its window closes')
+  const child = harness.createdSessions[0]!
+  assert.equal(harness.retirementEvents.filter(event => event === `dispose:${source.id}`).length, 0,
+    'the replaced owner must not be retired while its command/done is pending')
+
+  // Tear the surface down in that exact window: the exit waits for the pending
+  // command settlement, so it cannot dispose A first.
+  const disposal = fiber.dispose()
+  // Bounded observation window: the blocked teardown must not dispose A here.
+  await settle()
+  assert.equal(harness.retirementEvents.filter(event => event === `dispose:${source.id}`).length, 0,
+    'teardown must not retire the replaced owner before its own command/done')
+
+  releaseSettlement()
+  await disposal
+  // Bounded observation window: the deferred retirement settles before teardown ends.
+  await settle()
+
+  const settlements = harness.commandSettlements.filter(entry => entry.sessionId === source.id)
+  assert.deepEqual(settlements.map(entry => entry.phase), ['run', 'done'],
+    'the executor still settles the replaced Session command')
+  assert.equal(settlements.at(-1)?.ownerLive, true,
+    'teardown must not detach the replaced Session before its command/done')
+  assert.equal(harness.retirementEvents.filter(event => event === `dispose:${source.id}`).length, 1,
+    'the replaced owner is retired exactly once at the command settlement')
+  assert.equal(harness.retirementEvents.filter(event => event === `dispose:${child.id}`).length, 1,
+    'teardown then retires the committed current Session exactly once')
+})
+
+// ── the deferred window cannot re-wake the replaced Agent ───────────────────
+
+test('a prompt queued while the replaced owner awaits command/done is delivered to the committed child, never to A', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-new-deferred-no-wake-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  let releaseSettlement!: () => void
+  let signalSettlementReached!: () => void
+  const settlementReached = new Promise<void>(resolve => { signalSettlementReached = resolve })
+  const source = fakeSession({
+    id: 'new-deferred-no-wake-a',
+    header: { id: 'new-deferred-no-wake-a', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('A standing state'),
+  })
+  const harness = makeHarness(home, source)
+  // PR-acceptance ON: the fake Direct agent COMMITS prompts, so a delivery
+  // assertion is positive evidence about the writer's Agent resolution — not
+  // the vacuous negative a rejecting fixture produces.
+  harness.promptAcceptance.value = true
+  ;(harness.commands as { settlementGate?: () => Promise<void> }).settlementGate = async () => {
+    signalSettlementReached()
+    await new Promise<void>(resolve => { releaseSettlement = resolve })
+  }
+  // A held gate always has a fallback release: a failed assertion must never
+  // park the teardown's command-settlement wait forever.
+  life.defer(() => { releaseSettlement?.() })
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+
+  app.setDraft('/new')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  await settlementReached
+  // Bounded observation window: the fresh Session is committed here.
+  await settle()
+  const child = harness.createdSessions[0]!
+  assert.equal(harness.retirementEvents.includes(`dispose:${source.id}`), false,
+    'the replaced owner is in the deferred window')
+
+  // A prompt typed against the SAME surface while the settlement is held.
+  // The submit FIFO serializes it behind the in-flight command, so it is
+  // admitted only after the settlement — the Direct writer then resolves the
+  // Agent through the ownership core's CURRENT owner (B). If that fence were
+  // broken (resolving the still-attached A), the delivery below would land on
+  // A and wake it: exactly the reviewed hazard.
+  app.setDraft('hello after /new')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  // Bounded observation window: the queued prompt is parked behind the FIFO here.
+  await settle()
+  assert.equal(harness.delivered.length, 0,
+    `nothing is delivered while the command settlement holds the FIFO: ${JSON.stringify(harness.delivered)}`)
+  const runMarkers = harness.retirementEvents.filter(event => event.startsWith('command-run:'))
+  assert.deepEqual(runMarkers, [`command-run:${source.id}`],
+    `only the /new command itself may start in this window: ${JSON.stringify(harness.retirementEvents)}`)
+
+  releaseSettlement()
+  // Bounded drain: the FIFO releases, the deferred retirement runs.
+  await waitUntil('the queued prompt is delivered', () => harness.delivered.length === 1, 15_000)
+  await waitUntil('the deferred retirement', () =>
+    harness.retirementEvents.includes(`dispose:${source.id}`), 15_000)
+  // THE routing assertion: the real writer delivered the queued prompt to the
+  // CURRENT owner B — never to the still-attached-but-replaced A.
+  assert.equal(harness.delivered[0]!.sessionId, child.id,
+    `the queued prompt must be delivered to the committed child, never the replaced Session: ${JSON.stringify(harness.delivered)}`)
+  const aLog = source.snapshotEvents() as unknown as Array<{ type: string }>
+  assert.ok(!aLog.some(entry => entry.type === 'user/message'),
+    "A's durable log carries no user message from the deferred window")
+  // The keepInbox navigation cancel precedes the window and is the ONLY
+  // cancel: A was never re-woken and never re-driven inside it.
+  assert.equal(harness.retirementEvents.filter(event => event === `cancel:keepInbox:${source.id}`).length, 1,
+    'exactly the one navigation stop, never a retirement cancel inside the window')
+})
+
+// ── the deferred source release blocks a reopen of the replaced Session ────
+
+test('a reopen of the Session a /new command replaced waits for its deferred release', async () => {
+  const events: string[] = []
+  const diagnostics: Array<{ readonly message: string; readonly fields?: Record<string, unknown> }> = []
+  const diag: Diag = {
+    debug: () => {},
+    info: () => {},
+    warn: () => {},
+    error: (message, fields) => { diagnostics.push({ message, fields }) },
+    dispose: () => {},
+  }
+  /** One Direct-shaped attachment: the Agent identity plus its handle. */
+  const attach = (sessionId: string): SessionHandle => {
+    const session = fakeSession({
+      id: sessionId,
+      header: { id: sessionId, cwd: '/workspace', createdAt: 0, version: SESSION_FORMAT_VERSION },
+      events: sessionEvents(`${sessionId} answer`),
+    })
+    const agent = fakeAgent(session, undefined, events)
+    return {
+      session,
+      direct: { agent, ownerHandle: { dispose: async () => { events.push(`dispose:${sessionId}`) } } },
+    } as unknown as SessionHandle
+  }
+
+  let disposed = false
+  const core = createSessionOwnershipCore({
+    isSurfaceDisposed: () => disposed,
+    resetForGeneration: () => {},
+  })
+  const registry = createDirectOwnerRegistry(() => core.owner())
+  const retirement = createDirectOwnerRetirement({
+    owners: registry,
+    diag,
+    isLifecycleAborted: () => false,
+    drainContinuableDescendants: async () => {},
+    flushSession: async () => {},
+    parkHandle: () => {},
+    takeAllParkedOwners: () => [],
+  })
+  const lifecycle: SessionLifecycle = {
+    resolveWorkspace: async intent => ({ workspaceId: 'ws', path: intent.kind === 'host-path' ? intent.path : '/workspace' }),
+    create: async request => ({ ownership: 'current', outcome: { kind: 'created', handle: attach(request.sessionId) } }),
+    // The Direct adapter's own open shape: the pending owner release is awaited
+    // through the SAME ledger seam bootstrap wires as the Direct pool's
+    // `waitForRelease` (`ownership.waitForOwnerRelease`). The real adapter's
+    // wait/cancel behavior is covered by the Direct lifecycle tests.
+    open: async request => {
+      await core.waitForOwnerRelease(request.sessionId)
+      events.push(`resume:${request.sessionId}`)
+      return { ownership: 'current', outcome: { kind: 'opened', handle: attach(request.sessionId) } }
+    },
+    fork: async () => ({ ownership: 'current', outcome: { kind: 'unavailable', message: 'fork is not used by this fixture' } }),
+  }
+  const surface: SessionRuntimeSurface = {
+    warnRetirement: () => {},
+    warnRetirementSkipped: () => {},
+    isSurfaceDisposed: () => disposed,
+    beginOpening: () => undefined,
+    clearOpening: () => {},
+    settlePendingQueueRecalls: () => {},
+    settleLocalSubmitAck: () => {},
+    resetSubmitLatency: () => {},
+    setCompletionOwner: () => {},
+    initLiveSession: async owner => { events.push(`init:${registry.sessionId(owner)}`) },
+    refreshLiveCatalog: async owner => { events.push(`catalog:${registry.sessionId(owner)}`) },
+    reportSwitch: (from, to) => { events.push(`switch:${from ?? '(none)'}->${registry.sessionId(to)}`) },
+    clearUnpinnedDrafts: () => {},
+    dropOutgoingActiveDraft: () => {},
+    withdrawReplacedPresentation: () => {},
+    beginInputHistoryScope: () => {},
+    retireStaleHistorySeat: () => {},
+    reportSwitchFailure: () => {},
+    warnCommittedDurability: () => {},
+    launchComposition: async () => ({ composition: {} }),
+    setResumeFailure: () => {},
+    clearResumeFailure: () => {},
+    reportFirstSessionCreateFailure: () => {},
+    notifyResumeFailure: () => {},
+    awaitPendingDefaultWrite: async () => {},
+    newSessionId: () => 'session-first',
+    initialWorkspaceIntent: () => ({ kind: 'host-path', path: '/workspace' }),
+    currentOpening: () => undefined,
+    resetOpening: () => {},
+  }
+  const runtime = bindSessionRuntime(core, {
+    owners: registry,
+    retirement,
+    lifecycle,
+    lifecycleSignal: new AbortController().signal,
+    surface,
+    isScopeCurrent: () => true,
+    captureScope: () => ({ sessionId: core.currentSessionId() }) as SessionScope,
+    diag,
+  })
+
+  // A is the live Session; the command window is open (the DSH executor still
+  // owns A's `command/done` append), and the ordinary transition commits B.
+  runtime.publishResumedOwner(attach('session-a'), () => undefined)
+  runtime.beginCommandSettlement()
+  const handleB = attach('session-b')
+  const transition = await runtime.transitionTo({
+    target: { id: 'session-b' },
+    create: async () => handleB,
+  })
+  assert.equal(transition.ok, true, `the ordinary transition still commits: ${JSON.stringify(transition)}`)
+  assert.equal(core.currentSessionId(), 'session-b')
+  assert.equal(events.includes('dispose:session-a'), false,
+    'a command-window transition defers the replaced owner’s physical retirement')
+
+  // The reopen of A must wait for the EXACT deferred release: the adapter open
+  // cannot resume A before A is disposed, and it must not create a second live
+  // owner for the same id.
+  const opening = lifecycle.open({ sessionId: 'session-a' })
+  // Bounded observation window: the open has reached its release wait here.
+  await settle()
+  assert.equal(events.includes('resume:session-a'), false,
+    `the reopen must not resume the replaced Session while its release is pending: ${JSON.stringify(events)}`)
+  assert.equal(events.includes('dispose:session-a'), false,
+    'the release is only settled by the command settlement')
+
+  await runtime.settleCommandSettlement()
+  const opened = await opening
+  assert.equal(opened.outcome.kind, 'opened', 'the reopen completes once the release settles')
+  assert.equal(events.filter(event => event === 'dispose:session-a').length, 1,
+    'the replaced owner is retired exactly once')
+  assert.ok(events.indexOf('dispose:session-a') < events.indexOf('resume:session-a'),
+    `A must be disposed BEFORE its reopen resumes it: ${JSON.stringify(events)}`)
+  assert.deepEqual(diagnostics, [], 'a clean deferred retirement emits no failure diagnostic')
+  disposed = true
+})
+
+// ── the deferred retirement of a command-backed /new fails honestly ────────
+
+test('/new reports a deferred old-owner retirement failure with both Session identities and still releases the pin', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-new-deferred-dispose-fail-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const diagFile = join(home, 'diag.log')
+  process.env.DSH_PI_TUI_LOG = diagFile
+  life.defer(() => { delete process.env.DSH_PI_TUI_LOG })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const source = fakeSession({
+    id: 'new-deferred-dispose-fail-a',
+    header: { id: 'new-deferred-dispose-fail-a', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('A standing state'),
+  })
+  const harness = makeHarness(home, source)
+  // The /new-created child is a DIFFERENT Session: failing only A's dispose
+  // keeps the failure injected exactly at the deferred old-owner retirement.
+  harness.disposeFailures.add(source.id)
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+
+  app.setDraft('/new')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  await waitUntil('the fresh Session', () => harness.createdSessions.length === 1, 15_000)
+  const child = harness.createdSessions[0]!
+  await waitUntil('A\'s failed dispose attempt', () =>
+    harness.retirementEvents.includes(`dispose:${source.id}`), 15_000)
+
+  // The command still settled completely: A's run/done pair landed (the done
+  // append needed A attached), and the settlement completed despite the
+  // deferred retirement failure — a failed phase never hangs the FIFO.
+  const settlements = harness.commandSettlements.filter(entry => entry.sessionId === source.id)
+  assert.deepEqual(settlements.map(entry => entry.phase), ['run', 'done'],
+    'the replaced Session command must still settle')
+  assert.equal(settlements.at(-1)?.ownerLive, true,
+    'the replaced owner stayed attached through its command/done')
+
+  // The failure keeps BOTH Session identities and the child-committed fact; a
+  // contained retirement failure is never rewritten as a clean success.
+  const diagText = existsSync(diagFile) ? readFileSync(diagFile, 'utf8') : ''
+  assert.match(diagText, /ERROR[^\n]*old-owner retirement failed \(child committed\)/u,
+    `the deferred retirement failure must be diagnosed: ${JSON.stringify(diagText.slice(-800))}`)
+  assert.ok(diagText.includes(source.id) && diagText.includes(child.id),
+    `the diagnostic names BOTH the replaced and the committed Session: ${JSON.stringify(diagText.slice(-800))}`)
+
+  // The pin was released with the contained failure: a reopen of A proceeds
+  // instead of waiting forever (the handle leaked, but the ledger settled).
+  app.setDraft(`/resume ${source.id}`)
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  await waitUntil('the reopen resume attempt', () => harness.resumeSessionIds.includes(source.id), 15_000)
 })

@@ -1,107 +1,485 @@
-/**
- * Shell editor-completion grammar/adapter (TS8-E): parse a `!`/`!!` editor line
- * at the cursor into a completion context and shape the Client shell
- * candidates into the fork's suggestion batch.
- *
- * It consumes the Client-local capability (`client/shell/compgen.ts`) and the
- * shell word parser (`client/shell/words.ts`). Path positions stay with the
- * fork's fd-backed provider — the shell bridge never competes with it.
- * @module @xmoon76/dsh-pi-tui/tui/interaction/autocomplete/shell
- */
+/** The `!`/`!!` shell completion grammar and semantic-port adapter. */
 
 import type { AutocompleteSuggestions } from '@xmoon76/pi-tui'
-import { MAX_SHELL_CANDIDATES, hasSubcommandCompletion, requestShellCandidates } from '../../../client/shell/compgen.ts'
+import type { HostShellCompletionPort, HostShellCompletionTarget } from '../../../runtime/host-shell-completion-port.ts'
 import { parseShellWords } from '../../../client/shell/words.ts'
 
-/** Which completion the cursor needs on a `!` line. */
-export type ShellCompletionKind = 'command' | 'subcommand' | 'variable'
+const MAX_SHELL_CANDIDATES = 50
 
-/** The parsed completion context at the cursor on a `!` line. */
+export type ShellCompletionKind = 'command' | 'subcommand' | 'variable' | 'paths'
+
+/** The lexical state of the Shell WORD the cursor sits in: its decoded bytes,
+ * the quote the cursor is inside (if any) and whether that quote is already
+ * closed after the cursor. */
+export interface ShellWordLexicalState {
+  readonly valuePrefix: string
+  readonly quote: "'" | '"' | undefined
+  readonly closingQuoteAfterCursor: boolean
+}
+
 export interface ShellCompletionContext {
   readonly kind: ShellCompletionKind
-  /** The word being completed ('' when the cursor sits right after a space). */
+  /** The range/query prefix: RAW for a path position (the accepted literal
+   * replaces it), SEMANTIC for command/variable/subcommand positions. */
   readonly prefix: string
-  /** The parsed words BEFORE the current word (no `!` prefix). */
   readonly priorWords: readonly string[]
+  /** Present for the positions whose acceptance is quote-aware (paths and
+   * variables), so the accept branch can keep/close the cursor's quote. */
+  readonly word?: ShellWordLexicalState
+}
+
+/** The ONE word-delimiter rule the start and the tail scanners share: an
+ * unquoted/unescaped Shell blank or control operator ends the word. */
+function isShellWordDelimiter(character: string): boolean {
+  return character === ' ' || character === '\t' || character === '\n'
+    || character === ';' || character === '|' || character === '&'
+    || character === '(' || character === ')' || character === '<' || character === '>'
+}
+
+/** The subset of the delimiters that starts a NEW COMMAND word. A redirection
+ * (`<`/`>`) or a closing `)` ends a word without opening a command position;
+ * `&` covers both `&&` and a background `&`, `|` covers `||`/`|&`. */
+function isShellCommandSeparator(character: string): boolean {
+  return character === ';' || character === '&' || character === '|' || character === '('
+}
+
+function wordAtCursor(
+  line: string,
+  start: number,
+  col: number,
+): { readonly start: number; readonly quote: "'" | '"' | undefined; readonly commandPosition: boolean } {
+  let wordStart = start
+  let quote: "'" | '"' | undefined
+  // Whether the NEXT word would start a command segment: the line start and a
+  // command separator restore it; whitespace keeps it; a word consumes it.
+  let nextIsCommand = true
+  // Whether the word the cursor is in started a command segment.
+  let wordIsCommand = true
+  const startWord = (index: number): void => {
+    if (index !== wordStart) return
+    wordIsCommand = nextIsCommand
+    nextIsCommand = false
+  }
+  for (let index = start; index < col; index += 1) {
+    const character = line[index]!
+    if (quote === "'") {
+      if (character === "'") quote = undefined
+      continue
+    }
+    if (quote === '"') {
+      if (character === '\\') {
+        const next = line[index + 1]
+        if (next === '"' || next === '\\' || next === '$' || next === '`') index += 1
+        continue
+      }
+      if (character === '"') quote = undefined
+      continue
+    }
+    if (isShellWordDelimiter(character)) {
+      wordStart = index + 1
+      if (isShellCommandSeparator(character)) nextIsCommand = true
+      continue
+    }
+    if (character === '\\') {
+      startWord(index)
+      if (index + 1 < col) index += 1
+      continue
+    }
+    if (character === "'" || character === '"') {
+      startWord(index)
+      quote = character
+      continue
+    }
+    startWord(index)
+  }
+  return {
+    start: wordStart,
+    quote,
+    // An empty current word sits at the NEXT word's position.
+    commandPosition: wordStart === col ? nextIsCommand : wordIsCommand,
+  }
+}
+
+function closingQuoteIndex(line: string, from: number, quote: "'" | '"'): number {
+  for (let index = from; index < line.length; index += 1) {
+    const character = line[index]!
+    if (quote === "'") {
+      if (character === "'") return index
+      continue
+    }
+    if (character === '\\') {
+      const next = line[index + 1]
+      if (next === '"' || next === '\\' || next === '$' || next === '`') index += 1
+      continue
+    }
+    if (character === '"') return index
+  }
+  return -1
+}
+
+function closingQuoteAfter(line: string, col: number, quote: "'" | '"' | undefined): boolean {
+  return quote !== undefined && closingQuoteIndex(line, col, quote) !== -1
+}
+
+/** The raw tail of the cursor's Shell word that a whole-word acceptance
+ * replaces. A closing quote for the quote the cursor is inside is KEPT: the
+ * literal generated for it deliberately stops before that quote. */
+export function shellWordSuffix(line: string, col: number, quote: "'" | '"' | undefined): string {
+  if (quote !== undefined) {
+    const closing = closingQuoteIndex(line, col, quote)
+    return closing === -1 ? line.slice(col) : line.slice(col, closing)
+  }
+  let index = col
+  let substitution = 0
+  let brace = 0
+  let backtick = false
+  while (index < line.length) {
+    const character = line[index]!
+    if (backtick) {
+      if (character === '`') backtick = false
+      index += 1
+      continue
+    }
+    if (character === '\\') {
+      index += 2
+      continue
+    }
+    if (character === '`') {
+      backtick = true
+      index += 1
+      continue
+    }
+    if (character === '$' && line[index + 1] === '(') {
+      substitution += 1
+      index += 2
+      continue
+    }
+    if (character === '$' && line[index + 1] === '{') {
+      brace += 1
+      index += 2
+      continue
+    }
+    if (substitution > 0) {
+      if (character === '(') substitution += 1
+      else if (character === ')') substitution -= 1
+      index += 1
+      continue
+    }
+    if (brace > 0) {
+      if (character === '{') brace += 1
+      else if (character === '}') brace -= 1
+      index += 1
+      continue
+    }
+    if (isShellWordDelimiter(character)) break
+    if (character === "'" || character === '"') {
+      const closing = closingQuoteIndex(line, index + 1, character)
+      if (closing === -1) return line.slice(col)
+      index = closing + 1
+      continue
+    }
+    index += 1
+  }
+  return line.slice(col, index)
+}
+
+/** One pending here-document: its delimiter and whether `<<-` strips tabs. */
+interface PendingHeredoc {
+  readonly delimiter: string
+  readonly stripTabs: boolean
+}
+
+/** Parse a `<<`/`<<-` delimiter at `from`, or undefined when this is not a
+ *  here-document (a `<<<` here-string, or an unparsable delimiter). */
+function heredocAt(line: string, from: number): PendingHeredoc | undefined {
+  if (line[from] !== '<' || line[from + 1] !== '<') return undefined
+  if (line[from + 2] === '<') return undefined
+  let index = from + 2
+  let stripTabs = false
+  if (line[index] === '-') {
+    stripTabs = true
+    index += 1
+  }
+  while (line[index] === ' ' || line[index] === '\t') index += 1
+  const quote = line[index]
+  if (quote === "'" || quote === '"') {
+    const closing = line.indexOf(quote, index + 1)
+    if (closing === -1) return undefined
+    const delimiter = line.slice(index + 1, closing)
+    return delimiter === '' ? undefined : { delimiter, stripTabs }
+  }
+  const wordStart = index
+  while (index < line.length && !isShellWordDelimiter(line[index]!)) index += 1
+  const delimiter = line.slice(wordStart, index)
+  return delimiter === '' ? undefined : { delimiter, stripTabs }
 }
 
 /**
- * Parse the editor line at the cursor for shell completion. Returns a
- * context only when the line is a `!`/`!!` line AND the cursor completes a
- * shell-bridge word (command name, subcommand, `$VAR`); a path position
- * returns undefined so the caller falls through to the fork's fd
- * completion — paths are not the bridge's job.
- * @param line - the full editor line.
- * @param col - the cursor column.
+ * Whether the command opened by the lines BEFORE the cursor is still open.
+ *
+ * This is a deliberately small Bash-aware state machine, not a parser:
+ * - a trailing backslash CONTINUES the same logical line into the next one; it
+ *   does not open a command by itself, so `printf a \` + `  b` is complete
+ *   and the next physical line is a fresh command;
+ * - a `#` comment (unquoted, at a word start) ends the line and its quotes
+ *   never affect the state;
+ * - a here-document body (until its delimiter line) is TEXT, not commands, so
+ *   the cursor inside it is not a fresh command position;
+ * - an unfinished quote, backtick, `$(` or `${` stays open across lines.
  */
+export function shellCommandIsOpen(lines: readonly string[]): boolean {
+  let quote: "'" | '"' | undefined
+  let substitution = 0
+  let brace = 0
+  let backtick = false
+  // A here-document body starts only after the LOGICAL command line ends (an
+  // unescaped physical newline). `cat <<STOP \` + `STOP` is still one command,
+  // so the second `STOP` is an argument, not the body delimiter.
+  const declared: PendingHeredoc[] = []
+  // Bodies are consumed IN ORDER: a command may declare more than one
+  // (`cat <<A <<B`), each body ending at its own exact delimiter.
+  const bodies: PendingHeredoc[] = []
+  // A trailing backslash on the LAST previous line makes the cursor line a
+  // CONTINUATION of that command, not a fresh command position. Inside earlier
+  // lines the same backslash merely joins logical lines while scanning.
+  let trailingContinuation = false
+  for (const line of lines) {
+    trailingContinuation = false
+    const active = bodies[0]
+    if (active !== undefined) {
+      // Bash compares the delimiter line EXACTLY: `<<-` strips leading TABs
+      // only, and spaces (leading or trailing) never match.
+      const candidate = active.stripTabs ? line.replace(/^\t+/u, '') : line
+      if (candidate === active.delimiter) bodies.shift()
+      continue
+    }
+    let index = 0
+    while (index < line.length) {
+      const character = line[index]!
+      if (backtick) {
+        if (character === '`') backtick = false
+        index += 1
+        continue
+      }
+      if (quote === "'") {
+        if (character === "'") quote = undefined
+        index += 1
+        continue
+      }
+      if (quote === '"') {
+        if (character === '\\') index += 2
+        else {
+          if (character === '"') quote = undefined
+          index += 1
+        }
+        continue
+      }
+      if (character === '\\') {
+        // A trailing backslash joins the NEXT physical line to this command.
+        if (index === line.length - 1) {
+          trailingContinuation = true
+          break
+        }
+        index += 2
+        continue
+      }
+      if (character === '#' && (index === 0 || /[\s;|&()<>]/u.test(line[index - 1]!))) break
+      if (character === "'" || character === '"') {
+        quote = character
+        index += 1
+        continue
+      }
+      if (character === '`') {
+        backtick = true
+        index += 1
+        continue
+      }
+      if (character === '$' && line[index + 1] === '(') {
+        substitution += 1
+        index += 2
+        continue
+      }
+      if (character === '$' && line[index + 1] === '{') {
+        brace += 1
+        index += 2
+        continue
+      }
+      if (character === '<' && line[index + 1] === '<') {
+        const parsed = heredocAt(line, index)
+        if (parsed !== undefined) {
+          declared.push(parsed)
+          index += 2
+          continue
+        }
+      }
+      if (substitution > 0) {
+        if (character === '(') substitution += 1
+        else if (character === ')') substitution -= 1
+        index += 1
+        continue
+      }
+      if (brace > 0) {
+        if (character === '{') brace += 1
+        else if (character === '}') brace -= 1
+      }
+      index += 1
+    }
+    // The bodies begin only once this logical command line has ended.
+    if (!trailingContinuation && declared.length > 0) {
+      bodies.push(...declared.splice(0, declared.length))
+    }
+  }
+  return quote !== undefined || backtick || substitution > 0 || brace > 0
+    || declared.length > 0 || bodies.length > 0 || trailingContinuation
+}
+
+/** The RAW range a WHOLE-WORD acceptance replaces: the raw word start, and the
+ * raw word end. A closing quote the cursor is inside is part of the range (the
+ * accepted literal stops before it, so keeping it would leave `""`); otherwise
+ * the range ends where the word's tail ends. The command/subcommand query is
+ * the DECODED word, whose length can differ from this raw range (`zo\ s`), so
+ * the query prefix alone can never locate the replaced bytes. */
+export function shellWordRange(
+  line: string,
+  prefixLength: number,
+  col: number,
+): { readonly start: number; readonly end: number } {
+  const token = wordAtCursor(line, prefixLength, col)
+  if (token.quote !== undefined) {
+    const closing = closingQuoteIndex(line, col, token.quote)
+    if (closing !== -1) return { start: token.start, end: closing + 1 }
+  }
+  return { start: token.start, end: col + shellWordSuffix(line, col, token.quote).length }
+}
+
+/** Parse the editor line at the cursor for one shell-specific candidate source. */
 export function shellCompletionContext(line: string, col: number): ShellCompletionContext | undefined {
   if (!line.startsWith('!')) return undefined
   const prefixLength = line.startsWith('!!') ? 2 : 1
-  const before = line.slice(prefixLength, col)
-  const lastSpace = Math.max(before.lastIndexOf(' '), before.lastIndexOf('\t'))
-  const currentWord = before.slice(lastSpace + 1)
-  const prior = lastSpace === -1 ? '' : before.slice(0, lastSpace)
-  const priorWords = parseShellWords(prior)
-  if (priorWords.length === 0) {
-    // The first word: a command name. An explicit path (`.`, `..`, `/`,
-    // `~`) is a path, not a command — the fd provider owns it.
-    if (currentWord.startsWith('.') || currentWord.startsWith('/') || currentWord.startsWith('~')) return undefined
-    return { kind: 'command', prefix: currentWord, priorWords }
+  const token = wordAtCursor(line, prefixLength, col)
+  const rawPrefix = line.slice(token.start, col)
+  const valuePrefix = parseShellWords(rawPrefix)[0] ?? ''
+  const priorWords = parseShellWords(line.slice(prefixLength, token.start))
+  const word: ShellWordLexicalState = {
+    valuePrefix,
+    quote: token.quote,
+    closingQuoteAfterCursor: closingQuoteAfter(line, col, token.quote),
   }
-  if (currentWord.startsWith('$')) {
-    return { kind: 'variable', prefix: currentWord, priorWords }
+  const isPath = valuePrefix.startsWith('.') || valuePrefix.startsWith('/') || valuePrefix.startsWith('~')
+    || valuePrefix.includes('/') || valuePrefix.includes('\\')
+  // A command position is the line start or the first word after a top-level
+  // separator (`;`, `&&`, `||`, `|`, `&`, `(`); a path there stays a path.
+  if (token.commandPosition) {
+    return isPath
+      ? { kind: 'paths', prefix: rawPrefix, priorWords, word }
+      : { kind: 'command', prefix: valuePrefix, priorWords }
   }
-  if (priorWords.length === 1 && hasSubcommandCompletion(priorWords[0]!)) {
-    return { kind: 'subcommand', prefix: currentWord, priorWords }
+  // A `$VAR` word is queried by its DECODED name, so a quoted token
+  // (`!echo "$HO`) completes like an unquoted one.
+  if (valuePrefix.startsWith('$')) return { kind: 'variable', prefix: valuePrefix, priorWords, word }
+  if (isPath || (priorWords.length !== 1 || priorWords[0] !== 'git')) {
+    return { kind: 'paths', prefix: rawPrefix, priorWords, word }
   }
-  return undefined
+  return { kind: 'subcommand', prefix: valuePrefix, priorWords }
 }
 
-/** Filter one candidate list to the prefix and cap it ('' prefix keeps all). */
-function matchesFor(prefix: string, candidates: readonly string[]): AutocompleteSuggestions | null {
-  const matched = prefix === ''
-    ? candidates
-    : candidates.filter(name => name.startsWith(prefix))
-  if (matched.length === 0) return null
-  return {
-    items: matched.slice(0, MAX_SHELL_CANDIDATES).map(name => ({ value: name, label: name })),
+function singleQuotedLiteral(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`
+}
+
+function unquotedPathLiteral(value: string, expandHome: boolean): string {
+  if (!expandHome || !value.startsWith('~/')) return singleQuotedLiteral(value)
+  const suffix = value.slice(2)
+  return `~/${suffix === '' ? '' : singleQuotedLiteral(suffix)}`
+}
+
+function hostPathLiteral(value: string, word: ShellWordLexicalState, directory: boolean): string {
+  if (word.quote === undefined) {
+    const expandsHome = word.valuePrefix === '~' || word.valuePrefix.startsWith('~/')
+    return unquotedPathLiteral(value, expandsHome)
+  }
+  const close = !word.closingQuoteAfterCursor && !directory
+  if (word.quote === "'") return `'${value.replaceAll("'", "'\\''")}${close ? "'" : ''}`
+  const escaped = value.replace(/[\\"$`]/gu, character => `\\${character}`)
+  return `"${escaped}${close ? '"' : ''}`
+}
+
+/** The unquoted characters a Bash command word can carry without escaping:
+ * everything else is backslash-escaped so a command NAME is inserted as one
+ * word instead of being re-parsed as shell source. */
+const SAFE_COMMAND_WORD_CHARACTER = /^[A-Za-z0-9_@%+=:,./-]$/u
+
+/** Encode one `compgen -A command` name as ONE Bash-safe executable word. */
+function commandWordLiteral(name: string): string {
+  let word = ''
+  for (const character of name) {
+    word += SAFE_COMMAND_WORD_CHARACTER.test(character) ? character : `\\${character}`
+  }
+  return word
+}
+
+function matchesFor(
+  prefix: string,
+  candidates: readonly string[],
+  encode: (candidate: string) => string = candidate => candidate,
+): AutocompleteSuggestions | null {
+  const matched = (prefix === '' ? candidates : candidates.filter(candidate => candidate.startsWith(prefix)))
+    .slice(0, MAX_SHELL_CANDIDATES)
+  return matched.length === 0 ? null : {
+    items: matched.map(candidate => ({ value: encode(candidate), label: candidate })),
     prefix,
   }
 }
 
-/**
- * Suggest shell completions for a parsed `!` line context. Returns null
- * when nothing matches or the shell is unavailable — the editor then shows
- * no suggestions (the caller falls through to the fork's own provider).
- * @param context - the parsed cursor context.
- * @param cwd - the session workspace (compgen runs there).
- * @param options - the editor's request options (signal; force: an empty
- *   command prefix lists the cached commands on explicit Tab, while a
- *   natural trigger with an empty prefix stays quiet).
- */
+/** Query only the selected Host/Direct adapter; Remote never uses local path fallback here. */
 export async function suggestShellCompletion(
   context: ShellCompletionContext,
-  cwd: string,
-  options: { signal: AbortSignal; force?: boolean },
+  port: HostShellCompletionPort,
+  target: HostShellCompletionTarget,
+  options: { readonly signal: AbortSignal; readonly force?: boolean },
 ): Promise<AutocompleteSuggestions | null> {
-  // An already-aborted request never spawns a shell (the editor's latest
-  // request won this race; a stale one must stay silent).
   if (options.signal.aborted) return null
-  if (context.kind === 'command') {
-    // A natural trigger with an empty prefix would flash the whole command
-    // list on every `!` keystroke — only explicit Tab asks for it.
-    if (context.prefix === '' && options.force !== true) return null
-    const commands = await requestShellCandidates({ kind: 'commands' }, cwd, options.signal)
-    return matchesFor(context.prefix, commands)
+  if (context.kind === 'command' && context.prefix === '' && options.force !== true) return null
+  const pathPrefix = context.kind === 'paths' ? context.word?.valuePrefix ?? context.prefix : context.prefix
+  const hostPathPrefix = context.kind === 'paths'
+    && context.word?.quote !== undefined
+    && pathPrefix.startsWith('~')
+    ? `./${pathPrefix}`
+    : pathPrefix
+  const request = context.kind === 'command'
+    ? { kind: 'commands' as const, prefix: context.prefix }
+    : context.kind === 'variable'
+      ? { kind: 'variables' as const, prefix: context.prefix.slice(1) }
+      : context.kind === 'subcommand'
+        ? { kind: 'subcommands' as const, command: context.priorWords[0]!, prefix: context.prefix }
+        : { kind: 'paths' as const, prefix: hostPathPrefix }
+  const outcome = await port.complete({ target, request, signal: options.signal })
+  if (options.signal.aborted || outcome.kind !== 'ok') return null
+  if (context.kind === 'paths') {
+    const candidates = outcome.candidates.slice(0, MAX_SHELL_CANDIDATES)
+    return candidates.length === 0 ? null : {
+      items: candidates.map(candidate => {
+        const directory = candidate.endsWith('/') || candidate.endsWith('\\')
+        const value = port.pathAuthority === 'host' && context.word !== undefined
+          ? hostPathLiteral(candidate, context.word, directory)
+          : candidate
+        return { value, label: candidate }
+      }),
+      prefix: context.prefix,
+    }
   }
   if (context.kind === 'variable') {
-    const names = await requestShellCandidates({ kind: 'variables', prefix: context.prefix.slice(1) }, cwd, options.signal)
-    const items = names.map(name => ({ value: `$${name}`, label: `$${name}` }))
-    return items.length === 0 ? null : { items, prefix: context.prefix }
+    const names = context.prefix.slice(1)
+    const matched = outcome.candidates
+      .filter(name => names === '' || name.startsWith(names))
+      .slice(0, MAX_SHELL_CANDIDATES)
+      .map(name => ({ value: `$${name}`, label: `$${name}` }))
+    return matched.length === 0 ? null : { items: matched, prefix: context.prefix }
   }
-  // Subcommand of a known listable command: the live lister wins, the
-  // static fallback covers commands/versions that cannot list themselves
-  // (a failed lister is NOT a valid empty list).
-  const candidates = await requestShellCandidates({ kind: 'subcommands', command: context.priorWords[0]! }, cwd, options.signal)
-  return matchesFor(context.prefix, candidates)
+  // A command NAME and a git SUBCOMMAND are both inserted at a command-word
+  // position: a produced name (compgen / `git --list-cmds`) is untrusted text
+  // and must become one Bash-safe word exactly like a command name.
+  return context.kind === 'command' || context.kind === 'subcommand'
+    ? matchesFor(context.prefix, outcome.candidates, commandWordLiteral)
+    : matchesFor(context.prefix, outcome.candidates)
 }

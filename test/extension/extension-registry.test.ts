@@ -17,7 +17,7 @@ import { CommandBridge } from '../../src/extension/internal/command-bridge.ts'
 import { ThemeRegistry } from '../../src/extension/internal/theme-registry.ts'
 import { SettingsRegistry } from '../../src/extension/internal/settings-registry.ts'
 import { AutocompleteRegistry } from '../../src/extension/internal/autocomplete-registry.ts'
-import { KeybindingRegistry } from '../../src/extension/internal/keybinding-registry.ts'
+import { KeybindingRegistry, TUI_ACTIONS } from '../../src/extension/internal/keybinding-registry.ts'
 import { HOST_COMMAND_CATALOG, LOCAL_COMMANDS, SESSIONLESS_COMMANDS, resolveSubmitDelivery } from '../../src/index.ts'
 
 /** A minimal valid structural autocomplete provider for tests. */
@@ -25,7 +25,12 @@ function provider(getSuggestions: () => Promise<import('../../src/extension/publ
   return { getSuggestions }
 }
 
-// ── CommandBridge ──────────────────────────────────────────────────────────
+test('rendered transcript View Find stays outside the Stable plugin action set', () => {
+  assert.equal(TUI_ACTIONS.has('open-search'), true, 'legacy Stable search continues to exist')
+  assert.equal(TUI_ACTIONS.has('app.transcript.search.view' as never), false,
+    'the Host-private View semantic action is not a plugin action')
+})
+
 
 test('CommandBridge: dynamic local commands join the effective-local set', () => {
   const bridge = new CommandBridge()
@@ -469,6 +474,94 @@ test('SettingsRegistry: snapshot() never exposes the internal registration token
     'the Stable snapshot shape is exactly its seven row facts',
   )
   assert.equal('registrationToken' in snapshot.rows[0]!, false)
+})
+
+test('SettingsRegistry: a persisted registration projects its frozen choices and rejects runtime apply (PR-4)', async () => {
+  const registry = new SettingsRegistry()
+  const handle = registry.register({
+    id: 'p1',
+    label: 'Persisted label',
+    currentValue: 'alpha',
+    persisted: {
+      path: ['label'],
+      choices: [
+        { id: 'alpha', op: 'set', value: 'alpha' },
+        { id: 'omega', label: 'Omega', op: 'set', value: 'omega' },
+        { id: 'inherit', label: 'Use inherited', op: 'unset' },
+      ],
+    },
+  }, 'owner-p')
+  const [record] = registry.rows()
+  assert.equal(record?.mode, 'persisted')
+  assert.deepEqual(record?.values, ['alpha', 'omega', 'inherit'])
+  assert.deepEqual(registry.snapshot().rows[0]?.persisted?.path, ['label'])
+  assert.equal(registry.snapshot().rows[0]?.mode, 'persisted')
+  assert.equal(await registry.applyDetailed('p1', 'omega'), 'rejected')
+  assert.equal(await registry.apply('p1', 'omega'), false)
+  assert.equal(record?.currentValue, 'alpha', 'the runtime apply path never writes a persisted record')
+  handle.setValue('runtime-only')
+  assert.equal(registry.rows()[0]?.currentValue, 'runtime-only', 'the handle only carries the runtime fact')
+})
+
+test('SettingsRegistry: persisted registrations reject invalid declarations (PR-4)', () => {
+  const registry = new SettingsRegistry()
+  const register = (contribution: Parameters<SettingsRegistry['register']>[0]): void => {
+    registry.register(contribution, 'owner-p')
+  }
+  assert.throws(() => register({ id: 'empty', label: 'E', currentValue: '', persisted: { path: [], choices: [{ id: 'a', op: 'set', value: 'a' }] } }), /path must be a non-empty array/u)
+  assert.throws(() => register({ id: 'segment', label: 'E', currentValue: '', persisted: { path: ['a', ''], choices: [{ id: 'a', op: 'set', value: 'a' }] } }), /non-empty strings/u)
+  assert.throws(() => register({ id: 'choices', label: 'E', currentValue: '', persisted: { path: ['a'], choices: [] } }), /choices must be a non-empty array/u)
+  assert.throws(() => register({
+    id: 'duplicate',
+    label: 'E',
+    currentValue: '',
+    persisted: { path: ['a'], choices: [{ id: 'x', op: 'set', value: 1 }, { id: 'x', op: 'set', value: 2 }] },
+  }), /duplicate persisted settings choice id/u)
+  assert.throws(() => register({
+    id: 'object',
+    label: 'E',
+    currentValue: '',
+    persisted: { path: ['a'], choices: [{ id: 'x', op: 'set', value: { nested: true } as never }] },
+  }), /value must be a JSON scalar/u)
+  assert.throws(() => register({
+    id: 'nan',
+    label: 'E',
+    currentValue: '',
+    persisted: { path: ['a'], choices: [{ id: 'x', op: 'set', value: Number.NaN }] },
+  }), /value must be a JSON scalar/u)
+  assert.throws(() => register({
+    id: 'unset-value',
+    label: 'E',
+    currentValue: '',
+    persisted: { path: ['a'], choices: [{ id: 'x', op: 'unset', value: true } as never] },
+  }), /must not carry a value/u)
+  assert.throws(() => register({
+    id: 'mixed',
+    label: 'E',
+    currentValue: '',
+    onChange: () => true,
+    persisted: { path: ['a'], choices: [{ id: 'x', op: 'set', value: 1 }] },
+  } as never), /cannot declare runtime values or onChange/u)
+})
+
+test('SettingsRegistry: persisted zero/false/null are legal scalar values (PR-4)', async () => {
+  const registry = new SettingsRegistry()
+  registry.register({
+    id: 'scalars',
+    label: 'Scalars',
+    currentValue: '0',
+    persisted: {
+      path: ['value'],
+      choices: [
+        { id: 'zero', op: 'set', value: 0 },
+        { id: 'false', op: 'set', value: false },
+        { id: 'null', op: 'set', value: null },
+      ],
+    },
+  }, 'owner-p')
+  assert.deepEqual(registry.rows()[0]?.values, ['zero', 'false', 'null'])
+  assert.equal(registry.rows()[0]?.persisted?.choices.length, 3)
+  assert.equal(await registry.applyDetailed('scalars', 'zero'), 'rejected')
 })
 
 // ── AutocompleteRegistry ───────────────────────────────────────────────────

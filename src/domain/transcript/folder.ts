@@ -25,6 +25,11 @@ import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-llm-retry'
 import type { ToolWorkflowAgentStartData, ToolWorkflowRunStartData } from '@deepseek-ai/dsh-tool-workflow/types'
+// The PTC sub-dispatch session events (`tool/ptc-dispatch-start` /
+// `tool/ptc-dispatch`) are declared by the official PTC executor package's
+// `SessionEventMap` augmentation; the type-only import keeps them in the
+// program so the transcript folds stay exhaustive.
+import type {} from '@deepseek-ai/dsh-tool-executor-ptc'
 import {
   textWithAttachmentMarkers,
   userBlocksVisibleNow,
@@ -141,6 +146,26 @@ function settleToolTiming(message: TranscriptMessage, endedAt: number): void {
 const assistantPresentationRevisions = new WeakMap<Extract<TranscriptMessage, { kind: 'assistant' }>, number>()
 const assistantStepIdentities = new WeakMap<Extract<TranscriptMessage, { kind: 'assistant' }>, number>()
 
+/**
+ * The display mutation revision of one folded row. Transcript rows are mutated
+ * IN PLACE (a streaming body, a settled tool result, a merged read group), so
+ * object identity alone never proves that a materialized row is still current.
+ * This WeakMap is the cheap per-row change stamp a lazy renderer diffs against
+ * its own last materialization; it stores no text, no copy of the row and no
+ * second projection, and it is never exported as a durable identity.
+ */
+const transcriptDisplayRevisions = new WeakMap<TranscriptMessage, number>()
+
+/** The current display mutation revision of one row (`0` when never bumped). */
+export function transcriptDisplayRevisionOf(message: TranscriptMessage): number {
+  return transcriptDisplayRevisions.get(message) ?? 0
+}
+
+/** Record one display-affecting mutation of a row (fold-internal). */
+function bumpTranscriptDisplayRevision(message: TranscriptMessage): void {
+  transcriptDisplayRevisions.set(message, transcriptDisplayRevisionOf(message) + 1)
+}
+
 /** Return the mutation revision of an Assistant's live indexed projection. */
 export function assistantPresentationRevision(message: TranscriptMessage): number {
   return message.kind === 'assistant' ? assistantPresentationRevisions.get(message) ?? 0 : 0
@@ -149,6 +174,15 @@ export function assistantPresentationRevision(message: TranscriptMessage): numbe
 /** Return the internal step identity used to protect Focus final ownership. */
 export function assistantStepOf(message: TranscriptMessage): number | undefined {
   return message.kind === 'assistant' ? assistantStepIdentities.get(message) : undefined
+}
+
+/** Whether this exact Assistant row's step has an authoritative durable/live
+ * settlement in the Folder. This is a read-only view of the existing per-turn
+ * settled-step fence; it neither infers settlement from row shape nor changes
+ * Fold state. */
+export function assistantStepSettledOf(activity: TurnActivity, message: TranscriptMessage): boolean {
+  const step = assistantStepOf(message)
+  return step !== undefined && (activity as MutableTurnActivity).settledSteps.has(step)
 }
 
 /** Read the private latest-step fence without exposing it on the public
@@ -193,28 +227,49 @@ export function textOf(blocks: readonly ContentBlock[]): string {
  * NOT a failure — the status is never invented from text. */
 
 
-export function terminalFailureFromResult(result: string): boolean {
+export type SubCallTerminalFailure =
+  | { readonly kind: 'exit-code'; readonly exitCode: number; readonly body: string }
+  | { readonly kind: 'signal'; readonly signal: string; readonly body: string }
+
+function subCallTerminalFailure(result: string): SubCallTerminalFailure | undefined {
   const parsed = parseExitStatus(result)
-  if ('signal' in parsed) return true
-  if ('exitCode' in parsed) return parsed.exitCode !== 0
-  return false
+  if ('signal' in parsed) return { kind: 'signal', signal: parsed.signal, body: parsed.body }
+  if (parsed.exitCode !== 0) return { kind: 'exit-code', exitCode: parsed.exitCode, body: parsed.body }
+  return undefined
 }
 
-/** The DISPLAY status of one PTC sub-call: the durable lifecycle status
- * (`isError` only) PLUS the alpha.2 terminal contract for bash/pwsh — a
- * trailing `[exit code: N]` / `[killed by signal: ...]` marker (parsed by
- * the official `parseExitStatus`; a preceding truncation notice does not
- * affect it) renders the child failed even when the tool call settled
- * normally. Spilled/generic content without a marker never invents a
- * status. */
+export function terminalFailureFromResult(result: string): boolean {
+  return subCallTerminalFailure(result) !== undefined
+}
+
+/** One authoritative PTC display projection: lifecycle status plus the official
+ * shell marker interpretation. The terminal detail is transient presentation
+ * data; the TranscriptToolMessage lifecycle status is never rewritten. */
+export function subCallDisplay(child: {
+  name: string
+  status: 'ok' | 'error' | 'running'
+  result: string
+}): {
+  readonly status: 'ok' | 'error' | 'running'
+  readonly terminalFailure?: SubCallTerminalFailure
+} {
+  if (child.status === 'running') return { status: 'running' }
+  const terminalFailure = child.name === 'bash' || child.name === 'pwsh'
+    ? subCallTerminalFailure(child.result)
+    : undefined
+  return {
+    status: child.status === 'error' || terminalFailure !== undefined ? 'error' : 'ok',
+    ...(terminalFailure === undefined ? {} : { terminalFailure }),
+  }
+}
+
+/** The DISPLAY status of one PTC sub-call. */
 export function subCallDisplayStatus(child: {
   name: string
   status: 'ok' | 'error' | 'running'
   result: string
 }): 'ok' | 'error' | 'running' {
-  if (child.status !== 'ok') return child.status
-  if ((child.name === 'bash' || child.name === 'pwsh') && terminalFailureFromResult(child.result)) return 'error'
-  return 'ok'
+  return subCallDisplay(child).status
 }
 
 /**
@@ -797,6 +852,11 @@ export class TranscriptFolder {
   /** PTC sub-call events whose parent is not yet mounted (an incomplete
    * replay fragment): start/settle facts are parked here and connected
    * when the parent appears — never promoted to top-level surface rows. */
+  /** The mounted TOP-LEVEL PTC card of every attached sub-call, recorded at
+   * attach time: after the parent call's own result left `pendingCalls` there
+   * is no other live path from a nested card back to the root it is painted
+   * inside, and a late child mutation must still invalidate that root. */
+  private readonly ptcRootByCard = new WeakMap<TranscriptToolMessage, TranscriptToolMessage>()
   private readonly orphanSubCalls = new Map<string, {
     start?: { rootCallId: string; parentCallId: string; name: string; arguments: unknown }
     settle?: { rootCallId: string; parentCallId: string; name: string; arguments: unknown; isError: boolean; content: readonly ContentBlock[] }
@@ -1114,6 +1174,9 @@ export class TranscriptFolder {
     }
     if (parent.subCalls === undefined) parent.subCalls = []
     parent.subCalls.push(child)
+    this.ptcRootByCard.set(child, parent.subCallId === undefined
+      ? parent
+      : this.ptcRootByCard.get(parent) ?? parent)
     this.pendingSubCalls.set(data.subCallId, child)
     this.subCallIndex.set(data.subCallId, child)
     this.subCallDepth.set(data.subCallId, depth)
@@ -1173,6 +1236,9 @@ export class TranscriptFolder {
       child.result = text
       child.resultBlocks = data.content
       this.pendingSubCalls.delete(subCallId)
+      // The nested card's own body changed in place; the rooted refresh below
+      // stamps the top-level card that the client actually materializes.
+      bumpTranscriptDisplayRevision(child)
       this.refreshActiveSubCallsFor(child)
       return
     }
@@ -1202,9 +1268,16 @@ export class TranscriptFolder {
   private refreshActiveSubCallsFor(child: TranscriptToolMessage): void {
     const root = child.rootCallId === undefined
       ? undefined
-      : this.pendingCalls.get(child.rootCallId)?.card ?? this.subCallIndex.get(child.rootCallId)
+      : this.pendingCalls.get(child.rootCallId)?.card
+        ?? this.subCallIndex.get(child.rootCallId)
+        // A child settled AFTER its parent call left `pendingCalls` still has a
+        // mounted top-level card: the card identity is recorded at attach time.
+        ?? this.ptcRootByCard.get(child)
     if (root === undefined) return
     root.subtreeRevision = (root.subtreeRevision ?? 0) + 1
+    // The focused renderer materializes the root card lazily, so the in-place
+    // child mutation must ALSO stamp the root row's display revision.
+    bumpTranscriptDisplayRevision(root)
     const rootEntry = child.rootCallId === undefined ? undefined : this.pendingCalls.get(child.rootCallId)
     if (rootEntry !== undefined) this.markSearchEntryDirty(rootEntry.index)
     const activity = this.activityFor(root.turn)
@@ -1537,6 +1610,14 @@ export class TranscriptFolder {
     if (entry === undefined) return
     this.dirtySearchEntries.add(index)
     this.searchRevisionCounter += 1
+    // The SAME real content mutation that makes the search corpus stale also
+    // stales the row's materialized display (and, for a merged read group, the
+    // group card that is actually emitted). The search side keeps owning its
+    // dirty set; this mirror only stamps the displayed row.
+    const item = this.items[index]
+    if (item !== undefined) bumpTranscriptDisplayRevision(item)
+    const group = this.groupOf.get(index)
+    if (group !== undefined) bumpTranscriptDisplayRevision(group)
   }
 
   /** Mark a raw-item range dirty (the DEFENSIVE reflow path — O(run), rare;
@@ -3202,6 +3283,9 @@ export class TranscriptFolder {
       const timing = transcriptTimingOf(card)
       if (timing === undefined || timing.startedAt <= at) continue
       setTranscriptTiming(card, { ...timing, startedAt: at })
+      // The materialized Work header derives its duration from this sidecar, so
+      // an earlier proven start is a real display change of the owning card.
+      bumpTranscriptDisplayRevision(card)
       refreshed.push(callId)
       const group = this.groupOf.get(index)
       if (group !== undefined) touchedGroups.add(group)
@@ -3909,7 +3993,14 @@ export class TranscriptFolder {
       if (!assistantEntryHasInterruptionEvidence(item)) continue
       if (this.hiddenAssistantEntries.has(item)) continue
       const wasVisible = this.isVisible(item)
+      if (item.interrupted === true) continue
       item.interrupted = true
+      // Interruption evidence is rendered (and disqualifies the row as the
+      // turn's final Assistant), so it is a display change even when the row's
+      // VISIBILITY does not move — the visibility sync below returns early in
+      // exactly that case.
+      bumpTranscriptDisplayRevision(item)
+      bumpAssistantPresentationRevision(item)
       this.syncAssistantVisibility(turn, itemStep, item, wasVisible)
     }
   }
@@ -4327,7 +4418,18 @@ export class TranscriptFolder {
         const sourceKey = span?.sourceKey ?? 'message'
         const sourceOccurrence = sourceOccurrences.get(sourceKey) ?? 0
         sourceOccurrences.set(sourceKey, sourceOccurrence + 1)
-        matches.push({ id: representative, turn: entry.turn, occurrence, source, sourceOccurrence })
+        const end = index + needle.length
+        const normalizedSourceRange = span !== undefined && end <= span.end
+          ? { start: index - span.start, end: end - span.start }
+          : undefined
+        matches.push({
+          id: representative,
+          turn: entry.turn,
+          occurrence,
+          source,
+          sourceOccurrence,
+          ...(normalizedSourceRange === undefined ? {} : { normalizedSourceRange }),
+        })
         occurrence += 1
         start = index + Math.max(1, needle.length)
       }
@@ -4352,6 +4454,16 @@ export class TranscriptFolder {
       this.searchFullScanCount += 1
     }
     return matches
+  }
+
+  /** The current Folder-owned member count of one representative read card.
+   * Non-representative ids deliberately report one: navigation projects only
+   * visible representative matches and must not infer membership from card
+   * presentation fields. */
+  searchRepresentativeMemberCount(id: TranscriptItemId): number {
+    const group = this.groupOf.get(id)
+    if (group === undefined || this.representativeOf(id) !== id) return 1
+    return this.groupMembers.get(group)?.length ?? 1
   }
 
   /** Resolve one search match to its CURRENT visible card: the merged read
@@ -4412,6 +4524,9 @@ export class TranscriptFolder {
    * undefined. Consumers treat unknown as UNKNOWN, never zero. */
   private closeThinking(entry: Extract<TranscriptMessage, { kind: 'thinking' }>, endedAt?: number): void {
     entry.running = false
+    // The running flag is part of the rendered row (status/preview truncation)
+    // and does not itself touch the search corpus: stamp it here.
+    bumpTranscriptDisplayRevision(entry)
     const evidenceEnd = endedAt ?? thinkingLastEvidence.get(entry)
     const startedAt = transcriptTimingOf(entry)?.startedAt ?? evidenceEnd
     if (startedAt !== undefined) {
@@ -4547,7 +4662,12 @@ export class TranscriptFolder {
     if (kind === 'session/end-seed') {
       for (const [id, openIndex] of this.compacting) {
         const open = this.items[openIndex]
-        if (open !== undefined && open.kind === 'compaction') open.running = false
+        if (open !== undefined && open.kind === 'compaction' && open.running !== false) {
+          open.running = false
+          // The card's status is rendered from `running`; a resumed session
+          // must not keep painting a forever-running Compaction card.
+          bumpTranscriptDisplayRevision(open)
+        }
         this.compacting.delete(id)
       }
       return
@@ -4571,6 +4691,7 @@ export class TranscriptFolder {
     if (entry === undefined || entry.kind !== 'compaction') return
     if (kind === 'compaction/start') {
       entry.running = true
+      bumpTranscriptDisplayRevision(entry)
     } else if (kind === 'compaction/summary') {
       const summary = data.summary
       const seqs = data.shadowedSeqs
@@ -4580,10 +4701,21 @@ export class TranscriptFolder {
         // The summary body became searchable: mark the entry dirty (lazy).
         this.markSearchEntryDirty(index)
       }
-      if (Array.isArray(seqs)) entry.items = seqs.length
-      if (typeof tokens === 'number') entry.tokens = tokens
+      // The rendered counts badge reads these two fields, and a counts-only
+      // summary carries no body change to piggyback on.
+      let countsChanged = false
+      if (Array.isArray(seqs) && entry.items !== seqs.length) {
+        entry.items = seqs.length
+        countsChanged = true
+      }
+      if (typeof tokens === 'number' && entry.tokens !== tokens) {
+        entry.tokens = tokens
+        countsChanged = true
+      }
+      if (countsChanged && !Array.isArray(summary)) bumpTranscriptDisplayRevision(entry)
     } else if (kind === 'compaction/end') {
       entry.running = false
+      bumpTranscriptDisplayRevision(entry)
       const error = data.error
       if (typeof error === 'string' && error !== '') entry.error = error
       if (compactionId !== undefined) this.compacting.delete(compactionId)
@@ -4968,18 +5100,22 @@ export class TranscriptFolder {
         const sourcePresentation = contextPresentation(event.data.source)
         // Narrow Working delivery provenance: a Context row claimed from the
         // SAME turn's next-step inbox is the one delivery the presentation may
-        // carry with that turn's Work, and only for the two exact Working
-        // pairs — a tool-jobs Notice or an Agent relay. It is derived ONLY
-        // from the durable insert/claim identity chain above (no Agent.status
-        // sampling, no summary/wording inference); next-turn wakeups,
-        // foreign/legacy logs and every other producer stay absent and
-        // therefore fail open as independent Context.
+        // carry with that turn's Work, and only for the three exact Working
+        // pairs — a tool-jobs Notice, an Agent relay or a subagent settlement
+        // Notice. It is derived ONLY from the durable insert/claim identity
+        // chain above (no Agent.status sampling, no summary/wording
+        // inference); next-turn wakeups, foreign/legacy logs, crossed
+        // source/form pairs and every other producer stay absent and therefore
+        // fail open as independent Context. The settlement body stays an
+        // opaque producer payload: this branch never parses or synthesizes a
+        // stop reason.
         const claimedInThisTurn = wasClaimedFromNextStep === true
           && claimedIdentity !== undefined
           && claimedIdentity.insertionTurn === this.currentTurn
         const sameTurnNextStepDelivery = claimedInThisTurn && (
           (sourcePresentation.sourceKind === 'tool-jobs' && sourcePresentation.form === 'notice')
           || (sourcePresentation.sourceKind === 'agent-message' && sourcePresentation.form === 'relay')
+          || (sourcePresentation.sourceKind === 'subagent-settled' && sourcePresentation.form === 'notice')
         )
         if (sourcePresentation.sourceKind === 'user') {
           if (!userBlocksVisibleNow(blocks)) break

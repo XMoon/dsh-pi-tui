@@ -1,5 +1,5 @@
 /**
- * S4-D2 B13/B14 — on-demand Claude Code / Codex provider boundaries over the
+ * B13/B14 — on-demand Claude Code / Codex provider boundaries over the
  * real rc.2 Optional packages (implementation plan §5 D2-6).
  *
  * The default path is OFFLINE and truthfully EXTERNAL_UNVERIFIED: the real
@@ -14,17 +14,19 @@ import assert from 'node:assert/strict'
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
+import { getDshRuntimeVersion } from '@deepseek-ai/dsh-app-boot'
+import { executeModelToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import {
   skippedInstallationReason,
-  startS4D2Host,
-  type S4D2BundleId,
+  startOptionalBundleHost,
+  type OptionalBundleId,
 } from '../support/optional-bundle-fixture.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 
-const B13 = '@deepseek-ai/dsh-subagent-claude-code' satisfies S4D2BundleId
-const B14 = '@deepseek-ai/dsh-subagent-codex' satisfies S4D2BundleId
+const B13 = '@deepseek-ai/dsh-subagent-claude-code' satisfies OptionalBundleId
+const B14 = '@deepseek-ai/dsh-subagent-codex' satisfies OptionalBundleId
 const skip = skippedInstallationReason([B13, B14])
 /** Native process starts are opt-in: the default suite NEVER launches a native
  *  provider (so `pnpm test` cannot read a real credential tree or run a paid
@@ -38,7 +40,7 @@ const skip = skippedInstallationReason([B13, B14])
  *  - B14: `S5_CODEX_AUTH_FILE` names the caller's native `~/.codex/auth.json`
  *    (ChatGPT OAuth); its bytes are copied into the isolated HOME (0600) and
  *    never printed or committed.
- * BOTH sources are read ONLY after `DSH_PI_TUI_S4_D2_NATIVE=1` admits the
+ * BOTH sources are read ONLY after `DSH_PI_TUI_OPTIONAL_BUNDLE_NATIVE=1` admits the
  * native run; a credential path alone never triggers a file read or copy.
  * Each provider ALSO requires its OWN explicit source: with the global gate on
  * but one source absent, that provider is skipped before any native start (it
@@ -46,7 +48,7 @@ const skip = skippedInstallationReason([B13, B14])
  * Anthropic/OpenAI/Codex env and `CODEX_HOME` are scrubbed for an admitted run.
  * When a credential is absent, that provider stays on the truthful
  * `EXTERNAL_UNVERIFIED` path and no network call is attempted. */
-const NATIVE_ADMITTED = process.env.DSH_PI_TUI_S4_D2_NATIVE === '1'
+const NATIVE_ADMITTED = process.env.DSH_PI_TUI_OPTIONAL_BUNDLE_NATIVE === '1'
 const B13_DEEPSEEK_KEY = NATIVE_ADMITTED ? process.env.S5_B13_DEEPSEEK_API_KEY : undefined
 const CODEX_AUTH_FILE = NATIVE_ADMITTED ? process.env.S5_CODEX_AUTH_FILE : undefined
 
@@ -176,8 +178,8 @@ const NATIVE_TASKS = [
 
 test('official missing catalog, exact installTarget and local profile install', { skip }, async t => {
   // Catalog truth before any install: both on-demand packages are discoverable
-  // as missing official entries with an exact rc.2 install target.
-  const catalogHost = await startS4D2Host(t, { bundles: [] })
+  // as missing official entries with an exact target-version install target.
+  const catalogHost = await startOptionalBundleHost(t, { bundles: [] })
   const pluginManager = catalogHost.ctx.get('pluginManager') as {
     listBundles(): Promise<readonly {
       name: string
@@ -192,8 +194,8 @@ test('official missing catalog, exact installTarget and local profile install', 
     assert.ok(entry !== undefined, `${task.packageName} must be discoverable`)
     assert.equal(entry.official, true)
     assert.equal(entry.availability, 'missing')
-    assert.equal(entry.installTarget?.version, '0.2.1-rc.2')
-    assert.equal(entry.installTarget?.spec, `${task.packageName}@0.2.1-rc.2`)
+    assert.equal(entry.installTarget?.version, getDshRuntimeVersion())
+    assert.equal(entry.installTarget?.spec, `${task.packageName}@${getDshRuntimeVersion()}`)
   }
   await catalogHost.dispose()
 
@@ -204,9 +206,9 @@ test('official missing catalog, exact installTarget and local profile install', 
     // auth; the explicit source (B13 provider overlay / B14 copied auth.json)
     // is the only credential an admitted run can see.
     const restoreAuthEnv = admittedProvider ? scrubNativeAuthEnv() : undefined
-    let host: Awaited<ReturnType<typeof startS4D2Host>>
+    let host: Awaited<ReturnType<typeof startOptionalBundleHost>>
     try {
-      host = await startS4D2Host(t, {
+      host = await startOptionalBundleHost(t, {
         bundles: [task.bundle],
         profileDependencies: { [task.packageName]: `file:${join(catalogHost.installation.nodeModules, task.packageName)}` },
         ...(task.provider === 'claude-code' && b13Env !== undefined
@@ -247,7 +249,7 @@ test('official missing catalog, exact installTarget and local profile install', 
       assert.equal(Object.hasOwn(parameters, 'session_id'), false)
       assert.equal(Object.hasOwn(parameters, 'followup'), false)
 
-      const agent = await host.createAgent(SessionId(`s4-d2-native-${task.provider}`), { cwd: join(host.root, 'work') })
+      const agent = await host.createAgent(SessionId(`optional-bundle-native-${task.provider}`), { cwd: join(host.root, 'work') })
       if (!admittedProvider) {
         // The default offline run AND a partially supplied opt-in both launch
         // no native provider at all: the gate on its own never admits one.
@@ -259,9 +261,9 @@ test('official missing catalog, exact installTarget and local profile install', 
       // REAL Host start under the isolated HOME. A synchronous provider failure
       // is recorded as a truthful failure; a start that returns an external
       // child is observed to its settle/failure, never assumed successful.
-      const started = await host.ctx.tools.execute({
+      const started = await executeModelToolFixture(host.ctx, {
         signal: new AbortController().signal,
-        callId: ToolCallId(`s4-d2-${task.provider}-start`),
+        callId: ToolCallId(`optional-bundle-${task.provider}-start`),
         name: task.tool,
         arguments: { description: 'read-only ping', prompt: 'Reply with exactly PONG and nothing else.' },
         agent,
@@ -352,9 +354,9 @@ test('fixture restores the process environment after multiple concurrent hosts',
   const originalHome = process.env.HOME
   const originalDsh = process.env.DSH_HOME
   const originalAgents = process.env.DSH_AGENTS_HOME
-  const first = await startS4D2Host(t, { bundles: [] })
+  const first = await startOptionalBundleHost(t, { bundles: [] })
   const firstHome = process.env.HOME
-  const second = await startS4D2Host(t, { bundles: [] })
+  const second = await startOptionalBundleHost(t, { bundles: [] })
   assert.notEqual(process.env.HOME, firstHome, 'the second host points the process at its own root')
   await first.dispose()
   assert.notEqual(process.env.HOME, originalHome, 'the remaining host keeps the isolated environment')
@@ -366,8 +368,8 @@ test('fixture restores the process environment after multiple concurrent hosts',
 
 test('fixture re-applies its own environment on restart while another host is live', { skip }, async t => {
   const originalHome = process.env.HOME
-  const first = await startS4D2Host(t, { bundles: [] })
-  const second = await startS4D2Host(t, { bundles: [] })
+  const first = await startOptionalBundleHost(t, { bundles: [] })
+  const second = await startOptionalBundleHost(t, { bundles: [] })
   const restarted = await first.restart()
   assert.equal(process.env.HOME, join(restarted.root, 'home'),
     'the restarted host re-applies its OWN disposable HOME')
@@ -380,14 +382,14 @@ test('fixture re-applies its own environment on restart while another host is li
 })
 
 test('fixture rejects restart after dispose', { skip }, async t => {
-  const host = await startS4D2Host(t, { bundles: [] })
+  const host = await startOptionalBundleHost(t, { bundles: [] })
   await host.dispose()
   await assert.rejects(() => host.restart(), /cannot restart a disposed host/u)
 })
 
 test('the native gate is necessary: a path/key is never read when the gate is off', (t) => {
   const life = testLifecycle(t)
-  const root = life.tempDir('dsh-s4-d2-credential-gate-')
+  const root = life.tempDir('dsh-optional-bundle-credential-gate-')
   const source = join(root, 'caller-auth.json')
   writeFileSync(source, '{"auth_mode":"sentinel"}')
   assert.equal(b13EnvOverlay(false, 'sentinel-key'), undefined,
@@ -448,7 +450,7 @@ test('an admitted run scrubs ambient native auth env and restores it', (t) => {
 
 test('the Codex credential copy is 0600 and is removed before the temp root is cleaned', (t) => {
   const life = testLifecycle(t)
-  const root = life.tempDir('dsh-s4-d2-credential-copy-')
+  const root = life.tempDir('dsh-optional-bundle-credential-copy-')
   const source = join(root, 'caller-auth.json')
   writeFileSync(source, '{"auth_mode":"sentinel"}')
   let copy: CodexAuthCopy | undefined
@@ -469,7 +471,7 @@ test('the Codex credential copy is 0600 and is removed before the temp root is c
 
 test('a failed permission step removes the credential copy before rethrowing', (t) => {
   const life = testLifecycle(t)
-  const root = life.tempDir('dsh-s4-d2-credential-failure-')
+  const root = life.tempDir('dsh-optional-bundle-credential-failure-')
   const source = join(root, 'caller-auth.json')
   writeFileSync(source, '{"auth_mode":"sentinel"}')
   assert.throws(

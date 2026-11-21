@@ -39,6 +39,7 @@ import {
   type TuiExtensionDiagnostics,
 } from '../plugin-manager/extension-inventory.ts'
 import type { SurfaceExtensionService } from './extension-runtime.ts'
+import type { ClientExtensionObservationSource } from '../client-extensions/mount-owner.ts'
 
 /**
  * The presentation capabilities the composition zone injects. The page lays
@@ -59,6 +60,11 @@ export interface PluginManagerWorkspacePanelDeps {
    *  Left / Shift+Tab at the list root) and the ROOT commits the focus change.
    *  It never closes the page or releases the owner. */
   readonly onYieldNavigation: () => void
+  /** PR-5/MAC-09 v2: the Settings root's in-lease Computer Use navigation. */
+  readonly openComputerUseSettings?: () => string | undefined
+  /** R8-E PR-4: the CURRENT Client's live Loader observation source. It is a
+   *  read/notification port only; the page never writes Host or Client state. */
+  readonly clientExtensions?: () => ClientExtensionObservationSource | undefined
   /** Release the owner once, on a REAL teardown (never a navigation yield). */
   readonly onDispose: () => void
 }
@@ -81,7 +87,7 @@ export interface SurfacePluginManager {
    * instead of nesting a second owner. The page is created lazily: opening
    * Settings alone never calls this and therefore never reads the inventory.
    */
-  page(onYieldNavigation: () => void): Component | undefined
+  page(onYieldNavigation: () => void, openComputerUseSettings?: () => string | undefined): Component | undefined
 }
 
 /** The acquisition inputs of the Plugin Manager owner; one cohesive lifetime. */
@@ -98,6 +104,10 @@ export interface PluginManagerRuntimeOptions {
   readonly service: () => SurfaceExtensionService | undefined
   /** The concrete terminal page factory, selected by the composition zone. */
   readonly createPanel: PluginManagerPanelFactory
+  /** Read-only inventory-commit observer owned by the composition zone. */
+  readonly onInventoryCommitted?: (snapshot: import('../../runtime/plugin-manager-port.ts').PluginManagerSnapshot) => void
+  /** R8-E PR-4: the CURRENT Client's real per-package Loader observations. */
+  readonly clientExtensions?: () => ClientExtensionObservationSource | undefined
 }
 
 /** The surface Plugin Manager owner `createSurfaceRuntime()` consumes. */
@@ -125,6 +135,9 @@ export function createPluginManagerRuntime(options: PluginManagerRuntimeOptions)
         notify: (message, kind) => options.mounted().notify(message, kind),
         isOpen: () => hosts.isOpen(),
         diag: deps.diag,
+        ...(options.onInventoryCommitted === undefined
+          ? {}
+          : { onInventoryCommitted: options.onInventoryCommitted }),
       }, {
         observations: () => {
           const extensionService = options.service()
@@ -138,6 +151,7 @@ export function createPluginManagerRuntime(options: PluginManagerRuntimeOptions)
       const panelDeps = (
         claim: PluginManagerHostClaim,
         onYieldNavigation: () => void,
+        openComputerUseSettings: (() => string | undefined) | undefined,
       ): PluginManagerWorkspacePanelDeps => ({
         requestRender: () => options.mounted().requestRender(),
         onCopy: text => options.mounted().copyWorkspaceText(text),
@@ -151,12 +165,15 @@ export function createPluginManagerRuntime(options: PluginManagerRuntimeOptions)
             },
             extensionService,
             extensionService.api().capabilities,
+            options.clientExtensions?.()?.observation(),
           )
         },
         onYieldNavigation,
+        ...(openComputerUseSettings === undefined ? {} : { openComputerUseSettings }),
+        ...(options.clientExtensions === undefined ? {} : { clientExtensions: options.clientExtensions }),
         onDispose: () => { claim.release() },
       })
-      const page = (onYieldNavigation: () => void): Component | undefined => {
+      const page = (onYieldNavigation: () => void, openComputerUseSettings?: () => string | undefined): Component | undefined => {
         // The Settings root hosts exactly ONE page: a still-living page keeps
         // its claim (and its query/selection/scroll) instead of nesting a
         // second owner.
@@ -166,7 +183,7 @@ export function createPluginManagerRuntime(options: PluginManagerRuntimeOptions)
         try {
           // Claim BEFORE any synchronous callback can observe the new page.
           claim = hosts.claim()
-          panel = options.createPanel(controller, panelDeps(claim, onYieldNavigation))
+          panel = options.createPanel(controller, panelDeps(claim, onYieldNavigation, openComputerUseSettings))
         } catch (error) {
           // A failed factory never leaves a phantom owner or a half-built page
           // behind; the error stays the caller's (no fabricated success).

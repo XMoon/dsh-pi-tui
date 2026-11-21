@@ -24,7 +24,7 @@ import { Config as TuiConfigSchema } from '../../src/index.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { applyRunnerWithRuntime } from '../../src/app/bootstrap.ts'
 import type { RemoteApplicationOverride } from '../../src/app/application-runtime.ts'
-import { createRemoteApplicationRuntime } from '../../src/app/remote/runtime.ts'
+import { createRemoteApplicationRuntime } from '../support/m3-inprocess/application-runtime.ts'
 import { waitFor } from '../support/remote-application-fixture.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -134,10 +134,32 @@ test('Remote permission cycle — projection current, one semantic apply, pushed
     unsubscribe()
   }
   const before = app.statusStore.snapshot().access!.permissionPreset!.id!
-  assert.equal(app.statusStore.snapshot().access?.sandbox, undefined,
-    'the sandbox fact stays omitted on Remote (§6.6)')
-  assert.equal(app.statusStore.snapshot().access?.approval, undefined,
-    'the approval fact stays omitted on Remote (§6.6)')
+  // M6-1 F8: the independent sandbox/approval facts now come from the ONE
+  // session-policy observation over the private Host service — never a
+  // preset-name inference and never the agentless sandbox default.
+  const liveSession = host.ctx.sessions.get(SessionId(mainId))
+  const sandboxPolicy = host.ctx.get('sandboxPolicy') as unknown as {
+    resolve(request?: { session?: unknown }): { readonly mode: string }
+  }
+  const approvalService = host.ctx.get('approval') as unknown as {
+    overrideOf(session: unknown): 'ask' | 'never' | undefined
+    config?: { readonly policy?: 'ask' | 'never' }
+  }
+  await waitFor('the observed sandbox/approval facts render on Remote', () => {
+    const access = app.statusStore.snapshot().access as
+      | { sandbox?: { mode?: string }; approval?: { policy?: string } }
+      | undefined
+    return access?.sandbox?.mode !== undefined && access?.approval?.policy !== undefined
+  }, 20_000)
+  const accessAfterRead = app.statusStore.snapshot().access as {
+    sandbox?: { mode?: string }
+    approval?: { policy?: string }
+  }
+  assert.equal(accessAfterRead.sandbox?.mode, sandboxPolicy.resolve({ session: liveSession }).mode,
+    'the Remote sandbox fact is the exact Session-scoped policy, never an agentless default')
+  assert.equal(accessAfterRead.approval?.policy,
+    approvalService.overrideOf(liveSession) ?? approvalService.config?.policy ?? 'ask',
+    'the Remote approval fact is the official exact-Session effective policy')
 
   // 2. The REAL cycle action (the keybinding's production callback —
   //    exactly ONE semantic apply through the wire: ConfigPort → the
@@ -600,7 +622,7 @@ test('a real pending Remote Question survives reconnect — the same flow answer
   // + submit): exactly one answer reaches the Host.
   vt.sendInput('1')
   await new Promise(resolve => setTimeout(resolve, 300))
-  await waitFor('the review page rendered', () => view().includes('Submit'), 10_000)
+  await waitFor('the review page rendered', () => view().includes('Review your answer before submit'), 10_000)
   vt.sendInput('\r')
   const settled = await askSettled
   assert.deepEqual(settled.answers, [{ id: 'q1', selected: ['yes'] }],
@@ -809,7 +831,7 @@ test('a dispatched continued-answer settlement stays real across reconnect — c
   // settlement is HELD in flight.
   vt.sendInput('1')
   await new Promise(resolve => setTimeout(resolve, 300))
-  await waitFor('the review page rendered', () => view().includes('Submit'), 10_000)
+  await waitFor('the review page rendered', () => view().includes('Review your answer before submit'), 10_000)
   vt.sendInput('\r')
   await waitFor('the answer write dispatched on generation A', () => answerDispatches === 1, 15_000)
 

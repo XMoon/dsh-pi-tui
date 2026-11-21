@@ -9,16 +9,21 @@
  * back to the Session.
  *
  * A later re-derivation replaces the sidecar when ANY identity part changes
- * (display subject, projection source, session instance, committed seq, the
- * Assistant's own text/content revision or its turn/step). A → B → A can
- * therefore never resurrect a stale attribution, while an equivalent
- * re-derivation keeps the same revision so the TuiApp render cache stays warm.
+ * (display subject, projection source, session instance, the Assistant's own
+ * text/content revision or its turn/step) or when the derived publication
+ * content changes. The committed `seq` is deliberately NOT an identity part:
+ * an unrelated Session event must never re-materialize a historical figure
+ * row, and every real display change (a new/replaced/withdrawn publication)
+ * changes the derived `publications` themselves, which the caller compares
+ * element-identically (the runtime's publication index keeps one stable array
+ * for content-identical re-derivations). A → B → A can therefore never
+ * resurrect a stale attribution, while an equivalent re-derivation keeps the
+ * same revision so the TuiApp render cache stays warm.
  * @module @xmoon76/dsh-pi-tui/domain/visual/presentation
  */
 
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { PublishedVisual, VisualSessionEvent } from './publication.ts'
-import type { VerifiedVisualOriginSpan } from './origin.ts'
 
 /** One read-only snapshot of the exact Session instance that owns a display
  * subject. Supplied by the composition root; never a Host service. */
@@ -26,26 +31,15 @@ export interface VisualEventSnapshot {
   /** The exact live Session object (identity comparison only). */
   readonly session: object
   readonly sessionId: string
-  /** The committed log revision (`Session.seq`). */
+  /** The committed log revision at capture time. It is ONLY the derivation
+   *  short-circuit of the runtime's publication index (an unchanged snapshot
+   *  skips the O(N) re-derivation); it NEVER re-enters the Assistant display
+   *  stamp, so an unrelated session event cannot re-materialize a historical
+   *  figure row. */
   readonly seq: number
-  /** The complete committed event log of that Session. */
+  /** The complete committed event log of that Session. The session id NEVER
+   *  enters a visual reference; it only fences the display subject. */
   readonly events: readonly VisualSessionEvent[]
-  /**
-   * The PROVEN event-origin ranges of this exact log revision, in seq order.
-   *
-   * A forked Session inherits a prefix of its parent's log; those events
-   * derive their `sv1_…` references from the ANCESTOR's id. Replay therefore
-   * recomputes each call's reference from the range that recorded it, and a
-   * seq no range covers has no publication authority at all (fail closed).
-   */
-  readonly verifiedOriginSpans: readonly VerifiedVisualOriginSpan[]
-  /**
-   * The monotonic revision of {@link verifiedOriginSpans}: an async lineage
-   * proof settling for the SAME Session `seq` changes it, so a memo keyed on
-   * the Session seq alone can never mask the newly proven origins. It is NOT a
-   * second Session sequence and never a durable value.
-   */
-  readonly originRevision: number
 }
 
 /** The exact identity a visual presentation was derived from. */
@@ -58,7 +52,6 @@ export interface VisualPresentationKey {
   /** The exact Session instance. */
   readonly session: object
   readonly sessionId: string
-  readonly seq: number
   /** The owning Assistant's turn and durable step. */
   readonly turn: number
   readonly step: number | undefined
@@ -83,7 +76,6 @@ function sameKey(left: VisualPresentationKey, right: VisualPresentationKey): boo
     && left.sourceIdentity === right.sourceIdentity
     && left.session === right.session
     && left.sessionId === right.sessionId
-    && left.seq === right.seq
     && left.turn === right.turn
     && left.step === right.step
     && left.text === right.text

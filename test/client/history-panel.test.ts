@@ -1285,3 +1285,545 @@ test('boundary rules: they may compress Results/Preview but never to zero rows',
   assert.equal(message.bottomRule, true)
   assert.ok(message.resultsRows >= 1)
 })
+
+// ── PR-B B3: the Fullscreen Footer's complete pointer spans ──────────────────
+
+/** One minimal pointer event at a frame's exact grant. */
+function historyPointer(
+  type: 'press' | 'click',
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+): import('@xmoon76/pi-tui').TuiMouseEvent {
+  return {
+    type, button: 'left', x, y, screenX: x, screenY: y, width, height,
+    shift: false, alt: false, ctrl: false,
+  }
+}
+
+/** The footer row of the last painted frame, or -1. */
+function footerRowOf(lines: readonly string[]): number {
+  return lines.findLastIndex(line => line.includes('Cancel [Esc]'))
+}
+
+/** Observe the panel at an EXPLICIT width until the committed predicate holds.
+ * The 2ms poll keeps the test turn responsive; the deadline is the failure
+ * bound, never a blind fixed sleep. */
+async function renderUntil(
+  panel: HistoryPanel,
+  width: number,
+  predicate: (lines: string[]) => boolean,
+  label: string,
+  timeoutMs = 2_000,
+): Promise<string[]> {
+  const start = Date.now()
+  for (;;) {
+    const lines = panel.render(width)
+    if (predicate(lines)) return lines
+    if (Date.now() - start > timeoutMs) {
+      assert.fail(`${label}: the async history search never reached its final state:\n${plain(lines).join('\n')}`)
+    }
+    await new Promise<void>(resolve => setTimeout(resolve, 2))
+  }
+}
+
+test('B3: the Fullscreen footer Scope/Expand/Cancel spans run the ORIGINAL seat transitions', async () => {
+  const source = new FakeSource()
+  source.rows = [row('alpha prompt', 1, '/a', 'id-a')]
+  const { panel, closed } = makePanel(source, {
+    geometry: seatGeometry(120, 40, 2),
+    pointerEnabled: () => true,
+  })
+  panel.start()
+  const lines = plain(await waitForHistoryRender(
+    panel,
+    rows => rows.some(line => line.includes('alpha prompt')),
+    'the initial page',
+  ))
+  const footerRow = footerRowOf(lines)
+  assert.ok(footerRow >= 0, `the fullscreen footer paints its actions:\n${lines.join('\n')}`)
+  const footer = lines[footerRow]!
+  assert.ok(footer.includes('Scope [Tab]') && footer.includes('Expand [F2]'), footer)
+  const rawFooter = panel.render(120)[footerRow]!
+  assert.ok(rawFooter.includes(color.primary('Scope [Tab]'))
+    && rawFooter.includes(color.primary('Expand [F2]'))
+    && rawFooter.includes(color.primary('Cancel [Esc]')),
+  `the Footer affordances keep Role 14 primary ink: ${JSON.stringify(rawFooter)}`)
+  assert.ok(!footer.includes('Use [Enter]') && !footer.includes('Copy All [Alt+C]'),
+    `the painted heading owns Use/Copy, so the footer adds no duplicate sink:\n${footer}`)
+  const clickFooter = (text: string): boolean => {
+    const painted = panel.render(120)
+    const frame = plain(painted)
+    const height = painted.length
+    const row = footerRowOf(frame)
+    const col = frame[row]!.indexOf(text)
+    assert.ok(row >= 0 && col >= 0, `'${text}' must be painted:\n${frame.join('\n')}`)
+    const press = panel.handleMouse(historyPointer('press', col, row, 120, height))
+    if (press === undefined) return false
+    return panel.handleMouse(historyPointer('click', col, row, 120, height)) !== undefined
+  }
+  // Scope: changes the seat-local query range, never writes.
+  assert.equal(clickFooter('Scope [Tab]'), true)
+  assert.ok(plain(panel.render(120)).some(line => line.includes('Scope: all')), 'the scope really changed')
+  // Expand: the LOCAL F2 presentation preference only.
+  assert.equal(panel.isExpanded(), false)
+  assert.equal(clickFooter('Expand [F2]'), true)
+  assert.equal(panel.isExpanded(), true)
+  assert.equal(clickFooter('Collapse [F2]'), true)
+  assert.equal(panel.isExpanded(), false)
+  assert.equal(closed(), 0, 'seat-local actions never close the seat')
+  // Cancel: the ONE existing close route.
+  assert.equal(clickFooter('Cancel [Esc]'), true)
+  assert.equal(closed(), 1)
+  panel.dispose()
+})
+
+test('B3: the narrow footer carries the Use fallback only while the heading dropped it', async () => {
+  const source = new FakeSource()
+  source.rows = [row('alpha prompt', 1, '/a', 'id-a')]
+  const narrow = makePanel(source, {
+    geometry: seatGeometry(44, 20, 2),
+    pointerEnabled: () => true,
+  })
+  narrow.panel.start()
+  const lines = plain(await renderUntil(
+    narrow.panel,
+    44,
+    rows => rows.some(line => line.includes('Use [Enter]')),
+    'the committed narrow fallback page',
+  ))
+  const heading = lines.find(line => line.includes('Preview'))!
+  assert.ok(heading.includes('Copy All [Alt+C]'), `the heading keeps Copy at 44:\n${heading}`)
+  assert.ok(!heading.includes('Use Selected [Enter]'), `the heading had to drop Use at 44:\n${heading}`)
+  const footer = lines[footerRowOf(lines)]!
+  assert.ok(footer.includes('Use [Enter]'), `the footer carries the same-semantics Use fallback:\n${footer}`)
+  assert.ok(!footer.includes('Copy All [Alt+C]'), `the painted heading Copy is not duplicated:\n${footer}`)
+  // The fallback accepts through the ONE acceptSelected path.
+  const height = narrow.panel.render(44).length
+  const col = footer.indexOf('Use [Enter]')
+  assert.ok(narrow.panel.handleMouse(historyPointer('press', col, footerRowOf(lines), 44, height)) !== undefined)
+  assert.ok(narrow.panel.handleMouse(historyPointer('click', col, footerRowOf(lines), 44, height)) !== undefined)
+  assert.deepEqual(narrow.accepted(), { id: 'id-a', content: 'alpha prompt' })
+  narrow.panel.dispose()
+})
+
+test('B3: a Footer Use pressed before an async page replacement never accepts the replacement', async () => {
+  const source = new FakeSource()
+  source.rows = [row('alpha prompt', 1, '/a', 'id-a')]
+  const { panel, accepted } = makePanel(source, {
+    geometry: seatGeometry(44, 20, 2),
+    pointerEnabled: () => true,
+  })
+  panel.start()
+  const frame = plain(await renderUntil(
+    panel,
+    44,
+    rows => rows.some(line => line.includes('Use [Enter]')),
+    'the initial fallback page',
+  ))
+  const footerRow = footerRowOf(frame)
+  const col = frame[footerRow]!.indexOf('Use [Enter]')
+  assert.ok(footerRow >= 0 && col >= 0, `the Use fallback is painted:\n${frame.join('\n')}`)
+  const height = panel.render(44).length
+  assert.ok(panel.handleMouse(historyPointer('press', col, footerRow, 44, height)) !== undefined)
+  // The page is replaced under the SAME painted cells before the release.
+  source.rows = [row('BETA prompt', 2, '/a', 'id-b')]
+  panel.handleInput('x')
+  await renderUntil(
+    panel,
+    44,
+    rows => rows.some(line => line.includes('BETA prompt')),
+    'the replaced page',
+  )
+  panel.render(44)
+  panel.handleMouse(historyPointer('click', col, footerRow, 44, height))
+  assert.equal(accepted(), undefined, 'a fallback pressed for A must never accept B')
+  panel.dispose()
+})
+
+test('B3: a Footer Scope press does not replay across a scope change', async () => {
+  const source = new FakeSource()
+  source.rows = [row('alpha prompt', 1, '/a', 'id-a')]
+  const { panel } = makePanel(source, {
+    geometry: seatGeometry(120, 40, 2),
+    pointerEnabled: () => true,
+    sessionId: 'ses_a',
+  })
+  panel.start()
+  const frame = plain(await waitForHistoryRender(
+    panel,
+    rows => rows.some(line => line.includes('Scope: session')),
+    'the initial session-scope page',
+  ))
+  const footerRow = footerRowOf(frame)
+  const col = frame[footerRow]!.indexOf('Scope [Tab]')
+  const height = panel.render(120).length
+  assert.ok(panel.handleMouse(historyPointer('press', col, footerRow, 120, height)) !== undefined)
+  // The keyboard changes the scope (and the generation) before the release.
+  panel.handleInput('\t')
+  const toggled = plain(await waitForHistoryRender(
+    panel,
+    rows => rows.some(line => line.includes('Scope: directory')),
+    'the keyboard-toggled scope page',
+  ))
+  const afterKeyboard = toggled.find(line => line.includes('Scope: '))
+  assert.ok(afterKeyboard !== undefined, 'the metadata scope is painted')
+  panel.handleMouse(historyPointer('click', col, footerRow, 120, height))
+  const afterClick = plain(panel.render(120)).find(line => line.includes('Scope: '))
+  assert.equal(afterClick, afterKeyboard,
+    `exactly ONE toggle happened (keyboard); the stale click did nothing: ${afterClick}`)
+  panel.dispose()
+})
+
+test('B3: a Footer Cancel closes the empty and error pages without touching the editor seat', async () => {
+  // Empty page.
+  const emptySource = new FakeSource()
+  emptySource.rows = []
+  const empty = makePanel(emptySource, {
+    geometry: seatGeometry(100, 30, 2),
+    pointerEnabled: () => true,
+  })
+  empty.panel.start()
+  const emptyLines = plain(await waitForHistoryRender(
+    empty.panel,
+    rows => rows.some(line => line.includes('No history yet')),
+    'the settled empty page',
+  ))
+  const emptyRow = footerRowOf(emptyLines)
+  assert.ok(emptyRow >= 0, `the empty page still paints Cancel:\n${emptyLines.join('\n')}`)
+  const emptyCol = emptyLines[emptyRow]!.indexOf('Cancel [Esc]')
+  const emptyHeight = empty.panel.render(100).length
+  empty.panel.handleMouse(historyPointer('press', emptyCol, emptyRow, 100, emptyHeight))
+  empty.panel.handleMouse(historyPointer('click', emptyCol, emptyRow, 100, emptyHeight))
+  assert.equal(empty.closed(), 1)
+  empty.panel.dispose()
+
+  // Error page.
+  const failSource = new FakeSource()
+  failSource.fail = true
+  const failed = makePanel(failSource, {
+    geometry: seatGeometry(100, 30, 2),
+    pointerEnabled: () => true,
+  })
+  failed.panel.start()
+  const failLines = plain(await waitForHistoryRender(
+    failed.panel,
+    rows => rows.some(line => line.includes('History unavailable')),
+    'the settled error page',
+  ))
+  const failRow = footerRowOf(failLines)
+  assert.ok(failRow >= 0, `the error page still paints Cancel:\n${failLines.join('\n')}`)
+  const failCol = failLines[failRow]!.indexOf('Cancel [Esc]')
+  const failHeight = failed.panel.render(100).length
+  failed.panel.handleMouse(historyPointer('press', failCol, failRow, 100, failHeight))
+  failed.panel.handleMouse(historyPointer('click', failCol, failRow, 100, failHeight))
+  assert.equal(failed.closed(), 1)
+  failed.panel.dispose()
+})
+
+// ── PR-B review: intervening input revokes the pending Footer gesture ───────
+
+/** One wheel event at a frame's exact grant (the picker/seat only needs it to
+ *  be a genuine intervening scroll). */
+function historyWheel(x: number, y: number, width: number, height: number): import('@xmoon76/pi-tui').TuiMouseEvent {
+  return {
+    type: 'wheel', button: 'none', x, y, screenX: x, screenY: y, width, height,
+    shift: false, alt: false, ctrl: false, wheelDelta: 1,
+  }
+}
+
+/** The painted selected result row (or the first result row). */
+function resultRowOf(lines: readonly string[]): number {
+  return lines.findIndex(line => line.startsWith('> ') || line.includes('alpha prompt'))
+}
+
+test('B3 gesture: a wheel between a Footer Cancel press and release never closes the seat', async () => {
+  const source = new FakeSource()
+  source.rows = [row('alpha prompt', 1, '/a', 'id-a'), row('beta prompt', 2, '/a', 'id-b')]
+  const { panel, closed } = makePanel(source, {
+    geometry: seatGeometry(120, 40, 2),
+    pointerEnabled: () => true,
+  })
+  panel.start()
+  const lines = plain(await waitForHistoryRender(panel, rows => footerRowOf(rows) >= 0, 'the initial page'))
+  const footerRow = footerRowOf(lines)
+  const cancelCol = lines[footerRow]!.indexOf('Cancel [Esc]')
+  const listRow = resultRowOf(lines)
+  const height = panel.render(120).length
+  assert.ok(panel.handleMouse(historyPointer('press', cancelCol, footerRow, 120, height)) !== undefined)
+  panel.handleMouse(historyWheel(5, listRow, 120, height))
+  panel.render(120)
+  assert.equal(panel.handleMouse(historyPointer('click', cancelCol, footerRow, 120, height)), undefined,
+    'a wheel between the Footer Cancel press and release is inert')
+  assert.equal(closed(), 0)
+  // A fresh independent press still closes.
+  const next = plain(panel.render(120))
+  const nextFooter = footerRowOf(next)
+  const nextCol = next[nextFooter]!.indexOf('Cancel [Esc]')
+  const nextHeight = panel.render(120).length
+  assert.ok(panel.handleMouse(historyPointer('press', nextCol, nextFooter, 120, nextHeight)) !== undefined)
+  assert.ok(panel.handleMouse(historyPointer('click', nextCol, nextFooter, 120, nextHeight)) !== undefined)
+  assert.equal(closed(), 1)
+  panel.dispose()
+})
+
+test('B3 gesture: a wheel between a Footer Scope/Expand press and release never replays it', async () => {
+  const source = new FakeSource()
+  source.rows = [row('alpha prompt', 1, '/a', 'id-a'), row('beta prompt', 2, '/a', 'id-b')]
+  const { panel } = makePanel(source, {
+    geometry: seatGeometry(120, 40, 2),
+    pointerEnabled: () => true,
+    sessionId: 'ses_a',
+  })
+  panel.start()
+  await waitForHistoryRender(panel, rows => rows.some(line => line.includes('alpha prompt')), 'the initial page')
+  const frame = plain(panel.render(120))
+  const footerRow = footerRowOf(frame)
+  const listRow = resultRowOf(frame)
+  const height = panel.render(120).length
+  const scopeCol = frame[footerRow]!.indexOf('Scope [Tab]')
+  assert.ok(panel.handleMouse(historyPointer('press', scopeCol, footerRow, 120, height)) !== undefined)
+  panel.handleMouse(historyWheel(5, listRow, 120, height))
+  panel.render(120)
+  assert.equal(panel.handleMouse(historyPointer('click', scopeCol, footerRow, 120, height)), undefined)
+  assert.ok(plain(panel.render(120)).some(line => line.includes('Scope: session')), 'the stale Scope click changed nothing')
+
+  const expandedFrame = plain(panel.render(120))
+  const expandRow = footerRowOf(expandedFrame)
+  const expandCol = expandedFrame[expandRow]!.indexOf('Expand [F2]')
+  const expandHeight = panel.render(120).length
+  assert.ok(panel.handleMouse(historyPointer('press', expandCol, expandRow, 120, expandHeight)) !== undefined)
+  panel.handleMouse(historyWheel(5, resultRowOf(expandedFrame), 120, expandHeight))
+  panel.render(120)
+  assert.equal(panel.handleMouse(historyPointer('click', expandCol, expandRow, 120, expandHeight)), undefined)
+  assert.equal(panel.isExpanded(), false, 'the stale Expand click changed nothing')
+  // Fresh presses still work exactly once.
+  const fresh = plain(panel.render(120))
+  const freshRow = footerRowOf(fresh)
+  const freshHeight = panel.render(120).length
+  const freshExpand = fresh[freshRow]!.indexOf('Expand [F2]')
+  assert.ok(panel.handleMouse(historyPointer('press', freshExpand, freshRow, 120, freshHeight)) !== undefined)
+  assert.ok(panel.handleMouse(historyPointer('click', freshExpand, freshRow, 120, freshHeight)) !== undefined)
+  assert.equal(panel.isExpanded(), true)
+  panel.dispose()
+})
+
+test('scope-tabs: a wide session header publishes all three complete labels and clicks the requested scope directly', async () => {
+  const source = new FakeSource()
+  source.rows = [row('alpha prompt', 1, '/a', 'id-a')]
+  const { panel } = makePanel(source, {
+    geometry: seatGeometry(100, 30, 2),
+    pointerEnabled: () => true,
+    sessionId: 'ses_a',
+  })
+  panel.start()
+  const initial = plain(await waitForHistoryRender(
+    panel,
+    rows => rows.some(line => line.includes('alpha prompt')),
+    'the initial session page',
+  ))
+  const headerRow = initial.findIndex(line => line.includes('Input History'))
+  assert.ok(headerRow >= 0, `the header must paint:\n${initial.join('\n')}`)
+  assert.ok(initial[headerRow]!.includes('[Current Session]')
+    && initial[headerRow]!.includes('Current Directory')
+    && initial[headerRow]!.includes('All Directories'), `all three labels must paint:\n${initial[headerRow]}`)
+  const height = panel.render(100).length
+  const clickHeader = (label: string): boolean => {
+    const frame = plain(panel.render(100))
+    const row = frame.findIndex(line => line.includes('Input History'))
+    const col = frame[row]!.indexOf(label)
+    assert.ok(row >= 0 && col >= 0, `'${label}' must paint:\n${frame[row]}`)
+    const press = panel.handleMouse(historyPointer('press', col, row, 100, height))
+    if (press === undefined) return false
+    return panel.handleMouse(historyPointer('click', col, row, 100, height)) !== undefined
+  }
+  assert.equal(clickHeader('All Directories'), true)
+  const all = plain(await waitForHistoryRender(
+    panel,
+    rows => rows.some(line => line.includes('[All Directories]')),
+    'the directly selected all-directory scope',
+  ))
+  // reason: let the 1ms debounce enqueue the direct scope search before reading requests.
+  await settle()
+  assert.ok(all.some(line => line.includes('Scope: all')), `the metadata names the requested scope:\n${all.join('\n')}`)
+  assert.equal(source.requests.at(-1)?.scope, 'all')
+  // The same active label is a strict no-op: no new search request.
+  const requests = source.requests.length
+  assert.equal(clickHeader('[All Directories]'), true)
+  // reason: give any erroneous no-op search its full 1ms debounce window.
+  await settle()
+  assert.equal(source.requests.length, requests, 'clicking the current scope never starts another search')
+  panel.dispose()
+})
+
+test('scope-tabs: a narrow sessionless header keeps Directory/All, preserves the query and never targets title/gap/F2/clipped text', async () => {
+  const source = new FakeSource()
+  source.rows = [row('alpha prompt', 1, '/a', 'id-a')]
+  const { panel } = makePanel(source, {
+    geometry: seatGeometry(44, 20, 2),
+    pointerEnabled: () => true,
+  })
+  panel.start()
+  const initial = plain(await renderUntil(
+    panel,
+    44,
+    rows => rows.some(line => line.includes('alpha prompt')),
+    'the initial sessionless page',
+  ))
+  const headerRow = initial.findIndex(line => line.includes('Input History'))
+  assert.ok(headerRow >= 0, `the header must paint:\n${initial.join('\n')}`)
+  assert.ok(initial[headerRow]!.includes('[Directory]') && initial[headerRow]!.includes('All'), initial[headerRow]!)
+  assert.ok(!initial[headerRow]!.includes('Session'), 'a sessionless History never paints a Session tab')
+  panel.handleInput('alp')
+  await renderUntil(panel, 44, rows => rows.some(line => line.includes('alpha prompt')), 'the query result')
+  const before = source.requests.length
+  const height = panel.render(44).length
+  const click = (label: string): boolean => {
+    const frame = plain(panel.render(44))
+    const row = frame.findIndex(line => line.includes('Input History'))
+    const col = frame[row]!.indexOf(label)
+    assert.ok(row >= 0 && col >= 0, `'${label}' must paint:\n${frame[row]}`)
+    const press = panel.handleMouse(historyPointer('press', col, row, 44, height))
+    if (press === undefined) return false
+    return panel.handleMouse(historyPointer('click', col, row, 44, height)) !== undefined
+  }
+  assert.equal(click('All'), true)
+  await renderUntil(panel, 44, rows => rows.some(line => line.includes('[All]')), 'the selected All scope')
+  // reason: let the 1ms debounce enqueue the direct scope search before reading requests.
+  await settle()
+  assert.equal(source.requests.at(-1)?.scope, 'all')
+  assert.equal(source.requests.at(-1)?.query, 'alp', 'the query survives a direct scope jump')
+  // The active label is a strict no-op.
+  const afterJump = source.requests.length
+  assert.equal(click('[All]'), true)
+  // reason: give any erroneous no-op search its full 1ms debounce window.
+  await settle()
+  assert.equal(source.requests.length, afterJump, 'a same-scope click starts no search')
+  // Title/blank/F2 are inert at a comfortable width.
+  const wide = makePanel(source, { geometry: seatGeometry(100, 30, 2), pointerEnabled: () => true })
+  wide.panel.start()
+  const wideFrame = plain(await waitForHistoryRender(
+    wide.panel,
+    rows => rows.some(line => line.includes('Input History')),
+    'the wide header',
+  ))
+  const wideRow = wideFrame.findIndex(line => line.includes('Input History'))
+  const wideHeight = wide.panel.render(100).length
+  for (const x of [0, wideFrame[wideRow]!.indexOf('F2 ')]) {
+    if (x < 0) continue
+    assert.equal(wide.panel.handleMouse(historyPointer('press', x, wideRow, 100, wideHeight)), undefined,
+      'title/blank/F2 header cells are inert')
+  }
+  // A clipped narrow header publishes no hit for the clipped tail.
+  const clipped = makePanel(source, { geometry: seatGeometry(30, 20, 2), pointerEnabled: () => true })
+  clipped.panel.start()
+  const clippedFrame = plain(await renderUntil(clipped.panel, 30, rows => rows.some(line => line.includes('Input History')), 'the clipped header'))
+  const clippedRow = clippedFrame.findIndex(line => line.includes('Input History'))
+  const clippedHeight = clipped.panel.render(30).length
+  assert.equal(clipped.panel.handleMouse(historyPointer('press', 28, clippedRow, 30, clippedHeight)), undefined,
+    'a clipped label tail is not a pointer target')
+  panel.dispose(); wide.panel.dispose(); clipped.panel.dispose()
+})
+
+test('scope-tabs: complete label hit and width at the frozen History matrix', async () => {
+  for (const [cols, rows] of [[44, 20], [80, 24], [120, 40], [200, 50]] as const) {
+    const source = new FakeSource()
+    source.rows = [row('alpha prompt', 1, '/a', 'id-a')]
+    const { panel } = makePanel(source, {
+      geometry: seatGeometry(cols, rows, 2),
+      pointerEnabled: () => true,
+    })
+    panel.start()
+    const frame = plain(await renderUntil(
+      panel,
+      cols,
+      lines => lines.some(line => line.includes('Input History')),
+      `${cols}x${rows} History header`,
+    ))
+    const headerRow = frame.findIndex(line => line.includes('Input History'))
+    const header = frame[headerRow]!
+    assert.ok(visibleWidth(header) <= cols, `${cols}x${rows} header must not overflow: ${JSON.stringify(header)}`)
+    const target = cols >= 85 ? 'All Directories' : 'All'
+    const col = header.indexOf(target)
+    assert.ok(col >= 0, `${cols}x${rows} must paint ${target}: ${header}`)
+    const height = panel.render(cols).length
+    assert.ok(panel.handleMouse(historyPointer('press', col, headerRow, cols, height)) !== undefined)
+    assert.ok(panel.handleMouse(historyPointer('click', col, headerRow, cols, height)) !== undefined)
+    assert.ok(plain(panel.render(cols))[headerRow]!.includes(`[${target}]`),
+      `${cols}x${rows} complete label must select ${target}`)
+    panel.dispose()
+  }
+})
+
+test('scope-tabs: a scope press is invalidated by intervening keyboard state and a late old-scope page never commits', async () => {
+  const source = new FakeSource()
+  source.rows = [row('alpha prompt', 1, '/a', 'id-a')]
+  source.manual = true
+  const { panel } = makePanel(source, {
+    geometry: seatGeometry(100, 30, 2),
+    pointerEnabled: () => true,
+    sessionId: 'ses_a',
+  })
+  panel.start()
+  panel.handleInput('a')
+  // reason: let the 1ms debounce enqueue the typed-query search before pressing the header.
+  await settle()
+  assert.ok(source.pending.length >= 2, `the query request must be pending:\n${source.requests.map(request => request.query).join(',')}`)
+  const frame = plain(panel.render(100))
+  const headerRow = frame.findIndex(line => line.includes('Input History'))
+  const allCol = frame[headerRow]!.indexOf('All Directories')
+  const height = panel.render(100).length
+  assert.ok(panel.handleMouse(historyPointer('press', allCol, headerRow, 100, height)) !== undefined)
+  // Keyboard input between press and release retires the header gesture.
+  panel.handleInput('\t')
+  // reason: let the keyboard scope change enqueue its 1ms debounce search.
+  await settle()
+  assert.equal(panel.handleMouse(historyPointer('click', allCol, headerRow, 100, height)), undefined,
+    'a keyboard scope change retires the pressed Scope target')
+  // An old-scope response that ignores abort cannot commit into the newer scope.
+  source.resolveNext([row('STALE old-scope row', 2, '/a', 'id-stale')])
+  await flushMicrotasks()
+  assert.ok(!plain(panel.render(100)).some(line => line.includes('STALE old-scope row')),
+    'a late old-scope page must never commit')
+  const pending = source.pending.pop()
+  assert.ok(pending !== undefined)
+  pending.resolve({ results: [row('fresh current row', 3, '/a', 'id-fresh')], exhausted: true })
+  const fresh = plain(await renderUntil(panel, 100, rows => rows.some(line => line.includes('fresh current row')), 'the fresh scope page'))
+  assert.ok(fresh.some(line => line.includes('Scope: directory')), `the newer scope remains authoritative:\n${fresh.join('\n')}`)
+  panel.dispose()
+})
+
+test('B3 gesture: a wheel between a narrow Footer Use press and release never accepts', async () => {
+  const source = new FakeSource()
+  source.rows = [row('alpha prompt', 1, '/a', 'id-a')]
+  const { panel, accepted } = makePanel(source, {
+    geometry: seatGeometry(44, 20, 2),
+    pointerEnabled: () => true,
+  })
+  panel.start()
+  const lines = plain(await renderUntil(
+    panel,
+    44,
+    rows => rows.some(line => line.includes('Use [Enter]')),
+    'the committed narrow fallback page',
+  ))
+  const footerRow = footerRowOf(lines)
+  const useCol = lines[footerRow]!.indexOf('Use [Enter]')
+  const listRow = resultRowOf(lines)
+  const height = panel.render(44).length
+  assert.ok(panel.handleMouse(historyPointer('press', useCol, footerRow, 44, height)) !== undefined)
+  panel.handleMouse(historyWheel(5, listRow, 44, height))
+  panel.render(44)
+  assert.equal(panel.handleMouse(historyPointer('click', useCol, footerRow, 44, height)), undefined)
+  assert.equal(accepted(), undefined, 'the wheel-scrolled Use press never accepts the entry')
+  // A fresh independent press accepts.
+  const fresh = plain(panel.render(44))
+  const freshFooter = footerRowOf(fresh)
+  const freshCol = fresh[freshFooter]!.indexOf('Use [Enter]')
+  const freshHeight = panel.render(44).length
+  assert.ok(panel.handleMouse(historyPointer('press', freshCol, freshFooter, 44, freshHeight)) !== undefined)
+  assert.ok(panel.handleMouse(historyPointer('click', freshCol, freshFooter, 44, freshHeight)) !== undefined)
+  assert.deepEqual(accepted(), { id: 'id-a', content: 'alpha prompt' })
+  panel.dispose()
+})

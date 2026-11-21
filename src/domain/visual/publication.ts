@@ -13,12 +13,21 @@
  *   pairs and returns the references that were actually published, in durable
  *   order, first-wins.
  *
+ * Identity is SESSION-FREE: `sv2_…` is derived from
+ * `(turn, absolute step/start seq, callId)` so the SAME reference survives a
+ * fork-inherited prefix without a durable ancestor pointer. Fork history is
+ * expressed as an EVENT EPOCH derived synchronously from the committed log:
+ * every official `session/end-seed { inherited: true }` opens the next epoch,
+ * and every source/result/publisher pairing is confined to one epoch. The
+ * inherited successful publications therefore replay unchanged, while a child
+ * can never publish an inherited generating result again.
+ *
  * Both layers fail closed on every identity question: a bare `callId` is never
  * an identity (it may be reused in a later turn/step), a tool NAME read from
  * result text is never provenance (only the durable `tool/call` is), a policy
  * replacement of either the source result or the publish result removes the
- * qualification, and a source produced in the publisher's own step is refused
- * even when it happened to commit first.
+ * qualification, a cross-epoch pair never completes, and a source produced in
+ * the publisher's own step is refused even when it happened to commit first.
  *
  * This module is UI/Host-neutral: it holds no mutable state, imports only the
  * official session event types plus the visual fact parsers, and never writes.
@@ -30,7 +39,6 @@ import { authorizeSvg, type SvgFact } from './svg.ts'
 import type { ChartFact } from './chart.ts'
 import { visualParts } from './visual-facts.ts'
 import { parseVisualReferenceLine, VISUAL_REFERENCE_PREFIX, visualReference } from './reference.ts'
-import { createVisualOriginReader, type VerifiedVisualOriginSpan } from './origin.ts'
 import {
   CHART_TOOL_NAME,
   humanFacingVisualResult,
@@ -110,6 +118,16 @@ export type VisualSessionEvent =
       }
     }
   }
+  | {
+    /**
+     * The official fork cut marker. `inherited: true` is the ONLY marker that
+     * opens the next event epoch; a `session/end-seed` does not itself qualify
+     * any tool call.
+     */
+    readonly type: 'session/end-seed'
+    readonly seq: number
+    readonly data: { readonly inherited?: unknown }
+  }
 
 /** The durable event types this authority reads. */
 const RELEVANT_EVENT_TYPES: ReadonlySet<string> = new Set([
@@ -120,6 +138,7 @@ const RELEVANT_EVENT_TYPES: ReadonlySet<string> = new Set([
   'assistant/message',
   'tool/call',
   'tool/result',
+  'session/end-seed',
 ])
 
 /**
@@ -225,13 +244,13 @@ export interface PublishedVisual {
 }
 
 /**
- * One qualified generating occurrence together with the original Session of its
- * `tool/call` seq. The origin stays INTERNAL to the replay index: it is what
- * makes source/publisher pairing same-origin, and it is not a display fact.
+ * One qualified generating occurrence together with the fork EVENT EPOCH of its
+ * `tool/call` seq. The epoch stays INTERNAL to the replay index: it confines
+ * source/publisher pairing to one fork generation and is not a durable fact.
  */
 interface QualifiedSource {
   readonly source: VisualSource
-  readonly originSessionId: string
+  readonly epoch: number
 }
 
 /** One call occurrence as the durable log records it. */
@@ -243,8 +262,8 @@ interface IndexedCall {
   readonly step: number
   readonly stepStartSeq: number
   readonly callSeq: number
-  /** The original Session of this call's seq (the current one or a proven ancestor). */
-  readonly originSessionId: string
+  /** The fork event epoch of this call's seq (0 for the original generation). */
+  readonly epoch: number
   readonly ref: string
   /** Present once exactly one well-ordered result paired with this call. */
   result: IndexedResult | undefined
@@ -258,101 +277,65 @@ interface IndexedResult {
   readonly isError: boolean
 }
 
-function callKey(turn: number, step: number, callId: string): string {
-  return `${turn}:${step}:${callId}`
-}
-
-/**
- * The call index of one committed log, scanning the events once.
- * @param sessionId - the observed session identity.
- * @param events - the authority events.
- * @returns the indexed calls in durable order.
- */
-function indexCalls(sessionId: string, events: readonly VisualSessionEvent[]): IndexedCall[] {
-  return indexLog(sessionId, events).calls
-}
-
-/**
- * The executing step's `(turn, step)` key, located by its seq range.
- *
- * The step's model response lands AFTER its `step/start` and BEFORE the next
- * step boundary, so the range identifies it exactly even in a multi-step turn.
- * This reads only the boundary events, not the tool events.
- * @param events - the authority events.
- * @param turn - the executing turn.
- * @param stepStartSeq - the seq of the executing step's `step/start`.
- * @returns the step key, or undefined when its response is not observed.
- */
-function executingStepKey(
-  events: readonly VisualSessionEvent[],
-  turn: number,
-  stepStartSeq: number,
-): string | undefined {
-  let nextBoundary = Number.POSITIVE_INFINITY
-  for (const event of events) {
-    if (event.seq <= stepStartSeq) continue
-    if (event.type !== 'step/start' && event.type !== 'step/end' && event.type !== 'turn/end') continue
-    if (event.seq < nextBoundary) nextBoundary = event.seq
-  }
-  for (const event of events) {
-    if (event.type !== 'assistant/message' || isModelOnlyReplacement(event)) continue
-    if (event.data.turn !== turn) continue
-    if (event.seq <= stepStartSeq || event.seq >= nextBoundary) continue
-    return `${event.data.turn}:${event.data.step}`
-  }
-  return undefined
+/** The composite call identity, INCLUDING the fork epoch. */
+function callKey(epoch: number, turn: number, step: number, callId: string): string {
+  return `${epoch}:${turn}:${step}:${callId}`
 }
 
 /**
  * The committed calls of one session, with their paired results.
  *
- * Every call is recorded under its COMPOSITE identity `(turn, step, callId)`;
- * a duplicate composite identity or a second result marks the occurrence
- * ambiguous, and an ambiguous occurrence never authorizes a publication. A
- * `tool/call` outside an open `step/start` frame is not indexed at all: it has
- * no durable step identity, so nothing can be scoped to it. MODEL-ONLY surface
- * replacements are skipped: the compaction pruner appends a second `tool/result`
- * that repeats the original turn/step/`callId`, and counting it would make an
- * already-accepted publication look ambiguous.
+ * Every call is recorded under its COMPOSITE identity `(epoch, turn, step,
+ * callId)`; a duplicate composite identity or a second result marks the
+ * occurrence ambiguous, and an ambiguous occurrence never authorizes a
+ * publication. A `tool/call` outside an open `step/start` frame is not indexed
+ * at all: it has no durable step identity, so nothing can be scoped to it. The
+ * official `session/end-seed { inherited: true }` opens the next epoch and
+ * clears the open step, so a call from one fork generation can never be
+ * completed by a result from another. MODEL-ONLY surface replacements are
+ * skipped: the compaction pruner appends a second `tool/result` that repeats the
+ * original turn/step/`callId`, and counting it would make an already-accepted
+ * publication look ambiguous.
  */
 interface IndexedLog {
   readonly calls: IndexedCall[]
-  /** Per-step `(turn, step) -> callId -> count` from the model responses. */
-  readonly stepCallIds: Map<string, Map<string, number>>
+  /** Per-step `step/start seq -> callId -> count` from the model responses. */
+  readonly stepCallIds: Map<number, Map<string, number>>
+}
+
+/** One open `step/start` frame: the epoch and absolute seq of the step. */
+interface OpenStep {
+  readonly seq: number
+  readonly turn: number
+  readonly step: number
+  readonly epoch: number
 }
 
 /**
  * Index one committed log exactly once.
  *
- * Without `originOf` every event belongs to `sessionId` (the pre-lineage
- * behaviour and the LIVE path, which only ever reads its own committed log).
- * With `originOf` — a replay over proven fork-inherited ranges — each call is
- * attributed to the Session its seq originally belonged to, and a call in an
- * unproven seq is not indexed at all: it can neither be a source nor publish.
- * @param sessionId - the observed session identity.
+ * The epoch starts at 0 and increments on every official inherited fork
+ * marker; the inherited marker itself grants no tool-call qualification. Each
+ * model response's requested call ids are counted per ACTUAL `step/start` seq,
+ * because the same `(turn, step)` can be re-opened across fork generations.
  * @param events - the authority events.
- * @param originOf - optional proven seq→origin lookup.
  * @returns the indexed calls and the per-step requested-id counts.
  */
-function indexLog(
-  sessionId: string,
-  events: readonly VisualSessionEvent[],
-  originOf?: (seq: number) => string | undefined,
-): IndexedLog {
-  const originAt = originOf ?? ((): string => sessionId)
+function indexLog(events: readonly VisualSessionEvent[]): IndexedLog {
   const calls: IndexedCall[] = []
   const byKey = new Map<string, IndexedCall>()
-  const stepCallIds = new Map<string, Map<string, number>>()
-  let openStepStartSeq: number | undefined
+  const stepCallIds = new Map<number, Map<string, number>>()
+  let epoch = 0
+  let openStep: OpenStep | undefined
   for (const event of events) {
     if (isModelOnlyReplacement(event)) continue
     switch (event.type) {
       case 'assistant/message': {
-        const key = `${event.data.turn}:${event.data.step}`
-        let counts = stepCallIds.get(key)
+        if (openStep === undefined) break
+        let counts = stepCallIds.get(openStep.seq)
         if (counts === undefined) {
           counts = new Map<string, number>()
-          stepCallIds.set(key, counts)
+          stepCallIds.set(openStep.seq, counts)
         }
         for (const block of event.data.message.content) {
           if (block.type !== 'tool-call' || typeof block.id !== 'string') continue
@@ -363,37 +346,39 @@ function indexLog(
       case 'turn/start':
       case 'turn/end':
       case 'step/end':
-        openStepStartSeq = undefined
+        openStep = undefined
         break
       case 'step/start':
-        openStepStartSeq = event.seq
+        openStep = { seq: event.seq, turn: event.data.turn, step: event.data.step, epoch }
+        break
+      case 'session/end-seed':
+        // The official fork cut opens the next epoch. Non-inherited end-seed
+        // events (not an official fork shape) never change the identity.
+        if (event.data.inherited === true) {
+          epoch += 1
+          openStep = undefined
+        }
         break
       case 'tool/call': {
-        if (openStepStartSeq === undefined) break
-        const originSessionId = originAt(event.seq)
-        // An unproven seq has no publication authority, and a call whose step
-        // frame belongs to another original Session is a cross-boundary
-        // occurrence (a forged/partial fork): neither is indexed.
-        if (originSessionId === undefined || originAt(openStepStartSeq) !== originSessionId) break
+        if (openStep === undefined) break
         const call: IndexedCall = {
           callId: event.data.callId,
           name: event.data.name,
           arguments: event.data.arguments,
           turn: event.data.turn,
           step: event.data.step,
-          stepStartSeq: openStepStartSeq,
+          stepStartSeq: openStep.seq,
           callSeq: event.seq,
-          originSessionId,
+          epoch: openStep.epoch,
           ref: visualReference({
-            sessionId: originSessionId,
             turn: event.data.turn,
-            stepStartSeq: openStepStartSeq,
+            stepStartSeq: openStep.seq,
             callId: event.data.callId,
           }),
           result: undefined,
           ambiguous: false,
         }
-        const key = callKey(call.turn, call.step, call.callId)
+        const key = callKey(call.epoch, call.turn, call.step, call.callId)
         const existing = byKey.get(key)
         if (existing !== undefined) {
           existing.ambiguous = true
@@ -404,13 +389,12 @@ function indexLog(
         break
       }
       case 'tool/result': {
-        const key = callKey(event.data.turn, event.data.step, event.data.message.toolCallId)
+        // The result must be recorded in the SAME epoch as the call: a fork's
+        // synthetic closer (or a crafted crossing) is a different epoch and
+        // never completes an inherited call.
+        const key = callKey(epoch, event.data.turn, event.data.step, event.data.message.toolCallId)
         const call = byKey.get(key)
         if (call === undefined) break
-        // The result must be recorded by the SAME original Session as the call:
-        // a fork's synthetic closer (or a crafted crossing) is a different
-        // origin and never completes an inherited call.
-        if (originAt(event.seq) !== call.originSessionId) break
         if (call.result !== undefined || event.seq <= call.callSeq) {
           call.ambiguous = true
           break
@@ -481,7 +465,7 @@ function qualifySource(call: IndexedCall): QualifiedSource | undefined {
     return fact.type === 'chart'
       ? {
         source: { ...base, type: 'chart', chart: fact, svg: undefined, svgSource: undefined, svgAdmissionWidth: undefined },
-        originSessionId: call.originSessionId,
+        epoch: call.epoch,
       }
       : undefined
   }
@@ -499,7 +483,7 @@ function qualifySource(call: IndexedCall): QualifiedSource | undefined {
       svgSource: authorization.source,
       svgAdmissionWidth: authorization.admission.width,
     },
-    originSessionId: call.originSessionId,
+    epoch: call.epoch,
   }
 }
 
@@ -511,12 +495,11 @@ function qualifySource(call: IndexedCall): QualifiedSource | undefined {
  * a final fact of the matching type, the exact reference block the generating
  * tool projects, and — for SVG — a credential that still matches the durable
  * call arguments and admits the source.
- * @param sessionId - the observed session identity.
  * @param events - the exact committed events, in `seq` order.
  * @returns the qualified sources in durable order.
  */
-export function collectVisualSources(sessionId: string, events: readonly VisualSessionEvent[]): VisualSource[] {
-  return sourcesOf(indexCalls(sessionId, events)).map(qualified => qualified.source)
+export function collectVisualSources(events: readonly VisualSessionEvent[]): VisualSource[] {
+  return sourcesOf(indexLog(events).calls).map(qualified => qualified.source)
 }
 
 /**
@@ -627,7 +610,7 @@ export type PresentVisualArguments = { readonly ok: true; readonly refs: readonl
  * `tool/call.arguments` with the same one — so a successful receipt can always
  * be replay-verified, and a replay can never accept a document the live body
  * would have refused. The document is closed: only `visuals` at the root, only
- * `ref` per entry, 1–8 entries, well-formed `sv1_` references, no duplicates.
+ * `ref` per entry, 1–8 entries, well-formed `sv2_` references, no duplicates.
  * @param args - the model-supplied arguments (already JSON-parsed).
  * @returns the accepted references, or the verbatim refusal reason.
  */
@@ -653,7 +636,7 @@ export function parsePresentVisualArguments(args: unknown): PresentVisualArgumen
       return { ok: false, reason: 'every visual must contain only `ref`' }
     }
     if (!isReferenceSpelling(fields.ref)) {
-      return { ok: false, reason: 'every visual ref must look like sv1_ followed by 20 lowercase hex digits' }
+      return { ok: false, reason: 'every visual ref must look like sv2_ followed by 20 lowercase hex digits' }
     }
     refs.push(fields.ref)
   }
@@ -667,15 +650,16 @@ export function parsePresentVisualArguments(args: unknown): PresentVisualArgumen
  * Whether one generating source may be published by the given publisher.
  *
  * Stated once so the live tool body and cold replay cannot disagree: the SAME
- * original Session recorded both, the same turn, an EARLIER model step, and the
- * source result committed before the publishing call. The origin check is what
- * stops a child from publishing a figure it merely inherited.
+ * fork epoch recorded both, the same turn, an EARLIER model step, and the source
+ * result committed before the publishing call. The epoch equality is what stops
+ * a child from RE-publishing a figure it merely inherited; the inherited
+ * successful publication itself still replays from its own epoch.
  */
 function isPublishableBy(
   qualified: QualifiedSource,
-  publisher: { readonly turn: number; readonly stepStartSeq: number; readonly callSeq: number; readonly originSessionId: string },
+  publisher: { readonly turn: number; readonly stepStartSeq: number; readonly callSeq: number; readonly epoch: number },
 ): boolean {
-  return qualified.originSessionId === publisher.originSessionId
+  return qualified.epoch === publisher.epoch
     && qualified.source.turn === publisher.turn
     && qualified.source.stepStartSeq < publisher.stepStartSeq
     && qualified.source.resultSeq < publisher.callSeq
@@ -689,27 +673,25 @@ function isPublishableBy(
  * result pair exactly, the receipt is present in the FINAL content, and the
  * requested references equal the receipt's references position by position.
  * Repeated references keep only their FIRST successful publication.
- * @param sessionId - the observed session identity.
  * @param events - the exact committed events, in `seq` order.
  * @returns the published visuals in durable order, first-wins.
  */
 export function collectPublishedVisuals(
-  sessionId: string,
   events: readonly VisualSessionEvent[],
-  originSpans?: readonly VerifiedVisualOriginSpan[],
 ): PublishedVisual[] {
   // ONE index of the qualified sources per reference, built in a single pass
   // (plan §2.3: O(N + K), never a per-reference rescan of the log). A reference
   // is ambiguous — and therefore unpublishable — exactly when more than one
   // occurrence owns it, so the map keeps a null marker instead of rescanning.
-  // Two DISTINCT identity tuples cannot share an `sv1_` ref under SHA-256, so
+  // Two DISTINCT identity tuples cannot share an `sv2_` ref under SHA-256, so
   // this marker is an unreachable-in-practice fail-closed guard rather than a
   // behaviour any test can legitimately exercise; the duplicated-identity shape
-  // it protects against is covered (a repeated `(turn, step, callId)` is not a
-  // source at all).
+  // it protects against is covered (a repeated `(epoch, turn, step, callId)` is
+  // not a source at all). The SAME ref in a DIFFERENT independent Session is
+  // allowed: refs carry no cross-Session authority.
   // ONE pass over the log: the index is built once and both the sources and the
-  // publications are derived from it (plan §2.3 single-event-scan requirement).
-  const indexed = indexLog(sessionId, events, originSpans === undefined ? undefined : createVisualOriginReader(originSpans))
+  // publications are derived from it.
+  const indexed = indexLog(events)
   const sourcesByRef = new Map<string, QualifiedSource | null>()
   for (const qualified of sourcesOf(indexed.calls)) {
     const ref = qualified.source.ref
@@ -789,7 +771,6 @@ export type PublicationDecision = PublicationAcceptance | PublicationRefusal
  * @returns the receipt to persist, or the verbatim refusal reason.
  */
 export function decidePublication(input: {
-  readonly sessionId: string
   readonly events: readonly VisualSessionEvent[]
   /**
    * The references the executing call was handed. They are CHECKED against the
@@ -801,15 +782,16 @@ export function decidePublication(input: {
   readonly stepStartSeq: number
   readonly callId: string
 }): PublicationDecision {
-  const { sessionId, events, refs, turn, stepStartSeq, callId } = input
+  const { events, refs, turn, stepStartSeq, callId } = input
   // The call index and the step's complete requested-id counts come from ONE
   // traversal of the log.
-  const indexed = indexLog(sessionId, events)
-  // Complete-batch identity check FIRST: the step's own model response already
-  // lists every call id it requested, so a repeated id is refused before any
-  // publisher can win a race against its own sibling's `tool/call` append.
-  const stepKey = executingStepKey(events, turn, stepStartSeq)
-  const ids = stepKey === undefined ? 0 : indexed.stepCallIds.get(stepKey)?.get(callId) ?? 0
+  const indexed = indexLog(events)
+  // Complete-batch identity check FIRST: the model response for THIS exact
+  // `step/start` seq already lists every call id it requested, so a repeated id
+  // is refused before any publisher can win a race against its own sibling's
+  // `tool/call` append. The ABSOLUTE step seq is the key: the same `(turn, step)`
+  // can be re-opened across fork epochs.
+  const ids = indexed.stepCallIds.get(stepStartSeq)?.get(callId) ?? 0
   if (ids > 1) {
     return {
       ok: false,
@@ -873,6 +855,12 @@ export function decidePublication(input: {
     }
     if (source.stepStartSeq > stepStartSeq) {
       return { ok: false, reason: `visual ref ${ref} belongs to a later model step` }
+    }
+    if (qualified.epoch !== publisher.epoch) {
+      return {
+        ok: false,
+        reason: `visual ref ${ref} belongs to an earlier fork epoch; an inherited generating result cannot be published again`,
+      }
     }
     if (!isPublishableBy(qualified, publisher)) {
       return {

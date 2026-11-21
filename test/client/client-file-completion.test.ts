@@ -18,6 +18,7 @@ import {
   resolveFdPath,
 } from '../../src/client/file-completion/local-discovery.ts'
 import { discoverForQuery, MAX_FALLBACK_SCAN } from '../../src/domain/file-completion/discovery-policy.ts'
+import { rankPathCandidates } from '../../src/domain/file-completion/ranking.ts'
 import { resolvePathQuery, type PathQueryEnvironment } from '../../src/domain/file-completion/query.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 
@@ -30,6 +31,34 @@ function fakeFinder(life: TestLifecycle, body: string): { path: string; argsFile
   const path = join(dir, 'fd')
   const argsFile = join(dir, 'args.txt')
   writeFileSync(path, `#!/bin/sh\nprintf '%s\\n' "$@" > ${JSON.stringify(argsFile)}\n${body}\n`)
+  chmodSync(path, 0o755)
+  return { path, argsFile }
+}
+
+/**
+ * A pinned fake CLIENT finder over a scripted record list. It records its argv
+ * and honours fd's OWN `--max-results` bound, so an early-output cutoff in the
+ * production argument list is observable as BEHAVIOUR (a capped finder really
+ * omits the late record), not only as an argument-list string. The records
+ * arrive through a file so legal filename bytes (newlines, spaces, UTF-8) stay
+ * verbatim.
+ */
+function scriptedFinder(life: TestLifecycle, records: readonly string[]): { path: string; argsFile: string } {
+  const dir = life.tempDir('dsh-client-fd-scripted-')
+  const recordFile = join(dir, 'records.bin')
+  writeFileSync(recordFile, records.map(record => `${record}\0`).join(''))
+  const path = join(dir, 'fd')
+  const argsFile = join(dir, 'args.txt')
+  writeFileSync(path, `#!/usr/bin/env node
+const fs = require('node:fs')
+const args = process.argv.slice(2)
+fs.writeFileSync(${JSON.stringify(argsFile)}, args.join('\\n'))
+const maxIndex = args.indexOf('--max-results')
+const max = maxIndex === -1 ? Infinity : Number(args[maxIndex + 1])
+const records = fs.readFileSync(${JSON.stringify(recordFile)}, 'utf8').split('\\u0000')
+if (records.at(-1) === '') records.pop()
+process.stdout.write(records.slice(0, max).map(record => record + '\\u0000').join(''))
+`)
   chmodSync(path, 0o755)
   return { path, argsFile }
 }
@@ -94,8 +123,29 @@ test('a pinned Client finder drives the fast path; the literal term is regex-esc
   assert.ok(args.includes('--full-path'), 'the finder matches the full relative path')
   assert.ok(args.includes('--print0'), 'the finder emits NUL-delimited records')
   assert.ok(args.includes('--hidden'), 'hidden files are part of the completion contract')
-  assert.ok(args.includes('--max-results') && args.includes('100'), 'the finder result cap is bounded')
+  assert.ok(!args.includes('--max-results'),
+    `the finder must NOT truncate before ranking: ${JSON.stringify(args)}`)
   assert.ok(args.includes('file\\[\\+\\]'), `the literal term is regex-escaped: ${JSON.stringify(args)}`)
+})
+
+test('a strong finder match emitted after 100 weaker records still reaches the ranked set', async (t) => {
+  const life = testLifecycle(t)
+  const cwd = life.tempDir('dsh-client-uncapped-')
+  // 150 weaker prefix matches (score 80) stream out first; the EXACT basename
+  // match (score 100) is emitted LAST, i.e. beyond the retired 100-record cap.
+  const records = Array.from({ length: 150 }, (_value, index) =>
+    `nested/needle-${String(index).padStart(3, '0')}.txt`)
+  records.push('needle')
+  const finder = scriptedFinder(life, records)
+  const driver = new ClientLocalDiscoveryDriver(finder.path)
+  const candidates = await discoverForQuery(resolvePathQuery('needle', cwd, ENV), driver, abort)
+  const args = readFileSync(finder.argsFile, 'utf8').split(/\r?\n/)
+  assert.ok(!args.includes('--max-results'),
+    `no early-output cap may reach the Client finder: ${JSON.stringify(args)}`)
+  const ranked = rankPathCandidates(candidates, 'needle')
+  assert.equal(ranked[0]?.path, 'needle',
+    `the late exact match must win the ranked presentation set: ${JSON.stringify(ranked)}`)
+  assert.equal(ranked.length, 50, 'the presentation cap stays the existing 50')
 })
 
 test('null pins the bounded fallback: no finder is probed and the scan answers', async (t) => {
@@ -130,15 +180,202 @@ test('the finder output parser: NUL records, whitespace, the newline fallback an
     `a NUL record keeps the filename whitespace: ${JSON.stringify(nulCandidates)}`)
   assert.ok(!nulCandidates.some(candidate => candidate.path.includes('.git')), '.git records are excluded')
   // A fake/older finder that ignores --print0 is accepted through the newline
-  // fallback (unlike trim(), it preserves meaningful spaces). The finder's own
-  // records pass through verbatim — the finder already applied the term.
-  const lines = fakeFinder(life, `printf 'a.txt\\nmy file.txt\\n'`)
+  // fallback (unlike trim(), it preserves meaningful spaces). The records carry
+  // the searched bytes, exactly like a real finder that applied its own term:
+  // the collector drops a score-0 record, so a non-matching mock candidate must
+  // not be presented as a user suggestion.
+  const lines = fakeFinder(life, `printf 'a-t.txt\\nmy t-file.txt\\n'`)
   const lineCandidates = await discoverForQuery(
-    resolvePathQuery('a', cwd, ENV),
+    resolvePathQuery('t', cwd, ENV),
     new ClientLocalDiscoveryDriver(lines.path),
     abort,
   )
-  assert.deepEqual(lineCandidates.map(candidate => candidate.path), ['a.txt', 'my file.txt'])
+  assert.deepEqual(lineCandidates.map(candidate => candidate.path), ['a-t.txt', 'my t-file.txt'])
+})
+
+test('a large finder stream keeps UTF-8, legal whitespace and the finder facts across chunks', async (t) => {
+  const life = testLifecycle(t)
+  const cwd = life.tempDir('dsh-client-stream-')
+  mkdirSync(join(cwd, 'nested'))
+  mkdirSync(join(cwd, 'real'))
+  symlinkSync(join(cwd, 'real'), join(cwd, 'nested', 'linkdir'))
+  // ~70 KiB of NUL records: the pipe delivers several data events, so records
+  // and multi-byte UTF-8 sequences cross chunk boundaries in the REAL stream.
+  const records = Array.from({ length: 2600 }, (_value, index) =>
+    `nested/大文件-${String(index).padStart(4, '0')}.txt`)
+  records.push(' leading  space.txt', 'line\nbreak.txt', './.git/config', 'nested/linkdir')
+  const finder = scriptedFinder(life, records)
+  const driver = new ClientLocalDiscoveryDriver(finder.path)
+  const ranked = async (term: string): Promise<readonly { path: string; kind: string }[]> =>
+    rankPathCandidates(
+      await discoverForQuery(resolvePathQuery(term, cwd, ENV), driver, abort),
+      term,
+    )
+  const bulk = await ranked('大文件')
+  assert.equal(bulk.length, 50, 'the bounded collector trims the 2600-record stream')
+  assert.equal(bulk[0]?.path, 'nested/大文件-0000.txt', 'the multi-byte record decoded verbatim')
+  assert.ok(bulk.every(candidate => !candidate.path.includes('.git')), '.git records are excluded')
+  const spaced = await ranked('space')
+  assert.deepEqual(spaced.map(candidate => candidate.path), [' leading  space.txt'],
+    'the leading/double space filename survives the stream verbatim')
+  const newline = await ranked('line\nbreak')
+  assert.deepEqual(newline.map(candidate => candidate.path), ['line\nbreak.txt'],
+    'a legal newline inside a NUL record is not a record boundary')
+  const link = await ranked('link')
+  assert.deepEqual(link, [{ path: 'nested/linkdir', kind: 'directory' }],
+    'the finder record is classified against the Client filesystem (symlink to a directory)')
+})
+
+test('a non-zero finder exit discards its partial matches and the bounded fallback answers', async (t) => {
+  const life = testLifecycle(t)
+  const cwd = life.tempDir('dsh-client-nonzero-')
+  writeFileSync(join(cwd, 'fallback-needle.txt'), 'x')
+  const finder = fakeFinder(life, `printf '%s\\0' 'fake-only-needle.txt'; exit 3`)
+  const driver = new ClientLocalDiscoveryDriver(finder.path)
+  const candidates = await discoverForQuery(resolvePathQuery('needle', cwd, ENV), driver, abort)
+  const paths = candidates.map(candidate => candidate.path)
+  assert.ok(paths.includes('fallback-needle.txt'), `the bounded fallback answers: ${JSON.stringify(paths)}`)
+  assert.ok(!paths.includes('fake-only-needle.txt'), 'a failed finder contributes no partial match')
+})
+
+test('a truncated --print0 record is a finder failure, never a partial success', async (t) => {
+  const life = testLifecycle(t)
+  const cwd = life.tempDir('dsh-client-truncated-')
+  writeFileSync(join(cwd, 'fallback-needle.txt'), 'x')
+  // One terminated record then an unterminated tail: the run was cut off.
+  const finder = fakeFinder(life, `printf '%s\\0' 'fake-only-needle.txt'; printf '%s' 'partial-needle'`)
+  const driver = new ClientLocalDiscoveryDriver(finder.path)
+  const candidates = await discoverForQuery(resolvePathQuery('needle', cwd, ENV), driver, abort)
+  const paths = candidates.map(candidate => candidate.path)
+  assert.ok(paths.includes('fallback-needle.txt'), `the bounded fallback answers: ${JSON.stringify(paths)}`)
+  assert.ok(!paths.includes('fake-only-needle.txt') && !paths.includes('partial-needle'),
+    'a cut-off finder stream is a failure, never a partial success')
+})
+
+test('an unterminated record over the IO bound is a finder failure with the fallback answer', async (t) => {
+  const life = testLifecycle(t)
+  const cwd = life.tempDir('dsh-client-overbound-')
+  writeFileSync(join(cwd, 'fallback-needle.txt'), 'x')
+  // 70000 NUL-free code units exceed the 65_536 guard: the child is killed and
+  // the run fails instead of accumulating an unbounded candidate string.
+  const finder = fakeFinder(life, `dd if=/dev/zero bs=70000 count=1 2>/dev/null | tr '\\0' 'a'`)
+  const driver = new ClientLocalDiscoveryDriver(finder.path)
+  const candidates = await discoverForQuery(resolvePathQuery('needle', cwd, ENV), driver, abort)
+  assert.ok(candidates.some(candidate => candidate.path === 'fallback-needle.txt'),
+    `the bounded fallback answers after the guard trips: ${JSON.stringify(candidates.map(candidate => candidate.path))}`)
+})
+
+test('a single terminated record over the IO bound is a finder failure with the fallback answer', async (t) => {
+  const life = testLifecycle(t)
+  const cwd = life.tempDir('dsh-client-overbound-terminated-')
+  writeFileSync(join(cwd, 'fallback-needle.txt'), 'x')
+  // One NUL-terminated record longer than the guard: the completion and its
+  // NUL arrive inside the same chunk, so only the completed-record check can
+  // catch it. The run fails and the bounded fallback answers.
+  const finder = scriptedFinder(life, ['x'.repeat(65_600)])
+  const driver = new ClientLocalDiscoveryDriver(finder.path)
+  const candidates = await discoverForQuery(resolvePathQuery('needle', cwd, ENV), driver, abort)
+  const paths = candidates.map(candidate => candidate.path)
+  assert.ok(paths.includes('fallback-needle.txt'),
+    `the bounded fallback answers after the guard trips: ${JSON.stringify(paths)}`)
+  assert.ok(!paths.some(path => path.length > 65_536),
+    'the over-bound record never surfaces as a candidate')
+})
+
+test('a finder run over the wall budget is a failure: the bounded fallback answers, never a partial result', async (t) => {
+  const life = testLifecycle(t)
+  const cwd = life.tempDir('dsh-client-budget-')
+  writeFileSync(join(cwd, 'fallback-needle.txt'), 'x')
+  // A finder that never finishes inside the budget (amendment D4): the run is
+  // killed and settles as a FAILURE, so the existing bounded fallback answers
+  // and no streamed partial candidate is presented as success. A short
+  // injected budget keeps the test fast and deterministic (sleep 5 >> 50ms).
+  const finder = fakeFinder(life, `printf '%s\\0' 'finder-only-needle.txt'; sleep 5`)
+  const driver = new ClientLocalDiscoveryDriver(finder.path, 50)
+  const candidates = await discoverForQuery(resolvePathQuery('needle', cwd, ENV), driver, abort)
+  const paths = candidates.map(candidate => candidate.path)
+  assert.ok(paths.includes('fallback-needle.txt'),
+    `the bounded fallback answers after the budget: ${JSON.stringify(paths)}`)
+  assert.ok(!paths.includes('finder-only-needle.txt'),
+    'a killed finder contributes no partial match')
+})
+
+test('a burst of records whose processing exceeds the budget is a failure, not a starvation', async (t) => {
+  const life = testLifecycle(t)
+  const cwd = life.tempDir('dsh-client-budget-burst-')
+  writeFileSync(join(cwd, 'fallback-needle.txt'), 'x')
+  // Amendment D5: the deadline is re-checked at least every 64 records, so a
+  // synchronous classification burst cannot starve the budget timer. 100k
+  // records cost well over the injected 30ms budget on any host.
+  const records = Array.from({ length: 100_000 }, (_value, index) =>
+    `nested/deep/needle-${String(index).padStart(6, '0')}.txt`)
+  const finder = scriptedFinder(life, records)
+  const driver = new ClientLocalDiscoveryDriver(finder.path, 30)
+  const candidates = await discoverForQuery(resolvePathQuery('needle', cwd, ENV), driver, abort)
+  const paths = candidates.map(candidate => candidate.path)
+  assert.ok(paths.includes('fallback-needle.txt'),
+    `the bounded fallback answers after the processing budget: ${JSON.stringify(paths.slice(0, 3))}`)
+  assert.ok(!paths.some(path => path.startsWith('nested/deep/needle-')),
+    'the over-budget run contributes no partial match')
+})
+
+test('an abort during a budgeted finder run cancels without a fallback scan', async (t) => {
+  const life = testLifecycle(t)
+  const cwd = life.tempDir('dsh-client-budget-abort-')
+  writeFileSync(join(cwd, 'visible.txt'), 'x')
+  const finder = fakeFinder(life, 'sleep 5')
+  const driver = new ClientLocalDiscoveryDriver(finder.path, 5000)
+  const controller = new AbortController()
+  const pending = discoverForQuery(resolvePathQuery('visible', cwd, ENV), driver, controller.signal)
+  setTimeout(() => controller.abort(), 20)
+  assert.deepEqual(await pending, [],
+    'the user abort settles as cancellation, never as a timeout or a fallback scan')
+})
+
+test('a NUL-free run that crosses the budget inside finish() is a failure, never a partial success', async (t) => {
+  const life = testLifecycle(t)
+  const cwd = life.tempDir('dsh-client-budget-newline-')
+  writeFileSync(join(cwd, 'fallback-needle.txt'), 'x')
+  // Decisive RFL-005 witness: the finder closes WHILE THE BUDGET IS STILL
+  // OPEN, and the clock crosses the deadline only while finish() synchronously
+  // classifies its NUL-free records. An injected clock makes the timing exact:
+  // without the post-finish deadline re-check the run would publish its
+  // partial collector as success. The fake finder exits immediately; the
+  // imported real adapter owns the whole close → finish → settle path.
+  const finder = fakeFinder(life,
+    `printf 'needle-one\\nneedle-two\\nneedle-three\\n'`)
+  // The injected clock establishes the deadline (call 1) and is still inside
+  // budget at the close handler's pre-finish check (call 2: 100 < 100+500).
+  // `finish()` emits its newline records synchronously WITHOUT calling the
+  // clock; the third call is the post-finish check, which sees an over-budget
+  // time (1000 >= 600) and is the ONLY decision point that can fail this run.
+  // Removing that check makes this test fail with the finder's partial
+  // records published as a successful answer.
+  let calls = 0
+  const scriptedNow = (): number => {
+    calls += 1
+    return calls <= 2 ? 100 : 1000
+  }
+  const driver = new ClientLocalDiscoveryDriver(finder.path, 500, scriptedNow)
+  const candidates = await discoverForQuery(resolvePathQuery('needle', cwd, ENV), driver, abort)
+  const paths = candidates.map(candidate => candidate.path)
+  assert.ok(paths.includes('fallback-needle.txt'),
+    `the bounded fallback answers after the finish() budget crossing: ${JSON.stringify(paths)}`)
+  assert.ok(!paths.some(path => path.startsWith('needle-')),
+    'the over-budget newline run contributes no partial match')
+})
+
+test('a successful finder with no matches is a valid empty result, never a fallback scan', async (t) => {
+  const life = testLifecycle(t)
+  const cwd = life.tempDir('dsh-client-empty-')
+  mkdirSync(join(cwd, 'sub'))
+  writeFileSync(join(cwd, 'sub', 'needle.txt'), 'x')
+  // A no-op fake finder exits 0 with no output: the finder's answer is
+  // authoritative, so the bounded subtree scan must not fabricate a candidate.
+  const finder = fakeFinder(life, ':')
+  const driver = new ClientLocalDiscoveryDriver(finder.path)
+  assert.deepEqual(await discoverForQuery(resolvePathQuery('needle', cwd, ENV), driver, abort), [],
+    'a valid empty finder result does not rescan the tree')
 })
 
 test('symlink facts: a symlinked directory is a candidate but is never descended, at the root or below', async (t) => {

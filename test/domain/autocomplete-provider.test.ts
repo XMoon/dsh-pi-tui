@@ -16,6 +16,7 @@ import { extractAtPrefix } from '../../src/tui/file-completion/context.ts'
 import { resolvePathQuery, type PathQueryEnvironment } from '../../src/domain/file-completion/query.ts'
 import { MAX_LOCAL_COMPLETION_SUGGESTIONS } from '../../src/domain/file-completion/ranking.ts'
 import { DirectHostFilePort, resolveFdPath } from '../../src/runtime/direct/host-file-direct.ts'
+import { EMPTY_DIRECT_SHELL_COMPLETION } from '../support/host-shell-completion.ts'
 import { WorkspaceFileSearch, DEFAULT_FILE_SEARCH_EXCLUDED_DIRECTORIES } from '@deepseek-ai/dsh-file-reference-local/search'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 
@@ -60,11 +61,23 @@ function officialSeam(root: string, queries?: string[]): DirectHostFilePort {
   })
 }
 
-/** A workspace-scoped LEGACY-scanner seam (fd forced absent) — the
- * Direct-only sessionless compatibility path, never the session
- * semantics. */
-function fallbackSeam(): DirectHostFilePort {
-  return new DirectHostFilePort(() => undefined, null)
+/** A sessionless WORKSPACE seam over one fixture root: the Direct adapter's
+ * official workspace discovery resolved through a fixture registry. */
+const FALLBACK_WORKSPACE_ID = 'workspace-fallback'
+
+function fallbackSeam(root: string): { readonly port: DirectHostFilePort; readonly scope: import('../../src/runtime/host-file-port.ts').HostFileScope } {
+  return {
+    port: new DirectHostFilePort(() => undefined, null, {
+      get: (name: string) => name === 'workspaceRegistry'
+        ? {
+            create: async () => { throw new Error('the fixture never creates a workspace') },
+            list: () => [],
+            get: (id: string) => id === FALLBACK_WORKSPACE_ID ? { path: root } : undefined,
+          }
+        : undefined,
+    }),
+    scope: { kind: 'workspace', workspaceId: FALLBACK_WORKSPACE_ID, selectionRevision: 1 },
+  }
 }
 
 test('extractAtPrefix finds @ tokens at token boundaries only', () => {
@@ -136,7 +149,7 @@ test('the session scope completes @ mentions through the OFFICIAL Host service o
   // grammar-stripped official form — including the quoted case.
   const queries: string[] = []
   const official = officialSeam(root, queries)
-  const provider = new MentionProvider([], root, official, undefined, () => ({ kind: 'session', sessionId: 'session-live' }), undefined, undefined, [], true)
+  const provider = new MentionProvider([], root, official, undefined, () => ({ kind: 'session', sessionId: 'session-live' }), undefined, undefined, [], EMPTY_DIRECT_SHELL_COMPLETION)
   // Prefix match on the basename (cursor at the end of '@file').
   const file = await provider.getSuggestions(['look at @file'], 0, 13, { signal: abort })
   assert.ok(file !== null, `@file must suggest:\n${JSON.stringify(file)}`)
@@ -217,12 +230,14 @@ test('the HOME shorthand completes to an ABSOLUTE Host value — never ~/... (TS
   try {
     const provider = new MentionProvider([], root, scopedSeam(root), undefined,
       () => ({ kind: 'session', sessionId: 'session-live' }), null)
-    const result = await provider.getSuggestions(['@~/Down'], 0, 7, { signal: abort })
-    assert.ok(result !== null, `@~/Down must suggest:\n${JSON.stringify(result)}`)
-    assert.equal(result.prefix, '@~/Down')
+    // The term matches the nested file's basename but no direct child of the
+    // home scope (the amended direct-child-first rule answers a direct match
+    // without recursion), so the scoped recursive search returns both the
+    // directory and the file.
+    const result = await provider.getSuggestions(['@~/loads.'], 0, 10, { signal: abort })
+    assert.ok(result !== null, `@~/loads. must suggest:\n${JSON.stringify(result)}`)
+    assert.equal(result.prefix, '@~/loads.')
     const values = result.items.map(item => item.value)
-    assert.ok(values.includes(`@${join(home, 'Downloads')}/`),
-      `the home scope drives discovery: ${JSON.stringify(values)}`)
     assert.ok(values.includes(`@${join(home, 'Downloads', 'loads.txt')}`),
       `the nested candidate is absolute: ${JSON.stringify(values)}`)
     assert.ok(values.every(value => !value.startsWith('@~')),
@@ -306,7 +321,8 @@ test('a Host answer larger than the local completion cap is presented in FULL (n
 test('the provider completes the QUOTED @ form through the port (quoted values)', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
-  const provider = new MentionProvider([], root, fallbackSeam(), undefined, undefined, undefined, undefined, [], true)
+  const seam = fallbackSeam(root)
+  const provider = new MentionProvider([], root, seam.port, undefined, seam.scope, undefined, undefined, [], EMPTY_DIRECT_SHELL_COMPLETION)
   const result = await provider.getSuggestions(['@"my'], 0, 4, { signal: abort })
   assert.ok(result !== null, `@"my must suggest:\n${JSON.stringify(result)}`)
   assert.equal(result.prefix, '@"my')
@@ -316,7 +332,8 @@ test('the provider completes the QUOTED @ form through the port (quoted values)'
 test('the provider completes a CJK-glued @ mention (the CJK-glued trigger grammar)', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
-  const provider = new MentionProvider([], root, fallbackSeam(), undefined, undefined, undefined, undefined, [], true)
+  const seam = fallbackSeam(root)
+  const provider = new MentionProvider([], root, seam.port, undefined, seam.scope, undefined, undefined, [], EMPTY_DIRECT_SHELL_COMPLETION)
   const result = await provider.getSuggestions(['看看@file'], 0, 7, { signal: abort })
   assert.ok(result !== null, `看看@file must suggest:\n${JSON.stringify(result)}`)
   assert.equal(result.prefix, '@file')
@@ -326,7 +343,8 @@ test('the provider completes a CJK-glued @ mention (the CJK-glued trigger gramma
 test('the fallback quotes mention values that contain spaces', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
-  const provider = new MentionProvider([], root, fallbackSeam(), undefined, undefined, undefined, undefined, [], true)
+  const seam = fallbackSeam(root)
+  const provider = new MentionProvider([], root, seam.port, undefined, seam.scope, undefined, undefined, [], EMPTY_DIRECT_SHELL_COMPLETION)
   // A space-free query matching a file whose NAME has a space must produce a
   // quoted value (`@"my file.txt"`) so the submitted mention stays one token.
   const result = await provider.getSuggestions(['@my'], 0, 3, { signal: abort })
@@ -340,7 +358,7 @@ test('the provider delegates indented slash-command completion without losing in
   const provider = new MentionProvider(
     [{ name: 'exit', description: 'Quit' }, { name: 'settings', description: 'Panel' }],
     root,
-    fallbackSeam(),
+    fallbackSeam(root).port,
   )
   const result = await provider.getSuggestions(['  /ex'], 0, 5, { signal: abort })
   assert.ok(result !== null, `indented /ex must suggest:\n${JSON.stringify(result)}`)
@@ -355,7 +373,7 @@ test('the provider delegates slash-command completion to the inner provider', as
   const provider = new MentionProvider(
     [{ name: 'exit', description: 'Quit' }, { name: 'settings', description: 'Panel' }],
     root,
-    fallbackSeam(),
+    fallbackSeam(root).port,
   )
   const result = await provider.getSuggestions(['/ex'], 0, 3, { signal: abort })
   assert.ok(result !== null, `/ex must suggest:\n${JSON.stringify(result)}`)
@@ -379,7 +397,7 @@ test('a late port result is dropped when the request was aborted; a port rejecti
     resolveReference: async () => ({ kind: 'missing' }),
     canonicalizeMentions: async (_scope, text) => text,
   }
-  const provider = new MentionProvider([], root, seam, undefined, undefined, undefined, undefined, [], true)
+  const provider = new MentionProvider([], root, seam, undefined, undefined, undefined, undefined, [], EMPTY_DIRECT_SHELL_COMPLETION)
   const pending = provider.getSuggestions(['@file'], 0, 5, { signal: controller.signal })
   controller.abort() // the request is cancelled while discovery is in flight
   release!()
@@ -389,7 +407,7 @@ test('a late port result is dropped when the request was aborted; a port rejecti
     resolveReference: async () => ({ kind: 'missing' }),
     canonicalizeMentions: async (_scope, text) => text,
   }
-  const resilient = new MentionProvider([], root, throwing, undefined, undefined, undefined, undefined, [], true)
+  const resilient = new MentionProvider([], root, throwing, undefined, undefined, undefined, undefined, [], EMPTY_DIRECT_SHELL_COMPLETION)
   assert.equal(
     await resilient.getSuggestions(['@file'], 0, 5, { signal: abort }),
     null,
@@ -568,7 +586,7 @@ test('the provider completes /image arguments through the fork command branch', 
   const provider = new MentionProvider(
     [{ name: 'image', description: 'Attach', getArgumentCompletions: (arg) => suggestPathArgument(arg, root) }],
     root,
-    fallbackSeam(),
+    fallbackSeam(root).port,
   )
   const result = await provider.getSuggestions(['/image fi'], 0, 9, { signal: abort })
   assert.ok(result !== null, `/image fi must suggest:\n${JSON.stringify(result)}`)
@@ -585,7 +603,7 @@ test('the provider lets Tab file-complete an explicit PATH argument only (plan �
       { name: 'help', description: 'Help' },
     ],
     root,
-    fallbackSeam(),
+    fallbackSeam(root).port,
   )
   assert.equal(provider.shouldTriggerFileCompletion(['/image'], 0, 6), false, 'a bare command name stays command completion')
   assert.equal(provider.shouldTriggerFileCompletion(['/image '], 0, 7), true, 'a trailing-space PATH argument is a file-completion site')
@@ -600,7 +618,7 @@ test('the provider lets Tab file-complete an explicit PATH argument only (plan �
   // THE PROOF (plan §2.1): the HOST's own file branch stays closed for
   // every ordinary position — a forced request never produces a host file
   // dropdown there.
-  const probe = new MentionProvider([{ name: 'image', description: 'Attach', getArgumentCompletions: () => null }], root, fallbackSeam(), undefined, undefined, undefined, undefined, [], true)
+  const probe = new MentionProvider([{ name: 'image', description: 'Attach', getArgumentCompletions: () => null }], root, fallbackSeam(root).port, undefined, undefined, undefined, undefined, [], EMPTY_DIRECT_SHELL_COMPLETION)
   return Promise.all([
     probe.getSuggestions(['/help foo'], 0, 9, { signal: abort, force: true }),
     probe.getSuggestions(['see /tmp/'], 0, 9, { signal: abort, force: true }),
@@ -634,8 +652,8 @@ test('the completion scope is resolved at SUGGESTION time, so a session switch n
   let liveAgent: { session: { id: string } } | undefined = { session: { id: 'session-a' } }
   const provider = new MentionProvider([], root, seam, undefined, () =>
     liveAgent === undefined
-      ? { kind: 'workspace', cwd: root }
-      : { kind: 'session', sessionId: liveAgent.session.id }, undefined, undefined, [], true)
+      ? { kind: 'workspace', workspaceId: 'workspace-a', selectionRevision: 7 }
+      : { kind: 'session', sessionId: liveAgent.session.id }, undefined, undefined, [], EMPTY_DIRECT_SHELL_COMPLETION)
   await provider.getSuggestions(['@file'], 0, 5, { signal: abort })
   assert.deepEqual(scopes[0], { kind: 'session', sessionId: 'session-a' }, 'the first suggestion resolves session A')
   // The session switch: the SAME provider instance is queried again (no
@@ -646,7 +664,8 @@ test('the completion scope is resolved at SUGGESTION time, so a session switch n
   // And a sessionless install (deferred start) resolves the workspace.
   liveAgent = undefined
   await provider.getSuggestions(['@file'], 0, 5, { signal: abort })
-  assert.deepEqual(scopes[2], { kind: 'workspace', cwd: root }, 'the sessionless fallback resolves the workspace')
+  assert.deepEqual(scopes[2], { kind: 'workspace', workspaceId: 'workspace-a', selectionRevision: 7 },
+    'the sessionless scope is the confirmed Workspace selection snapshot (id + revision), never a cwd')
 })
 
 test('a scope switch MID-FLIGHT drops the in-flight candidate list (no cross-session commit)', async (t) => {
@@ -670,8 +689,8 @@ test('a scope switch MID-FLIGHT drops the in-flight candidate list (no cross-ses
   let liveAgent: { session: { id: string } } | undefined = { session: { id: 'session-a' } }
   const provider = new MentionProvider([], root, seam, undefined, () =>
     liveAgent === undefined
-      ? { kind: 'workspace', cwd: root }
-      : { kind: 'session', sessionId: liveAgent.session.id }, undefined, undefined, [], true)
+      ? { kind: 'workspace', workspaceId: 'workspace-a', selectionRevision: 1 }
+      : { kind: 'session', sessionId: liveAgent.session.id }, undefined, undefined, [], EMPTY_DIRECT_SHELL_COMPLETION)
   const pending = provider.getSuggestions(['@file'], 0, 5, { signal: abort })
   // The switch lands while the discovery is in flight (no abort).
   liveAgent = { session: { id: 'session-b' } }
@@ -694,7 +713,7 @@ test('inline skill completion returns ONLY skill candidates at ordinary position
   const provider = new MentionProvider(
     [{ name: 'exit', description: 'Quit' }, { name: 'settings', description: 'Panel' }],
     root,
-    fallbackSeam(),
+    fallbackSeam(root).port,
     undefined,
     undefined,
     undefined,
@@ -738,7 +757,7 @@ test('inline skill completion never leaks commands and never claims the command 
   const provider = new MentionProvider(
     [{ name: 'exit', description: 'Quit' }, { name: 'settings', description: 'Panel' }],
     root,
-    fallbackSeam(),
+    fallbackSeam(root).port,
     undefined,
     undefined,
     undefined,
@@ -767,7 +786,7 @@ test('inline skill completion stays closed in shell mode (shell/path logic uncha
   const provider = new MentionProvider(
     [],
     root,
-    fallbackSeam(),
+    fallbackSeam(root).port,
     () => 'shell-context',
     undefined,
     undefined,
@@ -782,7 +801,7 @@ test('inline skill completion stays closed in shell mode (shell/path logic uncha
 test('inline skill accept applies the reference and never submits', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
-  const provider = new MentionProvider([], root, fallbackSeam(), undefined, undefined, undefined, undefined, SKILLS, true)
+  const provider = new MentionProvider([], root, fallbackSeam(root).port, undefined, undefined, undefined, undefined, SKILLS, EMPTY_DIRECT_SHELL_COMPLETION)
   const result = await provider.getSuggestions(['请用 /el'], 0, 6, { signal: abort })
   assert.ok(result !== null)
   const applied = provider.applyCompletion(['请用 /el'], 0, 6, result.items[0]!, result.prefix)
@@ -801,24 +820,64 @@ test('inline skill accept applies the reference and never submits', async (t) =>
   assert.deepEqual(appliedSpaced, { lines: ['请用 /eli5 看看'], cursorLine: 0, cursorCol: 9 })
 })
 
-test('a scope switch fences the open inline dropdown (no stale accept)', async (t) => {
+test('a CLIENT-local inline dropdown survives a Host workspace selection change (the Client cwd is its authority)', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
-  let scope: import('../../src/runtime/host-file-port.ts').HostFileScope = { kind: 'workspace', cwd: root }
-  const provider = new MentionProvider([], root, fallbackSeam(), undefined, () => scope, undefined, undefined, SKILLS, true)
+  let scope: import('../../src/runtime/host-file-port.ts').HostFileScope = { kind: 'workspace', selectionRevision: 0 }
+  const provider = new MentionProvider([], root, fallbackSeam(root).port, undefined, () => scope, undefined, undefined, SKILLS, EMPTY_DIRECT_SHELL_COMPLETION)
   const result = await provider.getSuggestions(['请用 /el'], 0, 6, { signal: abort })
   assert.ok(result !== null)
-  // The session/workspace generation changes while the dropdown is open.
-  scope = { kind: 'workspace', cwd: '/other-workspace' }
+  // The sessionless workspace preflight confirms the launch directory while
+  // the dropdown is open: the Host scope gains its identity and a new
+  // revision. The inline lexicon (and the fixed attachment actions beside it)
+  // never read the Host filesystem, so its rows are still the exact ones THIS
+  // Client wrote and the accept must land — the seat keeps them PAINTED (it
+  // holds no Host scope of its own), so refusing here is an Enter that
+  // silently completes nothing.
+  scope = { kind: 'workspace', workspaceId: 'workspace-a', selectionRevision: 1 }
   const applied = provider.applyCompletion(['请用 /el'], 0, 6, result.items[0]!, result.prefix)
-  assert.deepEqual(applied, { lines: ['请用 /el'], cursorLine: 0, cursorCol: 6 },
-    'a switched scope must fence the old dropdown')
+  assert.deepEqual(applied, { lines: ['请用 /eli5 '], cursorLine: 0, cursorCol: 9 },
+    'a Host scope change must not fence a Client-local inline dropdown')
+  // The Client cwd IS that answer's scope: a change there still fences it.
+  const cwd = { value: root }
+  const localCwdScoped = new MentionProvider(
+    [], root, fallbackSeam(root).port, undefined, () => scope, undefined, () => cwd.value, SKILLS, EMPTY_DIRECT_SHELL_COMPLETION,
+  )
+  const painted = await localCwdScoped.getSuggestions(['请用 /el'], 0, 6, { signal: abort })
+  assert.ok(painted !== null)
+  cwd.value = '/somewhere-else'
+  assert.deepEqual(
+    localCwdScoped.applyCompletion(['请用 /el'], 0, 6, painted.items[0]!, painted.prefix),
+    { lines: ['请用 /el'], cursorLine: 0, cursorCol: 6 },
+    'the Client-local cwd is the answer authority and still fences the dropdown',
+  )
+})
+
+test('a Host-scoped dropdown is fenced by a workspace selection change (no stale accept)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  let scope: import('../../src/runtime/host-file-port.ts').HostFileScope = { kind: 'workspace', workspaceId: 'workspace-a', selectionRevision: 1 }
+  const seam: import('../../src/runtime/host-file-port.ts').HostFilePort = {
+    listReferences: async () => ({ kind: 'ok', items: [{ path: 'file-one.txt', kind: 'file' }] }),
+    resolveReference: async () => ({ kind: 'missing' }),
+    canonicalizeMentions: async (_scope, text) => text,
+  }
+  const provider = new MentionProvider([], root, seam, undefined, () => scope, undefined, undefined, SKILLS, EMPTY_DIRECT_SHELL_COMPLETION)
+  const result = await provider.getSuggestions(['@file'], 0, 5, { signal: abort })
+  assert.ok(result !== null)
+  // The Workspace selection revision changes while the dropdown is open: the
+  // `@` rows were resolved against the OLD Host workspace, so they must never
+  // apply under the new one.
+  scope = { kind: 'workspace', workspaceId: 'workspace-a', selectionRevision: 2 }
+  const applied = provider.applyCompletion(['@file'], 0, 5, result.items[0]!, result.prefix)
+  assert.deepEqual(applied, { lines: ['@file'], cursorLine: 0, cursorCol: 5 },
+    'a switched Host scope must fence the old dropdown')
 })
 
 test('a changed draft fences the open inline dropdown (no stale accept)', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
-  const provider = new MentionProvider([], root, fallbackSeam(), undefined, undefined, undefined, undefined, SKILLS, true)
+  const provider = new MentionProvider([], root, fallbackSeam(root).port, undefined, undefined, undefined, undefined, SKILLS, EMPTY_DIRECT_SHELL_COMPLETION)
   const result = await provider.getSuggestions(['请用 /el'], 0, 6, { signal: abort })
   assert.ok(result !== null)
   // The user typed more after the dropdown opened: the strict snapshot
@@ -831,7 +890,7 @@ test('a changed draft fences the open inline dropdown (no stale accept)', async 
 test('an inline no-match clears the previous snapshot (no stale accept after null)', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
-  const provider = new MentionProvider([], root, fallbackSeam(), undefined, undefined, undefined, undefined, SKILLS, true)
+  const provider = new MentionProvider([], root, fallbackSeam(root).port, undefined, undefined, undefined, undefined, SKILLS, EMPTY_DIRECT_SHELL_COMPLETION)
   const result = await provider.getSuggestions(['请用 /el'], 0, 6, { signal: abort })
   assert.ok(result !== null, `请用 /el must suggest:\n${JSON.stringify(result)}`)
   // A later request at an inline seat with NO matching candidates returns
@@ -852,7 +911,7 @@ test('a NON-STRICT legacy snapshot never feeds the inline apply (shell/command l
   const provider = new MentionProvider(
     [{ name: 'git', description: 'VCS' }],
     root,
-    fallbackSeam(),
+    fallbackSeam(root).port,
     undefined,
     undefined,
     undefined,
@@ -868,4 +927,36 @@ test('a NON-STRICT legacy snapshot never feeds the inline apply (shell/command l
   const applied = provider.applyCompletion(['foo /g'], 0, 6, { value: 'git', label: 'git' }, 'g')
   assert.deepEqual(applied, { lines: ['foo /g'], cursorLine: 0, cursorCol: 6 },
     'a non-strict legacy snapshot must never feed the inline apply')
+})
+
+test('an A→B→A Workspace selection drops the first A late answer (same id, newer revision)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  let releaseFirst: (() => void) | undefined
+  const firstGate = new Promise<void>(resolve => { releaseFirst = resolve })
+  let calls = 0
+  const seam: import('../../src/runtime/host-file-port.ts').HostFilePort = {
+    listReferences: async () => {
+      calls += 1
+      if (calls === 1) {
+        // The FIRST A request is held until after the surface moved A→B→A.
+        await firstGate
+        return { kind: 'ok', items: [{ path: 'stale-a.txt', kind: 'file' }] }
+      }
+      return { kind: 'ok', items: [{ path: 'current-a.txt', kind: 'file' }] }
+    },
+    resolveReference: async () => ({ kind: 'missing' }),
+    canonicalizeMentions: async (_scope, text) => text,
+  }
+  let scope: import('../../src/runtime/host-file-port.ts').HostFileScope = { kind: 'workspace', workspaceId: 'workspace-a', selectionRevision: 1 }
+  const provider = new MentionProvider([], root, seam, undefined, () => scope, undefined, undefined, [], EMPTY_DIRECT_SHELL_COMPLETION)
+  const stale = provider.getSuggestions(['@stale'], 0, 6, { signal: abort })
+  // A→B→A: the SAME WorkspaceId returns under a newer selection revision.
+  scope = { kind: 'workspace', workspaceId: 'workspace-b', selectionRevision: 2 }
+  scope = { kind: 'workspace', workspaceId: 'workspace-a', selectionRevision: 3 }
+  releaseFirst!()
+  assert.equal(await stale, null, 'the first A answer is fenced by the newer revision')
+  const fresh = await provider.getSuggestions(['@current'], 0, 8, { signal: abort })
+  assert.ok(fresh !== null)
+  assert.deepEqual(fresh.items.map(item => item.value), ['@current-a.txt'])
 })

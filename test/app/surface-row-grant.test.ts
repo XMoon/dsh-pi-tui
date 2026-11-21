@@ -132,7 +132,16 @@ function setup(options: { columns?: number; rows?: number } = {}): Harness {
     config: settingsDirectPageConfig({
       configReadiness: () => 'ready' as const,
       permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined },
-      subagentModelSelection: { available: () => false },
+      subagentLimits: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
+      subagentModelSelection: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
       // The Web provider section is Host-only (S2/PR-B): this stub composes no
       // Host settings plane, so the section reports unavailable and offers no write.
       web: { available: () => false },
@@ -178,7 +187,7 @@ function setup(options: { columns?: number; rows?: number } = {}): Harness {
   }
 }
 
-test('C-T08: bare /keybindings deeplinks into the ONE Settings lease and disposes its panel once', async () => {
+test('bare /keybindings deeplinks into the ONE Settings lease and disposes its panel once', async () => {
   for (const [columns, rows] of [[80, 24], [120, 40]] as const) {
     const h = setup({ columns, rows })
     h.invoke('keybindings')
@@ -188,7 +197,7 @@ test('C-T08: bare /keybindings deeplinks into the ONE Settings lease and dispose
     // pane header and the page's ONE bar — not the legacy 88-column overlay.
     assert.match(view, /Settings · Input & Terminal · Keyboard shortcuts/, `${columns}x${rows}: the Settings lease must own the screen:\n${view}`)
     assert.match(view, /Search: /, `${columns}x${rows}: the page's input is painted:\n${view}`)
-    assert.match(view, /Esc close/, `${columns}x${rows}: the page bar is the physical last row:\n${view}`)
+    assert.match(view, /Back \[Esc\]/, `${columns}x${rows}: the page bar is the physical last row:\n${view}`)
     assert.ok(!view.includes('╭') && !view.includes('╰'), `${columns}x${rows}: no second overlay Frame may be mounted:\n${view}`)
     const panel = h.deeplink().panel
     assert.ok(panel !== undefined, `${columns}x${rows}: the real command must mount the KeybindingEditorPanel:\n${view}`)

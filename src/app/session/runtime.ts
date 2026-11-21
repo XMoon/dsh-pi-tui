@@ -21,9 +21,13 @@ import {
   LifecycleError,
   requireCreated,
   requireOpened,
+  WorkspaceSelectionError,
+  type ResolvedWorkspaceSelection,
   type SessionHandle,
   type SessionLifecycle,
+  type WorkspaceSelectionIntent,
 } from '../../runtime/session-lifecycle-port.ts'
+import { createWorkspaceNextIntentOwner, type WorkspaceNextIntentCapture, type WorkspaceNextIntentOwner } from './workspace-next-intent.ts'
 import { isRewindIdentityCurrent, type RewindNavigationIdentity } from './navigation-identity.ts'
 import { runFirstSessionCommit, runForkCommit, runOrdinaryCommit, runResumeCommit } from './commit-order.ts'
 import type {
@@ -118,11 +122,24 @@ export interface SessionRuntimeSurface {
   retireStaleHistorySeat(): void
   /** Report a failed switch (the runner owns the logger + diagnostics). */
   reportSwitchFailure(sessionId: string, message: string): void
+  /**
+   * The committed child's post-commit durability checkpoint failed: the
+   * switch DID commit (never report a failed transition), but the new
+   * session's persisted boundary could not be confirmed. The runner turns
+   * this into a clear error notice + diagnostic with the session id.
+   */
+  warnCommittedDurability(sessionId: string, error: string): void
   // First-session (deferred creation) runner operations.
   /** Build the launch composition for the first session. */
   launchComposition(): Promise<{ failure?: string; composition: { agentPreset?: string } }>
   /** Record a first-session failure for the next resume notice. */
   setResumeFailure(failure: string): void
+  /** Drop the previous first-session attempt's pending failure notice. */
+  clearResumeFailure(): void
+  /** Show the EXISTING Workspace Browser for an unselected sessionless start
+   *  (at most once per mounted surface; a cancelled picker leaves the surface
+   *  unselected). */
+  promptWorkspaceSelection?(): void
   /** Report a failed first-session create (the runner logs + records it). */
   reportFirstSessionCreateFailure(message: string): void
   /** Show (and clear) the pending resume notice. */
@@ -131,10 +148,9 @@ export interface SessionRuntimeSurface {
   awaitPendingDefaultWrite(signal: AbortSignal): Promise<void>
   /** Generate the first session's id (the runner owns the Host id type). */
   newSessionId(): string
-  /** The cwd the first-session create request carries. */
-  sessionCreateCwd(): string
   /** The current opening-journal token (opaque to the session layer). */
-  currentOpening(): unknown
+  initialWorkspaceIntent?(): WorkspaceSelectionIntent
+   currentOpening(): unknown
   /** Reset the whole opening journal (the first-session finally). */
   resetOpening(): void
 }
@@ -146,6 +162,15 @@ export interface SessionRuntimeDeps {
   readonly retirement: SessionOwnerRetirement
   /** The session lifecycle port (open/create/fork). */
   readonly lifecycle: SessionLifecycle
+  /** The Client-local intent for the next Session create. */
+  readonly workspaceNextIntent?: WorkspaceNextIntentOwner
+  /** M6-1/F5-B: re-observe the Client-local AUTO launch-cwd equivalence. The
+   *  preflight calls it BEFORE the Host `workspace.create` and again before the
+   *  returned id is adopted; `undefined` means there is no auto proposal, so a
+   *  one-shot `auto` intent fails closed. */
+  readonly autoWorkspaceRevalidate?: (signal?: AbortSignal) => Promise<boolean>
+  /** Legacy structural caller input; production composition supplies workspaceNextIntent. */
+  initialWorkspaceIntent?(): WorkspaceSelectionIntent
   /** The runner lifecycle abort signal (the quiesces observe it). */
   readonly lifecycleSignal: AbortSignal
   readonly surface: SessionRuntimeSurface
@@ -263,11 +288,15 @@ export interface SessionRuntime {
   transitionTo<T>(steps: TransitionSteps<T>): Promise<TransitionOutcome<T>>
   /**
    * Run ONE user-navigation transaction through the same transition gate and
-   * barrier. The intent's captured generation is stopped exactly once BEFORE
-   * the admitted-writer drain; a stale capture or a refused/unproven stop
-   * aborts before the body with {@link SessionNavigationStopError}. The intent's
-   * `admission` records whether that stop was accepted, so a later failure in
-   * `task` can state that the old Turn is already stopped.
+   * barrier. The transition admission applies the backend's navigation
+   * ownership BEFORE the admitted-writer drain: a `stop-and-quiesce` backend
+   * stops the intent's captured generation exactly once (a stale capture or a
+   * refused/unproven stop aborts before the body with
+   * {@link SessionNavigationStopError}, and `admission.oldStopAccepted` records
+   * the accepted stop so a later failure in `task` can state that the old Turn
+   * is already stopped), while a `detach-client` backend dispatches no Host
+   * stop, so `admission.oldStopAccepted` stays false and only the captured
+   * scope's currentness is checked.
    */
   withNavigation<T>(intent: NavigationIntent, task: () => Promise<T> | T): Promise<T>
   /** Hand the TUI over to another persisted session (never throws). A scoped
@@ -312,6 +341,14 @@ export interface SessionRuntime {
   commitFirstSession(handle: SessionHandle): Promise<boolean>
   /** Create the first session lazily (deferred session creation). */
   ensureSession(): Promise<void>
+  /** One sessionless Host preflight of the next-create directory proposal.
+   *  Shared with the first create; never creates a Session. */
+  preflightWorkspace(): Promise<void>
+  /** Whether the Client-local AUTO launch-cwd evidence is current RIGHT NOW
+   *  (fail-closed when this surface has no auto candidate). */
+  isAutoWorkspaceCurrent(): Promise<boolean>
+  /** Await an in-flight sessionless Host preflight without starting one. */
+  awaitWorkspacePreflight(): Promise<void>
   /** Publish the startup-resume owner synchronously (plan §4D: publish →
    *  completion → pre-mount quiesce). Returns the quiesce promise only when the
    *  runner's hook produced one, so a sessionless startup stays synchronous. */
@@ -376,7 +413,9 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
   }
 
   /**
-   * ONE exact-owner stop for a user navigation. Runs INSIDE the frozen
+   * The user-navigation admission. A `stop-and-quiesce` backend sends ONE
+   * exact-owner stop here; a `detach-client` backend returns `nothing` after
+   * the capture check and dispatches no Host call. It runs INSIDE the frozen
    * barrier: the scope check and the owner capture happen in the SAME
    * synchronous stack as the backend call (exactly like the control
    * admission), so a replacement published elsewhere can never receive this
@@ -387,7 +426,10 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
    *   the failure wording distinguishes "requested, not yet confirmed" from
    *   "quiesced, cannot be resumed";
    * - `nothing` — the surface is sessionless (there is no old owner to stop),
-   *   or the runner is exiting (the transition is moot);
+   *   the runner is exiting (the transition is moot), or the backend's
+   *   `navigationKind` is `detach-client` (leaving a Session only releases
+   *   THIS Client's reference; the Host Turn keeps running and is never
+   *   addressed by a navigation cancel);
    * - `failed` — ONLY a `committed` cancellation is permission to enter the
    *   next phase. A proven refusal (`rejected`), a confirmed pre-dispatch
    *   refusal (`cancelled`) and a dispatched-unproven stop (`indeterminate`)
@@ -400,9 +442,10 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
    * A stale capture aborts FIRST: another navigation owns the surface, and
    * this intent must not stop the replacement's work.
    */
-  /** The receipt of the LAST navigation stop in this gate task; read by
-   *  `transitionTo` so the OLD-owner quiesce validates the SAME generation the
-   *  accepted cancel was addressed to (never a later reconnect). */
+  /** The receipt of the LAST `stop-and-quiesce` navigation stop in this gate
+   *  task; read by `transitionTo` so the OLD-owner quiesce validates the SAME
+   *  generation the accepted cancel was addressed to (never a later
+   *  reconnect). Always undefined for a `detach-client` navigation. */
   let navigationReceipt: NavigationStopReceipt | undefined
 
   const navigationStop = async (scope: SessionScope): Promise<
@@ -414,6 +457,10 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     if (!deps.isScopeCurrent(scope)) {
       return { kind: 'failed', failure: { settlement: 'stale', detail: '' } }
     }
+    // A detach-client backend keeps the Host Turn alive across the navigation:
+    // leaving the Session releases THIS Client's reference and never stops the
+    // Host Agent, so there is no stop to address and no stop fact to admit.
+    if (deps.retirement.navigationKind === 'detach-client') return { kind: 'nothing' }
     const owner = core.owner()
     if (owner === undefined) return { kind: 'nothing' }
     // The PHASE-RESOLVED navigation settlement: a pre-dispatch refusal is
@@ -434,10 +481,12 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
 
   /**
    * The barrier half of a navigation admission (the caller holds the gate):
-   * freeze → ONE exact-owner stop of the intent's captured generation →
-   * admitted writer drain → the transition body. The intent's `admission` fact
-   * is written from the stop callback, before the body runs; a stop failure
-   * aborts with ZERO body side effects.
+   * freeze → the backend's navigation ownership (`stop-and-quiesce`: ONE
+   * exact-owner stop of the intent's captured generation; `detach-client`: no
+   * Host stop, scope currentness only) → admitted writer drain → the
+   * transition body. The intent's `admission` fact is written from that
+   * admission callback, before the body runs; a stop failure aborts with ZERO
+   * body side effects.
    */
   const runNavigationTransition = <T>(intent: NavigationIntent, task: () => Promise<T> | T): Promise<T> => {
     let stopReceipt: NavigationStopReceipt | undefined
@@ -493,18 +542,20 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     runNavigationGate(() => runNavigationTransition(intent, task))
 
   /**
-   * Run one ordinary session transition/switch: quiesce + flush the old owner,
-   * run the caller's preflight/create, commit the visible handle through the
-   * fixed order (`runOrdinaryCommit`, plan §4A) and retire the old owner. The
-   * committed child always stands: a post-commit failure is contained and
-   * reported as a failed step. ONE deliberate exception: when the lifecycle
-   * aborts during the post-commit child quiesce, the transition returns early —
-   * the surface init and the switch report are skipped (the exiting runner's
-   * retirement takes over) and the outcome stays successful.
+   * Run one ordinary session transition/switch: quiesce (only when the backend
+   * owns the replaced owner's Host lifecycle) the old owner, run the caller's
+   * preflight/create, commit the visible handle through the fixed order
+   * (`runOrdinaryCommit`, plan §4A) and retire the old owner. The committed
+   * child always stands: a post-commit failure is contained and reported as a
+   * failed step. ONE deliberate exception: when the lifecycle aborts during the
+   * post-commit child quiesce, the transition returns early — the surface init
+   * and the switch report are skipped (the exiting runner's retirement takes
+   * over) and the outcome stays successful.
    */
   const transitionTo = async <T>(steps: TransitionSteps<T>): Promise<TransitionOutcome<T>> => {
     // The accepted navigation stop's generation receipt, if this transition is
-    // the body of a user navigation. Non-navigation transitions have none.
+    // the body of a `stop-and-quiesce` user navigation. A plain transition and
+    // a `detach-client` navigation have none.
     const stopReceipt = navigationReceipt
     core.bumpNavigationEpoch()
     const from = core.currentSessionId()
@@ -532,6 +583,14 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     try {
       return await runTransitionTo<T>({
         quiesceOld: async () => {
+          // A detach-client backend keeps the replaced Host Turn alive: the
+          // admitted Client writers already drained in the barrier, the replaced
+          // Client reference is released only AFTER the synchronous commit, and
+          // `flush` is a Client no-op that proves no durability. Waiting for the
+          // old Host owner's idle here would reintroduce exactly the implicit
+          // wait this navigation contract removes, and an `'unobservable'`
+          // quiesce would abort a navigation the Host never blocked.
+          if (deps.retirement.navigationKind === 'detach-client') return
           const owner = core.owner()
           if (owner === undefined) return
           // QUIESCE first: after whenIdle the old owner can no longer produce turn
@@ -553,6 +612,18 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
           // (the abort path may have swapped it), matching the pre-cutover read.
           const flushOwner = core.owner()
           if (flushOwner === undefined) return
+          if (deps.lifecycleSignal.aborted) {
+            // The exit already began: issuing an explicit flush now would race
+            // the close that owns durability. The flush is therefore NOT
+            // ATTEMPTED — which is different from swallowing its failure: once
+            // issued, any rejection is a real, reported failure (the shutdown
+            // close settlement is the only authority that can own durability).
+            deps.diag.info('old-owner flush skipped: the lifecycle already aborted')
+            return
+          }
+          // A rejection here is NEVER reclassified by the lifecycle flag: the
+          // flush may have failed on its own (a persistence listener's real
+          // I/O error), and an aborted lifecycle does not prove otherwise.
           await deps.retirement.flush(flushOwner)
           // ONLY an OBSERVED settle proves the old Turn idle; 'unobservable'
           // (a rolled Remote binding / missing attachment) is not idle.
@@ -665,24 +736,106 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         },
       retireOld: async () => {
         const retired: string[] = []
-        // Retire the OLD owner through the retirement port (which owns the
-        // official close order): the pre-commit quiesce already idled + flushed,
-        // so this covers the window where the old owner was re-woken by a
-        // Host-side continuation and releases its handle.
-        if (oldOwner !== undefined) {
-          const report = await deps.retirement.retire(oldOwner, 'transition')
-          for (const failure of report.failures) {
-            // A failed dispose means the old session may still have writers; the
-            // child stays current and the failure is recorded (the DSH
-            // SessionWriteLease still guards the session cross-process).
-            retired.push(`old ${failure.phase}: ${failure.error}`)
-          }
-        }
         // The committed owner was mapped once in the commit section; a
         // successful commit always published one (the commit section fails
         // fast otherwise).
         const nextOwner = committedOwner
         if (nextOwner === undefined) throw new Error('committed transition child has no owned Session generation')
+        // D2 durability checkpoint — the FIRST post-commit step, before the OLD
+        // owner's retirement and before the abort-aware child quiesce. The
+        // order is load-bearing: DSH's close drains what was appended but does
+        // not materialize an empty, never-appended session (asserted against
+        // the installed backend in test/runtime/direct/session-flush-close-race),
+        // and a shutdown closes the handle concurrently with this transaction.
+        // Both of the steps below are unbounded awaits (the OLD owner's
+        // descendant drain and the child quiesce), so a checkpoint behind
+        // either of them can be overtaken by an exit that closes the handle
+        // first. Only the COMMIT-time `nextOwner` is flushed — never a re-read
+        // of the current owner (a newer transition may already have replaced
+        // it). A failure does NOT roll the child back or fail the transition:
+        // it is recorded here, and the surface warns when it is still reachable.
+        let committedDurabilityFailure: string | undefined
+        try {
+          await deps.retirement.flush(nextOwner)
+        } catch (error) {
+          // The failure is fixed HERE, before the next await: the OLD owner's
+          // retirement and the child quiesce are unbounded, and the exit
+          // watchdog may end the process before a later summary line. The
+          // diagnostic sink writes synchronously (`writeSync`), so the exact
+          // session id and the original error are captured in this same stack.
+          committedDurabilityFailure = safeErrorMessage(error)
+          deps.diag.error('committed session durability checkpoint failed', {
+            session: committedSessionId,
+            error: committedDurabilityFailure,
+          })
+          retired.push(`committed child flush: ${committedDurabilityFailure}`)
+          // Single user notice, also at the failure itself. A synchronous
+          // notify may re-enter the application (and even begin an exit), so
+          // nothing below may assume the surface stayed live.
+          if (!deps.surface.isSurfaceDisposed() && committedSessionId !== undefined) {
+            deps.surface.warnCommittedDurability(committedSessionId, committedDurabilityFailure)
+          }
+        }
+        // Retire the OLD owner through the retirement port (which owns the
+        // official close order): the pre-commit quiesce already idled + flushed,
+        // so this covers the window where the old owner was re-woken by a
+        // Host-side continuation and releases its handle.
+        if (oldOwner !== undefined) {
+          if (deps.retirement.navigationKind === 'stop-and-quiesce' && commandExecutionDepth > 0) {
+            // A DSH command executor still owns an append on the OLD Session:
+            // its `command/done` lands only AFTER this handler returns, so
+            // detaching the old owner here makes that append throw "cannot
+            // append outside a SessionStore". Defer ONLY the physical
+            // retirement to the existing command-settlement ledger (the same
+            // queue a committed `/fork` uses) and keep the exact-source release
+            // pin registered, so an immediate reopen of the old id waits for
+            // its real release. The committed child's checkpoint above and its
+            // surface/catalog work below stay at their original positions.
+            //
+            // The enqueue below is SYNCHRONOUS, and `commandExecutionDepth > 0`
+            // was proven in this same stack, so it always returns `undefined`
+            // (queued, not started). Awaiting the settlement HERE would be the
+            // circular wait this branch exists to remove: the settlement only
+            // runs after this handler returns.
+            const sourceSessionId = from
+            if (sourceSessionId === undefined) {
+              throw new Error('ordinary transition replaced an owner without a session id')
+            }
+            const pin = core.beginForkSourcePin(sourceSessionId)
+            try {
+              retireSourceOwnerAfterSettlement(sourceSessionId, async () => {
+                const report = await deps.retirement.retire(oldOwner, 'transition')
+                for (const failure of report.failures) {
+                  // The summary of this transaction already reported (the child
+                  // is committed and visible), so the deferred retirement's
+                  // failure goes straight to the diagnostics with its own
+                  // attribution. Never rewritten as a success.
+                  deps.diag.error('old-owner retirement failed (child committed)', {
+                    from: sourceSessionId,
+                    to: committedSessionId,
+                    phase: failure.phase,
+                    error: failure.error,
+                  })
+                }
+              }, pin.release)
+            } catch (error) {
+              // The synchronous enqueue never rejects in production; if it
+              // ever did, the pin must not outlive this transaction (an
+              // un-released ledger entry would block every later reopen of the
+              // old id). `pin.release` is idempotent.
+              pin.release()
+              throw error
+            }
+          } else {
+            const report = await deps.retirement.retire(oldOwner, 'transition')
+            for (const failure of report.failures) {
+              // A failed dispose means the old session may still have writers; the
+              // child stays current and the failure is recorded (the DSH
+              // SessionWriteLease still guards the session cross-process).
+              retired.push(`old ${failure.phase}: ${failure.error}`)
+            }
+          }
+        }
         try {
           // The child quiesce is abort-aware too: an exit during this
           // post-commit phase must cancel the NEW owner instead of hanging past
@@ -690,12 +843,31 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
           // disposed and the retirement takes over: skip the surface
           // initialization below (it would repaint into the disposed app) and
           // let the committed child stand.
-          const aborted = await deps.retirement.whenIdleOrAbort(nextOwner, deps.lifecycleSignal)
-          if (aborted === true) {
+          //
+          // A detach-client backend keeps the committed child's Host Turn
+          // running — the target may legitimately be busy when the Client
+          // arrives — so it must not wait for that child's idle. The lifecycle
+          // check still runs: an exit during this phase owns the same
+          // skip-the-surface-init behavior on BOTH backends.
+          const aborted = deps.retirement.navigationKind === 'detach-client'
+            ? deps.lifecycleSignal.aborted
+            : (await deps.retirement.whenIdleOrAbort(nextOwner, deps.lifecycleSignal)) === true
+          if (aborted) {
             // The lifecycle is exiting: the committed child stands and the
             // retirement takes over. Skip the surface init AND the switch
             // report (the `finally` still clears the opening journal).
             retired.push('child quiesce aborted by lifecycle')
+            // The surface warning below is unreachable on this path (the
+            // surface is disposed), so EVERY recorded post-commit failure —
+            // the committed child's checkpoint and the OLD owner's retirement —
+            // must still reach the diagnostics instead of dying with the early
+            // return. An aborted lifecycle never proves a failure benign.
+            if (retired.length > 0) {
+              deps.diag.error('transition retire failed (child committed)', {
+                to: committedSessionId,
+                failures: retired,
+              })
+            }
             return
           }
         } catch (error) {
@@ -723,6 +895,9 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
             failures: retired,
           })
         }
+        // The checkpoint failure (if any) was already diagnosed and notified at
+        // the failure itself; the switch DID commit, so it is never reported as
+        // a failed transition.
         deps.surface.reportSwitch(from, nextOwner)
       },
       recordFailure: (phase, error) => {
@@ -752,14 +927,17 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
    * (open → commit) runs inside the session-transition gate, so it can never
    * interleave with another ordinary transition.
    *
-   * A switch is a USER NAVIGATION: the old generation is stopped once by the
-   * barrier admission before the admitted writers drain. A SCOPED intent (the
-   * Session Browser's captured row) is fenced by that capture: a stale one is a
-   * superseded navigation and settles silently. An UNSCOPED intent (a picker
-   * selection made against the live surface) captures its scope INSIDE the gate
-   * right before the freeze, so a queued later selection still follows the FIFO
-   * and never inherits an older generation. A refused or unproven stop keeps the
-   * CURRENT session live and says why.
+   * A switch is a USER NAVIGATION: the barrier admission applies the backend's
+   * navigation ownership before the admitted writers drain (a
+   * `stop-and-quiesce` backend stops the captured OLD generation once, a
+   * `detach-client` backend sends no Host stop and waits for no idle). A
+   * SCOPED intent (the Session Browser's captured row) is fenced by that
+   * capture: a stale one is a superseded navigation and settles silently. An
+   * UNSCOPED intent (a picker selection made against the live surface)
+   * captures its scope INSIDE the gate right before the freeze, so a queued
+   * later selection still follows the FIFO and never inherits an older
+   * generation. A refused or unproven stop keeps the CURRENT session live and
+   * says why.
    */
   const switchSessionOutcome = (sessionId: string, expectedScope?: SessionScope): Promise<SessionSwitchOutcome> => {
     /** The barrier half of this switch (the gate wrapper is added below). */
@@ -919,8 +1097,10 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
 
   // The fork + source-retirement ledgers (A2-3b-3): they moved out of the
   // runner together with the flows that fill them. The command-settlement
-  // window state lives here too, because a committed `/fork` QUEUES its source
-  // retirement while an executor is still appending `command/done`.
+  // window state lives here too, because a SOURCE transition (a committed
+  // `/fork`, or an ordinary Direct transition performed inside a command
+  // handler) QUEUES its source retirement while an executor is still appending
+  // `command/done` to the Session it is leaving.
   const pendingForks = new Set<Promise<unknown>>()
   const pendingSourceRetirements = new Set<Promise<void>>()
   // In-flight command settlements / nested submissions (reachable only from a
@@ -966,7 +1146,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
    */
   const startSourceRetirement = (sessionId: string, retire: () => Promise<void>): Promise<void> | undefined => {
     let pending: Promise<void> | undefined
-    runOwned('fork source retirement', () => {
+    runOwned('source retirement', () => {
       const task = retire()
       pending = task
       return task
@@ -980,12 +1160,12 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
   }
 
   /**
-   * Retire the source owner. A DSH command defers it to its own settlement (the
-   * executor's `command/done` append must land first) and returns `undefined`;
-   * outside a command the retirement promise is returned so the caller keeps the
-   * baseline ordering.
+   * Retire a replaced SOURCE owner. A DSH command defers it to its own
+   * settlement (the executor's `command/done` append must land first) and
+   * returns `undefined`; outside a command the retirement promise is returned so
+   * the caller keeps the baseline ordering.
    *
-   * `finishRelease` settles the fork's admission pin when the retirement has
+   * `finishRelease` settles the source-owner release pin when the retirement has
    * FINISHED — success or a CONTAINED failure: a failed phase is recorded in the
    * retirement report (never a rejection), and holding the pin on a failed
    * dispose would leave `open`/`resume` pending forever.
@@ -1020,9 +1200,9 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     return started
   }
 
-  /** Open one command-settlement window: while any is open a committed `/fork`
-   *  QUEUES its source retirement instead of detaching the Session whose
-   *  executor is still appending `command/done`. */
+  /** Open one command-settlement window: while any is open a committed source
+   *  transition QUEUES its source retirement instead of detaching the Session
+   *  whose executor is still appending `command/done`. */
   const beginCommandSettlement = (): void => { commandExecutionDepth += 1 }
   /** Close a window whose handler never ran: nothing was queued. */
   const abortCommandSettlement = (): void => { commandExecutionDepth -= 1 }
@@ -1228,11 +1408,23 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
           // that success would otherwise race its own retirement.
           if (retirement !== undefined) await retirement
         }
+        // A detach-client backend keeps the committed child's Host Turn alive:
+        // the forked child is a Host-owned Session that may legitimately be
+        // RUNNING when this Client adopts it (the Host fork business interface
+        // decides the cut and the child's activity, never the Client), so the
+        // adoption must not wait for its idle — the same rule the ordinary
+        // transition's committed-child phase follows. The lifecycle-abort skip
+        // still runs on BOTH backends: an exit during this phase owns the same
+        // skip-the-surface-init behavior.
         let aborted: boolean | 'unobservable' = false
-        try {
-          aborted = await deps.retirement.whenIdleOrAbort(nextOwner, deps.lifecycleSignal)
-        } catch (error) {
-          deps.diag.error('fork child quiescence failed after commit', { error: safeErrorMessage(error), session: nextSessionId })
+        if (deps.retirement.navigationKind === 'detach-client') {
+          aborted = deps.lifecycleSignal.aborted
+        } else {
+          try {
+            aborted = await deps.retirement.whenIdleOrAbort(nextOwner, deps.lifecycleSignal)
+          } catch (error) {
+            deps.diag.error('fork child quiescence failed after commit', { error: safeErrorMessage(error), session: nextSessionId })
+          }
         }
         if (aborted !== true) {
           try {
@@ -1560,6 +1752,18 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
   }
 
   let creating: Promise<void> | undefined
+  // Production supplies the runner-lifetime owner. A legacy structural caller
+  // may still supply only `initialWorkspaceIntent`; its owner is created at the
+  // first create attempt, so a sessionless mount that never creates (and never
+  // provides the legacy intent) is still a valid composition.
+  let nextIntentOwner = deps.workspaceNextIntent
+  const intentOwner = (): WorkspaceNextIntentOwner => {
+    if (nextIntentOwner !== undefined) return nextIntentOwner
+    const intent = deps.initialWorkspaceIntent?.()
+    if (intent?.kind !== 'host-path') throw new Error('legacy session runtime requires a host-path workspace intent')
+    nextIntentOwner = createWorkspaceNextIntentOwner(intent.path)
+    return nextIntentOwner
+  }
 
   /**
    * Create the FIRST session lazily — the first user message triggers it
@@ -1568,11 +1772,187 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
    * session transition too, so it runs inside the single-writer gate and can
    * never interleave with an ordinary transition already in flight.
    */
+  let workspacePreflight: Promise<void> | undefined
+
+  /**
+   * Resolve the sessionless next-create proposal ONCE through the official Host
+   * Workspace lifecycle so the Welcome can state a Host-confirmed directory and
+   * the Browser can expand that destination. The first create awaits the same
+   * promise, so one mount never dispatches two Host `create`s concurrently.
+   */
+  /** The Client-local AUTO evidence, re-observed now. A missing revalidation
+   *  hook fails closed: an automatic proposal never rides an assumed proof. */
+  const autoWorkspaceEvidenceCurrent = async (): Promise<boolean> =>
+    deps.autoWorkspaceRevalidate === undefined ? false : await deps.autoWorkspaceRevalidate(deps.lifecycleSignal)
+
+  /** After an async AUTO evidence re-observation the captured target must
+   *  still be the CURRENT create intent and no Session owner may have
+   *  appeared while the proof was awaited. */
+  const assertAutoIntentStillCurrent = (captured: WorkspaceNextIntentCapture): void => {
+    deps.lifecycleSignal.throwIfAborted()
+    if (!captured.isCurrent() || core.owner() !== undefined) {
+      throw new WorkspaceSelectionError('superseded', 'workspace selection changed before first session creation')
+    }
+  }
+
+  /**
+   * Start or join the ONE sessionless preflight. The single-flight promise is
+   * published SYNCHRONOUSLY, before the first `await` (the auto proof): a
+   * concurrent `awaitWorkspacePreflight()` or first-session create must observe
+   * the in-flight work instead of silently starting a second Host resolution.
+   */
+  const preflightWorkspace = (): Promise<void> => {
+    if (deps.workspaceNextIntent === undefined) return Promise.resolve()
+    if (creating !== undefined || core.owner() !== undefined) return Promise.resolve()
+    if (workspacePreflight !== undefined) return workspacePreflight
+    const owner = intentOwner()
+    const snapshot = owner.snapshot()
+    // Unselected is a real state: ZERO Host call (no registry read, no
+    // workspace.create, no Session.create). The Welcome/Browser owns the next
+    // user decision.
+    if (snapshot.status === 'unselected' || snapshot.intent === undefined) return Promise.resolve()
+    if (snapshot.status === 'confirmed' || snapshot.intent.kind !== 'host-path') return Promise.resolve()
+    const preflight = (async (): Promise<void> => {
+      try {
+        // The automatic Client launch-cwd candidate is re-proved BEFORE the
+        // Host sees it; a revoked proof releases the candidate and stays
+        // unselected — but ONLY while this operation still owns the captured
+        // intent. A newer manual/launch choice or a Session owner that appeared
+        // during the await must never be cleared by this late result.
+        if (snapshot.provenance === 'auto' && !(await autoWorkspaceEvidenceCurrent())) {
+          if (deps.lifecycleSignal.aborted) return
+          if (core.owner() !== undefined || owner.snapshot().revision !== snapshot.revision) return
+          owner.resetToLaunchCwd()
+          deps.diag.warn('first session automatic workspace candidate was revoked', {})
+          return
+        }
+        if (deps.lifecycleSignal.aborted) return
+        if (core.owner() !== undefined || owner.snapshot().revision !== snapshot.revision) return
+        const token = owner.beginPathVerification()
+        try {
+          const resolved = await deps.lifecycle.resolveWorkspace(token.intent, deps.lifecycleSignal)
+          if (!token.isCurrent()) return
+          // The Host may have accepted the proposal, but the LOCAL equivalence
+          // proof is what authorizes ADOPTING it: a Host restart/mount-view change
+          // during the create revokes the automatic candidate. The Host-side
+          // registration (if any) stays with the official registry.
+          if (snapshot.provenance === 'auto' && !(await autoWorkspaceEvidenceCurrent())) {
+            if (!token.isCurrent() || deps.lifecycleSignal.aborted) return
+            owner.resetToLaunchCwd()
+            deps.diag.warn('first session automatic workspace candidate changed during resolution', {})
+            return
+          }
+          if (!token.isCurrent() || deps.lifecycleSignal.aborted) return
+          owner.commitVerifiedPath(token, resolved.workspaceId, resolved.path)
+        } catch (error) {
+          if (!token.isCurrent()) return
+          const message = safeErrorMessage(error)
+          owner.rejectPathVerification(token, message)
+          deps.diag.warn('first session workspace preflight failed', { error: message })
+        }
+      } finally {
+        // The single-flight slot is exclusively this operation's until it
+        // settles: no later preflight can start while it is occupied.
+        workspacePreflight = undefined
+      }
+    })()
+    workspacePreflight = preflight
+    return preflight
+  }
+
+  const awaitWorkspacePreflight = (): Promise<void> => workspacePreflight ?? Promise.resolve()
+
   const ensureSession = async (): Promise<void> => {
     if (core.owner() !== undefined) return
     if (creating !== undefined) return creating
     creating = core.gate.run(() => core.barrier.runTransition(async () => {
+      // A NEW create attempt replaces the previous attempt's pending notice: a
+      // refusal the user then fixed must never be replayed as a false error
+      // after this attempt's successful commit.
+      deps.surface.clearResumeFailure()
+      // The Host Workspace pre-selection precedes every Session side-effect: a
+      // refused/unavailable workspace leaves the surface sessionless without a
+      // Session create, an opening journal entry or a consumed draft.
+      if (workspacePreflight !== undefined) await workspacePreflight
+      const workspaceIntent = intentOwner().capture()
+      if (workspaceIntent === undefined) {
+        // UNSELECTED: no legal Host target exists, so NOTHING is dispatched
+        // (no workspace.create, no Session.create, no opening journal entry).
+        // The existing Workspace Browser is opened (once per surface) and the
+        // draft stays with the submission owner.
+        const message = 'Choose a Host workspace before starting a session'
+        deps.surface.promptWorkspaceSelection?.()
+        deps.surface.reportFirstSessionCreateFailure(message)
+        throw new WorkspaceSelectionError('refused', message, 'workspace/not-selected')
+      }
+      // The AUTO candidate's local evidence is re-proved at the CONSUMPTION
+      // boundary too (review P2): a preflight may have confirmed the id long
+      // before the first message, and a mount-view change in that window
+      // revokes the proof. The Host-side registration stays with the official
+      // registry; the surface returns to unselected.
+      if (workspaceIntent.provenance === 'auto' && !(await autoWorkspaceEvidenceCurrent())) {
+        // The proof is async. A newer manual/launch intent or a Session owner
+        // that appeared during the await owns the CURRENT state; a late false
+        // result must neither clear it nor turn the Client launch path into a
+        // 'launch' proposal (resetToLaunchCwd uses the CURRENT provenance).
+        assertAutoIntentStillCurrent(workspaceIntent)
+        intentOwner().resetToLaunchCwd()
+        const message = 'The verified local workspace changed before the first session — choose a Host workspace'
+        deps.surface.promptWorkspaceSelection?.()
+        deps.surface.reportFirstSessionCreateFailure(message)
+        throw new WorkspaceSelectionError('refused', message, 'workspace/not-selected')
+      }
+      assertAutoIntentStillCurrent(workspaceIntent)
+      let workspace: ResolvedWorkspaceSelection
+      try {
+        workspace = await deps.lifecycle.resolveWorkspace(workspaceIntent.intent, deps.lifecycleSignal)
+      } catch (error) {
+        if (deps.lifecycleSignal.aborted) {
+          // Shutdown owns this cancellation; no submission can safely continue.
+          deps.diag.warn('first session workspace selection superseded', {
+            settlement: 'aborted',
+          })
+          return
+        }
+        // A selection that settles after its OWN captured token expired or
+        // after another Session appeared belongs to nobody: classify it as
+        // superseded and never rewrite the newer target, report it as the
+        // current failure or open the recovery chooser. A late Host refusal
+        // must not overwrite a newer user choice.
+        if (!workspaceIntent.isCurrent() || core.owner() !== undefined) {
+          deps.diag.warn('first session workspace selection superseded', {
+            settlement: 'superseded',
+          })
+          throw new WorkspaceSelectionError('superseded', 'workspace selection changed before first session creation')
+        }
+        if (error instanceof WorkspaceSelectionError && error.kind === 'superseded') {
+          deps.diag.warn('first session workspace selection superseded', {
+            settlement: error.kind,
+            code: error.code,
+          })
+          throw error
+        }
+        // A refused/unavailable workspace is a real first-session failure under
+        // the existing sessionless contract (notice + retry on the next input);
+        // NO Session was dispatched and nothing is retried automatically.
+        const message = safeErrorMessage(error)
+        intentOwner().rejectCreateResolution(workspaceIntent, message)
+        deps.surface.reportFirstSessionCreateFailure(message)
+        throw error
+      }
+      // The pre-selection awaited Host IO: re-check the intent and the two
+      // existing authorities before creating anything. A newer directory
+      // selection or a Session that appeared while it ran makes this attempt
+      // fail back to the submission owner, which restores its draft.
+      deps.lifecycleSignal.throwIfAborted()
+      if (!workspaceIntent.isCurrent() || core.owner() !== undefined) {
+        throw new WorkspaceSelectionError('superseded', 'workspace selection changed before first session creation')
+      }
       const launched = await deps.surface.launchComposition()
+      deps.lifecycleSignal.throwIfAborted()
+      if (!workspaceIntent.isCurrent() || core.owner() !== undefined) {
+        throw new WorkspaceSelectionError('superseded', 'workspace selection changed before first session creation')
+      }
       if (launched.failure !== undefined) deps.surface.setResumeFailure(launched.failure)
       // The first-session creation follows the same transaction shape as every
       // other transition: the id is pre-generated and the DSH create publishes
@@ -1589,16 +1969,40 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         // fabricated choice.
         await deps.surface.awaitPendingDefaultWrite(deps.lifecycleSignal)
         deps.lifecycleSignal.throwIfAborted()
+        if (!workspaceIntent.isCurrent() || core.owner() !== undefined) {
+          throw new WorkspaceSelectionError('superseded', 'workspace selection changed before first session creation')
+        }
+        // The LAST gate before the real Host dispatch (external review EXT-P2):
+        // every await that could straddle a mount-view change has settled, so the
+        // automatic candidate's local proof is re-observed one final time. A
+        // revoked candidate releases the target and creates NOTHING.
+        if (workspaceIntent.provenance === 'auto' && !(await autoWorkspaceEvidenceCurrent())) {
+          // Same ownership rule as the consumption gate: this late result may
+          // only reset the intent it actually captured.
+          assertAutoIntentStillCurrent(workspaceIntent)
+          intentOwner().resetToLaunchCwd()
+          throw new WorkspaceSelectionError(
+            'refused',
+            'The verified local workspace changed before the first session — choose a Host workspace',
+            'workspace/not-selected',
+          )
+        }
+        assertAutoIntentStillCurrent(workspaceIntent)
         created = requireCreated(await deps.lifecycle.create({
           sessionId,
           // The semantic `agentPreset` is the sole preset authority; the Direct
           // adapter writes the actually composed preset into the durable header
-          // (never a duplicated meta field).
-          cwd: deps.surface.sessionCreateCwd(),
+          // (never a duplicated meta field). The Host Workspace id is the ONE
+          // directory authority: no cwd crosses this request.
+          workspaceId: workspace.workspaceId,
           agentPreset: launched.composition.agentPreset,
           signal: deps.lifecycleSignal,
         }))
       } catch (error) {
+        if (error instanceof WorkspaceSelectionError && error.kind === 'superseded') {
+          deps.diag.warn('first session creation superseded', { settlement: error.kind })
+          throw error
+        }
         if (error instanceof LifecycleError && error.ownership === 'superseded') {
           // A superseded first-session create is UI-silent — no degradation
           // notice; the surface simply stays sessionless.
@@ -1626,6 +2030,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         // initialization below.
         return
       }
+      intentOwner().consumeAfterCommittedCreate(workspaceIntent)
       if (opening !== undefined) deps.surface.clearOpening(opening)
       const owner = core.owner()
       if (owner === undefined) throw new Error('first-session commit published no owner')
@@ -1665,6 +2070,9 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     settleCommandSettlement,
     commitFirstSession,
     ensureSession,
+    preflightWorkspace,
+    awaitWorkspacePreflight,
+    isAutoWorkspaceCurrent: autoWorkspaceEvidenceCurrent,
     publishResumedOwner,
     retireOwnedSession,
     preCancelOwnedSession,

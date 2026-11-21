@@ -43,6 +43,8 @@ import {
   type TuiMouseEventResult,
 } from '@xmoon76/pi-tui'
 import { color } from '../theme/runtime.ts'
+import { ACTION_BAR_SEPARATOR } from '../presentation/action-bar.ts'
+import { paintActionSpan } from '../presentation/action-ink.ts'
 import type { StatusSnapshot } from '../../domain/status/types.ts'
 import { FooterComposer, renderSpans } from './composer.ts'
 import { sanitizeCommandOutput } from './ansi-sanitize.ts'
@@ -57,7 +59,7 @@ import {
   itemMenuFor,
   toneChoicesFor,
 } from './configurator-model.ts'
-import type { FooterConfiguratorModel } from './configurator-model.ts'
+import type { FooterConfiguratorMode, FooterConfiguratorModel } from './configurator-model.ts'
 import { effectiveCustomCommandRefreshMs, effectiveCustomCommandTimeoutMs } from '../../domain/footer/custom-items.ts'
 import { MAX_ITEMS_PER_ROW, defaultHideInTsp, stripControlChars } from '../../domain/footer/layout.ts'
 import type { FooterItemRegistry } from './item-registry.ts'
@@ -108,6 +110,21 @@ type ConfiguratorMouseHit =
   | { kind: 'exit'; choice: 'save' | 'discard' | 'keep' }
   | { kind: 'inert' }
 
+/** The last-painted scrollable body window, in this page's own physical
+ *  frame. It is pure paint geometry: the model selection, the draft and the
+ *  Host never read it. */
+interface ConfiguratorWheelWindow {
+  readonly mode: FooterConfiguratorMode
+  /** The first page row of the body slice (below any pinned pre lines). */
+  readonly bodyTop: number
+  /** Body rows this frame really painted. */
+  readonly bodyVisible: number
+  /** Complete body length this frame projected. */
+  readonly bodyTotal: number
+  /** Whether the model's own cursor row is inside THIS painted slice. */
+  readonly cursorPainted: boolean
+}
+
 /** The actionable subset of a hit, used as the press-time gesture
  * identity (mouse parity): a click may only run the EXACT semantic
  * action that was pressed — a resize/repaint between press and release
@@ -118,6 +135,18 @@ type ConfiguratorMouseAction =
   | { kind: 'select'; target: number }
   | { kind: 'save' }
   | { kind: 'exit'; choice: 'save' | 'discard' | 'keep' }
+
+/** Whether this page's wheel must stay inert for the current model mode:
+ *  inline text editors own their buffer (append/backspace only) and the delete
+ *  prompt owns a pending transaction, so neither is a scroll surface. */
+function wheelInertMode(state: ReturnType<FooterConfiguratorModel['state']>): boolean {
+  if (state.mode === 'custom-delete') return true
+  if (state.mode === 'advanced' && state.editing) return true
+  return state.mode === 'create-name'
+    || state.mode === 'create-text'
+    || state.mode === 'create-command'
+    || ((state.mode === 'custom-text' || state.mode === 'custom-command' || state.mode === 'custom-name') && state.editing)
+}
 
 /** The pressed semantic action equals the current hit's action. */
 function sameMouseAction(a: ConfiguratorMouseAction | undefined, b: ConfiguratorMouseHit): boolean {
@@ -148,6 +177,10 @@ export class FooterConfiguratorPanel implements Component {
   private grantedRows: number | undefined
   /** The grant the last completed render really painted (the paint fence). */
   private paintedGrant: number | undefined
+  /** The complete Esc affordance of the LAST painted bar, in this page's own
+   *  content columns. Cleared by a grant change, so a resize never keeps the
+   *  previous frame's geometry clickable. */
+  private paintedEscapeSpanValue: { readonly startCol: number; readonly endCol: number } | undefined
   /** The last painted body slice: only its rows may dispatch a keyboard or
    *  pointer action; a body-less frame admits only the real Esc. */
   private paintedBodyRows = 0
@@ -160,6 +193,13 @@ export class FooterConfiguratorPanel implements Component {
   /** The body scrollport's top offset (stable across renders — the cursor
    * scrolls the body minimally; the fixed shell never moves). */
   private scrollTop = 0
+  /** The LAST painted scrollable body window (page-local coordinates). A
+   *  wheel may only act on a body row this frame really painted. */
+  private wheelWindow: ConfiguratorWheelWindow | undefined
+  /** The ONE manual wheel viewport override: while it names the current mode,
+   *  render keeps the wheel offset instead of following the model cursor. Any
+   *  explicit keyboard input or a mode change restores cursor-follow. */
+  private wheelOverride: FooterConfiguratorMode | undefined
   /** Physical row → hit entry from the LAST render (mouse parity). */
   private hitMap: ConfiguratorMouseHit[] = []
   /** The semantic action the last left press latched (mouse parity): a
@@ -209,6 +249,20 @@ export class FooterConfiguratorPanel implements Component {
       this.mousePressedAction = undefined
       this.mousePressedGrant = undefined
       const state = this.model.state()
+      // An explicit keyboard input restores the model's own cursor-follow.
+      // When the manual wheel window really hid the cursor, the FIRST
+      // dangerous activation is consumed below so it cannot edit/remove/save
+      // an unseen selection; navigation and text keys still run normally.
+      const wheelWindow = this.wheelWindow
+      // The LAST PAINTED frame is the authority. The fence stays armed while
+      // that frame still shows the model cursor outside the body viewport —
+      // even after an earlier key cleared the manual offset but before the
+      // cursor-follow frame has painted (e.g. a second key in the same input
+      // tick). It turns off only when a frame really paints the cursor.
+      const cursorHidden = wheelWindow !== undefined
+        && wheelWindow.mode === state.mode
+        && !wheelWindow.cursorPainted
+      this.wheelOverride = undefined
       // A save in flight freezes INPUT (PR E §10): the draft captured for
       // the pending write must stay the draft on screen, duplicate
       // Enter/S are refused by construction, and Esc can never race a
@@ -247,6 +301,17 @@ export class FooterConfiguratorPanel implements Component {
         // `←` is the back verb ONLY on the Row Selector: the item/row editors
         // keep it as their zone switch.
         if (!this.model.cancel()) this.onCancel()
+        return
+      }
+      // A hidden model selection must become visible before any dangerous
+      // activation runs. While the last painted frame still hides it, EVERY
+      // such key is consumed (not only the first of a gesture: a second key
+      // may arrive in the same input tick before the cursor-follow frame
+      // paints) and one repaint is requested. Once that frame shows the
+      // cursor, the next explicit key follows the normal model path. Esc and
+      // the Row Selector `←` back alias were handled above.
+      if (cursorHidden && this.hiddenSelectionAction(data, state, textMode)) {
+        this.requestRender()
         return
       }
       if (matchesKey(data, 'enter')) {
@@ -344,6 +409,7 @@ export class FooterConfiguratorPanel implements Component {
     const next = Math.max(1, Math.floor(Number.isFinite(rows) ? rows : 1))
     if (next === this.grantedRows) return
     this.grantedRows = next
+    this.paintedEscapeSpanValue = undefined
     this.requestRender()
   }
 
@@ -414,8 +480,19 @@ export class FooterConfiguratorPanel implements Component {
       // Explicit close-without-write: no persistence of layout or
       // definitions (PR E §7.2 Discard & Exit).
       this.onCancel()
+      return
     }
-    // 'keep': the model already returned to the Row Selector.
+    // 'keep': the keyboard Enter path has already called
+    // `exitConfirmAction()` (which returns the mode to the selector). A
+    // MOUSE click reaches this method directly, so it must run the SAME
+    // model transition exactly once — never a second one.
+    if (this.model.state().mode === 'exit-confirm') {
+      // On the guard, Esc IS Keep Editing; the model's own cancel owns that
+      // transition. (The keyboard Enter path already left the guard through
+      // exitConfirmAction, so this never runs a second transition.)
+      this.model.cancel()
+      this.requestRender()
+    }
   }
 
   invalidate(): void {
@@ -430,15 +507,33 @@ export class FooterConfiguratorPanel implements Component {
     return this.disposed
   }
 
+  /** The complete visible Esc affordance span of the LAST PAINTED frame, in
+   *  this page's own content-column coordinates; undefined when the frame
+   *  painted no complete Esc affordance (a save in flight, a truncated row). */
+  paintedEscapeSpan(): { readonly startCol: number; readonly endCol: number } | undefined {
+    return this.paintedEscapeSpanValue
+  }
+
+  /** The page's own SEMANTIC identity for a pointer gesture: the model mode,
+   *  the dirty state and the in-flight save decide what its Esc really does.
+   *  The Settings root stores it at press and re-proves it at the release. */
+  gestureIdentity(): string {
+    const state = this.model.state()
+    return `${state.mode}:${this.model.isDirty() ? 'dirty' : 'clean'}:${state.saving ? 'saving' : 'idle'}`
+  }
+
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    this.paintedEscapeSpanValue = undefined
     this.clearPasteStartPending()
     this.pasteBuffer = ''
     this.isInPaste = false
     this.skipPasteOnce = false
     this.mousePressedAction = undefined
     this.mousePressedGrant = undefined
+    this.wheelWindow = undefined
+    this.wheelOverride = undefined
     this.paintedBodyRows = 0
     this.paintedSave = false
     this.paintedExitChoices = new Set()
@@ -446,21 +541,33 @@ export class FooterConfiguratorPanel implements Component {
 
   render(width: number): string[] {
     const state = this.model.state()
+    // A mode change ends the manual wheel window: the next page follows its
+    // own cursor again.
+    if (this.wheelOverride !== undefined && this.wheelOverride !== state.mode) this.wheelOverride = undefined
     const safeWidth = Math.max(1, width)
     this.lastRenderWidth = safeWidth
+    // The wheel window is republished by THIS frame only.
+    this.wheelWindow = undefined
     // The effective budget is the LIVE terminal cap (stand-alone mount) AND the
     // root's grant (embedded). A repeated identical grant never re-renders.
     const budget = Math.max(1, Math.min(this.maxVisible(), this.grantedRows ?? Number.MAX_SAFE_INTEGER))
     this.paintedGrant = this.grantedRows
     // The bar is ALWAYS the physical last row of this page; a bar-only grant
     // paints the way back and nothing else.
-    const bar = color.textMuted(this.actionBar(state, safeWidth, budget))
+    const bar = this.actionBar(state, safeWidth, budget)
+    // The span is read from the SAME value the bar paints, never re-derived
+    // from the painted ANSI string. A wording chosen as a truncated fallback
+    // carries no span, so no half token can be clicked.
+    this.paintedEscapeSpanValue = bar.escape
+    const paintedBar = paintBarWording(bar)
     if (budget <= 1) {
       this.hitMap = [{ kind: 'inert' }]
       this.paintedBodyRows = 0
       this.paintedSave = false
       this.paintedExitChoices = new Set()
-      return [truncateToWidth(bar, safeWidth, '…')]
+      // A bar-only frame has no body to scroll.
+      this.wheelOverride = undefined
+      return [truncateToWidth(paintedBar, safeWidth, '…')]
     }
     const pre = this.preLines(state)
     const tail = this.tailLines(state)
@@ -505,19 +612,38 @@ export class FooterConfiguratorPanel implements Component {
       if (bodyBudget > 0) {
         const scrollBudget = Math.max(1, Math.min(bodyBudget, body.lines.length))
         this.scrollTop = Math.max(0, Math.min(this.scrollTop, Math.max(0, body.lines.length - scrollBudget)))
-        if (body.cursor < this.scrollTop) this.scrollTop = body.cursor
-        if (body.cursor >= this.scrollTop + scrollBudget) this.scrollTop = body.cursor - scrollBudget + 1
-        this.scrollTop = Math.max(0, Math.min(this.scrollTop, Math.max(0, body.lines.length - scrollBudget)))
+        // A manual wheel window keeps its clamped offset and skips the two
+        // cursor-follow moves; every other frame keeps the historical follow.
+        // A window that can no longer scroll ends the override immediately.
+        const manual = this.wheelOverride !== undefined
+          && this.wheelOverride === state.mode
+          && body.lines.length > scrollBudget
+        if (!manual) {
+          this.wheelOverride = undefined
+          if (body.cursor < this.scrollTop) this.scrollTop = body.cursor
+          if (body.cursor >= this.scrollTop + scrollBudget) this.scrollTop = body.cursor - scrollBudget + 1
+          this.scrollTop = Math.max(0, Math.min(this.scrollTop, Math.max(0, body.lines.length - scrollBudget)))
+        }
         bodySlice = body.lines.slice(this.scrollTop, this.scrollTop + scrollBudget)
         bodyHits = body.hits.slice(this.scrollTop, this.scrollTop + scrollBudget)
+        // Publish the REAL body window of THIS frame. Only these rows accept
+        // the wheel; the shell/preview/bar and padded rows never do.
+        this.wheelWindow = {
+          mode: state.mode,
+          bodyTop: preShown.length,
+          bodyVisible: bodySlice.length,
+          bodyTotal: body.lines.length,
+          cursorPainted: body.cursor >= this.scrollTop && body.cursor < this.scrollTop + bodySlice.length,
+        }
       }
     }
+    if (this.wheelWindow === undefined) this.wheelOverride = undefined
     const lines = [
       ...preShown,
       ...bodySlice,
       ...tailShown,
       ...previewBlock,
-      bar,
+      paintedBar,
     ].map(line => truncateToWidth(line, safeWidth, '…'))
     this.hitMap = [
       ...preShown.map((): ConfiguratorMouseHit => ({ kind: 'inert' })),
@@ -549,6 +675,11 @@ export class FooterConfiguratorPanel implements Component {
    */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     if (this.disposed) return undefined
+    // A wheel is NEVER a click: it has its own viewport-only branch below and
+    // is always consumed here (zero delta, fixed chrome, a stale frame and a
+    // non-scrollable body included), so it can never fall through to the
+    // Fork's primary background viewport as a press/release.
+    if (event.type === 'wheel') return this.handleWheel(event)
     // A click ends any gesture, and every left press starts a fresh
     // one: release the pressed action up front — BEFORE the width
     // guard / hit lookup / inert return / saving gate, so a press on
@@ -559,7 +690,7 @@ export class FooterConfiguratorPanel implements Component {
     // the valid-row comparison below.
     const pressedAction = this.mousePressedAction
     const pressedGrant = this.mousePressedGrant
-    if (event.type === 'click' || event.type === 'wheel' || (event.type === 'press' && event.button === 'left')) {
+    if (event.type === 'click' || (event.type === 'press' && event.button === 'left')) {
       this.mousePressedAction = undefined
       this.mousePressedGrant = undefined
     }
@@ -609,6 +740,83 @@ export class FooterConfiguratorPanel implements Component {
       if (this.model.state().mode !== 'row-move') this.model.activate()
     }
     return { handled: true }
+  }
+
+  /**
+   * Wheel ONLY scrolls the viewport this frame really painted. The Fork has
+   * already applied Wheel Lines and Alt acceleration, so the signed
+   * `wheelDelta` is used exactly once. This never calls the model's
+   * `moveUp`/`moveDown` (in row-move that would reorder the draft), never
+   * touches the cursor/draft/dirty/save state and never performs IO.
+   *
+   * Every wheel delegated to this page is consumed, whatever its target: an
+   * inert one must never scroll the primary background viewport.
+   */
+  private handleWheel(event: TuiMouseEvent): TuiMouseEventResult {
+    const delta = event.wheelDelta ?? 0
+    // A REAL nonzero wheel is a navigation intent: it retires an old press
+    // even at a viewport boundary (a zero notch never cancels a legal press).
+    if (delta !== 0) {
+      this.mousePressedAction = undefined
+      this.mousePressedGrant = undefined
+    }
+    const consumed: TuiMouseEventResult = { handled: true, render: false }
+    if (delta === 0) return consumed
+    const window = this.wheelWindow
+    if (window === undefined) return consumed
+    // Last-painted geometry only: the page width, the cell column and the
+    // REAL body rows this frame painted (not the pinned pre/tail lines, the
+    // preview, the bar or root padding).
+    if (event.width !== this.lastRenderWidth
+      || event.x < 0 || event.x >= this.lastRenderWidth
+      || event.y < window.bodyTop
+      || event.y >= window.bodyTop + window.bodyVisible) return consumed
+    const state = this.model.state()
+    // Never act on an old mode or an unpainted grant; never scroll while a
+    // save is in flight.
+    if (state.saving || window.mode !== state.mode || this.grantAwaitingPaint()) return consumed
+    // Text editing and the delete prompt own their buffer/transaction: the
+    // wheel is inert there and cannot change a single character.
+    if (window.bodyTotal <= window.bodyVisible || wheelInertMode(state)) return consumed
+    const max = window.bodyTotal - window.bodyVisible
+    const next = Math.min(Math.max(0, this.scrollTop + delta), max)
+    // A boundary wheel is consumed but does not repaint or change any state.
+    if (next === this.scrollTop) return consumed
+    this.scrollTop = next
+    this.wheelOverride = state.mode
+    return { handled: true }
+  }
+
+  /** The FIRST dangerous key on a selection the manual wheel window scrolled
+   *  out of view. Navigation and text keys are not hidden-selection actions;
+   *  this only classifies keys that would edit/remove/save/activate the
+   *  current model selection. */
+  private hiddenSelectionAction(
+    data: string,
+    state: ReturnType<FooterConfiguratorModel['state']>,
+    textMode: boolean,
+  ): boolean {
+    if (matchesKey(data, 'enter')) return true
+    // Space is text in an editor/query, and an activation/remove elsewhere.
+    if (!textMode && matchesKey(data, 'space')) return true
+    if (state.mode === 'rows') return matchesKey(data, 's')
+    if (state.mode === 'row-move') {
+      // ←/→ still change the hidden item's ZONE (a persisted draft mutation);
+      // only the explicit ↑/↓ reorder is the keyboard contract.
+      return matchesKey(data, 'left') || matchesKey(data, 'right')
+    }
+    if (state.mode === 'item') {
+      // ←/→ cycle the hidden menu row's format/tone value in the model draft.
+      return matchesKey(data, 'left') || matchesKey(data, 'right')
+    }
+    if (state.mode !== 'row') return false
+    return matchesKey(data, 'a')
+      || matchesKey(data, 'm')
+      || matchesKey(data, 'f')
+      || matchesKey(data, 'left')
+      || matchesKey(data, 'right')
+      || matchesKey(data, 'shift+up')
+      || matchesKey(data, 'shift+down')
   }
 
   /** Move the current cursor to `target` through the model's own move
@@ -862,12 +1070,12 @@ export class FooterConfiguratorPanel implements Component {
   /** The ONE semantic Action Bar of this page: only keys the current mode
    *  really accepts, with shorter whole-segment variants for narrow widths. It
    *  never advertises a save while the in-flight write freezes input. */
-  private actionBar(state: ReturnType<FooterConfiguratorModel['state']>, width: number, budget: number): string {
+  private actionBar(state: ReturnType<FooterConfiguratorModel['state']>, width: number, budget: number): BarWording {
     // A save in flight freezes input, so it outranks even a bar-only grant: the
     // bar must never advertise a back verb the handler refuses until the write
-    // settles.
+    // settles. It has no Esc affordance, so it carries no clickable span.
     if (state.saving) {
-      return fittedWording(['Saving… · one write at a time', 'Saving…'], width)
+      return fittedWording([plainWording('Saving… · one write at a time'), plainWording('Saving…')], width)
     }
     if (budget <= 1) {
       // The bar-only grant cannot show a business row: it keeps only the page's
@@ -877,64 +1085,83 @@ export class FooterConfiguratorPanel implements Component {
       const verb = state.mode === 'rows' && !this.model.isDirty() ? 'Close' : 'Back'
       const rootBack = state.mode === 'rows'
       return fittedWording(rootBack
-        ? [`← Back · Esc ${verb} · Not enough room`, `← Back · Esc ${verb}`, `Esc ${verb}`]
-        : [`Esc ${verb} · Not enough room`, `Esc ${verb}`], width)
+        ? [escapeWording('← Back · Not enough room', verb), escapeWording('← Back', verb), escapeWording('', verb)]
+        : [escapeWording('Not enough room', verb), escapeWording('', verb)], width)
     }
     switch (state.mode) {
       case 'rows': {
         const dirty = this.model.isDirty()
         const save = dirty ? 'S Save' : 'S Done'
-        const back = dirty ? 'Esc Back' : 'Esc Close'
+        // A dirty Row Selector's Esc opens the existing exit-confirm gradient;
+        // a clean one closes the page.
+        const verb = dirty ? 'Back' : 'Close'
+        const sessionOnly = this.sessionOnly ? ' · Not persisted (session only)' : ''
         // The Row Selector is the page's root: it advertises the same `←` the
         // panel accepts there. Sub-pages keep their own verb and never show it.
         return fittedWording([
-          `↑↓ Select · Enter Open · ${save} · ← Back · ${back}${this.sessionOnly ? ' · Not persisted (session only)' : ''}`,
-          `↑↓ Select · Enter Open · ${save} · ← Back · ${back}`,
-          `Enter Open · ${save} · ← Back · ${back}`,
-          `${save} · ← Back · ${back}`,
-          `← Back · ${back}`,
-          back,
+          escapeWording(`↑↓ Select · Enter Open · ${save} · ← Back${sessionOnly}`, verb),
+          escapeWording(`↑↓ Select · Enter Open · ${save} · ← Back`, verb),
+          escapeWording(`Enter Open · ${save} · ← Back`, verb),
+          escapeWording(`${save} · ← Back`, verb),
+          escapeWording('← Back', verb),
+          escapeWording('', verb),
         ], width)
       }
       case 'exit-confirm':
-        return fittedWording(['↑↓ Select · Enter Confirm · Esc Keep Editing', 'Enter Confirm · Esc Keep Editing', 'Esc Keep Editing'], width)
+        return fittedWording([
+          escapeWording('↑↓ Select · Enter Confirm', 'Keep editing'),
+          escapeWording('Enter Confirm', 'Keep editing'),
+          escapeWording('', 'Keep editing'),
+        ], width)
       case 'row':
         return fittedWording([
-          'A Add · Enter Edit · M Move · ←→ Side · Space Remove · F Style · Esc Back',
-          '↑↓ Select · Enter Edit · Esc Back',
-          'Esc Back',
+          escapeWording('A Add · Enter Edit · M Move · ←→ Side · Space Remove · F Style', 'Back'),
+          escapeWording('↑↓ Select · Enter Edit', 'Back'),
+          escapeWording('', 'Back'),
         ], width)
       case 'row-move':
-        return fittedWording(['↑↓ Move · ←→ Side · Enter/Esc Done', 'Esc Done'], width)
+        return fittedWording([escapeWording('↑↓ Move · ←→ Side · Enter', 'Done'), escapeWording('', 'Done')], width)
       case 'item':
-        return fittedWording(['↑↓ Select · Enter Open · ←→ Change · Esc Back', 'Enter Open · Esc Back', 'Esc Back'], width)
+        return fittedWording([
+          escapeWording('↑↓ Select · Enter Open · ←→ Change', 'Back'),
+          escapeWording('Enter Open', 'Back'),
+          escapeWording('', 'Back'),
+        ], width)
       case 'style':
       case 'tone':
       case 'custom-tone':
       case 'custom-refresh':
       case 'custom-timeout':
-        return fittedWording(['↑↓ Select · Enter Apply · Esc Back', 'Enter Apply · Esc Back', 'Esc Back'], width)
+        return fittedWording([
+          escapeWording('↑↓ Select · Enter Apply', 'Back'),
+          escapeWording('Enter Apply', 'Back'),
+          escapeWording('', 'Back'),
+        ], width)
       case 'advanced':
         return state.editing
-          ? fittedWording(['Type · Enter Confirm · Esc Cancel', 'Esc Cancel'], width)
-          : fittedWording(['↑↓ Select · Enter Edit · Esc Back', 'Esc Back'], width)
+          ? fittedWording([escapeWording('Type · Enter Confirm', 'Cancel'), escapeWording('', 'Cancel')], width)
+          : fittedWording([escapeWording('↑↓ Select · Enter Edit', 'Back'), escapeWording('', 'Back')], width)
       case 'custom-text':
       case 'custom-command':
       case 'custom-name':
-        return fittedWording(['Type · Enter Confirm · Esc Cancel', 'Esc Cancel'], width)
+        return fittedWording([escapeWording('Type · Enter Confirm', 'Cancel'), escapeWording('', 'Cancel')], width)
       case 'custom-delete':
-        return fittedWording(['Enter Confirm · Esc Cancel', 'Esc Cancel'], width)
+        return fittedWording([escapeWording('Enter Confirm', 'Cancel'), escapeWording('', 'Cancel')], width)
       case 'create-name':
       case 'create-text':
       case 'create-command':
-        return fittedWording(['Type · Enter Next · Esc Cancel', 'Esc Cancel'], width)
+        return fittedWording([escapeWording('Type · Enter Next', 'Cancel'), escapeWording('', 'Cancel')], width)
       case 'create-refresh':
       case 'create-timeout':
-        return fittedWording(['↑↓ Select · Enter Next · Esc Cancel', 'Esc Cancel'], width)
+        return fittedWording([escapeWording('↑↓ Select · Enter Next', 'Cancel'), escapeWording('', 'Cancel')], width)
       case 'create-tone':
-        return fittedWording(['↑↓ Select · Enter Create · Esc Cancel', 'Esc Cancel'], width)
+        return fittedWording([escapeWording('↑↓ Select · Enter Create', 'Cancel'), escapeWording('', 'Cancel')], width)
       case 'add':
-        return fittedWording(['Type to search · ↑↓ Select · Enter Add · Esc Back', '↑↓ Select · Enter Add · Esc Back', 'Esc Back'], width)
+        return fittedWording([
+          escapeWording('Type to search · ↑↓ Select · Enter Add', 'Back'),
+          escapeWording('↑↓ Select · Enter Add', 'Back'),
+          escapeWording('', 'Back'),
+        ], width)
     }
   }
 
@@ -1418,7 +1645,13 @@ export class FooterConfiguratorPanel implements Component {
         if (matches.length === 0) hits.push({ kind: 'inert' })
         hits.push({ kind: 'select', target: createIndex })
         hits.push({ kind: 'select', target: createIndex + 1 })
-        return { lines, cursor: Math.min(state.pickerIndex, createIndex + 1), hits }
+        // With zero matches the inert `(no matching items)` placeholder is
+        // body line 0; the SELECTED create action is line 1/2. The painted
+        // cursor must name the real selected row, never the placeholder.
+        const cursor = matches.length === 0
+          ? 1 + Math.min(state.pickerIndex, 1)
+          : Math.min(state.pickerIndex, createIndex + 1)
+        return { lines, cursor, hits }
       }
     }
   }
@@ -1596,10 +1829,54 @@ function clipText(text: string, max = 40): string {
   return text.length <= max ? text : `${text.slice(0, Math.max(0, max - 1))}…`
 }
 
+/** One whole Action Bar wording and, when its LAST segment is the real
+ *  `Verb [Esc]` affordance, the UNPAINTED geometry of exactly that segment. The
+ *  painted prefix is kept beside the token, so painting never re-derives
+ *  columns from a coloured string. */
+interface BarWording {
+  readonly text: string
+  readonly escape?: {
+    readonly startCol: number
+    readonly endCol: number
+    /** The painted prefix, INCLUDING the trailing ` · ` separator. */
+    readonly lead: string
+    readonly token: string
+  }
+}
+
+/** Build one wording whose LAST segment is `Verb [Esc]`, the form the design
+ *  language reserves for an affordance with a key (§7.1). */
+function escapeWording(lead: string, verb: string): BarWording {
+  const token = `${verb} [Esc]`
+  if (lead === '') return { text: token, escape: { startCol: 0, endCol: visibleWidth(token), lead: '', token } }
+  const prefix = lead + ACTION_BAR_SEPARATOR
+  const startCol = visibleWidth(prefix)
+  return {
+    text: prefix + token,
+    escape: { startCol, endCol: startCol + visibleWidth(token), lead: prefix, token },
+  }
+}
+
+/** A wording with no Esc affordance (the in-flight save freezes input). */
+function plainWording(text: string): BarWording {
+  return { text }
+}
+
 /** The FIRST whole wording that fits `width` (never a mid-segment cut); below
  *  the shortest wording the last one is ellipsized, so a bar row never grows
- *  past its grant. */
-function fittedWording(words: readonly string[], width: number): string {
-  return words.find(word => visibleWidth(word) <= width)
-    ?? truncateToWidth(words[words.length - 1] ?? '', Math.max(1, width), '…')
+ *  past its grant. A truncated fallback carries NO span: its Esc token may be
+ *  cut, and a half affordance is never clickable. */
+function fittedWording(words: readonly BarWording[], width: number): BarWording {
+  const chosen = words.find(word => visibleWidth(word.text) <= width)
+  if (chosen !== undefined) return chosen
+  const last = words[words.length - 1]
+  return last === undefined ? { text: '' } : { text: truncateToWidth(last.text, Math.max(1, width), '…') }
+}
+
+/** Paint one chosen wording: the row stays muted, and only the real Esc
+ *  affordance carries the secondary ink (its `[Esc]` cap is muted). */
+function paintBarWording(wording: BarWording): string {
+  const escape = wording.escape
+  if (escape === undefined) return color.textMuted(wording.text)
+  return `${color.textMuted(escape.lead)}${paintActionSpan(escape.token, 'secondary')}`
 }

@@ -13,8 +13,10 @@
  *   3. parse — every `.mjs` passes `node --check`; every `.d.mts` parses via
  *      the TypeScript compiler when available;
  *   4. install — the tarball installs with the exact declared DSH Host
- *      (`npm install --omit=dev` in a fresh temp project), public `exports`
- *      entries import, and
+ *      (`npm install --omit=dev` in a fresh temp project OUTSIDE this
+ *      checkout and with no ancestor `node_modules`, so neither a positive
+ *      import nor the self-contained check can borrow this workspace's
+ *      dependency tree), public `exports` entries import, and
  *      `@xmoon76/pi-tui` is NOT resolvable from the installed package.
  *
  * Usage: node scripts/tarball-smoke.mjs [path-to-tgz]
@@ -35,8 +37,10 @@
  */
 
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -47,7 +51,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 import { parseArgs } from 'node:util'
@@ -67,6 +71,25 @@ import { pnpmExecutable } from './lib/process.mjs'
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 /** The dsh-pi-tui package root (the workspace checkout). */
 const PACKAGE_ROOT = join(SCRIPT_DIR, '..')
+
+/**
+ * The exact pinned Darwin prebuilds (upstream earendil-works/pi v1.5.0 @
+ * f9a26365), identified by their Git blob IDs. The values are deliberately
+ * repeated instead of imported from the copier: the pack verifier must fail
+ * if the build step ever copies a different file.
+ */
+const DARWIN_PREBUILDS = [
+  { arch: 'arm64', size: 52_024, gitBlob: '3294b6bffd36eaab70d61134e9955992f31f9a8f' },
+  { arch: 'x64', size: 22_784, gitBlob: '014383575508654d9f898ee25631b88db8d9740c' },
+]
+
+function darwinPrebuildPath(arch) {
+  return `dist/native/darwin/prebuilds/darwin-${arch}/darwin-platform.node`
+}
+
+function gitBlobSha(bytes) {
+  return createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex')
+}
 
 const failures = []
 const checks = []
@@ -245,14 +268,79 @@ function runSourceInstall(tarball, candidate, distribution, probeDir) {
   return { probePackage, required, installed: true }
 }
 
+/** `dir` is `root` itself or lives below it (both must be real paths).
+ *
+ * A child whose NAME starts with two dots (`/repo/..cache`) produces the
+ * relative path `..cache`, which is still INSIDE. Only the parent itself
+ * (`..`) or a real parent traversal (`../...`) is outside. */
+export function isInside(dir, root) {
+  const rel = relative(root, dir)
+  return !isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${sep}`)
+}
+
+/** The nearest directory at or above `dir` that holds a `node_modules`
+ * entry: Node resolves a bare specifier from `dir` by walking up to it. */
+function nearestAncestorNodeModules(dir) {
+  let current = dir
+  while (true) {
+    if (existsSync(join(current, 'node_modules'))) return current
+    const parent = dirname(current)
+    if (parent === current) return undefined
+    current = parent
+  }
+}
+
+/** The root the probe work dir is created under.
+ *
+ * The probe runs `npm install` and then resolves bare specifiers from it, and
+ * Node walks EVERY ancestor `node_modules`. A `TMPDIR` inside this checkout
+ * would therefore let the probe see the workspace links: the self-contained
+ * check would pass through pollution instead of proving the tarball, and a
+ * positive import could borrow a dependency the published package never
+ * declared. Use the first candidate outside the checkout with no ancestor
+ * `node_modules`; when none exists the run is an infrastructure failure,
+ * never a candidate failure. */
+function isolatedTempRoot(checkoutRoot) {
+  const systemTemp = process.platform === 'win32'
+    ? join(process.env.SystemRoot ?? 'C:\\Windows', 'Temp')
+    : '/tmp'
+  const rejected = []
+  for (const candidate of new Set([tmpdir(), systemTemp])) {
+    let real
+    try {
+      real = realpathSync(candidate)
+    } catch (error) {
+      rejected.push(`${candidate} (unavailable: ${error.code ?? error.message})`)
+      continue
+    }
+    if (isInside(real, checkoutRoot)) {
+      rejected.push(`${candidate} (inside the checkout)`)
+      continue
+    }
+    const polluted = nearestAncestorNodeModules(real)
+    if (polluted !== undefined) {
+      rejected.push(`${candidate} (ancestor node_modules: ${polluted})`)
+      continue
+    }
+    return real
+  }
+  throw new Error(`TARBALL_SMOKE_INFRA_FAILURE: no isolated temp root for the probe; tried ${rejected.join(', ')}. A work dir below this checkout's node_modules would make the self-contained check meaningless`)
+}
+
 function main() {
   const cli = parseCli()
   const tarball = resolveTarball(cli.tarball)
   const keep = process.env.TARBALL_SMOKE_KEEP === '1'
   const skipInstall = process.env.TARBALL_SMOKE_SKIP_INSTALL === '1'
-  const workDir = mkdtempSync(join(tmpdir(), 'tarball-smoke-'))
+  const checkoutRoot = realpathSync(PACKAGE_ROOT)
+  const workDir = mkdtempSync(join(isolatedTempRoot(checkoutRoot), 'tarball-smoke-'))
   const probeDir = join(workDir, 'probe')
   try {
+    const realWorkDir = realpathSync(workDir)
+    const polluted = nearestAncestorNodeModules(realWorkDir)
+    if (isInside(realWorkDir, checkoutRoot) || polluted !== undefined) {
+      throw new Error(`TARBALL_SMOKE_INFRA_FAILURE: probe work dir ${realWorkDir} is not isolated from this checkout${polluted === undefined ? '' : ` (ancestor node_modules: ${polluted})`}; the self-contained check could pass through workspace pollution`)
+    }
     check('tarball exists', existsSync(tarball), basename(tarball))
     const extracted = extract(tarball, workDir)
     const pkg = JSON.parse(readFileSync(join(extracted, 'package.json'), 'utf8'))
@@ -283,8 +371,16 @@ function main() {
     check('types dist/builtins.d.mts', has('dist/builtins.d.mts'))
     check('exports entry dist/visual-tools.mjs', has('dist/visual-tools.mjs'))
     check('types dist/visual-tools.d.mts', has('dist/visual-tools.d.mts'))
+    check('exports entry dist/web-preferences.mjs', has('dist/web-preferences.mjs'))
+    check('types dist/web-preferences.d.mts', has('dist/web-preferences.d.mts'))
+    check('exports entry dist/daemon-launcher.mjs', has('dist/daemon-launcher.mjs'))
+    check('types dist/daemon-launcher.d.mts', has('dist/daemon-launcher.d.mts'))
+    check('exports entry dist/acp-preferences.mjs', has('dist/acp-preferences.mjs'))
+    check('types dist/acp-preferences.d.mts', has('dist/acp-preferences.d.mts'))
     check('exports entry dist/host-runtime.mjs', has('dist/host-runtime.mjs'))
     check('types dist/host-runtime.d.mts', has('dist/host-runtime.d.mts'))
+    check('exports entry dist/preferences.mjs', has('dist/preferences.mjs'))
+    check('types dist/preferences.d.mts', has('dist/preferences.d.mts'))
     // M4-B2-HF: ONE Loader subpath for the built-in Host composition. The two
     // private business services must never become installable business
     // subpaths of their own.
@@ -293,8 +389,37 @@ function main() {
         && pkg.exports?.['./file-reference-host'] === undefined
         && pkg.exports?.['./terminal-progress-host'] === undefined,
       `exports=${Object.keys(pkg.exports ?? {}).join(',')}`)
+    check('the generated Web roster layer is packaged',
+      has('generated/web-access/cordis.patch.yml'),
+      'the generated bundle layer must ship or the installed Web rows disappear')
+    check('the canonical preferences row is a Loader subpath',
+      pkg.exports?.['./preferences'] !== undefined,
+      `exports=${Object.keys(pkg.exports ?? {}).join(',')}`)
     check('cordis.patch.yml included', has('cordis.patch.yml'))
     check('no duplicated official preset root', !files.some(name => name.startsWith('config/agent-presets/')))
+
+    // Pinned Darwin native prebuilds: the only `.node` payload the package may
+    // ship. The bytes are compared to the pinned upstream Git blob ID, and the
+    // tree must not gain any other file or symlink.
+    const expectedNative = DARWIN_PREBUILDS.map((entry) => darwinPrebuildPath(entry.arch))
+    const nativeFiles = files.filter(name => name.startsWith('dist/native/'))
+    const unexpectedNative = nativeFiles.filter(name => !expectedNative.includes(name))
+    const nativeSymlinks = nativeFiles.filter(name => lstatSync(join(extracted, name)).isSymbolicLink())
+    check('dist/native holds exactly the two pinned Darwin prebuilds',
+      unexpectedNative.length === 0 && nativeSymlinks.length === 0,
+      [...unexpectedNative, ...nativeSymlinks.map(name => `${name} (symlink)`)].join(', '))
+    for (const expected of DARWIN_PREBUILDS) {
+      const prebuild = darwinPrebuildPath(expected.arch)
+      check(`pinned Darwin ${expected.arch} prebuild ships: ${prebuild}`, has(prebuild))
+      if (!has(prebuild)) continue
+      const info = lstatSync(join(extracted, prebuild))
+      check(`pinned Darwin ${expected.arch} prebuild is a regular file`,
+        info.isFile() && !info.isSymbolicLink(), `file=${info.isFile()} symlink=${info.isSymbolicLink()}`)
+      const bytes = readFileSync(join(extracted, prebuild))
+      check(`pinned Darwin ${expected.arch} prebuild bytes match the upstream Git blob`,
+        bytes.length === expected.size && gitBlobSha(bytes) === expected.gitBlob,
+        `${bytes.length} bytes, git blob ${gitBlobSha(bytes)}`)
+    }
     // The generated preset mirror MUST ship: upstream bundle-patch loading
     // downgrades a missing patch file to a stderr "skipping profile bundle"
     // line, so a stripped mirror would silently drop the whole preset roster
@@ -305,6 +430,12 @@ function main() {
     }
     check('README included', has('README.md'))
     check('English README included', has('README.en.md'))
+    check('LICENSE included', has('LICENSE'))
+    const packagedLicense = has('LICENSE') ? readFileSync(join(extracted, 'LICENSE'), 'utf8') : ''
+    check('LICENSE carries the pinned upstream pi-tui copyright notice',
+      packagedLicense.includes('Copyright (c) 2025 Mario Zechner')
+        && packagedLicense.includes('The above copyright notice and this permission notice'),
+      has('LICENSE') ? '' : 'LICENSE is missing')
     const leaks = files.filter(name => name.includes('test/')
       || name.endsWith('.bak')
       || name.endsWith('.tgz')
@@ -343,7 +474,7 @@ function main() {
       /\/home\/[^/"']+/,
       /\/Users\/[^/"']+/,
       /\/home\/runner\/work\//,
-      /[A-Za-z]:\\(?:[^\\"']*\\)+/,
+      /[A-Za-z]:\\[^\\/\r\n"'<>|?*]+\\[^\\/\r\n"'<>|?*]+/,
     ]
     const workspaceLeaks = textFiles.filter(file => {
       const text = readFileSync(file, 'utf8')
@@ -419,12 +550,14 @@ function main() {
       // `app/host/pi-tui-host-runtime` is the M4-B2-HF built-in Host Runtime
       // entry; its two internal feature modules are inlined regions of that
       // entry, not separate public entries.
+      // `app/host/extension-config-carrier` is the R8-E PR-1 trusted Config-only
+      // carrier row, exposed as the flat `./extension-config` subpath.
       const isRoot = name === 'dist/index.d.mts'
       for (const line of lines) {
         const match = /\/\/#region\s+(\S+)/.exec(line)
         if (match) {
           const regionPath = match[1]
-          const allowed = /^src\/(app\/bootstrap\/profile|app\/config\/schema|app\/host\/features\/file-reference|app\/host\/features\/terminal-progress|app\/host\/performance-host|app\/host\/pi-tui-host-runtime|app\/host\/visual-tools|app\/session\/interrupt|app\/submission\/command-policy|app\/submission\/pending-input|app\/surface\/compaction-presentation|app\/surface\/pending-presentation|app\/surface\/task-presentation|app\/surface\/viewer-policy|builtins|client\/launcher\/profile|client\/media\/image\/types|commands|display-preset|domain\/catalog\/skill|domain\/catalog\/surface|domain\/command\/policy|domain\/communication\/policy|domain\/media\/types|domain\/shell\/danger|extension\/advanced|extension\/advanced-types|extension\/public-types|extension\/service|extension\/slot-map|extension\/unstable|extension\/unstable-types|extensions|index|runtime\/direct\/surface-catalog|runtime\/process\/diagnostics|startup)\.d\.ts$/.test(regionPath)
+          const allowed = /^src\/(app\/bootstrap\/profile|app\/config\/preferences|app\/config\/schema|app\/host\/acp-preferences|app\/host\/features\/file-reference|app\/host\/features\/terminal-progress|app\/host\/performance-host|app\/host\/pi-tui-host-runtime|app\/host\/extension-config-carrier|app\/host\/visual-tools|app\/host\/web-preferences|app\/remote-process\/daemon-launcher|app\/session\/interrupt|app\/submission\/command-policy|app\/submission\/pending-input|app\/surface\/compaction-presentation|app\/surface\/pending-presentation|app\/surface\/task-presentation|app\/surface\/viewer-policy|builtins|client\/launcher\/profile|client\/media\/image\/types|commands|display-preset|domain\/catalog\/skill|domain\/catalog\/surface|domain\/command\/policy|domain\/communication\/policy|domain\/media\/types|domain\/shell\/danger|extension\/advanced|extension\/advanced-types|extension\/public-types|extension\/service|extension\/slot-map|extension\/unstable|extension\/unstable-types|extensions|index|runtime\/direct\/surface-catalog|runtime\/process\/diagnostics|startup)\.d\.ts$/.test(regionPath)
           const rootAllowed = isRoot && /^src\/tui-app\.d\.ts$/.test(regionPath)
           if (!allowed && !rootAllowed) dtsLeaks.push(`${name}: region ${regionPath}`)
         }
@@ -492,12 +625,45 @@ function main() {
       if (installSucceeded) {
         const installed = join(probeDir, 'node_modules', '@xmoon76', 'dsh-pi-tui')
         check('installed package contains dist', existsSync(join(installed, 'dist', 'index.mjs')))
+        for (const expected of DARWIN_PREBUILDS) {
+          const installedNative = join(installed, darwinPrebuildPath(expected.arch))
+          const sourceNative = join(PACKAGE_ROOT, 'packages', 'pi-tui', 'native', 'darwin', 'prebuilds',
+            `darwin-${expected.arch}`, 'darwin-platform.node')
+          let identical = false
+          if (existsSync(installedNative) && existsSync(sourceNative)) {
+            const packed = readFileSync(installedNative)
+            identical = packed.equals(readFileSync(sourceNative))
+              && packed.length === expected.size
+              && gitBlobSha(packed) === expected.gitBlob
+          }
+          check(`installed Darwin ${expected.arch} prebuild is byte-identical to the pinned source asset`, identical)
+        }
+        if (process.platform === 'darwin' && DARWIN_PREBUILDS.some((entry) => entry.arch === process.arch)) {
+          const prebuild = join(installed, darwinPrebuildPath(process.arch))
+          const helperScript = `
+import { createRequire } from 'node:module'
+const require = createRequire(${JSON.stringify(join(probeDir, 'probe.mjs'))})
+const helper = require(${JSON.stringify(prebuild)})
+for (const key of ['isModifierPressed', 'getText', 'setText', 'getImage', 'getFilePaths']) {
+  if (typeof helper[key] !== 'function') throw new Error('missing native export: ' + key)
+}
+console.log('installed Darwin native helper exposes the pinned five-function API')
+`
+          const helperRun = run(process.execPath, ['--input-type=module', '-e', helperScript], { cwd: probeDir })
+          check('installed Darwin native helper loads and exposes the real API',
+            helperRun.status === 0, helperRun.status === 0 ? '' : resultDetail(helperRun))
+        } else {
+          checks.push(`skip native helper load — this runner is ${process.platform}/${process.arch}`)
+        }
         const importRun = run(process.execPath, ['--input-type=module', '-e',
           "Promise.all([import('@xmoon76/dsh-pi-tui'), import('@xmoon76/dsh-pi-tui/startup'),"
             + "import('@xmoon76/dsh-pi-tui/extensions'), import('@xmoon76/dsh-pi-tui/builtins'),"
             + "import('@xmoon76/dsh-pi-tui/extensions/advanced'), import('@xmoon76/dsh-pi-tui/extensions/unstable'),"
             + "import('@xmoon76/dsh-pi-tui/performance-host'), import('@xmoon76/dsh-pi-tui/visual-tools'),"
-            + "import('@xmoon76/dsh-pi-tui/host-runtime')])"
+            + "import('@xmoon76/dsh-pi-tui/host-runtime'), import('@xmoon76/dsh-pi-tui/web-preferences'),"
+            + "import('@xmoon76/dsh-pi-tui/daemon-launcher'),"
+            + "import('@xmoon76/dsh-pi-tui/acp-preferences'),"
+            + "import('@xmoon76/dsh-pi-tui/preferences')])"
             + ".then(m => { if (m[4].ADVANCED_API_LEVEL !== 1) throw new Error('ADVANCED_API_LEVEL');"
             + "if (m[5].UNSTABLE_API_LEVEL !== 1) throw new Error('UNSTABLE_API_LEVEL');"
             + "if (m[6].name !== 'pi-tui-performance-host') throw new Error('performance-host row');"
@@ -511,17 +677,56 @@ function main() {
             + "if (!Array.isArray(m[7].inject)) throw new Error('visual-tools inject');"
             + "if (m[8].name !== 'pi-tui-host-runtime') throw new Error('host-runtime row');"
             + "if (typeof m[8].apply !== 'function') throw new Error('host-runtime apply');"
-            + "if (!Array.isArray(m[8].inject) || m[8].inject.join(',') !== 'typert,agents,fileReferences,workingDirectory') throw new Error('host-runtime inject');"
+            // The built-in Host Runtime is a public entry, so the PACKED row must
+            // still export a valid dependency declaration. Its exact service set is
+            // a Host-composition fact owned by the Host composition/readiness tests,
+            // not by this packaging gate: a legitimate new inject must not force this
+            // historical list to be frozen here.
+            + "if (!Array.isArray(m[8].inject) || m[8].inject.length === 0 || m[8].inject.some(dep => typeof dep !== 'string' || dep === '') || new Set(m[8].inject).size !== m[8].inject.length) throw new Error('host-runtime inject');"
+            + "if (m[9].name !== 'pi-tui-web-preferences') throw new Error('web-preferences row');"
+            + "if (typeof m[9].Config !== 'function' && typeof m[9].Config !== 'object') throw new Error('web-preferences Config');"
+            + "if (typeof m[9].apply !== 'function') throw new Error('web-preferences apply');"
+            + "if (m[10].name !== 'pi-tui-daemon-launcher') throw new Error('daemon-launcher row');"
+            + "if (typeof m[10].apply !== 'function') throw new Error('daemon-launcher apply');"
+            + "if (!Array.isArray(m[10].inject) || m[10].inject.length === 0) throw new Error('daemon-launcher inject');"
+            + "if (m[11].name !== 'pi-tui-acp-preferences') throw new Error('acp-preferences row');"
+            + "if (typeof m[11].Config !== 'function' && typeof m[11].Config !== 'object') throw new Error('acp-preferences Config');"
+            + "if (typeof m[11].apply !== 'function') throw new Error('acp-preferences apply');"
+            + "if (m[12].name !== 'pi-tui-preferences') throw new Error('preferences row');"
+            + "if (typeof m[12].Config !== 'function' && typeof m[12].Config !== 'object') throw new Error('preferences Config');"
+            + "if (typeof m[12].apply !== 'function') throw new Error('preferences apply');"
             + "console.log('imports-ok') })"
             + ".catch(e => { console.error(e.message); process.exit(1) })",
         ], { cwd: probeDir })
         check('all exports entries import', importRun.status === 0 && importRun.stdout.includes('imports-ok'),
           importRun.status === 0 ? '' : importRun.stderr.slice(0, 200))
-        const forkRun = run(process.execPath, ['--input-type=module', '-e',
-          "import('@xmoon76/pi-tui').then(() => process.exit(0)).catch(() => process.exit(3))",
+        // The native helper is lazy: merely importing the package must not
+        // dlopen the Darwin addon, and on a non-Darwin runner the shipped
+        // Mach-O files must never be loaded.
+        const nativeLoadRun = run(process.execPath, ['--input-type=module', '-e',
+          "const loaded = []; const original = process.dlopen;"
+            + "process.dlopen = function (module, filename) { loaded.push(String(filename)); return original.apply(this, arguments) };"
+            + "await import('@xmoon76/dsh-pi-tui'); await import('@xmoon76/dsh-pi-tui/startup');"
+            + "const darwin = loaded.filter((file) => file.includes('/native/darwin/'));"
+            + "if (darwin.length > 0) { console.error('loaded Darwin addon(s) on import: ' + darwin.join(', ')); process.exit(1) }"
+            + "console.log('no-darwin-native-on-import')",
         ], { cwd: probeDir })
+        check('importing the installed package loads no Darwin prebuild', nativeLoadRun.status === 0
+          && nativeLoadRun.stdout.includes('no-darwin-native-on-import'),
+          nativeLoadRun.status === 0 ? '' : resultDetail(nativeLoadRun))
+        const forkRun = run(process.execPath, ['--input-type=module', '-e',
+          // Resolve only: the module must not be installed at all. Any other
+          // failure (a broken package.json, a resolver error) is NOT the
+          // expected "not found" and must stay a real test failure.
+          "try { console.error('resolved ' + import.meta.resolve('@xmoon76/pi-tui')); process.exit(0) }"
+            + " catch (error) { if (error?.code === 'ERR_MODULE_NOT_FOUND') process.exit(3);"
+            + " console.error(String(error?.code ?? 'unknown') + ': ' + String(error?.message ?? error)); process.exit(1) }",
+        ], { cwd: probeDir })
+        const forkDetail = forkRun.status === 3
+          ? ''
+          : `status=${forkRun.status} — ${forkRun.stderr.trim().split('\n')[0]}`
         check('@xmoon76/pi-tui is not resolvable from the installed package (self-contained)',
-          forkRun.status === 3, `status=${forkRun.status}`)
+          forkRun.status === 3, forkDetail)
       }
     }
   } finally {
@@ -537,9 +742,11 @@ function main() {
   console.log('\ntarball smoke passed')
 }
 
-try {
-  await main()
-} catch (error) {
-  console.error(`tarball-smoke: ${error instanceof Error ? error.message : String(error)}`)
-  process.exit(1)
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    await main()
+  } catch (error) {
+    console.error(`tarball-smoke: ${error instanceof Error ? error.message : String(error)}`)
+    process.exit(1)
+  }
 }

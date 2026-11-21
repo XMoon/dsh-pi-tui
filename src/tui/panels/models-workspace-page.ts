@@ -24,7 +24,8 @@ import {
   type TuiMouseEvent,
   type TuiMouseEventResult,
 } from '@xmoon76/pi-tui'
-import { renderActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
+import { ACTION_BAR_SEPARATOR, layoutActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
+import { paintActionSpan } from '../presentation/action-ink.ts'
 import { color } from '../theme/runtime.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
@@ -44,6 +45,7 @@ import type {
   StoredCredentialRow,
 } from '../../app/command/credential-workflow.ts'
 import { PROTOCOL_CHOICES, ROUTE_PATTERN } from '../../domain/catalog/provider.ts'
+import { SupersededReadError } from '../../runtime/read-error.ts'
 
 /** One provider row of the Models list (a detached semantic DTO). */
 export interface ModelsProviderRow {
@@ -110,9 +112,15 @@ export interface ModelsStoredCredentials {
  * providers configured".
  */
 export type ModelsCatalogRead =
-  | { readonly kind: 'ready'; readonly rows: readonly ModelsProviderRow[] }
+  | {
+    readonly kind: 'ready'
+    readonly rows: readonly ModelsProviderRow[]
+    /** A definite limitation that affects native sign-in ONLY (never the API
+     *  key/provider list): the Host has no authorization service. */
+    readonly authorizationNotice?: string
+  }
   /** The LAST KNOWN rows, explicitly not current (a stale backend mirror). */
-  | { readonly kind: 'stale'; readonly rows: readonly ModelsProviderRow[] }
+  | { readonly kind: 'stale'; readonly rows: readonly ModelsProviderRow[]; readonly authorizationNotice?: string }
   | { readonly kind: 'failed'; readonly reason: string }
 
 /**
@@ -124,6 +132,9 @@ export type ModelsRecordPresence =
   | { readonly kind: 'known'; readonly records: readonly { readonly key: string; readonly route?: string }[] }
   | { readonly kind: 'unavailable'; readonly reason: string }
   | { readonly kind: 'failed'; readonly reason: string }
+  /** A record DELETE was dispatched but its outcome could not be observed: the
+   *  stored presence is unknown until a fresh authoritative read. */
+  | { readonly kind: 'unknown'; readonly reason: string }
 
 /** The page's intent surface (the app/command owner implements it). */
 export interface ModelsWorkspaceSource {
@@ -188,11 +199,16 @@ type ModelsView =
   | { readonly kind: 'guide' }
 
 interface ClearState {
-  readonly phase: 'reading' | 'ready' | 'pending' | 'done' | 'failed'
+  /** `unconfirmed` is a DISPATCHED record delete whose Host outcome could not
+   *  be observed — never a failure and never a success. */
+  readonly phase: 'reading' | 'ready' | 'pending' | 'done' | 'failed' | 'unconfirmed'
   readonly configured: boolean
   readonly source?: string
   readonly reason?: string
   readonly result?: string
+  /** The definite failure class of the record path: the exact reason the clear
+   *  ended without a committed delete. */
+  readonly failure?: 'not-sent' | 'rejected' | 'still-stored'
 }
 
 interface AddProviderState {
@@ -231,7 +247,7 @@ interface NoticeState {
 
 interface AuthState {
   readonly targetIdentity: string
-  readonly phase: 'starting' | 'running' | 'authorized' | 'cancelled' | 'failed'
+  readonly phase: 'starting' | 'running' | 'authorized' | 'cancelled' | 'failed' | 'unconfirmed'
   /** A cancellation was requested but the Host may still commit/finish. */
   readonly cancelRequested?: boolean
   readonly attemptId?: string
@@ -335,7 +351,23 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+/** The UI's structural read of the Remote adapter's stable failure code (the
+ *  page never imports the Remote error class). */
+function errorCode(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null) return undefined
+  const code = (error as { readonly code?: unknown }).code
+  return typeof code === 'string' && code !== '' ? code : undefined
+}
+
+/** The stable code of a dispatched record delete whose Host settlement the
+ *  Client could not observe (owned by the Remote credential adapter). */
+const RECORD_DELETE_UNCONFIRMED_CODE = 'RECORD_DELETE_UNCONFIRMED'
+
 /** The Models page component. Constructed per workspace open. */
+/** The pending-write Esc is a WAIT fact, never a navigation affordance: it is
+ *  painted but publishes no clickable span. */
+const WAIT_ESC_HINT = 'Wait [Esc]'
+
 export class ModelsWorkspacePage implements Component {
   private readonly source: ModelsWorkspaceSource
   private requestRender: () => void
@@ -346,6 +378,15 @@ export class ModelsWorkspacePage implements Component {
   private readonly credentialStates = new Map<string, ModelsCredentialState>()
   private records: ModelsStoredCredentials | undefined
   private clear: ClearState | undefined
+  /**
+   * STICKY post-dispatch memory for the current clear target: a record delete
+   * was dispatched and the client never observed a definite refusal; from then
+   * on, a failed current-presence read is UNKNOWN, never a "Not cleared" claim.
+   * Reset only when the next clear confirmation is opened for a (possibly new)
+   * target — never by a transient `reading` phase, so a re-entrant refresh in
+   * the same failing connection cannot lose the fact.
+   */
+  private clearOutcomeUnknown = false
   private add: AddProviderState | undefined
   private cursor = 0
   private scroll = 0
@@ -368,6 +409,11 @@ export class ModelsWorkspacePage implements Component {
   private readonly pageController = new AbortController()
   private disposed = false
   private revision = 0
+  /** Monotonic owner identities for the embedded transient owners: a replaced
+   *  Question/Picker must not let a press recorded on the previous owner's bar
+   *  act on the new one. */
+  private questionOwnerSerial = 0
+  private pickerOwnerSerial = 0
   private paintedTargets: readonly HitTarget[] = []
   private pressed: { readonly target: HitTarget; readonly revision: number; readonly width: number; readonly height: number } | undefined
   private lastWidth = 0
@@ -401,6 +447,8 @@ export class ModelsWorkspacePage implements Component {
    * never painted as "no providers configured".
    */
   private readState: 'loading' | 'ready' | 'refreshing' | 'stale' | 'error' = 'loading'
+  /** A definite native-sign-in limitation reported by the catalog read. */
+  private authorizationNotice: string | undefined
   /** Why the last read failed (the `stale`/`error` reason). */
   private readFailure: string | undefined
   /** The stored RECORD presence (one enumeration per read generation). */
@@ -654,6 +702,7 @@ export class ModelsWorkspacePage implements Component {
           return
         }
         this.providerRows = read.rows
+        this.authorizationNotice = read.authorizationNotice
         this.readState = read.kind === 'stale' ? 'stale' : 'ready'
         this.readFailure = read.kind === 'stale'
           ? 'the last snapshot is not the current authority'
@@ -995,6 +1044,7 @@ export class ModelsWorkspacePage implements Component {
 
   private openClear(target: CredentialClearTarget, deferRead = false): void {
     this.clearSerial += 1
+    this.clearOutcomeUnknown = false
     this.view = { kind: 'logout', target }
     this.cursor = 0
     this.scroll = 0
@@ -1028,6 +1078,10 @@ export class ModelsWorkspacePage implements Component {
     if (this.clear?.phase === 'pending') return
     const key = this.view.target.key
     const serial = this.clearSerial
+    // A dispatched delete whose outcome was never disproven keeps its unknown
+    // class across every refresh (including a re-entrant one while a first read
+    // is still in flight): a failed read may never become "Not cleared".
+    const dispatchedUnknown = this.clearOutcomeUnknown
     const readSerial = ++this.clearReadSerial
     this.clear = { phase: 'reading', configured: false }
     // The stored-credential read scans the provider configuration
@@ -1050,9 +1104,22 @@ export class ModelsWorkspacePage implements Component {
             this.clear = { phase: 'ready', configured: present }
           })
         } catch (error) {
+          const reason = errorText(error)
           this.settle(() => {
             if (readSerial !== this.clearReadSerial || serial !== this.clearSerial || this.view.kind !== 'logout' || this.view.target.kind !== 'record' || this.view.target.key !== key) return
-            this.clear = { phase: 'failed', configured: false, reason: errorText(error) }
+            if (dispatchedUnknown) {
+              // The method was dispatched: the failed CURRENT-presence read is
+              // an unknown outcome, never proof that the delete did not run.
+              // Fence every older record snapshot and keep the read-only
+              // refresh as the only next step.
+              this.recordsSerial += 1
+              this.records = undefined
+              this.recordPresenceSerial += 1
+              this.recordPresence = { kind: 'unknown', reason: `the record list could not be re-read: ${reason}` }
+              this.clear = { phase: 'unconfirmed', configured: true, reason: `the record list could not be re-read: ${reason}` }
+              return
+            }
+            this.clear = { phase: 'failed', configured: false, reason }
           })
         }
       })
@@ -1086,9 +1153,35 @@ export class ModelsWorkspacePage implements Component {
         if (target.kind === 'reference') await this.source.clearReference(target.ref)
         else await this.source.deleteRecord(target.key)
       } catch (error) {
+        const unconfirmed = target.kind === 'record' && errorCode(error) === RECORD_DELETE_UNCONFIRMED_CODE
         this.settle(() => {
           if (!isCurrent()) return
-          this.clear = { phase: 'failed', configured: true, reason: errorText(error) }
+          if (unconfirmed) {
+            // The Host MAY have committed the delete: never report "Not
+            // cleared", never replay the call. Every older record snapshot is
+            // invalidated and the exact key is kept; only a fresh read may
+            // re-arm the confirmation.
+            this.recordsSerial += 1
+            this.records = undefined
+            this.recordPresenceSerial += 1
+            this.recordPresence = {
+              kind: 'unknown',
+              reason: 'the last clear outcome is unconfirmed; refresh records',
+            }
+            this.clearOutcomeUnknown = true
+            this.clear = { phase: 'unconfirmed', configured: true, reason: errorText(error) }
+            return
+          }
+          // A definite refusal (invalid key / official bad-request) or a
+          // pre-dispatch fence: this attempt provably did not change the store.
+          this.clear = target.kind === 'reference'
+            ? { phase: 'failed', configured: true, reason: errorText(error) }
+            : {
+                phase: 'failed',
+                configured: true,
+                failure: error instanceof SupersededReadError ? 'not-sent' : 'rejected',
+                reason: errorText(error),
+              }
         })
         return
       }
@@ -1131,9 +1224,22 @@ export class ModelsWorkspacePage implements Component {
           if (!isCurrent() || readSerial !== this.clearReadSerial) return
           this.recordsSerial += 1
           this.records = records
+          // The delete was dispatched; even a confirmed presence/absence keeps
+          // the post-dispatch class so a later failed refresh stays unknown.
+          this.clearOutcomeUnknown = true
           this.clear = present
-            ? { phase: 'failed', configured: true, reason: 'the stored record is still present after the clear' }
-            : { phase: 'done', configured: false, result: `${target.label} signed out locally — stored credential cleared` }
+            ? {
+                phase: 'failed',
+                configured: true,
+                failure: 'still-stored',
+                reason:
+                  'the stored record is present on the current Host (it may have been re-created since the clear); refresh and confirm a new clear',
+              }
+            : {
+                phase: 'done',
+                configured: false,
+                result: `${target.label} — local stored credential cleared (not revoked at the issuer; the current model is unchanged)`,
+              }
           // The HOME's record presence is the same fact: re-read it (the
           // minimal affected authority) instead of leaving the old answer.
           this.readRecordPresence()
@@ -1141,16 +1247,16 @@ export class ModelsWorkspacePage implements Component {
       } catch (error) {
         this.settle(() => {
           if (!isCurrent() || readSerial !== this.clearReadSerial) return
-          // The authoritative re-read failed. Fence any older refreshRecords
-          // answer and drop the old snapshot: record presence is Unknown, never
-          // the pre-delete list.
+          // The method ACK does not prove the CURRENT presence: a failed
+          // readback is an unconfirmed outcome, never `done` and never
+          // `Not cleared`. Fence every older snapshot and keep a read-only
+          // refresh.
           this.recordsSerial += 1
           this.records = undefined
-          // The HOME's record presence is the SAME deleted fact: a read that
-          // started before the clear must not settle as a fresh "Signed in".
           this.recordPresenceSerial += 1
-          this.recordPresence = { kind: 'failed', reason: `the clear returned; the record list could not be re-read: ${errorText(error)}` }
-          this.clear = { phase: 'failed', configured: true, reason: `the clear returned; the record list could not be re-read: ${errorText(error)}` }
+          this.recordPresence = { kind: 'unknown', reason: `the clear returned; the record list could not be re-read: ${errorText(error)}` }
+          this.clearOutcomeUnknown = true
+          this.clear = { phase: 'unconfirmed', configured: true, reason: `the clear returned; the record list could not be re-read: ${errorText(error)}` }
         })
       }
     })
@@ -1421,12 +1527,20 @@ export class ModelsWorkspacePage implements Component {
         try {
           started = await this.source.beginAuthorization(row.key!, method, this.pageController.signal)
         } catch (error) {
+          // The Remote adapter already established the result taxonomy: a
+          // DISPATCH_UNKNOWN means the run WAS dispatched and the Host may have
+          // started/committed it, but the `started` frame was lost. That is the
+          // same fourth outcome as a lost settlement stream (`unconfirmed`),
+          // never a definite business failure. Refresh the Host facts read-only
+          // and let the user re-read before another manual attempt.
+          const dispatchUnknown = (error as { readonly code?: unknown } | null)?.code === 'DISPATCH_UNKNOWN'
           this.settle(() => {
             this.auth = {
               targetIdentity: row.identity,
-              phase: 'failed',
+              phase: dispatchUnknown ? 'unconfirmed' : 'failed',
               status: authorizationFailureText(error, errorText(error)),
             }
+            if (dispatchUnknown) this.refresh()
             if (this.pendingAfterAuth !== undefined) this.runPendingAfterAuth()
           })
           return
@@ -1454,6 +1568,20 @@ export class ModelsWorkspacePage implements Component {
       } else if (outcome.status === 'cancelled') {
         this.settle(() => {
           this.auth = { targetIdentity: row.identity, phase: 'cancelled', attemptId: started.attemptId, status: 'sign-in cancelled' }
+          if (this.pendingAfterAuth !== undefined) this.runPendingAfterAuth()
+        })
+      } else if (outcome.status === 'unconfirmed') {
+        // The transport lost the official outcome: the Host may have
+        // committed. Never paint a business failure and never retry: offer the
+        // read-only refresh path instead.
+        this.settle(() => {
+          this.auth = {
+            targetIdentity: row.identity,
+            phase: 'unconfirmed',
+            attemptId: started.attemptId,
+            status: 'sign-in outcome unconfirmed — refresh credentials before retrying',
+          }
+          this.refresh()
           if (this.pendingAfterAuth !== undefined) this.runPendingAfterAuth()
         })
       } else {
@@ -1666,6 +1794,7 @@ export class ModelsWorkspacePage implements Component {
   }
 
   private setQuestion(question: EmbeddedQuestion): void {
+    this.questionOwnerSerial += 1
     if (this.question === undefined) {
       this.question = question
       this.questionUsable = false
@@ -1681,6 +1810,10 @@ export class ModelsWorkspacePage implements Component {
     if (this.question === question) {
       this.question = this.questionQueue.shift()
       if (this.question !== undefined) {
+        // The queued prompt is a DIFFERENT owner: its Esc must not inherit a
+        // press that was made on the retired one, even when both start in the
+        // same flow mode.
+        this.questionOwnerSerial += 1
         this.question.flow.focused = true
         this.questionUsable = false
       }
@@ -1693,6 +1826,7 @@ export class ModelsWorkspacePage implements Component {
   }
 
   private clearQuestions(): void {
+    this.questionOwnerSerial += 1
     this.question = undefined
     this.questionQueue.length = 0
     this.questionPress = undefined
@@ -1715,6 +1849,67 @@ export class ModelsWorkspacePage implements Component {
     this.paintedRowIds.clear()
     this.paintedTargets = []
     this.paintedCopy = false
+  }
+
+  /** The complete visible Esc affordance span of the LAST rendered frame
+   *  (page-local columns), or undefined when the frame painted none. The
+   *  Settings root owns the ONE physical last row and publishes its pointer
+   *  target from THIS span. */
+  paintedEscapeSpan(): { readonly startCol: number; readonly endCol: number } | undefined {
+    return this.paintedEscape
+  }
+
+  /** The complete painted Esc affordance of the last bar this page generated. */
+  private paintedEscape: { readonly startCol: number; readonly endCol: number } | undefined
+
+  /** The page's own SEMANTIC identity for a pointer gesture: the current view
+   *  plus every transient phase that decides what its Esc really does. The
+   *  Settings root stores it at press and re-proves it at the release, so a
+   *  child repaint that keeps the same bar cells cannot hand a press to a
+   *  different Esc outcome. */
+  gestureIdentity(): string {
+    return JSON.stringify({
+      view: this.view,
+      question: this.question === undefined
+        ? undefined
+        : { owner: this.questionOwnerSerial, mode: this.question.flow.interactionIdentity() },
+      picker: this.picker === undefined
+        ? undefined
+        : { owner: this.pickerOwnerSerial, header: this.picker.header, index: this.picker.index },
+      modelPicker: this.modelPicker === undefined
+        ? undefined
+        : { index: this.modelPicker.index, selected: [...this.modelPicker.selected].sort().join(',') },
+      reference: this.referencePhase,
+      add: this.add === undefined ? undefined : { step: this.add.step, creating: this.add.creating === true },
+      // A browse/read refresh is not an Esc-semantic change: it must not revoke
+      // a legitimate press (the bar cells and their meaning stay the same).
+      clear: this.clear === undefined ? undefined : this.clear.phase,
+    })
+  }
+
+  /** Lay out + paint one bar row: the LAST (Esc) segment carries the scoped
+   *  Fullscreen secondary ink, every other hint stays `textMuted`, and only a
+   *  FULLY painted Esc segment publishes its span. */
+  private paintBar(segments: readonly ActionBarSegment[], width: number): string {
+    const layout = layoutActionBarRow(segments, width)
+    this.paintedEscape = undefined
+    if (layout.truncated || layout.spans.length === 0) return color.textMuted(layout.text)
+    const escapeIndex = segments.length - 1
+    let span: { startCol: number; endCol: number } | undefined
+    // A pending write paints the real wait fact but is not an affordance: the
+    // Esc key only reports that the Host has not settled, so it publishes no
+    // span and a click on it is inert.
+    const waiting = segments[escapeIndex]?.text === WAIT_ESC_HINT
+    const painted = layout.spans.map(candidate => {
+      if (candidate.inputIndex !== escapeIndex || waiting) return color.textMuted(candidate.text)
+      span = { startCol: candidate.startCol, endCol: candidate.endCol }
+      return paintActionSpan(candidate.text, 'secondary')
+    })
+    this.paintedEscape = span
+    const segmentWidth = layout.spans.reduce((sum, candidate) => sum + visibleWidth(candidate.text), 0)
+      + Math.max(0, layout.spans.length - 1) * visibleWidth(ACTION_BAR_SEPARATOR)
+    const padding = Math.max(0, visibleWidth(layout.text) - segmentWidth)
+    return painted.join(color.textMuted(ACTION_BAR_SEPARATOR)) + ' '.repeat(padding)
   }
 
   render(width: number): string[] {
@@ -1758,16 +1953,16 @@ export class ModelsWorkspacePage implements Component {
       // Below its 8-row gate the question does not accept edits or Enter: the
       // ONLY real key is Esc, which cancels the embedded question. Do not
       // advertise editing/submit hints that this frame cannot honour.
-      const bar = color.textMuted(renderActionBarRow(
+      const bar = this.paintBar(
         usable
           ? [
               { text: 'type to edit', priority: 5 },
               { text: 'Enter continue', priority: 6 },
-              { text: 'Esc back', priority: 8 },
+              { text: 'Back [Esc]', priority: 8 },
             ]
-          : [{ text: 'Esc cancel', priority: 8 }],
+          : [{ text: 'Cancel [Esc]', priority: 8 }],
         width,
-      ))
+      )
       this.paintedCopy = false
       this.copyValue = undefined
       this.paintedTargets = []
@@ -1781,7 +1976,7 @@ export class ModelsWorkspacePage implements Component {
       this.paintedCopy = false
       if (!this.pickerUsable) {
         this.paintedTargets = []
-        const bar = color.textMuted(renderActionBarRow([{ text: 'Esc cancel', priority: 8 }], width))
+        const bar = this.paintBar([{ text: 'Cancel [Esc]', priority: 8 }], width)
         const warning = fit(color.warning(`Resize the terminal: the authorization notice, model choices and actions need ${required} rows.`), width)
         return this.pad(this.barAtLastRow([warning], height, width, bar), height, width)
       }
@@ -1794,12 +1989,12 @@ export class ModelsWorkspacePage implements Component {
         const target = targets[index]!
         targets[index] = { ...target, row: target.row + pickerTop }
       }
-      const bar = color.textMuted(renderActionBarRow([
+      const bar = this.paintBar([
         { text: 'Space toggle', priority: 5 },
         { text: 'Enter apply', priority: 6 },
         { text: 'm manual', priority: 4 },
-        { text: 'Esc cancel', priority: 8 },
-      ], width))
+        { text: 'Cancel [Esc]', priority: 8 },
+      ], width)
       this.paintedTargets = targets
       return this.pad(this.barAtLastRow(body, height, width, bar), height, width)
     }
@@ -1811,7 +2006,7 @@ export class ModelsWorkspacePage implements Component {
       this.paintedCopy = false
       if (!this.pickerUsable) {
         this.paintedTargets = []
-        const bar = color.textMuted(renderActionBarRow([{ text: 'Esc cancel', priority: 8 }], width))
+        const bar = this.paintBar([{ text: 'Cancel [Esc]', priority: 8 }], width)
         const warning = fit(color.warning(`Resize the terminal: the authorization notice, sign-in choices and actions need ${required} rows.`), width)
         return this.pad(this.barAtLastRow([warning], height, width, bar), height, width)
       }
@@ -1824,11 +2019,11 @@ export class ModelsWorkspacePage implements Component {
         const target = targets[index]!
         targets[index] = { ...target, row: target.row + pickerTop }
       }
-      const bar = color.textMuted(renderActionBarRow([
+      const bar = this.paintBar([
         { text: 'Up/Down choose', priority: 5 },
         { text: 'Enter select', priority: 6 },
-        { text: 'Esc cancel', priority: 8 },
-      ], width))
+        { text: 'Cancel [Esc]', priority: 8 },
+      ], width)
       this.paintedTargets = targets
       return this.pad(this.barAtLastRow(body, height, width, bar), height, width)
     }
@@ -1840,7 +2035,7 @@ export class ModelsWorkspacePage implements Component {
       this.paintedActionIds.clear()
       this.paintedCopy = false
       this.paintedTargets = []
-      const bar = color.textMuted(renderActionBarRow([{ text: this.fallbackEscHint(), priority: 8 }], width))
+      const bar = this.paintBar([{ text: this.fallbackEscHint(), priority: 8 }], width)
       const body = [fit(color.warning('Resize the terminal to show the page actions.'), width)]
       return this.pad(this.barAtLastRow(body, height, width, bar), height, width)
     }
@@ -1893,7 +2088,7 @@ export class ModelsWorkspacePage implements Component {
     return out
   }
 
-  /** The one truthful Esc action when no Action row fits. The Add Provider
+/** The one truthful Esc action when no Action row fits. The Add Provider
    *  catalog binds a non-empty filter to Esc BEFORE it can leave the page, so
    *  the fallback hint names that real effect instead of claiming a back the
    *  key will not perform. */
@@ -1902,19 +2097,19 @@ export class ModelsWorkspacePage implements Component {
    *  in-flight state (it never leaves); a pending provider authorization is
    *  the opposite case and Esc explicitly cancels it. */
   private pendingEscHint(): string | undefined {
-    if (this.referencePhase === 'pending') return 'Esc wait'
-    if (this.view.kind === 'review' && this.add?.creating === true) return 'Esc wait'
-    if (this.view.kind === 'logout' && this.clear?.phase === 'pending') return 'Esc wait'
+    if (this.referencePhase === 'pending') return WAIT_ESC_HINT
+    if (this.view.kind === 'review' && this.add?.creating === true) return WAIT_ESC_HINT
+    if (this.view.kind === 'logout' && this.clear?.phase === 'pending') return WAIT_ESC_HINT
     if (this.view.kind === 'provider'
-      && (this.auth?.phase === 'starting' || this.auth?.phase === 'running')) return 'Esc cancel'
+      && (this.auth?.phase === 'starting' || this.auth?.phase === 'running')) return 'Cancel [Esc]'
     return undefined
   }
 
   private fallbackEscHint(): string {
     const pending = this.pendingEscHint()
     if (pending !== undefined) return pending
-    if (this.view.kind === 'add-catalog' && this.catalogFilter !== '') return 'Esc clear filter'
-    return 'Esc back'
+    if (this.view.kind === 'add-catalog' && this.catalogFilter !== '') return 'Clear filter [Esc]'
+    return 'Back [Esc]'
   }
 
   /** Keep the page's semantic bar on the physical last row: the body is
@@ -2036,6 +2231,9 @@ export class ModelsWorkspacePage implements Component {
           color.warning('Stale — the provider configuration is not current'),
           color.textDim(sanitizedPhysicalLine(this.readFailure ?? 'the last snapshot is not the current authority')),
           color.textDim('Press r to refresh; an authority-dependent write waits for the fresh read.'),
+          ...(this.authorizationNotice === undefined
+            ? []
+            : [color.textDim(sanitizedPhysicalLine(this.authorizationNotice))]),
         ]
       case 'error':
         return [
@@ -2043,6 +2241,12 @@ export class ModelsWorkspacePage implements Component {
           color.textDim('Press r to retry.'),
         ]
       case 'ready':
+        if (this.authorizationNotice !== undefined) {
+          return [color.textDim(sanitizedPhysicalLine(this.authorizationNotice))]
+        }
+        if (this.recordPresence?.kind === 'unknown') {
+          return [color.warning(`The stored credential state is unconfirmed: ${sanitizedPhysicalLine(this.recordPresence.reason)}`)]
+        }
         if (this.recordPresence?.kind === 'failed') {
           return [color.warning(`The stored credential records could not be read: ${sanitizedPhysicalLine(this.recordPresence.reason)}`)]
         }
@@ -2101,7 +2305,7 @@ export class ModelsWorkspacePage implements Component {
     // A backend that cannot enumerate records is UNAVAILABLE, never an empty
     // answer that would read as "not signed in".
     if (presence.kind === 'unavailable') return { kind: 'unavailable', reason: presence.reason }
-    if (presence.kind === 'failed') return { kind: 'unknown', reason: presence.reason }
+    if (presence.kind === 'failed' || presence.kind === 'unknown') return { kind: 'unknown', reason: presence.reason }
     const key = row.key
     const configured = key === undefined
       ? presence.records.some(entry => entry.route !== undefined && entry.route === row.route)
@@ -2177,7 +2381,7 @@ export class ModelsWorkspacePage implements Component {
         label: row.inFlight ? 'Sign-in in progress' : this.auth?.targetIdentity === row.identity && this.auth.phase === 'authorized' ? 'Sign in again (provider)' : 'Sign in (provider)',
         // A native sign-in writes a credential record: it waits for the fresh
         // read like every other authority-dependent write.
-        enabled: mayWrite && !row.inFlight && (this.auth === undefined || this.auth.phase === 'authorized' || this.auth.phase === 'cancelled' || this.auth.phase === 'failed'),
+        enabled: mayWrite && !row.inFlight && (this.auth === undefined || this.auth.phase === 'authorized' || this.auth.phase === 'cancelled' || this.auth.phase === 'failed' || this.auth.phase === 'unconfirmed'),
       })
     }
     if (row.kind === 'reference' || (row.ref !== undefined && row.namesCredential)) {
@@ -2477,7 +2681,13 @@ export class ModelsWorkspacePage implements Component {
     const view = this.view
     const clear = this.clear
     if (view.kind !== 'logout' || clear === undefined) return { content: [], actions: [] }
+    const unconfirmed = clear.phase === 'unconfirmed'
     const content: string[] = [color.textStrong('Clear stored credential'), '']
+    // The unconfirmed outcome is the frame's SAFETY fact: it is pinned directly
+    // under the title so a short-height frame can never clip the only statement
+    // that says "unknown, read before retrying" while the exact target facts
+    // stay below it.
+    if (unconfirmed) content.push(color.warning('Outcome unconfirmed — refresh stored credentials before retrying.'))
     if (view.target.kind === 'reference') {
       content.push(...this.fact('API key reference', view.target.ref, width))
       content.push(...this.fact('Provider', view.target.route ?? view.target.label, width))
@@ -2487,15 +2697,30 @@ export class ModelsWorkspacePage implements Component {
     }
     content.push('')
     if (clear.phase === 'reading') content.push(color.textMuted('Reading the credential store…'))
-    else if (clear.phase === 'failed') content.push(color.error(`Not cleared: ${sanitizedPhysicalLine(clear.reason ?? 'the clear could not be verified')}`))
-    else if (clear.phase === 'pending') content.push(color.textMuted('Clearing — the Host has not confirmed yet.'))
+    else if (unconfirmed) {
+      // A dispatched delete whose Host settlement was lost: neither success nor
+      // failure, and never a reason to re-send it automatically.
+      if (clear.reason !== undefined) content.push(color.textDim(sanitizedPhysicalLine(clear.reason)))
+      content.push(color.textDim('The Host may already have removed it. Reading the current Host once is the only next step.'))
+    } else if (clear.phase === 'failed') {
+      const reasonText = sanitizedPhysicalLine(clear.reason ?? 'the clear could not be verified')
+      if (clear.failure === 'not-sent') content.push(color.error(`Not sent: ${reasonText}`))
+      else if (clear.failure === 'still-stored') content.push(color.warning(`Still stored: ${reasonText}`))
+      else if (clear.failure === 'rejected') content.push(color.error(`Failed: ${reasonText}`))
+      else content.push(color.error(`Not cleared: ${reasonText}`))
+    } else if (clear.phase === 'pending') content.push(color.textMuted('Clearing — the Host has not confirmed yet.'))
     else if (clear.phase === 'done') content.push(color.success(sanitizedPhysicalLine(clear.result ?? 'cleared')))
     else if (!clear.configured) content.push(color.textMuted('Nothing stored for this target — nothing will be cleared.'))
-    else content.push(color.warning('This removes the locally stored credential. The current model is not switched.'))
+    else if (view.target.kind === 'record') {
+      content.push(color.warning('This clears the local stored credential; it does not revoke access at the issuer or switch the current model.'))
+    } else content.push(color.warning('This removes the locally stored credential. The current model is not switched.'))
     if (this.notice !== undefined) content.push('', color.warning(sanitizedPhysicalLine(this.notice)))
     this.copyValue = undefined
     const actions: ActionLine[] = []
     if (clear.phase === 'ready' && clear.configured) actions.push({ id: 'clear:confirm', label: 'Clear credential', enabled: true })
+    // The unconfirmed state offers ONE read-only action; the old confirmation is
+    // never reused before a fresh authoritative presence read.
+    if (clear.phase === 'unconfirmed') actions.push({ id: 'clear:refresh', label: 'Refresh records [r]', enabled: true })
     if (clear.phase !== 'pending') actions.push({ id: 'clear:back', label: '← Back', enabled: true })
     return { content, actions }
   }
@@ -2597,10 +2822,10 @@ export class ModelsWorkspacePage implements Component {
       && Math.max(1, this.bodyHeight) - 1 - actions.length >= 1) {
       segments.push({ text: 'Tab sections', priority: 0 })
     }
-    segments.push({ text: this.pendingEscHint() ?? 'Esc back', priority: 8 })
-    const rendered = renderActionBarRow(segments, width)
+    segments.push({ text: this.pendingEscHint() ?? 'Back [Esc]', priority: 8 })
+    const rendered = this.paintBar(segments, width)
     this.paintedCopy = rendered.includes('c copy')
-    return color.textMuted(rendered)
+    return rendered
   }
 
   // ── input ────────────────────────────────────────────────────────────────
@@ -2736,6 +2961,7 @@ export class ModelsWorkspacePage implements Component {
   }
 
   private setPicker(picker: PickerState): void {
+    this.pickerOwnerSerial += 1
     if (this.picker === undefined) this.picker = picker
     else this.pickerQueue.push(picker)
     this.revision += 1
@@ -2747,6 +2973,7 @@ export class ModelsWorkspacePage implements Component {
   private removePicker(picker: PickerState): void {
     const token = picker.token
     if (this.picker?.token === token) {
+      this.pickerOwnerSerial += 1
       this.picker = this.pickerQueue.shift()
     } else {
       const index = this.pickerQueue.findIndex(candidate => candidate.token === token)
@@ -3026,6 +3253,7 @@ export class ModelsWorkspacePage implements Component {
       case 'review:done': this.addSerial += 1; this.add = undefined; this.enter({ kind: 'list' }); return 'handled'
       case 'records:back': this.enter({ kind: 'list' }); return 'handled'
       case 'clear:confirm': this.confirmClear(); return 'handled'
+      case 'clear:refresh': this.readClearRecord(); return 'handled'
       case 'clear:back': this.clear = undefined; this.enter({ kind: 'list' }); return 'handled'
       case 'guide:back': this.enter({ kind: 'list' }); return 'handled'
       case 'page:back': return 'exit'
@@ -3249,8 +3477,11 @@ export class ModelsWorkspacePage implements Component {
     if (attemptId !== undefined) {
       // A native attempt must not outlive the page with an open prompt. The
       // account browser attempt is deliberately NOT cancelled here (it is the
-      // Host's, not this page's). Keep the subscription alive until the Host
-      // settles so its outcome cannot hang on a dropped settled event.
+      // Host's, not this page's). The still-live flow subscription must reach a
+      // terminal: a Remote stream that can no longer observe the official
+      // settlement reports `unconfirmed`, and the Direct adapter's caller-abort
+      // path settles from the official outcome, so the owned flow task cannot
+      // hang on a lost event.
       this.source.run('models cancel sign-in on close', async () => {
         await this.source.cancelAuthorization(attemptId)
       })

@@ -7,6 +7,110 @@
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-11-21
+
+### 新增
+
+#### Daemon 模式（0.5.7 重大更新，Linux/macOS）
+
+- **独立 Host、可断开的 TUI**：默认 Direct 模式不变；切换到 Daemon 后，Host 独立运行，退出当前终端不再结束 Agent 工作。
+- **多客户端共享 Session**：同一 Profile 下，多个 TUI、官方 Web 和本地 ACP 客户端可以连接同一 Host，访问同一 Agent Session，不必为每个界面重复开启会话。
+- **启用方式**：只想体验一次，可直接运行：
+
+  ```sh
+  DSH_PI_TUI_BACKEND=daemon dsh --profile pi-tui
+  ```
+
+  也可在 `/settings → General → Backend` 选择 `Daemon` 并保存，下次启动生效；环境变量只覆盖本次启动。
+- **Host 生命周期管理**：通过 `dsh --profile pi-tui daemon status|start|stop|restart|logs` 查看和管理 Host；可选使用 `daemon install|uninstall` 安装/移除 Linux systemd 用户服务或 macOS LaunchAgent，普通 Daemon 运行不依赖系统服务。
+- **Web 与 ACP 接入**：`dsh --profile pi-tui web status|enable|disable|url|open` 可在不打开 TUI 的情况下管理运行中的官方 Web；`/acp` 可按需开启/关闭本地 ACP v1 接口，供兼容客户端接入。
+- **退出与更新**：Daemon 下 `/exit`、`/quit` 默认只断开当前 Client，任务进行中可选择保留工作或停止工作；停止整个 Host 使用 `daemon stop`。更新 TUI 后，使用 `daemon restart` 让运行中的 Host 切换到新版本。
+
+#### 其他新增
+- **Agent Team 模式**：`/model` 增加独立的 Agent Team 开关，并将模型、Reasoning Effort 和 Team 设置分区展示；关闭已有活动记录的 Team 时提供确认。
+- **Work / Team 任务中心**：`/tasks` 增加 Work、Team 双页面。Work 展示当前任务与执行情况；Root Session 的 Team 页面可查看团队任务和成员。支持页面切换、搜索及任务类型筛选；Team 页面以查看为主。
+- **更清晰的 Subagent 和 Job 展示**：已跟踪的 Subagent 树默认逐层展开，仍可手动折叠；运行中的 Job 优先显示，已结束的 Job 收入可展开的历史（完整任务中心按 `j`，TSP Work Hub 按 `Alt+J`），减少长历史对当前工作的干扰。
+- **更多可视化设置**：增加 Subagent 模型与限制的分项编辑、Agent Loop 并行工具数和 Shell 执行限制；Web Search/Fetch、ACP 自动启动、Session 日志上传等设置使用 Host 实际配置并支持保存与重置。
+- **MCP 与第三方插件**：Settings 可查看、探测、重启、配置 MCP Server；支持第三方插件的 Client-local `./tui` 扩展入口、每包独立设置及持久化配置，并区分 Host 已安装与当前 Client 已加载状态。
+- **Workspace / Session 操作**：Session Browser 改为按 Workspace 分组，支持目录展开和浏览；新增 `--session [id-or-query]`、`-c/--continue` 启动入口，改进无会话时的 Workspace 选择、`@file` 补全和 Host 目录浏览。
+- **输入队列与 Host 工具**：`/queue` 可查看、修改或删除待发送输入，Dock 增加快捷入口；Daemon 客户端补齐 Host Shell、命令产生的文件和正式附件上传，Skills 列表可随 Host Workspace 文件变化刷新。
+- **转录阅读与图像**：新增更完整的 Full/Focus/Compact 阅读方式、`Ctrl+F` 当前视图搜索与 `Ctrl+Shift+F` 全文搜索；改善工具/工作流卡片展开、消息复制、SVG/图片预览和窄屏显示。可选 TSP 渲染器获得原生转录及任务卡片交互。
+- **macOS Computer Use 设置**：在 Settings → Tools 中查看 Computer Use 能力、系统授权和应用许可，并可执行相关授权与管理操作。
+
+### 改进
+
+- **取消操作**：忙碌时的 `Ctrl+C` 优先取消当前工作，避免误退出。
+- **Plan、Goal 与任务反馈**：Plan Review 可以直接跳转查看对应计划内容后再决策；Goal Dock 会随终端宽度展示目标；任务、Subagent 和工具执行状态更容易在转录中定位。
+- **发送与交互体验**：输入草稿在 Host 接受后才清除；Compact 期间可以正常排队。完善全屏任务、历史、图片、设置和 Question 面板的鼠标点击、滚轮及返回操作。
+- **Direct/Daemon 功能一致性**：改进 Remote 端的 Provider/账号信息、授权状态、Web 设置、Host 命令补全、Session 恢复以及不同工作目录下的操作体验。
+
+### 修复
+
+- 修复已接收输入后 `Submitting…` / `Queued…` 提示可能一直停留，以及 Compact 期间队列输入丢失的问题。
+- 修复 `/new` 附近提交命令的 Session 归属/结束时序，以及无会话状态下默认模型或 Reasoning Effort 保存后未带入新会话的问题。
+- 修复 `Ctrl+R` 的 Current Session 历史随工作目录变化而不准确的问题；改进文件补全排序、被忽略文件匹配和 Remote Host 命令候选。
+- 修复终端更新屏幕外内容时可能闪烁、清空滚动历史，以及 Kitty 图片遮挡弹窗的问题。
+- 修复部分 Question 标题切换、任务/历史面板、鼠标滚轮、图片与设置页面的点击失效；Footer 临时提示不再挤动 Composer 布局。
+- 修复 Daemon 在 macOS 上的部分连接/启动竞态、跨版本 Host 管理和 Herdr 会话恢复问题。
+
+### 安装与升级
+
+0.5.7 需要 **Node.js ≥24.9.0** 和 **DSH ≥0.2.2-rc.3**，推荐使用 **DSH 0.2.2-rc.5**：
+
+~~~sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.5
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.7
+dsh --profile pi-tui
+~~~
+
+从 0.5.6 升级需要同时更换 DSH Runtime。先结束运行中的任务、停止旧 Host 并备份 Session/Profile 数据，再安装新版配对；仅更新 TUI 后，已运行的 Daemon Host 需要显式 `daemon restart` 才会使用新代码。
+
+历史配对：`@deepseek-ai/dsh@0.2.2-rc.1` + `@xmoon76/dsh-pi-tui@0.5.6`；`@deepseek-ai/dsh@0.2.1-rc.5` + `@xmoon76/dsh-pi-tui@0.5.5`。
+
+## [0.5.6] - 2026-11-08
+
+### 安装与版本对应
+
+本版要求 DSH `>=0.2.2-rc.1`，精确验证目标为 `0.2.2-rc.1`，Node.js `>=24.9.0`；不兼容 DSH `0.2.1-rc.*`。安装 DSH 需允许官方原生安装脚本：
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.1
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.6
+dsh --profile pi-tui
+```
+
+从 `0.5.5` 升级也必须切换 DSH。先结束 Agent 回合和后台工作、正常退出旧 TUI/Host，并备份 Profile/patch、Session 原始日志、Workspace 及所需 Host 资源和凭据引用；本版不支持热升级。0.2.2 写入的数据不保证能由 rc5 原地读取。回退时将备份恢复到独立目录，并启动原有 DSH/TUI 配对，不要在已升级目录降级。
+
+### 升级与安全须知
+
+- **DSH 0.2.2 默认不再要求先读后写。** 上游关闭了 `fs-observation-policy` 默认值；需要该约束时，请用官方 Profile override 重新启用，本扩展不会替你修改配置。
+- **`web_fetch` 可访问 localhost 和私网地址。** 需要限制时使用 Host 网络隔离、代理/防火墙或官方 tool pre-execute policy，不要依赖 TUI URL 规则。
+- **同一 Host 的附件存储不按 Session 隔离。** Gateway/Peer 方法级授权仍是权限边界；需要会话隔离时使用不同 Host 和 `DSH_HOME`。
+- **旧 `schedule/change` 事件不会迁移为 Host Scheduled Task。** 新 `schedule_*` 工具管理 Host-wide 任务，旧调用和结果仅作为历史记录展示。
+- 旧版配对仍有效：`@deepseek-ai/dsh@0.2.1-rc.5` 搭配 `@xmoon76/dsh-pi-tui@0.5.5`；`@deepseek-ai/dsh@0.2.0-rc.2` 搭配 `@xmoon76/dsh-pi-tui@0.5.2-rc.1`。
+
+### 新增
+
+- **Host Schedule 管理。** PiTui Direct 的 `/schedule` 管理 Host-wide 任务，不需要 Session；任务由 Host 执行。
+- **PiTui Session Workspace。** `/sessions`、`/search`、`/resume` 按 Needs attention、Working、Recent 分组，可按 Workspace 浏览；`Space` 查看只读 Peek，`Enter` 才切换。Direct 下新 Session（包括 `/new`）由官方 Host Workspace 决定归属。主编辑器严格空白时，600ms 内两次无修饰 `←` 打开 All workspaces，第一次仍是普通左移。
+- **插件版本更新。** Plugin Manager 可检查 Host 标记为可更新的第三方 Registry Profile bundle，选择具体版本并确认更新；结果以 Host 回读为准，当前运行的 TUI 不能从自身面板更新。
+- **共享文件交付指导。** 支持的 Agent preset 获得官方文件链接、图片引用和 `present` 交付建议；不依赖 Web 是否启用。
+- **粘贴图片路径自动附件化。** 支持的终端中，可识别的本地绝对图片路径粘贴后会成为图片附件；读取期间不能发送，失败时保留路径文字。
+
+### 变更
+
+- **（不兼容）DSH 扩展 API。** DSH 0.2.2 移除了 `composeAgent(ctx, ModelSelectionRef)`。扩展应改用 Agent-scoped compose callback，并通过 `agent.model` 读写模型选择；仅使用内置 TUI 的 Profile 无需改动。
+- **（不兼容）图表/SVG 引用改用 `sv2`。** `sv1_…`、`visual-ref-v1:` 和 `[dsh-visual-sv1_…]` 不迁移也不再解析；旧内联图表可能退化为文本。
+- **普通 Fork/Rewind 不再显示为父子 Session lineage。** DSH 0.2.2 将其作为独立 Session；Session lineage 仅表示 Subagent 关系。
+- **`/transcript` 改为官方 Session Markdown。** Direct 下导出 Host 官方格式，用户消息为引用块，过程内容可折叠。`/export` ZIP 行为不变。
+- **Markdown 裸 URL 的标点边界调整。** 裸 URL 在首个 CJK/全角标点处结束链接，包括平衡全角括号；可见正文、显式 Markdown 链接和复制文本不变。
+
+### 修复
+
+- **内联附件完成后显示成功提示。** PiTui 正文中的 `/image`、`/attach` 候选已成功写入草稿时显示提示；写入被拒绝则不再误报成功。
+- **修复新建会话后立即退出的保存竞态。** `/new` 后紧接 `/exit` 不再因重复 flush 已关闭的句柄而产生退出错误。
+- **退出时清除受支持终端的过期程序状态。** 仅已启用 Program Status 上报的终端会收到清除序列。
+
 ## [0.5.5] - 2026-11-03
 
 ### 安装与版本对应
@@ -1683,7 +1787,9 @@ dsh --profile pi-tui
 - 全屏布局、Ctrl+F 搜索、主题系统。
 - 单包发布模型。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.5...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.7...HEAD
+[0.5.7]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.6...v0.5.7
+[0.5.6]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.5...v0.5.6
 [0.5.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.5.2-rc.1...v0.5.3

@@ -23,17 +23,18 @@
  * - deterministic image bytes and Host-only/Client-only path markers where a
  *   wrong-machine discriminator is required
  *
+ * INTEGRATION SINKS
+ * - one authenticated Host-owned shell stream through the real Gateway, with
+ *   `!!` card-only settlement and `!` result submission to the same Host Session
+ *
  * DELIBERATELY ABSENT
  * - PR4 command plane (slash-command catalog/claim) — plain prompts only
- * - generic-file upload receipts (D4): the fail-closed path is proven at L1
- *   (remote-prompt-serializer.test.ts)
- * - a qualified Remote user-shell carrier (CARRIER_GAP): the Remote shell
- *   proofs here are the FAIL-CLOSED proofs
  *
  * @module @xmoon76/dsh-pi-tui/runner-remote-submission.test
  */
 
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import test from 'node:test'
 import { closeSync, ftruncateSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
@@ -41,10 +42,18 @@ import { createRequire } from 'node:module'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { Config as TuiConfigSchema } from '../../src/index.ts'
 import { TuiApp } from '../../src/tui-app.ts'
+import { probeAttachment } from '../../src/client/media/attachment/intake.ts'
 import { applyRunnerWithRuntime } from '../../src/app/bootstrap.ts'
+import type { LaunchWorkspaceVerdict } from '../../src/app/remote-process/local-workspace-equivalence.ts'
+import { statSync } from 'node:fs'
 import { TRANSITION_FENCE_NOTICE } from '../../src/app/submission/steer.ts'
 import type { RemoteApplicationOverride } from '../../src/app/application-runtime.ts'
-import { createRemoteApplicationRuntime } from '../../src/app/remote/runtime.ts'
+import type { ImageAttachmentRefLike } from '../../src/domain/media/types.ts'
+import type { RemotePromptSerializer } from '../../src/runtime/remote/session-writer-remote.ts'
+import { RemotePromptSerializerProduction } from '../../src/runtime/remote/prompt-serializer-remote.ts'
+import { createRemoteFileReceiptUploader } from '../../src/runtime/remote/file-upload-remote.ts'
+import type { ExperimentalRemoteRuntime } from '../support/m3-inprocess/runtime.ts'
+import { createRemoteApplicationRuntime } from '../support/m3-inprocess/application-runtime.ts'
 import { waitFor } from '../support/remote-application-fixture.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -120,6 +129,20 @@ async function mountHost(life: TestLifecycle, presetId: string, options: { reado
   } as never)
   const goalUnit = await import('@deepseek-ai/dsh-goal')
   await base.ctx.plugin(goalUnit.default as never, { defaultMaxGoalRounds: 5 } as never)
+  // One REAL human-invocable skill in the Host composition: the official
+  // skill registry is mounted once (unless the base already provides it) and a
+  // runtime skill is registered before any agent/catalog read.
+  if (base.ctx.get('skills') === undefined) {
+    const SkillRegistry = (await import('@deepseek-ai/dsh-skill')).default
+    await base.ctx.plugin(SkillRegistry, {})
+  }
+  base.ctx.get('skills')!.register({
+    name: 'f4-l6-skill',
+    description: 'F4 L6 qualification skill',
+    content: 'F4_L6_SKILL_BODY_20261111',
+    source: 'runtime',
+    invocation: { modelInvocable: true, userInvocable: true },
+  })
   return base
 }
 
@@ -135,21 +158,41 @@ interface Pr3Fixture {
  * Mount the REAL Remote runner WITHOUT a serializer stub: the aggregate's
  * default (the production serializer) is the composition under test.
  */
+
+/** An in-process VERIFIED launch proof for composition tests. The REAL
+ * classifier's evidence is validated by its own unit contract and the packed
+ * OS lane; this fixture only needs a legal sessionless Workspace target. */
+function launchProof(cwd: string): LaunchWorkspaceVerdict {
+  const evidence = statSync(cwd, { bigint: true })
+  return {
+    kind: 'verified',
+    launchCwd: cwd,
+    instanceId: 'in-process-fixture-host',
+    hostPid: process.pid,
+    device: evidence.dev.toString(),
+    inode: evidence.ino.toString(),
+    revalidate: async () => true,
+  }
+}
+
 async function mountPr3Runner(
   life: TestLifecycle,
   options: {
     readonly presetId?: string
     readonly resumeSessionId?: string
     readonly host?: HostFixture
+    readonly buildPromptSerializer?: (wire: ExperimentalRemoteRuntime) => RemotePromptSerializer
   } = {},
 ): Promise<Pr3Fixture> {
   const presetId = options.presetId ?? 'm3-4-pr3-preset'
   const host = options.host ?? await mountHost(life, presetId)
-  const { createRemoteApplicationRuntime } = await import('../../src/app/remote/runtime.ts')
+  const { createRemoteApplicationRuntime } = await import('../support/m3-inprocess/application-runtime.ts')
   const aggregate = await createRemoteApplicationRuntime({
     hostContext: host.ctx,
     waitForHostPrerequisites: async () => {},
     // NO promptSerializer: the PRODUCTION serializer composes by default.
+    // A qualification wrapper may still decorate that production serializer.
+    ...(options.buildPromptSerializer === undefined ? {} : { buildPromptSerializer: options.buildPromptSerializer }),
     // The runner receives the same startup facts (M3-6 PR1).
     clientUiStartup: {
       ...(options.resumeSessionId === undefined ? {} : { sessionId: options.resumeSessionId }),
@@ -188,7 +231,16 @@ async function mountPr3Runner(
   }
   life.defer(() => { TuiApp.prototype.start = originalStart })
   const runnerFiber = runnerCtx.plugin(pluginCtx => {
-    applyRunnerWithRuntime(pluginCtx, TuiConfigSchema({ fullscreen: 'off', sessionId: options.resumeSessionId } as never), override)
+    applyRunnerWithRuntime(
+      pluginCtx,
+      TuiConfigSchema({ fullscreen: 'off', sessionId: options.resumeSessionId } as never),
+      override,
+      undefined,
+      // The REAL classifier is proven by its own unit contract and the packed
+      // OS lane; this in-process composition only needs a sessionless first
+      // create to have a legal Host Workspace target.
+      launchProof(process.cwd()),
+    )
   })
   await runnerFiber
   await waitFor('remote runner mount', () => vt.getViewport().join('').length > 0, 20_000)
@@ -208,6 +260,23 @@ function submitDraft(fixture: Pr3Fixture, text: string): void {
   const app = fixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(): void }
   app.setDraft(text)
   app.submitDraft()
+}
+
+/** Wait for a viewport fact, failing with the FULL viewport so a rendering
+ * mismatch is distinguishable from an execution failure. */
+async function waitForViewport(
+  fixture: Pr3Fixture,
+  label: string,
+  predicate: (view: string) => boolean,
+  timeoutMs = 20_000,
+): Promise<string> {
+  const started = Date.now()
+  for (;;) {
+    const view = fixture.vt.getViewport().join('\n')
+    if (predicate(view)) return view
+    if (Date.now() - started > timeoutMs) throw new Error(`timed out waiting for ${label}:\n${view}`)
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
 }
 
 /** Collect the notices the mounted surface posts (the canonical prototype
@@ -291,20 +360,48 @@ test('prompt negative: an empty or whitespace-only draft dispatches nothing', as
   const fixture = await mountPr3Runner(life, { presetId, resumeSessionId: mainId, host })
   await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
 
+  // Count every SessionFace.prompt on the production Client Session class.
+  // Install before either negative gesture; the valid control below takes the
+  // same submit FIFO turn and settles after any earlier dispatch.
+  const binding = fixture.aggregate.wire.client.sessions.binding(SessionId(mainId) as never)
+  assert.ok(binding !== undefined, 'the mounted Client retains the current Session binding')
+  const sessionFace = binding.session
+  const sessionPrototype = Object.getPrototypeOf(sessionFace) as { prompt: typeof sessionFace.prompt }
+  const originalPrompt = sessionPrototype.prompt
+  type PromptResult = Awaited<ReturnType<typeof originalPrompt>>
+  const promptCalls: Array<{ sessionId: string; result: PromptResult | undefined }> = []
+  sessionPrototype.prompt = function (this: typeof sessionFace, ...args: Parameters<typeof originalPrompt>) {
+    const call = { sessionId: this.sessionId, result: undefined as PromptResult | undefined }
+    promptCalls.push(call)
+    return originalPrompt.call(this, ...args).then(result => {
+      call.result = result
+      return result
+    })
+  }
+  life.defer(() => { sessionPrototype.prompt = originalPrompt })
+
   submitDraft(fixture, '')
   submitDraft(fixture, '   ')
-  // Give any (wrong) dispatch a chance to land, then require NOTHING: no
-  // durable user-rpc event, no official submission echo.
-  await new Promise(resolve => setTimeout(resolve, 500))
-  assert.equal(hostUserRows(fixture, mainId).length, 0,
-    'an empty/whitespace draft never reaches the Host')
-  const pending = fixture.aggregate.presentation.submissionPresentation.snapshot(mainId)
-  assert.ok(pending === undefined || pending.length === 0,
-    'no official submission echo exists for an empty draft')
-  // The real prompt path still works afterwards (the editor was never poisoned).
+
+  // A real accepted prompt is the positive completion control. Its settlement
+  // drains earlier FIFO work; the durable row separately witnesses Host commit.
   submitDraft(fixture, 'after empty gamma')
-  await waitFor('the real prompt lands', () =>
+  await waitFor('the real SessionFace prompt settles', () =>
+    promptCalls.length === 1 && promptCalls[0]?.result !== undefined, 20_000)
+  assert.equal(promptCalls[0]?.sessionId, mainId)
+  assert.equal(promptCalls[0]?.result?.ok, true, 'the positive control was accepted by the official Client')
+  await waitFor('the positive control reaches Host durable history', () =>
     hostUserRows(fixture, mainId).some(row => row.includes('after empty gamma')), 20_000)
+  assert.equal(promptCalls.length, 1, 'empty and whitespace-only submits never call the official SessionFace.prompt')
+
+  const rows = hostUserRows(fixture, mainId)
+  assert.equal(rows.filter(row => row.includes('after empty gamma')).length, 1,
+    'the positive control creates exactly one durable Host row')
+  assert.equal(rows.filter(row => row.trim() === '').length, 0,
+    'an empty/whitespace draft never reaches the Host')
+  const pending = fixture.aggregate.presentation.submissionPresentation.snapshot(mainId) ?? []
+  assert.equal(pending.some(item => item.text.trim() === ''), false,
+    'no official submission echo exists for an empty draft')
 })
 
 test('prompt: a sessionless first prompt creates the Session, then reaches the Host durable log', async (t) => {
@@ -326,33 +423,61 @@ test('prompt: a sessionless first prompt creates the Session, then reaches the H
   }
 })
 
-test('shell (Remote, CARRIER_GAP): `!` and `!!` BOTH fail closed — zero Client spawn, zero Session write, visible unavailable', async (t) => {
+test('shell (Remote): `!!` and `!` execute in the effective Host working directory', async (t) => {
   const life = testLifecycle(t)
-  const mainId = 'm3-4-pr3-shellgap'
+  const mainId = 'm6-f1-remote-shell-writer'
   const presetId = 'm3-4-pr3-preset'
   const host = await mountHost(life, presetId)
-  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  // Header A is the immutable creation directory; the effective directory is
+  // the committed official `workingDirectory` projection B, which is what the
+  // Host Shell admission compares against and what the command runs in.
+  const agent = await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const effectiveCwd = join(host.anchorDir, 'remote-shell-effective')
+  mkdirSync(effectiveCwd, { recursive: true })
+  await host.ctx.workingDirectory.set(agent, effectiveCwd)
   const fixture = await mountPr3Runner(life, { presetId, resumeSessionId: mainId, host })
+  const notices = recordNotices(life, fixture)
   await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
+  await waitFor('official Remote status follows the Host working directory', () =>
+    fixture.aggregate.presentation.sessionFacts.sessionStatus(mainId)?.cwd === effectiveCwd, 20_000)
+  assert.equal(agent.session.header.cwd, host.anchorDir,
+    'the immutable Session header keeps the creation directory while the effective cwd is B')
   const durableBefore = hostUserRows(fixture, mainId).length
-  submitDraft(fixture, '!!echo client-poison-marker')
-  await waitFor('unavailable notice', () => {
-    return fixture.vt.getViewport().join('').includes('Host user-shell execution is unavailable')
-  }, 15_000)
-  submitDraft(fixture, '!echo context-poison-marker')
-  await waitFor('second unavailable notice', () => {
-    const view = fixture.vt.getViewport().join('')
-    return view.includes('context-poison-marker') && view.includes('unavailable')
-  }, 15_000)
-  // ZERO execution: neither command's OUTPUT ever appears; ZERO Session write:
-  // the durable user rows are unchanged (a `!` result submit never ran).
-  const view = fixture.vt.getViewport().join('')
-  assert.equal(view.includes('client-poison-marker\n'), false, 'the command never executed (no output body)')
-  const durableAfter = hostUserRows(fixture, mainId)
-  assert.equal(durableAfter.length, durableBefore,
-    `zero durable user rows added by the failed-closed shell gestures (before ${durableBefore}, after ${durableAfter.length})`)
-  assert.equal(durableAfter.some(row => row.includes('poison')), false,
-    'no shell command or output reached the Session/model context')
+
+  submitDraft(fixture, '!!pwd; echo remote-shell-local-marker')
+  // The folded local-shell card is the Host execution's settlement surface:
+  // the command row carries the marker and the one outcome row carries the
+  // exit status. The pwd VALUE stays in the retained body until Ctrl+O.
+  await waitForViewport(fixture, 'the folded Remote `!!` output card', view =>
+    view.includes('$ pwd; echo remote-shell-local-marker') && view.includes('[exit 0]'))
+
+  // The default card is folded (local-shell-card.test.ts owns that display
+  // contract): the command output is reachable through the existing Ctrl+O
+  // expansion, not through the folded header/outcome rows. The expanded body
+  // renders the command row immediately followed by the captured stdout and
+  // exit marker; compare the whitespace-free stream so a long private-root
+  // pwd can wrap across physical rows without matching an unrelated footer
+  // copy of the same path.
+  fixture.vt.sendInput('\x0f')
+  await waitForViewport(fixture, 'the expanded Remote `!!` card body', view =>
+    view.replace(/\s+/gu, '')
+      .includes(`$pwd;echoremote-shell-local-marker${effectiveCwd}remote-shell-local-marker[exit0]`))
+  fixture.vt.sendInput('\x0f')
+  await fixture.vt.waitForRender()
+  assert.equal(hostUserRows(fixture, mainId).length, durableBefore,
+    '!! executes on the Host but adds no Session/model message')
+
+  submitDraft(fixture, '!pwd; echo remote-shell-context-marker')
+  await waitFor('Remote `!` Host result is serialized and accepted', () =>
+    hostUserRows(fixture, mainId).some(row => row.includes('remote-shell-context-marker')) || notices.length > 0, 20_000)
+  const resultRows = hostUserRows(fixture, mainId).filter(row => row.includes('remote-shell-context-marker'))
+  assert.equal(resultRows.length, 1,
+    `! adds exactly one Host result Session message: ${JSON.stringify(resultRows)}; notices=${JSON.stringify(notices)}`)
+  assert.ok(resultRows[0]?.includes(effectiveCwd),
+    `the Host command really ran in the effective directory B: ${JSON.stringify(resultRows[0])}`)
+  assert.ok(resultRows[0]?.includes('$ pwd; echo remote-shell-context-marker'),
+    `the Host writer preserves the command/result context: ${JSON.stringify(resultRows[0])}`)
+  assert.deepEqual(notices, [], `Remote shell completion must not report writer/transport errors: ${JSON.stringify(notices)}`)
 })
 
 test('image: known staged bytes → PromptContentPart → Host durable attachment → official readAttachment byte equality', async (t) => {
@@ -413,21 +538,27 @@ test('image: known staged bytes → PromptContentPart → Host durable attachmen
   // rc.2 durable user/message payload IS the message: content lives at
   // event.data.content (never .data.message.content).
   const blocks = ((imageEvent.data as { content?: unknown[] }).content ?? []) as
-    Array<{ type: string; attachment?: { attachmentId?: string } }>
+    Array<{ type: string; attachment?: ImageAttachmentRefLike }>
   const imageBlock = blocks.find(block => block.type === 'image')
   assert.ok(imageBlock?.attachment?.attachmentId !== undefined,
     'the durable row carries a Host attachment id (the image became durable)')
-  // The OFFICIAL authorized read through the real Client binding.
+  assert.equal(imageBlock.attachment.mediaType, 'image/png',
+    'the durable block carries the full reference metadata, not only the id')
+  assert.equal(imageBlock.attachment.width, 1)
+  assert.equal(imageBlock.attachment.height, 1)
+  assert.ok(imageBlock.attachment.bytes > 0)
+  // The OFFICIAL authorized read through the real Client binding, addressed by
+  // the COMPLETE durable reference the persisted user/message block carries.
   const binding = fixture.aggregate.wire.client.sessions.binding(SessionId(mainId) as never) as {
     session: {
-      readAttachment(attachmentId: never): Promise<
+      readAttachment(attachment: ImageAttachmentRefLike): Promise<
         | { ok: true; value: { data: Uint8Array } }
         | { ok: false; error: unknown }
       >
     }
   } | undefined
   assert.ok(binding !== undefined, 'the retained binding serves the official attachment read')
-  const read = await binding.session.readAttachment(imageBlock.attachment!.attachmentId as never)
+  const read = await binding.session.readAttachment(imageBlock.attachment)
   assert.ok(read.ok, 'the official readAttachment must succeed')
   if (read.ok) {
     assert.deepEqual(
@@ -436,6 +567,470 @@ test('image: known staged bytes → PromptContentPart → Host durable attachmen
       'staged bytes → PromptContentPart → Host durable attachment → readAttachment BYTE EQUALITY',
     )
   }
+})
+
+test('generic file: the real /attach intake → official receipt → Host durable file block with byte equality', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm6-f4-remote-file'
+  const presetId = 'm3-4-pr3-preset'
+  const host = await mountHost(life, presetId)
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const fixture = await mountPr3Runner(life, { presetId, resumeSessionId: mainId, host })
+  await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
+
+  // The durable Host proof is the Session event; the official Host attachment
+  // read is the byte authority. The Client-local source lives in a directory
+  // the Host workspace does NOT contain.
+  const sourceDir = life.tempDir('dsh-f4-client-source-')
+  const path = join(sourceDir, 'client-only-report.bin')
+  const source = Buffer.alloc(8 * 1024 * 1024)
+  for (let index = 0; index < source.length; index += 1) source[index] = index % 251
+  writeFileSync(path, source)
+  const sourceSha256 = createHash('sha256').update(source).digest('hex')
+
+  // Record the official beginSubmission echo input on the production Session
+  // instance: the pending FILE metadata must be the Host-issued ref, never a
+  // local name/size guess.
+  const binding = fixture.aggregate.wire.client.sessions.binding(SessionId(mainId) as never)
+  assert.ok(binding !== undefined, 'the mounted Client retains the current Session binding')
+  const sessionFace = binding.session as unknown as {
+    beginSubmission(input: unknown): unknown
+    prompt(...args: unknown[]): unknown
+  }
+  const sessionPrototype = Object.getPrototypeOf(sessionFace) as {
+    beginSubmission: (this: unknown, input: unknown) => unknown
+  }
+  const originalBegin = sessionPrototype.beginSubmission
+  const begins: unknown[] = []
+  sessionPrototype.beginSubmission = function patchedBegin(this: unknown, input: unknown) {
+    begins.push(input)
+    return originalBegin.call(this, input)
+  }
+  life.defer(() => { sessionPrototype.beginSubmission = originalBegin })
+
+  // REAL TUI intake: the /attach command stages the metadata draft and inserts
+  // the canonical placeholder into the live composer.
+  submitDraft(fixture, `/attach ${path}`)
+  const app = fixture.runnerApp() as unknown as { getDraft(): string; submitDraft(): void }
+  await waitFor('the /attach placeholder reaches the composer', () => app.getDraft().includes('[file #'), 15_000)
+  app.submitDraft()
+
+  const fileEventOf = (): { data: { content?: Array<{ type: string; attachment?: { attachmentId: string; name: string; bytes: number } }> } } | undefined => {
+    const session = fixture.host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+      snapshotEvents(): Array<{ type: string; data: unknown }>
+    }
+    return session.snapshotEvents().find(event => event.type === 'user/message'
+      && JSON.stringify(event.data).includes('client-only-report.bin')) as
+      { data: { content?: Array<{ type: string; attachment?: { attachmentId: string; name: string; bytes: number } }> } } | undefined
+  }
+  await waitFor('the Host durable user/message row carries the file block', () => fileEventOf() !== undefined, 60_000)
+  const blocks = fileEventOf()!.data.content ?? []
+  const fileBlock = blocks.find(block => block.type === 'file')
+  assert.ok(fileBlock?.attachment?.attachmentId !== undefined,
+    'the durable row carries a Host attachment id (the uploaded file became durable)')
+  const ref = fileBlock!.attachment!
+  assert.equal(ref.name, 'client-only-report.bin')
+  assert.equal(ref.bytes, source.byteLength, 'the Host metadata describes the actual uploaded byte count')
+
+  // G: the official echo registered the SAME Host-issued file metadata.
+  const fileBegin = begins.map(input => input as {
+    attachments?: Array<{ type: string; value?: { attachmentId?: string; name?: string; bytes?: number } }>
+  }).find(input => input.attachments?.some(attachment => attachment.type === 'file'))
+  assert.ok(fileBegin !== undefined, 'a file-bearing beginSubmission was registered')
+  const echoFile = fileBegin!.attachments!.find(attachment => attachment.type === 'file')!
+  assert.equal(echoFile.value?.attachmentId, ref.attachmentId,
+    'the pending FILE metadata is the Host-issued attachmentId, not a local guess')
+  assert.equal(echoFile.value?.name, ref.name)
+  assert.equal(echoFile.value?.bytes, ref.bytes)
+
+  // The Host's OWN attachment authority reads the stored bytes: SHA256 and
+  // length must equal the Client source exactly.
+  const attachments = host.ctx.get('attachments') as unknown as {
+    readFileStream(ref: unknown, signal?: AbortSignal): AsyncIterable<Uint8Array>
+  }
+  const stored: Uint8Array[] = []
+  for await (const chunk of attachments.readFileStream(ref)) stored.push(chunk)
+  const storedBytes = Buffer.concat(stored.map(chunk => Buffer.from(chunk)))
+  assert.equal(storedBytes.byteLength, source.byteLength)
+  assert.equal(createHash('sha256').update(storedBytes).digest('hex'), sourceSha256,
+    'Host stored bytes === Client source bytes (SHA256); chunk sizing is the Client streamer contract, proven at L1/L3')
+
+  // The TUI paints the accepted file row (the durable event is the source).
+  await waitFor('the file placeholder is painted in the transcript', () =>
+    fixture.vt.getViewport().join('').includes('client-only-report.bin'), 30_000)
+})
+
+test('a 1 KiB /attach file reaches Host storage with the same hash and paints', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm6-f4-remote-file-small'
+  const presetId = 'm3-4-pr3-preset'
+  const host = await mountHost(life, presetId)
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const fixture = await mountPr3Runner(life, { presetId, resumeSessionId: mainId, host })
+  await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
+  const sourceDir = life.tempDir('dsh-f4-small-')
+  const path = join(sourceDir, 'small.bin')
+  const source = Buffer.alloc(1024)
+  for (let index = 0; index < source.length; index += 1) source[index] = (index * 7 + 19) % 251
+  assert.equal(source.byteLength, 1024, 'the fixture is a deterministic 1 KiB binary')
+  writeFileSync(path, source)
+  const marker = 'F4_SMALL_FILE_20261111'
+  submitDraft(fixture, `/attach ${path}`)
+  const app = fixture.runnerApp() as unknown as { getDraft(): string; setDraft(text: string): void; submitDraft(): void }
+  await waitFor('the small file placeholder reaches the composer', () => app.getDraft().includes('[file #'), 15_000)
+  app.setDraft(`${app.getDraft()} ${marker}`)
+  app.submitDraft()
+  const session = host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+    snapshotEvents(): Array<{ type: string; data: unknown }>
+  }
+  await waitFor('the 1 KiB file row is durable', () => session.snapshotEvents().some(event =>
+    event.type === 'user/message' && JSON.stringify(event.data).includes(marker)), 20_000)
+  const durable = session.snapshotEvents().find(event => event.type === 'user/message'
+    && JSON.stringify(event.data).includes(marker))!
+  const content = (durable.data as { content: Array<{ type: string; attachment?: { attachmentId?: string; bytes?: number } }> }).content
+  const fileBlock = content.find(block => block.type === 'file')
+  assert.ok(fileBlock?.attachment?.attachmentId !== undefined)
+  assert.equal(fileBlock!.attachment!.bytes, source.byteLength)
+  const attachments = host.ctx.get('attachments') as unknown as {
+    readFileStream(ref: unknown): AsyncIterable<Uint8Array>
+  }
+  const chunks: Uint8Array[] = []
+  for await (const chunk of attachments.readFileStream(fileBlock!.attachment!)) chunks.push(chunk)
+  assert.equal(
+    createHash('sha256').update(Buffer.concat(chunks.map(chunk => Buffer.from(chunk)))).digest('hex'),
+    createHash('sha256').update(source).digest('hex'),
+    'the 1 KiB Client source bytes are the Host-stored bytes',
+  )
+  await waitFor('the small file row is painted', () =>
+    fixture.vt.getViewport().join('').includes('small.bin'), 30_000)
+})
+
+test('generic file: a source changed after /attach is refused with no Host prompt', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm6-f4-remote-file-changed'
+  const presetId = 'm3-4-pr3-preset'
+  const host = await mountHost(life, presetId)
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const fixture = await mountPr3Runner(life, { presetId, resumeSessionId: mainId, host })
+  const notices = recordNotices(life, fixture)
+  await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
+
+  const sourceDir = life.tempDir('dsh-f4-client-changed-')
+  const path = join(sourceDir, 'changed-report.bin')
+  writeFileSync(path, Buffer.alloc(256 * 1024, 3))
+  submitDraft(fixture, `/attach ${path}`)
+  const app = fixture.runnerApp() as unknown as { getDraft(): string; setDraft(text: string): void; submitDraft(): void }
+  await waitFor('the /attach placeholder reaches the composer', () => app.getDraft().includes('[file #'), 15_000)
+  app.setDraft(`${app.getDraft()} F4_CHANGED_SOURCE_PROMPT`)
+  // The source changes AFTER the immutable prepared snapshot's attach-time
+  // fingerprint was recorded, so the submit-time read must refuse.
+  writeFileSync(path, Buffer.alloc(3, 9))
+  const durableBefore = (() => {
+    const session = host.ctx.sessions.get(SessionId(mainId)) as unknown as { snapshotEvents(): Array<{ type: string }> }
+    return session.snapshotEvents().filter(event => event.type === 'user/message').length
+  })()
+  app.submitDraft()
+
+  await waitFor('the changed source is visibly refused', () =>
+    notices.some(notice => notice.includes('changed since it was attached')), 20_000)
+  const durableAfter = (() => {
+    const session = host.ctx.sessions.get(SessionId(mainId)) as unknown as { snapshotEvents(): Array<{ type: string; data: unknown }> }
+    return session.snapshotEvents().filter(event => event.type === 'user/message'
+      && JSON.stringify(event.data).includes('F4_CHANGED_SOURCE_PROMPT')).length
+  })()
+  assert.equal(durableAfter, 0, 'a changed source never produces a durable Host prompt')
+  assert.equal(app.getDraft().includes('F4_CHANGED_SOURCE_PROMPT'), true,
+    'the refused draft is restored for the user')
+  assert.equal(durableBefore, 0)
+})
+
+test('mixed file/image prompt: both file receipts and the image keep their source order in the Host row', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm6-f4-remote-file-mixed'
+  const presetId = 'm3-4-pr3-preset'
+  const host = await mountHost(life, presetId)
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const fixture = await mountPr3Runner(life, { presetId, resumeSessionId: mainId, host })
+  await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
+  const app = fixture.runnerApp() as unknown as {
+    getDraft(): string
+    setDraft(text: string): void
+    submitDraft(): void
+    draftImageStoreForTest?: import('../../src/client/media/image/draft-store.ts').DraftImageStore
+    draftFileStoreForTest?: import('../../src/client/media/attachment/file-draft.ts').DraftFileStore
+  }
+  assert.ok(app.draftFileStoreForTest !== undefined, 'the mounted app exposes its live file draft store')
+  assert.ok(app.draftImageStoreForTest !== undefined, 'the mounted app exposes its live image draft store')
+  const fileStore = app.draftFileStoreForTest!
+  const imageStore = app.draftImageStoreForTest!
+  const sourceDir = life.tempDir('dsh-f4-mixed-l6-')
+
+  const stagedFiles: { placeholder: string; bytes: Buffer }[] = []
+  for (const [name, seed] of [['mix-a.bin', 3], ['mix-b.bin', 5]] as const) {
+    const path = join(sourceDir, name)
+    const bytes = Buffer.alloc(80 * 1024)
+    for (let index = 0; index < bytes.length; index += 1) bytes[index] = (index + seed) % 239
+    writeFileSync(path, bytes)
+    const probe = await probeAttachment(path, sourceDir)
+    assert.equal(probe.kind, 'file')
+    if (probe.kind !== 'file') return
+    const draft = fileStore.add({
+      name: probe.name,
+      byteLength: probe.byteLength,
+      source: { type: 'path', path: probe.path, fingerprint: probe.fingerprint },
+    })
+    stagedFiles.push({ placeholder: draft.placeholder, bytes })
+  }
+  const pngBytes = await d12PngBytes()
+  const stagedImage = imageStore.add({
+    bytes: pngBytes,
+    mediaType: 'image/png',
+    width: 1,
+    height: 1,
+    name: 'mixed-image.png',
+  })
+
+  const marker = 'F4_MIXED_FILE_IMAGE_20261111'
+  app.setDraft(`${stagedFiles[0]!.placeholder} middle ${stagedImage.placeholder} ${stagedFiles[1]!.placeholder} tail ${marker}`)
+  app.submitDraft()
+
+  const session = host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+    snapshotEvents(): Array<{ type: string; data: unknown }>
+  }
+  await waitFor('the mixed row is durable', () => session.snapshotEvents().some(event =>
+    event.type === 'user/message' && JSON.stringify(event.data).includes(marker)), 30_000)
+  const durable = session.snapshotEvents().find(event =>
+    event.type === 'user/message' && JSON.stringify(event.data).includes(marker))!
+  const content = (durable.data as { content: Array<{ type: string; text?: string; attachment?: { attachmentId?: string; width?: number; height?: number } }> }).content
+  assert.deepEqual(content.map(block => block.type),
+    ['file', 'text', 'image', 'text', 'file', 'text'],
+    'the source order (file → text → image → text → file → text) reaches the Host unchanged')
+  assert.equal(content[1]?.text, ' middle ')
+  assert.equal(content[5]?.text, ` tail ${marker}`)
+  const attachments = host.ctx.get('attachments') as unknown as {
+    readFileStream(ref: unknown): AsyncIterable<Uint8Array>
+  }
+  for (const [blockIndex, source] of [[0, stagedFiles[0]!.bytes], [4, stagedFiles[1]!.bytes]] as const) {
+    const ref = content[blockIndex]!.attachment
+    assert.ok(ref?.attachmentId !== undefined, 'each file block carries its Host attachment')
+    const chunks: Uint8Array[] = []
+    for await (const chunk of attachments.readFileStream(ref)) chunks.push(chunk)
+    assert.deepEqual(
+      Buffer.from(Buffer.concat(chunks.map(chunk => Buffer.from(chunk)))),
+      source,
+      'each file keeps its own uploaded bytes in the mixed prompt',
+    )
+  }
+  assert.equal(content[2]?.attachment?.width, 1, 'the image block keeps its real dimensions')
+  assert.equal(content[2]?.attachment?.height, 1)
+})
+
+test('a human-invocable skill prompt carries its file through the same official writer', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm6-f4-remote-skill-file'
+  const presetId = 'm3-4-pr3-preset'
+  const host = await mountHost(life, presetId)
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const fixture = await mountPr3Runner(life, { presetId, resumeSessionId: mainId, host })
+  await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
+  const app = fixture.runnerApp() as unknown as {
+    getDraft(): string
+    setDraft(text: string): void
+    submitDraft(): void
+    draftFileStoreForTest?: import('../../src/client/media/attachment/file-draft.ts').DraftFileStore
+  }
+  assert.ok(app.draftFileStoreForTest !== undefined, 'the mounted app exposes its live file draft store')
+  const sourceDir = life.tempDir('dsh-f4-skill-l6-')
+  const path = join(sourceDir, 'skill-file.bin')
+  const source = Buffer.alloc(72 * 1024)
+  for (let index = 0; index < source.length; index += 1) source[index] = (index + 13) % 233
+  writeFileSync(path, source)
+  const probe = await probeAttachment(path, sourceDir)
+  assert.equal(probe.kind, 'file')
+  if (probe.kind !== 'file') return
+  const draft = app.draftFileStoreForTest!.add({
+    name: probe.name,
+    byteLength: probe.byteLength,
+    source: { type: 'path', path: probe.path, fingerprint: probe.fingerprint },
+  })
+  const marker = 'F4_SKILL_FILE_L6_20261111'
+  app.setDraft(`/skill f4-l6-skill ${draft.placeholder} ${marker}`)
+  app.submitDraft()
+  const session = host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+    snapshotEvents(): Array<{ type: string; data: unknown }>
+  }
+  await waitFor('the skill file row is durable', () => session.snapshotEvents().some(event => {
+    if (event.type !== 'user/message') return false
+    const content = (event.data as { content?: Array<{ type: string; text?: string }> }).content ?? []
+    return content.some(block => block.type === 'file') && JSON.stringify(event.data).includes(marker)
+  }), 30_000)
+  const durable = session.snapshotEvents().find(event => event.type === 'user/message'
+    && JSON.stringify(event.data).includes(marker))!
+  const content = (durable.data as { content: Array<{ type: string; text?: string; attachment?: { attachmentId?: string; bytes?: number } }> }).content
+  const text = content.filter(block => block.type === 'text').map(block => block.text ?? '').join('')
+  assert.match(text, /\/f4-l6-skill\b/u,
+    `the durable row is the agent-facing skill line, not a raw /skill wrapper: ${JSON.stringify(text)}`)
+  assert.ok(text.includes(marker), 'the user arguments survive the normalized skill line')
+  const fileBlock = content.find(block => block.type === 'file')
+  assert.ok(fileBlock?.attachment?.attachmentId !== undefined,
+    'the skill prompt carries the Host-issued file attachment')
+  assert.equal(fileBlock!.attachment!.bytes, source.byteLength)
+  const attachments = host.ctx.get('attachments') as unknown as {
+    readFileStream(ref: unknown): AsyncIterable<Uint8Array>
+  }
+  const chunks: Uint8Array[] = []
+  for await (const chunk of attachments.readFileStream(fileBlock!.attachment!)) chunks.push(chunk)
+  assert.equal(
+    createHash('sha256').update(Buffer.concat(chunks.map(chunk => Buffer.from(chunk)))).digest('hex'),
+    createHash('sha256').update(source).digest('hex'),
+    'the skill file bytes are the Client source bytes',
+  )
+})
+
+test('surface stop after the file upload but before dispatch makes zero prompt and restores the draft', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm6-f4-remote-file-stop'
+  const presetId = 'm3-4-pr3-preset'
+  const host = await mountHost(life, presetId)
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  // The qualification wrapper holds the PRODUCTION serializer right AFTER the
+  // official upload returned a receipt and BEFORE the writer's dispatch fence.
+  let uploaded = false
+  let releaseDispatch!: () => void
+  const dispatchGate = new Promise<void>(resolve => { releaseDispatch = resolve })
+  life.defer(releaseDispatch)
+  const fixture = await mountPr3Runner(life, {
+    presetId,
+    resumeSessionId: mainId,
+    host,
+    buildPromptSerializer: (wire: ExperimentalRemoteRuntime): RemotePromptSerializer => {
+      const production = RemotePromptSerializerProduction.overSessions(
+        wire.client.sessions,
+        createRemoteFileReceiptUploader(wire.host.carrier.fetch),
+      )
+      return {
+        preflight: prepared => production.preflight(prepared),
+        async serialize(prepared, signal) {
+          const serialized = await production.serialize(prepared, signal)
+          if (serialized.kind === 'ok') {
+            uploaded = true
+            await dispatchGate
+          }
+          return serialized
+        },
+      }
+    },
+  })
+  await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
+  const app = fixture.runnerApp() as unknown as {
+    getDraft(): string
+    setDraft(text: string): void
+    submitDraft(): void
+    draftFileStoreForTest?: import('../../src/client/media/attachment/file-draft.ts').DraftFileStore
+  }
+  assert.ok(app.draftFileStoreForTest !== undefined, 'the mounted app exposes its live file draft store')
+  const sourceDir = life.tempDir('dsh-f4-stop-')
+  const path = join(sourceDir, 'stop.bin')
+  writeFileSync(path, Buffer.alloc(32 * 1024, 4))
+  const probe = await probeAttachment(path, sourceDir)
+  assert.equal(probe.kind, 'file')
+  if (probe.kind !== 'file') return
+  const draft = app.draftFileStoreForTest!.add({
+    name: probe.name,
+    byteLength: probe.byteLength,
+    source: { type: 'path', path: probe.path, fingerprint: probe.fingerprint },
+  })
+  const marker = 'F4_SURFACE_STOP_20261111'
+  app.setDraft(`${draft.placeholder} ${marker}`)
+  // Count the official SessionFace.prompt on the production Client binding.
+  const binding = fixture.aggregate.wire.client.sessions.binding(SessionId(mainId) as never)
+  assert.ok(binding !== undefined)
+  const prototype = Object.getPrototypeOf(binding.session) as {
+    prompt(...args: unknown[]): unknown
+  }
+  const originalPrompt = prototype.prompt
+  let promptCalls = 0
+  prototype.prompt = function patchedPrompt(this: unknown, ...args: unknown[]) {
+    promptCalls += 1
+    return originalPrompt.apply(this, args)
+  }
+  life.defer(() => { prototype.prompt = originalPrompt })
+  const session = host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+    snapshotEvents(): Array<{ type: string; data: unknown }>
+  }
+  app.submitDraft()
+  // Handshake: the official Host upload completed and the serializer is parked
+  // before dispatch. Any prompt from here would violate the surface fence.
+  await waitFor('the Host file upload completed before dispatch', () => uploaded, 20_000)
+  assert.equal(promptCalls, 0, 'the prompt is still held after the upload and before dispatch')
+  assert.equal(session.snapshotEvents().filter(event => event.type === 'user/message'
+    && JSON.stringify(event.data).includes(marker)).length, 0,
+  'an uploaded-but-undispatched file is not a Host prompt yet')
+  const stopSurfaceAdmission = fixture.aggregate.selected.stopSurfaceAdmission
+  assert.ok(stopSurfaceAdmission !== undefined, 'the Remote selection exposes the surface-stop admission')
+  stopSurfaceAdmission()
+  releaseDispatch()
+  // The submission settles through the writer's post-serialize fence: the
+  // draft returns and the official prompt is never called.
+  await waitFor('the stopped submission restores the draft', () => app.getDraft().includes(marker), 20_000)
+  for (let round = 0; round < 50; round += 1) await Promise.resolve()
+  assert.equal(promptCalls, 0, 'a surface stop after upload dispatches zero prompts')
+  assert.equal(session.snapshotEvents().filter(event => event.type === 'user/message'
+    && JSON.stringify(event.data).includes(marker)).length, 0,
+  'the stopped surface leaves no durable prompt')
+})
+
+test('multi-file submission: a later source failure sends no prompt and restores both placeholders', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm6-f4-remote-file-partial'
+  const presetId = 'm3-4-pr3-preset'
+  const host = await mountHost(life, presetId)
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const fixture = await mountPr3Runner(life, { presetId, resumeSessionId: mainId, host })
+  const notices = recordNotices(life, fixture)
+  await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
+  const app = fixture.runnerApp() as unknown as {
+    getDraft(): string
+    setDraft(text: string): void
+    submitDraft(): void
+    draftFileStoreForTest?: import('../../src/client/media/attachment/file-draft.ts').DraftFileStore
+  }
+  assert.ok(app.draftFileStoreForTest !== undefined, 'the mounted app exposes its live file draft store')
+  const fileStore = app.draftFileStoreForTest!
+  const sourceDir = life.tempDir('dsh-f4-partial-l6-')
+  const placeholders: string[] = []
+  const paths: string[] = []
+  for (const name of ['partial-a.bin', 'partial-b.bin']) {
+    const path = join(sourceDir, name)
+    writeFileSync(path, Buffer.alloc(64 * 1024, 6))
+    paths.push(path)
+    const probe = await probeAttachment(path, sourceDir)
+    assert.equal(probe.kind, 'file')
+    if (probe.kind !== 'file') return
+    const draft = fileStore.add({
+      name: probe.name,
+      byteLength: probe.byteLength,
+      source: { type: 'path', path: probe.path, fingerprint: probe.fingerprint },
+    })
+    placeholders.push(draft.placeholder)
+  }
+  const marker = 'F4_PARTIAL_MULTI_FILE_20261111'
+  app.setDraft(`${placeholders[0]!} ${placeholders[1]!} ${marker}`)
+  // The SECOND file changes: the first upload may already be staged on the
+  // Host, but the Prompt must never be sent and both placeholders must return.
+  writeFileSync(paths[1]!, Buffer.alloc(3, 9))
+  const session = host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+    snapshotEvents(): Array<{ type: string; data: unknown }>
+  }
+  app.submitDraft()
+  await waitFor('the partial multi-file failure is visible', () =>
+    notices.some(notice => notice.includes('changed since it was attached')), 20_000)
+  assert.equal(session.snapshotEvents().filter(event => event.type === 'user/message'
+    && JSON.stringify(event.data).includes(marker)).length, 0,
+  'no partial multi-file prompt is dispatched')
+  const restored = app.getDraft()
+  assert.ok(restored.includes(placeholders[0]!) && restored.includes(placeholders[1]!)
+    && restored.includes(marker), `both placeholders and the text are restored: ${JSON.stringify(restored)}`)
 })
 
 test('queue/steer: a busy queue prompt lands as an official queued occurrence; a steer lands as steering', async (t) => {
@@ -554,9 +1149,22 @@ test('a submit inside a session transition is refused, keeps the draft and dispa
   // same transition through the Browser selection (a non-FIFO navigation)
   // while keeping the hydration fence real.
   submitDraft(fixture, '/sessions')
-  await waitFor('the Session Browser is open', () => fixture.vt.getViewport().join('\n').includes('sessions'), 15_000)
+  await waitFor('the Session Workspace is open', () => fixture.vt.getViewport().join('\n').includes('Sessions'), 15_000)
+  // The fullscreen workspace never consumes printable bytes in the list seat:
+  // `/` focuses the global editor, the raw query paints there, and the safe
+  // two-Enter contract (results, then resume) is the only navigation path.
+  fixture.vt.sendInput('/')
+  await fixture.vt.waitForRender()
   fixture.vt.sendInput('pr3-transition-b')
-  await waitFor('the target row is filtered', () => fixture.vt.getViewport().join('\n').includes('pr3-transition-b'), 15_000)
+  // The editor echoes the raw query immediately; the metadata RESULT row is
+  // the fact this step needs (the safe two-Enter contract only advances once
+  // the read owner has accepted a matching row).
+  await waitFor('the target row is filtered', () => {
+    const view = fixture.vt.getViewport().join('\n')
+    return view.includes('pr3-transition-b') && view.includes('metadata')
+  }, 15_000)
+  fixture.vt.sendInput('\r')
+  await fixture.vt.waitForRender()
   fixture.vt.sendInput('\r')
   await waitFor('the transition committed and parked its surface hydration', () => parked >= 1, 15_000)
   const app = fixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(): void; getDraft(): string }
@@ -586,6 +1194,25 @@ test('a Remote submit after /resume targets the replacement current Session, nev
   await host.harness.create(SessionId('pr3-stale-b'), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
   const fixture = await mountPr3Runner(life, { presetId, resumeSessionId: 'pr3-stale-a', host })
   await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
+  // Patch the actual official SessionFace prototype before B is materialized.
+  // The production Remote writer uses this ClientSessions binding source for
+  // both A and the replacement B; the original method keeps its real receiver.
+  const bindingA = fixture.aggregate.wire.client.sessions.binding(SessionId('pr3-stale-a') as never)
+  assert.ok(bindingA !== undefined, 'the mounted Client retains Session A')
+  const sessionFace = bindingA.session
+  const sessionPrototype = Object.getPrototypeOf(sessionFace) as { prompt: typeof sessionFace.prompt }
+  const originalPrompt = sessionPrototype.prompt
+  type PromptResult = Awaited<ReturnType<typeof originalPrompt>>
+  const promptCalls: Array<{ sessionId: string; result: PromptResult | undefined }> = []
+  sessionPrototype.prompt = function (this: typeof sessionFace, ...args: Parameters<typeof originalPrompt>) {
+    const call = { sessionId: this.sessionId, result: undefined as PromptResult | undefined }
+    promptCalls.push(call)
+    return originalPrompt.call(this, ...args).then(result => {
+      call.result = result
+      return result
+    })
+  }
+  life.defer(() => { sessionPrototype.prompt = originalPrompt })
   // PR4 §1.2: switch A -> B through the seam a REAL user drives — a /resume
   // submit through the mounted surface (the Client command registry executes
   // the TUI built-in; the Host commands service carries no TUI callback on
@@ -595,15 +1222,20 @@ test('a Remote submit after /resume targets the replacement current Session, nev
   // live catalog are ready — the product's own completion signal, i.e. exactly
   // what a real user waits for before pressing Enter again.
   await waitFor('the switch transaction reports completion', () => switchReported(host, 'pr3-stale-a'), 20_000)
+  assert.equal(promptCalls.length, 0, '/resume changes the current Session without sending a prompt')
   // ONE submit after that signal, without retrying: the post-transition submit
   // contract is "dispatch exactly once into the new current owner".
   submitDraft(fixture, 'switched-session row epsilon')
+  await waitFor('the single replacement SessionFace prompt settles', () =>
+    promptCalls.length === 1 && promptCalls[0]?.result !== undefined, 20_000)
+  assert.equal(promptCalls[0]?.sessionId, 'pr3-stale-b',
+    'the official prompt call is addressed to the replacement Session B')
+  assert.equal(promptCalls[0]?.result?.ok, true,
+    'the official prompt settles with Host acceptance')
+  assert.equal(promptCalls.length, 1, 'one post-switch submit invokes SessionFace.prompt exactly once')
   const inB = (): number => hostUserRows(fixture, 'pr3-stale-b').filter(row => row.includes('switched-session row epsilon')).length
-  await waitFor('the single post-switch submit lands in B', () => inB() === 1, 20_000)
-  // A duplicate could still land after the first row, so give the settled state
-  // a bounded look before asserting the exact count.
-  await new Promise(resolve => setTimeout(resolve, 250))
-  assert.equal(inB(), 1, 'the post-switch submit dispatches exactly once into B')
+  await waitFor('the single post-switch submit reaches B durable history', () => inB() === 1, 20_000)
+  assert.equal(inB(), 1, 'the post-switch submit creates exactly one durable row in B')
   // …and NEVER in the retired session A. Scope note: this proves the
   // post-switch gesture uses the NEW current owner (rebind correctness), not
   // the pre-dispatch stale-capture race — that counterfactual (capture A →
@@ -675,6 +1307,105 @@ test('busy steer: a steer gesture while running lands as next-step with its own 
   }, 20_000)
 })
 
+test('busy steer with a file: the steered occurrence carries the Host file block into next-step and the durable row', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm6-f4-busy-file-steer'
+  const presetId = 'm3-4-pr3-preset'
+  const llm = new StubStreamingLlmAdapter()
+  const release = llm.hold()
+  life.defer(release)
+  const host = await mountHost(life, presetId, { llmAdapter: llm })
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const fixture = await mountPr3Runner(life, { presetId, resumeSessionId: mainId, host })
+  await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
+  submitDraft(fixture, 'file steer opener')
+  await waitFor('turn is running', () =>
+    fixture.aggregate.presentation.sessionFacts.running(mainId) === true, 20_000)
+
+  const sourceDir = life.tempDir('dsh-f4-busy-file-')
+  const path = join(sourceDir, 'steer-file.bin')
+  const source = Buffer.alloc(96 * 1024)
+  for (let index = 0; index < source.length; index += 1) source[index] = index % 241
+  writeFileSync(path, source)
+  const app = fixture.runnerApp() as unknown as { getDraft(): string; setDraft(text: string): void; submitDraft(request?: string): void }
+  submitDraft(fixture, `/attach ${path}`)
+  await waitFor('the /attach placeholder reaches the composer', () => app.getDraft().includes('[file #'), 15_000)
+  const marker = 'F4_BUSY_STEER_FILE_20261111'
+  app.setDraft(`${app.getDraft()} ${marker}`)
+  app.submitDraft('accelerated')
+
+  const sessionOf = (): { snapshotEvents(): Array<{ type: string; data: unknown }> } =>
+    host.ctx.sessions.get(SessionId(mainId)) as unknown as { snapshotEvents(): Array<{ type: string; data: unknown }> }
+  const spliceOf = (needle: string): { target: string; file: boolean } | undefined => {
+    for (const event of sessionOf().snapshotEvents()) {
+      if (event.type !== 'agent/inbox/spliced') continue
+      if (!JSON.stringify(event.data).includes(needle)) continue
+      const parsed = event.data as { target: string; inserted?: Array<{ content?: Array<{ type: string }> }> }
+      return {
+        target: parsed.target,
+        file: parsed.inserted?.[0]?.content?.some(block => block.type === 'file') === true,
+      }
+    }
+    return undefined
+  }
+  await waitFor('the steered file occurrence is spliced', () => spliceOf(marker)?.file === true, 20_000)
+  assert.equal(spliceOf(marker)!.target, 'next-step',
+    'a file-bearing steer targets the RUNNING turn, exactly like its text-only sibling')
+  // Alt+Up on a queue holding a durable FILE: Remote refuses BEFORE any
+  // recalled draft or queue removal, and the running turn keeps its queue.
+  const queuePath = join(sourceDir, 'queued-file.bin')
+  writeFileSync(queuePath, Buffer.alloc(48 * 1024, 7))
+  const queueMarker = 'F4_BUSY_QUEUED_FILE_20261111'
+  submitDraft(fixture, `/attach ${queuePath}`)
+  await waitFor('the queued /attach placeholder reaches the composer', () => app.getDraft().includes('[file #'), 15_000)
+  app.setDraft(`${app.getDraft()} ${queueMarker}`)
+  app.submitDraft('explicit-queue')
+  await waitFor('the queued file occurrence is spliced', () => spliceOf(queueMarker)?.file === true, 20_000)
+  assert.equal(spliceOf(queueMarker)!.target, 'next-turn',
+    'the explicit-queue file gesture appends a next-turn occurrence')
+  fixture.vt.sendInput('\x1b[1;3A')
+  await waitFor('the file queue pull-back is refused visibly', () =>
+    fixture.vt.getViewport().join('').includes('Cannot recall queued messages containing files'), 20_000)
+  assert.equal(app.getDraft(), '', 'the refused recall never injects a recalled draft')
+  assert.equal(spliceOf(queueMarker)?.file, true, 'the Host queue keeps its file occurrence')
+
+  release()
+  await waitFor('turn settles', () =>
+    fixture.aggregate.presentation.sessionFacts.running(mainId) === false, 20_000)
+  await waitFor('the steered file row is durable', () =>
+    hostUserRows(fixture, mainId).some(row => row.includes(marker)), 20_000)
+  const durable = sessionOf().snapshotEvents().find(event => event.type === 'user/message'
+    && JSON.stringify(event.data).includes(marker)) as unknown as {
+      data: { content: Array<{ type: string; attachment?: { attachmentId: string; name: string; bytes: number } }> }
+    }
+  const fileBlock = durable.data.content.find(block => block.type === 'file')
+  assert.ok(fileBlock?.attachment?.attachmentId !== undefined,
+    'the steered durable row carries the Host-issued file attachment')
+  assert.equal(fileBlock!.attachment!.bytes, source.byteLength)
+  const attachments = host.ctx.get('attachments') as unknown as {
+    readFileStream(ref: unknown): AsyncIterable<Uint8Array>
+  }
+  const stored: Uint8Array[] = []
+  for await (const chunk of attachments.readFileStream(fileBlock!.attachment!)) stored.push(chunk)
+  assert.equal(
+    createHash('sha256').update(Buffer.concat(stored.map(chunk => Buffer.from(chunk)))).digest('hex'),
+    createHash('sha256').update(source).digest('hex'),
+    'the steered file bytes are the Client source bytes',
+  )
+  // The preserved queue occurrence is delivered AFTER the running turn and
+  // carries its own Host file attachment.
+  await waitFor('the queued file row is durable', () =>
+    hostUserRows(fixture, mainId).some(row => row.includes(queueMarker)), 30_000)
+  const queuedDurable = sessionOf().snapshotEvents().find(event => event.type === 'user/message'
+    && JSON.stringify(event.data).includes(queueMarker)) as unknown as {
+      data: { content: Array<{ type: string; attachment?: { attachmentId: string; bytes: number } }> }
+    }
+  const queuedFileBlock = queuedDurable.data.content.find(block => block.type === 'file')
+  assert.ok(queuedFileBlock?.attachment?.attachmentId !== undefined,
+    'the preserved queued file occurrence reaches the Host durable row')
+  assert.equal(queuedFileBlock!.attachment!.bytes, 48 * 1024)
+})
+
 test('remote cancel: a real cancel gesture stops the running official turn and PRESERVES the queued next-turn work', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr3-cancel'
@@ -693,10 +1424,6 @@ test('remote cancel: a real cancel gesture stops the running official turn and P
   // Queue a next-turn occurrence FIRST: the cancel must stop the running
   // turn WITHOUT discarding queued work (Direct keepInbox parity).
   const app = fixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(request?: string): void }
-  app.setDraft('queued survives cancel lambda')
-  app.submitDraft('explicit-queue')
-  app.setDraft('queued second nu')
-  app.submitDraft('explicit-queue')
   const spliceOf = (marker: string): boolean => {
     const session = fixture.host.ctx.sessions.get(SessionId(mainId)) as unknown as {
       snapshotEvents(): Array<{ type: string; data: unknown }>
@@ -704,7 +1431,14 @@ test('remote cancel: a real cancel gesture stops the running official turn and P
     return session.snapshotEvents().some(event => event.type === 'agent/inbox/spliced'
       && JSON.stringify(event.data).includes(marker))
   }
+  app.setDraft('queued survives cancel lambda')
+  app.submitDraft('explicit-queue')
+  // PR2: the first queued submission is HELD until the Host accepts it (the
+  // authoritative splice below IS that acceptance), so the second gesture is
+  // submitted only after the composer unlocked.
   await waitFor('queued occurrence spliced', () => spliceOf('queued survives cancel lambda'), 20_000)
+  app.setDraft('queued second nu')
+  app.submitDraft('explicit-queue')
   await waitFor('second queued occurrence spliced', () => spliceOf('queued second nu'), 20_000)
   // The REAL cancel gesture: a single Esc while the agent is busy (the
   // surface routes it to events.onCancel — the same seam cancel-activity
@@ -799,38 +1533,43 @@ test('image resend: a SECOND submission citing the recalled durable image re-del
   const store = app.draftImageStoreForTest!
   const sessionOf = (): { snapshotEvents(): Array<{ type: string; data: unknown }> } =>
     fixture.host.ctx.sessions.get(SessionId(mainId)) as never
-  const officialRead = async (attachmentId: string): Promise<Uint8Array> => {
+  const officialRead = async (attachment: ImageAttachmentRefLike): Promise<Uint8Array> => {
     const binding = fixture.aggregate.wire.client.sessions.binding(SessionId(mainId) as never) as {
-      session: { readAttachment(id: never): Promise<{ ok: true; value: { data: Uint8Array } } | { ok: false; error: unknown }> }
+      session: {
+        readAttachment(attachment: ImageAttachmentRefLike): Promise<
+          { ok: true; value: { data: Uint8Array } } | { ok: false; error: unknown }
+        >
+      }
     } | undefined
     if (binding === undefined) throw new Error('no retained binding for the official attachment read')
-    const read = await binding.session.readAttachment(attachmentId as never)
+    const read = await binding.session.readAttachment(attachment)
     if (!read.ok) throw new Error(`official readAttachment failed: ${JSON.stringify(read.error)}`)
     return read.value.data
   }
   const imageEventCount = (): number =>
     sessionOf().snapshotEvents().filter(event => event.type === 'user/message'
       && JSON.stringify(event.data).includes('image')).length
-  const attachmentIdsOf = (): string[] => {
-    const ids: string[] = []
+  /** The COMPLETE durable references of every image block (never bare ids). */
+  const attachmentRefsOf = (): ImageAttachmentRefLike[] => {
+    const refs: ImageAttachmentRefLike[] = []
     for (const event of sessionOf().snapshotEvents()) {
       if (event.type !== 'user/message') continue
       const blocks = ((event.data as { content?: unknown[] }).content ?? []) as
-        Array<{ type: string; attachment?: { attachmentId?: string } }>
+        Array<{ type: string; attachment?: ImageAttachmentRefLike }>
       for (const block of blocks) {
-        if (block.type === 'image' && block.attachment?.attachmentId !== undefined) ids.push(block.attachment.attachmentId)
+        if (block.type === 'image' && block.attachment?.attachmentId !== undefined) refs.push(block.attachment)
       }
     }
-    return ids
+    return refs
   }
   // (1) FIRST submission: staged bytes → durable image → authorized read equality.
   const staged = store.add({ bytes: pngBytes, mediaType: 'image/png', width: 1, height: 1, name: 'resend-proof.png' })
   submitDraft(fixture, `resend first submit ${staged.placeholder}`)
   await waitFor('first durable image row', () => imageEventCount() >= 1, 20_000)
-  const firstIds = attachmentIdsOf()
-  assert.equal(firstIds.length, 1, 'exactly one attachment after the first submission')
+  const firstRefs = attachmentRefsOf()
+  assert.equal(firstRefs.length, 1, 'exactly one attachment after the first submission')
   assert.deepEqual(
-    Buffer.from(await officialRead(firstIds[0]!)).toString('hex'),
+    Buffer.from(await officialRead(firstRefs[0]!)).toString('hex'),
     Buffer.from(pngBytes).toString('hex'),
     '(1) the FIRST submission durably stored the image; the authorized read returns the original bytes')
   // The held stream keeps the turn officially RUNNING.
@@ -885,12 +1624,12 @@ test('image resend: a SECOND submission citing the recalled durable image re-del
     'the resent line produced its own durable user/message row')
   const lastImageEvent = imageEvents[imageEvents.length - 1]!
   const lastBlocks = ((lastImageEvent.data as { content?: unknown[] }).content ?? []) as
-    Array<{ type: string; attachment?: { attachmentId?: string } }>
+    Array<{ type: string; attachment?: ImageAttachmentRefLike }>
   const resentBlock = lastBlocks.find(block => block.type === 'image')
   assert.ok(resentBlock?.attachment?.attachmentId !== undefined,
     "the second submission's durable row carries an image attachment (the recalled durable image was re-delivered)")
   assert.deepEqual(
-    Buffer.from(await officialRead(resentBlock!.attachment!.attachmentId!)).toString('hex'),
+    Buffer.from(await officialRead(resentBlock.attachment)).toString('hex'),
     Buffer.from(pngBytes).toString('hex'),
     'the SECOND submission (citing the recalled durable image) re-delivered the ORIGINAL authorized bytes through the official attachment read')
   release()

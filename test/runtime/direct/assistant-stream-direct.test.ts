@@ -17,6 +17,7 @@ import {
   type AssistantStreamDirectHandle,
   type AssistantStreamFrameLike,
 } from '../../../src/runtime/direct/assistant-stream-direct.ts'
+import type { HostEventSurface } from '../../../src/runtime/direct/assistant-stream-direct.ts'
 import type { AssistantLiveInput } from '../../../src/runtime/assistant-stream-port.ts'
 import { TranscriptFolder } from '../../../src/transcript.ts'
 
@@ -47,10 +48,10 @@ function harness(accept: (subject: unknown) => boolean): {
   const sink = makeSink()
   const listeners = new Map<string, (payload: unknown) => void>()
   const ctx = {
-    on: (event: string, handler: (payload: unknown) => void) => {
+    on: ((event: string, handler: (payload: unknown) => void) => {
       listeners.set(event, handler)
-      return () => { listeners.delete(event) }
-    },
+      return () => { listeners.delete(event); return true }
+    }) as HostEventSurface['on'],
   }
   const dispose = installAssistantStreamDirect({ ctx, isCurrentAgent: accept, onInput: sink.onInput })
   return {

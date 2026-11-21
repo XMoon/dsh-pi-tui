@@ -22,12 +22,13 @@
  * @module @xmoon76/dsh-pi-tui/tui/interaction/tui-editor
  */
 
-import { decodePrintableKey, Editor, matchesKey, truncateToWidth, type EditorTheme, type SelectListLayoutOptions, type TUI } from '@xmoon76/pi-tui'
+import { decodePrintableKey, Editor, matchesKey, truncateToWidth, type AutocompleteProvider, type EditorTheme, type SelectListLayoutOptions, type TUI, type TuiMouseEvent, type TuiMouseEventResult } from '@xmoon76/pi-tui'
 import { SelectedMarquee } from '../components/marquee.ts'
 import { color } from '../theme/runtime.ts'
 import { classifyFileCompletionContext } from '../file-completion/context.ts'
 import { FILE_ARGUMENT_COMMANDS } from '../../domain/file-completion/path-argument-commands.ts'
 import { editorModeFromHistoryEntry, type EditorInputMode } from './editor-input-mode.ts'
+import { pastedBodySpan, type PasteRangeSpan } from './pasted-path-range.ts'
 import { extractInlineSkillPrefix } from './autocomplete/skill-reference.ts'
 
 /** Host render-routing options for the host editor. */
@@ -47,6 +48,24 @@ export interface TuiEditorRenderLayout {
    * never builds a second visual wrap map.
    */
   readonly downEligible: boolean
+}
+
+/** ONE completed bracketed paste the host editor accepted as ordinary text.
+ *  The body is the complete paste content (mode prefix already stripped); the
+ *  span is the provable raw-text interval of the pasted file path — `undefined`
+ *  when the editor did not insert the body verbatim (a large-paste marker,
+ *  control-character filtering, shell-mode normalization), so a host can never
+ *  guess offsets. */
+export interface TuiEditorPasteCommit {
+  readonly text: string
+  readonly span: PasteRangeSpan
+}
+
+/** The flat UTF-16 caret offset of one editor position. */
+function flatCursorOffset(lines: readonly string[], cursor: { line: number; col: number }): number {
+  let offset = 0
+  for (let line = 0; line < cursor.line; line += 1) offset += (lines[line] ?? '').length + 1
+  return offset + cursor.col
 }
 
 export interface TuiEditorOptions {
@@ -185,6 +204,51 @@ export class TuiEditor extends Editor {
   /** The host observes the layout facts computed by the actual Editor render;
    *  this is not a paint-completion hook (render may also be measured). */
   onVisualLayoutRendered?: (layout: TuiEditorRenderLayout) => void
+  /** ONE real bracketed paste finished inserting ordinary prompt-mode text.
+   *  Fired synchronously after the fork's atomic paste insertion, so the host
+   *  can register the paste's exact span against the CURRENT raw text. Shell
+   *  modes and shell-mode normalization never fire it. */
+  onBracketedPasteCommitted?: (commit: TuiEditorPasteCommit) => void
+  /** The REAL editor state immediately before one input event mutates it.
+   *  The host proves the input's exact splice from this anchor (never from a
+   *  text-diff guess). Fired only for the OUTERMOST input event, so a residual
+   *  chunk processed inside it never re-anchors. */
+  onInputStart?: (state: { readonly text: string; readonly cursor: number }) => void
+  /** The outermost input event finished: the anchor it announced must not be
+   *  reused by a later ASYNC editor change. */
+  onInputEnd?: () => void
+  /** Re-entrancy depth of handleInput (the residual paste chunks re-enter). */
+  private inputDepth = 0
+  /** Whether a completion provider has been installed through this host
+   *  override (the base field is private; the host only needs the fact). */
+  private autocompleteProviderInstalled = false
+  /** The draft captured when the user entered ↑/↓ history browse. The base
+   *  editor owns the browse bookmark privately; this host copy survives a
+   *  history-list replacement (an async recall reseed) so the user's own
+   *  draft and caret are never lost. */
+  private historyBrowseDraft: {
+    readonly text: string
+    readonly cursor: { readonly line: number; readonly col: number }
+    readonly mode: EditorInputMode
+  } | undefined
+  /** Number of synchronously scheduled onChange calls that belong to the
+   *  CURRENT recall application (a mode change + the row setText). It is not a
+   *  time window: the next real edit in the same stdin chunk/JS turn must see
+   *  zero and invalidate the host bookmark. */
+  private historyRecallChangesRemaining = 0
+  /** A candidate captured by the vendored save hook. The fork calls the hook
+   *  even when `historyNext` has no next row (newIndex -2) and never enters
+   *  browse; only a successful `onRecall` below promotes this to the active
+   *  bookmark. A no-op leaves it pending and a reseed must ignore it. */
+  private pendingHistoryBrowseDraft: {
+    readonly text: string
+    readonly cursor: { readonly line: number; readonly col: number }
+    readonly mode: EditorInputMode
+  } | undefined
+  /** True only inside the fork's synchronous left-click handler. The fork
+   *  exits history browsing on a click without firing onChange; its own
+   *  "navigation" boundary notification is the post-exit proof we consume. */
+  private pointerClickInFlight = false
 
   constructor(tui: TUI, theme: EditorTheme, options: TuiEditorOptions = {}) {
     // paddingX: 2 reserves the left two cells for the mode prompt painted
@@ -209,21 +273,112 @@ export class TuiEditor extends Editor {
     // draft save/restore pair keeps the mode across ↑/↓ browsing (a draft
     // recalled as `!!pwd` must never come back as `❯ pwd`).
     this.onRecall = (entry) => {
+      // A real recall callback is the only proof that a save hook actually
+      // entered history browsing; promote its candidate before decoding.
+      if (this.pendingHistoryBrowseDraft !== undefined) {
+        this.historyBrowseDraft = this.pendingHistoryBrowseDraft
+        this.pendingHistoryBrowseDraft = undefined
+      }
       const { mode, text } = editorModeFromHistoryEntry(entry)
+      // The mode change (when it changes) and the row setText each fire ONE
+      // synchronous onChange. Count exactly those, then the next change is a
+      // real edit — no microtask/JS-turn window that could swallow input
+      // arriving later in the same stdin chunk.
+      this.historyRecallChangesRemaining = this.inputMode === mode ? 1 : 2
       this.setInputMode(mode)
       return text
     }
-    this.onHistoryDraftSave = () => this.inputMode
+    this.onHistoryDraftSave = () => {
+      // Pending candidate, not an active bookmark: `historyNext` at the
+      // bottom of the history calls this then returns with newIndex === -2.
+      this.pendingHistoryBrowseDraft = {
+        text: this.getText(),
+        cursor: this.getCursor(),
+        mode: this.inputMode,
+      }
+      return this.inputMode
+    }
     this.onHistoryDraftRestore = (state) => {
+      this.historyBrowseDraft = undefined
+      this.pendingHistoryBrowseDraft = undefined
+      this.historyRecallChangesRemaining = 0
       if (state === 'prompt' || state === 'shell-context' || state === 'shell-local') {
         this.setInputMode(state)
       }
     }
   }
 
+  /** The host boundary callback forwards "navigation" events here. A left
+   *  click on an editor row is the only navigation event produced inside
+   *  `handleMouse`; it exits browse without onChange, so the bookmark dies. */
+  consumePointerBrowseExit(reason: string): void {
+    if (reason === 'navigation' && this.pointerClickInFlight) this.clearHistoryBrowseDraft()
+  }
+
+  override handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (event.type === 'click' && event.button === 'left') this.pointerClickInFlight = true
+    try {
+      return super.handleMouse(event)
+    } finally {
+      this.pointerClickInFlight = false
+    }
+  }
+
+  override clearDraftAfterSubmit(): void {
+    super.clearDraftAfterSubmit()
+    this.clearHistoryBrowseDraft()
+  }
+
+  /** Consume ONE onChange caused by the current recall application. Returns
+   *  false for the first change after it (a real edit/programmatic mutation),
+   *  so the host can drop the browse bookmark immediately — including a key
+   *  delivered synchronously later in the SAME stdin chunk. */
+  consumeHistoryRecallChange(): boolean {
+    if (this.historyRecallChangesRemaining <= 0) return false
+    this.historyRecallChangesRemaining -= 1
+    return true
+  }
+
   /** The current input mode (read-only for the host). */
   getInputMode(): EditorInputMode {
     return this.inputMode
+  }
+
+  /**
+   * Take the draft/caret/mode captured by the ACTIVE ↑/↓ history browse and
+   * clear the local copy. Returns undefined when the editor is not browsing
+   * (a later edit exits the base editor's browse without firing the restore
+   * callback; the stale snapshot is then rejected by the caller's entry check).
+   * The caller replaces the history list and restores this snapshot itself, so
+   * an asynchronous recall reseed can never lose a non-empty draft.
+   */
+  takeHistoryBrowseDraft(): {
+    readonly text: string
+    readonly cursor: { readonly line: number; readonly col: number }
+    readonly mode: EditorInputMode
+  } | undefined {
+    const draft = this.historyBrowseDraft
+    this.historyBrowseDraft = undefined
+    this.pendingHistoryBrowseDraft = undefined
+    this.historyRecallChangesRemaining = 0
+    return draft
+  }
+
+  /** A real document mutation exits the base editor's browse; erase the host
+   *  bookmark so a later cold seed can never restore a stale draft. */
+  clearHistoryBrowseDraft(): void {
+    this.historyBrowseDraft = undefined
+    this.pendingHistoryBrowseDraft = undefined
+  }
+
+  /**
+   * First-party Host probe only; does not consume/cancel the paste. True while
+   * a bracketed paste is still being captured at the raw layer or a split
+   * paste marker is pending — the Host Editor gesture must never arm on input
+   * that belongs to an in-flight paste.
+   */
+  isPasteCapturePending(): boolean {
+    return this.pasteCapture !== null || this.pendingPasteMarker !== null
   }
 
   /**
@@ -412,6 +567,21 @@ export class TuiEditor extends Editor {
   }
 
   override handleInput(data: string): void {
+    const outermost = this.inputDepth === 0
+    if (outermost) {
+      this.onInputStart?.({ text: this.getText(), cursor: flatCursorOffset(this.getLines(), this.getCursor()) })
+    }
+    this.inputDepth += 1
+    try {
+      this.handleInputCore(data)
+    } finally {
+      this.inputDepth -= 1
+      if (outermost) this.onInputEnd?.()
+    }
+  }
+
+  /** The input event body; {@link handleInput} owns the host mutation anchor. */
+  private handleInputCore(data: string): void {
     // A bracketed-paste marker split across input chunks (real terminals
     // keep markers whole, but a chunk boundary must not lose them):
     // stitch a buffered marker prefix onto this chunk, and buffer a
@@ -484,20 +654,14 @@ export class TuiEditor extends Editor {
         return
       }
     }
-    // Tab on a leading `/` in a shell mode is a PATH, never a slash
-    // command: the fork's handleTabCompletion routes a space-free
-    // leading-`/` line to slash-command completion, which would list
-    // commands for `/usr/lo`. Force the file-completion path instead
-    // (the provider's virtual prefix keeps the shell grammar intact).
-    // An open dropdown keeps Tab as accept — only a closed one routes.
+    // A closed-dropdown Tab in shell mode is always a shell-completion
+    // request: command names, variables, Git subcommands and path arguments
+    // share the selected Host/Direct port. Letting other shell words fall
+    // through to Bash's intrinsic editor completion would bypass Host locality
+    // and make results depend on the Client's interactive shell state.
     if (matchesKey(data, 'tab') && !this.isShowingAutocomplete() && this.inputMode !== 'prompt') {
-      const { line, col } = this.getCursor()
-      const beforeCursor = this.getLines()[line]?.slice(0, col) ?? ''
-      const trimmed = beforeCursor.trimStart()
-      if (trimmed.startsWith('/') && !trimmed.includes(' ')) {
-        this.requestAutocomplete({ force: true, explicitTab: true })
-        return
-      }
+      this.requestAutocomplete({ force: true, explicitTab: true })
+      return
     }
     // Bracketed paste: captured at the RAW layer BEFORE the base editor
     // sees it. The prefix normalization therefore happens PRE-INSERT —
@@ -716,10 +880,63 @@ export class TuiEditor extends Editor {
       content = content.slice(1)
     }
     if (mode !== 'prompt') this.setInputMode(mode)
+    const beforeText = this.getText()
+    const beforeCursor = flatCursorOffset(this.getLines(), this.getCursor())
     if (content !== '') super.handleInput(`\x1b[200~${content}\x1b[201~`)
+    if (mode === 'prompt' && this.inputMode === 'prompt' && content !== '' && this.onBracketedPasteCommitted !== undefined) {
+      // The fork's own insertion is the ONLY evidence this span may rest on:
+      // the before/after document + caret prove exactly which bytes THIS paste
+      // inserted (the fork may prepend one readability space; a large paste
+      // becomes a marker and fails the proof). A body that is not a candidate
+      // (or not provable) never reaches the host at all, so plain text creates
+      // no lease.
+      const span = pastedBodySpan(
+        beforeText,
+        beforeCursor,
+        this.getText(),
+        flatCursorOffset(this.getLines(), this.getCursor()),
+        content,
+      )
+      if (span !== undefined) this.onBracketedPasteCommitted({ text: content, span })
+    }
     const remaining = data.slice(end + '\x1b[201~'.length)
     if (remaining !== '') residuals.push(remaining)
     return residuals
+  }
+
+  /**
+   * Re-evaluate the CURRENT draft after a provider replacement.
+   *
+   * The command catalog commits asynchronously: a sessionless surface can be
+   * mounted and accept a user's `@`/slash input while a later catalog snapshot
+   * installs a NEW provider. The fork's `setAutocompleteProvider` cancels the
+   * active request and clears the dropdown but does NOT ask the new provider
+   * about the draft that is still in the editor — so an in-flight `@file`
+   * query would be dropped and never re-issued (the user would have to type
+   * again). Re-issue it through the SAME context gate the real triggers use:
+   * only a live file-completion position (`@` mention or a declared path
+   * argument) or a slash-command name/argument position may reopen, so plain
+   * prose never pops a dropdown just because the catalog refreshed.
+   */
+  override setAutocompleteProvider(provider: AutocompleteProvider): void {
+    super.setAutocompleteProvider(provider)
+    this.autocompleteProviderInstalled = true
+    this.reopenAutocompleteAfterProviderReplacement()
+  }
+
+  private reopenAutocompleteAfterProviderReplacement(): void {
+    if (!this.autocompleteProviderInstalled || this.isShowingAutocomplete()) return
+    const { line, col } = this.getCursor()
+    const textBeforeCursor = this.getLines()[line]?.slice(0, col) ?? ''
+    if (textBeforeCursor === '') return
+    const shellDocument = this.isShellDocumentLine(textBeforeCursor)
+    const fileContext = classifyFileCompletionContext(textBeforeCursor, FILE_ARGUMENT_COMMANDS, {
+      line,
+      shell: shellDocument,
+    })
+    const slashContext = !shellDocument && /^\/[^\s/]*(\s|$)/u.test(textBeforeCursor.trimStart())
+    if (fileContext.kind === 'none' && !slashContext) return
+    this.requestAutocomplete({ force: false, explicitTab: false })
   }
 
   /** Reopen `@dir/` mention completion right after a key closed it (e.g.

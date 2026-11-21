@@ -13,8 +13,14 @@
  * @module @xmoon76/dsh-pi-tui/runtime/capability
  */
 
-/** The domain capabilities of the TUI's Host consumption (the full
- * migration vocabulary — NOT every entry is implemented yet). */
+/**
+ * The domain capabilities of the TUI's Host consumption — the M2-era migration
+ * vocabulary, NOT an exhaustive port ledger. Later semantic ports (schedule,
+ * teamMode, teamBoard, mcpServers, sessionPolicy, ...) deliberately do not
+ * extend it: no production consumer gates on `CapabilitySet`; the `Backend`
+ * interface is the authoritative port list, and the capability set only
+ * advertises the originally migrated domains.
+ */
 export const CAPABILITIES = [
   'session-read',
   'session-write',

@@ -101,8 +101,11 @@ export interface RemoteLiveIngressSinks {
    *  finished whole values: title/goal/todos/model/preset/usage/context...).
    *  The Session snapshot never carries projection values, so this is the ONE
    *  live channel through which a current-value change made by the Host or by
-   *  another Client reaches this surface. */
-  readonly onProjectionsChanged: (sessionId: string) => void
+   *  another Client reaches this surface. `changedKeys` is the real key set of
+   *  THIS coalesced notification batch (never inferred from the subscribed
+   *  inventory), so a consumer can react to the one projection it owns without
+   *  treating unrelated high-frequency updates as a reason to rewrite it. */
+  readonly onProjectionsChanged: (sessionId: string, changedKeys: readonly string[]) => void
 }
 
 /** The installed ingress subscription handle. */
@@ -470,22 +473,32 @@ export function createRemoteLiveIngress(
         }
 
         let projectionRefreshQueued = false
-        const onProjections = (): void => {
+        /** The REAL projection keys that notified in the pending microtask
+         *  batch. Short-lived delivery bookkeeping only: never a projection
+         *  value cache and never an authority. */
+        const pendingProjectionKeys = new Set<string>()
+        const onProjections = (key: string): void => {
           if (isBindingReplaced()) {
             dispose()
             return
           }
+          pendingProjectionKeys.add(key)
           if (projectionRefreshQueued) return
           projectionRefreshQueued = true
           queueMicrotask(() => {
             projectionRefreshQueued = false
             if (disposed || isBindingReplaced()) return
-            sinks.onProjectionsChanged(sessionId)
+            // Copy and clear BEFORE the sink: a synchronous sink callback that
+            // publishes another projection must start a NEW batch instead of
+            // mutating the keys this notification reports.
+            const changedKeys = [...pendingProjectionKeys]
+            pendingProjectionKeys.clear()
+            sinks.onProjectionsChanged(sessionId, changedKeys)
           })
         }
 
         const unsubscribeSnapshot = binding.session.subscribe(onSnapshot)
-        const offs = projectionKeys.map(key => binding.session.projections.faceOf(key).subscribe(onProjections))
+        const offs = projectionKeys.map(key => binding.session.projections.faceOf(key).subscribe(() => onProjections(key)))
         const unsubscribeEvent = binding.eventSource.subscribe(publish)
         attached = {
           binding,

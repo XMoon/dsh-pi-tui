@@ -11,6 +11,8 @@
  */
 
 import assert from 'node:assert/strict'
+import { fakeAgentModel } from '../support/agent-model-double.ts'
+import { unavailableAcpAccess, unavailableWebAccess, unavailableMcpServers } from '../support/web-access-fake.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
@@ -18,15 +20,15 @@ import { afterEach, test } from 'node:test'
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
-import { ProcessTerminal } from '@xmoon76/pi-tui'
+import { ProcessTerminal, stripTerminalSequences } from '@xmoon76/pi-tui'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SESSION_FORMAT_VERSION, SessionId } from '@deepseek-ai/dsh-session'
 import { registerTuiCommands, type TuiCommandRunner } from '../../src/commands.ts'
 import { apply as applyRunner, Config as TuiConfigSchema } from '../../src/index.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
-import { sessionArtifactFilename, safeSessionIdSegment } from '../../src/app/command/artifacts.ts'
+import { createArtifactSaveOwner, sessionArtifactFilename, safeSessionIdSegment } from '../../src/app/command/artifacts.ts'
 import { resolveClientDirectory, streamToFile, writeTextAtomically } from '../../src/client/artifact/save.ts'
-import { sessionLogZipFilename } from '@deepseek-ai/dsh-session-log-export'
+import { formatSessionMarkdown, sessionLogZipFilename } from '@deepseek-ai/dsh-session-log-export'
 import { TuiApp } from '../../src/tui-app.ts'
 import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
 import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
@@ -34,8 +36,12 @@ import { DirectSessionArchive } from '../../src/runtime/direct/session-archive-d
 import { TUI_STARTUP_SERVICE } from '../../src/startup.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import { waitForFrame } from '../support/frame-wait.ts'
 import { sessionScopeFacts } from '../support/session-scope-facts.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
+import type { SessionMarkdownPort } from '../../src/runtime/session-markdown-port.ts'
+import { provideFakeHostWorkspaceRegistry } from '../support/workspace-registry.ts'
+import { unconfiguredPolicyObservation, unconfiguredSessionPolicyPort } from '../support/session-policy-fake.ts'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
@@ -56,9 +62,13 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     ctx,
     app,
     deliveredFilesSnapshot: () => undefined,
+    webAccess: unavailableWebAccess(),
+    acpAccess: unavailableAcpAccess(),
+    mcpServers: unavailableMcpServers(),
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
         ...sessionScopeFacts(() => state.agent, () => 1),
         get currentSessionId() { return state.agent?.session.id },
+    sessionPolicy: unconfiguredSessionPolicyPort(),
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     defaultSelection: () => undefined,
@@ -92,8 +102,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
         answerContinued: async () => 'not-continued' as const,
       },
       onApprovalRequest: () => {},
-      setApprovalPolicy: () => true,
-    },
+      },
     catalog: {
       models: {
         available: () => true,
@@ -117,7 +126,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
         listHumanSkills: async () => undefined,
         resolveSkill: async () => ({ kind: 'unavailable' as const }),
         hostLoadsSkillBody: () => false,
-        onSkillsChange: () => {},
+        onSkillsChange: () => () => {},
       },
     },
     config: {
@@ -145,6 +154,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
       },
       account: {
         available: () => false,
+        isObservationCurrent: () => false,
         getState: async () => { throw new Error('account unavailable') },
         getProfile: async () => null,
         getBalance: async () => null,
@@ -153,7 +163,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
         startSignIn: async () => { throw new Error('account unavailable') },
         cancelSignIn: async () => { throw new Error('account unavailable') },
         signOut: async () => { throw new Error('account unavailable') },
-        hasRunningAccountTasks: () => false,
+        hasRunningAccountTasks: async () => false,
       },
       credentials: {
         recordsSupported: () => true,
@@ -168,23 +178,43 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
       authorization: {
         available: () => false,
         listTargets: () => [],
+        refreshTargets: async () => {},
+        targetsState: () => 'unavailable' as const,
         begin: async () => ({ kind: 'unavailable' as const }),
         onEvent: () => () => {},
         respond: async () => {},
         cancel: async () => {},
       },
       permissions: {
-        approvalOverrideAvailable: () => true,
         presetNames: () => [],
         defaultPreset: () => undefined,
         setDefaultPreset: async () => {},
-        approvalOverrideOf: () => undefined,
         applyPermissionPreset: async () => ({ kind: 'applied' as const }),
       },
+      subagentLimits: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
       subagentModelSelection: {
-        available: () => false,
-        get: () => ({ enabled: false, allowedModels: [] }),
-        set: async () => {},
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
+      agentLoopSettings: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
+      shellExecutionSettings: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
+      sessionLogUpload: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
       },
       presetDefault: {
         available: () => true,
@@ -196,18 +226,46 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
         read: async () => undefined,
         setSearchProvider: async () => {},
         setFetchProvider: async () => {},
+        restoreSearchProvider: async () => {},
+        restoreFetchProvider: async () => {},
         setSearchApiCount: async () => {},
         setSendOriginalQuestion: async () => {},
-        setSearchApiBaseURL: async () => {},
+        setSearchBilling: async () => {},
+        setFetchBilling: async () => {},
       },
       visualTools: {
         read: () => undefined,
         setEnabled: async (_enabled: boolean, _revision: number) => {},
       },
+      webStartupPreference: {
+        read: () => undefined,
+        setAutoStart: async (_value: boolean, _revision: number) => {},
+      },
+      backendStartupPreference: {
+        read: () => undefined, readFresh: async () => undefined,
+        setBackend: async (_value: 'direct' | 'daemon', _revision: number) => {},
+      },
+      acpStartupPreference: {
+        read: () => undefined,
+        setAutoStart: async (_value: boolean, _revision: number) => {},
+      },
+      extensionConfigs: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'no Host settings in this fixture' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'no Host settings in this fixture' }),
+      },
+      mcpServerSources: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'no Host settings in this fixture' }),
+        refresh: async () => {},
+      },
+      mcpServerConfiguration: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'no Host settings in this fixture' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'failed' as const, failure: { kind: 'rejected' as const, reason: 'no Host settings in this fixture' } }),
+      },
     },
     hostFile: new DirectHostFilePort(() => undefined, null),
-    hostShellCompletion: true,
-    transcriptExportAvailable: true,
+    hostShellCompletion: { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) },
     commandRegistry: ctx.get('commands') as import('../../src/commands.ts').CommandRegistryLike | undefined,
     clientCommands: createClientCommandRegistry(parseCommand),
     requestExit: () => {},
@@ -241,7 +299,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, createPluginManagerPage: () => undefined,
+    openTasksBrowser: () => {}, openScheduleWorkspace: () => ({ kind: 'success' } as const), createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -320,9 +378,9 @@ test('/transcript accepts no arguments: bare and whitespace-only succeed, any ar
   registerTuiCommandsWithDirectSeams(stubRunner(ctx, app))
   const defs = commands.defs
 
-  // The stub declares the REQUIRED capability explicitly as `true` (Direct
-  // semantics); the refused branch is locked separately below and by the
-  // mounted Remote /transcript L6.
+  // A mounted PiTui app is the real save-dialog capability; the refused
+  // app-less renderer branch is locked separately below, and the mounted
+  // Remote success path by the L6 Remote suite.
   const bare = awaitHandler(defs, 'transcript', '')
   assert.equal(bare.kind, 'success')
   assert.equal(bare.text, 'Transcript export requested.')
@@ -334,21 +392,25 @@ test('/transcript accepts no arguments: bare and whitespace-only succeed, any ar
   assert.equal(path.kind, 'error')
 })
 
-test('/transcript refuses truthfully when the composition declares the capability false (PR4 round 5; required since PR5)', () => {
+test('/transcript refuses explicitly on a renderer without a mounted TuiApp (no post-success save can start)', () => {
   const ctx = new Context()
   const commands = fakeCommands()
   ctx.provide('commands', commands.service as never)
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onCancel: () => {} })
   startedApps.add(app)
+  // The non-PiTui/TSP renderer mounts no `TuiApp`: the save-location dialog is
+  // a real Client capability that does not exist there. The command must refuse
+  // BEFORE a success result (and therefore before the post-success artifact
+  // workflow) instead of reporting a save that can never run.
   const runner: import('../../src/commands.ts').TuiCommandRunner = {
     ...stubRunner(ctx, app),
-    transcriptExportAvailable: false,
+    app: undefined,
   }
   registerTuiCommandsWithDirectSeams(runner)
   const refused = awaitHandler(commands.defs, 'transcript', '')
   assert.equal(refused.kind, 'error')
-  assert.equal(refused.text, 'transcript export is unavailable on this backend')
+  assert.equal(refused.text, 'transcript file save is unavailable on this renderer')
 })
 
 // The grammar handlers are synchronous acknowledgements; the helper keeps
@@ -699,19 +761,33 @@ test('streamToFile releases the reader lock after a cancelled save', async (t) =
 
 /** A minimal runner harness (the runner-session-bootstrap pattern) with a
  * scriptable commands service and a recorded archive port. */
+type HarnessSession = {
+  id: string
+  header: { id: string; cwd: string; createdAt: number; version: number }
+  events?: readonly unknown[]
+}
+
 function makeHarness(home: string, options: {
   execute?: () => Promise<{ result: { kind: 'success' } | { kind: 'error'; text: string } } | undefined>
-  sessions?: Record<string, { id: string; header: { id: string; cwd: string; createdAt: number; version: number } }>
+  sessions?: Record<string, HarnessSession>
 }) {
-  const persisted = new Map<string, { id: string; header: { id: string; cwd: string; createdAt: number; version: number } }>()
+  const persisted = new Map<string, HarnessSession>()
   for (const session of Object.values(options.sessions ?? {})) persisted.set(session.id, session)
+  // Every official Session Query Markdown read the production adapter issues.
+  const markdownReads: string[] = []
   const live = new Map<string, Agent>()
-  const makeHandle = (session: { id: string; header: { id: string; cwd: string; createdAt: number; version: number } }): { agent: Agent; dispose: () => Promise<void> } => {
+  const makeHandle = (session: HarnessSession): { agent: Agent; dispose: () => Promise<void> } => {
     // The structural Agent shape the runner's surface rebuild and the
-    // Direct retirement touch: ctx (get/on), whenIdle, cancel, inbox.
+    // Direct retirement touch: ctx (get/on/effect), whenIdle, cancel, inbox.
+    // `effect` models the official Agent-scope lifecycle (the per-Turn latch
+    // disposes with the Agent exactly as in production).
+    const effectDisposers: Array<() => void> = []
     const agentContext = {
       get: () => undefined,
       on: () => () => {},
+      effect: (fn: () => () => void) => {
+        effectDisposers.push(fn())
+      },
     }
     let cancelled = false
     let releaseIdle: (() => void) | undefined
@@ -719,6 +795,8 @@ function makeHarness(home: string, options: {
       session: { id: session.id, header: session.header, snapshotEvents: () => [] },
       ctx: agentContext,
       options: { provider: 'p', model: 'm' },
+      // DSH 0.2.2: the Agent owns its model selection (`AgentModel`).
+      model: fakeAgentModel(undefined, { provider: 'p', model: 'm' }),
       status: 'idle',
       inbox: { nextTurn: [], nextStep: [] },
       whenIdle: async () => {
@@ -734,7 +812,14 @@ function makeHarness(home: string, options: {
       },
     } as unknown as Agent
     live.set(session.id, agent)
-    return { agent, dispose: async () => { live.delete(session.id) } }
+    return {
+      agent,
+      dispose: async () => {
+        // The Agent-scope teardown runs the registered effect disposers.
+        for (const disposeEffect of effectDisposers.splice(0)) disposeEffect()
+        live.delete(session.id)
+      },
+    }
   }
   const persistence = {
     list: async () => [...persisted.values()].map(session => session.header),
@@ -743,6 +828,12 @@ function makeHarness(home: string, options: {
       if (session === undefined) throw new Error(`unknown test session ${String(id)}`)
       return { meta: session.header, events: [] }
     },
+    stat: async (id: unknown) => {
+      const session = persisted.get(String(id))
+      if (session === undefined) return undefined
+      // Every seeded Session has a materialized Host artifact in this fixture.
+      return { header: session.header, revision: 'rev-1', location: { path: `/host/sessions/${session.id}.jsonl` } }
+    },
   }
   const sessionQuery = {
     listSessions: async () => [...persisted.values()].map(session => ({ header: session.header, live: live.has(session.id) })),
@@ -750,6 +841,16 @@ function makeHarness(home: string, options: {
       const session = persisted.get(String(id))
       if (session === undefined) throw new Error(`unknown test session ${String(id)}`)
       return { header: session.header, events: [], [Symbol.dispose]: () => {} }
+    },
+    // The official complete committed logical snapshot the Markdown adapter
+    // consumes. An unknown id answers the official stable not-found code.
+    readSession: async (id: unknown) => {
+      markdownReads.push(String(id))
+      const session = persisted.get(String(id))
+      if (session === undefined) {
+        throw Object.assign(new Error('session not found'), { code: 'SESSION_QUERY_SESSION_NOT_FOUND' })
+      }
+      return { header: session.header, events: session.events ?? [] }
     },
   }
   const agents = {
@@ -807,10 +908,22 @@ function makeHarness(home: string, options: {
     execute: options.execute ?? (async () => ({ result: { kind: 'success' } })),
     handler: (name: string) => definitions.get(name)?.handler,
   }
-  return { persistence, sessionQuery, agents, sessions, defaultModel, llm, commands, live }
+  return {
+    persistence,
+    sessionQuery,
+    agents,
+    sessions,
+    defaultModel,
+    llm,
+    commands,
+    live,
+    markdownReads,
+  }
 }
 
-async function settle(): Promise<void> {
+/** Drain the queued microtask chain (a deterministic flush, NOT a fixed-time
+ *  wait; the name deliberately avoids any support fixed-wait helper name). */
+async function flushMicrotasks(): Promise<void> {
   for (let index = 0; index < 40; index += 1) await Promise.resolve()
 }
 
@@ -889,14 +1002,18 @@ async function mountRunner(
   ctx.provide('sessionPersistence', harness.persistence as never)
   ctx.provide('sessionQuery', harness.sessionQuery as never)
   ctx.provide('agents', harness.agents as never)
+  // WS-2: the official Host Workspace registry the Direct lifecycle pre-selects through.
+  provideFakeHostWorkspaceRegistry(ctx)
   ctx.provide('sessions', harness.sessions as never)
   ctx.provide('agentDefaultModel', harness.defaultModel as never)
   ctx.provide('llm', harness.llm as never)
   ctx.provide('commands', harness.commands as never)
   ctx.provide('loader', { await: async () => {} } as never)
-  const fiber = ctx.plugin((pluginCtx) => applyRunner(pluginCtx, TuiConfigSchema(config as never)))
+  const tuiConfig = TuiConfigSchema(config as never)
+  ctx.provide('piTuiPreferences', tuiConfig)
+  const fiber = ctx.plugin((pluginCtx) => applyRunner(pluginCtx, tuiConfig))
   await fiber
-  await settle()
+  await flushMicrotasks()
   return fiber
 }
 
@@ -943,7 +1060,7 @@ test('BLOCKING: /export opens Save Location only after commands.execute resolved
   assert.ok(app, 'the production runner must create a TuiApp')
   startedApps.add(app)
   submitText(app, '/export')
-  await settle()
+  await flushMicrotasks()
   // The save workflow must start ONLY AFTER the command lifecycle settled.
   assert.deepEqual(events, ['execute-resolved', 'save-location-opened'],
     'the archive workflow must begin after commands.execute resolved — never inside the handler')
@@ -981,7 +1098,7 @@ test('BLOCKING: a failed /export result never opens Save Location', async (t) =>
   assert.ok(app, 'the production runner must create a TuiApp')
   startedApps.add(app)
   submitText(app, '/export foo')
-  await settle()
+  await flushMicrotasks()
   assert.equal(opened, 0, 'an error result must never open Save Location')
 })
 
@@ -1021,30 +1138,30 @@ test('a second artifact save while one prompt is active is refused with a notice
   // the editor is free — no prompt is open until a command settles).
   submitText(app, '/export')
   submitText(app, '/transcript')
-  await settle()
+  await flushMicrotasks()
   // Release each command in turn. The first successful command opens the
   // real Save Location prompt; after its submit turn is released, the second
   // command runs and its save is refused by the duplicate guard.
   for (let index = 0; index < 2; index += 1) {
-    for (let round = 0; round < 40 && executeGates.length <= index; round += 1) await settle()
+    for (let round = 0; round < 40 && executeGates.length <= index; round += 1) await flushMicrotasks()
     assert.ok(executeGates[index], `command ${index + 1} must reach the gated Host plane`)
     executeGates[index]!()
-    await settle()
+    await flushMicrotasks()
   }
-  await settle()
+  await flushMicrotasks()
   // Bounded poll for the refused-save notice: a fixed sleep raced the
   // prompt/notice rendering under load (the flake this replaces).
   let view = ''
   for (let round = 0; round < 50 && !view.includes('already active'); round += 1) {
     await new Promise<void>(resolve => setTimeout(resolve, 10))
-    await settle()
+    await flushMicrotasks()
     view = vt.getViewport().join('\n')
   }
   assert.ok(view.includes('already active'),
     `the refused second save must notify, never silently drop:\n${view}`)
   // Cancel the first prompt (Esc) to clean up.
   vt.sendInput('\x1b')
-  await settle()
+  await flushMicrotasks()
 })
 
 test('the post-success workflow targets the CAPTURED originating Session even after a switch', async (t) => {
@@ -1088,7 +1205,7 @@ test('the post-success workflow targets the CAPTURED originating Session even af
     assert.ok(resumeHandler !== undefined, 'the real runner must register /resume')
     const outcome = await (resumeHandler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: 'session-b' })
     assert.equal((outcome as { kind?: string }).kind, 'success', 'the switch to B must succeed')
-    await settle()
+    await flushMicrotasks()
     return { kind: 'selected', directory: outDir, overwrite: false }
   }
   life.defer(() => { TuiApp.prototype.askSaveLocation = originalAsk })
@@ -1105,14 +1222,14 @@ test('the post-success workflow targets the CAPTURED originating Session even af
   assert.ok(app, 'the production runner must create a TuiApp')
   startedApps.add(app)
   submitText(app, '/export')
-  await settle()
+  await flushMicrotasks()
   // The switch + save chain crosses real async boundaries (the transition
   // quiesce and the stream sink); poll for the artifact instead of a fixed
   // sleep so a loaded CI machine cannot starve the assertion.
   const deadline = Date.now() + 2_000
   for (;;) {
     await new Promise<void>(resolve => setTimeout(resolve, 25))
-    await settle()
+    await flushMicrotasks()
     if (existsSync(join(outDir, 'dsh-session-session-a.zip'))) break
     if (Date.now() > deadline) break
   }
@@ -1123,7 +1240,7 @@ test('the post-success workflow targets the CAPTURED originating Session even af
   assert.ok(existsSync(join(outDir, 'dsh-session-session-a.zip')), 'the artifact lands in the selected directory')
 })
 
-test('/transcript writes the readable Markdown from the originating Session after settlement', async (t) => {
+test('BLOCKING: /transcript writes the OFFICIAL Markdown of the captured originating Session after a switch', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-export-transcript-')
   const previousHome = process.env.DSH_HOME
@@ -1133,10 +1250,68 @@ test('/transcript writes the readable Markdown from the originating Session afte
     else process.env.DSH_HOME = previousHome
   })
   const outDir = life.tempDir('dsh-export-out-')
-  const sessionA = { id: 'session-a', header: { id: 'session-a', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION } }
-  const harness = makeHarness(home, { sessions: { 'session-a': sessionA } })
+  const eventsA = [
+    { type: 'session/title', seq: 0, time: 1, data: { title: 'Session A title' } },
+    { type: 'turn/start', seq: 1, time: 2, data: { turn: 0 } },
+    {
+      type: 'user/message', seq: 2, time: 3, surfaceOp: 'append',
+      data: { id: 'u-a', role: 'user', content: [{ type: 'text', text: 'question from A 汉字' }], source: { kind: 'user' } },
+    },
+    {
+      type: 'assistant/message', seq: 3, time: 4, surfaceOp: 'append',
+      data: {
+        turn: 0, step: 0,
+        message: {
+          id: 'a-a', role: 'assistant',
+          content: [{ type: 'text', text: 'answer from A 🙂' }],
+          source: { kind: 'model', provider: 'p', model: 'm' },
+        },
+        stream: [], usage: { inputTokens: 1, outputTokens: 1 },
+      },
+    },
+    { type: 'turn/end', seq: 4, time: 5, data: { turn: 0, reason: { kind: 'completed' } } },
+  ] as const
+  const eventsB = [
+    { type: 'session/title', seq: 0, time: 1, data: { title: 'Session B title' } },
+    { type: 'turn/start', seq: 1, time: 2, data: { turn: 0 } },
+    {
+      type: 'user/message', seq: 2, time: 3, surfaceOp: 'append',
+      data: { id: 'u-b', role: 'user', content: [{ type: 'text', text: 'question from B' }], source: { kind: 'user' } },
+    },
+    {
+      type: 'assistant/message', seq: 3, time: 4, surfaceOp: 'append',
+      data: {
+        turn: 0, step: 0,
+        message: {
+          id: 'a-b', role: 'assistant',
+          content: [{ type: 'text', text: 'answer from B' }],
+          source: { kind: 'model', provider: 'p', model: 'm' },
+        },
+        stream: [], usage: { inputTokens: 1, outputTokens: 1 },
+      },
+    },
+    { type: 'turn/end', seq: 4, time: 5, data: { turn: 0, reason: { kind: 'completed' } } },
+  ] as const
+  const headerA = { id: 'session-a', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION }
+  const headerB = { id: 'session-b', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION }
+  const harness = makeHarness(home, {
+    sessions: {
+      'session-a': { id: 'session-a', header: headerA, events: eventsA },
+      'session-b': { id: 'session-b', header: headerB, events: eventsB },
+    },
+  })
   const originalAsk = TuiApp.prototype.askSaveLocation
+  let askCalls = 0
   TuiApp.prototype.askSaveLocation = async function () {
+    askCalls += 1
+    // While the /transcript workflow is paused at Save Location, switch the
+    // live Session to B (the /resume command handler drives the switch). The
+    // eventual Markdown MUST still be A's.
+    const resumeHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('resume')
+    assert.ok(resumeHandler !== undefined, 'the real runner must register /resume')
+    const outcome = await (resumeHandler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: 'session-b' })
+    assert.equal((outcome as { kind?: string }).kind, 'success', 'the switch to B must succeed')
+    await flushMicrotasks()
     return { kind: 'selected', directory: outDir, overwrite: false }
   }
   life.defer(() => { TuiApp.prototype.askSaveLocation = originalAsk })
@@ -1152,20 +1327,243 @@ test('/transcript writes the readable Markdown from the originating Session afte
   const app = probe.apps.at(-1)
   assert.ok(app, 'the production runner must create a TuiApp')
   startedApps.add(app)
+  harness.markdownReads.length = 0
   submitText(app, '/transcript')
-  await settle()
-  // The save chain crosses real async boundaries (the transition quiesce
-  // and the atomic text sink); poll for the artifact instead of a fixed
-  // sleep so a loaded CI machine cannot starve the assertion.
+  await flushMicrotasks()
+  const target = join(outDir, 'dsh-session-session-a.md')
   const deadline = Date.now() + 2_000
   for (;;) {
     await new Promise<void>(resolve => setTimeout(resolve, 25))
-    await settle()
-    if (existsSync(join(outDir, 'dsh-session-session-a.md'))) break
+    await flushMicrotasks()
+    if (existsSync(target)) break
     if (Date.now() > deadline) break
   }
-  const target = join(outDir, 'dsh-session-session-a.md')
-  assert.ok(existsSync(target), 'the transcript file is written with the fixed .md name')
+  assert.equal(askCalls, 1, 'the save workflow must have opened Save Location')
+  assert.deepEqual(harness.markdownReads, ['session-a'],
+    'the Markdown read targets the captured originating Session, never the live B')
+  assert.ok(existsSync(target), 'the official Markdown lands in the Client-selected directory')
   const content = readFileSync(target, 'utf8')
-  assert.ok(content.startsWith('# Session session-a'), 'the Markdown renders the originating Session header')
+  assert.equal(
+    content,
+    formatSessionMarkdown(eventsA as never, '/host/sessions/session-a.jsonl'),
+    'the file bytes are the official formatter output over the captured Host snapshot (with the Host source path)',
+  )
+  assert.match(content, /^# Session A title$/mu, 'the official title, not the retired Client header')
+  assert.match(content, /> question from A 汉字/u, 'the human question is an official blockquote')
+  assert.match(content, /answer from A 🙂/u)
+  assert.doesNotMatch(content, /answer from B/u, 'the replacement live Session is never exported')
+  assert.doesNotMatch(content, /^## (User|Assistant)$/mu, 'the retired Client-local format is gone')
+  assert.equal(content.endsWith('\n'), true)
+})
+
+/** The painted fullscreen frame as plain text lines (ANSI stripped). */
+function paintedScreen(vt: VirtualTerminal): readonly string[] {
+  return vt.getViewport().map(line => stripTerminalSequences(line))
+}
+
+/** Wait for one painted fullscreen frame satisfying the predicate. */
+async function waitForScreen(
+  vt: VirtualTerminal,
+  label: string,
+  predicate: (frame: string) => boolean,
+): Promise<readonly string[]> {
+  await waitForFrame(() => paintedScreen(vt).join('\n'), predicate, () => vt.waitForRender(), label)
+  return paintedScreen(vt)
+}
+
+/** One REAL SGR left press/release on a painted word (1-based terminal cells). */
+function clickScreenWord(vt: VirtualTerminal, lines: readonly string[], word: string): void {
+  const row = lines.findIndex(line => line.includes(word))
+  assert.ok(row >= 0, `${word} is not painted:\n${lines.join('\n')}`)
+  const column = lines[row]!.indexOf(word)
+  assert.ok(column >= 0, `${word} has no painted column`)
+  vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
+  vt.sendInput(`\x1b[<0;${column + 1};${row + 1}m`)
+}
+
+test('SGR Save / No / Yes in the fullscreen editor seat writes the official transcript exactly once', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-export-mouse-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const outDir = life.tempDir('dsh-export-mouse-out-')
+  const target = join(outDir, 'dsh-session-session-a.md')
+  // C-S03: a pre-existing target enters the collision confirmation; NO must
+  // leave it untouched and YES must replace it exactly once.
+  writeFileSync(target, 'STALE\n')
+  const eventsA = [
+    { type: 'session/title', seq: 0, time: 1, data: { title: 'Session A title' } },
+    { type: 'turn/start', seq: 1, time: 2, data: { turn: 0 } },
+    {
+      type: 'user/message', seq: 2, time: 3, surfaceOp: 'append',
+      data: { id: 'u-a', role: 'user', content: [{ type: 'text', text: 'question from A 汉字' }], source: { kind: 'user' } },
+    },
+    {
+      type: 'assistant/message', seq: 3, time: 4, surfaceOp: 'append',
+      data: {
+        turn: 0, step: 0,
+        message: {
+          id: 'a-a', role: 'assistant',
+          content: [{ type: 'text', text: 'answer from A 🙂' }],
+          source: { kind: 'model', provider: 'p', model: 'm' },
+        },
+        stream: [], usage: { inputTokens: 1, outputTokens: 1 },
+      },
+    },
+    { type: 'turn/end', seq: 4, time: 5, data: { turn: 0, reason: { kind: 'completed' } } },
+  ] as const
+  const sessionA = {
+    id: 'session-a',
+    header: { id: 'session-a', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: eventsA,
+  }
+  const harness = makeHarness(home, { sessions: { 'session-a': sessionA } })
+  const probe = installAppProbe()
+  life.defer(probe.restore)
+  const vt = new VirtualTerminal(100, 30)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const ctx = new Context()
+  life.defer(() => disposeContext(ctx))
+  const fiber = await mountRunner(ctx, home, harness, { sessionId: 'session-a' }, {})
+  life.defer(() => fiber.dispose())
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  startedApps.add(app)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  // The REAL fullscreen input path submits the command; the artifact workflow
+  // then opens the Save Location seat after the command lifecycle settles.
+  vt.sendInput('/transcript')
+  vt.sendInput('\r')
+  await waitForScreen(vt, 'the Save Location seat to open', frame => frame.includes('Save readable transcript'))
+  // Type the absolute Client directory, replacing the initial './'.
+  vt.sendInput('\x15') // Ctrl+U: delete to line start (the shared Input binding)
+  vt.sendInput(outDir)
+  // Flush the input's own frame before accepting the settled action row; the
+  // previous './' suggestion frame carries the same Save/Dismiss wording.
+  await vt.waitForRender()
+  const ready = await waitForScreen(vt, 'the settled directory suggestion', frame =>
+    frame.includes('Save [Enter]') && frame.includes('Dismiss suggestions [Esc]') && frame.includes('→ '))
+  // The painted suggestion/action rows prove the async refresh settled even
+  // when a long absolute directory label is clipped to this 100-column seat.
+  // The actual target bytes and one official read are asserted after consent.
+  clickScreenWord(vt, ready, 'Save [Enter]')
+  const collision = await waitForScreen(vt, 'the collision confirmation', frame =>
+    frame.includes('Replace existing file?'))
+  assert.match(collision.join('\n'), /Yes \[Y\] · No \[N\]/u)
+  clickScreenWord(vt, collision, 'No [N]')
+  assert.equal(readFileSync(target, 'utf8'), 'STALE\n', 'No never overwrites the target')
+  // No returns to editing and re-runs the suggestion refresh; wait for THAT
+  // settled frame before the next Save gesture.
+  const back = await waitForScreen(vt, 'the directory editing state', frame =>
+    frame.includes('Save [Enter]') && !frame.includes('Replace existing file?')
+      && frame.includes('Dismiss suggestions [Esc]') && frame.includes('→ '))
+  clickScreenWord(vt, back, 'Save [Enter]')
+  const again = await waitForScreen(vt, 'the collision confirmation again', frame =>
+    frame.includes('Replace existing file?'))
+  clickScreenWord(vt, again, 'Yes [Y]')
+  // The ONE overwrite-consented write replaces the target with the official
+  // Markdown of the captured Session.
+  const official = formatSessionMarkdown(eventsA as never, '/host/sessions/session-a.jsonl')
+  const deadline = Date.now() + 3_000
+  for (;;) {
+    await new Promise<void>(resolve => setTimeout(resolve, 25))
+    await flushMicrotasks()
+    if (existsSync(target) && readFileSync(target, 'utf8') === official) break
+    if (Date.now() > deadline) break
+  }
+  assert.equal(readFileSync(target, 'utf8'), official,
+    'the overwrite-consented artifact is the official Markdown of the captured Session')
+  assert.deepEqual(harness.markdownReads, ['session-a'], 'exactly ONE official Markdown read owns the write')
+  await vt.waitForRender()
+})
+
+// ── 23.4 ArtifactSaveOwner Markdown source classification ────────────────
+/** A focused ArtifactSaveOwner harness: the REAL owner/sink over a fake
+ *  official Markdown port. Used ONLY for the sink/error classification the
+ *  real end-to-end runner test above cannot drive (a Host that answers
+ *  none/unavailable/generic failure), never as a substitute for the real
+ *  Host→route→Client chain. */
+function markdownOwnerHarness(options: {
+  directory: string
+  read: SessionMarkdownPort['read']
+  saveResult?: { kind: 'selected'; directory: string; overwrite: boolean } | { kind: 'cancelled' }
+}) {
+  const notices: { text: string; kind?: 'info' | 'error' }[] = []
+  const reads: string[] = []
+  const app = {
+    askSaveLocation: async () => options.saveResult
+      ?? { kind: 'selected' as const, directory: options.directory, overwrite: false },
+    notify: (text: string, kind?: 'info' | 'error') => { notices.push({ text, kind }) },
+  } as unknown as TuiApp
+  const owner = createArtifactSaveOwner<{ session: { id: string } }>({
+    app: () => app,
+    isCleanedUp: () => false,
+    signal: new AbortController().signal,
+    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+    sessionArchive: { open: async () => ({ kind: 'unavailable' as const }) },
+    sessionMarkdown: {
+      read: async (sessionId, signal) => {
+        reads.push(sessionId)
+        return options.read(sessionId, signal)
+      },
+    },
+    clientCwd: options.directory,
+  })
+  return { owner, notices, reads }
+}
+
+test('a cancelled transcript save never reads the Host and writes no file', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-transcript-cancel-')
+  const harness = markdownOwnerHarness({
+    directory: dir,
+    saveResult: { kind: 'cancelled' },
+    read: async () => ({ kind: 'ready', markdown: 'never read\n' }),
+  })
+  const outcome = await harness.owner.save('transcript', { session: { id: 'session-a' } })
+  assert.deepEqual(outcome, { kind: 'cancelled' })
+  assert.deepEqual(harness.reads, [], 'a cancelled Save Location dispatches no Host request')
+  assert.deepEqual(readdirSync(dir), [], 'no artifact is created')
+})
+
+test('none / unavailable / generic failure never write a file or claim success', async (t) => {
+  const life = testLifecycle(t)
+  for (const [label, read, message] of [
+    ['none', async () => ({ kind: 'none' as const }), 'Session was not found.'],
+    ['unavailable', async () => ({ kind: 'unavailable' as const }), 'Session Markdown export is unavailable.'],
+    ['generic', async () => { throw new Error('host path /secret/session.jsonl exploded') }, 'host path /secret/session.jsonl exploded'],
+  ] as const) {
+    const dir = life.tempDir(`dsh-transcript-${label}-`)
+    const harness = markdownOwnerHarness({ directory: dir, read })
+    await assert.rejects(
+      () => harness.owner.save('transcript', { session: { id: 'session-a' } }),
+      error => error instanceof Error && error.message === message,
+      `${label} must reject with its own stable classification`,
+    )
+    assert.deepEqual(readdirSync(dir), [], `${label} must leave no final artifact`)
+  }
+})
+
+test('the user notice maps an unexpected Markdown failure to the stable artifact error', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-transcript-error-')
+  const harness = markdownOwnerHarness({
+    directory: dir,
+    read: async () => { throw new Error('transport reset') },
+  })
+  harness.owner.start('transcript', { session: { id: 'session-a' } })
+  const deadline = Date.now() + 1_000
+  while (harness.notices.length === 0 && Date.now() < deadline) {
+    await new Promise<void>(resolve => setTimeout(resolve, 10))
+    await flushMicrotasks()
+  }
+  assert.deepEqual(harness.notices, [{ text: 'transcript export failed', kind: 'error' }],
+    'the Host error detail stays in diagnostics; the user sees the stable artifact-level failure')
+  assert.deepEqual(readdirSync(dir), [], 'a failed read leaves no artifact')
 })

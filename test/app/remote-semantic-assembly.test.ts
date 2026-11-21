@@ -13,6 +13,8 @@ import { createRemoteM3ASemantics, type RemoteM3ARuntimeSource } from '../../src
 import { createObservableGenerationHarness } from '../support/remote-generation.ts'
 import type { RemoteModelCatalog } from '../../src/runtime/remote/model-remote.ts'
 import type { RemotePresetCatalog } from '../../src/runtime/remote/preset-remote.ts'
+import type { RemoteFileReceiptUploader } from '../../src/runtime/remote/file-upload-remote.ts'
+import type { PreparedFile } from '../../src/runtime/prepared-prompt.ts'
 
 function serializer(): import('../../src/runtime/remote/session-writer-remote.ts').RemotePromptSerializer {
   return {
@@ -21,10 +23,26 @@ function serializer(): import('../../src/runtime/remote/session-writer-remote.ts
   }
 }
 
+/** The structural receipt uploader the assembly hands the command port. */
+function uploader(): RemoteFileReceiptUploader {
+  return {
+    upload: async (_sessionId, file) => ({
+      receiptId: 'receipt-1',
+      file: { attachmentId: 'attachment-1', name: file.name, bytes: file.byteLength },
+    }),
+  }
+}
+
 /** A small structural stand-in for the narrow one-source runtime face. The
  * official-contract gate proves the REAL `RemoteClientRuntime` satisfies the
  * same face; this fake exists to observe the wiring identities. */
-function runtimeSource(): { source: RemoteM3ARuntimeSource; sessions: object; remote: object; generation: object } {
+function runtimeSource(): {
+  source: RemoteM3ARuntimeSource
+  sessions: object
+  remote: object
+  generation: object
+  directoryPickerCalls: Array<{ readonly path: string | undefined; readonly signal: AbortSignal | undefined }>
+} {
   const generation = createObservableGenerationHarness()
   const sessions = {
     list: {
@@ -39,7 +57,25 @@ function runtimeSource(): { source: RemoteM3ARuntimeSource; sessions: object; re
     create: async () => ({ ok: true as const, value: { sessionId: 's' } }),
     fork: async () => ({ ok: true as const, value: { sessionId: 'f' } }),
   }
+  const directoryPickerCalls: Array<{ readonly path: string | undefined; readonly signal: AbortSignal | undefined }> = []
   const remote = {
+    // The official generated `directoryPicker` namespace (Session Workspace
+    // PR1): the browse port must read through this SAME source object.
+    directoryPicker: {
+      list: async (path: string | undefined, signal?: AbortSignal) => {
+        directoryPickerCalls.push({ path, signal })
+        return {
+          ok: true as const,
+          value: {
+            path: path ?? '/home/host-user',
+            home: '/home/host-user',
+            crumbs: [{ name: '/', path: '/', hidden: false }],
+            entries: [{ name: 'proof', path: '/home/host-user/proof', hidden: false }],
+            truncated: false,
+          },
+        }
+      },
+    },
     session: {
       modelCatalog: async () => ({ ok: true as const, value: {
         default: { provider: 'p', model: 'm' },
@@ -57,22 +93,38 @@ function runtimeSource(): { source: RemoteM3ARuntimeSource; sessions: object; re
     },
     skills: { list: async () => ({ ok: true as const, value: { skills: [] } }) },
     fileReferences: { list: async () => ({ ok: true as const, value: [] }) },
+    // The PRIVATE sessionless default-model namespace (M6): the model catalog's
+    // ONE sessionless write path. The SAME mounted contribution publishes it.
+    piTuiDefaultModel: { saveSelection: async () => ({ ok: true as const, value: { kind: 'saved' as const } }) },
     commands: { execute: async () => ({ ok: true as const, value: undefined }) },
     userQuestions: {
       attachWait: () => (async function* () { /* no frames */ })(),
       answer: async () => ({ ok: true as const, value: true }),
     },
     pluginManager: { list: async () => ({ ok: true as const, value: {} }) },
+    // The official generated `workspace` namespace (WS-2): the lifecycle's ONE
+    // pre-selection authority is passed through this SAME source object.
+    workspace: {
+      create: async () => ({
+        ok: true as const,
+        value: { workspace: { workspaceId: 'workspace-wiring', path: '/wiring', sessionIds: [] }, created: true },
+      }),
+      follow: () => ({
+        [Symbol.asyncIterator]: () => (async function* () { /* no frames */ })(),
+        dispose: () => {},
+      }),
+    },
     $on: () => () => {},
     subagents: {
       prompt: async () => ({ ok: true as const, value: { messageId: 'm' } }),
-      interruptByParent: async () => ({ ok: true as const, value: {} }),
+      interruptByUser: async () => ({ ok: true as const, value: {} }),
     },
   }
   return {
     sessions,
     remote,
     generation: generation.source,
+    directoryPickerCalls,
     source: {
       sessions: sessions as never,
       remote: remote as never,
@@ -84,7 +136,7 @@ function runtimeSource(): { source: RemoteM3ARuntimeSource; sessions: object; re
 
 test('every M3-3A adapter constructs from one shared runtime source', () => {
   const { source, sessions, remote, generation } = runtimeSource()
-  const semantics = createRemoteM3ASemantics(source, { promptSerializer: serializer() })
+  const semantics = createRemoteM3ASemantics(source, { promptSerializer: serializer(), fileReceiptUploader: uploader() })
   assert.ok(semantics.sessionReader)
   assert.ok(semantics.pendingInputReader)
   assert.ok(semantics.sessionWriter)
@@ -96,14 +148,27 @@ test('every M3-3A adapter constructs from one shared runtime source', () => {
   assert.ok(semantics.hostFile)
   assert.ok(semantics.hostCommand)
   assert.ok(semantics.presentationReader)
+  assert.ok(semantics.hostDirectoryBrowse)
   void sessions
   void remote
   void generation
 })
 
+test('the Host directory-browse port reads the SAME generated namespace and generation', async () => {
+  const { source, directoryPickerCalls } = runtimeSource()
+  const semantics = createRemoteM3ASemantics(source, { promptSerializer: serializer(), fileReceiptUploader: uploader() })
+  const signal = new AbortController().signal
+  const outcome = await semantics.hostDirectoryBrowse.list(undefined, signal)
+  assert.equal(outcome.kind, 'ready')
+  assert.ok(outcome.kind === 'ready')
+  assert.equal(outcome.listing.home, '/home/host-user')
+  assert.deepEqual(directoryPickerCalls, [{ path: undefined, signal }],
+    'the port must call the ONE shared generated namespace with the caller signal')
+})
+
 test('the catalog adapters serve reads through the shared source', async () => {
   const { source } = runtimeSource()
-  const semantics = createRemoteM3ASemantics(source, { promptSerializer: serializer() })
+  const semantics = createRemoteM3ASemantics(source, { promptSerializer: serializer(), fileReceiptUploader: uploader() })
   const directory = await semantics.catalog.models.loadDirectory()
   assert.deepEqual(directory.groups.map(group => group.id), ['p'])
   const skills = await semantics.catalog.skills.listHumanSkills('s')
@@ -112,7 +177,7 @@ test('the catalog adapters serve reads through the shared source', async () => {
 
 test('dispose drops the adapter caches (before the Client Context disposal)', async () => {
   const { source } = runtimeSource()
-  const semantics = createRemoteM3ASemantics(source, { promptSerializer: serializer() })
+  const semantics = createRemoteM3ASemantics(source, { promptSerializer: serializer(), fileReceiptUploader: uploader() })
   await semantics.catalog.models.loadDirectory()
   assert.deepEqual(semantics.catalog.models.defaultSelection(), { provider: 'p', model: 'm' })
   semantics.dispose()
@@ -125,8 +190,8 @@ test('dispose drops the adapter caches (before the Client Context disposal)', as
 
 test('the host-file adapter answers through the official session scope', async () => {
   const { source } = runtimeSource()
-  const semantics = createRemoteM3ASemantics(source, { promptSerializer: serializer() })
-  const result = await semantics.hostFile.listReferences({ kind: 'workspace', cwd: '/x' }, '@a')
+  const semantics = createRemoteM3ASemantics(source, { promptSerializer: serializer(), fileReceiptUploader: uploader() })
+  const result = await semantics.hostFile.listReferences({ kind: 'workspace', selectionRevision: 1 }, '@a')
   assert.equal(result.kind, 'unavailable')
   const resolve = await semantics.hostFile.resolveReference({ kind: 'session', sessionId: 's' }, 'a')
   assert.equal(resolve.kind, 'unavailable')
@@ -134,9 +199,39 @@ test('the host-file adapter answers through the official session scope', async (
 
 test('the session reader measures context through the shared generation source', () => {
   const { source } = runtimeSource()
-  const semantics = createRemoteM3ASemantics(source, { promptSerializer: serializer() })
+  const semantics = createRemoteM3ASemantics(source, { promptSerializer: serializer(), fileReceiptUploader: uploader() })
   assert.equal(semantics.sessionReader.measureContext('s'), undefined,
     'no retained binding in the stand-in — unmeasured, never invented')
   assert.equal(semantics.sessionReader.turnOutline('s'), undefined)
   assert.deepEqual(semantics.sessionReader.sessionStatus('s'), undefined)
+})
+
+test('the Host command port stages command files through the injected receipt uploader', async () => {
+  const { source } = runtimeSource()
+  const calls: { sessionId: string; file: PreparedFile; signal: AbortSignal }[] = []
+  const receiptUploader: RemoteFileReceiptUploader = {
+    upload: async (sessionId, file, signal) => {
+      calls.push({ sessionId, file, signal })
+      return { receiptId: 'receipt-7', file: { attachmentId: 'att-7', name: file.name, bytes: file.byteLength } }
+    },
+  }
+  const semantics = createRemoteM3ASemantics(source, {
+    promptSerializer: serializer(),
+    fileReceiptUploader: receiptUploader,
+  })
+  const signal = new AbortController().signal
+  const file: PreparedFile = {
+    name: 'report.pdf',
+    byteLength: 4,
+    source: {
+      kind: 'client-stream',
+      open: async function* () { yield new Uint8Array([1, 2, 3, 4]) },
+    },
+  }
+  assert.deepEqual(
+    await semantics.hostCommand.stageFileReceipt({ sessionId: 'session-a', file, signal }),
+    { receiptId: 'receipt-7' },
+  )
+  assert.deepEqual(calls, [{ sessionId: 'session-a', file, signal }],
+    'the command port stages through the ONE injected uploader, never a second transport')
 })

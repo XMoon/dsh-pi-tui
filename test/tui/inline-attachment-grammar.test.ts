@@ -381,6 +381,53 @@ test('a Unicode whitespace inside a filename is NOT a token separator', () => {
     { consumed: '\u3000件.png', suffix: '' })
 })
 
+test('a line break ends the path token in the quoted and the unquoted form alike', () => {
+  // One renderer keeps the CR of a pasted CRLF pair as the content of its OWN
+  // line (the TSP Composer inserts a paste verbatim; the vendored editor
+  // normalizes CR to LF). The token boundary is the LINE in both forms: an
+  // attachment accept replaces a fragment of one line and must leave the break
+  // that ends it, and every later line, byte-for-byte untouched.
+  const unquoted = '看一下 /image notes\r\nsecond line'
+  const unquotedCursor = '看一下 /image notes'.length
+  const unquotedSeat = pathArgumentSeat(unquoted.slice(0, unquotedCursor), COMMANDS)
+  assert.ok(unquotedSeat !== undefined)
+  const applied = applyInlineAttachmentPath(unquoted, unquotedSeat, unquotedCursor, 0, 'notes.txt')
+  assert.equal(applied.line, '看一下 /image notes.txt \r\nsecond line',
+    'the CR ends the unquoted token: the name completes on its own line and the pair and line 2 survive')
+  assert.equal(applied.cursorCol, '看一下 /image notes.txt'.length)
+  assert.equal(applied.span.line, 0)
+  assert.equal(applied.span.start, '看一下 '.length)
+  assert.equal(applied.span.end, '看一下 /image notes.txt'.length)
+  assert.equal(applied.line.slice(applied.span.start, applied.span.end), '/image notes.txt',
+    'the fragment the placeholder will replace carries no line break')
+  // A bare LF is the same boundary, not a different rule.
+  const lf = applyInlineAttachmentPath('看一下 /image notes\nsecond line', unquotedSeat, unquotedCursor, 0, 'notes.txt')
+  assert.equal(lf.line, '看一下 /image notes.txt \nsecond line', 'LF ends the token like CR')
+  // QUOTED: an open quote never reaches across a line for its partner. The
+  // closing quote here sits on the NEXT line, and that line is the user's prose.
+  const quoted = '请看 /image "my shot\r\nsecond"'
+  const quotedCursor = '请看 /image "my shot'.length
+  const quotedSeat = pathArgumentSeat(quoted.slice(0, quotedCursor), COMMANDS)
+  assert.ok(quotedSeat !== undefined)
+  const quotedApplied = applyInlineAttachmentPath(quoted, quotedSeat, quotedCursor, 0, '"my shot.png"')
+  assert.equal(quotedApplied.line, '请看 /image "my shot.png" \r\nsecond"',
+    'the quoted token stops at the break and line 2 keeps its own stray quote verbatim')
+  assert.equal(quotedApplied.cursorCol, '请看 /image "my shot.png"'.length)
+  // The ONE boundary authority, stated directly.
+  assert.deepEqual(splitTokenRemainder('.png\r\nsecond', false, true),
+    { consumed: '.png', suffix: '\r\nsecond' }, 'a mid-token caret stops AT the break, never past it')
+  assert.deepEqual(splitTokenRemainder('\r\nsecond', false, true), { consumed: '', suffix: '\r\nsecond' })
+  assert.deepEqual(splitTokenRemainder('\nsecond', false, true), { consumed: '', suffix: '\nsecond' })
+  assert.deepEqual(splitTokenRemainder(' shot\r\nnext', true, true),
+    { consumed: ' shot', suffix: '\r\nnext' }, 'a quoted token stops at the break too')
+  assert.deepEqual(splitTokenRemainder(' shot" tail', true, true), { consumed: ' shot"', suffix: ' tail' },
+    'the ordinary same-line quoted close is unchanged')
+  // The two rules together: U+3000 stays a legal filename character — a `\s`
+  // boundary would stop mid-name and duplicate the tail — while CR/LF end it.
+  assert.deepEqual(splitTokenRemainder('\u3000件.png\r\nnext', false, true),
+    { consumed: '\u3000件.png', suffix: '\r\nnext' })
+})
+
 test('a directory accept preserves the closing quote that bounds the prose', () => {
   // Cursor INSIDE the quoted path, with the user's own closing quote and prose
   // already on the right. A directory keeps the seat open, so that quote is the

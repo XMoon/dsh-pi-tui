@@ -8,6 +8,8 @@
 import assert from 'node:assert/strict'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
+import { NativeToolExecutor } from '@deepseek-ai/dsh-tool-executor-native'
+import { executeModelToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import { Context } from '@deepseek-ai/cordis'
 import { ToolRuntime, defineTool } from '@deepseek-ai/dsh-tools'
 import { ToolCallId, MessageId, createToolResultMessage } from '@deepseek-ai/dsh-llm'
@@ -22,23 +24,43 @@ import { TranscriptFolder } from '../../src/transcript.ts'
 import type { TranscriptMessage, TurnActivity } from '../../src/transcript.ts'
 import type { JsonValue } from '../../src/domain/transcript/types.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../../src/runtime/assistant-stream-port.ts'
-import { TuiApp, ThinkingCompactComponent, TODO_COMPACT_LIMIT, TODO_SHORT_COMPACT_LIMIT, TODO_SHORT_SCREEN_MAX_ROWS, todoCompactLimit } from '../../src/tui-app.ts'
-import { Text, stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
+import { TuiApp, ThinkingCompactComponent, TODO_COMPACT_LIMIT, TODO_SHORT_COMPACT_LIMIT, TODO_SHORT_SCREEN_MAX_ROWS, todoCompactLimit, type OwnedRunner } from '../../src/tui-app.ts'
+import type { ExitSessionActivity as ExitActivity } from '../../src/domain/command/policy.ts'
+import { exitChoiceAsking, exitChoiceUnconfirmed, type ExitChoiceOption } from '../../src/app/surface/exit-choice.ts'
+import { createExitIntentFacts } from '../../src/app/bootstrap/exit-facts.ts'
+import { createExitIntentCoordinator } from '../../src/app/bootstrap/exit-intent.ts'
+import { pituiExitChoiceSeam } from '../../src/app/surface/exit-choice-pitui.ts'
+import type { LiveSessionScope, SessionScope } from '../../src/app/session/scope.ts'
+import { Text, getKeybindings, stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { ExtensionLedger } from '../../src/extension/internal/ledger.ts'
 import { SurfaceHost } from '../../src/extension/internal/surface-host.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { APP_KEYBINDINGS } from '../../src/tui/keybindings/definitions.ts'
 import { buildOsc52Sequence, copyToClipboard, type CopyExecutor } from '../../src/client/clipboard/copy.ts'
+import { runOwned } from '../../src/runtime/process/tasks.ts'
+import { createDiag } from '../../src/runtime/process/diagnostics.ts'
+import { FileHistorySearchSource } from '../../src/client/history/search.ts'
+import { historyFilePath } from '../../src/client/history/store.ts'
+
+const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
+afterEach(() => {
+  disposeStartedApps()
+})
+
+/** A `runOwned` entry for tests that open the external editor: the real
+ *  classifier with a silent diag (the owned failure path stays observable). */
+function ownedTaskEntry(): OwnedRunner {
+  const diag = createDiag({ filePath: undefined, stderrLevel: 'off' })
+  return (label, task, options) => {
+    runOwned(label, task, { ...options, diag })
+  }
+}
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
  * stopped after each test — the process's single-live-TUI slot (the
  * vendored keybindings are process-global) is held only by LIVE surfaces,
  * so a test that starts an app must not leak the slot into the next test
  * (see src/tui/process-slot.ts). */
-const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
-afterEach(() => {
-  disposeStartedApps()
-})
 
 
 function startApp(): {
@@ -296,6 +318,7 @@ test('tool cards present through the real registry: read shows the relativized p
     section: () => () => {},
   })
   new ToolRuntime(ctx)
+  ctx.tools.setExecutor(new NativeToolExecutor(ctx))
   const unregister = ctx.tools.register(defineTool({
     name: 'read',
     description: 'Read a UTF-8 text file (test fake).',
@@ -343,7 +366,7 @@ test('tool cards present through the real registry: read shows the relativized p
       time: 1_700_000_000_000,
       data: { turn: 0, step: 0, callId, name: 'read', arguments: JSON.stringify({ file_path: filePath }) },
     }
-    const outcome = await ctx.tools.execute({
+    const outcome = await executeModelToolFixture(ctx, {
       callId,
       name: 'read',
       arguments: { file_path: filePath },
@@ -460,6 +483,128 @@ test('a merged read group renders one tree row per file on the Client presenter 
   assert.ok(!view.includes('total lines: 1'), `the merged group rendered as ONE file:\n${view}`)
 })
 
+test('a foreign tool with read-shaped metadata renders identically with and without the client presenter', async (t) => {
+  // R11 Web-parity negative control on a REAL visible sink: a NON-read tool
+  // that returns valid read-shaped metadata + a file envelope must NOT gain a
+  // presenter-only Read card. Drive the SAME foreign `tool/call` +
+  // `tool/result` through two serial TuiApps — one with
+  // `createClientToolPresenter()` installed, one WITHOUT a presenter — each on
+  // its own isolated VirtualTerminal, started/stopped one at a time (the
+  // process's single-live-TUI slot). The two visible sinks must be IDENTICAL:
+  // the Client presenter adds no increment for a foreign tool. This isolates
+  // the presenter increment instead of string-guessing (the generic
+  // `parseReadEnvelopes` may legitimately render the same body either way).
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-pi-tui-foreign-read-')
+
+  const envelope = '<path>src/a.ts</path>\n<type>file</type>\n<content>\n1: a\n</content>'
+  const readMeta = { path: 'src/a.ts', offset: 1, lines: [{ number: 1, text: 'a' }], totalLines: 1 }
+  const eventsFor = (name: string): SessionEvent[] => ([
+    {
+      type: 'tool/call',
+      seq: SessionSeq(0),
+      time: 1_700_000_000_000,
+      data: { turn: 0, step: 0, callId: ToolCallId('call-1'), name, arguments: JSON.stringify({ file_path: 'src/a.ts' }) },
+    },
+    {
+      type: 'tool/result',
+      surfaceOp: 'append',
+      seq: SessionSeq(1),
+      time: 1_700_000_000_001,
+      data: {
+        turn: 0,
+        step: 0,
+        message: createToolResultMessage({ callId: ToolCallId('call-1'), content: [{ type: 'text', text: envelope }], isError: false }),
+        meta: readMeta as JsonValue,
+      },
+    },
+  ])
+
+  // Run one TuiApp to a settled viewport and release its process slot before
+  // the next (the two apps are strictly serial).
+  const run = async (name: string, present: ReturnType<typeof createClientToolPresenter> | undefined): Promise<string> => {
+    const vt = new VirtualTerminal(100, 24)
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+      workspaceRoot: dir,
+      ...(present === undefined ? {} : { present }),
+    })
+    app.start()
+    startedApps.add(app)
+    app.setTranscriptDetailExpanded(true)
+    const folder = new TranscriptFolder()
+    folder.apply(eventsFor(name))
+    app.setTranscript(folder.messages())
+    await vt.waitForRender()
+    const view = vt.getViewport()
+      .map(line => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, ''))
+      .join('\n')
+    app.dispose()
+    return view
+  }
+
+  const foreignWith = await run('third_party_probe', createClientToolPresenter())
+  const foreignWithout = await run('third_party_probe', undefined)
+
+  // DECISIVE: the foreign tool's visible sink is IDENTICAL with and without
+  // the presenter — no presenter-only Read-card increment (R11-WEB-01).
+  assert.equal(foreignWith, foreignWithout,
+    `the presenter must not add a Read card for a foreign tool:\n=== with presenter ===\n${foreignWith}\n=== without presenter ===\n${foreignWithout}`)
+  // The raw result body is preserved on the generic path (not swallowed).
+  assert.ok(foreignWithout.includes('third_party_probe'), `the foreign tool row is missing:\n${foreignWithout}`)
+
+  // The same shape on the REAL `read` name still renders its Read card through
+  // the Client presenter — the dedicated read capability is intact (the
+  // positive counterpart, so tightening the foreign case cannot hide a read
+  // regression).
+  const readView = await run('read', createClientToolPresenter())
+  assert.ok(readView.includes('path: src/a.ts'), `the read card path is missing:\n${readView}`)
+  assert.ok(readView.includes('total lines: 1'), `the read card line count is missing:\n${readView}`)
+})
+
+test('a settled write with no result metadata still paints its args diff', async (t) => {
+  // Owner W05 correction: a write that succeeded but carries NO result path
+  // has no Result View (never a synthetic `args.file_path` result path), yet
+  // the user must still SEE the args-derived diff — the call-view fallback in
+  // the settled card paints it. This is the source -> decision -> painted-sink
+  // proof (not merely `presenter.call() !== undefined`).
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-pi-tui-write-call-diff-')
+  const callEvent: SessionEvent = {
+    type: 'tool/call',
+    seq: SessionSeq(0),
+    time: 1_700_000_000_000,
+    data: { turn: 0, step: 0, callId: ToolCallId('call-1'), name: 'write', arguments: JSON.stringify({ file_path: 'src/b.ts', content: 'the-written-body' }) },
+  }
+  const resultEvent: SessionEvent = {
+    type: 'tool/result',
+    surfaceOp: 'append',
+    seq: SessionSeq(1),
+    time: 1_700_000_000_001,
+    data: {
+      turn: 0,
+      step: 0,
+      message: createToolResultMessage({ callId: ToolCallId('call-1'), content: [{ type: 'text', text: 'Updated file' }], isError: false }),
+      // NO result metadata: the args diff must still be painted via the call view.
+    },
+  }
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    workspaceRoot: dir,
+    present: createClientToolPresenter(),
+  })
+  app.start()
+  startedApps.add(app)
+  life.defer(() => app.stop())
+  app.setTranscriptDetailExpanded(true)
+  const folder = new TranscriptFolder()
+  folder.apply([callEvent, resultEvent])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  // The args-derived diff body is painted in the settled write card.
+  assert.ok(view.includes('the-written-body'), `the settled write's args diff body is missing:\n${view}`)
+})
+
 
 test('footer mode slot badges every permission preset', async () => {
   const { vt, app } = startApp()
@@ -495,6 +640,38 @@ test('shift+tab with no overlay cycles the permission through the host', async (
   vt.sendInput('\x1b[Z') // shift+tab
   await vt.waitForRender()
   assert.equal(cycled, 1, `shift+tab must reach the host:\n`)
+  app.stop()
+})
+
+test('the goal line keeps the full objective up to the real terminal width and truncates at the cell budget', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  // A long objective (the old 24-char domain cut used to discard everything
+  // past 24 chars BEFORE any width was known). The 80-column terminal minus
+  // the shared 2-cell right gutter budgets 78 cells.
+  const objective = 'ship the 0.5.7 goal dock with full width aware truncation behavior for the dock row'
+  app.setStatus({ goal: `goal ● ${objective}` })
+  await vt.waitForRender()
+  const line = vt.getViewport().find(row => row.includes('goal ●'))
+  assert.ok(line !== undefined, `goal line missing:\n${vt.getViewport().join('\n')}`)
+  assert.ok(line.includes('width aware'), `long objective truncated before the terminal width:\n${line}`)
+  assert.ok(line.trimEnd().endsWith('…'), `an overflowing goal line must end in the visible ellipsis:\n${line}`)
+  assert.ok(visibleWidth(line.trimEnd()) <= 80, `goal line exceeded the terminal width:\n${line}`)
+  // A resize re-derives the baked truncation at the new width: growing the
+  // terminal reveals strictly more of the objective.
+  vt.resize(120, 24)
+  await vt.waitForRender()
+  const wider = vt.getViewport().find(row => row.includes('goal ●'))
+  assert.ok(wider !== undefined, `goal line missing after resize:\n${vt.getViewport().join('\n')}`)
+  assert.ok(wider.includes('truncation behavior for'), `a wider terminal must reveal more objective:\n${wider}`)
+  assert.ok(visibleWidth(wider.trimEnd()) <= 120, `goal line exceeded the terminal width:\n${wider}`)
+  // The single-line contract: newlines and tabs in the raw objective collapse
+  // to one physical row, never a second dock line.
+  app.setStatus({ goal: 'goal ● multi\r\nline\tobjective' })
+  await vt.waitForRender()
+  const rows = vt.getViewport().filter(row => row.includes('goal ●'))
+  assert.equal(rows.length, 1, `a multiline objective must single-line the goal dock:\n${vt.getViewport().join('\n')}`)
+  assert.ok(rows[0]!.includes('multi'), `single-lined objective text missing:\n${rows[0]}`)
   app.stop()
 })
 
@@ -546,8 +723,10 @@ test('the queue pane renders pending rows and hides when empty', async () => {
   // keymap has NO per-row queue edit/remove action, so a symbolic or
   // key-only row action cannot exist silently.
   const queueActions = Object.keys(APP_KEYBINDINGS).filter(id => /queue|dequeue|steer/i.test(id)).sort()
-  assert.deepEqual(queueActions, ['app.input.dequeue', 'app.input.queue', 'app.input.steer'],
-    'no per-row queue edit/remove action may be bound')
+  assert.deepEqual(queueActions, ['app.input.dequeue', 'app.input.queue', 'app.input.steer', 'app.queue.open'],
+    'the manager entry exists; per-row edit/remove still has no bound action')
+  assert.ok(view.includes(' Queue · 2'), `queue header/count missing:\n${view}`)
+  assert.ok(view.includes('Manage [Alt+I]'), `live Manage binding missing:\n${view}`)
   assert.equal((view.match(/❯/g) ?? []).length, 3, 'two queue rows plus the editor prompt only')
   // Every rendered queue row is EXACTLY the marker plus its text — no action
   // token, bracket hint, or extra control (viewport padding is trimmed).
@@ -621,14 +800,19 @@ test('queue pane reflows from raw items across a narrow-to-wide resize', async (
   let lines = vt.getViewport()
   const narrowRow = lines.findIndex(line => line.includes('QUEUE-RESIZE'))
   assert.ok(narrowRow > 0, `queue row must remain visible after narrowing:\n${lines.join('\n')}`)
-  let borderRows = 0
-  for (let index = narrowRow - 1; index >= 0 && lines[index]!.includes('─'); index -= 1) borderRows += 1
-  assert.equal(borderRows, 1, `a narrow queue must have one border row, not stale wrapped rows:\n${lines.join('\n')}`)
-  assert.equal(visibleWidth(lines[narrowRow - 1]!), 40)
+  // The pane's first row is the compact Queue header (it replaced the old
+  // decorative rule). A narrow frame must not leave stale wrapped rows behind
+  // it, and the header must occupy exactly the terminal width.
+  const headerRow = narrowRow - 1
+  assert.ok(lines[headerRow]!.includes('Queue · 1'), `a narrow queue must keep its compact header:\n${lines.join('\n')}`)
+  assert.ok(lines[headerRow]!.includes('Manage'), `a narrow queue must keep the Manage affordance:\n${lines.join('\n')}`)
+  assert.ok(!lines.slice(Math.max(0, headerRow - 2), headerRow).some(line => line.includes('─')),
+    `no stale queue border row may survive above the header:\n${lines.join('\n')}`)
+  assert.equal(visibleWidth(lines[headerRow]!), 40)
   vt.resize(120, 24)
   await vt.waitForRender()
   lines = vt.getViewport()
-  assert.ok(lines.some(line => line.includes(fullText)), `the wide queue must recover the raw semantic row:\n${lines.join('\n')}`)
+  assert.ok(lines.some(line => line.includes(fullText.trim())), `the wide queue must recover the raw semantic row:\n${lines.join('\n')}`)
 })
 
 test('a client-local queued echo renders its content marked sending in the queue pane', async () => {
@@ -2600,14 +2784,17 @@ test('a Job View opened from Full returns to the exact Full state (type filter, 
     { mode: 'full', header: 'Tasks', enableSearch: true, maxVisible: 18 },
   )
   await vt.waitForRender()
-  // Establish a non-default TYPE FILTER (first cycle: the first item type).
-  vt.sendInput('\t')
+  // Establish a non-default TYPE FILTER through the explicit f list
+  // (`All` → the first row type; Tab no longer cycles types, FR2).
+  vt.sendInput('f')
+  vt.sendInput('\x1b[B')
+  vt.sendInput('\r')
   await vt.waitForRender()
-  assert.equal(handle.getViewState!().typeFilter, 'subagent', 'Tab must set the type filter')
+  assert.equal(handle.getViewState!().typeFilter, 'subagent', 'the f list must set the type filter')
   // Establish non-default TREE DISCLOSURE on the selected parent row.
-  vt.sendInput('\x1b[C') // right arrow: expand
+  vt.sendInput('\x1b[D') // left arrow: collapse
   await vt.waitForRender()
-  assert.ok(handle.getViewState!().expandedIds.has('agent:parent'), 'right arrow must expand the parent')
+  assert.ok(handle.getViewState!().collapsedIds.has('agent:parent'), 'left arrow must collapse the parent')
   // Establish SEARCH state.
   vt.sendInput('/')
   for (const key of 'parent') vt.sendInput(key)
@@ -2616,7 +2803,7 @@ test('a Job View opened from Full returns to the exact Full state (type filter, 
   assert.equal(before.searchMode, true)
   assert.equal(before.searchQuery, 'parent')
   assert.equal(before.typeFilter, 'subagent')
-  assert.ok(before.expandedIds.has('agent:parent'))
+  assert.ok(before.collapsedIds.has('agent:parent'))
 
   vt.sendInput('\r') // Enter selects the matching parent row
   await vt.waitForRender()
@@ -2629,8 +2816,84 @@ test('a Job View opened from Full returns to the exact Full state (type filter, 
   assert.equal(after.searchMode, true, 'Full search mode must survive the Job View')
   assert.equal(after.searchQuery, 'parent', 'the Full search query must survive the Job View')
   assert.equal(after.typeFilter, 'subagent', 'the Full type filter must survive the Job View')
-  assert.ok(after.expandedIds.has('agent:parent'), 'the Full tree disclosure must survive the Job View')
+  assert.ok(after.collapsedIds.has('agent:parent'), 'the Full tree disclosure must survive the Job View')
   assert.equal(after.selectedId, 'agent:parent', 'the Full selection must survive the Job View')
+  app.stop()
+})
+
+test('the queue manager opens from the Alt+I action, paints its rows and closes on Esc', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  let controller: import('../../src/app/queue/manager.ts').QueueManagerController | undefined
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onOpenQueue: initialItemId => {
+      controller?.open(initialItemId === undefined ? {} : { initialItemId })
+    },
+  })
+  const items = [
+    { id: 'occ-1', placement: 'queued' as const, content: [{ type: 'text', text: 'check the API compatibility' }] },
+    { id: 'occ-2', placement: 'queued' as const, content: [{ type: 'text', text: 'run the whole suite' }] },
+  ]
+  const { QueueManagerController } = await import('../../src/app/queue/manager.ts')
+  const { queueTextOf } = await import('../../src/app/surface/pending-presentation.ts')
+  controller = new QueueManagerController({
+    reader: { snapshot: () => ({ running: true, items }) },
+    writer: {
+      prompt: async () => ({ kind: 'committed', value: undefined }),
+      updateQueue: async () => ({ kind: 'committed', value: undefined }),
+      cancel: async () => ({ kind: 'committed', value: undefined }),
+      rename: async () => ({ kind: 'committed', value: { title: 't' } }),
+      refreshTitle: async () => ({ kind: 'unsupported', reason: 'none' }),
+    },
+    captureSessionId: () => 'session-a',
+    captureSubject: () => ({}),
+    isSubjectCurrent: () => true,
+    captureScope: () => ({ sessionId: 'session-a' } as never),
+    isScopeCurrent: () => true,
+    isViewing: () => false,
+    withWriter: async (_scope, task) => task(),
+    beginClientWrite: () => () => {},
+    runOwned: () => {},
+    refreshPendingInput: () => {},
+    notify: () => {},
+    textOf: content => queueTextOf(content as never),
+  })
+  app.attachQueueManager(controller)
+  app.start()
+  startedApps.add(app)
+  vt.sendInput('\x1bi') // alt+i: the effective app.queue.open default
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Queue'), `the wide overlay header is painted:\n${view}`)
+  assert.ok(view.includes('2 queued'), `the queued count is painted:\n${view}`)
+  assert.ok(view.includes('check the API compatibility'), `the authoritative rows are painted:\n${view}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().join('\n').includes('2 queued'), 'Esc closes Browse')
+  app.stop()
+})
+
+test('a real fullscreen SGR press → release → click opens the Dock row manager', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const opened: Array<string | undefined> = []
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onOpenQueue: initialItemId => { opened.push(initialItemId) },
+  })
+  app.start()
+  startedApps.add(app)
+  app.setFullscreen(true)
+  app.setQueueItems([{ id: 'occ-1', text: 'check the API compatibility', mode: 'followup' }], true)
+  await vt.waitForRender()
+  const row = vt.getViewport().findIndex(line => line.includes('check the API compatibility'))
+  assert.ok(row >= 0, `the Dock row must be painted:\n${vt.getViewport().join('\n')}`)
+  // The REAL SGR sequence the terminal sends: press, release, synthesized click.
+  vt.sendInput(`\x1b[<0;5;${row + 1}M`)
+  vt.sendInput(`\x1b[<0;5;${row + 1}m`)
+  await vt.waitForRender()
+  assert.deepEqual(opened, ['occ-1'], 'the synthesized click carries the pressed Host occurrence id')
   app.stop()
 })
 
@@ -2691,6 +2954,213 @@ async function submitThroughEditor(app: TuiApp, vt: VirtualTerminal, text: strin
   vt.sendInput('\r')
   await vt.waitForRender()
 }
+
+test('the cold cross-cwd session seed drives real PiTui ↑/↓ recall', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('pi-tui-app-cross-cwd-')
+  // The same Session in two cwd files; the OTHER cwd row is newer.
+  const other = historyFilePath(home, '/other-workspace')
+  await mkdir(join(home, 'user-history'), { recursive: true })
+  await writeFile(other, JSON.stringify({ v: 2, content: 'cross cwd newest', cwd: '/other-workspace', ts: 2_000, sessionId: 'ses_a', writeId: 'w1' }) + '\n', 'utf8')
+  const current = historyFilePath(home, '/current-workspace')
+  await writeFile(current, JSON.stringify({ v: 2, content: 'current cwd older', cwd: '/current-workspace', ts: 1_000, sessionId: 'ses_a' }) + '\n', 'utf8')
+  const seed = await new FileHistorySearchSource({ dshHome: home }).readSessionRecall('ses_a')
+  assert.deepEqual(seed.entries, ['cross cwd newest', 'current cwd older'])
+  const { vt, app, submitted } = startApp()
+  app.resetInputHistory(seed.entries, 'ses_a', seed.writeIds)
+  await vt.waitForRender()
+  app.setDraft('')
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'cross cwd newest', 'the first ↑ recalls the cross-cwd newest row')
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'current cwd older', 'the second ↑ walks to the older row')
+  vt.sendInput('\x1b[B')
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), '', 'leaving the browse restores the empty draft')
+  assert.deepEqual(submitted, [], 'browsing and restoring never submit')
+  app.stop()
+})
+
+test('an async recall reseed restores the PiTui draft abandoned to ↑ browse', async () => {
+  const { vt, app } = startApp()
+  app.resetInputHistory(['old row'])
+  app.setDraft('my draft')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[H') // Home: the first ↑ from column 0 enters the browse
+  await vt.waitForRender()
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'old row', 'the browse really replaced the draft with the recalled row')
+  // The cold cross-cwd seed lands while the browse is open: the user's own
+  // draft/caret must come back, not silently disappear with the bookmark.
+  app.resetInputHistory(['new row'])
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'my draft', 'the async reseed restores the abandoned draft')
+  assert.deepEqual(app.getInputHistory(), ['new row'], 'and commits the new projection')
+  app.stop()
+})
+
+test('a PiTui edit that happens to equal another history row is never overwritten by a reseed', async () => {
+  const { vt, app } = startApp()
+  app.resetInputHistory(['abc', 'abcd'])
+  app.setDraft('mine')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[H')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'abc', 'the browse replaced the draft with the newest row')
+  vt.sendInput('\x1b[F') // End: edit the recalled row itself
+  await vt.waitForRender()
+  vt.sendInput('d')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'abcd', 'the user now owns a real draft that happens to equal an older history row')
+  app.resetInputHistory(['new row'])
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'abcd', 'the cold seed keeps the REAL edited draft, never restores the stale bookmark')
+  app.stop()
+})
+
+test('a PiTui prompt draft survives a browse across a shell row and an async reseed', async () => {
+  const { vt, app } = startApp()
+  const editor = (app as unknown as { editor: { getInputMode(): string } }).editor
+  app.resetInputHistory(['!echo shell', 'plain row'])
+  app.setDraft('my prompt')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[H')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), '!echo shell', 'the shell row is recalled')
+  assert.equal(editor.getInputMode(), 'shell-context', 'the recalled row switched the real input mode')
+  app.resetInputHistory(['new row'])
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'my prompt', 'the original prompt draft is restored')
+  assert.equal(editor.getInputMode(), 'prompt', 'the original prompt mode is restored, not the shell row mode')
+  app.stop()
+})
+
+test('a PiTui edit after a recall in the same turn never leaves a restore bookmark', async () => {
+  const { vt, app } = startApp()
+  app.resetInputHistory(['abc'])
+  app.setDraft('mine')
+  await vt.waitForRender()
+  const editor = (app as unknown as {
+    editor: {
+      setCursor(cursor: { line: number; col: number }): void
+      handleInput(data: string): unknown
+    }
+  }).editor
+  editor.setCursor({ line: 0, col: 0 })
+  // The REAL StdinBuffer splits ONE raw stdin chunk into two synchronous
+  // editor input events: ↑ recalls `abc`, then `d` edits, same JS turn.
+  const { StdinBuffer } = await import('@xmoon76/pi-tui')
+  const buffer = new StdinBuffer({ timeout: 5, escapeTimeout: 5 })
+  buffer.on('data', sequence => editor.handleInput(sequence))
+  buffer.process('\x1b[Ad')
+  buffer.removeAllListeners()
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'dabc', 'the same-turn edit is the real draft')
+  app.resetInputHistory(['new row'])
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'dabc', 'the cold seed never restores a stale browse bookmark over it')
+  app.stop()
+})
+
+test('a pointer exit from PiTui history browse retires the bookmark', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  app.resetInputHistory(['row one'])
+  app.setDraft('my draft')
+  await vt.waitForRender()
+  const editor = (app as unknown as { editor: { getCursor(): { line: number; col: number } } }).editor
+  vt.sendInput('\x1b[H')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'row one', 'the browse row is active')
+  const beforeClick = editor.getCursor()
+  const viewport = vt.getViewport()
+  const row = viewport.findIndex(line => line.includes('row one'))
+  assert.ok(row >= 0, `the recalled row must be painted before the pointer probe:\n${viewport.join('\n')}`)
+  const column = viewport[row]!.indexOf('row one') + 3
+  const sendMouse = (kind: 'press' | 'release'): void => {
+    vt.sendInput(`\x1b[<0;${column + 1};${row + 1}${kind === 'press' ? 'M' : 'm'}`)
+  }
+  sendMouse('press')
+  await vt.waitForRender()
+  sendMouse('release')
+  await vt.waitForRender()
+  const afterClick = editor.getCursor()
+  assert.notDeepEqual(afterClick, beforeClick, 'the pointer really moved the caret and left browse')
+  app.resetInputHistory(['new row'])
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'row one', 'the clicked recalled row is not replaced by the pre-browse draft')
+  assert.deepEqual(editor.getCursor(), afterClick, 'the clicked caret survives the reseed')
+  app.stop()
+})
+
+test('a large-paste registry entry survives a PiTui browse reseed', async () => {
+  const { vt, app } = startApp()
+  app.resetInputHistory(['old row'])
+  const body = Array.from({ length: 40 }, (_, index) => `pasted line ${index}`).join('\n')
+  vt.sendInput(`before ${'\x1b[200~'}${body}${'\x1b[201~'} after`)
+  await vt.waitForRender()
+  const editor = (app as unknown as { editor: { getCursor(): { line: number; col: number } } }).editor
+  const document = app.seatTextForTest()
+  const expanded = app.getDraft()
+  assert.match(document, /\[paste #1 \+40 lines\]/, 'the raw document carries the registry marker')
+  assert.ok(expanded.includes('pasted line 39'), 'the production wire draft expands the payload')
+  assert.ok(!expanded.includes('[paste #'), 'the wire draft never carries registry-bound marker text')
+  vt.sendInput('\x1b[H')
+  await vt.waitForRender()
+  const cursorAtBrowse = editor.getCursor()
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  const holder = (app as unknown as { editorSeatHolder: { notifyChanged(): void } }).editorSeatHolder
+  const originalNotify = holder.notifyChanged.bind(holder)
+  let notifications = 0
+  holder.notifyChanged = () => { notifications += 1; originalNotify() }
+  app.resetInputHistory(['new row'])
+  await vt.waitForRender()
+  assert.ok(notifications > 0, 'the restored draft is published through the host onChange/seat notification channel')
+  assert.equal(app.seatTextForTest(), document, 'the marker document survives the browse reseed byte for byte')
+  assert.equal(app.getDraft(), expanded, 'the paste registry still resolves to the full payload')
+  assert.deepEqual(editor.getCursor(), cursorAtBrowse, 'the browse-entry caret survives the reseed')
+  app.stop()
+})
+
+test('a no-op history-next gesture never creates a PiTui browse bookmark', async () => {
+  const keybindings = getKeybindings()
+  const previousBindings = keybindings.getUserBindings()
+  keybindings.setUserBindings({ ...previousBindings, 'tui.editor.historyNext': 'ctrl+n' })
+  const { vt, app } = startApp()
+  try {
+    app.resetInputHistory(['old row'])
+    app.setDraft('my draft')
+    await vt.waitForRender()
+    const editor = (app as unknown as { editor: { getCursor(): { line: number; col: number } } }).editor
+    vt.sendInput('\x1b[H') // caret at the start
+    await vt.waitForRender()
+    vt.sendInput('\x0e') // configured history-next at the bottom: a real no-op
+    await vt.waitForRender()
+    vt.sendInput('\x1b[C') // move the caret without editing the text
+    await vt.waitForRender()
+    const beforeReseed = { text: app.getDraft(), cursor: editor.getCursor() }
+    assert.notDeepEqual(beforeReseed.cursor, { line: 0, col: 0 }, 'the caret really moved after the no-op browse gesture')
+    app.resetInputHistory(['new row'])
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), beforeReseed.text, 'the no-op gesture never replaces the current draft')
+    assert.deepEqual(editor.getCursor(), beforeReseed.cursor, 'the no-op gesture never restores a stale caret')
+  } finally {
+    app.stop()
+    keybindings.setUserBindings(previousBindings)
+  }
+})
 
 test('the recall scope reconciles written, skipped and pending occurrences in the append order', async () => {
   const { vt, app, submitted, settleAt } = startApp()
@@ -4257,11 +4727,11 @@ test('Quick Tasks: S then a single Esc returns to the editor (original regressio
   // chord, and the SECOND Esc closes the browser back to the editor.
   vt.sendInput('S')
   await vt.waitForRender()
-  assert.ok(vt.getViewport().map(strip).join('\n').includes('confirm stop'),
+  assert.ok(/confirm stop/iu.test(vt.getViewport().map(strip).join('\n')),
     'S arms the stop chord (never confirms without Y)')
   vt.sendInput('\x1b')
   await vt.waitForRender()
-  assert.ok(!vt.getViewport().map(strip).join('\n').includes('confirm stop'),
+  assert.ok(!/confirm stop/iu.test(vt.getViewport().map(strip).join('\n')),
     'Esc cancels the armed chord')
   vt.sendInput('\x1b')
   await vt.waitForRender()
@@ -5189,6 +5659,137 @@ test('fullscreen openPicker responds to mouse clicks (mouse parity)', async () =
   app.dispose()
 })
 
+function clickFullscreenLabel(vt: VirtualTerminal, label: string): void {
+  const viewport = vt.getViewport()
+  const row = viewport.findIndex(line => line.includes(label))
+  assert.ok(row >= 0, `Fullscreen label '${label}' must be painted:\n${viewport.join('\n')}`)
+  const column = viewport[row]!.indexOf(label)
+  assert.ok(column >= 0)
+  vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
+  vt.sendInput(`\x1b[<0;${column + 1};${row + 1}m`)
+}
+
+test('question: Regular/Main keeps the keyboard hint without painting a mouse action row', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const answers = app.askQuestions([
+    { id: 'q1', question: 'Choose a route', options: [{ label: 'A' }, { label: 'B' }] },
+  ])
+  void answers.catch(() => {})
+  await vt.waitForRender()
+  let view = vt.getViewport()
+  assert.ok(view.some(line => line.includes('Review')), `Regular/Main keeps the Review stage label:\n${view.join('\n')}`)
+  assert.ok(view.some(line => line.includes('↑↓ select') && line.includes('esc cancel')),
+    `Regular/Main retains the legacy keyboard hint:\n${view.join('\n')}`)
+  assert.ok(!view.some(line => line.includes('Skip [→]') || line.includes('Continue [→]') || line.includes('Cancel [Esc]')),
+    `Regular/Main must not paint the mouse action row:\n${view.join('\n')}`)
+
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  await assert.rejects(answers, /question flow cancelled/u)
+  app.stop()
+})
+
+test('question: Fullscreen SGR Submit resolves the original answer Promise once', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let settlements = 0
+  const answers = app.askQuestions([
+    { id: 'q1', question: 'Choose a route', options: [{ label: 'A' }, { label: 'B' }] },
+    { id: 'q2', question: 'Choose a deployment', options: [{ label: 'C' }] },
+  ]).then(value => { settlements += 1; return value })
+
+  await vt.waitForRender()
+  clickFullscreenLabel(vt, '[1] A')
+  await vt.waitForRender()
+  clickFullscreenLabel(vt, '[1] C')
+  await vt.waitForRender()
+  const review = vt.getViewport()
+  assert.ok(review.some(line => line.includes('Review your answer before submit')))
+  assert.ok(review.some(line => line.includes('✓ Review')), `the final top tab must read Review:\n${review.join('\n')}`)
+  assert.ok(review.some(line => line.includes('Submit [Enter]')), `Submit must remain in the bottom action row:\n${review.join('\n')}`)
+  assert.ok(!review.some(line => line.includes('← back · ↵ submit · esc cancel')),
+    `fullscreen actions replace the keyboard hint instead of adding a second row:\n${review.join('\n')}`)
+  clickFullscreenLabel(vt, 'Submit [Enter]')
+
+  assert.deepEqual(await answers, [
+    { id: 'q1', selected: ['A'] },
+    { id: 'q2', selected: ['C'] },
+  ])
+  assert.equal(settlements, 1)
+  assert.equal(app.focusSeatForTest(), 'editor', 'the question seat returns to the original editor')
+  app.stop()
+})
+
+test('question: Fullscreen Review Cancel rejects the original Request without answering', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const answers = app.askQuestions([
+    { id: 'q1', question: 'Choose a route', options: [{ label: 'A' }] },
+  ])
+  void answers.catch(() => {})
+  await vt.waitForRender()
+  clickFullscreenLabel(vt, '[1] A')
+  await vt.waitForRender()
+  clickFullscreenLabel(vt, 'Cancel [Esc]')
+  await assert.rejects(answers, /question flow cancelled/u)
+  assert.equal(app.focusSeatForTest(), 'editor', 'cancel restores the original editor seat')
+  app.stop()
+})
+
+test('question: Fullscreen frame border and padding presses cannot transfer to Cancel on release', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let settled = false
+  const answers = app.askQuestions([
+    { id: 'q1', question: 'Choose a route', options: [{ label: 'A' }] },
+  ]).then(value => { settled = true; return value })
+  void answers.catch(() => {})
+  await vt.waitForRender()
+
+  const cancelLocation = (viewport: string[]): { row: number; column: number } => {
+    const row = viewport.findIndex(line => line.includes('Cancel [Esc]'))
+    assert.ok(row >= 0, `Cancel must be painted before the probe:\n${viewport.join('\n')}`)
+    const column = viewport[row]!.indexOf('Cancel [Esc]')
+    assert.ok(column >= 0)
+    return { row, column }
+  }
+  const sendMouse = (kind: 'press' | 'release', column: number, row: number): void => {
+    const suffix = kind === 'press' ? 'M' : 'm'
+    vt.sendInput(`\x1b[<0;${column + 1};${row + 1}${suffix}`)
+  }
+
+  for (const target of ['border', 'padding'] as const) {
+    const before = vt.getViewport()
+    const { row } = cancelLocation(before)
+    const leftBorder = before[row]!.indexOf('│')
+    assert.ok(leftBorder >= 0, `the Question frame border must be visible:\n${before.join('\n')}`)
+    const column = target === 'border' ? leftBorder : leftBorder + 1
+    if (target === 'padding') {
+      assert.equal(before[row]![column], ' ', `the press target must be Frame padding:\n${before[row]}`)
+    }
+    sendMouse('press', column, row)
+    await vt.waitForRender()
+
+    // Resolve the release cell from the current viewport, not the press frame.
+    const afterPress = vt.getViewport()
+    const release = cancelLocation(afterPress)
+    sendMouse('release', release.column, release.row)
+    await vt.waitForRender()
+    const view = vt.getViewport()
+    assert.ok(view.some(line => line.includes('Choose a route')), `${target} press must not close the Question:\n${view.join('\n')}`)
+    assert.equal(settled, false, `${target} press released over Cancel must not settle the flow`)
+  }
+
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  await assert.rejects(answers, /question flow cancelled/u)
+  app.stop()
+})
+
 test('question: press Q1 option → keyboard advance → release same cell must not activate Q2 (mouse parity)', async () => {
   const { vt, app } = startApp()
   app.setFullscreen(true)
@@ -5261,6 +5862,54 @@ test('question: a queued flow cannot consume the previous flow press (mouse pari
   app.stop()
 })
 
+test('question: a queued same-id flow cannot consume a stale Review Submit release', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const answers1 = app.askQuestions([
+    { id: 'same', question: 'Confirm?', options: [{ label: 'A' }] },
+  ])
+  const answers2 = app.askQuestions([
+    { id: 'same', question: 'Confirm?', options: [{ label: 'A' }] },
+  ])
+  void answers1.catch(() => {})
+  void answers2.catch(() => {})
+  await vt.waitForRender()
+  clickFullscreenLabel(vt, '[1] A')
+  await vt.waitForRender()
+
+  let view = vt.getViewport()
+  const submitRow = view.findIndex(line => line.includes('Submit [Enter]'))
+  assert.ok(submitRow >= 0, `the first flow must reach Review before the press:\n${view.join('\n')}`)
+  const submitColumn = view[submitRow]!.indexOf('Submit [Enter]')
+  assert.ok(submitColumn >= 0)
+  vt.sendInput(`\x1b[<0;${submitColumn + 1};${submitRow + 1}M`)
+  await vt.waitForRender()
+
+  vt.sendInput('\r') // keyboard Submit hands the seat to the queued flow
+  await vt.waitForRender()
+  assert.deepEqual(await answers1, [{ id: 'same', selected: ['A'] }])
+  vt.sendInput('\r') // answer the queued same-id question and reach Review
+  await vt.waitForRender()
+  view = vt.getViewport()
+  const nextSubmitRow = view.findIndex(line => line.includes('Submit [Enter]'))
+  assert.equal(nextSubmitRow, submitRow, `the queued Review action must occupy the pressed row:\n${view.join('\n')}`)
+  const nextSubmitColumn = view[nextSubmitRow]!.indexOf('Submit [Enter]')
+  assert.equal(nextSubmitColumn, submitColumn, `the queued Review action must occupy the pressed span:\n${view.join('\n')}`)
+
+  vt.sendInput(`\x1b[<0;${submitColumn + 1};${submitRow + 1}m`)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  assert.ok(view.some(line => line.includes('Review your answer before submit')),
+    `the old flow's press must not Submit the queued flow:\n${view.join('\n')}`)
+  assert.ok(view.some(line => line.includes('✓ Review')), `the queued flow remains in Review:\n${view.join('\n')}`)
+
+  vt.sendInput('\r') // the queued Review remains open and can submit normally
+  await vt.waitForRender()
+  assert.deepEqual(await answers2, [{ id: 'same', selected: ['A'] }])
+  app.stop()
+})
+
 test('question: a press cannot transfer to the next question with a duplicate id (mouse parity)', async () => {
   const { vt, app } = startApp()
   app.setFullscreen(true)
@@ -5315,10 +5964,12 @@ test('question: Esc between press and release cannot re-enter the free-text edit
   vt.sendInput('\x1b')
   vt.sendInput(`\x1b[<0;3;${pinnedRow + 1}m`)
   await vt.waitForRender()
-  // The flow must stay in the navigation state.
+  // The flow must stay in optionless navigation state, whose fullscreen
+  // action row exposes Edit and Cancel instead of the keyboard hint.
   const final = vt.getViewport()
-  assert.ok(final.some(line => line.includes('↵ edit')), `the flow must stay in the navigation state:\n${final.join('\n')}`)
-  assert.ok(!final.some(line => line.includes('↵ confirm')), 'the release must not re-enter the edit')
+  assert.ok(final.some(line => line.includes('Edit [Enter]')), `the flow must stay in the navigation state:\n${final.join('\n')}`)
+  assert.ok(final.some(line => line.includes('Cancel [Esc]')), `navigation must retain its flow cancellation:\n${final.join('\n')}`)
+  assert.ok(!final.some(line => line.includes('Leave edit [Esc]')), 'the release must not re-enter the edit')
   answers.catch(() => {})
   app.stop()
 })
@@ -5419,4 +6070,946 @@ test('a client-local queued echo alone never gets the parked-queue explanation',
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('❯ not yet acknowledged'), `the local echo must stay visible:\n${view}`)
   assert.ok(!view.includes('waiting for the next prompt'), `a local-only echo is not Host-acked parked work:\n${view}`)
+})
+
+// ── PR2 composer submission hold (renderer contract) ───────────────────────
+// The fork Editor keeps the exact submitted document until the Host acceptance;
+// the host input ladder, the public disableSubmit contract and the programmatic
+// mutator fences are the ONE freeze. (Owned here with TuiApp: the product lane's
+// Windows argv budget forbids one more test file.)
+
+
+interface HoldMount {
+  readonly vt: VirtualTerminal
+  readonly app: TuiApp
+  readonly submitted: Array<{ text: string; request: string }>
+  readonly steered: string[]
+  readonly admissions: Array<{ text: string; request: string }>
+  /** Answers `beginComposerSubmission`; default `'legacy'`. */
+  admit(text: string, request: string): 'held' | 'legacy' | 'refused'
+}
+
+function startHoldApp(): HoldMount {
+  const vt = new VirtualTerminal(100, 24)
+  const submitted: Array<{ text: string; request: string }> = []
+  const steered: string[] = []
+  const admissions: Array<{ text: string; request: string }> = []
+  const mount: HoldMount = {
+    vt,
+    app: undefined as unknown as TuiApp,
+    submitted,
+    steered,
+    admissions,
+    admit: () => 'legacy',
+  }
+  const app = new TuiApp(vt, {
+    onSubmit: (text, request) => { submitted.push({ text, request }) },
+    onSteer: (text) => { steered.push(text) },
+    onExit: () => {},
+    onCancel: () => {},
+    beginComposerSubmission: (text, request) => {
+      admissions.push({ text, request })
+      return mount.admit(text, request)
+    },
+  })
+  app.start()
+  startedApps.add(app)
+  ;(mount as { app: TuiApp }).app = app
+  return mount
+}
+
+async function typeHold(vt: VirtualTerminal, data: string): Promise<void> {
+  vt.sendInput(data)
+  await vt.waitForRender()
+}
+
+test('PR2: a held Enter keeps the document, freezes editing and never fires onSubmit', async () => {
+  const h = startHoldApp()
+  let holds = 0
+  h.admit = (text) => {
+    holds += 1
+    h.app.holdSubmission(`attempt-${holds}`)
+    return 'held'
+  }
+  await typeHold(h.vt, 'held prompt')
+  await typeHold(h.vt, '\r')
+  assert.equal(h.admissions.length, 1, 'the fork submit went through the ONE admission')
+  assert.deepEqual(h.admissions[0]?.text, 'held prompt')
+  assert.deepEqual(h.submitted, [], 'a held line is dispatched by the application, never by onSubmit')
+  assert.equal(h.app.getDraft(), 'held prompt', 'the fork kept the exact submitted document')
+  // Typing into the frozen composer changes nothing.
+  await typeHold(h.vt, 'X')
+  assert.equal(h.app.getDraft(), 'held prompt', 'the held document is read-only')
+  // A repeated Enter is consumed: no second admission, no submission.
+  await typeHold(h.vt, '\r')
+  assert.equal(h.admissions.length, 1, 'a repeated Enter is a no-op while sending')
+  assert.deepEqual(h.submitted, [])
+  // The accepted settlement clears the committed draft exactly once.
+  h.app.settleSubmission('attempt-1', 'accepted')
+  await h.vt.waitForRender()
+  assert.equal(h.app.getDraft(), '', 'only the Host acceptance clears the draft')
+})
+
+test('PR2: a refusal unlocks the editor with the draft intact and editable', async () => {
+  const h = startHoldApp()
+  h.admit = () => {
+    h.app.holdSubmission('attempt-refuse')
+    return 'held'
+  }
+  await typeHold(h.vt, 'keep me')
+  await typeHold(h.vt, '\r')
+  assert.equal(h.app.getDraft(), 'keep me')
+  h.app.settleSubmission('attempt-refuse', 'not-accepted')
+  await h.vt.waitForRender()
+  assert.equal(h.app.getDraft(), 'keep me', 'the refused draft is never cleared')
+  await typeHold(h.vt, '!')
+  assert.equal(h.app.getDraft(), 'keep me!', 'the editor is editable again (no restore duplicated the text)')
+})
+
+test('PR2: a programmatic insertion cannot mutate the held document', async () => {
+  const h = startHoldApp()
+  h.admit = () => {
+    h.app.holdSubmission('attempt-insert')
+    return 'held'
+  }
+  await typeHold(h.vt, 'original')
+  await typeHold(h.vt, '\r')
+  assert.equal(h.app.getDraft(), 'original')
+  h.app.insertIntoEditor(' UNSENT')
+  assert.equal(h.app.getDraft(), 'original', 'a held composer refuses programmatic insertion')
+  h.app.setEditorText('replacement')
+  assert.equal(h.app.getDraft(), 'original', 'and programmatic replacement too')
+  h.app.settleSubmission('attempt-insert', 'accepted')
+  await h.vt.waitForRender()
+  assert.equal(h.app.getDraft(), '', 'the accepted settlement clears the ORIGINAL document only')
+})
+
+test('PR2: a legacy verdict keeps the pre-PR2 clear-then-submit ordering', async () => {
+  const h = startHoldApp()
+  await typeHold(h.vt, '/status')
+  await typeHold(h.vt, '\r')
+  assert.deepEqual(h.submitted, [{ text: '/status', request: 'enter' }],
+    'a legacy line reaches onSubmit exactly as before')
+  assert.equal(h.app.getDraft(), '', 'the legacy path cleared the draft before dispatching')
+})
+
+test('PR2: a refused verdict neither clears nor dispatches', async () => {
+  const h = startHoldApp()
+  h.admit = () => 'refused'
+  await typeHold(h.vt, 'ignored')
+  await typeHold(h.vt, '\r')
+  assert.deepEqual(h.submitted, [])
+  assert.equal(h.app.getDraft(), 'ignored', 'the draft is preserved by a refused gesture')
+})
+
+test('PR2: the Ctrl+S steer gesture shares the admission and the freeze', async () => {
+  const h = startHoldApp()
+  h.admit = (_text, request) => {
+    if (request !== 'steer') return 'legacy'
+    h.app.holdSubmission('attempt-steer')
+    return 'held'
+  }
+  await typeHold(h.vt, 'steer me')
+  const dispatched = (h.app as unknown as {
+    actionDispatcher: { dispatch: (action: string, data?: string) => boolean }
+  }).actionDispatcher.dispatch('app.input.steer')
+  assert.equal(dispatched, true)
+  assert.equal(h.admissions.at(-1)?.request, 'steer', 'the steer gesture used the ONE admission')
+  assert.deepEqual(h.steered, [], 'a held steer is dispatched by the application, never re-dispatched')
+  assert.equal(h.app.getDraft(), 'steer me', 'the steered draft stays frozen until acceptance')
+  h.app.settleSubmission('attempt-steer', 'accepted')
+  await h.vt.waitForRender()
+  assert.equal(h.app.getDraft(), '')
+})
+
+// ── PR2/F1/F2: the hold owns every draft/publication entry point ───────────
+
+test('PR2: Ctrl+G during a held submission never starts the external editor', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const launches: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    openExternalEditor: async (draft) => { launches.push(draft); return draft },
+    runOwned: ownedTaskEntry(),
+  })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setDraft('held draft')
+    app.holdSubmission('attempt-editor')
+    await vt.waitForRender()
+    vt.sendInput('\x07') // Ctrl+G
+    await vt.waitForRender()
+    assert.deepEqual(launches, [], 'a held composer never hands its document to $EDITOR')
+    assert.equal(app.getDraft(), 'held draft', 'the submitted document is untouched')
+    // The Host acceptance releases the hold; the editor entry works again.
+    app.settleSubmission('attempt-editor', 'accepted')
+    await vt.waitForRender()
+    app.setDraft('next draft')
+    vt.sendInput('\x07')
+    await vt.waitForRender()
+    assert.deepEqual(launches, ['next draft'], 'after the acceptance the external editor runs normally')
+  } finally {
+    app.stop()
+  }
+})
+
+test('PR2: a settlement while the external editor is open releases the hold and discards the stale write-back', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  let releaseEditor!: () => void
+  const editorGate = new Promise<void>(resolve => { releaseEditor = resolve })
+  let editorOpened!: () => void
+  const opened = new Promise<void>(resolve => { editorOpened = resolve })
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    openExternalEditor: async () => {
+      editorOpened()
+      await editorGate
+      return 'external rewrite'
+    },
+    runOwned: ownedTaskEntry(),
+  })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setDraft('draft in editor')
+    vt.sendInput('\x07') // Ctrl+G: the editor opens over a TEMPORARILY suspended surface
+    await opened
+    // The symmetric path: the attempt settles while the editor holds the tty.
+    // The renderer must still release its hold (a temporary suspension is not
+    // a stop) …
+    app.holdSubmission('attempt-during-flight')
+    app.settleSubmission('attempt-during-flight', 'accepted')
+    releaseEditor()
+    await vt.waitForRender()
+    // … and the stale editor result must not be written back into the
+    // settled/cleared composer.
+    assert.equal(app.getDraft(), '', 'the stale external write-back is discarded')
+    // The editor is usable again (no permanent lock): a fresh ordinary
+    // submission works end to end.
+    app.setDraft('after resumption')
+    await vt.waitForRender()
+    vt.sendInput('typed') // editable again — the input lock died with the hold
+    await vt.waitForRender()
+    assert.ok(app.getDraft().includes('typed'), 'the composer accepts typing again after the resumption')
+  } finally {
+    app.stop()
+  }
+})
+
+test('PR2: Ctrl+V during a held submission never probes the clipboard', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  let pastes = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onClipboardPaste: () => { pastes += 1 },
+  })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setDraft('held')
+    app.holdSubmission('attempt-paste')
+    await vt.waitForRender()
+    vt.sendInput('\x16') // Ctrl+V
+    await vt.waitForRender()
+    assert.equal(pastes, 0, 'a held composer consumes Ctrl+V without probing the clipboard')
+    app.settleSubmission('attempt-paste', 'not-accepted')
+    vt.sendInput('\x16')
+    await vt.waitForRender()
+    assert.equal(pastes, 1, 'after the release the paste intent runs again')
+  } finally {
+    app.stop()
+  }
+})
+
+// ── PR2/F4: every remaining draft writer shares the ONE admission ──────────
+
+test('PR2: a fullscreen right-click paste is dropped while the composer is held', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  let releaseRead!: () => void
+  const gate = new Promise<void>(resolve => { releaseRead = resolve })
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+  }, {
+    readClipboardText: () => gate.then(() => 'pasted text'),
+  })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setFullscreen(true)
+    await vt.waitForRender()
+    app.setDraft('held right-click target')
+    // The right-click paste intent starts while the composer is editable …
+    vt.sendInput('\x1b[<2;10;10M')
+    vt.sendInput('\x1b[<2;10;10m')
+    await vt.waitForRender()
+    // … the submission hold begins before the clipboard read settles …
+    app.holdSubmission('attempt-rightclick')
+    releaseRead()
+    await vt.waitForRender()
+    await new Promise(resolve => setImmediate(resolve))
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), 'held right-click target',
+      'the synthetic bracketed paste never reaches the held document')
+    // After the release the same paste path works again (the gate is one-shot:
+    // assert through a fresh read).
+    app.settleSubmission('attempt-rightclick', 'not-accepted')
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), 'held right-click target')
+  } finally {
+    app.stop()
+    app.setFullscreen(false)
+  }
+})
+
+test('PR2: the advanced extension editor controls refuse writes while held', () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setDraft('extension base draft')
+    const controls = app.advancedEditorControlsForTest()
+    app.holdSubmission('attempt-extension')
+    controls.setEditorText('extension rewrite')
+    controls.insertEditorText(' inserted')
+    controls.pasteToEditor(' pasted')
+    assert.equal(app.getDraft(), 'extension base draft',
+      'no advanced editor control may mutate a held composer')
+    app.settleSubmission('attempt-extension', 'accepted')
+    assert.equal(app.getDraft(), '', 'the accepted settlement clears the submitted document')
+    controls.setEditorText('after acceptance')
+    assert.equal(app.getDraft(), 'after acceptance', 'the controls work again once released')
+  } finally {
+    app.stop()
+  }
+})
+
+test('PR2/F5: a settlement while stopped completes the hold; start() leaves no stranded lock', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setDraft('settle while stopped')
+    app.holdSubmission('attempt-stopped')
+    app.stop()
+    // The Host acceptance lands while the surface is stopped: the LOGICAL
+    // settlement must complete (hold released) even though the stopped screen
+    // is never cleared or repainted — the document stays as inert state,
+    // exactly like the remote teardown contract.
+    app.settleSubmission('attempt-stopped', 'accepted')
+    app.start()
+    await vt.waitForRender()
+    // RFL009: the accepted clear itself is deferred to the restart — the
+    // stopped screen was never repainted, but the FIRST post-restart frame
+    // shows a CLEARED composer (the accepted document is not a live draft
+    // that a fresh Enter could resubmit).
+    assert.equal(app.getDraft(), '',
+      'the accepted-while-stopped document is cleared at the restart, never resubmittable')
+    vt.sendInput('fresh after restart')
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), 'fresh after restart',
+      'the restarted editor accepts input — no stale submit lock')
+    app.holdSubmission('attempt-after-restart')
+    app.settleSubmission('attempt-after-restart', 'not-accepted')
+    assert.equal(app.getDraft(), 'fresh after restart',
+      'a rejection after the restart keeps the live draft')
+  } finally {
+    app.stop()
+  }
+})
+
+test('PR2/R5-1: a deferred restore parked by a stop window is replayed at the restart', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: (text) => { submitted.push(text) },
+    onExit: () => {},
+  })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setDraft('B across the stop')
+    app.holdSubmission('attempt-r5')
+    // The settlement arrives while the surface is STOPPED: the logical release
+    // runs (the hold clears), but the parked deferred restore cannot be
+    // written yet.
+    app.stop()
+    app.settleSubmission('attempt-r5', 'accepted')
+    app.start()
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), '', 'the deferred accepted clear completed at the restart')
+    // The renderer asked the owner to replay any parked obligation: nothing
+    // was lost, nothing was duplicated, and the composer is editable.
+    vt.sendInput('fresh input')
+    await vt.waitForRender()
+    assert.ok(app.getDraft().includes('fresh input'), 'the restarted composer is writable')
+  } finally {
+    app.stop()
+  }
+})
+
+test('PR2/R5-1: the restart replays a parked restore after a rejected stopped settlement', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  let replays = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onDeferredDraftRestore: () => { replays += 1 },
+  })
+  app.start()
+  startedApps.add(app)
+  try {
+    const baseline = replays // the initial start also asks (an empty queue is a no-op)
+    app.setDraft('B rejected while stopped')
+    app.holdSubmission('attempt-r5-rej')
+    app.stop()
+    app.settleSubmission('attempt-r5-rej', 'not-accepted')
+    app.start()
+    await vt.waitForRender()
+    assert.equal(replays, baseline + 1,
+      'the re-presentation asked the owner to replay even without a deferred accepted clear')
+    assert.equal(app.getDraft(), 'B rejected while stopped', 'the retained draft stayed')
+    // A second stop/start cycle asks exactly once more (the owner is idempotent).
+    app.stop()
+    app.start()
+    await vt.waitForRender()
+    assert.equal(replays, baseline + 2, 'each re-presentation asks exactly once')
+  } finally {
+    app.stop()
+  }
+})
+
+test('PR2/F5: a rejection while stopped unlocks the composer on start()', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setDraft('refused while stopped')
+    app.holdSubmission('attempt-refused-stopped')
+    app.stop()
+    app.settleSubmission('attempt-refused-stopped', 'not-accepted')
+    app.start()
+    await vt.waitForRender()
+    vt.sendInput('+refused')
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), 'refused while stopped+refused',
+      'a refusal settled while stopped still unlocks the editor for the restart')
+  } finally {
+    app.stop()
+  }
+})
+
+test('PR2/RFL008: Ctrl+C during a hold cancels activity without clearing the submitted draft', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setDraft('held through ctrl+c')
+    app.holdSubmission('attempt-ctrlc')
+    await vt.waitForRender()
+    vt.sendInput('\x03') // Ctrl+C — pi-parity clear-then-confirm key
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), 'held through ctrl+c',
+      'the pre-acceptance document survives Ctrl+C (cancel-activity only)')
+    app.settleSubmission('attempt-ctrlc', 'accepted')
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), '', 'the acceptance still clears the document')
+  } finally {
+    app.stop()
+  }
+})
+
+test('PR2/RFL008: a replacement editor cannot mutate the held document', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const { EditorRegistry } = await import('../../src/extension/internal/editor-registry.ts')
+  const registry = new EditorRegistry()
+  let pluginText = 'held plugin base'
+  let inputEvents = 0
+  registry.register({
+    id: 'plugin-editor',
+    priority: 1,
+    create: () => ({
+      component: { kind: 'text', spans: [{ text: pluginText }] },
+      getText: () => pluginText,
+      setText: (text: string) => { pluginText = text },
+      getCursor: () => 0,
+      setCursor: () => {},
+      // The routed SEMANTIC input channel (P1-5): the plugin owns the key
+      // events it accepts. The hold gate must consume them before this hook.
+      handleInput: (event: import('../../src/extension/public-types.ts').EditorInputEvent) => {
+        inputEvents += 1
+        if (event.kind === 'text') pluginText += event.text
+        return true
+      },
+      dispose: () => {},
+    }),
+  }, 'plugin')
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.reconcileEditorNow()
+    await vt.waitForRender()
+    assert.equal(app.seatEditorForTest().id, 'plugin-editor')
+    app.holdSubmission('attempt-plugin')
+    await vt.waitForRender()
+    const textAtHold = pluginText
+    vt.sendInput('X')
+    await vt.waitForRender()
+    assert.equal(inputEvents, 0,
+      'the replacement editor input is consumed while the composer is held')
+    assert.equal(pluginText, textAtHold, `the plugin document is unchanged (${JSON.stringify(textAtHold)})`)
+    app.settleSubmission('attempt-plugin', 'accepted')
+    await vt.waitForRender()
+    assert.equal(pluginText, '', 'the acceptance clears the LIVE plugin seat document')
+    assert.equal(inputEvents, 0, 'no unsent plugin input ever entered the cleared document')
+  } finally {
+    app.stop()
+  }
+})
+
+test('PR2/RFL011: a plugin EditorHost.replaceText cannot mutate the held document', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const { EditorRegistry } = await import('../../src/extension/internal/editor-registry.ts')
+  const registry = new EditorRegistry()
+  let pluginText = 'base'
+  let host: import('../../src/extension/public-types.ts').EditorHost | undefined
+  registry.register({
+    id: 'plugin-editor',
+    priority: 1,
+    create: (editorHost) => {
+      host = editorHost
+      return {
+        component: { kind: 'text', spans: [{ text: pluginText }] },
+        getText: () => pluginText,
+        setText: (text: string) => { pluginText = text },
+        getCursor: () => 0,
+        setCursor: () => {},
+        dispose: () => {},
+      }
+    },
+  }, 'plugin')
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.reconcileEditorNow()
+    await vt.waitForRender()
+    assert.ok(host !== undefined, 'the plugin received its EditorHost')
+    app.holdSubmission('attempt-host-replace')
+    await vt.waitForRender()
+    host!.replaceText('new unsent extension text')
+    await vt.waitForRender()
+    assert.notEqual(pluginText, 'new unsent extension text',
+      'the public replaceText seam refuses to write the held document')
+    app.settleSubmission('attempt-host-replace', 'accepted')
+    await vt.waitForRender()
+    // After the release the seam is admitted again.
+    host!.replaceText('post-acceptance write')
+    assert.equal(pluginText, 'post-acceptance write',
+      'the seam works again once the composer is released')
+  } finally {
+    app.stop()
+  }
+})
+
+test('PR2/RFL009: an accepted-while-stopped prompt recalls exactly once after the restart', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setDraft('accepted recall witness')
+    app.holdSubmission('attempt-recall-stopped')
+    app.stop()
+    app.settleSubmission('attempt-recall-stopped', 'accepted')
+    app.start()
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), '', 'the deferred accepted clear completed at the restart')
+    // The recall row exists exactly once: ↑ recalls the accepted text.
+    vt.sendInput('\x1b[A')
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), 'accepted recall witness',
+      'the accepted-while-stopped prompt recalls after the restart (deferred exactly once)')
+    // And a LIVE acceptance still recalls the same way (no divergence).
+    app.setDraft('live recall witness')
+    await vt.waitForRender()
+    app.holdSubmission('attempt-recall-live')
+    app.settleSubmission('attempt-recall-live', 'accepted')
+    await vt.waitForRender()
+    vt.sendInput('\x1b[A')
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), 'live recall witness', 'a live acceptance recalls identically')
+  } finally {
+    app.stop()
+  }
+})
+
+// --- M6 UX PR1: the builtin physical Ctrl+C busy/unknown/idle rule ---
+
+/** Start an app whose sessions report the SCRIPTED authoritative activity, and
+ *  record the existing interrupt path (onCancel) beside the exit count. */
+function startAppWithActivity(activity: () => ExitActivity): {
+  vt: VirtualTerminal
+  app: TuiApp
+  submitted: string[]
+  get exits(): number
+  get cancels(): number
+} {
+  const vt = new VirtualTerminal(80, 24)
+  const submitted: string[] = []
+  let exits = 0
+  let cancels = 0
+  const app = new TuiApp(vt, {
+    onSubmit: (text) => { submitted.push(text) },
+    onExit: () => { exits += 1 },
+    onCancel: () => { cancels += 1 },
+    sessionActivity: activity,
+  })
+  app.start()
+  startedApps.add(app)
+  return {
+    vt,
+    app,
+    submitted,
+    get exits() { return exits },
+    get cancels() { return cancels },
+  }
+}
+
+test('ctrl+c while working cancels ONCE and never arms an exit or clears the draft', async () => {
+  const surface = startAppWithActivity(() => 'working')
+  await surface.vt.waitForRender()
+  surface.app.setDraft('working draft')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x03')
+  await surface.vt.waitForRender()
+  assert.equal(surface.cancels, 1, 'a busy Ctrl+C takes the existing cancel path exactly once')
+  assert.equal(surface.exits, 0, 'a busy Ctrl+C never requests the exit intent')
+  assert.equal(surface.app.getDraft(), 'working draft', 'a busy cancel preserves the draft')
+  // A repeated press is a NEW cancel, still never an exit confirmation.
+  surface.vt.sendInput('\x03')
+  await surface.vt.waitForRender()
+  assert.equal(surface.cancels, 2, 'each busy press re-cancels the live work')
+  assert.equal(surface.exits, 0)
+})
+
+test('ctrl+c while unknown refuses to arm the exit and says the state is unobservable', async () => {
+  const surface = startAppWithActivity(() => 'unknown')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x03')
+  await surface.vt.waitForRender()
+  assert.equal(surface.cancels, 0, 'unknown is not treated as busy')
+  assert.equal(surface.exits, 0, 'unknown is never treated as idle')
+  assert.match(surface.vt.getViewport().join('\n'), /running state cannot be verified/,
+    'the refusal is visible')
+  // A second press within the window still must not exit.
+  surface.vt.sendInput('\x03')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 0, 'a repeated unknown Ctrl+C still cannot exit')
+})
+
+test('ctrl+c while idle keeps the historical clear-then-same-key double press', async () => {
+  const surface = startAppWithActivity(() => 'idle')
+  await surface.vt.waitForRender()
+  surface.app.setDraft('idle draft')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x03')
+  await surface.vt.waitForRender()
+  assert.equal(surface.cancels, 0, 'an idle press never cancels work')
+  assert.equal(surface.exits, 0, 'the first idle press only clears + arms')
+  assert.equal(surface.app.getDraft(), '', 'the historical clear-draft behavior is preserved')
+  surface.vt.sendInput('\x03')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 1, 'the same key confirms the exit')
+})
+
+test('an idle arm cannot be used after the session becomes busy', async () => {
+  let activity: ExitActivity = 'idle'
+  const surface = startAppWithActivity(() => activity)
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x03') // idle: arm
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 0)
+  activity = 'working'
+  surface.vt.sendInput('\x03') // second press: the live state now wins
+  await surface.vt.waitForRender()
+  assert.equal(surface.cancels, 1, 'the second press cancels the now-working turn')
+  assert.equal(surface.exits, 0, 'a stale idle arm can never confirm a busy exit')
+})
+
+test('a busy cancel never arms the following idle double press by itself', async () => {
+  let activity: ExitActivity = 'working'
+  const surface = startAppWithActivity(() => activity)
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x03') // busy: cancel
+  await surface.vt.waitForRender()
+  assert.equal(surface.cancels, 1)
+  activity = 'idle'
+  surface.vt.sendInput('\x03') // idle: first real arm
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 0, 'the busy cancel did not count as an idle arm')
+  surface.vt.sendInput('\x03')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 1)
+})
+
+test('a REMAPPED exit key keeps its ordinary double-press semantics while working', async () => {
+  const surface = startAppWithActivity(() => 'working')
+  await surface.vt.waitForRender()
+  surface.app.applyUserKeybindings({ 'app.exit.request': 'ctrl+x' }, () => {})
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x18') // Ctrl+X — the effective exit key now
+  await surface.vt.waitForRender()
+  assert.equal(surface.cancels, 0, 'the remapped key is never a busy cancel')
+  assert.equal(surface.exits, 0, 'the first remapped press only arms')
+  surface.vt.sendInput('\x18')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 1, 'the same remapped key confirms the exit intent')
+})
+
+test('ctrl+d while working still requires its own same-key confirmation', async () => {
+  const surface = startAppWithActivity(() => 'working')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x04')
+  await surface.vt.waitForRender()
+  assert.equal(surface.cancels, 0, 'Ctrl+D never becomes a busy cancel')
+  assert.equal(surface.exits, 0, 'the first Ctrl+D only arms')
+  surface.vt.sendInput('\x04')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 1, 'the confirmed Ctrl+D reaches the exit intent')
+})
+
+test('the exit choice never stacks above a live Host approval', async () => {
+  const surface = startApp()
+  await surface.vt.waitForRender()
+  let dismissed = 0
+  const selection: ExitChoiceOption[] = []
+  const pending = surface.app.showApprovalPrompt({ toolName: 'bash', reason: 'needs a shell', arguments: '{}' })
+  await surface.vt.waitForRender()
+  surface.app.openExitChoice({
+    ...exitChoiceAsking('daemon-busy', option => { selection.push(option) }, () => { dismissed += 1 }),
+  })
+  await surface.vt.waitForRender()
+  assert.equal(dismissed, 1, 'a real Host modal refuses the Client choice')
+  assert.deepEqual(selection, [], 'withdrawal is not a decision')
+  const view = surface.vt.getViewport().join('\n')
+  assert.ok(!view.includes('Disconnect from dsh-pi-tui'), `the choice never paints over the modal:\n${view}`)
+  surface.vt.sendInput('n')
+  await surface.vt.waitForRender()
+  assert.equal(await pending, 'rejected')
+})
+
+// --- M6 UX PR1: the Exit Choice physical lifecycle / real terminal budget ---
+
+/** Start an app on an explicit terminal size (the choice is geometry-aware). */
+function startSizedApp(columns: number, rows: number): { vt: VirtualTerminal; app: TuiApp } {
+  const vt = new VirtualTerminal(columns, rows)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  return { vt, app }
+}
+
+test('the exit choice survives a fullscreen screen swap and keeps its model', async () => {
+  const surface = startApp()
+  await surface.vt.waitForRender()
+  const selections: ExitChoiceOption[] = []
+  surface.app.openExitChoice(exitChoiceAsking('daemon-busy', option => { selections.push(option) }, () => {}))
+  await surface.vt.waitForRender()
+  assert.match(surface.vt.getViewport().join('\n'), /Keep working and disconnect/)
+  surface.app.setFullscreen(true)
+  await surface.vt.waitForRender()
+  assert.match(surface.vt.getViewport().join('\n'), /Keep working and disconnect/,
+    'the physical screen swap rebinds the seat instead of destroying the open decision')
+  surface.vt.sendInput('\x1b[B')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\r')
+  await surface.vt.waitForRender()
+  assert.deepEqual(selections, ['stop-and-disconnect'], 'the rebound seat drives the SAME model callback')
+})
+
+test('a 20-column terminal makes only Stay actable (no clipped Stop)', async () => {
+  // RFL-009: a narrow real viewport must never leave a clipped destructive
+  // action keyboard-reachable.
+  const surface = startSizedApp(20, 24)
+  await surface.vt.waitForRender()
+  const selections: ExitChoiceOption[] = []
+  surface.app.openExitChoice(exitChoiceAsking('daemon-busy', option => { selections.push(option) }, () => {}))
+  await surface.vt.waitForRender()
+  const view = surface.vt.getViewport().join('\n')
+  assert.ok(!view.includes('Stop'), `no clipped Stop is painted:\n${view}`)
+  assert.match(view, /Stay/u)
+  surface.vt.sendInput('\x1b[B')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\r')
+  await surface.vt.waitForRender()
+  assert.deepEqual(selections, ['stay'], 'the only actable option is Stay')
+})
+
+test('a six-row terminal keeps the risk line and only the safe Stay action', async () => {
+  // Four content rows cannot host the risk line plus all three actions; the
+  // destructive Stop is refused and the truthful safe path remains.
+  const surface = startSizedApp(80, 6)
+  await surface.vt.waitForRender()
+  const selections: ExitChoiceOption[] = []
+  surface.app.openExitChoice(exitChoiceAsking('daemon-busy', option => { selections.push(option) }, () => {}))
+  await surface.vt.waitForRender()
+  const view = surface.vt.getViewport().join('\n')
+  assert.match(view, /Session is working\./u, 'the risk line survives')
+  assert.match(view, /Stay in the TUI/u)
+  assert.ok(!view.includes('Stop current work'), `no unhostable destructive action is painted:\n${view}`)
+  surface.vt.sendInput('\x1b[B')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\r')
+  await surface.vt.waitForRender()
+  assert.deepEqual(selections, ['stay'], 'the only actable option is Stay')
+})
+
+test('an eight-row terminal keeps the short risk line with all three actions', async () => {
+  const surface = startSizedApp(80, 8)
+  await surface.vt.waitForRender()
+  const selections: ExitChoiceOption[] = []
+  surface.app.openExitChoice(exitChoiceAsking('daemon-busy', option => { selections.push(option) }, () => {}))
+  await surface.vt.waitForRender()
+  const view = surface.vt.getViewport().join('\n')
+  assert.match(view, /Session is working\./u, 'the compact risk line survives')
+  assert.match(view, /Stop current work and disconnect/u)
+  surface.vt.sendInput('\x1b[B')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\r')
+  await surface.vt.waitForRender()
+  assert.deepEqual(selections, ['stop-and-disconnect'])
+})
+
+test('a three-row terminal offers only the Escape-Stay fallback', async () => {
+  const surface = startSizedApp(80, 3)
+  await surface.vt.waitForRender()
+  const selections: ExitChoiceOption[] = []
+  surface.app.openExitChoice(exitChoiceAsking('daemon-busy', option => { selections.push(option) }, () => {}))
+  await surface.vt.waitForRender()
+  const view = surface.vt.getViewport().join('\n')
+  assert.ok(!view.includes('Stop current work'), `the box cannot host three actions:\n${view}`)
+  assert.match(view, /Esc Stay/u)
+  surface.vt.sendInput('\x1b[B')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\r')
+  await surface.vt.waitForRender()
+  assert.deepEqual(selections, [], 'no action is reachable when the box cannot paint it')
+  surface.vt.sendInput('\x1b')
+  await surface.vt.waitForRender()
+  assert.deepEqual(selections, ['stay'], 'the safe exit path stays operable')
+})
+
+test('a preempted choice never reappears after the Host modal settles', async () => {
+  // RFL-008/§3.6: a real Host Question/Approval withdraws the Client choice
+  // and the choice is NEVER restored automatically afterwards.
+  const surface = startApp()
+  await surface.vt.waitForRender()
+  let dismissed = 0
+  surface.app.openExitChoice(exitChoiceAsking('daemon-busy', () => {}, () => { dismissed += 1 }))
+  await surface.vt.waitForRender()
+  const pending = surface.app.showApprovalPrompt({ toolName: 'bash', reason: 'needs a shell', arguments: '{}' })
+  await surface.vt.waitForRender()
+  assert.equal(dismissed, 1, 'the Host modal withdrew the Client choice')
+  surface.vt.sendInput('n')
+  await surface.vt.waitForRender()
+  assert.equal(await pending, 'rejected')
+  assert.ok(!surface.vt.getViewport().join('\n').includes('Keep working and disconnect'),
+    'the withdrawn choice stays gone after the Host modal settles')
+})
+
+test('the live facts -> coordinator -> real PiTui seat -> ONE commit chain', async () => {
+  // The composition seam (facts) and the renderer seam (the real TuiApp seat)
+  // are exercised together, so this is a source -> decision -> sink path, not
+  // two independently injected conclusions.
+  const surface = startApp()
+  await surface.vt.waitForRender()
+  let live: LiveSessionScope | undefined = { sessionId: 'session-a' } as unknown as LiveSessionScope
+  let running = true
+  let current = true
+  let tokenCurrent = true
+  const facts = createExitIntentFacts({
+    backend: () => 'daemon',
+    scopes: {
+      capture: () => (live ?? ({ sessionId: undefined } as unknown as SessionScope)),
+      captureLive: () => live,
+      isCurrent: () => current,
+    },
+    admissionPending: () => false,
+    shellRunning: () => false,
+    remote: {
+      running: () => running,
+      captureTransportToken: () => ({ generation: 1 }),
+      isTransportTokenCurrent: () => tokenCurrent,
+    },
+  })
+  const commits: Array<{ workStopped: boolean }> = []
+  const coordinator = createExitIntentCoordinator({
+    diag: createDiag({ filePath: undefined, stderrLevel: 'off', sinks: [] }),
+    facts,
+    commit: options => { commits.push(options) },
+    presenter: () => pituiExitChoiceSeam(surface.app),
+    stopCurrentWork: async () => assert.fail('Keep must never reach the Stop operation'),
+  })
+  coordinator.request('slash')
+  await surface.vt.waitForRender()
+  assert.match(surface.vt.getViewport().join('\n'), /Keep working and disconnect/)
+  surface.vt.sendInput('\r')
+  await surface.vt.waitForRender()
+  assert.deepEqual(commits, [{ workStopped: false }], 'Enter on the default Keep is the ONE commit')
+  // The SAME chain detaches immediately once the live authority proves idle.
+  running = false
+  coordinator.request('slash')
+  assert.deepEqual(commits, [{ workStopped: false }, { workStopped: false }])
+  // A rolled transport turns the same input into the truthful unknown choice.
+  tokenCurrent = false
+  running = true
+  coordinator.request('slash')
+  await surface.vt.waitForRender()
+  assert.match(surface.vt.getViewport().join('\n'), /Disconnect without stopping/)
+})
+
+test('a resize before the next paint refuses an old dangerous confirmation', async () => {
+  // RFL-009: the keyboard uses the last painted action set; a geometry change
+  // invalidates it immediately, before the repaint recomputes operability.
+  const surface = startSizedApp(80, 24)
+  await surface.vt.waitForRender()
+  const selections: ExitChoiceOption[] = []
+  surface.app.openExitChoice(exitChoiceAsking('daemon-busy', option => { selections.push(option) }, () => {}))
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x1b[B') // focus Stop in the 80-column frame
+  await surface.vt.waitForRender()
+  surface.vt.resize(20, 24) // invalidate before any repaint
+  surface.vt.sendInput('\r')
+  await surface.vt.waitForRender()
+  assert.ok(!selections.includes('stop-and-disconnect'),
+    `a pre-resize dangerous confirmation can never fire: ${JSON.stringify(selections)}`)
+  // After the repaint the 20-column frame makes only Stay actable.
+  surface.vt.sendInput('\r')
+  await surface.vt.waitForRender()
+  assert.deepEqual(selections, ['stay'])
+})
+
+test('a long Host error detail never pushes the actable actions out of the box', async () => {
+  // RFL-009: status rows are the REAL wrapped rows, not a fixed 2-row estimate.
+  const surface = startSizedApp(80, 12)
+  await surface.vt.waitForRender()
+  const selections: ExitChoiceOption[] = []
+  surface.app.openExitChoice(exitChoiceUnconfirmed('host-error: '.repeat(60), option => { selections.push(option) }, () => {}))
+  await surface.vt.waitForRender()
+  const view = surface.vt.getViewport().join('\n')
+  assert.match(view, /Disconnect without stopping/u)
+  assert.match(view, /Stay in the TUI/u)
+  surface.vt.sendInput('\r')
+  await surface.vt.waitForRender()
+  assert.deepEqual(selections, ['disconnect-without-stop'])
 })

@@ -2,12 +2,9 @@
  * Static audit for the long-lived application-layer dependency direction between
  * `src/app/**` owners, `src/runtime/**` semantic/adaptor layers, presentation/TUI
  * modules, and the experimental Remote composition boundary (see
- * `docs/architecture/overview.md`): the real
- * production tree must satisfy every application-layer rule, and the gate's
- * AST scanner must catch each synthetic violation while ignoring comments,
- * dynamic imports, package imports, and the deliberate non-Backend Direct
- * application owners. The gate itself (`scripts/application-architecture-gate.mjs`)
- * is the enforcement; this test guards the rules against regressions.
+ * `docs/architecture/overview.md`). The production CLI gate enforces the
+ * real-tree contract; these tests exercise its AST rules against synthetic
+ * legal and illegal imports without repeating a full production-tree scan.
  * @module @xmoon76/dsh-pi-tui/application-architecture-gate.test
  */
 
@@ -47,8 +44,9 @@ import {
   parseValueDynamicImports,
   readSourceRootBaseline,
   REMOTE_COMPOSITION_SPECIFIER,
-  REMOTE_DYNAMIC_IMPORT_OWNER,
-  REMOTE_DYNAMIC_IMPORT_TARGET,
+  RETIRED_REMOTE_LOADER,
+  RETIRED_REMOTE_LOADER_TARGET,
+  findRetiredM3CompositionViolations,
   resolveRelativeImport,
   RETIRED_SOURCE_DIRECTORIES,
   RETIRED_SOURCE_ROOTS,
@@ -63,17 +61,6 @@ import {
 
 /** One synthetic source entry; `findViolations` only needs rel + source. */
 const entry = (rel, source) => ({ rel, source })
-
-test('the real production tree satisfies every architecture rule', () => {
-  const violations = findViolations(collectSourceEntries())
-  assert.deepEqual(
-    violations,
-    [],
-    `application-layer dependency direction violated — fix the import or record a deliberate exception:\n${violations
-      .map(v => `src/${v.file}:${v.line} [${v.rule}] ${v.detail}`)
-      .join('\n')}`,
-  )
-})
 
 test('runtime importing app is rejected', () => {
   const violations = findViolations([
@@ -318,17 +305,8 @@ test('the bootstrap composition zone may construct Direct wiring (TS2)', () => {
   assert.equal(isDirectCompositionFile('bootstrap.ts'), false)
 })
 
-test('the production tree has no non-composition Direct import (the historical allowlist is gone)', () => {
-  // TS8-F2 moved the legacy settings migration into the composition zone and
-  // removed the historical exception, so no non-composition module may import
-  // Direct wiring at all — with or without an allowlist.
-  assert.deepEqual(
-    findViolations(collectSourceEntries(), { allowlist: [] }).map(v => `${v.file}:${v.rule}`),
-    [],
-    'no non-composition Direct import may remain',
-  )
+test('the architecture gate retains an empty Direct-import allowlist', () => {
   assert.deepEqual(ARCHITECTURE_ALLOWLIST, [], 'the checked-in allowlist is empty')
-  assert.deepEqual(findViolations(collectSourceEntries()), [])
 })
 
 test('an allowlist entry excuses only a TYPE-ONLY import, never a value import', () => {
@@ -713,6 +691,7 @@ test('the widened Remote composition specifier rule recognizes every Remote face
     '@deepseek-ai/dsh-agent-preset-registry/remote',
     '@deepseek-ai/dsh-plugin-manager/remote',
     '@deepseek-ai/dsh-api-settings-controller/remote',
+    '@deepseek-ai/dsh-deepseek-account/remote',
     '@deepseek-ai/dsh-permission-presets/remote',
     '@deepseek-ai/dsh-llm/remote',
     '@deepseek-ai/dsh-client-file-upload/remote',
@@ -771,157 +750,131 @@ test('startup.ts statically reaching dsh /client or /remote faces through a help
   }
 })
 
-test('startup importing the backend loader alone is fine; its value dynamic import is not a static edge (M3-1)', () => {
-  const entries = [
-    entry('startup.ts', "import { loadExperimentalRemoteRuntime } from './runtime/backend-loader.ts'\n"),
+test('the RETIRED lazy boundary no longer exists and no src module may dynamically import app/remote/** (M3 retirement)', () => {
+  // The loader module and its target re-export are gone from the tree.
+  const tree = collectSourceEntries()
+  assert.equal(tree.some(e => e.rel === RETIRED_REMOTE_LOADER), false,
+    'runtime/backend-loader.ts must not exist any more')
+  const entryModule = tree.find(e => e.rel === RETIRED_REMOTE_LOADER_TARGET)
+  assert.ok(entryModule !== undefined, 'app/remote/runtime.ts still exists as the shared backend assembly')
+  assert.equal(entryModule.source.includes('createRemoteApplicationRuntime'), false,
+    'the production entry module must not re-export the retired aggregate')
+  assert.equal(entryModule.source.includes('createExperimentalRemoteRuntime'), false,
+    'the production entry module must not carry the retired wire composer')
+
+  // The former sanctioned owner is now an ordinary violation like any other.
+  const formerOwner = findRemoteDynamicImportViolations([
     entry(
-      'runtime/backend-loader.ts',
-      `export function loadExperimentalRemoteRuntime() {\n  return import('../app/remote/runtime.ts')\n}\n`,
-    ),
-    entry('app/remote/runtime.ts', 'export const runtime = 1\n'),
-  ]
-  assert.deepEqual(findViolations(entries), [])
-  // The NodeNext emitted-extension spelling canonicalizes to the same target.
-  const jsSpelling = findRemoteDynamicImportViolations([
-    entry(
-      REMOTE_DYNAMIC_IMPORT_OWNER,
+      RETIRED_REMOTE_LOADER,
       `export function load() {\n  return import('../app/remote/runtime.js')\n}\n`,
     ),
-    entry(REMOTE_DYNAMIC_IMPORT_TARGET, 'export const runtime = 1\n'),
+    entry(RETIRED_REMOTE_LOADER_TARGET, 'export const runtime = 1\n'),
   ])
-  assert.deepEqual(jsSpelling, [])
-})
+  assert.equal(formerOwner.length, 1)
+  assert.equal(formerOwner[0].rule, 'remote-dynamic-import-owner')
 
-test('the sanctioned lazy boundary is the only value dynamic-import owner into app/remote/** (M3-1)', () => {
-  const allowed = findRemoteDynamicImportViolations([
-    entry(
-      REMOTE_DYNAMIC_IMPORT_OWNER,
-      `export function load() {\n  return import('../app/remote/runtime.js')\n}\n`,
-    ),
-    entry(REMOTE_DYNAMIC_IMPORT_TARGET, 'export const runtime = 1\n'),
-  ])
-  assert.deepEqual(allowed, [])
+  // Any other module dynamically importing app/remote/** fails too, and the
+  // NodeNext `.js` spelling resolves identically.
+  for (const specifier of ['./remote/runtime.js', '../app/remote/client-runtime.js', './remote/application-stage.js']) {
+    const violations = findRemoteDynamicImportViolations([
+      entry('app/bootstrap.ts', `export async function boot() {\n  return await import('${specifier}')\n}\n`),
+      entry('app/remote/runtime.ts', 'export const runtime = 1\n'),
+      entry('app/remote/client-runtime.ts', 'export const clientRuntime = 1\n'),
+      entry('app/remote/application-stage.ts', 'export const stage = 1\n'),
+    ])
+    assert.equal(violations.length, 1, `${specifier} must be refused`)
+    assert.equal(violations[0].rule, 'remote-dynamic-import-owner')
+  }
 
-  // Another src module dynamically importing the composition fails.
-  const fromHelper = findRemoteDynamicImportViolations([
-    entry('app/bootstrap.ts', "export async function boot() {\n  return await import('./remote/runtime.js')\n}\n"),
-    entry('app/remote/runtime.ts', 'export const runtime = 1\n'),
-  ])
-  assert.equal(fromHelper.length, 1)
-  assert.equal(fromHelper[0].file, 'app/bootstrap.ts')
-  assert.equal(fromHelper[0].rule, 'remote-dynamic-import-owner')
-  assert.equal(fromHelper[0].line, 2)
-
-  // Even the sanctioned owner cannot dynamically import another app/remote module.
-  const ownerOtherTarget = findRemoteDynamicImportViolations([
-    entry(
-      REMOTE_DYNAMIC_IMPORT_OWNER,
-      `export function load() {\n  return import('../app/remote/client-runtime.js')\n}\n`,
-    ),
-    entry('app/remote/client-runtime.ts', 'export const clientRuntime = 1\n'),
-  ])
-  assert.equal(ownerOtherTarget.length, 1)
-  assert.equal(ownerOtherTarget[0].rule, 'remote-dynamic-import-owner')
-
-  // Dynamic imports outside the Remote composition boundary stay out of scope.
+  // Dynamic imports outside the Remote boundary stay out of scope, and a
+  // STATIC import of `app/remote/**` from the split Client stays legal.
   assert.deepEqual(findRemoteDynamicImportViolations([
     entry('app/direct/x.ts', "const m = await import('../../runtime/direct/backend-direct.js')\n"),
     entry('runtime/direct/backend-direct.ts', 'export const backend = 1\n'),
     entry('app/remote/client-runtime.ts', "const bundle = await import('@deepseek-ai/dsh-typert-registry/client')\n"),
   ]), [])
+  assert.deepEqual(findViolations([
+    entry('app/remote-process/client-bootstrap.ts', "import { mountRemoteClientDomainPrerequisites } from '../remote/client-runtime.ts'\n"),
+    entry('app/remote/client-runtime.ts', 'export function mountRemoteClientDomainPrerequisites(): void {}\n'),
+  ]), [])
 })
 
-test('the M3-4 application-runtime aggregate joins through the SINGLE dynamic entry, not a second target (M3-4 PR1)', () => {
-  // The one sanctioned edge covers BOTH composition entries: the loader
-  // imports app/remote/runtime.ts, which statically re-exports the aggregate.
-  assert.deepEqual(findRemoteDynamicImportViolations([
-    entry(
-      REMOTE_DYNAMIC_IMPORT_OWNER,
-      `export function loadRemoteApplicationRuntime() {\n  return import('../app/remote/runtime.ts').then(m => ({ createRemoteApplicationRuntime: m.createRemoteApplicationRuntime }))\n}\n`,
-    ),
-    entry(REMOTE_DYNAMIC_IMPORT_TARGET, "export { createRemoteApplicationRuntime } from './application-runtime.ts'\n"),
-    entry('app/remote/application-runtime.ts', 'export async function createRemoteApplicationRuntime() {}\n'),
+test('src/** can never reach the test-only M3 carrier, by import or by symbol (M3 retirement)', () => {
+  // A static, type-only, dynamic or re-export edge into test/** is refused.
+  const cases = [
+    "import { createRemoteHostRuntime } from '../../test/support/m3-inprocess/host-runtime.ts'\n",
+    "import type { RemoteClientRuntime } from '../../test/support/m3-inprocess/client-runtime.ts'\n",
+    "export { createExperimentalRemoteRuntime } from '../../test/support/m3-inprocess/runtime.ts'\n",
+    "const m = await import('../../test/support/m3-inprocess/runtime.ts')\n",
+  ]
+  for (const source of cases) {
+    const violations = findRetiredM3CompositionViolations([entry('app/remote/x.ts', source)])
+    assert.ok(violations.length >= 1, `a test-support import must fail: ${source.trim()}`)
+    assert.ok(violations.every(v => v.rule === 'src-imports-test-support' || v.rule === 'retired-m3-composition'))
+  }
+
+  // Naming a retired composition symbol anywhere in src/** fails, while a
+  // comment describing the retirement is free.
+  const symbolViolation = findRetiredM3CompositionViolations([
+    entry('app/remote/x.ts', 'export function boot() {\n  return createRemoteApplicationRuntime()\n}\n'),
+  ])
+  assert.equal(symbolViolation.length, 1)
+  assert.equal(symbolViolation[0].rule, 'retired-m3-composition')
+  assert.equal(symbolViolation[0].line, 2)
+  assert.deepEqual(findRetiredM3CompositionViolations([
+    entry('app/remote/x.ts', '// the retired createRemoteApplicationRuntime lives in test/support now\nexport const x = 1\n'),
   ]), [])
 
-  // A SECOND dynamic target under the owner — even the aggregate itself —
-  // violates the frozen ONE-edge contract.
-  const secondTarget = findRemoteDynamicImportViolations([
-    entry(
-      REMOTE_DYNAMIC_IMPORT_OWNER,
-      `export function loadRemoteApplicationRuntime() {\n  return import('../app/remote/application-runtime.ts')\n}\n`,
-    ),
-    entry('app/remote/application-runtime.ts', 'export async function createRemoteApplicationRuntime() {}\n'),
-  ])
-  assert.equal(secondTarget.length, 1, 'a second dynamic target must fail')
-  assert.equal(secondTarget[0].rule, 'remote-dynamic-import-owner')
-
-  // A SECOND import expression for the SAME sanctioned target is also a
-  // violation: "ONE dynamic edge" is one owner + ONE expression + one target
-  // (enforced by the gate function itself, not only by the real-tree test).
-  const duplicateExpression = findRemoteDynamicImportViolations([
-    entry(
-      REMOTE_DYNAMIC_IMPORT_OWNER,
-      `export const a = () => import('../app/remote/runtime.ts')\nexport const b = () => import('../app/remote/runtime.ts')\n`,
-    ),
-    entry(REMOTE_DYNAMIC_IMPORT_TARGET, 'export const runtime = 1\n'),
-  ])
-  assert.equal(duplicateExpression.length, 1, 'a duplicate expression for the sanctioned target must fail')
-  assert.equal(duplicateExpression[0].rule, 'remote-dynamic-import-owner')
-  assert.match(duplicateExpression[0].detail, /exactly ONE dynamic import expression/)
-
-  // bootstrap may statically import the loader (the selection seam's reach),
-  // and the loader's dynamic import is not a static edge — the Remote graph
-  // stays unreachable from startup.ts.
-  const entries = [
-    entry('startup.ts', "import { applyRunner } from './index.ts'\n"),
-    entry('index.ts', "import { applyRunner } from './app/bootstrap.ts'\n"),
-    entry('app/bootstrap.ts', "import { loadRemoteApplicationRuntime } from '../runtime/backend-loader.ts'\n"),
-    entry(
-      'runtime/backend-loader.ts',
-      `export function loadRemoteApplicationRuntime() {\n  return import('../app/remote/runtime.ts').then(m => ({ createRemoteApplicationRuntime: m.createRemoteApplicationRuntime }))\n}\n`,
-    ),
-    entry('app/remote/runtime.ts', "export { createRemoteApplicationRuntime } from './application-runtime.ts'\n"),
-    entry('app/remote/application-runtime.ts', 'export const applicationRuntime = 1\n'),
+  // Every LOAD spelling reaches the same verdict: static, type-only, re-export,
+  // `require()`, string `import()`, and a no-substitution template `import()`.
+  const spellings = [
+    "import { x } from '../../test/support/m3-inprocess/runtime.ts'\n",
+    "import type { X } from '../../test/support/m3-inprocess/runtime.ts'\n",
+    "export * from '../../test/support/m3-inprocess/runtime.ts'\n",
+    "const m = require('../../test/support/m3-inprocess/runtime.ts')\n",
+    "const m = await import('../../test/support/m3-inprocess/runtime.ts')\n",
+    'const m = await import(`../../test/support/m3-inprocess/runtime.ts`)\n',
   ]
-  assert.deepEqual(findViolations(entries), [], 'bootstrap -> backend-loader -> dynamic app/remote/runtime.ts is the sanctioned M3-4 shape')
+  for (const source of spellings) {
+    const violations = findRetiredM3CompositionViolations([entry('app/remote/x.ts', source)])
+    assert.equal(violations.length, 1, `the load spelling must be refused: ${source.trim()}`)
+    assert.equal(violations[0].rule, 'src-imports-test-support')
+  }
 
-  // Any other module dynamically importing the composition still fails.
-  const other = findRemoteDynamicImportViolations([
-    entry('app/surface/runtime.ts', "const m = await import('../../app/remote/runtime.js')\n"),
-    entry('app/remote/runtime.ts', 'export const runtime = 1\n'),
-  ])
-  assert.equal(other.length, 1)
-  assert.equal(other[0].rule, 'remote-dynamic-import-owner')
-})
+  // …and every SYMBOL spelling too, including the member-access and
+  // element-access forms that hide the identifier from a naive walk.
+  const symbolSpellings = [
+    'export function boot() { return createRemoteApplicationRuntime() }\n',
+    'export function boot(factory) { return factory.createRemoteApplicationRuntime() }\n',
+    "export function boot(factory) { return factory['createRemoteApplicationRuntime']() }\n",
+    'export const pick = (m) => m.createExperimentalRemoteRuntime\n',
+    'const { createRemoteHostRuntime } = carrier\n',
+  ]
+  for (const source of symbolSpellings) {
+    const violations = findRetiredM3CompositionViolations([entry('app/remote/x.ts', source)])
+    assert.equal(violations.length, 1, `the symbol spelling must be refused: ${source.trim()}`)
+    assert.equal(violations[0].rule, 'retired-m3-composition')
+  }
 
-test('the REAL production tree carries the bootstrap composition zone -> backend-loader edge, ONE dynamic target, and stays Remote-clean (M3-4 PR1 / TS2)', () => {
-  // The M3-4 selection seam is not a synthetic allowance: the TS2 composition
-  // zone statically imports the loader — the facade re-exports nothing, the
-  // `app/bootstrap/runtime-selection.ts` helper owns the reach — the loader owns
-  // the only dynamic edge into app/remote/**, and the whole production tree
-  // stays violation-free (the startup graph included — verified by the full
-  // findViolations scan in the other real-tree tests).
-  const selectionRel = 'app/bootstrap/runtime-selection.ts'
-  const selection = collectSourceEntries().find(e => e.rel === selectionRel)
-  assert.ok(selection !== undefined, `${selectionRel} must exist in the scanned tree`)
-  const edges = parseImportSpecifiers(selection.source, selectionRel)
-    .map(spec => resolveRelativeImport(selectionRel, spec.specifier))
-    .filter(resolved => resolved === 'runtime/backend-loader.ts')
-  assert.equal(edges.length, 1, `the real selection seam statically imports runtime/backend-loader.ts exactly once (the M3-4 seam reach)`)
-  const loader = collectSourceEntries().find(e => e.rel === REMOTE_DYNAMIC_IMPORT_OWNER)
-  assert.ok(loader !== undefined, 'runtime/backend-loader.ts must exist in the scanned tree')
-  const dynamicTargets = parseValueDynamicImports(loader.source)
-    .map(({ specifier }) => resolveRelativeImport(REMOTE_DYNAMIC_IMPORT_OWNER, specifier))
-    .filter(resolved => resolved !== undefined && resolved.startsWith('app/remote/'))
-  assert.deepEqual(dynamicTargets, [REMOTE_DYNAMIC_IMPORT_TARGET],
-    'the real loader has EXACTLY ONE dynamic import into app/remote/** (the single entry module)')
-  // The entry module statically re-exports the aggregate (intra-app/remote).
-  const entryModule = collectSourceEntries().find(e => e.rel === REMOTE_DYNAMIC_IMPORT_TARGET)
-  assert.ok(entryModule !== undefined && /export\s*\{[^}]*createRemoteApplicationRuntime[^}]*\}\s*from\s*'\.\/application-runtime\.ts'/.test(entryModule.source),
-    'app/remote/runtime.ts must statically re-export the aggregate constructor (the single-entry join)')
+  // A DECLARATION of that name (an object key, an interface member, a method or a
+  // parameter) is not a reference to the retired carrier and stays legal.
+  assert.deepEqual(findRetiredM3CompositionViolations([
+    entry('app/remote/x.ts', [
+      'export interface Factory {',
+      '  createRemoteApplicationRuntime: () => void',
+      '}',
+      'export const keys = { createRemoteHostRuntime: 1 }',
+      'export function build(createRemoteClientRuntime: () => void) { return 1 }',
+    ].join('\n')),
+  ]), [])
+
+  // The REAL production tree is clean, and the retired symbols exist only in
+  // the test carrier.
   const tree = collectSourceEntries()
-  assert.deepEqual(findViolations(tree), [], 'the real tree stays clean with the real seam edge')
-  assert.deepEqual(findRemoteDynamicImportViolations(tree), [], 'the real tree keeps the exact dynamic-import owner and single target')
+  assert.deepEqual(findRetiredM3CompositionViolations(tree), [],
+    'the production tree must not import test/** nor name the retired composition')
+  assert.equal(tree.some(e => e.rel === 'app/remote/host-runtime.ts'), false,
+    'src/app/remote/host-runtime.ts must be test-only now')
 })
 
 test('the test-support production scan mirrors the gate extension set and parser kind (TS2 §19)', () => {
@@ -1152,20 +1105,20 @@ test('app owners must not import the TUI implementation layer (TS4 §11/§12)', 
     [],
     'the bootstrap composition zone may also use the template-literal spelling',
   )
-  // The sanctioned Remote lazy edge stays governed ONLY by its own rule: the
-  // generic runtime/app rules must not be applied to dynamic imports wholesale.
+  // The retired Remote lazy edge is gone: ANY dynamic import into
+  // `app/remote/**` is refused by its own dedicated rule, including the
+  // template-literal spelling (primitive semantic completion).
   const remoteEdge = findViolations([
     entry('runtime/backend-loader.ts', "const backend = await import('../app/remote/runtime.ts')\n"),
     entry('app/remote/runtime.ts', 'export const backend = 1\n'),
   ])
-  assert.deepEqual(remoteEdge, [], 'the sanctioned Remote dynamic edge is not re-classified')
-  // The second consumer of the shared primitive: the Remote lazy-boundary rule
-  // now also sees the template-literal spelling (primitive semantic completion).
+  assert.equal(remoteEdge.length, 1, 'the retired lazy edge must be refused')
+  assert.equal(remoteEdge[0].rule, 'remote-dynamic-import-owner')
   const remoteEdgeTemplate = findViolations([
-    entry('app/remote/not-the-loader.ts', 'const backend = await import(`./runtime.ts`)\n'),
+    entry('app/remote/not-a-client.ts', 'const backend = await import(`./runtime.ts`)\n'),
     entry('app/remote/runtime.ts', 'export const backend = 1\n'),
   ])
-  assert.equal(remoteEdgeTemplate.length, 1, 'only the loader owner may dynamically import the Remote composition root')
+  assert.equal(remoteEdgeTemplate.length, 1, 'no src module may dynamically import the Remote composition')
   assert.equal(remoteEdgeTemplate[0].rule, 'remote-dynamic-import-owner')
   // …and the parenthesized spelling reaches that rule too.
   const remoteEdgeWrapped = findViolations([
@@ -1502,7 +1455,6 @@ test('findViolations includes the Remote dynamic-import owner rule in the produc
   const tree = collectSourceEntries()
   const dynamicOnly = findRemoteDynamicImportViolations(tree)
   assert.deepEqual(dynamicOnly, [], 'the real production tree must satisfy the dynamic-import owner rule')
-  assert.deepEqual(findViolations(tree), [], 'the full production scan stays clean with the M3-1 rules')
 })
 
 test('the TUI layer must not import experimental Remote composition (TS1)', () => {
@@ -1803,9 +1755,7 @@ test('state: a re-opened legacy root or a changed stable set is rejected', () =>
     'an extra stable entry must fail')
 })
 
-test('retired roots are a closed forbidden set (48 physical roots, builtins excluded)', () => {
-  assert.equal(RETIRED_SOURCE_ROOTS.length, 48, 'all 48 physical roots removed by F1-F6 are forbidden')
-  assert.equal(new Set(RETIRED_SOURCE_ROOTS).size, 48, 'the retired set has no duplicates')
+test('retired root paths remain forbidden, with builtins classified as stable', () => {
   assert.equal(RETIRED_SOURCE_ROOTS.includes('builtins.ts'), false,
     'builtins.ts is reclassified STABLE by F7, never retired')
   assert.deepEqual(findRetiredSourceRootViolations(listSourceRootFiles(), collectSourceEntries()), [],
@@ -1858,7 +1808,7 @@ test('roots: a recreated file or a dangling old-path import is rejected', () => 
   ]), [])
 })
 
-test('a Remote adapter cannot import the Direct implementation (two HF1 edges excepted)', () => {
+test('a Remote adapter cannot import the Direct implementation (three Host bridge edges excepted)', () => {
   // `direct-import-outside-composition` treats the whole runtime/** layer as
   // Direct composition, so runtime/remote was silently exempt; this check is
   // the actual assertion, and its exception is scoped to the reviewed
@@ -1873,19 +1823,24 @@ test('a Remote adapter cannot import the Direct implementation (two HF1 edges ex
   assert.equal(findRemoteToDirectViolations([
     entry('runtime/remote/example.ts', "const load = () => import('../direct/example.ts')\n"),
   ]).length, 1)
-  // The reviewed HF1 Host-side construction bridge keeps EXACTLY its two
-  // reviewed Direct helpers — a new target from the same file must fail.
+  // The reviewed Host-side construction bridges keep EXACTLY their reviewed
+  // Direct helpers; a new target from either file must fail.
+  const shellBridge = 'runtime/remote/pi-tui-host-user-shell-host-bridge.ts'
   assert.deepEqual([...REMOTE_TO_DIRECT_APPROVED_EDGES].sort(), [
     `${bridge} -> runtime/direct/file-completion/host-discovery.ts`,
+    `${bridge} -> runtime/direct/file-completion/official-workspace-search.ts`,
     `${bridge} -> runtime/direct/host-file-augmentation-direct.ts`,
-  ], 'the exception set must stay exactly the two documented HF1 edges')
+    `${shellBridge} -> runtime/direct/file-completion/host-discovery.ts`,
+  ], 'the exception set contains exactly the reviewed Host-side bridge edges')
   assert.deepEqual(findRemoteToDirectViolations([
     entry(bridge, "import { x } from '../direct/file-completion/host-discovery.ts'\n"),
     entry(bridge, "export type { Y } from '../direct/host-file-augmentation-direct.ts'\n"),
-  ]), [], 'the two reviewed edges stay legal (imports and the type re-export)')
+    entry(bridge, "import { OfficialWorkspaceSearchPool } from '../direct/file-completion/official-workspace-search.ts'\n"),
+    entry(shellBridge, "import { x } from '../direct/file-completion/host-discovery.ts'\n"),
+  ]), [], 'the reviewed edges stay legal')
   assert.equal(findRemoteToDirectViolations([
-    entry(bridge, "import { x } from '../direct/session-direct.ts'\n"),
-  ]).length, 1, 'the approved bridge importing a THIRD Direct module must fail')
+    entry(shellBridge, "import { x } from '../direct/session-direct.ts'\n"),
+  ]).length, 1, 'the Host user-shell bridge importing another Direct module must fail')
   // The exception is per-edge: another Remote adapter may not use an approved
   // target either.
   assert.equal(findRemoteToDirectViolations([

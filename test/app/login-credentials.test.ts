@@ -42,7 +42,7 @@ const TARGETS: readonly AuthorizationFlowTarget[] = [
   { kind: 'authorization', key: 'deepseek-account-platform/default', label: 'DeepSeek', methods: [{ id: 'browser', label: 'DeepSeek' }], inFlight: false },
 ]
 
-function authCommands() {
+function authCommands(options: { readonly targetsState?: 'ready' | 'unavailable' | 'stale' } = {}) {
   const definitions = new Map<string, (invocation: CommandInvocation) => unknown>()
   const opened: AuthDestination[] = []
   const commands = createAuthCommands({
@@ -60,6 +60,8 @@ function authCommands() {
         authorization: {
           available: () => true,
           listTargets: () => TARGETS,
+          refreshTargets: async () => {},
+          targetsState: () => options.targetsState ?? 'ready',
           begin: async () => ({ kind: 'unavailable' }),
           onEvent: () => () => {},
           respond: async () => {},
@@ -114,6 +116,14 @@ test('/login navigates: bare list, known route, explicit ref, new route, account
   ])
 })
 
+test('/login falls back to the Models list instead of routing from a STALE roster', async () => {
+  const { invoke, opened } = authCommands({ targetsState: 'stale' })
+  await invoke('login', 'acme')
+  // The stale flow target may belong to another Host generation: /login opens
+  // the Models list, whose read revalidates the roster before any sign-in.
+  assert.deepEqual(opened, [{ kind: 'models', view: 'list' }])
+})
+
 test('/login rejects an unknown target without opening a targetless page', async () => {
   const { invoke, opened } = authCommands()
   const result = await invoke('login', 'not valid!') as { kind: string; text: string }
@@ -134,6 +144,38 @@ test('/logout navigates: bare stored-credentials, exact ref, keyless record, acc
     { kind: 'models', view: 'logout', target: { kind: 'record', key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' } },
     { kind: 'account', view: 'signout' },
   ])
+})
+
+test('/logout from a STALE roster never derives a record target from old flows (F7B)', async () => {
+  const { invoke, opened } = authCommands({ targetsState: 'stale' })
+  await invoke('logout', '')
+  // A route-shaped word could be an old provider route: the page re-reads the
+  // CURRENT Host through the stored-credentials list instead of guessing a key.
+  await invoke('logout', 'anthropic')
+  // A lowercase single word is ambiguous (route grammar AND env-var grammar).
+  await invoke('logout', 'mykey')
+  // Explicit references and the Account escape hatch stay safe.
+  await invoke('logout', 'ACME_GATEWAY_API_KEY')
+  await invoke('logout', 'MY_KEY')
+  await invoke('logout', 'deepseek-account')
+  // An unparseable/unknown target falls back to the list, never an error page.
+  await invoke('logout', 'not valid!')
+  assert.deepEqual(opened, [
+    { kind: 'models', view: 'logout-list' },
+    { kind: 'models', view: 'logout-list' },
+    { kind: 'models', view: 'logout-list' },
+    { kind: 'models', view: 'logout', target: { kind: 'reference', ref: 'ACME_GATEWAY_API_KEY', label: 'acme', route: 'acme' } },
+    { kind: 'models', view: 'logout', target: { kind: 'reference', ref: 'MY_KEY', label: 'MY_KEY' } },
+    { kind: 'account', view: 'signout' },
+    { kind: 'models', view: 'logout-list' },
+  ])
+  assert.equal(
+    opened.some(destination => destination.kind === 'models'
+      && destination.view === 'logout'
+      && destination.target.kind === 'record'),
+    false,
+    'a stale flow roster must never produce an exact record-delete target',
+  )
 })
 
 test('/logout rejects an unknown target', async () => {

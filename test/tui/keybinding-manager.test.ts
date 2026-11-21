@@ -8,6 +8,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { parseUserKeybindings } from '../../src/tui/keybindings/config.ts'
+import { deriveKeybindingContext } from '../../src/tui/keybindings/context.ts'
 import { HostKeybindingManager } from '../../src/tui/keybindings/manager.ts'
 
 function managerWith(config: Record<string, unknown>): HostKeybindingManager {
@@ -87,6 +88,52 @@ test('matches() reflects a remap of a configurable action; matchesDefault() stay
   assert.ok(manager.matchesDefault('\x1b[13;2u', 'app.transcript.search.previous'), 'the fixed overlay keys keep their defaults')
 })
 
+test('the default transcript search actions resolve to distinct View and Full scopes', () => {
+  const manager = managerWith({})
+  const context = deriveKeybindingContext()
+  assert.equal(manager.resolve('\x06', context)?.action, 'app.transcript.search.view')
+  assert.equal(manager.resolve('\x1b[102;6u', context)?.action, 'app.transcript.search')
+  assert.deepEqual(manager.keysFor('app.transcript.search.view'), ['ctrl+f'])
+  assert.deepEqual(manager.keysFor('app.transcript.search'), ['ctrl+shift+f'])
+  assert.equal(manager.keyHint('app.transcript.search.view'), 'Ctrl+F')
+  assert.equal(manager.keyHint('app.transcript.search'), 'Ctrl+Shift+F')
+})
+
+test('a stored Full Ctrl+F override shadows the View builtin and remains Full', () => {
+  const manager = managerWith({ 'app.transcript.search': 'ctrl+f' })
+  assert.equal(manager.resolve('\x06', deriveKeybindingContext())?.action, 'app.transcript.search')
+  assert.deepEqual(manager.keysFor('app.transcript.search.view'), [])
+  assert.deepEqual(manager.keysFor('app.transcript.search'), ['ctrl+f'])
+  assert.ok(!manager.matches('\x1b[102;6u', 'app.transcript.search'),
+    'a replaced Full default is not fabricated as a fallback')
+})
+
+test('a remapped Full trigger coexists with default View and a disabled Full leaves View active', () => {
+  const remapped = managerWith({ 'app.transcript.search': 'alt+s' })
+  assert.equal(remapped.resolve('\x1b[115;3u', deriveKeybindingContext())?.action, 'app.transcript.search')
+  assert.equal(remapped.resolve('\x06', deriveKeybindingContext())?.action, 'app.transcript.search.view')
+  assert.ok(!remapped.matches('\x1b[102;6u', 'app.transcript.search'))
+
+  const disabled = managerWith({ 'app.transcript.search': false })
+  assert.equal(disabled.resolve('\x06', deriveKeybindingContext())?.action, 'app.transcript.search.view')
+  assert.equal(disabled.resolve('\x1b[102;6u', deriveKeybindingContext()), undefined)
+})
+
+test('same-chord user overrides conflict without last-write routing', () => {
+  const manager = managerWith({
+    'app.transcript.search': 'ctrl+y',
+    'app.transcript.search.view': 'ctrl+y',
+  })
+  assert.equal(manager.resolve('\x19', deriveKeybindingContext()), undefined)
+  assert.ok(manager.diagnosticsList().some(message => message.includes('conflict')))
+})
+
+test('safe mode restores the distinct builtin search winners', () => {
+  const manager = managerWith({ 'app.transcript.search': 'ctrl+f' })
+  manager.setSafeMode(true)
+  assert.equal(manager.resolve('\x06', deriveKeybindingContext())?.action, 'app.transcript.search.view')
+  assert.equal(manager.resolve('\x1b[102;6u', deriveKeybindingContext())?.action, 'app.transcript.search')
+})
 test('a leader-only action appears in the snapshot with its leader sequence (review round)', () => {
   // Review finding: an action with NO default keys configured only as
   // `<leader>X` (e.g. app.transcript.toggleFullscreen) was advertised by
@@ -144,6 +191,7 @@ test('keysLabelFor falls back to an overlay action default (the /help source)', 
   assert.equal(manager.keysLabelFor('app.transcript.search.close'), 'Esc / Ctrl+C',
     'search close advertises its full default set (the overlay Input swallows Ctrl+C otherwise)')
   assert.equal(manager.keysLabelFor('app.transcript.search.next'), 'Enter')
+  assert.equal(manager.keysLabelFor('app.transcript.search.scope'), 'Tab')
   assert.equal(manager.keysLabelFor('app.transcript.search.previous'), 'Shift+Enter')
   // Disabled actions still advertise nothing.
   const disabled = managerWith({ 'app.input.submit': false })

@@ -38,6 +38,7 @@ import { TUI_STARTUP_SERVICE } from '../../src/startup.ts'
 import type { TuiSettingsDoc } from '../../src/runtime/config-port.ts'
 import type { ContributionHealth } from '../../src/extension/public-types.ts'
 import type { TuiCommandRunner } from '../../src/commands.ts'
+import { unconfiguredPolicyObservation } from '../support/session-policy-fake.ts'
 
 /** The concrete extension service members this case drives (the public
  *  registration path plus the internal health ledger the runner reads). */
@@ -79,11 +80,28 @@ interface Harness {
   readonly warnings: () => readonly { readonly message: string; readonly fields?: Record<string, unknown> }[]
   /** The LIVE extension health snapshot (failed/active per contribution). */
   readonly health: () => readonly ContributionHealth[]
+  /** R8-E PR-4 fixture seams: exact owner→entry map + current Client phases. */
+  readonly ownerEntryIds: Map<string, string>
+  readonly clientObservations: { packageName: string; phase: string; entryId?: string }[]
+  readonly extensionConfig: FakeExtensionConfig
+  readonly clientRefreshCount: () => number
   readonly key: (data: string) => Promise<void>
   readonly drain: () => Promise<void>
   /** Open `/settings` (the About home) on the real command path. */
   readonly open: () => Promise<void>
   readonly dispose: () => Promise<void>
+}
+
+/** A tiny per-package Host Config authority for the persisted-setting cases:
+ *  ONE detached `data` projection, revision and opaque generation, and an
+ *  official set/unset mutation that changes the USER layer. */
+interface FakeExtensionConfig {
+  readonly values: Map<string, { revision: number; generation: object; effective: Record<string, unknown>; inherited: Record<string, unknown>; user: Record<string, unknown> }>
+  readonly mutations: { packageName: string; ops: readonly { op: 'set' | 'unset'; path: readonly string[]; value?: unknown }[]; revision: number }[]
+  refreshCount: number
+  read(packageName: string): import('../../src/runtime/config-port.ts').ExtensionConfigRead
+  refresh(): Promise<void>
+  mutate(packageName: string, ops: readonly { op: 'set' | 'unset'; path: readonly string[]; value?: unknown }[], revision: number, generation: object): Promise<import('../../src/runtime/config-port.ts').SectionMutationOutcome>
 }
 
 /** One captured registration handle of the public service API. */
@@ -116,6 +134,49 @@ async function setupEnvironment(): Promise<Harness> {
   }
   let documentWrites = 0
   let disposed = false
+  const ownerEntryIds = new Map<string, string>()
+  const clientObservations: { packageName: string; phase: string; entryId?: string }[] = []
+  let clientRefreshCount = 0
+  const extensionConfig: FakeExtensionConfig = {
+    values: new Map(),
+    mutations: [],
+    refreshCount: 0,
+    read(packageName) {
+      const value = this.values.get(packageName)
+      if (value === undefined) return { kind: 'unavailable', reason: 'the package Config row is not mounted' }
+      return {
+        kind: 'ready',
+        packageName,
+        generation: value.generation,
+        revision: value.revision,
+        effective: structuredClone(value.effective),
+        inherited: structuredClone(value.inherited),
+        user: structuredClone(value.user),
+        userDataPresent: Object.keys(value.user).length > 0,
+      }
+    },
+    async refresh() {
+      this.refreshCount += 1
+    },
+    async mutate(packageName, ops, revision) {
+      const value = this.values.get(packageName)
+      if (value === undefined) return { kind: 'rejected', reason: 'the package Config row is not mounted' }
+      if (value.revision !== revision) return { kind: 'conflict', reason: 'the Host settings section changed since it was read' }
+      this.mutations.push({ packageName, ops, revision })
+      const user = structuredClone(value.user)
+      const op = ops[0]!
+      if (op.op === 'set') user[op.path[0]!] = op.value
+      else {
+        const inherited = (value.inherited as Record<string, unknown>)[op.path[0]!]
+        if (inherited === undefined) delete user[op.path[0]!]
+        else user[op.path[0]!] = structuredClone(inherited)
+      }
+      value.user = user
+      value.effective = { ...value.inherited, ...user }
+      value.revision += 1
+      return { kind: 'accepted' }
+    },
+  }
   const events: TuiAppEvents = {
     onSubmit: () => {},
     onExit: () => {},
@@ -177,6 +238,7 @@ async function setupEnvironment(): Promise<Harness> {
     // Sessionless surface: the About page reports unavailable facts and the
     // approval row is withheld; no Session is created or read.
     currentSessionId: undefined,
+    policy: unconfiguredPolicyObservation(),
     captureLiveSessionScope: () => undefined,
     isSessionScopeCurrent: () => false,
     currentSessionStats: async () => undefined,
@@ -213,18 +275,52 @@ async function setupEnvironment(): Promise<Harness> {
       },
     },
     // The composition's LIVE registry owner (never a test copy).
-    extensions: { themes: new ThemeRegistry(), settings: service.settings },
+    extensions: {
+      themes: new ThemeRegistry(),
+      settings: service.settings,
+      ownerEntryIds: () => ownerEntryIds,
+      clientObservations: () => clientObservations,
+      refreshClientExtensions: () => { clientRefreshCount += 1 },
+    },
     createPluginManagerPage: () => undefined,
     config: {
+      extensionConfigs: extensionConfig,
       configReadiness: () => 'ready' as const,
       visualTools: { read: () => undefined },
+      webStartupPreference: { read: () => undefined, setAutoStart: async (_value: boolean, _revision: number) => {} },
+      backendStartupPreference: { read: () => undefined, readFresh: async () => undefined, setBackend: async (_value: 'direct' | 'daemon', _revision: number) => {} },
+      acpStartupPreference: { read: () => undefined, setAutoStart: async (_value: boolean, _revision: number) => {} },
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available' as const, value: undefined }) },
       permissions: {
         presetNames: () => [],
         defaultPreset: () => undefined,
         approvalOverrideAvailable: () => false,
       },
-      subagentModelSelection: { available: () => false },
+      subagentLimits: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
+      subagentModelSelection: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
+      agentLoopSettings: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
+      shellExecutionSettings: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
+      sessionLogUpload: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
       web: { available: () => false },
       credentials: { available: () => false },
       providers: { available: () => false },
@@ -288,6 +384,10 @@ async function setupEnvironment(): Promise<Harness> {
     header,
     warnings: () => warnings,
     health: () => service._ledger().healthSnapshot(),
+    ownerEntryIds,
+    clientObservations,
+    extensionConfig,
+    clientRefreshCount: () => clientRefreshCount,
     key,
     drain,
     open,
@@ -785,6 +885,82 @@ test('a pending write whose owner group unloads settles GONE without claiming th
     assert.equal(goneWrite.fields?.outcome, 'not-saved')
     assert.match(String(goneWrite.fields?.reason), /unloaded or replaced/u)
     assert.equal(gamma.handles.length, 1)
+  } finally {
+    await h.dispose()
+  }
+})
+
+test('a persisted extension setting reads Host facts and commits through ONE CAS writer (PR-4)', async () => {
+  const h = await setupEnvironment()
+  try {
+    await registerFiber(h.ctx, (service) => {
+      service.registerSetting({
+        id: 'r8-a-label',
+        label: 'R8 A label',
+        description: 'Fixture A persisted label',
+        currentValue: 'alpha',
+        persisted: {
+          path: ['label'],
+          choices: [
+            { id: 'alpha', op: 'set', value: 'alpha' },
+            { id: 'omega', label: 'Omega', op: 'set', value: 'omega' },
+            { id: 'inherit', label: 'Use inherited', op: 'unset' },
+          ],
+        },
+      } as never)
+    })
+    await h.vt.waitForRender()
+    const record = h.registry.rows().find(candidate => candidate.id === 'r8-a-label')
+    assert.ok(record !== undefined)
+    h.ownerEntryIds.set(record.owner, 'entry-dev')
+    h.clientObservations.push({ packageName: '@r8-pr1-fixture/a', phase: 'active', entryId: 'entry-dev' })
+    h.extensionConfig.values.set('@r8-pr1-fixture/a', {
+      revision: 4,
+      generation: { host: 1 },
+      effective: { label: 'alpha' },
+      inherited: { label: 'alpha' },
+      user: { label: 'alpha' },
+    })
+    await openExtensionsRows(h)
+    await h.key('\r')
+    assert.match(h.view(), /Host profile · effective: alpha/u)
+    assert.match(h.view(), /Inherited: alpha/u)
+    assert.match(h.view(), /USER field: set alpha/u)
+    // A higher-precedence external effective override cannot leave a declared
+    // USER value painted as `[current]`; the existing out-of-choices warning
+    // must appear instead.
+    await h.key('\u001b') // back to Rows so explicit refresh is admitted
+    const configValue = h.extensionConfig.values.get('@r8-pr1-fixture/a')!
+    configValue.effective = { label: 'gamma' }
+    configValue.user = { label: 'omega' }
+    await h.key('r')
+    await h.vt.waitForRender()
+    assert.match(h.view(), /Current value is not in selectable/u)
+    await h.key('\r')
+    await h.vt.waitForRender()
+    assert.doesNotMatch(h.view(), /\[current\]/u, 'an out-of-choices effective value has no current candidate')
+    await h.key('\u001b')
+    configValue.effective = { label: 'alpha' }
+    configValue.user = { label: 'alpha' }
+    await h.key('r')
+    await h.vt.waitForRender()
+    await h.key('\r') // Detail + native Choice again
+    // The remaining persisted facts live in the same scrollable Detail body.
+    await h.key('\u001b[6~')
+    assert.match(h.view(), /Differs from inherited: No/u)
+    assert.match(h.view(), /Runtime in this Client: alpha/u)
+    await h.key('\u001b[5~')
+    // The authoritative effective value equals inherited, so the candidate
+    // starts on Reset; one Up selects omega, then ONE Confirm.
+    await h.key('\u001b[A')
+    await h.key('\r')
+    await h.drain()
+    assert.equal(h.extensionConfig.mutations.length, 1, 'exactly ONE Host CAS mutation')
+    assert.deepEqual(h.extensionConfig.mutations[0]?.ops, [{ op: 'set', path: ['label'], value: 'omega' }])
+    assert.equal(h.extensionConfig.values.get('@r8-pr1-fixture/a')?.effective.label, 'omega')
+    assert.match(h.view(), /Verified/u, 'the Host authority readback is painted as Verified')
+    assert.equal(h.documentWrites(), 0, 'a persisted extension setting never writes the TUI settings document')
+    assert.equal(h.clientRefreshCount(), 1, 'a verified save requests the CURRENT Client apply re-read once')
   } finally {
     await h.dispose()
   }

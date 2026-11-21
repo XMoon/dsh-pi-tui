@@ -139,6 +139,10 @@ export interface StatusRuntimeDeps {
     readonly selection: () => ModelSelectionValue | undefined
     readonly currentOf: (agent: StatusLiveAgent) => ModelSelectionValue | undefined
     readonly defaultSelection: () => ModelSelectionValue | undefined
+    /** TRUE when a confirmed sessionless default save's directory is not
+     *  readable yet — the footer shows UNKNOWN, never 'no model' and never a
+     *  fabricated value. */
+    readonly defaultUnavailable?: () => boolean
     readonly marker: () => { readonly selection: ModelSelectionValue; readonly status: 'pending' | 'unresolved' } | undefined
     readonly preset: () => string | undefined
   }
@@ -173,6 +177,7 @@ export interface StatusRuntimeDeps {
   readonly diag: Diag
   /** The resolved CLIENT working directory (a composition prerequisite). */
   readonly clientCwd: string
+  readonly nextWorkspaceIntent?: () => import('../session/workspace-next-intent.ts').WorkspaceNextIntentSnapshot
   /**
    * The permission-cycle authority (M3-4 PR4 §6.2/§6.3): the current value
    * is the SESSION STATUS PROJECTION's permission field (projection-
@@ -202,6 +207,20 @@ export interface StatusRuntimeDeps {
      *  is unobservable (e.g. a post-dispatch transport cancellation) — it is
      *  never silently downgraded to `unavailable`, never retried. */
     apply(sessionId: string, presetId: string, signal?: AbortSignal): Promise<PermissionCycleApplyOutcome>
+  }
+  /**
+   * M6-1 F8: the ONE session-policy observation owner (the SAME object the
+   * command surface holds). The access derivation reads its committed
+   * snapshots for the independent sandbox/approval facts of the display
+   * subject; absent = this composition exposes no policy observation and the
+   * access section keeps its previous behavior.
+   */
+  readonly policyObservation?: {
+    readSnapshot(sessionId: string): import('../command/policy-observation-state.ts').PolicyObservationState
+    subscribe(listener: () => void): () => void
+    /** Revoke one subject's committed truth (the previous display subject is
+     *  retired when the viewer exits or the main subject changes). */
+    invalidate?(sessionId: string): void
   }
 }
 
@@ -340,6 +359,10 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
    */
    
   let goalText: string | undefined
+  /** M6-1 F8: the last policy display subject (main session or viewed child)
+   *  whose observation truth is current. A subject change retires the old
+   *  subject's snapshot. */
+  let lastPolicySubjectId: string | undefined
 
   /** Repaint the welcome card from the live agent's current facts. Re-read
    * on every call so a still-blank session's preset switch shows up. */
@@ -360,6 +383,22 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
       const facts = deps.remote === undefined ? undefined : mainSessionStatus()
       if (facts === undefined) {
         deps.surface.display.setWelcomeIdle(true)
+        const next = deps.nextWorkspaceIntent?.()
+        // M6-1/F5-B: `unselected` is a REAL state (no verified auto candidate
+        // and no explicit choice): the card names the missing Host workspace
+        // and points at the existing Browser, never a fabricated Client cwd.
+        deps.surface.display.setWelcomeWorkspace?.(
+          next === undefined
+            ? { path: deps.clientCwd, status: 'proposed' }
+            : next.status === 'unselected'
+              ? { path: '', status: 'unselected' }
+              : {
+                  path: next.displayPath ?? deps.clientCwd,
+                  status: next.status,
+                  ...(next.workspaceId === undefined ? {} : { workspaceId: next.workspaceId }),
+                  ...(next.error === undefined ? {} : { error: next.error }),
+                },
+        )
         return
       }
       deps.surface.display.setWelcomeCard({
@@ -403,16 +442,20 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
    */
   
   /**
-   * The OFFICIAL cwd fact of the live session (Remote branch: the list-row
-   * cwd). `undefined` when a LIVE session's official row carries none —
-   * the status presentation then OMITS the cwd fact rather than copying the
-   * Client cwd (Host/Client cwd equivalence is forbidden). Never consumed
-   * by execution paths (the shell/history owners keep their own fallback).
+   * The OFFICIAL cwd fact of the live session. `undefined` when a LIVE
+   * session's official facts carry none — the status presentation then OMITS
+   * the cwd fact rather than copying the Client cwd (Host/Client cwd
+   * equivalence is forbidden). Never consumed by execution paths (the
+   * shell/history owners keep their own fallback).
    *
-   * Direct reads the SESSION STATUS projection of THIS session (S2/PR-B):
-   * its `cwd` is the official effective working directory, which follows a
-   * committed `working-directory/change`. The immutable header cwd is only
-   * the reader's own fallback when no value is recorded.
+   * Both branches read the official EFFECTIVE working directory from the
+   * Session status projection of THIS session (S2/PR-B): Direct from the
+   * Host's `workingDirectory` projection; Remote from the same official
+   * projection over the exact retained binding, with the Session list row's
+   * immutable creation cwd as the reader's fallback only when no value is
+   * recorded. A committed `working-directory/change` therefore moves the
+   * footer/welcome/title facts, and the header cwd is never treated as the
+   * current directory.
    */
   const sessionCwdFact = (): string | undefined => {
     const agent = deps.liveAgent()
@@ -550,7 +593,11 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
         base = 'no model'
       } else {
         const fallback = deps.model.defaultSelection() as ModelSelectionValue | undefined
-        base = fallback === undefined ? 'no model' : labelOf(fallback)
+        // Distinguish an UNKNOWN current default (a confirmed save whose
+        // directory is not readable yet) from a genuinely absent one.
+        base = fallback !== undefined
+          ? labelOf(fallback)
+          : deps.model.defaultUnavailable?.() === true ? 'model unknown' : 'no model'
       }
     } else {
       const selection = agent === undefined
@@ -621,10 +668,13 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
   /** M0: the workspace section (cwd/project/branch — project and cwd are
    * deliberately separate facts). `branchAllowed` is the LOCALITY gate: the
    * local `gitBranch(cwd)` derivation may only speak for a cwd on THIS
-   * process's own filesystem. A Remote child's Host cwd is not a Client
-   * path, so its branch is omitted rather than inferred (M3-5 PR1 §9.4). */
-  
-  const deriveWorkspaceStatus = (cwd: string, branchAllowed = true): WorkspaceStatus => {
+   * process's own filesystem. Every Remote LIVE Session — main AND child —
+   * carries a Host cwd that is not a Client path, so its branch is omitted
+   * rather than inferred; the sole Remote exception is Sessionless (no live
+   * Session), whose Client launch cwd IS a Client path and keeps its local
+   * branch (M3-5 PR1 §9.4). */
+
+  const deriveWorkspaceStatus = (cwd: string, branchAllowed: boolean): WorkspaceStatus => {
     const parts = cwd.split('/').filter(Boolean)
     const branch = branchAllowed ? gitBranch(cwd) : ''
     return {
@@ -634,15 +684,19 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     }
   }
 
-  /** M0: the host section (dsh + bundle versions). tuiVersion is the
-   * BUNDLE's own version (bundleVersion), never the dsh version — the
-   * welcome-card helper prefers dsh for display, which would show the
-   * harness version under `version(format=tui)` (review finding). */
+  /** M0: the host section (dsh + bundle versions). `dshVersion` is the
+   * CURRENT Client's installed DSH runtime identity (Direct argv or Split
+   * install anchor), read once here; `tuiVersion` is the BUNDLE's own version
+   * (bundleVersion), never the DSH version. The field name is the historical
+   * status schema; it is not the Remote Host record's identity. */
   
-  const deriveHostStatus = (): HostStatus => ({
-    ...dshVersion() === undefined ? {} : { dshVersion: dshVersion() },
-    tuiVersion: bundleVersion(),
-  })
+  const deriveHostStatus = (): HostStatus => {
+    const installedDsh = dshVersion()
+    return {
+      ...installedDsh === undefined ? {} : { dshVersion: installedDsh },
+      tuiVersion: bundleVersion(),
+    }
+  }
 
   // PR D2: the session-bound context-measurement cache. The coordinator
   // owns the value/dirty/session identity; the runner owns the event
@@ -722,21 +776,53 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     // (no public rc.2 carrier — §6.6's truthful-unavailable rows). Direct
     // keeps the in-process service derivation.
     let access: ReturnType<typeof deriveAccessStatus> | {}
+    // M6-1 F8: the independent sandbox/approval facts come from the ONE
+    // policy observation (the SAME snapshot source Settings reads), keyed to
+    // the DISPLAY SUBJECT's own session id — the child viewer reads the
+    // child's subject, the main surface the main session's. A missing or
+    // non-ready observation leaves those facts ABSENT (never a guessed
+    // default), exactly like any other unavailable authority.
+    const policySubjectId = viewed === undefined ? deps.currentSessionId() : viewed.id
+    // The previous DISPLAY SUBJECT's observation truth is retired when the
+    // subject changes (viewer exit, session switch): a child's facts must never
+    // linger as the main session's, nor vice versa.
+    if (policySubjectId !== lastPolicySubjectId) {
+      const previous = lastPolicySubjectId
+      lastPolicySubjectId = policySubjectId
+      if (previous !== undefined) deps.policyObservation?.invalidate?.(previous)
+    }
+    const policySnapshot = deps.policyObservation === undefined || policySubjectId === undefined
+      ? undefined
+      : deps.policyObservation.readSnapshot(policySubjectId)
+    const policyFacts = policySnapshot?.kind === 'ready' && policySnapshot.read.kind === 'ready'
+      ? policySnapshot.read
+      : undefined
+    const sandboxFact = policyFacts?.sandbox.state === 'ready'
+      ? { mode: policyFacts.sandbox.effective }
+      : undefined
+    const approvalFact = policyFacts?.approval.state === 'ready'
+      ? { policy: policyFacts.approval.effective }
+      : undefined
     if (viewed !== undefined) {
       // M3-5 PR1 §9.4: the CHILD's access is the projection-authoritative
       // permission preset only — the parent's service-derived sandbox /
       // approval / permission never rides the child surface, and an absent
-      // child fact is omitted (never the parent's).
-      access = childAccessStatus(childStatus)
+      // child fact is omitted (never the parent's). M6-1 F8: the child's OWN
+      // observed sandbox/approval facts (never the parent's) join it.
+      access = { ...childAccessStatus(childStatus), ...sandboxFact === undefined ? {} : { sandbox: sandboxFact }, ...approvalFact === undefined ? {} : { approval: approvalFact } }
     } else if (deps.remote === undefined) {
-      access = deriveAccessStatus(
-          {
-            permissionPresets: permission,
-            sandboxPolicy: deps.host().sandboxPolicy,
-            approval: deps.host().approval,
-          },
-          deps.liveAgent()?.session,
-        )
+      // Direct: the permission preset stays with the official in-process
+      // service fold; sandbox/approval come from the observation (the
+      // official service derivation of those two knobs is retired here).
+      const presetStatus = deriveAccessStatus(
+        { permissionPresets: permission },
+        deps.liveAgent()?.session,
+      )
+      access = {
+        ...presetStatus,
+        ...sandboxFact === undefined ? {} : { sandbox: sandboxFact },
+        ...approvalFact === undefined ? {} : { approval: approvalFact },
+      }
     } else {
       // §6.4: the preset row comes from the projection ONLY. When the
       // projection cannot answer — the session status itself is unavailable,
@@ -750,9 +836,25 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
       // never become the main session's retained value.
       const status = mainSessionStatus()
       const currentPreset = status?.permission
-      access = currentPreset === undefined
-        ? (current.view.subject.kind === 'main' ? (current.access ?? {}) as typeof access : {})
+      // The LAST-KNOWN fallback is the PRESET ROW ONLY. The independent
+      // sandbox/approval facts must never ride this fallback: an unavailable
+      // projection after a Connection generation change or a failed policy
+      // read would otherwise keep painting the old Host's security policy as
+      // the current fact.
+      const retainedPreset = current.view.subject.kind === 'main'
+        ? current.access?.permissionPreset
+        : undefined
+      const presetPart = currentPreset === undefined
+        ? (retainedPreset === undefined ? {} : { permissionPreset: retainedPreset })
         : { permissionPreset: { id: currentPreset, label: currentPreset, matched: true } }
+      // The observed sandbox/approval facts are NOT retained across subjects
+      // or generations: only the preset row keeps its subject-scoped
+      // last-known fallback.
+      access = {
+        ...presetPart,
+        ...sandboxFact === undefined ? {} : { sandbox: sandboxFact },
+        ...approvalFact === undefined ? {} : { approval: approvalFact },
+      }
     }
     const collaboration = viewed === undefined
       ? {
@@ -763,8 +865,10 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
       : { plan: { effective: false } }
     // The display subject's workspace: the child SessionStatus' OWN cwd
     // (absent = '', never the parent's workspace). The local `gitBranch`
-    // derivation may speak only for a cwd on THIS process's filesystem — a
-    // Remote child's Host cwd is not one, so its branch is omitted.
+    // derivation may speak only for a cwd on THIS process's filesystem —
+    // every Remote LIVE Session (main AND child) carries a Host cwd that is
+    // not one, so its branch is omitted; only a Remote Sessionless surface's
+    // Client launch cwd keeps a local branch.
     const displayCwd = viewed === undefined ? liveCwd : (childStatus?.cwd ?? '')
     // The DISPLAY SUBJECT's unknown effective directory is stated in words
     // (plan §B2 UI: 不可用状态有文字) — for the child viewer too, whose slot
@@ -775,7 +879,15 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
         && (deps.liveAgent() !== undefined || deps.remote !== undefined)
         && deps.currentSessionId() !== undefined
       : childStatus?.cwd === undefined
-    const workspaceBase = deriveWorkspaceStatus(displayCwd, viewed === undefined || deps.remote === undefined)
+    // Direct and Remote-sessionless describe a directory on this Client.
+    // A Remote LIVE Session's cwd belongs to the Host and cannot authorize
+    // a read of this Client's .git/HEAD.
+    const liveBranchIsClientLocal = deps.remote === undefined
+      || deps.currentSessionId() === undefined
+    const displayBranchIsClientLocal = viewed === undefined
+      ? liveBranchIsClientLocal
+      : deps.remote === undefined
+    const workspaceBase = deriveWorkspaceStatus(displayCwd, displayBranchIsClientLocal)
     const workspace = cwdUnavailable ? { ...workspaceBase, cwdUnavailable: true } : workspaceBase
     // The Remote branch's event window is BOUNDED: its fold cannot count the
     // session's lifetime tokens, so the official `tokenUsage` projection (and
@@ -886,7 +998,11 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
         // footer cwd ITEM shortens for display itself); the legacy
         // display value (tail segments) is derived from it.
         cwd: liveCwd,
-        branch: gitBranch(liveCwd),
+        // The LIVE session owner's branch locality: a Remote LIVE Session
+        // never authorizes a Client `.git/HEAD` read of its Host cwd — output
+        // '' so the legacy merge / Extension sync CLEAR any old value rather
+        // than leaving it stale.
+        branch: liveBranchIsClientLocal ? gitBranch(liveCwd) : '',
         goal: goalText,
         turns: stats.turns,
         steps: stats.steps,
@@ -1164,6 +1280,15 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     scheduleInitialMeasurement: scheduleInitialContextMeasure,
     cancelDeferred,
     setGoal,
-    applyGoalChange: (event) => { goalText = foldGoal([event]) },
+    // Fold the newest durable `goal/change` and publish it through the ONE
+    // status refresh: the live legacy `goal` slot carries the folded text, and
+    // the cheap refresh is what repaints the dock's goal line. Without it a
+    // committed clear/completion kept the previous badge painted until an
+    // unrelated status event happened to refresh (the fold alone mutates no
+    // surface fact).
+    applyGoalChange: (event) => {
+      goalText = foldGoal([event])
+      refreshStatusCheap()
+    },
   }
 }

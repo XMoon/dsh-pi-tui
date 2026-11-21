@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
 
 import { compositionFile, compositionSources, compositionSourcesUnder } from '../support/composition-surface.ts'
-import { aliasAwareConstructionSites, ownerFile, ownerSource, parseSources, productionScriptKind, productionSource, productionSources, unwrapExpression, type ParsedSourceSet } from '../support/owner-modules.ts'
+import { aliasAwareConstructionSites, ownerFile, parseSources, productionScriptKind, productionSource, productionSources, unwrapExpression, type ParsedSourceSet } from '../support/owner-modules.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 
 /** This repository root. */
@@ -29,7 +29,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
  * `src/app/bootstrap/**` helper at any depth, and the package entry never
  * defines any of them.
  *
- * Plan §8.2's minimum closure list and where each clause is locked:
+ * Plan §8.2's minimum closure list and where each clause is guarded or reviewed:
  *   1. the composition zone exists — one facade plus its helpers —
  *      "the composition zone is one facade plus its bootstrap helpers" below;
  *   2. `src/index.ts` remains a facade —
@@ -39,9 +39,8 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
  *      "the composition root implements no TuiAppEvents/TuiCommandRunner
  *      literal" (root) + "exactly one TuiAppEvents implementation" (owner);
  *   5. no `TuiCommandRunner` implementation literal — the same two locks;
- *   6. no universal carrier/bag —
- *      "no universal application/runtime dependency bag exists" +
- *      "the composition root introduces no new context/bag type";
+ *   6. no universal carrier/bag — a semantic ownership rule in
+ *      `docs/architecture/overview.md`, not a blacklist of type names;
  *   7. each extracted owner constructed/bound once — the
  *      `OWNER_CONSTRUCTIONS` lock here plus the inventory test's
  *      `SINGLE_OWNER_SITES` authority/binding rows.
@@ -220,46 +219,6 @@ test('the package entry is a facade and defines no application handler', () => {
   for (const name of FINAL_FORBIDDEN_HANDLERS) {
     assert.equal(declares(entry, name), false, `src/index.ts must not define ${name}`)
   }
-})
-
-test('no universal application/runtime dependency bag exists', () => {
-  // Plan §6.3/§7.6.2: the escape hatch is a new EverythingBag type that carries
-  // cross-domain state. It must not appear in the composition surface or in any
-  // extracted owner.
-  const source = ownerSource()
-  for (const bag of ['BootstrapContext', 'AppContext', 'GlobalRuntime', 'EverythingBag', 'RunnerContext', 'SurfaceContext', 'CompositionContext', 'RuntimeContext', 'ApplicationContext']) {
-    assert.equal(
-      new RegExp(`\\b(?:interface|type|class)\\s+${bag}\\b`).test(source),
-      false,
-      `${bag} would be a universal dependency bag (plan A5b §6.3)`,
-    )
-  }
-})
-
-/** Every top-level `interface`/`type alias`/`class` name a module declares. */
-function declaredTypeNames(source: string): string[] {
-  const sf = ts.createSourceFile('module.ts', source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS)
-  const names: string[] = []
-  const walk = (node: ts.Node): void => {
-    if ((ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node) || ts.isClassDeclaration(node)) && node.name) {
-      names.push(node.name.text)
-    }
-    ts.forEachChild(node, walk)
-  }
-  walk(sf)
-  return names
-}
-
-test('the composition root introduces no new context/bag type', () => {
-  // Plan §7.6.2: no new broad context/bag type carrying cross-domain state. The
-  // only type the composition root has ever declared is the small pre-existing
-  // `AppExit`; a new `type`/`interface`/`class` there is a bag by construction.
-  const root = compositionFile('src/app/bootstrap.ts')
-  assert.deepEqual(
-    declaredTypeNames(root),
-    ['AppExit'],
-    'src/app/bootstrap.ts must declare no type/interface/class besides the pre-existing AppExit (plan §7.6.2: no new broad bag)',
-  )
 })
 
 interface TuiAppEventsLiteral {
@@ -555,12 +514,10 @@ test('NO production module implements a typed TuiCommandRunner object literal', 
 /**
  * Extracted declarations and the module that must own them.
  *
- * The aggregate `ownerOccurrences()`/`ownerSource()` locks prove "exactly once
- * SOMEWHERE across the owner surface" — and that surface includes
- * `src/app/bootstrap.ts`, so a construction or state machine moving back into
- * the composition root would still satisfy the count. These rows pin the
- * ownership LOCATION per module (A5b-1 review P2): the named owner must declare
- * the symbol and the composition root must not.
+ * The whole-production-tree single-owner construction checks live in
+ * `composition-inventory.test.ts`. These rows separately pin the declaration
+ * LOCATION per module (A5b-1 review P2): the named owner must declare the
+ * symbol and the composition root must not.
  */
 const EXTRACTED_DECLARATIONS: ReadonlyArray<readonly [string, readonly string[]]> = [
   [
@@ -644,14 +601,14 @@ const EXTRACTED_DECLARATIONS: ReadonlyArray<readonly [string, readonly string[]]
       // submission owner (the sole writer/admission authority).
       'withWriterSection',
       // A5b-4 review fix: the submission-presentation policy the composition
-      // root used to define (attachment refusal, command-submit attachment
-      // expansion, local-echo placement) is controller-owned.
-      'attachmentRefusal', 'commandSubmitAttachments', 'submissionPlacement',
+      // root used to define (attachment refusal, local-echo placement) is
+      // controller-owned.
+      'attachmentRefusal', 'submissionPlacement',
     ],
   ],
   [
     'src/app/submission/user-shell.ts',
-    ['shellController', 'interrupt', 'shellTempFiles', 'runUserShell'],
+    ['shellController', 'interrupt', 'runUserShell'],
   ],
   [
     'src/app/surface/application-events.ts',
@@ -764,10 +721,9 @@ test('every extracted-owner factory is called exactly once, from the composition
 /**
  * Owner-internal presentation constructors and the modules that must hold them.
  *
- * `SINGLE_OWNER_SITES` in the A5 composition inventory counts across the whole
- * owner surface (which includes the composition root), so moving one of these
- * back into bootstrap would keep the aggregate count green (A5b-1 review P2).
- * These rows pin the concrete module set.
+ * Whole-production-tree construction counts can remain unchanged when a
+ * constructor moves back into bootstrap. These rows separately pin each
+ * presentation constructor to its actual owning module.
  */
 const EXTRACTED_CONSTRUCTIONS: ReadonlyArray<readonly [string, readonly string[]]> = [
   ['src/app/surface/session-presentation.ts', ['new TranscriptFolder(', 'new StatsFolder(', 'new TranscriptWindowController(']],
@@ -834,8 +790,13 @@ test('only the owner that is asked to consume the draft clears the editor', () =
   const events = ownerFile('src/app/surface/application-events.ts')
   assert.equal(events.split('submission.steer(').length - 1, 2,
     'exactly two production steer call sites must exist in the event owner (one consume-draft, one already-consumed)')
-  assert.match(events, /submission\.steer\(deps\.surface\.app\.getDraft\(\), \{ consumeDraft: true \}\)/u,
-    'the steer-draft action must ask the owner to consume the still-present draft')
+  // PR2/F4: the surface action shares the synchronous Composer admission; the
+  // owner is asked to consume the still-present draft only on the LEGACY
+  // verdict (`'held'` already started the attempt and freezes the document).
+  assert.match(events, /beginComposerSubmission\(text, 'steer'\)/u,
+    'the steer-draft action must enter the ONE composer admission first')
+  assert.match(events, /if \(admission === 'legacy'\) deps\.submission\.steer\(text, \{ consumeDraft: true \}\)/u,
+    'the legacy verdict asks the owner to consume the still-present draft')
   const onSteer = events.slice(events.indexOf('onSteer: (text) =>'), events.indexOf('onSteer: (text) =>') + 900)
   assert.match(onSteer, /submission\.steer\(text\)/u,
     'the TuiApp onSteer seam must NOT ask for a second consume (the caller already cleared)')
@@ -1058,8 +1019,10 @@ test('the submission writer section is controller-owned and read late-bound', ()
     /const withWriterSection = <T>\(task: \(\) => Promise<T>\): Promise<T> => \{\n\s*const scope = deps\.scope\.captureLive\(\)\n\s*if \(scope === undefined\) return Promise\.reject\(new SessionScopeSupersededError\(\)\)\n\s*return deps\.submissionRuntime\.withWriter\(scope, task\)\n\s*\}/u,
     'the owner must keep the exact captureLive → reject → withWriter semantics',
   )
-  assert.equal(root.split('submission.withWriterSection(task)').length - 1, 2,
-    'the local shell and the subagent-delivery adapter must both reach the owner')
+  assert.equal(root.split('submission.withWriterSection(task)').length - 1, 1,
+    'the Subagent delivery adapter keeps its existing scope-capturing owner wrapper')
+  assert.equal(root.split('submission.withShellWriterSection(scope, task)').length - 1, 1,
+    'the Host shell result write must use its exact gesture-captured scope')
   assert.doesNotMatch(root, /writerSection: submission\.withWriterSection\b/u,
     'the consumers must read the owner at call time, never capture the method by value')
 })

@@ -141,7 +141,7 @@ test('every environment gate rejects BEFORE any tmux command is spawned', (t) =>
   }
 })
 
-test('F4: live Kitty re-probes use the startup preference, not a later env mutation', (t) => {
+test('live Kitty re-probes use the startup preference, not a later env mutation', (t) => {
   const cli = createFakeTmuxCli(t)
   try {
     const identity = probeTmuxKittyIdentity(cli.env)

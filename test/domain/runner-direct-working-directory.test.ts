@@ -22,6 +22,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { executeModelToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import { Context } from '@deepseek-ai/cordis'
 import { SESSION_FORMAT_VERSION, SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
@@ -78,7 +79,7 @@ test('a committed cd moves the status workspace of the live Session and never th
 
   const target = join(fixture.workRoot, 'moved-workspace')
   mkdirSync(target, { recursive: true })
-  await fixture.ctx.tools.execute({
+  await executeModelToolFixture(fixture.ctx, {
     signal: new AbortController().signal,
     callId: ToolCallId('s2b-runner-cd'),
     name: 'working_directory',

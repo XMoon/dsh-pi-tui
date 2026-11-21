@@ -84,6 +84,10 @@ export interface PluginBundleFact {
   readonly version?: string
   readonly title?: string
   readonly description?: string
+  /** The Host's default GUI visibility decision after its own package/Host
+   * checks; absent when the Host declares none. It only answers "listed by
+   * default", never enablement, installation or load success. */
+  readonly listedByDefault?: boolean
   /** Selected in the profile manifest. */
   readonly enabled: boolean
   /** Whether the profile's own dependencies hold the package. */
@@ -94,6 +98,12 @@ export interface PluginBundleFact {
    * information removed by the Host), when one is declared. */
   readonly source?: string
   readonly removable: boolean
+  /** How the Host can update this bundle, absent when it cannot: `registry`
+   *  (a registry version update accepted by `listVersions`/`updateBundle`) or
+   *  `git` (a Git-sourced profile dependency). The value is a Host declaration
+   *  only: it never answers which version is newer, and the TUI must not infer
+   *  it from a source string. */
+  readonly update?: 'registry' | 'git'
   readonly readOnlyReason?: PluginReadOnlyReason
   readonly error?: PluginErrorFact
   readonly rows: readonly PluginBundleRowFact[]
@@ -212,6 +222,69 @@ export interface PluginInstallPhaseFact {
   }
 }
 
+/** One registry a version lookup asked, and why it gave no usable answer. */
+export interface PluginRegistryAttemptFact {
+  readonly registry: string | null
+  readonly problem?: 'not-found' | 'network' | 'unknown'
+  readonly reason?: string
+}
+
+/** One published version newer than the installed one (official `PluginVersion`). */
+export interface PluginVersionFact {
+  readonly version: string
+  readonly publishedAt?: string
+  readonly tags: readonly string[]
+  readonly prerelease: boolean
+  readonly deprecated?: string
+  /** Whether the version declares a `dsh.bundle`; only such a version can replace a bundle. */
+  readonly bundle: boolean
+  /** Present when the running DSH version rejects this version without an exemption. */
+  readonly incompatible?: PluginIncompatibleFact
+}
+
+/**
+ * The versions a registry offers for an installed registry package, read WITHOUT
+ * changing the profile. The Host is the registry and compatibility authority;
+ * this port carries its answer verbatim, in the Host's own order.
+ */
+export type PluginVersionListFact =
+  | {
+    readonly status: 'listed'
+    /** The installed version the list is newer than. */
+    readonly installed: string
+    /** The registry that answered; an update installs from exactly this one. */
+    readonly registry: string | null
+    readonly attempts: readonly PluginRegistryAttemptFact[]
+    readonly versions: readonly PluginVersionFact[]
+    /** Newer versions beyond the Host's own limit that the list leaves out. */
+    readonly omitted: number
+  }
+  | {
+    readonly status: 'refused'
+    readonly problem: 'not-updatable' | 'not-found' | 'network' | 'unknown'
+    readonly reason: string
+    readonly attempts: readonly PluginRegistryAttemptFact[]
+  }
+
+/** One Host update step announcement (official `PluginUpdateProgress`). */
+export interface PluginUpdateProgressFact {
+  readonly requestId: string
+  readonly step: 'checking' | 'removing' | 'installing' | 'restoring'
+}
+
+/**
+ * How one official update ended: `result` belongs to the last step that ran and
+ * `restore` reports the reinstallation of the former version, when one ran.
+ * The two are INDEPENDENT outcomes and must never be collapsed into one.
+ */
+export interface PluginUpdateResultFact {
+  readonly from: string
+  readonly to: string
+  readonly step: 'check' | 'remove' | 'install'
+  readonly result: PluginChangeFact
+  readonly restore?: PluginChangeFact
+}
+
 /** One chunk of a pnpm run's output. */
 export interface PluginInstallLogFact {
   readonly requestId?: string
@@ -272,6 +345,23 @@ export interface PluginManagerPort {
   cancelInstall(requestId: string): Promise<PluginInstallCancellationFact>
   /** Subscribe to the official install progress/log events. */
   subscribeInstall(listener: (event: PluginInstallEvent) => void): () => void
+  /**
+   * Read the published versions newer than one installed profile registry
+   * bundle, through the Host's default registry plan. The Host is the registry
+   * and compatibility authority: this never guesses a version locally and does
+   * not change the profile. `signal` ends the read only.
+   */
+  listVersions(name: string, signal?: AbortSignal): Promise<PluginVersionListFact>
+  /**
+   * Replace one installed profile registry bundle with one EXACT published
+   * version through the official Host update. `registry` is the one the Host's
+   * own `listVersions` answer named (or null for pnpm's configuration).
+   * `requestId` names the update progress and its target installation; the
+   * Host alone performs the write, its automatic restore and the final result.
+   */
+  updateBundle(name: string, version: string, registry: string | null, requestId: string): Promise<PluginUpdateResultFact>
+  /** Subscribe to the official update step announcements. */
+  subscribeUpdate(listener: (progress: PluginUpdateProgressFact) => void): () => void
   /**
    * Subscribe to one transport-neutral invalidation hint: the question it
    * answers is "has something happened that makes the cached snapshot

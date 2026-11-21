@@ -1,5 +1,5 @@
 /**
- * S4-D3 B05/B07/B08 — the OFFICIAL rc.2 Optional bundle result in the
+ * S4-D3 B05/B08 — the OFFICIAL rc.2 Optional bundle result in the
  * MOUNTED PiTui application (D3-4).
  *
  * `PRODUCTION PREREQUISITES REPRODUCED`: the published rc.2 Optional bundle
@@ -24,13 +24,13 @@ import { createUserMessage, LlmAdapter, type GenerateOptions, type StreamChunk }
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import {
   skippedInstallationReason,
-  type S4D2BundleId,
+  type OptionalBundleId,
+  type S5OptionalBundleId,
 } from '../support/optional-bundle-fixture.ts'
 import { startS4D3Application } from '../support/application-fixture.ts'
 
-const B05 = '@deepseek-ai/dsh-experimental-tool-worktree' satisfies S4D2BundleId
-const B07 = '@deepseek-ai/dsh-experimental-terminal-bundle' satisfies S4D2BundleId
-const B08 = '@deepseek-ai/dsh-experimental-session-search' satisfies S4D2BundleId
+const B05 = '@deepseek-ai/dsh-experimental-tool-worktree' satisfies OptionalBundleId
+const B08 = '@deepseek-ai/dsh-experimental-session-search' satisfies OptionalBundleId
 
 function git(cwd: string, ...args: readonly string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim()
@@ -102,6 +102,7 @@ function footerLine(view: string): string {
 test('the real create_worktree result and effective cwd reach the mounted TUI', { skip: skippedInstallationReason([B05]) }, async t => {
   const app = await startS4D3Application(t, {
     bundles: [B05],
+    presets: true,
     patches: [{ id: 'agent-default-model', config: { provider: 'scripted', model: 'review-model' } }] as never,
   })
   const adapter = new ScriptedAdapter()
@@ -156,7 +157,7 @@ test('the real create_worktree result and effective cwd reach the mounted TUI', 
   // never inherits the previous session's effective worktree directory.
   adapter.scripts.push({ kind: 'text', text: 'Fresh session ready.' })
   for (const character of '/new') app.vt.sendInput(character)
-  await app.settle()
+  await app.waitFor(() => app.view().includes('❯ /new'), 'the painted /new command')
   app.vt.sendInput('\r')
   await app.waitFor(() => app.agent() !== undefined && String(app.agent()!.session.id) !== String(agent.session.id),
     'the production /new session transition')
@@ -165,7 +166,7 @@ test('the real create_worktree result and effective cwd reach the mounted TUI', 
   await second.whenIdle()
   await app.waitFor(() => app.view().includes('Fresh session ready.'), 'the fresh session answer')
   assert.notEqual(String(second.session.id), String(agent.session.id))
-  assert.match(footerLine(app.view()), /dsh-s4-d2-[^/]+\/work|s4d-pi-tui-wt\/s4-d3/u,
+  assert.match(footerLine(app.view()), /dsh-optional-bundle-[^/]+\/work|s4d-pi-tui-wt\/s4-d3/u,
     'the fresh session cwd is the launch project')
   assert.doesNotMatch(footerLine(app.view()), /s4d3-worktree/u, 'the old session cwd never leaks into the new one')
 
@@ -177,133 +178,17 @@ test('the real create_worktree result and effective cwd reach the mounted TUI', 
   assert.equal(git(project, 'status', '--porcelain'), '', 'the source worktree stays clean')
 })
 
-// ── B07 persistent terminal ────────────────────────────────────────────────
-
-/** The exact durable tool result of one call id (never a sibling result). */
+/** The committed text of one tool/result by call id. */
 function toolResultOf(agent: Agent, callId: string): string | undefined {
-  for (const event of agent.session.snapshotEvents() as readonly { readonly type?: string; data?: unknown }[]) {
+  const events = agent.session.snapshotEvents() as readonly { readonly type?: string; readonly data?: unknown }[]
+  for (const event of events) {
     if (event.type !== 'tool/result') continue
-    const message = (event.data as { message?: { toolCallId?: unknown; content?: readonly { text?: string }[] } }).message
-    if (String(message?.toolCallId) !== callId) continue
-    return (message?.content ?? []).map(block => block.text ?? '').join('')
+    const message = (event.data as { message?: { toolCallId?: string; content?: readonly { type?: string; text?: string }[] } }).message
+    if (message?.toolCallId !== callId) continue
+    return (message.content ?? []).map(block => block.text ?? '').join('')
   }
   return undefined
 }
-
-function toolResultTexts(agent: Agent): string[] {
-  const events = agent.session.snapshotEvents() as readonly { readonly type?: string; readonly data?: unknown }[]
-  const texts: string[] = []
-  for (const event of events) {
-    if (event.type !== 'tool/result') continue
-    const message = (event.data as { message?: { content?: readonly { type?: string; text?: string }[] } }).message
-    const text = (message?.content ?? []).map(block => block.text ?? '').join('')
-    if (text !== '') texts.push(text)
-  }
-  return texts
-}
-
-const sleep = async (ms: number): Promise<void> => { await new Promise<void>(resolve => setTimeout(resolve, ms)) }
-
-test('the real retained terminal result, Job and close state reach the mounted TUI', { skip: skippedInstallationReason([B07]) }, async t => {
-  const app = await startS4D3Application(t, {
-    bundles: [B07],
-    patches: [{ id: 'agent-default-model', config: { provider: 'scripted', model: 'review-model' } }] as never,
-  })
-  const adapter = new ScriptedAdapter()
-  app.host.ctx.llm.registerAdapter(['scripted'], adapter)
-  const work = join(app.host.root, 'work')
-
-  adapter.scripts.push(
-    { kind: 'tool', name: 'terminal_open', callId: 's4d3-b07-open', arguments: JSON.stringify({ type: 'shell', name: 'main', cwd: work }) },
-    { kind: 'text', text: 'Terminal opened.' },
-  )
-  const agent = await app.submitFirstPrompt('Open a persistent terminal')
-  await agent.whenIdle()
-  const opened = toolResultTexts(agent).find(text => text.includes('started terminal session'))
-  assert.ok(opened !== undefined, `the real terminal_open result is committed:\n${toolResultTexts(agent).join('\n---\n')}`)
-  const terminalId = /started terminal session (\S+)/u.exec(opened!)![1]!
-  await app.waitFor(() => app.view().includes('terminal_open'), 'the real terminal tool card')
-
-  adapter.scripts.push(
-    { kind: 'tool', name: 'terminal_send', callId: 's4d3-b07-send', arguments: JSON.stringify({ sessionId: terminalId, text: 'echo TERMINAL_OK' }) },
-    { kind: 'tool', name: 'terminal_read', callId: 's4d3-b07-read', arguments: JSON.stringify({ sessionId: terminalId }) },
-    { kind: 'tool', name: 'terminal_send', callId: 's4d3-b07-ansi', arguments: JSON.stringify({ sessionId: terminalId, text: "printf '\\033[31mRED_ESCAPE\\033[0m\\n'" }) },
-    { kind: 'tool', name: 'terminal_read', callId: 's4d3-b07-read-ansi', arguments: JSON.stringify({ sessionId: terminalId }) },
-    { kind: 'tool', name: 'terminal_list', callId: 's4d3-b07-list', arguments: '{}' },
-    { kind: 'tool', name: 'terminal_send', callId: 's4d3-b07-background', arguments: JSON.stringify({ sessionId: terminalId, text: 'sleep 0.2; echo BG_OK', run_in_background: true }) },
-    { kind: 'text', text: 'Terminal round completed.' },
-  )
-  followup(agent, 'Run the retained terminal commands')
-  await agent.whenIdle()
-  await app.waitFor(() => app.view().includes('TERMINAL_OK'), 'the real terminal output in the transcript')
-  assert.match(app.view(), /RED_ESCAPE/u, 'the sanitized ANSI output is visible')
-  assert.doesNotMatch(app.view(), /\u001b\[31m/u, 'no raw terminal escape sequence is painted by the transcript')
-
-  const results = toolResultTexts(agent)
-  const listed = results.findLast(text => /pid=\d+/u.test(text))!
-  const pid = Number(/pid=(\d+)/u.exec(listed)![1]!)
-  const background = results.find(text => text.includes('started background job'))
-  assert.ok(background !== undefined, 'the background send really created a Host Job')
-  const jobId = /started background job (\S+)/u.exec(background!)![1]!
-
-  adapter.scripts.push(
-    { kind: 'tool', name: 'job_output', callId: 's4d3-b07-job', arguments: JSON.stringify({ job_id: jobId, wait: true, timeout_ms: 30_000 }) },
-    { kind: 'tool', name: 'terminal_close', callId: 's4d3-b07-close', arguments: JSON.stringify({ sessionId: terminalId }) },
-    { kind: 'tool', name: 'terminal_read', callId: 's4d3-b07-read-closed', arguments: JSON.stringify({ sessionId: terminalId }) },
-    { kind: 'text', text: 'Terminal closed.' },
-  )
-  followup(agent, 'Read the background Job and close the terminal')
-  await agent.whenIdle()
-  await app.waitFor(() => app.view().includes('BG_OK'), 'the real background Job output in the transcript')
-  const closed = toolResultOf(agent, 's4d3-b07-close')
-  assert.match(closed ?? '', /closed terminal session/iu, 'the exact close call succeeded')
-  const afterClose = toolResultOf(agent, 's4d3-b07-read-closed')
-  assert.match(afterClose ?? '', /unknown PTY session|unknown|closed|lost/iu,
-    'the SPECIFIC post-close read is the official refusal, not the close success')
-  await app.waitFor(() => /unknown PTY session/iu.test(app.view()), 'the post-close refusal is painted')
-
-  // The existing Task Center observes the SAME Host Job without a second
-  // registry: open `/tasks` and read the job row, then its retained output.
-  for (const character of '/tasks') app.vt.sendInput(character)
-  await app.settle()
-  app.vt.sendInput('\r')
-  await app.settle()
-  await app.waitFor(() => /Job|jobs|Task/iu.test(app.view()), 'the real Task Center')
-  const taskFrame = app.view()
-  // Isolate the Task Center overlay cells; the retained transcript behind it
-  // already contains terminal/job text and can never witness the roster.
-  const frameLines = taskFrame.split('\n')
-  const overlayTop = frameLines.findIndex(line => line.includes('Tasks [TRACKED]'))
-  assert.ok(overlayTop >= 0, `the real Task Center painted:\n${taskFrame}`)
-  const overlayBottom = frameLines.findIndex((line, index) => index > overlayTop && line.includes('╰'))
-  assert.ok(overlayBottom > overlayTop, 'the Task Center overlay has a painted bottom border')
-  const overlay = frameLines.slice(overlayTop, overlayBottom + 1).join('\n')
-  assert.match(overlay.replace(/\s+/gu, ' '), /Tasks \[TRACKED\]/u)
-  assert.match(overlay.replace(/\s+/gu, ' '), /pty-send · pty-1: sleep 0\.2; echo BG_OK/u,
-    `the exact Host Job row is in the Task Center overlay:\n${overlay}`)
-  assert.match(overlay.replace(/\s+/gu, ' '), /status completed/iu)
-  // Enter opens the existing Job reader as a dedicated SCREEN; the pinned
-  // retained-preview disclosure is unique to that reader (the transcript's
-  // earlier BG_OK cannot witness it). The selected Job's output is then read
-  // from the same reader.
-  app.vt.sendInput('\r')
-  await app.settle()
-  await app.waitFor(() => app.view().includes('Retained preview · not full history'), 'the selected Job reader')
-  assert.match(app.view(), /BG_OK/u, 'the selected Job reader shows the retained output')
-
-  // A closed terminal truly released its process tree.
-  await app.waitFor(() => {
-    try {
-      process.kill(pid, 0)
-      return false
-    } catch {
-      return true
-    }
-  }, 'the retained terminal process to exit')
-  // The one-shot `!`/`!!` behavior is a separate shell owner; this test never
-  // merges it with the persistent terminal and does not touch it.
-  await sleep(10)
-})
 
 // ── B08 session search ─────────────────────────────────────────────────────
 
@@ -312,6 +197,7 @@ test('the official scoped session_search results reach the PiTui Tool output, ne
   const project = { path: '' }
   const app = await startS4D3Application(t, {
     bundles: [B08],
+    presets: true,
     columns: 160,
     rows: 56,
     patches: [{ id: 'agent-default-model', config: { provider: 'scripted', model: 'review-model' } }] as never,
@@ -371,15 +257,163 @@ test('the official scoped session_search results reach the PiTui Tool output, ne
     await app.settle()
   }
   const browser = app.view()
-  assert.match(browser, /sessions · Current directory/u, 'the existing Session Browser opens')
-  assert.match(browser, /Type to filter/u, 'the picker keeps its own query input')
-  // The Host query is a Tool result; opening the Browser never carries that
-  // query into the picker's own search input. Read the OVERLAY cells only (the
-  // transcript remains painted to its left).
-  const overlay = browser.split('\n')
-  const top = overlay.findIndex(line => line.includes('sessions · Current directory'))
-  assert.ok(top >= 0)
-  const left = overlay[top]!.indexOf('╭')
-  const overlayText = overlay.slice(top).map(line => line.slice(left)).join('\n')
-  assert.doesNotMatch(overlayText, /ALPHA_NEEDLE_PROJECT/u, 'the Host query is not a Session Browser search injection')
+  assert.match(browser, /Sessions/u, 'the fullscreen Session Workspace opens')
+  assert.match(browser, /Workspace: /u, 'the workspace keeps its own scope chrome')
+  // The Host query is a Tool result; opening the workspace never carries that
+  // query into its own raw editor. `/` focuses the workspace editor and it
+  // must start empty.
+  app.vt.sendInput('/')
+  await app.waitFor(() => app.view().includes('Search:'), 'the workspace query editor')
+  const editor = app.view()
+  assert.match(editor, /Search:\s*$/mu, 'the workspace keeps its own EMPTY query editor')
+  assert.doesNotMatch(editor, /ALPHA_NEEDLE_PROJECT/u, 'the Host query is not a Session Workspace search injection')
+})
+
+// ── Release-added Forge bundle: the same Host Git path, no GitHub ─────────
+
+const FORGE_BUNDLE = '@deepseek-ai/dsh-experimental-forge-bundle' satisfies S5OptionalBundleId
+
+interface DurableToolCall {
+  readonly callId: string
+  readonly name: string
+  readonly arguments: string
+}
+
+/** The durable `tool/call` event of one call id (never the painted card). */
+function toolCallOf(agent: Agent, callId: string): DurableToolCall | undefined {
+  for (const event of agent.session.snapshotEvents() as readonly { readonly type?: string; readonly data?: unknown }[]) {
+    if (event.type !== 'tool/call') continue
+    const data = event.data as { readonly callId?: unknown; readonly name?: unknown; readonly arguments?: unknown }
+    if (String(data?.callId) !== callId) continue
+    return { callId: String(data.callId), name: String(data.name), arguments: String(data.arguments) }
+  }
+  return undefined
+}
+
+interface WorktreeRecord {
+  readonly path: string
+  readonly branch: string
+  readonly baseCommit: string
+  readonly repositoryRoot: string
+}
+
+/** The REAL Git registration set of one repository. */
+function gitWorktrees(cwd: string): readonly { readonly path: string; readonly branch: string }[] {
+  const output = git(cwd, 'worktree', 'list', '--porcelain')
+  const entries: Array<{ path: string; branch: string }> = []
+  let path = ''
+  let branch = ''
+  for (const line of output.split('\n')) {
+    if (line.startsWith('worktree ')) {
+      if (path !== '') entries.push({ path, branch })
+      path = line.slice('worktree '.length)
+      branch = ''
+    } else if (line.startsWith('branch ')) {
+      branch = line.slice('branch '.length).replace(/^refs\/heads\//u, '')
+    }
+  }
+  if (path !== '') entries.push({ path, branch })
+  return entries
+}
+
+test('the experimental Forge bundle drives the real create_worktree Git/cwd path and the mounted TUI', { skip: skippedInstallationReason([FORGE_BUNDLE]) }, async t => {
+  const app = await startS4D3Application(t, {
+    bundles: [FORGE_BUNDLE],
+    presets: true,
+    patches: [{ id: 'agent-default-model', config: { provider: 'scripted', model: 'review-model' } }] as never,
+  })
+  const adapter = new ScriptedAdapter()
+  app.host.ctx.llm.registerAdapter(['scripted'], adapter)
+
+  // A REAL local Git repository: the only Forge prerequisite exercised here.
+  const project = join(app.host.root, 'work')
+  mkdirSync(project, { recursive: true })
+  git(project, 'init', '-q', '-b', 'main')
+  git(project, 'config', 'user.email', 's5-pr6@example.invalid')
+  git(project, 'config', 'user.name', 'S5 PR6')
+  writeFileSync(join(project, 'README.md'), 'S5-PR6 Forge fixture\n')
+  git(project, 'add', 'README.md')
+  git(project, 'commit', '-q', '-m', 'fixture base')
+  const sourceHead = git(project, 'rev-parse', 'HEAD')
+  const sourceReadme = readFileSync(join(project, 'README.md'), 'utf8')
+  assert.equal(git(project, 'remote'), '', 'the fixture repository has NO GitHub remote')
+  assert.equal(app.host.toolNames().filter(tool => tool === 'create_worktree').length, 1,
+    'the composed Forge bundle declares the single official create_worktree schema')
+
+  adapter.scripts.push(
+    { kind: 'tool', name: 'create_worktree', callId: 's5-pr6-forge-create', arguments: JSON.stringify({ name: 's5-forge-worktree', from: sourceHead }) },
+    { kind: 'text', text: 'Forge worktree created.' },
+  )
+  const agent = await app.submitFirstPrompt('Create the Forge worktree')
+  await agent.whenIdle()
+  assert.equal(app.host.toolNames(agent).filter(tool => tool === 'create_worktree').length, 1,
+    'the calling Agent sees exactly one create_worktree schema')
+
+  // The durable call is the official model request, not a test-side Git write.
+  const call = toolCallOf(agent, 's5-pr6-forge-create')
+  assert.ok(call !== undefined, 'the durable tool/call event exists')
+  assert.equal(call.name, 'create_worktree')
+  assert.deepEqual(JSON.parse(call.arguments), { name: 's5-forge-worktree', from: sourceHead })
+
+  const resultText = toolResultOf(agent, 's5-pr6-forge-create')
+  assert.ok(resultText !== undefined, 'the official tool/result is committed')
+  const record = JSON.parse(resultText) as WorktreeRecord
+  const expectedPath = join(project, '.agents', 'worktrees', 's5-forge-worktree')
+  assert.equal(record.path, expectedPath, 'the official result reports the canonical checkout')
+  assert.equal(record.baseCommit, sourceHead, 'the checkout is pinned to the real base commit')
+  assert.equal(record.repositoryRoot, project, 'the source checkout is the fixture project')
+
+  // Git owns the registration and the checkout really contains the base file.
+  const registered = gitWorktrees(project).find(entry => entry.path === expectedPath)
+  assert.ok(registered !== undefined, `git worktree list carries ${expectedPath}`)
+  assert.equal(registered.branch, record.branch, 'the registered branch is the official result branch')
+  assert.equal(readFileSync(join(expectedPath, 'README.md'), 'utf8'), sourceReadme, 'the base file was checked out')
+
+  // The effective Session directory moved; the immutable header did not.
+  const workingDirectory = app.host.ctx.get('workingDirectory') as { get(session: unknown): string }
+  assert.equal(workingDirectory.get(agent.session), expectedPath)
+  assert.equal(agent.session.header.cwd, project, 'the Session header keeps the launch checkout')
+  await app.waitFor(() => app.view().includes('Forge worktree created.'), 'the assistant turn after the tool')
+  await app.waitFor(() => footerLine(app.view()).includes('s5-forge-worktree'), 'the footer follows the effective cwd')
+  assert.match(app.view(), /create_worktree/u, 'the real Host tool call is painted')
+  assert.match(app.view(), /s5-forge-worktree/u, 'the real Host result is painted')
+
+  // NEGATIVE: an illegal worktree name is refused by the official tool and no
+  // Git registration, working directory or source content changes.
+  const registrationsBefore = gitWorktrees(project)
+  adapter.scripts.push(
+    { kind: 'tool', name: 'create_worktree', callId: 's5-pr6-forge-refused', arguments: JSON.stringify({ name: '../escape', from: sourceHead }) },
+    { kind: 'text', text: 'The invalid Forge request failed.' },
+  )
+  followup(agent, 'Attempt an invalid Forge worktree')
+  await agent.whenIdle()
+  const refused = toolResultOf(agent, 's5-pr6-forge-refused')
+  assert.match(refused ?? '', /relative Git branch name|branch/iu, 'the official tool refuses the illegal name')
+  assert.deepEqual(gitWorktrees(project), registrationsBefore, 'a refused call registers no new worktree')
+  assert.equal(workingDirectory.get(agent.session), expectedPath, 'a refused call never moves the cwd')
+  assert.match(footerLine(app.view()), /s5-forge-worktree/u)
+  assert.equal(git(project, 'rev-parse', 'HEAD'), sourceHead, 'the source HEAD is unchanged')
+  assert.equal(readFileSync(join(project, 'README.md'), 'utf8'), sourceReadme, 'the source content is unchanged')
+  await app.waitFor(() => app.view().includes('The invalid Forge request failed.'), 'the refusal turn settles')
+
+  // The /new Session starts from the launch project, never the Forge checkout.
+  adapter.scripts.push({ kind: 'text', text: 'Fresh Forge session ready.' })
+  for (const character of '/new') app.vt.sendInput(character)
+  await app.waitFor(() => app.view().includes('❯ /new'), 'the painted /new command')
+  app.vt.sendInput('\r')
+  await app.waitFor(() => app.agent() !== undefined && String(app.agent()!.session.id) !== String(agent.session.id),
+    'the production /new session transition')
+  const second = app.requireAgent()
+  followup(second, 'Start a fresh Forge session')
+  await second.whenIdle()
+  await app.waitFor(() => app.view().includes('Fresh Forge session ready.'), 'the fresh session answer')
+  assert.notEqual(String(second.session.id), String(agent.session.id))
+  assert.doesNotMatch(footerLine(app.view()), /s5-forge-worktree/u, 'the new Session never inherits the Forge worktree')
+  assert.equal(workingDirectory.get(second.session), project, 'the new Session starts from the launch project')
+
+  // TEST-OWNED CLEANUP: remove the temporary checkout; the source stays clean.
+  execFileSync('git', ['worktree', 'remove', '--force', record.path], { cwd: project })
+  assert.equal(git(project, 'rev-parse', 'HEAD'), sourceHead)
+  assert.equal(readFileSync(join(project, 'README.md'), 'utf8'), sourceReadme)
+  assert.equal(git(project, 'status', '--porcelain'), '')
 })

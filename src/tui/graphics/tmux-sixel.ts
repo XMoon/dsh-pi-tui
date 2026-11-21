@@ -149,6 +149,12 @@ export class TmuxSixelTerminal implements Terminal {
     this.inner.setProgramStatus(status)
   }
 
+  /** U1 sync process-exit restoration: forward the before/after bytes to the
+   *  wrapped terminal without creating a second cleanup lifecycle. */
+  restoreOnExit(before: string, after: string): void {
+    this.inner.restoreOnExit?.(before, after)
+  }
+
   get setProgressState(): Terminal['setProgressState'] {
     const method = this.inner.setProgressState
     return method === undefined ? undefined : method.bind(this.inner)

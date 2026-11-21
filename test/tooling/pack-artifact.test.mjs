@@ -1,7 +1,6 @@
 /**
  * The single-pack contract: `pack:artifact` must stay a pure pack, and the
- * local `pack:release` / `verify:release` orchestration must keep every
- * explicit stage.
+ * local `pack:release` orchestration must keep every explicit stage.
  *
  * The lifecycle-negative case is REAL: a temporary package defines
  * `prepack`/`prepare`/`postpack` sentinels, and the same `pnpm pack
@@ -53,27 +52,6 @@ test('pack:release is the explicit full order and never delegates to a second bu
     'pnpm test:product',
     'pnpm pack:artifact',
     'pnpm smoke:release',
-  ])
-})
-
-test('verify:release retains every former pre-push gate and ends in pack:release', () => {
-  assertOrder(PACKAGE.scripts['verify:release'], [
-    'pnpm typecheck:fork',
-    'pnpm typecheck:bench',
-    'pnpm test:fork',
-    'pnpm test:tmux',
-    'pnpm test:tooling',
-    'pnpm gate:installation-doc',
-    'pnpm gate:pi-divergence-ledger',
-    'pnpm gate:pi-vendor-diff --strict',
-    'node scripts/naming-gate.mjs',
-    'node scripts/check-no-session-events.mjs',
-    'pnpm gate:boundary',
-    'pnpm gate:architecture',
-    'pnpm gate:production-reads',
-    'pnpm gate:keybindings',
-    'pnpm audit --prod --audit-level high',
-    'pnpm pack:release',
   ])
 })
 

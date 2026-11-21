@@ -1,10 +1,18 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { deleteKittyImage, isImageLine, type SixelScreenPort } from "./terminal-image.ts";
+import {
+	deleteKittyImage,
+	deleteKittyImagePlacement,
+	isImageLine,
+	type SixelScreenPort,
+} from "./terminal-image.ts";
 import type { Terminal } from "./terminal.ts";
 import { SEGMENT_RESET, type TUI, TuiBase, type TuiStopOptions } from "./tui.ts";
 import { asciiVisibleWidthEarlyExit, normalizeTerminalOutput, sliceByColumn, visibleWidth } from "./utils.ts";
+
+/** OSC 133 prompt markers at the start of a rendered line. Fullscreen uses them for prompt navigation. */
+const OSC133_ZONE_PREFIX = /^(?:\x1b\]133;[ABC](?:\x07|\x1b\\))+/;
 
 const KITTY_SEQUENCE_PREFIX = "\x1b_G";
 const MAX_RENDER_WRITE_CHARS = 1024 * 1024;
@@ -77,6 +85,7 @@ class BoundedTerminalWriter {
 
 interface KittyImageHeader {
 	ids: number[];
+	placementIds: number[];
 	rows: number;
 }
 
@@ -88,6 +97,7 @@ function parseKittyImageHeader(line: string): KittyImageHeader | undefined {
 	if (paramsEnd === -1) return undefined;
 
 	const ids: number[] = [];
+	const placementIds: number[] = [];
 	let rows = 1;
 	for (const param of line.slice(paramsStart, paramsEnd).split(",")) {
 		const [key, value] = param.split("=", 2);
@@ -95,9 +105,10 @@ function parseKittyImageHeader(line: string): KittyImageHeader | undefined {
 		const numberValue = Number(value);
 		if (!Number.isInteger(numberValue) || numberValue <= 0 || numberValue > 0xffffffff) continue;
 		if (key === "i") ids.push(numberValue);
+		else if (key === "p") placementIds.push(numberValue);
 		else if (key === "r") rows = numberValue;
 	}
-	return { ids, rows };
+	return { ids, placementIds, rows };
 }
 
 function extractKittyImageIds(line: string): number[] {
@@ -106,6 +117,17 @@ function extractKittyImageIds(line: string): number[] {
 
 function extractKittyImageRows(line: string): number {
 	return parseKittyImageHeader(line)?.rows ?? 1;
+}
+
+/** The explicit placement id of one image line, or undefined when it has none. */
+function extractKittyPlacementId(line: string): number | undefined {
+	return parseKittyImageHeader(line)?.placementIds[0];
+}
+
+/** Whether a line is the same explicit image placement (same image and placement id). */
+function isSameKittyPlacement(line: string, imageId: number, placementId: number): boolean {
+	const header = parseKittyImageHeader(line);
+	return header !== undefined && header.ids.includes(imageId) && header.placementIds.includes(placementId);
 }
 
 function isTermuxSession(): boolean {
@@ -232,6 +254,20 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			}
 		}
 		return ids;
+	}
+
+	/**
+	 * Rows the clamped diff skipped (above the viewport) are committed
+	 * scrollback: the terminal still holds their previous text and image state,
+	 * so every incremental commit must keep the previous caches for that prefix
+	 * instead of claiming the new frame's values were rendered — including the
+	 * image-id metadata the kitty cleanup record is built from. A later full
+	 * render reprocesses those rows from their current raw, repaints them, and
+	 * deletes exactly the images the model still holds. (dsh-pi-tui divergence
+	 * X078.)
+	 */
+	private mergeSkippedPrefix<T>(previous: readonly T[], next: T[], skipRows: number): T[] {
+		return skipRows > 0 ? [...previous.slice(0, skipRows), ...next.slice(skipRows)] : next;
 	}
 
 	private deleteKittyImages(ids: Iterable<number>): string {
@@ -460,18 +496,32 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		return { firstChanged: expandedFirstChanged, lastChanged: expandedLastChanged };
 	}
 
-	private deleteChangedKittyImages(firstChanged: number, lastChanged: number): string {
+	private deleteChangedKittyImages(firstChanged: number, lastChanged: number, newLines: readonly string[]): string {
 		if (firstChanged < 0 || lastChanged < firstChanged) return "";
 
 		const ids = new Set<number>();
+		let buffer = "";
 		const maxLine = Math.min(lastChanged, this.previousLines.length - 1);
 		for (let i = firstChanged; i <= maxLine; i++) {
+			const previousLine = this.previousLines[i] ?? "";
+			const newLine = newLines[i] ?? "";
 			for (const id of this.previousLineImageIds[i] ?? EMPTY_IMAGE_IDS) {
+				// An `a=p` placement carries no payload of its own. Remove ONLY the
+				// placement the previous frame showed — addressed by its own placement
+				// id — and keep the data resident when the block is coming back:
+				// either this frame's overlay preemption blanked it (X077), or the same
+				// placement is still on this row and this frame is about to write it
+				// again. A sibling placement of the same image is never removed.
+				const placementId = extractKittyPlacementId(previousLine);
+				if (placementId !== undefined && (this.preemptedKittyImageIds.has(id) || isSameKittyPlacement(newLine, id, placementId))) {
+					buffer += deleteKittyImagePlacement(id, placementId);
+					continue;
+				}
 				ids.add(id);
 			}
 		}
 
-		return this.deleteKittyImages(ids);
+		return buffer + this.deleteKittyImages(ids);
 	}
 
 	/**
@@ -567,10 +617,18 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			return targetScreenRow - currentScreenRow;
 		};
 
-		// Render all components to get new lines. In SIXEL mode these lines carry
-		// inert candidate markers, not device commands: the final viewport below
-		// decides which occurrences are granted pixels. (X073.)
-		let rawLines = this.render(width);
+		// Render all components to get new lines. Resolve fake cursors and drop
+		// OSC 133 prompt zones before compositing and line slicing so overlays and
+		// the raw-line cache see only plain SGR text. The terminal reads 133;A as
+		// a new shell prompt, which ends program status (OSC 7501).
+		// In SIXEL mode these lines carry inert candidate markers, not device
+		// commands: the final viewport below decides which occurrences are
+		// granted pixels. (X073.)
+		let rawLines = this.resolveFakeCursors(this.render(width).map((line) => line.replace(OSC133_ZONE_PREFIX, "")));
+
+		// Only a visible-overlay frame can preempt a Native Kitty block (X077).
+		// Reset before the compositor may record this frame's set.
+		this.preemptedKittyImageIds = new Set<number>();
 
 		// Composite overlays into the rendered lines (before differential compare)
 		if (this.hasOverlayEntries) {
@@ -747,11 +805,19 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			return;
 		}
 
-		// Find first and last changed lines
+		// Find first and last changed lines. Rows above the viewport are
+		// committed scrollback: the physical screen cannot address them without
+		// clearing it (2J/3J), so a change there must not force a full redraw —
+		// a spinner pushed above the viewport keeps animating and would
+		// otherwise clear and repaint the whole screen on every tick
+		// (dsh-pi-tui divergence X078). Height changes recompute the viewport
+		// top, so they keep the whole-buffer scan (Termux relies on it; other
+		// terminals full-rendered above already).
 		let firstChanged = -1;
 		let lastChanged = -1;
 		const maxLines = Math.max(newLines.length, this.previousLines.length);
-		for (let i = 0; i < maxLines; i++) {
+		const diffScanStart = heightChanged ? 0 : prevViewportTop;
+		for (let i = diffScanStart; i < maxLines; i++) {
 			const oldLine = i < this.previousLines.length ? this.previousLines[i] : "";
 			const newLine = i < newLines.length ? newLines[i] : "";
 
@@ -790,10 +856,15 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			// Processed output is unchanged, but keep the raw/image-id caches in
 			// sync so future frames keep hitting the reuse fast path (e.g. the
 			// cursor-marker line gets a fresh string every frame).
-			this.previousRawLines = rawLines;
-			this.previousLineImageIds = lineImageIds;
-			this.previousLineImageRows = lineImageRows;
-			this.previousLineSixelRows = lineSixelRows;
+			// Rows skipped above the viewport keep their COMMITTED caches (raw,
+			// processed and image metadata alike): the terminal still holds the
+			// old text and the old image state, so the cleanup record built from
+			// those caches must not claim the skipped frame's new values were
+			// rendered (dsh-pi-tui divergence X078).
+			this.previousRawLines = this.mergeSkippedPrefix(this.previousRawLines, rawLines, diffScanStart);
+			this.previousLineImageIds = this.mergeSkippedPrefix(this.previousLineImageIds, lineImageIds, diffScanStart);
+			this.previousLineImageRows = this.mergeSkippedPrefix(this.previousLineImageRows, lineImageRows, diffScanStart);
+			this.previousLineSixelRows = this.mergeSkippedPrefix(this.previousLineSixelRows, lineSixelRows, diffScanStart);
 			return;
 		}
 
@@ -802,11 +873,17 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			if (this.previousLines.length > newLines.length) {
 				const output = new BoundedTerminalWriter((data) => this.terminal.write(data));
 				output.append("\x1b[?2026h");
-				output.append(this.deleteChangedKittyImages(firstChanged, lastChanged));
+				output.append(this.deleteChangedKittyImages(firstChanged, lastChanged, newLines));
 				// Move to end of new content (clamp to 0 for empty content)
 				const targetRow = Math.max(0, newLines.length - 1);
-				if (targetRow < prevViewportTop) {
-					logRedraw(`deleted lines moved viewport up (${targetRow} < ${prevViewportTop})`);
+				// The viewport cannot move UP differentially: whenever the new
+				// document no longer fills the previous viewport, the tail view must
+				// be restored with a full redraw. `targetRow < prevViewportTop` is
+				// subsumed by this check; the difference is a pure tail deletion that
+				// stays below the old viewport top (previously differential, leaving
+				// blank rows at the bottom). (dsh-pi-tui divergence X078.)
+				if (frameViewportTop < prevViewportTop) {
+					logRedraw(`deleted lines moved viewport up (${frameViewportTop} < ${prevViewportTop})`);
 					fullRender(true);
 					return;
 				}
@@ -840,22 +917,32 @@ export class TuiMainScreen extends TuiBase implements TUI {
 				this.hardwareCursorRow = targetRow;
 			}
 			this.positionHardwareCursor(cursorPos, newLines.length);
-			this.previousLines = newLines;
-			this.previousRawLines = rawLines;
-			this.previousLineImageIds = lineImageIds;
-			this.previousLineImageRows = lineImageRows;
-			this.previousLineSixelRows = lineSixelRows;
-			this.previousKittyImageIds = this.unionKittyImageIds(lineImageIds);
+			this.previousLines = this.mergeSkippedPrefix(this.previousLines, newLines, diffScanStart);
+			this.previousRawLines = this.mergeSkippedPrefix(this.previousRawLines, rawLines, diffScanStart);
+			this.previousLineImageIds = this.mergeSkippedPrefix(this.previousLineImageIds, lineImageIds, diffScanStart);
+			this.previousLineImageRows = this.mergeSkippedPrefix(this.previousLineImageRows, lineImageRows, diffScanStart);
+			this.previousLineSixelRows = this.mergeSkippedPrefix(this.previousLineSixelRows, lineSixelRows, diffScanStart);
+			this.previousKittyImageIds = this.unionKittyImageIds(this.previousLineImageIds);
 			this.previousWidth = width;
 			this.previousHeight = height;
 			this.previousViewportTop = prevViewportTop;
 			return;
 		}
 
-		// Differential rendering can only touch what was actually visible.
-		// If the first changed line is above the previous viewport, we need a full redraw.
-		if (firstChanged < prevViewportTop) {
-			logRedraw(`firstChanged < viewportTop (${firstChanged} < ${prevViewportTop})`);
+		// Differential rendering can only touch what was actually visible. If the
+		// first changed line is above the previous viewport (only reachable via
+		// image-range expansion now that the diff starts at the viewport), we
+		// need a full redraw. The same applies when the new content no longer
+		// fills the previous viewport: the viewport cannot move UP
+		// differentially, so the tail view must be restored with a full redraw
+		// instead of leaving blank rows at the bottom. (dsh-pi-tui divergence
+		// X078)
+		if (firstChanged < prevViewportTop || frameViewportTop < prevViewportTop) {
+			logRedraw(
+				firstChanged < prevViewportTop
+					? `firstChanged < viewportTop (${firstChanged} < ${prevViewportTop})`
+					: `viewport would move up (${frameViewportTop} < ${prevViewportTop})`,
+			);
 			fullRender(true);
 			return;
 		}
@@ -864,7 +951,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		// Keep updates wrapped in synchronized output while writing bounded chunks.
 		const output = new BoundedTerminalWriter((data) => this.terminal.write(data));
 		output.append("\x1b[?2026h"); // Begin synchronized output
-		output.append(this.deleteChangedKittyImages(firstChanged, lastChanged));
+		output.append(this.deleteChangedKittyImages(firstChanged, lastChanged, newLines));
 		const prevViewportBottom = prevViewportTop + height - 1;
 		const moveTargetRow = appendStart ? firstChanged - 1 : firstChanged;
 		if (moveTargetRow > prevViewportBottom) {
@@ -1037,12 +1124,16 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		// Position hardware cursor for IME
 		this.positionHardwareCursor(cursorPos, newLines.length);
 
-		this.previousLines = newLines;
-		this.previousRawLines = rawLines;
-		this.previousLineImageIds = lineImageIds;
-		this.previousLineImageRows = lineImageRows;
-		this.previousLineSixelRows = lineSixelRows;
-		this.previousKittyImageIds = this.unionKittyImageIds(lineImageIds);
+		// Rows the clamped diff skipped (above the viewport) were not painted:
+		// commit their PREVIOUS caches so the model keeps matching the terminal's
+		// committed scrollback and the kitty cleanup record keeps every image
+		// that is still physically placed. (dsh-pi-tui divergence X078.)
+		this.previousLines = this.mergeSkippedPrefix(this.previousLines, newLines, diffScanStart);
+		this.previousRawLines = this.mergeSkippedPrefix(this.previousRawLines, rawLines, diffScanStart);
+		this.previousLineImageIds = this.mergeSkippedPrefix(this.previousLineImageIds, lineImageIds, diffScanStart);
+		this.previousLineImageRows = this.mergeSkippedPrefix(this.previousLineImageRows, lineImageRows, diffScanStart);
+		this.previousLineSixelRows = this.mergeSkippedPrefix(this.previousLineSixelRows, lineSixelRows, diffScanStart);
+		this.previousKittyImageIds = this.unionKittyImageIds(this.previousLineImageIds);
 		this.previousWidth = width;
 		this.previousHeight = height;
 	}

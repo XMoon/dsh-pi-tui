@@ -4,40 +4,268 @@ import test from 'node:test'
 import { join } from 'node:path'
 
 import { testLifecycle } from '../support/temp-lifecycle.ts'
-import { API_VERSION } from '../../src/extension/public-types.ts'
-import { UNSTABLE_API_LEVEL } from '../../src/extension/unstable-types.ts'
 import {
-  assertNoCompatibilityFailures,
-  assertOfficialPresetHeader,
   candidateArgument,
   compatibilityFailureLine,
-  fixtureImportViolations,
-  hasFreshResizeWidth,
   isolatedEnvironment,
   isRetryableRegistryFailure,
   redact,
   requireExactVersion,
   resolveTarball,
   retryDiagnostic,
-  RESIZE_FAILURE_PHASE,
-  classifyConsumerMetadata,
-  failConsumerMetadata,
+  run,
   validateCandidatePackageData,
-  validateConsumerMetadata,
-  validateFixturePackageData,
-  validateManifest,
-  validateTargetDshManifest,
-  smokeOfficialPresetMounts,
-  officialPresetStatusCommand,
-  officialPresetStatusVisible,
-  settingsSearchSnapshot,
-  presetDegradationLine,
+} from '../../scripts/lib/dsh-smoke-harness.mjs'
+import {
+  assertNoPi2dshSurfaceFailures,
   CI_ECOSYSTEM_TIMEOUT_MS,
   CLEANUP_BUDGET_MS,
+  fixtureImportViolations,
+  forcePeersArgument,
   GATE_BUDGET_MS,
-  REQUIRED_CONTRACTS,
-  run,
+  hasFreshResizeWidth,
+  pi2dshCompatibilityFailureLine,
+  resolvePublishedPairing,
+  RESIZE_FAILURE_PHASE,
+  validateFixturePackageData,
 } from '../../scripts/pi2dsh-compat-smoke.mjs'
+import { selectPublishedPi2dshPairing } from '../../scripts/lib/pi2dsh-compat-selection.mjs'
+
+// ---------------------------------------------------------------------------
+// The published-pairing selector (pure, no registry I/O).
+// ---------------------------------------------------------------------------
+
+const TUI_VERSION = '0.5.6'
+
+function candidateTui({ peers = {}, engines } = {}) {
+  return {
+    name: '@xmoon76/dsh-pi-tui',
+    version: TUI_VERSION,
+    peerDependencies: peers,
+    ...(engines === undefined ? {} : { engines }),
+  }
+}
+
+function publishedBridge({ version = '0.28.0', tuiPeer = '^0.5.0', peers = {} } = {}) {
+  return {
+    name: 'pi2dsh',
+    version,
+    peerDependencies: {
+      '@xmoon76/dsh-pi-tui': tuiPeer,
+      ...peers,
+    },
+  }
+}
+
+test('the selector picks the highest published DSH intersection, not the checkout target', () => {
+  const selection = selectPublishedPi2dshPairing({
+    consumerPackage: publishedBridge({ peers: {
+      '@deepseek-ai/dsh-agent': '>=0.2.0',
+      '@deepseek-ai/dsh-commands': '>=0.2.1',
+    } }),
+    candidatePackage: candidateTui({ peers: { '@deepseek-ai/dsh-agent': '>=0.2.1' } }),
+    publishedDshVersions: ['0.2.0', '0.2.3', '0.2.1'],
+  })
+  assert.deepEqual(selection, { pi2dshVersion: '0.28.0', dshVersion: '0.2.3', tuiPeerDrift: false })
+})
+
+test('npm prerelease rules decide whether a published prerelease is selectable', () => {
+  const versions = ['0.2.1', '0.2.2-rc.1']
+  assert.equal(selectPublishedPi2dshPairing({
+    consumerPackage: publishedBridge({ peers: { '@deepseek-ai/dsh-agent': '>=0.2.0' } }),
+    candidatePackage: candidateTui(),
+    publishedDshVersions: versions,
+  }).dshVersion, '0.2.1', 'a bare >= range must not admit a prerelease of another tuple')
+  assert.equal(selectPublishedPi2dshPairing({
+    consumerPackage: publishedBridge({ peers: { '@deepseek-ai/dsh-agent': '>=0.2.2-rc.1' } }),
+    candidatePackage: candidateTui(),
+    publishedDshVersions: versions,
+  }).dshVersion, '0.2.2-rc.1', 'a matching prerelease comparator must admit it')
+})
+
+test('any unsatisfied DSH family peer excludes that version', () => {
+  const selection = selectPublishedPi2dshPairing({
+    consumerPackage: publishedBridge({ peers: {
+      '@deepseek-ai/dsh-agent': '>=0.2.0',
+      '@deepseek-ai/dsh-commands': '>=0.2.3',
+    } }),
+    candidatePackage: candidateTui({ peers: { '@deepseek-ai/dsh-session': '>=0.2.0' } }),
+    publishedDshVersions: ['0.2.2', '0.2.3'],
+  })
+  assert.equal(selection.dshVersion, '0.2.3')
+
+  assert.throws(() => selectPublishedPi2dshPairing({
+    consumerPackage: publishedBridge({ peers: { '@deepseek-ai/dsh-agent': '>=0.2.0' } }),
+    candidatePackage: candidateTui({ peers: { '@deepseek-ai/dsh-session': '^0.3.0' } }),
+    publishedDshVersions: ['0.2.2', '0.2.3'],
+  }), /no installable published DSH intersection/u)
+})
+
+test('a lagging TUI peer is a drift warning, not a reason to drop a runnable DSH', () => {
+  const selection = selectPublishedPi2dshPairing({
+    consumerPackage: publishedBridge({
+      tuiPeer: '^0.4.0',
+      peers: { '@deepseek-ai/dsh-agent': '>=0.2.0' },
+    }),
+    candidatePackage: candidateTui(),
+    publishedDshVersions: ['0.2.2'],
+  })
+  assert.equal(selection.tuiPeerDrift, true)
+  assert.equal(selection.dshVersion, '0.2.2')
+})
+
+test('invalid metadata and an empty intersection fail with a diagnosable reason', () => {
+  const consumer = publishedBridge({ peers: { '@deepseek-ai/dsh-agent': '>=0.2.0' } })
+  const candidate = candidateTui()
+  const versions = ['0.2.0']
+  const cases = [
+    [{ ...consumer, name: 'other-bridge' }, candidate, versions, /not 'pi2dsh'/u],
+    [{ ...consumer, version: 'latest' }, candidate, versions, /exact semver/u],
+    [{ ...consumer, peerDependencies: 'broken' }, candidate, versions, /peerDependencies is not an object/u],
+    [{ ...consumer, peerDependencies: {} }, candidate, versions, /does not declare a @xmoon76\/dsh-pi-tui peer/u],
+    [{ ...consumer, peerDependencies: { '@xmoon76/dsh-pi-tui': 'not a range' } }, candidate, versions, /invalid semver range/u],
+    [consumer, candidate, [], /empty or not an array/u],
+    [consumer, candidate, ['0.2.0', 'latest'], /not an exact semver/u],
+    [publishedBridge({ peers: { '@deepseek-ai/dsh-agent': '^0.3.0' } }), candidate, versions, /no installable published DSH intersection/u],
+    [consumer, candidateTui({ peers: { '@deepseek-ai/dsh-agent': 'not a range' } }), versions, /invalid semver range/u],
+  ]
+  for (const [consumerPackage, candidatePackage, publishedDshVersions, expected] of cases) {
+    assert.throws(
+      () => selectPublishedPi2dshPairing({ consumerPackage, candidatePackage, publishedDshVersions }),
+      expected,
+    )
+  }
+})
+
+test('engines.dsh uses includePrerelease semantics, separately from peer ranges', () => {
+  // No DSH peers at all: only engines.dsh can admit the prerelease.
+  assert.equal(selectPublishedPi2dshPairing({
+    consumerPackage: publishedBridge(),
+    candidatePackage: candidateTui({ engines: { dsh: '>=0.2.2-rc.1' } }),
+    publishedDshVersions: ['0.2.1', '0.2.2-rc.1'],
+  }).dshVersion, '0.2.2-rc.1')
+  // A peer range keeps npm's default rule: engines.dsh must not rescue a
+  // version the peer excludes, so this pair has no intersection at all.
+  assert.throws(() => selectPublishedPi2dshPairing({
+    consumerPackage: publishedBridge(),
+    candidatePackage: candidateTui({
+      peers: { '@deepseek-ai/dsh-agent': '>=0.2.0' },
+      engines: { dsh: '>=0.2.2-rc.1' },
+    }),
+    publishedDshVersions: ['0.2.1', '0.2.2-rc.1'],
+  }), /no installable published DSH intersection/u)
+})
+
+test('a package that declares no DSH peer gets no invented constraint', () => {
+  const selection = selectPublishedPi2dshPairing({
+    consumerPackage: publishedBridge(),
+    candidatePackage: candidateTui(),
+    publishedDshVersions: ['0.1.0', '0.2.0'],
+  })
+  assert.equal(selection.dshVersion, '0.2.0')
+})
+
+test('investigative mode skips only the bridge DSH peers, never the candidate constraints', () => {
+  const consumer = publishedBridge({ peers: { '@deepseek-ai/dsh-agent': '^0.3.0' } })
+  const versions = ['0.2.0', '0.2.1']
+  assert.throws(() => selectPublishedPi2dshPairing({
+    consumerPackage: consumer,
+    candidatePackage: candidateTui(),
+    publishedDshVersions: versions,
+  }), /no installable published DSH intersection/u)
+  assert.equal(selectPublishedPi2dshPairing({
+    consumerPackage: consumer,
+    candidatePackage: candidateTui(),
+    publishedDshVersions: versions,
+    investigativeForcePeers: true,
+  }).dshVersion, '0.2.1')
+  assert.equal(selectPublishedPi2dshPairing({
+    consumerPackage: consumer,
+    candidatePackage: candidateTui({ peers: { '@deepseek-ai/dsh-agent': '>=0.2.1' } }),
+    publishedDshVersions: versions,
+    investigativeForcePeers: true,
+  }).dshVersion, '0.2.1', 'the candidate DSH peers still apply in investigative mode')
+})
+
+// ---------------------------------------------------------------------------
+// The script path: registry metadata fetch -> selection -> exact install spec.
+// ---------------------------------------------------------------------------
+
+const LATEST_VIEW = 'view pi2dsh@latest --json --registry=https://registry.npmjs.org'
+const DSH_VERSIONS_VIEW = 'view @deepseek-ai/dsh versions --json --registry=https://registry.npmjs.org'
+
+function injectedRun(responses) {
+  return (command, args) => {
+    assert.equal(command, 'npm')
+    const response = responses[args.join(' ')]
+    if (response === undefined) {
+      return { status: 1, stdout: '', stderr: `unexpected npm invocation: ${args.join(' ')}` }
+    }
+    return { status: 0, stdout: typeof response === 'string' ? response : JSON.stringify(response), stderr: '' }
+  }
+}
+
+test('the registry fetch -> selection -> install spec path freezes the exact pair', () => {
+  const resolution = resolvePublishedPairing({
+    candidatePackage: candidateTui({ peers: { '@deepseek-ai/dsh-agent': '>=0.2.1' } }),
+    env: {},
+    runCommand: injectedRun({
+      [LATEST_VIEW]: publishedBridge({ peers: { '@deepseek-ai/dsh-agent': '>=0.2.0' } }),
+      [DSH_VERSIONS_VIEW]: ['0.2.1', '0.2.3'],
+    }),
+  })
+  assert.equal(resolution.pi2dshVersion, '0.28.0')
+  assert.equal(resolution.dshVersion, '0.2.3')
+  assert.equal(resolution.bridgeSpec, 'pi2dsh@0.28.0', 'the bridge install uses the resolved exact version, never latest')
+  assert.equal(resolution.dshFamilySpec, '@deepseek-ai/dsh@0.2.3', 'the DSH family pin uses the resolved exact version')
+  assert.equal(resolution.tuiPeerDrift, false)
+})
+
+test('the same path fails closed when no published DSH satisfies both sides', () => {
+  assert.throws(() => resolvePublishedPairing({
+    candidatePackage: candidateTui({ peers: { '@deepseek-ai/dsh-agent': '>=0.2.2-rc.1' } }),
+    env: {},
+    runCommand: injectedRun({
+      [LATEST_VIEW]: publishedBridge({ peers: { '@deepseek-ai/dsh-agent': '^0.2.1-rc.2' } }),
+      [DSH_VERSIONS_VIEW]: ['0.2.1-rc.2', '0.2.2-rc.1'],
+    }),
+  }), error => error?.name === 'CompatFailure'
+    && error?.phase === 'ECOSYSTEM_CONTRACT_BLOCKER'
+    && /no installable published DSH intersection/u.test(error.message)
+    && /0\.2\.1-rc\.2/u.test(error.message), 'the failure must name the actual metadata')
+})
+
+test('registry failures and malformed metadata are infrastructure failures', () => {
+  assert.throws(() => resolvePublishedPairing({
+    candidatePackage: candidateTui(),
+    env: {},
+    runCommand: () => ({ status: 1, stdout: '', stderr: 'registry unreachable' }),
+  }), error => error?.phase === 'INFRA_INSTALL_FAILURE' && /could not be read/u.test(error.message))
+
+  assert.throws(() => resolvePublishedPairing({
+    candidatePackage: candidateTui(),
+    env: {},
+    runCommand: injectedRun({ [LATEST_VIEW]: 'not json', [DSH_VERSIONS_VIEW]: [] }),
+  }), error => error?.phase === 'INFRA_INSTALL_FAILURE' && /invalid JSON/u.test(error.message))
+})
+
+test('the investigative selector flag is explicit and off by default', () => {
+  const previous = process.env.PI2DSH_COMPAT_FORCE_PEERS
+  try {
+    delete process.env.PI2DSH_COMPAT_FORCE_PEERS
+    assert.equal(forcePeersArgument([]), false)
+    assert.equal(forcePeersArgument(['--force-peers']), true)
+    process.env.PI2DSH_COMPAT_FORCE_PEERS = '1'
+    assert.equal(forcePeersArgument([]), true)
+  } finally {
+    if (previous === undefined) delete process.env.PI2DSH_COMPAT_FORCE_PEERS
+    else process.env.PI2DSH_COMPAT_FORCE_PEERS = previous
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Shared harness behavior the consumer smoke relies on.
+// ---------------------------------------------------------------------------
 
 test('pi2dsh smoke isolates credential-bearing parent environment variables', () => {
   const canary = 'PI2DSH_COMPAT_TEST_SECRET'
@@ -48,8 +276,8 @@ test('pi2dsh smoke isolates credential-bearing parent environment variables', ()
     assert.equal(env[canary], undefined, 'the isolated environment must not inherit arbitrary parent variables')
     assert.equal(env.HOME, '/tmp/compat-home', 'the TUI must receive the temporary HOME')
     assert.equal(env.DSH_HOME, '/tmp/compat-dsh', 'the TUI must receive the temporary DSH_HOME')
-    assert.equal(env.PI2DSH_COMPAT_EVIDENCE, '/tmp/evidence.json', 'the TUI must receive the isolated evidence path')
-    assert.equal(env.PI2DSH_COMPAT_HEADER_EVIDENCE, '/tmp/compat-work/header-evidence.json', 'the TUI must receive the isolated durable-header evidence path')
+    assert.equal(env.DSH_SMOKE_EVIDENCE, '/tmp/evidence.json', 'the TUI must receive the isolated evidence path')
+    assert.equal(env.DSH_SMOKE_HEADER_EVIDENCE, '/tmp/compat-work/header-evidence.json', 'the TUI must receive the isolated durable-header evidence path')
     assert.equal(env.PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN, 'false')
     assert.equal(env.PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS, 'false')
   } finally {
@@ -76,222 +304,6 @@ test('pi2dsh smoke accepts pnpm separator arguments and enforces installed versi
   assert.doesNotThrow(() => validateCandidatePackageData({ name: '@xmoon76/dsh-pi-tui', version: '0.3.4' }, { name: '@xmoon76/dsh-pi-tui', version: '0.3.4' }))
   assert.throws(() => validateCandidatePackageData({ name: 'unrelated-package', version: '0.3.4' }, { name: '@xmoon76/dsh-pi-tui', version: '0.3.4' }), /candidate package mismatch/u)
   assert.throws(() => validateCandidatePackageData({ name: '@xmoon76/dsh-pi-tui', version: '0.3.3' }, { name: '@xmoon76/dsh-pi-tui', version: '0.3.4' }), /candidate package mismatch/u)
-})
-
-test('pi2dsh smoke treats the compatibility manifest as its version source of truth', () => {
-  const manifest = JSON.parse(readFileSync(join(process.cwd(), 'test', 'compat', 'pi2dsh.json'), 'utf8'))
-  assert.doesNotThrow(() => validateManifest(manifest))
-  assert.throws(() => validateManifest({ ...manifest, pi2dshVersion: 'not-a-version' }), /exact pi2dsh version/u)
-  assert.throws(() => validateManifest({ ...manifest, dshVersion: 'not-a-version' }), /exact target DSH version/u)
-})
-
-test('the required contracts are derived from the production extension surface, not hand-written', () => {
-  // The published pi2dsh bridge hosts Pi components ONLY when the host
-  // reports the CURRENT apiVersion and advertises the unstable raw-surface
-  // capability; on any other api version it logs a warning and mounts no
-  // component, so a contract list frozen at an older api version would
-  // certify a pairing the bridge cannot use. The required list therefore
-  // follows the production constants, and the manifest must carry exactly
-  // that list.
-  assert.ok(REQUIRED_CONTRACTS.includes(`apiVersion=${API_VERSION}`),
-    'the required contracts must name the production api version')
-  assert.ok(REQUIRED_CONTRACTS.includes(`extensions/unstable.UNSTABLE_API_LEVEL=${UNSTABLE_API_LEVEL}`),
-    'the required contracts must name the production unstable API level')
-  assert.equal(REQUIRED_CONTRACTS.includes('apiVersion=1'), API_VERSION === 1,
-    'the required contracts must not carry a stale api version')
-
-  const manifest = JSON.parse(readFileSync(join(process.cwd(), 'test', 'compat', 'pi2dsh.json'), 'utf8'))
-  for (const contract of REQUIRED_CONTRACTS) {
-    assert.ok(manifest.contracts.includes(contract), `the manifest must declare ${contract}`)
-  }
-  // The stale v1 contract is refused: a manifest still naming it would pass
-  // the real runtime smoke (the host does report v2) while recording a
-  // contract the bridge never negotiated.
-  const stale = { ...manifest, contracts: manifest.contracts.filter(contract => contract !== `apiVersion=${API_VERSION}`) }
-  assert.throws(() => validateManifest(stale), /missing a required contract/u)
-})
-
-test('official preset validation is independent of pi2dsh consumer metadata', () => {
-  assert.equal(validateTargetDshManifest({ dshVersion: '0.1.2-alpha.1' }), '0.1.2-alpha.1')
-  assert.doesNotThrow(() => validateTargetDshManifest({ dshVersion: '0.1.2-alpha.1', consumer: 'unreleased-bridge' }))
-  assert.throws(() => validateTargetDshManifest({ dshVersion: 'not-a-version' }), /exact target DSH version/u)
-  assert.equal(typeof smokeOfficialPresetMounts, 'function', 'the real official matrix must be independently callable')
-  assert.equal(officialPresetStatusCommand(), '/preset status')
-  assert.equal(officialPresetStatusVisible('ptc', 'preset: ptc · default: ptc'), true)
-  assert.equal(officialPresetStatusVisible('ptc', 'preset: standard · default: ptc'), false)
-})
-
-test('pi2dsh metadata preflight blocks an unsupported consumer contract', () => {
-  const manifest = { dshVersion: '0.1.2-alpha.1' }
-  const candidate = { name: '@xmoon76/dsh-pi-tui', version: '0.4.0-alpha.1' }
-  const supported = {
-    name: 'pi2dsh',
-    version: '0.23.0',
-    peerDependencies: {
-      '@xmoon76/dsh-pi-tui': '^0.4.0-alpha.1',
-      '@deepseek-ai/dsh-agent': '>=0.1.2-alpha.1',
-      '@deepseek-ai/dsh-commands': '>=0.1.2-alpha.1',
-    },
-  }
-  assert.doesNotThrow(() => validateConsumerMetadata(supported, manifest, candidate))
-
-  // A DSH peer mismatch and a missing dsh-peer set stay BLOCKING.
-  for (const consumerPackage of [
-    { ...supported, peerDependencies: { ...supported.peerDependencies, '@deepseek-ai/dsh-agent': '^0.1.1' } },
-    { ...supported, peerDependencies: { '@xmoon76/dsh-pi-tui': '^0.4.0-alpha.1' } },
-  ]) {
-    assert.throws(
-      () => validateConsumerMetadata(consumerPackage, manifest, candidate),
-      error => error?.name === 'CompatFailure'
-        && error?.phase === 'ECOSYSTEM_CONTRACT_BLOCKER'
-        && error.message.includes('DSH 0.1.2-alpha.1')
-        && error.message.includes('@xmoon76/dsh-pi-tui 0.4.0-alpha.1'),
-    )
-  }
-})
-
-test('pi2dsh metadata preflight classifies the four peer-declaration cases', () => {
-  const manifest = { dshVersion: '0.1.2-alpha.1' }
-  const candidate = { name: '@xmoon76/dsh-pi-tui', version: '0.4.0-alpha.1' }
-  const base = {
-    name: 'pi2dsh',
-    version: '0.24.0',
-    peerDependencies: {
-      '@xmoon76/dsh-pi-tui': '^0.4.0-alpha.1',
-      '@deepseek-ai/dsh-agent': '>=0.1.2-alpha.1',
-      '@deepseek-ai/dsh-commands': '>=0.1.2-alpha.1',
-    },
-  }
-
-  // 1. TUI peer current + DSH peers covering → ok.
-  assert.equal(classifyConsumerMetadata(base, manifest, candidate).kind, 'ok')
-
-  // 2. TUI peer stale ONLY (DSH peers still cover) → stale-tui-peer, not thrown.
-  const stale = { ...base, peerDependencies: { ...base.peerDependencies, '@xmoon76/dsh-pi-tui': '^0.3.3' } }
-  const classification = validateConsumerMetadata(stale, manifest, candidate)
-  assert.equal(classification.kind, 'stale-tui-peer')
-  assert.equal(classification.tuiRange, '^0.3.3')
-  // The narrow allowance is required: without it the preflight still blocks.
-  assert.throws(
-    () => failConsumerMetadata(stale, manifest, candidate, [`  @xmoon76/dsh-pi-tui: ${classification.tuiRange}`]),
-    error => error?.name === 'CompatFailure' && error?.phase === 'ECOSYSTEM_CONTRACT_BLOCKER',
-  )
-
-  // 3. TUI peer MISSING entirely → block (never a stale range: "declared too
-  // old" can be proven stale by the runtime smoke, "never declared" cannot).
-  const missing = { ...base, peerDependencies: { '@deepseek-ai/dsh-agent': '>=0.1.2-alpha.1' } }
-  const missingClassification = classifyConsumerMetadata(missing, manifest, candidate)
-  assert.equal(missingClassification.kind, 'block')
-  assert.match(missingClassification.problems.join('\n'), /@xmoon76\/dsh-pi-tui: \(missing\)/)
-
-  // 4. DSH peer mismatch → block, never classified as stale.
-  const dshMismatch = classifyConsumerMetadata(
-    { ...base, peerDependencies: { ...base.peerDependencies, '@deepseek-ai/dsh-agent': '^0.1.1' } },
-    manifest,
-    candidate,
-  )
-  assert.equal(dshMismatch.kind, 'block')
-})
-
-test('pi2dsh preset checks inspect the filtered /help frame rather than stale pane text', () => {
-  const goalPane = [
-    'transcript mentioned /goal before the overlay',
-    '╭────────────────────────╮',
-    '│ > goal                 │',
-    '│                        │',
-    '│ ❯ /goal               │',
-    '│                        │',
-    '│ Type to search · Enter/Space to change · Esc to cancel │',
-    '╰────────────────────────╯',
-  ].join('\n')
-  assert.deepEqual(settingsSearchSnapshot(goalPane), {
-    searchVisible: true,
-    query: 'goal',
-    commandRows: ['/goal'],
-    noMatches: false,
-  })
-
-  const minimalPane = [
-    'transcript mentioned /goal before the overlay',
-    '╭────────────────────────╮',
-    '│ > goal                 │',
-    '│ No matching settings   │',
-    '│ Type to search · Enter/Space to change · Esc to cancel │',
-    '╰────────────────────────╯',
-  ].join('\n')
-  assert.deepEqual(settingsSearchSnapshot(minimalPane), {
-    searchVisible: true,
-    query: 'goal',
-    commandRows: [],
-    noMatches: true,
-  })
-
-  // A capturing overlay is composited over the host frame, so the overlay's
-  // left border can share a line with stale host text. The parser must slice
-  // the inner frame before looking for query text or command rows.
-  const compositedPane = [
-    '╭──────────────────────────────────────────────────────────────────────────────╮',
-    '│ 🐋  session session-1                                                        │',
-    '│ de╭──────────────────────────────────────────────────────────────────────╮   │',
-    '│ /h│ >                                                                    │   │',
-    '╰───│                                                                      │───╯',
-    '    │   (1/48)                                                             │',
-    '────│   Type to search · Enter/Space to change · Esc to cancel             │────',
-    '❯   ╰──────────────────────────────────────────────────────────────────────╯',
-  ].join('\n')
-  assert.deepEqual(settingsSearchSnapshot(compositedPane), {
-    searchVisible: true,
-    query: '',
-    commandRows: [],
-    noMatches: false,
-  })
-
-  const compositedGoalPane = [
-    '╭──────────────────────────────────────────────────────────────────────────────╮',
-    '│ 🐋  session session-1                                                        │',
-    '│ de╭──────────────────────────────────────────────────────────────────────╮   │',
-    '│ /h│ > goal                                                               │   │',
-    '╰───│ ›/goal                                                             │───╯',
-    '    │                                                                      │',
-    '────│   Type to search · Enter/Space to change · Esc to cancel             │────',
-    '❯   ╰──────────────────────────────────────────────────────────────────────╯',
-  ].join('\n')
-  assert.deepEqual(settingsSearchSnapshot(compositedGoalPane), {
-    searchVisible: true,
-    query: 'goal',
-    commandRows: ['/goal'],
-    noMatches: false,
-  })
-})
-
-test('pi2dsh preset degradation diagnostics never count as a healthy mount', () => {
-  assert.equal(presetDegradationLine('preset mounted successfully'), undefined)
-  assert.equal(
-    presetDegradationLine('tui-runner: launch preset unavailable; falling back to default'),
-    'tui-runner: launch preset unavailable; falling back to default',
-  )
-  assert.equal(
-    presetDegradationLine('skill catalog unavailable for preset standard'),
-    'skill catalog unavailable for preset standard',
-  )
-})
-
-test('pi2dsh preset smoke requires a durable canonical session header', (t) => {
-  const life = testLifecycle(t)
-  const directory = life.tempDir('pi2dsh-compat-header-')
-  const evidencePath = join(directory, 'header.json')
-  writeFileSync(evidencePath, JSON.stringify({ sessionId: 'session-1', agentPreset: 'minimal' }))
-  assert.doesNotThrow(() => assertOfficialPresetHeader('minimal', evidencePath))
-  writeFileSync(evidencePath, JSON.stringify({ sessionId: 'session-1', agentPreset: 'standard' }))
-  assert.throws(
-    () => assertOfficialPresetHeader('minimal', evidencePath),
-    error => error?.phase === 'COMPAT_BOOT_FAILURE' && error.message.includes('durable header mismatch'),
-  )
-  writeFileSync(evidencePath, JSON.stringify({ sessionId: 'session-1', error: 'inspect failed' }))
-  assert.throws(
-    () => assertOfficialPresetHeader('minimal', evidencePath),
-    error => error?.phase === 'COMPAT_BOOT_FAILURE' && error.message.includes('durable header probe failed'),
-  )
 })
 
 test('pi2dsh smoke classifies resize failures as surface failures', () => {
@@ -364,6 +376,9 @@ test('pi2dsh smoke redacts common credential forms from diagnostics', () => {
     'url-secret',
     'query-secret',
     'aws-secret',
+    'hyphen-secret',
+    'hyphen-auth-secret',
+    'hyphen-query-secret',
   ]
   const output = redact([
     'Authorization: Bearer bearer-secret',
@@ -372,22 +387,40 @@ test('pi2dsh smoke redacts common credential forms from diagnostics', () => {
     'https://user:url-secret@example.test/',
     'https://example.test/?access_token=query-secret',
     'AWS_SECRET_ACCESS_KEY=aws-secret',
+    'x-token=hyphen-secret',
+    'foo-authorization=hyphen-auth-secret',
+    'https://example.test/?x-token=hyphen-query-secret',
+    '  @deepseek-ai/dsh-credentials: 0.2.1-rc.2 || 0.2.1-rc.3',
+    '  @deepseek-ai/dsh-authorization: >=0.2.2-rc.1',
   ].join('\n'))
   for (const secret of secrets) {
     assert.ok(!output.includes(secret), `diagnostics must not expose ${secret}`)
   }
   assert.match(output, /\[REDACTED\]/u, 'redacted diagnostics must retain an explicit marker')
+  // Package peer names contain credential-like words; a redacted version range
+  // would make the no-intersection diagnostic unexplainable.
+  assert.match(output, /@deepseek-ai\/dsh-credentials: 0\.2\.1-rc\.2 \|\| 0\.2\.1-rc\.3/u)
+  assert.match(output, /@deepseek-ai\/dsh-authorization: >=0\.2\.2-rc\.1/u)
 })
 
-test('pi2dsh smoke detects published fallback diagnostics without false positives', () => {
+test('the shared smoke failure detector is consumer-neutral', () => {
   assert.equal(compatibilityFailureLine('ordinary fallback text'), undefined, 'ordinary TUI text must not fail the gate')
   assert.equal(compatibilityFailureLine('component fallback is available'), undefined, 'benign component fallback text must not fail the gate')
   assert.equal(compatibilityFailureLine('TUI fallback is available'), undefined, 'benign TUI fallback text must not fail the gate')
   assert.ok(compatibilityFailureLine('fallback to headless mode') !== undefined, 'an unprefixed headless fallback must fail the gate')
   assert.ok(compatibilityFailureLine('capability mismatch: unstable surface') !== undefined, 'an unprefixed capability mismatch must fail the gate')
-  assert.ok(compatibilityFailureLine('[pi2dsh] unsupported surface capability') !== undefined, 'a prefixed pi2dsh capability failure must fail the gate')
-  assert.ok(compatibilityFailureLine('pi2dsh degraded to headless') !== undefined, 'explicit pi2dsh headless degradation must fail the gate')
   assert.ok(compatibilityFailureLine('surface degraded to inert') !== undefined, 'explicit surface inert degradation must fail the gate')
+  assert.equal(compatibilityFailureLine('[pi2dsh] unsupported surface capability'), undefined,
+    'the shared detector must not claim a pi2dsh-specific diagnostic')
+  assert.equal(compatibilityFailureLine('pi2dsh degraded to headless'), undefined,
+    'the shared detector must not claim a pi2dsh-specific diagnostic')
+})
+
+test('the pi2dsh smoke keeps its own surface-failure diagnostics', () => {
+  assert.ok(pi2dshCompatibilityFailureLine('[pi2dsh] unsupported surface capability') !== undefined, 'a prefixed pi2dsh capability failure must fail the pi2dsh gate')
+  assert.ok(pi2dshCompatibilityFailureLine('pi2dsh degraded to headless') !== undefined, 'explicit pi2dsh headless degradation must fail the pi2dsh gate')
+  assert.ok(pi2dshCompatibilityFailureLine('surface degraded to inert') !== undefined, 'a generic surface failure must still fail the pi2dsh gate')
+  assert.equal(pi2dshCompatibilityFailureLine('ordinary fallback text'), undefined, 'benign text must not fail the pi2dsh gate')
 })
 
 test('pi2dsh smoke rechecks late lifecycle diagnostics', (t) => {
@@ -397,8 +430,9 @@ test('pi2dsh smoke rechecks late lifecycle diagnostics', (t) => {
   for (const phase of ['raw input', 'resize', 'dispose']) {
     writeFileSync(logPath, `${phase}: surface degraded to inert\n`)
     assert.throws(
-      () => assertNoCompatibilityFailures(logPath, { capturePane: () => '' }),
-      error => error?.phase === 'COMPAT_BOOT_FAILURE',
+      () => assertNoPi2dshSurfaceFailures(logPath, { capturePane: () => '' }),
+      error => error?.phase === 'COMPAT_BOOT_FAILURE'
+        && error.message.startsWith('published pi2dsh reported an incompatible surface:'),
       `${phase} diagnostics must fail the compatibility check`,
     )
   }

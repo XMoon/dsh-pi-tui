@@ -1,10 +1,13 @@
 import assert from "node:assert";
 import { afterEach, describe, it } from "node:test";
+import { setFlagsFromString } from "node:v8";
+import { runInNewContext } from "node:vm";
 import type { Terminal as XtermTerminalType } from "@xterm/headless";
 import { Chalk } from "chalk";
-import { Markdown, type MarkdownTheme } from "../src/components/markdown.ts";
+import { Markdown, type MarkdownSourceCellProof, type MarkdownTheme } from "../src/components/markdown.ts";
 import { resetCapabilitiesCache, setCapabilities } from "../src/terminal-image.ts";
 import type { Component, TUI } from "../src/tui.ts";
+import { sliceByColumn, stripTerminalSequences } from "../src/utils.ts";
 import { TuiMainScreen } from "../src/tui-main-screen.ts";
 import { defaultMarkdownTheme } from "./test-themes.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
@@ -105,6 +108,63 @@ describe("Markdown component", () => {
 			markdown.render(60);
 			assert.deepStrictEqual(calls.at(-1), { source: "updated", availableWidth: 56 });
 			assert.strictEqual(calls.length, 4);
+		});
+	});
+
+	describe("Block reuse", () => {
+		afterEach(() => resetCapabilitiesCache());
+
+		function countingTheme(calls: string[]): MarkdownTheme {
+			return {
+				...defaultMarkdownTheme,
+				highlightCode: (code, lang) => {
+					calls.push(`${lang}:${code}`);
+					return code.split("\n").map((line) => chalk.green(line));
+				},
+			};
+		}
+
+		it("highlights a code block once across streamed text and resizes, and again after invalidate", () => {
+			const calls: string[] = [];
+			const markdown = new Markdown("```ts\nx\n```", 0, 0, countingTheme(calls));
+			markdown.render(80);
+			markdown.setText("```ts\nx\n```\n\nafter");
+			markdown.render(40);
+			assert.deepStrictEqual(calls, ["ts:x"]);
+			markdown.invalidate();
+			markdown.render(40);
+			assert.deepStrictEqual(calls, ["ts:x", "ts:x"]);
+		});
+
+		it("holds rendered blocks weakly, so a full garbage collection releases them", async () => {
+			setFlagsFromString("--expose-gc");
+			const gc = runInNewContext("gc") as () => void;
+			const calls: string[] = [];
+			const markdown = new Markdown("```ts\nx\n```", 0, 0, countingTheme(calls));
+			markdown.render(80);
+			// A WeakRef keeps its target alive until the current job ends.
+			await new Promise((resolve) => setImmediate(resolve));
+			gc();
+			markdown.render(40);
+			assert.deepStrictEqual(calls, ["ts:x", "ts:x"]);
+		});
+
+		it("renders a block again when the block after it changes its spacing", () => {
+			const markdown = new Markdown("# Title", 0, 0, defaultMarkdownTheme);
+			markdown.render(80);
+			markdown.setText("# Title\nfoo");
+			assert.deepStrictEqual(
+				markdown.render(80).map((line) => stripAnsi(line).trim()),
+				["Title", "", "foo"],
+			);
+		});
+
+		it("follows changed reference link definitions", () => {
+			setCapabilities({ images: null, trueColor: false, hyperlinks: false });
+			const markdown = new Markdown("[a][x]\n\n[x]: https://one.example", 0, 0, defaultMarkdownTheme);
+			markdown.render(80);
+			markdown.setText("[a][x]\n\n[x]: https://two.example");
+			assert.ok(stripAnsi(markdown.render(80).join("\n")).includes("https://two.example"));
 		});
 	});
 
@@ -1031,6 +1091,98 @@ Inline \(A_{sf}\)`,
 			);
 		});
 
+		// Regression test for https://github.com/earendil-works/pi/issues/11483
+		it("falls back to raw source when display math is wider than the content width", () => {
+			const source = [
+				"\\[",
+				String.raw`\frac{\partial^2 u}{\partial x^2} + \frac{\partial^2 u}{\partial y^2} = \sum_{i=1}^{n} \frac{1}{i^2} + \int_0^1 f(x)\,dx`,
+				"\\]",
+			].join("\n");
+			const render = (width: number) =>
+				new Markdown(source, 0, 0, defaultMarkdownTheme).render(width).map((line) => stripAnsi(line).trimEnd());
+
+			assert.deepStrictEqual(render(40), [
+				"∂² u   ∂² u   n   1   1",
+				"──── + ──── = ∑   ── +∫ f(x) dx",
+				"∂ x²   ∂ y²  i=1  i²  0",
+			]);
+
+			const narrow = render(30);
+			assert.strictEqual(narrow[0], "\\[");
+			assert.strictEqual(narrow[narrow.length - 1], "\\]");
+			assert.ok(!narrow.some((line) => line.includes("─")));
+			assert.ok(narrow.every((line) => line.length <= 30));
+		});
+
+		// Regression tests for https://github.com/earendil-works/pi/issues/11159
+		describe("unclosed display math before tables (#11159)", () => {
+			const table = ["| A | B |", "|---|---|", "| 1 | 2 |"];
+			const renderedTable = ["┌───┬───┐", "│ A │ B │", "├───┼───┤", "│ 1 │ 2 │", "└───┴───┘"];
+			const render = (source: string) =>
+				new Markdown(source, 0, 0, defaultMarkdownTheme).render(80).map((line) => stripAnsi(line).trimEnd());
+
+			it("renders a table after an orphan $$ opener", () => {
+				const source = ["Intro", "", "$$", "", ...table, "", "After"].join("\n");
+				assert.deepStrictEqual(render(source), ["Intro", "", "$$", "", ...renderedTable, "", "After"]);
+			});
+
+			it("renders a table after an orphan $$ opener with math-like content", () => {
+				const source = ["$$", "x = 1", "", ...table].join("\n");
+				assert.deepStrictEqual(render(source), ["$$", "x = 1", "", ...renderedTable]);
+			});
+
+			it("does not pair an unclosed $$ with a later $$ across a table", () => {
+				const source = ["Intro", "", "$$", "x = 1", "", ...table, "", "$$", "y^2", "$$"].join("\n");
+				assert.deepStrictEqual(render(source), ["Intro", "", "$$", "x = 1", "", ...renderedTable, "", "y²"]);
+			});
+
+			it("renders a single-column table with a pipe-free aligned delimiter after an orphan $$", () => {
+				const source = ["$$", "", "| A |", ":---:", "| 1 |"].join("\n");
+				assert.deepStrictEqual(render(source), ["$$", "", "┌───┐", "│ A │", "├───┤", "│ 1 │", "└───┘"]);
+			});
+
+			it("renders a table after an orphan \\[ opener", () => {
+				const source = ["\\\\[", "x^2", "", ...table].join("\n");
+				assert.deepStrictEqual(render(source), ["", "\\[", "x^2", "", ...renderedTable]);
+			});
+
+			it("does not pair an unclosed \\[ with a later \\[ across a table", () => {
+				const source = ["\\\\[", "x = 1", "", ...table, "", "\\\\[", "y^2", "\\\\]"].join("\n");
+				assert.deepStrictEqual(render(source), [
+					"",
+					"\\[",
+					"x = 1",
+					"",
+					...renderedTable,
+					"",
+					"\\",
+					"",
+					"\\[",
+					"y^2",
+					"\\\\]",
+				]);
+			});
+
+			it("renders a table with a pipe-free header after an orphan $$", () => {
+				const source = ["$$", "x^2", "", "Value", "| --- |", "1"].join("\n");
+				assert.deepStrictEqual(render(source), [
+					"$$",
+					"x^2",
+					"",
+					"┌───────┐",
+					"│ Value │",
+					"├───────┤",
+					"│ 1     │",
+					"└───────┘",
+				]);
+			});
+
+			it("still renders closed multi-line display math followed by a table", () => {
+				const source = ["$$", "a", "+ b", "$$", "", ...table].join("\n");
+				assert.deepStrictEqual(render(source), ["a + b", "", ...renderedTable]);
+			});
+		});
+
 		it("switches from raw to rendered math when a streamed delimiter closes", () => {
 			const markdown = new Markdown(String.raw`Map $\mathbb{C}^3`, 0, 0, defaultMarkdownTheme);
 			assert.deepStrictEqual(
@@ -1363,6 +1515,18 @@ again, hello world`,
 		});
 	});
 
+	describe("Deeply nested blockquotes", () => {
+		// Regression test for https://github.com/earendil-works/pi/issues/11272
+		it("should render quotes nested deeper than the width allows without exploding", () => {
+			const markdown = new Markdown(`${">".repeat(60)}x`, 1, 0, defaultMarkdownTheme);
+			const lines = markdown.render(80);
+			const plainLines = lines.map((line) => line.replace(/\x1b\[[0-9;]*m/g, "").trimEnd());
+
+			assert.strictEqual(plainLines.length, 1, `Expected a single line: ${JSON.stringify(plainLines)}`);
+			assert.ok(plainLines[0].endsWith("x"), `Expected content to be kept: ${JSON.stringify(plainLines)}`);
+		});
+	});
+
 	describe("Blockquotes with multiline content", () => {
 		it("should apply consistent styling to all lines in lazy continuation blockquote", () => {
 			// Markdown "lazy continuation" - second line without > is still part of the quote
@@ -1650,9 +1814,90 @@ bar`,
 		});
 	});
 
+	// #10925
+	describe("styled words at the wrap boundary", () => {
+		it("should not start the next line with a space or carry styles into padding", () => {
+			const markdown = new Markdown("aaaa **bold** next ~~strk~~ more words", 1, 0, defaultMarkdownTheme, {
+				bgColor: (text) => `\x1b[44m${text}\x1b[49m`,
+			});
+
+			assert.deepStrictEqual(markdown.render(11), [
+				"\x1b[44m aaaa \x1b[1mbold\x1b[22m \x1b[49m",
+				"\x1b[44m next \x1b[9mstrk\x1b[29m \x1b[49m",
+				"\x1b[44m more      \x1b[49m",
+				"\x1b[44m words     \x1b[49m",
+			]);
+		});
+	});
+
+	// #10154
+	describe("CJK emphasis", () => {
+		const tagTheme: MarkdownTheme = {
+			...defaultMarkdownTheme,
+			bold: (text) => `<b>${text}</b>`,
+			italic: (text) => `<i>${text}</i>`,
+		};
+		const render = (text: string) => new Markdown(text, 0, 0, tagTheme).render(80).map((line) => line.trimEnd());
+
+		it("renders emphasis delimited next to CJK punctuation", () => {
+			assert.deepStrictEqual(render("**这是测试。**后面"), ["<b>这是测试。</b>后面"]);
+			assert.deepStrictEqual(render("**一句话说清：**一台机器"), ["<b>一句话说清：</b>一台机器"]);
+			assert.deepStrictEqual(render("**要点到此为止。**20 小时"), ["<b>要点到此为止。</b>20 小时"]);
+			assert.deepStrictEqual(render("字**「引用」**字"), ["字<b>「引用」</b>字"]);
+			assert.deepStrictEqual(render("*斜体。*后面"), ["<i>斜体。</i>后面"]);
+		});
+
+		it("keeps CommonMark flanking rules for non-CJK text", () => {
+			assert.deepStrictEqual(render("**end.**Then next"), ["**end.**Then next"]);
+		});
+	});
+
 	describe("Links", () => {
 		afterEach(() => {
 			resetCapabilitiesCache();
+		});
+
+		it("should stop bare URLs at CJK punctuation and preserve the following text", () => {
+			setCapabilities({ images: null, trueColor: false, hyperlinks: true });
+			for (const punctuation of "。，；：！？、“”‘’（）【】《》「」『』…—·・〈〉［］｛｝．｡｢｣､･") {
+				for (const url of ["https://example.com", "https://example.com/中文?q=搜索#片段", "www.example.com"]) {
+					const source = `${url}${punctuation}后面的中文`;
+					const output = new Markdown(source, 0, 0, defaultMarkdownTheme).render(160).join("");
+					const href = url.startsWith("www.") ? `http://${url}` : url;
+					assert.ok(output.includes(`\x1b]8;;${href}\x1b\\`), source);
+					assert.ok(stripAnsi(output).includes(`\x1b]8;;\x1b\\${punctuation}后面的中文`), source);
+					assert.strictEqual(stripAnsi(output.replace(/\x1b\]8;;[^\x1b]*\x1b\\/g, "")).trimEnd(), source);
+				}
+			}
+		});
+
+		it("should preserve Chinese characters without punctuation in bare URLs", () => {
+			setCapabilities({ images: null, trueColor: false, hyperlinks: true });
+			for (const url of [
+				"https://example.com紧接着中文",
+				"https://example.com/中文?q=搜索#片段",
+				"https://example.com/テストー한글",
+			]) {
+				const output = new Markdown(url, 0, 0, defaultMarkdownTheme).render(160).join("");
+				assert.ok(output.includes(`\x1b]8;;${url}\x1b\\`));
+			}
+		});
+
+		it("should preserve CJK punctuation in explicit links and angle autolinks", () => {
+			setCapabilities({ images: null, trueColor: false, hyperlinks: true });
+			const url = "https://example.com/中文，路径·テスト・한글…—。";
+			for (const source of [`[文档](${url})`, `<${url}>`]) {
+				const output = new Markdown(source, 0, 0, defaultMarkdownTheme).render(160).join("");
+				assert.ok(output.includes(`\x1b]8;;${url}\x1b\\`), source);
+			}
+		});
+
+		it("should preserve English punctuation trimming before Chinese punctuation", () => {
+			setCapabilities({ images: null, trueColor: false, hyperlinks: true });
+			const source = "https://example.com.，后面的中文";
+			const output = new Markdown(source, 0, 0, defaultMarkdownTheme).render(160).join("");
+			assert.ok(output.includes("\x1b]8;;https://example.com\x1b\\"));
+			assert.ok(stripAnsi(output).includes("\x1b]8;;\x1b\\.，后面的中文"));
 		});
 
 		it("should not duplicate URL for autolinked emails", () => {
@@ -1838,7 +2083,7 @@ bar`,
 	});
 });
 
-describe("CJK punctuation after bare URLs (dsh-pi-tui divergence X031)", () => {
+describe("CJK punctuation after bare URLs (upstream URL policy)", () => {
 	it("should not absorb CJK punctuation after bare URLs into the link", () => {
 		setCapabilities({ images: null, trueColor: false, hyperlinks: true });
 		const markdown = new Markdown(
@@ -1895,39 +2140,407 @@ describe("CJK punctuation after bare URLs (dsh-pi-tui divergence X031)", () => {
 		);
 	});
 
-	it("should keep balanced full-width parentheses inside the URL path", () => {
+	it("should terminate a bare URL before a balanced full-width parenthetical", () => {
 		setCapabilities({ images: null, trueColor: false, hyperlinks: true });
-		const markdown = new Markdown(
-			"见 https://example.com/wiki/中华人民共和国（1949年） 的说明",
-			0,
-			0,
-			defaultMarkdownTheme,
-		);
+		const source = "见 https://example.com/issues/521（说明）";
+		const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
 
 		const lines = markdown.render(80);
 		const joined = lines.join("");
 
 		assert.ok(
-			joined.includes("\x1b]8;;https://example.com/wiki/中华人民共和国（1949年）\x1b\\"),
-			"Balanced full-width parens remain part of the hyperlink target",
+			joined.includes("\x1b]8;;https://example.com/issues/521\x1b\\"),
+			"the bare URL target stops at the full-width parenthesis",
+		);
+		const plain = lines
+			.map((line) => line.replace(/\x1b\]8;;[^\x1b]*\x1b\\/g, "").replace(/\x1b\[[0-9;]*m/g, ""))
+			.join("");
+		assert.ok(plain.includes("（说明）"), "the following parenthetical stays visible and unlinked");
+		assert.strictEqual(plain.trimEnd(), source);
+	});
+});
+
+describe("Source-cell proof (proveSourceSpan)", () => {
+	afterEach(() => resetCapabilitiesCache());
+
+	type ProvenProof = Extract<MarkdownSourceCellProof, { kind: "PROVEN" }>;
+
+	const capabilities = (hyperlinks: boolean): void => {
+		setCapabilities({ images: null, trueColor: false, hyperlinks });
+	};
+
+	const rangeOf = (source: string, target: string, nth = 0): { start: number; end: number } => {
+		let index = -1;
+		for (let occurrence = 0; occurrence <= nth; occurrence++) {
+			index = source.indexOf(target, index + 1);
+		}
+		assert.ok(index >= 0, `target ${JSON.stringify(target)} is not in the source`);
+		return { start: index, end: index + target.length };
+	};
+
+	const painted = (rows: readonly string[], segments: ProvenProof["segments"]): string =>
+		segments
+			.map((segment) =>
+				stripTerminalSequences(sliceByColumn(rows[segment.row]!, segment.startCol, segment.endCol - segment.startCol)),
+			)
+			.join("");
+
+	const proven = (
+		markdown: Markdown,
+		source: string,
+		range: { start: number; end: number },
+		width: number,
+	): { proof: ProvenProof; rows: string[] } => {
+		const rows = markdown.render(width);
+		const before = rows.slice();
+		const proof = markdown.proveSourceSpan(range, width);
+		assert.strictEqual(
+			proof.kind,
+			"PROVEN",
+			`expected PROVEN for ${JSON.stringify(source.slice(range.start, range.end))}, got ${JSON.stringify(proof)}`,
+		);
+		assert.strictEqual(markdown.render(width), rows, "a proof must keep the normal render cache identity");
+		assert.deepStrictEqual(rows, before);
+		return { proof: proof as ProvenProof, rows };
+	};
+
+	const expectPainted = (
+		markdown: Markdown,
+		source: string,
+		target: string,
+		width: number,
+		nth = 0,
+	): { proof: ProvenProof; rows: string[]; range: { start: number; end: number } } => {
+		const range = rangeOf(source, target, nth);
+		const result = proven(markdown, source, range, width);
+		assert.strictEqual(painted(result.rows, result.proof.segments), target, "painted cells must be the source range");
+		return { ...result, range };
+	};
+
+	const expectUnproven = (
+		markdown: Markdown,
+		source: string,
+		target: string,
+		width: number,
+		nth = 0,
+	): MarkdownSourceCellProof => {
+		const range = rangeOf(source, target, nth);
+		const proof = markdown.proveSourceSpan(range, width);
+		assert.notStrictEqual(
+			proof.kind,
+			"PROVEN",
+			`${JSON.stringify(target)} must not be proven as painted cells`,
+		);
+		return proof;
+	};
+
+	it("proves exactly the requested occurrence of a plain paragraph", () => {
+		capabilities(false);
+		const source = "needle one and needle two";
+		const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+		const first = expectPainted(markdown, source, "needle", 44, 0);
+		const second = expectPainted(markdown, source, "needle", 44, 1);
+		assert.deepStrictEqual(first.proof.segments, [{ row: 0, startCol: 0, endCol: 6 }]);
+		assert.deepStrictEqual(second.proof.segments, [{ row: 0, startCol: 15, endCol: 21 }]);
+	});
+
+	it("proves heading, strong, em and strikethrough text", () => {
+		capabilities(false);
+		const cases: Array<[string, string]> = [
+			["## heading needle", "needle"],
+			["**bold needle** after", "bold needle"],
+			["*em needle* after", "em needle"],
+			["~~del needle~~ after", "del needle"],
+		];
+		for (const [source, target] of cases) {
+			const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+			expectPainted(markdown, source, target, 44);
+		}
+	});
+
+	it("proves nested list items and quoted text, including continuation lines", () => {
+		capabilities(false);
+		const source = "- parent\n  - nested needle text\n\n> quoted needle line\n> second needle line";
+		const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+		expectPainted(markdown, source, "nested needle", 44);
+		expectPainted(markdown, source, "quoted needle", 44);
+		expectPainted(markdown, source, "needle", 44, 1);
+		expectPainted(markdown, source, "second needle", 44);
+	});
+
+	it("proves a link label and keeps the hidden destination unclaimed", () => {
+		capabilities(true);
+		const source = "needle [label](https://x/needle)";
+		const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+		const label = expectPainted(markdown, source, "label", 44);
+		assert.ok(
+			label.rows.join("").includes("\x1b]8;;https://x/needle\x1b\\"),
+			"the business OSC 8 target is unchanged",
+		);
+		const hidden = markdown.proveSourceSpan(rangeOf(source, "needle", 1), 44);
+		assert.deepStrictEqual(hidden, { kind: "NOT_PAINTED", reason: "HIDDEN_LINK_TARGET" });
+		// The visible homonym before the link is never highlighted by a hidden-destination request.
+		assert.strictEqual(painted(label.rows, label.proof.segments), "label");
+	});
+
+	it("proves the printed destination when hyperlinks are disabled", () => {
+		capabilities(false);
+		const source = "[label](https://x/needle)";
+		const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+		const { proof, rows } = expectPainted(markdown, source, "needle", 44);
+		assert.ok(proof.segments[0]!.startCol > 0, "the destination is printed after the label");
+		assert.ok(rows.join("").includes("(https://x/needle)"), "the printed href is unchanged");
+	});
+
+	it("proves a reference definition target printed by its using link", () => {
+		capabilities(false);
+		const source = "[label][id]\n\n[id]: https://x/needle";
+		const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+		expectPainted(markdown, source, "needle", 44);
+	});
+
+	it("keeps the ordinary block/highlight cache lifecycle across a proof after setText and a resize", () => {
+		capabilities(false);
+		const highlights: string[] = [];
+		const theme: MarkdownTheme = {
+			...defaultMarkdownTheme,
+			highlightCode: (code) => {
+				highlights.push(code);
+				return code.split("\n").map((line) => chalk.green(line));
+			},
+		};
+		const stableCode = "```js\nconst stable = 1;\n```";
+		const changed = `second paragraph needle\n\n${stableCode}`;
+		const markdown = new Markdown(`first paragraph\n\n${stableCode}`, 0, 0, theme);
+		markdown.render(80);
+		assert.strictEqual(highlights.length, 1);
+		markdown.setText(changed);
+		// No render() before the proof: proveSourceSpan performs the first post-setText normal render itself.
+		const proof = markdown.proveSourceSpan(rangeOf(changed, "needle"), 80);
+		assert.strictEqual(proof.kind, "PROVEN", JSON.stringify(proof));
+		assert.strictEqual(highlights.length, 1, "the proof-triggered render reuses the unchanged highlighted block");
+		const resized = markdown.proveSourceSpan(rangeOf(changed, "needle"), 44);
+		assert.strictEqual(resized.kind, "PROVEN", JSON.stringify(resized));
+		assert.strictEqual(highlights.length, 1, "a resize proof also reuses the unchanged highlighted block");
+	});
+
+
+	it("reuses cached normal blocks for non-intersecting blocks in a reference-definition document", () => {
+		capabilities(false);
+		const highlights: string[] = [];
+		const theme: MarkdownTheme = {
+			...defaultMarkdownTheme,
+			highlightCode: (code) => {
+				highlights.push(code);
+				return code.split("\n").map((line) => chalk.green(line));
+			},
+		};
+		const source = "[label][id]\n\n[id]: https://x/needle\n\n```js\nconst other = 1;\n```";
+		const markdown = new Markdown(source, 0, 0, theme);
+		markdown.render(44);
+		assert.strictEqual(highlights.length, 1, "the ordinary reference-link render has no block cache");
+		expectPainted(markdown, source, "label", 44);
+		const afterFirstProof = highlights.length;
+		assert.strictEqual(afterFirstProof, 2, "the proof primes the normal block cache once");
+		expectPainted(markdown, source, "label", 44);
+		assert.strictEqual(highlights.length, afterFirstProof, "the next proof reuses the cached non-intersecting block");
+	});
+
+	it("keeps reference-definition destinations hidden or ambiguous instead of claiming cells", () => {
+		const source = "[label][id]\n\n[id]: https://x/needle";
+		capabilities(true);
+		const hidden = new Markdown(source, 0, 0, defaultMarkdownTheme);
+		assert.deepStrictEqual(hidden.proveSourceSpan(rangeOf(source, "needle"), 44), {
+			kind: "NOT_PAINTED",
+			reason: "HIDDEN_LINK_TARGET",
+		});
+		capabilities(false);
+		// Two using links print the same destination; the visible owner is ambiguous, so the proof must fail closed.
+		const shared = "[one][id] and [two][id]\n\n[id]: https://x/needle";
+		const ambiguous = new Markdown(shared, 0, 0, defaultMarkdownTheme);
+		// Two printed owners: the visible ownership is ambiguous, so the range is UNPROVEN, never NOT_PAINTED.
+		assert.deepStrictEqual(ambiguous.proveSourceSpan(rangeOf(shared, "needle"), 44), {
+			kind: "UNPROVEN",
+			reason: "TOKEN_ORIGIN",
+		});
+	});
+
+	it("proves fenced code text and refuses a highlighter that rewrites the glyphs", () => {
+		capabilities(false);
+		const source = "```js\nneedle one\nconst needle = 2;\n```";
+		const plain = new Markdown(source, 0, 0, defaultMarkdownTheme);
+		const second = expectPainted(plain, source, "needle", 44, 1);
+		assert.ok(
+			stripTerminalSequences(second.rows[second.proof.segments[0]!.row]!).includes("const needle = 2;"),
+			"the second occurrence is proven inside the second code line",
+		);
+
+		const coloredTheme: MarkdownTheme = {
+			...defaultMarkdownTheme,
+			highlightCode: (code) => code.split("\n").map((line) => chalk.green(line)),
+		};
+		const colored = new Markdown(source, 0, 0, coloredTheme);
+		expectPainted(colored, source, "needle", 44, 1);
+
+		const rewrittenTheme: MarkdownTheme = {
+			...defaultMarkdownTheme,
+			highlightCode: (code) => code.split("\n").map((line) => line.toUpperCase()),
+		};
+		const rewritten = new Markdown(source, 0, 0, rewrittenTheme);
+		expectUnproven(rewritten, source, "needle", 44, 1);
+
+		const fence = new Markdown(source, 0, 0, defaultMarkdownTheme);
+		expectUnproven(fence, source, "js", 44);
+	});
+
+	it("proves renderLatex:false inline and display math source text", () => {
+		capabilities(false);
+		const source = "$needle$ and \\(needle\\)\n\n$$\nneedle\n$$\n\n\\[\nneedle\n\\]";
+		const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme, undefined, { renderLatex: false });
+		for (let occurrence = 0; occurrence < 4; occurrence++) {
+			expectPainted(markdown, source, "needle", 44, occurrence);
+		}
+		expectUnproven(
+			new Markdown("\\(needle and more", 0, 0, defaultMarkdownTheme, undefined, { renderLatex: false }),
+			"\\(needle and more",
+			"needle",
+			44,
 		);
 	});
 
-	it("should keep CJK punctuation inside balanced full-width parentheses", () => {
-		setCapabilities({ images: null, trueColor: false, hyperlinks: true });
-		const markdown = new Markdown(
-			"见 https://example.com/wiki/中华人民共和国（北京，1949年） 的说明",
-			0,
-			0,
-			defaultMarkdownTheme,
-		);
+	it("returns every painted row when one occurrence spans a soft wrap", () => {
+		capabilities(false);
+		const source = "needleword";
+		const markdown = new Markdown(source, 2, 0, defaultMarkdownTheme);
+		const { proof } = expectPainted(markdown, source, "needleword", 12);
+		assert.ok(proof.segments.length >= 2, "a wrapped occurrence returns one segment per painted row");
+		const rows = proof.segments.map((segment) => segment.row);
+		assert.deepStrictEqual(rows, [...new Set(rows)].sort((left, right) => left - right));
+		assert.ok(rows.every((row, index) => index === 0 || row > rows[index - 1]!), "segments run row by row");
+	});
 
-		const lines = markdown.render(80);
-		const joined = lines.join("");
+	it("re-proves the same component after width changes", () => {
+		capabilities(false);
+		const source = "alpha beta needle gamma delta epsilon zeta";
+		const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+		for (const width of [12, 44, 80, 120, 44]) {
+			expectPainted(markdown, source, "needle", width);
+		}
+	});
 
+	it("proves CJK, ZWJ and wide grapheme text without splitting a cluster", () => {
+		capabilities(false);
+		const source = "前缀**匹配词**后缀 家庭 👨‍👩‍👧 needle";
+		const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+		for (const width of [12, 44, 80]) {
+			expectPainted(markdown, source, "匹配词", width);
+			expectPainted(markdown, source, "👨‍👩‍👧", width);
+			expectPainted(markdown, source, "needle", width);
+		}
+	});
+
+	it("proves table cell text, including a wrapped cell, and refuses a table fallback", () => {
+		capabilities(false);
+		const source = "| h |\n|---|\n| needlewordandsomeextralongtext |";
+		const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+		expectPainted(markdown, source, "needlewordandsomeextralongtext", 12);
+		expectUnproven(new Markdown(source, 0, 0, defaultMarkdownTheme), source, "needleword", 4);
+	});
+
+	it("reports markup-only delimiter ranges as not painted", () => {
+		capabilities(false);
+		const source = "before **needle** after";
+		const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+		assert.deepStrictEqual(markdown.proveSourceSpan(rangeOf(source, "**"), 44), {
+			kind: "NOT_PAINTED",
+			reason: "MARKUP_ONLY",
+		});
+	});
+
+	it("refuses ranges that are not one painted leaf", () => {
+		capabilities(false);
+		const image = "a ![alt text](x.png) b";
+		expectUnproven(new Markdown(image, 0, 0, defaultMarkdownTheme), image, "alt text", 44);
+
+		const html = "<div>needle</div>";
+		expectUnproven(new Markdown(html, 0, 0, defaultMarkdownTheme), html, "needle", 44);
+
+		const crossLeaf = "**ab** cd";
+		expectUnproven(new Markdown(crossLeaf, 0, 0, defaultMarkdownTheme), crossLeaf, "ab** cd", 44);
+
+		const escapes = "a \\*needle\\* b";
+		expectUnproven(new Markdown(escapes, 0, 0, defaultMarkdownTheme), escapes, "\\*needle\\*", 44);
+
+		const composite = "first needle\n\nsecond needle";
+		const spanning = new Markdown(composite, 0, 0, defaultMarkdownTheme);
+		const proof = expectUnproven(spanning, composite, "needle\n\nsecond", 44);
 		assert.ok(
-			joined.includes("\x1b]8;;https://example.com/wiki/中华人民共和国（北京，1949年）\x1b\\"),
-			"Punctuation inside balanced full-width parens remains part of the hyperlink target",
+			proof.kind !== "UNPROVEN" || proof.reason !== "COMPOSITE_OWNER",
+			"Markdown itself never claims composite-card authority",
 		);
+	});
+
+	it("refuses invalid, shifted and grapheme-splitting ranges", () => {
+		capabilities(false);
+		const source = "a 😀 needle";
+		const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+		assert.deepStrictEqual(markdown.proveSourceSpan({ start: 4, end: 4 }, 44), {
+			kind: "UNPROVEN",
+			reason: "SOURCE_PROJECTION",
+		});
+		assert.deepStrictEqual(markdown.proveSourceSpan({ start: -1, end: 2 }, 44), {
+			kind: "UNPROVEN",
+			reason: "SOURCE_PROJECTION",
+		});
+		assert.deepStrictEqual(markdown.proveSourceSpan({ start: 0, end: source.length + 1 }, 44), {
+			kind: "UNPROVEN",
+			reason: "SOURCE_PROJECTION",
+		});
+		const split = markdown.proveSourceSpan({ start: 3, end: 4 }, 44);
+		assert.notStrictEqual(split.kind, "PROVEN");
+	});
+
+	it("keeps the normal render byte-identical and cached across a proof", () => {
+		capabilities(false);
+		const source = "before **needle** after\n\n- list\n\n```js\nconst x = 1;\n```";
+		const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+		const rows = markdown.render(44);
+		const snapshot = JSON.stringify(rows);
+		assert.strictEqual(markdown.render(44), rows);
+		expectPainted(markdown, source, "needle", 44);
+		assert.strictEqual(markdown.render(44), rows, "the cached array is reused");
+		assert.strictEqual(JSON.stringify(markdown.render(44)), snapshot, "the normal bytes are unchanged");
+		assert.deepStrictEqual(rows, new Markdown(source, 0, 0, defaultMarkdownTheme).render(44));
+		for (const row of rows) {
+			assert.ok(!row.includes("\u200B") && !row.includes("\u200C"), "no proof sentinel reaches a normal row");
+		}
+	});
+
+	it("drops stale proofs after setText and invalidate without stale ranges", () => {
+		capabilities(false);
+		const first = "needle one";
+		const markdown = new Markdown(first, 0, 0, defaultMarkdownTheme);
+		expectPainted(markdown, first, "needle", 80);
+		markdown.setText("pre\nneedle");
+		const stale = markdown.proveSourceSpan({ start: 0, end: 6 }, 80);
+		assert.notStrictEqual(stale.kind, "PROVEN");
+		expectPainted(markdown, "pre\nneedle", "needle", 80);
+		markdown.invalidate();
+		expectPainted(markdown, "pre\nneedle", "needle", 80);
+	});
+
+	it("returns STALE_RENDER across a capability change until invalidate()", () => {
+		capabilities(false);
+		const source = "[needle](https://x/y)";
+		const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+		markdown.render(44);
+		expectPainted(markdown, source, "needle", 44);
+		capabilities(true);
+		assert.deepStrictEqual(markdown.proveSourceSpan(rangeOf(source, "needle"), 44), {
+			kind: "UNPROVEN",
+			reason: "STALE_RENDER",
+		});
+		markdown.invalidate();
+		expectPainted(markdown, source, "needle", 44);
 	});
 });

@@ -463,7 +463,7 @@ test('structural gate: the status owner keeps measurement out of cheap refreshes
 
 // ── C3: measureResult — the additive read-result sibling ──────────────────
 
-test('C3 measureResult: a fresh authoritative answer (including ZERO) reads fresh exactly once', () => {
+test('measureResult: a fresh authoritative answer (including ZERO) reads fresh exactly once', () => {
   const coordinator = new ContextMeasurementCoordinator()
   const counting = countingReader(0)
   coordinator.bind('session-a')
@@ -483,7 +483,7 @@ test('C3 measureResult: a fresh authoritative answer (including ZERO) reads fres
   assert.equal(counting.measureCalls, 2)
 })
 
-test('C3 measureResult: a failed attempt with a bound value reads last-known and stays dirty', () => {
+test('measureResult: a failed attempt with a bound value reads last-known and stays dirty', () => {
   const coordinator = new ContextMeasurementCoordinator()
   const counting = countingReader(50_000)
   coordinator.bind('session-a')
@@ -496,7 +496,7 @@ test('C3 measureResult: a failed attempt with a bound value reads last-known and
   assert.equal(counting.measureCalls, 2)
 })
 
-test('C3 measureResult: a failed attempt with NO bound value reads unavailable, never 0', () => {
+test('measureResult: a failed attempt with NO bound value reads unavailable, never 0', () => {
   const coordinator = new ContextMeasurementCoordinator()
   const failing = (_sessionId: string): number | undefined => undefined
   coordinator.bind('session-a')
@@ -509,7 +509,7 @@ test('C3 measureResult: a failed attempt with NO bound value reads unavailable, 
   assert.deepEqual(thrown, { value: undefined, observation: 'unavailable' })
 })
 
-test('C3 measureResult: the A→B session switch clears the old value; B cannot inherit A', () => {
+test('measureResult: the A→B session switch clears the old value; B cannot inherit A', () => {
   const coordinator = new ContextMeasurementCoordinator()
   const counting = countingReader(10_000)
   coordinator.bind('session-a')
@@ -527,7 +527,7 @@ test('C3 measureResult: the A→B session switch clears the old value; B cannot 
   assert.equal(counting.measureCalls, 2, 'a foreign id never reaches the reader')
 })
 
-test('C3 measureResult: one force = one reader call; the legacy measure keeps its semantics', () => {
+test('measureResult: one force = one reader call; the legacy measure keeps its semantics', () => {
   const coordinator = new ContextMeasurementCoordinator()
   const counting = countingReader(70_000)
   coordinator.bind('session-a')

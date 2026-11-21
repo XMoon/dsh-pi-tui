@@ -1,8 +1,9 @@
 /**
- * S4-D3 B01–B14 terminal boundaries (D3-6): the REAL rc.2 Host catalog travels
+ * S4-D3 B02–B14 terminal boundaries (D3-6): the REAL rc.2 Host catalog travels
  * through the ONE shared mapping → D1 classifier/model → the MOUNTED Plugin
  * Manager workspace, where the bounded capability copy and the allowed
- * actions are read from the actual frame. B01 keeps HOST_ONLY, the web-only
+ * actions are read from the actual frame. The retired B01 profile no longer
+ * carries a boundary (rc.2 promotes Team to the base layer), the web-only
  * bundles stay WEB_ONLY, B13/B14 stay missing Install-only and carry their
  * verified one-shot/provider boundaries, and no Team/Discover/mic/Inspector
  * page is invented.
@@ -25,13 +26,13 @@ import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import PluginManager, { type BundleInfo } from '@deepseek-ai/dsh-plugin-manager'
 import { mkdirSync, writeFileSync } from 'node:fs'
-import { OPTIONAL_BUNDLES, OFFICIAL_ON_DEMAND_CATALOG } from '@deepseek-ai/dsh-app-boot'
+import { EXPERIMENTAL_BUNDLES, OFFICIAL_ON_DEMAND_CATALOG, OPTIONAL_BUNDLES } from '@deepseek-ai/dsh-official-bundles'
 import {
   EXPERIMENTAL_BUNDLE_IDS,
   classifyPluginPackages,
   type PluginClassificationInput,
 } from '../../src/app/plugin-manager/classify.ts'
-import { buildPluginManagerModel, bundleValue } from '../../src/app/plugin-manager/model.ts'
+import { buildPluginDetailView, buildPluginManagerModel, bundleValue } from '../../src/app/plugin-manager/model.ts'
 import { detachPluginManagerSnapshot } from '../../src/runtime/plugin-manager-mapping.ts'
 import { DirectPluginManagerPort, type PluginManagerServiceLike } from '../../src/runtime/direct/plugin-manager-direct.ts'
 import { PluginManagerController } from '../../src/app/plugin-manager/controller.ts'
@@ -44,6 +45,10 @@ import { disposeContext } from '../support/runner-harness.ts'
 import { plain } from '../support/plugin-workspace-harness.ts'
 
 const ON_DEMAND = OFFICIAL_ON_DEMAND_CATALOG.map(entry => entry.packageName)
+/** The release-added Experimental members in Host catalog order: they are
+ *  appended after the frozen B02–B14 order, not interleaved with it. */
+const RELEASE_ONLY_EXPERIMENTAL = [...OPTIONAL_BUNDLES, ...ON_DEMAND]
+  .filter(name => EXPERIMENTAL_BUNDLES.has(name) && !EXPERIMENTAL_BUNDLE_IDS.includes(name))
 
 function seedProfile(workRoot: string): Record<string, unknown> {
   const profileDir = join(workRoot, 'profile')
@@ -71,7 +76,8 @@ function seedProfile(workRoot: string): Record<string, unknown> {
       name,
       version: '0.2.1-rc.2',
       private: true,
-      dsh: { bundle: { patch: [] } },
+      // Input fact from the official package manifest: CUA is darwin-only.
+      dsh: { bundle: { patch: [], ...(name === '@deepseek-ai/dsh-cua-bundle' ? { platforms: ['darwin'] } : {}) } },
     }, null, 2))
   }
   return {
@@ -88,7 +94,6 @@ function seedProfile(workRoot: string): Record<string, unknown> {
 }
 
 const SURFACE_HINTS: Readonly<Record<string, RegExp>> = {
-  '@deepseek-ai/dsh-experimental-agent-team-profile': /Host Team tools/u,
   '@deepseek-ai/dsh-experimental-voice-input-bundle': /browser microphone UI is not available/u,
   '@deepseek-ai/dsh-experimental-auto-review': /official permission preset/u,
   '@deepseek-ai/dsh-experimental-inspector-profile': /no PiTui inspection page/u,
@@ -104,7 +109,7 @@ const SURFACE_HINTS: Readonly<Record<string, RegExp>> = {
   '@deepseek-ai/dsh-subagent-claude-code': /one-shot Claude Code subagent tool/u,
 }
 
-test('the real rc.2 Host catalog paints all 14 bounded boundaries through the mounted Plugin Manager', async t => {
+test('the real Host catalog paints the 13 verified B02–B14 boundaries through the mounted Plugin Manager', async t => {
   const life = testLifecycle(t)
   const workRoot = life.tempDir('s4-d3-boundaries-')
   const profileContext = seedProfile(workRoot)
@@ -114,7 +119,7 @@ test('the real rc.2 Host catalog paints all 14 bounded boundaries through the mo
   await ctx.plugin(Loader)
   await ctx.plugin(PluginManager, {})
   const service = ctx.get('pluginManager') as PluginManagerServiceLike
-  const port = new DirectPluginManagerPort({ get: name => name === 'pluginManager' ? service : undefined, on: () => () => {} })
+  const port = new DirectPluginManagerPort({ get: name => name === 'pluginManager' ? service : undefined, on: () => () => false })
 
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -163,22 +168,35 @@ test('the real rc.2 Host catalog paints all 14 bounded boundaries through the mo
   /** The DETAIL column of the embedded dual frame, whitespace-normalized. In a
    *  dual frame a plain row-wise flatten would interleave the List column with
    *  the Details column, so the pane is sliced from its real split. */
-  const detailFrame = (): string => {
+  const rawDetail = (): string => {
     const split = panel.contentLayout()
     const lines = vt.getViewport().map(line => plain([line]))
-    if (!split.dual) return lines.join('\n').replace(/\s+/gu, ' ')
+    if (!split.dual) return lines.join('\n')
     const start = split.leftWidth + 2
-    return lines.map(line => line.slice(start)).join('\n').replace(/\s+/gu, ' ')
+    return lines.map(line => line.slice(start)).join('\n')
   }
-  await waitFor(() => controller.model().cards.length === 14, 'the real Host catalog read')
-  assert.deepEqual(controller.model().sections.at(-1)!.cards.map(card => card.name), [...EXPERIMENTAL_BUNDLE_IDS])
+  const detailFrame = (): string => rawDetail().replace(/\s+/gu, ' ')
+  // The catalog is the COMPLETE official roster (shipped Optional bundles +
+  // on-demand catalog entries); the B02–B14 UI boundaries below are the
+  // TUI's own verified subset, not the catalog size.
+  await waitFor(() => controller.model().cards.length === OPTIONAL_BUNDLES.length + ON_DEMAND.length,
+    'the real Host catalog read')
+  assert.deepEqual(controller.model().sections.at(-1)!.cards.map(card => card.name),
+    [...EXPERIMENTAL_BUNDLE_IDS, ...RELEASE_ONLY_EXPERIMENTAL])
 
   // Walk the Experimental tail from B14 backwards using the REAL keys: the
   // Detail is painted for each exact identity and its bounded facts survive.
-  vt.sendInput('\x1b[F') // End = B14
-  await settle()
+  // Selection is EXPLICIT (the page's own search seat) because the Host's
+  // default listing legitimately hides several Optional bundles.
   for (let index = EXPERIMENTAL_BUNDLE_IDS.length - 1; index >= 0; index -= 1) {
     const name = EXPERIMENTAL_BUNDLE_IDS[index]!
+    vt.sendInput('/')
+    vt.sendInput('\x1b') // clear any previous query
+    vt.sendInput('/')
+    for (const character of name) vt.sendInput(character)
+    vt.sendInput('\r')
+    await settle()
+    assert.equal(panel.selectedCardValue(), `bundle:${name}`, `the explicit search selects ${name}`)
     vt.sendInput('\r')
     await waitFor(() => plain(vt.getViewport()).includes('Official DSH catalog entry'), `the ${name} Detail`)
     // The Detail column wraps cleanly; the existing PgUp/PgDn scroll reveals
@@ -195,12 +213,17 @@ test('the real rc.2 Host catalog paints all 14 bounded boundaries through the mo
       await settle()
       paintedUnion += `\n${detailFrame()}`
     }
+    // The bounded copy is proven by a frame that REALLY painted it: the
+    // accumulated detail frames of this card, never a later page position.
     const frame = detailFrame()
-    assert.match(frame, SURFACE_HINTS[name]!, `${name} surfaces its exact boundary:\n${frame}`)
+    assert.match(paintedUnion, SURFACE_HINTS[name]!, `${name} surfaces its exact boundary:\n${paintedUnion}\ncurrent:\n${frame}`)
     if (ON_DEMAND.includes(name)) {
-      for (let page = 0; page < 10 && !/no Continue\/Resume/u.test(detailFrame()); page += 1) {
+      // Accumulate the paged frames too: the evidence is a frame that painted
+      // the copy, never the pane's final scroll position.
+      for (let page = 0; page < 10 && !/no Continue\/Resume/u.test(paintedUnion); page += 1) {
         vt.sendInput('\x1b[6~')
         await settle()
+        paintedUnion += `\n${detailFrame()}`
       }
       const external = paintedUnion
       assert.match(external, /no Continue\/Resume/u, `${name} states its verified one-shot boundary`)
@@ -221,13 +244,10 @@ test('the real rc.2 Host catalog paints all 14 bounded boundaries through the mo
     }
     vt.sendInput('\x1b') // leave Details
     await settle()
-    if (index > 0) {
-      vt.sendInput('\x1b[A') // Up: the previous Experimental row
-      await settle()
-    }
   }
   assert.deepEqual(controller.model().cards.filter(card => card.section === 'experimental').map(card => card.name),
-    [...EXPERIMENTAL_BUNDLE_IDS], 'the real Host snapshot kept the frozen B01–B14 order')
+    [...EXPERIMENTAL_BUNDLE_IDS, ...RELEASE_ONLY_EXPERIMENTAL],
+    'the real Host snapshot kept the frozen B02–B14 order and appended the release members')
 
   // No phantom Team/Discover/mic/Inspector page action is present in the real
   // catalog; the web-only rows expose only the official Install/Back actions.
@@ -247,7 +267,6 @@ test('the real rc.2 Host catalog paints all 14 bounded boundaries through the mo
   }))
   const model = buildPluginManagerModel(snapshot, classifyPluginPackages(inputs, []))
   for (const name of [
-    '@deepseek-ai/dsh-experimental-agent-team-profile',
     '@deepseek-ai/dsh-experimental-voice-input-bundle',
     '@deepseek-ai/dsh-experimental-inspector-profile',
     '@deepseek-ai/dsh-experimental-cot-translation-bundle',
@@ -259,12 +278,13 @@ test('the real rc.2 Host catalog paints all 14 bounded boundaries through the mo
   }
 })
 
-// ── D3-6: B01 and B03 in the mounted application ───────────────────────────
+// ── D3-6: rc.2 base Team and B03 in the mounted application ────────────────
 
-import { createUserMessage, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, LlmAdapter, ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { executeModelToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import { startS4D3Application } from '../support/application-fixture.ts'
-import { skippedInstallationReason, type S4D2BundleId } from '../support/optional-bundle-fixture.ts'
+import { profileSelectsBundle, skippedInstallationReason, type OptionalBundleId } from '../support/optional-bundle-fixture.ts'
 
 type BoundaryScript =
   | { readonly kind: 'tool'; readonly name: string; readonly arguments: string; readonly callId: string }
@@ -319,8 +339,7 @@ function toolResultOf(agent: Agent, callId: string): string | undefined {
   return undefined
 }
 
-const B01 = '@deepseek-ai/dsh-experimental-agent-team-profile' satisfies S4D2BundleId
-const B03 = '@deepseek-ai/dsh-experimental-auto-review' satisfies S4D2BundleId
+const B03 = '@deepseek-ai/dsh-experimental-auto-review' satisfies OptionalBundleId
 
 /** Pass-through mutation counter over the REAL plugin-manager service class
  *  (the prototype is shared by the restarted instance). Every call continues
@@ -340,10 +359,256 @@ function countPluginMutations(service: unknown): { readonly counts: Record<'setB
   return { counts, restore() { for (const [name, original] of originals) proto[name] = original } }
 }
 
-test('the mounted TUI keeps Team capability in the existing Tool/Activity views and invents no Team board', { skip: skippedInstallationReason([B01]) }, async t => {
+/**
+ * The Release-added Experimental members' real frame: the four catalog entries
+ * the current release adds beyond B02–B14 are painted through the SAME mounted
+ * Plugin Manager. Their bounded TUI surface/Risk copy, their legal actions and
+ * the Host platform refusal of the hidden CUA entry are read from the frame,
+ * never from a local support guess. The profile manifests here are the
+ * file's own seeded metadata: this case proves the mounted presentation and
+ * actions, not that the published packages were loaded (S5-PR1 and the
+ * lifecycle/Forge cases own that).
+ */
+const RELEASE_FRAME_NAMES = [
+  '@deepseek-ai/dsh-personalized-recommendations',
+  '@deepseek-ai/dsh-experimental-liveshare',
+  '@deepseek-ai/dsh-experimental-forge-bundle',
+  '@deepseek-ai/dsh-cua-bundle',
+] as const
+
+const RELEASE_FRAME_HINTS: Readonly<Record<typeof RELEASE_FRAME_NAMES[number], RegExp>> = {
+  '@deepseek-ai/dsh-personalized-recommendations': /no native Action Card interaction/u,
+  '@deepseek-ai/dsh-experimental-liveshare': /no native share controller/u,
+  '@deepseek-ai/dsh-experimental-forge-bundle': /no native Forge panel/u,
+  '@deepseek-ai/dsh-cua-bundle': /darwin-only platform/u,
+}
+
+const RELEASE_FRAME_RISK_HINTS: Readonly<Record<typeof RELEASE_FRAME_NAMES[number], RegExp>> = {
+  '@deepseek-ai/dsh-personalized-recommendations': /Risk\s+Web recommendations are not TUI cards/u,
+  '@deepseek-ai/dsh-experimental-liveshare': /Risk\s+Relay, owner identity\/credentials/u,
+  '@deepseek-ai/dsh-experimental-forge-bundle': /Risk\s+Requires a Git repository/u,
+  '@deepseek-ai/dsh-cua-bundle': /Risk\s+darwin-only platform/u,
+}
+
+const CUA_BUNDLE = '@deepseek-ai/dsh-cua-bundle'
+
+test('the release Experimental members paint their real TUI surface and platform admission', async t => {
+  const life = testLifecycle(t)
+  const workRoot = life.tempDir('s4-d3-release-frame-')
+  const profileContext = seedProfile(workRoot)
+  const ctx = new Context()
+  life.defer(() => disposeContext(ctx))
+  ctx.provide('profileContext', profileContext as never)
+  await ctx.plugin(Loader)
+  await ctx.plugin(PluginManager, {})
+  const service = ctx.get('pluginManager') as PluginManagerServiceLike
+  const port = new DirectPluginManagerPort({ get: name => name === 'pluginManager' ? service : undefined, on: () => () => false })
+  const mutations = countPluginMutations(service)
+  t.after(mutations.restore)
+
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  const controller = new PluginManagerController(port, {
+    requestRender: () => app.requestRender(),
+    notify: () => {},
+    isOpen: () => true,
+    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+  })
+  const panel = new PluginManagerWorkspacePanel(controller, {
+    requestRender: () => app.requestRender(),
+    onCopy: () => {},
+    onYieldNavigation: () => {},
+  }, { onDispose: () => {} })
+  const settings = app.openSettingsWorkspace(
+    { readSnapshot: () => ({ configReadiness: 'ready', rows: [], capturedAt: Date.now() }) },
+    {
+      aboutVersionFacts: { tui: 'test-bundle', dsh: undefined },
+      initialCategory: 'plugins',
+      onOpenPlugins: () => {
+        controller.open()
+        return panel
+      },
+    },
+  )
+  life.defer(() => { try { settings.close() } catch {} try { app.dispose() } catch {} controller.dispose() })
+  const renderFrame = async (rounds = 10): Promise<void> => {
+    for (let index = 0; index < rounds; index += 1) await new Promise<void>(resolve => setTimeout(resolve, 0))
+    await vt.waitForRender()
+  }
+  const rawDetail = (): string => {
+    const split = panel.contentLayout()
+    const lines = vt.getViewport().map(line => plain([line]))
+    if (!split.dual) return lines.join('\n')
+    const start = split.leftWidth + 2
+    return lines.map(line => line.slice(start)).join('\n')
+  }
+  const detailFrame = (): string => rawDetail().replace(/\s+/gu, ' ')
+  const waitFor = async (predicate: () => boolean, label: string, timeoutMs = 60_000): Promise<void> => {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      if (predicate()) return
+      await new Promise<void>(resolve => setTimeout(resolve, 10))
+      await vt.waitForRender()
+    }
+    throw new Error(`timed out waiting for ${label}: ${plain(vt.getViewport())}`)
+  }
+  await renderFrame()
+  await waitFor(() => controller.model().cards.length === OPTIONAL_BUNDLES.length + ON_DEMAND.length,
+    'the real Host catalog read')
+  await waitFor(() => {
+    const frame = plain(vt.getViewport())
+    return frame.includes('Experimental') && !frame.includes('Loading plugins…')
+  }, 'the first painted Plugin Manager catalog')
+
+  // An UNSUPPORTED Host hides the CUA entry by default; the initial painted list
+  // advertises explicit search and paging never paints the hidden card. A
+  // supported (macOS) Host lists its shipped CUA bundle and therefore has no
+  // hidden-official hint to advertise.
+  if (process.platform !== 'darwin') {
+    const firstPage = plain(vt.getViewport())
+    assert.match(firstPage, /searches hidden official/u, 'the initial list advertises explicit search')
+    let defaultList = firstPage
+    for (let page = 0; page < 12; page += 1) {
+      const before = plain(vt.getViewport())
+      vt.sendInput('\x1b[6~')
+      await renderFrame()
+      const after = plain(vt.getViewport())
+      if (after === before) break
+      defaultList += `\n${after}`
+    }
+    assert.doesNotMatch(defaultList, /dsh-cua-bundle/u, 'the Host-hidden CUA entry is absent from the default list')
+  }
+
+  for (const name of RELEASE_FRAME_NAMES) {
+    // Exact-name search from the page's own search seat.
+    vt.sendInput('/')
+    vt.sendInput('\x1b')
+    vt.sendInput('/')
+    for (const character of name) vt.sendInput(character)
+    vt.sendInput('\r')
+    await renderFrame()
+    assert.equal(panel.selectedCardValue(), `bundle:${name}`, `the explicit search reveals ${name}`)
+    vt.sendInput('\r')
+    await waitFor(() => plain(vt.getViewport()).includes('Official DSH catalog entry'), `the ${name} Detail`)
+    // The CURRENT painted Detail column (never the search box or the
+    // controller model) must carry the exact identity. Whitespace is removed
+    // because the narrow detail column wraps the package name across lines.
+    await waitFor(() => rawDetail().replace(/\s+/gu, '').includes(name),
+      `the painted Detail carries the exact ${name} identity`)
+    let painted = detailFrame()
+    for (let page = 0; page < 20 && !/TUI surface/u.test(painted); page += 1) {
+      vt.sendInput('\x1b[6~')
+      await renderFrame()
+      painted += `\n${detailFrame()}`
+    }
+    assert.match(painted, /TUI surface/u, `${name} paints its bounded TUI surface:\n${painted}`)
+    for (let page = 0; page < 20 && !RELEASE_FRAME_HINTS[name].test(painted); page += 1) {
+      vt.sendInput('\x1b[6~')
+      await renderFrame()
+      painted += `\n${detailFrame()}`
+    }
+    assert.match(painted, RELEASE_FRAME_HINTS[name], `${name} paints its exact limit:\n${painted}`)
+    assert.match(painted, RELEASE_FRAME_RISK_HINTS[name], `${name} paints its exact Risk warning:\n${painted}`)
+    const riskCard = controller.model().cards.find(card => card.name === name)
+    assert.ok(riskCard !== undefined, `${name} remains in the real Host-derived model`)
+    const riskFact = buildPluginDetailView(riskCard!).groups.flatMap(group => group.facts)
+      .find(fact => fact.label === 'Risk')
+    assert.ok(riskFact !== undefined, `${name} has a bounded Risk fact`)
+    assert.equal(riskFact!.tone, 'warning', `${name} risk uses the warning tone`)
+    assert.match(painted, /\[experimental\]/u, `${name} is painted in the Experimental section`)
+    // The action block sits below the bounded facts; page until the frame
+    // really paints the primary action this card offers.
+    for (let page = 0; page < 40 && !/> (?:Enable|Install)…/u.test(painted); page += 1) {
+      vt.sendInput('\x1b[6~')
+      await renderFrame()
+      painted += `\n${detailFrame()}`
+    }
+
+    if (name === CUA_BUNDLE) {
+      // rc.2 moved CUA from the on-demand catalog to the shipped Optional
+      // roster: it has no Install route. On a supported Host its shipped
+      // Enable is offered; on an unsupported Host the Enable action is painted
+      // disabled with the exact Host platform refusal.
+      if (process.platform === 'darwin') {
+        assert.match(painted, /> Enable…/u, `${name} offers Enable on its supported Host`)
+        assert.doesNotMatch(painted, /Remove…/u, `${name} is shipped, so no Remove action exists`)
+      } else {
+        assert.match(painted, /> Enable… — unsupported-platform/u,
+          `${name} paints the Host platform refusal on its disabled Enable action:\n${painted}`)
+        assert.match(painted, /This bundle cannot be enabled on the DSH Host platform/u)
+        // The disabled action is readable but inert: invoking it only explains
+        // the refusal and writes neither the profile nor a Host mutation.
+        const before = { ...mutations.counts }
+        vt.sendInput('\r')
+        await renderFrame()
+        await waitFor(() => /cannot be enabled on the DSH Host platform/u.test(plain(vt.getViewport())),
+          'the disabled Enable explanation')
+        assert.deepEqual(mutations.counts, before, 'the refused Enable dispatches no Host mutation')
+      }
+    } else {
+      assert.match(painted, /> Enable…/u, `${name} offers the official Enable action for its shipped installation`)
+      assert.doesNotMatch(painted, /Remove…/u, `${name} is shipped, so the TUI offers no Remove action`)
+      assert.doesNotMatch(painted, /Create…|Not now|Share…|Open PR/u,
+        `${name} paints no phantom Web/Relay/Forge action:\n${painted}`)
+    }
+    vt.sendInput('\x1b') // leave Details
+    await renderFrame()
+  }
+  // Supplemental model-level control (NOT mounted-frame evidence): ONE
+  // representative same-name official:false package. The Host fact keeps it
+  // Third-party, so it inherits neither the Experimental identity nor the new
+  // release support copy; the mounted negative remains the existing
+  // plugin-manager-classify.test.ts same-name case.
+  const impostorName = '@deepseek-ai/dsh-experimental-forge-bundle'
+  const impostorSnapshot = detachPluginManagerSnapshot({
+    bundles: [{
+      name: impostorName,
+      official: false,
+      availability: 'profile',
+      enabled: true,
+      installed: true,
+      removable: true,
+      rows: [],
+      overrides: [],
+    }] as never,
+    plugins: [],
+    registries: { registry: null, fallbackRegistries: [], resolved: null },
+    exemptions: { exemptions: {}, warnings: [] },
+  })
+  const impostorModel = buildPluginManagerModel(
+    impostorSnapshot,
+    classifyPluginPackages([{
+      key: bundleValue(impostorName),
+      bundleName: impostorName,
+      entryIds: [],
+      official: false,
+      availability: 'profile',
+      installed: true,
+    }], []),
+  )
+  const impostor = impostorModel.cards.find(card => card.name === impostorName)!
+  assert.equal(impostor.section, 'third-party', 'an official:false same-name package stays Third-party')
+  assert.equal(impostor.experimental, false)
+  assert.equal(buildPluginDetailView(impostor).groups.flatMap(group => group.facts)
+    .some(fact => fact.label === 'TUI surface'), false, 'the forged identity inherits no release support copy')
+
+  // The presentation case never wrote the profile or dispatched a Host mutation.
+  assert.deepEqual(mutations.counts, {
+    setBundleEnabled: 0,
+    setPluginEnabled: 0,
+    removeBundle: 0,
+  }, 'the frame case performed ZERO Host writes')
+  for (const name of RELEASE_FRAME_NAMES) {
+    assert.equal(profileSelectsBundle(String(profileContext['dir']), name), false, `${name} was never selected by this frame case`)
+  }
+})
+
+test('the mounted TUI keeps rc.2 base Team capability in the existing Tool/Activity views and invents no Team board', { skip: skippedInstallationReason([]) }, async t => {
   const adapter = new BoundaryAdapter()
   const app = await startS4D3Application(t, {
-    bundles: [B01],
+    // rc.2 moved Team to the base layer: no optional bundle is mounted.
+    bundles: [],
     presets: true,
     presetId: 'standard',
     patches: [{ id: 'agent-default-model', config: { provider: 'scripted', model: 'review-model' } }] as never,
@@ -352,16 +617,70 @@ test('the mounted TUI keeps Team capability in the existing Tool/Activity views 
   adapter.scripts.push({ kind: 'text', text: 'Team session ready.' })
   const agent = await app.submitFirstPrompt('Start the team session')
   await agent.whenIdle()
-  assert.equal(app.host.hasTool('spawn_teammate', agent), true, 'the real B01 Team tool is Agent-scoped')
-  assert.equal(app.host.hasTool('team_task_create', agent), true)
+  // The base Team authority is mounted but OFF per Session, and the retired
+  // model tool does not exist: the root must enable the mode explicitly.
+  const resolveTools = async (): Promise<{ view(scope: Agent): ReadonlyMap<string, unknown>; dispose(): void }> => {
+    const tools = app.host.ctx.tools as unknown as {
+      resolve(context: {
+        readonly agent: Agent
+        readonly modelSelection: { readonly provider: string; readonly model: string }
+        readonly signal: AbortSignal
+      }): Promise<{ view(scope: Agent): ReadonlyMap<string, unknown>; dispose(): void }>
+    }
+    return tools.resolve({
+      agent,
+      modelSelection: { provider: 'scripted', model: 'review-model' },
+      signal: new AbortController().signal,
+    })
+  }
+  const resolveStepTools = async (): Promise<readonly string[]> => {
+    const toolSet = await resolveTools()
+    try {
+      return [...toolSet.view(agent).keys()]
+    } finally {
+      toolSet.dispose()
+    }
+  }
+  assert.equal(app.host.hasTool('spawn_teammate', agent), false, 'rc.2 retired spawn_teammate')
+  assert.equal(app.host.hasTool('subagent', agent), true, 'teammates use the standard subagent tool')
+  assert.equal((await resolveStepTools()).includes('team_task_create'), false,
+    'base Team tools start OFF in the real step admission')
+
+  // Default OFF: the conditional tool is not in the model admission, so a real
+  // model-admitted call fails with the official UNKNOWN_TOOL code and paints
+  // NO success card.
+  {
+    const toolSet = await resolveTools()
+    try {
+      const denied = await executeModelToolFixture(app.host.ctx, {
+        signal: new AbortController().signal,
+        callId: ToolCallId('s4d3-b01-off-task'),
+        name: 'team_task_create',
+        arguments: { subject: 'must not exist', description: 'the disabled Team authority must refuse creation' },
+        agent,
+        toolSet: toolSet as never,
+      })
+      assert.equal(denied.isError, true, 'a disabled Team session cannot create a task')
+      assert.match(JSON.stringify(denied.error), /UNKNOWN_TOOL/u,
+        'the conditional Team tool is not admitted to the model executor while Team mode is off')
+    } finally {
+      toolSet.dispose()
+    }
+  }
+  assert.ok(!app.view().includes('Create team task'), 'no success card is painted for the rejected OFF call')
+
+  const teams = app.host.ctx.get('agentTeams') as { setEnabled(agent: unknown, enabled: boolean): Promise<void> }
+  await teams.setEnabled(agent, true)
+  assert.equal((await resolveStepTools()).includes('team_task_create'), true,
+    'the root enablement exposes the shared board to the model step')
   const commands = (app.host.ctx.get('commands') as { list(agent: unknown): readonly { name: string }[] })
     .list(agent).map(command => command.name)
   assert.equal(commands.includes('team'), false, 'no dedicated Team command/board is created by the TUI')
 
-  // The REAL scoped Team operation travels through the same Agent/loop and
-  // lands in the existing Tool output (no Team board is involved).
+  // ── Create: the REAL scoped Team operation travels through the same
+  // Agent/loop and lands in the existing Tool output (no Team board).
   adapter.scripts.push(
-    { kind: 'tool', name: 'team_task_create', callId: 's4d3-b01-task', arguments: JSON.stringify({ subject: 'Scout one file', description: 'Read one file and report its content.' }) },
+    { kind: 'tool', name: 'team_task_create', callId: 's4d3-b01-task', arguments: JSON.stringify({ subject: 'Scout the config', description: 'Read the config and report the timeout.' }) },
     { kind: 'text', text: 'Team task created.' },
   )
   followup(agent, 'Create one shared Team task')
@@ -373,13 +692,15 @@ test('the mounted TUI keeps Team capability in the existing Tool/Activity views 
     readonly status?: string
   }
   assert.equal(typeof created.id, 'string', 'the EXACT team_task_create result is the official JSON task record')
-  assert.equal(created.subject, 'Scout one file')
+  assert.equal(created.subject, 'Scout the config')
   assert.equal(created.status, 'pending')
   assert.equal(typeof created.revision, 'number')
-  await app.waitFor(() => app.view().includes('team_task_create'), 'the real Team create Tool card')
+  await app.waitFor(() => app.view().includes('Create team task'), 'the real Team create Tool card')
+  // The model-facing description never becomes the card header identity.
+  assert.ok(!app.view().includes('report the timeout'), 'the description must never be used as the header identity')
 
-  // The shared board read returns the created subject through the same Agent
-  // and the existing Tool output (never a Team board).
+  // ── List: the shared board read returns the created subject through the same
+  // Agent and the existing Tool output (never a Team board).
   adapter.scripts.push(
     { kind: 'tool', name: 'team_task_list', callId: 's4d3-b01-list', arguments: '{}' },
     { kind: 'text', text: 'Team task listed.' },
@@ -391,9 +712,43 @@ test('the mounted TUI keeps Team capability in the existing Tool/Activity views 
   }
   assert.equal(listed.tasks?.length, 1, 'the EXACT team_task_list result is the official shared-board JSON')
   assert.equal(listed.tasks?.[0]?.id, created.id, 'the Host-generated task id crosses create -> list')
-  assert.equal(listed.tasks?.[0]?.subject, 'Scout one file')
+  assert.equal(listed.tasks?.[0]?.subject, 'Scout the config')
   assert.equal(listed.tasks?.[0]?.status, 'pending')
-  await app.waitFor(() => app.view().includes('team_task_list'), 'the real Team list Tool card')
+  await app.waitFor(() => app.view().includes('List team tasks'), 'the real Team list Tool card')
+
+  // ── Get: the fixed identity is the task id from the real create result.
+  adapter.scripts.push(
+    { kind: 'tool', name: 'team_task_get', callId: 's4d3-b01-get', arguments: JSON.stringify({ task_id: created.id }) },
+    { kind: 'text', text: 'Team task read.' },
+  )
+  followup(agent, 'Read the shared Team task')
+  await agent.whenIdle()
+  const read = JSON.parse(toolResultOf(agent, 's4d3-b01-get') ?? '') as { readonly id?: string; readonly revision?: number }
+  assert.equal(read.id, created.id, 'the EXACT team_task_get result is the same shared task')
+  assert.equal(read.revision, created.revision, 'a read does not change the revision')
+  await app.waitFor(() => app.view().includes('View team task'), 'the real Team get Tool card')
+
+  // ── Update: a real CAS edit using the revision the create returned.
+  adapter.scripts.push(
+    { kind: 'tool', name: 'team_task_update', callId: 's4d3-b01-update', arguments: JSON.stringify({ task_id: created.id, expected_revision: created.revision, action: 'edit', subject: 'Scout the config (edited)' }) },
+    { kind: 'text', text: 'Team task updated.' },
+  )
+  followup(agent, 'Update the shared Team task')
+  await agent.whenIdle()
+  const updated = JSON.parse(toolResultOf(agent, 's4d3-b01-update') ?? '') as { readonly id?: string; readonly revision?: number; readonly subject?: string }
+  assert.equal(updated.id, created.id, 'the EXACT team_task_update result is the same shared task')
+  assert.equal(updated.subject, 'Scout the config (edited)')
+  assert.equal(updated.revision, (created.revision as number) + 1, 'the edit bumps the CAS revision')
+  await app.waitFor(() => app.view().includes('Update team task'), 'the real Team update Tool card')
+
+  // The durable Session carries the ORIGINAL model tool-call JSON and the
+  // official result JSON; the display titles are never persisted into events.
+  const eventsJson = JSON.stringify(agent.session.snapshotEvents())
+  assert.ok(eventsJson.includes('Scout the config'), 'the raw create arguments stay in the Session')
+  for (const title of ['Create team task', 'List team tasks', 'View team task', 'Update team task']) {
+    assert.equal(eventsJson.includes(title), false, `the display title ${title} must not be rewritten into the Session events`)
+  }
+
   // The Host-generated id exists in NO tool argument; after expanding the
   // cards it is a result-exclusive painted fact, and `{"tasks"` is list-only.
   app.vt.sendInput('\x0f')
@@ -411,6 +766,7 @@ test('the real Auto preset and the shared Plugin Manager danger confirmation wor
   const adapter = new BoundaryAdapter()
   const app = await startS4D3Application(t, {
     bundles: [],
+    presets: true,
     patches: [{ id: 'agent-default-model', config: { provider: 'scripted', model: 'review-model' } }] as never,
     prepareHost: host => { host.ctx.llm.registerAdapter(['scripted'], adapter) },
   })
@@ -455,20 +811,21 @@ test('the real Auto preset and the shared Plugin Manager danger confirmation wor
   await restarted.settle()
   await restarted.waitFor(() => /Auto Review|auto-review/iu.test(restarted.view()), 'the exact B03 row')
   // Open Details and choose the shared Disable… action; the confirmation is
-  // a PAGE whose default is Cancel.
+  // a PAGE whose default is Cancel. rc.1 paints the page title as
+  // "Disable Auto Review?" (the same Owner warning block follows it).
   for (let step = 0; step < 4; step += 1) {
     restarted.vt.sendInput('\r') // reveal then dispatch the selected Disable… action
     await restarted.settle()
-    if (/safety confirmation/u.test(restarted.view())) break
+    if (/Disable Auto Review\?/u.test(restarted.view())) break
   }
-  assert.match(restarted.view(), /Auto Review safety confirmation/u,
+  assert.match(restarted.view(), /Disable Auto Review\?/u,
     'the shared confirmation opened for the real B03 row')
   assert.match(restarted.view().replace(/\s+/gu, ' '),
     /Disabling Auto Review can change existing Auto sessions to Full access/u)
   assert.match(restarted.view(), /> Cancel/u, 'the shared confirmation defaults to Cancel')
   restarted.vt.sendInput('\r') // activate the DEFAULT Cancel action
   await restarted.settle()
-  await restarted.waitFor(() => !/safety confirmation/u.test(restarted.view()),
+  await restarted.waitFor(() => !/Disable Auto Review\?/u.test(restarted.view()),
     'the default Cancel action closes the confirmation')
   const before = (await restarted.host.pluginManager.listBundles() as readonly { name: string; enabled: boolean }[])
     .find(bundle => bundle.name === B03)

@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { visibleWidth } from '@xmoon76/pi-tui'
+import { sliceByColumn, visibleWidth } from '@xmoon76/pi-tui'
 import { FooterComposer } from '../../src/tui/footer/composer.ts'
 import { createBuiltinFooterRegistry } from '../../src/tui/footer/builtin-items.ts'
 import { DEFAULT_FOOTER_LAYOUT } from '../../src/domain/footer/presets.ts'
@@ -275,6 +275,67 @@ test('the default stats row drops cache-hit, then TTFB, then speed — usage sur
     const text = composer.render({ snapshot: snap as StatusSnapshot, layout: DEFAULT_FOOTER_LAYOUT, width, context: CONTEXT })
     for (const line of text.split('\n')) {
       assert.ok(visibleWidth(line) <= Math.max(1, width), `overflow at ${width}: ${JSON.stringify(line)}`)
+    }
+  }
+})
+
+const plainOf = (row: string): string => row.replace(/\x1b\[[0-9;:]*m/g, '')
+
+test('CJK/emoji prefixes and suffixes stay inside the placement hit, never a partial glyph', () => {
+  const snap = busySnapshot() as DeepMutable<StatusSnapshot>
+  snap.composition.model = { provider: undefined, id: 'deepseek-v4-flash', displayName: 'deepseek-v4-flash' }
+  const layout = {
+    schemaVersion: 1 as const,
+    rows: [{
+      left: [
+        { id: 'model', format: 'plain', prefix: '模:', suffix: ' ✓' },
+        { id: 'tasks' },
+        { id: 'cwd' },
+      ],
+      right: [],
+    }],
+  }
+  for (const width of [80, 44, 34]) {
+    const projection = composer.compose({ snapshot: snap, layout, width, context: CONTEXT })
+    const rows = projection.text.split('\n').map(plainOf)
+    const modelHit = projection.hits.find(hit => hit.id === 'model')
+    assert.ok(modelHit !== undefined, `model must publish a hit at w=${width}:\n${rows.join('\n')}`)
+    const slice = sliceByColumn(rows[modelHit.row]!, modelHit.startCol, modelHit.endCol - modelHit.startCol, true)
+    assert.equal(slice, '模:deepseek-v4-flash ✓', `the whole visible placement is the target (w=${width})`)
+    for (const hit of projection.hits) {
+      assert.equal(
+        visibleWidth(sliceByColumn(plainOf(rows[hit.row]!), hit.startCol, hit.endCol - hit.startCol, true)),
+        hit.endCol - hit.startCol,
+        `every published cell span is width-exact (w=${width})`,
+      )
+    }
+  }
+})
+
+test('a right-zone placement hit is flush right and never covers the alignment gap', () => {
+  const snap = busySnapshot()
+  const layout = {
+    schemaVersion: 1 as const,
+    rows: [{
+      left: [{ id: 'cwd' }],
+      right: [{ id: 'model', format: 'plain' }, { id: 'tasks' }],
+    }],
+  }
+  for (const width of [100, 60, 40]) {
+    const projection = composer.compose({ snapshot: snap, layout, width, context: CONTEXT })
+    const rows = projection.text.split('\n').map(plainOf)
+    assert.ok(projection.hits.length >= 1, `at least the right model/tasks survive at w=${width}:\n${rows.join('\n')}`)
+    for (const hit of projection.hits) {
+      assert.ok(hit.endCol <= width, `a hit cannot exceed the terminal width (w=${width})`)
+      // No hit may start inside the left zone's exclusive region: the only
+      // left item is the truncated cwd, and the right zone is flush right.
+      assert.ok(hit.startCol >= width - visibleWidth(rows[hit.row]!.slice(hit.startCol).trimEnd()) - 0,
+        `right-zone hit is inside the right half (w=${width})`)
+    }
+    const tasksHit = projection.hits.find(hit => hit.id === 'tasks')
+    if (tasksHit !== undefined) {
+      assert.equal(rows[tasksHit.row]!.slice(tasksHit.startCol, tasksHit.endCol).endsWith(']'), true,
+        `the tasks hit covers the closing bracket (w=${width})`)
     }
   }
 })

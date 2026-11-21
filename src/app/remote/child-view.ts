@@ -51,7 +51,13 @@ export interface RemoteChildBinding {
       /** The official failure the Client recorded for `openState: 'error'`. */
       readonly openError?: unknown
     }
-    readAttachment(attachmentId: string): Promise<RemoteAttachmentReadResult>
+    /**
+     * The official binding's authenticated attachment read. DSH 0.2.2 takes the
+     * Host's full `ImageAttachmentRef`, not a bare id; the composition seam
+     * passes the complete durable reference now (S2-PR2 runtime compatibility),
+     * so this structural handle stays opaque only at the type boundary.
+     */
+    readAttachment(attachment: unknown): Promise<RemoteAttachmentReadResult>
   }
   /** The official event window source (S3-R0: the child re-fold fence must
    *  prove its read is still the CURRENT revision before it commits). */

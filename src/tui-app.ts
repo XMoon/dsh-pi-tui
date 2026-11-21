@@ -32,10 +32,14 @@ import {
   TuiMainScreen,
   VStack,
   Input,
+  getGraphemeSegmenter,
   getKeybindings,
   isKeyRelease,
   isKeyRepeat,
   matchesKey,
+  parseKey,
+  sliceByColumn,
+  stripTerminalSequences,
   truncateToWidth,
   visibleWidth,
   wrapTextWithAnsi,
@@ -58,6 +62,7 @@ import {
   AltScreenSearchIndex,
   dispatchMouseEvent,
   type AltScreenSearchMatch,
+  type AltScreenSearchSegment,
 } from '@xmoon76/pi-tui'
 import {
   SearchablePicker,
@@ -80,6 +85,12 @@ import {
 } from './domain/terminal-progress/settings.ts'
 import { runSyncDisposalSteps, runSyncDisposalStepsWithPrimary } from './runtime/process/disposal.ts'
 import { Frame, FocusForwardingFrame, ResponsiveOverlayFrame, type ResponsiveOverlayGeometry } from './tui/components/frame.ts'
+import { ExitChoicePanel } from './tui/interaction/exit-choice.ts'
+import type { ExitChoiceModel } from './app/surface/exit-choice.ts'
+import type { ExitSessionActivity } from './domain/command/policy.ts'
+import { DockQueue, type DockQueueModel } from './tui/queue/dock-queue.ts'
+import { QueuePanel, queueOverlayGeometry } from './tui/queue/queue-panel.ts'
+import type { QueueManagerController, QueueManagerPresentation } from './app/queue/manager.ts'
 // The generic overlay frame now lives in the TUI component layer; the stable
 // facade export stays here for existing consumers (TS4 plan §19).
 export { Frame } from './tui/components/frame.ts'
@@ -125,8 +136,10 @@ export {
 import {
   OUTPUT_VIEWER_MAX_HEIGHT,
   OUTPUT_VIEWER_WIDTH,
+  type OutputViewerBar,
   OutputViewerPanel,
 } from './tui/panels/output-viewer-panel.ts'
+import { TeamDisableConfirmation, type TeamDisableConfirmationRequest } from './tui/pickers/team-disable-confirmation.ts'
 import { ImageThumbnail } from './tui/components/media/image-thumbnail.ts'
 import { ImageWorkspacePanel } from './tui/components/media/image-workspace.ts'
 import type { SvgViewerSource } from './tui/components/media/svg-viewer.ts'
@@ -173,8 +186,17 @@ import {
 } from './tui/panels/settings-workspace-panel.ts'
 import type { ModelsInitialView } from './tui/panels/models-workspace-page.ts'
 import type { AccountInitialView } from './tui/panels/account-workspace-page.ts'
+import { SessionWorkspacePanel, type SessionWorkspaceActivityFacts, type SessionWorkspacePanelHost } from './tui/panels/session-workspace-panel.ts'
+import { ScheduleWorkspacePanel } from './tui/schedule/workspace-panel.ts'
+import type {
+  SessionBrowserReadSnapshot,
+  SessionBrowserSubject,
+} from './app/command/session-browser-presentation.ts'
+import type { WorkspaceFactsFrame } from './runtime/session-workspace-facts-port.ts'
+import type { ScheduleIntent, ScheduleWorkspaceSnapshot } from './app/schedule/presentation.ts'
 import type { TaskPanelItem } from './app/surface/task-presentation.ts'
 import type { JobInspectorState, TaskBrowserViewState } from './app/surface/task-runtime.ts'
+import type { TeamBrowserPresentation } from './app/surface/task-presentation-port.ts'
 import type { TaskBrowserSummary } from './app/surface/task-browser-runtime.ts'
 import type { StatusStore } from './domain/status/store.ts'
 import type { DisplayState, DisplayPreset, DisplayPresetApplyResult } from './domain/display/preset.ts'
@@ -187,7 +209,7 @@ import type { AccessStatus, ActivityStatus, CompositionStatus, RunPhase, StatusP
 import { deriveActivityStatus } from './domain/status/derive-activity.ts'
 import { initialStatusSnapshot } from './domain/status/snapshot.ts'
 import { StatusStore as StatusStoreImpl } from './domain/status/store.ts'
-import { FooterComposer, mergeCommandSurface } from './tui/footer/composer.ts'
+import { FooterComposer, mergeCommandSurface, type FooterClickId, type FooterPaintProjection, type FooterPaintedItemHit } from './tui/footer/composer.ts'
 import { createBuiltinFooterRegistry } from './tui/footer/builtin-items.ts'
 import { resolveFooterInstruction } from './tui/footer/instruction.ts'
 import { layoutForPreset } from './domain/footer/presets.ts'
@@ -236,7 +258,13 @@ import {
   webCardLines,
   type ToolPresenter,
 } from './tui/transcript/tool-presentation.ts'
-import { TranscriptSearchComponent } from './tui/interaction/transcript-search.ts'
+import {
+  TranscriptSearchComponent,
+  type FullSearchSourceNotice,
+  type TranscriptSearchCoverage,
+  type TranscriptSearchScope,
+} from './tui/interaction/transcript-search.ts'
+export type { TranscriptSearchCoverage, TranscriptSearchScope } from './tui/interaction/transcript-search.ts'
 import { CompactTextPreview } from './tui/components/transcript/compact-text-preview.ts'
 import { ChartBody } from './tui/components/transcript/chart-body.ts'
 import { VisualAssistantBody, VisualAssistantDisposalFrame } from './tui/components/transcript/visual-assistant-body.ts'
@@ -266,6 +294,7 @@ import type { SvgRasterLoader } from './client/media/svg/raster-loader.ts'
 import { longMessageDisclosureWindow } from './tui/transcript/long-message-disclosure.ts'
 import { HistoryPanel } from './tui/panels/history-panel.ts'
 import type { HistorySearchSource } from './client/history/search.ts'
+import { createHistoryRecallScope, type HistoryScopeSettlement } from './client/history/recall-scope.ts'
 import { QuestionFlow, QuestionFrame, type QuestionFlowDraft } from './tui/interaction/question.ts'
 import { ApprovalRuntime, type PendingApproval } from './tui/interaction/approval-runtime.ts'
 import { SaveLocationPrompt, SaveLocationFrame, type SaveLocationDeps, type SaveLocationRequest, type SaveLocationResult } from './tui/interaction/save-location.ts'
@@ -274,30 +303,53 @@ import { SaveLocationPrompt, SaveLocationFrame, type SaveLocationDeps, type Save
 // than importing the concrete `src/tui/interaction/**` modules (TS5 §15).
 export type { QuestionFlowDraft } from './tui/interaction/question.ts'
 export type { SaveLocationResult } from './tui/interaction/save-location.ts'
-import { MentionProvider } from './tui/interaction/autocomplete/provider.ts'
-import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, textWithAttachmentMarkers, transcriptSearchSourceKey, type AssistantDisplayBlock, subCallDisplayStatus, type PresentedFilePresentation, type TranscriptMessage, type TranscriptSearchMatch, type TurnActivity, type WorkflowMemberView, type WorkflowRunStatus, workflowPhaseKey } from './transcript.ts'
+import { createInstalledAutocompleteProvider } from './tui/interaction/autocomplete/installed-provider.ts'
+import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, textWithAttachmentMarkers, transcriptSearchMatchKey, transcriptSearchSourceKey, type AssistantDisplayBlock, subCallDisplayStatus, type PresentedFilePresentation, type TranscriptMessage, type TranscriptSearchMatch, type TurnActivity, type WorkflowMemberView, type WorkflowRunStatus, workflowPhaseKey, workflowReadablePhase } from './transcript.ts'
+import type { UserShellPresentationPlacement, UserShellSubmissionState } from './app/submission/user-shell.ts'
+import { eligibleFinalAssistant } from './domain/transcript/final-assistant.ts'
 import { classifyTranscriptMessage, isSurfacedInteractionTool, isSurfacedContext } from './domain/transcript/semantics.ts'
 import {
   SearchHighlightComponent,
   buildSourceGeometry,
+  cardAnchorForRenderedLines,
+  searchMatchInsideRegion,
   selectRenderedSearchMatch,
   selectRenderedSearchScrollRange,
   type RenderedSearchSelection,
   type RenderedSearchScrollRange,
   type RenderedSearchSelector,
+  type SearchHighlightPaintSelector,
   type SearchSourceRegion,
 } from './tui/components/transcript/search-presentation.ts'
 import {
+  preparePlainTextSourceProbe,
+  provePlainTextPaintedSegments,
+} from './tui/components/transcript/plain-text-source-proof.ts'
+import { AssistantMarkdownComponent } from './tui/components/transcript/assistant-markdown-source-proof.ts'
+import {
+  chooseSearchViewportTop,
+  selectReadableSearchCandidate,
+  type PaintedTargetSegment,
+  type PhysicalRect,
+} from './tui/components/transcript/search-viewport.ts'
+import {
   workflowCountsText,
   workflowPhasePresentations,
-  workflowRunMode,
   workflowRunSummaryText,
   workflowRunViewAllVisible,
   workflowStatusCounts,
   type WorkflowPhasePresentation,
 } from './tui/transcript/workflow-presentation.ts'
+import {
+  advanceWorkflowDisclosureState,
+  effectiveWorkflowPhaseOpen,
+  effectiveWorkflowRunOpen,
+  type WorkflowPhaseDisclosureState,
+  type WorkflowRunDisclosureState,
+} from './tui/transcript/workflow-disclosure.ts'
 import { finalizedBlockFallbackText, openOpaqueBlockFallbackText } from './domain/transcript/content-blocks.ts'
 import { latestLine } from './domain/transcript/text.ts'
+import { rawSourceRangeForNormalizedMatch } from './domain/transcript/search.ts'
 import { fileAttachmentSummary } from './domain/media/file-summary.ts'
 import type { TranscriptWindowState } from './domain/transcript/window.ts'
 import { createTranscriptRenderProfiler } from './tui/diagnostics/transcript-render-profile.ts'
@@ -311,7 +363,7 @@ import type { CompactActionSource, CompactActionStats } from './tui/transcript/p
 import { projectCompact } from './tui/transcript/compact-projection.ts'
 import { clusterByMemberOf, isFoldableWorkContext, projectTranscriptStructure, workByMemberOf, type TranscriptStructureBlock, type TranscriptWorkSpan } from './tui/transcript/structure.ts'
 import { transcriptRevealAncestryFor, transcriptRevealPathFor, type TranscriptRevealAncestry } from './tui/transcript/reveal.ts'
-import { deepestCommonTranscriptContainer, sameTranscriptContainerPath, type TranscriptContainerOwner, type TranscriptContainerPath } from './tui/transcript/container-owner.ts'
+import { deepestCommonTranscriptContainer, sameTranscriptContainerOwner, sameTranscriptContainerPath, type TranscriptContainerOwner, type TranscriptContainerPath } from './tui/transcript/container-owner.ts'
 import { CompactWorkComponent } from './tui/components/transcript/compact-work.ts'
 import { summarizeWorkSpan, type CompactWorkSummary } from './tui/transcript/work-summary.ts'
 import { activityClockOf, resolveWorkLifetimes, type ActivityClock, type WorkLifetime } from './tui/transcript/activity-clock.ts'
@@ -339,6 +391,7 @@ import type { SurfaceHost } from './extension/internal/surface-host.ts'
 import { InputRouter } from './tui/interaction/input-router.ts'
 import { AppActionDispatcher, type AppActionHost } from './tui/keybindings/action-dispatcher.ts'
 import { componentKeymap } from './tui/keybindings/component-keymap.ts'
+import { setNoAnswerNavigationInstalled } from './tui/interaction/question.ts'
 import { parseUserKeybindings } from './tui/keybindings/config.ts'
 import { deriveKeybindingContext } from './tui/keybindings/context.ts'
 import { APP_KEYBINDINGS, VIEWER_BLOCKED_PARENT_ACTIONS } from './tui/keybindings/definitions.ts'
@@ -347,20 +400,16 @@ import type { LeaderStateMachine } from './tui/keybindings/leader.ts'
 import { applyHomeEndKeyMode, homeEndKeysModeOf } from './tui/keybindings/home-end-mode.ts'
 import { HostKeybindingManager, normalizedKeyToKeyId } from './tui/keybindings/manager.ts'
 import type { AppKeybindingId, KeybindingContext, KeybindingSource, UserKeybindingsConfig } from './tui/keybindings/types.ts'
-import {
-  isLocalShellCard,
-  localShellHiddenMarker,
-  localShellPreview,
-  RUNNING_PREVIEW_LINES,
-  SETTLED_PREVIEW_VISUAL_ROWS,
-} from './tui/components/transcript/local-shell-card.ts'
+import { isLocalShellCard } from './tui/components/transcript/local-shell-card.ts'
 import { formatBytes } from './domain/media/format.ts'
 import type { RendererRegistry } from './extension/internal/renderer-registry.ts'
 import { OverlayBroker } from './tui/interaction/overlay-broker.ts'
 import { EditorSeatMount } from './tui/interaction/editor-seat.ts'
 import { EditorSeatHolder } from './tui/interaction/editor-seat-holder.ts'
-import { TuiEditor, type TuiEditorRenderLayout } from './tui/interaction/tui-editor.ts'
-import { serializeEditorInput, serializedDraftHasPayload, shellPrefixForMode, type EditorInputMode } from './tui/interaction/editor-input-mode.ts'
+import { TuiEditor, type TuiEditorPasteCommit, type TuiEditorRenderLayout } from './tui/interaction/tui-editor.ts'
+import { PasteRangeTracker, proveCaretEdit } from './tui/interaction/pasted-path-range.ts'
+import { PASTE_PENDING_NOTICE, type PastedImageIntakePort, type PastedPathReceipt } from './app/surface/pasted-image-intake.ts'
+import { serializeEditorInput, serializedDraftHasPayload, type EditorInputMode } from './tui/interaction/editor-input-mode.ts'
 import type { EditorRegistry } from './extension/internal/editor-registry.ts'
 import { compileView } from './extension/internal/component-compiler.ts'
 import { AdvancedOverlayComponent } from './extension/internal/advanced-overlay.ts'
@@ -370,6 +419,16 @@ import type { DisplaySubjectSnapshot, ExtensionView, MessagePresentationSnapshot
 
 /** How many most-recent turns Ctrl+O expands; mirrors pi's default. */
 export const EXPAND_RECENT_TURNS = 3
+
+/** Settled local shell cards kept in the current TUI mount. */
+const MAX_SETTLED_LOCAL_SHELL_CARDS = 32
+
+/** Physical Job-local keys always outrank transcript Find bindings on this screen. */
+const JOB_LOCAL_FIND_RESERVED_KEYS: ReadonlySet<KeyId> = new Set([
+  'home',
+  'end',
+  JOB_LOCAL_KEYS.switchPage,
+])
 
 /** Semantic inspection actions that may cross a response modal boundary. */
 const MODAL_INSPECTION_ACTIONS: readonly AppKeybindingId[] = [
@@ -411,6 +470,19 @@ export type TranscriptViewportAnchorEdge = 'top' | 'bottom'
  * intent to distinguish an in-place dismiss from a latest reset or a physical
  * surface swap. */
 export type TranscriptSearchCloseReason = 'dismiss' | 'jump-latest' | 'surface-change'
+type TranscriptSearchAction = 'app.transcript.search' | 'app.transcript.search.view'
+
+interface TranscriptSearchOpening {
+  screen: TuiAltScreen | undefined
+  readonly component: TranscriptSearchComponent
+  readonly temporaryReader: boolean
+  admitted: boolean
+  openCallbackInFlight: boolean
+  mountInFlight: boolean
+  closeRequested: boolean
+  closeReason: TranscriptSearchCloseReason
+  closeNotified: boolean
+}
 
 /** One rendered transcript row used to restore a viewport after re-windowing.
  * Object identity is preferred for overlapping folder projections; row kind and
@@ -527,39 +599,6 @@ function workflowMemberMark(status: WorkflowRunStatus): string {
   }
 }
 
-/** One phase's disclosure state inside a Workflow run (PR2 plan §7, Web
- * advanceDisclosureState parity): the user's explicit choice wins forever
- * once set — EXCEPT across a NEW CYCLE: a clean phase (all members
- * completed) that gains a new running/abnormal member reopens (plan
- * §7.7), overriding a prior user close. `previousMode` +
- * `previousActivityCount` are the edge detectors (Web's
- * `phaseStartedCycle`): running → running is an ordinary update (the
- * user's close persists), clean → anything (or a clean phase whose
- * member count changed) is a new cycle (reopen). */
-interface WorkflowPhaseDisclosureState {
-  /** The user's explicit open/closed choice (undefined = fact-driven). */
-  userOpen?: boolean
-  /** The phase's mode at the last advance (edge detection). */
-  previousMode: 'clean' | 'running' | 'abnormal'
-  /** The phase's member count at the last advance (edge detection). */
-  previousActivityCount: number
-}
-
-/** One Workflow run's disclosure state (PR2 plan §7). Keyed by the durable
- * `runId`; phase state is keyed by `workflowPhaseKey(phase)` — never the
- * display label, never an array index. The run's open/closed value is
- * derived from the CURRENT facts at render time (completed → closed,
- * otherwise open) unless the user set an explicit choice; a phase starting
- * a new cycle reopens a user-closed run (plan §7.7). */
-interface WorkflowRunDisclosureState {
-  /** The user's explicit open/closed choice (undefined = fact-driven). */
-  userOpen?: boolean
-  /** The run's mode at the last advance (edge detection). */
-  previousMode: 'clean' | 'running' | 'abnormal'
-  /** Per-phase disclosure state by exact phase identity key. */
-  phases: Map<string, WorkflowPhaseDisclosureState>
-}
-
 /** One Workflow card row hit target (PR2 plan §12.5): the minimal per-line
  * metadata the fullscreen click map consumes — run header, phase header,
  * inline running member, phase `View N agents`, run `View all N agents`. */
@@ -614,6 +653,16 @@ export interface TranscriptSearchPresentationDiagnostics {
   fullRenders: number
   /** `setTranscript()` commits. */
   transcriptSets: number
+  /** Disposable source-cell probe renders for the current plain-text target.
+   * A static frame and every non-current card must contribute zero. */
+  plainTextProofs: number
+  /** Calls to the F1 Markdown cell proof for the current Assistant target.
+   * Every non-current card and every View/scroll frame must contribute zero. */
+  markdownProofs: number
+  /** Real `scrollTo` mutations made by the one-shot post-paint occlusion
+   * correction. A passive/scroll-only frame must contribute zero, and one
+   * explicit navigation at most one. */
+  occlusionCorrections: number
 }
 
 /** Test-only counters for transcript presentation invalidation. These counters
@@ -646,6 +695,126 @@ type TranscriptRebuildReason =
   | 'local-card'
   | 'other'
 
+/** The static Source-only source-kind label of one semantic target. Never a
+ * user string: the label only names the source vocabulary the match came
+ * from. */
+function searchSourceLabel(source: TranscriptSearchMatch['source'], message: TranscriptMessage): string {
+  switch (source.kind) {
+    case 'message':
+      switch (message.kind) {
+        case 'assistant': return 'Assistant text'
+        case 'user': return 'User text'
+        case 'thinking': return 'Thinking text'
+        default: return 'Message source'
+      }
+    case 'tool-field':
+      return source.field === 'name' ? 'Tool name' : source.field === 'args' ? 'Tool arguments' : 'Tool result'
+    case 'command-field':
+      return source.field === 'name' ? 'Command name' : source.field === 'args' ? 'Command arguments' : 'Command outcome'
+    case 'subcall-field':
+      return source.field === 'name' ? 'Subcall name' : source.field === 'args' ? 'Subcall arguments' : 'Subcall result'
+    case 'workflow-run': return 'Workflow run'
+    case 'workflow-phase': return 'Workflow phase'
+    case 'workflow-member': return 'Workflow member'
+    case 'assistant-deliverable':
+      return source.field === 'path' ? 'Delivered file path' : 'Delivered file description'
+  }
+}
+
+/** A snippet may leak nothing the card did not paint. Control/escape bytes
+ * (other than the whitespace a single display row folds) disqualify the whole
+ * snippet, and so does URL/path shaped context: ANY path separator (POSIX `/`,
+ * Windows `\`, UNC or a `C:relative` drive-qualified path), a URL authority
+ * (host:port, `localhost`, a dotted host, IPv4/IPv6), `www.`, a dotted
+ * file/domain-like token or HTML-ish markup.
+ * Deliberately conservative — a twelve-grapheme window can split a
+ * destination, so a partial match is never evidence that the rest is safe —
+ * and the display boundary outranks showing a snippet on every row. */
+const UNSAFE_SOURCE_SNIPPET = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u
+const UNSAFE_SOURCE_SNIPPET_SHAPE =
+  /[\\/]|www\.|<[A-Za-z][^>]*>|\b[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{2,}\b|\b[A-Za-z][A-Za-z0-9.-]*:\d{1,5}\b|\blocalhost\b|\[[0-9A-Fa-f:]+\]|\b\d{1,3}(?:\.\d{1,3}){3}\b|::|\b[A-Za-z]:(?=[^\s])/u
+
+function searchSourceSnippetTextIsSafe(text: string): boolean {
+  if (text === '') return false
+  if (UNSAFE_SOURCE_SNIPPET.test(text)) return false
+  return !UNSAFE_SOURCE_SNIPPET_SHAPE.test(text)
+}
+
+/** Code-unit window used to locate the snippet's grapheme boundaries. The
+ * context is at most `count` clusters, so a bounded window keeps the whole
+ * message prefix/suffix out of memory; the loop only widens for pathological
+ * giant clusters. */
+const SNIPPET_CONTEXT_WINDOW = 256
+
+/** Up to `count` grapheme clusters immediately before `offset`, so a snippet
+ * never starts inside a combining/ZWJ cluster. */
+function snippetStartBefore(text: string, offset: number, count: number): number {
+  let window = SNIPPET_CONTEXT_WINDOW
+  while (true) {
+    const from = Math.max(0, offset - window)
+    const starts: number[] = []
+    for (const segment of getGraphemeSegmenter().segment(text.slice(from, offset))) starts.push(from + segment.index)
+    if (starts.length >= count + 1) return starts[starts.length - count]!
+    // A window cut can split the FIRST cluster, so a short window is not
+    // trusted; the document start is the only exact fallback.
+    if (from === 0) return 0
+    window *= 2
+  }
+}
+
+/** Up to `count` grapheme clusters immediately after `offset`. */
+function snippetEndAfter(text: string, offset: number, count: number): number {
+  let window = SNIPPET_CONTEXT_WINDOW
+  while (true) {
+    const to = Math.min(text.length, offset + window)
+    const starts: number[] = []
+    for (const segment of getGraphemeSegmenter().segment(text.slice(offset, to))) starts.push(offset + segment.index)
+    // A window cut can only truncate the LAST cluster's end; its start stays
+    // exact, so `starts[count]` is a real boundary whenever it exists.
+    if (starts.length >= count + 1) return starts[count]!
+    if (to === text.length) return text.length
+    window *= 2
+  }
+}
+
+/** The safety guard's token expansion is bounded: a longer unbroken token is
+ * not a readable destination fragment, so the snippet is omitted instead of
+ * slicing/regex-testing a message-length token. */
+const SNIPPET_GUARD_TOKEN_MAX = 512
+
+/** A snippet is a display nicety, never a reason to walk a huge source: above
+ * this source length the notice stays label-only. */
+const SNIPPET_MAX_SOURCE_LENGTH = 200_000
+
+/** The start of the whitespace-delimited token that owns `offset`, or
+ * `undefined` when the token exceeds {@link SNIPPET_GUARD_TOKEN_MAX}. The
+ * DISPLAY stays a grapheme window, but the safety guard must see the complete
+ * token: a twelve-grapheme window can split an address/URL/path into a
+ * fragment (`127.0.0.1` -> `.0.0.1`) that no shape rule would recognize. */
+function snippetTokenStart(text: string, offset: number): number | undefined {
+  let start = offset
+  let walked = 0
+  while (start > 0 && !/\s/u.test(text[start - 1]!)) {
+    start -= 1
+    walked += 1
+    if (walked > SNIPPET_GUARD_TOKEN_MAX) return undefined
+  }
+  return start
+}
+
+/** The end (exclusive) of the whitespace-delimited token that owns `offset`,
+ * or `undefined` when it exceeds {@link SNIPPET_GUARD_TOKEN_MAX}. */
+function snippetTokenEnd(text: string, offset: number): number | undefined {
+  let end = offset
+  let walked = 0
+  while (end < text.length && !/\s/u.test(text[end]!)) {
+    end += 1
+    walked += 1
+    if (walked > SNIPPET_GUARD_TOKEN_MAX) return undefined
+  }
+  return end
+}
+
 /** Whether two search targets denote the SAME semantic navigation: the query,
  * the stable match identity (id + ordinals + source key) and the resolved card
  * object. Object reference is deliberately NOT the authority — the runner
@@ -657,6 +826,13 @@ function sameSearchTarget(left: TranscriptSearchPresentationTarget | undefined, 
   if (left.query !== right.query || left.message !== right.message) return false
   if (left.match.id !== right.match.id || left.match.turn !== right.match.turn) return false
   if (left.match.occurrence !== right.match.occurrence || left.match.sourceOccurrence !== right.match.sourceOccurrence) return false
+  const leftRange = left.match.normalizedSourceRange
+  const rightRange = right.match.normalizedSourceRange
+  if (leftRange === undefined || rightRange === undefined) {
+    if (leftRange !== rightRange) return false
+  } else if (leftRange.start !== rightRange.start || leftRange.end !== rightRange.end) {
+    return false
+  }
   return transcriptSearchSourceKey(left.match.source) === transcriptSearchSourceKey(right.match.source)
 }
 
@@ -731,6 +907,40 @@ export const XML_ENVELOPE_RESULT_TOOLS: ReadonlySet<string> = new Set(['read', '
  */
 export const TERMINAL_RESULT_TOOLS: ReadonlySet<string> = new Set(['bash', 'pwsh', 'shell'])
 
+/**
+ * The result lines ONE legacy PTC sub-call body paints, in BLOCK ORDER.
+ *
+ * An image-bearing row renders its structured blocks in order, so a mixed
+ * text+image result keeps its readable text AND gets the TSP's frozen
+ * payload-free identity row (`[IMAGE] name · W×H · bytes`) for each image
+ * block. Image BYTES never render on this surface; the native image node stays
+ * the TSP pane's capability. A row without an image block keeps its exact
+ * previous projection (terminal stdout keeps whitelisted SGR, every other
+ * result is plain text).
+ */
+export function subCallResultLines(child: Extract<TranscriptMessage, { kind: 'tool' }>): string[] {
+  const images = new Map(toolRowImageBlocks(child).map(block => [block.index, block.attachment]))
+  if (images.size === 0) {
+    return TERMINAL_RESULT_TOOLS.has(child.name)
+      ? sanitizeDisplayLog(child.result).split('\n')
+      : sanitizeDisplayText(child.result).split('\n')
+  }
+  const lines: string[] = []
+  ;(child.resultBlocks ?? []).forEach((block, index) => {
+    const attachment = images.get(index)
+    if (attachment !== undefined) {
+      lines.push(imageIdentityText(attachment))
+      return
+    }
+    if (block?.type === 'text' && typeof block.text === 'string') {
+      lines.push(...sanitizeDisplayText(block.text).split('\n'))
+    }
+  })
+  // A row whose blocks carry only images still states WHAT it holds.
+  if (lines.length === 0) for (const attachment of images.values()) lines.push(imageIdentityText(attachment))
+  return lines
+}
+
 /** First lines of a multi-line text, joined for folded previews. */
 function preview(text: string, lines: number): string {
   const parts = text.split('\n')
@@ -759,16 +969,30 @@ function preview(text: string, lines: number): string {
   return dropped && clipped === first ? `${clipped}…` : clipped
 }
 
+/** The ONE expanded-Host-Thinking text constructor: the dim `Thinking` title
+ * plus the sanitized reasoning body, each logical body line indented two cells.
+ * The live card and the disposable search-cell witness both build through it,
+ * so a probe can never drift from the painted layout. `undefined` keeps the
+ * original no-body shape for an empty reasoning source. */
+function expandedThinkingTextComponent(safeBodyText: string | undefined, iconStyle: IconStyle): Text {
+  const head = color.textDim(`${iconLead('thinking', iconStyle)}Thinking`)
+  const body = safeBodyText === undefined
+    ? ''
+    : safeBodyText.split('\n').map(line => `  ${line}`).join('\n')
+  return new Text([head, color.textDimItalic(body)].filter(line => line !== '').join('\n'), 0, 0)
+}
+
 
 /** SGR mouse reports (press/drag/release/wheel) — the alt screen owns them. */
 const MOUSE_SEQUENCE = /^\x1b\[<\d+;\d+;\d+[Mm]$/
 
 /**
  * Decode one SGR/legacy mouse WHEEL report into a 0-based cell and the signed
- * wheel step. `undefined` for every non-wheel mouse chunk, so press/release
- * keep flowing to the alt screen's own click machinery.
+ * wheel step. Shared by the Approval sheet and the active Question body;
+ * `undefined` for every non-wheel mouse chunk, so press/release keep flowing
+ * to the alt screen's own click machinery.
  */
-function parseApprovalWheel(data: string): { x: number; y: number; direction: -1 | 1 } | undefined {
+function parseModalWheel(data: string): { x: number; y: number; direction: -1 | 1 } | undefined {
   const sgr = /^\x1b\[<(\d+);(\d+);(\d+)[Mm]$/.exec(data)
   if (sgr !== null) {
     const button = Number.parseInt(sgr[1]!, 10)
@@ -793,6 +1017,44 @@ function parseApprovalWheel(data: string): { x: number; y: number; direction: -1
     }
   }
   return undefined
+}
+
+/**
+ * Decode one SGR mouse report's button number and release flag — the SAME
+ * grammar the fork's alt screen decodes (legacy X10 chunks are consumed by
+ * the fork without ever being decoded, so they carry no gesture semantics
+ * here and retire like any unknown protocol chunk); undefined for non-mouse
+ * input.
+ */
+function mouseChunkKind(data: string): {
+  readonly button: number
+  readonly release: boolean
+  readonly x: number
+  readonly y: number
+} | undefined {
+  const sgr = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/.exec(data)
+  if (sgr === null) return undefined
+  return {
+    button: Number.parseInt(sgr[1]!, 10),
+    release: sgr[4] === 'm',
+    x: Number.parseInt(sgr[2]!, 10) - 1,
+    y: Number.parseInt(sgr[3]!, 10) - 1,
+  }
+}
+
+/**
+ * Whether one mouse report retires a pending same-cell press gesture. The
+ * fork's click synthesis accepts a primary release (button 0) AND the
+ * release of the pressed button as encoded by several terminals (button 3)
+ * — both must COMPLETE the pending gesture, never retire it (a narrower
+ * classification would break the fork's own supported release path). Wheel
+ * and drag/motion reports and any other button's press/release are
+ * intervening input.
+ */
+function retiresPointerGesture(chunk: { readonly button: number; readonly release: boolean }): boolean {
+  if ((chunk.button & 64) !== 0 || (chunk.button & 32) !== 0) return true
+  if (chunk.release) return chunk.button !== 0 && chunk.button !== 3
+  return chunk.button !== 0
 }
 
 /**
@@ -1068,12 +1330,40 @@ export interface TuiAppEventsBase {
    *  exactly that occurrence; absent when no scope occurrence was recorded. */
   onSubmit: (text: string, request: ComposerSubmitRequest, scopeToken?: number) => void
   /**
+   * PR2/R5-1: the surface presents again after a stop() window that had
+   * parked a draft-restore obligation (a legacy command's failed line whose
+   * replay was refused while stopped). The submission owner replays it now,
+   * on the writable composer.
+   */
+  onDeferredDraftRestore?: () => void
+  /**
+   * PR2: the SYNCHRONOUS submit admission of the live composer. The renderer
+   * calls it BEFORE any draft/undo mutation and honors the verdict:
+   * `'held'` means the application already started the submission and the
+   * composer stays frozen with its document intact (the caller must NOT run
+   * its legacy submit path); `'legacy'` lets the caller run its existing
+   * pre-clear contract; `'refused'` consumes the gesture silently. Absent
+   * keeps the pre-PR2 (clear-first) behavior for compositions that do not
+   * provide the admission.
+   */
+  beginComposerSubmission?: (text: string, request: ComposerSubmitRequest | 'steer', scopeToken?: number) => 'held' | 'legacy' | 'refused'
+  /**
    * Clipboard paste with image intake (the paste-media action, plan M3):
    * the host consumed the key and asks the runner to probe the clipboard — an image lands as a draft
    * placeholder, plain text as an editor insert. Optional; absent keeps
    * the pre-pipeline behavior (the key falls through to the editor).
    */
   onClipboardPaste?: () => void
+  /**
+   * A REAL terminal bracketed paste was inserted into the default host
+   * composer as prompt text and may carry one local image file path (a
+   * DIFFERENT input source from {@link onClipboardPaste}: the terminal sent
+   * the path as text, the OS clipboard was never read). The application
+   * intake owner decides whether it is a candidate, reads/stages the image
+   * and replaces the exact tracked span; the renderer only forwards the
+   * receipt. Optional.
+   */
+  onTerminalPastedPath?: (receipt: PastedPathReceipt) => void
   /**
    * Whether a submitted line may enter the EDITOR history (both the
    * in-memory recall and the editor's own stack; the runner's persisted
@@ -1089,9 +1379,21 @@ export interface TuiAppEventsBase {
    * absent means the draft text is the only emptiness authority.
    */
   isImageDraft?: () => boolean
+  /** Single Escape while the Host user-shell run is active; aborts only that
+   * managed run and never enters the Agent Turn interrupt/rewind path. */
+  cancelLocalShellIfRunning?: () => boolean
   /** The user asked to quit after the TUI's same-key keyboard exit
    * confirmation; Ctrl+C additionally clears the draft on its first press. */
   onExit: () => void
+  /**
+   * M6 UX PR1: the LIVE authoritative activity of the exact current Session
+   * for the keyboard exit rule. The default physical Ctrl+C cancels current
+   * work once while `working`, refuses to arm an exit while `unknown`, and
+   * keeps the historical clear-then-double-press exit only when `idle`.
+   * Optional; absent keeps the historical double-press exit for every state
+   * (a composition without a Session authority never claims a busy cancel).
+   */
+  sessionActivity?: () => ExitSessionActivity
   /** Stop the current activity (the interrupt action, default: Esc — a
    * SINGLE press fires this directly while busy; idle, a double press
    * within the window fires it when the editor is non-empty, and an
@@ -1132,11 +1434,12 @@ export interface TuiAppEventsBase {
    * write — the toggle action has no default key; Ctrl+F is transcript
    * search). Optional. */
   onFullscreenChange?: (fullscreen: boolean) => void
-  /** The transcript search overlay opened; the host may clear
-   * stale presentation before a match moves the view into history. */
-  onSearchOpen?: () => void
-  /** The transcript-search query changed (the search action opened it;
-   * the search keys are fixed overlay contracts). Optional. */
+  /** The transcript-search overlay opened; `false` refuses admission. Existing
+   * listeners returning void remain compatible. */
+  onSearchOpen?: (scope: TranscriptSearchScope) => boolean | void
+  /** The active search overlay requested a scope change. */
+  onSearchScope?: (scope: TranscriptSearchScope) => void
+  /** The transcript-search query changed (the search action opened it). Optional. */
   onSearchQuery?: (query: string) => void
   /** The search's next-match key (fixed overlay contract): jump to the next match. Optional. */
   onSearchNext?: () => void
@@ -1185,6 +1488,14 @@ export interface TuiAppEventsBase {
    * not the official in-place queue edit operation. Optional.
    */
   onDequeue?: () => void
+  /**
+   * PR-Q: open the per-occurrence queued-message manager (the Dock `Manage`
+   * affordance, a Dock row click, `/queue` or the `app.queue.open` action).
+   * `initialItemId` is the clicked Host occurrence (a preselection hint only);
+   * the application-level manager re-reads the live projection and validates
+   * it before any write. Optional.
+   */
+  onOpenQueue?: (initialItemId?: string) => void
   /**
    * M6: a plugin keybinding fired (the InputRouter mapped a normalized
    * key to a SEMANTIC action). The host executes the action through its
@@ -1270,8 +1581,10 @@ export interface TuiQuestion {
   options?: readonly { label: string; description?: string }[]
   /** Whether more than one option may be selected. */
   multiSelect?: boolean
-  /** Presentation intent: approve names the recommended option label. */
-  intent?: { kind: string; approve?: string }
+  /** Presentation intent: approve names the recommended option label; the
+ * official plan-review intent also carries the reviewed tool call identity
+ * (presentation-only — the answer encoding is identical either way). */
+  intent?: { kind: string; approve?: string; callId?: string }
   /** Mask the free-text row's rendered content (an authorization secret
    *  prompt). The real value stays in the input's memory and is returned
    *  in the answer; only the DISPLAY is bullets, and nothing is logged,
@@ -1295,6 +1608,13 @@ export interface TuiQuestionAnswer {
 export interface TuiQuestionStatus {
   /** Status line rendered above the tabs; `undefined` renders none. */
   text?: string
+  /**
+   * Split-Client only: the flow is a LIVE forwarded interaction the Agent is
+   * blocked on (never a continued late-answer form). The modal-safe
+   * navigation hint paints only when this is true and the navigation control
+   * is installed.
+   */
+  navigationEligible?: boolean
   /** Fired on the FIRST real answer mutation (selection / text / skip). */
   onAnswerMutation?: () => void
   /**
@@ -1305,6 +1625,13 @@ export interface TuiQuestionStatus {
   onDraftChange?: (draft: QuestionFlowDraft) => void
   /** Local progress to seed the flow with (reopening the SAME parked call). */
   initialDraft?: QuestionFlowDraft
+  /**
+   * The OFFICIAL Question's owning Session identity (presentation-only). A
+   * plan-review inspection compares it with the CURRENT display subject before
+   * locating a tool card, so a question of another Session can never navigate
+   * this one. It never reaches the wire or the answer.
+   */
+  reviewSessionId?: string
 }
 
 /** Live state of one user-questions flow (the QuestionFlow seat). */
@@ -1537,6 +1864,11 @@ export interface TaskBrowserOptions {
    * observer that lives under this browser.
    */
   onRetired?: (reason: TaskBrowserCloseReason) => void
+  /** FR2: the READ-ONLY Team page DTO. Absent = Work-only (no Team tab). */
+  team?: TeamBrowserPresentation
+  /** FR2: physical pointer final admission (captured subject / browser token /
+   *  non-cleanup), read by the tab/filter/Team hit paths. */
+  interactionCurrent?: () => boolean
 }
 
 /** Live control of an open picker. */
@@ -1670,6 +2002,16 @@ export interface SettingsWorkspaceOpenOptions {
    */
   readonly onCommit?: (request: SettingsWorkspaceCommitRequest) => Promise<SettingsWorkspaceCommitOutcome>
   /**
+   * M6 UX PR2: the ONE explicit Profile service install, offered only after a
+   * verified `direct → daemon` transition in the SAME lease. The command layer
+   * owns the install task and settles exactly once with the control plane's own
+   * result; the app fences the settlement against THIS screen lease. Absent
+   * when the composition cannot prove the local capability.
+   */
+  readonly onBackendServiceInstall?: (
+    settle: (result: { readonly ok: boolean; readonly detail?: string }) => void,
+  ) => void
+  /**
    * The lazy factory of the ONE embedded Plugin Manager page hosted INSIDE this
    * Settings workspace (`Settings → Plugins`). The app owner supplies it from
    * the shared surface Plugin Manager runtime; it is invoked only when the
@@ -1679,6 +2021,7 @@ export interface SettingsWorkspaceOpenOptions {
    */
   readonly onOpenPlugins?: (
     onYieldNavigation: () => void,
+    onManageComputerUse: () => string | undefined,
   ) => import('./tui/plugin-manager/workspace.ts').EmbeddedPluginPage | undefined
   /** Fired once when the workspace is torn down by ANY path, with the reason
    *  the lease really closed. `user-exit` is the panel's own L0 Esc/Close
@@ -1706,13 +2049,15 @@ export interface SettingsWorkspaceOpenOptions {
   ) => SettingsAuthPage | undefined
   /** The Account page factory. */
   readonly createAccountPage?: (initial: AccountInitialView) => SettingsAuthPage | undefined
-  /**
-   * C2-R3: the ONE embedded specialist page factory (the existing subagent
-   * allowlist picker). It is mounted in the SAME Settings lease/body when the
-   * user explicitly activates the row that carries `specialist`; `done` returns
-   * to the Agent rows and `onAuthoritativeChange` asks for a fresh row read.
-   */
-  readonly createSubagentAllowlistPicker?: (
+  /** FR5-A: the one staged Subagent settings page in the SAME Settings lease. */
+  readonly createSubagentSettingsPage?: (
+    done: () => void,
+    onAuthoritativeChange: () => void,
+  ) => import('./tui/panels/settings-workspace-panel.ts').EmbeddedSpecialistPage | undefined
+  /** FR5-B: the one numeric page shared by the Agent-loop and Shell-execution
+   *  Settings rows, in the SAME Settings lease. */
+  readonly createHostNumericSettingsPage?: (
+    kind: 'agent-loop' | 'shell-execution',
     done: () => void,
     onAuthoritativeChange: () => void,
   ) => import('./tui/panels/settings-workspace-panel.ts').EmbeddedSpecialistPage | undefined
@@ -1743,6 +2088,18 @@ export interface SettingsWorkspaceOpenOptions {
   readonly createKeybindingsPage?: (
     done: () => void,
     onAuthoritativeChange: () => void,
+  ) => import('./tui/panels/settings-workspace-panel.ts').EmbeddedSpecialistPage | undefined
+  /**
+   * FR3: the ONE same-lease MCP servers page factory. The page's controller
+   * starts its single watch only after this factory runs on the live lease.
+   */
+  readonly createMcpServersPage?: (
+    done: () => void,
+  ) => import('./tui/panels/settings-workspace-panel.ts').EmbeddedSpecialistPage | undefined
+  /** PR-5/MAC-09 v2: the ONE same-lease Computer Use page factory. */
+  readonly createComputerUsePage?: (
+    done: () => void,
+    openPlugins: () => void,
   ) => import('./tui/panels/settings-workspace-panel.ts').EmbeddedSpecialistPage | undefined
 }
 
@@ -1775,6 +2132,12 @@ export interface SettingsWorkspaceHandle {
    *  ONE guarded document read). A superseded/closed lease is inert. */
   refreshRow(rowId: SettingsWorkspaceRowId, facts: SettingsWorkspaceRowFacts): void
   /**
+   * Invalidate an OPEN candidate choice for ONE writable field whose authority
+   * changed (e.g. a Connection generation change). The stale selection exits
+   * `choosing` before any new Confirm can dispatch it to a different Host.
+   */
+  invalidateChoice(field: import('./tui/panels/settings-workspace-panel.ts').SettingsWorkspaceWritableField): void
+  /**
    * C2-R5: settles when the typed deeplink page really mounted on the leased
    * first frame, failed, or the workspace was torn down. Commands await this to
    * return a REAL error instead of leaving a silently empty row. Resolves
@@ -1783,12 +2146,122 @@ export interface SettingsWorkspaceHandle {
   whenInitialSpecialistSettled(): Promise<import('./tui/panels/settings-workspace-panel.ts').SettingsInitialSpecialistSettlement>
 }
 
+/** The ONE per-open capture and callback set the PiTUI Session Workspace
+ *  command layer supplies. `subject` is the only currentness this open may
+ *  use: the panel never re-reads the live Session. */
+export interface SessionWorkspaceOpenOptions {
+  readonly subject: SessionBrowserSubject
+  readonly onQueryChange: (raw: string) => void
+  readonly onResume: (sessionId: string) => void
+  readonly onUseDirectory?: (workspaceId: string, canonicalPath: string) => void
+  readonly onNewSession?: (workspaceId: string, settle?: (outcome: import('./app/command/session-browser-presentation.ts').SessionBrowserNewSessionSettlement) => void) => void
+  readonly onAddDirectory?: (path: string, settle: (outcome: import('./app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void) => void
+  /** Session Workspace PR3: the ONE optional read-only Host directory browse
+   *  seam. Installed on the panel ONLY when this open really carries it. */
+  readonly onListDirectory?: SessionWorkspacePanelHost['onListDirectory']
+  /** The physical lease's ONE close notification (user Esc, blocking-owner
+   *  pre-emption or surface teardown). An owner-origin `close()` suppresses it. */
+  readonly onClose: () => void
+  readonly initialMode: 'browse' | 'search'
+  readonly initialBrowseScope: 'current' | 'all'
+  readonly initialDirectoryChooser?: boolean
+  readonly currentWorkspaceId?: string
+  readonly initialDirectoryEntry?: boolean
+  readonly initialDirectoryPath?: string
+}
+
+/** The returned control of ONE open Session Workspace, fenced by THIS lease
+ *  record: a stale handle can never repaint or close a newer screen. */
+export interface SessionWorkspaceHandle {
+  setSnapshot(snapshot: SessionBrowserReadSnapshot, initialQuery?: string): void
+  updateWorkspaces(frame: WorkspaceFactsFrame): void
+  workspaceUnavailable(message: string): void
+  /** M5-U-D: ONE accepted official Activity sample for the accepted roster
+   *  revision it belongs to, plus the Client-root forwarded-answer eligibility
+   *  read view. A stale/closed lease is inert. */
+  setActivityFacts(facts: SessionWorkspaceActivityFacts): void
+  /** M5-U-D: ONE failed Activity sample. Nonfatal: the roster, search and Peek
+   *  stay usable and every activity fact becomes Unknown. */
+  activityUnavailable(message: string): void
+  close(): void
+  isDisposed(): boolean
+}
+
+/** The controller-backed bindings of ONE Schedule workspace open. */
+export interface ScheduleWorkspaceBindings {
+  /** The CURRENT controller snapshot (the panel reads it on every frame). */
+  readonly snapshot: () => ScheduleWorkspaceSnapshot
+  /** The ONE intent entry; the controller owns every semantic. */
+  readonly dispatch: (intent: ScheduleIntent) => void
+  /** Teardown notification of THIS lease (the controller is disposed here). */
+  readonly onClose?: () => void
+}
+
+/** The instance-fenced handle of ONE Schedule workspace open. */
+export interface ScheduleWorkspaceHandle {
+  /** Leave the Schedule workspace and restore the surface that opened it. */
+  close(): void
+  /** Publish a newer controller snapshot and repaint; inert once superseded. */
+  update(snapshot: ScheduleWorkspaceSnapshot): void
+}
+
 /**
- * The ONE short-lived Settings workspace screen lease (Phase 3B / B2-A). Like
- * the Job workspace it renders in a temporary alt screen while the surface that
- * opened it — object tree, focus, draft and scroll state — is only STOPPED, and
- * it is MUTUALLY EXCLUSIVE with the Job lease: at most one workspace owns the
- * terminal at any time.
+ * Split-Client only: the ONE modal-safe no-answer navigation control Alt+W
+ * uses while a forwarded Question/Approval owns the editor seat.
+ *
+ * `begin()` commits the Client-root presentation-only hold and withdraws the
+ * local modal seat, returning the one-shot release; the official request stays
+ * live and keeps its Host lifetime. `open()` exercises the EXISTING registered
+ * `/sessions` entry (never a second listing or a private fallback). The
+ * composition root installs this only after the command registration settled.
+ */
+export interface NoAnswerNavigationControl {
+  /** Whether the registered `/sessions` entry can present its Browser here. */
+  available(): boolean
+  /** Commit the root hold and withdraw the local modal seat. */
+  begin(): () => void
+  /** Open the EXISTING registered Session Workspace. */
+  open(): void
+}
+
+/**
+ * The ONE PiTUI Host Editor `←←` composition control (M5-U-E).
+ *
+ * It is deliberately NARROW: the composition root installs the already
+ * registered `/sessions` entry's availability, the A3 scope authority's
+ * synchronous capture and the SAME command body opened with the All initial
+ * browse scope. The gesture itself (two unclaimed physical Left presses, the
+ * transient latch, its invalidation) stays inside this TuiApp instance; this
+ * control never owns a listing, a Session identity, a Screen or a Host read.
+ */
+export interface EditorWorkspaceEntryControl {
+  /** Whether the registered `/sessions` entry can present its Browser here. */
+  available(): boolean
+  /** Capture the app's ONE current Session/generation (sessionless included). */
+  captureIsCurrent(): () => boolean
+  /** Invoke the registered `/sessions` UI body with the All initial scope. */
+  openAll(): void
+}
+
+/**
+ * The ONE transient first-Press latch of the Host Editor `←←` gesture. Purely
+ * discardable surface state: it pins the monotonic first-press clock, the
+ * editor edit epoch, the installed control identity and the captured Session
+ * scope currentness. Nothing durable (SessionId, Screen, Reader) is stored.
+ */
+interface LeftWorkspaceArm {
+  readonly at: number
+  readonly editEpoch: number
+  readonly control: EditorWorkspaceEntryControl
+  readonly current: () => boolean
+}
+
+/**
+ * The ONE short-lived workspace screen lease (Settings, the Session Workspace
+ * and the Image UX screens). Like the Job workspace it renders in a temporary
+ * alt screen while the surface that opened it — object tree, focus, draft and
+ * scroll state — is only STOPPED, and it is MUTUALLY EXCLUSIVE with the Job
+ * lease: at most one workspace owns the terminal at any time.
  */
 /** The layout-root panel a workspace lease hosts (the Settings workspace). */
 type WorkspaceLeasePanel = Component & {
@@ -1798,11 +2271,12 @@ type WorkspaceLeasePanel = Component & {
   handleMouse?(event: TuiMouseEvent): TuiMouseEventResult | undefined
 }
 
-/** The ONE temporary fullscreen workspace lease (the Settings workspace or the
- *  Image UX PR2 picker/Viewer screen). The Plugin Manager is a CHILD of the
- *  Settings lease and never takes a workspace screen of its own. */
+/** The ONE temporary fullscreen workspace lease (the Settings workspace, the
+ *  Session Workspace or the Image UX PR2 picker/Viewer screen). The Plugin
+ *  Manager is a CHILD of the Settings lease and never takes a workspace screen
+ *  of its own. */
 interface WorkspaceLeaseRecord {
-  readonly kind: 'settings' | 'image'
+  readonly kind: 'settings' | 'image' | 'sessions' | 'schedule'
   readonly token: object
   readonly screen: TuiAltScreen
   readonly panel: WorkspaceLeasePanel
@@ -1826,6 +2300,8 @@ export interface TaskBrowserHandle {
   setItems(items: readonly TaskPanelItem[], preferredValue?: string): void
   /** Update loading/ready/stale state without replacing cached rows. */
   setRefreshState?(state: 'loading' | 'ready' | 'stale', error?: string): void
+  /** FR2: replace (or, with `undefined`, REVOKE) the READ-ONLY Team page DTO. */
+  setTeamPage?(value: TeamBrowserPresentation | undefined): void
   /** Read the presentation state for tests/embedders (the full projection
    *  snapshot; the Quick→Full restore consumer retired with the modal
    *  Quick, B4-B). */
@@ -1924,6 +2400,10 @@ export interface TuiAppOptions {
    * store, exposed so a mounted test can stage REAL draft bytes through the
    * production intake surface. Never read by production code paths. */
   draftImageStoreForTest?: import('./client/media/image/draft-store.ts').DraftImageStore
+  /** Headless-test seam: the runner's live generic-file draft store, exposed
+   * so a mounted test can stage REAL file drafts through the production
+   * submission surface. Never read by production code paths. */
+  draftFileStoreForTest?: import('./client/media/attachment/file-draft.ts').DraftFileStore
   /**
    * The READ-ONLY composer draft-image projection (image UX plan PR1). The
    * runner supplies the live store's staged values; the preview never
@@ -1953,6 +2433,13 @@ export interface TuiAppOptions {
    * mutations and real history retirement — it keeps no mirror of either.
    */
   draftImagePreviewUndo?: import('./client/media/image/draft-store.ts').DraftImageUndoLeasePort
+  /**
+   * The ONE application intake owner of a terminal bracketed pasted image
+   * file path. The host editor forwards each proven paste receipt here and
+   * consults its read-only delivery predicate BEFORE any submit/steer clear;
+   * absent keeps the pasted path ordinary text (headless fixtures).
+   */
+  terminalPastedPath?: PastedImageIntakePort
   imageTheme?: import('./tui/components/media/image-thumbnail.ts').ImageThumbnailTheme
   /**
    * PR-D: the Client-local SVG raster cache. Wired by the mount composition
@@ -1999,6 +2486,15 @@ export interface TuiAppOptions {
    */
   terminalProgressMode?: TerminalProgressMode
   /**
+   * READ-ONLY observation of the main-Agent LOGICAL status this app already
+   * derives for itself ({@link TuiApp.effectiveProgramStatus}). It is called
+   * after the authoritative fact commit — never from the physical OSC writer —
+   * so an external sink keeps reporting even when the terminal progress mode
+   * is off or the PTY is temporarily owned by `$EDITOR`. The observer must be
+   * synchronous and must not re-enter the app's status inputs.
+   */
+  onProgramStatus?: (status: ProgramStatus) => void
+  /**
    * The structural icon palette (emoji | symbols | minimal), read once at
    * startup from the persisted settings. Runtime switches go through
    * {@link TuiApp.setIconStyle} — renderers NEVER deep-read a settings
@@ -2021,6 +2517,8 @@ export interface TuiAppOptions {
   statusStore?: StatusStore
   /** The shared canonical display authority. Standalone surfaces default to Full. */
   displayState?: DisplayState
+  /** Query coverage authority supplied by the mounted Direct/Remote composition. */
+  initialSearchCoverage?: TranscriptSearchCoverage
   /** M5: fired when the terminal WIDTH materially changed (the command
    * surface refreshes on width changes — the runner coalesces to its
    * interval). */
@@ -2048,6 +2546,17 @@ export interface TuiAppOptions {
    *  navigation action. Optional; absence omits that action entirely. This is
    *  first-party internal wiring, not an extension API. */
   onQuickTaskOpenFull?: () => void
+  /**
+   * PR3: the Fullscreen footer's two FIRST-PARTY navigation entries. Both
+   * are the existing business owners — the registered `/model` command body
+   * and the Full Task Center — never a second picker/browser and never a
+   * capability shadow. Absent means the footer placement stays inert
+   * (standalone TuiApp fixtures keep no local fallback).
+   */
+  onFooterModelOpen?: () => void
+  footerModelAvailable?: () => boolean
+  onFooterTasksOpen?: () => void
+  footerTasksAvailable?: () => boolean
   /**
    * M6: the plugin keybinding resolver (wired by the runner from the M5
    * KeybindingRegistry). Maps a NORMALIZED key (the InputRouter has
@@ -2272,6 +2781,16 @@ type TranscriptRenderBlock = FocusProjectedBlock | TranscriptWorkBlock | Transcr
 } | {
   kind: 'pending-tail'
   item: PendingTailRow
+}
+
+type LocalShellPlacement = Omit<UserShellPresentationPlacement, 'acceptedOrder'>
+
+interface LocalShellEntry {
+  message: TranscriptMessage
+  placement: LocalShellPlacement
+  acceptedOrder: number
+  /** Client-local Session-submission outcome; absent while pending/succeeded. */
+  submission?: UserShellSubmissionState
 }
 
 /** Canonical Work/cluster membership for one `messages` window, memoized on
@@ -2561,6 +3080,71 @@ type TranscriptCellGesture = {
 /** The gesture hit id of the pinned viewer subject bar's `‹ back` affordance. */
 const VIEWER_BACK_HIT = 'back'
 
+/** PR3: one press on a PAINTED first-party root-Footer placement. The
+ * release may only act on the EXACT painted frame revision, placement,
+ * cell and terminal geometry the user pressed — never on a same-id target
+ * that repainted onto the cell. */
+type FooterPressGesture = {
+  readonly screen: TuiAltScreen
+  readonly compositionRevision: number
+  readonly subjectKind: 'main'
+  readonly id: FooterClickId
+  readonly placement: string
+  /** Absolute screen cell (0-based; half-open columns). */
+  readonly row: number
+  readonly startCol: number
+  readonly endCol: number
+  /** The exact pressed cell inside the hit span: a release at any OTHER cell
+   * never synthesizes a click, so the gesture retires and the fork's armed
+   * multi-click history is consumed. */
+  readonly pressX: number
+  readonly pressY: number
+  readonly columns: number
+  readonly termRows: number
+  /* Painted-frame geometry fencing (plan §9.1): the footer is bottom-anchored
+   * pinned chrome with `shrink: 0`, so its painted box is a pure function of
+   * the terminal geometry (columns/termRows, both fenced) and the composed
+   * line count (fenced by the projection revision, whose key carries the
+   * full text). Any reachable box change therefore necessarily moves one of
+   * the fenced values — the absolute hit cell + revision + screen identity
+   * below ARE the complete box fence, and storing the box separately would
+   * add a redundant latch for an unreachable state. */
+}
+
+/** One footer hit translated to ABSOLUTE screen cells of the painted
+ * frame. */
+type PaintedFooterHit = {
+  readonly id: FooterClickId
+  readonly placement: string
+  readonly row: number
+  readonly startCol: number
+  readonly endCol: number
+}
+
+/** PR3: the footer composition that belongs to the last PAINTED fullscreen
+ * frame, with its painted box and absolute hit cells. A value never
+ * outlives the frame it describes: every consumer checks the live screen,
+ * terminal geometry and projection revision before acting. */
+type PaintedFooterProjection = {
+  readonly screen: TuiAltScreen
+  readonly revision: number
+  readonly subjectKind: 'main' | 'subagent'
+  readonly columns: number
+  readonly termRows: number
+  readonly top: number
+  readonly left: number
+  readonly width: number
+  readonly height: number
+  readonly hits: ReadonlyArray<PaintedFooterHit>
+}
+
+/** PR3: one transient composition awaiting its paint commit. */
+type PendingFooterProjection = {
+  readonly revision: number
+  readonly subjectKind: 'main' | 'subagent'
+  readonly projection: FooterPaintProjection
+}
+
 /** The stable owner identity of one PAINTED `‹ back` band: a child switch, a
  *  viewer reopen or an exit bumps the generation, so a press can never
  *  transfer to a different viewer (viewer UX plan §6.2). */
@@ -2815,6 +3399,49 @@ function userDisclosureMountAction(
   return hits.some(hit => hit.action === 'collapse') ? 'collapse' : 'expand'
 }
 
+type RenderedViewSearchHit = {
+  readonly component: Component
+  readonly blockIndex: number
+  readonly localMatchIndex: number
+  readonly matchKey: string
+  readonly firstTranscriptRow: number
+  readonly lastTranscriptRow: number
+}
+
+type RenderedViewSearchBlockSnapshot = {
+  readonly component: Component
+  readonly lines: readonly string[]
+}
+
+type RenderedViewSearchState = {
+  readonly query: string
+  readonly hits: readonly RenderedViewSearchHit[]
+  readonly blocks: readonly RenderedViewSearchBlockSnapshot[]
+  readonly currentIndex: number
+  readonly width: number
+}
+
+/** The single-call outcome of the current Assistant Markdown source proof:
+ * proven cells, or the honest reason they are absent. */
+type AssistantMarkdownSourceProof =
+  | { readonly kind: 'proven'; readonly segments: readonly AltScreenSearchSegment[] }
+  | { readonly kind: 'not-painted' | 'unproven' }
+
+/** One-shot eligibility for the post-paint occlusion correction: the frame
+ * that just painted is the one whose REAL boxes decide the target's
+ * readability. Every field identifies the current search epoch; any mismatch
+ * retires the eligibility without scrolling. */
+type SearchOcclusionCorrection = {
+  readonly screen: TuiAltScreen
+  readonly overlay: OverlayHandle
+  readonly scope: TranscriptSearchScope
+  readonly query: string
+  readonly presentationRevision: number
+  readonly viewIndex: number
+  readonly columns: number
+  readonly termRows: number
+}
+
 /** One transcript block rendered once for the current Focus projection. The
  * shared result keeps the painted component tree and the fullscreen hit map
  * on the same measured rows without a second live render. */
@@ -2830,7 +3457,10 @@ type RenderedTranscriptBlock = {
   searchSelection?: RenderedSearchSelection
   /** The selector matching {@link searchSelection} for the CURRENT render
    * epoch: remeasure uses it to re-sync the mounted highlight wrapper. */
-  searchSelector?: RenderedSearchSelector
+  searchSelector?: SearchHighlightPaintSelector
+  /** Rendered-view matcher/results owned by this mounted block only. */
+  renderedViewIndex?: AltScreenSearchIndex
+  renderedViewMatches?: readonly AltScreenSearchMatch[]
   /** Physical non-owning gutter mount; absent for zero-height blocks. */
   mount?: TranscriptGutterComponent
   truncatedMarker: boolean
@@ -2854,34 +3484,6 @@ type FocusLiveHeightState = {
   expanded: boolean
   width: number
   height: number
-}
-
-/**
- * One accepted Enter submission of the OPEN editor-recall scope (see
- * {@link TuiApp.scopeInputs}): the owner it was accepted for, the OCCURRENCE
- * token threaded through its submission into the persistence record, and its
- * trimmed text. The token is what makes a settlement attributable to exactly
- * this occurrence even when the same text is submitted several times.
- */
-interface ScopeSubmission {
-  readonly owner: string | undefined
-  readonly token: number
-  readonly text: string
-}
-
-/** One settlement the write owner reported (see
- *  {@link TuiApp.settleScopeInput}), in APPEND order. */
-interface ScopeSettlement {
-  /** The occurrence token when the settled submission was a scope Enter
-   *  (`undefined` for every other session-history writer: a Ctrl+S / editor /
-   *  extension steer, a bare `!`, a sessionless command, …). */
-  readonly token?: number
-  /** The session id the row carries (`undefined` = a sessionless row). */
-  readonly owner: string | undefined
-  /** Whether the row was appended, or skipped by the write policy. */
-  readonly outcome: 'written' | 'skipped'
-  /** The submitted text (the owner's trimmed row content). */
-  readonly text: string
 }
 
 /** The ONE SIXEL-backed trust port projection: Direct SIXEL or Zellij. */
@@ -3009,6 +3611,15 @@ export class TuiApp {
   private readonly footerComposer: FooterComposer
   private readonly tui: TuiMainScreen
   private readonly editor: TuiEditor
+  /** The short-lived paste-range leases of the default host composer: the
+   *  only identity an async image read may replace. */
+  private readonly pasteRanges = new PasteRangeTracker()
+  /** The REAL editor state before the current input event. The one splice it
+   *  caused is proven from this anchor — the tracker never infers a position
+   *  from a text diff (two different edits can produce the same text). */
+  private pasteEditAnchor: { text: string; cursor: number } | undefined
+  /** @see TuiAppOptions.terminalPastedPath — the application intake owner. */
+  private readonly terminalPastedPath: PastedImageIntakePort | undefined
   /**
    * The surface GENERATION: incremented only when a genuinely NEW surface
    * attaches (a fresh TuiApp / SurfaceHost), never by start/stop, fullscreen
@@ -3032,6 +3643,12 @@ export class TuiApp {
    * re-asserts the effective value.
    */
   private terminalProgressActive = false
+  /**
+   * The optional READ-ONLY logical-status observer (an external Pane reporter).
+   * It receives the already-derived main-Agent status after a fact commit and
+   * is never consulted by the physical terminal writers.
+   */
+  private readonly onProgramStatus: ((status: ProgramStatus) => void) | undefined
   /**
    * The already-SETTLED outcome of the current main-Agent running interval, as
    * proven by the application evidence fold before this commit. It only
@@ -3169,6 +3786,11 @@ export class TuiApp {
   private readonly quickTaskSelect: ((value: string) => boolean) | undefined
   /** The Full Task Center route for Quick's typed open-full navigation target. */
   private readonly quickTaskOpenFull: (() => void) | undefined
+  /** PR3: the first-party footer navigation entries (see TuiAppOptions). */
+  private readonly footerModelOpen: (() => void) | undefined
+  private readonly footerModelAvailable: (() => boolean) | undefined
+  private readonly footerTasksOpen: (() => void) | undefined
+  private readonly footerTasksAvailable: (() => boolean) | undefined
   /** PR-D: the measured protected pinned chrome height the CURRENT fullscreen
    * widget grant was derived from (undefined on the regular surface, whose
    * grants are fixed). A change means the grant is stale — the widget rows
@@ -3226,6 +3848,27 @@ export class TuiApp {
   /** The active user-questions flow, if any (one on screen at a time). */
   private activeQuestions: QuestionState | undefined
   /**
+   * Split-Client only: the ONE modal-safe no-answer navigation entry (Alt+W),
+   * installed by the composition root after the `/sessions` registration
+   * settled. Absent on Direct and on a renderer mount without a TuiApp, where
+   * Alt+W stays inert.
+   */
+  private noAnswerNavigation: NoAnswerNavigationControl | undefined
+  /**
+   * M5-U-E: the ONE PiTUI Host Editor `←←` composition control, installed by
+   * the composition root after the `/sessions` registration settled. Absent on
+   * a TSP mount (no TuiApp) and inert without a registered entry.
+   */
+  private editorWorkspaceEntry: EditorWorkspaceEntryControl | undefined
+  /** The transient first-Press latch of {@link EditorWorkspaceEntryControl}. */
+  private leftWorkspaceArm: LeftWorkspaceArm | undefined
+  /**
+   * One-shot callbacks armed by Alt+W: the Session Workspace close (or a
+   * blocking-owner pre-emption) releases the root navigation hold. A set keeps
+   * the close path independent of the lease's own `onClose`.
+   */
+  private readonly workspaceCloseHooks = new Set<() => void>()
+  /**
    * M3-3B final-answer enrichment: the authoritative settled answers of one
    * timed `ask_user_question` call (the `userQuestions.settled` projection),
    * keyed by the card's `callId`. A timed-out call's own tool result records
@@ -3264,6 +3907,15 @@ export class TuiApp {
    * not a transcript row, and its release must re-prove the exact draft
    * text/occurrence geometry it was pressed against. */
   private draftPreviewGesture: { remove: DraftPreviewRemoveHit; columns: number; termRows: number } | undefined
+  /** PR3: the transient footer click provenance. The pending projection is
+   * the last COMPOSED footer (waiting for its frame commit); the painted
+   * projection describes the frame the user actually saw; the press gesture
+   * is the one-shot release latch. None of them is persisted or transmitted. */
+  private footerProjectionRevision = 0
+  private footerProjectionKey: string | undefined
+  private footerPendingProjection: PendingFooterProjection | undefined
+  private footerPaintedProjection: PaintedFooterProjection | undefined
+  private footerPressGesture: FooterPressGesture | undefined
 
   /** Invalidate every fullscreen press/release latch at an ownership or
    * surface boundary. A gesture captured by one owner must never be
@@ -3271,6 +3923,7 @@ export class TuiApp {
   private clearFullscreenPointerGestures(): void {
     this.fullscreenCellGesture = undefined
     this.draftPreviewGesture = undefined
+    this.footerPressGesture = undefined
     this.questionPressGesture = undefined
     this.questionTranscriptGesture = undefined
     this.approvalPressGesture = undefined
@@ -3302,79 +3955,18 @@ export class TuiApp {
    * Focus activity state. The runner replaces this snapshot on each coalesced
    * transcript repaint. */
   private streamingToolPreviews: readonly StreamingToolPreview[] = []
-  /** Local (non-session) cards — e.g. `!` shell runs — rendered after the transcript. */
-  private readonly localMessages: TranscriptMessage[] = []
-  /** Submitted input history (newest first), mirrored for persistence. */
-  private readonly inputHistory: string[] = []
+  /** Client-local cards with frozen transcript placement, never Session rows. */
+  private readonly localMessages: LocalShellEntry[] = []
+  /** Monotonic display order captured at the accepted Shell gesture. */
+  private localShellAcceptedOrder = 0
   /**
-   * The SCOPE-BOUND TEMPORARY SUBMISSIONS of the OPEN editor-recall scope, in
-   * submission order (newest first): one entry per input `rememberInput`
-   * accepted for the scope's owner, each carrying its own OCCURRENCE token. A
-   * Session's hydration reseeds ↕ recall from the session-scoped JSONL rows,
-   * while a submission's own append is ordered behind the session transition
-   * (the submit FIFO turn and `ensureSession()`), so a submission accepted
-   * inside the publication→hydration window is absent from the snapshot and
-   * would be wiped by the reseed.
-   *
-   * The list is the scope's TRUE submission sequence and is never re-ordered or
-   * shrunk; the write owner settles OCCURRENCES into
-   * {@link scopeSettlements}, never into this list. The whole list is dropped
-   * only when the scope is replaced (or consumed by its owner's reseed / the
-   * pool's adoption).
+   * The ONE Client-local input-recall kernel of this mount (TSP I-A): the
+   * recall projection, the OPEN scope's occurrences, the write owner's
+   * settlements and the hydration reseed reconcile all live there. The editor
+   * keeps its own ↑/↓ stack, rebuilt from the kernel's snapshot — never a
+   * second mirror and never a scope ledger on the app.
    */
-  private readonly scopeInputs: ScopeSubmission[] = []
-  /**
-   * The ordered settlements of the OPEN scope (oldest first): one report per
-   * settled submission, produced by the session-history owner from the SAME
-   * synchronous stack as its append (or from its policy skip). The order is the
-   * APPEND order, which is the file's row order — the authoritative order of the
-   * rows the reseed snapshot carries. This queue is bounded, so it is NOT the
-   * authority for "was this occurrence settled"; that fact lives in
-   * {@link scopeSettled}.
-   */
-  private readonly scopeSettlements: ScopeSettlement[] = []
-  /**
-   * The DURABLE per-occurrence settlement fact of the OPEN scope, keyed by the
-   * occurrence token: which outcome settled it and the session id its row
-   * carried. Bounded by the scope's own occurrences (never by the queue), so a
-   * settlement the queue evicted can neither resurrect the occurrence nor lose
-   * it.
-   */
-  private readonly scopeSettled = new Map<number, {
-    readonly owner: string | undefined
-    readonly outcome: 'written' | 'skipped'
-    /** The number of the ROW OWNER's appends that preceded this settlement —
-     *  its rank among the covered rows, which survives the queue's cap. */
-    readonly appendsBefore: number
-  }>()
-  /** The LIVE occurrence tokens of the open scope: the durable facts above are
-   *  kept for exactly these (bounded by the scope cap, never by the queue). */
-  private readonly scopeOccurrences = new Set<number>()
-  /** The number of APPENDS this scope's settlements reported per row owner — the
-   *  exact watermark of how many of the snapshot's newest rows the window owns,
-   *  even for settlements the bounded queue evicted. */
-  private readonly scopeAppends = new Map<string | undefined, number>()
-  /**
-   * The number of positions the last recall reconcile visited — a HEADLESS-TEST
-   * HOOK pinning the frozen plan's O(100) bound (never read by production code).
-   */
-  private reconcileSteps = 0
-  /** The next occurrence token (monotonic per process; only equality matters). */
-  private scopeTokenSeq = 0
-  /**
-   * The owner the OPEN scope's entries were accepted for (`undefined` = the
-   * sessionless pool). The pool is a real scope: a deferred start and the
-   * Remote startup resume both accept input before any hydration reseeds the
-   * recall, and the first published owner ADOPTS the pool's entries (that
-   * submission's row is persisted under the new Session, so the snapshot
-   * cannot carry it yet).
-   */
-  private scopeOwner: string | undefined = undefined
-  /** Whether a recall scope is open. Open at construction (the sessionless
-   * pool); closed by the owning owner's hydration reseed commit. */
-  private scopeOpen = true
-  /** Cap for the persisted input history per working directory. */
-  private static readonly INPUT_HISTORY_LIMIT = 100
+  private readonly historyRecall = createHistoryRecallScope()
   /** Ctrl+O master switch: expand the most recent turns' collapsible
    * entries (the ordinary fold) — and, in REGULAR Focus, the DERIVED
    * reveal of the recent Focus Thoughts (never written into
@@ -3423,7 +4015,7 @@ export class TuiApp {
    * `❯ text` row per pending message and a dim hint. Renders nothing while
    * the queue is empty.
    */
-  private readonly queuePane: Text
+  private readonly queuePane: DockQueue
   /** The semantic queued pending-input occurrences for the active subject. */
   private queueItems: readonly QueueItem[] = []
   /** The ONE ordered ephemeral pending tail lane (authoritative steering +
@@ -3497,6 +4089,11 @@ export class TuiApp {
   }
   /** Fullscreen (alt-screen) instance; absent in regular mode. */
   private fullscreen: TuiAltScreen | undefined
+  /** A temporary Fullscreen used only to make the Regular transcript navigable. */
+  private temporarySearchReaderReturnToRegular = false
+  /** One-shot authorization consumed by setFullscreen at the call boundary. */
+  private temporarySearchReaderTransitionPermit = false
+  private fullscreenTransitionDepth = 0
   /**
    * The ONE current Job workspace lease (Phase 3B / B1-A), or undefined. Its
    * `screen` is the physical owner while it is set: `activeScreen` derives the
@@ -3547,12 +4144,16 @@ export class TuiApp {
   private schemeDisposers: (() => void)[] = []
   /** The mounted transcript-search overlay, while one is open. */
   private searchOverlay: OverlayHandle | undefined
-  /** The search input component, while one is open (for match counts). */
+  /** The search input component, while one is open (for result/scope projection). */
   private searchComponent: TranscriptSearchComponent | undefined
+  private searchOpening: TranscriptSearchOpening | undefined
+  private transcriptSearchCoverage: TranscriptSearchCoverage = 'loaded-history'
   /** The temporary search presentation target: while set, its owner turn /
    * card is revealed and the query highlighted — presentation only, never
    * written into any user disclosure map. */
   private searchTarget: TranscriptSearchPresentationTarget | undefined
+  /** Current mounted-rendered View query and occurrence selection. */
+  private renderedViewSearch: RenderedViewSearchState | undefined
   /** The representative cards of the CURRENT semantic search result set
    * (runner-owned). Only these cards may receive a weak visual highlight; a
    * card that merely renders the query in UI chrome is never decorated. */
@@ -3580,6 +4181,43 @@ export class TuiApp {
   /** The block-relative transcript range of the current search selection
    * (welcome card excluded), recomputed on every rebuild/remeasure. */
   private currentSearchTranscriptRange: RenderedSearchScrollRange | undefined
+  /** The CURRENT render epoch's proven target cells in transcript DOCUMENT
+   * rows (welcome included). Absent for an anchor-only target: the occlusion
+   * solver then uses the conservative full-width target rows instead of
+   * guessing columns. Never persisted, never reused across a width/proof
+   * epoch. */
+  private currentSearchPaintedSegments: readonly PaintedTargetSegment[] | undefined
+  /** The CURRENT render epoch's Source-only notice for a Full target without a
+   * proven cell. `revision`/`query` bind it to the epoch that produced it. */
+  private searchSourceNotice: (FullSearchSourceNotice & { readonly query: string; readonly revision: number }) | undefined
+  /** Whether the CURRENT render epoch has any proving channel for the target's
+   * semantic source, i.e. an unvisited same-card occurrence could still prove
+   * exact. Disposable metadata bound to query/revision/message; it never feeds
+   * the corpus or a stored geometry map. */
+  private searchExactChannelAvailable: {
+    readonly revision: number
+    readonly query: string
+    readonly message: TranscriptMessage
+    readonly available: boolean
+  } | undefined
+  /** Monotonic epoch for NON-search structural state (resize, theme, display
+   * preset, disclosure, content remeasure). The navigation projection caches a
+   * target's qualification; that cache must expire when the frame that proved
+   * it changed, but MUST NOT expire on every ordinary search jump (which only
+   * bumps `searchPresentationRevision`). */
+  private searchQualificationEpoch = 0
+  /** One-shot occlusion correction eligibility, registered by an explicit
+   * navigation (or a resize) and consumed by the next painted-frame commit. */
+  private pendingSearchOcclusionCorrection: SearchOcclusionCorrection | undefined
+  /** One-entry memo for the CURRENT target's snippet: a passive rebuild of the
+   * same settled source must not re-project its raw grapheme context. */
+  private searchSourceSnippetMemo: {
+    readonly revision: number
+    readonly query: string
+    readonly message: TranscriptMessage
+    readonly text: string
+    readonly snippet: string | undefined
+  } | undefined
   /** The transcript content height (welcome card + rows + hint/notify) measured
    * by the LAST rebuild/remeasure. `scrollToSearchTarget` reads it instead of
    * re-rendering the whole mounted view for every ordinary search jump. */
@@ -3596,6 +4234,9 @@ export class TuiApp {
     renderedMatchResultCacheHits: 0,
     fullRenders: 0,
     transcriptSets: 0,
+    plainTextProofs: 0,
+    markdownProofs: 0,
+    occlusionCorrections: 0,
   }
   /** Test-only structural/content invalidation counters. */
   private readonly transcriptPresentationDiagnostics: TranscriptPresentationDiagnostics = {
@@ -3638,6 +4279,27 @@ export class TuiApp {
   private modelPickerOverlay: OverlayHandle | undefined
   /** The live responsive frame of the /model picker. */
   private modelPickerFrame: ResponsiveOverlayFrame | undefined
+  /** The independent Team-disable confirmation seat (a logical Root seat of
+   *  its own: it outlives the /model overlay and owns its write admission). */
+  private teamConfirmationOverlay: {
+    readonly handle: OverlayHandle
+    readonly component: TeamDisableConfirmation
+    close(): void
+  } | undefined
+  /** M6 UX PR1: the ONE Client-local Exit Choice seat. It outlives no
+   *  session: the exit-intent coordinator owns its decision state and asks
+   *  this app only to paint/withdraw the model. The seat is published BEFORE
+   *  its physical mount, because that mount can synchronously run another
+   *  owner's blur/focus callback which may preempt it. */
+  private clientExitChoiceOverlay: {
+    readonly component: ExitChoicePanel
+    model: ExitChoiceModel
+    /** The physical overlay handle, assigned once the synchronous mount returns. */
+    handle: OverlayHandle | undefined
+    /** A real Host modal withdrew this seat while it was mounting. */
+    preempted: boolean
+    close(): void
+  } | undefined
   /** The injected Ctrl+R search source (the runner wires the file-backed
    * implementation; the host never touches the filesystem). */
   private readonly historySearchSource: HistorySearchSource | undefined
@@ -3745,7 +4407,7 @@ export class TuiApp {
    *  can never pass an equality-only fence (ABA). */
   private editorEditEpoch = 0
   /** The latest window metadata, retained so remapped key hints stay live. */
-  private transcriptWindow: (TranscriptWindowState & { firstTurn?: number; lastTurn?: number; hasNewer?: boolean }) | undefined
+  private transcriptWindow: (TranscriptWindowState & { firstTurn?: number; lastTurn?: number; hasOlder?: boolean; hasNewer?: boolean }) | undefined
   /** Styling of the current notify line: info (default) is dim with a ℹ,
    * errors are red with a ✗. */
   private notifyKind: 'error' | 'info' = 'info'
@@ -3760,6 +4422,9 @@ export class TuiApp {
   private lastEscapeAt: number | undefined
   /** Idle double-Esc window in ms. */
   private static readonly ESCAPE_CANCEL_WINDOW_MS = 400
+  /** M5-U-E: the two-press Host Editor `←←` window, measured from the FIRST
+   *  eligible press with the monotonic clock. No timer is armed for it. */
+  private static readonly LEFT_WORKSPACE_WINDOW_MS = 600
   /**
    * The agent-busy state pushed by the runner at turn/compaction
    * boundaries (pi parity): while busy, a SINGLE Esc stops the current
@@ -3850,6 +4515,16 @@ export class TuiApp {
    *  change rebinds the SAME logical lease with a fresh frame and live options
    *  (never a wider host canvas that would erase the background beside it). */
   private deliveredFilesGeometryKey: string | undefined
+  /** PR-Q: the application-level Queue manager (the ONE business owner) and
+   *  the live overlay lease/presentation. The panel reads the manager's view
+   *  DTO; every intent goes back through it. */
+  private queueManager: QueueManagerController | undefined
+  private queuePresentationObject: QueueManagerPresentation | undefined
+  private queueOverlay: OverlayHandle | undefined
+  private queueFrame: ResponsiveOverlayFrame | undefined
+  private queuePanel: QueuePanel | undefined
+  private queueScreen: TuiMainScreen | TuiAltScreen | undefined
+  private queueGeometryKey: string | undefined
   private readonly openExternalUrl: ((url: string) => void) | undefined
   private readonly readClipboardText: (() => Promise<string | undefined>) | undefined
   /**
@@ -3876,6 +4551,8 @@ export class TuiApp {
   private readonly svgRasterLoader: SvgRasterLoader | undefined
   /** @see TuiAppOptions.draftImageStoreForTest — headless-test seam only. */
   readonly draftImageStoreForTest: import('./client/media/image/draft-store.ts').DraftImageStore | undefined
+  /** @see TuiAppOptions.draftFileStoreForTest — headless-test seam only. */
+  readonly draftFileStoreForTest: import('./client/media/attachment/file-draft.ts').DraftFileStore | undefined
   /** @see TuiAppOptions.draftImagePreviewSource — the production preview source. */
   private readonly draftImagePreviewSource: import('./client/media/image/types.ts').DraftImagePreviewSource | undefined
   /** @see TuiAppOptions.draftImagePreviewLiveDraft — live-draft reader. */
@@ -4014,7 +4691,7 @@ export class TuiApp {
   private openWorkOwners: ReadonlySet<TranscriptMessage> = new Set()
   /**
    * The reveal owner memoized for the CURRENT (target, preset, surface,
-   * window) identity. `revealedSearchOwner()` is consulted once per projected
+   * window) identity. `temporaryRevealOwner()` is consulted once per projected
    * row and once per Work span / cluster component, so resolving it freshly
    * each time would re-project the whole transcript per row — an accidental
    * O(n^2) while a search is active. The memo key holds every input the
@@ -4273,6 +4950,27 @@ export class TuiApp {
   /** ONE external-editor ownership at a time: set synchronously at launch,
    * cleared in the launch's `finally` (success, failure or cancellation). */
   private externalEditorInFlight = false
+  /**
+   * PR2/F1: set when a submission attempt settles while the external editor
+   * is open. The editor's write-back is then STALE (the attempt settled the
+   * composer) and must be discarded instead of resurrecting content.
+   */
+  private externalEditorStale = false
+  /**
+   * PR2/RFL009: an attempt ACCEPTED while the surface was stopped. The FULL
+   * physical accepted commit — the recall/history bookkeeping AND the draft
+   * clear — is deferred to the next start(): a stopped screen is never
+   * cleared or repainted, but the accepted document must not survive the
+   * restart as a live, submittable draft, and its recall row must exist
+   * exactly once like any live acceptance.
+   */
+  private deferredAcceptedSettle: { readonly text: string; readonly remember: boolean } | undefined
+  /**
+   * The surface was STOPPED through the public lifecycle (stop/start), as
+   * opposed to the external editor's temporary presentation suspension: only a
+   * real stop makes the renderer inert for good.
+   */
+  private surfaceStopped = false
   /** The live session's auto-generated title, shown in the header when set. */
   private sessionTitleText = ''
   /** The mode-aware subagent viewer: while set, the editor bar shows the
@@ -4334,7 +5032,13 @@ export class TuiApp {
           return (onInput: (data: string) => void, onResize: () => void): void => {
             target.start(onInput, () => {
               // The app may be disposed before the terminal stops.
-              if (!this.disposed) this.syncSurfaceGeometry()
+              if (!this.disposed) {
+                // The grant changed: the Exit Choice's last-painted action set
+                // no longer describes the viewport. No option may be confirmed
+                // until the next paint recomputes the real operability.
+                this.clientExitChoiceOverlay?.component.invalidateActions()
+                this.syncSurfaceGeometry()
+              }
               onResize()
             })
           }
@@ -4359,6 +5063,7 @@ export class TuiApp {
     // iterm2:  no managed handle; a Direct terminal keeps the legacy path.
     // none:    no managed handle and every consumer paints text.
     this.imageProtocolPreference = imageProtocolPreference(process.env)
+    this.transcriptSearchCoverage = options.initialSearchCoverage ?? 'loaded-history'
     let graphics: ImageGraphics | undefined
     switch (this.imageProtocolPreference) {
       case 'none':
@@ -4468,12 +5173,17 @@ export class TuiApp {
     this.ternTerminal = options.ternTerminal === true
     this.terminalProgressActive = options.initialTerminalProgress === true
     this.terminalProgressMode = options.terminalProgressMode ?? DEFAULT_TERMINAL_PROGRESS_MODE
+    this.onProgramStatus = options.onProgramStatus
     this.extensionHost = options.extensionHost
     this.onTerminalResize = options.onTerminalResize
     this.onWorkflowAction = options.onWorkflowAction
     // B4-B: the typed Quick task and Full Center routes (see field docs).
     this.quickTaskSelect = options.onQuickTaskSelect
     this.quickTaskOpenFull = options.onQuickTaskOpenFull
+    this.footerModelOpen = options.onFooterModelOpen
+    this.footerModelAvailable = options.footerModelAvailable
+    this.footerTasksOpen = options.onFooterTasksOpen
+    this.footerTasksAvailable = options.footerTasksAvailable
     // M0: the unified status projection store. The runner passes its own
     // store; without one the app keeps an internal projection so the
     // footer always composes from a snapshot (headless tests drive it
@@ -4497,6 +5207,11 @@ export class TuiApp {
     // externally supplied store must not retain the dead surface).
     this.statusStoreUnsubscribe = this.statusStore.subscribe(() => {
       this.renderViewerSubjectBar()
+      // The composer's plan-mode hint follows the committed collaboration
+      // fact (the same projection the footer badge reads): event-driven and
+      // hydration commits both land here, so a pending selection from the
+      // official plan projection is never mistaken for a committed mode.
+      this.applyComposerPlanHint()
       // B4-B: the hidden-entry grant preflights the complete Footer with
       // `↓ view` enabled, so the grant does not depend on the Footer's
       // currently committed height. No post-compose convergence is needed.
@@ -4554,8 +5269,10 @@ export class TuiApp {
       // messagesView exists.
       onInvalidate: () => {
         // A keymap rebuild changes the effective trigger identity; never
-        // allow a confirmation armed under the old map to carry over.
+        // allow a confirmation armed under the old map to carry over. The same
+        // rule applies to the transient Host Editor `←←` first-Press latch.
         this.clearExitConfirmation()
+        this.clearLeftWorkspaceArm()
         if (this.messagesView !== undefined) {
           this.refreshTranscriptWindowHint()
           this.rebuildMessages('theme-keymap')
@@ -4576,7 +5293,8 @@ export class TuiApp {
         // so the global Transcript search handler is never entered (and no
         // fork search overlay is opened) — the leader completion is not a
         // "dispatch then repair" path.
-        if (action === 'app.transcript.search' && this.jobWorkspace !== undefined) {
+        if ((action === 'app.transcript.search' || action === 'app.transcript.search.view')
+          && this.jobWorkspace !== undefined) {
           this.jobWorkspace.panel.openFind()
           return true
         }
@@ -4728,6 +5446,7 @@ export class TuiApp {
     // moving the cursor. Text edits invalidate the rendered snapshot; the next
     // Editor render republishes the exact layout boundary.
     this.editor.onVisualLineBoundaryChanged = (reason, onLastVisualLine) => {
+      this.editor.consumePointerBrowseExit(reason)
       if (reason === 'navigation' && onLastVisualLine === this.taskQuickPaintedBoundary) return
       this.taskQuickPaintedBoundary = onLastVisualLine
       this.quickHintCurrentEditorLayout = undefined
@@ -4753,6 +5472,37 @@ export class TuiApp {
     // its clear (onBeforeSubmitClear) and runs the returned release in a
     // finally after the synchronous clear + onSubmit dispatch. The host keeps
     // no array/counter of these — one gesture, one release.
+    this.editor.onMaySubmit = (text) => {
+      // The ONE refusal that must land BEFORE the fork clears: a pasted image
+      // path whose attachment read is still in flight. No clear, no Undo
+      // retirement, no history/ack/writer; the draft stays editable and the
+      // user retries after the read settles.
+      if (this.terminalPastedPath?.blocksDelivery(text) === true) {
+        this.notify(PASTE_PENDING_NOTICE, 'info')
+        return false
+      }
+      // PR2: the SYNCHRONOUS admission runs while the fork still holds the
+      // document. A `'held'` verdict proves the application registered the
+      // attempt and started the delivery itself — returning false keeps the
+      // fork from clearing the draft (its Undo history and paste registry
+      // stay usable until the accepted settlement). `'legacy'` proceeds to
+      // the fork's own pre-clear submit exactly as before; `'refused'`
+      // consumes the gesture silently.
+      const serialized = serializeEditorInput(this.editor.getInputMode(), text)
+      const admission = this.admitComposerGesture(serialized, 'enter')
+      if (admission === 'held') {
+        // Fresh input supersedes any transient notice, exactly like the
+        // legacy onSubmit path (whose post-clear ordering this branch skips).
+        this.clearNotify()
+        this.requestRender()
+        return false
+      }
+      if (admission === 'refused') return false
+      return true
+    }
+    this.editor.onBracketedPasteCommitted = (commit) => { this.acceptHostPastedText(commit) }
+    this.editor.onInputStart = (state) => { this.pasteEditAnchor = { text: state.text, cursor: state.cursor } }
+    this.editor.onInputEnd = () => { this.pasteEditAnchor = undefined }
     this.editor.onBeforeSubmitClear = (text) => this.draftImagePreviewReserve?.(text)
     this.editor.onSubmit = (text) => {
       const gesture: ComposerSubmitGesture = 'enter'
@@ -4823,6 +5573,20 @@ export class TuiApp {
       this.events.onSubmit(serialized, 'enter', scopeToken)
     }
     this.editor.onChange = () => {
+      // FIRST: exact browse lifecycle. A recalled-row setText is the ONLY
+      // mutation that keeps the host draft bookmark; every real edit,
+      // programmatic replacement, completion splice or submit/cancel clear
+      // exits the base editor's browse privately, so the bookmark must die
+      // there (text equality cannot stand in for state).
+      if (!this.editor.consumeHistoryRecallChange()) this.editor.clearHistoryBrowseDraft()
+      // The Host Editor `←←` first-Press latch dies with ANY document
+      // mutation — typing, deletion, paste, Undo, history recall or a
+      // programmatic restore — even when the text ends up identical (ABA).
+      this.clearLeftWorkspaceArm()
+      // The paste range leases consume the input's EXACT splice before
+      // any external callback (undo retention, seat subscribers) can act on a
+      // stale offset. No common-prefix/suffix guess is made here.
+      this.observePasteMutation()
       // Ordinary editor input is an intervening action, so it disarms a
       // pending exit confirmation. Ctrl+C clear-draft arms again after its
       // own setText mutation completes.
@@ -4873,9 +5637,11 @@ export class TuiApp {
     // M9: the editor seat holder — the atomic handoff + current occupant.
     // The host default editor is the adapter source; a plugin editor
     // (single-winner from the editor registry) can replace it.
+    this.terminalPastedPath = options.terminalPastedPath
     this.imageLoader = options.imageLoader
     this.imageScope = options.imageScope
     this.draftImageStoreForTest = options.draftImageStoreForTest
+    this.draftFileStoreForTest = options.draftFileStoreForTest
     this.draftImagePreviewSource = options.draftImagePreviewSource
     this.draftImagePreviewLiveDraft = options.draftImagePreviewLiveDraft
     this.draftImagePreviewReserve = options.draftImagePreviewReserve
@@ -4894,7 +5660,11 @@ export class TuiApp {
       undo.registerUndoOwner(this.editor, placeholder => this.editor.retireDraftImageFromUndo(placeholder))
       // A REAL undo-history retirement (submit clear) releases this owner's
       // leases immediately; backend acceptance is irrelevant to the history.
-      this.editor.onUndoHistoryRetired = () => { undo.releaseUndoForOwner(this.editor) }
+      this.editor.onUndoHistoryRetired = () => {
+        this.pasteRanges.retireAll()
+        this.pasteEditAnchor = undefined
+        undo.releaseUndoForOwner(this.editor)
+      }
     }
     this.imageTheme = options.imageTheme
     this.svgRasterLoader = options.svgRasterLoader
@@ -4909,6 +5679,9 @@ export class TuiApp {
       hostAdapter: () => this.hostEditorAdapter(),
       surfaceId: `tui-${Date.now().toString(36)}`,
       generation: () => this.generation,
+      // PR2/RFL011: the public EditorHost.replaceText seam shares the ONE
+      // composer write admission with every other draft writer.
+      writeAdmitted: () => this.draftWriteAdmitted(),
       // Round-2 P1: a plugin editor's invalidate() recompiles its view and
       // swaps the child in the seat (the M4 compiler caches at
       // construction — a live plugin view needs a recompile to repaint).
@@ -4963,6 +5736,16 @@ export class TuiApp {
             // Paste markers are EXPANDED — the steer wire never carries
             // registry-bound marker text.
             const serialized = this.expandedSeatWireDraft()
+            // A pending pasted image path refuses the steer BEFORE its clear.
+            if (this.blocksPastedPathDelivery(serialized)) return true
+            // PR2: the same composer admission as the submit gestures. A
+            // held/refused verdict means the application owns the gesture —
+            // the draft stays and no second dispatch runs.
+            const steerAdmission = this.admitComposerGesture(serialized, 'steer')
+            if (steerAdmission === 'held' || steerAdmission === 'refused') {
+              this.requestRender()
+              return true
+            }
             // Same scoped bridge as the Ctrl+S action: the clear's retention
             // reconcile must not evict an image the steer dispatch needs.
             const bridgeRelease = this.draftImagePreviewReserve?.(serialized)
@@ -5008,7 +5791,7 @@ export class TuiApp {
     this.dock = new Text('', 0, 0)
     this.todoPanel = new Text('', 0, 0)
     this.goalLine = new Text('', 0, 0)
-    this.queuePane = new Text('', 0, 0)
+    this.queuePane = new DockQueue({ open: itemId => { this.openQueueEntry(itemId) } })
     // The busy indicator repaints through a callback, not a captured screen:
     // the MAIN screen stops rendering while the alt screen (fullscreen) is
     // active, so a captured TuiMainScreen would freeze the animation at the
@@ -5186,6 +5969,29 @@ export class TuiApp {
     if (this.disposed) {
       throw new Error('cannot start a disposed TuiApp')
     }
+    this.surfaceStopped = false
+    // RFL009: complete the FULL accepted commit that settled while the
+    // surface was stopped — the recall/history row first (the text is still
+    // in the hold record), then the clear. The screen paints its FIRST
+    // post-restart frame below, so the cleared composer is the only frame
+    // the user ever sees; the stopped screen itself was never repainted.
+    if (this.deferredAcceptedSettle !== undefined) {
+      const deferred = this.deferredAcceptedSettle
+      this.deferredAcceptedSettle = undefined
+      if (deferred.remember) {
+        this.editor.addToHistory(deferred.text.trim())
+        this.historyRecall.rememberAccepted(deferred.text)
+      }
+      this.clearSubmittedDraft()
+      this.resetEditorMode()
+    }
+    // R5-1/RFL016: replay a parked restore obligation on EVERY
+    // re-presentation — a rejected or indeterminate settlement also parks
+    // text while stopped, and a re-presentation with no deferred accepted
+    // clear at all must still replay. Runs AFTER any deferred accepted clear,
+    // so the restored text is NEW live content, never part of the accepted
+    // document.
+    this.events.onDeferredDraftRestore?.()
     const firstStart = !this.processTuiSlotClaimed
     if (firstStart) {
       claimProcessTuiSlot(`tui-${Date.now().toString(36)}`)
@@ -5198,6 +6004,9 @@ export class TuiApp {
     }
     try {
       this.tui.start()
+      // The stopped Fullscreen screen may have replaced terminal rows outside
+      // the main screen's differential cache; repaint the restarted main frame.
+      if (!firstStart) this.tui.requestRender(true)
     } catch (error) {
       // A throw must never leak the claimed slot (plan §11).
       if (firstStart && this.processTuiSlotClaimed) {
@@ -5253,6 +6062,11 @@ export class TuiApp {
       // The right-click target must still be the focused component on the
       // SAME screen — otherwise the paste is dropped (never misdirected).
       if (this.disposed || this.activeScreen !== screen || screen.getFocusedComponent() !== target) return
+      // PR2/F4: the paste is also dropped while a submission attempt owns the
+      // composer document — the read may settle after the hold began, and the
+      // synthetic handleInput feed deliberately bypasses the key ladder's
+      // freeze. The ONE write admission is re-read HERE, at the write.
+      if (!this.draftWriteAdmitted()) return
       // Call THROUGH the target — never cache the method: handleInput is a
       // prototype method (TuiEditor/Input/FocusForwardingFrame) that reads
       // `this`; a bare extracted call would run with this === undefined in
@@ -5363,12 +6177,15 @@ export class TuiApp {
    * keybindings — the slot is held until the FINAL dispose() (see
    * tui/process-slot.ts). */
   stop(): void {
+    this.surfaceStopped = true
+    this.temporarySearchReaderReturnToRegular = false
+    this.temporarySearchReaderTransitionPermit = false
+    this.workspaceLeaseFreezeDepth += 1
     // The stop is a terminal-ownership transition: NEW workspace leases are
     // refused for its whole duration, so a synchronous callback run by the
     // workspace close below cannot mint a screen that would outlive the stop. The
     // latch is cleared by the LAST step of the batch, so a throwing sibling can
     // never leave the surface permanently unable to lease.
-    this.workspaceLeaseFreezeDepth += 1
     // From here on this TuiApp no longer owns the terminal for presentation:
     // a status arriving while stopped must only fold the desired state.
     this.leaveTerminalPresentation()
@@ -5391,6 +6208,7 @@ export class TuiApp {
       // `leaveTerminalPresentation` closing step below releases again.
       () => this.jobWorkspace?.close(),
       () => this.workspaceLease?.close(),
+      () => this.closeTranscriptSearch('surface-change'),
       () => this.clearNotify(),
       // Issue #8: the exit-confirmation timer dies with the surface — a stopped
       // TUI must never fire a stale disarm into a dead footer.
@@ -5402,6 +6220,9 @@ export class TuiApp {
       // second press of a pre-stop one — convergence findings).
       () => this.keybindings.cancelLeader(),
       () => { this.lastEscapeAt = undefined },
+      // A stop/start cycle may keep the instance but swap the physical screen:
+      // the transient Host Editor `←←` latch never crosses that boundary.
+      () => this.clearLeftWorkspaceArm(),
       () => this.working.dispose(),
       // Every pending question flow settles rejected: a stopped TUI must
       // not leave askQuestions promises hanging forever.
@@ -5413,10 +6234,12 @@ export class TuiApp {
       // throw cannot strand its siblings.
       ...schemeDisposers.map(dispose => () => dispose()),
       () => this.clearFocusLiveHeightState(),
+      () => this.clearRenderedViewSearch(),
       () => this.resetScrollProfileFrame(),
       () => this.tui.stop(),
       () => this.fullscreen?.stop(),
       () => { this.fullscreen = undefined },
+      () => { this.fullscreenScroll = undefined },
       // Those stops RELEASED the OSC 11 observation the screen was running, and a later
       // start() restarts the SAME screen object, so the identity check in
       // completeScreenHandoff() cannot notice the loss (exactly like the external-editor
@@ -5511,6 +6334,7 @@ export class TuiApp {
     if (this.terminalProgressActive === active && this.terminalProgressOutcome === settled) return
     this.terminalProgressActive = active
     this.terminalProgressOutcome = settled
+    this.publishProgramStatus()
     this.convergeTerminalPresentation(false)
   }
 
@@ -5678,6 +6502,18 @@ export class TuiApp {
   }
 
   /**
+   * Hand the CURRENT logical program status to the optional READ-ONLY
+   * observer (H1 Herdr). This is the ONLY observation point: it reuses the
+   * exact derivation {@link convergeTerminalPresentation} writes physically, so
+   * the external report is independent of the selected terminal protocol and
+   * of PTY ownership. It never caches a second status.
+   */
+  private publishProgramStatus(): void {
+    if (this.disposed) return
+    this.onProgramStatus?.(this.effectiveProgramStatus())
+  }
+
+  /**
    * Whether the interaction currently owning the response surface is a wait the
    * main Agent is BLOCKED on. A CONTINUED (late-answer) Agent question and every
    * Client-local flow are `false`: the phase alone cannot tell them apart, so the
@@ -5727,6 +6563,12 @@ export class TuiApp {
     // state observed before the mount — or one left behind by another terminal
     // owner — never needs a corrective second write.
     this.convergeTerminalPresentation(true, tokens)
+    // H1: every terminal (re)acquisition republishes the CURRENT logical fact
+    // to the read-only observer. A stop()/start() round trip (an `$EDITOR`
+    // excursion, a fullscreen swap) may have moved the logical status while the
+    // PTY was not owned; the observer's own three-state dedupe keeps this
+    // physically inert when nothing changed.
+    this.publishProgramStatus()
   }
 
   /**
@@ -5817,6 +6659,10 @@ export class TuiApp {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    this.temporarySearchReaderReturnToRegular = false
+    this.temporarySearchReaderTransitionPermit = false
+    this.pasteRanges.retireAll()
+    this.pasteEditAnchor = undefined
     // M3-6 PR3: the final teardown is ONE ordered non-truncating batch. Every
     // independent resource is attempted even when a sibling throws; the
     // process live-TUI slot stays CLAIMED unless the WHOLE batch settles
@@ -5849,10 +6695,13 @@ export class TuiApp {
     this.optionalSeat = undefined
     if (optionalSeat !== undefined) optionalSeat.finalized = true
     runSyncDisposalSteps('tui dispose', [
+      // The transient Host Editor `←←` latch dies with the surface.
+      () => this.clearLeftWorkspaceArm(),
       // Delivered files (PR1): the retained panel is released BEFORE the
       // broker's physical unmount, so its recorded hit map can never survive
       // into a dying surface.
       () => this.closeDeliveredFiles(),
+      () => this.closeQueueManager(),
       // Phase 3B / B1-A / B2-A: the leased workspace screen (Job OR Settings) is
       // released FIRST — through the SAME close path Esc uses, so its owner
       // notification still runs exactly once, its temporary alt screen never
@@ -5937,7 +6786,8 @@ export class TuiApp {
       // must not hang.
       ...brokerSettles.map(settle => () => settle()),
       () => { this.pendingBrokerSettles.clear() },
-      // FINAL teardown: physically unmount every still-tracked overlay
+      () => this.closeTranscriptSearch('surface-change'),
+       // FINAL teardown: physically unmount every still-tracked overlay
       // (disposeOnHide releases the panels — OutputViewer's refresh
       // interval, TaskBrowser's tick — exactly once) instead of merely
       // forgetting the handles. A caller that never invoked its closer must
@@ -5959,6 +6809,7 @@ export class TuiApp {
       () => this.terminalSchemeListeners.clear(),
       () => this.expandedOverride.clear(),
       () => this.pendingUserExpanded.clear(),
+      () => this.clearRenderedViewSearch({ rebuild: false }),
       () => this.disposeMessageComponents(),
       () => { this.localMessages.length = 0 },
       () => { this.pendingTailRows = [] },
@@ -6078,6 +6929,11 @@ export class TuiApp {
     // second half of the Host's exit confirmation because app.exit.request
     // was resolved before this stage.
     this.clearExitConfirmation()
+    // PR2/RFL008: a held submission attempt owns the composer document — a
+    // replacement editor's input is consumed without reaching it, exactly
+    // like the host editor's key freeze (the acceptance settlement clears
+    // the LIVE seat, so unsent plugin text cannot ride along).
+    if (this.composerHeld()) return { consume: true }
     if (replacement(event)) return { consume: true }
     if (forceEscapeRoute) return undefined
     // Declined regular editor input: retry against plugin bindings only
@@ -6145,6 +7001,27 @@ export class TuiApp {
 
   /** Shared key routing: questions, then approval, then folding/mode/cancel/exit. */
   private handleInput(data: string): TuiInputListenerResult {
+    // PR3: a pending footer press belongs to the frame the user pressed on.
+    // ANY input that is not that gesture's own primary-button mouse report
+    // retires it HERE — before the unstable raw stage: a capture that
+    // consumes or rewrites a key or wheel is still intervening input, and a
+    // later release must never act past it (the emergency fail-safe's
+    // consumed keys are covered by the same placement).
+    const mouseChunk = mouseChunkKind(data)
+    if (mouseChunk === undefined || retiresPointerGesture(mouseChunk)) {
+      this.footerPressGesture = undefined
+    } else if (mouseChunk.release) {
+      // A release at a DIFFERENT cell never synthesizes a click (the fork's
+      // same-cell rule): the footer gesture is dead AND its press armed the
+      // fork's multi-click counter. Consume that history here so the next
+      // valid same-cell click is a single click again — otherwise an aborted
+      // footer gesture would silently poison the following navigation.
+      const pressed = this.footerPressGesture
+      if (pressed !== undefined && (mouseChunk.x !== pressed.pressX || mouseChunk.y !== pressed.pressY)) {
+        pressed.screen.resetTextSelection()
+        this.footerPressGesture = undefined
+      }
+    }
     // Terminal focus reports (CSI ? 1004 — ESC[I/ESC[O) are HOST-RESERVED:
     // they bypass the unstable raw stage entirely (a raw capture can
     // never consume, rewrite or starve them) and flow straight to the
@@ -6187,16 +7064,24 @@ export class TuiApp {
         }
         this.notify('unstable captures released (emergency fail-safe)', 'info')
         if (isKeyRelease(data) || isKeyRepeat(data)) return { consume: true }
+        // A consumed real key is an intervening action: the Host Editor `←←`
+        // latch must never survive it.
+        this.clearLeftWorkspaceArm()
         this.clearExitConfirmation()
         return { consume: true }
       }
       const outcome = this.unstableInputRoute(data, this.extensionHost?.surfaceId ?? 'tui')
       if (outcome.action === 'consume') {
         if (isKeyRelease(data) || isKeyRepeat(data)) return { consume: true }
+        this.clearLeftWorkspaceArm()
         this.clearExitConfirmation()
         return { consume: true }
       }
       if (outcome.action === 'rewrite') {
+        // A rewrite is NOT a real physical key: the Host Editor `←←` gesture
+        // must never count a synthesized Left, and an already armed latch must
+        // never survive the rewrite.
+        this.clearLeftWorkspaceArm()
         // A rewrite INTO a focus-control sequence is refused: focus
         // reports are HOST-reserved, and the tracker must never be
         // spoofed into a false focus transition (a synthesized ESC[O
@@ -6216,7 +7101,7 @@ export class TuiApp {
           && !isKeyRepeat(outcome.data)) {
           this.events.onUserInput?.()
         }
-        const result = this.handleInputCore(outcome.data)
+        const result = this.handleInputCore(outcome.data, { allowEditorWorkspaceShortcut: false })
         if (result === undefined) return { data: outcome.data }
         return result
       }
@@ -6225,8 +7110,47 @@ export class TuiApp {
   }
 
   /** The host's own input precedence ladder (the raw stage has already
-   * run — see {@link handleInput}). */
-  private handleInputCore(data: string): TuiInputListenerResult {
+   * run — see {@link handleInput}). `allowEditorWorkspaceShortcut` is false
+   * ONLY for the Unstable raw stage's rewrite path: a synthesized chunk is
+   * never a real physical Left press for the Host Editor `←←` gesture. */
+  private handleInputCore(
+    data: string,
+    options?: { readonly allowEditorWorkspaceShortcut?: boolean },
+  ): TuiInputListenerResult {
+    const allowEditorWorkspaceShortcut = options?.allowEditorWorkspaceShortcut !== false
+    // M5-U-E: whether the plain-Left gesture stage was really consulted for
+    // THIS event. Every early owner return skips it, and a real Left consumed
+    // by a higher-priority owner (a modal, an overlay, an Advanced capture, a
+    // replacement editor, ...) is an INTERVENING input exactly like any other
+    // key — it must invalidate the armed first press, never be stitched over.
+    const gestureExamined = { examined: false }
+    try {
+      return this.runInputLadder(data, allowEditorWorkspaceShortcut, gestureExamined)
+    } finally {
+      if (!gestureExamined.examined && this.isPlainLeftPress(data)) this.clearLeftWorkspaceArm()
+    }
+  }
+
+  /** One pass through the host precedence ladder. Split from
+   * {@link handleInputCore} only so the unexamined-real-Left invalidation above
+   * has ONE exit hook instead of one per branch. */
+  private runInputLadder(
+    data: string,
+    allowEditorWorkspaceShortcut: boolean,
+    gestureExamined: { examined: boolean },
+  ): TuiInputListenerResult {
+    // M5-U-E: BEFORE any owner below can consume this event, a REAL key that
+    // is not the gesture's own plain Left invalidates the first-Press latch
+    // (a Question/Approval/History/overlay-consumed key still means the user
+    // did something else in between). Kitty repeat/release are artifacts of
+    // the SAME press and deliberately leave the latch alone.
+    this.observeWorkspaceGestureInterveningInput(data)
+    // A visible ordinary Question owns the wheel over its whole modal frame:
+    // its painted body scrolls, every other cell is inert (never the
+    // transcript behind it). This runs BEFORE the Approval route so a Question
+    // in front wins the same way it wins the seat.
+    const questionWheel = this.handleQuestionWheel(data)
+    if (questionWheel !== undefined) return questionWheel
     // The approval action sheet is a blocking FULLSCREEN pointer owner: a
     // wheel over its painted body scrolls the reading viewport and every other
     // wheel is inert behind the modal (the transcript's background wheel stays
@@ -6243,7 +7167,21 @@ export class TuiApp {
     // did when it was registered first. (Unstable raw captures already ran
     // BEFORE this point and still see every chunk.)
     if (MOUSE_SEQUENCE.test(data) || (data.length === 6 && data.startsWith('\x1b[M'))) {
+      // A mouse report is fresh input and always disarms the exit
+      // confirmation (that authority is unchanged). When this press targets
+      // a live Footer hit, the disarm recomposes the Footer synchronously —
+      // rebase the pointer frame only if the SAME fully visible placement
+      // still occupies the SAME cell, so the click resolves against what the
+      // user actually pressed without weakening any stale-frame fence.
+      const mouse = mouseChunkKind(data)
+      const wasExitArmed = this.exitConfirmTrigger !== undefined || this.exitConfirmAt !== undefined
+      const footerFramesWereCurrent = this.footerPaintedProjection !== undefined
+        && this.footerPendingProjection !== undefined
+        && this.footerPendingProjection.revision === this.footerPaintedProjection.revision
       this.clearExitConfirmation()
+      if (wasExitArmed && footerFramesWereCurrent && mouse !== undefined && !mouse.release && mouse.button === 0) {
+        this.rebasePointerFrameAfterExitClear(mouse)
+      }
       return undefined
     }
     // FOCUS reports (CSI ? 1004 — ESC[I/ESC[O) are handled HOST-SIDE,
@@ -6366,8 +7304,24 @@ export class TuiApp {
         const exitCompletion = leader.pending && !physicalEscape && leader.leaderBindings.some(
           binding => binding.action === 'app.exit.request' && matchesKey(data, binding.key),
         )
+        const reservedFindCompletion = leader.pending && !physicalEscape && leader.leaderBindings.some(
+          binding => (binding.action === 'app.transcript.search' || binding.action === 'app.transcript.search.view')
+            && JOB_LOCAL_FIND_RESERVED_KEYS.has(binding.key)
+            && matchesKey(data, binding.key),
+        )
+        if (reservedFindCompletion) {
+          // A Search leader may not take a Job-local physical key away from
+          // Home/End viewport control or Tab page switching. Cancel the prefix,
+          // then let the Job panel apply the key's fixed local meaning.
+          leader.cancel()
+          this.clearExitConfirmation()
+          this.jobWorkspace.panel.handleInput(data)
+          return { consume: true }
+        }
         const findCompletion = leader.pending && !physicalEscape && leader.leaderBindings.some(
-          binding => binding.action === 'app.transcript.search' && matchesKey(data, binding.key),
+          binding => (binding.action === 'app.transcript.search' || binding.action === 'app.transcript.search.view')
+            && !JOB_LOCAL_FIND_RESERVED_KEYS.has(binding.key)
+            && matchesKey(data, binding.key),
         )
         if (exitCompletion) {
           const outcome = leader.feed(data)
@@ -6495,14 +7449,15 @@ export class TuiApp {
     // the search TOGGLE (app.transcript.search) is user-configurable, so
     // a remap of the toggle must work while the overlay is open too —
     // matching the EFFECTIVE keys (review finding).
+    if (this.searchOpening !== undefined && this.searchOverlay === undefined) {
+      if (this.keybindings.matchesDefault(data, 'app.transcript.search.close')) this.closeTranscriptSearch()
+      this.clearExitConfirmation()
+      return { consume: true }
+    }
     if (this.searchOverlay !== undefined) {
       // The search overlay owns this input; it is a fresh interaction, never
       // the second half of a parent keyboard exit confirmation.
       this.clearExitConfirmation()
-      if (this.keybindings.matches(data, 'app.transcript.jumpLatest')) {
-        const consumed = this.dispatchResolvedAction('app.transcript.jumpLatest', data)
-        if (consumed) return { consume: true }
-      }
       if (this.keybindings.matchesDefault(data, 'app.transcript.search.close')) {
         this.closeTranscriptSearch()
         return { consume: true }
@@ -6515,11 +7470,23 @@ export class TuiApp {
         this.events.onSearchPrev?.()
         return { consume: true }
       }
-      if (this.keybindings.matches(data, 'app.transcript.search')) {
-        // Ctrl+F (or the remapped toggle) closes the overlay on a second
-        // press.
-        this.closeTranscriptSearch()
+      if (this.keybindings.matchesDefault(data, 'app.transcript.search.scope')) {
+        const current = this.searchComponent?.getScope()
+        if (current !== undefined) {
+          this.switchOpenTranscriptSearchScope(current === 'view' ? 'full' : 'view')
+        }
         return { consume: true }
+      }
+      const action = this.transcriptSearchActionForInput(data)
+      if (action !== undefined) {
+        const scope = action === 'app.transcript.search.view' ? 'view' : 'full'
+        if (this.searchComponent?.getScope() === scope) this.closeTranscriptSearch()
+        else this.switchOpenTranscriptSearchScope(scope)
+        return { consume: true }
+      }
+      if (this.keybindings.matches(data, 'app.transcript.jumpLatest')) {
+        const consumed = this.dispatchResolvedAction('app.transcript.jumpLatest', data)
+        if (consumed) return { consume: true }
       }
       return undefined
     }
@@ -6729,6 +7696,15 @@ export class TuiApp {
     }
     if ((route.kind === 'editor' || route.kind === 'viewer-editor') && replacement === undefined) {
       this.clearExitConfirmation()
+      // PR2: a live submission attempt FREEZES the main composer. The key is
+      // consumed without reaching the fork editor — typing, paste/IME,
+      // autocomplete, history recall and a repeated Enter cannot mutate or
+      // re-submit the held document. The reserved lifecycle paths above
+      // (physical Escape / the cancel-activity action / exit) keep their own
+      // routing; an interactive child viewer owns its own seat contract.
+      if (this.composerHeld() && this.seatEditor().id === 'host') {
+        return { consume: true }
+      }
       // P2-R5: only the HOST seat may forward to the hidden host editor. A
       // display-only replacement editor (no handleInput hook) owns the seat
       // too: the public contract (public-types.ts) says ordinary typing is
@@ -6737,6 +7713,14 @@ export class TuiApp {
       // the app's own listeners) keep it, and the hidden host draft never
       // diverges from what the user sees.
       if (this.seatEditor().id !== 'host') return { consume: true }
+      // M5-U-E: the LAST stage — only an unclaimed real `editor` route (never
+      // the continuable viewer's `viewer-editor`) may arm or complete the Host
+      // Editor `←←` gesture. The first press returns false and the fork Editor
+      // receives the Left exactly as before; the second consumes it.
+      if (route.kind === 'editor'
+        && this.maybeOpenWorkspaceFromLeft(data, allowEditorWorkspaceShortcut, gestureExamined)) {
+        return { consume: true }
+      }
       // Leave normal host editing to pi-tui's focused-component dispatch.
       // Returning undefined is important: TuiBase then calls Editor.handleInput
       // and schedules its immediate active-screen repaint. Calling the editor
@@ -6843,12 +7827,33 @@ export class TuiApp {
       // missing key can only come from an internal legacy caller; fail closed
       // instead of treating an unknown trigger as an immediate exit.
       if (key === undefined) return true
-      this.handleExitRequest(trigger ?? {
+      const effectiveTrigger = trigger ?? {
         identity: `direct:${key}`,
         key,
         label: formatKeyId(key),
         clearsDraft: key === 'ctrl+c',
-      })
+      }
+      // M6 UX PR1: the DEFAULT builtin physical Ctrl+C (the ONE exit key with
+      // the clear-draft identity) is the only key with a busy-cancel rule.
+      // While the exact current Session is authoritatively working it cancels
+      // ONCE (the existing Busy Esc path: shell interrupt + exact-scope
+      // session interrupt), never arms an exit and never clears the draft. An
+      // unobservable state refuses to arm the exit and says so. Remapped exit
+      // keys and leader completions keep the ordinary same-key confirmation.
+      if (trigger === undefined && source === 'builtin' && effectiveTrigger.clearsDraft) {
+        const activity = this.events.sessionActivity?.()
+        if (activity === 'working') {
+          this.clearExitConfirmation()
+          this.events.onCancel?.()
+          return true
+        }
+        if (activity === 'unknown') {
+          this.clearExitConfirmation()
+          this.notify("The current session's running state cannot be verified.", 'error')
+          return true
+        }
+      }
+      this.handleExitRequest(effectiveTrigger)
       return true
     }
     // Every other semantic host action is an intervening user action. Clear
@@ -6991,6 +7996,13 @@ export class TuiApp {
       // a second time by TuiBase's focused-component dispatch.
       if (!includeInterrupt) return { consume: true }
     }
+    // A running user Shell is an independent Host subprocess activity, not a
+    // busy Agent Turn. Give it the promised single-Esc run cancellation before
+    // arming the idle double-Esc rewind/cancel state machine.
+    if (this.events.cancelLocalShellIfRunning?.() === true) {
+      this.lastEscapeAt = undefined
+      return { consume: true }
+    }
     // Shell-mode exit: the host editor in a shell mode with an EMPTY
     // body owns Esc — it cancels the shell mode (the double-Esc cancel
     // must not fire while the user is composing a shell command). The
@@ -7016,6 +8028,11 @@ export class TuiApp {
     // draft before same-key confirmation so a programmatic draft mutation
     // can never make a pending Ctrl+C unexpectedly exit while text remains.
     if (isCtrlC) {
+      // PR2/RFL008: while a submission attempt holds the composer, Ctrl+C is
+      // pure CANCEL-ACTIVITY — the pre-acceptance document stays exactly as
+      // submitted (the plan forbids a pre-acceptance clear). The exit
+      // confirmation ladder continues below unchanged.
+      if (!this.composerHeld()) {
       const text = this.seatEditor().getText()
       // A shell-mode draft is non-empty in its SERIALIZED form: the first
       // press clears BOTH the body and the mode — an empty `!` / `!!` editor
@@ -7031,6 +8048,7 @@ export class TuiApp {
         // the next keypress (the stale-clear trap).
         this.requestRender()
         return
+      }
       }
     }
 
@@ -7080,6 +8098,16 @@ export class TuiApp {
         // re-serialized here (serializeSeatDraft) and the mode reset with
         // the draft.
         const serialized = this.expandedSeatWireDraft()
+        if (this.blocksPastedPathDelivery(serialized)) return true
+        // PR2: the Ctrl+S steer gesture shares the ONE composer admission.
+        // A held/refused verdict means the application already owns the
+        // gesture (the draft stays frozen until the Host acceptance); the
+        // renderer must not clear or dispatch it again.
+        const steerAdmission = this.admitComposerGesture(serialized, 'steer')
+        if (steerAdmission === 'held' || steerAdmission === 'refused') {
+          this.requestRender()
+          return true
+        }
         // The SCOPED bridge: the clear below pushes an undo snapshot and fires
         // onChange, whose retention reconcile must never evict an image the
         // steer dispatch is about to hand to the business owner. Released after
@@ -7114,8 +8142,12 @@ export class TuiApp {
       },
       interruptActivity: () => true,
       requestExit: () => true,
-      openTranscriptSearch: () => {
-        this.startTranscriptSearch()
+      openTranscriptViewSearch: () => {
+         this.startTranscriptSearch('view')
+         return true
+       },
+       openTranscriptSearch: () => {
+        this.startTranscriptSearch('full')
         return true
       },
       jumpLatest: () => {
@@ -7234,6 +8266,7 @@ export class TuiApp {
         // pending (the latch inside launchExternalEditor is set
         // synchronously), further presses are consumed without starting
         // another editor.
+        if (this.composerHeld() || this.disposed || this.surfaceStopped) return true
         if (this.events.openExternalEditor !== undefined && !this.externalEditorInFlight) {
           this.events.runOwned('external editor', () => this.launchExternalEditor(), {
             onError: (error: unknown) => {
@@ -7249,6 +8282,10 @@ export class TuiApp {
         // an image becomes a draft placeholder and plain text falls back
         // to an editor insert. WITHOUT a handler the key falls through to
         // the editor exactly like the pre-pipeline behavior.
+        // PR2/F2: a held Composer owns its document — the intent is consumed
+        // without probing the clipboard (no orphan DraftImageStore bytes, no
+        // "attached" notice beside a document that refuses the placeholder).
+        if (this.composerHeld() || this.disposed || this.surfaceStopped) return true
         if (this.events.onClipboardPaste === undefined) return false
         this.events.onClipboardPaste()
         return true
@@ -7261,6 +8298,15 @@ export class TuiApp {
         // opened); an ENTRY consumes the key (no replay — no double
         // processing).
         return this.enterTaskQuick()
+      },
+      openQueueManager: () => {
+        // PR-Q: the `app.queue.open` action. The host ladder resolves host
+        // actions BEFORE the overlay capture stage, so the shared entry (not
+        // the keymap) is what refuses to stack the queue panel on another
+        // managed overlay. When the queue panel itself is live, the
+        // application manager toggles it closed (one entry, one toggle).
+        this.openQueueEntry()
+        return true
       },
       openHistorySearch: () => {
         // Input-history search: unbound (no historySearchSource) is a
@@ -7288,6 +8334,14 @@ export class TuiApp {
       copySelectedVisual: () => this.copySelectedVisual(),
       openSelectedVisual: () => this.openSelectedVisual(),
     }
+  }
+
+  private transcriptSearchActionForInput(data: string): TranscriptSearchAction | undefined {
+    const resolution = this.keybindings.resolve(data, this.keybindingContext())
+    if (resolution?.owner !== 'host') return undefined
+    return resolution.action === 'app.transcript.search' || resolution.action === 'app.transcript.search.view'
+      ? resolution.action
+      : undefined
   }
 
   /** The live keybinding context (plan §6): built in ONE place so the
@@ -7339,7 +8393,10 @@ export class TuiApp {
       // The router's physical-key seams (the read-only viewer fold
       // pass-through, the search overlay ownership) consult the EFFECTIVE
       // keymap, so a user remap stays authoritative (review finding).
-      matchesEffective: (action: string, data: string) => this.keybindings.matches(data, action as unknown as AppKeybindingId),
+      matchesEffective: (action: string, data: string) => {
+        const resolution = this.keybindings.resolve(data, this.keybindingContext())
+        return resolution?.owner === 'host' && resolution.action === action
+      },
       // The runtime reservation is ACTION-driven: a key is reserved for
       // the host ONLY while an active host action binds it. A remapped-
       // away old key (e.g. Ctrl+V after pasteMedia moved to Ctrl+P) is
@@ -7543,8 +8600,12 @@ export class TuiApp {
    */
   async launchExternalEditor(): Promise<void> {
     const open = this.events.openExternalEditor
-    if (open === undefined || this.externalEditorInFlight || this.disposed) return
+    if (open === undefined || this.externalEditorInFlight || this.disposed || this.surfaceStopped) return
+    // PR2/F1: a held Composer owns its document — an external editing round
+    // trip would replace the exact draft the Host is about to accept.
+    if (this.composerHeld()) return
     this.externalEditorInFlight = true
+    this.externalEditorStale = false
     try {
       // The external editor round-trips the WIRE form: the $EDITOR sees
       // the same document the shell dispatch would (a shell-mode draft
@@ -7576,6 +8637,11 @@ export class TuiApp {
       try {
         const next = await open(draft)
         if (this.disposed) return
+        // PR2/F1: the editor's round trip is only admissible while the SAME
+        // draft still owns the composer. A settlement (or a new hold) during
+        // the flight makes this result stale — discard it instead of
+        // resurrecting or overwriting a document the attempt already settled.
+        if (!this.draftWriteAdmitted() || this.externalEditorStale) return
         // No redundant editor update when the editor saved the draft
         // unchanged (an update would bump history/undo and repaint).
         if (next !== '' && next !== draft) {
@@ -7587,124 +8653,71 @@ export class TuiApp {
       }
     } finally {
       this.externalEditorInFlight = false
+      this.externalEditorStale = false
     }
   }
 
-  /** Record a submitted line into the editor history and the persistence
-   * mirror. The host may REFUSE via `shouldRememberInput` (e.g. a
-   * multimodal draft whose placeholders die with their drafts — recalling
-   * it would re-send dead placeholders as plain text; review finding). */
+  /** Record a submitted line into the editor history and the recall kernel.
+   * The host may REFUSE via `shouldRememberInput` (e.g. a multimodal draft
+   * whose placeholders die with their drafts — recalling it would re-send dead
+   * placeholders as plain text; review finding). The accepted occurrence's
+   * OCCURRENCE token comes from the shared kernel, never from the History IO. */
   private rememberInput(text: string): number | undefined {
     const trimmed = text.trim()
     if (trimmed === '') return undefined
     if (this.events.shouldRememberInput?.(text) === false) return undefined
     this.editor.addToHistory(trimmed)
-    // The persistence mirror keeps its own consecutive-duplicate rule (the
-    // pre-existing editor recall semantics).
-    if (this.inputHistory[0] !== trimmed) {
-      this.inputHistory.unshift(trimmed)
-      if (this.inputHistory.length > TuiApp.INPUT_HISTORY_LIMIT) this.inputHistory.pop()
+    return this.historyRecall.rememberAccepted(trimmed)
+  }
+
+  /** Rebuild the editor's ↑/↓ stack from the kernel's newest-first snapshot.
+   *  `addToHistory` unshifts, so the snapshot is fed oldest→newest; the kernel
+   *  already collapsed consecutive duplicates and applied the cap, so the
+   *  editor ends up holding exactly the projection the kernel owns. Called
+   *  only where the whole recall context was replaced (a scope publish or a
+   *  hydration reseed) — never on a settlement, which must not touch the
+   *  draft. */
+  private restoreEditorRecall(restoreBrowseDraft: boolean): void {
+    // A cold hydration reseed may land while the user is browsing the
+    // provisional recall with their own non-empty draft. The base editor owns
+    // that draft bookmark privately (and clearHistory drops it), so take the
+    // host copy FIRST and restore it after the list replacement. A formal
+    // owner publication must always DROP it (never restore A's draft into B).
+    const browseDraft = this.editor.takeHistoryBrowseDraft()
+    if (!restoreBrowseDraft) {
+      // The take above cleared any bookmark; a publication never restores it.
     }
-    if (!this.scopeOpen) return undefined
-    // EVERY accepted Enter is an occurrence: a repeat of an earlier submission is
-    // not detectable here anyway (a steer can write between two identical Enters),
-    // and the consecutive-duplicate compression belongs to the final seed, which
-    // sees every writer in append order.
-    this.scopeTokenSeq += 1
-    const token = this.scopeTokenSeq
-    const entry: ScopeSubmission = { owner: this.scopeOwner, token, text: trimmed }
-    const head = this.scopeInputs[0]
-    if (head !== undefined && head.text === trimmed) {
-      // A consecutive identical submission. Only the run's FIRST occurrence can
-      // ever append (every later one hits the CWD-level consecutive dedupe), while
-      // the NEWEST one carries the run's newest rank, so exactly those two are
-      // kept: a long run of pending duplicates costs O(1) state and can never
-      // evict an older, distinct occurrence.
-      let runStart = this.scopeInputs.length
-      for (let index = 0; index < this.scopeInputs.length; index += 1) {
-        if (this.scopeInputs[index]!.text !== trimmed) { runStart = index; break }
+    this.editor.clearHistory()
+    const entries = this.historyRecall.snapshot()
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+      this.editor.addToHistory(entries[index]!)
+    }
+    if (restoreBrowseDraft && browseDraft !== undefined) {
+      // Lossless document restore: the raw draft may contain registry-bound
+      // large-paste markers. setText() would clear the editor's paste registry
+      // (turning `[paste #N …]` into literal text); setTextAndCursor() keeps
+      // surviving registry entries and leaves undo/transient state alone.
+      // setTextAndCursor deliberately fires no onChange, so publish the one
+      // host document-change notification through the REAL onChange channel:
+      // seat subscribers, widget budget, edit epoch and undo leases must see
+      // the visible draft change. A mode change already fires that onChange.
+      const previousMode = this.editor.getInputMode()
+      this.editor.setTextAndCursor(browseDraft.text, browseDraft.cursor)
+      if (browseDraft.mode === previousMode) {
+        this.editor.onChange?.(this.editor.getText())
+      } else {
+        this.editor.setInputMode(browseDraft.mode)
       }
-      const first = this.scopeInputs[runStart - 1]!
-      const older = this.scopeInputs.slice(runStart)
-      // Every superseded run member except its oldest one goes: the oldest is the
-      // only occurrence that can still append.
-      for (let index = 0; index < runStart - 1; index += 1) this.forgetScopeInput(this.scopeInputs[index]!)
-      this.scopeInputs.length = 0
-      this.scopeInputs.push(entry, first, ...older)
-      this.scopeOccurrences.add(token)
-      return token
     }
-    this.scopeInputs.unshift(entry)
-    this.scopeOccurrences.add(token)
-    // The cap counts RUNS of consecutive identical text, exactly like the
-    // editor/mirror recall this scope feeds: a long run of duplicates cannot
-    // evict an older, distinct occurrence.
-    if (this.countScopeRuns() > TuiApp.INPUT_HISTORY_LIMIT) {
-      const oldest = this.scopeInputs[this.scopeInputs.length - 1]!
-      let runStart = this.scopeInputs.length - 1
-      while (runStart > 0 && this.scopeInputs[runStart - 1]!.text === oldest.text) runStart -= 1
-      for (let index = this.scopeInputs.length - 1; index >= runStart; index -= 1) {
-        this.forgetScopeInput(this.scopeInputs[index]!)
-      }
-      this.scopeInputs.length = runStart
-    }
-    return token
-  }
-
-  /** Drop every durable trace of one occurrence the scope no longer holds. */
-  private forgetScopeInput(entry: ScopeSubmission): void {
-    this.scopeOccurrences.delete(entry.token)
-    this.scopeSettled.delete(entry.token)
-  }
-
-  /** The number of runs of consecutive identical text in the scope. */
-  private countScopeRuns(): number {
-    let runs = 0
-    let previous: string | undefined
-    for (const entry of this.scopeInputs) {
-      if (entry.text !== previous) { runs += 1; previous = entry.text }
-    }
-    return runs
-  }
-
-  /**
-   * Record ONE settlement of the OPEN scope, in append order. The
-   * input-history owner calls this from the SAME synchronous stack as its
-   * append (the detached task's factory is invoked synchronously) and ALSO when
-   * its write policy skips a submission, and it carries the submission's
-   * occurrence token whenever the settled submission was a scope Enter. That
-   * token — not the text — is what attributes the settlement to exactly one
-   * occurrence, so repeated identical submissions stay distinguishable, and the
-   * ordering of the settled submissions is what places them against every other
-   * session-history writer (a steer, a shell line, a sessionless command).
-   * @param settlement - the settlement facts (see {@link ScopeSettlement}).
-   */
-  settleScopeInput(settlement: ScopeSettlement): void {
-    if (!this.scopeOpen) return
-    // The durable facts FIRST: they outlive the queue's cap for every LIVE
-    // occurrence, and a late settlement of an already dropped occurrence adds
-    // nothing.
-    const appendsBefore = this.scopeAppends.get(settlement.owner) ?? 0
-    if (settlement.outcome === 'written') {
-      this.scopeAppends.set(settlement.owner, appendsBefore + 1)
-    }
-    if (settlement.token !== undefined && this.scopeOccurrences.has(settlement.token)) {
-      this.scopeSettled.set(settlement.token, {
-        owner: settlement.owner,
-        outcome: settlement.outcome,
-        appendsBefore,
-      })
-    }
-    this.scopeSettlements.push(settlement)
-    if (this.scopeSettlements.length > TuiApp.INPUT_HISTORY_LIMIT) this.scopeSettlements.shift()
   }
 
   /**
    * Seed the editor's recall history from persisted entries (newest first).
-   * The persistence mirror is filled with the SAME semantics as the editor
-   * (only consecutive duplicates collapse, 100-entry cap), so the mirror
-   * always equals what ↑/↓ can recall — non-consecutive repeats like
+   * The kernel snapshot is filled with the SAME semantics as the editor (only
+   * consecutive duplicates collapse, the 100-entry cap applies), so the
+   * snapshot always equals what ↑/↓ can recall — non-consecutive repeats like
    * `['a', 'b', 'a']` are legal history and must survive the round-trip.
+   * An APPEND, never a replace: it does not open or close a scope.
    * @param entries - persisted entries, most recent first.
    */
   seedInputHistory(entries: readonly string[]): void {
@@ -7715,164 +8728,31 @@ export class TuiApp {
       const trimmed = entry.trim()
       if (trimmed !== '') this.editor.addToHistory(trimmed)
     }
-    // Mirror: push newest→oldest, collapsing only CONSECUTIVE duplicates
-    // (the editor's rule), capped at the same 100 entries as the editor.
-    let last: string | undefined
-    for (const entry of entries) {
-      const trimmed = entry.trim()
-      if (trimmed === '' || trimmed === last) continue
-      last = trimmed
-      this.inputHistory.push(trimmed)
-    }
-    if (this.inputHistory.length > TuiApp.INPUT_HISTORY_LIMIT) {
-      this.inputHistory.length = TuiApp.INPUT_HISTORY_LIMIT
-    }
+    this.historyRecall.seed(entries)
   }
 
   /**
-   * REPLACE the whole recall history (editor + persistence mirror) with the
+   * REPLACE the whole recall history (editor + kernel snapshot) with the
    * entries of the CURRENT workspace. Session switches must not recall the
    * previous workspace's inputs nor pollute the new workspace's persisted
    * history, so the host resets on every session change. The OPEN scope's
    * occurrences ride along: every successful write keeps its own row once, a
-   * policy-skipped occurrence is inserted where its settlement placed it, and a
-   * still-unsettled occurrence keeps its rank in the scope's submission order
-   * (see {@link scopeInputs} / {@link scopeSettlements}). The commit closes the
-   * scope, so ordinary submissions use the plain {@link rememberInput} path
-   * again.
+   * policy-skipped occurrence is inserted where its settlement placed it, and
+   * a still-unsettled occurrence keeps its rank in the scope's submission
+   * order (the kernel's own reconcile). The commit closes the scope, so
+   * ordinary submissions use the plain {@link rememberInput} path again.
    * @param entries - the new workspace's persisted entries, newest first.
    * @param owner - the owner whose hydration committed this reseed. The
    *   sessionless boot seed passes no owner: it only seeds the recall pool and
    *   leaves the scope open (boot is not a published Session).
    */
-  resetInputHistory(entries: readonly string[], owner?: string): void {
-    this.editor.clearHistory()
-    this.inputHistory.length = 0
-    if (owner === undefined) {
-      this.seedInputHistory(entries)
-      return
-    }
-    // The settlements THIS Session's rows produced, in append order, plus the
-    // tokens they carry. The snapshot's newest written-count rows are exactly
-    // those appends, in reverse: the append order IS the file order, so no text
-    // is ever matched to guess which occurrence a row belongs to.
-    const settlements = this.scopeSettlements.filter(settlement => settlement.owner === owner)
-    const retainedTokens = new Set<number>()
-    let retainedWrites = 0
-    for (const settlement of settlements) {
-      if (settlement.outcome === 'written') retainedWrites += 1
-      if (settlement.token !== undefined) retainedTokens.add(settlement.token)
-    }
-    // The watermark is the DURABLE append count for this Session's rows, not the
-    // retained queue's: the snapshot's newest covered rows are this window's
-    // appends in reverse, whether or not their settlements survived the cap.
-    const covered = Math.min(this.scopeAppends.get(owner) ?? 0, entries.length)
-    // Occurrence token → rank (0 = newest), built ONCE: every lookup below is a
-    // map read, so the reconstruction stays linear in the scope and the window.
-    const ranks = new Map<number, number>()
-    for (let index = 0; index < this.scopeInputs.length; index += 1) {
-      ranks.set(this.scopeInputs[index]!.token, index)
-    }
-    // The window in the DISK order (newest first), each position tagged with the
-    // occurrence rank it carries (`undefined` = another writer's row).
-    const windowTexts: string[] = []
-    const windowRanks: (number | undefined)[] = []
-    const windowRows: boolean[] = []
-    let writeSeen = 0
-    for (let index = settlements.length - 1; index >= 0; index -= 1) {
-      const settlement = settlements[index]!
-      const rank = settlement.token === undefined ? undefined : ranks.get(settlement.token)
-      if (settlement.outcome === 'written') {
-        writeSeen += 1
-        // Writes older than the recall window have no row in the projection at
-        // all (exactly like the baseline snapshot).
-        if (writeSeen > covered) continue
-        windowTexts.push(entries[writeSeen - 1]!)
-      } else {
-        if (rank === undefined) continue
-        windowTexts.push(this.scopeInputs[rank]!.text)
-      }
-      windowRanks.push(rank)
-      windowRows.push(settlement.outcome === 'written')
-    }
-    // The appends whose settlements the cap evicted are the OLDER window rows:
-    // their rows are still part of the projection and must be emitted in the disk
-    // order, with no occurrence association (their own facts stay in the map).
-    for (let row = retainedWrites; row < covered; row += 1) {
-      windowTexts.push(entries[row]!)
-      windowRanks.push(undefined)
-      windowRows.push(true)
-    }
-    // The occurrences the window does not carry, in submission order (newest
-    // first): a never-settled occurrence is NEWER than every settled submission
-    // of the writers that share the submit turn, while an occurrence whose
-    // settlement the cap evicted was settled strictly BEFORE every retained one,
-    // so it expires BEHIND the whole window.
-    const before: number[] = []
-    const after: { readonly rank: number; readonly newerRows: number }[] = []
-    for (let index = 0; index < this.scopeInputs.length; index += 1) {
-      const token = this.scopeInputs[index]!.token
-      if (retainedTokens.has(token)) continue
-      const settled = this.scopeSettled.get(token)
-      if (settled === undefined) before.push(index)
-      else if (settled.outcome === 'skipped' && settled.owner === owner) {
-        // A skip the queue evicted keeps its rank: it sits after the appends that
-        // preceded it, so its boundary is a ROW count inside the covered window
-        // (never negative: every append adds a session row, so the covered count is
-        // at least the appends that preceded it — a zero boundary means the skip is
-        // newer than every covered row and belongs in front of them).
-        after.push({ rank: index, newerRows: covered - settled.appendsBefore })
-      }
-    }
-    // The most recent skip first: its boundary is the smallest row count, so an
-    // ASCENDING cursor reaches each boundary in turn.
-    after.sort((left, right) => (left.newerRows - right.newerRows) || (left.rank - right.rank))
-    // ONE ordered cursor: an occurrence the window does not carry is emitted just
-    // before the first position that is another writer's row or an older
-    // occurrence — no search inside either loop.
-    this.reconcileSteps = 0
-    const merged: string[] = []
-    let next = 0
-    let rowsSeen = 0
-    let skipped = 0
-    // A skip whose settlement the cap evicted: every one of them settled before
-    // every RETAINED settlement, and it belongs after the rows that preceded it.
-    const emitEvictedSkips = (upTo: number): void => {
-      while (skipped < after.length && after[skipped]!.newerRows <= upTo) {
-        merged.push(this.scopeInputs[after[skipped]!.rank]!.text)
-        skipped += 1
-      }
-    }
-    for (let index = 0; index < windowTexts.length; index += 1) {
-      this.reconcileSteps += 1
-      const windowRank = windowRanks[index]
-      while (next < before.length && (windowRank === undefined || before[next]! < windowRank)) {
-        this.reconcileSteps += 1
-        merged.push(this.scopeInputs[before[next]!]!.text)
-        next += 1
-      }
-      // A skip that settled before this position's append belongs here.
-      emitEvictedSkips(rowsSeen)
-      merged.push(windowTexts[index]!)
-      if (windowRows[index] === true) {
-        rowsSeen += 1
-        emitEvictedSkips(rowsSeen)
-      }
-    }
-    while (next < before.length) {
-      this.reconcileSteps += 1
-      merged.push(this.scopeInputs[before[next]!]!.text)
-      next += 1
-    }
-    emitEvictedSkips(covered)
-    this.seedInputHistory([...merged, ...entries.slice(covered)])
-    this.scopeInputs.length = 0
-    this.scopeSettlements.length = 0
-    this.scopeSettled.clear()
-    this.scopeOccurrences.clear()
-    this.scopeAppends.clear()
-    this.scopeOpen = false
-    this.scopeOwner = owner
+  resetInputHistory(entries: readonly string[], owner?: string, writeIds?: readonly (string | undefined)[]): void {
+    // The kernel is the ONLY recall state: reset it first, then mirror its
+    // snapshot into the editor. Re-seeding through `seedInputHistory` here
+    // would feed the kernel twice. The PREVIOUS snapshot is the browse's own
+    // entry list (needed to recognise/restore an active browse draft).
+    this.historyRecall.reset(entries, owner, writeIds)
+    this.restoreEditorRecall(true)
   }
 
   /**
@@ -7888,140 +8768,209 @@ export class TuiApp {
    * @param owner - the published Session's id.
    */
   beginInputHistoryScope(owner: string | undefined): void {
-    if (this.scopeOwner !== undefined) {
-      // A REPLACED owner: its occurrences are dropped with the scope.
-      this.scopeInputs.length = 0
-      this.scopeSettlements.length = 0
-      this.scopeSettled.clear()
-      this.scopeOccurrences.clear()
-      this.scopeAppends.clear()
-    }
-    // The OUTGOING recall pool never survives into the newly published owner. This
-    // seam runs AFTER the publication committed (never in the possibly-failing
-    // pre-publication phase), while the new owner's hydration reseed only lands
-    // later, so without this both a replaced Session's rows AND the boot recall of
-    // the CWD history (the FIRST Session's creation has no previous owner) would
-    // stay recallable by ↑ in the meantime. The open scope's own occurrences are
-    // re-seeded here, so an input already accepted for this owner stays recallable
-    // until the reconcile folds it over the snapshot.
-    this.editor.clearHistory()
-    this.inputHistory.length = 0
-    // Only what this owner can still own: an occurrence whose row was already
-    // written under ANOTHER identity (a sessionless local command, say) is settled
-    // and must not appear in this Session's recall even for a moment; an occurrence
-    // that is merely unpersisted belongs to this owner and stays.
-    this.seedInputHistory(this.scopeInputs
-      .filter(entry => {
-        const settled = this.scopeSettled.get(entry.token)
-        // Cross-Session visibility follows the SETTLEMENT's identity, never
-        // whether a row happened to be written: a sessionless occurrence the
-        // policy skipped is just as foreign as a sessionless row.
-        return settled === undefined || settled.owner === owner
-      })
-      .map(entry => entry.text))
-    this.scopeOwner = owner
-    this.scopeOpen = true
+    this.historyRecall.begin(owner)
+    this.restoreEditorRecall(false)
   }
 
-  /** The current input history (newest first) for persistence. */
+  /**
+   * Record ONE settlement of the OPEN scope, in append order, straight into
+   * this mount's recall kernel. The input-history owner calls this from the
+   * SAME synchronous stack as its append (the detached task's factory is
+   * invoked synchronously) and ALSO when its write policy skips a submission,
+   * and it carries the submission's occurrence token whenever the settled
+   * submission was a scope Enter. That token — not the text — is what
+   * attributes the settlement to exactly one occurrence, so repeated identical
+   * submissions stay distinguishable, and the ordering of the settled
+   * submissions is what places them against every other session-history writer
+   * (a steer, a shell line, a sessionless command). Never touches the draft or
+   * replays a UI key.
+   * @param settlement - the settlement facts (see {@link HistoryScopeSettlement}).
+   */
+  settleScopeInput(settlement: HistoryScopeSettlement): void {
+    this.historyRecall.settle(settlement)
+  }
+
+  /** The current recall snapshot (newest first) for persistence. */
   getInputHistory(): readonly string[] {
-    return [...this.inputHistory]
+    return this.historyRecall.snapshot()
   }
 
   /** HEADLESS-TEST HOOK: the number of positions the LAST recall reconcile
    *  visited. Production never reads it; it exists so the frozen plan's O(100)
    *  bound is pinned by a number instead of by the shape of the code. */
   reconcileStepsForTest(): number {
-    return this.reconcileSteps
+    return this.historyRecall.reconcileStepsForTest()
   }
 
   /** HEADLESS-TEST HOOK: the number of durable per-occurrence settlement facts
    *  the open scope currently holds — it must stay bounded by the scope's own
    *  occurrence cap, never by how many submissions the window saw. */
   scopeFactCountForTest(): number {
-    return this.scopeSettled.size
+    return this.historyRecall.scopeFactCountForTest()
   }
 
-  /**
-   * Append a local card rendered after the session transcript (e.g. `!`
-   * shell runs). The card is always expanded (its turn is unbounded).
-   * @param message - the local card to show.
-   * @returns the stored card reference, for {@link updateLocalMessage}.
-   */
-  pushLocalMessage(message: TranscriptMessage): TranscriptMessage {
-    this.localMessages.push(message)
-    this.clearFocusLiveHeightState()
-    this.rebuildMessages('local-card')
+  /** Capture the source row and accepted display order at the submit gesture. */
+  captureLocalShellPlacement(): UserShellPresentationPlacement {
+    const acceptedOrder = ++this.localShellAcceptedOrder
+    if (this.transcriptWindow?.mode === 'history' || this.transcriptWindow?.hasNewer === true) {
+      return { anchor: undefined, turn: undefined, target: 'deferred-to-latest', acceptedOrder }
+    }
+    let anchor: TranscriptMessage | undefined
+    for (let index = this.messages.length - 1; index >= 0; index -= 1) {
+      const candidate = this.messages[index]!
+      if (candidate.kind === 'summary') continue
+      anchor = candidate
+      break
+    }
+    if (anchor === undefined) return { anchor: undefined, turn: undefined, target: 'beginning', acceptedOrder }
+    return {
+      anchor,
+      turn: 'turn' in anchor ? anchor.turn : undefined,
+      target: 'anchored',
+      acceptedOrder,
+    }
+  }
+
+  /** Append one Client-local card with its already-captured placement. */
+  pushLocalMessage(
+    message: TranscriptMessage,
+    placement = this.captureLocalShellPlacement(),
+  ): TranscriptMessage {
+    const { acceptedOrder, ...snapshot } = placement
+    this.mutateTranscriptDisclosure(() => {
+      this.localMessages.push({ message, placement: snapshot, acceptedOrder })
+      this.pruneLocalShellRetention()
+    })
     return message
   }
 
-  /**
-   * Replace one local card by reference. Settling a card by its own identity
-   * (not "the last one") keeps concurrent cards independent: a card settled
-   * after a newer one was pushed must not overwrite the newer card.
-   * @param message - the card reference {@link pushLocalMessage} returned.
-   * @param next - the settled replacement.
-   * @returns the stored replacement (`next`), so a caller that keeps the
-   *   card reference (e.g. a streaming tail refresher) can chain updates —
-   *   the array element is replaced, so the OLD reference no longer indexes.
-   */
+  /** Replace one local card by reference, preserving its placement/order. */
   updateLocalMessage(message: TranscriptMessage, next: TranscriptMessage): TranscriptMessage {
-    const index = this.localMessages.indexOf(message)
+    const index = this.localMessages.findIndex(entry => entry.message === message)
     if (index === -1) return next
-    // A click-expanded local card keeps its override across the running →
-    // settled replacement: the message identity changes, the presentation
-    // state must not (plan §5.2 — never key expansion on the object alone).
-    const override = this.expandedOverride.get(message)
-    if (override !== undefined) {
-      this.expandedOverride.delete(message)
-      this.expandedOverride.set(next, override)
-    }
-    // The press-time identity token follows the logical card across the
-    // running → settled object replacement: a press on the running card
-    // must still match the settled card at release (mouse parity).
-    const token = this.identityTokens.get(message)
-    if (token !== undefined) this.identityTokens.set(next, token)
-    this.localMessages[index] = next
-    this.clearFocusLiveHeightState()
-    this.rebuildMessages('local-card')
+    this.mutateTranscriptDisclosure(() => {
+      const entry = this.localMessages[index]!
+      const override = this.expandedOverride.get(message)
+      if (override !== undefined) {
+        this.expandedOverride.delete(message)
+        this.expandedOverride.set(next, override)
+      }
+      const token = this.identityTokens.get(message)
+      if (token !== undefined) {
+        this.identityTokens.delete(message)
+        this.identityTokens.set(next, token)
+      }
+      this.localMessages[index] = { ...entry, message: next }
+      this.pruneLocalShellRetention()
+    })
     return next
   }
 
   /** Replace the most recent local card (running → settled). */
   updateLastLocalMessage(message: TranscriptMessage): void {
-    const index = this.localMessages.length - 1
-    if (index < 0) return
-    // The press-time identity token follows the logical card across the
-    // running → settled object replacement (mouse parity).
-    const token = this.identityTokens.get(this.localMessages[index]!)
-    if (token !== undefined) this.identityTokens.set(message, token)
-    this.localMessages[index] = message
-    this.clearFocusLiveHeightState()
-    this.rebuildMessages('local-card')
+    if (this.localMessages.length === 0) return
+    this.mutateTranscriptDisclosure(() => {
+      const index = this.localMessages.length - 1
+      const entry = this.localMessages[index]!
+      const token = this.identityTokens.get(entry.message)
+      if (token !== undefined) {
+        this.identityTokens.delete(entry.message)
+        this.identityTokens.set(message, token)
+      }
+      const override = this.expandedOverride.get(entry.message)
+      if (override !== undefined) {
+        this.expandedOverride.delete(entry.message)
+        this.expandedOverride.set(message, override)
+      }
+      this.localMessages[index] = { ...entry, message }
+      this.pruneLocalShellRetention()
+    })
   }
 
-  /** Drop all local cards (session switch). */
+  /** Record (or clear) the Client-local Session-submission outcome of one
+   * retained shell card. Unknown references are inert: the card was already
+   * evicted or removed. */
+  setLocalShellSubmissionState(message: TranscriptMessage, state: UserShellSubmissionState | undefined): boolean {
+    const index = this.localMessages.findIndex(entry => entry.message === message)
+    if (index === -1) return false
+    this.mutateTranscriptDisclosure(() => {
+      const entry = this.localMessages[index]!
+      this.localMessages[index] = state === undefined
+        ? { message: entry.message, placement: entry.placement, acceptedOrder: entry.acceptedOrder }
+        : { ...entry, submission: state }
+      // The submission sidecar is entry state, not part of the message's
+      // semantic snapshot: the width/bake cache cannot see it, so drop THIS
+      // card's cached component explicitly (the same dispose path the window
+      // prune uses) or the next paint would keep the old folded row.
+      const cached = this.messageComponents.get(message)
+      if (cached !== undefined) {
+        this.messageComponents.delete(message)
+        try {
+          cached.component.dispose?.()
+        } catch {
+          // Best effort: a cached component's dispose must not break a paint.
+        }
+      }
+    })
+    return true
+  }
+
+  private localShellSubmissionOf(message: TranscriptMessage): UserShellSubmissionState | undefined {
+    return this.localMessages.find(entry => entry.message === message)?.submission
+  }
+
+  /** Remove one local card only when its exact current object is still owned. */
+  removeLocalMessage(message: TranscriptMessage): boolean {
+    const index = this.localMessages.findIndex(entry => entry.message === message)
+    if (index === -1) return false
+    this.mutateTranscriptDisclosure(() => {
+      this.localMessages.splice(index, 1)
+      this.forgetLocalShellPresentation(message)
+    })
+    return true
+  }
+
+  /** Drop all local cards on a real Session replacement or hydration. */
   clearLocalMessages(): void {
     if (this.localMessages.length === 0) return
-    this.localMessages.length = 0
-    this.clearFocusLiveHeightState()
-    this.rebuildMessages('local-card')
+    this.mutateTranscriptDisclosure(() => {
+      for (const entry of this.localMessages) this.forgetLocalShellPresentation(entry.message)
+      this.localMessages.length = 0
+    })
   }
 
-  /**
-   * Drop SETTLED local cards (completed `!`/`!!` shell runs); running cards
-   * survive so a live stream is never dismissed by a concurrent submit.
-   * Local cards are a live view, not a record: context runs clear on submit
-   * success (the transcript's user row takes over), local-only runs on the
-   * next user submission (dispatchUserInput / steerNow).
-   */
+  /** Alt+K drops settled local cards; running cards remain owned by their run. */
   clearSettledLocalMessages(): void {
-    const running = this.localMessages.filter(message => message.kind === 'tool' && message.status === 'running')
+    const running = this.localMessages.filter(entry => entry.message.kind === 'tool' && entry.message.status === 'running')
     if (running.length === this.localMessages.length) return
-    this.localMessages.length = 0
-    this.localMessages.push(...running)
-    this.clearFocusLiveHeightState()
-    this.rebuildMessages('local-card')
+    this.mutateTranscriptDisclosure(() => {
+      for (const entry of this.localMessages) {
+        if (!(entry.message.kind === 'tool' && entry.message.status === 'running')) {
+          this.forgetLocalShellPresentation(entry.message)
+        }
+      }
+      this.localMessages.splice(0, this.localMessages.length, ...running)
+    })
+  }
+
+  private forgetLocalShellPresentation(message: TranscriptMessage): void {
+    this.expandedOverride.delete(message)
+    this.identityTokens.delete(message)
+    this.subCallHitsByMessage.delete(message)
+    this.workflowHitsByMessage.delete(message)
+    this.searchSourceRegionsByMessage.delete(message)
+  }
+
+  private pruneLocalShellRetention(): void {
+    const settled = this.localMessages
+      .filter(entry => entry.message.kind === 'tool' && isLocalShellCard(entry.message) && entry.message.status !== 'running')
+      .sort((left, right) => left.acceptedOrder - right.acceptedOrder)
+    for (const entry of settled.slice(0, Math.max(0, settled.length - MAX_SETTLED_LOCAL_SHELL_CARDS))) {
+      const index = this.localMessages.indexOf(entry)
+      if (index === -1) continue
+      this.localMessages.splice(index, 1)
+      this.forgetLocalShellPresentation(entry.message)
+    }
   }
 
   /**
@@ -8051,6 +9000,84 @@ export class TuiApp {
   /** Whether the alt screen is currently active (fullscreen mode). */
   isFullscreen(): boolean {
     return this.fullscreen !== undefined
+  }
+
+  private transcriptSearchScreenIsEligible(
+    screen: TuiMainScreen | TuiAltScreen,
+    searchOverlay?: OverlayHandle,
+  ): boolean {
+    const overlayAdmission = searchOverlay === undefined
+      ? !this.overlayBroker.hasVisibleModalOverlay() && !this.overlayBroker.hasFocusedOverlay()
+      : this.overlayBroker.isOnlyVisibleModal(searchOverlay)
+        && this.overlayBroker.hasFocusedOverlay()
+        && searchOverlay.isFocused()
+    return !this.disposed
+      && this.fullscreenTransitionDepth === 0
+      && this.terminalPresentationActive
+      && this.activeScreen === screen
+      && overlayAdmission
+      && this.jobWorkspace === undefined
+      && this.workspaceLease === undefined
+      && this.activeQuestions === undefined
+      && !this.approvals.hasPending()
+      && this.activeSaveLocation === undefined
+      && this.viewerMode === undefined
+      && this.optionalSeat === undefined
+      && !this.taskQuick.focused
+  }
+
+  private beginTemporarySearchReaderIfRegular(): TuiAltScreen | undefined {
+    if (this.fullscreen !== undefined) {
+      return this.transcriptSearchScreenIsEligible(this.fullscreen) ? this.fullscreen : undefined
+    }
+    if (!this.transcriptSearchScreenIsEligible(this.tui)) return undefined
+
+    this.temporarySearchReaderReturnToRegular = true
+    this.temporarySearchReaderTransitionPermit = true
+    try {
+      this.setFullscreen(true, { persistPreference: false, onlyWhenIdle: true })
+    } finally {
+      this.temporarySearchReaderTransitionPermit = false
+    }
+
+    const screen = this.fullscreen
+    if (screen !== undefined && this.activeScreen === screen) return screen
+    this.temporarySearchReaderReturnToRegular = false
+    return undefined
+  }
+
+  private rollbackTemporarySearchReader(screen: TuiAltScreen): void {
+    if (!this.temporarySearchReaderReturnToRegular || this.disposed
+      || !this.transcriptSearchScreenIsEligible(screen)
+      || this.fullscreen !== screen || this.activeScreen !== screen
+      || this.jobWorkspace !== undefined || this.workspaceLease !== undefined
+      || this.searchOverlay !== undefined || this.searchOpening !== undefined) {
+      this.temporarySearchReaderReturnToRegular = false
+      return
+    }
+    this.temporarySearchReaderTransitionPermit = true
+    try {
+      this.setFullscreen(false, { persistPreference: false })
+    } finally {
+      this.temporarySearchReaderTransitionPermit = false
+      this.temporarySearchReaderReturnToRegular = false
+    }
+  }
+
+  private returnTemporarySearchReaderIfCurrent(screen: TuiAltScreen): void {
+    if (!this.temporarySearchReaderReturnToRegular) return
+    if (this.searchOverlay !== undefined || this.searchOpening !== undefined) return
+    if (!this.transcriptSearchScreenIsEligible(screen) || this.fullscreen !== screen) {
+      this.temporarySearchReaderReturnToRegular = false
+      return
+    }
+    this.temporarySearchReaderTransitionPermit = true
+    try {
+      this.setFullscreen(false, { persistPreference: false, onlyWhenIdle: true })
+    } finally {
+      this.temporarySearchReaderTransitionPermit = false
+      this.temporarySearchReaderReturnToRegular = false
+    }
   }
 
   /** Set the fullscreen mouse-wheel step (transcript lines per wheel
@@ -8097,6 +9124,21 @@ export class TuiApp {
    *   ordinary behavior.
    */
   setFullscreen(enabled: boolean, options?: { readonly persistPreference?: boolean; readonly onlyWhenIdle?: boolean }): void {
+    const temporarySearchReaderTransition = this.temporarySearchReaderTransitionPermit
+    this.temporarySearchReaderTransitionPermit = false
+    this.fullscreenTransitionDepth += 1
+    try {
+      this.setFullscreenTransition(enabled, options, temporarySearchReaderTransition)
+    } finally {
+      this.fullscreenTransitionDepth -= 1
+    }
+  }
+
+  private setFullscreenTransition(
+    enabled: boolean,
+    options: { readonly persistPreference?: boolean; readonly onlyWhenIdle?: boolean } | undefined,
+    temporarySearchReaderTransition: boolean,
+  ): void {
     if (this.disposed) return
     // A leased workspace (Job OR Settings) owns the physical screen: a
     // display-mode switch now would detach the PAUSED return surface (killing
@@ -8120,6 +9162,10 @@ export class TuiApp {
     this.keybindings.cancelLeader()
     const active = this.fullscreen !== undefined
     if (enabled === active) return
+    if (this.temporarySearchReaderReturnToRegular && !temporarySearchReaderTransition) {
+      this.temporarySearchReaderReturnToRegular = false
+    }
+    this.clearRenderedViewSearch({ rebuild: false })
     // B4-B: the on-demand Task Quick is retired on ANY screen hand-off — the
     // accessory instance is shared by both roots and its `focused` flag would
     // otherwise survive the swap while the new screen focuses the editor,
@@ -8138,7 +9184,8 @@ export class TuiApp {
     // through such a regular surface (re-entry re-derives folded). The
     // temporary SEARCH reveal is separate state: the runner closes the search
     // overlay on a surface swap, which clears the target.
-    if (enabled && !this.userDisclosureAffordanceAvailable()) {
+    if (enabled && !this.userDisclosureAffordanceAvailable()
+      && !this.temporarySearchReaderReturnToRegular) {
       this.clearUserDisclosureOverrides()
     }
     this.clearFocusLiveHeightState()
@@ -8148,17 +9195,15 @@ export class TuiApp {
     // physical projections die with the old screen (detachPhysical). The
     // remount callbacks re-create them for the same logical nodes (including
     // the approval, whose logical node keeps its suppressed children hidden).
-    this.overlayBroker.detachPhysical()
-    // The ordinary search overlay is NOT remounted across the screen swap
-    // (only extension/advanced/unstable/history leases are): its raw
-    // handle died with the old screen — close it properly (the runner's
-    // onSearchClose resets the search state/anchor) so the next Ctrl+F
-    // reopens a FRESH search instead of focusing a stale dead handle.
-    if (this.searchOverlay !== undefined) {
-      this.searchOverlay = undefined
-      this.searchComponent = undefined
-      this.events.onSearchClose?.('surface-change')
+    // Search is not remounted across a user surface change. The temporary
+    // Reader entry is the exception: its opening intent was precommitted and
+    // the overlay is mounted only after this screen transaction completes.
+    const enteringTemporarySearchReader = temporarySearchReaderTransition && enabled && this.fullscreen === undefined
+    if (!enteringTemporarySearchReader
+      && (this.searchOverlay !== undefined || this.searchOpening !== undefined)) {
+      this.closeTranscriptSearch('surface-change')
     }
+    if (!enabled) this.overlayBroker.detachPhysical()
     if (enabled) {
       const openExternalUrl = this.openExternalUrl
       // The alt screen owns mouse handling (wheel scroll, drag selection,
@@ -8203,14 +9248,19 @@ export class TuiApp {
           if (this.keybindings.matches(data, 'app.transcript.jumpLatest')) {
             return this.events.onTranscriptJumpLatest?.() === true
           }
-          if (this.keybindings.matches(data, 'app.transcript.search')) {
+          const action = this.transcriptSearchActionForInput(data)
+          if (action !== undefined) {
             if (this.searchOverlay !== undefined) {
-              this.closeTranscriptSearch()
+              const scope = action === 'app.transcript.search.view' ? 'view' : 'full'
+              if (this.searchComponent?.getScope() === scope) this.closeTranscriptSearch()
+              else this.switchOpenTranscriptSearchScope(scope)
               return true
             }
-            return this.dispatchResolvedAction('app.transcript.search', data)
+            return this.dispatchResolvedAction(action, data)
           }
-          return getKeybindings().matches(data, 'tui.altScreen.search')
+          // The Host Full action owns Full-history search. The fork search is
+          // never a fallback: it would silently change both corpus and scope.
+          return getKeybindings().matches(data, 'tui.altScreen.search') ? true : false
         },
         onScrollBoundary: (direction, source) => direction < 0
           ? this.events.onTranscriptMoveOlder?.(source) === true
@@ -8342,39 +9392,71 @@ export class TuiApp {
       // viewport) — only the FINAL delivery to the focused component is
       // withheld while an optional seat tenant owns the keyboard.
       alt.addInputListener((data) => this.protocolSinkFence(data))
-      // The screen swap stops the terminal between the two starts: progress
-      // must not be written until the new screen owns it again (plan §7).
-      this.leaveTerminalPresentation()
-      this.tui.stop()
-      // The new alt's first paint is scheduled asynchronously: drop the
-      // PREVIOUS alt instance's last-painted snapshot (and any in-flight
-      // gesture) BEFORE start, so a press immediately after re-entry can
-      // never resolve against a frame the new surface never drew.
-      alt.start()
-      // Mode 2031 is per screen: the freshly started alt screen syncs the
-      // CURRENT tracking choice now that it owns the terminal (writing the mode
-      // before start() would land on the stopped screen and be lost).
-      alt.setTerminalColorSchemeNotifications(this.followingTerminalTheme)
-      // The main screen's stop cleared the physical progress indicator;
-      // re-assert the desired state on the new alt screen (plan §7).
-      this.enterTerminalPresentation()
-      // The alt screen starts with NO focused component: without this, every
-      // key after Ctrl+F is dropped (the app-level listener still sees
-      // shortcuts, but the editor never receives text or Enter). M9 + Phase
-      // 3A / PR-B: a screen swap is an active re-projection entry. Re-sync the
-      // SHARED seat mount with the LIVE owner first (a stale ACTIVE tenant is
-      // never left painted across the swap), then focus the live seat owner (a
-      // Question/Save frame, an ACTIVE tenant, else the latest host/plugin
-      // editor) on the screen that now owns the terminal. The stale record
-      // itself is retired AFTER the swap is committed (below), so a throwing
-      // caller cleanup can never leave a half-swapped surface.
-      this.projectSeatOccupant()
-      alt.setFocus(this.seatFallbackComponent() ?? this.seatEditor().component)
-      this.fullscreen = alt
-      // The alt screen owns the terminal now: re-register the scheme fan-out —
-      // which also re-binds the SIXEL readiness projection to THIS screen, so no
-      // pixel is painted with facts sampled for the previous one. (RFL-011.)
-      this.refreshSchemeRegistrations()
+      const returnFocus = this.tui.getFocusedComponent()
+      let mainStopAttempted = false
+      let altStartAttempted = false
+      try {
+        this.overlayBroker.detachPhysical()
+        // The screen swap stops the terminal between the two starts: progress
+        // must not be written until the new screen owns it again (plan §7).
+        this.leaveTerminalPresentation()
+        mainStopAttempted = true
+        this.tui.stop()
+        // The new alt's first paint is scheduled asynchronously: drop the
+        // PREVIOUS alt instance's last-painted snapshot (and any in-flight
+        // gesture) BEFORE start, so a press immediately after re-entry can
+        // never resolve against a frame the new surface never drew.
+        altStartAttempted = true
+        alt.start()
+        // Mode 2031 is per screen: the freshly started alt screen syncs the
+        // CURRENT tracking choice now that it owns the terminal (writing the mode
+        // before start() would land on the stopped screen and be lost).
+        alt.setTerminalColorSchemeNotifications(this.followingTerminalTheme)
+        // The main screen's stop cleared the physical progress indicator;
+        // re-assert the desired state on the new alt screen (plan §7).
+        this.enterTerminalPresentation()
+        // The alt screen starts with NO focused component: without this, every
+        // key after Ctrl+F is dropped (the app-level listener still sees
+        // shortcuts, but the editor never receives text or Enter). M9 + Phase
+        // 3A / PR-B: a screen swap is an active re-projection entry. Re-sync the
+        // SHARED seat mount with the LIVE owner first (a stale ACTIVE tenant is
+        // never left painted across the swap), then focus the live seat owner (a
+        // Question/Save frame, an ACTIVE tenant, else the latest host/plugin
+        // editor) on the screen that now owns the terminal. The stale record
+        // itself is retired AFTER the swap is committed (below), so a throwing
+        // caller cleanup can never leave a half-swapped surface.
+        this.projectSeatOccupant()
+        alt.setFocus(this.seatFallbackComponent() ?? this.seatEditor().component)
+        this.fullscreen = alt
+        // The alt screen owns the terminal now: re-register the scheme fan-out —
+        // which also re-binds the SIXEL readiness projection to THIS screen, so no
+        // pixel is painted with facts sampled for the previous one. (RFL-011.)
+        this.refreshSchemeRegistrations()
+      } catch (error) {
+        if (!temporarySearchReaderTransition) throw error
+        const stillOwnsFailedTransition = (): boolean => !this.disposed
+          && this.jobWorkspace === undefined
+          && this.workspaceLease === undefined
+          && (this.fullscreen === undefined || this.fullscreen === alt)
+        const remounts = this.overlayBroker.remountOrder()
+        runSyncDisposalStepsWithPrimary('fullscreen screen transition unwind', error, [
+          () => { if (altStartAttempted && stillOwnsFailedTransition()) alt.stop() },
+          () => {
+            if (!stillOwnsFailedTransition()) return
+            if (this.fullscreen === alt) this.fullscreen = undefined
+            this.fullscreenScroll = undefined
+          },
+          () => {
+            if (!stillOwnsFailedTransition()) return
+            if (mainStopAttempted) this.resumeReturnSurface(this.tui, returnFocus)
+            else this.enterTerminalPresentation()
+          },
+          ...remounts.map(handle => () => {
+            if (stillOwnsFailedTransition()) this.overlayRemounts.get(handle)?.()
+          }),
+          () => { if (stillOwnsFailedTransition()) this.overlayBroker.restoreFocusAfterSwap() },
+        ])
+      }
     } else {
       this.leaveTerminalPresentation()
       this.fullscreen?.stop()
@@ -8404,7 +9486,7 @@ export class TuiApp {
       // starts from the bulk preference again (plan §6.2's preferred cleanup
       // — the regular surface's only Thinking state is the bulk preference).
       // Search reveals are separate temporary state and write no override.
-      this.clearThinkingExpansionOverrides()
+      if (!this.temporarySearchReaderReturnToRegular) this.clearThinkingExpansionOverrides()
       // The alt screen's exit repaint starts at the hardware cursor row, so
       // rows above it (e.g. a dialog the alt screen composited) survive in
       // the terminal buffer. Force a full repaint so the regular surface
@@ -8490,39 +9572,214 @@ export class TuiApp {
    * focus its input. The search itself runs in the host against the folded
    * transcript; this surface only collects the query and reports navigation keys.
    */
-  startTranscriptSearch(): void {
+  startTranscriptSearch(scope: TranscriptSearchScope = 'full'): void {
     if (this.disposed) return
     if (this.searchOverlay !== undefined) {
-      this.searchOverlay.focus()
+      if (this.searchComponent?.getScope() !== scope) this.switchOpenTranscriptSearchScope(scope)
+      else this.searchOverlay.focus()
       return
     }
-    this.events.onSearchOpen?.()
-    const component = new TranscriptSearchComponent((query) => {
-      this.events.onSearchQuery?.(query)
+    if (this.searchOpening !== undefined) return
+
+    const temporaryReader = this.fullscreen === undefined || this.temporarySearchReaderReturnToRegular
+    const component = new TranscriptSearchComponent({
+      onQueryChange: query => this.events.onSearchQuery?.(query),
+      onScopeRequest: next => this.switchOpenTranscriptSearchScope(next),
+      readViewResult: () => this.renderedViewSearchStatus(),
+      readTemporaryReader: () => this.isTemporarySearchReader(),
+      readCoverage: () => this.transcriptSearchCoverage,
+      readSourceNotice: () => this.currentFullSearchNotice(),
+      readTerminalRows: () => this.terminal.rows,
+      initialScope: scope,
     })
+    const opening: TranscriptSearchOpening = {
+      screen: this.fullscreen,
+      component,
+      temporaryReader,
+      admitted: false,
+      openCallbackInFlight: true,
+      mountInFlight: false,
+      closeRequested: false,
+      closeReason: 'dismiss',
+      closeNotified: false,
+    }
+    this.searchOpening = opening
     this.searchComponent = component
-    this.searchOverlay = this.showOverlayOnHost(component, {
-      anchor: 'top-right',
-      width: '40%',
-      minWidth: 24,
-      margin: 1,
-      // Fullscreen: the search box keeps keyboard focus, but the transcript
-      // viewport stays interactive (wheel/PageUp/PageDown/scrollbar/background
-      // selection) while the box itself did not handle the event
-      // (fork seam X058; inert on the main screen, where the terminal owns
-      // scrollback).
-      viewportPassthrough: true,
-    })
+
+    let screen: TuiAltScreen | undefined
+    try {
+      screen = this.beginTemporarySearchReaderIfRegular()
+    } catch (error) {
+      opening.openCallbackInFlight = false
+      opening.screen = this.fullscreen
+      runSyncDisposalStepsWithPrimary('transcript search reader open unwind', error, [
+        () => this.finishSearchOpening(opening),
+        () => {
+          if (this.searchOpening === undefined && this.searchOverlay === undefined && this.fullscreen === undefined) {
+            this.temporarySearchReaderReturnToRegular = false
+          }
+        },
+      ])
+    }
+    if (screen === undefined) {
+      opening.openCallbackInFlight = false
+      this.finishSearchOpening(opening)
+      return
+    }
+    opening.screen = screen
+    if (opening.closeRequested || !this.transcriptSearchScreenIsEligible(screen)) {
+      opening.openCallbackInFlight = false
+      opening.closeReason = 'surface-change'
+      this.finishSearchOpening(opening)
+      return
+    }
+
+    let admitted: boolean | void
+    try {
+      admitted = this.events.onSearchOpen?.(scope)
+    } catch (error) {
+      opening.openCallbackInFlight = false
+      opening.admitted = true
+      opening.closeRequested = true
+      opening.closeReason = 'surface-change'
+      runSyncDisposalStepsWithPrimary('transcript search admission unwind', error, [
+        () => this.finishSearchOpening(opening),
+        () => {
+          if (opening.temporaryReader && this.searchOpening === undefined
+            && this.searchOverlay === undefined && this.fullscreen === undefined) {
+            this.temporarySearchReaderReturnToRegular = false
+          }
+        },
+      ])
+    }
+    opening.openCallbackInFlight = false
+    opening.admitted = admitted !== false
+    if (!opening.admitted) {
+      this.finishSearchOpening(opening)
+      return
+    }
+    if (opening.closeRequested || this.searchOpening !== opening
+      || !this.transcriptSearchScreenIsEligible(screen)) {
+      if (!opening.closeRequested) {
+        opening.closeRequested = true
+        opening.closeReason = 'surface-change'
+      }
+      this.finishSearchOpening(opening)
+      return
+    }
+
+    opening.mountInFlight = true
+    let overlay: OverlayHandle
+    try {
+      overlay = this.showOverlayOnHost(component, {
+        anchor: 'top-right',
+        width: '40%',
+        minWidth: 24,
+        margin: 1,
+        viewportPassthrough: true,
+      })
+    } catch (error) {
+      opening.mountInFlight = false
+      opening.closeRequested = true
+      opening.closeReason = 'surface-change'
+      runSyncDisposalStepsWithPrimary('transcript search open unwind', error, [
+        () => this.finishSearchOpening(opening),
+      ])
+      return
+    }
+    opening.mountInFlight = false
+    if (opening.closeRequested || this.searchOpening !== opening
+      || this.fullscreen !== screen || this.activeScreen !== screen) {
+      if (!opening.closeRequested) {
+        opening.closeRequested = true
+        opening.closeReason = 'surface-change'
+      }
+      this.searchOverlay = overlay
+      this.searchComponent = component
+      this.closeTranscriptSearch(opening.closeReason)
+      return
+    }
+    this.searchOverlay = overlay
+    this.searchComponent = component
+    if (opening.closeRequested || this.searchOpening !== opening
+      || !this.transcriptSearchScreenIsEligible(screen, overlay)) {
+      opening.closeRequested = true
+      if (opening.closeReason === 'dismiss') opening.closeReason = 'surface-change'
+      this.closeTranscriptSearch(opening.closeReason)
+      return
+    }
+    this.searchOpening = undefined
   }
 
-  /** Close host/fullscreen transcript search and report whether either closed. */
+  private switchOpenTranscriptSearchScope(scope: TranscriptSearchScope): void {
+    if (this.searchOverlay === undefined || this.searchComponent === undefined) return
+    if (this.searchComponent.getScope() === scope) return
+    this.events.onSearchScope?.(scope)
+  }
+
+  private finishSearchOpening(opening: TranscriptSearchOpening): void {
+    if (opening.openCallbackInFlight || opening.mountInFlight) return
+    if (this.searchOpening === opening) this.searchOpening = undefined
+    if (this.searchComponent === opening.component && this.searchOverlay === undefined) {
+      this.searchComponent = undefined
+    }
+    if (!opening.admitted) {
+      if (opening.temporaryReader && opening.screen !== undefined) {
+        this.rollbackTemporarySearchReader(opening.screen)
+      }
+      return
+    }
+    if (!opening.closeRequested || opening.closeNotified) return
+    opening.closeNotified = true
+    runSyncDisposalSteps('transcript search opening close', [
+      () => this.events.onSearchClose?.(opening.closeReason),
+      () => {
+        if (!opening.temporaryReader || opening.screen === undefined) return
+        if (opening.closeReason === 'surface-change') this.rollbackTemporarySearchReader(opening.screen)
+        else this.returnTemporarySearchReaderIfCurrent(opening.screen)
+      },
+    ])
+  }
+
+  /** Close the managed Search overlay and report one lifecycle reason. */
   closeTranscriptSearch(reason: TranscriptSearchCloseReason = 'dismiss'): boolean {
     const closedFullscreen = this.fullscreen?.clearSearch() ?? false
-    if (this.searchOverlay === undefined) return closedFullscreen
-    this.searchOverlay.hide()
+    const opening = this.searchOpening
+    const overlay = this.searchOverlay
+    if (overlay === undefined) {
+      if (opening === undefined) return closedFullscreen
+      opening.closeRequested = true
+      opening.closeReason = reason
+      this.finishSearchOpening(opening)
+      return true
+    }
+
+    const screen = this.fullscreen
+    const temporaryReader = this.temporarySearchReaderReturnToRegular
+    const readerOwner = opening?.screen ?? screen
+    // Retire the old logical owner BEFORE hide() can synchronously run focus hooks.
     this.searchOverlay = undefined
     this.searchComponent = undefined
-    this.events.onSearchClose?.(reason)
+    this.pendingSearchOcclusionCorrection = undefined
+    this.clearCurrentSearchTargetGeometry()
+    if (opening !== undefined) {
+      opening.closeRequested = true
+      opening.closeReason = reason
+      opening.closeNotified = true
+      if (this.searchOpening === opening) this.searchOpening = undefined
+    }
+    let closeCurrentSearch = false
+    runSyncDisposalSteps('transcript search close', [
+      () => overlay.hide(),
+      () => {
+        closeCurrentSearch = this.searchOverlay === undefined && this.searchOpening?.admitted !== true
+        if (closeCurrentSearch) this.events.onSearchClose?.(reason)
+      },
+      () => {
+        if (!closeCurrentSearch || !temporaryReader || readerOwner === undefined) return
+        this.returnTemporarySearchReaderIfCurrent(readerOwner)
+      },
+    ])
     return true
   }
 
@@ -8742,6 +9999,26 @@ export class TuiApp {
     this.searchComponent?.invalidate()
   }
 
+  setSearchScope(scope: TranscriptSearchScope): void {
+    this.searchComponent?.setScope(scope)
+    this.requestRender()
+  }
+
+  setTranscriptSearchCoverage(coverage: TranscriptSearchCoverage): void {
+    if (this.transcriptSearchCoverage === coverage) return
+    this.transcriptSearchCoverage = coverage
+    this.searchComponent?.invalidate()
+    this.requestRender()
+  }
+
+  isTemporarySearchReader(): boolean {
+    return this.temporarySearchReaderReturnToRegular
+  }
+
+  transcriptSearchCoverageForTest(): TranscriptSearchCoverage {
+    return this.transcriptSearchCoverage
+  }
+
   /** Whether the transcript search is open. */
   isSearching(): boolean {
     return this.searchOverlay !== undefined
@@ -8790,7 +10067,7 @@ export class TuiApp {
   setTranscript(
     messages: readonly TranscriptMessage[],
     activities?: ReadonlyMap<number, TurnActivity>,
-    window?: TranscriptWindowState & { firstTurn?: number; lastTurn?: number; hasNewer?: boolean },
+    window?: TranscriptWindowState & { firstTurn?: number; lastTurn?: number; hasOlder?: boolean; hasNewer?: boolean },
     streamingToolPreviews?: readonly StreamingToolPreview[],
     searchPresentation?: TranscriptSearchPresentation,
   ): void {
@@ -8802,6 +10079,10 @@ export class TuiApp {
     // CURRENT subject/projection is retired BEFORE this frame can paint it
     // beside the new subject (three identity comparisons while closed).
     this.retireStaleDeliveredFiles()
+    // PR-Q: a projection commit follows every display-subject change; a queue
+    // panel captured for a previous Session/owner must retire BEFORE the new
+    // subject paints beside it.
+    this.queueManager?.retireIfStale()
     const profileStart = this.transcriptRenderProfiler.begin()
     const previousWindow = this.transcriptWindow
     const previousWindowHint = this.transcriptWindowHint
@@ -8999,7 +10280,9 @@ export class TuiApp {
     // not written into `focusExpandedTurns`: the first explicit click on a
     // search-opened Thought must collapse it (and revoke the reveal), never
     // re-expand as a no-op.
-    if (this.focusExpandedTurns.has(turn) || this.searchTargetTurn() === turn) {
+    if (this.focusExpandedTurns.has(turn)
+      || this.searchTargetTurn() === turn
+      || this.planInspectionOpensTurn(turn)) {
       this.collapseFocusTurn(turn, { fullscreenViewport: 'anchor-turn' })
       return
     }
@@ -9038,13 +10321,19 @@ export class TuiApp {
    * it?" (a manual-open container that the target also sits in would otherwise
    * silently reopen on the next rebuild). */
   toggleWorkSpan(owner: TranscriptMessage): void {
-    const span = this.eligibleWorkSpans().find(candidate => candidate.owner === owner)
-    const revealed = span !== undefined && this.workSpanRevealedBySearch(span)
-    const revokesReveal = this.searchTargetInsideWork(owner)
-    if (this.expandedWorkOwners.has(owner) || revealed) {
+    // Per-REQUEST ownership, never the union: an explicit collapse revokes
+    // ONLY the temporary request that actually opened this span or whose
+    // target lives inside it. Collapsing a Search-opened span must not cancel
+    // an unrelated Plan lease, and vice versa.
+    const searchRevealedThis = this.searchRevealsWork(owner)
+    const planRevealedThis = this.planRevealsWork(owner)
+    const searchTargetInside = this.searchTargetInsideWork(owner)
+    const planTargetInside = this.planTargetInsideWork(owner)
+    if (this.expandedWorkOwners.has(owner) || searchRevealedThis || planRevealedThis) {
       this.mutateTranscriptDisclosure(() => {
         this.expandedWorkOwners.delete(owner)
-        if (revealed || revokesReveal) this.suppressSearchReveal()
+        if (searchRevealedThis || searchTargetInside) this.suppressSearchReveal()
+        if (planRevealedThis || planTargetInside) this.revokePlanInspectionLease()
       })
       return
     }
@@ -9057,19 +10346,47 @@ export class TuiApp {
    * explicit collapse revokes the temporary search reveal whenever the target
    * lives inside this cluster (same ownership rule as Work). */
   toggleContextCluster(owner: TranscriptMessage): void {
-    const cluster = this.canonicalStructureIndex().clusterByMember.get(owner)
-    const revealed = cluster !== undefined && this.clusterRevealedBySearch(cluster)
-    const revokesReveal = this.searchTargetInsideCluster(owner)
-    if (this.expandedContextClusterOwners.has(owner) || revealed) {
+    // Per-REQUEST ownership (same rule as Work): collapse revokes only the
+    // request that opened this cluster or whose target lives inside it.
+    const searchRevealedThis = this.searchRevealsCluster(owner)
+    const planRevealedThis = this.planRevealsCluster(owner)
+    const searchTargetInside = this.searchTargetInsideCluster(owner)
+    const planTargetInside = this.planTargetInsideCluster(owner)
+    if (this.expandedContextClusterOwners.has(owner) || searchRevealedThis || planRevealedThis) {
       this.mutateTranscriptDisclosure(() => {
         this.expandedContextClusterOwners.delete(owner)
-        if (revealed || revokesReveal) this.suppressSearchReveal()
+        if (searchRevealedThis || searchTargetInside) this.suppressSearchReveal()
+        if (planRevealedThis || planTargetInside) this.revokePlanInspectionLease()
       })
       return
     }
     this.mutateTranscriptDisclosure(() => {
       this.expandedContextClusterOwners.add(owner)
     })
+  }
+
+  /** Whether the one-shot PLAN inspection's located row is a member of this
+   * Work span / cluster / Focus turn (the explicit-collapse ownership
+   * question — the SAME rule the search reveal uses). */
+  private planTargetInsideWork(owner: TranscriptMessage): boolean {
+    const target = this.planInspection?.message
+    return target !== undefined && this.canonicalStructureIndex().workByMember.get(target)?.owner === owner
+  }
+
+  private planTargetInsideCluster(owner: TranscriptMessage): boolean {
+    const target = this.planInspection?.message
+    return target !== undefined && this.canonicalStructureIndex().clusterByMember.get(target)?.owner === owner
+  }
+
+  private planTargetInsideTurn(turn: number): boolean {
+    const target = this.planInspection?.message
+    return target !== undefined && 'turn' in target && target.turn === turn
+  }
+
+  /** Whether the one-shot plan inspection currently FORCES this Focus turn
+   * open (a temporary reveal, not a manual expansion). */
+  private planInspectionOpensTurn(turn: number): boolean {
+    return this.planInspection !== undefined && this.planInspectionTurn() === turn
   }
 
   /** Whether the GRANTED search target is a member of this Work span (the
@@ -9132,10 +10449,15 @@ export class TuiApp {
     if (open.length > 0) {
       this.mutateTranscriptDisclosure(() => {
         for (const span of open) this.expandedWorkOwners.delete(span.owner)
-        // A span open ONLY by the granted reveal must actually close: revoke
-        // the reveal with the manual owners in the SAME rebuild.
+        // A span open ONLY by a temporary reveal must actually close: revoke
+        // the reveal with the manual owners in the SAME rebuild — the search
+        // navigation and the one-shot plan inspection are both such grants.
         const target = this.searchRevealedMessage()
         if (target !== undefined && open.some(span => span.members.includes(target))) this.suppressSearchReveal()
+        const planTarget = this.planInspection?.message
+        if (planTarget !== undefined && open.some(span => span.members.includes(planTarget))) {
+          this.revokePlanInspectionLease()
+        }
       })
       return
     }
@@ -9144,6 +10466,100 @@ export class TuiApp {
     this.mutateTranscriptDisclosure(() => {
       for (const span of recent) this.expandedWorkOwners.add(span.owner)
     })
+  }
+
+  /** Set the transient rendered-window query. Full search remains a separate
+   * semantic owner and must be retired before this test/V2 seam is activated. */
+  setRenderedViewSearchQuery(query: string): { currentIndex: number; count: number } {
+    if (query.trim() === '') {
+      this.clearRenderedViewSearch()
+      return { currentIndex: -1, count: 0 }
+    }
+    if (this.fullscreen === undefined || this.fullscreenScroll === undefined) {
+      throw new Error('rendered View search requires the mounted fullscreen transcript')
+    }
+    if (this.searchTarget !== undefined || this.searchMatchMessages.size > 0) {
+      throw new Error('rendered View search cannot overlap Full search presentation')
+    }
+    const width = this.transcriptRenderWidth()
+    const current = this.renderedViewSearch
+    if (current?.query === query && current.width === width) {
+      return { currentIndex: current.currentIndex, count: current.hits.length }
+    }
+    this.renderedViewSearch = {
+      query,
+      hits: [],
+      blocks: [],
+      currentIndex: -1,
+      width,
+    }
+    this.rebuildMessages('search-presentation')
+    const next = this.renderedViewSearch!
+    this.scrollToSearchTarget()
+    this.requestRender()
+    return { currentIndex: next.currentIndex, count: next.hits.length }
+  }
+
+  /** Move the rendered occurrence cursor without rescanning or rebuilding. */
+  stepRenderedViewSearch(direction: 1 | -1): { currentIndex: number; count: number } {
+    const state = this.renderedViewSearch
+    if (state === undefined) return { currentIndex: -1, count: 0 }
+    if (this.fullscreenScroll === undefined) {
+      throw new Error('rendered View search lost its fullscreen transcript')
+    }
+    if (this.fullscreenRowsDirty) this.refreshMessageRows()
+    const current = this.renderedViewSearch!
+    const count = current.hits.length
+    if (count === 0) return { currentIndex: -1, count: 0 }
+    const currentIndex = current.currentIndex < 0
+      ? direction > 0 ? 0 : count - 1
+      : (current.currentIndex + direction + count) % count
+    const previousHit = current.hits[current.currentIndex]
+    const nextHit = current.hits[currentIndex]!
+    this.renderedViewSearch = { ...current, currentIndex }
+    const blockIndices = new Set<number>()
+    if (previousHit !== undefined) blockIndices.add(previousHit.blockIndex)
+    blockIndices.add(nextHit.blockIndex)
+    for (const blockIndex of blockIndices) {
+      this.applyRenderedViewSearchSelection(this.mountedTranscriptBlocks[blockIndex]!, blockIndex, current.width)
+    }
+    this.currentSearchTranscriptRange = {
+      startRow: nextHit.firstTranscriptRow,
+      endRow: nextHit.lastTranscriptRow,
+    }
+    // The selected rendered occurrence's OWN segments are the current epoch's
+    // painted cells; a hit without segments keeps the conservative anchor.
+    const nextEntry = this.mountedTranscriptBlocks[nextHit.blockIndex]
+    const nextSelection = nextEntry?.searchSelection
+    const selectionStart = nextSelection?.scrollRange?.startRow
+    this.currentSearchPaintedSegments = nextSelection === undefined || selectionStart === undefined
+      ? undefined
+      : this.paintedSegmentsForSelection(nextSelection, nextHit.firstTranscriptRow - selectionStart)
+        ?.map(segment => ({ ...segment, documentRow: this.transcriptWelcomeHeight + segment.documentRow }))
+    this.scrollToSearchTarget()
+    this.requestRender()
+    return { currentIndex, count }
+  }
+
+  /** Clear only View decoration; never promotes or mutates Full disclosure. */
+  clearRenderedViewSearch(options: { rebuild?: boolean } = {}): void {
+    if (this.renderedViewSearch === undefined) return
+    this.renderedViewSearch = undefined
+    this.clearCurrentSearchTargetGeometry()
+    for (const entry of this.mountedTranscriptBlocks) {
+      if (entry.mountedComponent instanceof SearchHighlightComponent) entry.mountedComponent.clear()
+      entry.searchSelection = undefined
+      entry.searchSelector = undefined
+      entry.renderedViewMatches = undefined
+      entry.renderedViewIndex = undefined
+    }
+    if (options.rebuild !== false) this.rebuildMessages('search-presentation')
+  }
+
+  /** Read the active rendered-window projection without exposing its hits. */
+  renderedViewSearchStatus(): { currentIndex: number; count: number } | undefined {
+    const state = this.renderedViewSearch
+    return state === undefined ? undefined : { currentIndex: state.currentIndex, count: state.hits.length }
   }
 
   /** Set (or clear) the TEMPORARY search presentation target (plan §6). The
@@ -9188,7 +10604,7 @@ export class TuiApp {
 
     const message = target.message
     let changed = false
-    const messageReveal = this.searchForcesMessageExpanded(message)
+    const messageReveal = this.forcesMessageExpandedTemporarily(message)
     // Long-user disclosure has a real Host owner on either surface when the
     // navigation-time ownership/affordance latch admitted the reveal.
     if (isUserMessageDisclosureCandidate(message) && messageReveal
@@ -9247,7 +10663,7 @@ export class TuiApp {
     if (this.fullscreen !== undefined && target.match.source.kind === 'subcall-field') {
       let subCallChanged = false
       for (const subCallId of target.match.source.subCallIds) {
-        if (!this.searchForcesSubCallExpanded(subCallId) || this.subCallExpanded.has(subCallId)) continue
+        if (!this.forcesSubCallExpandedTemporarily(subCallId) || this.subCallExpanded.has(subCallId)) continue
         this.subCallExpanded.add(subCallId)
         subCallChanged = true
       }
@@ -9286,6 +10702,10 @@ export class TuiApp {
    * rebuild, so the target/reveal is in effect when the render blocks are
    * built. Returns whether anything changed. */
   private applySearchPresentation(presentation: TranscriptSearchPresentation): boolean {
+    // Every Full-owner commit, including the passive `setTranscript()` path,
+    // retires a mounted View projection before its semantic state is applied.
+    const retiredViewSearch = this.renderedViewSearch !== undefined
+    if (retiredViewSearch) this.clearRenderedViewSearch({ rebuild: false })
     let changed = false
     if (this.searchMatchMessages !== presentation.matchMessages) {
       this.searchMatchMessages = presentation.matchMessages
@@ -9332,7 +10752,7 @@ export class TuiApp {
       // keeps the existing grant/reveal flags — a user collapse stays revoked.
       changed = true
     }
-    if (!changed) return false
+    if (!changed) return retiredViewSearch
     this.searchPresentationRevision += 1
     this.clearFocusLiveHeightState()
     return true
@@ -9378,6 +10798,9 @@ export class TuiApp {
     this.searchPresentationDiagnostics.renderedMatchResultCacheHits = 0
     this.searchPresentationDiagnostics.fullRenders = 0
     this.searchPresentationDiagnostics.transcriptSets = 0
+    this.searchPresentationDiagnostics.plainTextProofs = 0
+    this.searchPresentationDiagnostics.markdownProofs = 0
+    this.searchPresentationDiagnostics.occlusionCorrections = 0
   }
 
   /** Test-only transcript presentation counters. */
@@ -9483,6 +10906,18 @@ export class TuiApp {
     return message.turn
   }
 
+  /** The plan inspection's owner turn, but ONLY when collapsed Focus actually
+   * hides the located card: the ONE-SHOT presentation opens the Thought root
+   * the same way a search navigation does (the plan's card may live inside a
+   * collapsed Thought, and the row proof needs it materialized). */
+  private planInspectionTurn(): number | undefined {
+    const message = this.planInspection?.message
+    if (message === undefined || !('turn' in message)) return undefined
+    if (!isFocusDisplayPreset(this.displayState.preset)) return undefined
+    if (!this.focusRootHidesSearchTarget(message)) return undefined
+    return message.turn
+  }
+
   /** Whether the COLLAPSED Focus projection hides one row (so the search target
    * needs the Focus-root reveal). Computed from the real `projectFocus`
    * collapsed output — never from "the row has a turn" — and memoized per
@@ -9514,6 +10949,18 @@ export class TuiApp {
    * compacts at the current width and still offers an expand affordance; the
    * Host-ownership decision is LATCHED at navigation time (see
    * {@link setTranscriptSearchTarget}). */
+  private forcesMessageExpandedTemporarily(message: TranscriptMessage): boolean {
+    // The ONE-SHOT plan inspection (FR7 A4) opens its located card for the
+    // reading step: an explicit user collapse of THAT card wins over the
+    // inspection lease (the lease never fights the user's own disclosure).
+    if (this.planInspection?.message === message) {
+      return this.expandedOverride.get(message) !== false
+    }
+    return this.searchForcesMessageExpanded(message)
+  }
+
+  /** Whether the CURRENT SEARCH navigation forces this card open (its own
+   * request only; the plan lease is a different request). */
   private searchForcesMessageExpanded(message: TranscriptMessage): boolean {
     if (!this.searchRevealGranted || this.searchTarget?.message !== message) return false
     if (isUserMessageDisclosureCandidate(message)) {
@@ -9567,12 +11014,26 @@ export class TuiApp {
     return this.effectiveMessageExpanded(message, this.expandBoundary(), this.userExpandBoundary(), true)
   }
 
-  /** Whether the current search target's PTC path contains this sub-call. */
-  private searchForcesSubCallExpanded(subCallId: string): boolean {
+  /** Whether the CURRENT SEARCH target's PTC path contains this sub-call
+   * (the search request's own force; the plan inspection never reads or writes
+   * this request's suppression record). */
+  private searchForcesSubCall(subCallId: string): boolean {
     if (!this.searchRevealGranted) return false
     if (this.searchSuppressedSubCalls.has(subCallId)) return false
     const source = this.searchTarget?.match.source
     return source?.kind === 'subcall-field' && source.subCallIds.includes(subCallId)
+  }
+
+  /** Whether a temporary request (the plan inspection or the search
+   * navigation) forces this sub-call open. Each request consults ONLY its own
+   * suppression record. */
+  private forcesSubCallExpandedTemporarily(subCallId: string): boolean {
+    // The plan inspection's located PTC child (the plan body lives inside the
+    // nested card) is opened for the reading step; an explicit user collapse
+    // of that child revokes the whole lease (see toggleSubCallExpanded), so no
+    // plan-scoped suppression record is needed.
+    if (this.planInspection?.subCallId === subCallId) return true
+    return this.searchForcesSubCall(subCallId)
   }
 
   /** Whether the current search target is inside this Workflow run (temporary
@@ -9681,8 +11142,9 @@ export class TuiApp {
    * §22: "any expanded Thought" = an expanded Thought in view). */
   private hasVisibleExpandedFocusRoots(): boolean {
     const searchTurn = this.searchTargetTurn()
+    const planTurn = this.planInspectionTurn()
     for (const turn of this.eligibleFocusRootTurns()) {
-      if (this.focusExpandedTurns.has(turn) || turn === searchTurn) return true
+      if (this.focusExpandedTurns.has(turn) || turn === searchTurn || turn === planTurn) return true
     }
     return false
   }
@@ -9737,7 +11199,7 @@ export class TuiApp {
       // The temporary search reveal counts as a VISIBLE expanded user
       // disclosure so one Ctrl+O press collapses it (instead of expanding
       // Thought roots while the bubble stays open).
-      if (this.expandedOverride.get(message) !== true && !this.searchForcesMessageExpanded(message)) continue
+      if (this.expandedOverride.get(message) !== true && !this.forcesMessageExpandedTemporarily(message)) continue
       if (!this.isHostUserDisclosure(message)) continue
       if (this.userMessageCompactsAtCurrentWidth(message)) return true
     }
@@ -9787,6 +11249,14 @@ export class TuiApp {
     return this.canonicalStructureIndex().clusterByMember.has(owner)
   }
 
+  private localShellEntryInCurrentWindow(entry: LocalShellEntry): boolean {
+    if (this.viewerMode !== undefined || entry.placement.target === 'deferred-to-latest') return false
+    if (entry.placement.target === 'beginning') return this.transcriptWindow?.hasOlder !== true
+    if (entry.placement.anchor !== undefined && this.messages.includes(entry.placement.anchor)) return true
+    return entry.placement.turn !== undefined
+      && this.messages.some(message => 'turn' in message && message.turn === entry.placement.turn)
+  }
+
   /** Whether one per-card override row is MATERIALIZED on the current
    * projection: a current-window top-level row, an OPEN Work member, or a row
    * the Focus projection actually emits (compaction always; a Focus secondary
@@ -9794,11 +11264,8 @@ export class TuiApp {
    * expanded Thought root — an unqualified mid-turn notice renders as a
    * post-Thought row, never hidden). */
   private messageRowMaterialized(message: TranscriptMessage, projectionExpanded: ReadonlySet<number>): boolean {
-    // A local (non-session) card — e.g. a `!`/`!!` shell card — is always
-    // appended to the rendered transcript and participates in NO canonical
-    // Work/cluster/Focus ancestry, so it is always materialized. It is NOT in
-    // `this.messages` (it lives in `localMessages`).
-    if (this.localMessages.includes(message)) return true
+    const localEntry = this.localMessages.find(entry => entry.message === message)
+    if (localEntry !== undefined) return this.localShellEntryInCurrentWindow(localEntry)
     if (!this.messages.includes(message)) return false
     const index = this.canonicalStructureIndex()
     const policy = displayPolicyFor(this.displayState.preset)
@@ -9851,7 +11318,7 @@ export class TuiApp {
     if (target === undefined) return undefined
     if (!isFoldableMessageDisclosure(target) || target.kind === 'thinking') return undefined
     if (this.surfacedInteractionFailsOpen(target)) return undefined
-    if (!this.searchForcesMessageExpanded(target)) return undefined
+    if (!this.forcesMessageExpandedTemporarily(target)) return undefined
     return this.messageRowMaterialized(target, projectionExpanded) ? target : undefined
   }
 
@@ -9921,7 +11388,7 @@ export class TuiApp {
       // it is not already covered by an ancestor full reveal (regular Focus
       // root, plan §21). A latent manual owner changes nothing on screen, so it
       // must not arm the collapse branch.
-      if (this.workSpanRevealedBySearch(span) || this.workManualOwnerContributes(span)) return true
+      if (this.workSpanTemporarilyRevealed(span) || this.workManualOwnerContributes(span)) return true
     }
     if (!this.contextClusterDefaultExpanded()) {
       for (const cluster of new Set(this.canonicalStructureIndex().clusterByMember.values())) {
@@ -9988,7 +11455,7 @@ export class TuiApp {
     }
     const target = this.searchRevealedMessage()
     return target !== undefined && isDeliveredFilesDisclosureCandidate(target)
-      && this.searchForcesMessageExpanded(target)
+      && this.forcesMessageExpandedTemporarily(target)
       && this.messageRowMaterialized(target, projectionExpanded)
   }
 
@@ -10114,16 +11581,21 @@ export class TuiApp {
     // while a local shell card's override (turn Infinity) survives. A granted
     // search-only reveal is an effective root too and must be revoked.
     const searchTurn = this.searchTargetTurn()
+    const planTurn = this.planInspectionTurn()
     const expandedTurns = new Set(this.focusExpandedTurns)
     if (searchTurn !== undefined) expandedTurns.add(searchTurn)
+    if (planTurn !== undefined) expandedTurns.add(planTurn)
     this.focusExpandedTurns.clear()
     this.clearFocusSecondaryExpansionsForTurns(expandedTurns)
     // Collapse All always revokes a granted search reveal: the reveal is a
     // TEMPORARY grant and may be what opened the root (`searchTargetTurn()`).
+    // The one-shot plan inspection is the same kind of temporary grant and is
+    // revoked by the same explicit collapse.
     // A settled surfaced-interaction card's OWN disclosure is unaffected — it
     // survives via the secondary-reset carve-out above, not by keeping the
     // root open.
     if (searchTurn !== undefined) this.suppressSearchReveal()
+    if (planTurn !== undefined) this.revokePlanInspectionLease()
     this.transcriptDetailExpanded = false
     this.rebuildMessages('focus-disclosure')
     this.applyFullscreenFocusTurnAnchor(anchorTurn)
@@ -10141,9 +11613,12 @@ export class TuiApp {
     const top = this.fullscreenScroll.scrollTop - welcomeHeight
     const bottom = top + this.fullscreenScroll.viewportHeight
     const searchTurn = this.searchTargetTurn()
+    const planTurn = this.planInspectionTurn()
     let row = 0
     for (const entry of this.messageRows) {
-      if (entry.activity !== undefined && (this.focusExpandedTurns.has(entry.activity.turn) || entry.activity.turn === searchTurn)) {
+      if (entry.activity !== undefined && (this.focusExpandedTurns.has(entry.activity.turn)
+        || entry.activity.turn === searchTurn
+        || entry.activity.turn === planTurn)) {
         if (row < bottom && row + entry.height > top) return entry.activity.turn
       }
       row += entry.height
@@ -10208,14 +11683,17 @@ export class TuiApp {
     // collapse request on it would otherwise early-return without revoking the
     // reveal (the Thought would stay open).
     const searchCollapse = !expanded && this.searchTargetTurn() === turn
-    if (!manualChanged && !searchCollapse) return
+    const planCollapse = !expanded && this.planInspectionOpensTurn(turn)
+    if (!manualChanged && !searchCollapse && !planCollapse) return
     if (manualChanged) {
       if (expanded) this.focusExpandedTurns.add(turn)
       else this.focusExpandedTurns.delete(turn)
     }
     // Closing a Thought is an explicit user collapse: revoke a search reveal
-    // whose target lives in that turn (the semantic match/highlight stays).
+    // whose target lives in that turn (the semantic match/highlight stays) AND
+    // the equivalent one-shot plan inspection lease.
     if (searchCollapse) this.suppressSearchReveal()
+    if (planCollapse) this.revokePlanInspectionLease()
     // 1. flip the set → 2. rebuild the projection (rebuildMessages already
     // requests a render) → 3. re-measure the row map at the current width
     // (a thumbnail that just finished loading must not shift the anchor).
@@ -10448,7 +11926,10 @@ export class TuiApp {
     }
     if (this.messageComponents.size === 0) return
     const live = new Set<TranscriptMessage>(this.messages)
-    for (const message of this.localMessages) live.add(message)
+    for (const block of blocks) {
+      if (block.kind !== 'message') continue
+      if (this.localMessages.some(entry => entry.message === block.message)) live.add(block.message)
+    }
     for (const [message, entry] of this.messageComponents) {
       if (live.has(message)) continue
       this.messageComponents.delete(message)
@@ -10479,9 +11960,12 @@ export class TuiApp {
   private focusProjectionExpandedTurns(): ReadonlySet<number> {
     const base = this.focusProjectionExpandedTurnsBase()
     const targetTurn = this.searchTargetTurn()
-    if (targetTurn === undefined) return base
+    const planTurn = this.planInspectionTurn()
+    const reveal = targetTurn ?? planTurn
+    if (reveal === undefined) return base
     const union = new Set(base)
-    union.add(targetTurn)
+    union.add(reveal)
+    if (targetTurn !== undefined && planTurn !== undefined) union.add(planTurn)
     return union
   }
 
@@ -10535,7 +12019,7 @@ export class TuiApp {
     const expandedClusters = new Set(this.effectiveExpandedClusterOwners())
     // The temporary search reveal opens exactly the containers that HIDE the
     // target row, resolved through the same path the dismissal promotes.
-    const revealed = this.revealedSearchOwner()
+    const revealed = this.temporaryRevealOwner()
     const expandedWorkOwners = new Set(workOwners)
     for (const owner of revealed ?? []) {
       if (owner.kind === 'work') expandedWorkOwners.add(owner.owner)
@@ -10731,20 +12215,68 @@ export class TuiApp {
 
   /** The GRANTED reveal's container path (undefined when no reveal is active).
    * The stable ancestry is memoized; the current open state is not. */
-  private revealedSearchOwner(): SearchRevealPath | undefined {
+  /** The CURRENT search navigation's own reveal path (undefined when no
+   * reveal is granted). ONE request's answer — never the union. */
+  private searchRevealPathOwners(): SearchRevealPath | undefined {
     const target = this.searchRevealedMessage()
-    if (target === undefined) return undefined
-    return this.revealPathFromAncestry(this.searchRevealAncestry(target))
+    return target === undefined ? undefined : this.revealPathFromAncestry(this.searchRevealAncestry(target))
+  }
+
+  /** The ONE-SHOT plan inspection's own reveal path (undefined when no lease
+   * or the user explicitly collapsed the located card). */
+  private planRevealPathOwners(): SearchRevealPath | undefined {
+    const target = this.planInspection?.message
+    if (target === undefined || this.expandedOverride.get(target) === false) return undefined
+    return this.revealPathFromAncestry(this.searchRevealAncestryFor(target))
+  }
+
+  /** Whether ONE request's path hides a row inside this Work span / cluster. */
+  private searchRevealsWork(owner: TranscriptMessage): boolean {
+    return this.searchRevealPathOwners()?.some(node => node.kind === 'work' && node.owner === owner) === true
+  }
+
+  private planRevealsWork(owner: TranscriptMessage): boolean {
+    return this.planRevealPathOwners()?.some(node => node.kind === 'work' && node.owner === owner) === true
+  }
+
+  private searchRevealsCluster(owner: TranscriptMessage): boolean {
+    return this.searchRevealPathOwners()?.some(node => node.kind === 'context-cluster' && node.owner === owner) === true
+  }
+
+  private planRevealsCluster(owner: TranscriptMessage): boolean {
+    return this.planRevealPathOwners()?.some(node => node.kind === 'context-cluster' && node.owner === owner) === true
+  }
+
+  private temporaryRevealOwner(): SearchRevealPath | undefined {
+    // The plan inspection's one-shot presentation owns its own lease: its
+    // located card's hiding ancestors open exactly like a search navigation
+    // (the SAME reveal path resolution — never a second reveal owner).
+    // The plan inspection and the search navigation are INDEPENDENT temporary
+    // requests: both may hide different containers at the same time (a search
+    // the plan review temporarily parked, or a search that stays active while
+    // the review is suspended). The effective reveal path is the UNION of both
+    // requests' paths — one request never shadows the other, and each is
+    // released by its own owner.
+    const owners: TranscriptContainerOwner[] = []
+    const addOwners = (path: SearchRevealPath | undefined): void => {
+      for (const owner of path ?? []) {
+        if (owners.some(existing => sameTranscriptContainerOwner(existing, owner))) continue
+        owners.push(owner)
+      }
+    }
+    addOwners(this.planRevealPathOwners())
+    addOwners(this.searchRevealPathOwners())
+    return owners.length === 0 ? undefined : owners
   }
 
   /** Whether one Work span is opened ONLY by the granted search reveal. */
-  private workSpanRevealedBySearch(span: TranscriptWorkSpan): boolean {
-    return this.revealedSearchOwner()?.some(owner => owner.kind === 'work' && owner.owner === span.owner) === true
+  private workSpanTemporarilyRevealed(span: TranscriptWorkSpan): boolean {
+    return this.temporaryRevealOwner()?.some(owner => owner.kind === 'work' && owner.owner === span.owner) === true
   }
 
   /** Whether one ambient cluster is opened ONLY by the granted search reveal. */
-  private clusterRevealedBySearch(cluster: ContextCluster): boolean {
-    return this.revealedSearchOwner()
+  private clusterTemporarilyRevealed(cluster: ContextCluster): boolean {
+    return this.temporaryRevealOwner()
       ?.some(owner => owner.kind === 'context-cluster' && owner.owner === cluster.owner) === true
   }
 
@@ -10754,7 +12286,7 @@ export class TuiApp {
    * is operable. */
   private contextClusterExpanded(cluster: ContextCluster): boolean {
     return this.expandedContextClusterOwners.has(cluster.owner)
-      || this.clusterRevealedBySearch(cluster)
+      || this.clusterTemporarilyRevealed(cluster)
       || this.regularBulkOwnsTurn(cluster.turn)
       || this.contextClusterDefaultExpanded()
   }
@@ -10925,6 +12457,118 @@ export class TuiApp {
     return trailingTurn === undefined || trailingTurn === turn ? blocks.length : lastTurnIndex + 1
   }
 
+  /** Interleave Client-local cards only after canonical Work/Focus projection. */
+  private interleaveLocalShellCards(blocks: TranscriptRenderBlock[]): void {
+    if (this.viewerMode !== undefined) return
+    const entries = [...this.localMessages].sort((left, right) => left.acceptedOrder - right.acceptedOrder)
+    const latestSource = (): TranscriptMessage | undefined => {
+      for (let index = this.messages.length - 1; index >= 0; index -= 1) {
+        const candidate = this.messages[index]!
+        if (candidate.kind !== 'summary') return candidate
+      }
+      return undefined
+    }
+    const blockTurn = (block: TranscriptRenderBlock): number | undefined => {
+      if (block.kind === 'message') return 'turn' in block.message ? block.message.turn : undefined
+      if (block.kind === 'activity') return block.activity.turn
+      if (block.kind === 'work') return block.span.turn
+      if (block.kind === 'context-cluster') return block.cluster.turn
+      if (block.kind === 'streaming-tool-previews') return block.turn
+      return undefined
+    }
+    const finalAssistant = (turn: number): TranscriptMessage | undefined => {
+      const group = this.messages.filter(message => 'turn' in message && message.turn === turn)
+      return eligibleFinalAssistant(this.turnActivities.get(turn), group)?.message
+    }
+    const insertAfterExistingCards = (index: number, entry: LocalShellEntry): number => {
+      let next = index
+      // The same insertion boundary can be shared by several cards whose
+      // captured anchors were folded into ONE Work/Thought carrier. Accepted
+      // order is the only tie-break: a later card always inserts after every
+      // earlier local card already present at this boundary.
+      while (next < blocks.length) {
+        const block = blocks[next]!
+        if (block.kind !== 'message') break
+        const previous = entries.find(candidate => candidate.message === block.message)
+        if (previous === undefined || previous.acceptedOrder >= entry.acceptedOrder) break
+        next += 1
+      }
+      return next
+    }
+
+    for (const entry of entries) {
+      if (entry.placement.target === 'deferred-to-latest') {
+        if (this.transcriptWindow?.mode === 'history') continue
+        const anchor = latestSource()
+        entry.placement = {
+          anchor,
+          turn: anchor !== undefined && 'turn' in anchor ? anchor.turn : undefined,
+          target: anchor === undefined ? 'beginning' : 'anchored',
+        }
+      }
+
+      const { anchor, turn } = entry.placement
+      let insertionIndex: number | undefined
+      if (anchor !== undefined) {
+        const exact = blocks.findIndex(block => block.kind === 'message' && block.message === anchor)
+        if (exact >= 0) {
+          insertionIndex = exact + 1
+        } else {
+          const carrier = blocks.findIndex(block =>
+            block.kind === 'work' && block.span.members.includes(anchor)
+            || block.kind === 'context-cluster' && block.cluster.members.includes(anchor),
+          )
+          if (carrier >= 0) insertionIndex = carrier + 1
+        }
+      }
+
+      let finalIndex = -1
+      if (turn !== undefined) {
+        const final = finalAssistant(turn)
+        if (final !== undefined) finalIndex = blocks.findIndex(block => block.kind === 'message' && block.message === final)
+      }
+      if (turn !== undefined && isFocusDisplayPreset(this.displayState.preset)) {
+        if (insertionIndex === undefined) {
+          const anchorIndex = anchor === undefined ? -1 : this.messages.indexOf(anchor)
+          let activityIndex = -1
+          for (let index = 0; index < blocks.length; index += 1) {
+            const block = blocks[index]!
+            if (block.kind !== 'activity' || block.activity.turn !== turn) continue
+            const ownerIndex = this.messages.indexOf(block.owner)
+            if (anchorIndex < 0 || ownerIndex <= anchorIndex) activityIndex = index
+          }
+          if (activityIndex >= 0) insertionIndex = activityIndex + 1
+          else if (finalIndex >= 0) insertionIndex = finalIndex
+        }
+      }
+
+      if (insertionIndex === undefined && turn !== undefined) {
+        if (!this.messages.some(message => 'turn' in message && message.turn === turn)) continue
+        let lastTurnBlock = -1
+        for (let index = 0; index < blocks.length; index += 1) {
+          if (blockTurn(blocks[index]!) !== turn) continue
+          if (finalIndex >= 0 && index >= finalIndex) continue
+          lastTurnBlock = index
+        }
+        if (lastTurnBlock >= 0) insertionIndex = lastTurnBlock + 1
+        else if (finalIndex >= 0) insertionIndex = finalIndex
+      }
+
+      if (insertionIndex === undefined && entry.placement.target === 'beginning') {
+        // A `beginning` card is bound to the window that actually starts at
+        // the Session's first turn. A mid/old history page or a later latest
+        // window may still have older turns outside it, so the card must not
+        // drift to the top of every page.
+        if (this.transcriptWindow?.hasOlder === true) continue
+        const summaryIndex = blocks.findIndex(block => block.kind === 'message' && block.message.kind === 'summary')
+        insertionIndex = summaryIndex === 0 ? 1 : 0
+      }
+      if (insertionIndex === undefined) continue
+      insertionIndex = insertAfterExistingCards(insertionIndex, entry)
+      blocks.splice(insertionIndex, 0, { kind: 'message', message: entry.message })
+    }
+  }
+
   /** Build the rendered transcript blocks in visual order. Focus keeps the
    * ephemeral Preparing state outside the durable projection: collapsed rows
    * are summarized by their Thought header, while expanded rows are inserted
@@ -10947,7 +12591,7 @@ export class TuiApp {
       // Thought's live process is summarised by its header and skipped.
       this.applyWorkPreparing(blocks, projectionExpanded)
     }
-    blocks.push(...this.localMessages.map(message => ({ kind: 'message', message }) as FocusProjectedBlock))
+    this.interleaveLocalShellCards(blocks)
     // The ONE ordered ephemeral pending tail sits at the LIVE conversation
     // tail, after durable content and local cards: user steering rows and
     // non-user context occurrences in the join's projection order. It is
@@ -10964,7 +12608,7 @@ export class TuiApp {
    * recent-turn bulk, or a regular Focus root full-reveal) or to the granted
    * search reveal whose target is one of its members. */
   private workSpanExpanded(span: TranscriptWorkSpan): boolean {
-    return this.openWorkOwners.has(span.owner) || this.workSpanRevealedBySearch(span)
+    return this.openWorkOwners.has(span.owner) || this.workSpanTemporarilyRevealed(span)
   }
 
   /** Whether one turn's contiguous Process run is still OPEN at the transcript
@@ -11477,7 +13121,7 @@ export class TuiApp {
       let mountedComponent: Component | undefined
       let searchSelection: RenderedSearchSelection | undefined
       let searchSelector: RenderedSearchSelector | undefined
-      const presentation = this.blockSearchPresentation(block, rendered, subCallRegions, deliverableRegions)
+      const presentation = this.blockSearchPresentation(block, component, rendered, width, subCallRegions, deliverableRegions)
       if (presentation.selector !== undefined && presentation.selection !== undefined) {
         searchSelection = presentation.selection
         searchSelector = presentation.selector
@@ -11509,9 +13153,77 @@ export class TuiApp {
   ): RenderedTranscriptBlock[] {
     const boundary = this.expandBoundary()
     const userBoundary = this.userExpandBoundary()
-    return blocks.map(block =>
+    const rendered = blocks.map(block =>
       this.renderTranscriptBlock(block, projectionExpanded, boundary, userBoundary, width),
     )
+    this.decorateCurrentOwnerHeader(rendered, width)
+    return rendered
+  }
+
+  /** The current Full target may be hidden inside a folded Work/Context card:
+   * decorate that card's REAL materialized header as the card anchor, and never
+   * a hidden member row. When the target's own message row is materialized the
+   * message-level selection already owns the highlight. */
+  private decorateCurrentOwnerHeader(renderedBlocks: RenderedTranscriptBlock[], width: number): void {
+    const target = this.searchTarget
+    if (target === undefined || target.query === '') return
+    const materialized = renderedBlocks.some(entry =>
+      entry.block.kind === 'message' && entry.block.message === target.message)
+    if (materialized) return
+    // A Work span's members INCLUDE its nested snapshot-context cluster, so a
+    // raw first-match pick would paint the OUTER Activity header even while the
+    // inner collapsed cluster is the real hiding owner. Prefer the deepest
+    // materialized container (the same outer→inner ancestry the reveal uses);
+    // ties keep the later render order.
+    let ownerIndex = -1
+    let ownerDepth = -1
+    renderedBlocks.forEach((entry, index) => {
+      const owns = entry.block.kind === 'work' && entry.block.span.members.includes(target.message)
+        || entry.block.kind === 'context-cluster' && entry.block.cluster.members.includes(target.message)
+      if (!owns) return
+      const depth = entry.containerPath?.length ?? 0
+      if (depth >= ownerDepth) {
+        ownerIndex = index
+        ownerDepth = depth
+      }
+    })
+    if (ownerIndex < 0) return
+    // A target change / disclosure change must never leave the previous owner's
+    // anchor painted on a different header.
+    for (let index = 0; index < renderedBlocks.length; index += 1) {
+      if (index === ownerIndex) continue
+      const entry = renderedBlocks[index]!
+      if (entry.block.kind === 'message') continue
+      if (entry.searchSelection === undefined && entry.searchSelector === undefined) continue
+      entry.searchSelection = undefined
+      entry.searchSelector = undefined
+      if (entry.mountedComponent instanceof SearchHighlightComponent) entry.mountedComponent.clear()
+    }
+    const owner = renderedBlocks[ownerIndex]!
+    const anchor = cardAnchorForRenderedLines(owner.rendered)
+    // The target row itself is hidden by the container's own disclosure: this
+    // is the honest `unproven` state until an explicit reveal materializes it.
+    this.recordSearchSourceNotice(target, 'unproven')
+    const selector: RenderedSearchSelector = { query: target.query, sourceOccurrence: 0 }
+    const selection: RenderedSearchSelection = {
+      matches: [],
+      selectedIndex: -1,
+      selectedRow: anchor?.row,
+      exact: false,
+      ...(anchor === undefined
+        ? {}
+        : { cardAnchor: anchor, scrollRange: { startRow: anchor.row, endRow: anchor.row } }),
+      sourceDisposition: 'unproven',
+    }
+    const mounted = owner.mountedComponent
+    if (mounted instanceof SearchHighlightComponent) {
+      mounted.updateSelector(selector, selection, width, owner.rendered)
+    } else {
+      const wrapper = new SearchHighlightComponent(owner.component, selector, selection, width, owner.rendered)
+      owner.mountedComponent = wrapper
+    }
+    owner.searchSelector = selector
+    owner.searchSelection = selection
   }
 
   /** Resolve rendered matches through the cache owned by the live message
@@ -11531,8 +13243,152 @@ export class TuiApp {
     return result.matches
   }
 
-  /**
-   * Display-only suppression of a "void" search target: the semantic corpus
+  /** Search one mounted block, reusing the live message cache only when its
+   * component identity still belongs to that exact message object. */
+  private renderedViewMatchesFor(
+    entry: RenderedTranscriptBlock,
+    query: string,
+  ): readonly AltScreenSearchMatch[] {
+    if (entry.rendered.length === 0) return []
+    if (entry.block.kind === 'message') {
+      const messageEntry = this.messageComponents.get(entry.block.message)
+      if (messageEntry?.component === entry.component) {
+        return this.renderedSearchMatchesFor(entry.block.message, entry.rendered, query)
+      }
+    }
+    const index = entry.renderedViewIndex ??= new AltScreenSearchIndex()
+    const result = index.search(entry.rendered, query)
+    this.searchPresentationDiagnostics.renderedMatchLookups += 1
+    if (!result.changed) this.searchPresentationDiagnostics.renderedMatchResultCacheHits += 1
+    return result.matches
+  }
+
+  /** Rebuild the ephemeral View hits from one measured mounted batch. */
+  private updateRenderedViewSearchGeometry(
+    renderedBlocks: readonly RenderedTranscriptBlock[],
+    width: number,
+    paddingRows: ReadonlyMap<number, number>,
+  ): void {
+    const previous = this.renderedViewSearch
+    if (previous === undefined) return
+    if (this.fullscreen === undefined || this.fullscreenScroll === undefined) {
+      throw new Error('rendered View search requires the mounted fullscreen transcript')
+    }
+
+    const hits: RenderedViewSearchHit[] = []
+    let transcriptRow = 0
+    for (let blockIndex = 0; blockIndex < renderedBlocks.length; blockIndex += 1) {
+      const entry = renderedBlocks[blockIndex]!
+      const matches = this.renderedViewMatchesFor(entry, previous.query)
+      entry.renderedViewMatches = matches
+      const height = this.normalTranscriptBlockHeight(entry, blockIndex, renderedBlocks.length)
+      if (height > 0) {
+        for (let localMatchIndex = 0; localMatchIndex < matches.length; localMatchIndex += 1) {
+          const match = matches[localMatchIndex]!
+          const first = match.segments[0]
+          const last = match.segments.at(-1)
+          if (first === undefined || last === undefined) continue
+          // Keep the fork match-key format without adding a private import from
+          // the protected package; the matcher remains the geometry authority.
+          hits.push({
+            component: entry.component,
+            blockIndex,
+            localMatchIndex,
+            matchKey: `${first.row}:${first.startCol}:${last.row}:${last.endCol}`,
+            firstTranscriptRow: transcriptRow + first.row,
+            lastTranscriptRow: transcriptRow + last.row,
+          })
+        }
+      }
+      transcriptRow += height + (paddingRows.get(blockIndex) ?? 0)
+    }
+
+    const sameSource = previous.width === width
+      && previous.blocks.length === renderedBlocks.length
+      && previous.blocks.every((snapshot, index) => {
+        const entry = renderedBlocks[index]!
+        return snapshot.component === entry.component
+          && snapshot.lines.length === entry.rendered.length
+          && snapshot.lines.every((line, row) => line === entry.rendered[row])
+      })
+    const sameHits = sameSource
+      && previous.hits.length === hits.length
+      && previous.hits.every((hit, index) => {
+        const next = hits[index]!
+        return hit.component === next.component
+          && hit.blockIndex === next.blockIndex
+          && hit.localMatchIndex === next.localMatchIndex
+          && hit.matchKey === next.matchKey
+          && hit.firstTranscriptRow === next.firstTranscriptRow
+          && hit.lastTranscriptRow === next.lastTranscriptRow
+      })
+    let currentIndex = sameHits ? previous.currentIndex : -1
+    if (hits.length > 0 && currentIndex < 0) {
+      const viewportTop = this.fullscreenScroll.scrollTop - this.transcriptWelcomeHeight
+      const afterTop = hits.findIndex(hit => hit.firstTranscriptRow >= viewportTop)
+      currentIndex = afterTop < 0 ? 0 : afterTop
+    }
+    const nextState = {
+      query: previous.query,
+      hits,
+      blocks: renderedBlocks.map(entry => ({ component: entry.component, lines: entry.rendered })),
+      currentIndex,
+      width,
+    }
+    this.renderedViewSearch = nextState
+    this.currentSearchTranscriptRange = currentIndex < 0
+      ? undefined
+      : {
+          startRow: hits[currentIndex]!.firstTranscriptRow,
+          endRow: hits[currentIndex]!.lastTranscriptRow,
+        }
+    for (let blockIndex = 0; blockIndex < renderedBlocks.length; blockIndex += 1) {
+      this.applyRenderedViewSearchSelection(renderedBlocks[blockIndex]!, blockIndex, width)
+    }
+  }
+
+  private applyRenderedViewSearchSelection(
+    entry: RenderedTranscriptBlock,
+    blockIndex: number,
+    width: number,
+  ): void {
+    const state = this.renderedViewSearch
+    if (state === undefined) return
+    const matches = entry.renderedViewMatches ?? []
+    if (matches.length === 0) {
+      if (entry.mountedComponent instanceof SearchHighlightComponent) entry.mountedComponent.clear()
+      entry.searchSelection = undefined
+      entry.searchSelector = undefined
+      return
+    }
+    const hit = state.hits[state.currentIndex]
+    const selectedIndex = hit?.blockIndex === blockIndex ? hit.localMatchIndex : -1
+    const selectedMatch = selectedIndex < 0 ? undefined : matches[selectedIndex]
+    const first = selectedMatch?.segments[0]
+    const last = selectedMatch?.segments.at(-1)
+    const selector: SearchHighlightPaintSelector = { query: state.query }
+    const selection: RenderedSearchSelection = {
+      matches,
+      selectedIndex,
+      selectedRow: undefined,
+      exact: false,
+      ...(first === undefined || last === undefined
+        ? {}
+        : { scrollRange: { startRow: first.row, endRow: last.row } }),
+    }
+    const mounted = entry.mountedComponent
+    if (mounted instanceof SearchHighlightComponent) {
+      mounted.updateSelector(selector, selection, width, entry.rendered)
+    } else {
+      const wrapper = new SearchHighlightComponent(entry.component, selector, selection, width, entry.rendered)
+      entry.mount?.replace(wrapper)
+      entry.mountedComponent = wrapper
+    }
+    entry.searchSelector = selector
+    entry.searchSelection = selection
+  }
+
+  /** Display-only suppression of a "void" search target: the semantic corpus
    * still contains the hidden marker line, but no painted row does. Suppress
    * the anchor wash for that exact case only; the N/M navigation count and the
    * raw search authority are deliberately unchanged.
@@ -11579,13 +13435,199 @@ export class TuiApp {
     return !normalize(residual).includes(normalize(query))
   }
 
+  /** Publish (or clear) the CURRENT render epoch's Source-only notice. The
+   * notice is presentation metadata for one epoch: it never feeds matching,
+   * span proof or a cache key, and the query/revision guard makes a stale pass
+   * unable to speak for a newer target. */
+  private recordSearchSourceNotice(
+    target: TranscriptSearchPresentationTarget,
+    disposition: 'not-painted' | 'unproven' | undefined,
+  ): void {
+    if (disposition === undefined) {
+      this.searchSourceNotice = undefined
+      return
+    }
+    const snippet = this.fullSearchSourceSnippet(target)
+    this.searchSourceNotice = {
+      kind: disposition,
+      sourceLabel: searchSourceLabel(target.match.source, target.message),
+      ...(snippet === undefined ? {} : { snippet }),
+      query: target.query,
+      revision: this.searchPresentationRevision,
+    }
+  }
+
+  /**
+   * The Source-only notice for the CURRENT Full target, or `undefined`.
+   *
+   * Reads only current state: another scope, an exact cell proof, no current
+   * target, a missing/hidden/superseded Search overlay, or a notice from an
+   * older presentation epoch all return `undefined` instead of a stale fact.
+   */
+  currentFullSearchNotice(): FullSearchSourceNotice | undefined {
+    const target = this.searchTarget
+    const overlay = this.searchOverlay
+    if (target === undefined || overlay === undefined || overlay.isHidden()) return undefined
+    if (this.searchComponent?.getScope() !== 'full') return undefined
+    if (!this.overlayBroker.isOnlyVisibleModal(overlay)) return undefined
+    const notice = this.searchSourceNotice
+    if (notice === undefined) return undefined
+    if (notice.query !== target.query || notice.revision !== this.searchPresentationRevision) return undefined
+    return {
+      kind: notice.kind,
+      sourceLabel: notice.sourceLabel,
+      ...(notice.snippet === undefined ? {} : { snippet: notice.snippet }),
+    }
+  }
+
+  /** The current frame's non-search structural epoch. Runtime clears its
+   * disposable qualification cache when this moves; ordinary search commits do
+   * not move it. */
+  searchQualificationEpochForRuntime(): number {
+    return this.searchQualificationEpoch
+  }
+
+  currentFullNavigationQualification(): {
+    readonly semanticMatchKey: string
+    readonly representativeId: number
+    readonly currentnessEpoch: number
+    readonly verdict: 'exact' | 'auxiliary' | 'card'
+    readonly groupScope: 'occurrence' | 'source-run' | 'whole-card'
+  } | undefined {
+    const target = this.searchTarget
+    const overlay = this.searchOverlay
+    if (target === undefined || overlay === undefined || overlay.isHidden()) return undefined
+    if (this.searchComponent?.getScope() !== 'full' || !this.overlayBroker.isOnlyVisibleModal(overlay)) return undefined
+    const key = transcriptSearchMatchKey(target.match)
+    const entry = this.mountedTranscriptBlocks.find(candidate =>
+      candidate.block.kind === 'message' && candidate.block.message === target.message)
+    const selection = entry?.searchSelection
+    if (selection?.exact === true) {
+      return {
+        semanticMatchKey: key,
+        representativeId: target.match.id,
+        currentnessEpoch: this.searchPresentationRevision,
+        verdict: 'exact',
+        groupScope: 'occurrence',
+      }
+    }
+    if (selection === undefined) {
+      const owner = this.mountedTranscriptBlocks.find(candidate =>
+        candidate.block.kind === 'work' && candidate.block.span.members.includes(target.message)
+        || candidate.block.kind === 'context-cluster' && candidate.block.cluster.members.includes(target.message),
+      )
+      if (owner === undefined && entry === undefined) return undefined
+    }
+    const sourceNotice = this.currentFullSearchNotice()
+    const visibleMatches = selection?.matches.length ?? 0
+    // A not-painted card with NO rendered occurrence proves every raw hit on
+    // this representative unlocatable at this frame: one card target. With
+    // visible homonyms the card may still hold exact-capable occurrences, so
+    // only the unresolved source run may merge.
+    if (sourceNotice?.kind === 'not-painted') {
+      return {
+        semanticMatchKey: key,
+        representativeId: target.match.id,
+        currentnessEpoch: this.searchPresentationRevision,
+        verdict: 'card',
+        groupScope: visibleMatches === 0 ? 'whole-card' : 'source-run',
+      }
+    }
+    const channel = this.searchExactChannelAvailable
+    const exactChannel = channel !== undefined
+      && channel.revision === this.searchPresentationRevision
+      && channel.query === target.query
+      && channel.message === target.message
+      && channel.available
+    const auxiliary = visibleMatches > 0
+    // A card WITH a proving channel may hide exact-capable unvisited occurrences:
+    // merge only this unresolved source run. Without any proving channel the
+    // whole card is unlocatable and its hits collapse into one card target.
+    return {
+      semanticMatchKey: key,
+      representativeId: target.match.id,
+      currentnessEpoch: this.searchPresentationRevision,
+      verdict: auxiliary ? 'auxiliary' : 'card',
+      groupScope: auxiliary && exactChannel ? 'source-run' : 'whole-card',
+    }
+  }
+
+  /** The optional Source-only context: ONLY a Host-owned single-text User
+   * message or an EXPANDED Host Thinking body may contribute one. Every
+   * Assistant Markdown (including a hidden href), Tool/Command/Workflow,
+   * Plugin, Visual and Delivered source is label-only, and a collapsed or
+   * mixed-content body has no raw span to project.
+   */
+  private fullSearchSourceSnippet(target: TranscriptSearchPresentationTarget): string | undefined {
+    const source = target.match.source
+    if (source.kind !== 'message') return undefined
+    const message = target.message
+    if (message.kind !== 'user' && message.kind !== 'thinking') return undefined
+    const entry = this.messageComponents.get(message)
+    if (entry === undefined || entry.rendererId !== undefined) return undefined
+    // A COLLAPSED Host Thinking card paints only its compact preview: its raw
+    // body is hidden transcript text, so it is never a snippet source. The
+    // search reveal expands a Thinking target; only an explicit user collapse
+    // reaches this state, and then the notice stays label-only.
+    if (message.kind === 'thinking' && entry.expanded !== true) return undefined
+    if (message.kind === 'user' && message.content?.some(part => part.type !== 'text') === true) return undefined
+    const memo = this.searchSourceSnippetMemo
+    if (memo !== undefined && memo.revision === this.searchPresentationRevision
+      && memo.query === target.query && memo.message === message && memo.text === message.text) {
+      return memo.snippet
+    }
+    const snippet = this.projectFullSearchSourceSnippet(target, message)
+    this.searchSourceSnippetMemo = {
+      revision: this.searchPresentationRevision,
+      query: target.query,
+      message,
+      text: message.text,
+      snippet,
+    }
+    return snippet
+  }
+
+  private projectFullSearchSourceSnippet(
+    target: TranscriptSearchPresentationTarget,
+    message: Extract<TranscriptMessage, { kind: 'user' | 'thinking' }>,
+  ): string | undefined {
+    const range = target.match.normalizedSourceRange
+    if (range === undefined) return undefined
+    if (message.text.length > SNIPPET_MAX_SOURCE_LENGTH) return undefined
+    const normalizedQuery = target.query.trim().toLowerCase()
+    if (normalizedQuery === '') return undefined
+    if (message.text.toLowerCase().slice(range.start, range.end) !== normalizedQuery) return undefined
+    const rawRange = rawSourceRangeForNormalizedMatch(message.text, range)
+    if (rawRange === undefined) return undefined
+    const displayStart = snippetStartBefore(message.text, rawRange.start, 12)
+    const displayEnd = snippetEndAfter(message.text, rawRange.end, 12)
+    // The guard is the displayed window EXPANDED to whole whitespace-delimited
+    // tokens: a twelve-grapheme window can split an address/URL/path into a
+    // fragment the classifier would miss, so the classifier must see the whole
+    // token that overlaps the displayed context.
+    const guardStart = snippetTokenStart(message.text, displayStart)
+    const guardEnd = snippetTokenEnd(message.text, displayEnd)
+    if (guardStart === undefined || guardEnd === undefined) return undefined
+    if (!searchSourceSnippetTextIsSafe(message.text.slice(guardStart, guardEnd))) return undefined
+    const rawSnippet = message.text.slice(displayStart, displayEnd)
+    // BOTH the raw display window and the projected single row must be safe:
+    // the raw one proves there is no escape/control span hiding in what would
+    // be displayed, the projected one proves the display row itself.
+    if (!searchSourceSnippetTextIsSafe(rawSnippet)) return undefined
+    const line = sanitizedPhysicalLine(rawSnippet)
+    if (!searchSourceSnippetTextIsSafe(line)) return undefined
+    return line
+  }
+
   /** The rendered search presentation of ONE block while a search is active.
    * The current target builds PROVEN source geometry from the renderer-declared
    * regions; every other VISIBLE message block that is a semantic match card is
    * decorated WEAKLY (approximate visual hint, never semantic identity). */
   private blockSearchPresentation(
     block: TranscriptRenderBlock,
+    component: Component,
     rendered: readonly string[],
+    renderWidth: number,
     subCallRegions: ReadonlyArray<SearchSourceRegion> | undefined,
     deliverableRegions: ReadonlyArray<SearchSourceRegion> | undefined,
   ): { selector?: RenderedSearchSelector; selection?: RenderedSearchSelection; current: boolean } {
@@ -11595,7 +13637,28 @@ export class TuiApp {
     // Non-current cards must be SEMANTIC match representatives: a card that
     // merely renders the query in UI chrome is never highlighted.
     if (!current && !this.searchMatchMessages.has(block.message)) return { current: false }
-    const matches = this.renderedSearchMatchesFor(block.message, rendered, target.query)
+    const messageEntry = this.messageComponents.get(block.message)
+    let hostThinkingBodyRange: { anchorRow: number; rowStart: number; rowEnd: number } | undefined
+    if (block.message.kind === 'thinking' && messageEntry !== undefined && messageEntry.rendererId === undefined) {
+      const displayText = sanitizeDisplayText(block.message.text)
+      const hasBody = messageEntry.expanded ? displayText !== '' : latestLine(displayText) !== ''
+      const titleRows = messageEntry.expanded
+        ? new Text(color.textDim(`${iconLead('thinking', this.iconStyle)}Thinking`), 0, 0).render(renderWidth).length
+        : 1
+      hostThinkingBodyRange = hasBody
+        ? {
+            anchorRow: titleRows,
+            rowStart: titleRows,
+            rowEnd: messageEntry.expanded ? rendered.length : Math.min(rendered.length, 2),
+          }
+        : { anchorRow: 0, rowStart: rendered.length, rowEnd: rendered.length }
+    }
+    const renderedMatches = this.renderedSearchMatchesFor(block.message, rendered, target.query)
+    const bodyRange = hostThinkingBodyRange
+    const matches = bodyRange === undefined
+      ? renderedMatches
+      : renderedMatches.filter(match => match.segments.every(segment =>
+          segment.row >= bodyRange.rowStart && segment.row < bodyRange.rowEnd))
     if (!current && matches.length === 0) return { current: false }
     if (current
       && matches.length === 0
@@ -11604,26 +13667,300 @@ export class TuiApp {
       // collapsed but is a fully legitimate anchor target; never suppress it.
       && target.match.source.kind === 'message'
       && this.searchTargetRendersNoOccurrence(block.message, target.query)) {
-      return { current: false }
+      // The source text IS consumed by the card's own Visual rendering: this is
+      // the ONE non-Assistant NOT_PAINTED evidence, and the notice must reach it
+      // even though the block owns no semantic occurrence. Only the REAL card
+      // anchor may be decorated; no visual row or homonym is invented.
+      this.recordSearchSourceNotice(target, 'not-painted')
+      this.searchExactChannelAvailable = {
+        revision: this.searchPresentationRevision,
+        query: target.query,
+        message: block.message,
+        available: false,
+      }
+      const anchor = cardAnchorForRenderedLines(rendered)
+      const anchorSelector: RenderedSearchSelector = {
+        query: target.query,
+        sourceOccurrence: target.match.sourceOccurrence,
+      }
+      const anchorSelection: RenderedSearchSelection = {
+        matches: [],
+        selectedIndex: -1,
+        selectedRow: anchor?.row,
+        exact: false,
+        ...(anchor === undefined
+          ? {}
+          : { cardAnchor: anchor, scrollRange: { startRow: anchor.row, endRow: anchor.row } }),
+        sourceDisposition: 'not-painted',
+      }
+      return { selector: anchorSelector, selection: anchorSelection, current }
     }
     if (current) {
-      const regions = this.searchSourceRegionsFor(block.message, rendered.length, subCallRegions, deliverableRegions)
-      const geometry = buildSourceGeometry(matches, regions, transcriptSearchSourceKey(target.match.source))
+      const regions = this.searchSourceRegionsFor(
+        block.message,
+        rendered,
+        subCallRegions,
+        deliverableRegions,
+        hostThinkingBodyRange,
+      )
+      const geometry = buildSourceGeometry(matches, rendered, regions, transcriptSearchSourceKey(target.match.source), target.query)
+      // Host plain text (a pure-text User bubble or an EXPANDED Host Thinking
+      // body) can prove this one source occurrence against the cells it really
+      // painted. A collapsed compact bubble, a plugin renderer, mixed content
+      // and a body-less Thinking card stay on the PR-A source anchor.
+      const plainTextProofHost = messageEntry !== undefined
+        && messageEntry.rendererId === undefined
+        && (block.message.kind === 'user'
+          ? block.message.content?.some(part => part.type !== 'text') !== true
+            && messageEntry.component instanceof UserBubbleComponent
+            && messageEntry.component.compactMarkerRow() === undefined
+          : block.message.kind === 'thinking'
+            && messageEntry.expanded === true
+            && hostThinkingBodyRange !== undefined
+            && hostThinkingBodyRange.rowStart < hostThinkingBodyRange.rowEnd
+            && messageEntry.component instanceof Text)
+      // A single Host-native Assistant Markdown card can prove its own painted
+      // source cells through the SAME live renderer. The final component
+      // identity decides ownership: a plugin renderer, a composite card
+      // (multi-block / open-opaque / visual / delivered / interrupted) or a
+      // stale cached instance keeps the honest source anchor and is never
+      // scanned for a homonym inside one of its private children.
+      const assistantProofHost = block.message.kind === 'assistant'
+        && messageEntry !== undefined
+        && messageEntry.rendererId === undefined
+        && messageEntry.component === component
+        && component instanceof AssistantMarkdownComponent
+        && block.message.content === undefined
+        && block.message.displayBlocks === undefined
+        && block.message.interrupted !== true
+        && (block.message.deliverables?.length ?? 0) === 0
+        && (assistantVisualPresentation(block.message)?.publications.length ?? 0) === 0
       const selector: RenderedSearchSelector = {
         query: target.query,
         sourceOccurrence: target.match.sourceOccurrence,
+        ...(target.match.normalizedSourceRange === undefined ? {} : { normalizedSourceRange: target.match.normalizedSourceRange }),
+        ...(hostThinkingBodyRange === undefined && !plainTextProofHost ? {} : { suppressMatchesOnStaleGeometry: true }),
         ...(geometry === undefined ? {} : { geometry }),
       }
-      const selection = selectRenderedSearchMatch(matches, selector)
+      let painted: readonly AltScreenSearchSegment[] | undefined
+      let disposition: 'not-painted' | 'unproven' | undefined
+      if (plainTextProofHost && messageEntry !== undefined
+        && (block.message.kind === 'user' || block.message.kind === 'thinking')
+        && target.match.source.kind === 'message' && target.match.normalizedSourceRange !== undefined) {
+        const proof = preparePlainTextSourceProbe(
+          block.message.text,
+          target.match.normalizedSourceRange,
+          target.query.trim().toLowerCase(),
+        )
+        if (proof !== undefined) {
+          this.searchPresentationDiagnostics.plainTextProofs += 1
+          if (block.message.kind === 'user' && messageEntry.component instanceof UserBubbleComponent) {
+            painted = provePlainTextPaintedSegments(
+              rendered,
+              messageEntry.component.renderSourceProbe(proof.taggedDisplayText, renderWidth),
+              proof.expectedVisibleMatch,
+            )
+          } else if (block.message.kind === 'thinking') {
+            painted = provePlainTextPaintedSegments(
+              rendered,
+              expandedThinkingTextComponent(proof.taggedDisplayText, this.iconStyle).render(renderWidth),
+              proof.expectedVisibleMatch,
+            )
+          }
+        }
+      } else if (assistantProofHost && block.message.kind === 'assistant'
+        && component instanceof AssistantMarkdownComponent
+        && target.match.source.kind === 'message' && target.match.normalizedSourceRange !== undefined) {
+        const proof = this.proveAssistantMarkdownSourceCells(
+          block.message.text,
+          target.match.normalizedSourceRange,
+          target.query,
+          component,
+          rendered,
+          renderWidth,
+        )
+        if (proof.kind === 'proven') painted = proof.segments
+        else disposition = proof.kind
+      }
+      // Everything the current renderer cannot prove (tool/command/workflow/
+      // plugin/composite/collapsed bodies, an ineligible source kind) is
+      // honestly `unproven`, never "no visible cell".
+      disposition ??= painted === undefined ? 'unproven' : undefined
+      let selection = selectRenderedSearchMatch(matches, selector)
+      if (painted !== undefined) {
+        selection = {
+          ...selection,
+          exact: true,
+          selectedIndex: -1,
+          exactPaintedSegments: painted,
+          selectedRow: painted[0]!.row,
+        }
+      }
+      // The Source-only notice belongs to the FINAL selection, not to one proof
+      // channel: a direct-field region (Workflow run/phase/member, Tool,
+      // Command, deliverable) can be exact through `buildSourceGeometry()` even
+      // though the dedicated User/Thinking/Assistant channel produced nothing.
+      // Record it only when the committed selection is genuinely non-exact.
+      this.recordSearchSourceNotice(target, selection.exact ? undefined : disposition)
+      const targetSourceKey = transcriptSearchSourceKey(target.match.source)
+      // A proving channel is CARD-WIDE: the card may hold an exact-capable
+      // occurrence from a DIFFERENT source (an inline phase status beside a
+      // hidden summary-phase status), so whole-card merging is only safe when no
+      // source on this card can ever prove a cell at this size.
+      const provingRegion = regions.some(region => {
+        if (region.enumerable === false || region.sourceText === undefined) return false
+        const regionGeometry = buildSourceGeometry(matches, rendered, [region], region.sourceKey, target.query)
+        return (regionGeometry?.occurrences.length ?? 0) > 0
+      })
+      const proofHostAvailable = target.match.source.kind === 'message'
+        && target.match.normalizedSourceRange !== undefined
+        && (block.message.kind === 'user' || block.message.kind === 'thinking' ? plainTextProofHost : assistantProofHost)
+      this.searchExactChannelAvailable = {
+        revision: this.searchPresentationRevision,
+        query: target.query,
+        message: block.message,
+        available: painted !== undefined || provingRegion || proofHostAvailable,
+      }
       const scrollRange = selectRenderedSearchScrollRange(matches, selection, selector, regions)
+      const cardAnchor = selection.exact ? undefined : cardAnchorForRenderedLines(rendered)
+      const scopedMatches = targetSourceKey === 'message'
+        // A message target's scroll hint must stay inside its own body: a
+        // delivered-files tail, PTC sub-call or other declared field region is a
+        // DIFFERENT semantic source and must never become the candidate pool.
+        ? matches.filter(match => !regions.some(region =>
+            region.sourceKey !== 'message' && searchMatchInsideRegion(match, region)))
+        : matches.filter(match => regions.some(region =>
+            region.sourceKey === targetSourceKey && searchMatchInsideRegion(match, region)))
+      const auxiliaryMatches = disposition === 'not-painted' ? [] : scopedMatches
+      // A card with no authorized region for this source (e.g. a Tool result
+      // body) still has REAL visible words: a POSITION-ONLY body region is the
+      // authorized scroll hint, never header or status-count chrome. The
+      // not-painted path never borrows a homonym this way.
+      // Never fall back to the whole-card match set: for a message target that
+      // would re-admit a delivered tail / sub-call word the scoped pool above
+      // deliberately excluded. An empty scoped pool means no scroll hint.
+      const scrollCandidates = auxiliaryMatches
+      // The base range is the first eligible body candidate; geometry later
+      // prefers a candidate already visible and unoccluded. This is a viewport
+      // hint only, never source proof.
+      const scrollCandidate = scrollCandidates[0]
+      const visibleWordRange = selection.exact || scrollCandidate === undefined
+        ? undefined
+        : (() => {
+            const first = scrollCandidate.segments[0]
+            const last = scrollCandidate.segments.at(-1)
+            return first === undefined || last === undefined
+              ? undefined
+              : { startRow: first.row, endRow: last.row }
+          })()
+      const candidateSegments = selection.exact || scrollCandidates.length === 0
+        ? undefined
+        : scrollCandidates.flatMap(match => match.segments)
+      const targetRange = visibleWordRange ?? scrollRange ?? (cardAnchor === undefined
+        ? undefined
+        : { startRow: cardAnchor.row, endRow: cardAnchor.row })
+      const committedSelection: RenderedSearchSelection = {
+        ...selection,
+        ...(candidateSegments === undefined ? {} : { candidateSegments }),
+        ...(selection.exact
+          ? {}
+          : { selectedRow: targetRange?.startRow ?? selection.selectedRow }),
+        ...(targetRange === undefined ? {} : { scrollRange: targetRange }),
+        ...(cardAnchor === undefined ? {} : { cardAnchor }),
+      }
       return {
         selector,
-        selection: scrollRange === undefined ? selection : { ...selection, scrollRange },
+        selection: selection.exact || disposition === undefined
+          ? committedSelection
+          : { ...committedSelection, sourceDisposition: disposition },
         current,
       }
     }
-    const selector: RenderedSearchSelector = { query: target.query, sourceOccurrence: 0, weakOnly: true }
+    const selector: RenderedSearchSelector = {
+      query: target.query,
+      sourceOccurrence: 0,
+      weakOnly: true,
+      ...(hostThinkingBodyRange === undefined ? {} : { suppressMatchesOnStaleGeometry: true }),
+    }
     return { selector, selection: selectRenderedSearchMatch(matches, selector), current }
+  }
+
+  /**
+   * Prove ONE current Assistant Markdown semantic range against the cells the
+   * CURRENT Host card really painted. A failed proof is classified, not
+   * discarded: `not-painted` is F1's own evidence that the source has no
+   * visible cell, every other rejection is `unproven`.
+   *
+   * The semantic source range is normalized/lowercase; the card paints
+   * `sanitizeDisplayText(message.text)`. The projection is accepted only when
+   * the raw range survives lowercasing, the query still describes THIS range,
+   * and the per-part sanitized projection is additive over the whole source
+   * (so a control sequence or sanitized-away codepoint is never guessed onto a
+   * visible homonym). The F1 proof then answers for the card's own Markdown,
+   * and its card-relative segments are re-read from the current `rendered`
+   * rows: only cells that reproduce exactly `safeHit` in order are accepted.
+   */
+  private proveAssistantMarkdownSourceCells(
+    messageText: string,
+    normalizedSourceRange: { readonly start: number; readonly end: number },
+    query: string,
+    component: AssistantMarkdownComponent,
+    rendered: readonly string[],
+    renderWidth: number,
+  ): AssistantMarkdownSourceProof {
+    const normalizedQuery = query.trim().toLowerCase()
+    if (normalizedQuery === '') return { kind: 'unproven' }
+    const rawRange = rawSourceRangeForNormalizedMatch(messageText, normalizedSourceRange)
+    if (rawRange === undefined) return { kind: 'unproven' }
+    // The range must still describe the CURRENT query over the CURRENT source:
+    // an offset from an older query is not evidence for this one.
+    if (messageText.toLowerCase().slice(normalizedSourceRange.start, normalizedSourceRange.end) !== normalizedQuery) {
+      return { kind: 'unproven' }
+    }
+    const rawBefore = messageText.slice(0, rawRange.start)
+    const rawHit = messageText.slice(rawRange.start, rawRange.end)
+    const rawAfter = messageText.slice(rawRange.end)
+    const safeBefore = sanitizeDisplayText(rawBefore)
+    const safeHit = sanitizeDisplayText(rawHit)
+    const safeAfter = sanitizeDisplayText(rawAfter)
+    // A per-part projection that does not reassemble the whole painted source
+    // (raw control sequences, CRLF/Tab state, removed escape spans) is not a
+    // local range in the sanitized component source.
+    if (safeHit === '' || safeBefore + safeHit + safeAfter !== sanitizeDisplayText(messageText)) {
+      return { kind: 'unproven' }
+    }
+    this.searchPresentationDiagnostics.markdownProofs += 1
+    const proof = component.proveSourceSpan(
+      { start: safeBefore.length, end: safeBefore.length + safeHit.length },
+      renderWidth,
+    )
+    // NOT_PAINTED (a hidden link destination / markup delimiter) is real
+    // evidence that the source HAS no visible cell; UNPROVEN (reflow, rewritten
+    // glyph, ambiguous token origin) is only an absent position proof. Both
+    // keep the source anchor.
+    if (proof.kind === 'NOT_PAINTED') return { kind: 'not-painted' }
+    if (proof.kind !== 'PROVEN') return { kind: 'unproven' }
+    // The proof speaks for the render epoch it measured; the mounted rows are
+    // that same epoch. Every segment must sit inside a real row, stay ordered
+    // and reproduce the projected source text from the ACTUAL cells. The
+    // component's bullet/indent offset means a segment can never begin in the
+    // bullet band, and a wrongly shifted one would not recover `safeHit`.
+    let previousRow = -1
+    let previousEndCol = -1
+    const collected: string[] = []
+    for (const segment of proof.segments) {
+      const line = rendered[segment.row]
+      if (line === undefined) return { kind: 'unproven' }
+      const lineWidth = visibleWidth(line)
+      if (segment.row < previousRow) return { kind: 'unproven' }
+      if (segment.row === previousRow && segment.startCol < previousEndCol) return { kind: 'unproven' }
+      if (segment.startCol < 0 || segment.endCol <= segment.startCol || segment.endCol > lineWidth) return { kind: 'unproven' }
+      collected.push(stripTerminalSequences(sliceByColumn(line, segment.startCol, segment.endCol - segment.startCol, true)))
+      previousRow = segment.row
+      previousEndCol = segment.endCol
+    }
+    if (collected.join('') !== safeHit) return { kind: 'unproven' }
+    return { kind: 'proven', segments: proof.segments }
   }
 
   /** The proven source regions of one rendered card: renderer-recorded absolute
@@ -11631,23 +13968,53 @@ export class TuiApp {
    * and (for message-kind cards) the whole card as the `message` source region. */
   private searchSourceRegionsFor(
     message: TranscriptMessage,
-    renderedLength: number,
+    renderedLines: readonly string[],
     subCallRegions: ReadonlyArray<SearchSourceRegion> | undefined,
     deliverableRegions: ReadonlyArray<SearchSourceRegion> | undefined,
+    thinkingBodyRange: { anchorRow: number; rowStart: number; rowEnd: number } | undefined,
   ): SearchSourceRegion[] {
+    const renderedLength = renderedLines.length
     const regions: SearchSourceRegion[] = []
     if (subCallRegions !== undefined) regions.push(...subCallRegions)
     const cardRegions = this.searchSourceRegionsByMessage.get(message)
     if (cardRegions !== undefined) regions.push(...cardRegions)
     if (deliverableRegions !== undefined) regions.push(...deliverableRegions)
-    // A message-kind card's rendered body ALWAYS includes UI chrome (a
-    // `Thinking` header, the user bubble's `❯` marker/continuation indent,
-    // markdown transforms, attachments, the delivered-files tail, …), so the
-    // whole card is never an occurrence-ordinal-preserving projection of
-    // `message.text`: anchor-only. A renderer may later register a
-    // source-only region to upgrade it.
+    // Message-kind cards include UI chrome or transformed content, so their
+    // message source stays position-only. Host Thinking starts below its title
+    // when a body row is present; plugin-owned and body-less cards anchor at top.
     if (message.kind !== 'tool' && message.kind !== 'workflow') {
-      regions.push({ sourceKey: 'message', anchorRow: 0, rowStart: 0, rowEnd: renderedLength, enumerable: false })
+      if (message.kind === 'thinking' && thinkingBodyRange !== undefined) {
+        regions.push({ sourceKey: 'message', ...thinkingBodyRange, enumerable: false })
+      } else {
+        regions.push({ sourceKey: 'message', anchorRow: 0, rowStart: 0, rowEnd: renderedLength, enumerable: false })
+      }
+    }
+    // A Tool card's result BODY has no exact channel, but it is still a real
+    // visible surface: a position-only body region (row 0 is the header) lets
+    // the viewport preference land on a body word without claiming proof or
+    // borrowing header/status chrome.
+    if (message.kind === 'tool' && renderedLength > 1) {
+      // The shell command row is CALL presentation, not the result body: a
+      // terminal/local-shell card paints `$ command` (or `PS> command`) at row 1,
+      // so its result body starts at row 2. This is a position-only hint, never
+      // an exact channel; the structural predicate avoids mistaking a result
+      // line that merely STARTS with `$ ` for the call row.
+      const commandRow = isLocalShellCard(message) || this.terminalCommand(message.name, message.args) !== ''
+      const rowStart = commandRow ? 2 : 1
+      // PTC sub-call rows belong to their own cards/sources, not to the root
+      // result body: clamp the position-only hint before the first sub-call.
+      const subCallStart = subCallRegions?.reduce((min, region) => Math.min(min, region.rowStart), Number.POSITIVE_INFINITY)
+        ?? Number.POSITIVE_INFINITY
+      const rowEnd = Math.min(renderedLength, subCallStart)
+      if (rowEnd > rowStart) {
+        regions.push({
+          sourceKey: transcriptSearchSourceKey({ kind: 'tool-field', field: 'result' }),
+          anchorRow: 0,
+          rowStart,
+          rowEnd,
+          enumerable: false,
+        })
+      }
     }
     return regions
   }
@@ -11817,7 +14184,7 @@ export class TuiApp {
       const workflowHits = workflowInfo === undefined
         ? undefined
         : workflowInfo.hits.map(hit => ({ ...hit, top: hit.top + rendered.length - workflowInfo.total }))
-      const searchPresentation = this.blockSearchPresentation(entry.block, rendered, subCallRegions, deliverableRegions)
+      const searchPresentation = this.blockSearchPresentation(entry.block, entry.component, rendered, width, subCallRegions, deliverableRegions)
       const searchSelection = searchPresentation.selection
       return {
         ...entry,
@@ -11969,6 +14336,50 @@ export class TuiApp {
     }
   }
 
+  /** Resolve the CURRENT target's search range against the live viewport. An
+   * auxiliary target carries every eligible visible candidate; prefer one the
+   * user can already see and that the Search overlay does not cover, then fall
+   * back to distance from the viewport centre. Exact/card-anchor targets keep
+   * their proven or anchor geometry unchanged. */
+  private resolveCurrentSearchGeometry(
+    selection: RenderedSearchSelection,
+    blockContentRow: number,
+  ): { range: RenderedSearchScrollRange; segments: readonly PaintedTargetSegment[] | undefined } | undefined {
+    const fallback = selection.scrollRange
+    const candidates = selection.candidateSegments ?? []
+    if (fallback === undefined && candidates.length === 0) return undefined
+    let chosen: AltScreenSearchSegment | undefined = candidates[0]
+    const scroll = this.fullscreenScroll
+    const overlay = this.searchOverlayRect()
+    const viewport = scroll === undefined ? undefined : this.fullscreen?.getPaintedBox(scroll)
+    if (candidates.length > 0 && scroll !== undefined && viewport !== undefined) {
+      const welcome = this.transcriptWelcomeHeight
+      const picked = selectReadableSearchCandidate({
+        viewport,
+        ...(overlay === undefined ? {} : { overlay }),
+        scrollTop: scroll.scrollTop,
+        candidates: candidates.map(segment => ({
+          documentRow: welcome + blockContentRow + segment.row,
+          startCol: segment.startCol,
+          endCol: segment.endCol,
+        })),
+      })
+      if (picked !== undefined) {
+        chosen = {
+          row: picked.documentRow - welcome - blockContentRow,
+          startCol: picked.startCol,
+          endCol: picked.endCol,
+        }
+      }
+    }
+    const startRow = blockContentRow + (chosen?.row ?? fallback!.startRow)
+    const endRow = blockContentRow + (chosen?.row ?? fallback!.endRow)
+    const segments = chosen === undefined
+      ? this.paintedSegmentsForSelection(selection, blockContentRow)
+      : [{ documentRow: blockContentRow + chosen.row, startCol: chosen.startCol, endCol: chosen.endCol }]
+    return { range: { startRow, endRow }, segments }
+  }
+
   /** Publish row geometry from one already-rendered block batch. Structural
    * rebuilds also mount the batch; content commits reuse the existing mounts. */
   private updateTranscriptGeometry(
@@ -11978,17 +14389,16 @@ export class TuiApp {
     mount: boolean,
   ): void {
     const paddingRows = this.focusLivePaddingFor(renderedBlocks, projectionExpanded, width)
-    const rows: FullscreenRowEntry[] = []
     this.currentSearchTranscriptRange = undefined
+    this.currentSearchPaintedSegments = undefined
+    this.updateRenderedViewSearchGeometry(renderedBlocks, width, paddingRows)
+    const rows: FullscreenRowEntry[] = []
     let transcriptRow = 0
+    let pendingSelection: { selection: RenderedSearchSelection; blockContentRow: number } | undefined
     renderedBlocks.forEach((entry, index) => {
       const height = this.normalTranscriptBlockHeight(entry, index, renderedBlocks.length)
-      const scrollRange = entry.searchSelection?.scrollRange
-      if (scrollRange !== undefined) {
-        this.currentSearchTranscriptRange = {
-          startRow: transcriptRow + scrollRange.startRow,
-          endRow: transcriptRow + scrollRange.endRow,
-        }
+      if (entry.searchSelection?.scrollRange !== undefined) {
+        pendingSelection = { selection: entry.searchSelection, blockContentRow: transcriptRow }
       }
       if (height === 0) {
         rows.push(this.fullscreenRowEntry(entry, 0, false))
@@ -12046,7 +14456,15 @@ export class TuiApp {
       }
     }
     this.transcriptChromeHeight = chromeHeight
-    if (mount) this.transcriptWelcomeHeight = this.welcomeCard.render(this.terminal.columns).length
+    this.transcriptWelcomeHeight = this.welcomeCard.render(this.terminal.columns).length
+    const searchGeometry = pendingSelection === undefined
+      ? undefined
+      : this.resolveCurrentSearchGeometry(pendingSelection.selection, pendingSelection.blockContentRow)
+    this.currentSearchTranscriptRange = searchGeometry?.range
+    this.currentSearchPaintedSegments = searchGeometry?.segments?.map(segment => ({
+      ...segment,
+      documentRow: this.transcriptWelcomeHeight + segment.documentRow,
+    }))
     this.transcriptContentHeight = this.transcriptWelcomeHeight + transcriptRow + chromeHeight
     this.messageRows = rows
     this.fullscreenRowsDirty = true
@@ -12130,7 +14548,7 @@ export class TuiApp {
       // Search highlight wrappers carry geometry tied to the old rendered
       // text. Until an in-place wrapper update is proven safe, one structural
       // rebuild is the correctness-preserving fallback.
-      if (this.searchTarget !== undefined) {
+      if (this.searchTarget !== undefined || this.renderedViewSearch !== undefined) {
         return { kind: 'structural', dirtyBlocks, mountReplacements }
       }
       const next = this.renderTranscriptBlock(block, projectionExpanded, boundary, userBoundary, width, component)
@@ -12180,8 +14598,13 @@ export class TuiApp {
     projectionExpanded = this.focusProjectionExpandedTurns(),
     blocks = this.transcriptBlocks(projectionExpanded),
   ): void {
-    void reason
+    if (reason !== 'search-presentation') this.searchQualificationEpoch += 1
     this.searchPresentationDiagnostics.rebuilds += 1
+    // The rebuild re-derives the current target's cells and Source-only state
+    // below; an older epoch's notice must not survive a pass that finds no
+    // current block.
+    this.searchSourceNotice = undefined
+    this.searchExactChannelAvailable = undefined
     // Every rebuild path prunes the cache to the live set first. The caller
     // supplies the already-derived projection blocks when setTranscript() has
     // classified the commit, so the semantic epoch is projected once.
@@ -12328,39 +14751,45 @@ export class TuiApp {
     // dispose the mounted live-assistant component and a paint rendered it as
     // zero rows (fullscreen Focus transient collapse).
     const projectionExpanded = this.focusProjectionExpandedTurns()
+    // This pass re-derives the current target's cells and Source-only state; an
+    // older epoch's notice must not survive it when the target block is absent.
+    this.searchSourceNotice = undefined
+    this.searchExactChannelAvailable = undefined
     const remeasureStart = this.scrollProfiler.enabled ? performance.now() : 0
     const renderedBlocks = this.remeasureTranscriptBlocks(this.mountedTranscriptBlocks, width)
+    this.decorateCurrentOwnerHeader(renderedBlocks, width)
     if (this.scrollProfiler.enabled) this.scrollFrameRemeasureMs += performance.now() - remeasureStart
     // Keep the MOUNTED highlight wrapper on the SAME geometry epoch as this
     // row map / scroll anchor: a stale selector would paint a strong occurrence
     // for geometry the viewport no longer uses.
-    for (const entry of renderedBlocks) {
-      const mounted = entry.mountedComponent
-      if (!(mounted instanceof SearchHighlightComponent)) continue
-      if (entry.searchSelector !== undefined && entry.searchSelection !== undefined) {
-        mounted.updateSelector(entry.searchSelector, entry.searchSelection, width, entry.rendered)
-      } else {
-        // The block is no longer part of the presentation: a measurement-only
-        // remeasure keeps the mounted wrapper, so explicitly stop decorating.
-        mounted.clear()
+    if (this.renderedViewSearch === undefined) {
+      for (const entry of renderedBlocks) {
+        const mounted = entry.mountedComponent
+        if (!(mounted instanceof SearchHighlightComponent)) continue
+        if (entry.searchSelector !== undefined && entry.searchSelection !== undefined) {
+          mounted.updateSelector(entry.searchSelector, entry.searchSelection, width, entry.rendered)
+        } else {
+          // The block is no longer part of the presentation: a measurement-only
+          // remeasure keeps the mounted wrapper, so explicitly stop decorating.
+          mounted.clear()
+        }
       }
     }
     // Publish the remeasured metadata too. Otherwise the next no-op/content
     // commit could reuse stale rendered lengths after an async image resize.
     this.mountedTranscriptBlocks = renderedBlocks
     const paddingRows = this.focusLivePaddingFor(renderedBlocks, projectionExpanded, width)
-    const rows: FullscreenRowEntry[] = []
     this.currentSearchTranscriptRange = undefined
+    this.currentSearchPaintedSegments = undefined
+    this.updateRenderedViewSearchGeometry(renderedBlocks, width, paddingRows)
+    const rows: FullscreenRowEntry[] = []
     let transcriptRow = 0
+    let pendingSelection: { selection: RenderedSearchSelection; blockContentRow: number } | undefined
     for (let index = 0; index < renderedBlocks.length; index += 1) {
       const entry = renderedBlocks[index]!
       const height = this.normalTranscriptBlockHeight(entry, index, renderedBlocks.length)
-      const scrollRange = entry.searchSelection?.scrollRange
-      if (scrollRange !== undefined) {
-        this.currentSearchTranscriptRange = {
-          startRow: transcriptRow + scrollRange.startRow,
-          endRow: transcriptRow + scrollRange.endRow,
-        }
+      if (entry.searchSelection?.scrollRange !== undefined) {
+        pendingSelection = { selection: entry.searchSelection, blockContentRow: transcriptRow }
       }
       rows.push(this.fullscreenRowEntry(entry, height, height > 0 && index < renderedBlocks.length - 1))
       const padding = paddingRows.get(index) ?? 0
@@ -12368,17 +14797,68 @@ export class TuiApp {
       transcriptRow += height + padding
     }
     this.transcriptWelcomeHeight = this.welcomeCard.render(this.terminal.columns).length
+    const searchGeometry = pendingSelection === undefined
+      ? undefined
+      : this.resolveCurrentSearchGeometry(pendingSelection.selection, pendingSelection.blockContentRow)
+    this.currentSearchTranscriptRange = searchGeometry?.range
+    this.currentSearchPaintedSegments = searchGeometry?.segments?.map(segment => ({
+      ...segment,
+      documentRow: this.transcriptWelcomeHeight + segment.documentRow,
+    }))
     this.transcriptContentHeight = this.transcriptWelcomeHeight + transcriptRow + this.transcriptChromeHeight
     this.messageRows = rows
     this.fullscreenRowsDirty = true
   }
 
-  /** Reveal the fullscreen transcript viewport on the current search range
-   * (plan S7 §12): reuse the geometry the last rebuild/remeasure already
-   * measured (perf plan S2 §5.6 — an ordinary search jump must NOT re-render
-   * the whole mounted view). An already-visible range is left in place; an
-   * outside range is positioned about one third down the viewport. Regular mode
-   * has no app-owned ScrollView — its materialized window is the contract. */
+  /** Retire the current-epoch search target geometry (range, proven cells and
+   * Source-only notice) as ONE fact: every seam that loses the target must use
+   * this so a stale cell/notice can never scroll or paint for a newer state. */
+  private clearCurrentSearchTargetGeometry(): void {
+    this.currentSearchTranscriptRange = undefined
+    this.currentSearchPaintedSegments = undefined
+    this.searchSourceNotice = undefined
+    this.searchExactChannelAvailable = undefined
+    this.searchSourceSnippetMemo = undefined
+  }
+
+  /** The proven cells of one current search selection, in block-relative
+   * DOCUMENT rows (the welcome offset is added by the caller). A selection with
+   * no proven cells returns `undefined`, which makes the occlusion solver fall
+   * back to the conservative full-width anchor rows — never to guessed columns. */
+  private paintedSegmentsForSelection(
+    selection: RenderedSearchSelection,
+    blockContentRow: number,
+  ): readonly PaintedTargetSegment[] | undefined {
+    const segments = (selection.exactPaintedSegments?.length ?? 0) > 0
+      ? selection.exactPaintedSegments
+      : selection.selectedIndex >= 0 ? selection.matches[selection.selectedIndex]?.segments : undefined
+    if (segments === undefined) return undefined
+    return segments.map(segment => ({
+      documentRow: blockContentRow + segment.row,
+      startCol: segment.startCol,
+      endCol: segment.endCol,
+    }))
+  }
+
+  /** The real overlay rectangle in the SAME 0-based screen units as
+   * `TuiAltScreen.getPaintedBox`. Undefined while the box is hidden or was
+   * never painted. */
+  private searchOverlayRect(): PhysicalRect | undefined {
+    const overlay = this.searchOverlay
+    if (overlay === undefined || overlay.isHidden()) return undefined
+    const bounds = overlay.getBounds()
+    if (bounds === undefined || bounds.width <= 0 || bounds.height <= 0) return undefined
+    return { x: bounds.col, y: bounds.row, width: bounds.width, height: bounds.height }
+  }
+
+  /** Reveal the fullscreen transcript viewport on the current search range.
+   * Reuses the geometry the last rebuild/remeasure already measured (an
+   * ordinary search jump must NOT re-render the whole mounted view). When the
+   * Search overlay and the ScrollView have both really painted, the jump is
+   * solved against those TWO rectangles so a target behind the box is moved out
+   * from under it; otherwise the historical "already visible or one third down"
+   * placement stays in force. Regular mode has no app-owned ScrollView — its
+   * materialized window is the contract. */
   scrollToSearchTarget(): void {
     const scroll = this.fullscreenScroll
     const searchRange = this.currentSearchTranscriptRange
@@ -12388,13 +14868,94 @@ export class TuiApp {
     if (viewportHeight <= 0) return
 
     const before = scroll.scrollTop
-    const targetStart = this.transcriptWelcomeHeight + searchRange.startRow
-    const targetEnd = this.transcriptWelcomeHeight + searchRange.endRow
-    const visibleBottom = before + viewportHeight - 1
-    if (targetStart >= before && targetEnd <= visibleBottom) return
+    const welcomeHeight = this.transcriptWelcomeHeight
+    const viewport = this.fullscreen?.getPaintedBox(scroll)
+    const overlay = this.searchOverlayRect()
+    if (viewport !== undefined && overlay !== undefined) {
+      const choice = chooseSearchViewportTop({
+        viewport,
+        overlay,
+        currentScrollTop: before,
+        maxScrollTop: Math.max(0, this.transcriptContentHeight - viewportHeight),
+        targetRows: { start: welcomeHeight + searchRange.startRow, end: welcomeHeight + searchRange.endRow },
+        segments: this.currentSearchPaintedSegments ?? [],
+      })
+      if (choice.scrollTop !== before) scroll.scrollTo(choice.scrollTop, { disableFollow: true })
+    } else {
+      const targetStart = welcomeHeight + searchRange.startRow
+      const targetEnd = welcomeHeight + searchRange.endRow
+      const visibleBottom = before + viewportHeight - 1
+      if (!(targetStart >= before && targetEnd <= visibleBottom)) {
+        scroll.scrollTo(Math.max(0, targetStart - Math.floor(viewportHeight / 3)), { disableFollow: true })
+      }
+    }
+    // The box that painted this jump may have been a frame old (the Source-only
+    // notice can change the box height), so one correction is allowed on the
+    // next REAL frame; it re-solves with those boxes and never recurses.
+    this.registerSearchOcclusionCorrection()
+  }
 
-    const desiredTop = Math.max(0, targetStart - Math.floor(viewportHeight / 3))
-    scroll.scrollTo(desiredTop, { disableFollow: true })
+  /** Record the ONE post-paint correction allowed for the current navigation.
+   * Only an explicit navigation (or a resize) reaches here; a passive
+   * projection/stream/scroll repaint never does. */
+  private registerSearchOcclusionCorrection(): void {
+    const overlay = this.searchOverlay
+    const screen = this.fullscreen
+    const component = this.searchComponent
+    if (overlay === undefined || screen === undefined || component === undefined) return
+    const scope = component.getScope()
+    const query = scope === 'full' ? this.searchTarget?.query : this.renderedViewSearch?.query
+    if (query === undefined) return
+    this.pendingSearchOcclusionCorrection = {
+      screen,
+      overlay,
+      scope,
+      query,
+      presentationRevision: this.searchPresentationRevision,
+      viewIndex: this.renderedViewSearch?.currentIndex ?? -1,
+      columns: this.terminal.columns,
+      termRows: this.terminal.rows,
+    }
+  }
+
+  /** Consume the pending correction against the frame that just painted: only
+   * the same screen/overlay/scope/query/selection epoch may move the viewport,
+   * and at most once. A mismatch only retires the eligibility. */
+  private applyPendingSearchOcclusionCorrection(): boolean {
+    const pending = this.pendingSearchOcclusionCorrection
+    if (pending === undefined) return false
+    this.pendingSearchOcclusionCorrection = undefined
+    if (this.fullscreen !== pending.screen
+      || this.searchOverlay !== pending.overlay
+      || this.searchComponent?.getScope() !== pending.scope
+      || pending.overlay.isHidden()
+      || this.terminal.columns !== pending.columns
+      || this.terminal.rows !== pending.termRows
+      || !this.overlayBroker.isOnlyVisibleModal(pending.overlay)
+      || this.searchPresentationRevision !== pending.presentationRevision
+      || (this.renderedViewSearch?.currentIndex ?? -1) !== pending.viewIndex) return false
+    const query = pending.scope === 'full' ? this.searchTarget?.query : this.renderedViewSearch?.query
+    if (query !== pending.query) return false
+    const scroll = this.fullscreenScroll
+    const searchRange = this.currentSearchTranscriptRange
+    const viewport = scroll === undefined ? undefined : pending.screen.getPaintedBox(scroll)
+    const overlay = this.searchOverlayRect()
+    if (scroll === undefined || searchRange === undefined || viewport === undefined || overlay === undefined) return false
+    if (scroll.viewportHeight <= 0) return false
+    const before = scroll.scrollTop
+    const welcomeHeight = this.transcriptWelcomeHeight
+    const choice = chooseSearchViewportTop({
+      viewport,
+      overlay,
+      currentScrollTop: before,
+      maxScrollTop: Math.max(0, this.transcriptContentHeight - scroll.viewportHeight),
+      targetRows: { start: welcomeHeight + searchRange.startRow, end: welcomeHeight + searchRange.endRow },
+      segments: this.currentSearchPaintedSegments ?? [],
+    })
+    if (choice.scrollTop === before) return false
+    this.searchPresentationDiagnostics.occlusionCorrections += 1
+    scroll.scrollTo(choice.scrollTop, { disableFollow: true })
+    return true
   }
 
   /** Discard any open scroll-profiler frame window WITHOUT emitting. Called
@@ -12417,6 +14978,7 @@ export class TuiApp {
    * `ImageThumbnail` render-request wiring MUST go through here. */
   private settleThumbnailRender(): void {
     this.fullscreenRowsDirty = true
+    this.searchQualificationEpoch += 1
     // A pixel settle changes an image body's painted geometry. On the
     // fullscreen surface the scroll view can otherwise consider the frame
     // unchanged, so force the repaint that publishes the new row map/hits.
@@ -13009,6 +15571,7 @@ export class TuiApp {
       // A resize re-wraps every block at the new width: the committed row
       // geometry cannot survive it even when no rebuild ran yet.
       this.fullscreenRowsDirty = true
+      this.searchQualificationEpoch += 1
     }
     const scroll = this.fullscreenScroll
     const paintedHeight = (component: Component): number => this.fullscreen?.getPaintedBox(component)?.height ?? 0
@@ -13070,7 +15633,17 @@ export class TuiApp {
       rows,
       viewerBack: this.paintedViewerBack(paintedHeight(this.header), paintedHeight(this.viewerSubjectBar)),
     }
+    // PR3: commit the footer's painted click geometry with the SAME frame
+    // boundary as the transcript snapshot — never a re-measured estimate.
+    this.commitFooterPaintProjection()
     if (effectiveImageProtocol(this.graphics, this.imageProtocolPreference) === 'sixel') this.refreshCommittedPixelHitRows()
+    // A resize re-wraps the transcript and may move the overlay: the current
+    // target gets ONE re-solve against the new real boxes, and only while a
+    // Search target still exists. No target, no scroll.
+    if (resized && this.searchOverlay !== undefined && this.currentSearchTranscriptRange !== undefined) {
+      this.registerSearchOcclusionCorrection()
+    }
+    if (this.applyPendingSearchOcclusionCorrection()) this.requestRender()
     if (this.scrollProfiler.enabled && this.scrollFramePending) {
       const now = performance.now()
       this.scrollProfiler.emit({
@@ -13087,10 +15660,219 @@ export class TuiApp {
         viewport: scroll?.viewportHeight ?? 0,
         scrollTop: scroll?.scrollTop ?? 0,
         preset: this.displayPreset(),
-        searchActive: this.searchOverlay !== undefined,
+        searchActive: this.searchOverlay !== undefined || this.searchOpening !== undefined,
       })
       this.scrollFramePending = false
     }
+  }
+
+  /** PR3: commit the footer projection that belongs to the frame just
+   * PAINTED — the REAL painted box plus the composer hits translated to
+   * absolute screen cells. A composition whose rows do not match what the
+   * footer Text actually wrapped and painted publishes NO hit (fail closed;
+   * never a guessed coordinate map, never a second wrap pass). */
+  private commitFooterPaintProjection(): void {
+    const screen = this.fullscreen
+    const pending = this.footerPendingProjection
+    if (screen === undefined || pending === undefined) {
+      this.footerPaintedProjection = undefined
+      return
+    }
+    const box = screen.getPaintedBox(this.footer)
+    if (box === undefined || box.width <= 0 || box.height <= 0) {
+      this.footerPaintedProjection = undefined
+      return
+    }
+    const columns = this.terminal.columns
+    const termRows = this.terminal.rows
+    const rows = pending.projection.text === '' ? [] : pending.projection.text.split('\n')
+    // Text (padding 0) may only ADD right padding to each composed row: a
+    // row-count change, a second wrap, or a tab expansion means the
+    // composer's cells do not describe the painted frame.
+    const painted = this.footer.render(columns)
+    let matches = box.width === columns && box.height === painted.length && painted.length === rows.length
+    if (matches) {
+      for (let index = 0; index < rows.length; index += 1) {
+        if (stripTerminalSequences(painted[index]!).trimEnd() !== stripTerminalSequences(rows[index]!).trimEnd()) {
+          matches = false
+          break
+        }
+      }
+    }
+    if (!matches) {
+      this.footerPaintedProjection = undefined
+      return
+    }
+    const hits: PaintedFooterHit[] = []
+    for (const hit of pending.projection.hits) {
+      if (hit.row < 0 || hit.row >= rows.length) continue
+      if (hit.startCol < 0 || hit.endCol > box.width) continue
+      hits.push({
+        id: hit.id,
+        placement: hit.placement,
+        row: box.y + hit.row,
+        startCol: box.x + hit.startCol,
+        endCol: box.x + hit.endCol,
+      })
+    }
+    this.footerPaintedProjection = {
+      screen,
+      revision: pending.revision,
+      subjectKind: pending.subjectKind,
+      columns,
+      termRows,
+      top: box.y,
+      left: box.x,
+      width: box.width,
+      height: box.height,
+      hits,
+    }
+  }
+
+  /** Rebase the committed Footer pointer frame after a mouse press cleared
+   * the exit confirmation and synchronously recomposed the Footer. The
+   * screen has not repainted yet; a press may therefore resolve against the
+   * successor projection ONLY when the exact same fully visible placement
+   * occupies the exact same cells and the physical height is unchanged.
+   * Every other pending-revision case keeps the ordinary fail-closed fence. */
+  private rebasePointerFrameAfterExitClear(chunk: {
+    readonly x: number
+    readonly y: number
+  }): void {
+    const painted = this.footerPaintedProjection
+    const pending = this.footerPendingProjection
+    if (painted === undefined || pending === undefined) return
+    if (pending.revision === painted.revision) return
+    if (pending.subjectKind !== painted.subjectKind) return
+    const successorHeight = pending.projection.text === '' ? 0 : pending.projection.text.split('\n').length
+    if (successorHeight !== painted.height) return
+    const pressed = painted.hits.find(candidate => candidate.row === chunk.y
+      && chunk.x >= candidate.startCol && chunk.x < candidate.endCol)
+    if (pressed === undefined) return
+    const successorHits = pending.projection.hits.map(hit => ({ ...hit, row: painted.top + hit.row }))
+    const successor = successorHits.find(candidate =>
+      candidate.id === pressed.id
+      && candidate.placement === pressed.placement
+      && candidate.row === pressed.row
+      && candidate.startCol === pressed.startCol
+      && candidate.endCol === pressed.endCol)
+    if (successor === undefined) return
+    // Expose ONLY hits that were ALSO present in the painted frame at the
+    // exact same cells: the successor may contain a hit on the row the
+    // instruction covered, which was never painted and must stay unreachable
+    // until a real repaint publishes it.
+    this.footerPaintedProjection = {
+      ...painted,
+      revision: pending.revision,
+      subjectKind: pending.subjectKind,
+      hits: successorHits.filter(candidate => painted.hits.some(previous =>
+        previous.id === candidate.id
+        && previous.placement === candidate.placement
+        && previous.row === candidate.row
+        && previous.startCol === candidate.startCol
+        && previous.endCol === candidate.endCol)),
+    }
+  }
+
+  /** PR3: the root Footer box half of a fullscreen press. Returns true when
+   * the cell belongs to the painted footer: a complete first-party hit
+   * starts the one-shot gesture, every other footer cell (separator, gap,
+   * truncated/dropped item, child-subject, command-mode, blocked owner) is
+   * inert and never falls through to the transcript/todo ladder. */
+  private beginFooterPress(x: number, y: number): boolean {
+    const painted = this.footerPaintedProjection
+    if (painted === undefined) return false
+    if (this.fullscreen !== painted.screen || this.activeScreen !== painted.screen) return false
+    if (this.terminal.columns !== painted.columns || this.terminal.rows !== painted.termRows) return false
+    const inBox = y >= painted.top && y < painted.top + painted.height
+      && x >= painted.left && x < painted.left + painted.width
+    if (!inBox) return false
+    // A composition newer than the painted frame consumes the press without
+    // starting a gesture: the press may never name a hit of a footer the
+    // app has already replaced on its side.
+    const pending = this.footerPendingProjection
+    if (pending === undefined || pending.revision !== painted.revision) return true
+    // Inside the painted footer box the press is CONSUMED even when no hit
+    // applies: the footer is not a transcript surface.
+    if (painted.subjectKind !== 'main') return true
+    // The transcript-search box's passthrough exception belongs to transcript
+    // inspection ONLY: any visible modal — search included — blocks footer
+    // navigation, as does a non-capturing overlay actually painted here.
+    if (this.overlayBroker.hasVisibleModalOverlay()) return true
+    if (this.taskQuick.focused || this.optionalSeatOwnsKeyboard()) return true
+    if (this.overlayBroker.coversVisibleNonCapturingCell(x, y)) return true
+    const hit = painted.hits.find(candidate =>
+      candidate.row === y && x >= candidate.startCol && x < candidate.endCol)
+    if (hit === undefined) return true
+    this.footerPressGesture = {
+      screen: painted.screen,
+      compositionRevision: painted.revision,
+      subjectKind: 'main',
+      id: hit.id,
+      placement: hit.placement,
+      row: hit.row,
+      startCol: hit.startCol,
+      endCol: hit.endCol,
+      pressX: x,
+      pressY: y,
+      columns: painted.columns,
+      termRows: painted.termRows,
+    }
+    return true
+  }
+
+  /** PR3: complete (or reject) the ONE footer press gesture. The gesture is
+   * already cleared by the caller BEFORE this runs — the business callback
+   * can never observe or re-enter a stale latch. */
+  private completeFooterPress(pressed: FooterPressGesture, x: number, y: number): void {
+    const painted = this.footerPaintedProjection
+    if (painted === undefined || painted.screen !== pressed.screen) return
+    if (this.fullscreen !== pressed.screen || this.activeScreen !== pressed.screen) return
+    if (this.terminal.columns !== pressed.columns || this.terminal.rows !== pressed.termRows) return
+    if (painted.revision !== pressed.compositionRevision) return
+    // A composition NEWER than the painted frame — a synchronous recompose
+    // (command-mode switch, content change) that has not repainted yet —
+    // retires the press immediately (plan §9.1–9.2): the release may never
+    // act on a footer the app has already replaced on its side, paint or no
+    // paint.
+    const pending = this.footerPendingProjection
+    if (pending === undefined || pending.revision !== painted.revision) return
+    if (painted.subjectKind !== 'main') return
+    if (this.statusStore.snapshot().view.subject.kind !== 'main') return
+    if (this.taskQuick.focused || this.optionalSeatOwnsKeyboard()) return
+    if (this.activeQuestions !== undefined || this.approvals.isActive()) return
+    if (this.overlayBroker.hasVisibleModalOverlay()) return
+    if (this.overlayBroker.coversVisibleNonCapturingCell(x, y)) return
+    // The release must be the SAME cell of the SAME hit the press resolved.
+    if (y !== pressed.row || x < pressed.startCol || x >= pressed.endCol) return
+    const current = painted.hits.find(candidate =>
+      candidate.id === pressed.id
+      && candidate.placement === pressed.placement
+      && candidate.row === pressed.row
+      && candidate.startCol === pressed.startCol
+      && candidate.endCol === pressed.endCol)
+    if (current === undefined) return
+    // The painted geometry is not a capability: re-read the live business
+    // availability the original owner exposes.
+    if (pressed.id === 'model') {
+      if (this.footerModelOpen === undefined || this.footerModelAvailable?.() !== true) return
+      this.footerModelOpen()
+      return
+    }
+    if (this.footerTasksOpen === undefined || this.footerTasksAvailable?.() !== true) return
+    this.footerTasksOpen()
+  }
+
+  /** PR3: whether one click cell is part of the CURRENT painted footer box.
+   * A click here without a matching press gesture is inert (a drag/second
+   * click never becomes a transcript or Task Quick action). */
+  private isInertFooterClickCell(x: number, y: number): boolean {
+    const painted = this.footerPaintedProjection
+    if (painted === undefined) return false
+    if (this.fullscreen !== painted.screen || this.activeScreen !== painted.screen) return false
+    if (this.terminal.columns !== painted.columns || this.terminal.rows !== painted.termRows) return false
+    return y >= painted.top && y < painted.top + painted.height
+      && x >= painted.left && x < painted.left + painted.width
   }
 
   /** The viewer subject bar's PAINTED `‹ back` band for the frame being
@@ -13710,6 +16492,48 @@ export class TuiApp {
   }
 
   /**
+   * Fullscreen Question wheel: a wheel while an ordinary Question frame owns
+   * the visible seat belongs to the QUESTION, never to the transcript behind
+   * it. A wheel over the painted body scrolls that body by the configured
+   * line delta; every other wheel while the question is front is consumed as
+   * inert chrome. The official plan-review branch keeps its own reading path
+   * and returns `undefined` here.
+   */
+  private handleQuestionWheel(data: string): TuiInputListenerResult | undefined {
+    if (this.activeScreen.mode !== 'fullscreen') return undefined
+    const wheel = parseModalWheel(data)
+    if (wheel === undefined) return undefined
+    const state = this.activeQuestions
+    if (state === undefined) return undefined
+    // PlanReview owns its own reading/feedback step machine: the generic
+    // question wheel must never invent a second scroll owner there.
+    if (state.flow.isPlanReviewFlow()) return undefined
+    const frame = state.frame
+    if (frame === undefined) return undefined
+    // Only the CURRENT seat occupant may scroll, and only while it really
+    // holds the physical input seat: a focused managed overlay raised above
+    // the modal owns its own pointer plane, so the Question must not swallow
+    // its wheel (the fork's overlay dispatch handles it).
+    if (this.seatFallbackComponent() !== frame || !this.ownsPhysicalKeyboard(frame)) return undefined
+    this.clearExitConfirmation()
+    // A frame that has not rendered at the current terminal size has no
+    // authoritative body geometry: consume the wheel here so it can never
+    // fall through and scroll the transcript behind the modal.
+    if (this.terminal.columns !== frame.termColumns || this.terminal.rows !== frame.termRows) {
+      return { consume: true }
+    }
+    const bounds = this.questionFrameBounds(state)
+    if (bounds === undefined) return { consume: true }
+    const width = Math.max(1, this.terminal.columns)
+    if (wheel.y < bounds.top || wheel.y >= bounds.bottom
+      || wheel.x < 2 || wheel.x >= width - 2) return { consume: true }
+    if (state.flow.wheelBy(wheel.direction * this.wheelScrollLines, wheel.y - bounds.top - 1)) {
+      this.requestRender()
+    }
+    return { consume: true }
+  }
+
+  /**
    * Fullscreen approval wheel: a wheel over the painted body viewport scrolls
    * the sheet; any other wheel while the blocking sheet is active is inert (the
    * modal's pointer plane owns it). Regular never calls this — it has no
@@ -13717,7 +16541,7 @@ export class TuiApp {
    */
   private handleApprovalWheel(data: string): TuiInputListenerResult | undefined {
     if (this.activeScreen.mode !== 'fullscreen' || !this.approvals.isActive()) return undefined
-    const wheel = parseApprovalWheel(data)
+    const wheel = parseModalWheel(data)
     if (wheel === undefined) return undefined
     this.clearExitConfirmation()
     const frame = this.approvals.activeFrame()
@@ -14019,6 +16843,9 @@ export class TuiApp {
     // removal gesture that the release re-proves against the same snapshot.
     const preview = this.draftPreviewHitAt(y)
     if (preview !== undefined) {
+      // PR2/F3: a held draft's preview band is display-only — a press never
+      // arms a removal gesture against the submitted document.
+      if (!this.draftWriteAdmitted()) return
       if (this.activeQuestions !== undefined || this.approvals.isActive()) return
       if (this.overlayBlocksTranscriptPointer() || this.searchOverlayCoversCell(x, y)) return
       const row = y - preview.top
@@ -14056,7 +16883,7 @@ export class TuiApp {
       if (bounds === undefined) return
       if (y >= bounds.top && y < bounds.bottom) {
         if (x >= 2 && x <= width - 3) {
-          this.questionPressGesture = question.flow.beginMousePress(y - bounds.top - 1)
+          this.questionPressGesture = question.flow.beginMousePress(y - bounds.top - 1, x - 2)
         }
         return
       }
@@ -14091,6 +16918,10 @@ export class TuiApp {
       this.fullscreenCellGesture = undefined
       return
     }
+    // PR3: the root Footer's whole painted box is a first-party navigation
+    // surface. A press inside it either starts the ONE footer gesture or is
+    // inert — it never falls through to the transcript/todo ladder.
+    if (this.beginFooterPress(x, y)) return
     // The press resolves ONLY against the last-painted frame snapshot
     // (committed by the trailing paint-commit probe at the frame
     // boundary): no render() call, no refresh — a re-measure between
@@ -14200,6 +17031,23 @@ export class TuiApp {
   }
 
   private handleFullscreenClick(x: number, y: number): void {
+    // PR3: a press that began on the root Footer can only complete or
+    // reject the SAME footer target. The latch is cleared FIRST, before any
+    // callback, and the release never falls into the modal/transcript
+    // ladders — a modal that opened between press and release makes this
+    // release inert, not a click on the modal.
+    const pressedFooter = this.footerPressGesture
+    if (pressedFooter !== undefined) {
+      this.footerPressGesture = undefined
+      // A completed footer release consumes the fork's same-word click
+      // history: the navigation control must never inherit the text-selection
+      // double-click window, or a close-and-reopen within 500 ms would be
+      // swallowed as a word selection. The fork's shared resetTextSelection
+      // seam clears both; sibling click paths are untouched.
+      pressedFooter.screen.resetTextSelection()
+      this.completeFooterPress(pressedFooter, x, y)
+      return
+    }
     // Image UX PR1: complete a composer-preview `×` gesture before the
     // transcript/modal ladders. The pressed occurrence must still occupy the
     // exact same painted row/columns and draft text; a repaint, a draft edit
@@ -14320,6 +17168,16 @@ export class TuiApp {
     // does not own the release.
     if (this.overlayBlocksTranscriptPointer()) {
       this.fullscreenCellGesture = undefined
+      return
+    }
+    // PR3: a click inside the painted Footer box that did not begin with a
+    // matching footer press is inert — never a transcript/todo fall-through.
+    // A completed footer-box release consumes the fork's same-word click
+    // history as well: its press armed the multi-click counter, and the
+    // footer must never feed the text-selection double-click window.
+    if (this.isInertFooterClickCell(x, y)) {
+      this.fullscreenCellGesture = undefined
+      this.footerPaintedProjection?.screen.resetTextSelection()
       return
     }
     // The region determination uses the SAME last-painted snapshot as the
@@ -14741,7 +17599,7 @@ export class TuiApp {
     if (message.kind === 'thinking') {
       if (this.effectiveThinkingExpanded(message)) {
         if (this.thinkingExpanded) this.expandedOverride.set(message, false)
-        else if (this.searchForcesMessageExpanded(message)) this.expandedOverride.set(message, false)
+        else if (this.forcesMessageExpandedTemporarily(message)) this.expandedOverride.set(message, false)
         else this.expandedOverride.delete(message)
         if (revokesSearchReveal) this.suppressSearchReveal()
       } else {
@@ -14764,11 +17622,18 @@ export class TuiApp {
     } else if (this.expandedOverride.get(message) === true) {
       this.expandedOverride.delete(message)
       if (revokesSearchReveal) this.suppressSearchReveal()
-    } else if (this.searchForcesMessageExpanded(message)) {
-      // The card is open only because of the search reveal: a click must
-      // collapse it explicitly (a deleted override would let search re-open).
+      // A user-opened card that the one-shot plan inspection is ALSO forcing
+      // open: deleting the override alone would let the lease re-open it, so
+      // the explicit collapse revokes the lease too (first click collapses).
+      if (this.planInspection?.message === message) this.revokePlanInspectionLease()
+    } else if (this.forcesMessageExpandedTemporarily(message)) {
+      // The card is open only because of a temporary reveal: a click must
+      // collapse it explicitly (a deleted override would let the reveal
+      // re-open). Revoke ONLY the request that forces THIS card — a
+      // Plan-only card's collapse must not cancel an unrelated Search grant.
       this.expandedOverride.set(message, false)
-      this.suppressSearchReveal()
+      if (this.searchForcesMessageExpanded(message)) this.suppressSearchReveal()
+      if (this.planInspection?.message === message) this.revokePlanInspectionLease()
     } else {
       this.expandedOverride.set(message, true)
     }
@@ -14776,28 +17641,18 @@ export class TuiApp {
     this.rebuildMessages()
   }
 
-  /** The effective Run disclosure of one Workflow card: the user's explicit
-   * choice wins forever once set; otherwise the CURRENT FACTS decide via
-   * the single {@link workflowRunMode} (Web runDisclosureFacts parity) —
-   * a clean run closes, a running/abnormal run opens. A completed run with
-   * a failed member is abnormal and stays open (PR2 goal: abnormal first). */
+  /** The effective Run disclosure of one Workflow card: a temporary search
+   * reveal wins; otherwise the shared presentation policy resolves the user's
+   * choice against the current canonical facts. */
   private workflowRunOpen(message: Extract<TranscriptMessage, { kind: 'workflow' }>): boolean {
     if (this.searchForcesWorkflowRunOpen(message.runId)) return true
-    const state = this.workflowDisclosure.get(message.runId)
-    if (state?.userOpen !== undefined) return state.userOpen
-    return workflowRunMode(message.status, message.members) !== 'clean'
+    return effectiveWorkflowRunOpen(this.workflowDisclosure.get(message.runId), message)
   }
 
-  /** The effective Phase disclosure of one Workflow phase: user choice
-   * first, then the CURRENT FACTS — a clean phase (all members completed)
-   * closes, a running/abnormal phase opens. Re-derived at every change,
-   * so any number of running→clean cycles fold and unfold (Web
-   * advanceDisclosureState parity). */
+  /** The effective Phase disclosure; the PiTui search reveal still wins. */
   private workflowPhaseOpen(runId: string, phaseKey: string, phase: WorkflowPhasePresentation): boolean {
     if (this.searchForcesWorkflowPhaseOpen(runId, phaseKey)) return true
-    const state = this.workflowDisclosure.get(runId)?.phases.get(phaseKey)
-    if (state?.userOpen !== undefined) return state.userOpen
-    return phase.counts.completed !== phase.members.length
+    return effectiveWorkflowPhaseOpen(this.workflowDisclosure.get(runId), phase)
   }
 
   /** Toggle one Workflow Run disclosure (click on the run header). The
@@ -14836,114 +17691,15 @@ export class TuiApp {
     this.rebuildMessages()
   }
 
-  /** Advance the Workflow disclosure state for one changed run (PR2 plan
-   * §7, Web advanceDisclosureState parity): the open/closed value is
-   * derived from the CURRENT FACTS at render time (completed/clean →
-   * closed, running/abnormal → open), so any number of running→clean
-   * cycles fold and unfold correctly. The stored EDGES consume the user's
-   * choice exactly like Web:
-   * - entering clean (running/abnormal → clean, or a clean phase whose
-   *   member count changed): the clean facts auto-close — the user's
-   *   choice is consumed (Web: new clean facts => close). Reopening AFTER
-   *   the card is already clean persists (no facts change);
-   * - clean → running/abnormal: a NEW CYCLE — the phase reopens and the
-   *   outer run reopens too (plan §7.7), overriding a prior user close;
-   * - non-abnormal → abnormal: the first abnormal edge opens once
-   *   (plan §7.5), overriding a prior user close;
-   * - running → running: an ordinary update — the user's choice persists.
-   * The caller has already verified the run's content actually changed. */
+  /** Advance one Workflow run's presentation disclosure state. The shared
+   * policy owns the exact fact edges; PiTui keeps its local state map, the
+   * seen-snapshot comparison and its own render revision. */
   private advanceWorkflowDisclosure(
     message: Extract<TranscriptMessage, { kind: 'workflow' }>,
   ): void {
-    // The run's disclosure mode is the SINGLE shared definition (Web
-    // runDisclosureFacts parity): abnormal when the run status OR any
-    // member is abnormal — a completed run with a failed member is
-    // abnormal, never clean. Cold replay pre-settles the mode so a
-    // terminal run never re-triggers an edge.
-    const runMode = workflowRunMode(message.status, message.members)
-    let state = this.workflowDisclosure.get(message.runId)
-    if (state === undefined) {
-      // First sight: the current mode is the pre-settled edge baseline (a
-      // cold-replayed terminal run never re-triggers an edge).
-      state = { previousMode: runMode, phases: new Map() }
-      this.workflowDisclosure.set(message.runId, state)
-    }
-    let changed = false
-    const previousRunMode = state.previousMode
-    state.previousMode = runMode
-    if (runMode === 'clean' && previousRunMode !== 'clean') {
-      // Normal completion: the clean facts consume the user's choice — the
-      // run auto-closes (Web: new clean facts => close). A user who
-      // reopens AFTER the run is already clean keeps their choice.
-      if (state.userOpen !== undefined) {
-        state.userOpen = undefined
-        changed = true
-      }
-    } else if (previousRunMode === 'clean' && runMode !== 'clean') {
-      // A completed run resumed (unreachable today — run-end is terminal —
-      // kept symmetric with the phase rule).
-      if (state.userOpen === false) { state.userOpen = undefined; changed = true }
-    } else if (previousRunMode !== 'abnormal' && runMode === 'abnormal') {
-      // First abnormal edge: override ONLY a prior user CLOSE so the
-      // exception is not hidden behind an earlier fold (plan §7.5). An
-      // explicit user OPEN is preserved (review finding).
-      if (state.userOpen === false) { state.userOpen = undefined; changed = true }
-    }
-    // Phase-level edges over the CURRENT phase groups. A phase that
-    // disappears (impossible today — members are append-only) simply keeps
-    // its state; the renderer only consults present phases.
-    let phaseStartedCycle = false
-    for (const phase of workflowPhasePresentations(message.members)) {
-      const phaseHasAbnormal = phase.counts.failed + phase.counts.cancelled + phase.counts.interrupted > 0
-      const phaseMode: 'clean' | 'running' | 'abnormal' = phaseHasAbnormal
-        ? 'abnormal'
-        : phase.counts.completed === phase.members.length ? 'clean' : 'running'
-      let phaseState = state.phases.get(phase.key)
-      if (phaseState === undefined) {
-        phaseState = { previousMode: phaseMode, previousActivityCount: phase.members.length }
-        state.phases.set(phase.key, phaseState)
-        continue
-      }
-      const previousPhaseMode = phaseState.previousMode
-      const previousActivityCount = phaseState.previousActivityCount
-      const phaseFactsChanged = previousPhaseMode !== phaseMode
-        || previousActivityCount !== phase.members.length
-      phaseState.previousMode = phaseMode
-      phaseState.previousActivityCount = phase.members.length
-      if (phaseMode === 'clean' && phaseFactsChanged) {
-        // Normal completion (incl. clean→clean with a changed member
-        // count): the clean facts consume the user's choice — the phase
-        // auto-closes (Web: new clean facts => close). A clean phase
-        // whose member count changed is still a NEW CYCLE for the outer
-        // run (Web phaseStartedCycle: the run reopens, the phase stays
-        // folded).
-        if (phaseState.userOpen !== undefined) {
-          phaseState.userOpen = undefined
-          changed = true
-        }
-        if (previousPhaseMode === 'clean' && phase.members.length !== previousActivityCount) {
-          phaseStartedCycle = true
-        }
-      } else if (previousPhaseMode === 'clean' && phaseMode !== 'clean') {
-        // NEW CYCLE (plan §7.7): a completed phase gained a new running or
-        // abnormal member — reopen the phase and mark the run for reopen.
-        if (phaseState.userOpen === false) { phaseState.userOpen = undefined; changed = true }
-        phaseStartedCycle = true
-      } else if (previousPhaseMode !== 'abnormal' && phaseMode === 'abnormal') {
-        // First abnormal edge: same one-shot override as the run level.
-        if (phaseState.userOpen === false) { phaseState.userOpen = undefined; changed = true }
-      }
-      // running → running: ordinary update — the user's choice persists.
-    }
-    if (phaseStartedCycle && runMode !== 'clean' && state.userOpen === false) {
-      // The outer run reopens with the new cycle (Web parity, plan §7.7):
-      // a user who folded the whole run must not keep the second batch
-      // hidden. A clean run is never force-reopened (Web's
-      // `runFacts.mode !== 'clean'` guard).
-      state.userOpen = undefined
-      changed = true
-    }
-    if (changed) this.workflowDisclosureRevision += 1
+    const result = advanceWorkflowDisclosureState(this.workflowDisclosure.get(message.runId), message)
+    this.workflowDisclosure.set(message.runId, result.state)
+    if (result.choiceChanged) this.workflowDisclosureRevision += 1
   }
 
   /** Fold the Workflow disclosure transitions for the CURRENT transcript
@@ -15054,7 +17810,8 @@ export class TuiApp {
       this.searchRevealGranted = false
       this.searchRevealHostOwned = false
       this.searchPresentationRevision += 1
-      this.currentSearchTranscriptRange = undefined
+      this.clearCurrentSearchTargetGeometry()
+      this.pendingSearchOcclusionCorrection = undefined
     }
     this.searchSuppressedSubCalls.clear()
     this.searchMatchMessages = new Set()
@@ -15109,8 +17866,12 @@ export class TuiApp {
     // session's subCallId expansions, and the old message objects must not
     // be retained by the hit map.
     this.subCallExpanded.clear()
+    this.searchSuppressedSubCalls.clear()
     this.subCallHitsByMessage.clear()
     this.subCallExpandedRevision += 1
+    // The one-shot plan inspection is session-scoped too: a switched-in
+    // session must never inherit the old session's located card or its lease.
+    this.planInspection = undefined
     // The Workflow disclosure state, its seen-snapshots and its render-time
     // hit map are session-scoped too: a switched-in session must never
     // inherit the old session's run/phase choices or retain its messages.
@@ -15156,17 +17917,67 @@ export class TuiApp {
     this.visualSelection = undefined
   }
 
-  /** Show or clear plan mode: header + footer badges and a warning-tinted editor border. */
-  setPlanMode(active: boolean): void {
+  /** Show or clear plan mode: header + footer badges, a warning-tinted editor
+   * border and the empty-draft composer hint (`Plan mode · describe the task`,
+   * or the pending variants while a selection awaits the next accepted step).
+   * The viewer placeholder (a child viewer's `Message <label>…`) keeps its own
+   * priority; the plan hint applies only to the MAIN subject's empty draft.
+   * @param active - the official `plan` projection's effective flag.
+   * @param pending - the projection's pending selection, when it reports one.
+   */
+  setPlanMode(active: boolean, pending?: boolean): void {
     this.planMode = active
-    // The collaboration projection's store notify re-renders the footer.
-    this.projectStatus({ collaboration: { plan: { effective: active } } })
+    // The collaboration projection's store notify re-renders the footer AND
+    // re-derives the composer hint from the SAME committed fact (one plan
+    // projection, two presentations — never a second plan authority). An
+    // omitted `pending` keeps the projection's own fact untouched.
+    this.projectStatus({
+      collaboration: {
+        plan: pending === undefined
+          ? { effective: active }
+          : { effective: active, pending },
+      },
+    })
     this.renderHeader()
     const seat = this.seatEditor()
     seat.borderColor = active ? color.warning : this.editorBorder
     seat.invalidate()
+    this.refreshComposerPlaceholder()
     this.requestRender()
     this.syncExtensionState()
+  }
+
+  /** The current plan-mode composer hint (undefined = none). */
+  private planHint: string | undefined
+
+  /** Re-derive the composer plan hint from the COMMITTED collaboration fact
+   * (the official plan projection's effective/pending state) and repaint the
+   * placeholder only when it actually changed. */
+  private applyComposerPlanHint(): void {
+    const plan = this.statusStore.snapshot().collaboration.plan
+    const hint = plan.effective
+      ? plan.pending === true
+        ? 'Plan mode · change pending'
+        : 'Plan mode · describe the task'
+      : plan.pending === true
+        ? 'Plan requested · pending'
+        : undefined
+    if (hint === this.planHint) return
+    this.planHint = hint
+    this.refreshComposerPlaceholder()
+  }
+
+  /** Refresh the host editor's placeholder: a child viewer's own placeholder
+   * wins; the plan hint shows only for the MAIN subject's EMPTY prompt-mode
+   * draft. Presentation-only — the hint is never part of the draft text. */
+  private refreshComposerPlaceholder(): void {
+    if (this.viewerMode !== undefined) return
+    const hint = this.planHint
+    if (hint === undefined) {
+      this.clearViewerPlaceholder()
+      return
+    }
+    this.editor.setPlaceholder(hint)
   }
 
   /**
@@ -15178,6 +17989,10 @@ export class TuiApp {
    * `'error'` renders red with a ✗ — pass it explicitly for failures.
    */
   notify(text: string, kind: 'error' | 'info' = 'info'): void {
+    // A disposed surface is finally detached: a late async callback must not
+    // arm a new auto-clear timer (or repaint) after `dispose()` retired the
+    // one it owned. Old-generation callbacks are benign no-ops.
+    if (this.disposed) return
     this.notifyText = text
     this.notifyKind = kind
     if (this.notifyTimer !== undefined) clearTimeout(this.notifyTimer)
@@ -15267,6 +18082,7 @@ export class TuiApp {
    */
   setEditorText(text: string): void {
     this.clearExitConfirmation()
+    if (!this.draftWriteAdmitted()) return
     this.invalidateDraftPreviewCaches()
     const target = this.viewerMode
     if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
@@ -15287,6 +18103,127 @@ export class TuiApp {
     this.requestRender()
   }
 
+  /** The flat UTF-16 caret of the host editor's raw document. */
+  private editorFlatCursor(): number {
+    const cursor = this.editor.getCursor()
+    const lines = this.editor.getText().split('\n')
+    let offset = 0
+    for (let line = 0; line < cursor.line && line < lines.length; line += 1) offset += (lines[line] ?? '').length + 1
+    return offset + cursor.col
+  }
+
+  /**
+   * Consume ONE editor change notification.
+   *
+   * The input's REAL pre-edit caret (announced by `TuiEditor.onInputStart`)
+   * proves the single splice that changed the document. Only an exact proof
+   * may shift or keep a paste lease; an async change, a multi-splice input or
+   * any ambiguity retires every lease — the tracker never guesses.
+   */
+  private observePasteMutation(): void {
+    const nextText = this.editor.getText()
+    const anchor = this.pasteEditAnchor
+    if (anchor !== undefined) {
+      if (anchor.text === nextText) {
+        // A change notification without a text change (mode toggle): the
+        // anchor stays valid for the next mutation of the same input.
+        return
+      }
+      const edit = proveCaretEdit(anchor.text, anchor.cursor, nextText)
+      if (edit !== undefined) {
+        this.pasteRanges.applyEdit(edit, nextText)
+        this.pasteEditAnchor = { text: nextText, cursor: this.editorFlatCursor() }
+        return
+      }
+    }
+    this.pasteRanges.reset(nextText)
+    this.pasteEditAnchor = undefined
+  }
+
+  /**
+   * ONE completed bracketed paste of the default host composer.
+   *
+   * The renderer-side receipt is built from the paste's PROVEN raw span; the
+   * application intake owner then applies the candidate grammar, reads the
+   * file and replaces exactly that span. Viewer composers and shell modes are
+   * never claimed: the viewer's child prompt has no image delivery path, and
+   * shell words are the shell plane's authority. Plugin replacement editors
+   * never route their paste through this host editor, so they are untouched
+   * by construction.
+   */
+  private acceptHostPastedText(commit: TuiEditorPasteCommit): void {
+    if (this.events.onTerminalPastedPath === undefined) return
+    if (this.disposed || this.viewerMode !== undefined) return
+    if (this.seatEditor().id !== 'host' || this.editor.getInputMode() !== 'prompt') return
+    const id = this.pasteRanges.add(commit.span)
+    if (id === undefined) return
+    const receipt: PastedPathReceipt = {
+      text: commit.text,
+      seatCurrent: () => !this.disposed
+        && this.viewerMode === undefined
+        && this.seatEditor().id === 'host'
+        && this.editor.getInputMode() === 'prompt',
+      hasLivePath: (path) => this.pasteRanges.live(id)?.expected === path,
+      replacePastedPath: (path, placeholder) => this.replacePastedPathSpan(id, path, placeholder),
+    }
+    this.events.onTerminalPastedPath?.(receipt)
+  }
+
+  /**
+   * Replace ONE live pasted-path span with the canonical image placeholder as
+   * a real Undoable edit (the fork's existing seam — no new editor API). The
+   * caret keeps its position RELATIVE to the surrounding text. Any failure of
+   * identity proof retires the lease and returns false: no other occurrence
+   * of the same path is ever touched.
+   */
+  private replacePastedPathSpan(id: number, path: string, placeholder: string): boolean {
+    const span = this.pasteRanges.live(id)
+    if (span === undefined || span.expected !== path) return false
+    const seat = this.seatEditor()
+    if (seat.id !== 'host' || seat.replaceTextUndoable === undefined) return false
+    const raw = seat.getText()
+    if (raw.slice(span.start, span.end) !== path || !raw.includes(path)) {
+      this.pasteRanges.retire(id)
+      return false
+    }
+    const cursor = seat.getCursor()
+    let nextCursor = cursor
+    if (cursor >= span.end) nextCursor += placeholder.length - path.length
+    else if (cursor > span.start) nextCursor = span.start + placeholder.length
+    const next = raw.slice(0, span.start) + placeholder + raw.slice(span.end)
+    // The replacement is ONE known splice. Announce the resulting document so
+    // the synchronous onChange is a no-op, then apply the splice to the OTHER
+    // live leases: leases after the replaced span must shift, and this lease
+    // must die (a replacement never keeps its own identity).
+    this.pasteEditAnchor = { text: next, cursor: nextCursor }
+    try {
+      seat.replaceTextUndoable(next, nextCursor)
+    } catch (error) {
+      this.pasteEditAnchor = undefined
+      this.pasteRanges.reset(this.seatEditor().getText())
+      throw error
+    }
+    this.pasteEditAnchor = undefined
+    this.pasteRanges.applyEdit(
+      { start: span.start, oldEnd: span.end, newEnd: span.start + placeholder.length },
+      next,
+    )
+    this.pasteRanges.retire(id)
+    return true
+  }
+
+  /**
+   * The read-only delivery predicate every host submit/steer clear consults
+   * BEFORE clear/Undo retirement/history/ack/writer. A live pasted path whose
+   * attachment read is in flight refuses the delivery and announces the ONE
+   * retry notice; a plain prompt that does not carry that path is unaffected.
+   */
+  private blocksPastedPathDelivery(text: string): boolean {
+    if (this.terminalPastedPath?.blocksDelivery(text) !== true) return false
+    this.notify(PASTE_PENDING_NOTICE, 'info')
+    return true
+  }
+
   /**
    * Insert text at the editor cursor — the image-placeholder insertion
    * path (`/image`, Ctrl+V). A replacement editor without cursor insertion
@@ -15297,6 +18234,7 @@ export class TuiApp {
    */
   insertIntoEditor(text: string): void {
     this.clearExitConfirmation()
+    if (!this.draftWriteAdmitted()) return
     this.invalidateDraftPreviewCaches()
     const target = this.viewerMode
     if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
@@ -15369,6 +18307,9 @@ export class TuiApp {
       const seat = this.seatEditor()
       seat.borderColor = this.editorBorder
       this.clearViewerPlaceholder()
+      // Back on the MAIN subject: the plan-mode composer hint (if the session
+      // is in plan mode) re-applies beside the restored empty draft.
+      this.refreshComposerPlaceholder()
       this.setSeatSerializedInput(this.mainDraftBeforeViewer ?? '')
       this.mainDraftBeforeViewer = undefined
       seat.invalidate()
@@ -15383,23 +18324,23 @@ export class TuiApp {
       // workspace/usage (the review's P2).
       return
     }
-    if (this.viewerMode === undefined) {
+    const currentViewer = this.viewerMode
+    const enteringViewer = currentViewer === undefined
+    if (currentViewer === undefined) {
       // Preserve the main draft in its SERIALIZED wire form, so a
       // shell-mode draft round-trips through the viewer with its mode.
       this.mainDraftBeforeViewer = this.expandedSeatWireDraft()
-      // The viewer renders ONLY the child transcript: the main session's
-      // local cards (`!` shell runs) and its ephemeral pending tail must
-      // never leak into it. The runner repaints the child folder right after,
-      // so the cleared lists are rebuilt from the child content.
-      this.localMessages.length = 0
+      // Main-session local cards stay owned here but transcriptBlocks omits
+      // them while the child viewer is active. Pending tail rows are subject-
+      // scoped and are cleared before the child projection arrives.
       this.pendingTailRows = []
-      this.rebuildMessages()
-    } else if (isViewerAccessInteractive(resolveViewerAccess(this.viewerMode.mode, this.viewerMode.access))) {
+    } else if (isViewerAccessInteractive(resolveViewerAccess(currentViewer.mode, currentViewer.access))) {
       // Switching child: park the outgoing child's draft first.
-      this.parkSubagentDraft(this.viewerMode.childSessionId)
+      this.parkSubagentDraft(currentViewer.childSessionId)
     }
     this.viewerMode = mode
     this.viewerGeneration += 1
+    if (enteringViewer) this.rebuildMessages()
     // M3-5 PR1: the display subject follows the viewer — StatusRuntime
     // resolves the child and commits the view section together with the
     // child's Session-owned sections in ONE atomic `commitDisplaySubject`
@@ -15456,6 +18397,16 @@ export class TuiApp {
     legacy: Partial<StatusData>,
     presentation: DisplaySubjectPresentation | undefined,
   ): void {
+    const previousSubject = this.statusStore.snapshot().view.subject
+    const nextSubject = patch.view?.subject
+    if (nextSubject !== undefined && (
+      previousSubject.kind !== nextSubject.kind
+      || previousSubject.kind === 'subagent'
+        && nextSubject.kind === 'subagent'
+        && previousSubject.id !== nextSubject.id
+    )) {
+      this.clearRenderedViewSearch({ rebuild: false })
+    }
     this.displaySubjectPresentation = presentation
     // The ACTIVITY section is display-subject-scoped too (its `todoCount` is
     // the display-subject list length): it must travel in the SAME store
@@ -15507,6 +18458,7 @@ export class TuiApp {
     // inside the scroll content: `transcriptWelcomeHeight`, the fullscreen row
     // map and the scroll anchor all ride the measurement).
     if (this.welcomeCard.setHidden(presentation !== undefined)) {
+      this.searchQualificationEpoch += 1
       this.refreshMessageRows()
       this.requestRender()
     }
@@ -15736,6 +18688,10 @@ export class TuiApp {
     this.rebuildMessages()
   }
 
+  setWelcomeWorkspace(workspace: import('./app/surface/display-seam.ts').DisplayWelcomeWorkspace | undefined): void {
+    this.welcomeCard.setWorkspace(workspace)
+    this.rebuildMessages()
+  }
   /** The turn threshold at or above which collapsible PROCESS entries
    * (thinking/system/tool) expand under the Ctrl+O master. Memoized on the
    * window identity + master flag: the boundary is consulted per projected
@@ -16263,7 +19219,9 @@ export class TuiApp {
     return {
       getEditorState: () => app.editorSeatHolder.snapshot(),
       setEditorText: (text) => {
-        if (app.disposed) return
+        // PR2/F4: an extension write obeys the ONE composer admission — a
+        // held attempt owns the document (the accepted settlement clears it).
+        if (!app.draftWriteAdmitted()) return
         // The shell-editor-mode boundary: the host editor decodes a
         // SERIALIZED draft (`!pwd` → shell mode + body) — a raw write
         // would leave the previous shell mode active and submit the
@@ -16278,7 +19236,7 @@ export class TuiApp {
         app.editorSeatHolder.notifyChanged()
       },
       insertEditorText: (text, at) => {
-        if (app.disposed) return
+        if (!app.draftWriteAdmitted()) return
         const current = app.seatEditor()
         const offset = at ?? current.getCursor()
         const draft = current.getText()
@@ -16288,7 +19246,7 @@ export class TuiApp {
         app.editorSeatHolder.notifyChanged()
       },
       pasteToEditor: (text) => {
-        if (app.disposed) return
+        if (!app.draftWriteAdmitted()) return
         const current = app.seatEditor()
         const offset = current.getCursor()
         const draft = current.getText()
@@ -16718,6 +19676,10 @@ export class TuiApp {
     // A replacement Editor seat is a new keyboard owner. Retire Quick before
     // the atomic handoff so focus restoration never targets the old seat.
     this.leaveTaskQuick()
+    // The outgoing seat's paste ranges are dead: the incoming editor holds a
+    // different document/Undo authority and must never inherit a span.
+    this.pasteRanges.retireAll()
+    this.pasteEditAnchor = undefined
     // Perform the atomic handoff (create → transfer → mount → dispose).
     // The registry revision rides along so a failed target's guard clears
     // on a same-id re-registration (round-1 finding 4).
@@ -17622,6 +20584,139 @@ export class TuiApp {
     return true
   }
 
+  /**
+   * M5-U-E: whether this raw input is ONE unmodified Left PRESS — the only
+   * input the Host Editor `←←` gesture ever counts. The fork's own key
+   * identity decides (legacy `\x1b[D`, Kitty left with no modifiers,
+   * modifyOtherKeys alike); a compound/multi-key chunk, a modified arrow or a
+   * non-key sequence is never a press for this feature. Kitty repeat/release
+   * artifacts are filtered by the caller before this point; the strict
+   * `parseKey` equality additionally refuses them here.
+   */
+  private isPlainLeftPress(data: string): boolean {
+    // A Kitty repeat/release parses to the SAME key identity as its press, so
+    // the protocol artifact filter is part of the PRESS question itself.
+    if (isKeyRelease(data) || isKeyRepeat(data)) return false
+    return matchesKey(data, 'left') && parseKey(data) === 'left'
+  }
+
+  /** Drop the Host Editor `←←` first-Press latch (idempotent, allocation-free). */
+  private clearLeftWorkspaceArm(): void {
+    this.leftWorkspaceArm = undefined
+  }
+
+  /**
+   * Invalidate the Host Editor `←←` latch on every REAL input event that is
+   * not the gesture's own plain Left press. Called on EVERY
+   * `handleInputCore` entry, BEFORE any higher-priority owner can consume the
+   * key — a Question/Approval/History/overlay consumed key still means the
+   * user did something else between the two presses. Kitty repeat/release are
+   * protocol artifacts of the SAME physical press: they neither count as the
+   * second press nor clear the latch (the host protocol sink consumes them).
+   */
+  private observeWorkspaceGestureInterveningInput(data: string): void {
+    if (isKeyRelease(data) || isKeyRepeat(data)) return
+    if (!this.isPlainLeftPress(data)) this.clearLeftWorkspaceArm()
+  }
+
+  /**
+   * The non-geometric live-owner facts the Host Editor `←←` gesture requires
+   * (M5-U-E). Every check is O(1) field state re-read on EVERY press; the
+   * caller's ladder position already guarantees `InputRouter.route` returned
+   * the unclaimed `editor` route, so no higher-priority owner is displaced.
+   *
+   * - the composition control is installed AND the registered `/sessions`
+   *   entry is really usable right now;
+   * - the HOST editor is the seat editor AND the real physical keyboard owner
+   *   on the main surface (never a leased/paused workspace screen);
+   * - strict prompt mode with a strictly-empty draft (whitespace is text), no
+   *   staged image, no in-flight paste, no autocomplete;
+   * - no blocking/optional/modal/workspace/leader owner above the editor.
+   */
+  private editorWorkspaceShortcutEligible(): boolean {
+    if (this.disposed) return false
+    const control = this.editorWorkspaceEntry
+    if (control === undefined || !control.available()) return false
+    if (this.seatEditor().id !== 'host') return false
+    if (!this.ownsPhysicalKeyboard(this.editor)) return false
+    if (this.activeScreen !== (this.fullscreen ?? this.tui)) return false
+    if (this.seatInputMode() !== 'prompt') return false
+    if (this.editor.getText() !== '') return false
+    if (this.events.isImageDraft?.() === true) return false
+    if (this.editor.isPasteCapturePending()) return false
+    if (this.editor.isShowingAutocomplete()) return false
+    if (this.activeQuestions !== undefined) return false
+    if (this.approvals.hasPending()) return false
+    if (this.activeSaveLocation !== undefined) return false
+    if (this.optionalTenantOwnsSeat()) return false
+    if (this.overlayBroker.hasFocusedOverlay()) return false
+    if (this.jobWorkspace !== undefined) return false
+    if (this.workspaceLease !== undefined) return false
+    if (this.taskQuick.focused) return false
+    if (this.viewerMode !== undefined) return false
+    if (this.searchOverlay !== undefined) return false
+    if (this.keybindings.leaderMachine()?.pending === true) return false
+    return true
+  }
+
+  /**
+   * M5-U-E: the ONE Host Editor `←←` admission and transient first-Press
+   * latch. Called ONLY after the whole existing owner/keymap/Advanced/
+   * InputRouter ladder returned the unclaimed Host Editor route.
+   *
+   * The FIRST eligible press arms the latch and returns false — the Left goes
+   * to the fork Editor exactly as before (an empty draft's cursor move). The
+   * SECOND eligible press within {@link LEFT_WORKSPACE_WINDOW_MS} of the
+   * monotonic first-press clock, with the same editor edit epoch, the same
+   * installed control and the captured Session scope still current, clears the
+   * latch FIRST, invokes the registered `/sessions` body with the All initial
+   * scope and consumes the key. Any other combination is a fresh first press
+   * (an expired latch is simply overwritten).
+   */
+  private maybeOpenWorkspaceFromLeft(
+    data: string,
+    allowed: boolean,
+    gestureExamined: { examined: boolean },
+  ): boolean {
+    // Reaching this stage means the plain Left WAS the unclaimed Host Editor
+    // route — whether it arms, opens, or declines for a live-owner reason.
+    gestureExamined.examined = true
+    const control = this.editorWorkspaceEntry
+    if (!allowed || control === undefined || !control.available()
+      || !this.editorWorkspaceShortcutEligible() || !this.isPlainLeftPress(data)) {
+      this.clearLeftWorkspaceArm()
+      return false
+    }
+    const now = performance.now()
+    const armed = this.leftWorkspaceArm
+    if (armed !== undefined
+      && armed.control === control
+      && now - armed.at <= TuiApp.LEFT_WORKSPACE_WINDOW_MS
+      && this.editorEditEpoch === armed.editEpoch
+      && armed.current()) {
+      // Commit the cleared latch BEFORE the open callback: the command leases
+      // the fullscreen screen synchronously, and any re-entrant input must
+      // never read this same arm as a third press.
+      this.leftWorkspaceArm = undefined
+      try {
+        control.openAll()
+      } catch (error) {
+        // The command's own sink owns its async outcomes; a SYNCHRONOUS
+        // refusal (lease, moment-in-time registration) is reported once and
+        // never retried into an implicit second Browser.
+        this.notify(`Could not open sessions: ${safeErrorMessage(error)}`, 'error')
+      }
+      return true
+    }
+    this.leftWorkspaceArm = {
+      at: now,
+      editEpoch: this.editorEditEpoch,
+      control,
+      current: control.captureIsCurrent(),
+    }
+    return false
+  }
+
   /** Admission facts that do not depend on Footer/Quick geometry. Kept
    *  separate so the geometry probe can render the Footer candidate with its
    *  hint enabled without calling back into this predicate. */
@@ -17644,6 +20739,11 @@ export class TuiApp {
    * the raw text. The single decode point for every host restore path.
    */
   private setSeatSerializedInput(text: string): void {
+    // A programmatic whole-document replacement (session restore, viewer
+    // transfer, forced clear) is NOT the original paste: retire every lease
+    // before the text changes, even when the same path bytes reappear.
+    this.pasteRanges.retireAll()
+    this.pasteEditAnchor = undefined
     this.invalidateDraftPreviewCaches()
     const seat = this.seatEditor()
     if (seat.id === 'host') {
@@ -17651,6 +20751,7 @@ export class TuiApp {
     } else {
       seat.setText(text)
     }
+    this.pasteRanges.reset(this.seatEditor().getText())
   }
 
   /** After an accepted submission the editor returns to the prompt mode
@@ -17819,7 +20920,7 @@ export class TuiApp {
     // The temporary search reveal wins over a stale explicit override while it
     // is GRANTED (a new navigation re-opens the card); an explicit collapse
     // revokes the grant instead of writing user state.
-    if (!ignoreSearch && this.searchForcesMessageExpanded(message)) return true
+    if (!ignoreSearch && this.forcesMessageExpandedTemporarily(message)) return true
     const override = this.expandedOverride.get(message)
     if (override !== undefined) return override
     return this.thinkingExpanded
@@ -17869,7 +20970,7 @@ export class TuiApp {
       // Neither an operable Ctrl+O owner NOR the browser command exists: the
       // tail FAILS OPEN rather than hiding files behind a dead entry.
       if (!masterOwned && !commandOwned) return true
-      if (!ignoreSearch && this.searchForcesMessageExpanded(message)) return true
+      if (!ignoreSearch && this.forcesMessageExpandedTemporarily(message)) return true
       // A per-card override is a MASTER-owned durable choice: on a surface
       // whose Ctrl+O owns something else it has no operator, so it must never
       // silently expand the tail there (that leaves a permanent expansion with
@@ -17905,7 +21006,7 @@ export class TuiApp {
       // The temporary search reveal wins over a stale explicit override while
       // it is GRANTED (a new navigation re-opens the card); an explicit
       // collapse revokes the grant instead of writing user state.
-      if (!ignoreSearch && this.searchForcesMessageExpanded(message)) return true
+      if (!ignoreSearch && this.forcesMessageExpandedTemporarily(message)) return true
       const override = this.expandedOverride.get(message)
       if (override !== undefined) return override
       if (this.fullscreen !== undefined && isFocusDisplayPreset(this.displayState.preset)) return false
@@ -17920,7 +21021,7 @@ export class TuiApp {
     if ('turn' in message && this.openWorkRunMembers.has(message)) {
       if (this.fullscreen !== undefined) {
         return this.expandedOverride.get(message) === true
-          || (!ignoreSearch && this.searchForcesMessageExpanded(message))
+          || (!ignoreSearch && this.forcesMessageExpandedTemporarily(message))
       }
       return true
     }
@@ -17929,7 +21030,7 @@ export class TuiApp {
         // Fullscreen: explicit secondary disclosure only (plus the temporary
         // search reveal, which never writes the user override).
         return this.expandedOverride.get(message) === true
-          || (!ignoreSearch && this.searchForcesMessageExpanded(message))
+          || (!ignoreSearch && this.forcesMessageExpandedTemporarily(message))
       }
       // Regular: no mouse, so no compact secondary affordance — ANY
       // expanded Focus root (Ctrl+O-derived OR manually revealed /
@@ -17956,11 +21057,11 @@ export class TuiApp {
       // reveals it.
       if (this.fullscreen !== undefined && isFocusDisplayPreset(this.displayState.preset)) {
         return this.expandedOverride.get(message) === true
-          || (!ignoreSearch && this.searchForcesMessageExpanded(message))
+          || (!ignoreSearch && this.forcesMessageExpandedTemporarily(message))
       }
       return this.transcriptDetailExpanded
         || this.expandedOverride.get(message) === true
-        || (!ignoreSearch && this.searchForcesMessageExpanded(message))
+        || (!ignoreSearch && this.forcesMessageExpandedTemporarily(message))
     }
     // A COMMAND owns its own standalone disclosure, independent of the
     // Focus root (post-PR166 plan §11): outside fullscreen Focus the
@@ -17972,16 +21073,16 @@ export class TuiApp {
     if (message.kind === 'command') {
       if (this.fullscreen !== undefined && isFocusDisplayPreset(this.displayState.preset)) {
         return this.expandedOverride.get(message) === true
-          || (!ignoreSearch && this.searchForcesMessageExpanded(message))
+          || (!ignoreSearch && this.forcesMessageExpandedTemporarily(message))
       }
       return this.transcriptDetailExpanded
         || this.expandedOverride.get(message) === true
-        || (!ignoreSearch && this.searchForcesMessageExpanded(message))
+        || (!ignoreSearch && this.forcesMessageExpandedTemporarily(message))
     }
     return (message.kind === 'system' || message.kind === 'tool' || message.kind === 'compaction')
       && (message.turn >= boundary
         || this.expandedOverride.get(message) === true
-        || (!ignoreSearch && this.searchForcesMessageExpanded(message)))
+        || (!ignoreSearch && this.forcesMessageExpandedTemporarily(message)))
   }
 
   /**
@@ -18048,7 +21149,7 @@ export class TuiApp {
     // contract — no mouse, so a capped diff would be unreadable); fullscreen
     // keeps the per-card override semantics.
     const fullReveal = this.expandedOverride.get(message) === true
-      || this.searchForcesMessageExpanded(message)
+      || this.forcesMessageExpandedTemporarily(message)
       || !this.messageFoldDisclosureAvailable()
       || this.surfacedInteractionFailsOpen(message)
       || (this.fullscreen === undefined && (insideFocusSecondary || insideOpenWorkRun))
@@ -18814,8 +21915,12 @@ export class TuiApp {
       // re-renders it at the new width, so tables reflow instead of
       // re-wrapping a frozen render (the 5a76526 regression).
       const bullet = color.primary(iconPrefix('assistant-bullet', this.iconStyle))
+      // The card is the SAME bulleted live Markdown; the subclass only makes
+      // that Markdown's own source-cell proof reachable for the search
+      // presentation (F2). Every other build (plugin, composite, visual,
+      // delivered/interrupted wrapper) is unchanged.
       const makeAssistantText = (text: string): Component =>
-        new BulletedComponent(new Markdown(sanitizeDisplayText(text), 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS), bullet)
+        new AssistantMarkdownComponent(new Markdown(sanitizeDisplayText(text), 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS), bullet)
       // ONLY the exact final Assistant row carries a sidecar (the runtime
       // derives it from the complete Direct Session log). Every other answer
       // keeps the original path byte for byte.
@@ -18860,9 +21965,10 @@ export class TuiApp {
       if (!expanded) {
         return new ThinkingCompactComponent(message, this.expandHint(expandHint), this.iconStyle)
       }
-      const head = color.textDim(`${iconLead('thinking', this.iconStyle)}Thinking`)
-      const body = message.text === '' ? '' : sanitizeDisplayText(message.text).split('\n').map(line => `  ${line}`).join('\n')
-      return new Text([head, color.textDimItalic(body)].filter(line => line !== '').join('\n'), 0, 0)
+      return expandedThinkingTextComponent(
+        message.text === '' ? undefined : sanitizeDisplayText(message.text),
+        this.iconStyle,
+      )
     }
     if (message.kind === 'system') {
       // Form-aware surfaced Context: a known notice/relay/recall form owns a
@@ -19206,7 +22312,7 @@ export class TuiApp {
     const singleLineHead = statsPart === '' || statsBudget === 0
       ? headWithoutStats
       : `${headWithoutStats}${truncateToWidth(statsPart, statsBudget, '…')}`
-    const expandedHead = message.name === 'edit' ? singleLineHead : head
+    const expandedHead = message.name === 'edit' || isLocalShellCard(message) ? singleLineHead : head
     // LOCAL `!`/`!!` shell cards read the master expand switch (plan §5.3),
     // never the unbounded turn marker: collapsed by default so a long log
     // cannot fill the TUI, expanded only while the expand switch is on.
@@ -19223,6 +22329,15 @@ export class TuiApp {
       // disclosure) or any REGULAR Focus expanded root — a capped diff in
       // regular mode would have no mouse affordance to open it.
       this.renderToolBody(card, message, fullReveal, editResultView, editDiffs)
+      if (localShell) {
+        const submission = this.localShellSubmissionOf(message)
+        if (submission !== undefined) {
+          const headline = submission.kind === 'uncertain'
+            ? 'Session submission uncertain — do not retry automatically'
+            : 'Session submission not written'
+          card.addChild(new Text(color.textDim(`${headline}\n${sanitizeDisplayText(submission.reason)}`), 0, 0))
+        }
+      }
     } else {
       if (action !== undefined) {
         // Action cards deliberately keep the stable header separate from the
@@ -19245,12 +22360,11 @@ export class TuiApp {
       // expanding), then the result preview. Read cards keep the envelope
       // summary (`— N lines`), never a dump of the raw XML. Every row
       // truncates to the terminal width, so a folded block never wraps.
-      // LOCAL `!`/`!!` shell cards get their OWN folded layout (plan §5.1):
-      // the command row plus the newest 5 (running) / 20 visual (settled)
-      // rows of output with a hidden-count marker — a long log previews
-      // instead of filling the TUI.
+      // LOCAL `!`/`!!` shell cards get their OWN folded layout: the header,
+      // the single command row and one settled outcome row. The retained
+      // bounded output is reachable through the existing card expansion.
       if (localShell) {
-        this.renderLocalShellFolded(card, message, head, width)
+        this.renderLocalShellFolded(card, message, singleLineHead, width)
         return card
       }
       const rows: string[] = []
@@ -19283,7 +22397,7 @@ export class TuiApp {
         resultPreview = imageFoldedPreview(message.result)
       } else if (isVisualToolName(message.name)) {
         // The three visual tools carry machine blocks (the projected
-        // `visual-ref-v1:` line, the chart/SVG fact and present_visual's
+        // `visual-ref-v2:` line, the chart/SVG fact and present_visual's
         // `visual-published-v1:` receipt) beside their human text. The folded
         // preview reads the SAME source-aware projection as the expanded body,
         // so no machine line ever appears in one row of the folded card.
@@ -19454,7 +22568,7 @@ export class TuiApp {
     // bounded preview while the root stays collapsed.
     const bodyExpanded = this.fullscreen === undefined
       ? rootExpanded
-      : this.subCallExpanded.has(child.subCallId ?? '') || this.searchForcesSubCallExpanded(child.subCallId ?? '')
+      : this.subCallExpanded.has(child.subCallId ?? '') || this.forcesSubCallExpandedTemporarily(child.subCallId ?? '')
     const disclosure = bodyExpanded ? '▼' : '▶'
     const icon = iconPrefix(toolIconSemantic(child.name), this.iconStyle)
     const head = color.textDim(`${disclosure} ${icon}${subTitle}${subSummary === '' ? '' : ` ${subSummary}`}`)
@@ -19487,22 +22601,52 @@ export class TuiApp {
         card.addChild(new Text(truncateToWidth(`${pad}  ${this.shellPrompt(child.name)}${color.textDim(sanitizedPhysicalLine(command))}`, width, '…'), 0, 0))
         rows += 1
       }
+      // A sub-call with a PRESENTER generic body (the official plan-review
+      // call among them) shows that content exactly like the top-level card
+      // would: the presenter is the ONE card-presentation authority on both
+      // levels, so a running exit_plan_mode child is readable before it
+      // settles (the plan body lives in the call arguments, not the result).
+      const callView = isVisualToolName(child.name) ? undefined : this.present?.call(child.name, child.args)
+      if (callView !== undefined && callView.card === 'generic' && (callView.content?.length ?? 0) > 0) {
+        const contentStart = row + rows
+        let contentRows = 0
+        // The body WRAPS at the nested content width (the top-level generic
+        // card's `Text` does the same): a long plan paragraph must never lose
+        // its tail to a one-line truncation — the reading step has to reach the
+        // complete plan, including its last words.
+        const contentWidth = Math.max(1, width - visibleWidth(pad) - 2)
+        for (const block of callView.content ?? []) {
+          const body = block.type === 'text' ? block.text : this.blockDisplayText(block)
+          for (const line of sanitizeDisplayText(body).split('\n')) {
+            for (const wrappedLine of wrapTextWithAnsi(line, contentWidth)) {
+              card.addChild(new Text(`${pad}  ${color.textDim(wrappedLine)}`, 0, 0))
+              contentRows += 1
+            }
+          }
+        }
+        if (contentRows > 0) {
+          // The presenter body is a projection of the call arguments; anchor
+          // it as the child's args region (never enumerated — the header
+          // summary already owns the enumerable args cells).
+          regions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'subcall-field', subCallIds: path, field: 'args' }), anchorRow: contentStart, rowStart: contentStart, rowEnd: contentStart + contentRows, enumerable: false })
+          rows += contentRows
+        }
+      }
       if (isVisualToolName(child.name)) {
         const resultStart = row + rows
         const rendered = this.renderVisualChildBody(card, child, width, indent, bodyExpanded)
         regions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'subcall-field', subCallIds: path, field: 'result' }), anchorRow: resultStart, rowStart: resultStart, rowEnd: resultStart + rendered, enumerable: false })
         rows += rendered
-      } else if (child.result !== '') {
+      } else if (toolRowProjectsImages(child) || child.result !== '') {
         const resultStart = row + rows
-        // A captured terminal sub-call stdout keeps whitelisted SGR; every
-        // other external result is plain. The projected line count is the
-        // region height as well, so the display and the search geometry agree.
-        const resultLines = TERMINAL_RESULT_TOOLS.has(child.name)
-          ? sanitizeDisplayLog(child.result).split('\n')
-          : sanitizeDisplayText(child.result).split('\n')
+        const resultLines = subCallResultLines(child)
         // Result lines are truncated to the width: a dropped match would shift
         // every later raw ordinal. Anchor the body, never enumerate.
         regions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'subcall-field', subCallIds: path, field: 'result' }), anchorRow: resultStart, rowStart: resultStart, rowEnd: resultStart + resultLines.length, enumerable: false })
+        // The projection already sanitized every line: terminal stdout keeps the
+        // whitelisted SGR (`sanitizeDisplayLog`), plain text and image identity
+        // are escape-free. Re-projecting here with `sanitizedPhysicalLine` would
+        // strip that SGR and change the established terminal-output contract.
         for (const line of resultLines) {
           card.addChild(new Text(truncateToWidth(`${pad}  ${color.textDim(line)}`, width, '…'), 0, 0))
           rows += 1
@@ -19525,18 +22669,24 @@ export class TuiApp {
   /** Toggle one PTC sub-call body's disclosure (mouse click on its header
    * row). The state is keyed by the durable subCallId. */
   private toggleSubCallExpanded(subCallId: string): void {
-    // Capture the search force BEFORE mutating: a sub-call can be open both
-    // because the user expanded it earlier AND because the search target's
-    // path covers it. An explicit collapse must suppress the search force in
-    // that case too, or the body reopens immediately.
-    const searchForced = this.searchForcesSubCallExpanded(subCallId)
+    // Capture BOTH temporary forces BEFORE mutating: a sub-call can be open
+    // because the user expanded it earlier, the search target's path covers
+    // it, and/or the plan inspection opened it. Each request owns its own
+    // suppression record: an explicit collapse suppresses the search request
+    // for that child and revokes the plan lease (the lease never keeps forcing
+    // a container the user just collapsed), never mixing the two states.
+    const planForced = this.planInspection?.subCallId === subCallId
+    const searchForced = this.searchForcesSubCall(subCallId)
     if (this.subCallExpanded.has(subCallId)) {
       this.subCallExpanded.delete(subCallId)
       if (searchForced) this.searchSuppressedSubCalls.add(subCallId)
+      if (planForced) this.revokePlanInspectionLease()
+    } else if (planForced) {
+      if (searchForced) this.searchSuppressedSubCalls.add(subCallId)
+      this.revokePlanInspectionLease()
     } else if (searchForced) {
-      // The body is open only because of the search reveal: an explicit click
-      // collapses just that sub-call until the next navigation (the rest of
-      // the reveal path stays).
+      // The body is open only because of the search navigation: an explicit
+      // click collapses just that sub-call for the rest of that search.
       this.searchSuppressedSubCalls.add(subCallId)
     } else {
       this.subCallExpanded.add(subCallId)
@@ -19646,11 +22796,11 @@ export class TuiApp {
   }
 
   /**
-   * The folded (collapsed) layout of a LOCAL `!`/`!!` shell card (plan
-   * §5.1): the card head, the `$ command` row, the newest preview rows
-   * (5 source lines while running, up to 20 visual rows once settled),
-   * and the hidden-count marker when content was cut. The capture layer
-   * (client/shell/output-capture caps) is untouched — this is display policy only.
+   * The folded (collapsed) layout of a LOCAL `!`/`!!` shell card: at most
+   * three physical rows — the card head, the `$ command` row, and (settled
+   * only) one authoritative outcome row. A running card never paints a fake
+   * live output; the retained bounded streams stay in the expanded body.
+   * The capture layer is untouched — this is display policy only.
    * @param card - the card container to fill.
    * @param message - the local shell tool message (name 'shell', unbounded
    *   turn — see {@link isLocalShellCard}).
@@ -19665,21 +22815,67 @@ export class TuiApp {
     const running = message.status === 'running'
     const indent = '  '
     const contentWidth = Math.max(1, width - visibleWidth(indent) - 2)
-    const budget = running ? RUNNING_PREVIEW_LINES : SETTLED_PREVIEW_VISUAL_ROWS
-    const mode = running ? 'lines' : 'visual'
-    const preview = localShellPreview(sanitizeDisplayLog(message.result), contentWidth, budget, mode)
     const rows = [truncateToWidth(head, width, '…')]
     // The command row (kimi ShellExecution layout): the local shell card's
     // `args` IS the raw command string (never JSON).
     const prompt = color.shellMode('$ ')
     rows.push(`${indent}${prompt}${truncateToWidth(color.textDim(sanitizedPhysicalLine(message.args)), contentWidth, '…')}`)
-    for (const line of preview.rows) {
-      rows.push(`${indent}${truncateToWidth(color.textDim(line), contentWidth, '…')}`)
+    if (running) {
+      card.addChild(new Text(rows.join('\n'), 0, 0))
+      return
     }
-    if (preview.hidden > 0) {
-      rows.push(color.textDim(`${indent}${localShellHiddenMarker(preview.hidden, running, preview.partial, this.expandHint('fold'))}`))
+    const body = sanitizeDisplayLog(message.result)
+    const summary = this.localShellOutcomeSummary(body, message.status)
+    const submission = this.localShellSubmissionOf(message)
+    const fullMarker = submission === undefined
+      ? ''
+      : submission.kind === 'uncertain' ? 'submission uncertain' : 'not submitted'
+    const shortMarker = submission === undefined
+      ? ''
+      : submission.kind === 'uncertain' ? 'uncertain' : 'not sent'
+    const marker = fullMarker !== '' && visibleWidth(fullMarker) + 3 < contentWidth ? fullMarker : shortMarker
+    const markerText = marker === '' ? '' : ` · ${marker}`
+    const markerWidth = visibleWidth(markerText)
+    const hint = this.localShellExpandHint()
+    const wantsHint = hint !== '' && summary !== '' && (this.localShellHasHiddenBody(body, summary) || submission !== undefined)
+    const suffixText = wantsHint ? ` (${hint} to expand)` : ''
+    const suffixWidth = suffixText === '' ? 0 : visibleWidth(suffixText)
+    // The Host outcome, the persistent submission marker and the hint share
+    // ONE physical row budget. The marker is a safety fact and never yields;
+    // the hint yields first, and the summary gets what remains.
+    const showHint = suffixText !== '' && markerWidth + suffixWidth + 8 <= contentWidth
+    const summaryBudget = Math.max(1, contentWidth - markerWidth - (showHint ? suffixWidth : 0))
+    const suffix = showHint ? color.textDim(suffixText) : ''
+    if (summary !== '' || markerText !== '') {
+      rows.push(`${indent}${truncateToWidth(color.textDim(summary), summaryBudget, '…')}${markerText === '' ? '' : color.textDim(markerText)}${suffix}`)
     }
     card.addChild(new Text(rows.join('\n'), 0, 0))
+  }
+
+  /** The ONE settled fact the folded shell card paints: an authoritative
+   * terminal marker when present, otherwise the first diagnostic line. */
+  private localShellOutcomeSummary(body: string, status: 'running' | 'ok' | 'error'): string {
+    const lines = body.split('\n').map(line => line.trim()).filter(line => line !== '')
+    const marker = [...lines].reverse().find(line => /^\[(?:exit \d+|signal [A-Z0-9_]+|timed out)\]$/u.test(line)
+      || line === 'sandbox denied'
+      || line === 'stdout truncated'
+      || line === 'stderr truncated')
+    if (marker !== undefined) return marker
+    if (status === 'error') return lines[0] ?? ''
+    return lines.at(-1) ?? ''
+  }
+
+  /** Whether the expanded body carries more than the single summary fact. */
+  private localShellHasHiddenBody(body: string, summary: string): boolean {
+    const meaningful = body.split('\n').map(line => line.trim()).filter(line => line !== '')
+    return meaningful.length > 1 || meaningful.some(line => line !== summary)
+  }
+
+  /** The shell card's operable expand verb for the CURRENT surface; empty
+   * when no owner can really open it (fail open, no dead hint). */
+  private localShellExpandHint(): string {
+    if (this.fullscreen !== undefined) return this.expandHint('click')
+    return this.keybindings.keyHint('app.transcript.toggleExpand') === '' ? '' : this.expandHint('fold')
   }
 
   private toolResultView(
@@ -19715,7 +22911,8 @@ export class TuiApp {
     const icon = iconPrefix('workflow', this.iconStyle)
     const disclosure = runOpen ? '▼' : '▶'
     const runName = sanitizedPhysicalLine(message.name)
-    const head = `${color.textDim(`${disclosure} ${icon}Workflow ${runName}`)} ${workflowStatusPill(message.status)}`
+    const statusPill = workflowStatusPill(message.status)
+    const head = `${color.textDim(`${disclosure} ${icon}Workflow ${runName}`)} ${statusPill}`
     const rows: string[] = []
     const hits: Array<{ top: number; height: number; hit: WorkflowHit }> = []
     const regions: SearchSourceRegion[] = []
@@ -19728,8 +22925,8 @@ export class TuiApp {
       const statusStart = labelEnd + visibleWidth(' — ')
       return { labelStart, labelEnd, statusStart, statusEnd: statusStart + visibleWidth(status) }
     }
-    const pushFieldRegion = (sourceKey: string, row: number, startCol: number, endCol: number): void => {
-      if (endCol > startCol) regions.push({ sourceKey, anchorRow: row, rowStart: row, rowEnd: row + 1, columns: { startCol, endCol } })
+    const pushFieldRegion = (sourceKey: string, row: number, startCol: number, endCol: number, sourceText: string): void => {
+      if (endCol > startCol) regions.push({ sourceKey, anchorRow: row, rowStart: row, rowEnd: row + 1, columns: { startCol, endCol }, sourceText })
     }
     rows.push(truncateToWidth(head, width, '…'))
     hits.push({ top: 0, height: 1, hit: { kind: 'run', runId } })
@@ -19742,10 +22939,10 @@ export class TuiApp {
     const runNameStart = runKindEnd + 1
     const runNameEnd = runNameStart + visibleWidth(runName)
     const runStatusStart = runNameEnd + 1
-    const runStatusEnd = runStatusStart + visibleWidth(workflowStatusPill(message.status))
-    pushFieldRegion('workflow-run.kind', 0, runKindStart, runKindEnd)
-    pushFieldRegion('workflow-run.name', 0, runNameStart, runNameEnd)
-    pushFieldRegion('workflow-run.status', 0, runStatusStart, runStatusEnd)
+    const runStatusEnd = runStatusStart + visibleWidth(statusPill)
+    pushFieldRegion('workflow-run.kind', 0, runKindStart, runKindEnd, 'workflow')
+    pushFieldRegion('workflow-run.name', 0, runNameStart, runNameEnd, message.name)
+    pushFieldRegion('workflow-run.status', 0, runStatusStart + 1, runStatusEnd - 1, message.status)
     // The aggregate summary renders in BOTH states (plan §5.6: a compact
     // completed run still shows `126 agents · completed` — the phases and
     // members stay hidden, the aggregate never does).
@@ -19768,7 +22965,7 @@ export class TuiApp {
         hits.push({ top: rows.length - 1, height: 1, hit: { kind: 'phase', runId, phaseKey: phase.key } })
         const phasePrefix = `  ${phaseDisclosure} `
         const phaseSpan = fieldSpans(phasePrefix, phaseLabel, undefined)
-        pushFieldRegion(`workflow-phase.${phase.key}`, rows.length - 1, phaseSpan.labelStart, phaseSpan.labelEnd)
+        pushFieldRegion(`workflow-phase.${phase.key}`, rows.length - 1, phaseSpan.labelStart, phaseSpan.labelEnd, workflowReadablePhase(phase.members[0]!.phase))
         if (!phaseOpen) continue
         if (phase.mode === 'inline') {
           // Small phase: every member in durable seq order. Only a RUNNING
@@ -19785,8 +22982,8 @@ export class TuiApp {
             ))
             const spans = fieldSpans(prefix, memberLabel, memberStatus)
             const memberBase = `workflow-member.${phase.key}.${member.seq}`
-            pushFieldRegion(`${memberBase}.label`, rows.length - 1, spans.labelStart, spans.labelEnd)
-            pushFieldRegion(`${memberBase}.status`, rows.length - 1, spans.statusStart, spans.statusEnd)
+            pushFieldRegion(`${memberBase}.label`, rows.length - 1, spans.labelStart, spans.labelEnd, member.label)
+            pushFieldRegion(`${memberBase}.status`, rows.length - 1, spans.statusStart, spans.statusEnd, member.status)
             if (member.status === 'running') {
               hits.push({ top: rows.length - 1, height: 1, hit: { kind: 'member', runId, seq: member.seq, childId: String(member.childId) } })
             }
@@ -19806,7 +23003,7 @@ export class TuiApp {
             // context row is deliberately suppressed for previewed members).
             // Its status text is not rendered, so only the label region exists.
             const spans = fieldSpans(prefix, memberLabel, undefined)
-            pushFieldRegion(`workflow-member.${phase.key}.${member.seq}.label`, rows.length - 1, spans.labelStart, spans.labelEnd)
+            pushFieldRegion(`workflow-member.${phase.key}.${member.seq}.label`, rows.length - 1, spans.labelStart, spans.labelEnd, member.label)
           }
           if (phase.hiddenAnomalyCount > 0) {
             rows.push(truncateToWidth(color.textDim(`    … ${phase.hiddenAnomalyCount} more abnormal`), width, '…'))
@@ -19832,8 +23029,8 @@ export class TuiApp {
             ))
             const spans = fieldSpans(prefix, contextLabel, contextStatus)
             const memberBase = `workflow-member.${phase.key}.${context.seq}`
-            pushFieldRegion(`${memberBase}.label`, rows.length - 1, spans.labelStart, spans.labelEnd)
-            pushFieldRegion(`${memberBase}.status`, rows.length - 1, spans.statusStart, spans.statusEnd)
+            pushFieldRegion(`${memberBase}.label`, rows.length - 1, spans.labelStart, spans.labelEnd, context.label)
+            pushFieldRegion(`${memberBase}.status`, rows.length - 1, spans.statusStart, spans.statusEnd, context.status)
           }
         }
       }
@@ -20137,6 +23334,22 @@ export class TuiApp {
       // source), so the expanded card keeps the command row in every wiring.
       this.addTerminalCommandRow(card, this.terminalCommand(message.name, message.args), this.shellPrompt(message.name))
       return
+    }
+    // The reviewed PLAN BODY lives in the CALL arguments for the WHOLE life of
+    // an official exit_plan_mode card: the settled result is the review
+    // OUTCOME, never a replacement for the plan. Render the call view body
+    // here as well (then continue to the ordinary settled result), so the
+    // Transcript stays the ONE long-term reading entry after approval,
+    // dismissal, a failed delivery and a replayed Session — Direct
+    // presentCall and the Remote Client presenter alike.
+    if (message.name === 'exit_plan_mode') {
+      const callView = this.present?.call(message.name, message.args)
+      if (callView !== undefined && callView.card === 'generic' && (callView.content?.length ?? 0) > 0) {
+        for (const block of callView.content ?? []) {
+          if (block.type === 'text') card.addChild(new Text(color.textDim(sanitizeDisplayText(block.text)), 0, 0))
+          else card.addChild(new Text(color.textDim(sanitizeDisplayText(this.blockDisplayText(block))), 0, 0))
+        }
+      }
     }
     // A settled ask_user_question renders its answered-count summary, never
     // the raw `{"answers":[…]}` JSON the tool's render text carries (Web
@@ -20703,6 +23916,10 @@ export class TuiApp {
         // components. Rebuild from their raw state before chrome measurement
         // so fullscreen hit-testing and footer budgets see the new geometry.
         this.rebuildQueuePane(width)
+        // The goal line bakes its width-aware truncation at setText time too
+        // (the dock row budget is one physical line); re-project it at the
+        // new width on the same geometry pass.
+        this.renderGoalLine()
       }
       if (widthChanged || heightChanged) {
         // The todo panel is width-baked AND height-sensitive: its compact cap
@@ -20743,8 +23960,8 @@ export class TuiApp {
       // widget-zone change must recompose the footer at the fresh surface
       // budget before the frame paints. A freshly shrunk viewport would
       // otherwise keep the old (taller) footer text and clip its own
-      // bottom rows — the appended Host instruction FIRST ("the
-      // instruction always survives" would break); a regular ->
+      // bottom rows (its last row included, where the Host instruction is
+      // painted); a regular ->
       // fullscreen switch at unchanged geometry would keep a budget
       // measured against chrome the fullscreen root doesn't mount. The
       // recompose runs AFTER the extension-host refresh below (widget
@@ -20890,6 +24107,9 @@ export class TuiApp {
   private setFocusSeat(seat: 'editor' | 'overlay' | 'editor-panel' | 'none'): void {
     if (this.focusSeat === seat) return
     this.focusSeat = seat
+    // M5-U-E: a seat transition is a real owner change between the two Left
+    // presses — the first-Press latch never survives it.
+    this.clearLeftWorkspaceArm()
     this.projectSurface({ focusedSeat: seat })
     this.renderFooter()
     if (this.focusSeatPublishScheduled || this.disposed) return
@@ -21185,6 +24405,10 @@ export class TuiApp {
     // paint the transcript rarely, so a render-driven freeze could miss the
     // whole wait and over-count it (plan §5.3).
     this.observeFocusTiming(activity.phase)
+    // H1: the activity commit above is the authoritative fact the logical
+    // status is derived from, so the read-only external observer runs after it
+    // and before the terminal projection (which re-reads the newest inputs).
+    this.publishProgramStatus()
     // The activity phase is an input of BOTH projections: a wait that opens or
     // settles while the main Agent keeps running moves the Tern pane state AND
     // the OSC 7501 blocked record immediately. Convergence reads the phase from
@@ -21688,56 +24912,33 @@ export class TuiApp {
     this.syncExtensionState()
   }
 
-  /** Rebuild the queue pane text from the current inbox rows and width. */
+  /** Rebuild the Dock Queue pane from the current pending presentation. The
+   * component builds its own rows/hit map from the LAST paint width, so the
+   * pinned chrome height and the pointer identity can never be baked into a
+   * stale Text string. */
   private rebuildQueuePane(width: number): void {
+    void width
     const items = this.queueItems
+    const model: DockQueueModel = {
+      rows: items.length === 0
+        ? []
+        : items.map(item => ({
+            ...(item.local === true ? {} : { id: item.id }),
+            text: item.text,
+            local: item.local === true,
+          })),
+      running: this.queueRunning,
+      steerKey: this.keybindings.keyHint('app.input.steer'),
+      recallKey: this.keybindings.keyHint('app.input.dequeue'),
+      manageKey: this.keybindings.keyHint('app.queue.open'),
+      viewer: this.viewerMode !== undefined,
+    }
+    this.queuePane.setModel(model)
     if (items.length === 0) {
-      // An emptied pane must not leave its previously painted rows behind
-      // (fork trap): the empty Text renders no lines and the requested
-      // frame repaints the region.
-      this.queuePane.setText('')
-      return
+      // An emptied pane must not leave its previously painted rows behind: the
+      // model is empty and the requested frame repaints the region.
+      this.queuePane.setModel(model)
     }
-    const safeWidth = Math.max(1, Math.floor(width))
-    // Panel border rules indent one cell on each side so the boundary never
-    // reads as the editor's full-width border.
-    const lines = [color.border(` ${'─'.repeat(Math.max(0, safeWidth - 2))} `)]
-    for (const item of items) {
-      const text = sanitizeDisplayText(item.text).replace(/\s+/g, ' ').trim()
-      // A client-local echo has no authoritative queue item yet: advertise
-      // that it is still being admitted, never a plain authoritative row.
-      // The suffix is part of the row's width budget, so a narrow pane
-      // truncates the TEXT and keeps the status on the same line — never a
-      // detached wrapped row. On an ultra-narrow pane that cannot hold the
-      // marker + one text cell + the status, the status is dropped rather
-      // than wrapped.
-      const prefixWidth = visibleWidth('❯ ')
-      const fullSuffix = item.local === true ? ' sending…' : ''
-      const suffix = prefixWidth + visibleWidth(fullSuffix) + 1 <= safeWidth ? fullSuffix : ''
-      const available = Math.max(1, safeWidth - prefixWidth - visibleWidth(suffix))
-      const truncated = truncateToWidth(text, available, '…')
-      // Every row is a semantic queued occurrence; the same ❯ marker and
-      // steer/recall hints apply regardless of its backend origin.
-      lines.push(`${color.roleUser('❯')} ${truncated}${color.textDim(suffix)}`)
-    }
-    // The bulk steer-all/recall-all gestures address only AUTHORITATIVE queued
-    // occurrences; a client-local `sending…` row has no occurrence id yet. A
-    // pane holding ONLY local echoes must not advertise a no-op action (the
-    // `sending…` suffix already communicates the state). A MIXED pane keeps
-    // the hint but scopes it to the accepted rows, so `sending…` rows are
-    // never implied to participate.
-    const hasLocalRows = items.some(item => item.local === true)
-    if (items.some(item => item.local !== true)) {
-      const scope = hasLocalRows ? 'accepted' : 'all'
-      const steerHint = this.queueRunning
-        ? `${(this.keybindings.keyHint('app.input.steer') || 'the steer key').toLowerCase()} to steer ${scope}`
-        : 'waiting for the next prompt — send a message to continue'
-      const hint = this.viewerMode === undefined
-        ? `${steerHint} · ${(this.keybindings.keyHint('app.input.dequeue') || 'the recall key').toLowerCase()} to recall ${scope}`
-        : steerHint
-      lines.push(color.textDim(truncateToWidth(`  ${hint}`, Math.max(1, safeWidth - 2), '…')))
-    }
-    this.queuePane.setText(lines.join('\n'))
   }
 
   /** Rebuild the queue pane at the current terminal width and repaint. */
@@ -21758,6 +24959,10 @@ export class TuiApp {
    */
   setDraft(text: string): void {
     this.clearExitConfirmation()
+    // The ONE write admission (PR2/F1/F3): a held, disposed or stopped surface
+    // never accepts a programmatic draft write. The accepted settlement clears
+    // through its own private path.
+    if (!this.draftWriteAdmitted()) return
     this.invalidateDraftPreviewCaches()
     const target = this.viewerMode
     if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
@@ -21775,6 +24980,114 @@ export class TuiApp {
     this.setSeatSerializedInput(text)
     this.editorSeatHolder.notifyChanged()
     this.requestRender()
+  }
+
+  /**
+   * PR2: the live submission attempt freezing this composer, or undefined.
+   * Set by the application's `holdSubmission` and cleared by
+   * `settleSubmission` — the renderer never invents one. While present the
+   * editor document is read-only, a second submit is a no-op, and the ONLY
+   * draft removal is the accepted settlement (the fork's undo-retiring
+   * clear).
+   */
+  private submissionHold: { attemptId: string; text: string; remember: boolean } | undefined
+
+  /**
+   * PR2 — SubmissionComposerPort: freeze the composer for one attempt. The
+   * document stays exactly as submitted; ordinary editing, paste/IME,
+   * autocomplete and a repeated submit are consumed by the input ladder, and
+   * the fork's submit gesture is disabled so no path (including a mouse
+   * autocomplete submit) reaches `onMaySubmit`.
+   */
+  /** PR2/R5-1: the composer-port write probe — {@link draftWriteAdmitted}
+   *  minus the hold (a settlement's own flush runs AFTER releasing it). */
+  draftWriteAccepted(): boolean {
+    return !this.disposed && !this.surfaceStopped
+  }
+
+  holdSubmission(attemptId: string): void {
+    if (this.disposed || this.surfaceStopped || this.submissionHold !== undefined) return
+    const text = this.getDraft()
+    // The recall-eligibility fact belongs to the GESTURE time: at acceptance
+    // the staged attachments are already consumed, so re-asking
+    // `shouldRememberInput` then would wrongly accept a multimodal line.
+    const remember = text.trim() !== '' && this.events.shouldRememberInput?.(text) !== false
+    this.submissionHold = { attemptId, text, remember }
+    this.editor.disableSubmit = true
+    this.requestRender()
+  }
+
+  /**
+   * PR2 — SubmissionComposerPort: end one attempt's hold. Only `'accepted'`
+   * removes the committed draft (through the SAME undo-retiring clear a
+   * normal submit uses) and lands its recall occurrence; the refusal and
+   * unknown outcomes unlock the editor with the document intact.
+   */
+  settleSubmission(attemptId: string, result: 'accepted' | 'not-accepted' | 'unknown'): void {
+    // A disposed surface never settles again. A STOPPED surface (a real
+    // stop(), not the external editor's temporary suspension) still completes
+    // the LOGICAL settlement — the hold is released and the submit input
+    // re-enabled — because stop()/start() is a supported round trip on the
+    // SAME instance and a stranded hold would keep the restarted editor
+    // frozen forever. Only the PHYSICAL effects are withheld: a stopped
+    // screen is never cleared or repainted, so the pre-acceptance document
+    // stays as inert state exactly like the remote-teardown contract.
+    if (this.disposed) return
+    const hold = this.submissionHold
+    if (hold === undefined || hold.attemptId !== attemptId) return
+    this.submissionHold = undefined
+    this.editor.disableSubmit = false
+    // An external editor that is currently open belongs to a document whose
+    // ownership just changed: its write-back must be discarded (F1).
+    if (this.externalEditorInFlight) this.externalEditorStale = true
+    if (this.surfaceStopped) {
+      // RFL009: only the ACCEPTED commit is deferred to the restart (the
+      // recall/history row AND the clear, applied exactly once at start());
+      // a refusal keeps its retained draft as the live document across the
+      // round trip.
+      if (result === 'accepted') {
+        this.deferredAcceptedSettle = { text: hold.text, remember: hold.remember }
+      }
+      return
+    }
+    if (result === 'accepted') {
+      // The accepted occurrence is what the editor's ↑ recall records. Order:
+      // remember FIRST (the text is still available), then the clear.
+      if (hold.remember) {
+        this.editor.addToHistory(hold.text.trim())
+        this.historyRecall.rememberAccepted(hold.text)
+      }
+      this.clearSubmittedDraft()
+      this.resetEditorMode()
+    }
+    this.requestRender()
+  }
+
+  /** PR2: the composer document is frozen by a live submission attempt. */
+  private composerHeld(): boolean {
+    return this.submissionHold !== undefined
+  }
+
+  /**
+   * PR2 (F1/F3): the ONE admission every production writer of the composer
+   * document consults — the draft setters, the external editor's write-back,
+   * the fullscreen preview-removal sink and the media intake. A live
+   * submission attempt owns the document, and a disposed/stopped surface never
+   * mutates it again. The external editor's TEMPORARY presentation suspension
+   * is deliberately not part of this fence.
+   */
+  private draftWriteAdmitted(): boolean {
+    return !this.disposed && !this.surfaceStopped && !this.composerHeld()
+  }
+
+  /**
+   * PR2: the synchronous submit admission. Absent application wiring keeps
+   * the pre-PR2 (renderer-clears-first) behavior.
+   */
+  private admitComposerGesture(text: string, request: ComposerSubmitRequest | 'steer'): 'held' | 'legacy' | 'refused' {
+    const admit = this.events.beginComposerSubmission
+    if (admit === undefined) return 'legacy'
+    return admit(text, request)
   }
 
   /** The editor's current draft in its WIRE form (mode + body serialized
@@ -21814,6 +25127,18 @@ export class TuiApp {
     // Submission is an explicit intervening action even when the draft is
     // empty or a viewer guard rejects it.
     this.clearExitConfirmation()
+    // PR2: the synchronous admission runs BEFORE any clear. `'held'` proves
+    // the application already registered the attempt and started the
+    // delivery — the composer keeps its document (the application settles it
+    // on Host acceptance); `'refused'` consumes the gesture silently.
+    const admission = this.admitComposerGesture(this.getDraft(), request)
+    if (admission === 'held' || admission === 'refused') {
+      // A fresh submission gesture supersedes any transient notice (the same
+      // post-clear rule the legacy path applies a few lines below).
+      this.clearNotify()
+      this.requestRender()
+      return
+    }
     // P1-12: a finally-disposed surface never submits — a late plugin
     // callback (or a stale host dispatch) must not produce a real
     // session-side effect after teardown.
@@ -21830,6 +25155,9 @@ export class TuiApp {
     // placeholder expansion resolves it to real content blocks at
     // submission (plan §11.1).
     if (serialized.trim() === '' && this.events.isImageDraft?.() !== true) return
+    // A pasted image path still being attached must not be delivered as text:
+    // refuse BEFORE any clear/history/ack/writer and keep the live draft.
+    if (this.blocksPastedPathDelivery(serialized)) return
     this.clearNotify()
     if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
       // A plugin action inside an interactive viewer submits to the
@@ -21886,9 +25214,12 @@ export class TuiApp {
    *  seam when present; a Replacement Editor without it falls back to setText
    *  (which PUSHES undo). */
   private clearSubmittedDraft(): void {
+    this.pasteRanges.retireAll()
+    this.pasteEditAnchor = undefined
     const editor = this.seatEditor()
     if (editor.clearDraftAfterSubmit !== undefined) editor.clearDraftAfterSubmit()
     else editor.setText('')
+    this.pasteRanges.reset(this.seatEditor().getText())
     this.editorSeatHolder.notifyChanged()
   }
 
@@ -21947,10 +25278,21 @@ export class TuiApp {
   }
 
   /** Rebuild the goal line: `goal ● <objective>` while a goal is set, hidden
-   * otherwise (display-only — no verbs yet). */
+   * otherwise (display-only — no verbs yet). The domain keeps the objective
+   * whole; the ONE width-aware truncation happens here at the terminal sink,
+   * against the goal row's real cell budget (the full terminal width — the
+   * goal line is dock chrome, not transcript content, so no transcript
+   * gutter applies). */
   private renderGoalLine(): void {
     const goal = this.displayGoal()
-    this.goalLine.setText(goal === undefined || goal === '' ? '' : color.primary(sanitizedPhysicalLine(goal)))
+    if (goal === undefined || goal === '') {
+      this.goalLine.setText('')
+      this.requestRender()
+      return
+    }
+    const single = sanitizedPhysicalLine(goal)
+    const line = truncateToWidth(single, this.terminal.columns, '…')
+    this.goalLine.setText(color.primary(line))
     this.requestRender()
   }
 
@@ -22165,6 +25507,8 @@ export class TuiApp {
     // and (b) retire the Editor's undo snapshots when the bounded retention
     // budget evicts the image. The host Editor exposes both seams; a plugin
     // Replacement Editor exposes neither (preview stays display-only).
+    // PR2/F3: a held Composer never offers a draft mutation control.
+    if (!this.draftWriteAdmitted()) return false
     const seat = this.seatEditor()
     if (seat.retireDraftImageFromUndo === undefined || seat.replaceTextUndoable === undefined) return false
     const decision = this.draftPreviewRemovalDecision()
@@ -22220,6 +25564,11 @@ export class TuiApp {
    * ordinary attach/submit cleanup honors that leased draft.
    */
   private removeDraftPreviewOccurrence(hit: DraftPreviewRemoveHit): void {
+    // PR2/F3: the LAST authority of the preview `×` — a press armed BEFORE the
+    // hold must not delete from the document after it. The paint-side and
+    // press-side gates make the control non-operable; this check closes the
+    // stale-gesture window (press → hold → release).
+    if (!this.draftWriteAdmitted()) return
     if (this.viewerMode !== undefined) return
     if (this.activeQuestions !== undefined || this.approvals.isActive()) return
     const source = this.draftImagePreviewSource
@@ -22318,8 +25667,8 @@ export class TuiApp {
    * layouts). */
   private customFooterLayout: FooterLayoutV1 | undefined
   /** M5: the command surface's sanitized rows (undefined = the native
-   * composer surface). The command owns the Status Surface; the Host
-   * instruction surface still merges on top. */
+   * composer surface). The command owns the Status Surface; a transient
+   * Host instruction replaces its last visible row. */
   private commandRows: string[] | undefined
 
   /** Set the footer density preset and repaint. Switching the preset
@@ -22404,7 +25753,8 @@ export class TuiApp {
 
   /** M5: set the command surface's sanitized rows (undefined restores the
    * native composer surface). The rows are already sanitized + capped by
-   * the runner; the Host instruction still merges on top. */
+   * the runner; a transient Host instruction replaces the last visible
+   * row. */
   setFooterCommandRows(rows: string[] | undefined): void {
     this.commandRows = rows
     this.renderFooter()
@@ -22475,10 +25825,13 @@ export class TuiApp {
 
   /** Render the complete Footer surface for one task-browser context. Used
    *  both for the committed paint and the read-only `↓ view` candidate-height
-   *  preflight; the latter never mutates `this.footer`. */
-  private composeFooterText(width: number, taskBrowserAvailable: boolean): string {
-    // A pending leader sequence is an independent Host instruction, appended
-    // after the layout rows; it never replaces a Footer row.
+   *  preflight; the latter never mutates `this.footer`. The returned hits
+   *  are read-only presentation geometry — business availability is checked
+   *  again on release, never inferred from a painted badge. */
+  private composeFooterProjection(width: number, taskBrowserAvailable: boolean): FooterPaintProjection {
+    // A pending leader sequence is a transient Host instruction: it
+    // replaces the last existing layout row for its lifetime, so the
+    // Footer height never changes.
     const leader = this.keybindings.leaderMachine()
     const instruction = resolveFooterInstruction({
       exitConfirmKeyLabel: this.exitConfirmTrigger?.label,
@@ -22487,10 +25840,15 @@ export class TuiApp {
     })
     if (this.commandRows !== undefined) {
       // M5: the command surface owns the Status Surface; the Host
-      // instruction still merges on top and reserves its own budget.
-      return mergeCommandSurface(this.commandRows, instruction, width, this.footerPhysicalLineBudget())
+      // instruction replaces its last visible command row for the
+      // instruction's lifetime. Command rows never publish a first-party
+      // footer hit (even when their text mimics a badge).
+      return {
+        text: mergeCommandSurface(this.commandRows, instruction, width, this.footerPhysicalLineBudget()),
+        hits: [],
+      }
     }
-    return this.footerComposer.render({
+    return this.footerComposer.compose({
       snapshot: this.statusStore.snapshot(),
       layout: this.currentFooterLayout(),
       width,
@@ -22501,6 +25859,33 @@ export class TuiApp {
       instruction,
       physicalLineBudget: this.footerPhysicalLineBudget(),
     })
+  }
+
+  /** The Task Quick candidate-height preflight reads the TEXT only: it must
+   *  never install a projection or disturb the painted frame's hit map. */
+  private composeFooterText(width: number, taskBrowserAvailable: boolean): string {
+    return this.composeFooterProjection(width, taskBrowserAvailable).text
+  }
+
+  /** Commit the newly composed footer for the NEXT frame commit. The
+   *  revision advances only when the text, a hit, or the subject kind
+   *  actually changes, so an unrelated repaint does not invalidate a click
+   *  that began on the same painted footer. */
+  private commitFooterPendingProjection(projection: FooterPaintProjection): void {
+    const subjectKind: 'main' | 'subagent' = this.statusStore.snapshot().view.subject.kind === 'subagent'
+      ? 'subagent'
+      : 'main'
+    const key = `${subjectKind}\u0000${projection.text}\u0000${
+      projection.hits.map(hit => `${hit.id}:${hit.placement}:${hit.row}:${hit.startCol}:${hit.endCol}`).join('|')}`
+    if (key !== this.footerProjectionKey) {
+      this.footerProjectionKey = key
+      this.footerProjectionRevision += 1
+    }
+    this.footerPendingProjection = {
+      revision: this.footerProjectionRevision,
+      subjectKind,
+      projection,
+    }
   }
 
   /** Commit the current Footer composition and refresh the painted editor
@@ -22529,13 +25914,14 @@ export class TuiApp {
         ? renderedLayout?.physicalWidth === width ? renderedLayout.onLastVisualLine : false
         : undefined
     this.footerCompositionInProgress = true
-    let text: string
+    let projection: FooterPaintProjection
     try {
-      text = this.composeFooterText(width, this.taskBrowserAvailable(onLastVisualLine))
+      projection = this.composeFooterProjection(width, this.taskBrowserAvailable(onLastVisualLine))
     } finally {
       this.footerCompositionInProgress = false
     }
-    this.footer.setText(text)
+    this.footer.setText(projection.text)
+    this.commitFooterPendingProjection(projection)
     this.taskQuickPaintedBoundary = onLastVisualLine
     const latestLayout = this.quickHintCurrentEditorLayout
     const latestOwnerEligible = this.keybindings.keysFor('app.tasks.open').includes('down')
@@ -22573,8 +25959,8 @@ export class TuiApp {
    *   rows are measured — on fullscreen the widget zones are pinned rows
    *   above the footer and are measured here too (PR-D);
    * - the command surface consumes the same effective total through
-   *   mergeCommandSurface (instruction reserves first, trusted rows keep
-   *   the remaining slots in order).
+   *   mergeCommandSurface (its visible rows are capped first, then the
+   *   Host instruction replaces the last one — no extra row).
    *
    * Floored at 0: when the pinned chrome alone already fills the
    * viewport the granted budget is ZERO and the footer renders nothing
@@ -22917,125 +26303,31 @@ export class TuiApp {
       force?: boolean
     }) => Promise<{ items: import('@xmoon76/pi-tui').AutocompleteItem[]; prefix: string } | null>,
     scope: import('./runtime/host-file-port.ts').HostFileScope
-      | (() => import('./runtime/host-file-port.ts').HostFileScope) = { kind: 'workspace', cwd },
+      | (() => import('./runtime/host-file-port.ts').HostFileScope) = { kind: 'workspace', selectionRevision: 0 },
      localCwd: string | (() => string) = cwd,
     skillReferences: readonly import('./domain/catalog/skill.ts').HumanSkillSummary[] = [],
-    hostShellCompletion: boolean = true,
+    hostShellCompletion: import('./runtime/host-shell-completion-port.ts').HostShellCompletionPort | undefined = undefined,
   ): void {
-    const base = new MentionProvider(
-      [...commands],
+    // TSP I-C: the composition moved VERBATIM into the shared installed-provider
+    // factory so the TSP renderer composes the same completion authority from the
+    // same catalog install. This surface keeps only what is PiTui's own: the
+    // installed-row record and the LIVE host-editor input mode plus the inline
+    // attachment acceptance sink the base provider hands its acceptances to.
+    const { provider } = createInstalledAutocompleteProvider({
+      commands,
       cwd,
       fileReferences,
-      () => this.editor.getInputMode(),
+      extensionSuggest,
       scope,
-      undefined,
       localCwd,
       skillReferences,
       hostShellCompletion,
-    )
+      inputMode: () => this.editor.getInputMode(),
+      localFdPath: undefined,
+      inlineAttachmentAccept: acceptance => this.acceptInlineAttachment(acceptance),
+    })
     this.installedCommandCompletions = [...commands]
-    // The inline attachment acceptance rides THIS provider (the
-    // base one owns the strict snapshot; the delegating wrap only forwards
-    // applyCompletion, so either installation must install the same sink).
-    base.setInlineAttachmentAcceptSink(acceptance => this.acceptInlineAttachment(acceptance))
-    if (extensionSuggest === undefined) {
-      this.editor.setAutocompleteProvider(base)
-      return
-    }
-    // A delegating provider: the host's own completions run FIRST; the
-    // plugin chain (M5 AutocompleteRegistry) is consulted only when the
-    // host provider has nothing. applyCompletion always delegates to the
-    // host provider (the fork's completion semantics own the editor).
-    // HOST EXECUTION MODE (review round 23): the provider is attached to
-    // the HOST editor, and every forwarded key into it (the declined-key
-    // fallback) re-DECODES the visible plugin wire document into the host
-    // editor's mode first — so the host editor's mode is the
-    // authoritative completion mode. Reading the VISIBLE seat mode here
-    // would see a mode-less plugin and drop the shell semantics of a
-    // declined `!gi` Tab (no shell completion, no `!` wire prefix in the
-    // extension query). `seatInputMode()` stays for the genuine
-    // visible-seat consumers (the ↓ task-browser gate, the Ctrl+C clear,
-    // the footer badge).
-    const getMode = (): EditorInputMode => this.editor.getInputMode()
-    const delegated: import('@xmoon76/pi-tui').AutocompleteProvider = {
-      async getSuggestions(lines, cursorLine, cursorCol, options) {
-        // THIS delegated request's generation AND scope: minted/captured
-        // synchronously at entry (before ANY await), so both the host
-        // result and the extension's answer bind to THIS request — never to
-        // a newer one that started while the extension was in flight, and
-        // never to a session/workspace that switched mid-request.
-        const requestGeneration = base.mintRequestGeneration()
-        const requestScope = base.scopeAtRequestTime()
-        const requestMode = getMode()
-        const requestLocalCwd = base.localCwdAtRequestTime()
-        const host = await base.getSuggestionsForGeneration(requestGeneration, lines, cursorLine, cursorCol, options, requestMode, requestLocalCwd)
-        if (host !== null) return host
-        // Preserve the shell-mode natural-trigger suppression: a leading
-        // `/` on ANY line of a shell-mode document is a PATH, and the
-        // host provider deliberately stays quiet until Tab — the plugin
-        // chain must not flash its suggestions over it (that would
-        // reopen the dropdown mid-typing and double-apply on the next
-        // Tab). The wire query below still carries the prefix on line 0
-        // only.
-        const mode = requestMode
-        if (mode !== 'prompt' && options.force !== true
-          && (lines[cursorLine] ?? '').startsWith('/')) {
-          return null
-        }
-        // M5 Stable-compatibility adapter: the plugin chain's query is
-        // the WIRE document — the same lines the host exposed BEFORE the
-        // shell-editor-mode feature. A shell-mode body is re-prefixed
-        // (`git che` → `!git che`, cursor shifted), so a third-party
-        // plugin keeps parsing shell lines exactly as before and can
-        // still tell a shell line from plain prose; the query shape is
-        // unchanged (no new fields, no semantic drift).
-        const prefix = shellPrefixForMode(mode)
-        // The wire document carries the shell prefix on LINE 0 only: a
-        // body continuation line is ordinary text in the wire form too,
-        // and only the first-line cursor shifts by the prefix.
-        const wireLines = mode === 'prompt'
-          ? lines
-          : lines.map((line, index) => index === 0 ? prefix + line : line)
-        const result = await extensionSuggest({
-          lines: wireLines,
-          cursorLine,
-          cursorCol: cursorCol + (mode === 'prompt' || cursorLine > 0 ? 0 : prefix.length),
-          signal: options.signal,
-          force: options.force,
-        })
-        // The EXTENSION's suggestions bind the host's stale fence too:
-        // the base provider owns the apply-time document/cursor snapshot,
-        // and a list the extension produced must be computed against the
-        // SAME editor state + scope (plan §9.2 — a stale ext accept must
-        // never modify a later edit, and an old session's candidate must
-        // never be accepted under a switched session).
-        return base.captureRequestSnapshot(requestGeneration, requestScope, lines, cursorLine, cursorCol, result, requestMode, requestLocalCwd)
-      },
-      applyCompletion: (lines, cursorLine, cursorCol, item, prefix) => {
-        // A Stable plugin computes its prefix on the WIRE document it
-        // received (line 0 carries the synthetic `!` / `!!`), so its
-        // prefix may include it (`!ch` for the wire line `!ch`).
-        // Normalize back to BARE coordinates before the host apply — the
-        // base adapter adds its own virtual prefix and strips it exactly
-        // once; a doubled prefix would corrupt the result. The strip
-        // applies ONLY when the prefix starts at the WIRE line start
-        // (cursorCol + synthetic length − prefix length === 0): a
-        // mid-body `!` token (e.g. `echo !ch`) is a literal document
-        // character and must never be stripped.
-        const mode = getMode()
-        const synthetic = mode === 'prompt' ? 0 : shellPrefixForMode(mode).length
-        const stripWirePrefix = mode !== 'prompt' && cursorLine === 0 && synthetic > 0
-          && (prefix.startsWith('!!') || prefix.startsWith('!'))
-          && cursorCol + synthetic - prefix.length === 0
-        const barePrefix = stripWirePrefix
-          ? prefix.slice(prefix.startsWith('!!') ? 2 : 1)
-          : prefix
-        return base.applyCompletion(lines, cursorLine, cursorCol, item, barePrefix)
-      },
-      shouldTriggerFileCompletion: (lines, cursorLine, cursorCol) =>
-        base.shouldTriggerFileCompletion(lines, cursorLine, cursorCol),
-    }
-    this.editor.setAutocompleteProvider(delegated)
+    this.editor.setAutocompleteProvider(provider)
   }
 
   /**
@@ -23109,6 +26401,12 @@ export class TuiApp {
        *  "edit → Undo" (ABA). */
       const sourceCurrent = (): boolean => {
         if (this.disposed || this.generation !== generation) return false
+        // PR2/F4+RFL010: the ONE write admission — a submission attempt that
+        // took the composer while the async intake ran owns the document, and
+        // a stopped surface never mutates it. (The hold leaves the draft
+        // bytes unchanged, so the identity checks below alone would still
+        // pass.)
+        if (!this.draftWriteAdmitted()) return false
         const live = this.seatEditor()
         if (live !== source.seat || live.getText() !== source.raw) return false
         if (this.editorEditEpoch !== acceptanceEpoch) return false
@@ -23159,6 +26457,9 @@ export class TuiApp {
     sourceCurrent: () => boolean,
   ): boolean {
     if (!sourceCurrent()) return false
+    // PR2/F4+RFL010: the LAST fence, re-read at the write itself — the ONE
+    // admission (the sourceCurrent closure may run a tick earlier).
+    if (!this.draftWriteAdmitted()) return false
     if (this.seatEditor() !== seat) return false
     const raw = seat.getText()
     if (raw !== expectedRaw) return false
@@ -23689,6 +26990,7 @@ export class TuiApp {
         header: options.header,
         noMatchText: options.noMatchText,
         enableSearch: options.enableSearch,
+        mouseActionsEnabled: () => this.fullscreen !== undefined,
         onStop: options.onStop,
         onViewportExpose: options.onViewportExpose,
         onRefresh: options.onRefresh,
@@ -23704,6 +27006,8 @@ export class TuiApp {
         loading: options.loading,
         refreshError: options.refreshError,
         groupLabels: options.groupLabels,
+        ...(options.team === undefined ? {} : { team: options.team }),
+        ...(options.interactionCurrent === undefined ? {} : { interactionCurrent: options.interactionCurrent }),
       },
       (value) => {
         // Run the selection FIRST: a child-detail selection opens its
@@ -23790,6 +27094,10 @@ export class TuiApp {
       },
       setRefreshState: (state, error) => {
         panel.setRefreshState(state, error)
+        this.requestRender()
+      },
+      setTeamPage: (value: TeamBrowserPresentation | undefined) => {
+        panel.setTeamPage(value)
         this.requestRender()
       },
       getViewState: () => panel.getViewState(),
@@ -23965,6 +27273,139 @@ export class TuiApp {
     this.closeDeliveredFiles()
   }
 
+  /**
+   * PR-Q: install the ONE application-level Queue manager on this mounted
+   * PiTui surface. Exactly one surface is mounted per process; the controller
+   * attaches once here and its `present()` drives the overlay below.
+   */
+  attachQueueManager(controller: QueueManagerController): void {
+    this.queueManager = controller
+    const presentation: QueueManagerPresentation = {
+      present: () => this.presentQueueManager(),
+      retire: () => this.closeQueueManager(),
+    }
+    this.queuePresentationObject = presentation
+    controller.attach(presentation)
+  }
+
+  /** The ONE entry shared by the Dock header/rows and `app.queue.open`. A
+   *  managed overlay already owns the keyboard: never stack the queue panel on
+   *  it (the host key ladder resolves actions before the overlay capture). */
+  private openQueueEntry(initialItemId?: string): void {
+    if (this.disposed) return
+    if (this.queueOverlay === undefined && this.overlayBroker.hasFocusedOverlay()) return
+    if (this.deliveredFilesPanel !== undefined || this.modelPickerOverlay !== undefined) return
+    this.events.onOpenQueue?.(initialItemId)
+  }
+
+  /**
+   * The controller's presentation commit: mount the panel on first open,
+   * repaint it afterwards, and close the physical overlay when the controller
+   * is closed (Esc, a session switch or an owner change).
+   */
+  private presentQueueManager(): void {
+    if (this.disposed) return
+    const controller = this.queueManager
+    if (controller === undefined) return
+    if (!controller.isOpen()) {
+      this.closeQueueManager()
+      return
+    }
+    if (this.queuePanel === undefined) {
+      this.mountQueueManagerPanel(controller)
+      return
+    }
+    if (this.queueScreen !== this.activeScreen) {
+      // A workspace lease owns the visible screen: the projection stays parked
+      // on its return screen and resumes with the ordinary repaint funnel.
+      return
+    }
+    this.requestRender()
+  }
+
+  private mountQueueManagerPanel(controller: QueueManagerController): void {
+    const panel = new QueuePanel({
+      controller,
+      requestRender: () => this.requestRender(),
+      screen: () => this.activeScreen,
+      close: () => { controller.close() },
+    })
+    const frame = this.createQueueManagerFrame(panel)
+    const geometry = queueOverlayGeometry(this.terminal.columns, this.terminal.rows)
+    // Publish the lease BEFORE the mount: a focus callback inside the mount may
+    // synchronously re-enter this presentation.
+    this.queuePanel = panel
+    this.queueFrame = frame
+    this.queueScreen = this.activeScreen
+    this.queueGeometryKey = geometry.key
+    let handle: OverlayHandle
+    try {
+      handle = this.showOverlayOnHost(
+        frame,
+        { width: geometry.width, maxHeight: geometry.maxHeight },
+        {
+          // REMOUNTABLE: a fullscreen screen swap keeps the SAME panel (edit
+          // draft, selection, scroll) behind a fresh physical projection.
+          remountable: true,
+          remount: (logical) => {
+            if (this.queuePanel !== panel) return
+            const next = this.createQueueManagerFrame(panel)
+            this.queueFrame = next
+            this.queueScreen = this.activeScreen
+            const live = queueOverlayGeometry(this.terminal.columns, this.terminal.rows)
+            this.queueGeometryKey = live.key
+            this.rebindOverlayRaw(logical, next, { width: live.width, maxHeight: live.maxHeight })
+          },
+        },
+      )
+    } catch (error) {
+      if (this.queuePanel === panel) {
+        this.queuePanel = undefined
+        this.queueFrame = undefined
+        this.queueScreen = undefined
+        this.queueGeometryKey = undefined
+      }
+      panel.dispose()
+      throw error
+    }
+    if (this.queuePanel !== panel) {
+      // A focus callback inside the mount already closed/replaced this lease:
+      // the fresh projection is orphaned and must not survive.
+      this.overlayRemounts.delete(handle)
+      handle.hide()
+      return
+    }
+    this.queueOverlay = handle
+  }
+
+  /** The frame's geometry callback, the host options and the panel's row grant
+   *  all read ONE live geometry result (D10 snap-down ladder). */
+  private createQueueManagerFrame(panel: QueuePanel): ResponsiveOverlayFrame {
+    return new ResponsiveOverlayFrame(
+      panel,
+      () => {
+        const geometry = queueOverlayGeometry(this.terminal.columns, this.terminal.rows)
+        return { width: geometry.width, maxHeight: geometry.maxHeight, key: geometry.key }
+      },
+      (geometry) => panel.setMaxRows(Math.max(1, geometry.maxHeight - 2)),
+    )
+  }
+
+  /** Close the live Queue manager overlay (idempotent). The lease identity is
+   *  dropped BEFORE the broker close can run focus callbacks. */
+  closeQueueManager(): void {
+    const overlay = this.queueOverlay
+    const panel = this.queuePanel
+    this.queueOverlay = undefined
+    this.queueFrame = undefined
+    this.queuePanel = undefined
+    this.queueScreen = undefined
+    this.queueGeometryKey = undefined
+    if (overlay !== undefined) this.overlayRemounts.delete(overlay)
+    overlay?.hide()
+    panel?.dispose()
+  }
+
   /** The live terminal key a delivered-files physical projection was mounted
    *  at. The formula is a pure function of columns/rows, so this is the same
    *  thing as the derived size key without recomputing the size twice. */
@@ -24130,6 +27571,9 @@ export class TuiApp {
    * reappear.
    */
   openModelPicker(component: Component & RowBudgetAware): () => void {
+    // A new `/model` interaction retires any previous Team-disable confirmation
+    // seat: that seat belongs to the previous interaction's exact capture.
+    this.closeTeamDisableConfirmation()
     if (this.modelPickerComponent !== undefined) this.closeModelPicker()
     this.modelPickerComponent = component
     this.mountModelPickerOverlay(component)
@@ -24137,6 +27581,161 @@ export class TuiApp {
     // remounts the SAME component behind a fresh handle, and the user's
     // close must still reach it.
     return () => this.closeModelPicker()
+  }
+
+  /**
+   * Mount the independent `TeamDisableConfirmation` seat. It is a sibling
+   * overlay, NOT part of the `/model` picker: closing `/model` leaves it alive
+   * with its captured Session scope, and its Confirm performs the one Host
+   * write. Returns the closer; the seat never changes the Host on Cancel/Esc.
+   */
+  openTeamDisableConfirmation(request: TeamDisableConfirmationRequest): () => void {
+    this.closeTeamDisableConfirmation()
+    let handle: OverlayHandle | undefined
+    // The hide latch is INDEPENDENT of the component's teardown notification:
+    // the component commits `closed` before it asks the owner to hide, and the
+    // owner must still perform the ONE hide.
+    let hidden = false
+    let closeHandle: () => void = () => {}
+    const component = new TeamDisableConfirmation({
+      ...request,
+      requestRender: () => { this.requestRender() },
+      close: () => { closeHandle() },
+      onClosed: () => {
+        if (this.teamConfirmationOverlay?.handle === handle) this.teamConfirmationOverlay = undefined
+        request.onClosed?.()
+      },
+    })
+    const frame = new FocusForwardingFrame(component, true)
+    handle = this.showOverlayOnHost(frame, { width: 64, maxHeight: 14 })
+    closeHandle = (): void => {
+      if (hidden) return
+      hidden = true
+      if (this.teamConfirmationOverlay?.handle === handle) this.teamConfirmationOverlay = undefined
+      handle?.hide()
+    }
+    this.teamConfirmationOverlay = { handle, component, close: closeHandle }
+    return closeHandle
+  }
+
+  /**
+   * M6 UX PR1: present the ONE Client-local Exit Choice. The coordinator owns
+   * the model (title/copy/options and the ONE select callback); this app owns
+   * only the overlay lifetime. The seat is REMOUNTABLE across a fullscreen
+   * screen swap and is published before its physical mount, so a blur/focus
+   * callback that runs inside that mount can preempt it without leaving a
+   * hidden ghost the coordinator still believes is open.
+   * @param model - the coordinator's frozen choice model.
+   */
+  openExitChoice(model: ExitChoiceModel): void {
+    // A real Host Question/Approval owns the seat. The Client choice must
+    // never stack above it; it is withdrawn with ZERO business action.
+    if (this.approvals.isActive() || this.activeQuestions !== undefined) {
+      model.dismiss()
+      return
+    }
+    this.closeExitChoice()
+    const component = new ExitChoicePanel({
+      model,
+      requestRender: () => { this.requestRender() },
+      onClosed: () => {
+        if (this.clientExitChoiceOverlay?.component === component) this.clientExitChoiceOverlay = undefined
+      },
+    })
+    const seat: NonNullable<TuiApp['clientExitChoiceOverlay']> = {
+      component,
+      model,
+      handle: undefined,
+      preempted: false,
+      close: () => {},
+    }
+    // Publish the logical seat BEFORE the mount: showOverlayOnHost can
+    // synchronously run another overlay's blur/focus callbacks, whose Host
+    // modal must be able to withdraw this seat while it is mounting.
+    this.clientExitChoiceOverlay = seat
+    const geometryOptions = { width: 64, maxHeight: 20 }
+    const geometryOf = (): ResponsiveOverlayGeometry => {
+      const width = Math.max(1, Math.min(this.terminal.columns, geometryOptions.width))
+      const maxHeight = Math.max(1, Math.min(this.terminal.rows, geometryOptions.maxHeight))
+      return { width, maxHeight, key: `${this.terminal.columns}:${this.terminal.rows}:${width}:${maxHeight}` }
+    }
+    const createFrame = (): ResponsiveOverlayFrame => new ResponsiveOverlayFrame(
+      component,
+      geometryOf,
+      geometry => { component.setMaxRows(Math.max(1, geometry.maxHeight - 2)) },
+    )
+    let handle: OverlayHandle | undefined
+    handle = this.showOverlayOnHost(createFrame(), { width: geometryOptions.width, maxHeight: geometryOptions.maxHeight }, {
+      remountable: true,
+      // A fullscreen screen swap REBINDS the same seat: destroying the only
+      // projection while the coordinator still owns an open choice would leave
+      // an invisible decision that blocks every later exit intent.
+      remount: (logical) => {
+        if (this.clientExitChoiceOverlay !== seat) return
+        this.rebindOverlayRaw(logical, createFrame(), { width: geometryOptions.width, maxHeight: geometryOptions.maxHeight })
+      },
+    })
+    seat.handle = handle
+    let hidden = false
+    seat.close = (): void => {
+      if (hidden) return
+      hidden = true
+      if (this.clientExitChoiceOverlay === seat) this.clientExitChoiceOverlay = undefined
+      if (seat.handle !== undefined) this.overlayRemounts.delete(seat.handle)
+      seat.handle?.hide()
+      // A remountable overlay opts out of disposeOnHide: the final close owns
+      // the component's lifecycle explicitly.
+      component.dispose()
+    }
+    if (seat.preempted) {
+      // A mount-time callback already withdrew the seat: never publish a
+      // visible ghost after it.
+      seat.close()
+    }
+  }
+
+  /** Replace the painted model of the OPEN Exit Choice (a phase transition). */
+  updateExitChoice(model: ExitChoiceModel): void {
+    const seat = this.clientExitChoiceOverlay
+    if (seat === undefined) return
+    seat.model = model
+    seat.component.setModel(model)
+    this.requestRender()
+  }
+
+  /** Hide the open Exit Choice. Never a business action. */
+  closeExitChoice(): void {
+    const seat = this.clientExitChoiceOverlay
+    if (seat === undefined) return
+    this.clientExitChoiceOverlay = undefined
+    seat.close()
+  }
+
+  /**
+   * Withdraw the open Exit Choice because a real Host modal took the seat.
+   * The model's dismiss() reaches the coordinator with ZERO business action
+   * (no Host write, no exit); a later user intent opens a fresh choice. Safe
+   * during the synchronous mount window: the seat is already published, and
+   * the pending physical handle is hidden as soon as it exists.
+   */
+  private preemptClientExitChoice(): void {
+    const seat = this.clientExitChoiceOverlay
+    if (seat === undefined) return
+    seat.preempted = true
+    this.clientExitChoiceOverlay = undefined
+    seat.model.dismiss()
+    seat.close()
+  }
+
+  /** Close the Team-disable confirmation seat, if one is open and not
+   *  mid-write. An in-flight write owns the seat until settlement; a new
+   *  `/model` must not tear it down (the command's shared Team latch also
+   *  refuses a second write while it is unsettled). */
+  private closeTeamDisableConfirmation(): void {
+    const seat = this.teamConfirmationOverlay
+    if (seat === undefined) return
+    if (!seat.component.requestClose()) return
+    seat.close()
   }
 
   /** Mount the `/model` picker frame around its (retained) component. The
@@ -24148,14 +27747,14 @@ export class TuiApp {
     this.modelPickerFrame = frame
     const handle = this.showOverlayOnHost(
       frame,
-      { width: 72, maxHeight: 28 },
+      { width: 88, maxHeight: 28 },
       {
         remountable: true,
         remount: (logical) => {
           if (this.modelPickerComponent !== component) return
           const next = this.createModelPickerFrame(component)
           this.modelPickerFrame = next
-          this.rebindOverlayRaw(logical, next, { width: 72, maxHeight: 28 })
+          this.rebindOverlayRaw(logical, next, { width: 88, maxHeight: 28 })
         },
       },
     )
@@ -24163,7 +27762,7 @@ export class TuiApp {
   }
 
   private createModelPickerFrame(component: Component & RowBudgetAware): ResponsiveOverlayFrame {
-    const configuredWidth = 72
+    const configuredWidth = 88
     const configuredMaxHeight = 28
     const geometryOf = (): ResponsiveOverlayGeometry => {
       const width = Math.max(1, Math.min(this.terminal.columns, configuredWidth))
@@ -24385,6 +27984,7 @@ export class TuiApp {
     let record: JobWorkspaceRecord
     const panel = new JobInspectorPanel(options.initial, {
       rows: () => this.terminal.rows,
+      columns: () => this.terminal.columns,
       requestRender: () => this.requestRender(),
       notice: () => this.currentNotice(),
       onClose: () => record.close(),
@@ -24443,7 +28043,7 @@ export class TuiApp {
       // `Ctrl+F` string and never the Transcript's search handler.
       isFindKey: (data) => {
         const resolution = this.keybindings.resolve(data, this.keybindingContext())
-        return resolution !== undefined && resolution.action === 'app.transcript.search'
+        return resolution !== undefined && (resolution.action === 'app.transcript.search' || resolution.action === 'app.transcript.search.view')
       },
       // One action advertises ONE key (design language §7.1): the keymap's primary
       // effective binding. The Job reserves the physical Home/End viewport keys
@@ -24453,11 +28053,17 @@ export class TuiApp {
       // takes its place. `/` stays the always-available Job-local alias, advertised
       // when nothing is left to name.
       findHint: () => {
-        const direct = this.keybindings.keysFor('app.transcript.search')
-          .filter(key => key !== 'home' && key !== 'end' && key !== JOB_LOCAL_KEYS.switchPage)
+        const direct = [
+           ...this.keybindings.keysFor('app.transcript.search.view'),
+           ...this.keybindings.keysFor('app.transcript.search'),
+         ]
+          .filter(key => !JOB_LOCAL_FIND_RESERVED_KEYS.has(key))
         const first = direct[0]
         if (first !== undefined) return formatKeyId(first)
-        const leader = this.keybindings.leaderKeysFor('app.transcript.search')[0]
+        const leader = [
+          ...this.keybindings.leaderKeysFor('app.transcript.search.view'),
+          ...this.keybindings.leaderKeysFor('app.transcript.search'),
+        ].find(key => !JOB_LOCAL_FIND_RESERVED_KEYS.has(key))
         return leader === undefined ? '' : formatLeaderSequence(leader)
       },
       focusComponent: (component) => screen.setFocus(component),
@@ -24472,12 +28078,13 @@ export class TuiApp {
       // reveal (and leaves a search whose row the frame could not show), so no
       // layout is ever mutated from inside `render()`.
       onFramePainted: () => panel.onFramePainted(),
-      // Phase 3B / B1-C: the header's Command summary / Copy All affordances are
-      // plain painted cells (no mouse-handling component), so their same-cell
-      // press/click arrives here and the panel re-proves the press-time painted
-      // identity before acting.
-      onCellPress: (x, y) => panel.onHeaderPress(x, y),
-      onCellClick: (x, y) => panel.onHeaderClick(x, y),
+      // Phase 3B / B1-C: the header's Command summary / Copy All affordances AND
+      // the pinned Action Bar's Esc affordance are plain painted cells (no
+      // mouse-handling component), so their same-cell press/click arrives here
+      // as the panel's ONE chrome gesture and it re-proves the press-time
+      // painted identity before acting.
+      onCellPress: (x, y) => panel.onChromePress(x, y),
+      onCellClick: (x, y) => panel.onChromeClick(x, y),
     })
     const nativeCopyOnSelect = screen.getCopyOnSelect()
     screen.setLayoutRoot(panel)
@@ -24632,9 +28239,12 @@ export class TuiApp {
       ...(options.onOpenPlugins === undefined ? {} : { onOpenPlugins: options.onOpenPlugins }),
       ...(options.createModelsPage === undefined ? {} : { createModelsPage: options.createModelsPage }),
       ...(options.createAccountPage === undefined ? {} : { createAccountPage: options.createAccountPage }),
-      ...(options.createSubagentAllowlistPicker === undefined
+      ...(options.createSubagentSettingsPage === undefined
         ? {}
-        : { createSubagentAllowlistPicker: options.createSubagentAllowlistPicker }),
+        : { createSubagentSettingsPage: options.createSubagentSettingsPage }),
+      ...(options.createHostNumericSettingsPage === undefined
+        ? {}
+        : { createHostNumericSettingsPage: options.createHostNumericSettingsPage }),
       ...(options.createWebSettingsPage === undefined
         ? {}
         : { createWebSettingsPage: options.createWebSettingsPage }),
@@ -24644,6 +28254,12 @@ export class TuiApp {
       ...(options.createKeybindingsPage === undefined
         ? {}
         : { createKeybindingsPage: options.createKeybindingsPage }),
+      ...(options.createMcpServersPage === undefined
+        ? {}
+        : { createMcpServersPage: options.createMcpServersPage }),
+      ...(options.createComputerUsePage === undefined
+        ? {}
+        : { createComputerUsePage: options.createComputerUsePage }),
       // The clipboard capability stays the SAME Client-local `copySelection` the
       // rest of the surface already uses; the settlement re-proves THIS workspace
       // record before it may notify.
@@ -24690,6 +28306,21 @@ export class TuiApp {
           },
         })
       },
+      // M6 UX PR2: the ONE explicit service install, fenced against THIS
+      // screen lease exactly like onCommit. A late or superseded settlement
+      // never repaints a newer follow-up; the command layer keeps the task's
+      // single-run ownership.
+      onBackendServiceInstall: (settle) => {
+        const install = options.onBackendServiceInstall
+        if (install === undefined) {
+          settle({ ok: false, detail: 'the local daemon administration capability is unavailable' })
+          return
+        }
+        install((result) => {
+          if (this.disposed || this.workspaceLease !== record) return
+          settle(result)
+        })
+      },
     }, {
       // A typed row deeplink restores ITS row: a re-entry from a specialist
       // page (or the Web page) never lands the user on the default theme row.
@@ -24708,11 +28339,167 @@ export class TuiApp {
         ;(record.panel as SettingsWorkspacePanel).refreshRow(rowId, facts)
         this.requestRender()
       },
+      invalidateChoice: (field) => {
+        if (this.disposed || this.workspaceLease !== record || record.kind !== 'settings') return
+        ;(record.panel as SettingsWorkspacePanel).invalidateChoice(field)
+        this.requestRender()
+      },
       whenInitialSpecialistSettled: () => {
         if (this.disposed || this.workspaceLease !== record || record.kind !== 'settings') {
           return Promise.resolve({ ok: false, reason: 'the Settings workspace was superseded before the page opened' })
         }
         return (record.panel as SettingsWorkspacePanel).whenInitialSpecialistSettled()
+      },
+    }
+  }
+
+  /**
+   * M5-U-C: open the ONE PiTUI fullscreen Session Workspace on the SAME
+   * temporary physical-screen lease as Settings/Image. The lease is latched
+   * before anything else happens: a refused lease (blocking Question/Approval/
+   * Save, another workspace, a transition freeze or a disposed surface) throws
+   * synchronously, and the command layer is the ONE owner of the resulting
+   * error. A successful open does NOT start any Host read; the caller starts
+   * the per-open Workspace follow only after this method returns.
+   * @param options - the captured subject, callbacks and the command intent.
+   * @returns the instance-fenced handle of THIS workspace.
+   */
+  openSessionWorkspace(options: SessionWorkspaceOpenOptions): SessionWorkspaceHandle {
+    this.assertWorkspaceLeaseAvailable('Sessions')
+    let record!: WorkspaceLeaseRecord
+    // An owner-origin close (the command/presenter retired this open) must not
+    // re-enter the owner's `onClose`; a user Esc, modal pre-emption or teardown
+    // still notifies it exactly once through the lease's close path.
+    let closingFromOwner = false
+    let disposed = false
+    const panelHost: SessionWorkspacePanelHost = {
+      rows: () => this.terminal.rows,
+      columns: () => this.terminal.columns,
+      requestRender: () => this.requestRender(),
+      notice: () => this.workspaceNotice(),
+      onQueryChange: (raw) => {
+        if (this.workspaceLease === record) options.onQueryChange(raw)
+      },
+      onResume: (sessionId) => {
+        if (this.workspaceLease === record) options.onResume(sessionId)
+      },
+      onClose: () => {
+        record.close()
+      },
+      // Optional capabilities stay OPTIONAL all the way to the panel: an
+      // always-present wrapper would paint an action whose owner can never
+      // settle it (a permanently pending Add/New).
+      ...(options.onUseDirectory === undefined ? {} : {
+        onUseDirectory: (workspaceId: string, canonicalPath: string) => {
+          if (this.workspaceLease === record) options.onUseDirectory?.(workspaceId, canonicalPath)
+        },
+      }),
+      ...(options.onNewSession === undefined ? {} : {
+        onNewSession: (workspaceId: string, settle?: Parameters<NonNullable<SessionWorkspacePanelHost['onNewSession']>>[1]) => {
+          if (this.workspaceLease === record) options.onNewSession?.(workspaceId, settle)
+        },
+      }),
+      ...(options.onAddDirectory === undefined ? {} : {
+        onAddDirectory: (path: string, settle: (outcome: import('./app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void) => {
+          if (this.workspaceLease === record) options.onAddDirectory?.(path, settle)
+        },
+      }),
+      // PR3: an absent browse capability stays absent — never a fabricated
+      // always-ready reader. A read started during panel construction belongs
+      // to the open that is still committing; once the record exists any
+      // other lease is stale and refuses the read.
+      ...(options.onListDirectory === undefined ? {} : {
+        onListDirectory: (path: string | undefined, signal: AbortSignal) => {
+          if (record !== undefined && this.workspaceLease !== record) {
+            return Promise.reject(new Error('the Session Workspace lease was released'))
+          }
+          return options.onListDirectory!(path, signal)
+        },
+      }),
+    }
+    const panel = new SessionWorkspacePanel(panelHost, {
+      initialMode: options.initialMode,
+      initialBrowseScope: options.initialBrowseScope,
+      initialDirectoryChooser: options.initialDirectoryChooser,
+       currentWorkspaceId: options.currentWorkspaceId,
+       initialDirectoryEntry: options.initialDirectoryEntry,
+       initialDirectoryPath: options.initialDirectoryPath,
+       currentSessionId: options.subject.currentSessionId,
+
+
+    })
+    record = this.leaseWorkspaceScreen('sessions', panel, () => {
+      if (!closingFromOwner) options.onClose()
+    })
+    const owns = (): boolean => !this.disposed && !disposed && this.workspaceLease === record
+    return {
+      setSnapshot: (snapshot, initialQuery) => {
+        if (!owns()) return
+        panel.setSnapshot(snapshot, initialQuery === undefined ? undefined : { initialQuery })
+      },
+      updateWorkspaces: (frame) => {
+        if (!owns()) return
+        panel.updateWorkspaces(frame)
+      },
+      workspaceUnavailable: (message) => {
+        if (!owns()) return
+        panel.workspaceUnavailable(message)
+      },
+      setActivityFacts: (facts) => {
+        if (!owns()) return
+        panel.setActivityFacts(facts)
+      },
+      activityUnavailable: (message) => {
+        if (!owns()) return
+        panel.activityUnavailable(message)
+      },
+      close: () => {
+        if (disposed) return
+        disposed = true
+        closingFromOwner = true
+        record.close()
+      },
+      isDisposed: () => disposed || this.disposed || this.workspaceLease !== record,
+    }
+  }
+
+  /**
+   * Open the fullscreen Schedule workspace (S5-PR4): the SAME ONE temporary
+   * `TuiAltScreen` lease primitive as Settings/Image, with the bundle's single
+   * `ScheduleWorkspacePanel` as layout root, keyboard focus target and mouse
+   * hitmap owner. The screen that opened it is only STOPPED with
+   * `preserveScreen` — its tree, draft, focus and scroll survive the round trip.
+   *
+   * The lease is committed BEFORE the physical switch, and it is mutually
+   * exclusive with the Job, Settings and Image workspaces: at most ONE
+   * workspace owns the terminal. A blocking Question/Approval/Save owner still
+   * refuses the lease outright.
+   * @param bindings - the controller-backed snapshot source, the ONE intent
+   *   dispatch and the teardown notification of THIS open.
+   * @returns the instance-fenced handle of THIS workspace.
+   */
+  openScheduleWorkspace(bindings: ScheduleWorkspaceBindings): ScheduleWorkspaceHandle {
+    this.assertWorkspaceLeaseAvailable('Schedule')
+    // The lease record exists only after the panel is constructed; a close
+    // request can only arrive from input, so the thunk is never called during
+    // construction and the binding is resolved by then.
+    let record: WorkspaceLeaseRecord | undefined
+    const panel = new ScheduleWorkspacePanel({
+      snapshot: bindings.snapshot,
+      dispatch: bindings.dispatch,
+      requestRender: () => this.requestRender(),
+      rows: () => this.terminal.rows,
+      columns: () => this.terminal.columns,
+      close: () => record?.close(),
+    })
+    record = this.leaseWorkspaceScreen('schedule', panel, () => bindings.onClose?.())
+    const close = (): void => record.close()
+    return {
+      close,
+      update: (snapshot: ScheduleWorkspaceSnapshot) => {
+        if (this.disposed || this.workspaceLease !== record || record.kind !== 'schedule') return
+        panel.setSnapshot(snapshot)
+        this.requestRender()
       },
     }
   }
@@ -24759,13 +28546,19 @@ export class TuiApp {
    * workspace screen of its own.
    */
   private leaseWorkspaceScreen(
-    kind: 'settings' | 'image',
+    kind: 'settings' | 'image' | 'sessions' | 'schedule',
     panel: WorkspaceLeasePanel,
     onClose?: () => void,
   ): WorkspaceLeaseRecord {
-    this.assertWorkspaceLeaseAvailable(kind === 'settings' ? 'Settings' : 'Image')
+    this.assertWorkspaceLeaseAvailable(kind === 'settings' ? 'Settings' : kind === 'sessions' ? 'Sessions' : kind === 'image' ? 'Image' : 'Schedule')
     const returnScreen: TuiMainScreen | TuiAltScreen = this.fullscreen ?? this.tui
     const returnFocus = returnScreen.getFocusedComponent()
+    // A same-process temporary screen (the Session Workspace) never hands the
+    // PTY to another owner: the progress presentation must stay authoritative
+    // across the lease rather than churn clear -> settled-record (which would
+    // resurrect a settled `done` the current owner already reported). Settings
+    // and Image keep their historical leave/enter handoff unchanged.
+    const preserveTerminalPresentation = kind === 'sessions'
     const token: object = {}
     const screen = new TuiAltScreen(this.terminal, undefined, undefined, {
       imageProtocolOverride: this.altScreenImageProtocol,
@@ -24794,17 +28587,24 @@ export class TuiApp {
     }
     const close = (): void => {
       if (finalized) return
-      runSyncDisposalSteps('settings workspace close', [
+      runSyncDisposalSteps('workspace close', [
         finalizeOnce,
         () => screen.stop({ preserveScreen: true }),
         () => panel.dispose?.(),
         () => {
           // Restore ONLY while no newer physical owner exists.
           if (!this.disposed && this.workspaceLease === undefined && this.activeScreen === returnScreen) {
-            this.resumeReturnSurface(returnScreen, returnFocus)
+            this.resumeReturnSurface(returnScreen, returnFocus, preserveTerminalPresentation)
           }
         },
         () => { onClose?.() },
+        // The split Client's Alt+W hold is released by the physical close of
+        // the Browser lease (including a blocking-owner pre-emption), never by
+        // the mere key press. One-shot: the hooks clear themselves.
+        () => {
+          for (const hook of [...this.workspaceCloseHooks]) hook()
+          this.workspaceCloseHooks.clear()
+        },
       ])
     }
     /** A synchronous callback during ANY physical step of the open sequence may
@@ -24816,14 +28616,14 @@ export class TuiApp {
     record = { kind, token, screen, panel, returnScreen, returnFocus, finalizeOnce, close }
     this.workspaceLease = record
     try {
-      this.leaveTerminalPresentation()
+      if (!preserveTerminalPresentation) this.leaveTerminalPresentation()
       assertStillOpening()
       returnScreen.stop({ preserveScreen: true })
       assertStillOpening()
       screen.start()
       assertStillOpening()
       screen.setTerminalColorSchemeNotifications(this.followingTerminalTheme)
-      this.enterTerminalPresentation()
+      if (!preserveTerminalPresentation) this.enterTerminalPresentation()
       assertStillOpening()
       this.refreshSchemeRegistrations()
       screen.setFocus(panel)
@@ -24836,7 +28636,7 @@ export class TuiApp {
         () => { if (!alreadyClosed) panel.dispose?.() },
         () => {
           if (!alreadyClosed && !this.disposed && this.workspaceLease === undefined && this.activeScreen === returnScreen) {
-            this.resumeReturnSurface(returnScreen, returnFocus)
+            this.resumeReturnSurface(returnScreen, returnFocus, preserveTerminalPresentation)
           }
         },
       ])
@@ -24889,7 +28689,11 @@ export class TuiApp {
    * re-assigned when the paused screen has NO focused component left — its own
    * focus survived the pause, and the workspace never forces the editor back.
    */
-  private resumeReturnSurface(screen: TuiMainScreen | TuiAltScreen, returnFocus: Component | null): void {
+  private resumeReturnSurface(
+    screen: TuiMainScreen | TuiAltScreen,
+    returnFocus: Component | null,
+    preserveTerminalPresentation = false,
+  ): void {
     screen.start()
     if (screen === this.tui) {
       // The alt screen's stop disabled focus reporting (?1004l rides the
@@ -24903,7 +28707,7 @@ export class TuiApp {
       }
     }
     if (screen.getFocusedComponent() === null) screen.setFocus(returnFocus)
-    this.enterTerminalPresentation()
+    if (!preserveTerminalPresentation) this.enterTerminalPresentation()
     this.refreshSchemeRegistrations()
     // A detection issued from the temporary workspace screen died with it; when the latest
     // DELIBERATE selection still follows the terminal, the restored screen re-samples, so
@@ -24984,10 +28788,11 @@ export class TuiApp {
       } catch (error) {
         this.routeTerminalSettlementFailure(`job workspace abandonment (${context})`, error)
       }
+      const lease = this.workspaceLease
       try {
-        this.workspaceLease?.close()
+        lease?.close()
       } catch (error) {
-        this.routeTerminalSettlementFailure(`settings workspace abandonment (${context})`, error)
+        this.routeTerminalSettlementFailure(`${lease?.kind ?? 'workspace'} workspace abandonment (${context})`, error)
       }
     } finally {
       this.workspaceLeaseFreezeDepth = freezeDepthBefore
@@ -25396,22 +29201,34 @@ export class TuiApp {
     // inert overlay handle would never dispose the panel, so the unref'd
     // interval would keep calling options.refresh() forever.
     if (this.disposed) return () => {}
-    // ONE live capability source for both the hint and the key handler: a
+    // The overlay mounts on the CURRENT active screen; the panel's pointer route
+    // exists only while THAT screen is still the active fullscreen surface, so a
+    // Regular/Main viewer never gains an application mouse path.
+    const hostScreen = this.activeScreen
+    // ONE live capability source for both the chrome and the key handler: a
     // job that settles (or leaves the registry) while the viewer is open
     // stops offering Stop on the next tick and its key becomes a no-op.
     const stopAvailable = (): boolean => options.onStop !== undefined && (options.canStop?.() ?? true)
-    const hintOf = (): { hint: string; fallback: string } => {
+    const closeVerb = options.closeHint === 'back' ? 'Back' : 'Close'
+    const hintOf = (): OutputViewerBar => {
       const close = options.closeHint === 'back' ? 'Esc back' : 'Esc close'
       const closeHint = color.textDim(close)
-      // The close/back verb is the primary action; Stop degrades away when
-      // the combined hint cannot fit the viewer's content width.
-      if (!stopAvailable()) return { hint: closeHint, fallback: closeHint }
-      // The stop label comes from the SAME app keybinding definition the
-      // handler matches (tasks.stop) — never a hard-coded 's'.
-      const key = this.keybindings.keyHint('tasks.stop')
-      return { hint: color.textDim(`${key} stop · ${close}`), fallback: closeHint }
+      const stopKey = this.keybindings.keyHint('tasks.stop')
+      const stop = stopAvailable() && stopKey !== ''
+      return {
+        // The historical keyboard-only forms (the Regular/Main surface).
+        legacy: stop
+          ? { hint: color.textDim(`${stopKey} stop · ${close}`), fallback: closeHint }
+          : { hint: closeHint, fallback: closeHint },
+        // The ONE fullscreen bar: the same live truth as complete affordances;
+        // the keycap is the SAME effective binding the key handler matches.
+        actions: [
+          ...(stop ? [{ action: 'stop' as const, text: `Stop [${stopKey.length === 1 ? stopKey.toUpperCase() : stopKey}]`, priority: 2, role: 'secondary' as const }] : []),
+          { action: 'close' as const, text: `${closeVerb} [Esc]`, priority: 8, role: 'secondary' as const },
+        ],
+      }
     }
-    const initialHint = hintOf()
+    const initialHint = hintOf().legacy
     const panel = new OutputViewerPanel(options.title, options.initial, initialHint.hint, initialHint.fallback)
     // ONE per-open finalizer is the ONLY notification owner: Esc, the returned
     // closer and the frame's physical `onDispose` all funnel here, so
@@ -25454,6 +29271,18 @@ export class TuiApp {
       // caps are reached (the shared last-painted-geometry mouse fence).
       return { width, maxHeight, key: `${this.terminal.columns}:${this.terminal.rows}:${width}:${maxHeight}` }
     }
+    // The panel paints the live fullscreen bar from the SAME capability source,
+    // and the pointer route is gated on the REAL mount screen: while a fullscreen
+    // swap rebinds the overlay elsewhere the captured identity stops matching and
+    // the route fails closed. The two sinks are the existing close-once intent
+    // and the existing tasks.stop semantic.
+    panel.setBar(hintOf)
+    panel.setMouseRoute({
+      enabled: () => hostScreen === this.activeScreen && hostScreen instanceof TuiAltScreen,
+      stopAvailable,
+      onStop: () => options.onStop?.(),
+      onClose: () => requestClose(),
+    })
     // The responsive shell mirrors the fork's clamped overlay budget into
     // the panel, so the body row budget (and the bottom hint) match the
     // physically granted box on resize and short terminals. The -2 drops
@@ -25472,7 +29301,7 @@ export class TuiApp {
     // owned panel is disposed and an interval started here would never be
     // cleared — arm the timer only while the viewer is still live.
     if (!finalized) {
-      panel.startRefreshing(options.refresh, () => this.requestRender(), options.intervalMs ?? 1000, hintOf)
+      panel.startRefreshing(options.refresh, () => this.requestRender(), options.intervalMs ?? 1000)
     }
     return requestClose
   }
@@ -25811,6 +29640,10 @@ export class TuiApp {
     request: ApprovalPromptRequest,
     agentInputWait = false,
   ): Promise<ApprovalOutcome> {
+    // M6 UX PR1: a real Host modal always outranks the Client-local Exit
+    // Choice. A blocked request that is already aborted never takes the seat
+    // and must not withdraw the choice either.
+    if (request.signal?.aborted !== true) this.preemptClientExitChoice()
     // Phase 3B / B1-A modal precedence: the blocking owner ARRIVES — leave the
     // Job workspace BEFORE the approval claims the seat, so the restored surface
     // is the one the approval mounts on and no second keyboard owner can exist.
@@ -25855,6 +29688,22 @@ export class TuiApp {
       // completion, then continues through the component's normal handler.
       this.keybindings.cancelLeader()
       return undefined
+    }
+    // The split Client's modal-safe no-answer navigation: an EXPLICIT
+    // whitelist between the modal's fixed response keys above and the ordinary
+    // inspection/editor ladder. It is enabled ONLY for a LIVE forwarded
+    // interaction (the Agent is blocked on THIS answer: a foreground
+    // Question/Approval, never a continued late-answer form, which is not part
+    // of the forwarded presentation and cannot be suspended by the hold). The
+    // root hold is committed before the seat is withdrawn, so no local cancel
+    // can become a Host answer.
+    if (this.noAnswerNavigation !== undefined
+      && this.agentInputWaitActive()
+      && componentKeymap.matches(data, 'interaction.navigateWorkspace')) {
+      this.keybindings.cancelLeader()
+      this.clearExitConfirmation()
+      this.beginNoAnswerNavigation()
+      return { consume: true }
     }
     for (const action of MODAL_INSPECTION_ACTIONS) {
       if (!this.keybindings.matches(data, action)) continue
@@ -25914,6 +29763,109 @@ export class TuiApp {
   }
 
   /**
+   * Install (or clear) the ONE modal-safe no-answer navigation entry the split
+   * composition root wires after the `/sessions` command registration settled.
+   * Alt+W is inert without it (Direct, TSP and headless fixtures never install
+   * one).
+   */
+  setNoAnswerNavigation(control: NoAnswerNavigationControl | undefined): void {
+    this.noAnswerNavigation = control
+    // The modal hint reads these synchronously at render time: the verb paints
+    // only where the control is installed AND actually usable right now (the
+    // same predicate the key press consults), so the hint can never advertise
+    // an entry that would answer "unavailable".
+    setNoAnswerNavigationInstalled(
+      control !== undefined,
+      control === undefined ? undefined : () => control.available(),
+    )
+  }
+
+  /**
+   * Install (or clear) the ONE PiTUI Host Editor `←←` control the composition
+   * root wires after the `/sessions` command registration settled. The gesture
+   * is inert without it (TSP, headless fixtures and an unregistered `/sessions`
+   * never install a usable one). Installing or replacing the control drops any
+   * first-Press latch armed under the previous instance.
+   */
+  setEditorWorkspaceEntry(control: EditorWorkspaceEntryControl | undefined): void {
+    this.editorWorkspaceEntry = control
+    this.clearLeftWorkspaceArm()
+  }
+
+  /**
+   * Withdraw the PRESENTATION of the listed live Question/Approval requests
+   * without answering or cancelling the official invocation. Matching queued
+   * flows leave their queues BEFORE the active one settles, so no withdrawn
+   * successor is ever promoted onto the seat. The split root delivery's hold /
+   * epoch makes every local cancellation here stale; Direct never calls this.
+   */
+  withdrawPresentations(lifetimes: readonly AbortSignal[]): void {
+    if (lifetimes.length === 0) return
+    const selected = new Set(lifetimes)
+    for (const state of [...this.questionQueue]) {
+      if (state.signal !== undefined && selected.has(state.signal)) this.abortQuestion(state)
+    }
+    const active = this.activeQuestions
+    if (active !== undefined && active.signal !== undefined && selected.has(active.signal)) {
+      this.settleQuestions(active, undefined)
+    }
+    this.approvals.withdrawPresentations(lifetimes)
+  }
+
+  /**
+   * The split Client's modal-safe Alt+W: commit the root presentation-only hold
+   * FIRST, withdraw the local modal seat, then open the EXISTING registered
+   * Session Workspace. The hold is released when that lease closes — or at
+   * once when the entry cannot present/lease, which restores the original
+   * dialog through the root delivery's normal re-offer path.
+   */
+  private beginNoAnswerNavigation(): void {
+    const navigation = this.noAnswerNavigation
+    if (navigation === undefined) return
+    if (!navigation.available()) {
+      this.notify('Session browsing is not available here; the dialog stays open.', 'error')
+      return
+    }
+    let release: (() => void) | undefined
+    try {
+      release = navigation.begin()
+    } catch (error) {
+      this.notify(`Could not suspend the dialog for navigation: ${safeErrorMessage(error)}`, 'error')
+      return
+    }
+    let removeCloseHook: (() => void) | undefined
+    const releaseOnce = (): void => {
+      removeCloseHook?.()
+      removeCloseHook = undefined
+      const run = release
+      release = undefined
+      run?.()
+    }
+    removeCloseHook = this.armWorkspaceCloseHook(releaseOnce)
+    try {
+      navigation.open()
+    } catch (error) {
+      releaseOnce()
+      this.notify(`Could not open sessions: ${safeErrorMessage(error)}`, 'error')
+      return
+    }
+    // The command opens the fullscreen lease SYNCHRONOUSLY; a refused/absent
+    // lease means the Browser never appeared, so the dialog must come back
+    // instead of leaving the editor under a hold that no close would release.
+    if (this.workspaceLease?.kind !== 'sessions') {
+      releaseOnce()
+      this.notify('Sessions could not be opened; the dialog is back.', 'error')
+    }
+  }
+
+  /** Arm ONE one-shot callback for the next physical workspace close. */
+  private armWorkspaceCloseHook(hook: () => void): () => void {
+    const entry = (): void => { hook() }
+    this.workspaceCloseHooks.add(entry)
+    return () => { this.workspaceCloseHooks.delete(entry) }
+  }
+
+  /**
    * The result text a settled `ask_user_question` card should render: the
    * authoritative projection batch when one exists, else the card's own
    * recorded result. Presentation-only enrichment — persisted Session events
@@ -25945,6 +29897,9 @@ export class TuiApp {
      */
     agentInputWait = false,
   ): Promise<TuiQuestionAnswer[]> {
+    // M6 UX PR1: a foreground Question is a real Host modal and wins the seat
+    // over the Client-local Exit Choice.
+    this.preemptClientExitChoice()
     // A disposed surface must never leave the caller hanging: settle
     // rejected immediately (M0 stale-generation contract — the runner's
     // questions provider may fire during exit teardown).
@@ -25979,9 +29934,16 @@ export class TuiApp {
         reject,
         signal,
         agentInputWait,
-        ...status === undefined ? {} : { status },
+        // The split navigation hint paints only for a LIVE forwarded wait
+        // (the Agent is blocked on THIS answer); a continued late-answer form
+        // or a Client-local ask never carries the fact.
+        ...status === undefined
+          ? (agentInputWait ? { status: { navigationEligible: true } } : {})
+          : {
+            status: agentInputWait ? { ...status, navigationEligible: true } : status,
+          },
       }
-      state.flow.setStatus(status)
+      state.flow.setStatus(state.status)
       if (signal?.aborted === true) {
         reject(cancellationError('question flow aborted'))
         return
@@ -26008,12 +29970,167 @@ export class TuiApp {
     })
   }
 
+  /**
+   * The plan-review inspection (FR7 A4): a ONE-SHOT read-only viewport
+   * request. It resolves the OFFICIAL `intent.callId` against the CURRENT
+   * mounted transcript (native `tool.callId` or a nested PTC `subCallId`),
+   * commits a DEDICATED one-shot presentation (the located card and its
+   * hiding ancestors open exactly like a search navigation, through the SAME
+   * reveal path resolution — no search target, no synthetic match, no second
+   * ScrollView), scrolls the same fullscreen viewport to the card's measured
+   * row, and reports whether the locate was PROVEN. Every failed proof rolls
+   * the presentation back before returning, so the caller's fallback never
+   * inherits a half-applied reveal.
+   *
+   * The locate requires BOTH identities: the official Question's Session and
+   * the current display subject's Session must be known and equal; an unknown
+   * identity is not a proven locate (fail closed to the detail fallback).
+   */
+  /**
+   * The read-only admission BOTH the Fullscreen inspection and the Regular
+   * card-presence probe share: the flow is still the live seat owner AND the
+   * official Question's Session is provably the CURRENT display subject. An
+   * unknown identity on either side fails closed — a card in some other
+   * Session is never "the plan above", and the question's own detail stays the
+   * reading entry in the exception.
+   */
+  private planReviewTargetAdmitted(state: QuestionState, reviewSessionId: string | undefined): boolean {
+    if (this.activeQuestions !== state) return false
+    const displaySubject = this.statusStore.snapshot().view.subject
+    const displaySessionId = displaySubject.kind === 'main'
+      ? this.mainSessionIdText
+      : this.displaySubjectPresentation?.sessionId
+    if (reviewSessionId === undefined || displaySessionId === undefined) return false
+    return reviewSessionId === displaySessionId
+  }
+
+  /**
+   * Locate one OFFICIAL plan tool card in the CURRENT mounted transcript by
+   * the official `intent.callId` (a native `tool.callId`, or a nested PTC
+   * `subCallId` — the sub-call renders INSIDE its root card, so the reveal
+   * targets the ROOT message plus the child id). Local, read-only, no
+   * scroll and no presentation write: the Fullscreen inspection and the
+   * Regular card-presence probe share this ONE identity lookup.
+   */
+  private locatePlanCard(callId: string): { card: TranscriptMessage; ptcSubCallId?: string } | undefined {
+    let ptcSubCallId: string | undefined
+    const matches = (tool: Extract<TranscriptMessage, { kind: 'tool' }>): boolean => {
+      if (tool.name !== 'exit_plan_mode') return false
+      if (tool.callId === callId) return true
+      if (tool.subCallId === callId) {
+        ptcSubCallId = callId
+        return true
+      }
+      return false
+    }
+    const find = (messages: readonly TranscriptMessage[]): TranscriptMessage | undefined => {
+      for (const message of messages) {
+        if (message.kind === 'tool') {
+          if (matches(message)) return message
+          const nested = find(message.subCalls ?? [])
+          if (nested !== undefined) return message
+        }
+      }
+      return undefined
+    }
+    const card = find(this.messages)
+    return card === undefined ? undefined : { card, ...(ptcSubCallId === undefined ? {} : { ptcSubCallId }) }
+  }
+
+  private inspectPlanReview(state: QuestionState, reviewSessionId: string | undefined): boolean {
+    const question = state.flow.planReviewQuestionForHost()
+    const callId = question?.intent?.callId
+    if (question === undefined || callId === undefined || callId === '') return false
+    // Currentness + identity admission: the flow must still be the live seat
+    // owner AND the official Question's Session must prove it is the current
+    // display subject (the SAME admission the card-presence probe uses).
+    if (!this.planReviewTargetAdmitted(state, reviewSessionId)) return false
+    // A locate without a fullscreen viewport has nothing to address.
+    const scroll = this.fullscreenScroll
+    if (scroll === undefined) return false
+    const located = this.locatePlanCard(callId)
+    if (located === undefined) return false
+    const { card, ptcSubCallId } = located
+    // An EXPLICIT new View supersedes an earlier user collapse of this card
+    // (the user is asking to see the plan again). The collapse marker is
+    // dropped here; a collapse made DURING the new reading lease still wins
+    // (the reveal predicates honor it), so a repaint never fights the user.
+    if (this.expandedOverride.get(card) === false) this.expandedOverride.delete(card)
+    // A plan View never edits the SEARCH request's suppression record: a child
+    // the user collapsed under search stays collapsed for search after this
+    // lease ends (the plan lease ignores that record while it is active).
+    // Commit the one-shot presentation and re-project: the card and the
+    // hiding ancestors open, and (for a PTC target) the nested child opens.
+    this.planInspection = ptcSubCallId === undefined
+      ? { message: card }
+      : { message: card, subCallId: ptcSubCallId }
+    this.clearFocusLiveHeightState()
+    this.rebuildMessages('focus-disclosure')
+    // Prove the target's real rendered row in the fresh row map; a failure
+    // ROLLS THE PRESENTATION BACK so the fallback inherits nothing.
+    let docRow = 0
+    let cardEntry: (typeof this.messageRows)[number] | undefined
+    for (const entry of this.messageRows) {
+      if (entry.message === card) { cardEntry = entry; break }
+      docRow += entry.height
+    }
+    if (cardEntry === undefined) {
+      this.releasePlanInspectionReveal()
+      return false
+    }
+    // A PTC target is located INSIDE the root card: scroll to the CHILD's own
+    // measured row (the root's program body / earlier siblings may be long),
+    // never merely to the root card's top. The child's hit is the same
+    // geometry the disclosure/hit map uses; an unproven child fails closed.
+    if (ptcSubCallId !== undefined) {
+      const hit = cardEntry.subCallHits?.find(candidate => candidate.subCallId === ptcSubCallId)
+      if (hit === undefined) {
+        this.releasePlanInspectionReveal()
+        return false
+      }
+      docRow += hit.top
+    }
+    scroll.updateLayout(this.transcriptContentHeight, scroll.viewportHeight, () => this.requestRender())
+    const targetStart = this.transcriptWelcomeHeight + docRow
+    scroll.scrollTo(Math.max(0, targetStart - Math.floor(scroll.viewportHeight / 3)), { disableFollow: true })
+    this.requestRender()
+    return true
+  }
+
+  /** Release the plan inspection's one-shot presentation (reading-step Esc
+   * back, a failed locate, or the question settling): the located card keeps
+   * any user-opened disclosure, but the QUESTION never leaves a pinned reveal
+   * or a forced PTC expansion behind. Presentation-only. */
+  private releasePlanInspectionReveal(): void {
+    if (this.planInspection === undefined) return
+    this.revokePlanInspectionLease()
+    this.rebuildMessages('focus-disclosure')
+  }
+
+  /** Drop the one-shot plan inspection lease WITHOUT rebuilding: callers that
+   * already batch a disclosure transaction (Focus/Work/cluster/message
+   * toggles) rebuild once themselves. */
+  private revokePlanInspectionLease(): void {
+    if (this.planInspection === undefined) return
+    this.planInspection = undefined
+    // The search navigation's explicit collapses are a DIFFERENT request's
+    // state and survive a plan View/reading/settlement untouched (the plan
+    // lease writes no search suppression of its own).
+    this.clearFocusLiveHeightState()
+  }
+
+  /** The ONE-SHOT plan inspection presentation (FR7 A4): the card the current
+   * reading step is located on, plus the PTC child that must open inside it.
+   * Presentation-only display state; it never enters the question, the wire or
+   * the transcript corpus, and it is released by the reading step / settle /
+   * a failed locate / a session switch. */
+  private planInspection: { readonly message: TranscriptMessage; readonly subCallId?: string } | undefined
+
   /** Mount one flow into the editor seat and make it the active one. Every
    * step below that can run a synchronous callback is followed by an identity
    * fence: a flow that a callback preempted, replaced or cancelled must never
    * mount, focus or publish its frame (Phase 3A / PR-B §B2/§B5). */
-  private presentQuestion(state: QuestionState): void {
-    // Phase 3B / B1-A modal precedence: leave the Job workspace BEFORE the
+  private presentQuestion(state: QuestionState): void {    // Phase 3B / B1-A modal precedence: leave the Job workspace BEFORE the
     // question claims the seat (`activeQuestions` below), so the flow mounts and
     // focuses on the restored surface — never on a screen the workspace still
     // owns, and never with the Job swallowing the user's answer keys. The
@@ -26104,7 +30221,8 @@ export class TuiApp {
     // The suspension hands the keyboard to the seat owner and may fire a plugin
     // focus/blur callback: re-read the identity before building the frame.
     if (this.abandonIfDead(this.questionFlowIsLive(state), state)) return
-    const frame = new QuestionFrame(state.flow, () => this.terminal.rows)
+    this.installPlanReviewSeam(state)
+    const frame = new QuestionFrame(state.flow, () => this.terminal.rows, () => this.fullscreen !== undefined)
     state.frame = frame
     // Re-vendor lifecycle follow-up P1: the flow only PROJECTS into the
     // seat — the previous occupant (the editor's compiled component) stays
@@ -26126,6 +30244,53 @@ export class TuiApp {
     // setFocusSeat('overlay') above is a no-op and this is the ONLY budget
     // sync the replacement gets.
     this.requestRender()
+  }
+
+  /** Install (or clear) the plan-review host seam on ONE flow. Every mount
+   * path uses this: a directly presented question AND a queued successor handed
+   * over after a settle. The capability is a LIVE probe (the View row reflects
+   * the current Fullscreen executability) and the reading step drives the SAME
+   * transcript ScrollView; leaving the step (or settling) releases the
+   * one-shot presentation. */
+  private installPlanReviewSeam(state: QuestionState): void {
+    if (!state.flow.isPlanReviewFlow()) {
+      state.flow.setPlanInspection(undefined)
+      return
+    }
+    state.flow.setPlanInspection({
+      canInspect: () => this.fullscreen !== undefined,
+      inspect: () => this.inspectPlanReview(state, state.status?.reviewSessionId),
+      // Local card-presence probe: the SAME read-only Session/currentness
+      // admission as the inspection, then the official callId identity lookup.
+      // A provable card in the mounted transcript IS the "plan above in
+      // terminal history" that Regular's frozen ordinary layout names; an
+      // identity mismatch/unknown or no card ⇒ the question's own full-text
+      // exception entry (never an unrelated Session's card).
+      cardPresent: () => {
+        const callId = state.flow.planReviewQuestionForHost()?.intent?.callId
+        if (callId === undefined || callId === '') return false
+        if (!this.planReviewTargetAdmitted(state, state.status?.reviewSessionId)) return false
+        return this.locatePlanCard(callId) !== undefined
+      },
+    })
+    state.flow.onPlanReadingScroll = (direction, page) => {
+      const scroll = this.fullscreenScroll
+      if (scroll === undefined) return
+      scroll.updateLayout(this.transcriptContentHeight, scroll.viewportHeight, () => this.requestRender())
+      scroll.scrollBy(direction * (page ? Math.max(1, scroll.viewportHeight - 1) : 1))
+      this.requestRender()
+    }
+    // Home/End use the existing ScrollView owners (never a second viewport or
+    // a guessed row): the reading lease forwards the jump, the host clamps.
+    state.flow.onPlanReadingEdge = (edge) => {
+      const scroll = this.fullscreenScroll
+      if (scroll === undefined) return
+      scroll.updateLayout(this.transcriptContentHeight, scroll.viewportHeight, () => this.requestRender())
+      if (edge === 'start') scroll.scrollToStart()
+      else scroll.scrollToEnd()
+      this.requestRender()
+    }
+    state.flow.onPlanReadingEnd = () => this.releasePlanInspectionReveal()
   }
 
   /** Abort one flow (its signal fired). The ACTIVE flow settles rejected
@@ -26212,8 +30377,12 @@ export class TuiApp {
         settled.suspendedOverlays = new Set()
       },
       () => { target.flow.setStatus(target.status) },
+      // A QUEUED successor gets its own plan-review host seam: without this a
+      // queued plan-review question would mount with no live View capability
+      // (the decision list would silently drop to Keep/Approve).
+      () => this.installPlanReviewSeam(target),
       () => {
-        const frame = new QuestionFrame(target.flow, () => this.terminal.rows)
+        const frame = new QuestionFrame(target.flow, () => this.terminal.rows, () => this.fullscreen !== undefined)
         target.frame = frame
         // Re-vendor lifecycle follow-up P1: the next flow only PROJECTS
         // into the seat — the settled flow's frame is simply unmounted
@@ -26265,6 +30434,10 @@ export class TuiApp {
     // is a final OBLIGATION step of the SAME batch.
     runSyncDisposalSteps('question settlement', [
       () => this.keybindings.cancelLeader(),
+      // FR7: a settling plan-review releases its temporary reveal grant and
+      // forced PTC expansion (the question must never leave a pinned reveal
+      // behind; user-opened disclosures are untouched by this).
+      () => { if (state.flow.isPlanReviewFlow()) this.releasePlanInspectionReveal() },
       // M3-3B park/reopen: the owner receives the flow's FINAL local progress
       // before the seat is torn down, so parking a continued Question keeps the
       // user's answers, free text and current question exactly as they left them
@@ -26625,6 +30798,7 @@ export class TuiApp {
 }
 
 // Style helpers from the terminal theme runtime's token functions.
+import { imageIdentityText, toolRowImageBlocks, toolRowProjectsImages } from './tui/tsp/transcript-view.ts'
 import { color } from './tui/theme/runtime.ts'
 
 /**

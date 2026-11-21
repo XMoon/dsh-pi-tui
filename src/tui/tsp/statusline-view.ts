@@ -30,7 +30,7 @@
 import { ui } from '@stencil-hq/tern'
 import type { Node, Tone } from '@stencil-hq/tern'
 import type { StatusSnapshot } from '../../domain/status/types.ts'
-import { createBuiltinFooterRegistry } from '../footer/builtin-items.ts'
+import { createBuiltinFooterRegistry, tasksItem } from '../footer/builtin-items.ts'
 import { FooterCustomItemCatalog } from '../footer/custom-item-catalog.ts'
 import type { FooterItemDefinition, FooterRenderContext } from '../footer/presentation-types.ts'
 import type { FooterItemRef, FooterLayoutV1, FooterTone } from '../footer/presentation-types.ts'
@@ -41,6 +41,18 @@ import type { TspNativeFooterConfig } from '../../domain/footer/tsp-native-confi
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { clampMiddle } from './picker-text.ts'
 import { TSP_FOOTER_NOTICES } from '../../domain/footer/tsp-native-config.ts'
+
+/**
+ * Mouse PR4: the ONE protocol action string the first-party `tasks` status
+ * segment sends when the client activates it. It is an internal renderer
+ * constant, never a business command line and never a second `/tasks`
+ * interpreter: the TSP session admits an `action` event carrying it only for a
+ * node id of the CURRENT committed frame and then calls the registered
+ * `/tasks` UI entry. Shared with `session.ts` (the event gate) through this
+ * module so the projection and the admission can never disagree, and so no
+ * new module or circular import is introduced.
+ */
+export const TSP_FOOTER_TASKS_ACTION = 'dsh.footer.tasks.open'
 
 /**
  * The immutable builtin-only lookup for the FROZEN default/compact presets
@@ -213,6 +225,44 @@ const NO_COMPOSER_AFFORDANCES: TspFooterAffordances = {
   reasoning: false,
 }
 
+/**
+ * Mouse PR4: the per-frame affordances of the native statusline projection.
+ * It is UI-only and this frame's own: `tasksAction` names the protocol action
+ * the first-party Tasks segment may carry, and it is passed ONLY while the
+ * renderer's live admission predicate allows the click. Nothing here is
+ * business permission, Session state or persistent configuration.
+ */
+export interface NativeStatuslineOptions {
+  readonly tasksAction?: string
+}
+
+/**
+ * Mouse PR4: the ONLY first-party item whose native segment may carry an
+ * action. Identity — not the id string, not the rendered text — decides: an
+ * extension or USER item that happens to render the word "tasks" is never a
+ * navigation control, and a USER definition cannot shadow this id (the
+ * registry's non-custom layers win that collision).
+ */
+const TASKS_ITEM = tasksItem
+
+/** Whether this status item is the first-party Tasks builtin. */
+function isFirstPartyTasks(id: string): boolean {
+  return TASKS_ITEM.id === id
+}
+
+/**
+ * The click action one segment may carry, or `undefined`. Only the caller's
+ * action string AND the first-party identity admit one: the projection never
+ * invents an action value of its own.
+ */
+function segActions(
+  id: string,
+  tasksAction: string | undefined,
+): { readonly click: string } | undefined {
+  if (tasksAction === undefined) return undefined
+  return isFirstPartyTasks(id) ? { click: tasksAction } : undefined
+}
+
 /** Build one row's `ui.seg` children (an absent item contributes nothing).
  * The PR-F universal visibility filter runs BEFORE rendering: a hidden
  * placement never reaches the formatter (so it can never surface an
@@ -221,12 +271,14 @@ function rowSegments(
   snapshot: StatusSnapshot,
   items: readonly StatuslineItem[],
   affordances: TspFooterAffordances,
+  tasksAction?: string,
 ): Node[] {
   const segments: Node[] = []
   for (const item of items) {
     if (hideFooterRefInTsp({ id: item.id, format: item.format }, affordances)) continue
     const rendered = itemText(snapshot, item)
     if (rendered === undefined) continue
+    const actions = segActions(item.id, tasksAction)
     segments.push(ui.seg({
       key: item.key,
       text: rendered.text,
@@ -234,6 +286,7 @@ function rowSegments(
       ...(rendered.tone === undefined ? {} : { tone: rendered.tone }),
       ...(item.side === undefined ? {} : { side: item.side }),
       priority: item.priority,
+      ...(actions === undefined ? {} : { actions }),
     }))
   }
   return segments
@@ -346,7 +399,7 @@ function customRefSegments(
   presentation: NativeFooterPresentation,
   ref: FooterItemRef,
   side: 'left' | 'right',
-): { text: string; tone: Tone | undefined; importance: number } | undefined {
+): { text: string; tone: Tone | undefined; importance: number; firstPartyTasks: boolean } | undefined {
   // The retired viewer identity block stays INERT (registered, renders
   // nothing) — not an unsupported marker and never an error.
   if (ref.id === 'view-scope') return undefined
@@ -354,7 +407,7 @@ function customRefSegments(
   // items) are EXPLICIT_UNAVAILABLE in TSP: no extension state exists on this
   // renderer, and the synthetic builtin must not fabricate an empty bridge.
   if (isExtensionId(ref.id)) {
-    return { ...unavailableSeg('extension'), importance: ref.importance ?? 70 }
+    return { ...unavailableSeg('extension'), importance: ref.importance ?? 70, firstPartyTasks: false }
   }
   // The ONE mount-local registry answers every lookup (builtins + the USER
   // catalog attached through setCustomSource — the single source of truth).
@@ -364,9 +417,9 @@ function customRefSegments(
       // A USER command definition (classified by the resolver) or an unknown
       // `user:*` ref: the name is user-facing text, never the command string.
       const kind = presentation.userCommandIds.has(ref.id) ? 'command' : 'item'
-      return { ...unavailableSeg(kind, customItemName(ref.id)), importance: ref.importance ?? 70 }
+      return { ...unavailableSeg(kind, customItemName(ref.id)), importance: ref.importance ?? 70, firstPartyTasks: false }
     }
-    return { ...unavailableSeg('item'), importance: ref.importance ?? 70 }
+    return { ...unavailableSeg('item'), importance: ref.importance ?? 70, firstPartyTasks: false }
   }
   const segment = def.render(snapshot, ref, 'preferred', NO_SURFACE_HINTS)
   if (segment === null) return undefined
@@ -391,7 +444,17 @@ function customRefSegments(
   const tone = explicitTone
     ? nativeTone(ref.tone)
     : nativeTone(segment.spans.find(span => span.tone !== undefined)?.tone)
-  return { text, tone, importance: ref.importance ?? def.defaultImportance }
+  // Mouse PR4: the identity test reads the RESOLVED definition instance, not
+  // the id text: an extension/USER item that collides with the spelling (or
+  // renders the word "tasks") is not the first-party builtin and gets no
+  // action. Duplicate placements of the real builtin each keep their own
+  // placement key and all carry the SAME action.
+  return {
+    text,
+    tone,
+    importance: ref.importance ?? def.defaultImportance,
+    firstPartyTasks: def === TASKS_ITEM,
+  }
 }
 
 /**
@@ -404,6 +467,7 @@ function customRows(
   snapshot: StatusSnapshot,
   presentation: NativeFooterPresentation,
   affordances: TspFooterAffordances,
+  tasksAction?: string,
 ): readonly Node[] {
   const layout = presentation.layout
   if (layout === undefined) return []
@@ -419,12 +483,18 @@ function customRows(
         if (hideFooterRefInTsp(ref, affordances)) continue
         const rendered = customRefSegments(snapshot, presentation, ref, zone)
         if (rendered === undefined) continue
+        // Mouse PR4: ONLY the first-party Tasks builtin carries the action —
+        // an `Unavailable` placeholder, an extension item, a USER item and a
+        // fact-less item never do. A repeated placement keeps its own
+        // `footer-r<row>-<zone><index>` key and gets the SAME action.
+        const actions = rendered.firstPartyTasks ? segActions(ref.id, tasksAction) : undefined
         segments.push(ui.seg({
           key: `footer-r${rowNumber}-${zone[0]}${index}`,
           text: rendered.text,
           ...(rendered.tone === undefined ? {} : { tone: rendered.tone }),
           ...(zone === 'left' ? {} : { side: 'right' as const }),
           priority: rendered.importance,
+          ...(actions === undefined ? {} : { actions }),
         }))
       }
     }
@@ -450,24 +520,32 @@ export function nativeStatuslineRows(
   snapshot: StatusSnapshot,
   presentation: NativeFooterPresentation | undefined,
   affordances?: TspFooterAffordances,
+  options?: NativeStatuslineOptions,
 ): readonly Node[]
 export function nativeStatuslineRows(
   snapshot: StatusSnapshot,
   presentation?: NativeFooterPresentation,
   affordances: TspFooterAffordances = NO_COMPOSER_AFFORDANCES,
+  options?: NativeStatuslineOptions,
 ): readonly Node[] {
+  // Mouse PR4: the ONE optional affordance of this projection. It is NOT a
+  // business permission and NOT persistent config — it is the action string
+  // THIS frame's first-party Tasks segment may carry (the TSP session decides
+  // it per frame from its live admission predicate). Absent => the frozen
+  // read-only projection, byte for byte.
+  const tasksAction = options?.tasksAction
   if (presentation === undefined || presentation.mode === 'default') {
     const rows: Node[] = []
-    const rowOne = rowSegments(snapshot, ROW_ONE, affordances)
+    const rowOne = rowSegments(snapshot, ROW_ONE, affordances, tasksAction)
     if (rowOne.length > 0) rows.push(ui.status({ key: 'status-row-1' }, ...rowOne))
-    const rowTwo = rowSegments(snapshot, ROW_TWO, affordances)
+    const rowTwo = rowSegments(snapshot, ROW_TWO, affordances, tasksAction)
     if (rowTwo.length > 0) rows.push(ui.status({ key: 'status-row-2' }, ...rowTwo))
     return rows
   }
   if (presentation.mode === 'compact') {
-    const row = rowSegments(snapshot, COMPACT_ROW, affordances)
+    const row = rowSegments(snapshot, COMPACT_ROW, affordances, tasksAction)
     if (row.length > 0) return [ui.status({ key: 'status-row-1' }, ...row)]
     return []
   }
-  return customRows(snapshot, presentation, affordances)
+  return customRows(snapshot, presentation, affordances, tasksAction)
 }

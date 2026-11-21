@@ -66,12 +66,15 @@ import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
 import CommandRuntime from '@deepseek-ai/dsh-commands'
 import AgentPresetRegistry from '@deepseek-ai/dsh-agent-preset-registry'
+import SkillRegistry from '@deepseek-ai/dsh-skill'
 import TypertGatewayService from '@deepseek-ai/dsh-api-gateway'
 import { RemoteAccessService } from '@deepseek-ai/dsh-api-remote-access'
 import JobController from '@deepseek-ai/dsh-api-job-controller'
 import LocalCredentials from '@deepseek-ai/dsh-credentials-local'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import WorkingDirectory from '@deepseek-ai/dsh-working-directory'
+import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
+import LocalSandboxProvider from '@deepseek-ai/dsh-sandbox-local'
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { SqliteSessionQueryEngine } from '@deepseek-ai/dsh-session-query-sqlite'
 import Storage from '@deepseek-ai/dsh-storage'
@@ -80,10 +83,12 @@ import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
+import WorkspaceController from '@deepseek-ai/dsh-api-workspace-controller'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import * as toolJobs from '@deepseek-ai/dsh-tool-jobs'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
 import * as piTuiHostRuntime from '../../src/app/host/pi-tui-host-runtime.ts'
+import { PreferencesConfig as CanonicalPreferencesConfig } from '../../src/app/config/schema.ts'
 import * as performanceHost from '../../src/app/host/performance-host.ts'
 import type { RemotePromptSerializer } from '../../src/runtime/remote/session-writer-remote.ts'
 import { testLifecycle, type TestLifecycle } from './temp-lifecycle.ts'
@@ -284,6 +289,13 @@ function isolateFixtureHome(root: string): () => void {
   writeFileSync(globalNpmrc, '')
   const cache = join(home, '.npm-cache')
   mkdirSync(cache, { recursive: true })
+  // pnpm's content-addressable store does NOT follow HOME/XDG alone: CI's
+  // pnpm setup exports PNPM_HOME and caches the store there. A fixture tarball
+  // then comes from the shared cache and never reaches the loopback registry,
+  // which breaks the deliberate slow-tarball cancel window. Pin a
+  // fixture-owned store so every real-pnpm test really downloads its packages.
+  const pnpmStore = join(home, '.pnpm-store')
+  mkdirSync(pnpmStore, { recursive: true })
   const overrides: Record<string, string> = {
     npm_config_userconfig: userNpmrc,
     NPM_CONFIG_USERCONFIG: userNpmrc,
@@ -291,6 +303,8 @@ function isolateFixtureHome(root: string): () => void {
     NPM_CONFIG_GLOBALCONFIG: globalNpmrc,
     npm_config_cache: cache,
     NPM_CONFIG_CACHE: cache,
+    pnpm_config_store_dir: pnpmStore,
+    npm_config_store_dir: pnpmStore,
   }
   for (const [key, value] of Object.entries(overrides)) {
     remember(key)
@@ -353,6 +367,13 @@ export async function createRemoteApplicationHostFixture(
      */
     readonly isolateHome?: boolean
     /**
+     * M6-1 F8 H07: omit the official sandbox-policy provider (and the
+     * workspace-files row that injects it) so a Host with approval but WITHOUT
+     * any sandbox service can be composed. Opt-in; every other consumer keeps
+     * the production prerequisite graph.
+     */
+    readonly withoutSandbox?: boolean
+    /**
      * TS8-HF1: the Host `@`-file reference provider the private
      * `piTuiFileReferences` bare route delegates. `'local'` mounts the REAL
      * `@deepseek-ai/dsh-file-reference-local` service the production Host
@@ -366,6 +387,23 @@ export async function createRemoteApplicationHostFixture(
         signal?: AbortSignal,
       ): Promise<readonly { readonly path: string; readonly kind: 'file' | 'directory' }[]>
     }
+    /**
+     * M6 PR-C C3: omit the built-in Host Runtime row (`pi-tui-host-runtime`).
+     * The row installs the per-Agent TUI prompt policy on every ordinary Agent
+     * it observes (`agent/created`), so a test that installs its OWN
+     * controlled TUI prompt policy on real Agents (the neutral latch/sections
+     * semantics) opts out to avoid duplicate section registration. The row's
+     * own installation is covered by the Host parity/wire suites. Off by
+     * default so every other consumer keeps its exact previous composition.
+     */
+    readonly withoutHostRuntime?: boolean
+    /**
+     * Canonical `pi-tui-preferences` document values for this fixture (e.g.
+     * `{ gitAttribution: 'product-model' }`); omitted fields use the schema
+     * defaults. The Host Runtime's prompt rows read these refs live at every
+     * assembly.
+     */
+    readonly preferences?: Record<string, unknown>
   } = {},
 ): Promise<{
   ctx: Context
@@ -437,21 +475,39 @@ export async function createRemoteApplicationHostFixture(
     })
     await ctx.plugin(LocalFileSystem)
     // The OFFICIAL Host file service (the bundle's `workspace-files` row) — a
-    // Remote-composition prerequisite, mounted exactly once.
-    await mountWorkspaceFileService(ctx)
+    // Remote-composition prerequisite, mounted exactly once. The F8 H07
+    // composition deliberately omits the sandbox-policy provider this row
+    // injects, so the row is skipped with it.
+    if (options.withoutSandbox !== true) await mountWorkspaceFileService(ctx)
     // 0.2.1-rc.2's SessionController nests the official skill catalog and the real
     // `@`-file reference provider injects the directory owner: both require
     // the real `workingDirectory` service (the same row dsh-base mounts once).
     await ctx.plugin(WorkingDirectory)
-    // M4-B2-HF: the built-in PiTui Host Runtime owns the package contribution
-    // and both private Host services exactly once; Performance remains its own
-    // independent row. `createRemoteHostRuntime()` only verifies their gates.
-    await ctx.plugin(piTuiHostRuntime)
-    await ctx.plugin(performanceHost)
+    await ctx.plugin(LocalSandboxProvider)
+    await ctx.plugin(LocalSubprocessRuntime)
+    // The official Host Skills standing authorities the built-in Host Runtime
+    // now injects: the durable Workspace registry (a Host-issued WorkspaceId
+    // must resolve to the Host canonical path) and the official Skills
+    // registry (the standing metadata read). Both mount BEFORE the runtime row
+    // so its explicit injects settle; the fixture provides no skill providers,
+    // so an authoritative empty COMPLETE catalog is the real observation.
     await ctx.plugin(Storage)
     await ctx.plugin(StorageJson, { root: join(workRoot, 'storages') })
     await ctx.plugin(StorageDomain, { backend: 'json' })
     await ctx.plugin(WorkspaceRegistry)
+    await ctx.plugin(SkillRegistry)
+    // M6-1 F1: the same Host Runtime row owns one-shot shell and completion;
+    // M6-1 F6 adds the private Skills standing read and invalidation stream.
+    // The canonical preference authority the Host Runtime injects. These
+    // historical in-process fixtures mount the row directly, so they publish
+    // the same canonical references a real Host profile would.
+    ctx.provide('piTuiPreferences', CanonicalPreferencesConfig({ ...(options.preferences ?? {}) } as never))
+    if (options.withoutHostRuntime !== true) await ctx.plugin(piTuiHostRuntime, { sessionId: '' } as never)
+    await ctx.plugin(performanceHost)
+    // The official `workspace` Remote owner (the `workspace-controller` Host
+    // row): an ordinary Remote create names a Host WorkspaceId, so the Host must
+    // serve `workspace/create` and `workspace/follow` like production does.
+    await ctx.plugin(WorkspaceController)
     // The REAL writable credential provider the production base composition
     // mounts (`packages/bundle/base/cordis.patch.yml`, id `credentials`):
     // the abstract `@deepseek-ai/dsh-credentials` seam has no set/unset, so

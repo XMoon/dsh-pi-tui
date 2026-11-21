@@ -82,7 +82,7 @@ test('the /skill paths resolve ONE atomic live scope and never pair two identity
 })
 
 test('loadSkill uses the captured scope for every session-scoped operation', () => {
-  const body = span(commandsSource, 'const loadSkill = async (', '\n  const skillDisposers = new Map<string, () => void>()')
+  const body = span(commandsSource, 'const loadSkill = async (', '\n  const replaceSkillCommands = ')
   assert.equal(body.includes('agent.session.id'), false,
     'a session-scoped call must use scope.sessionId, never an agent-derived id')
   // Every catalog interaction goes through a SCOPE-BOUND facade: the captured
@@ -116,11 +116,6 @@ test('requireLiveSessionScope ensures the session then captures the scope atomic
   assert.ok(facade.includes('return scope'), 'the captured scope is returned alone')
 })
 
-test('sessionGeneration no longer exists in the command layer', () => {
-  assert.equal(commandLayerSource.includes('sessionGeneration'), false,
-    'A3-2 deletes the member: the scope-bound refresh facade carries the target key')
-})
-
 test('scope-bound reads admit through ONE stale-throwing helper, never a raw current read', () => {
   // A3-5: the helper lives in the bound command runtime; the runner resolves
   // the exact Direct attachment in the SAME synchronous step the helper's
@@ -146,7 +141,6 @@ test('scope-bound reads admit through ONE stale-throwing helper, never a raw cur
     'listScopedSkills',
     'currentSessionActivity',
     'currentSessionRouting',
-    'currentApprovalOverride',
     'currentSessionStats',
     'lastAssistantText',
     'refreshSessionCatalog',
@@ -233,16 +227,21 @@ test('scope-bound WRITES refuse a stale scope BEFORE dispatching its sessionId',
     assert.ok(next > at, `${name} provider span end was not found`)
     return commandSurfaceSource.slice(at, next)
   }
-  // `setSessionApprovalPolicy` is a synchronous write: the exact-owner
-  // admission and the explicit stale-scope refusal BOTH precede the only
-  // `scope.sessionId` dispatch (never a re-resolved id).
+  // `setSessionApprovalPolicy` is the transport-neutral ASYNC exact-session
+  // write (M6-1 F8): the explicit stale-scope refusal precedes the ONE
+  // `scope.sessionId` dispatch to the SessionPolicyPort, the post-await
+  // re-check preserves the settlement, and it requires NO Direct agent —
+  // asserted by ABSENCE (the old `agentForLiveScope(scope)` prerequisite was
+  // the Remote-blocking bug this slice removes).
   const approval = writeSpan('setSessionApprovalPolicy', 'switchSession')
-  assert.ok(approval.includes('agentForLiveScope(scope)'),
-    'setSessionApprovalPolicy must admit through agentForLiveScope')
   assert.ok(approval.includes('if (!deps.sessionScope.isCurrent(scope)) return'),
     'setSessionApprovalPolicy must REFUSE a stale scope explicitly (never retarget)')
-  assert.ok(approval.indexOf('scope.sessionId') > approval.indexOf('agentForLiveScope(scope)'),
-    'setSessionApprovalPolicy must guard before dispatching scope.sessionId')
+  assert.ok(approval.includes('deps.backend.sessionPolicy.setApproval('),
+    'setSessionApprovalPolicy dispatches the ONE SessionPolicyPort write')
+  assert.ok(!approval.includes('agentForLiveScope(scope)'),
+    'setSessionApprovalPolicy must NOT require a Direct agent (the Remote branch reaches the SAME semantic)')
+  assert.ok((approval.match(/deps\.sessionScope\.isCurrent\(scope\)/g) ?? []).length >= 2,
+    'the async approval write re-checks the ORIGINAL scope after its await')
   assert.ok(!approval.includes('agentNow()'),
     'setSessionApprovalPolicy must not read the current attachment directly')
   // `applyPermissionPreset` is TRANSPORT-NEUTRAL (PR5 v2 §1D, owner ruling):

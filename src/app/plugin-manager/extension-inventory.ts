@@ -13,6 +13,126 @@
  */
 
 import { copySafe } from '../../domain/terminal/copy-safe.ts'
+import type { ClientExtensionObservation } from '../client-extensions/mount-owner.ts'
+
+/** The CURRENT Client's real `./tui` status for one official bundle. These are
+ *  Client Loader facts; they never restate the Host's installed/selected
+ *  truth. */
+export type CurrentClientPluginStatus =
+  | 'ACTIVE'
+  | 'PENDING'
+  | 'ERROR'
+  | 'RELOAD_REQUIRED'
+  | 'UNAVAILABLE'
+  | 'NOT_OPTED_IN'
+  | 'NOT_SELECTED'
+
+/** One detached Client status fact with its truthful display label. */
+export interface CurrentClientPluginFact {
+  readonly status: CurrentClientPluginStatus
+  readonly label: string
+  readonly reason?: string
+  readonly entryId?: string
+  readonly configRevision?: number
+}
+
+const CURRENT_CLIENT_STATUS_LABEL: Readonly<Record<CurrentClientPluginStatus, string>> = Object.freeze({
+  ACTIVE: 'Active',
+  PENDING: 'Pending',
+  ERROR: 'Error',
+  RELOAD_REQUIRED: 'Reload required',
+  UNAVAILABLE: 'Unavailable',
+  NOT_OPTED_IN: 'Not opted in',
+  NOT_SELECTED: 'Not selected',
+})
+
+/**
+ * Classify ONE official bundle's CURRENT Client `./tui` status from the HOST
+ * facts (`installed`/`enabled`) and THIS Client's live Loader observations.
+ *
+ * Rules (R8-E PR-4):
+ * - the bundle name is matched exactly against the observation package name;
+ * - a selected, installed bundle with NO observation is `UNAVAILABLE` / not
+ *   yet observed, never a fabricated `NOT_OPTED_IN`; only a successful
+ *   discovery's explicit `not-opted-in` phase proves that negative fact;
+ * - a Host-unselected bundle without an observation remains `NOT_SELECTED`;
+ *   an uninstalled bundle remains `UNAVAILABLE`;
+ * - an observation wins over the Host flags: a Host-selected package can
+ *   still be ERROR/RELOAD_REQUIRED in this Client;
+ * - contribution counts and the Host `enabled` flag never produce ACTIVE.
+ */
+export function classifyCurrentClientPluginStatus(
+  bundleName: string,
+  installed: boolean,
+  enabled: boolean,
+  liveObservations: readonly ClientExtensionObservation[],
+): CurrentClientPluginFact {
+  const matches = liveObservations.filter(observation => observation.packageName === bundleName)
+  if (matches.length > 1) {
+    return {
+      status: 'UNAVAILABLE',
+      label: CURRENT_CLIENT_STATUS_LABEL.UNAVAILABLE,
+      reason: 'multiple live Client entries name this package',
+    }
+  }
+  const observation = matches[0]
+  if (observation === undefined) {
+    if (!installed) {
+      return {
+        status: 'UNAVAILABLE',
+        label: CURRENT_CLIENT_STATUS_LABEL.UNAVAILABLE,
+        reason: 'the package is not installed in this Client',
+      }
+    }
+    return enabled
+      ? {
+          status: 'UNAVAILABLE',
+          label: CURRENT_CLIENT_STATUS_LABEL.UNAVAILABLE,
+          reason: 'the CURRENT Client has not observed this package yet',
+        }
+      : { status: 'NOT_SELECTED', label: CURRENT_CLIENT_STATUS_LABEL.NOT_SELECTED }
+  }
+  const base = {
+    ...observation.entryId === undefined ? {} : { entryId: observation.entryId },
+    ...observation.configRevision === undefined ? {} : { configRevision: observation.configRevision },
+  }
+  switch (observation.phase) {
+    case 'active':
+      return { status: 'ACTIVE', label: CURRENT_CLIENT_STATUS_LABEL.ACTIVE, ...base }
+    case 'pending':
+      return {
+        status: 'PENDING',
+        label: CURRENT_CLIENT_STATUS_LABEL.PENDING,
+        ...base,
+        ...observation.reason === undefined ? {} : { reason: observation.reason },
+      }
+    case 'error':
+      return {
+        status: 'ERROR',
+        label: CURRENT_CLIENT_STATUS_LABEL.ERROR,
+        ...base,
+        ...observation.reason === undefined ? {} : { reason: observation.reason },
+      }
+    case 'reload-required':
+      return {
+        status: 'RELOAD_REQUIRED',
+        label: CURRENT_CLIENT_STATUS_LABEL.RELOAD_REQUIRED,
+        ...base,
+        ...observation.reason === undefined ? {} : { reason: observation.reason },
+      }
+    case 'not-opted-in':
+      return { status: 'NOT_OPTED_IN', label: CURRENT_CLIENT_STATUS_LABEL.NOT_OPTED_IN }
+    case 'unavailable':
+    case 'unresolved':
+    case 'invalid-opt-in':
+      return {
+        status: 'UNAVAILABLE',
+        label: CURRENT_CLIENT_STATUS_LABEL.UNAVAILABLE,
+        ...base,
+        ...observation.reason === undefined ? {} : { reason: observation.reason },
+      }
+  }
+}
 
 /** The minimal read view of one live contribution (`ContributionHealth`). */
 export interface TuiExtensionHealthRecord {
@@ -165,9 +285,18 @@ export interface TuiExtensionContributionTotals {
   readonly other: number
 }
 
+/** One CURRENT Client Loader status fact for the diagnostics page. */
+export interface TuiExtensionClientStatus {
+  readonly packageName: string
+  readonly status: string
+  readonly reason?: string
+}
+
 /** The detached, immutable Plugin Manager diagnostics projection. It combines
  * three separate truth sources without collapsing them: contribution health
- * records, live registry counts, and the actual advertised capability set. */
+ * records, live registry counts, and the actual advertised capability set.
+ * `clientExtensions` (R8-E PR-4) is a fourth, independently labelled group:
+ * this Client's real Loader phases, never the Host install log. */
 export interface TuiExtensionDiagnostics {
   /** Contributions whose owner has a PROVEN Loader entry id, sorted. */
   readonly entries: readonly TuiContributionDiagnostic[]
@@ -178,6 +307,8 @@ export interface TuiExtensionDiagnostics {
   readonly capabilities: readonly string[]
   /** `all active`, or `n failed · n shadowed` (plus `n other` if reported). */
   readonly healthSummary: string
+  /** The CURRENT Client's per-package Loader status, when a source is mounted. */
+  readonly clientExtensions?: readonly TuiExtensionClientStatus[]
 }
 
 function compareDiagnostic(
@@ -232,6 +363,14 @@ export function serializeTuiExtensionDiagnostics(view: TuiExtensionDiagnostics):
     lines.push('Unassociated extension contributions', '')
     for (const entry of view.unmappedEntries) lines.push(formatTuiContributionDiagnostic(entry), '')
   }
+  if (view.clientExtensions !== undefined && view.clientExtensions.length > 0) {
+    lines.push('Client extension status (this Client)', '')
+    for (const client of view.clientExtensions) {
+      lines.push(`Package: ${copySafe(client.packageName)}`, `Status: ${copySafe(client.status)}`)
+      if (client.reason !== undefined) lines.push(`Reason: ${copySafe(client.reason)}`)
+      lines.push('')
+    }
+  }
   return lines.join('\n').trimEnd()
 }
 
@@ -246,6 +385,7 @@ export function describeTuiExtensionDiagnostics(
   source: TuiExtensionObservationSource,
   registries: TuiExtensionRegistrySource,
   capabilities: ReadonlySet<string>,
+  clientObservations?: readonly ClientExtensionObservation[],
 ): TuiExtensionDiagnostics {
   const entryIds = source.ownerEntryIds?.()
   const entries: TuiContributionDiagnostic[] = []
@@ -306,5 +446,16 @@ export function describeTuiExtensionDiagnostics(
     registryCounts,
     capabilities: Object.freeze([...capabilities].sort()),
     healthSummary: healthParts.join(' · '),
+    ...(clientObservations === undefined
+      ? {}
+      : {
+          clientExtensions: Object.freeze(clientObservations
+            .map(observation => Object.freeze({
+              packageName: observation.packageName,
+              status: observation.phase,
+              ...(observation.reason === undefined ? {} : { reason: observation.reason }),
+            }))
+            .sort((left, right) => left.packageName < right.packageName ? -1 : left.packageName > right.packageName ? 1 : 0)),
+        }),
   })
 }

@@ -13,7 +13,10 @@
  * - Divider, then the Preview: the soft-wrapped ORIGINAL prompt text with an
  *   INDEPENDENT scroll position, a `Preview x-y/N` heading carrying the copy
  *   actions and ONE trailing metadata row;
- * - Footer hint: `Enter use · Esc cancel · Tab scope · …`.
+ * - Footer hint: Regular keeps the keyboard hint (`Enter use · Esc cancel ·
+ *   Tab scope · …`); Fullscreen paints the complete pointer spans
+ *   `Cancel [Esc]`, `Scope [Tab]`, `Expand/Collapse [F2]` and the conditional
+ *   `Use [Enter]` / `Copy All [Alt+C]` fallbacks.
  *
  * The Preview is never truncated: `… more` is gone, the whole source is
  * scrollable, and every painted cell maps back to its exact original UTF-16
@@ -29,10 +32,12 @@
  *
  * Pointer contract (Transcript Fullscreen ONLY): the alt screen's single
  * native SGR parser dispatches press/drag/release into this component. A result
- * row click only SELECTS; the explicit `Use Selected [Enter]` / `Copy All [Alt+C]` items
- * and the Preview drag selection act, always resolved against the LAST PAINTED
- * frame (width/height, result identity, search generation) and the exact
- * original source offsets. In the regular main screen this component installs
+ * row click only SELECTS; the explicit `Use Selected [Enter]` / `Copy All [Alt+C]` items,
+ * the Fullscreen Footer's complete `Cancel [Esc]` / `Scope [Tab]` /
+ * `Expand/Collapse [F2]` spans and the Preview drag selection act, always
+ * resolved against the LAST PAINTED frame (width/height, result identity,
+ * search generation, seat scope/expand state) and the exact original source
+ * offsets. In the regular main screen this component installs
  * no mouse behavior at all: {@link HistoryPanel.handleMouse} refuses every
  * event while the pointer capability is disabled.
  *
@@ -48,7 +53,7 @@ import type { HistorySearchResult, HistorySearchSource, HistoryScope } from '../
 import { HISTORY_SEARCH_RESULT_LIMIT } from '../../client/history/search.ts'
 import { HISTORY_SEARCH_DEBOUNCE_MS } from '../../client/history/search.ts'
 import { HISTORY_CHORDS, type HistoryChordId } from '../keybindings/hints.ts'
-import { renderActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
+import { ACTION_BAR_SEPARATOR, layoutActionBarRow, renderActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color } from '../theme/runtime.ts'
 import {
@@ -325,15 +330,28 @@ interface HistoryPointerAction {
   readonly id: string
 }
 
+/** The Footer's OWN action set. `useSelected`/`copyAll` are the narrow-frame
+ *  fallbacks and carry the selected result identity; Cancel/Scope/Expand are
+ *  seat-local and never touch a Host write. */
+type HistoryFooterActionKind = 'cancel' | 'scope' | 'expand' | 'useSelected' | 'copyAll'
+
+interface HistoryFooterAction {
+  readonly kind: HistoryFooterActionKind
+  /** The selected result identity for Use/Copy, null for the seat-local verbs. */
+  readonly id: string | null
+}
+
 /** One physical row of the last painted frame (mouse hit-testing). The map is
  * built from the EXACT final rows `render()` returns, so a pointer can only act
  * on last-painted geometry. */
 type HistoryMouseHit =
   | { readonly kind: 'inert' }
   | { readonly kind: 'search'; readonly xOffset: number }
+  | { readonly kind: 'scope-tabs'; readonly spans: readonly { readonly scope: HistoryScope; readonly from: number; readonly to: number }[] }
   | { readonly kind: 'result'; readonly id: string }
   | { readonly kind: 'preview'; readonly row: number }
   | { readonly kind: 'actions'; readonly actions: readonly { readonly from: number; readonly to: number; readonly action: HistoryPointerAction }[] }
+  | { readonly kind: 'footer'; readonly actions: readonly { readonly from: number; readonly to: number; readonly action: HistoryFooterAction }[] }
 
 /** The last painted frame: the ONLY geometry a pointer event may resolve
  *  against. `generation` is the panel's search generation at paint time, so a
@@ -357,16 +375,52 @@ interface HistoryMouseFrame {
   readonly paintedResultIds: ReadonlySet<string>
 }
 
-interface HistoryPointerGesture {
-  readonly kind: 'result' | 'actions' | 'preview'
-  readonly generation: number
-  readonly x: number
-  readonly y: number
-  /** The pressed result identity (result/useSelected gestures). */
-  readonly id?: string
-  /** The pressed pointer action (actions gestures). */
-  readonly action?: HistoryPointerAction
-}
+type HistoryPointerGesture =
+  | {
+      readonly kind: 'scope-tab'
+      readonly generation: number
+      readonly sourceScope: HistoryScope
+      readonly targetScope: HistoryScope
+      readonly row: number
+      readonly from: number
+      readonly to: number
+      readonly width: number
+      readonly height: number
+    }
+  | {
+      readonly kind: 'result'
+      readonly generation: number
+      readonly x: number
+      readonly y: number
+      /** The pressed result identity. */
+      readonly id: string
+    }
+  | {
+      readonly kind: 'actions'
+      readonly generation: number
+      readonly x: number
+      readonly y: number
+      readonly action: HistoryPointerAction
+    }
+  | {
+      readonly kind: 'preview'
+      readonly generation: number
+      readonly x: number
+      readonly y: number
+    }
+  | {
+      readonly kind: 'footer'
+      readonly generation: number
+      readonly x: number
+      readonly y: number
+      readonly action: HistoryFooterAction
+      /** The seat state the pressed frame described: a repaint that changes any
+       *  of these (or a settled page that replaces the selection) makes the
+       *  release stale. */
+      readonly scope: HistoryScope
+      readonly expanded: boolean
+      readonly selectedId: string | undefined
+    }
 
 /** The shortest distinctive cwd suffix (parent + name). */
 function shortCwd(cwd: string): string {
@@ -573,6 +627,9 @@ export class HistoryPanel implements Component, Focusable {
   }
 
   handleInput(data: string): void {
+    // Keyboard input between a press and its release is intervening input: the
+    // release must never replay a Footer/heading action taken for the old frame.
+    this.gesture = undefined
     // Tab: scope toggle — the query SURVIVES.
     if (this.matchesChord('scope', data)) {
       this.toggleScope()
@@ -633,6 +690,16 @@ export class HistoryPanel implements Component, Focusable {
    * ONLY the region under the pointer.
    */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    // A WHEEL between a press and its release scrolls the list/preview under
+    // the pressed cell while the pointer stays there, so the old row/action
+    // identity may still resolve after the repaint; it revokes the pending
+    // gesture (a Preview drag's highlight is dropped with it). Move/drag is
+    // NOT a revocation here: the alt screen already withholds the synthesized
+    // click when the pointer left the pressed cell.
+    if (event.type === 'wheel') {
+      if (this.gesture?.kind === 'preview') this.resetPreviewSelection()
+      this.gesture = undefined
+    }
     // The pointer path never passes the Host key ladder, so THIS is the entry
     // that must guard the live tenant identity (the captured session subject):
     // a click must never act on another session's page, and the fork keeps
@@ -664,6 +731,24 @@ export class HistoryPanel implements Component, Focusable {
     if (hit === undefined) return undefined
 
     if (event.type === 'press') {
+      if (hit.kind === 'scope-tabs') {
+        const span = hit.spans.find(candidate => event.x >= candidate.from && event.x < candidate.to)
+        if (span === undefined) return undefined
+        // Capture the complete painted identity NOW: source scope, target,
+        // row/span/grant and the search generation the frame was painted with.
+        this.gesture = {
+          kind: 'scope-tab',
+          generation: frame.generation,
+          sourceScope: this.state.scope,
+          targetScope: span.scope,
+          row: event.y,
+          from: span.from,
+          to: span.to,
+          width: event.width,
+          height: event.height,
+        }
+        return { handled: true }
+      }
       if (hit.kind === 'search') {
         const result = dispatchMouseEvent(this.input, { ...event, x: event.x - hit.xOffset, y: 0 })
         // The Input's own focus intent is deliberately DROPPED: the panel is the
@@ -694,6 +779,25 @@ export class HistoryPanel implements Component, Focusable {
         this.gesture = { kind: 'actions', generation: frame.generation, x: event.x, y: event.y, action }
         return { handled: true }
       }
+      if (hit.kind === 'footer') {
+        // A Footer press only arms the EXACT painted action; the release must
+        // re-prove the same frame, seat state and (for Use/Copy) result id.
+        const action = this.footerActionAt(hit, event.x)
+        if (action === undefined) return undefined
+        if (action.kind === 'useSelected' && !this.canAccept()) return undefined
+        if (action.kind === 'copyAll' && !this.canAcceptCopy()) return undefined
+        this.gesture = {
+          kind: 'footer',
+          generation: frame.generation,
+          x: event.x,
+          y: event.y,
+          action,
+          scope: this.state.scope,
+          expanded: this.expanded,
+          selectedId: this.selected()?.id,
+        }
+        return { handled: true }
+      }
       if (hit.kind === 'preview') {
         // A press inside the painted Preview starts the exact source drag.
         this.gesture = { kind: 'preview', generation: frame.generation, x: event.x, y: event.y }
@@ -719,6 +823,54 @@ export class HistoryPanel implements Component, Focusable {
       const generation = frame.generation
       this.gesture = undefined
       if (gesture === undefined || gesture.generation !== generation) return undefined
+      if (gesture.kind === 'scope-tab') {
+        // The release must still describe the SAME painted header and the SAME
+        // source scope: a query/scope change, a repaint at another row/grant or
+        // a stale tenant retires the press instead of retargeting the click.
+        if (frame.generation !== this.state.generation) return undefined
+        if (event.y !== gesture.row || event.width !== gesture.width || event.height !== gesture.height) return undefined
+        if (hit.kind !== 'scope-tabs') return undefined
+        const span = hit.spans.find(candidate => candidate.scope === gesture.targetScope
+          && candidate.from === gesture.from && candidate.to === gesture.to)
+        if (span === undefined || event.x < span.from || event.x >= span.to) return undefined
+        if (this.state.scope !== gesture.sourceScope || !this.tenantIsCurrent()) return undefined
+        this.selectScope(gesture.targetScope)
+        return { handled: true, render: true }
+      }
+      if (gesture.kind === 'footer') {
+        const current = hit.kind === 'footer' ? this.footerActionAt(hit, event.x) : undefined
+        if (current === undefined
+          || current.kind !== gesture.action.kind
+          || current.id !== gesture.action.id) return undefined
+        // The seat state and the painted result identity the press belonged to
+        // must still hold; a scope/expand change or a replaced selection makes
+        // the release stale. `Use`/`Copy` also re-check their live predicates.
+        if (this.state.scope !== gesture.scope || this.expanded !== gesture.expanded) return undefined
+        if ((current.kind === 'useSelected' || current.kind === 'copyAll')
+          && this.selected()?.id !== gesture.selectedId) return undefined
+        if (!this.tenantIsCurrent()) return undefined
+        if (current.kind === 'cancel') {
+          this.onClose()
+          return { handled: true }
+        }
+        if (current.kind === 'scope') {
+          this.toggleScope()
+          return { handled: true, render: true }
+        }
+        if (current.kind === 'expand') {
+          this.expanded = !this.expanded
+          this.onResultsChanged?.()
+          return { handled: true, render: true }
+        }
+        if (current.kind === 'copyAll') {
+          if (!this.canAcceptCopy()) return undefined
+          this.copyAll()
+          return { handled: true, render: true }
+        }
+        if (!this.canAccept()) return undefined
+        this.acceptSelected()
+        return { handled: true }
+      }
       if (gesture.kind !== 'actions') return { handled: true }
       // The synthesized click already proves press and release landed on the
       // same painted cell; the gesture additionally re-proves the ACTION and
@@ -834,10 +986,16 @@ export class HistoryPanel implements Component, Focusable {
     // last row, BELOW the action bar. Both are decoration: the plan drops the
     // bottom rule first, then the top one, before any Preview region shrinks.
     if (layout.topRule) push(color.border('─'.repeat(layout.width)), { kind: 'inert' })
-    if (layout.header) push(this.renderHeader(layout.width), { kind: 'inert' })
+    if (layout.header) {
+      const header = this.renderHeader(layout.width)
+      push(header.text, header.hit)
+    }
     if (layout.query) push(this.renderQueryRow(layout.width), { kind: 'search', xOffset: visibleWidth('Search: ') })
 
     const previewable = this.previewable()
+    // Which of the Preview heading's two actions THIS frame really painted: the
+    // Footer only offers the matching fallback when one was dropped whole.
+    const paintedHeadingActions = new Set<HistoryFooterActionKind>()
     if (!previewable) {
       if (layout.resultsRows > 0) push(this.renderMessage(layout.width), { kind: 'inert' })
     } else {
@@ -850,12 +1008,32 @@ export class HistoryPanel implements Component, Focusable {
       const preview = this.renderPreview(layout)
       previewTop = lines.length
       for (const line of preview) {
+        if (line.kind === 'heading' && line.hit.kind === 'actions') {
+          for (const action of line.hit.actions) paintedHeadingActions.add(action.action.kind)
+        }
         if (line.kind === 'content' && previewContentTop === undefined) previewContentTop = lines.length
         push(line.text, line.hit)
       }
       previewBottom = lines.length - 1
     }
-    if (layout.footer) push(this.renderFooter(layout.width), { kind: 'inert' })
+    if (layout.footer) {
+      // Paint-time eligibility against THE FRAME BEING BUILT (the committed
+      // frame is still the previous one): a fallback is only offered when the
+      // selected row really is painted and the state could accept/copy it. The
+      // press/click still re-run `canAccept`/`canAcceptCopy` against the live
+      // frame, so this only decides what may be ADVERTISED.
+      const selectedId = this.selected()?.id
+      const paintedSelection = selectedId !== undefined
+        && paintedResultIds.has(selectedId)
+        && this.tenantIsCurrent()
+      const footer = this.renderFooter(
+        layout.width,
+        paintedHeadingActions,
+        paintedSelection && layout.acceptEnabled && !this.state.loading && this.state.error === undefined,
+        paintedSelection && this.state.error === undefined,
+      )
+      push(footer.text, footer.hit)
+    }
     if (layout.bottomRule) push(color.border('─'.repeat(layout.width)), { kind: 'inert' })
 
     // A frame whose width or height moved: the painted rows, the pointer hit map
@@ -906,24 +1084,44 @@ export class HistoryPanel implements Component, Focusable {
 
   // ── rendering ────────────────────────────────────────────────────────────
 
-  private renderHeader(width: number): string {
+  private renderHeader(width: number): { text: string; hit: HistoryMouseHit } {
     // Identity is Title Case, role 1 (`textStrong`); the leading/trailing blank
     // width of the old ` Input history ` is preserved.
     const title = ' Input History '
     const hint = `${HISTORY_CHORDS.expand.label} ${this.expanded ? 'collapse' : 'expand'}`
     const tabs = this.renderTabs(width)
     const headPlain = `${title}${tabs.plain}`
+    // The hit spans are resolved from the SAME text the final row paints: a
+    // label clipped by the head clamp (or covered by its trailing ellipsis)
+    // never publishes a target. Coordinates stay panel-local in terminal cells.
+    const publishHit = (paintedHead: string, truncated: boolean): HistoryMouseHit => {
+      if (!this.pointerEnabled()) return { kind: 'inert' }
+      const paintedLimit = truncated
+        ? Math.max(0, visibleWidth(paintedHead) - 1)
+        : visibleWidth(paintedHead)
+      const titleWidth = visibleWidth(title)
+      const spans = tabs.spans
+        .map(span => ({ scope: span.scope, from: span.from + titleWidth, to: span.to + titleWidth }))
+        .filter(span => span.to <= paintedLimit)
+      return spans.length === 0 ? { kind: 'inert' } : { kind: 'scope-tabs', spans }
+    }
     const gap = width - visibleWidth(headPlain) - visibleWidth(hint)
     if (gap >= 2) {
       // Styles are applied AFTER the widths are resolved, so the line can never
       // exceed the frame. The F2 hint is role 13 (`textMuted`).
-      return `${color.textStrong(title)}${tabs.styled}${' '.repeat(gap)}${color.textMuted(hint)}`
+      return {
+        text: `${color.textStrong(title)}${tabs.styled}${' '.repeat(gap)}${color.textMuted(hint)}`,
+        hit: publishHit(headPlain, false),
+      }
     }
     // Cramped: the F2 hint is removed WHOLE (never a partial `F2 exp…`); the
     // scope tabs keep their own ink while the head fits, and the head is
     // clamped plain only below the frozen 44-column matrix minimum.
-    if (visibleWidth(headPlain) <= width) return `${color.textStrong(title)}${tabs.styled}`
-    return color.textStrong(clampLine(headPlain, width))
+    if (visibleWidth(headPlain) <= width) {
+      return { text: `${color.textStrong(title)}${tabs.styled}`, hit: publishHit(headPlain, false) }
+    }
+    const clamped = clampLine(headPlain, width)
+    return { text: color.textStrong(clamped), hit: publishHit(clamped, true) }
   }
 
   /**
@@ -932,19 +1130,34 @@ export class HistoryPanel implements Component, Focusable {
    * the short forms (`Session` / `Directory` / `All`). Each Header paints
    * exactly ONE active scope as a bold-`primary` `[Label]`; the others are
    * `textDim`. The session tab exists only when a live session identity was
-   * injected.
+   * injected. `spans` are the complete VISIBLE label cells in the returned
+   * plain text, with the active label's brackets included and the inactive
+   * labels' surrounding decoration excluded.
    */
-  private renderTabs(width: number): { plain: string; styled: string } {
+  private renderTabs(width: number): {
+    plain: string
+    styled: string
+    spans: readonly { scope: HistoryScope; from: number; to: number }[]
+  } {
     const wide = width >= 85
     const sessionLabel = this.sessionId !== undefined ? (wide ? 'Current Session' : 'Session') : null
     const currentLabel = wide ? 'Current Directory' : 'Directory'
     const allLabel = wide ? 'All Directories' : 'All'
-    const parts: Array<{ plain: string; styled: string }> = []
+    const parts: Array<{ plain: string; styled: string; scope: HistoryScope; from: number; to: number }> = []
+    let cursor = 2 // the fixed two-cell lead before the first tab
     const push = (scope: HistoryScope, label: string): void => {
       const active = this.state.scope === scope
-      parts.push(active
-        ? { plain: `[${label}]`, styled: color.textStrong(`[${label}]`, 'primary') }
-        : { plain: ` ${label} `, styled: ` ${color.textDim(label)} ` })
+      const plain = active ? `[${label}]` : ` ${label} `
+      parts.push({
+        plain,
+        styled: active
+          ? color.textStrong(plain, 'primary')
+          : ` ${color.textDim(label)} `,
+        scope,
+        from: cursor + (active ? 0 : 1),
+        to: cursor + (active ? visibleWidth(plain) : 1 + visibleWidth(label)),
+      })
+      cursor += visibleWidth(plain) + 1
     }
     if (sessionLabel !== null) push('session', sessionLabel)
     push('current', currentLabel)
@@ -952,6 +1165,7 @@ export class HistoryPanel implements Component, Focusable {
     return {
       plain: `  ${parts.map(part => part.plain).join(' ')}`,
       styled: `  ${parts.map(part => part.styled).join(' ')}`,
+      spans: parts.map(part => ({ scope: part.scope, from: part.from, to: part.to })),
     }
   }
 
@@ -1173,21 +1387,80 @@ export class HistoryPanel implements Component, Focusable {
     return color.textDim(clampLine(`  ${parts.join(' · ')}`, width))
   }
 
-  private renderFooter(width: number): string {
-    // The History-LOCAL Action Bar: the shared `renderActionBarRow` algorithm
+  /**
+   * The Footer row. In the Regular root it keeps the historical keyboard hint
+   * verbatim and publishes no target. In Fullscreen the seat-local verbs
+   * (`Cancel [Esc]`, `Scope [Tab]`, `Expand/Collapse [F2]`) are complete
+   * pointer spans; `Use`/`Copy All` appear as the narrow-frame FALLBACK only
+   * when the Preview heading did not paint its own button, and they carry the
+   * currently painted result identity. The pure browsing hints stay inert.
+   */
+  private renderFooter(
+    width: number,
+    paintedHeadingActions: ReadonlySet<HistoryFooterActionKind>,
+    useEligible: boolean,
+    copyEligible: boolean,
+  ): { text: string; hit: HistoryMouseHit } {
+    if (!this.pointerEnabled()) {
+      const segments: ActionBarSegment[] = [
+        { text: `${HISTORY_CHORDS.accept.label} use`, priority: 100 },
+        { text: `${HISTORY_CHORDS.scope.label} scope`, priority: 65 },
+        { text: `${HISTORY_CHORDS.results.label} results`, priority: 50, short: HISTORY_CHORDS.results.label },
+        { text: `${HISTORY_CHORDS.preview.label} preview`, priority: 35, short: HISTORY_CHORDS.preview.label },
+        { text: `${HISTORY_CHORDS.copy.label} copy`, priority: 55 },
+        { text: `${HISTORY_CHORDS.expand.label} ${this.expanded ? 'collapse' : 'expand'}`, priority: 30 },
+        { text: `${HISTORY_CHORDS.cancel.label} cancel`, priority: 1000 },
+      ]
+      return { text: color.textMuted(renderActionBarRow(segments, width)), hit: { kind: 'inert' } }
+    }
+    // The History-LOCAL Fullscreen Action Bar: the shared layout algorithm
     // (compact a declared `short` first, then drop whole segments by ascending
-    // priority, `Esc` last and never dropped), driven by the ONE chord table so
-    // every hint names the same key its handler matches.
-    const segments: ActionBarSegment[] = [
-      { text: `${HISTORY_CHORDS.accept.label} use`, priority: 100 },
-      { text: `${HISTORY_CHORDS.scope.label} scope`, priority: 65 },
-      { text: `${HISTORY_CHORDS.results.label} results`, priority: 50, short: HISTORY_CHORDS.results.label },
-      { text: `${HISTORY_CHORDS.preview.label} preview`, priority: 35, short: HISTORY_CHORDS.preview.label },
-      { text: `${HISTORY_CHORDS.copy.label} copy`, priority: 55 },
-      { text: `${HISTORY_CHORDS.expand.label} ${this.expanded ? 'collapse' : 'expand'}`, priority: 30 },
-      { text: `${HISTORY_CHORDS.cancel.label} cancel`, priority: 1000 },
-    ]
-    return color.textMuted(renderActionBarRow(segments, width))
+    // priority, `Cancel` last and never dropped), driven by the ONE chord table.
+    const selectedId = this.selected()?.id
+    const segments: ActionBarSegment[] = []
+    const targets = new Map<number, HistoryFooterAction>()
+    const add = (segment: ActionBarSegment, action: HistoryFooterAction): void => {
+      targets.set(segments.length, action)
+      segments.push(segment)
+    }
+    if (useEligible && !paintedHeadingActions.has('useSelected')) {
+      add({ text: `Use [${HISTORY_CHORDS.accept.label}]`, priority: 100 }, {
+        kind: 'useSelected', id: selectedId ?? null,
+      })
+    }
+    add({ text: `Scope [${HISTORY_CHORDS.scope.label}]`, priority: 65 }, { kind: 'scope', id: null })
+    segments.push({ text: `${HISTORY_CHORDS.results.label} results`, priority: 50, short: HISTORY_CHORDS.results.label })
+    segments.push({ text: `${HISTORY_CHORDS.preview.label} preview`, priority: 35, short: HISTORY_CHORDS.preview.label })
+    if (copyEligible && !paintedHeadingActions.has('copyAll')) {
+      add({ text: `Copy All [${HISTORY_CHORDS.copy.label}]`, priority: 55 }, {
+        kind: 'copyAll', id: selectedId ?? null,
+      })
+    }
+    add({ text: `${this.expanded ? 'Collapse' : 'Expand'} [${HISTORY_CHORDS.expand.label}]`, priority: 30 }, {
+      kind: 'expand', id: null,
+    })
+    add({ text: `Cancel [${HISTORY_CHORDS.cancel.label}]`, priority: 1000 }, { kind: 'cancel', id: null })
+
+    const layout = layoutActionBarRow(segments, width)
+    if (layout.truncated || layout.spans.length === 0) {
+      return { text: color.textMuted(layout.text), hit: { kind: 'inert' } }
+    }
+    const actions: Array<{ from: number; to: number; action: HistoryFooterAction }> = []
+    const painted = layout.spans.map(span => {
+      const target = targets.get(span.inputIndex)
+      if (target === undefined) return color.textMuted(span.text)
+      actions.push({ from: span.startCol, to: span.endCol, action: target })
+      // Not a DENSE Action Bar surface (design-language §7.1): every Footer
+      // affordance keeps Role 14 `primary`; the inert hints stay muted.
+      return color.primary(span.text)
+    })
+    const segmentWidth = layout.spans.reduce((sum, span) => sum + visibleWidth(span.text), 0)
+      + Math.max(0, layout.spans.length - 1) * visibleWidth(ACTION_BAR_SEPARATOR)
+    const padding = Math.max(0, visibleWidth(layout.text) - segmentWidth)
+    return {
+      text: painted.join(color.textMuted(ACTION_BAR_SEPARATOR)) + ' '.repeat(padding),
+      hit: actions.length === 0 ? { kind: 'inert' } : { kind: 'footer', actions },
+    }
   }
 
   /** One Preview source row, with the drag-selected source CELLS inverted. The
@@ -1212,14 +1485,24 @@ export class HistoryPanel implements Component, Focusable {
 
   // ── navigation ───────────────────────────────────────────────────────────
 
+  /** The ONE directed Scope transition. The keyboard/Footer cycle computes its
+   *  next scope and lands here too; the same-scope click is a strict no-op. */
+  private selectScope(target: HistoryScope): void {
+    if (target === this.state.scope) return
+    if (target === 'session' && this.sessionId === undefined) return
+    this.state.scope = target
+    this.state.selectedIndex = 0
+    this.gesture = undefined
+    this.scheduleSearch()
+  }
+
   private toggleScope(): void {
-    this.state.scope = this.sessionId !== undefined
+    const next: HistoryScope = this.sessionId !== undefined
       ? this.state.scope === 'session' ? 'current'
         : this.state.scope === 'current' ? 'all'
           : 'session'
       : this.state.scope === 'current' ? 'all' : 'current'
-    this.state.selectedIndex = 0
-    this.scheduleSearch()
+    this.selectScope(next)
   }
 
   private moveSelection(data: string): void {
@@ -1308,6 +1591,16 @@ export class HistoryPanel implements Component, Focusable {
     const layout = buildSourceTextVisualLayout(content, safeWidth)
     this.previewLayout = layout
     return layout
+  }
+
+  private footerActionAt(
+    hit: Extract<HistoryMouseHit, { kind: 'footer' }>,
+    x: number,
+  ): HistoryFooterAction | undefined {
+    for (const entry of hit.actions) {
+      if (x >= entry.from && x < entry.to) return entry.action
+    }
+    return undefined
   }
 
   private actionAt(

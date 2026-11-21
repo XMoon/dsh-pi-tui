@@ -12,7 +12,7 @@
  * presents a local child it does not have.
  *
  * EVIDENCE BOUNDARY: the row and its Detail are asserted on the PAINTED frame
- * at all three sizes; the action bar advertises no `s stop` for that row (and
+ * at all three sizes; the action bar advertises no clickable `Stop` for that row (and
  * `s` latches nothing); Enter's refusal is asserted on the production notice
  * slot while the panel is open and on the PAINTED frame right after the user
  * closes it (the panel paints over the notice row while it is open).
@@ -113,7 +113,9 @@ for (const [columns, rows] of SIZES) test(`the REAL Task Center external leaf fr
   context.provide('loader', { await: async () => {} } as never)
   await mountAgentLoopTestHarness(context)
   context.provide('agentDefaultModel', peripherals.defaultModel as never)
-  const fiber = await context.plugin(pluginCtx => applyRunner(pluginCtx, TuiConfigSchema({ sessionId: String(SESSION) } as never)))
+  const tuiConfig = TuiConfigSchema({ sessionId: String(SESSION) } as never)
+  context.provide('piTuiPreferences', tuiConfig)
+  const fiber = await context.plugin(pluginCtx => applyRunner(pluginCtx, tuiConfig))
   life.defer(() => fiber.dispose())
   const view = (): string => vt.getViewport().map(line => line.replace(/\u001b\[[0-9;]*m/g, '')).join('\n')
   for (let attempt = 0; attempt < 80 && !view().includes('dsh-pi-tui'); attempt += 1) {
@@ -147,7 +149,8 @@ for (const [columns, rows] of SIZES) test(`the REAL Task Center external leaf fr
   const activation = await subagents.startActivation({
     provider: 'fixture-external',
     label: LABEL,
-    request: { parent, prompt: [{ type: 'text', text: 'run the external task' }] },
+    parent,
+    prompt: [{ type: 'text', text: 'run the external task' }],
     signal: new AbortController().signal,
     delivery: 'parent',
   })
@@ -182,7 +185,13 @@ for (const [columns, rows] of SIZES) test(`the REAL Task Center external leaf fr
   // known to the Task Center (narrow grants paint fewer rows, never fewer
   // facts). The row itself and its durable classification stay DISCERNIBLE at
   // the frozen narrow sizes (the label truncates, `external`/`External` do not).
-  assert.match(frame, /1\/1 shown/u, `the Task Center knows the external entry:\n${frame}`)
+  // FR2 adds the Work/Team tabs to a Root header, so the `n/N shown` counter —
+  // a secondary fact the short-width degradation sheds first — is only
+  // guaranteed when the header has room; the row/classification checks below
+  // are the roster fact at every size.
+  if (columns >= 120) {
+    assert.match(frame, /1\/1 shown/u, `the Task Center knows the external entry:\n${frame}`)
+  }
   assert.ok(frame.includes(LABEL) || frame.includes('exte'),
     `the external row is painted at ${columns} columns:\n${frame}`)
   assert.match(frame, /External/u, `the classification word is painted at ${columns} columns:\n${frame}`)
@@ -192,15 +201,16 @@ for (const [columns, rows] of SIZES) test(`the REAL Task Center external leaf fr
     assert.match(frame, /activity\s+External/u, 'the Detail states the activity word')
   }
 
-  // The action bar advertises the SELECTED row's capability: the external leaf
-  // cannot be stopped (`canStop === false`), so no Stop hint may be painted and
+  // The action bar advertises the selected row's capability: the external leaf
+  // cannot be stopped (`canStop === false`), so no Stop action may be painted and
   // pressing `s` must never latch the stop confirmation.
-  assert.ok(!/\bs stop\b/u.test(frame), `the non-stoppable external row advertises no Stop hint:\n${frame}`)
+  assert.ok(!/\bStop \[/u.test(frame), `the non-stoppable external row advertises no Stop action:\n${frame}`)
   vt.sendInput('s')
   await settle()
   await new Promise(resolve => setTimeout(resolve, 30))
   await vt.waitForRender()
-  assert.doesNotMatch(view(), /Y confirm stop/u, `pressing s on the external row latches nothing:\n${view()}`)
+  assert.doesNotMatch(view(), /Y confirm stop|Confirm stop \[Y\]/u,
+    `pressing s on the external row latches nothing:\n${view()}`)
 
   // Enter: the external leaf is not openable and mounts nothing. The refusal is
   // a NOTICE; it shares the frame with the capturing Task Center panel (the

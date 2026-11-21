@@ -95,6 +95,12 @@ test('plain printable bound to a Host action → rejected', () => {
   assert.ok(parsed.diagnostics[0]!.includes('text-producing'))
 })
 
+test('scope Tab stays fixed and non-configurable', () => {
+  const parsed = parseUserKeybindings({ 'app.transcript.search.scope': 'ctrl+t' })
+  assert.deepEqual(parsed.bindings, {})
+  assert.ok(parsed.diagnostics.some(message => message.includes('not user-configurable')))
+})
+
 test('non-configurable action → rejected', () => {
   const parsed = parseUserKeybindings({ 'question.confirm': 'ctrl+m' })
   assert.deepEqual(parsed.bindings, {})

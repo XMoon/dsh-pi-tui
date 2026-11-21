@@ -291,13 +291,15 @@ function buildSessionFixture(life: TestLifecycle, options: {
     },
     withdrawReplacedPresentation: () => {},
     reportSwitchFailure: () => {},
+    warnCommittedDurability: () => {},
     launchComposition: async () => ({ composition: {} }),
     setResumeFailure: () => {},
+    clearResumeFailure: () => {},
     reportFirstSessionCreateFailure: () => {},
     notifyResumeFailure: () => {},
     awaitPendingDefaultWrite: async () => {},
     newSessionId: () => 'session-first',
-    sessionCreateCwd: () => '/work/a',
+    initialWorkspaceIntent: () => ({ kind: 'host-path', path: '/work/a' }),
     currentOpening: () => undefined,
     resetOpening: () => {},
   }
@@ -320,6 +322,7 @@ function buildSessionFixture(life: TestLifecycle, options: {
   }
 
   const retirement: SessionOwnerRetirement = {
+    navigationKind: 'stop-and-quiesce',
     whenIdleOrAbort: async () => false,
     cancel: async () => ({ kind: 'committed', value: undefined }),
     cancelForNavigation: async () => ({ kind: 'committed' as const }),
@@ -331,6 +334,7 @@ function buildSessionFixture(life: TestLifecycle, options: {
   }
 
   const lifecycle = {
+    resolveWorkspace: async () => ({ workspaceId: 'ws-a', path: '/work/a' }),
     create: async () => { throw new Error('unexpected create in this fixture') },
     open: async (request: { sessionId: string }) => ({
       ownership: 'current' as const,

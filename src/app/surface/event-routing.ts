@@ -182,6 +182,14 @@ export interface SurfaceEventRoutingSource<Event extends RoutedSessionEvent> {
    * reads the official projection; a Remote Host cwd never reaches OSC 7.
    */
   refreshWorkspaceFacts(): void
+  /**
+   * M6-1 F8: one session-policy knob event (`approval/policy`,
+   * `sandbox/mode`, `permission/preset`) of the CURRENT session arrived —
+   * revoke the session-policy observation's committed snapshots so the
+   * next read re-derives from the official Host store (never a local
+   * event-log fold). Absent = this composition observes no policy.
+   */
+  invalidateSessionPolicy?(sessionId: string): void
   /** Fold one `goal/change` into the runner's status goal text. */
   applyGoalChange(event: Event): void
   /** The session title one `session/title` event implies. */
@@ -196,6 +204,16 @@ export interface SurfaceEventRoutingSource<Event extends RoutedSessionEvent> {
   settleLocalSubmitAck(reason: string): void
   markSubmitLatency(sessionId: string | undefined, phase: SubmitLatencyPhase): void
   observeDurableSubmission(rpcId: string): void
+  /**
+   * PR1: fold ONE Direct Host event into the client-local pending-echo
+   * terminal reconciliation (the official Client receipt/index/seq rule mapped
+   * onto the Direct ledger). Only the three durable event types the rule needs
+   * are forwarded; the composition binds the callback on the Direct branch
+   * alone and returns false elsewhere. Returns whether the VISIBLE echo set
+   * changed — a receipt-index update alone returns false and the existing
+   * authoritative pending-input refresh owns that presentation change.
+   */
+  observeDirectPendingSubmissionEvent(event: Event, sessionId: string): boolean
   markContextDirty(): void
   refreshContextMeasurement(reason: ContextMeasureReason): void
   /** Whether the CURRENT live agent's log ends mid-turn (the compaction
@@ -320,6 +338,13 @@ function sessionTurnEndReasonOf(data: unknown): string | undefined {
   return typeof reason?.kind === 'string' ? reason.kind : undefined
 }
 
+/** The durable policy knob events (the exact family the approval/sandbox
+ *  observation re-derives from the official Host store). ONE predicate for the
+ *  main and the viewed-child routing branches. */
+function isPolicyKnobEvent(type: string): boolean {
+  return type === 'permission/preset' || type === 'approval/policy' || type === 'sandbox/mode'
+}
+
 /**
  * Create the application-level presentation event router. The bodies are the
  * aggregate's original routing bodies verbatim; only the free variables became
@@ -394,6 +419,11 @@ export function createEventRouting<Event extends RoutedSessionEvent>(
         // just above, and both stores keep their content-equality no-notify
         // discipline. Transient assistant-stream frames never reach this durable
         // path at all, so no per-token work is added.
+        // M6-1 F8: the CHILD's own policy knob events revoke the observation
+        // for the CHILD's exact session id too — a footer refresh alone would
+        // keep rendering the previous ready sandbox/approval snapshot for the
+        // viewed subject.
+        if (isPolicyKnobEvent(event.type)) source.invalidateSessionPolicy?.(session.id)
         viewer.refreshFooter()
         if (event.type === 'turn/start' || event.type === 'agent/inbox/spliced') queueMicrotask(() => options.refreshPendingInput())
         if (event.type === 'turn/end') options.paintNow()
@@ -441,6 +471,20 @@ export function createEventRouting<Event extends RoutedSessionEvent>(
     }
     main.folder.apply([event])
     main.stats.apply([event])
+    // PR1: Direct pending-echo terminal reconciliation. The Host claimed a
+    // previously accepted Inbox occurrence and then crossed a durable turn
+    // boundary without the matching `user/message`, so the accepted content
+    // can no longer become visible and its local echo must stop claiming to
+    // send. The callback decides from the durable event alone (identity +
+    // receipt index + strictly later seq); `compaction/*`, `agent/error`,
+    // status changes and unrelated events are NEVER routed here — there is no
+    // generic "turn ended, clear the echoes" rule. A changed visible set needs
+    // the shared presentation refresh; the existing `agent/inbox/spliced`
+    // microtask refresh below stays (the Host projection mutates after this
+    // notification).
+    if (event.type === 'agent/inbox/spliced' || event.type === 'request/context' || event.type === 'turn/end') {
+      if (source.observeDirectPendingSubmissionEvent(event, session.id)) options.refreshPendingInput()
+    }
     // The goal badge folds incrementally: the newest goal/change event
     // decides, so one event is enough (clear/completed hide the badge).
     if (event.type === 'goal/change') source.applyGoalChange(event)
@@ -450,10 +494,17 @@ export function createEventRouting<Event extends RoutedSessionEvent>(
     // "permission: …" notice) ~REPAINT_FLUSH_MS after the switch, making
     // it flash. The footer badge refresh below repaints the status line
     // instead, and the next real session event repaints the transcript.
-    const isKnob = event.type === 'permission/preset' || event.type === 'approval/policy' || event.type === 'sandbox/mode'
+    const isKnob = isPolicyKnobEvent(event.type)
     if (!isKnob) options.schedulePaint()
     if (event.type === 'todo/write') options.mounted().commitStatusFacts({ todos: (event.data as { readonly todos: readonly TodoItem[] }).todos })
-    if (event.type === 'plan/mode') options.mounted().commitStatusFacts({ planMode: (event.data as { readonly active: boolean }).active })
+    if (event.type === 'plan/mode') {
+      // The instant badge commit, then the OFFICIAL projection read: only the
+      // projection knows the pending selection (a `/plan` during an open turn
+      // queues the mode), so the composer/status facts must be re-derived
+      // here instead of being assumed equal to the event's committed bit.
+      options.mounted().commitStatusFacts({ planMode: (event.data as { readonly active: boolean }).active })
+      source.refreshStatusCheap()
+    }
     if (event.type === 'session/title') options.mounted().commitStatusFacts({ sessionTitle: source.sessionTitleOf(event) })
     // The Session's EFFECTIVE directory is a projection fact (S2/PR-B): the
     // committed change reaches the footer, the welcome card, the OSC 0
@@ -476,7 +527,11 @@ export function createEventRouting<Event extends RoutedSessionEvent>(
     // derives (measure-kind events refresh again through the context path below).
     if (isKnob || viewedId !== undefined) {
       // Knob events are UI-only: the permission badge repaints from
-      // cached facts — never a context measurement.
+      // cached facts — never a context measurement. M6-1 F8: the same knob
+      // events revoke the session-policy observation (the read re-derives
+      // from the official Host store on the next refresh, never a local
+      // event fold).
+      if (isKnob) source.invalidateSessionPolicy?.(session.id)
       source.refreshStatusCheap()
     }
     // Every durable inbox mutation (followup, steer, splice) commits

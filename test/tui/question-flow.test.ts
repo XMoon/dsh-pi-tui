@@ -10,14 +10,17 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { setKittyProtocolActive } from '@xmoon76/pi-tui'
-import { QuestionFlow, type QuestionFlowQuestion } from '../../src/tui/interaction/question.ts'
+import { setKittyProtocolActive, stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
+import { planReviewOf, QuestionFlow, setNoAnswerNavigationInstalled, type QuestionFlowQuestion } from '../../src/tui/interaction/question.ts'
+import { color, setTheme } from '../../src/tui/theme/runtime.ts'
 
 const BUDGETS = [8, 12, 22, 24]
 const WIDTHS = [50, 100]
 
 function strip(line: string): string {
-  return line.replace(/\x1b\[[0-9;]*m/g, '')
+  // U1 components emit zero-width fake-cursor APC markers; visible text must
+  // be read after removing every terminal sequence, not only SGR.
+  return stripTerminalSequences(line)
 }
 
 function makeFlow(questions: QuestionFlowQuestion[], budget: number): QuestionFlow {
@@ -26,9 +29,62 @@ function makeFlow(questions: QuestionFlowQuestion[], budget: number): QuestionFl
   return f
 }
 
+function makeMouseFlow(questions: QuestionFlowQuestion[], budget: number): QuestionFlow {
+  const f = makeFlow(questions, budget)
+  f.setMouseActionsEnabled(true)
+  return f
+}
+
 /** Render the flow and strip ANSI escapes. */
 function render(f: QuestionFlow, width: number): string[] {
   return f.render(width).map(strip)
+}
+
+function clickAction(f: QuestionFlow, label: string, width = 100): string[] {
+  const lines = render(f, width)
+  const row = lines.length - 1
+  const x = lines[row]?.indexOf(label) ?? -1
+  assert.ok(x >= 0, `action '${label}' must be fully visible:\n${lines.join('\n')}`)
+  const gesture = f.beginMousePress(row, x)
+  assert.ok(gesture !== undefined, `press on '${label}' must capture its span`)
+  f.completeMouseClick(gesture, row, x)
+  return lines
+}
+
+function clickHitRow(f: QuestionFlow, text: string, width = 100): string[] {
+  const lines = render(f, width)
+  const row = lines.findIndex(line => line.includes(text))
+  assert.ok(row >= 0, `hit row '${text}' must be visible:\n${lines.join('\n')}`)
+  const gesture = f.beginMousePress(row, 0)
+  assert.ok(gesture !== undefined, `press on '${text}' must capture its row`)
+  f.completeMouseClick(gesture, row, 0)
+  return lines
+}
+
+function assertMouseActionRow(
+  f: QuestionFlow,
+  lines: string[],
+  width: number,
+  budget: number,
+  required: readonly string[],
+): void {
+  assert.ok(lines.length <= budget, `mouse action row exceeded budget ${budget} at width ${width}:\n${lines.join('\n')}`)
+  const row = lines.at(-1) ?? ''
+  assert.ok(row !== '', `mouse action row missing at width ${width}:\n${lines.join('\n')}`)
+  assert.ok(visibleWidth(row) <= width, `mouse action row exceeded width ${width}:\n${row}`)
+  for (const label of required) {
+    assert.ok(row.includes(label), `mouse action row must retain '${label}' at width ${width}:\n${row}`)
+  }
+  assert.ok(!lines.join('\n').includes('esc cancel'), `mouse mode must replace the keyboard hint:\n${lines.join('\n')}`)
+  const hits = (f as unknown as { paintedActionHits: Array<{ row: number; startCol: number; endCol: number }> }).paintedActionHits
+  assert.ok(hits.length > 0, `visible actions must retain hit spans at width ${width}:\n${row}`)
+  for (const hit of hits) {
+    assert.equal(hit.row, lines.length - 1, `action hits must match the final row at width ${width}`)
+    assert.ok(hit.startCol >= 0 && hit.startCol < hit.endCol && hit.endCol <= width,
+      `action hit must cover only fully visible cells at width ${width}: ${JSON.stringify(hit)}`)
+    assert.equal(visibleWidth(row.slice(hit.startCol, hit.endCol)), hit.endCol - hit.startCol,
+      `action hit span must retain its complete painted label at width ${width}`)
+  }
 }
 
 /** Assert the per-page invariants and the total budget. */
@@ -63,11 +119,17 @@ function assertPage(
     }
   }
   if (expect.review === true) {
-    // The review page (plan item 4) has NO Submit/Cancel action row: the
-    // 'Submit' TAB stays in the strip, but a Cancel ACTION must never
-    // render (Enter submits, Esc cancels — no two-choice control).
-    assert.ok(joined.includes('Submit'), `review tab missing (${width}x${budget}):\n${joined}`)
-    assert.ok(!joined.includes('Cancel'), `the Submit/Cancel two-choice row is gone (${width}x${budget}):\n${joined}`)
+    assert.ok(lines[0]?.includes('Review'), `Review stage label missing (${width}x${budget}):\n${joined}`)
+    assert.ok(joined.includes('↵ submit'), `keyboard Review hint must expose Submit (${width}x${budget}):\n${joined}`)
+    assert.ok(joined.includes('← back'), `keyboard Review hint must expose Back (${width}x${budget}):\n${joined}`)
+    assert.ok(joined.includes('esc cancel'), `keyboard Review hint must expose Cancel (${width}x${budget}):\n${joined}`)
+    assert.ok(!joined.includes('Submit [Enter]') && !joined.includes('Cancel [Esc]'),
+      `keyboard-only Review must not paint a mouse action row (${width}x${budget}):\n${joined}`)
+    // The smoke driver gates its final Enter on this EXACT line, so the
+    // review title must survive every supported budget/width — a wrapped
+    // or dropped title would leave the frame wait without a positive paint.
+    assert.ok(joined.includes('Review your answer before submit'),
+      `review-only title missing (${width}x${budget}):\n${joined}`)
   }
 }
 
@@ -162,7 +224,7 @@ test('→ skips only unanswered questions; answered drafts advance untouched', (
   render(f, 100)
   // q2 is now shown; → skips it (unanswered) and lands on the review page.
   f.handleInput('\x1b[C')
-  assert.ok(render(f, 100).join('\n').includes('Submit'), `→ must reach the review page:\n${render(f, 100).join('\n')}`)
+  assert.ok(render(f, 100).join('\n').includes('Review your answer before submit'), `→ must reach the review page:\n${render(f, 100).join('\n')}`)
   f.handleInput('\r') // submit
   assert.deepEqual(done, [
     { id: 'q1', selected: ['A'] },
@@ -204,7 +266,7 @@ test('→ skips only unanswered questions; answered drafts advance untouched', (
   render(g, 100)
   g.handleInput('\x1b[C') // → on ANSWERED q2: draft kept, advance to review
   const review = render(g, 100).join('\n')
-  assert.ok(review.includes('Submit'), `→ must reach the review page:\n${review}`)
+  assert.ok(review.includes('Review your answer before submit'), `→ must reach the review page:\n${review}`)
   assert.ok(!review.includes('(skipped)'), `an answered question must not be marked skipped:\n${review}`)
   g.handleInput('\r') // submit
   assert.deepEqual(done2, [
@@ -238,7 +300,7 @@ test('Enter on empty custom text never wipes an existing selection', () => {
   render(f, 100)
   f.handleInput('\r') // Enter with EMPTY text: must NOT wipe the selection
   const review = render(f, 100).join('\n')
-  assert.ok(review.includes('Submit'), `Enter must reach the review page:\n${review}`)
+  assert.ok(review.includes('Review your answer before submit'), `Enter must reach the review page:\n${review}`)
   assert.ok(!review.includes('(skipped)'), `the answered question must not become (skipped):\n${review}`)
   f.handleInput('\r') // submit
   assert.deepEqual(done, [{ id: 'q1', selected: ['A'] }])
@@ -260,16 +322,15 @@ test('Enter on empty custom text never wipes an existing selection', () => {
   g.handleInput('\r') // Enter with EMPTY text on the answered multi-select
   // Single-question flow: commitOther advances straight to the review page.
   const review2 = render(g, 100).join('\n')
-  assert.ok(review2.includes('Submit'), `Enter must reach the review page:\n${review2}`)
+  assert.ok(review2.includes('Review your answer before submit'), `Enter must reach the review page:\n${review2}`)
   assert.ok(!review2.includes('(skipped)'), `the multi-select answer must not become (skipped):\n${review2}`)
   g.handleInput('\r') // submit
   assert.deepEqual(done2, [{ id: 'q1', selected: ['X'] }])
 })
 
 test('review page: Enter submits, ↓ never cancels, ← goes back to the last question', () => {
-  // Plan item 4: the review page is a PURE review — no Submit/Cancel
-  // two-choice control, no focus, no ↑↓. Enter submits the whole batch,
-  // Esc cancels the flow, ← returns to the last question (drafts survive).
+  // The Review action row adds mouse targets without changing its keyboard
+  // settlement: Enter submits, Esc cancels, and ← returns to the last question.
   let cancelled = 0
   let done: unknown
   const f = new QuestionFlow([
@@ -277,14 +338,18 @@ test('review page: Enter submits, ↓ never cancels, ← goes back to the last q
     { id: 'q2', question: 'Two?', options: [{ label: 'B' }] },
   ], (answers) => { done = answers }, () => { cancelled += 1 })
   f.setMaxRows(24)
+  f.setMouseActionsEnabled(true)
   render(f, 100)
   f.handleInput('1') // answer q1 → q2
   render(f, 100)
   f.handleInput('1') // answer q2 → review
-  let review = render(f, 100).join('\n')
-  assert.ok(review.includes('Submit'), `review page missing:\n${review}`)
-  assert.ok(!review.includes('Cancel'), `no Cancel action row on the pure review page:\n${review}`)
-  assert.ok(review.includes('← back · ↵ submit · esc cancel'), `fixed review hint missing:\n${review}`)
+  const reviewLines = render(f, 100)
+  const review = reviewLines.join('\n')
+  const actionRow = reviewLines.at(-1) ?? ''
+  assert.ok(actionRow.includes('Submit [Enter]'), `Review exposes Submit in its action row:\n${review}`)
+  assert.ok(actionRow.includes('Back [←]'), `Review exposes Back in its action row:\n${review}`)
+  assert.ok(actionRow.includes('Cancel [Esc]'), `Review exposes Cancel in its action row:\n${review}`)
+  assert.ok(!review.includes('← back · ↵ submit · esc cancel'), `mouse mode must replace the keyboard hint:\n${review}`)
   // ↑↓ are INERT on the review page: ↓ must not arm a Cancel action.
   f.handleInput('\x1b[B')
   f.handleInput('\x1b[B')
@@ -301,6 +366,7 @@ test('review page: Enter submits, ↓ never cancels, ← goes back to the last q
     { id: 'q2', question: 'Two?', options: [{ label: 'B' }] },
   ], () => {}, () => {})
   g.setMaxRows(24)
+  g.setMouseActionsEnabled(true)
   render(g, 100)
   g.handleInput('1')
   render(g, 100)
@@ -374,7 +440,46 @@ test('the hint advertises ← back · → skip instead of the old letters', () =
   assert.ok(!review.includes('b back'), `the old 'b back' verb must be gone:\n${review}`)
 })
 
-test('budget matrix: review page keeps the hint and never a Cancel row', () => {
+test('the Review stage tab does not mark a selectable question as ready for final review', () => {
+  // The `Review` tab is present on the option page and review page alike, so
+  // a driver must wait for the unique review title before sending its final Enter.
+  const questions: QuestionFlowQuestion[] = [{
+    id: 'c1-question',
+    question: 'Continue the C1 test?',
+    options: [{ label: 'Proceed' }, { label: 'Cancel' }],
+  }]
+  // Enter on the option page is the option-confirm verb (select the
+  // highlighted row + advance), never the final submit.
+  const entered: unknown[] = []
+  const byEnter = new QuestionFlow(questions, (answers) => { entered.push(answers) }, () => {})
+  byEnter.setMaxRows(24)
+  const optionPage = render(byEnter, 100).join('\n')
+  assert.ok(optionPage.split('\n')[0]?.includes('Review'), `the option page carries the Review stage tab:\n${optionPage}`)
+  assert.ok(!optionPage.includes('Review your answer before submit'),
+    `the option page must not look like the final review page:\n${optionPage}`)
+  byEnter.handleInput('\r')
+  assert.equal(entered.length, 0, 'Enter on the option page submitted the whole flow')
+  const reviewPage = render(byEnter, 100).join('\n')
+  assert.ok(reviewPage.includes('Review your answer before submit'),
+    `Enter must land on the review page:\n${reviewPage}`)
+  byEnter.handleInput('\r')
+  assert.deepEqual(entered, [[{ id: 'c1-question', selected: ['Proceed'] }]],
+    'exactly one Enter from the review seat submits the selection once')
+  // The digit route (what the smoke sends) has the SAME two-phase shape.
+  const digit: unknown[] = []
+  const byDigit = new QuestionFlow(questions, (answers) => { digit.push(answers) }, () => {})
+  byDigit.setMaxRows(24)
+  render(byDigit, 100)
+  byDigit.handleInput('1')
+  const digitReview = render(byDigit, 100).join('\n')
+  assert.ok(digitReview.includes('Review your answer before submit'),
+    `digit selection must land on the review page:\n${digitReview}`)
+  assert.equal(digit.length, 0, 'digit selection submitted the flow before the review Enter')
+  byDigit.handleInput('\r')
+  assert.deepEqual(digit, [[{ id: 'c1-question', selected: ['Proceed'] }]])
+})
+
+test('budget matrix: review page keeps its title and final keyboard hint', () => {
   for (const budget of BUDGETS) {
     for (const width of WIDTHS) {
       const f = makeFlow([
@@ -391,12 +496,9 @@ test('budget matrix: review page keeps the hint and never a Cancel row', () => {
   }
 })
 
-test('the review page fills the FULL budget (round-3 finding: one row was reserved for the removed Cancel row)', () => {
-  // The old page reserved TWO tail rows (the Submit/Cancel action row +
-  // the hint); with the action row gone, the hint is the ONLY required
-  // tail — the page must show one more answer/content row, i.e. use the
-  // whole budget when the answers are long enough. Five long answers
-  // far exceed every budget, so the budget is exactly filled.
+test('the review page fills its row budget while reserving the final keyboard hint', () => {
+  // Long answers must fill the available content rows after the Review title
+  // and final keyboard hint have each kept their reserved space.
   const questions = Array.from({ length: 5 }, (_, i) => ({
     id: `q${i + 1}`,
     question: RICH_QUESTION.question,
@@ -411,6 +513,58 @@ test('the review page fills the FULL budget (round-3 finding: one row was reserv
     assert.equal(lines.length, budget, `the review page must fill the whole budget at ${budget}:\n${lines.join('\n')}`)
     assert.ok(lines[lines.length - 1]!.includes('↵ submit'),
       `the hint must still be the last row at ${budget}:\n${lines.join('\n')}`)
+  }
+})
+
+test('mouse action bars replace one hint row across supported widths and budgets', () => {
+  const widths = [44, 72, 80, 100]
+  const budgets = [8, 12, 24]
+  const questions = [
+    { id: 'q1', question: 'Pick many', multiSelect: true, options: [{ label: 'A' }, { label: 'B' }] },
+    { id: 'q2', question: 'Pick one', options: [{ label: 'C' }] },
+  ] satisfies QuestionFlowQuestion[]
+
+  for (const budget of budgets) {
+    for (const width of widths) {
+      const regular = makeFlow(questions, budget)
+      const regularLines = render(regular, width)
+      assert.ok(regularLines.at(-1)?.includes('esc cancel'), `keyboard mode must retain its hint at ${width}x${budget}`)
+      assert.ok(regularLines[0]?.includes('Review'), `keyboard mode also uses the Review stage label at ${width}x${budget}`)
+      assert.ok(!regularLines.some(line => line.includes('Submit [Enter]') || line.includes('Cancel [Esc]')),
+        `keyboard mode must not paint mouse action spans at ${width}x${budget}`)
+
+      const choices = makeMouseFlow(questions, budget)
+      let lines = render(choices, width)
+      assert.equal(lines.length, regularLines.length, `the action bar must replace, not add to, the hint row at ${width}x${budget}`)
+      assert.ok(lines[0]?.includes('Review'), `fullscreen mouse mode also uses the Review stage label at ${width}x${budget}`)
+      assertMouseActionRow(choices, lines, width, budget, ['Skip', 'Cancel'])
+
+      choices.handleInput('\x1b[C') // skip q1 and land on q2
+      lines = render(choices, width)
+      assertMouseActionRow(choices, lines, width, budget, ['Skip', 'Back', 'Cancel'])
+
+      const regularEditing = makeFlow([{ id: 'name', question: 'Your name?' }], budget)
+      const regularEditLines = render(regularEditing, width)
+      const editing = makeMouseFlow([{ id: 'name', question: 'Your name?' }], budget)
+      lines = render(editing, width)
+      assert.equal(lines.length, regularEditLines.length, `edit actions must replace, not add to, the hint row at ${width}x${budget}`)
+      assertMouseActionRow(editing, lines, width, budget, ['Review', 'Cancel flow', 'Leave edit'])
+      editing.handleInput('\x1b') // leave edit for optionless navigation
+      lines = render(editing, width)
+      regularEditing.handleInput('\x1b')
+      assert.equal(lines.length, render(regularEditing, width).length,
+        `optionless navigation actions must replace, not add to, the hint row at ${width}x${budget}`)
+      assertMouseActionRow(editing, lines, width, budget, ['Skip', 'Edit', 'Cancel'])
+
+      const regularReview = makeFlow([{ id: 'done', question: 'Ready?', options: [{ label: 'Yes' }] }], budget)
+      regularReview.handleInput('1')
+      const regularReviewLines = render(regularReview, width)
+      const review = makeMouseFlow([{ id: 'done', question: 'Ready?', options: [{ label: 'Yes' }] }], budget)
+      review.handleInput('1')
+      lines = render(review, width)
+      assert.equal(lines.length, regularReviewLines.length, `Review actions must replace, not add to, the hint row at ${width}x${budget}`)
+      assertMouseActionRow(review, lines, width, budget, ['Submit', 'Back', 'Cancel'])
+    }
   }
 })
 
@@ -466,17 +620,17 @@ test('scrollport: PageDown/PageUp page the long body without moving the budget',
     // Page down until the render stops changing (bottom reached).
     let guard = 200
     let prev = ''
+    let sawDeepestDetail = false
     while (guard-- > 0) {
       f.handleInput('\x1b[6~')
       const next = render(f, width).join('\n')
+      if (next.includes('detail-59')) sawDeepestDetail = true
       if (next === prev) break
       prev = next
     }
     const bottom = render(f, width).join('\n')
     assert.ok(render(f, width).length <= 12, `budget moved while scrolling (${width})`)
-    // MAX_CONTENT_ROWS (256) keeps the whole page (detail + options)
-    // reachable at both widths — the deepest detail line is always there.
-    assert.ok(bottom.includes('detail-59'), `deep content unreachable (${width}):\n${bottom}`)
+    assert.ok(sawDeepestDetail, `deep content must be reachable by paging (${width}):\n${bottom}`)
     assert.ok(!bottom.includes('detail-00'), `top content must scroll away (${width}):\n${bottom}`)
     assert.ok(bottom.includes('↑ '), `up marker missing at the bottom (${width}):\n${bottom}`)
     // Page up back to the top.
@@ -809,7 +963,7 @@ test('Kitty CSI-u Esc cancels and CSI-u Tab/Enter work', () => {
   render(k, 100)
   k.handleInput('\x1b[13;1u')
   assert.ok(done === undefined, `first CSI-u Enter must land on the review page, not submit`)
-  assert.ok(render(k, 100).join('\n').includes('Submit'), `review page must show after CSI-u Enter:\n${render(k, 100).join('\n')}`)
+  assert.ok(render(k, 100).join('\n').includes('Review your answer before submit'), `review page must show after CSI-u Enter:\n${render(k, 100).join('\n')}`)
   k.handleInput('\x1b[13;1u')
   assert.ok(done !== undefined, `second CSI-u Enter must submit:\n${JSON.stringify(done)}`)
   assert.deepEqual((done as { id: string; selected: string[] }[])[0]?.selected, ['A'])
@@ -1515,8 +1669,13 @@ test('question: press option A → repaint moves B onto the cell → release mus
   ], () => {}, () => {})
   f.setMaxRows(8)
   let rendered = f.render(100).map(strip)
-  const rowA = rendered.findIndex(line => line.includes('Option 0'))
-  assert.ok(rowA >= 0, 'option 0 row missing')
+  let rowA = rendered.findIndex(line => line.includes('Option 0'))
+  for (let page = 0; rowA < 0 && page < 4; page += 1) {
+    f.handleInput('\x1b[6~')
+    rendered = f.render(100).map(strip)
+    rowA = rendered.findIndex(line => line.includes('Option 0'))
+  }
+  assert.ok(rowA >= 0, `option 0 must become visible through the scrollport:\n${rendered.join('\n')}`)
   // Press option 0.
   const gesture = f.beginMousePress(rowA)
   assert.ok(gesture !== undefined)
@@ -1561,9 +1720,10 @@ test('question: inert press → repaint moves the marker onto the cell → relea
   ], () => {}, () => {})
   f.setMaxRows(8)
   let rendered = f.render(100).map(strip)
-  // Row 6 is inert (blank) at maxRows 8; the marker sits at row 5.
+  // Row 6 is inert after the marker at maxRows 8; at maxRows 9 the marker
+  // moves down to that row, exercising the press-time hit-kind fence.
   const row = 6
-  assert.equal((f as unknown as { hitMap: Map<number, string | undefined> }).hitMap.get(row), undefined, 'row 6 must be inert at maxRows 8')
+  assert.equal((f as unknown as { hitMap: Map<number, string | undefined> }).hitMap.get(row), undefined, 'row 7 must be inert at maxRows 8')
   // Press the inert row: the press-time identity is undefined chrome.
   const gesture = f.beginMousePress(row)
   assert.ok(gesture !== undefined && gesture.hit === undefined, 'an inert press must record an undefined hit')
@@ -1577,6 +1737,291 @@ test('question: inert press → repaint moves the marker onto the cell → relea
   const before = state.bodyExpanded
   f.completeMouseClick(gesture, row)
   assert.equal(state.bodyExpanded, before, 'the inert press must not toggle the expanded panel')
+})
+
+test('Fullscreen Action Bar uses quiet ink roles and muted keycaps without changing geometry', () => {
+  setTheme('dark')
+  const f = makeMouseFlow([
+    { id: 'q1', question: 'One?', options: [{ label: 'A' }] },
+    { id: 'q2', question: 'Two?', multiSelect: true, options: [{ label: 'B' }] },
+    { id: 'q3', question: 'Three?', options: [{ label: 'C' }] },
+  ], 24)
+  f.handleInput('1') // answer q1 → q2
+  f.handleInput(' ') // answer q2 in place → Continue is now the progress action
+  const lines = f.render(100)
+  const row = lines.at(-1)!
+  assert.equal(visibleWidth(row), visibleWidth(strip(row)), 'ink must not change the painted cell width')
+  assert.ok(row.includes(color.text('Continue')), `Continue is the primary action ink:\n${row}`)
+  assert.ok(row.includes(color.textMuted(' [→]')), `the progress keycap is muted:\n${row}`)
+  assert.ok(row.includes(color.textDim('Back')), `Back is secondary ink:\n${row}`)
+  assert.ok(row.includes(color.textDim('Cancel')), `Cancel is secondary ink:\n${row}`)
+  assert.ok(row.includes(color.textMuted(' [←]')) && row.includes(color.textMuted(' [Esc]')), `secondary keycaps are muted:\n${row}`)
+  assert.ok(row.includes(color.textMuted('↑↓ select')), `pure keyboard hints are muted:\n${row}`)
+  assert.ok(row.includes(color.textMuted(' · ')), `the separator is muted:\n${row}`)
+  assert.ok(!row.includes(color.primary('Continue')) && !row.includes(color.primary('Back')),
+    `no action segment is flooded with primary ink:\n${row}`)
+  assert.ok(strip(row).includes('Continue [→] · Back [←] · ↑↓ select'), `the visible text/order is unchanged:\n${strip(row)}`)
+
+  // Review: Submit primary; Back/Cancel secondary; all keycaps muted.
+  f.handleInput('\r') // Continue → q3
+  f.handleInput('1') // answer q3 → Review
+  const review = f.render(100)
+  const reviewRow = review.at(-1)!
+  assert.ok(reviewRow.includes(color.text('Submit')) && reviewRow.includes(color.textMuted(' [Enter]')),
+    `Review Submit is primary with a muted keycap:\n${reviewRow}`)
+  assert.ok(reviewRow.includes(color.textDim('Back')) && reviewRow.includes(color.textDim('Cancel')),
+    `Review navigation actions are secondary:\n${reviewRow}`)
+  assert.ok(!reviewRow.includes(color.primary('Submit')), `Submit is not flooded with primary ink:\n${reviewRow}`)
+
+  // Edit: the cursor hint is gone; Review primary; Cancel flow/Leave edit secondary.
+  const edit = makeMouseFlow([{ id: 'q1', question: 'Name?' }], 24)
+  edit.handleInput('typed')
+  const editRow = edit.render(100).at(-1)!
+  assert.ok(!strip(editRow).includes('←→ edit'), `the edit bar omits ordinary cursor help:\n${strip(editRow)}`)
+  assert.ok(editRow.includes(color.text('Review')) && editRow.includes(color.textMuted(' [Enter]')),
+    `edit Review is primary with a muted keycap:\n${editRow}`)
+  assert.ok(editRow.includes(color.textDim('Cancel flow')) && editRow.includes(color.textDim('Leave edit')),
+    `Cancel flow and Leave edit are secondary:\n${editRow}`)
+  assert.ok(editRow.includes(color.textMuted(' [Esc]')), `Leave edit's keycap is muted:\n${editRow}`)
+})
+
+test('mouse action rows order progress, Back, hints and final cancellation by state', () => {
+  const choices = makeMouseFlow([
+    { id: 'q1', question: 'One?', options: [{ label: 'A' }] },
+    { id: 'q2', question: 'Two?', options: [{ label: 'B' }] },
+  ], 24)
+  choices.handleInput('\x1b[C') // skip q1 and show Back on q2
+  let row = (render(choices, 100).at(-1) ?? '')
+  const choicePositions = ['Skip [→]', 'Back [←]', '↑↓ select', 'Cancel [Esc]'].map(label => row.indexOf(label))
+  assert.ok(choicePositions.every(position => position >= 0), `choice row must expose primary keys and hints:\n${row}`)
+  assert.ok(choicePositions.every((position, index) => index === 0 || position > choicePositions[index - 1]!),
+    `choice order must be progress, Back, hints, Cancel:\n${row}`)
+
+  const optionless = makeMouseFlow([
+    { id: 'q1', question: 'First?', options: [{ label: 'A' }] },
+    { id: 'q2', question: 'Your name?' },
+  ], 24)
+  optionless.handleInput('1') // enter q2's edit
+  optionless.handleInput('\x1b') // optionless navigation
+  row = render(optionless, 100).at(-1) ?? ''
+  const navPositions = ['Skip [→]', 'Edit [Enter]', 'Back [←]', 'Cancel [Esc]'].map(label => row.indexOf(label))
+  assert.ok(navPositions.every(position => position >= 0), `optionless navigation must expose Edit and Back:\n${row}`)
+  assert.ok(navPositions.every((position, index) => index === 0 || position > navPositions[index - 1]!),
+    `optionless order must be progress, Edit, Back, Cancel:\n${row}`)
+
+  const editing = makeMouseFlow([{ id: 'q1', question: 'Name?' }], 24)
+  row = render(editing, 100).at(-1) ?? ''
+  const editPositions = ['Review [Enter]', 'Cancel flow', 'Leave edit [Esc]'].map(label => row.indexOf(label))
+  assert.ok(editPositions.every(position => position >= 0), `edit row must expose its click-only cancel and Esc leave action:\n${row}`)
+  assert.ok(editPositions.every((position, index) => index === 0 || position > editPositions[index - 1]!),
+    `edit order must be progress, Cancel flow, Leave edit:\n${row}`)
+  assert.ok(!row.includes('←→ edit'), `the edit bar must not spend a segment on ordinary cursor help:\n${row}`)
+
+  const review = makeMouseFlow([
+    { id: 'q1', question: 'One?', options: [{ label: 'A' }] },
+    { id: 'q2', question: 'Two?', options: [{ label: 'B' }] },
+  ], 24)
+  review.handleInput('1')
+  review.handleInput('1')
+  const reviewLines = render(review, 100)
+  row = reviewLines.at(-1) ?? ''
+  assert.ok(reviewLines[0]?.includes('Review'), `the final navigation tab must be Review:\n${reviewLines.join('\n')}`)
+  const reviewPositions = ['Submit [Enter]', 'Back [←]', 'Cancel [Esc]'].map(label => row.indexOf(label))
+  assert.ok(reviewPositions.every(position => position >= 0), `Review must expose Submit, Back and Cancel:\n${row}`)
+  assert.ok(reviewPositions.every((position, index) => index === 0 || position > reviewPositions[index - 1]!),
+    `Review order must be Submit, Back, Cancel:\n${row}`)
+})
+
+test('eligible Split browse stays low priority beside the required Question actions', () => {
+  let available = true
+  setNoAnswerNavigationInstalled(true, () => available)
+  try {
+    const f = makeMouseFlow([{ id: 'q1', question: 'Pick?', options: [{ label: 'A' }] }], 24)
+    f.setStatus({ navigationEligible: true })
+    let row = render(f, 100).at(-1) ?? ''
+    assert.ok(row.includes('browse'), `an eligible live Split flow must advertise browse:\n${row}`)
+
+    available = false
+    row = render(f, 100).at(-1) ?? ''
+    assert.ok(!row.includes('browse'), `a currently unusable navigation action must disappear:\n${row}`)
+
+    available = true
+    row = render(f, 44).at(-1) ?? ''
+    assert.ok(!row.includes('browse'), `narrow action rows must drop low-priority browse first:\n${row}`)
+    assert.ok(row.includes('Skip') && row.includes('Cancel'), `narrow rows must retain progress and cancellation:\n${row}`)
+  } finally {
+    setNoAnswerNavigationInstalled(false)
+  }
+})
+
+test('a visible Continue action advances through multi/custom answers and Review Back preserves drafts before Submit', () => {
+  let doneCalls = 0
+  let answers: unknown
+  let cancelled = 0
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Pick many', multiSelect: true, options: [{ label: 'A' }, { label: 'B' }] },
+    { id: 'q2', question: 'Pick one', options: [{ label: 'C' }] },
+  ], value => { doneCalls += 1; answers = value }, () => { cancelled += 1 })
+  f.setMaxRows(24)
+  f.setMouseActionsEnabled(true)
+
+  clickHitRow(f, '[ ] A')
+  assert.deepEqual(f.draftSnapshot().answers[0]!.selected, ['A'])
+  clickHitRow(f, 'Type something.')
+  f.handleInput('custom answer')
+  clickAction(f, 'Next')
+  assert.ok(render(f, 100).some(line => line.includes('?  Pick one')), 'Next commits custom text and advances')
+  assert.equal(f.draftSnapshot().answers[0]!.custom, 'custom answer')
+  clickHitRow(f, '[1] C')
+  assert.ok(render(f, 100).some(line => line.includes('Review your answer')), 'the option click reaches Review')
+
+  clickAction(f, 'Back')
+  assert.ok(render(f, 100).some(line => line.includes('?  Pick one')), 'Review Back returns to the last question')
+  assert.deepEqual(f.draftSnapshot().answers[1]!.selected, ['C'], 'Review Back preserves the answer')
+  clickAction(f, 'Back')
+  assert.ok(render(f, 100).some(line => line.includes('?  Pick many')), 'Back returns to the prior question')
+  assert.deepEqual(f.draftSnapshot().answers[0]!.selected, ['A'], 'Back preserves multi-select choices')
+  assert.equal(f.draftSnapshot().answers[0]!.custom, 'custom answer', 'Back preserves custom text')
+
+  clickAction(f, 'Continue')
+  clickHitRow(f, '[1] C')
+  clickAction(f, 'Submit')
+  assert.equal(doneCalls, 1)
+  assert.equal(cancelled, 0)
+  assert.deepEqual(answers, [
+    { id: 'q1', selected: ['A'], custom: 'custom answer' },
+    { id: 'q2', selected: ['C'] },
+  ])
+})
+
+test('Skip reaches Review without settling and Submit keeps the original empty answer encoding', () => {
+  let answers: unknown
+  let doneCalls = 0
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Unanswered?', options: [{ label: 'A' }] },
+  ], value => { doneCalls += 1; answers = value }, () => {})
+  f.setMaxRows(24)
+  f.setMouseActionsEnabled(true)
+
+  clickAction(f, 'Skip')
+  assert.equal(f.draftSnapshot().answers[0]!.skipped, true)
+  assert.ok(render(f, 100).some(line => line.includes('Review your answer')))
+  assert.equal(doneCalls, 0, 'Skip only advances into Review')
+  clickAction(f, 'Submit')
+  assert.equal(doneCalls, 1)
+  assert.deepEqual(answers, [{ id: 'q1', selected: [] }])
+})
+
+test('Edit, Leave edit, Next and Cancel flow use their distinct existing methods', () => {
+  let cancelled = 0
+  let doneCalls = 0
+  const editing = new QuestionFlow([
+    { id: 'q1', question: 'Name?' },
+  ], () => { doneCalls += 1 }, () => { cancelled += 1 })
+  editing.setMaxRows(24)
+  editing.setMouseActionsEnabled(true)
+  editing.handleInput('typed name')
+  const editRow = render(editing, 100).at(-1) ?? ''
+  assert.ok(editRow.includes('Review') && editRow.includes('Leave edit') && editRow.includes('Cancel flow'))
+  assert.ok(editRow.includes('Cancel flow · Leave edit [Esc]'),
+    'Cancel flow is click-only while Esc remains the final Leave edit action')
+
+  clickAction(editing, 'Leave edit')
+  assert.ok(render(editing, 100).some(line => line.includes('Edit [Enter]')), 'Leave edit returns to optionless navigation')
+  assert.equal(editing.draftSnapshot().answers[0]!.custom, 'typed name')
+  clickAction(editing, 'Edit')
+  assert.ok((render(editing, 100).at(-1) ?? '').includes('Leave edit'), 'Edit re-enters the same draft')
+  clickAction(editing, 'Cancel flow')
+  assert.equal(cancelled, 1)
+  assert.equal(doneCalls, 0)
+
+  const progressing = new QuestionFlow([
+    { id: 'q1', question: 'First?' },
+    { id: 'q2', question: 'Second?', options: [{ label: 'B' }] },
+  ], () => {}, () => {})
+  progressing.setMaxRows(24)
+  progressing.setMouseActionsEnabled(true)
+  progressing.handleInput('answer')
+  clickAction(progressing, 'Next')
+  assert.ok(render(progressing, 100).some(line => line.includes('?  Second?')))
+  assert.equal(progressing.draftSnapshot().answers[0]!.custom, 'answer')
+})
+
+test('an inert or different Question press cannot transfer onto an action span', () => {
+  let cancelled = 0
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Pick?', options: [{ label: 'A' }] },
+  ], () => {}, () => { cancelled += 1 })
+  f.setMaxRows(24)
+  f.setMouseActionsEnabled(true)
+  let lines = render(f, 100)
+  const bodyRow = lines.findIndex(line => line.includes('?  Pick?'))
+  assert.ok(bodyRow >= 0, `the question body row must be visible:\n${lines.join('\n')}`)
+  const actionRow = lines.length - 1
+  const cancelX = lines[actionRow]!.indexOf('Cancel')
+  const bodyGesture = f.beginMousePress(bodyRow, 0)
+  assert.equal(bodyGesture?.hitKind, 'inert')
+  f.completeMouseClick(bodyGesture, actionRow, cancelX)
+  assert.equal(cancelled, 0, 'a body press cannot turn into Cancel')
+
+  lines = render(f, 100)
+  const skipX = lines[actionRow]!.indexOf('Skip')
+  const skipGesture = f.beginMousePress(actionRow, skipX)
+  assert.equal(skipGesture?.action, 'progress')
+  f.completeMouseClick(skipGesture, actionRow, cancelX)
+  assert.equal(cancelled, 0, 'a press on Skip cannot release on Cancel')
+  lines = render(f, 100)
+  const separatorX = lines[actionRow]!.indexOf(' · ') + 1
+  assert.ok(separatorX > 0, `the action separator must be visible:\n${lines[actionRow]}`)
+  const separatorGesture = f.beginMousePress(actionRow, separatorX)
+  assert.equal(separatorGesture?.hitKind, 'inert', 'separator cells are not action spans')
+  f.completeMouseClick(separatorGesture, actionRow, cancelX)
+  assert.equal(cancelled, 0, 'a separator press released over Cancel must not invoke it')
+  assert.ok(render(f, 100).some(line => line.includes('?  Pick?')))
+})
+
+test('a Question action press cannot survive keyboard page change or resize', () => {
+  let cancelled = 0
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'First?', options: [{ label: 'A' }] },
+    { id: 'q2', question: 'Second?', options: [{ label: 'B' }] },
+  ], () => {}, () => { cancelled += 1 })
+  f.setMaxRows(24)
+  f.setMouseActionsEnabled(true)
+  let lines = render(f, 100)
+  let row = lines.length - 1
+  let x = lines[row]!.indexOf('Skip')
+  let gesture = f.beginMousePress(row, x)
+  f.handleInput('\x1b[C')
+  lines = render(f, 100)
+  f.completeMouseClick(gesture, row, x)
+  assert.ok(lines.some(line => line.includes('?  Second?')), 'keyboard progress owns the page change')
+  assert.equal(cancelled, 0)
+
+  lines = render(f, 100)
+  row = lines.length - 1
+  x = lines[row]!.indexOf('Cancel')
+  gesture = f.beginMousePress(row, x)
+  render(f, 80)
+  f.completeMouseClick(gesture, row, x)
+  assert.equal(cancelled, 0, 'a release after resize is inert')
+})
+
+test('masked Question action metadata and labels never contain the answer', () => {
+  const secret = 'private-token'
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Enter secret', masked: true },
+  ], () => {}, () => {})
+  f.setMaxRows(24)
+  f.setMouseActionsEnabled(true)
+  f.handleInput(secret)
+  const lines = render(f, 100)
+  const actionRow = lines.at(-1) ?? ''
+  assert.ok(!lines.join('\n').includes(secret))
+  assert.ok(!actionRow.includes(secret))
+  const hits = (f as unknown as { paintedActionHits: Array<Record<string, unknown>> }).paintedActionHits
+  assert.ok(hits.length > 0)
+  assert.ok(!JSON.stringify(hits).includes(secret))
 })
 
 test('masked review keeps the grapheme mask (mouse parity)', () => {
@@ -1933,46 +2378,6 @@ test('masked custom shows bullets in list mode after revisit, never plaintext', 
   assert.ok(!view.includes('secret'), `the plaintext must NEVER render:\n${view}`)
 })
 
-test('single-select existing selection + empty custom Enter survives (regression)', () => {
-  // Plan §14.9 (single variant): selected A, enter OTHER, do not type,
-  // Enter — the answer stays ['A']. (The comprehensive walkthrough lives
-  // in 'Enter on empty custom text never wipes an existing selection'
-  // above; this is the §14.9-anchored minimal pin.)
-  let done: unknown
-  const f = new QuestionFlow([
-    { id: 'q1', question: 'Pick', options: [{ label: 'A' }, { label: 'B' }] },
-  ], (answers) => { done = answers }, () => {})
-  f.setMaxRows(24)
-  render(f, 100)
-  f.handleInput('1') // select A → review
-  render(f, 100)
-  f.handleInput('\x1b[D') // ← back
-  enterOtherEdit(f, 2) // enter the edit (seeded with the empty draft)
-  f.handleInput('\r') // Enter with EMPTY text
-  render(f, 100)
-  f.handleInput('\r') // submit
-  assert.deepEqual(done, [{ id: 'q1', selected: ['A'] }])
-})
-
-test('multi-select existing selection + empty custom Enter survives (regression)', () => {
-  // Plan §14.9 (multi variant): the comprehensive walkthrough lives in
-  // 'Enter on empty custom text never wipes an existing selection'; this
-  // is the §14.9-anchored minimal pin with the NEW Space toggle entry.
-  let done: unknown
-  const f = new QuestionFlow([
-    { id: 'q1', question: 'Pick many', multiSelect: true, options: [{ label: 'X' }, { label: 'Y' }] },
-  ], (answers) => { done = answers }, () => {})
-  f.setMaxRows(24)
-  render(f, 100)
-  f.handleInput(' ') // toggle X (Space)
-  render(f, 100)
-  enterOtherEdit(f, 2) // enter the edit (empty draft)
-  f.handleInput('\r') // Enter with EMPTY text → keep selection, advance
-  render(f, 100)
-  f.handleInput('\r') // submit
-  assert.deepEqual(done, [{ id: 'q1', selected: ['X'] }])
-})
-
 test('multi-select mouse click toggles without advancing (mouse parity)', () => {
   // Plan §14.13: clickRow → confirm() used to be the universal mouse
   // entry; the multi-select click must be the SELECTION action.
@@ -2269,4 +2674,1004 @@ test('hostile question, option and detail text is projected before the themed pa
   assert.ok(!withoutSgr.includes('\u001b'), 'no raw ESC survives outside an app-owned SGR paint')
   assert.ok(withoutSgr.includes('evil'), 'the readable question/option text survives')
   assert.ok(withoutSgr.includes('text'), 'the readable trailing payload text survives')
+})
+
+// ── The official plan-review branch (FR7) ────────────────────────────────
+
+const PLAN_MD = '# Upgrade 0.5.7\n## Scope\n- goal dock\n- plan review\n## Execution\nship it'
+
+/** A plan-review question WITHOUT the detail body (the decision/feedback/
+ * reading cases: `View review text` is absent, so the rows are exactly
+ * [View plan?, Keep…, Approve plan]). */
+const planQuestionNoDetail = (overrides: Partial<QuestionFlowQuestion> = {}): QuestionFlowQuestion =>
+  planQuestionFixture({ detail: undefined, ...overrides })
+
+function planQuestionFixture(overrides: Partial<QuestionFlowQuestion> = {}): QuestionFlowQuestion {
+  return {
+    id: 'plan-review',
+    question: 'Approve this plan and leave plan mode?',
+    header: 'Plan review',
+    detail: PLAN_MD,
+    options: [
+      { label: 'Approve', description: 'Leave plan mode.' },
+      { label: 'Keep planning', description: 'Stay in plan mode.' },
+    ],
+    intent: { kind: 'plan-review', approve: 'Approve', callId: 'call-plan-1' },
+    ...overrides,
+  }
+}
+
+function planMakeFlow(
+  questions: readonly QuestionFlowQuestion[],
+  handlers: { onDone?: (answers: unknown[]) => void; onCancel?: () => void } = {},
+): QuestionFlow {
+  return new QuestionFlow(
+    questions,
+    (answers) => handlers.onDone?.(answers),
+    () => handlers.onCancel?.(),
+  )
+}
+
+/** The Fullscreen-capable host seam the app installs (capability + one-shot
+ * inspect), with an optional inspection outcome for the failure path. */
+function planInspectionSeam(
+  inspect: () => boolean,
+  canInspect: () => boolean = () => true,
+  cardPresent: () => boolean = () => true,
+): { canInspect: () => boolean; inspect: () => boolean; cardPresent: () => boolean } {
+  return { canInspect, inspect, cardPresent }
+}
+
+function planRender(flow: QuestionFlow, width = 80): string[] {
+  return flow.render(width).map(line => stripTerminalSequences(line))
+}
+
+test('planReviewOf accepts exactly the official shape and rejects lookalikes', () => {
+  assert.ok(planReviewOf([planQuestionFixture()]) !== undefined, 'the official shape is a plan review')
+  // Two questions in one ask: not a plan decision.
+  assert.equal(planReviewOf([planQuestionFixture(), planQuestionFixture()]), undefined)
+  // A forged intent without a matching approve option.
+  assert.equal(planReviewOf([planQuestionFixture({ intent: { kind: 'plan-review', approve: 'Nope' } })]), undefined)
+  // approve present but no other option (no keep-planning class).
+  assert.equal(planReviewOf([planQuestionFixture({
+    options: [{ label: 'Approve' }],
+    intent: { kind: 'plan-review', approve: 'Approve' },
+  })]), undefined)
+  // A different intent kind.
+  assert.equal(planReviewOf([planQuestionFixture({ intent: { kind: 'approval', approve: 'Approve' } })]), undefined)
+  // No intent at all.
+  assert.equal(planReviewOf([planQuestionFixture({ intent: undefined })]), undefined)
+})
+
+test('the plan decision component defaults to View (with inspection) and never to Approve', () => {
+  const flow = planMakeFlow([planQuestionNoDetail()])
+  flow.setMaxRows(24)
+  assert.ok(flow.setPlanInspection(planInspectionSeam(() => true)), 'the plan flow accepts the inspection capability')
+  const lines = planRender(flow)
+  const joined = lines.join('\n')
+  assert.ok(joined.includes('Plan review · Approve this plan'), `title row missing (question text without a detail body):\n${joined}`)
+  const viewRow = lines.findIndex(line => line.includes('View plan'))
+  const keepRow = lines.findIndex(line => line.includes('Keep planning…'))
+  const approveRow = lines.findIndex(line => line.includes('Approve plan'))
+  assert.ok(viewRow >= 0, `View plan row missing:\n${joined}`)
+  assert.ok(keepRow >= 0, `Keep planning row missing:\n${joined}`)
+  assert.ok(approveRow >= 0, `Approve row missing:\n${joined}`)
+  assert.ok(viewRow < keepRow && keepRow < approveRow, `fixed row order View→Keep→Approve:\n${joined}`)
+  // The cursor '>' marks View plan (index 0), never Approve.
+  assert.ok(lines[viewRow]!.trimStart().startsWith('>'), `View plan must hold the cursor:\n${joined}`)
+  assert.ok(!lines[approveRow]!.trimStart().startsWith('>'), `Approve must not hold the default cursor:\n${joined}`)
+  // No generic question machinery renders.
+  assert.ok(!joined.includes('Review'), `no generic Review tab:\n${joined}`)
+  assert.ok(!joined.includes('Type something.'), `no generic free-text row:\n${joined}`)
+})
+
+test('without the inspection capability the decision list keeps Keep first (Regular shape)', () => {
+  const flow = planMakeFlow([planQuestionNoDetail()])
+  flow.setMaxRows(24)
+  flow.setPlanInspection(undefined)
+  const lines = planRender(flow)
+  const joined = lines.join('\n')
+  assert.ok(!joined.includes('View plan'), `Regular must not offer an unusable View plan:\n${joined}`)
+  const keepRow = lines.findIndex(line => line.includes('Keep planning…'))
+  assert.ok(keepRow >= 0 && lines[keepRow]!.trimStart().startsWith('>'), `Keep planning holds the default cursor:\n${joined}`)
+})
+
+test('Enter on Approve answers the OFFICIAL approve label through the flow settle', () => {
+  const settled: unknown[] = []
+  const flow = planMakeFlow([planQuestionNoDetail()], { onDone: answers => settled.push(answers) })
+  flow.setMaxRows(24)
+  flow.setPlanInspection(planInspectionSeam(() => true))
+  // ↓↓ moves to Approve (View=0, Keep=1, Approve=2).
+  flow.handleInput('\x1b[B')
+  flow.handleInput('\x1b[B')
+  flow.handleInput('\r')
+  assert.deepEqual(settled, [[{ id: 'plan-review', selected: ['Approve'] }]],
+    `the official approve label is the answer:\n${JSON.stringify(settled)}`)
+})
+
+test('Enter on View runs the host inspection once and enters reading; Esc returns to the decision', () => {
+  const inspections: number[] = []
+  const flow = planMakeFlow([planQuestionNoDetail()])
+  flow.setMaxRows(24)
+  flow.setPlanInspection(planInspectionSeam(() => { inspections.push(1); return true }))
+  flow.handleInput('\r') // Enter on View (default cursor)
+  assert.equal(inspections.length, 1, 'the host inspection runs exactly once')
+  let lines = planRender(flow)
+  assert.ok(lines.join('\n').includes('Reading the submitted plan'), `reading step must planRender:\n${lines.join('\n')}`)
+  // Enter in reading is INERT (never an approve).
+  const settled: unknown[] = []
+  ;(flow as unknown as { onDone: (answers: unknown[]) => void }).onDone = answers => settled.push(answers)
+  flow.handleInput('\r')
+  assert.deepEqual(settled, [], 'Enter in reading must never settle')
+  // Esc returns to the decision list.
+  flow.handleInput('\x1b')
+  lines = planRender(flow)
+  assert.ok(lines.join('\n').includes('View plan'), `Esc returns to the decision list:\n${lines.join('\n')}`)
+})
+
+test('a failed inspection degrades to the question-detail fallback, never a claimed reading state', () => {
+  const flow = planMakeFlow([planQuestionFixture()])
+  flow.setMaxRows(24)
+  flow.setPlanInspection(planInspectionSeam(() => false))
+  flow.handleInput('\r') // Enter on View
+  const lines = planRender(flow)
+  const joined = lines.join('\n')
+  assert.ok(joined.includes('Full review text'), `the fallback names its source:\n${joined}`)
+  assert.ok(!joined.includes('Reading the submitted plan'), `no claimed-located reading:\n${joined}`)
+  // The fallback shows the plan body's tail via paging (the whole text stays
+  // reachable; a fixed cap would drop it silently).
+  assert.ok(joined.includes('# Upgrade 0.5.7'), `the fallback body starts with the plan:\n${joined}`)
+})
+
+test('Keep planning… opens the feedback input; Enter sends the official label with optional custom', () => {
+  const settled: unknown[] = []
+  const flow = planMakeFlow([planQuestionNoDetail()], { onDone: answers => settled.push(answers) })
+  flow.setMaxRows(24)
+  flow.setPlanInspection(planInspectionSeam(() => true))
+  flow.handleInput('\x1b[B') // ↓ to Keep planning…
+  flow.handleInput('\r')
+  let lines = planRender(flow)
+  assert.ok(lines.join('\n').includes('What should be changed?'), `feedback step renders:\n${lines.join('\n')}`)
+  // Esc keeps the draft and returns to the decision list.
+  flow.handleInput('p')
+  flow.handleInput('l')
+  flow.handleInput('e')
+  flow.handleInput('a')
+  flow.handleInput('s')
+  flow.handleInput('e')
+  flow.handleInput('\x1b')
+  lines = planRender(flow)
+  assert.ok(lines.join('\n').includes('View plan'), `Esc returns to the decision list:\n${lines.join('\n')}`)
+  // Re-enter: the cursor stays on Keep planning… and the draft survives.
+  flow.handleInput('\r')
+  flow.handleInput('\r') // Enter submits the feedback with the kept draft.
+  assert.deepEqual(settled, [[{ id: 'plan-review', selected: ['Keep planning'], custom: 'please' }]],
+    `the keep label survives with the custom text:\n${JSON.stringify(settled)}`)
+})
+
+test('an empty feedback answers the keep label alone (no custom field)', () => {
+  const settled: unknown[] = []
+  const flow = planMakeFlow([planQuestionNoDetail()], { onDone: answers => settled.push(answers) })
+  flow.setMaxRows(24)
+  flow.setPlanInspection(planInspectionSeam(() => true))
+  flow.handleInput('\x1b[B') // Keep planning…
+  flow.handleInput('\r') // enter feedback
+  flow.handleInput('\r') // submit empty
+  assert.deepEqual(settled, [[{ id: 'plan-review', selected: ['Keep planning'] }]],
+    `empty feedback keeps only the label:\n${JSON.stringify(settled)}`)
+})
+
+test('Esc on the decision list is the OFFICIAL dismiss (onCancel)', () => {
+  let cancelled = 0
+  const flow = planMakeFlow([planQuestionNoDetail()], { onCancel: () => { cancelled += 1 } })
+  flow.setMaxRows(24)
+  flow.setPlanInspection(planInspectionSeam(() => true))
+  flow.handleInput('\x1b')
+  assert.equal(cancelled, 1, 'Esc on the decision list cancels the flow')
+})
+
+test('Ctrl+C is the official cancel in every plan step (no orphaned reading state)', () => {
+  // Decision.
+  let cancelled = 0
+  const decision = planMakeFlow([planQuestionNoDetail()], { onCancel: () => { cancelled += 1 } })
+  decision.setMaxRows(24)
+  decision.setPlanInspection(planInspectionSeam(() => true))
+  decision.handleInput('\x03')
+  assert.equal(cancelled, 1, 'Ctrl+C cancels from the decision list')
+  // Reading: the host reading lease is released and the flow cancels.
+  let readingEnded = 0
+  let readingCancelled = 0
+  const reading = planMakeFlow([planQuestionNoDetail()], { onCancel: () => { readingCancelled += 1 } })
+  reading.setMaxRows(24)
+  reading.setPlanInspection(planInspectionSeam(() => true))
+  reading.onPlanReadingEnd = () => { readingEnded += 1 }
+  reading.handleInput('\r')
+  assert.ok(reading.isPlanReading())
+  reading.handleInput('\x03')
+  assert.equal(readingCancelled, 1, 'Ctrl+C cancels while reading')
+  assert.equal(readingEnded, 1, 'Ctrl+C releases the reading lease')
+  // Feedback: Ctrl+C cancels instead of the Input consuming it.
+  let feedbackCancelled = 0
+  const feedback = planMakeFlow([planQuestionNoDetail()], { onCancel: () => { feedbackCancelled += 1 } })
+  feedback.setMaxRows(24)
+  feedback.setPlanInspection(planInspectionSeam(() => true))
+  feedback.handleInput('\x1b[B')
+  feedback.handleInput('\r')
+  feedback.handleInput('\x03')
+  assert.equal(feedbackCancelled, 1, 'Ctrl+C cancels while editing feedback')
+})
+
+test('a non-plan question keeps the generic flow pages untouched', () => {
+  const flow = planMakeFlow([planQuestionFixture({
+    intent: undefined,
+    options: [{ label: 'A' }, { label: 'B' }],
+  })])
+  flow.setMaxRows(24)
+  const lines = planRender(flow)
+  const joined = lines.join('\n')
+  assert.ok(joined.includes('Approve this plan'), `the question text renders:\n${joined}`)
+  assert.ok(joined.includes('Review'), `the generic Review tab renders:\n${joined}`)
+  assert.ok(!joined.includes('Plan review · '), `no plan decision component:\n${joined}`)
+})
+
+function planStripLines(flow: QuestionFlow, width = 80): string[] {
+  return flow.render(width).map(line => stripTerminalSequences(line))
+}
+
+/** Click the plan decision row with `label` through the last-painted hit map. */
+function planClickRow(flow: QuestionFlow, label: string, width = 80): void {
+  const lines = planStripLines(flow, width)
+  const row = lines.findIndex(line => line.includes(label))
+  assert.ok(row >= 0, `row '${label}' must be painted:\n${lines.join('\n')}`)
+  const gesture = flow.beginMousePress(row, 0)
+  assert.ok(gesture !== undefined, `press on '${label}' must capture its row`)
+  flow.completeMouseClick(gesture, row, 0)
+}
+
+test('Fullscreen pointer: clicking a decision row is keyboard-Enter parity (never a stray approve)', () => {
+  const settled: unknown[] = []
+  const flow = planMakeFlow([planQuestionNoDetail()], { onDone: answers => settled.push(answers) })
+  flow.setMaxRows(24)
+  flow.setMouseActionsEnabled(true)
+  flow.setPlanInspection(planInspectionSeam(() => true))
+  const lines = planStripLines(flow)
+  const joined = lines.join('\n')
+  // The action bar is the frozen hint row, not a second list of verbs.
+  assert.ok(joined.includes('↑↓ select'), `selection hint missing:\n${joined}`)
+  assert.ok(joined.includes('Enter choose'), `enter hint missing:\n${joined}`)
+  assert.ok(joined.includes('Discuss [Esc]'), `the clickable Discuss verb missing:\n${joined}`)
+  assert.ok(joined.includes('Waiting for decision'), `the decision status fact missing:\n${joined}`)
+  // Clicking the Approve row settles with the official label.
+  planClickRow(flow, 'Approve plan')
+  assert.deepEqual(settled, [[{ id: 'plan-review', selected: ['Approve'] }]])
+})
+
+test('Fullscreen pointer: clicking View runs the inspection (a click is never a submit)', () => {
+  const settled: unknown[] = []
+  const inspections: number[] = []
+  const flow = planMakeFlow([planQuestionNoDetail()], { onDone: answers => settled.push(answers) })
+  flow.setMaxRows(24)
+  flow.setMouseActionsEnabled(true)
+  flow.setPlanInspection(planInspectionSeam(() => { inspections.push(1); return true }))
+  planClickRow(flow, 'View plan')
+  assert.equal(inspections.length, 1, 'the click runs the inspection once')
+  assert.deepEqual(settled, [], 'View never submits')
+  assert.ok(flow.isPlanReading(), 'the click enters the reading step')
+})
+
+test('Fullscreen pointer: clicking Keep opens the feedback input, and the Send verb submits', () => {
+  const settled: unknown[] = []
+  const flow = planMakeFlow([planQuestionNoDetail()], { onDone: answers => settled.push(answers) })
+  flow.setMaxRows(24)
+  flow.setMouseActionsEnabled(true)
+  flow.setPlanInspection(planInspectionSeam(() => true))
+  planClickRow(flow, 'Keep planning…')
+  let lines = planStripLines(flow)
+  assert.ok(lines.join('\n').includes('What should be changed?'), `feedback step missing:\n${lines.join('\n')}`)
+  // The feedback Input row is a real pointer target (click places the cursor).
+  const inputRow = lines.findIndex(line => line.trimStart().startsWith('>'))
+  assert.ok(inputRow >= 0, `the feedback input row must paint:\n${lines.join('\n')}`)
+  const inputGesture = flow.beginMousePress(inputRow, 4)
+  assert.ok(inputGesture !== undefined)
+  flow.completeMouseClick(inputGesture, inputRow, 4)
+  // Click the Send revision span.
+  const sendRow = lines.length - 1
+  const sendCol = lines[sendRow]!.indexOf('Send revision')
+  assert.ok(sendCol >= 0, `Send revision missing:\n${lines[sendRow]}`)
+  const sendGesture = flow.beginMousePress(sendRow, sendCol)
+  assert.ok(sendGesture !== undefined)
+  flow.completeMouseClick(sendGesture, sendRow, sendCol)
+  assert.deepEqual(settled, [[{ id: 'plan-review', selected: ['Keep planning'] }]],
+    'the click submits the official keep label')
+})
+
+test('Fullscreen pointer: a stale gesture cannot act on a repainted plan step', () => {
+  const settled: unknown[] = []
+  const flow = planMakeFlow([planQuestionNoDetail()], { onDone: answers => settled.push(answers) })
+  flow.setMaxRows(24)
+  flow.setMouseActionsEnabled(true)
+  flow.setPlanInspection(planInspectionSeam(() => true))
+  const lines = planStripLines(flow)
+  const viewRow = lines.findIndex(line => line.includes('View plan'))
+  assert.ok(viewRow >= 0)
+  // Press on View, then change the mode (keyboard enters reading) before the
+  // release: the release must be inert, never a submit and never a re-entry.
+  const gesture = flow.beginMousePress(viewRow, 0)
+  assert.ok(gesture !== undefined)
+  flow.handleInput('\r')
+  flow.completeMouseClick(gesture, viewRow, 0)
+  assert.deepEqual(settled, [], 'a stale release never approves')
+  assert.ok(flow.isPlanReading(), 'the keyboard action owns the transition')
+})
+
+test('Fullscreen pointer: the fallback Back returns to the decision list without an answer', () => {
+  const settled: unknown[] = []
+  const flow = planMakeFlow([planQuestionNoDetail()], { onDone: answers => settled.push(answers) })
+  flow.setMaxRows(24)
+  flow.setMouseActionsEnabled(true)
+  flow.setPlanInspection(planInspectionSeam(() => false))
+  flow.handleInput('\r') // View → fallback (no provable target)
+  let lines = planStripLines(flow)
+  assert.ok(lines.join('\n').includes('Full review text'), `fallback missing:\n${lines.join('\n')}`)
+  const backRow = lines.length - 1
+  const backCol = lines[backRow]!.indexOf('Back')
+  assert.ok(backCol >= 0, `fallback Back verb missing:\n${lines[backRow]}`)
+  const gesture = flow.beginMousePress(backRow, backCol)
+  assert.ok(gesture !== undefined)
+  flow.completeMouseClick(gesture, backRow, backCol)
+  lines = planStripLines(flow)
+  assert.ok(lines.join('\n').includes('View plan'), `Back returns to the decision list:\n${lines.join('\n')}`)
+  assert.deepEqual(settled, [], 'Back never answers')
+})
+
+test('a plan request with several non-approve options still renders exactly three rows', () => {
+  const flow = planMakeFlow([planQuestionFixture({
+    options: [
+      { label: 'Approve' },
+      { label: 'Keep planning' },
+      { label: 'Ask something else' },
+    ],
+  })])
+  flow.setMaxRows(24)
+  flow.setPlanInspection(planInspectionSeam(() => true))
+  const lines = planStripLines(flow)
+  const joined = lines.join('\n')
+  const decisionRows = lines.filter(line => /^(>| ) (View plan|View review text|Keep planning…|Approve plan)$/.test(line))
+  assert.equal(decisionRows.length, 3, `exactly three decision rows:\n${joined}`)
+  assert.ok(joined.includes('Keep planning…'), `the FIRST non-approve option is the keep class:\n${joined}`)
+  assert.ok(!joined.includes('Ask something else'), `extra non-approve options never add rows:\n${joined}`)
+})
+
+test('a real feedback edit fires the answer-mutation hook and keeps the draft snapshot live', () => {
+  let mutations = 0
+  const drafts: unknown[] = []
+  const flow = new QuestionFlow(
+    [planQuestionNoDetail()],
+    () => {},
+    () => {},
+    () => { mutations += 1 },
+    draft => { drafts.push(draft) },
+  )
+  flow.setMaxRows(24)
+  flow.setPlanInspection(planInspectionSeam(() => true))
+  flow.handleInput('\x1b[B') // Keep planning…
+  flow.handleInput('\r')
+  assert.equal(mutations, 0, 'entering the feedback step is not itself an answer mutation')
+  // Cursor-only keys never mutate.
+  flow.handleInput('\x1b[D')
+  flow.handleInput('\x1b[C')
+  assert.equal(mutations, 0, 'cursor moves never mutate')
+  // The first real character freezes the timed claim and snapshots the draft.
+  flow.handleInput('n')
+  assert.equal(mutations, 1, 'the first edited character is a real answer mutation')
+  assert.equal((drafts.at(-1) as { answers: Array<{ custom: string }> }).answers[0]!.custom, 'n',
+    'the draft snapshot carries the feedback text for park/reopen')
+  flow.handleInput('o')
+  assert.equal(mutations, 2, 'every real edit notifies')
+  assert.equal((drafts.at(-1) as { answers: Array<{ custom: string }> }).answers[0]!.custom, 'no')
+})
+
+test('a stale action-bar press from another plan step is inert after a keyboard transition', () => {
+  const settled: unknown[] = []
+  const flow = planMakeFlow([planQuestionNoDetail()], { onDone: answers => settled.push(answers) })
+  flow.setMaxRows(24)
+  flow.setMouseActionsEnabled(true)
+  flow.setPlanInspection(planInspectionSeam(() => true))
+  // Enter feedback, then press its `Back [Esc]` span…
+  flow.handleInput('\x1b[B')
+  flow.handleInput('\r')
+  let lines = planStripLines(flow)
+  const backRow = lines.length - 1
+  const backCol = lines[backRow]!.indexOf('Back')
+  assert.ok(backCol >= 0, `feedback Back span missing:\n${lines[backRow]}`)
+  const gesture = flow.beginMousePress(backRow, backCol)
+  assert.ok(gesture !== undefined)
+  // …then leave feedback with the KEYBOARD (Esc) and release the old span.
+  flow.handleInput('\x1b')
+  flow.completeMouseClick(gesture, backRow, backCol)
+  assert.ok(!flow.isPlanReading(), 'the stale release never enters reading')
+  assert.deepEqual(settled, [], 'the stale release never answers')
+  lines = planStripLines(flow)
+  assert.ok(lines.join('\n').includes('View plan'), `the flow stays on the decision list:\n${lines.join('\n')}`)
+})
+
+test('the decision cursor keeps its ACTION when the live View capability disappears (never Approve)', () => {
+  const settled: unknown[] = []
+  const flow = planMakeFlow([planQuestionNoDetail()], { onDone: answers => settled.push(answers) })
+  flow.setMaxRows(24)
+  let fullscreen = true
+  flow.setPlanInspection(planInspectionSeam(() => true, () => fullscreen))
+  // Fullscreen: rows [View, Keep, Approve]; move to Keep (index 1).
+  flow.handleInput('\x1b[B')
+  let lines = planStripLines(flow)
+  assert.ok(lines.find(l => l.includes('Keep planning…'))?.trimStart().startsWith('>'), 'Keep holds the cursor')
+  // The live capability disappears: the row list becomes [Keep, Approve].
+  fullscreen = false
+  lines = planStripLines(flow)
+  assert.ok(!lines.join('\n').includes('View plan'), `the View row is gone:\n${lines.join('\n')}`)
+  const keepRow = lines.findIndex(line => line.includes('Keep planning…'))
+  const approveRow = lines.findIndex(line => line.includes('Approve plan'))
+  assert.ok(lines[keepRow]!.trimStart().startsWith('>'), `Keep (not Approve) keeps the cursor after the capability change:\n${lines.join('\n')}`)
+  assert.ok(!lines[approveRow]!.trimStart().startsWith('>'), 'Approve is never selected by the capability change')
+  // Enter runs the HIGHLIGHTED Keep (feedback), never Approve.
+  flow.handleInput('\r')
+  lines = planStripLines(flow)
+  assert.ok(lines.join('\n').includes('What should be changed?'), `Enter opened the feedback input:\n${lines.join('\n')}`)
+  assert.deepEqual(settled, [], 'Enter never approved')
+})
+
+test('the plan step identity in a mouse gesture is discriminative (non-keyboard transition)', () => {
+  let readingEnded = 0
+  const flow = planMakeFlow([planQuestionNoDetail()], { onDone: () => {} })
+  flow.setMaxRows(24)
+  flow.setMouseActionsEnabled(true)
+  flow.setPlanInspection(planInspectionSeam(() => true))
+  flow.onPlanReadingEnd = () => { readingEnded += 1 }
+  // Enter the feedback step, then press its `Back [Esc]` span.
+  flow.handleInput('\x1b[B')
+  flow.handleInput('\r')
+  let lines = planStripLines(flow)
+  const backRow = lines.length - 1
+  const backCol = lines[backRow]!.indexOf('Back')
+  assert.ok(backCol >= 0, `feedback Back span missing:\n${lines[backRow]}`)
+  const gesture = flow.beginMousePress(backRow, backCol)
+  assert.ok(gesture !== undefined)
+  // A NON-keyboard transition into reading (no gesture-clearing input).
+  flow.enterPlanReading()
+  assert.ok(flow.isPlanReading())
+  flow.completeMouseClick(gesture, backRow, backCol)
+  // The pressed feedback-Back must NOT be reinterpreted as the reading Back.
+  assert.ok(flow.isPlanReading(), 'the stale release left the reading step untouched')
+  assert.equal(readingEnded, 0, 'the stale release never ended the reading lease')
+})
+
+test('Fullscreen pointer: clicking the feedback input row MOVES the text cursor', () => {
+  const flow = planMakeFlow([planQuestionNoDetail()])
+  flow.setMaxRows(24)
+  flow.setMouseActionsEnabled(true)
+  flow.setPlanInspection(planInspectionSeam(() => true))
+  flow.handleInput('\x1b[B') // Keep planning…
+  flow.handleInput('\r')
+  const lines = planStripLines(flow)
+  assert.ok(lines.join('\n').includes('What should be changed?'), 'the feedback step is active')
+  // Type enough text that a mid-row click has a distinguishable column.
+  for (const ch of 'revise the plan') flow.handleInput(ch)
+  const inputRow = planStripLines(flow).findIndex(line => line.trimStart().startsWith('>'))
+  assert.ok(inputRow >= 0, 'the feedback input row is painted')
+  const typed = planStripLines(flow)[inputRow]!.trimStart().slice(2)
+  const clickCol = 6 // inside the typed text, not at its end
+  const input = (flow as unknown as { planFeedbackInput: { getValue(): string; setCursor(index: number): void; render(w: number): string[] } }).planFeedbackInput
+  const cursorBefore = input.getValue().length // typing leaves the cursor at the end
+  const gesture = flow.beginMousePress(inputRow, clickCol)
+  assert.ok(gesture !== undefined, 'the press on the input row captures its target')
+  flow.completeMouseClick(gesture, inputRow, clickCol)
+  // The authoritative observable: after the click, typing INSERTS at the click
+  // column instead of appending at the end (the cursor really moved).
+  flow.handleInput('X')
+  const valueAfter = input.getValue()
+  const expectedMidInsert = `${'revise the plan'.slice(0, Math.max(0, clickCol - 2))}X`
+  assert.ok(valueAfter.startsWith(expectedMidInsert),
+    `the click must move the text cursor (typing after the click inserts mid-text): got "${valueAfter}"`)
+  assert.ok(cursorBefore > 0, 'precondition: text was typed before the click')
+})
+
+test('the fallback respects the seat budget with BOTH trailing rows (hint and marker)', () => {
+  const detail = `# Long\n${Array.from({ length: 30 }, (_, i) => `line ${i}`).join('\n')}`
+  const question: QuestionFlowQuestion = {
+    id: 'plan-review', question: 'A?', header: 'Plan review', detail,
+    options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    intent: { kind: 'plan-review', approve: 'Approve' },
+  }
+  for (const budget of [8, 12, 24]) {
+    // Keyboard hint row (non-mouse).
+    const keyboard = planMakeFlow([question])
+    keyboard.setMaxRows(budget)
+    assert.ok(keyboard.setPlanInspection(planInspectionSeam(() => false)))
+    keyboard.handleInput('\r') // View -> fallback
+    const rows = planRender(keyboard, 80)
+    assert.ok(rows.length <= budget, `keyboard hint: ${rows.length} rows exceeds budget ${budget}:\n${rows.join('\n')}`)
+    assert.ok(rows.at(-1)!.includes('esc back'), `the Back hint stays reachable at budget ${budget}`)
+    // Fullscreen action bar (mouse mode paints the bar the budget must hold).
+    const pointer = planMakeFlow([question])
+    pointer.setMaxRows(budget)
+    pointer.setMouseActionsEnabled(true)
+    assert.ok(pointer.setPlanInspection(planInspectionSeam(() => false)))
+    pointer.handleInput('\r')
+    const pointerRows = planRender(pointer, 80)
+    assert.ok(pointerRows.length <= budget, `pointer bar: ${pointerRows.length} rows exceeds budget ${budget}:\n${pointerRows.join('\n')}`)
+    assert.ok(pointerRows.at(-1)!.includes('Back'), `the pointer Back stays painted at budget ${budget}`)
+    // The tail is still reachable by paging (marker pages, Esc returns).
+    for (let page = 0; page < 16 && !planRender(pointer, 80).some(l => l.includes('line 29')); page += 1) {
+      pointer.handleInput('\x1b[6~')
+    }
+    assert.ok(planRender(pointer, 80).some(l => l.includes('line 29')),
+      `the fallback tail stays reachable by paging at budget ${budget}`)
+    pointer.handleInput('\x1b')
+    assert.ok(planRender(pointer, 80).some(l => l.includes('Keep planning…')),
+      `Esc returns to the decision list at budget ${budget}`)
+  }
+})
+
+// ── Top stage tabs: direct pointer navigation (Fullscreen only) ──────────
+
+/** The painted stage-strip row (tabs always start at the content's first
+ *  non-status row). */
+function tabRowIndex(lines: readonly string[]): number {
+  return lines.findIndex(line => /^…  |^[✓○] Q\d+/.test(line)
+    && (line.includes('Review') || line.includes('…')))
+}
+
+/** Click one complete painted tab label by its visible text. */
+function clickTab(f: QuestionFlow, label: string, width = 100): void {
+  const lines = render(f, width)
+  const row = tabRowIndex(lines)
+  assert.ok(row >= 0, `tab row missing:\n${lines.join('\n')}`)
+  const x = lines[row]!.indexOf(label)
+  assert.ok(x >= 0, `tab '${label}' missing from:\n${lines[row]}`)
+  const gesture = f.beginMousePress(row, x)
+  assert.ok(gesture !== undefined, `tab '${label}' must record a press gesture`)
+  assert.equal(gesture.hitKind, 'tab', `tab '${label}' must be a tab target`)
+  f.completeMouseClick(gesture, row, x)
+}
+
+test('clicking any painted question tab jumps directly without skipping or submitting', () => {
+  let doneCalls = 0
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'FIRST?', options: [{ label: 'A' }] },
+    { id: 'q2', question: 'SECOND?', options: [{ label: 'B' }] },
+    { id: 'q3', question: 'THIRD?', options: [{ label: 'C' }] },
+  ], () => { doneCalls += 1 }, () => {})
+  f.setMaxRows(24)
+  f.setMouseActionsEnabled(true)
+  clickTab(f, 'Q2')
+  assert.equal(f.draftSnapshot().tab, 1, 'Q2 must be the current page')
+  assert.ok(render(f, 100).some(line => line.includes('SECOND?')), 'Q2 content must paint')
+  clickTab(f, 'Q3')
+  assert.equal(f.draftSnapshot().tab, 2, 'Q3 must be reachable directly from Q2')
+  clickTab(f, 'Q1')
+  assert.equal(f.draftSnapshot().tab, 0, 'Q1 must be reachable directly from Q3')
+  assert.deepEqual(f.draftSnapshot().answers.map(answer => answer.skipped), [false, false, false],
+    'direct navigation must never mark skipped')
+  assert.equal(doneCalls, 0, 'tab navigation must never submit')
+})
+
+test('clicking Review shows the summary without answering; Q tabs return and Submit is the only commit', () => {
+  let doneCalls = 0
+  let submitted: unknown
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'FIRST?', options: [{ label: 'A' }, { label: 'B' }] },
+    { id: 'q2', question: 'SECOND?', options: [{ label: 'C' }] },
+  ], (answers) => { doneCalls += 1; submitted = answers }, () => {})
+  f.setMaxRows(24)
+  f.setMouseActionsEnabled(true)
+  clickTab(f, 'Review')
+  assert.equal(f.draftSnapshot().tab, 2, 'Review is the last stage index')
+  assert.ok(render(f, 100).some(line => line.includes('Review your answer before submit')),
+    'Review must paint its summary')
+  assert.deepEqual(f.draftSnapshot().answers.map(answer => answer.skipped), [false, false],
+    'entering Review must not mark unanswered questions skipped')
+  clickTab(f, 'Q1')
+  assert.ok(render(f, 100).some(line => line.includes('FIRST?')), 'Q1 must be editable again')
+  clickTab(f, 'Review')
+  clickAction(f, 'Submit')
+  assert.equal(doneCalls, 1, 'only the bottom Submit commits')
+  assert.ok(Array.isArray(submitted) && submitted.length === 2, 'Submit sends the full answer batch')
+})
+
+test('clicking the already-current tab is a no-op and keeps the option cursor', () => {
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'FIRST?', options: [{ label: 'A' }, { label: 'B' }] },
+  ], () => {}, () => {})
+  f.setMaxRows(24)
+  f.setMouseActionsEnabled(true)
+  f.handleInput('\x1b[B') // cursor B
+  clickTab(f, 'Q1')
+  f.handleInput('\r') // single-select adopts the highlighted row
+  assert.deepEqual(f.draftSnapshot().answers[0]?.selected, ['B'],
+    'a same-tab click must not reset the selection cursor')
+})
+
+test('the stage strip hit map follows a status row above it', () => {
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'FIRST?', options: [{ label: 'A' }] },
+    { id: 'q2', question: 'SECOND?', options: [{ label: 'B' }] },
+  ], () => {}, () => {})
+  f.setMaxRows(24)
+  f.setMouseActionsEnabled(true)
+  f.setStatus({ text: 'Waiting for the response…' })
+  const lines = render(f, 100)
+  const row = tabRowIndex(lines)
+  assert.ok(row > 0, `the status row must shift the tabs down:\n${lines.join('\n')}`)
+  assert.ok(lines[row]!.includes('Q1'), 'the tab row is still located')
+  clickTab(f, 'Q2')
+  assert.equal(f.draftSnapshot().tab, 1, 'the shifted row still navigates')
+})
+
+test('gap cells and overflow ellipses are inert, never tab targets', () => {
+  const two = new QuestionFlow([
+    { id: 'q1', question: 'FIRST?', options: [{ label: 'A' }] },
+    { id: 'q2', question: 'SECOND?', options: [{ label: 'B' }] },
+  ], () => {}, () => {})
+  two.setMaxRows(24)
+  two.setMouseActionsEnabled(true)
+  const lines = render(two, 100)
+  const row = tabRowIndex(lines)
+  const q1End = lines[row]!.indexOf('Q1') + 2
+  const gesture = two.beginMousePress(row, q1End)
+  assert.ok(gesture !== undefined, 'a gap press still records an inert gesture')
+  assert.equal(gesture.hitKind, 'inert', 'the separator between tabs is inert chrome')
+  two.completeMouseClick(gesture, row, q1End)
+  assert.equal(two.draftSnapshot().tab, 0, 'a gap click must not navigate')
+
+  const many = new QuestionFlow(Array.from({ length: 12 }, (_, index) => ({
+    id: `q${index + 1}`, question: `QUESTION ${index + 1}?`, options: [{ label: `O${index + 1}` }],
+  })), () => {}, () => {})
+  many.setMaxRows(24)
+  many.setMouseActionsEnabled(true)
+  const overflow = render(many, 44)
+  const overflowRow = tabRowIndex(overflow)
+  const ellipsis = overflow[overflowRow]!.indexOf('…')
+  assert.ok(ellipsis >= 0, `the overflow marker must paint:\n${overflow[overflowRow]}`)
+  const ellipsisGesture = many.beginMousePress(overflowRow, ellipsis)
+  assert.ok(ellipsisGesture !== undefined)
+  assert.equal(ellipsisGesture.hitKind, 'inert', 'the overflow ellipsis is inert chrome')
+  many.completeMouseClick(ellipsisGesture, overflowRow, ellipsis)
+  assert.equal(many.draftSnapshot().tab, 0, 'the ellipsis must never navigate')
+})
+
+test('overflow keeps the current page and Review visible, with complete-label hits only', () => {
+  const many = new QuestionFlow(Array.from({ length: 12 }, (_, index) => ({
+    id: `q${index + 1}`, question: `QUESTION ${index + 1}?`, options: [{ label: `O${index + 1}` }],
+  })), () => {}, () => {})
+  many.setMaxRows(24)
+  many.setMouseActionsEnabled(true)
+  // The typical overflow widths keep the current page + Review and expose
+  // only complete-label hits; the widest terminal paints the untouched strip.
+  for (const width of [44, 72, 80]) {
+    const lines = render(many, width)
+    const row = tabRowIndex(lines)
+    const painted = lines[row]!
+    assert.ok(painted.includes('Q1') && painted.includes('Review'),
+      `the current page and Review must be visible at ${width}:\n${painted}`)
+    assert.ok(!painted.includes('Q12'), `omitted question tabs must not paint at ${width}`)
+    const hits = (many as unknown as {
+      paintedTabHits: Array<{ targetTab: number; startCol: number; endCol: number }>
+    }).paintedTabHits
+    assert.ok(hits.some(hit => hit.targetTab === 12), `Review must be a hit target at ${width}`)
+    for (const hit of hits) {
+      const label = painted.slice(hit.startCol, hit.endCol)
+      assert.match(label, /^[✓○] (Q\d+|Review)$/u,
+        `a hit must cover one complete painted tab label at ${width}, saw ${JSON.stringify(label)}`)
+      assert.ok(hit.endCol <= visibleWidth(painted), `a hit may never exceed the painted width at ${width}`)
+    }
+  }
+  const wide = render(many, 120)
+  const wideRow = tabRowIndex(wide)
+  assert.ok(wide[wideRow]!.includes('Q12') && wide[wideRow]!.includes('Review'),
+    `the complete strip must fit at 120:\n${wide[wideRow]}`)
+  assert.equal((many as unknown as { paintedTabHits: unknown[] }).paintedTabHits.length, 13,
+    'every complete tab is a target when the whole strip fits')
+  render(many, 44)
+  clickTab(many, 'Q5')
+  assert.equal(many.draftSnapshot().tab, 4, 'a visible overflow-window tab is clickable')
+  clickTab(many, 'Review')
+  assert.equal(many.draftSnapshot().tab, 12, 'Review stays directly reachable')
+})
+
+test('very narrow terminals keep the current tab before Review and never expose a partial hit', () => {
+  const many = new QuestionFlow(Array.from({ length: 12 }, (_, index) => ({
+    id: `q${index + 1}`, question: `QUESTION ${index + 1}?`, options: [{ label: `O${index + 1}` }],
+  })), () => {}, () => {})
+  many.setMaxRows(24)
+  many.setMouseActionsEnabled(true)
+  const lines = render(many, 12)
+  const row = tabRowIndex(lines)
+  assert.ok(lines[row]!.includes('Q1'), `the current tab must survive first:\n${lines[row]}`)
+  assert.ok(!lines[row]!.includes('Review'), 'Review drops before the current tab')
+  const hits = (many as unknown as {
+    paintedTabHits: Array<{ targetTab: number; startCol: number; endCol: number }>
+  }).paintedTabHits
+  assert.deepEqual(hits.map(hit => hit.targetTab), [0], 'only the complete current tab is a target')
+  assert.ok(hits[0]!.endCol <= 12, 'the hit never exceeds the available width')
+
+  const tiny = render(many, 3)
+  assert.ok(tiny.some(line => line.trim() !== ''), 'a heavily clipped strip still paints')
+  const tinyHits = (many as unknown as { paintedTabHits: unknown[] }).paintedTabHits
+  assert.equal(tinyHits.length, 0, 'a clipped tab paints no hit')
+})
+
+test('a tab press cannot complete on another target or a resize', () => {
+  const make = (): QuestionFlow => {
+    const f = new QuestionFlow([
+      { id: 'q1', question: 'FIRST?', options: [{ label: 'A' }] },
+      { id: 'q2', question: 'SECOND?', options: [{ label: 'B' }] },
+      { id: 'q3', question: 'THIRD?', options: [{ label: 'C' }] },
+    ], () => {}, () => {})
+    f.setMaxRows(24)
+    f.setMouseActionsEnabled(true)
+    return f
+  }
+  // Cross-target release.
+  const cross = make()
+  let lines = render(cross, 100)
+  let row = tabRowIndex(lines)
+  let x = lines[row]!.indexOf('Q2')
+  const q3x = lines[row]!.indexOf('Q3')
+  const gesture = cross.beginMousePress(row, x)
+  assert.ok(gesture !== undefined)
+  cross.completeMouseClick(gesture, row, q3x)
+  assert.equal(cross.draftSnapshot().tab, 0, 'a release on another tab must not navigate')
+  // Resize between press and release.
+  const resized = make()
+  lines = render(resized, 100)
+  row = tabRowIndex(lines)
+  x = lines[row]!.indexOf('Q2')
+  const resizePress = resized.beginMousePress(row, x)
+  assert.ok(resizePress !== undefined)
+  render(resized, 72)
+  resized.completeMouseClick(resizePress, row, x)
+  assert.equal(resized.draftSnapshot().tab, 0, 'a width change must invalidate the tab press')
+})
+
+test('a status row appearing or disappearing between press and release invalidates the tab press', () => {
+  const make = (): QuestionFlow => {
+    const f = new QuestionFlow([
+      { id: 'q1', question: 'FIRST?', options: [{ label: 'A' }] },
+      { id: 'q2', question: 'SECOND?', options: [{ label: 'B' }] },
+    ], () => {}, () => {})
+    f.setMaxRows(24)
+    f.setMouseActionsEnabled(true)
+    return f
+  }
+  // Status row APPEARS after the press: the strip moves down one row.
+  const appeared = make()
+  let lines = render(appeared, 100)
+  let row = tabRowIndex(lines)
+  let x = lines[row]!.indexOf('Q2')
+  const appearPress = appeared.beginMousePress(row, x)
+  assert.ok(appearPress !== undefined)
+  appeared.setStatus({ text: 'Waiting for the response…' })
+  render(appeared, 100)
+  appeared.completeMouseClick(appearPress, row, x)
+  assert.equal(appeared.draftSnapshot().tab, 0, 'a status row appearing must invalidate the tab press')
+  // Status row DISAPPEARS after the press: the strip moves back up.
+  const disappeared = make()
+  disappeared.setStatus({ text: 'Waiting for the response…' })
+  lines = render(disappeared, 100)
+  row = tabRowIndex(lines)
+  x = lines[row]!.indexOf('Q2')
+  const disappearPress = disappeared.beginMousePress(row, x)
+  assert.ok(disappearPress !== undefined)
+  disappeared.setStatus(undefined)
+  render(disappeared, 100)
+  disappeared.completeMouseClick(disappearPress, row, x)
+  assert.equal(disappeared.draftSnapshot().tab, 0, 'a status row disappearing must invalidate the tab press')
+})
+
+test('PlanReview and Regular rendering expose no stage-tab pointer targets', () => {
+  const plan = new QuestionFlow([{
+    id: 'plan-review',
+    question: 'Approve the plan?',
+    detail: '# Plan\nDo the thing.',
+    options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    intent: { kind: 'plan-review', approve: 'Approve' },
+  }], () => {}, () => {})
+  plan.setMaxRows(24)
+  plan.setMouseActionsEnabled(true)
+  plan.render(100)
+  assert.equal((plan as unknown as { paintedTabHits: unknown[] }).paintedTabHits.length, 0,
+    'the plan-review branch paints no generic stage tabs')
+  const regular = makeFlow([
+    { id: 'q1', question: 'FIRST?', options: [{ label: 'A' }] },
+    { id: 'q2', question: 'SECOND?', options: [{ label: 'B' }] },
+  ], 24)
+  regular.render(100)
+  assert.equal((regular as unknown as { paintedTabHits: unknown[] }).paintedTabHits.length, 0,
+    'Regular has no application pointer targets')
+})
+
+test('an optionless edit keeps its live text when a tab click changes pages', () => {
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Type here?', options: [] },
+    { id: 'q2', question: 'SECOND?', options: [{ label: 'B' }] },
+  ], () => {}, () => {})
+  f.setMaxRows(24)
+  f.setMouseActionsEnabled(true)
+  f.handleInput('abc')
+  clickTab(f, 'Q2')
+  assert.equal(f.draftSnapshot().tab, 1, 'the tab click changes pages')
+  assert.equal(f.draftSnapshot().answers[0]?.custom, 'abc', 'the live Q1 draft is preserved')
+  clickTab(f, 'Q1')
+  assert.ok(render(f, 100).some(line => line.includes('abc')), 'returning reseeds the Q1 input text')
+})
+
+// ── Question body wheel ownership ────────────────────────────────────────
+
+interface WheelGeometry {
+  lastScrollportStart: number
+  lastScrollportEnd: number
+  lastVisibleRows: number
+  lastContentRows: number
+  bodyScroll: number
+}
+
+test('wheelBy moves the painted body by a line delta, clamps at both edges and never mutates drafts', () => {
+  const f = makeFlow([{
+    id: 'q1', question: 'Pick a side', detail: longDetail(40), options: [{ label: 'Alpha' }],
+  }], 12)
+  render(f, 100)
+  const geometry = f as unknown as WheelGeometry
+  assert.ok(geometry.lastScrollportStart >= 0 && geometry.lastScrollportEnd > geometry.lastScrollportStart,
+    'the ordinary body must record its scrollport')
+  const row = geometry.lastScrollportStart
+  const before = render(f, 100).join('\n')
+  assert.equal(f.wheelBy(3, row), true, 'a wheel inside the body scrolls it')
+  const after = render(f, 100).join('\n')
+  assert.notEqual(after, before, 'the painted body must move')
+  assert.ok(!after.includes('detail-00'), `the body must really scroll:\n${after}`)
+  assert.equal(f.wheelBy(0, row), false, 'a zero delta is inert')
+  // Wheel up to the top, then one more is a clamped no-op.
+  for (let guard = 0; guard < 500 && geometry.bodyScroll > 0; guard += 1) f.wheelBy(-7, row)
+  assert.equal(geometry.bodyScroll, 0, 'wheel-up clamps at the top')
+  assert.equal(f.wheelBy(-1, row), false, 'no further up movement at the top')
+  // Wheel down to the bottom, then one more is a clamped no-op.
+  for (let guard = 0; guard < 500 && f.wheelBy(7, row); guard += 1) { /* scroll */ }
+  const bottom = geometry.bodyScroll
+  assert.ok(bottom > 0, 'the page reaches a real bottom')
+  assert.equal(f.wheelBy(1, row), false, 'no further down movement at the bottom')
+  assert.deepEqual(f.draftSnapshot().answers[0], { selected: [], custom: '', skipped: false },
+    'wheel scrolling never mutates an answer draft')
+})
+
+test('wheelBy is inert on the tab strip, the action bar, a fitting page, Review and PlanReview', () => {
+  const short = makeFlow([{ id: 'q1', question: 'Short?', options: [{ label: 'A' }] }], 24)
+  const shortLines = render(short, 100)
+  const shortGeometry = short as unknown as WheelGeometry
+  assert.ok(shortGeometry.lastScrollportStart >= 0)
+  assert.equal(short.wheelBy(1, shortGeometry.lastScrollportStart), false, 'a fitting page cannot scroll')
+  assert.equal(short.wheelBy(1, 0), false, 'the tab row is not a scrollport row')
+  assert.equal(short.wheelBy(1, shortLines.length - 1), false, 'the action bar is not a scrollport row')
+
+  const long = makeFlow([{ id: 'q1', question: 'Pick', detail: longDetail(40), options: [{ label: 'A' }] }], 12)
+  const longLines = render(long, 100)
+  const longGeometry = long as unknown as WheelGeometry
+  assert.ok(longGeometry.lastScrollportStart > 0, 'the status/header rows sit above the body')
+  assert.equal(long.wheelBy(1, longLines.length - 1), false, 'the action bar stays inert')
+  long.handleInput('\x1b[C') // one question: → skip reaches Review
+  render(long, 100)
+  assert.equal(longGeometry.lastScrollportStart, -1, 'Review paints no body scrollport')
+  assert.equal(long.wheelBy(1, 3), false, 'Review never scrolls a question body')
+
+  const plan = new QuestionFlow([{
+    id: 'plan-review',
+    question: 'Approve the plan?',
+    detail: '# Plan\nDo the thing.',
+    options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    intent: { kind: 'plan-review', approve: 'Approve' },
+  }], () => {}, () => {})
+  plan.setMaxRows(24)
+  plan.render(100)
+  assert.equal(plan.wheelBy(1, 3), false, 'the plan-review branch keeps its own reading path')
+})
+
+test('a status row above the tabs shifts the wheel scrollport together with the body', () => {
+  const f = makeFlow([{
+    id: 'q1', question: 'Pick', detail: longDetail(30), options: [{ label: 'A' }],
+  }], 12)
+  f.setStatus({ text: 'Waiting for the response…' })
+  render(f, 100)
+  const geometry = f as unknown as WheelGeometry
+  assert.ok(geometry.lastScrollportStart > 1, 'the status row must push the body down')
+  assert.equal(f.wheelBy(2, geometry.lastScrollportStart), true,
+    'the recorded range already includes the status shift')
+})
+
+test('a real wheel scroll cancels a pending cursor-follow before the next render', () => {
+  const f = makeFlow([{
+    id: 'q1',
+    question: 'Pick',
+    options: Array.from({ length: 10 }, (_, i) => ({ label: `Option ${i + 1}`, description: 'd'.repeat(200) })),
+  }], 12)
+  render(f, 100)
+  const geometry = f as unknown as WheelGeometry & { pendingCursorScroll: boolean }
+  assert.equal(f.wheelBy(5, geometry.lastScrollportStart), true)
+  render(f, 100)
+  assert.ok(geometry.bodyScroll > 0, 'the wheel established a real body scroll')
+  // Move the cursor WITHOUT rendering: the pending-follow flag is live when
+  // the wheel arrives, which is the state the production host sees.
+  for (let i = 0; i < 8; i += 1) f.handleInput('\x1b[B')
+  assert.equal(geometry.pendingCursorScroll, true, 'the cursor move armed a pending follow')
+  assert.equal(f.wheelBy(-2, geometry.lastScrollportStart), true)
+  assert.equal(geometry.pendingCursorScroll, false, 'the real wheel scroll must cancel the pending follow')
+  const afterWheel = geometry.bodyScroll
+  render(f, 100)
+  assert.equal(geometry.bodyScroll, afterWheel,
+    'the next frame must not snap back to the cursor after a real wheel scroll')
+})
+
+test('option clicks still resolve against the painted rows after a wheel scroll', () => {
+  const f = makeFlow([{
+    id: 'q1',
+    question: 'Pick many',
+    multiSelect: true,
+    options: Array.from({ length: 12 }, (_, i) => ({ label: `Option ${i + 1}`, description: 'd'.repeat(120) })),
+  }], 12)
+  render(f, 100)
+  const geometry = f as unknown as WheelGeometry
+  assert.equal(f.wheelBy(4, geometry.lastScrollportStart), true)
+  const lines = render(f, 100)
+  const row = lines.findIndex(line => /\[ \] Option \d+/.test(line))
+  assert.ok(row >= 0, `a scrolled option must be visible:\n${lines.join('\n')}`)
+  const label = /Option \d+/.exec(lines[row]!)![0]
+  const x = lines[row]!.indexOf(label)
+  const gesture = f.beginMousePress(row, x)
+  assert.ok(gesture !== undefined)
+  f.completeMouseClick(gesture, row, x)
+  assert.ok(f.draftSnapshot().answers[0]?.selected.includes(label),
+    'the click must toggle the option painted at that row after the scroll')
+})
+
+test('a wheel before the next paint cannot apply the old page geometry to a new page', () => {
+  const make = (): QuestionFlow => {
+    const f = new QuestionFlow([
+      { id: 'q1', question: 'FIRST?', detail: longDetail(40), options: [{ label: 'A' }] },
+      { id: 'q2', question: 'SECOND?', detail: longDetail(40), options: [{ label: 'B' }] },
+    ], () => {}, () => {})
+    f.setMaxRows(12)
+    f.setMouseActionsEnabled(true)
+    return f
+  }
+  // Tab click: the old page's painted scrollport must be revoked at the
+  // navigation boundary, not only when the deferred render lands.
+  const clicked = make()
+  render(clicked, 100)
+  const clickedGeometry = clicked as unknown as WheelGeometry
+  const oldStart = clickedGeometry.lastScrollportStart
+  assert.ok(oldStart >= 0, 'precondition: the first page recorded a scrollport')
+  clickTab(clicked, 'Q2')
+  assert.equal(clickedGeometry.lastScrollportStart, -1, 'tab navigation revokes the old scrollport')
+  assert.equal(clicked.wheelBy(5, oldStart), false, 'a pre-paint wheel cannot use the old page range')
+  assert.equal(clickedGeometry.bodyScroll, 0, 'the new page must not be scrolled before its first paint')
+  clicked.handleInput('\x1b[6~') // keyboard page-down in the same unpainted window
+  assert.equal(clickedGeometry.bodyScroll, 0, 'the stale keyboard page geometry is revoked too')
+  const clickedView = render(clicked, 100)
+  assert.ok(clickedView.some(line => line.includes('SECOND?')), 'the new page paints its question')
+  assert.ok(clickedView.some(line => line.includes('detail-00')), 'the new page starts at its top')
+  // After the paint, ordinary wheel scrolling still works on the new page.
+  const freshStart = (clicked as unknown as WheelGeometry).lastScrollportStart
+  assert.ok(freshStart >= 0)
+  assert.equal(clicked.wheelBy(3, freshStart), true, 'post-paint wheel scrolling remains live')
+
+  // Keyboard navigation has the same invalidation boundary.
+  const keyboard = make()
+  render(keyboard, 100)
+  const keyboardGeometry = keyboard as unknown as WheelGeometry
+  const keyboardOldStart = keyboardGeometry.lastScrollportStart
+  keyboard.handleInput('\x1b[C') // skip Q1 → Q2
+  assert.equal(keyboardGeometry.lastScrollportStart, -1, 'keyboard page advance revokes the old scrollport')
+  assert.equal(keyboard.wheelBy(5, keyboardOldStart), false,
+    'a pre-paint wheel cannot use the keyboard-old page range')
+  assert.equal(keyboardGeometry.bodyScroll, 0)
+  const keyboardView = render(keyboard, 100)
+  assert.ok(keyboardView.some(line => line.includes('detail-00')), 'keyboard navigation starts the new page at top')
 })

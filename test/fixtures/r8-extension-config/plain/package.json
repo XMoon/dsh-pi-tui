@@ -1,0 +1,15 @@
+{
+  "name": "@r8-pr1-fixture/plain",
+  "version": "1.0.0",
+  "description": "R8-E PR-1 negative control: a plain DSH Host plugin with no dshPiTui opt-in",
+  "type": "module",
+  "exports": {
+    "./host": "./dist/host.mjs",
+    "./tui": "./dist/tui.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

@@ -268,6 +268,7 @@ function mountHarness(options: {
     settleLocalSubmitAck: () => {},
     markSubmitLatency: () => {},
     observeDurableSubmission: () => {},
+    observeDirectPendingSubmissionEvent: () => false,
     markContextDirty: () => {},
     refreshContextMeasurement: () => {},
     currentWorkingFromLog: () => false,
@@ -1008,7 +1009,11 @@ function mountPresentationHarness(options: {
       updateWelcomeCard: noop,
       scheduleInitialMeasurement: noop, markContextDirty: noop, refreshContextMeasurement: noop,
     },
-    history: { rememberCwd: noop, currentCwd: () => '/tmp', records: () => [], setLastContent: noop },
+    history: {
+      rememberCwd: noop, currentCwd: () => '/tmp', records: () => [], setLastContent: noop,
+      readSessionRecall: async () => ({ entries: [], writeIds: [] }),
+    },
+    currentness: { captureGeneration: () => 0, isStillCurrent: () => true },
     commands: { register: noop },
     submission: { clearPending: noop },
     viewer: { resetAutoPop: noop, teardownForSessionSwap: noop },
@@ -1025,7 +1030,7 @@ function mountPresentationHarness(options: {
         return window
       },
       running: () => false,
-      plan: () => false,
+      plan: () => ({ active: false, pending: false }),
       facts: () => ({}),
       captureTransportToken: () => liveTransportToken,
       isTransportTokenCurrent: (_sessionId, token) => Object.is(token, liveTransportToken),
@@ -1068,6 +1073,7 @@ function mountPresentationHarness(options: {
     settleLocalSubmitAck: noop,
     markSubmitLatency: noop,
     observeDurableSubmission: noop,
+    observeDirectPendingSubmissionEvent: () => false,
     markContextDirty: noop,
     refreshContextMeasurement: noop,
     currentWorkingFromLog: () => false,
@@ -1414,6 +1420,23 @@ interface PreparingHarness {
   readonly tern: ScriptedTern
   /** The PRODUCTION preview map the surface reads. */
   readonly previews: Map<string, StreamingToolPreview>
+  /**
+   * The eligibility argument each commit carried, in commit order. Recorded by
+   * wrapping the PRODUCTION consumer's own `setTranscript` (the mounted
+   * renderer's seam) and calling the saved unbound original through the
+   * instance, so the witness is the argument the surface really committed —
+   * not a guess from the painted sink, which the renderer's own content veto
+   * can also explain.
+   */
+  readonly committedEligibilities: Array<'sessionless' | 'blank-session' | 'hidden' | undefined>
+  /** The ONE bounded display-window controller of the main subject. Exposed so
+   *  a case can re-select the window and prove the Welcome eligibility does not
+   *  read it (the eligibility reads the fold's OWN turn facts). */
+  readonly window: TranscriptWindowController
+  /** Mount a viewed child as the display subject (the Welcome D W07 switch). */
+  viewChild(): TranscriptFolder
+  /** Leave the viewed child and return to the main subject. */
+  exitChild(): void
   route(event: SessionEvent): void
   /** The live Agent object of the main session (the identity the stream carries). */
   agent(): object
@@ -1429,13 +1452,33 @@ interface PreparingHarness {
  * connect on a scripted pane) with the PRODUCTION preview owner wired in: the
  * live assistant input folds through `applyAssistantLiveInput` and the durable
  * events clear the map through `applyStreamingToolPreviewEvent`.
+ *
+ * TSP-7 Welcome D: `sessionBlank` injects the SAME read-only port the
+ * production composition binds (`backend.sessionReader.blank`) into the real
+ * `createSurfaceRuntime`; the fold, the window, the subject selection, the
+ * repaint and the mounted renderer stay the production ones. Absent, the
+ * composition has no Welcome consumer at all — the PiTui/older shape, where a
+ * repaint carries no eligibility argument.
  */
-async function mountPreparingHarness(): Promise<PreparingHarness> {
-  const tern = new ScriptedTern(PREPARING_HELLO)
+async function mountPreparingHarness(welcome: {
+  readonly sessionBlank?: (sessionId: string) => boolean | undefined
+  /** Advertise `el` so the mounted renderer takes the styled Welcome path. */
+  readonly nativeEl?: boolean
+  /**
+   * The bounded display window's turn count. The Welcome eligibility NEVER
+   * reads it (it reads the fold's OWN turn facts — the grouped index and the
+   * activity map), so a case can shrink the window under a longer history and
+   * prove the two are not the same fact.
+   */
+  readonly windowTurns?: number
+} = {}): Promise<PreparingHarness> {
+  const tern = new ScriptedTern(welcome.nativeEl === true
+    ? { ...PREPARING_HELLO, kinds: [...PREPARING_HELLO.kinds, 'el'] }
+    : PREPARING_HELLO)
   const { session } = await openTern(tern)
   const folder = new TranscriptFolder()
   const stats = new StatsFolder()
-  const controller = new TranscriptWindowController({ windowTurns: 20, stepTurns: 10 })
+  const controller = new TranscriptWindowController({ windowTurns: welcome.windowTurns ?? 20, stepTurns: 10 })
   const previews = new Map<string, StreamingToolPreview>()
   /** The live Agent registry: the identity the assistant stream carries. */
   const agents = new Map<string, object>()
@@ -1445,6 +1488,20 @@ async function mountPreparingHarness(): Promise<PreparingHarness> {
     currentAgent = agent
     return agent
   }
+  // A MOUNTABLE viewed child, in the exact shape the production routing source
+  // exposes (the same pattern as this file's first harness).
+  let viewed: { id: string; folder: TranscriptFolder; window: TranscriptWindowController } | undefined
+  const childPresentation = () => ({
+    id: viewed!.id,
+    folder: { apply: (events: readonly SessionEvent[]) => viewed!.folder.apply(events) },
+    stats: { apply: () => {} },
+    window: viewed!.window,
+    previews,
+    applyToolPreview: () => {},
+    beginTurn: () => {},
+    endTurn: () => {},
+    refreshFooter: () => {},
+  })
 
   const source: SurfaceEventRoutingSource<SessionEvent> = {
     isCleanedUp: () => false,
@@ -1464,10 +1521,10 @@ async function mountPreparingHarness(): Promise<PreparingHarness> {
       applyToolPreview: event => applyStreamingToolPreviewEvent(previews, event),
       refreshRecentPerformanceAvailability: () => {},
     }),
-    viewedChildId: () => undefined,
-    viewedChild: () => { throw new Error('no viewer in this harness') },
+    viewedChildId: () => viewed?.id,
+    viewedChild: () => childPresentation(),
     mainFolder: () => folder,
-    viewedChildFolder: () => { throw new Error('no viewer in this harness') },
+    viewedChildFolder: () => viewed!.folder,
     pendingSubjectId: () => undefined,
     pendingSnapshot: () => undefined,
     submissionEchoes: () => undefined,
@@ -1482,6 +1539,7 @@ async function mountPreparingHarness(): Promise<PreparingHarness> {
     settleLocalSubmitAck: () => {},
     markSubmitLatency: () => {},
     observeDurableSubmission: () => {},
+    observeDirectPendingSubmissionEvent: () => false,
     markContextDirty: () => {},
     refreshContextMeasurement: () => {},
     currentWorkingFromLog: () => false,
@@ -1494,7 +1552,10 @@ async function mountPreparingHarness(): Promise<PreparingHarness> {
     setViewedChildAgent: () => {},
     setViewedQueueAgent: () => {},
     agentForSession: sessionId => agents.get(sessionId),
-    applyViewedChildAssistantInput: () => { throw new Error('no viewer in this harness') },
+    applyViewedChildAssistantInput: input => {
+      if (viewed === undefined) throw new Error('no viewer in this harness')
+      viewed.folder.applyLiveInput(input)
+    },
     // The PRODUCTION live path: the preview owner sees the SAME official
     // chunk the transcript fold sees.
     applyMainAssistantInput: input => applyAssistantLiveInput(folder, stats, previews, input, toolSummaryKeys),
@@ -1508,6 +1569,7 @@ async function mountPreparingHarness(): Promise<PreparingHarness> {
     mainProgressAuthority: 'local-events',
     terminalProgress: undefined,
     createPluginManagerPanel: createPluginManagerWorkspacePanel,
+    ...(welcome.sessionBlank === undefined ? {} : { welcomeSessionBlank: welcome.sessionBlank }),
   })
   surface.attachEventRouting(source)
 
@@ -1547,11 +1609,28 @@ async function mountPreparingHarness(): Promise<PreparingHarness> {
   })
 
   const agent = registerAgent({ session: { id: SESSION_ID } })
+  // The eligibility witness: patch the consumer instance the mount created and
+  // keep passing every argument through unchanged.
+  const committedEligibilities: Array<'sessionless' | 'blank-session' | 'hidden' | undefined> = []
+  const consumer = mountedRenderer!
+  const originalSetTranscript = consumer.display.setTranscript
+  consumer.display.setTranscript = ((...args: Parameters<typeof originalSetTranscript>) => {
+    committedEligibilities.push(args[6])
+    return originalSetTranscript.apply(consumer.display, args)
+  }) as typeof originalSetTranscript
 
   return {
     surface,
     tern,
     previews,
+    window: controller,
+    committedEligibilities,
+    viewChild() {
+      const child = new TranscriptFolder()
+      viewed = { id: CHILD_ID, folder: child, window: new TranscriptWindowController({ windowTurns: 20, stepTurns: 10 }) }
+      return child
+    },
+    exitChild() { viewed = undefined },
     route(event) { surface.routeSessionEvent({ id: SESSION_ID }, event) },
     agent: () => agent,
     replaceAgent: () => registerAgent({ session: { id: SESSION_ID } }),
@@ -1567,8 +1646,8 @@ async function mountPreparingHarness(): Promise<PreparingHarness> {
   }
 }
 
-/** The native row nodes the wire currently shows, with their visible text. */
-function wirePreparingRows(wire: string): { id: string; text: string }[] {
+/** The live node map the pane's frames fold to right now (`add`/`del`/`set`/`text`). */
+function foldLiveNodes(wire: string): Map<string, { k: string; p: Record<string, unknown>; childIds: string[] }> {
   interface WireNode { id: string; k: string; p?: Record<string, unknown>; c?: WireNode[] }
   const nodes = new Map<string, { k: string; p: Record<string, unknown>; childIds: string[] }>()
   const visit = (node: WireNode): void => {
@@ -1580,7 +1659,13 @@ function wirePreparingRows(wire: string): { id: string; text: string }[] {
     for (const op of frame.ops) {
       if (op[0] === 'add') {
         const node = op[4] as WireNode | null | undefined
-        if (node !== undefined && node !== null) visit(node)
+        if (node === undefined || node === null) continue
+        visit(node)
+        // A child added UNDER an already-live parent joins that parent's child
+        // list, or a later subtree `del` would leave it behind as a phantom.
+        const parentId = String(op[2])
+        const parent = nodes.get(parentId)
+        if (parent !== undefined && !parent.childIds.includes(node.id)) parent.childIds.push(node.id)
       } else if (op[0] === 'del') {
         const doomed = new Set<string>()
         const collect = (id: string): void => {
@@ -1604,12 +1689,23 @@ function wirePreparingRows(wire: string): { id: string; text: string }[] {
       }
     }
   }
+  return nodes
+}
+
+/** The native row nodes the wire currently shows, with their visible text. */
+function wirePreparingRows(wire: string): { id: string; text: string }[] {
+  const nodes = foldLiveNodes(wire)
   const rows: { id: string; text: string }[] = []
   for (const [id, node] of nodes) {
     if (node.k !== 'row') continue
     rows.push({ id, text: node.childIds.map(child => String(nodes.get(child)?.p['text'] ?? '')).join('') })
   }
   return rows
+}
+
+/** Every node id the wire currently shows (the LIVE set, never the history). */
+function liveWireIds(wire: string): string[] {
+  return [...foldLiveNodes(wire).keys()]
 }
 
 /** The official-shaped live tool-call delta of one streaming tool call. */
@@ -1669,7 +1765,7 @@ function deliverAssistantInput(
   return true
 }
 
-test('B3-L01: a live tool-call delta reaches the mounted TSP renderer as ONE Preparing row', async () => {
+test('a live tool-call delta reaches the mounted TSP renderer as ONE Preparing row', async () => {
   const harness = await mountPreparingHarness()
   try {
     harness.route(ev('turn/start', { turn: 1 }, 0))
@@ -1708,7 +1804,7 @@ test('B3-L01: a live tool-call delta reaches the mounted TSP renderer as ONE Pre
   }
 })
 
-test('B3-L02: the retry, the attempt, the step end and the turn end each clear the row', async () => {
+test('the retry, the attempt, the step end and the turn end each clear the row', async () => {
   const harness = await mountPreparingHarness()
   try {
     harness.route(ev('turn/start', { turn: 1 }, 0))
@@ -1755,7 +1851,7 @@ test('B3-L02: the retry, the attempt, the step end and the turn end each clear t
   }
 })
 
-test('B3-L03: a retired Agent\'s delta never reaches the preview owner', async () => {
+test('a retired Agent\'s delta never reaches the preview owner', async () => {
   const harness = await mountPreparingHarness()
   try {
     harness.route(ev('turn/start', { turn: 1 }, 0))
@@ -1806,6 +1902,284 @@ test('B3-L03: a retired Agent\'s delta never reaches the preview owner', async (
       'the frame after the second refused delta to reach the wire')
     assert.equal(harness.previews.size, 1, 'the refused delta still changed no preview')
     assert.equal(wireRowCount(harness), 1, 'the refused delta still drew no second row')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+// ── TSP-7 Welcome D: the real authority → repaint → Main chain (W05/W06/W07) ─
+//
+// These three cases run the WHOLE production path: the injected read-only
+// `SessionReader.blank` port, the real `TranscriptFolder`, the real
+// `TranscriptWindowController`, the real `SurfaceRuntime.repaintTarget` and the
+// MOUNTED TSP renderer's own Main selection. Nothing here writes a renderer
+// state by hand or injects a pre-computed `isEmpty`.
+
+/** Whether the Welcome is the Main the wire currently shows. */
+function welcomeOnWire(harness: PreparingHarness): boolean {
+  return liveWireIds(harness.tern.output.text()).some(id => id.includes('welcome-box'))
+}
+
+/** Whether the wire currently shows a transcript message row. */
+function messageRowOnWire(harness: PreparingHarness): boolean {
+  return liveWireIds(harness.tern.output.text()).some(id => /(^|\.)s\d+-msg-/u.test(id))
+}
+
+test('W05: the blank authority plus an empty fold reaches the mounted TSP Main as the Welcome, and the first real turn retires it', async () => {
+  // The stand-in models the official Direct mapping (`blank` = "no started
+  // turn"): it flips where the Host's turn-boundary projection flips — on the
+  // routed `turn/start` — and nothing writes renderer state directly.
+  let started = false
+  const harness = await mountPreparingHarness({
+    nativeEl: true,
+    sessionBlank: () => !started,
+  })
+  try {
+    harness.surface.paintNow()
+    await awaitWire(() => welcomeOnWire(harness), 'the blank main subject to present the Welcome')
+    assert.equal(messageRowOnWire(harness), false, 'the empty subject shows no message row')
+
+    // The FIRST real request starts a turn: the official turn boundary stops
+    // being blank, and the NEXT authorized repaint retires the Main empty
+    // state — BEFORE any display row exists, so the hide is the authority's
+    // doing and never a row count.
+    harness.route(ev('turn/start', { turn: 1 }, 0))
+    started = true
+    harness.surface.paintNow()
+    await awaitWire(() => !welcomeOnWire(harness), 'the started turn boundary to retire the Welcome')
+    assert.equal(messageRowOnWire(harness), false, 'nothing was projected yet — the hide came from the authority')
+    // The first message then lands through the same production chain.
+    harness.route(userMessage(1, 'user-1', 'Run the focused test.'))
+    harness.surface.paintNow()
+    await awaitWire(() => messageRowOnWire(harness), 'the first real row to reach the wire')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('W06: a started turn with no displayable row yet vetoes the empty state while the authority still claims blank', async () => {
+  // The reachable Remote intermediate: the listed session summary still answers
+  // `blank:true` (its snapshot has not refreshed), while the fold has already
+  // applied a real `turn/start` that has produced NO displayable row. The
+  // grouped turn index is still empty here — it counts turns that yielded
+  // cards — so the veto must read the fold's real turn ACTIVITY instead.
+  const harness = await mountPreparingHarness({ nativeEl: true, sessionBlank: () => true })
+  try {
+    harness.surface.paintNow()
+    await awaitWire(() => welcomeOnWire(harness), 'the blank subject to present the Welcome')
+    harness.route(ev('turn/start', { turn: 1 }, 0))
+    harness.surface.paintNow()
+    // The witness is the PAINTED result, not the recorded argument: wait until
+    // the frame that lifted the Welcome is on the wire.
+    await awaitWire(() => !welcomeOnWire(harness), 'the started turn to retire the painted Welcome')
+    assert.deepEqual(harness.committedEligibilities.at(-1), 'hidden',
+      'and the surface committed the veto, rather than the renderer painting around a stale invitation')
+    assert.equal(messageRowOnWire(harness), false,
+      'the hide needed no displayable row at all — the turn ACTIVITY is the evidence')
+    // The action left with the state: no Welcome action node survives anywhere.
+    assert.equal(liveWireIds(harness.tern.output.text()).some(id => id.includes('welcome-resume')), false,
+      'the Resume action is not painted on a subject that has already started')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('W06: a turn in the complete fold vetoes the empty state even when the authority still claims blank', async () => {
+  // The Remote shape this veto exists for: the listed summary still says
+  // `blank:true` while the complete fold already carries the turn. The veto
+  // reads the fold's own turn facts, never the projected window, so no window
+  // re-selection can bring the Welcome back.
+  const harness = await mountPreparingHarness({ nativeEl: true, sessionBlank: () => true })
+  try {
+    harness.surface.paintNow()
+    await awaitWire(() => welcomeOnWire(harness), 'the blank subject to present the Welcome')
+    harness.route(ev('turn/start', { turn: 1 }, 0))
+    harness.route(userMessage(1, 'user-1', 'A turn already ran.'))
+    harness.surface.paintNow()
+    await awaitWire(() => messageRowOnWire(harness), 'the real row to reach the wire')
+    assert.equal(welcomeOnWire(harness), false,
+      'the fold\'s turn vetoed the stale blank claim: no Welcome came back')
+    // The decisive witness is the argument the surface COMMITTED, taken from
+    // the production consumer's own method: one turn in the fold must answer
+    // `'hidden'`, so the veto is the authority's decision and not only a
+    // presentation-side accident of the painted frame.
+    assert.deepEqual(harness.committedEligibilities.at(-1), 'hidden',
+      `the repaint committed the veto itself: ${JSON.stringify(harness.committedEligibilities)}`)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('W06: the veto reads the complete fold, so a bounded window that shows nothing of the history never re-presents the empty state', async () => {
+  // A one-turn window over a two-turn history: the projection is a strict
+  // subset of the fold, and the plan's rule is that the subset is never the
+  // authority. The blank claim stays `true` throughout, so the ONLY fact that
+  // can keep the Welcome away is the fold's own turn index.
+  const harness = await mountPreparingHarness({ nativeEl: true, sessionBlank: () => true, windowTurns: 1 })
+  try {
+    harness.surface.paintNow()
+    await awaitWire(() => welcomeOnWire(harness), 'the empty subject to present the Welcome')
+    harness.route(ev('turn/start', { turn: 1 }, 0))
+    harness.route(userMessage(1, 'user-1', 'The oldest turn of the history.'))
+    harness.route(ev('turn/start', { turn: 2 }, 1))
+    harness.route(userMessage(2, 'user-2', 'The newest turn of the history.'))
+    harness.surface.paintNow()
+    await awaitWire(() => messageRowOnWire(harness), 'the bounded window to paint a row')
+    assert.equal(welcomeOnWire(harness), false, 'a fold with turns never re-becomes the empty state')
+    assert.deepEqual(harness.committedEligibilities.at(-1), 'hidden',
+      'the veto came from the complete fold, not from the one-turn window it painted')
+    // And re-anchoring the ONE-turn window onto the OLDER turn keeps it away:
+    // the window's contents are not the eligibility input.
+    assert.equal(harness.window.anchorAt(1), true, 'the window re-anchors onto the older turn')
+    harness.surface.paintNow()
+    await awaitWire(() => !harness.window.isLatest(), 'the window to leave the live tail')
+    assert.equal(welcomeOnWire(harness), false,
+      're-selecting the bounded window never brings the Welcome back')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('W07: a viewed child never borrows the main subject\'s Welcome, and leaving it restores the main projection', async () => {
+  const harness = await mountPreparingHarness({ nativeEl: true, sessionBlank: () => true })
+  try {
+    harness.surface.paintNow()
+    await awaitWire(() => welcomeOnWire(harness), 'the blank main subject to present the Welcome')
+    harness.viewChild()
+    harness.surface.paintNow()
+    await awaitWire(() => !welcomeOnWire(harness), 'the child subject to drop the main Welcome')
+    harness.exitChild()
+    harness.surface.paintNow()
+    await awaitWire(() => welcomeOnWire(harness), 'the main blank subject to present its own Welcome again')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('W06: a zero-row window over a non-empty fold is unreachable through the public controller, so the veto cannot be window-derived', () => {
+  // The plan's W06 asks for "the window re-selected to zero rows". This proves
+  // the state itself: every window selection the production controller ACCEPTS
+  // over a fold that has turns paints at least one row, and the only accepted
+  // re-selections are anchors inside the fold's own turn index. A test that
+  // fabricated an empty window would be constructing a state production cannot
+  // reach, so the claim is carried here instead: the veto input is the fold's
+  // turn index, and no reachable window state can make a non-empty fold look
+  // empty. Every public operation of `TranscriptWindowController` is walked
+  // below — `setTurns`, `latest`, `resetToLatest`, `anchorAt`, `moveOlder`,
+  // `turnOlder`, `turnNewer`, `moveNewer` — including the ones that must be
+  // REFUSED (`anchorAt` outside the index at both ends, the older moves at the
+  // oldest turn, the newer moves from `latest`).
+  const events = (offset: number) => [
+    ev('turn/start', { turn: 1 + offset }, offset * 10),
+    userMessage(1 + offset * 10, `user-w${offset}`, `the ${offset}nd turn`),
+  ]
+  for (const turns of [1, 2, 3]) {
+    const folder = new TranscriptFolder()
+    folder.apply(Array.from({ length: turns }, (_, index) => events(index)).flat())
+    const controller = new TranscriptWindowController({ windowTurns: 1, stepTurns: 1 })
+    controller.setTurns(folder.groupedTurns())
+    assert.equal(folder.groupedTurns().length, turns, 'the fold really carries the history')
+    const projected = () => {
+      const endTurn = controller.endTurn()
+      return folder.window({ maxTurns: controller.windowTurns, ...(endTurn === undefined ? {} : { endTurn }) }).messages.length
+    }
+    const nonEmpty = (where: string): void => {
+      assert.ok(projected() > 0, `${where}: the window still paints at least one row`)
+    }
+    nonEmpty('latest')
+    // Re-anchor onto every turn the fold actually has: none is empty.
+    for (const turn of folder.groupedTurns()) {
+      assert.equal(controller.anchorAt(turn), true, `anchorAt(${turn}) is a real re-selection`)
+      nonEmpty(`anchorAt(${turn})`)
+    }
+    // Refused re-selections change nothing, so they cannot empty the window.
+    assert.equal(controller.anchorAt(9999), false, 'a turn the fold never had is refused')
+    assert.equal(controller.anchorAt(0), false, 'a turn below the index is refused')
+    nonEmpty('after the refused anchors')
+    // Walk the whole older/newer ladder, both by page and by single turn.
+    controller.latest()
+    nonEmpty('latest again')
+    while (controller.moveOlder()) nonEmpty('moveOlder page')
+    while (controller.turnOlder()) nonEmpty('turnOlder step')
+    assert.equal(controller.turnOlder(), false, 'the oldest turn is reached')
+    nonEmpty('the oldest reachable window')
+    while (controller.turnNewer()) nonEmpty('turnNewer step')
+    while (controller.moveNewer()) nonEmpty('moveNewer page')
+    nonEmpty('the newest reachable window')
+    // The two reset spellings are both covered: `latest()` and the Host
+    // handler alias `resetToLatest()` reach the same live-tail state.
+    assert.equal(controller.anchorAt(folder.groupedTurns()[0]!), true, 're-anchored for the reset alias')
+    assert.equal(controller.resetToLatest(), true, 'resetToLatest() is a real transition from history')
+    nonEmpty('resetToLatest()')
+    // A swapped-in empty index is the ONE way to a zero-row fold — and there
+    // the veto correctly reports no history, so it is not the window lying.
+    controller.setTurns([])
+    assert.equal(controller.state().mode, 'latest', 'setTurns([]) resets to latest, never an empty history window')
+    nonEmpty('after setTurns([]) on a fold that still has turns')
+  }
+})
+
+test('W16: the Remote session-summary blank bit drives the same repaint chain, including the UNKNOWN case', async () => {
+  // The authority is the REAL Remote port object, not a boolean the fixture
+  // pre-computed: `RemoteSessionReader.blank()` reads the official Client
+  // session-summary snapshot, and the snapshot's `phase` is what makes an
+  // answer UNKNOWN. The surface, the fold, the repaint and the mounted
+  // renderer are the production ones.
+  const { RemoteSessionReader } = await import('../../src/runtime/remote/session-reader-remote.ts')
+  const { createObservableGenerationHarness } = await import('../support/remote-generation.ts')
+  const generations = createObservableGenerationHarness()
+  const rows: Record<string, { id: string; updatedAt: number; running: boolean; blank?: boolean }> = {
+    'session-live-pr2': { id: SESSION_ID, updatedAt: 10, running: false, blank: true },
+  }
+  let phase: 'ready' | 'loading' = 'ready'
+  const source = {
+    list: {
+      getSnapshot: () => ({ ids: Object.keys(rows), byId: rows, phase }),
+      refresh: async () => {},
+      subscribe: () => () => {},
+    },
+    bindings: { getSnapshot: () => ({ byId: {} }), subscribe: () => () => {} },
+  } as never
+  const reader = new RemoteSessionReader(source, generations.source)
+  assert.equal(reader.blank(SESSION_ID), true, 'the port answers blank for the listed row')
+
+  const harness = await mountPreparingHarness({ nativeEl: true, sessionBlank: id => reader.blank(id) })
+  try {
+    harness.surface.paintNow()
+    await awaitWire(() => welcomeOnWire(harness), 'the Remote-blank subject to present the Welcome')
+    assert.deepEqual(harness.committedEligibilities.at(-1), 'blank-session',
+      'the eligibility came from the Remote port read')
+
+    // The summary flips to non-blank: the next authorized repaint retires it.
+    rows[SESSION_ID] = { id: SESSION_ID, updatedAt: 20, running: false, blank: false }
+    harness.surface.paintNow()
+    await awaitWire(() => !welcomeOnWire(harness), 'the non-blank summary to retire the Welcome')
+    assert.deepEqual(harness.committedEligibilities.at(-1), 'hidden')
+
+    // UNKNOWN: the list is not ready, so the bit is not a fact. The Welcome
+    // must stay away — an unknown authority is never read as blank.
+    rows[SESSION_ID] = { id: SESSION_ID, updatedAt: 30, running: false, blank: true }
+    phase = 'loading'
+    assert.equal(reader.blank(SESSION_ID), undefined, 'the port answers undefined while loading')
+    harness.surface.paintNow()
+    await awaitWire(() => harness.committedEligibilities.at(-1) === 'hidden',
+      'the unknown authority to answer hidden')
+    assert.equal(welcomeOnWire(harness), false, 'an UNKNOWN blank bit never shows the empty state')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('W05: a composition with no injected blank authority carries no eligibility and shows no Welcome', async () => {
+  // The PiTui/older shape: the surface performs no Host read and commits no
+  // argument, so the mounted renderer keeps the transcript Main.
+  const harness = await mountPreparingHarness({ nativeEl: true })
+  try {
+    harness.route(ev('turn/start', { turn: 1 }, 0))
+    harness.route(userMessage(1, 'user-1', 'No authority composed.'))
+    harness.surface.paintNow()
+    await awaitWire(() => messageRowOnWire(harness), 'the real projection to reach the wire')
+    assert.equal(welcomeOnWire(harness), false, 'no authority, no empty state')
   } finally {
     await harness.dispose()
   }

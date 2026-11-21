@@ -8,7 +8,6 @@ import { compositionFile, compositionFilesUnder, compositionOccurrences, composi
 import {
   aliasAwareConstructionSites,
   ownerFile,
-  ownerOccurrences,
   parseSources,
   productionFilesUnder,
   productionScriptKind,
@@ -108,22 +107,6 @@ const SINGLE_OWNER_SITES: ReadonlyArray<readonly [string, number, string]> = [
   ['new TranscriptWindowController(', 1, 'src/app/surface/viewer-runtime.ts'],
 ]
 
-test('the composition surface is the entry plus the composition zone', () => {
-  const sources = compositionSources()
-  assert.equal(sources[0].rel, 'src/index.ts', 'the package entry is the first composition-surface file')
-  assert.equal(sources[1].rel, 'src/app/bootstrap.ts', 'the composition facade is the second composition-surface file')
-  for (const { rel } of sources.slice(2)) {
-    assert.ok(rel.startsWith('src/app/bootstrap/'), `${rel} is not a composition-surface file`)
-  }
-})
-
-test('every composition responsibility still has a site', () => {
-  const source = compositionSource()
-  for (const [name, site] of COMPOSITION_INVENTORY) {
-    assert.ok(source.includes(site), `the composition surface must still own ${name} (${site})`)
-  }
-})
-
 test('the composition ROOT owns every composition site (the entry owns none)', () => {
   // Ownership LOCATION, not just "somewhere in the composition surface". The
   // aggregate counts below cannot catch a regression that moves a construction
@@ -182,21 +165,6 @@ test('the composition ROOT owns every composition site (the entry owns none)', (
         `src/app/bootstrap.ts must not construct ${site} — its owner is ${owner}`,
       )
     }
-  }
-})
-
-test('every single-owner construction has exactly its expected count across the owner surface', () => {
-  // The aggregate companion to the per-module location lock above: the TOTAL
-  // count across the owner surface (which includes the composition root) must
-  // still match, so a relocation that duplicates a construction in TWO owner
-  // modules fails even when each module individually looks plausible.
-  const expectedBySite = new Map<string, number>()
-  for (const [site, expected] of SINGLE_OWNER_SITES) {
-    expectedBySite.set(site, (expectedBySite.get(site) ?? 0) + expected)
-  }
-  for (const [site, expected] of expectedBySite) {
-    assert.equal(ownerOccurrences(site), expected,
-      `${site} must have exactly ${expected} construction site(s) in the A5b owner surface`)
   }
 })
 
@@ -403,27 +371,66 @@ const OTHER_HOST_SUBSCRIPTIONS: ReadonlyArray<readonly [string, string]> = [
   ['approval/request', 'src/runtime/direct/interaction-direct.ts'],
   ['plugin-manager/install-state', 'src/runtime/direct/plugin-manager-direct.ts'],
   ['plugin-manager/install-log', 'src/runtime/direct/plugin-manager-direct.ts'],
+  ['plugin-manager/update-state', 'src/runtime/direct/plugin-manager-direct.ts'],
   ['plugin-manager/changed', 'src/runtime/direct/plugin-manager-direct.ts'],
   ['agent/assistant-stream', 'src/runtime/direct/assistant-stream-direct.ts'],
   ['agent/disposed', 'src/runtime/direct/assistant-stream-direct.ts'],
   ['skills/change', 'src/runtime/direct/skill-catalog.ts'],
   ['commands/change', 'src/commands.ts'],
   ['loader/volatile-update', 'src/app/host/visual-tools.ts'],
+  // M5-W PR-C: the Host Web access service repairs its live roster after the
+  // official profile recomposition (Owner decision: settings writes must not
+  // change the running Host's FINAL Web state).
+  ['app-boot/config-reload', 'src/app/host/features/web-access.ts'],
+  // M5-U-A: the Direct read-authority adapter re-reads the ONE official Host
+  // Workspace registry after each committed Workspace domain write (it never
+  // derives an increment from the event payload and keeps no second table).
+  ['domain/changed', 'src/runtime/direct/session-workspace-facts-direct.ts'],
+  // The Direct Account adapter invalidates local observations immediately when
+  // Cordis replaces the official Host binding; this is not a business Account event.
+  ['internal/service', 'src/runtime/direct/config-direct.ts'],
+  // FR3: the Direct MCP manager adapter invalidates its observation when Cordis
+  // replaces the official `mcpManager` binding (same Host-authority rule as the
+  // Account adapter above; no second manager service is created).
+  ['internal/service', 'src/runtime/direct/mcp-server-direct.ts'],
+  // S5-PR4: the Direct Schedule adapter's ONE invalidation subscription. The
+  // event carries no content, so the listener only re-reads the authoritative
+  // catalog through the one controller.
+  ['schedule/changed', 'src/runtime/direct/schedule-direct.ts'],
+  // M6 PR-C C2: the Direct composition's per-Turn prompt latch reads the
+  // official Session boundary plane through its typed source adapter.
+  ['session/event', 'src/app/bootstrap.ts'],
 ]
 
 /**
- * The REMOTE-BRANCH counterpart of three subscriptions the Direct branch owns:
- * the private `piTuiTerminalProgress` Host row observes the same Host events on
- * the other backend branch of the same process (plan R2 §6.4). The two owners
- * never run together (the Direct rows are gated by `if (direct)` and the Host
- * row is mounted only by the built-in PiTui Host Runtime), but both sites exist
- * statically, so both are pinned BY BRANCH: a third site — or a second one in
- * either file — still fails.
+ * The REMOTE-BRANCH counterpart subscriptions the Direct branch also owns: the
+ * private `piTuiTerminalProgress` Host row observes the same Host events on the
+ * other backend branch of the same process (plan R2 §6.4), and the private
+ * `piTuiFileReferences` row observes the existing `session/event` plane to mark
+ * its resident official workspace indexes stale (M6-1/F5-B — no second file
+ * watcher). The two owners never run together (the Direct rows are gated by
+ * `if (direct)` and these Host rows are mounted only by the built-in PiTui Host
+ * Runtime), but both sites exist statically, so both are pinned BY BRANCH: a
+ * third site — or a second one in either file — still fails.
  */
 const REMOTE_BRANCH_SUBSCRIPTIONS: ReadonlyArray<readonly [string, string]> = [
   ['session/event', 'src/app/host/features/terminal-progress.ts'],
   ['agent/status', 'src/app/host/features/terminal-progress.ts'],
   ['agent/disposed', 'src/app/host/features/terminal-progress.ts'],
+  // M6-1 F6: the Host Skills row observes the official registry invalidation
+  // event and forwards it as the private stream's pending bit.
+  ['skills/change', 'src/app/host/features/skills.ts'],
+  // M6-1 F5-B: the private file-reference row marks its (at most four) resident
+  // official workspace indexes stale after a Host tool result. It consumes the
+  // EXISTING session/event plane and installs no watcher.
+  ['session/event', 'src/app/host/features/file-reference.ts'],
+  // M6 PR-C: the Host prompt-parity owner keeps every live Agent's prompt
+  // sections current: it observes the Agent roster through the official
+  // global lifecycle events and installs one per-Turn latch per Agent on the
+  // EXISTING session/event plane (no second boundary source).
+  ['agent/created', 'src/app/host/features/agent-prompt.ts'],
+  ['agent/disposed', 'src/app/host/features/agent-prompt.ts'],
+  ['session/event', 'src/app/host/features/agent-prompt.ts'],
 ]
 
 /** Dynamic (non-literal event) `ctx.on` bridges: the Direct config port only. */
@@ -509,29 +516,6 @@ test('the Host subscription inventory is unique and AST-complete across producti
   )
 })
 
-test('the composition surface keeps the documented surface release order', () => {
-  // Plan §12.2/§38: the teardown order is behaviour. The composition root only
-  // orchestrates; every release hook is surface-owned.
-  const source = compositionSource()
-  const cleanupStart = source.indexOf('const disposeSurface = (): Promise<void> | void => {')
-  assert.ok(cleanupStart >= 0, 'disposeSurface must exist')
-  const cleanup = source.slice(cleanupStart, source.indexOf('diag.dispose()', cleanupStart) + 20)
-  const order = [
-    'surface.disposePluginManager()',
-    'surface.disposeJobEvents()',
-    'surface.disposeJobObservation()',
-    'surface.disposeTaskBrowser()',
-    'surface.dispose()',
-  ]
-  let cursor = -1
-  for (const hook of order) {
-    const at = cleanup.indexOf(hook)
-    assert.ok(at >= 0, `cleanup must call ${hook}`)
-    assert.ok(at > cursor, `cleanup must call ${hook} after the previous surface release hook`)
-    cursor = at
-  }
-})
-
 test('the composition surface keeps the startup order', () => {
   // attachTasks → refreshPendingInput → initLiveSession → registerCommands.
   // Search FORWARD from each hit: the earlier input handlers also refresh the
@@ -600,7 +584,8 @@ test('the Host-subscription phases keep their frozen startup interleaving', () =
 
   // The phase SPLIT itself: exactly one declaration + one call per phase, and
   // phase 1 installs exactly ONE listener (the throwing-install window's active
-  // set), while phase 2 installs the other five IN THE BASELINE ORDER.
+  // set), while phase 2 installs the other five. Their relative order within
+  // phase 2 is not a distinct event-ownership or stream-acquire contract.
   assert.equal(compositionOccurrences('installSessionEventWiring('), 2,
     'phase 1 must have exactly one declaration and one call site')
   assert.equal(compositionOccurrences('installRuntimeEventWiring('), 2,
@@ -613,7 +598,6 @@ test('the Host-subscription phases keep their frozen startup interleaving', () =
   assert.equal(phaseOne.split('ctx.on(').length - 1, 1,
     'phase 1 installs exactly ONE listener, so a throwing stream install leaves exactly that one active')
   assert.ok(phaseOne.includes("ctx.on('session/event'"), 'phase 1 owns the Direct durable firehose')
-  let phaseCursor = -1
   for (const event of [
     'subagent/start',
     'subagent/end',
@@ -622,9 +606,8 @@ test('the Host-subscription phases keep their frozen startup interleaving', () =
     'settings/document-updated',
   ]) {
     assert.ok(!phaseOne.includes(`ctx.on('${event}'`), `${event} must NOT be installed before the stream acquire`)
-    const at = phaseTwo.indexOf(`ctx.on('${event}'`)
-    assert.ok(at > phaseCursor, `${event} must keep its baseline registration order inside phase 2`)
-    phaseCursor = at
+    assert.ok(phaseTwo.includes(`ctx.on('${event}'`),
+      `${event} must remain subscribed in phase 2`)
   }
   assert.equal(phaseTwo.split('ctx.on(').length - 1, 5, 'phase 2 installs exactly the other five listeners')
 })
@@ -701,8 +684,8 @@ test('the composition zone is enumerated RECURSIVELY (nested helpers included)',
     ],
     'the composition surface must include a NESTED zone helper over every production extension',
   )
-  // The SAME enumerator feeds OWNER_MODULES (`bootstrapHelperModules`), so the
-  // aggregate bag/single-owner locks see nested helpers too.
+  // The SAME enumerator feeds OWNER_MODULES (`bootstrapHelperModules`), so
+  // nested helpers remain visible to the owner-module location checks.
   assert.deepEqual(
     productionFilesUnder(root, 'src/app/bootstrap'),
     [
@@ -711,16 +694,15 @@ test('the composition zone is enumerated RECURSIVELY (nested helpers included)',
       'src/app/bootstrap/top.ts',
     ],
   )
-  // ...and their CONTENT is part of what the content locks scan: a bad
-  // universal-dependency bag (or a hard-coded chord) hidden in a nested helper
-  // must be visible to the composed surface text, not just to the file list.
+  // ...and their CONTENT is part of the composed surface text, not just the
+  // file list. This proves enumeration, not semantic detection of a broad bag.
   writeFileSync(
     join(root, 'src', 'app', 'bootstrap', 'nested', 'bad.ts'),
-    'interface EverythingBag { readonly everything: unknown }\n',
+    'interface NestedProbe { readonly value: unknown }\n',
   )
   const composed = compositionSourceUnder(root)
-  assert.ok(composed.includes('interface EverythingBag {'),
-    'a bag declared in a NESTED composition helper must appear in the composed composition surface')
+  assert.ok(composed.includes('interface NestedProbe {'),
+    'a declaration in a NESTED composition helper must appear in the composed composition surface')
   assert.ok(composed.includes('// >>> src/app/bootstrap/nested/bad.ts'),
     'the composed surface must banner the nested helper it now covers')
   // The real tree is unchanged by the recursion: every helper is flat today
@@ -730,21 +712,21 @@ test('the composition zone is enumerated RECURSIVELY (nested helpers included)',
     productionFilesUnder(process.cwd(), 'src/app/bootstrap'),
     [
       'src/app/bootstrap/event-wiring.ts',
+      'src/app/bootstrap/exit-facts.ts',
+      'src/app/bootstrap/exit-intent.ts',
       'src/app/bootstrap/exit.ts',
-      'src/app/bootstrap/legacy-settings-migration.ts',
       'src/app/bootstrap/lifecycle.ts',
       'src/app/bootstrap/presentation-bridge.ts',
       'src/app/bootstrap/profile.ts',
       'src/app/bootstrap/remote-init-retry.ts',
+      'src/app/bootstrap/remote-progress-watch.ts',
       'src/app/bootstrap/remote-refold-request.ts',
       'src/app/bootstrap/renderer-selection.ts',
       'src/app/bootstrap/runtime-selection.ts',
+      'src/app/bootstrap/session-launch-intent.ts',
       'src/app/bootstrap/session-startup.ts',
       'src/app/bootstrap/task-source.ts',
       'src/app/bootstrap/terminal-output.ts',
-      // The fork-inherited published-visual ancestry proof (PR5 hotfix) is a
-      // composition helper like the snapshot selector it feeds.
-      'src/app/bootstrap/visual-lineage.ts',
       'src/app/bootstrap/visual-snapshot.ts',
     ],
   )

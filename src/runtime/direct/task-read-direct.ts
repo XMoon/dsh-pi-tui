@@ -62,6 +62,10 @@ function detachChild(
     hasChildren: entry.hasChildren,
     parentId: entry.parentId,
     depth: entry.depth,
+    // The official `listDescendants()` path is carried verbatim; absent stays
+    // absent (an unnamed ancestor below the root makes the whole path
+    // undefined — never fabricated from a label or id).
+    ...(entry.path === undefined ? {} : { path: entry.path }),
   })
 }
 

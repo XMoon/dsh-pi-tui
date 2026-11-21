@@ -34,6 +34,7 @@ import type { StreamingToolPreview } from './streaming-tool-preparing.ts'
 import type { StatusPatch } from '../../domain/status/types.ts'
 import type { TranscriptMessage, TurnActivity } from '../../domain/transcript/types.ts'
 import type { TranscriptWindowState } from '../../domain/transcript/window.ts'
+import type { HistoryScopeSettlement } from '../../client/history/recall-scope.ts'
 import type { StatusData, DisplaySubjectPresentation } from '../../tui-app.ts'
 
 /**
@@ -54,6 +55,10 @@ export interface DisplayStatusFacts {
   readonly busy?: boolean
   readonly working?: boolean
   readonly planMode?: boolean
+  /** The official plan projection's pending selection, committed beside
+   * `planMode` (a selection awaiting the next accepted step). Omitted when
+   * the source cannot report it. */
+  readonly planPending?: boolean
   readonly sessionTitle?: string | undefined
   readonly todos?: readonly TodoItem[]
   readonly compactionPhase?: CompactionPhase
@@ -91,7 +96,15 @@ export interface DisplayActivityFacts {
   readonly failedTaskCount?: number
 }
 
-/** The welcome-card facts (see TuiApp.setWelcomeCard). */
+export interface DisplayWelcomeWorkspace {
+  /** Empty exactly when `status === 'unselected'` (no Host Workspace chosen). */
+  readonly path: string
+  readonly status: 'unselected' | 'proposed' | 'verifying' | 'confirmed' | 'rejected'
+  readonly workspaceId?: string
+  readonly error?: string
+}
+
+
 export interface DisplayWelcomeFacts {
   readonly cwd: string
   readonly sessionId: string
@@ -101,18 +114,34 @@ export interface DisplayWelcomeFacts {
 }
 
 /**
+ * TSP-7 Welcome D: the display-only result of the ONE current Session
+ * projection, derived by `SurfaceRuntime.repaintTarget` from the Host blank
+ * authority plus the selected subject's complete fold. It is a presentation
+ * eligibility, never a Session fact: it carries no id, no history and no
+ * model, and a renderer that receives nothing treats it as `'hidden'`.
+ *
+ * - `'sessionless'` — the application formally committed the idle start
+ *   (no Session exists yet); the original `setWelcomeIdle(true)` source.
+ * - `'blank-session'` — the live MAIN subject's Host blank read is `true`
+ *   and its complete fold holds no turn.
+ * - `'hidden'` — anything else: a started turn, an unknown authority, a
+ *   viewed child, or a subject this commit does not speak for.
+ */
+export type DisplayWelcomeEligibility = 'sessionless' | 'blank-session' | 'hidden'
+
+/**
  * The renderer-facing display surface. Every member is a COMMIT of a fact the
  * application owner already derived; none of them queries the renderer back.
  */
 export interface SurfaceDisplaySeam {
   // ── The transcript projection (SurfaceRuntime.repaintTarget is the only writer) ──
-  /** Commit ONE windowed transcript projection (the same arguments
-   * `TuiApp.setTranscript` takes; a renderer that cannot present search
-   * ignores the optional presentation parts). */
+  /** Commit the one renderer-selected transcript projection: PiTui receives a
+   * bounded window; TSP receives all currently Client-loaded rows. Window-shaped
+   * metadata is display context, not a second history or physical scroll authority. */
   setTranscript(
     messages: readonly TranscriptMessage[],
     activities?: ReadonlyMap<number, TurnActivity>,
-    window?: TranscriptWindowState & { firstTurn?: number; lastTurn?: number; hasNewer?: boolean },
+    window?: TranscriptWindowState & { firstTurn?: number; lastTurn?: number; hasOlder?: boolean; hasNewer?: boolean },
     streamingToolPreviews?: readonly StreamingToolPreview[],
     searchPresentation?: TranscriptSearchPresentation,
     /**
@@ -123,6 +152,15 @@ export interface SurfaceDisplaySeam {
      * scope tracking may ignore it.
      */
     source?: object,
+    /**
+     * TSP-7 Welcome D: the display-only Welcome eligibility of the SAME
+     * subject this frame projects (`SurfaceRuntime.repaintTarget` is its only
+     * writer). Appended LAST so every existing implementation stays
+     * structurally compatible; a consumer that receives nothing reads it as
+     * `'hidden'` and never shows a Welcome of its own accord. PiTui does not
+     * consume it — its Welcome card keeps its long-standing owner.
+     */
+    welcomeEligibility?: DisplayWelcomeEligibility,
   ): void
 
   // ── Status facts and resets (session-presentation / event-routing owners) ──
@@ -182,17 +220,24 @@ export interface SurfaceDisplaySeam {
    * sites consult this before merging.
    */
   retainsStaleDraftRestore(): boolean
-  /** Replace the editor input-history recall rows (editor-only; a read-only
-   * renderer ignores the rows but still records the reset).
+  /** Replace the recall projection with the CURRENT workspace's rows. Each
+   * renderer owns ONE Client-local recall kernel
+   * (`src/client/history/recall-scope.ts`) and commits the reset into it; the
+   * PiTui adapter additionally mirrors the kernel's snapshot into its editor's
+   * ↑/↓ stack. Neither one renders, clears a draft nor opens a second
+   * persistence owner.
    * @param entries - the current Session's rows, most recent first.
    * @param owner - the owner whose hydration committed this reseed. Omitted
-   *   for the sessionless boot seed, which only seeds the recall pool. */
-  resetInputHistory(entries: readonly string[], owner?: string): void
+   *   for the sessionless boot seed, which only seeds the recall pool.
+   * @param writeIds - optional provenance of a cold cross-cwd seed, positionally
+   *   aligned with `entries`; the kernel uses it to rebuild the open scope's
+   *   true append prefix. Omitted by every other caller. */
+  resetInputHistory(entries: readonly string[], owner?: string, writeIds?: readonly (string | undefined)[]): void
   /** Open the editor-recall scope of the owner a Session commit section is
    * publishing (or creating): the following {@link resetInputHistory} for that
    * owner must reconcile the inputs accepted since the publication
-   * (scope-bound temporary submissions) instead of dropping them. A read-only
-   * renderer records nothing. */
+   * (scope-bound temporary submissions) instead of dropping them. Every
+   * mounted renderer records it in its own kernel. */
   beginInputHistoryScope(owner: string | undefined): void
   /** Record ONE settlement of the open editor-recall scope, IN APPEND ORDER:
    * called from the SAME synchronous stack as the append (or from the policy
@@ -200,12 +245,7 @@ export interface SurfaceDisplaySeam {
    * settlement to exactly one accepted submission; the order is the file's row
    * order, which is what the following {@link resetInputHistory} maps.
    * @param settlement - the settled occurrence's facts. */
-  settleScopeInput(settlement: {
-    readonly token?: number
-    readonly owner: string | undefined
-    readonly outcome: 'written' | 'skipped'
-    readonly text: string
-  }): void
+  settleScopeInput(settlement: HistoryScopeSettlement): void
   /** Clear the search result readout (chrome-only; harmless on TSP). */
   setSearchResult(index: number, count: number): void
 
@@ -218,6 +258,7 @@ export interface SurfaceDisplaySeam {
   setWelcomeCard(facts: DisplayWelcomeFacts): void
   /** The welcome card's idle form (deferred start, no session yet). */
   setWelcomeIdle(idle: boolean): void
+  setWelcomeWorkspace?(workspace: DisplayWelcomeWorkspace | undefined): void
   /** The terminal-local cwd fact the renderer may publish (OSC 7 on PiTui;
    * the TSP pane owns its own cwd presentation). */
   setTerminalCwd(cwd: string | undefined): void

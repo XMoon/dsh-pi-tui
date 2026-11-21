@@ -31,17 +31,29 @@ import type { Catalog } from '../catalog-port.ts'
 import type { ConfigPort } from '../config-port.ts'
 import type { HostFilePort } from '../host-file-port.ts'
 import type { SessionArchivePort } from '../session-archive-port.ts'
+import type { SessionMarkdownPort } from '../session-markdown-port.ts'
 import type { HostCommandPort } from '../host-command-port.ts'
 import type { PluginManagerPort } from '../plugin-manager-port.ts'
 import type { JobObservationPort } from '../job-observation-port.ts'
 import type { HostUserShellPort } from '../host-user-shell-port.ts'
+import type { HostShellCompletionPort } from '../host-shell-completion-port.ts'
 import type { DeliveredFileReadPort } from '../deliverables-port.ts'
+import type { WebAccessPort } from '../web-access-port.ts'
+import type { AcpAccessPort } from '../acp-access-port.ts'
+import type { SessionWorkspaceFactsPort } from '../session-workspace-facts-port.ts'
+import type { SchedulePort } from '../schedule-port.ts'
+import type { HostDirectoryBrowsePort } from '../host-directory-browse-port.ts'
+import type { SessionPolicyPort } from '../session-policy-port.ts'
+import type { TeamModePort } from '../team-mode-port.ts'
+import type { TeamBoardReadPort } from '../team-board-read-port.ts'
+import type { McpServerPort } from '../mcp-server-port.ts'
+import type { CuaAccessPort } from '../cua-access-port.ts'
 
 /** Every semantic port the Remote backend serves (one adapter each). */
 export interface RemoteBackendParts {
-  /** The truthful-unavailable Host user-shell adapter (M3-4 PR3; the
-   * CARRIER_GAP rc.2 outcome — zero execution, zero Client spawn). */
+  /** The Host-owned one-shot shell adapter over the authenticated private stream. */
   readonly hostUserShell: HostUserShellPort
+  readonly hostShellCompletion: HostShellCompletionPort
   readonly subagent: SubagentPort
   readonly sessionReader: SessionReader
   readonly pendingInputReader: PendingInputReader
@@ -52,11 +64,36 @@ export interface RemoteBackendParts {
   readonly config: ConfigPort
   readonly hostFile: HostFilePort
   readonly sessionArchive: SessionArchivePort
+  /** The official authenticated Session Markdown read adapter (S5-PR3). */
+  readonly sessionMarkdown: SessionMarkdownPort
   readonly hostCommand: HostCommandPort
   readonly pluginManager: PluginManagerPort
   readonly jobObservation: JobObservationPort
   /** The official generated `workspaceFiles` read adapter (Delivered files PR2). */
   readonly deliveredFileRead: DeliveredFileReadPort
+  /** The private `piTuiWebAccess` control adapter (M5-W PR-C). */
+  readonly webAccess: WebAccessPort
+  /** The private `piTuiAcpAccess` local ACP listener control adapter (PO-1B). */
+  readonly acpAccess: AcpAccessPort
+  /** The Remote read-authority adapter (M5-U-A). */
+  readonly sessionWorkspaceFacts: SessionWorkspaceFactsPort
+  /** The official generated `schedule` namespace adapter (S5-PR4). */
+  readonly schedule: SchedulePort
+  /** The official generated `directoryPicker` read adapter (Session Workspace PR1). */
+  readonly hostDirectoryBrowse: HostDirectoryBrowsePort
+  /** The private `piTuiSessionPolicy` adapter (M6-1 F8): the exact-Session
+   *  approval/sandbox facts and the single approval write, generation-fenced
+   *  and bracketed by the SHARED accepted-write lifetime. */
+  readonly sessionPolicy: SessionPolicyPort
+  /** The official generated `agentTeams` namespace adapter (FR1). */
+  readonly teamMode: TeamModePort
+  /** The official `agentTeam` projection READ-ONLY board adapter (FR2). */
+  readonly teamBoard: TeamBoardReadPort
+  /** The official generated `mcpManager` roster/probe/restart adapter (FR3). */
+  readonly mcpServers: McpServerPort
+  /** The official generated `cuaAccess` permission/application adapter
+   *  (PR-5/MAC-09 v2), generation-fenced on the same Connection. */
+  readonly cuaAccess: CuaAccessPort
 }
 
 /** Assemble the experimental Remote `Backend` from its proven adapters. */

@@ -626,6 +626,7 @@ test('a capture whose PNG the client never wrote FAILS instead of passing silent
 
 /** A flow that finishes immediately; the run's exit code then means what it says. */
 const CHECKED_FLOW = 'export default async function (h) { h.check("the flow ran", true) }\n'
+const LYING_QUALIFICATION_FLOW = 'export default async function (h) { h.check("the native toggle failed", false, "no event"); h.finish({ qualification: "REAL_TERN_INNER_DISCLOSURE_PASS" }) }\n'
 /** A flow that throws: a red run, not a missing one. */
 const THROWING_FLOW = 'export default async function () { throw new Error("the flow failed") }\n'
 
@@ -865,6 +866,16 @@ test('a flow that throws still tears down its helpers before the driver exits', 
   })
   const ledger = JSON.parse(readFileSync(joinPath(out, 'assertions.json'), 'utf8'))
   assert.equal(ledger.failed, 1, 'the throwing flow is a red run, not a missing one')
+})
+
+test('the final GUI evidence ledger retains qualification metadata and rejects a failed assertion', async (t) => {
+  const { out } = await assertFinishedRunTearsDown(t, 'tern-gui-qualification-', {
+    flow: LYING_QUALIFICATION_FLOW,
+    expectedStatus: 1,
+  })
+  const ledger = JSON.parse(readFileSync(joinPath(out, 'assertions.json'), 'utf8'))
+  assert.equal(ledger.failed, 1)
+  assert.equal(ledger.qualification, 'FAILED_ASSERTIONS')
 })
 
 test('a daemon that exits before the flow finishes does not block or leak the teardown', async (t) => {

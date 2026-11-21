@@ -28,10 +28,11 @@
  * @module app/remote-process/client-bootstrap
  */
 
-import { existsSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, readFileSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import { PI_TUI_EXTENSIONS_SERVICE } from '../../extensions.ts'
-import type { RemoteApplicationOverride } from '../application-runtime.ts'
+import type { RemoteApplicationOverride, RemotePromptPresenceCapability } from '../application-runtime.ts'
 import { Config as TuiConfigSchema } from '../config/schema.ts'
 import {
   createRemoteApplicationRuntimeFromClient,
@@ -46,11 +47,14 @@ import { createRemoteClientUiRuntime, type RemoteClientUiRuntime } from '../remo
 import { mergeCause } from '../remote/dispose-cause.ts'
 import type { RemoteBackendFetch } from '../remote/runtime.ts'
 import type { RemotePromptSerializer } from '../../runtime/remote/session-writer-remote.ts'
+import type { HostDirectoryBrowseOutcome } from '../../runtime/host-directory-browse-port.ts'
 import { RemotePromptSerializerProduction } from '../../runtime/remote/prompt-serializer-remote.ts'
 import { runDetached } from '../../runtime/process/tasks.ts'
+import type { CliSessionLaunchIntent } from '../../startup.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import type { LocalInstanceRecord } from './local-discovery.ts'
 import type { LocalClientTransport } from './local-transport.ts'
+import type { ProfileDaemonAdmin } from './local-profile-daemon-admin.ts'
 import type { SplitClientInteractionDeliveryOwner } from './client-interaction-delivery.ts'
 
 export type {
@@ -62,20 +66,33 @@ export type {
 export interface LocalClientStartupFacts {
   readonly sessionId?: string
   readonly presetId?: string
+  /**
+   * The public CLI Session launch intent (M6-2A), forwarded single-path into
+   * the Client-local `tuiStartup` so the existing `bootstrap.ts` runner resolves
+   * browse/lookup/continue against the official Host roster. Mutually exclusive
+   * with `sessionId` (the internal exact channel).
+   */
+  readonly sessionLaunch?: CliSessionLaunchIntent
 }
 
-/** The authenticated Host facts projected into Client status. */
-export interface LocalClientHostFacts {
+/** The authenticated Host facts projected into Client status. The schema
+ *  discriminates the ONE kernel identity material; no field is borrowed from
+ *  the other platform's representation. */
+interface LocalClientHostFactsShared {
+  readonly schema: 1 | 2
   readonly scopeId: string
   readonly instanceId: string
   readonly hostPid: number
-  readonly hostStarttime: string
   readonly origin: string
   readonly protocol: string
   readonly bundleVersion: string
   readonly dshVersion: string
   readonly buildId: string
 }
+
+export type LocalClientHostFacts =
+  | (LocalClientHostFactsShared & { readonly schema: 1; readonly hostStarttime: string })
+  | (LocalClientHostFactsShared & { readonly schema: 2; readonly hostKernelIdentity: import('../../runtime/native-process/identity.ts').DarwinKernelProcessIdentity })
 
 /** A status snapshot built from the official Connection at call time. */
 export interface LocalClientStatus {
@@ -109,7 +126,7 @@ export interface LocalClientStatus {
   readonly fiberOwner: 'client-root'
   readonly rootFiberUid?: number
   readonly extensionService: { readonly present: true }
-  readonly startupFacts: { readonly sessionId?: string; readonly presetId?: string }
+  readonly startupFacts: { readonly sessionId?: string; readonly presetId?: string; readonly sessionLaunch?: CliSessionLaunchIntent }
   readonly host?: LocalClientHostFacts
   readonly generationId?: number
   readonly hostHome?: string
@@ -149,6 +166,13 @@ export interface LocalClientRunnerMountInput {
   readonly config: ReturnType<typeof TuiConfigSchema>
   /** The pre-built Remote selection the runner adopts by identity. */
   readonly override: RemoteApplicationOverride
+  /**
+   * Which physical Surface mount this runner is: the first mount of the OS
+   * Client or a same-process HMR replacement. The compatible-cross-build
+   * notice is projected only from the initial mount; the runner itself owns
+   * no "already shown" latch.
+   */
+  readonly mountKind: 'initial' | 'hmr'
 }
 
 /** The Client composition inputs that are not startup facts. */
@@ -186,6 +210,27 @@ export interface LocalClientComposition {
    * not construct a second Context/transport/Domain/surface.
    */
   readonly mountRunner?: (input: LocalClientRunnerMountInput) => Promise<MountedLocalClientRunner>
+  /**
+   * Split-Client only: the process-owned official Loader and `PluginPackages`
+   * table plus the `file:` URL of this Client module. The Client UI subtree
+   * uses them to mount external PiTui `./tui` packages on the SAME Context.
+   * Never crossed over the wire and never a second Loader/resolver.
+   */
+  readonly clientExtensions?: {
+    readonly loader: import('@deepseek-ai/cordis-plugin-loader').Loader
+    readonly pluginPackages: import('../client-extensions/discovery.ts').CurrentClientPackageLookup
+    readonly parentURL: string
+  }
+  /**
+   * M6 UX PR2: the ONE process-local daemon administration capability built by
+   * the real Client entry from its officially verified Profile facts. It is
+   * only a value borrowed through this composition: the entry owns it, the
+   * mounted runner consumes it (Settings follow-up install and the final exit
+   * root's confirmed whole-Host stop), and an HMR/remount re-borrows the SAME
+   * port instead of constructing a second lifecycle owner. Absent on every
+   * composition that cannot prove the official local Profile identity.
+   */
+  readonly profileDaemonAdmin?: ProfileDaemonAdmin
   /**
    * Surface-mode qualification telemetry: one structured status record on every
    * change of the observable tuple (transport, generation, `tuiMainView`
@@ -239,24 +284,34 @@ export interface LocalClientHandle {
 
 /** Project the authenticated record without the profile path. */
 function hostFacts(record: LocalInstanceRecord): LocalClientHostFacts {
-  return {
+  const shared = {
+    schema: record.schema,
     scopeId: record.scopeId,
     instanceId: record.instanceId,
     hostPid: record.hostPid,
-    hostStarttime: record.hostStarttime,
     origin: record.origin,
     protocol: record.protocol,
     bundleVersion: record.bundleVersion,
     dshVersion: record.dshVersion,
     buildId: record.buildId,
   }
+  return record.schema === 1
+    ? { ...shared, schema: 1, hostStarttime: record.hostStarttime }
+    : { ...shared, schema: 2, hostKernelIdentity: record.hostKernelIdentity }
 }
 
 /** The exact Host startup facts object (never the Host-only readiness seam). */
-function startupFactsOf(startup: LocalClientStartupFacts): { readonly sessionId?: string; readonly presetId?: string } {
+function startupFactsOf(
+  startup: LocalClientStartupFacts,
+  includeLaunch = true,
+): { readonly sessionId?: string; readonly presetId?: string; readonly sessionLaunch?: CliSessionLaunchIntent } {
   return {
     ...(startup.sessionId === undefined ? {} : { sessionId: startup.sessionId }),
     ...(startup.presetId === undefined ? {} : { presetId: startup.presetId }),
+    // The public launch intent is consumed by the FIRST revision only: an HMR
+    // re-mount passes `includeLaunch: false` so an already-resolved lookup / `-c`
+    // never re-runs and cannot open a second Session.
+    ...(includeLaunch && startup.sessionLaunch !== undefined ? { sessionLaunch: startup.sessionLaunch } : {}),
   }
 }
 
@@ -683,6 +738,7 @@ async function startSurfaceLocalClient(
     const privateRemote = domains.remote as unknown as {
       readonly piTuiFileReferences?: unknown
       readonly piTuiTerminalProgress?: unknown
+      readonly piTuiSkills?: unknown
     } | undefined
     return {
       ...base,
@@ -708,7 +764,8 @@ async function startSurfaceLocalClient(
       privateNamespaces: domainsOpen
         && privateRemote?.piTuiFileReferences !== undefined
         && privateRemote.piTuiTerminalProgress !== undefined
-        ? 2
+        && privateRemote.piTuiSkills !== undefined
+        ? 3
         : 0,
     }
   }
@@ -767,10 +824,22 @@ async function startSurfaceLocalClient(
     await waitForAssemblyHold('domain', signal, composition.onQualification)
     signal?.throwIfAborted()
     const revisionStartup = {
-      ...startupFactsOf(startup),
+      ...startupFactsOf(startup, kind === 'initial'),
       ...(sessionIdOverride === undefined ? {} : { sessionId: sessionIdOverride }),
     }
-    revision.ui = await createRemoteClientUiRuntime({ context, startup: revisionStartup })
+    revision.ui = await createRemoteClientUiRuntime({
+      context,
+      startup: revisionStartup,
+      ...(composition.clientExtensions === undefined
+        ? {}
+        : {
+            clientExtensions: {
+              ...composition.clientExtensions,
+              ...(signal === undefined ? {} : { signal }),
+              ...(composition.diag === undefined ? {} : { diag: composition.diag }),
+            },
+          }),
+    })
     composition.onQualification?.({ op: 'startup-stage', stage: 'ui-mounted', revision: revision.id })
     signal?.throwIfAborted()
     // T34 qualification input: hold ONE write between its real serialization
@@ -784,6 +853,10 @@ async function startSurfaceLocalClient(
         preflight: message => production.preflight(message),
         async serialize(message) {
           const serialized = await production.serialize(message)
+          // Qualification observation of the ONE hold point: a lane must know
+          // the write really reached the serializer instead of sleeping on the
+          // keystroke. Test-only — emitted only while the hold is configured.
+          composition.onQualification?.({ op: 'serialize-held', revision: revision.id })
           await waitForQualificationBarrier(holdPath)
           return serialized
         },
@@ -792,6 +865,7 @@ async function startSurfaceLocalClient(
     revision.application = await createRemoteApplicationRuntimeFromClient({
       domains,
       fetch: authenticatedFetch,
+      trustedHostOrigin: host.origin,
       clientUi: revision.ui,
       delivery,
       surfaceRevision: revision.id,
@@ -800,16 +874,92 @@ async function startSurfaceLocalClient(
       ...(promptSerializer === undefined ? {} : { promptSerializer }),
     })
     composition.onQualification?.({ op: 'startup-stage', stage: 'application-ready', revision: revision.id })
+    // The application runtime's official PluginManager/Config ports are live:
+    // activate the external PiTui packages on THIS Client revision before the
+    // runner (and therefore the first physical surface) attaches. A failing
+    // inventory read is logged inside the UI owner and never blocks the
+    // already-composed Client surface.
+    if (composition.clientExtensions !== undefined) {
+      await revision.ui.activateClientExtensions({
+        pluginManager: revision.application.selected.backend.pluginManager,
+        config: revision.application.selected.backend.config,
+      })
+      composition.onQualification?.({ op: 'startup-stage', stage: 'client-extensions-ready', revision: revision.id })
+      // Qualification-only: drive the official PM disable/re-enable path on
+      // the REAL Client revision and record the owner's observations.
+      if (process.env.SPLIT_PROCESS_CLIENT_EXTENSION_LOADER_PROBE === '1') {
+        const { runClientExtensionLoaderProbe } = await import('./client-extension-loader-probe.ts')
+        composition.onQualification?.(await runClientExtensionLoaderProbe({
+          pluginManager: revision.application.selected.backend.pluginManager,
+          ui: revision.ui,
+          pluginPackages: composition.clientExtensions.pluginPackages,
+          parentURL: composition.clientExtensions.parentURL,
+        }))
+      }
+    }
+    // Qualification-only: exercise the per-package extension-config port on
+    // THIS revision's production application. Production never sets the env.
+    if (process.env.SPLIT_PROCESS_CLIENT_EXTENSION_CONFIG_PROBE === '1') {
+      const { runExtensionConfigProbe } = await import('./extension-config-probe.ts')
+      composition.onQualification?.(await runExtensionConfigProbe(revision.application.selected.backend.config))
+    }
+    // Qualification-only: exercise the persisted extension-setting writer on
+    // THIS revision's production ConfigPort with a second real Client. Production
+    // never sets the env.
+    if (process.env.SPLIT_PROCESS_CLIENT_PERSISTED_SETTING_PROBE === '1') {
+      const { runPersistedSettingProbe } = await import('./persisted-setting-probe.ts')
+      composition.onQualification?.(await runPersistedSettingProbe(
+        revision.application.selected.backend.config,
+        () => revision.ui?.clientExtensionObservation() ?? [],
+      ))
+    }
     signal?.throwIfAborted()
     // T59 qualification input: force the NEW revision's UI mount to fail after
     // the old revision was already retired. Production never sets this.
     if (kind === 'hmr' && process.env.SPLIT_PROCESS_CLIENT_HMR_FAIL === '1') {
       throw new Error('local client entry: qualification forced HMR surface mount failure')
     }
+    // M6 PR-C C3: the mounted private session-view presence capability, if the
+    // Host serves it. It crosses the composition seam as the ONE narrow
+    // structural capability (no transport, no Cookie, no extra Remote mount —
+    // the descriptor rides the existing single `PI_TUI_CLIENT_CONTRIBUTION`).
+    const promptPresence = (domains.remote as unknown as {
+      readonly piTuiPromptPresence?: RemotePromptPresenceCapability
+    } | undefined)?.piTuiPromptPresence
     const override: RemoteApplicationOverride = {
       selected: revision.application.selected,
       presentation: revision.application.presentation,
       extensionService: revision.application.extensionService,
+      // Client-local only: the Plugin Manager controller's committed inventory
+      // callback lands on THIS revision's live mount owner. A superseded or
+      // disposed revision is ignored instead of publishing stale state.
+      ...(composition.clientExtensions === undefined
+        ? {}
+        : {
+            reconcilePluginInventory: async snapshot => {
+              if (currentRevision !== revision) return
+              await revision.ui?.reconcileClientExtensions(snapshot)
+            },
+            clientExtensionObservationSource: () => currentRevision === revision
+              ? revision.ui?.clientExtensionObservationSource()
+              : undefined,
+          }),
+      // The SAME root delivery owner the revision's Remote interaction adapter
+      // attaches its two providers to. The runner binds the application's ONE
+      // committed-Session authority to it and the modal-safe navigation entry
+      // opens the existing Sessions Workspace through it.
+      interactionDelivery: delivery,
+      ...(promptPresence === undefined ? {} : { promptPresence }),
+      // M6 UX PR2: the SAME process-local daemon administration capability the
+      // Client entry built; every surface revision re-borrows the SAME value.
+      ...(composition.profileDaemonAdmin === undefined
+        ? {}
+        : { profileDaemonAdmin: composition.profileDaemonAdmin }),
+      // M6 UX PR2 (F3): the SAME B1 transport the Client root owns. The exit
+      // root releases it only on the explicit whole-Host Stop path.
+      ...(composition.transport === undefined
+        ? {}
+        : { releaseTransport: () => composition.transport!.dispose() }),
     }
     // Schema defaults + the explicit Client-local startup facts. No fabricated
     // profile document: a preference's absence resolves to its schema default.
@@ -818,7 +968,7 @@ async function startSurfaceLocalClient(
       ...(activeSessionId === undefined ? {} : { sessionId: activeSessionId }),
     } as never)
     signal?.throwIfAborted()
-    revision.runner = await mountRunner({ context, config, override })
+    revision.runner = await mountRunner({ context, config, override, mountKind: kind })
     composition.onQualification?.({ op: 'startup-stage', stage: 'runner-fiber-mounted', revision: revision.id })
     // T59 mid-HMR hold: a replacement-only barrier between the new runner
     // fiber mount and its physical surface readiness. Production never sets it.
@@ -843,6 +993,18 @@ async function startSurfaceLocalClient(
     } finally {
       abortReady.cancel()
     }
+    // Qualification-only: drive the REAL notification seam after the surface
+    // is physically ready. Production never sets this env.
+    if (process.env.SPLIT_PROCESS_CLIENT_EXTENSION_LOADER_NOTICE_PROBE === '1'
+      && composition.clientExtensions !== undefined) {
+      const { runClientExtensionReloadNoticeProbe } = await import('./client-extension-loader-probe.ts')
+      composition.onQualification?.(await runClientExtensionReloadNoticeProbe({
+        pluginManager: revision.application.selected.backend.pluginManager,
+        ui: revision.ui,
+        pluginPackages: composition.clientExtensions.pluginPackages,
+        parentURL: composition.clientExtensions.parentURL,
+      }))
+    }
     composition.onQualification?.({ op: 'startup-stage', stage: 'surface-ready', revision: revision.id })
     revision.surfaceMounted = true
     subscribeRevisionStatus(revision)
@@ -852,26 +1014,37 @@ async function startSurfaceLocalClient(
 
   /** Reverse-dispose exactly one revision: runner -> UI -> application adapters. */
   const disposeRevision = async (revision: SurfaceRevision): Promise<void> => {
+    const startedAt = performance.now()
+    const stage = (name: string, stageStartedAt: number): void => {
+      composition.onQualification?.({ op: 'dispose-stage', stage: `revision-${name}`, revision: revision.id, durationMs: Math.round((performance.now() - stageStartedAt) * 10) / 10 })
+    }
     revision.surfaceMounted = false
     emitStatus()
     revision.statusCleanup?.()
     revision.statusCleanup = undefined
     const errors: unknown[] = []
     if (revision.runner !== undefined) {
+      const runnerAt = performance.now()
       try { await revision.runner.dispose() } catch (error) { errors.push(error) }
+      stage('runner', runnerAt)
     }
     if (revision.ui !== undefined) {
+      const uiAt = performance.now()
       try { await revision.ui.dispose() } catch (error) { errors.push(error) }
+      stage('ui', uiAt)
     }
     // The runner may already have released the selected adapters; this is the
     // SAME memoized release. When the runner never mounted, this is the first
     // release. The root Domain graph and B1 transport stay root-owned.
     if (revision.application !== undefined) {
+      const adaptersAt = performance.now()
       try { await revision.application.selected.disposeTransport() } catch (error) { errors.push(error) }
+      stage('adapters', adaptersAt)
     }
     revision.runner = undefined
     revision.ui = undefined
     revision.application = undefined
+    composition.onQualification?.({ op: 'dispose-stage', stage: 'revision-total', revision: revision.id, durationMs: Math.round((performance.now() - startedAt) * 10) / 10 })
     throwDisposalErrors(errors, 'local client surface revision')
   }
 
@@ -907,7 +1080,36 @@ async function startSurfaceLocalClient(
           }
         }
         const sessionId = String(target)
-        const file = await remote.piTuiFileReferences.list(sessionId, 'notes')
+        // The private Host workspace semantics, driven through the ONE
+        // authenticated Client contribution (never a shadow RPC/scanner):
+        //   bare     -> the official provider's order
+        //   empty    -> an authoritative official [] stays empty
+        //   scoped   -> the Host scanner for an explicit path scope
+        //   home     -> ABSOLUTE Host paths
+        type FileListAnswer = { readonly ok: boolean; readonly value?: { readonly kind?: unknown, readonly items?: readonly { readonly path?: unknown }[] } }
+        /**
+         * A business `ok` answer with a REAL array, or `undefined` for anything
+         * else. A transport success whose business result is `unavailable` or an
+         * error must never be read as "the authority answered with an empty
+         * list": that is exactly the false-green this probe has to exclude.
+         */
+        const answerItems = (answer: FileListAnswer): readonly { readonly path?: unknown }[] | undefined =>
+          answer.ok && answer.value?.kind === 'ok' && Array.isArray(answer.value.items)
+            ? answer.value.items
+            : undefined
+        const file = await remote.piTuiFileReferences.list(sessionId, 't36notes')
+        const bareItems = answerItems(file) ?? []
+        const empty = await remote.piTuiFileReferences.list(sessionId, 't36-definitely-no-such-name')
+        const emptyItems = answerItems(empty)
+        // The retired built-bundle smoke's discriminator, migrated: the OFFICIAL
+        // provider excludes `dist`, so the SAME file the scoped route finds must be
+        // invisible to the official bare route.
+        const officialExcludesDist = await remote.piTuiFileReferences.list(sessionId, 't36only')
+        const officialExcludesDistItems = answerItems(officialExcludesDist)
+        const scoped = await remote.piTuiFileReferences.list(sessionId, 'dist/t36only')
+        const scopedItems = answerItems(scoped) ?? []
+        const homeQuery = await remote.piTuiFileReferences.list(sessionId, '~/')
+        const homeItems = answerItems(homeQuery) ?? []
         const watch = remote.piTuiTerminalProgress.watch(sessionId)
         const iterator = watch[Symbol.asyncIterator]()
         let terminalKind: unknown
@@ -917,16 +1119,472 @@ async function startSurfaceLocalClient(
         } finally {
           watch.dispose()
         }
+        // WS-2: the SAME official Client Domain reads the Host Workspace
+        // authority (its baseline) and the Host's own Workspace file read. The
+        // record carries bounded facts only: digests, counts and predicates —
+        // never a raw path.
+        const digest = (value: unknown): string =>
+          createHash('sha256').update(String(value)).digest('hex').slice(0, 16)
+        const wsRemote = currentDomains.remote as unknown as {
+          readonly workspace?: {
+            follow(signal?: AbortSignal): AsyncIterable<{
+              readonly type: string
+              readonly value?: {
+                readonly items?: readonly {
+                  readonly workspaceId?: unknown
+                  readonly path?: unknown
+                  readonly sessionIds?: readonly unknown[]
+                }[]
+              }
+            }> & { dispose(): void }
+          }
+          readonly workspaceFiles?: {
+            read(
+              sessionId: string,
+              path: string,
+              range: { readonly offset?: number; readonly limit?: number },
+            ): Promise<{ readonly ok: boolean; readonly value?: { readonly text?: unknown } }>
+          }
+        }
+        let workspaceCount = 0
+        let workspacePathDigest: string | undefined
+        let workspaceMatchesClientCwd = false
+        let workspaceSessionDigests: string[] = []
+        let workspaceRows: { readonly pathDigest: string; readonly sessionDigests: string[] }[] = []
+        if (wsRemote.workspace !== undefined) {
+          const stream = wsRemote.workspace.follow()
+          try {
+            for await (const frame of stream) {
+              if (frame.type !== 'baseline') break
+              const items = frame.value?.items ?? []
+              workspaceCount = items.length
+              // Bounded per-Workspace facts (digests only): a multi-Client
+              // proof needs to see that each Session stayed in ITS Workspace.
+              workspaceRows = items.map(item => ({
+                pathDigest: digest(item.path),
+                sessionDigests: (item.sessionIds ?? []).map(digest),
+              }))
+              const member = items.find(item =>
+                Array.isArray(item.sessionIds) && item.sessionIds.map(String).includes(sessionId))
+              if (member !== undefined) {
+                workspacePathDigest = digest(member.path)
+                // The Client's launch directory reaching the Host canonical
+                // Workspace path is the whole intent→authority chain.
+                workspaceMatchesClientCwd = member.path === process.cwd()
+                workspaceSessionDigests = (member.sessionIds ?? []).map(digest)
+              }
+              break
+            }
+          } finally {
+            stream.dispose()
+          }
+        }
+        // The Host's OWN read: a relative path resolved from the durable header
+        // cwd (the Workspace). A different Workspace must not answer it.
+        let workspaceMarkerText: unknown
+        if (wsRemote.workspaceFiles !== undefined) {
+          const marker = await wsRemote.workspaceFiles.read(sessionId, 'ws2-host-marker.txt', {})
+            .catch(() => ({ ok: false as const }))
+          workspaceMarkerText = marker.ok ? marker.value?.text : undefined
+        }
+        const listRows = currentDomains.sessions.list.getSnapshot().byId as unknown as
+          Readonly<Record<string, { readonly cwd?: string } | undefined>>
+        const listRow = listRows[sessionId]
         composition.onQualification?.({
           op: 'private-rpc-proof',
           sessionId,
           fileOk: file.ok === true,
           fileKind: file.ok ? file.value?.kind : undefined,
+          // Bounded facts only: counts and fixed predicates, never paths or
+          // user text.
+          bareOfficial: bareItems.some(item => item.path === 't36notes.md'),
+          bareCount: bareItems.length,
+          // BOTH halves must be a real `ok` answer with a real array: a business
+          // error or `unavailable` is not an empty authoritative result.
+          // Bounded diagnostics: the business kind and the ok flag make a future
+          // failure decidable without another run (never paths or user text).
+          emptyOk: empty.ok === true,
+          emptyKind: empty.ok ? empty.value?.kind : undefined,
+          officialEmpty: emptyItems !== undefined && emptyItems.length === 0,
+          officialExcludesDist: officialExcludesDistItems !== undefined
+            && officialExcludesDistItems.length === 0,
+          officialExcludesDistKind: officialExcludesDist.ok ? officialExcludesDist.value?.kind : undefined,
+          scopedOk: scoped.ok === true && answerItems(scoped) !== undefined,
+          // The scoped route materializes the candidate against the resolved
+          // display base, so the accepted value may be scope-relative
+          // (`dist/x`) or base-anchored (`/abs/.../dist/x`). The SINK is the file
+          // the Host scanner reached, expressed by its path suffix.
+          scopedHostScanner: scopedItems.some(item =>
+            typeof item.path === 'string'
+            && (item.path === 'dist/t36only-scoped.js' || item.path.endsWith('/dist/t36only-scoped.js'))),
+          scopedCount: scopedItems.length,
+          homeAbsolute: homeQuery.ok === true
+            && homeItems.length > 0
+            && homeItems.every(item => typeof item.path === 'string' && item.path.startsWith('/'))
+            && homeItems.some(item => typeof item.path === 'string' && item.path.endsWith('/t36home-note.md')),
           terminalKind,
+          // WS-2 Host Workspace facts (bounded): the active Session's Workspace
+          // path digest, its full membership digests, whether the Client launch
+          // directory IS that Host path, the Host list-row cwd digest (the
+          // durable header fact) and the marker text the HOST read.
+          workspaceCount,
+          workspacePathDigest,
+          workspaceMatchesClientCwd,
+          workspaceSessionDigests,
+          workspaceRows,
+          workspaceListCwdDigest: listRow?.cwd === undefined ? undefined : digest(listRow.cwd),
+          workspaceMarkerText,
           owners: status().owners,
           privateNamespaces: status().privateNamespaces,
         })
       }, { diag })
+    })
+  }
+  // M5-U-A qualification input: exercise the ONE read-authority Backend port
+  // (`SessionWorkspaceFactsPort`) in the REAL Client composition against the
+  // REAL Host. The request is a small JSON operation file under the isolated
+  // qualification work root (never a product input); the result is one
+  // structured telemetry record. This is an observation seam, not a second
+  // read implementation: every fact comes from the mounted Backend port.
+  const readAuthorityRequestPath = process.env.SPLIT_PROCESS_CLIENT_READ_AUTHORITY_PROOF
+  if (readAuthorityRequestPath !== undefined && readAuthorityRequestPath !== '') {
+    const readAuthorityDiag = composition.diag
+    if (readAuthorityDiag === undefined) {
+      throw new Error('local client entry: the read-authority qualification requires the Client diagnostics sink')
+    }
+    process.on('SIGUSR2', () => {
+      // Each SIGUSR2 opens ONE owned detached task: a throwing telemetry sink
+      // or probe body is classified by the failure model instead of becoming an
+      // unhandled rejection. The request file is read synchronously at the task
+      // start, so overlapping triggers stay nonce-correlated (no serialization
+      // is claimed: an overlapping read is a distinct sample, not a queued one).
+      runDetached('read-authority qualification probe', async () => {
+        /** Echoes the caller's correlation nonce on every record of ONE op. */
+        let nonce: unknown
+        const emit = (record: Record<string, unknown>): void => {
+          composition.onQualification?.({
+            op: 'read-authority-proof',
+            ...(nonce === undefined ? {} : { nonce }),
+            ...record,
+          })
+        }
+        try {
+          const request = JSON.parse(readFileSync(readAuthorityRequestPath, 'utf8')) as {
+            readonly nonce?: unknown
+            readonly op?: unknown
+            readonly sessionId?: unknown
+            readonly callId?: unknown
+            readonly answers?: unknown
+            readonly windowMs?: unknown
+            readonly maxFrames?: unknown
+            readonly path?: unknown
+            readonly abort?: unknown
+            readonly namespace?: unknown
+          }
+          nonce = request.nonce
+          const backend = currentRevision?.application?.selected.backend
+          if (backend === undefined) throw new Error('read-authority probe: no mounted surface revision')
+          /** The REAL generated Client `settings` namespace (the same face the
+           *  ConfigPort mirror consumes), as the qualification probes address it. */
+          const officialSettingsFace = (): {
+            describe(): Promise<{
+              readonly ok: boolean
+              readonly value?: { readonly namespaces?: readonly { readonly ns?: unknown; readonly revision?: unknown }[] }
+            }>
+            mutate(
+              ns: string,
+              ops: readonly { readonly op: 'set'; readonly path: readonly string[]; readonly value: unknown }[],
+              expectedRevision: number | undefined,
+            ): Promise<{ readonly ok: boolean; readonly error?: { readonly code?: unknown; readonly message?: unknown } }>
+          } | undefined => (domains.remote as unknown as {
+            readonly settings?: {
+              describe(): Promise<{
+                readonly ok: boolean
+                readonly value?: { readonly namespaces?: readonly { readonly ns?: unknown; readonly revision?: unknown }[] }
+              }>
+              mutate(
+                ns: string,
+                ops: readonly { readonly op: 'set'; readonly path: readonly string[]; readonly value: unknown }[],
+                expectedRevision: number | undefined,
+              ): Promise<{ readonly ok: boolean; readonly error?: { readonly code?: unknown; readonly message?: unknown } }>
+            }
+          }).settings
+          if (request.op === 'read') {
+            const rows = await backend.sessionReader.list(undefined)
+            if (rows === undefined) throw new Error('read-authority probe: the Host Session list is unavailable')
+            const facts = await backend.sessionWorkspaceFacts.readActivity(rows)
+            const current = status()
+            const listedIds = domains.sessions.list.getSnapshot().ids
+            /** The official listed identity of one plain id (never a re-mint). */
+            const officialIdOf = (id: unknown): (typeof listedIds)[number] | undefined =>
+              listedIds.find(listedId => String(listedId) === String(id))
+            emit({
+              phase: 'facts',
+              openSessionId: current.openSessionId ?? null,
+              sessionOpen: current.sessionOpen,
+              generationId: current.generationId,
+              rows: rows.map(row => ({
+                id: row.id,
+                live: row.live,
+                ...(row.origin === undefined ? {} : { origin: row.origin }),
+                // The official `tuiMainView`/child reference counts: a read must
+                // never be satisfied by retaining the Session it reports on.
+                retainedBy: (() => {
+                  const listedId = officialIdOf(row.id)
+                  return listedId === undefined
+                    ? undefined
+                    : domains.sessions.retainInfo(listedId).getSnapshot().retainedBy
+                })(),
+              })),
+              facts: facts.map(fact => ({
+                sessionId: fact.sessionId,
+                running: fact.running,
+                pendingKinds: fact.pendingKinds,
+                continuedQuestionCallIds: fact.continuedQuestionCallIds,
+                attention: fact.attention,
+                attentionSourceState: fact.attentionSourceState,
+              })),
+            })
+            return
+          }
+          if (request.op === 'workspaces') {
+            const handle = backend.sessionWorkspaceFacts.followWorkspaces()
+            const windowMs = typeof request.windowMs === 'number' ? request.windowMs : 30_000
+            const maxFrames = typeof request.maxFrames === 'number' ? request.maxFrames : Number.POSITIVE_INFINITY
+            const deadline = setTimeout(() => { handle.dispose() }, windowMs)
+            emit({ phase: 'workspaces-open', windowMs, maxFrames })
+            try {
+              let frames = 0
+              for await (const frame of handle) {
+                frames += 1
+                switch (frame.type) {
+                  case 'baseline':
+                  case 'replace':
+                    emit({ phase: 'workspaces-frame', type: frame.type, items: frame.items })
+                    break
+                  case 'upsert':
+                    emit({ phase: 'workspaces-frame', type: frame.type, workspace: frame.workspace })
+                    break
+                  case 'remove':
+                    emit({ phase: 'workspaces-frame', type: frame.type, workspaceId: frame.workspaceId })
+                    break
+                  case 'order':
+                    emit({ phase: 'workspaces-frame', type: frame.type, workspaceIds: frame.workspaceIds })
+                    break
+                }
+                if (frames >= maxFrames) break
+              }
+              emit({ phase: 'workspaces-ended' })
+            } finally {
+              clearTimeout(deadline)
+              handle.dispose()
+            }
+            return
+          }
+          if (request.op === 'directory-browse') {
+            // Session Workspace PR1: exercise the mounted Backend's read-only
+            // `HostDirectoryBrowsePort` in the REAL Client composition against
+            // the REAL Host. Three modes share ONE dispatch: an ordinary read,
+            // a caller abort raised right after dispatch, and a physical mux
+            // drop raised while the read is in flight. Every emitted fact comes
+            // from the production port (never a raw namespace shortcut).
+            const path = typeof request.path === 'string' ? request.path : undefined
+            const mode = request.abort === true
+              ? 'abort-after-dispatch'
+              : request.abort === 'drop' ? 'drop-during-read' : 'read'
+            const controller = new AbortController()
+            const listing = (outcome: HostDirectoryBrowseOutcome): Record<string, unknown> =>
+              outcome.kind === 'ready'
+                ? {
+                    kind: outcome.kind,
+                    path: outcome.listing.path,
+                    home: outcome.listing.home,
+                    crumbs: outcome.listing.crumbs.map(crumb => ({ path: crumb.path, hidden: crumb.hidden })),
+                    entries: outcome.listing.entries.map(entry => ({
+                      name: entry.name,
+                      path: entry.path,
+                      hidden: entry.hidden,
+                    })),
+                    truncated: outcome.listing.truncated,
+                  }
+                : { kind: outcome.kind, reason: outcome.reason, ...(outcome.code === undefined ? {} : { code: outcome.code }) }
+            const record = (outcome: HostDirectoryBrowseOutcome, generationAtDispatch: number | null): void => {
+              const current = status()
+              emit({
+                phase: 'directory-browse',
+                mode,
+                outcome: listing(outcome),
+                // The real Connection generation at dispatch and at delivery:
+                // a ready listing whose delivery generation differs from its
+                // dispatch generation is a stale-generation delivery.
+                generationAtDispatch,
+                generationAtDelivery: current.generationId ?? null,
+                sessionOpen: current.sessionOpen,
+                openSessionId: current.openSessionId ?? null,
+                listedSessions: domains.sessions.list.getSnapshot().ids.length,
+              })
+            }
+            const rejected = (error: unknown, generationAtDispatch: number | null): void => {
+              emit({
+                phase: 'directory-browse-rejected',
+                mode,
+                rejected: true,
+                generationAtDispatch,
+                generationAtDelivery: status().generationId ?? null,
+                errorName: error instanceof Error ? error.name : typeof error,
+              })
+            }
+            if (request.abort === true) {
+              const generationAtDispatch = status().generationId ?? null
+              const pending = backend.hostDirectoryBrowse.list(path, controller.signal)
+              controller.abort()
+              try {
+                record(await pending, generationAtDispatch)
+              } catch (error) {
+                rejected(error, generationAtDispatch)
+              }
+              return
+            }
+            if (request.abort === 'drop') {
+              // The carrier drop is dispatched SYNCHRONOUSLY after the read
+              // is created: the RPC response cannot have been delivered in the
+              // same task, so this read is provably in flight when the mux
+              // socket is dropped.
+              const generationAtDispatch = status().generationId ?? null
+              const pending = backend.hostDirectoryBrowse.list(path, controller.signal)
+              composition.transport?.dropWebSocketsForQualification()
+              try {
+                record(await pending, generationAtDispatch)
+              } catch (error) {
+                rejected(error, generationAtDispatch)
+              }
+              return
+            }
+            const generationAtDispatch = status().generationId ?? null
+            record(await backend.hostDirectoryBrowse.list(path, controller.signal), generationAtDispatch)
+            return
+          }
+          if (request.op === 'answer-continued') {
+            if (typeof request.sessionId !== 'string' || typeof request.callId !== 'string') {
+              throw new Error('read-authority probe: answer-continued requires sessionId and callId')
+            }
+            const outcome = await backend.interaction.questions.answerContinued(
+              request.sessionId,
+              request.callId,
+              request.answers as Parameters<typeof backend.interaction.questions.answerContinued>[2],
+            )
+            emit({ phase: 'continued-answer', sessionId: request.sessionId, callId: request.callId, outcome })
+            return
+          }
+          if (request.op === 'settings-stale-cas') {
+            // L5 official Settings CAS proof through the REAL generated Client
+            // `settings` namespace (the SAME face the ConfigPort mirror uses).
+            // This is the ONLY deterministic stale-revision witness: the TUI /
+            // ConfigPort always fresh-reads before dispatch, so a single Client
+            // can never SEND a stale revision. Two literal mutations against the
+            // one revision `describe()` returned prove the Host accepted the
+            // first and rejected the second with the official conflict.
+            const settings = officialSettingsFace()
+            if (settings === undefined) throw new Error('settings-stale-cas probe: the official settings namespace is not mounted')
+            const ns = typeof request.namespace === 'string' ? request.namespace : 'web-deepseek-api'
+            const described = await settings.describe()
+            if (described.ok !== true) throw new Error('settings-stale-cas probe: settings.describe failed')
+            const view = described.value?.namespaces?.find(entry => entry.ns === ns)
+            if (typeof view?.revision !== 'number') throw new Error(`settings-stale-cas probe: no revision for ${ns}`)
+            const expectedRevision = view.revision
+            const first = await settings.mutate(ns, [{ op: 'set', path: ['count'], value: 11 }], expectedRevision)
+            const second = await settings.mutate(ns, [{ op: 'set', path: ['count'], value: 12 }], expectedRevision)
+            emit({
+              phase: 'settings-stale-cas',
+              namespace: ns,
+              expectedRevision,
+              firstOk: first.ok === true,
+              secondOk: second.ok === true,
+              secondCode: second.ok === true ? undefined : String(second.error?.code ?? ''),
+              secondMessage: second.ok === true ? undefined : String(second.error?.message ?? ''),
+            })
+            return
+          }
+          if (request.op === 'settings-negative-writes') {
+            // L5 real-path negative controls for the Web provider Settings: the
+            // MOUNTED Remote ConfigPort must refuse an invalid provider id / an
+            // out-of-range count BEFORE any Host dispatch, and must refuse to
+            // replace a CUSTOM provider route. The custom route itself is seeded
+            // through the real official `settings` namespace (the same write path
+            // the Host serves); when that schema refuses the custom value the
+            // probe records the official refusal instead of claiming the guard.
+            const web = backend.config.web
+            const attempts: { readonly attempt: string; readonly rejected: boolean; readonly message?: string }[] = []
+            const attempt = async (label: string, operation: () => Promise<void>): Promise<void> => {
+              try {
+                await operation()
+                attempts.push({ attempt: label, rejected: false })
+              } catch (error) {
+                attempts.push({
+                  attempt: label,
+                  rejected: true,
+                  message: error instanceof Error ? error.message : String(error),
+                })
+              }
+            }
+            {
+              await attempt('invalid-search-provider', () => web.setSearchProvider('legacy-custom-search' as never))
+              await attempt('invalid-fetch-provider', () => web.setFetchProvider('legacy-custom-fetch' as never))
+              await attempt('count-zero', () => web.setSearchApiCount(0))
+              await attempt('count-51', () => web.setSearchApiCount(51))
+            }
+            const settings = officialSettingsFace()
+            let customRouteSeeded = false
+            let customRouteSeedMessage: string | undefined
+            let customRouteRefusal: { readonly rejected: boolean; readonly message?: string } | undefined
+            if (settings !== undefined) {
+              const seed = await settings.mutate('web', [{ op: 'set', path: ['fetchProvider'], value: 'legacy-custom-fetch' }], undefined)
+              customRouteSeeded = seed.ok === true
+              if (!seed.ok) customRouteSeedMessage = String(seed.error?.message ?? '')
+              if (customRouteSeeded) {
+                // Wait until the mounted port's own authoritative read sees the
+                // custom value, or the guard would be probed against the old one.
+                let visible = false
+                for (let attempt = 0; attempt < 40; attempt += 1) {
+                  const facts = await web.read()
+                  visible = facts?.fetchProvider === 'legacy-custom-fetch'
+                  if (visible) break
+                  await new Promise(resolve => setTimeout(resolve, 50))
+                }
+                if (visible) {
+                  try {
+                    await web.setFetchProvider('http')
+                    customRouteRefusal = { rejected: false }
+                  } catch (error) {
+                    customRouteRefusal = { rejected: true, message: error instanceof Error ? error.message : String(error) }
+                  }
+                } else {
+                  customRouteRefusal = { rejected: false, message: 'the mounted port never observed the seeded custom route' }
+                }
+                await settings.mutate('web', [{ op: 'set', path: ['fetchProvider'], value: 'http' }], undefined)
+                await web.read()
+              }
+            }
+            emit({
+              phase: 'settings-negative-writes',
+              attempts,
+              customRouteSeeded,
+              ...(customRouteSeedMessage === undefined ? {} : { customRouteSeedMessage }),
+              ...(customRouteRefusal === undefined ? {} : { customRouteRefusal }),
+            })
+            return
+          }
+          throw new Error(`read-authority probe: unsupported op ${JSON.stringify(request.op)}`)
+        } catch (error) {
+          emit({
+            phase: 'failed',
+            error: error instanceof Error ? error.message : String(error),
+            ...(typeof error === 'object' && error !== null && typeof (error as { code?: unknown }).code === 'string'
+              ? { errorCode: (error as { code: string }).code }
+              : {}),
+          })
+        }
+      }, { diag: readAuthorityDiag })
     })
   }
   // T34 qualification input: close the writer's pre-dispatch admission while
@@ -1019,10 +1677,16 @@ async function startSurfaceLocalClient(
     async dispose(): Promise<void> {
       if (disposed) return
       disposed = true
+      const startedAt = performance.now()
+      const stage = (name: string, stageStartedAt: number): void => {
+        composition.onQualification?.({ op: 'dispose-stage', stage: name, durationMs: Math.round((performance.now() - stageStartedAt) * 10) / 10 })
+      }
       // Stop is the ONE outer coordinator: it first aborts the in-flight
       // revision through `signal`, then waits for that revision task before
       // releasing the Context. Never release the root underneath a mount.
+      const drainAt = performance.now()
       await revisionTasks.drain()
+      stage('revision-drain', drainAt)
       const errors: unknown[] = []
       const revision = currentRevision
       currentRevision = undefined
@@ -1036,9 +1700,16 @@ async function startSurfaceLocalClient(
       // Stop the official Gateway/Connection BEFORE the Session Client goes
       // away: while the pump is live its Agent resolver must stay mounted; the
       // transport disposal is what aborts any remaining delivery task.
+      const transportAt = performance.now()
       try { await transport.dispose() } catch (error) { errors.push(error) }
+      stage('transport-dispose', transportAt)
+      const domainsAt = performance.now()
       try { await domains.dispose() } catch (error) { errors.push(error) }
+      stage('domains-dispose', domainsAt)
+      const rootAt = performance.now()
       try { await context.fiber.dispose() } catch (error) { errors.push(error) }
+      stage('root-dispose', rootAt)
+      stage('total', startedAt)
       throwDisposalErrors(errors, 'local client surface')
     },
   }

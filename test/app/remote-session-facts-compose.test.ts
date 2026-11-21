@@ -254,7 +254,7 @@ test('a present Host projection renders its measured zero; a sample-less scope s
 // `recent-performance-availability.test.ts`), not here.
 
 test('lastAssistantText: Remote keeps the official marker bytes (no Direct display-copy rewrite)', async () => {
-  const ref = `sv1_${'a'.repeat(20)}`
+  const ref = `sv2_${'a'.repeat(20)}`
   const body = `Before.\n\n[dsh-visual-${ref}]: <#>\n\nAfter.`
   const window: PresentationReadSnapshot = {
     sessionId: 's',

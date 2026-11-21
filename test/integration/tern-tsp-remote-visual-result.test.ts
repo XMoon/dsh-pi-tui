@@ -131,7 +131,10 @@ test('a Remote chart result crosses the wire and paints the same ordered values'
       unit: 'ms',
       series: [{ label: 'p50', value: 42 }, { label: 'p99', value: 70 }],
     }
-    appendTool(await sessionOf(host), 'remote-chart-1', 'dsh_pi_tui_chart', args, chartContentBlocks(chartFactFromArgs(args)))
+    await appendTool(await sessionOf(host), 'remote-chart-1', 'dsh_pi_tui_chart', args, chartContentBlocks(chartFactFromArgs(args)))
+    await waitFor('the Remote chart Tool node to materialize before disclosure', () =>
+      wireNodes(pane.frames()).some(node => node.k === 'tool'), 30_000)
+    expandToolCards({ pane })
     await waitFor('the Remote pane carries the native chart node', () =>
       wireNodes(pane.frames()).some(node => node.k === 'chart'), 30_000)
     const nodes = wireNodes(pane.frames())

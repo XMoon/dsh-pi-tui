@@ -11,26 +11,26 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { imageProtocolPreference } from '../../src/tui/graphics/image-protocol-preference.ts'
 
-test('P01: unset, empty and auto all normalize to auto', () => {
+test('unset, empty and auto all normalize to auto', () => {
   assert.equal(imageProtocolPreference({}), 'auto')
   assert.equal(imageProtocolPreference({ PI_IMAGE_PROTOCOL: '' }), 'auto')
   assert.equal(imageProtocolPreference({ PI_IMAGE_PROTOCOL: 'auto' }), 'auto')
 })
 
-test('P02: case and surrounding whitespace are normalized', () => {
+test('case and surrounding whitespace are normalized', () => {
   assert.equal(imageProtocolPreference({ PI_IMAGE_PROTOCOL: 'KiTtY' }), 'kitty')
   assert.equal(imageProtocolPreference({ PI_IMAGE_PROTOCOL: ' sixel ' }), 'sixel')
   assert.equal(imageProtocolPreference({ PI_IMAGE_PROTOCOL: '\tITERM2\n' }), 'iterm2')
   assert.equal(imageProtocolPreference({ PI_IMAGE_PROTOCOL: ' Auto ' }), 'auto')
 })
 
-test('P03: none and 0 are the same hard off', () => {
+test('none and 0 are the same hard off', () => {
   assert.equal(imageProtocolPreference({ PI_IMAGE_PROTOCOL: 'none' }), 'none')
   assert.equal(imageProtocolPreference({ PI_IMAGE_PROTOCOL: '0' }), 'none')
   assert.equal(imageProtocolPreference({ PI_IMAGE_PROTOCOL: ' NONE ' }), 'none')
 })
 
-test('P04: every unknown value throws a concrete configuration error, never auto', () => {
+test('every unknown value throws a concrete configuration error, never auto', () => {
   for (const value of ['off', 'true', '1', 'sixelx']) {
     assert.throws(
       () => imageProtocolPreference({ PI_IMAGE_PROTOCOL: value }),
@@ -46,7 +46,7 @@ test('P04: every unknown value throws a concrete configuration error, never auto
   }
 })
 
-test('P05: only PI_IMAGE_PROTOCOL is read; the parser is pure and uncached', () => {
+test('only PI_IMAGE_PROTOCOL is read; the parser is pure and uncached', () => {
   assert.equal(imageProtocolPreference({ PI_FORCE_IMAGE_PROTOCOL: 'sixel' }), 'auto')
   assert.equal(
     imageProtocolPreference({ PI_IMAGE_PROTOCOL: 'kitty', PI_FORCE_IMAGE_PROTOCOL: 'sixel' }),

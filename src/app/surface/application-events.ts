@@ -58,6 +58,7 @@ import { viewerCanonicalizeScope } from './viewer-submission.ts'
 import type { SubagentPromptOutcome, SubagentViewerSubmitRequest } from '../../runtime/subagent-port.ts'
 import type { SessionForkOutcome } from '../session/runtime.ts'
 import type { SubmissionController } from '../submission/controller.ts'
+import type { PastedImageIntakeOwner } from './pasted-image-intake.ts'
 import type { SubmissionComposerPort } from '../submission/composer-port.ts'
 import type { ClientActions } from './client-actions.ts'
 import type { SettingsRuntime } from './settings-runtime.ts'
@@ -171,6 +172,11 @@ export interface ApplicationEventsOwner {
 export interface ApplicationEventsDeps {
   /** A5b-4: the user-input workflow owner. */
   readonly submission: SubmissionController
+  /** PR-Q: the application-level queued-message manager opener. The events
+   *  owner carries only the entry; the manager owns every read and write. */
+  readonly queueManager: {
+    open(options?: { readonly initialItemId?: string }): void
+  }
   /** A5b-1: the interactive subagent viewer owner. */
   readonly viewer: ApplicationEventsViewer
   /** The mounted surface owner (app + focus/input reports + task browser). */
@@ -186,6 +192,9 @@ export interface ApplicationEventsDeps {
     readonly images: DraftImageStore
     readonly files: DraftFileStore
   }
+  /** The ONE intake owner of a terminal bracketed pasted image file path
+   *  (the real paste entry, distinct from the Ctrl+V clipboard entry). */
+  readonly pastedImageIntake: PastedImageIntakeOwner
   /** The deployment image policy (the Host attachments service `imageLimits`),
    *  re-read per paste. Direct only: on Remote this is `undefined`, so the
    *  paste intake uses the Client's own caps and the exact Session's official
@@ -452,14 +461,31 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
     // chord, or the explicit queue action) rides along — the boundary resolves
     // its delivery mode.
     onSubmit: (text, request, scopeToken) => deps.submission.submit(text, request, scopeToken),
+    // PR2/R5-1: the surface presents again after a stop() window that parked a
+    // draft-restore obligation — the owner replays it on the writable composer.
+    onDeferredDraftRestore: () => deps.submission.replayDeferredDraftRestores(),
+    // PR2: the renderer's synchronous submit admission — ONE classification
+    // shared with the dispatch. `'held'` proves the attempt was registered
+    // and its delivery started; the renderer must not clear/submit itself.
+    beginComposerSubmission: (text, request, scopeToken) =>
+      deps.submission.beginComposerSubmission(text, request, scopeToken),
     // The image-only submit gate (plan §11.1): an empty-text draft with staged
     // images is a real submission.
     isImageDraft: () => draftHasImages(deps.surface.composer.getDraft(), deps.drafts.images),
+    cancelLocalShellIfRunning: () => deps.submission.cancelLocalShellIfRunning(),
     // The in-process EDITOR history must never recall a multimodal line after
     // its drafts were consumed — the placeholders would re-send as plain text
     // (the persisted JSONL history has the same guard; review finding: the
-    // memory side was missing it).
-    shouldRememberInput: (text) => !draftHasAttachments(text, deps.drafts.images, deps.drafts.files),
+    // memory side was missing it). A path whose attachment read is still in
+    // flight is equally transient: recalling it would later re-send the raw
+    // local path as ordinary text.
+    shouldRememberInput: (text) => !draftHasAttachments(text, deps.drafts.images, deps.drafts.files)
+      && !deps.pastedImageIntake.blocksDelivery(text),
+    // A REAL terminal bracketed paste (a different input source from Ctrl+V):
+    // the renderer proved the pasted span; the ONE intake owner decides
+    // whether it is an image file path, reads/stages it and replaces exactly
+    // that span.
+    onTerminalPastedPath: (receipt) => deps.pastedImageIntake.accept(receipt),
     // Ctrl+V (plan M3): probe the clipboard ONCE per paste — an image lands as
     // a draft placeholder, plain text as an editor insert, unsupported/empty
     // silently (a text paste must never error).
@@ -482,6 +508,11 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
         && deps.lifecycle.generation() === generation
         && deps.lifecycle.currentSessionId() === sessionId
         && deps.surface.composer === composer
+        // PR2/F2: a held Composer owns its document. The clipboard read is
+        // asynchronous, so this is re-read at BOTH the trigger and the commit:
+        // a gesture started before the hold and settling after it must not
+        // create an un-placeholdered image draft or announce one.
+        && !deps.submission.composerHoldActive()
       const work = clipboardPasteTail.then(async () => {
         // A paste whose ownership already moved (or whose surface died) never
         // probes the OS clipboard at all.
@@ -597,9 +628,15 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
           // The steered draft is an agent-facing submission: the OWNER snapshots
           // the persist facts (ts + image check) BEFORE consuming the draft, and
           // the row is written after the session exists (the deferred-start
-          // gate) with the FINAL session id. This action hands the still-present
-          // draft over, so the owner consumes it.
-          deps.submission.steer(deps.surface.app.getDraft(), { consumeDraft: true })
+          // gate) with the FINAL session id. This action shares the SAME
+          // synchronous Composer admission as Ctrl+S (PR2/F4): 'held' has
+          // already opened the attempt, frozen the renderer and started the
+          // steer — the draft stays until the Host accepts it; 'refused' is a
+          // silent no-op (no second request id, no writer call, no history row);
+          // only 'legacy' keeps the pre-PR2 clear-then-steer contract.
+          const text = deps.surface.app.getDraft()
+          const admission = deps.submission.beginComposerSubmission(text, 'steer')
+          if (admission === 'legacy') deps.submission.steer(text, { consumeDraft: true })
           break
         }
         case 'cancel-activity': {
@@ -607,7 +644,7 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
           break
         }
         case 'open-search': {
-          deps.surface.app.startTranscriptSearch()
+          deps.surface.app.startTranscriptSearch('full')
           break
         }
         case 'toggle-fullscreen': {
@@ -688,6 +725,12 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
     // editor draft. The gesture is disabled in every viewer so it cannot mutate
     // a hidden main or child queue.
     onDequeue: () => deps.submission.dequeue(),
+    // PR-Q: the ONE queue manager entry shared by the Dock `Manage`
+    // affordance, a Dock row click and the `app.queue.open` action. A row
+    // click passes its Host occurrence id as a PRESELECTION hint only.
+    onOpenQueue: (initialItemId?: string) => {
+      deps.queueManager.open(initialItemId === undefined ? {} : { initialItemId })
+    },
     // B4-B retired the old modal-Quick event route: the on-demand Task Quick
     // opens through the app's own `enterTaskQuick()` (the keymap's
     // `app.tasks.open` action), NOT through this event surface.
@@ -782,7 +825,6 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
         content: [{ type: 'text', text: submit.text }],
       }
       const promptViewerAbort = deps.viewer.followUpSignal()
-      const promptViewerCwd = deps.viewer.read()?.cwd
       deps.lifecycle.runOwned('subagent prompt', () => deps.subagentDelivery.subagent.prompt(request, {
         // The caller signal owns lookup/materialization/admission only until
         // inbox acceptance (the official prompt contract): a TUI cleanup / exit,
@@ -794,11 +836,11 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
           : AbortSignal.any([deps.lifecycle.signal(), promptViewerAbort]),
         // Same `@`-mention send seam as the main session's submissions
         // (the official semantics keep the text literal; the seam remains
-        // the one routing point). The scope is the VIEWED CHILD's workspace
-        // when the viewer knows it; an unknown cold-child cwd falls back to
-        // the live parent.
+        // the one routing point). The scope is the VIEWED CHILD's Session
+        // identity; a cold child without an identity falls back to the live
+        // parent. No cwd participates.
         canonicalizeText: (text) => deps.subagentDelivery.hostFile.canonicalizeMentions(
-          viewerCanonicalizeScope(promptViewerCwd, request.parentSessionId),
+          viewerCanonicalizeScope(request.childSessionId, request.parentSessionId),
           text,
         ),
         // The Client-local request zone of THIS follow-up, sampled by the

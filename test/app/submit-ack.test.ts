@@ -14,7 +14,6 @@ import {
   freshSubmitAckState,
   settleSubmitAck,
   submitAckLabel,
-  submitAckPending,
 } from '../../src/app/submission/ack.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -33,14 +32,14 @@ afterEach(() => {
 
 test('fresh state is idle; pending/settle is round-trip with elapsed', () => {
   const state = freshSubmitAckState()
-  assert.equal(submitAckPending(state), false)
+  assert.equal(state.detail, undefined)
   assert.equal(settleSubmitAck(state, { now: 1000 }), undefined, 'settle on idle is a no-op')
   const token = acceptSubmitAck(state, { detail: 'submit', now: 1000 })
   assert.equal(token, 1, 'the first accept mints epoch 1')
-  assert.equal(submitAckPending(state), true)
+  assert.equal(state.detail, 'submit')
   const elapsed = settleSubmitAck(state, { now: 1123, token })
   assert.equal(elapsed, 123)
-  assert.equal(submitAckPending(state), false)
+  assert.equal(state.detail, undefined)
 })
 
 test('settle is idempotent: a double settle never double-notifies', () => {
@@ -70,7 +69,7 @@ test('COALESCING (documented): a late authoritative event settles the CURRENT ro
   // the CURRENT (newest) row — the documented coalescing, no identity.
   const elapsed = settleSubmitAck(state, { now: 400 })
   assert.equal(elapsed, 100, 'elapsed measures the newest acceptance')
-  assert.equal(submitAckPending(state), false)
+  assert.equal(state.detail, undefined)
 })
 
 // ── gesture epoch: an older submission's TERMINAL exit never clears a
@@ -85,11 +84,11 @@ test('EPOCH: a stale terminal settle (older gesture) never clears the newer pend
   // token and MUST be ignored — B is what the user is waiting on.
   assert.equal(settleSubmitAck(state, { now: 400, token: tokenA }), undefined,
     'a stale terminal settle must be a no-op')
-  assert.equal(submitAckPending(state), true, 'B must remain pending')
+  assert.equal(state.detail, 'submit', 'B must remain pending')
   assert.equal(state.detail, 'submit', 'B\'s label untouched')
   // B's own terminal settle (current token) works.
   assert.equal(settleSubmitAck(state, { now: 450, token: tokenB }), 150)
-  assert.equal(submitAckPending(state), false)
+  assert.equal(state.detail, undefined)
 })
 
 test('EPOCH: a stale terminal settle does not block the later coalescing settle', () => {
@@ -99,7 +98,7 @@ test('EPOCH: a stale terminal settle does not block the later coalescing settle'
   assert.equal(settleSubmitAck(state, { now: 300, token: tokenA }), undefined, 'A stale')
   // The authoritative event for B arrives: tokenless coalescing settles.
   assert.equal(settleSubmitAck(state, { now: 350 }), 150)
-  assert.equal(submitAckPending(state), false)
+  assert.equal(state.detail, undefined)
 })
 
 test('EPOCH: a terminal settle for the CURRENT token still settles', () => {

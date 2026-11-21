@@ -25,7 +25,7 @@
  * |--------------------------------|-------------------------------------------------|
  * | RemoteSessionReader            | `ISessions`                                     |
  * | RemoteSessionWriter            | `ISessions`                                     |
- * | RemoteSessionLifecycle         | `ISessions` + `ClientRemote['session']`         |
+ * | RemoteSessionLifecycle         | `ISessions` + `ClientRemote['session']` + `['workspace']` |
  * | RemoteModelCatalog             | `ClientRemote['session']` + `ISessions`         |
  * | RemotePresetCatalog            | `ClientRemote['agentPresets']`                  |
  * | RemotePendingInputReader       | `ISessions`                                     |
@@ -40,7 +40,9 @@
  * | RemoteInteractionPort          | `ISessions` + `ClientRemote` (userQuestions + $on) |
  * | RemoteSessionArchive          | the composition-owned `Fetch`                   |
  * | RemoteConfigPort               | `ClientRemote['settings']` + `['credentials']`   |
+ * | RemoteSessionWorkspaceFacts    | `ISessions` + `ClientRemote['session']` (state/projections) + `['workspace']` |
  * | RemoteHostFilePort (TS8-HF1)   | the PRIVATE `piTuiFileReferences` contribution   |
+ * | RemoteHostDirectoryBrowsePort  | `ClientRemote['directoryPicker']`               |
  *
  * @module @xmoon76/dsh-pi-tui/remote-official-contract.test
  */
@@ -56,9 +58,12 @@ import type { ClientRemote } from '@deepseek-ai/dsh-api-gateway/client'
 // `./remote` face; this public assembly entry references them all, so the
 // `ClientRemote[...]` indexed accesses below resolve to the published contract.
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
+import type {} from '@deepseek-ai/dsh-agent-team/remote'
+import type { RemoteClientRuntime } from '../../support/m3-inprocess/client-runtime.ts'
+import { RemoteConfigPort } from '../../../src/runtime/remote/config-remote.ts'
 import { RemoteSessionReader } from '../../../src/runtime/remote/session-reader-remote.ts'
 import { RemoteSessionWriter, type RemotePromptSerializer } from '../../../src/runtime/remote/session-writer-remote.ts'
-import { RemoteSessionLifecycle } from '../../../src/runtime/remote/session-lifecycle-remote.ts'
+import { RemoteSessionLifecycle, type RemoteWorkspaceNamespaceLike } from '../../../src/runtime/remote/session-lifecycle-remote.ts'
 import { RemoteModelCatalog, type RemoteLlmRemotes } from '../../../src/runtime/remote/model-remote.ts'
 import { RemotePresetCatalog } from '../../../src/runtime/remote/preset-remote.ts'
 import { RemotePendingInputReader } from '../../../src/runtime/remote/pending-input-reader-remote.ts'
@@ -74,9 +79,18 @@ import { RemoteSkillCatalog } from '../../../src/runtime/remote/skill-remote.ts'
 import { createRemoteM3ASemantics, remoteM3ARuntimeSourceOf } from '../../../src/app/remote/m3a-semantics.ts'
 import { RemoteHostFilePort } from '../../../src/runtime/remote/host-file-remote.ts'
 import { RemoteInteractionPort } from '../../../src/runtime/remote/interaction-remote.ts'
+import { RemoteSessionWorkspaceFacts } from '../../../src/runtime/remote/session-workspace-facts-remote.ts'
+import {
+  RemoteHostDirectoryBrowsePort,
+  type RemoteDirectoryPickerNamespace,
+} from '../../../src/runtime/remote/host-directory-browse-remote.ts'
+import { RemoteTeamModePort } from '../../../src/runtime/remote/team-mode-remote.ts'
 import type { ContextPressureProjection, ContextBreakdownProjection, TokenUsageProjection } from '@deepseek-ai/dsh-token-meter'
 import type { TurnOutlineEntry } from '@deepseek-ai/dsh-session-turn-outline/types'
 import type { SessionSeq } from '@deepseek-ai/dsh-session/types'
+import type { SessionProjectionsValue } from '@deepseek-ai/dsh-api-session-controller/types'
+import type { UserQuestionProjectionView } from '@deepseek-ai/dsh-user-questions/types'
+import type { InboxWireState } from '@deepseek-ai/dsh-agent/types'
 import type { SessionStatusProjection, SessionReader } from '../../../src/runtime/session-reader-port.ts'
 import type { PresentationReader, TurnOutlineEntryDto } from '../../../src/runtime/presentation-read-port.ts'
 
@@ -95,8 +109,16 @@ function officialSessionWriter(
 function officialSessionLifecycle(
   sessions: ISessions,
   generation: ConnectionGenerationState,
+  workspace: ClientRemote['workspace'],
+  session: ClientRemote['session'],
 ): RemoteSessionLifecycle {
-  return new RemoteSessionLifecycle(sessions, generation)
+  return new RemoteSessionLifecycle(sessions, generation, workspace, session)
+}
+
+/** WS-2: the official generated `workspace` namespace satisfies the
+ *  lifecycle's narrow pre-selection source with no cast. */
+function officialWorkspaceNamespace(remote: ClientRemote): RemoteWorkspaceNamespaceLike {
+  return remote.workspace
 }
 
 function officialModelCatalog(
@@ -122,7 +144,12 @@ function officialPendingInputReader(
 }
 
 function officialHostCommandPort(commands: ClientRemote['commands']): RemoteHostCommandPort {
-  return new RemoteHostCommandPort(commands)
+  return new RemoteHostCommandPort(commands, {
+    upload: async (_sessionId, file) => ({
+      receiptId: 'receipt-official',
+      file: { attachmentId: 'attachment-official', name: file.name, bytes: file.byteLength },
+    }),
+  })
 }
 
 function officialSubagentPort(subagents: ClientRemote['subagents']): RemoteSubagentPort {
@@ -170,11 +197,41 @@ function officialJobObservationPort(jobs: IJobs): RemoteJobObservationPort {
   return new RemoteJobObservationPort(jobs)
 }
 
+/** Session Workspace PR1: the official generated `directoryPicker` namespace
+ *  satisfies the browse adapter's declared source with NO cast. */
+function officialHostDirectoryBrowseNamespace(
+  directoryPicker: ClientRemote['directoryPicker'],
+): RemoteDirectoryPickerNamespace {
+  return directoryPicker
+}
+
+function officialHostDirectoryBrowsePort(
+  directoryPicker: ClientRemote['directoryPicker'],
+  generation: ConnectionGenerationState,
+): RemoteHostDirectoryBrowsePort {
+  return new RemoteHostDirectoryBrowsePort(directoryPicker, generation)
+}
+
+/** FR1: the official generated `agentTeams` namespace and the published
+ *  `ISessions` binding/list face satisfy the Team port's source with NO cast. */
+function officialTeamModePort(
+  sessions: ISessions,
+  remote: ClientRemote,
+  generation: ConnectionGenerationState,
+): RemoteTeamModePort {
+  return new RemoteTeamModePort({
+    sessions,
+    remote: { agentTeams: remote.agentTeams },
+    connection: { generation },
+  })
+}
+
 function officialSkillCatalog(
   skills: ClientRemote['skills'],
+  piTuiSkills: import('../../../src/runtime/remote/skill-remote.ts').PiTuiSkillsRemotes,
   generation: ConnectionGenerationState,
 ): RemoteSkillCatalog {
-  return new RemoteSkillCatalog(skills, generation)
+  return new RemoteSkillCatalog(skills, piTuiSkills, generation)
 }
 
 /** TS8-HF1: the Session `@` source is the PRIVATE `piTuiFileReferences`
@@ -213,13 +270,61 @@ function officialContextFactFaces(): { breakdown: ContextBreakdownProjection; us
   }
 }
 
+/** M5-U-A: the official `ISessions` read face, the generated `session`
+ *  namespace and the generated `workspace` namespace satisfy the facts
+ *  adapter's one-source face with NO cast — the passive `session.state` /
+ *  `session.projections` methods and `workspace.follow` are the published
+ *  contract, not a test-only shape. */
+function officialSessionWorkspaceFacts(
+  sessions: ISessions,
+  remote: ClientRemote,
+  generation: ConnectionGenerationState,
+): RemoteSessionWorkspaceFacts {
+  return new RemoteSessionWorkspaceFacts({
+    sessions,
+    remote: { session: remote.session, workspace: remote.workspace },
+    connection: { generation },
+  })
+}
+
+/** M5-U-A: the official projection PAYLOAD the Attention classification reads
+ *  — `sequenced` cut, typed `userQuestions.active` (callId/state/intent) and
+ *  the `inbox` lanes — is the published `SessionProjectionValues` shape, with
+ *  NO cast. The Runtime adapter parses the same JSON-safe value structurally
+ *  because it may not import Host packages; this proof keeps the field names
+ *  and value domains pinned to the published declarations. */
+function officialQuestionProjectionPayload(value: SessionProjectionsValue): {
+  readonly active: readonly {
+    readonly callId: string
+    readonly state: 'open' | 'continued'
+    readonly intents: readonly string[]
+  }[]
+  readonly lanes: readonly ('next-step' | 'next-turn')[]
+} {
+  if (value === null || value.kind !== 'sequenced') return { active: [], lanes: [] }
+  const questions: UserQuestionProjectionView | undefined = value.values.userQuestions
+  const inbox: InboxWireState | undefined = value.values.inbox
+  return {
+    active: (questions?.active ?? []).map(entry => ({
+      callId: String(entry.callId),
+      state: entry.state,
+      intents: entry.questions.flatMap(question =>
+        question.intent === undefined ? [] : [question.intent.kind]),
+    })),
+    lanes: inbox === undefined ? [] : (['next-step', 'next-turn'] as const),
+  }
+}
+
 /** The M3-3A partial assembly constructs from the REAL M3-1 runtime — a
  * compile-time proof that `RemoteClientRuntime` satisfies the narrow
  * one-source face (the same sessions service, Remote namespaces and
  * Connection generation source feed every adapter). */
 function officialM3ASemanticsAssembly(
-  runtime: import('../../../src/app/remote/client-runtime.ts').RemoteClientRuntime,
-  options: { promptSerializer: import('../../../src/runtime/remote/session-writer-remote.ts').RemotePromptSerializer },
+  runtime: import('../../support/m3-inprocess/client-runtime.ts').RemoteClientRuntime,
+  options: {
+    promptSerializer: import('../../../src/runtime/remote/session-writer-remote.ts').RemotePromptSerializer
+    fileReceiptUploader: import('../../../src/runtime/remote/file-upload-remote.ts').RemoteFileReceiptUploader
+  },
 ): ReturnType<typeof createRemoteM3ASemantics> {
   return createRemoteM3ASemantics(remoteM3ARuntimeSourceOf(runtime), options)
 }
@@ -255,9 +360,11 @@ test('every Remote adapter accepts the published DSH public Client/Remote face (
   // A compile-time proof only runs when the compiler keeps the function in the
   // program; this reference is that keep-alive.
   for (const proof of [
+    officialRemoteWebConfig,
     officialSessionReader,
     officialSessionWriter,
     officialSessionLifecycle,
+    officialWorkspaceNamespace,
     officialModelCatalog,
     officialPresetCatalog,
     officialPendingInputReader,
@@ -272,6 +379,11 @@ test('every Remote adapter accepts the published DSH public Client/Remote face (
     officialSkillCatalog,
     piTuiHostFilePort,
     officialRemoteInteractionPort,
+    officialSessionWorkspaceFacts,
+    officialQuestionProjectionPayload,
+    officialHostDirectoryBrowseNamespace,
+    officialHostDirectoryBrowsePort,
+    officialTeamModePort,
   ]) {
     assert.equal(typeof proof, 'function')
   }
@@ -286,6 +398,7 @@ test('the M3-3B additions consume the published 0.2.0-rc.2 contract', () => {
   assert.equal(typeof officialSettingsRemoteFace, 'function')
   assert.equal(typeof officialCredentialsRemoteFace, 'function')
   assert.equal(typeof officialArchiveFetchFace, 'function')
+  assert.equal(typeof officialTeamModePort, 'function')
 })
 
 test('the M3-3A semantic additions consume the published 0.2.0-rc.1 contract', () => {
@@ -327,6 +440,12 @@ function officialRemoteInteractionPort(
     remote: { userQuestions: remote.userQuestions, $on: remote.$on },
     connection: { generation },
   })
+}
+
+/** The published settings and credentials Remote faces satisfy the production
+ * Remote ConfigPort source without casts. */
+function officialRemoteWebConfig(runtime: RemoteClientRuntime): RemoteConfigPort {
+  return new RemoteConfigPort({ remote: runtime.remote, connection: runtime.connection })
 }
 
 /** The published settings Remote face the Remote ConfigPort maps (the mirror

@@ -202,26 +202,28 @@ test('advanced facade: the interactive overlay lease is inert without a mounted 
   }
 })
 
-test('advanced facade: owner unload aborts a pending imperative prompt (the promise settles)', async () => {
+test('advanced facade: imperative UI calls resolve with no mounted surface', async () => {
   const ctx = new Context()
   try {
     await ctx.plugin(Loader)
     await mount(ctx, startupPlugin)
     await mount(ctx, applyExtensionHost)
 
-    // A pending select with NO mounted surface resolves undefined
-    // immediately (the seam is absent) — the fiber effect still detaches
-    // cleanly.
+    const prompts: Promise<unknown>[] = []
     const plugin = await mount(ctx, (ctx) => {
       const service = ctx.get(PI_TUI_EXTENSIONS_SERVICE) as never
       const ui = advanced(service)
-      void ui.ui.select({ items: [{ value: 'a', label: 'A' }] })
-      void ui.ui.confirm({ question: 'q' })
-      void ui.ui.input({ question: 'i' })
+      // Without a mounted surface, the public service resolves these calls
+      // immediately instead of creating caller-fiber-owned pending prompts.
+      prompts.push(
+        ui.ui.select({ items: [{ value: 'a', label: 'A' }] }),
+        ui.ui.confirm({ question: 'q' }),
+        ui.ui.input({ question: 'i' }),
+        ui.ui.custom(() => ({ render: () => ({ kind: 'text', spans: [{ text: 'x' }] }) })),
+      )
       ui.ui.notify('hello')
-      void ui.ui.custom(() => ({ render: () => ({ kind: 'text', spans: [{ text: 'x' }] }) }))
     })
-    await settle()
+    assert.deepEqual(await Promise.all(prompts), [undefined, false, undefined, undefined])
     await plugin()
     await settle()
   } finally {

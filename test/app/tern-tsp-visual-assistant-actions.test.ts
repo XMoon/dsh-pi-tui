@@ -173,8 +173,8 @@ const SVG: SvgFact = {
   bytes: SVG_SOURCE.length,
 }
 
-const REF_CHART = `sv1_${'1'.repeat(20)}`
-const REF_SVG = `sv1_${'2'.repeat(20)}`
+const REF_CHART = `sv2_${'1'.repeat(20)}`
+const REF_SVG = `sv2_${'2'.repeat(20)}`
 
 function marker(ref: string): string {
   return `[dsh-visual-${ref}]: <#>`
@@ -250,7 +250,6 @@ function present(message: TranscriptMessage, publications: readonly PublishedVis
     sourceIdentity: {},
     session: {},
     sessionId: 'session-1',
-    seq: 1,
     turn: 1,
     step: 0,
     text: 'text' in message ? message.text : '',
@@ -400,10 +399,12 @@ async function mountHarness(options: {
     submit: () => {},
     steer: () => {},
     pasteMedia: () => {},
+    pastedPath: () => {},
+    admitPastedPathDelivery: () => true, shouldRememberInput: () => true,
     noteUserInput: () => {},
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,
-    openModelPicker() {},
+    openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true, openTasksBrowserUi() {}, tasksBrowserUiAvailable: () => true,
   }
   if (options.bind !== false) renderer.bindInput(handlers)
   return {
@@ -576,6 +577,41 @@ test('a second Alt+C copies the newer selection, never the earlier figure', asyn
   }
 })
 
+test('appending a figure refreshes the Dock selection count in the same commit', async () => {
+  const harness = await mountHarness()
+  try {
+    // ONE stable projection source: both commits speak for the SAME session,
+    // so the append is an ordinary same-subject delta (a fresh source object
+    // would model a subject switch, which owns the selection retirement).
+    const source = {}
+    // One figure, selected while it is the only one.
+    const chart = chartPublication()
+    const first = assistantRow(`Latency:\n\n${marker(chart.ref)}`)
+    present(first, [chart])
+    harness.commit([first], source)
+    harness.tern.input.type('\u001bv')
+    await until('the 1/1 badge', () => badgeTexts(harness.tern).includes('Selected · 1/1'))
+    await until('the 1/1 dock summary', () => textNodes(harness.tern).includes(`Selected 1/1 · ${CHART.title} (${CHART.unit})`))
+
+    // A later answer of the SAME session publishes a second figure. The
+    // selected figure's index stays 1, but the real count is now 2: the Dock
+    // summary (painted from the selection state) and the Main badge (from the
+    // committed row stamp) must agree within THIS commit, without any further
+    // input or repaint.
+    const svg = svgPublication()
+    const second = assistantRow(`Topology:\n\n${marker(svg.ref)}`)
+    present(second, [svg])
+    harness.commit([first, second], source)
+    await until('the appended figure', () => figureIds(harness.tern).length === 2)
+    await until('the 1/2 dock summary', () => textNodes(harness.tern).includes(`Selected 1/2 · ${CHART.title} (${CHART.unit})`))
+    await until('the 1/2 badge', () => badgeTexts(harness.tern).includes('Selected · 1/2'))
+    assert.equal(textNodes(harness.tern).includes(`Selected 1/1 · ${CHART.title} (${CHART.unit})`), false,
+      'no stale 1/1 dock summary survives the append')
+  } finally {
+    await harness.dispose()
+  }
+})
+
 // ── Currentness: old frame ids, new subjects, in-flight copies ──────────────
 
 test('a Copy action from an older frame is refused after the subject scope changes', async () => {
@@ -587,6 +623,12 @@ test('a Copy action from an older frame is refused after the subject scope chang
 
     const second = bothFiguresAnswer()
     harness.commit(second.messages, {})
+    // PR2: the new subject's Main roots are targeted raw ops that can be
+    // queued behind an ack. Wait for the NEW scope's button identity itself,
+    // not for the first frame of the source transition.
+    await until('the new scope to rename the visual copy button',
+      () => copyButtonIds(harness.tern)[0] !== oldButton
+        && copyButtonIds(harness.tern)[0] !== undefined)
     const newButton = copyButtonIds(harness.tern)[0] as string
     assert.notEqual(newButton, oldButton, 'the new scope renames the whole node tree')
 

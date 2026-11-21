@@ -11,7 +11,7 @@ import test from 'node:test'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { FileHistorySearchSource, HistorySearchContinuationError, HistorySearchContinuationStaleError } from '../../src/client/history/search.ts'
+import { FileHistorySearchSource, HistorySearchContinuationError, HistorySearchContinuationStaleError, HistorySessionRecallReadError } from '../../src/client/history/search.ts'
 import type { HistorySearchDebugStats, HistorySearchResult, HistoryScope } from '../../src/client/history/search.ts'
 import { appendHistoryRecord, historyFilePath, historyFilePathFromHash } from '../../src/client/history/store.ts'
 
@@ -20,7 +20,7 @@ function tempHome(life: TestLifecycle): string {
 }
 
 /** Write a canonical history file for a cwd directly. */
-function writeV2(home: string, cwd: string, rows: Array<{ content: string; ts: number; sessionId?: string }>): void {
+function writeV2(home: string, cwd: string, rows: Array<{ content: string; ts: number | null; sessionId?: string; writeId?: string }>): void {
   const file = historyFilePath(home, cwd)
   mkdirSync(file.slice(0, file.lastIndexOf('/')), { recursive: true })
   const lines = rows.map(row => JSON.stringify({
@@ -29,6 +29,7 @@ function writeV2(home: string, cwd: string, rows: Array<{ content: string; ts: n
     cwd,
     ts: row.ts,
     ...(row.sessionId !== undefined ? { sessionId: row.sessionId } : {}),
+    ...(row.writeId !== undefined ? { writeId: row.writeId } : {}),
   }))
   writeFileSync(file, lines.join('\n') + '\n', { mode: 0o600 })
 }
@@ -755,13 +756,290 @@ test('a continuation with a mismatched sessionId is a typed error', async (t) =>
   )
 })
 
-test('session scope never scans other cwds', async (t) => {
+test('session scope searches EVERY cwd file for the exact session id', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
-  writeV2(home, '/a', [{ content: 'mine in a', ts: 1, sessionId: 'ses_a' }])
-  // The same session ALSO has rows in /b — the session scope opens only
-  // the live cwd's file, so /b must never be scanned.
-  writeV2(home, '/b', [{ content: 'mine in b', ts: 2, sessionId: 'ses_a' }])
-  const results = await search(home, 'session', '/a', '', { sessionId: 'ses_a' })
-  assert.deepEqual(results.map(row => row.content), ['mine in a'])
+  // One Session submitted from three working directories; each row lives in
+  // its own cwd-hashed file but carries the same sessionId.
+  writeV2(home, '/ws/a', [
+    { content: 'A1 from a', ts: 100, sessionId: 'ses_a' },
+    { content: 'distractor from B in file a', ts: 150, sessionId: 'ses_b' },
+  ])
+  writeV2(home, '/ws/b', [
+    { content: 'B1 from b', ts: 200, sessionId: 'ses_a' },
+    { content: 'sessionless in file b', ts: 250 },
+  ])
+  writeV2(home, '/ws/c', [{ content: 'C1 from c', ts: 300, sessionId: 'ses_a' }])
+  writeV1(home, '/ws/legacy', ['legacy prompt'])
+
+  const session = await search(home, 'session', '/ws/a', '', { sessionId: 'ses_a' })
+  assert.deepEqual(session.map(row => row.content), ['C1 from c', 'B1 from b', 'A1 from a'],
+    'all three cwd files are searched; other sessions/sessionless/v1 never leak in')
+  assert.deepEqual(session.map(row => row.cwd), ['/ws/c', '/ws/b', '/ws/a'],
+    'each result reports its REAL directory, never the open-time request cwd')
+
+  // Current directory stays the ONE open-time cwd file (all trusted rows, any
+  // session, v1 included) — the session fix must not widen this scope.
+  const current = await search(home, 'current', '/ws/a', '')
+  assert.deepEqual(new Set(current.map(row => row.content)), new Set(['A1 from a', 'distractor from B in file a']),
+    'Current directory reads only the live cwd file')
+  assert.ok(current.every(row => row.cwd === '/ws/a'))
+
+  // All directories stays the pre-existing cross-file, cwd-proofed scope.
+  const all = await search(home, 'all', '/ws/nowhere', '')
+  assert.ok(all.some(row => row.content === 'C1 from c' && row.cwd === '/ws/c'))
+  assert.ok(all.some(row => row.content === 'B1 from b' && row.cwd === '/ws/b'))
+  assert.ok(all.some(row => row.content === 'A1 from a' && row.cwd === '/ws/a'))
+  assert.ok(!all.some(row => row.content === 'legacy prompt'),
+    'an unresolved v1-only file stays excluded from All (Rule 3)')
+})
+
+test('session scope dedupes by content ACROSS files — the newest session occurrence wins', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  writeV2(home, '/ws/a', [{ content: 'same prompt', ts: 10, sessionId: 'ses_a' }])
+  writeV2(home, '/ws/b', [{ content: 'same prompt', ts: 20, sessionId: 'ses_a' }])
+  const session = await search(home, 'session', '/ws/a', '', { sessionId: 'ses_a' })
+  assert.equal(session.length, 1, 'session scope keeps ONE row per content across all files')
+  assert.equal(session[0]?.ts, 20)
+  assert.equal(session[0]?.cwd, '/ws/b', 'the winner reports the file it actually came from')
+})
+
+test('session scope tie-breaks equal ts by source file path then row offset', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  writeV2(home, '/ws/a', [
+    { content: 'a older row', ts: 500, sessionId: 'ses_a' },
+    { content: 'a newer row', ts: 500, sessionId: 'ses_a' },
+  ])
+  writeV2(home, '/ws/b', [{ content: 'b row', ts: 500, sessionId: 'ses_a' }])
+  const results = await search(home, 'session', '/ws/elsewhere', '', { sessionId: 'ses_a' })
+  const aFile = historyFilePath(home, '/ws/a')
+  const bFile = historyFilePath(home, '/ws/b')
+  const firstFile = aFile.localeCompare(bFile) < 0 ? aFile : bFile
+  assert.equal(results[0]?.sourceFile, firstFile, 'equal ts compares the source file path ASC')
+  // Within one file the equal-ts rows are ordered by byte offset DESC (the
+  // later row in the append-only file is the newer occurrence).
+  const fromA = results.filter(row => row.sourceFile === aFile)
+  if (fromA.length === 2) {
+    assert.equal(fromA[0]?.content, 'a newer row')
+    assert.equal(fromA[1]?.content, 'a older row')
+  }
+})
+
+test('session scope returns content with cwd=null when the file carries no trusted cwd proof', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  // The file is keyed by md5('/ws/x'), but its rows claim '/ws/y' — the hash
+  // does not validate, and no known-cwd map entry exists. The session row is
+  // still the requested session and MUST stay searchable; its directory is
+  // honestly unknown (never the open-time request cwd).
+  const file = historyFilePath(home, '/ws/x')
+  mkdirSync(file.slice(0, file.lastIndexOf('/')), { recursive: true })
+  writeFileSync(file, JSON.stringify({ v: 2, content: 'unprovable cwd row', cwd: '/ws/y', ts: 7, sessionId: 'ses_a' }) + '\n', { mode: 0o600 })
+  const results = await search(home, 'session', '/ws/open-time', '', { sessionId: 'ses_a' })
+  assert.deepEqual(results.map(row => row.content), ['unprovable cwd row'])
+  assert.equal(results[0]?.cwd, null, 'no trusted proof => null, never the request cwd')
+})
+
+test('session scope keeps the global 5000-line budget across files and continues without gaps', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  const dirs = ['/ws/a', '/ws/b', '/ws/c']
+  for (const [dirIndex, dir] of dirs.entries()) {
+    writeV2(home, dir, Array.from({ length: 100 }, (_, index) => ({
+      content: `needle-${dirIndex}-${index}`,
+      ts: dirIndex * 1000 + index,
+      sessionId: 'ses_a',
+    })))
+  }
+  // Make the scan order deterministic: /ws/a newest mtime, then /ws/b, /ws/c.
+  const { utimesSync } = await import('node:fs')
+  const now = Date.now()
+  utimesSync(historyFilePath(home, '/ws/a'), new Date(now), new Date(now))
+  utimesSync(historyFilePath(home, '/ws/b'), new Date(now - 10_000), new Date(now - 10_000))
+  utimesSync(historyFilePath(home, '/ws/c'), new Date(now - 20_000), new Date(now - 20_000))
+  const stats: HistorySearchDebugStats = { filesVisited: 0, physicalLinesScanned: 0, bytesRead: 0 }
+  const src = new FileHistorySearchSource({ dshHome: home, scanLimit: 150, stats })
+  const request = { scope: 'session' as const, cwd: '/ws/a', sessionId: 'ses_a', query: 'needle', limit: 100 }
+  const page1 = await src.search(request)
+  assert.equal(stats.physicalLinesScanned, 150, 'the budget is GLOBAL across files, never per file')
+  assert.equal(stats.filesVisited, 2, 'file A was consumed fully, file B was cut at the shared budget')
+  assert.equal(page1.exhausted, false)
+  assert.ok(page1.continuation !== undefined)
+  const contents = [...page1.results.map(row => row.content)]
+  let continuation: import('../../src/client/history/search.ts').HistorySearchContinuation | undefined = page1.continuation
+  let pages = 1
+  while (continuation !== undefined) {
+    const page = await src.search(request, continuation)
+    pages += 1
+    assert.ok(pages <= 5, 'the continuation must terminate')
+    contents.push(...page.results.map(row => row.content))
+    continuation = page.exhausted ? undefined : page.continuation
+  }
+  assert.equal(new Set(contents).size, 300, 'every session row appears exactly once across the pages')
+})
+
+test('session scope abort resolves an empty page without partial results', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  writeV2(home, '/ws/a', Array.from({ length: 50 }, (_, index) => ({
+    content: `row-${index}`, ts: index, sessionId: 'ses_a',
+  })))
+  const controller = new AbortController()
+  controller.abort()
+  const results = await search(home, 'session', '/ws/a', '', { sessionId: 'ses_a', signal: controller.signal })
+  assert.deepEqual(results, [])
+})
+// ---------------------------------------------------------------------------
+// Cold session recall reader (readSessionRecall): the ↑/↓ hydration seed.
+// A DIFFERENT read contract from search(): no content dedupe, no 5000-line
+// search window, all cwd files, newest 100 by stored ts.
+// ---------------------------------------------------------------------------
+
+test('the cold session reader returns this Session\'s rows from every cwd, newest first, without dedupe', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  writeV2(home, '/ws/a', [
+    { content: 'A1', ts: 100, sessionId: 'ses_a', writeId: 'w-a1' },
+    { content: 'A2', ts: 200, sessionId: 'ses_a', writeId: 'w-a2' },
+  ])
+  writeV2(home, '/ws/b', [{ content: 'B1', ts: 300, sessionId: 'ses_a', writeId: 'w-b1' }])
+  writeV2(home, '/ws/c', [{ content: 'C1', ts: 400, sessionId: 'ses_a', writeId: 'w-c1' }])
+  const strangerFile = historyFilePath(home, '/ws/stranger')
+  mkdirSync(strangerFile.slice(0, strangerFile.lastIndexOf('/')), { recursive: true })
+  writeFileSync(strangerFile, [
+    JSON.stringify({ v: 2, content: 'other session row', cwd: '/ws/stranger', ts: 500, sessionId: 'ses_b' }),
+    JSON.stringify({ v: 2, content: 'sessionless row', cwd: '/ws/stranger', ts: 600 }),
+    JSON.stringify({ content: 'legacy v1 row' }),
+  ].join('\n') + '\n', { mode: 0o600 })
+  const seed = await new FileHistorySearchSource({ dshHome: home }).readSessionRecall('ses_a')
+  assert.deepEqual(seed.entries, ['C1', 'B1', 'A2', 'A1'])
+  assert.deepEqual(seed.writeIds, ['w-c1', 'w-b1', 'w-a2', 'w-a1'])
+})
+
+test('the cold session reader keeps non-consecutive and adjacent repeats — it never content-dedupes', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  writeV2(home, '/ws/a', [
+    { content: 'a', ts: 1, sessionId: 'ses_a' },
+    { content: 'a', ts: 2, sessionId: 'ses_a' },
+    { content: 'b', ts: 3, sessionId: 'ses_a' },
+  ])
+  writeV2(home, '/ws/b', [{ content: 'a', ts: 4, sessionId: 'ses_a' }])
+  const seed = await new FileHistorySearchSource({ dshHome: home }).readSessionRecall('ses_a')
+  assert.deepEqual(seed.entries, ['a', 'b', 'a', 'a'],
+    'newest first: the cross-file a, then b, then the adjacent a run')
+})
+
+test('the cold session reader tie-breaks equal ts by file then offset, and puts unknown ts last', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  writeV2(home, '/ws/a', [
+    { content: 'a older', ts: 50, sessionId: 'ses_a' },
+    { content: 'a newer', ts: 50, sessionId: 'ses_a' },
+    { content: 'a unknown', ts: null, sessionId: 'ses_a' },
+  ])
+  writeV2(home, '/ws/b', [{ content: 'b same ts', ts: 50, sessionId: 'ses_a' }])
+  const seed = await new FileHistorySearchSource({ dshHome: home }).readSessionRecall('ses_a')
+  const aFile = historyFilePath(home, '/ws/a')
+  const bFile = historyFilePath(home, '/ws/b')
+  const firstFile = aFile.localeCompare(bFile) < 0 ? 'a' : 'b'
+  assert.equal(seed.entries[0], firstFile === 'a' ? 'a newer' : 'b same ts')
+  assert.equal(seed.entries.at(-1), 'a unknown', 'the unknown ts sorts after every timed row')
+})
+
+test('the cold session reader keeps only the globally newest 100 session rows', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  // 120 rows spread across three cwds; ts is global across them.
+  for (const [index, dir] of ['/ws/a', '/ws/b', '/ws/c'].entries()) {
+    writeV2(home, dir, Array.from({ length: 40 }, (_, row) => ({
+      content: `row-${index * 40 + row}`,
+      ts: index * 40 + row,
+      sessionId: 'ses_a',
+    })))
+  }
+  const seed = await new FileHistorySearchSource({ dshHome: home }).readSessionRecall('ses_a')
+  assert.equal(seed.entries.length, 100)
+  assert.equal(seed.entries[0], 'row-119', 'the globally newest row leads')
+  assert.equal(seed.entries.at(-1), 'row-20', 'the 100th newest row closes the window')
+  assert.ok(!seed.entries.includes('row-19'), 'older rows are outside the recall window')
+})
+
+test('the cold session reader reads old v2 without writeId and new v2 with it; v1/sessionless excluded', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  writeV2(home, '/ws/a', [
+    { content: 'old v2 row', ts: 10, sessionId: 'ses_a' },
+    { content: 'new v2 row', ts: 20, sessionId: 'ses_a', writeId: 'w-new' },
+  ])
+  writeV1(home, '/ws/legacy', ['legacy in legacy file'])
+  const seed = await new FileHistorySearchSource({ dshHome: home }).readSessionRecall('ses_a')
+  assert.deepEqual(seed.entries, ['new v2 row', 'old v2 row'])
+  assert.deepEqual(seed.writeIds, ['w-new', undefined], 'old v2 rows legitimately have no writeId')
+})
+
+test('the cold session reader treats a missing history directory as empty', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  const seed = await new FileHistorySearchSource({ dshHome: home }).readSessionRecall('ses_a')
+  assert.deepEqual(seed, { entries: [], writeIds: [] })
+})
+
+test('the cold session reader reports a global enumeration failure instead of pretending empty', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  // `user-history` is a REGULAR FILE: readdir fails with ENOTDIR, not ENOENT.
+  writeFileSync(join(home, 'user-history'), 'not a directory', { mode: 0o600 })
+  const diagnostics: import('../../src/client/history/search.ts').HistorySourceDiagnostic[] = []
+  const source = new FileHistorySearchSource({ dshHome: home, diagnostics: event => diagnostics.push(event) })
+  await assert.rejects(
+    source.readSessionRecall('ses_a'),
+    (error: unknown) => error instanceof HistorySessionRecallReadError,
+  )
+  assert.equal(diagnostics.length, 1)
+  assert.equal(diagnostics[0]?.kind, 'session-recall-global-failure')
+})
+
+test('a per-file cold-read failure is isolated and recorded; other files still seed', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  writeV2(home, '/ws/a', [{ content: 'good row', ts: 1, sessionId: 'ses_a' }])
+  // A DIRECTORY named *.jsonl: stat succeeds, opening/reading it fails.
+  mkdirSync(join(home, 'user-history', 'broken.jsonl'), { recursive: true })
+  const diagnostics: import('../../src/client/history/search.ts').HistorySourceDiagnostic[] = []
+  const seed = await new FileHistorySearchSource({ dshHome: home, diagnostics: event => diagnostics.push(event) })
+    .readSessionRecall('ses_a')
+  assert.deepEqual(seed.entries, ['good row'])
+  assert.ok(diagnostics.some(event => event.kind === 'session-recall-partial-file'),
+    'the partial read is recorded, never reported as complete coverage')
+})
+
+test('readSessionRecall honours an abort signal with an AbortError', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  writeV2(home, '/ws/a', [{ content: 'row', ts: 1, sessionId: 'ses_a' }])
+  const controller = new AbortController()
+  controller.abort()
+  await assert.rejects(
+    new FileHistorySearchSource({ dshHome: home }).readSessionRecall('ses_a', controller.signal),
+    (error: unknown) => error instanceof Error && error.name === 'AbortError',
+  )
+})
+
+test('a legal negative ts sorts before an unknown ts in both comparators', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  writeV2(home, '/ws/a', [
+    { content: 'unknown ts', ts: null, sessionId: 'ses_a' },
+    { content: 'negative ts', ts: -5, sessionId: 'ses_a' },
+    { content: 'zero ts', ts: 0, sessionId: 'ses_a' },
+  ])
+  const seed = await new FileHistorySearchSource({ dshHome: home }).readSessionRecall('ses_a')
+  assert.deepEqual(seed.entries, ['zero ts', 'negative ts', 'unknown ts'],
+    'a finite negative epoch is a REAL time; only NULL sorts last')
+  const session = await search(home, 'session', '/ws/a', '', { sessionId: 'ses_a' })
+  assert.deepEqual(session.map(row => row.content), ['zero ts', 'negative ts', 'unknown ts'],
+    'the Ctrl+R session comparator uses the same explicit NULL ordering')
 })

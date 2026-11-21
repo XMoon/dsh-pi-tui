@@ -38,38 +38,74 @@
  * @module @xmoon76/dsh-pi-tui/tui/tsp/session
  */
 
-import { connect as sdkConnect, ui, View } from '@stencil-hq/tern'
+import { connect as sdkConnect, html, ui, View } from '@stencil-hq/tern'
 import type { Key, Node, ScrollTo, Session, SessionInput, Surface, Tree, TspEvent } from '@stencil-hq/tern'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { StatusSnapshot, StatusSnapshotReader } from '../../domain/status/types.ts'
-import type { ComposerSubmitRequest } from '../../tui-app.ts'
+import type { ComposerSubmitRequest, WorkflowAction } from '../../tui-app.ts'
+import { workflowPhasePresentations, workflowRunViewAllVisible } from '../transcript/workflow-presentation.ts'
+import {
+  advanceWorkflowDisclosureState,
+  effectiveWorkflowPhaseOpen,
+  effectiveWorkflowRunOpen,
+  type WorkflowRunDisclosureState,
+} from '../transcript/workflow-disclosure.ts'
+import type { WorkflowMemberView, WorkflowRunId, WorkflowRunStatus } from '../../domain/transcript/workflow-projection.ts'
+import { TSP_WORKFLOW_BROWSE_ACTION } from './workflow-actions.ts'
+import { createHistoryRecallScope } from '../../client/history/recall-scope.ts'
 import type {
   DisplayDockNotice,
   DisplayStatusFacts,
+  DisplayWelcomeEligibility,
   DisplayWelcomeFacts,
   SurfaceDisplaySeam,
 } from '../../app/surface/display-seam.ts'
 import type { SubmissionComposerPort } from '../../app/submission/composer-port.ts'
+import type { ExitSessionActivity } from '../../domain/command/policy.ts'
 import type { SubmitPendingDetail } from '../../app/submission/ack.ts'
 import type { SettledQuestionAnswersLookup, SurfaceInteractionPresenter } from '../../app/surface/interaction-presenter.ts'
 import type { SurfaceDraftImageOccurrence, SurfaceImageBinding } from '../../app/surface/runtime.ts'
 import type { DraftImage } from '../../client/media/image/types.ts'
 import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
-import { TSP_CONTINUED_INSPECTION_LABEL, TSP_VISUAL_CHORDS, TSP_VISUAL_COPY_LABEL, TSP_VISUAL_SELECT_LABEL, matchesKeyId } from '../keybindings/hints.ts'
-import { createTspComposer, type TspComposer, type TspComposerEdit } from './editor.ts'
+import { TSP_CONTINUED_INSPECTION_LABEL, TSP_SEARCH_CHORD, TSP_VISUAL_CHORDS, TSP_VISUAL_COPY_LABEL, TSP_VISUAL_SELECT_LABEL, formatKeyId, matchesKeyId } from '../keybindings/hints.ts'
+import { createTspComposer, type TspComposer, type TspComposerEdit, type TspComposerState } from './editor.ts'
+import { createTspInputCompletion, type TspInputCompletion } from './input-completion.ts'
+import { createTspHistorySearch, TSP_HISTORY_SEARCH_UNAVAILABLE, type TspHistorySearchSeat } from './history-search.ts'
+import { historySearchView, HISTORY_SEARCH_SHEET, HISTORY_SEARCH_STYLES } from './history-search-view.ts'
+import { createTspTranscriptSearch, TSP_TRANSCRIPT_SEARCH_UNAVAILABLE, type TspTranscriptSearchSeat } from './transcript-search.ts'
+import { transcriptSearchView, TRANSCRIPT_SEARCH_SHEET, TRANSCRIPT_SEARCH_STYLES } from './transcript-search-view.ts'
+import type { InlineAttachmentAcceptance, InlineAttachmentStager } from '../interaction/autocomplete/inline-attachment.ts'
+import { createInstalledAutocompleteProvider } from '../interaction/autocomplete/installed-provider.ts'
+import type {
+  TspCommandCompletionInstallation,
+  TspHistorySearchBinding,
+  TspTranscriptSemanticSearchBinding,
+} from '../../app/surface/runtime.ts'
+import { pastedBodySpan } from '../interaction/pasted-path-range.ts'
+import type { PastedPathReceipt } from '../../app/surface/pasted-image-intake.ts'
 import { imageProtocolPreference } from '../graphics/image-protocol-preference.ts'
 import { clampMiddle } from './picker-text.ts'
 import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { createTspInteractionSeat, NATIVE_APPROVAL_ROLE, type TspContinuedRow, type TspInteractionSeat } from './interaction.ts'
 import { TspModelPicker } from './model-picker.ts'
+import { TspQueueManager } from './queue-manager.ts'
+import type { QueueManagerController, QueueManagerPresentation } from '../../app/queue/manager.ts'
+import { TspModelQuickMenu } from './model-quick-menu.ts'
+import type { QuickMenuIntent } from './model-quick-menu.ts'
 import { TspPresetPicker } from './preset-picker.ts'
+import { TspWebAccessPicker } from './web-access-picker.ts'
+import { TspAcpAccessPicker } from './acp-access-picker.ts'
 import { TspSessionBrowser } from './session-browser.ts'
-import { nativeStatuslineRows, compileNativeFooterPresentation, type NativeFooterPresentation } from './statusline-view.ts'
+import { nativeStatuslineRows, compileNativeFooterPresentation, TSP_FOOTER_TASKS_ACTION, type NativeFooterPresentation } from './statusline-view.ts'
 import { quietComposerView, QUIET_COMPOSER_SHEET, QUIET_COMPOSER_STYLES, QUIET_COMPOSER_ROLES, type QuietComposerPermissionOption } from './quiet-composer-view.ts'
+import { welcomeView, TSP_WELCOME_SHEET, TSP_WELCOME_STYLES } from './welcome-view.ts'
+import { pickWelcomeWhaleVariant, welcomeWhalePlainLines } from '../components/welcome-whale.ts'
 import type { TspNativeFooterConfig } from '../../domain/footer/tsp-native-config.ts'
 import type { TspFooterAffordances } from '../../domain/footer/layout.ts'
-import { TspWorkHub } from './work-hub.ts'
+import { TspWorkHub, workHubPaneWidthSupported } from './work-hub.ts'
+import type { TranscriptStructureBlock, TranscriptWorkSpan } from '../transcript/structure.ts'
+import type { ContextCluster } from '../transcript/context-structure.ts'
 import {
   WORK_DETAILS_REGION,
   buildWorkDetails,
@@ -78,18 +114,25 @@ import {
 } from './work-details.ts'
 import type { ModelPresentation } from '../../app/command/model-presentation.ts'
 import type { PresetPresentation } from '../../app/command/preset-presentation.ts'
+import type { WebAccessPresentation } from '../../app/command/web-access-presentation.ts'
+import type { AcpAccessPresentation } from '../../app/command/acp-access-presentation.ts'
 import type { SessionBrowserPresentation } from '../../app/command/session-browser-presentation.ts'
 import type { TaskCenterPresentationPort } from '../../app/surface/task-presentation-port.ts'
 import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
 import type { TaskPanelItem } from '../../app/surface/task-presentation.ts'
 import type { PendingInputPresentation, PendingTailRow, QueueItem } from '../../app/surface/pending-presentation.ts'
 import { projectTranscriptStructure } from '../transcript/structure.ts'
+import { consecutiveTurnGroup, focusProjectionTurnOf, projectFocus, type FocusProjectedBlock } from '../transcript/focus-projection.ts'
+import { FocusTimingStore } from '../transcript/focus-timing.ts'
+import type { DisplayState } from '../../domain/display/preset.ts'
 import type { ToolPresenter } from '../transcript/tool-presentation.ts'
 import type { TranscriptMessage, TranscriptToolMessage, TurnActivity } from '../../domain/transcript/types.ts'
+import { isSurfacedInteractionTool } from '../../domain/transcript/semantics.ts'
 import type { TranscriptWindowState } from '../../domain/transcript/window.ts'
 import type { TodoItem, TranscriptSearchPresentation } from '../../tui-app.ts'
 import type { StreamingToolPreview } from '../../app/surface/streaming-tool-preparing.ts'
-import { TranscriptNodeKeys, transcriptView, toolRowImageBlocks, imageRefProblem, imageDisplayName, imageIdentityText, dockDraftImageNodes, DOCK_DRAFT_SINGLE_PREVIEW_COLS, DOCK_DRAFT_TWO_PREVIEW_COLS, MAX_IMAGE_BLOB_BYTES, type DockDraftImageEntry, type ToolSvgState } from './transcript-view.ts'
+import { TranscriptNodeKeys, transcriptView, transcriptViewForPreset, describeTranscriptMainBlocks, describeTranscriptMainBlocksForPreset, visibleTranscriptMembers, toolRowImageBlocks, imageRefProblem, imageDisplayName, imageIdentityText, dockDraftImageNodes, DOCK_DRAFT_SINGLE_PREVIEW_COLS, DOCK_DRAFT_TWO_PREVIEW_COLS, MAX_IMAGE_BLOB_BYTES, type DockDraftImageEntry, type ToolSvgState, type TranscriptMainBlockDescriptor } from './transcript-view.ts'
+import { ContinuousMainJournal, emptyTranscriptMain } from './continuous-main.ts'
 import { admitSvg, type SvgAdmission } from '../../domain/visual/svg-admission.ts'
 import { authorizeSvg, svgDigest } from '../../domain/visual/svg.ts'
 import { visualFactLine, visualPartsFromText } from '../../domain/visual/visual-facts.ts'
@@ -106,11 +149,39 @@ import {
   type SelectedVisualState,
 } from './assistant-visual.ts'
 import type { ToolImageState } from './transcript-view.ts'
+import { TRANSCRIPT_COPY_ACTION, transcriptCopyPayload } from './transcript-copy.ts'
 
-/** The renderer-local dock state (welcome + notices). */
+type WorkflowRow = Extract<TranscriptMessage, { kind: 'workflow' }>
+type WorkflowScopedAction = Extract<WorkflowAction, { kind: 'open-phase-agents' | 'open-run-agents' }>
+type WorkflowBrowseTarget = {
+  readonly kind: 'phase' | 'run'
+  readonly owner: WorkflowRow
+  readonly source: object
+  readonly scopePrefix: string
+  readonly phaseKey?: string
+}
+
+type InnerDisclosurePathTarget =
+  | { readonly kind: 'thinking'; readonly owner: Extract<TranscriptMessage, { kind: 'thinking' }> }
+  | { readonly kind: 'context-row'; readonly owner: Extract<TranscriptMessage, { kind: 'system' }> }
+  | { readonly kind: 'context-cluster'; readonly owner: Extract<TranscriptMessage, { kind: 'system' }> }
+  | { readonly kind: 'workflow-run'; readonly owner: WorkflowRow }
+  | { readonly kind: 'workflow-phase'; readonly owner: WorkflowRow; readonly phaseKey: string }
+  | {
+    readonly kind: 'command-compaction'
+    readonly owner: Extract<TranscriptMessage, { kind: 'command' | 'compaction' }>
+  }
+
+/**
+ * The renderer-local dock state (notices + the mount-scoped footer notices).
+ *
+ * TSP-7 Welcome D: the Dock carries NO welcome facts at all. The Quiet
+ * Composer is its only input and its only business controls; the empty-state
+ * invitation lives in Main, where it is projected from the ONE display
+ * eligibility the surface commits — never from a second Session cache.
+ */
 interface DockState {
   notices: readonly DisplayDockNotice[]
-  welcome: readonly DisplayWelcomeFacts[]
   /**
    * TSP-7 PR-D: the mount-scoped footer compatibility notices. They are a
    * SEPARATE segment from the transient `notices`: the transient list evicts
@@ -150,6 +221,16 @@ interface VisualFrameIndex {
   readonly targets: ReadonlyMap<string, VisualCopyTarget>
   /** Copy targets by the actual Copy button node id (the pointer path). */
   readonly copyButtons: ReadonlyMap<string, VisualCopyTarget>
+  /** User and Assistant transcript Copy targets by current node id. */
+  readonly transcriptCopyButtons: ReadonlyMap<string, TranscriptCopyTarget>
+}
+
+interface TranscriptCopyTarget {
+  readonly message: Extract<TranscriptMessage, { kind: 'user' | 'assistant' }>
+  readonly payload: string
+  readonly source: object
+  readonly scopePrefix: string
+  readonly nodeId: string
 }
 
 /** How many transient notices the dock keeps (oldest evicted). */
@@ -188,8 +269,16 @@ const WORK_DETAILS_FEATURE = 'scroll' as const
  * application gesture.
  */
 export interface TspInputHandlers {
-  /** The keyboard exit intent (the empty-draft Ctrl+D through the composer). */
+  /** The keyboard exit intent (the empty-draft Ctrl+D / idle Ctrl+C double press). */
   exit(): void
+  /**
+   * M6 UX PR1: the LIVE authoritative activity fact for the raw exit keys.
+   * Ctrl+C cancels once while `working`, refuses to arm while `unknown`, and
+   * keeps the same-key double press while `idle`. Optional: a mount without it
+   * keeps the historical cancel-only Ctrl+C; the empty-draft Ctrl+D always
+   * keeps the product same-key double press.
+   */
+  sessionActivity?(): ExitSessionActivity
   /**
    * The interrupt/cancel intent — the EXISTING application cancel path
    * (PR3-B §3.4 row 3): aborts a running local shell / interrupts the live
@@ -202,8 +291,31 @@ export interface TspInputHandlers {
    * renderer snapshots the draft, CLEARS the composer BEFORE the callback
    * (so a synchronous failure restoration merges into the empty/current
    * draft), and never applies a stale pre-callback snapshot afterwards.
+   *
+   * TSP I-A: `scopeToken` is the OCCURRENCE this mount's recall kernel
+   * assigned to the accepted input (see `historyRecall`), forwarded verbatim
+   * into the SAME existing submission entry so the write owner settles exactly
+   * that occurrence. It is `undefined` when the recall refused the input — the
+   * submission itself is unaffected and still runs its original path.
    */
-  submit(text: string, request: ComposerSubmitRequest): void
+  submit(text: string, request: ComposerSubmitRequest, scopeToken?: number): void
+  /**
+   * PR2: the SYNCHRONOUS submit admission shared with the application. The
+   * renderer calls it BEFORE any composer mutation: `'held'` means the
+   * application registered the attempt and started the delivery (the draft
+   * must stay and no `submit` may follow); `'legacy'` keeps the renderer's
+   * existing remember/clear/submit sequence; `'refused'` is a silent no-op.
+   */
+  beginComposerSubmission?(text: string, request: ComposerSubmitRequest | 'steer'): 'held' | 'legacy' | 'refused'
+  /**
+   * TSP I-A: the HISTORY-eligibility read for one already-delivery-admitted
+   * draft — the SAME `ApplicationEvents.shouldRememberInput` policy PiTui's
+   * `TuiApp.rememberInput` consults (staged attachments, a pasted path whose
+   * read is still in flight). It answers ONLY whether this input may enter the
+   * plain-text recall; the business submit admission stays with the submission
+   * controller, which receives the submission either way.
+   */
+  shouldRememberInput(text: string): boolean
   /**
    * PR3-B B2: the draft-steer entry (`events.onSteer`) with the same
    * before-callback ordering; the submission controller owns the outcome.
@@ -217,6 +329,21 @@ export interface TspInputHandlers {
    * stages an image and owns no media queue of its own.
    */
   pasteMedia(): void
+  /**
+   * ONE real bracketed paste (`Key{name:'paste'}`) was inserted into the main
+   * composer. The renderer already proved the raw text span; the application
+   * intake owner decides whether it is an image-file-path candidate, reads
+   * and stages it and replaces exactly that span. A different input source
+   * from {@link pasteMedia}.
+   */
+  pastedPath(receipt: PastedPathReceipt): void
+  /**
+   * The ONE pasted-image delivery admission, consulted BEFORE the composer
+   * draft is cleared: false means a pasted path in `text` is still being
+   * attached (the owner has already announced the retry notice), so the
+   * draft, caret and Undo stay untouched.
+   */
+  admitPastedPathDelivery(text: string): boolean
   /** Real user input on the editor seat (editable/submit keys). */
   noteUserInput(): void
   /**
@@ -238,6 +365,14 @@ export interface TspInputHandlers {
    * re-checks its own seat admission before forwarding.
    */
   openModelPicker(entry: 'models' | 'effort'): void
+  /**
+   * TSP-7 PR-G: open the composer's ONE combined Model/Effort control through
+   * the SAME registered `/model` command, in its quick presentation. The
+   * renderer never decides whether a Session exists: the registered command
+   * captures the formal `SessionScope` and routes a sessionless subject to the
+   * full panel with its explicit `Save default`.
+   */
+  openModelQuick(): void
   /** Whether the native `/model` picker business entry is actually installed
    *  (registered, not Host-owned). Optional only for old test fixtures; an
    *  absent fact falls back to the negotiated-kind check below. */
@@ -254,6 +389,36 @@ export interface TspInputHandlers {
    * StatusRuntime selection writer (never optimistic, never a renderer store).
    */
   selectPermission?(id: string): void
+  /**
+   * TSP-7 Welcome D: open the SAME registered `/sessions` Session Browser the
+   * typed command runs, from the Welcome's single Resume action. The renderer
+   * owns no listing, no Session id and no switch: it re-checks its own seat
+   * admission and forwards.
+   */
+  openSessionBrowser(options?: { readonly addDirectory?: boolean }): void
+  /** Whether that `/sessions` business entry is actually installed (registered
+   *  AND presentable on this mount). The Welcome paints its real state. */
+  sessionBrowserAvailable(): boolean
+  /**
+   * Mouse PR4: open the SAME registered `/tasks` (`/subagents`) browser the
+   * typed command runs, from the native first-party Tasks status segment. The
+   * renderer owns no Task/Job/Question read, no Session admission and no
+   * browser: it re-checks its own current-frame + seat admission and forwards
+   * to this ONE application entry, which runs the registered handler.
+   */
+  openTasksBrowserUi(): void
+  /**
+   * Open the existing read-only Work Hub scoped to one Workflow Phase or Run.
+   * The action is composed from the CURRENT canonical row, never from a cached
+   * frame target; the ONE TaskRuntime remains the business owner.
+   */
+  openWorkflowScopedAgents?(action: WorkflowScopedAction): void
+  /** Whether the scoped TaskRuntime entry and its Work Hub are live now. */
+  workflowScopedAgentsAvailable?(): boolean
+  /** Whether that `/tasks` business entry is actually usable now (registered
+   *  AND this mount's live Task Center capability holds). The status segment
+   *  paints its click action from this fact, never from a painted badge. */
+  tasksBrowserUiAvailable(): boolean
 }
 
 /** The B1 binding: editor-local + lifecycle only (submissions are B2). */
@@ -268,14 +433,35 @@ export interface TspInputBinding {
 
 /** What the TSP renderer needs from the composition root. */
 export interface TspRendererOptions {
-  /** The workspace root for tool-args path relativization in the mapper. */
+  /**
+   * The workspace root for tool-args path relativization in the mapper — the
+   * STANDALONE SDK mount / no-status-reader compatibility input ONLY. It is
+   * never the production Session's path authority: a renderer whose mount
+   * bound a status reader derives its tool-path root exclusively from the
+   * FORMALLY COMMITTED `StatusSnapshot.workspace` (see `transcriptCwd()`),
+   * even before that snapshot ever arrived.
+   */
   readonly cwd?: string
   /**
-   * The exit intent: invoked ONCE on the quit key. Routes through the SAME
-   * exit orchestration as `/exit` (surface teardown, Host retirement,
-   * appExit) — never `process.exit`.
+   * The ONE live display authority. Optional ONLY at this renderer boundary so
+   * the existing standalone pure SDK mounts keep the historical Work-section
+   * layout; the production connector declares it REQUIRED. It is read live at
+   * every formal projection — never copied into a mount-local preset.
+   */
+  readonly displayState?: DisplayState
+  /**
+   * The exit INTENT: invoked on a BOUND quit key. Routes through the SAME
+   * exit-intent decision as `/exit` (it may present the in-place choice) —
+   * never `process.exit`. It is NOT a final-exit verdict and never latches.
    */
   readonly requestExit: () => void
+  /**
+   * The FINAL exit commit used by the PRE-BIND emergency Ctrl+C and the fatal
+   * fallback: the existing exit controller directly (surface teardown, Host
+   * retirement, appExit). Absent (standalone/test mounts) keeps
+   * {@link requestExit} as the fallback.
+   */
+  readonly requestImmediateExit?: () => void
   /**
    * The FATAL intent: a mounted renderer failure (the SDK input loop died —
    * the tty owner is gone). Routes through the runner's fatal lifecycle
@@ -284,6 +470,14 @@ export interface TspRendererOptions {
   readonly onFatal?: (error: unknown) => void
   /** SDK connect timeout override (tests); default is the SDK's 1000 ms. */
   readonly connectTimeout?: number
+  /**
+   * PR-Q: the LIVE effective `app.queue.open` keys (the composition root reads
+   * the same definitions + user settings the PiTui keymap uses). The TSP
+   * renderer has no TuiApp keymap; this getter is what makes the raw SDK
+   * `Alt+I`/remap and the Dock's `Manage` label point at the SAME effective
+   * action. Absent = no queue-open key (the Dock shows `Manage` only).
+   */
+  readonly queueOpenKeys?: () => readonly string[]
   /**
    * PR-B1: the presentation bridge over the REGISTERED tool definitions (the
    * SAME bridge the PiTui renderer consumes). It is consulted ONLY to decide
@@ -321,8 +515,27 @@ export interface TspRenderer extends TspInputBinding {
    * advertise the official kinds it renders.
    */
   readonly presetPresentation: PresetPresentation | undefined
+  /**
+   * M5-W PR-C: the native `/web` picker. Absent when the pane does not
+   * advertise the official kinds/features it renders.
+   */
+  readonly webPresentation: WebAccessPresentation | undefined
+  /**
+   * PO-5E: the native `/acp` picker. Absent when the pane does not advertise
+   * the official kinds/features it renders.
+   */
+  readonly acpPresentation: AcpAccessPresentation | undefined
   /** Internal read-only Session Browser seam; absent unless all required kinds are negotiated. */
   readonly sessionBrowserPresentation: SessionBrowserPresentation | undefined
+  /** PR-Q: the native Queue manager sheet; undefined until the composition
+   *  root binds the application controller AND the pane negotiated its kinds. */
+  readonly queuePresentation: QueueManagerPresentation | undefined
+  /**
+   * PR-Q: install the ONE application-level Queue manager controller. Called
+   * once at mount (before input binding); a second bind or a post-disposal bind
+   * fails fast.
+   */
+  bindQueueManager?(controller: QueueManagerController): void
   /**
    * B3-A1/B3-A3: the Task Center presentation sink. It is ALWAYS present — the
    * internal native Work Hub is the renderer's implementation — and the
@@ -345,6 +558,12 @@ export interface TspRenderer extends TspInputBinding {
    * call).
    */
   readonly interaction: SurfaceInteractionPresenter
+  /**
+   * M6 UX PR1: the ONE Client-local Exit Choice seat. It paints the
+   * coordinator's frozen model inside the SAME modal-first keyboard owner as
+   * the official interaction seat; no business decision lives here.
+   */
+  readonly exitChoice: import('../../app/surface/exit-choice.ts').SurfaceExitChoiceSeam
   /**
    * PR-C: install the ONE image binding (the mount's loader and scope
    * sampler) on this renderer. It is SYNCHRONOUS and ONE-TIME: the binding
@@ -377,11 +596,74 @@ export interface TspRenderer extends TspInputBinding {
    */
   readonly bindNativeFooterConfig: (config: TspNativeFooterConfig) => void
   /**
+   * TSP I-C: publish ONE effective command catalog commit onto this mount.
+   * The renderer composes its provider through the SAME shared installed-provider
+   * factory the PiTui surface uses, so there is exactly one completion authority
+   * and one catalog source; every call REPLACES the previous source (a withdrawn
+   * command leaves the menu, an empty install closes the seat) and the mount
+   * stores no catalog of its own.
+   *
+   * It carries no execution right: a candidate only ever edits the composer, and
+   * a disposed mount installs nothing (the command layer keeps its own claims
+   * regardless).
+   */
+  readonly installCommandCompletions: (installation: TspCommandCompletionInstallation) => void
+  /**
+   * TSP I-D: install the ONE inline-attachment stager onto this mount at the
+   * command layer's single registration site — the TSP counterpart of
+   * `TuiApp.setInlineAttachmentStager`. It is a FUNCTION the command plane owns
+   * (its `runAttachmentIntake` is the read/store/notice authority); the renderer
+   * only calls it for a file the Composer really committed and keeps no
+   * attachment state of its own. A disposed mount installs nothing; a retry after
+   * a failed registration replaces the previous function, exactly like the PiTui
+   * setter. Carries no execution, no submit and no Session right.
+   */
+  readonly installInlineAttachmentStager: (stager: InlineAttachmentStager) => void
+  /**
+   * TSP I-E: install the ONE read-only History-search capability bundle on this
+   * mount. It is SYNCHRONOUS and ONE-TIME, exactly like the image binding and
+   * the status reader: the mount owns ONE History seat, the seat is created here
+   * and never a second time, and a binding after disposal is an explicit error.
+   *
+   * The bundle carries READ-ONLY capability only — one search source, the live
+   * session cwd and the atomic Session-currentness capture. It grants no
+   * persistence, no Session ownership and no clipboard authority.
+   */
+  readonly bindHistorySearch: (binding: TspHistorySearchBinding) => void
+  /**
+   * T3-B1: install the ONE read-only semantic-search capability on this mount.
+   * SYNCHRONOUS and ONE-TIME, exactly like the History bundle: the mount owns ONE
+   * Search seat, the seat is created here and never a second time, and a binding
+   * after disposal is an explicit error.
+   *
+   * The capability carries READ-ONLY projection only — the selected Folder's
+   * own `search()`, one match resolution and a source-currentness check. It
+   * grants no corpus, no Session ownership, no Host read and no Composer write.
+   */
+  readonly bindTranscriptSemanticSearch: (binding: TspTranscriptSemanticSearchBinding) => void
+  /**
    * Stop the input loop, close the surface + session ONCE. The promise
    * settles only after the SDK restored the tty (input drain included), so
    * callers awaiting it can safely touch the terminal afterwards.
    */
   readonly dispose: () => Promise<void>
+  /**
+   * TSP I-A: the TWO relocated headless recall diagnostics of this mount's ONE
+   * kernel — the durable per-occurrence settlement fact count of the open
+   * scope, and the number of positions the last reseed reconcile visited.
+   * They are the SAME members, with the same definitions and bounds, that the
+   * PiTui adapter already exposes on `TuiApp`; the recall kernel itself
+   * declares them (`src/client/history/recall-scope.ts`).
+   *
+   * They read THIS MOUNT's recall state and nothing else: no render, no draft,
+   * no seat, no Session read, no file, no persistence. Production has no
+   * consumer — they exist so a headless case can prove that a display-seam
+   * commit actually changed the mount's recall state instead of merely
+   * reaching the seam. I-A presents no recall UI, so this is state
+   * verification, not a visible surface (that is I-B).
+   */
+  scopeFactCountForTest(): number
+  reconcileStepsForTest(): number
 }
 
 /**
@@ -451,6 +733,16 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   // release, so there is exactly ONE close and no bare fire-and-forget
   // promise inside this synchronous function.
   const surface: Surface = session.open({ mode: 'inline', title: 'dsh' })
+  /**
+   * The ONE renderer-local Main journal: it owns the transcript Main's
+   * top-level children through the same Surface's public `send(ops)`, while
+   * every `Surface.render()` below keeps a stable EMPTY Main root plus the
+   * Dock/Layer (and the formal Welcome Main). Never a second Surface and never
+   * a second frame writer.
+   */
+  const mainJournal = new ContinuousMainJournal(surface)
+  /** The stable empty Main root the Surface always renders for the transcript. */
+  const EMPTY_TRANSCRIPT_MAIN = emptyTranscriptMain()
   /**
    * The dock's draft-preview stylesheet role. The attribute VALUE may contain a
    * period; the sheet NAME may not (the client rejects a dotted sheet name).
@@ -529,7 +821,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     `)
   }
   let disposed = false
-  let exitRequested = false
+  /** The ONE fatal latch (never a normal exit intent). */
+  let fatalExitRequested = false
   /** Monotonic renderer-local identities (notices; scope epochs). */
   let noticeSeq = 0
   let scopeEpoch = 0
@@ -540,12 +833,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * lifecycle (error outcome, no resume hint) — never a normal exit and never
    * a second invocation.
    */
+  /** The FINAL exit commit (pre-bind emergency + fatal fallback). */
+  const requestImmediateExit = (): void => (options.requestImmediateExit ?? options.requestExit)()
+
   const routeFatal = (error: unknown): void => {
-    if (exitRequested) return
-    exitRequested = true
+    if (fatalExitRequested) return
+    fatalExitRequested = true
     const fatal = options.onFatal
     if (fatal !== undefined) fatal(error)
-    else options.requestExit()
+    else requestImmediateExit()
   }
 
   // ── Renderer-local presentation state ──
@@ -571,9 +867,31 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * available.
    */
   let hydrating = false
-  let lastMain: Node | undefined
+  /**
+   * The CURRENT projection's top-level Main blocks, derived by
+   * `rebuildLastMain()` and committed by `render()`. They are renderer-local
+   * descriptors, never a second transcript: each one only states its key, its
+   * semantic stamp and how to materialize that ONE block.
+   */
+  let lastMainBlocks: readonly TranscriptMainBlockDescriptor[] = []
+  /** The scoped-browse admission the current descriptors were built with. The
+   *  Workflow button's existence is part of the committed Main, so a live
+   *  admission flip (resize crossing the Hub floor, seat change, late bind)
+   *  converges the descriptors before the next frame instead of leaving a
+   *  painted entry whose click the same predicate would refuse. `undefined`
+   *  means no Main projection was built yet. */
+  let committedBrowseAdmission: boolean | undefined
   let modelPicker: TspModelPicker | undefined
+  let queueManagerPresenter: TspQueueManager | undefined
+  /** TSP-7 PR-G: the composer's anchored quick Model/Effort selector. A local
+   *  presentation panel of THIS renderer (never a fifth business Presenter and
+   *  never a second catalog/writer owner), retired with every higher seat. */
+  let modelQuick: TspModelQuickMenu | undefined
   let presetPicker: TspPresetPicker | undefined
+  /** M5-W PR-C: the ONE native `/web` menu (same layer, one page + Details). */
+  let webPicker: TspWebAccessPicker | undefined
+  /** PO-5E: the ONE native `/acp` menu (same layer, one page + Details). */
+  let acpPicker: TspAcpAccessPicker | undefined
   let sessionBrowser: TspSessionBrowser | undefined
   /** B3-A1: the internal native Work Hub presenter (same ONE layer). */
   let workHub: TspWorkHub | undefined
@@ -596,10 +914,70 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * premature no-op (and the resources are still released exactly once).
    */
   let disposeTask: Promise<void> | undefined
-  const dock: DockState = { notices: [], welcome: [], footerNotices: [] }
+  const dock: DockState = { notices: [], footerNotices: [] }
+  /**
+   * TSP-7 Welcome D: the ONE display-only Welcome eligibility of this mount.
+   * It is written by exactly three commits — `setWelcomeIdle` (the formal
+   * sessionless invitation), the hydration fence (always hidden) and the live
+   * main subject's `setTranscript` commit — and read only by `render()`'s Main
+   * selection. No Session facts, no id, no history and no second cache.
+   */
+  let welcomeEligibility: DisplayWelcomeEligibility = 'hidden'
+  let welcomeWorkspace: import('../../app/surface/display-seam.ts').DisplayWelcomeWorkspace | undefined
+  /**
+   * TSP-7 Welcome D: the whale pick of THIS mount, drawn ONCE and never
+   * re-drawn: a repaint, a resize, a status refresh or a Browser cancel keeps
+   * the same variant for the whole mount lifetime.
+   */
+  const welcomeWhaleVariant = pickWelcomeWhaleVariant()
+  /**
+   * TSP-7 Welcome D: the ONE predicate that decides whether the Welcome is the
+   * presented Main right now. `render()` selects the Main with it and the
+   * Resume action re-checks with it, so a click can never act on a frame the
+   * mount no longer shows: the sessionless invitation or the live MAIN
+   * subject's own blank commit qualifies, while the hydration window and the
+   * temporary Reader (a different subject's surface) do not.
+   */
+  /**
+   * TSP-7 Welcome D: the empty state is an EMPTY state, so the committed
+   * projection has the last word. A blank subject still shows real turn-less
+   * rows — a command result card, a refusal, a system line — and those are
+   * content the user must see: the Welcome may only occupy Main while the
+   * frame it would replace carries no visible message at all. This is a
+   * presentation fact about the frame ALREADY committed, never a second
+   * authority: the eligibility still decides whether the empty state is
+   * allowed, and a started turn hides it in the surface layer.
+   */
+  let lastProjectionEmpty = true
+  const welcomeMainPresented = (): boolean =>
+    welcomeEligibility !== 'hidden' && !hydrating && detailsSlot === undefined && lastProjectionEmpty
   const pending: { queued: readonly QueueItem[]; tail: readonly PendingTailRow[]; running: boolean } = { queued: [], tail: [], running: false }
   /** The application's pending-submit fact, surfaced as a dock line. */
   let pendingSubmit: SubmitPendingDetail | undefined
+  /**
+   * TSP I-A: the ONE Client-local input-recall kernel of THIS mount (see
+   * `src/client/history/recall-scope.ts`). It is mount-private, never a module
+   * global: the recall projection, the OPEN scope's occurrences, the write
+   * owner's settlements and the hydration reseed reconcile all live here, and
+   * the mount's Enter/Send occurrences are tokened from it. It holds no
+   * persistence, no Session identity, no timer and no subscription — the row
+   * owner (`InputHistory.persist`) and the publication authority
+   * (`SessionRuntime`) stay where they are and only REPORT into this kernel
+   * through the existing display seam. I-A added no visible recall surface;
+   * TSP I-B made the composer's ↑/↓ read exactly this projection — the composer
+   * owns only the short-lived browse position and the draft it replaced.
+   */
+  const historyRecall = createHistoryRecallScope()
+  /**
+   * PR2: the live submission attempt freezing the composer, or undefined.
+   * Set ONLY by the application's `holdSubmission` (through the composer
+   * port) and cleared by `settleSubmission`. While present the SDK editor is
+   * painted `readonly`, Send is disabled, and the composer reducer refuses
+   * edits and submits.
+   */
+  let heldSubmission: { readonly attemptId: string; readonly text: string; readonly remember: boolean } | undefined
+  /** PR2: whether the composer is held (the ONE read every gate consults). */
+  const composerHeld = (): boolean => heldSubmission !== undefined
   /**
    * PR3-B B1: the ONE program-owned composer. The SDK controls the editor
    * node (`text`/`cursor` in UTF-16 units); the native edit/undo/send
@@ -614,6 +992,165 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       render()
     },
     notify: (text, kind) => display.notify(text, kind),
+  }, {
+    // The recall read is the mount's own kernel snapshot — no second history
+    // source, no file handle, no Session filter invented here.
+    entries: () => historyRecall.snapshot(),
+    // The SAME two application admissions a submission consults, read off the
+    // CURRENT bound handlers (never a boot-time capture) and only when the
+    // composer is about to replace a live draft with a recalled row. A refusal
+    // leaves the browse un-entered; a throw keeps travelling up the original
+    // key stack.
+    admitDraft: (text) => {
+      // `routeInput` holds or drops every key before `dispatchKey`, so the
+      // composer only ever runs once the bind is live: assert the pairing for
+      // the type system rather than silently defaulting (the same shape as
+      // `routeInput`'s own check).
+      const handlers = boundHandlers
+      if (handlers === undefined) throw new Error('the TSP composer recalled before the input was bound')
+      return handlers.admitPastedPathDelivery(text) && handlers.shouldRememberInput(text)
+    },
+  })
+  /**
+   * TSP I-E: the ONE History-search seat of this mount, created exactly once by
+   * {@link bindHistorySearch} at the mount. It is a short-lived Dock seat — not a
+   * Presenter, not a second composer, not a second SDK surface — and it holds no
+   * history, Session or clipboard authority of its own.
+   */
+  let historySearch: TspHistorySearchSeat | undefined
+  /** TSP I-E: the one-time History bind latch (a lifecycle fact, not a cache). */
+  let historySearchInstalled = false
+  /**
+   * T3-B1: the ONE Session semantic-search seat of this mount, created exactly
+   * once by {@link bindTranscriptSemanticSearch}. Like the History seat it is a
+   * short-lived Dock seat — not a Presenter, not a second composer, not a second
+   * SDK surface — and it holds no corpus, no Session and no Composer authority:
+   * the surface's read-only binding answers every query from the live Folder.
+   */
+  let transcriptSearch: TspTranscriptSearchSeat | undefined
+  /** T3-B1: the one-time semantic-search bind latch. */
+  let transcriptSearchInstalled = false
+  /** T3-B1: the bound read-only semantic-search capability (the surface's ONE
+   *  projection of the selected Folder). Absent on a scripted mount that
+   *  declares no semantic-search plane. */
+  let transcriptSearchBinding: TspTranscriptSemanticSearchBinding | undefined
+  /**
+   * TSP I-E: the History card's SEAT LIFECYCLE fact, including a Modal park.
+   * This is deliberately NOT `historySearch.isOpen()`: while a Modal owns the
+   * keys the card is parked, `isOpen()` answers false, but the SAME instance
+   * still holds the Composer seat and comes back when the blocker settles. An
+   * asynchronous Composer intake that started BEFORE the park must stay
+   * refused for that whole window — the park must not re-open a hidden business
+   * write into the draft the card will restore into. The keyboard owner, the
+   * painted projection and the click admissions keep using `isOpen()`.
+   */
+  const historyHoldsComposerSeat = (): boolean => historySearch?.holdsSeat() === true
+  /**
+   * TSP I-D: the ONE inline-attachment stager of this mount, installed by the
+   * command layer through the renderer's `installInlineAttachmentStager` port at
+   * the SAME single registration site where PiTui receives
+   * `app.setInlineAttachmentStager`. The mount keeps no attachment state of its
+   * own: this is the command plane's function (`runAttachmentIntake` owns the
+   * read, the limits, the draft stores and the notices), and the renderer owns
+   * only the editor facts the stake needs. A disposed mount installs nothing and
+   * a late settlement finds nothing; a retry after a failed registration
+   * REPLACES the previous function, exactly like the PiTui setter, so this mount
+   * never holds a stager belonging to a dead runner.
+   */
+  let inlineAttachmentStager: InlineAttachmentStager | undefined
+  /**
+   * TSP I-D: settle ONE inline attachment FILE acceptance the Composer really
+   * committed. This is the ONLY path in the renderer that may reach a Client-local
+   * read, and it reaches it exclusively through the installed command-plane
+   * stager — the renderer never reads a file, never touches a draft store and
+   * never invents a placeholder.
+   *
+   * The synchronous gate below is the whole permission: the seat already proved
+   * the commit landed (a refused write never calls here), the live document and
+   * caret must still be exactly the accepted ones, the mount must still be alive
+   * and out of the hydration window, and a stager must actually be installed.
+   * The stake then carries the CURRENTNESS half: `current()` re-reads the live
+   * document, the caret AND the composer's edit revision, so a read that lands
+   * after the user typed on, cleared the draft, switched the Session or disposed
+   * this mount commits nothing — and an A→B→A text walk is refused by the
+   * revision, not by luck. Session/Workspace ownership stays where it always
+   * was: the command plane captured its own scope before the read.
+   */
+  const settleInlineAttachmentAcceptance = (acceptance: InlineAttachmentAcceptance): void => {
+    if (acceptance.kind !== 'path') return
+    const stager = inlineAttachmentStager
+    const span = acceptance.span
+    if (stager === undefined || span === undefined) return
+    if (disposed || hydrating) return
+    // TSP I-E: the History card owns the composer seat. An acceptance read that
+    // was started BEFORE the chord still must not write its placeholder into the
+    // draft while the card is what the user is operating — the draft is the
+    // card's Restore target meanwhile, and a hidden write there would be a
+    // second owner of the seat the plan froze to one card.
+    if (historyHoldsComposerSeat()) return
+    const acceptedText = acceptance.lines.join('\n')
+    let acceptedCursor = acceptance.cursorCol
+    for (let index = 0; index < acceptance.cursorLine; index += 1) {
+      acceptedCursor += (acceptance.lines[index]?.length ?? 0) + 1
+    }
+    const live = composer.state()
+    if (live.text !== acceptedText || live.cursor !== acceptedCursor) return
+    const acceptedRevision = composer.editRevision()
+    stager({
+      command: acceptance.command,
+      path: acceptance.path,
+      rawDraft: acceptedText,
+      span,
+      // The live seat, re-read EVERY time (never the value captured above): the
+      // same document bytes are not the same operation once the draft moved, and
+      // this mount's ONE composer object is a mount constant, so identity needs
+      // no second fence here.
+      current: () => !disposed && !hydrating && !historyHoldsComposerSeat()
+        && !composerHeld()
+        && composer.editRevision() === acceptedRevision
+        && composer.getDraft() === acceptedText
+        && composer.state().cursor === acceptedCursor,
+      draft: () => (disposed ? undefined : composer.getDraft()),
+      commit: (placeholder) => (
+        // PR2/F1: the LAST fence — a hold that began after the read owns the
+        // document; the late placeholder must not land.
+        composerHeld()
+          ? false
+          : composer.replaceInlineAttachmentFragment(
+            { text: acceptedText, cursor: acceptedCursor, editRevision: acceptedRevision },
+            span,
+            placeholder,
+          )
+      ),
+      notify: (message, kind) => composer.notify(message, kind),
+    })
+  }
+  /**
+   * TSP I-C/I-D: the ONE input-completion seat of this mount. It is created with
+   * the composer it edits and holds only the short-lived candidate list, the
+   * highlighted row, the request its answer must match, and the ONE staged
+   * inline attachment of the accept gesture in flight. The catalog source
+   * arrives later through `installCommandCompletions` (the command layer's own
+   * commit point); until then the seat queries nothing and paints nothing.
+   *
+   * Its admission is the composer's OWN live key-ownership facts plus the two
+   * anchored menus that sit above it in the fixed ladder: a seat that is not
+   * admitted neither keeps a popup painted nor consumes a key, so a Modal,
+   * Reader, Picker, the Permission menu or the Quick menu can never be shadowed
+   * by a hidden candidate list.
+   */
+  const completion: TspInputCompletion = createTspInputCompletion({
+    composer,
+    // The composer seat's ONE admission authority, so a candidate list can
+    // never be operable (or write an accepted inline attachment) while the
+    // History card owns that seat — the same rule Send, Stop, Model and the
+    // Permission menu answer to.
+    admitted: () => composerActionsAdmitted()
+      && !composerHeld()
+      && !permissionMenuOpen
+      && modelQuick?.isOpen() !== true,
+    requestRender: () => render(),
+    onInlineAttachmentCommitted: settleInlineAttachmentAcceptance,
   })
   /**
    * PR3-B B3: the ONE interaction seat (the renderer's modal presentation
@@ -626,18 +1163,28 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     render: () => render(),
     // A frame/focus failure while settling a prompt must reach the runner's
     // fatal lifecycle (the tty owner is broken), never become a silent modal
-    // cancellation; a repeated failure keeps the FIRST fatal (exitRequested).
+    // cancellation; a repeated failure keeps the FIRST fatal (fatalExitRequested).
     onFatal: (error) => { routeFatal(error) },
     notify: (text, kind) => { display.notify(text, kind) },
     setSettledQuestionAnswersLookup: (lookup) => {
       settledQuestionAnswers = lookup
+      // The lookup is a LIVE closure over the official `userQuestions`
+      // projection: a late answer settles AFTER installation, with no further
+      // callback. A projection change therefore has to re-derive the current
+      // descriptors so the question row's stamp reads the new payload.
+      settledQuestionAnswersRevision += 1
       if (!rebuildLastMain()) return
       render()
     },
     // B3-A2 §6.6: the temporary Screen may still be painted when an official
     // modal takes the LOGICAL seat. Retire it synchronously here, BEFORE the
     // form becomes visible/answerable; the close stays owned by this renderer.
-    beforeModalSeat: () => { retireWorkDetails('modal') },
+    // TSP-7 PR-G: the composer quick menu retires in the same step — a modal
+    // outranks it, and no quick frame may stay operable under a form.
+    beforeModalSeat: () => {
+      modelQuick?.retire()
+      retireWorkDetails('modal')
+    },
     // The native modal inputs: the base surface's OWN id (an event addressed at
     // another surface is foreign to this seat) plus the two negotiated
     // capability decisions taken above from the handshake. The seat never reads
@@ -682,7 +1229,43 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // never an admission requirement.
     nativeKv: session.caps.kinds.includes('kv'),
   })
+  webPicker = new TspWebAccessPicker({
+    render: () => render(),
+    // The same ONE seat admission every sibling presenter uses: a modal, the
+    // temporary Reader, the hydration window or an unbound renderer owns the
+    // input before the Web menu does.
+    canInteract: () => !disposed && !hydrating && inputBound && !seat.hasModalSeat(),
+    notify: (text, kind) => display.notify(text, kind),
+    // The ONE Surface owner performs the Reading's native scroll, addressed by
+    // a wire id of the frame the presenter itself built.
+    nativeScroll: (id, to) => { surface.scroll(id, to) },
+  })
+  acpPicker = new TspAcpAccessPicker({
+    render: () => render(),
+    // The SAME single seat admission: the ACP menu is a sibling non-blocking
+    // presenter, never a second input owner.
+    canInteract: () => !disposed && !hydrating && inputBound && !seat.hasModalSeat(),
+    notify: (text, kind) => display.notify(text, kind),
+    nativeScroll: (id, to) => { surface.scroll(id, to) },
+  })
   modelPicker.resize(session.caps.cols, session.caps.cell.w)
+  modelQuick = new TspModelQuickMenu({
+    render: () => render(),
+    // The same seat admission every composer control uses: a modal, the
+    // temporary Screen, a higher presenter, the hydration window, an unbound
+    // renderer or the History card owns the input before this menu does.
+    canInteract: () => composerActionsAdmitted(),
+    // The ONE focus owner is `applyFocus`; this menu never calls `surface.focus`
+    // through a second path.
+    setFocus: () => applyFocus(true),
+    // The Full handoff runs through the registered `/model` UI entry — the same
+    // route the typed command and the old Model button used, never a string
+    // submitted through the Composer.
+    openFull: () => { composerModelClicked('models') },
+    // The ONE Surface owner performs the reveal of the row the keyboard moved
+    // onto, addressed by a wire id of the frame this presenter indexed.
+    reveal: (id) => { surface.reveal(id, 'nearest') },
+  })
   workHub = new TspWorkHub({
     surfaceId: surface.id,
     render: () => render(),
@@ -739,12 +1322,24 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     if (generation !== presenterOpenGeneration) return inert
     return open()
   }
-  /** The three sibling presenters, in the fixed retirement order. */
-  const siblingRetirements = (...excluded: readonly ('model' | 'preset' | 'browser' | 'hub')[]): Array<() => void> => {
+  /** The sibling retirement steps, in the fixed order. */
+  const siblingRetirements = (...excluded: readonly ('model' | 'preset' | 'browser' | 'hub' | 'web' | 'acp')[]): Array<() => void> => {
     const steps: Array<() => void> = []
+    // TSP I-E: a non-blocking Presenter NEVER coexists with the History card. It
+    // is retired SYNCHRONOUSLY as the first step of every presenter open —
+    // before any retiring callback can run — so a hidden History never keeps a
+    // read in flight and never claims a key.
+    steps.push(() => historySearch?.retire())
+    // TSP-7 PR-G: the composer quick menu is the FIRST step in EVERY presenter
+    // open — including its own — so at most one of the two model presentations
+    // is ever operable and a Quick → Full handoff never leaves a clickable
+    // quick frame behind. It is a local `retire()`: no re-entrant callback.
+    steps.push(() => modelQuick?.retire())
     if (!excluded.includes('model')) steps.push(() => modelPicker?.retire())
     if (!excluded.includes('preset')) steps.push(() => presetPicker?.retire())
     if (!excluded.includes('browser')) steps.push(() => sessionBrowser?.retire())
+    if (!excluded.includes('web')) steps.push(() => webPicker?.retire())
+    if (!excluded.includes('acp')) steps.push(() => acpPicker?.retire())
     if (!excluded.includes('hub')) steps.push(() => { retireHubWithDetails('hub-replaced') })
     return steps
   }
@@ -765,6 +1360,21 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       () => modelPicker!.presentation.open(request),
       // A superseded open never minted a panel; its handle is inert and the
       // command's own read owner checks `isDisposed()` before every read.
+      {
+        setLoading: () => {},
+        setDirectory: () => {},
+        setLoadError: () => {},
+        isDisposed: () => true,
+        close: () => {},
+      },
+    ),
+    // TSP-7 PR-G: the composer's quick presentation of the SAME request. It
+    // takes the seat exactly like the full picker: the sibling sweep (whose
+    // first step is this menu's own retirement) commits before the panel opens,
+    // and `presenterOpenGeneration` decides a re-entrant takeover.
+    openQuick: (request) => openExclusively(
+      siblingRetirements(),
+      () => modelQuick!.open(request),
       {
         setLoading: () => {},
         setDirectory: () => {},
@@ -798,6 +1408,38 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       { isDisposed: () => true, setSnapshot: () => {}, close: () => {} },
     ),
     notify: (message, kind) => sessionBrowser!.presentation.notify(message, kind),
+  }
+  /**
+   * M5-W PR-C: the ONE application-level WebAccessPresentation on this renderer.
+   * It takes the seat exactly like every sibling presenter (the sibling sweep
+   * retires the model/preset/browser/hub panels, and THIS picker retires when a
+   * sibling opens), so at most one non-blocking presenter is operable.
+   */
+  const webPresentation: WebAccessPresentation = {
+    open: (request) => openExclusively(
+      siblingRetirements('web'),
+      () => webPicker!.presentation.open(request),
+      // A superseded open never minted a panel; the command's own read owner
+      // checks `isDisposed()` before every read.
+      { isDisposed: () => true, setLoading: () => {}, setPending: () => {}, setStatus: () => {}, close: () => {} },
+    ),
+    notify: (message, kind) => webPicker!.presentation.notify(message, kind),
+  }
+  /**
+   * PO-5E: the ONE application-level AcpAccessPresentation on this renderer. It
+   * takes the SAME seat as every sibling presenter (the sweep retires the
+   * model/preset/browser/hub/web panels, and THIS picker retires when a sibling
+   * opens), so at most one non-blocking presenter is operable.
+   */
+  const acpPresentation: AcpAccessPresentation = {
+    open: (request) => openExclusively(
+      siblingRetirements('acp'),
+      () => acpPicker!.presentation.open(request),
+      // A superseded open never minted a panel; the command's own read owner
+      // checks `isDisposed()` before every read.
+      { isDisposed: () => true, setLoading: () => {}, setPending: () => {}, setStatus: () => {}, close: () => {} },
+    ),
+    notify: (message, kind) => acpPicker!.presentation.notify(message, kind),
   }
   /**
    * The Task Center presentation sink the surface installs is a SEAT WRAPPER,
@@ -849,6 +1491,51 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * redraws the SAME rows instead of dropping them for one frame.
    */
   let lastStreamingToolPreviews: readonly StreamingToolPreview[] = []
+  /** The last formally committed transcript window and turn boundaries.
+   *  These are retained inputs for tail-preview admission and proven Activity
+   *  close times only; no mirror stats authority or second window owner. */
+  let lastWindowState: (TranscriptWindowState & { firstTurn?: number; lastTurn?: number; hasNewer?: boolean }) | undefined
+  let lastTurnActivities: ReadonlyMap<number, TurnActivity> | undefined
+  /** The ONE renderer-local Focus Turn disclosure owner set. Separate
+   *  occurrence node keys are derived from the projected owner object; the
+   *  semantic open decision remains the turn number. */
+  const expandedFocusTurns = new Set<number>()
+  const focusDisclosureByPath = new Map<string, number>()
+  const focusTiming = new FocusTimingStore()
+  /** The current Focus frame's Work owner/turn indexes, rebuilt from the
+   *  exact expanded projection that produced its native sections. */
+  let focusWorkTurnByOwner: ReadonlyMap<TranscriptMessage, number> = new Map()
+  let focusWorkOwnersByTurn: ReadonlyMap<number, ReadonlySet<TranscriptMessage>> = new Map()
+  /** The top-level ordinary process Tool keys the CURRENT Focus frame projects
+   *  per turn. A root close resets exactly these cards; a settled human-
+   *  interaction card, a PTC child path and another Turn keep their own owners. */
+  let focusToolRootsByTurn: ReadonlyMap<number, ReadonlySet<string>> = new Map()
+  /** The Thinking owners the CURRENT Focus frame projects per turn (the
+   *  PiTui-Focus secondary reset set; Context/cluster owners are NOT here). */
+  let focusThinkingOwnersByTurn: ReadonlyMap<number, ReadonlySet<TranscriptMessage>> = new Map()
+  /** Renderer-local version of the settled-answer lookup (see the mapper's
+   *  `settledQuestionAnswersRevision`): a settled Question changes a tool row
+   *  without a Folder mutation, so this version is part of that row's stamp. */
+  let settledQuestionAnswersRevision = 0
+  /** The ONE renderer-local Compact Work disclosure owner set, keyed by the
+   *  canonical span owner OBJECT identity. Never merged with expandedToolKeys
+   *  (which owns SVG blob demand). Retired with the source/hydration/dispose. */
+  const expandedWorkOwners = new Set<TranscriptMessage>()
+  /** The CURRENT frame's Compact Activity node-key PATH → span owner. Rebuilt
+   *  from the per-root contributions on every projection; empty in Full/Focus. */
+  const workDisclosureByPath = new Map<string, TranscriptMessage>()
+  /**
+   * The members the CURRENT projection actually materializes.
+   *
+   * A Compact Activity builds NO member node while it is collapsed, so a Tool
+   * image inside such a Work is NOT visible and must not start an attachment
+   * read or a blob send. The image demand therefore follows THIS set, not the
+   * raw window: it is derived from the SAME canonical structure the projection
+   * consumes, and it is a per-commit disposable, never a second transcript
+   * store. Full/Focus materialize every member, so their demand is the whole
+   * window.
+   */
+  let visibleMembers: ReadonlySet<TranscriptMessage> = new Set()
   /**
    * PR-C: the ONE image binding of this renderer, installed by the mount
    * BEFORE the first tool projection. It carries the mount's loader (the
@@ -882,6 +1569,24 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * status can never paint beside the incoming one's transcript.
    */
   let presentedStatus: StatusSnapshot | undefined
+  /**
+   * R13: the ONE tool-path relativization root for the CURRENT displayed
+   * transcript — the formally committed display-subject workspace. A mount
+   * with a bound status reader NEVER falls back to `options.cwd`: before the
+   * first formal commit (and after hydration retired the old snapshot) the
+   * root is `undefined`, so paths stay unabridged instead of borrowing the
+   * Client launch directory. Stateless and read-only: no store read, no cache,
+   * no `process.cwd()`; the only input is `presentedStatus`, sampled at the
+   * formal display commit. A standalone SDK fixture without a reader keeps
+   * the mount-time `options.cwd` compatibility input.
+   */
+  const transcriptCwd = (): string | undefined => {
+    if (!statusReaderInstalled) return options.cwd
+    const workspace = presentedStatus?.workspace
+    return workspace === undefined || workspace.cwdUnavailable === true || workspace.cwd === ''
+      ? undefined
+      : workspace.cwd
+  }
   /**
    * PR-C (external review r3): the busy-LIFETIME identity of the current
    * display subject — a renderer-local presentation serial advanced at every
@@ -941,6 +1646,23 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   const svgAdmissions = new Map<string, SvgAdmission>()
   /** PR-D: admitted SVG digests → the ONE sender's blob id (content-addressed). */
   const svgBlobIds = new Map<string, string>()
+  const expandedThinkingOwners = new Set<TranscriptMessage>()
+  const expandedContextRowOwners = new Set<TranscriptMessage>()
+  const expandedClusterOwners = new Set<TranscriptMessage>()
+  /**
+   * T3-0B: the ONE manual owner of native Command/Compaction disclosure. A
+   * card with real detail starts collapsed; a detail-less card stays directly
+   * readable. The set is source-local like every sibling above and is never
+   * reset by closing a Work/Focus ancestor.
+   */
+  const expandedCommandCompactionOwners = new Set<TranscriptMessage>()
+  /** T3-0C: the ONE source-scoped Workflow disclosure owner and its exact
+   *  last-seen official facts (members array reference + run status). */
+  const workflowDisclosureStates = new Map<WorkflowRunId, WorkflowRunDisclosureState>()
+  const workflowSeen = new Map<WorkflowRunId, { members: readonly WorkflowMemberView[]; status: WorkflowRunStatus }>()
+  /** Exact current-frame Workflow browse button ids and their canonical owners. */
+  let workflowBrowseButtons: ReadonlyMap<string, WorkflowBrowseTarget> = new Map()
+  const innerDisclosureByPath = new Map<string, InnerDisclosurePathTarget>()
   /**
    * PR-D RFL-016: the tool-card keys the user EXPANDED via the Tern `toggle`
    * event. A ready SVG card starts collapsed; only the user's expansion
@@ -954,6 +1676,27 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    *  unambiguous. A toggle whose id does not end with a current path is
    *  stale/foreign and is ignored. */
   const toolDisclosureByPath = new Map<string, string>()
+  const retireTranscriptDisclosureScope = (): void => {
+    expandedFocusTurns.clear()
+    focusDisclosureByPath.clear()
+    focusTiming.resetSessionScope()
+    focusWorkTurnByOwner = new Map()
+    focusWorkOwnersByTurn = new Map()
+    focusToolRootsByTurn = new Map()
+    focusThinkingOwnersByTurn = new Map()
+    expandedWorkOwners.clear()
+    workDisclosureByPath.clear()
+    expandedToolKeys.clear()
+    toolDisclosureByPath.clear()
+    expandedThinkingOwners.clear()
+    expandedContextRowOwners.clear()
+    expandedClusterOwners.clear()
+    expandedCommandCompactionOwners.clear()
+    innerDisclosureByPath.clear()
+    workflowDisclosureStates.clear()
+    workflowSeen.clear()
+    workflowBrowseButtons = new Map()
+  }
   /**
    * PR3: the CURRENT committed frame's Assistant figures — the published refs
    * in paint order, each figure's wrapper node id, and the two Copy-target
@@ -965,6 +1708,17 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   let figureNodeIds: ReadonlyMap<string, string> = new Map()
   let visualTargets: ReadonlyMap<string, VisualCopyTarget> = new Map()
   let visualCopyButtons: ReadonlyMap<string, VisualCopyTarget> = new Map()
+  /** Copy actions admitted only by the exact current main-frame node id. */
+  let transcriptCopyButtons: ReadonlyMap<string, TranscriptCopyTarget> = new Map()
+  /**
+   * Mouse PR4: the wire node ids carrying {@link TSP_FOOTER_TASKS_ACTION} in
+   * the LAST COMMITTED dock frame — the event provenance of one pointer click,
+   * never business state. The set is REPLACED at every `surface.render`
+   * commit boundary from that frame's own `seg` nodes; a frame without the
+   * action-bearing segment clears it, so a stale node id (a retired badge, a
+   * configuration change, a hydration) can never claim the intent.
+   */
+  let tasksActionNodeIds: ReadonlySet<string> = new Set()
   /**
    * PR3: the selected figure of the CURRENT subject. It stores the ref plus
    * the 1-based position/count painted in the last committed frame; the next
@@ -984,6 +1738,22 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    *  editor + native footer only, never a fake text button. */
   const composerChromeSupported = (): boolean =>
     session.caps.features.includes('styles') && session.caps.kinds.includes('el')
+
+  /**
+   * TSP I-E: the ONE capability gate of the native History card. It reads the
+   * EXACT kinds the card's own projection constructs plus the two features it
+   * really uses (`styles` for the scoped sheet, `scroll` for the two native
+   * scroll containers) from the negotiated handshake — never a version label or
+   * a window size. A pane that cannot paint and scroll the whole card gets an
+   * explicit unavailable statement, never a reduced second-tier UI.
+   */
+  const nativeHistoryCapable = (): boolean =>
+    ['col', 'row', 'text', 'input', 'el', 'scroll'].every(kind => session.caps.kinds.includes(kind))
+    && session.caps.features.includes('styles')
+    && session.caps.features.includes('scroll')
+  /** The card's responsive breakpoint: the ACTUAL pane width in px, never the
+   *  desktop window width (a TSP pane can be a split of any window). */
+  const historyPaneWide = (): boolean => session.caps.cols * session.caps.cell.w > 720
 
   /** The editor's REAL node path: inside the Quiet Composer Shell it is
    *  `dock.quiet-composer.composer` (region -> shell key -> editor key); the
@@ -1011,11 +1781,38 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         ? workHub.desiredFocusId() ?? null
         : sessionBrowser?.isOpen() === true
           ? sessionBrowser.desiredFocusId() ?? null
-          : presetPicker?.isOpen() === true
-            ? presetPicker.desiredFocusId() ?? null
-            : modelPicker?.isOpen() === true
-              ? modelPicker.desiredFocusId() ?? null
-              : composerFocusId
+          : webPicker?.isOpen() === true
+            ? webPicker.desiredFocusId() ?? null
+            : acpPicker?.isOpen() === true
+              ? acpPicker.desiredFocusId() ?? null
+            : presetPicker?.isOpen() === true
+              ? presetPicker.desiredFocusId() ?? null
+              : modelPicker?.isOpen() === true
+                ? modelPicker.desiredFocusId() ?? null
+                : queueManagerPresenter?.isOpen() === true
+                  ? queueManagerPresenter.desiredFocusId() ?? null
+                // TSP-7 PR-G: the composer quick menu is the LAST seat above the
+                // Composer. It claims the hardware caret only while its search
+                // field owns the keyboard (the real wire id of the node this frame
+                // built); everywhere else it is app-routed and asks for no caret,
+                // so the Composer's draft and caret stay untouched.
+                // TSP I-E: an OPERABLE History card owns the hardware caret on
+                // its own query field (the real wire id of the field this frame
+                // built). It outranks the Quick menu, the Permission menu and
+                // the Composer, it never claims focus while parked, and closing
+                // it returns the caret to the ONE composer through this function.
+                : historySearch?.isOpen() === true
+                  ? historySearch.desiredFocusId() ?? null
+                  // T3-B1: an open Session Search card owns the hardware caret on
+                  // its own query field (the real wire id of the field this frame
+                  // built). It outranks the Quick menu, the Permission menu and
+                  // the Composer, and closing it returns the caret to the ONE
+                  // composer through this function.
+                  : transcriptSearch?.isOpen() === true
+                    ? transcriptSearch.desiredFocusId() ?? null
+                    : modelQuick?.isOpen() === true
+                    ? modelQuick.desiredFocusId() ?? null
+                    : composerFocusId
     if (!force && desired === lastAppliedFocusId) return
     lastAppliedFocusId = desired
     composer.setFocused(desired === composerFocusId)
@@ -1326,14 +2123,51 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     return true
   }
 
+  /**
+   * PR2: derive the frame's figure indexes from the CURRENT descriptors. The
+   * Dock's chord hint reads `visualOrder`, but the journal materializes a root
+   * only when its stamp changed; this pure derivation gives the dock the SAME
+   * figure order the Main will paint, without materializing unrelated history
+   * and without a second writer.
+   */
+  function previewFrameIndexes(): void {
+    if (lastMainBlocks.length === 0) return
+    const order: string[] = []
+    for (const block of lastMainBlocks) {
+      for (const owner of block.owners) {
+        if (owner.kind !== 'assistant' || owner.displayBlocks !== undefined) continue
+        const presentation = assistantVisualPresentation(owner)
+        for (const publication of presentation?.publications ?? []) order.push(publication.ref)
+      }
+    }
+    if (order.length === visualOrder.length && order.every((ref, index) => visualOrder[index] === ref)) return
+    visualOrder = order
+  }
+
   /** Re-render every region in ONE frame (the SDK diffs). The `layer` region is
    *  ALWAYS submitted (an omitted region would be deleted by the full-view
    *  diff, wiping an open modal on the next unrelated repaint). */
   function render(): void {
     if (disposed) return
+    // TSP I-E: the Modal/Reader blocker is mirrored into the History seat at
+    // the top of every frame, so a card parked under a form is neither painted
+    // operable nor keyboard-live, and the SAME instance comes back when the
+    // last blocker settles (a stale captured scope retires it instead).
+    historySearch?.syncBlocker(seat.hasModalSeat())
+    // T3-B1 §7: a HIGHER seat acquiring the input (a Modal, the temporary
+    // Reader, the Work Hub, a picker, the Queue sheet) RETIRES the Session Search
+    // card — the frozen contract has NO `parked` phase for it, so this is not a
+    // blocked-but-alive card that could reappear when the blocker settles. The
+    // retire drops the query, the targets, the source token, the pending reveal
+    // and the temporary disclosure grants in ONE place, and the higher seat's own
+    // owner keeps the frame meanwhile.
+    if (transcriptSearch?.holdsState() === true && !transcriptSearchSeatAdmitted()) retireSearchSeat()
     if (seat.hasModalSeat()) {
       sessionBrowser?.suspend()
+      webPicker?.suspend()
+      acpPicker?.suspend()
       modelPicker?.suspend()
+      queueManagerPresenter?.suspend()
       presetPicker?.suspend()
       workHub?.suspend()
     }
@@ -1355,12 +2189,67 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // subject's own commit re-enters through `syncImageSubscriptions` in
     // `setTranscript` and rebuilds the ledger from scratch.
     if (!hydrating) syncImageSubscriptions()
+    previewFrameIndexes()
+    // PR2: the Dock paints the selection badge from `selectedVisual`, but the
+    // authoritative reconciliation only ran in the PREVIOUS commitMainFrame.
+    // When this frame's descriptor-derived figure order differs (a figure was
+    // appended or withdrawn in the SAME session), reconcile FIRST and rebuild
+    // the descriptors, so the Dock and the committed Main agree within this
+    // frame. commitMainFrame stays the authoritative post-commit reconciliation
+    // against the real committed order (which also excludes `gone` roots).
+    if (selectedVisual !== undefined) {
+      const previewIndex = visualOrder.indexOf(selectedVisual.ref)
+      const previewed = previewIndex < 0
+        ? undefined
+        : { ref: selectedVisual.ref, index: previewIndex + 1, count: visualOrder.length }
+      if (!sameSelectedVisual(selectedVisual, previewed)) {
+        selectedVisual = previewed
+        rebuildLastMain()
+      }
+    }
+    // The Workflow scoped entry is painted from the same predicate that admits
+    // its click. When the live admission flips without a transcript commit (a
+    // resize crossing the Work Hub's pane floor, a seat change, the late input
+    // bind), converge the descriptors BEFORE this frame so the committed button
+    // and the click can never disagree.
+    if (committedBrowseAdmission !== undefined
+      && committedBrowseAdmission !== scopedBrowseAdmitted()
+      && !rebuildLastMain()) return
     const draftStates = prepareDockDraftImageStates()
     if (imageProjectionAborted) return
     const dockNode = dockView(draftStates)
-    const mainNode = lastMain
+    // TSP-7 Welcome D: the Main selection is strict and shares ONE predicate
+    // with the Resume admission, so a frame and a click can never disagree
+    // about whether the Welcome is the presented Main. The transcript
+    // projection stays in the journal (no fake row is ever inserted into the
+    // fold) and the Welcome never enters the Dock.
+    //
+    // PR2: the Welcome is a FORMAL SDK Main. The journal therefore hands the
+    // region back BEFORE the Welcome is rendered, so the client never holds the
+    // journal's raw Main children and the Welcome tree at the same time; when
+    // the Welcome goes away the SDK render below deletes its children first and
+    // only then does the journal re-add the transcript roots.
+    const welcomeMain = welcomeMainPresented()
+    if (welcomeMain) mainJournal.detachAll()
+    const mainNode = welcomeMain
+      ? welcomeView({
+          tuiVersion: presentedStatus?.host.tuiVersion,
+          whaleLines: welcomeWhalePlainLines(welcomeWhaleVariant),
+          resumeAvailable: boundHandlers?.sessionBrowserAvailable() === true,
+          nativeStyled: composerChromeSupported(),
+          // The `icon` KIND is negotiated separately from `el`+`styles`: a pane
+          // that never advertised it must not be sent an icon node.
+          nativeIcon: session.caps.kinds.includes('icon'),
+          scopeKey: scopePrefix,
+          workspacePath: welcomeWorkspace?.path,
+          workspaceStatus: welcomeWorkspace?.status,
+          workspaceError: welcomeWorkspace?.error,
+          onChooseDirectory: welcomeChooseDirectoryClicked,
+          onResume: welcomeResumeClicked,
+        })
+      : EMPTY_TRANSCRIPT_MAIN
     surface.render({
-      ...(mainNode === undefined ? {} : { main: mainNode }),
+      main: mainNode,
       ...(dockNode === undefined ? {} : { dock: dockNode }),
       // Modal-first, then the four mutually-exclusive non-blocking presenters
       // in their frozen priority order; the empty seat layer is the fallback.
@@ -1381,12 +2270,42 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           ? seat.renderLayer()
           : workHub?.renderLayer()
             ?? sessionBrowser?.renderLayer()
+            ?? webPicker?.renderLayer()
+            ?? acpPicker?.renderLayer()
             ?? presetPicker?.renderLayer()
             ?? modelPicker?.renderLayer()
+            ?? queueManagerPresenter?.renderLayer()
             ?? seat.renderLayer(),
     })
+    // PR2: commit the Main journal AFTER the SDK view. On the Welcome →
+    // transcript boundary this is the exact contract order: the SDK render
+    // deleted the Welcome's children and restored the empty Main root, and only
+    // now are the transcript's raw Main roots added.
+    if (!welcomeMain) {
+      commitMainFrame()
+      settleImmutableUserRows()
+    }
     // The focus op is meaningful only for a node of a COMMITTED frame (the
     // SDK never validates it), so it always follows the render above.
+    // TSP-7 PR-G: so does the quick menu's id indexing — the ids it hands to
+    // `focus`/`reveal` are the ones of the frame the SDK just committed
+    // (resolved from the SDK's own id assignment, never a guessed path). A dock
+    // without the menu indexes nothing.
+    // Mouse PR4: the Tasks action ids are read from the frame the SDK just
+    // committed — the SAME boundary the other frame indexes use, so an action
+    // event always resolves against the node identity that really reached the
+    // client. This is provenance only (no Session/Task/browser fact).
+    indexTasksActions(dockNode)
+    if (dockNode !== undefined && modelQuick?.isOpen() === true) modelQuick.indexFrame(dockNode)
+    // TSP I-E: the History card's reveal/scroll/focus targets are the wire ids
+    // of the frame the SDK just committed — never a guessed path. A closed or
+    // parked card indexes nothing.
+    if (dockNode !== undefined && historySearch?.isOpen() === true) historySearch.indexFrame(dockNode)
+    // T3-B1: the Search card's focus/reveal targets are the wire ids of the frame
+    // the SDK just committed — never a guessed path. A closed card indexes
+    // nothing, and a navigation's reveal is requested exactly here (after the
+    // Main tree this frame committed).
+    if (dockNode !== undefined && transcriptSearch?.isOpen() === true) transcriptSearch.indexFrame(dockNode)
     applyFocus(false)
     // B3-A2 §5.3: the base frame is the ONE point that reconciles the Reader
     // with the CURRENT row (the Hub already renders after `setItems`), so a
@@ -1419,6 +2338,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * (`displayBlocks` outranks settled `content` while an opaque block is open;
    * User reads `content`), so a body the mapper draws block-wise is a body
    * whose images are read, and a legacy flat body reads nothing.
+   *
+   * A collapsed Compact Activity materializes NO member node, so the demand
+   * follows the CURRENT projection's visible member set: a hidden Tool image
+   * starts no read and sends no blob. The set is derived from the SAME
+   * canonical structure the view materializes, so the reader and the view can
+   * never disagree about what is on screen.
    */
   const projectedImageRefs = (): ImageAttachmentRefLike[] => {
     const refs: ImageAttachmentRefLike[] = []
@@ -1445,9 +2370,17 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       }
       if (message.kind !== 'tool') return
       for (const block of toolRowImageBlocks(message)) push(block.attachment)
-      for (const child of message.subCalls ?? []) visit(child)
+      for (const child of message.subCalls ?? []) {
+        if (visibleMembers.has(child)) visit(child)
+      }
     }
-    for (const message of lastMessages) visit(message)
+    for (const message of lastMessages) {
+      // The demand follows the CURRENT projection: a member the view does not
+      // materialize (a collapsed Compact Work's Tool row) starts no read and
+      // sends no blob.
+      if (!visibleMembers.has(message)) continue
+      visit(message)
+    }
     return refs
   }
 
@@ -1455,6 +2388,36 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   const releaseImageSubscriptions = (): void => {
     for (const unsubscribe of imageSubscriptions.values()) unsubscribe()
     imageSubscriptions.clear()
+  }
+
+  /**
+   * The members the CURRENT projection materializes, for the image demand.
+   *
+   * It is derived from the SAME canonical structure and the SAME disclosure
+   * owners the view uses, so a hidden member and a wanted member can never
+   * disagree. A mount with no display authority (the historical standalone
+   * layout) materializes every member, so its demand stays the whole window.
+   */
+  const currentVisibleMembers = (
+    messages: readonly TranscriptMessage[],
+    keys: TranscriptNodeKeys,
+  ): ReadonlySet<TranscriptMessage> => {
+    const displayState = options.displayState
+    if (displayState === undefined) return visibleTranscriptMembers(messages, { preset: 'full' }, keys)
+    return visibleTranscriptMembers(messages, {
+      preset: displayState.preset,
+      expandedWorkOwners,
+      expandedFocusTurns,
+      expandedToolKeys,
+      innerDisclosure: {
+        expandedThinkingOwners,
+        expandedContextRowOwners,
+        expandedClusterOwners,
+        expandedCommandCompactionOwners,
+      },
+      turnActivities: lastTurnActivities,
+      ...(lastWindowState === undefined ? {} : { window: lastWindowState }),
+    }, keys)
   }
 
   /**
@@ -1806,44 +2769,675 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   }
 
   /**
-   * PR3: index the COMMITTED main tree. The node ids come from the SDK's own
-   * `View.from` derivation over the exact tree this renderer paints, so a
-   * pointer action can be matched by the real button id of the current frame —
-   * never by a ref substring, a bare call id or a guessed path.
+   * PR2: ONE root's disposable frame contribution — everything the frame
+   * indexes need from that root's materialized subtree. It is computed when
+   * (and only when) the journal materializes that root, then merged in Main
+   * order; a retained root never walks its tree again.
    */
-  const indexVisualFrame = (
-    root: Node,
-    sources: ReadonlyMap<string, { readonly message: AssistantTranscriptRow; readonly publication: PublishedVisual }>,
-  ): VisualFrameIndex => {
+  interface MainRootContribution {
+    readonly figures: readonly {
+      readonly ref: string
+      readonly nodeId: string
+      readonly target: VisualCopyTarget
+    }[]
+    readonly visualCopyButtons: readonly (readonly [string, VisualCopyTarget])[]
+    readonly transcriptCopyButtons: readonly (readonly [string, TranscriptCopyTarget])[]
+    readonly toolDisclosure: readonly (readonly [string, string])[]
+    readonly workDisclosure: readonly (readonly [string, TranscriptMessage])[]
+    readonly focusDisclosure: readonly (readonly [string, number])[]
+    readonly innerDisclosure: readonly (readonly [string, InnerDisclosurePathTarget])[]
+    readonly workflowBrowseButtons: readonly (readonly [string, WorkflowBrowseTarget])[]
+  }
+
+  /** The per-root contributions of the CURRENT frame, keyed by block key. */
+  const frameContributions = new Map<string, MainRootContribution>()
+  /**
+   * The indexer the journal calls for every root it materializes. It is
+   * replaced by each `rebuildLastMain()` (it closes over that rebuild's
+   * canonical lookup context) and never runs for a retained root.
+   */
+  let frameIndexer: ((key: string, node: Node, tree: Tree) => void) | undefined
+
+  /** Whether a disclosure path belongs to one top-level root key. */
+  const pathUnderRoot = (path: string, rootKey: string): boolean =>
+    path === rootKey || path.startsWith(`${rootKey}.`)
+
+  /** Index ONE materialized root: `node` is the root node, `tree` its root Tree
+   *  (the journal's single-root view child), so its ids are the wire ids. */
+  const collectRootContribution = (
+    rootKey: string,
+    node: Node,
+    tree: Tree,
+    context: {
+      readonly source: object
+      readonly messagesByKey: ReadonlyMap<string, TranscriptMessage>
+      readonly transcriptCopyPayloads: ReadonlyMap<TranscriptMessage, string>
+      readonly figureSources: ReadonlyMap<string, { readonly message: AssistantTranscriptRow; readonly publication: PublishedVisual }>
+      readonly focusRootTurnsBySectionKey: ReadonlyMap<string, number>
+      readonly workOwnersBySectionKey: ReadonlyMap<string, TranscriptMessage>
+      readonly focusWorkBySectionKey: ReadonlyMap<string, { readonly owner: TranscriptMessage; readonly turn: number }>
+      readonly innerOwnersByNodeKey: ReadonlyMap<string, InnerDisclosurePathTarget>
+      readonly workflowOwnersByNodeKey: ReadonlyMap<string, WorkflowRow>
+      readonly phaseKeysByOwner: ReadonlyMap<WorkflowRow, ReadonlyMap<string, string>>
+      readonly compactWork: boolean
+      readonly focus: boolean
+    },
+  ): MainRootContribution => {
+    const figures: { ref: string; nodeId: string; target: VisualCopyTarget }[] = []
+    const visualCopyButtons: (readonly [string, VisualCopyTarget])[] = []
+    const transcriptCopyButtons: (readonly [string, TranscriptCopyTarget])[] = []
+    const toolDisclosure: (readonly [string, string])[] = []
+    const workDisclosure: (readonly [string, TranscriptMessage])[] = []
+    const focusDisclosure: (readonly [string, number])[] = []
+    const innerDisclosure: (readonly [string, InnerDisclosurePathTarget])[] = []
+    const workflowBrowseButtons: (readonly [string, WorkflowBrowseTarget])[] = []
+    const recordDisclosures = (current: Node, path: string, parentTool: string | undefined, workflowRow: WorkflowRow | undefined): void => {
+      const nodeKey = (current.props as { key?: string }).key
+      let tool = parentTool
+      if (current.kind === 'tool' && (current.props as { collapsible?: boolean }).collapsible === true && nodeKey !== undefined) {
+        const own = nodeKey.startsWith(`${scopePrefix}msg-`)
+          ? nodeKey.slice(scopePrefix.length)
+          : nodeKey.startsWith('msg-') ? nodeKey : undefined
+        tool = own ?? (parentTool !== undefined ? `${parentTool}/${nodeKey}` : undefined)
+        if (tool !== undefined) toolDisclosure.push([path, tool])
+      }
+      let currentWorkflow = workflowRow ?? (nodeKey === undefined ? undefined : context.workflowOwnersByNodeKey.get(nodeKey))
+      if (current.kind === 'section' && (current.props as { collapsible?: boolean }).collapsible === true && nodeKey !== undefined) {
+        const workflowOwner = currentWorkflow
+        if (workflowOwner !== undefined) {
+          const phaseKey = context.phaseKeysByOwner.get(workflowOwner)?.get(nodeKey)
+          if (phaseKey !== undefined) {
+            innerDisclosure.push([path, { kind: 'workflow-phase', owner: workflowOwner, phaseKey }])
+          } else if (nodeKey === scopeKeys.keyFor(workflowOwner)
+            || nodeKey === `${scopePrefix}${scopeKeys.keyFor(workflowOwner)}`) {
+            innerDisclosure.push([path, { kind: 'workflow-run', owner: workflowOwner }])
+          }
+        }
+        const inner = context.innerOwnersByNodeKey.get(nodeKey)
+        if (inner !== undefined) innerDisclosure.push([path, inner])
+        if (context.focus) {
+          const turn = context.focusRootTurnsBySectionKey.get(nodeKey)
+          if (turn !== undefined) focusDisclosure.push([path, turn])
+          const work = context.focusWorkBySectionKey.get(nodeKey)
+          if (work !== undefined) workDisclosure.push([path, work.owner])
+        } else if (context.compactWork) {
+          const owner = context.workOwnersBySectionKey.get(nodeKey)
+          if (owner !== undefined) workDisclosure.push([path, owner])
+        }
+      }
+      for (const [index, child] of current.children.entries()) {
+        const childKey = (child.props as { key?: string }).key
+        recordDisclosures(child, `${path}.${childKey ?? String(index)}`, tool, currentWorkflow)
+      }
+    }
+    recordDisclosures(node, rootKey, undefined, context.workflowOwnersByNodeKey.get(rootKey))
+
+    const visit = (
+      current: Tree,
+      figure: VisualCopyTarget | undefined,
+      assistant: AssistantTranscriptRow | undefined,
+      workflowRow: WorkflowRow | undefined,
+      phaseKey: string | undefined,
+    ): void => {
+      const props = current.props as Record<string, unknown>
+      const key = props['key']
+      const rootWorkflow = workflowRow ?? (typeof key === 'string' ? context.workflowOwnersByNodeKey.get(key) : undefined)
+      const currentPhaseKey = rootWorkflow !== undefined && typeof key === 'string'
+        ? context.phaseKeysByOwner.get(rootWorkflow)?.get(key) ?? phaseKey
+        : phaseKey
+      const entry = typeof key === 'string' ? context.figureSources.get(key) : undefined
+      let currentFigure = figure
+      if (entry !== undefined) {
+        currentFigure = {
+          message: entry.message,
+          publication: entry.publication,
+          source: context.source,
+          scopePrefix,
+        }
+        figures.push({ ref: entry.publication.ref, nodeId: current.id, target: currentFigure })
+      }
+      if (currentFigure !== undefined && key === VISUAL_COPY_KEY) visualCopyButtons.push([current.id, currentFigure])
+
+      let currentAssistant = assistant
+      if (props['role'] === 'dsh.transcript.assistant' && typeof key === 'string') {
+        const message = context.messagesByKey.get(key)
+        currentAssistant = message?.kind === 'assistant' ? message : undefined
+      }
+      if (current.kind === 'message' && props['role'] === 'dsh.transcript.user' && typeof key === 'string') {
+        const message = context.messagesByKey.get(key)
+        if (message?.kind === 'user') {
+          const payload = context.transcriptCopyPayloads.get(message)
+          const actions = props['actions']
+          if (payload !== undefined && Array.isArray(actions)
+            && actions.some(action => action !== null && typeof action === 'object'
+              && (action as { readonly act?: unknown }).act === TRANSCRIPT_COPY_ACTION)) {
+            transcriptCopyButtons.push([current.id, { message, payload, source: context.source, scopePrefix, nodeId: current.id }])
+          }
+        }
+      } else if (current.kind === 'button' && props['role'] === 'dsh.transcript.copy'
+        && key === 'copy' && currentAssistant !== undefined) {
+        const actions = props['actions'] as { readonly click?: unknown } | undefined
+        const payload = context.transcriptCopyPayloads.get(currentAssistant)
+        if (actions?.click === TRANSCRIPT_COPY_ACTION && payload !== undefined) {
+          transcriptCopyButtons.push([current.id, {
+            message: currentAssistant,
+            payload,
+            source: context.source,
+            scopePrefix,
+            nodeId: current.id,
+          }])
+        }
+      } else if (current.kind === 'button' && props['role'] === 'dsh.transcript.workflow.browse'
+        && rootWorkflow !== undefined) {
+        const actions = props['actions'] as { readonly click?: unknown } | undefined
+        if (actions?.click === TSP_WORKFLOW_BROWSE_ACTION) {
+          workflowBrowseButtons.push([current.id, {
+            kind: key === 'browse-all' ? 'run' : 'phase',
+            owner: rootWorkflow,
+            source: context.source,
+            scopePrefix,
+            ...(currentPhaseKey === undefined ? {} : { phaseKey: currentPhaseKey }),
+          }])
+        }
+      }
+      for (const child of current.children) visit(child, currentFigure, currentAssistant, rootWorkflow, currentPhaseKey)
+    }
+    visit(tree, undefined, undefined, undefined, undefined)
+    return {
+      figures, visualCopyButtons, transcriptCopyButtons, toolDisclosure,
+      workDisclosure, focusDisclosure, innerDisclosure, workflowBrowseButtons,
+    }
+  }
+
+  /** Merge the current per-root contributions, in Main order, into the frame. */
+  const mergeFrameIndexes = (): VisualFrameIndex => {
     const order: string[] = []
     const nodeIds = new Map<string, string>()
     const targets = new Map<string, VisualCopyTarget>()
     const copyButtons = new Map<string, VisualCopyTarget>()
-    const source = projectionScope
-    if (source === undefined) return { order, nodeIds, targets, copyButtons }
-    const visit = (tree: Tree, figure: VisualCopyTarget | undefined): void => {
-      const key = (tree.props as { readonly key?: unknown }).key
-      const entry = typeof key === 'string' ? sources.get(key) : undefined
-      let current = figure
-      if (entry !== undefined) {
-        current = {
-          message: entry.message,
-          publication: entry.publication,
-          source,
-          scopePrefix,
-        }
-        order.push(entry.publication.ref)
-        nodeIds.set(entry.publication.ref, tree.id)
-        targets.set(entry.publication.ref, current)
+    const transcriptCopies = new Map<string, TranscriptCopyTarget>()
+    const toolPaths = new Map<string, string>()
+    const workPaths = new Map<string, TranscriptMessage>()
+    const focusPaths = new Map<string, number>()
+    const innerPaths = new Map<string, InnerDisclosurePathTarget>()
+    const browseButtons = new Map<string, WorkflowBrowseTarget>()
+    for (const key of mainJournal.order) {
+      const contribution = frameContributions.get(key)
+      if (contribution === undefined) continue
+      for (const figure of contribution.figures) {
+        order.push(figure.ref)
+        nodeIds.set(figure.ref, figure.nodeId)
+        targets.set(figure.ref, figure.target)
       }
-      if (current !== undefined && key === VISUAL_COPY_KEY) copyButtons.set(tree.id, current)
-      for (const child of tree.children) visit(child, current)
+      for (const [id, target] of contribution.visualCopyButtons) copyButtons.set(id, target)
+      for (const [id, target] of contribution.transcriptCopyButtons) transcriptCopies.set(id, target)
+      for (const [path, tool] of contribution.toolDisclosure) toolPaths.set(path, tool)
+      for (const [path, owner] of contribution.workDisclosure) workPaths.set(path, owner)
+      for (const [path, turn] of contribution.focusDisclosure) focusPaths.set(path, turn)
+      for (const [path, target] of contribution.innerDisclosure) innerPaths.set(path, target)
+      for (const [id, target] of contribution.workflowBrowseButtons) browseButtons.set(id, target)
     }
-    for (const region of View.from({ main: root }).regions) {
-      if (region !== undefined) visit(region, undefined)
-    }
-    return { order, nodeIds, targets, copyButtons }
+    visualOrder = order
+    figureNodeIds = nodeIds
+    visualTargets = targets
+    visualCopyButtons = copyButtons
+    transcriptCopyButtons = transcriptCopies
+    toolDisclosureByPath.clear()
+    for (const [path, tool] of toolPaths) toolDisclosureByPath.set(path, tool)
+    workDisclosureByPath.clear()
+    for (const [path, owner] of workPaths) workDisclosureByPath.set(path, owner)
+    focusDisclosureByPath.clear()
+    for (const [path, turn] of focusPaths) focusDisclosureByPath.set(path, turn)
+    innerDisclosureByPath.clear()
+    for (const [path, target] of innerPaths) innerDisclosureByPath.set(path, target)
+    workflowBrowseButtons = browseButtons
+    return { order, nodeIds, targets, copyButtons, transcriptCopyButtons: transcriptCopies }
   }
+
+  /** Whether one canonical Work span really contains `message`: directly as a
+   *  message part, or through a snapshot-only Context cluster nested inside it. */
+  const workSpanContains = (span: TranscriptWorkSpan, message: TranscriptMessage): boolean => {
+    for (const part of span.parts) {
+      if (part.kind === 'message') {
+        if (part.message === message) return true
+        continue
+      }
+      if (part.cluster.members.includes(message as never)) return true
+    }
+    return false
+  }
+
+  /** Every canonical Context cluster of one structure — top-level AND nested in a
+   *  Work span (the SAME membership `clusterByMemberOf` derives). */
+  const clustersOf = (structure: readonly TranscriptStructureBlock[]): readonly ContextCluster[] => {
+    const out: ContextCluster[] = []
+    for (const block of structure) {
+      if (block.kind === 'context-cluster') out.push(block.cluster)
+      else if (block.kind === 'work') {
+        for (const part of block.span.parts) if (part.kind === 'context-cluster') out.push(part.cluster)
+      }
+    }
+    return out
+  }
+
+  /**
+   * T3-B1: the SEARCH-ONLY disclosure grants of the CURRENT target.
+   *
+   * These are PURELY TEMPORARY, frame-scoped facts: they exist only while the
+   * Search seat is open and only for the target the user is on, and they are
+   * recomputed on every navigation. They NEVER write the manual disclosure sets
+   * above (`expandedWorkOwners`, `expandedToolKeys`, `expandedFocusTurns`, the
+   * inner owner sets, `workflowDisclosureStates`) and they never produce a fake
+   * `toggle` event: the Owner-frozen contract is "temporary effective
+   * disclosure", so closing the search leaves every manual preference exactly as
+   * the user set it.
+   *
+   * The grants are DERIVED from the canonical ancestry of the matched
+   * representative message, not from a text scan: the target's own message is
+   * the leaf, and each enclosing canonical owner (its Turn's Focus root, its Work
+   * span, its Thinking/Context/Command owner, its Workflow run/phase) is opened
+   * only because it really CONTAINS that message in the current projection.
+   */
+  interface SearchDisclosureGrants {
+    /** The target identity the grants were derived for (never a raw position). */
+    readonly targetKey: string
+    readonly focusTurns: ReadonlySet<number>
+    readonly workOwners: ReadonlySet<TranscriptMessage>
+    readonly thinkingOwners: ReadonlySet<TranscriptMessage>
+    readonly contextRowOwners: ReadonlySet<TranscriptMessage>
+    readonly clusterOwners: ReadonlySet<TranscriptMessage>
+    readonly commandCompactionOwners: ReadonlySet<TranscriptMessage>
+    readonly toolKeys: ReadonlySet<string>
+    /** Workflow run ids the CURRENT target's own run must present open. */
+    readonly workflowRuns: ReadonlySet<WorkflowRunId>
+    /** Workflow phase keys (per granted run) that must present open. */
+    readonly workflowPhases: ReadonlyMap<WorkflowRunId, ReadonlySet<string>>
+  }
+
+  /** The CURRENT frame's search grants (`undefined` = no search disclosure). */
+  let searchGrants: SearchDisclosureGrants | undefined
+  /** The no-grant workflow facts (identity constants, never copied per frame). */
+  const EMPTY_WORKFLOW_GRANTS: ReadonlySet<WorkflowRunId> = new Set()
+  const EMPTY_WORKFLOW_PHASE_GRANTS: ReadonlyMap<WorkflowRunId, ReadonlySet<string>> = new Map()
+
+  /**
+   * T3-B1: the effective Workflow disclosure read of THIS frame.
+   *
+   * The returned map is the USER's own `workflowDisclosureStates` UNCHANGED when
+   * no grant exists. With a grant it is a shallow copy whose granted run (and
+   * phase, when the hit named one) presents `userOpen: true` — a temporary
+   * read-only projection the mapper consumes; the manual map is never mutated
+   * and `advanceWorkflowDisclosureState` keeps running against the real one.
+   */
+  const effectiveWorkflowDisclosureStates = (): ReadonlyMap<string, WorkflowRunDisclosureState> => {
+    const grants = searchGrants
+    if (grants === undefined || grants.workflowRuns.size === 0) return workflowDisclosureStates
+    const states = new Map(workflowDisclosureStates)
+    for (const runId of grants.workflowRuns) {
+      const base = workflowDisclosureStates.get(runId)
+      const phases = new Map(base?.phases ?? [])
+      for (const phaseKey of grants.workflowPhases.get(runId) ?? []) {
+        phases.set(phaseKey, { previousMode: base?.phases.get(phaseKey)?.previousMode ?? 'clean', previousActivityCount: base?.phases.get(phaseKey)?.previousActivityCount ?? 0, userOpen: true })
+      }
+      states.set(runId, { previousMode: base?.previousMode ?? 'clean', userOpen: true, phases })
+    }
+    return states
+  }
+  /**
+   * The navigation epoch whose grants the user has explicitly collapsed. A
+   * manual collapse suppresses the automatic re-open until the NEXT explicit
+   * navigation (a new epoch), and a passive repaint never overrides it.
+   */
+  let searchGrantSuppressedEpoch = -1
+  /** Strictly increasing per explicit navigation (Next/Prev/query change). */
+  let searchNavigationEpoch = 0
+  /** The epoch the CURRENT grants were derived in. */
+  let searchGrantsEpoch = -1
+
+  /** The empty grant set: a frame with no search disclosure at all. */
+  const EMPTY_SEARCH_GRANTS: SearchDisclosureGrants = {
+    targetKey: '',
+    focusTurns: new Set(),
+    workOwners: new Set(),
+    thinkingOwners: new Set(),
+    contextRowOwners: new Set(),
+    clusterOwners: new Set(),
+    commandCompactionOwners: new Set(),
+    toolKeys: new Set(),
+    workflowRuns: new Set(),
+    workflowPhases: new Map(),
+  }
+
+  /**
+   * Derive the temporary grants for the CURRENT Search target.
+   *
+   * The chain is the canonical one: the binding resolves the target to the
+   * CURRENT representative message, and the enclosing owners are read from the
+   * SAME projection helpers the mapper uses (`projectTranscriptStructure` for
+   * Work spans and clusters, `projectFocus` for Focus turns, the message kinds
+   * for the inner owners, and the tool rows' own disclosure keys). Nothing here
+   * re-derives a structure from text.
+   */
+  const deriveSearchGrants = (): SearchDisclosureGrants => {
+    const seat = transcriptSearch
+    if (seat === undefined || seat.isOpen() !== true) return EMPTY_SEARCH_GRANTS
+    const target = seat.currentTarget()
+    const message = seat.currentMessage()
+    if (target === undefined || message === undefined) return EMPTY_SEARCH_GRANTS
+    // A user collapse of THIS navigation epoch wins over the automatic open.
+    if (searchGrantSuppressedEpoch === searchNavigationEpoch) return EMPTY_SEARCH_GRANTS
+    const focusTurns = new Set<number>()
+    const workOwners = new Set<TranscriptMessage>()
+    const thinkingOwners = new Set<TranscriptMessage>()
+    const contextRowOwners = new Set<TranscriptMessage>()
+    const clusterOwners = new Set<TranscriptMessage>()
+    const commandCompactionOwners = new Set<TranscriptMessage>()
+    const toolKeys = new Set<string>()
+    const workflowRuns = new Set<WorkflowRunId>()
+    const workflowPhases = new Map<WorkflowRunId, Set<string>>()
+    // The message's own Turn is the Focus root, but ONLY for a row the focused
+    // projection really HIDES inside the Thought. `projectFocus` keeps the
+    // prompt/steer rows, surfaced context and the FINAL assistant OUTSIDE the
+    // Thought, so opening the Thought for one of those would reveal Process the
+    // target never needed (Finding 5). The ancestry test is the projection's own
+    // collapsed-Focus disposition — the SAME authority that decides what the
+    // Thought hides — never a second classifier.
+    if ('turn' in message && focusRootHides(message)) focusTurns.add(message.turn)
+    // Work spans / clusters that really CONTAIN the message in this projection.
+    // The membership authority is the SAME canonical structure the mapper uses:
+    // a snapshot-only Context cluster nested INSIDE a Work span makes its members
+    // belong to BOTH ancestors, so the walk covers `span.parts` (not only direct
+    // message parts) and the top-level cluster blocks.
+    const structure = projectTranscriptStructure(lastMessages)
+    for (const block of structure) {
+      if (block.kind === 'work') {
+        if (!workSpanContains(block.span, message)) continue
+        workOwners.add(block.span.owner)
+        continue
+      }
+      if (block.kind === 'context-cluster') {
+        if (block.cluster.members.includes(message as never)) {
+          clusterOwners.add(block.cluster.owner as TranscriptMessage)
+        }
+      }
+    }
+    // A cluster nested inside the Work span the target lives in opens too: the
+    // mapper renders it as that Work's own part, so both ancestors are needed.
+    for (const cluster of clustersOf(structure)) {
+      if (cluster.members.includes(message as never)) clusterOwners.add(cluster.owner as TranscriptMessage)
+    }
+    if (message.kind === 'thinking') thinkingOwners.add(message)
+    else if (message.kind === 'system' && message.context === true) contextRowOwners.add(message)
+    else if (message.kind === 'command' || message.kind === 'compaction') commandCompactionOwners.add(message)
+    else if (message.kind === 'tool') {
+      // The tool card's OWN disclosure key (the SAME key the toggle route
+      // admits): a body that is folded behind the card opens for this target.
+      // A hit inside a NESTED sub-call must open EVERY ancestor level, because
+      // the mapper keys each child as `${parentDisclosure}/sub-<subCallId>`: the
+      // match's own `subcall-field` source carries that exact path.
+      const rootKey = scopeKeys.keyFor(message)
+      toolKeys.add(rootKey)
+      const hitSource = target.match.source
+      if (hitSource.kind === 'subcall-field') {
+        let path = rootKey
+        for (const subCallId of hitSource.subCallIds) {
+          path = `${path}/sub-${subCallId}`
+          toolKeys.add(path)
+        }
+      }
+    } else if (message.kind === 'workflow') {
+      // The run opens for the target; a hit on a phase/member opens THAT phase
+      // (the match's own closed-vocabulary source carries the phase key).
+      workflowRuns.add(message.runId)
+      const hitSource = target.match.source
+      if (hitSource.kind === 'workflow-phase' || hitSource.kind === 'workflow-member') {
+        const phases = workflowPhases.get(message.runId) ?? new Set<string>()
+        phases.add(hitSource.phaseKey)
+        workflowPhases.set(message.runId, phases)
+      }
+    }
+    return {
+      targetKey: `${target.representativeId}`,
+      focusTurns,
+      workOwners,
+      thinkingOwners,
+      contextRowOwners,
+      clusterOwners,
+      commandCompactionOwners,
+      toolKeys,
+      workflowRuns,
+      workflowPhases,
+    }
+  }
+
+  /**
+   * T3-B1 Finding 5: whether the COLLAPSED focused projection would HIDE this
+   * row inside the Thought root. `projectFocus` is the ONE authority: project the
+   * SAME messages with NO turn expanded and ask whether the row is absent from
+   * the visible output while its turn is present. A row the projection keeps
+   * visible (the prompt/steer row, surfaced context, the final assistant, a
+   * standalone turn-less row) needs NO Thought grant.
+   */
+  const focusRootHides = (message: TranscriptMessage): boolean => {
+    // The Focus disposition only exists in the FOCUS preset: under Full/Compact
+    // every row is visible and no Thought root exists, so the probe is skipped
+    // entirely instead of projecting history the preset never folds.
+    if (options.displayState?.preset !== 'focus') return false
+    const activities = lastTurnActivities
+    if (activities === undefined) return false
+    const turn = focusProjectionTurnOf(message)
+    if (turn === undefined) return false
+    // ONE turn's own group, never the whole loaded history: the probe asks about
+    // a single row, so projecting every other turn's Thought is pure waste (and
+    // it ran on every query keystroke). `consecutiveTurnGroup` is the SAME
+    // segmentation `projectFocus` walks, so the slice cannot disagree with it.
+    const start = lastMessages.indexOf(message)
+    if (start < 0) return false
+    let groupStart = start
+    while (groupStart > 0 && focusProjectionTurnOf(lastMessages[groupStart - 1]!) === turn) groupStart -= 1
+    const group = consecutiveTurnGroup(lastMessages, groupStart, turn)
+    const visible = new Set<TranscriptMessage>()
+    for (const block of projectFocus(group, activities, EMPTY_PROBE_TURNS, true)) {
+      if (block.kind === 'message') visible.add(block.message)
+      else if (block.kind === 'work') {
+        for (const part of block.span.parts) if (part.kind === 'message') visible.add(part.message)
+      }
+    }
+    return !visible.has(message)
+  }
+  const EMPTY_PROBE_TURNS: ReadonlySet<number> = new Set()
+
+  /**
+   * The effective disclosure inputs of THIS frame: the manual sets PLUS the
+   * current search grants. The manual sets are never mutated — every consumer
+   * below reads a fresh union, so closing the search restores the user's own
+   * state with no undo step.
+   */
+  const effectiveDisclosure = (): {
+    readonly focusTurns: ReadonlySet<number>
+    readonly workOwners: ReadonlySet<TranscriptMessage>
+    readonly thinkingOwners: ReadonlySet<TranscriptMessage>
+    readonly contextRowOwners: ReadonlySet<TranscriptMessage>
+    readonly clusterOwners: ReadonlySet<TranscriptMessage>
+    readonly commandCompactionOwners: ReadonlySet<TranscriptMessage>
+    readonly toolKeys: ReadonlySet<string>
+    readonly workflowRuns: ReadonlySet<WorkflowRunId>
+    readonly workflowPhases: ReadonlyMap<WorkflowRunId, ReadonlySet<string>>
+  } => {
+    const grants = searchGrants
+    if (grants === undefined) {
+      return {
+        focusTurns: expandedFocusTurns,
+        workOwners: expandedWorkOwners,
+        thinkingOwners: expandedThinkingOwners,
+        contextRowOwners: expandedContextRowOwners,
+        clusterOwners: expandedClusterOwners,
+        commandCompactionOwners: expandedCommandCompactionOwners,
+        toolKeys: expandedToolKeys,
+        workflowRuns: EMPTY_WORKFLOW_GRANTS,
+        workflowPhases: EMPTY_WORKFLOW_PHASE_GRANTS,
+      }
+    }
+    const union = <T>(manual: ReadonlySet<T>, extra: ReadonlySet<T>): ReadonlySet<T> =>
+      extra.size === 0 ? manual : new Set([...manual, ...extra])
+    return {
+      focusTurns: union(expandedFocusTurns, grants.focusTurns),
+      workOwners: union(expandedWorkOwners, grants.workOwners),
+      thinkingOwners: union(expandedThinkingOwners, grants.thinkingOwners),
+      contextRowOwners: union(expandedContextRowOwners, grants.contextRowOwners),
+      clusterOwners: union(expandedClusterOwners, grants.clusterOwners),
+      commandCompactionOwners: union(expandedCommandCompactionOwners, grants.commandCompactionOwners),
+      toolKeys: union(expandedToolKeys, grants.toolKeys),
+      workflowRuns: grants.workflowRuns,
+      workflowPhases: grants.workflowPhases,
+    }
+  }
+
+  /**
+   * T3-B1: start ONE new navigation epoch and derive its grants. Called only by
+   * an EXPLICIT navigation (open, query change, Next/Prev) — a passive repaint
+   * never resets the suppression, so a card the user collapsed stays collapsed.
+   */
+  const refreshSearchGrants = (): void => {
+    searchNavigationEpoch += 1
+    searchGrantSuppressedEpoch = -1
+    searchGrants = deriveSearchGrants()
+    searchGrantsEpoch = searchNavigationEpoch
+  }
+
+  /**
+   * T3-B1: drop the search grants without touching any manual set. Used when the
+   * seat closes, retires or loses its source.
+   */
+  const clearSearchGrants = (): void => {
+    searchGrants = undefined
+    searchGrantsEpoch = -1
+  }
+
+  /**
+   * T3-B1: the ONE lifecycle retirement of the Session Search seat. Every path
+   * that can invalidate the current source — a new presentation scope, a
+   * hydration begin, a viewer switch, a `gone` root or a disposal — goes through
+   * here, so no older query, target, grant or reveal identity can survive it.
+   * It never touches the Composer: the Dock simply stops painting the card.
+   */
+  const retireSearchSeat = (): void => {
+    searchGrantSuppressedEpoch = -1
+    clearSearchGrants()
+    transcriptSearch?.retire()
+  }
+
+  /**
+   * T3-B1: the USER collapsed a card the search had opened. This is the ONE
+   * suppression point: the current navigation epoch stops re-opening, and the
+   * user's own manual choice is recorded by the SAME toggle route as always.
+   * A new explicit navigation starts a new epoch and may open again.
+   */
+  const suppressSearchGrantsForEpoch = (): void => {
+    searchGrantSuppressedEpoch = searchNavigationEpoch
+    clearSearchGrants()
+  }
+
+  /**
+   * T3-B1: request the native reveal of the CURRENT Session Search target.
+   *
+   * The identity chain is the canonical one and nothing else: the surface's
+   * read-only binding resolves the target's match to the CURRENT representative
+   * `TranscriptMessage` of the live Folder; the renderer's own committed
+   * `lastMainBlocks` descriptors report which top-level Main root OWNS that
+   * message object (their `owners` are the mapper's canonical membership); the
+   * `ContinuousMainJournal` then answers whether that root is really attached to
+   * the client and with which derived wire id.
+   *
+   * There is deliberately NO text scan, no `msg-<id>` synthesis and no
+   * turn/query guess here. A target whose root is not currently attached (a
+   * `gone` root, a folded member the mapper never materialized, a replaced
+   * source) is reported as unreachable, and the card says
+   * `Unavailable in current pane` instead of sending an op that cannot land.
+   */
+  const revealCurrentSearchTarget = (): { readonly requested: boolean; readonly rootId: string | undefined } => {
+    if (disposed || hydrating || !inputBound) return { requested: false, rootId: undefined }
+    const seat = transcriptSearch
+    if (seat === undefined || seat.isOpen() !== true) return { requested: false, rootId: undefined }
+    const target = seat.currentTarget()
+    if (target === undefined) return { requested: false, rootId: undefined }
+    const message = seat.currentMessage()
+    if (message === undefined) return { requested: false, rootId: undefined }
+    // The canonical owner: the FIRST committed descriptor whose `owners`
+    // contains this exact representative object. Object identity is the mapper's
+    // own membership fact, never a re-derived guess.
+    const block = lastMainBlocks.find(candidate => candidate.owners.includes(message))
+    if (block === undefined) return { requested: false, rootId: undefined }
+    // The CURRENT attached fact: a root the client evicted is not re-added by a
+    // projection, so an unattached root can never receive a reveal op.
+    if (!mainJournal.isAttached(block.key)) return { requested: false, rootId: undefined }
+    const nodeId = mainJournal.idOf(block.key)
+    if (nodeId === undefined) return { requested: false, rootId: undefined }
+    surface.reveal(nodeId, 'nearest')
+    // The id this reveal named IS the target's reachability proof: a later
+    // `gone` for THIS id is the only eviction that invalidates the target.
+    return { requested: true, rootId: nodeId }
+  }
+
+  /**
+   * The ONE Main-frame commit point: after the SDK view is rendered, commit the
+   * current descriptors (materializing only new/changed roots), merge the
+   * per-root frame indexes in real Main order, and reconcile the selected
+   * figure against the CURRENT figure order the client will paint.
+   *
+   * The selection is part of every Assistant row's stamp, so a selection that
+   * has to be cleared is repaired by ONE rare second commit — never by
+   * re-materializing unrelated history.
+   */
+  function commitMainFrame(): VisualFrameIndex {
+    const committed = mainJournal.commit(lastMainBlocks, frameIndexer)
+    for (const key of committed.removed) frameContributions.delete(key)
+    let frame = mergeFrameIndexes()
+    const reconciled = reconcileVisualSelection(selectedVisual, frame)
+    if (!sameSelectedVisual(selectedVisual, reconciled)) {
+      selectedVisual = reconciled
+      if (rebuildLastMain()) {
+        const repaired = mainJournal.commit(lastMainBlocks, frameIndexer)
+        for (const key of repaired.removed) frameContributions.delete(key)
+        frame = mergeFrameIndexes()
+      }
+    }
+    return frame
+  }
+
+  /**
+   * PR2 SAFE SETTLE: the ONLY settle whitelist of this renderer.
+   *
+   * Only a top-level, currently attached, PURE User row whose owning turn is
+   * PROVEN ended may be settled: its body, its time and its Copy payload can no
+   * longer change, and it carries no image/blob or pending publication. Every
+   * other kind — Assistant (stats/visuals), Work/Activity, Tool, Thinking,
+   * Context cluster, Focus root, Command, Workflow, Compaction, any row with an
+   * image, any Preparing row — stays unsettled ON PURPOSE: those still accept
+   * late, legal updates and must never be frozen by a guess.
+   */
+  function settleImmutableUserRows(): void {
+    const activities = lastTurnActivities
+    if (activities === undefined) return
+    const eligible: string[] = []
+    for (const block of lastMainBlocks) {
+      if (block.owners.length !== 1) continue
+      const message = block.owners[0]!
+      if (message.kind !== 'user') continue
+      if (activities.get(message.turn)?.completed !== true) continue
+      if (message.content !== undefined && message.content.some(entry => entry.type === 'image')) continue
+      if (!mainJournal.isAttached(block.key)) continue
+      eligible.push(block.key)
+    }
+    if (eligible.length > 0) mainJournal.settle(eligible)
+  }
+
+  /** Retire one evicted root's contribution and every id it exposed. */
+  const retireRootContribution = (rootKey: string): void => {
+    frameContributions.delete(rootKey)
+    mergeFrameIndexes()
+  }
+  void pathUnderRoot
 
   /** Reconcile the previous selection with a frame's REAL figure order: a
    *  target that left the window clears the selection. */
@@ -1870,6 +3464,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     figureNodeIds = new Map()
     visualTargets = new Map()
     visualCopyButtons = new Map()
+    transcriptCopyButtons = new Map()
+    workflowBrowseButtons = new Map()
     selectedVisual = undefined
   }
 
@@ -1898,8 +3494,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   const rebuildLastMain = (): boolean => {
     if (disposed || hydrating) return true
     // PR-C: an aborted projection STAYS aborted. The fatal already took the
-    // renderer down, so no further blob may even be ATTEMPTED.
+    // renderer down, so no further read or blob may even be ATTEMPTED.
     if (imageProjectionAborted || visualProjectionAborted) return false
+    // Image demand is a projection fact, not a transcript-commit fact: a live
+    // DisplayState preset change and a Work disclosure toggle can change which
+    // members exist in the current frame without a new setTranscript call.
+    for (const message of lastMessages) scopeKeys.keyFor(message)
+    visibleMembers = currentVisibleMembers(lastMessages, scopeKeys)
+    syncImageSubscriptions()
     const imageStates = prepareImageStates()
     // PR-C: a fatal blob failure ABORTED this projection: the last committed
     // frame stands and the caller must not render a new one.
@@ -1908,63 +3510,241 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // PR-D: the same fatal fence for the native SVG blob sender.
     if (visualProjectionAborted) return false
     const figureSources = visualFigureSources()
-    const build = (selection: SelectedVisualState | undefined): Node => transcriptView(
-      projectTranscriptStructure(lastMessages),
-      scopeKeys,
-      {
-        ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
-        scopePrefix,
-        ...(settledQuestionAnswers === undefined ? {} : { settledQuestionAnswersLookup: settledQuestionAnswers }),
-        ...(options.toolPresenter === undefined ? {} : { toolPresenter: options.toolPresenter }),
-        preparingPreviews: lastStreamingToolPreviews,
-        chartKindsSupported: session.caps.kinds.includes('chart'),
-        ...(svgStates === undefined ? {} : { toolSvgStates: svgStates }),
-        expandedToolKeys,
-        imageStates,
-        nativeImagesSupported: nativeImagesSupported(),
-        requestPublishedSvgBlob,
-        ...(selection === undefined ? {} : { selectedVisual: selection }),
+    const displayState = options.displayState
+    // ONE lookup table for this frame's Activity roots: the canonical Work
+    // spans keyed by their section node key. The previous per-section linear
+    // scan was O(W²) for W Work spans; this map is built once per projection
+    // and is a disposable frame index, never a second authority.
+    const workOwnersBySectionKey = new Map<string, TranscriptMessage>()
+    if (displayState !== undefined && displayState.preset === 'compact') {
+      for (const block of projectTranscriptStructure(lastMessages)) {
+        if (block.kind !== 'work') continue
+        workOwnersBySectionKey.set(`${scopePrefix}work-${scopeKeys.keyFor(block.span.owner)}`, block.span.owner)
+      }
+    }
+    // The current Focus disclosure indexes and local reset targets come from
+    // the exact Focus blocks that the mapper consumes, never from node-key text.
+    const focusRootTurnsBySectionKey = new Map<string, number>()
+    const focusRootTurnByOwner = new Map<TranscriptMessage, number>()
+    const focusWorkBySectionKey = new Map<string, { readonly owner: TranscriptMessage; readonly turn: number }>()
+    const focusWorkTurn = new Map<TranscriptMessage, number>()
+    const focusWorksByTurn = new Map<number, Set<TranscriptMessage>>()
+    const focusToolRoots = new Map<number, Set<string>>()
+    const focusThinking = new Map<number, Set<TranscriptMessage>>()
+    const toolRootsForTurn = (turn: number): Set<string> => {
+      let keys = focusToolRoots.get(turn)
+      if (keys === undefined) {
+        keys = new Set()
+        focusToolRoots.set(turn, keys)
+      }
+      return keys
+    }
+    const thinkingOwnersForTurn = (turn: number): Set<TranscriptMessage> => {
+      let owners = focusThinking.get(turn)
+      if (owners === undefined) {
+        owners = new Set()
+        focusThinking.set(turn, owners)
+      }
+      return owners
+    }
+    /**
+     * The per-turn manual-owner projections one explicit Focus root close may
+     * reset. Context Row/Cluster owners are deliberately ABSENT: they are
+     * independent disclosure facts, not Thought-owned process detail (the same
+     * rule PiTui applies to Surfaced Context). Only the top-level ordinary
+     * process Tool root is collected: a settled human-interaction card is
+     * surfaced evidence, and a PTC child keeps its own `root/sub-...` owner.
+     */
+    const collectFocusInnerMessage = (message: TranscriptMessage, turn: number): void => {
+      if (message.kind === 'thinking') thinkingOwnersForTurn(turn).add(message)
+      else if (message.kind === 'tool' && !isSurfacedInteractionTool(message)) {
+        toolRootsForTurn(turn).add(scopeKeys.keyFor(message))
+      }
+    }
+    const turnActivities = lastTurnActivities ?? new Map<number, TurnActivity>()
+    // T3-B1: THIS frame's effective disclosure inputs = the user's manual sets
+    // PLUS the current search target's temporary grants. The manual sets are
+    // never mutated, so closing the search restores them with no undo step.
+    const effective = effectiveDisclosure()
+    const focusBlocks = displayState?.preset === 'focus'
+      ? projectFocus(lastMessages, turnActivities, effective.focusTurns, true)
+      : []
+    for (const block of focusBlocks) {
+      if (block.kind === 'activity') {
+        focusRootTurnsBySectionKey.set(`${scopePrefix}focus-${scopeKeys.keyFor(block.owner)}`, block.activity.turn)
+        focusRootTurnByOwner.set(block.owner, block.activity.turn)
+        continue
+      }
+      if (block.kind === 'message') {
+        const rootOwner = block.focusPresentationOwner
+        const turn = rootOwner === undefined ? undefined : focusRootTurnByOwner.get(rootOwner)
+        if (turn !== undefined) collectFocusInnerMessage(block.message, turn)
+        continue
+      }
+      const key = `${scopePrefix}work-${scopeKeys.keyFor(block.span.owner)}`
+      focusWorkBySectionKey.set(key, { owner: block.span.owner, turn: block.focusOwnerTurn })
+      focusWorkTurn.set(block.span.owner, block.focusOwnerTurn)
+      const owners = focusWorksByTurn.get(block.focusOwnerTurn) ?? new Set<TranscriptMessage>()
+      owners.add(block.span.owner)
+      focusWorksByTurn.set(block.focusOwnerTurn, owners)
+      for (const part of block.span.parts) {
+        if (part.kind === 'message') collectFocusInnerMessage(part.message, block.focusOwnerTurn)
+      }
+    }
+    const focusPhase = displayState?.preset === 'focus' ? presentedStatus?.activity.phase : undefined
+    let focusElapsedMs: ReadonlyMap<TurnActivity, number> | undefined
+    if (focusPhase !== undefined && lastTurnActivities !== undefined) {
+      const now = Date.now()
+      const elapsed = new Map<TurnActivity, number>()
+      for (const activity of lastTurnActivities.values()) {
+        const activeMillis = focusTiming.activeMillis(activity, focusPhase, now)
+        if (activeMillis !== undefined) elapsed.set(activity, activeMillis)
+      }
+      focusElapsedMs = elapsed
+    }
+    const transcriptCopyPayloads = new Map<TranscriptMessage, string>()
+    for (const message of lastMessages) {
+      if ((message.kind !== 'user' && message.kind !== 'assistant') || !visibleMembers.has(message)) continue
+      const payload = transcriptCopyPayload(message)
+      if (payload !== undefined) transcriptCopyPayloads.set(message, payload)
+    }
+    const messagesByKey = new Map<string, TranscriptMessage>()
+    for (const message of lastMessages) {
+      if (message.kind !== 'user' && message.kind !== 'assistant') continue
+      const key = scopeKeys.keyFor(message)
+      messagesByKey.set(key, message)
+      messagesByKey.set(`${scopePrefix}${key}`, message)
+    }
+    const workflowOwnersByNodeKey = new Map<string, WorkflowRow>()
+    const phaseKeysByOwner = new Map<WorkflowRow, Map<string, string>>()
+    for (const message of lastMessages) {
+      if (message.kind !== 'workflow') continue
+      const bareKey = scopeKeys.keyFor(message)
+      workflowOwnersByNodeKey.set(bareKey, message)
+      workflowOwnersByNodeKey.set(`${scopePrefix}${bareKey}`, message)
+      const phases = new Map<string, string>()
+      for (const phase of workflowPhasePresentations(message.members)) {
+        phases.set(`phase-${Buffer.from(phase.key, 'utf8').toString('base64url')}`, phase.key)
+      }
+      phaseKeysByOwner.set(message, phases)
+    }
+    // ONE admission fact for this descriptor pass: the painted Workflow button
+    // and the click route must both consume it.
+    const workflowBrowseAdmitted = scopedBrowseAdmitted()
+    // R13: ONE effective root for the whole descriptor pass — sampled exactly
+    // once here, so every block stamps/materializes from the same value.
+    const currentCwd = transcriptCwd()
+    const viewOptions = {
+      ...(currentCwd === undefined ? {} : { cwd: currentCwd }),
+      scopePrefix,
+      ...(settledQuestionAnswers === undefined ? {} : { settledQuestionAnswersLookup: settledQuestionAnswers }),
+      settledQuestionAnswersRevision,
+      ...(options.toolPresenter === undefined ? {} : { toolPresenter: options.toolPresenter }),
+      preparingPreviews: lastStreamingToolPreviews,
+      transcriptCopy: { action: TRANSCRIPT_COPY_ACTION } as const,
+      transcriptCopyPayloads,
+      chartKindsSupported: session.caps.kinds.includes('chart'),
+      ...(svgStates === undefined ? {} : { toolSvgStates: svgStates }),
+      expandedToolKeys: effective.toolKeys,
+      ...(displayState === undefined ? {} : {
+        innerDisclosure: {
+          expandedThinkingOwners: effective.thinkingOwners,
+          expandedContextRowOwners: effective.contextRowOwners,
+          expandedClusterOwners: effective.clusterOwners,
+          expandedCommandCompactionOwners: effective.commandCompactionOwners,
+        },
+      }),
+      imageStates,
+      nativeImagesSupported: nativeImagesSupported(),
+      requestPublishedSvgBlob,
+      ...(selectedVisual === undefined ? {} : { selectedVisual }),
+      workflowDisclosure: {
+        states: effectiveWorkflowDisclosureStates(),
+        browseAvailable: workflowBrowseAdmitted,
       },
-    )
-    // The painted selection follows the frame's REAL order: a transcript
-    // change can add, remove or reorder figures while a selection exists. The
-    // first build is the normal path; only a changed selection fact triggers
-    // ONE bounded rebuild (the badge text is the only difference).
-    let selection = selectedVisual
-    lastMain = build(selection)
-    let frame = indexVisualFrame(lastMain, figureSources)
-    const reconciled = reconcileVisualSelection(selection, frame)
-    if (!sameSelectedVisual(selection, reconciled)) {
-      selection = reconciled
-      lastMain = build(selection)
-      frame = indexVisualFrame(lastMain, figureSources)
     }
-    selectedVisual = reconciled
-    visualOrder = frame.order
-    figureNodeIds = frame.nodeIds
-    visualTargets = frame.targets
-    visualCopyButtons = frame.copyButtons
-    // Record the CURRENT projection's actual tool-node id → disclosure path.
-    // The walk uses the real parent/child key chain, so a dotted subCallId is
-    // never split and an absent ToggleEvent.key never needs a fallback.
-    toolDisclosureByPath.clear()
-    const recordDisclosures = (node: Node, path: string, parentTool: string | undefined): void => {
-      const nodeKey = (node.props as { key?: string }).key
-      let tool = parentTool
-      if (node.kind === 'tool' && nodeKey !== undefined) {
-        const own = nodeKey.startsWith(`${scopePrefix}msg-`)
-          ? nodeKey.slice(scopePrefix.length)
-          : nodeKey.startsWith('msg-') ? nodeKey : undefined
-        tool = own ?? (parentTool !== undefined ? `${parentTool}/${nodeKey}` : undefined)
-        if (tool !== undefined) toolDisclosureByPath.set(path, tool)
+    // Capture the SAME admission fact the descriptors were stamped with.
+    committedBrowseAdmission = workflowBrowseAdmitted
+    // ONE lightweight descriptor pass: keys, canonical ownership and the exact
+    // semantic stamps. Node materialization belongs to the journal, which only
+    // builds the blocks whose stamp changed.
+    lastMainBlocks = displayState === undefined
+      ? describeTranscriptMainBlocks(lastMessages, scopeKeys, viewOptions)
+      // Read the LIVE authority at the commit point; never a mount-time copy.
+      : describeTranscriptMainBlocksForPreset(lastMessages, scopeKeys, {
+          ...viewOptions,
+          preset: displayState.preset,
+          expandedWorkOwners: effective.workOwners,
+          expandedFocusTurns: effective.focusTurns,
+          turnActivities: lastTurnActivities,
+          window: lastWindowState,
+          ...(focusPhase === undefined ? {} : { focusPhase }),
+          ...(focusElapsedMs === undefined ? {} : { focusElapsedMs }),
+        })
+    const compactWork = displayState !== undefined && displayState.preset === 'compact'
+    const focus = displayState !== undefined && displayState.preset === 'focus'
+    const innerOwnersByNodeKey = new Map<string, InnerDisclosurePathTarget>()
+    const addInnerKey = (key: string, target: InnerDisclosurePathTarget): void => {
+      innerOwnersByNodeKey.set(key, target)
+    }
+    if (displayState !== undefined) {
+      for (const message of lastMessages) {
+        const key = scopeKeys.keyFor(message)
+        if (message.kind === 'thinking') {
+          const target: InnerDisclosurePathTarget = { kind: 'thinking', owner: message }
+          addInnerKey(key, target)
+          addInnerKey(`${scopePrefix}${key}`, target)
+        } else if (message.kind === 'system' && message.context === true) {
+          const target: InnerDisclosurePathTarget = { kind: 'context-row', owner: message }
+          addInnerKey(key, target)
+          addInnerKey(`${scopePrefix}${key}`, target)
+        } else if (message.kind === 'command' || message.kind === 'compaction') {
+          // Only a Command/Compaction that actually materializes a collapsible
+          // Section is admitted by `collectRootContribution`'s real-node check;
+          // this semantic candidate map itself grants no operation.
+          const target: InnerDisclosurePathTarget = { kind: 'command-compaction', owner: message }
+          addInnerKey(key, target)
+          addInnerKey(`${scopePrefix}${key}`, target)
+        }
       }
-      for (const [index, child] of node.children.entries()) {
-        const childKey = (child.props as { key?: string }).key
-        recordDisclosures(child, path === '' ? (childKey ?? String(index)) : `${path}.${childKey ?? String(index)}`, tool)
+      for (const block of projectTranscriptStructure(lastMessages)) {
+        if (block.kind === 'context-cluster') {
+          addInnerKey(`${scopePrefix}ctx-${scopeKeys.keyFor(block.cluster.owner)}`, {
+            kind: 'context-cluster', owner: block.cluster.owner as Extract<TranscriptMessage, { kind: 'system' }>,
+          })
+        } else if (block.kind === 'work') {
+          for (const part of block.span.parts) {
+            if (part.kind !== 'context-cluster') continue
+            addInnerKey(`${scopePrefix}ctx-${scopeKeys.keyFor(part.cluster.owner)}`, {
+              kind: 'context-cluster', owner: part.cluster.owner as Extract<TranscriptMessage, { kind: 'system' }>,
+            })
+          }
+        }
       }
     }
-    recordDisclosures(lastMain, '', undefined)
-    if (visualProjectionAborted) return false
+    const source = projectionScope
+    frameIndexer = source === undefined
+      ? undefined
+      : (key, node, tree) => {
+          frameContributions.set(key, collectRootContribution(key, node, tree, {
+            source,
+            messagesByKey,
+            transcriptCopyPayloads,
+            figureSources,
+            focusRootTurnsBySectionKey,
+            workOwnersBySectionKey,
+            focusWorkBySectionKey,
+            innerOwnersByNodeKey,
+            workflowOwnersByNodeKey,
+            phaseKeysByOwner,
+            compactWork,
+            focus,
+          }))
+        }
+    focusWorkTurnByOwner = focusWorkTurn
+    focusWorkOwnersByTurn = focusWorksByTurn
+    focusToolRootsByTurn = focusToolRoots
+    focusThinkingOwnersByTurn = focusThinking
     return true
   }
 
@@ -2020,16 +3800,49 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // PR4: a draft preview is a `ui.image` node, so the line list holds any
     // native node kind — not just text/editor.
     const lines: Node[] = []
-    for (const facts of dock.welcome) {
-      const model = facts.model === undefined ? '' : ` · ${facts.model}`
-      lines.push(ui.text({ key: `welcome-${facts.sessionId}`, text: sanitizeDisplayText(`DSH session ${facts.sessionId}${model}`) }))
-    }
+    // TSP-7 Welcome D: the Dock draws NO welcome line at all — no Session id,
+    // no model fact, no second input. Its invitation, if any, is Main's.
     // The pending-input presentation IS visible on this renderer: the queue
     // lane (authoritative queued + local echoes) and the ordered conversation
     // tail, exactly as the ONE join produced them.
-    for (const item of pending.queued) {
-      const sending = item.local === true ? ' — sending…' : ''
-      lines.push(ui.text({ key: `queue-${item.id}`, text: sanitizeDisplayText(`queued (${item.mode}): ${item.text}${sending}`) }))
+    const queueSheetMounted = queueManagerPresenter !== undefined
+    if (pending.queued.length > 0 && queueSheetMounted) {
+      // PR-Q: ONE compact header replaces no dock row (the queue lane is the
+      // pre-existing lane); `Manage` is a native clickable button over the live
+      // effective `app.queue.open` key, and each row opens the SAME sheet with
+      // its Host occurrence id as a preselection hint.
+      const authoritative = pending.queued.filter(item => item.local !== true).length
+      const openKeys = options.queueOpenKeys?.() ?? []
+      const manageLabel = openKeys.length === 0 ? 'Manage' : `Manage [${formatKeyId(openKeys[0] as never)}]`
+      const header = ui.row(
+        { key: 'queue-header', justify: 'between' },
+        ui.text({ key: 'queue-header-title', text: `Queue · ${authoritative}` }),
+        html.button(
+          { key: 'queue-manage', onClick: () => { queueManagerPresenter?.openManage() } },
+          html.span({ key: 'queue-manage-label' }, manageLabel),
+        ),
+      )
+      lines.push(header)
+      for (const item of pending.queued) {
+        const sending = item.local === true ? ' — sending…' : ''
+        lines.push(ui.row(
+          {
+            key: `queue-${item.id}`,
+            onClick: () => { queueManagerPresenter?.openRow(item.local === true ? undefined : item.id) },
+          },
+          ui.text({ key: `queue-text-${item.id}`, text: sanitizeDisplayText(`queued (${item.mode}): ${item.text}${sending}`) }),
+        ))
+      }
+    } else {
+      // No sheet capability: the queue lane stays the historical PLAIN read-only
+      // rows (no header, no Manage, no clickable `el`/`row` affordance).
+      for (const item of pending.queued) {
+        const sending = item.local === true ? ' — sending…' : ''
+        lines.push(ui.text({
+          key: `queue-${item.id}`,
+          text: sanitizeDisplayText(`queued (${item.mode}): ${item.text}${sending}`),
+        }))
+      }
     }
     // An IDLE subject with at least one authoritative queued occurrence is the
     // preserved parked queue: the next real prompt wakes it. A local-only echo
@@ -2111,9 +3924,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // Quiet Composer shell with the native control row; every other pane keeps
     // the pre-PR-C editor exactly as before. The native edit/undo/send
     // features are NOT advertised; the program owns every edit.
-    const editorNode = composerEditorNode()
-    const quietShell = composerActionsSupported() ? quietComposerNode(editorNode) : undefined
-    lines.push(quietShell ?? editorNode)
+    // TSP I-E: the History card rides ABOVE the Quiet Composer inside the ONE
+    // Dock — never a `mode:'screen'`, never an overlay, never a second editor.
+    const historyNode = historyDockNode()
+    if (historyNode !== undefined) lines.push(historyNode)
     // TSP-7 PR-A/PR-D/PR-E: the native status rows follow the composer. They
     // are projected from the LAST FORMALLY COMMITTED snapshot through THIS
     // mount's compiled footer presentation (the frozen PR-A/B default when no
@@ -2121,9 +3935,72 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // the Quiet Composer branch — wrapped in the ONE transparent footer group
     // so the Shell→Footer gap belongs to the presentation, never a synthetic
     // row inside the dock. An empty projection adds NO wrapper and NO height.
+    // Mouse PR4: the first-party Tasks segment carries its click action ONLY
+    // while the live admission predicate allows the click; every other
+    // segment stays status-only. Absent action => the frozen read-only frame.
+    // While the Session Search card owns the Dock, its blanket event fence drops
+    // every non-toggle base event — so the Tasks segment must NOT advertise a
+    // click affordance it could not honor. The frozen read-only frame is the
+    // honest state (the SAME predicate paints and routes the action).
+    const tasksAction = nativeTasksActionAdmitted() && transcriptSearch?.isOpen() !== true
+      ? TSP_FOOTER_TASKS_ACTION
+      : undefined
     const footerRows = presentedStatus !== undefined && !hydrating
-      ? nativeStatuslineRows(presentedStatus, footerPresentation, nativeFooterAffordances())
+      ? nativeStatuslineRows(
+          presentedStatus,
+          footerPresentation,
+          nativeFooterAffordances(),
+          ...(tasksAction === undefined ? [] : [{ tasksAction }]),
+        )
       : []
+    // T3-B1: the Search card and the Composer are MUTUALLY EXCLUSIVE input
+    // owners of this ONE Dock. While the card is open the Dock builds NO
+    // composer editor, NO Quiet Composer shell and NO completion/permission/
+    // quick node at all — the Composer is withdrawn, not hidden behind CSS, so
+    // there is never a second editable field and never a second Send. The
+    // Status/Footer owner above is NOT part of that exclusion (the frozen
+    // contract: the notices/status/footer keep their original owner in BOTH
+    // states). Closing the card re-materializes the SAME controller from its
+    // OWN state.
+    const searchNode = transcriptSearchDockNode()
+    if (searchNode !== undefined) {
+      lines.push(searchNode)
+      if (footerRows.length > 0) {
+        if (composerActionsSupported()) {
+          lines.push(ui.col({ key: 'footer-group', role: QUIET_COMPOSER_ROLES.footerGroup, gap: 'none' }, ...footerRows))
+        } else {
+          lines.push(...footerRows)
+        }
+      }
+      return ui.col({ key: 'dock' }, ...lines)
+    }
+    const editorNode = composerEditorNode()
+    const quietShell = composerActionsSupported() ? quietComposerNode(editorNode) : undefined
+    if (quietShell === undefined) {
+      // TSP I-C: a pane without `el`+`styles` cannot anchor a styled popup, so
+      // the candidates ride ordinary `ui.text` rows directly above the ONE
+      // editor — keyboard-operable, with NO click affordance claimed (an `el`
+      // button paints as bare text here, so promising a click would be false).
+      // Three rows maximum: the draft and the Send/Footer stay operable.
+      // The seat windows the rows IT can show; this surface can show three, and
+      // the window it asks for is the one that follows the highlighted row — a
+      // bare pane must never paint a window that leaves the user's own selection
+      // off-screen (a row the user cannot see must never be the accepted one).
+      const bare = completion.renderState(3)
+      if (bare !== undefined) {
+        for (const row of bare.rows) {
+          lines.push(ui.text({
+            key: `completion-bare-${bare.revision}-${row.id.replace(/[^A-Za-z0-9._-]+/g, '_')}`,
+            wrap: 'none',
+            text: `${row.highlighted ? '›' : ' '}${row.text}`
+              + (row.description === undefined ? '' : ` — ${row.description}`),
+          }))
+        }
+      }
+    }
+    lines.push(quietShell ?? editorNode)
+    // The footer rows were projected ABOVE the search branch so BOTH states
+    // paint the same owner; this is the same projection, not a second one.
     if (footerRows.length > 0) {
       if (composerActionsSupported()) {
         lines.push(ui.col({ key: 'footer-group', role: QUIET_COMPOSER_ROLES.footerGroup, gap: 'none' }, ...footerRows))
@@ -2135,20 +4012,42 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   }
 
   // ── The transcript projection (the ONLY writer is setTranscript) ──
-  const loadingMain = (): Node => ui.col({ key: 'transcript' }, ui.md({ key: 'loading', text: 'Loading session…' }))
+  /**
+   * The hydration Loading frame as ONE Main block: the same single row the
+   * previous full view held, expressed as a descriptor so the journal replaces
+   * the retired subject's rows with it through the same commit path.
+   */
+  const loadingMainBlocks = (): readonly TranscriptMainBlockDescriptor[] => [{
+    key: 'loading',
+    stamp: ['loading'],
+    owners: [],
+    materialize: () => ui.md({ key: 'loading', text: 'Loading session…' }),
+  }]
   const setTranscript = (
     messages: readonly TranscriptMessage[],
-    _activities?: ReadonlyMap<number, TurnActivity>,
-    _window?: TranscriptWindowState & { firstTurn?: number; lastTurn?: number; hasNewer?: boolean },
+    activities?: ReadonlyMap<number, TurnActivity>,
+    window?: TranscriptWindowState & { firstTurn?: number; lastTurn?: number; hasNewer?: boolean },
     streamingToolPreviews?: readonly StreamingToolPreview[],
     _searchPresentation?: TranscriptSearchPresentation,
     source?: object,
+    welcomeEligibilityCommit?: DisplayWelcomeEligibility,
   ): void => {
     if (disposed) return
     // Hydration fence: while a NEW source is pending, a frame still carrying
     // the RETIRED source is dropped (it reads the old fold — its rows can
     // never lift the Loading state).
     if (retiredSource !== undefined && source === retiredSource) return
+    // TSP-7 Welcome D: the eligibility travels with THIS commit only. A frame
+    // the fence already rejected carries none, and an ABSENT argument is never
+    // an invitation — it leaves the formal state alone (the initial state is
+    // `'hidden'`, and only a commit that speaks for the live main subject
+    // answers the question). `'sessionless'` therefore survives an empty
+    // sessionless projection, while every real subject commit decides.
+    if (welcomeEligibilityCommit !== undefined) welcomeEligibility = welcomeEligibilityCommit
+    // The frame's OWN content decides whether an empty state may cover it (see
+    // `welcomeMainPresented`): any committed message — including the turn-less
+    // command card a blank subject can produce — keeps the transcript in Main.
+    lastProjectionEmpty = messages.length === 0
     // The projection source identity governs the presentation-key scope: a
     // NEW identity (session commit, cold rehydrate, viewer switch) re-scopes
     // into a FRESH namespace (a new epoch prefix + allocator), so identical
@@ -2156,6 +4055,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // state. Ordinary deltas keep the same source and the same keys.
     if (source !== undefined && source !== projectionScope) {
       projectionScope = source
+      retireTranscriptDisclosureScope()
       retiredSource = undefined
       // The new subject committed: the hydration input fence lifts with it.
       hydrating = false
@@ -2163,6 +4063,26 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // TSP-7 PR-E: a new presentation scope invalidates any open Permission
       // menu expansion; the option keys themselves also carry the epoch.
       closePermissionMenu()
+      // TSP-7 PR-G: and with it the composer quick menu — its node keys carry
+      // the same scope, so an old subject's panel can never act on the new one.
+      modelQuick?.retire()
+      // TSP I-C: a formal publication is a new presentation scope for the
+      // candidate list too — the in-flight query is aborted and its rows are
+      // withdrawn, so a candidate set built for the outgoing subject can never
+      // be accepted into the incoming one. The next keystroke re-queries.
+      completion.retire()
+      // TSP I-E: the same rule for the History card. A new presentation scope
+      // is a different subject, so the outgoing subject's page, selection and
+      // in-flight read are withdrawn here (PURE STATE); the card a user must
+      // open again for the incoming subject, and no older row can be restored
+      // or copied into it.
+      historySearch?.retire()
+      // T3-B1: and the same rule for the Session Search card. A new presentation
+      // scope is a DIFFERENT subject even under the same session id (a cold
+      // rehydration), so the outgoing subject's query, targets, index and
+      // temporary disclosure grants are withdrawn here; the card is never
+      // restored onto the incoming source.
+      retireSearchSeat()
       scopePrefix = `s${scopeEpoch}-`
       scopeKeys = new TranscriptNodeKeys()
       // PR-C: the retired subject's image subscriptions go with it, and the
@@ -2170,7 +4090,6 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // re-resolved when a read settles.
       releaseImageSubscriptions()
       svgBlobIds.clear()
-      expandedToolKeys.clear()
       // PR3: the old frame's figure ids, Copy targets and selection belong to
       // the retired scope; the new subject starts with no selected figure.
       clearVisualFrameState()
@@ -2183,10 +4102,91 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // fence — a retired frame contributes no preview to the new subject.
     lastMessages = messages
     lastStreamingToolPreviews = streamingToolPreviews ?? []
-    // PR-C: the image subscriptions follow the CURRENT window: an attachment
-    // that left it is unsubscribed, a new one is subscribed and read.
-    syncImageSubscriptions()
+    lastTurnActivities = activities
+    lastWindowState = window
+    // Advance the source-scoped Workflow policy only on the official facts that
+    // changed: the members array reference or the authoritative run status.
+    const loadedRunIds = new Set<WorkflowRunId>()
+    for (const message of messages) {
+      if (message.kind !== 'workflow') continue
+      loadedRunIds.add(message.runId)
+      const previous = workflowSeen.get(message.runId)
+      if (previous?.members === message.members && previous.status === message.status) continue
+      workflowSeen.set(message.runId, { members: message.members, status: message.status })
+      const result = advanceWorkflowDisclosureState(workflowDisclosureStates.get(message.runId), message)
+      workflowDisclosureStates.set(message.runId, result.state)
+    }
+    // A run that left the current window loses its manual and last-seen state;
+    // a same-source retained run keeps it even while folded.
+    for (const runId of workflowDisclosureStates.keys()) {
+      if (!loadedRunIds.has(runId)) workflowDisclosureStates.delete(runId)
+    }
+    for (const runId of workflowSeen.keys()) {
+      if (!loadedRunIds.has(runId)) workflowSeen.delete(runId)
+    }
+    if (expandedFocusTurns.size > 0) {
+      const focusBlocks = projectFocus(messages, activities ?? new Map(), expandedFocusTurns, true)
+      const visibleTurns = new Set(focusBlocks.flatMap(block => block.kind === 'activity' ? [block.activity.turn] : []))
+      for (const turn of expandedFocusTurns) if (!visibleTurns.has(turn)) expandedFocusTurns.delete(turn)
+    }
+    const structure = projectTranscriptStructure(messages)
+    const loadedMessages = new Set(messages)
+    const liveClusters = new Set<TranscriptMessage>()
+    const collectCluster = (cluster: { readonly owner: TranscriptMessage; readonly members: readonly TranscriptMessage[] }): void => {
+      liveClusters.add(cluster.owner)
+    }
+    for (const block of structure) {
+      if (block.kind === 'context-cluster') collectCluster(block.cluster)
+      else if (block.kind === 'work') {
+        for (const part of block.span.parts) if (part.kind === 'context-cluster') collectCluster(part.cluster)
+      }
+    }
+    for (const owner of expandedThinkingOwners) if (!loadedMessages.has(owner)) expandedThinkingOwners.delete(owner)
+    for (const owner of expandedContextRowOwners) {
+      // A preset may present this loaded row through a Cluster temporarily.
+      // Its own preference is retained for the next independent occurrence.
+      if (!loadedMessages.has(owner)) expandedContextRowOwners.delete(owner)
+    }
+    for (const owner of expandedClusterOwners) if (!liveClusters.has(owner)) expandedClusterOwners.delete(owner)
+    // Command/Compaction owners follow the CURRENT loaded canonical objects:
+    // a replaced fold must never let a same-name /command row inherit the old
+    // row's manual preference.
+    for (const owner of expandedCommandCompactionOwners) {
+      if (!loadedMessages.has(owner)) expandedCommandCompactionOwners.delete(owner)
+    }
+
+    const liveToolDisclosures = new Set<string>()
+    const collectTools = (message: TranscriptMessage, parentPath?: string): void => {
+      if (message.kind !== 'tool') return
+      const path = parentPath === undefined
+        ? scopeKeys.keyFor(message)
+        : `${parentPath}/sub-${message.subCallId!}`
+      liveToolDisclosures.add(path)
+      for (const child of message.subCalls ?? []) collectTools(child, path)
+    }
+    for (const message of messages) collectTools(message)
+    for (const owner of expandedToolKeys) if (!liveToolDisclosures.has(owner)) expandedToolKeys.delete(owner)
+
+    // A manual Work owner survives ordinary same-source deltas only while the
+    // SAME source message is still in the loaded window. Prune by canonical
+    // owner identity so a long session never retains retired message objects.
+    if (expandedWorkOwners.size > 0) {
+      const loaded = new Set(structure.flatMap(block => block.kind === 'work' ? [block.span.owner] : []))
+      for (const owner of expandedWorkOwners) if (!loaded.has(owner)) expandedWorkOwners.delete(owner)
+    }
+    if (presentedStatus !== undefined && activities !== undefined) {
+      const now = Date.now()
+      for (const activity of activities.values()) focusTiming.observe(activity, presentedStatus.activity.phase, now)
+    }
+    // PR-C: rebuildLastMain recomputes the CURRENT projection's visible member
+    // set and reconciles image subscriptions before it prepares image states.
+    // A collapsed Compact Work member therefore starts no read or blob demand.
     if (!rebuildLastMain()) return
+    // T3-B1 (B1-11): a same-source commit with a real Folder revision change
+    // re-queries the open card's current query (the seat's refresh probes the
+    // revision first, so an unchanged revision never re-scans history). The
+    // refresh's own navigationChanged already re-derived the grants above.
+    transcriptSearch?.refresh()
     render()
   }
 
@@ -2242,8 +4242,20 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       if (statusReader === undefined) {
         throw new Error('the TSP renderer has no status reader: the mount must bind one')
       }
+      // R13: capture the effective root of the ALREADY PAINTED transcript
+      // BEFORE the new formal snapshot replaces it — `transcriptCwd()` reads
+      // `presentedStatus`, which this commit is about to re-sample.
+      const priorCwd = transcriptCwd()
       const previous = presentedStatus
       presentedStatus = statusReader.snapshot()
+      const nextCwd = transcriptCwd()
+      const now = Date.now()
+      focusTiming.notePhase(presentedStatus.activity.phase, now)
+      if (lastTurnActivities !== undefined) {
+        for (const activity of lastTurnActivities.values()) {
+          focusTiming.observe(activity, presentedStatus.activity.phase, now)
+        }
+      }
       // PR-C (external review r3): every FALSE→TRUE busy edge of the committed
       // snapshot starts a NEW busy lifetime — the next Stop button paints under
       // a fresh node identity, so a stale click from the PREVIOUS run of the
@@ -2254,6 +4266,17 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         && previous.activity.busy !== true
         && presentedStatus.activity.busy === true) {
         busyEpoch += 1
+      }
+      // R13: ONE status-driven refresh condition. A status-only effective-root
+      // change re-derives the descriptors ONCE (Full, Compact and Focus — the
+      // path text lives in all three), the Focus preset keeps its historical
+      // phase/elapsed refresh, and a transcript that only carries live
+      // Preparing rows (`lastStreamingToolPreviews`) refreshes too. One
+      // rebuild, one `render()` below — never a second rebuild or loop.
+      if (!hydrating
+        && (lastMessages.length > 0 || lastStreamingToolPreviews.length > 0)
+        && (priorCwd !== nextCwd || options.displayState?.preset === 'focus')) {
+        if (!rebuildLastMain()) return
       }
       render()
     },
@@ -2273,16 +4296,32 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     },
     beginSessionHydration() {
       if (disposed) return
+      // Mouse PR4: the outgoing subject's action-bearing status node ids die
+      // with it — a late click on the retired frame must not reach the new
+      // subject's `/tasks` entry.
+      tasksActionNodeIds = new Set()
+      retireTranscriptDisclosureScope()
       // TSP-7 PR-E: the open Permission menu belongs to the outgoing subject;
       // revoke its expansion identity with the subject before any later frame
       // can paint a stale option target.
       closePermissionMenu()
+      // TSP-7 PR-G: same for the composer quick menu — retired BEFORE any
+      // retiring Presenter callback can run, so no old read, click or write
+      // settlement can paint or act on the incoming subject.
+      modelQuick?.retire()
+      // TSP I-C: the hydration window fences the keys, so the candidate list and
+      // its in-flight query die with the outgoing subject HERE, before any
+      // retiring callback can run. A failed transition restores the fence and a
+      // later keystroke re-queries; nothing from the old subject survives.
+      completion.retire()
       // B3-A2 §8.2: the Reader belongs to the OUTGOING subject, so it is
       // revoked FIRST — before any retiring Presenter callback can run — and
       // its close stays owned here. `resetSessionFacts()` deliberately does
       // NOT do this: a same-subject facts clear is not an ownership change.
       retireWorkDetails('session-change')
       sessionBrowser?.retire()
+      webPicker?.retire()
+      acpPicker?.retire()
       modelPicker?.retire()
       presetPicker?.retire()
       // B3-A1: the Work Hub belongs to the outgoing subject — a newly
@@ -2295,8 +4334,16 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // EXPLICIT Loading state and FENCE the retired source until a frame
       // with a NEW token commits — AND fence the composer input for the same
       // window (§3.4 row 1).
+      // TSP I-E: the outgoing subject's card goes with it — PURE STATE (abort,
+      // timer, click identities), never a render, and a cleanup failure can
+      // never roll back the publication that already happened.
+      historySearch?.retire()
       hydrating = true
       retiredSource = projectionScope
+      // TSP-7 Welcome D: the Welcome retires SYNCHRONOUSLY in this same commit,
+      // so the outgoing subject's CTA and the Loading state never share a frame
+      // and a late event of the old subject can no longer open the Browser.
+      welcomeEligibility = 'hidden'
       // TSP-7 PR-A: the outgoing subject's status is dropped with its
       // transcript — the Loading frame shows NO native status row, so an old
       // permission/cwd/usage fact can never sit beside the incoming subject.
@@ -2314,7 +4361,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // PR-B3: the retired subject's Preparing rows go with it — the new
       // subject's own snapshot replaces them when it commits.
       lastStreamingToolPreviews = []
-      lastMain = loadingMain()
+      lastWindowState = undefined
+      lastTurnActivities = undefined
+      lastMainBlocks = loadingMainBlocks()
       render()
     },
     clearActiveDraft() {
@@ -2328,6 +4377,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // un-editable, so the outgoing text is never submittable meanwhile.
       if (disposed) return
       composer.clearDraftStateOnly()
+      // TSP I-E: the draft the card could have restored into is gone, so the
+      // card is withdrawn too. Pure state, exactly like the composer call above;
+      // the next committed frame carries the emptied editor and no card.
+      historySearch?.retire()
+      // TSP I-C: the draft the candidate list was built for is gone, so the
+      // list and any in-flight query die with it — PURE STATE here, exactly like
+      // the composer call above; the next committed frame paints the emptied
+      // editor with no popup.
+      completion.retire()
     },
     retainsStaleDraftRestore() {
       // PR3-B §7.3 (F2): the switch authority DROPPED the old draft, so a
@@ -2335,14 +4393,45 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // composer — the stale-settle sites skip the merge and notify instead.
       return false
     },
-    resetInputHistory() {
-      // Editor-only; no recall surface exists on the read-only renderer.
+    resetInputHistory(entries, owner, writeIds) {
+      // TSP I-A: a real kernel commit, NOT the old no-op. This records the
+      // reseed/reconcile into THIS mount's recall projection only: no render,
+      // no draft/caret touch, no seat or Focus change, no second read of the
+      // history file.
+      // This is a PROJECTION replace, not a scope publication: `beginInputHistoryScope`
+      // (the owner publication seam) is what retires an outgoing owner's
+      // completion/search seats. Since the cold cross-cwd seed is committed
+      // ASYNCHRONOUSLY after hydration, the user may already have opened the
+      // NEW owner's search card or completion list; this reseed must not tear
+      // either down. Only the editor's positional recall browse is invalidated,
+      // because its indices point at the replaced projection. Pure state.
+      if (disposed) return
+      composer.reseatRecallAfterReseed()
+      historyRecall.reset(entries, owner, writeIds)
     },
-    beginInputHistoryScope() {
-      // Editor-only; no recall surface exists on the read-only renderer.
+    beginInputHistoryScope(owner) {
+      // TSP I-A: the formal Session publication the application already owns.
+      // Pure kernel state; nothing here is inferred from a received Session id.
+      // TSP I-B: the same synchronous commit retires the open browse, so a
+      // browse of Session A can never return A's draft under Session B.
+      if (disposed) return
+      composer.invalidateRecallNavigation()
+      // TSP I-C: a newly published Owner also ends the completion browse (the
+      // scope its candidates were resolved under is the outgoing one).
+      completion.retire()
+      // TSP I-E: a newly published Owner retires the card before any older
+      // subject's rows could be restored into the incoming one.
+      historySearch?.retire()
+      historyRecall.begin(owner)
     },
-    settleScopeInput() {
-      // Editor-only; no recall surface exists on the read-only renderer.
+    settleScopeInput(settlement) {
+      // TSP I-A: the row owner's synchronous append/skip report, in append
+      // order. Kernel state only — a settlement never re-renders or re-seats.
+      // TSP I-B: and it never retires an open browse either: what the user is
+      // reading is the projection of the moment, and a settlement only updates
+      // the ledger the NEXT reseed reconciles with.
+      if (disposed) return
+      historyRecall.settle(settlement)
     },
     setSearchResult() {
       // Search chrome is PiTui-only (input-gated); nothing to present.
@@ -2364,14 +4453,24 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       }
       render()
     },
-    setWelcomeCard(facts) {
+    setWelcomeCard(_facts: DisplayWelcomeFacts) {
+      // TSP-7 Welcome D: the seam member stays (the upstream owner still
+      // commits its card facts on the PiTui branch), but this page shows no
+      // Session facts: no cache, no eligibility change, no extra repaint. The
+      // Main empty state is decided ONLY by the idle commit and the live
+      // subject's transcript commit.
+    },
+    setWelcomeWorkspace(workspace) {
       if (disposed) return
-      dock.welcome = [facts]
+      welcomeWorkspace = workspace
       render()
     },
     setWelcomeIdle(idle) {
       if (disposed) return
-      if (idle) dock.welcome = []
+      // The application's OWN formal sessionless commit — the one source of
+      // `'sessionless'`. Clearing the idle form hides the Welcome; it never
+      // promotes a blank session, which only a real commit can declare.
+      welcomeEligibility = idle ? 'sessionless' : 'hidden'
       render()
     },
     setTerminalCwd() {
@@ -2379,6 +4478,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     },
     setPendingInputPresentation(presentation: PendingInputPresentation) {
       if (disposed) return
+      // PR-Q: the pending presentation follows every display-subject commit;
+      // a queue sheet captured for a previous owner retires here BEFORE the new
+      // subject's dock paints beside it.
+      queueManagerPresenter?.retireIfStale()
       pending.queued = presentation.queued
       pending.tail = presentation.tail
       pending.running = presentation.running
@@ -2415,20 +4518,48 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * the PR3-A compatibility window) bypass the queue and route the same exit
    * controller; nothing else acts before the binding exists.
    */
-  const heldKeys: Key[] = []
+  const heldKeys: Array<{ readonly key: Key; readonly at: number }> = []
   const HELD_KEYS_LIMIT = 128
   let heldOverflowed = false
+  /** M6 UX PR1: the semantic identity of one armed raw exit key. The two
+   *  physical gestures never confirm each other. */
+  type RawExitIdentity = 'interrupt' | 'exit'
+  /**
+   * M6 UX PR1: the ONE armed raw exit key (Ctrl+C while idle / Ctrl+D on an
+   * empty draft). Only the SAME key inside the 1.5 s window confirms; any
+   * other key disarms, and an expired arm is simply replaced.
+   */
+  let lastExitKey: { readonly identity: RawExitIdentity; readonly at: number } | undefined
+  /** M6 UX PR1: the raw exit-key confirmation window (same as PiTui's). */
+  const RAW_EXIT_CONFIRM_WINDOW_MS = 1500
   let inputBound = false
   /** The bound application input handlers (B1: editor-local + lifecycle). */
   let boundHandlers: TspInputHandlers | undefined
 
-  /** Route one exit-intent decision to the BOUND handler when bound. */
+  /**
+   * Arm or confirm one raw exit key. Returns true only when the SAME key was
+   * pressed within the live window (the ONE exit intent to forward).
+   */
+  const armOrConfirmRawExit = (identity: RawExitIdentity, at: number = Date.now()): boolean => {
+    const now = at
+    const armed = lastExitKey
+    if (armed !== undefined && armed.identity === identity && now - armed.at < RAW_EXIT_CONFIRM_WINDOW_MS) {
+      lastExitKey = undefined
+      return true
+    }
+    lastExitKey = { identity, at: now }
+    return false
+  }
+
+  /**
+   * Route one PRE-BIND emergency exit. It is the FINAL commit, never the
+   * session-aware intent: a busy/unknown startup must not need a choice
+   * surface that does not exist yet, and no terminal latch is set before the
+   * real commit (a later fatal still reaches its own lifecycle).
+   */
   const routeExit = (held: boolean): void => {
-    if (exitRequested) return
-    exitRequested = true
     options.log?.('tsp renderer: exit key', { held })
-    if (boundHandlers !== undefined) boundHandlers.exit()
-    else options.requestExit()
+    requestImmediateExit()
   }
 
   /**
@@ -2442,8 +4573,78 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     if (seat.hasModalSeat()) return false
     if (detailsSlot !== undefined || openingDetails) return false
     if (workHub?.isOpen() === true || sessionBrowser?.isOpen() === true
-      || presetPicker?.isOpen() === true || modelPicker?.isOpen() === true) return false
+      || presetPicker?.isOpen() === true || modelPicker?.isOpen() === true
+      || queueManagerPresenter?.isOpen() === true) return false
     return true
+  }
+
+  const transcriptCopyAdmitted = (): boolean => visualActionsAdmitted()
+    && webPicker?.isOpen() !== true
+    && acpPicker?.isOpen() !== true
+    && modelQuick?.isOpen() !== true
+    && historySearch?.isOpen() !== true
+    && !historyHoldsComposerSeat()
+    && !permissionMenuOpen
+    && !completion.isOpen()
+
+  /**
+   * Mouse PR4: the ONE admission predicate of the first-party Tasks status
+   * segment's click. It decides BOTH what the frame paints (`tasksAction`) and
+   * whether a received action may run, so the painted affordance and the
+   * handled event can never disagree.
+   *
+   * The base is the STRICTER `transcriptCopyAdmitted()` seat predicate (it
+   * already covers modal seats, the Reader slot, web/menu/history/completion
+   * presenters, the composer-seat holds, hydration, disposal and an unbound
+   * input). Added here: the Reader's in-flight close, the pane's structural
+   * Task Center negotiation, the REGISTERED `/tasks` UI entry's live
+   * availability, and the exact snapshot presence the dock paints from. It
+   * answers about THIS instant only — it is not persistent state and it never
+   * substitutes for the command's own Session admission.
+   */
+  const nativeTasksActionAdmitted = (): boolean => transcriptCopyAdmitted()
+    && detailsCloseTask === undefined
+    && taskCenterCapabilitiesNegotiated()
+    && boundHandlers?.tasksBrowserUiAvailable() === true
+    && presentedStatus !== undefined
+    && !hydrating
+
+  /** ONE predicate decides both whether a Workflow browse button is painted and
+   *  whether its current-frame action may reach the TaskRuntime. The Work Hub's
+   *  OWN pane floor is part of it: below that width the Hub refuses to present
+   *  itself, so painting the entry would be a dead control. */
+  const scopedBrowseAdmitted = (): boolean => transcriptCopyAdmitted()
+    && detailsCloseTask === undefined
+    && projectionScope !== undefined
+    && workHubPaneWidthSupported(session.caps.cols * session.caps.cell.w)
+    && taskCenterCapabilitiesNegotiated()
+    && boundHandlers?.workflowScopedAgentsAvailable?.() === true
+    && boundHandlers?.openWorkflowScopedAgents !== undefined
+    && !hydrating
+
+  /**
+   * Rebuild the CURRENT frame's action-bearing Tasks node ids from the dock
+   * root the SDK just committed. Identity comes from the SDK's own tree
+   * (`Tree.id`), and the test is the node's explicit `seg` + `actions.click`
+   * prop — never a key/text/id suffix heuristic. Called at the ONE commit
+   * boundary; a frame with no dock clears the set.
+   */
+  const indexTasksActions = (dockRoot: Node | undefined): void => {
+    const next = new Set<string>()
+    if (dockRoot !== undefined) {
+      const root = View.from({ dock: dockRoot }).regions.find(region => region !== undefined)
+      if (root !== undefined) {
+        const visit = (tree: Tree): void => {
+          if (tree.kind === 'seg') {
+            const actions = tree.props['actions'] as { readonly click?: unknown } | undefined
+            if (actions?.click === TSP_FOOTER_TASKS_ACTION) next.add(tree.id)
+          }
+          for (const child of tree.children) visit(child)
+        }
+        visit(root)
+      }
+    }
+    tasksActionNodeIds = next
   }
 
   // ── TSP-7 PR-C/PR-E: the ONE Quiet Composer (editor + controls) ──
@@ -2465,6 +4666,19 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     composerActionsSupported()
     && modelPickerCapable()
     && (boundHandlers?.modelPickerAvailable?.() ?? true)
+  /** The quick menu needs the composer chrome (`el` + `styles`), the real
+   *  `/model` business entry, AND a native text field for its search. A pane
+   *  without one of those gets the full panel instead of a fake control. */
+  const modelQuickCapable = (): boolean =>
+    modelPickerAvailable() && session.caps.kinds.includes('input')
+  /** PR-Q: the Queue manager sheet needs the native picker, overlay, controlled
+   *  editor, buttons, clickable rows and the dock `el` control. A pane that did
+   *  not negotiate every one of them receives NO presenter, no raw-key entry
+   *  and no Dock Manage/row pointer affordance — it keeps the historical plain
+   *  queue rows instead of sending nodes it cannot paint. */
+  const queueSheetCapable = (): boolean =>
+    ['picker', 'overlay', 'editor', 'button', 'row', 'col', 'text', 'el']
+      .every(kind => session.caps.kinds.includes(kind))
   /** The three standard presets the Quiet Composer menu may offer, in the
    * Owner-frozen order. `auto`/custom presets stay available through
    * `/permission` and Shift+Tab but never enter this three-row menu. */
@@ -2513,18 +4727,82 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   if (composerActionsSupported()) {
     surface.stylesheet(QUIET_COMPOSER_SHEET, QUIET_COMPOSER_STYLES)
   }
+  // TSP-7 Welcome D: the Welcome sheet is installed ONCE at surface init (never
+  // from `render()`) and only where the client negotiated BOTH `el` and
+  // `styles` — the same gate as the Quiet Composer chrome, and the reason a
+  // pane without them gets the plain text fallback instead of an unpainted
+  // stage. It never touches the composer sheet.
+  if (composerChromeSupported()) {
+    surface.stylesheet(TSP_WELCOME_SHEET, TSP_WELCOME_STYLES)
+  }
 
+  /**
+   * TSP-7 Welcome D: the Welcome's Resume click — the ONE registered
+   * `/sessions` UI entry, admitted by the SAME seat predicate every other base
+   * action re-checks. A stale frame's click (retired subject, hydration
+   * window, modal seat, open presenter, disposed mount) reaches nothing; a
+   * throw from an unwired composition becomes a Dock notice instead of a
+   * renderer crash, exactly like the composer's Model entry.
+   */
+  function welcomeResumeClicked(): void {
+    if (!visualActionsAdmitted()) return
+    if (!welcomeMainPresented()) return
+    const handlers = boundHandlers
+    if (handlers === undefined || !handlers.sessionBrowserAvailable()) return
+    try {
+      handlers.openSessionBrowser()
+    } catch (error) {
+      display.notify('session resume is unavailable in this session (the /sessions command is not registered)', 'error')
+      options.logError?.('tsp renderer: welcome session browser entry refused', { error: errorText(error) })
+    }
+  }
   /**
    * PR-C (TSP-7 §3.3): the ONE shared submit helper — the Editor's Enter
    * branch and the Send button both run EXACTLY this sequence (the frozen
    * PR3-B §3.4 before-callback ordering). No business-level filtering lives
    * here: the submission controller owns admission, rollback and the queue.
    */
+  function welcomeChooseDirectoryClicked(): void {
+    if (!visualActionsAdmitted() || !welcomeMainPresented()) return
+    const handlers = boundHandlers
+    if (handlers === undefined || !handlers.sessionBrowserAvailable()) return
+    try {
+      handlers.openSessionBrowser({ addDirectory: true })
+    } catch (error) {
+      display.notify('Directory selection is unavailable in this session.', 'error')
+      options.logError?.('tsp renderer: welcome directory chooser refused', { error: errorText(error) })
+    }
+  }
   const submitComposerDraft = (handlers: TspInputHandlers, gesture: 'enter' | 'accelerated'): void => {
     handlers.noteUserInput()
     const serializedDraft = composer.getDraft()
+    // BEFORE the clear: a pasted image path whose attachment read is still in
+    // flight must not be delivered as text, and the refusal must keep the
+    // live draft/caret — the same gate the app's submit/steer owners enforce.
+    if (!handlers.admitPastedPathDelivery(serializedDraft)) return
+    // PR2: the application admission runs while the draft is still the live
+    // document. `'held'` starts the submission itself; the renderer must not
+    // remember, clear or submit. `'legacy'` keeps the original sequence.
+    const admission = handlers.beginComposerSubmission?.(serializedDraft, gesture) ?? 'legacy'
+    if (admission === 'held' || admission === 'refused') {
+      render()
+      return
+    }
+    // TSP I-A: the recall OCCURRENCE is taken here — AFTER the one delivery
+    // admission (a refused paste leaves no occurrence behind) and BEFORE the
+    // clear, from the same snapshot this submission was admitted from.
+    // `shouldRememberInput` is the EXISTING application policy (staged
+    // attachments / an in-flight pasted path), never a second admission here.
+    // The local `!` exclusion is not a shell decision: this renderer's
+    // user-shell is refused outright by the submission controller (no row, no
+    // Session, the draft restored), so accepting such a line into the recall
+    // would advertise a submission that cannot run. The submission itself
+    // still takes its ORIGINAL path either way.
+    const scopeToken = serializedDraft.startsWith('!') || !handlers.shouldRememberInput(serializedDraft)
+      ? undefined
+      : historyRecall.rememberAccepted(serializedDraft)
     composer.setDraft('')
-    handlers.submit(serializedDraft, gesture)
+    handlers.submit(serializedDraft, gesture, scopeToken)
   }
 
   /**
@@ -2536,7 +4814,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * does. It is a shared local predicate — no `enabled` mirror is persisted
    * and no second state machine exists.
    */
-  const composerActionsAdmitted = (): boolean => visualActionsAdmitted()
+  const composerActionsAdmitted = (): boolean =>
+    visualActionsAdmitted() && !historyOwnsComposerSeat()
 
   /**
    * PR-C (TSP-7): the Send click — the same one-shot submit path as Enter. A
@@ -2548,6 +4827,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     if (!composerActionsAdmitted()) return
     const handlers = boundHandlers
     if (handlers === undefined) return
+    // PR2: a click from a frame painted BEFORE the hold must not submit the
+    // frozen document (the SDK dispatches by the painted id, so the button's
+    // own disabled state is not a gate).
+    if (composerHeld()) return
     if (!composerDraftSubmittable()) return
     submitComposerDraft(handlers, 'enter')
   }
@@ -2593,6 +4876,115 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     }
   }
 
+  /** TSP-7 PR-G: the composer's ONE combined Model/Effort trigger click.
+   *
+   * It never inspects a display snapshot to decide what exists: a live Session
+   * and a sessionless subject are both routed through the SAME registered
+   * `/model` command, which captured the formal `SessionScope` and chooses the
+   * quick presentation or the full panel. A second click on the open menu closes
+   * it (a pure local dismissal: no read, no write, no notice). */
+  const composerModelQuickToggled = (): void => {
+    // ONE admission authority: the renderer refuses a seat it does not own, and
+    // the COMMAND SURFACE owns the business-entry/capability refusal (a
+    // Host-owned `/model` or a pane that cannot present the native UI is stated
+    // there, through the existing notice path — never guessed twice here).
+    if (!composerActionsAdmitted()) return
+    if (modelQuick?.isOpen() === true) {
+      modelQuick.retire()
+      render()
+      return
+    }
+    // Permission and the model quick menu are never both expanded.
+    if (closePermissionMenu()) render()
+    if (!modelQuickCapable()) {
+      // A pane that cannot present the quick menu still has the real registered
+      // full entry: the trigger keeps ONE meaning instead of going dead.
+      composerModelClicked('models')
+      return
+    }
+    const handlers = boundHandlers
+    if (handlers === undefined) return
+    try {
+      handlers.openModelQuick()
+    } catch (error) {
+      display.notify('model selection is unavailable in this session (the /model command is not registered)', 'error')
+      options.logError?.('tsp renderer: composer model quick entry refused', { error: errorText(error) })
+    }
+  }
+
+  /** TSP-7 PR-G: one interaction of the quick menu's CURRENT frame. Every
+   *  admission (seat, panel identity, frame revision, offered identity) is the
+   *  presenter's own; this route forwards exactly once. */
+  const composerQuickIntent = (intent: QuickMenuIntent): void => {
+    modelQuick?.handleIntent(intent)
+  }
+
+  /** TSP-7 PR-G: revoke the quick menu's interaction identity and repaint when it
+   *  was open. The presenter's own `retire()` is silent by contract (the sibling
+   *  sweep and the opening presenter own that frame); these are the callers that
+   *  own no other frame, so a revoked menu must never linger on screen. */
+  const retireQuickMenu = (): void => {
+    if (modelQuick?.isOpen() !== true) return
+    modelQuick.retire()
+    render()
+  }
+
+  /**
+   * TSP I-E: the ONE `Ctrl+R` entry. An unbound seat or a pane that never
+   * negotiated the kinds/features the card really paints gets an explicit
+   * unavailable statement and an untouched draft — never a silently reduced
+   * second-tier UI. When it can open, the three low composer popovers go first
+   * (none of them reopens itself), then the seat captures its Session scope and
+   * cwd exactly once and paints its first Searching frame.
+   */
+  const openHistorySearch = (): void => {
+    if (disposed || hydrating || !inputBound) return
+    if (visualActionsAdmitted() === false) return
+    if (historySearch === undefined || !historySearch.supported()) {
+      display.notify(TSP_HISTORY_SEARCH_UNAVAILABLE, 'info')
+      return
+    }
+    if (closePermissionMenu()) render()
+    retireQuickMenu()
+    if (completion.retire()) render()
+    historySearch.open()
+  }
+
+  /**
+   * TSP I-E: the ONE History Copy. It reuses the SAME Client-local copy policy
+   * the Assistant figure Copy and the composer's visual copy already use — the
+   * injected `copyVisual` callback, whose production input is
+   * `ClientActions.copySelection` — and never a second clipboard owner. The raw
+   * payload was captured at admission inside the seat; the settlement notice is
+   * owed only while the SAME card, the SAME query round and the SAME selected
+   * row are still current, so a copy that finished after a Session change or a
+   * newer card never announces itself onto a different subject.
+   */
+  const issueHistoryCopy = (payload: string, live: () => boolean): void => {
+    let task: Promise<boolean>
+    try {
+      task = options.copyVisual(payload)
+    } catch (error) {
+      options.logError?.('tsp renderer: history copy failed', { error: errorText(error) })
+      try { display.notify('Failed to copy the history entry', 'error') } catch (failure) { routeFatal(failure) }
+      return
+    }
+    task.then(
+      copied => {
+        if (!live()) return
+        try {
+          display.notify(copied ? 'Copied the history entry' : 'Failed to copy the history entry',
+            copied ? 'info' : 'error')
+        } catch (error) { routeFatal(error) }
+      },
+      (error: unknown) => {
+        options.logError?.('tsp renderer: history copy failed', { error: errorText(error) })
+        if (!live()) return
+        try { display.notify('Failed to copy the history entry', 'error') } catch (failure) { routeFatal(failure) }
+      },
+    )
+  }
+
   /** The Quiet Composer's narrow-pane threshold (measured: 400px pane is
    *  below this, the 637px GUI pane is above it). */
   const QUIET_COMPOSER_NARROW_COLS = 56
@@ -2601,10 +4993,115 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   const QUIET_COMPOSER_MODEL_NARROW_WIDTH = 14
   const QUIET_COMPOSER_PERMISSION_WIDTH = 24
 
+  /**
+   * TSP I-E: the mount-side admission the History seat consults — the SAME live
+   * facts every composer-adjacent seat uses (no Modal, no temporary Reader, no
+   * higher Presenter, no hydration window, no disposal, input bound), plus the
+   * pane's own negotiated capability. A seat that is not admitted neither keeps
+   * a card painted nor consumes a key, so a hidden History can never shadow the
+   * form or panel the user is actually looking at.
+   */
+  const historySeatAdmitted = (): boolean => visualActionsAdmitted() && nativeHistoryCapable()
+
+  /**
+   * T3-B1: the ONE capability gate of the Session Search card. It reads the
+   * EXACT kinds the card's own projection constructs (`col`/`row`/`text`/
+   * `input`/`el`) plus `styles` for its scoped sheet — never a version label or
+   * a window size. A pane that cannot paint the card states the truth instead of
+   * painting a reduced second-tier UI.
+   */
+  const nativeTranscriptSearchCapable = (): boolean =>
+    ['col', 'row', 'text', 'input', 'el'].every(kind => session.caps.kinds.includes(kind))
+    && session.caps.features.includes('styles')
+
+  /**
+   * T3-B1: the mount-side admission the Search seat consults. It REUSES the
+   * same live fences every composer-adjacent seat uses (no Modal/Reader/higher
+   * Presenter, no hydration window, no disposal, the input is bound) and adds
+   * the pane's own negotiated capability plus the History card, which outranks
+   * this seat.
+   *
+   * The three LOW composer popovers (Permission menu, Model quick menu,
+   * completion list) are deliberately NOT part of this predicate: the explicit
+   * Search entry retires them synchronously first, so a retirable local popover
+   * can never make the entry permanently unavailable.
+   */
+  const transcriptSearchSeatAdmitted = (): boolean =>
+    visualActionsAdmitted() && nativeTranscriptSearchCapable() && historySearch?.isOpen() !== true
+
+  /**
+   * T3-B1: the ONE Session Search entry. A pane without the negotiated
+   * capability or without the surface's semantic-search binding states the
+   * truth and leaves the draft untouched — it never opens a fake card.
+   */
+  const openTranscriptSearch = (): void => {
+    if (disposed || hydrating || !inputBound) return
+    if (visualActionsAdmitted() === false) return
+    if (historySearch?.isOpen() === true) return
+    if (transcriptSearch === undefined || !transcriptSearch.supported()) {
+      display.notify(TSP_TRANSCRIPT_SEARCH_UNAVAILABLE, 'info')
+      return
+    }
+    // The three low popovers retire FIRST (none of them reopens itself), then the
+    // same admission predicate decides whether the seat may really open.
+    if (closePermissionMenu()) render()
+    retireQuickMenu()
+    if (completion.retire()) render()
+    if (!transcriptSearchSeatAdmitted()) return
+    transcriptSearch.open()
+  }
+
+  /**
+   * T3-B1: whether the Session Search card currently owns the Dock's input seat.
+   * While it is open the Dock paints NO Composer node at all, so this predicate
+   * is the ONE fact every composer-side admission reads.
+   */
+  const transcriptSearchOwnsDock = (): boolean => transcriptSearch?.isOpen() === true
+
+  /**
+   * TSP I-E: the ONE Dock producer of the History card. `undefined` = paint
+   * nothing: the seat's own projection already refuses a parked, retired,
+   * un-admitted or capability-poor card, so a frame can never show a card the
+   * mount would not let act.
+   */
+  const historyDockNode = (): Node | undefined => {
+    const seatState = historySearch?.renderState()
+    if (seatState === undefined) return undefined
+    return historySearchView({
+      state: seatState,
+      wide: historyPaneWide(),
+      // Every pointer route lands in the SAME admitted intent the keyboard
+      // produces; the SDK dispatches by the id of the view it last rendered, and
+      // the seat re-checks serial/revision/currentness before anything mutates.
+      onIntent: (intent) => { historySearch?.handleIntent(intent) },
+    })
+  }
+
+  /**
+   * T3-B1: the ONE Dock producer of the Session Search card. `undefined` = paint
+   * nothing: the seat's own projection already refuses a retired or un-admitted
+   * card, so a frame can never show a card the mount would not let act.
+   */
+  const transcriptSearchDockNode = (): Node | undefined => {
+    const seatState = transcriptSearch?.renderState()
+    if (seatState === undefined) return undefined
+    return transcriptSearchView({
+      state: seatState,
+      // Every pointer route lands in the SAME admitted intent the keyboard
+      // produces; the SDK dispatches by the id of the view it last rendered and
+      // the seat re-checks serial/revision/currentness before anything mutates.
+      onIntent: (intent) => { transcriptSearch?.handleIntent(intent) },
+    })
+  }
+
   /** The controlled editor node: the SAME program-owned draft/cursor cell,
    *  with the v2 placeholder and NO `> ` prompt inside the quiet shell. */
   const composerEditorNode = (): Node => {
     const state = composer.state()
+    // PR2: a held submission paints the composer read-only (the native
+    // SDK-level affordance) — the business gates below are still the
+    // authority, the paint only tells the truth about them.
+    const readonly = composerHeld() ? { readonly: true } : {}
     return composerActionsSupported()
       ? ui.editor({
           key: 'composer',
@@ -2612,6 +5109,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           cursor: state.cursor,
           maxLines: 8,
           placeholder: 'What would you like to work on?',
+          ...readonly,
         })
       : ui.editor({
           key: 'composer',
@@ -2620,6 +5118,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           maxLines: 8,
           placeholder: 'Message',
           prompt: '> ',
+          ...readonly,
         })
   }
 
@@ -2636,8 +5135,22 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   /** The edit-time admission of the permission menu: a real main-subject
    *  permission fact, a non-empty standard roster, the bound UI owner and no
    *  modal/Reader/picker/hydration/disposed owner. */
+  // The Permission menu is a COMPOSER control, so it answers to the composer
+  // seat's own admission: while the History card owns that seat the menu can
+  // neither open nor choose, exactly like Send and the Model quick panel.
+  // Reading the bare `visualActionsAdmitted()` here left a business write
+  // (selectPermission) reachable behind the card the user was looking at, while
+  // the projection already painted the button disabled — a click that lied.
   const permissionMenuAdmitted = (): boolean =>
-    permissionComposerAffordance() && visualActionsAdmitted()
+    permissionComposerAffordance() && composerActionsAdmitted()
+
+  /** TSP I-E: whether the card is CURRENTLY OPERABLE (open, not parked). The
+   *  Quiet Composer stays VISIBLE and is the ONE editor either way; while the
+   *  card is the keyboard seat its business controls are painted disabled and
+   *  every click admission refuses, so a click can never send, stop or open a
+   *  second popover behind the card the user is looking at. Async settlements
+   *  must use {@link historyHoldsComposerSeat}, which also covers a park. */
+  const historyOwnsComposerSeat = (): boolean => historySearch?.isOpen() === true
 
   /** Toggle the menu; opening starts a NEW expansion identity and lands the
    *  keyboard highlight on the current preset when one is present. */
@@ -2650,6 +5163,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     }
     const options = permissionMenuOptions()
     if (options.length === 0) return
+    // TSP-7 PR-G: the two composer menus are never both expanded — the model
+    // quick menu is revoked synchronously before the permission frame paints.
+    retireQuickMenu()
     permissionMenuOpen = true
     permissionMenuEpoch += 1
     const selected = options.findIndex(option => option.selected)
@@ -2729,24 +5245,6 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     return false
   }
 
-  /** The Quiet Composer's model/effort labels + title, with the frozen
-   *  narrow-pane degradation and external-fact sanitization. */
-  const quietComposerModelView = (): { label: string; title: string; interactive: boolean } => {
-    const model = presentedStatus?.composition.model
-    const cleanName = model?.displayName === undefined ? undefined : sanitizedPhysicalLine(model.displayName).trim()
-    const cleanEffort = model?.reasoningEffort === undefined ? undefined : sanitizedPhysicalLine(model.reasoningEffort).trim()
-    const narrow = session.caps.cols < QUIET_COMPOSER_NARROW_COLS
-    const value = cleanName === undefined || cleanName === ''
-      ? undefined
-      : clampMiddle(cleanName, narrow ? QUIET_COMPOSER_MODEL_NARROW_WIDTH : QUIET_COMPOSER_MODEL_WIDTH)
-    return {
-      label: `${value ?? 'Model'} ▾`,
-      title: model === undefined
-        ? 'Model — type /model to switch'
-        : `Model ${cleanName}${cleanEffort === undefined || cleanEffort === '' ? '' : ` · effort ${cleanEffort}`} — type /model to switch`,
-      interactive: boundHandlers !== undefined,
-    }
-  }
   /** The narrow-pane effort abbreviation: keep the REAL value's identity,
    *  never a guessed `H` for every non-High value. Unknown free-form values
    *  keep a bounded prefix instead of being relabelled. */
@@ -2760,16 +5258,37 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       default: return clampMiddle(value, 6)
     }
   }
-  const quietComposerEffortView = (): { label: string; title: string; interactive: boolean } => {
-    const effort = presentedStatus?.composition.model?.reasoningEffort
-    const clean = effort === undefined ? undefined : sanitizedPhysicalLine(effort).trim()
-    if (clean === undefined || clean === '') {
-      return { label: 'Effort ▾', title: 'Reasoning effort — type /model to change', interactive: boundHandlers !== undefined }
-    }
+
+  /** TSP-7 PR-G: the ONE combined trigger's display parts — the committed
+   *  Status model and effort, sanitized and bounded FOR DISPLAY ONLY. A truncated
+   *  label never becomes a write payload: the menu's rows and every submitted
+   *  identity come from the directory the registered command read. With no model
+   *  the slot reads `Model`; with no effort NO empty effort slot is invented. */
+  const quietComposerModelQuickView = (): {
+    readonly name: string
+    readonly effort: string | undefined
+    readonly title: string
+    readonly interactive: boolean
+  } => {
+    const model = presentedStatus?.composition.model
+    const cleanName = model?.displayName === undefined ? undefined : sanitizedPhysicalLine(model.displayName).trim()
+    const cleanEffort = model?.reasoningEffort === undefined ? undefined : sanitizedPhysicalLine(model.reasoningEffort).trim()
+    const narrow = session.caps.cols < QUIET_COMPOSER_NARROW_COLS
+    const name = cleanName === undefined || cleanName === ''
+      ? 'Model'
+      : clampMiddle(cleanName, narrow ? QUIET_COMPOSER_MODEL_NARROW_WIDTH : QUIET_COMPOSER_MODEL_WIDTH)
+    const effort = cleanEffort === undefined || cleanEffort === ''
+      ? undefined
+      : narrow ? narrowEffortLabel(cleanEffort) : clampMiddle(cleanEffort, 14)
+    const facts = [
+      ...(cleanName === undefined || cleanName === '' ? [] : [cleanName]),
+      ...(effort === undefined ? [] : [cleanEffort]),
+    ].join(' · ')
     return {
-      label: `${session.caps.cols < QUIET_COMPOSER_NARROW_COLS ? narrowEffortLabel(clean) : clampMiddle(clean, 14)} ▾`,
-      title: `Reasoning effort ${clean} — type /model to change`,
-      interactive: boundHandlers !== undefined,
+      name,
+      effort,
+      title: `${facts === '' ? 'Model' : facts} — model and reasoning effort`,
+      interactive: modelPickerAvailable(),
     }
   }
 
@@ -2779,12 +5298,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // A modal/Reader/picker/hydration frame invalidates an open menu before
     // it can paint a stale click target.
     if (permissionMenuOpen && !permissionMenuAdmitted()) closePermissionMenu()
+    // TSP-7 PR-G: the same rule for the quick menu — a frame that no longer
+    // admits composer input must not paint a clickable quick frame.
+    if (modelQuick?.isOpen() === true && !visualActionsAdmitted()) modelQuick.retire()
     const baseOptions = permissionMenuOptions()
     const index = Math.min(Math.max(0, permissionMenuIndex), Math.max(0, baseOptions.length - 1))
     permissionMenuIndex = index
     const options = baseOptions.map((option, optionIndex) => ({ ...option, highlighted: optionIndex === index }))
-    const model = quietComposerModelView()
-    const effort = quietComposerEffortView()
+    const modelQuickView = quietComposerModelQuickView()
     const renderScope = scopeEpoch
     return quietComposerView({
       editor,
@@ -2792,32 +5313,52 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       busyEpoch,
       permission: {
         label: permissionTriggerLabel(),
-        interactive: permissionComposerAffordance(),
+        interactive: permissionComposerAffordance() && !historyOwnsComposerSeat(),
         expanded: permissionMenuOpen && options.length > 0,
         options,
         menuEpoch: permissionMenuEpoch,
       },
-      model,
-      effort,
+      modelQuick: {
+        name: modelQuickView.name,
+        effort: modelQuickView.effort,
+        title: modelQuickView.title,
+        interactive: modelQuickView.interactive && !historyOwnsComposerSeat(),
+        expanded: modelQuick?.isOpen() === true,
+        panel: modelQuick?.renderState(),
+      },
       busy: presentedStatus?.activity.busy === true && !hydrating,
-      sendable: composerDraftSubmittable(),
+      sendable: composerDraftSubmittable() && !historyOwnsComposerSeat() && !composerHeld(),
+      // TSP I-C: the seat's OWN projection, observed at paint time. The painter
+      // never queries and never re-sorts; a click is admitted only for the row
+      // of the frame that painted it.
+      completion: completion.renderState(),
+      onCompletionChoose: (id, revision) => { completion.acceptClick(id, revision) },
       onPermissionToggle: () => { composerPermissionToggled() },
       onPermissionChoose: (id, menuEpoch) => { permissionOptionChosen(renderScope, id, menuEpoch) },
-      onModel: () => {
-        if (closePermissionMenu()) render()
-        composerModelClicked('models')
-      },
-      onEffort: () => {
-        if (closePermissionMenu()) render()
-        composerModelClicked('effort')
-      },
+      onModelQuickToggle: () => { composerModelQuickToggled() },
+      onModelQuickIntent: (intent) => { composerQuickIntent(intent) },
       onSend: () => {
         if (closePermissionMenu()) render()
+        // TSP-7 PR-G: sending with the menu open dismisses the menu FIRST — the
+        // submission belongs to the Composer, not to a covered frame.
+        retireQuickMenu()
         composerSendClicked()
       },
       onStop: () => {
         if (closePermissionMenu()) render()
+        retireQuickMenu()
         composerStopClicked()
+      },
+      // T3-B1: the ONE `Search session` entry. `enabled` is the SAME admission
+      // predicate the click re-checks (plus the real seat capability), so the
+      // painted affordance and the accepted gesture can never disagree. A pane
+      // without the semantic-search plane paints the entry disabled rather than
+      // a fake control; the chord still states the truth.
+      searchSession: {
+        available: transcriptSearch?.supported() === true,
+        enabled: transcriptSearch?.supported() === true && transcriptSearchSeatAdmitted(),
+        narrow: session.caps.cols < QUIET_COMPOSER_NARROW_COLS,
+        onOpen: () => { openTranscriptSearch() },
       },
     })
   }
@@ -2879,6 +5420,40 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     )
   }
 
+  const issueTranscriptCopy = (target: TranscriptCopyTarget): void => {
+    if (!transcriptCopyAdmitted()) return
+    const isStillCurrent = (): boolean => {
+      if (disposed || hydrating || target.source !== projectionScope || target.scopePrefix !== scopePrefix) return false
+      if (!lastMessages.includes(target.message)) return false
+      const current = transcriptCopyButtons.get(target.nodeId)
+      return current?.message === target.message
+        && current.payload === target.payload
+        && current.source === target.source
+        && current.scopePrefix === target.scopePrefix
+    }
+    let task: Promise<boolean>
+    try {
+      task = options.copyVisual(target.payload)
+    } catch (error) {
+      options.logError?.('tsp renderer: transcript copy failed', { error: errorText(error) })
+      if (isStillCurrent()) {
+        try { display.notify('Failed to copy message', 'error') } catch (failure) { routeFatal(failure) }
+      }
+      return
+    }
+    task.then(
+      copied => {
+        if (!isStillCurrent()) return
+        try { display.notify(copied ? 'Copied message' : 'Failed to copy message', copied ? 'info' : 'error') } catch (error) { routeFatal(error) }
+      },
+      (error: unknown) => {
+        options.logError?.('tsp renderer: transcript copy failed', { error: errorText(error) })
+        if (!isStillCurrent()) return
+        try { display.notify('Failed to copy message', 'error') } catch (failure) { routeFatal(failure) }
+      },
+    )
+  }
+
   /**
    * PR3 Alt+V: select the next figure of the CURRENT committed frame (wrap to
    * the first), repaint the selection badge, then reveal the figure through the
@@ -2912,7 +5487,39 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     issueVisualCopy(target)
   }
 
-  const dispatchKey = (key: Key, handlers: TspInputHandlers): boolean => {
+  /**
+   * ONE completed bracketed paste: prove the raw span the composer inserted
+   * and forward the receipt to the application intake owner. A paste whose
+   * insertion cannot be proven verbatim is never claimed, so a candidate span
+   * is never guessed from the draft text.
+   */
+  const acceptPastedPath = (before: TspComposerState, key: Key, handlers: TspInputHandlers): void => {
+    if (disposed || hydrating) return
+    const after = composer.state()
+    const pastedText = key.text ?? ''
+    const span = pastedBodySpan(before.text, before.cursor, after.text, after.cursor, pastedText)
+    if (span === undefined) return
+    const id = composer.registerPastedPathSpan(span)
+    if (id === undefined) return
+    handlers.pastedPath({
+      text: pastedText,
+      seatCurrent: () => !disposed && !hydrating,
+      hasLivePath: (path) => composer.hasLivePath(id, path),
+      replacePastedPath: (path, placeholder) => composer.replacePastedPathOccurrence(id, path, placeholder),
+    })
+  }
+
+  const dispatchKey = (key: Key, handlers: TspInputHandlers, at: number = Date.now()): boolean => {
+    // M6 UX PR1: only the two exit keys may confirm an armed exit window, and
+    // only the SAME one. Pressing the OTHER exit key is an intervening gesture
+    // even when its own edit action is a no-op (e.g. Ctrl+D on a non-empty
+    // draft), so C→D→C or D→C→D can never confirm across keys. Any other key
+    // (including a modal answer) disarms too.
+    const exitKeyIdentity: RawExitIdentity | undefined = key.ctrl === true
+      ? key.name === 'c' ? 'interrupt' : key.name === 'd' ? 'exit' : undefined
+      : undefined
+    if (exitKeyIdentity === undefined) lastExitKey = undefined
+    else if (lastExitKey !== undefined && lastExitKey.identity !== exitKeyIdentity) lastExitKey = undefined
     // 1. The disposal fence: `disposed` is checked by the loop before this.
     // 2. B3-A2 §6.6: a temporary Screen that is still physically open or
     //    closing covers this pane. While it exists the modal seat's logical
@@ -2923,9 +5530,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     //    below resumes for the form that is then really visible.
     const details = detailsSlot
     if (details !== undefined) {
-      if (details.phase === 'closing') return false
+      if (details.phase === 'closing') { lastExitKey = undefined; return false }
       if (!seat.hasModalSeat()) {
         handleDetailsKey(details, key)
+        // The Reader is an intervening owner: an armed exit key never survives.
+        lastExitKey = undefined
         return false
       }
     }
@@ -2937,7 +5546,26 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     //    controller/renderer presentation retirement withdraws it).
     if (seat.hasModalSeat()) {
       seat.handleKey(key, handlers)
+      // Any key the modal seat consumes — the exit keys included — is an
+      // intervening gesture; a prior arm is never reused after it.
+      lastExitKey = undefined
       return false
+    }
+    // TSP I-E: an open (non-parked) History card owns EVERY key. Its own
+    // `Esc`/`Ctrl+C` is the card's cancel (closing History never interrupts the
+    // Agent and never quits the TUI), and a stray letter, `Ctrl+V`, `Ctrl+D`,
+    // `Alt+Q` or a visual chord can never reach the Composer reducer, the paste
+    // intake or another business owner meanwhile.
+    if (historySearch?.isOpen() === true) {
+      historySearch.handleKey(key)
+      return false
+    }
+    // T3-B1: an open Session Search card owns every key EXCEPT `Ctrl+C`, which
+    // must reach the original interrupt/cancel owner exactly once. The card
+    // retires itself first so no stale query survives the interrupt, and the
+    // key then falls through the ladder unchanged.
+    if (transcriptSearch?.isOpen() === true) {
+      if (transcriptSearch.handleKey(key)) return false
     }
     // 4. `Alt+Q` (PR3-B B3 §3.8): the inspection entry for parked continued
     //    Questions — only with no modal and outside the hydration window (the
@@ -2945,6 +5573,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     //    fence as every other key applies).
     if (!fencedOut(key) && key.alt === true && key.ctrl !== true && key.meta !== true
       && key.shift !== true && key.name === 'q') {
+      // TSP-7 PR-G: the Alt+Q list takes the composer seat, so the quick menu is
+      // revoked synchronously before the list opens (never hidden-but-clickable).
+      retireQuickMenu()
       seat.openContinuedList(handlers)
       return false
     }
@@ -2956,20 +5587,135 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // Ctrl+C always belongs to the original cancel owner; the local menu
       // expansion is revoked without consuming the intent.
       if (closePermissionMenu()) render()
-      handlers.cancel()
+      // TSP-7 PR-G: the same for the quick menu — its interaction identity goes
+      // first (with the frame that shows it), and the cancel intent still
+      // reaches its original owner unchanged.
+      retireQuickMenu()
+      // TSP I-C/I-D: the same rule for the candidate list — the popup retires
+      // FIRST and the cancel intent still reaches its original owner exactly
+      // once. An open list never turns Ctrl+C into a no-op. The frame is owed
+      // only when a list actually went away (the Permission menu's own shape).
+      if (completion.retire()) render()
+      // M6 UX PR1: the DEFAULT Ctrl+C is the ONE busy-cancel key. Working:
+      // cancel ONCE through the existing application path, never arm an exit.
+      // Unknown: refuse to arm and state the unobservable fact. Idle: keep the
+      // same-key 1.5 s double-press exit (no immediate cancel).
+      const activity = handlers.sessionActivity?.()
+      // A mount without the live fact keeps the historical cancel-only Ctrl+C
+      // (never an unconfirmed exit); the production composition always binds it.
+      if (activity === 'working' || activity === undefined) {
+        lastExitKey = undefined
+        handlers.cancel()
+        return false
+      }
+      if (activity === 'unknown') {
+        lastExitKey = undefined
+        display.notify("The current session's running state cannot be verified.", 'error')
+        return false
+      }
+      // Inspect the CURRENT draft BEFORE confirming: a late paste/clipboard
+      // insert may have filled it after the first press. PiTui's ladder clears
+      // the live draft and re-arms; the same-key window never exits over text
+      // that arrived between the presses.
+      if (composer.state().text !== '') {
+        composer.clearDraftStateOnly()
+        render()
+        lastExitKey = { identity: 'interrupt', at }
+        return false
+      }
+      if (armOrConfirmRawExit('interrupt', at)) {
+        handlers.exit()
+        return false
+      }
       return false
     }
     if (workHub?.handleKey(key)) return false
     if (sessionBrowser?.handleKey(key)) return false
+    if (webPicker?.handleKey(key)) return false
+    if (acpPicker?.handleKey(key)) return false
     if (presetPicker?.handleKey(key)) return false
     if (modelPicker?.handleKey(key)) return false
+    // PR-Q: the renderer-local `/queue` entry uses the LIVE effective
+    // `app.queue.open` binding (the composition root injects the same action's
+    // key ids). It runs AFTER every higher presenter declined the key, so it
+    // can never stack the sheet on a live picker, and BEFORE the sheet's own
+    // key handler so the SAME chord toggles a mounted sheet closed (the
+    // controller's repeated-open intent). The seat order still wins above.
+    if (!fencedOut(key) && !seat.hasModalSeat() && queueManagerPresenter !== undefined
+      && queueManagerPresenter.matchesOpenKey(key)) {
+      queueManagerPresenter.openFromKey()
+      return false
+    }
+    if (queueManagerPresenter?.handleKey(key)) return false
+    // TSP I-E: `Ctrl+R` opens the ONE History card. It runs after every higher
+    // Presenter (Reader/Modal/Alt+Q list/Hub/Browser/Web/Preset/Model) has
+    // declined the key and BEFORE the three low composer popovers, and it
+    // retires those popovers synchronously first — the same
+    // never-two-operable-seats rule the Quick menu and Permission menu follow.
+    if (key.ctrl === true && key.name === 'r' && !key.alt && !key.meta && !key.shift) {
+      openHistorySearch()
+      return false
+    }
+    // T3-B1: `Alt+Shift+S` opens the ONE Session Search seat — the SAME entry the
+    // Quiet Composer's `Search session` button calls. It runs AFTER every higher
+    // Presenter has declined the key (so a Modal/Reader/Hub/picker/Queue keeps
+    // its own rights) and BEFORE the low composer popovers. A second press while
+    // the card is open only re-focuses its query.
+    if (matchesKeyId(key, TSP_SEARCH_CHORD)) {
+      openTranscriptSearch()
+      return false
+    }
+    // TSP-7 PR-G: the composer quick menu owns its keys after every higher seat
+    // and BEFORE the Permission menu and the original Escape/cancel route: a
+    // consumed key never reaches the Composer reducer, so Enter cannot send the
+    // draft and a stray letter cannot edit it.
+    if (modelQuick?.handleKey(key)) return false
     // TSP-7 PR-E: the Quiet Composer Permission menu sits AFTER every seat/
     // Reader/picker owner and BEFORE the original Escape cancel. Up/Down
     // cycle, Enter chooses, Escape closes ONLY the menu; any other key closes
     // the menu and then reaches the ONE composer reducer exactly once.
     if (permissionMenuHandleKey(key)) return false
+    // TSP I-C/I-D: the candidate list sits AFTER every higher seat (Reader,
+    // Modal, Alt+Q list, the pickers, the Quick menu, the Permission menu) and
+    // BEFORE the original Escape cancel and the Composer reducer. It consumes a
+    // key ONLY for its own gestures (arrows walk the list, Tab/Shift+Tab walk it
+    // too, a plain Enter or the single-candidate Tab ACCEPTS, Escape closes just
+    // the list). Everything else retires the list first and then reaches its
+    // existing owner exactly once, so an open popup never hijacks Escape,
+    // Ctrl+V, a visual chord, a printable edit or an I-B History arrow.
+    //
+    // The painted state is read BEFORE the seat runs, because a key the seat
+    // does not own also ends the browse: if that key then changes nothing in the
+    // composer (a modified arrow, an unknown chord), NO editor frame is coming —
+    // and the list would stay on screen while the seat already considers itself
+    // closed, so the NEXT Escape would cancel the agent instead of dismissing a
+    // list the user still sees. That one case owes exactly one frame.
+    const listWasPainted = completion.isOpen()
+    if (completion.handleKey(key)) return false
+    // A key the seat does not own ends the browse first, and the branches below
+    // that hand the key to a NON-composer owner return before the composer block
+    // at the end of the ladder. When such an owner produces no frame of its own
+    // (an empty clipboard, a visual chord with no figure on this frame), the
+    // withdrawn list would stay painted while the seat already considers itself
+    // closed, so the user's next Escape would hit Cancel instead of dismissing
+    // what they can still see. The frame is owed exactly then: only when a list
+    // WAS painted above and is now gone, so a normal edit (which renders through
+    // the composer's own sink) is never double-rendered.
+    const dismissOwedFrame = (): void => {
+      if (listWasPainted && !completion.isOpen()) render()
+    }
     if (key.name === 'escape') {
       handlers.cancel()
+      return false
+    }
+    // PR2/F2: a held submission freezes the composer as an INPUT OWNER — every
+    // remaining composer-destined key (typing, paste, Ctrl+V media, history
+    // browse, visual chords, Enter/Send) is consumed here, BEFORE the visual
+    // chords and the media intent can run. Escape/Ctrl+C and every higher seat
+    // (modal/Reader/pickers/menus/queue/search) already had their own routing
+    // above.
+    if (composerHeld()) {
+      dismissOwedFrame()
       return false
     }
     // PR3: the two visual chords are inserted AFTER every existing owner
@@ -2980,10 +5726,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // when no figure exists (a no-op that leaves the composer draft untouched).
     if (matchesKeyId(key, TSP_VISUAL_CHORDS.select)) {
       selectNextVisual()
+      dismissOwedFrame()
       return false
     }
     if (matchesKeyId(key, TSP_VISUAL_CHORDS.copy)) {
       copySelectedVisual()
+      dismissOwedFrame()
       return false
     }
     // PR4: the paste-media gesture. The SDK decodes Ctrl+V as the formal
@@ -2995,16 +5743,50 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     if (key.name === 'v' && key.ctrl === true && key.alt !== true && key.meta !== true && key.shift !== true) {
       handlers.noteUserInput()
       handlers.pasteMedia()
+      // The application owns the OS probe and may legitimately write nothing
+      // (no image on the clipboard), so this branch cannot assume a frame.
+      dismissOwedFrame()
+      return false
+    }
+    // PR2: a held submission freezes the composer document. Every key that
+    // would reach the reducer (typing, paste, history browse, Enter/Send) is
+    // consumed here; the cancel/exit/presenter paths ABOVE keep their own
+    // routing (Escape/Ctrl+C already returned, the modal seat and every
+    // picker were offered the key first).
+    if (composerHeld()) {
+      dismissOwedFrame()
       return false
     }
     // 5. The composer reducer owns everything else (Ctrl+D empty-exit,
     //    Enter gestures, paste, edits). A typed `q` is TEXT now.
+    const before = composer.state()
     const edit = composer.applyKey(key)
     if (edit.kind === 'submit') {
       submitComposerDraft(handlers, edit.gesture)
     }
-    if (edit.kind === 'edited') handlers.noteUserInput()
-    if (edit.kind === 'exit-empty') return true
+    if (edit.kind === 'edited') {
+      handlers.noteUserInput()
+      // A REAL bracketed paste is the only input source that may claim an
+      // automatic image-file-path attachment. The span is measured from the
+      // composer's own before/after state — never from the draft text.
+      if (key.name === 'paste') acceptPastedPath(before, key, handlers)
+      // TSP I-C: the natural trigger runs off the composer's OWN committed
+      // change, and only off a change to the TEXT (never a pure caret move): a
+      // Home/Left/End step inside a `/` token must not raise a candidate list,
+      // because the ↑/↓ that reach that draft are the I-B History browse. A
+      // caret-only move still retires the painted list at its own fence — the
+      // accept is admitted only for the exact document AND caret it was built
+      // for, so a list nobody can accept never stays on screen.
+      if (composer.state().text !== before.text) completion.onComposerEdit()
+    } else if (edit.kind === 'none') {
+      dismissOwedFrame()
+    }
+    if (edit.kind === 'exit-empty') {
+      // M6 UX PR1: an empty-draft Ctrl+D is a same-key double-press exit, the
+      // same contract as PiTui's effective exit key. Never an immediate exit.
+      if (armOrConfirmRawExit('exit', at)) handlers.exit()
+      return false
+    }
     return false
   }
 
@@ -3057,6 +5839,31 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         }
         return false
       }
+      // PR2: the client's bounded retention reports the ids it dropped. A Main
+      // DIRECT child id is retired from this renderer's cache and from every
+      // frame index: the row is not re-fetched, not re-added by a mere
+      // projection, and never treated as permission to read Host history.
+      //
+      // An id that names THIS SURFACE keeps the SDK's own closed lifecycle: the
+      // SDK has already closed the surface above and the existing fatal/closed
+      // path owns the frame, so this renderer only observes the event.
+      if (input.event.ev === 'gone') {
+        if ((input.event.sf === undefined || input.event.sf === surface.id)
+          && !input.event.ids.includes(surface.id)) {
+          const retired = mainJournal.retireGone(input.event.ids)
+          if (retired.length > 0) {
+            for (const key of retired) retireRootContribution(key)
+            // T3-B1 (B1-13): an evicted root invalidates the CURRENT Search
+            // target's proven reachability, so the card states `Unavailable in
+            // current pane` instead of keeping a `Source-only` claim about a node
+            // the client no longer holds. Nothing is re-added and no stale-id
+            // reveal is ever sent.
+            transcriptSearch?.invalidateReachability(input.event.ids)
+            render()
+          }
+        }
+        return false
+      }
       // B3-A2 §7.3: while a temporary Screen exists its admission comes BEFORE
       // every base event branch. The fence does not depend on the client's
       // presentation: even a client that leaves the base on screen must not let
@@ -3088,32 +5895,171 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           return false
         }
       }
-      // PR3-B B3 (§3.5.5): the modal seat gates events addressed at the
-      // underlying composer. A terminal focus claim must not move the caret
-      // away from an open form, so the seat's own focus is re-asserted; every
-      // other event keeps its existing (unhandled) course.
-      // PR-D RFL-016: the Tern disclosure event. A ready SVG card starts
-      // collapsed; expanding it is the real display demand that sends the
-      // blob. The node id's last segment is the `ui.tool` key (the same key the
-      // mapper wrote), with the event's optional `key` taking precedence.
-      if (input.event.ev === 'toggle' && input.event.sf === surface.id) {
-        // The SDK node id still carries the B2 child key (`sub-...`); the
-        // disclosure identity is the parent-scoped path from the last tool-card
-        // key (`msg-N`) through that child key. The mapper builds exactly the
-        // same `msg-N/sub-...` path, so two parents with the same subCallId do
-        // not share expansion while node ids stay untouched.
-        let disclosure: string | undefined
-        let matched = -1
-        for (const [path, value] of toolDisclosureByPath) {
-          if (path.length > matched && (input.event.id === path || input.event.id.endsWith(`.${path}`))) {
-            disclosure = value
-            matched = path.length
+      // Focus Root, Work and Tool disclosures all use this Session iterator and
+      // share the same current-frame and input-seat admission before changing
+      // any renderer-local disclosure owner or creating image demand.
+      if (input.event.ev === 'toggle' && input.event.sf === surface.id
+        && !hydrating && inputBound
+        && !seat.hasModalSeat()
+        && detailsSlot === undefined && !openingDetails
+        && workHub?.isOpen() !== true && sessionBrowser?.isOpen() !== true
+        && webPicker?.isOpen() !== true && acpPicker?.isOpen() !== true
+        && presetPicker?.isOpen() !== true
+        && modelPicker?.isOpen() !== true && modelQuick?.isOpen() !== true
+        && queueManagerPresenter?.isOpen() !== true
+        && historySearch?.isOpen() !== true
+        // T3-B1: a `toggle` stays admitted while the Search card is open — the
+        // Owner-frozen contract lets the user collapse a card the search
+        // temporarily expanded. Every OTHER base event stays fenced below.
+        ) {
+        const preset = options.displayState?.preset
+        if (preset === 'focus') {
+          const path = input.event.id.startsWith('main.') ? input.event.id.slice('main.'.length) : input.event.id
+          const turn = focusDisclosureByPath.get(input.event.id) ?? focusDisclosureByPath.get(path)
+          if (turn !== undefined) {
+            // T3-B1: the comparison reads the EFFECTIVE state (manual + the
+            // current search grant), so collapsing a card the search opened is a
+            // real change instead of a no-op that the next frame re-opens.
+            const wasExpanded = expandedFocusTurns.has(turn) || searchGrants?.focusTurns.has(turn) === true
+            const targetExpanded = input.event.collapsed !== true
+            if (wasExpanded !== targetExpanded) {
+              if (targetExpanded) {
+                expandedFocusTurns.add(turn)
+              } else {
+                // The user's own collapse wins over the search's temporary
+                // grant for THIS navigation epoch.
+                if (searchGrants?.focusTurns.has(turn) === true) suppressSearchGrantsForEpoch()
+                expandedFocusTurns.delete(turn)
+                // Reset ONLY the process detail this exact Thought root owns:
+                // Work and Thinking manual owners, plus the top-level ordinary
+                // process Tool cards. Independent Surfaced Context Rows /
+                // Clusters, settled human-interaction cards, PTC child owners
+                // and other Turns keep their manual disclosure state.
+                for (const owner of focusWorkOwnersByTurn.get(turn) ?? []) expandedWorkOwners.delete(owner)
+                for (const owner of focusThinkingOwnersByTurn.get(turn) ?? []) expandedThinkingOwners.delete(owner)
+                for (const rootKey of focusToolRootsByTurn.get(turn) ?? []) expandedToolKeys.delete(rootKey)
+              }
+              if (rebuildLastMain()) render()
+            }
+            return false
           }
         }
-        if (disclosure === undefined) return false
-        if (input.event.collapsed) expandedToolKeys.delete(disclosure)
-        else expandedToolKeys.add(disclosure)
-        if (rebuildLastMain()) render()
+        if (preset === 'compact' || preset === 'focus') {
+          // EXACT current-path admission: only the real current id or its one
+          // fixed `main.` region prefix is accepted.
+          const owner = workDisclosureByPath.get(input.event.id)
+            ?? workDisclosureByPath.get(input.event.id.startsWith('main.') ? input.event.id.slice('main.'.length) : input.event.id)
+          const turn = owner === undefined ? undefined : focusWorkTurnByOwner.get(owner)
+          // Finding 2: the admission reads the SAME effective state the frame was
+          // PAINTED from — a Thought opened by a search grant makes its Work
+          // collapsible by the user too (a painted card the user cannot collapse
+          // is the forbidden asymmetry).
+          const focusRootOpen = turn !== undefined
+            && (expandedFocusTurns.has(turn) || searchGrants?.focusTurns.has(turn) === true)
+          const admitted = preset === 'compact' || focusRootOpen
+          if (owner !== undefined && admitted) {
+            const wasExpanded = expandedWorkOwners.has(owner) || searchGrants?.workOwners.has(owner) === true
+            const targetExpanded = input.event.collapsed !== true
+            if (wasExpanded !== targetExpanded) {
+              if (targetExpanded) expandedWorkOwners.add(owner)
+              else {
+                if (searchGrants?.workOwners.has(owner) === true) suppressSearchGrantsForEpoch()
+                expandedWorkOwners.delete(owner)
+              }
+              if (rebuildLastMain()) render()
+            }
+            return false
+          }
+        }
+        const framePath = input.event.id.startsWith('main.')
+          ? input.event.id.slice('main.'.length)
+          : input.event.id
+        const innerTarget = innerDisclosureByPath.get(input.event.id) ?? innerDisclosureByPath.get(framePath)
+        if (innerTarget !== undefined) {
+          if (innerTarget.kind === 'workflow-run' || innerTarget.kind === 'workflow-phase') {
+            const state = workflowDisclosureStates.get(innerTarget.owner.runId)
+            if (state !== undefined) {
+              const targetExpanded = input.event.collapsed !== true
+              const phaseState = innerTarget.kind === 'workflow-phase'
+                ? state.phases.get(innerTarget.phaseKey)
+                : undefined
+              // Finding 2: the effective state includes the CURRENT search grant
+              // (the frame's own `effectiveWorkflowDisclosureStates` projection),
+              // so a run/phase the search opened is collapsible by the user.
+              const grantedRun = searchGrants?.workflowRuns.has(innerTarget.owner.runId) === true
+              const grantedPhase = innerTarget.kind === 'workflow-phase'
+                && searchGrants?.workflowPhases.get(innerTarget.owner.runId)?.has(innerTarget.phaseKey) === true
+              const wasExpanded = innerTarget.kind === 'workflow-run'
+                ? (grantedRun || effectiveWorkflowRunOpen(state, innerTarget.owner))
+                : phaseState !== undefined
+                  ? (() => {
+                    const phase = workflowPhasePresentations(innerTarget.owner.members)
+                      .find(candidate => candidate.key === innerTarget.phaseKey)
+                    return grantedPhase
+                      || (phase !== undefined && effectiveWorkflowPhaseOpen(state, phase))
+                  })()
+                  : false
+              if (wasExpanded !== targetExpanded) {
+                if (targetExpanded) {
+                  if (innerTarget.kind === 'workflow-run') state.userOpen = true
+                  else if (phaseState !== undefined) phaseState.userOpen = true
+                } else {
+                  // The user's own collapse wins over the search's grant for THIS
+                  // navigation epoch (the same rule the other cards follow).
+                  if (grantedRun || grantedPhase) suppressSearchGrantsForEpoch()
+                  if (innerTarget.kind === 'workflow-run') state.userOpen = false
+                  else if (phaseState !== undefined) phaseState.userOpen = false
+                }
+                if (rebuildLastMain()) render()
+              }
+            }
+            return false
+          }
+          const set = innerTarget.kind === 'thinking'
+            ? expandedThinkingOwners
+            : innerTarget.kind === 'context-row'
+              ? expandedContextRowOwners
+              : innerTarget.kind === 'context-cluster' ? expandedClusterOwners : expandedCommandCompactionOwners
+          const granted = innerTarget.kind === 'thinking'
+            ? searchGrants?.thinkingOwners
+            : innerTarget.kind === 'context-row'
+              ? searchGrants?.contextRowOwners
+              : innerTarget.kind === 'context-cluster'
+                ? searchGrants?.clusterOwners
+                : searchGrants?.commandCompactionOwners
+          // The comparison reads the EFFECTIVE state (manual + search grant).
+          const wasExpanded = set.has(innerTarget.owner) || granted?.has(innerTarget.owner) === true
+          const targetExpanded = input.event.collapsed !== true
+          if (wasExpanded !== targetExpanded) {
+            if (targetExpanded) set.add(innerTarget.owner)
+            else {
+              if (granted?.has(innerTarget.owner) === true) suppressSearchGrantsForEpoch()
+              set.delete(innerTarget.owner)
+            }
+            if (rebuildLastMain()) render()
+          }
+          return false
+        }
+
+        // Tool IDs are admitted only as the exact current path or its one fixed
+        // `main.` region prefix. Suffix matching would let a stale or foreign
+        // parent path claim a dotted PTC child identity.
+        const disclosure = toolDisclosureByPath.get(input.event.id) ?? toolDisclosureByPath.get(framePath)
+        if (disclosure !== undefined) {
+          // T3-B1: the effective state includes the current search grant, so the
+          // user's collapse of a search-opened tool body is a real change.
+          const wasExpanded = expandedToolKeys.has(disclosure)
+            || searchGrants?.toolKeys.has(disclosure) === true
+          const targetExpanded = input.event.collapsed !== true
+          if (wasExpanded !== targetExpanded) {
+            if (targetExpanded) expandedToolKeys.add(disclosure)
+            else {
+              if (searchGrants?.toolKeys.has(disclosure) === true) suppressSearchGrantsForEpoch()
+              expandedToolKeys.delete(disclosure)
+            }
+            if (rebuildLastMain()) render()
+          }
+        }
         return false
       }
       if (input.event.ev === 'resize' && input.event.sf === surface.id && typeof input.event.cols === 'number') {
@@ -3131,14 +6077,77 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         return false
       }
       if (seat.hasModalSeat()) { if (seat.handleEvent(input.event)) applyFocus(true); return false }
+      // T3-B1: while the Session Search card owns the Dock, a base event that is
+      // not the admitted `toggle` above must not reach a composer-side or
+      // transcript business action behind the card the user is looking at.
+      if (transcriptSearch?.isOpen() === true) return false
       if (!hydrating && inputBound && 'sf' in input.event && input.event.sf === surface.id) {
         // B3-A1/A2: the Work Hub is the highest non-modal native presenter. Its
         // local SELECT/ACTIVATE/ACTION admission never reaches a business
         // router; Enter/View details is a LOCAL Read intent.
         if (workHub?.handleEvent(input.event)) return false
         if (sessionBrowser?.handleEvent(input.event)) return false
+        if (webPicker?.handleEvent(input.event)) return false
+        if (acpPicker?.handleEvent(input.event)) return false
         if (presetPicker?.handleEvent(input.event)) return false
         if (modelPicker?.handleEvent(input.event)) return false
+        if (queueManagerPresenter?.handleEvent(input.event)) return false
+        // Mouse PR4: the first-party Tasks status segment's ONE pointer entry.
+        // Admission is the CURRENT committed frame's exact node id PLUS a live
+        // re-check of the predicate that painted it; the event's own claim is
+        // never trusted. A rejected/foreign action falls through to `false`
+        // (dropped, never another app handler), and an admitted one runs the
+        // registered `/tasks` UI entry exactly once.
+        if (input.event.ev === 'action' && input.event.act === TSP_FOOTER_TASKS_ACTION) {
+          const handlers = boundHandlers
+          if (handlers !== undefined
+            && tasksActionNodeIds.has(input.event.id)
+            && nativeTasksActionAdmitted()) {
+            handlers.openTasksBrowserUi()
+          }
+          return false
+        }
+        if (input.event.ev === 'action' && input.event.act === TSP_WORKFLOW_BROWSE_ACTION) {
+          if (scopedBrowseAdmitted()) {
+            const target = workflowBrowseButtons.get(input.event.id)
+            const handlers = boundHandlers
+            if (target !== undefined && handlers !== undefined && projectionScope !== undefined
+              && target.source === projectionScope && target.scopePrefix === scopePrefix) {
+              const owner = lastMessages.find(message => message === target.owner && message.kind === 'workflow')
+              if (owner !== undefined && owner.kind === 'workflow') {
+                if (target.kind === 'phase' && target.phaseKey !== undefined) {
+                  const phase = workflowPhasePresentations(owner.members)
+                    .find(candidate => candidate.key === target.phaseKey)
+                  if (phase !== undefined) {
+                    handlers.openWorkflowScopedAgents?.({
+                      kind: 'open-phase-agents',
+                      runId: String(owner.runId),
+                      name: owner.name,
+                      phaseLabel: phase.label,
+                      childIds: phase.members.map(member => String(member.childId)),
+                    })
+                  }
+                } else if (target.kind === 'run'
+                  && workflowRunViewAllVisible(owner.members.length, workflowPhasePresentations(owner.members).length)) {
+                  handlers.openWorkflowScopedAgents?.({
+                    kind: 'open-run-agents',
+                    runId: String(owner.runId),
+                    name: owner.name,
+                    childIds: owner.members.map(member => String(member.childId)),
+                  })
+                }
+              }
+            }
+          }
+          return false
+        }
+        if (input.event.ev === 'action' && input.event.act === TRANSCRIPT_COPY_ACTION) {
+          if (transcriptCopyAdmitted()) {
+            const target = transcriptCopyButtons.get(input.event.id)
+            if (target !== undefined) issueTranscriptCopy(target)
+          }
+          return false
+        }
         // PR3: a figure Copy action is admitted ONLY through the exact Copy
         // button node id of the CURRENT committed frame, re-checked against the
         // live sidecar; an old-frame button, a ref substring or any other action
@@ -3150,8 +6159,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           }
           return false
         }
+        // TSP I-E: the History card joins the seats whose caret a terminal
+        // focus claim must NOT steal. A click on the still-visible Composer
+        // behind the card asks the client to move the caret; the keyboard owner
+        // is still the card, so the ONE focus decision is re-asserted rather
+        // than left on the Composer.
         if ((workHub?.isOpen() === true || sessionBrowser?.isOpen() === true
-          || presetPicker?.isOpen() === true || modelPicker?.isOpen() === true)
+          || presetPicker?.isOpen() === true || modelPicker?.isOpen() === true
+          || queueManagerPresenter?.isOpen() === true
+          || modelQuick?.isOpen() === true || historySearch?.isOpen() === true)
           && input.event.ev === 'focus') applyFocus(true)
       }
       return false
@@ -3163,18 +6179,17 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // emergency semantics and is held like any other key.
     if (key.ctrl === true && key.name === 'c' && !inputBound) return true
     // The empty-draft Ctrl+D exit is ORDER-dependent (the reducer decides it
-    // against the live draft): pre-bind, it may act directly ONLY while the
-    // held queue is EMPTY — with held keys the draft's emptiness is not yet
-    // knowable (the held edits have not applied), so the gesture must wait
-    // and re-decide in arrival order at the bind.
+    // against the live draft): the gesture ALWAYS waits for the bind and is
+    // re-decided in arrival order there. It is not a final emergency exit —
+    // only the pre-bind Ctrl+C is. Holding it also means the same-key 1.5 s
+    // confirmation (not one key) is required after the bind.
     // While the fence is up the composer accepts NO key: the draft (and any
     // submit) would belong to a subject the surface is replacing. Dropped, not
     // held, and the existing draft is preserved.
     if (fencedOut(key)) return false
     if (!inputBound) {
-      if (key.ctrl === true && key.name === 'd' && heldKeys.length === 0 && composer.getDraft() === '') return true
       if (heldKeys.length < HELD_KEYS_LIMIT) {
-        heldKeys.push(key)
+        heldKeys.push({ key, at: Date.now() })
       } else if (!heldOverflowed) {
         // Fail loud ONCE (never a silent drop): the pre-bind window received
         // more input than the bounded queue holds. The dropped tail is
@@ -3214,7 +6229,41 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   // composer object. `getDraft()` reads the VISIBLE TSP composer, never a
   // hidden PiTui instance; `setSubmitPending` surfaces the existing pending
   // fact in the dock (no derived queue state).
-  const composerPort: SubmissionComposerPort = composer
+  const composerPort: SubmissionComposerPort = {
+    getDraft: () => composer.getDraft(),
+    // PR2: a held document is frozen against programmatic writes too (the
+    // accepted settlement clears through the composer directly, below).
+    setDraft: (text) => { if (!composerHeld()) composer.setDraft(text) },
+    setEditorText: (text) => { if (!composerHeld()) composer.setEditorText(text) },
+    insertIntoEditor: (text) => { if (!composerHeld()) composer.insertIntoEditor(text) },
+    notify: (message, kind) => { composer.notify(message, kind) },
+    setSubmitPending: (detail) => { composer.setSubmitPending(detail) },
+    // PR2: the ONE renderer-owned hold of this mount. The application opens it
+    // synchronously BEFORE the dispatch and settles it at the write's Host
+    // acceptance — only `'accepted'` commits the draft (clear + recall
+    // occurrence + one render); the other outcomes unlock the editable draft.
+    holdSubmission: (attemptId) => {
+      const text = composer.getDraft()
+      heldSubmission = {
+        attemptId,
+        text,
+        remember: text.startsWith('!') ? false : (boundHandlers?.shouldRememberInput(text) ?? true),
+      }
+      render()
+    },
+    settleSubmission: (attemptId, result) => {
+      const hold = heldSubmission
+      if (hold === undefined || hold.attemptId !== attemptId) return
+      heldSubmission = undefined
+      if (result === 'accepted') {
+        // The accepted occurrence is what the ↑ recall records. Order: the
+        // recall occurrence (the document is still available), then the clear.
+        if (hold.remember) historyRecall.rememberAccepted(hold.text)
+        composer.setDraft('')
+      }
+      render()
+    },
+  }
   return {
     display,
     get modelPresentation() {
@@ -3246,6 +6295,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         ? presetPresentation
         : undefined
     },
+    get queuePresentation(): QueueManagerPresentation | undefined {
+      // The sheet builds a picker, a modal overlay, a controlled editor and
+      // native buttons/rows. A pane that did not negotiate every one of those
+      // kinds is refused BEFORE `/queue` reaches the handler (fail closed).
+      const kinds = ['picker', 'overlay', 'editor', 'button', 'row', 'col', 'text', 'el']
+      return kinds.every(kind => session.caps.kinds.includes(kind))
+        ? queueManagerPresenter?.presentation
+        : undefined
+    },
     get sessionBrowserPresentation() {
       const kinds = ['picker', 'row', 'overlay', 'text']
       return kinds.every(kind => session.caps.kinds.includes(kind))
@@ -3253,11 +6311,47 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         ? sessionBrowserPresentation
         : undefined
     },
+    get webPresentation() {
+      // ONE native `ui.picker` + ONE read-only native overlay whose body the
+      // SDK scrolls. A pane that did not negotiate every kind and the `scroll`
+      // feature is refused BEFORE the command opens it (fail closed) instead of
+      // being handed a page it cannot present.
+      const kinds = ['picker', 'row', 'overlay', 'text']
+      return kinds.every(kind => session.caps.kinds.includes(kind))
+        && session.caps.features.includes('scroll')
+        ? webPresentation
+        : undefined
+    },
+    get acpPresentation() {
+      // The SAME single-picker + one-overlay shape; a pane without the
+      // negotiated kinds/scroll is refused BEFORE the command opens it.
+      const kinds = ['picker', 'row', 'overlay', 'text']
+      return kinds.every(kind => session.caps.kinds.includes(kind))
+        && session.caps.features.includes('scroll')
+        ? acpPresentation
+        : undefined
+    },
     composer: composerPort,
     // PR3-B B3 (§3.5.1): the REAL interaction presenter (the seat) replaces
     // the B0 inert one. It is installed with the mount, but the surface only
     // opts into modals once `bindInput` has committed the application wiring.
     interaction: seat.presenter,
+    // M6 UX PR1: the renderer's ONE Client-local Exit Choice seat, in the SAME
+    // modal-first keyboard owner as every official interaction.
+    exitChoice: {
+      open: (model: import('../../app/surface/exit-choice.ts').ExitChoiceModel) => {
+        // A temporary Reader (or one still closing) is a HIGHER modal owner:
+        // the Client choice must never open behind/above it. Withdraw it with
+        // zero business action instead.
+        if (detailsSlot !== undefined || openingDetails) {
+          model.dismiss()
+          return
+        }
+        seat.openExitChoice(model)
+      },
+      update: (model: import('../../app/surface/exit-choice.ts').ExitChoiceModel) => { seat.updateExitChoice(model) },
+      close: () => { seat.closeExitChoice() },
+    },
     // B3-A1: the internal native Work Hub presentation sink, wrapped by the
     // seat's four-way presenter exclusivity. It is always supplied with the
     // mount; the display seam's `supportsTaskCenter` getter above is the ONE
@@ -3312,22 +6406,199 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         render()
       }
     },
+    // TSP I-A: the mount kernel's own headless diagnostics, passed through with
+    // no consumer in production code (see `TspRenderer`).
+    scopeFactCountForTest: () => historyRecall.scopeFactCountForTest(),
+    reconcileStepsForTest: () => historyRecall.reconcileStepsForTest(),
+    installCommandCompletions: (installation) => {
+      // A disposed mount installs nothing and never re-acquires anything: the
+      // surface withdraws this installer with the renderer, and a late catalog
+      // commit has no seat to write into.
+      if (disposed) return
+      const { provider } = createInstalledAutocompleteProvider({
+        commands: installation.commands,
+        cwd: installation.cwd,
+        fileReferences: installation.fileReferences,
+        extensionSuggest: installation.extensionSuggest,
+        scope: installation.scope,
+        localCwd: installation.localCwd,
+        skillReferences: installation.skillReferences,
+        hostShellCompletion: installation.hostShellCompletion,
+        // The TSP composer has no shell mode and no plugin replacement editor:
+        // the ONE input mode this mount can present is the prompt mode.
+        inputMode: () => 'prompt',
+        // I-C opened no file seat; I-D opens them through the SAME provider, so
+        // `localFdPath: null` stays the bounded Client-local fallback — and it
+        // also means NO Client PATH probe at catalog-install time, the choice
+        // PiTui's own install makes and this renderer deliberately does not
+        // inherit.
+        localFdPath: null,
+        // TSP I-D: the inline attachment acceptance rides THIS provider, because
+        // the base provider's own strict request snapshot is what makes a row a
+        // real Client-local file candidate. The seat's capture entry STAGES the
+        // acceptance for the accept gesture in flight and nothing else — the
+        // stager is never called from here, because the Composer has not agreed
+        // to the edit yet.
+        inlineAttachmentAccept: (acceptance) => {
+          completion.captureInlineAttachmentAcceptance(acceptance)
+        },
+      })
+      // F2: a catalog commit can change the command authority the dock's
+      // controls are admitted by (a genuine Host `/tasks`/`/subagents` taking
+      // over the name, or releasing it). The closed completion seat repaints
+      // nothing on its own, so the dock would keep a stale click affordance
+      // until an unrelated status commit. Paint exactly ONE frame per commit:
+      // the install's own repaint (its list was withdrawn) already happened.
+      const repainted = completion.install(provider, installation.sourceFailed === true)
+      if (!repainted) render()
+    },
+    // TSP I-E: the ONE History-search bind. Synchronous, exactly once, at the
+    // mount (before `bindInput` can deliver any key), and it installs nothing
+    // but capability plus the seat's own scoped sheet: no snapshot is sampled,
+    // no read starts and no frame is painted here, so a mount that fails
+    // afterwards has nothing to unwind. A second bind or a post-disposal bind is
+    // an explicit error, exactly like the image binding and the status reader.
+    bindHistorySearch: (binding) => {
+      if (disposed) throw new Error('cannot bind History search after TSP renderer disposal')
+      if (historySearchInstalled) throw new Error('the TSP renderer History search is already bound')
+      historySearchInstalled = true
+      // The sheet is installed ONCE, and only on a pane that can really paint
+      // the card: a pane without `el`+`styles` never receives a rule it cannot
+      // draw, and the capability gate above refuses the card there anyway.
+      if (composerChromeSupported() && nativeHistoryCapable()) {
+        surface.stylesheet(HISTORY_SEARCH_SHEET, HISTORY_SEARCH_STYLES)
+      }
+      historySearch = createTspHistorySearch({
+        admitted: historySeatAdmitted,
+        requestRender: () => render(),
+        setFocus: () => applyFocus(true),
+        // PR2/R5-2: the write admission is decided in the seat (BEFORE it
+        // retires), so a refused Restore keeps the live card on screen.
+        composerWritable: () => !composerHeld(),
+        restoreToComposer: (raw) => {
+          composer.setEditorText(raw)
+        },
+        copyRaw: (raw, live) => { issueHistoryCopy(raw, live) },
+        reveal: (id) => { surface.reveal(id, 'nearest') },
+        scroll: (id, to) => { surface.scroll(id, to) },
+        // A settlement branch that throws is a broken tty owner: the PRIMARY
+        // error reaches the runner's fatal lifecycle, exactly like the seat's
+        // own modal settle and the visual/History Copy settlements above.
+        reportFatal: (error) => { routeFatal(error) },
+        // The fatal owner itself threw: state it, exactly as the visible-Reader
+        // close does, and do not let this chain end unhandled.
+        reportSecondaryFailure: (error, secondary) => {
+          options.logError?.('tsp renderer: History search settlement failure could not be routed', {
+            error: errorText(error),
+            secondary: errorText(secondary),
+          })
+        },
+      }, binding, nativeHistoryCapable)
+    },
+    // T3-B1: the ONE semantic-search bind. Synchronous, exactly once, before
+    // `bindInput` can deliver any key, and it installs nothing but capability
+    // plus the seat's own scoped sheet: no snapshot is sampled, no query runs and
+    // no frame is painted here, so a mount that fails afterwards has nothing to
+    // unwind.
+    bindTranscriptSemanticSearch: (binding) => {
+      if (disposed) throw new Error('cannot bind semantic search after TSP renderer disposal')
+      if (transcriptSearchInstalled) throw new Error('the TSP renderer semantic search is already bound')
+      transcriptSearchInstalled = true
+      transcriptSearchBinding = binding
+      // The sheet is installed ONCE, and only on a pane that can really paint
+      // the card: a pane without `el`+`styles` never receives a rule it cannot
+      // draw, and the capability gate above refuses the card there anyway.
+      if (nativeTranscriptSearchCapable()) {
+        surface.stylesheet(TRANSCRIPT_SEARCH_SHEET, TRANSCRIPT_SEARCH_STYLES)
+      }
+      transcriptSearch = createTspTranscriptSearch({
+        admitted: transcriptSearchSeatAdmitted,
+        requestRender: () => render(),
+        setFocus: (control) => {
+          if (control === undefined) {
+            applyFocus(true)
+            return
+          }
+          // The seat's own Tab cycle: focus THAT control's real wire id. The
+          // query takes the hardware caret; a button focus is the client's to
+          // grant or decline, and the ring position is tracked either way.
+          const id = transcriptSearch?.controlFocusId(control)
+          if (id !== undefined) surface.focus(id)
+        },
+        requestReveal: () => revealCurrentSearchTarget(),
+        // T3-B1: the ONE point a search disclosure grant is ever granted. The
+        // mount derives the CURRENT target's temporary grants and rebuilds the
+        // Main frame, so the frame that will be revealed already carries the
+        // opened ancestry. A passive repaint never reaches here.
+        navigationChanged: () => {
+          // The seat is closed or retiring: the grants go with it, and the frame
+          // that re-materializes the Composer carries the user's own disclosure
+          // state again.
+          if (transcriptSearch?.isOpen() !== true) {
+            clearSearchGrants()
+            rebuildLastMain()
+            return
+          }
+          refreshSearchGrants()
+          rebuildLastMain()
+        },
+        reportFatal: (error) => { routeFatal(error) },
+      }, binding, nativeTranscriptSearchCapable)
+    },
+    bindQueueManager: (controller: QueueManagerController) => {
+      if (disposed) throw new Error('cannot bind the queue manager after TSP renderer disposal')
+      if (queueManagerPresenter !== undefined) throw new Error('the TSP renderer queue manager is already bound')
+      // A pane without the sheet's kinds mounts NO presenter: its `Manage`
+      // affordance, raw key entry and queuePresentation stay absent together.
+      if (!queueSheetCapable()) return
+      queueManagerPresenter = new TspQueueManager({
+        controller,
+        render: () => render(),
+        // The SAME seat admission every non-blocking presenter uses, PLUS the
+        // sibling presenters: a Dock click must never stack the sheet on a live
+        // picker/Reader/History card (the pointer path does not pass the
+        // keyboard ladder that would have consumed the key instead).
+        canInteract: () => !disposed && !hydrating && inputBound
+          && !seat.hasModalSeat()
+          && detailsSlot === undefined && !openingDetails
+          && workHub?.isOpen() !== true && sessionBrowser?.isOpen() !== true
+          && webPicker?.isOpen() !== true && acpPicker?.isOpen() !== true
+          && presetPicker?.isOpen() !== true
+          && modelPicker?.isOpen() !== true && modelQuick?.isOpen() !== true
+          && historySearch?.isOpen() !== true,
+        queueOpenKeys: () => options.queueOpenKeys?.() ?? [],
+        notify: (message, kind) => display.notify(message, kind),
+      })
+    },
+    installInlineAttachmentStager: (stager) => {
+      // A disposed mount installs nothing: the seat died with the renderer, so a
+      // late registration has no composer to write a placeholder into.
+      if (disposed) return
+      inlineAttachmentStager = stager
+    },
     bindInput: (handlers) => {
       if (disposed) throw new Error('the TSP renderer is disposed')
       if (inputBound) throw new Error('the TSP renderer input is already bound')
       inputBound = true
       boundHandlers = handlers
+      // The scoped Workflow browse entry is admitted by the BOUND business
+      // entry. `render()` converges the descriptors when this bind flipped the
+      // admission, so a transcript committed before the bind gains its real
+      // button now instead of waiting for an unrelated official event.
+      render()
       // Consume the held pre-bind keys ONCE, in arrival order. An exit
       // intent among them (possible only when held edits emptied the draft)
       // routes the exit through the same bound handler; the caller's
       // handlers now observe every subsequent key.
       const held = heldKeys.splice(0, heldKeys.length)
-      for (const key of held) {
+      for (const entry of held) {
         if (disposed) return
         // The SAME fence as the live path: a key held across a generation bump
         // must not be applied to a subject the surface is replacing.
-        if (fencedOut(key)) continue
-        if (dispatchKey(key, handlers)) routeExit(true)
+        if (fencedOut(entry.key)) continue
+        // Replay with the ORIGINAL arrival time: the held window must not
+        // compress two same-key presses into one 1.5 s confirmation.
+        if (dispatchKey(entry.key, handlers, entry.at)) routeExit(true)
       }
     },
     // B3-A2 §9: the disposal is a STORED promise, not an async wrapper. The
@@ -3337,6 +6608,18 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     dispose: () => {
       if (disposeTask !== undefined) return disposeTask
       disposed = true
+      retireTranscriptDisclosureScope()
+      // Disposable presentation state: a disposed mount owns no Work owner,
+      // frame index or retained projection input for a late event.
+      lastWindowState = undefined
+      lastTurnActivities = undefined
+      // Mouse PR4: a disposed mount owns no committed-frame action provenance.
+      tasksActionNodeIds = new Set()
+      // PR2: the Main journal is renderer-local disposable state too. The
+      // surface is closing, so no `del` op is sent here.
+      mainJournal.reset()
+      lastMainBlocks = []
+      frameContributions.clear()
       // B3-A2 §9: the shared Promise's IDENTITY is latched BEFORE any cleanup
       // runs at all. Two separate hazards require this exact shape:
       //   1. the seat/Hub retirements call out to owner callbacks that may
@@ -3383,8 +6666,30 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           // the surface/session close (A1 adds no second SDK resource).
           () => { workHub?.retire() },
           () => { sessionBrowser?.retire() },
+          // M5-W PR-C: the Web menu dies with the renderer; a late read/action
+          // settlement of a disposed mount owns no frame and no write.
+          () => { webPicker?.retire() },
+          // PO-5E: the ACP menu dies with the renderer the same way.
+          () => { acpPicker?.retire() },
           () => { modelPicker?.retire() },
+          // TSP-7 PR-G: the composer quick menu dies with the renderer; a late
+          // read or write settlement of a disposed mount owns no frame.
+          () => { modelQuick?.retire() },
           () => { presetPicker?.retire() },
+          // TSP I-C/I-D: the completion seat dies with the renderer — an aborted
+          // query that a disposed mount owns can neither paint nor write, and a
+          // stager installed on a dead mount has no composer to commit into
+          // (cleared here so no late acceptance can even reach the command
+          // plane).
+          // TSP I-E: the History seat dies with the renderer — its abort, its
+          // debounce timer and its painted click identities are all released
+          // here, and a late search or copy settlement owns no frame.
+          () => { historySearch?.retire() },
+          // T3-B1: the Search seat dies with the renderer — its captured source
+          // token, current target and pending reveal are all released here, so a
+          // late frame or intent owns nothing.
+          () => { transcriptSearch?.retire() },
+          () => { completion.retire(); inlineAttachmentStager = undefined },
         ])
       } catch (error) {
         failures.push(error)

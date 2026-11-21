@@ -1,15 +1,16 @@
 /**
- * Input-first lifecycle regression for the /sessions picker (the official
- * /resume fix, mirrored): the overlay opens and owns the input BEFORE any
- * Host read settles — Esc works while `list()` pends forever, arrows /
- * search / category cycling work while a projection batch pends, closing
- * the picker aborts the scan, a late settlement never refreshes a closed
- * or superseded picker, and a progressive title refresh neither clears the
- * live search query nor re-triggers a resume.
+ * Input-first lifecycle regression for the /sessions fullscreen Session
+ * Workspace: the leased screen opens and owns the input BEFORE any Host read
+ * settles — Esc works while `list()` pends forever, arrows/search work while a
+ * projection batch pends, closing the workspace aborts the scan, a late
+ * settlement never refreshes a closed or superseded workspace, and a
+ * progressive title refresh neither clears the live search query nor
+ * re-triggers a resume.
  * @module @xmoon76/dsh-pi-tui/session-picker-loading.test
  */
 
 import assert from 'node:assert/strict'
+import { unavailableAcpAccess, unavailableWebAccess, unavailableMcpServers } from '../support/web-access-fake.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
@@ -31,6 +32,7 @@ import type { SessionReader } from '../../src/runtime/session-reader-port.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import type { SessionSwitchOutcome } from '../../src/app/session/runtime.ts'
 import type { SessionBrowserPanelRequest, SessionBrowserPresentation, SessionBrowserReadSnapshot } from '../../src/app/command/session-browser-presentation.ts'
+import { unconfiguredPolicyObservation, unconfiguredSessionPolicyPort } from '../support/session-policy-fake.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -59,9 +61,17 @@ interface Harness {
   app: TuiApp
   runSessions: () => Promise<unknown>
   runResume: (rawInput: string) => Promise<unknown>
+  /** The CLI startup entry of the SAME registered `/sessions` body. */
+  openSessionBrowser: (request: {
+    readonly scope?: 'current' | 'all'
+    readonly initialQuery: string
+  }) => Promise<import('@deepseek-ai/dsh-commands').CommandResult>
+  /** Counts the sessionless Workspace-preflight waits the entry performed. */
+  preflight: { calls: number }
   view: () => string
   switched: string[]
   switchScopes: Array<import('../../src/app/session/scope.ts').SessionScope | undefined>
+  notices: Array<{ text: string; kind: string }>
 }
 
 /** Mount the command surface with an injectable sessionReader. */
@@ -70,12 +80,19 @@ function harness(
   size: { readonly columns: number; readonly rows: number } = { columns: 80, rows: 24 },
   switchOutcome?: (id: string) => Promise<SessionSwitchOutcome>,
   nativePresentation?: SessionBrowserPresentation,
+  currentSessionId?: string,
 ): Harness {
   const ctx = new Context()
   const vt = new VirtualTerminal(size.columns, size.rows)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
   startedApps.add(app)
+  const notices: Array<{ text: string; kind: string }> = []
+  const recordNotify = app.notify.bind(app)
+  app.notify = (text, kind = 'info') => {
+    notices.push({ text, kind })
+    recordNotify(text, kind)
+  }
   const defs: { name: string; handler?: unknown }[] = []
   const commands = {
     register: (def: { name: string; handler?: unknown }): (() => void) => {
@@ -87,10 +104,19 @@ function harness(
     execute: async () => undefined,
   }
   ctx.provide('commands', commands as never)
-  const state: { agent: Agent | undefined } = { agent: undefined }
+  const state: { agent: Agent | undefined } = {
+    agent: currentSessionId === undefined
+      ? undefined
+      : { session: { id: currentSessionId } } as unknown as Agent,
+  }
   const switched: string[] = []
   const switchScopes: Array<import('../../src/app/session/scope.ts').SessionScope | undefined> = []
+  const preflight = { calls: 0 }
   const runner: TuiCommandRunner = {
+    awaitWorkspacePreflight: async () => { preflight.calls += 1 },
+    webAccess: unavailableWebAccess(),
+    acpAccess: unavailableAcpAccess(),
+    mcpServers: unavailableMcpServers(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,
@@ -98,6 +124,8 @@ function harness(
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
     get defaultIntentOutcome() { return undefined },
     ...sessionScopeFacts(() => state.agent, () => 1),
+    sessionPolicy: unconfiguredSessionPolicyPort(),
+    policy: unconfiguredPolicyObservation(),
     ...(nativePresentation === undefined ? {} : { sessionBrowserPresentation: nativePresentation }),
     get currentSessionId() { return state.agent?.session.id },
     ensureSession: async () => {},
@@ -126,15 +154,13 @@ function harness(
         answerContinued: async () => 'not-continued' as const,
       },
       onApprovalRequest: () => {},
-      setApprovalPolicy: () => true,
-    },
+      },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     commandRegistry: ctx.get('commands') as never,
     clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
-    hostShellCompletion: true,
-    transcriptExportAvailable: true,
+    hostShellCompletion: { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) },
     requestExit: () => {},
     cwd: '/ws',
     sessionCwd: () => '/ws',
@@ -151,7 +177,12 @@ function harness(
     switchSessionOutcome: async (id: string, scope?: import('../../src/app/session/scope.ts').SessionScope): Promise<SessionSwitchOutcome> => {
       switched.push(id)
       switchScopes.push(scope)
-      return switchOutcome === undefined ? { kind: 'committed', sessionId: id } : switchOutcome(id)
+      const outcome = switchOutcome === undefined ? { kind: 'committed' as const, sessionId: id } : await switchOutcome(id)
+      // A REAL committed switch publishes the target Session; the captured
+      // subject of the workspace open is then stale. Mirror that retirement so
+      // the fixture cannot pass by keeping a subject the runtime already left.
+      if (outcome.kind === 'committed') state.agent = { session: { id: outcome.sessionId } } as unknown as Agent
+      return outcome
     },
     transitionTo: async <T>(steps: { create: () => Promise<T> }) => ({ ok: true, next: await steps.create() }),
     currentPreset: () => undefined,
@@ -171,7 +202,7 @@ function harness(
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, createPluginManagerPage: () => undefined,
+    openTasksBrowser: () => {}, openScheduleWorkspace: () => ({ kind: 'success' } as const), createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -181,7 +212,7 @@ function harness(
     extensions: undefined,
     exit: () => {},
   }
-  registerTuiCommandsWithDirectSeams(runner)
+  const installed = registerTuiCommandsWithDirectSeams(runner)
   const def = defs.find(entry => entry.name === 'sessions')
   assert.ok(def?.handler !== undefined, 'sessions handler missing')
   // /resume registers as its own command carrying the alias handler.
@@ -199,15 +230,18 @@ function harness(
     app,
     runSessions: () => invoke(def!.handler, ''),
     runResume: (rawInput: string) => invoke(resumeDef!.handler, rawInput),
+    openSessionBrowser: request => installed.openSessionBrowser!(request),
+    preflight,
     view: () => vt.getViewport().join('\n'),
     switched,
     switchScopes,
+    notices,
   }
 }
 
 const pendingList = (): Promise<never> => new Promise(() => {})
 
-test('the picker opens and Esc cancels while list() pends forever', async (t) => {
+test('the workspace opens and Esc cancels while list() pends forever', async (t) => {
   const h = harness({
     list: pendingList,
     search: async () => ({ items: [], hasMore: false }),
@@ -227,7 +261,7 @@ test('the picker opens and Esc cancels while list() pends forever', async (t) =>
   // Esc closes the overlay immediately — no listing settlement involved.
   h.vt.sendInput('\x1b')
   await h.vt.waitForRender()
-  assert.ok(!h.view().includes('Loading sessions…'), 'Esc must close the pending picker immediately')
+  assert.ok(!h.view().includes('Loading sessions…'), 'Esc must close the pending workspace immediately')
 })
 
 test('Enter on the loading placeholder never triggers a resume', async (t) => {
@@ -274,20 +308,28 @@ test('arrows, search, and Esc stay responsive while a projection batch pends', a
   let view = h.view()
   assert.ok(view.includes('row3'), 'the rows stay rendered while enrichment pends')
 
-  // Typing narrows the corpus (search works mid-enrichment).
+  // `/` focuses the global editor; typing narrows the corpus (search works
+  // mid-enrichment). The list itself never consumes printable bytes.
+  h.vt.sendInput('/')
+  await h.vt.waitForRender()
   h.vt.sendInput('row3')
   await h.vt.waitForRender()
   view = h.view()
+  assert.ok(view.includes('Search all workspaces'), `the query editor must be visible:\n${view}`)
   assert.ok(view.includes('row3'), `the search filter must apply while enrichment pends:\n${view}`)
   assert.ok(!view.includes('row0'), 'non-matching rows must be filtered mid-enrichment')
 
-  // Esc aborts the pending batch and closes the picker.
+  // Esc returns from the query editor to the browse list, then closes it and
+  // aborts the pending batch.
   h.vt.sendInput('\x1b')
   await h.vt.waitForRender()
-  assert.ok(!h.view().includes('row3'), 'Esc must close the picker during pending enrichment')
+  assert.ok(!h.view().includes('Search all workspaces'), 'the first Esc must restore the browse list')
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('row3'), 'Esc must close the workspace during pending enrichment')
 })
 
-test('closing the picker aborts the pending projection batch', async (t) => {
+test('closing the workspace aborts the pending projection batch', async (t) => {
   let observedSignal: AbortSignal | undefined
   let settleBatch!: () => void
   const rows = [{ id: 'session-a', updatedAt: 10, cwd: '/ws', live: false }]
@@ -310,11 +352,11 @@ test('closing the picker aborts the pending projection batch', async (t) => {
   await h.vt.waitForRender()
   assert.equal(observedSignal?.aborted, true, 'Esc must abort the pending scan')
 
-  // A late settlement must not resurrect the closed picker.
+  // A late settlement must not resurrect the closed workspace.
   settleBatch()
   await new Promise<void>(resolve => setImmediate(resolve))
   const view = h.view()
-  assert.ok(!view.includes('session-a'), 'a late batch result must not refresh the closed picker')
+  assert.ok(!view.includes('session-a'), 'a late batch result must not refresh the closed workspace')
 })
 
 test('a superseding open fences the previous load out of the UI', async (t) => {
@@ -424,8 +466,11 @@ test('progressive title enrichment preserves the live search query', async (t) =
 
   await h.runSessions()
   await waitUntil(() => h.view().includes('needle'))
-  // Filter down to one row, then let the late title land: the query must
-  // survive the refresh and the enriched title must enter the corpus.
+  // Filter down to one row (`/` focuses the global editor), then let the late
+  // title land: the query must survive the refresh and the enriched title must
+  // enter the corpus.
+  h.vt.sendInput('/')
+  await h.vt.waitForRender()
   h.vt.sendInput('needle')
   await h.vt.waitForRender()
   assert.ok(!h.view().includes('other'), 'the filter applies before enrichment')
@@ -456,12 +501,12 @@ test('/resume <arg> is input-first: the overlay opens while list() pends forever
   // the filter yet — the true Loading row stays visible (never "no
   // matching sessions" while the scan still runs).
   const view = h.view()
-  assert.ok(view.includes('resume · Current directory'), `the overlay must be open without list() settling:\n${view}`)
+  assert.ok(view.includes('Sessions'), `the fullscreen workspace must be open without list() settling:\n${view}`)
   assert.ok(view.includes('Loading sessions…'), `the loading row must be visible behind an unresolved argument:\n${view}`)
 
   h.vt.sendInput('\x1b')
   await h.vt.waitForRender()
-  assert.ok(!h.view().includes('resume · Current directory'), 'Esc must close the pending /resume picker immediately')
+  assert.ok(!h.view().includes('Loading sessions…'), 'Esc must close the pending /resume workspace immediately')
   const result = await resultPromise
   assert.deepEqual(result, { kind: 'error', text: 'resume cancelled' }, 'Esc during the pending listing cancels the resume')
 })
@@ -486,16 +531,20 @@ test('/resume <arg> with NO match lists exactly once and keeps the argument as t
   t.after(() => h.app.stop())
 
   // 'eed' is a SUBSTRING of the row label but not an id/prefix match, so
-  // the direct fast path finds nothing and the same picker fills in.
+  // the direct fast path finds nothing and the same workspace fills in.
   await h.runResume('eed')
   await waitUntil(() => h.view().includes('needle1'))
-  assert.equal(listCalls, 1, 'an unmatched argument must fall back to the SAME picker, never a second listing')
+  assert.equal(listCalls, 1, 'an unmatched argument must fall back to the SAME workspace, never a second listing')
   const view = h.view()
   assert.ok(!view.includes('other'), 'the argument stays as the live search query (non-matching rows filtered)')
 
+  // The seeded fallback starts in the global editor: the first Esc restores
+  // the browse list, the second closes the workspace.
   h.vt.sendInput('\x1b')
   await h.vt.waitForRender()
-  assert.ok(!h.view().includes('Current directory'), 'Esc closes the filtered picker')
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Workspace: '), 'Esc closes the filtered workspace')
 })
 
 test('/resume <arg> with a unique match switches after exactly one listing', async (t) => {
@@ -523,8 +572,8 @@ test('/resume <arg> with a unique match switches after exactly one listing', asy
   assert.ok(h.switchScopes[0] !== undefined,
     'the typed /resume must pass the SYNCHRONOUSLY captured source scope, never an unscoped switch')
   assert.equal(listCalls, 1, 'the direct fast path resolves against the ONE shared input-first listing')
-  await waitUntil(() => !h.view().includes('Current directory'), 3000)
-  assert.deepEqual(h.switched, ['session-target'], 'no further switch may fire after the picker closes')
+  await waitUntil(() => !h.view().includes('Workspace: '), 3000)
+  assert.deepEqual(h.switched, ['session-target'], 'no further switch may fire after the workspace settles')
 })
 
 test('/resume <arg> does not report success until the tracked switch commits', async (t) => {
@@ -549,7 +598,7 @@ test('/resume <arg> does not report success until the tracked switch commits', a
   let settled = false
   void result.then(() => { settled = true })
   await new Promise<void>(resolve => setImmediate(resolve))
-  assert.equal(settled, false, 'a matched picker close must not settle the command as success')
+  assert.equal(settled, false, 'a matched workspace open must not settle the command as success')
   resolveSwitch({ kind: 'failed', message: 'session "session-target" is not available' })
   assert.deepEqual(await result, { kind: 'error', text: 'session "session-target" is not available' })
   assert.deepEqual(h.switched, ['session-target'], 'the tracked switch is dispatched exactly once')
@@ -694,4 +743,275 @@ test('a cancelled PiTui direct switch settles the resume command instead of hang
   const result = h.runResume('target') as Promise<{ kind: string; text?: string }>
   assert.deepEqual(await result, { kind: 'error', text: 'resume cancelled' },
     'a cancelled switch must settle the awaiting resume rather than leave it pending')
+})
+
+// ── M5-U-B/M5-U-C: the workspace renders the shared ReadOwner snapshot ──
+// The physical workspace stays open while the accepted switch pends; a
+// committed outcome retires the captured subject and closes it once, so the
+// command-level switch result and the stale
+// fence are the only owners of the terminal feedback. These tests exercise the
+// REAL PiTui Presenter (no injected native presentation).
+
+const interactiveRows = (): Array<{ id: string; updatedAt: number; cwd: string; live: boolean }> => [
+  { id: 'session-target', updatedAt: 20, cwd: '/ws', live: false },
+  { id: 'session-other', updatedAt: 10, cwd: '/ws', live: false },
+]
+
+test('an interactive selection stays pending and reports its failed switch exactly once (UB-08/UB-13)', async (t) => {
+  let resolveSwitch!: (outcome: SessionSwitchOutcome) => void
+  const gate = new Promise<SessionSwitchOutcome>(resolve => { resolveSwitch = resolve })
+  const h = harness({
+    list: async () => interactiveRows(),
+    search: async () => ({ items: [], hasMore: false }),
+    projectionBatch: async () => new Map(),
+    blank: () => undefined, measureContext: () => undefined,
+    turnOutline: () => undefined,
+    sessionStatus: () => undefined,
+  }, undefined, () => gate)
+  t.after(() => h.app.stop())
+
+  await h.runSessions()
+  await waitUntil(() => h.view().includes('target'))
+  // The root Add row is the initial cursor of the flat (no official Workspace)
+  // tree; Down reaches the first listed Session.
+  h.vt.sendInput('\u001b[B')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  assert.ok(h.view().includes('Opening session…'), 'the accepted intent is pending, never a success')
+  assert.ok(h.view().includes('Sessions'), 'the workspace stays open while the switch pends')
+  assert.deepEqual(h.switched, ['session-target'], 'the accepted intent dispatches the real switch once')
+
+  // A failed switch keeps the SAME workspace and still owns ONE final result.
+  resolveSwitch({ kind: 'failed', message: 'session open failed: lease held' })
+  await waitUntil(() => h.notices.some(notice => notice.text.includes('lease held')))
+  assert.equal(
+    h.notices.filter(notice => notice.text.includes('lease held')).length,
+    1,
+    'the live workspace keeps exactly one owner for the real failure notice',
+  )
+  await waitUntil(() => !h.view().includes('Opening session…'))
+  assert.ok(h.view().includes('Sessions'), 'a failed switch never hides the authoritative current reading')
+  assert.deepEqual(h.switched, ['session-target'], 'a failed switch never retries by itself')
+})
+
+test('an interactive selection that commits ends without an error notice', async (t) => {
+  const h = harness({
+    list: async () => interactiveRows(),
+    search: async () => ({ items: [], hasMore: false }),
+    projectionBatch: async () => new Map(),
+    blank: () => undefined, measureContext: () => undefined,
+    turnOutline: () => undefined,
+    sessionStatus: () => undefined,
+  })
+  t.after(() => h.app.stop())
+
+  await h.runSessions()
+  await waitUntil(() => h.view().includes('target'))
+  h.vt.sendInput('\u001b[B')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\r')
+  await waitUntil(() => h.switched.length === 1)
+  // The committed outcome publishes the target Session: the captured subject
+  // retires and the workspace closes exactly once, with no error notice.
+  await waitUntil(() => !h.view().includes('Sessions'))
+  assert.deepEqual(h.notices, [], 'a committed switch is not an error')
+})
+
+test('Enter on the current Session row returns without starting a switch', async (t) => {
+  const rows = [
+    { id: 'session-currentrow', updatedAt: 20, cwd: '/ws', live: true },
+    { id: 'session-otherrow', updatedAt: 10, cwd: '/ws', live: false },
+  ]
+  const h = harness({
+    list: async () => rows,
+    search: async () => ({ items: [], hasMore: false }),
+    projectionBatch: async () => new Map(),
+    blank: () => undefined, measureContext: () => undefined,
+    turnOutline: () => undefined,
+    sessionStatus: () => undefined,
+  }, undefined, undefined, undefined, 'session-currentrow')
+  t.after(() => h.app.stop())
+
+  await h.runSessions()
+  await waitUntil(() => h.view().includes('otherrow'))
+  assert.ok(h.view().includes('● currentr'), 'the captured current Session carries the marker')
+  assert.ok(h.view().includes('Return [Enter]'), 'the current row advertises its real Return verb')
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  assert.deepEqual(h.switched, [], 'the current Session row is a Return, never a resume')
+  assert.ok(!h.view().includes('Sessions'), 'Return closes the Browser and restores the previous surface')
+  assert.equal(h.app.isFullscreen(), false, 'no fullscreen lease remains after the Return')
+})
+
+test('a manual query edit during the listing supersedes the typed /resume direct match (UB-07)', async (t) => {
+  const rows = interactiveRows()
+  let resolveList!: (value: Array<{ id: string; updatedAt: number; cwd: string; live: boolean }>) => void
+  const h = harness({
+    list: () => new Promise<Array<{ id: string; updatedAt: number; cwd: string; live: boolean }>>(resolve => { resolveList = resolve }),
+    search: async () => ({ items: [], hasMore: false }),
+    projectionBatch: async () => new Map(),
+    blank: () => undefined, measureContext: () => undefined,
+    turnOutline: () => undefined,
+    sessionStatus: () => undefined,
+  })
+  t.after(() => h.app.stop())
+
+  const result = h.runResume('target') as Promise<{ kind: string; text?: string }>
+  await h.vt.waitForRender()
+  // A real edit starts at the global editor: `/` focuses it and the printable
+  // bytes reach the Input, which supersedes the typed direct match.
+  h.vt.sendInput('/')
+  await h.vt.waitForRender()
+  h.vt.sendInput('zzz')
+  await h.vt.waitForRender()
+  assert.ok(h.view().includes('Search all workspaces') && h.view().includes('zzz'),
+    'the live edit enters the global search editor while the list still pends')
+  resolveList(rows)
+  // The command settlement is the authoritative "listing landed" signal: a
+  // wrongly admitted direct switch would already have been dispatched
+  // synchronously before this promise resolves.
+  assert.deepEqual(await result, { kind: 'success' },
+    'the unmatched typed resume falls through to the filtered workspace')
+  assert.deepEqual(h.switched, [], 'a user-edited query must suppress the typed direct switch')
+  await h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+})
+
+test('/resume never switches to a subagent-only target', async (t) => {
+  const h = harness({
+    list: async () => [
+      { id: 'session-childonly', updatedAt: 20, cwd: '/ws', origin: 'subagent' as const, live: false },
+    ],
+    search: async () => ({ items: [], hasMore: false }),
+    projectionBatch: async () => new Map(),
+    blank: () => undefined, measureContext: () => undefined,
+    turnOutline: () => undefined,
+    sessionStatus: () => undefined,
+  })
+  t.after(() => h.app.stop())
+
+  const result = await (h.runResume('childonly') as Promise<{ kind: string; text?: string }>)
+  await h.vt.waitForRender()
+  assert.deepEqual(result, { kind: 'success' }, 'the subagent target becomes the initial query, not a switch')
+  assert.deepEqual(h.switched, [], 'a subagent row never participates in Resume')
+  assert.ok(h.view().includes('Search all workspaces'), 'the unmatched target stays in the SAME fullscreen workspace')
+})
+
+test('a late listing from a superseded open never repaints the new workspace', async (t) => {
+  let resolveFirst!: (value: Array<{ id: string; updatedAt: number; cwd: string; live: boolean }>) => void
+  let calls = 0
+  const h = harness({
+    list: () => {
+      calls += 1
+      if (calls === 1) {
+        return new Promise<Array<{ id: string; updatedAt: number; cwd: string; live: boolean }>>(resolve => { resolveFirst = resolve })
+      }
+      return Promise.resolve([{ id: 'session-freshrow', updatedAt: 20, cwd: '/ws', live: false }])
+    },
+    search: async () => ({ items: [], hasMore: false }),
+    projectionBatch: async () => new Map(),
+    blank: () => undefined, measureContext: () => undefined,
+    turnOutline: () => undefined,
+    sessionStatus: () => undefined,
+  })
+  t.after(() => h.app.stop())
+
+  await h.runSessions()
+  await h.vt.waitForRender()
+  await h.runSessions()
+  await waitUntil(() => h.view().includes('freshrow'))
+  resolveFirst([{ id: 'session-stalerow', updatedAt: 30, cwd: '/ws', live: false }])
+  await new Promise<void>(resolve => setImmediate(resolve))
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('stalerow'), 'the superseded listing must never repaint the new workspace')
+  assert.ok(h.view().includes('freshrow'), 'the new workspace keeps its own roster')
+})
+
+test('typed /resume against an empty roster reports the same readable-empty state as the workspace', async (t) => {
+  // Regression (empty-roster command wording): an empty listing only proves
+  // that no Session is READABLE — the official listing publishes a Session
+  // from its header, so an unlistable log looks exactly like an empty store
+  // here. The command result must carry the same S2 limited-contract wording
+  // as the in-workspace status row, never a claim about stored data.
+  const h = harness({
+    list: async () => [],
+    search: async () => ({ items: [], hasMore: false }),
+    projectionBatch: async () => new Map(),
+    blank: () => undefined, measureContext: () => undefined,
+    turnOutline: () => undefined,
+    sessionStatus: () => undefined,
+  })
+  t.after(() => h.app.stop())
+
+  const result = await (h.runResume('anything') as Promise<{ kind: string; text?: string }>)
+  assert.deepEqual(result, { kind: 'error', text: 'No readable sessions' })
+  assert.ok(!/no persisted sessions/iu.test(result.text ?? ''),
+    'the empty roster never claims there are no stored Sessions')
+  await waitUntil(() => h.view().includes('No readable sessions'))
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  assert.deepEqual(h.switched, [], 'an empty roster never starts a switch')
+})
+
+test('the CLI startup entry opens the SAME Browser with its query and skips the Workspace preflight', async (t) => {
+  const rows = [
+    { id: 'session-mysql-0001', updatedAt: 20, cwd: '/ws', live: false },
+    { id: 'session-other', updatedAt: 10, cwd: '/ws', live: false },
+  ]
+  let listCalls = 0
+  const h = harness({
+    list: async () => {
+      listCalls += 1
+      return rows
+    },
+    search: async () => ({ items: [], hasMore: false }),
+    projectionBatch: async () => new Map(),
+    blank: () => undefined, measureContext: () => undefined,
+    turnOutline: () => undefined,
+    sessionStatus: () => undefined,
+  })
+  t.after(() => h.app.stop())
+
+  const opened = await h.openSessionBrowser({ scope: 'all', initialQuery: 'mysql' })
+  assert.deepEqual(opened, { kind: 'success' }, 'the Browser admission resolves without waiting for any Host content read')
+  await waitUntil(() => h.view().includes('Search all workspaces') && h.view().includes('mysql'))
+  assert.equal(listCalls, 1, 'the SAME read owner lists exactly once')
+  assert.equal(h.preflight.calls, 0, 'the CLI startup entry must not wait for the sessionless Workspace preflight')
+  assert.deepEqual(h.switched, [], 'a query-only startup never auto-resumes')
+
+  // The seeded query starts in the global editor: the first Esc restores the
+  // browse list and the second closes the same workspace.
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Workspace: '), 'Esc closes the startup Browser back to the sessionless Welcome')
+  assert.deepEqual(h.switched, [], 'closing the Browser starts no Session and switches nothing')
+})
+
+test('a bare CLI startup opens Browse All without the Workspace preflight', async (t) => {
+  const rows = [
+    { id: 'session-alpha', updatedAt: 20, cwd: '/ws', live: false },
+    { id: 'session-beta', updatedAt: 10, cwd: '/ws', live: false },
+  ]
+  const h = harness({
+    list: async () => rows,
+    search: async () => ({ items: [], hasMore: false }),
+    projectionBatch: async () => new Map(),
+    blank: () => undefined, measureContext: () => undefined,
+    turnOutline: () => undefined,
+    sessionStatus: () => undefined,
+  })
+  t.after(() => h.app.stop())
+
+  const opened = await h.openSessionBrowser({ scope: 'all', initialQuery: '' })
+  assert.deepEqual(opened, { kind: 'success' })
+  await waitUntil(() => h.view().includes('alpha') && h.view().includes('beta'))
+  assert.equal(h.preflight.calls, 0, 'browse-all needs no Host Workspace pre-commit')
+  assert.ok(!h.view().includes('Search all workspaces'), 'a bare startup opens the browse list, not the search editor')
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Workspace: '), 'Esc returns to the sessionless Welcome')
+  assert.deepEqual(h.switched, [])
 })

@@ -358,6 +358,32 @@ test('action stats: subtype parts keep the shared sort/cap and +N counts kinds',
     'a command row contributes nothing')
 })
 
+test('action stats: a low-frequency send_message leads without changing total, counts or the cap', () => {
+  const stats = compactActionStatsOf([
+    toolMessage({ name: 'bash', callCount: 30 }),
+    toolMessage({ name: 'read', callCount: 5 }),
+    toolMessage({ name: 'edit' }),
+    toolMessage({ name: 'send_message' }),
+  ])
+  assert.equal(stats.total, 37, 'the visual priority never changes the counted actions')
+  assert.equal(stats.types.get('send_message'), 1, 'the subtype count is unchanged')
+  assert.deepEqual(compactActionStatParts(stats),
+    ['37 actions', 'send_message ×1', 'bash ×30', 'read ×5', '+1'],
+    'send_message leads; the remaining keep count-desc/name-asc and +N counts the other subtypes')
+  // The cap still shows three subtype names: send_message plus the two
+  // highest-count others, never a fourth.
+  const parts = compactActionStatParts(stats)
+  assert.equal(parts.length, 5, 'total + three subtype names + the +N remainder')
+  assert.equal(parts.at(-1), '+1')
+  // Only ordinary tools: identical to the historical order and output.
+  const plain = compactActionStatsOf([
+    toolMessage({ name: 'bash', callCount: 30 }),
+    toolMessage({ name: 'read', callCount: 5 }),
+    toolMessage({ name: 'edit' }),
+  ])
+  assert.deepEqual(compactActionStatParts(plain), ['36 actions', 'bash ×30', 'read ×5', 'edit ×1'])
+})
+
 test('signature: an over-cap display stays bounded AND sensitive past the cap', () => {
   const failure = 'x'.repeat(200)
   const tailA = compactActionPresentation({

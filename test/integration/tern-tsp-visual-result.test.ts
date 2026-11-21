@@ -190,6 +190,9 @@ test('a chart result is painted as a native chart and exact text over the real w
     }
     const fact = chartFactFromArgs(args)
     await appendTool(fixture, 'call-chart-1', 'dsh_pi_tui_chart', args, chartContentBlocks(fact))
+    await waitFor('the Direct chart Tool node to materialize before disclosure', () =>
+      wireNodes(fixture.pane.frames()).some(node => node.k === 'tool'), 30_000)
+    expandToolCards(fixture)
     await waitFor('the wire carries the native chart node', () =>
       wireNodes(fixture.pane.frames()).some(node => node.k === 'chart'), 30_000)
     const nodes = wireNodes(fixture.pane.frames())
@@ -425,8 +428,8 @@ function mappedResultOf(blocks: readonly unknown[], name: string, argsRaw: strin
 test('the TSP mapper paints the publication summary and never the receipt machine block', () => {
   const mapped = mappedResultOf([
     { type: 'text', text: 'Selected 2 visuals for presentation.' },
-    { type: 'text', text: 'visual-published-v1:{"version":1,"published":[{"ref":"sv1_0123456789abcdef0123"},{"ref":"sv1_0123456789abcdef0124"}]}' },
-  ], 'present_visual', JSON.stringify({ visuals: [{ ref: 'sv1_0123456789abcdef0123' }, { ref: 'sv1_0123456789abcdef0124' }] }))
+    { type: 'text', text: 'visual-published-v1:{"version":1,"published":[{"ref":"sv2_0123456789abcdef0123"},{"ref":"sv2_0123456789abcdef0124"}]}' },
+  ], 'present_visual', JSON.stringify({ visuals: [{ ref: 'sv2_0123456789abcdef0123' }, { ref: 'sv2_0123456789abcdef0124' }] }))
   assert.ok(mapped.text.includes('Selected 2 visuals for presentation.'), `the summary is painted:\n${mapped.text}`)
   assert.ok(!mapped.text.includes('visual-published-v1:'), `the receipt is never painted:\n${mapped.text}`)
   assert.ok(!mapped.kinds.includes('chart'), 'the publication tool never emits a chart node')
@@ -435,9 +438,42 @@ test('the TSP mapper paints the publication summary and never the receipt machin
 
 test('the TSP mapper keeps a failed publication’s readable reason', () => {
   const mapped = mappedResultOf(
-    [{ type: 'text', text: 'unknown visual ref sv1_0123456789abcdef0123' }],
+    [{ type: 'text', text: 'unknown visual ref sv2_0123456789abcdef0123' }],
     'present_visual',
-    JSON.stringify({ visuals: [{ ref: 'sv1_0123456789abcdef0123' }] }),
+    JSON.stringify({ visuals: [{ ref: 'sv2_0123456789abcdef0123' }] }),
   )
   assert.ok(mapped.text.includes('unknown visual ref'), `the failure reason is painted:\n${mapped.text}`)
+})
+
+// ── PR-4B: a newly admitted static-paint SVG rides the SAME official gate ──
+
+test('an SVG source using the new static paint attributes is blob-admitted over the same wire', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, {
+    deltas: ['PRD', '-SVG-4B'],
+    startup: { sessionId: SESSION_ID },
+    persistedBlankSessions: [{ id: SESSION_ID }],
+    nativeImages: true,
+  })
+  try {
+    // The PR-4B static subset: an inherited `color` resolved by exact
+    // `currentColor` paint, plus a bounded dash stroke.
+    const source = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32">'
+      + '<g color="#3b82f6"><rect width="64" height="32" fill="currentColor"/>'
+      + '<path d="M4 28 L60 4" stroke="#ef4444" stroke-width="2" stroke-dasharray="4 2"/></g></svg>'
+    const args = { title: 'Static paint topology', description: 'Gateway -> App -> Database', svg: source }
+    const fact = svgFactFromArgs(args)
+    const expectedBlobId = createHash('sha256').update(Buffer.from(source, 'utf8')).digest('hex')
+    await appendTool(fixture, 'call-svg-4b', 'dsh_pi_tui_svg', args, svgContentBlocks(fact))
+    await waitFor('the SVG tool card is projected', () =>
+      wireNodes(fixture.pane.frames()).some(node => node.k === 'tool'), 30_000)
+    expandToolCards(fixture)
+    await waitFor('the pane received the admitted static-paint SVG blob', () =>
+      fixture.pane.blobIds().includes(expectedBlobId), 30_000)
+    await waitFor('the pane painted the image node with the admitted blob', () =>
+      imageCarriesBlob(fixture.pane.frames(), expectedBlobId), 30_000)
+  } finally {
+    // Bounded teardown window: the fixture disposes the app, pane and Host before the next case.
+    await fixture.settle()
+  }
 })

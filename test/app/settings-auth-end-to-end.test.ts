@@ -12,7 +12,10 @@
  */
 
 import assert from 'node:assert/strict'
-import { afterEach, test } from 'node:test'
+import { after, afterEach, test } from 'node:test'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
@@ -20,10 +23,12 @@ import { createClientCommandRegistry } from '../../src/app/command/client-comman
 import { registerTuiCommands, type TuiCommandRunner } from '../../src/commands.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { TuiApp, type OwnedRunner, type TuiAppEvents } from '../../src/tui-app.ts'
-import type { AccountView, AuthorizationFlowTarget, CredentialProviderOption } from '../../src/runtime/config-port.ts'
+import type { AccountObservation, AccountObservationLease, AccountView, AuthorizationFlowTarget, CredentialProviderOption } from '../../src/runtime/config-port.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { waitForFrame } from '../support/frame-wait.ts'
+import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import { bundleVersion } from '../../src/client/launcher/version.ts'
 
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
@@ -31,6 +36,22 @@ afterEach(() => {
     startedApps.delete(app)
     try { if (!app.isDisposed()) app.dispose() } catch {}
   }
+})
+
+// This suite drives a REAL installed-Client Account page. Its default Client
+// identity is a Split-surface install anchor with an explicit DSH version, so
+// the production Account workflow has a provable version to report; the
+// dedicated identity test below overrides it with Direct/Split fixtures.
+const TEST_DSH_ANCHOR = fileURLToPath(new URL('../fixtures/dsh-runtime-identity/package.json', import.meta.url))
+const previousTestDshMode = process.env.SPLIT_PROCESS_CLIENT_MODE
+const previousTestDshAnchor = process.env.SPLIT_PROCESS_DSH_ANCHOR
+process.env.SPLIT_PROCESS_CLIENT_MODE = 'surface'
+process.env.SPLIT_PROCESS_DSH_ANCHOR = TEST_DSH_ANCHOR
+after(() => {
+  if (previousTestDshMode === undefined) delete process.env.SPLIT_PROCESS_CLIENT_MODE
+  else process.env.SPLIT_PROCESS_CLIENT_MODE = previousTestDshMode
+  if (previousTestDshAnchor === undefined) delete process.env.SPLIT_PROCESS_DSH_ANCHOR
+  else process.env.SPLIT_PROCESS_DSH_ANCHOR = previousTestDshAnchor
 })
 
 const OPTIONS: readonly CredentialProviderOption[] = [
@@ -70,6 +91,9 @@ interface Harness {
   readonly setRecordRows: (rows: readonly { key: string; label: string; kind: 'grant' }[]) => void
   readonly view: () => string
   readonly rows: () => string[]
+  /** Every metadata-bearing Account request and the Client DSH version it
+   * carried at the semantic-port boundary. */
+  readonly accountMetadata: readonly { readonly method: string; readonly version: string }[]
   /** The exact secrets the UI handed to the official store (fixture-only). */
   readonly writtenSecrets: readonly { ref: string; secret: string }[]
   /** Seed the fake official store's configured state for one reference. */
@@ -100,7 +124,13 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
   ctx.provide('commands', commands as never)
   ctx.provide('skills', { list: async () => [], get: async () => undefined, find: () => undefined, execute: async () => undefined } as never)
   const accountState: { view: AccountView } = { view: SIGNED_OUT }
+  const currentAccountLeases = new Set<AccountObservationLease>()
+  const accountObservation = (view = accountState.view, lease = {} as AccountObservationLease): AccountObservation => {
+    currentAccountLeases.add(lease)
+    return { view, lease }
+  }
   const calls: string[] = []
+  const accountMetadata: { method: string; version: string }[] = []
   /** The references the fake official store really reports as configured. */
   const configuredRefs = new Set(['DEEPSEEK_API_KEY', 'ACME_API_KEY', 'ANTHROPIC_API_KEY'])
   /** The exact secret the UI handed to setReference (fixture-only; never painted). */
@@ -161,22 +191,73 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
     },
     extensions: undefined,
     createPluginManagerPage: () => undefined,
+    // M6-1 F8: the Settings snapshot asks the approval row's observation
+    // (this e2e scenario never opens a live session, so it answers checking).
+    policy: {
+      readSnapshot: () => ({ kind: 'checking' as const }),
+      refresh: async () => ({ kind: 'checking' as const }),
+      invalidate: () => {},
+      subscribe: () => () => {},
+      dispose: () => {},
+    },
     config: {
       configReadiness: () => 'ready',
       visualTools: {
         read: () => ({ enabled: true, revision: 1, userOverridden: false, applied: true }),
         setEnabled: async (_enabled: boolean, _revision: number) => {},
       },
+      webStartupPreference: {
+        read: () => ({ autoStart: false, revision: 1, userOverridden: false }),
+        setAutoStart: async (_value: boolean, _revision: number) => {},
+      },
+      backendStartupPreference: {
+        read: () => ({ backend: 'direct' as const, revision: 1, userOverridden: false }),
+        readFresh: async () => ({ backend: 'direct' as const, revision: 1, userOverridden: false }),
+        setBackend: async (_value: 'direct' | 'daemon', _revision: number) => {},
+      },
+      acpStartupPreference: {
+        read: () => ({ autoStart: false, revision: 1, userOverridden: false }),
+        setAutoStart: async (_value: boolean, _revision: number) => {},
+      },
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
-      permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined, approvalOverrideAvailable: () => false },
-      subagentModelSelection: { available: () => false },
+      permissions: { presetNames: () => [], defaultPreset: () => undefined },
+      subagentLimits: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
+      subagentModelSelection: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
+      agentLoopSettings: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
+      shellExecutionSettings: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
+      sessionLogUpload: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
       // C2-R4: the Tools Web page is mountable for the credential deeplink case.
       web: {
         available: () => true,
         read: async () => ({
           searchProvider: 'deepseek-official',
           fetchProvider: 'http',
-          api: { baseURL: 'https://api.deepseek.com/v1/tools', count: 10, sendOriginalQuestion: true },
+          providerSelection: {
+            search: { baseId: 'deepseek-official', userSet: false, userId: undefined },
+            fetch: { baseId: 'http', userSet: false, userId: undefined },
+          },
+          api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
+          advanced: {},
           credential: configuredRefs.has('DEEPSEEK_API_KEY')
             ? { configured: true, source: 'file' }
             : { configured: false },
@@ -232,6 +313,8 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
       authorization: authorizationOverride ?? {
         available: () => true,
         listTargets: () => FLOWS,
+        refreshTargets: async () => {},
+        targetsState: () => 'ready' as const,
         begin: async () => ({ kind: 'unavailable' as const }),
         onEvent: () => () => {},
         respond: async () => {},
@@ -239,26 +322,47 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
       },
       account: {
         available: () => true,
-        getState: async () => accountState.view,
+        isObservationCurrent: (lease: AccountObservationLease) => currentAccountLeases.has(lease),
+        getState: async () => accountObservation(),
         // The Account watch subscription count: a category the user only
         // browsed must never start one.
-        watch: async function* () { calls.push('account:watch'); yield accountState.view; await new Promise<void>(() => {}) },
-        getProfile: async () => null,
-        getBalance: async () => null,
+        watch: async function* (signal: AbortSignal) {
+          calls.push('account:watch')
+          const lease = {} as AccountObservationLease
+          try {
+            yield { kind: 'current' as const, observation: accountObservation(accountState.view, lease) }
+            await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }))
+          } finally {
+            currentAccountLeases.delete(lease)
+          }
+        },
+        getProfile: async (client: { version: string }, _lease: AccountObservationLease) => {
+          accountMetadata.push({ method: 'getProfile', version: client.version })
+          return null
+        },
+        getBalance: async (client: { version: string }, _lease: AccountObservationLease) => {
+          accountMetadata.push({ method: 'getBalance', version: client.version })
+          return null
+        },
         getCallbackOrigin: () => 'http://127.0.0.1:43121',
-        startSignIn: async () => {
+        startSignIn: async (client: { version: string }, lease: AccountObservationLease) => {
+          accountMetadata.push({ method: 'startSignIn', version: client.version })
           calls.push('startSignIn')
           const gate = signInGate
           signInGate = undefined
           await gate
-          return accountState.view
+          return accountObservation(accountState.view, lease)
         },
-        cancelSignIn: async () => accountState.view,
-        signOut: async () => {
+        cancelSignIn: async (_id: string, lease: AccountObservationLease) => accountObservation(accountState.view, lease),
+        signOut: async (client: { version: string }, lease: AccountObservationLease) => {
+          accountMetadata.push({ method: 'signOut', version: client.version })
           calls.push('signOut')
-          return accountState.view
+          return accountObservation(accountState.view, lease)
         },
-        hasRunningAccountTasks: () => false,
+        hasRunningAccountTasks: async (_lease: AccountObservationLease) => {
+          calls.push('hasRunningAccountTasks')
+          return false
+        },
       },
     },
     catalog: { models: { available: () => true, discoverModels: async () => [{ id: 'acme-1' }] } },
@@ -293,6 +397,7 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
       return () => { releaseSetReference?.() }
     },
     rows,
+    accountMetadata,
     writtenSecrets,
     setConfigured: (ref: string, configured: boolean) => {
       if (configured) configuredRefs.add(ref)
@@ -486,13 +591,16 @@ test('/login bare opens the Models list; /login deepseek-account opens Account',
   h2.close()
 })
 
-test('/logout deepseek-account opens the Sign out confirmation directly', async () => {
+test('/logout deepseek-account with no stored credential reports signed out without a task check', async () => {
   const h = open()
   await h.vt.waitForRender()
   ;(h as unknown as { invoke(line: string): unknown }).invoke('/logout deepseek-account')
   await h.vt.waitForRender()
-  assert.match(h.view(), /Sign out confirmation/u)
+  assert.match(h.view(), /Signed out \/ no stored credential/u)
   assert.match(h.view(), /Nothing to sign out/u)
+  assert.match(h.view(), /Sign in/u)
+  assert.doesNotMatch(h.view(), /Sign out confirmation|Checking running account tasks|Could not verify/u)
+  assert.equal(h.calls.includes('hasRunningAccountTasks'), false)
   h.close()
 })
 
@@ -517,7 +625,7 @@ test('mouse: a painted provider row opens its detail, the category rail switches
   await h.vt.waitForRender()
   assert.match(h.view(), /Provider · Acme Gateway/u)
 
-  const accountRow = rowOf(h, 'Account')
+  const accountRow = railEntryRow(h, 'Account')
   press(h, accountRow, 1)
   release(h, accountRow, 1)
   await h.vt.waitForRender()
@@ -527,7 +635,7 @@ test('mouse: a painted provider row opens its detail, the category rail switches
   assert.match(h.view(), /^> Account/mu, 'the rail selects the Account category')
   assert.match(h.view(), /DeepSeek Account/u, 'the right column shows the real Account page')
 
-      const modelsRow = rowOf(h, 'Models')
+  const modelsRow = railEntryRow(h, 'Models')
   press(h, modelsRow, 1)
   release(h, modelsRow, 1)
   await h.vt.waitForRender()
@@ -553,16 +661,24 @@ test('a cross-owner mouse drag never reuses the other owner press (RFL-004)', as
   const h = open()
   await h.vt.waitForRender()
   ;(h as unknown as { invoke(line: string): unknown }).invoke('/login acme')
-  await h.vt.waitForRender()
+  // The Models page reads its provider catalog AFTER its first frame: the
+  // Configure action is only painted once the read settles, and the mouse
+  // gesture must resolve against that painted row, never the Loading frame.
+  await waitForFrame(
+    h.view,
+    frame => frame.includes('Provider · Acme Gateway') && frame.includes('> Configure API Key…'),
+    () => h.vt.waitForRender(),
+    'the Acme provider action must be painted before the cross-owner drag',
+  )
   const providerRow = rowOf(h, 'Configure API Key')
-  const railModels = rowOf(h, 'Models')
+  const railModels = railEntryRow(h, 'Models')
   press(h, providerRow, colOf(h, providerRow, 'Configure API Key'))
   release(h, railModels, 1)
   await h.vt.waitForRender()
   assert.match(h.view(), /Provider · Acme Gateway/u, 'the auth-page press did not fire after a rail release')
   assert.doesNotMatch(h.view(), /API Key Reference/u)
 
-  const railAppearance = rowOf(h, 'Appearance')
+  const railAppearance = railEntryRow(h, 'Appearance')
   press(h, railAppearance, 1)
   release(h, providerRow, colOf(h, providerRow, 'Configure API Key'))
   await h.vt.waitForRender()
@@ -575,10 +691,18 @@ test('a Host approval preempts Models input, abandons the workspace and never re
   const h = open()
   await h.vt.waitForRender()
   ;(h as unknown as { invoke(line: string): unknown }).invoke('/login deepseek-official')
-  await h.vt.waitForRender()
+  // The Enter below must open the masked editor: wait for the page's OWN
+  // actionable frame (the stored-state read answered and the selected
+  // Configure action is enabled), never a single render that can still be
+  // `Stored reading…` with a disabled action a fence would drop.
+  await waitForFrame(
+    h.view,
+    frame => /Stored\s+(?:Configured|Not set)/u.test(frame) && frame.includes('> Configure API Key…'),
+    () => h.vt.waitForRender(),
+    'the /login deeplink must reach the actionable API Key Reference page',
+  )
   // Enter the page-local masked API-key editor, then hand the seat to a Host
   // approval. The workspace must be abandoned at its own lease boundary.
-  await key(h, '\r')
   await key(h, '\r')
   assert.match(h.view(), /Enter the API key/u)
   const decision = h.app.showApprovalPrompt({ toolName: 'bash', reason: 'MA13 blocking-owner probe' })
@@ -607,13 +731,230 @@ test('/logout mykey deletes the flow RECORD, never the MYKEY reference (RFL-001 
   h.close()
 })
 
+test('a keyboard Esc between a bar press and release never cancels the embedded QuestionFlow', async () => {
+  const h = open()
+  await h.vt.waitForRender()
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/login deepseek-official')
+  await waitForFrame(
+    h.view,
+    frame => /Stored\s+(?:Configured|Not set)/u.test(frame) && frame.includes('> Configure API Key…'),
+    () => h.vt.waitForRender(),
+    'the /login deeplink must reach the API Key Reference page',
+  )
+  await key(h, '\r')
+  await waitForFrame(
+    h.view,
+    frame => frame.includes('Enter the API key') && frame.includes('Enter continue'),
+    () => h.vt.waitForRender(),
+    'Enter must open the masked embedded QuestionFlow',
+  )
+  const frame = h.rows()
+  const barRow = frame.length - 1
+  const col = frame[barRow]!.indexOf('Back [Esc]')
+  assert.ok(col >= 0, `the embedded question bar paints Back:\n${frame[barRow]}`)
+
+  // PRESS the bar's Back, then let the KEYBOARD Esc leave only the QuestionFlow's
+  // current Esc state (edit -> navigation; the question itself stays).
+  press(h, barRow, col)
+  await key(h, '\x1b')
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Enter the API key/u, 'the keyboard Esc left the question in place')
+  const after = h.rows()
+  const afterRow = after.length - 1
+  assert.equal(after[afterRow]!.indexOf('Back [Esc]'), col, 'the repaint keeps the same Back cells')
+
+  // RELEASE on the old cells: the keyboard input revoked the press, so it must
+  // NOT run a second Esc and cancel the question.
+  release(h, barRow, col)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Enter the API key/u, 'the stale release did not cancel the QuestionFlow')
+  assert.equal(h.calls.some(call => call.startsWith('set:')), false, 'no Host write was attempted')
+  h.close()
+})
+
+test('one fresh bar click runs exactly ONE Esc step of the embedded QuestionFlow', async () => {
+  const h = open()
+  await h.vt.waitForRender()
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/login deepseek-official')
+  await waitForFrame(
+    h.view,
+    frame => /Stored\s+(?:Configured|Not set)/u.test(frame) && frame.includes('> Configure API Key…'),
+    () => h.vt.waitForRender(),
+    'the /login deeplink must reach the API Key Reference page',
+  )
+  await key(h, '\r')
+  await waitForFrame(
+    h.view,
+    frame => frame.includes('Enter the API key') && frame.includes('Enter continue'),
+    () => h.vt.waitForRender(),
+    'Enter must open the masked embedded QuestionFlow',
+  )
+  const barCell = (): { row: number; col: number } => {
+    const rows = h.rows()
+    const row = rows.length - 1
+    const col = rows[row]!.indexOf('Back [Esc]')
+    assert.ok(col >= 0, `the embedded question bar paints Back:\n${rows[row]}`)
+    return { row, col }
+  }
+  const first = barCell()
+  await click(h, first.row, first.col)
+  assert.match(h.view(), /Enter the API key/u,
+    'the first click ran only the edit-exit Esc (the flow stays)')
+  // Two rapid clicks on the same cell are read as a terminal double click; give
+  // the gesture window time to reset so this is a SECOND independent click.
+  await new Promise<void>(resolve => setTimeout(resolve, 900))
+  const second = barCell()
+  await click(h, second.row, second.col)
+  assert.doesNotMatch(h.view(), /Enter the API key/u,
+    'the second independent click ran the navigation-state Esc exactly once (the flow cancels)')
+  assert.match(h.rows()[0]!, /Settings · Models/u, 'the Settings lease stays on the Models page')
+  h.close()
+})
+
+test('a Host prompt takeover between a bar press and release leaves the old press inert', async () => {
+  const listeners = new Set<(event: unknown) => void>()
+  const responds: string[] = []
+  const emit = (event: unknown): void => {
+    for (const listener of listeners) listener(event)
+  }
+  const auth = {
+    available: () => true,
+    listTargets: () => FLOWS,
+    refreshTargets: async () => {},
+    targetsState: () => 'ready' as const,
+    begin: async () => {
+      queueMicrotask(() => {
+        emit({
+          kind: 'prompt',
+          attemptId: 'auth-takeover',
+          promptId: 'p1',
+          prompt: { kind: 'text', message: 'FIRST PROMPT' },
+        })
+        // The second prompt arrives BEFORE the press: it queues behind p1, so
+        // the owner serial is already at its current value when the press is
+        // recorded and p1's withdrawal is the ONLY thing that changes hands.
+        emit({
+          kind: 'prompt',
+          attemptId: 'auth-takeover',
+          promptId: 'p2',
+          prompt: { kind: 'text', message: 'SECOND PROMPT' },
+        })
+      })
+      return { kind: 'started' as const, attemptId: 'auth-takeover' }
+    },
+    onEvent: (listener: (event: unknown) => void) => {
+      listeners.add(listener)
+      return () => { listeners.delete(listener) }
+    },
+    respond: async (attemptId: string, promptId: string, answer: string | null) => {
+      responds.push(`${attemptId}:${promptId}:${answer === null ? 'null' : answer}`)
+    },
+    cancel: async () => {},
+  }
+  const h = open(120, 40, auth)
+  await h.vt.waitForRender()
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/login anthropic')
+  await waitForFrame(
+    h.view,
+    frame => frame.includes('Provider · Anthropic') && frame.includes('> Sign in (provider)'),
+    () => h.vt.waitForRender(),
+    'the /login deeplink must reach the actionable Anthropic provider page',
+  )
+  await key(h, '\r')
+  await waitForFrame(
+    h.view,
+    frame => frame.includes('FIRST PROMPT') && frame.includes('Back [Esc]'),
+    () => h.vt.waitForRender(),
+    'the first Host prompt must own the painted question bar',
+  )
+  const barCell = (): { row: number; col: number } => {
+    const rows = h.rows()
+    const row = rows.length - 1
+    const col = rows[row]!.indexOf('Back [Esc]')
+    assert.ok(col >= 0, `the embedded question bar paints Back:\n${rows[row]}`)
+    return { row, col }
+  }
+  const first = barCell()
+  press(h, first.row, first.col)
+
+  // The Host withdraws the VISIBLE first prompt: the queued second one takes
+  // over the same bar cells while p1's press is still recorded.
+  emit({ kind: 'prompt-withdrawn', attemptId: 'auth-takeover', promptId: 'p1' })
+  await waitForFrame(
+    h.view,
+    frame => frame.includes('SECOND PROMPT') && frame.includes('Back [Esc]'),
+    () => h.vt.waitForRender(),
+    'the withdrawn first prompt must hand the question UI to the queued prompt',
+  )
+  assert.doesNotMatch(h.view(), /FIRST PROMPT/u)
+  assert.equal(barCell().col, first.col, 'the takeover keeps the same Back cells')
+
+  // The OLD press belongs to p1: releasing on the same cells must be inert and
+  // leave p2 in its EDIT state (the flow's own hint still says `esc back`, not
+  // the navigation state's `esc cancel`).
+  release(h, first.row, first.col)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /SECOND PROMPT/u)
+  assert.match(h.view(), /esc back/u, 'the stale release did not run p2 edit exit')
+  assert.deepEqual(responds, [], 'the stale release answered no prompt')
+
+  // A FRESH complete click is a new gesture: it runs exactly ONE Esc step (the
+  // edit exit), so the takeover prompt survives. Two rapid clicks would be a
+  // double click; wait out that terminal gesture window before this click.
+  await new Promise<void>(resolve => setTimeout(resolve, 900))
+  const fresh = barCell()
+  await click(h, fresh.row, fresh.col)
+  assert.match(h.view(), /SECOND PROMPT/u, 'one fresh click ran exactly one Esc step')
+  assert.deepEqual(responds, [], 'one fresh click never cancels the prompt')
+
+  // A second independent click runs the navigation-state Esc exactly once and
+  // answers exactly the takeover prompt; the same double-click window applies.
+  await new Promise<void>(resolve => setTimeout(resolve, 900))
+  const cancelling = barCell()
+  await click(h, cancelling.row, cancelling.col)
+  assert.deepEqual(responds, ['auth-takeover:p2:null'],
+    'the second independent click cancelled exactly the takeover prompt')
+  assert.doesNotMatch(h.view(), /SECOND PROMPT/u)
+  h.close()
+})
+
 test('a 30x8 Settings workspace disables Enter for a clipped masked form; 40x16 keeps it visible (MA12)', async () => {
   const h = open()
   await h.vt.waitForRender()
   ;(h as unknown as { invoke(line: string): unknown }).invoke('/login deepseek-official')
-  await h.vt.waitForRender()
-  await key(h, '\r') // open the masked API-key form at full height
-  await h.vt.waitForRender()
+  // Wait for the ACTIONABLE reference page, not just its header: the Enter below
+  // must open the masked form, so the frame that grants that action has to be
+  // painted first (a single render after the deeplink can still be the Loading
+  // or provider frame under load).
+  await waitForFrame(
+    h.view,
+    frame => /Stored\s+(?:Configured|Not set)/u.test(frame) && frame.includes('> Configure API Key…'),
+    () => h.vt.waitForRender(),
+    'the /login deeplink must reach the API Key Reference page before Enter',
+  )
+  // Open the masked form. The page refuses a key while a changed row grant
+  // awaits its paint (a safe fail-closed admission), and a frame can land
+  // between the wait above and the keypress under CI load; retry the key after
+  // that frame. A genuinely broken Enter still never paints the form and fails.
+  const settledFormPainted = async (): Promise<boolean> => {
+    for (let frame = 0; frame < 8; frame += 1) {
+      const painted = h.view()
+      if (painted.includes('Enter the API key') && painted.includes('Enter continue')) return true
+      await h.vt.waitForRender()
+      await new Promise<void>(resolve => setImmediate(resolve))
+    }
+    return false
+  }
+  await key(h, '\r')
+  if (!(await settledFormPainted())) {
+    // Retry ONLY while the reference page is still the live owner: a frame that
+    // already advanced to the form/review must never receive a second submit.
+    assert.match(h.view(), /Configure API Key|API Key Reference/u,
+      'the retry is only safe while the reference page still owns the frame')
+    await key(h, '\r')
+    assert.ok(await settledFormPainted(),
+      'Enter on the reference page must open the masked form with its real submit hint')
+  }
   assert.match(h.view(), /API Key Reference|Enter the API key/u)
 
   h.vt.resize(40, 16)
@@ -627,7 +968,7 @@ test('a 30x8 Settings workspace disables Enter for a clipped masked form; 40x16 
   assert.equal(h.calls.some(call => call.startsWith('set:')), false, 'the input-path geometry guard blocks the race')
   assert.match(h.view(), /Resize the terminal/u)
   assert.doesNotMatch(h.view(), /Enter continue/u, 'a clipped form never advertises a hidden submit')
-  assert.match(h.view(), /Esc cancel/u, 'the only real key of the clipped question is its cancel')
+  assert.match(h.view(), /Cancel \[Esc\]/u, 'the only real key of the clipped question is its cancel')
   assert.doesNotMatch(h.view(), /type to edit/u, 'the frame does not advertise editing it refuses')
   await key(h, 'a')
   await key(h, '\r')
@@ -685,6 +1026,57 @@ test('a pending Host mutation owns the page: the rail click cannot take the keyb
   }
 })
 
+test('the real Settings Account factory injects the installed DSH identity into Account metadata (Direct and Split)', async (t) => {
+  const life = testLifecycle(t)
+  const previousMode = process.env.SPLIT_PROCESS_CLIENT_MODE
+  const previousAnchor = process.env.SPLIT_PROCESS_DSH_ANCHOR
+  const previousArgv = process.argv[1]
+  life.defer(() => {
+    if (previousMode === undefined) delete process.env.SPLIT_PROCESS_CLIENT_MODE
+    else process.env.SPLIT_PROCESS_CLIENT_MODE = previousMode
+    if (previousAnchor === undefined) delete process.env.SPLIT_PROCESS_DSH_ANCHOR
+    else process.env.SPLIT_PROCESS_DSH_ANCHOR = previousAnchor
+    process.argv[1] = previousArgv
+  })
+  const exercise = async (expectedVersion: string): Promise<void> => {
+    const h = open()
+    await h.vt.waitForRender()
+    ;(h as unknown as { invoke(line: string): unknown }).invoke('/login deepseek-account')
+    await waitForFrame(h.view, frame => /Settings · Account/u.test(frame)
+      && /Signed out \/ no stored credential/u.test(frame) && /Sign in/u.test(frame),
+    () => h.vt.waitForRender(), 'the Account page must settle on its signed-out Host snapshot')
+    await key(h, '\r')
+    await waitForCall(h, call => call === 'startSignIn', `Account sign-in (${expectedVersion})`)
+    assert.deepEqual(h.accountMetadata.at(-1), { method: 'startSignIn', version: expectedVersion },
+      'the semantic Account port receives the installed DSH version')
+    h.close()
+  }
+
+  // Direct launch identity: the DSH CLI manifest through argv.
+  const directRoot = life.tempDir('settings-account-dsh-direct-')
+  const directDsh = join(directRoot, 'node_modules', '@deepseek-ai', 'dsh')
+  mkdirSync(join(directDsh, 'bin'), { recursive: true })
+  writeFileSync(join(directDsh, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.2-direct-b' }))
+  const directBin = join(directDsh, 'bin', 'dsh')
+  writeFileSync(directBin, '')
+  delete process.env.SPLIT_PROCESS_CLIENT_MODE
+  delete process.env.SPLIT_PROCESS_DSH_ANCHOR
+  process.argv[1] = directBin
+  assert.notEqual('0.2.2-direct-b', bundleVersion(), 'the DSH value deliberately differs from the TUI bundle version')
+  await exercise('0.2.2-direct-b')
+
+  // Split surface launch identity: the official install anchor; argv stays at
+  // the test runner and is never a fallback for this process.
+  const splitRoot = life.tempDir('settings-account-dsh-split-')
+  const anchor = join(splitRoot, 'package.json')
+  writeFileSync(anchor, JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.2-split-c' }))
+  process.env.SPLIT_PROCESS_CLIENT_MODE = 'surface'
+  process.env.SPLIT_PROCESS_DSH_ANCHOR = anchor
+  process.argv[1] = new URL(import.meta.url).pathname
+  assert.notEqual('0.2.2-split-c', bundleVersion(), 'the DSH value deliberately differs from the TUI bundle version')
+  await exercise('0.2.2-split-c')
+})
+
 test('a pending Account operation keeps the keyboard: the painted Back action does not leave the page', async () => {
   const h = open()
   await h.vt.waitForRender()
@@ -719,7 +1111,7 @@ test('a pending Account operation keeps the keyboard: the painted Back action do
   // Host, it neither leaves nor cancels the in-flight operation.
   h.vt.resize(120, 2)
   await h.vt.waitForRender()
-  assert.match(h.rows().at(-1) ?? '', /Esc wait/u, 'the zero-body fallback states that Esc waits')
+  assert.match(h.rows().at(-1) ?? '', /Wait \[Esc\]/u, 'the zero-body fallback states that Esc waits')
   await key(h, '\u001b')
   assert.match(h.rows()[0]!, /Settings · Account/u, 'the pending operation still owns the content')
 
@@ -749,6 +1141,8 @@ test('real Settings 30x8 hides a clipped select prompt and refuses Enter (F7)', 
   const auth = {
     available: () => true,
     listTargets: () => FLOWS,
+    refreshTargets: async () => {},
+    targetsState: () => 'ready' as const,
     begin: async () => {
       queueMicrotask(() => {
         for (const listener of listeners) {
@@ -786,8 +1180,6 @@ test('real Settings 30x8 hides a clipped select prompt and refuses Enter (F7)', 
 // once; Enter/Right hands the keyboard to that page. These cases drive the
 // REAL command coordinator, the REAL workspace lease and the REAL pages.
 
-const railRow = (h: Harness, label: string): number => rowOf(h, label)
-
 /**
  * The physical row of one CATEGORY RAIL entry. The rail owns the first 22
  * cells of the frame, so a rail entry is found by its own cell — a plain
@@ -809,8 +1201,9 @@ test('the category rail paints the real Models and Account pages while the keybo
   await h.vt.waitForRender()
   assert.match(h.view(), /dsh-pi-tui/u, 'the About home is the first frame')
 
-  // Down to Models: the right column shows the REAL Models page at once.
-  await key(h, '\u001b[B')
+  // Down to Models (via General): the right column shows the REAL Models page at once.
+  await key(h, '\u001b[B') // About -> General
+  await key(h, '\u001b[B') // General -> Models
   assert.match(h.view(), /Models & Credentials/u, 'the rail shows the real Models page')
   assert.match(h.rows()[0]!, /Settings · Categories/u, 'the keyboard stays on the rail')
 
@@ -827,8 +1220,9 @@ test('Enter on the rail hands the keyboard to the SAME Account page without runn
   await h.vt.waitForRender()
   ;(h as unknown as { invoke(line: string): unknown }).invoke('/settings')
   await h.vt.waitForRender()
-  await key(h, '\u001b[B')
-  await key(h, '\u001b[B')
+  await key(h, '\u001b[B') // About -> General
+  await key(h, '\u001b[B') // General -> Models
+  await key(h, '\u001b[B') // Models -> Account
   assert.match(h.view(), /DeepSeek Account/u, 'the Account page is already on screen')
   const before = h.view()
 
@@ -871,7 +1265,7 @@ test('a rail selection is refused while the page owns a pending Host mutation', 
   try {
     await submitHeldOfficialKey(h)
 
-    const accountRow = railRow(h, 'Account')
+    const accountRow = railEntryRow(h, 'Account')
     await click(h, accountRow, 1)
     assert.match(h.rows()[0]!, /Settings · Models/u, 'the pending mutation owns the page')
     assert.doesNotMatch(h.view(), /Settings · Account/u, 'the rail refused the category change')
@@ -894,7 +1288,7 @@ test('a cross-owner gesture does nothing: a rail press released in the content c
     () => h.vt.waitForRender(),
     'the Models provider row must be painted before the cross-owner gesture',
   )
-  const railModels = rowOf(h, 'Models')
+  const railModels = railEntryRow(h, 'Models')
   const providerRow = rowOf(h, 'Acme Gateway')
   // A press on the RAIL, released in the CONTENT column: neither owner may
   // act. The rail press must not select a category and the content release
@@ -904,6 +1298,19 @@ test('a cross-owner gesture does nothing: a rail press released in the content c
   await h.vt.waitForRender()
   assert.match(h.view(), /Models & Credentials/u, 'the content release did not open a provider')
   assert.match(h.view(), /^> Models/mu, 'the rail press did not select a category')
+  // The rail press must not even take the KEYBOARD: re-selecting the already
+  // selected category would leave the rail as the focus owner while the same
+  // Models content stays painted, so the header is the witness that no rail
+  // action ran at all.
+  assert.match(h.rows()[0]!, /Settings · Models/u, 'the rail press did not take the keyboard from the content')
+
+  // Control: the SAME content cell is a real target. A matching press and
+  // release opens the provider detail, so the refusal above is a real
+  // cross-owner refusal, not an inert coordinate.
+  press(h, providerRow, colOf(h, providerRow, 'Acme Gateway'))
+  release(h, providerRow, colOf(h, providerRow, 'Acme Gateway'))
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Provider · Acme Gateway/u, 'the content cell is a real provider target')
   h.close()
 })
 
@@ -942,10 +1349,10 @@ test('the Account page keeps its Host browser attempt when the rail leaves and r
   assert.match(h.view(), /waiting-browser/u, 'the running Host attempt is on screen')
   assert.match(h.view(), /platform\.example/u, 'the authorize URL is on screen')
 
-  const aboutRow = railRow(h, 'About')
+  const aboutRow = railEntryRow(h, 'About')
   await click(h, aboutRow, 1)
   assert.match(h.view(), /dsh-pi-tui/u, 'the About page is painted after the category change')
-  const accountRow = railRow(h, 'Account')
+  const accountRow = railEntryRow(h, 'Account')
   await click(h, accountRow, 1)
   assert.match(h.view(), /waiting-browser/u, 'the returned page re-reads the Host attempt')
   assert.equal(h.calls.some(call => call.includes('cancelSignIn')), false,
@@ -960,7 +1367,7 @@ test('a Host callback that settles after a category change never repaints the ne
   await h.vt.waitForRender()
   const before = h.view()
   // Switch to the About home WHILE the Account watch is still settling.
-  const aboutRow = railRow(h, 'About')
+  const aboutRow = railEntryRow(h, 'About')
   await click(h, aboutRow, 1)
   for (let index = 0; index < 20; index += 1) await new Promise<void>(resolve => setImmediate(resolve))
   assert.match(h.view(), /dsh-pi-tui/u, 'the About page is still painted after the settlement')
@@ -979,8 +1386,9 @@ test('a narrow rail selection never creates the invisible Account page, and Ente
   assert.match(h.rows()[0]!, /Settings · Categories/u, 'the narrow rail owns the list')
 
   // Browsing the invisible Account category must not start a Host watch.
-  await key(h, '\u001b[B')
-  await key(h, '\u001b[B')
+  await key(h, '\u001b[B') // About -> General
+  await key(h, '\u001b[B') // General -> Models
+  await key(h, '\u001b[B') // Models -> Account
   assert.equal(h.calls.filter(call => call === 'account:watch').length, 0,
     'browsing an invisible category never starts the Account watch')
   assert.equal(h.calls.filter(call => call === 'startSignIn').length, 0,
@@ -1000,8 +1408,9 @@ test('the wide rail previews the real page with exactly ONE watch, and the focus
   await h.vt.waitForRender()
   ;(h as unknown as { invoke(line: string): unknown }).invoke('/settings')
   await h.vt.waitForRender()
-  await key(h, '\u001b[B')
-  await key(h, '\u001b[B')
+  await key(h, '\u001b[B') // About -> General
+  await key(h, '\u001b[B') // General -> Models
+  await key(h, '\u001b[B') // Models -> Account
   assert.match(h.view(), /DeepSeek Account/u, 'the rail previews the real Account page')
   assert.equal(h.calls.filter(call => call === 'account:watch').length, 1,
     'the wide rail preview starts exactly ONE watch')
@@ -1019,9 +1428,10 @@ test('a content press released on the rail does not select the category', async 
   await h.vt.waitForRender()
   ;(h as unknown as { invoke(line: string): unknown }).invoke('/settings')
   await h.vt.waitForRender()
-  const accountRow = railRow(h, 'Account')
-  await key(h, '\u001b[B')
-  await key(h, '\u001b[B')
+  const accountRow = railEntryRow(h, 'Account')
+  await key(h, '\u001b[B') // About -> General
+  await key(h, '\u001b[B') // General -> Models
+  await key(h, '\u001b[B') // Models -> Account
   const contentRow = rowOf(h, 'Status')
   // A press in the CONTENT, released on the RAIL: the rail must not act on it.
   // The selection stays exactly where the rail navigation left it, and the
@@ -1042,8 +1452,9 @@ test('a narrow rail selection is mounted when the terminal grows and the content
   await h.vt.waitForRender()
   // The narrow first frame is the About content: Esc returns to the list.
   await key(h, '\u001b')
-  await key(h, '\u001b[B')
-  await key(h, '\u001b[B')
+  await key(h, '\u001b[B') // About -> General
+  await key(h, '\u001b[B') // General -> Models
+  await key(h, '\u001b[B') // Models -> Account
   assert.match(h.view(), /^> Account/mu, 'the narrow rail selected the Account category')
   assert.equal(h.calls.filter(call => call === 'account:watch').length, 0,
     'the narrow rail browsed an invisible category: no Account watch was started')
@@ -1064,7 +1475,8 @@ test('the Models page is mounted the same way when the terminal grows', async ()
   ;(h as unknown as { invoke(line: string): unknown }).invoke('/settings')
   await h.vt.waitForRender()
   await key(h, '\u001b')
-  await key(h, '\u001b[B')
+  await key(h, '\u001b[B') // About -> General
+  await key(h, '\u001b[B') // General -> Models
   assert.match(h.view(), /^> Models/mu, 'the narrow rail selected the Models category')
   h.vt.resize(120, 40)
   await h.vt.waitForRender()
@@ -1173,7 +1585,7 @@ test('a shrink before repaint revokes a selected sign-out action; the short fall
   for (let index = 0; index < 10; index += 1) await new Promise<void>(resolve => setImmediate(resolve))
   assert.equal(h.calls.filter(call => call === 'signOut').length, 0,
     'the stale Enter after a shrink never dispatches the old sign-out grant')
-  assert.match(h.rows().at(-1) ?? '', /Esc cancel/u, 'the short fallback names the real Esc cancel')
+  assert.match(h.rows().at(-1) ?? '', /Cancel \[Esc\]/u, 'the short fallback names the real Esc cancel')
 
   // Even after the fallback paints, Enter and the hidden refresh stay inert.
   await key(h, '\r')
@@ -1218,18 +1630,21 @@ test('a resize to 120x7 rejects a mouse press/release on the old sign-out row', 
 // ── C2-R4: the Web page's credential row is the SAME official reference ─────
 
 /** Open `/settings → Tools → Web Search / Fetch` and select the credential row
- *  of the real Web page (Home + five Downs within the page list). */
+ *  of the real Web page (Home + eight Downs within the page list: the
+ *  credential row is the ninth frozen row). */
 async function openWebCredentialRow(h: Harness): Promise<void> {
   ;(h as unknown as { invoke(line: string): unknown }).invoke('/settings')
   await waitForFrame(h.view, frame => frame.includes('Settings ·'), () => h.vt.waitForRender(), 'the Settings workspace')
-  for (let step = 0; step < 7; step += 1) await key(h, '\x1b[B') // About -> Tools
+  for (let step = 0; step < 8; step += 1) await key(h, '\x1b[B') // About -> Tools
   await key(h, '\r') // rows level
-  await key(h, '\x1b[B') // the Web row
+  // Walk the Tools rows until the Web launcher owns the selection (the M5-W
+  // PR-C preference row sits between Visual tools and it).
+  for (let step = 0; step < 6 && !/> Web Search \/ Fetch/u.test(h.view()); step += 1) await key(h, '\x1b[B')
   await key(h, '\r') // the SAME-lease Web page
   await waitForFrame(h.view, frame => frame.includes('Web Search Provider') && !frame.includes('Loading…'),
     () => h.vt.waitForRender(), 'the Web Search / Fetch page')
   await key(h, '\x1b[H')
-  for (let step = 0; step < 5; step += 1) await key(h, '\x1b[B')
+  for (let step = 0; step < 8; step += 1) await key(h, '\x1b[B')
   await key(h, '\r') // the credential row Detail
   await waitForFrame(h.view, frame => frame.includes('Reference: DEEPSEEK_API_KEY'),
     () => h.vt.waitForRender(), 'the credential row Detail')
@@ -1313,4 +1728,32 @@ test('the Web page Clear deeplink cancel writes nothing', async () => {
   assert.deepEqual(h.calls.filter(call => call.startsWith('unset:')), [],
     'a cancelled clear performs ZERO credential writes')
   h.close()
+})
+
+test('a Models/Account physical bar click replays the page own Esc exactly like the keyboard', async () => {
+  const normalize = (text: string): string => text.replace(/Refreshed \d\d:\d\d/u, 'Refreshed --:--')
+  for (const command of ['/login acme', '/login deepseek-account']) {
+    // ONE live TuiApp per process: run the click path first, capture the frame
+    // after EACH of the two Esc steps, close it, then drive the keyboard path
+    // the same way and compare every step.
+    const viaClick = open()
+    await viaClick.vt.waitForRender()
+    ;(viaClick as unknown as { invoke(line: string): unknown }).invoke(command)
+    await viaClick.vt.waitForRender()
+    const barRow = viaClick.rows().length - 1
+    assert.match(viaClick.rows()[barRow]!, /Back \[Esc\]/u, `${command}: the direct page names its real Esc outcome`)
+    await click(viaClick, barRow, colOf(viaClick, barRow, 'Back [Esc]'))
+    const clicked = normalize(viaClick.view())
+    viaClick.close()
+
+    const viaKey = open()
+    await viaKey.vt.waitForRender()
+    ;(viaKey as unknown as { invoke(line: string): unknown }).invoke(command)
+    await viaKey.vt.waitForRender()
+    await key(viaKey, '\x1b')
+    const keyed = normalize(viaKey.view())
+    viaKey.close()
+
+    assert.equal(clicked, keyed, `${command}: the click runs the SAME Esc ladder step as the keyboard`)
+  }
 })

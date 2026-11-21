@@ -55,7 +55,7 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -70,7 +70,9 @@ import { HostConnectionService } from '@deepseek-ai/dsh-client-connection'
 import TypertGatewayService from '@deepseek-ai/dsh-api-gateway'
 import { apply as applyApiRemotes, inject as apiRemotesInject } from '@deepseek-ai/dsh-api-remotes'
 import SessionController from '@deepseek-ai/dsh-api-session-controller'
+import WorkspaceController from '@deepseek-ai/dsh-api-workspace-controller'
 import sessionRemote from '@deepseek-ai/dsh-api-session-controller/remote'
+import workspaceRemote from '@deepseek-ai/dsh-api-workspace-controller/remote'
 import commandsRemote from '@deepseek-ai/dsh-commands/remote'
 import presetsRemote from '@deepseek-ai/dsh-agent-preset-registry/remote'
 import subagentsRemote from '@deepseek-ai/dsh-subagent/remote'
@@ -250,10 +252,22 @@ async function createHost(workRoot) {
     await ctx.plugin(StorageJson, { root: join(workRoot, 'storages') })
     await ctx.plugin(StorageDomain, { backend: 'json' })
     await ctx.plugin(WorkspaceRegistry)
-    let sessionController
-    await ctx.inject(SessionController.inject, controllerCtx => {
-      sessionController = new SessionController(controllerCtx, { nativeOpen: false })
+    // The official Host Workspace Controller row: the SAME registry above is the
+    // only Workspace authority, and it serves the generated `workspace` Remote
+    // namespace this lane's ordinary create pre-selects through.
+    await ctx.plugin(WorkspaceController)
+    await ctx.plugin(hostCtx => {
+      new HostConnectionService(hostCtx, [], {})
     })
+    await ctx.inject(TypertGatewayService.inject, gatewayCtx => {
+      new TypertGatewayService(gatewayCtx, { websocketHeartbeatIntervalMs: 50 })
+    })
+    // DSH 0.2.2 builds the controller's control/history/state sub-owners in the
+    // async `[Service.init]` and the controller also injects `typertGateway`, so
+    // mount the plugin form AFTER the gateway and read the instance back from the
+    // service registry (a pre-gateway mount stays pending and yields no service).
+    await ctx.plugin(SessionController, { nativeOpen: false })
+    const sessionController = ctx.get('sessionController')
     // Count every Host-side create dispatch: the pinned controller create is
     // "create or idempotently adopt", so mere Session presence cannot prove the
     // TUI dispatched exactly one Host create.
@@ -263,12 +277,6 @@ async function createHost(workRoot) {
       hostCreateCalls.push(String(request?.sessionId))
       return originalCreate(request)
     }
-    await ctx.plugin(hostCtx => {
-      new HostConnectionService(hostCtx, [], {})
-    })
-    await ctx.inject(TypertGatewayService.inject, gatewayCtx => {
-      new TypertGatewayService(gatewayCtx, { websocketHeartbeatIntervalMs: 50 })
-    })
     await ctx.plugin({ inject: apiRemotesInject, apply: applyApiRemotes })
 
     ctx.llm.registerAdapter([PROVIDER], new SmokeAdapter())
@@ -331,6 +339,7 @@ async function main() {
     host = await createHost(workRoot)
     const anchorDir = join(workRoot, 'anchor')
     mkdirSync(anchorDir, { recursive: true })
+    const canonicalAnchor = realpathSync(anchorDir)
 
     // ---- Flow F prerequisite: start the external writer holder BEFORE the
     // Client's first catalog read, so the cold JSONL Session is discoverable
@@ -347,7 +356,7 @@ async function main() {
     await client.plugin(TypertRegistry)
     await client.plugin(connectionClient)
     await client.plugin(gatewayClient)
-    for (const contribution of [commandsRemote, presetsRemote, sessionRemote, subagentsRemote]) {
+    for (const contribution of [commandsRemote, presetsRemote, sessionRemote, subagentsRemote, workspaceRemote]) {
       await client.remote.$mount(contribution)
     }
     client.provide('fileUpload', { available: false })
@@ -363,7 +372,13 @@ async function main() {
     ))
 
     const generation = connection.generation
-    const lifecycle = new RemoteSessionLifecycle(sessions, generation)
+    const workspaceFace = client.remote.workspace
+    const lifecycle = new RemoteSessionLifecycle(sessions, generation, workspaceFace, sessionRemoteFace)
+    // WS-2: the ordinary create names an OFFICIAL Host WorkspaceId. The Client
+    // launch directory is only the proposal the Host canonicalizes.
+    const anchorWorkspace = await lifecycle.resolveWorkspace({ kind: 'host-path', path: anchorDir })
+    assert.equal(anchorWorkspace.path, canonicalAnchor,
+      'the Host canonical Workspace path is the pre-selection result')
     const models = new RemoteModelCatalog(sessionRemoteFace, sessions, generation)
     const presets = new RemotePresetCatalog(presetRemoteFace, generation)
     const hostSession = id => host.ctx.sessions.get(SessionId(id))
@@ -375,7 +390,7 @@ async function main() {
     // ---- Flow A: ordinary create -----------------------------------------
     {
       const requested = 'lifecycle-ordinary'
-      const result = await lifecycle.create({ sessionId: requested, cwd: anchorDir })
+      const result = await lifecycle.create({ sessionId: requested, workspaceId: anchorWorkspace.workspaceId })
       assert.equal(result.ownership, 'current', `Flow A ownership: ${result.ownership}/${result.outcome.kind}`)
       assert.equal(result.outcome.kind, 'created', `Flow A create failed: ${result.ownership}/${result.outcome.kind}`)
       const handle = result.outcome.handle
@@ -391,18 +406,143 @@ async function main() {
       assert.ok(referenceCount > 0, 'Flow A retain must hold a reference')
       handle.client.release()
       assert.ok(sessions.retainInfo(SessionId(requested)).getSnapshot().referenceCount
-        < referenceCount, 'Flow A release must return the reference')
+        < referenceCount, 'the first create release must return the reference')
       flows.ordinaryCreate = { status: 'covered', sessionId: requested }
     }
 
-    // ---- Flow A2: a BLANK requested Session is reused ---------------------
+    // ---- Flow G: Host Workspace authority (WS-2) -------------------------
+    {
+      const registry = host.ctx.workspaceRegistry
+      const anchorRow = registry.get(anchorWorkspace.workspaceId)
+      assert.ok(anchorRow !== undefined, 'Flow G pre-selection must produce a REAL Host Workspace record')
+      assert.equal(anchorRow.path, canonicalAnchor, 'the Host canonicalizes the proposed directory')
+      assert.deepEqual(registry.list().map(workspace => workspace.path), [canonicalAnchor],
+        'the Host owns exactly one Workspace for the launch directory')
+
+      // Same canonical path (and a symlink to it): ONE Workspace identity.
+      const again = await workspaceFace.create({ path: anchorDir })
+      assert.equal(again.ok, true, `Flow G same-path create must resolve: ${JSON.stringify(again)}`)
+      assert.equal(again.value.created, false, 'the same canonical path is never registered twice')
+      assert.equal(String(again.value.workspace.workspaceId), anchorWorkspace.workspaceId)
+      const aliasPath = join(workRoot, 'anchor-alias')
+      symlinkSync(anchorDir, aliasPath)
+      const viaAlias = await lifecycle.resolveWorkspace({ kind: 'host-path', path: aliasPath })
+      assert.equal(viaAlias.workspaceId, anchorWorkspace.workspaceId,
+        'a symlinked spelling resolves to the same canonical Workspace')
+      assert.equal(viaAlias.path, canonicalAnchor, 'the alias pre-selection carries the Host canonical path')
+
+      // A DIFFERENT real directory is a DIFFERENT Workspace.
+      const otherDir = join(workRoot, 'anchor-other')
+      mkdirSync(otherDir)
+      const other = await lifecycle.resolveWorkspace({ kind: 'host-path', path: otherDir })
+      assert.notEqual(other.workspaceId, anchorWorkspace.workspaceId,
+        'a different directory is a different Host Workspace')
+      assert.equal(other.path, realpathSync(otherDir))
+
+      // An unknown WorkspaceId is refused at PREFLIGHT with zero Session dispatch.
+      const createsBefore = host.hostCreateCalls.length
+      const preflightError = await lifecycle.resolveWorkspace({ kind: 'workspace-id', workspaceId: 'workspace-does-not-exist' })
+        .then(() => undefined, error => error)
+      assert.equal(preflightError?.kind, 'refused', `Flow G unknown Workspace must refuse: ${String(preflightError?.kind)}`)
+      assert.equal(preflightError?.code, 'workspace/not-found')
+      assert.equal(host.hostCreateCalls.length, createsBefore, 'the preflight refusal never reaches Session.create')
+
+      // The same unknown identity dispatched as a create is ONE Host refusal,
+      // and no Session is published (no cwd fallback, no second create).
+      const refused = await lifecycle.create({ sessionId: 'lifecycle-unknown-workspace', workspaceId: 'workspace-does-not-exist' })
+      assert.equal(refused.outcome.kind, 'rejected',
+        `Flow G unknown-Workspace create must refuse: ${refused.ownership}/${refused.outcome.kind}`)
+      if (refused.outcome.kind === 'rejected') assert.equal(refused.outcome.error.code, 'workspace/not-found')
+      assert.equal(host.hostCreateCalls.filter(id => id === 'lifecycle-unknown-workspace').length, 1,
+        'exactly one refused Host create dispatch (never a retry)')
+      assert.equal(host.ctx.sessions.get(SessionId('lifecycle-unknown-workspace')), undefined,
+        'the refused create publishes no Session')
+
+      // The durable Session header and its membership both come from the Host
+      // Workspace, not from anything the Client sent.
+      const session = hostSession('lifecycle-ordinary')
+      assert.equal(session.header.cwd, canonicalAnchor, 'the durable header cwd is the Host Workspace path')
+      assert.ok([...anchorRow.sessionIds].map(String).includes('lifecycle-ordinary'),
+        'the created Session is attached to the Host Workspace membership')
+      const viaSource = await lifecycle.resolveWorkspace({ kind: 'source-session', sessionId: 'lifecycle-ordinary' })
+      assert.equal(viaSource.workspaceId, anchorWorkspace.workspaceId,
+        'source-session membership resolves to the same Host Workspace')
+      assert.equal(sessions.list.getSnapshot().byId['lifecycle-ordinary']?.cwd, canonicalAnchor,
+        'the Client list summary carries the Host directory fact, never a Client guess')
+      flows.hostWorkspaceAuthority = {
+        status: 'covered',
+        workspaceId: anchorWorkspace.workspaceId,
+        canonicalPath: canonicalAnchor,
+        samePathCreated: false,
+        unknownPreflight: preflightError?.code,
+        unknownCreate: 'rejected: workspace/not-found',
+      }
+    }
+
+    // ---- Flow H: historical Session without membership (F1 evidence) ------
+    // The official Host `session.list` is the fallback authority: this proves
+    // the REAL wire read succeeds for a durable historical Session whose Workspace
+    // the registry does not account, and that the read result (not a Client
+    // cache) drives the Host canonical path proposal.
+    {
+      const historicalDir = join(workRoot, 'lifecycle-historical-project')
+      mkdirSync(historicalDir, { recursive: true })
+      const canonicalHistorical = realpathSync(historicalDir)
+      const historicalId = 'lifecycle-historical'
+      // The RAW Host Session store (not the lifecycle create): a durable header
+      // cwd with NO Workspace membership.
+      host.ctx.get('sessions').create(SessionId(historicalId), { meta: { cwd: historicalDir } })
+      const registry = host.ctx.workspaceRegistry
+      assert.equal(registry.list().some(workspace => workspace.sessionIds.map(String).includes(historicalId)), false,
+        'Flow H the historical Session must start without Workspace membership')
+
+      // The OFFICIAL Host read the fallback performs (the real wire row, never
+      // the Client list cache whose store drops the pull state).
+      const listed = await sessionRemoteFace.list({})
+      assert.equal(listed.ok, true, `Flow H the official session.list must succeed: ${JSON.stringify(listed)}`)
+      const listedRow = listed.ok ? listed.value.items.find(item => String(item.sessionId) === historicalId) : undefined
+      assert.equal(listedRow?.cwd, canonicalHistorical,
+        'Flow H the official Host list row must carry the persisted immutable header cwd')
+
+      const historicalSelection = await lifecycle.resolveWorkspace({ kind: 'source-session', sessionId: historicalId })
+      assert.equal(historicalSelection.path, canonicalHistorical,
+        'Flow H the fallback must propose the Host canonical header directory')
+      const historicalWorkspace = registry.list().find(workspace => String(workspace.id) === historicalSelection.workspaceId)
+      assert.ok(historicalWorkspace !== undefined, 'Flow H the Host must register the header Workspace')
+      assert.equal(historicalWorkspace.path, canonicalHistorical)
+      assert.deepEqual(historicalWorkspace.sessionIds.map(String), [],
+        'Flow H the historical Session must never be silently attached')
+
+      // The next ordinary create lands in that header Workspace.
+      const historicalChild = await lifecycle.create({
+        sessionId: 'lifecycle-historical-child',
+        workspaceId: historicalSelection.workspaceId,
+      })
+      assert.equal(historicalChild.outcome.kind, 'created',
+        `Flow H child create failed: ${historicalChild.ownership}/${historicalChild.outcome.kind}`)
+      const childId = historicalChild.outcome.handle.session.id
+      assert.equal(hostSession(childId).header.cwd, canonicalHistorical,
+        'Flow H the child durable cwd must be the header Workspace path')
+      assert.deepEqual(historicalWorkspace.sessionIds.map(String), [childId],
+        'Flow H only the fresh Session joins the header Workspace')
+      historicalChild.outcome.handle.client?.release()
+      flows.historicalHeaderFallback = {
+        status: 'covered',
+        historicalSessionId: historicalId,
+        workspaceId: historicalSelection.workspaceId,
+        canonicalPath: canonicalHistorical,
+        listedCwd: listedRow?.cwd,
+      }
+    }
+
+    // ---- Blank-reuse flow: a BLANK requested Session is reused -------------
     {
       const requested = 'lifecycle-blank-reuse'
-      const first = await lifecycle.create({ sessionId: requested, cwd: anchorDir })
-      assert.equal(first.outcome.kind, 'created', `Flow A2 first create failed: ${first.ownership}/${first.outcome.kind}`)
+      const first = await lifecycle.create({ sessionId: requested, workspaceId: anchorWorkspace.workspaceId })
+      assert.equal(first.outcome.kind, 'created', `blank-reuse first create failed: ${first.ownership}/${first.outcome.kind}`)
       first.outcome.handle.client?.release()
-      const second = await lifecycle.create({ sessionId: requested, cwd: anchorDir })
-      assert.equal(second.outcome.kind, 'created', `Flow A2 reuse create failed: ${second.ownership}/${second.outcome.kind}`)
+      const second = await lifecycle.create({ sessionId: requested, workspaceId: anchorWorkspace.workspaceId })
+      assert.equal(second.outcome.kind, 'created', `blank-reuse second create failed: ${second.ownership}/${second.outcome.kind}`)
       assert.equal(second.outcome.handle.session.id, requested,
         'the Host REUSES a still-reusable blank Session and reports that identity')
       assert.equal(host.hostCreateCalls.filter(id => id === requested).length, 2,
@@ -411,21 +551,21 @@ async function main() {
       flows.blankReuse = { status: 'covered', sessionId: requested }
     }
 
-    // ---- Flow A3: a NON-BLANK requested id is never reused ---------------
+    // ---- Non-blank flow: a NON-BLANK requested id is never reused ----------
     {
-      // Flow A's Session is still blank; run one turn so the Host cannot reuse it.
+      // The first Session is still blank; run one turn so the Host cannot reuse it.
       const requested = 'lifecycle-ordinary'
       const agent = host.ctx.agents.get(SessionId(requested))
-      assert.ok(agent !== undefined, 'Flow A3 needs the live Host Agent of the created Session')
+      assert.ok(agent !== undefined, 'the non-blank flow needs the live Host Agent of the created Session')
       agent.followup(createUserMessage({
         content: [{ type: 'text', text: 'make this Session non-blank' }],
         source: { kind: 'user' },
       }))
-      await waitFor('Flow A3 turn to settle', () =>
+      await waitFor('the non-blank flow turn to settle', () =>
         hostSession(requested).snapshotEvents().some(event => event.type === 'turn/end'), 20_000)
 
-      const result = await lifecycle.create({ sessionId: requested, cwd: anchorDir })
-      assert.equal(result.outcome.kind, 'created', `Flow A3 create failed: ${result.ownership}/${result.outcome.kind}`)
+      const result = await lifecycle.create({ sessionId: requested, workspaceId: anchorWorkspace.workspaceId })
+      assert.equal(result.outcome.kind, 'created', `the non-blank flow create failed: ${result.ownership}/${result.outcome.kind}`)
       const published = result.outcome.handle.session.id
       assert.notEqual(published, requested,
         'the Host publishes ANOTHER identity when the requested id is not reusable (returned id is the authority)')
@@ -441,7 +581,7 @@ async function main() {
       // The requested preset is deliberately NOT the Host default: if the
       // adapter dropped `agentPreset`, the Host default would land instead and
       // the assertion below would fail.
-      const result = await lifecycle.create({ sessionId: requested, cwd: anchorDir, agentPreset: ALT_PRESET })
+      const result = await lifecycle.create({ sessionId: requested, workspaceId: anchorWorkspace.workspaceId, agentPreset: ALT_PRESET })
       assert.equal(result.ownership, 'current', `Flow B ownership: ${result.ownership}/${result.outcome.kind}`)
       assert.equal(result.outcome.kind, 'created', `Flow B create failed: ${result.ownership}/${result.outcome.kind}`)
       const handle = result.outcome.handle
@@ -489,8 +629,8 @@ async function main() {
 
       const target = 'lifecycle-model-target'
       const other = 'lifecycle-model-other'
-      const createdTarget = await lifecycle.create({ sessionId: target, cwd: anchorDir })
-      const createdOther = await lifecycle.create({ sessionId: other, cwd: anchorDir })
+      const createdTarget = await lifecycle.create({ sessionId: target, workspaceId: anchorWorkspace.workspaceId })
+      const createdOther = await lifecycle.create({ sessionId: other, workspaceId: anchorWorkspace.workspaceId })
       assert.equal(createdTarget.outcome.kind, 'created', `Flow D target create failed: ${createdTarget.ownership}/${createdTarget.outcome.kind}`)
       assert.equal(createdOther.outcome.kind, 'created', `Flow D other create failed: ${createdOther.ownership}/${createdOther.outcome.kind}`)
       try {
@@ -526,7 +666,7 @@ async function main() {
 
       // Normal select on a BLANK Session.
       const blank = 'lifecycle-blank'
-      const created = await lifecycle.create({ sessionId: blank, cwd: anchorDir, agentPreset: PRESET })
+      const created = await lifecycle.create({ sessionId: blank, workspaceId: anchorWorkspace.workspaceId, agentPreset: PRESET })
       assert.equal(created.outcome.kind, 'created', `Flow E blank create failed: ${created.ownership}/${created.outcome.kind}`)
       const selected = await presets.selectSessionPreset(blank, ALT_PRESET)
       assert.equal(selected.ownership, 'current', `Flow E ownership: ${selected.ownership}/${selected.outcome.kind}`)
@@ -536,7 +676,7 @@ async function main() {
 
       // Locked / refusal: a Session that has already run a turn refuses the switch.
       const locked = 'lifecycle-locked'
-      const lockedCreated = await lifecycle.create({ sessionId: locked, cwd: anchorDir, agentPreset: PRESET })
+      const lockedCreated = await lifecycle.create({ sessionId: locked, workspaceId: anchorWorkspace.workspaceId, agentPreset: PRESET })
       assert.equal(lockedCreated.outcome.kind, 'created', `Flow E locked create failed: ${lockedCreated.ownership}/${lockedCreated.outcome.kind}`)
       lockedCreated.outcome.handle.client?.release()
       const lockedSession = hostSession(locked)

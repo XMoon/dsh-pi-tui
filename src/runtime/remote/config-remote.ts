@@ -8,7 +8,7 @@
  *
  * ```text
  * TUI settings / footer trust / custom items / providers / permissions /
- * preset default / subagent model selection
+ * preset default / subagent limits and model selection
  *   -> one serialized, generation-aware Client-local settings mirror over
  *      remote.settings.describe()
  * provider directory -> remote.llm.listConfigurableProviders()
@@ -19,10 +19,12 @@
  * ```
  *
  * Explicitly unsupported on the wire:
- * authorization flows (no `authorization` namespace anywhere in rc.2),
- * credential-record enumeration/deletion (no `credentials/list` or record
- * delete Remote), and the exact independent session approval-policy read
- * (`approvalOverrideOf` answers `undefined` as "unavailable", never `ask`).
+ * authorization flows (no `authorization` namespace anywhere in rc.2) and
+ * credential-record enumeration/deletion on the generated config plane (the
+ * package's OWN `piTuiCredentialRecords` bridge serves them). The independent
+ * session approval/sandbox facts are NOT part of this port at all: the
+ * package's OWN `piTuiSessionPolicy` bridge and the `SessionPolicyPort` serve
+ * them (M6-1 F8).
  *
  * Frozen sync/async bridge (§2.3): the port's synchronous reads (`get()`,
  * `presetNames()`, `listCredentialOptions()`, ...) cannot await the wire, so
@@ -50,15 +52,29 @@ import {
   resolveUserLayerFooterMode,
 } from '../../domain/footer/command-trust.ts'
 import { parseFooterCustomItems, type FooterCustomItemsParseResult } from '../../domain/footer/custom-items.ts'
+import {
+  assertFetchProviderId,
+  assertFetchProviderReplaceable,
+  assertSearchApiCount,
+  assertSearchProviderId,
+  assertSearchProviderReplaceable,
+  assertWebApiBilling,
+  readWebApiBilling,
+  webApiAdvancedFactsOf,
+  webProviderSelectionFactsOf,
+} from '../../domain/web-provider-settings.ts'
 import type {
   AccountBalanceOutcome,
   AccountClientMetadata,
   AccountConfig,
+  AccountObservation,
+  AccountObservationLease,
+  AccountWatchEvent,
+  AccountProfile,
   AccountProfileOutcome,
   AccountView,
+  AccountWallet,
   AuthorizationConfig,
-  AuthorizationFlowEvent,
-  AuthorizationFlowTarget,
   ConfigPort,
   CredentialConfig,
   CredentialProviderOption,
@@ -71,8 +87,20 @@ import type {
   ProviderCatalogSnapshot,
   ProviderProfileConfig,
   ProviderProfileFacts,
-  SubagentAllowedModelRoute,
+  SubagentLimits,
+  SubagentLimitsConfig,
+  SubagentModelSelection,
   SubagentModelSelectionConfig,
+  AgentLoopSettings,
+  AgentLoopSettingsConfig,
+  HostShellExecutor,
+  ShellExecutionSettings,
+  ShellExecutionSettingsConfig,
+  SessionLogUpload,
+  SessionLogUploadConfig,
+  SectionPatch,
+  SectionRead,
+  SectionMutationOutcome,
   WebProviderConfig,
   WebProviderSettings,
   TuiSettingsConfig,
@@ -80,15 +108,58 @@ import type {
   ConfigReadiness,
   VisualToolsConfig,
   VisualToolsState,
+  WebStartupPreferenceConfig,
+  WebStartupPreferenceState,
+  BackendStartupPreferenceConfig,
+  BackendStartupPreferenceState,
+  PublicBackendValue,
+  AcpStartupPreferenceConfig,
+  AcpStartupPreferenceState,
+  McpServerSources,
+  McpServerSourcesConfig,
+  McpServerConfiguration,
+  McpServerConfigurationConfig,
+  McpConfigWriteOutcome,
+  ExtensionConfigDataOp,
+  ExtensionConfigRead,
+  ExtensionConfigsConfig,
 } from '../config-port.ts'
+import { extensionConfigRowId } from '../../domain/extension-config/row-id.ts'
+import {
+  extensionConfigUserDataPresent,
+  projectExtensionConfigData,
+  snapshotExtensionConfigOps,
+} from '../../domain/extension-config/data.ts'
+import {
+  baseDictKeysOf,
+  classifyMcpServerProvenance,
+  projectMcpServerEntry,
+  type McpClassifiedServerEntry,
+} from '../../domain/mcp/server-config.ts'
+import { projectSubagentLimits, projectSubagentModelSelection } from '../subagent-settings.ts'
+import {
+  projectAgentLoopSettings,
+  projectSessionLogUpload,
+  projectShellExecutionSettings,
+  type SectionFacts,
+} from '../host-settings-sections.ts'
 import { SupersededReadError } from '../read-error.ts'
+import { RemoteConfigWriteLifetime } from './config-write-lifetime.ts'
+import { RemoteAuthorizationConfig } from './authorization-remote.ts'
+import type { PiTuiAuthorizationNamespace } from './pi-tui-authorization-contract.ts'
+import {
+  parsePiTuiCredentialRecordKey,
+  parsePiTuiCredentialRecordList,
+  type CredentialRecordMetadata,
+  type PiTuiCredentialRecordsNamespace,
+} from './pi-tui-credential-records-contract.ts'
 import type { RemoteCommandsSource } from './host-command-remote.ts'
 import type { RemoteLlmRemotes } from './model-remote.ts'
 import type { RemotePresetRemotes } from './preset-remote.ts'
 import type { RemoteConnectionGeneration, RemoteConnectionGenerationSource } from './session-reader-remote.ts'
 import type { RemoteResultLike } from './session-writer-remote.ts'
-import { remoteFailureCode, remoteFailureMessage } from './write-failure.ts'
-import { isRemoteBusinessRefusalCode } from '../write-outcome.ts'
+import { classifyRemoteWriteFailure, remoteFailureCode, remoteFailureMessage } from './write-failure.ts'
+import { GATEWAY_PRE_INVOCATION_CODES, isRemoteBusinessRefusalCode } from '../write-outcome.ts'
 import type { PermissionPresetApplyOutcome } from '../config-port.ts'
 
 /* ------------------------------------------------------------------------- *
@@ -144,6 +215,23 @@ export interface RemoteCredentialsRemotes {
   unset(ref: string): Promise<RemoteResultLike<void>>
 }
 
+/** The generated Account stream handle: its disposal closes observation only. */
+export interface RemoteAccountStreamHandle<Value> extends AsyncIterable<Value> {
+  dispose(): void
+}
+
+/** The official generated Account namespace subset mapped by ConfigPort. */
+export interface RemoteAccountRemotes {
+  getState(): Promise<RemoteResultLike<unknown>>
+  getProfile(client: AccountClientMetadata): Promise<RemoteResultLike<unknown>>
+  getBalance(client: AccountClientMetadata): Promise<RemoteResultLike<unknown>>
+  startSignIn(client: AccountClientMetadata, callbackOrigin: string, loginSource: 'web'): Promise<RemoteResultLike<unknown>>
+  cancelSignIn(attemptId: string): Promise<RemoteResultLike<unknown>>
+  signOut(client: AccountClientMetadata): Promise<RemoteResultLike<unknown>>
+  hasRunningAccountTasks(): Promise<RemoteResultLike<unknown>>
+  watch(signal?: AbortSignal): RemoteAccountStreamHandle<unknown>
+}
+
 /** One selectable permission preset (`PresetOption`). */
 export interface RemotePermissionPresetOption {
   readonly value: string
@@ -185,19 +273,30 @@ export interface RemoteConfigEventsSource {
 }
 
 /** The narrow one-source runtime face this adapter consumes. No `sessions`
- *  field is needed: every Config read is process-scoped, and the only
- *  session-scoped method (`approvalOverrideOf`) is deliberately unavailable
- *  on the wire (§10). */
+ *  field is needed: every config read here is process-scoped. The
+ *  session-scoped policy read/write belongs to `SessionPolicyPort` (M6-1 F8),
+ *  never to this port. */
 export interface RemoteConfigRuntimeSource {
   readonly remote: {
     readonly settings: RemoteSettingsRemotes
     readonly credentials: RemoteCredentialsRemotes
+    /** The private provider-native authorization namespace mounted by this
+     *  package's ONE contribution. Absent until that contribution is mounted. */
+    readonly piTuiAuthorization?: PiTuiAuthorizationNamespace
+    /** The private stored-credential-RECORD namespace (M6-1 F7B) mounted by
+     *  the SAME contribution. Its presence alone is the record capability flag;
+     *  a mounted namespace whose Host read fails is a SUPPORTED backend with a
+     *  failed read, never a capability gap. */
+    readonly piTuiCredentialRecords?: PiTuiCredentialRecordsNamespace
+    readonly account?: RemoteAccountRemotes
     readonly commands: RemoteCommandsSource
     readonly permissionPresets: RemotePermissionPresetRemotes
     readonly agentPresets: RemotePresetRemotes
     readonly llm: RemoteLlmRemotes & RemoteLlmDirectoryRemotes
     readonly $on: RemoteConfigEventsSource['$on']
   }
+  /** Origin from the authenticated Host identity; never derived from Client input. */
+  readonly trustedHostOrigin?: string
   readonly connection: { readonly generation: RemoteConnectionGenerationSource }
 }
 
@@ -208,11 +307,14 @@ export type RemoteConfigReadiness = 'ready' | 'stale' | 'unavailable'
  * Adapter-owned Host schema knowledge (never crosses the port).
  * ------------------------------------------------------------------------- */
 
-const TUI_SETTINGS_NS = 'tui-app'
+const TUI_SETTINGS_NS = 'pi-tui-preferences'
 const PROVIDER_SETTINGS_NS = 'llm-pi-ai'
 const PERMISSION_SETTINGS_NS = 'permission'
 const PRESET_REGISTRY_NS = 'agent-preset-registry'
+const SUBAGENT_LIMITS_NS = 'subagent'
 const SUBAGENT_SETTINGS_NS = 'subagent-model-selection-settings'
+const AGENT_LOOP_NS = 'agent-loop'
+const SESSION_LOG_UPLOAD_NS = 'session-log-deepseek'
 const VISUAL_TOOLS_NS = 'pi-tui-visual-tools'
 
 /** The provider route grammar the adapter-owned profile-slot rule enforces
@@ -341,32 +443,6 @@ function copyProviderEntry(entry: ProviderCatalogEntry): ProviderCatalogEntry {
  * Invalidations only bump the counter (the snapshot stays readable as the
  * last-known display value); no unowned background promise is started.
  */
-/**
- * The ONE accepted-write lifetime counter of the Remote configuration port.
- * Every write sink (the settings mirror's `mutate` and the credential
- * reference writes) brackets its accepted work; the Client reload safety gate
- * reads the count so it can never retire the Client while a persisted
- * configuration write is still in flight. Read-only calls never register.
- */
-class RemoteConfigWriteLifetime {
-  private pending = 0
-
-  /** Register one accepted write; the returned release is idempotent. */
-  begin(): () => void {
-    this.pending += 1
-    let released = false
-    return () => {
-      if (released) return
-      released = true
-      this.pending -= 1
-    }
-  }
-
-  hasUnsettledWrites(): boolean {
-    return this.pending > 0
-  }
-}
-
 class RemoteConfigMirror {
   /** The accepted-write lifetime owner (the serialized chain below is
    *  `writes`, its internal queue). */
@@ -523,6 +599,16 @@ class RemoteConfigMirror {
     return this.readiness() === 'ready'
   }
 
+  /**
+   * The opaque Host generation of the CURRENT committed settings read, or
+   * undefined when the snapshot is not current. Exposed so a semantic consumer
+   * (the MCP configuration-source read) can prove its key set belongs to the
+   * same Host generation as the roster it classifies.
+   */
+  readyGeneration(): object | undefined {
+    return this.readiness() === 'ready' ? this.snapshot?.generation : undefined
+  }
+
   /** Refresh when the snapshot is not current (a write's pre-flight fence). */
   async ensureCurrent(): Promise<void> {
     if (!this.isCurrent()) await this.describe()
@@ -545,6 +631,19 @@ class RemoteConfigMirror {
    * result describes a superseded state). Either failure discards the
    * result and re-reads, bounded.
    */
+  /**
+   * Force ONE fresh authoritative read that does NOT merely join a
+   * previously-started in-flight refresh: used by the exit-time dangerous
+   * gate, which must observe the Host state AFTER its confirm action. It
+   * awaits any pre-existing in-flight refresh to settle, then starts a NEW
+   * `describe()` whose double fence (generation + invalidation) commits only a
+   * current snapshot.
+   */
+  async describeFresh(): Promise<void> {
+    await this.refresh
+    await this.describe()
+  }
+
   describe(): Promise<void> {
     if (this.disposed) return Promise.resolve()
     // One in-flight refresh serves every concurrent caller (a write's
@@ -611,6 +710,7 @@ class RemoteConfigMirror {
           committed.set(view.ns, {
             ns: view.ns,
             ...view.value === undefined ? {} : { value: detachedValue(view.value) },
+            ...view.base === undefined ? {} : { base: detachedValue(view.base) },
             ...view.user === undefined ? {} : { user: detachedValue(view.user) },
             ...view.revision === undefined ? {} : { revision: view.revision },
           })
@@ -675,17 +775,22 @@ class RemoteConfigMirror {
    * `refreshFailure` owns the ONE ambiguity left: the official mutate may have
    * committed while the post-settlement refresh could not complete. `reject`
    * (default) keeps that as a failed write, which is what a caller that RE-READS
-   * the mirror afterwards needs — it must never mistake a last-known value for the
-   * committed one (`RemoteSubagentModelSelectionConfig.set`). `record` reports the
-   * committed write as committed, marks the snapshot non-current and records the
+   * the mirror afterwards needs — it must never mistake a last-known value for
+   * the committed one. `record` reports the committed write as committed,
+   * marks the snapshot non-current and records the
    * cause; the whole-document `replace` uses it so its consumer re-reads the
    * authority itself and reports accepted-but-unverified instead of a refusal.
+   *
+   * An optional synchronous `beforeDispatch` predicate runs inside this same
+   * write queue against the selected descriptor, and the exact descriptor
+   * revision it receives is the revision sent to the Host CAS.
    */
   async mutate(
     ns: string,
     ops: readonly RemoteSettingsPathOp[],
     baseRevision?: number,
     refreshFailure: 'reject' | 'record' = 'reject',
+    beforeDispatch?: (descriptor: RemoteSettingsNamespaceView, expectedRevision: number | undefined) => void,
   ): Promise<void> {
     // Accepted-work lifetime: registered SYNCHRONOUSLY by the caller's write
     // (before the serialized queue), released only when the enqueued write
@@ -723,7 +828,9 @@ class RemoteConfigMirror {
         if (descriptor === undefined) {
           throw new Error(`settings namespace "${ns}" is not available in this deployment`)
         }
-        const result = await settledResult(this.settings.mutate(ns, [...ops], baseRevision ?? descriptor.revision))
+        const expectedRevision = baseRevision ?? descriptor.revision
+        beforeDispatch?.(descriptor, expectedRevision)
+        const result = await settledResult(this.settings.mutate(ns, [...ops], expectedRevision))
         if (!result.ok) {
           // A failed write RPC does NOT prove the Host refused it: the official
           // controller applies the edit and then performs its OWN post-write describe,
@@ -738,7 +845,13 @@ class RemoteConfigMirror {
           } catch (error) {
             this.recordFailure(error)
           }
-          throw new Error(`settings.mutate(${ns}) failed: ${remoteFailureMessage(result.error)}`)
+          // The official failure's stable `code` is preserved on the thrown
+          // error: a CAS conflict (`settings/conflict`) is a different outcome
+          // from a business refusal for the caller.
+          throw Object.assign(
+            new Error(`settings.mutate(${ns}) failed: ${remoteFailureMessage(result.error)}`),
+            { code: remoteFailureCode(result.error) },
+          )
         }
         // Authoritative refresh AFTER the official settlement. The write is already
         // committed; a FAILED refresh is a currentness uncertainty, not a refusal —
@@ -775,13 +888,13 @@ class RemoteConfigMirror {
 }
 
 /* ------------------------------------------------------------------------- *
- * `tuiSettings` (the `tui-app` namespace).
+ * `tuiSettings` (the canonical `pi-tui-preferences` namespace).
  * ------------------------------------------------------------------------- */
 
-/** The tui-app Config defaults (app/config/schema.ts): the SAME fallbacks the
- *  Direct adapter's live Cordis Config supplies for an absent field. Raw
- *  pass-through fields (footerLayout/footerCustomItems/footerCommand/
- *  keybindings) have no default and stay verbatim. */
+/** The canonical preferences defaults (app/config/schema.ts): the SAME
+ *  fallbacks the Direct adapter's live Cordis Config supplies for an absent
+ *  field. Raw pass-through fields (footerLayout/footerCustomItems/
+ *  footerCommand/keybindings) have no default and stay verbatim. */
 const TUI_SETTINGS_DEFAULTS: {
   readonly theme: string
   readonly iconStyle: string
@@ -949,21 +1062,35 @@ class RemoteTuiSettingsConfig implements TuiSettingsConfig {
     this.mutationQueueKey = mirror
   }
 
+  /** The canonical namespace only: the retired `tui-app` /
+   * `split-host-pi-tui-runtime` descriptors are never a fallback. A Host that
+   * does not project `pi-tui-preferences` is truthfully unavailable, so no
+   * schema default can masquerade as a saved user value. */
+  private settingsNamespace(): string | undefined {
+    return this.mirror.namespace(TUI_SETTINGS_NS) === undefined ? undefined : TUI_SETTINGS_NS
+  }
+
+  hasNamespace(): boolean {
+    return this.settingsNamespace() !== undefined
+  }
+
   get(): TuiSettingsDoc {
-    return tuiSettingsDocOf(this.mirror.namespace(TUI_SETTINGS_NS)?.value)
+    const namespace = this.settingsNamespace()
+    return tuiSettingsDocOf(namespace === undefined ? undefined : this.mirror.namespace(namespace)?.value)
   }
 
   async replace(doc: TuiSettingsDoc): Promise<void> {
-    const descriptor = this.mirror.namespace(TUI_SETTINGS_NS)
-    if (descriptor === undefined) {
-      throw new Error('settings entry "tui-app" is unavailable on this connection')
+    const namespace = this.settingsNamespace()
+    if (namespace === undefined) {
+      throw new Error('the Host has no TUI settings namespace on this connection')
     }
+    const descriptor = this.mirror.namespace(namespace)!
     if (descriptor.value === undefined) {
       // An entry with volatile fields always projects a populated object; an
       // absent projection is unrepresentable — fail loud rather than diffing
       // every defaulted field against undefined and pinning the whole
       // document into the USER layer.
-      throw new Error('settings entry "tui-app" exposes no form projection')
+      throw new Error(`settings entry "${namespace}" exposes no form projection`)
     }
     // The ops are reconciled against THIS descriptor, so ITS revision is the
     // fence the official mutate must check: the queued write may refresh the
@@ -973,7 +1100,7 @@ class RemoteTuiSettingsConfig implements TuiSettingsConfig {
     // `record`: this port's consumer re-reads the authority itself and classifies a
     // commit it cannot confirm as unverified, so a failed post-settlement refresh
     // must not be reported as a refusal.
-    await this.mirror.mutate(TUI_SETTINGS_NS, ops, descriptor.revision, 'record')
+    await this.mirror.mutate(namespace, ops, descriptor.revision, 'record')
   }
 }
 
@@ -1266,11 +1393,30 @@ class RemoteProviderProfileConfig implements ProviderProfileConfig {
 }
 
 /* ------------------------------------------------------------------------- *
- * Credentials (references only).
+ * Credentials (references and stored records).
  * ------------------------------------------------------------------------- */
+
+/** The stable code of a record delete whose Host settlement the Client could
+ *  not observe. The outcome is UNKNOWN: the Host may have committed the delete,
+ *  so nothing may claim it failed and nothing may retry it automatically. */
+export const RECORD_DELETE_UNCONFIRMED_CODE = 'RECORD_DELETE_UNCONFIRMED'
+
+/** One record delete that was dispatched but never settled observably.
+ *
+ *  The UI reads the stable `code` structurally (never this class), so the
+ *  presentation layer stays independent of the Remote adapter. */
+export class RecordDeleteUnconfirmedError extends Error {
+  readonly code = RECORD_DELETE_UNCONFIRMED_CODE
+
+  constructor(detail: string) {
+    super(`the stored credential record delete outcome is unconfirmed: ${detail}`)
+    this.name = 'RecordDeleteUnconfirmedError'
+  }
+}
 
 class RemoteCredentialConfig implements CredentialConfig {
   private readonly credentials: RemoteCredentialsRemotes
+  private readonly records: PiTuiCredentialRecordsNamespace | undefined
   private readonly generation: RemoteConnectionGenerationSource
   private readonly on: RemoteConfigEventsSource['$on']
   private readonly writeLifetime: RemoteConfigWriteLifetime
@@ -1279,11 +1425,13 @@ class RemoteCredentialConfig implements CredentialConfig {
 
   constructor(
     credentials: RemoteCredentialsRemotes,
+    records: PiTuiCredentialRecordsNamespace | undefined,
     on: RemoteConfigEventsSource['$on'],
     generation: RemoteConnectionGenerationSource,
     writeLifetime: RemoteConfigWriteLifetime,
   ) {
     this.credentials = credentials
+    this.records = records
     this.on = on
     this.generation = generation
     this.writeLifetime = writeLifetime
@@ -1365,33 +1513,87 @@ class RemoteCredentialConfig implements CredentialConfig {
   }
 
   /**
-   * Unsupported on the wire: rc.2
-   * publishes no credentials record read Remote and no record delete Remote
-   * (`credentials/describe|set|unset` address REFERENCE names only, and the
-   * two key grammars are disjoint). `recordsSupported()` (below) is the
-   * port-level availability marker the consumer asks instead of inferring a
-   * capability gap from a rejection; this method still REJECTS with a
-   * truthful message rather than faking an empty list or a silent successful
-   * delete.
+   * The official generated reference Remote never enumerates or deletes stored
+   * RECORDS (`credentials/describe|set|unset` address REFERENCE names only, and
+   * the two key grammars are disjoint). M6-1 F7B adds the private
+   * `piTuiCredentialRecords` namespace for exactly those two operations: a
+   * mounted namespace is the CAPABILITY, and the Host's official
+   * `ctx.credentials` store remains the metadata/delete authority. Without the
+   * namespace this method still REJECTS with a truthful message rather than
+   * faking an empty list.
    */
-  listRecords(): Promise<readonly { key: string; kind?: string }[]> {
-    return Promise.reject(new Error(
-      'the Remote credentials backend cannot enumerate stored credential records: rc.2 publishes no credentials record read Remote',
-    ))
+  async listRecords(): Promise<readonly { key: string; kind?: string }[]> {
+    const records = this.requireRecordsNamespace()
+    // The read belongs to the Host that answers it: with no current Connection
+    // generation there is nothing to ask, and a result that completes after a
+    // replacement must never be presented as the current Host's list.
+    const captured = this.generation.getSnapshot()
+    if (captured === undefined) {
+      throw new SupersededReadError('the stored credential record list was not read: no current Connection generation')
+    }
+    const result = await settledResult(records.list())
+    // The fence runs BEFORE the result branch: an OLD empty list, an old
+    // failure and an old success are all equally superseded.
+    this.fence(captured)
+    if (!result.ok) {
+      throw new Error(`piTuiCredentialRecords.list failed: ${remoteFailureMessage(result.error)}`)
+    }
+    // Detached, exact metadata only: any extra field or invalid row fails the
+    // whole result instead of being filtered into a false "complete" list.
+    const metadata: readonly CredentialRecordMetadata[] = parsePiTuiCredentialRecordList(result.value)
+    return metadata
   }
 
   recordsSupported(): boolean {
-    // INTENTIONAL_UNSUPPORTED_IN_M3 (§8.5/§10): rc.2 publishes no record-read
-    // and no record-delete Remote, so this is a CAPABILITY GAP — reported as
-    // such by consumers, never as an empty record list.
-    return false
+    // The mounted private namespace IS the capability. It is NOT a claim that
+    // the Host store has records, that the Host is online, or that a delete can
+    // succeed: a mounted namespace whose read fails stays SUPPORTED with a
+    // failed read (the UI must not turn that into "cannot list records").
+    return this.records !== undefined
   }
 
-  /** @see listRecords — no record delete Remote exists on rc.2. */
-  deleteRecord(key: string): Promise<void> {
-    return Promise.reject(new Error(
-      `the Remote credentials backend cannot delete stored credential record "${key}": rc.2 publishes no credential record delete Remote`,
-    ))
+  /**
+   * Delete exactly one record through the official Host store.
+   *
+   * The key is validated against the official wire grammar BEFORE dispatch, so
+   * an invalid key is never sent. Once dispatched, the call is bracketed by the
+   * accepted-write lifetime (a Client reload must observe it), made EXACTLY
+   * once, and never replayed. Only a definite pre-invocation refusal
+   * (`gateway/bad-request`) may be reported as a normal failure; a lost ACK,
+   * `gateway/cancelled`, `gateway/internal`, a transport throw or a result
+   * rejection all leave the commit unproven and surface as
+   * `RECORD_DELETE_UNCONFIRMED`.
+   */
+  async deleteRecord(key: string): Promise<void> {
+    const records = this.requireRecordsNamespace()
+    const exact = parsePiTuiCredentialRecordKey(key)
+    this.requireDispatchableGeneration()
+    const endWrite = this.writeLifetime.begin()
+    try {
+      const result = await settledResult(records.delete(exact))
+      if (result.ok) return
+      const code = remoteFailureCode(result.error)
+      const message = remoteFailureMessage(result.error)
+      if (code === 'gateway/bad-request') {
+        throw new Error(`piTuiCredentialRecords.delete(${exact}) was rejected: ${message}`)
+      }
+      throw new RecordDeleteUnconfirmedError(message)
+    } finally {
+      // Every path — success, definite refusal, unconfirmed, throw — releases
+      // the accepted-write lifetime exactly once.
+      endWrite()
+    }
+  }
+
+  /** The mounted record namespace, or the truthful capability refusal. */
+  private requireRecordsNamespace(): PiTuiCredentialRecordsNamespace {
+    const records = this.records
+    if (records === undefined) {
+      throw new Error(
+        'the Remote credentials backend cannot address stored credential records: the private record namespace is not mounted',
+      )
+    }
+    return records
   }
 
   onChanged(listener: () => void): () => void {
@@ -1414,43 +1616,6 @@ class RemoteCredentialConfig implements CredentialConfig {
   /** Release every active listener subscription exactly once. */
   dispose(): void {
     for (const unsubscribe of [...this.active]) unsubscribe()
-  }
-}
-
-/* ------------------------------------------------------------------------- *
- * Authorization (unsupported on rc.2).
- * ------------------------------------------------------------------------- */
-
-class RemoteAuthorizationConfig implements AuthorizationConfig {
-  available(): boolean {
-    // INTENTIONAL_UNSUPPORTED_IN_M3: rc.2
-    // publishes no authorization namespace/Remote at all. Never a private RPC.
-    return false
-  }
-
-  listTargets(): readonly AuthorizationFlowTarget[] {
-    // No fake targets: there is no catalog to list.
-    return []
-  }
-
-  begin(): Promise<{ kind: 'unavailable' }> {
-    return Promise.resolve({ kind: 'unavailable' })
-  }
-
-  onEvent(_listener: (event: AuthorizationFlowEvent) => void): () => void {
-    return () => {}
-  }
-
-  respond(): Promise<void> {
-    return Promise.reject(new Error(
-      'authorization is unavailable on this backend: rc.2 publishes no authorization Remote',
-    ))
-  }
-
-  cancel(): Promise<void> {
-    return Promise.reject(new Error(
-      'authorization is unavailable on this backend: rc.2 publishes no authorization Remote',
-    ))
   }
 }
 
@@ -1485,21 +1650,6 @@ class RemotePermissionConfig implements PermissionConfig {
     await this.mirror.mutate(PERMISSION_SETTINGS_NS, [
       { op: 'set', path: ['defaultPreset'], value: name },
     ])
-  }
-
-  approvalOverrideAvailable(): boolean {
-    // INTENTIONAL_UNSUPPORTED_IN_M3 (§10): no public Client read of the session
-    // approval override and no synchronous policy carrier exist on rc.2, so the
-    // UI must HIDE/DISABLE the row instead of showing a guessed `ask`.
-    return false
-  }
-
-  approvalOverrideOf(_sessionId: string): undefined {
-    // INTENTIONAL_UNSUPPORTED_IN_M3: rc.2 has
-    // no public Client read of the independent session `approval/policy`
-    // override. `undefined` means "unavailable", NEVER `ask` — the Remote
-    // settings row must be hidden/disabled instead of guessing.
-    return undefined
   }
 
   async applyPermissionPreset(
@@ -1538,7 +1688,7 @@ class RemotePermissionConfig implements PermissionConfig {
 }
 
 /* ------------------------------------------------------------------------- *
- * Preset default + subagent model selection.
+ * Preset default + subagent settings.
  * ------------------------------------------------------------------------- */
 
 class RemotePresetDefaultConfig implements PresetDefaultConfig {
@@ -1567,59 +1717,316 @@ class RemotePresetDefaultConfig implements PresetDefaultConfig {
   }
 }
 
-class RemoteSubagentModelSelectionConfig implements SubagentModelSelectionConfig {
-  private readonly mirror: RemoteConfigMirror
+type RemoteSnapshotRead =
+  | { readonly kind: 'ready'; readonly generation: object }
+  | { readonly kind: 'unavailable' | 'unreadable'; readonly reason: string }
 
-  constructor(mirror: RemoteConfigMirror) {
-    this.mirror = mirror
-  }
-
-  available(): boolean {
-    // BOTH the official settings section and a readable settings backend.
-    return this.mirror.usable() && this.mirror.namespace(SUBAGENT_SETTINGS_NS) !== undefined
-  }
-
-  get(): { enabled: boolean; allowedModels: readonly SubagentAllowedModelRoute[] } {
-    const section = plainRecord(this.mirror.namespace(SUBAGENT_SETTINGS_NS)?.value)
-    if (section === undefined) return { enabled: false, allowedModels: [] }
-    const allowedModels = (Array.isArray(section.allowedModels) ? section.allowedModels : []).flatMap(route => {
-      const candidate = route as { readonly provider?: unknown; readonly model?: unknown }
-      return typeof candidate?.provider === 'string' && typeof candidate?.model === 'string'
-        ? [{ provider: candidate.provider, model: candidate.model }]
-        : []
-    })
-    return { enabled: section.enabled === true, allowedModels }
-  }
-
-  async set(value: { enabled: boolean; allowedModels: readonly SubagentAllowedModelRoute[] }): Promise<void> {
-    // Client-side pre-validation with the official rules (the Host validates
-    // again on the section boundary): fail fast before any write.
-    assertOfficialSubagentRoutes(value.allowedModels)
-    if (value.enabled && value.allowedModels.length === 0) {
-      throw new Error('enabled subagent model selection requires at least one allowed model')
+/** ONE currentness proof of the shared mirror, shared by every typed section
+ *  read so a snapshot never mixes generations. */
+function readRemoteSnapshot(mirror: RemoteConfigMirror): RemoteSnapshotRead {
+  const readiness = mirror.readiness()
+  if (readiness === 'unavailable') {
+    const failure = mirror.lastRefreshFailure()
+    if (mirror.usable() && failure !== undefined) {
+      return { kind: 'unreadable', reason: `the Host settings read failed: ${remoteFailureMessage(failure)}` }
     }
-    // The mirror never patches optimistically, so a failed write leaves the
-    // authoritative snapshot untouched and the next get() reads authority.
-    await this.mirror.mutate(SUBAGENT_SETTINGS_NS, [
-      { op: 'set', path: ['enabled'], value: value.enabled },
-      { op: 'set', path: ['allowedModels'], value: value.allowedModels.map(route => ({ ...route })) },
-    ])
+    return { kind: 'unavailable', reason: 'no current Host settings snapshot is available' }
+  }
+  if (readiness !== 'ready') {
+    return { kind: 'unreadable', reason: 'the Host settings snapshot is not current' }
+  }
+  const generation = mirror.readyGeneration()
+  if (generation === undefined) {
+    return { kind: 'unreadable', reason: 'the Host settings snapshot is not current' }
+  }
+  return { kind: 'ready', generation }
+}
+
+function projectRemoteView<T extends object>(
+  generation: object,
+  view: RemoteSettingsNamespaceView,
+  project: (effective: unknown, inherited: unknown) => SectionFacts<T> | undefined,
+): SectionRead<T> {
+  if (typeof view.revision !== 'number' || !Number.isSafeInteger(view.revision) || view.revision < 0) {
+    return { kind: 'unreadable', reason: 'the official Host settings revision is not readable' }
+  }
+  const projected = project(view.value, view.base)
+  if (projected === undefined) {
+    return { kind: 'unreadable', reason: 'the official Host settings value or inherited base is not readable' }
+  }
+  return { kind: 'ready', generation, revision: view.revision, ...projected }
+}
+
+function readRemoteSection<T extends object>(
+  mirror: RemoteConfigMirror,
+  namespace: string,
+  project: (effective: unknown, inherited: unknown) => SectionFacts<T> | undefined,
+): SectionRead<T> {
+  const snapshot = readRemoteSnapshot(mirror)
+  if (snapshot.kind !== 'ready') return snapshot
+  const view = mirror.namespace(namespace)
+  if (view === undefined) {
+    return { kind: 'unavailable', reason: 'the official Host settings section is not mounted' }
+  }
+  return projectRemoteView(snapshot.generation, view, project)
+}
+
+/** Follow dsh-web's served-bound shell selection: the Host's served namespace
+ *  set decides the row, with `pwsh-sandbox` preferred when both are served. */
+const SHELL_EXECUTOR_ROWS: readonly { readonly executor: HostShellExecutor; readonly namespace: string }[] = [
+  { executor: 'pwsh', namespace: 'pwsh-sandbox' },
+  { executor: 'bash', namespace: 'bash-sandbox' },
+]
+
+function readRemoteShellExecutionSection(mirror: RemoteConfigMirror): SectionRead<ShellExecutionSettings> {
+  const snapshot = readRemoteSnapshot(mirror)
+  if (snapshot.kind !== 'ready') return snapshot
+  const active = SHELL_EXECUTOR_ROWS.find(row => mirror.namespace(row.namespace) !== undefined)
+  if (active === undefined) {
+    return { kind: 'unavailable', reason: 'no active Host shell executor settings row is mounted' }
+  }
+  return projectRemoteView(snapshot.generation, mirror.namespace(active.namespace)!, projectShellExecutionSettings(active.executor))
+}
+
+async function mutateRemoteSection(
+  mirror: RemoteConfigMirror,
+  namespace: string,
+  ops: readonly RemoteSettingsPathOp[],
+  expectedRevision: number,
+  generation: object,
+): Promise<SectionMutationOutcome> {
+
+  const currentGeneration = mirror.readyGeneration()
+  if (currentGeneration === undefined || !Object.is(currentGeneration, generation)) {
+    return { kind: 'rejected', reason: 'the Host authority changed; refresh before saving' }
+  }
+  const current = mirror.namespace(namespace)
+  if (current === undefined) {
+    return { kind: 'rejected', reason: 'the official Host settings section is not mounted' }
+  }
+  if (current.revision !== expectedRevision) {
+    return { kind: 'conflict', reason: 'the Host settings section changed since it was read' }
+  }
+  if (ops.length === 0) return { kind: 'rejected', reason: 'no settings fields were staged' }
+
+  let dispatchAdmitted = false
+  try {
+    await mirror.mutate(namespace, ops, expectedRevision, 'record', (descriptor, queuedRevision) => {
+      if (!Object.is(mirror.readyGeneration(), generation)) {
+        throw Object.assign(new Error('the Host authority changed before dispatch'), { code: 'settings/writer-superseded' })
+      }
+      if (descriptor.revision !== expectedRevision || queuedRevision !== expectedRevision) {
+        throw Object.assign(new Error('the Host settings section changed since it was read'), { code: 'settings/conflict' })
+      }
+      dispatchAdmitted = true
+    })
+    return { kind: 'accepted' }
+  } catch (error) {
+    const reason = remoteFailureMessage(error)
+    const code = remoteFailureCode(error)
+    if (code === 'settings/conflict' || code === 'SETTINGS_CONFLICT') {
+      return { kind: 'conflict', reason }
+    }
+    if (!dispatchAdmitted) {
+      return { kind: 'rejected', reason }
+    }
+    // The official controller can label a post-persistence Loader failure as
+    // settings/rejected. Only Gateway pre-invocation refusals prove no edit ran.
+    if (code === 'gateway/bad-request' || (code !== undefined && GATEWAY_PRE_INVOCATION_CODES.has(code))) {
+      return { kind: 'rejected', reason }
+    }
+    return { kind: 'outcome-unconfirmed', reason }
   }
 }
 
-/** The official route-list rules (mirrored client-side so a malformed edit
- *  fails before the Host write; same messages as the Host validator). */
-function assertOfficialSubagentRoutes(routes: readonly SubagentAllowedModelRoute[]): void {
-  const seen = new Set<string>()
-  for (const route of routes) {
-    if (route.provider.length === 0 || route.model.length === 0) {
-      throw new Error('subagent model selection requires non-empty provider and model ids')
+class RemoteSubagentLimitsConfig implements SubagentLimitsConfig {
+  private readonly mirror: RemoteConfigMirror
+  private readonly refreshRead: () => Promise<void>
+
+  constructor(mirror: RemoteConfigMirror, refreshRead: () => Promise<void>) {
+    this.mirror = mirror
+    this.refreshRead = refreshRead
+  }
+
+  read(): SectionRead<SubagentLimits> {
+    return readRemoteSection(this.mirror, SUBAGENT_LIMITS_NS, projectSubagentLimits)
+  }
+
+  async refresh(): Promise<void> {
+    await this.refreshRead()
+  }
+
+  async mutate(
+    patch: SectionPatch<SubagentLimits>,
+    expectedRevision: number,
+    generation: object,
+  ): Promise<SectionMutationOutcome> {
+    const ops: RemoteSettingsPathOp[] = []
+    for (const field of ['maxDepth', 'maxActiveSubagents'] as const) {
+      const edit = patch[field]
+      if (edit === undefined) continue
+      ops.push(edit.kind === 'reset'
+        ? { op: 'unset', path: [field] }
+        : { op: 'set', path: [field], value: edit.value })
     }
-    const key = `${route.provider}\u0000${route.model}`
-    if (seen.has(key)) {
-      throw new Error(`subagent model selection repeats route "${route.provider}/${route.model}"`)
+    return mutateRemoteSection(this.mirror, SUBAGENT_LIMITS_NS, ops, expectedRevision, generation)
+  }
+}
+
+class RemoteSubagentModelSelectionConfig implements SubagentModelSelectionConfig {
+  private readonly mirror: RemoteConfigMirror
+  private readonly refreshRead: () => Promise<void>
+
+  constructor(mirror: RemoteConfigMirror, refreshRead: () => Promise<void>) {
+    this.mirror = mirror
+    this.refreshRead = refreshRead
+  }
+
+  read(): SectionRead<SubagentModelSelection> {
+    return readRemoteSection(this.mirror, SUBAGENT_SETTINGS_NS, projectSubagentModelSelection)
+  }
+
+  async refresh(): Promise<void> {
+    await this.refreshRead()
+  }
+
+  async mutate(
+    patch: SectionPatch<SubagentModelSelection>,
+    expectedRevision: number,
+    generation: object,
+  ): Promise<SectionMutationOutcome> {
+    const ops: RemoteSettingsPathOp[] = []
+    if (patch.enabled !== undefined) {
+      ops.push(patch.enabled.kind === 'reset'
+        ? { op: 'unset', path: ['enabled'] }
+        : { op: 'set', path: ['enabled'], value: patch.enabled.value })
     }
-    seen.add(key)
+    if (patch.allowedModels !== undefined) {
+      ops.push(patch.allowedModels.kind === 'reset'
+        ? { op: 'unset', path: ['allowedModels'] }
+        : { op: 'set', path: ['allowedModels'], value: patch.allowedModels.value.map(route => ({ ...route })) })
+    }
+    return mutateRemoteSection(this.mirror, SUBAGENT_SETTINGS_NS, ops, expectedRevision, generation)
+  }
+}
+
+class RemoteAgentLoopSettingsConfig implements AgentLoopSettingsConfig {
+  private readonly mirror: RemoteConfigMirror
+  private readonly refreshRead: () => Promise<void>
+
+  constructor(mirror: RemoteConfigMirror, refreshRead: () => Promise<void>) {
+    this.mirror = mirror
+    this.refreshRead = refreshRead
+  }
+
+  read(): SectionRead<AgentLoopSettings> {
+    return readRemoteSection(this.mirror, AGENT_LOOP_NS, projectAgentLoopSettings)
+  }
+
+  async refresh(): Promise<void> {
+    await this.refreshRead()
+  }
+
+  async mutate(
+    patch: SectionPatch<AgentLoopSettings>,
+    expectedRevision: number,
+    generation: object,
+  ): Promise<SectionMutationOutcome> {
+    const ops: RemoteSettingsPathOp[] = []
+    if (patch.maxParallelToolCalls !== undefined) {
+      ops.push(patch.maxParallelToolCalls.kind === 'reset'
+        ? { op: 'unset', path: ['maxParallelToolCalls'] }
+        : { op: 'set', path: ['maxParallelToolCalls'], value: patch.maxParallelToolCalls.value })
+    }
+    return mutateRemoteSection(this.mirror, AGENT_LOOP_NS, ops, expectedRevision, generation)
+  }
+}
+
+/** The two numeric caps of the Host's ACTIVE shell executor row. The row is
+ *  chosen from the mirrored Host namespaces; the Client OS is never consulted. */
+class RemoteShellExecutionSettingsConfig implements ShellExecutionSettingsConfig {
+  private readonly mirror: RemoteConfigMirror
+  private readonly refreshRead: () => Promise<void>
+
+  constructor(mirror: RemoteConfigMirror, refreshRead: () => Promise<void>) {
+    this.mirror = mirror
+    this.refreshRead = refreshRead
+  }
+
+  read(): SectionRead<ShellExecutionSettings> {
+    return readRemoteShellExecutionSection(this.mirror)
+  }
+
+  async refresh(): Promise<void> {
+    await this.refreshRead()
+  }
+
+  async mutate(
+    patch: SectionPatch<ShellExecutionSettings>,
+    expectedRevision: number,
+    generation: object,
+    expectedExecutor: HostShellExecutor,
+  ): Promise<SectionMutationOutcome> {
+    if (patch.executor !== undefined) {
+      return { kind: 'rejected', reason: 'the Host shell executor identity is a Host observation, not an editable setting' }
+    }
+    // Re-prove the served-bound Host row before dispatch: never write the
+    // other namespace from a Client-side guess or a stale generation.
+    const current = readRemoteShellExecutionSection(this.mirror)
+    if (current.kind !== 'ready' || !Object.is(current.generation, generation)) {
+      return { kind: 'rejected', reason: 'the Host shell settings are no longer current; refresh before saving' }
+    }
+    if (current.effective.executor !== expectedExecutor) {
+      return { kind: 'rejected', reason: 'the Host served shell row changed; refresh before saving' }
+    }
+    const namespace = SHELL_EXECUTOR_ROWS.find(row => row.executor === current.effective.executor)!.namespace
+    const ops: RemoteSettingsPathOp[] = []
+    for (const field of ['timeoutMs', 'maxOutputBytes'] as const) {
+      const edit = patch[field]
+      if (edit === undefined) continue
+      ops.push(edit.kind === 'reset'
+        ? { op: 'unset', path: [field] }
+        : { op: 'set', path: [field], value: edit.value })
+    }
+    return mutateRemoteSection(this.mirror, namespace, ops, expectedRevision, generation)
+  }
+}
+
+class RemoteSessionLogUploadConfig implements SessionLogUploadConfig {
+  private readonly mirror: RemoteConfigMirror
+  private readonly refreshRead: () => Promise<void>
+
+  constructor(mirror: RemoteConfigMirror, refreshRead: () => Promise<void>) {
+    this.mirror = mirror
+    this.refreshRead = refreshRead
+  }
+
+  read(): SectionRead<SessionLogUpload> {
+    // An absent namespace hides the General row even on a stale mirror. A
+    // last-known namespace stays visible as an explicit non-current fact;
+    // `readRemoteSection` then reports it unreadable, never as a current Off.
+    if (this.mirror.namespace(SESSION_LOG_UPLOAD_NS) === undefined) {
+      return { kind: 'unavailable', reason: 'the official Host settings section is not mounted' }
+    }
+    return readRemoteSection(this.mirror, SESSION_LOG_UPLOAD_NS, projectSessionLogUpload)
+  }
+
+  async refresh(): Promise<void> {
+    await this.refreshRead()
+  }
+
+  async mutate(
+    patch: SectionPatch<SessionLogUpload>,
+    expectedRevision: number,
+    generation: object,
+  ): Promise<SectionMutationOutcome> {
+    const ops: RemoteSettingsPathOp[] = []
+    if (patch.enabled !== undefined) {
+      ops.push(patch.enabled.kind === 'reset'
+        ? { op: 'unset', path: ['enabled'] }
+        : { op: 'set', path: ['enabled'], value: patch.enabled.value })
+    }
+    return mutateRemoteSection(this.mirror, SESSION_LOG_UPLOAD_NS, ops, expectedRevision, generation)
   }
 }
 
@@ -1682,6 +2089,170 @@ class RemoteVisualToolsConfig implements VisualToolsConfig {
   }
 }
 
+/** The official profile entry id of the Host row that owns the Web startup
+ *  preference (its Loader row id is also its Settings namespace). */
+const WEB_STARTUP_PREFERENCE_NS = 'pi-tui-web-preferences'
+
+/**
+ * The Remote Web startup preference: the mirrored `pi-tui-web-preferences` form
+ * section over the official generated settings remote. The write is a
+ * revision-checked path mutation and the mirror's post-settlement refresh is
+ * the only new authority — the mutate reply is never trusted as the new value.
+ *
+ * It reads the preference only: the CURRENT Host's Web state has no settings
+ * projection and stays the private `piTuiWebAccess` service's authority.
+ */
+class RemoteWebStartupPreferenceConfig implements WebStartupPreferenceConfig {
+  private readonly mirror: RemoteConfigMirror
+
+  constructor(mirror: RemoteConfigMirror) {
+    this.mirror = mirror
+  }
+
+  read(): WebStartupPreferenceState | undefined {
+    const view = this.mirror.namespace(WEB_STARTUP_PREFERENCE_NS)
+    if (view === undefined) return undefined
+    const value = plainRecord(view.value)
+    const autoStart = value?.autoStart
+    // A missing/non-boolean projection is unreadable, never the default.
+    if (typeof autoStart !== 'boolean') return undefined
+    const revision = view.revision
+    // Without the read revision the decision cannot be submitted conditionally;
+    // report the section unreadable rather than allowing a silent overwrite.
+    if (typeof revision !== 'number') return undefined
+    const user = plainRecord(view.user)
+    return {
+      autoStart,
+      revision,
+      userOverridden: user?.autoStart !== undefined,
+    }
+  }
+
+  async setAutoStart(value: boolean, expectedRevision: number): Promise<void> {
+    const view = this.mirror.namespace(WEB_STARTUP_PREFERENCE_NS)
+    if (view === undefined) {
+      throw new Error(`settings namespace "${WEB_STARTUP_PREFERENCE_NS}" is not available in this deployment`)
+    }
+    if (view.value === undefined) {
+      throw new Error(`settings namespace "${WEB_STARTUP_PREFERENCE_NS}" exposes no form projection`)
+    }
+    // The decision's revision is the fence; `record` keeps a failed
+    // post-settlement refresh a currentness uncertainty, not proof of refusal.
+    await this.mirror.mutate(
+      WEB_STARTUP_PREFERENCE_NS,
+      [{ op: 'set', path: ['autoStart'], value }],
+      expectedRevision,
+      'record',
+    )
+  }
+}
+
+/** The official profile entry id of the Host row that owns the startup backend
+ *  selection (its Loader row id is also its Settings namespace). */
+const TUI_STARTUP_NS = 'tui-startup'
+
+/** The typed guard for the closed public backend vocabulary. A value outside
+ *  `direct|daemon` is never coerced into a default (fail-closed). */
+function isPublicBackendValue(value: unknown): value is PublicBackendValue {
+  return value === 'direct' || value === 'daemon'
+}
+
+/**
+ * The Remote startup backend preference: the mirrored `tui-startup` form
+ * section over the official generated settings remote. The write is a
+ * revision-checked path mutation and the mirror's post-settlement refresh is
+ * the only new authority — the mutate reply is never trusted as the new value.
+ *
+ * FAIL-CLOSED: an effective `backend` value outside `direct|daemon` is NOT a
+ * read — `read()` returns `undefined` rather than mapping it to `direct`.
+ */
+class RemoteBackendStartupPreferenceConfig implements BackendStartupPreferenceConfig {
+  private readonly mirror: RemoteConfigMirror
+
+  constructor(mirror: RemoteConfigMirror) {
+    this.mirror = mirror
+  }
+
+  read(): BackendStartupPreferenceState | undefined {
+    const view = this.mirror.namespace(TUI_STARTUP_NS)
+    if (view === undefined) return undefined
+    const value = plainRecord(view.value)
+    const backend = value?.backend
+    if (!isPublicBackendValue(backend)) return undefined
+    const revision = view.revision
+    if (typeof revision !== 'number') return undefined
+    const user = plainRecord(view.user)
+    return { backend, revision, userOverridden: user?.backend !== undefined }
+  }
+
+  async setBackend(value: PublicBackendValue, expectedRevision: number): Promise<void> {
+    const view = this.mirror.namespace(TUI_STARTUP_NS)
+    if (view === undefined) {
+      throw new Error(`settings namespace "${TUI_STARTUP_NS}" is not available in this deployment`)
+    }
+    if (view.value === undefined) {
+      throw new Error(`settings namespace "${TUI_STARTUP_NS}" exposes no form projection`)
+    }
+    await this.mirror.mutate(TUI_STARTUP_NS, [{ op: 'set', path: ['backend'], value }], expectedRevision, 'record')
+  }
+
+  async readFresh(): Promise<BackendStartupPreferenceState | undefined> {
+    // Force a NEW official settings read (not merely the last mirror snapshot,
+    // and not a previously-started in-flight refresh), so a concurrent write by
+    // another Client is observed even before its invalidation event arrives.
+    await this.mirror.describeFresh()
+    return this.read()
+  }
+}
+
+/** The official profile entry id of the Host row that owns the ACP startup
+ *  preference (its Loader row id is also its Settings namespace). */
+const ACP_STARTUP_PREFERENCE_NS = 'pi-tui-acp-preferences'
+
+/**
+ * The Remote ACP startup preference: the mirrored `pi-tui-acp-preferences` form
+ * section over the official generated settings remote. The write is a
+ * revision-checked path mutation and the mirror's post-settlement refresh is the
+ * only new authority — the mutate reply is never trusted as the new value.
+ *
+ * It reads the preference only: the CURRENT Host's listener state has no
+ * settings projection and stays the private `piTuiAcpAccess` service's authority.
+ */
+class RemoteAcpStartupPreferenceConfig implements AcpStartupPreferenceConfig {
+  private readonly mirror: RemoteConfigMirror
+
+  constructor(mirror: RemoteConfigMirror) {
+    this.mirror = mirror
+  }
+
+  read(): AcpStartupPreferenceState | undefined {
+    const view = this.mirror.namespace(ACP_STARTUP_PREFERENCE_NS)
+    if (view === undefined) return undefined
+    const value = plainRecord(view.value)
+    const autoStart = value?.autoStart
+    if (typeof autoStart !== 'boolean') return undefined
+    const revision = view.revision
+    if (typeof revision !== 'number') return undefined
+    const user = plainRecord(view.user)
+    return { autoStart, revision, userOverridden: user?.autoStart !== undefined }
+  }
+
+  async setAutoStart(value: boolean, expectedRevision: number): Promise<void> {
+    const view = this.mirror.namespace(ACP_STARTUP_PREFERENCE_NS)
+    if (view === undefined) {
+      throw new Error(`settings namespace "${ACP_STARTUP_PREFERENCE_NS}" is not available in this deployment`)
+    }
+    if (view.value === undefined) {
+      throw new Error(`settings namespace "${ACP_STARTUP_PREFERENCE_NS}" exposes no form projection`)
+    }
+    await this.mirror.mutate(ACP_STARTUP_PREFERENCE_NS, [{ op: 'set', path: ['autoStart'], value }], expectedRevision, 'record')
+  }
+}
+
+const WEB_PROVIDER_NS = 'web'
+const WEB_SEARCH_API_NS = 'web-deepseek-api'
+const WEB_API_KEY_REF = 'DEEPSEEK_API_KEY'
+
 /* ------------------------------------------------------------------------- *
  * The port.
  * ------------------------------------------------------------------------- */
@@ -1696,8 +2267,13 @@ export class RemoteConfigPort implements ConfigPort {
   private readonly mirror: RemoteConfigMirror
   private readonly tuiSettingsWrapper: RemoteTuiSettingsConfig
   private readonly credentialConfig: RemoteCredentialConfig
-  /** The ONE accepted-write lifetime of this port (settings + credentials). */
-  private readonly writes = new RemoteConfigWriteLifetime()
+  private readonly accountConfig: RemoteAccountConfig
+  private readonly authorizationConfig: RemoteAuthorizationConfig
+  /** The ONE accepted-write lifetime of this port (settings + credentials).
+   *  An injected instance is SHARED with the Remote session-policy port so
+   *  the Client reload gate observes every accepted persisted write through
+   *  one fact; absent, the port owns a private instance exactly as before. */
+  private readonly writes: RemoteConfigWriteLifetime
 
   readonly footerCommandTrust: FooterCommandTrust
   readonly footerCustomItems: FooterCustomItemsConfig
@@ -1707,24 +2283,35 @@ export class RemoteConfigPort implements ConfigPort {
   readonly account: AccountConfig
   readonly permissions: PermissionConfig
   readonly presetDefault: PresetDefaultConfig
+  readonly subagentLimits: SubagentLimitsConfig
   readonly subagentModelSelection: SubagentModelSelectionConfig
+  readonly agentLoopSettings: AgentLoopSettingsConfig
+  readonly shellExecutionSettings: ShellExecutionSettingsConfig
+  readonly sessionLogUpload: SessionLogUploadConfig
   readonly web: WebProviderConfig
   readonly visualTools: VisualToolsConfig
+  readonly webStartupPreference: WebStartupPreferenceConfig
+  readonly backendStartupPreference: BackendStartupPreferenceConfig
+  readonly acpStartupPreference: AcpStartupPreferenceConfig
+  readonly extensionConfigs: ExtensionConfigsConfig
+  readonly mcpServerSources: McpServerSourcesConfig
+  readonly mcpServerConfiguration: McpServerConfigurationConfig
 
   /** `undefined` while the `tui-app` namespace is absent from the mirror
    *  (the port's documented absence contract). */
   get tuiSettings(): TuiSettingsConfig | undefined {
-    return this.mirror.namespace(TUI_SETTINGS_NS) === undefined ? undefined : this.tuiSettingsWrapper
+    return this.tuiSettingsWrapper.hasNamespace() ? this.tuiSettingsWrapper : undefined
   }
 
-  constructor(source: RemoteConfigRuntimeSource) {
+  constructor(source: RemoteConfigRuntimeSource, options?: { readonly writeLifetime?: RemoteConfigWriteLifetime }) {
+    this.writes = options?.writeLifetime ?? new RemoteConfigWriteLifetime()
     // Bind the event seat to its service BEFORE anything subscribes.
     const on = source.remote.$on.bind(source.remote) as unknown as RemoteConfigEventsSource['$on']
     // NEVER rebuild `remote` with a spread: the official Client remote exposes
     // its namespaces through prototype accessors, so an own-property copy keeps
     // only its bookkeeping fields (`connection`, `ctx`, `events`, ...) and every
-    // namespace (`settings`, `credentials`, `llm`, `permissionPresets`, ...)
-    // silently becomes `undefined` — which only a real-wire test can catch.
+    // namespace (`settings`, `credentials`, `account`, `llm`, ...) silently becomes
+    // `undefined` — which only a real-wire test can catch.
     // The original object is passed through and the bound seat travels beside
     // it.
     const bound: RemoteConfigRuntimeSource = {
@@ -1738,22 +2325,42 @@ export class RemoteConfigPort implements ConfigPort {
     this.providers = new RemoteProviderProfileConfig(this.mirror)
     this.credentialConfig = new RemoteCredentialConfig(
       bound.remote.credentials,
+      bound.remote.piTuiCredentialRecords,
       on,
       source.connection.generation,
       this.writes,
     )
     this.credentials = this.credentialConfig
-    this.authorization = new RemoteAuthorizationConfig()
-    this.account = new RemoteUnsupportedAccountConfig()
+    this.authorizationConfig = new RemoteAuthorizationConfig(
+      source.remote.piTuiAuthorization,
+      source.connection.generation,
+    )
+    this.authorization = this.authorizationConfig
+    this.accountConfig = new RemoteAccountConfig(
+      source.remote.account,
+      source.trustedHostOrigin,
+      source.connection.generation,
+    )
+    this.account = this.accountConfig
     this.permissions = new RemotePermissionConfig(this.mirror, source.remote.commands)
     this.presetDefault = new RemotePresetDefaultConfig(this.mirror)
-    this.subagentModelSelection = new RemoteSubagentModelSelectionConfig(this.mirror)
+    this.subagentLimits = new RemoteSubagentLimitsConfig(this.mirror, () => this.describe())
+    this.subagentModelSelection = new RemoteSubagentModelSelectionConfig(this.mirror, () => this.describe())
+    this.agentLoopSettings = new RemoteAgentLoopSettingsConfig(this.mirror, () => this.describe())
+    this.shellExecutionSettings = new RemoteShellExecutionSettingsConfig(this.mirror, () => this.describe())
+    this.sessionLogUpload = new RemoteSessionLogUploadConfig(this.mirror, () => this.describe())
     this.visualTools = new RemoteVisualToolsConfig(this.mirror)
-    // S2/PR-B §3.2: the Host web-provider setting stays DIRECT-only. The wire
-    // publishes no provider-selection read or write, so this backend reports a
-    // static unavailable and refuses every write — it never names a Host
-    // settings namespace and never claims a success.
-    this.web = new RemoteUnsupportedWebProviderConfig()
+    this.webStartupPreference = new RemoteWebStartupPreferenceConfig(this.mirror)
+    this.backendStartupPreference = new RemoteBackendStartupPreferenceConfig(this.mirror)
+    this.acpStartupPreference = new RemoteAcpStartupPreferenceConfig(this.mirror)
+    this.extensionConfigs = new RemoteExtensionConfigsConfig(this.mirror, () => this.describe())
+    // The MCP configuration-source read reuses the SAME settings mirror (no
+    // second long-lived mirror): `refresh()` drives its existing serialized
+    // describe(), so a just-opened page reads a current key set instead of
+    // waiting for an unrelated invalidation.
+    this.mcpServerSources = new RemoteMcpServerSourcesConfig(this.mirror, () => this.describe())
+    this.mcpServerConfiguration = new RemoteMcpServerConfigurationConfig(this.mirror, () => this.describe())
+    this.web = new RemoteWebProviderConfig(this.mirror, this.credentialConfig)
   }
 
   /** Commit one fresh mirror snapshot (or leave the last-known value). A
@@ -1767,6 +2374,19 @@ export class RemoteConfigPort implements ConfigPort {
     } catch (error) {
       this.mirror.recordFailure(error)
       throw error
+    }
+    // The initial readiness barrier (and a post-reconnect describe) loads the
+    // authorization roster ONCE. A failure is NOT a describe failure: the
+    // roster state stays `stale` (the page shows "refresh needed") and the rest
+    // of the settings plane keeps working. The read is generation-fenced
+    // inside the adapter; an already-current roster is not re-read on every
+    // settings refresh.
+    if (this.authorizationConfig.targetsState() === 'stale') {
+      try {
+        await this.authorizationConfig.refreshTargets()
+      } catch {
+        // Recorded as `stale` by the adapter; an explicit page read retries.
+      }
     }
   }
 
@@ -1802,49 +2422,188 @@ export class RemoteConfigPort implements ConfigPort {
   dispose(): void {
     this.mirror.dispose()
     this.credentialConfig.dispose()
+    this.accountConfig.dispose()
+    this.authorizationConfig.dispose()
   }
 }
 
-/**
- * The Remote backend's Web provider sub-domain: INTENTIONALLY unsupported in
- * S2. The wire carries no web-provider selection read (the `settings` mirror
- * exposes plugin forms for the CLIENT-owned surfaces only) and no write RPC for
- * a Host namespace, so the section is presented as unsupported on this backend
- * and every write fails closed instead of naming a Host settings namespace or
- * reporting a success it cannot observe. Remote web-provider support is owned
- * by a later stage (S3/S4) together with the Host generated-settings parity.
- */
-class RemoteUnsupportedWebProviderConfig implements WebProviderConfig {
+class RemoteWebProviderConfig implements WebProviderConfig {
+  private readonly mirror: RemoteConfigMirror
+  private readonly credentials: RemoteCredentialConfig
+
+  constructor(mirror: RemoteConfigMirror, credentials: RemoteCredentialConfig) {
+    this.mirror = mirror
+    this.credentials = credentials
+  }
+
   available(): boolean {
-    return false
+    return this.mirror.namespace(WEB_PROVIDER_NS) !== undefined
+      && this.mirror.namespace(WEB_SEARCH_API_NS) !== undefined
   }
 
   async read(): Promise<WebProviderSettings | undefined> {
-    return undefined
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await this.mirror.ensureCurrent()
+      if (this.mirror.readiness() !== 'ready') {
+        throw new SupersededReadError('the Remote Web settings have no current Host snapshot')
+      }
+      const web = this.mirror.namespace(WEB_PROVIDER_NS)
+      const api = this.mirror.namespace(WEB_SEARCH_API_NS)
+      if (web === undefined || api === undefined) return undefined
+      const webValue = plainRecord(web.value)
+      const apiValue = plainRecord(api.value)
+      if (webValue === undefined || apiValue === undefined) return undefined
+      // The SAME mirrored `web` view carries the `base`/`user` projections.
+      // A missing/non-object layer is UNAVAILABLE — never "there is no USER
+      // override" (the official controller always sends both objects).
+      const searchSelection = webProviderSelectionFactsOf(web.base, web.user, 'searchProvider')
+      const fetchSelection = webProviderSelectionFactsOf(web.base, web.user, 'fetchProvider')
+      if (searchSelection === undefined || fetchSelection === undefined) return undefined
+      // There is NO single `baseURL` requirement: the read stays ready without
+      // one (the Host selects the actual provider at request time). A
+      // missing/foreign billing value is UNAVAILABLE — never a silent `auto` —
+      // and the advanced overrides are detached read-only facts.
+      const searchBilling = readWebApiBilling(apiValue, 'searchBilling')
+      const fetchBilling = readWebApiBilling(apiValue, 'fetchBilling')
+      const count = apiValue.count
+      const sendOriginalQuestion = apiValue.sendOriginalQuestion
+      if (searchBilling === undefined || fetchBilling === undefined) return undefined
+      if (typeof count !== 'number' || !Number.isInteger(count)) return undefined
+      if (typeof sendOriginalQuestion !== 'boolean') return undefined
+      const credential = await this.credentials.describeReference(WEB_API_KEY_REF)
+      if (this.mirror.readiness() !== 'ready'
+        || this.mirror.namespace(WEB_PROVIDER_NS) !== web
+        || this.mirror.namespace(WEB_SEARCH_API_NS) !== api) continue
+      return {
+        searchProvider: typeof webValue.searchProvider === 'string' && webValue.searchProvider !== ''
+          ? webValue.searchProvider
+          : undefined,
+        fetchProvider: typeof webValue.fetchProvider === 'string' && webValue.fetchProvider !== ''
+          ? webValue.fetchProvider
+          : undefined,
+        providerSelection: { search: searchSelection, fetch: fetchSelection },
+        api: { searchBilling, fetchBilling, count, sendOriginalQuestion },
+        advanced: webApiAdvancedFactsOf(apiValue),
+        credential,
+      }
+    }
+    throw new SupersededReadError('the Remote Web settings read was repeatedly superseded')
   }
 
-  private refuse(): never {
-    throw new Error('web provider settings are not supported on this backend')
+  /** One revision-checked official settings mutation on the EXISTING mirror
+   *  write queue (the Host CAS revision is the selected descriptor's own
+   *  revision; the post-settlement `describe` is the only new authority). */
+  private async dispatch(
+    ns: typeof WEB_PROVIDER_NS | typeof WEB_SEARCH_API_NS,
+    ops: readonly RemoteSettingsPathOp[],
+    guard?: (descriptor: RemoteSettingsNamespaceView) => void,
+  ): Promise<void> {
+    await this.mirror.ensureCurrent()
+    if (this.mirror.readiness() !== 'ready'
+      || this.mirror.namespace(WEB_PROVIDER_NS) === undefined
+      || this.mirror.namespace(WEB_SEARCH_API_NS) === undefined) {
+      throw new Error('the official Host Web settings sections are unavailable or non-current')
+    }
+    await this.mirror.mutate(
+      ns,
+      ops,
+      undefined,
+      'reject',
+      guard === undefined ? undefined : descriptor => { guard(descriptor) },
+    )
   }
 
-  async setSearchProvider(): Promise<void> {
-    this.refuse()
+  private async mutate(
+    ns: typeof WEB_PROVIDER_NS | typeof WEB_SEARCH_API_NS,
+    field: string,
+    value: unknown,
+    protectProvider?: 'searchProvider' | 'fetchProvider',
+  ): Promise<void> {
+    await this.dispatch(
+      ns,
+      [{ op: 'set', path: [field], value }],
+      protectProvider === undefined
+        ? undefined
+        : descriptor => {
+            const current = plainRecord(descriptor.value)
+            if (current === undefined) throw new Error('the official Host Web settings section is unreadable')
+            if (protectProvider === 'searchProvider') assertSearchProviderReplaceable(current.searchProvider)
+            else assertFetchProviderReplaceable(current.fetchProvider)
+          },
+    )
   }
 
-  async setFetchProvider(): Promise<void> {
-    this.refuse()
+  async restoreSearchProvider(): Promise<void> {
+    await this.restoreProvider('searchProvider')
   }
 
-  async setSearchApiCount(): Promise<void> {
-    this.refuse()
+  async restoreFetchProvider(): Promise<void> {
+    await this.restoreProvider('fetchProvider')
   }
 
-  async setSendOriginalQuestion(): Promise<void> {
-    this.refuse()
+  /** The ONE official USER-layer reset of one provider selection: a single
+   *  `unset` path op on the mirror's existing write queue. Both layers must be
+   *  readable; an already-absent USER own-field is a real no-op (sending
+   *  `unset` would let the official base substitution PIN it again when a
+   *  sibling USER field exists, so it must never be dispatched blindly).
+   *
+   *  STALE-INTENT FENCE: the facts are captured SYNCHRONOUSLY from the same
+   *  committed mirror view the caller's read used, BEFORE this write joins the
+   *  serialized queue. While it waits, another writer may refresh the mirror to
+   *  a different USER value or deployment default; the synchronous
+   *  `beforeDispatch` then compares the descriptor that supplies the CAS
+   *  revision with those captured facts and REFUSES the reset (zero Host
+   *  mutation) instead of clearing the other writer's newer value. */
+  private async restoreProvider(field: 'searchProvider' | 'fetchProvider'): Promise<void> {
+    const web = this.mirror.namespace(WEB_PROVIDER_NS)
+    if (web === undefined) throw new Error('the official Host Web settings section is unavailable')
+    const observed = webProviderSelectionFactsOf(web.base, web.user, field)
+    if (observed === undefined) {
+      throw new Error('the official Host Web settings section does not report its USER/base layers')
+    }
+    if (!observed.userSet) return
+    await this.dispatch(
+      WEB_PROVIDER_NS,
+      [{ op: 'unset', path: [field] }],
+      descriptor => {
+        const live = webProviderSelectionFactsOf(descriptor.base, descriptor.user, field)
+        if (live === undefined) {
+          throw new Error('the official Host Web settings section does not report its USER/base layers')
+        }
+        if (live.baseId !== observed.baseId || live.userSet !== observed.userSet || live.userId !== observed.userId) {
+          throw new Error('the Host Web USER/base selection changed before the reset was dispatched; no reset was dispatched')
+        }
+      },
+    )
   }
 
-  async setSearchApiBaseURL(): Promise<void> {
-    this.refuse()
+  async setSearchProvider(id: 'deepseek-official' | 'deepseek-search-api'): Promise<void> {
+    assertSearchProviderId(id)
+    await this.mutate(WEB_PROVIDER_NS, 'searchProvider', id, 'searchProvider')
+  }
+
+  async setFetchProvider(id: 'http' | 'deepseek-fetch-api'): Promise<void> {
+    assertFetchProviderId(id)
+    await this.mutate(WEB_PROVIDER_NS, 'fetchProvider', id, 'fetchProvider')
+  }
+
+  async setSearchApiCount(count: number): Promise<void> {
+    assertSearchApiCount(count)
+    await this.mutate(WEB_SEARCH_API_NS, 'count', count)
+  }
+
+  async setSendOriginalQuestion(enabled: boolean): Promise<void> {
+    await this.mutate(WEB_SEARCH_API_NS, 'sendOriginalQuestion', enabled)
+  }
+
+  async setSearchBilling(mode: 'auto' | 'account' | 'api-key'): Promise<void> {
+    assertWebApiBilling(mode)
+    await this.mutate(WEB_SEARCH_API_NS, 'searchBilling', mode)
+  }
+
+  async setFetchBilling(mode: 'auto' | 'account' | 'api-key'): Promise<void> {
+    assertWebApiBilling(mode)
+    await this.mutate(WEB_SEARCH_API_NS, 'fetchBilling', mode)
   }
 }
 
@@ -1875,56 +2634,780 @@ function remoteProviderFactsOf(route: string, fallbackLabel: string, profile: un
   }
 }
 
-/**
- * The Remote backend's DeepSeek Account sub-domain: INTENTIONALLY unsupported
- * for this stage. The rc.2 wire publishes no account state/attempt/profile/
- * balance/sign-out RPC, and the browser callback origin is a Host listener
- * fact that must never be synthesized by a Client. Every operation fails
- * closed; the Account page states the backend limitation instead of faking a
- * sign-in or a signed-out state.
- */
-class RemoteUnsupportedAccountConfig implements AccountConfig {
+function canonicalAccountCallbackOrigin(origin: string | undefined): origin is string {
+  if (origin === undefined) return false
+  const match = /^http:\/\/127\.0\.0\.1:([1-9]\d{0,4})$/u.exec(origin)
+  if (match === null) return false
+  const port = Number(match[1])
+  return port <= 65_535 && String(port) === match[1]
+}
+
+/** The rc.2 `account/watch` frame envelope: every frame is
+ *  `{type: 'snapshot' | 'credentials-changed', state}`. Validated only at this
+ *  external Stream boundary; a `credentials-changed` frame is a fresh snapshot,
+ *  not a sign-out. The Remote guard in `watch` keeps the generation/epoch
+ *  invalidation authoritative around it. */
+function accountUpdateStateOf(value: unknown): unknown {
+  if (typeof value !== 'object' || value === null) {
+    throw new Error('Remote account watch frame is not an AccountUpdate')
+  }
+  const update = value as { readonly type?: unknown; readonly state?: unknown }
+  if (
+    (update.type !== 'snapshot' && update.type !== 'credentials-changed')
+    || typeof update.state !== 'object' || update.state === null
+  ) {
+    throw new Error('Remote account watch frame is not an AccountUpdate')
+  }
+  return update.state
+}
+
+function accountViewOf(value: unknown): AccountView {
+  const view = value as AccountView
+  const attempt = view.attempt
+  return {
+    status: view.status,
+    links: { usageUrl: view.links.usageUrl, topUpUrl: view.links.topUpUrl },
+    attempt: attempt === null
+      ? null
+      : {
+          id: attempt.id,
+          phase: attempt.phase,
+          ...(attempt.authorizeUrl === undefined ? {} : { authorizeUrl: attempt.authorizeUrl }),
+          ...(attempt.expiresAt === undefined ? {} : { expiresAt: attempt.expiresAt }),
+          ...(attempt.errorCode === undefined ? {} : { errorCode: attempt.errorCode }),
+        },
+  }
+}
+
+function accountProfileOf(value: unknown): AccountProfile {
+  const profile = value as AccountProfile
+  return {
+    id: profile.id,
+    name: profile.name,
+    contact: profile.contact,
+    ...(profile.avatarUrl === undefined ? {} : { avatarUrl: profile.avatarUrl }),
+  }
+}
+
+function accountProfileOutcomeOf(value: unknown): AccountProfileOutcome {
+  if (value === null) return null
+  if (typeof value !== 'object' || value === null) {
+    throw new Error('remote account.getProfile returned an invalid outcome')
+  }
+  const outcome = value as { readonly status?: unknown; readonly value?: unknown }
+  if (outcome.status === 'failed') return { status: 'failed' }
+  if (outcome.status !== 'ready') throw new Error('remote account.getProfile returned an invalid status')
+  return { status: 'ready', value: accountProfileOf(outcome.value) }
+}
+
+function accountWalletsOf(value: unknown): readonly AccountWallet[] {
+  if (!Array.isArray(value)) throw new Error('remote account returned an invalid wallet list')
+  return value.map(entry => {
+    const wallet = entry as AccountWallet
+    return { currency: wallet.currency, balance: wallet.balance }
+  })
+}
+
+function accountBalanceOutcomeOf(value: unknown): AccountBalanceOutcome {
+  if (value === null) return null
+  if (typeof value !== 'object' || value === null) {
+    throw new Error('remote account.getBalance returned an invalid outcome')
+  }
+  const outcome = value as {
+    readonly status?: unknown
+    readonly value?: unknown
+    readonly bonusWallets?: unknown
+  }
+  if (outcome.status === 'failed') return { status: 'failed' }
+  if (outcome.status !== 'ready') throw new Error('remote account.getBalance returned an invalid status')
+  return {
+    status: 'ready',
+    value: accountWalletsOf(outcome.value),
+    bonusWallets: accountWalletsOf(outcome.bonusWallets),
+  }
+}
+
+function isRemoteStreamCarrierFailure(error: unknown): error is Error {
+  return error instanceof Error && error.name === 'RemoteStreamCarrierError'
+}
+
+/** Remote Account is the same Host authority as Direct, addressed through the
+ * authenticated generated namespace on the current Connection generation. */
+class RemoteAccountConfig implements AccountConfig {
+  private readonly remote: RemoteAccountRemotes | undefined
+  private readonly trustedHostOrigin: string | undefined
+  private readonly generation: RemoteConnectionGenerationSource
+  private readonly lifetime = new AbortController()
+  private readonly streams = new Map<RemoteAccountStreamHandle<unknown>, () => void>()
+  private readonly observations = new WeakMap<object, {
+    readonly generation: RemoteConnectionGeneration
+    readonly epoch: number
+    active: boolean
+  }>()
+  private observationEpoch = 0
+  private disposed = false
+
+  constructor(
+    remote: RemoteAccountRemotes | undefined,
+    trustedHostOrigin: string | undefined,
+    generation: RemoteConnectionGenerationSource,
+  ) {
+    this.remote = remote
+    this.trustedHostOrigin = trustedHostOrigin
+    this.generation = generation
+  }
+
+  private observe(view: AccountView, generation: RemoteConnectionGeneration, lease?: AccountObservationLease): AccountObservation {
+    const authority = lease ?? ({} as AccountObservationLease)
+    this.observations.set(authority, { generation, epoch: this.observationEpoch, active: true })
+    return { view, lease: authority }
+  }
+
+  private invalidateObservations(): void {
+    this.observationEpoch += 1
+  }
+
+  private invalidateObservation(lease: AccountObservationLease): void {
+    const record = this.observations.get(lease)
+    if (record !== undefined) record.active = false
+  }
+
+  private assertObservation(lease: AccountObservationLease, method: string): RemoteConnectionGeneration {
+    const record = this.observations.get(lease)
+    if (this.disposed || record === undefined || !record.active || record.epoch !== this.observationEpoch
+      || !Object.is(record.generation, this.generation.getSnapshot())) {
+      throw new SupersededReadError(`remote account.${method} has no current Host observation`)
+    }
+    return record.generation
+  }
+
+  isObservationCurrent(lease: AccountObservationLease): boolean {
+    const record = this.observations.get(lease)
+    return !this.disposed && record !== undefined && record.active && record.epoch === this.observationEpoch
+      && Object.is(record.generation, this.generation.getSnapshot())
+  }
+
   available(): boolean {
-    return false
+    return !this.disposed
+      && this.remote !== undefined
+      && this.generation.getSnapshot() !== undefined
   }
 
-  private refuse(): never {
-    throw new Error('DeepSeek Account is not supported on this backend')
+  private requireRemote(method: string): RemoteAccountRemotes {
+    if (this.disposed) throw new Error('remote Account adapter is disposed')
+    if (this.remote === undefined) throw new Error(`remote account.${method} namespace is unavailable`)
+    return this.remote
   }
 
-  async getState(): Promise<AccountView> {
-    this.refuse()
+  private captureGeneration(method: string) {
+    const generation = this.generation.getSnapshot()
+    if (generation === undefined) throw new Error(`remote account.${method} is unavailable while disconnected`)
+    return generation
   }
 
-  async getProfile(_client: AccountClientMetadata): Promise<AccountProfileOutcome> {
-    this.refuse()
+  private assertCurrent(generation: ReturnType<RemoteConnectionGenerationSource['getSnapshot']>, method: string): void {
+    if (generation === undefined || !Object.is(generation, this.generation.getSnapshot())) {
+      throw new SupersededReadError(`remote account.${method} belongs to a superseded Host generation`)
+    }
   }
 
-  async getBalance(_client: AccountClientMetadata): Promise<AccountBalanceOutcome> {
-    this.refuse()
+  private async callAt<T>(
+    method: string,
+    generation: ReturnType<RemoteConnectionGenerationSource['getSnapshot']>,
+    operation: (remote: RemoteAccountRemotes) => Promise<RemoteResultLike<T>>,
+  ): Promise<T> {
+    const result = await operation(this.requireRemote(method))
+    this.assertCurrent(generation, method)
+    if (!result.ok) throw new Error(`remote account.${method} failed: ${remoteFailureMessage(result.error)}`)
+    return result.value
   }
 
-  watch(_signal: AbortSignal): AsyncIterable<AccountView> {
-    return (async function* empty(): AsyncGenerator<AccountView> {})()
+  private async callForObservation<T>(
+    method: string,
+    lease: AccountObservationLease,
+    operation: (remote: RemoteAccountRemotes) => Promise<RemoteResultLike<T>>,
+  ): Promise<T> {
+    const epoch = this.observationEpoch
+    const generation = this.assertObservation(lease, method)
+    const value = await this.callAt(method, generation, operation)
+    this.assertObservation(lease, method)
+    if (epoch !== this.observationEpoch) throw new SupersededReadError(`remote account.${method} was superseded by Account observation invalidation`)
+    return value
+  }
+
+  async getState(): Promise<AccountObservation> {
+    const generation = this.captureGeneration('getState')
+    const epoch = this.observationEpoch
+    const value = await this.callAt('getState', generation, remote => remote.getState())
+    if (epoch !== this.observationEpoch) throw new SupersededReadError('remote account.getState was superseded by Account observation invalidation')
+    return this.observe(accountViewOf(value), generation)
+  }
+
+  async getProfile(client: AccountClientMetadata, lease: AccountObservationLease): Promise<AccountProfileOutcome> {
+    return accountProfileOutcomeOf(await this.callForObservation(
+      'getProfile',
+      lease,
+      remote => remote.getProfile({ ...client }),
+    ))
+  }
+
+  async getBalance(client: AccountClientMetadata, lease: AccountObservationLease): Promise<AccountBalanceOutcome> {
+    return accountBalanceOutcomeOf(await this.callForObservation(
+      'getBalance',
+      lease,
+      remote => remote.getBalance({ ...client }),
+    ))
+  }
+
+  private assertWatchCurrent(): void {
+    if (this.disposed || this.generation.getSnapshot() === undefined) {
+      throw new SupersededReadError('remote account.watch has no current authenticated Host generation')
+    }
+  }
+
+  private waitForGeneration(previous: RemoteConnectionGeneration, signal: AbortSignal): Promise<boolean> {
+    if (signal.aborted) return Promise.resolve(false)
+    return new Promise(resolve => {
+      let settled = false
+      let unsubscribe = (): void => {}
+      const finish = (reconnected: boolean): void => {
+        if (settled) return
+        settled = true
+        unsubscribe()
+        signal.removeEventListener('abort', aborted)
+        resolve(reconnected)
+      }
+      const inspect = (): void => {
+        const current = this.generation.getSnapshot()
+        if (current !== undefined && !Object.is(current, previous)) finish(true)
+      }
+      const aborted = (): void => { finish(false) }
+      unsubscribe = this.generation.subscribe(inspect)
+      if (settled) {
+        unsubscribe()
+        return
+      }
+      signal.addEventListener('abort', aborted, { once: true })
+      inspect()
+      if (signal.aborted) aborted()
+    })
+  }
+
+  /**
+   * The official generated ClientStreamHandle represents one carrier generation,
+   * unlike the Gateway's separately reconnecting internal RemoteStream owner.
+   * Retire only that per-generation handle after a Connection rollover, wait for
+   * the new authenticated Host generation, and open a fresh official account
+   * watch. The Host's watch starts with its complete current AccountView, so no
+   * client-side state/cache is needed for recovery.
+   */
+  watch(signal: AbortSignal): AsyncIterable<AccountWatchEvent> {
+    this.captureGeneration('watch')
+    if (signal.aborted || this.lifetime.signal.aborted) {
+      throw new SupersededReadError('remote account.watch was aborted before dispatch')
+    }
+    const watchSignal = AbortSignal.any([signal, this.lifetime.signal])
+    const owner = this
+    return (async function* accountWatch(): AsyncGenerator<AccountWatchEvent> {
+      let previous = owner.captureGeneration('watch')
+      while (!watchSignal.aborted && !owner.disposed) {
+        let generation = owner.generation.getSnapshot()
+        if (generation === undefined || !Object.is(generation, previous)) {
+          const reconnected = await owner.waitForGeneration(previous, watchSignal)
+          if (!reconnected || watchSignal.aborted || owner.disposed) return
+          generation = owner.generation.getSnapshot()
+          if (generation === undefined) continue
+          previous = generation
+        }
+        owner.assertWatchCurrent()
+        const lease = {} as AccountObservationLease
+        owner.observations.set(lease, { generation, epoch: owner.observationEpoch, active: true })
+        const handle = owner.requireRemote('watch').watch(watchSignal)
+        const abort = (): void => { owner.releaseStream(handle) }
+        owner.streams.set(handle, () => watchSignal.removeEventListener('abort', abort))
+        watchSignal.addEventListener('abort', abort, { once: true })
+        let reconnect = false
+        let resolveGenerationChanged!: () => void
+        const generationChanged = new Promise<void>(resolve => { resolveGenerationChanged = resolve })
+        const unsubscribeGeneration = owner.generation.subscribe(() => {
+          if (Object.is(generation, owner.generation.getSnapshot())) return
+          owner.invalidateObservations()
+          resolveGenerationChanged()
+        })
+        const iterator = handle[Symbol.asyncIterator]()
+        try {
+          while (!watchSignal.aborted && !owner.disposed) {
+            const nextResult = iterator.next().then(
+              result => ({ kind: 'next' as const, result }),
+              error => ({ kind: 'error' as const, error }),
+            )
+            const winner = await Promise.race([
+              nextResult,
+              generationChanged.then(() => ({ kind: 'generation-changed' as const })),
+            ])
+            if (winner.kind === 'generation-changed') {
+              reconnect = true
+              yield { kind: 'invalidated', reason: 'connection-changed' }
+              break
+            }
+            if (winner.kind === 'error') throw winner.error
+            if (!Object.is(generation, owner.generation.getSnapshot())) {
+              reconnect = true
+              yield { kind: 'invalidated', reason: 'connection-changed' }
+              break
+            }
+            if (winner.result.done === true) break
+            if (watchSignal.aborted || owner.disposed) return
+            yield { kind: 'current', observation: { view: accountViewOf(accountUpdateStateOf(winner.result.value)), lease } }
+          }
+        } catch (error) {
+          if (watchSignal.aborted || owner.disposed) return
+          owner.invalidateObservations()
+          if (!Object.is(generation, owner.generation.getSnapshot())) {
+            reconnect = true
+            yield { kind: 'invalidated', reason: 'connection-changed' }
+          } else if (isRemoteStreamCarrierFailure(error)) {
+            yield { kind: 'invalidated', reason: 'watch-failed' }
+            const reconnected = await owner.waitForGeneration(generation, watchSignal)
+            if (!reconnected || watchSignal.aborted || owner.disposed) return
+            reconnect = true
+          } else {
+            throw error
+          }
+        } finally {
+          unsubscribeGeneration()
+          owner.invalidateObservation(lease)
+          owner.releaseStream(handle)
+        }
+        if (watchSignal.aborted || owner.disposed) return
+        const current = owner.generation.getSnapshot()
+        if (current === undefined || !Object.is(generation, current)) {
+          reconnect = true
+          previous = generation
+          if (current === undefined) {
+            const reconnected = await owner.waitForGeneration(generation, watchSignal)
+            if (!reconnected || watchSignal.aborted || owner.disposed) return
+            const replacement = owner.generation.getSnapshot()
+            if (replacement === undefined) continue
+            previous = replacement
+          } else {
+            previous = current
+          }
+          continue
+        }
+        if (reconnect) throw new Error('remote account.watch ended while its Host generation remained current')
+        owner.invalidateObservations()
+        yield { kind: 'invalidated', reason: 'watch-ended' }
+        return
+      }
+    })()
   }
 
   getCallbackOrigin(): string | undefined {
-    return undefined
+    if (!this.available() || !canonicalAccountCallbackOrigin(this.trustedHostOrigin)) return undefined
+    return this.trustedHostOrigin
   }
 
-  async startSignIn(_client: AccountClientMetadata): Promise<AccountView> {
-    this.refuse()
+  async startSignIn(client: AccountClientMetadata, lease: AccountObservationLease): Promise<AccountObservation> {
+    const generation = this.assertObservation(lease, 'startSignIn')
+    const origin = this.trustedHostOrigin
+    if (!canonicalAccountCallbackOrigin(origin)) {
+      throw new Error('the authenticated Host browser callback listener is unavailable')
+    }
+    const result = await this.callForObservation(
+      'startSignIn',
+      lease,
+      remote => remote.startSignIn({ ...client }, origin, 'web'),
+    )
+    if (!Object.is(generation, this.generation.getSnapshot())) {
+      throw new SupersededReadError('remote account.startSignIn result belongs to a replaced Host generation')
+    }
+    return { view: accountViewOf(result), lease }
   }
 
-  async cancelSignIn(_id: string): Promise<AccountView> {
-    this.refuse()
+  async cancelSignIn(id: string, lease: AccountObservationLease): Promise<AccountObservation> {
+    const result = await this.callForObservation('cancelSignIn', lease, remote => remote.cancelSignIn(id))
+    return { view: accountViewOf(result), lease }
   }
 
-  async signOut(_client: AccountClientMetadata): Promise<AccountView> {
-    this.refuse()
+  async signOut(client: AccountClientMetadata, lease: AccountObservationLease): Promise<AccountObservation> {
+    const result = await this.callForObservation('signOut', lease, remote => remote.signOut({ ...client }))
+    return { view: accountViewOf(result), lease }
   }
 
-  hasRunningAccountTasks(): boolean {
-    return false
+  async hasRunningAccountTasks(lease: AccountObservationLease): Promise<boolean> {
+    const running = await this.callForObservation(
+      'hasRunningAccountTasks',
+      lease,
+      remote => remote.hasRunningAccountTasks(),
+    )
+    if (typeof running !== 'boolean') throw new Error('remote account.hasRunningAccountTasks returned an invalid result')
+    return running
+  }
+
+  private releaseStream(handle: RemoteAccountStreamHandle<unknown>): void {
+    const cleanup = this.streams.get(handle)
+    if (cleanup === undefined) return
+    this.streams.delete(handle)
+    cleanup()
+    handle.dispose()
+  }
+
+  dispose(): void {
+    if (this.disposed) return
+    this.disposed = true
+    this.lifetime.abort(new SupersededReadError('remote Account adapter was disposed'))
+    for (const handle of this.streams.keys()) this.releaseStream(handle)
+  }
+}
+
+/** The `servers` map of one descriptor layer (own keys), or undefined. */
+function plainServersOf(layer: unknown): Record<string, unknown> | undefined {
+  if (typeof layer !== 'object' || layer === null || Array.isArray(layer)) return undefined
+  const servers = (layer as { servers?: unknown }).servers
+  return typeof servers === 'object' && servers !== null && !Array.isArray(servers)
+    ? servers as Record<string, unknown>
+    : undefined
+}
+
+/** The official settings namespace the shared Host MCP manager owns. */
+const MCP_SERVER_SOURCES_NS = 'mcp-manager'
+
+/**
+ * The Remote MCP configuration-source read over the ONE committed settings
+ * mirror. It never opens a second mirror and never writes: `ready` requires a
+ * CURRENT committed settings read whose `mcp-manager.servers` effective value
+ * is readable. A last-known (no-longer-current) snapshot is `stale`, and an
+ * absent namespace is `unavailable` — neither may be presented as a key set.
+ */
+class RemoteMcpServerSourcesConfig implements McpServerSourcesConfig {
+  private readonly mirror: RemoteConfigMirror
+  private readonly refreshRead: () => Promise<void>
+
+  constructor(mirror: RemoteConfigMirror, refreshRead: () => Promise<void>) {
+    this.mirror = mirror
+    this.refreshRead = refreshRead
+  }
+
+  read(): McpServerSources {
+    const readiness = this.mirror.readiness()
+    if (readiness === 'unavailable') {
+      return { kind: 'unavailable', reason: 'no current Host settings snapshot is available' }
+    }
+    if (readiness !== 'ready') {
+      return { kind: 'stale', reason: 'the Host settings snapshot is not current' }
+    }
+    const generation = this.mirror.readyGeneration()
+    if (generation === undefined) {
+      return { kind: 'stale', reason: 'the Host settings snapshot is not current' }
+    }
+    const descriptor = this.mirror.namespace(MCP_SERVER_SOURCES_NS)
+    if (descriptor === undefined) {
+      return {
+        kind: 'unavailable',
+        reason: 'the "mcp-manager" Host settings section is not mounted',
+      }
+    }
+    const section = plainRecord(descriptor.value)
+    const servers = section === undefined ? undefined : plainRecord(section.servers)
+    if (servers === undefined) {
+      return { kind: 'unavailable', reason: 'the "mcp-manager.servers" configuration is not readable' }
+    }
+    return {
+      kind: 'ready',
+      configuredNames: Object.freeze(Object.keys(servers)),
+      generation,
+      ...descriptor.revision === undefined ? {} : { revision: descriptor.revision },
+    }
+  }
+
+  async refresh(): Promise<void> {
+    await this.refreshRead()
+  }
+}
+
+/**
+ * The Remote FR4 MCP server configuration read/write over the SAME committed
+ * settings mirror (never a second mirror). `read()` requires a CURRENT
+ * committed snapshot; a last-known one is `stale`, an absent namespace
+ * `unavailable`. `mutate` is ONE official wire mutation at the caller's
+ * pinned revision, fenced on the mirror's current Host generation; a lost
+ * post-write refresh is `outcome-unconfirmed` (never replayed).
+ */
+class RemoteMcpServerConfigurationConfig implements McpServerConfigurationConfig {
+  private readonly mirror: RemoteConfigMirror
+  private readonly refreshRead: () => Promise<void>
+
+  constructor(mirror: RemoteConfigMirror, refreshRead: () => Promise<void>) {
+    this.mirror = mirror
+    this.refreshRead = refreshRead
+  }
+
+  read(): McpServerConfiguration {
+    const readiness = this.mirror.readiness()
+    if (readiness === 'unavailable') {
+      return { kind: 'unavailable', reason: 'no current Host settings snapshot is available' }
+    }
+    if (readiness !== 'ready') {
+      return { kind: 'stale', reason: 'the Host settings snapshot is not current' }
+    }
+    const generation = this.mirror.readyGeneration()
+    if (generation === undefined) {
+      return { kind: 'stale', reason: 'the Host settings snapshot is not current' }
+    }
+    const descriptor = this.mirror.namespace(MCP_SERVER_SOURCES_NS)
+    if (descriptor === undefined) {
+      return {
+        kind: 'unavailable',
+        reason: 'the "mcp-manager" Host settings section is not mounted',
+      }
+    }
+    const section = plainRecord(descriptor.value)
+    const servers = section === undefined ? undefined : plainRecord(section.servers)
+    if (servers === undefined) {
+      return { kind: 'unavailable', reason: 'the "mcp-manager.servers" configuration is not readable' }
+    }
+    if (typeof descriptor.revision !== 'number') {
+      return { kind: 'unavailable', reason: 'the "mcp-manager" settings revision is not readable' }
+    }
+    const entries: McpClassifiedServerEntry[] = []
+    const baseServers = plainServersOf(descriptor.base)
+    for (const name of Object.keys(servers)) {
+      const provenance = classifyMcpServerProvenance(descriptor.base, { servers }, name)
+      if (provenance === undefined) continue
+      const effective = projectMcpServerEntry(servers[name])
+      if (effective === undefined) continue
+      const baseKeys = baseDictKeysOf(baseServers?.[name])
+      entries.push({ name, provenance, effective, ...baseKeys === undefined ? {} : { baseKeys } })
+    }
+    return {
+      kind: 'ready',
+      generation,
+      revision: descriptor.revision,
+      entries: Object.freeze(entries),
+    }
+  }
+
+  async refresh(): Promise<void> {
+    await this.refreshRead()
+  }
+
+  async mutate(
+    ops: readonly { readonly op: 'set' | 'unset'; readonly path: readonly string[]; readonly value?: unknown }[],
+    expectedRevision: number,
+    pinnedGeneration: object,
+  ): Promise<McpConfigWriteOutcome> {
+    // The generation fence runs TWICE: once here (fail fast, before anything is
+    // queued) and once INSIDE the serialized write queue at dispatch time. The
+    // queue is async: a Connection may swap Hosts between the entry check and
+    // the actual RPC, and a Host B that happens to carry the same namespace
+    // revision must still never receive Host A's edit intent. The dispatch-time
+    // check throws out of the mirror's write task, which surfaces as this
+    // method's failure — never as a dispatch.
+    if (!Object.is(this.mirror.readyGeneration(), pinnedGeneration)) {
+      return {
+        kind: 'failed',
+        failure: { kind: 'rejected', reason: 'the Host authority changed; re-read the configuration before saving' },
+      }
+    }
+    const wireOps: RemoteSettingsPathOp[] = ops.map(op => op.op === 'set'
+      ? { op: 'set', path: [...op.path], value: op.value }
+      : { op: 'unset', path: [...op.path] })
+    try {
+      // `record`: a write whose post-settlement refresh cannot complete is a
+      // committed-but-unverified fact (`outcome-unconfirmed`), never a fake
+      // refusal — exactly the FR4 unconfirmed contract.
+      await this.mirror.mutate(MCP_SERVER_SOURCES_NS, wireOps, expectedRevision, 'record', () => {
+        if (!Object.is(this.mirror.readyGeneration(), pinnedGeneration)) {
+          // Thrown inside the queue BEFORE the RPC: the write was never
+          // dispatched, so this is a PROVEN refusal of a stale-authority
+          // intent. The `settings/writer-superseded` code (a registered
+          // pre-invocation refusal in the shared classifier) keeps the
+          // settlement `rejected` instead of `outcome-unconfirmed`.
+          throw Object.assign(
+            new Error('the Host authority changed before the write was dispatched'),
+            { code: 'settings/writer-superseded' },
+          )
+        }
+      })
+    } catch (error) {
+      const message = remoteFailureMessage(error)
+      const code = remoteFailureCode(error)
+      if (code === 'settings/conflict' || /changed since it was read|SETTINGS_CONFLICT/u.test(message)) {
+        return { kind: 'failed', failure: { kind: 'conflict', reason: message } }
+      }
+      // A failure this classifier cannot prove was a pre-dispatch refusal is
+      // INDETERMINATE: the official controller may have committed the edit and
+      // failed only in its own post-write read, so reporting `rejected` would
+      // claim the configuration did not change. `outcome-unconfirmed` is the
+      // truthful settlement and is never replayed.
+      const settlement = classifyRemoteWriteFailure(error)
+      return {
+        kind: 'failed',
+        failure: settlement.kind === 'rejected'
+          ? { kind: 'rejected', reason: message }
+          : { kind: 'outcome-unconfirmed', reason: message },
+      }
+    }
+    // Saved is a READ-BACK fact: only a current committed snapshot that still
+    // speaks for the same generation verifies the write.
+    const readBack = this.read()
+    if (readBack.kind !== 'ready') {
+      return {
+        kind: 'failed',
+        failure: { kind: 'outcome-unconfirmed', reason: readBack.reason },
+      }
+    }
+    if (!Object.is(readBack.generation, pinnedGeneration)) {
+      return {
+        kind: 'failed',
+        failure: { kind: 'outcome-unconfirmed', reason: 'the Host authority changed while the write settled' },
+      }
+    }
+    return { kind: 'saved', revision: readBack.revision }
+  }
+}
+
+/* ------------------------------------------------------------------------- *
+ * R8-E PR-2: per-package extension configuration.
+ * ------------------------------------------------------------------------- */
+
+function validRemoteSettingsRevision(revision: unknown): revision is number {
+  return typeof revision === 'number' && Number.isSafeInteger(revision) && revision >= 0
+}
+
+/**
+ * The Remote per-package extension-config domain over the ONE committed
+ * Settings mirror. A `ready` read requires a CURRENT mirror generation and a
+ * readable `data` projection. A write joins the EXISTING serialized mirror
+ * queue, re-checks the captured generation and revision at dispatch, and is
+ * `accepted` only when a post-write authoritative `describe()` still serves
+ * the same generation. No second mirror, write counter or optimistic value.
+ */
+class RemoteExtensionConfigsConfig implements ExtensionConfigsConfig {
+  private readonly mirror: RemoteConfigMirror
+  private readonly refreshRead: () => Promise<void>
+
+  constructor(mirror: RemoteConfigMirror, refreshRead: () => Promise<void>) {
+    this.mirror = mirror
+    this.refreshRead = refreshRead
+  }
+
+  read(packageName: string): ExtensionConfigRead {
+    const readiness = this.mirror.readiness()
+    if (readiness === 'unavailable') {
+      const failure = this.mirror.lastRefreshFailure()
+      if (this.mirror.usable() && failure !== undefined) {
+        return { kind: 'unreadable', reason: `the Host settings read failed: ${remoteFailureMessage(failure)}` }
+      }
+      return { kind: 'unavailable', reason: 'no current Host settings snapshot is available' }
+    }
+    if (readiness !== 'ready') {
+      return { kind: 'stale', reason: 'the Host settings snapshot is not current' }
+    }
+    const generation = this.mirror.readyGeneration()
+    if (generation === undefined) {
+      return { kind: 'stale', reason: 'the Host settings snapshot is not current' }
+    }
+    const namespace = extensionConfigRowId(packageName)
+    const view = this.mirror.namespace(namespace)
+    if (view === undefined) {
+      return { kind: 'unavailable', reason: `the "${namespace}" extension Config row is not mounted` }
+    }
+    if (!validRemoteSettingsRevision(view.revision)) {
+      return { kind: 'unreadable', reason: 'the official Host settings revision is not readable' }
+    }
+    const effective = projectExtensionConfigData(view.value)
+    const inherited = projectExtensionConfigData(view.base)
+    const user = projectExtensionConfigData(view.user)
+    if (effective.kind === 'invalid') return { kind: 'unreadable', reason: effective.reason }
+    if (inherited.kind === 'invalid') return { kind: 'unreadable', reason: inherited.reason }
+    if (user.kind === 'invalid') return { kind: 'unreadable', reason: user.reason }
+    return {
+      kind: 'ready',
+      packageName,
+      generation,
+      revision: view.revision,
+      effective: effective.value,
+      inherited: inherited.value,
+      user: user.value,
+      userDataPresent: extensionConfigUserDataPresent(view.user),
+    }
+  }
+
+  async refresh(): Promise<void> {
+    await this.refreshRead()
+  }
+
+  async mutate(
+    packageName: string,
+    ops: readonly ExtensionConfigDataOp[],
+    expectedRevision: number,
+    pinnedGeneration: object,
+  ): Promise<SectionMutationOutcome> {
+    // The generation fence runs TWICE: here (fail fast) and inside the shared
+    // serialized queue at dispatch. A Connection may swap Hosts while the write
+    // waits; a Host B carrying the same revision must never receive Host A's
+    // intent.
+    const currentGeneration = this.mirror.readyGeneration()
+    if (currentGeneration === undefined || !Object.is(currentGeneration, pinnedGeneration)) {
+      return { kind: 'rejected', reason: 'the Host authority changed; refresh before saving' }
+    }
+    if (ops.length === 0) return { kind: 'rejected', reason: 'no settings fields were staged' }
+    const snapshot = snapshotExtensionConfigOps(ops)
+    if (snapshot.kind === 'invalid') return { kind: 'rejected', reason: snapshot.reason }
+    const namespace = extensionConfigRowId(packageName)
+    const current = this.mirror.namespace(namespace)
+    if (current === undefined) {
+      return { kind: 'rejected', reason: `the "${namespace}" extension Config row is not mounted` }
+    }
+    if (!validRemoteSettingsRevision(current.revision)) {
+      return { kind: 'rejected', reason: 'the official Host settings revision is not readable' }
+    }
+    if (current.revision !== expectedRevision) {
+      return { kind: 'conflict', reason: 'the Host settings section changed since it was read' }
+    }
+    const wireOps: readonly RemoteSettingsPathOp[] = snapshot.ops.map(op => op.op === 'set'
+      ? { op: 'set' as const, path: ['data', ...op.path], value: op.value }
+      : { op: 'unset' as const, path: ['data', ...op.path] })
+    let dispatchAdmitted = false
+    try {
+      // `record`: a committed write whose post-settlement refresh cannot
+      // complete remains `outcome-unconfirmed`, never a fake refusal. The
+      // mirror's post-write `describe()` is the only new authority.
+      await this.mirror.mutate(namespace, wireOps, expectedRevision, 'record', (descriptor, queuedRevision) => {
+        if (!Object.is(this.mirror.readyGeneration(), pinnedGeneration)) {
+          throw Object.assign(new Error('the Host authority changed before dispatch'), { code: 'settings/writer-superseded' })
+        }
+        if (descriptor.revision !== expectedRevision || queuedRevision !== expectedRevision) {
+          throw Object.assign(new Error('the Host settings section changed since it was read'), { code: 'settings/conflict' })
+        }
+        dispatchAdmitted = true
+      })
+    } catch (error) {
+      const reason = remoteFailureMessage(error)
+      const code = remoteFailureCode(error)
+      if (code === 'settings/conflict' || code === 'SETTINGS_CONFLICT') {
+        return { kind: 'conflict', reason }
+      }
+      if (!dispatchAdmitted) {
+        return { kind: 'rejected', reason }
+      }
+      // The official controller can label a post-persistence Loader failure as
+      // `settings/rejected`; only Gateway pre-invocation refusals prove the
+      // write never ran. Everything else stays unconfirmed and is never retried.
+      if (code === 'gateway/bad-request' || (code !== undefined && GATEWAY_PRE_INVOCATION_CODES.has(code))) {
+        return { kind: 'rejected', reason }
+      }
+      return { kind: 'outcome-unconfirmed', reason }
+    }
+    const readBack = this.read(packageName)
+    if (readBack.kind !== 'ready') {
+      return { kind: 'outcome-unconfirmed', reason: readBack.reason }
+    }
+    if (!Object.is(readBack.generation, pinnedGeneration)) {
+      return { kind: 'outcome-unconfirmed', reason: 'the Host authority changed while the write settled' }
+    }
+    return { kind: 'accepted' }
   }
 }

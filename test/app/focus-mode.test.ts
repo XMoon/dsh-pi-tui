@@ -11,7 +11,7 @@ import test from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { TranscriptFolder, groupConsecutiveReads, isPostTurnReplayEvidence, type TranscriptMessage, type TurnActivity } from '../../src/transcript.ts'
+import { TranscriptFolder, assistantStepSettledOf, groupConsecutiveReads, isPostTurnReplayEvidence, type TranscriptMessage, type TurnActivity } from '../../src/transcript.ts'
 import { projectCompact } from '../../src/tui/transcript/compact-projection.ts'
 import { isTranscriptWorkMember, projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../../src/runtime/assistant-stream-port.ts'
@@ -1452,6 +1452,53 @@ test('the header drops the token/action tail progressively on narrow widths (pla
   assert.ok(visibleWidth(minuscule) <= 4, `hard truncate as the last resort:\n${minuscule}`)
 })
 
+test('send_message leads the Focus header subtypes and survives partial degradation', () => {
+  const done = activityOf(0, completedTurn(0, 0, 1000))
+  const stats = actionStatsOf(37, { bash: 30, read: 5, edit: 1, send_message: 1 })
+  assert.deepEqual(compactActionStatParts(stats),
+    ['37 actions', 'send_message ×1', 'bash ×30', 'read ×5', '+1'],
+    'send_message leads; the remaining subtypes keep count-desc/name-asc and +N counts the other kinds')
+  assert.equal(stats.total, 37, 'the visual promotion never changes the counted total')
+  assert.equal(stats.types.get('bash'), 30, 'the subtype counts are unchanged')
+  const rich = { ...done!, usage: { inputTokens: 62_000, outputTokens: 800, cacheReadTokens: 0, cacheWriteTokens: 0 }, totalTokens: 62_800 }
+  const head = '🐋 Turn complete 6s'
+  const token = '63k tok'
+  const wide = formatFocusHeaderLine(rich, false, 'idle', '6s', 200, stats)
+  assert.ok(wide.includes('37 actions · send_message ×1 · bash ×30 · read ×5 · +1'), wide)
+  // The width that fits exactly the label + token + total + send_message: the
+  // trailing high-count subtypes are trimmed from the right, never the low
+  // frequency send_message.
+  const mediumWidth = visibleWidth(`${head} · ${token} · 37 actions · send_message ×1`)
+  const medium = formatFocusHeaderLine(rich, false, 'idle', '6s', mediumWidth, stats)
+  assert.equal(medium, `${head} · ${token} · 37 actions · send_message ×1`,
+    `a medium header keeps the total and send_message before dropping high-count types:
+${medium}`)
+  assert.ok(visibleWidth(medium) <= mediumWidth, 'the medium header never overflows')
+  // Even narrower: the total alone survives before the token is dropped.
+  const totalWidth = visibleWidth(`${head} · ${token} · 37 actions`)
+  assert.equal(formatFocusHeaderLine(rich, false, 'idle', '6s', totalWidth, stats),
+    `${head} · ${token} · 37 actions`)
+  // Extreme narrow: the header never exceeds the width and stays one row.
+  for (const width of [4, 8, 12]) {
+    const line = formatFocusHeaderLine(rich, false, 'idle', '6s', width, stats)
+    assert.ok(visibleWidth(line) <= width, `width ${width}: ${JSON.stringify(line)}`)
+    assert.ok(!line.includes('\n'), 'the header stays one physical row')
+  }
+  // The disclosure identity is still recognizable per icon style.
+  assert.ok(formatFocusHeaderLine(rich, false, 'idle', '6s', 120, stats, 'symbols').startsWith('▸ '))
+  assert.ok(formatFocusHeaderLine(rich, true, 'idle', '6s', 120, stats, 'minimal').startsWith('▾ '))
+})
+
+test('a header without send_message keeps the previous subtype order and degradation', () => {
+  const done = activityOf(0, completedTurn(0, 0, 1000))
+  const stats = actionStatsOf(16, { read: 7, search: 4, bash: 3, z: 2 })
+  assert.deepEqual(compactActionStatParts(stats), ['16 actions', 'read ×7', 'search ×4', 'bash ×3', '+1'],
+    'no send_message entry: the historical count-desc/name-asc order is byte-for-byte unchanged')
+  const rich = { ...done!, usage: { inputTokens: 62_000, outputTokens: 800, cacheReadTokens: 0, cacheWriteTokens: 0 }, totalTokens: 62_800 }
+  const wide = formatFocusHeaderLine(rich, false, 'idle', '6s', 120, stats)
+  assert.ok(wide.includes('🐋 Turn complete 6s · 63k tok · 16 actions · read ×7 · search ×4 · bash ×3 · +1'), wide)
+})
+
 test('the header never wraps: every candidate fits its width', () => {
   const done = activityOf(0, completedTurn(0, 0, 1000))
   const stats = actionStatsOf(6, { read: 3, bash: 2, skill: 1 })
@@ -2379,6 +2426,67 @@ test('no final assistant before turn/end (running collapsed)', () => {
   assert.deepEqual(blockKinds(blocks), ['user', 'activity'])
 })
 
+test('an incomplete expanded turn holds its last settled Assistant until turn/end', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, completedTurn(0, 0, 1000).slice(0, -1))
+  const blocks = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  assert.deepEqual(blockKinds(blocks), ['user', 'activity', 'thinking', 'tool'])
+  assert.ok(!blocks.some(block => block.kind === 'message' && block.message.kind === 'assistant'))
+})
+
+test('an incomplete expanded turn keeps a Tool-confirmed intermediate Assistant but holds its trailing answer', () => {
+  const folder = new TranscriptFolder()
+  const events = [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('user/message', {
+      id: MessageId('pending-intermediate-user'), role: 'user',
+      content: [{ type: 'text', text: 'inspect then answer' }], source: { kind: 'user' },
+    }, 1001, 1),
+    eventAt('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('pending-intermediate'), role: 'assistant', content: [{ type: 'text', text: 'I will inspect first' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1002, 2),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('pending-intermediate-tool'), name: 'read', arguments: '{}' }, 1003, 3),
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: { id: MessageId('pending-intermediate-result'), role: 'tool', toolCallId: ToolCallId('pending-intermediate-tool'), content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('pending-intermediate-tool') } },
+    }, 1004, 4),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('pending-trailing-final'), role: 'assistant', content: [{ type: 'text', text: 'final answer stays held' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1005, 5),
+  ]
+  applyMixed(folder, events)
+  const activity = folder.turnActivity(0)
+  const trailing = folder.messages().find(message => message.kind === 'assistant' && message.text === 'final answer stays held')
+  assert.ok(activity !== undefined && trailing?.kind === 'assistant')
+  assert.equal(assistantStepSettledOf(activity, trailing), true, 'the Folder recognizes the exact trailing durable settlement')
+  const blocks = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  const assistants = blocks.filter((block): block is Extract<FocusProjectedBlock, { kind: 'message' }> =>
+    block.kind === 'message' && block.message.kind === 'assistant')
+  assert.deepEqual(assistants.map(block => block.message.kind === 'assistant' ? block.message.text : ''), ['I will inspect first'])
+})
+
+test('an expanded Focus keeps the unsettled live Assistant candidate visible', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('user/message', {
+      id: MessageId('live-candidate-user'), role: 'user',
+      content: [{ type: 'text', text: 'answer while streaming' }], source: { kind: 'user' },
+    }, 1001, 1),
+    eventAt('step/start', { turn: 0, step: 0 }, 1002, 2),
+  ])
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'streaming answer' }, 1003))
+  const activity = folder.turnActivity(0)
+  const candidate = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(activity !== undefined && candidate?.kind === 'assistant')
+  assert.equal(assistantStepSettledOf(activity, candidate), false, 'the Fold owns no durable settlement for this live candidate')
+  const blocks = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set([0]), true)
+  assert.ok(blocks.some(block => block.kind === 'message' && block.message === candidate),
+    'a still-streaming Assistant is process content, not a pending final answer')
+})
+
 test('FocusActivity always precedes the final assistant', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, completedTurn(0, 0, 1000))
@@ -2667,6 +2775,18 @@ test('collapsed turns never render process rows at all (no Ctrl+O leak)', () => 
   const blocks = projectFocusFlat(messages, folder.turnActivities(), new Set(), true)
   assert.ok(!blocks.some(b => b.kind === 'message' && (b.message.kind === 'tool' || b.message.kind === 'thinking')),
     'a collapsed Focus turn must hide its process regardless of Ctrl+O')
+})
+
+test('a missing TurnActivity keeps the Focus projection in raw chronology', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, completedTurn(0, 0, 1000))
+  const messages = folder.messages()
+  const blocks = projectFocus(messages, new Map(), new Set([0]), true)
+
+  assert.equal(blocks.length, messages.length, 'the partial window does not drop transcript rows')
+  assert.ok(blocks.every(block => block.kind === 'message'), 'no Focus or Work disclosure is invented')
+  assert.deepEqual(blocks.map(block => block.kind === 'message' ? block.message : undefined), messages,
+    'the shared projection keeps the exact raw chronology for PiTui and TSP')
 })
 
 test('compaction cards keep their existing lifecycle under Focus', () => {
@@ -4028,11 +4148,10 @@ test('a Snapshot-only turn hides its rows only when a real Thought owner exists'
   const owned = projectTools(messages, folder.turnActivities(), new Set())
   assert.deepEqual(blockKinds(owned), ['user', 'activity', 'assistant'])
   assert.ok(!owned.some(block => block.kind === 'message' && block.message === snapshot))
-  // A window with no activity owner must FAIL OPEN rather than drop the row.
-  // (The final assistant is also activity-derived, so this truncated window
-  // has no held-back final.)
+  // A window with no activity owner fails open as the complete raw group.
   const failOpen = projectTools(messages, new Map(), new Set())
-  assert.deepEqual(blockKinds(failOpen), ['user', 'system'])
+  assert.deepEqual(failOpen.map(block => block.kind === 'message' ? block.message : undefined), messages,
+    'without an owner every row, including the Assistant, remains in raw order')
   assert.ok(failOpen.some(block => block.kind === 'message' && block.message === snapshot))
 })
 
@@ -4059,8 +4178,8 @@ test('a snapshot-only raw cluster is hidden as one unit inside a real Thought', 
   const owned = projectTools(messages, folder.turnActivities(), new Set())
   assert.deepEqual(blockKinds(owned), ['user', 'activity', 'assistant'], 'the cluster never leaks outside the Thought')
   const failOpen = projectTools(messages, new Map(), new Set())
-  assert.deepEqual(blockKinds(failOpen), ['user', 'system', 'system'],
-    'without an owner every member fails open')
+  assert.deepEqual(failOpen.map(block => block.kind === 'message' ? block.message : undefined), messages,
+    'without an owner every cluster member and following row fails open in raw order')
   const expanded = projectTools(messages, folder.turnActivities(), new Set([0]))
   assert.equal(blockKinds(expanded).filter(kind => kind === 'system').length, 2,
     'both cluster members are restored exactly once when expanded')
@@ -5219,7 +5338,7 @@ test('a next-turn wakeup Agent relay stays visible before the Thought', () => {
   assert.ok(wakeIndex >= 0 && wakeIndex < thoughtIndex)
 })
 
-test('a claimed subagent-settled Notice stays independently visible for every settlement outcome', () => {
+test('a claimed same-turn settlement folds into the real Thought for every settlement outcome', () => {
   const outcomes = [
     'Background subagent child-x finished and will do no further work unless you send it more.',
     'Background subagent child-x was stopped before it finished.',
@@ -5227,10 +5346,10 @@ test('a claimed subagent-settled Notice stays independently visible for every se
     'Background subagent child-x ran out of room before it finished.',
     'Background subagent child-x declined the task.',
   ]
-  for (const summary of outcomes) {
+  for (const [index, summary] of outcomes.entries()) {
     const settled = {
-      id: MessageId(`settled-${outcomes.indexOf(summary)}`), role: 'user',
-      content: [{ type: 'text', text: `SETTLED_BODY ${outcomes.indexOf(summary)}` }],
+      id: MessageId(`settled-${index}`), role: 'user',
+      content: [{ type: 'text', text: `SETTLED_BODY ${index}` }],
       source: { kind: 'subagent-settled', form: 'notice', summary, senderSessionId: 'child-x' },
     }
     const folder = new TranscriptFolder()
@@ -5256,14 +5375,138 @@ test('a claimed subagent-settled Notice stays independently visible for every se
     const messages = folder.messages()
     const notice = messages.find(message => message.kind === 'system')
     assert.ok(notice !== undefined && notice.kind === 'system')
-    assert.equal(notice.contextPresentation?.sameTurnNextStep, undefined,
-      `outcome ${outcomes.indexOf(summary)}: a settlement Notice is never a Working delivery`)
+    assert.equal(notice.contextPresentation?.sameTurnNextStep, true,
+      `outcome ${index}: the durable same-turn claim qualifies the settlement`)
     assert.equal(notice.summary, summary, 'the raw DSH summary is preserved')
+    assert.equal(notice.text, `SETTLED_BODY ${index}`, 'the raw settlement body is preserved')
     const collapsed = projectTools(messages, folder.turnActivities(), new Set())
-    assert.ok(collapsed.some(block => block.kind === 'message' && block.message === notice),
-      `outcome ${outcomes.indexOf(summary)}: the settlement stays visible while collapsed`)
+    assert.ok(!collapsed.some(block => block.kind === 'message' && block.message === notice),
+      `outcome ${index}: the settlement has no independent card while the Thought is collapsed`)
     assert.ok(collapsed.some(block => block.kind === 'activity'))
+    const expanded = projectTools(messages, folder.turnActivities(), new Set([0]))
+    assert.equal(expanded.filter(block => block.kind === 'message' && block.message === notice).length, 1,
+      `outcome ${index}: the expanded Thought restores the settlement exactly once`)
+    const restored = expanded.find(block => block.kind === 'message' && block.message === notice)
+    assert.ok(restored !== undefined && restored.kind === 'message' && restored.message.kind === 'system')
+    assert.equal(restored.message.text, `SETTLED_BODY ${index}`)
+    assert.equal(restored.message.summary, summary)
+    assert.equal(focusThoughtLeadBoundary(messages), 1,
+      `outcome ${index}: the settlement stays Thought content, not turn foundation`)
   }
+})
+
+test('a claimed settlement separated from every Process by a hard boundary fails open in collapsed Focus', () => {
+  const settled = {
+    id: MessageId('settled-hard-boundary'), role: 'user',
+    content: [{ type: 'text', text: 'HARD_BOUNDARY_SETTLED' }],
+    source: { kind: 'subagent-settled', form: 'notice', summary: 'child settled', senderSessionId: 'session-child' },
+  }
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 6000, 0),
+    eventAt('user/message', {
+      id: MessageId('settled-boundary-prompt'), role: 'user',
+      content: [{ type: 'text', text: 'go' }],
+      source: { kind: 'user' },
+    }, 6001, 1),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'process' } }, 6002, 2),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('settled-boundary-c1'), name: 'read', arguments: '{}' }, 6003, 3),
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('settled-boundary-r1'), role: 'tool', toolCallId: ToolCallId('settled-boundary-c1'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('settled-boundary-c1') },
+      },
+    }, 6004, 4),
+    // An unqualified notice is a hard boundary.
+    eventAt('user/message', {
+      id: MessageId('settled-hard-boundary-cut'), role: 'user',
+      content: [{ type: 'text', text: 'boundary' }],
+      source: { kind: 'plugin', form: 'notice', plugin: 'foreign' },
+    }, 6005, 5),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [settled] }, 6006, 6),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 6006.1, 7),
+    eventAt('user/message', settled, 6006.2, 8),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('settled-boundary-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 6007, 9),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 6008, 10),
+  ])
+  const messages = folder.messages()
+  const notice = messages.find(message => message.kind === 'system' && message.text === 'HARD_BOUNDARY_SETTLED')
+  assert.ok(notice !== undefined && notice.kind === 'system')
+  assert.equal(notice.contextPresentation?.sameTurnNextStep, true, 'fixture: durable same-turn claim')
+  assert.deepEqual(projectTranscriptStructure(messages).map(block => block.kind),
+    ['message', 'work', 'message', 'message', 'message'],
+    'fixture: the boundary owns no Work member, so the settlement has no owner')
+  const collapsed = projectTools(messages, folder.turnActivities(), new Set())
+  assert.ok(collapsed.some(block => block.kind === 'message' && block.message === notice),
+    'a settlement with Process elsewhere but no owning Work stays independently visible')
+  const expanded = projectTools(messages, folder.turnActivities(), new Set([0]))
+  assert.equal(expanded.filter(block => block.kind === 'message' && block.message === notice).length, 1,
+    'expanded Focus restores the settlement exactly once')
+})
+
+test('a settlement with no Process at all never disappears into an activity-only Thought', () => {
+  const settled = {
+    id: MessageId('settled-no-process'), role: 'user',
+    content: [{ type: 'text', text: 'NO_PROCESS_SETTLED' }],
+    source: { kind: 'subagent-settled', form: 'notice', summary: 'child settled', senderSessionId: 'session-child' },
+  }
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 6100, 0),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [settled] }, 6101, 1),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 6101.1, 2),
+    eventAt('user/message', settled, 6101.2, 3),
+    eventAt('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('settled-no-process-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 6102, 4),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 6103, 5),
+  ])
+  const messages = folder.messages()
+  const notice = messages.find(message => message.kind === 'system')
+  assert.ok(notice !== undefined && notice.kind === 'system')
+  assert.equal(notice.contextPresentation?.sameTurnNextStep, true, 'fixture: durable same-turn claim')
+  assert.deepEqual(projectTranscriptStructure(messages).map(block => block.kind), ['message', 'message'],
+    'fixture: no Process means no Work owner')
+  const collapsed = projectTools(messages, folder.turnActivities(), new Set())
+  assert.ok(collapsed.some(block => block.kind === 'message' && block.message === notice),
+    'without Process the settlement must fail open')
+})
+
+test('a next-turn settlement wakeup stays visible before the Thought', () => {
+  const wakeMessage = {
+    id: MessageId('settled-wake-message'), role: 'user',
+    content: [{ type: 'text', text: 'WAKEUP_SETTLED_BODY' }],
+    source: { kind: 'subagent-settled', form: 'notice', summary: 'child settled', senderSessionId: 'session-waker' },
+  }
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('agent/inbox/spliced', { target: 'next-turn', start: 0, inserted: [wakeMessage] }, 6300, 0),
+    eventAt('turn/start', { turn: 0 }, 6301, 1),
+    eventAt('agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [] }, 6302, 2),
+    eventAt('user/message', wakeMessage, 6303, 3),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'reasoning' } }, 6304, 4),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('settled-wake-c1'), name: 'read', arguments: '{}' }, 6305, 5),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('settled-wake-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 6306, 6),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 6307, 7),
+  ])
+  const messages = folder.messages()
+  const wake = messages.find(message => message.kind === 'system')
+  assert.ok(wake !== undefined)
+  assert.equal(wake.contextPresentation?.sameTurnNextStep, undefined)
+  const collapsed = projectTools(messages, folder.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(collapsed), ['system', 'activity', 'assistant'],
+    'the wakeup settlement stays visible before the Thought')
+  const wakeIndex = collapsed.findIndex(block => block.kind === 'message' && block.message === wake)
+  const thoughtIndex = collapsed.findIndex(block => block.kind === 'activity')
+  assert.ok(wakeIndex >= 0 && wakeIndex < thoughtIndex)
 })
 
 test('a claimed same-turn Agent relay without any real Process stays visible in collapsed Focus', () => {

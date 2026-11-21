@@ -12,7 +12,7 @@ import test from 'node:test'
 import { SELF_BUNDLE } from '../../src/app/plugin-manager/classify.ts'
 import { PluginManagerController } from '../../src/app/plugin-manager/controller.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
-import { PLUGIN_ACTION, bundleValue, buildPluginDetailView, entryValue } from '../../src/app/plugin-manager/model.ts'
+import { AUTO_REVIEW_BUNDLE, PLUGIN_ACTION, bundleValue, buildPluginDetailView, entryValue } from '../../src/app/plugin-manager/model.ts'
 import { PluginManagerStaleResultError } from '../../src/runtime/plugin-manager-port.ts'
 import type {
   PluginBundleFact,
@@ -21,6 +21,10 @@ import type {
   PluginManagerPort,
   PluginManagerSnapshot,
   PluginSpecInspectionFact,
+  PluginUpdateProgressFact,
+  PluginUpdateResultFact,
+  PluginVersionFact,
+  PluginVersionListFact,
 } from '../../src/runtime/plugin-manager-port.ts'
 
 function change(overrides: Partial<PluginChangeFact> = {}): PluginChangeFact {
@@ -37,6 +41,7 @@ function bundle(overrides: Partial<PluginBundleFact> = {}): PluginBundleFact {
     installed: true,
     optional: false,
     removable: true,
+    update: undefined,
     rows: [],
     overrides: [],
     ...overrides,
@@ -73,11 +78,15 @@ interface FakeState {
   inspectCalls: unknown[]
   waitCalls: unknown[]
   cancelCalls: unknown[]
+  listVersionCalls: unknown[]
+  updateCalls: unknown[]
   snapshotImpl: () => Promise<PluginManagerSnapshot>
   inspectImpl: (spec: string, registry: string | null, signal?: AbortSignal) => Promise<PluginSpecInspectionFact>
   installImpl: (request: unknown) => Promise<PluginChangeFact>
   waitImpl: (requestId: string) => Promise<PluginChangeFact | null>
   cancelImpl: (requestId: string) => Promise<{ status: 'cancelled' | 'too-late' | 'not-running' }>
+  versionsImpl: (name: string, signal?: AbortSignal) => Promise<PluginVersionListFact>
+  updateImpl: (name: string, version: string, registry: string | null, requestId: string) => Promise<PluginUpdateResultFact>
   setBundleImpl?: (name: string, enabled: boolean) => Promise<PluginChangeFact>
 }
 
@@ -85,14 +94,17 @@ function fakePort(state: Partial<FakeState> = {}): {
   port: PluginManagerPort
   state: FakeState
   emit: (event: PluginInstallEvent) => void
+  emitUpdate: (progress: PluginUpdateProgressFact) => void
   invalidate: () => void
-  offCalls: { install: number; invalidation: number }
+  offCalls: { install: number; update: number; invalidation: number }
   installSubscriptions: () => number
+  updateSubscriptions: () => number
   invalidationSubscriptions: () => number
 } {
   const listeners = new Set<(event: PluginInstallEvent) => void>()
+  const updateListeners = new Set<(progress: PluginUpdateProgressFact) => void>()
   const invalidationListeners = new Set<() => void>()
-  const offCalls = { install: 0, invalidation: 0 }
+  const offCalls = { install: 0, update: 0, invalidation: 0 }
   const full: FakeState = {
     snapshotCalls: 0,
     setBundle: [],
@@ -102,6 +114,8 @@ function fakePort(state: Partial<FakeState> = {}): {
     inspectCalls: [],
     waitCalls: [],
     cancelCalls: [],
+    listVersionCalls: [],
+    updateCalls: [],
     snapshotImpl: async () => snapshot([
       bundle({ name: SELF_BUNDLE, source: 'file:/tui' }),
       bundle(),
@@ -110,6 +124,20 @@ function fakePort(state: Partial<FakeState> = {}): {
     installImpl: async () => change({ stage: 'install' }),
     waitImpl: async () => null,
     cancelImpl: async () => ({ status: 'not-running' }),
+    versionsImpl: async () => ({
+      status: 'listed',
+      installed: '1.0.0',
+      registry: 'https://registry.example/',
+      attempts: [{ registry: 'https://registry.example/' }],
+      versions: [{ version: '1.1.0', tags: ['latest'], prerelease: false, bundle: true }],
+      omitted: 0,
+    }),
+    updateImpl: async (name, version) => ({
+      from: '1.0.0',
+      to: version,
+      step: 'install',
+      result: { changed: true, application: 'applied', stage: 'install', target: name, version },
+    }),
     ...state,
   }
   const port: PluginManagerPort = {
@@ -127,9 +155,21 @@ function fakePort(state: Partial<FakeState> = {}): {
     startInstall: async (request) => { full.installCalls.push(request); return full.installImpl(request) },
     waitForInstall: async (requestId) => { full.waitCalls.push(requestId); return full.waitImpl(requestId) },
     cancelInstall: async (requestId) => { full.cancelCalls.push(requestId); return full.cancelImpl(requestId) },
+    listVersions: async (name, signal) => {
+      full.listVersionCalls.push({ name })
+      return full.versionsImpl(name, signal)
+    },
+    updateBundle: async (name, version, registry, requestId) => {
+      full.updateCalls.push({ name, version, registry, requestId })
+      return full.updateImpl(name, version, registry, requestId)
+    },
     subscribeInstall: (listener) => {
       listeners.add(listener)
       return () => { offCalls.install += 1; listeners.delete(listener) }
+    },
+    subscribeUpdate: (listener) => {
+      updateListeners.add(listener)
+      return () => { offCalls.update += 1; updateListeners.delete(listener) }
     },
     subscribeInvalidation: (listener) => {
       invalidationListeners.add(listener)
@@ -140,9 +180,11 @@ function fakePort(state: Partial<FakeState> = {}): {
     port,
     state: full,
     emit: event => { for (const listener of listeners) listener(event) },
+    emitUpdate: progress => { for (const listener of [...updateListeners]) listener(progress) },
     invalidate: () => { for (const listener of [...invalidationListeners]) listener() },
     offCalls,
     installSubscriptions: () => listeners.size,
+    updateSubscriptions: () => updateListeners.size,
     invalidationSubscriptions: () => invalidationListeners.size,
   }
 }
@@ -303,6 +345,7 @@ test('official missing card install starts from the Host installTarget, never a 
         name: '@deepseek-ai/dsh-experimental-auto-review',
         official: true,
         availability: 'missing',
+        enabled: false,
         installed: false,
         optional: true,
         removable: false,
@@ -966,9 +1009,9 @@ test('dispose releases BOTH subscriptions exactly once and is idempotent', () =>
   controller.dispose()
   assert.equal(installSubscriptions(), 0)
   assert.equal(invalidationSubscriptions(), 0)
-  assert.deepEqual(offCalls, { install: 1, invalidation: 1 })
+  assert.deepEqual(offCalls, { install: 1, update: 1, invalidation: 1 })
   invalidate()
-  assert.deepEqual(offCalls, { install: 1, invalidation: 1 }, 'a disposed controller never re-subscribes or re-releases')
+  assert.deepEqual(offCalls, { install: 1, update: 1, invalidation: 1 }, 'a disposed controller never re-subscribes or re-releases')
 })
 
 test('a throwing install-event unsubscribe cannot strand the invalidation release', () => {
@@ -990,7 +1033,7 @@ test('a throwing install-event unsubscribe cannot strand the invalidation releas
   assert.equal(invalidationSubscriptions(), 1)
 
   assert.throws(() => controller.dispose(), (error: unknown) => error === failure)
-  assert.deepEqual(offCalls, { install: 1, invalidation: 1 })
+  assert.deepEqual(offCalls, { install: 1, update: 1, invalidation: 1 })
   assert.equal(installSubscriptions(), 0)
   assert.equal(invalidationSubscriptions(), 0)
 
@@ -1047,7 +1090,7 @@ test('dispose aborts an in-flight inspect, releases both subscriptions and never
   assert.equal(inspectSignal.aborted, true, 'dispose aborts the in-flight inspect')
   assert.equal(installSubscriptions(), 0)
   assert.equal(invalidationSubscriptions(), 0)
-  assert.deepEqual(offCalls, { install: 1, invalidation: 1 })
+  assert.deepEqual(offCalls, { install: 1, update: 1, invalidation: 1 })
 
   invalidate()
   inspectGate.resolve({ status: 'accepted', kind: 'registry', name: 'pkg', version: '1', bundle: true, registry: null })
@@ -1253,4 +1296,813 @@ test('version difference, equal version and masked sources never leak credential
   assert.equal(detailFact(same, 'Version difference'), undefined, 'equal versions are not a fabricated update')
   assert.doesNotMatch(same.groups.flatMap(group => group.facts.map(entry => entry.value)).join('\n'), /latest|up to date/iu,
     'equal versions do not claim the offered version is the latest')
+})
+
+// ── S5-PR2: official registry bundle update lifecycle ──────────────────────
+
+function updatable(overrides: Partial<PluginBundleFact> = {}): PluginBundleFact {
+  return bundle({
+    name: 'updatable',
+    update: 'registry',
+    source: 'https://registry.example/updatable',
+    version: '1.0.0',
+    ...overrides,
+  })
+}
+
+function stableVersion(overrides: Partial<PluginVersionFact> = {}): PluginVersionFact {
+  return { version: '1.1.0', tags: ['latest'], prerelease: false, bundle: true, ...overrides }
+}
+
+function listed(versions: readonly PluginVersionFact[], overrides: Partial<{
+  installed: string
+  registry: string | null
+  omitted: number
+}> = {}): PluginVersionListFact {
+  return {
+    status: 'listed',
+    installed: '1.0.0',
+    registry: 'https://registry.example/',
+    attempts: [{ registry: 'https://registry.example/' }],
+    versions,
+    omitted: 0,
+    ...overrides,
+  }
+}
+
+async function openedUpdate(
+  state: Partial<FakeState> = {},
+): Promise<ReturnType<typeof fakePort> & { controller: PluginManagerController }> {
+  const fake = fakePort({
+    snapshotImpl: async () => snapshot([updatable()]),
+    ...state,
+  })
+  const { controller } = controllerOf(fake.port)
+  controller.open()
+  await tick()
+  return { ...fake, controller }
+}
+
+test('update: one official write with the Host-answered registry and a target-install-only stop', async () => {
+  const updateGate = deferred<PluginUpdateResultFact>()
+  const cancelGate = deferred<{ status: 'cancelled' | 'too-late' | 'not-running' }>()
+  let observed = '1.0.0'
+  const fixture = await openedUpdate({
+    snapshotImpl: async () => snapshot([updatable({ version: observed })]),
+    updateImpl: () => updateGate.promise,
+    cancelImpl: () => cancelGate.promise,
+  })
+  const { controller, state, emit, emitUpdate } = fixture
+
+  controller.beginUpdate(bundleValue('updatable'))
+  assert.equal(controller.updateView()?.phase, 'checking')
+  await tick()
+  const selecting = controller.updateView()!
+  assert.equal(selecting.phase, 'selecting')
+  assert.equal(selecting.versions?.status, 'listed')
+  assert.equal(selecting.selectedExactVersion, '1.1.0', 'the first eligible stable version is suggested')
+  assert.equal(selecting.registry, 'https://registry.example/')
+  assert.equal(state.listVersionCalls.length, 1)
+
+  controller.confirmUpdateVersion()
+  assert.equal(controller.updateView()?.phase, 'confirm')
+  controller.executeUpdate()
+  await tick(2)
+  const running = controller.updateView()!
+  assert.equal(running.phase, 'running')
+  assert.ok(running.requestId !== undefined)
+  assert.equal(state.updateCalls.length, 1)
+  assert.deepEqual(state.updateCalls[0], {
+    name: 'updatable',
+    version: '1.1.0',
+    registry: 'https://registry.example/',
+    requestId: running.requestId,
+  })
+  assert.equal(controller.busy(), bundleValue('updatable'))
+  assert.equal(controller.hasDispatchedInstall(), false)
+
+  // A wrong request id never advances the lifecycle; the real steps do.
+  emitUpdate({ requestId: 'another-update', step: 'installing' })
+  assert.equal(controller.updateView()?.hostStep, undefined)
+  emitUpdate({ requestId: running.requestId!, step: 'checking' })
+  assert.equal(controller.updateView()?.hostStep, 'checking')
+  assert.equal(controller.updateView()?.canStopTargetInstall, false, 'stop is not offered during the check/remove steps')
+  emitUpdate({ requestId: running.requestId!, step: 'installing' })
+  assert.equal(controller.updateView()?.canStopTargetInstall, false, 'the matched install-state must also say installing')
+  emit({ kind: 'phase', phase: { requestId: running.requestId!, phase: 'installing' } })
+  assert.equal(controller.updateView()?.canStopTargetInstall, true)
+
+  controller.stopUpdateTargetInstall()
+  await tick()
+  assert.deepEqual(state.cancelCalls, [running.requestId])
+  cancelGate.resolve({ status: 'cancelled' })
+  await tick()
+  assert.equal(controller.updateView()?.phase, 'running', 'a cancellation alone never ends the update')
+  assert.equal(controller.updateView()?.cancelStatus, 'cancelled')
+  assert.match(controller.updateView()?.message ?? '', /awaiting Host restoration\/result/u)
+
+  // A refresh while the update runs must not discard its request id.
+  controller.refresh()
+  await tick()
+  observed = '1.1.0'
+  updateGate.resolve({
+    from: '1.0.0',
+    to: '1.1.0',
+    step: 'install',
+    result: change({ stage: 'install', application: 'applied', version: '1.1.0' }),
+  })
+  await tick(10)
+  const done = controller.updateView()!
+  assert.equal(done.phase, 'done')
+  assert.equal(done.result?.to, '1.1.0')
+  assert.equal(done.readback, 'ready')
+  assert.equal(done.lastObservedVersion, '1.1.0')
+  assert.equal(controller.busy(), undefined)
+  assert.equal(state.updateCalls.length, 1, 'exactly one Host write per confirmed update')
+  assert.equal(state.listVersionCalls.length, 1, 'a running update never repeats the registry read')
+})
+
+test('update: version eligibility marks disabled rows and never guesses a prerelease target', async () => {
+  const versions = [
+    stableVersion({ version: '1.1.0', bundle: false }),
+    stableVersion({
+      version: '1.2.0',
+      incompatible: {
+        name: 'updatable',
+        version: '1.2.0',
+        runtimeVersion: '0.2.2-rc.1',
+        requirements: { 'engines.dsh': '>=9' },
+      },
+    }),
+    stableVersion({ version: '1.3.0', deprecated: 'use the 2.x line' }),
+    stableVersion({ version: '1.4.0-rc.1', prerelease: true, tags: ['next'] }),
+  ]
+  const fixture = await openedUpdate({
+    versionsImpl: async () => listed(versions),
+  })
+  const { controller, state } = fixture
+  controller.beginUpdate(bundleValue('updatable'))
+  await tick()
+  assert.equal(controller.updateView()?.phase, 'selecting')
+  assert.equal(controller.updateView()?.selectedExactVersion, undefined,
+    'a list without an eligible stable version starts with NO selection')
+
+  for (const disabled of ['1.1.0', '1.2.0', '1.3.0']) {
+    controller.selectUpdateVersion(disabled)
+    assert.equal(controller.updateView()?.selectedExactVersion, undefined, `${disabled} is not selectable`)
+    assert.match(controller.notice() ?? '', /no bundle|cannot replace|Deprecated|rejects DSH/u)
+  }
+  controller.confirmUpdateVersion()
+  assert.equal(controller.updateView()?.phase, 'selecting', 'a disabled row never reaches confirmation')
+
+  controller.selectUpdateVersion('1.4.0-rc.1')
+  assert.equal(controller.updateView()?.selectedExactVersion, '1.4.0-rc.1')
+  controller.confirmUpdateVersion()
+  assert.equal(controller.updateView()?.phase, 'confirm', 'a user-chosen prerelease is allowed with its warning')
+  controller.cancelUpdateConfirmation()
+  assert.equal(controller.updateView()?.phase, 'selecting')
+  assert.equal(state.updateCalls.length, 0)
+})
+
+test('update: old write entrances are refused while the update owns the path', async () => {
+  const updateGate = deferred<PluginUpdateResultFact>()
+  const fixture = await openedUpdate({ updateImpl: () => updateGate.promise })
+  const { controller, state } = fixture
+  controller.beginUpdate(bundleValue('updatable'))
+  await tick()
+  controller.confirmUpdateVersion()
+  controller.executeUpdate()
+  await tick(2)
+  assert.equal(controller.updateView()?.phase, 'running')
+
+  controller.executeUpdate()
+  await tick()
+  assert.equal(state.updateCalls.length, 1, 'a second execute never writes')
+  controller.toggleCard(bundleValue('updatable'))
+  await tick()
+  assert.equal(state.setBundle.length, 0, 'toggle is refused during the update')
+  assert.match(controller.notice() ?? '', /still in progress/u)
+  assert.equal(controller.toggleRow(bundleValue('updatable'), 'e1'), false)
+  assert.equal(controller.requestRemove(bundleValue('updatable')), false)
+  assert.equal(controller.beginManualInstall(), false)
+  assert.equal(state.installCalls.length, 0)
+  assert.equal(controller.beginOfficialInstall(bundleValue('updatable')), false)
+
+  updateGate.resolve({
+    from: '1.0.0',
+    to: '1.1.0',
+    step: 'install',
+    result: change({ stage: 'install', application: 'applied', version: '1.1.0' }),
+  })
+  await tick(10)
+  assert.equal(controller.updateView()?.phase, 'done')
+  controller.toggleCard(bundleValue('updatable'))
+  await tick()
+  assert.equal(state.setBundle.length, 1, 'a terminal done update releases the write path')
+})
+
+test('update: an indeterminate outcome keeps the write lock until a successful reread and acknowledgment', async () => {
+  let failReads = false
+  const fixture = await openedUpdate({
+    snapshotImpl: async () => {
+      if (failReads) throw new Error('inventory offline')
+      return snapshot([updatable()])
+    },
+    updateImpl: async () => { throw new PluginManagerStaleResultError('updateBundle') },
+  })
+  const { controller, state } = fixture
+  controller.beginUpdate(bundleValue('updatable'))
+  await tick()
+  controller.confirmUpdateVersion()
+  controller.executeUpdate()
+  await tick(10)
+  const unknown = controller.updateView()!
+  assert.equal(unknown.phase, 'unknown')
+  assert.equal(unknown.result, undefined, 'no result is fabricated')
+  assert.match(unknown.message ?? '', /outcome unknown/u)
+  assert.match(unknown.message ?? '', /not retried automatically/u)
+  assert.equal(unknown.readback, 'ready')
+  assert.equal(controller.busy(), bundleValue('updatable'), 'the write lock stays held')
+  assert.equal(state.updateCalls.length, 1)
+
+  controller.executeUpdate()
+  await tick()
+  assert.equal(state.updateCalls.length, 1, 'an unknown outcome is never retried')
+
+  controller.acknowledgeUpdateUncertainty()
+  assert.equal(controller.updateView()?.acknowledged, true)
+  assert.equal(controller.busy(), undefined, 'an explicit acknowledgment releases the local write lock')
+
+  // An acknowledged outcome allows a NEW check for the same bundle.
+  controller.beginUpdate(bundleValue('updatable'))
+  await tick()
+  assert.equal(state.listVersionCalls.length, 2)
+  assert.equal(controller.updateView()?.phase, 'selecting')
+
+  // A failed reread leaves the acknowledgment disabled until a successful one.
+  failReads = true
+  controller.confirmUpdateVersion()
+  controller.executeUpdate()
+  assert.equal(controller.updateView()?.phase, 'running')
+  await tick(10)
+  assert.equal(controller.updateView()?.phase, 'unknown')
+  assert.equal(controller.updateView()?.readback, 'error')
+  controller.acknowledgeUpdateUncertainty()
+  assert.equal(controller.updateView()?.acknowledged, false)
+  assert.match(controller.notice() ?? '', /reread must succeed/u)
+  failReads = false
+  controller.refresh()
+  await tick()
+  assert.equal(controller.updateView()?.readback, 'ready')
+  controller.acknowledgeUpdateUncertainty()
+  assert.equal(controller.updateView()?.acknowledged, true)
+})
+
+test('update: a new authoritative inventory invalidates an unconfirmed list and never re-queries implicitly', async () => {
+  const fixture = await openedUpdate()
+  const { controller, state, invalidate } = fixture
+  controller.beginUpdate(bundleValue('updatable'))
+  await tick()
+  assert.equal(controller.updateView()?.phase, 'selecting')
+  assert.equal(controller.updateView()?.versions?.status, 'listed')
+
+  // A Host invalidation / refresh changes the installed-version premise.
+  invalidate()
+  await tick()
+  const invalidated = controller.updateView()!
+  assert.equal(invalidated.phase, 'selecting')
+  assert.equal(invalidated.versions, undefined)
+  assert.equal(invalidated.selectedExactVersion, undefined)
+  assert.match(invalidated.message ?? '', /Bundle changed; check versions again/u)
+  assert.equal(state.listVersionCalls.length, 1, 'No implicit registry re-query')
+
+  controller.retryUpdateCheck()
+  await tick()
+  assert.equal(state.listVersionCalls.length, 2, 'the explicit retry is the only re-query')
+  assert.equal(controller.updateView()?.versions?.status, 'listed')
+
+  controller.confirmUpdateVersion()
+  assert.equal(controller.updateView()?.phase, 'confirm')
+  controller.refresh()
+  await tick()
+  assert.equal(controller.updateView()?.phase, 'selecting', 'a changed inventory withdraws the stale confirmation')
+  controller.executeUpdate()
+  await tick()
+  assert.equal(state.updateCalls.length, 0, 'a withdrawn confirmation never writes')
+})
+
+test('update: a superseded version list is indeterminate and never writes', async () => {
+  const fixture = await openedUpdate({
+    versionsImpl: async () => { throw new PluginManagerStaleResultError('listVersions') },
+  })
+  const { controller, state } = fixture
+  controller.beginUpdate(bundleValue('updatable'))
+  await tick()
+  assert.equal(controller.updateView()?.phase, 'selecting')
+  assert.equal(controller.updateView()?.versions, undefined)
+  assert.match(controller.updateView()?.message ?? '', /superseded currentness context/u)
+  controller.confirmUpdateVersion()
+  controller.executeUpdate()
+  await tick()
+  assert.equal(state.updateCalls.length, 0)
+})
+
+test('update: target and restore outcomes stay independent, including a failed restoration', async () => {
+  const fixture = await openedUpdate({
+    updateImpl: async () => ({
+      from: '1.0.0',
+      to: '1.1.0',
+      step: 'install',
+      result: change({
+        stage: 'install',
+        application: 'failed',
+        error: { code: 'operation-error', diagnostic: 'target install failed' },
+      }),
+      restore: change({
+        stage: 'install',
+        application: 'failed',
+        version: '1.0.0',
+        error: { code: 'operation-error', diagnostic: 'restore failed' },
+      }),
+    }),
+  })
+  const { controller } = fixture
+  controller.beginUpdate(bundleValue('updatable'))
+  await tick()
+  controller.confirmUpdateVersion()
+  controller.executeUpdate()
+  await tick(10)
+  const done = controller.updateView()!
+  assert.equal(done.phase, 'done')
+  assert.equal(done.result?.result.application, 'failed')
+  assert.equal(done.result?.restore?.application, 'failed', 'a failed restoration is reported separately')
+  assert.equal(done.readback, 'ready')
+})
+
+test('update: a failed authoritative reread is reported, never a fabricated current version', async () => {
+  let reads = 0
+  const fixture = await openedUpdate({
+    snapshotImpl: async () => {
+      reads += 1
+      if (reads > 1) throw new Error('inventory offline')
+      return snapshot([updatable({ version: '1.0.0' })])
+    },
+    updateImpl: async (_name, version) => ({
+      from: '1.0.0',
+      to: version,
+      step: 'install',
+      result: change({ stage: 'install', application: 'applied', version }),
+    }),
+  })
+  const { controller } = fixture
+  controller.beginUpdate(bundleValue('updatable'))
+  await tick()
+  controller.confirmUpdateVersion()
+  controller.executeUpdate()
+  await tick(10)
+  const done = controller.updateView()!
+  assert.equal(done.phase, 'done')
+  assert.equal(done.readback, 'error')
+  assert.equal(done.lastObservedVersion, undefined)
+  assert.equal(controller.status().state, 'error')
+})
+
+test('update: hide never cancels or re-dispatches the Host operation', async () => {
+  const updateGate = deferred<PluginUpdateResultFact>()
+  const fixture = await openedUpdate({ updateImpl: () => updateGate.promise })
+  const { controller, state } = fixture
+  controller.beginUpdate(bundleValue('updatable'))
+  await tick()
+  controller.confirmUpdateVersion()
+  controller.executeUpdate()
+  await tick(2)
+  controller.hideUpdate()
+  assert.equal(controller.updateView()?.phase, 'running')
+  assert.equal(state.updateCalls.length, 1)
+  assert.equal(state.cancelCalls.length, 0)
+  updateGate.resolve({
+    from: '1.0.0',
+    to: '1.1.0',
+    step: 'install',
+    result: change({ stage: 'install', application: 'applied', version: '1.1.0' }),
+  })
+  await tick(10)
+  assert.equal(controller.updateView()?.phase, 'done')
+  assert.equal(state.updateCalls.length, 1)
+})
+
+test('update: subscriptions are acquired transactionally and disposed together', () => {
+  // A throwing update subscription releases the install subscription.
+  {
+    const { port, offCalls } = fakePort()
+    port.subscribeUpdate = () => { throw new Error('update subscription refused') }
+    assert.throws(() => controllerOf(port), /update subscription refused/)
+    assert.deepEqual(offCalls, { install: 1, update: 0, invalidation: 0 })
+  }
+  // A throwing invalidation subscription releases install AND update.
+  {
+    const { port, offCalls } = fakePort()
+    port.subscribeInvalidation = () => { throw new Error('invalidation subscription refused') }
+    assert.throws(() => controllerOf(port), /invalidation subscription refused/)
+    assert.deepEqual(offCalls, { install: 1, update: 1, invalidation: 0 })
+  }
+})
+
+test('update: dispose aborts an in-flight version read and never cancels the Host update', async () => {
+  let signal: AbortSignal | undefined
+  const fixture = await openedUpdate({
+    versionsImpl: (_name, versionSignal) => {
+      signal = versionSignal
+      return new Promise<PluginVersionListFact>(() => {})
+    },
+  })
+  const { controller, state, offCalls, updateSubscriptions } = fixture
+  assert.equal(updateSubscriptions(), 1)
+  controller.beginUpdate(bundleValue('updatable'))
+  await tick(2)
+  assert.ok(signal !== undefined)
+  assert.equal(signal.aborted, false)
+  controller.dispose()
+  assert.equal(signal.aborted, true, 'dispose aborts the un-sent version read')
+  assert.deepEqual(offCalls, { install: 1, update: 1, invalidation: 1 })
+  assert.equal(updateSubscriptions(), 0)
+  assert.equal(state.cancelCalls.length, 0, 'dispose never cancels a Host update')
+  assert.equal(state.updateCalls.length, 0)
+})
+
+test('update: request-id-matched events update the one log and duplicate steps do not advance semantics', async () => {
+  const updateGate = deferred<PluginUpdateResultFact>()
+  const fixture = await openedUpdate({ updateImpl: () => updateGate.promise })
+  const { controller, emit, emitUpdate } = fixture
+  controller.beginUpdate(bundleValue('updatable'))
+  await tick()
+  controller.confirmUpdateVersion()
+  controller.executeUpdate()
+  await tick(2)
+  const requestId = controller.updateView()?.requestId
+  assert.ok(requestId !== undefined)
+
+  const before = controller.semanticTransitionsCount()
+  emitUpdate({ requestId, step: 'installing' })
+  const after = controller.semanticTransitionsCount()
+  assert.ok(after > before, 'a real new step notifies')
+  emitUpdate({ requestId, step: 'installing' })
+  assert.equal(controller.semanticTransitionsCount(), after, 'a repeated step is not a new semantic transition')
+
+  emit({ kind: 'log', log: { requestId: 'some-other-install', jobId: 'job', stream: 'stdout', text: 'leaked' } })
+  assert.deepEqual(controller.updateView()?.log, [], 'another request id never leaks into the update log')
+  emit({ kind: 'log', log: { requestId, jobId: 'job', stream: 'stdout', text: 'target output' } })
+  assert.deepEqual(controller.updateView()?.log, ['target output'])
+  updateGate.resolve({
+    from: '1.0.0',
+    to: '1.1.0',
+    step: 'install',
+    result: change({ stage: 'install', application: 'applied', version: '1.1.0' }),
+  })
+  await tick(10)
+})
+
+test('update: begin refuses a bundle the Host does not declare updatable without any registry read', async () => {
+  const fixture = fakePort({
+    snapshotImpl: async () => snapshot([
+      updatable({ name: 'fixed', update: undefined }),
+      updatable({ name: '@vendor/official', official: true, availability: 'installation', source: undefined, update: undefined }),
+    ]),
+  })
+  const { controller } = controllerOf(fixture.port)
+  controller.open()
+  await tick()
+  for (const name of ['fixed', '@vendor/official']) {
+    controller.beginUpdate(bundleValue(name))
+    assert.equal(controller.updateView(), undefined)
+    assert.match(controller.notice() ?? '', /does not support Host updates/u)
+  }
+  assert.equal(fixture.state.listVersionCalls.length, 0)
+})
+
+test('update: the terminal done state waits for the authoritative reread', async () => {
+  const readGate = deferred<PluginManagerSnapshot>()
+  let reads = 0
+  const fixture = await openedUpdate({
+    snapshotImpl: async () => {
+      reads += 1
+      if (reads === 1) return snapshot([updatable({ version: '1.0.0' })])
+      return readGate.promise
+    },
+    updateImpl: async (_name, version) => ({
+      from: '1.0.0',
+      to: version,
+      step: 'install',
+      result: change({ stage: 'install', application: 'applied', version }),
+    }),
+  })
+  const { controller } = fixture
+  controller.beginUpdate(bundleValue('updatable'))
+  await tick()
+  controller.confirmUpdateVersion()
+  controller.executeUpdate()
+  await tick(10)
+  const settling = controller.updateView()!
+  assert.equal(settling.phase, 'running', 'the official result alone is never painted as done')
+  assert.equal(settling.settling, true)
+  assert.equal(settling.readback, 'pending')
+  assert.equal(settling.canStopTargetInstall, false, 'stop is closed once the Host already returned')
+  assert.equal(controller.busy(), bundleValue('updatable'), 'the write lock is held through the reread')
+  readGate.resolve(snapshot([updatable({ version: '1.1.0' })]))
+  await tick(10)
+  assert.equal(controller.updateView()?.phase, 'done')
+  assert.equal(controller.updateView()?.readback, 'ready')
+  assert.equal(controller.updateView()?.lastObservedVersion, '1.1.0')
+  assert.equal(controller.busy(), undefined)
+})
+
+test('update: a superseded authoritative reread never becomes ready', async () => {
+  let reads = 0
+  const fixture = await openedUpdate({
+    snapshotImpl: async () => {
+      reads += 1
+      if (reads > 1) throw new PluginManagerStaleResultError('snapshot')
+      return snapshot([updatable({ version: '1.0.0' })])
+    },
+    updateImpl: async (_name, version) => ({
+      from: '1.0.0',
+      to: version,
+      step: 'install',
+      result: change({ stage: 'install', application: 'applied', version }),
+    }),
+  })
+  const { controller } = fixture
+  controller.beginUpdate(bundleValue('updatable'))
+  await tick()
+  controller.confirmUpdateVersion()
+  controller.executeUpdate()
+  await tick(10)
+  const done = controller.updateView()!
+  assert.equal(done.phase, 'done')
+  assert.equal(done.readback, 'error', 'a superseded snapshot is NOT the authoritative readback')
+  assert.equal(done.lastObservedVersion, undefined)
+  assert.equal(controller.busy(), undefined)
+})
+
+test('update: a Host check-step refusal is a done result, not an indeterminate outcome', async () => {
+  const fixture = await openedUpdate({
+    updateImpl: async (_name, version) => ({
+      from: '1.0.0',
+      to: version,
+      step: 'check',
+      result: change({
+        stage: 'install',
+        application: 'failed',
+        error: { code: 'incompatible-version' },
+      }),
+    }),
+  })
+  const { controller } = fixture
+  controller.beginUpdate(bundleValue('updatable'))
+  await tick()
+  controller.confirmUpdateVersion()
+  controller.executeUpdate()
+  await tick(10)
+  const done = controller.updateView()!
+  assert.equal(done.phase, 'done')
+  assert.equal(done.result?.step, 'check')
+  assert.equal(done.result?.result.application, 'failed')
+  assert.equal(done.result?.restore, undefined)
+  assert.equal(done.readback, 'ready')
+})
+
+test('update: a failed target with a successful restore reports both outcomes separately', async () => {
+  const fixture = await openedUpdate({
+    updateImpl: async (_name, version) => ({
+      from: '1.0.0',
+      to: version,
+      step: 'install',
+      result: change({
+        stage: 'install',
+        application: 'failed',
+        error: { code: 'operation-error', diagnostic: 'target failed' },
+      }),
+      restore: change({ stage: 'install', application: 'applied', version: '1.0.0' }),
+    }),
+  })
+  const { controller } = fixture
+  controller.beginUpdate(bundleValue('updatable'))
+  await tick()
+  controller.confirmUpdateVersion()
+  controller.executeUpdate()
+  await tick(10)
+  const done = controller.updateView()!
+  assert.equal(done.result?.result.application, 'failed')
+  assert.equal(done.result?.restore?.application, 'applied')
+  assert.equal(done.result?.restore?.version, '1.0.0')
+})
+
+test('update: a read-only version preview never blocks the other plugin mutations', async () => {
+  const fixture = await openedUpdate()
+  const { controller, state } = fixture
+  controller.beginUpdate(bundleValue('updatable'))
+  await tick()
+  assert.equal(controller.updateView()?.phase, 'selecting')
+
+  // Toggle the same bundle while the read-only preview exists: it is admitted.
+  controller.toggleCard(bundleValue('updatable'))
+  await tick()
+  assert.equal(state.setBundle.length, 1, 'a registry preview never owns the Host write path')
+  // The mutation's authoritative reread revokes the stale preview.
+  assert.equal(controller.updateView()?.phase, 'selecting')
+  assert.equal(controller.updateView()?.versions, undefined)
+  assert.match(controller.updateView()?.message ?? '', /Bundle changed; check versions again/u)
+
+  // The other write entrances are admitted too.
+  assert.equal(controller.beginManualInstall(), true)
+  controller.hideInstall()
+  assert.equal(controller.requestRemove(bundleValue('updatable')), true)
+  controller.cancelConfirmation()
+})
+
+test('update: the read-only preview leaves Auto Review and row toggles admitted', async () => {
+  const fixture = fakePort({
+    snapshotImpl: async () => ({
+      bundles: [
+        updatable(),
+        bundle({
+          name: AUTO_REVIEW_BUNDLE,
+          enabled: true,
+          rows: [{ rowId: 'review-row', moduleName: 'review', entryId: 'e-review' }],
+        }),
+      ],
+      plugins: [{ entryId: 'e-review', moduleName: 'review', enabled: true, fiberPhase: 'active', patchId: 'review-row' }],
+      registries: { registry: null, fallbackRegistries: [], resolved: null },
+      exemptions: [],
+      exemptionWarnings: [],
+    }),
+  })
+  const { controller } = controllerOf(fixture.port)
+  controller.open()
+  await tick()
+  controller.beginUpdate(bundleValue('updatable'))
+  await tick()
+  assert.equal(controller.updateView()?.phase, 'selecting')
+  assert.equal(controller.requestAutoDisable(bundleValue(AUTO_REVIEW_BUNDLE)), true,
+    'the Auto Review confirmation is not blocked by a read-only preview')
+  controller.cancelConfirmation()
+  assert.equal(controller.toggleRow(bundleValue(AUTO_REVIEW_BUNDLE), 'e-review'), true,
+    'a row-level toggle is not blocked by a read-only preview')
+  controller.cancelConfirmation()
+})
+
+test('update: another bundle Check updates replaces a read-only preview', async () => {
+  const fixture = fakePort({
+    snapshotImpl: async () => snapshot([
+      updatable({ name: 'first' }),
+      updatable({ name: 'second' }),
+    ]),
+  })
+  const { controller } = controllerOf(fixture.port)
+  controller.open()
+  await tick()
+  controller.beginUpdate(bundleValue('first'))
+  await tick()
+  assert.equal(controller.updateView()?.name, 'first')
+  controller.beginUpdate(bundleValue('second'))
+  await tick()
+  assert.equal(controller.updateView()?.name, 'second')
+  assert.equal(controller.updateView()?.phase, 'selecting')
+  assert.deepEqual(fixture.state.listVersionCalls, [{ name: 'first' }, { name: 'second' }],
+    'the previous preview read is abandoned for the new bundle')
+})
+
+test('update: another mutation revokes an open confirmation before any write', async () => {
+  const fixture = await openedUpdate()
+  const { controller, state } = fixture
+  controller.beginUpdate(bundleValue('updatable'))
+  await tick()
+  controller.confirmUpdateVersion()
+  assert.equal(controller.updateView()?.phase, 'confirm')
+  controller.toggleCard(bundleValue('updatable'))
+  await tick()
+  assert.equal(state.setBundle.length, 1)
+  assert.equal(controller.updateView()?.phase, 'selecting')
+  assert.equal(controller.updateView()?.versions, undefined)
+  controller.executeUpdate()
+  await tick()
+  assert.equal(state.updateCalls.length, 0, 'a withdrawn confirmation never dispatches the Host update')
+})
+
+test('update: an official catalog install entry is admitted during a read-only preview', async () => {
+  const fixture = fakePort({
+    snapshotImpl: async () => snapshot([
+      updatable(),
+      bundle({
+        name: 'official-missing',
+        official: true,
+        availability: 'missing',
+        installed: false,
+        removable: false,
+        source: undefined,
+        installTarget: { spec: 'official-missing@1.0.0', version: '1.0.0' },
+      }),
+    ]),
+  })
+  const { controller } = controllerOf(fixture.port)
+  controller.open()
+  await tick()
+  controller.beginUpdate(bundleValue('updatable'))
+  await tick()
+  assert.equal(controller.updateView()?.phase, 'selecting')
+  assert.equal(controller.beginOfficialInstall(bundleValue('official-missing')), true,
+    'the official catalog install entry is not blocked by a read-only preview')
+  controller.dispose()
+})
+
+test('update: Check updates after a completed update starts a fresh lifecycle and never re-dispatches', async () => {
+  let check = 0
+  let installed = '1.0.0'
+  const updates: string[] = []
+  const fixture = fakePort({
+    snapshotImpl: async () => snapshot([updatable({ version: installed })]),
+    versionsImpl: async () => {
+      check += 1
+      const target = check === 1 ? '1.1.0' : '1.2.0'
+      return listed([stableVersion({ version: target }), stableVersion({ version: '9.9.9' })], { installed })
+    },
+    updateImpl: async (_name, version) => {
+      updates.push(version)
+      installed = version
+      return {
+        from: '1.0.0',
+        to: version,
+        step: 'install',
+        result: change({ stage: 'install', application: 'applied', version }),
+      }
+    },
+  })
+  const { controller } = controllerOf(fixture.port)
+  controller.open()
+  await tick()
+
+  // First update: 1.0.0 -> 1.1.0.
+  controller.beginUpdate(bundleValue('updatable'))
+  await tick()
+  controller.confirmUpdateVersion()
+  controller.executeUpdate()
+  await tick(10)
+  assert.equal(controller.updateView()?.phase, 'done')
+  assert.equal(controller.updateView()?.lastObservedVersion, '1.1.0')
+  const firstRequest = controller.updateView()?.requestId
+  assert.ok(firstRequest !== undefined)
+  assert.equal(fixture.state.updateCalls.length, 1)
+
+  // A completed update is historical evidence; Check updates… is a new intent.
+  controller.beginUpdate(bundleValue('updatable'))
+  assert.equal(controller.updateView()?.phase, 'checking', 'the done result is replaced by a fresh check')
+  await tick()
+  const second = controller.updateView()!
+  assert.equal(second.phase, 'selecting')
+  assert.equal(second.versions?.status, 'listed')
+  assert.equal(second.selectedExactVersion, '1.2.0')
+  assert.equal(second.requestId, undefined, 'the new check has no update request id')
+  assert.equal(second.result, undefined, 'the new check carries no previous result')
+  assert.equal(fixture.state.listVersionCalls.length, 2)
+  assert.equal(fixture.state.updateCalls.length, 1, 'a new check never re-dispatches the update')
+
+  controller.confirmUpdateVersion()
+  assert.equal(controller.updateView()?.phase, 'confirm')
+  controller.executeUpdate()
+  await tick(10)
+  assert.equal(fixture.state.updateCalls.length, 2)
+  assert.deepEqual(updates, ['1.1.0', '1.2.0'])
+  assert.equal(controller.updateView()?.phase, 'done')
+  assert.equal(controller.updateView()?.lastObservedVersion, '1.2.0')
+  assert.notEqual(controller.updateView()?.requestId, firstRequest, 'the second update has its own request id')
+})
+
+test('only a committed read emits the inventory callback; failures and superseded reads never do', async () => {
+  let fail = false
+  const committed: PluginManagerSnapshot[] = []
+  const snap = snapshot([bundle()])
+  const { port } = fakePort({
+    snapshotImpl: async () => {
+      if (fail) throw new Error('inventory unavailable')
+      return snap
+    },
+  })
+  const controller = new PluginManagerController(port, {
+    requestRender: () => {},
+    notify: () => {},
+    isOpen: () => true,
+    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+    onInventoryCommitted: value => { committed.push(value) },
+  }, { observations: () => [] })
+
+  controller.open()
+  await tick()
+  assert.equal(committed.length, 1)
+  assert.equal(committed[0], snap, 'the callback receives the exact committed snapshot')
+
+  fail = true
+  controller.refresh()
+  await tick()
+  assert.equal(committed.length, 1, 'a failed refresh never emits a committed inventory')
+  controller.dispose()
 })

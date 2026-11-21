@@ -69,7 +69,7 @@ export function createDirectSettingsFixture(overrides: Record<string, unknown> =
   })
   const forms: SettingsFormsLike = {
     describe: () => [{
-      ns: 'tui-app',
+      ns: 'pi-tui-preferences',
       value: { ...values },
       user: {},
       revision,

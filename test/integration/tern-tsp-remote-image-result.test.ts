@@ -12,12 +12,15 @@ import test from 'node:test'
 import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { dirname } from 'node:path'
+import { symbols, type Context } from '@deepseek-ai/cordis'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { mountRemotePresentationHost, mountRemoteRunner } from '../app/runner-remote-presentation.test.ts'
 import { waitFor } from '../support/remote-application-fixture.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { readTspBlobMessages } from '../support/tsp-blob-wire.ts'
+import type { TspWireFrame } from '../support/tsp-terminal-fixture.ts'
+import type { ImageAttachmentRefLike } from '../../src/domain/media/types.ts'
 
 const SESSION_ID = 'prc-remote-image-session'
 
@@ -31,11 +34,34 @@ async function realPng(): Promise<Uint8Array> {
 }
 
 interface AttachmentStore {
-  saveImages(inputs: readonly { data: Uint8Array; mediaType: string; name?: string }[]): Promise<readonly {
-    attachmentId: string; mediaType: string; bytes: number; width: number; height: number; name?: string
-  }[]>
+  saveImages(inputs: readonly { data: Uint8Array; mediaType: string; name?: string }[]): Promise<readonly ImageAttachmentRefLike[]>
+  readImage(ref: ImageAttachmentRefLike, signal?: AbortSignal): Promise<{ readonly ref: ImageAttachmentRefLike; readonly data: Uint8Array }>
 }
-interface HostSession { append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void }
+interface HostSession {
+  append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+  snapshotEvents(): readonly unknown[]
+}
+
+function currentToolIds(fixture: { readonly pane: { frames(): readonly TspWireFrame[] } }): string[] {
+  const ids = new Set<string>()
+  const visit = (node: { id?: string; k?: string; c?: readonly unknown[] } | undefined): void => {
+    if (node?.k === 'tool' && typeof node.id === 'string') ids.add(node.id)
+    for (const child of node?.c ?? []) visit(child as never)
+  }
+  for (const frame of fixture.pane.frames()) for (const op of frame.ops) {
+    if (op[0] === 'add') visit(op[4] as never)
+  }
+  return [...ids]
+}
+
+function expandToolCards(fixture: { readonly pane: { event(value: unknown): void; frames(): readonly TspWireFrame[] } }): void {
+  const frames = fixture.pane.frames()
+  const sf = frames.at(-1)?.sf
+  if (sf === undefined) throw new Error('the Remote pane has no frame to address the Tool disclosure')
+  for (const id of currentToolIds(fixture)) {
+    fixture.pane.event({ ev: 'toggle', sf, id, collapsed: false, key: id.slice(id.lastIndexOf('.') + 1), raw: {} })
+  }
+}
 
 function drewImage(wire: string, blobId: string): boolean {
   const imageIds = new Set<string>()
@@ -75,8 +101,10 @@ test('a Remote lifetime that retires while the read is open refuses the bytes, a
     // The REAL retained binding's read is gated, so the lifetime can retire
     // WHILE the read is open. The gate is a test-side seam on the client's
     // read method: the read itself still traverses the real Host.
+    await waitFor('the Remote TSP inline surface handshake completes before appending its first turn', () =>
+      pane.probed() && pane.openSurfaces().some(surface => surface.mode === 'inline'), 30_000)
     const clientSessions = fixture.aggregate.wire.client.sessions as unknown as {
-      binding(id: unknown): { session: { readAttachment(id: unknown): Promise<unknown> } } | undefined
+      binding(id: unknown): { session: { readAttachment(attachment: ImageAttachmentRefLike): Promise<unknown> } } | undefined
     }
     const retained = clientSessions.binding(SessionId(SESSION_ID))
     assert.ok(retained, 'the resumed Remote Session is retained by the real Client')
@@ -84,17 +112,17 @@ test('a Remote lifetime that retires while the read is open refuses the bytes, a
     const gate = new Promise<void>(resolve => { releaseRead = resolve })
     let readStarted = false
     const originalRead = retained.session.readAttachment
-    retained.session.readAttachment = async (id: unknown) => {
+    retained.session.readAttachment = async (attachment: ImageAttachmentRefLike) => {
       readStarted = true
       await gate
-      return originalRead.call(retained.session, id)
+      return originalRead.call(retained.session, attachment)
     }
 
     // The PRODUCTION Remote read seam is observed one-to-one: the unbound
     // original is called through `original.call`, and the outcome is recorded.
     const presentation = fixture.aggregate.presentation as unknown as {
       attachments: {
-        readDurableImage(sessionId: string, attachmentId: string, lifetime: unknown): Promise<unknown>
+        readDurableImage(sessionId: string, attachment: ImageAttachmentRefLike, lifetime: unknown): Promise<unknown>
       }
     }
     const outcomes: { readonly rejected?: string }[] = []
@@ -120,9 +148,9 @@ test('a Remote lifetime that retires while the read is open refuses the bytes, a
         },
       }, { surfaceOp: 'append' })
 
+      await waitFor('the Remote image Tool row to materialize', () => currentToolIds({ pane }).length > 0, 30_000)
+      expandToolCards({ pane })
       await waitFor('the REAL attachment read to start', () => readStarted, 20_000)
-
-      // The REAL Connection generation rolls over while the read is open: the
       // presentation's transport lifetime is retired under the read.
       const connection = fixture.aggregate.wire.client.connection as unknown as {
         generation: { getSnapshot(): { readonly id: number } | undefined }
@@ -176,7 +204,7 @@ test('a Remote tool-result image is authorized by its retained Session and reach
     const expectedBlobId = createHash('sha256').update(png).digest('hex')
 
     const clientSessions = fixture.aggregate.wire.client.sessions as unknown as {
-      binding(id: unknown): { session: { readAttachment(id: unknown): Promise<unknown> } } | undefined
+      binding(id: unknown): { session: { readAttachment(attachment: ImageAttachmentRefLike): Promise<unknown> } } | undefined
     }
     const retained = clientSessions.binding(SessionId(SESSION_ID))
     assert.ok(retained, 'the resumed Remote Session is retained by the real Client')
@@ -188,16 +216,16 @@ test('a Remote tool-result image is authorized by its retained Session and reach
     // names the exact production seam instead of "some read happened".
     const presentation = fixture.aggregate.presentation as unknown as {
       attachments: {
-        readDurableImage(sessionId: string, attachmentId: string, lifetime: unknown): Promise<unknown>
+        readDurableImage(sessionId: string, attachment: ImageAttachmentRefLike, lifetime: unknown): Promise<unknown>
       }
     }
     const durableReads: { sessionId: string; attachmentId: string; hasLifetime: boolean }[] = []
     const originalRead = presentation.attachments.readDurableImage
     presentation.attachments.readDurableImage = function patched(
-      this: unknown, sessionId: string, attachmentId: string, lifetime: unknown,
+      this: unknown, sessionId: string, attachment: ImageAttachmentRefLike, lifetime: unknown,
     ) {
-      durableReads.push({ sessionId, attachmentId, hasLifetime: lifetime !== undefined })
-      return originalRead.call(this, sessionId, attachmentId, lifetime)
+      durableReads.push({ sessionId, attachmentId: attachment.attachmentId, hasLifetime: lifetime !== undefined })
+      return originalRead.call(this, sessionId, attachment, lifetime)
     }
     try {
       session.append('turn/start', { turn: 1 })
@@ -217,6 +245,10 @@ test('a Remote tool-result image is authorized by its retained Session and reach
       // The `b` write is not the end of the chain: the `f` that references the
       // blob leaves the SDK later (frame credit), so the wait observes the frame
       // the assertions below read.
+      await waitFor('the Remote Tool node to materialize before disclosure', () =>
+        fixture.pane!.frames().some(frame => frame.ops.some(op => op[0] === 'add' && JSON.stringify(op[4]).includes('"k":"tool"'))), 30_000)
+      const pane = fixture.pane!
+      expandToolCards({ pane })
       await waitFor('the SDK emitted the admitted image blob and the frame that references it', () => {
         const sent = fixture.pane!.output.text()
         return fixture.pane!.blobIds().includes(expectedBlobId) && drewImage(sent, expectedBlobId)
@@ -267,16 +299,16 @@ test('a Remote USER body image is authorized by its retained Session and painted
     // original is saved and called through `original.call`, never `.bind`).
     const presentation = fixture.aggregate.presentation as unknown as {
       attachments: {
-        readDurableImage(sessionId: string, attachmentId: string, lifetime: unknown): Promise<unknown>
+        readDurableImage(sessionId: string, attachment: ImageAttachmentRefLike, lifetime: unknown): Promise<unknown>
       }
     }
     const durableReads: { sessionId: string; attachmentId: string; hasLifetime: boolean }[] = []
     const originalRead = presentation.attachments.readDurableImage
     presentation.attachments.readDurableImage = function patched(
-      this: unknown, sessionId: string, attachmentId: string, lifetime: unknown,
+      this: unknown, sessionId: string, attachment: ImageAttachmentRefLike, lifetime: unknown,
     ) {
-      durableReads.push({ sessionId, attachmentId, hasLifetime: lifetime !== undefined })
-      return originalRead.call(this, sessionId, attachmentId, lifetime)
+      durableReads.push({ sessionId, attachmentId: attachment.attachmentId, hasLifetime: lifetime !== undefined })
+      return originalRead.call(this, sessionId, attachment, lifetime)
     }
     try {
       // A REAL durable USER message whose content carries the image block.
@@ -331,7 +363,7 @@ test('a Remote USER body image whose read is refused after a generation rollover
     // Gate the REAL retained binding's read so the transport lifetime can
     // retire WHILE the read is open.
     const clientSessions = fixture.aggregate.wire.client.sessions as unknown as {
-      binding(id: unknown): { session: { readAttachment(id: unknown): Promise<unknown> } } | undefined
+      binding(id: unknown): { session: { readAttachment(attachment: ImageAttachmentRefLike): Promise<unknown> } } | undefined
     }
     const retained = clientSessions.binding(SessionId(BODY_SESSION_ID))
     assert.ok(retained, 'the resumed Remote Session is retained by the real Client')
@@ -339,10 +371,10 @@ test('a Remote USER body image whose read is refused after a generation rollover
     const gate = new Promise<void>(resolve => { releaseRead = resolve })
     let readStarted = false
     const originalRead = retained.session.readAttachment
-    retained.session.readAttachment = async (id: unknown) => {
+    retained.session.readAttachment = async (attachment: ImageAttachmentRefLike) => {
       readStarted = true
       await gate
-      return originalRead.call(retained.session, id)
+      return originalRead.call(retained.session, attachment)
     }
     try {
       session.append('user/message', {
@@ -376,6 +408,191 @@ test('a Remote USER body image whose read is refused after a generation rollover
     } finally {
       retained.session.readAttachment = originalRead
     }
+  } finally {
+    await fixture.dispose()
+  }
+})
+
+// ── S3-03 A: cross-Session attachment access and its authorization boundary ──
+
+/** The REAL Host attachment service behind Cordis' traceable service proxy. */
+function attachmentStoreOf(ctx: Context): AttachmentStore {
+  const traced = ctx.get('attachments') as unknown as AttachmentStore
+  const original = (traced as unknown as Record<PropertyKey, unknown>)[symbols.original]
+  return (original ?? traced) as AttachmentStore
+}
+
+interface ClientAttachmentOutcome {
+  readonly ok: boolean
+  readonly value?: { readonly attachment: ImageAttachmentRefLike; readonly data: Uint8Array }
+  readonly error?: { readonly code?: string; readonly details?: { readonly reason?: string } }
+}
+
+interface ClientSessionBinding {
+  readonly session: { readAttachment(attachment: ImageAttachmentRefLike): Promise<ClientAttachmentOutcome> }
+}
+
+function retainedBinding(
+  fixture: { readonly aggregate: { readonly wire: { readonly client: { readonly sessions: unknown } } } },
+  sessionId: string,
+): ClientSessionBinding {
+  const sessions = fixture.aggregate.wire.client.sessions as {
+    binding(id: unknown): ClientSessionBinding | undefined
+  }
+  const binding = sessions.binding(SessionId(sessionId))
+  assert.ok(binding, `the resumed Remote Session ${sessionId} is retained by the real Client`)
+  return binding
+}
+
+/** Seed the ONLY test-owned image in Session A's history; Session B never
+ *  references it. Both Sessions live on the same Host/AttachmentStore. */
+async function seedCrossSessionImage(
+  host: Awaited<ReturnType<typeof mountRemotePresentationHost>>,
+  sessionA: string,
+  sessionB: string,
+): Promise<{ readonly png: Uint8Array; readonly image: ImageAttachmentRefLike; readonly store: AttachmentStore }> {
+  await host.harness.create(SessionId(sessionA), { provider: 'smoke', model: 'smoke' } as never, { cwd: host.anchorDir })
+  await host.harness.create(SessionId(sessionB), { provider: 'smoke', model: 'smoke' } as never, { cwd: host.anchorDir })
+  const store = attachmentStoreOf(host.ctx)
+  const png = await realPng()
+  const image = (await store.saveImages([{ data: png, mediaType: 'image/png', name: 'cross-session.png' }]))[0]!
+  const owner = host.ctx.sessions.get(SessionId(sessionA)) as unknown as HostSession
+  owner.append('user/message', {
+    id: MessageId(`s3-cross-owner-${sessionA}`),
+    role: 'user',
+    content: [{ type: 'text', text: 'Session A owns the image' }, { type: 'image', attachment: image }],
+    source: { kind: 'user' },
+    turn: 1,
+  }, { surfaceOp: 'append' })
+  return { png, image, store }
+}
+
+test('a Session B that never referenced the image reads A\'s full ref from the same Host store', async t => {
+  const life = testLifecycle(t)
+  const SESSION_A = 's3-cross-store-a'
+  const SESSION_B = 's3-cross-store-b'
+  const host = await mountRemotePresentationHost(life, 'prc-cross-store-preset')
+  const { png, image, store } = await seedCrossSessionImage(host, SESSION_A, SESSION_B)
+  const sessionB = host.ctx.sessions.get(SessionId(SESSION_B)) as unknown as HostSession
+  assert.equal(JSON.stringify(sessionB.snapshotEvents()).includes(image.attachmentId), false,
+    'Session B history carries NO reference to the image')
+  const fixture = await mountRemoteRunner(life, {
+    presetId: 'prc-cross-store-preset', resumeSessionId: SESSION_B, host,
+    renderer: 'tsp', nativeImages: true,
+  })
+  const reads: string[] = []
+  const originalRead = store.readImage
+  store.readImage = function patched(this: unknown, ref: ImageAttachmentRefLike, signal?: AbortSignal) {
+    reads.push(ref.attachmentId)
+    return originalRead.call(this, ref, signal)
+  }
+  try {
+    const binding = retainedBinding(fixture, SESSION_B)
+    const outcome = await binding.session.readAttachment(image)
+    assert.equal(outcome.ok, true,
+      `the official client read resolves the full ref through Session B: ${JSON.stringify(outcome.error)}`)
+    assert.deepEqual(Array.from(outcome.value!.data), Array.from(png),
+      'the exact Host-store PNG bytes are returned')
+    assert.deepEqual(Array.from(outcome.value!.attachment.name ?? ''), Array.from('cross-session.png'))
+    assert.deepEqual(reads, [image.attachmentId],
+      'the REAL Host AttachmentStore served the read (not a test mirror)')
+  } finally {
+    store.readImage = originalRead
+    await fixture.dispose()
+  }
+})
+
+test('a non-owner Peer without session/attachment access is refused by the Gateway before the store', async t => {
+  const life = testLifecycle(t)
+  const SESSION_A = 's3-guest-a'
+  const SESSION_B = 's3-guest-b'
+  const host = await mountRemotePresentationHost(life, 'prc-guest-preset')
+  const { png, image, store } = await seedCrossSessionImage(host, SESSION_A, SESSION_B)
+  const fixture = await mountRemoteRunner(life, {
+    presetId: 'prc-guest-preset', resumeSessionId: SESSION_B, host,
+    renderer: 'tsp', nativeImages: true,
+  })
+  let storeReads = 0
+  const originalRead = store.readImage
+  store.readImage = function patched(this: unknown, ref: ImageAttachmentRefLike, signal?: AbortSignal) {
+    storeReads += 1
+    return originalRead.call(this, ref, signal)
+  }
+  const remoteAccess = host.ctx.get('remoteAccess') as {
+    registerPolicy(kind: string, policy: { bindings(): readonly unknown[] }): () => void
+  }
+  // A REAL policy for an independent non-owner Peer: no grant at all.
+  const disposePolicy = remoteAccess.registerPolicy('s3-guest', { bindings: () => [] })
+  const gateway = host.ctx.get('typertGateway') as {
+    invoke(request: unknown): Promise<unknown>
+  }
+  const controller = new AbortController()
+  const peer = {
+    id: 's3-guest-peer',
+    ctx: host.ctx,
+    principal: { kind: 's3-guest', guest: 's3-qualification' },
+    signal: controller.signal,
+    interactions: 'answer',
+    dispose: async () => {},
+  }
+  try {
+    // Positive control on the SAME ref/Host: the authorized owner Client read
+    // succeeds, so the denial below is authorization, not a broken reference.
+    const authorized = await retainedBinding(fixture, SESSION_B).session.readAttachment(image)
+    assert.equal(authorized.ok, true, 'the authorized owner read succeeds on the same ref')
+    assert.deepEqual(Array.from(authorized.value!.data), Array.from(png))
+    const ownerReads = storeReads
+    assert.equal(ownerReads > 0, true, 'the authorized read really reached the Host store')
+
+    await assert.rejects(gateway.invoke({
+      peer,
+      namespace: 'session',
+      method: 'attachment',
+      args: { request: { sessionId: SESSION_B, attachment: image } },
+    }), (error: unknown) => {
+      const failure = error as { code?: string; details?: { reason?: string } }
+      assert.equal(failure.code, 'remote-access/denied',
+        `the real Gateway refusal code: ${String(failure.code)}`)
+      assert.equal(failure.details?.reason, 'no-allow', 'the denial names the missing grant')
+      return true
+    })
+    assert.equal(storeReads, ownerReads,
+      'the refused non-owner call never reached the Host AttachmentStore')
+  } finally {
+    disposePolicy()
+    store.readImage = originalRead
+    await fixture.dispose()
+  }
+})
+
+test('an intrinsic full-ref mismatch is refused by the real store; display metadata is not a credential', async t => {
+  const life = testLifecycle(t)
+  const SESSION_A = 's3-integrity-a'
+  const SESSION_B = 's3-integrity-b'
+  const host = await mountRemotePresentationHost(life, 'prc-integrity-preset')
+  const { png, image } = await seedCrossSessionImage(host, SESSION_A, SESSION_B)
+  const fixture = await mountRemoteRunner(life, {
+    presetId: 'prc-integrity-preset', resumeSessionId: SESSION_B, host,
+    renderer: 'tsp', nativeImages: true,
+  })
+  try {
+    const binding = retainedBinding(fixture, SESSION_B)
+    // Same attachment identity, WRONG intrinsic byte length: the real store
+    // verifies the stored bytes against the full ref and refuses.
+    const corrupt = await binding.session.readAttachment({ ...image, bytes: image.bytes + 1 })
+    assert.equal(corrupt.ok, false, 'a mismatched intrinsic ref never resolves to bytes')
+    assert.equal(corrupt.error?.code, 'session/attachment-invalid')
+    assert.equal(corrupt.error?.details?.reason, 'ATTACHMENT_CORRUPT',
+      'the refusal is the real store integrity check')
+    assert.equal(corrupt.value, undefined, 'no zero-byte success is fabricated for the refusal')
+
+    // Display-only fields are preserved, not treated as intrinsic credentials.
+    const renamed = await binding.session.readAttachment({ ...image, name: 'display-name-only.png' })
+    assert.equal(renamed.ok, true, 'a display-field change is not an intrinsic mismatch')
+    assert.deepEqual(Array.from(renamed.value!.data), Array.from(png),
+      'the renamed display ref returns the exact stored bytes')
+    assert.equal(renamed.value!.attachment.name, 'display-name-only.png',
+      'the display name is preserved without becoming verification material')
   } finally {
     await fixture.dispose()
   }

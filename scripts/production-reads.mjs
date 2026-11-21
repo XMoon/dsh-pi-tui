@@ -121,7 +121,6 @@ export function productionReferences(source, fileDepth = 0) {
   // enumeration (whose per-file reads are not comparable, but whose BASE
   // is).
   const unresolvedIdentifiers = new Set()
-  const resolvedIdentifiers = new Set()
   const enumeratedTrees = new Set()
 
   const visit = (node) => {
@@ -268,7 +267,6 @@ export function productionReferences(source, fileDepth = 0) {
   }
   visit(file)
   for (const name of unresolvedIdentifiers) refs.push(`<unresolved:${name}>`)
-  for (const name of resolvedIdentifiers) refs.push(`<partial:${name}>`)
   // The same target can be reached twice (a directory base that is also an
   // enumeration base); the comparison is over SETS, so a duplicate carries
   // no information.

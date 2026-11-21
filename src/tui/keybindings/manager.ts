@@ -238,7 +238,7 @@ export class HostKeybindingManager {
     // Leader PREFIX collision (PR review finding + round-12 finding): the
     // leader key is fed BEFORE the host ladder AND before the plugin
     // stage, so a leader key that is ALSO an ACTIVE direct key of any
-    // host action (e.g. `leader: ctrl+f` swallows app.transcript.search)
+    // host action (e.g. `leader: ctrl+f` swallows app.transcript.search.view)
     // or a LIVE plugin binding would silently shadow it. Fail-soft: the
     // direct/plugin key wins, the leader machine is DISABLED, and the
     // collision is a diagnostic — never a silent shadow. A leader key

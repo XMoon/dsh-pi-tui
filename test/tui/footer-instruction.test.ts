@@ -12,10 +12,30 @@ test('exit confirmation instruction uses the effective key label', () => {
     })
     assert.deepEqual(instruction, {
       id: 'exit-confirm',
-      text: [{ text: `Press ${label} again to exit` }],
+      text: [
+        { text: 'Press ' },
+        { text: label, emphasis: 'strong' },
+        { text: ' again to exit' },
+      ],
       priority: 100,
     })
   }
+})
+
+test('the armed exit confirmation outranks a pending leader hint', () => {
+  assert.deepEqual(resolveFooterInstruction({
+    exitConfirmKeyLabel: 'Ctrl+D',
+    viewing: false,
+    leaderHint: 'Leader T',
+  }), {
+    id: 'exit-confirm',
+    text: [
+      { text: 'Press ' },
+      { text: 'Ctrl+D', emphasis: 'strong' },
+      { text: ' again to exit' },
+    ],
+    priority: 100,
+  })
 })
 
 test('viewing suppresses the parent exit instruction', () => {

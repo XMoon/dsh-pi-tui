@@ -14,10 +14,16 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { chmodSync, existsSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { DirectHostFilePort, resolveFdPath } from '../../src/runtime/direct/host-file-direct.ts'
+import { isExplicitHostFileQuery } from '../../src/runtime/direct/host-file-augmentation-direct.ts'
+import { discoverForQuery } from '../../src/domain/file-completion/discovery-policy.ts'
+import { resolvePathQuery } from '../../src/domain/file-completion/query.ts'
+import { RemoteHostFilePort } from '../../src/runtime/remote/host-file-remote.ts'
+import { createPiTuiHostFileReferenceRuntime } from '../../src/runtime/remote/pi-tui-file-reference-host-bridge.ts'
+import { createObservableGenerationHarness } from '../support/remote-generation.ts'
 import { DirectHostDiscoveryDriver } from '../../src/runtime/direct/file-completion/host-discovery.ts'
 import { ClientLocalDiscoveryDriver } from '../../src/client/file-completion/local-discovery.ts'
 import type { LocalDirectoryEntry } from '../../src/domain/file-completion/discovery-policy.ts'
@@ -61,10 +67,49 @@ function okItems(result: import('../../src/runtime/host-file-port.ts').HostFileL
   return result.items
 }
 
-/** The fallback-only adapter (fd forced absent) over a workspace scope. */
-function fallbackPort(root: string): DirectHostFilePort {
-  return new DirectHostFilePort((sessionId) =>
-    sessionId === 'session-live' ? { session: { header: { cwd: root } } } : undefined, null)
+/** The fallback-only adapter (fd forced absent) over a workspace scope. The
+ *  workspace scope resolves through the OFFICIAL Host registry + official
+ *  `WorkspaceFileSearch`, never a cwd and never the legacy scanner. */
+const WORKSPACE_ID = 'workspace-live'
+
+function workspaceContext(root: string, extra: {
+  readonly official?: unknown
+  /** The root every `get` answers (default: the fixture root). */
+  readonly workspace?: { readonly path: string } | undefined
+  /** The root `get` answers from the SECOND read onward (the post-scan
+   *  re-check): a replacement root, or `undefined` to simulate removal. */
+  readonly workspaceAfterFirst?: { readonly path: string } | undefined
+} = {}): { get(name: string): unknown } {
+  let reads = 0
+  const registry = {
+    create: async () => { throw new Error('the workspace fixture never creates') },
+    list: () => [],
+    get: (id: string) => {
+      if (id !== WORKSPACE_ID) return undefined
+      reads += 1
+      if (reads > 1 && 'workspaceAfterFirst' in extra) return extra.workspaceAfterFirst
+      return extra.workspace ?? { path: root }
+    },
+  }
+  return {
+    get(name: string) {
+      if (name === 'workspaceRegistry') return registry
+      if (name === 'fileReferences') return extra.official
+      return undefined
+    },
+  }
+}
+
+function workspaceScope(selectionRevision = 1): HostFileScope {
+  return { kind: 'workspace', workspaceId: WORKSPACE_ID, selectionRevision }
+}
+
+function fallbackPort(root: string, extra: Parameters<typeof workspaceContext>[1] = {}): DirectHostFilePort {
+  return new DirectHostFilePort(
+    (sessionId) => sessionId === 'session-live' ? { session: { header: { cwd: root } } } : undefined,
+    null,
+    workspaceContext(root, extra),
+  )
 }
 
 /** A recorded official `ctx.fileReferences` service stand-in. */
@@ -114,36 +159,143 @@ test('resolveFdPath finds an executable fd on PATH and returns null otherwise', 
   }
 })
 
-test('the fallback discovers paths from anywhere in the tree (path-only DTOs)', async (t) => {
+test('the workspace scope runs the OFFICIAL search: bare fuzzy, directory scope and the official exclusions', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
   const port = fallbackPort(root)
-  const file = okItems(await port.listReferences({ kind: 'workspace', cwd: root }, 'file'))
+  const file = okItems(await port.listReferences(workspaceScope(), 'file'))
   assert.ok(file.some(item => item.path === 'file-one.txt' && item.kind === 'file'),
     `file-one missing:\n${JSON.stringify(file)}`)
   assert.ok(file.some(item => item.path === 'file-two.ts' && item.kind === 'file'),
     `file-two missing:\n${JSON.stringify(file)}`)
-  const nested = okItems(await port.listReferences({ kind: 'workspace', cwd: root }, 'nested'))
+  const nested = okItems(await port.listReferences(workspaceScope(), 'deep'))
   assert.ok(nested.some(item => item.path === 'src/deep-nested.ts' && item.kind === 'file'),
     `nested file missing:\n${JSON.stringify(nested)}`)
-  const dirs = okItems(await port.listReferences({ kind: 'workspace', cwd: root }, 'src'))
+  const dirs = okItems(await port.listReferences(workspaceScope(), 'src'))
   assert.ok(dirs.some(item => item.path === 'src' && item.kind === 'directory'),
     `directory item missing:\n${JSON.stringify(dirs)}`)
   // A query into a nonexistent directory is an AUTHORITATIVE empty ok,
   // never an unavailable capability.
-  assert.deepEqual(await port.listReferences({ kind: 'workspace', cwd: root }, 'no-such-dir-zzz/'),
+  assert.deepEqual(await port.listReferences(workspaceScope(), 'no-such-dir-zzz/'),
     { kind: 'ok', items: [] })
+  // The official default exclusions apply: `.git` content never appears.
+  const ignored = okItems(await port.listReferences(workspaceScope(), 'config'))
+  assert.ok(!ignored.some(item => item.path.startsWith('.git/')),
+    `the official excluded directories stay out: ${JSON.stringify(ignored)}`)
 })
 
-test('the workspace compat path returns RAW paths — quoting is the official grammar, ranking is the adapter\'s', async (t) => {
+test('an UNSELECTED workspace scope answers unavailable without any Host read', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  let registryReads = 0
+  const ctx = {
+    get(name: string) {
+      if (name !== 'workspaceRegistry') return undefined
+      registryReads += 1
+      return { create: async () => { throw new Error('never') }, list: () => [], get: () => undefined }
+    },
+  }
+  const port = new DirectHostFilePort(() => undefined, null, ctx)
+  const result = await port.listReferences({ kind: 'workspace', selectionRevision: 1 }, 'file')
+  assert.equal(result.kind, 'unavailable')
+  assert.match(result.kind === 'unavailable' ? result.reason : '', /Choose a Host workspace first/u)
+  assert.equal(registryReads, 0, 'an unselected scope never touches the registry')
+
+  const missing = await port.listReferences({ kind: 'workspace', workspaceId: 'not-registered', selectionRevision: 2 }, 'file')
+  assert.equal(missing.kind, 'unavailable')
+  // The root is irrelevant here: the registry is the ONLY path authority.
+  assert.ok(root !== '')
+})
+
+test('an EXPLICIT workspace path scope enumerates the Host scope the user typed, bare fuzzy still bounds to the root', async (t) => {
+  const life = testLifecycle(t)
+  const { parent, root } = nestedWorkspace(life)
+  const port = fallbackPort(root)
+  // BARE fuzzy keeps the official index: a file OUTSIDE the registered root is
+  // never auto-discovered by a bare query (the official WorkspaceFileSearch
+  // only walks the root).
+  assert.deepEqual(await port.listReferences(workspaceScope(), 'foo'),
+    { kind: 'ok', items: [] }, 'bare fuzzy never scans outside the registered root')
+  // An explicit parent scope enumerates the outside directory and keeps the
+  // `../` prefix the user typed (Host cwd = the registry root).
+  assert.deepEqual(await port.listReferences(workspaceScope(), '../shared/'),
+    { kind: 'ok', items: [{ path: '../shared/foo.txt', kind: 'file' }] })
+  // An explicit ABSOLUTE Host scope enumerates outside with its absolute path.
+  assert.deepEqual(await port.listReferences(workspaceScope(), `${parent}/shared/`),
+    { kind: 'ok', items: [{ path: `${parent}/shared/foo.txt`, kind: 'file' }] })
+  // The home shorthand returns ABSOLUTE Host paths (never a literal `~/...`).
+  const home = await port.listReferences(workspaceScope(), '~/')
+  assert.equal(home.kind, 'ok')
+  if (home.kind === 'ok') {
+    assert.ok(home.items.length > 0, 'the Host HOME directory lists')
+    for (const item of home.items) {
+      assert.ok(isAbsolute(item.path) && !item.path.startsWith('~'),
+        `every home-shorthand candidate is an ABSOLUTE Host path: ${item.path}`)
+      assert.ok(item.path.startsWith(homedir()), `the Host HOME scope drives discovery: ${item.path}`)
+    }
+  }
+})
+
+test('an explicit workspace scope reaches officially-excluded and symlinked directories', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-hostfile-ws-excluded-')
+  mkdirSync(join(root, '.git'))
+  writeFileSync(join(root, '.git', 'config'), 'x')
+  const target = life.tempDir('dsh-hostfile-ws-target-')
+  writeFileSync(join(target, 'inside.ts'), 'x')
+  symlinkSync(target, join(root, 'shared-link'))
+  const port = fallbackPort(root)
+  // An explicitly named officially-excluded directory is searchable when typed.
+  assert.deepEqual(okItems(await port.listReferences(workspaceScope(), './.git/')),
+    [{ path: './.git/config', kind: 'file' }])
+  // An explicitly named symlink scope: searchable, never recursively descended.
+  assert.deepEqual(okItems(await port.listReferences(workspaceScope(), 'shared-link/')),
+    [{ path: 'shared-link/inside.ts', kind: 'file' }])
+})
+
+test('explicit workspace candidates are bare path/kind DTOs, keep the typed prefix and literal mentions', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
   const port = fallbackPort(root)
-  // The port answers "which Host files exist" in its own ranked order: no
-  // `@`, no quotes, no trailing slash. (The SESSION path's ranking is the
-  // official Host authority's; the WORKSPACE compatibility path ranks
-  // inside its adapter — the client only presents either way.)
-  const result = okItems(await port.listReferences({ kind: 'workspace', cwd: root }, 'my'))
+  const result = okItems(await port.listReferences(workspaceScope(), 'src/'))
+  const [item] = result
+  assert.ok(item !== undefined)
+  assert.deepEqual(Object.keys(item).sort(), ['kind', 'path'])
+  assert.deepEqual(result, [{ path: 'src/deep-nested.ts', kind: 'file' }])
+  // A quote/mention typed in the prompt stays literal on the workspace scope.
+  assert.equal(
+    await port.canonicalizeMentions(workspaceScope(), 'see @src/deep-nested.ts and "../shared/foo"'),
+    'see @src/deep-nested.ts and "../shared/foo"',
+  )
+})
+
+test('the bare/explicit classifier is a PURE token decision (POSIX and Windows adjacency)', () => {
+  const posix = { homeDir: '/home/x', windowsHost: false }
+  const windows = { homeDir: 'C:\\Users\\x', windowsHost: true }
+  // POSIX: `/` is the only separator; `\` is a filename character and is left
+  // to the official provider (fail closed), never claimed as a scope.
+  for (const raw of ['', 'foo', 'a\\b']) {
+    assert.equal(isExplicitHostFileQuery(raw, posix), false, `POSIX bare ${JSON.stringify(raw)}`)
+  }
+  for (const raw of ['.', '..', '~', 'src/', 'a/b', '/abs', '../shared', './']) {
+    assert.equal(isExplicitHostFileQuery(raw, posix), true, `POSIX explicit ${JSON.stringify(raw)}`)
+  }
+  // Windows: `\` is a separator too, and any win32-absolute form is explicit.
+  for (const raw of ['', 'foo']) {
+    assert.equal(isExplicitHostFileQuery(raw, windows), false, `Windows bare ${JSON.stringify(raw)}`)
+  }
+  for (const raw of ['.', '..', '~', 'C:/x', 'C:\\x', 'a\\b', '\\\\server\\share', 'src/']) {
+    assert.equal(isExplicitHostFileQuery(raw, windows), true, `Windows explicit ${JSON.stringify(raw)}`)
+  }
+})
+
+test('the workspace scope returns RAW paths — quoting is the official grammar, ranking is the Host authority\'s', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const port = fallbackPort(root)
+  // The Host authority owns ranking/quoting: the adapter returns the official
+  // `FileReferenceCandidate` values (no `@`, no quotes, no trailing slash).
+  const result = okItems(await port.listReferences(workspaceScope(), 'my file'))
   assert.ok(result.some(item => item.path === 'my file.txt' && item.kind === 'file'),
     `the spaced path flows through raw:\n${JSON.stringify(result)}`)
   assert.ok(result.every(item => !item.path.startsWith('@') && !item.path.includes('"') && !item.path.endsWith('/')),
@@ -158,7 +310,7 @@ test('resolveReference honors an already-aborted request as CANCELLATION (no fil
   // Cancellation is its own outcome (the M3-3A failure vocabulary): the
   // probe rejects, never reporting unavailable or asserting missing.
   await assert.rejects(
-    fallbackPort(root).resolveReference({ kind: 'workspace', cwd: root }, 'file-one.txt', { signal: controller.signal }),
+    fallbackPort(root).resolveReference(workspaceScope(), 'file-one.txt', { signal: controller.signal }),
     /aborted/u,
   )
 })
@@ -184,7 +336,7 @@ test('an abort mid-scan cancels the fallback discovery (a rejection, never unava
   const controller = new AbortController()
   controller.abort()
   await assert.rejects(
-    fallbackPort(root).listReferences({ kind: 'workspace', cwd: root }, '@file', { signal: controller.signal }),
+    fallbackPort(root).listReferences(workspaceScope(), '@file', { signal: controller.signal }),
     /aborted/u,
     'a cancelled discovery rejects — Direct and Remote share the one cancellation semantic')
 })
@@ -220,7 +372,7 @@ test('resolveReference probes existence with the mention resolution rules', asyn
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
   const port = fallbackPort(root)
-  const scope = { kind: 'workspace', cwd: root } as const
+  const scope = workspaceScope()
   assert.deepEqual(await port.resolveReference(scope, 'file-one.txt'), { kind: 'found', path: join(root, 'file-one.txt') })
   assert.deepEqual(await port.resolveReference(scope, './file-one.txt'), { kind: 'found', path: join(root, 'file-one.txt') })
   // Bare `~` resolves to the Host home directory itself, not `<cwd>/~`
@@ -236,7 +388,7 @@ test('canonicalizeMentions returns the text VERBATIM (the official mention seman
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
   const port = fallbackPort(root)
-  const scope = { kind: 'workspace', cwd: root } as const
+  const scope = workspaceScope()
   // The official client codec is `serialize: ref => ref` and the Host's
   // FILE_REFERENCE_PROMPT resolves relative paths from the workspace root:
   // the submitted text stays literal — on BOTH backends — with no
@@ -264,44 +416,12 @@ test('canonicalizeMentions returns the text VERBATIM (the official mention seman
 test('candidates are detached PATH-ONLY DTOs (path/kind — the official FileReferenceCandidate shape)', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
-  const [item] = okItems(await fallbackPort(root).listReferences({ kind: 'workspace', cwd: root }, 'file'))
+  const [item] = okItems(await fallbackPort(root).listReferences(workspaceScope(), 'file'))
   assert.ok(item !== undefined)
   assert.deepEqual(Object.keys(item).sort(), ['kind', 'path'])
   assert.equal(typeof item.path, 'string')
   assert.ok(item.kind === 'file' || item.kind === 'directory')
 })
-
-test('the workspace scanner exposes a symlinked directory but never descends it (TS8-A parity)', async (t) => {
-  const life = testLifecycle(t)
-  const root = life.tempDir('dsh-hostfile-symlink-')
-  mkdirSync(join(root, 'real'))
-  writeFileSync(join(root, 'real', 'inside.ts'), 'x')
-  symlinkSync('real', join(root, 'linkdir'))
-  mkdirSync(join(root, 'dir'))
-  symlinkSync(join('..', 'real'), join(root, 'dir', 'nested-link'))
-  const scope = { kind: 'workspace', cwd: root } as const
-  const port = fallbackPort(root)
-  // The symlink itself stays a DIRECTORY candidate: a `@linkdir/` accept still
-  // continues into the link.
-  const link = okItems(await port.listReferences(scope, 'lin'))
-  assert.ok(link.some(item => item.path === 'linkdir' && item.kind === 'directory'),
-    `the symlinked directory is still a candidate: ${JSON.stringify(link)}`)
-  // Its target's children are never enumerated — at the root and below it alike
-  // (a descended symlink would rank `linkdir/inside.ts` exactly like the real
-  // `real/inside.ts`, so this assertion is discriminating).
-  const inside = okItems(await port.listReferences(scope, 'inside'))
-  const paths = inside.map(item => item.path)
-  assert.ok(paths.includes('real/inside.ts'), `the real directory is traversed: ${JSON.stringify(paths)}`)
-  assert.ok(!paths.some(path => path.startsWith('linkdir/')), `a root symlink must not be descended: ${JSON.stringify(paths)}`)
-  assert.ok(!paths.some(path => path.startsWith('dir/nested-link/')), `a deeper symlink must not be descended: ${JSON.stringify(paths)}`)
-  // A scoped listing still reads the directory the user EXPLICITLY named (the
-  // readdir follows the link) — the non-descent rule governs only the automatic
-  // bounded subtree scan, not an explicit scope.
-  const listed = okItems(await port.listReferences(scope, 'linkdir/'))
-  assert.deepEqual(listed.map(item => item.path), ['linkdir/inside.ts'])
-})
-
-// ── the fd-backed branch (the fork's whole-tree fuzzy search) ─────────────
 
 /** A fake `fd` executable: a script that prints the fixture's RELATIVE
  * paths the way real fd does (directories with a trailing `/`). The fork
@@ -314,56 +434,31 @@ function fakeFd(life: TestLifecycle, body: string): string {
   return script
 }
 
-test('the fd branch delegates to the fork fuzzy search and returns path-only candidates', async (t) => {
-  const life = testLifecycle(t)
-  const root = fixtureWorkspace(life)
-  const port = new DirectHostFilePort(() => undefined, fakeFd(life,
-    `printf 'file-one.txt\\nfile-two.ts\\nsrc/\\nsrc/deep-nested.ts\\n'`))
-  const scope = { kind: 'workspace', cwd: root } as const
-  const hits = okItems(await port.listReferences(scope, 'file'))
-  const paths = hits.map(candidate => candidate.path)
-  assert.ok(paths.includes('file-one.txt') || paths.includes('file-two.ts'),
-    `the fd candidates flow through as path-only DTOs:\n${JSON.stringify(paths)}`)
-  const [item] = hits
-  assert.ok(item !== undefined)
-  assert.deepEqual(Object.keys(item).sort(), ['kind', 'path'])
-})
-
-test('the fd branch returns RAW paths — quoting is client-side', async (t) => {
-  const life = testLifecycle(t)
-  const root = fixtureWorkspace(life)
-  const port = new DirectHostFilePort(() => undefined, fakeFd(life,
-    `printf 'my file.txt\\nsrc/\\nsrc/deep-nested.ts\\n'`))
-  const hits = okItems(await port.listReferences({ kind: 'workspace', cwd: root } as const, 'my file'))
-  assert.ok(hits.some(candidate => candidate.path === 'my file.txt' && candidate.kind === 'file'),
-    `a spaced fd candidate must flow through as a RAW path:\n${JSON.stringify(hits.map(h => h.path))}`)
-})
-
-test('an abort mid-fd-query cancels as a REJECTION (the port re-checks AFTER the await)', async (t) => {
-  const life = testLifecycle(t)
-  const root = fixtureWorkspace(life)
-  // A fake fd that would answer eventually but sleeps past the abort.
-  const port = new DirectHostFilePort(() => undefined, fakeFd(life, 'sleep 30'))
-  const controller = new AbortController()
-  const pending = port.listReferences({ kind: 'workspace', cwd: root } as const, '@file', { signal: controller.signal })
-  controller.abort()
-  await assert.rejects(pending, /aborted/u, 'a cancelled fd query never serves a late result and never reports unavailable')
-})
-
-test('a failing fd falls back to the bounded scan (plan §6.2 fd-first-fallback)', async (t) => {
-  const life = testLifecycle(t)
-  const root = fixtureWorkspace(life)
-  // Non-zero exit: fd failed (a broken invocation). The plan's §6.2
-  // contract is fd-FIRST, BOUNDED-FALLBACK — a failure is NOT a valid
-  // empty result, so the recursive scan answers.
-  const port = new DirectHostFilePort(() => undefined, fakeFd(life, 'exit 3'))
-  const candidates = okItems(await port.listReferences({ kind: 'workspace', cwd: root } as const, 'file'))
-  assert.ok(candidates.length > 0, 'a failed fd must fall back to the bounded scan')
-  assert.ok(
-    candidates.some(candidate => candidate.path.includes('file-one.txt')),
-    `the fallback must find the fixture file:\n${JSON.stringify(candidates)}`,
-  )
-})
+/** A scripted fake `fd` over a records file: it records its argv and honours
+ * fd's own `--max-results` bound, so an early-output cutoff in the production
+ * argument list is observable as BEHAVIOUR, not only as text. */
+function scriptedFd(
+  life: TestLifecycle,
+  records: readonly string[],
+): { path: string; argsFile: string } {
+  const dir = life.tempDir('dsh-scriptedfd-')
+  const recordFile = join(dir, 'records.bin')
+  writeFileSync(recordFile, records.map(record => `${record}\0`).join(''))
+  const argsFile = join(dir, 'args.txt')
+  const path = join(dir, 'fd')
+  writeFileSync(path, `#!/usr/bin/env node
+const fs = require('node:fs')
+const args = process.argv.slice(2)
+fs.writeFileSync(${JSON.stringify(argsFile)}, args.join('\\n'))
+const maxIndex = args.indexOf('--max-results')
+const max = maxIndex === -1 ? Infinity : Number(args[maxIndex + 1])
+const records = fs.readFileSync(${JSON.stringify(recordFile)}, 'utf8').split('\\u0000')
+if (records.at(-1) === '') records.pop()
+process.stdout.write(records.slice(0, max).map(record => record + '\\u0000').join(''))
+`)
+  chmodSync(path, 0o755)
+  return { path, argsFile }
+}
 
 // ── session-vs-workspace routing (source -> route -> sink) ────────────────
 
@@ -450,14 +545,14 @@ test('a BARE session query routes to the official service ONLY — the Host scan
     const sessionCalls = [...calls]
     assert.deepEqual(sessionCalls, [], 'no Host find/listDirectory call for a bare session query')
     assert.equal(existsSync(marker), false, 'the Host finder process never spawned for a bare session query')
-    // POSITIVE CONTROL: the WORKSPACE scope DOES enter the production driver (the
-    // finder method AND the direct-child merge listing), so neither witness is
-    // vacuous.
-    const workspace = await port.listReferences({ kind: 'workspace', cwd: root }, 'file')
-    assert.ok(workspace.kind === 'ok' && workspace.items.length > 0, 'the workspace scope answers locally')
-    assert.ok(calls.some(entry => entry.startsWith('find:')), `the workspace scope enters find(): ${JSON.stringify(calls)}`)
-    assert.ok(calls.some(entry => entry.startsWith('list:')), `the workspace merge lists children: ${JSON.stringify(calls)}`)
-    assert.equal(existsSync(marker), true, 'the workspace scope runs the finder process')
+    // POSITIVE CONTROL: the EXPLICIT session scope DOES enter the production
+    // driver (and its finder process), so neither witness is vacuous.
+    const explicit = await port.listReferences({ kind: 'session', sessionId: 'session-live' }, 'src/')
+    assert.ok(explicit.kind === 'ok' && explicit.items.length > 0, 'the explicit scope answers from the Host scanner')
+    assert.ok(calls.some(entry => entry.startsWith('find:') || entry.startsWith('list:')),
+      `the explicit scope enters the Host driver: ${JSON.stringify(calls)}`)
+    assert.equal(existsSync(marker), false,
+      'the explicit directory listing does not need the whole-tree finder process')
   } finally {
     restoreDirect()
   }
@@ -501,6 +596,37 @@ test('an EXPLICIT session path scope routes to the Host scanner ONLY — the off
   }
 })
 
+test('an explicit Host @ scope keeps a late high-score directory and never caps the finder argv', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-hostfile-late-')
+  mkdirSync(join(root, 'de', 'nested', 'x-deep'), { recursive: true })
+  writeFileSync(join(root, 'de', 'deep-nested.ts'), 'x')
+  // 120 weaker file matches stream out first (basename prefix, score 80); the
+  // high-score directory (80 + 10) is emitted LAST, beyond the retired
+  // 100-record finder cap. It is NESTED so the neutral root direct-child merge
+  // cannot re-add it independently of the finder record.
+  const records = Array.from({ length: 120 }, (_value, index) =>
+    `x-filler-${String(index).padStart(3, '0')}.txt`)
+  records.push('nested/x-deep/')
+  const finder = scriptedFd(life, records)
+  const live = { session: { header: { cwd: root } } }
+  // No Host context: the EXPLICIT scoped route never consults the official
+  // provider, so the scoped finder is the only source here.
+  const port = new DirectHostFilePort(
+    (sessionId) => sessionId === 'session-live' ? live : undefined,
+    finder.path,
+  )
+  const items = okItems(await port.listReferences(
+    { kind: 'session', sessionId: 'session-live' },
+    'de/x',
+  ))
+  const args = readFileSync(finder.argsFile, 'utf8').split(/\r?\n/)
+  assert.ok(!args.includes('--max-results'),
+    `the Host finder must not truncate before ranking: ${JSON.stringify(args)}`)
+  assert.ok(items.some(item => item.path === 'de/nested/x-deep' && item.kind === 'directory'),
+    `the late Host-directory match must survive the union: ${JSON.stringify(items)}`)
+})
+
 test('the explicit session scope reaches excluded, symlinked and absolute Host directories through the port', async (t) => {
   const life = testLifecycle(t)
   const root = life.tempDir('dsh-hostfile-scopes-')
@@ -523,6 +649,78 @@ test('the explicit session scope reaches excluded, symlinked and absolute Host d
   // A Host-absolute scope outside the workspace, with no containment rule.
   assert.deepEqual(okItems(await port.listReferences(scope, `${outside}/logs/`)),
     [{ path: `${outside}/logs/a.log`, kind: 'file' }])
+})
+
+test('a Host finder record over the IO bound is a finder failure with the bounded fallback', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-hostfile-overbound-')
+  writeFileSync(join(root, 'fallback-needle.txt'), 'x')
+  // One NUL-terminated record longer than the guard: the Host run fails and
+  // the bounded scan answers, like the Client adapter.
+  const finder = scriptedFd(life, ['x'.repeat(65_600)])
+  const live = { session: { header: { cwd: root } } }
+  const port = new DirectHostFilePort(
+    (sessionId) => sessionId === 'session-live' ? live : undefined,
+    finder.path,
+  )
+  const items = okItems(await port.listReferences(
+    { kind: 'session', sessionId: 'session-live' },
+    // EXPLICIT scope: the Host finder owns this route (a bare query belongs
+    // to the official provider, which this case does not exercise).
+    `${root}/needle`,
+  ))
+  assert.ok(items.some(item => item.path === join(root, 'fallback-needle.txt')),
+    `the bounded fallback answers: ${JSON.stringify(items)}`)
+  assert.ok(!items.some(item => item.path.length > 65_536),
+    'the over-bound Host record never surfaces as a candidate')
+})
+
+test('a Host finder run over the wall budget is a failure with the bounded fallback', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-hostfile-budget-')
+  writeFileSync(join(root, 'fallback-needle.txt'), 'x')
+  // Amendment D4 on the Host locality: the same neutral budget, the same
+  // failure semantics, proven at the Host driver's owning seam (the port-level
+  // routing is covered by the other cases). A short injected budget keeps the
+  // case deterministic.
+  const finder = fakeFd(life, `printf '%s\\0' 'finder-only-needle.txt'; sleep 5`)
+  const driver = new DirectHostDiscoveryDriver(finder, 50)
+  const candidates = await driver.find(root, 'needle', abort)
+  assert.ok(candidates === null, 'an over-budget Host run is a finder FAILURE, never a partial success')
+  const fallback = await discoverForQuery(
+    resolvePathQuery(`${root}/needle`, root, { homeDir: homedir(), windowsHost: false }),
+    driver,
+    abort,
+  )
+  // The scope's OWN matching direct child answered (amendment D2: a direct
+  // match needs no finder and no subtree scan), and the killed finder
+  // contributed nothing.
+  assert.ok(fallback.some(item => item.path === 'fallback-needle.txt'),
+    `the scope still answers after the budget: ${JSON.stringify(fallback)}`)
+  assert.ok(!fallback.some(item => item.path.includes('finder-only-needle')),
+    'a killed Host finder contributes no partial match')
+})
+
+test('a Host NUL-free run that crosses the budget inside finish() settles as failure', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-hostfile-budget-newline-')
+  // Decisive RFL-005 witness on the Host locality: the finder closes inside
+  // the budget (first clock call), then the clock crosses the deadline before
+  // the post-finish check. With the old implementation (no post-finish check)
+  // the Host adapter would publish the partial newline records as success.
+  const finder = fakeFd(life, `printf 'needle-one\nneedle-two\nneedle-three\n'`)
+  // Call 1 establishes the deadline, call 2 is the close handler's
+  // pre-finish check (still inside budget); call 3 is the post-finish check
+  // (over budget) and must be the deciding failure point.
+  let calls = 0
+  const scriptedNow = (): number => {
+    calls += 1
+    return calls <= 2 ? 100 : 1000
+  }
+  const driver = new DirectHostDiscoveryDriver(finder, 500, scriptedNow)
+  const result = await driver.find(root, 'needle', abort)
+  assert.equal(result, null,
+    'a run crossing the budget during finish() is a finder FAILURE, never a partial success')
 })
 
 test('the Host-home shorthand returns an ABSOLUTE Host path, never a literal ~/... value', async (t) => {
@@ -605,10 +803,83 @@ test('the provider-level Session @ path never falls back to the Client filesyste
       `the Client witness fires on the Client chain: ${JSON.stringify(clientCalls)}`)
     assert.ok(clientCalls.some(entry => entry.startsWith('list:')),
       `the Client witness observes the fallback listing too: ${JSON.stringify(clientCalls)}`)
-    const workspace = await port.listReferences({ kind: 'workspace', cwd: root }, 'file')
-    assert.ok(workspace.kind === 'ok' && workspace.items.length > 0, 'the workspace scope answers locally')
-    assert.ok(directCalls.length > 0, `the Direct witness fires on the workspace scope: ${JSON.stringify(directCalls)}`)
+    // The WORKSPACE scope uses the OFFICIAL search, so it does not touch the
+    // Direct scanner at all (the scope no longer has a legacy scan path).
+    const workspacePort = new DirectHostFilePort(() => undefined, finder, workspaceContext(root))
+    const workspace = await workspacePort.listReferences(workspaceScope(), 'file')
+    assert.ok(workspace.kind === 'ok' && workspace.items.length > 0, 'the workspace scope answers from the official search')
+    assert.deepEqual(directCalls, [], 'the official workspace scope never enters the Direct scanner')
   } finally {
     restore()
   }
+})
+
+test('Direct and Remote resolve the SAME workspace query through the ONE shared bare + explicit Host semantics', async (t) => {
+  const life = testLifecycle(t)
+  const { parent, root } = nestedWorkspace(life)
+  writeFileSync(join(root, 'my file.txt'), 'x')
+  mkdirSync(join(root, 'node_modules'))
+  writeFileSync(join(root, 'node_modules', 'dep.ts'), 'x')
+  const direct = fallbackPort(root)
+  const runtime = createPiTuiHostFileReferenceRuntime({
+    agentFor: () => undefined,
+    official: () => undefined,
+    // Deterministic bounded fallback on BOTH sides so the parity compares the
+    // shared policy, never a machine-specific fd availability.
+    fdPath: null,
+    workspaces: () => ({ get: id => id === WORKSPACE_ID ? { path: root } : undefined }),
+  })
+  const generation = createObservableGenerationHarness()
+  const remote = new RemoteHostFilePort({
+    list: async () => { throw new Error('the parity fixture never uses the session verb') },
+    listWorkspace: async (workspaceId, query, signal) => ({
+      ok: true,
+      value: await runtime.listWorkspace(workspaceId, query, signal ?? new AbortController().signal),
+    }),
+  }, generation.source)
+  try {
+    // BARE fuzzy, a bare directory name, and EXPLICIT scopes (relative,
+    // absolute, parent `..`) must all answer identically across the backends.
+    for (const query of ['', 'file', 'my file', 'src', 'src/', 'deep', 'no-such-zzz/', './', 'src/de', '../shared/', `${parent}/shared/`]) {
+      assert.deepEqual(
+        await remote.listReferences(workspaceScope(1), query),
+        await direct.listReferences(workspaceScope(1), query),
+        `the two backends must return the same candidates for ${JSON.stringify(query)}`,
+      )
+    }
+    // The official exclusions hold on both: the ONLY `hidden` match lives in
+    // node_modules, so both backends answer an authoritative empty bare list.
+    assert.deepEqual(await direct.listReferences(workspaceScope(), 'hidden'),
+      { kind: 'ok', items: [] })
+    assert.deepEqual(await remote.listReferences(workspaceScope(), 'hidden'),
+      { kind: 'ok', items: [] })
+  } finally {
+    runtime.dispose()
+  }
+})
+
+test('a Workspace replaced or removed during the Direct official scan retires the stale candidates', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const replacedRoot = life.tempDir('dsh-hostfile-replaced-')
+  writeFileSync(join(replacedRoot, 'replaced.ts'), 'x')
+
+  // The registry's SECOND read (the post-scan re-check) answers the
+  // replacement root: the first scan's candidates belong to the old tree.
+  const replaced = fallbackPort(root, { workspaceAfterFirst: { path: replacedRoot } })
+  const result = await replaced.listReferences(workspaceScope(), 'file')
+  assert.equal(result.kind, 'unavailable')
+  assert.match(result.kind === 'unavailable' ? result.reason : '', /changed during discovery/u,
+    `the replaced root must not present the old scan: ${JSON.stringify(result)}`)
+
+  // A REMOVED registration during the scan is the same fence: no stale ok.
+  const removed = fallbackPort(root, { workspaceAfterFirst: undefined })
+  const gone = await removed.listReferences(workspaceScope(), 'file')
+  assert.equal(gone.kind, 'unavailable')
+  assert.match(gone.kind === 'unavailable' ? gone.reason : '', /changed during discovery/u)
+
+  // POSITIVE CONTROL: an unchanged registry still answers from the scan.
+  const stable = fallbackPort(root)
+  const ok = await stable.listReferences(workspaceScope(), 'file')
+  assert.ok(ok.kind === 'ok' && ok.items.length > 0, 'the unchanged registry keeps its answer')
 })

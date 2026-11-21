@@ -143,7 +143,7 @@ test('a failed newer operation restores the nearest UNRESOLVED ancestor (never e
   assert.equal(tracker.outcome, 'committed')
 })
 
-test('reconcile converges CONSECUTIVE unresolved ancestors with one authoritative snapshot', () => {
+test('reconcile CONFIRMS the active unresolved intent only on a matching snapshot (never fails a mismatch)', () => {
   const tracker = new DefaultIntentTracker()
   tracker.set(a)
   const idA = tracker.record!.id
@@ -151,20 +151,23 @@ test('reconcile converges CONSECUTIVE unresolved ancestors with one authoritativ
   tracker.set(b)
   const idB = tracker.record!.id
   tracker.settle(idB, 'unresolved')
-  // One authoritative read proves the persisted default is A.
+  // A snapshot proving an OLDER value A must NOT negate the newer unresolved B:
+  // the official save is async and may still commit after this read.
   tracker.reconcile(selection => selection === a)
-  assert.equal(tracker.intent, undefined, 'the matching unresolved ancestor commits')
-  assert.equal(tracker.outcome, 'committed', 'one reconciliation call converges the whole chain')
+  assert.deepEqual(tracker.intent, b, 'a non-matching snapshot leaves the unresolved intent untouched')
+  assert.equal(tracker.outcome, 'unresolved', 'a non-matching snapshot never fails the choice')
+  // A snapshot proving B confirms it.
+  tracker.reconcile(selection => selection === b)
+  assert.equal(tracker.intent, undefined, 'the matching unresolved intent commits')
+  assert.equal(tracker.outcome, 'committed')
 })
 
-test('reconcile stops at a restored PENDING ancestor (the sessionless marker derives from it)', () => {
+test('reconcile never fails a non-matching unresolved intent (an older snapshot is not proof)', () => {
   const tracker = new DefaultIntentTracker()
-  tracker.set(a) // A is pending (its write has not settled)
-  tracker.set(b)
-  const idB = tracker.record!.id
-  tracker.settle(idB, 'unresolved')
-  // An authoritative read matches nothing: B fails, A (pending) is restored.
+  tracker.set(a)
+  const id = tracker.record!.id
+  tracker.settle(id, 'unresolved')
   tracker.reconcile(() => false)
-  assert.deepEqual(tracker.intent, a, 'the pending ancestor becomes the active intent again')
-  assert.equal(tracker.outcome, undefined, 'a restored pending ancestor has no settled outcome')
+  assert.deepEqual(tracker.intent, a, 'the unresolved intent survives a non-matching read')
+  assert.equal(tracker.outcome, 'unresolved', 'the explicit unconfirmed state is preserved')
 })

@@ -190,7 +190,7 @@ can be reviewed against a frame:
 | 11 | Diagnostic line | `textMuted` | no | `Scope: … · Refreshed 09:41` |
 | 12 | Count / position | `textMuted` | no | `2 editable rows`, `rows 7-40/40`, `3/8 checks` |
 | 13 | Action hint | `textMuted` | no | `Esc back`, `Enter details` |
-| 14 | Affordance (clickable/keyed verb) | `primary` | no | `↗ Command`, `Copy All [C]`, `Change…`, `x remove` (fullscreen draft preview) |
+| 14 | Affordance (clickable/keyed verb) | `primary` (except the Fullscreen dense Action Bars listed in §7.1) | no | `↗ Command`, `Copy All [C]`, `Change…`, `x remove` (fullscreen draft preview) |
 | 15 | Rule / gutter | `border` | no | `─`, 2-cell column gutter |
 | 16 | Placeholder / empty state | `textDim`, and `error` for the word of a *failed* one | no | `No matching commands`, `Model catalog unavailable: …`, `Waiting for retained output…` |
 | 17 | Notice | `textMuted` (info) / `error` (error) | no | `ℹ Copy sent`, `✗ Copy failed` |
@@ -704,7 +704,41 @@ anchor, without inventing a fourth meaning for `primary`.
   body. Plugin Diagnostics, the Models/Account pages and every other surface's
   business copy keep their own affordances; this rule is scoped to Settings
   About alone.
-- Affordances are `primary` (role 14).
+- Affordances are `primary` (role 14), with an Owner-scoped exception for the
+  PiTui Fullscreen DENSE Action Bars. There the primary forward/commit verb
+  (Question: Continue, Review, Next, Submit, Confirm stop; Task Center:
+  Confirm stop; Session: Open, Choose, Results, Verify, Expand, Collapse)
+  paints `text`, the secondary verbs (Skip, Edit, Back, Cancel, Cancel flow,
+  Leave edit, Stop, Peek, Close, Clear, Hide, Wait, Keep editing, Done, and
+  the Job/Command bar's `Output`/`Leave find`) paint `textDim`; the Viewer's
+  one-step `Stop [Key]` is such a secondary verb (it has no confirm step), and pure keyboard hints, `[Key]` caps and ` · ` separators paint
+  `textMuted`. The difference is brightness only: no bold, no `primary` flood,
+  no background, border, icon or new glyph. The exception is scoped to the
+  dense Action Bars of the PiTui Fullscreen Question/Task Center seats and the
+  Job, Output Viewer, Session Workspace, Settings (root and its hosted
+  About/Models/Account/Plugin/Footer/Keybindings/specialist pages) fullscreen
+  surfaces; every other affordance keeps Role 14 `primary` and no other panel
+  adopts the treatment automatically. A clickable dense-bar segment renders
+  `Verb [Key]` (or a bare `Verb` when no key can be named) and the keycap alone
+  is muted; the same segment is never also painted as a plain `<Key> <verb>`
+  hint. Extending the scope further is a spec change (§11.1) with an explicit
+  Owner decision.
+- **Footer navigation exception (Status bar, not an Action Bar).** The PiTui
+  Fullscreen root footer keeps its status-bar grammar: existing badges, tones,
+  separators and the physical row budget are unchanged, and NO new affordance
+  is painted (no frame, background, hover, arrow or `primary` flood). Only the
+  two first-party builtin placements `model` and `tasks` accept a same-cell
+  pointer click while they are completely visible and the main subject owns
+  them: `model` opens the SAME registered `/model` picker, `tasks` opens the
+  SAME Full Task Center as `/tasks`. The item's whole visible placement
+  (configured prefix/suffix included) is the target. Inert: a dropped,
+  compacted-away or truncated placement; separators and alignment gaps; the
+  Host instruction row; whole-footer command output; custom/extension items
+  that merely spell the same words; a viewed child subject (its `model` names
+  the child while `/model` writes the main Session); and the Regular/Main
+  surface. The `tasks` `↓ view` hint keeps its separate Quick-admission
+  meaning and does not gate this click. This exception does not generalize to
+  any other status bar or action bar.
 
 ### 7.2 Ordering and degradation
 
@@ -796,10 +830,27 @@ Invariants that hold at every size:
 
 ## 9. Theme and accessibility
 
-- **No new palette tokens in this contract.** The role table maps onto the existing
-  `ColorPalette`. If a genuine gap appears, re-valuing `borderFocus` or adding a
-  token requires dark + light + custom fallback + contrast review + live-theme
-  switch tests in the same PR.
+- **The transcript-search highlight roles are the frozen search tokens.** The
+  chrome role table maps onto the existing `ColorPalette`; the transcript Find
+  decoration is governed by its own frozen family of search tokens:
+  - `searchMatchFg` / `searchMatchBg` — every visible ordinary occurrence: an
+    explicit themed **yellow background block** with a readable foreground.
+  - `searchCurrentFg` / `searchCurrentBg` — the CURRENT occurrence: an explicit
+    **orange background block plus bold**. A Full scope uses it ONLY for a
+    source-proven occurrence; View's current mounted rendered occurrence uses
+    the same bold current style under its own mounted-batch authority (it is
+    not a Full source-cell proof).
+  - the same `searchCurrentFg`/`searchCurrentBg` pair **without bold** marks the
+    current card's real visible header/anchor when no exact cell is provable.
+    This is card-level emphasis, never a guessed exact word.
+  - `searchAnchorBg` — the weaker row wash retained for legacy anchor-only
+    diagnostics; it never replaces the yellow/orange occurrence roles.
+  Yellow means "this text is a visible match"; orange means "this is the current
+  unit" (a proven occurrence, or the current card when only the card is
+  provable). Weight distinguishes the two orange uses: exact is bold, a card
+  anchor is not. Adding any other search token, or changing these roles,
+  requires dark + light + custom fallback + contrast review + live-theme switch
+  tests in the same PR.
 - Never read the palette at module scope: styles come from `color.*` /
   `taskStatusColor()` / the theme factories at render time, so live theme
   switches (`setTheme`) keep working. `settingsListTheme()` is a function for
@@ -810,7 +861,9 @@ Invariants that hold at every size:
   setting. Switching it must not change cursor width, hit targets, or the
   chrome glyphs in the inventory (§4.4) — those are chrome, not icons.
 - Custom themes must not be able to break the frame: a palette missing the
-  optional search tokens is already filled by `withSearchCurrentTokens`.
+  optional search tokens is filled by `withSearchCurrentTokens` at every theme
+  apply boundary (the ordinary yellow pair plus the current orange pair and the
+  legacy anchor wash), while an explicitly supplied token is never overwritten.
 
 ## 10. Reuse map
 
@@ -819,7 +872,7 @@ Use these; do not build a parallel owner.
 | Need | Existing owner | Rule |
 |---|---|---|
 | Colours, bold/dim/italic | `src/tui/theme/runtime.ts` (`color`, `hexPaint`) | the only ink source |
-| Palette vocabulary, built-ins | `src/domain/display/theme.ts` | no new token in this contract |
+| Palette vocabulary, built-ins | `src/domain/display/theme.ts` | the §9 transcript-search role family is the authorized content-decoration addition; any further token needs an Owner amendment to this document |
 | Job status → colour | `taskStatusColor()` (`runtime.ts:116-128`) | extend the *wording* map next to it; do not fork the colour map |
 | Picker / settings-list / editor / markdown palettes | `selectListTheme`, `settingsListTheme()`, `editorTheme`, `markdownTheme` | restyle through these, never by re-painting their components. `SearchablePicker` reads its cursor through the same slot |
 | Semantic structural icons | `src/tui/icons.ts` (`iconFor`, `iconPrefix`, `iconLead`) + `src/domain/display/icons.ts` | chrome punctuation (cursor/brackets/rule) is **not** an icon and does not enter the registry |
@@ -870,15 +923,41 @@ Copy into every PR that changes a visible surface:
 [ ] Do the advertised keys come from the live effective keymap, ONE per
     action (the primary binding)?
 [ ] Action bar: whole-segment drops only; no partial word; safety facts kept?
+[ ] For new/changed interactive PiTui Fullscreen states, is each painted action
+    classified for mouse support, including Enter/confirm, Esc/back/cancel,
+    pending and recovery, with explicit contract reasons for inert/key-only?
+[ ] Can a pointer-only user finish each intended mouse-supported primary
+    journey and its applicable exit without a hidden keyboard step? Were
+    the live hit route, keyboard equivalence and negative controls verified
+    under overlay-focus.md §7 (or honestly marked NOT_RUN/NOT_APPLICABLE)?
 [ ] New glyphs: ASCII or EAW neutral/narrow/halfwidth (§4.3)?
 [ ] Wide / medium / narrow / short / CJK: full interaction still reachable
     (frozen matrix: 200×50, 120×40, 100×40, 80×24, 80×10, 72×24, 44×20)?
 [ ] Dark / light / custom, and icons symbols / minimal checked?
 [ ] No new shadow authority, focus owner, fork divergence, or duplicate layout
-    framework? No new palette token?
+    framework? No palette token beyond the §9 search role family (a new token
+    needs an Owner amendment)?
 [ ] before/after frames from the real VirtualTerminal included, plus a real
     terminal check per docs/guides/tmux-testing.md. Unrun items are marked NOT_RUN.
 ```
+
+The **interaction coverage authority** for the two mouse checklist items is
+[overlay-focus.md](./overlay-focus.md#7-regression-checklist-for-future-changes):
+this checklist is an entry point, not a new source of pointer permissions.
+Keyboard-only and inert action hints remain legitimate only where the owning
+product contract says so; a new action does not inherit mouse behavior merely
+because it is painted as a hint. The pointer check is `NOT_APPLICABLE` for
+non-interactive changes, Regular/Main application mouse routes and TSP-native
+surfaces (which have their own pointer/key review).
+
+The **interaction coverage authority** for the two mouse checklist items is
+[overlay-focus.md](./overlay-focus.md#7-regression-checklist-for-future-changes):
+this checklist is an entry point, not a new source of pointer permissions.
+Keyboard-only and inert action hints remain legitimate only where the owning
+product contract says so; a new action does not inherit mouse behavior merely
+because it is painted as a hint. The pointer check is `NOT_APPLICABLE` for
+non-interactive changes, Regular/Main application mouse routes and TSP-native
+surfaces (which have their own pointer/key review).
 
 Visual beauty is an Owner/Reviewer judgement. "All tests pass" never closes a
 visual item, and an unrun screenshot must never be reported as PASS.
@@ -938,7 +1017,7 @@ A new surface picks one and must justify any deviation.
 | **Overlay** (modal, non-fullscreen) | `Frame` box, single body, bottom hint | pickers |
 | **Blocking editor-seat sheet** | `Frame` box in the editor seat (replaces the draft, never disposes it), pinned title/danger + one scrollable request body + pinned decision bar; Fullscreen paints real pointer cells, Regular is keyboard-only | Approval |
 | **Pane** (embedded in the transcript/log) | header line + folded body, no action bar | tool cards, subagent cards, Thinking |
-| **Status bar** | one row of items + separators, no interaction (a host-instruction line may be reserved above it — `footer/instruction.ts`) | footer |
+| **Status bar** | one row of items + separators, READ-ONLY by default. A transient Host instruction (`footer/instruction.ts`) overlays the last EXISTING physical row for its lifetime — the normal Footer height is unchanged; an otherwise row-less Footer with a positive budget paints only the one-line instruction safety exception, and a zero-grant Footer paints nothing. The one exception is the PiTui Fullscreen root footer: a fully visible, currently-owned first-party `model`/`tasks` placement is a navigation affordance (§7.1); separators, gaps, dropped/truncated items, the instruction, command/custom/extension items and Regular stay inert | footer |
 | **Accessory band** (pinned, on-demand) | zero rows hidden; when active: ONE top separator rule (the §6.2 exception) + identity row + ≤3 single-line navigation rows (tasks, then the optional Full action), painted UNDER the whole footer as the frame's last region | Task Quick |
 
 **Approval reading floor (PiTui).** The blocking editor-seat Approval sheet is a
@@ -987,7 +1066,7 @@ A **PiTui-painted** overlay is the same vocabulary in a rounded `Frame` instead 
 
 | Item | Rule |
 |---|---|
-| Title | role 1 (bold `textStrong`) as the **first row inside the frame**; a title is never inset into the frame's top rule (`╭─ Title ─╮` is not our device — it would fight the `Frame` geometry contract). A context suffix (`Subagent allowed models`) is role 2. |
+| Title | role 1 (bold `textStrong`) as the **first row inside the frame**; a title is never inset into the frame's top rule (`╭─ Title ─╮` is not our device — it would fight the `Frame` geometry contract). A context suffix (`Subagent settings`) is role 2. |
 | Count / status | role 12, **right-aligned on the title row** (`Models` … `3/8`), exactly as a workspace header aligns its badge. Not a title suffix. |
 | Selection | `> ` in `primary` + the row's text in bold `textStrong` (§5). |
 | Current value | the state chip `[current]` in `textMuted` (§4.5), placed at the end of the row's content — or inside the row's right-aligned fact slot when it has one (`/model`'s badge group, the vendored `SettingsList` value slot). **Never recoloured by selection** — pre-paint it at the call site when the row paints itself as one string. No arrow, no bare word, no leading `✓` gutter. Two states are two chips (`[current] [unavailable]`), not one joined pair. **Painted whole or not at all**: in a slot whose width only the renderer knows, hand it whole parts (`valueParts`, X061) — it reserves one chip and drops the rest whole, and the label is what truncates. |
@@ -996,8 +1075,8 @@ A **PiTui-painted** overlay is the same vocabulary in a rounded `Frame` instead 
 | Disabled / unavailable row | `textDim` plus a reason word (`unavailable`, `read-only`); never colour-only (§3.3.3), and the cursor still moves onto it (no dead rows). |
 | Placeholder / loading / failure | role 16: `textDim`; a failed one names the failure and paints that word `error` (`Model catalog unavailable: …`); loading is a word (`Loading models…`), never animation. |
 | Bottom row | inside the frame; `Esc` is its **last** segment (D8) and the hint line uses ` · ` (D4). |
-| Sizing ladder | The step is declared by **content type**: short menu `64`; default interactive list `72`; long values, badges or a detail column `88`; **full** for a surface that must present a whole document or decision (a long-command approval, a full-screen list). Resolution, in this order: **(1)** `full` is not a numeric step — `effective = columns` (a surface that needs its own margin, e.g. the full-screen task browser, declares that margin as a per-surface exception); **(2)** otherwise `effective = min(declared, columns)`, then snap **down** to the largest ladder step `≤ effective`; **(3)** if `effective < 64` there is no ladder step to snap to — the overlay takes **exactly `columns`** and degrades through its own row budget / `ROW_PRIORITY` / degenerate-grant rules instead of through frame size (there is no minimum terminal width for an overlay). The step is never raised because the terminal is wide. Height is `min(rows − 2, cap)` with the cap owned by the step (`24` narrow/standard, `28` wide, the terminal for full). A per-surface exception is allowed only when that surface's own doc names it with its reason — the PiTui `/model` sizing exception is `72×28`; the Delivered files browser is a CENTERED percentage window, `width = C < 80 ? C : min(120, max(72, floor(C × 0.80)))` and `maxHeight = R < 20 ? max(1, R − 2) : min(38, max(1, floor(R × 0.75)))` with the center-anchor default (no margin), because it must stay usable at `44×20` and still refuse the old `≥110`-column near-fullscreen jump at `120×40`; its frame, row grant and host options read the SAME live helper (never a second percentage); a terminal resize rebinds the same logical lease at the new result so the panel state survives and the frame never paints a wider canvas over the transcript beside it. The browser is also the one surface that opts into overlay text selection (fork divergence X068, amendment `D17`): the selectable region is the painted frame's content area, so selecting text adds no inset, no gutter, no row and no glyph to the vocabulary — the same cells are painted, and a drag over them selects instead of hitting an inert modal cell (the pointer contract lives in [overlay-focus.md](./overlay-focus.md) §6.1). Every other overlay keeps the opaque default and paints no such affordance. The TSP-native `/model` instead lets each native sheet declare its own client size (catalogue `size:'md'`, Reader overlay `size:'lg'`), chosen from that surface's own measured pane geometry (see §12.3) |
-| Assembly | mandatory chrome (title, search row, hint) is granted first, then the item window, then optional separators/scroll/status — the existing `overlay-focus-contract.md` budget rules stay authoritative. |
+| Sizing ladder | The step is declared by **content type**: short menu `64`; default interactive list `72`; long values, badges or a detail column `88`; **full** for a surface that must present a whole document or decision (a long-command approval, a full-screen list). Resolution, in this order: **(1)** `full` is not a numeric step — `effective = columns` (a surface that needs its own margin, e.g. the full-screen task browser, declares that margin as a per-surface exception); **(2)** otherwise `effective = min(declared, columns)`, then snap **down** to the largest ladder step `≤ effective`; **(3)** if `effective < 64` there is no ladder step to snap to — the overlay takes **exactly `columns`** and degrades through its own row budget / `ROW_PRIORITY` / degenerate-grant rules instead of through frame size (there is no minimum terminal width for an overlay). The step is never raised because the terminal is wide. Height is `min(rows − 2, cap)` with the cap owned by the step (`24` narrow/standard, `28` wide, the terminal for full). A per-surface exception is allowed only when that surface's own doc names it with its reason — the PiTui `/model` sizing exception is `88×28` (the list, the independent Reasoning Effort strip, the Agent Team row and the footer must share one frame without squeezing the model list); the Delivered files browser is a CENTERED percentage window, `width = C < 80 ? C : min(120, max(72, floor(C × 0.80)))` and `maxHeight = R < 20 ? max(1, R − 2) : min(38, max(1, floor(R × 0.75)))` with the center-anchor default (no margin), because it must stay usable at `44×20` and still refuse the old `≥110`-column near-fullscreen jump at `120×40`; its frame, row grant and host options read the SAME live helper (never a second percentage); a terminal resize rebinds the same logical lease at the new result so the panel state survives and the frame never paints a wider canvas over the transcript beside it. The browser is also the one surface that opts into overlay text selection (fork divergence X068, amendment `D17`): the selectable region is the painted frame's content area, so selecting text adds no inset, no gutter, no row and no glyph to the vocabulary — the same cells are painted, and a drag over them selects instead of hitting an inert modal cell (the pointer contract lives in [overlay-focus.md](./overlay-focus.md) §6.1). Every other overlay keeps the opaque default and paints no such affordance. The TSP-native `/model` instead lets each native sheet declare its own client size (catalogue `size:'md'`, Reader overlay `size:'lg'`), chosen from that surface's own measured pane geometry (see §12.3) |
+| Assembly | mandatory chrome (title, search row, hint) is granted first, then the item window, then optional separators/scroll/status — the existing `overlay-focus.md` budget rules stay authoritative. |
 
 ### 12.3 Native TSP surface adapter (product semantics, not PiTui geometry)
 
@@ -1018,52 +1097,47 @@ This is a **renderer-specific application of** D1–D14, not a new layout framew
 
 ## 13. Reference alignment and deliberate divergences
 
-The reference study (Pi `earendil-works/pi` / `badlogic/pi-mono`, oh-my-pi
-`can1357/oh-my-pi` @ main `818dd42b73`, kimi-code `MoonshotAI/kimi-code`) was
-read as *evidence of what a mainstream TUI does*, never as a specification to
-copy. Pi and kimi-code were fetched from GitHub (their local checkouts are not
-present on this machine), so those quotes carry file+symbol rather than
-line numbers.
+This section records the decisions that remain load-bearing for this
+repository. The dated comparison snapshots, upstream source line numbers and
+one-off reference-study results are not product contracts. Sections D1–D14
+above own the normative visual vocabulary; this rationale does not create a
+second palette or surface-specific exception list.
 
-### 13.1 Followed (consensus, and it also matches this repo)
+### 13.1 Followed (current shared rules)
 
-| Rule | Where the references agree | Where this repo already does it |
-|---|---|---|
-| A navigation cursor is a **glyph in a gutter**, not a colour | pi `select-list.ts` `"→ "`; oh-my-pi `select-list.ts:592` `cursor + ' '`; kimi `SELECT_POINTER = '❯'` | `src/tui/panels/settings-workspace-panel.ts:766,774,887` (`'> '`), `settingsListTheme.cursor` |
-| **Selection ≠ current** | pi `model-selector.ts` second `✓ ` gutter; kimi DESIGN §1 "当前项与选中项互相独立" | the candidate list's row-end mark (`:888`); this document keeps the device and replaces the arrow with the width-safe word |
-| ` · ` joins metadata/hint segments | oh-my-pi `theme/symbols.ts:456` `"sep.dot": " · "`; kimi DESIGN §4; pi `settings-list.ts` hint line | both workspace meta/fact rows, `task-panel.ts:1275-1287` |
-| **Key token Capitalized, verb lowercase** | pi `keyDisplayText`; oh-my-pi `key-hint-format.ts`; kimi DESIGN §4 | `Esc back`, `Enter details` (bare letters must change, §4.1) |
-| Hints and keys come from the **keymap**, never a raw literal | pi AGENTS.md; kimi `printable-key-guard.test.ts` (CI-enforced); oh-my-pi `formatKeyHint` | `componentKeymap.keyHint('tasks.stop')` in Job; Settings still compares `'r'`/`'c'` |
-| Every row is width-clamped through the shared helpers | pi/oh-my-pi/kimi docs | `fit()` / `truncateToWidth` / `visibleWidth`; `test/domain/icons.test.ts` |
-| A **small, counted** decoration budget | kimi DESIGN §3 "整个 dialog 全宽 `─` 仅 2 条（顶 + 底）", checklist-enforced; pi's de-facto 2 `DynamicBorder`s | `planSettingsChrome` grants 0 or 2 rules |
-| Text contrast floor ≥ 4.5:1 | pi `docs/themes.md`; kimi AGENTS.md (+3:1 chrome) | palette comments ("tuned for ≥ 4.5:1 contrast on black") |
-| `borderFocus` is approval-only | kimi `theme/colors.ts` "Focus / attention border — currently only the approval panel" | identical comment on our `ColorPalette.borderFocus` |
+- Cursor location and the currently configured value are separate facts:
+  navigation uses a visible gutter glyph and the current-value indicator is
+  preserved independently of selection.
+- Key hints use semantic keybinding display text, not guessed printable
+  literals. Metadata and hint segments use the shared ` · ` separator.
+- Row text is clamped at the available *cell* width; colour alone never
+  conveys availability, selection, meaning or focus.
+- Frame chrome consumes a bounded row budget. Status and controls remain
+  readable even when the terminal or native client compresses the viewport.
 
 ### 13.2 Deliberate divergences
 
-| Decision | What the references do | What this contract does, and why |
-|---|---|---|
-| Surface identity ink | kimi paints the dialog title `primary` + bold; oh-my-pi insets it in the top rule in `accent` | `textStrong` bold, no colour. This repo already uses `primary` for links *and* inline code *and* selection (`markdownTheme.code`, picker prefixes), so a blue title would make "blue" mean brand + clickable + current at once. Keeping the identity weight-only keeps `primary` = active/actionable |
-| Selected row's text | pi/oh-my-pi paint it with their accent token | bold `textStrong`; only the cursor glyph is `primary`. Same reason as above, and it matches this repo's existing picker device |
-| Hint overflow | kimi truncates the whole line; pi truncates + one documented whole-segment drop; oh-my-pi's native path wraps and its ANSI footer clips in a height-1 row | **whole-segment drop by priority, never mid-word** (already implemented in Job). At a pinned height 1, wrapping is impossible and line truncation is what produces today's `Esc back · ↑↓/Pg keys scroll · Enter change…` |
-| Status word case + marker | pi sentence case; oh-my-pi Title Case with `●`/`✓`/`✕`/`⊘` glyphs; kimi lowercase with a row-end `← current` | Title Case word plus one EAW-neutral `‣` anchor (D5 + D7). `●`/`○`/`◐`/`×` are rejected as width-unsafe, and the width-safe `✓`/`✕`/`⊘` are rejected because a per-status glyph vocabulary makes the shape the signal |
-| Cursor glyph shape | pi `→`, oh-my-pi `❯`/`>`, kimi `❯` (and kimi forbids inventing `>`/`→` for its own dialogs) | `>` for this repo (D3): `→` is EAW-ambiguous, `❯` already owns the transcript's user marker, `›` already owns two icon semantics |
-| "Never colour alone" | **no reference states this rule** (one paints a disabled row by colour only) | adopted anyway (§3.3.3) because our palette proves colour is unreliable here: `borderFocus` and `warning` are the same hex |
-| Rules on a status line | kimi forbids an inner rule; oh-my-pi freely adds `├──┤` dividers | at most one rule per boundary and never flanking a text line (D6) |
+| Choice | Durable reason |
+|---|---|
+| Titles use bold `textStrong`, not action ink | `primary` marks active/actionable elements; colouring titles would obscure that distinction |
+| Selected labels are bold while only the `>` gutter is `primary` | Selection is not the current configured value; the glyph avoids EAW-ambiguous arrows and transcript markers |
+| Hint overflow drops whole segments in priority order | One-height rows cannot safely wrap; breaking key/verb tokens creates misleading instructions |
+| Status words use Title Case and a width-neutral `‣` anchor | Multiple status glyph alphabets are inconsistent across terminal fonts and widths |
+| At most one separator per boundary | Extra rules consume rows needed by content, without adding semantic structure |
+| Disabled and failed states retain text labels | Colour contrast and palette roles alone are insufficient on real terminals |
 
 ### 13.3 What is realistically machine-checkable
 
-The study checked what each project actually gates. kimi is the strongest
-(named-chalk-colour scan, bare-printable-key scan, per-dialog exact-line
-assertions); oh-my-pi has no snapshot gate but pins exact row strings, column
-indices and theme glyph tokens; Pi gates formatting/lint only. **None of the
-three has a TUI screenshot gate, and none gates a decoration budget or a
-"colour alone" rule.**
-
-That is why §11.3 restricts this repo's automated checks to the glyph width
-gate, a handful of frame invariants in the two existing `VirtualTerminal`
-suites, and the degradation-ladder matrix — and leaves the rest to the review
-checklist.
+Automated checks protect cell-width safety, a small set of frame invariants and
+the responsive degradation matrix. They do **not** prove physical focus, mouse
+or touch completeness, font rendering, visual hierarchy or the usability of an
+actual terminal/client. Those require the relevant product review and
+qualification procedures (see
+[overlay-focus.md](./overlay-focus.md),
+[../guides/tmux-testing.md](../guides/tmux-testing.md), and
+[../guides/tern-gui-testing.md](../guides/tern-gui-testing.md)).
+Do not convert one-off screenshot measurements or upstream comparisons into a
+permanent machine gate.
 
 ### 13.4 Transcript right gutter and measurement
 

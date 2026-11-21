@@ -29,18 +29,69 @@
 
 import type { OperationOwnership, WriteError } from './write-outcome.ts'
 
-/** Create one ordinary fresh Session (the /new and first-session paths).
- * The Host owns the durable header shape; these are the only ordinary semantic
- * inputs the TUI supplies. `signal` is client-local and never serialized. */
+/** One ordinary create request. The Host owns the durable header shape; these
+ * are the only ordinary semantic inputs the TUI supplies. The durable working
+ * directory is NOT a request input: a Session is created in a Host Workspace,
+ * and the Host resolves that Workspace's canonical path itself. `signal` is
+ * client-local and never serialized. */
 export interface CreateSessionRequest {
   /** The pre-generated identity for an ordinary fresh Session. */
   sessionId: string
-  /** Optional ordinary workspace directory. */
-  cwd?: string
+  /** Official Host Workspace identity the new Session belongs to. Mandatory:
+   * the request cannot also carry a `cwd`, and there is no missing-`cwd`
+   * fallback. */
+  workspaceId: string
   /** Semantic preset intent; the Direct adapter resolves its setup. */
   agentPreset?: string
   /** Client-local creation cancellation; never serialized. */
   signal?: AbortSignal
+}
+
+/** One CLIENT-LOCAL workspace pre-selection intent. Resolving it never creates
+ * a Session and never moves the current surface: it only asks the Host which
+ * official Workspace a later create belongs to.
+ *
+ * - `host-path` is a directory PROPOSAL the Host canonicalizes and validates.
+ * - `workspace-id` names an existing official Host Workspace identity.
+ * - `source-session` asks for the official membership of a captured Session,
+ *   falling back to that Session's persisted immutable header directory. */
+export type WorkspaceSelectionIntent =
+  | { readonly kind: 'host-path'; readonly path: string }
+  | { readonly kind: 'workspace-id'; readonly workspaceId: string }
+  | { readonly kind: 'source-session'; readonly sessionId: string }
+
+/** The Host-resolved Workspace a create will name. `workspaceId` is the
+ * authoritative membership key; `path` is the Host-verified canonical
+ * directory and is a transition/UI hint only — it is never re-sent as a create
+ * input. */
+export interface ResolvedWorkspaceSelection {
+  readonly workspaceId: string
+  readonly path: string
+}
+
+/** Why a workspace pre-selection produced no Workspace. Never used after a
+ * Session create has been dispatched. */
+export type WorkspaceSelectionErrorKind = 'refused' | 'unavailable' | 'superseded'
+
+/**
+ * A workspace pre-selection failure. `refused` is a proven Host business
+ * refusal (invalid path, unknown Workspace); `unavailable` means the Host
+ * Workspace authority could not be read or the directory could not be
+ * confirmed; `superseded` means the caller's generation/lifetime changed while
+ * the selection was in flight and the result must not reach a newer surface.
+ * In every case ZERO Session creates were dispatched.
+ */
+export class WorkspaceSelectionError extends Error {
+  readonly kind: WorkspaceSelectionErrorKind
+  /** Stable machine-readable cause when the Host supplied one. */
+  readonly code: string | undefined
+
+  constructor(kind: WorkspaceSelectionErrorKind, message: string, code?: string) {
+    super(message)
+    this.name = 'WorkspaceSelectionError'
+    this.kind = kind
+    this.code = code
+  }
 }
 
 /** Official Host-owned fork intent. The Host chooses the child identity,
@@ -123,6 +174,9 @@ export interface SessionHandle {
 
 /** The session LIFECYCLE domain port. */
 export interface SessionLifecycle {
+  /** Resolve ONE Host Workspace for a later create. Pre-selection only: it
+   *  publishes no Session, moves no surface and cancels no owner. */
+  resolveWorkspace(intent: WorkspaceSelectionIntent, signal?: AbortSignal): Promise<ResolvedWorkspaceSelection>
   create(request: CreateSessionRequest): Promise<CreateResult>
   open(request: OpenSessionRequest): Promise<OpenResult>
   fork(request: ForkSessionRequest): Promise<ForkResult>

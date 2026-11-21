@@ -33,6 +33,7 @@ import type { HumanSkillCatalog } from '../../domain/catalog/skill.ts'
 import type { SessionStats, SessionStatsFacts } from '../../domain/status/stats.ts'
 import type { SurfaceCommandSummary } from '../../domain/catalog/surface.ts'
 import type { LiveSessionScope, SessionScope, SessionScopeAuthority } from '../session/scope.ts'
+import type { SessionPolicyObservation } from './session-policy-observation.ts'
 
 /** The session-runtime entries the command runtime drives. */
 export interface CommandSessionRuntime {
@@ -60,8 +61,6 @@ export interface CommandRuntimeSurface {
     readonly model: string | undefined
     readonly cwd: string
   }
-  /** The live owner's approval-policy override, or `undefined`. */
-  approvalOverride(sessionId: string): 'ask' | 'never' | undefined
   /**
    * The live owner's whole-log stats, or `undefined`. Async since M3-4
    * PR4 §3.3/§12.4: the Remote branch composes the official whole-log
@@ -93,6 +92,8 @@ export interface CommandRuntimeDeps {
   readonly skills: SkillCatalogCapability
   /** The Direct facts, resolved by the runner. */
   readonly surface: CommandRuntimeSurface
+  /** M6-1 F8: the ONE session-policy observation owner. */
+  readonly policy: SessionPolicyObservation
 }
 
 /** The semantic command surface the runner facade delegates to. */
@@ -120,7 +121,10 @@ export interface CommandRuntime {
     readonly model: string | undefined
     readonly cwd: string
   }
-  currentApprovalOverride(scope: LiveSessionScope): 'ask' | 'never' | undefined
+  /** M6-1 F8: the ONE session-policy observation owner — the Settings
+   *  approval row's read source (checking/ready/unavailable/failed) on BOTH
+   *  backends. Not a synchronous override read anymore. */
+  readonly policy: SessionPolicyObservation
   currentSessionStats(scope: LiveSessionScope, signal?: AbortSignal): Promise<SessionStatsFacts | undefined>
   lastAssistantText(scope: LiveSessionScope, signal?: AbortSignal): Promise<string | undefined>
   /** Refresh the LIVE Session's scoped catalog. The scope is validated at the
@@ -195,9 +199,9 @@ export function bindCommandRuntime(deps: CommandRuntimeDeps): CommandRuntime {
     // optionality, never an invariant break — the presentation renders
     // "unconfigured".
     currentSessionRouting: (scope) => deps.surface.sessionRouting(liveSessionId(scope)),
-    // The scope's owner is proven current before the read; the port resolves
-    // the session id to its exact live Agent internally.
-    currentApprovalOverride: (scope) => deps.surface.approvalOverride(liveSessionId(scope)),
+    // M6-1 F8: the ONE observation owner, passed by reference — the Settings
+    // approval row and the status/footer consume the SAME snapshot source.
+    policy: deps.policy,
     // PR5 (plan §3.7): the async whole-log stats read re-checks the ORIGINAL
     // scope after settle — the Remote transport fences answer binding
     // identity, not VISIBLE TUI ownership, so a session switch mid-read must

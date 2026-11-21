@@ -54,9 +54,9 @@ const SVG: SvgFact = {
   bytes: SVG_SOURCE.length,
 }
 
-const REF_CHART = `sv1_${'1'.repeat(20)}`
-const REF_SVG = `sv1_${'2'.repeat(20)}`
-const REF_THIRD = `sv1_${'3'.repeat(20)}`
+const REF_CHART = `sv2_${'1'.repeat(20)}`
+const REF_SVG = `sv2_${'2'.repeat(20)}`
+const REF_THIRD = `sv2_${'3'.repeat(20)}`
 
 function visualSource(overrides: Partial<VisualSource> & { readonly ref: string; readonly type: 'chart' | 'svg' }): VisualSource {
   return {
@@ -139,7 +139,6 @@ function present(message: TranscriptMessage, publications: readonly PublishedVis
     sourceIdentity: {},
     session: {},
     sessionId: 'session-1',
-    seq: 1,
     turn: 1,
     step: 0,
     text,
@@ -156,7 +155,7 @@ interface ViewOptions {
   readonly selectedVisual?: { readonly ref: string; readonly index: number; readonly count: number }
 }
 
-/** The assistant card the production mapper builds for one row. */
+/** The native frameless Assistant column the production mapper builds for one row. */
 function cardOf(message: TranscriptMessage, options: ViewOptions = {}): Node {
   const view = transcriptView(projectTranscriptStructure([message]), new TranscriptNodeKeys(), {
     chartKindsSupported: options.chartKindsSupported,
@@ -165,8 +164,8 @@ function cardOf(message: TranscriptMessage, options: ViewOptions = {}): Node {
     ...(options.requestPublishedSvgBlob === undefined ? {} : { requestPublishedSvgBlob: options.requestPublishedSvgBlob }),
     ...(options.selectedVisual === undefined ? {} : { selectedVisual: options.selectedVisual }),
   })
-  const card = view.children.find(child => child.kind === 'card' && child.props['head'] === 'Assistant')
-  assert.ok(card !== undefined, 'the Assistant row must render one Assistant card')
+  const card = view.children.find(child => child.kind === 'col' && child.props['role'] === 'dsh.transcript.assistant')
+  assert.ok(card !== undefined, 'the Assistant row must render one native frameless column')
   return card
 }
 
@@ -208,13 +207,13 @@ function headRowOf(figure: Node): Node {
 
 // ── Placement and card shape ────────────────────────────────────────────────
 
-test('a chart marked between two paragraphs stays one Assistant card with the figure in place', () => {
+test('a chart marked between two paragraphs stays one frameless Assistant with the figure in place', () => {
   const publication = chartPublication()
   const message = assistantRow(`Before figure.\n\n${marker(publication.ref)}\n\nAfter figure.`)
   present(message, [publication])
   const card = cardOf(message, { chartKindsSupported: true })
 
-  assert.equal(card.props['head'], 'Assistant')
+  assert.equal(card.props['role'], 'dsh.transcript.assistant')
   assert.deepEqual(figureKeys(card), [`body-visual-${publication.ref}`])
   assert.deepEqual(mdTexts(card), ['Before figure.\n\n', '\n\nAfter figure.'])
   // The visible marker line never survives as text.
@@ -451,7 +450,7 @@ test('a definition placed after its two references is supplied to both display r
 })
 
 test('twenty ordinary definitions and ten figures keep every definition in every run without a marker leak', () => {
-  const publications = Array.from({ length: 10 }, (_, index) => chartPublication(`sv1_${String(index + 4).padStart(20, '0')}`))
+  const publications = Array.from({ length: 10 }, (_, index) => chartPublication(`sv2_${String(index + 4).padStart(20, '0')}`))
   const definitions = Array.from({ length: 20 }, (_, index) => `[link${index}]: https://example.com/${index}`)
   const body = [
     `Intro [a][link0] [b][link19].`,

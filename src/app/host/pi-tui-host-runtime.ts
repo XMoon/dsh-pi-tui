@@ -4,16 +4,23 @@
  *
  * This is a HOST-plane Cordis plugin, not a TUI module and not a
  * user-configurable business plugin. A real Host Profile mounts it exactly
- * once to own the two private business modules that belong to this package:
+ * once to own the private business modules that belong to this package:
  *
  * ```text
- * the package's ONE private Typert contribution (both private descriptors)
+ * the package's ONE private Typert contribution (all private descriptors)
  * the private `piTuiFileReferences` Host service
  * the private `piTuiTerminalProgress` Host service
+ * the private `piTuiWebAccess` Host service (official Web frontend toggle)
+ * the private `piTuiHostUserShell` Host service (one-shot Shell and completion)
+ * the private `piTuiSkills` Host service (standing metadata and invalidation)
+ * the private `piTuiAuthorization` Host service (provider-native sign-in)
+ * the private `piTuiCredentialRecords` Host service (stored record metadata)
+ * the private `piTuiSessionPolicy` Host service (exact-Session policy)
+ * the private `piTuiDefaultModel` Host service (sessionless default model)
  * ```
  *
  * The row publishes the data-free `piTuiHostReady` gate only after the
- * contribution and BOTH service bindings are actually live, so a Host
+ * contribution and ALL service bindings are actually live, so a Host
  * readiness audit can depend on ordering instead of trusting a declared row.
  * It never mounts a second Connection/Gateway/Session stack, never registers
  * the official Session-serving services, and never owns a Host root: the
@@ -23,29 +30,101 @@
  */
 
 import type { Context, Fiber } from '@deepseek-ai/cordis'
+import { Config as TuiConfig, type Config as TuiConfigValue } from '../config/schema.ts'
+import { CANONICAL_TUI_SETTINGS_NS } from '../../runtime/config-port.ts'
 import { PI_TUI_HOST_CONTRIBUTION } from '../../runtime/remote/pi-tui-remote-contribution.ts'
 import { PI_TUI_FILE_REFERENCES_NAMESPACE } from '../../runtime/remote/pi-tui-file-reference-contract.ts'
 import { PI_TUI_TERMINAL_PROGRESS_NAMESPACE } from '../../runtime/remote/pi-tui-terminal-progress-contract.ts'
+import { PI_TUI_WEB_ACCESS_NAMESPACE } from '../../runtime/remote/pi-tui-web-access-contract.ts'
+import { PI_TUI_ACP_ACCESS_NAMESPACE } from '../../runtime/remote/pi-tui-acp-access-contract.ts'
+import { PI_TUI_HOST_USER_SHELL_NAMESPACE } from '../../runtime/remote/pi-tui-host-user-shell-contract.ts'
+import { PI_TUI_SKILLS_NAMESPACE } from '../../runtime/remote/pi-tui-skills-contract.ts'
+import { PI_TUI_AUTHORIZATION_NAMESPACE } from '../../runtime/remote/pi-tui-authorization-contract.ts'
+import { PI_TUI_CREDENTIAL_RECORDS_NAMESPACE } from '../../runtime/remote/pi-tui-credential-records-contract.ts'
+import { createHostShellPathCompletionBridge } from '../../runtime/remote/pi-tui-host-user-shell-host-bridge.ts'
 import { mergeCause } from '../remote/dispose-cause.ts'
 import {
   PiTuiFileReferenceHostService,
   type FileReferencesServiceLike,
   type LiveAgentLike,
+  type WorkspaceRegistryPort,
 } from './features/file-reference.ts'
 import {
   PiTuiTerminalProgressHostService,
   type LiveAgentLike as TerminalProgressLiveAgentLike,
 } from './features/terminal-progress.ts'
+import { PiTuiWebAccessHostService } from './features/web-access.ts'
+import { PiTuiAcpAccessHostService } from './features/acp-access.ts'
+import { PiTuiHostUserShellService } from './features/host-user-shell.ts'
+import {
+  PiTuiSkillsHostService,
+  type AgentPresetRegistryLike,
+  type SkillRegistryLike,
+  type WorkspaceRegistryLike,
+} from './features/skills.ts'
+import {
+  PiTuiAuthorizationHostService,
+  type PiTuiAuthorizationHostDeps,
+} from './features/authorization.ts'
+import {
+  PiTuiCredentialRecordsHostService,
+  type PiTuiCredentialRecordsHostDeps,
+  type CredentialRecordsStoreLike,
+} from './features/credential-records.ts'
+import {
+  PiTuiSessionPolicyHostService,
+  type ApprovalServiceLike,
+  type SandboxPolicyServiceLike,
+  type SessionLike,
+} from './features/session-policy.ts'
+import { PiTuiDefaultModelHostService } from './features/default-model.ts'
+import {
+  PiTuiPromptPresenceHostService,
+  type PromptPresenceAgentLike,
+  type PromptPresenceSessionLike,
+} from './features/prompt-presence.ts'
+import { HostAgentPromptOwner } from './features/agent-prompt.ts'
+import {
+  parseGitAttributionMode,
+} from '../../domain/communication/git-attribution.ts'
+import {
+  parseProgressUpdates,
+  parseResponseStyle,
+} from '../../domain/communication/policy.ts'
+import { PI_TUI_SESSION_POLICY_NAMESPACE } from '../../runtime/remote/pi-tui-session-policy-contract.ts'
+import { PI_TUI_DEFAULT_MODEL_NAMESPACE } from '../../runtime/remote/pi-tui-default-model-contract.ts'
+import { PI_TUI_PROMPT_PRESENCE_NAMESPACE } from '../../runtime/remote/pi-tui-prompt-presence-contract.ts'
 
 /** Stable Cordis plugin name (the Loader row id in the Host-only overlay). */
 export const name = 'pi-tui-host-runtime'
 
+/** The legacy Split Host TUI settings schema. It is kept ONLY for installed
+ * profile compatibility and as a migration source: the runtime reads the
+ * canonical `piTuiPreferences` service, and this row's auto-generated page is
+ * hidden so users cannot edit a namespace that no longer drives behavior. */
+export const Config = TuiConfig
+
 /**
  * Explicit Host dependencies: the private Typert registry plus the two live
  * Host facts the business rows resolve per call. `tuiStartup` remains a Loader
- * row gate (see the Host-only overlay), not a plugin inject.
+ * row gate (see the Host-only overlay), not a plugin inject. The Web access row
+ * resolves the Host's OWN Loader through the service on every call, so this
+ * published row contract does not change: this row IS a Loader row, and a Host
+ * without a Loader fails closed (`unavailable`) instead of pending forever.
  */
-export const inject = ['typert', 'agents', 'fileReferences', 'workingDirectory']
+export const inject = [
+  // The canonical profile preference authority. Injecting (not a per-call
+  // lookup) makes Host business wait for the row that owns the real user
+  // choice; the legacy Split Config is never a runtime fallback.
+  'piTuiPreferences',
+  'typert', 'agents', 'fileReferences', 'workingDirectory', 'sessions',
+  // `sandboxPolicy`/`sandbox` are deliberately NOT hard injects (M6-1 F8):
+  // every feature resolves them PER CALL through `ctx.reflect.get`, so a Host
+  // that only lacks the sandbox provider still becomes Ready and reports that
+  // side as a definite unavailable fact (the shell endpoints refuse explicitly
+  // instead of the whole Host staying down).
+  'subprocess', 'workspaceRegistry', 'skills', 'agentPresets',
+]
 
 /** Data-free readiness gate published after the whole built-in runtime is live. */
 export const PI_TUI_HOST_READY_SERVICE = 'piTuiHostReady'
@@ -53,6 +132,20 @@ export const PI_TUI_HOST_READY_SERVICE = 'piTuiHostReady'
 /** The narrow structural view of the authoritative Host Agent registry. */
 interface AgentRegistryLike {
   get(sessionId: string): unknown
+}
+
+/** The canonical live preference references the prompt sections read. Every
+ * field is a LIVE `.volatile()` reference: reading `.get()` at each assembly
+ * is what makes a Client settings write reach the next Turn. */
+interface CanonicalPreferenceRefs {
+  readonly progressUpdates: { get(): string }
+  readonly responseStyle: { get(): string }
+  readonly gitAttribution: { get(): string }
+}
+
+/** Read the canonical preference references PER CALL (never a snapshot). */
+function preferencesRefs(ctx: Context): CanonicalPreferenceRefs | undefined {
+  return ctx.reflect.get('piTuiPreferences') as CanonicalPreferenceRefs | undefined
 }
 
 /**
@@ -95,14 +188,27 @@ function assertPrivateBinding(ctx: Context, serviceKey: string, namespace: strin
 /**
  * Mount the built-in PiTui Host Runtime on the launching Host Context.
  *
- * Startup order is fixed: register the package's ONE contribution, mount the
- * file-reference service, mount the terminal-progress service, verify both
- * live bindings, then publish the readiness gate. Every child fiber is recorded
- * BEFORE it is awaited; a partial rejection disposes the recorded children in
- * reverse order (contribution last) while keeping the original error primary
- * and attaching cleanup failures to its cause chain.
+ * Startup order is fixed: register the package's ONE contribution, mount every
+ * private business service in order, verify ALL live bindings, then publish the
+ * readiness gate.
+ * Every child fiber is recorded BEFORE it is awaited; a partial rejection
+ * disposes the recorded children in reverse order (contribution last) while
+ * keeping the original error primary and attaching cleanup failures to its
+ * cause chain.
  */
-export async function apply(ctx: Context): Promise<void> {
+export async function apply(ctx: Context, _config: TuiConfigValue): Promise<void> {
+  const preferences = ctx.get('piTuiPreferences') as {
+    readonly localShellSandbox: { get(): string }
+  } | undefined
+  if (preferences === undefined) {
+    throw new Error(`pi-tui-host-runtime: the canonical "${CANONICAL_TUI_SETTINGS_NS}" preferences are missing`)
+  }
+  // The retired Split row keeps a schema for installed profiles, but its
+  // auto-generated Settings page is hidden: runtime behavior reads the
+  // canonical row, and two editable TUI pages would present one stale copy.
+  ctx.inject(['settings'], child => {
+    child.effect(() => child.settings.configure({ auto: false }, ctx.fiber))
+  })
   const fibers: Fiber[] = []
   let disposeContribution: (() => Promise<void>) | undefined
   try {
@@ -114,6 +220,7 @@ export async function apply(ctx: Context): Promise<void> {
       new PiTuiFileReferenceHostService(pluginCtx, {
         agentFor: sessionId => agentFor(ctx, sessionId) as LiveAgentLike | undefined,
         official: () => ctx.reflect.get('fileReferences') as FileReferencesServiceLike | undefined,
+        workspaces: () => ctx.reflect.get('workspaceRegistry') as WorkspaceRegistryPort | undefined,
       })
     })
     fibers.push(fileReferenceFiber)
@@ -128,8 +235,139 @@ export async function apply(ctx: Context): Promise<void> {
     })
     fibers.push(terminalProgressFiber)
     await terminalProgressFiber
+    const webAccessFiber = ctx.inject(PiTuiWebAccessHostService.inject, pluginCtx => {
+      new PiTuiWebAccessHostService(pluginCtx)
+    })
+    fibers.push(webAccessFiber)
+    await webAccessFiber
+    // The local ACP listener control facade: a stateless forwarder to the
+    // Host-entry-owned runtime controller (`piTuiAcpOwner`). The listener itself
+    // is owned by the entry, NOT by this business fiber, so a profile
+    // recomposition cannot dispose a live socket. On a Host whose entry has not
+    // (yet) provided the owner, the two methods answer a truthful `unavailable`.
+    const acpAccessFiber = ctx.inject(PiTuiAcpAccessHostService.inject, pluginCtx => {
+      new PiTuiAcpAccessHostService(pluginCtx)
+    })
+    fibers.push(acpAccessFiber)
+    await acpAccessFiber
+    const hostUserShellFiber = ctx.inject(PiTuiHostUserShellService.inject, pluginCtx => {
+      new PiTuiHostUserShellService(pluginCtx, {
+        agentFor: sessionId => agentFor(ctx, sessionId) as import('./features/host-user-shell.ts').HostAgentLike | undefined,
+        sessionFor: sessionId => (ctx.reflect.get('sessions') as AgentRegistryLike | undefined)?.get(sessionId) as import('./features/host-user-shell.ts').HostSessionLike | undefined,
+        workingDirectory: () => ctx.reflect.get('workingDirectory') as import('./features/host-user-shell.ts').WorkingDirectoryLike | undefined,
+        sandboxPolicy: () => ctx.reflect.get('sandboxPolicy') as import('./features/host-user-shell.ts').SandboxPolicyServiceLike | undefined,
+        sandbox: () => ctx.reflect.get('sandbox') as import('./features/host-user-shell.ts').SandboxServiceLike | undefined,
+        subprocess: () => ctx.reflect.get('subprocess') as import('./features/host-user-shell.ts').SubprocessServiceLike | undefined,
+        pathCompletion: createHostShellPathCompletionBridge(),
+        shellPolicy: () => preferences.localShellSandbox.get() === 'sandbox' ? 'sandbox' : 'bypass',
+        workspaces: () => ctx.reflect.get('workspaceRegistry') as WorkspaceRegistryPort | undefined,
+      })
+    })
+    fibers.push(hostUserShellFiber)
+    await hostUserShellFiber
+    const skillsFiber = ctx.inject(PiTuiSkillsHostService.inject, pluginCtx => {
+      new PiTuiSkillsHostService(pluginCtx, {
+        workspaces: () => ctx.reflect.get('workspaceRegistry') as WorkspaceRegistryLike | undefined,
+        skills: () => ctx.reflect.get('skills') as SkillRegistryLike | undefined,
+        agentPresets: () => ctx.reflect.get('agentPresets') as AgentPresetRegistryLike | undefined,
+      })
+    })
+    fibers.push(skillsFiber)
+    await skillsFiber
+    // The provider-native sign-in bridge resolves the OFFICIAL authorization
+    // service per call: a Host without that plugin is a truthful `unavailable`,
+    // never a hard inject that would keep the whole Split Host from starting.
+    const authorizationFiber = ctx.inject(PiTuiAuthorizationHostService.inject, pluginCtx => {
+      new PiTuiAuthorizationHostService(pluginCtx, {
+        authorization: () => ctx.reflect.get('authorization') as ReturnType<PiTuiAuthorizationHostDeps['authorization']>,
+      })
+    })
+    fibers.push(authorizationFiber)
+    await authorizationFiber
+    // The stored-credential-record bridge reads the OFFICIAL credentials store
+    // per call: a Host without that plugin stays Ready and the two methods are
+    // a definite service-unavailable failure, never an empty record list.
+    const credentialRecordsFiber = ctx.inject(PiTuiCredentialRecordsHostService.inject, pluginCtx => {
+      new PiTuiCredentialRecordsHostService(pluginCtx, {
+        credentials: () => ctx.reflect.get('credentials') as CredentialRecordsStoreLike | undefined,
+      })
+    })
+    fibers.push(credentialRecordsFiber)
+    await credentialRecordsFiber
+    // The exact-Session policy bridge resolves the OFFICIAL approval and
+    // sandbox-policy services per call: a Host without either plugin stays
+    // Ready and that side is a definite unavailable fact, never a hard inject
+    // that would keep the whole Split Host from starting.
+    const sessionPolicyFiber = ctx.inject(PiTuiSessionPolicyHostService.inject, pluginCtx => {
+      new PiTuiSessionPolicyHostService(pluginCtx, {
+        sessions: () => ctx.reflect.get('sessions') as { get(sessionId: string): SessionLike | undefined } | undefined,
+        agents: () => ctx.reflect.get('agents') as { get(sessionId: string): unknown } | undefined,
+        approval: () => ctx.reflect.get('approval') as ApprovalServiceLike | undefined,
+        sandboxPolicy: () => ctx.reflect.get('sandboxPolicy') as SandboxPolicyServiceLike | undefined,
+      })
+    })
+    fibers.push(sessionPolicyFiber)
+    await sessionPolicyFiber
+    // The sessionless default-model bridge delegates to the OFFICIAL
+    // `agentDefaultModel.saveSelection`; the service resolves the official
+    // service faces per call, so this Host stays Ready even without them and a
+    // write is a truthful refusal instead of a hard startup dependency.
+    const defaultModelFiber = ctx.inject(PiTuiDefaultModelHostService.inject, pluginCtx => {
+      new PiTuiDefaultModelHostService(pluginCtx)
+    })
+    fibers.push(defaultModelFiber)
+    await defaultModelFiber
+    // M6 PR-C C3: the authenticated per-Peer prompt presence projection. The
+    // Host keys every record by the EXACT `invocation.peer.id`, so a Client can
+    // only speak for itself; the display preset stays Client-local. The
+    // Session/Agent identity validation reads the authoritative registries
+    // PER CALL (a same-id replacement must invalidate the voter).
+    const promptPresenceFiber = ctx.inject(PiTuiPromptPresenceHostService.inject, pluginCtx => {
+      new PiTuiPromptPresenceHostService(pluginCtx, {
+        sessions: () => ctx.reflect.get('sessions') as
+          | { get(sessionId: string): PromptPresenceSessionLike | undefined }
+          | undefined,
+        agents: () => ctx.reflect.get('agents') as
+          | { get(sessionId: string): PromptPresenceAgentLike | undefined }
+          | undefined,
+      })
+    })
+    fibers.push(promptPresenceFiber)
+    await promptPresenceFiber
     assertPrivateBinding(ctx, 'piTuiFileReferences', PI_TUI_FILE_REFERENCES_NAMESPACE)
     assertPrivateBinding(ctx, 'piTuiTerminalProgress', PI_TUI_TERMINAL_PROGRESS_NAMESPACE)
+    assertPrivateBinding(ctx, 'piTuiWebAccess', PI_TUI_WEB_ACCESS_NAMESPACE)
+    assertPrivateBinding(ctx, 'piTuiAcpAccess', PI_TUI_ACP_ACCESS_NAMESPACE)
+    assertPrivateBinding(ctx, 'piTuiHostUserShell', PI_TUI_HOST_USER_SHELL_NAMESPACE)
+    assertPrivateBinding(ctx, 'piTuiSkills', PI_TUI_SKILLS_NAMESPACE)
+    assertPrivateBinding(ctx, 'piTuiAuthorization', PI_TUI_AUTHORIZATION_NAMESPACE)
+    assertPrivateBinding(ctx, PI_TUI_CREDENTIAL_RECORDS_NAMESPACE, PI_TUI_CREDENTIAL_RECORDS_NAMESPACE)
+    assertPrivateBinding(ctx, PI_TUI_SESSION_POLICY_NAMESPACE, PI_TUI_SESSION_POLICY_NAMESPACE)
+    assertPrivateBinding(ctx, PI_TUI_DEFAULT_MODEL_NAMESPACE, PI_TUI_DEFAULT_MODEL_NAMESPACE)
+    assertPrivateBinding(ctx, PI_TUI_PROMPT_PRESENCE_NAMESPACE, PI_TUI_PROMPT_PRESENCE_NAMESPACE)
+    // M6 PR-C C3: install the SAME per-Agent TUI prompt policy the Direct
+    // branch installs, on every Host Agent (and every later one). The sampler
+    // reads the presence service's current fold through the SAME canonical
+    // preference axes; the latch samples it ONCE per Turn.
+    const presenceService = ctx.reflect.get(PI_TUI_PROMPT_PRESENCE_NAMESPACE) as
+      | PiTuiPromptPresenceHostService
+      | undefined
+    if (presenceService === undefined) {
+      throw new Error('pi-tui-host-runtime: the prompt presence service is not readable')
+    }
+    const promptOwner = new HostAgentPromptOwner(ctx, {
+      ctx,
+      voters: { snapshotVoters: session => presenceService.snapshotVoters(session) },
+      preferences: {
+        // The canonical live preference references: the SAME authority the
+        // Client settings wire writes, read on every assembly.
+        progressUpdates: () => ({ mode: parseProgressUpdates(preferencesRefs(ctx)?.progressUpdates.get()) }),
+        responseStyle: () => ({ style: parseResponseStyle(preferencesRefs(ctx)?.responseStyle.get()) }),
+        gitAttribution: () => ({ mode: parseGitAttributionMode(preferencesRefs(ctx)?.gitAttribution.get()) }),
+      },
+    })
+    promptOwner.installLiveAgents()
+    ctx.effect(() => () => promptOwner.dispose(), 'pi-tui-host-agent-prompt-owner')
     ctx.provide(PI_TUI_HOST_READY_SERVICE, {})
   } catch (error) {
     const cleanupErrors: unknown[] = []

@@ -357,8 +357,12 @@ test('the active-target, repaint and search/transcript wiring are surface-owned'
   assert.match(surface, /const jumpToSearchMatch = /u, 'the surface must own the search commit')
   assert.match(surface, /const runSearchQuery = /u, 'the surface must own the search query wiring')
   assert.match(surface, /const closeSearch = /u, 'the surface must own the search close wiring')
-  assert.match(surface, /onSearchQuery: query => runSearchQuery\(query\)/u,
-    'the surface must wire the search query callback')
+  assert.match(surface, /onSearchOpen: scope => openSearch\(scope\)/u,
+    'the surface must commit the requested scope before opening Search')
+  assert.match(surface, /onSearchScope: scope => switchSearchScope\(scope\)/u,
+    'the surface must wire the cross-scope transaction')
+  assert.match(surface, /onSearchQuery: query => changeSearchQuery\(query\)/u,
+    'the surface must route query changes through the active scope')
   assert.match(surface, /onTranscriptMoveOlder: \(\) => transcriptMoveOlder\(\)/u,
     'the surface must wire the navigation callback')
   assert.match(surface, /searchBindingForRepaint/u, 'the surface must own the search repaint binding')

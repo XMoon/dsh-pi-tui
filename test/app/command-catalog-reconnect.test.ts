@@ -23,6 +23,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { unavailableAcpAccess, unavailableWebAccess, unavailableMcpServers } from '../support/web-access-fake.ts'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
@@ -30,16 +31,20 @@ import { TuiApp } from '../../src/tui-app.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { sessionScopeFacts } from '../support/session-scope-facts.ts'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
+import { CommandBridge } from '../../src/extension/internal/command-bridge.ts'
 import { createCommandSurface } from '../../src/app/command/surface.ts'
 import type { RemoteCommandSourceFace } from '../../src/app/application-runtime.ts'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
 import type { TuiCommandRunner, TuiSettingsLike } from '../../src/commands.ts'
+import type { SurfaceCommandSummary } from '../../src/domain/catalog/surface.ts'
 import type { PermissionPresetApplyOutcome } from '../../src/runtime/config-port.ts'
 import { DirectCatalogPort } from '../../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
 import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
 import type { ModelSelectionValue } from '../../src/domain/session/model-selection.ts'
+import { unconfiguredPolicyObservation, unconfiguredSessionPolicyPort } from '../support/session-policy-fake.ts'
+import { createWorkspaceNextIntentOwner, type WorkspaceNextIntentOwner } from '../../src/app/session/workspace-next-intent.ts'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
@@ -72,23 +77,29 @@ function controlledRemoteSource(options: {
   let unsubscribed = 0
   let listeners: Array<() => void> = []
   const reads: CatalogRead[] = []
-  /** One scripted read: a settled name list, a rejection, or a held gate the
-   * test releases with `releaseRead` (the stale-read scenarios). */
+  /** One scripted read: a settled row list, a rejection, or a held gate the
+   * test releases with `releaseRead` (the stale-read scenarios). A bare name
+   * is the minimal row (`description` = the name); a full summary keeps the
+   * official descriptor fields the display must preserve. */
+  type ScriptedRow = string | SurfaceCommandSummary
   type Scripted =
-    | { readonly kind: 'settle'; readonly names: readonly string[] }
+    | { readonly kind: 'settle'; readonly rows: readonly SurfaceCommandSummary[] }
     | { readonly kind: 'reject'; readonly error: Error }
-    | { readonly kind: 'hold'; readonly release: (names: readonly string[]) => void; readonly gate: Promise<readonly string[]> }
+    | { readonly kind: 'hold'; readonly release: (rows: readonly ScriptedRow[]) => void; readonly gate: Promise<readonly ScriptedRow[]> }
   let scripted: readonly Scripted[] = []
   let readOrdinal = 0
   const holds = new Map<number, Scripted & { kind: 'hold' }>()
+  const normalizeRows = (rows: readonly ScriptedRow[]): readonly SurfaceCommandSummary[] =>
+    rows.map(row => typeof row === 'string' ? Object.freeze({ name: row, description: row }) : row)
   const source: RemoteCommandSourceFace & {
     readonly tokens: { readonly a: GenerationToken; readonly b: GenerationToken; readonly c: GenerationToken }
     readonly reads: readonly CatalogRead[]
-    /** Script the NEXT reads (in order): a name list, an Error (rejection),
-     * or 'hold' (the read waits until the test releases it). */
-    script(next: ReadonlyArray<readonly string[] | Error | 'hold'>): void
-    /** Release one held read with the names it settles with. */
-    releaseRead(ordinal: number, names: readonly string[]): void
+    /** Script the NEXT reads (in order): a row list (bare names or full
+     * descriptors), an Error (rejection), or 'hold' (the read waits until the
+     * test releases it). */
+    script(next: ReadonlyArray<readonly ScriptedRow[] | Error | 'hold'>): void
+    /** Release one held read with the rows it settles with. */
+    releaseRead(ordinal: number, rows: readonly ScriptedRow[]): void
     replace(next: GenerationToken | undefined): void
     readonly unsubscribedCount: () => number
     readonly listenerCount: () => number
@@ -99,15 +110,15 @@ function controlledRemoteSource(options: {
       scripted = next.map(entry => {
         if (entry instanceof Error) return { kind: 'reject', error: entry } as Scripted
         if (entry === 'hold') {
-          let release: (names: readonly string[]) => void = () => {}
-          const gate = new Promise<readonly string[]>(resolve => { release = resolve })
+          let release: (rows: readonly ScriptedRow[]) => void = () => {}
+          const gate = new Promise<readonly ScriptedRow[]>(resolve => { release = resolve })
           return { kind: 'hold', release, gate } as Scripted
         }
-        return { kind: 'settle', names: entry } as Scripted
+        return { kind: 'settle', rows: normalizeRows(entry) } as Scripted
       })
       readOrdinal = 0
     },
-    releaseRead: (ordinal, names) => { holds.get(ordinal)?.release(names) },
+    releaseRead: (ordinal, rows) => { holds.get(ordinal)?.release(rows) },
     unsubscribedCount: () => unsubscribed,
     listenerCount: () => listeners.length,
     replace: (next) => {
@@ -121,8 +132,8 @@ function controlledRemoteSource(options: {
       const plan = scripted[ordinal]
       if (plan === undefined) return { commands: Object.freeze([]), skills: Object.freeze([]) } as never
       if (plan.kind === 'reject') throw plan.error
-      const names = plan.kind === 'hold' ? await plan.gate : plan.names
-      return { commands: Object.freeze(names.map(name => Object.freeze({ name, description: name }))), skills: Object.freeze([]) } as never
+      const rows = normalizeRows(plan.kind === 'hold' ? await plan.gate : plan.rows)
+      return { commands: Object.freeze(rows), skills: Object.freeze([]) } as never
     },
     readCommands: async (sessionId: string) => {
       reads.push({ sessionId })
@@ -131,8 +142,7 @@ function controlledRemoteSource(options: {
       const plan = scripted[ordinal]
       if (plan === undefined) return []
       if (plan.kind === 'reject') throw plan.error
-      const names = plan.kind === 'hold' ? await plan.gate : plan.names
-      return names.map(name => ({ name, description: name }))
+      return normalizeRows(plan.kind === 'hold' ? await plan.gate : plan.rows)
     },
     captureTransportToken: (sessionId: string): unknown => ({ generation: snapshot, binding: `binding:${sessionId}` }),
     isTransportTokenCurrent: (sessionId: string, token: unknown): boolean => {
@@ -201,11 +211,44 @@ function fakeRunnerDeps(options: {
     presetId: string,
     signal: AbortSignal,
   ) => Promise<PermissionPresetApplyOutcome>
+  /** The Client-local next-create intent owner the surface reads for its Host
+   *  Workspace identity (the deferred-preflight tests). Omitted = no owner. */
+  readonly workspace?: WorkspaceNextIntentOwner
+  /** The existing single-flight launch preflight the automatic invalidation
+   *  admission awaits. Omitted = no preflight seam. */
+  readonly awaitWorkspacePreflight?: () => Promise<void>
+  /** The user-visible notice sink (the stale-selection assertions). */
+  readonly notify?: (message: string, kind: 'info' | 'error' | undefined) => void
+  /** The diagnostics sink (the retired-continuation assertions). */
+  readonly diag?: import('../../src/runtime/process/diagnostics.ts').Diag
+  /** The bumped chat-session generation (the catalog target identity). */
+  readonly generation?: () => number
+  /** Client-context command contributions mounted before registration. */
+  readonly extensionCommands?: ReadonlyArray<{
+    readonly id: string
+    readonly name: string
+    readonly description?: string
+  }>
 }) {
   const ctx = new Context()
+  const generation = options.generation ?? (() => 0)
+  const diag = options.diag ?? silentDiag
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   startedApps.add(app)
+  // Record the rows the ONE production installer receives. The wrapper is a
+  // one-to-one passthrough to the REAL TuiApp method (no second catalog and no
+  // candidate synthesis of its own).
+  const installedCompletions: Array<readonly { name: string; description: string; argumentHint?: string }[]> = []
+  const originalSetCommandCompletions = app.setCommandCompletions
+  app.setCommandCompletions = ((commands: Parameters<TuiApp['setCommandCompletions']>[0], ...rest: unknown[]) => {
+    installedCompletions.push(commands.map(command => ({
+      name: command.name,
+      description: command.description ?? '',
+      ...(command.argumentHint === undefined ? {} : { argumentHint: command.argumentHint }),
+    })))
+    ;(originalSetCommandCompletions as (...args: unknown[]) => void).call(app, commands, ...rest)
+  }) as TuiApp['setCommandCompletions']
   app.start()
   const tuiSettings: TuiSettingsLike = {
     get: () => ({ theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', history: {} }) as never,
@@ -217,13 +260,65 @@ function fakeRunnerDeps(options: {
       applyPermissionPreset: NonNullable<typeof options.applyPermissionPreset>
     }).applyPermissionPreset = options.applyPermissionPreset
   }
+  // Client-context extension contributions through the REAL CommandBridge.
+  // The health recorder mirrors the production extension-health ledger shape
+  // so a collision's fail-loud record and its recovery are observable.
+  const extensionHealth = new Map<string, {
+    extensionPoint: string
+    id: string
+    owner: string
+    state: 'failed'
+    lastError: string
+  }>()
+  const extensionBridge = options.extensionCommands === undefined ? undefined : new CommandBridge()
+  const extensionHandles = new Map<string, { dispose(): void }>()
+  for (const command of options.extensionCommands ?? []) {
+    const outcome = extensionBridge!.register({
+      id: command.id,
+      name: command.name,
+      description: command.description ?? `ext ${command.name}`,
+      sessionless: true,
+      handler: () => ({ kind: 'success' as const }),
+    }, 'test-owner')
+    assert.equal(outcome.kind, 'registered', `the extension command ${command.name} must register`)
+    if (outcome.kind === 'registered') {
+      // The extension host untracks a disposed fiber's health records as part
+      // of the same registration lifetime; the test keeps that production
+      // coupling so the recovered state is observable here.
+      extensionHandles.set(command.name, {
+        dispose: () => {
+          extensionHealth.delete(`command\u0000${command.id}\u0000test-owner`)
+          outcome.handle.dispose()
+        },
+      })
+    }
+  }
+  const recordExtensionError = (ref: { slot: string; id: string; owner: string }, error: unknown): void => {
+    extensionHealth.set(`${ref.slot}\u0000${ref.id}\u0000${ref.owner}`, {
+      extensionPoint: ref.slot,
+      id: ref.id,
+      owner: ref.owner,
+      state: 'failed',
+      lastError: error instanceof Error ? error.message : String(error),
+    })
+  }
+  const clearExtensionError = (ref: { slot: string; id: string; owner: string }): void => {
+    extensionHealth.delete(`${ref.slot}\u0000${ref.id}\u0000${ref.owner}`)
+  }
   const runner: TuiCommandRunner = {
+    webAccess: unavailableWebAccess(),
+    acpAccess: unavailableAcpAccess(),
+    mcpServers: unavailableMcpServers(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,
     app,
-    diag: silentDiag,
-    ...sessionScopeFacts(() => undefined, () => 0),
+    diag,
+    ...sessionScopeFacts(() => undefined, generation),
+    recordExtensionError,
+    clearExtensionError,
+    sessionPolicy: unconfiguredSessionPolicyPort(),
+    policy: unconfiguredPolicyObservation(),
     get currentSessionId() { return options.currentSessionId() },
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } as never },
@@ -248,14 +343,13 @@ function fakeRunnerDeps(options: {
     commandRegistry: undefined,
     clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
-    hostShellCompletion: false,
-    transcriptExportAvailable: false,
+    hostShellCompletion: { pathAuthority: 'host' as const, complete: async () => ({ kind: 'unavailable' as const, reason: 'test Host unavailable' }) },
     interaction: {
       questions: {
         onRequest: () => true, subscribe: () => undefined, snapshot: () => undefined,
         claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const,
       },
-      onApprovalRequest: () => {}, setApprovalPolicy: () => true,
+      onApprovalRequest: () => {},
     },
     sessionWriter: {
       prompt: async () => ({ kind: 'committed' as const, value: undefined }),
@@ -294,7 +388,7 @@ function fakeRunnerDeps(options: {
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, createPluginManagerPage: () => undefined,
+    openTasksBrowser: () => {}, openScheduleWorkspace: () => ({ kind: 'success' } as const), createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -302,17 +396,21 @@ function fakeRunnerDeps(options: {
     withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},
-    extensions: undefined,
+    extensions: extensionBridge === undefined ? undefined : {
+      commands: extensionBridge,
+      health: () => [...extensionHealth.values()],
+    } as never,
     exit: () => {},
   }
-  const scopeFacts = sessionScopeFacts(() => undefined, () => 0)
+  const scopeFacts = sessionScopeFacts(() => undefined, generation)
   const surface = createCommandSurface<ModelSelectionValue, string, never>({
     ctx,
     logError: () => {},
-    diag: silentDiag,
+    diag,
+    policy: unconfiguredPolicyObservation(),
     signal: options.signal ?? new AbortController().signal,
     app: () => app,
-    notify: () => {},
+    notify: (message, kind) => { options.notify?.(message, kind) },
     liveAgent: () => undefined,
     sessionScope: {
       capture: () => scopeFacts.captureSessionScope(),
@@ -320,7 +418,7 @@ function fakeRunnerDeps(options: {
       isCurrent: scope => scopeFacts.isSessionScopeCurrent(scope as never),
     },
     ownership: {
-      generation: () => 0,
+      generation,
       currentSessionId: () => options.currentSessionId(),
     },
     transition: { pending: () => false, run: async (task) => task() },
@@ -357,22 +455,38 @@ function fakeRunnerDeps(options: {
       setNotificationMode: () => {}, currentNotificationMode: () => 'unfocused', currentNotificationMethod: () => 'auto',
       setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
       openJobView: () => {},
-      openTasksBrowser: () => {},
+      openTasksBrowser: () => {}, openScheduleWorkspace: () => ({ kind: 'success' } as const),
       // Image UX PR3-B: the CommandSurface's live composer seam. This harness
       // mounts the real PiTui app, which is its own composer port.
       composer: () => app,
       deliveredFilesSnapshot: () => undefined,
+      // TSP I-C: this harness mounts the real PiTui app, so `app` is defined and
+      // every catalog commit keeps its existing `app.setCommandCompletions`
+      // route — these two seams are never reached here. They are declared
+      // because the production composition makes them required capabilities of
+      // the mounted surface, and this literal is that contract's fake.
+      installTspCommandCompletions: () => {},
+      // TSP I-D: same reason — the PiTui branch installs the stager on `app`.
+      installTspInlineAttachmentStager: () => {},
+      tspCommandPickerCapabilities: () => ({}),
     },
     backend: {
       kind: options.remoteSource === undefined ? 'direct' : 'remote',
       sessionReader: runner.sessionReader,
+      sessionWorkspaceFacts: runner.sessionWorkspaceFacts,
+      hostDirectoryBrowse: runner.hostDirectoryBrowse,
+      sessionPolicy: runner.sessionPolicy,
       sessionWriter: runner.sessionWriter,
       interaction: runner.interaction,
       catalog: runner.catalog,
       config: runner.config,
       hostFile: runner.hostFile,
-      hostShellCompletion: false,
-      transcriptExportAvailable: false,
+      webAccess: runner.webAccess,
+      acpAccess: runner.acpAccess,
+      mcpServers: runner.mcpServers,
+      cuaAccess: runner.cuaAccess,
+      pluginManager: runner.pluginManager,
+      hostShellCompletion: { pathAuthority: 'host' as const, complete: async () => ({ kind: 'unavailable' as const, reason: 'test Host unavailable' }) },
     },
     session: {
       ensureSession: () => runner.ensureSession(),
@@ -381,6 +495,10 @@ function fakeRunnerDeps(options: {
       forkSession: async () => ({ kind: 'committed', value: undefined }) as never,
       isNavigationCurrent: () => false,
       transitionTo: runner.transitionTo,
+      ...(options.workspace === undefined ? {} : { workspaceNextIntent: options.workspace }),
+      ...(options.awaitWorkspacePreflight === undefined
+        ? {}
+        : { awaitWorkspacePreflight: options.awaitWorkspacePreflight }),
     },
     status: {
       forceContextMeasurement: () => undefined,
@@ -411,9 +529,9 @@ function fakeRunnerDeps(options: {
       files: { pin: () => {}, unpin: () => {}, clearUnpinned: () => {}, attach: () => {} } as never,
     },
     extensions: {
-      current: () => undefined,
-      recordError: () => {},
-      clearError: () => {},
+      current: () => runner.extensions,
+      recordError: (ref, error) => recordExtensionError(ref, error),
+      clearError: (ref) => clearExtensionError(ref),
     },
     pluginManager: {
       page: () => undefined,
@@ -445,6 +563,14 @@ function fakeRunnerDeps(options: {
     surface,
     runner,
     app,
+    /** The rows most recently handed to `TuiApp.setCommandCompletions`. */
+    completions: () => installedCompletions.at(-1) ?? [],
+    /** How many times the production installer ran. */
+    completionInstallCount: () => installedCompletions.length,
+    /** The real CommandBridge handles of the mounted Client contributions. */
+    extensionHandles,
+    /** The recorded extension-health entries (failed collisions). */
+    extensionHealth: () => [...extensionHealth.values()],
     /** The facade `buildRunner` produced (the public TuiCommandRunner seam). */
     builtRunner: () => facade,
     /** The REAL current SessionScope the harness's scope authority captures. */
@@ -463,6 +589,275 @@ function fakeRunnerDeps(options: {
     },
   }
 }
+
+/* ── Remote Host display synthesis ─────────────────────────────────────── */
+
+test('a live Remote Host catalog is displayed beside Client commands with its own metadata', async () => {
+  const source = controlledRemoteSource({})
+  const harness = fakeRunnerDeps({
+    remoteSource: source,
+    currentSessionId: () => 'session-a',
+  })
+  try {
+    harness.register()
+    source.script([[
+      { name: 'compact', description: 'Compact the conversation', input: { hint: '[instructions]' } },
+      { name: 'plan', description: 'Toggle plan mode' },
+      { name: 'host-plugin', description: 'A Host plugin command', input: { hint: '<task>', attachments: true } },
+    ]])
+    await harness.surface.refreshLiveCatalogById('session-a')
+    const rows = harness.completions()
+    const byName = new Map(rows.map(row => [row.name, row]))
+    assert.deepEqual(byName.get('compact'), {
+      name: 'compact',
+      description: 'Compact the conversation',
+      argumentHint: '[instructions]',
+    }, 'the Host /compact row keeps the official Host description and hint')
+    assert.deepEqual(byName.get('plan'), {
+      name: 'plan',
+      description: 'Toggle plan mode',
+    }, 'the Host /plan row keeps the official Host description')
+    assert.deepEqual(byName.get('host-plugin'), {
+      name: 'host-plugin',
+      description: 'A Host plugin command',
+      argumentHint: '<task>',
+    }, 'a Host plugin row follows the same Host-first display rule')
+    assert.equal(byName.has('help'), true, 'the Client registration remains visible beside the Host rows')
+    assert.equal(new Set(rows.map(row => row.name)).size, rows.length, 'every displayed command name is unique')
+  } finally {
+    harness.dispose()
+  }
+})
+
+test('a Host descriptor keeps its name, description and argument hint over a same-named Client registration', async () => {
+  const source = controlledRemoteSource({})
+  const harness = fakeRunnerDeps({
+    remoteSource: source,
+    currentSessionId: () => 'session-a',
+  })
+  try {
+    harness.register()
+    source.script([[
+      { name: 'sessions', description: 'Host session picker', input: { hint: '<host query>', attachments: true } },
+      { name: 'export', description: 'Host export descriptor' },
+    ]])
+    await harness.surface.refreshLiveCatalogById('session-a')
+    const byName = new Map(harness.completions().map(row => [row.name, row]))
+    assert.deepEqual(byName.get('sessions'), {
+      name: 'sessions',
+      description: 'Host session picker',
+      argumentHint: '<host query>',
+    }, 'the Host /sessions descriptor wins the display row over the Client built-in')
+    assert.deepEqual(byName.get('export'), {
+      name: 'export',
+      description: 'Host export descriptor',
+    }, 'the Host /export descriptor wins the display row over the Client built-in')
+    assert.deepEqual(harness.surface.hostOriginClaimOf({ name: 'sessions' }),
+      { claimed: true, attachments: true },
+      'the Host-origin claim keeps the Host descriptor declaration')
+    assert.deepEqual(harness.surface.hostOriginClaimOf({ name: 'export' }),
+      { claimed: true, attachments: false },
+      'the Host-origin claim owns the Host name independently of the display list')
+    assert.equal(harness.runner.clientCommands.get('sessions') !== undefined, true,
+      'the Client registration still exists under the name; it is only not the display winner')
+  } finally {
+    harness.dispose()
+  }
+})
+
+test('a late extension refresh keeps Host rows, and a Host/extension collision withdraws the whole display until recovery', async () => {
+  const source = controlledRemoteSource({})
+  const harness = fakeRunnerDeps({
+    remoteSource: source,
+    currentSessionId: () => 'session-a',
+    extensionCommands: [{
+      id: 'ext-host-plugin',
+      name: 'host-plugin',
+      description: 'extension host-plugin',
+    }],
+  })
+  try {
+    harness.register()
+    source.script([[
+      { name: 'host-plugin', description: 'Host plugin row', input: { hint: '<task>' } },
+      { name: 'host-other', description: 'Another Host row' },
+    ]])
+    await harness.surface.refreshLiveCatalogById('session-a')
+    // The collision already fails the live snapshot synthesis: the display is
+    // withdrawn as ONE group while the Host claims remain the routing truth.
+    assert.deepEqual(harness.completions(), [], 'a Host/extension collision withdraws every displayed row')
+    assert.deepEqual(harness.surface.hostOriginClaimOf({ name: 'host-plugin' }),
+      { claimed: true, attachments: false },
+      'the Host claim survives the failed display synthesis')
+    assert.equal(harness.extensionHealth().length, 1, 'the collision is recorded in the extension health ledger')
+    assert.match(harness.extensionHealth()[0]!.lastError, /collides with a host command/u)
+
+    // A late, non-Host refresh (the extension disposal path) must not read the
+    // Host again and must restore the Host rows in exactly ONE commit.
+    const readsBefore = source.reads.length
+    const installsBefore = harness.completionInstallCount()
+    harness.extensionHandles.get('host-plugin')?.dispose()
+    harness.surface.refreshCompletions()
+    const byName = new Map(harness.completions().map(row => [row.name, row]))
+    assert.deepEqual(byName.get('host-plugin'), {
+      name: 'host-plugin',
+      description: 'Host plugin row',
+      argumentHint: '<task>',
+    }, 'the Host row and its metadata survive the late Client-only refresh')
+    assert.equal(byName.has('host-other'), true, 'every Host row returns together')
+    assert.equal(source.reads.length, readsBefore, 'the recovery refresh issues no Host read')
+    assert.equal(harness.completionInstallCount(), installsBefore + 1, 'the recovery is exactly ONE install commit')
+    assert.deepEqual(harness.extensionHealth(), [], 'the recovered collision leaves the failed health state')
+  } finally {
+    harness.dispose()
+  }
+})
+
+test('a held Remote target transition never advertises an extension row reserved by the old Host name', async () => {
+  const source = controlledRemoteSource({})
+  let generation = 1
+  let currentSession: string | undefined = 'session-a'
+  const harness = fakeRunnerDeps({
+    remoteSource: source,
+    currentSessionId: () => currentSession,
+    generation: () => generation,
+    extensionCommands: [{
+      id: 'ext-alpha-reserved',
+      name: 'alpha-only',
+      description: 'extension alpha-only',
+    }],
+  })
+  try {
+    harness.register()
+    source.script([[{ name: 'alpha-only', description: 'Host A alpha-only' }]])
+    await harness.surface.refreshLiveCatalogById('session-a')
+    // Normal live synthesis: the Host row wins, so the same-named extension
+    // contribution is a real fail-loud collision and no row is displayed.
+    assert.deepEqual(harness.completions(), [], 'the live Host/extension collision withdraws the display')
+    assert.equal(harness.extensionHealth().length, 1, 'the live collision is recorded')
+    const healthAfterLive = harness.extensionHealth()[0]!.lastError
+
+    // Hold B's read after entering the target-changing transition. The old
+    // Host row is hidden, but its genuine name reservation must still keep
+    // the extension row out of the display and keep the collision health.
+    generation = 2
+    currentSession = 'session-b'
+    source.script(['hold'])
+    const pending = harness.surface.refreshLiveCatalogById('session-b')
+    await waitUntil(() => source.reads.length === 2, 'the held B read')
+    assert.deepEqual(harness.completions(), [],
+      'the transition gap never advertises the extension row for the reserved Host name')
+    assert.equal(harness.extensionHealth().length, 1,
+      'the transition does not falsely recover the retained Host/extension collision')
+    assert.equal(harness.extensionHealth()[0]!.lastError, healthAfterLive,
+      'the retained collision health record is unchanged during the transition')
+
+    // B retains the name: the collision survives the new target snapshot.
+    source.releaseRead(0, [{ name: 'alpha-only', description: 'Host B alpha-only' }])
+    await pending
+    assert.deepEqual(harness.completions(), [],
+      'B retaining the Host name keeps the display withdrawn')
+    assert.equal(harness.extensionHealth().length, 1,
+      'B retaining the Host name keeps the collision health failed')
+
+    // B retires the name: the next same-target snapshot may advertise the
+    // extension row cleanly and the collision health recovers exactly then.
+    source.script([[]])
+    await harness.surface.refreshLiveCatalogById('session-b')
+    const rows = harness.completions()
+    assert.equal(rows.some(row => row.name === 'alpha-only' && row.description === 'extension alpha-only'), true,
+      'after B retires the Host row the extension row is a legitimate Client candidate')
+    assert.equal(rows.some(row => row.name === 'alpha-only' && row.description === 'Host B alpha-only'), false,
+      'the old Host metadata never repaints')
+    assert.deepEqual(harness.extensionHealth(), [],
+      'the collision health recovers only after the Host name is genuinely retired')
+  } finally {
+    source.releaseRead(0, [])
+    harness.dispose()
+  }
+})
+
+test('a target change withdraws the old Host rows immediately and installs only the new target catalog', async () => {
+  const source = controlledRemoteSource({})
+  let generation = 1
+  let currentSession: string | undefined = 'session-a'
+  const harness = fakeRunnerDeps({
+    remoteSource: source,
+    currentSessionId: () => currentSession,
+    generation: () => generation,
+  })
+  try {
+    harness.register()
+    const disposeTwin = harness.runner.clientCommands.register({
+      name: 'alpha-only',
+      description: 'Client twin of the old Host name',
+      handler: () => ({ kind: 'success' as const }),
+    })
+    source.script([[{ name: 'alpha-only', description: 'Target A Host row' }]])
+    await harness.surface.refreshLiveCatalogById('session-a')
+    assert.equal(new Map(harness.completions().map(row => [row.name, row])).get('alpha-only')?.description,
+      'Target A Host row',
+      'target A displays its Host row with the genuine metadata')
+
+    // A REAL target change: the chat-session generation bumps and the owner
+    // moves to B. The coordinator enters the transition SYNCHRONOUSLY before
+    // its read, so the old Host row (and its same-named Client twin) must be
+    // gone from the display in this same turn; the retained claims remain.
+    generation = 2
+    currentSession = 'session-b'
+    source.script(['hold'])
+    const pending = harness.surface.refreshLiveCatalogById('session-b')
+    assert.equal(harness.completions().some(row => row.name === 'alpha-only'), false,
+      'the previous target Host row is not repainted as a new-target candidate')
+    assert.deepEqual(harness.surface.hostOriginClaimOf({ name: 'alpha-only' }),
+      { claimed: true, attachments: false },
+      'the last-good Host claim is retained across the transition')
+
+    // B settles with its own catalog: only beta-only is displayed. The old
+    // Client twin is disposed first so this assertion observes the HOST row's
+    // retirement, not a legitimate Client fallback under the old name.
+    disposeTwin()
+    source.releaseRead(0, [{ name: 'beta-only', description: 'Target B Host row' }])
+    await pending
+    const after = new Map(harness.completions().map(row => [row.name, row]))
+    assert.deepEqual(after.get('beta-only'), {
+      name: 'beta-only',
+      description: 'Target B Host row',
+    }, 'target B installs its own Host row')
+    assert.equal(after.has('alpha-only'), false, 'the A-only Host row cannot survive the target change')
+  } finally {
+    source.releaseRead(0, [])
+    harness.dispose()
+  }
+})
+
+test('a sessionless Remote surface shows no Host command until the first real Session catalog installs', async () => {
+  const source = controlledRemoteSource({})
+  let currentSession: string | undefined
+  const harness = fakeRunnerDeps({
+    remoteSource: source,
+    currentSessionId: () => currentSession,
+  })
+  try {
+    harness.register()
+    assert.equal(harness.completions().some(row => row.name === 'compact' || row.name === 'plan'), false,
+      'the cold sessionless surface fabricates no effective Host command rows')
+    assert.equal(source.reads.length, 0, 'opening the sessionless surface issues no Host command read')
+
+    // The first REAL Session appears and its official catalog installs.
+    currentSession = 'session-first'
+    source.script([[
+      { name: 'compact', description: 'Compact from the Host' },
+      { name: 'plan', description: 'Plan from the Host' },
+    ]])
+    await harness.surface.refreshLiveCatalogById('session-first')
+    const names = harness.completions().map(row => row.name)
+    assert.ok(names.includes('compact') && names.includes('plan'),
+      `the first real Session makes the Host commands visible: ${names.join(', ')}`)
+  } finally {
+    harness.dispose()
+  }
+})
 
 /* ── CCR-1 ────────────────────────────────────────────────────────────── */
 
@@ -487,6 +882,134 @@ test('a synchronous subscription-time generation notification is NOT a duplicate
   }
 })
 
+test('the official Workspace facts port crosses the command facade BY IDENTITY (M5-U-C)', () => {
+  const harness = fakeRunnerDeps({ currentSessionId: () => 'session-a' })
+  try {
+    harness.register()
+    const built = harness.builtRunner()
+    assert.ok(built !== undefined, 'buildRunner must expose the real TuiCommandRunner facade')
+    assert.equal(built.sessionWorkspaceFacts, harness.runner.sessionWorkspaceFacts,
+      'the facade forwards the SAME backend port — no copy, wrapper or second registry')
+  } finally {
+    harness.dispose()
+  }
+})
+
+/* ── explicit owner refresh re-establishes a failed Skills watch ─────────── */
+
+test('a passive invalidation does not re-arm, but a same-generation Live Session refresh does', async () => {
+  const source = controlledRemoteSource({})
+  const harness = fakeRunnerDeps({
+    remoteSource: source,
+    currentSessionId: () => 'session-live',
+  })
+  const rearms = { count: 0 }
+  let passiveListener: (() => void) | undefined
+  const skills = harness.runner.catalog.skills as unknown as {
+    onSkillsChange: (listener: () => void, onError: (error: unknown) => void) => () => void
+    rearmSkillsChange?: () => void
+  }
+  skills.onSkillsChange = (listener) => {
+    passiveListener = listener
+    return () => {}
+  }
+  skills.rearmSkillsChange = () => { rearms.count += 1 }
+  try {
+    harness.register()
+    assert.ok(passiveListener !== undefined, 'registration installed the invalidation subscription')
+    // One passive `skills/change` notification: it MUST refresh the current
+    // owner but MUST NOT re-arm a failed stream (no hidden retry loop).
+    source.script([['passive-host-command']])
+    passiveListener!()
+    for (let index = 0; index < 40; index += 1) await Promise.resolve()
+    assert.equal(source.reads.length, 1, 'the passive invalidation really ran one owner read')
+    assert.equal(rearms.count, 0, 'a passive invalidation never re-arms the failed stream')
+    // The Live Session START/SWITCH/STARTUP entry is an explicit owner refresh:
+    // it re-arms even though the Connection generation is unchanged.
+    source.script([['switched-host-command']])
+    await harness.surface.refreshLiveCatalogById('session-live')
+    assert.equal(rearms.count, 1, 'a Live Session refresh re-arms the failed stream exactly once')
+    assert.equal(source.reads.length, 2, 'the Live Session refresh performed its official read')
+  } finally {
+    harness.dispose()
+  }
+})
+
+/* ── live owner admission for the sessionless standing refresh ───────────── */
+
+test('a live Session refuses a sessionless standing refresh, so Add directory never replaces its catalog', async () => {
+  const source = controlledRemoteSource({})
+  let sessionId: string | undefined = 'session-live'
+  const harness = fakeRunnerDeps({
+    remoteSource: source,
+    currentSessionId: () => sessionId,
+  })
+  const rearms = { count: 0 }
+  ;(harness.runner.catalog.skills as unknown as {
+    rearmSkillsChange?: () => void
+  }).rearmSkillsChange = () => { rearms.count += 1 }
+  try {
+    harness.register()
+    assert.ok(harness.builtRunner() !== undefined, 'the runner facade must be built')
+    const readsBefore = source.reads.length
+    const live = await harness.surface.requestCatalogRefresh({
+      source: 'invalidation',
+      target: { kind: 'preset', presetId: 'code', workspaceId: 'ws-1' },
+    })
+    assert.equal(live.kind, 'superseded',
+      'a live Session owns the catalog: the standing (preset/workspace) target is refused')
+    assert.equal(source.reads.length, readsBefore,
+      'the refusal neither re-dispatches nor replaces the live official read')
+    assert.equal(rearms.count, 0, 'a refused standing request never re-arms the live subscription')
+    // The SAME request from a sessionless owner reaches the standing path.
+    // There is no confirmed Workspace in this harness, so the coordinator
+    // applies the local incomplete projection (never a Host RPC and never a
+    // blank fabricated complete catalog).
+    sessionId = undefined
+    const sessionless = await harness.surface.requestCatalogRefresh({
+      source: 'invalidation',
+      target: { kind: 'preset', presetId: 'code' },
+    })
+    assert.equal(sessionless.kind, 'applied')
+    assert.equal(rearms.count, 1,
+      'an explicit owner refresh re-arms a failed invalidation stream exactly once')
+    if (sessionless.kind === 'applied') {
+      assert.match(String(sessionless.notice), /Select a Host workspace/u,
+        'a sessionless Remote owner without a confirmed Workspace gets the explicit selection prompt')
+    }
+  } finally {
+    harness.dispose()
+  }
+})
+
+test('disposeCatalog releases the Skills subscription BEFORE the coordinator and unsubscribes the generation listener', () => {
+  const source = controlledRemoteSource({})
+  const harness = fakeRunnerDeps({
+    remoteSource: source,
+    currentSessionId: () => 'session-a',
+  })
+  const lifecycle: string[] = []
+  ;(harness.runner.catalog.skills as unknown as {
+    onSkillsChange: (listener: () => void, onError: (error: unknown) => void) => () => void
+  }).onSkillsChange = () => {
+    lifecycle.push('subscribe')
+    return () => { lifecycle.push('dispose-skills') }
+  }
+  try {
+    harness.register()
+    assert.deepEqual(lifecycle, ['subscribe'], 'registration installs the ONE invalidation subscription')
+    assert.equal(source.listenerCount(), 1, 'the Remote generation listener is installed')
+    harness.surface.disposeCatalog()
+    assert.deepEqual(lifecycle, ['subscribe', 'dispose-skills'],
+      'surface teardown MUST release the Skills subscription (Direct listener / Remote watch)')
+    assert.equal(source.listenerCount(), 0,
+      'the Remote generation listener is released by the SAME disposal owner')
+    assert.doesNotThrow(() => harness.surface.disposeCatalog(), 'disposal is idempotent')
+  } finally {
+    harness.dispose()
+  }
+})
+
 /* ── CCR-2 ────────────────────────────────────────────────────────────── */
 
 test('disconnect (A -> undefined) reads nothing, clears nothing, and keeps the Host-origin claim reserved', async () => {
@@ -502,6 +1025,8 @@ test('disconnect (A -> undefined) reads nothing, clears nothing, and keeps the H
     await harness.surface.refreshLiveCatalogById('session-a')
     assert.equal(harness.surface.hostOriginClaimOf({ name: 'host-a' })?.claimed, true,
       'the installed Host command claims the name before the disconnect')
+    assert.equal(new Map(harness.completions().map(row => [row.name, row])).get('host-a')?.description,
+      'host-a', 'the installed Host row is displayed')
 
     // A -> undefined: no read, no clear, no Client same-name takeover.
     const clientRegistry = harness.runner.clientCommands
@@ -518,6 +1043,8 @@ test('disconnect (A -> undefined) reads nothing, clears nothing, and keeps the H
       'the last-good Host-origin claim survives the disconnect')
     assert.equal(harness.surface.hostCatalogResolves('host-a'), true,
       'the reserved Host name cannot be taken over by the Client twin while disconnected')
+    assert.equal(new Map(harness.completions().map(row => [row.name, row])).get('host-a')?.description,
+      'host-a', 'the last-good Host row stays displayed and never repaints the Client twin')
   } finally {
     harness.dispose()
   }
@@ -552,6 +1079,9 @@ test('a new defined generation B refreshes automatically without /reload and rep
       'the new B Host command is authoritative after the commit')
     assert.equal(harness.surface.hostCatalogResolves('host-a'), false,
       'the completion/claim state reflects B, not the A residue')
+    const display = new Map(harness.completions().map(row => [row.name, row]))
+    assert.equal(display.has('host-b'), true, 'the successful B display carries the new Host row')
+    assert.equal(display.has('host-a'), false, 'the display no longer carries the retired A Host row')
   } finally {
     harness.dispose()
   }
@@ -580,6 +1110,8 @@ test('a FAILED new-generation read keeps the last-good Host claims (no blank suc
       'the last-good Host command authority remains after the failed B read')
     assert.equal(harness.surface.hostCatalogResolves('host-a'), true,
       'no blank/empty catalog replaced the last-good Host truth')
+    assert.equal(new Map(harness.completions().map(row => [row.name, row])).get('host-a')?.description,
+      'host-a', 'the failed same-target refresh keeps the last-good Host display')
   } finally {
     harness.dispose()
   }
@@ -615,6 +1147,9 @@ test('generation C supersedes an in-flight B refresh through the existing coordi
       'the C snapshot is the installed current catalog')
     assert.equal(harness.surface.hostOriginClaimOf({ name: 'host-b' }), undefined,
       'the superseded B snapshot never installed')
+    const display = new Map(harness.completions().map(row => [row.name, row]))
+    assert.equal(display.has('host-c'), true, 'the display shows only the C snapshot after the race')
+    assert.equal(display.has('host-b'), false, 'the superseded B display never appears')
   } finally {
     source.releaseRead(0, [])
     harness.dispose()
@@ -797,6 +1332,432 @@ test('the CommandSurface prefers the explicit operation signal and forwards abor
     assert.equal(received[0]?.aborted, true,
       'the official executor still observes the caller cancellation')
   } finally {
+    harness.dispose()
+  }
+})
+
+/* ── B2: sessionless first-frame admission (Workspace preflight barrier) ── */
+
+/** Poll a synchronous predicate with real timer turns (never a bare sleep). */
+async function waitUntil(predicate: () => boolean, label: string, timeoutMs = 3_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (predicate()) return
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+  assert.fail(label)
+}
+
+/** One recorded standing read (its production arguments). */
+interface StandingReadCall {
+  readonly presetId: string | undefined
+  readonly location: import('../../src/runtime/catalog-port.ts').StandingSkillLocation
+}
+
+/** Replace the REAL catalog capability's standing read with a recorder. */
+function recordStandingReads(
+  harness: ReturnType<typeof fakeRunnerDeps>,
+  read?: (call: number) => Promise<import('../../src/runtime/catalog-port.ts').StandingSkillRead>,
+): StandingReadCall[] {
+  const calls: StandingReadCall[] = []
+  const skills = harness.runner.catalog.skills as unknown as {
+    standing: (
+      presetId: string | undefined,
+      location: import('../../src/runtime/catalog-port.ts').StandingSkillLocation,
+      signal?: AbortSignal,
+    ) => Promise<import('../../src/runtime/catalog-port.ts').StandingSkillRead>
+  }
+  skills.standing = async (presetId, location) => {
+    calls.push({ presetId, location })
+    if (read !== undefined) return read(calls.length)
+    return {
+      catalog: { skills: [{ name: 'host-skill', description: 'Host skill', modelInvocable: true }], complete: true },
+    }
+  }
+  return calls
+}
+
+/** Capture the installed Host invalidation stream's two sinks. */
+function captureSkillsStream(harness: ReturnType<typeof fakeRunnerDeps>): {
+  frame: () => void
+  fail: (error: unknown) => void
+} {
+  const sinks: { frame?: () => void; fail?: (error: unknown) => void } = {}
+  const skills = harness.runner.catalog.skills as unknown as {
+    onSkillsChange: (listener: () => void, onError: (error: unknown) => void) => () => void
+  }
+  skills.onSkillsChange = (listener, onError) => {
+    sinks.frame = listener
+    sinks.fail = onError
+    return () => {}
+  }
+  return {
+    frame: () => {
+      assert.ok(sinks.frame !== undefined, 'registration installed the invalidation subscription')
+      sinks.frame()
+    },
+    fail: (error) => {
+      assert.ok(sinks.fail !== undefined, 'registration installed the invalidation error sink')
+      sinks.fail(error)
+    },
+  }
+}
+
+/** A deferred gate the test resolves explicitly (the controlled preflight). */
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve: () => void = () => {}
+  const promise = new Promise<void>(done => { resolve = done })
+  return { promise, resolve }
+}
+
+test('B2-RACE-1: the host startup invalidation waits for the Workspace preflight, then reads the confirmed Host WorkspaceId', async () => {
+  const source = controlledRemoteSource({})
+  const workspace = createWorkspaceNextIntentOwner(undefined)
+  const preflight = deferred()
+  const notices: Array<{ message: string; kind: string | undefined }> = []
+  const harness = fakeRunnerDeps({
+    remoteSource: source,
+    currentSessionId: () => undefined,
+    workspace,
+    awaitWorkspacePreflight: () => preflight.promise,
+    notify: (message, kind) => { notices.push({ message, kind }) },
+  })
+  const standings = recordStandingReads(harness)
+  const stream = captureSkillsStream(harness)
+  try {
+    harness.register()
+    // The real Host stream's subscribe→reread startup frame arrives BEFORE the
+    // launch preflight commits.
+    stream.frame()
+    await new Promise(resolve => setTimeout(resolve, 30))
+    assert.equal(standings.length, 0, 'no Host standing RPC may be issued before the preflight settles')
+    assert.deepEqual(notices, [], 'the pending preflight must not paint a selection error')
+
+    workspace.setResolvedWorkspace('ws-host-1', '/host/workspace')
+    preflight.resolve()
+    await waitUntil(() => standings.length === 1, 'the admitted standing read')
+    assert.deepEqual(standings[0]?.location, { kind: 'host-workspace', workspaceId: 'ws-host-1' },
+      'the standing read must use the Host-issued WorkspaceId read AFTER the preflight')
+    assert.equal(standings[0]?.presetId, undefined, 'the effective preset id is read at admission time')
+    await waitUntil(() => harness.surface.isSkillWrapperName('host-skill'),
+      'the served skill is installed as the current wrapper')
+    assert.deepEqual(notices, [], 'the successful admitted read paints no stale selection notice')
+  } finally {
+    workspace.dispose()
+    harness.dispose()
+  }
+})
+
+test('B2-RACE-2: a live Session published while the preflight is held wins; no sessionless Host read is issued', async () => {
+  const source = controlledRemoteSource({})
+  const workspace = createWorkspaceNextIntentOwner(undefined)
+  const preflight = deferred()
+  let currentSession: string | undefined
+  const harness = fakeRunnerDeps({
+    remoteSource: source,
+    currentSessionId: () => currentSession,
+    workspace,
+    awaitWorkspacePreflight: () => preflight.promise,
+  })
+  const standings = recordStandingReads(harness)
+  const stream = captureSkillsStream(harness)
+  try {
+    harness.register()
+    stream.frame()
+    await new Promise(resolve => setTimeout(resolve, 30))
+    assert.equal(standings.length, 0)
+    // The first Session commits while the preflight is still held.
+    currentSession = 'session-live'
+    source.script([['live-command']])
+    preflight.resolve()
+    await waitUntil(() => source.reads.length === 1, 'the live catalog read after the preflight')
+    assert.deepEqual(source.reads, [{ sessionId: 'session-live' }],
+      'the re-read live owner owns the refresh: never the sessionless standing target')
+    assert.equal(standings.length, 0, 'no Host standing RPC may run for a live Session')
+  } finally {
+    workspace.dispose()
+    harness.dispose()
+  }
+})
+
+test('B2-RACE-3: an unselected surface publishes no automatic standing read, while /reload keeps its explicit notice', async () => {
+  const source = controlledRemoteSource({})
+  const workspace = createWorkspaceNextIntentOwner(undefined)
+  const notices: Array<{ message: string; kind: string | undefined }> = []
+  const harness = fakeRunnerDeps({
+    remoteSource: source,
+    currentSessionId: () => undefined,
+    workspace,
+    awaitWorkspacePreflight: async () => {},
+    notify: (message, kind) => { notices.push({ message, kind }) },
+  })
+  const standings = recordStandingReads(harness)
+  const stream = captureSkillsStream(harness)
+  try {
+    harness.register()
+    stream.frame()
+    await new Promise(resolve => setTimeout(resolve, 30))
+    assert.equal(standings.length, 0,
+      'an automatic invalidation without a confirmed Workspace must issue no Host RPC')
+    assert.deepEqual(notices, [], 'the automatic path must not paint the stale selection error')
+    assert.equal(harness.surface.catalogRefreshAvailable(), true, 'global commands remain available')
+
+    // The EXPLICIT owner refresh keeps the pre-existing selection notice: the
+    // two admission decisions are different, not a blanket silence.
+    const explicit = await harness.surface.requestCatalogRefresh({
+      source: 'reload',
+      target: { kind: 'preset', presetId: 'code' },
+    })
+    assert.equal(explicit.kind, 'applied', 'the explicit reload still runs its standing projection')
+    if (explicit.kind === 'applied') {
+      assert.match(String(explicit.notice), /Select a Host workspace to load skills/u,
+        'an explicit /reload keeps the explicit selection notice')
+    }
+    assert.equal(standings.length, 0, 'the unavailable Workspace is projected locally, never as an RPC')
+  } finally {
+    workspace.dispose()
+    harness.dispose()
+  }
+})
+
+test('B2-RECONNECT: a sessionless generation change waits for the preflight, keeps last-good, then refreshes the current target', async () => {
+  const source = controlledRemoteSource({})
+  const workspace = createWorkspaceNextIntentOwner(undefined)
+  const preflight = deferred()
+  let currentSession: string | undefined = 'session-live'
+  const harness = fakeRunnerDeps({
+    remoteSource: source,
+    currentSessionId: () => currentSession,
+    workspace,
+    awaitWorkspacePreflight: () => preflight.promise,
+  })
+  const standings = recordStandingReads(harness)
+  try {
+    harness.register()
+    source.script([['host-a']])
+    await harness.surface.refreshLiveCatalogById('session-live')
+    assert.equal(harness.surface.hostOriginClaimOf({ name: 'host-a' })?.claimed, true)
+
+    // The Client lost its Session and reconnected while the launch preflight
+    // is still held: no read, no clear, last-good retained.
+    currentSession = undefined
+    source.replace(undefined)
+    source.replace(source.tokens.b)
+    await new Promise(resolve => setTimeout(resolve, 30))
+    assert.deepEqual(source.reads.map(read => read.sessionId), ['session-live'],
+      'a held preflight must not start the reconnect refresh')
+    assert.equal(harness.surface.hostOriginClaimOf({ name: 'host-a' })?.claimed, true,
+      'the last-good Host claim survives the held preflight')
+
+    workspace.setResolvedWorkspace('ws-reconnect', '/host/reconnect')
+    preflight.resolve()
+    await waitUntil(() => standings.length === 1, 'the admitted reconnect standing refresh')
+    assert.deepEqual(standings[0]?.location, { kind: 'host-workspace', workspaceId: 'ws-reconnect' },
+      'the reconnect refresh reads the Workspace confirmed at admission time')
+  } finally {
+    workspace.dispose()
+    harness.dispose()
+  }
+})
+
+test('B2-COALESCE: two invalidation frames during one read still perform the follow-up read with the CURRENT target', async () => {
+  const source = controlledRemoteSource({})
+  const workspace = createWorkspaceNextIntentOwner(undefined)
+  const release: Array<() => void> = []
+  const harness = fakeRunnerDeps({
+    remoteSource: source,
+    currentSessionId: () => undefined,
+    workspace,
+    awaitWorkspacePreflight: async () => {},
+    notify: () => {},
+  })
+  const standings = recordStandingReads(harness, async call => {
+    if (call === 1) await new Promise<void>(resolve => { release.push(resolve) })
+    return {
+      catalog: {
+        skills: [{ name: call === 1 ? 'first-skill' : 'second-skill', description: 's', modelInvocable: true }],
+        complete: true,
+      },
+    }
+  })
+  const stream = captureSkillsStream(harness)
+  try {
+    harness.register()
+    workspace.setResolvedWorkspace('ws-coalesce', '/host/coalesce')
+    stream.frame()
+    stream.frame()
+    await waitUntil(() => standings.length === 1, 'the first coalesced read')
+    release[0]?.()
+    await waitUntil(() => standings.length === 2, 'the follow-up read is never dropped')
+    await waitUntil(() => harness.surface.isSkillWrapperName('second-skill'),
+      'the LAST frame\'s catalog is installed')
+    assert.equal(harness.surface.isSkillWrapperName('first-skill'), false,
+      'the superseded first read did not remain installed')
+  } finally {
+    for (const releaseRead of release) releaseRead()
+    workspace.dispose()
+    harness.dispose()
+  }
+})
+
+test('B2-STREAM-ERROR: a failed invalidation stream is visible and an explicit reload re-arms it', async () => {
+  const source = controlledRemoteSource({})
+  let currentSession: string | undefined = 'session-live'
+  const notices: Array<{ message: string; kind: string | undefined }> = []
+  const harness = fakeRunnerDeps({
+    remoteSource: source,
+    currentSessionId: () => currentSession,
+    notify: (message, kind) => { notices.push({ message, kind }) },
+  })
+  const rearms = { count: 0 }
+  const skills = harness.runner.catalog.skills as unknown as {
+    rearmSkillsChange?: () => void
+    onSkillsChange: (listener: () => void, onError: (error: unknown) => void) => () => void
+  }
+  skills.rearmSkillsChange = () => { rearms.count += 1 }
+  let streamError: ((error: unknown) => void) | undefined
+  const onSkillsChange = skills.onSkillsChange
+  skills.onSkillsChange = (listener, onError) => {
+    streamError = onError
+    return onSkillsChange.call(skills, listener, onError)
+  }
+  try {
+    harness.register()
+    assert.ok(streamError !== undefined)
+    streamError(new Error('Host skills watch failed'))
+    await waitUntil(() => notices.length === 1, 'the visible stream failure')
+    assert.match(notices[0]?.message ?? '', /Skills invalidation stream/u)
+    assert.equal(notices[0]?.kind, 'error')
+    // The explicit owner refresh re-arms the failed stream exactly once.
+    source.script([['host-a']])
+    await harness.surface.refreshLiveCatalogById('session-live')
+    assert.equal(rearms.count, 1, 'an explicit Live Session refresh re-arms the failed stream')
+  } finally {
+    harness.dispose()
+  }
+})
+
+test('B2-DIRECT: a Direct invalidation never waits for a Remote Workspace preflight and keeps its co-located standing read', async () => {
+  let preflightAwaited = 0
+  const harness = fakeRunnerDeps({
+    remoteSource: undefined,
+    currentSessionId: () => undefined,
+    awaitWorkspacePreflight: () => {
+      preflightAwaited += 1
+      return new Promise<void>(() => {})
+    },
+  })
+  const standings = recordStandingReads(harness)
+  const skills = harness.runner.catalog.skills as unknown as {
+    onSkillsChange: (listener: () => void, onError: (error: unknown) => void) => () => void
+  }
+  let frame: (() => void) | undefined
+  const original = skills.onSkillsChange
+  skills.onSkillsChange = (listener, onError) => {
+    frame = listener
+    return original.call(skills, listener, onError)
+  }
+  try {
+    harness.register()
+    assert.ok(frame !== undefined)
+    frame()
+    await waitUntil(() => standings.length === 1, 'the Direct standing read')
+    assert.deepEqual(standings[0]?.location, { kind: 'co-located-directory', cwd: '/ws' },
+      'Direct keeps its co-located directory and never reads a Host WorkspaceId')
+    assert.equal(preflightAwaited, 0, 'the Direct branch never consumes the Remote preflight seam')
+  } finally {
+    harness.dispose()
+  }
+})
+
+/* ── B2-RETIRE: disposal during the preflight wait ─────────────────────── */
+
+/** A recording diagnostics sink (only the entries the assertions read). */
+function recordingDiag(): import('../../src/runtime/process/diagnostics.ts').Diag & {
+  readonly errors: Array<{ message: string; fields?: Record<string, unknown> }>
+} {
+  const errors: Array<{ message: string; fields?: Record<string, unknown> }> = []
+  const noop = (): void => {}
+  return {
+    debug: noop,
+    info: noop,
+    warn: noop,
+    error: (message, fields) => { errors.push({ message, fields }) },
+    dispose: noop,
+    errors,
+  }
+}
+
+test('B2-RETIRE: catalog disposal during the preflight wait retires the invalidation continuation without a false failure', async () => {
+  const source = controlledRemoteSource({})
+  const workspace = createWorkspaceNextIntentOwner(undefined)
+  const preflight = deferred()
+  const notices: Array<{ message: string; kind: string | undefined }> = []
+  const diag = recordingDiag()
+  const harness = fakeRunnerDeps({
+    remoteSource: source,
+    currentSessionId: () => undefined,
+    workspace,
+    awaitWorkspacePreflight: () => preflight.promise,
+    notify: (message, kind) => { notices.push({ message, kind }) },
+    diag,
+  })
+  const standings = recordStandingReads(harness)
+  const stream = captureSkillsStream(harness)
+  try {
+    harness.register()
+    stream.frame()
+    await new Promise(resolve => setTimeout(resolve, 30))
+    assert.equal(standings.length, 0)
+    // The surface retires while the continuation is still awaiting the
+    // preflight: the retired refresh slot must be a no-op, not a call through
+    // the disposed coordinator (which used to paint `skill catalog refresh
+    // failed: Cannot read properties of undefined`).
+    harness.surface.disposeCatalog()
+    workspace.setResolvedWorkspace('ws-after-dispose', '/host/after')
+    preflight.resolve()
+    await new Promise(resolve => setTimeout(resolve, 80))
+    assert.deepEqual(notices, [], 'a retired continuation must not paint a refresh failure')
+    assert.deepEqual(diag.errors, [], 'a retired continuation must not log a primary error')
+    assert.equal(standings.length, 0, 'a retired continuation must not issue a Host standing read')
+  } finally {
+    workspace.dispose()
+    harness.dispose()
+  }
+})
+
+test('B2-RETIRE-RECONNECT: catalog disposal during the reconnect preflight wait is a silent retirement', async () => {
+  const source = controlledRemoteSource({})
+  const workspace = createWorkspaceNextIntentOwner(undefined)
+  const preflight = deferred()
+  const notices: Array<{ message: string; kind: string | undefined }> = []
+  const diag = recordingDiag()
+  const harness = fakeRunnerDeps({
+    remoteSource: source,
+    currentSessionId: () => undefined,
+    workspace,
+    awaitWorkspacePreflight: () => preflight.promise,
+    notify: (message, kind) => { notices.push({ message, kind }) },
+    diag,
+  })
+  const standings = recordStandingReads(harness)
+  try {
+    harness.register()
+    // A sessionless reconnect starts its own preflight continuation, then the
+    // catalog is disposed while that continuation is still pending.
+    source.replace(undefined)
+    source.replace(source.tokens.b)
+    await new Promise(resolve => setTimeout(resolve, 30))
+    assert.equal(standings.length, 0)
+    harness.surface.disposeCatalog()
+    workspace.setResolvedWorkspace('ws-reconnect-after-dispose', '/host/reconnect-after')
+    preflight.resolve()
+    await new Promise(resolve => setTimeout(resolve, 80))
+    assert.deepEqual(notices, [], 'the retired reconnect continuation must not paint a failure')
+    assert.equal(diag.errors.length, 0, 'the retired reconnect continuation must not log a primary error')
+    assert.equal(standings.length, 0, 'the retired reconnect continuation must not issue a standing read')
+  } finally {
+    workspace.dispose()
     harness.dispose()
   }
 })

@@ -1,8 +1,8 @@
 /**
  * Orchestration regression for the combined projection batch behind the
- * /sessions and /resume picker: every MAIN row the picker can display must
+ * /sessions and /resume workspace: every MAIN row the workspace can display must
  * enter `sessionReader.projectionBatch()` — including rows beyond any read
- * window — while SUBAGENT rows (never shown in the human session picker)
+ * window — while SUBAGENT rows (never shown in the human Session Workspace)
  * must not be read at all, and each main id must enter the batch exactly
  * once across the progressive slices.
  *
@@ -16,6 +16,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { unavailableAcpAccess, unavailableWebAccess, unavailableMcpServers } from '../support/web-access-fake.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
@@ -33,6 +34,7 @@ import { DirectCatalogPort } from '../../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
+import { unconfiguredPolicyObservation, unconfiguredSessionPolicyPort } from '../support/session-policy-fake.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -59,7 +61,7 @@ function row(id: string, createdAt: number): import('../../src/tui/pickers/sessi
   return { id, updatedAt: createdAt, createdAt, cwd: '/ws/project-a', live: false }
 }
 
-test('the picker projection loader covers EVERY main row beyond the legacy window, and never reads subagents', async (t) => {
+test('the workspace projection loader covers EVERY main row beyond the legacy window, and never reads subagents', async (t) => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -119,12 +121,17 @@ test('the picker projection loader covers EVERY main row beyond the legacy windo
 
   const state: { agent: Agent | undefined } = { agent: undefined }
   const runner: TuiCommandRunner = {
+    webAccess: unavailableWebAccess(),
+    acpAccess: unavailableAcpAccess(),
+    mcpServers: unavailableMcpServers(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
         ...sessionScopeFacts(() => state.agent, () => 1),
+        sessionPolicy: unconfiguredSessionPolicyPort(),
+        policy: unconfiguredPolicyObservation(),
         get currentSessionId() { return state.agent?.session.id },
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -152,15 +159,13 @@ test('the picker projection loader covers EVERY main row beyond the legacy windo
         answerContinued: async () => 'not-continued' as const,
       },
       onApprovalRequest: () => {},
-      setApprovalPolicy: () => true,
-    },
+      },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     commandRegistry: ctx.get('commands') as never,
     clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
-    hostShellCompletion: true,
-    transcriptExportAvailable: true,
+    hostShellCompletion: { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) },
     requestExit: () => {},
     cwd: '/ws',
     sessionCwd: () => '/ws',
@@ -190,7 +195,7 @@ test('the picker projection loader covers EVERY main row beyond the legacy windo
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, createPluginManagerPage: () => undefined,
+    openTasksBrowser: () => {}, openScheduleWorkspace: () => ({ kind: 'success' } as const), createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),

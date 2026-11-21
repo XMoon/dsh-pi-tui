@@ -67,7 +67,9 @@ export const HOST_SERVICES = [
   'sandboxPolicy',
   'shell',
   'pluginManager',
+  'cuaAccess',
   'jobController',
+  'mcpManager',
 ]
 
 const SERVICE_ALT = HOST_SERVICES.join('|')

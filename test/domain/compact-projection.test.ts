@@ -20,7 +20,7 @@ import {
 } from '../../src/tui/transcript/context-structure.ts'
 import { contextPresentation, isTranscriptContextForm } from '../../src/domain/transcript/context-semantics.ts'
 import { projectCompact } from '../../src/tui/transcript/compact-projection.ts'
-import { clusterByMemberOf, isWorkingAgentRelay, isWorkingToolJobsNotice, projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
+import { clusterByMemberOf, isWorkingAgentRelay, isWorkingSubagentSettledNotice, isWorkingToolJobsNotice, projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
 import { formatWorkHeaderLine, compactWorkBody, CompactWorkComponent } from '../../src/tui/components/transcript/compact-work.ts'
 import { summarizeWorkSpan } from '../../src/tui/transcript/work-summary.ts'
 import { compactActionPresentation } from '../../src/tui/components/transcript/compact-process-preview.ts'
@@ -889,7 +889,7 @@ test('other notice producers never qualify, even through a next-step claim', () 
   const foreignMessage = {
     id: MessageId('foreign-notice'), role: 'user',
     content: [{ type: 'text', text: 'FOREIGN_NOTICE body' }],
-    source: { kind: 'subagent-settled', form: 'notice', summary: 'child settled' },
+    source: { kind: 'plugin', form: 'notice', plugin: 'foreign' },
   }
   apply(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
@@ -904,7 +904,7 @@ test('other notice producers never qualify, even through a next-step claim', () 
   const notice = folder.messages().find(message => message.kind === 'system')
   assert.ok(notice !== undefined && notice.kind === 'system')
   assert.equal(notice.contextPresentation?.sameTurnNextStep, undefined,
-    'the durable claim is not enough: sourceKind/form must both be tool-jobs/notice')
+    'the durable claim is not enough: a foreign producer never qualifies')
   assert.deepEqual(projectTranscriptStructure(folder.messages()).map(block => block.kind),
     ['work', 'message', 'work'])
 })
@@ -1083,7 +1083,7 @@ test('a cross-turn, missing or cancelled next-step claim never qualifies a relay
 test('a next-step claim never qualifies a crossed or foreign source pair', () => {
   const cases: ReadonlyArray<readonly [string, Record<string, unknown>]> = [
     ['agent-message with notice form', { kind: 'agent-message', form: 'notice', senderSessionId: 'session-x' }],
-    ['subagent-settled notice', { kind: 'subagent-settled', form: 'notice', summary: 'settled', senderSessionId: 'session-x' }],
+    ['subagent-settled with relay form', { kind: 'subagent-settled', form: 'relay', summary: 'settled', senderSessionId: 'session-x' }],
     ['plugin relay form', { kind: 'plugin', form: 'relay', plugin: 'foreign' }],
     ['recall form', { kind: 'session-reference', form: 'recall', references: [{ label: 'prior' }] }],
   ]
@@ -1185,4 +1185,227 @@ test('a next-turn wakeup relay stays independently visible in Compact', () => {
   assert.deepEqual(projectTranscriptStructure(messages).map(block => block.kind), ['message', 'work', 'message'])
   assert.deepEqual(kindsOf(projectCompact(messages, noOptions)), ['system', 'work', 'assistant'],
     'the wakeup relay is a standalone visible Context before the Work')
+})
+
+
+// --- Working same-turn subagent settlement Notice follows the same Work -----
+
+/** One durable Working subagent settlement delivery: next-step insert →
+ * same-turn claim → the folded `user/message` (the id is preserved). */
+function workingSubagentSettledEvents(id: string, text: string, summary: string, time: number, seq: number): SessionEvent[] {
+  const message = {
+    id: MessageId(id), role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'subagent-settled', form: 'notice', summary, senderSessionId: 'session-settled-child' },
+  }
+  return [
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [message] }, time, seq),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, time + 0.1, seq + 1),
+    eventAt('user/message', message, time + 0.2, seq + 2),
+  ]
+}
+
+test('a proven same-turn subagent settlement Notice is carried by the same Work on the real fold', () => {
+  const events: SessionEvent[] = [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    toolCallEvent(0, 'settled-a', 1),
+    toolResultEvent(0, 'settled-a', 2),
+    ...workingSubagentSettledEvents('working-settled', 'SETTLED_BODY', 'child completed', 1003, 3),
+    toolCallEvent(0, 'settled-b', 6),
+    toolResultEvent(0, 'settled-b', 7),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('settled-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1008, 8),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1009, 9),
+  ]
+  const folder = new TranscriptFolder()
+  apply(folder, events)
+  const messages = folder.messages()
+  const notice = messages.find(message => message.kind === 'system' && message.contextPresentation?.form === 'notice')
+  assert.ok(notice !== undefined && notice.kind === 'system')
+  assert.equal(notice.contextPresentation?.sourceKind, 'subagent-settled')
+  assert.equal(notice.contextPresentation?.sameTurnNextStep, true,
+    'the fold records the durable same-turn next-step provenance')
+  assert.equal(isWorkingSubagentSettledNotice(notice), true)
+  assert.equal(notice.text, 'SETTLED_BODY', 'the producer body is untouched')
+  assert.equal(notice.summary, 'child completed', 'the producer summary is untouched')
+  const structure = projectTranscriptStructure(messages)
+  assert.deepEqual(structure.map(block => block.kind), ['work', 'message'])
+  const span = onlySpan(structure)
+  assert.equal(span.members.includes(notice), true,
+    'Process A -> qualified settlement -> Process B is ONE Work in raw order')
+  assert.equal(summarizeWorkSpan(span).actionStats.total, 2, 'the settlement adds no Action')
+  assert.deepEqual(kindsOf(projectCompact(messages, noOptions)), ['work', 'assistant'],
+    'collapsed Compact hides the carried settlement under the Work header')
+  const expanded = projectCompact(messages, {
+    expandedWorkOwners: new Set([span.owner]), expandedClusters: new Set(), forcedExpanded: new Set(),
+  })
+  assert.deepEqual(kindsOf(expanded), ['work', 'tool', 'system', 'tool', 'assistant'],
+    'expanding the Work restores every raw member exactly once')
+  assert.equal(expanded.filter(block => block.kind === 'message' && block.message === notice).length, 1)
+  // Cold replay folds the SAME durable log to the same provenance.
+  const cold = new TranscriptFolder()
+  cold.hydrate(events)
+  const coldNotice = cold.messages().find(message => message.kind === 'system')
+  assert.ok(coldNotice !== undefined && coldNotice.kind === 'system')
+  assert.equal(coldNotice.contextPresentation?.sameTurnNextStep, true, 'rehydrate keeps the claim provenance')
+  assert.equal(coldNotice.text, 'SETTLED_BODY')
+  assert.deepEqual(projectTranscriptStructure(cold.messages()).map(block => block.kind), ['work', 'message'])
+})
+
+test('a same-turn settlement Notice without a real Process fails open (no invented Activity)', () => {
+  const folder = new TranscriptFolder()
+  apply(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    ...workingSubagentSettledEvents('settled-no-process', 'NO_PROCESS_SETTLED', 'child completed', 1001, 1),
+    eventAt('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('settled-no-process-final'), role: 'assistant', content: [{ type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1005, 4),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1006, 5),
+  ])
+  const messages = folder.messages()
+  const notice = messages.find(message => message.kind === 'system')
+  assert.ok(notice !== undefined && notice.kind === 'system')
+  assert.equal(notice.contextPresentation?.sameTurnNextStep, true)
+  assert.deepEqual(projectTranscriptStructure(messages).map(block => block.kind), ['message', 'message'],
+    'Context + Conversation without Process stays a flat sequence')
+  assert.deepEqual(kindsOf(projectCompact(messages, noOptions)), ['system', 'assistant'],
+    'fail-open: the settlement card is visible and no empty Work is minted')
+})
+
+test('a hard boundary keeps a claimed settlement Notice out of the earlier Work', () => {
+  // Process -> hard boundary (an unqualified notice) -> claimed settlement ->
+  // Process: the later Process may adopt the pending settlement, so it joins
+  // the SECOND Work and never the first one.
+  const boundaryRow = contextRow(0, 'notice', 'plugin')
+  const settledRow: TranscriptMessage = {
+    kind: 'system', turn: 0, text: 'HARD_BOUNDARY_SETTLED', context: true,
+    contextPresentation: { form: 'notice', sourceKind: 'subagent-settled', senderSessionId: 'session-hard', role: 'inject', sameTurnNextStep: true },
+  }
+  const processRows = [thinking(0), tool(0)]
+  const structure = projectTranscriptStructure([
+    ...processRows,
+    boundaryRow,
+    settledRow,
+    thinking(0),
+    tool(0),
+  ])
+  assert.deepEqual(structure.map(block => block.kind), ['work', 'message', 'work'])
+  const [first, second] = structure.filter(block => block.kind === 'work')
+  assert.ok(first?.kind === 'work' && second?.kind === 'work')
+  assert.equal(first.span.members.includes(settledRow), false,
+    'the settlement never crosses the hard boundary into the earlier Work')
+  assert.equal(second.span.members.includes(settledRow), true,
+    'the later Process adopts the still-pending settlement')
+
+  // Without a later Process the settlement has NO Work owner: it materializes
+  // as an independent Context row instead of disappearing.
+  const orphan = projectTranscriptStructure([...processRows, boundaryRow, settledRow, assistant(0, 'done')])
+  assert.deepEqual(orphan.map(block => block.kind), ['work', 'message', 'message', 'message'])
+})
+
+test('a settlement Notice only qualifies through the exact same-turn next-step chain', () => {
+  // next-turn wakeup: the settlement triggers a NEW turn; it stays the visible
+  // cause before that turn's Work.
+  const wakeMessage = {
+    id: MessageId('settled-wake'), role: 'user',
+    content: [{ type: 'text', text: 'SETTLED_WAKE' }],
+    source: { kind: 'subagent-settled', form: 'notice', summary: 'child completed', senderSessionId: 'session-wake' },
+  }
+  const wake = new TranscriptFolder()
+  apply(wake, [
+    eventAt('agent/inbox/spliced', { target: 'next-turn', start: 0, inserted: [wakeMessage] }, 900, 0),
+    eventAt('turn/start', { turn: 1 }, 1000, 1),
+    eventAt('agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [] }, 1001, 2),
+    eventAt('user/message', wakeMessage, 1002, 3),
+    toolCallEvent(1, 'settled-wake-a', 4),
+    toolResultEvent(1, 'settled-wake-a', 5),
+  ])
+  const wakeNotice = wake.messages().find(message => message.kind === 'system')
+  assert.ok(wakeNotice !== undefined && wakeNotice.kind === 'system')
+  assert.equal(wakeNotice.contextPresentation?.sameTurnNextStep, undefined)
+  assert.deepEqual(projectTranscriptStructure(wake.messages()).map(block => block.kind), ['message', 'work'])
+
+  // Cross-turn claim: inserted during turn 1, claimed in turn 2.
+  const crossMessage = {
+    id: MessageId('settled-cross'), role: 'user',
+    content: [{ type: 'text', text: 'SETTLED_CROSS' }],
+    source: { kind: 'subagent-settled', form: 'notice', summary: 'child completed', senderSessionId: 'session-cross' },
+  }
+  const cross = new TranscriptFolder()
+  apply(cross, [
+    eventAt('turn/start', { turn: 1 }, 1000, 0),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [crossMessage] }, 1001, 1),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, 1002, 2),
+    eventAt('turn/start', { turn: 2 }, 2000, 3),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 2001, 4),
+    eventAt('user/message', crossMessage, 2002, 5),
+    toolCallEvent(2, 'settled-cross-a', 6),
+    toolResultEvent(2, 'settled-cross-a', 7),
+  ])
+  const crossNotice = cross.messages().find(message => message.kind === 'system')
+  assert.ok(crossNotice !== undefined && crossNotice.kind === 'system')
+  assert.equal(crossNotice.contextPresentation?.sameTurnNextStep, undefined)
+
+  // Missing splice: a settlement-shaped producer message without delivery.
+  const missing = new TranscriptFolder()
+  apply(missing, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    toolCallEvent(0, 'settled-missing-a', 1),
+    toolResultEvent(0, 'settled-missing-a', 2),
+    eventAt('user/message', {
+      id: MessageId('settled-missing'), role: 'user',
+      content: [{ type: 'text', text: 'SETTLED_MISSING' }],
+      source: { kind: 'subagent-settled', form: 'notice', summary: 'child completed', senderSessionId: 'session-missing' },
+    }, 1003, 3),
+    toolCallEvent(0, 'settled-missing-b', 4),
+    toolResultEvent(0, 'settled-missing-b', 5),
+  ])
+  const missingNotice = missing.messages().find(message => message.kind === 'system')
+  assert.ok(missingNotice !== undefined && missingNotice.kind === 'system')
+  assert.equal(missingNotice.contextPresentation?.sameTurnNextStep, undefined)
+  assert.deepEqual(projectTranscriptStructure(missing.messages()).map(block => block.kind),
+    ['work', 'message', 'work'], 'an unqualified settlement still splits the Work')
+
+  // Cancelled replacement: the removed identity is never claimed.
+  const cancelledMessage = {
+    id: MessageId('settled-cancelled'), role: 'user',
+    content: [{ type: 'text', text: 'SETTLED_CANCELLED' }],
+    source: { kind: 'subagent-settled', form: 'notice', summary: 'child completed', senderSessionId: 'session-cancelled' },
+  }
+  const cancelled = new TranscriptFolder()
+  apply(cancelled, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [cancelledMessage] }, 1001, 1),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [], outcome: 'canceled' }, 1002, 2),
+    eventAt('user/message', cancelledMessage, 1003, 3),
+    toolCallEvent(0, 'settled-cancelled-a', 4),
+    toolResultEvent(0, 'settled-cancelled-a', 5),
+  ])
+  const cancelledNotice = cancelled.messages().find(message => message.kind === 'system')
+  assert.ok(cancelledNotice !== undefined && cancelledNotice.kind === 'system')
+  assert.equal(cancelledNotice.contextPresentation?.sameTurnNextStep, undefined,
+    'a cancelled replacement is not a delivery')
+
+  // Crossed source/form pair: a subagent-settled RELAY is not the settlement pair.
+  const relayMessage = {
+    id: MessageId('settled-relay-form'), role: 'user',
+    content: [{ type: 'text', text: 'SETTLED_RELAY_FORM' }],
+    source: { kind: 'subagent-settled', form: 'relay', summary: 'child completed', senderSessionId: 'session-relay-form' },
+  }
+  const crossed = new TranscriptFolder()
+  apply(crossed, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [relayMessage] }, 1001, 1),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 1002, 2),
+    eventAt('user/message', relayMessage, 1003, 3),
+    toolCallEvent(0, 'settled-relay-form-a', 4),
+    toolResultEvent(0, 'settled-relay-form-a', 5),
+  ])
+  const crossedNotice = crossed.messages().find(message => message.kind === 'system')
+  assert.ok(crossedNotice !== undefined && crossedNotice.kind === 'system')
+  assert.equal(crossedNotice.contextPresentation?.sameTurnNextStep, undefined,
+    'a crossed source/form pair is never the settlement delivery')
 })

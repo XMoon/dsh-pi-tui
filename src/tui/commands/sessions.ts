@@ -1,46 +1,42 @@
 /**
  * Session-domain command definitions: /sessions (+ /resume), /new, /search,
  * /title (+ /rename), /fork and /rewind, plus the ONE shared Session Browser
- * lifecycle (displaySessionId, sessionPickerCategories, sessionSearchCategory,
- * openSessionPicker) that all of them consume.
+ * lifecycle (the `SessionBrowserReadOwner` plus the PiTui Picker Presentation
+ * that renders its snapshot) that /sessions, /resume and /search consume.
  *
  * Registration is explicit: the coordinator (src/commands.ts) calls each
  * registrar at its frozen position and owns catalog/provenance/disposal state.
  * @module @xmoon76/dsh-pi-tui/commands/sessions
  */
 
-import { scheduler } from 'node:timers/promises'
 import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
-import type { PickerCategory, TuiApp } from '../../tui-app.ts'
+import type { SessionWorkspaceHandle, TuiApp } from '../../tui-app.ts'
 import { createSessionBrowserReadOwner, type SessionBrowserReadOwner, type SessionBrowserReadSettlement, type SessionBrowserResumeSettlement } from '../../app/command/session-browser-read.ts'
-import type { SessionBrowserPresentation } from '../../app/command/session-browser-presentation.ts'
+import type {
+  SessionBrowserAnswerEligibility,
+  SessionBrowserPanelHandle,
+  SessionBrowserPanelRequest,
+  SessionBrowserPresentation,
+  SessionBrowserReadSnapshot,
+  SessionBrowserDirectorySettlement,
+} from '../../app/command/session-browser-presentation.ts'
 import { TransitionInProgressError } from '../../app/session/operation-barrier.ts'
 import { SessionScopeSupersededError, type SessionScope } from '../../app/session/scope.ts'
 import { SessionNavigationStopError, type NavigationIntent } from '../../app/session/transition.ts'
 import type { SessionSwitchOutcome } from '../../app/session/runtime.ts'
 import { cancellationError, isCancellation, runOwned } from '../../runtime/process/tasks.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
-import { LifecycleError } from '../../runtime/session-lifecycle-port.ts'
+import { createWorkspaceNextIntentOwner } from '../../app/session/workspace-next-intent.ts'
+import { recoverableWorkspaceSelection } from '../../app/session/workspace-selection-recovery.ts'
+import { LifecycleError, WorkspaceSelectionError, type ResolvedWorkspaceSelection, type WorkspaceSelectionIntent } from '../../runtime/session-lifecycle-port.ts'
 import {
-  CONTENT_SEARCH_DEBOUNCE_MS,
-  PROJECTION_BATCH_SIZE,
-  PROJECTION_FIRST_BATCH,
-  buildSessionTree,
   findSessionMatch,
-  sameWorkspace,
-  sanitizeSessionSearchInput,
   sanitizeTerminalText,
-  sessionLabelParts,
-  sessionRowMatchesQuery,
-  sessionSearchItem,
-  sessionPickerItem,
-  type SessionContentHit,
-  type SessionPickerItem,
+  sessionBrowserErrorNotice,
   type SessionPickerRow,
 } from '../pickers/sessions.ts'
-import type { SessionSummary } from '../../runtime/session-reader-port.ts'
+import { chooseListedSession } from '../../domain/session/browser.ts'
 import type {
-  DetachTask,
   NewSessionId,
   RegisterOne,
   RegisterTuiCommand,
@@ -52,6 +48,7 @@ type SessionCommandRunner = Pick<
   TuiCommandRunner,
   | 'agents'
   | 'awaitPendingDefaultWrite'
+  | 'awaitWorkspacePreflight'
   | 'captureSessionScope'
   | 'catalog'
   | 'currentSessionId'
@@ -60,12 +57,17 @@ type SessionCommandRunner = Pick<
   | 'effectivePresetId'
   | 'fileStore'
   | 'forkSession'
+  | 'forwardedAnswerEligibility'
+  | 'subscribeForwardedAnswerEligibility'
   | 'imageStore'
   | 'isSessionScopeCurrent'
   | 'openRewindPicker'
   | 'requireLiveSessionScope'
+  | 'refreshStandingCatalog'
   | 'sessionCwd'
   | 'sessionReader'
+  | 'sessionWorkspaceFacts'
+  | 'hostDirectoryBrowse'
   | 'sessionBrowserPresentation'
   | 'sessionWriter'
   | 'signal'
@@ -74,6 +76,9 @@ type SessionCommandRunner = Pick<
   | 'transitionTo'
   | 'withSessionTransition'
   | 'withWriter'
+  | 'workspaceNextIntent'
+  | 'updateWelcomeCard'
+  | 'validateAutoWorkspace'
 >
 
 export interface SessionCommandDeps {
@@ -81,7 +86,6 @@ export interface SessionCommandDeps {
   app: TuiApp
   registerOne: RegisterOne
   registerTuiCommand: RegisterTuiCommand
-  detach: DetachTask
   recordCommandDraftDisposition: (commandId: string | undefined, disposition: 'restored' | 'suppressed') => void
   newSessionId: NewSessionId
   /**
@@ -112,123 +116,25 @@ export interface SessionCommandRegistrars {
   registerTitle(): void
   registerFork(): void
   registerRewind(): void
+  /**
+   * TSP-7 Welcome D: the argument-free UI entry into the SAME `/sessions`
+   * Session Browser lifecycle the typed command runs — one shared
+   * `openSessionPicker`, one picker generation, one read owner, one switch
+   * route. It carries no query (the Welcome offers no filter affordance);
+   * the typed handler keeps passing its own invocation, so a
+   * `/sessions <query>` argument still seeds the Browser.
+   *
+   * The optional scope is the internal initial BROWSE scope the PiTUI Host
+   * Editor gesture passes (`'all'`); every pre-existing caller omits it and
+   * keeps the Current default. The TSP native presentation ignores it — the
+   * SDK owns that list's scope.
+   */
+  openSessions(scope?: 'current' | 'all' | { readonly scope?: 'current' | 'all'; readonly addDirectory?: boolean }): Promise<CommandResult>
 }
 
 /** Shorten a session id for read-only display rows, capped at 28 characters. */
 export function displaySessionId(id: string): string {
   return id.length > 28 ? `${id.slice(0, 28)}…` : id
-}
-
-export function sessionPickerCategories(
-  rows: readonly SessionPickerRow[],
-  currentCwd: string,
-  header: string,
-  itemFor: (row: SessionPickerRow, indent?: number) => SessionPickerItem,
-  placeholder?: () => SessionPickerItem,
-): PickerCategory[] {
-  return [
-    {
-      id: 'current',
-      label: 'Current directory',
-      header: `${header} · Current directory`,
-      // The same lineage tree as "All directories", built over the CURRENT
-      // workspace's subset: a fork/rewind branch whose parent lives in
-      // another workspace (or outside the window) degrades to a root at depth
-      // 0 — never lost, never mis-nested under an unrelated root.
-      items: () => {
-        const mainRows = rows.filter(row => row.origin !== 'subagent')
-        if (rows.length === 0 && placeholder !== undefined) return [placeholder()]
-        return buildSessionTree(
-          mainRows.filter(row => sameWorkspace(row.cwd, currentCwd)),
-        ).map(entry => itemFor(entry.row, entry.depth))
-      },
-    },
-    {
-      id: 'all',
-      label: 'All directories',
-      header: `${header} · All directories`,
-      // The lineage tree (plan §20): fork/rewind children and subagents
-      // hang under their parentSession chain with a └─ prefix. Missing-parent
-      // or cycle members degrade to flat roots; the tree's `placed` guard
-      // keeps corrupt metadata from looping.
-      items: () => {
-        const mainRows = rows.filter(row => row.origin !== 'subagent')
-        if (rows.length === 0 && placeholder !== undefined) return [placeholder()]
-        return buildSessionTree(mainRows).map(entry => itemFor(entry.row, entry.depth))
-      },
-    },
-  ]
-}
-
-/**
- * The Session Browser's SEARCH projection category (review P1/P2): with a
- * non-empty query the picker enters a GLOBAL search view whose membership is
- * the explicit union of local metadata matches and Host content hits —
- * never a workspace-scoped post-filter of the bounded Host page (the Host
- * returns a global top-20; scoping it afterwards would hide a real
- * current-workspace match ranked beyond the window), and never a fake query
- * append in the description (membership and presentation stay separate).
- * The category is EXTERNALLY filtered (review P1): the SelectList renders
- * without its internal substring filter, so the projection's items ARE the
- * membership — a Host-authoritative hit is never dropped by a substring
- * re-filter, regardless of snippet length or query normalization. The
- * category is non-cyclable: Tab never leaves it while a query is active,
- * and browse mode skips it.
- */
-export function sessionSearchCategory(options: {
-  rows: readonly SessionPickerRow[]
-  header: string
-  /** The SEARCH item builder (the cwd joins the searchable description). */
-  itemFor: (row: SessionPickerRow, indent?: number) => SessionPickerItem
-  /** The LIVE CANONICAL filter text (read at activation time) — the one
-   * semantic query that also drives the Host search. */
-  queryOf: () => string
-  /** The merged Host content hits (live map, Host page order). */
-  contentHitsById: ReadonlyMap<string, SessionContentHit>
-  /** The enriched metadata (title/preset) for the local match — the raw
-   * list rows carry neither until the projection batch lands. */
-  metadataOf: (id: string) => { title?: string; preset?: string }
-  placeholder?: () => SessionPickerItem
-}): PickerCategory {
-  const { rows, header, itemFor, queryOf, contentHitsById, metadataOf, placeholder } = options
-  return {
-    id: 'search',
-    label: 'Search results',
-    header: `${header} · Search results`,
-    cyclable: false,
-    // The externally-filtered mode (review P1): the SelectList renders
-    // WITHOUT its internal substring filter — this projection's items ARE
-    // the membership, and a Host-authoritative hit is never dropped by a
-    // substring re-filter.
-    externalFilter: true,
-    items: () => {
-      if (rows.length === 0 && placeholder !== undefined) return [placeholder()]
-      const mainRows = rows.filter(row => row.origin !== 'subagent')
-      const query = queryOf()
-      // Flat merged search projection (review P2): local metadata matches
-      // keep the newest-first list order; content-only matches keep the
-      // Host page order (the map's insertion order); a row that is both is
-      // a local match with the snippet merged. No browse tree ordering.
-      const localMatches = query === '' ? [] : mainRows.filter(row => {
-        const meta = metadataOf(row.id)
-        return sessionRowMatchesQuery({
-          ...row,
-          title: meta.title,
-          preset: meta.preset ?? row.preset,
-        }, query)
-      })
-      const localIds = new Set(localMatches.map(row => row.id))
-      // Content-only matches keep the HOST PAGE order — iterate the hit
-      // map (its insertion order IS the Host page order), never the
-      // newest-first list order.
-      const rowById = new Map(mainRows.map(row => [row.id, row]))
-      const contentOnly = [...contentHitsById.keys()]
-        .filter(id => !localIds.has(id))
-        .map(id => rowById.get(id))
-        .filter((row): row is SessionPickerRow => row !== undefined)
-      return [...localMatches, ...contentOnly].map(row => itemFor(row, 0))
-    },
-  }
 }
 
 /**
@@ -243,37 +149,19 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     app,
     registerOne,
     registerTuiCommand,
-    detach,
     recordCommandDraftDisposition,
     newSessionId,
     notify,
     notifyTitleRefusal,
     notifyTitleSuccess,
   } = deps
-  const { cwd, signal } = runner
+  const { signal } = runner
+  const workspaceNextIntent = runner.workspaceNextIntent ?? createWorkspaceNextIntentOwner(runner.cwd ?? process.cwd())
 
-  /** Switch sessions with full rejection handling (the runner resolves an
-   * error STRING for user-facing failures, but an unexpected rejection must
-   * not become an unhandled rejection either). An owned workflow: the
-   * outcome drives the notify — runOwned (AGENTS.md); the classification
-   * diagnostics are recorded by runOwned itself. */
-  const switchSession = (id: string): void => {
-    runOwned('session switch', () => runner.switchSession(id), {
-      diag: runner.diag,
-      sessionId: () => id,
-      onResult: (error) => {
-        if (error !== undefined) app.notify(error, 'error')
-      },
-      onError: (error: unknown) => {
-        const message = safeErrorMessage(error)
-        app.notify(`session switch failed: ${message}`, 'error')
-      },
-    })
-  }
-
-  /** The tracked switch settlement used by `/resume`: `matched`/accepted is
-   * not success; only a committed target counts. Legacy narrow fakes without
-   * the tracked entry keep the old string result (undefined = committed). */
+  /** The tracked switch settlement used by `/resume` and by an interactive
+   * Picker selection: `matched`/accepted is not success; only a committed
+   * target counts. Legacy narrow fakes without the tracked entry keep the old
+   * string result (undefined = committed). */
   const switchSessionOutcome = (id: string, scope?: SessionScope): Promise<SessionSwitchOutcome> => {
     if (runner.switchSessionOutcome !== undefined) return runner.switchSessionOutcome(id, scope)
     return runner.switchSession(id, scope).then(
@@ -284,24 +172,210 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     )
   }
 
-  // Shared /sessions + /resume + /search body — input-first (the official
-  // /resume fix): the picker overlay opens IMMEDIATELY on a loading
-  // placeholder and owns the input (Esc, arrows, search) while the Host
-  // listing and the combined projection enrichment land in the background.
-  // The header option lets each entry present itself under its own name.
-  /** Generation/staleness fence for the open picker load: a superseding
-   * open bumps the generation and aborts the previous scan, and any late
-   * settlement from a closed/superseded picker is dropped. */
-  let sessionPickerGeneration = 0
-  let activeSessionPickerScan: AbortController | undefined
-  /** The debounced content-search timer/controller shared across picker
-   * opens: a superseding open cancels the previous picker's pending or
-   * in-flight content search exactly like its scan. */
-  let activeContentSearchTimer: ReturnType<typeof setTimeout> | undefined
-  let activeContentSearch: AbortController | undefined
+  /** The Session Browser command edge under which the ONE PiTUI fullscreen
+   *  Workspace opens. It is written synchronously immediately before the
+   *  shared read owner opens the panel and consumed-and-reset by the
+   *  presenter's `open()`, so a re-entrant open never inherits a stale intent. */
+  interface PiTuiOpenIntent {
+    readonly header: 'sessions' | 'resume' | 'search'
+    readonly scope: 'current' | 'all'
+    readonly searchRequested: boolean
+  }
+  let piTuiOpenIntent: PiTuiOpenIntent | undefined
+
+  /** One open PiTui fullscreen lease whose listing and Host reads are owned by the shared SessionBrowserReadOwner. */
+  interface PiTuiWorkspaceOpen {
+    readonly request: SessionBrowserPanelRequest
+    handle: SessionWorkspaceHandle | undefined
+    readonly controller: AbortController
+    workspaceRevision: number
+    disposed: boolean
+    /** Per-open dedupe of the one notice each snapshot fact may surface. */
+    lastNotice: string | undefined
+  }
+
+  /** The ONE PiTUI Session Workspace presentation (M5-U-C). It owns the
+   *  physical fullscreen lease through `app.openSessionWorkspace` and the ONE
+   *  per-open official Workspace follow; it owns no list, projection, query
+   *  generation or switch (those stay in the shared read owner). */
+  const createPiTuiSessionWorkspacePresentation = (): SessionBrowserPresentation => {
+    let active: PiTuiWorkspaceOpen | undefined
+
+    /** Release this open ONCE: token first, then the follow generation, then
+     *  (only for an owner-origin close) the physical lease. */
+    const release = (open: PiTuiWorkspaceOpen, closeLease: boolean): void => {
+      if (open.disposed) return
+      open.disposed = true
+      if (active === open) active = undefined
+      open.controller.abort()
+
+
+
+
+
+
+
+
+      if (closeLease) open.handle?.close()
+    }
+
+    /** Start the ONE per-open Workspace follow AFTER the lease exists. Every
+     *  frame re-proves this open's token and the captured subject; a failed
+     *  stream degrades to All with one visible message and never closes the
+     *  Session list/search. */
+    /** The ONE Activity sample of ONE accepted roster revision. The roster is
+     *  the read owner's ORIGINAL array (never a copy and never a re-listing),
+     *  and the sample is fenced by this open's token, the captured Session
+     *  subject, the accepted revision and its own AbortController. A sample the
+     *  current frame did not ask for is inert. */
+    /** Reproject the SAME last sample against the newest Client-root
+     *  eligibility (no Host read) and request ONE early roster refresh through
+     *  the read owner's single generation, so the next sample's `attention` is
+     *  fresh too. An official request that another Client settled must drop the
+     *  Needs row NOW, not at the next refresh tick. */
+    /** Surface this open's Host/search/projection facts as ONE deduped notice
+     *  (Host result first, the secondary projection failure second). The panel
+     *  ALSO paints the same status; the notice is the transient companion the
+     *  U-B contract already promised, never a second authority. */
+    const emitNotice = (open: PiTuiWorkspaceOpen, snapshot: SessionBrowserReadSnapshot): void => {
+      let key: string
+      let text: string
+      let kind: 'info' | 'error' = 'info'
+      if (snapshot.searchState === 'unavailable') {
+        key = 'search-unavailable'
+        text = 'content search unavailable'
+      } else if (snapshot.searchState === 'error') {
+        key = `search-error:${snapshot.searchError ?? ''}`
+        text = sessionBrowserErrorNotice('search', snapshot.searchError ?? 'unknown error')
+        kind = 'error'
+      } else if (snapshot.hasMore) {
+        key = `search-more:${snapshot.query}`
+        text = 'More content matches exist — refine the search.'
+      } else if (snapshot.projectionError !== undefined) {
+        key = 'projection-error'
+        text = sessionBrowserErrorNotice('projection', snapshot.projectionError)
+      } else {
+        return
+      }
+      if (open.lastNotice === key) return
+      open.lastNotice = key
+      app.notify(text, kind)
+    }
+
+    const open = (request: SessionBrowserPanelRequest): SessionBrowserPanelHandle => {
+      const previous = active
+      if (previous !== undefined) release(previous, true)
+      const intent = piTuiOpenIntent
+      piTuiOpenIntent = undefined
+      const subject = request.subject
+      const closeAfterCommit = request.onClose
+
+      const state: PiTuiWorkspaceOpen = {
+        request,
+        handle: undefined,
+        controller: new AbortController(),
+        workspaceRevision: -1,
+        disposed: false,
+        lastNotice: undefined,
+      }
+      // The lease is the ONLY physical owner. A refused lease throws here,
+      // BEFORE any Workspace follow or Host list starts; the read owner retires
+      // its just-created panel and the command reports one error.
+      const handle = app.openSessionWorkspace({
+        subject,
+        onQueryChange: (raw) => {
+          if (!state.disposed) request.onQueryChange(raw)
+        },
+        onResume: (sessionId) => {
+          if (state.disposed) return
+          request.onResumeIntent({
+            sessionId,
+            currentSessionId: subject.currentSessionId,
+            source: 'enter',
+          })
+        },
+        onClose: () => {
+          if (state.disposed) return
+          release(state, false)
+          closeAfterCommit()
+        },
+        // The capability crossing keeps its OPTIONALITY: a missing owner must
+        // never become a wrapper the panel can paint but nobody can settle.
+        ...(request.onUseDirectory === undefined ? {} : {
+          onUseDirectory: (workspaceId: string, canonicalPath: string) => {
+            if (!state.disposed) request.onUseDirectory?.(workspaceId, canonicalPath)
+          },
+        }),
+        ...(request.onNewSession === undefined ? {} : {
+          onNewSession: (workspaceId: string, settle?: (outcome: import('../../app/command/session-browser-presentation.ts').SessionBrowserNewSessionSettlement) => void) => {
+            // The shared ReadOwner owns ONE folder-New transaction for both
+            // renderers: it invokes the existing /new body and retires this
+            // lease only after the transition commits. The optional ack is the
+            // ONE per-operation settlement (a notice is never a settlement).
+            if (!state.disposed) request.onNewSession?.(workspaceId, settle)
+          },
+        }),
+        ...(request.onAddDirectory === undefined ? {} : {
+          onAddDirectory: (path: string, settle: (outcome: import('../../app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void) => {
+            if (!state.disposed) request.onAddDirectory?.(path, settle)
+          },
+        }),
+        // PR3: the optional Host browse read crosses only when this request
+        // really carries it; a missing capability stays missing.
+        ...(request.onListDirectory === undefined ? {} : { onListDirectory: request.onListDirectory }),
+        initialMode: intent?.searchRequested === true ? 'search' : 'browse',
+        initialBrowseScope: intent?.scope === 'all' || subject.currentSessionId === undefined ? 'all' : 'current',
+       initialDirectoryChooser: request.initialDirectoryChooser,
+        currentWorkspaceId: subject.currentWorkspaceId,
+        initialDirectoryEntry: request.initialDirectoryEntry,
+        initialDirectoryPath: request.initialDirectoryPath,
+      })
+      state.handle = handle
+      active = state
+
+
+      return {
+        isDisposed: () => state.disposed || handle.isDisposed(),
+        setSnapshot: (snapshot, snapshotOptions) => {
+          if (state.disposed) return
+          handle.setSnapshot(snapshot, snapshotOptions?.initialQuery)
+          const workspace = snapshot.workspace
+          if (workspace?.state === 'unavailable' && workspace.revision !== state.workspaceRevision) {
+            state.workspaceRevision = workspace.revision
+            handle.workspaceUnavailable(workspace.error ?? 'Workspace membership unavailable')
+          }
+          emitNotice(state, snapshot)
+        },
+        close: () => { release(state, true) },
+      }
+    }
+
+    return {
+      open,
+      notify: (message, kind) => { app.notify(message, kind) },
+    }
+  }
+
   let nativeReadOwner: SessionBrowserReadOwner | undefined
   let nativePresentation: SessionBrowserPresentation | undefined
 
+  /** PiTUI-only roster refresh cadence. TSP keeps its historical single read. */
+  const SESSION_WORKSPACE_REFRESH_MS = 20_000
+
+  const piTuiPresentation = createPiTuiSessionWorkspacePresentation()
+
+  // The runner lifetime owns the ONE read owner: a quit/HMR aborts it so no
+  // pending list, projection batch or debounced search outlives the surface.
+  if (!signal.aborted) {
+    signal.addEventListener('abort', () => {
+      nativeReadOwner?.dispose()
+      nativeReadOwner = undefined
+      nativePresentation = undefined
+    }, { once: true })
+  }
+
+  /** The ONE Reader-owner factory: a stable presentation keeps its owner; a
+   * different renderer presentation retires the previous owner outright. */
   const nativeReadOwnerFor = (presentation: SessionBrowserPresentation): SessionBrowserReadOwner => {
     if (nativeReadOwner !== undefined && nativePresentation === presentation) return nativeReadOwner
     nativeReadOwner?.dispose()
@@ -309,21 +383,152 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     nativeReadOwner = createSessionBrowserReadOwner({
       reader: runner.sessionReader,
       presentation,
+      ...(presentation === piTuiPresentation ? { autoRefreshMs: SESSION_WORKSPACE_REFRESH_MS } : {}),
+      // PR3: ONLY the PiTUI presentation receives the Host directory browse
+      // seam. The TSP native picker keeps its own read owner and must never
+      // grow a second directory reader or suggestion layer.
+      ...(presentation === piTuiPresentation
+        ? { onListDirectory: (path: string | undefined, signal: AbortSignal) => runner.hostDirectoryBrowse.list(path, signal) }
+        : {}),
       captureSubject: () => {
         const scope = runner.captureSessionScope()
+        const nextIntent = scope.sessionId === undefined ? workspaceNextIntent.snapshot() : undefined
         return {
           scope,
           subject: {
             currentSessionId: scope.sessionId,
             currentCwd: runner.sessionCwd(),
-            isCurrent: () => runner.isSessionScopeCurrent(scope),
+            // IDENTITY, not transient status (external review EXT-P1 sibling):
+            // the Browser/TSP panel's next-create identity is the snapshot's
+            // intent, so a verifying/refused Add of another path never clears
+            // the still-confirmed Workspace.
+            ...(nextIntent?.intent?.kind === 'workspace-id'
+              ? { currentWorkspaceId: nextIntent.intent.workspaceId }
+              : {}),
+            isCurrent: () => !signal.aborted && runner.isSessionScopeCurrent(scope),
           },
         }
       },
       diag: runner.diag,
       sessionId: () => runner.currentSessionId,
-      onResumeIntent: (intent, scope, settle, isCurrent) => {
-        if (!runner.isSessionScopeCurrent(scope)
+      sessionWorkspaceFacts: runner.sessionWorkspaceFacts,
+       forwardedAnswerEligibility: runner.forwardedAnswerEligibility,
+       subscribeForwardedAnswerEligibility: runner.subscribeForwardedAnswerEligibility,
+       onWorkspaceNewSession: (workspaceId, closeAfterCommit, settle) => {
+         // ONE operation-local commit marker: a silent superseded success is
+         // NOT a commit, so CommandResult.kind alone cannot classify this.
+         let committed = false
+         let settled = false
+         const finish = (outcome: import('../../app/command/session-browser-presentation.ts').SessionBrowserNewSessionSettlement): void => {
+           if (settled) return
+           settled = true
+           settle?.(outcome)
+         }
+         const notifyFailure = (message: string): void => {
+           const text = sanitizeTerminalText(message)
+           if (nativePresentation !== undefined) nativePresentation.notify(text, 'error')
+           else app.notify(text, 'error')
+         }
+         runOwned('workspace new session', () => startNewSession({
+           source: 'folder',
+           workspaceIntent: { kind: 'workspace-id', workspaceId },
+           onCommitted: () => { committed = true },
+         }), {
+           diag: runner.diag,
+           sessionId: () => runner.currentSessionId,
+           isCancellation: () => runner.signal.aborted,
+           onResult: (settlement) => {
+             // The Folder row never consumes the recovery settlement: it keeps
+             // this Browser, reports the refusal here and releases its pending
+             // operation. A second Browser would be a second screen owner.
+             const result = settlement.result
+             if (committed) {
+               // The create really committed; a post-commit cleanup error keeps
+               // its truthful error notice but never fabricates a pre-commit
+               // failure or blocks the committed retirement.
+               if (result.kind === 'error') notifyFailure(result.text ?? 'fresh session cleanup failed')
+               finish({ kind: 'committed' })
+               closeAfterCommit()
+               return
+             }
+             if (result.kind === 'error') {
+               const message = sanitizeTerminalText(result.text ?? 'fresh session creation failed')
+               notifyFailure(message)
+               finish({ kind: 'failed', message })
+               return
+             }
+             // A silent superseded/success result created no Session: no close,
+             // no success, and the pending operation is released for a retry.
+             finish({ kind: 'not-committed' })
+           },
+           onError: (error) => {
+             const message = sanitizeTerminalText(safeErrorMessage(error))
+             notifyFailure(message)
+             finish({ kind: 'failed', message })
+           },
+           onCancel: () => finish({ kind: 'cancelled' }),
+         })
+       },
+       onUseDirectory: (workspaceId, canonicalPath) => {
+         workspaceNextIntent.setResolvedWorkspace(workspaceId, canonicalPath)
+         runner.updateWelcomeCard()
+         if (runner.currentSessionId !== undefined) return
+         runOwned(
+           'workspace standing catalog refresh',
+           () => runner.refreshStandingCatalog(runner.effectivePresetId, 'invalidation'),
+           {
+             diag: runner.diag,
+             sessionId: () => runner.currentSessionId,
+             onResult: (outcome) => {
+               if (outcome.kind === 'applied' && outcome.notice !== undefined) notify(outcome.notice, 'error')
+             },
+             onError: (error) => notify(`workspace skill refresh failed: ${safeErrorMessage(error)}`, 'error'),
+           },
+         )
+       },
+       onAddDirectory: (path, settle) => {
+         const token = workspaceNextIntent.beginPathVerification(path)
+         let settled = false
+         const finish = (outcome: import('../../app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement): void => {
+           if (settled) return
+           settled = true
+           settle(outcome)
+         }
+         runOwned('workspace directory verification', () => runner.agents.resolveWorkspace(token.intent, runner.signal), {
+           diag: runner.diag,
+           sessionId: () => runner.currentSessionId,
+           isCancellation: () => runner.signal.aborted || !token.isCurrent(),
+           onResult: (resolved) => {
+             if (!token.isCurrent()) return
+             workspaceNextIntent.commitVerifiedPath(token, resolved.workspaceId, resolved.path)
+             runner.updateWelcomeCard()
+             finish({ kind: 'registered', workspaceId: resolved.workspaceId, path: resolved.path })
+             if (runner.currentSessionId !== undefined) return
+             runOwned(
+               'workspace standing catalog refresh',
+               () => runner.refreshStandingCatalog(runner.effectivePresetId, 'invalidation'),
+               {
+                 diag: runner.diag,
+                 sessionId: () => runner.currentSessionId,
+                 onResult: (outcome) => {
+                   if (outcome.kind === 'applied' && outcome.notice !== undefined) notify(outcome.notice, 'error')
+                 },
+                 onError: (error) => notify(`workspace skill refresh failed: ${safeErrorMessage(error)}`, 'error'),
+               },
+             )
+           },
+           onCancel: () => finish({ kind: 'failed', message: 'Directory verification was superseded.' }),
+           onError: (error) => {
+             const message = safeErrorMessage(error)
+             workspaceNextIntent.rejectPathVerification(token, message)
+              runner.updateWelcomeCard()
+             finish({ kind: 'failed', message })
+           },
+         })
+       },
+       onResumeIntent: (intent, scope, settle, isCurrent) => {
+         if (signal.aborted
+          || !runner.isSessionScopeCurrent(scope)
           || intent.currentSessionId !== scope.sessionId
           || intent.sessionId === scope.sessionId) {
           settle({ kind: 'cancelled' })
@@ -343,10 +548,10 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
           if (!direct) presentation.notify(sanitizeTerminalText(text), 'error')
           settle({ kind: 'failed', text })
         }
-        // The native Browser's `resumePending` is the non-terminal indicator;
-        // the command owner receives the real outcome below. Do not paint a
-        // transient notice from inside the read-owner callback: a native
-        // presentation may already be closed/replaced.
+        // The Browser's `resumePending` is the non-terminal indicator; the
+        // command owner receives the real outcome below. Do not paint a
+        // transient notice from inside the read-owner callback: a presentation
+        // may already be closed/replaced.
         runOwned('session browser resume', () => switchSessionOutcome(intent.sessionId, scope), {
           diag: runner.diag,
           sessionId: () => intent.sessionId,
@@ -386,12 +591,22 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
   /** The narrow open options the three Session Browser entries really need
    * (plan §8.2) — not a controller/framework abstraction. */
   interface SessionPickerOpenOptions {
-    readonly header: 'sessions' | 'resume' | 'search'
-    /** `/resume <arg>`: after the ONE shared listing lands, resolve the
-     * argument as a direct id/prefix match — the first listed match closes the
-     * picker and switches; no match falls through to the filtered picker
-     * (the argument stays as the live search query). */
+    readonly header: PiTuiOpenIntent['header']
+    /** The PiTUI Host Editor gesture asks for the All-workspaces initial
+     * browse scope; every typed/pre-existing caller omits it (Current). */
+    readonly browseScope?: 'current' | 'all'
+    readonly addDirectory?: boolean
+    readonly initialDirectoryEntry?: boolean
+    readonly initialDirectoryPath?: string
+    /** `/resume <arg>` direct id/prefix lookup query. */
     readonly directMatchQuery?: string
+    /** The CLI startup direct match: exact/unique-prefix only, with a word
+     *  query never auto-resuming. Omitted for the looser `/resume` rule. */
+    readonly cliDirectMatch?: boolean
+    /** Return the ADMISSION immediately; the read owner observes the later
+     *  direct-match outcome and states a real failure through the presentation.
+     *  The startup root must never wait for roster content. */
+    readonly startupAdmission?: boolean
     /** `/search` only: the query is required — an empty argument is
      * rejected BEFORE the overlay opens. */
     readonly requireQuery?: boolean
@@ -408,16 +623,40 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
       ? undefined
       : {
           query: options.directMatchQuery,
-          // Owner ruling: Native TSP typed `/resume` matches the Browser's
-          // listed main-session rows only. The PiTui fallback retains its
-          // existing matcher behavior.
-          find: (rows: readonly SessionPickerRow[], query: string) => findSessionMatch(rows, query),
+          find: (rows: readonly SessionPickerRow[], query: string) => options.cliDirectMatch === true
+            ? chooseListedSession(rows, query)
+            : findSessionMatch(rows, query),
         }
+    // `open()` captures the typed `/resume` scope SYNCHRONOUSLY (before any
+    // listing await), so a navigation that wins during the listing leaves this
+    // intent superseded instead of falling back to an unscoped gate capture.
     const handle = nativeReadOwnerFor(presentation).open({
       ...(initialQuery === undefined ? {} : { initialQuery }),
       ...(directMatch === undefined ? {} : { directMatch }),
+      initialDirectoryChooser: options.addDirectory === true,
+      ...(options.initialDirectoryEntry ? { initialDirectoryEntry: true } : {}),
+      ...(options.initialDirectoryPath === undefined ? {} : { initialDirectoryPath: options.initialDirectoryPath }),
     })
     if (directMatch === undefined) return Promise.resolve({ kind: 'success' })
+    if (options.startupAdmission === true) {
+      // The Browser is already admitted. The startup root must not wait for the
+      // roster/guarded-Resume settlement; the read owner still owns the real
+      // outcome, and a failed/indeterminate/refused outcome becomes the existing
+      // presentation notice instead of a command result (there is no command).
+      void handle.settlement.then(async (result: SessionBrowserReadSettlement) => { // allowlist: startup admission observer — the read owner owns the operation
+        if (result.kind === 'matched') {
+          const resume: SessionBrowserResumeSettlement = await handle.resumeSettlement
+          if (resume.kind === 'failed' || resume.kind === 'indeterminate') {
+            presentation.notify(sanitizeTerminalText(resume.text), 'error')
+          }
+          return
+        }
+        if (result.kind === 'refused') presentation.notify(sanitizeTerminalText(result.text), 'error')
+      }, (error: unknown) => {
+        presentation.notify(sanitizeTerminalText(safeErrorMessage(error)), 'error')
+      })
+      return Promise.resolve({ kind: 'success' })
+    }
     return handle.settlement.then(async (result: SessionBrowserReadSettlement) => {
       if (result.kind === 'matched') {
         const resume: SessionBrowserResumeSettlement = await handle.resumeSettlement
@@ -436,456 +675,43 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     })
   }
 
-  const openSessionPicker = async (
+  /** Open the ONE Session Browser: the native TSP Presenter when the renderer
+   * provides one, otherwise the PiTui Picker Presentation. Both consume the
+   * same `SessionBrowserReadOwner` snapshot and the same resume settlement. */
+  const openSessionPicker = (
     invocation: { rawInput: string; commandId?: string },
     options: SessionPickerOpenOptions,
   ): Promise<{ kind: 'success' } | { kind: 'error'; text: string }> => {
     if (options.requireQuery === true && invocation.rawInput.trim() === '') {
-      return { kind: 'error', text: 'search needs a query' }
+      return Promise.resolve({ kind: 'error', text: 'search needs a query' })
     }
-    // `/resume <arg>` captures its source generation SYNCHRONOUSLY, before the
-    // input-first listing await. A navigation that wins during the listing
-    // must leave this intent superseded — it must never fall back to an
-    // unscoped capture at gate time and stop the NEW owner.
-    const resumeScope = options.directMatchQuery === undefined ? undefined : runner.captureSessionScope()
     const presentation = runner.sessionBrowserPresentation
     if (presentation !== undefined) return openNativeSessionBrowser(invocation, options, presentation)
-    // The current marker is the live session's id; before the first session
-    // (deferred start) no row is marked current, and the picker can still
-    // browse and switch to a persisted session without creating one.
-    const currentId = runner.currentSessionId
-    // A NEW picker open supersedes the previous one outright: bump the
-    // generation, cancel its scan AND its content search, and take over
-    // as the active load.
-    sessionPickerGeneration += 1
-    const generation = sessionPickerGeneration
-    activeSessionPickerScan?.abort()
-    if (activeContentSearchTimer !== undefined) {
-      clearTimeout(activeContentSearchTimer)
-      activeContentSearchTimer = undefined
+    // The ONE PiTUI fullscreen Workspace renders the same read owner. The
+    // per-open intent is captured synchronously before the read owner can open
+    // the panel; the presenter consumes and resets it inside `open()`.
+    const raw = invocation.rawInput.trim()
+    piTuiOpenIntent = {
+      header: options.header,
+      scope: options.browseScope ?? 'current',
+      // `/sessions <query>` and `/search <query>` open the global editor; the
+      // bare commands open the browse list. A typed `/resume` still tries its
+      // direct match first and only falls back to the editor through the read
+      // owner's one-shot seed.
+      searchRequested: options.header === 'search' || (options.header === 'sessions' && raw !== ''),
     }
-    activeContentSearch?.abort()
-    activeContentSearch = undefined
-    const controller = new AbortController()
-    activeSessionPickerScan = controller
-    const scanSignal = AbortSignal.any([signal, controller.signal])
-    /** True when this load's result may no longer touch the UI: the picker
-     * closed (abort), the runner quit, or a newer open superseded it. */
-    const stale = (): boolean => scanSignal.aborted || generation !== sessionPickerGeneration
-
-    // The picker rows: EMPTY until `list()` lands. The category factories
-    // read this shared array at activation time, so the loading placeholder
-    // renders first and the late rows appear through the same factories.
-    const rows: SessionPickerRow[] = []
-    // Live enrichment maps: the background projection batch fills them, and
-    // the category factories re-read them on every activation (Tab cycle,
-    // refresh). The category scopes see the FULL row set, so "All
-    // directories" really lists every main session (round-1 review finding:
-    // the old code capped the rows themselves at MAX_PICKER_SESSIONS).
-    const titlesById = new Map<string, string>()
-    const presetsById = new Map<string, string>()
-    // Content-search enrichment (plan §10.2): Host hits merge onto
-    // already-listed rows — the list stays the row authority, the search
-    // page only adds snippets. Cleared per query; the unavailable notice
-    // fires at most once per picker lifecycle.
-    const contentHitsById = new Map<string, SessionContentHit>()
-    let contentHasMore = false
-    let contentSearchNoticeShown = false
-    const itemFor = (row: SessionPickerRow, indent = 0): SessionPickerItem =>
-      sessionPickerItem({
-        ...row,
-        title: titlesById.get(row.id),
-        preset: presetsById.get(row.id) ?? row.preset,
-      }, runner.currentSessionId ?? '', indent, contentHitsById.get(row.id))
-    // Category tabs (Tab cycles while the picker is open): the session
-    // picker is a HUMAN surface, so subagent children never appear in
-    // either scope — /tasks and the subagent viewer own that surface now
-    // (the 2026-08-22 plan, item 3; kimi's directory-scope direction).
-    // Current directory scopes to the live session's workspace (the
-    // sessionCwd the whole surface follows); All directories lists every
-    // main session, grouped by its workspace.
-    const loadingItem: SessionPickerItem = {
-      value: '',
-      label: 'Loading sessions…',
-      description: '',
-      group: '',
-    }
-    // The status row the categories render while `rows` is still empty: the
-    // loading label first, swapped for the refusal text when the listing
-    // fails (the overlay is already open — an in-picker refusal beats a
-    // dead loading frame; Esc still closes it).
-    let statusRow = loadingItem
-    const categories = [
-      ...sessionPickerCategories(rows, runner.sessionCwd(), options.header, itemFor, () => statusRow),
-      // The search projection (review P1/P2): with a non-empty query the
-      // picker switches to this GLOBAL view — local metadata matches UNION
-      // Host content hits, never scoped by the Current/All browse tabs.
-      sessionSearchCategory({
-        rows,
-        header: options.header,
-        // The search item builder: the cwd joins the searchable description
-        // (the SelectList never searches the group header), and the
-        // enriched title/preset are synthesized exactly like the browse rows.
-        itemFor: (row, indent = 0) => sessionSearchItem({
-          ...row,
-          title: titlesById.get(row.id),
-          preset: presetsById.get(row.id) ?? row.preset,
-        }, runner.currentSessionId ?? '', indent, contentHitsById.get(row.id)),
-        queryOf: () => pendingContentQuery,
-        contentHitsById,
-        metadataOf: id => ({ title: titlesById.get(id), preset: presetsById.get(id) }),
-        placeholder: () => statusRow,
-      }),
-    ]
-    /** The `/resume <arg>` outcome of the ONE shared listing, resolved by
-     * the detached load task — the overlay stays interactive the whole
-     * time, and the awaiting handler keeps the OLD synchronous semantics
-     * (the switch has started before the handler returns). */
-    type ListingOutcome =
-      | { kind: 'switched' }
-      | { kind: 'indeterminate'; text: string }
-      | { kind: 'picker' }
-      | { kind: 'refused'; text: string }
-      | { kind: 'cancelled' }
-    let settleListing: ((outcome: ListingOutcome) => void) | undefined
-    let switchInFlight = false
-    const listing = options.directMatchQuery === undefined
-      ? undefined
-      : new Promise<ListingOutcome>(resolve => { settleListing = resolve })
-    /** Idempotent outcome settle — later calls are no-ops (the abort
-     * listener races the task's own settles). */
-    const settleOnce = (outcome: ListingOutcome): void => {
-      settleListing?.(outcome)
-      settleListing = undefined
-    }
-    if (listing !== undefined) {
-      // Esc / any close settles the awaiting /resume <arg> handler. A closed
-      // picker that is carrying a switch in flight must NOT be reported as a
-      // cancellation: the tracked switch result owns the final settlement.
-      controller.signal.addEventListener('abort', () => {
-        if (!switchInFlight) settleOnce({ kind: 'cancelled' })
-      }, { once: true })
-    }
-    // Content-search lifecycle (plan §9 + review P1/P2): local metadata
-    // filtering is immediate; Host content search is a 250ms-debounced
-    // async augmentation that must never block keyboard input. The query is
-    // only recorded until the list baseline lands; clearing the filter drops
-    // the content enrichment; close/supersede/quit cancels everything. A
-    // non-empty query switches the picker into the GLOBAL search projection
-    // (scope is browse state — it never wraps the bounded Host results);
-    // clearing restores the browse category that was active before.
-    let listLanded = false
-    let pendingContentQuery = ''
-    let browseCategory = 'current'
-    /** Run one Host content search for a settled non-empty query. */
-    const runContentSearch = (query: string): void => {
-      if (stale()) return
-      const controller = new AbortController()
-      activeContentSearch = controller
-      const searchSignal = AbortSignal.any([scanSignal, controller.signal])
-      detach('session content search', async () => {
-        try {
-          const page = await runner.sessionReader.search(query, searchSignal)
-          if (stale() || controller.signal.aborted) return
-          if (page === undefined) {
-            // Capability unavailable/disabled (e.g. the default
-            // `openAt: never` FTS policy): the picker stays open with its
-            // local metadata filtering; notice once per picker lifecycle.
-            if (!contentSearchNoticeShown) {
-              contentSearchNoticeShown = true
-              app.notify('content search unavailable', 'info')
-            }
-            return
-          }
-          // Merge (plan §10.2 + review P2): only already-listed MAIN rows
-          // accept hits — the search page never creates rows, and subagent
-          // children stay out of the human Session Browser. Membership is
-          // the explicit union in the search projection; the row carries
-          // ONLY the real Host snippet (never a fake query append).
-          contentHitsById.clear()
-          contentHasMore = page.hasMore
-          const knownIds = new Set(rows.filter(row => row.origin !== 'subagent').map(row => row.id))
-          for (const item of page.items) {
-            if (knownIds.has(item.sessionId)) {
-              contentHitsById.set(item.sessionId, { snippet: item.snippet })
-            }
-          }
-          picker.refresh?.()
-          if (contentHasMore) app.notify('More content matches exist — refine the search.', 'info')
-        } catch (error) {
-          if (stale() || controller.signal.aborted) return
-          // Non-fatal: local rows stay and the picker stays open. The
-          // error text is a Host/provider boundary value — sanitize it
-          // before the notify writes it to the terminal (a raw ESC/OSC in
-          // an error message must never inject terminal sequences). The
-          // rethrow records the real diagnostic through runDetached.
-          app.notify(`session content search failed: ${sanitizeTerminalText(safeErrorMessage(error))}`, 'error')
-          throw error
-        }
+    try {
+      return openNativeSessionBrowser(invocation, options, piTuiPresentation)
+    } catch (error) {
+      // A synchronous fullscreen-lease refusal (blocking modal, another
+      // workspace, a transition freeze) is ONE real command error; the read
+      // owner already retired its panel and started no Host read.
+      piTuiOpenIntent = undefined
+      return Promise.resolve({
+        kind: 'error',
+        text: `session workspace unavailable: ${sanitizeTerminalText(safeErrorMessage(error))}`,
       })
     }
-    /** Debounce a non-empty query: 250ms of stability before the Host
-     * content search runs (dsh-web parity). */
-    const scheduleContentSearch = (query: string): void => {
-      if (activeContentSearchTimer !== undefined) clearTimeout(activeContentSearchTimer)
-      activeContentSearchTimer = setTimeout(() => {
-        activeContentSearchTimer = undefined
-        runContentSearch(query)
-      }, CONTENT_SEARCH_DEBOUNCE_MS)
-    }
-    /** Cancel the pending debounce and any in-flight content search. */
-    const cancelContentSearch = (): void => {
-      if (activeContentSearchTimer !== undefined) {
-        clearTimeout(activeContentSearchTimer)
-        activeContentSearchTimer = undefined
-      }
-      activeContentSearch?.abort()
-      activeContentSearch = undefined
-    }
-    const picker = app.openPicker(
-      categories[0]!.items(),
-      (id) => {
-        // Any close — including the loading row's Enter — ends the scan
-        // and the content search: the picker is gone, so late enrichment
-        // may not touch the UI.
-        if (id !== '' && id !== currentId) settleOnce({ kind: 'switched' })
-        controller.abort()
-        cancelContentSearch()
-        // Enter on the loading placeholder (value '') must never resume.
-        if (id === '' || id === currentId) return
-        switchSession(id)
-      },
-      () => {
-        controller.abort()
-        cancelContentSearch()
-      },
-      {
-        enableSearch: true,
-        header: categories[0]!.header,
-        noMatchText: '  no matching sessions',
-        // The command argument is applied AFTER the rows land (below), not
-        // as initialQuery: a prefilled filter would hide the STATUS rows
-        // (loading / refusal / already-on) behind "no matching sessions"
-        // while the scan is still running.
-        initialQuery: '',
-        width: 76,
-        maxHeight: 26,
-        showHint: true,
-        categories,
-        // A closed picker (select, Esc) aborts the background scan through
-        // the same controller; a runner exit closes the overlay AND cancels
-        // the scan through the shared signal.
-        signal: scanSignal,
-        // The selected session's long title marquees; the lineage tree
-        // connector and the `●` current marker stay fixed (plan §7.6/§7.7).
-        marquee: { labelPartsOf: sessionLabelParts },
-        // The Session Browser's content-search hook: every filter change
-        // (typed or programmatic) feeds the 250ms debounce; before the
-        // list baseline lands the query is only recorded. ANY change drops
-        // the previous query's enrichment — stale snippets must never
-        // match the new filter (plan §18), and an unavailable/failed new
-        // search must not leave the old query's hits behind.
-        onFilterChange: (query) => {
-          // ONE canonical client query (review P1): remove NUL → trim →
-          // cap 500 UTF-16 units. The SAME canonical drives the local
-          // metadata projection AND the Host search (whose authoritative
-          // validation is then a no-op) — the input box keeps the raw
-          // text the user typed, but membership never drifts from what
-          // was searched.
-          const canonical = sanitizeSessionSearchInput(query)
-          // The canonical is the semantic identity: a raw edit that does
-          // not change it (e.g. padding whitespace or NULs around the
-          // same term) must not abort/restart the identical Host search.
-          if (canonical === pendingContentQuery) return
-          pendingContentQuery = canonical
-          cancelContentSearch()
-          contentHitsById.clear()
-          contentHasMore = false
-          // A whitespace-only filter is an empty query: no Host request
-          // (the official contract rejects empty queries — a whitespace
-          // filter must not surface as a search failure).
-          if (canonical === '') {
-            // Back to the browse state (the category that was active
-            // before the query started).
-            if (picker.getCategory?.() !== browseCategory) picker.setCategory?.(browseCategory)
-            return
-          }
-          // Enter the GLOBAL search projection: scope is browse state and
-          // never wraps the bounded Host results (review P1). The switch
-          // happens once per query; further typing re-runs the active
-          // factory through refresh.
-          if (picker.getCategory?.() !== 'search') {
-            browseCategory = picker.getCategory?.() ?? 'current'
-            picker.setCategory?.('search')
-          } else {
-            picker.refresh?.()
-          }
-          if (listLanded) scheduleContentSearch(canonical)
-        },
-      },
-    )
-    // The listing + progressive enrichment run behind the open overlay.
-    // Cancellations (picker close, TUI quit, a superseding open) are
-    // debug-level through the unified entry; a real failure lands in
-    // diagnostics instead of being swallowed. Every await re-checks the
-    // staleness fence so a late settlement never refreshes a picker that
-    // already closed or was replaced.
-    detach('session picker load', async () => {
-      // The FIRST thing the scan does is a real event-loop yield: the
-      // overlay must be registered, focused, and repainted before any Host
-      // work starts (a microtask yield would not guarantee the terminal
-      // I/O phase a turn).
-      await scheduler.yield()
-      scanSignal.throwIfAborted()
-
-      // The session READ port (migration M1.3): semantic listing with
-      // capability-aware activity ordering lives in the Direct adapter, never here.
-      let listed: readonly SessionSummary[] | undefined
-      try {
-        listed = await runner.sessionReader.list(currentId, scanSignal)
-      } catch (error) {
-        // A real listing failure surfaces in-picker (the overlay is already
-        // open) and settles the awaiting /resume <arg> handler — never a
-        // dead loading frame, never a hanging handler.
-        if (stale()) return
-        const message = safeErrorMessage(error)
-        statusRow = { value: '', label: `session listing failed: ${message}`, description: '', group: '' }
-        picker.refresh?.()
-        settleOnce({ kind: 'refused', text: message })
-        return
-      }
-      if (stale()) return
-      if (listed === undefined || listed.length === 0) {
-        // The overlay is already open — keep it open on the refusal row
-        // (Esc closes as always) instead of leaving a dead loading frame.
-        // An EMPTY roster is `No readable sessions`: the official listing
-        // publishes a Session from its header only, so a store whose logs the
-        // reader refuses is indistinguishable from an empty one here — never
-        // claim "no persisted sessions" (the S2 limited contract, recorded in
-        // docs/architecture/host-client.md).
-        const text = listed === undefined ? 'session persistence unavailable' : 'No readable sessions'
-        statusRow = { value: '', label: text, description: '', group: '' }
-        picker.refresh?.()
-        settleOnce({ kind: 'refused', text })
-        return
-      }
-      // `/resume <arg>` direct fast path, resolved against the ONE shared
-      // listing (never a second one): a unique id/prefix match closes the
-      // picker and settles the command with the TRACKED switch outcome — the
-      // picker close itself is never success; matching the
-      // CURRENT session surfaces the already-on notice; no match falls
-      // through to the filtered picker with the argument preserved as the
-      // live search query.
-      if (options.directMatchQuery !== undefined) {
-        const match = findSessionMatch(listed, options.directMatchQuery)
-        if (match !== undefined) {
-          if (match.id === currentId) {
-            // Nothing to switch and nothing to browse: close the overlay —
-            // the error result is the whole feedback (a status row would
-            // linger behind the argument filter).
-            settleOnce({ kind: 'refused', text: 'already on this session' })
-            controller.abort()
-            picker.close()
-            return
-          }
-          switchInFlight = true
-          controller.abort()
-          picker.close()
-          app.notify('switching session…', 'info')
-          runOwned('session switch', () => switchSessionOutcome(match.id, resumeScope), {
-            diag: runner.diag,
-            sessionId: () => match.id,
-            onResult: (outcome) => {
-              if (outcome.kind === 'committed') settleOnce({ kind: 'switched' })
-              else if (outcome.kind === 'cancelled') settleOnce({ kind: 'cancelled' })
-              else if (outcome.kind === 'indeterminate') settleOnce({ kind: 'indeterminate', text: outcome.message })
-              else settleOnce({ kind: 'refused', text: outcome.message })
-            },
-            onCancel: () => settleOnce({ kind: 'cancelled' }),
-            onError: (error) => settleOnce({ kind: 'refused', text: `session switch failed: ${safeErrorMessage(error)}` }),
-          })
-          return
-        }
-        settleOnce({ kind: 'picker' })
-      }
-      // Mutate the shared row array in place: the category factories read
-      // it at activation time, so this one splice swaps the loading
-      // placeholder for the real rows on the next refresh.
-      rows.push(...listed)
-      picker.refresh?.()
-      // The list baseline is in: content search may start now (plan §9.3).
-      listLanded = true
-      // NOW the command argument becomes the live filter — real rows are
-      // in, so it narrows sessions instead of hiding the status phase. A
-      // query the USER typed during the load is never clobbered.
-      const pendingQuery = invocation.rawInput.trim()
-      if (pendingQuery !== '' && picker.getFilter?.() === '') {
-        picker.setFilter?.(pendingQuery)
-      }
-      // A filter that was only recorded during the load (or just applied
-      // above) now enters the normal debounced content-search flow. The
-      // query is canonicalized (trimmed) exactly like the interactive
-      // path: trim BEFORE the client cap, so a whitespace-padded filter
-      // never loses a character to the 500-unit window (official
-      // semantics: trim, then cap).
-      if (pendingContentQuery !== '' && activeContentSearchTimer === undefined && activeContentSearch === undefined) {
-        scheduleContentSearch(pendingContentQuery)
-      }
-
-      // Progressive combined projection batches: the first
-      // PROJECTION_FIRST_BATCH rows fill the visible window, then
-      // PROJECTION_BATCH_SIZE chunks refresh behind it. Each row's title
-      // and preset arrive TOGETHER from the one DSH projection batch (one
-      // cache lookup per session, never one scan per field), and the yield
-      // between batches keeps the event loop responsive to input while the
-      // cache hints settle. Cold misses remain unknown. The batches cover MAIN
-      // rows only (the categories never show subagents) and the FULL main-row set — NOT
-      // the `shown` window: a session beyond MAX_PICKER_SESSIONS that IS
-      // displayed (e.g. an old session in the "Current directory" scope)
-      // would otherwise never be enriched and would show a bare short id
-      // forever.
-      const mainRows = listed.filter(row => row.origin !== 'subagent')
-      const loadBatch = async (batch: readonly SessionSummary[]): Promise<void> => {
-        const projections = await runner.sessionReader.projectionBatch(batch, scanSignal)
-        if (stale()) return
-        let enriched = false
-        for (const [id, projection] of projections) {
-          if (projection.title !== undefined) {
-            titlesById.set(id, projection.title)
-            enriched = true
-          }
-          if (projection.preset !== undefined) {
-            presetsById.set(id, projection.preset)
-            enriched = true
-          }
-        }
-        if (enriched) picker.refresh?.()
-      }
-      await loadBatch(mainRows.slice(0, PROJECTION_FIRST_BATCH))
-      if (stale()) return
-      for (let offset = PROJECTION_FIRST_BATCH; offset < mainRows.length; offset += PROJECTION_BATCH_SIZE) {
-        // Yield between batches so input/repaint keep their turns even when
-        // every projection is a cold miss.
-        await scheduler.yield()
-        if (stale()) return
-        await loadBatch(mainRows.slice(offset, offset + PROJECTION_BATCH_SIZE))
-      }
-    })
-    if (listing === undefined) return { kind: 'success' }
-    // `/resume <arg>` keeps the OLD synchronous command semantics — the
-    // switch has started before the handler returns — while the overlay
-    // stays interactive during the wait (Esc cancels). No match settles as
-    // success with the filtered picker; a refusal returns the error text.
-    const outcome = await listing
-    if (outcome.kind === 'indeterminate') {
-      // The Host may have opened the target; never restore `/resume ...` as a
-      // plain retry intent.
-      recordCommandDraftDisposition(invocation.commandId, 'suppressed')
-      return { kind: 'error', text: outcome.text }
-    }
-    if (outcome.kind === 'refused') return { kind: 'error', text: outcome.text }
-    if (outcome.kind === 'cancelled') return { kind: 'error', text: 'resume cancelled' }
-    return { kind: 'success' }
   }
 
   // Shared by /title and its /rename alias. With an argument, pins the
@@ -986,12 +812,70 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     }
   }
 
+  /**
+   * TSP-7 Welcome D: the ONE `/sessions` open body. The typed command passes
+   * its own invocation (so a `/sessions <query>` argument still seeds the
+   * Browser); the Welcome's UI entry passes an empty one. Both are the SAME
+   * shared lifecycle — one picker generation, one read owner, one query and
+   * one switch route — never a second listing or a copied presenter. The
+   * PiTUI Host Editor `←←` gesture is the ONE caller that passes `'all'`
+   * (its frozen initial scope); the typed and Welcome entries keep Current.
+   */
+  const openSessionsBody = async (
+    invocation: { rawInput: string; commandId?: string },
+    options: 'current' | 'all' | {
+      readonly scope?: 'current' | 'all'
+      readonly addDirectory?: boolean
+      readonly initialDirectoryEntry?: boolean
+      readonly initialDirectoryPath?: string
+      /** The CLI startup entry's initial query. An explicit value (including
+       *  the empty Browse-All query) selects the startup semantics: the raw
+       *  input is the launch query and the one entry that skips the sessionless
+       *  Workspace-preflight wait — the Browser must own the first input frame
+       *  even when the preflight is slow or never answers. */
+      readonly initialQuery?: string
+      /** The CLI startup lookup entry: run the strict exact/unique-prefix
+       *  direct match after the roster lands through the SAME guarded Resume
+       *  `/resume` uses. The Browser opens before the read. */
+      readonly directMatch?: boolean
+    } = 'current',
+  ): Promise<CommandResult> => {
+    const settings = typeof options === 'string' ? { scope: options } : options
+    const startupQuery = settings.initialQuery
+    // A sessionless Browser's subject may name the launch Workspace only after
+    // the mount preflight commits; open the ONE owner with that confirmed
+    // destination instead of a transient "no current Workspace" state. The
+    // CLI startup entry deliberately skips this wait (see `initialQuery`).
+    if (startupQuery === undefined && runner.captureSessionScope().sessionId === undefined) {
+      await runner.awaitWorkspacePreflight?.()
+    }
+    if (startupQuery !== undefined && settings.directMatch === true) {
+      return openSessionPicker({ rawInput: startupQuery }, {
+        // 'sessions' (not the typed 'resume' header) seeds the global query in
+        // the same open: the search editor is live before the roster lands,
+        // while the direct match still runs after it unless the user edits.
+        header: 'sessions',
+        directMatchQuery: startupQuery,
+        cliDirectMatch: true,
+        startupAdmission: true,
+        browseScope: settings.scope,
+      })
+    }
+    return openSessionPicker(startupQuery === undefined ? invocation : { rawInput: startupQuery }, {
+      header: 'sessions',
+      browseScope: settings.scope,
+      addDirectory: settings.addDirectory === true,
+      initialDirectoryEntry: settings.initialDirectoryEntry === true,
+      initialDirectoryPath: settings.initialDirectoryPath,
+    })
+  }
+
   const registerSessions = (): void => {
     registerTuiCommand({
       name: 'sessions',
       description: 'List, search, and switch persisted sessions',
       input: { hint: '[query]' },
-      handler: (invocation) => openSessionPicker(invocation, { header: 'sessions' }),
+      handler: (invocation) => openSessionsBody(invocation),
       aliases: ['resume'],
       // /resume keeps its direct-resume fast path (exact id, a session-
       // prefixed prefix, or the short id prefix) — resolved against the ONE
@@ -1000,8 +884,13 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
       // lands. No match leaves the filtered picker with the argument as the
       // live search query (content search included). Never a second listing.
       aliasHandlers: {
-        resume: (invocation) => {
+        resume: async (invocation) => {
           const raw = invocation.rawInput.trim()
+          // The ARGUMENT-FREE `/resume` is the same sessionless Browser entry
+          // as `/sessions`: it must not capture a transient no-Current subject
+          // before the mount preflight commits. An explicit argument keeps its
+          // direct match path.
+          if (raw === '' && runner.captureSessionScope().sessionId === undefined) await runner.awaitWorkspacePreflight?.()
           return openSessionPicker(invocation, {
             header: 'resume',
             directMatchQuery: raw === '' ? undefined : raw,
@@ -1027,20 +916,42 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
    */
   let freshSessionInFlight = false
 
-  const registerNew = (): void => {
-    registerOne({
-      name: 'new',
-      description: 'Start a fresh session in this workspace',
-      handler: async () => {
+  /**
+   * The internal `/new` settlement. Every ordinary branch keeps its exact
+   * `CommandResult`; a proven pre-create Host Workspace refusal additionally
+   * carries the typed failure and the captured subject, so ONLY the `/new`
+   * entry can decide whether that refusal may open recovery navigation.
+   * Folder `New session` consumes the same settlement but never navigates.
+   */
+  type NewSessionSettlement =
+    | { readonly kind: 'done'; readonly result: CommandResult }
+    | {
+        readonly kind: 'workspace-refused'
+        readonly result: CommandResult
+        readonly failure: WorkspaceSelectionError
+        readonly subject: SessionScope
+      }
+
+  const startNewSession = async (options: {
+    readonly workspaceIntent?: WorkspaceSelectionIntent
+    readonly source: 'command' | 'folder'
+    /** Called ONLY after `transitionTo` confirmed a real commit. It observes
+     *  the one genuine commit checkpoint without changing the transaction. */
+    readonly onCommitted?: () => void
+  }): Promise<NewSessionSettlement> => {
+        const done = (result: CommandResult): NewSessionSettlement => ({ kind: 'done', result })
         if (freshSessionInFlight) {
-          return { kind: 'error', text: 'a fresh session is already starting' }
+          return done({ kind: 'error', text: 'a fresh session is already starting' })
         }
         freshSessionInFlight = true
         // The ORIGINAL session generation/navigation identity, captured
-        // SYNCHRONOUSLY: the navigation stop must address exactly the owner
-        // the user chose to leave, never a replacement published while this
-        // intent waited behind another transition. The runtime fills in
-        // `admission.oldStopAccepted` before the transaction body runs.
+        // SYNCHRONOUSLY: a Direct (`stop-and-quiesce`) navigation stop must
+        // address exactly the owner the user chose to leave, never a
+        // replacement published while this intent waited behind another
+        // transition; a Remote (`detach-client`) navigation uses the same
+        // capture only for its stale/superseded fence. The runtime fills in
+        // `admission.oldStopAccepted` before the transaction body runs (false
+        // when no Host stop is dispatched).
         const navigation: NavigationIntent = {
           scope: runner.captureSessionScope(),
           admission: { oldStopAccepted: false },
@@ -1055,7 +966,96 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
             : '; turn stop requested (not yet confirmed)'
         }
         try {
-          return await runner.withSessionTransition(async () => {
+          // WS-2 Workspace pre-selection BEFORE the navigation transition: a
+          // refused directory, an unknown Workspace or an offline Host must not
+          // stop the old owner, flush/consume drafts or dispatch a Session.
+          // `source-session` asks for the captured Session's official Host
+          // membership (never the Client launch/effective cwd); a sessionless
+          // `/new` offers the Client launch directory as a Host path proposal.
+          let nextIntentCapture: ReturnType<typeof workspaceNextIntent.capture> | undefined
+          let intent: WorkspaceSelectionIntent
+          // Whether THIS create's target comes from the next-intent owner. An
+          // EXPLICIT caller (Folder New with an official workspace-id) owns its
+          // target: it must never be refused by the leftover AUTO candidate's
+          // proof, which belongs to a different, not-consumed proposal.
+          const targetFromNextIntent = options.workspaceIntent === undefined
+          // The sessionless mount may still be verifying the launch directory:
+          // wait for that ONE request before capturing, so its committed
+          // revision is the one this create revalidates (never a stale token).
+          if (navigation.scope.sessionId === undefined) {
+            // EVERY sessionless start (including an explicit Folder
+            // workspace-id) consumes the next-intent capture, so all of them
+            // must wait for the mount preflight's committed revision.
+            await runner.awaitWorkspacePreflight?.()
+          }
+          if (options.workspaceIntent !== undefined) {
+            if (navigation.scope.sessionId === undefined) nextIntentCapture = workspaceNextIntent.capture()
+            intent = options.workspaceIntent
+          } else if (navigation.scope.sessionId === undefined) {
+            nextIntentCapture = workspaceNextIntent.capture()
+            if (nextIntentCapture === undefined) {
+              // UNSELECTED: there is no Host Workspace to create in. Refuse
+              // BEFORE any transition/stop/flush; the Welcome's existing
+              // Browser entry is the one place to choose one (ensureSession
+              // opens it through promptWorkspaceSelection on its own refusal).
+              return done({ kind: 'error', text: 'Choose a Host workspace before starting a session' })
+            }
+            // The AUTO candidate's local evidence is re-proved at THIS create
+            // boundary too (review P2): the preflight may have confirmed the
+            // id long ago and the mount view may have changed since. The
+            // surface returns to unselected; an explicit choice is unaffected.
+            if (nextIntentCapture.provenance === 'auto' && await runner.validateAutoWorkspace?.() !== true) {
+              // The late false result may only reset the intent it captured.
+              // A newer manual/launch choice that appeared during the await
+              // owns the current state and must never be cleared here.
+              if (nextIntentCapture.isCurrent()) {
+                workspaceNextIntent.resetToLaunchCwd()
+                return done({ kind: 'error', text: 'The verified local workspace changed — choose a Host workspace' })
+              }
+              return done({ kind: 'error', text: 'workspace selection changed before fresh session creation' })
+            }
+            if (!nextIntentCapture.isCurrent()) {
+              return done({ kind: 'error', text: 'workspace selection changed before fresh session creation' })
+            }
+            intent = nextIntentCapture.intent
+          } else {
+            intent = { kind: 'source-session', sessionId: navigation.scope.sessionId }
+          }
+          let workspace: ResolvedWorkspaceSelection
+          try {
+            workspace = await runner.agents.resolveWorkspace(intent, signal)
+          } catch (error) {
+            // A cancellation-shaped resolution rejection is NOT a user-visible
+            // failure: it propagates to the owned task's cancellation
+            // settlement. The Direct/Remote adapters map an abort of a
+            // pre-commit selection to WorkspaceSelectionError('superseded'),
+            // which stays the documented silent/no-ownership path below.
+            if (isCancellation(error)) throw error
+            if (!runner.isSessionScopeCurrent(navigation.scope)
+              || (nextIntentCapture !== undefined && !nextIntentCapture.isCurrent())
+              || (error instanceof WorkspaceSelectionError && error.kind === 'superseded')) {
+              // A stale/superseded selection owns nothing: silent, exactly like
+              // a superseded create. Nothing was stopped, flushed or created.
+              return done({ kind: 'success' })
+            }
+            if (error instanceof WorkspaceSelectionError
+              && recoverableWorkspaceSelection(error).kind === 'select-workspace') {
+              // The Host proved a PRE-CREATE refusal the user can fix by
+              // choosing another Workspace. Only `registerNew` may act on it.
+              return {
+                kind: 'workspace-refused',
+                result: { kind: 'error', text: `fresh session creation failed: ${safeErrorMessage(error)}` },
+                failure: error,
+                subject: navigation.scope,
+              }
+            }
+            return done({ kind: 'error', text: `fresh session creation failed: ${safeErrorMessage(error)}` })
+          }
+          if (nextIntentCapture !== undefined && !nextIntentCapture.isCurrent()) {
+            return done({ kind: 'error', text: 'workspace selection changed before fresh session creation' })
+          }
+          if (!runner.isSessionScopeCurrent(navigation.scope)) return done({ kind: 'success' })
+          return done(await runner.withSessionTransition(async () => {
             // The unified transaction: the old session is flushed BEFORE the
             // fresh session is created, the commit is synchronous, and a failure
             // anywhere before the create leaves the current session untouched
@@ -1071,12 +1071,10 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
               resolved = await runner.catalog.presets.resolve(runner.effectivePresetId, runner.signal)
             } catch (error) {
               // A lifecycle cancellation (exit/HMR) during the read aborts it: no
-              // create is dispatched, and the abort must not surface as an unhandled
-              // rejection. Any OTHER failure keeps its real diagnostic — never
+              // create is dispatched, and the owned task settles it AS a
+              // cancellation. Any OTHER failure keeps its real diagnostic — never
               // mislabeled as a cancellation.
-              if (runner.signal.aborted) {
-                return { kind: 'error', text: `fresh session creation cancelled: ${safeErrorMessage(error)}${stopNote()}` }
-              }
+              if (isCancellation(error) || runner.signal.aborted) throw error
               return { kind: 'error', text: `fresh session creation failed: ${safeErrorMessage(error)}${stopNote()}` }
             }
             // Coordinate with the newest sessionless `/model` global-default write
@@ -1088,23 +1086,54 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
               await runner.awaitPendingDefaultWrite(signal)
             } catch (error) {
               // The lifetime signal aborted while waiting for the default write:
-              // no create is dispatched (the old session stays current).
-              return { kind: 'error', text: `fresh session creation cancelled: ${safeErrorMessage(error)}${stopNote()}` }
+              // no create is dispatched (the old session stays current) and the
+              // owned task settles the abort as a cancellation.
+              if (isCancellation(error) || runner.signal.aborted) throw error
+              return { kind: 'error', text: `fresh session creation failed: ${safeErrorMessage(error)}${stopNote()}` }
             }
             const result = await runner.transitionTo({
-              target: { id: String(sessionId), header: { cwd } },
+              // The Host-verified canonical Workspace directory is a display
+              // hint only; the durable header cwd is resolved by the Host from
+              // the Workspace id below.
+              target: { id: String(sessionId), header: { cwd: workspace.path } },
               onOldOwnerQuiesced: () => { oldOwnerQuiesced = true },
               create: async () => {
                 // Re-wait immediately before dispatch: a newer sessionless /model may
                 // have started between the first wait and here, and the Direct
                 // adapter activates the Agent from the persisted Host default.
                 await runner.awaitPendingDefaultWrite(signal)
+                if (nextIntentCapture !== undefined && !nextIntentCapture.isCurrent()) {
+                  throw new WorkspaceSelectionError('superseded', 'workspace selection changed before fresh session creation')
+                }
+                // The LAST gate before the real Host create (external review
+                // EXT-P2): all preset/default awaits have settled, so the
+                // automatic candidate's local proof is re-observed once more.
+                // ONLY a create that actually consumes the next-intent target is
+                // subject to it (explicit Folder New owns its own WorkspaceId).
+                if (targetFromNextIntent && nextIntentCapture?.provenance === 'auto'
+                  && await runner.validateAutoWorkspace?.() !== true) {
+                  if (!nextIntentCapture.isCurrent()) {
+                    throw new WorkspaceSelectionError('superseded', 'workspace selection changed before fresh session creation')
+                  }
+                  workspaceNextIntent.resetToLaunchCwd()
+                  throw new WorkspaceSelectionError(
+                    'refused',
+                    'The verified local workspace changed before fresh session creation — choose a Host workspace',
+                    'workspace/not-selected',
+                  )
+                }
+                if (nextIntentCapture !== undefined && !nextIntentCapture.isCurrent()) {
+                  throw new WorkspaceSelectionError('superseded', 'workspace selection changed before fresh session creation')
+                }
                 return runner.agents.create({
                   sessionId: String(sessionId),
+                  // The official Host Workspace identity is the ONE directory
+                  // authority; no cwd crosses this request. The Host resolves
+                  // the durable directory from its own registry.
+                  workspaceId: workspace.workspaceId,
                   // The semantic `agentPreset` is the SINGLE preset authority; the
                   // Direct adapter persists the actually composed preset into the
                   // durable header. Never duplicate it into generic meta.
-                  cwd,
                   agentPreset: resolved.id,
                 })
               },
@@ -1127,6 +1156,13 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
               }
               return { kind: 'error', text: `${result.message}${stopNote()}` }
             }
+            // The ONE genuine commit checkpoint: the transition really
+            // published the fresh Session. A later local cleanup failure must
+            // not turn this into a pre-commit failure.
+            options.onCommitted?.()
+            if (nextIntentCapture !== undefined) {
+              workspaceNextIntent.consumeAfterCommittedCreate(nextIntentCapture)
+            }
             // The transaction COMMITTED: staged drafts are per-TUI-run UI state —
             // drop the unpinned ones now, never before (a failed create keeps
             // the current session and its drafts intact; in-flight submissions
@@ -1134,7 +1170,7 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
             runner.imageStore.clearUnpinned()
             runner.fileStore?.clearUnpinned()
             return { kind: 'success', text: 'started a fresh session' }
-          }, navigation)
+          }, navigation))
         } catch (error) {
           if (error instanceof SessionNavigationStopError) {
             // A stale capture is a locally SUPERSEDED navigation (another
@@ -1142,18 +1178,60 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
             // owns nothing — silent, exactly like the superseded create path.
             // A refused/unproven stop aborts BEFORE any child work; the message
             // already states whether the old Turn may have been stopped.
-            if (error.settlement === 'stale') return { kind: 'success' }
-            return { kind: 'error', text: `fresh session creation failed: ${error.message}` }
+            if (error.settlement === 'stale') return done({ kind: 'success' })
+            return done({ kind: 'error', text: `fresh session creation failed: ${error.message}` })
           }
-          if (isCancellation(error)) throw error
+          if (isCancellation(error) || runner.signal.aborted) throw error
           // The transition can THROW after the quiesce (a synchronous commit
           // seam): keep the phase fact in the user-visible failure instead of
           // letting the generic command path drop it.
-          return { kind: 'error', text: `${safeErrorMessage(error)}${stopNote()}` }
+          return done({ kind: 'error', text: `${safeErrorMessage(error)}${stopNote()}` })
         } finally {
           freshSessionInFlight = false
         }
-      },
+  }
+
+  /**
+   * The ONLY `/new` auto-recovery entry. A proven pre-create Host refusal may
+   * open the SAME full Workspace Browser read-only; the user must then choose a
+   * Folder and explicitly activate its `New session` (no create is dispatched
+   * here). The single-flight is already released by `startNewSession`'s own
+   * `finally` before this opens anything.
+   */
+  const runNewCommandWithRecovery = async (): Promise<CommandResult> => {
+    const settled = await startNewSession({ source: 'command' })
+    if (settled.kind === 'done') return settled.result
+    // A refusal whose captured subject is no longer current owns nothing: no
+    // error card and no Browser for a Session the user already left.
+    if (!runner.isSessionScopeCurrent(settled.subject) || runner.signal.aborted) return { kind: 'success' }
+    if (recoverableWorkspaceSelection(settled.failure).kind !== 'select-workspace') return settled.result
+    // A native renderer without a Session Browser presenter has no fallback:
+    // the original error text stays with the command's existing owner.
+    const piTuiMounted = (app as TuiApp | undefined) !== undefined
+    if (!piTuiMounted && runner.sessionBrowserPresentation === undefined) return settled.result
+    // This is the ONLY /new auto-Browse entry. No `addDirectory` and no
+    // initial-directory options: the sessionless chooser must keep its Folder
+    // click meaning, and the recovery is always the full tree.
+    const opened = await openSessionsBody({ rawInput: '' }, 'all')
+    if (opened.kind === 'error') {
+      // The Browser never opened: the command result stays the ONE visible
+      // owner, and it keeps BOTH facts (the recovery could not be presented and
+      // the original Host refusal) instead of silently dropping either.
+      const refusal = settled.result.kind === 'error' ? settled.result.text : ''
+      return refusal === undefined || refusal === ''
+        ? opened
+        : { kind: 'error', text: `${opened.text} — ${refusal}` }
+    }
+    const message = settled.result.kind === 'error' ? settled.result.text : undefined
+    if (message !== undefined && message !== '') notify(message, 'error')
+    return { kind: 'success' }
+  }
+
+  const registerNew = (): void => {
+    registerOne({
+      name: 'new',
+      description: 'Start a fresh session in this workspace',
+      handler: () => runNewCommandWithRecovery(),
     })
   }
 
@@ -1215,5 +1293,24 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     })
   }
 
-  return { registerSessions, registerNew, registerSearch, registerTitle, registerFork, registerRewind }
+  return {
+    registerSessions,
+    registerNew,
+    registerSearch,
+    registerTitle,
+    registerFork,
+    registerRewind,
+    // TSP-7 Welcome D: the argument-free UI entry over the SAME body.
+    openSessions: (scope: 'current' | 'all' | {
+      readonly scope?: 'current' | 'all'
+      readonly addDirectory?: boolean
+      readonly initialDirectoryEntry?: boolean
+      readonly initialDirectoryPath?: string
+      readonly initialQuery?: string
+      readonly directMatch?: boolean
+    } = 'current') => {
+      if (typeof scope === 'string') return openSessionsBody({ rawInput: '' }, scope)
+      return openSessionsBody({ rawInput: scope.initialQuery ?? '' }, scope)
+    },
+  }
 }

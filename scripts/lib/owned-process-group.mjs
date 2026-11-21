@@ -26,14 +26,14 @@
  *
  * IDENTITY. A numeric pgid is not an identity: once the leader has been reaped
  * its pid — and therefore the group id — can be reused. The escalation is
- * therefore gated on PROOF: either the leader itself (same `/proc` start time;
- * a not-yet-reaped zombie must also carry our ppid), or a WITNESS captured
- * while the leader was verifiable — a process in BOTH the group and the session
- * this wrapper created, whose `(pid, start time)` still matches at escalation
- * time. Leader reaping alone is neither authorization nor a veto. Where
- * `/proc` is unavailable no witness can be captured, so the escalation FAILS
- * CLOSED and the caller reports the unproven group (that is also the macOS
- * boundary).
+ * therefore gated on PROOF from the shared kernel-identity seam
+ * (`src/runtime/native-process/identity.ts`, the same source the footer
+ * consumes): either the leader itself is still the SAME kernel process, or a
+ * WITNESS captured while the leader was verifiable is still the same process in
+ * BOTH the group and the session this wrapper created. Leader reaping alone is
+ * neither authorization nor a veto; missing evidence fails closed and the
+ * caller reports the unproven group (macOS is no longer a fail-closed-only
+ * boundary: its libproc identity provides the same proof).
  *
  * POSIX ONLY. Windows has no process-group id to address, so the wrappers keep
  * their previous semantics there (forward to the direct child) and never call
@@ -42,7 +42,11 @@
  * @module scripts/lib/owned-process-group
  */
 
-import { readFileSync, readdirSync } from 'node:fs'
+import {
+  listKernelGroupMembers,
+  readKernelProcess,
+  sameKernelProcess,
+} from '../../src/runtime/native-process/identity.ts'
 
 /** How long the group may take to exit on the forwarded signal. */
 export const GROUP_SIGNAL_GRACE_MS = 2_000
@@ -57,78 +61,45 @@ const sleep = (ms) => new Promise((resolve) => {
   setTimeout(resolve, ms)
 })
 
-/**
- * The `/proc/<pid>/stat` facts this module needs, or undefined when the process
- * has no readable entry (already gone, or a platform without `/proc`).
- *
- * Fields are counted from the LAST `)`: the command name between `(` and that
- * `)` may contain spaces and parentheses, so the first field after it is the
- * state (field 3). `startTime` is field 22.
- */
-function procStats(pid) {
-  let stat
-  try {
-    stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
-  } catch {
-    return undefined
-  }
-  const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
-  return {
-    ppid: Number(fields[1]),
-    pgrp: Number(fields[2]),
-    session: Number(fields[3]),
-    startTime: fields[19],
-  }
-}
-
-/** Field 22: the pid-reuse discriminator. Undefined where `/proc` is absent. */
-function defaultStatStartTime(pid) {
-  return procStats(pid)?.startTime
-}
+/** The production kernel-identity source. Tests inject the same shape to make
+ * reuse/lost-evidence branches deterministic without manufacturing pid reuse. */
+const KERNEL_IDENTITY = Object.freeze({
+  read: readKernelProcess,
+  listGroupMembers: listKernelGroupMembers,
+  same: sameKernelProcess,
+})
 
 /**
  * Capture ownership witnesses for the group `pgid` while its leader is
- * verifiably ours.
+ * verifiably ours. A witness is a member of BOTH the process group and the
+ * session the wrapper created (`pgrp === session === pgid`), recorded as its
+ * full kernel identity. One surviving witness proves at escalation time that
+ * the numeric pgid still names THIS group: a group id that was freed and
+ * reused cannot contain the same kernel process again.
  *
- * A witness is a member of BOTH the process group and the session the wrapper
- * created (`pgrp === session === pgid`), recorded as `(pid, start time)`. One
- * surviving witness proves at escalation time that the numeric pgid still
- * names THIS group: a group id that was freed and reused cannot contain the
- * same process again.
- *
- * The capture is bracketed by the leader's identity — the leader must still be
- * the process whose start time was read before AND after the scan, or the scan
- * may have observed a different group that happened to carry the same id.
+ * An unverifiable scan yields no witness (undefined): witnesses are only ever
+ * captured from a scan the kernel identity seam could fully verify.
  */
-function defaultCaptureWitnesses(pgid, leaderStartTime) {
-  if (defaultStatStartTime(pgid) !== leaderStartTime) return undefined
-  let entries
-  try {
-    entries = readdirSync('/proc')
-  } catch {
-    return undefined
-  }
+function captureWitnesses(kernelIdentity, pgid) {
+  const listed = kernelIdentity.listGroupMembers(pgid)
+  if (!Array.isArray(listed)) return undefined
   const witnesses = []
-  for (const entry of entries) {
-    if (!/^\d+$/u.test(entry)) continue
-    const pid = Number(entry)
+  for (const observation of listed) {
+    if (observation.kind !== 'alive') continue
     // The leader's own identity is the primary proof, not a witness.
-    if (pid === pgid) continue
-    const stats = procStats(pid)
-    if (stats === undefined || stats.pgrp !== pgid || stats.session !== pgid) continue
-    witnesses.push({ pid, startTime: stats.startTime })
+    if (observation.identity.pid === pgid) continue
+    witnesses.push(observation.identity)
   }
-  if (defaultStatStartTime(pgid) !== leaderStartTime) return undefined
   return witnesses
 }
 
-/** Whether one captured witness still identifies a member of THIS group. */
-function witnessStillOwns(witness, pgid) {
-  const stats = procStats(witness.pid)
-  return stats !== undefined
-    && stats.startTime === witness.startTime
-    && stats.pgrp === pgid
-    && stats.session === pgid
+/** Whether one captured witness still identifies a member of THIS group and
+ * session, as the SAME kernel process (pid/starttime/boot/unique-id all match). */
+function witnessStillOwns(kernelIdentity, witness, pgid) {
+  const current = kernelIdentity.read(witness.pid)
+  if (current.kind !== 'alive') return false
+  if (current.identity.pgid !== pgid || current.identity.sid !== pgid) return false
+  return kernelIdentity.same(witness, current) === 'same'
 }
 
 /**
@@ -146,6 +117,13 @@ function groupAlive(pgid) {
     // failure names a member we cannot inspect, which is not the same fact.
     return error.code !== 'ESRCH'
   }
+}
+
+/** Every captured identity whose kernel process is still in this
+ * group+session; undefined when the evidence has expired. */
+function survivingWitnesses(kernelIdentity, witnesses, pgid) {
+  if (witnesses === undefined) return undefined
+  return witnesses.filter((witness) => witnessStillOwns(kernelIdentity, witness, pgid))
 }
 
 /**
@@ -187,13 +165,13 @@ async function waitUntilGone(pgid, deadlineMs) {
  * its own resources are quiesced.
  *
  * The escalation never SIGKILLs a group it cannot prove is still the one this
- * wrapper created. While the leader occupies its pid it is the primary proof
- * (same start time; a zombie must also carry our ppid). Once the leader has
- * been reaped its pid slot is free and the numeric pgid proves nothing, so a
- * WITNESS recorded while the leader was verifiable must still be a member of
- * the same group AND session. No witness, a different start time, or a member
- * that left the group/session fails closed: the caller reports the unproven
- * group instead of signalling a stranger's.
+ * wrapper created. While the unreaped ChildProcess handle owns the numeric
+ * pgid, the leader's kernel identity (and a witness scan) is captured. At
+ * escalation time the leader must still be the SAME kernel process, or a
+ * witness must still be the same process inside the same group+session. No
+ * witness, a different identity, an unverifiable read or a member that left the
+ * group/session fails closed: the caller reports the unproven group instead of
+ * signalling a stranger's.
  */
 export async function stopOwnedGroup(
   child,
@@ -201,14 +179,20 @@ export async function stopOwnedGroup(
   {
     graceMs = GROUP_SIGNAL_GRACE_MS,
     settleMs = GROUP_SETTLE_MS,
-    statStartTime = defaultStatStartTime,
-    captureWitnesses = defaultCaptureWitnesses,
+    kernelIdentity = KERNEL_IDENTITY,
   } = {},
 ) {
   const pgid = child.pid
   // A child that never spawned has no group, so there is nothing to wait for.
   if (pgid === undefined) return true
-  if (child.exitCode !== null || child.signalCode !== null) {
+  // Node has not reaped this child: its pid slot is still allocated, so the
+  // numeric group id is the one this wrapper created.
+  const leaderUnreaped = child.exitCode === null && child.signalCode === null
+  const observed = kernelIdentity.read(pgid)
+  const leader = leaderUnreaped && observed.kind === 'alive' && observed.identity.ppid === process.pid
+    ? observed.identity
+    : undefined
+  if (!leaderUnreaped && leader === undefined) {
     // The leader is already gone, so its pid slot — and therefore the group id
     // — may name a different group. NOTHING is signalled without proof, not
     // even the FIRST forwarded signal: a live ChildProcess is the only thing
@@ -219,27 +203,20 @@ export async function stopOwnedGroup(
   }
   // Captured while the leader is (normally) alive: the escalation needs this
   // identity, or a witness recorded under it.
-  const leaderStartTime = statStartTime(pgid)
-  const witnesses = leaderStartTime === undefined ? undefined : captureWitnesses(pgid, leaderStartTime)
+  const witnesses = leader === undefined ? undefined : captureWitnesses(kernelIdentity, pgid)
   signalGroup(pgid, signal)
   if (await waitUntilGone(pgid, graceMs)) return true
 
-  if (child.exitCode !== null || child.signalCode !== null) {
-    const current = statStartTime(pgid)
-    if (current !== undefined) {
-      // The leader still occupies its pid. It must be the SAME process: a
-      // different start time is a recycled pid, and a zombie must carry our
-      // ppid.
-      if (leaderStartTime === undefined || current !== leaderStartTime) return false
-      const stats = procStats(pgid)
-      if (stats !== undefined && stats.ppid !== process.pid) return false
-    } else if (witnesses === undefined || !witnesses.some((witness) => witnessStillOwns(witness, pgid))) {
-      // The leader slot is free, so the numeric pgid alone proves nothing and
-      // only a recorded witness can establish that this is still the group the
-      // wrapper created. Leader reaping is neither authorization nor a veto;
-      // missing evidence fails closed.
-      return false
-    }
+  const current = kernelIdentity.read(pgid)
+  const leaderStillOwns = leader !== undefined
+    && current.kind === 'alive'
+    && current.identity.ppid === process.pid
+    && kernelIdentity.same(leader, current) === 'same'
+  const witnessStillOwnsGroup = (survivingWitnesses(kernelIdentity, witnesses, pgid)?.length ?? 0) > 0
+  if (!leaderStillOwns && !witnessStillOwnsGroup) {
+    // Leader reaping is neither authorization nor a veto; missing evidence
+    // fails closed.
+    return false
   }
 
   signalGroup(pgid, 'SIGKILL')

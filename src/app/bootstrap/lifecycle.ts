@@ -77,6 +77,12 @@ export interface SurfaceLifecycleDeps {
   readonly surface: SurfaceTeardownOwner
   /** Abort every in-flight lifecycle load (the runner lifetime signal). */
   readonly abortLifecycle: () => void
+  /**
+   * M6 UX PR1: retire the Client-local exit-intent choice and abort any Stop
+   * wait. It runs before the renderer/app teardown so a pending idle wait can
+   * never outlive the surface or commit an exit into a dying Client.
+   */
+  readonly disposeExitIntent: () => void
   readonly disposeViewer: () => void
   readonly clearDraftImages: () => void
   readonly clearDraftFiles: () => void
@@ -84,6 +90,24 @@ export interface SurfaceLifecycleDeps {
   readonly cancelDeferredStatus: () => void
   readonly disposeFooterCommand: () => void
   readonly disposeLocalShell: () => void
+  /** Retire every in-flight terminal pasted-image read before the draft
+   *  stores are cleared: a stale read must never write a staged image or a
+   *  replacement token into a dying surface. */
+  readonly disposePastedImageIntake: () => void
+  /**
+   * H1: stop the Client-local Pane reporter's new status admission and hand its
+   * ordered `release-agent` to its own short-lived CLI queue. It runs BEFORE the
+   * mounted app dies and must never block or throw into the surface teardown.
+   */
+  readonly disposeHerdrReporter: () => void
+  /**
+   * H1: release the official Connection-generation subscription that
+   * re-establishes the ONE Remote progress watch after a transport rollover.
+   * It is an independent ordered teardown step: a throwing real unsubscribe
+   * must be recorded by the non-truncating batch, never escape a lifecycle
+   * abort listener as an uncaught failure.
+   */
+  readonly disposeRemoteProgressGeneration: () => void
   /** The memoized session-retirement coordinator (settles before the transport). */
   readonly retireOwnedSession: () => Promise<SessionRetirementReport>
   /** The selected runtime's transport disposer (awaited after the retirement). */
@@ -112,6 +136,14 @@ export interface SurfaceLifecycle {
   disposeSurface(): Promise<void> | void
   /** Register the fiber disposer: surface teardown, retirement, transport. */
   registerRunnerDisposal(): void
+  /**
+   * The TTY-release half of the ONE teardown: `'released'` only when the
+   * renderer release (and the acquisition stage) really settled, `'failed'`
+   * when it rejected, `undefined` before the teardown ran. A destructive Host
+   * stop reads this instead of inferring "the terminal is back" from the
+   * absence of an exception.
+   */
+  surfaceReleased(): 'released' | 'failed' | undefined
 }
 
 /**
@@ -126,6 +158,7 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
     markCleanedUp,
     surface,
     abortLifecycle,
+    disposeExitIntent,
     disposeViewer,
     clearDraftImages,
     clearDraftFiles,
@@ -133,6 +166,9 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
     cancelDeferredStatus,
     disposeFooterCommand,
     disposeLocalShell,
+    disposePastedImageIntake,
+    disposeHerdrReporter,
+    disposeRemoteProgressGeneration,
     retireOwnedSession,
     disposeSelectedTransport,
     registerDisposal,
@@ -154,6 +190,13 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
    * AND the batch failure that follows it.
    */
   let disposeRelease: Promise<void> | undefined
+  /**
+   * The TTY-release half of the teardown, tracked SEPARATELY from the batch
+   * failure: the confirmed whole-Host Stop is a destructive admin action that
+   * may only run after the terminal is proven restored, and a surface disposer
+   * that failed must not be confused with an unreleased terminal.
+   */
+  let rendererReleaseOutcome: 'released' | 'failed' | undefined
   const disposeSurface = (): Promise<void> | void => {
     // Already torn down: hand back the SAME transaction (never `void` — a
     // second caller must still await the tty restore and the batch failure).
@@ -204,6 +247,10 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
       // (the TUI's physical owner.lock / lease / cooling stack is removed
       // legacy).
       () => abortLifecycle(),
+      // M6 UX PR1: the Client-local Exit Choice and any in-flight Stop wait
+      // are retired BEFORE the presentation/app resources they would repaint
+      // or commit into.
+      () => disposeExitIntent(),
       // M3-5 PR2: tear the child viewer down FIRST among the presentation
       // resources — a mounted viewer owns a client child generation + live
       // ingress (Remote) and an in-flight open may own a retained generation.
@@ -211,6 +258,9 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
       // follows this step. Late-bound (`viewerRef`): a startup failure can run
       // this cleanup before the viewer owner exists (TDZ guard).
       () => disposeViewer(),
+      // The pasted-image intake retires BEFORE its draft store: a pending
+      // read must not stage bytes or replace a token after the stores go.
+      () => disposePastedImageIntake(),
       () => clearDraftImages(),
       () => clearDraftFiles(),
       // Abort any in-flight catalog refresh: its late result must never
@@ -239,6 +289,11 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
       () => surface.disposeJobEvents(),
       () => surface.disposeJobObservation(),
       () => surface.disposeTaskBrowser(),
+      // H1: stop new Pane-status admission BEFORE the mounted app dies, then
+      // leave the ordered `release-agent` to the reporter's own short-lived CLI
+      // queue (it never blocks the surface teardown).
+      () => disposeHerdrReporter(),
+      () => disposeRemoteProgressGeneration(),
       // The mounted TuiApp, the plugin keybinding sync, the theme-unload hook
       // and the extension surface bridge are released by their surface owner
       // (A4): the runner steps around this call release only what the runner
@@ -269,6 +324,12 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
       surface.whenRendererReleased(),
       whenRendererAcquired(),
     ]).then(() => undefined)
+    // The outcome slot only mirrors the published transaction, which every
+    // caller awaits; this observer never races or replaces it.
+    void release.then( // allowlist: mirror of the published transaction
+      () => { rendererReleaseOutcome = 'released' },
+      () => { rendererReleaseOutcome = 'failed' },
+    )
     const composed = !batchFailed
       ? release
       : release.then(
@@ -340,7 +401,10 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
     })
   }
 
-  return { disposeSurface, registerRunnerDisposal }
+  /** The TTY-release outcome of the ONE teardown, or `undefined` before it ran. */
+  const surfaceReleased = (): 'released' | 'failed' | undefined => rendererReleaseOutcome
+
+  return { disposeSurface, registerRunnerDisposal, surfaceReleased }
 }
 
 /**

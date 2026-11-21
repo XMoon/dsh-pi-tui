@@ -49,6 +49,19 @@ async function microtasks(): Promise<void> {
   for (let index = 0; index < 40; index += 1) await Promise.resolve()
 }
 
+/** The captured setTranscript values are published only after the surface's
+ * coalesced repaint; wait for that projection, then flush its real frame. */
+async function waitForPreviewState(vt: VirtualTerminal, ready: () => boolean, label: string): Promise<void> {
+  const deadline = Date.now() + 15_000
+  while (!ready()) {
+    if (Date.now() >= deadline) {
+      throw new Error(`the ${label} projection was not published:\n${vt.getViewport().join('\n')}`)
+    }
+    await vt.waitForRender()
+  }
+  await vt.waitForRender()
+}
+
 const JOB_WORKSPACE_MARK = 'Retained preview · not full history'
 const jobWorkspaceOpen = (rendered: string): boolean => rendered.includes(JOB_WORKSPACE_MARK)
 
@@ -466,7 +479,8 @@ test('the parent Preparing projection and child viewer lifecycle rollover stay l
   emitLiveStream(context, parentAgent, liveChunkFrame('p1', 0, {
     type: 'tool-call-delta', index: 0, id: '', name: 'edit', argumentsDelta: parentArguments,
   }))
-  await new Promise(resolve => setTimeout(resolve, 70))
+  await waitForPreviewState(vt, () => probe.capturedStreamingToolPreviews?.some(preview =>
+    preview.name === 'edit' && preview.summary === 'parent.ts') === true, 'parent streaming preview')
   await vt.waitForRender()
   assert.deepEqual(probe.capturedStreamingToolPreviews?.map(preview => [
     preview.callId, preview.name, preview.argumentBytes, preview.summary,
@@ -529,8 +543,9 @@ test('the parent Preparing projection and child viewer lifecycle rollover stay l
     type: 'chunk', attemptId: 'c2', revision: 3, index: 1,
     time: 1_700_000_026_101, chunk: { type: 'usage', usage: { inputTokens: 11, outputTokens: 3, totalTokens: 14 } },
   })
-  await new Promise(resolve => setTimeout(resolve, 70))
-  await vt.waitForRender()
+  await waitForPreviewState(vt, () =>
+    probe.capturedMessages?.some(message => message.kind === 'assistant' && message.text === 'follow-up live') === true,
+  'replacement viewer stream')
   assert.ok(probe.capturedMessages?.some(message => message.kind === 'assistant' && message.text === 'follow-up live'),
     'the replacement Agent must feed the still-open viewer immediately')
 
@@ -595,8 +610,8 @@ test('the parent Preparing projection and child viewer lifecycle rollover stay l
     block: { type: 'tool-call', id: 'parent-call-a', name: 'write' },
   }))
   emitLiveStream(context, parentAgent, liveCommittedEnd('p1', 4, 'assistant/message'))
-  await new Promise(resolve => setTimeout(resolve, 70))
-  await vt.waitForRender()
+  // The hidden main owner folds these events synchronously; Esc below reveals
+  // that exact preview map and the following frame is its visible sink.
 
   // Esc returns to the parent surface; its hidden map, not a reset map, is
   // projected and therefore contains the latest A plus the new B.
@@ -624,8 +639,6 @@ test('the parent Preparing projection and child viewer lifecycle rollover stay l
   context.emit('session/event', parent as never, event('turn/start', { turn: 2 }, 16))
   emitLiveStream(context, parentAgent, liveStart('p2', 2, 0))
   emitLiveStream(context, parentAgent, liveChunkFrame('p2', 0, { type: 'tool-call-delta', index: 0, id: 'parent-call-c', name: 'edit', argumentsDelta: '{' }))
-  await new Promise(resolve => setTimeout(resolve, 70))
-  await vt.waitForRender()
   context.emit('session/event', parent as never, event('tool/call', {
     turn: 2,
     step: 0,
@@ -633,8 +646,8 @@ test('the parent Preparing projection and child viewer lifecycle rollover stay l
     name: 'edit',
     arguments: '{}',
   }, 18))
-  await new Promise(resolve => setTimeout(resolve, 70))
-  await vt.waitForRender()
+  // Both live deltas and the materializing tool/call update the hidden main
+  // preview owner synchronously; the viewer-exit frame below samples its map.
   input('\x1b')
   await settle()
   await vt.waitForRender()
@@ -823,6 +836,8 @@ test('a Job detail opened from /tasks keeps its parent mounted and live-refreshe
   await settle()
   await vt.waitForRender()
   assert.equal(app.overlayGraphState().handles, 1, 'Esc must close only the Job detail')
+  input('j') // the retained terminal record is collapsed by default: open its history
+  await vt.waitForRender()
   assert.ok(view().includes('completed'),
     `the restored parent must show the live-refreshed job status:\n${view()}`)
 
@@ -1033,6 +1048,10 @@ test('Task Center membership follows the registry: settlement retains, removal d
   const app = probe.apps.at(-1)
   assert.ok(app, 'the production runner must create a TuiApp')
   const view = (): string => vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+  const input = (data: string): void => {
+    const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
+    tui.handleTerminalInput(data)
+  }
   const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
   assert.ok(tasksHandler, 'the real runner must register /tasks')
 
@@ -1044,10 +1063,13 @@ test('Task Center membership follows the registry: settlement retains, removal d
   assert.ok(view().includes('build'), `the running job row must be visible:\n${view()}`)
 
   // Retained settlement: the registry keeps the terminal record (a
-  // handed-out background job) — the row must STAY and show completed.
+  // handed-out background job) — the row must STAY and show completed once
+  // its (default-collapsed) history group is opened.
   jobs.setEntries([{ id: 'bash-1', kind: 'bash', label: 'build', status: 'completed', startedAt: 1 }])
   jobs.emit('settled')
   await settle()
+  await vt.waitForRender()
+  input('j')
   await vt.waitForRender()
   const settledView = view()
   assert.ok(settledView.includes('build'), `a retained settlement must keep the row:\n${settledView}`)
@@ -1304,13 +1326,26 @@ test('switching sessions tears down the Job status viewer with its Task Browser'
   await vt.waitForRender()
   assert.equal(app.overlayGraphState().handles, 1, 'the browser only (the Job is a SCREEN)')
   assert.equal(jobWorkspaceOpen(view()), true, 'the Job workspace owns the surface')
-  assert.ok(view().includes('Esc back'), `the Job workspace shows Esc back:\n${view()}`)
+  assert.ok(view().includes('Back [Esc]'), `the Job workspace shows its Back affordance:\n${view()}`)
 
+  // A fullscreen Session Workspace lease is mutually exclusive with the open
+  // Job workspace: `/resume` is refused and the Task Center stack survives.
+  const refused = await resume({ rawInput: sessionB.id }) as { kind: string; text?: string }
+  await vt.waitForRender()
+  assert.equal(refused.kind, 'error', 'a /resume while the Job workspace is leased is refused')
+  assert.match(refused.kind === 'error' ? refused.text ?? '' : '', /session workspace unavailable/u)
+  assert.equal(app.overlayGraphState().handles, 1, 'the refused switch keeps the Task Center stack')
+  assert.equal(jobWorkspaceOpen(view()), true, 'the refused switch keeps the Job workspace')
+
+  // Leave the Job workspace (the Task Browser is restored), then the SAME
+  // /resume switches and tears the stack down through the session-switch path.
+  input('\x1b')
+  await vt.waitForRender()
+  assert.ok(view().includes('↑↓ select'), `the Task Browser is restored:\n${view()}`)
   await resume({ rawInput: sessionB.id })
-  await settle()
   await vt.waitForRender()
   assert.equal(app.overlayGraphState().handles, 0, 'the whole Task Center stack is torn down')
-  assert.ok(!view().includes('Esc back'), `the old Job View must not survive the switch:\n${view()}`)
+  assert.ok(!view().includes('Back [Esc]'), `the old Job View must not survive the switch:\n${view()}`)
   // The BROWSER's own chrome is the discriminator: the new session's
   // first-party Task Quick accessory may legitimately paint the same fixture
   // roster label below the editor, so a bare label search can no longer tell
@@ -1686,7 +1721,6 @@ async function waitForParkedQuestionFooter(vt: VirtualTerminal): Promise<string>
     }
     await settle()
     await vt.waitForRender()
-    await new Promise(resolve => setTimeout(resolve, 20))
   }
 }
 
@@ -2297,15 +2331,17 @@ test('the Direct child viewer derives its display subject from SessionStatus(chi
   // A bounded wait for the coalesced runner commit + paint (a raw `settle()`
   // does not guarantee the transcript commit has been flushed).
   const waitForView = async (needle: string): Promise<void> => {
-    for (let attempt = 0; attempt < 120; attempt += 1) {
+    const deadline = Date.now() + 8_400
+    for (;;) {
       if (plain(vt.getViewport().join('\n')).includes(needle)) return
-      await new Promise(resolve => setTimeout(resolve, 50))
+      if (Date.now() >= deadline) {
+        assert.fail(`the viewport never rendered ${JSON.stringify(needle)}:\n${plain(vt.getViewport().join('\n'))}`)
+      }
       await vt.waitForRender()
     }
-    assert.fail(`the viewport never rendered ${JSON.stringify(needle)}:\n${plain(vt.getViewport().join('\n'))}`)
   }
-  // Growth driven ONLY by the shared working repaint (this loop flushes the
-  // terminal; it feeds no event and re-commits no transcript).
+  // Growth is driven ONLY by WorkingIndicator's real 500ms interval; keep a
+  // bounded 24 × 300ms observation cadence with no injected event.
   const waitForGrowth = async (previous: number): Promise<number> => {
     for (let attempt = 0; attempt < 24; attempt += 1) {
       await new Promise(resolve => setTimeout(resolve, 300))
@@ -2348,6 +2384,8 @@ test('the Direct child viewer derives its display subject from SessionStatus(chi
   const childFrozen = activitySeconds(vt.getViewport().join('\n'))
   assert.ok(childFrozen !== undefined && childFrozen >= childSilent && childFrozen <= childSilent + 2,
     `the child's boundary must freeze the value the user saw (${childSilent}s -> ${childFrozen}s):\n${childFrozenView}`)
+  // Observe beyond two 500ms WorkingIndicator intervals: a stale repaint must
+  // not advance the settled Activity after turn/end.
   await new Promise(resolve => setTimeout(resolve, 1_200))
   await vt.waitForRender()
   assert.equal(activitySeconds(vt.getViewport().join('\n')), childFrozen,
@@ -3246,7 +3284,8 @@ test('PERF (plan §5): the Direct compat read adds no perceptible refresh cost o
 // notice line — with a HOSTILE official label, and asserts on the RAW stream
 // the TUI writes to the terminal (never a `stripTerminalSequences()` shot).
 
-test('S-03 L6: the real /tasks Subagent interrupt admits through the session control admission and a hostile label never reaches the terminal stream', async (t) => {
+// Evidence level: L6 (the raw stream the TUI writes to the terminal).
+test('the real /tasks Subagent interrupt admits through the session control admission and a hostile label never reaches the terminal stream', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-task-interrupt-text-safety-')
   const previousHome = process.env.DSH_HOME
@@ -3327,8 +3366,8 @@ test('S-03 L6: the real /tasks Subagent interrupt admits through the session con
   // reached `ctx.subagents` with the exact durable parent/child authority.
   assert.deepEqual(interrupts, [{
     childSessionId: child.id,
-    authority: { kind: 'user', parentSessionId: parent.id },
-  }], 'the writer-admitted interrupt must name the exact durable parent/child authority')
+    authority: { kind: 'user' },
+  }], 'the writer-admitted rc.2 interrupt names the exact child; the viewer parent relation stays Client currentness')
   // The committed settlement produced the ONE transient notice from the RAW
   // official label (the draw-boundary projection of that notice is proven by
   // the dedicated Task Browser suite; here the full-screen `/tasks` overlay
@@ -3342,7 +3381,7 @@ test('S-03 L6: the real /tasks Subagent interrupt admits through the session con
   assert.ok(!stream.includes('UFdORUQ='), 'no Host clipboard payload reaches the terminal stream')
 })
 
-test('PRA-L6: Task Stop is admitted through the control barrier while a /new transition is frozen, and a superseded browser never dispatches again', async (t) => {
+test('Task Stop is admitted through the control barrier while a /new transition is frozen, and a superseded browser never dispatches again', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-pra-task-control-')
   const previousHome = process.env.DSH_HOME

@@ -9,7 +9,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { CURSOR_MARKER, TuiAltScreen, visibleWidth } from '@xmoon76/pi-tui'
+import { CURSOR_MARKER, stripTerminalSequences, Text, TuiAltScreen, visibleWidth } from '@xmoon76/pi-tui'
 import {
   SearchablePicker,
   type SearchablePickerTheme,
@@ -452,6 +452,19 @@ test('renders a hint footer when search is enabled', () => {
   assert.ok(rendered.some((line) => line.includes('Type to filter')), 'hint missing')
 })
 
+test('an external hint owner suppresses the inner footer without changing search or selection', () => {
+  const picker = new SearchablePicker([{ value: 'a', label: 'alpha' }], 5, testTheme, {}, {
+    enableSearch: true,
+    externalHint: true,
+    hint: 'Enter toggle · Esc back',
+  })
+  const rendered = picker.render(44)
+  assert.ok(rendered.some(line => line.includes('alpha')))
+  assert.ok(!rendered.some(line => /Enter toggle|Esc back|Type to filter/u.test(line)), 'the outer owner paints the sole footer')
+  picker.handleInput('alpha')
+  assert.equal(picker.getSelectedItem()?.value, 'a', 'the search keeps its ordinary selected item')
+})
+
 test('keeps the compact height without hints for inline usage', () => {
   const picker = new SearchablePicker([{ value: 'a', label: 'alpha' }], 5, testTheme)
   const rendered = picker.render(80)
@@ -654,6 +667,83 @@ test('wheel moves filtered selection (mouse parity)', () => {
   assert.equal(picker.getSelectedIndex(), 0, 'wheel down must wrap to the first item')
 })
 
+test('an effective wheel retires the pressed item so the old row cannot activate (mouse parity)', () => {
+  const activated: string[] = []
+  const selected: string[] = []
+  const picker = new SearchablePicker(plainItems, 5, testTheme, {}, { enableSearch: true })
+  picker.onSelect = (item) => { activated.push(item.value) }
+  picker.onSelectionChange = (item) => { selected.push(item.value) }
+  picker.render(80)
+  // Rows: 0=search, 1=blank, 2=alpha, 3=bravo, 4=charlie.
+  picker.handleMouse(mouse('press', 5, 2, 80, 10)) // press alpha
+  picker.handleMouse(mouse('wheel', 5, 2, 80, 10, 1)) // wheel down selects bravo
+  assert.equal(picker.getSelectedIndex(), 1, 'the wheel moved the selection to bravo')
+  assert.deepEqual(selected, ['b'], 'only the wheel navigation fires onSelectionChange')
+  picker.handleMouse(mouse('click', 5, 2, 80, 10)) // release/click the old alpha row
+  assert.deepEqual(activated, [], 'the retired press must not activate the old item')
+  // A fresh press on the same row is a NEW gesture and activates once.
+  picker.handleMouse(mouse('press', 5, 2, 80, 10))
+  picker.handleMouse(mouse('click', 5, 2, 80, 10))
+  assert.deepEqual(activated, ['a'], 'a fresh press/click activates the pressed value once')
+})
+
+test('a boundary wheel with no selection change still retires the press (mouse parity)', () => {
+  const activated: string[] = []
+  const picker = new SearchablePicker([{ value: 'only', label: 'only' }], 5, testTheme, {}, { enableSearch: true })
+  picker.onSelect = (item) => { activated.push(item.value) }
+  picker.render(80)
+  // Rows: 0=search, 1=blank, 2=only. A one-item wheel wraps onto itself: the
+  // selection is unchanged, but the event is still an effective navigation.
+  picker.handleMouse(mouse('press', 5, 2, 80, 10))
+  picker.handleMouse(mouse('wheel', 5, 2, 80, 10, 1))
+  assert.equal(picker.getSelectedIndex(), 0, 'a one-item list stays on its only row')
+  picker.handleMouse(mouse('click', 5, 2, 80, 10))
+  assert.deepEqual(activated, [], 'a boundary wheel still retires the unfinished press')
+})
+
+test('a wheel on inert picker chrome retires the pressed item (mouse parity)', () => {
+  const activated: string[] = []
+  const picker = new SearchablePicker(plainItems, 5, testTheme, {}, { enableSearch: true })
+  picker.onSelect = (item) => { activated.push(item.value) }
+  const rendered = picker.render(80)
+  const hintRow = rendered.findIndex(line => line.includes('navigate'))
+  assert.ok(hintRow >= 0, `the hint row must be painted:\n${rendered.join('\n')}`)
+  picker.handleMouse(mouse('press', 5, 2, 80, 10))
+  picker.handleMouse(mouse('wheel', 5, hintRow, 80, 10, 1))
+  picker.handleMouse(mouse('click', 5, 2, 80, 10))
+  assert.deepEqual(activated, [], 'the wheel gesture boundary applies before the hit lookup')
+})
+
+test('a zero-delta wheel changes nothing and keeps the pressed item (mouse parity)', () => {
+  const activated: string[] = []
+  const selected: string[] = []
+  const picker = new SearchablePicker(plainItems, 5, testTheme, {}, { enableSearch: true })
+  picker.onSelect = (item) => { activated.push(item.value) }
+  picker.onSelectionChange = (item) => { selected.push(item.value) }
+  picker.render(80)
+  picker.handleMouse(mouse('press', 5, 2, 80, 10))
+  assert.equal(picker.handleMouse(mouse('wheel', 5, 2, 80, 10, 0)), undefined, 'a zero-delta wheel is not a navigation')
+  assert.equal(picker.getSelectedIndex(), 0, 'the zero-delta wheel must not move the selection')
+  assert.deepEqual(selected, [], 'the zero-delta wheel must not fire a selection change')
+  picker.handleMouse(mouse('click', 5, 2, 80, 10))
+  assert.deepEqual(activated, ['a'], 'the unchanged press completes normally')
+})
+
+test('the owning surface can retire the pressed item at a foreign gesture boundary (mouse parity)', () => {
+  const activated: string[] = []
+  const picker = new SearchablePicker(plainItems, 5, testTheme, {}, { enableSearch: true })
+  picker.onSelect = (item) => { activated.push(item.value) }
+  picker.render(80)
+  picker.handleMouse(mouse('press', 5, 2, 80, 10))
+  picker.clearMousePress()
+  picker.handleMouse(mouse('click', 5, 2, 80, 10))
+  assert.deepEqual(activated, [], 'the retired press must not activate the old item')
+  // A fresh press/click remains the ordinary activation contract.
+  picker.handleMouse(mouse('press', 5, 2, 80, 10))
+  picker.handleMouse(mouse('click', 5, 2, 80, 10))
+  assert.deepEqual(activated, ['a'], 'a later fresh press/click still activates once')
+})
+
 test('search Input click repositions the search cursor (mouse parity)', () => {
   const picker = new SearchablePicker(plainItems, 5, testTheme, {}, { enableSearch: true })
   picker.render(80)
@@ -664,7 +754,9 @@ test('search Input click repositions the search cursor (mouse parity)', () => {
   const result = picker.handleMouse(mouse('press', 3, 0, 80, 10))
   assert.ok(result?.handled, 'press on the search row must be handled')
   picker.handleInput('X')
-  const rendered = picker.render(80).map(line => line.replace(/\x1b\[[0-9;]*m/gu, ''))
+  // The U1 fake cursor is a zero-width APC around the cursor cell; stripping
+  // only SGR would leave its marker inside the asserted text.
+  const rendered = picker.render(80).map(line => stripTerminalSequences(line))
   assert.ok(rendered.some(line => line.includes('aXb')), 'typing after the click must insert at the clicked filter column')
 })
 
@@ -683,6 +775,37 @@ test('tiny-budget sliced rows keep hit-map alignment (mouse parity)', () => {
   if (hintRow >= 0) {
     assert.equal(picker.handleMouse(mouse('press', 5, hintRow, 80, 4)), undefined, 'sliced hint must be inert')
   }
+})
+
+test('paintedSelectedItem is the read-only LAST-PAINT answer (Image View bar)', () => {
+  const picker = new SearchablePicker(
+    [{ value: 'v0', label: 'item 0' }, { value: 'v1', label: 'item 1' }],
+    2,
+    testTheme,
+    {},
+    { header: 'Images' },
+  )
+  picker.render(40)
+  assert.equal(picker.paintedSelectedItem()?.value, 'v0', 'the selected painted row is answered')
+  // The logical selection may move before the next paint; its OWN row is still
+  // painted, so the answer follows the live selection (the workspace's bar
+  // identity check separately rejects an old bar value).
+  picker.setSelectedIndex(1)
+  assert.equal(picker.paintedSelectedItem()?.value, 'v1')
+  picker.render(40)
+  // A selection that is in the CURRENT model but absent from the LAST paint
+  // (setItems without a repaint) is never a visible target.
+  picker.setItems([{ value: 'v9', label: 'item 9' }])
+  assert.equal(picker.paintedSelectedItem(), null, 'an unpainted selection is never a target')
+  picker.render(40)
+  assert.equal(picker.paintedSelectedItem()?.value, 'v9', 'the repainted selection is answered')
+  // No cursor (the owner cleared it): no row is the current action target even
+  // though rows stay painted and selectable.
+  picker.clearSelection()
+  assert.equal(picker.paintedSelectedItem(), null)
+  picker.setFilter('no-such-row')
+  picker.render(40)
+  assert.equal(picker.paintedSelectedItem(), null, 'a zero-match frame has no selected row')
 })
 
 test('delegated search press replaces the stale pressed value (mouse parity)', () => {
@@ -1057,4 +1180,35 @@ test('a custom multiline hint projects to ONE physical row', () => {
     assert.ok(visibleWidth(row) <= 80, `a hint row exceeds the grant: ${JSON.stringify(row)}`)
   }
   assert.ok(rows.some(row => row.includes('foo bar')), `the collapsed hint must render:\n${rows.join('\n')}`)
+})
+
+/**
+ * Reachability: the picker mounted as the FOCUSED COMPONENT (not an overlay)
+ * must keep PageDown/PageUp, exactly like the fork's SelectList. The capture
+ * comes from the focused picker, not from mounting it: the same key with no
+ * focused capturer still scrolls the transcript.
+ */
+test('a focused picker mounted as a component keeps page keys and the transcript stays fixed', async () => {
+  const terminal = new VirtualTerminal(40, 8)
+  const tui = new TuiAltScreen(terminal)
+  tui.addChild(new Text(Array.from({ length: 30 }, (_, index) => `line ${index + 1}`).join('\n'), 0, 0))
+  const items = Array.from({ length: 10 }, (_, index) => ({ value: `v${index}`, label: `item ${index}` }))
+  const picker = new SearchablePicker(items, 3, testTheme, {}, { enableSearch: false })
+  tui.addChild(picker)
+  tui.setFocus(picker)
+  tui.start()
+  await terminal.waitForRender()
+  const top = tui.viewportTop
+  const before = picker.getSelectedIndex()
+
+  terminal.sendInput('\x1b[6~')
+  await terminal.waitForRender()
+  assert.equal(picker.getSelectedIndex(), before + 3, 'PageDown advances the focused picker')
+  assert.equal(tui.viewportTop, top, 'the background transcript must not scroll')
+
+  tui.setFocus(null)
+  terminal.sendInput('\x1b[5~')
+  await terminal.waitForRender()
+  assert.ok(tui.viewportTop < top, 'without a focused capturer the same key still scrolls the transcript')
+  tui.stop()
 })

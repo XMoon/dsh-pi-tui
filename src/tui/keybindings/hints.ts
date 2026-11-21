@@ -82,6 +82,39 @@ export const DELIVERED_FILES_CHORDS = {
   copyPath: { keys: ['shift+c'], label: 'Shift+C' },
 } as const
 
+/**
+ * The PiTui Queue manager overlay's FIXED local chords (PR-Q).
+ *
+ * The panel is a per-surface COMPONENT contract, not a Host command: inside it
+ * `Enter` is edit/confirm, `d` opens the delete confirmation, `Ctrl+S` saves the
+ * local edit draft (it must never reach the global steer action) and `Esc` backs
+ * out one level. The table is the ONE machine definition both the panel's
+ * handler and its painted action bar consume.
+ */
+export const QUEUE_CHORDS = {
+  edit: { keys: ['enter'], label: 'Enter' },
+  remove: { keys: ['d'], label: 'D' },
+  save: { keys: ['ctrl+s'], label: 'Ctrl+S' },
+  cancel: { keys: ['escape'], label: 'Esc' },
+} as const
+
+/** One Queue manager local chord key. */
+export type QueueChordId = keyof typeof QUEUE_CHORDS
+
+/**
+ * The Session Workspace tree's FIXED local chord (PR2).
+ *
+ * The fullscreen PiTUI tree is a per-surface COMPONENT contract, not a Host
+ * command: Tab/Shift+Tab step between Workspace Folder titles and have no
+ * keymap action or remap. Keeping the handler and painted label in this ONE
+ * key-label authority means a footer hint and the admitted keys cannot drift
+ * into two authorities — the same category as the History/Delivered-files
+ * fixed chords.
+ */
+export const SESSION_WORKSPACE_CHORDS = {
+  folderCycle: { keys: ['tab', 'shift+tab'], label: 'Tab/Shift+Tab' },
+} as const
+
 /** The display name of a bare (unmodified) key id. */
 const BASE_KEY_LABELS: Record<string, string> = {
   enter: 'Enter',
@@ -163,6 +196,19 @@ export const TSP_VISUAL_CHORDS = {
   copy: 'alt+c',
 } as const satisfies Record<'select' | 'copy', KeyId>
 
+/**
+ * The TSP renderer's FIXED Session Search chord (T3-B1): the ONE machine
+ * definition that serves BOTH the raw-key dispatch and the painted label.
+ *
+ * Like the visual chords above it is a renderer-local chord with no Host action
+ * and no remap, so it can never come from `keyHint`/`keysFor` and can never go
+ * stale. Keeping the id HERE means the handler and the label are one authority.
+ */
+export const TSP_SEARCH_CHORD: KeyId = 'alt+shift+s'
+
+/** The label DERIVED from that one chord id (never a hand-written string). */
+export const TSP_SEARCH_CHORD_LABEL = formatKeyId(TSP_SEARCH_CHORD)
+
 /** The dock/notice labels DERIVED from the one chord table. */
 export const TSP_VISUAL_SELECT_LABEL = formatKeyId(TSP_VISUAL_CHORDS.select)
 export const TSP_VISUAL_COPY_LABEL = formatKeyId(TSP_VISUAL_CHORDS.copy)
@@ -201,6 +247,8 @@ export const SVG_VIEWER_CHORDS = {
   switchPage: { keys: ['tab'], label: viewerKeyLabel('tab') },
   /** Copy the RAW SVG source (available on both pages). */
   copy: { keys: ['c'], label: viewerKeyLabel('c') },
+  /** Retry the preview after a transient raster failure (recoverable errors only). */
+  retry: { keys: ['r'], label: viewerKeyLabel('r') },
   /** Close the Viewer and restore the transcript it was opened from. */
   close: { keys: ['escape'], label: viewerKeyLabel('escape') },
   scrollUp: { keys: ['up'], label: '↑' },

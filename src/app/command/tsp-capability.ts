@@ -23,16 +23,25 @@
  * The unconditional set is the exit pair plus the PR4-B2-A business builtins
  * whose ENTIRE outcome is carried by the existing business owner (Session
  * runtime, SessionWriter, permission writer, credential port, clipboard
- * policy) and needs no PiTui pane. Native Model, Preset and Session Browser
- * commands are admitted only when their mounted presenters are available, and
- * the Task Center family (`/tasks` + `/subagents`) only when the mounted
- * renderer's ONE Task Center capability is present; every other TUI builtin is
- * refused. `/logout` is the ONE input-shaped member: only its explicit-target
- * form is admitted (see the predicate).
+ * policy) and needs no PiTui pane. Native Model, Preset, ACP and Session
+ * Browser commands are admitted only when their mounted presenters are
+ * available, and the Task Center family (`/tasks` + `/subagents`) only when the
+ * mounted renderer's ONE Task Center capability is present; every other TUI
+ * builtin is refused. `/logout` is the ONE input-shaped member: only its
+ * explicit-target form is admitted (see the predicate).
  * @module @xmoon76/dsh-pi-tui/app/command/tsp-capability
  */
 
 import type { CommandLineClassification } from '../../domain/command/policy.ts'
+
+/**
+ * S5-PR3: the ONE fixed refusal copy for `/transcript` on a renderer that
+ * mounts no Client-local save dialog. The typed handler never runs on the TSP
+ * renderer (the pre-admission below refuses every PiTui-only builtin), so the
+ * TSP admission emits the SAME copy the handler would return; keeping one
+ * constant prevents the pre-admission and the handler text from drifting.
+ */
+export const TRANSCRIPT_SAVE_UNAVAILABLE_TEXT = 'transcript file save is unavailable on this renderer'
 
 /**
  * The TUI builtins the TSP renderer can execute without any PiTui chrome.
@@ -94,6 +103,9 @@ export const TSP_B2A_RESULT_NOTICE_COMMANDS: ReadonlySet<string> = new Set([
   // Remote Client command registry appends no result card. Membership here is
   // notice ownership only — this set is never a routing authority.
   'reload-client',
+  // PR-Q: an unavailable queue sheet returns a real error result; on the
+  // card-less route this set is its ONLY visible owner.
+  'queue',
 ])
 
 /**
@@ -112,6 +124,14 @@ export interface TspBuiltinPickers {
   readonly presetPicker?: boolean
   readonly sessionBrowser?: boolean
   /**
+   * PO-5E: the mounted renderer installed the native `/acp` picker (ONE
+   * `ui.picker` + ONE read-only Details overlay). `/acp` is a Split-Client
+   * runtime control whose ONLY UI is that presenter, so an unnegotiated pane
+   * must refuse it before the handler — never run a handler that would open a
+   * page the client cannot present.
+   */
+  readonly acpPicker?: boolean
+  /**
    * B3-A3: the mounted renderer's ONE Task Center reachability truth
    * (`SurfaceDisplaySeam.supportsTaskCenter`). The `/tasks` + `/subagents`
    * family runs the EXISTING registered handler into the EXISTING
@@ -119,6 +139,9 @@ export interface TspBuiltinPickers {
    * second renderer state.
    */
   readonly taskCenter?: boolean
+  /** PR-Q: the mounted renderer really installed the native Queue manager
+   *  sheet (picker + overlay + editor + button/row kinds negotiated). */
+  readonly queueManager?: boolean
 }
 
 /**
@@ -169,6 +192,26 @@ export function tspBuiltinAvailability(
     // must branch on this kind — it is the family decision, made once here.
     return { kind: 'not-a-tui-builtin' }
   }
+  return tspSelectedTuiBuiltinAvailability(name, pickers, rawInput)
+}
+
+/**
+ * TSP I-C: the family-decided half of {@link tspBuiltinAvailability}, exposed
+ * for a caller that already established the `client-command` + `source: 'tui'`
+ * winner somewhere else. Slash candidates are screened by the command
+ * authority BEFORE they reach the renderer, and a candidate row is a bare
+ * command NAME with no parsed line behind it — so that caller passes the empty
+ * `rawInput`, which is exactly why bare `/logout` is never offered.
+ *
+ * Same rule, same answers, one implementation: it never decides whether a name
+ * IS a TUI builtin, never consults a Host claim, the command catalog or a
+ * registry, and never admits an execution result.
+ */
+export function tspSelectedTuiBuiltinAvailability(
+  name: string,
+  pickers: TspBuiltinPickers,
+  rawInput: string,
+): TspBuiltinAvailability {
   if (TSP_SUPPORTED_TUI_BUILTINS.has(name)) return { kind: 'available' }
   if (name === 'logout') {
     // The ONE input-shaped member: `/logout <target>` runs the unchanged
@@ -184,8 +227,10 @@ export function tspBuiltinAvailability(
     // pane refuses the command instead of mounting an unreadable Hub.
     return pickers.taskCenter === true ? { kind: 'available' } : { kind: 'unsupported' }
   }
+  if (name === 'queue') return pickers.queueManager === true ? { kind: 'available' } : { kind: 'unsupported' }
   return (name === 'model' && pickers.modelPicker === true)
     || (name === 'preset' && pickers.presetPicker === true)
+    || (name === 'acp' && pickers.acpPicker === true)
     || ((name === 'sessions' || name === 'resume' || name === 'search') && pickers.sessionBrowser === true)
     ? { kind: 'available' }
     : { kind: 'unsupported' }

@@ -48,7 +48,7 @@ import { createDirectSettingsFixture } from '../support/direct-settings-fixture.
 import { parseUserKeybindings } from '../../src/tui/keybindings/config.ts'
 import { waitForFrame } from '../support/frame-wait.ts'
 import { themePickerRows } from '../../src/app/surface/theme-selection.ts'
-import type { CredentialProviderOption, TuiSettingsDoc, VisualToolsState } from '../../src/runtime/config-port.ts'
+import type { CredentialProviderOption, ExtensionConfigsConfig, TuiSettingsDoc, VisualToolsState, WebStartupPreferenceState, BackendStartupPreferenceState, PublicBackendValue } from '../../src/runtime/config-port.ts'
 import { serializeTuiSettingsMutation } from '../../src/runtime/config-port.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -107,6 +107,11 @@ interface HarnessOptions {
    *  drives the production `/settings` handler, or supplies the same instance
    *  the extension service owns. */
   settingsRegistry?: SettingsRegistry
+  /** R8-E PR-4: exact owner→Loader-entry mapping + current Client phases. */
+  ownerEntryIds?: Map<string, string>
+  clientObservations?: readonly { packageName: string; phase: string; entryId?: string; configRevision?: number }[]
+  /** R8-E PR-4: the Host per-package Config authority the persisted rows read. */
+  extensionConfigs?: ExtensionConfigsConfig
   /** The live clipboard strategy; a promise lets a case hold the settlement. */
   copySelection?: (text: string) => Promise<boolean>
   /** Real provider options the Models page reads. Supplying them enables the
@@ -130,7 +135,7 @@ interface HarnessOptions {
   tuiSettings?: { get(): TuiSettingsDoc; replace(doc: TuiSettingsDoc): unknown }
   /**
    * Build a minimal Plugin page when the Settings Plugins entry activates it
-   * (S4-D2 / D2-0): lets a visual case prove that a frame with no painted
+   * (the optional-bundle visual case): lets a visual case prove that a frame with no painted
    * affordance can never dispatch the entry.
    */
   pluginPage?: boolean
@@ -159,6 +164,18 @@ interface HarnessOptions {
   /** An external writer commits this enabled value (and bumps the revision)
    *  just before the next switch write: the decision is then stale. */
   visualToolsExternalChange?: boolean
+  /** M5-W PR-C: the profile-owned Web startup preference the ConfigPort reads. */
+  webStartupPreference?: WebStartupPreferenceState
+  /** The Web startup preference section is absent/unreadable. */
+  webStartupUnavailable?: boolean
+  /** Make `setAutoStart` reject with this reason (a refused Host write). */
+  webStartupWriteFailure?: string
+  /** M6-2A A5: the profile-owned startup backend the ConfigPort reads. */
+  backendStartupPreference?: BackendStartupPreferenceState
+  /** The startup backend section is absent/unreadable. */
+  backendStartupUnavailable?: boolean
+  /** Make `setBackend` reject with this reason (a refused Host write). */
+  backendStartupWriteFailure?: string
   /**
    * Compose a LIVE main Session for the About page: the exact seams the real
    * `/settings` command injects (`captureLiveSessionScope` / scope currency /
@@ -181,7 +198,7 @@ interface HarnessOptions {
    * value lives on the object handed in, so a case can prove the downstream
    * effect on the SAME instance the production seam consumes (never on a UI
    * copy): the session approval override, the Host permission default, the
-   * official subagent model-selection section and the official model directory.
+   * typed Subagent limits and model-selection sections, and the official model directory.
    */
   agent?: {
     /** The live session scope the workspace pins (absent = sessionless). */
@@ -192,6 +209,17 @@ interface HarnessOptions {
     readonly approvalAvailable?: boolean
     /** The official per-session approval override the service really holds. */
     readonly approval?: { value: 'ask' | 'never' | undefined }
+    /** M6-1 F8: the opaque Connection generation token the write chain binds
+     *  the ACK/readback to (a new object simulates a rollover). */
+    readonly policyGeneration?: object
+    /** Flip `policyGeneration` to a NEW object right after the write is
+     *  admitted (the generation-rollover race). */
+    readonly changeGenerationOnWrite?: boolean
+    /** The mutable generation slot the fake runner reads. */
+    readonly generation?: { value: object | undefined }
+    /** M6-1 F8: hold the initial Host policy read until the case releases it
+     *  (the real asynchronous first frame: the panel paints Checking… first). */
+    readonly deferPolicyRead?: boolean
     /** The Host permission roster, in Host order. */
     readonly permissionNames?: readonly string[]
     /** The Host's effective default for new sessions. */
@@ -201,16 +229,19 @@ interface HarnessOptions {
       enabled: boolean
       allowedModels: { provider: string; model: string }[]
     }
+    /** The official delegation limits section (absent = ready with defaults). */
+    readonly limits?: {
+      maxDepth: number
+      maxActiveSubagents: number
+    }
     /**
      * Hold every official subagent section write until the returned promise
      * settles: the ONLY way a case can observe a real in-flight section write
-     * (the production queue serializes on it).
+     * (the controller's Save latch owns it).
      */
     readonly gateSectionWrite?: () => Promise<void>
-    /** Make the official section's `get()` throw while `available()` stays
-     *  true: the READY-backend unreadable case, distinct from a non-current
-     *  backend. */
-    readonly getFailure?: () => string | undefined
+    /** Return an unreadable Selection read while its typed port remains mounted. */
+    readonly readFailure?: () => string | undefined
     /** The official grouped model directory the allowlist picker reads. */
     readonly directory?: readonly {
       readonly id: string
@@ -218,6 +249,29 @@ interface HarnessOptions {
       readonly models: readonly { readonly id: string; readonly name?: string }[]
     }[]
   }
+  /** FR5-B: the official Agent-loop section (absent = unavailable). */
+  agentLoop?: { readonly maxParallelToolCalls: number; readonly inherited?: number; readonly unreadable?: boolean }
+  /** Make the Agent-loop mutation reject with this reason. */
+  agentLoopWriteFailure?: string
+  /** FR5-B: the ACTIVE Host shell executor row (absent = unavailable). */
+  shellExecution?: {
+    readonly executor: 'bash' | 'pwsh'
+    readonly timeoutMs: number
+    readonly maxOutputBytes: number
+    readonly inheritedTimeoutMs?: number
+    readonly inheritedMaxOutputBytes?: number
+    readonly unreadable?: boolean
+  }
+  /** Make the shell-execution mutation reject with this reason. */
+  shellExecutionWriteFailure?: string
+  /** FR5-B: the official session-log contributor (absent = row hidden). */
+  sessionLog?: { readonly enabled: boolean; readonly inherited?: boolean; readonly unreadable?: boolean }
+  /** Make the session-log mutation reject with this reason. */
+  sessionLogWriteFailure?: string
+  /** Return `outcome-unconfirmed` after dispatch (a lost ACK). */
+  sessionLogUnconfirmed?: boolean
+  /** Accept the write but do NOT apply it (a fresh readback disagrees). */
+  sessionLogIgnoreWrite?: boolean
   /** The icon style the REAL `TuiApp` starts with (the composition's persisted
    *  read). Omitted = the app's own default. */
   iconStyle?: 'emoji' | 'symbols' | 'minimal'
@@ -281,6 +335,11 @@ class FakeEmbeddedPluginPage implements EmbeddedPluginPage {
   gestureRevision(): number {
     return this.viewRevision
   }
+  /** Test-only: advance the page's OWN semantic identity while its painted bar
+   *  (and therefore every cell) stays identical. */
+  bumpGestureIdentity(): void {
+    this.viewRevision += 1
+  }
 
   semanticGeneration(): number {
     return this.viewRevision
@@ -317,8 +376,21 @@ class FakeEmbeddedPluginPage implements EmbeddedPluginPage {
         lines.push((index === 0 ? 'PLUGIN PAGE' : '').padEnd(Math.max(1, width)))
       }
     }
-    lines.push(color.textMuted('PLUGIN BAR'.padEnd(Math.max(1, viewport.width))))
+    // PR2: the page's local last row carries its ONE real Esc affordance and
+    // publishes the COMPLETE span for the Settings root's physical hit.
+    const barText = 'PLUGIN BAR · Back [Esc]'
+    if (viewport.width >= barText.length) {
+      this.escapeSpan = { startCol: 'PLUGIN BAR · '.length, endCol: barText.length }
+    } else {
+      this.escapeSpan = undefined
+    }
+    lines.push(color.textMuted(barText.slice(0, viewport.width).padEnd(Math.max(1, viewport.width))))
     return lines
+  }
+  private escapeSpan: { readonly startCol: number; readonly endCol: number } | undefined
+  /** The complete visible Esc affordance span of the LAST rendered row. */
+  paintedEscapeSpan(): { readonly startCol: number; readonly endCol: number } | undefined {
+    return this.escapeSpan
   }
   invalidate(): void {}
   handleInput(data: string): void {
@@ -328,6 +400,13 @@ class FakeEmbeddedPluginPage implements EmbeddedPluginPage {
   onCellPress(): void {}
   onCellClick(): void {}
   dispose(): void { this.disposed = true }
+}
+
+/** ONE staged field intent the FR5-B fake Host ports observed. */
+type HostSectionWrite = {
+  readonly field: 'maxParallelToolCalls' | 'timeoutMs' | 'maxOutputBytes' | 'enabled'
+  readonly op: 'set' | 'reset'
+  readonly value?: number | boolean
 }
 
 interface Harness {
@@ -372,6 +451,10 @@ interface Harness {
   readonly visualWrites: () => readonly boolean[]
   /** The current fake Host state the ConfigPort reads. */
   readonly visualState: () => VisualToolsState | undefined
+  /** Every `webStartupPreference.setAutoStart` value the UI dispatched. */
+  readonly webAutoStartWrites: () => readonly boolean[]
+  /** Every `backendStartupPreference.setBackend` value the UI dispatched. */
+  readonly backendStartupWrites: () => readonly PublicBackendValue[]
   /** Every byte the app wrote to the terminal (the raw write sink). */
   readonly writes: () => readonly string[]
   /** Run every owned task the harness is holding (`holdOwned`). */
@@ -386,6 +469,30 @@ interface Harness {
   readonly agent: NonNullable<HarnessOptions['agent']>
   /** Every official subagent section write, in dispatch order. */
   readonly subagentWrites: () => readonly { enabled: boolean; allowedModels: readonly { provider: string; model: string }[] }[]
+  /** Every official delegation-limits write, in dispatch order. */
+  readonly subagentLimitsWrites: () => readonly { maxDepth?: number; maxActiveSubagents?: number }[]
+  /** FR5-B: every Agent-loop field write, in dispatch order. */
+  readonly agentLoopWrites: () => readonly HostSectionWrite[]
+  /** FR5-B: every active-shell field write, in dispatch order. */
+  readonly shellExecutionWrites: () => readonly HostSectionWrite[]
+  /** FR5-B: every session-log field write, in dispatch order. */
+  readonly sessionLogWrites: () => readonly HostSectionWrite[]
+  /** Advance the fake session-log revision without a write (an external edit). */
+  readonly advanceSessionLogRevision: () => void
+  /** Replace the fake session-log Host generation while keeping its revision. */
+  readonly replaceSessionLogGeneration: () => void
+  /** FR5-B: the LIVE fake section values the ports currently serve. */
+  readonly hostSections: () => {
+    readonly agentLoop: { readonly maxParallelToolCalls: number; readonly inherited: number } | undefined
+    readonly shell: {
+      readonly executor: 'bash' | 'pwsh'
+      readonly timeoutMs: number
+      readonly maxOutputBytes: number
+      readonly inheritedTimeoutMs: number
+      readonly inheritedMaxOutputBytes: number
+    } | undefined
+    readonly sessionLog: { readonly enabled: boolean; readonly inherited: boolean } | undefined
+  }
   /** Every Host permission-default write, in dispatch order. */
   readonly permissionWrites: () => readonly string[]
   /** The LIVE official subagent section the harness's seam serves. */
@@ -398,6 +505,12 @@ interface Harness {
   readonly firstWriteStarted: () => Promise<void>
   /** Release the held first document write. */
   readonly releaseFirstReplace: () => void
+  /** M6-1 F8: settle the deferred initial Host policy read. */
+  readonly releasePolicyRead: () => void
+  /** M6-1 F8: explicit `policy.refresh()` calls (double-read witness). */
+  readonly policyRefreshCalls: () => number
+  /** M6-1 F8: revoke the policy truth (Connection generation/subject change). */
+  readonly revokePolicyRead: () => void
   readonly dispose: () => void
 }
 
@@ -405,7 +518,7 @@ interface Harness {
  *  conditional `Extensions` category is appended only while the extension
  *  settings registry has live rows, so a case that needs it walks by label. */
 const CATEGORY_ORDER = [
-  'About', 'Models', 'Account', 'Agent', 'Appearance',
+  'About', 'General', 'Models', 'Account', 'Agent', 'Appearance',
   'Conversation', 'Input & Terminal', 'Tools', 'Plugins',
 ]
 
@@ -414,7 +527,7 @@ const CATEGORY_ORDER = [
  *  the rail's own labels are the witness. */
 const railVisible = (vt: VirtualTerminal): boolean =>
   vt.getViewport().map(stripTerminalSequences)
-    .some(line => /^(?:> | {2})(?:About|Models|Account|Agent|Appearance|Conversation|Input & Terminal|Tools|Plugins|Extensions)(?: {2,}|\s*$)/u.test(line))
+    .some(line => /^(?:> | {2})(?:About|General|Models|Account|Agent|Appearance|Conversation|Input & Terminal|Tools|Plugins|Extensions)(?: {2,}|\s*$)/u.test(line))
 
 function setup(options: HarnessOptions = {}): Harness {
   const columns = options.columns ?? 120
@@ -432,6 +545,14 @@ function setup(options: HarnessOptions = {}): Harness {
   let pluginPages = 0
   const pluginPageInstances: FakeEmbeddedPluginPage[] = []
   const visualWrites: boolean[] = []
+  const webAutoStartWrites: boolean[] = []
+  let webStartupState: WebStartupPreferenceState | undefined = options.webStartupUnavailable === true
+    ? undefined
+    : options.webStartupPreference ?? { autoStart: false, revision: 1, userOverridden: false }
+  const backendStartupWrites: PublicBackendValue[] = []
+  let backendStartupState: BackendStartupPreferenceState | undefined = options.backendStartupUnavailable === true
+    ? undefined
+    : options.backendStartupPreference ?? { backend: 'direct', revision: 1, userOverridden: false }
   /** The LIVE backend readiness the ConfigPort answers (a case can move it). */
   let readiness = options.readiness ?? 'ready'
   let externalVisualChange = options.visualToolsExternalChange
@@ -444,8 +565,103 @@ function setup(options: HarnessOptions = {}): Harness {
   // the exact instance the production consumer would read.
   const agent = options.agent ?? {}
   const subagentWrites: { enabled: boolean; allowedModels: { provider: string; model: string }[] }[] = []
+  const subagentLimitsWrites: { maxDepth?: number; maxActiveSubagents?: number }[] = []
+  const limitsGeneration = {}
+  let limitsRevision = 1
+  let subagentLimits = { maxDepth: agent.limits?.maxDepth ?? 1, maxActiveSubagents: agent.limits?.maxActiveSubagents ?? 8 }
+  const limitsBase = { maxDepth: 1, maxActiveSubagents: 8 }
+  // FR5-B: the official Agent-loop, active-shell and session-log sections. A
+  // section the case does not supply is genuinely absent (no fabricated default).
+  const agentLoopGeneration = {}
+  let agentLoopRevision = 1
+  let agentLoopValue: { maxParallelToolCalls: number; inherited: number; unreadable?: boolean } | undefined =
+    options.agentLoop === undefined ? undefined : {
+      maxParallelToolCalls: options.agentLoop.maxParallelToolCalls,
+      inherited: options.agentLoop.inherited ?? options.agentLoop.maxParallelToolCalls,
+      ...(options.agentLoop.unreadable === true ? { unreadable: true } : {}),
+    }
+  const agentLoopWrites: HostSectionWrite[] = []
+  const shellGeneration = {}
+  let shellRevision = 1
+  let shellValue: {
+    executor: 'bash' | 'pwsh'
+    timeoutMs: number
+    maxOutputBytes: number
+    inheritedTimeoutMs: number
+    inheritedMaxOutputBytes: number
+    unreadable?: boolean
+  } | undefined = options.shellExecution === undefined ? undefined : {
+    executor: options.shellExecution.executor,
+    timeoutMs: options.shellExecution.timeoutMs,
+    maxOutputBytes: options.shellExecution.maxOutputBytes,
+    inheritedTimeoutMs: options.shellExecution.inheritedTimeoutMs ?? options.shellExecution.timeoutMs,
+    inheritedMaxOutputBytes: options.shellExecution.inheritedMaxOutputBytes ?? options.shellExecution.maxOutputBytes,
+    ...(options.shellExecution.unreadable === true ? { unreadable: true } : {}),
+  }
+  const shellExecutionWrites: HostSectionWrite[] = []
+  let sessionLogGeneration: object = {}
+  let sessionLogRevision = 1
+  let sessionLogValue: { enabled: boolean; inherited: boolean; unreadable?: boolean } | undefined =
+    options.sessionLog === undefined ? undefined : {
+      enabled: options.sessionLog.enabled,
+      inherited: options.sessionLog.inherited ?? options.sessionLog.enabled,
+      ...(options.sessionLog.unreadable === true ? { unreadable: true } : {}),
+    }
+  const sessionLogWrites: HostSectionWrite[] = []
   const permissionWrites: string[] = []
   const approvalState = agent.approval ?? { value: undefined as 'ask' | 'never' | undefined }
+  const policyGenerationSlot = agent.generation ?? { value: agent.policyGeneration ?? {} }
+  const policyListeners = new Set<(event: 'committed' | 'invalidated') => void>()
+  let policyRefreshCalls = 0
+  let policyReadSettled = agent.deferPolicyRead !== true
+  let releaseDeferredPolicyRead: (() => void) | undefined
+  let policyReadGate: Promise<void> | undefined
+  const notifyPolicyListeners = (event: 'committed' | 'invalidated'): void => {
+    for (const listener of [...policyListeners]) listener(event)
+  }
+  const beginDeferredPolicyRead = (): void => {
+    if (policyReadGate !== undefined) return
+    policyReadGate = new Promise<void>(resolve => { releaseDeferredPolicyRead = resolve })
+    // The production observation starts a controlled read from the display
+    // path; the fake mirrors it so a revocation + repaint starts the new read.
+    void policyReadGate.then(() => {
+      policyReadGate = undefined
+      if (policyReadSettled) return
+      policyReadSettled = true
+      notifyPolicyListeners('committed')
+    })
+  }
+  const policySnapshot = (sessionId: string): unknown => {
+    if (sessionId !== agent.sessionId) return { kind: 'checking' }
+    if (!policyReadSettled) {
+      if (agent.deferPolicyRead === true) beginDeferredPolicyRead()
+      return { kind: 'checking' }
+    }
+    if (agent.approvalAvailable === false) {
+      return {
+        kind: 'ready',
+        read: {
+          kind: 'ready',
+          sessionId,
+          approval: { state: 'unavailable', reason: 'service-not-installed' },
+          sandbox: { state: 'ready', effective: 'workspace-write' },
+        },
+      }
+    }
+    return {
+      kind: 'ready',
+      read: {
+        kind: 'ready',
+        sessionId,
+        approval: approvalState.value === undefined
+          ? { state: 'ready', effective: 'ask' }
+          : { state: 'ready', effective: approvalState.value, override: approvalState.value },
+        sandbox: { state: 'ready', effective: 'workspace-write' },
+      },
+    }
+  }
+  const subagentGeneration = limitsGeneration
+  let subagentRevision = 1
   let subagentSection = agent.subagent === undefined
     ? undefined
     : { enabled: agent.subagent.enabled, allowedModels: agent.subagent.allowedModels.map(route => ({ ...route })) }
@@ -624,18 +840,37 @@ function setup(options: HarnessOptions = {}): Harness {
       return true
     },
     refreshStatus: () => { calls.push('refreshStatus') },
-    // C2-R3: the official per-session approval override, read and written on
-    // the SAME captured scope. A stale scope is refused exactly like the
-    // production surface facade does.
-    currentApprovalOverride: (scope: { sessionId: string }) => {
-      if (!(agent.scopeCurrent?.() ?? true)) return undefined
-      return approvalState.value
+    // M6-1 F8: the ONE session-policy observation + the transport-neutral
+    // async exact-session write, on the SAME captured scope. The observation
+    // answers the pinned session's proven facts; a stale scope is refused
+    // before any dispatch, exactly like the production facade.
+    policy: {
+      readSnapshot: policySnapshot,
+      refresh: async (sessionId: string) => {
+        policyRefreshCalls += 1
+        if (agent.deferPolicyRead === true && !policyReadSettled) {
+          beginDeferredPolicyRead()
+          await policyReadGate
+        }
+        return policySnapshot(sessionId) as never
+      },
+      invalidate: () => {
+        policyReadSettled = false
+        notifyPolicyListeners('invalidated')
+      },
+      subscribe: (listener: (event: 'committed' | 'invalidated') => void) => {
+        policyListeners.add(listener)
+        return () => { policyListeners.delete(listener) }
+      },
+      dispose: () => { policyListeners.clear() },
     },
-    setSessionApprovalPolicy: (scope: { sessionId: string }, value: 'ask' | 'never') => {
+    sessionPolicyGeneration: () => policyGenerationSlot.value,
+    setSessionApprovalPolicy: async (scope: { sessionId: string }, value: 'ask' | 'never') => {
       calls.push(`approval:${scope.sessionId}:${value}`)
-      if (!(agent.scopeCurrent?.() ?? true)) return 'superseded'
+      if (!(agent.scopeCurrent?.() ?? true)) return { ownership: 'superseded' as const, outcome: undefined }
       approvalState.value = value
-      return 'applied'
+      if (agent.changeGenerationOnWrite === true) policyGenerationSlot.value = {}
+      return { ownership: 'current' as const, outcome: { kind: 'applied' as const, sessionId: scope.sessionId } }
     },
     tuiSettings: options.settingsService === false
       ? undefined
@@ -672,7 +907,13 @@ function setup(options: HarnessOptions = {}): Harness {
     // every snapshot; the registry here is the real in-process owner.
     extensions: options.themes === undefined && options.settingsRegistry === undefined
       ? undefined
-      : { themes: options.themes ?? new ThemeRegistry(), settings: options.settingsRegistry ?? new SettingsRegistry() },
+      : {
+          themes: options.themes ?? new ThemeRegistry(),
+          settings: options.settingsRegistry ?? new SettingsRegistry(),
+          ...(options.ownerEntryIds === undefined ? {} : { ownerEntryIds: () => options.ownerEntryIds! }),
+          ...(options.clientObservations === undefined ? {} : { clientObservations: () => options.clientObservations! }),
+          ...(options.extensionConfigs === undefined ? {} : { refreshClientExtensions: () => {} }),
+        },
     createPluginManagerPage: (onYieldNavigation: () => void) => {
       if (options.pluginPage !== true) return undefined
       pluginPages += 1
@@ -681,6 +922,7 @@ function setup(options: HarnessOptions = {}): Harness {
       return page
     },
     config: {
+      ...(options.extensionConfigs === undefined ? {} : { extensionConfigs: options.extensionConfigs }),
       configReadiness: () => readiness,
       visualTools: {
         read: () => visualState,
@@ -711,6 +953,39 @@ function setup(options: HarnessOptions = {}): Harness {
           }
         },
       },
+      webStartupPreference: {
+        read: () => webStartupState,
+        setAutoStart: async (value: boolean, revision: number) => {
+          webAutoStartWrites.push(value)
+          if (options.webStartupWriteFailure !== undefined) throw new Error(options.webStartupWriteFailure)
+          if (webStartupState !== undefined && webStartupState.revision !== revision) {
+            throw new Error(`settings namespace "pi-tui-web-preferences" changed since it was read (expected revision ${revision}, now ${webStartupState.revision})`)
+          }
+          if (webStartupState !== undefined) {
+            webStartupState = { autoStart: value, revision: webStartupState.revision + 1, userOverridden: true }
+          }
+        },
+      },
+      backendStartupPreference: {
+        read: () => backendStartupState, readFresh: async () => undefined,
+        setBackend: async (value: PublicBackendValue, revision: number) => {
+          backendStartupWrites.push(value)
+          if (options.backendStartupWriteFailure !== undefined) throw new Error(options.backendStartupWriteFailure)
+          if (backendStartupState !== undefined && backendStartupState.revision !== revision) {
+            throw new Error(`settings namespace "tui-startup" changed since it was read (expected revision ${revision}, now ${backendStartupState.revision})`)
+          }
+          if (backendStartupState !== undefined) {
+            backendStartupState = { backend: value, revision: backendStartupState.revision + 1, userOverridden: true }
+          }
+        },
+      },
+      // PO-1B: the profile-owned ACP startup preference. This suite does not
+      // exercise ACP controls (they live in settings-acp-controls.test.ts); a
+      // default-OFF stub keeps the Tools category complete without a write path.
+      acpStartupPreference: {
+        read: () => ({ autoStart: false, revision: 1, userOverridden: false }),
+        setAutoStart: async (_value: boolean, _revision: number) => {},
+      },
       footerCustomItems: {
         rawForPersistence: () => ({ kind: 'available' as const, value: options.footerCustomItemsRaw }),
       },
@@ -724,26 +999,202 @@ function setup(options: HarnessOptions = {}): Harness {
           if (agent.permissionDefault === undefined) throw new Error('settings service unavailable')
           agent.permissionDefault.value = name
         },
-        approvalOverrideOf: (sessionId: string) => sessionId === agent.sessionId ? approvalState.value : undefined,
-        approvalOverrideAvailable: () => agent.approvalAvailable ?? false,
+      },
+      subagentLimits: {
+        read: () => {
+          if (readiness !== 'ready') return { kind: 'unreadable', reason: 'Host settings are not current' }
+          return { kind: 'ready', generation: limitsGeneration, revision: limitsRevision,
+            effective: structuredClone(subagentLimits),
+            inherited: { ...limitsBase },
+            overridden: {
+              maxDepth: subagentLimits.maxDepth !== limitsBase.maxDepth,
+              maxActiveSubagents: subagentLimits.maxActiveSubagents !== limitsBase.maxActiveSubagents,
+            } }
+        },
+        refresh: async () => {},
+        mutate: async (patch: import('../../src/runtime/config-port.ts').SectionPatch<import('../../src/runtime/config-port.ts').SubagentLimits>, revision: number, generation: object) => {
+          if (revision !== limitsRevision || generation !== limitsGeneration) return { kind: 'conflict', reason: 'revision changed' }
+          await agent.gateSectionWrite?.()
+          const apply = (field: 'maxDepth' | 'maxActiveSubagents'): number => {
+            const edit = patch[field]
+            if (edit === undefined) return subagentLimits[field]
+            if (edit.kind === 'reset') return limitsBase[field]
+            return edit.value
+          }
+          const next = { maxDepth: apply('maxDepth'), maxActiveSubagents: apply('maxActiveSubagents') }
+          subagentLimits = next
+          limitsRevision += 1
+          subagentLimitsWrites.push({
+            ...patch.maxDepth === undefined ? {} : { maxDepth: next.maxDepth },
+            ...patch.maxActiveSubagents === undefined ? {} : { maxActiveSubagents: next.maxActiveSubagents },
+          })
+          return { kind: 'accepted' }
+        },
       },
       subagentModelSelection: {
-        available: () => subagentSection !== undefined,
-        get: () => {
-          // The READY-but-UNREADABLE authority: the capability still answers,
-          // the value cannot be read. It must never be presented as an empty
-          // section that a write may base itself on.
-          const failure = agent.getFailure?.()
-          if (failure !== undefined) throw new Error(failure)
-          return subagentSection === undefined
-            ? { enabled: false, allowedModels: [] }
-            : { enabled: subagentSection.enabled, allowedModels: subagentSection.allowedModels.map(route => ({ ...route })) }
+        read: () => {
+          const failure = agent.readFailure?.()
+          if (failure !== undefined) return { kind: 'unreadable', reason: failure }
+          if (readiness !== 'ready') return { kind: 'unreadable', reason: 'Host settings are not current' }
+          if (subagentSection === undefined) return { kind: 'unavailable', reason: 'Model selection is not mounted.' }
+          return { kind: 'ready', generation: subagentGeneration, revision: subagentRevision,
+            effective: structuredClone(subagentSection),
+            inherited: { enabled: false, allowedModels: [] },
+            overridden: { enabled: subagentSection.enabled, allowedModels: subagentSection.allowedModels.length !== 0 } }
         },
-        set: async (value: { enabled: boolean; allowedModels: readonly { provider: string; model: string }[] }) => {
+        refresh: async () => {},
+        mutate: async (patch: import('../../src/runtime/config-port.ts').SectionPatch<import('../../src/runtime/config-port.ts').SubagentModelSelection>, revision: number, generation: object) => {
+          if (revision !== subagentRevision || generation !== subagentGeneration) return { kind: 'conflict', reason: 'revision changed' }
           await agent.gateSectionWrite?.()
-          subagentWrites.push({ enabled: value.enabled, allowedModels: value.allowedModels.map(route => ({ ...route })) })
-          if (subagentSection === undefined) throw new Error('settings service unavailable')
-          subagentSection = { enabled: value.enabled, allowedModels: value.allowedModels.map(route => ({ ...route })) }
+          if (subagentSection === undefined) return { kind: 'rejected', reason: 'not mounted' }
+          const enabled = patch.enabled === undefined ? subagentSection.enabled : patch.enabled.kind === 'reset' ? false : patch.enabled.value
+          const routes = patch.allowedModels === undefined ? subagentSection.allowedModels : patch.allowedModels.kind === 'reset' ? [] : patch.allowedModels.value
+          subagentSection = { enabled, allowedModels: routes.map(route => ({ ...route })) }
+          subagentRevision += 1
+          subagentWrites.push(structuredClone(subagentSection))
+          return { kind: 'accepted' }
+        },
+      },
+      // FR5-B: the official Agent-loop scheduling section. Absent = unavailable;
+      // the page never paints a fabricated budget.
+      agentLoopSettings: {
+        read: () => {
+          if (agentLoopValue === undefined) return { kind: 'unavailable' as const, reason: 'Agent loop is not mounted.' }
+          if (agentLoopValue.unreadable === true) return { kind: 'unreadable' as const, reason: 'Agent loop value is unreadable.' }
+          if (readiness !== 'ready') return { kind: 'unreadable' as const, reason: 'Host settings are not current' }
+          return {
+            kind: 'ready' as const,
+            generation: agentLoopGeneration,
+            revision: agentLoopRevision,
+            effective: { maxParallelToolCalls: agentLoopValue.maxParallelToolCalls },
+            inherited: { maxParallelToolCalls: agentLoopValue.inherited },
+            overridden: { maxParallelToolCalls: agentLoopValue.maxParallelToolCalls !== agentLoopValue.inherited },
+          }
+        },
+        refresh: async () => {},
+        mutate: async (
+          patch: import('../../src/runtime/config-port.ts').SectionPatch<import('../../src/runtime/config-port.ts').AgentLoopSettings>,
+          revision: number,
+          generation: object,
+        ) => {
+          const edit = patch.maxParallelToolCalls
+          if (edit === undefined) return { kind: 'rejected' as const, reason: 'no field was staged' }
+          if (agentLoopValue === undefined) return { kind: 'rejected' as const, reason: 'Agent loop is not mounted.' }
+          if (revision !== agentLoopRevision || generation !== agentLoopGeneration) {
+            return { kind: 'conflict' as const, reason: 'the Agent loop section changed since it was read' }
+          }
+          if (options.agentLoopWriteFailure !== undefined) {
+            return { kind: 'rejected' as const, reason: options.agentLoopWriteFailure }
+          }
+          agentLoopWrites.push(edit.kind === 'reset'
+            ? { field: 'maxParallelToolCalls', op: 'reset' }
+            : { field: 'maxParallelToolCalls', op: 'set', value: edit.value })
+          agentLoopValue = {
+            ...agentLoopValue,
+            maxParallelToolCalls: edit.kind === 'reset' ? agentLoopValue.inherited : edit.value,
+          }
+          agentLoopRevision += 1
+          return { kind: 'accepted' as const }
+        },
+      },
+      // FR5-B: the ACTIVE Host shell executor row. The executor identity is a
+      // Host observation; a mismatch refuses the write instead of guessing.
+      shellExecutionSettings: {
+        read: () => {
+          if (shellValue === undefined) return { kind: 'unavailable' as const, reason: 'No active shell executor row is mounted.' }
+          if (shellValue.unreadable === true) return { kind: 'unreadable' as const, reason: 'Shell execution values are unreadable.' }
+          if (readiness !== 'ready') return { kind: 'unreadable' as const, reason: 'Host settings are not current' }
+          return {
+            kind: 'ready' as const,
+            generation: shellGeneration,
+            revision: shellRevision,
+            effective: {
+              executor: shellValue.executor,
+              timeoutMs: shellValue.timeoutMs,
+              maxOutputBytes: shellValue.maxOutputBytes,
+            },
+            inherited: {
+              executor: shellValue.executor,
+              timeoutMs: shellValue.inheritedTimeoutMs,
+              maxOutputBytes: shellValue.inheritedMaxOutputBytes,
+            },
+            overridden: {
+              executor: false,
+              timeoutMs: shellValue.timeoutMs !== shellValue.inheritedTimeoutMs,
+              maxOutputBytes: shellValue.maxOutputBytes !== shellValue.inheritedMaxOutputBytes,
+            },
+          }
+        },
+        refresh: async () => {},
+        mutate: async (
+          patch: import('../../src/runtime/config-port.ts').SectionPatch<import('../../src/runtime/config-port.ts').ShellExecutionSettings>,
+          revision: number,
+          generation: object,
+        ) => {
+          if (shellValue === undefined) return { kind: 'rejected' as const, reason: 'No active shell executor row is mounted.' }
+          if (revision !== shellRevision || generation !== shellGeneration) {
+            return { kind: 'conflict' as const, reason: 'the shell executor section changed since it was read' }
+          }
+          if (options.shellExecutionWriteFailure !== undefined) {
+            return { kind: 'rejected' as const, reason: options.shellExecutionWriteFailure }
+          }
+          for (const field of ['timeoutMs', 'maxOutputBytes'] as const) {
+            const edit = patch[field]
+            if (edit === undefined) continue
+            shellExecutionWrites.push(edit.kind === 'reset'
+              ? { field, op: 'reset' }
+              : { field, op: 'set', value: edit.value })
+            const inherited: number = field === 'timeoutMs' ? shellValue.inheritedTimeoutMs : shellValue.inheritedMaxOutputBytes
+            shellValue = { ...shellValue, [field]: edit.kind === 'reset' ? inherited : edit.value }
+          }
+          shellRevision += 1
+          return { kind: 'accepted' as const }
+        },
+      },
+      // FR5-B: the official session-log contributor. Absent = no General row.
+      sessionLogUpload: {
+        read: () => {
+          if (sessionLogValue === undefined) return { kind: 'unavailable' as const, reason: 'Session log upload is not mounted.' }
+          if (sessionLogValue.unreadable === true) return { kind: 'unreadable' as const, reason: 'Session log upload value is unreadable.' }
+          if (readiness !== 'ready') return { kind: 'unreadable' as const, reason: 'Host settings are not current' }
+          return {
+            kind: 'ready' as const,
+            generation: sessionLogGeneration,
+            revision: sessionLogRevision,
+            effective: { enabled: sessionLogValue.enabled },
+            inherited: { enabled: sessionLogValue.inherited },
+            overridden: { enabled: sessionLogValue.enabled !== sessionLogValue.inherited },
+          }
+        },
+        refresh: async () => {},
+        mutate: async (
+          patch: import('../../src/runtime/config-port.ts').SectionPatch<import('../../src/runtime/config-port.ts').SessionLogUpload>,
+          revision: number,
+          generation: object,
+        ) => {
+          const edit = patch.enabled
+          if (edit === undefined) return { kind: 'rejected' as const, reason: 'no field was staged' }
+          if (sessionLogValue === undefined) return { kind: 'rejected' as const, reason: 'Session log upload is not mounted.' }
+          if (revision !== sessionLogRevision || generation !== sessionLogGeneration) {
+            return { kind: 'conflict' as const, reason: 'the session log section changed since it was read' }
+          }
+          if (options.sessionLogWriteFailure !== undefined) {
+            return { kind: 'rejected' as const, reason: options.sessionLogWriteFailure }
+          }
+          if (options.sessionLogUnconfirmed === true) {
+            return { kind: 'outcome-unconfirmed' as const, reason: 'transport lost after dispatch' }
+          }
+          sessionLogWrites.push(edit.kind === 'reset'
+            ? { field: 'enabled', op: 'reset' }
+            : { field: 'enabled', op: 'set', value: edit.value })
+          if (options.sessionLogIgnoreWrite !== true) {
+            sessionLogValue = {
+              ...sessionLogValue,
+              enabled: edit.kind === 'reset' ? sessionLogValue.inherited : edit.value,
+            }
+          }
+          sessionLogRevision += 1
+          return { kind: 'accepted' as const }
         },
       },
       // The Web provider section is Host-only (S2/PR-B): this stub composes no
@@ -777,6 +1228,8 @@ function setup(options: HarnessOptions = {}): Harness {
       authorization: {
         available: () => false,
         listTargets: () => [],
+        refreshTargets: async () => {},
+        targetsState: () => 'unavailable' as const,
         begin: async () => ({ kind: 'unavailable' as const }),
         onEvent: () => () => {},
         respond: async () => {},
@@ -795,7 +1248,7 @@ function setup(options: HarnessOptions = {}): Harness {
         startSignIn: async () => { throw new Error('account unavailable') },
         cancelSignIn: async () => { throw new Error('account unavailable') },
         signOut: async () => { throw new Error('account unavailable') },
-        hasRunningAccountTasks: () => false,
+        hasRunningAccountTasks: async () => false,
       },
     },
     catalog: {
@@ -864,6 +1317,29 @@ function setup(options: HarnessOptions = {}): Harness {
     doc,
     agent,
     subagentWrites: () => subagentWrites,
+    subagentLimitsWrites: () => subagentLimitsWrites,
+    agentLoopWrites: () => agentLoopWrites,
+    shellExecutionWrites: () => shellExecutionWrites,
+    sessionLogWrites: () => sessionLogWrites,
+    advanceSessionLogRevision: () => { sessionLogRevision += 1 },
+    replaceSessionLogGeneration: () => { sessionLogGeneration = {} },
+    hostSections: () => ({
+      agentLoop: agentLoopValue === undefined ? undefined : {
+        maxParallelToolCalls: agentLoopValue.maxParallelToolCalls,
+        inherited: agentLoopValue.inherited,
+      },
+      shell: shellValue === undefined ? undefined : {
+        executor: shellValue.executor,
+        timeoutMs: shellValue.timeoutMs,
+        maxOutputBytes: shellValue.maxOutputBytes,
+        inheritedTimeoutMs: shellValue.inheritedTimeoutMs,
+        inheritedMaxOutputBytes: shellValue.inheritedMaxOutputBytes,
+      },
+      sessionLog: sessionLogValue === undefined ? undefined : {
+        enabled: sessionLogValue.enabled,
+        inherited: sessionLogValue.inherited,
+      },
+    }),
     permissionWrites: () => permissionWrites,
     subagentSection: () => subagentSection,
     notices: () => notices,
@@ -886,6 +1362,8 @@ function setup(options: HarnessOptions = {}): Harness {
     terminalProgressWrites: () => terminalProgressWrites,
     warnings: () => warnings,
     visualWrites: () => visualWrites,
+    webAutoStartWrites: () => webAutoStartWrites,
+    backendStartupWrites: () => backendStartupWrites,
     visualState: () => visualState,
     writes: () => writes,
     pluginPages: () => pluginPages,
@@ -900,6 +1378,15 @@ function setup(options: HarnessOptions = {}): Harness {
     firstWriteStarted: () => firstReplaceRunning ?? Promise.resolve(),
     /** Release the held first document write. */
     releaseFirstReplace: () => { releaseFirstReplace?.() },
+    /** M6-1 F8: settle the deferred initial Host policy read. */
+    releasePolicyRead: () => { releaseDeferredPolicyRead?.() },
+    /** M6-1 F8: explicit `policy.refresh()` calls (double-read witness). */
+    policyRefreshCalls: () => policyRefreshCalls,
+    /** M6-1 F8: revoke the policy truth (Connection generation/subject change). */
+    revokePolicyRead: () => {
+      policyReadSettled = false
+      notifyPolicyListeners('invalidated')
+    },
     dispose,
   }
 }
@@ -954,6 +1441,28 @@ const key = async (h: Harness, data: string): Promise<void> => {
   await h.vt.waitForRender()
 }
 
+/** Move the current Rows cursor onto a row whose label matches. */
+async function highlightRow(h: Harness, label: string): Promise<void> {
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+  for (let step = 0; step < 10; step += 1) {
+    if (new RegExp(`> ${escaped}(?:\\s|$)`, 'mu').test(h.view())) return
+    await key(h, '\x1b[B')
+  }
+  assert.fail(`the "${label}" row never owned the selection:\n${h.view()}`)
+}
+
+/** One Root-level pointer click on a painted control (press -> repaint -> release). */
+async function clickPainted(h: Harness, text: string, last = false): Promise<void> {
+  const row = last ? h.rowsPlain().length - 1 : rowOf(h, text)
+  const col = cellIndexOf(h, row, text)
+  press(h, row, col)
+  // The Root requests a render after admitting a body press; the page's next
+  // painted frame is what the release must resolve against.
+  await h.vt.waitForRender()
+  release(h, row, col)
+  await settle(h)
+}
+
 const pluginThemes = (): ThemeRegistry => {
   const themes = new ThemeRegistry()
   themes.register({ id: 'solarized', name: 'Solarized', palette: { text: '#123456' } as never }, 'acme-owner', 'acme')
@@ -971,7 +1480,7 @@ const assertRowWidths = (h: Harness, columns: number): void => {
 
 // ── A-01: the dedicated fullscreen workspace ───────────────────────────────
 
-test('A-01 /settings enters a dedicated fullscreen workspace: Settings chrome owns the frame, no editor row behind it', async () => {
+test('/settings enters a dedicated fullscreen workspace: Settings chrome owns the frame, no editor row behind it', async () => {
   const h = setup({ columns: 100, rows: 40 })
   await h.vt.waitForRender()
   assert.match(h.view(), /❯/, 'the regular editor seat is painted before opening')
@@ -980,18 +1489,18 @@ test('A-01 /settings enters a dedicated fullscreen workspace: Settings chrome ow
   assert.ok(rows[0]?.startsWith('Settings'), `the Settings header owns row 0:\n${h.view()}`)
   assert.match(rows[0]!, /Settings · Categories/, 'every width opens on the L0 categories level')
   assert.ok(!h.view().includes('❯'), `no editor/transcript row may render behind the workspace:\n${h.view()}`)
-  assert.match(rows.at(-1) ?? '', /Right open · Enter open · Tab panes · Esc close/, 'the Settings Action Bar is pinned to the physical last row')
+  assert.match(rows.at(-1) ?? '', /Right open · Enter open · Tab panes · Close \[Esc\]/, 'the Settings Action Bar is pinned to the physical last row')
   assert.match(h.view(), /Rows \(4\)/, 'the row list column is part of the workspace body')
   h.dispose()
 })
 
 // ── A-02 / A-03: the wide and medium projections ──────────────────────────
 
-test('A-02 200x60 and 160x40 paint the three-column projection with the real value/source facts', async () => {
+test('200x60 and 160x40 paint the three-column projection with the real value/source facts', async () => {
   for (const [columns, rows] of [[200, 60], [160, 40]] as const) {
     const h = setup({ columns, rows, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
     await h.open()
-    const paneRow = rowOf(h, 'Categories (9)')
+    const paneRow = rowOf(h, 'Categories (10)')
     const paneLine = h.rowsPlain()[paneRow]!
     assert.match(paneLine, /Rows \(4\)/, 'the middle column is the current category rows')
     assert.match(paneLine, /Details/, 'the third column is the detail pane')
@@ -1002,12 +1511,12 @@ test('A-02 200x60 and 160x40 paint the three-column projection with the real val
   }
 })
 
-test('A-03 100x40 and 76x24 project the medium composition per level and switch category with ↑↓', async () => {
+test('100x40 and 76x24 project the medium composition per level and switch category with ↑↓', async () => {
   for (const [columns, rows] of [[100, 40], [76, 24]] as const) {
   const h = setup({ columns, rows, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
   await h.open()
   // L0 paints categories + rows only; the retired header arrows never paint.
-  assert.match(h.rowsPlain()[rowOf(h, 'Categories (9)')]!, /\[Categories \(9\)\]/, 'L0 owns the categories level')
+  assert.match(h.rowsPlain()[rowOf(h, 'Categories (10)')]!, /\[Categories \(10\)\]/, 'L0 owns the categories level')
   assert.ok(h.rowsPlain().some(line => line.includes('Rows (4)')), `the rows column exists:\n${h.view()}`)
   assert.ok(!h.view().includes('Details'), 'L0 does not paint the Detail column')
   assert.ok(!h.view().includes('←'), 'no medium header category arrows')
@@ -1019,7 +1528,7 @@ test('A-03 100x40 and 76x24 project the medium composition per level and switch 
   // Enter advances to L1: rows + detail, no categories column.
   await key(h, '\r')
   assert.match(h.rowsPlain()[rowOf(h, 'Details')]!, /Details/, 'L1 paints the Detail column')
-  assert.ok(!h.view().includes('Categories (9)'), 'L1 hides the categories column')
+  assert.ok(!h.view().includes('Categories (10)'), 'L1 hides the categories column')
   // Right enters L2's inline choice directly from L1 on the same projection.
   await key(h, '\x1b[C')
   assert.match(h.view(), /Choose value/, 'the one-step detail entry opens the inline choice')
@@ -1032,7 +1541,7 @@ test('A-03 100x40 and 76x24 project the medium composition per level and switch 
   }
 })
 
-test('A-03b the wide inline choice keeps the focused pane title as its phase changes', async () => {
+test('the wide inline choice keeps the focused pane title as its phase changes', async () => {
   const h = setup({ columns: 200, rows: 50, doc: { theme: 'dark' } })
   await h.open()
   await key(h, '\r') // Categories -> Rows
@@ -1046,7 +1555,7 @@ test('A-03b the wide inline choice keeps the focused pane title as its phase cha
   h.dispose()
 })
 
-test('A-03c a short inline choice exposes only Esc when the pane title consumes the body budget', async () => {
+test('a short inline choice exposes only Esc when the pane title consumes the body budget', async () => {
   for (const rows of [3, 4] as const) {
     const h = setup({ columns: 200, rows, doc: { theme: 'dark' } })
     await h.open()
@@ -1058,7 +1567,7 @@ test('A-03c a short inline choice exposes only Esc when the pane title consumes 
     assert.ok(h.view().includes('> dark'), `the selected candidate remains painted at 200x${rows}:\n${h.view()}`)
     assert.ok(!h.view().includes('Enter confirm'), `confirmation is withheld without enough body rows at 200x${rows}:\n${h.view()}`)
     const actionBar = h.rowsPlain().at(-1) ?? ''
-    assert.match(actionBar, /^Esc back/, `only the safe back action is advertised at 200x${rows}`)
+    assert.match(actionBar, /^Back \[Esc\]/, `only the safe back action is advertised at 200x${rows}`)
     for (const hiddenHint of ['Up/Down', 'PgUp/PgDn', 'Enter confirm', 'c copy']) {
       assert.ok(!actionBar.includes(hiddenHint), `${hiddenHint} is not advertised at 200x${rows}: ${actionBar}`)
     }
@@ -1087,7 +1596,7 @@ test('A-03c a short inline choice exposes only Esc when the pane title consumes 
   }
 })
 
-test('A-03d a resize before repaint revokes the previous choice-navigation grant', async () => {
+test('a resize before repaint revokes the previous choice-navigation grant', async () => {
   const h = setup({ columns: 200, rows: 24, doc: { theme: 'dark' } })
   await h.open()
   await key(h, '\r') // Categories -> Rows
@@ -1099,7 +1608,7 @@ test('A-03d a resize before repaint revokes the previous choice-navigation grant
   h.vt.resize(200, 3)
   h.vt.sendInput('\x1b[B') // Down is no longer advertised at the live height.
   await h.vt.waitForRender()
-  assert.match(h.rowsPlain().at(-1) ?? '', /^Esc back/)
+  assert.match(h.rowsPlain().at(-1) ?? '', /^Back \[Esc\]/)
   h.vt.resize(200, 24)
   await h.vt.waitForRender()
   assert.ok(h.view().includes('> dark'), `the stale Down did not change the candidate:\n${h.view()}`)
@@ -1110,7 +1619,7 @@ test('A-03d a resize before repaint revokes the previous choice-navigation grant
 
 // ── A-04: the narrow drill-down ───────────────────────────────────────────
 
-test('A-04 72x24 drills categories → rows → detail with one Esc per level and a final close', async () => {
+test('72x24 drills categories → rows → detail with one Esc per level and a final close', async () => {
   const h = setup({ columns: 72, rows: 24, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
   await h.open()
   assert.match(h.rowsPlain()[0]!, /Settings · Categories/)
@@ -1128,11 +1637,11 @@ test('A-04 72x24 drills categories → rows → detail with one Esc per level an
   h.dispose()
 })
 
-test('A-04b 44x8 shows the old value, current candidate identity and explicit confirm', async () => {
+test('44x8 shows the old value, current candidate identity and explicit confirm', async () => {
   const longTheme = 'file:a-very-long-custom-theme-name-that-must-wrap-across-cells'
   const h = setup({ columns: 44, rows: 8, doc: { theme: longTheme } })
   await h.open()
-  assert.match(h.rowsPlain().at(-1) ?? '', /Enter open · Esc close/, 'the Action Bar is the physical last row')
+  assert.match(h.rowsPlain().at(-1) ?? '', /Enter open · Close \[Esc\]/, 'the Action Bar is the physical last row')
   await key(h, '\r') // categories -> rows (Appearance)
   await key(h, '\r') // L1 -> inline choice
   assert.match(h.rowsPlain()[0]!, /Appearance · Configure/)
@@ -1150,13 +1659,13 @@ test('A-04b 44x8 shows the old value, current candidate identity and explicit co
 
 // ── A-05: the extreme-height allocation ───────────────────────────────────
 
-test('A-05 every height keeps the pinned bar last, grants a real body from 3 rows, and Esc always escapes', async () => {
+test('every height keeps the pinned bar last, grants a real body from 3 rows, and Esc always escapes', async () => {
   for (const rows of [1, 2, 3, 4, 5, 8, 10, 24]) {
     const h = setup({ columns: 72, rows })
     await h.open()
     const painted = h.rowsPlain()
     assert.equal(painted.length, rows, `the frame must paint exactly ${rows} rows`)
-    assert.match(painted.at(-1) ?? '', /Esc close/, `the Action Bar is pinned at rows=${rows}`)
+    assert.match(painted.at(-1) ?? '', /Close \[Esc\]/, `the Action Bar is pinned at rows=${rows}`)
     if (rows >= 3) {
       assert.ok(painted.some(line => line.includes('Appearance')), `at least one real body row at rows=${rows}:\n${h.view()}`)
     }
@@ -1168,7 +1677,7 @@ test('A-05 every height keeps the pinned bar last, grants a real body from 3 row
 
 // ── A-06: resize only re-projects ─────────────────────────────────────────
 
-test('A-06 200 → 72 → 44 → 200 preserves the category, the row, the level and the focus', async () => {
+test('200 → 72 → 44 → 200 preserves the category, the row, the level and the focus', async () => {
   const h = setup({ columns: 200, rows: 40, doc: { theme: 'plugin:acme/solarized', iconStyle: 'symbols' }, themes: pluginThemes() })
   await h.open()
   await key(h, '\x1b[B') // Appearance -> Conversation on the categories level
@@ -1193,7 +1702,7 @@ test('A-06 200 → 72 → 44 → 200 preserves the category, the row, the level 
 
 // ── A-07: hostile external text ───────────────────────────────────────────
 
-test('A-07 hostile OSC/CSI/CJK theme text is sanitized before paint and never reaches the clipboard', async () => {
+test('hostile OSC/CSI/CJK theme text is sanitized before paint and never reaches the clipboard', async () => {
   const hostile = `evil\x1b[31mred\x07payload-${'汉'.repeat(60)}`
   const h = setup({ columns: 100, rows: 24, doc: { theme: hostile } })
   await h.open()
@@ -1223,7 +1732,7 @@ test('A-07 hostile OSC/CSI/CJK theme text is sanitized before paint and never re
 
 // ── A-08: read provenance and currentness ─────────────────────────────────
 
-test('A-08 the ready snapshot distinguishes the raw theme identity, the runtime preset and its persisted last-read', async () => {
+test('the ready snapshot distinguishes the raw theme identity, the runtime preset and its persisted last-read', async () => {
   const h = setup({
     columns: 200,
     rows: 40,
@@ -1247,7 +1756,7 @@ test('A-08 the ready snapshot distinguishes the raw theme identity, the runtime 
   h.dispose()
 })
 
-test('A-08b stale and unavailable backends keep the last-known document but never claim it current', async () => {
+test('stale and unavailable backends keep the last-known document but never claim it current', async () => {
   for (const readiness of ['stale', 'unavailable'] as const) {
     const h = setup({ columns: 100, rows: 40, doc: { theme: 'dark' }, readiness })
     await h.open()
@@ -1259,7 +1768,7 @@ test('A-08b stale and unavailable backends keep the last-known document but neve
   }
 })
 
-test('A-08c a missing document and a throwing read are distinct explicit states, never fabricated defaults', async () => {
+test('a missing document and a throwing read are distinct explicit states, never fabricated defaults', async () => {
   const missing = setup({ columns: 100, rows: 40, settingsService: false })
   await missing.open()
   assert.match(missing.view(), /Unavailable — no authoritative config document/)
@@ -1277,7 +1786,7 @@ test('A-08c a missing document and a throwing read are distinct explicit states,
 
 // ── A-09: the painted mouse identity ──────────────────────────────────────
 
-test('A-09 SGR press/release hits the same painted row; a repaint between press and release is refused', async () => {
+test('SGR press/release hits the same painted row; a repaint between press and release is refused', async () => {
   const h = setup({ columns: 100, rows: 40, doc: { iconStyle: 'minimal' } })
   await h.open()
   const iconRow = rowOf(h, 'Icon style')
@@ -1307,7 +1816,7 @@ test('A-09 SGR press/release hits the same painted row; a repaint between press 
   h.dispose()
 })
 
-test('A-09b the wheel scrolls only the visible pane under the pointer, and blank chrome is inert', async () => {
+test('the wheel scrolls only the visible pane under the pointer, and blank chrome is inert', async () => {
   const h = setup({ columns: 100, rows: 10, doc: { theme: 'dark' } })
   await h.open()
   const l0 = h.view()
@@ -1339,7 +1848,7 @@ test('A-09b the wheel scrolls only the visible pane under the pointer, and blank
 
 // ── A-10: exact copy and scoped feedback ──────────────────────────────────
 
-test('A-10 About c copies the exact selected fact and its settlement is visible inside the workspace', async () => {
+test('About c copies the exact selected fact and its settlement is visible inside the workspace', async () => {
   const h = setup({ columns: 140, rows: 40, liveSession: { sessionId: 'sess-a10', title: 'a10 proof', contextUsed: 1_000 } })
   await h.openHome()
   await key(h, '\r') // rail -> About content
@@ -1355,7 +1864,7 @@ test('A-10 About c copies the exact selected fact and its settlement is visible 
   h.dispose()
 })
 
-test('A-10d Legacy choosing and settled Detail never copy, under raw and encoded copy keys', async () => {
+test('Legacy choosing and settled Detail never copy, under raw and encoded copy keys', async () => {
   const encodedCopyKeys = ['c', 'C', '\x1b[99u', '\x1b[99:67:99;2u', '\x1b[27;2;67~'] as const
   for (const columns of [72, 44, 30] as const) {
     // A plain palette: this case confirms a real write, and the fixture's theme
@@ -1385,7 +1894,7 @@ test('A-10d Legacy choosing and settled Detail never copy, under raw and encoded
   }
 })
 
-test('A-10e About c/C accept raw, Kitty and modifyOtherKeys printable events', async () => {
+test('About c/C accept raw, Kitty and modifyOtherKeys printable events', async () => {
   // Each encoded event is one whole press of the same semantic key: `c` for the
   // selected fact, the Shift+C form for the whole report.
   const factKeys = ['c', '\x1b[99u'] as const
@@ -1412,7 +1921,7 @@ test('A-10e About c/C accept raw, Kitty and modifyOtherKeys printable events', a
   }
 })
 
-test('A-10f a copy key never edits a Legacy document at any level', async () => {
+test('a copy key never edits a Legacy document at any level', async () => {
   const encodedCopyKeys = ['\x1b[99u', '\x1b[99:67:99;2u', '\x1b[27;2;67~'] as const
   for (const encodedKey of encodedCopyKeys) {
     const h = setup({ columns: 72, rows: 24, doc: { theme: 'dark' } })
@@ -1432,8 +1941,11 @@ test('A-10f a copy key never edits a Legacy document at any level', async () => 
   }
 })
 
-test('B-15e mouse Confirm requires the painted Enter hint at the minimum Action Bar width', async () => {
-  for (const [columns, canConfirm] of [[18, false], [19, true], [23, true]] as const) {
+test('mouse Confirm requires the painted Enter hint at the minimum Action Bar width', async () => {
+  // PR2's clickable `Back [Esc]` affordance is two cells wider than the old
+  // `Esc back` hint, and its compact form is `Back` (4) instead of `Esc` (3), so
+  // the minimum width where `Enter confirm` survives moved from 19 to 20.
+  for (const [columns, canConfirm] of [[19, false], [20, true], [23, true]] as const) {
     const h = setup({ columns, rows: 24, doc: { theme: 'dark' }, themes: pluginThemes() })
     await openSelectedRow(h, 'theme')
     await key(h, '\r') // Detail -> choosing
@@ -1463,7 +1975,7 @@ test('B-15e mouse Confirm requires the painted Enter hint at the minimum Action 
   }
 })
 
-test('A-10b a copy settled after the workspace closed never notifies the restored surface', async () => {
+test('a copy settled after the workspace closed never notifies the restored surface', async () => {
   let settleCopy: ((ok: boolean) => void) | undefined
   let copyRequests = 0
   const h = setup({
@@ -1492,7 +2004,7 @@ test('A-10b a copy settled after the workspace closed never notifies the restore
 
 // ── A-11: the legacy compatibility bridge ─────────────────────────────────
 
-test('A-11 Agent paints only the five availability-gated rows and no legacy launcher', async () => {
+test('Agent paints the single Subagent entry among its availability-gated rows and no legacy launcher', async () => {
   const h = setup({
     columns: 140,
     rows: 44,
@@ -1512,28 +2024,37 @@ test('A-11 Agent paints only the five availability-gated rows and no legacy laun
   await key(h, '\r') // L0 -> L1 (the Agent rows level)
   assert.match(h.rowsPlain()[0]!, /Settings · Agent · Rows/)
   const rows = h.rowsPlain()
-  const order = ['Approval policy (this session)', 'Default permission', 'Subagent allowed models', 'Subagent model selection', 'User shell sandbox policy']
-    .map(label => rows.findIndex(line => line.includes(label)))
+  const order = [
+    'Approval policy (this session)',
+    'Default permission',
+    'Subagent settings',
+    'User shell sandbox policy',
+    'Agent loop',
+  ].map(label => rows.findIndex(line => line.includes(label)))
   for (const [index, row] of order.entries()) {
     assert.ok(row >= 0, `Agent paints ${JSON.stringify(order[index])}:\n${h.view()}`)
   }
   assert.deepEqual([...order].sort((left, right) => left - right), order, 'the Agent rows keep the frozen order')
+  assert.match(h.view(), /Agent loop/u, 'the Agent loop specialist row is painted')
   assert.doesNotMatch(h.view(), /Agent settings…/u, 'the legacy launcher is retired')
   // Browsing the rows (L1 -> L2 back) writes nothing at all.
   assert.equal(h.replacements(), 0, 'reading the Agent rows writes no document')
   assert.deepEqual(h.subagentWrites(), [], 'reading the Agent rows writes no official section')
   assert.deepEqual(h.permissionWrites(), [], 'reading the Agent rows writes no Host permission default')
-  // The approval row states an override-less session as such — never a saved
-  // `ask` it never read.
+  // The approval row states the PROVEN effective policy and `override: none`
+  // only when the read succeeded — never a saved `ask` it never read.
   await key(h, '\r') // Enter the approval Detail (and its choice)
   const approval = h.view()
-  assert.match(approval, /not overridden/u, `an absent override is stated, not faked:\n${approval}`)
-  assert.match(approval, /consumer fallback ask/u, 'the consumer fallback is named as the runtime effect')
-  assert.match(approval, /not applicable — current session only/u, 'the persisted half is explicitly not applicable')
+  assert.match(approval, /Effective: ask/u, `the official effective policy is stated:\n${approval}`)
+  assert.match(approval, /Session override: none/u, 'a successful read with no override states none, never a guessed value')
+  assert.match(approval, /Source: Host session policy/u, 'the durable event source is named')
+  assert.match(approval, /not written to the TUI/u,
+    'the persistence wording names the Host Session log, not a TUI document field')
+  assert.match(approval, /Source: Host session policy/u, 'the durable source is named')
   h.dispose()
 })
 
-test('A-11b Agent hides the approval and delegation rows when their authority is absent', async () => {
+test('Agent hides session-scoped approval but retains Subagent unavailability when its authority is absent', async () => {
   // Sessionless Direct with the capability present: no session-scoped row.
   const sessionless = setup({
     columns: 140,
@@ -1545,11 +2066,12 @@ test('A-11b Agent hides the approval and delegation rows when their authority is
   assert.doesNotMatch(sessionless.view(), /Approval policy \(this session\)/u, 'a sessionless surface paints no approval row')
   assert.match(sessionless.view(), /Default permission/u, 'the Host-authority rows do not need a Session')
   assert.match(sessionless.view(), /User shell sandbox policy/u, 'the document row does not need a Session')
-  assert.doesNotMatch(sessionless.view(), /Subagent (?:allowed models|model selection)/u, 'no official section means no delegation rows')
+  assert.match(sessionless.view(), /Subagent settings/u, 'one reachable page states the unavailable sections')
   sessionless.dispose()
 
-  // A live session on a backend WITHOUT the approval capability (Remote): the
-  // row is absent rather than rendered as a saved `ask`.
+  // M6-1 F8: a pinned live Session with an UNAVAILABLE approval side keeps
+  // its row so the user can SEE the gap and refresh — but the row states the
+  // unavailability and offers no confirmable candidate (never a guessed ask).
   const remote = setup({
     columns: 140,
     rows: 44,
@@ -1562,7 +2084,11 @@ test('A-11b Agent hides the approval and delegation rows when their authority is
   })
   await remote.open('Agent')
   await key(remote, '\r')
-  assert.doesNotMatch(remote.view(), /Approval policy \(this session\)/u, 'no capability means no approval row')
+  assert.match(remote.view(), /Approval policy \(this session\)/u, 'a pinned session keeps the row to show the gap')
+  assert.match(remote.view(), /unavailable on this Host/u, 'the missing side is stated, never a guessed ask')
+  await key(remote, '\r')
+  const remoteDetail = remote.view()
+  assert.doesNotMatch(remoteDetail, /Effective: ask/u, 'no effective value is fabricated for a missing service')
   remote.dispose()
 
   // An empty Host roster paints no default-permission row at all.
@@ -1625,7 +2151,7 @@ async function openAgentRow(h: Harness, label: string): Promise<void> {
   assert.fail(`the Agent row ${JSON.stringify(label)} was never reached:\n${h.view()}`)
 }
 
-test('R3-01 confirming a permission preset writes the Host default and never the current session', async () => {
+test('confirming a permission preset writes the Host default and never the current session', async () => {
   const h = setup({
     columns: 120,
     rows: 40,
@@ -1653,7 +2179,7 @@ test('R3-01 confirming a permission preset writes the Host default and never the
   h.dispose()
 })
 
-test('R3-01b a Host permission default that could not be written is never reported as Verified', async () => {
+test('a Host permission default that could not be written is never reported as Verified', async () => {
   const h = setup({
     columns: 120,
     rows: 40,
@@ -1677,7 +2203,7 @@ test('R3-01b a Host permission default that could not be written is never report
   h.dispose()
 })
 
-test('R3-02 the approval Confirm targets the pinned session scope; a stale scope dispatches nothing', async () => {
+test('the approval Confirm targets the pinned session scope; a stale scope dispatches nothing', async () => {
   const h = setup({
     columns: 120,
     rows: 40,
@@ -1702,7 +2228,102 @@ test('R3-02 the approval Confirm targets the pinned session scope; a stale scope
   h.dispose()
 })
 
-test('R3-02b a session switch revokes the approval row instead of re-targeting the new session', async () => {
+test('M6-1 F8: a Host policy read settling after the first frame replaces Checking… without a key press', async () => {
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    agent: {
+      sessionId: 'session-live',
+      approvalAvailable: true,
+      approval: { value: 'never' },
+      deferPolicyRead: true,
+      permissionNames: ['workspace-write'],
+      permissionDefault: { value: 'workspace-write' },
+    },
+  })
+  await h.open('Agent')
+  await key(h, '\r') // L0 -> L1 rows: the first frame reads the still-pending Host policy
+  // The panel's first snapshot already started the ONE read; the Settings
+  // command must not issue a second explicit refresh for the same open.
+  assert.equal(h.policyRefreshCalls(), 0,
+    'the initial open must not double-read: the panel snapshot already started the read')
+  assert.match(h.view(), /Checking…/u, `the first frame is the truthful pending state:\n${h.view()}`)
+  assert.doesNotMatch(h.view(), /Effective:/u, 'no fact is guessed before the Host answers')
+  // The Host read settles LATER; no `r`, no re-open, no key press at all.
+  h.releasePolicyRead()
+  await new Promise<void>(resolve => { setTimeout(resolve, 30) })
+  const settled = h.view()
+  assert.doesNotMatch(settled, /Checking…/u,
+    `the settled read must replace the pending state without user input:\n${settled}`)
+  assert.match(settled, /never/u, 'the proven effective value is painted')
+  // The row is editable again: Enter opens the inline choice with the proven facts.
+  await key(h, '\r')
+  assert.match(h.view(), /Effective: never/u, `the detail shows the settled fact:\n${h.view()}`)
+  assert.match(h.view(), /Choose value/u)
+  h.dispose()
+})
+
+test('M6-1 F8: a connection-generation revocation drops the old policy from the open Settings page immediately', async () => {
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    agent: {
+      sessionId: 'session-live',
+      approvalAvailable: true,
+      approval: { value: 'never' },
+      deferPolicyRead: true,
+      permissionNames: ['workspace-write'],
+      permissionDefault: { value: 'workspace-write' },
+    },
+  })
+  await h.open('Agent')
+  await key(h, '\r')
+  h.releasePolicyRead()
+  await new Promise<void>(resolve => { setTimeout(resolve, 30) })
+  assert.match(h.view(), /never/u, 'the first Host read settled')
+  // The Connection generation changes: the observation revokes its truth.
+  // The OPEN page must drop the old Host fact NOW — before (and without) any
+  // new Host read answering.
+  h.revokePolicyRead()
+  await new Promise<void>(resolve => { setTimeout(resolve, 20) })
+  const revoked = h.view()
+  assert.match(revoked, /Checking…/u, `the revoked fact returns to the truthful pending state:\n${revoked}`)
+  assert.doesNotMatch(revoked, /Effective: never/u, 'the old Host policy is gone from the page')
+  // The revocation repaint already started the new Host read (the generation
+  // edge is a safe trigger); only its settlement paints the fresh fact.
+  h.releasePolicyRead()
+  await new Promise<void>(resolve => { setTimeout(resolve, 30) })
+  assert.match(h.view(), /never/u, 'the new generation fact paints after its own read settles')
+  h.dispose()
+})
+
+test('a Connection generation rollover after the applied ACK is never Verified (M6-1 F8 R07/RF-004)', async () => {
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    agent: {
+      sessionId: 'session-live',
+      approvalAvailable: true,
+      approval: { value: 'ask' },
+      changeGenerationOnWrite: true,
+      permissionNames: ['workspace-write'],
+      permissionDefault: { value: 'workspace-write' },
+    },
+  })
+  await openAgentRow(h, 'Approval policy (this session)')
+  await key(h, '\r')
+  await key(h, '\x1b[B')
+  await key(h, '\r')
+  await settle(h)
+  const view = h.view()
+  assert.doesNotMatch(view, /Verified/u,
+    `an ACK from a replaced generation must not be verified on the new one:\n${view}`)
+  assert.match(view, /Commit accepted|verification unavailable/u,
+    `the accepted-but-unverified state is stated truthfully:\n${view}`)
+  h.dispose()
+})
+
+test('a session switch revokes the approval row instead of re-targeting the new session', async () => {
   let current = true
   const h = setup({
     columns: 120,
@@ -1734,139 +2355,413 @@ test('R3-02b a session switch revokes the approval row instead of re-targeting t
   h.dispose()
 })
 
-test('R3-04 the allowlist row mounts the EXISTING picker in the same workspace and toggles the official section', async () => {
-  const h = setup({
-    columns: 140,
-    rows: 40,
-    agent: {
-      sessionId: 'session-live',
-      approvalAvailable: true,
-      permissionNames: ['workspace-write'],
-      permissionDefault: { value: 'workspace-write' },
-      subagent: { enabled: false, allowedModels: [] },
-      directory: [
-        { id: 'p1', name: 'Provider One', models: [{ id: 'm1', name: 'Model One' }, { id: 'm2', name: 'Model Two' }] },
-        { id: 'p2', name: 'Provider Two', models: [{ id: 'm1' }] },
-      ],
-    },
-  })
-  await openAgentRow(h, 'Subagent allowed models')
-  // Tab focuses the Detail WITHOUT activating anything (the Manage action is
-  // painted there), then Enter mounts the SAME picker.
-  await key(h, '\t')
-  assert.match(h.view(), /Manage allowed models…/u, `the ONE explicit Manage action is painted:\n${h.view()}`)
-  await key(h, '\r')
-  const picker = h.view()
-  assert.match(picker, /Subagent allowed models/u, `the picker is painted in the same lease:\n${picker}`)
-  assert.match(picker, /Provider One|Provider Two/u, 'the official grouped directory really painted')
-  assert.match(picker, /Enter toggle/u, 'the picker keeps its own semantic hint on the last row')
-  // The picker is searchable: filter down to one route and toggle it.
-  await key(h, 'm')
+test('Subagent settings stages Enabled and routes in one lease until explicit Save', async () => {
+  const h = setup({ columns: 120, rows: 40, agent: {
+    subagent: { enabled: false, allowedModels: [] },
+    directory: [{ id: 'p1', name: 'Provider One', models: [{ id: 'm1', name: 'Model One' }] }],
+  } })
+  await openAgentRow(h, 'Subagent settings')
   await key(h, '\r')
   await settle(h)
-  assert.equal(h.subagentWrites().length, 1, 'exactly ONE official section write')
-  assert.deepEqual(h.subagentWrites()[0]?.allowedModels, [{ provider: 'p1', model: 'm1' }],
-    'the write carries the exact (provider, model) pair')
-  assert.equal(h.subagentSection()?.allowedModels.length, 1, 'the official section really changed')
-  // Esc leaves the picker (NOT the workspace) and returns to the Agent rows.
-  await key(h, '\x1b')
-  const back = h.view()
-  assert.match(back, /Settings · Agent/u, `Esc returns to the Agent rows, not the conversation:\n${back}`)
-  assert.match(back, /1 route/u, 'the row summary follows the committed official section')
-  // RE-ENTERING the picker must paint the grant that was really committed — the
-  // marker is derived from the official section, never from the closed page.
-  // Esc from the closed picker's Detail first, then reopen through the row.
-  await key(h, '\x1b') // closed picker's Detail -> Rows
-  // Tab moves the keyboard to the Detail WITHOUT activating the row (Enter on a
-  // specialist row mounts the page), then the painted Manage action opens a
-  // FRESH picker instance.
-  await key(h, '\t')
-  await key(h, '\r')
-  const reopened = h.view()
-  assert.match(reopened, /Subagent allowed models/u, `the picker is mounted again:\n${reopened}`)
-  // The reopened picker's working copy comes from the OFFICIAL section, so the
-  // committed route is still granted there and NO second write is dispatched by
-  // merely looking.
-  assert.deepEqual(h.subagentSection()?.allowedModels, [{ provider: 'p1', model: 'm1' }],
-    `the committed route is still in the official section:\n${JSON.stringify(h.subagentSection())}`)
-  assert.equal(h.subagentWrites().length, 1,
-    'reopening the picker reads the section and dispatches NO second write')
-  // The VISIBLE marker: the reopened picker paints the committed route as
-  // allowed. A picker that ignored the section would paint an unmarked list.
-  const grantedLine = reopened.split('\n').find(line => /Model One|m1/u.test(line) && /allowed/u.test(line))
-  assert.ok(grantedLine !== undefined,
-    `the reopened picker marks the committed route as allowed:\n${reopened}`)
-  await key(h, '\x1b')
-  assert.match(h.view(), /1 route/u, `the outer row still summarises the committed grant:\n${h.view()}`)
-  h.dispose()
-})
-
-test('R3-05 enabling the toggle with an EMPTY allowlist writes nothing and moves to the allowlist row', async () => {
-  const h = setup({
-    columns: 120,
-    rows: 40,
-    agent: {
-      sessionId: 'session-live',
-      approvalAvailable: true,
-      permissionNames: ['workspace-write'],
-      permissionDefault: { value: 'workspace-write' },
-      subagent: { enabled: false, allowedModels: [] },
-      directory: [{ id: 'p1', name: 'P1', models: [{ id: 'm1' }] }],
-    },
-  })
-  await openAgentRow(h, 'Subagent model selection')
-  await key(h, '\r')
-  await key(h, '\x1b[B') // off -> on
-  await key(h, '\r')
-  await settle(h)
-  assert.deepEqual(h.subagentWrites(), [], 'an empty allowlist means ZERO official writes')
-  assert.equal(h.agent.subagent?.enabled, false, 'the section stays off')
-  const view = h.view()
-  assert.match(view, /Select at least one Subagent allowed model before enabling model selection\./u,
-    `the exact guidance is shown:\n${view}`)
-  assert.match(agentSelectedRowLabel(h), /^Subagent allowed models/u,
-    `the typed follow-up moved the selection to the allowlist row:\n${view}`)
-  h.dispose()
-})
-
-test('R3-05b enabling and disabling the toggle preserves every saved route', async () => {
-  const h = setup({
-    columns: 120,
-    rows: 40,
-    agent: {
-      sessionId: 'session-live',
-      approvalAvailable: true,
-      permissionNames: ['workspace-write'],
-      permissionDefault: { value: 'workspace-write' },
-      subagent: { enabled: false, allowedModels: [{ provider: 'p1', model: 'm1' }] },
-      directory: [{ id: 'p1', name: 'P1', models: [{ id: 'm1' }] }],
-    },
-  })
-  await openAgentRow(h, 'Subagent model selection')
-  await key(h, '\r')
+  assert.match(h.view(), /Maximum recursion depth/u)
+  assert.doesNotMatch(h.view(), /Subagent allowed models|Subagent model selection/u)
   await key(h, '\x1b[B')
-  await key(h, '\r')
+  await key(h, '\x1b[B')
+  await key(h, '\r') // stage Enabled
+  await key(h, 's')
   await settle(h)
-  assert.deepEqual(h.subagentWrites(), [{ enabled: true, allowedModels: [{ provider: 'p1', model: 'm1' }] }],
-    'enabling keeps the existing route')
-  assert.match(h.view(), /Verified/u, 'both section halves read back')
-  // Disable again in a FRESH open: the routes survive.
-  for (let step = 0; step < 3; step += 1) await key(h, '\x1b')
+  assert.equal(h.subagentWrites().length, 0, 'enabled + empty routes never dispatches')
+  assert.match(h.view(), /at least one allowed route/u)
+  await key(h, '\x1b[B')
+  await key(h, '\r') // Manage
   await settle(h)
-  assert.doesNotMatch(h.view(), /Settings ·/u, `the workspace closed:\n${h.view()}`)
-  await openAgentRow(h, 'Subagent model selection')
-  await key(h, '\r')
-  await key(h, '\x1b[A') // the section reads enabled: on -> off
-  await key(h, '\r')
+  assert.match(h.view(), /Provider One/u)
+  await key(h, '\r') // stage first route
+  assert.equal(h.subagentWrites().length, 0, 'directory Enter only edits draft')
+  await key(h, '\x1b')
+  await key(h, 's')
   await settle(h)
-  assert.equal(h.subagentWrites().length, 2, 'the second toggle dispatched ONE write')
-  assert.deepEqual(h.subagentWrites()[1], { enabled: false, allowedModels: [{ provider: 'p1', model: 'm1' }] },
-    'disabling never clears the saved routes')
-  assert.equal(h.subagentSection()?.allowedModels.length, 1, 'the official section still carries the route')
+  assert.deepEqual(h.subagentSection(), { enabled: true, allowedModels: [{ provider: 'p1', model: 'm1' }] })
+  assert.equal(h.subagentWrites().length, 1)
+  assert.match(h.view(), /Selection: Verified/u)
+  await key(h, '\x1b')
+  assert.match(h.view(), /Settings · Agent · Rows/u)
   h.dispose()
 })
 
-test('R3-07 the user shell sandbox policy Confirm stores the raw document value only', async () => {
+test('the embedded Subagent page keeps its selection and Save bar inside every frozen Settings viewport', async () => {
+  const matrix = [
+    [200, 50, 'dark', 'symbols'],
+    [120, 40, 'light', 'minimal'],
+    [100, 40, 'plugin:acme/solarized', 'emoji'],
+    [80, 24, 'dark', 'symbols'],
+    [80, 10, 'light', 'minimal'],
+    [72, 24, 'dark', 'emoji'],
+    [44, 20, 'light', 'symbols'],
+    [44, 8, 'plugin:acme/solarized', 'minimal'],
+  ] as const
+  for (const [columns, rows, theme, iconStyle] of matrix) {
+    const h = setup({ columns, rows, doc: { theme }, iconStyle,
+      ...(theme === 'plugin:acme/solarized' ? { themes: pluginThemes() } : {}),
+      agent: {
+        subagent: { enabled: false, allowedModels: [{ provider: 'p1', model: 'm1' }] },
+        directory: [{ id: 'p1', name: 'Provider One', models: [{ id: 'm1', name: 'Model One' }] }],
+      },
+    })
+    await h.open('Agent')
+    await key(h, '\r')
+    for (let step = 0; step < 8 && !h.rowsPlain().some(line => />\s+Subagent settings/u.test(line)); step += 1) {
+      await key(h, '\x1b[B')
+    }
+    assert.ok(h.rowsPlain().some(line => />\s+Subagent settings/u.test(line)),
+      `${columns}x${rows}: the Subagent row must be selectable:\n${h.view()}`)
+    await key(h, '\r')
+    await settle(h)
+    assert.match(h.view(), /Settings · Agent · Subagent settings/u, `${columns}x${rows}: the page identity stays visible`)
+    assertRowWidths(h, columns)
+    assert.match(h.rowsPlain().at(-1) ?? '', /Back \[Esc\]/u, `${columns}x${rows}: the Root-owned exit stays painted`)
+    for (let step = 0; step < 2; step += 1) await key(h, '\x1b[B')
+    await key(h, '\r') // Enabled changes only the per-open draft.
+    assert.equal(h.subagentWrites().length, 0, `${columns}x${rows}: staging has no Host write`)
+    assert.match(h.rowsPlain().at(-1) ?? '', /Save \[S\]/u, `${columns}x${rows}: the dirty primary action stays complete`)
+    await key(h, 's')
+    await settle(h)
+    assert.equal(h.subagentWrites().length, 1, `${columns}x${rows}: Save reaches the typed section once`)
+    assert.match(h.view(), /Selection: Verified/u, `${columns}x${rows}: the section readback is visible`)
+    assertRowWidths(h, columns)
+    h.dispose()
+  }
+})
+
+test('the real Settings Root row and delegated spans complete the Subagent pointer journey', async () => {
+  const h = setup({ columns: 120, rows: 40, agent: {
+    subagent: { enabled: false, allowedModels: [] },
+    directory: [{ id: 'p1', name: 'Provider One', models: [{ id: 'm1', name: 'Model One' }] }],
+  } })
+  const clickText = async (text: string, last = false): Promise<void> => {
+    const row = last ? h.rowsPlain().length - 1 : rowOf(h, text)
+    const col = cellIndexOf(h, row, text)
+    press(h, row, col)
+    // The Root requests a render after admitting a body press; the child's
+    // next painted frame is what a release must resolve against.
+    await h.vt.waitForRender()
+    release(h, row, col)
+    await settle(h)
+  }
+  await h.open('Agent')
+  await key(h, '\r')
+  await clickText('Subagent settings')
+  assert.match(h.view(), /Maximum recursion depth/u, 'Root painted row click opens the real embedded page')
+  await clickText('Enabled')
+  await clickText('Manage…')
+  assert.match(h.view(), /Provider One/u, `the managed row opens the model directory:\n${h.view()}`)
+  await clickText('Model One')
+  assert.equal(h.subagentWrites().length, 0)
+  await clickText('Back [Esc]', true)
+  // The numeric field and its Reset are pointer-operable too: the input accepts
+  // normal text, while Apply stays a painted bar action.
+  await clickText('Maximum recursion depth')
+  await key(h, '2')
+  await clickText('Apply [Enter]', true)
+  await clickText('Reset')
+  assert.match(h.view(), /Reset staged/u, 'the pointer Reset really staged the draft')
+  assert.match(h.view(), /Save \[S\]/u, 'the dirty page paints its delegated Save')
+  await clickText('Save [S]', true)
+  assert.equal(h.subagentWrites().length, 1, 'Root delegated Save is the only writer')
+  assert.deepEqual(h.subagentLimitsWrites(), [{ maxDepth: 1 }],
+    'the Reset staged one official maxDepth unset/effective restore')
+  assert.deepEqual(h.subagentSection(), { enabled: true, allowedModels: [{ provider: 'p1', model: 'm1' }] })
+  await clickText('Enabled')
+  await clickText('Back [Esc]', true)
+  assert.match(h.view(), /Discard unsaved changes\? y\/N/u)
+  await clickText('Keep [Esc]', true)
+  assert.match(h.view(), /Maximum recursion depth/u)
+  await clickText('Back [Esc]', true)
+  await clickText('Discard [Y]', true)
+  assert.match(h.view(), /Settings · Agent · Rows/u)
+  assert.equal(h.subagentWrites().length, 1, 'discard never sends another Host write')
+  h.dispose()
+})
+
+
+// ── FR5-B: the numeric specialist pages and the General migration ──────────
+
+test('the real Root numeric Agent-loop page stages, saves, resets and discards through the official section', async () => {
+  const h = setup({ columns: 160, rows: 44, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })
+  await h.open('Agent')
+  await key(h, '\r') // L0 -> L1
+  await clickPainted(h, 'Agent loop')
+  assert.match(h.view(), /Settings · Agent · Agent loop/u)
+  assert.match(h.view(), /Host profile · effective settings · revision 1/u)
+  assert.match(h.view(), /Parallel tool calls\s+10\s+\[Reset\]/u)
+  assert.match(h.view(), /Comparison: Differs from base/u)
+
+  // Root row/field click -> the page's own single-line edit -> painted Apply.
+  await clickPainted(h, 'Parallel tool calls')
+  assert.match(h.view(), /Edit Parallel tool calls/u)
+  await key(h, '\x15') // clear the captured value
+  await key(h, '4')
+  await clickPainted(h, 'Apply [Enter]', true)
+  assert.match(h.view(), /Parallel tool calls\s+4/u)
+  assert.equal(h.agentLoopWrites().length, 0, 'Apply only stages the field draft')
+  await clickPainted(h, 'Save [S]', true)
+  await settle(h, 12)
+  assert.deepEqual(h.agentLoopWrites(), [{ field: 'maxParallelToolCalls', op: 'set', value: 4 }])
+  assert.deepEqual(h.hostSections().agentLoop, { maxParallelToolCalls: 4, inherited: 2 })
+  assert.match(h.view(), /Status: Verified/u)
+
+  // An explicit painted Reset stages the official unset; Save dispatches it.
+  await clickPainted(h, '[Reset]')
+  assert.match(h.view(), /Reset staged/u)
+  await clickPainted(h, 'Save [S]', true)
+  await settle(h, 12)
+  assert.deepEqual(h.agentLoopWrites()[1], { field: 'maxParallelToolCalls', op: 'reset' })
+  assert.deepEqual(h.hostSections().agentLoop, { maxParallelToolCalls: 2, inherited: 2 },
+    'the Host readback decides the value; Reset does not promise USER deletion')
+  assert.match(h.view(), /Status: Verified/u)
+
+  // Dirty Back asks the page's own question; Keep returns, Discard leaves.
+  await clickPainted(h, 'Parallel tool calls')
+  await key(h, '\x15')
+  await key(h, '5')
+  await clickPainted(h, 'Apply [Enter]', true)
+  await clickPainted(h, 'Back [Esc]', true)
+  assert.match(h.view(), /Discard unsaved changes\? y\/N/u)
+  await clickPainted(h, 'Keep [Esc]', true)
+  assert.match(h.view(), /Parallel tool calls\s+5/u)
+  await clickPainted(h, 'Back [Esc]', true)
+  assert.match(h.view(), /Discard unsaved changes\? y\/N/u)
+  await clickPainted(h, 'Discard [Y]', true)
+  assert.match(h.view(), /Settings · Agent · Rows/u)
+  assert.equal(h.agentLoopWrites().length, 2, 'discard never sends another Host write')
+  h.dispose()
+})
+
+test('the real Root Shell-execution page saves both caps in ONE official mutation', async () => {
+  const h = setup({
+    columns: 160,
+    rows: 44,
+    shellExecution: {
+      executor: 'bash',
+      timeoutMs: 60_000,
+      maxOutputBytes: 64_000,
+      inheritedTimeoutMs: 60_000,
+      inheritedMaxOutputBytes: 32_000,
+    },
+  })
+  await h.open('Tools')
+  await key(h, '\r')
+  await clickPainted(h, 'Shell execution')
+  assert.match(h.view(), /Settings · Tools · Shell execution/u)
+  assert.match(h.view(), /Host model-tool executor · POSIX Bash/u)
+  assert.match(h.view(), /Command timeout \(ms\)\s+60000/u)
+  assert.match(h.view(), /Output cap per stream \(bytes\)\s+64000/u)
+
+  await clickPainted(h, 'Command timeout (ms)')
+  await key(h, '\x15')
+  for (const character of '45000') await key(h, character)
+  await clickPainted(h, 'Apply [Enter]', true)
+  await clickPainted(h, 'Output cap per stream (bytes)')
+  await key(h, '\x15')
+  for (const character of '128000') await key(h, character)
+  await clickPainted(h, 'Apply [Enter]', true)
+  await clickPainted(h, 'Save [S]', true)
+  await settle(h, 12)
+  assert.deepEqual(h.shellExecutionWrites(), [
+    { field: 'timeoutMs', op: 'set', value: 45_000 },
+    { field: 'maxOutputBytes', op: 'set', value: 128_000 },
+  ])
+  assert.deepEqual(h.hostSections().shell, {
+    executor: 'bash',
+    timeoutMs: 45_000,
+    maxOutputBytes: 128_000,
+    inheritedTimeoutMs: 60_000,
+    inheritedMaxOutputBytes: 32_000,
+  })
+  assert.match(h.view(), /Status: Verified/u)
+  await clickPainted(h, 'Back [Esc]', true)
+  assert.match(h.view(), /Settings · Tools · Rows/u)
+  h.dispose()
+})
+
+test('the real Root Shell page accepts a positive finite decimal cap', async () => {
+  const h = setup({
+    columns: 160,
+    rows: 44,
+    shellExecution: { executor: 'bash', timeoutMs: 60_000, maxOutputBytes: 64_000 },
+  })
+  await h.open('Tools')
+  await key(h, '\r')
+  await clickPainted(h, 'Shell execution')
+  await clickPainted(h, 'Command timeout (ms)')
+  await key(h, '\x15')
+  for (const character of '1.5') await key(h, character)
+  await clickPainted(h, 'Apply [Enter]', true)
+  await clickPainted(h, 'Save [S]', true)
+  await settle(h, 12)
+  assert.deepEqual(h.shellExecutionWrites(), [{ field: 'timeoutMs', op: 'set', value: 1.5 }])
+  assert.match(h.view(), /Status: Verified/u)
+  h.dispose()
+})
+
+test('General owns Backend, both startup preferences and Session log; Tools keeps no duplicate preference row', async () => {
+  const h = setup({ columns: 200, rows: 50, sessionLog: { enabled: true, inherited: true } })
+  await h.open('General')
+  await key(h, '\r')
+  const general = h.rowsPlain()
+  const order = ['Backend', 'Start Web automatically', 'Start ACP automatically', 'Session log upload']
+    .map(label => general.findIndex(line => line.includes(label)))
+  for (const [index, row] of order.entries()) {
+    assert.ok(row >= 0, `General paints ${JSON.stringify(order[index])}:\n${h.view()}`)
+  }
+  assert.deepEqual([...order].sort((left, right) => left - right), order, 'General keeps the FR5-B frozen order')
+  assert.doesNotMatch(h.view(), /Auto-enable Web on Host startup|Auto-enable ACP on Host startup/u,
+    'the old labels are gone, not duplicated')
+
+  await backToRail(h)
+  await railToCategory(h, 'Tools')
+  await key(h, '\r')
+  const tools = h.rowsPlain().join('\n')
+  for (const label of ['Visual tools', 'Shell execution', 'ACP Server', 'Web Search / Fetch', 'MCP servers']) {
+    assert.ok(tools.includes(label), `Tools keeps ${label}`)
+  }
+  assert.doesNotMatch(tools, /Start Web automatically|Start ACP automatically/u,
+    'the migrated preference rows have no Tools duplicate')
+  assert.doesNotMatch(tools, /Session log upload/u, 'the session-log row is General-only')
+  h.dispose()
+})
+
+test('Session log upload paints its upload risk and offers On/Off/Reset; Reset may read back On', async () => {
+  const h = setup({ columns: 200, rows: 44, sessionLog: { enabled: true, inherited: true } })
+  await h.open('General')
+  await key(h, '\r')
+  await highlightRow(h, 'Session log upload')
+  const detail = h.view()
+  assert.match(detail, /Send session log data with requests to the official DeepSeek API/u)
+  assert.match(detail, /Session data can include conversation content/u)
+
+  await key(h, '\r') // L1 -> the scalar candidate choice
+  assert.match(h.view(), /Risk: May send chat content to DeepSeek API/u,
+    'the L2 confirmation frame paints the upload risk in full')
+  assert.match(h.view(), /> On/u)
+  await highlightCandidate(h, 'Off')
+  await key(h, '\r')
+  await settle(h, 12)
+  assert.deepEqual(h.sessionLogWrites(), [{ field: 'enabled', op: 'set', value: false }])
+  assert.match(h.view(), /Verified/u)
+
+  // Reopen the same row and stage the OFFICIAL unset. The Host may read On.
+  await key(h, '\x1b') // settled Detail -> Rows
+  await key(h, '\r') // Rows -> the choice again
+  await highlightCandidate(h, 'Reset')
+  await key(h, '\r')
+  await settle(h, 12)
+  assert.deepEqual(h.sessionLogWrites()[1], { field: 'enabled', op: 'reset' })
+  assert.equal(h.hostSections().sessionLog?.enabled, true, 'the official reset readback is On again')
+  const after = h.view()
+  assert.match(after, /Verified/u)
+  assert.match(after, /On/u)
+  assert.doesNotMatch(after, /Off[^\n]*safe|safe[^\n]*Off/iu, 'Reset is never presented as a safety guarantee')
+  h.dispose()
+})
+
+test('Session log unknown/mismatched settlements never offer a blind Retry', async () => {
+  // A dispatched write whose ACK is lost is NOT a retryable refusal.
+  const unknown = setup({ columns: 200, rows: 44, sessionLog: { enabled: true }, sessionLogUnconfirmed: true })
+  await unknown.open('General')
+  await key(unknown, '\r')
+  await highlightRow(unknown, 'Session log upload')
+  await key(unknown, '\r')
+  await highlightCandidate(unknown, 'Off')
+  await key(unknown, '\r')
+  await settle(unknown, 12)
+  const unknownFrame = unknown.view()
+  assert.match(unknownFrame, /Outcome unconfirmed/u, 'the lost settlement is named explicitly')
+  assert.doesNotMatch(unknownFrame, /Retry save/u, 'a blind replay is not offered')
+  assert.equal(unknown.sessionLogWrites().length, 0, 'the fake did not apply the unconfirmed write')
+  unknown.dispose()
+
+  // An accepted official mutation whose fresh readback disagrees is not a
+  // definite refusal: it is an unverified accepted settlement.
+  const mismatched = setup({ columns: 200, rows: 44, sessionLog: { enabled: true }, sessionLogIgnoreWrite: true })
+  await mismatched.open('General')
+  await key(mismatched, '\r')
+  await highlightRow(mismatched, 'Session log upload')
+  await key(mismatched, '\r')
+  await highlightCandidate(mismatched, 'Off')
+  await key(mismatched, '\r')
+  await settle(mismatched, 12)
+  const mismatchedFrame = mismatched.view()
+  assert.match(mismatchedFrame, /Commit accepted · verification unavailable/u,
+    'the accepted but disagreeing readback is Unverified')
+  assert.doesNotMatch(mismatchedFrame, /Retry save/u)
+  assert.equal(mismatched.sessionLogWrites().length, 1, 'the official write was dispatched once')
+  assert.equal(mismatched.hostSections().sessionLog?.enabled, true)
+  mismatched.dispose()
+
+  // A definite Host refusal is different: the normal manual retry route stays.
+  const refused = setup({
+    columns: 200,
+    rows: 44,
+    sessionLog: { enabled: true },
+    sessionLogWriteFailure: 'official validator refused',
+  })
+  await refused.open('General')
+  await key(refused, '\r')
+  await highlightRow(refused, 'Session log upload')
+  await key(refused, '\r')
+  await highlightCandidate(refused, 'Off')
+  await key(refused, '\r')
+  await settle(refused, 12)
+  const refusedFrame = refused.view()
+  assert.match(refusedFrame, /Not saved/u)
+  assert.match(refusedFrame, /Retry save/u, 'a definite refusal keeps the manual retry route')
+  assert.equal(refused.sessionLogWrites().length, 0)
+  refused.dispose()
+})
+
+test('the Session log Confirm button is pointer-complete with the risk frame', async () => {
+  const h = setup({ columns: 200, rows: 44, sessionLog: { enabled: true } })
+  await h.open('General')
+  await key(h, '\r')
+  await highlightRow(h, 'Session log upload')
+  await key(h, '\r') // L2 choice
+  await highlightCandidate(h, 'Off')
+  const frame = h.view()
+  assert.match(frame, /Risk: May send chat content to DeepSeek API/u)
+  await clickPainted(h, 'Confirm')
+  await settle(h, 12)
+  assert.deepEqual(h.sessionLogWrites(), [{ field: 'enabled', op: 'set', value: false }])
+  assert.match(h.view(), /Verified/u)
+  h.dispose()
+})
+
+test('an absent session-log namespace paints no row; a stale authority stays visibly current-unknown and read-only', async () => {
+  const absent = setup({ columns: 200, rows: 44 })
+  await absent.open('General')
+  await key(absent, '\r')
+  assert.doesNotMatch(absent.view(), /Session log upload/u, 'no official namespace = no row')
+  absent.dispose()
+
+  const stale = setup({
+    columns: 200,
+    rows: 44,
+    readiness: 'stale',
+    sessionLog: { enabled: true, inherited: true },
+  })
+  await stale.open('General')
+  await key(stale, '\r')
+  await highlightRow(stale, 'Session log upload')
+  const frame = stale.view()
+  assert.match(frame, /Session log upload/u)
+  assert.match(frame, /Current unknown/u, 'a stale snapshot never claims a current Off/On')
+  await key(stale, '\r')
+  assert.doesNotMatch(stale.view(), /Choose value/u, 'no confirmable candidate is offered when not current')
+  assert.equal(stale.sessionLogWrites().length, 0)
+  stale.dispose()
+})
+
+test('the user shell sandbox policy Confirm stores the raw document value only', async () => {
   const h = setup({
     columns: 120,
     rows: 40,
@@ -1898,221 +2793,7 @@ test('R3-07 the user shell sandbox policy Confirm stores the raw document value 
   h.dispose()
 })
 
-test('R3-06 one queued section write cannot resurrect a route a pending picker write removed', async () => {
-  // The cross-surface failure this queue must prevent: the picker removes a
-  // route (its write is still in flight), the user leaves the picker and flips
-  // the toggle. The toggle owns ONLY `enabled`, so the route list it writes must
-  // come from the FRESH section inside the queue — not from the snapshot the
-  // user saw before the removal settled.
-  let openGate: (() => void) | undefined
-  const gate = new Promise<void>(resolve => { openGate = resolve })
-  const h = setup({
-    columns: 120,
-    rows: 40,
-    agent: {
-      sessionId: 'session-live',
-      approvalAvailable: true,
-      permissionNames: ['workspace-write'],
-      permissionDefault: { value: 'workspace-write' },
-      // Enabled with TWO routes: disabling must keep whatever routes survive,
-      // and the picker's removal is what they are.
-      subagent: { enabled: true, allowedModels: [{ provider: 'p1', model: 'm1' }, { provider: 'p1', model: 'm2' }] },
-      directory: [{ id: 'p1', name: 'P1', models: [{ id: 'm1' }, { id: 'm2' }] }],
-      gateSectionWrite: () => gate,
-    },
-  })
-  await openAgentRow(h, 'Subagent allowed models')
-  await key(h, '\r') // Detail focus
-  await key(h, '\r') // Manage → the picker
-  assert.match(h.view(), /P1/u, `the picker painted the official directory:\n${h.view()}`)
-  // Walk to m2 and toggle it OFF: that section write is held open.
-  await key(h, '\x1b[B')
-  await key(h, '\r')
-  await settle(h, 2)
-  // Leave the picker (its own Esc) and flip the toggle while the removal is
-  // still in flight. The toggle is 'on' -> 'off', so it needs no route gate.
-  await key(h, '\x1b') // picker Esc -> the allowlist row's Detail
-  await key(h, '\x1b') // Detail -> Rows
-  for (let step = 0; step < 8 && !agentSelectedRowLabel(h).includes('Subagent model selection'); step += 1) {
-    await key(h, '\x1b[B')
-  }
-  assert.match(agentSelectedRowLabel(h), /^Subagent model selection/u, `the toggle row was reached:\n${h.view()}`)
-  await key(h, '\r')
-  await key(h, '\x1b[A') // the current candidate is `on` → `off`
-  await key(h, '\r')
-  await settle(h, 2)
-  assert.deepEqual(h.subagentWrites(), [], 'nothing settles while the first write is held')
-
-  openGate!()
-  await settle(h, 12)
-  const writes = h.subagentWrites()
-  assert.ok(writes.length >= 2, `both intents committed in order: ${JSON.stringify(writes)}`)
-  // The INVARIANT this queue exists for: whatever the ORDER, no write after the
-  // picker's removal may resurrect the route the user withdrew, and the toggle
-  // must own only the `enabled` half.
-  const removalIndex = writes.findIndex(write => write.allowedModels.length === 1)
-  assert.ok(removalIndex >= 0, `the picker's removal committed: ${JSON.stringify(writes)}`)
-  const survived = writes[removalIndex]!.allowedModels
-  assert.equal(survived.length, 1, 'the picker removed exactly one of the two routes')
-  assert.equal(writes[removalIndex]!.enabled, true,
-    'the picker kept the CURRENT enabled half instead of the value it saw when it was built')
-  // The defect this queue prevents is RESURRECTION, not "every later write
-  // equals the removal's list": a later picker intent may legitimately change
-  // the list again. What may never happen is the withdrawn (provider, model)
-  // reappearing.
-  const removedRoute = writes[0]!.allowedModels.length === 1 && survived[0]!.model === 'm1' ? 'm2' : 'm1'
-  const afterRemoval = writes.slice(removalIndex + 1)
-  for (const write of afterRemoval) {
-    assert.ok(!write.allowedModels.some(route => route.model === removedRoute),
-      `the withdrawn route ${removedRoute} was resurrected: ${JSON.stringify(writes)}`)
-  }
-  const final = h.subagentSection()
-  assert.equal(final?.enabled, false, 'the toggle really landed')
-  assert.ok(!(final?.allowedModels ?? []).some(route => route.model === removedRoute),
-    `the withdrawn route ${removedRoute} never came back: ${JSON.stringify(final)}`)
-  h.dispose()
-})
-
-test('R3-06b a queued allowlist write is REFUSED when the backend goes stale while the first turn is held', async () => {
-  // Ready at dispatch time, then the Client loses currentness while the write
-  // waits: the queued turn must refuse from the FRESH authority at its own
-  // turn, never write the last-known section back, and the refusal must reach
-  // the user with its real reason.
-  let openGate: (() => void) | undefined
-  const gate = new Promise<void>(resolve => { openGate = resolve })
-  let gateStarted!: () => void
-  const started = new Promise<void>(resolve => { gateStarted = resolve })
-  const h = setup({
-    columns: 120,
-    rows: 40,
-    agent: {
-      sessionId: 'session-live',
-      approvalAvailable: true,
-      permissionNames: ['workspace-write'],
-      permissionDefault: { value: 'workspace-write' },
-      subagent: { enabled: true, allowedModels: [{ provider: 'p1', model: 'm1' }] },
-      directory: [{ id: 'p1', name: 'P1', models: [{ id: 'm1' }, { id: 'm2' }] }],
-      gateSectionWrite: () => { gateStarted(); return gate },
-      // The ready -> stale transition happens ONLY after the first turn is
-      // already in flight.
-      getFailure: undefined,
-    },
-  })
-  await openAgentRow(h, 'Subagent allowed models')
-  await key(h, '\r') // Detail focus
-  await key(h, '\r') // Manage → the picker
-  assert.match(h.view(), /P1/u, `the picker painted the official directory:\n${h.view()}`)
-  // First intent: add m2. Its section write starts and is held.
-  await key(h, '\x1b[B') // m1 -> m2
-  await key(h, '\r')
-  await started
-  // Second intent: remove m1. It queues behind the held write.
-  await key(h, '\x1b[A') // m2 -> m1
-  await key(h, '\r')
-  await settle(h, 2)
-  assert.deepEqual(h.subagentWrites(), [], 'nothing settles while the first turn is held')
-
-  // The Client loses currentness while the second intent waits for its turn.
-  h.setReadiness('stale')
-  openGate!()
-  await settle(h, 12)
-
-  assert.equal(h.subagentWrites().length, 1, 'only the ready-time turn wrote the section')
-  assert.deepEqual(h.subagentWrites()[0]?.allowedModels, [{ provider: 'p1', model: 'm1' }, { provider: 'p1', model: 'm2' }],
-    'the first write carried the fresh section plus its own route')
-  // The queued stale turn wrote NOTHING: the last-known section was not written back.
-  assert.deepEqual(h.subagentSection(), {
-    enabled: true,
-    allowedModels: [{ provider: 'p1', model: 'm1' }, { provider: 'p1', model: 'm2' }],
-  }, 'the stale turn never removed m1')
-  // The refusal is diagnosable and reaches the user (no silent success).
-  assert.ok(h.notices().some(notice => /allowlist write failed: the configuration is stale/u.test(notice)),
-    `the queued turn's real refusal reached the user: ${JSON.stringify(h.notices())}`)
-  h.dispose()
-})
-
-test('R3-06c a READY but UNREADABLE official section is never written as an empty config', async () => {
-  // The one-shot failure targets the COMMIT read (the snapshot opened from a
-  // readable section, so the row and its candidates exist); the following
-  // refresh reads the section again and paints the real refusal.
-  let failNextRead = false
-  const h = setup({
-    columns: 120,
-    rows: 40,
-    agent: {
-      sessionId: 'session-live',
-      approvalAvailable: true,
-      permissionNames: ['workspace-write'],
-      permissionDefault: { value: 'workspace-write' },
-      subagent: { enabled: false, allowedModels: [{ provider: 'p1', model: 'm1' }] },
-      directory: [{ id: 'p1', name: 'P1', models: [{ id: 'm1' }] }],
-      getFailure: () => {
-        if (!failNextRead) return undefined
-        failNextRead = false
-        return 'the official section could not be read'
-      },
-    },
-  })
-  await openAgentRow(h, 'Subagent model selection')
-  await key(h, '\r') // Detail + choice (off)
-  await key(h, '\x1b[B') // off -> on
-  failNextRead = true
-  await key(h, '\r') // Confirm: the commit's authoritative read throws
-  await settle(h)
-
-  assert.deepEqual(h.subagentWrites(), [], 'an unreadable section produces ZERO official writes')
-  assert.deepEqual(h.subagentSection(), { enabled: false, allowedModels: [{ provider: 'p1', model: 'm1' }] },
-    'the section is not rewritten from a fabricated empty base')
-  const view = h.view()
-  assert.match(view, /Not saved/u, `the refusal is reported:\n${view}`)
-  assert.match(detailsPaneText(h).replace(/\s+/gu, ' '),
-    /the official subagent model-selection section could not be read: the official section could not be read/u,
-    `the real read failure is on screen:\n${view}`)
-  assert.doesNotMatch(view, /Status\s+Verified/u, 'an unreadable section is never Verified')
-  h.dispose()
-})
-
-test('R3-09 a NON-CURRENT backend paints no confirmable Agent candidate and claims no current value', async () => {
-  for (const readiness of ['stale', 'unavailable'] as const) {
-    const h = setup({
-      columns: 140,
-      rows: 44,
-      readiness,
-      doc: { localShellSandbox: 'bypass' },
-      agent: {
-        sessionId: 'session-live',
-        approvalAvailable: true,
-        approval: { value: 'ask' },
-        permissionNames: ['workspace-write', 'danger-full-access'],
-        permissionDefault: { value: 'workspace-write' },
-        subagent: { enabled: true, allowedModels: [{ provider: 'p1', model: 'm1' }] },
-        directory: [{ id: 'p1', name: 'P1', models: [{ id: 'm1' }] }],
-      },
-    })
-    await h.open('Agent')
-    await key(h, '\r')
-    // The delegation rows report the LAST-KNOWN state and claim no [current],
-    // and the Manage action is NOT offered (the picker would refuse anyway).
-    assert.match(h.view(), /Subagent allowed models/u, `${readiness}: the row stays reachable`)
-    await openRowInAgent(h, 'Subagent allowed models')
-    await key(h, '\r')
-    assert.doesNotMatch(h.view(), /Manage allowed models…/u,
-      `${readiness}: a non-current section offers no Manage action:\n${h.view()}`)
-    assert.doesNotMatch(h.view(), /Provider One/u, `${readiness}: the picker never mounts`)
-    // Back to the rows level before walking to the toggle.
-    await key(h, '\x1b')
-    await openRowInAgent(h, 'Subagent model selection')
-    await key(h, '\r') // its Detail cannot open a choice with no candidates
-    const view = h.view()
-    assert.match(view, /No candidate is available for this setting right now\./u,
-      `${readiness}: a non-current section offers NO confirmable candidate:\n${view}`)
-    assert.doesNotMatch(view, /\[current\]/u, `${readiness}: no [current] chip on an unconfirmed value`)
-    assert.doesNotMatch(view, /Enter confirm/u, `${readiness}: no confirm affordance is advertised`)
-    h.dispose()
-  }
-})
-
-test('R3-09b the default permission and shell policy rows offer no candidate on a non-ready backend', async () => {
+test('the default permission and shell policy rows offer no candidate on a non-ready backend', async () => {
   for (const readiness of ['stale', 'unavailable'] as const) {
     const h = setup({
       columns: 140,
@@ -2147,7 +2828,7 @@ test('R3-09b the default permission and shell policy rows offer no candidate on 
 
 // ── A-12: the return surface ──────────────────────────────────────────────
 
-test('A-12 Esc restores the SAME return surface: the editor draft, the regular footer and the fullscreen mode', async () => {
+test('Esc restores the SAME return surface: the editor draft, the regular footer and the fullscreen mode', async () => {
   const h = setup({ columns: 100, rows: 40 })
   await h.vt.waitForRender()
   for (const ch of 'draft text') await key(h, ch)
@@ -2170,7 +2851,7 @@ test('A-12 Esc restores the SAME return surface: the editor draft, the regular f
 
 // ── A-15: live theme tokens ───────────────────────────────────────────────
 
-test('A-15 the workspace chrome paints the live palette tokens (dark → light)', async () => {
+test('the workspace chrome paints the live palette tokens (dark → light)', async () => {
   // The row summaries come from the LIVE authorities (C2-R1): the icon row's
   // summary is `app.currentIconStyle()`, so the app must start on the style this
   // token assertion names.
@@ -2183,8 +2864,8 @@ test('A-15 the workspace chrome paints the live palette tokens (dark → light)'
   // The active device and the cursor share `primary`; the identity word above
   // does NOT (it is weight-only). This is the exact split the vocabulary fixes:
   // ordinary focus is never the amber `borderFocus` (which equals `warning`).
-  const paneHeadRow = rowOf(h, '[Categories (9)]')
-  const paneHeadCol = cellIndexOf(h, paneHeadRow, '[Categories (9)]')
+  const paneHeadRow = rowOf(h, '[Categories (10)]')
+  const paneHeadCol = cellIndexOf(h, paneHeadRow, '[Categories (10)]')
   assert.equal(h.vt.getCellFgRgb(paneHeadRow, paneHeadCol), hexToRgb(currentPalette.primary),
     'the focused pane label wears the bracketed bold primary active device')
   const cursorRow = rowOf(h, '> Appearance')
@@ -2268,7 +2949,7 @@ test('the retired Legacy Copy cells are inert while the rails Copy All stays a r
 test('a click anywhere in a visible column takes that column focus', async () => {
   const h = setup({ columns: 100, rows: 40, doc: { theme: 'dark' } })
   await h.open()
-  assert.match(h.rowsPlain()[rowOf(h, 'Categories (9)')]!, /\[Categories \(9\)\]/, 'the categories level owns focus at open')
+  assert.match(h.rowsPlain()[rowOf(h, 'Categories (10)')]!, /\[Categories \(10\)\]/, 'the categories level owns focus at open')
   // Clicking a row selects it and takes the rows level's focus (and therefore
   // the rows + detail composition).
   const iconRow = rowOf(h, 'Icon style')
@@ -2293,7 +2974,7 @@ test('100x3 paints real content in its only body row, not pane headers', async (
   const painted = h.rowsPlain()
   assert.equal(painted.length, 3)
   assert.ok(painted.some(line => line.includes('Configured theme')), `the only body row is real content:\n${h.view()}`)
-  assert.ok(!painted.some(line => line.includes('Categories (9)')), 'the pane header yields to the content row')
+  assert.ok(!painted.some(line => line.includes('Categories (10)')), 'the pane header yields to the content row')
   h.dispose()
 })
 
@@ -2415,18 +3096,18 @@ test('a raw source value with a line break renders a visible escape distinct fro
 
 // ── F9 extras: the remaining matrix controls ──────────────────────────────
 
-test('A-02b the wide geometry is exact and a 300-char value never squeezes the Action Bar', async () => {
+test('the wide geometry is exact and a 300-char value never squeezes the Action Bar', async () => {
   const long = `file:${'x'.repeat(300)}`
   const h = setup({ columns: 200, rows: 60, doc: { theme: long } })
   await h.open()
-  const paneRow = rowOf(h, 'Categories (9)')
-  assert.equal(cellIndexOf(h, paneRow, '[Categories (9)]'), 0, 'the categories level starts at cell 0 and owns focus at L0')
+  const paneRow = rowOf(h, 'Categories (10)')
+  assert.equal(cellIndexOf(h, paneRow, '[Categories (10)]'), 0, 'the categories level starts at cell 0 and owns focus at L0')
   assert.equal(cellIndexOf(h, paneRow, 'Rows (4)'), 22 + 2, 'the row column starts after the 22-cell column and a 2-cell gap')
   assert.equal(cellIndexOf(h, paneRow, 'Details'), 22 + 2 + 42 + 2, 'the detail column starts after the 42-cell row column and a 2-cell gap')
   for (const [index, line] of h.vt.getViewport().entries()) {
     assert.ok(visibleWidth(line) <= 200, `row ${index} must fit the terminal`)
   }
-  assert.match(h.rowsPlain().at(-1) ?? '', /Right open · Enter open · Tab panes · Esc close/, 'the Action Bar stays the last physical row')
+  assert.match(h.rowsPlain().at(-1) ?? '', /Right open · Enter open · Tab panes · Close \[Esc\]/, 'the Action Bar stays the last physical row')
   await key(h, '\r') // L0 -> L1 (the row list owns the keyboard)
   await key(h, '\r') // L1 -> inline choice
   assert.ok(h.view().includes('Full value'), 'the complete long value starts in the facts region')
@@ -2435,7 +3116,7 @@ test('A-02b the wide geometry is exact and a 300-char value never squeezes the A
   h.dispose()
 })
 
-test('A-10c the About copy failure paths report inside the workspace instead of a false success', async () => {
+test('the About copy failure paths report inside the workspace instead of a false success', async () => {
   for (const failing of [async () => false, async () => { throw new Error('clipboard refused') }]) {
     const h = setup({
       columns: 140,
@@ -2452,7 +3133,7 @@ test('A-10c the About copy failure paths report inside the workspace instead of 
   }
 })
 
-test('A-15b a custom palette repaints the workspace tokens', async () => {
+test('a custom palette repaints the workspace tokens', async () => {
   const h = setup({ columns: 100, rows: 40 })
   await h.open()
   const dark = h.vt.getCellFgRgb(0, 0)
@@ -2464,7 +3145,7 @@ test('A-15b a custom palette repaints the workspace tokens', async () => {
   h.dispose()
 })
 
-test('A-06b a non-first row and its REAL detail scroll survive a resize', async () => {
+test('a non-first row and its REAL detail scroll survive a resize', async () => {
   // A long RAW icon-style value makes the SELECTED row's Detail overflow the
   // short viewport, so the scroll below is observable and meaningful.
   const h = setup({ columns: 100, rows: 10, doc: { iconStyle: `symbols-${'z'.repeat(240)}` } })
@@ -2485,7 +3166,7 @@ test('A-06b a non-first row and its REAL detail scroll survive a resize', async 
   h.dispose()
 })
 
-test('A-15c an unhandled printable key is inert inside the workspace', async () => {
+test('an unhandled printable key is inert inside the workspace', async () => {
   const h = setup({ columns: 100, rows: 40, doc: { theme: 'dark' } })
   await h.open()
   const before = h.view()
@@ -2499,12 +3180,12 @@ test('A-15c an unhandled printable key is inert inside the workspace', async () 
 test('a real category/row item click takes that level and selects the item', async () => {
   const wide = setup({ columns: 200, rows: 24, doc: { theme: 'dark' } })
   await wide.open()
-  assert.match(wide.rowsPlain()[rowOf(wide, 'Categories (9)')]!, /\[Categories \(9\)\]/, 'the categories level owns focus at open')
+  assert.match(wide.rowsPlain()[rowOf(wide, 'Categories (10)')]!, /\[Categories \(10\)\]/, 'the categories level owns focus at open')
   const displayRow = rowOf(wide, 'Conversation')
   press(wide, displayRow, 2)
   release(wide, displayRow, 2)
   await wide.vt.waitForRender()
-  assert.match(wide.rowsPlain()[rowOf(wide, 'Categories (9)')]!, /\[Categories \(9\)\]/, 'the clicked category keeps the categories level')
+  assert.match(wide.rowsPlain()[rowOf(wide, 'Categories (10)')]!, /\[Categories \(10\)\]/, 'the clicked category keeps the categories level')
   assert.ok(wide.rowsPlain().some(line => line.startsWith('> Conversation')), 'and selects the clicked category')
   await key(wide, '\x1b[B')
   assert.ok(wide.rowsPlain().some(line => line.startsWith('> Input & Terminal')), 'Down now moves the CATEGORY, not the row')
@@ -2535,7 +3216,7 @@ test('below the body floor the Action Bar advertises only the Esc semantics', as
     // alone and starts at X=0 in every projection. A narrow terminal opens on
     // the About CONTENT (Esc back to the rail); 76+ opens on the rail (Esc
     // close).
-    const back = columns < 76 ? 'Esc back' : 'Esc close'
+    const back = columns < 76 ? 'Back [Esc]' : 'Close [Esc]'
     assert.ok(bar.includes(back), `the bar keeps its ${back} semantics at ${columns}x${rows}: ${bar}`)
     for (const forbidden of ['Up/Down', 'Left', 'Right', 'Enter', 'Tab', 'r refresh', 'c copy', 'PgDn', 'PgUp']) {
       assert.ok(!bar.includes(forbidden), `${columns}x${rows} must not advertise the inert ${forbidden}: ${bar}`)
@@ -2690,7 +3371,7 @@ test('Left/Right select levels while Tab/Shift+Tab only re-focus the panes', asy
 
 // ── External UI review (PR #295) P2s ───────────────────────────────────────
 
-test('A-02c the list summary survives a long value and stays exact for a short one', async () => {
+test('the list summary survives a long value and stays exact for a short one', async () => {
   const long = `file:${'w'.repeat(120)}`
   // The rows pane is located from its painted pane header, so the assertion
   // follows the real medium geometry (L0 paints the list in its second column).
@@ -2723,13 +3404,13 @@ test('A-02c the list summary survives a long value and stays exact for a short o
   narrow.dispose()
 })
 
-test('A-05b the decorative rules yield before readable content on short screens', async () => {
+test('the decorative rules yield before readable content on short screens', async () => {
   // 5 rows without a notice: header + THREE real body rows + bar, no rule row.
   const short = setup({ columns: 72, rows: 5, doc: { theme: 'dark' } })
   await short.open()
   const painted = short.rowsPlain()
   assert.equal(painted.length, 5)
-  assert.match(painted.at(-1)!, /Right open · Enter open · Esc close/)
+  assert.match(painted.at(-1)!, /Right open · Enter open · Close \[Esc\]/)
   assert.equal(painted.filter(line => /^─+$/.test(line)).length, 0, 'the decorative rules yield at 5 rows')
   for (const label of ['Account', 'Agent', 'Appearance']) {
     assert.ok(painted.some(line => line.includes(label)), `the body keeps the real ${label} row:\n${short.view()}`)
@@ -2751,7 +3432,7 @@ test('A-05b the decorative rules yield before readable content on short screens'
     await live.vt.waitForRender()
     const frame = live.rowsPlain()
     assert.equal(frame.length, rows)
-    assert.match(frame.at(-1)!, /Esc back/)
+    assert.match(frame.at(-1)!, /Back \[Esc\]/)
     assert.ok(frame.some(line => line.includes('Copy sent')), `the notice is still granted and painted at ${rows} rows:\n${live.view()}`)
     assert.equal(frame.filter(line => /^─+$/.test(line)).length, 0, `the decorative rules yield at ${rows} rows:\n${live.view()}`)
     if (rows === 8) {
@@ -2763,10 +3444,148 @@ test('A-05b the decorative rules yield before readable content on short screens'
       assert.ok(frame.some(line => line.includes('TUI')), `a real About fact remains in the body:\n${live.view()}`)
       // The header row names the pane the frame really paints and the frame
       // keeps exactly one physical bar.
-      assert.equal(frame.filter(line => /Esc (?:back|close)/u.test(line)).length, 1, 'one truthful bar')
+      assert.equal(frame.filter(line => /Back \[Esc\]|Close \[Esc\]/u.test(line)).length, 1, 'one truthful bar')
     }
   }
   live.dispose()
+})
+
+// ── PR2: the ONE physical last-row Esc affordance is clickable ─────────────
+
+test('Settings rail, Rows, Detail and About Esc affordances move exactly one level per click', async () => {
+  const h = setup({ columns: 100, rows: 30, doc: { theme: 'dark' } })
+  await h.openHome()
+  const affordance = (label: string): { row: number; col: number } => {
+    const rows = h.rowsPlain()
+    const row = rows.length - 1
+    const col = rows[row]!.indexOf(label)
+    assert.ok(col >= 0, `the ${label} affordance is painted on the physical last row:\n${h.view()}`)
+    return { row, col }
+  }
+  const click = async (label: string): Promise<void> => {
+    const cell = affordance(label)
+    press(h, cell.row, cell.col)
+    release(h, cell.row, cell.col)
+    await settle(h)
+  }
+
+  // L0 rail: Close leaves the ONE Settings lease through the user-exit path.
+  assert.match(h.rowsPlain().at(-1)!, /Close \[Esc\]/, 'the rail bar names its real Esc outcome')
+  await click('Close [Esc]')
+  assert.doesNotMatch(h.view(), /Settings · /, 'the rail Close left the Settings workspace')
+
+  // A legacy category: L0 -> L1 -> L2 -> L1 -> L0 stays one click per level.
+  await h.open('Appearance')
+  await key(h, '\r')
+  assert.match(h.rowsPlain()[0]!, /· Rows/)
+  assert.match(h.rowsPlain().at(-1)!, /Back \[Esc\]/, 'the Rows bar names Back')
+  await key(h, '\r')
+  assert.match(h.rowsPlain()[0]!, /· Configured theme|· Rows/, 'the Detail level is painted')
+  const detailHeader = h.rowsPlain()[0]!
+  assert.match(detailHeader, /· Configured theme/, 'the click test is at L2')
+  await click('Back [Esc]')
+  assert.match(h.rowsPlain()[0]!, /· Rows/, 'one click returned to the Rows level')
+  await click('Back [Esc]')
+  assert.match(h.rowsPlain()[0]!, /Settings · Categories/, 'the second click returned to the rail')
+  await click('Close [Esc]')
+  assert.doesNotMatch(h.view(), /Settings · /, 'the rail Close left the workspace again')
+
+  // The About content's Back returns to the rail, never out of the workspace.
+  await h.openHome()
+  await key(h, '\t')
+  assert.match(h.view(), /Settings · About/, 'Tab focused the About content')
+  await click('Back [Esc]')
+  assert.match(h.rowsPlain()[0]!, /Settings · Categories/, 'the About Back returned to the rail')
+  assert.match(h.rowsPlain().at(-1)!, /Close \[Esc\]/, 'the rail owns the bar again')
+  await click('Close [Esc]')
+  assert.doesNotMatch(h.view(), /Settings · /, 'the outer Close left the workspace')
+  h.dispose()
+})
+
+test('a Settings bar press is refused when a keyboard transition or resize re-paints the frame', async () => {
+  const h = setup({ columns: 100, rows: 30, doc: { theme: 'dark' } })
+  await h.open('Appearance')
+  await key(h, '\r') // L1: the bar's Back would return to the rail
+  const rows = h.rowsPlain()
+  const row = rows.length - 1
+  const col = rows[row]!.indexOf('Back [Esc]')
+  assert.ok(col >= 0, `the Rows Back affordance is painted:\n${h.view()}`)
+  // PRESS, then let the KEYBOARD move to L2 (the bar still says Back, but the
+  // frame identity moved), and only then RELEASE: the stale press is inert.
+  press(h, row, col)
+  await key(h, '\r')
+  assert.match(h.rowsPlain()[0]!, /· Configured theme/, 'the keyboard really moved to L2')
+  release(h, row, col)
+  await settle(h)
+  assert.match(h.rowsPlain()[0]!, /· Configured theme/, 'the stale release never navigated')
+
+  // Same for a resize between the two halves.
+  const rows2 = h.rowsPlain()
+  const row2 = rows2.length - 1
+  const col2 = rows2[row2]!.indexOf('Back [Esc]')
+  press(h, row2, col2)
+  h.vt.resize(100, 24)
+  await h.vt.waitForRender()
+  release(h, row2, col2)
+  await settle(h)
+  assert.match(h.rowsPlain()[0]!, /· Configured theme/, 'a release after a resize is inert')
+  h.dispose()
+})
+
+test('a child identity change with identical bar cells refuses the stale release', async () => {
+  const h = setup({ columns: 120, rows: 40, pluginPage: true })
+  await h.open('Plugins')
+  await key(h, '\r') // rail -> plugin content
+  const page = h.pluginPageInstances()[0]!
+  const barCell = (): { row: number; col: number; bar: string } => {
+    const rows = h.rowsPlain()
+    const row = rows.length - 1
+    const bar = rows[row]!
+    const col = bar.indexOf('Back [Esc]')
+    assert.ok(col >= 0, `the page bar paints Back:\n${bar}`)
+    return { row, col, bar }
+  }
+  const before = barCell()
+  press(h, before.row, before.col)
+  // The page's own semantic identity advances while its painted bar keeps the
+  // EXACT same cells; the root must refuse to hand the stale press to the new
+  // page state (its Esc would yield the keyboard to the rail).
+  page.bumpGestureIdentity()
+  h.app.requestRender()
+  await h.vt.waitForRender()
+  const after = barCell()
+  assert.equal(after.bar, before.bar, 'the child repaint keeps every bar cell identical')
+  release(h, before.row, before.col)
+  await settle(h)
+  assert.match(h.rowsPlain().at(-1)!, /PLUGIN BAR · Back \[Esc\]/, 'the stale release did not run the new page Esc')
+  assert.equal(h.pluginPageInstances()[0], page, 'the page instance stayed the focused owner')
+
+  // Positive control: the same cells on the CURRENT identity still run the
+  // child's own Esc (the List yields to the rail), once.
+  const current = barCell()
+  await key(h, '\x1b')
+  assert.match(h.rowsPlain().at(-1)!, /Close \[Esc\]/, 'the keyboard Esc yields to the rail')
+  h.dispose()
+})
+
+test('the embedded plugin page publishes its Esc span and the root runs its own handler on a click', async () => {
+  const h = setup({ columns: 120, rows: 40, pluginPage: true })
+  await h.open('Plugins')
+  await key(h, '\r') // rail -> plugin content
+  const page = h.pluginPageInstances()[0]!
+  assert.equal(h.pluginPageInstances().length, 1)
+  const rows = h.rowsPlain()
+  const row = rows.length - 1
+  assert.match(rows[row]!, /PLUGIN BAR · Back \[Esc\]/, 'the page bar is the physical last row')
+  const col = rows[row]!.indexOf('Back [Esc]')
+  press(h, row, col)
+  release(h, row, col)
+  await settle(h)
+  // The root replays the child's OWN Esc handler (the List yields), never a
+  // second visible-layer navigation ladder.
+  assert.equal(h.pluginPageInstances()[0], page, 'the page instance survived the click')
+  assert.match(h.rowsPlain().at(-1)!, /Close \[Esc\]/, 'the rail owns the physical last row again')
+  h.dispose()
 })
 
 // ── External UI review round 2 (PR #295): the narrow drill-down contract ───
@@ -2889,20 +3708,20 @@ test('the medium projection is a pure function of focus: L0 categories+rows, L1/
   for (const columns of [76, 107]) {
     const h = setup({ columns, rows: 40, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
     await h.open()
-    assert.ok(h.rowsPlain().some(line => line.includes('Categories (9)')), `L0 categories at ${columns}:\n${h.view()}`)
+    assert.ok(h.rowsPlain().some(line => line.includes('Categories (10)')), `L0 categories at ${columns}:\n${h.view()}`)
     assert.ok(!h.view().includes('Details'), 'L0 paints no Detail pane')
     assert.ok(!h.view().includes('Copy value [C]'), 'L0 publishes no Detail button')
     await key(h, '\r')
     assert.ok(h.rowsPlain().some(line => line.includes('Details')), 'L1 paints rows+detail')
-    assert.ok(!h.view().includes('Categories (9)'), 'L1 drops the categories column')
+    assert.ok(!h.view().includes('Categories (10)'), 'L1 drops the categories column')
     await key(h, '\r')
     assert.ok(h.view().includes('Choose value'), 'L2 enters an inline choice without a second browse Enter')
     assert.ok(h.view().includes('Solarized'), 'the selected source identity remains visible')
-    assert.ok(!h.view().includes('Categories (9)'), 'L2 keeps the rows+detail projection')
+    assert.ok(!h.view().includes('Categories (10)'), 'L2 keeps the rows+detail projection')
     await key(h, '\x1b')
     assert.match(h.rowsPlain()[0]!, /· Rows/, 'Esc cancels L2 directly back to L1')
     await key(h, '\x1b')
-    assert.ok(h.rowsPlain().some(line => line.includes('Categories (9)')), 'Esc from L1 returns to categories+rows')
+    assert.ok(h.rowsPlain().some(line => line.includes('Categories (10)')), 'Esc from L1 returns to categories+rows')
     assert.ok(!h.view().includes('Details'), 'and hides the detail again')
     h.dispose()
   }
@@ -2990,7 +3809,7 @@ test('a one-row choice cannot confirm invisibly and the first Enter only reveals
 
   h.vt.resize(100, 3)
   await h.vt.waitForRender()
-  assert.match(h.rowsPlain().at(-1) ?? '', /^Esc back/, 'one granted choice row advertises only its safe back action')
+  assert.match(h.rowsPlain().at(-1) ?? '', /^Back \[Esc\]/, 'one granted choice row advertises only its safe back action')
   assert.ok(!h.rowsPlain().at(-1)!.includes('Enter confirm'))
   assert.ok(h.view().includes('> dark'), 'the one candidate row is still identity-bearing')
   await key(h, '\r')
@@ -2999,7 +3818,7 @@ test('a one-row choice cannot confirm invisibly and the first Enter only reveals
 
   h.vt.resize(100, 2)
   await h.vt.waitForRender()
-  assert.match(h.rowsPlain().at(-1) ?? '', /^Esc back/, 'with zero body rows only Esc remains')
+  assert.match(h.rowsPlain().at(-1) ?? '', /^Back \[Esc\]/, 'with zero body rows only Esc remains')
   await key(h, '\r')
   assert.equal(h.replacements(), 0, 'the below-floor Enter stays inert')
   h.dispose()
@@ -3174,7 +3993,7 @@ test('the projection table is frozen: below 76 columns one pane, 76..107 two, 10
     await h.open()
     await key(h, '\r') // L0 -> L1: the rows pane always, plus the detail when the width grants it
     const painted = h.rowsPlain()
-    assert.equal(painted.some(line => line.includes('Categories (9)')), panes === 3, `the categories pane at ${columns} columns:\n${h.view()}`)
+    assert.equal(painted.some(line => line.includes('Categories (10)')), panes === 3, `the categories pane at ${columns} columns:\n${h.view()}`)
     assert.equal(painted.some(line => line.includes('Details')), panes >= 2, `the detail pane at ${columns} columns:\n${h.view()}`)
     assertRowWidths(h, columns)
     h.dispose()
@@ -3197,7 +4016,7 @@ async function openSelectedRow(h: Harness, row: 'theme' | 'display-preset'): Pro
   await key(h, '\r') // L0 -> L1
 }
 
-test('B-01 the Theme Detail separates the runtime palette from the persisted preference and starts read-only', async () => {
+test('the Theme Detail separates the runtime palette from the persisted preference and starts read-only', async () => {
   const h = setup({ columns: 140, rows: 40, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
   await openSelectedRow(h, 'theme')
   assert.match(h.rowsPlain()[0]!, /Settings · Appearance · Rows/)
@@ -3210,7 +4029,7 @@ test('B-01 the Theme Detail separates the runtime palette from the persisted pre
   h.dispose()
 })
 
-test('B-02 Enter opens the L2 choice; moving the candidate writes nothing; only the explicit Confirm commits and verifies', async () => {
+test('Enter opens the L2 choice; moving the candidate writes nothing; only the explicit Confirm commits and verifies', async () => {
   const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark' }, themes: pluginThemes() })
   await openSelectedRow(h, 'theme')
   await key(h, '\r') // L1 -> inline choice
@@ -3273,7 +4092,7 @@ test('B-02 Enter opens the L2 choice; moving the candidate writes nothing; only 
   h.dispose()
 })
 
-test('B-03 a confirmed Theme commit whose write is refused reports the real failure and never claims Verified', async () => {
+test('a confirmed Theme commit whose write is refused reports the real failure and never claims Verified', async () => {
   const h = setup({
     columns: 200,
     rows: 40,
@@ -3311,7 +4130,7 @@ test('B-03 a confirmed Theme commit whose write is refused reports the real fail
   h.dispose()
 })
 
-test('B-04 Retry save re-dispatches the failed value once the write can succeed', async () => {
+test('Retry save re-dispatches the failed value once the write can succeed', async () => {
   let refuse = true
   const h = setup({
     columns: 200,
@@ -3347,7 +4166,7 @@ test('B-04 Retry save re-dispatches the failed value once the write can succeed'
   h.dispose()
 })
 
-test('B-04b two long same-prefix theme identities stay distinguishable at 44 columns and Confirm the raw choice', async () => {
+test('two long same-prefix theme identities stay distinguishable at 44 columns and Confirm the raw choice', async () => {
   const themes = new ThemeRegistry()
   themes.register({
     id: 'sunrise-alpha', name: 'Sunrise very long theme name alpha',
@@ -3379,7 +4198,7 @@ test('B-04b two long same-prefix theme identities stay distinguishable at 44 col
   h.dispose()
 })
 
-test('B-05 the Display preset applies through the shared runtime owner, persists exactly once and verifies', async () => {
+test('the Display preset applies through the shared runtime owner, persists exactly once and verifies', async () => {
   const h = setup({ columns: 140, rows: 40, doc: { displayPreset: 'compact', theme: 'dark' }, displayPreset: 'full' })
   await openSelectedRow(h, 'display-preset')
   assert.match(h.view(), /Value\s+full/, 'the row value IS the live runtime preset')
@@ -3406,7 +4225,7 @@ test('B-05 the Display preset applies through the shared runtime owner, persists
   h.dispose()
 })
 
-test('B-05b the profile-wide Visual tools switch confirms through its Host port, verifies and restores', async () => {
+test('the profile-wide Visual tools switch confirms through its Host port, verifies and restores', async () => {
   const h = setup({ columns: 200, rows: 40 })
   await h.open('Tools')
   assert.match(h.view(), /Visual tools/, 'the Tools category carries the built-in switch row')
@@ -3443,7 +4262,7 @@ test('B-05b the profile-wide Visual tools switch confirms through its Host port,
   h.dispose()
 })
 
-test('B-05c an unavailable Visual tools section stays visible and offers neither choice nor write', async () => {
+test('an unavailable Visual tools section stays visible and offers neither choice nor write', async () => {
   const h = setup({ columns: 200, rows: 40, visualToolsUnavailable: true })
   await h.open('Tools')
   assert.match(h.view(), /Visual tools/, 'the category still names its built-in row')
@@ -3457,7 +4276,7 @@ test('B-05c an unavailable Visual tools section stays visible and offers neither
   h.dispose()
 })
 
-test('B-05d a stale backend keeps the last-known Visual tools value but refuses the write', async () => {
+test('a stale backend keeps the last-known Visual tools value but refuses the write', async () => {
   const h = setup({
     columns: 200,
     rows: 40,
@@ -3475,7 +4294,7 @@ test('B-05d a stale backend keeps the last-known Visual tools value but refuses 
   h.dispose()
 })
 
-test('B-05e a switch the Host registry did not adopt is reported as unverified, never Verified', async () => {
+test('a switch the Host registry did not adopt is reported as unverified, never Verified', async () => {
   const h = setup({
     columns: 200,
     rows: 40,
@@ -3515,7 +4334,7 @@ test('B-05e2 a verified Off whose registrations remain is named as a runtime mis
   h.dispose()
 })
 
-test('B-05f a refused Visual tools write is reported as Not saved and never Verified', async () => {
+test('a refused Visual tools write is reported as Not saved and never Verified', async () => {
   const h = setup({
     columns: 200,
     rows: 40,
@@ -3534,7 +4353,7 @@ test('B-05f a refused Visual tools write is reported as Not saved and never Veri
   h.dispose()
 })
 
-test('B-05g an external edit before Confirm is a conflict, never a silent overwrite', async () => {
+test('an external edit before Confirm is a conflict, never a silent overwrite', async () => {
   const h = setup({ columns: 200, rows: 40, visualToolsExternalChange: false })
   await h.open('Tools')
   await key(h, '\r')
@@ -3549,7 +4368,7 @@ test('B-05g an external edit before Confirm is a conflict, never a silent overwr
   h.dispose()
 })
 
-test('B-06 a stale backend never writes and says why; the Display runtime fact still applies locally', async () => {
+test('a stale backend never writes and says why; the Display runtime fact still applies locally', async () => {
   const theme = setup({ columns: 200, rows: 40, doc: { theme: 'dark' }, readiness: 'stale', themes: pluginThemes() })
   await openSelectedRow(theme, 'theme')
   await key(theme, '\r')
@@ -3583,7 +4402,7 @@ test('B-06 a stale backend never writes and says why; the Display runtime fact s
   display.dispose()
 })
 
-test('B-07 a stored theme whose source is gone is listed as unavailable and can never be confirmed', async () => {
+test('a stored theme whose source is gone is listed as unavailable and can never be confirmed', async () => {
   const h = setup({ columns: 140, rows: 40, doc: { theme: 'plugin:gone/removed' } })
   await openSelectedRow(h, 'theme')
   assert.match(h.view(), /plugin:gone\/removed/, 'the broken persisted identity is still readable')
@@ -3598,7 +4417,7 @@ test('B-07 a stored theme whose source is gone is listed as unavailable and can 
   h.dispose()
 })
 
-test('B-08 the Input & Terminal handoff keeps its facts readable and gains no edit channel', async () => {
+test('the Input & Terminal handoff keeps its facts readable and gains no edit channel', async () => {
   // C2-R2 migrated every Input & Terminal configuration row; C2-R5 replaced the
   // last read-only handoff with the same-lease Keyboard shortcuts page entry. It
   // paints no scalar writer and exposes no copy verb.
@@ -3625,13 +4444,13 @@ test('B-08 the Input & Terminal handoff keeps its facts readable and gains no ed
   assert.match(page, /Settings · Input & Terminal · Keyboard shortcuts/u,
     `the Settings lease is still the ONE physical owner:\n${page}`)
   assert.match(page, /Search: /, 'the page body owns the keyboard search input')
-  assert.match(page, /Esc close/, 'the page ends on its ONE Action Bar')
+  assert.match(page, /Back \[Esc\]/, 'the page ends on its ONE Action Bar (Esc returns to Settings)')
   assert.doesNotMatch(page, /Type to search/, 'the legacy editor never mounts behind it')
   assert.equal(h.replacements(), 0, 'opening the page writes nothing')
   h.dispose()
 })
 
-test('B-09 a settlement held across the teardown never reaches a closed or replacement workspace', async () => {
+test('a settlement held across the teardown never reaches a closed or replacement workspace', async () => {
   const h = setup({ columns: 200, rows: 40, doc: { theme: 'dark' }, themes: pluginThemes(), holdOwned: true })
   await openSelectedRow(h, 'theme')
   await key(h, '\r')
@@ -3665,7 +4484,7 @@ test('B-09 a settlement held across the teardown never reaches a closed or repla
   h.dispose()
 })
 
-test('B-10 the 44x8 choice stays reachable, identity-fenced across a resize, and only the painted confirm writes', async () => {
+test('the 44x8 choice stays reachable, identity-fenced across a resize, and only the painted confirm writes', async () => {
   const h = setup({ columns: 44, rows: 8, doc: { theme: 'dark' } })
   await h.open()
   await key(h, '\r')
@@ -3689,7 +4508,7 @@ test('B-10 the 44x8 choice stays reachable, identity-fenced across a resize, and
   h.dispose()
 })
 
-test('B-11 a write the authority readably disagrees with is Not saved, never Verified and never "verification unavailable"', async () => {
+test('a write the authority readably disagrees with is Not saved, never Verified and never "verification unavailable"', async () => {
   // The document call RESOLVES (the Host accepted the request) but the stored
   // value never becomes the requested one — the one shape where "the write
   // returned" must not be reported as saved.
@@ -3722,7 +4541,7 @@ test('B-11 a write the authority readably disagrees with is Not saved, never Ver
   h.dispose()
 })
 
-test('B-12 the writable rows reach the choice and confirm at every responsive breakpoint', async () => {
+test('the writable rows reach the choice and confirm at every responsive breakpoint', async () => {
   for (const [columns, rows] of [[200, 40], [120, 40], [109, 40], [108, 40], [107, 40], [76, 40], [75, 24], [60, 24]] as const) {
     const h = setup({ columns, rows, doc: { theme: 'dark' } })
     await openSelectedRow(h, 'theme')
@@ -3745,7 +4564,7 @@ test('B-12 the writable rows reach the choice and confirm at every responsive br
 
 // ── B2-B round 2: the qualified paths and the reviewer's P2 regressions ────
 
-test('B-13 the REAL Direct adapter drives the workspace write end to end (UI → path ops → authoritative re-read → Verified)', async () => {
+test('the REAL Direct adapter drives the workspace write end to end (UI → path ops → authoritative re-read → Verified)', async () => {
   const fixture = createDirectSettingsFixture({ theme: 'dark', iconStyle: 'symbols' })
   const h = setup({ columns: 140, rows: 40, tuiSettings: fixture.settings })
   await openSelectedRow(h, 'theme')
@@ -3764,7 +4583,7 @@ test('B-13 the REAL Direct adapter drives the workspace write end to end (UI →
   // the profile (the W-11 whole-document preservation property, through the real
   // adapter rather than a hand-rolled replace).
   assert.deepEqual(fixture.calls[0]!.ops, [{ op: 'set', path: ['theme'], value: 'light' }])
-  assert.equal(fixture.calls[0]!.ns, 'tui-app')
+  assert.equal(fixture.calls[0]!.ns, 'pi-tui-preferences')
   assert.equal(fixture.calls[0]!.revision, 7, 'the fence is the revision the diff was reconciled against')
   assert.equal(fixture.document().theme, 'light', 'the committed document carries the new value')
   assert.equal(fixture.document().iconStyle, 'symbols', 'and every other field is untouched')
@@ -3773,7 +4592,7 @@ test('B-13 the REAL Direct adapter drives the workspace write end to end (UI →
   h.dispose()
 })
 
-test('B-14 the Persisted fact distinguishes a readable document without a value from an unreadable one', async () => {
+test('the Persisted fact distinguishes a readable document without a value from an unreadable one', async () => {
   // A readable document with no stored preset: `not set`, never "unreadable".
   const readable = setup({ columns: 200, rows: 40, doc: { theme: 'dark' }, displayPreset: 'full' })
   await openSelectedRow(readable, 'display-preset')
@@ -3787,7 +4606,7 @@ test('B-14 the Persisted fact distinguishes a readable document without a value 
   missing.dispose()
 })
 
-test('B-15 a long CJK candidate wraps while retaining its source-qualified raw identity', async () => {
+test('a long CJK candidate wraps while retaining its source-qualified raw identity', async () => {
   const label = `汉${'字'.repeat(30)}`
   const themes = new ThemeRegistry()
   themes.register({ id: 'long-cjk', name: label, palette: darkColors }, 'acme-owner', 'acme')
@@ -3826,7 +4645,7 @@ test('B-15 a long CJK candidate wraps while retaining its source-qualified raw i
   h.dispose()
 })
 
-test('B-15b the source-qualified candidate identity stays visible before 44x8 keyboard confirm', async () => {
+test('the source-qualified candidate identity stays visible before 44x8 keyboard confirm', async () => {
   const themes = new ThemeRegistry()
   themes.register({ id: 'solarized', name: 'Solarized', palette: darkColors }, 'acme-owner', 'acme')
   const value = 'plugin:acme/solarized'
@@ -3845,7 +4664,7 @@ test('B-15b the source-qualified candidate identity stays visible before 44x8 ke
   h.dispose()
 })
 
-test('B-15c identity-aware 44x8 allocation shows a full long raw identity with confirm', async () => {
+test('identity-aware 44x8 allocation shows a full long raw identity with confirm', async () => {
   const id = 'x'.repeat(80)
   const themes = new ThemeRegistry()
   themes.register({ id, name: 'Long custom theme', palette: darkColors }, 'acme-owner', 'acme')
@@ -3881,7 +4700,7 @@ test('B-15c identity-aware 44x8 allocation shows a full long raw identity with c
   h.dispose()
 })
 
-test('B-15d identity beyond the adaptive 44x8 budget remains non-confirmable', async () => {
+test('identity beyond the adaptive 44x8 budget remains non-confirmable', async () => {
   const id = 'x'.repeat(200)
   const themes = new ThemeRegistry()
   themes.register({ id, name: 'Oversized custom theme', palette: darkColors }, 'acme-owner', 'acme')
@@ -3903,7 +4722,7 @@ test('B-15d identity beyond the adaptive 44x8 budget remains non-confirmable', a
   h.dispose()
 })
 
-test('B-16 the wheel really scrolls the candidate list independently of its selection', async () => {
+test('the wheel really scrolls the candidate list independently of its selection', async () => {
   const themes = longNamedThemes(5)
   const h = setup({ columns: 44, rows: 8, doc: { theme: 'dark' }, themes })
   await openSelectedRow(h, 'theme')
@@ -3923,7 +4742,7 @@ test('B-16 the wheel really scrolls the candidate list independently of its sele
   h.dispose()
 })
 
-test('B-16b wheel scrolling the facts leaves candidate identity and offset alone', async () => {
+test('wheel scrolling the facts leaves candidate identity and offset alone', async () => {
   const themes = longNamedThemes(10)
   const value = `file:${'x'.repeat(120)}`
   const h = setup({ columns: 108, rows: 24, doc: { theme: value }, themes })
@@ -3948,7 +4767,7 @@ test('B-16b wheel scrolling the facts leaves candidate identity and offset alone
   h.dispose()
 })
 
-test('B-17 choosing auto drops the plugin-theme record, so a later HMR unload cannot force dark over it', async () => {
+test('choosing auto drops the plugin-theme record, so a later HMR unload cannot force dark over it', async () => {
   const themes = pluginThemes()
   const h = setup({ columns: 140, rows: 40, doc: { theme: 'plugin:acme/solarized' }, themes })
   // The plugin palette is the LIVE one when the user opens the workspace.
@@ -3972,7 +4791,7 @@ test('B-17 choosing auto drops the plugin-theme record, so a later HMR unload ca
   h.dispose()
 })
 
-test('B-18 a late OSC answer never overrides a newer choice, while it still applies to an unchallenged auto', async () => {
+test('a late OSC answer never overrides a newer choice, while it still applies to an unchallenged auto', async () => {
   const saved = {
     NO_COLOR: process.env.NO_COLOR,
     FORCE_COLOR: process.env.FORCE_COLOR,
@@ -4054,7 +4873,7 @@ test('B-18 a late OSC answer never overrides a newer choice, while it still appl
   }
 })
 
-test('B-19 a dispatched write that fails after the workspace closed still leaves a diagnostic', async () => {
+test('a dispatched write that fails after the workspace closed still leaves a diagnostic', async () => {
   const h = setup({
     columns: 140,
     rows: 40,
@@ -4094,7 +4913,7 @@ test('B-19 a dispatched write that fails after the workspace closed still leaves
   h.dispose()
 })
 
-test('B-20 a FAILED candidate never steals the intent of a pending auto query', async () => {
+test('a FAILED candidate never steals the intent of a pending auto query', async () => {
   const saved = {
     NO_COLOR: process.env.NO_COLOR,
     FORCE_COLOR: process.env.FORCE_COLOR,
@@ -4156,7 +4975,7 @@ test('B-20 a FAILED candidate never steals the intent of a pending auto query', 
   }
 })
 
-test('B-21 a candidate taller than the list viewport reveals its HEAD, never a marker-less tail', async () => {
+test('a candidate taller than the list viewport reveals its HEAD, never a marker-less tail', async () => {
   const label = `汉${'字'.repeat(30)}`
   const themes = new ThemeRegistry()
   themes.register({ id: 'tall-cjk', name: label, palette: darkColors }, 'acme-owner', 'acme')
@@ -4185,7 +5004,7 @@ test('B-21 a candidate taller than the list viewport reveals its HEAD, never a m
   h.dispose()
 })
 
-test('B-22 a PENDING theme commit already shows the runtime fact it applied', async () => {
+test('a PENDING theme commit already shows the runtime fact it applied', async () => {
   const themes = pluginThemes()
   // A COMPLETE palette so the applied plugin theme is renderable, like a real one.
   themes.register({ id: 'full-palette', name: 'FullPalette', palette: darkColors }, 'acme-owner', 'acme')
@@ -4228,7 +5047,7 @@ test('B-22 a PENDING theme commit already shows the runtime fact it applied', as
   h.dispose()
 })
 
-test('B-23 a PENDING display commit already shows the runtime preset', async () => {
+test('a PENDING display commit already shows the runtime preset', async () => {
   const h = setup({
     columns: 140,
     rows: 40,
@@ -4261,7 +5080,7 @@ test('B-23 a PENDING display commit already shows the runtime preset', async () 
   h.dispose()
 })
 
-test('B-24 a refused write whose value an external writer already set is neither accepted nor refused', async () => {
+test('a refused write whose value an external writer already set is neither accepted nor refused', async () => {
   const h = setup({
     columns: 200,
     rows: 40,
@@ -4296,7 +5115,7 @@ test('B-24 a refused write whose value an external writer already set is neither
   h.dispose()
 })
 
-test('B-25 a contribution unloading under an open choice re-anchors the highlight on the chosen candidate', async () => {
+test('a contribution unloading under an open choice re-anchors the highlight on the chosen candidate', async () => {
   const themes = new ThemeRegistry()
   themes.register({ id: 'aaa', name: 'Alpha', palette: darkColors }, 'acme-owner', 'acme')
   themes.register({ id: 'zzz', name: 'Zeta', palette: darkColors }, 'acme-owner', 'acme')
@@ -4328,7 +5147,7 @@ test('B-25 a contribution unloading under an open choice re-anchors the highligh
   h.dispose()
 })
 
-test('B-26 a choice whose candidate source vanished is dropped instead of offering a dead confirm', async () => {
+test('a choice whose candidate source vanished is dropped instead of offering a dead confirm', async () => {
   const themes = new ThemeRegistry()
   const handle = themes.register({ id: 'gone', name: 'Gone', palette: darkColors }, 'acme-owner', 'acme')
   themes.register({ id: 'stay', name: 'Stay', palette: darkColors }, 'acme-owner', 'acme')
@@ -4351,7 +5170,7 @@ test('B-26 a choice whose candidate source vanished is dropped instead of offeri
   h.dispose()
 })
 
-test('B-27 a rejected write whose field an external writer moved to a THIRD value is attributed as unknown, never as a refusal', async () => {
+test('a rejected write whose field an external writer moved to a THIRD value is attributed as unknown, never as a refusal', async () => {
   // The base this request started from is `dark` and it asks for `light`; before the
   // forced authoritative re-read an external writer lands a THIRD value. Neither the
   // requested value (so not an acceptance) nor the base value (so not a provable
@@ -4389,7 +5208,7 @@ test('B-27 a rejected write whose field an external writer moved to a THIRD valu
   h.dispose()
 })
 
-test('B-28 the leased Settings screen joins the terminal scheme-notification sync in both directions', async () => {
+test('the leased Settings screen joins the terminal scheme-notification sync in both directions', async () => {
   const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark' } })
   await openSelectedRow(h, 'theme')
   await key(h, '\r')
@@ -4430,7 +5249,7 @@ test('B-28 the leased Settings screen joins the terminal scheme-notification syn
   h.dispose()
 })
 
-test('B-29 leaving the workspace right after choosing auto re-samples on the restored screen', async () => {
+test('leaving the workspace right after choosing auto re-samples on the restored screen', async () => {
   const saved = {
     NO_COLOR: process.env.NO_COLOR,
     FORCE_COLOR: process.env.FORCE_COLOR,
@@ -4490,7 +5309,7 @@ function longNamedThemes(count: number): ThemeRegistry {
   return themes
 }
 
-test('B-30 a narrower pane that re-flows the wrapped candidates keeps the confirmed candidate visible', async () => {
+test('a narrower pane that re-flows the wrapped candidates keeps the confirmed candidate visible', async () => {
   const themes = longNamedThemes(10)
   const h = setup({ columns: 200, rows: 14, doc: { theme: 'dark' }, themes })
   themes.dispose('long0') // the builtin rows still precede the plugins; keep the walk short
@@ -4508,7 +5327,7 @@ test('B-30 a narrower pane that re-flows the wrapped candidates keeps the confir
   h.dispose()
 })
 
-test('B-31 the same re-flow inside the two-pane layout keeps the confirmed candidate visible', async () => {
+test('the same re-flow inside the two-pane layout keeps the confirmed candidate visible', async () => {
   const themes = longNamedThemes(10)
   const h = setup({ columns: 107, rows: 14, doc: { theme: 'dark' }, themes })
   themes.dispose('long0')
@@ -4524,7 +5343,7 @@ test('B-31 the same re-flow inside the two-pane layout keeps the confirmed candi
   h.dispose()
 })
 
-test('B-32 re-entering the choice reveals the highlighted candidate again', async () => {
+test('re-entering the choice reveals the highlighted candidate again', async () => {
   const themes = longNamedThemes(10)
   const h = setup({ columns: 108, rows: 14, doc: { theme: 'dark' }, themes })
   themes.dispose('long0')
@@ -4546,7 +5365,7 @@ test('B-32 re-entering the choice reveals the highlighted candidate again', asyn
   h.dispose()
 })
 
-test('B-32b Enter first reveals an offscreen selected identity and only a later Enter confirms', async () => {
+test('Enter first reveals an offscreen selected identity and only a later Enter confirms', async () => {
   const themes = longNamedThemes(10)
   const h = setup({ columns: 108, rows: 14, doc: { theme: 'dark' }, themes })
   await openSelectedRow(h, 'theme')
@@ -4608,7 +5427,7 @@ const startPendingObservation = (h: Harness): Promise<void> => {
   return pending
 }
 
-test('B-33 entering Transcript Fullscreen re-samples the observation the main screen lost', async () => {
+test('entering Transcript Fullscreen re-samples the observation the main screen lost', async () => {
   clearThemeEnv()
   try {
     const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark' } })
@@ -4626,7 +5445,7 @@ test('B-33 entering Transcript Fullscreen re-samples the observation the main sc
   }
 })
 
-test('B-34 entering the Settings workspace re-samples the observation the return screen lost', async () => {
+test('entering the Settings workspace re-samples the observation the return screen lost', async () => {
   clearThemeEnv()
   try {
     const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark' } })
@@ -4645,7 +5464,7 @@ test('B-34 entering the Settings workspace re-samples the observation the return
   }
 })
 
-test('B-35 a handled hand-off leaves no stale re-sample latch for the next one', async () => {
+test('a handled hand-off leaves no stale re-sample latch for the next one', async () => {
   clearThemeEnv()
   try {
     const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark' } })
@@ -4672,7 +5491,7 @@ test('B-35 a handled hand-off leaves no stale re-sample latch for the next one',
 
 // ── B-16 / B-17: the narrow-width colour contracts the review asked for ─────
 
-test('B-16 a status WORD that WRAPS keeps its semantic tone on every character (22 columns)', async () => {
+test('a status WORD that WRAPS keeps its semantic tone on every character (22 columns)', async () => {
   // At 22 columns the narrow pane's label column is 8 and the value area 14, so
   // `Outcome unknown` (15 cells) really wraps. The tone must follow the WORD,
   // not the first wrapped line.
@@ -4718,7 +5537,7 @@ test('B-16 a status WORD that WRAPS keeps its semantic tone on every character (
   h.dispose()
 })
 
-test('B-17 the diagnostic line keeps its field name muted and tones only the status word', async () => {
+test('the diagnostic line keeps its field name muted and tones only the status word', async () => {
   for (const [readiness, tone] of [['stale', 'warning'], ['unavailable', 'error']] as const) {
     const h = setup({ columns: 100, rows: 40, readiness })
     await h.open()
@@ -4790,7 +5609,7 @@ const paintedFrame = (h: Harness): PaintedFrame => ({
   primaryRgb: hexToRgb(currentPalette.primary),
 })
 
-test('A-16 the frozen §11.2 matrix keeps the §8 ladder-derived chrome at every size', async () => {
+test('the frozen §11.2 matrix keeps the §8 ladder-derived chrome at every size', async () => {
   for (const [columns, rows] of SETTINGS_MATRIX) {
     for (const noticeLive of [false, true]) {
       const h = setup({ columns, rows, doc: { theme: 'dark' } })
@@ -4809,10 +5628,10 @@ test('A-16 the frozen §11.2 matrix keeps the §8 ladder-derived chrome at every
       // its selection cursor `> <item>` (settings-workspace-panel.ts:813-820), so a
       // regression that blanks the body while leaving the chrome in place fails.
       const categoryBar = columns < 60
-        ? 'Right open · Enter open · Esc close'
+        ? 'Right open · Enter open · Close [Esc]'
         : columns < 76
-          ? 'Up/Down select · Right open · Enter open · Esc close'
-          : 'Up/Down select · Right open · Enter open · Tab panes · Esc close'
+          ? 'Up/Down select · Right open · Enter open · Close [Esc]'
+          : 'Up/Down select · Right open · Enter open · Tab panes · Close [Esc]'
       assertBarIsLastRow(painted, frame.readColor, categoryBar)
       const bodyTop = ladder.headerRows + ladder.metaRows + ladder.ruleRows + ladder.noticeRows
       const contentTop = bodyTop + ladder.paneHeaderRows
@@ -4823,7 +5642,7 @@ test('A-16 the frozen §11.2 matrix keeps the §8 ladder-derived chrome at every
 
       // §11.3.2/§4.5: exactly ONE chrome active device, and it is the focused pane
       // label. Wide/medium put the shared pane header on the body's first row, so
-      // the focused `[Categories (9)]` is the ONE primary label. The narrow
+      // the focused `[Categories (10)]` is the ONE primary label. The narrow
       // projection paints NO pane header at all: the plain list cursor is not a
       // chrome active device, so the returned device list is EMPTY there.
       const device = assertOneActiveDevice(frame, {
@@ -4882,7 +5701,7 @@ test('selecting Plugins previews the live plugin list inside ONE Settings chrome
     const frame = h.rowsPlain()
     // ONE shared pane header: the rail label plus the plugin column labels.
     // header0 / metadata1 / rule2 / pane header3 at both widths.
-    assert.match(frame[3]!, /^\[Categories \(9\)\]/, `the rail label owns the header:\n${h.view()}`)
+    assert.match(frame[3]!, /^\[Categories \(10\)\]/, `the rail label owns the header:\n${h.view()}`)
     assert.equal(cellIndexOf(h, 3, 'Plugins'), 24, `the plugin label starts the content column:\n${h.view()}`)
     if (dual) {
       assert.ok(frame[3]!.includes('Details'), `the >=120 preview also paints the Details column:\n${h.view()}`)
@@ -4901,9 +5720,9 @@ test('selecting Plugins previews the live plugin list inside ONE Settings chrome
       assert.equal(cellIndexOf(h, bodyRow, 'PLUGIN DETAIL'), 24 + 39 + 2, 'the Details column starts after the gutter')
       assert.equal(cellIndexOf(h, 3, 'Details'), 24 + 39 + 2, 'the shared header label sits on the same column')
     }
-    assert.match(frame[3]!, /\[Categories \(9\)\]/, 'the rail keeps the ONE active device')
+    assert.match(frame[3]!, /\[Categories \(10\)\]/, 'the rail keeps the ONE active device')
     assert.doesNotMatch(frame[3]!, /\[Plugins\]/, 'an unfocused preview is never the active device')
-    assertBarIsLastRow(frame, (row, col) => h.vt.getCellFgRgb(row, col), 'Esc close')
+    assertBarIsLastRow(frame, (row, col) => h.vt.getCellFgRgb(row, col), 'Close [Esc]')
     assert.match(frame[frame.length - 1]!, /Tab focus/, 'the rail advertises the real Tab focus key')
     h.dispose()
   }
@@ -4915,7 +5734,7 @@ test('80×10 keeps the visible plugin preview and Enter moves the keys without a
   await toPlugins(h)
   assert.equal(h.pluginPages(), 1, 'the visible preview built the ONE page')
   assert.match(h.view(), /PLUGIN PAGE/, 'the short screen still paints the list preview')
-  assertBarIsLastRow(h.rowsPlain(), (row, col) => h.vt.getCellFgRgb(row, col), 'Esc close')
+  assertBarIsLastRow(h.rowsPlain(), (row, col) => h.vt.getCellFgRgb(row, col), 'Close [Esc]')
   await key(h, '\r')
   assert.equal(h.pluginPages(), 1, 'Enter only moves the focus: no second page')
   // The plugin content now owns the keys, so ITS semantic bar is the last row.
@@ -4930,7 +5749,7 @@ test('44×20 keeps the single category list until Enter, then mounts the page on
   assert.doesNotMatch(h.view(), /PLUGIN PAGE/, 'no invisible plugin page is painted')
   assert.equal(h.pluginPages(), 0, 'a narrow rail selection alone never mounts the page')
   assert.match(h.view(), /> Plugins/, 'Plugins stays selected in the single column')
-  assertBarIsLastRow(h.rowsPlain(), (row, col) => h.vt.getCellFgRgb(row, col), 'Esc close')
+  assertBarIsLastRow(h.rowsPlain(), (row, col) => h.vt.getCellFgRgb(row, col), 'Close [Esc]')
   await key(h, '\r')
   assert.equal(h.pluginPages(), 1, 'Enter mounts the page once from the narrow list')
   assert.match(h.view(), /PLUGIN PAGE/)
@@ -5037,7 +5856,7 @@ test('the direct pages paint exactly the category rail and the content column', 
     assertBarIsLastRow(
       painted,
       (row, col) => h.vt.getCellFgRgb(row, col),
-      'Up/Down navigate · Enter/Right focus · Tab focus · Esc close',
+      'Up/Down navigate · Enter/Right focus · Tab focus · Close [Esc]',
     )
     h.dispose()
   }
@@ -5124,10 +5943,10 @@ test('Tab/Shift+Tab hand the keyboard to the About content and back at wide/medi
     const h = setup({ columns, rows })
     await h.openHome()
     assert.match(h.rowsPlain()[0]!, /Settings · Categories/u)
-    assert.match(h.rowsPlain().at(-1) ?? '', /Tab focus · Esc close/u, `the rail advertises Tab focus at ${columns}x${rows}`)
+    assert.match(h.rowsPlain().at(-1) ?? '', /Tab focus · Close \[Esc\]/u, `the rail advertises Tab focus at ${columns}x${rows}`)
     await key(h, '\t')
     assert.match(h.rowsPlain()[0]!, /Settings · About/u, `Tab focuses the About content at ${columns}x${rows}`)
-    if (columns >= 100) {
+    if (columns >= 108) {
       assert.match(h.view(), /Tab focus · Shift\+Tab back/u, 'the About bar advertises both region keys')
     } else {
       // At 90 the lowest-priority region hint is the first segment dropped;
@@ -5167,10 +5986,10 @@ test('Tab/Shift+Tab cycle the legacy panes in a real frame without opening a cho
   for (const [columns, rows] of [[200, 50], [120, 40]] as const) {
     const h = setup({ columns, rows, doc: { theme: 'dark' } })
     await h.open()
-    assert.match(h.rowsPlain().at(-1) ?? '', /Tab panes · Esc close/u)
+    assert.match(h.rowsPlain().at(-1) ?? '', /Tab panes · Close \[Esc\]/u)
     await key(h, '\t')
     assert.match(h.rowsPlain()[0]!, /· Rows/u)
-    assert.match(h.rowsPlain().at(-1) ?? '', /Tab panes · Shift\+Tab back · Esc back/u)
+    assert.match(h.rowsPlain().at(-1) ?? '', /Tab panes · Shift\+Tab back · Back \[Esc\]/u)
     await key(h, '\t')
     assert.match(h.rowsPlain()[0]!, /Configured theme/u)
     assert.ok(!h.view().includes('Choose value'), 'Tab focusing Detail never opens the choice')
@@ -5236,7 +6055,7 @@ test('the 90-column Settings split keeps the Models refresh hint over the region
   const bar = h.rowsPlain().at(-1)!
   assert.match(bar, /r refresh/u, 'the existing refresh hint survives the 66-cell content bar')
   assert.doesNotMatch(bar, /Tab sections/u, 'the region hint is the first segment dropped')
-  assert.match(bar, /Esc back/u, 'Esc remains the last-row hint')
+  assert.match(bar, /Back \[Esc\]/u, 'Esc remains the last-row hint')
   h.dispose()
 })
 
@@ -5247,7 +6066,7 @@ test('the Tab hints are whole segments and the action bar keeps the last physica
   const narrow = setup({ columns: 80, rows: 10 })
   await narrow.openHome()
   const bar80 = narrow.rowsPlain().at(-1) ?? ''
-  assert.match(bar80, /Up\/Down navigate · Enter\/Right focus · Tab focus · Esc close/u)
+  assert.match(bar80, /Up\/Down navigate · Enter\/Right focus · Tab focus · Close \[Esc\]/u)
   assert.doesNotMatch(bar80, /…/u, 'the bar never truncates a segment mid-word')
   assertNoHalfSegmentInBar(narrow.rowsPlain(), narrow.rowsPlain().length - 1, ' · ')
   narrow.dispose()
@@ -5255,7 +6074,7 @@ test('the Tab hints are whole segments and the action bar keeps the last physica
   // 90x24 keeps the whole segment visible at medium width.
   const medium = setup({ columns: 90, rows: 24 })
   await medium.openHome()
-  assert.match(medium.rowsPlain().at(-1) ?? '', /Tab focus · Esc close/u)
+  assert.match(medium.rowsPlain().at(-1) ?? '', /Tab focus · Close \[Esc\]/u)
   assertNoHalfSegmentInBar(medium.rowsPlain(), medium.rowsPlain().length - 1, ' · ')
   medium.dispose()
 
@@ -5280,7 +6099,7 @@ test('the Tab hints are whole segments and the action bar keeps the last physica
 // press/release gestures on the SAME painted row, each hitting its own
 // button cells. (The sessionless default harness hides the Refresh button by
 // contract — the live-session source-sink harness owns the two-button case.)
-test('C3 the sessionless About action row: Copy All is clickable and blank cells are inert', async () => {
+test('the sessionless About action row: Copy All is clickable and blank cells are inert', async () => {
   const h = setup({ columns: 120, rows: 40 })
   await h.openHome()
   const rows = h.vt.getViewport().map(stripTerminalSequences)
@@ -5336,7 +6155,7 @@ test('C3 the sessionless About action row: Copy All is clickable and blank cells
 // are COUNTED in the same harness as the panel, so the assertion observes
 // the reads the GATING actually admitted (removing the paintsDirectContent
 // condition fails the first assertion).
-test('C3 a narrow Account deeplink → rail-browse About reads nothing; Enter reads exactly once', async () => {
+test('a narrow Account deeplink → rail-browse About reads nothing; Enter reads exactly once', async () => {
   // A minimal runner stub with COUNTED About seams + a LIVE scope.
   const vt = new VirtualTerminal(44, 20)
   const reads: string[] = []
@@ -5432,12 +6251,28 @@ test('C3 a narrow Account deeplink → rail-browse About reads nothing; Enter re
     extensions: undefined,
     openPluginManager: () => {},
     createPluginManagerPage: () => undefined,
+    // M6-1 F8: the About-only page still asks the approval row's snapshot,
+    // which reads the ONE observation owner (this stub has no session scope).
+    policy: {
+      readSnapshot: () => ({ kind: 'checking' as const }),
+      refresh: async () => ({ kind: 'checking' as const }),
+      invalidate: () => {},
+      subscribe: () => () => {},
+      dispose: () => {},
+    },
     config: {
       configReadiness: () => 'ready',
       visualTools: { read: () => undefined, setEnabled: async (_enabled: boolean, _revision: number) => {} },
+      webStartupPreference: { read: () => undefined, setAutoStart: async (_value: boolean, _revision: number) => {} },
+      backendStartupPreference: { read: () => undefined, readFresh: async () => undefined, setBackend: async (_value: 'direct' | 'daemon', _revision: number) => {} },
+      acpStartupPreference: { read: () => undefined, setAutoStart: async (_value: boolean, _revision: number) => {} },
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
-      permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined, approvalOverrideAvailable: () => false },
-      subagentModelSelection: { available: () => false },
+      permissions: { presetNames: () => [], defaultPreset: () => undefined },
+      subagentLimits: { read: () => ({ kind: 'unavailable', reason: 'not mounted' }) },
+      subagentModelSelection: { read: () => ({ kind: 'unavailable', reason: 'not mounted' }) },
+      agentLoopSettings: { read: () => ({ kind: 'unavailable', reason: 'not mounted' }) },
+      shellExecutionSettings: { read: () => ({ kind: 'unavailable', reason: 'not mounted' }) },
+      sessionLogUpload: { read: () => ({ kind: 'unavailable', reason: 'not mounted' }) },
       web: { available: () => false },
       credentials: { available: () => false, recordsSupported: () => false },
       providers: { available: () => false },
@@ -5527,7 +6362,7 @@ function sendKey(vt: VirtualTerminal, data: string): void {
   vt.sendInput(data)
 }
 
-test('B-05h the Visual tools row keeps its focus/choice/confirm contract at medium and narrow widths', async () => {
+test('the Visual tools row keeps its focus/choice/confirm contract at medium and narrow widths', async () => {
   // Medium (76–107): the row's keyboard/Tab focus, mouse Change confirm and Esc
   // paths are the same workspace behaviors as the other writable rows.
   const medium = setup({ columns: 100, rows: 30 })
@@ -5597,7 +6432,7 @@ const SETTINGS_PROVIDERS: readonly CredentialProviderOption[] = [{
 /** The physical rows every multi-column frame must agree on. */
 const pr1Geometry = (h: Harness): { paneY: number; contentY: number; barY: number } => {
   const rows = h.rowsPlain()
-  const paneY = rows.findIndex(line => line.includes('Categories (9)'))
+  const paneY = rows.findIndex(line => line.includes('Categories (10)'))
   assert.ok(paneY >= 0, `the shared pane header must be painted:\n${h.view()}`)
   const contentY = paneY + 1
   assert.notEqual((rows[contentY] ?? '').trim(), '', `the first content row must carry real content:\n${h.view()}`)
@@ -5612,17 +6447,17 @@ test('direct and legacy settings categories share the pane-header, first-body an
       await direct.open(directCategory)
       const directGeometry = pr1Geometry(direct)
       const directHead = direct.rowsPlain()[directGeometry.paneY]!
-      assert.match(directHead, /\[Categories \(9\)\]/u, `the rail is the active device:\n${directHead}`)
+      assert.match(directHead, /\[Categories \(10\)\]/u, `the rail is the active device:\n${directHead}`)
       assert.match(directHead, new RegExp(`\\b${directCategory}\\b`, 'u'), `the right label names the page:\n${directHead}`)
       assert.doesNotMatch(directHead, /Rows \(|Details/u, 'the direct header fakes no legacy panes')
-      assert.match(direct.rowsPlain().at(-1) ?? '', /Esc close/u, 'the last row is the rail action bar')
+      assert.match(direct.rowsPlain().at(-1) ?? '', /Close \[Esc\]/u, 'the last row is the rail action bar')
       direct.dispose()
 
       const legacy = setup({ columns, rows: 24 })
       await legacy.open(legacyCategory)
       const legacyGeometry = pr1Geometry(legacy)
       const legacyHead = legacy.rowsPlain()[legacyGeometry.paneY]!
-      assert.match(legacyHead, /\[Categories \(9\)\].*Rows \(\d+\)/u, `the legacy panes stay adjacent:\n${legacyHead}`)
+      assert.match(legacyHead, /\[Categories \(10\)\].*Rows \(\d+\)/u, `the legacy panes stay adjacent:\n${legacyHead}`)
       legacy.dispose()
 
       assert.deepEqual(directGeometry, legacyGeometry,
@@ -5640,10 +6475,10 @@ test('120x24 and 120x40 paint header, metadata, rule, pane header, body and bar 
     assert.match(frame[0]!, /^Settings · Categories/u)
     assert.match(frame[1]!, /^Scope: /u)
     assert.match(frame[2]!, /^─+$/u)
-    assert.match(frame[3]!, /^\[Categories \(9\)\].*About/u)
+    assert.match(frame[3]!, /^\[Categories \(10\)\].*About/u)
     assert.doesNotMatch(frame[3]!, /Rows \(|Details/u, 'the direct projection paints exactly two labels')
     assert.match(frame[4]!, /^> About/u, 'the first real content row follows the pane header')
-    assert.match(frame.at(-1) ?? '', /Esc close/u)
+    assert.match(frame.at(-1) ?? '', /Close \[Esc\]/u)
     direct.dispose()
 
     const legacy = setup({ columns: 120, rows })
@@ -5653,10 +6488,10 @@ test('120x24 and 120x40 paint header, metadata, rule, pane header, body and bar 
     assert.match(legacyFrame[0]!, /^Settings · Categories/u)
     assert.match(legacyFrame[1]!, /^Scope: /u)
     assert.match(legacyFrame[2]!, /^─+$/u)
-    assert.match(legacyFrame[3]!, /^\[Categories \(9\)\].*Rows \(4\).*Details/u,
+    assert.match(legacyFrame[3]!, /^\[Categories \(10\)\].*Rows \(4\).*Details/u,
       'the wide legacy frame keeps all three pane headers')
     assert.match(legacyFrame[4]!, /^ {2}About/u)
-    assert.match(legacyFrame.at(-1) ?? '', /Esc close/u)
+    assert.match(legacyFrame.at(-1) ?? '', /Close \[Esc\]/u)
     legacy.dispose()
   }
 })
@@ -5666,9 +6501,9 @@ test('medium legacy levels keep Categories+Rows at L0 and Rows+Details at L1/L2'
     const h = setup({ columns, rows: 24 })
     await h.open('Appearance')
     let frame = h.rowsPlain()
-    let pane = frame.findIndex(line => line.includes('Categories (9)'))
+    let pane = frame.findIndex(line => line.includes('Categories (10)'))
     assert.ok(pane >= 0)
-    assert.match(frame[pane]!, /\[Categories \(9\)\].*Rows \(4\)/u, 'L0 is Categories + Rows')
+    assert.match(frame[pane]!, /\[Categories \(10\)\].*Rows \(4\)/u, 'L0 is Categories + Rows')
     assert.doesNotMatch(frame[pane]!, /Details/u)
 
     await key(h, '\r') // L0 -> L1
@@ -5698,9 +6533,9 @@ test('the 72/75/76/107/108 breakpoint edges keep their projection and at most on
     if (columns < 76) {
       assert.ok(!direct.view().includes('Categories ('), `narrow paints no pane header:\n${direct.view()}`)
     } else {
-      const pane = frame.findIndex(line => line.includes('[Categories (9)]'))
+      const pane = frame.findIndex(line => line.includes('[Categories (10)]'))
       assert.ok(pane >= 0)
-      assert.match(frame[pane]!, /\[Categories \(9\)\].*About/u)
+      assert.match(frame[pane]!, /\[Categories \(10\)\].*About/u)
       assert.doesNotMatch(frame[pane]!, /Rows \(|Details/u)
     }
     direct.dispose()
@@ -5714,9 +6549,9 @@ test('the 72/75/76/107/108 breakpoint edges keep their projection and at most on
       assert.ok(!legacy.view().includes('Categories ('), `narrow paints no pane header:\n${legacy.view()}`)
       assert.ok(frame.some(line => line.startsWith('> Appearance')), 'the narrow list is the one pane')
     } else {
-      const pane = frame.findIndex(line => line.includes('Categories (9)'))
+      const pane = frame.findIndex(line => line.includes('Categories (10)'))
       assert.ok(pane >= 0)
-      assert.match(frame[pane]!, /\[Categories \(9\)\].*Rows \(4\)/u)
+      assert.match(frame[pane]!, /\[Categories \(10\)\].*Rows \(4\)/u)
       if (columns >= 108) assert.match(frame[pane]!, /Details/u, '108 is the three-column edge')
       else assert.doesNotMatch(frame[pane]!, /Details/u, '76..107 stays two-column')
     }
@@ -5739,7 +6574,7 @@ test('an app notice sits after the top rule and before the pane header at every 
   assert.equal(frame.findIndex(line => line.includes('[About]')), 4, 'the pane header follows the notice')
   assert.ok(frame.slice(5).some(line => line.includes(`TUI  ${bundleVersion()}`)),
     `a real About fact follows the pane header (the whale art may take the first rows):\n${h.view()}`)
-  assert.match(frame.at(-1) ?? '', /Esc back/u)
+  assert.match(frame.at(-1) ?? '', /Back \[Esc\]/u)
   assert.equal(frame.filter(line => line.includes('Copy sent')).length, 1, 'exactly one app-level notice')
 
   h.vt.resize(100, 6)
@@ -5747,7 +6582,7 @@ test('an app notice sits after the top rule and before the pane header at every 
   frame = h.rowsPlain()
   assert.equal(frame[1]!.includes('Copy sent'), true, `the notice follows the header at 6 rows:\n${h.view()}`)
   assert.equal(frame[2]!.includes('[About]'), true, `the pane header follows the notice at 6 rows:\n${h.view()}`)
-  assert.match(frame.at(-1) ?? '', /Esc back/u)
+  assert.match(frame.at(-1) ?? '', /Back \[Esc\]/u)
   assert.equal(frame.filter(line => line.includes('Copy sent')).length, 1, 'still one notice')
 
   h.vt.resize(100, 8)
@@ -5755,7 +6590,7 @@ test('an app notice sits after the top rule and before the pane header at every 
   frame = h.rowsPlain()
   assert.equal(frame[2]!.includes('Copy sent'), true, `the notice follows the diagnostic line at 8 rows:\n${h.view()}`)
   assert.equal(frame[3]!.includes('[About]'), true, `the pane header follows the notice at 8 rows:\n${h.view()}`)
-  assert.match(frame.at(-1) ?? '', /Esc back/u)
+  assert.match(frame.at(-1) ?? '', /Back \[Esc\]/u)
   h.dispose()
 })
 
@@ -5781,9 +6616,9 @@ test('tiny heights grant only the allowed chrome and keep hidden actions inert',
     assert.equal(painted.some(line => line.startsWith('Settings ·')), headerRows === 1, 'the header needs two rows')
     assert.equal(painted.some(line => line.startsWith('Scope: ')), grant.meta, 'the diagnostic keeps its floor')
     assert.equal(painted.filter(line => /^─+$/.test(line)).length, grant.rule ? 1 : 0, 'the one rule keeps its floor')
-    assert.equal(painted.some(line => line.includes('Categories (9)')), grant.pane, 'the pane header keeps one content row')
+    assert.equal(painted.some(line => line.includes('Categories (10)')), grant.pane, 'the pane header keeps one content row')
     if (grant.pane) assert.notEqual((painted[contentY] ?? '').trim(), '', 'a granted pane header leaves real content below it')
-    assert.match(painted.at(-1) ?? '', /Esc close/u, 'the bar is the physical last row')
+    assert.match(painted.at(-1) ?? '', /Close \[Esc\]/u, 'the bar is the physical last row')
     assert.equal(contentY + grant.content, height - 1, 'the granted body ends directly above the bar')
 
     if (grant.content === 0) {
@@ -5810,7 +6645,7 @@ test('tiny heights grant only the allowed chrome and keep hidden actions inert',
     const ruleRows = height >= 8 ? 1 : 0
     const bodyTop = headerRows + metaRows + ruleRows
     assert.notEqual((painted[bodyTop] ?? '').trim(), '', 'the narrow body starts at the shared top')
-    assert.match(painted.at(-1) ?? '', /Esc back/u)
+    assert.match(painted.at(-1) ?? '', /Back \[Esc\]/u)
     h.dispose()
   }
 })
@@ -5818,7 +6653,7 @@ test('tiny heights grant only the allowed chrome and keep hidden actions inert',
 test('each frame paints one last-row action bar naming the live keyboard owner', async () => {
   const assertOneBar = (h: Harness, expected: RegExp, absent: RegExp): void => {
     const rows = h.rowsPlain()
-    const bars = rows.filter(line => /Esc (?:close|back)/u.test(line))
+    const bars = rows.filter(line => /Close \[Esc\]|Back \[Esc\]/u.test(line))
     assert.equal(bars.length, 1, `exactly one action bar row:\n${h.view()}`)
     const bar = rows.at(-1)!
     assert.match(bar, expected)
@@ -5828,30 +6663,30 @@ test('each frame paints one last-row action bar naming the live keyboard owner',
 
   const about = setup({ columns: 120, rows: 24 })
   await about.openHome()
-  assertOneBar(about, /Enter\/Right focus · Tab focus · Esc close/u, /Esc back/u)
+  assertOneBar(about, /Enter\/Right focus · Tab focus · Close \[Esc\]/u, /Back \[Esc\]/u)
   await key(about, '\t') // rail -> the About content
-  assertOneBar(about, /Esc back/u, /Esc close/u)
+  assertOneBar(about, /Back \[Esc\]/u, /Close \[Esc\]/u)
   about.dispose()
 
   const models = setup({ columns: 120, rows: 24, providerOptions: SETTINGS_PROVIDERS })
   await models.open('Models')
   await key(models, '\t')
-  assertOneBar(models, /r refresh · .*Esc back/u, /Esc close/u)
+  assertOneBar(models, /r refresh · .*Back \[Esc\]/u, /Close \[Esc\]/u)
   models.dispose()
 
   const account = setup({ columns: 120, rows: 24 })
   await account.open('Account')
   await key(account, '\t')
-  assertOneBar(account, /Esc back/u, /Esc close/u)
+  assertOneBar(account, /Back \[Esc\]/u, /Close \[Esc\]/u)
   account.dispose()
 
   const legacy = setup({ columns: 120, rows: 24 })
   await legacy.open('Appearance')
-  assertOneBar(legacy, /Right open · Enter open · Tab panes · Esc close/u, /Esc back/u)
+  assertOneBar(legacy, /Right open · Enter open · Tab panes · Close \[Esc\]/u, /Back \[Esc\]/u)
   await key(legacy, '\r')
-  assertOneBar(legacy, /Enter choose · .*Esc back/u, /Esc close/u)
+  assertOneBar(legacy, /Enter choose · .*Back \[Esc\]/u, /Close \[Esc\]/u)
   await key(legacy, '\x1b[C') // the inline choice (Details holds the keyboard)
-  assertOneBar(legacy, /Enter confirm · .*Esc back/u, /Esc close/u)
+  assertOneBar(legacy, /Enter confirm · .*Back \[Esc\]/u, /Close \[Esc\]/u)
   legacy.dispose()
 })
 
@@ -5893,7 +6728,7 @@ test('pointer and wheel act only on the last-painted body cells', async () => {
   assert.equal(about.copied.length, 1, 'the painted Copy All button is the action')
   const stable = about.view()
 
-  const paneRow = about.rowsPlain().findIndex(line => line.includes('[Categories (9)]'))
+  const paneRow = about.rowsPlain().findIndex(line => line.includes('[Categories (10)]'))
   assert.ok(paneRow >= 0)
   press(about, paneRow, 30)
   release(about, paneRow, 30)
@@ -5938,7 +6773,7 @@ test('pointer and wheel act only on the last-painted body cells', async () => {
   const wheelHarness = setup({ columns: 80, rows: 10 })
   await wheelHarness.openHome()
   const frame0 = wheelHarness.view()
-  const wheelPane = wheelHarness.rowsPlain().findIndex(line => line.includes('Categories (9)'))
+  const wheelPane = wheelHarness.rowsPlain().findIndex(line => line.includes('Categories (10)'))
   assert.ok(wheelPane >= 0)
   wheel(wheelHarness, wheelPane, 2, true)
   await wheelHarness.vt.waitForRender()
@@ -5981,7 +6816,8 @@ test('a resize, category change or notice insertion between press and release re
   const accountRow = switched.rowsPlain().findIndex(line => line.slice(0, 22).trim() === 'Account')
   assert.ok(accountRow >= 0)
   press(switched, accountRow, 2)
-  await key(switched, '\u001b[B') // About -> Models bumps the state version
+  await key(switched, '\u001b[B') // About -> General bumps the state version
+  await key(switched, '\u001b[B') // General -> Models bumps the state version
   release(switched, accountRow, 2)
   await settle(switched)
   assert.match(switched.view(), /Models & Credentials/u)
@@ -6013,7 +6849,7 @@ test('CJK values wrap inside their pane and the pane-header device follows the l
     const h = setup({ columns, rows, doc: { theme: longValue } })
     await h.open('Appearance')
     if (columns >= 76) {
-      const pane = h.rowsPlain().findIndex(line => line.includes('[Categories (9)]'))
+      const pane = h.rowsPlain().findIndex(line => line.includes('[Categories (10)]'))
       assert.ok(pane >= 0)
       assert.ok(visibleWidth(h.vt.getViewport()[pane]!) <= columns, `the pane header fits ${columns}`)
     }
@@ -6031,7 +6867,7 @@ test('CJK values wrap inside their pane and the pane-header device follows the l
 
   const h = setup({ columns: 120, rows: 24 })
   await h.openHome()
-  let paneRow = h.rowsPlain().findIndex(line => line.includes('[Categories (9)]'))
+  let paneRow = h.rowsPlain().findIndex(line => line.includes('[Categories (10)]'))
   assert.ok(paneRow >= 0)
   assert.equal(h.vt.getCellFgRgb(paneRow, 0), hexToRgb(currentPalette.primary), 'the focused rail label uses primary')
   assert.equal(h.vt.getCellFgRgb(paneRow, cellIndexOf(h, paneRow, 'About')), hexToRgb(currentPalette.textDim),
@@ -6058,7 +6894,7 @@ test('a content page below the body floor runs no hidden refresh and keeps its E
   await key(models, '\t') // rail -> Models content
   models.vt.resize(120, 2)
   await models.vt.waitForRender()
-  assert.match(models.rowsPlain().at(-1) ?? '', /Esc back/u)
+  assert.match(models.rowsPlain().at(-1) ?? '', /Back \[Esc\]/u)
   const modelReads = models.hostReads()
   await key(models, 'r')
   await key(models, 'c')
@@ -6071,7 +6907,7 @@ test('a content page below the body floor runs no hidden refresh and keeps its E
   models.vt.resize(120, 3)
   models.vt.sendInput('r') // before the resize frame: the old action grant is stale
   await models.vt.waitForRender()
-  assert.match(models.rowsPlain().at(-1) ?? '', /Esc back/u)
+  assert.match(models.rowsPlain().at(-1) ?? '', /Back \[Esc\]/u)
   assert.equal(models.hostReads(), shortModelReads, 'the shrink-before-repaint r ran no Host read')
   await key(models, 'r')
   assert.equal(models.hostReads(), shortModelReads, 'the painted short fallback r ran no Host read')
@@ -6084,7 +6920,7 @@ test('a content page below the body floor runs no hidden refresh and keeps its E
   await key(account, '\t') // rail -> Account content
   account.vt.resize(120, 2)
   await account.vt.waitForRender()
-  assert.match(account.rowsPlain().at(-1) ?? '', /Esc back/u)
+  assert.match(account.rowsPlain().at(-1) ?? '', /Back \[Esc\]/u)
   const accountReads = account.hostReads()
   await key(account, 'r')
   await key(account, '\r')
@@ -6094,7 +6930,7 @@ test('a content page below the body floor runs no hidden refresh and keeps its E
   account.vt.resize(120, 3)
   account.vt.sendInput('r') // before the resize frame: the old action grant is stale
   await account.vt.waitForRender()
-  assert.match(account.rowsPlain().at(-1) ?? '', /Esc back/u)
+  assert.match(account.rowsPlain().at(-1) ?? '', /Back \[Esc\]/u)
   assert.equal(account.hostReads(), shortAccountReads, 'the shrink-before-repaint Account r ran no Host read')
   await key(account, 'r')
   assert.equal(account.hostReads(), shortAccountReads, 'the painted short Account fallback r ran no Host read')
@@ -6117,7 +6953,7 @@ test('a content page below the body floor runs no hidden refresh and keeps its E
   assert.match(catalog.view(), /Filter: acme/u, 'the visible filter holds the typed query')
   catalog.vt.resize(120, 2)
   await catalog.vt.waitForRender()
-  assert.match(catalog.rowsPlain().at(-1) ?? '', /Esc clear filter/u,
+  assert.match(catalog.rowsPlain().at(-1) ?? '', /Clear filter \[Esc\]/u,
     'the zero-body hint names the real Esc effect while the filter is non-empty')
   await key(catalog, '\u007f')
   catalog.vt.resize(120, 24)
@@ -6129,9 +6965,9 @@ test('a content page below the body floor runs no hidden refresh and keeps its E
   // clears the non-empty filter, then the same frame names the real back.
   catalog.vt.resize(120, 2)
   await catalog.vt.waitForRender()
-  assert.match(catalog.rowsPlain().at(-1) ?? '', /Esc clear filter/u)
+  assert.match(catalog.rowsPlain().at(-1) ?? '', /Clear filter \[Esc\]/u)
   await key(catalog, '\u001b')
-  assert.match(catalog.rowsPlain().at(-1) ?? '', /Esc back/u,
+  assert.match(catalog.rowsPlain().at(-1) ?? '', /Back \[Esc\]/u,
     'after the clear, the zero-body hint is the real back')
   catalog.vt.resize(120, 24)
   await catalog.vt.waitForRender()
@@ -6141,7 +6977,7 @@ test('a content page below the body floor runs no hidden refresh and keeps its E
   // With an empty filter the zero-body Esc is a real back to the Models list.
   catalog.vt.resize(120, 2)
   await catalog.vt.waitForRender()
-  assert.match(catalog.rowsPlain().at(-1) ?? '', /Esc back/u)
+  assert.match(catalog.rowsPlain().at(-1) ?? '', /Back \[Esc\]/u)
   await key(catalog, '\u001b')
   catalog.vt.resize(120, 24)
   await catalog.vt.waitForRender()
@@ -6298,7 +7134,7 @@ test('a live registration appends Extensions and its row commits through the reg
   assert.equal(invalidations, 1, 'the registry invalidation reached the surface render path')
   await h.vt.waitForRender()
   await h.openHome()
-  assert.match(h.view(), /Categories \(10\)/u, 'the live directory appends the tenth category')
+  assert.match(h.view(), /Categories \(11\)/u, 'the live directory appends the eleventh category')
   await key(h, '\u001b[F')
   assert.match(h.view(), /^> Extensions/mu, `End reaches the live category:\n${h.view()}`)
   await key(h, '\r')
@@ -6331,7 +7167,7 @@ test('a live registration appends Extensions and its row commits through the reg
   await h.vt.waitForRender()
   assert.match(h.rowsPlain()[0]!, /Settings · Categories/u, 'the rail owns the keyboard again')
   assert.match(h.view(), /^> Plugins/mu, 'the emptied Extensions category fell back to Plugins')
-  assert.match(h.view(), /Categories \(9\)/u, 'the empty directory paints the nine fixed categories')
+  assert.match(h.view(), /Categories \(10\)/u, 'the empty directory paints the ten fixed categories')
   await key(h, '\u001b')
   assert.ok(h.view().includes('❯'), 'Esc still closes the workspace legally')
   h.dispose()
@@ -6475,7 +7311,7 @@ test('a cross-generation pointer gesture cannot select a replaced registration',
 // `runner.extensions.settings.snapshot()`, and the painted frame moves — with
 // the fiber dispose (the HMR unload) moving it back.
 
-test('C2-R0 a real extension fiber registration reaches the mounted Settings workspace and its unload retracts it', async () => {
+test('a real extension fiber registration reaches the mounted Settings workspace and its unload retracts it', async () => {
   const ctx = new Context()
   try {
     await ctx.plugin(Loader)
@@ -6515,7 +7351,7 @@ test('C2-R0 a real extension fiber registration reaches the mounted Settings wor
     await h.vt.waitForRender()
     await h.openHome()
     assert.match(h.rowsPlain()[0]!, /Settings · Categories/u)
-    assert.equal(h.view().includes('Categories (9)'), true, 'no Extensions category without live rows')
+    assert.equal(h.view().includes('Categories (10)'), true, 'no Extensions category without live rows')
 
     // A real plugin fiber registers through the PUBLIC service API.
     const fiber = ctx.plugin((pluginCtx) => {
@@ -6542,7 +7378,7 @@ test('C2-R0 a real extension fiber registration reaches the mounted Settings wor
     await new Promise<void>(resolve => queueMicrotask(resolve))
     await new Promise<void>(resolve => setTimeout(resolve, 25))
     await h.vt.waitForRender()
-    assert.match(h.view(), /Categories \(10\)/u, 'the live registration appended Extensions with no user input')
+    assert.match(h.view(), /Categories \(11\)/u, 'the live registration appended Extensions with no user input')
     await key(h, '\u001b[F')
     await key(h, '\r')
     assert.match(h.rowsPlain()[0]!, /Settings · Extensions \[1\/1\] · [^ ]+ · Rows/u,
@@ -6558,7 +7394,7 @@ test('C2-R0 a real extension fiber registration reaches the mounted Settings wor
     await h.vt.waitForRender()
     assert.match(h.rowsPlain()[0]!, /Settings · Categories/u, 'the unload moved the keyboard to the rail')
     assert.match(h.view(), /^> Plugins/mu, 'the emptied Extensions category falls back to Plugins')
-    assert.match(h.view(), /Categories \(9\)/u, 'the category is retracted without user input')
+    assert.match(h.view(), /Categories \(10\)/u, 'the category is retracted without user input')
     // Neither the register nor the unload started the existing editor: the
     // Settings workspace still owns the frame.
     assert.match(h.rowsPlain()[0]!, /Settings · /u, 'the Settings workspace still owns the frame')
@@ -6619,7 +7455,7 @@ test('the grouped Extensions page keeps its group position and ONE action bar at
       `the ${columns}x${rows} header states the group position:\n${h.view()}`)
     assert.equal(first.length, rows, `the ${columns}x${rows} frame keeps its physical budget`)
     assert.equal(
-      first.filter(line => /Esc (?:back|close)/u.test(line)).length,
+      first.filter(line => /Back \[Esc\]|Close \[Esc\]/u.test(line)).length,
       1,
       `exactly ONE physical Action Bar at ${columns}x${rows}:\n${h.view()}`,
     )
@@ -6647,7 +7483,7 @@ test('the grouped Extensions page keeps its group position and ONE action bar at
     if (columns === 44) {
       const bar = h.rowsPlain().at(-1)!
       assert.match(bar, /Tab group/u, 'the 44-column bar compacts the group hint')
-      assert.match(bar, /Esc back/u, 'the highest-priority hint is still painted')
+      assert.match(bar, /Back \[Esc\]/u, 'the highest-priority hint is still painted')
     }
     assertRowWidths(h, columns)
     h.dispose()
@@ -7287,7 +8123,7 @@ test('every migrated row never copies, at every responsive width', async () => {
     ['Conversation', 'Progress updates'],
     ['Conversation', 'Response style'],
   ]
-  for (const [columns, rows] of [[120, 40], [80, 24], [44, 24], [44, 8]] as const) {
+  for (const [columns, rows] of [[120, 40], [80, 24], [44, 8]] as const) {
     for (const [category, label] of MIGRATED) {
       const h = setup({ columns, rows })
       await h.open(category)
@@ -7354,8 +8190,9 @@ test('every required size walks the real rows: frozen order and Appearance membe
     return seen
   }
 
-  // The plan's R2-01 size list, in full.
-  for (const [columns, rows] of [[200, 50], [120, 40], [100, 40], [80, 24], [80, 10], [72, 24], [44, 20], [44, 8]] as const) {
+  // Representative wide/medium/short/narrow row-navigation equivalence
+  // classes; other viewport ladder cases cover the remaining sizes.
+  for (const [columns, rows] of [[120, 40], [80, 24], [80, 10], [44, 8]] as const) {
     const conversation = setup({ columns, rows })
     const conversationRows = await walkedRows(conversation, 'Conversation', CONVERSATION_ROWS)
     assert.deepEqual(conversationRows, [...CONVERSATION_ROWS],
@@ -7626,7 +8463,7 @@ test('a real Registry revision change keeps an open new-field choice and revokes
   assert.equal(h.replacements(), 0, 'an old-frame Confirm never dispatches after the directory moved')
   assert.equal(h.doc.responseStyle, undefined, 'and the document is untouched')
   await h.vt.waitForRender()
-  assert.match(h.view(), /Categories \(10\)/u, 'the live directory really changed')
+  assert.match(h.view(), /Categories \(11\)/u, 'the live directory really changed')
   const afterRegister = h.view()
   assert.match(afterRegister, /Choose value/u, 'the open Response style choice survives')
   assert.match(afterRegister, /> concise/u, 'on the SAME candidate identity')
@@ -8875,7 +9712,7 @@ async function railToCategory(h: Harness, category: string): Promise<void> {
 }
 
 // Regression: C2-R7 acceptance R7-APP1 / R7-03 / R7-13.
-test('R7-APP1 the real /settings route edits rows, choices and pages without ever calling app.openSettings', async () => {
+test('the real /settings route edits rows, choices and pages without ever calling app.openSettings', async () => {
   // ONE live extension registration: its row is the newest Settings content and
   // its confirm goes through the real Registry, so the negative control covers
   // the newest owner as well as the original document rows.
@@ -8936,7 +9773,9 @@ test('R7-APP1 the real /settings route edits rows, choices and pages without eve
   // 3. The Web row mounts the embedded page in THIS lease.
   await railToCategory(h, 'Tools')
   await key(h, '\r') // L0 -> L1
-  await key(h, '\x1b[B') // Visual tools -> Web Search / Fetch
+  await key(h, '\x1b[B') // Visual tools -> Shell execution (FR5-B)
+  await key(h, '\x1b[B') // -> ACP Server (PO-1B)
+  await key(h, '\x1b[B') // -> Web Search / Fetch
   await key(h, '\r') // the row's own page
   assert.match(h.rowsPlain()[0]!, /Settings · Tools · Web Search \/ Fetch/u,
     `the Web page owns THIS workspace body:\n${h.view()}`)
@@ -8978,7 +9817,7 @@ test('R7-APP1 the real /settings route edits rows, choices and pages without eve
 })
 
 // Regression: C2-R7 acceptance R7-13 (the independent SettingsList consumers).
-test('R7-13 /keybindings conflicts still paints its conflicts in the independent SettingsList', async () => {
+test('/keybindings conflicts still paints its conflicts in the independent SettingsList', async () => {
   // The conflicts command is the ONE independent `app.openSettings` consumer
   // that the R7 retirement could plausibly break, because the same command
   // module lost the legacy editor. A REAL conflict is installed on THIS app's
@@ -9008,4 +9847,421 @@ test('R7-13 /keybindings conflicts still paints its conflicts in the independent
   assert.match(description, /app\.todo\.toggle \(global, user\)/u, `the second conflicting action is named:\n${frame}`)
   assert.ok(!frame.includes('Settings · Categories'), 'the independent list is NOT the Settings workspace')
   h.dispose()
+})
+
+// ── M5-W PR-C: the next-Host-launch Web preference (`web-autostart`) ────────
+//
+// The row is a PROFILE preference, not the current Web state: every case below
+// drives the REAL `/settings` composition and proves the value the user picks,
+// the Host write that persists it and the authoritative re-read — never a claim
+// about the running Host's Web frontend.
+
+/** Move from the first General row (`startup-backend`) onto `web-autostart` and open it. */
+async function openWebAutostartRow(h: Harness): Promise<void> {
+  await h.open('General')
+  await key(h, '\r') // L0 -> L1 (the Rows level, on Backend)
+  await key(h, '\x1b[B') // Backend -> Start Web automatically (FR5-B General order)
+}
+
+test('the Auto-enable Web row shows the schema default and writes On through its own Host port', async () => {
+  const h = setup({ columns: 200, rows: 40 })
+  await openWebAutostartRow(h)
+  assert.match(h.view(), /Start Web automatically/, 'the General category carries the preference row')
+  assert.match(h.view(), /Off \(default\)/, 'the default OFF is marked as not user-overridden')
+  assert.match(
+    h.view(),
+    /applies on the next Host launch; the current Host is unchanged/u,
+    'the row states the next-launch lifetime instead of claiming a live effect',
+  )
+  await key(h, '\r') // writable L1 -> L2 inline choice
+  assert.match(h.view(), /Choose value/)
+  assert.match(h.view(), /> Off/, 'the current candidate carries the highlight')
+  await key(h, '\x1b[A') // Off (last candidate) -> On
+  assert.match(h.view(), /> On/)
+  assert.equal(h.webAutoStartWrites().length, 0, 'choosing a candidate never writes')
+
+  await key(h, '\r')
+  await settle(h)
+  assert.deepEqual(h.webAutoStartWrites(), [true], 'the Host port receives exactly one On write')
+  assert.match(h.view(), /Status\s+Verified/)
+  assert.match(h.view(), /On/, 'the verified row reports the persisted preference')
+  h.dispose()
+})
+
+test('an unreadable Web preference offers no confirmable candidate', async () => {
+  const h = setup({ columns: 200, rows: 40, webStartupUnavailable: true })
+  await openWebAutostartRow(h)
+  assert.match(h.view(), /Start Web automatically/)
+  assert.match(h.view(), /Unavailable/, 'an absent section is reported, never the schema default')
+  await key(h, '\r')
+  assert.doesNotMatch(h.view(), /Choose value/, 'no candidate exists without an authoritative read')
+  assert.equal(h.webAutoStartWrites().length, 0)
+  h.dispose()
+})
+
+test('a refused Web preference write is reported as not saved and keeps the base value', async () => {
+  const h = setup({
+    columns: 200,
+    rows: 40,
+    webStartupWriteFailure: 'settings namespace "pi-tui-web-preferences" changed since it was read (expected revision 1, now 2)',
+  })
+  await openWebAutostartRow(h)
+  await key(h, '\r')
+  await key(h, '\x1b[A') // Off -> On
+  await key(h, '\r')
+  await settle(h)
+  assert.deepEqual(h.webAutoStartWrites(), [true], 'the refused decision still reached the Host once')
+  assert.match(h.view(), /Not saved/, 'the conflict is attributed to THIS request')
+  assert.match(h.view(), /changed since it was read/u, 'the official conflict reason is stated')
+  h.dispose()
+})
+
+test('the Web preference never claims the current Host Web state was changed', async () => {
+  const h = setup({ columns: 200, rows: 40 })
+  await openWebAutostartRow(h)
+  const detail = h.view()
+  assert.doesNotMatch(detail, /enabled\b/u, 'the preference row never asserts the current frontend state')
+  assert.match(detail, /current Host is not changed/u)
+  h.dispose()
+})
+
+// ── M6-2A A5: the startup backend preference (`startup-backend`) ───────────
+//
+// The `Backend` row lives in the fixed `General` category. It is a PROFILE
+// preference for the NEXT cold launch, never the current process backend: every
+// case drives the REAL `/settings` composition and proves the value the user
+// picks, the port write that persists it and the authoritative re-read. An
+// explicit `DSH_PI_TUI_BACKEND` is a separate LAUNCH fact shown read-only.
+
+/** Open the `General` category and enter its single `Backend` row body (L1). */
+async function openStartupBackendRow(h: Harness): Promise<void> {
+  await h.open('General')
+  await key(h, '\r') // L0 categories -> L1 rows (on Backend)
+}
+
+test('the Backend row lives in the fixed General category and shows the profile default', async () => {
+  const saved = process.env.DSH_PI_TUI_BACKEND
+  delete process.env.DSH_PI_TUI_BACKEND
+  try {
+    const h = setup({ columns: 200, rows: 40 })
+    await h.open('General')
+    assert.match(h.view(), /^> General/mu, 'General is a reachable fixed category')
+    await key(h, '\r') // L0 -> L1
+    assert.match(h.view(), /Backend/u, 'the General category carries the Backend row')
+    assert.match(h.view(), /Direct \(default\)/u, 'the schema default Direct is marked not user-overridden')
+    assert.match(h.view(), /Applies on next launch; current TUI\/Host remains unchanged/u,
+      'the row states the next-launch lifetime instead of claiming a live effect')
+    assert.doesNotMatch(h.view(), /environment override/u, 'no environment fact without the variable')
+    h.dispose()
+  } finally {
+    if (saved === undefined) delete process.env.DSH_PI_TUI_BACKEND
+    else process.env.DSH_PI_TUI_BACKEND = saved
+  }
+})
+
+test('the Backend row writes Daemon through its own port and verifies the re-read', async () => {
+  const saved = process.env.DSH_PI_TUI_BACKEND
+  delete process.env.DSH_PI_TUI_BACKEND
+  try {
+    const h = setup({ columns: 200, rows: 40 })
+    await openStartupBackendRow(h)
+    await key(h, '\r') // writable L1 -> L2 inline choice
+    assert.match(h.view(), /Choose value/u)
+    assert.match(h.view(), /> Direct/u, 'the current candidate carries the highlight')
+    await key(h, '\x1b[B') // Direct -> Daemon
+    assert.match(h.view(), /> Daemon/u)
+    assert.equal(h.backendStartupWrites().length, 0, 'choosing a candidate never writes')
+    await key(h, '\r')
+    await settle(h)
+    assert.deepEqual(h.backendStartupWrites(), ['daemon'], 'the port receives exactly one daemon write')
+    assert.match(h.view(), /Status\s+Verified/u, 'the authoritative re-read verified the write')
+    assert.match(h.view(), /Daemon/u, 'the verified row reports the persisted preference')
+    h.dispose()
+  } finally {
+    if (saved === undefined) delete process.env.DSH_PI_TUI_BACKEND
+    else process.env.DSH_PI_TUI_BACKEND = saved
+  }
+})
+
+test('the (default) suffix follows USER provenance, not the effective value', async () => {
+  const declared = setup({
+    columns: 200,
+    rows: 40,
+    backendStartupPreference: { backend: 'daemon', revision: 2, userOverridden: true },
+  })
+  await declared.open('General')
+  await key(declared, '\r')
+  assert.match(declared.view(), /Daemon(?! \(default\))/u, 'a USER-declared Daemon carries no default mark')
+  declared.dispose()
+})
+
+test('an explicit DSH_PI_TUI_BACKEND is shown read-only and never written to the persisted value', async () => {
+  const saved = process.env.DSH_PI_TUI_BACKEND
+  try {
+    process.env.DSH_PI_TUI_BACKEND = 'daemon'
+    const h = setup({ columns: 200, rows: 40 })
+    await openStartupBackendRow(h)
+    assert.match(h.view(), /Current launch: daemon \(environment override\)/u,
+      'the environment override is a read-only launch fact')
+    assert.match(h.view(), /Direct \(default\)/u,
+      'the persisted Profile value stays Direct; the environment is never written into it')
+    assert.equal(h.backendStartupWrites().length, 0, 'reading the row never writes')
+    h.dispose()
+  } finally {
+    if (saved === undefined) delete process.env.DSH_PI_TUI_BACKEND
+    else process.env.DSH_PI_TUI_BACKEND = saved
+  }
+})
+
+test('an invalid DSH_PI_TUI_BACKEND is reported as a read-only fact, never hidden', async () => {
+  const saved = process.env.DSH_PI_TUI_BACKEND
+  try {
+    process.env.DSH_PI_TUI_BACKEND = 'garbage'
+    const h = setup({ columns: 200, rows: 40 })
+    await openStartupBackendRow(h)
+    assert.match(h.view(), /Current launch: invalid value "garbage" \(environment override\)/u,
+      'an illegal environment value is still reported as a real launch fact')
+    h.dispose()
+  } finally {
+    if (saved === undefined) delete process.env.DSH_PI_TUI_BACKEND
+    else process.env.DSH_PI_TUI_BACKEND = saved
+  }
+})
+
+test('an unreadable startup backend offers no confirmable candidate', async () => {
+  const h = setup({ columns: 200, rows: 40, backendStartupUnavailable: true })
+  await openStartupBackendRow(h)
+  assert.match(h.view(), /Backend/u)
+  assert.match(h.view(), /Unavailable/u, 'an absent section is reported, never the schema default')
+  await key(h, '\r')
+  assert.doesNotMatch(h.view(), /Choose value/u, 'no candidate exists without an authoritative read')
+  assert.equal(h.backendStartupWrites().length, 0)
+  h.dispose()
+})
+
+test('the General Backend row is reachable and operable at 108/76/75 columns and two heights', async () => {
+  const saved = process.env.DSH_PI_TUI_BACKEND
+  delete process.env.DSH_PI_TUI_BACKEND
+  try {
+    for (const columns of [108, 76, 75] as const) {
+      for (const rows of [24, 40] as const) {
+        const h = setup({ columns, rows })
+        await h.open('General')
+        if (columns >= 76) {
+          assert.match(h.view(), /Tab (?:focus|panes)/u, `the Tab hint is advertised at ${columns}x${rows}`)
+        } else {
+          // A narrow rail owns a single pane, so Tab is inert there and must not
+          // advertise a working pane switch.
+          assert.doesNotMatch(h.view(), /Tab (?:focus|panes)/u, `a narrow rail advertises no pane Tab at ${columns}x${rows}`)
+        }
+        await key(h, '\r') // L0 -> L1 (the Backend row)
+        assert.match(h.view(), /Backend/u, `the Backend row is reachable at ${columns}x${rows}`)
+        await key(h, '\r') // L1 -> L2 candidate choice
+        assert.match(h.view(), /Choose value/u, `the Backend row opens its candidate choice at ${columns}x${rows}`)
+        h.dispose()
+      }
+    }
+  } finally {
+    if (saved === undefined) delete process.env.DSH_PI_TUI_BACKEND
+    else process.env.DSH_PI_TUI_BACKEND = saved
+  }
+})
+
+test('the FR5-B numeric pages stay complete and Exit/Save-reachable across the frozen size and theme matrix', async () => {
+  const sizes = [
+    [200, 50], [120, 40], [100, 40], [80, 24], [80, 10], [72, 24], [44, 20], [44, 8],
+  ] as const
+  for (const [columns, rows] of sizes) {
+    for (const theme of ['dark', 'light'] as const) {
+      const h = setup({
+        columns,
+        rows,
+        doc: { theme },
+        agentLoop: { maxParallelToolCalls: 4, inherited: 2 },
+        shellExecution: { executor: 'bash', timeoutMs: 60_000, maxOutputBytes: 64_000, inheritedTimeoutMs: 60_000 },
+      })
+      await h.open('Agent')
+      await key(h, '\r')
+      await highlightRow(h, 'Agent loop')
+      await key(h, '\r')
+      await settle(h)
+      const openFrame = h.view()
+      assert.match(openFrame, /Settings · Agent · Agent loop/u, `${columns}x${rows} ${theme}: page identity`)
+      assert.match(openFrame, /Parallel tool calls/u, `${columns}x${rows} ${theme}: field`)
+      const bar = h.rowsPlain().at(-1) ?? ''
+      assert.match(bar, /Back \[Esc\]/u, `${columns}x${rows} ${theme}: complete Esc affordance`)
+      // Stage the explicit Reset so the dirty Save is painted, then discard it.
+      await key(h, 'x')
+      await settle(h)
+      const dirtyFrame = h.view()
+      assert.match(dirtyFrame, /Reset staged/u, `${columns}x${rows} ${theme}: staged reset`)
+      assert.match(dirtyFrame, /Save \[S\]/u, `${columns}x${rows} ${theme}: complete Save affordance`)
+      await key(h, '\x1b')
+      await settle(h)
+      await key(h, 'y')
+      await settle(h)
+      for (const [index, line] of h.vt.getViewport().entries()) {
+        assert.ok(visibleWidth(line) <= columns, `${columns}x${rows} ${theme}: row ${index} fits the width`)
+      }
+      h.dispose()
+
+      // The Tools page under the same frozen sizes.
+      const shell = setup({
+        columns,
+        rows,
+        doc: { theme },
+        shellExecution: { executor: 'pwsh', timeoutMs: 120_000, maxOutputBytes: 64_000, inheritedMaxOutputBytes: 32_000 },
+      })
+      await shell.open('Tools')
+      await key(shell, '\r')
+      await highlightRow(shell, 'Shell execution')
+      await key(shell, '\r')
+      await settle(shell)
+      const shellFrame = shell.view()
+      assert.match(shellFrame, /Settings · Tools · Shell execution/u, `${columns}x${rows} ${theme}: shell page identity`)
+      assert.match(shellFrame, /Windows/u, `${columns}x${rows} ${theme}: the Host executor identity`)
+      assert.match(shell.rowsPlain().at(-1) ?? '', /Back \[Esc\]/u, `${columns}x${rows} ${theme}: shell Esc affordance`)
+      await key(shell, 'x')
+      await settle(shell)
+      assert.match(shell.view(), /Save \[S\]/u, `${columns}x${rows} ${theme}: shell Save affordance`)
+      await key(shell, '\x1b')
+      await settle(shell)
+      await key(shell, 'y')
+      await settle(shell)
+      shell.dispose()
+    }
+  }
+
+  // A custom palette and the two icon styles keep the same page chrome.
+  const custom = new ThemeRegistry()
+  custom.register({ id: 'acme', name: 'Acme', palette: { text: '#123456', primary: '#654321' } as never }, 'acme', 'acme')
+  for (const iconStyle of ['symbols', 'minimal'] as const) {
+    const h = setup({ columns: 120, rows: 40, doc: { theme: 'plugin:acme/acme', iconStyle }, themes: custom, agentLoop: { maxParallelToolCalls: 4 } })
+    await h.open('Agent')
+    await key(h, '\r')
+    await highlightRow(h, 'Agent loop')
+    await key(h, '\r')
+    await settle(h)
+    assert.match(h.view(), /Settings · Agent · Agent loop/u, `custom/${iconStyle}: the page chrome stays`)
+    assert.match(h.rowsPlain().at(-1) ?? '', /Back \[Esc\]/u)
+    h.dispose()
+  }
+})
+
+// L5: production-panel VirtualTerminal SGR coverage. The packed Direct smoke
+// P4-08 supplies the separate L6 real-PTY injected-pointer witness.
+test('AltScreen pointer journey edits and resets a persisted extension setting (PR-4)', async () => {
+  const registry = new SettingsRegistry(() => {})
+  const ownerEntryIds = new Map<string, string>()
+  const values = new Map<string, { revision: number; generation: object; effective: Record<string, unknown>; inherited: Record<string, unknown>; user: Record<string, unknown> }>()
+  const mutations: { packageName: string; ops: readonly { op: 'set' | 'unset'; path: readonly string[]; value?: unknown }[] }[] = []
+  const extensionConfig: ExtensionConfigsConfig = {
+    read(packageName) {
+      const value = values.get(packageName)
+      if (value === undefined) return { kind: 'unavailable', reason: 'row not mounted' }
+      return {
+        kind: 'ready',
+        packageName,
+        generation: value.generation,
+        revision: value.revision,
+        effective: structuredClone(value.effective),
+        inherited: structuredClone(value.inherited),
+        user: structuredClone(value.user),
+        userDataPresent: Object.keys(value.user).length > 0,
+      }
+    },
+    async refresh() {},
+    async mutate(packageName, ops, revision) {
+      const value = values.get(packageName)
+      if (value === undefined) return { kind: 'rejected', reason: 'row not mounted' }
+      if (value.revision !== revision) return { kind: 'conflict', reason: 'revision changed' }
+      mutations.push({ packageName, ops })
+      const user = structuredClone(value.user)
+      const op = ops[0]!
+      if (op.op === 'set') user[op.path[0]!] = op.value
+      else {
+        const inherited = (value.inherited as Record<string, unknown>)[op.path[0]!]
+        if (inherited === undefined) delete user[op.path[0]!]
+        else user[op.path[0]!] = structuredClone(inherited)
+      }
+      value.user = user
+      value.effective = { ...value.inherited, ...user }
+      value.revision += 1
+      return { kind: 'accepted' }
+    },
+  }
+  const h = setup({
+    columns: 100,
+    rows: 40,
+    settingsRegistry: registry,
+    ownerEntryIds,
+    clientObservations: [{ packageName: '@r8-pr1-fixture/a', phase: 'active', entryId: 'entry-a' }],
+    extensionConfigs: extensionConfig,
+  })
+  const handle = registry.register({
+    id: 'r8-a-label',
+    label: 'R8 A label',
+    description: 'Fixture A persisted label',
+    currentValue: 'alpha',
+    persisted: {
+      path: ['label'],
+      choices: [
+        { id: 'alpha', op: 'set', value: 'alpha' },
+        { id: 'omega', label: 'Omega', op: 'set', value: 'omega' },
+        { id: 'inherit', label: 'Use inherited', op: 'unset' },
+      ],
+    },
+  }, 'acme-a')
+  ownerEntryIds.set('acme-a', 'entry-a')
+  values.set('@r8-pr1-fixture/a', {
+    revision: 4,
+    generation: { host: 1 },
+    effective: { label: 'alpha' },
+    inherited: { label: 'alpha' },
+    user: { label: 'alpha' },
+  })
+  try {
+    await h.openHome()
+    await key(h, '\u001b[F')
+    await key(h, '\r')
+    assert.match(h.view(), /Host profile · effective: alpha/u)
+    // Pointer-only positive path: Row -> Detail -> Choice -> candidate -> Confirm.
+    const valueRow = rowOf(h, 'Value')
+    press(h, valueRow, cellIndexOf(h, valueRow, 'Value'))
+    release(h, valueRow, cellIndexOf(h, valueRow, 'Value'))
+    await settle(h)
+    assert.match(h.view(), /Choose value/u)
+    const omegaRow = rowOf(h, 'omega (Omega)')
+    press(h, omegaRow, cellIndexOf(h, omegaRow, 'omega (Omega)'))
+    release(h, omegaRow, cellIndexOf(h, omegaRow, 'omega (Omega)'))
+    await settle(h)
+    const confirmRow = rowOf(h, 'Confirm')
+    press(h, confirmRow, cellIndexOf(h, confirmRow, 'Confirm'))
+    release(h, confirmRow, cellIndexOf(h, confirmRow, 'Confirm'))
+    await settle(h)
+    assert.equal(mutations.length, 1, 'the pointer Confirm dispatched ONE CAS write')
+    assert.deepEqual(mutations[0]?.ops, [{ op: 'set', path: ['label'], value: 'omega' }])
+    assert.equal(values.get('@r8-pr1-fixture/a')?.effective.label, 'omega')
+    assert.match(h.view(), /Verified/u)
+    // Pointer-only Reset: the painted Change button re-enters the SAME Choice.
+    const changeRow = rowOf(h, 'Change…')
+    press(h, changeRow, cellIndexOf(h, changeRow, 'Change…'))
+    release(h, changeRow, cellIndexOf(h, changeRow, 'Change…'))
+    await settle(h)
+    const inheritRow = rowOf(h, 'inherit (Use inherited)')
+    press(h, inheritRow, cellIndexOf(h, inheritRow, 'inherit (Use inherited)'))
+    release(h, inheritRow, cellIndexOf(h, inheritRow, 'inherit (Use inherited)'))
+    await settle(h)
+    const confirmRow2 = rowOf(h, 'Confirm')
+    press(h, confirmRow2, cellIndexOf(h, confirmRow2, 'Confirm'))
+    release(h, confirmRow2, cellIndexOf(h, confirmRow2, 'Confirm'))
+    await settle(h)
+    assert.equal(mutations.length, 2, 'Reset dispatched ONE official unset')
+    assert.deepEqual(mutations[1]?.ops, [{ op: 'unset', path: ['label'] }])
+    assert.equal(values.get('@r8-pr1-fixture/a')?.effective.label, 'alpha')
+    assert.equal(h.replacements(), 0, 'no TUI settings document write ever happens')
+  } finally {
+    handle.dispose()
+    h.dispose()
+  }
 })

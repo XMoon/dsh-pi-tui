@@ -6,13 +6,13 @@
  * PHYSICAL frame plus the cell ink of the state vocabulary:
  *
  * - the page is reachable at 200×50, 120×40, 100×40, 80×24, 80×10, 72×24,
- *   44×20 and 44×8, paints the six frozen rows (cropped/scrolled when the
+ *   44×20 and 44×8, paints the nine frozen rows (cropped/scrolled when the
  *   grant is short), keeps the ONE physical Action Bar, and never overflows a
  *   physical line;
  * - the Detail pane names the real Host facts (`Current: …`) and the whole
  *   `[current]` chip; a candidate/verdict is never painted partially;
- * - the endpoint editor keeps its trust warning and its ONE
- *   `Enter confirm · Esc cancel` bar at the narrow sizes;
+ * - the Search billing row keeps its three official candidates and its
+ *   `Confirm [Enter]` bar at the narrow sizes;
  * - the credential row keeps the official reference, the presence/source and
  *   BOTH explicit Models actions at 44×8 and above;
  * - the ink roles come from the LIVE palette (`textMuted` chips, `error`
@@ -51,6 +51,7 @@ import {
   assertNoHalfSegmentInBar,
   assertOneActiveDevice,
 } from '../support/design-language-frames.ts'
+import { unconfiguredPolicyObservation } from '../support/session-policy-fake.ts'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
@@ -95,7 +96,6 @@ interface Harness {
     web: WebProviderSettings
     available: boolean
     failNext: string | undefined
-    endpointStoredValue: string | undefined
   }
   readonly view: () => string
   readonly plain: () => readonly string[]
@@ -106,20 +106,30 @@ interface Harness {
 function setup(options: {
   readonly columns: number
   readonly rows: number
-  readonly endpoint?: string
   readonly iconStyle?: 'emoji' | 'symbols' | 'minimal'
+  /** The stored `web.searchProvider`; explicit `undefined` IS the Host's
+   *  AUTOMATIC routing state (kept as `undefined`, never defaulted). */
+  readonly searchProvider?: string
 }): Harness {
   const vt = new VirtualTerminal(options.columns, options.rows)
   const store = {
     available: true,
     failNext: undefined as string | undefined,
-    /** The value the Host actually KEEPS after a successful endpoint write (a
-     *  canonical form / a winning project layer); undefined = the submitted URL. */
-    endpointStoredValue: undefined as string | undefined,
     web: {
-      searchProvider: 'deepseek-official',
+      searchProvider: 'searchProvider' in options ? options.searchProvider : 'deepseek-official',
       fetchProvider: 'http',
-      api: { baseURL: options.endpoint ?? 'https://api.deepseek.com/v1/tools', count: 10, sendOriginalQuestion: true },
+      providerSelection: {
+        search: ('searchProvider' in options ? options.searchProvider : 'deepseek-official') === undefined
+          ? { baseId: undefined, userSet: false, userId: undefined }
+          : {
+              baseId: undefined,
+              userSet: true,
+              userId: 'searchProvider' in options ? options.searchProvider : 'deepseek-official',
+            },
+        fetch: { baseId: 'http', userSet: false, userId: undefined },
+      },
+      api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
+      advanced: {},
       credential: { configured: true, source: 'file' },
     } as WebProviderSettings,
   }
@@ -158,6 +168,7 @@ function setup(options: {
     clearExtensionError: () => {},
     captureExtensionHealthRef: () => () => {},
     currentSessionId: undefined,
+    policy: unconfiguredPolicyObservation(),
     captureLiveSessionScope: () => undefined,
     isSessionScopeCurrent: () => false,
     currentSessionStats: async () => undefined,
@@ -198,19 +209,67 @@ function setup(options: {
       configReadiness: () => 'ready',
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
       permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined, approvalOverrideAvailable: () => false },
-      subagentModelSelection: { available: () => false },
+      subagentLimits: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
+      subagentModelSelection: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
       credentials: {
         available: () => true,
         describeReference: async () => ({ configured: true, source: 'file' }),
       },
       web: {
         available: () => store.available,
-        read: async () => store.available ? { ...store.web, api: { ...store.web.api } } : undefined,
-        setSearchProvider: async (id: string) => { write(() => { store.web.searchProvider = id }) },
-        setFetchProvider: async (id: string) => { write(() => { store.web.fetchProvider = id }) },
+        read: async () => store.available
+          ? { ...store.web, providerSelection: structuredClone(store.web.providerSelection), api: { ...store.web.api } }
+          : undefined,
+        setSearchProvider: async (id: string) => {
+          write(() => {
+            store.web.searchProvider = id
+            store.web.providerSelection = {
+              ...store.web.providerSelection,
+              search: { baseId: store.web.providerSelection.search.baseId, userSet: true, userId: id },
+            }
+          })
+        },
+        setFetchProvider: async (id: string) => {
+          write(() => {
+            store.web.fetchProvider = id
+            store.web.providerSelection = {
+              ...store.web.providerSelection,
+              fetch: { baseId: store.web.providerSelection.fetch.baseId, userSet: true, userId: id },
+            }
+          })
+        },
+        restoreSearchProvider: async () => {
+          write(() => {
+            const baseId = store.web.providerSelection.search.baseId
+            store.web.searchProvider = baseId
+            store.web.providerSelection = {
+              ...store.web.providerSelection,
+              search: { baseId, userSet: false, userId: undefined },
+            }
+          })
+        },
+        restoreFetchProvider: async () => {
+          write(() => {
+            const baseId = store.web.providerSelection.fetch.baseId
+            store.web.fetchProvider = baseId
+            store.web.providerSelection = {
+              ...store.web.providerSelection,
+              fetch: { baseId, userSet: false, userId: undefined },
+            }
+          })
+        },
         setSearchApiCount: async (count: number) => { write(() => { store.web.api.count = count }) },
         setSendOriginalQuestion: async (enabled: boolean) => { write(() => { store.web.api.sendOriginalQuestion = enabled }) },
-        setSearchApiBaseURL: async (url: string) => { write(() => { store.web.api.baseURL = store.endpointStoredValue ?? url }) },
+        setSearchBilling: async (mode: string) => { write(() => { store.web.api.searchBilling = mode as 'auto' | 'account' | 'api-key' }) },
+        setFetchBilling: async (mode: string) => { write(() => { store.web.api.fetchBilling = mode as 'auto' | 'account' | 'api-key' }) },
       },
     }),
     catalog: { models: { available: () => false } },
@@ -248,6 +307,37 @@ async function key(h: Harness, data: string): Promise<void> {
 const press = (h: Harness, row: number, col: number): void => { h.vt.sendInput(`\x1b[<0;${col + 1};${row + 1}M`) }
 const release = (h: Harness, row: number, col: number): void => { h.vt.sendInput(`\x1b[<0;${col + 1};${row + 1}m`) }
 
+/** The painted (row, cell) of the LAST line containing `word`. */
+function paintedWordPoint(h: Harness, word: string): { readonly row: number; readonly column: number } {
+  const lines = h.plain()
+  const row = lines.findLastIndex(line => line.includes(word))
+  assert.ok(row >= 0, `${word} is not painted:\n${h.view()}`)
+  const column = lines[row]!.indexOf(word)
+  assert.ok(column >= 0, `${word} has no painted column`)
+  return { row, column }
+}
+
+/** One complete real SGR press+release on a painted word. */
+function clickWord(h: Harness, word: string): void {
+  const point = paintedWordPoint(h, word)
+  press(h, point.row, point.column + 1)
+  release(h, point.row, point.column + 1)
+}
+
+/**
+ * Wait out the alt screen's DOUBLE_CLICK window before the NEXT pointer
+ * gesture on the same word. An intentional second click on one painted word
+ * inside that window reads as a word-selection double click in the fork,
+ * never as a second disclosure; this paces the gesture out. The bound is the
+ * fork's real contract (DOUBLE_CLICK_INTERVAL_MS = 500 plus one frame of
+ * slack), not a blind wait for an async result.
+ */
+async function settlePointerClick(h: Harness): Promise<void> {
+  // The fork's real DOUBLE_CLICK window contract (500 ms), not an async guess:
+  await new Promise<void>(resolve => setTimeout(resolve, 550))
+  await h.vt.waitForRender()
+}
+
 /** Wait until the PAINTED frame satisfies `predicate` (a real rendered frame,
  *  never a timer guess about the Host read). */
 async function waitForPainted(h: Harness, label: string, predicate: (frame: string) => boolean): Promise<string> {
@@ -263,11 +353,21 @@ async function openOtherRows(h: Harness): Promise<void> {
   await key(h, ENTER)
 }
 
+/** Move the Tools rows cursor onto the Web launcher row (label-driven, so a new
+ *  neighbouring row can never silently shift this navigation). */
+async function highlightWebRow(h: Harness): Promise<void> {
+  for (let step = 0; step < 6; step += 1) {
+    if (/> Web Search \/ Fetch/u.test(h.view())) return
+    await key(h, DOWN)
+  }
+  assert.fail(`the Web launcher row never owned the selection:\n${h.view()}`)
+}
+
 /** Open the Web page and wait for its settled authority facts (the page's own
  *  mount triggers a fresh Host read, so the first frames are Loading…). */
 async function openWebPage(h: Harness): Promise<void> {
   await openOtherRows(h)
-  await key(h, DOWN)
+  await highlightWebRow(h)
   await key(h, ENTER)
   await waitForPainted(h, 'the Web page to paint its settled facts', frame =>
     frame.includes('Web Search Provider') && !frame.includes('Loading…'))
@@ -284,14 +384,19 @@ for (const [columns, rows] of SIZES) {
     const h = setup({ columns, rows })
     t.after(h.dispose)
     await openOtherRows(h)
+    // PO-1B added two ACP rows to Tools, so at the shortest grant the Web
+    // launcher row is CROPPED from the first screen. It stays reachable by
+    // scrolling the rows cursor onto it (the label-driven helper), which is the
+    // real user path; assert it is painted once selected rather than assuming
+    // every Tools row fits at once.
+    await highlightWebRow(h)
     const launcherRows = h.plain()
     assert.ok(launcherRows.some(line => line.includes('Web Search / Fetch')),
       `the launcher row is painted at ${columns}x${rows}:\n${launcherRows.join('\n')}`)
-    await key(h, DOWN)
     await key(h, ENTER)
     const frame = await waitForPainted(h, `the Web page at ${columns}x${rows}`, frame =>
       frame.includes('Web Search Provider') && !frame.includes('Loading…'))
-    // The six frozen rows exist and the FIRST is always visible at the top; a
+    // The nine frozen rows exist and the FIRST is always visible at the top; a
     // short grant crops/scolls the rest instead of inventing a compact mode.
     assert.match(frame, /Web Search Provider/u, 'the first frozen row is painted')
     assert.match(frame, /Enter open/u, 'the list bar states the ONE action')
@@ -317,14 +422,14 @@ for (const [columns, rows] of SIZES) {
       assert.equal(primaries.length, 1, `exactly one active pane header at ${columns}x${rows}:\n${frame}`)
     }
     // Scroll the list to the last row: every row stays reachable at every size.
-    for (let step = 0; step < 5; step += 1) await key(h, DOWN)
+    for (let step = 0; step < 8; step += 1) await key(h, DOWN)
     const scrolled = h.view()
     // The wide/medium projections paint the Detail pane; a narrow frame paints
     // the list alone, where the selected row's own value IS the Host fact.
     assert.match(scrolled, /Current: |Reference: |Configured · source: file/u,
       `the selected row states a real Host fact:\n${scrolled}`)
-    const lastRowPainted = scrolled.includes('DeepSeek API Key') || scrolled.includes('Search / Fetch API Endpoint')
-      || scrolled.includes('Search API Result Count') || scrolled.includes('Share Original Question')
+    const lastRowPainted = scrolled.includes('DeepSeek API Key') || scrolled.includes('Search API Override')
+      || scrolled.includes('Search Billing') || scrolled.includes('Search API Result Count')
     assert.ok(lastRowPainted, `the scroll really reveals later frozen rows:\n${scrolled}`)
     // Esc from the list returns to the Tools row (never a second overlay).
     await key(h, ESC)
@@ -342,8 +447,8 @@ for (const [columns, rows] of [[200, 50], [120, 40], [100, 40], [80, 24], [44, 2
     await selectListRow(h, 0)
     await key(h, ENTER) // the row Detail
     const frame = h.view()
-    assert.match(frame, /Current: Messages/u, `the Detail states the real Host value:\n${frame}`)
-    assert.match(frame, /Enter confirm/u, 'the Detail bar advertises the ONE confirm action')
+    assert.match(frame, /Current: DeepSeek server-side search/u, `the Detail states the real Host value:\n${frame}`)
+    assert.match(frame, /Confirm \[Enter\]/u, 'the Detail bar advertises the ONE confirm action')
     if (columns >= 80) {
       assert.match(frame, /\[current\]/u, 'the current chip is painted WHOLE')
       assert.ok(!frame.includes('[curren ') && !frame.includes('[curren|') && !frame.includes('[curren]'),
@@ -358,28 +463,39 @@ for (const [columns, rows] of [[200, 50], [120, 40], [100, 40], [80, 24], [44, 2
 }
 
 for (const [columns, rows] of SIZES) {
-  test(`the endpoint editor keeps its trust warning and confirm/cancel bar at ${columns}×${rows}`, async t => {
-    const longEndpoint = 'https://gateway.example.test/deepseek/v1/tools/with/a/long/path'
-    const h = setup({ columns, rows, endpoint: longEndpoint })
+  test(`the Search billing row keeps its candidates and confirm bar at ${columns}×${rows}`, async t => {
+    const h = setup({ columns, rows })
     t.after(h.dispose)
+    // The Billing row exists only for the Search API route (server-side Search
+    // never consumes searchBilling).
+    h.store.web.searchProvider = 'deepseek-search-api'
     await openWebPage(h)
     await selectListRow(h, 4)
-    await key(h, ENTER) // mount the endpoint editor
+    await key(h, ENTER) // the billing Detail
     const frame = h.view()
-    assert.match(frame, /Enter confirm · Esc cancel/u, `the whole confirm/cancel bar survives at ${columns}x${rows}`)
-    // The COMPLETE disclosure is mandatory before any confirm: a trusted https
-    // base, the API key AND query sent there, and the URL-shape/trust boundary.
-    const disclosure = frame.replace(/\s+/gu, ' ')
-    assert.match(disclosure, /Only confirm a trusted https base:/u, `the trust warning is painted:\n${frame}`)
-    assert.match(disclosure, /it receives the API key and the query/u,
-      `the credential+query disclosure is painted:\n${frame}`)
-    assert.match(disclosure, /The URL shape is not a trust check/u,
-      `the URL-shape/trust boundary is painted:\n${frame}`)
-    assert.ok(!/Esc ca$|Esc can$|Esc canc$|Enter confir$/u.test(frame), 'no hint is painted as a partial word')
+    assert.match(frame, /Current: Automatic/u, `the stored billing mode is painted at ${columns}x${rows}`)
+    assert.match(frame, /› Automatic/u, 'the current candidate is highlighted')
+    assert.match(frame, /Confirm \[Enter\]/u, `the confirm bar survives at ${columns}x${rows}`)
+    assert.ok(!/Confirm \[Ente?r?$|Back \[Es$/u.test(frame), 'no hint is painted as a partial word')
     for (const line of h.plain()) assert.ok(visibleWidth(line) <= columns)
-    assertBarIsLastRow(h.plain(), (row, col) => h.vt.getCellFgRgb(row, col), 'Enter confirm · Esc cancel')
-    await key(h, ESC) // cancel without a write
-    assert.doesNotMatch(h.view(), /Enter confirm · Esc cancel/u, 'Esc cancels the draft')
+    assertBarIsLastRow(h.plain(), (row, col) => h.vt.getCellFgRgb(row, col), 'Back [Esc]')
+    // The three official modes are offered with their credential claims. The
+    // highlighted candidate is the current mode; a short grant crops the rest
+    // of the Detail, so the remaining candidates are reachable by scrolling
+    // (never dropped) — a tiny viewport may not show two at once.
+    const disclosure = frame.replace(/\s+/gu, ' ')
+    assert.match(disclosure, /› Automatic \[current\]/u, 'the current candidate chip survives every frozen size')
+    assert.match(disclosure, /Confirm \[Enter\]/u)
+    for (let step = 0; step < 10 && !h.view().includes('API key · API key credential only'); step += 1) {
+      await key(h, '\x1b[6~') // PgDn scrolls the Detail viewport
+    }
+    assert.match(h.view().replace(/\s+/gu, ' '), /API key · API key credential only/u)
+    for (let step = 0; step < 10 && !h.view().includes('Account · signed-in account only'); step += 1) {
+      await key(h, '\x1b[5~') // PgUp scrolls back
+    }
+    assert.match(h.view().replace(/\s+/gu, ' '), /Account · signed-in account only/u)
+    await key(h, ESC) // back to the list without a write
+    assert.equal(h.store.web.api.searchBilling, 'auto', 'browsing the billing Detail writes nothing')
   })
 }
 
@@ -388,7 +504,7 @@ for (const [columns, rows] of [[120, 40], [80, 24], [44, 20], [44, 8]] as const)
     const h = setup({ columns, rows })
     t.after(h.dispose)
     await openWebPage(h)
-    await selectListRow(h, 5)
+    await selectListRow(h, 8)
     await key(h, ENTER)
     const frame = h.view()
     assert.match(frame, /Reference: DEEPSEEK_API_KEY/u, `the official reference is painted:\n${frame}`)
@@ -398,7 +514,7 @@ for (const [columns, rows] of [[120, 40], [80, 24], [44, 20], [44, 8]] as const)
     assert.match(frame, /Enter open in Models/u, 'the ONE action bar names the Models deeplink')
     assert.doesNotMatch(frame, /sk-|secret value/iu, 'no secret is ever painted')
     for (const line of h.plain()) assert.ok(visibleWidth(line) <= columns)
-    assertBarIsLastRow(h.plain(), (row, col) => h.vt.getCellFgRgb(row, col), 'Esc back')
+    assertBarIsLastRow(h.plain(), (row, col) => h.vt.getCellFgRgb(row, col), 'Back [Esc]')
     // Enter opens the EXISTING Models page in the same lease.
     await key(h, ENTER)
     await waitForPainted(h, 'the Models page on the reference', frame =>
@@ -422,7 +538,7 @@ test('the state vocabulary uses its frozen ink roles in dark and light', async t
     await openWebPage(dark)
     await selectListRow(dark, 0)
     await key(dark, ENTER)
-    const darkChip = chipCell(dark, 'Messages', '[current]')
+    const darkChip = chipCell(dark, 'DeepSeek server-side search', '[current]')
     assert.equal(darkChip, hexToRgb(currentPalette.textMuted), 'the current chip is textMuted')
     // A REFUSED write paints Not saved in error ink (the word rides the state).
     dark.store.failNext = 'mutate rejected'
@@ -443,7 +559,7 @@ test('the state vocabulary uses its frozen ink roles in dark and light', async t
       await openWebPage(light)
       await selectListRow(light, 0)
       await key(light, ENTER)
-      assert.equal(chipCell(light, 'Messages', '[current]'), hexToRgb(currentPalette.textMuted),
+      assert.equal(chipCell(light, 'DeepSeek server-side search', '[current]'), hexToRgb(currentPalette.textMuted),
         'the light palette supplies the same role')
       assert.notEqual(hexToRgb(currentPalette.textMuted), darkChip ?? -1,
         'the two palettes really differ (the probe was not vacuous)')
@@ -540,21 +656,242 @@ test('a click on a list row opens its Detail; a press→resize→release never d
   assert.match(h.view(), /Enter open/u, 'the refused gesture stays at the list (no Detail opened)')
 })
 
-test('a click on an option only highlights it; the explicit Enter is the ONE write', async t => {
+test('a click on an option only highlights it; the explicit Confirm [Enter] click is the ONE write', async t => {
   const h = setup({ columns: 120, rows: 40 })
   t.after(h.dispose)
   await openWebPage(h)
   await selectListRow(h, 0)
   await key(h, ENTER)
-  const optionRow = h.plain().findIndex(line => line.includes('DeepSeek Search API · opt-in'))
+  const optionRow = h.plain().findIndex(line => line.includes('DeepSeek Search API · explicit · billed per Search API call'))
   assert.ok(optionRow >= 0, `the candidate row is painted:\n${h.view()}`)
   press(h, optionRow, 40)
   release(h, optionRow, 40)
   await h.vt.waitForRender()
-  assert.equal(h.store.web.searchProvider, 'deepseek-official', 'a click never writes')
-  await key(h, ENTER) // the explicit confirm of the highlighted candidate
+  assert.equal(h.store.web.searchProvider, 'deepseek-official', 'an option click never writes')
+  assert.match(h.view(), /› DeepSeek Search API · explicit · billed per Search API call/u, 'the click only moved the draft')
+  // The complete painted Confirm [Enter] is the ONE delegated target.
+  clickWord(h, 'Confirm [Enter]')
   await waitForPainted(h, 'the confirmed write', frame => frame.includes('Verified'))
   assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
+  assert.equal(h.store.web.api.count, 10, 'no neighbouring Web field was written')
+  // The commit verb uses the primary action ink while the Back affordance keeps
+  // the secondary ink (design language §7.1; the key caps stay muted).
+  const confirmPoint = paintedWordPoint(h, 'Confirm [Enter]')
+  assert.equal(h.vt.getCellFgRgb(confirmPoint.row, confirmPoint.column), hexToRgb(currentPalette.text),
+    'Confirm uses the primary action ink')
+  const barLines = h.plain()
+  const barRow = barLines.length - 1
+  const backColumn = barLines[barRow]!.indexOf('Back [Esc]')
+  assert.ok(backColumn >= 0)
+  assert.equal(h.vt.getCellFgRgb(barRow, backColumn), hexToRgb(currentPalette.textDim),
+    'Back keeps the secondary action ink')
+})
+
+test('the AUTOMATIC page offers a complete pointer-only route: click the row, the API candidate, Confirm, Verified, Back out', async t => {
+  // With NO stored provider the page paints the real AUTOMATIC fact, paints no
+  // [current] chip, and the pointer route reaches the SAME real write path:
+  // row click (opens the Detail) → option click (draft only) → Confirm click
+  // → Verified → the painted Back span returns to the list. The only keyboard
+  // input is the workspace-level entry into the page itself.
+  const h = setup({ columns: 120, rows: 40, searchProvider: undefined })
+  t.after(h.dispose)
+  await openWebPage(h)
+  assert.match(h.view(), /Current: Automatic/u, 'the page states the AUTOMATIC current fact')
+  assert.match(h.view(), /› Automatic \[current\] · the Host selects per request/u,
+    'the Automatic entry is the current choice under the official automatic routing')
+  const providerRow = h.plain().findIndex(line => line.includes('Web Search Provider'))
+  assert.ok(providerRow >= 0)
+  press(h, providerRow, 4)
+  release(h, providerRow, 4)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Current: Automatic/u, 'the row click opened the provider Detail')
+  const optionRow = h.plain().findIndex(line => line.includes('DeepSeek Search API · explicit · billed per Search API call'))
+  assert.ok(optionRow >= 0, `the API candidate is painted under Automatic:\n${h.view()}`)
+  press(h, optionRow, 40)
+  release(h, optionRow, 40)
+  await h.vt.waitForRender()
+  assert.equal(h.store.web.searchProvider, undefined, 'the option click only moves the draft')
+  assert.match(h.view(), /› DeepSeek Search API · explicit · billed per Search API call/u)
+  clickWord(h, 'Confirm [Enter]')
+  await waitForPainted(h, 'the verified explicit write', frame => frame.includes('Verified'))
+  assert.equal(h.store.web.searchProvider, 'deepseek-search-api', 'the ONE real Host write landed')
+  // The painted Back span (the page's own last-row Esc affordance) exits the
+  // Detail to the list — pointer-only, no keyboard Esc. The Root requests a
+  // render after admitting a body press, so the release resolves against the
+  // child's next painted frame; the settled Verified verdict legitimately stays
+  // painted on the list, so the exit is proven by the list's own bar.
+  const back = paintedWordPoint(h, 'Back [Esc]')
+  press(h, back.row, back.column)
+  await h.vt.waitForRender()
+  release(h, back.row, back.column)
+  await waitForPainted(h, 'the pointer Back to return to the list', frame =>
+    frame.includes('Enter open') && !frame.includes('Confirm [Enter]'))
+})
+
+for (const [columns, rows] of [[120, 40], [44, 20]] as const) {
+  test(`the provider Detail restores the deployment default through the complete pointer route at ${columns}×${rows}`, async t => {
+    const h = setup({ columns, rows })
+    t.after(h.dispose)
+    await openWebPage(h)
+    // Row click opens the Detail.
+    const providerRow = h.plain().findIndex(line => line.includes('Web Search Provider'))
+    assert.ok(providerRow >= 0)
+    press(h, providerRow, 4)
+    release(h, providerRow, 4)
+    await waitForPainted(h, 'the provider Detail', frame => frame.includes('Current: DeepSeek server-side search'))
+    // Option click only moves the draft to the Automatic (official reset) row.
+    const optionRow = h.plain().findIndex(line => line.includes('Automatic · the Host selects per request'))
+    assert.ok(optionRow >= 0, `the Automatic reset row is painted:\n${h.view()}`)
+    const optionColumn = h.plain()[optionRow]!.indexOf('Automatic')
+    press(h, optionRow, optionColumn + 1)
+    release(h, optionRow, optionColumn + 1)
+    await h.vt.waitForRender()
+    assert.equal(h.store.web.searchProvider, 'deepseek-official', 'the option click never writes')
+    assert.match(h.view(), /› Automatic · the Host selects per request/u)
+    // The complete painted Confirm [Enter] is the ONE delegated reset target.
+    clickWord(h, 'Confirm [Enter]')
+    await waitForPainted(h, 'the verified deployment reset', frame =>
+      frame.includes('Verified') && frame.includes('Current: Automatic'))
+    assert.equal(h.store.web.searchProvider, undefined, 'the official unset restored the deployment selection')
+    assert.equal(h.store.web.providerSelection.search.userSet, false)
+    // The painted Back span returns to the list without a keyboard Esc.
+    const back = paintedWordPoint(h, 'Back [Esc]')
+    press(h, back.row, back.column)
+    await h.vt.waitForRender()
+    release(h, back.row, back.column)
+    await waitForPainted(h, 'the pointer Back to the list', frame =>
+      frame.includes('Enter open') && !frame.includes('Confirm [Enter]'))
+    for (const line of h.plain()) assert.ok(visibleWidth(line) <= columns)
+  })
+}
+
+test('a Confirm press followed by a key, wheel or resize never writes on release', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await selectListRow(h, 0)
+  await key(h, ENTER)
+  await key(h, DOWN) // highlight DeepSeek Search API
+  // A key between the press and the release refuses the gesture.
+  let point = paintedWordPoint(h, 'Confirm [Enter]')
+  press(h, point.row, point.column + 1)
+  await key(h, 'r') // a Host refresh: pending facts + a new semantic frame
+  release(h, point.row, point.column + 1)
+  await h.vt.waitForRender()
+  assert.equal(h.store.web.searchProvider, 'deepseek-official', 'a key between press and release never writes')
+  await waitForPainted(h, 'the refreshed Detail', frame =>
+    frame.includes('Confirm [Enter]') && !frame.includes('Loading…'))
+  // A wheel between the press and the release refuses it, even at the list's
+  // own top boundary where the selection does not move.
+  await settlePointerClick(h)
+  point = paintedWordPoint(h, 'Confirm [Enter]')
+  press(h, point.row, point.column + 1)
+  h.vt.sendInput('\x1b[<64;5;5M') // wheel up at the list top
+  await h.vt.waitForRender()
+  release(h, point.row, point.column + 1)
+  await h.vt.waitForRender()
+  assert.equal(h.store.web.searchProvider, 'deepseek-official', 'a wheel between press and release never writes')
+  // A resize between the press and the release refuses it.
+  await settlePointerClick(h)
+  await waitForPainted(h, 'the settled Detail before the resize', frame => frame.includes('Confirm [Enter]'))
+  point = paintedWordPoint(h, 'Confirm [Enter]')
+  press(h, point.row, point.column + 1)
+  h.vt.resize(100, 30)
+  await h.vt.waitForRender()
+  release(h, point.row, point.column + 1)
+  await h.vt.waitForRender()
+  assert.equal(h.store.web.searchProvider, 'deepseek-official', 'a resize between press and release never writes')
+  // A fresh complete gesture against the CURRENT frame writes exactly once.
+  await settlePointerClick(h)
+  await waitForPainted(h, 'the resized Detail', frame => frame.includes('Confirm [Enter]'))
+  clickWord(h, 'Confirm [Enter]')
+  await waitForPainted(h, 'the confirmed write', frame => frame.includes('Verified'))
+  assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
+})
+
+test('a cropped candidate publishes no Confirm target and a click there writes nothing', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await selectListRow(h, 2) // Search API Result Count
+  await key(h, ENTER)
+  await key(h, DOWN) // 10 -> 20
+  assert.match(h.view(), /Confirm \[Enter\]/u)
+  h.vt.resize(120, 3)
+  await h.vt.waitForRender()
+  const cropped = h.view()
+  assert.doesNotMatch(cropped, /Confirm \[Enter\]/u, `a cropped candidate offers no Confirm:\n${cropped}`)
+  const barRow = h.plain().length - 1
+  press(h, barRow, 10)
+  release(h, barRow, 10)
+  await h.vt.waitForRender()
+  assert.equal(h.store.web.api.count, 10, 'a click where Confirm was dispatches nothing')
+  h.vt.resize(120, 40)
+  await waitForPainted(h, 'the restored Confirm target', frame => frame.includes('Confirm [Enter]'))
+  clickWord(h, 'Confirm [Enter]')
+  await waitForPainted(h, 'the restored confirm write', frame => frame.includes('Verified'))
+  assert.equal(h.store.web.api.count, 20)
+})
+
+for (const [columns, rows] of [[80, 24], [44, 20], [44, 8]] as const) {
+  for (const iconStyle of ['symbols', 'minimal'] as const) {
+    test(`the delegated Confirm [Enter] works with ${iconStyle} icons at ${columns}×${rows}`, async t => {
+      const h = setup({ columns, rows, iconStyle })
+      t.after(h.dispose)
+      await openWebPage(h)
+      await selectListRow(h, 0)
+      await key(h, ENTER)
+      await key(h, HOME) // Automatic -> server-side search
+      await key(h, DOWN)
+      const frame = h.view()
+      assert.match(frame, /Confirm \[Enter\] · Back \[Esc\]/u,
+        `the complete delegated span is painted at ${columns}x${rows}:\n${frame}`)
+      for (const line of h.plain()) assert.ok(visibleWidth(line) <= columns)
+      clickWord(h, 'Confirm [Enter]')
+      await waitForPainted(h, 'the confirmed provider write', painted => painted.includes('Verified'))
+      assert.equal(h.store.web.searchProvider, 'deepseek-official')
+    })
+  }
+}
+
+test('a credential body click hands the same lease to Models without a Web write', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await selectListRow(h, 8)
+  await key(h, ENTER)
+  const actionRow = h.plain().findIndex(line => line.includes('Configure in Models…'))
+  assert.ok(actionRow >= 0, `the credential action row is painted:\n${h.view()}`)
+  const actionColumn = h.plain()[actionRow]!.indexOf('Configure in Models…')
+  press(h, actionRow, actionColumn + 1)
+  release(h, actionRow, actionColumn + 1)
+  await waitForPainted(h, 'the Models reference view', frame =>
+    frame.includes('Settings · Models') && frame.includes('API Key Reference'))
+  assert.equal(h.store.web.searchProvider, 'deepseek-official', 'the deeplink never writes a Web field')
+  assert.doesNotMatch(h.view(), /Configure in Models…/u, 'the Web page retired into the same lease')
+})
+
+test('a Root Back press whose release follows a wheel never leaves the Web page', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  const point = paintedWordPoint(h, 'Back [Esc]')
+  press(h, point.row, point.column + 1)
+  h.vt.sendInput('\x1b[<64;5;5M') // wheel at the list top: no selection change, new identity
+  await h.vt.waitForRender()
+  release(h, point.row, point.column + 1)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Settings · Tools · Web Search \/ Fetch/u,
+    `the stale Esc release keeps the page:\n${h.view()}`)
+  // A fresh complete Back gesture still returns to the Tools rows (paced past
+  // the alt screen's double-click window for the same word).
+  await settlePointerClick(h)
+  const fresh = paintedWordPoint(h, 'Back [Esc]')
+  press(h, fresh.row, fresh.column + 1)
+  release(h, fresh.row, fresh.column + 1)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Settings · Tools/u, 'the fresh Back returns to the Tools rows')
+  assert.doesNotMatch(h.view(), /Web Search Provider/u)
 })
 
 test('an unavailable authority paints the reason and offers no Confirm', async t => {
@@ -563,7 +900,7 @@ test('an unavailable authority paints the reason and offers no Confirm', async t
     try {
       h.store.available = false
       await openOtherRows(h)
-      await key(h, DOWN)
+      await highlightWebRow(h)
       await key(h, ENTER)
       const frame = await waitForPainted(h, 'the unavailable page', frame =>
         frame.includes('Web Search Provider') && !frame.includes('Loading…'))
@@ -572,7 +909,13 @@ test('an unavailable authority paints the reason and offers no Confirm', async t
       const detail = h.view().replace(/\s+/gu, ' ')
       assert.match(detail, /the Host Web provider settings are not available on this backend/u,
         'the Detail names the real reason')
-      assert.doesNotMatch(h.view(), /Enter confirm/u, 'no Confirm affordance exists without an authority')
+      assert.doesNotMatch(h.view(), /Confirm \[Enter\]/u, 'no Confirm affordance exists without an authority')
+      // A click where the Confirm span would be has no target and writes nothing.
+      const barRow = h.plain().length - 1
+      press(h, barRow, Math.min(20, columns - 1))
+      release(h, barRow, Math.min(20, columns - 1))
+      await h.vt.waitForRender()
+      assert.match(h.view(), /Unavailable/u, 'the read-only page stays')
       for (const line of h.plain()) assert.ok(visibleWidth(line) <= columns)
     } finally {
       h.dispose()

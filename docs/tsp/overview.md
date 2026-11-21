@@ -64,36 +64,68 @@ existing SessionPresentation + SurfaceEventRoutingSource
   (session/attachment/currentness/exact-Agent fences)
                 |
                 v
-ONE TranscriptFolder  (canonical fold)
+ONE TranscriptFolder  (canonical fold of Client-loaded rows)
                 |
                 v
-ONE TranscriptWindowController  (the selected window)
-                |
-                v
-SurfaceRuntime.repaintTarget()  -- the ONE projection glue
-   |                                    |
-   | production                         | optional read-only observer
-   v                                    v
-TuiApp.setTranscript(...)        onTranscriptProjected (absent in production)
-(PiTui, the product)                        |
-                                            v
-                              experimental TSP consumer
-                              projectTranscriptStructure()
-                                -> TSP node mapper
-                                -> official SDK Surface.render()
+SurfaceRuntime.repaintTarget()  -- the ONE application writer
+   +-> PiTui: folder.window(20 turns) -> TuiApp.setTranscript(...)
+   +-> TSP: folder.messages() -> SurfaceDisplaySeam.setTranscript(...)
+            -> projectTranscriptStructure()
+            -> Full / Compact / Focus block descriptors
+            -> ONE official SDK Surface:
+                 Main = renderer-local targeted ops (empty stable root)
+                 Dock / Layer / Welcome = SDK Surface.render()
+            -> Tern native scroll / Follow
 ```
 
 - `src/tui/transcript/structure.ts` → `projectTranscriptStructure()` remains the
   ONLY Work/Context/standalone segmentation authority; the TSP mapper consumes
   its blocks and never re-groups rows.
-- The mapper renders canonical `TranscriptWorkSpan.parts`: a snapshot-only
-  Context cluster carried by a Work becomes a nested `ui.card` inside the Work
-  `ui.section` (member cards stay under that card); a proven Working
-  `tool-jobs` Notice is a direct card child of that section. A retained Context
-  row whose parent changes from standalone to Work-internal legitimately
-  produces a local `del` of the old top-level card plus one `add` carrying the
-  new Work subtree; Work and unrelated user/assistant node ids stay stable.
-- One fold, one window, one currentness authority. The TSP path adds neither a
+- The mapper renders canonical `TranscriptWorkSpan.parts`: a canonical
+  snapshot-only Context Cluster carried by a Work becomes one native
+  `ui.section` inside the Work `ui.section`; each eligible Context member is
+  its own nested `ui.section` with an independent disclosure owner, while a
+  non-eligible member stays directly readable. Cluster and member are two
+  different disclosure owners: closing the ancestor never deletes a
+  descendant's manual preference, and each operable node is admitted only from
+  the current Main/Frame contribution index. A proven Working `tool-jobs`
+  Notice is a direct card child of that section. A retained Context row whose
+  parent changes from standalone to Work-internal legitimately produces a local
+  `del` of the old top-level card plus one `add` carrying the new Work subtree;
+  Work and unrelated user/assistant node ids stay stable.
+- TSP keeps ONE `Surface` and ONE Main document. The transcript Main's
+  top-level children are maintained as targeted SDK ops from the block
+  descriptors (`describeTranscriptMainBlocksForPreset`), so a retained row is
+  never re-materialized for an unrelated change. `Surface.render()` keeps a
+  stable EMPTY Main root plus the Dock, the Layer and the formal Welcome Main;
+  it never receives the transcript history again. Source identity, input seat,
+  Fold ownership, Copy/Disclosure exact ids and image/blob authority are
+  unchanged by that split.
+- A row's display currency is derived from the Fold, not from node identity:
+  `transcriptDisplayRevisionOf()` tracks the in-place mutations a row really
+  underwent, and `assistantPresentationRevision()` / a tool's subtree revision
+  carry the live-body and nested-call changes. Descriptor stamps combine those
+  with the renderer-local disclosure, image/SVG and selection state, so a legal
+  late `tool/result`, PTC child or settled answer can still refresh a very old
+  row while unrelated history stays untouched.
+- `settle()` is a bounded hint, never a correctness mechanism: only a
+  top-level, currently mounted, pure User row whose owning turn is proven ended
+  (and that carries no image or pending publication) is settled. Assistant
+  stats/visuals, Work/Activity, Tool, Thinking, Context, Focus roots, Commands
+  and any streaming row deliberately stay unsettled. Tern's own document
+  retention may evict such a settled Main child and report `gone`; the evicted
+  id is retired from the renderer's operable set and is not re-fetched, because
+  bounded retention is a client fact, not a Host history loss.
+- PiTui keeps its existing `TranscriptWindowController` and bounded
+  `folder.window()` projection. TSP uses `folder.messages()` from that same
+  Folder for all Client-loaded rows and commits them through the same
+  `SurfaceDisplaySeam.setTranscript`; it does not add a window summary.
+- The TSP `mode:'latest'` metadata describes the loaded-document tail only,
+  not Tern's physical scroll position or Follow state. Tern owns native Main
+  scroll and Follow; no app-level history navigation or scroll mirror is added.
+- Remote projection remains limited to rows already loaded by the authorized
+  Reader. Scrolling does not fetch Host history; authorized rehydrate replaces
+  the Folder and starts a new source scope. The TSP path adds neither a
   second `TranscriptFolder`, nor a second SessionEvent subscription, nor a new
   Host port, nor a Host service read (`src/app/surface/**` stays Host-free and
   is gate-enforced).
@@ -116,6 +148,239 @@ the repaint used, an opaque `===`-only `sourceIdentity`, and the exact
 folder/window/subject before the commit and publishes only if all are still
 live afterwards; a session switch, viewer open/exit or teardown drops the stale
 frame, and `dispose()` releases the observer before the app dies.
+
+### Native card disclosure
+
+The mapper owns the final presentation shape of every Main row; no row is
+folded by a second business state machine.
+
+- A Command or Compaction that carries real detail is a native `ui.section`
+  with one renderer-local manual owner shared by both kinds. It starts
+  collapsed and shows the bounded result/error preview plus the status word.
+  A row without any detail stays a directly readable static card: it paints no
+  operable disclosure head. A correlated manual `/compact` remains ONE
+  Compaction card; its command's error kind outranks the compaction error
+  text even when the normalized command text is empty.
+- An ordinary Tool keeps its native `ui.tool` identity and disclosure. While
+  collapsed it may carry one bounded human note derived from the existing
+  `tool-presentation` helpers (read/write/skill/read_image envelopes, answer
+  and Goal summaries, registered JSON summaries, action results, terminal
+  output after the shared log policy). Raw XML/JSON, machine receipts and
+  malformed envelopes never become that note; the existing error note keeps
+  precedence, and an opened card drops the folded note.
+- Standalone Notice/Recall/Relay rows reuse the existing Context owner. A
+  producer Notice summary stays normal wrapped text beside its header; Recall
+  names only its official label. A short Relay is directly readable, while a
+  long Relay uses a bounded first/last preview. The Relay threshold (more than
+  10 logical lines or 800 Unicode code points) is an explicit TSP text policy,
+  not PiTui's physical visual-row metric. Ambient/unknown Context keeps its
+  fail-open behavior, and T3 Context Cluster member semantics are unchanged.
+- Every toggle is admitted only from the current frame's materialized head and
+  the current source scope. A source replacement clears all manual owners; a
+  removed ancestor makes its descendants inoperable without deleting an owner
+  that is still loaded; an explicit Focus root close resets only the process
+  owners that root projects. The application never writes business state from
+  a disclosure toggle.
+
+### Native Workflow disclosure
+
+The canonical `TranscriptWorkflowMessage` remains the only Workflow business
+authority: run/member terminal facts come from the official `tool-workflow/*`
+events through `WorkflowProjection`, and a step/turn/idle fact never settles a
+run. The TSP mapper renders that one row as a native Run `ui.section` whose head
+always carries the real run status and the exact `workflowRunSummaryText`
+counts, including while the Run is collapsed. When the Run is open, each phase
+is a nested native `ui.section`; a phase with at most `WORKFLOW_INLINE_MEMBER_LIMIT`
+members shows every member in durable order with a textual status word, while a
+larger phase shows only its exact counts, an abnormal preview capped at
+`WORKFLOW_ANOMALY_PREVIEW_LIMIT`, and the hidden abnormal count. No TSP-specific
+Workflow fold state machine exists: `workflowPhasePresentations()` and
+`workflowRunMode()` own the presentation rules.
+
+Manual Run/Phase choices live in ONE source-scoped renderer map
+(`WorkflowRunDisclosureState` per canonical `runId`) and are advanced by the
+shared `advanceWorkflowDisclosureState()` edge policy only when the official
+members array reference or run status changed. The map is cleared with the
+projection source, hydration and disposal; a run that leaves the loaded window
+loses its state, while a retained run keeps a valid manual choice. A cold
+replay establishes its facts as the baseline rather than replaying historical
+edges. Closing a parent never recursively clears a legal child preference.
+
+Every toggle is admitted only from the exact current SDK frame's materialized
+Section head and the current input seat; a stale/foreign id, a replaced source,
+a modal/Reader/Hub seat or a hidden folded descendant never changes business
+state. The Workflow row never emits a child-transcript Viewer action: this
+renderer's `supportsViewer` remains `false`, and member rows are static text.
+Only when the live Task Center and its scoped TaskRuntime entry are both
+available does the frame paint one native scoped browse button (per phase, and
+one run-wide button when `workflowRunViewAllVisible()` holds); clicking it opens
+the existing read-only Work Hub, never a second task source.
+
+### The Main empty state (Welcome)
+
+The TSP renderer paints its invitation in **Main only**. The Dock stays the ONE
+Quiet Composer — one fixed input, one cursor, one draft owner — and gives up the
+empty state's identity line: no Session id/model welcome row and no Session
+listing ever appear there. The Dock's ordinary status content is untouched by
+this surface (session title, todo count, compaction phase, attention and visual
+rows keep painting as before): "Main only" constrains where the *empty state*
+lives, not everything the Dock may show.
+
+```text
+the application's formal idle commit (no Session yet)  -> sessionless
+SurfaceRuntime.repaintTarget() for the live MAIN subject
+   SessionReader.blank(sessionId) === true
+   AND the fold holds no turn activity at all           -> blank-session
+anything else (a started turn, an unknown read, a
+   viewed child, the hydration window)                -> hidden
+```
+
+- The one blank authority is `SessionReader.blank` (Direct: the official
+  turn-boundary projection; Remote: the official Client session-summary bit).
+  An unknown read is never inferred from the rendered window, a row count or a
+  running state, and the bounded display window is never the history: a fold
+  that already carries a turn vetoes the empty state, while an empty window
+  alone never proves blankness. The veto reads the fold's own turn *activity*,
+  not its rendered turn index: a Session whose `turn/start` has been applied
+  but which has produced no displayable row yet is already started, and a stale
+  `blank:true` summary must not keep the Welcome — or its live Resume action —
+  over it. On Remote that bit exists only once the session
+  list is ready, so a fresh blank Session can show the Welcome at a later
+  authorized commit instead of the first frame; nothing here adds a refresh, a
+  subscription or a poll to hurry it up.
+- The eligibility is a display-only argument carried by the SAME transcript
+  commit (`SurfaceDisplaySeam.setTranscript`, appended last). A renderer never
+  derives it from an empty projection, never shows a Welcome on its own
+  initiative and keeps no second Session cache. `beginSessionHydration()`
+  retires the presented Welcome in the same synchronous commit that installs
+  the Loading state, so a retired subject's action can never act on the
+  incoming subject.
+- The single action delegates and owns nothing: it calls the registered
+  `/sessions` command's argument-free UI entry, and the existing Session
+  Browser owns membership, reading, search, cancel, resume and every outcome
+  (see [session-browser.md](./session-browser.md)). The renderer never lists
+  Sessions, never picks a row, never holds a `SessionScope` and never switches
+  a Session. Where that business entry does not exist (the command is not
+  registered, or this mount cannot present the Browser), the state says so
+  instead of painting a control that does nothing.
+- A pane that negotiated neither `el` nor `styles` gets the plain-text form of
+  the same state with no claim of a clickable affordance; the typed command
+  stays its route. The mascot rows come from the ONE shared whale asset
+  (`src/tui/components/welcome-whale.ts`), picked once per renderer mount and
+  never re-picked by a repaint, a resize or a status commit.
+- Each negotiated capability gates exactly the node it enables and nothing
+  else: `el`+`styles` unlock the styled stage, the `icon` kind alone unlocks
+  the action's leading icon, and the Browser's own picker vocabulary decides
+  whether the action is operable at all. A pane missing one of them keeps the
+  rest and is never sent a node it cannot paint.
+
+## Native reading and the client's own Find
+
+The Tern client owns reading: its Main scrollback, its Follow state and its
+pane-level **Find** are client behaviours, not TSP surfaces.
+
+- The client Find searches the **committed text of the focused pane's own
+  document** — the rows the preset mapper materialized and the client has
+  painted into its scrollback. It is not a semantic full-text search over the
+  Session, and TSP adds no Find UI, no Find key binding, no second index, no
+  match list and no scroll mirror for it. `Ctrl+F` / `Ctrl+Shift+F` stay the
+  client's own actions; TSP neither binds nor intercepts them.
+- What is **not** in that document is not searchable there: a body the current
+  preset keeps folded (a collapsed Tool/Activity/Thought body, a Command or
+  Compaction detail) is not claimed to be Find-reachable until the user really
+  opens it, and the client may also bound or evict long documents
+  (`gone`-retired rows are not re-fetched). A host-unloaded page, a Remote
+  page the authorized Reader never loaded, and a settled row the client
+  evicted are all outside the claim.
+- The client owns the Find query, the match cursor, the highlight and the
+  close action; the program receives no match data and keeps no Find state.
+  The SDK pin in use exposes `reveal`/`scroll` and no find/openFind entry
+  point, so no application code may call one or drive the client's Find
+  programmatically in production.
+- A client-side disclosure the user causes stays the existing
+  source-scoped disclosure owner's decision. The SDK exposes no Find-origin
+  field, so a client `toggle` that happens while Find is open is not
+  reclassified as "temporary" or as a second manual state.
+- **Semantic search is the application's authority, not the client's**:
+  `TranscriptFolder.search()` owns the corpus of the loaded messages
+  (including text inside a folded card) and `TranscriptSearchMatch.source`
+  locates a hit inside its semantic source. That corpus and the client's
+  document are different scopes and neither contains the other. The TSP
+  Session Search below consumes the same Folder authority; the two entries
+  never share a query, an index or a result set.
+- Locality: the whole path is Client-local presentation. Nothing here reads
+  Host cwd/filesystem or Session writer authority, and a Find gesture writes
+  no Session event and mutates no composer draft.
+
+## Session semantic search (TSP)
+
+The TSP renderer's own search is a DIFFERENT entry from the client's Find and
+from PiTui's overlay. It answers one question — "where in the loaded session
+does this text appear?" — over the semantic corpus, and it navigates the
+existing native Main to the card that owns the hit.
+
+- **ONE authority, read-only.** The application surface hands the mount a
+  read-only binding over the ALREADY SELECTED `TranscriptFolder` (the main
+  folder, or the viewed child's while its viewer is mounted). `snapshot()`,
+  `resolve()` and `current()` are the only questions the renderer can ask; the
+  binding builds no index, keeps no cache and reads no Host service. The
+  opaque source token it returns is a per-fold identity, so a same-id cold
+  rehydration is a NEW source and every older snapshot, resolution and
+  currentness check is refused.
+- **Coverage is the officially committed fact.** A Direct surface owns a
+  complete log and labels itself `Entire`. A Remote surface starts at the
+  loaded history its authorized Reader delivered, and only an acknowledged
+  official hydrate/refold may widen it to `Older not searched`; a match count
+  never widens it and another subject's `hasMore` is never lent to a new one.
+- **ONE representative card is ONE target.** Raw hits are occurrence-level, but
+  the navigation projection groups them by representative card, so `N/M
+  targets` counts cards and a single card with many hits is never navigated as
+  many positions.
+- **A live revision refreshes, a passive repaint does not.** A same-source
+  `setTranscript` commit whose Folder `searchRevision()` really changed
+  re-queries the open card's current query and keeps the current representative
+  card when it still exists; an unchanged revision is a no-op (one counter read,
+  never a re-scan of history).
+- **Temporary disclosure, never a manual edit.** A hit inside a folded
+  Thought/Work/Tool/Context/Command/Workflow card opens that card's canonical
+  ancestry for the CURRENT target only. The grants are frame-scoped unions of
+  the user's own disclosure sets; they write no manual set and emit no fake
+  `toggle` event. A user collapse of a search-opened card wins for that
+  navigation epoch, and closing the search retracts every grant, so the
+  user's disclosure preferences are exactly what they were.
+- **Reveal is card-level and identity-checked.** The revealed node is the SDK's
+  OWN id for the Main root whose descriptor `owners` contain the resolved
+  representative message, and only while the `ContinuousMainJournal` reports
+  that root attached. A `gone` root, an unmaterialized member or a replaced
+  source yields `Unavailable in current pane` instead of an op that cannot
+  land. Because `Surface.reveal()` returns `void`, the card states
+  `Source-only · position unverified · <static kind>`: it never claims a
+  character-exact position or a painted highlight. A Workflow hit opens the
+  target's own run and — when the hit named one — that phase, through a
+  frame-scoped read projection; the official `workflowDisclosureStates` and its
+  fact-driven advance are never written.
+- **Search and Composer are mutually exclusive input owners of ONE Dock.** While
+  the search card is open the Dock builds no composer editor, no Quiet Composer
+  shell and no completion/permission/quick node at all; closing it
+  re-materializes the SAME `TspComposer` from its own state (draft, caret,
+  selection, undo and staged attachments untouched). The Status/Footer rows are
+  NOT part of that exclusion: their original owner keeps painting them in both
+  states. The card's query is a controlled field the renderer's key route edits —
+  the pinned client delivers no native `EditEvent` — and every key is consumed by
+  the seat except `Ctrl+C`, which RETIRES the card first and then reaches the
+  original interrupt/cancel owner exactly once.
+- **The seat's own key ring.** `Enter`/`Shift+Enter` step the card targets,
+  `Tab`/`Shift+Tab` cycle the seat's focus ring (query → Prev → Next → Close) and
+  never reach the hidden Composer, a second entry chord re-focuses the query
+  without rebuilding the card, and `Escape` closes it.
+- **Higher seats win.** A Modal, the temporary Reader, the Work Hub, the Session
+  Browser, a picker or the Queue sheet retires the search card before it takes
+  input; the card is never parked and never restored across a Modal.
+- **Entry points.** The renderer-local `Alt+Shift+S` chord and the Quiet
+  Composer's `Search session` button call the SAME seat entry. A pane without
+  the negotiated kinds paints no button and the chord states the truth; neither
+  entry binds, intercepts or reuses `Ctrl+F`/`Ctrl+Shift+F`, the cross-session
+  `/search` command or the `/transcript` export.
 
 ## Surface, frame and lifecycle invariants
 
@@ -169,8 +434,10 @@ enough. `PROJECTION_ONLY` is not navigable state.
 
 ## Verification entry points
 
-- Headless/semantic suites: `test/tern-tsp-*.test.ts` (transcript mapper,
-  renderer selection, interaction, projection) — the routine gate.
+- Headless/semantic suites: TSP headless/semantic tests are owned by their respective directories under
+  `test/` (including `test/app/` and `test/integration/`); discover the current
+  suite with `rg --files test | rg 'tern-tsp-'` instead of relying on a
+  root-level filename glob.
 - Real-pane operations: [../guides/tern-pane-testing.md](../guides/tern-pane-testing.md)
   (`scripts/tern-pane-drive.mjs`, `scripts/tern-pane-smoke.mjs`, geometry and
   instrumentation helpers).
@@ -181,12 +448,14 @@ enough. `PROJECTION_ONLY` is not navigable state.
 ## Known limits
 
 - TSP is experimental and opt-in; PiTui remains the product renderer.
-- TSP transcript folding/disclosure is partial; it is not PiTui's complete
-  Compact/Focus/Full model.
+- TSP now consumes the shared canonical transcript structure for native Full
+  and Compact presentation. Focus still does not have a PiTui-equivalent TSP
+  presentation, and some native disclosure interactions remain limited; Full
+  and Compact support does not establish full PiTui feature parity.
 - Physical GUI, IME, the desktop font stack, wheel/trackpad, the real OS
   window theme/chrome and Remote TSP qualification are outside the automated
   contract; only a specific real-pane run may claim them. The client's own
   light/dark appearance is headless-controllable (`appearance`) and is covered
   by the real-pane harness, not by this list.
-- No Remote TSP renderer is claimed; a Remote TSP projection observer over the
-  real wire remains a follow-up (see the repository handoff issue).
+- No Remote TSP renderer is claimed. Remote TSP projection observation over
+  the real wire has not been qualified.

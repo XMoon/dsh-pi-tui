@@ -6,6 +6,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { unavailableAcpAccess, unavailableWebAccess, unavailableMcpServers } from '../support/web-access-fake.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
@@ -38,6 +39,7 @@ import { checkImageLimits } from '../../src/client/media/image/intake.ts'
 import { TSP_B2A_RESULT_NOTICE_COMMANDS, tspBuiltinAvailability } from '../../src/app/command/tsp-capability.ts'
 import { classifyCommandLine } from '../../src/domain/command/policy.ts'
 import { prepareUserMessage } from '../../src/app/submission/direct-message-preparation.ts'
+import { unconfiguredPolicyObservation, unconfiguredSessionPolicyPort } from '../support/session-policy-fake.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
  * stopped after each test — the process's single-live-TUI slot (the
@@ -92,12 +94,17 @@ function setup(options: { cwd?: string; sessionCwd?: string; signal?: AbortSigna
   const clientCwd = options.cwd ?? '/ws'
   const sessionCwd = options.sessionCwd ?? '/ws'
   const runner: TuiCommandRunner = {
+    webAccess: unavailableWebAccess(),
+    acpAccess: unavailableAcpAccess(),
+    mcpServers: unavailableMcpServers(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
     ...sessionScopeFacts(() => undefined, () => 0),
+    sessionPolicy: unconfiguredSessionPolicyPort(),
+    policy: unconfiguredPolicyObservation(),
     currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -121,8 +128,7 @@ function setup(options: { cwd?: string; sessionCwd?: string; signal?: AbortSigna
     commandRegistry: ctx.get('commands') as import('../../src/commands.ts').CommandRegistryLike | undefined,
     clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
-    hostShellCompletion: true,
-    transcriptExportAvailable: true,
+    hostShellCompletion: { pathAuthority: 'client' as const, complete: async () => ({ kind: 'ok' as const, candidates: [] }) },
     interaction: {
       questions: {
         onRequest: () => true,
@@ -132,8 +138,7 @@ function setup(options: { cwd?: string; sessionCwd?: string; signal?: AbortSigna
         answerContinued: async () => 'not-continued' as const,
       },
       onApprovalRequest: () => {},
-      setApprovalPolicy: () => true,
-    },
+      },
     sessionWriter: {
       prompt: async () => ({ kind: 'committed' as const, value: undefined }),
       updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
@@ -172,7 +177,7 @@ function setup(options: { cwd?: string; sessionCwd?: string; signal?: AbortSigna
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, createPluginManagerPage: () => undefined,
+    openTasksBrowser: () => {}, openScheduleWorkspace: () => ({ kind: 'success' } as const), createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: options.transitionPending ?? (() => false),
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -407,7 +412,13 @@ test('command fallback SUCCESS: the handoff pin transfers and releases exactly o
   // leak the handoff forever (review finding).
   await runReservedSubmit({
     reserve: () => handoff,
-    run: async () => { consumeDraftAttachments(text, imageStore) },
+    // A successful write releases THIS gesture's handoff reservation before
+    // consuming; `consumeDraftAttachments` then retires only drafts no other
+    // accepted submission still reserves.
+    run: async (_text, release) => {
+      release()
+      consumeDraftAttachments(text, imageStore)
+    },
     restore: () => {},
   }, text)
   assert.equal(imageStore.isPinned(draft.id), false, 'the handoff pin is released after the nested submit')
@@ -457,7 +468,6 @@ function mountedComposer(initial = ''): SubmissionComposerPort & {
     },
     notify: (message, kind) => { notices.push({ text: message, kind }) },
     setSubmitPending: () => {},
-    clearSettledLocalMessages: () => {},
     caretAt: (index) => { caret = index },
   }
 }
@@ -519,6 +529,9 @@ function mountedHarness(options: {
   let cwdReads = 0
   const scopeFacts = sessionScopeFacts(() => undefined, () => generation)
   const runner: TuiCommandRunner = {
+    webAccess: unavailableWebAccess(),
+    acpAccess: unavailableAcpAccess(),
+    mcpServers: unavailableMcpServers(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,
@@ -526,6 +539,8 @@ function mountedHarness(options: {
     app: undefined,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
     ...scopeFacts,
+    sessionPolicy: unconfiguredSessionPolicyPort(),
+    policy: unconfiguredPolicyObservation(),
     // The recorder wraps the REAL scope authority: the intake's post-read
     // fence still decides exactly as production does, and its occurrence is
     // the deterministic "the file read settled" signal.
@@ -556,8 +571,7 @@ function mountedHarness(options: {
     commandRegistry: ctx.get('commands') as import('../../src/commands.ts').CommandRegistryLike | undefined,
     clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
-    hostShellCompletion: false,
-    transcriptExportAvailable: false,
+    hostShellCompletion: { pathAuthority: 'host' as const, complete: async () => ({ kind: 'unavailable' as const, reason: 'test Host unavailable' }) },
     interaction: {
       questions: {
         onRequest: () => true,
@@ -567,8 +581,7 @@ function mountedHarness(options: {
         answerContinued: async () => 'not-continued' as const,
       },
       onApprovalRequest: () => {},
-      setApprovalPolicy: () => true,
-    },
+      },
     sessionWriter: {
       prompt: async () => ({ kind: 'committed' as const, value: undefined }),
       updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
@@ -611,7 +624,7 @@ function mountedHarness(options: {
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, createPluginManagerPage: () => undefined,
+    openTasksBrowser: () => {}, openScheduleWorkspace: () => ({ kind: 'success' } as const), createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => options.transitionPending === true,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -992,6 +1005,9 @@ function cardlessController(options: {
       generation: () => core.generation(),
       captureSubject: () => core.subject(),
       transitionPending: () => false,
+      awaitTransitionSettled: async () => {},
+      beginNavigationIntent: () => () => {},
+      soleNavigationIntentPending: () => false,
     },
     scope: {
       captureLive: () => scopeAuthority.captureLive(),
@@ -1037,7 +1053,7 @@ function cardlessController(options: {
       clearError: () => {},
     },
     artifacts: { start: () => {} },
-    shell: { run: () => {}, interrupt: () => {} },
+    shell: { capturePlacement: () => ({ anchor: undefined, turn: undefined, target: 'beginning' as const, acceptedOrder: 0 }), run: () => {}, interrupt: () => {}, cancelRun: () => false },
     supportsLocalShellCards: false,
     // The TSP renderer: no PiTui builtin UI.
     supportsTuiBuiltinUi: false,

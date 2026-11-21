@@ -151,7 +151,16 @@ export function installTspPane(options: {
    *  `styles` is already in the base feature set): a pane without it can never
    *  carry the native composer buttons. */
   readonly composerActions?: boolean
+  /**
+   * TSP-7 PR-G: advertise the native `input` kind the composer's quick Model /
+   * Effort menu searches through. `el` + `styles` alone prove the trigger can
+   * paint; a pane without `input` can never carry the search field — exactly
+   * like the real client, where the capability belongs to the pane's own set.
+   */
+  readonly modelQuick?: boolean
   readonly presetPicker?: boolean
+  /** M5-W PR-C: advertise the native `/web` page's kinds/scroll. */
+  readonly webPicker?: boolean
   readonly sessionBrowser?: boolean
   /**
    * Advertise the temporary Work Details Reader's negotiated surface: the
@@ -179,6 +188,33 @@ export function installTspPane(options: {
    * fail-closed default, not an accident.
    */
   readonly nativeInteraction?: boolean
+  /**
+   * TSP I-E: advertise the EXACT kinds and features the native Ctrl+R History
+   * card really paints — a `ui.input` query, `el` buttons, and TWO native
+   * `scroll` containers — plus its `styles` sheet. A pane without any one of
+   * them must be refused the card, so the negative case passes `kinds` or
+   * `features` verbatim instead (the fail-closed default, not an accident).
+   */
+  readonly historySearch?: boolean
+  /**
+   * T3-B1: advertise the EXACT kinds and features the Session Search card paints
+   * — a `ui.input` query, `el` buttons and the `styles` sheet. A pane without any
+   * one of them must be refused the card, so the negative case passes `kinds` or
+   * `features` verbatim instead (the fail-closed default, not an accident).
+   */
+  readonly transcriptSearch?: boolean
+  /**
+   * PR-Q: advertise the native kinds the TSP Queue manager sheet paints — its
+   * `picker` (Browse), the modal `overlay` + controlled `editor` (Edit) and
+   * `overlay` + `button` (Delete confirmation) plus the `row`/`text`/`col`
+   * vocabulary every one of those pages uses. A pane without them is refused
+   * the sheet BEFORE the command reaches the handler (fail closed), exactly
+   * like the real client.
+   */
+  readonly queueManager?: boolean
+  /** Override the pane's column count (the narrow-composer threshold is a real
+   *  product fact: the narrow branch is the ONE honest way to test it). */
+  readonly cols?: number
   readonly kinds?: readonly string[]
   readonly features?: readonly string[]
 } = {}): TspPane {
@@ -209,29 +245,46 @@ export function installTspPane(options: {
   const native = Array.from(new Set([
     ...(options.modelPicker === true ? ['picker', 'row', 'overlay', 'text', 'kv'] : []),
     ...(options.composerActions === true ? ['el'] : []),
+    ...(options.modelQuick === true ? ['input'] : []),
     ...(options.presetPicker === true ? ['picker', 'row', 'overlay', 'text', 'md', 'kv'] : []),
+    ...(options.webPicker === true ? ['picker', 'row', 'overlay', 'text'] : []),
     ...(options.sessionBrowser === true ? ['picker', 'row', 'overlay', 'text', 'kv'] : []),
     ...(options.workDetails === true ? ['row', 'text'] : []),
     ...(options.nativeImages === true ? ['image'] : []),
     ...(options.nativeChart === true ? ['chart'] : []),
     ...(options.nativeInteraction === true ? ['questions', 'overlay', 'row', 'text', 'input', 'button', 'scroll'] : []),
+    ...(options.historySearch === true ? ['input', 'el', 'scroll', 'row', 'text'] : []),
+    ...(options.transcriptSearch === true ? ['input', 'el', 'row', 'text'] : []),
+    ...(options.queueManager === true ? ['picker', 'overlay', 'editor', 'button', 'row', 'text', 'el'] : []),
   ]))
   const nativeFeatures = [
-    ...(options.presetPicker === true || options.sessionBrowser === true || options.workDetails === true ? ['scroll'] : []),
+    ...(options.presetPicker === true || options.webPicker === true || options.sessionBrowser === true || options.workDetails === true ? ['scroll'] : []),
     ...(options.nativeImages === true ? ['blobs'] : []),
+    ...(options.historySearch === true ? ['scroll'] : []),
   ]
-  const hello = options.kinds !== undefined || options.features !== undefined
+  // The History-search case declares a larger APC: this fixture's frame reader
+  // folds ONE un-chunked `f` message per frame, and the plan's full-page
+  // obligation is a settled page at the source's own 200-row cap. The REAL
+  // client's 65536 limit and its chunking belong to the real-pane lanes, never
+  // to this scripted pane, so widening it here changes no product behavior.
+  const apc = options.historySearch === true ? 4 * 1024 * 1024 : HELLO.apc
+  // A `cols` override is NOT a kind/feature override: it keeps the opt-in sets
+  // this case asked for. Only an explicit `kinds`/`features` replaces them.
+  const hello = options.cols !== undefined || options.kinds !== undefined || options.features !== undefined
     ? {
         ...HELLO,
         ver: '0.7.2',
-        kinds: options.kinds ?? HELLO.kinds,
-        features: options.features ?? HELLO.features,
+        apc,
+        ...(options.cols === undefined ? {} : { cols: options.cols }),
+        kinds: options.kinds ?? [...HELLO.kinds, ...native],
+        features: options.features ?? [...HELLO.features, ...nativeFeatures],
       }
     : native.length === 0
       ? HELLO
       : {
           ...HELLO,
           ver: '0.7.2',
+          apc,
           kinds: [...HELLO.kinds, ...native],
           features: [...HELLO.features, ...nativeFeatures],
         }

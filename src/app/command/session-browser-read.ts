@@ -1,7 +1,7 @@
 /** Read-owner orchestration for the internal, read-only Session Browser. */
 import { scheduler } from 'node:timers/promises'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
-import { runOwned } from '../../runtime/process/tasks.ts'
+import { cancellationError, runOwned } from '../../runtime/process/tasks.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import type {
   SessionContentSearchPage,
@@ -10,6 +10,7 @@ import type {
 } from '../../runtime/session-reader-port.ts'
 import { sanitizeSessionSearchInput, sessionRowMatchesQuery } from '../../domain/session/browser.ts'
 import type {
+  SessionBrowserAnswerEligibility,
   SessionBrowserListState,
   SessionBrowserPanelHandle,
   SessionBrowserReadSnapshot,
@@ -19,7 +20,15 @@ import type {
   SessionBrowserSearchState,
   SessionBrowserPresentation,
   SessionBrowserSubject,
+  SessionBrowserWorkspaceSnapshot,
 } from './session-browser-presentation.ts'
+import type {
+  SessionActivityFact,
+  SessionWorkspaceFact,
+  SessionWorkspaceFactsPort,
+  WorkspaceFactsFrame,
+  WorkspaceFactsHandle,
+} from '../../runtime/session-workspace-facts-port.ts'
 import type { SessionScope } from '../session/scope.ts'
 
 const FIRST_PROJECTION_BATCH = 20
@@ -48,6 +57,9 @@ export type SessionBrowserResumeSettlement =
 
 export interface SessionBrowserOpenOptions {
   readonly initialQuery?: string
+  readonly initialDirectoryChooser?: boolean
+  readonly initialDirectoryEntry?: boolean
+  readonly initialDirectoryPath?: string
   readonly directMatch?: {
     readonly query: string
     readonly find: (rows: readonly SessionBrowserRow[], query: string) => Pick<SessionBrowserRow, 'id'> | undefined
@@ -63,13 +75,27 @@ interface ActiveRead {
   readonly settle: (result: SessionBrowserReadSettlement) => void
   handle: SessionBrowserPanelHandle | undefined
   disposed: boolean
+  rosterRows: SessionBrowserRow[]
   rows: SessionBrowserRow[]
   listState: SessionBrowserListState
   listError: string | undefined
+  /** The last accepted roster revision (see `SessionBrowserReadSnapshot`). */
+  listRevision: number
+  /** The accepted roster GENERATION of the projection batches: a refresh that
+   *  accepts a new roster invalidates every in-flight batch of the old one. */
+  projectionGeneration: number
+  refreshError: string | undefined
+  /** The ONE single-re-arm roster refresh timer; undefined while idle/other. */
+  refreshTimer: ReturnType<typeof setTimeout> | undefined
+  /** Whether a roster refresh read is in flight (never two in parallel). */
+  refreshing: boolean
   projectionError: string | undefined
   query: string
   userQueryChanged: boolean
   queryGeneration: number
+  /** Fences the ONE content search of a query generation: a search started by
+   *  a roster refresh must not lose to an older in-flight search result. */
+  searchRun: number
   queryController: AbortController | undefined
   queryTimer: ReturnType<typeof setTimeout> | undefined
   searchState: SessionBrowserSearchState
@@ -77,6 +103,21 @@ interface ActiveRead {
   searchPage: SessionContentSearchPage | undefined
   searchError: string | undefined
   hasMore: boolean
+  workspaceHandle: WorkspaceFactsHandle | undefined
+  workspaceById: Map<string, SessionWorkspaceFact>
+  workspaceOrder: string[]
+  workspaceBaselineProven: boolean
+  workspaceState: 'loading' | 'ready' | 'unavailable'
+  workspaceRevision: number
+  workspaceError: string | undefined
+  activityController: AbortController | undefined
+  activityFacts: readonly SessionActivityFact[] | undefined
+  activityRevision: number | undefined
+  activitySequence: number
+  sampledActivityRevision: number | undefined
+  activityError: string | undefined
+  answerEligibility: readonly SessionBrowserAnswerEligibility[] | undefined
+  eligibilitySubscription: (() => void) | undefined
   resumePending: boolean
   readonly resumeSettlement: Promise<SessionBrowserResumeSettlement>
   readonly resolveResume: (outcome: SessionBrowserResumeSettlement) => void
@@ -96,6 +137,10 @@ export interface SessionBrowserReadHandle {
 
 export interface SessionBrowserReadOwner {
   open(options?: SessionBrowserOpenOptions): SessionBrowserReadHandle
+  /** Ask the CURRENT panel to re-read its ONE roster now, through the SAME
+   *  single refresh generation the timer uses. Inert with no active panel, a
+   *  still-loading first read or a refresh already in flight. */
+  refresh(): void
   dispose(): void
 }
 
@@ -105,6 +150,20 @@ export interface SessionBrowserReadOwnerOptions {
   readonly captureSubject: () => CapturedSessionBrowserSubject
   readonly diag: Diag
   readonly sessionId?: () => string | undefined
+  readonly sessionWorkspaceFacts?: SessionWorkspaceFactsPort
+  readonly forwardedAnswerEligibility?: () => readonly SessionBrowserAnswerEligibility[]
+  readonly subscribeForwardedAnswerEligibility?: (listener: () => void) => () => void
+  readonly onUseDirectory?: (workspaceId: string, canonicalPath: string) => void
+  readonly onWorkspaceNewSession?: (workspaceId: string, closeAfterCommit: () => void, settle?: (outcome: import('./session-browser-presentation.ts').SessionBrowserNewSessionSettlement) => void) => void
+  readonly onAddDirectory?: (path: string, settle: (outcome: import('./session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void) => void
+  /** Session Workspace PR3: the ONE read-only Host directory browse seam,
+   *  forwarded VERBATIM to the presentation. The read owner never calls or
+   *  caches a directory query itself — the inline editor owns that lifetime. */
+  readonly onListDirectory?: import('../../runtime/host-directory-browse-port.ts').HostDirectoryBrowsePort['list']
+  /** PiTUI only: re-read the ONE roster on a single re-armed timer so the
+   *  fullscreen Workspace does not paint a stale Session list. TSP leaves it
+   *  undefined and keeps its historical single read. */
+  readonly autoRefreshMs?: number
   /** App-owned handoff to the one existing SessionRuntime switch entry. The
    * callback MUST call `settle` with the REAL final outcome; an accepted
    * request is not a committed switch. `isCurrent` identifies the exact panel
@@ -122,6 +181,24 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
   let active: ActiveRead | undefined
   let disposed = false
 
+  const workspaceSnapshotOf = (panel: ActiveRead): SessionBrowserWorkspaceSnapshot | undefined => {
+    if (options.sessionWorkspaceFacts === undefined) return undefined
+    return {
+      revision: panel.workspaceRevision,
+      state: panel.workspaceState,
+      facts: panel.workspaceOrder.flatMap(id => {
+        const fact = panel.workspaceById.get(id)
+        return fact === undefined ? [] : [fact]
+      }),
+      baselineProven: panel.workspaceBaselineProven,
+      ...(panel.activityRevision === undefined ? {} : { activityRevision: panel.activityRevision, activityRosterRevision: panel.listRevision }),
+      ...(panel.activityFacts === undefined ? {} : { activity: panel.activityFacts }),
+      answerEligibility: panel.answerEligibility,
+      ...(panel.workspaceError === undefined ? {} : { error: panel.workspaceError }),
+      ...(panel.activityError === undefined ? {} : { activityError: panel.activityError }),
+    }
+  }
+
   const snapshotOf = (panel: ActiveRead): SessionBrowserReadSnapshot => ({
     listState: panel.listState,
     rows: panel.rows,
@@ -130,9 +207,12 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     searchState: panel.searchState,
     searchResults: panel.searchResults,
     hasMore: panel.hasMore,
+    listRevision: panel.listRevision,
+    ...(workspaceSnapshotOf(panel) === undefined ? {} : { workspace: workspaceSnapshotOf(panel)! }),
     ...(panel.listError === undefined ? {} : { listError: panel.listError }),
     ...(panel.projectionError === undefined ? {} : { projectionError: panel.projectionError }),
     ...(panel.searchError === undefined ? {} : { searchError: panel.searchError }),
+    ...(panel.refreshError === undefined ? {} : { refreshError: panel.refreshError }),
   })
 
   const isActive = (panel: ActiveRead): boolean => {
@@ -163,8 +243,20 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     }
     if (panel.queryTimer !== undefined) clearTimeout(panel.queryTimer)
     panel.queryTimer = undefined
+    if (panel.refreshTimer !== undefined) clearTimeout(panel.refreshTimer)
+    panel.refreshTimer = undefined
+    panel.refreshing = false
     panel.queryController?.abort()
     panel.controller.abort()
+    panel.activityController?.abort()
+    panel.activityController = undefined
+    const workspaceHandle = panel.workspaceHandle
+    panel.workspaceHandle = undefined
+    workspaceHandle?.dispose()
+    const unsubscribeEligibility = panel.eligibilitySubscription
+    panel.eligibilitySubscription = undefined
+    unsubscribeEligibility?.()
+    panel.rosterRows = []
     panel.rows = []
     panel.searchResults = []
     panel.searchPage = undefined
@@ -175,6 +267,28 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
 
   const cancellation = (panel: ActiveRead): boolean =>
     panel.controller.signal.aborted || !isActive(panel)
+
+  const workspaceMetadataOf = (panel: ActiveRead, sessionId: string) => {
+    if (!panel.workspaceBaselineProven) return undefined
+    let found: SessionWorkspaceFact | undefined
+    for (const workspaceId of panel.workspaceOrder) {
+      const workspace = panel.workspaceById.get(workspaceId)
+      if (workspace === undefined || !workspace.sessionIds.includes(sessionId)) continue
+      if (found !== undefined) return undefined
+      found = workspace
+    }
+    return found === undefined
+      ? undefined
+      : { workspaceId: found.workspaceId, title: found.title, path: found.path }
+  }
+
+  const rowsWithWorkspaceMetadata = (
+    panel: ActiveRead,
+    rows: readonly SessionBrowserRow[],
+  ): SessionBrowserRow[] => rows.map((row) => {
+    const workspace = workspaceMetadataOf(panel, row.id)
+    return workspace === undefined ? row : { ...row, workspace }
+  })
 
   const localResults = (panel: ActiveRead): SessionBrowserSearchResult[] =>
     panel.rows
@@ -209,8 +323,68 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     return results
   }
 
-  const startProjectionBatch = (panel: ActiveRead, offset: number, limit: number): void => {
-    const batch = panel.rows.slice(offset, offset + limit)
+  const applyWorkspaceFrame = (panel: ActiveRead, frame: WorkspaceFactsFrame): void => {
+    switch (frame.type) {
+      case 'baseline':
+      case 'replace':
+        panel.workspaceById.clear()
+        panel.workspaceOrder = []
+        for (const workspace of frame.items) {
+          if (!panel.workspaceById.has(workspace.workspaceId)) panel.workspaceOrder.push(workspace.workspaceId)
+          panel.workspaceById.set(workspace.workspaceId, workspace)
+        }
+        panel.workspaceBaselineProven = true
+        break
+      case 'upsert':
+        if (!panel.workspaceById.has(frame.workspace.workspaceId)) panel.workspaceOrder.push(frame.workspace.workspaceId)
+        panel.workspaceById.set(frame.workspace.workspaceId, frame.workspace)
+        break
+      case 'remove':
+        panel.workspaceById.delete(frame.workspaceId)
+        panel.workspaceOrder = panel.workspaceOrder.filter(id => id !== frame.workspaceId)
+        break
+      case 'order': {
+        const known = frame.workspaceIds.filter(id => panel.workspaceById.has(id))
+        const listed = new Set(known)
+        panel.workspaceOrder = [...known, ...panel.workspaceOrder.filter(id => !listed.has(id))]
+        break
+      }
+    }
+    panel.workspaceState = 'ready'
+    panel.workspaceError = undefined
+    panel.workspaceRevision += 1
+    panel.rows = rowsWithWorkspaceMetadata(panel, panel.rosterRows)
+    if (panel.query !== '') {
+      panel.searchResults = panel.searchState === 'ready' && panel.searchPage !== undefined
+        ? mergeSearchPage(panel.rows, panel.query, panel.searchPage)
+        : localResults(panel)
+    }
+    publish(panel)
+  }
+
+  const clearWorkspaceFacts = (panel: ActiveRead, message: string): void => {
+    panel.workspaceById.clear()
+    panel.workspaceOrder = []
+    panel.workspaceBaselineProven = false
+    panel.workspaceState = 'unavailable'
+    panel.workspaceError = message
+    panel.workspaceRevision += 1
+    panel.rows = rowsWithWorkspaceMetadata(panel, panel.rosterRows)
+    if (panel.query !== '') {
+      panel.searchResults = panel.searchState === 'ready' && panel.searchPage !== undefined
+        ? mergeSearchPage(panel.rows, panel.query, panel.searchPage)
+        : localResults(panel)
+    }
+    publish(panel)
+  }
+
+  const startProjectionBatch = (
+    panel: ActiveRead,
+    offset: number,
+    limit: number,
+    generation: number = panel.projectionGeneration,
+  ): void => {
+    const batch = panel.rosterRows.slice(offset, offset + limit)
     if (batch.length === 0 || !isActive(panel)) return
     const signal = panel.controller.signal
     runOwned('session browser projection batch', async () => {
@@ -221,8 +395,10 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
       sessionId: options.sessionId,
       isCancellation: () => cancellation(panel),
       onResult: (projections: Map<string, SessionProjectionSummary>) => {
-        if (!isActive(panel)) return
-        const enriched = panel.rows.map((row) => {
+        // A batch read from an older accepted roster must never enrich (or
+        // continue against) a newer one: its ids/titles may already be stale.
+        if (!isActive(panel) || panel.projectionGeneration !== generation) return
+        const enriched = panel.rosterRows.map((row) => {
           const projection = projections.get(row.id)
           if (projection === undefined) return row
           return {
@@ -231,7 +407,8 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
             ...(projection.preset === undefined ? {} : { preset: projection.preset }),
           }
         })
-        panel.rows = enriched
+        panel.rosterRows = enriched
+        panel.rows = rowsWithWorkspaceMetadata(panel, panel.rosterRows)
         if (panel.query !== '') {
           panel.searchResults = panel.searchState === 'ready' && panel.searchPage !== undefined
             ? mergeSearchPage(panel.rows, panel.query, panel.searchPage)
@@ -240,11 +417,11 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
         publish(panel)
         if (!isActive(panel)) return
         if (offset + batch.length < panel.rows.length) {
-          startProjectionBatch(panel, offset + batch.length, PROJECTION_BATCH_SIZE)
+          startProjectionBatch(panel, offset + batch.length, PROJECTION_BATCH_SIZE, generation)
         }
       },
       onError: (error) => {
-        if (!isActive(panel)) return
+        if (!isActive(panel) || panel.projectionGeneration !== generation) return
         panel.projectionError = safeErrorMessage(error)
         publish(panel)
       },
@@ -257,15 +434,17 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     if (queryController === undefined) return
     panel.queryTimer = undefined
     const query = panel.query
+    const run = ++panel.searchRun
     const signal = AbortSignal.any([panel.controller.signal, queryController.signal])
     runOwned('session browser content search', () => options.reader.search(query, signal), {
       diag: options.diag,
       sessionId: options.sessionId,
       isCancellation: () => cancellation(panel)
         || queryController.signal.aborted
-        || panel.queryGeneration !== expectedGeneration,
+        || panel.queryGeneration !== expectedGeneration
+        || panel.searchRun !== run,
       onResult: (page) => {
-        if (!isActive(panel) || panel.queryGeneration !== expectedGeneration) return
+        if (!isActive(panel) || panel.queryGeneration !== expectedGeneration || panel.searchRun !== run) return
         panel.searchPage = page
         if (page === undefined) {
           panel.searchState = 'unavailable'
@@ -279,7 +458,7 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
         publish(panel)
       },
       onError: (error) => {
-        if (!isActive(panel) || panel.queryGeneration !== expectedGeneration) return
+        if (!isActive(panel) || panel.queryGeneration !== expectedGeneration || panel.searchRun !== run) return
         panel.searchState = 'error'
         panel.searchResults = localResults(panel)
         panel.searchPage = undefined
@@ -367,9 +546,174 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     return true
   }
 
+  /** Accept ONE official roster as this panel's ONLY listing: the subagent
+   *  children never enter it and the accepted revision advances. */
+  const acceptRoster = (panel: ActiveRead, listed: readonly SessionBrowserRow[]): readonly SessionBrowserRow[] => {
+    const listedRows = listed.map((row): SessionBrowserRow => ({ ...row }))
+    panel.activityController?.abort()
+    panel.activityController = undefined
+    panel.activityFacts = undefined
+    panel.activityRevision = undefined
+    panel.activityError = undefined
+    panel.activitySequence += 1
+    panel.rosterRows = listedRows.filter((row) => row.origin !== 'subagent')
+    panel.rows = rowsWithWorkspaceMetadata(panel, panel.rosterRows)
+    panel.listState = panel.rows.length === 0 ? 'empty' : 'ready'
+    panel.listError = undefined
+    panel.refreshError = undefined
+    panel.listRevision += 1
+    panel.projectionGeneration += 1
+    // A presented search RESULT is a claim about one roster row: when the
+    // accepted roster no longer lists that Session, the result must disappear
+    // in the SAME publication. Waiting for the refreshed Host search (or a
+    // projection batch, or a search that never re-runs after an unavailable/
+    // error state) would leave a removed Session selectable and peekable.
+    if (panel.searchResults.length > 0) {
+      const live = new Set(panel.rows.map((row) => row.id))
+      panel.searchResults = panel.searchResults.filter((result) => live.has(result.row.id))
+    }
+    return listedRows
+  }
+
+  /** Re-arm the ONE refresh timer. Only a COMPLETED read re-arms it, so two
+   *  roster reads never overlap; a retired panel never re-arms. */
+  const scheduleRefresh = (panel: ActiveRead): void => {
+    if (options.autoRefreshMs === undefined || panel.disposed || panel.controller.signal.aborted) return
+    if (panel.refreshTimer !== undefined) return
+    panel.refreshTimer = setTimeout(() => {
+      panel.refreshTimer = undefined
+      startRefresh(panel)
+    }, options.autoRefreshMs)
+  }
+
+  /** ONE background roster refresh through the SAME reader/owner. It never
+   *  re-runs the direct match, never resolves a settlement, never rewrites the
+   *  user's editor text and never resumes a Session. */
+  const startRefresh = (panel: ActiveRead): void => {
+    if (!isActive(panel) || panel.refreshing || panel.listState === 'loading') return
+    panel.refreshing = true
+    runOwned('session browser list refresh', () => options.reader.list(panel.subject.currentSessionId, panel.controller.signal), {
+      diag: options.diag,
+      sessionId: options.sessionId,
+      isCancellation: () => cancellation(panel),
+      onResult: (listed) => {
+        panel.refreshing = false
+        if (!isActive(panel)) return
+        if (listed === undefined) {
+          // A failed refresh NEVER empties the roster it already proved. The
+          // nonfatal freshness fact is painted beside the last good list.
+          panel.refreshError = 'session persistence unavailable'
+          publish(panel)
+          scheduleRefresh(panel)
+          return
+        }
+        acceptRoster(panel, listed as readonly SessionBrowserRow[])
+        publish(panel)
+        if (!isActive(panel)) return
+        startActivitySample(panel)
+        startProjectionBatch(panel, 0, FIRST_PROJECTION_BATCH)
+        // Re-run the ONE content search of the CURRENT query generation against
+        // the refreshed roster. No second timer, no second generation.
+        if (panel.query !== '' && panel.queryController !== undefined && panel.searchState === 'ready') {
+          startSearch(panel, panel.queryGeneration)
+        }
+        scheduleRefresh(panel)
+      },
+      onError: (error) => {
+        panel.refreshing = false
+        if (!isActive(panel)) return
+        panel.refreshError = safeErrorMessage(error)
+        publish(panel)
+        scheduleRefresh(panel)
+      },
+    })
+  }
+
+  const startActivitySample = (panel: ActiveRead): void => {
+    const facts = options.sessionWorkspaceFacts
+    const revision = panel.listRevision
+    if (facts === undefined || panel.sampledActivityRevision === revision) return
+    panel.sampledActivityRevision = revision
+    panel.activityController?.abort()
+    const controller = new AbortController()
+    panel.activityController = controller
+    const signal = AbortSignal.any([panel.controller.signal, controller.signal])
+    runOwned('session workspace activity read', () => facts.readActivity(panel.rosterRows, signal), {
+      diag: options.diag,
+      sessionId: options.sessionId,
+      isCancellation: () => cancellation(panel) || controller.signal.aborted || panel.listRevision !== revision,
+      onResult: (activity) => {
+        if (!isActive(panel) || controller.signal.aborted || panel.listRevision !== revision) return
+        panel.activityFacts = activity
+        panel.activitySequence += 1
+        panel.activityRevision = panel.activitySequence
+        panel.activityError = undefined
+        publish(panel)
+      },
+      onError: (error) => {
+        if (!isActive(panel) || controller.signal.aborted || panel.listRevision !== revision) return
+        panel.activityFacts = undefined
+        panel.activitySequence += 1
+        panel.activityRevision = panel.activitySequence
+        panel.activityError = safeErrorMessage(error)
+        publish(panel)
+      },
+    })
+  }
+
+  const startWorkspaceFollow = (panel: ActiveRead): void => {
+    const facts = options.sessionWorkspaceFacts
+    if (facts === undefined) return
+    let handle: WorkspaceFactsHandle
+    try {
+      handle = facts.followWorkspaces(panel.controller.signal)
+    } catch (error) {
+      options.diag.error('session workspace follow failed', { error: safeErrorMessage(error) })
+      clearWorkspaceFacts(panel, 'Workspace membership unavailable')
+      return
+    }
+    panel.workspaceHandle = handle
+    runOwned('session workspace follow', async () => {
+      for await (const frame of handle) {
+        if (cancellation(panel)) return
+        applyWorkspaceFrame(panel, frame)
+      }
+      if (!cancellation(panel)) clearWorkspaceFacts(panel, 'Workspace membership unavailable')
+    }, {
+      diag: options.diag,
+      sessionId: options.sessionId,
+      isCancellation: () => cancellation(panel),
+      onResult: () => {
+        if (!isActive(panel)) return
+        clearWorkspaceFacts(panel, 'Workspace membership unavailable')
+      },
+      onError: () => {
+        if (!isActive(panel)) return
+        clearWorkspaceFacts(panel, 'Workspace membership unavailable')
+      },
+    })
+  }
+
+  const refreshAnswerEligibility = (panel: ActiveRead): void => {
+    if (!isActive(panel)) return
+    const read = options.forwardedAnswerEligibility
+    panel.answerEligibility = read === undefined ? undefined : [...read()]
+    panel.activitySequence += 1
+    if (panel.activityRevision !== undefined) panel.activityRevision = panel.activitySequence
+    publish(panel)
+    if (panel.listRevision > 0) startRefresh(panel)
+  }
+
   const startList = (panel: ActiveRead): void => {
     if (!isActive(panel)) return
-    runOwned('session browser list', () => options.reader.list(panel.subject.currentSessionId, panel.controller.signal), {
+    runOwned('session browser list', async () => {
+      // The presented panel gets one REAL event-loop turn (not a microtask):
+      // its loading frame must be painted and focused before any Host read can
+      // settle into it (the shared input-first ordering for both renderers).
+      await scheduler.yield()
+      if (cancellation(panel)) throw cancellationError('session browser list cancelled')
+      return options.reader.list(panel.subject.currentSessionId, panel.controller.signal)
+    }, {
       diag: options.diag,
       sessionId: options.sessionId,
       isCancellation: () => cancellation(panel),
@@ -384,16 +728,21 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
           panel.searchError = undefined
           publish(panel)
           panel.settle({ kind: 'refused', text: 'session persistence unavailable' })
+          // The fullscreen Workspace stays mounted on a refused first read: the
+          // ONE refresh generation keeps trying instead of freezing the panel
+          // on a transient Host outage.
+          scheduleRefresh(panel)
           return
         }
-        const listedRows = listed.map((row): SessionBrowserRow => ({ ...row }))
-        panel.rows = listedRows.filter((row) => row.origin !== 'subagent')
-        panel.listState = panel.rows.length === 0 ? 'empty' : 'ready'
-        panel.listError = undefined
+        const listedRows = acceptRoster(panel, listed as readonly SessionBrowserRow[])
         const directMatch = panel.openOptions.directMatch
         if (directMatch !== undefined && listedRows.length === 0) {
+          // An EMPTY roster only proves "no readable sessions": the official
+          // listing publishes a Session from its header only, so a store whose
+          // logs the reader refuses is indistinguishable here. Never claim
+          // there are no persisted Sessions (the S2 limited contract).
           publish(panel)
-          panel.settle({ kind: 'refused', text: 'no persisted sessions' })
+          panel.settle({ kind: 'refused', text: 'No readable sessions' })
           return
         }
         // Native TSP direct matching is limited to visible main-session rows,
@@ -433,7 +782,9 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
         }
         panel.settle({ kind: 'ready' })
         if (!isActive(panel)) return
+        startActivitySample(panel)
         startProjectionBatch(panel, 0, FIRST_PROJECTION_BATCH)
+        scheduleRefresh(panel)
       },
       onError: (error) => {
         if (!isActive(panel)) return
@@ -445,6 +796,7 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
         panel.searchResults = []
         publish(panel)
         panel.settle({ kind: 'refused', text: message })
+        scheduleRefresh(panel)
       },
     })
   }
@@ -473,13 +825,35 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
         settle,
         handle: undefined,
         disposed: false,
+        rosterRows: [],
         rows: [],
+        workspaceHandle: undefined,
+        workspaceById: new Map(),
+        workspaceOrder: [],
+        workspaceBaselineProven: false,
+        workspaceState: 'loading',
+        workspaceRevision: 0,
+        workspaceError: undefined,
+        activityController: undefined,
+        activityFacts: undefined,
+        activityRevision: undefined,
+        activitySequence: 0,
+        sampledActivityRevision: undefined,
+        activityError: undefined,
+        answerEligibility: undefined,
+        eligibilitySubscription: undefined,
         listState: 'loading',
         listError: undefined,
+        listRevision: 0,
+        projectionGeneration: 0,
+        refreshError: undefined,
+        refreshTimer: undefined,
+        refreshing: false,
         projectionError: undefined,
         query: '',
         userQueryChanged: false,
         queryGeneration: 0,
+        searchRun: 0,
         queryController: undefined,
         queryTimer: undefined,
         searchState: 'idle',
@@ -496,15 +870,42 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
         resumeHandleSettled: false,
       }
       active = panel
-      const presentationHandle = options.presentation.open({
-        subject: panel.subject,
-        onQueryChange: (query) => changeQuery(panel, query),
-        onResumeIntent: (intent) => {
-          if (intent.source === 'direct') return
-          requestResume(panel, intent, panel.rows)
-        },
-        onClose: () => retire(panel, false),
-      })
+      let presentationHandle: SessionBrowserPanelHandle
+      try {
+        presentationHandle = options.presentation.open({
+          subject: panel.subject,
+          ...(openOptions.initialDirectoryChooser ? { initialDirectoryChooser: true } : {}),
+          ...(openOptions.initialDirectoryEntry ? { initialDirectoryEntry: true } : {}),
+          ...(openOptions.initialDirectoryPath === undefined ? {} : { initialDirectoryPath: openOptions.initialDirectoryPath }),
+          onQueryChange: (query) => changeQuery(panel, query),
+          onUseDirectory: options.onUseDirectory,
+          onNewSession: options.onWorkspaceNewSession === undefined
+            ? undefined
+            : (workspaceId, settle) => options.onWorkspaceNewSession?.(workspaceId, () => retire(panel, true), settle),
+          // The capability crosses the seam only when the composing owner really
+          // has one: an always-present closure would make an unsupported Add
+          // action look enabled.
+          onAddDirectory: options.onAddDirectory === undefined
+            ? undefined
+            : (path, settle) => options.onAddDirectory?.(path, settle),
+          // The Host browse capability keeps its optionality: the presentation
+          // receives the SAME function only when this composition has one.
+          ...(options.onListDirectory === undefined ? {} : { onListDirectory: options.onListDirectory }),
+          onResumeIntent: (intent) => {
+            if (intent.source === 'direct') return
+            requestResume(panel, intent, panel.rows)
+          },
+          onClose: () => retire(panel, false),
+        })
+      } catch (error) {
+        // A presenter that refuses to open (the PiTUI fullscreen lease is held
+        // by a blocking modal, another workspace or a transition freeze) must
+        // not leave a hidden, still-active read generation behind. Retire this
+        // panel WITHOUT closing a presenter that never opened, start no list
+        // and re-throw the real refusal to the command that owns the result.
+        retire(panel, false)
+        throw error
+      }
       panel.handle = presentationHandle
       const handle: SessionBrowserReadHandle = { settlement, resumeSettlement, close: () => retire(panel, true) }
       if (!isActive(panel)) {
@@ -522,8 +923,31 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
       }
       panel.handle.setSnapshot(snapshotOf(panel))
       if (!isActive(panel)) return handle
+      // An explicit initial query is the OPENING input, not a list-settlement
+      // effect: the search editor must be live (and editable) before any Host
+      // roster read settles. The one-shot seed is still skipped after a real
+      // user edit, and the list-settled fallback remains the direct-match path.
+      if (openOptions.initialQuery !== undefined && openOptions.initialQuery !== '') {
+        publish(panel, openOptions.initialQuery)
+      }
+      startWorkspaceFollow(panel)
+      panel.answerEligibility = options.forwardedAnswerEligibility === undefined
+        ? undefined
+        : [...options.forwardedAnswerEligibility()]
+      const subscribeEligibility = options.subscribeForwardedAnswerEligibility
+      if (subscribeEligibility !== undefined) {
+        panel.eligibilitySubscription = subscribeEligibility(() => refreshAnswerEligibility(panel))
+      }
       startList(panel)
       return handle
+    },
+    refresh() {
+      if (active === undefined || !isActive(active)) return
+      if (active.refreshTimer !== undefined) {
+        clearTimeout(active.refreshTimer)
+        active.refreshTimer = undefined
+      }
+      startRefresh(active)
     },
     dispose() {
       if (disposed) return

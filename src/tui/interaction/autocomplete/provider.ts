@@ -22,7 +22,8 @@ import {
   type AutocompleteSuggestions,
   type SlashCommand,
 } from '@xmoon76/pi-tui'
-import { shellCompletionContext, suggestShellCompletion } from './shell.ts'
+import { shellCommandIsOpen, shellCompletionContext, shellWordRange, shellWordSuffix, suggestShellCompletion } from './shell.ts'
+import type { HostShellCompletionPort, HostShellCompletionTarget } from '../../../runtime/host-shell-completion-port.ts'
 import { shellPrefixForMode, type EditorInputMode } from '../editor-input-mode.ts'
 import { applyInlineSkillReference, extractInlineSkillPrefix } from './skill-reference.ts'
 import {
@@ -69,13 +70,27 @@ const NO_HOST_REFERENCES: HostFilePort = {
   },
 }
 
-/** Whether two Host file scopes are the same (a session switch mid-flight
- * must drop the old session's candidate list). */
+/** Whether two Host file scopes are the same (a session switch or a Workspace
+ * selection change mid-flight must drop the old candidate list). The Workspace
+ * identity AND its Client-local selection revision must both match: an A→B→A
+ * return to the same WorkspaceId still invalidates the first A's late answer. */
 function sameHostFileScope(left: HostFileScope, right: HostFileScope): boolean {
   if (left.kind !== right.kind) return false
-  return left.kind === 'session'
-    ? left.sessionId === (right as { sessionId: string }).sessionId
-    : left.cwd === (right as { cwd: string }).cwd
+  if (left.kind === 'session') return left.sessionId === (right as { sessionId: string }).sessionId
+  const other = right as { workspaceId?: string; selectionRevision: number }
+  return left.workspaceId === other.workspaceId && left.selectionRevision === other.selectionRevision
+}
+
+/** Map ONE captured Host file scope to the completion target the Shell port
+ * takes: the exact live Session, the Host-issued Workspace id, or the explicit
+ * unselected state. The Client-local `selectionRevision` stays in the request
+ * identity (`sameHostFileScope` / `shellResultIdentity`) and is never sent. */
+function shellCompletionTargetOf(scope: HostFileScope): HostShellCompletionTarget {
+  if (scope.kind === 'session') return { kind: 'session', sessionId: scope.sessionId }
+  const workspaceId = scope.workspaceId
+  return workspaceId === undefined || workspaceId === ''
+    ? { kind: 'unselected' }
+    : { kind: 'workspace', workspaceId }
 }
 
 /**
@@ -113,12 +128,8 @@ export class MentionProvider implements AutocompleteProvider {
    * a command advertisement (the per-skill command wrappers keep their own
    * completion/claim path). */
   private readonly skillReferences: readonly HumanSkillSummary[]
-  /** Whether Host-shell completion facts are reachable (shell amendment
-   * M3-4 PR3): true on Direct (the compgen bridge reads the Host process's
-   * own state); false on Remote — the compgen/path bridge then stays SILENT
-   * (no Client `process.env.PATH`, no Client filesystem guessing for Host
-   * shell state). */
-  private readonly hostShellCompletion: boolean
+  /** The selected backend's Host/Direct shell completion authority. */
+  private readonly hostShellCompletion: HostShellCompletionPort | undefined
   /** The REQUEST SNAPSHOT (plan §9.2): the exact document lines + cursor
    * + mode + SCOPE of the most recent getSuggestions call that produced a
    * suggestion list. Strict file/extension results may apply ONLY when the
@@ -142,6 +153,13 @@ export class MentionProvider implements AutocompleteProvider {
      * identity is the permission — see {@link InlineAttachmentAcceptance}).
      * Empty for every request that offered none. */
     attachments: readonly AutocompleteItem[]
+    /** WHICH filesystem authority produced this answer. A HOST answer (a Host
+     * `@` mention, a Host shell fact, an extension list) is bound to the Host
+     * file scope it was resolved under; a CLIENT-local answer (the declared
+     * `/attach` + `/image` path argument and the inline action/skill lexicon)
+     * never reads the Host filesystem, so the Host scope is not its authority
+     * and its `localCwd` is. */
+    scopeAuthority: 'host' | 'client'
   } | null = null
   /** The monotonically increasing request generation (plan §9.2 latest-
    * only): minted at REQUEST START (getSuggestions entry). A result —
@@ -150,6 +168,18 @@ export class MentionProvider implements AutocompleteProvider {
    * (a provider that ignores AbortSignal) can never overwrite a NEWER
    * request's snapshot, so the next legitimate accept is not wrongly
    * fenced. */
+  /** The Shell result offered for THIS document/cursor/scope: the apply path
+   * accepts only a member of this exact set, so a stale first-line result can
+   * never be applied to another line or another edit. */
+  private shellResultIdentity: {
+    readonly items: readonly AutocompleteItem[]
+    readonly lines: readonly string[]
+    readonly cursorLine: number
+    readonly cursorCol: number
+    readonly mode: EditorInputMode
+    readonly scope: HostFileScope
+  } | null = null
+
   private requestGeneration = 0
 
   constructor(
@@ -157,11 +187,11 @@ export class MentionProvider implements AutocompleteProvider {
     workDir: string,
     fileReferences: HostFilePort | null,
     inputModeSource: () => EditorInputMode = () => 'prompt',
-    scope: HostFileScope | (() => HostFileScope) = { kind: 'workspace', cwd: workDir },
+    scope: HostFileScope | (() => HostFileScope) = { kind: 'workspace', selectionRevision: 0 },
     localFdPath: string | null | undefined = undefined,
     localCwd: string | (() => string) = workDir,
     skillReferences: readonly HumanSkillSummary[] = [],
-    hostShellCompletion: boolean = true,
+    hostShellCompletion: HostShellCompletionPort | undefined = undefined,
   ) {
     this.workDir = workDir
     this.fileReferences = fileReferences ?? NO_HOST_REFERENCES
@@ -198,12 +228,18 @@ export class MentionProvider implements AutocompleteProvider {
   /** The virtual serialized line for a shell-mode editor position on the
    * FIRST document line. */
   private virtualShellLine(
-    line: string,
+    lines: readonly string[],
+    cursorLine: number,
     cursorCol: number,
   ): { line: string; cursorCol: number; prefixLength: number } | null {
     const mode = this.inputModeSource()
     if (mode === 'prompt') return null
+    // A previous physical line that leaves the command OPEN (unfinished quote,
+    // backtick, substitution or a trailing backslash) means this cursor line
+    // is not a fresh command: no trustworthy single-line shell boundary.
+    if (cursorLine > 0 && shellCommandIsOpen(lines.slice(0, cursorLine))) return null
     const prefix = shellPrefixForMode(mode)
+    const line = lines[cursorLine] ?? ''
     return { line: prefix + line, cursorCol: cursorCol + prefix.length, prefixLength: prefix.length }
   }
 
@@ -213,8 +249,10 @@ export class MentionProvider implements AutocompleteProvider {
     cursorLine: number,
     cursorCol: number,
   ): { line: string; cursorCol: number; prefixLength: number } | null {
-    if (cursorLine !== 0) return null
-    return this.virtualShellLine(lines[0] ?? '', cursorCol)
+    // The synthetic `!`/`!!` prefix belongs to EVERY shell-mode command line,
+    // not only the first one: a new physical line starts a new command unless
+    // the previous lines leave it open.
+    return this.virtualShellLine(lines, cursorLine, cursorCol)
   }
 
   /** The SHELL SEMANTIC context: EVERY line of a shell-mode document is
@@ -223,7 +261,7 @@ export class MentionProvider implements AutocompleteProvider {
     currentLine: string,
     cursorCol: number,
   ): { line: string; cursorCol: number; prefixLength: number } | null {
-    return this.virtualShellLine(currentLine, cursorCol)
+    return this.virtualShellLine([currentLine], 0, cursorCol)
   }
 
   async getSuggestions(
@@ -253,24 +291,52 @@ export class MentionProvider implements AutocompleteProvider {
     cursorCol: number,
     options: { signal: AbortSignal; force?: boolean },
   ): Promise<AutocompleteSuggestions | null> {
+    this.shellResultIdentity = null
     const currentLine = lines[cursorLine] ?? ''
     const textBeforeCursor = currentLine.slice(0, cursorCol)
     // The REQUEST scope, captured at entry (never re-read after an await:
     // a session/workspace switch mid-request must not bake the NEW scope
     // into this request's snapshot — the apply fence compares it).
     const requestScope = this.scopeOf()
-    // 1. The SHELL-BRIDGE grammar first (a `!` line's first word is a
-    // command name; a path position falls through). The bridge never
-    // competes with file completion.
+    // An OPEN shell continuation (the previous physical line leaves a quote,
+    // backtick, substitution or trailing backslash unfinished) has no
+    // trustworthy single-line boundary. Offer NOTHING for it: no guessed shell
+    // candidate, no Client path fallback and no stale dropdown.
+    if (this.inputModeSource() !== 'prompt' && cursorLine > 0
+      && shellCommandIsOpen(lines.slice(0, cursorLine))) {
+      if (generation === this.requestGeneration) this.requestSnapshot = null
+      return null
+    }
+    // 1. The shell grammar runs before file/attachment completion. Direct keeps
+    // the existing fork path provider; Remote routes every shell word/path only
+    // through the authenticated Host port.
     const wire = this.virtualWireShellContext(lines, cursorLine, cursorCol)
     const shellLine = wire ?? { line: currentLine, cursorCol, prefixLength: 0 }
-    const shellContext = this.hostShellCompletion
-      ? shellCompletionContext(shellLine.line, shellLine.cursorCol)
-      : undefined
+    const shellContext = this.hostShellCompletion === undefined
+      ? undefined
+      : shellCompletionContext(shellLine.line, shellLine.cursorCol)
     if (shellContext !== undefined) {
-      const suggestions = await suggestShellCompletion(shellContext, this.workDir, options)
-      if (suggestions !== null) {
-        return this.withRequestSnapshot(generation, requestScope, requestMode, requestLocalCwd, lines, cursorLine, cursorCol, suggestions, false)
+      const port = this.hostShellCompletion!
+      const directPath = shellContext.kind === 'paths' && port.pathAuthority === 'client'
+      if (!directPath) {
+        const suggestions = await suggestShellCompletion(shellContext, port, shellCompletionTargetOf(requestScope), options)
+        if (suggestions !== null) {
+          if (generation === this.requestGeneration) {
+            this.shellResultIdentity = {
+              items: suggestions.items,
+              lines: [...lines],
+              cursorLine,
+              cursorCol,
+              mode: requestMode,
+              scope: requestScope,
+            }
+          }
+          return this.withRequestSnapshot(generation, requestScope, requestMode, requestLocalCwd, lines, cursorLine, cursorCol, suggestions, false)
+        }
+        if (generation === this.requestGeneration) this.requestSnapshot = null
+        if (shellContext.kind === 'paths' && port.pathAuthority === 'host') {
+          return this.withRequestSnapshot(generation, requestScope, requestMode, requestLocalCwd, lines, cursorLine, cursorCol, null, false)
+        }
       }
     }
 
@@ -310,6 +376,7 @@ export class MentionProvider implements AutocompleteProvider {
       if (context.leading || suggestions === null) {
         return this.withRequestSnapshot(
           generation, requestScope, requestMode, requestLocalCwd, lines, cursorLine, cursorCol, suggestions,
+          true, true, 'client',
         )
       }
       // THE INLINE seat (any other position): the rows are tagged so an
@@ -323,7 +390,9 @@ export class MentionProvider implements AutocompleteProvider {
       // Tab shortcut alike) without a fork change, while the rows keep their
       // ranked order (the dropdown highlights the top candidate). The replaced
       // span is re-derived in applyCompletion from the live document, so the
-      // prefix is not needed there either.
+      // prefix is not needed there either. The rows are CLIENT-local: the
+      // declared argument was answered by this machine's own discovery, never
+      // by the Host filesystem.
       return this.withRequestSnapshot(
         generation,
         requestScope,
@@ -333,6 +402,9 @@ export class MentionProvider implements AutocompleteProvider {
         cursorLine,
         cursorCol,
         { prefix: '', items: this.tagInlinePathItems(suggestions.items, context.command) },
+        true,
+        true,
+        'client',
       )
     }
 
@@ -359,7 +431,10 @@ export class MentionProvider implements AutocompleteProvider {
     // workspace.
     const literalShellLine = textBeforeCursor.trimStart().startsWith('!')
     if (semantic !== null || literalShellLine) {
-      if (!this.hostShellCompletion) return null
+      const port = this.hostShellCompletion
+      if (port === undefined || port.pathAuthority === 'host') {
+        return this.withRequestSnapshot(generation, requestScope, requestMode, requestLocalCwd, lines, cursorLine, cursorCol, null, false)
+      }
       try {
         const result = await this.inner.getSuggestions(lines, cursorLine, cursorCol, options)
         return this.withRequestSnapshot(generation, requestScope, requestMode, requestLocalCwd, lines, cursorLine, cursorCol, result, false)
@@ -401,18 +476,26 @@ export class MentionProvider implements AutocompleteProvider {
         // leading command and falls through to submit, while an inline
         // accept must only insert the reference. The result binds the
         // FULL request snapshot (strict fence), so a stale dropdown can
-        // never apply into a changed draft or a switched scope.
-        return this.withRequestSnapshot(generation, requestScope, requestMode, requestLocalCwd, lines, cursorLine, cursorCol, { prefix: inline.query, items })
+        // never apply into a changed draft or a switched input mode. These
+        // rows are CLIENT-local too: the fixed attachment actions and the
+        // detached skill lexicon never read the Host filesystem.
+        return this.withRequestSnapshot(
+          generation, requestScope, requestMode, requestLocalCwd, lines, cursorLine, cursorCol,
+          { prefix: inline.query, items }, true, true, 'client',
+        )
       }
       // No candidates: clear the snapshot (nothing to accept) — the same
       // null-clears contract as the file path, so a later direct apply
       // can never reuse an older request's dropdown.
-      return this.withRequestSnapshot(generation, requestScope, requestMode, requestLocalCwd, lines, cursorLine, cursorCol, null)
+      return this.withRequestSnapshot(
+        generation, requestScope, requestMode, requestLocalCwd, lines, cursorLine, cursorCol, null,
+        true, true, 'client',
+      )
     }
     // 6. PROMPT MODE leading command name (the FIRST logical line's
     // command seat only — a later line's leading `/name` is an inline
     // skill seat, never a command).
-    if (options.force === true) return null
+    if (options.force === true && shellContext === undefined) return null
     if (cursorLine === 0 && textBeforeCursor.trimStart().startsWith('/') && !textBeforeCursor.trimStart().includes(' ')) {
       try {
         const result = await this.getSlashCommandSuggestions(lines, cursorLine, cursorCol, options)
@@ -592,6 +675,9 @@ export class MentionProvider implements AutocompleteProvider {
      *  marker on a foreign row must therefore never authorize a local file
      *  read. */
     grantAttachments = true,
+    /** The authority that produced `result` (see the snapshot field). Every
+     *  caller that does not state one answers from the Host. */
+    scopeAuthority: 'host' | 'client' = 'host',
   ): T {
     if (generation !== this.requestGeneration) return result
     if (result === null) this.requestSnapshot = null
@@ -606,6 +692,7 @@ export class MentionProvider implements AutocompleteProvider {
       attachments: grantAttachments
         ? result.items.filter(item => isInlineAttachmentAction(item) || isInlineAttachmentPath(item))
         : [],
+      scopeAuthority,
     }
     return result
   }
@@ -694,13 +781,42 @@ export class MentionProvider implements AutocompleteProvider {
     if (snapshot === null) return false
     if (snapshot.cursorLine !== cursorLine || snapshot.cursorCol !== cursorCol) return false
     if (snapshot.mode !== this.inputModeSource()) return false
-    if (!sameHostFileScope(snapshot.scope, this.scopeOf())) return false
+    // The Host file scope is an answer's authority ONLY when the Host really
+    // produced it. A CLIENT-local answer never touches the Host filesystem, so
+    // its `localCwd` below is the whole scope: a Host workspace
+    // identity/revision change — the sessionless preflight confirming the
+    // launch directory right after the mount, an A→B→A Workspace selection —
+    // must not make its rows unapplicable. Fencing it against a fact it never
+    // depended on leaves the rows PAINTED while the accept writes nothing (the
+    // seat holds no Host scope of its own), i.e. the user's Enter becomes a
+    // silent no-op that completes nothing.
+    if (snapshot.scopeAuthority === 'host' && !sameHostFileScope(snapshot.scope, this.scopeOf())) return false
     if (snapshot.localCwd !== this.localCwdOf()) return false
     if (snapshot.lines.length !== lines.length) return false
     for (let index = 0; index < snapshot.lines.length; index += 1) {
       if (snapshot.lines[index] !== lines[index]) return false
     }
     return true
+  }
+
+  /** Whether `item` belongs to the Shell result set produced for THIS exact
+   * document, cursor, mode and Session scope. Every Host-derived shell kind
+   * (command, subcommand, variable, path) uses the same fence. */
+  private shellResultIsCurrent(
+    item: AutocompleteItem,
+    lines: readonly string[],
+    cursorLine: number,
+    cursorCol: number,
+  ): boolean {
+    const identity = this.shellResultIdentity
+    return identity !== null
+      && identity.items.includes(item)
+      && identity.cursorLine === cursorLine
+      && identity.cursorCol === cursorCol
+      && identity.mode === this.inputModeSource()
+      && identity.lines.length === lines.length
+      && identity.lines.every((line, index) => line === lines[index])
+      && sameHostFileScope(identity.scope, this.scopeOf())
   }
 
   applyCompletion(
@@ -711,6 +827,21 @@ export class MentionProvider implements AutocompleteProvider {
     prefix: string,
   ): { lines: string[]; cursorLine: number; cursorCol: number } {
     const currentLine = lines[cursorLine] ?? ''
+    // An OPEN continuation has no trustworthy boundary: never rewrite it, even
+    // for a stale shell item or a same-prefix file result.
+    if (this.inputModeSource() !== 'prompt' && cursorLine > 0
+      && shellCommandIsOpen(lines.slice(0, cursorLine))) {
+      return { lines, cursorLine, cursorCol }
+    }
+    const wire = this.virtualWireShellContext(lines, cursorLine, cursorCol)
+    const shellLine = wire ?? { line: currentLine, cursorCol, prefixLength: 0 }
+    const modePrefix = wire === null ? '' : shellPrefixForMode(this.inputModeSource())
+    const beforeCursor = currentLine.slice(0, cursorCol)
+    const bodyPrefix = modePrefix !== '' && prefix.startsWith(modePrefix)
+      && !beforeCursor.endsWith(prefix)
+      && beforeCursor.endsWith(prefix.slice(modePrefix.length))
+      ? prefix.slice(modePrefix.length)
+      : prefix
     // THE STALE FENCE (plan §9.1 minimum + §9.2 full snapshot): file and
     // extension results carry the EXACT document lines + cursor + mode + scope
     // of the request that produced them. An extension result at an ordinary
@@ -721,24 +852,111 @@ export class MentionProvider implements AutocompleteProvider {
       && !this.requestMatchesSnapshot(lines, cursorLine, cursorCol)) {
       return { lines, cursorLine, cursorCol }
     }
-    const start = cursorCol - prefix.length
-    if (start < 0 || currentLine.slice(start, cursorCol) !== prefix) {
+    // The shell context is derived BEFORE the prefix fence: a command/subcommand
+    // query prefix is the DECODED word (`zo\ s` → `zo s`), so its length says
+    // nothing about the RAW range the accepted Bash-safe word must replace.
+    // Those two kinds apply as WHOLE-WORD replacements below; every other kind
+    // keeps the prefix fence.
+    const shellContext = shellCompletionContext(shellLine.line, shellLine.cursorCol)
+    const wholeWordShell = shellContext?.kind === 'command' || shellContext?.kind === 'subcommand'
+    const start = cursorCol - bodyPrefix.length
+    if (!wholeWordShell && (start < 0 || currentLine.slice(start, cursorCol) !== bodyPrefix)) {
       return { lines, cursorLine, cursorCol }
     }
-    // Shell-bridge apply: replace only the current word (the `!` prefix and
-    // everything before stay untouched).
-    const wire = this.virtualWireShellContext(lines, cursorLine, cursorCol)
-    const shellLine = wire ?? { line: currentLine, cursorCol, prefixLength: 0 }
-    if (shellCompletionContext(shellLine.line, shellLine.cursorCol) !== undefined) {
-      const before = currentLine.slice(0, cursorCol - prefix.length)
-      const after = currentLine.slice(cursorCol)
-      const newLine = `${before}${item.value} ${after}`
+    // The accepted Shell item MUST come from the result set produced for this
+    // exact document, cursor, mode and Session scope. A stale first-line
+    // result (or a late async result from an older request) is never applied
+    // to a different line or edit. A STRICT (file/extension) result keeps its
+    // own snapshot fence below, so it is not classified as a Shell result.
+    const fromCurrentShellResult = wholeWordShell
+      && this.shellResultIsCurrent(item, lines, cursorLine, cursorCol)
+    if (wholeWordShell && !fromCurrentShellResult && this.requestSnapshot?.strict !== true) {
+      return { lines, cursorLine, cursorCol }
+    }
+    if (wholeWordShell && (fromCurrentShellResult || this.requestSnapshot?.strict === true)) {
+      // A strict extension/file result at a command-word position is a command
+      // word too: replace the whole raw range and keep the separator space.
+      // The scanner starts after the shell wire prefix: the SYNTHETIC one in a
+      // shell mode, or the literal `!`/`!!` a prompt-mode line carries (the same
+      // boundary `shellCompletionContext` uses). The range then maps back into
+      // currentLine coordinates by the serialized-line offset (0 when wire is
+      // null); everything after the word — other arguments, operators and
+      // trailing text — stays untouched.
+      const scanPrefixLength = wire === null
+        ? (currentLine.startsWith('!!') ? 2 : 1)
+        : wire.prefixLength
+      const range = shellWordRange(shellLine.line, scanPrefixLength, shellLine.cursorCol)
+      const rawStart = range.start - shellLine.prefixLength
+      const rawEnd = range.end - shellLine.prefixLength
       const newLines = [...lines]
-      newLines[cursorLine] = newLine
+      newLines[cursorLine] = `${currentLine.slice(0, rawStart)}${item.value} ${currentLine.slice(rawEnd)}`
       return {
         lines: newLines,
         cursorLine,
-        cursorCol: before.length + item.value.length + 1,
+        cursorCol: rawStart + item.value.length + 1,
+      }
+    }
+    if (shellContext?.kind === 'paths' && this.hostShellCompletion?.pathAuthority === 'host') {
+      // Host-derived path candidates are Session facts too: a result produced
+      // for another document/cursor/mode/Session must never be written here.
+      if (!this.shellResultIsCurrent(item, lines, cursorLine, cursorCol)) {
+        return { lines, cursorLine, cursorCol }
+      }
+      // Bash-style whole-word replacement: the cursor can sit mid-token, so
+      // the already-typed suffix of THIS word is part of the accepted range.
+      // Following words/whitespace and the command prefix stay untouched.
+      const suffix = shellWordSuffix(shellLine.line, shellLine.cursorCol, shellContext.word?.quote)
+      const before = currentLine.slice(0, start)
+      const after = currentLine.slice(cursorCol + suffix.length)
+      const newLines = [...lines]
+      newLines[cursorLine] = `${before}${item.value}${after}`
+      return {
+        lines: newLines,
+        cursorLine,
+        cursorCol: start + item.value.length,
+      }
+    }
+    if (shellContext?.kind === 'paths') {
+      // The synthetic wire prefix belongs to the CURSOR'S command line, which
+      // may be any physical line of a multi-line shell document.
+      const wireLines = wire === null
+        ? lines
+        : lines.map((line, index) => index === cursorLine ? wire.line : line)
+      const applied = this.inner.applyCompletion(
+        wireLines,
+        cursorLine,
+        wire?.cursorCol ?? cursorCol,
+        item,
+        bodyPrefix,
+      )
+      const resultLines = [...applied.lines]
+      if (wire !== null) resultLines[cursorLine] = resultLines[cursorLine]!.slice(wire.prefixLength)
+      return {
+        lines: resultLines,
+        cursorLine: applied.cursorLine,
+        cursorCol: Math.max(0, applied.cursorCol - (wire?.prefixLength ?? 0)),
+      }
+    }
+    if (shellContext?.kind === 'variable') {
+      // Variable candidates are Host-derived facts: same currentness fence.
+      if (!this.shellResultIsCurrent(item, lines, cursorLine, cursorCol)) {
+        return { lines, cursorLine, cursorCol }
+      }
+      // A `$VAR` word is one WORD whichever quote it lives in: replace its
+      // whole range (the semantic name starts after the opening quote) and
+      // append the separator space only OUTSIDE a quote — a space appended
+      // inside the still-open quote would become part of the value.
+      const quote = shellContext.word?.quote
+      const suffix = shellWordSuffix(shellLine.line, shellLine.cursorCol, quote)
+      const before = currentLine.slice(0, start)
+      const after = currentLine.slice(cursorCol + suffix.length)
+      const append = quote === undefined ? ' ' : ''
+      const newLines = [...lines]
+      newLines[cursorLine] = `${before}${item.value}${append}${after}`
+      return {
+        lines: newLines,
+        cursorLine,
+        cursorCol: start + item.value.length + append.length,
       }
     }
     // SYMMETRIC SHELL-SEMANTIC adapter (shell mode): the classification ran
@@ -746,7 +964,7 @@ export class MentionProvider implements AutocompleteProvider {
     const semantic = this.virtualShellSemanticContext(currentLine, cursorCol)
     if (semantic !== null) {
       const wireLines = lines.map((line, index) => index === cursorLine ? semantic.line : line)
-      const applied = this.inner.applyCompletion(wireLines, cursorLine, semantic.cursorCol, item, prefix)
+      const applied = this.inner.applyCompletion(wireLines, cursorLine, semantic.cursorCol, item, bodyPrefix)
       const resultLines = [...applied.lines]
       resultLines[cursorLine] = resultLines[cursorLine]!.slice(semantic.prefixLength)
       return {
@@ -876,10 +1094,9 @@ export class MentionProvider implements AutocompleteProvider {
     // `/usr/lo` reads as a PATH, never a bare slash command — the
     // pre-plan shell-mode parity the plan keeps as a non-goal).
     if (semantic !== null || textBeforeCursor.trimStart().startsWith('!')) {
-      // Shell amendment (M3-4 PR3): without Host shell facts (Remote) a
-      // shell line triggers NOTHING — the request itself would fall through
-      // to the Client-filesystem path provider.
-      if (!this.hostShellCompletion) return false
+      const port = this.hostShellCompletion
+      if (port === undefined) return false
+      if (port.pathAuthority === 'host') return true
       if (semantic !== null) {
         const virtualLines = lines.map((line, index) => index === cursorLine ? semantic.line : line)
         return this.inner.shouldTriggerFileCompletion?.(virtualLines, cursorLine, semantic.cursorCol) ?? true

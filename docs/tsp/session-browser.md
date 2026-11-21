@@ -31,29 +31,56 @@ production default; TSP keeps the experimental opt-in described in
 
 ## Browse, search and details
 
-- Browse opens in the current workspace. Workspace membership uses lexical
-  `sameWorkspace(row.cwd, currentCwd)`; unknown roots match neither workspace.
-  All-workspaces mode keeps the listed main-session lineage, including
-  cross-workspace parent/child edges. Orphans become roots; cycles are emitted
-  without unbounded traversal.
-- Browse Tree groups only adjacent rows whose workspaces match; repeated
-  workspace headings are intentional. Grouping never reorders the
-  `buildSessionTree()` parent-first sequence or resets row depth; each contiguous
-  run has its own PickerGroup ID. Search is global Cards without workspace
-  groups.
+- Browse uses the Host Workspace baseline from the shared `SessionBrowserReadOwner`.
+  Membership is keyed by official `workspaceId` and `sessionIds`; Client/Session
+  `cwd` strings never prove membership. A valid baseline is rendered as real
+  Picker Items (`workspace:<workspaceId>`) with Session children
+  (`session:<sessionId>`), in Host follow order. Static `PickerGroup` headers
+  are not Workspace identity or business targets. Folder item `open` reflects
+  the per-open expansion state; a collapsed Folder contributes no child or
+  Show more item at all, so a manual collapse also hides confirmed active rows.
+- The current Workspace starts expanded with eight ordinary rows; a
+  non-current Workspace with confirmed Needs/Working starts expanded with those
+  active rows and no ordinary history; an inactive non-current Workspace starts
+  as its Folder item only. Explicit expansion of a non-current Workspace starts
+  at five ordinary rows, and `Show more` adds five more until exhausted. A
+  sessionless, Host-confirmed next-create Workspace is ordered first, labelled
+  `Next`, and receives the same eight-row watermark without ever becoming
+  `Current`.
+- A missing or failed Workspace baseline keeps the listed roster usable as a
+  flat fallback and states the single unavailable membership annotation.
+  Ambiguous membership is not guessed into the current Workspace.
+- Workspace folder expansion is per Browser open. Search remains global and
+  ignores folder expansion; clearing the query restores the same typed
+  selection and expansion state.
+- A sessionless Welcome chooser opens this same Browser at its Workspace folder
+  list. A retained first-submit Host refusal opens it directly in `Add
+  directory` path-entry mode with the refused absolute path prefilled, after the
+  submission owner restores the draft. Path entry reuses the Picker's native
+  query/cursor field and exposes `Use directory` and `Cancel` actions. `Enter`
+  (or the Use directory action) dispatches at most one
+  command-owned `resolveWorkspace` until it settles. A rejection keeps the
+  field live and the previous confirmed intent intact; successful Host
+  registration commits the next-create intent and, for the chooser, returns to
+  the Welcome. An ordinary Browser Add returns to Browse and still requires the
+  explicit New session action.
+- A row's Workspace facts come only from the official membership baseline; a
+  row outside that baseline is never moved into a folder by `cwd`. Host content
+  search remains the sole content authority and search results are never
+  re-filtered by cwd.
 - A non-empty query is canonicalized once for metadata matching and Host search:
   remove NUL, trim, cap at 500 UTF-16 code units, and avoid a dangling high
   surrogate. Metadata matches only listed-row `id`, `title`, `cwd` and `preset`
   fields; it does not locally search content or Host snippets.
 - The native input keeps raw editor text and cursor separate from the canonical
   query. Ordinary Reader snapshots update results/status without rewriting the
-  editor; `/sessions`/`/search` initial queries and a no-match typed `/resume`
-  query are seeded once. Text edits made while the list loads — including
+  editor; `/sessions`/`/search` initial queries, the CLI startup query and a
+  no-match typed `/resume` query are seeded once. Text edits made while the list loads — including
   whitespace-only changes that canonicalize to the existing query — take
   precedence over pending initial/direct-match intent, and canonical no-op edits
   do not restart Host search.
 - Query mode uses the same native Picker identity in global Cards layout and does
-  not inherit browse-scope membership. Metadata matches retain the official list
+  not inherit browse-folder membership. Metadata matches retain the official list
   order; Host-only results follow Host page order; overlap is deduplicated and
   carries the Host snippet. `hasMore` asks the user to refine; it does not start
   pagination.
@@ -73,8 +100,7 @@ production default; TSP keeps the experimental opt-in described in
   fact group, control or page exists. The label is a statement, never a veto: the
   normal Resume/open path stays, and the official Host `Session.open` owns any
   migration it performs.
-- Details is one read-only native Overlay Reader. Back or Esc returns to the same
-  Picker and retains query/scope/selection. Each reading owns a distinct Reader/
+- Details is one read-only native Overlay Reader. Back or Esc returns to the same Picker and retains query/selection. Each reading owns a distinct Reader/
   body/scroll identity; no Resume action is offered from Details.
 - Details presents the Identity, Activity, Lineage and Configuration groups in
   reading order. Where the pane negotiated the `kv` kind each of those groups is
@@ -99,8 +125,8 @@ production default; TSP keeps the experimental opt-in described in
 - The native capability gate requires `picker`, `row`, `overlay` and `text` kinds
   plus the `scroll` feature. A pane missing any requirement receives no Session
   Browser presentation, and the Presenter emits no unsupported scroll operation.
-- One native Picker key remains stable for a panel across query, scope,
-  projection and resize updates. A new open gets a new panel identity. Details
+- One native Picker key remains stable for a panel across query, folder
+  expansion, projection and resize updates. A new open gets a new panel identity. Details
   body and Back identities are scoped to one reading. Event admission uses the
   current surface, rendered target, panel/page identity and offered action or
   row; the SDK exposes no authoritative frame revision, and this code does not
@@ -109,9 +135,16 @@ production default; TSP keeps the experimental opt-in described in
   and retire one another; a modal suspends Browser input and restores the same
   read-only state when it closes. Hydration retires the Browser; shared renderer
   disposal clears the exposed Model/Preset/Browser presenters.
-- Pointer selection changes only the selected row. A valid non-current row
-  enables the primary Resume action; row Enter/activate uses the same guarded
-  switch as the Footer. Details stays read-only.
+- Pointer selection changes only the selected typed row. Folder activation/Enter
+  toggles only that Workspace; Left/Right collapse/expand it. `Show more` is a
+  selectable action row whose Enter/activate reveals the next five ordinary
+  history rows. None of those folder actions can fall through to Resume of a
+  previously selected Session. A listed Current Session row's keyboard Enter or
+  native activate closes the Browser and returns to that same Session, with no
+  Resume intent and no Session switch; native `select` only selects, the Current
+  row keeps the Footer Resume action disabled with its existing reason, and the
+  Details Reader's Enter stays Back. A valid non-current Session row enables the
+  primary Resume action; Details stays read-only.
 
 ## Commands and Resume
 
@@ -124,14 +157,25 @@ production default; TSP keeps the experimental opt-in described in
   opens its global Cards view with the initial query; empty `/search` is rejected
   before listing. None of these commands creates a Session.
 - `/resume <id-or-prefix>` uses the single official `SessionReader.list()` read
-  for that open and the existing `findSessionMatch()` order over `panel.rows`
-  (listed main-session rows only). The first listed main-session match starts the
-  switch without a second list; a miss, including a subagent-only target, becomes
-  the initial global query. A manual Browser query entered while the list loads
-  takes precedence and suppresses a matching typed `/resume` switch. This
-  main-only corpus is the Native TSP rule; the PiTui fallback direct matcher is
-  unchanged.
-- Footer order is Close, Details, Resume. Resume keeps the `primary` action
+  for that open and the pure `findSessionMatch()` over `panel.rows` (listed
+  main-session rows only): a full exact ID wins over the listed order; without
+  one, only a UNIQUE non-empty `session-`/`session_`/short-id prefix starts the
+  switch, still without a second list. An ambiguous prefix, an empty prefix
+  (bare `session-`/`session_`), and a miss — including a subagent-only target —
+  never switch: the same original text seeds the ONE global Browser search for
+  the user to choose from. A manual Browser query entered while the list loads
+  takes precedence and suppresses a matching typed `/resume` switch. The PiTUI
+  renderer consumes the SAME `SessionBrowserReadOwner` through its own
+  fullscreen Session Workspace Presenter (`TuiApp.openSessionWorkspace` +
+  `src/tui/panels/session-workspace-panel.ts`), so the main-only corpus, matcher
+  and query precedence are the rule on every renderer; the PiTUI side owns only
+  its physical screen and Client-local presentation, never a second Reader or
+  query owner. On both renderers the Current row's Enter/activate returns
+  (closes the Browser) while every other listed row is the pre-existing guarded
+  Resume; the read-owner admission and settlement contract above is unchanged.
+- Footer order is Close, Details, Use directory (sessionless Folder selection),
+  New session, Add directory, Resume; each unavailable action carries its own
+  reason and only enabled actions take keyboard focus. Resume keeps the `primary` action
   designation in every state; it is enabled only for a listed, non-current
   selection while no switch is pending. Loading, empty, unavailable, error, no
   selection, current-row and pending states keep it disabled with an explicit

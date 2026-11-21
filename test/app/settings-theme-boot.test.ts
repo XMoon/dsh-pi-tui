@@ -110,6 +110,38 @@ function mountThemeRuntime(): ThemeHarness {
   }
 }
 
+test('display and fullscreen persist through the semantic settings port without Direct forms', async () => {
+  const writes: unknown[] = []
+  let doc = { displayPreset: 'regular', fullscreen: 'off' }
+  const runtime = createSettingsRuntime({
+    surface: {
+      app: {
+        setDisplayPreset: () => ({ kind: 'applied' }),
+        notify: (message: string) => { assert.fail(message) },
+      } as never,
+      status: { snapshot: () => ({}) as never, subscribe: () => noop },
+    },
+    signal: new AbortController().signal,
+    tuiSettings: {
+      get: () => doc,
+      replace: (next: typeof doc) => { writes.push(next); doc = next },
+    } as never,
+    settingsForms: undefined,
+    isCleanedUp: () => false,
+    backend: { config: { footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) } } } as never,
+    diag: { debug: noop, info: noop, warn: noop, error: assert.fail, dispose: noop } as never,
+    status: { refresh: noop },
+    extensions: () => undefined,
+  })
+  runtime.setDisplayPreset('focus')
+  runtime.setFullscreen(true)
+  // Both existing detached writes join the semantic document's FIFO.
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(writes.length, 2)
+  assert.equal(doc.displayPreset, 'focus')
+  assert.equal(doc.fullscreen, 'on')
+})
+
 test('the boot wiring samples once through autoDetectTheme and only toggles Mode 2031', () => {
   const harness = mountThemeRuntime()
   harness.runtime.applyBootDisplay()

@@ -1,5 +1,5 @@
 /**
- * The `/settings → Tools → Web Search / Fetch` page (C2-R4).
+ * The `/settings → Tools → Web Search / Fetch` page (C2-R4, rc.2 F3).
  *
  * This is the ONE Web provider configuration surface. It is mounted as an
  * EMBEDDED SPECIALIST PAGE inside the existing Settings Workspace lease (the
@@ -7,7 +7,7 @@
  * second alt-screen overlay.
  *
  * Authority is deliberately NOT here:
- *  - the six displayed facts come from the command owner's LATEST authoritative
+ *  - the displayed facts come from the command owner's LATEST authoritative
  *    Host read (`readFacts`): a pending read paints `Loading…`, an unreadable
  *    authority paints `Unavailable` with its reason, and a readable one paints
  *    the raw Host identity (a custom provider id stays verbatim, a stored count
@@ -15,8 +15,11 @@
  *  - every write is ONE explicit Enter confirmation handed to the command
  *    owner's single FIFO (`commit`), whose verdict is `verified` /
  *    `not-saved` / `outcome-unknown` against a fresh read-back;
- *  - the endpoint draft is the EXISTING `WebEndpointPanel` (Input + explicit
- *    Enter Confirm + its own verdict vocabulary), not a cloned URL editor;
+ *  - the rc.2 Search/Fetch YAML-only advanced overrides (`searchBaseURL`,
+ *    `searchApiKeyEnv`, `fetchBaseURL`, `fetchApiKeyEnv`) are READ-ONLY facts:
+ *    no editable input exists for them, Enter only opens their Detail, and a
+ *    non-empty override makes the matching Billing row non-writable (the
+ *    override owns that capability's endpoint/credential configuration);
  *  - the DeepSeek API key is only displayed as the official credential
  *    REFERENCE. Configure/Clear hand a typed `ModelsInitialView` to the
  *    workspace root, which retires this page and mounts the existing Models
@@ -30,12 +33,14 @@
  */
 
 import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type TuiMouseEvent, type TuiMouseEventResult } from '@xmoon76/pi-tui'
+import { maskWebProviderOverrideUrl, type WebProviderSelectionFacts } from '../../domain/web-provider-settings.ts'
 import type { WebProviderSettings } from '../../runtime/config-port.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color } from '../theme/runtime.ts'
+import { ACTION_BAR_SEPARATOR } from '../presentation/action-bar.ts'
+import { paintActionSpan } from '../presentation/action-ink.ts'
 import type { ModelsInitialView } from './models-workspace-page.ts'
 import type { EmbeddedSpecialistPage } from './settings-workspace-panel.ts'
-import { WebEndpointPanel, WebWriteVerdictError, type WebPanelTaskRunner } from './web-provider-panels.ts'
 
 /** The exact credential reference the official DeepSeek Search / Fetch API
  *  providers resolve (`apiKeyEnv`'s shipped default). Its VALUE never reaches
@@ -48,18 +53,51 @@ export const WEB_SETTINGS_PAGE_TITLE = 'Web Search / Fetch'
  * The official search-provider candidates, in their frozen order. `id` is the
  * ONLY value ever written (`label` is presentation); a configured id outside
  * this table is a CUSTOM route: it is reported verbatim and is not selectable
- * here.
+ * here. An absent `web.searchProvider` is the Host's AUTOMATIC routing state
+ * (DSH rc.5: the usable DeepSeek provider assigned to the model request's
+ * route) — the Host selection is authoritative and this page never precomputes
+ * it; a stored selection keeps applying.
  */
 export const WEB_SEARCH_PROVIDER_CANDIDATES = [
-  { id: 'deepseek-official', label: 'Messages', default: true },
-  { id: 'deepseek-search-api', label: 'DeepSeek Search API', default: false },
+  { id: 'deepseek-official', label: 'DeepSeek server-side search' },
+  { id: 'deepseek-search-api', label: 'DeepSeek Search API' },
 ] as const
 
 /** The official fetch-provider candidates (same identity contract). */
 export const WEB_FETCH_PROVIDER_CANDIDATES = [
-  { id: 'http', label: 'HTTP', default: true },
-  { id: 'deepseek-fetch-api', label: 'DeepSeek Fetch API', default: false },
+  { id: 'http', label: 'HTTP' },
+  { id: 'deepseek-fetch-api', label: 'DeepSeek Fetch API' },
 ] as const
+
+/** The option identity of the Automatic row: offered only while the deployment
+ *  composes NO provider for the capability. A NUL-prefixed key can never
+ *  collide with a real provider id (which is painted sanitized) nor be written
+ *  as one: the command maps it to the official USER-layer reset. */
+export const WEB_PROVIDER_AUTOMATIC_KEY = '\u0000automatic'
+/** The option identity of the `Use deployment default` row for a deployment
+ *  selection outside the official candidates. Same typed reset intent; NEVER
+ *  the custom id. */
+export const WEB_PROVIDER_RESTORE_KEY = '\u0000restore-deployment-default'
+
+/** One CONFIRMED provider selection intent. `observed` carries the same `web`
+ *  descriptor layer facts the page painted, so the queue head can refuse a
+ *  gesture a newer Host state no longer describes (never silently re-target). */
+export type WebProviderCommitIntent =
+  | {
+      /** Explicitly select this official provider id (`set`). */
+      readonly kind: 'provider-select'
+      readonly id: string
+      readonly observed: WebProviderSelectionFacts
+    }
+  | {
+      /** Restore the deployment selection: the ONE official `unset`. */
+      readonly kind: 'provider-restore'
+      readonly observed: WebProviderSelectionFacts
+    }
+
+/** One commit request: a plain string for the non-provider rows (unchanged),
+ *  a typed intent for the two provider rows. */
+export type WebSettingsCommitRequest = string | WebProviderCommitIntent
 
 /** The four recommended result-count presets. The official `count` domain is
  *  1–50; a stored integer outside this list is still reported verbatim and is
@@ -69,22 +107,80 @@ export const WEB_SEARCH_COUNT_CANDIDATES = ['5', '10', '20', '50'] as const
 /** The `sendOriginalQuestion` candidates. */
 export const WEB_QUESTION_CANDIDATES = ['on', 'off'] as const
 
-/** The five CONFIGURED fields (the credential row is the sixth, read-only
- *  reference row). */
+/** The official rc.2 billing candidates (`web-deepseek-api.searchBilling` /
+ *  `fetchBilling`), in their frozen order. `id` is the ONLY value ever written;
+ *  `auto` is a persisted explicit choice, never a reset of the YAML-only
+ *  overrides. */
+export const WEB_BILLING_CANDIDATES = [
+  { id: 'auto', label: 'Automatic' },
+  { id: 'account', label: 'Account' },
+  { id: 'api-key', label: 'API key' },
+] as const
+
+/** One billing mode's official display label (`auto` paints as `Automatic`). */
+export function webBillingLabel(mode: string): string {
+  return WEB_BILLING_CANDIDATES.find(candidate => candidate.id === mode)?.label ?? mode
+}
+
+/** One capability's NON-EMPTY rc.2 YAML-only override fields, with their
+ *  configured values (a masked URL or an env NAME — never a secret value).
+ *  Masking is applied HERE, centrally, so every paintable consumer (the
+ *  override rows' facts, the Billing Detail's `Configured override:` line and
+ *  the command owner's refusal reasons) is safe even if a source hands over a
+ *  raw Host URL. */
+export function webAdvancedOverrideFields(
+  advanced: WebProviderSettings['advanced'],
+  capability: 'search' | 'fetch',
+): readonly { readonly field: string; readonly value: string }[] {
+  const fields = capability === 'search'
+    ? ['searchBaseURL', 'searchApiKeyEnv'] as const
+    : ['fetchBaseURL', 'fetchApiKeyEnv'] as const
+  return fields.flatMap(field => {
+    const value = advanced[field]
+    if (typeof value !== 'string' || value === '') return []
+    return [{
+      field,
+      value: field === 'searchBaseURL' || field === 'fetchBaseURL' ? maskWebProviderOverrideUrl(value) : value,
+    }]
+  })
+}
+
+/** The read-only override facts one capability's row paints. Unset says the
+ *  configuration follows the CURRENT conversation's DeepSeek route — never a
+ *  fabricated fixed URL; set fields are painted as `field=value` pairs. */
+export function webAdvancedFactsText(
+  advanced: WebProviderSettings['advanced'],
+  capability: 'search' | 'fetch',
+): string {
+  const overrides = webAdvancedOverrideFields(advanced, capability)
+  if (overrides.length === 0) {
+    return "Host YAML: not set — follows current conversation's DeepSeek route"
+  }
+  return `Host YAML: ${overrides.map(entry => `${entry.field}=${entry.value}`).join(' · ')}`
+}
+
+/** The eight CONFIGURED fields (the credential row is the ninth, read-only
+ *  reference row; the two override rows are read-only facts). */
 export type WebSettingRowId =
   | 'web-search-provider'
   | 'web-fetch-provider'
   | 'web-search-count'
   | 'web-send-original-question'
-  | 'web-search-endpoint'
+  | 'web-search-billing'
+  | 'web-fetch-billing'
+  | 'web-search-advanced'
+  | 'web-fetch-advanced'
 
-/** The six row identities of this page, in the FROZEN order. */
+/** The nine row identities of this page, in the FROZEN order (§5.5A E2.3). */
 export const WEB_SETTINGS_ROW_IDS = [
   'web-search-provider',
   'web-fetch-provider',
   'web-search-count',
   'web-send-original-question',
-  'web-search-endpoint',
+  'web-search-billing',
+  'web-fetch-billing',
+  'web-search-advanced',
+  'web-fetch-advanced',
   'web-credential',
 ] as const
 export type WebSettingsRowId = (typeof WEB_SETTINGS_ROW_IDS)[number]
@@ -119,13 +215,13 @@ export interface WebSettingsPageIntents {
   readonly readFacts: () => WebSettingsFacts
   /** Why this page may not commit right now (backend non-current/unavailable).
    *  The page still paints the last read facts, but offers NO confirmable
-   *  candidate, no endpoint draft and no credential action until it is writable
-   *  again — the command queue would refuse every one of them. */
+   *  candidate and no credential action until it is writable again — the
+   *  command queue would refuse every one of them. */
   readonly writableRefusal: () => string | undefined
   /** Whether the official credential store is mounted right now. */
   readonly credentialAvailable: () => boolean
   /** Queue ONE confirmed intent on the command owner's single Web FIFO. */
-  readonly commit: (id: WebSettingRowId, requested: string) => Promise<WebCommitResult>
+  readonly commit: (id: WebSettingRowId, requested: WebSettingsCommitRequest) => Promise<WebCommitResult>
   /** Start a fresh authoritative Host read (`r` and page entry). */
   readonly refresh: () => void
   /** The root's narrow page-switch intent: retire this page and open the
@@ -133,7 +229,7 @@ export interface WebSettingsPageIntents {
   readonly navigateToModels: (initial: ModelsInitialView) => void
   readonly requestRender: () => void
   /** The caller's owned task entry (never a bare promise). */
-  readonly run: WebPanelTaskRunner
+  readonly run: (label: string, task: () => Promise<void>) => void
   /** The page's own close (Esc at the list root). Returns to the Tools row. */
   readonly done: () => void
 }
@@ -195,9 +291,65 @@ function composeRow(left: string, right: string, width: number): string {
   return fit(left + ' '.repeat(width - leftWidth - rightWidth) + right, width)
 }
 
-/** The LONGEST wording that fits `width` WHOLE, or '' when none does. */
-function wholeWording(preferred: string, width: number, shorter: readonly string[] = []): string {
-  return [preferred, ...shorter].find(text => visibleWidth(text) <= width) ?? ''
+/** One complete Action Bar segment and the ink role it paints with: a pure
+ *  browsing HINT (muted, inert), the page's REAL confirm verb, or the root's
+ *  Esc affordance. */
+interface BarSegmentWording {
+  readonly text: string
+  readonly ink: 'hint' | 'confirm' | 'escape'
+}
+
+/** One whole Action Bar wording: COMPLETE segments only (never truncated),
+ *  each with the exact cells the same string paints. */
+interface BarWording {
+  readonly text: string
+  readonly segments: readonly (BarSegmentWording & {
+    readonly startCol: number
+    readonly endCol: number
+  })[]
+}
+
+/** Compose whole ` · `-joined segments and measure their painted cells from
+ *  the very strings that are painted. */
+function barWording(parts: readonly BarSegmentWording[]): BarWording {
+  const segments: Array<BarSegmentWording & { readonly startCol: number; readonly endCol: number }> = []
+  let text = ''
+  for (const part of parts) {
+    if (segments.length > 0) text += ACTION_BAR_SEPARATOR
+    const startCol = visibleWidth(text)
+    text += part.text
+    segments.push({ ...part, startCol, endCol: visibleWidth(text) })
+  }
+  return { text, segments }
+}
+
+/** The empty wording: a width that cannot paint even one complete segment. */
+const EMPTY_WORDING: BarWording = { text: '', segments: [] }
+
+/** Build one wording whose LAST segment is the real `Verb [Esc]` affordance
+ *  (design §7.1), with its span measured from the painted string. */
+function escapeWording(lead: string, verb: string): BarWording {
+  return barWording([
+    ...lead === '' ? [] : [{ text: lead, ink: 'hint' as const }],
+    { text: `${verb} [Esc]`, ink: 'escape' as const },
+  ])
+}
+
+/** Build the page's explicit `Verb [Enter] · Back [Esc]` wording: the commit
+ *  verb is the ONE delegated target and the Esc affordance stays the root's. */
+function confirmWording(lead: string): BarWording {
+  return barWording([
+    ...lead === '' ? [] : [{ text: lead, ink: 'hint' as const }],
+    { text: 'Confirm [Enter]', ink: 'confirm' as const },
+    { text: 'Back [Esc]', ink: 'escape' as const },
+  ])
+}
+
+/** The LONGEST wording that fits `width` WHOLE, or the empty one when none
+ *  does. The chosen value is the SAME value the row paints, so its spans are
+ *  never re-derived from a coloured string. */
+function wholeWording(preferred: BarWording, width: number, shorter: readonly BarWording[] = []): BarWording {
+  return [preferred, ...shorter].find(word => visibleWidth(word.text) <= width) ?? EMPTY_WORDING
 }
 
 /** The state WORD + ink of one transient phase (§4A.2 vocabulary). */
@@ -212,7 +364,7 @@ function phaseWord(phase: WebRowPhase): string {
 
 /**
  * The `/settings → Tools → Web Search / Fetch` page. It paints a short list of
- * the six frozen rows plus the selected row's Detail, keeps ONE active cursor,
+ * the nine frozen rows plus the selected row's Detail, keeps ONE active cursor,
  * and turns exactly one explicit Enter into a `commit` on the command owner's
  * FIFO.
  */
@@ -226,16 +378,42 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   private region: WebPageRegion = 'list'
   /** The highlighted candidate of the selected choice row (presentation only). */
   private choiceIndex = 0
+  /** Whether the first READABLE authority was already taken as the Detail's
+   *  highlight anchor. The page is constructed while the read is pending, so
+   *  the initial index is a placeholder: once real facts arrive the highlight
+   *  must point at the value the Host holds (an unrelated later read must not
+   *  yank a draft the user already moved). */
+  private authorityAnchored = false
+  /** The authority facts the LAST painted frame used. A confirmed provider
+   *  gesture carries THESE facts (not a read that settled after the paint), so
+   *  the command queue can detect that the Host changed under the gesture. */
+  private paintedFacts: WebSettingsFacts | undefined
   /** The highlighted credential action. */
   private actionIndex = 0
   private listOffset = 0
   private detailOffset = 0
   private rowGrant = 8
   private readonly phases = new Map<WebSettingRowId, WebRowPhase>()
-  private endpointPanel: { readonly panel: WebEndpointPanel } | undefined
   private disposed = false
   private revision = 0
   private paint: PagePaint | undefined
+  /** The complete Esc affordance of the LAST painted bar, in this page's
+   *  own content columns. Cleared by a row-grant change and on dispose, so
+   *  a resize never keeps the previous frame's geometry clickable. */
+  private paintedEscapeSpanValue: { readonly startCol: number; readonly endCol: number } | undefined
+  /** The page's ONE delegated confirm target of the LAST PAINTED frame: the
+   *  exact `Confirm [Enter]` cells plus the semantic snapshot they were painted
+   *  from. It is presentation-only pointer state — the command owner's Web FIFO
+   *  stays the ONE write authority. */
+  private paintedConfirmTarget:
+    | {
+      readonly revision: number
+      readonly rowId: WebSettingRowId
+      readonly candidate: string
+      readonly startCol: number
+      readonly endCol: number
+    }
+    | undefined
   /** The credential action the LAST COMMITTED frame painted as the ACTIVE
    *  cursor (Detail region only). Enter must target exactly this identity. It
    *  is updated ONLY while the real render runs: a non-render projection (the
@@ -261,6 +439,10 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   /** The root's row-budget seam: the granted lines INCLUDE the Action Bar. */
   setMaxRows(rows: number): void {
     this.rowGrant = Math.max(1, Math.floor(rows))
+    // A new grant has not painted yet: the previous bar's geometry (including
+    // the delegated Confirm target) is stale.
+    this.paintedEscapeSpanValue = undefined
+    this.paintedConfirmTarget = undefined
   }
 
   private bodyRows(): number {
@@ -286,20 +468,11 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
 
   handleInput(data: string): void {
     if (this.disposed) return
-    // The endpoint draft owns the keyboard: its Input + its own explicit Enter
-    // Confirm + its own Esc cancel are the ONLY keys it understands.
-    if (this.endpointPanel !== undefined) {
-      // Readiness is re-proved BEFORE the key is forwarded: a backend that
-      // turned stale while the draft was open must not accept a Confirm, and
-      // the key that discovered it is not applied to the read-only surface.
-      if (this.syncEndpointWritability()) {
-        this.commitPresentation(() => {})
-        return
-      }
-      this.endpointPanel.panel.focused = this.focused
-      this.endpointPanel.panel.handleInput(data)
-      return
-    }
+    // Every real key starts a new semantic frame: a bar press that began
+    // before it can never complete against the state this key changes (or
+    // re-affirms). The painted target is re-published by the next render.
+    this.revision += 1
+    this.paintedConfirmTarget = undefined
     if (matchesKey(data, 'escape')) {
       if (this.region === 'detail') {
         this.commitPresentation(() => { this.region = 'list' })
@@ -331,11 +504,76 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     // editor, transcript or a host composer action.
   }
 
+  /** The complete visible Esc affordance span of the LAST PAINTED frame, in
+   *  this page's own content-column coordinates; undefined when the frame
+   *  painted no complete Esc affordance (a loading/saving wording without Esc,
+   *  a wording dropped at this width). */
+  paintedEscapeSpan(): { readonly startCol: number; readonly endCol: number } | undefined {
+    return this.paintedEscapeSpanValue
+  }
+
+  /** The NON-Esc Action-Bar span the LAST PAINTED frame really published: the
+   *  page's own `Confirm [Enter]`. The Settings root owns the ONE physical last
+   *  row and DELEGATES these cells through {@link activateBarSpan}; a frame
+   *  that painted no confirmable candidate publishes nothing. */
+  paintedBarSpans(): readonly { readonly id: string; readonly startCol: number; readonly endCol: number }[] {
+    const target = this.paintedConfirmTarget
+    return target === undefined
+      ? []
+      : [{ id: 'web:confirm', startCol: target.startCol, endCol: target.endCol }]
+  }
+
+  /**
+   * Invoke the ONE delegated confirm gesture. The id came from
+   * {@link paintedBarSpans} of the last frame; the pointer's own currentness is
+   * re-proven HERE against the LIVE page state before the EXISTING
+   * `confirmSelected()` sink runs:
+   *
+   * - a new frame/gesture revision (any key, wheel, row/candidate/phase move,
+   *   resize, dispose) makes the old press stale;
+   * - the LATEST authority read must still be ready and writable, and must
+   *   still offer the SAME raw candidate at the SAME choice index the frame
+   *   painted (the painted snapshot is never a commit base);
+   * - a saving row offers no second write, and the candidate must still be
+   *   inside the last-painted Detail viewport.
+   *
+   * A refusal dispatches NOTHING (never a different candidate, never a
+   * second command-layer entry).
+   */
+  activateBarSpan(id: string): void {
+    if (this.disposed || id !== 'web:confirm') return
+    const target = this.paintedConfirmTarget
+    if (target === undefined) return
+    if (target.revision !== this.revision) return
+    if (this.region !== 'detail') return
+    if (this.selectedSettingId() !== target.rowId) return
+    const facts = this.intents.readFacts()
+    if (facts.kind !== 'ready') return
+    if (this.intents.writableRefusal() !== undefined) return
+    if (this.phases.get(target.rowId)?.kind === 'saving') return
+    if (this.choiceValues()[this.choiceIndex] !== target.candidate) return
+    if (!this.paintedChoiceVisible(target.candidate)) return
+    // The ONE business sink: the original Enter path (never a second writer).
+    this.confirmSelected()
+  }
+
+  /** The page's own SEMANTIC identity for a pointer gesture: the region, the
+   *  selected row and the monotonic semantic revision (plus every transient
+   *  phase its Esc/Confirm really acts on). The Settings root stores it at
+   *  press and re-proves it at the release, so a child repaint that keeps the
+   *  same bar cells cannot hand a press to a different outcome — including a
+   *  candidate A → B → A round trip. */
+  gestureIdentity(): string {
+    const rowId = this.selectedSettingId()
+    const phase = rowId === undefined ? undefined : this.phases.get(rowId)?.kind
+    return `${this.region}:${rowId ?? ''}:${phase ?? ''}:${this.choiceIndex}:${this.actionIndex}:${this.revision}`
+  }
+
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
-    this.endpointPanel?.panel.dispose()
-    this.endpointPanel = undefined
+    this.paintedEscapeSpanValue = undefined
+    this.paintedConfirmTarget = undefined
     this.paint = undefined
     this.pressed = undefined
     this.phases.clear()
@@ -452,24 +690,18 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   private scrollDetail(delta: number): void {
     const width = this.liveWidth()
     const viewport = this.detailViewport(width, this.liveBodyRows())
-    const projection = this.detailProjection(width, viewport)
+    const projection = this.detailProjection(this.detailWidth(width, this.liveBodyRows()), viewport)
     const next = Math.min(Math.max(0, this.detailOffset + delta), projection.maxOffset)
     if (next === this.detailOffset) return
     this.commitPresentation(() => { this.detailOffset = next })
   }
 
-  /** Enter at the list: show the selected row's Detail. The endpoint row opens
-   *  the EXISTING endpoint editor (only over a READABLE authority); every other
-   *  row shows its facts/candidates read-only until an explicit Enter. */
+  /** Enter at the list: show the selected row's Detail (its facts/candidates
+   *  stay read-only until an explicit Enter). */
   private openSelectedRow(): void {
     const rowId = this.selectedRowId()
     if (rowId === undefined) return
     const facts = this.intents.readFacts()
-    if (rowId === 'web-search-endpoint' && facts.kind === 'ready'
-      && this.intents.writableRefusal() === undefined) {
-      this.openEndpointEditor(facts.settings.api.baseURL)
-      return
-    }
     this.commitPresentation(() => {
       this.region = 'detail'
       this.detailOffset = 0
@@ -481,7 +713,9 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   }
 
   /** Enter in the Detail: confirm the highlighted candidate (choice rows) or
-   *  activate one credential deeplink. Nothing else writes. */
+   *  activate one credential deeplink. The read-only override rows offer no
+   *  candidate, so their Enter only re-proves the painted frame (nothing
+   *  writes). Nothing else writes. */
   private confirmSelected(): void {
     const rowId = this.selectedRowId()
     if (rowId === undefined) return
@@ -490,27 +724,41 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
       return
     }
     const facts = this.intents.readFacts()
-    // The endpoint row's ONE action is its explicit editor, reachable from the
-    // LIST (Enter opens the Detail) and from the read-only Detail (Enter opens
-    // the editor) — the bar never advertises a key that does nothing.
-    if (rowId === 'web-search-endpoint') {
-      if (facts.kind === 'ready' && this.intents.writableRefusal() === undefined) {
-        this.openEndpointEditor(facts.settings.api.baseURL)
-      }
-      return
-    }
     if (facts.kind !== 'ready') return
     const requested = this.choiceValues()[this.choiceIndex]
     if (requested === undefined) return
     // The candidate must be VISIBLE in this frame: an off-screen highlight is
     // never confirmed (the same rule the workspace's choice projection keeps).
     if (!this.paintedChoiceVisible(requested)) return
-    this.confirmChoice(rowId, requested)
+    const request = this.commitRequestFor(rowId, requested)
+    if (request === undefined) return
+    this.confirmChoice(rowId, request)
+  }
+
+  /** The TYPED intent a provider option really means, carrying the page-time
+   *  layer facts. It is decided HERE (not re-derived by the queue head): a
+   *  candidate equal to the deployment default is the official reset, every
+   *  other candidate is an explicit set, and the restore rows are never a
+   *  provider id. Non-provider rows keep their plain string request. */
+  private commitRequestFor(rowId: WebSettingRowId, requested: string): WebSettingsCommitRequest | undefined {
+    if (rowId !== 'web-search-provider' && rowId !== 'web-fetch-provider') return requested
+    // The intent records the read the PAINTED frame was built from: a read
+    // that settles afterwards must make the queue refuse (Not saved), never
+    // silently re-interpret the same key as a different official action.
+    const facts = this.paintedFacts ?? this.intents.readFacts()
+    if (facts.kind !== 'ready') return undefined
+    const capability = rowId === 'web-search-provider' ? 'search' : 'fetch'
+    const observed = facts.settings.providerSelection[capability]
+    const choice = this.providerChoices(rowId, facts.settings).find(entry => entry.key === requested)
+    if (choice === undefined) return undefined
+    if (choice.action === 'restore') return { kind: 'provider-restore', observed }
+    if (choice.id === undefined) return undefined
+    return { kind: 'provider-select', id: choice.id, observed }
   }
 
   /** ONE explicit confirm → the command owner's FIFO → the painted verdict. The
    *  page never dispatches a second write for the same draft. */
-  private confirmChoice(rowId: WebSettingRowId, requested: string): void {
+  private confirmChoice(rowId: WebSettingRowId, requested: WebSettingsCommitRequest): void {
     if (this.phases.get(rowId)?.kind === 'saving') return
     this.commitPresentation(() => {
       this.phases.set(rowId, { kind: 'saving' })
@@ -527,58 +775,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     })
   }
 
-  /** Close the endpoint draft without a write (the backend stopped being
-   *  writable, or the page is being retired). The draft never outlives its
-   *  ability to be confirmed. */
-  private closeEndpointDraft(): void {
-    this.endpointPanel?.panel.dispose()
-    this.endpointPanel = undefined
-    this.region = 'detail'
-    this.detailOffset = 0
-    this.pressed = undefined
-  }
-
-  /** A draft whose Confirm can only be refused is a false affordance: when the
-   *  backend turned non-current (or the credential/section disappeared), the
-   *  draft closes with ZERO writes and the row's read-only Detail states why.
-   *  Returns true when this call really closed a mounted draft. */
-  private syncEndpointWritability(): boolean {
-    if (this.endpointPanel === undefined) return false
-    if (this.intents.writableRefusal() === undefined) return false
-    this.closeEndpointDraft()
-    return true
-  }
-
-  /** Mount the EXISTING endpoint editor for the row's current authority value. */
-  private openEndpointEditor(current: string): void {
-    const panel = new WebEndpointPanel((selected) => {
-      if (this.endpointPanel?.panel !== panel) return
-      this.endpointPanel = undefined
-      if (selected !== undefined) this.phases.set('web-search-endpoint', { kind: 'verified' })
-      this.commitPresentation(() => { this.region = 'list' })
-    }, {
-      current,
-      save: async (url: string) => {
-        const result = await this.intents.commit('web-search-endpoint', url)
-        if (result.kind === 'verified') {
-          this.phases.set('web-search-endpoint', { kind: 'verified' })
-          return
-        }
-        this.phases.set('web-search-endpoint', { kind: result.kind, reason: result.reason })
-        throw new WebWriteVerdictError(result.kind, result.reason)
-      },
-      requestRender: () => { if (!this.disposed) this.intents.requestRender() },
-      run: (label, task) => this.intents.run(label, task),
-    })
-    panel.focused = this.focused
-    this.endpointPanel = { panel }
-    this.commitPresentation(() => {
-      this.region = 'detail'
-      this.detailOffset = 0
-    })
-  }
-
-  // ── the six rows and their candidates ─────────────────────────────────────
+  // ── the nine rows and their candidates ────────────────────────────────────
 
   private selectedRowId(): WebSettingsRowId | undefined {
     return WEB_SETTINGS_ROW_IDS[this.cursor]
@@ -591,39 +788,122 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   }
 
   /** The candidate identities the selected row may CONFIRM right now. A
-   *  pending/unavailable authority, a custom provider route and the endpoint
-   *  row (its own editor owns the write) offer NONE. */
+   *  pending/unavailable authority, a custom provider route, a read-only
+   *  override row and a Billing row whose capability carries a non-empty YAML
+   *  override (the override owns that configuration) offer NONE. */
   private choiceValues(): readonly string[] {
     const rowId = this.selectedSettingId()
-    if (rowId === undefined || rowId === 'web-search-endpoint') return []
+    if (rowId === undefined || rowId === 'web-search-advanced' || rowId === 'web-fetch-advanced') return []
     const facts = this.intents.readFacts()
     if (facts.kind !== 'ready') return []
     if (this.intents.writableRefusal() !== undefined) return []
     switch (rowId) {
       case 'web-search-provider':
-        return this.providerSelectable(facts.settings.searchProvider, WEB_SEARCH_PROVIDER_CANDIDATES)
-          ? WEB_SEARCH_PROVIDER_CANDIDATES.map(candidate => candidate.id)
-          : []
+        return this.providerChoices(rowId, facts.settings).map(choice => choice.key)
       case 'web-fetch-provider':
-        return this.providerSelectable(facts.settings.fetchProvider, WEB_FETCH_PROVIDER_CANDIDATES)
-          ? WEB_FETCH_PROVIDER_CANDIDATES.map(candidate => candidate.id)
-          : []
+        return this.providerChoices(rowId, facts.settings).map(choice => choice.key)
       case 'web-search-count':
         return WEB_SEARCH_COUNT_CANDIDATES
       case 'web-send-original-question':
         return WEB_QUESTION_CANDIDATES
+      case 'web-search-billing':
+        return this.billingSelectable(facts.settings, 'search') ? WEB_BILLING_CANDIDATES.map(candidate => candidate.id) : []
+      case 'web-fetch-billing':
+        return this.billingSelectable(facts.settings, 'fetch') ? WEB_BILLING_CANDIDATES.map(candidate => candidate.id) : []
     }
   }
 
-  /** Whether the configured provider id is one of the official candidates this
-   *  page may select. `undefined` = no explicit selection (the official default
-   *  applies), which IS selectable; any other id is a CUSTOM route and offers
-   *  no candidate at all. */
-  private providerSelectable(
-    current: string | undefined,
-    candidates: readonly { readonly id: string }[],
-  ): boolean {
-    return current === undefined || candidates.some(candidate => candidate.id === current)
+  /** Whether ONE capability's YAML-only override is non-empty: it then owns
+   *  that capability's endpoint/credential configuration, so the Billing row
+   *  must not write (the official Host behaviour the override implies). */
+  private billingOverridden(settings: WebProviderSettings, capability: 'search' | 'fetch'): boolean {
+    return webAdvancedOverrideFields(settings.advanced, capability).length > 0
+  }
+
+  /** Whether the capability's API provider is the selected route. Only the
+   *  official Search/Fetch API consumes its billing mode; server-side Search
+   *  and HTTP Fetch never do. An absent value is the Host's AUTOMATIC routing
+   *  state, which may still execute the billed API for other models' requests,
+   *  so it does NOT make the billing row editable here (the official Client's
+   *  product policy). */
+  private billingProviderSelected(settings: WebProviderSettings, capability: 'search' | 'fetch'): boolean {
+    return capability === 'search'
+      ? settings.searchProvider === 'deepseek-search-api'
+      : settings.fetchProvider === 'deepseek-fetch-api'
+  }
+
+  /** A Billing row is writable only while its API provider is the current
+   *  route AND no YAML-only override owns that capability. */
+  private billingSelectable(settings: WebProviderSettings, capability: 'search' | 'fetch'): boolean {
+    return this.billingProviderSelected(settings, capability) && !this.billingOverridden(settings, capability)
+  }
+
+  /**
+   * The provider rows' real choices, derived from the SAME Host read's
+   * `value`/`base`/`user` facts:
+   *
+   * - the deployment composes no provider -> an Automatic row (the official
+   *   unset, never a provider id) plus the official candidates;
+   * - a candidate whose id EQUALS the deployment `baseId` keeps its provider
+   *   label but confirms the official reset ("deployment default");
+   * - a custom effective route keeps the explicit-set protection (no official
+   *   candidate is offered to replace it) while a USER override still gets the
+   *   ONE restore row that maps to `unset` — never the custom id;
+   * - an inherited custom route (no USER own-field) offers nothing to reset.
+   */
+  private providerChoices(
+    rowId: 'web-search-provider' | 'web-fetch-provider',
+    settings: WebProviderSettings,
+  ): readonly { readonly key: string; readonly label: string; readonly note: string; readonly action: 'select' | 'restore'; readonly id?: string }[] {
+    const capability = rowId === 'web-search-provider' ? 'search' : 'fetch'
+    const candidates = capability === 'search' ? WEB_SEARCH_PROVIDER_CANDIDATES : WEB_FETCH_PROVIDER_CANDIDATES
+    const selection = capability === 'search' ? settings.providerSelection.search : settings.providerSelection.fetch
+    const effective = capability === 'search' ? settings.searchProvider : settings.fetchProvider
+    const choices: { key: string; label: string; note: string; action: 'select' | 'restore'; id?: string }[] = []
+    if (selection.baseId === undefined) {
+      choices.push({
+        key: WEB_PROVIDER_AUTOMATIC_KEY,
+        label: 'Automatic',
+        note: 'the Host selects per request',
+        action: 'restore',
+      })
+    }
+    const baseCandidate = candidates.find(candidate => candidate.id === selection.baseId)
+    const explicitSetsAllowed = effective === undefined || candidates.some(candidate => candidate.id === effective)
+    if (explicitSetsAllowed) {
+      for (const candidate of candidates) {
+        const restoresBase = candidate.id === selection.baseId
+        choices.push({
+          key: candidate.id,
+          label: candidate.label,
+          note: restoresBase ? 'deployment default' : this.providerCandidateNote(capability, candidate.id),
+          action: restoresBase ? 'restore' : 'select',
+          ...restoresBase ? {} : { id: candidate.id },
+        })
+      }
+    } else if (baseCandidate !== undefined && selection.userSet) {
+      // A custom effective route blocks explicit official sets, but the
+      // deployment's own provider is still reachable through the official
+      // reset: offer ONLY that restore row (the custom route is never written).
+      choices.push({ key: baseCandidate.id, label: baseCandidate.label, note: 'deployment default', action: 'restore' })
+    }
+    if (baseCandidate === undefined && selection.baseId !== undefined && selection.userSet) {
+      choices.push({
+        key: WEB_PROVIDER_RESTORE_KEY,
+        label: 'Use deployment default',
+        note: `deployment default: ${sanitizedPhysicalLine(selection.baseId)}`,
+        action: 'restore',
+      })
+    }
+    return choices
+  }
+
+  /** The billing/product note one explicit official candidate paints (a
+   *  deployment-default row carries its own note instead). */
+  private providerCandidateNote(capability: 'search' | 'fetch', id: string): string {
+    return capability === 'search'
+      ? id === 'deepseek-search-api' ? 'explicit · billed per Search API call' : 'server-side · model-token billed'
+      : id === 'http' ? 'anonymous · no billed API' : 'separately billed'
   }
 
   /** The highlighted candidate of the selected row, positioned on the value the
@@ -632,19 +912,49 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     if (facts.kind !== 'ready') return 0
     const rowId = this.selectedSettingId()
     if (rowId === undefined) return 0
-    const committed = this.committedIdentity(facts.settings, rowId)
+    const committed = this.currentChoiceValue(facts.settings, rowId)
     const index = this.choiceValues().findIndex(value => value === committed)
     return index < 0 ? 0 : index
   }
 
-  /** The authority's RAW identity of one field (never a display label). */
+  /** The option whose `[current]` chip the LATEST read earns. Provider rows
+   *  report the option that really owns the effective value: the Automatic row
+   *  while no deployment/effective selection exists, or the official candidate
+   *  whose id is the effective one. A custom effective route owns NO option chip
+   *  (the restore row is an action, not the current value). */
+  private currentChoiceValue(settings: WebProviderSettings, rowId: WebSettingRowId): string | undefined {
+    switch (rowId) {
+      case 'web-search-provider':
+        return this.providerCurrentKey(settings, 'search')
+      case 'web-fetch-provider':
+        return this.providerCurrentKey(settings, 'fetch')
+      default:
+        return this.committedIdentity(settings, rowId)
+    }
+  }
+
+  private providerCurrentKey(settings: WebProviderSettings, capability: 'search' | 'fetch'): string | undefined {
+    const effective = capability === 'search' ? settings.searchProvider : settings.fetchProvider
+    const candidates = capability === 'search' ? WEB_SEARCH_PROVIDER_CANDIDATES : WEB_FETCH_PROVIDER_CANDIDATES
+    const key = effective === undefined
+      ? WEB_PROVIDER_AUTOMATIC_KEY
+      : candidates.some(candidate => candidate.id === effective) ? effective : undefined
+    if (key === undefined) return undefined
+    return this.choiceValues().includes(key) ? key : undefined
+  }
+
+  /** The authority's RAW identity of one field (never a display label). The
+   *  billing rows report the raw official mode; the read-only override rows
+   *  report the same facts string the row paints (they are never written, so
+   *  this identity is display-only). */
   private committedIdentity(settings: WebProviderSettings, rowId: WebSettingRowId): string | undefined {
     switch (rowId) {
-      case 'web-search-provider': return settings.searchProvider
-      case 'web-fetch-provider': return settings.fetchProvider
       case 'web-search-count': return String(settings.api.count)
       case 'web-send-original-question': return settings.api.sendOriginalQuestion ? 'on' : 'off'
-      case 'web-search-endpoint': return settings.api.baseURL
+      case 'web-search-billing': return settings.api.searchBilling
+      case 'web-fetch-billing': return settings.api.fetchBilling
+      case 'web-search-advanced': return webAdvancedFactsText(settings.advanced, 'search')
+      case 'web-fetch-advanced': return webAdvancedFactsText(settings.advanced, 'fetch')
     }
   }
 
@@ -663,16 +973,27 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     const settings = facts.settings
     switch (rowId) {
       case 'web-search-provider': {
-        if (settings.searchProvider === undefined) return 'not selected · official default applies'
+        if (settings.searchProvider === undefined) return 'Automatic'
         return sanitizedPhysicalLine(this.providerLabel(WEB_SEARCH_PROVIDER_CANDIDATES, settings.searchProvider) ?? settings.searchProvider)
       }
       case 'web-fetch-provider': {
-        if (settings.fetchProvider === undefined) return 'not selected · official default applies'
+        if (settings.fetchProvider === undefined) return 'Automatic'
         return sanitizedPhysicalLine(this.providerLabel(WEB_FETCH_PROVIDER_CANDIDATES, settings.fetchProvider) ?? settings.fetchProvider)
       }
       case 'web-search-count': return String(settings.api.count)
       case 'web-send-original-question': return settings.api.sendOriginalQuestion ? 'on' : 'off'
-      case 'web-search-endpoint': return sanitizedPhysicalLine(settings.api.baseURL)
+      case 'web-search-billing':
+        if (!this.billingProviderSelected(settings, 'search')) return 'Not selected'
+        return this.billingOverridden(settings, 'search')
+          ? `Overridden by Host YAML (stored: ${webBillingLabel(settings.api.searchBilling)})`
+          : webBillingLabel(settings.api.searchBilling)
+      case 'web-fetch-billing':
+        if (!this.billingProviderSelected(settings, 'fetch')) return 'Not selected'
+        return this.billingOverridden(settings, 'fetch')
+          ? `Overridden by Host YAML (stored: ${webBillingLabel(settings.api.fetchBilling)})`
+          : webBillingLabel(settings.api.fetchBilling)
+      case 'web-search-advanced': return sanitizedPhysicalLine(webAdvancedFactsText(settings.advanced, 'search'))
+      case 'web-fetch-advanced': return sanitizedPhysicalLine(webAdvancedFactsText(settings.advanced, 'fetch'))
       case 'web-credential': return this.credentialState(facts).value
     }
   }
@@ -774,7 +1095,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   private listViewport(width: number, bodyRows: number): number {
     if (!this.paintsBothRegions(width, bodyRows)) return bodyRows
     if (layoutForWidth(width) === 'wide') return bodyRows
-    // Medium: the list is granted the top share, never more than its six rows.
+    // Medium: the list is granted the top share, never more than its nine rows.
     return Math.min(WEB_SETTINGS_ROW_IDS.length, Math.max(1, Math.floor((bodyRows - 1) / 2)))
   }
 
@@ -788,8 +1109,11 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     return Math.min(34, Math.max(1, width))
   }
 
-  private detailWidth(width: number): number {
-    if (!this.paintsBothRegions(width, this.bodyRows())) return width
+  /** The REAL detail content width for the current projection (the wide
+   *  layout paints the Detail in its own column; the stacked and single-region
+   *  projections use the whole page width). */
+  private detailWidth(width: number, bodyRows: number): number {
+    if (!this.paintsBothRegions(width, bodyRows)) return width
     if (layoutForWidth(width) !== 'wide') return width
     return Math.max(1, width - this.listColumnWidth(width) - 2)
   }
@@ -807,7 +1131,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   private rebaseDetailForChoice(choiceIndex: number): void {
     const width = this.liveWidth()
     const viewport = this.detailViewport(width, this.liveBodyRows())
-    const projection = this.detailProjection(width, viewport)
+    const projection = this.detailProjection(this.detailWidth(width, this.liveBodyRows()), viewport)
     const requested = this.choiceValues()[choiceIndex]
     if (requested === undefined) return
     const entry = projection.optionLines.find(line => line.value === requested)
@@ -823,7 +1147,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   private rebaseDetailForAction(actionIndex: number): void {
     const width = this.liveWidth()
     const viewport = this.detailViewport(width, this.liveBodyRows())
-    const projection = this.detailProjection(width, viewport)
+    const projection = this.detailProjection(this.detailWidth(width, this.liveBodyRows()), viewport)
     const action = this.selectableCredentialActions()[actionIndex]?.action
     if (action === undefined) return
     const entry = projection.actionLines.find(line => line.value === action)
@@ -843,7 +1167,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     if (paintedTarget !== true) return false
     const width = this.liveWidth()
     const viewport = this.detailViewport(width, this.liveBodyRows())
-    const projection = this.detailProjection(width, viewport)
+    const projection = this.detailProjection(this.detailWidth(width, this.liveBodyRows()), viewport)
     const entry = projection.actionLines.find(line => line.value === action)
     if (entry === undefined) return false
     const offset = Math.min(Math.max(0, this.detailOffset), projection.maxOffset)
@@ -860,7 +1184,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     if (paintedTarget !== true) return false
     const width = this.liveWidth()
     const viewport = this.detailViewport(width, this.liveBodyRows())
-    const projection = this.detailProjection(width, viewport)
+    const projection = this.detailProjection(this.detailWidth(width, this.liveBodyRows()), viewport)
     const entry = projection.optionLines.find(line => line.value === value)
     if (entry === undefined) return false
     const offset = Math.min(Math.max(0, this.detailOffset), projection.maxOffset)
@@ -880,39 +1204,33 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   }
 
   private renderFrame(width: number): string[] {
-    // The marker belongs to THIS frame only: a list/endpoint/non-credential
-    // frame must never retain the credential action an earlier Detail painted.
+    // The marker belongs to THIS frame only: a list/non-credential frame must
+    // never retain the credential action an earlier Detail painted.
     this.paintedCredentialAction = undefined
-    // A backend that turned non-current closes an open endpoint draft FIRST:
-    // the frame never paints a Confirm the writer must refuse.
-    this.syncEndpointWritability()
+    // Same rule for the bar's clickable geometry: a frame that paints no
+    // complete Esc affordance or Confirm target (a dropped wording, a
+    // saving/loading fact) must not leave the previous frame's spans alive.
+    this.paintedEscapeSpanValue = undefined
+    this.paintedConfirmTarget = undefined
     // A fresh read can invalidate the credential cursor before this frame: clamp
     // it FIRST so the painted cursor, the bar and the Enter target agree.
-    if (this.endpointPanel === undefined && this.selectedRowId() === 'web-credential') {
+    if (this.selectedRowId() === 'web-credential') {
       this.reconcileCredentialCursor()
     }
     const grant = this.rowGrant
     const bodyRows = this.bodyRows()
     const facts = this.intents.readFacts()
+    // Anchor the placeholder highlight on the FIRST readable authority so the
+    // Automatic / deployment-default row is never painted as selected while a
+    // different option carries `[current]`. A later read keeps the user's draft.
+    this.anchorAuthorityChoice(facts, width, bodyRows)
+    this.paintedFacts = facts
     const targets: PageTarget[] = []
     const lines: string[] = []
-    if (this.endpointPanel !== undefined) {
-      const panel = this.endpointPanel.panel
-      panel.focused = this.focused
-      panel.setMaxRows(grant)
-      const painted = panel.render(width)
-      // The panel's OWN last line is its semantic hint: it becomes this page's
-      // ONE physical Action Bar, exactly like a direct page's bar.
-      const body = painted.slice(0, Math.max(0, painted.length - 1))
-      for (let index = 0; index < bodyRows; index += 1) lines.push(fit(body[index] ?? '', width))
-      lines.push(fit(painted[painted.length - 1] ?? '', width))
-      this.paint = { width, rows: grant, bodyRows, targetRows: [] }
-      return lines
-    }
     const both = this.paintsBothRegions(width, bodyRows)
     if (both && layoutForWidth(width) === 'wide') {
       const listWidth = this.listColumnWidth(width)
-      const detailWidth = this.detailWidth(width)
+      const detailWidth = this.detailWidth(width, bodyRows)
       const list = this.renderList(facts, listWidth, bodyRows)
       const detail = this.renderDetail(facts, detailWidth, bodyRows)
       for (let index = 0; index < bodyRows; index += 1) {
@@ -939,20 +1257,62 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
       targets.push(...detail.targets)
     }
     while (lines.length < bodyRows) lines.push(fit('', width))
-    lines.push(fit(this.actionBar(width, bodyRows), width))
+    const bar = this.actionBar(width, bodyRows)
+    // `fit` below only pads (the chosen wording is already whole and in budget),
+    // so the recorded spans are exactly the painted bar's geometry.
+    const escapeSegment = bar.segments.find(segment => segment.ink === 'escape')
+    this.paintedEscapeSpanValue = escapeSegment === undefined
+      ? undefined
+      : { startCol: escapeSegment.startCol, endCol: escapeSegment.endCol }
+    const confirmSegment = bar.segments.find(segment => segment.ink === 'confirm')
+    if (confirmSegment !== undefined) {
+      const rowId = this.selectedSettingId()
+      const candidate = rowId === undefined ? undefined : this.choiceValues()[this.choiceIndex]
+      // The delegate may only describe a candidate this frame REALLY painted:
+      // the option must own a painted hit target (a cropped candidate has
+      // none), so the bar can never advertise an unexecutable Confirm.
+      const paintedOption = candidate !== undefined
+        && targets.some(target => target.kind === 'option' && target.id === candidate)
+      if (rowId !== undefined && candidate !== undefined && paintedOption) {
+        this.paintedConfirmTarget = {
+          revision: this.revision,
+          rowId,
+          candidate,
+          startCol: confirmSegment.startCol,
+          endCol: confirmSegment.endCol,
+        }
+      }
+    }
+    lines.push(fit(this.paintBarWording(bar), width))
     this.paint = { width, rows: grant, bodyRows, targetRows: targets }
     return lines.slice(0, grant)
+  }
+
+  /** Point the page's placeholder highlight at the FIRST readable authority.
+   *  The page is constructed while its read is pending, so the initial index 0
+   *  is not a user draft: without this anchor an Automatic / deployment-default
+   *  row could be painted as selected while a different option carries
+   *  `[current]`. The projection uses THIS frame's real width/rows (the paint of
+   *  the previous frame — possibly none — is not a layout authority). A later
+   *  read never re-anchors, so a draft the user moved stays put. */
+  private anchorAuthorityChoice(facts: WebSettingsFacts, width: number, bodyRows: number): void {
+    if (facts.kind !== 'ready' || this.authorityAnchored) return
+    this.authorityAnchored = true
+    const viewport = this.detailViewport(width, bodyRows)
+    const projection = this.detailProjection(this.detailWidth(width, bodyRows), viewport)
+    this.detailOffset = 0
+    this.choiceIndex = this.currentChoiceIndex(facts)
+    const requested = this.choiceValues()[this.choiceIndex]
+    const entry = requested === undefined ? undefined : projection.optionLines.find(line => line.value === requested)
+    if (entry !== undefined && entry.line >= viewport) {
+      this.detailOffset = Math.min(entry.line - viewport + 1, projection.maxOffset)
+    }
   }
 
   /** The pane-header line the root paints inside the shared body grant. The
    *  two-column projection names BOTH columns; exactly one is the active
    *  device (§4.5) — the focused region's. */
   paneHeader(width: number): string {
-    if (this.endpointPanel !== undefined) {
-      return this.focused
-        ? color.textStrong('[Search / Fetch API Endpoint]', 'primary')
-        : color.textDim('Search / Fetch API Endpoint')
-    }
     if (!this.paintsBothRegions(width, this.bodyRows())) {
       return this.focused
         ? color.textStrong(`[${WEB_SETTINGS_PAGE_TITLE}]`, 'primary')
@@ -964,28 +1324,34 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     return composeRow(left, right, width)
   }
 
-  /** A choice row's Action Bar: `Enter confirm` only while the highlighted
-   *  candidate is inside THIS render's Detail viewport (the same gate the
-   *  dispatch uses), so a resize can never advertise a Confirm it will drop. */
-  private choiceActionBar(width: number, bodyRows: number): string {
+  /** A choice row's Action Bar: the explicit `Confirm [Enter]` only while the
+   *  highlighted candidate is inside THIS render's Detail viewport (the same
+   *  gate the dispatch uses), so a resize can never advertise a Confirm it
+   *  will drop. The commit verb is painted with the real action ink and
+   *  published as the page's ONE delegated last-row span. */
+  private choiceActionBar(width: number, bodyRows: number): BarWording {
     // A dispatched write owns the row: the bar states it and never advertises a
     // Confirm that `confirmChoice()` would silently drop.
     const rowId = this.selectedSettingId()
     if (rowId !== undefined && this.phases.get(rowId)?.kind === 'saving') {
-      return wholeWording('Saving… · Esc back', width, ['Esc back'])
+      return wholeWording(escapeWording('Saving…', 'Back'), width, [escapeWording('', 'Back')])
     }
     const requested = this.choiceValues()[this.choiceIndex]
-    if (requested === undefined) return wholeWording('r refresh · Esc back', width, ['Esc back'])
+    if (requested === undefined) return wholeWording(escapeWording('r refresh', 'Back'), width, [escapeWording('', 'Back')])
     const viewport = this.detailViewport(width, bodyRows)
-    const projection = this.detailProjection(width, viewport)
+    // The Detail pane really paints inside its OWN column in the wide layout:
+    // the visibility proof must wrap the SAME width the actual render used, or
+    // a long fact/verdict can crop the candidate under the bar's projection
+    // while the real frame no longer paints it.
+    const projection = this.detailProjection(this.detailWidth(width, bodyRows), viewport)
     const entry = projection.optionLines.find(line => line.value === requested)
     const offset = Math.min(Math.max(0, this.detailOffset), projection.maxOffset)
     const visible = entry !== undefined && entry.line >= offset && entry.line < offset + viewport
-    if (!visible) return wholeWording('r refresh · Esc back', width, ['Esc back'])
+    if (!visible) return wholeWording(escapeWording('r refresh', 'Back'), width, [escapeWording('', 'Back')])
     return wholeWording(
-      '↑/↓ choose · Enter confirm · Esc back',
+      confirmWording('↑/↓ choose'),
       width,
-      ['Enter confirm · Esc back', 'Enter · Esc', 'Esc back'],
+      [confirmWording(''), escapeWording('', 'Back')],
     )
   }
 
@@ -995,51 +1361,62 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
    *  never described as an available Enter. `bodyRows` is THIS frame's grant,
    *  never the previously painted one (a resize can shrink the grant before
    *  `this.paint` is updated). */
-  private credentialActionBar(width: number, bodyRows: number): string {
+  private credentialActionBar(width: number, bodyRows: number): BarWording {
     const active = this.selectableCredentialActions()[this.reconcileCredentialCursor()]
-    if (active === undefined) return wholeWording('r refresh · Esc back', width, ['Esc back'])
+    if (active === undefined) return wholeWording(escapeWording('r refresh', 'Back'), width, [escapeWording('', 'Back')])
     const viewport = this.detailViewport(width, bodyRows)
-    const projection = this.detailProjection(width, viewport)
+    const projection = this.detailProjection(this.detailWidth(width, bodyRows), viewport)
     const entry = projection.actionLines.find(line => line.value === active.action)
     const offset = Math.min(Math.max(0, this.detailOffset), projection.maxOffset)
     const visible = entry !== undefined && entry.line >= offset && entry.line < offset + viewport
-    if (!visible) return wholeWording('r refresh · Esc back', width, ['Esc back'])
+    if (!visible) return wholeWording(escapeWording('r refresh', 'Back'), width, [escapeWording('', 'Back')])
     return wholeWording(
-      '↑/↓ choose · Enter open in Models · Esc back',
+      escapeWording('↑/↓ choose · Enter open in Models', 'Back'),
       width,
-      ['Enter open in Models · Esc back', 'Enter · Esc', 'Esc back'],
+      [escapeWording('Enter open in Models', 'Back'), escapeWording('Enter', 'Back'), escapeWording('', 'Back')],
     )
   }
 
   /** The ONE physical Action Bar line. Whole segments only: a hint that does
-   *  not fit is dropped, never cut into half a word. It is painted with the
-   *  hint role (§3.2 role 12), so its first cell is always real ink. */
-  private actionBar(width: number, bodyRows: number): string {
+   *  not fit is dropped, never cut into half a word. Its non-Esc segments keep
+   *  the hint role (§3.2 role 12) and only the real Esc affordance carries the
+   *  secondary ink, so its first cell is always real ink. */
+  private actionBar(width: number, bodyRows: number): BarWording {
     const rowId = this.selectedRowId()
-    const hint = this.region === 'list'
+    return this.region === 'list'
       ? wholeWording(
-          '↑/↓ choose · Enter open · r refresh · Esc Tools',
+          escapeWording('↑/↓ choose · Enter open · r refresh', 'Back'),
           width,
-          ['↑/↓ · Enter open · r refresh · Esc', '↑/↓ · Enter · Esc', 'Esc'],
+          [
+            escapeWording('↑/↓ · Enter open · r refresh', 'Back'),
+            escapeWording('↑/↓ · Enter', 'Back'),
+            escapeWording('', 'Back'),
+          ],
         )
       : rowId === 'web-credential'
         ? this.credentialActionBar(width, bodyRows)
-        : rowId === 'web-search-endpoint'
-          ? this.intents.readFacts().kind === 'ready'
-            && this.intents.writableRefusal() === undefined
-            ? wholeWording(
-                'Enter edit endpoint · Esc back',
-                width,
-                ['Enter edit · Esc back', 'Esc back'],
-              )
-            : wholeWording('r refresh · Esc back', width, ['Esc back'])
-          // No confirmable candidate (a pending/unreadable authority or a custom
-          // provider route) means NO Confirm affordance: the bar advertises only
-          // what the frame really offers, and a candidate cropped out of THIS
-          // frame's Detail viewport is not confirmable either (Enter is refused
-          // by the same painted-visibility gate).
-          : this.choiceActionBar(width, bodyRows)
-    return hint === '' ? '' : color.textMuted(hint)
+        // No confirmable candidate (a pending/unreadable authority, a custom
+        // provider route, a read-only override row or a Billing row owned by a
+        // YAML override) means NO Confirm affordance: the bar advertises only
+        // what the frame really offers, and a candidate cropped out of THIS
+        // frame's Detail viewport is not confirmable either (Enter is refused
+        // by the same painted-visibility gate).
+        : this.choiceActionBar(width, bodyRows)
+  }
+
+  /** Paint one chosen Action Bar wording: pure browsing hints and separators
+   *  stay muted, the page's real Confirm carries the primary action ink, and
+   *  the root's Esc affordance keeps the secondary verb ink (both `[Key]` caps
+   *  are muted by {@link paintActionSpan}). */
+  private paintBarWording(wording: BarWording): string {
+    if (wording.segments.length === 0) return color.textMuted(wording.text)
+    return wording.segments.map(segment => {
+      switch (segment.ink) {
+        case 'confirm': return paintActionSpan(segment.text, 'primary')
+        case 'escape': return paintActionSpan(segment.text, 'secondary')
+        case 'hint': return color.textMuted(segment.text)
+      }
+    }).join(color.textMuted(ACTION_BAR_SEPARATOR))
   }
 
   private renderList(
@@ -1105,7 +1482,10 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
       case 'web-fetch-provider': return 'Web Fetch Provider'
       case 'web-search-count': return 'Search API Result Count'
       case 'web-send-original-question': return 'Share Original Question'
-      case 'web-search-endpoint': return 'Search / Fetch API Endpoint'
+      case 'web-search-billing': return 'Search Billing'
+      case 'web-fetch-billing': return 'Fetch Billing'
+      case 'web-search-advanced': return 'Search API Override'
+      case 'web-fetch-advanced': return 'Fetch API Override'
       case 'web-credential': return 'DeepSeek API Key'
     }
   }
@@ -1138,8 +1518,9 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     const values = this.choiceValues()
     if (values.length > 0) {
       lines.push({ text: '' })
-      const committed = facts.kind === 'ready' ? this.committedIdentity(facts.settings, rowId) : undefined
-      for (const [index, value] of values.entries()) lines.push(this.optionLine(rowId, value, index, committed, width))
+      const committed = facts.kind === 'ready' ? this.currentChoiceValue(facts.settings, rowId) : undefined
+      const settings = facts.kind === 'ready' ? facts.settings : undefined
+      for (const [index, value] of values.entries()) lines.push(this.optionLine(rowId, value, index, committed, width, settings))
       lines.push({ text: '' })
     }
     lines.push(...this.rowNotes(rowId, facts, width).map(text => ({ text })))
@@ -1183,28 +1564,37 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
 
   /** ONE candidate line. The active cursor is `primary` only while the Detail
    *  region really owns the keyboard; the `[current]` chip is painted only on a
-   *  candidate that matches the LATEST authoritative read. */
+   *  candidate that matches the LATEST authoritative read. The chip is a
+   *  CURRENT-VALUE fact and outranks the optional explanation: when the row is
+   *  too narrow for both, the note is dropped and the chip stays whole. */
   private optionLine(
     rowId: WebSettingRowId,
     value: string,
     index: number,
     committed: string | undefined,
     width: number,
+    settings: WebProviderSettings | undefined,
   ): DetailLine {
     const selected = index === this.choiceIndex
     const marker = selected ? (this.region === 'detail' ? color.primary('› ') : color.textDim('› ')) : '  '
-    const label = this.optionLabel(rowId, value)
-    const note = this.optionNote(rowId, value)
+    const providerChoice = settings === undefined || (rowId !== 'web-search-provider' && rowId !== 'web-fetch-provider')
+      ? undefined
+      : this.providerChoices(rowId, settings).find(choice => choice.key === value)
+    const label = providerChoice?.label ?? this.optionLabel(rowId, value)
+    const note = providerChoice?.note ?? this.optionNote(rowId, value)
     let text = `${marker}${selected ? color.textStrong(label) : color.text(label)}`
-    if (note !== '' && visibleWidth(`${text} · ${note}`) <= width) text += color.textDim(` · ${note}`)
     if (committed === value && visibleWidth(`${text} [current]`) <= width) text += ` ${color.textMuted('[current]')}`
+    if (note !== '' && visibleWidth(`${text} · ${note}`) <= width) text += color.textDim(` · ${note}`)
     return { text, option: value }
   }
 
   private optionLabel(rowId: WebSettingRowId, value: string): string {
     switch (rowId) {
-      case 'web-search-provider': return WEB_SEARCH_PROVIDER_CANDIDATES.find(candidate => candidate.id === value)?.label ?? value
-      case 'web-fetch-provider': return WEB_FETCH_PROVIDER_CANDIDATES.find(candidate => candidate.id === value)?.label ?? value
+      case 'web-search-provider':
+      case 'web-fetch-provider':
+        return value
+      case 'web-search-billing':
+      case 'web-fetch-billing': return webBillingLabel(value)
       default: return value
     }
   }
@@ -1212,42 +1602,109 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   private optionNote(rowId: WebSettingRowId, value: string): string {
     switch (rowId) {
       case 'web-search-provider':
-        return value === 'deepseek-official' ? 'built-in default' : 'opt-in · separately billed'
       case 'web-fetch-provider':
-        return value === 'http' ? 'anonymous default' : 'opt-in · separately billed'
+        return ''
       case 'web-search-count':
         return value === '10' ? 'packed default' : ''
       case 'web-send-original-question':
         return value === 'on' ? 'packed default' : ''
+      case 'web-search-billing':
+      case 'web-fetch-billing':
+        return value === 'auto'
+          ? 'follows the conversation route'
+          : value === 'account' ? 'signed-in account only' : 'API key credential only'
       default: return ''
     }
   }
 
+  /** The billing explanation ONE row's Detail freezes: the three explicit modes'
+   *  credential claims, the per-API billing fact, and the override precedence. */
+  private static readonly BILLING_NOTE =
+    'Automatic follows the credential the CURRENT conversation\'s DeepSeek route selects (the account token in a '
+      + 'DeepSeek-model conversation, otherwise the API key, then the signed-in account) and never claims a key is '
+      + 'configured. Account uses only the signed-in account; API key uses only the DEEPSEEK_API_KEY credential '
+      + 'reference. Each choice is explicit and persistent (Automatic is NOT a reset of an override) and applies to '
+      + 'the NEXT call; the Search API is billed separately per call, and a Messages plan does not guarantee coverage.'
+
+  /** Host-origin override facts as ONE sanitized physical line. URL masking
+   *  happens in the domain projection; this display boundary additionally
+   *  strips ANSI/OSC and control characters before the text reaches
+   *  `wrapTextWithAnsi` (which is a wrapper, not a terminal sanitizer). */
+  private overrideFactsLine(overrides: readonly { readonly field: string; readonly value: string }[]): string {
+    return overrides.map(entry => `${entry.field}=${sanitizedPhysicalLine(entry.value)}`).join(' · ')
+  }
+
+  /** The provider Detail's layer-aware explanation. It is DERIVED from the
+   *  latest `value`/`base`/`user` facts and states only what they prove: the
+   *  deployment default, whether a reset entry exists, the routing rule when
+   *  the deployment composes no provider, and the ONE residual state in which
+   *  the Host keeps an explicit USER value equal to the deployment default
+   *  (the official reset restores the effective value; it is not a
+   *  promise that the USER field is deleted while a sibling override exists). */
+  private providerLayerNotes(capability: 'search' | 'fetch', settings: WebProviderSettings | undefined): string[] {
+    const notes: string[] = []
+    if (settings === undefined) return notes
+    const selection = capability === 'search' ? settings.providerSelection.search : settings.providerSelection.fetch
+    const effective = capability === 'search' ? settings.searchProvider : settings.fetchProvider
+    const candidates = capability === 'search' ? WEB_SEARCH_PROVIDER_CANDIDATES : WEB_FETCH_PROVIDER_CANDIDATES
+    const official = candidates.find(candidate => candidate.id === effective) !== undefined
+    if (effective !== undefined && !official) {
+      notes.push(capability === 'search'
+        ? 'The configured search provider is a CUSTOM route: it is displayed as-is and is not selectable here. '
+          + 'The official candidates are DeepSeek server-side search and DeepSeek Search API.'
+        : 'The configured fetch provider is a CUSTOM route: it is displayed as-is and is not selectable here. '
+          + 'The official candidates are HTTP and DeepSeek Fetch API.')
+    }
+    if (selection.baseId === undefined) {
+      notes.push(capability === 'search'
+        ? 'This deployment composes no Search provider, so Automatic is available: with no explicit USER selection '
+          + 'the Host routes AUTOMATICALLY (DSH rc.5) — a request on a DeepSeek model route PREFERS DeepSeek '
+          + 'server-side search (no per-search charge), while other models and requests outside a model route prefer '
+          + 'the DeepSeek Search API (billed per Search API call; a Messages plan does not guarantee coverage). An '
+          + 'explicit USER selection always overrides the automatic routing. When no preferred provider is usable the '
+          + 'Host may pick another single usable provider or fail with an explicit error; this page states the '
+          + 'configured fact, never which provider one request actually consumed. The choice applies to the NEXT '
+          + 'search. No write happens without an explicit Enter.'
+        : 'This deployment composes no Fetch provider, so Automatic is available: with no explicit USER selection '
+          + 'the Host auto-selects exactly one usable fetch provider, otherwise the fetch fails with an explicit '
+          + 'error. HTTP calls no billed API. DeepSeek Fetch API is the opt-in alternative and is separately billed: '
+          + 'a Messages plan does not guarantee coverage. The choice applies to the NEXT fetch.')
+    } else {
+      notes.push(capability === 'search'
+        ? `The deployment default Search provider is "${sanitizedPhysicalLine(selection.baseId)}". Choosing that `
+          + 'candidate runs the official reset of the USER selection (never a write of the deployment id as a '
+          + 'provider); the deployment selection then applies. An explicit USER selection still overrides it until '
+          + 'it is reset.'
+        : `The deployment default Fetch provider is "${sanitizedPhysicalLine(selection.baseId)}". Choosing that `
+          + 'candidate runs the official reset of the USER selection (never a write of the deployment id as a '
+          + 'provider); the deployment selection then applies. An explicit USER selection still overrides it until '
+          + 'it is reset.')
+    }
+    if (selection.baseId !== undefined && !candidates.some(candidate => candidate.id === selection.baseId)
+      && selection.userSet) {
+      notes.push('The "Use deployment default" row is the official reset of this capability\'s USER selection. '
+        + 'It maps to the official unset path op only: the custom deployment id is never written and the other '
+        + 'Web fields are untouched.')
+    }
+    if (selection.userSet && selection.baseId !== undefined && selection.userId === selection.baseId) {
+      notes.push('The effective value already equals the deployment default, but the USER layer still carries this '
+        + 'value explicitly. Choosing the deployment-default candidate (or "Use deployment default") replaces that '
+        + 'explicit value with the official reset; the effective value stays the deployment default.')
+    }
+    return notes
+  }
+
   /** The row's static explanation, wrapped to the Detail column. These are the
-   *  durable product facts (defaults, billing, payload boundary, endpoint
-   *  trust) this page freezes; they are never derived from the request. */
+   *  durable product facts (defaults, billing, payload boundary, override
+   *  ownership) this page freezes; they are never derived from the request. */
   private rowNotes(rowId: WebSettingRowId, facts: WebSettingsFacts, width: number): string[] {
     const notes: string[] = []
     switch (rowId) {
-      case 'web-search-provider': {
-        const custom = facts.kind === 'ready'
-          && !this.providerSelectable(facts.settings.searchProvider, WEB_SEARCH_PROVIDER_CANDIDATES)
-        notes.push(custom
-          ? 'The configured search provider is a CUSTOM route: it is displayed as-is and is not selectable here. '
-            + 'The official candidates are Messages and DeepSeek Search API.'
-          : 'Messages is the official default and does not call the billed Search API. '
-            + 'DeepSeek Search API is opt-in and separately billed: a Messages plan does not guarantee coverage. '
-            + 'The choice applies to the NEXT search. No write happens without an explicit Enter.')
-        break
-      }
+      case 'web-search-provider':
       case 'web-fetch-provider': {
-        const custom = facts.kind === 'ready'
-          && !this.providerSelectable(facts.settings.fetchProvider, WEB_FETCH_PROVIDER_CANDIDATES)
-        notes.push(custom
-          ? 'The configured fetch provider is a CUSTOM route: it is displayed as-is and is not selectable here. '
-            + 'The official candidates are HTTP and DeepSeek Fetch API.'
-          : 'HTTP is the official anonymous default. DeepSeek Fetch API is opt-in and separately billed: '
-            + 'a Messages plan does not guarantee coverage. The choice applies to the NEXT fetch.')
+        const capability = rowId === 'web-search-provider' ? 'search' : 'fetch'
+        const settings = facts.kind === 'ready' ? facts.settings : undefined
+        notes.push(...this.providerLayerNotes(capability, settings))
         break
       }
       case 'web-search-count':
@@ -1260,13 +1717,51 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
           + 'triggering human question as ori_question — never the full history or the system prompt. Off: never sent. '
           + 'Only the DeepSeek Search API uses this field; a running operation is unchanged.')
         break
-      case 'web-search-endpoint':
-        notes.push('The API base the DeepSeek Search and Fetch APIs call; /search and /fetch are appended automatically. '
-          + 'Enter opens the endpoint editor and nothing is written until its explicit Confirm. '
-          + 'Changing it sends the DeepSeek API credential and the query to that target: confirm only a trusted HTTPS base — '
-          + 'the URL shape is checked, not the host\'s trust.')
-        notes.push('Official base: https://api.deepseek.com/v1/tools')
+      case 'web-search-billing':
+      case 'web-fetch-billing': {
+        const capability = rowId === 'web-search-billing' ? 'search' : 'fetch'
+        const settings = facts.kind === 'ready' ? facts.settings : undefined
+        const overrides = settings === undefined ? [] : webAdvancedOverrideFields(settings.advanced, capability)
+        if (settings !== undefined && !this.billingProviderSelected(settings, capability)) {
+          notes.push(capability === 'search'
+            ? 'Not selected: the DeepSeek Search API Billing is EDITABLE HERE only while that API is the explicitly '
+              + 'selected provider. Under Automatic the Host may still execute the Search API for other models\' '
+              + 'requests, and any stored Billing stays a Host setting that can apply then; this page follows the '
+              + 'official Client and does not offer its Billing editor here. This row cannot write.'
+            : 'Not selected: the DeepSeek Fetch API Billing is EDITABLE HERE only while that API is the explicitly '
+              + 'selected provider; under Automatic the Host auto-selects one usable fetch provider, and HTTP calls '
+              + 'no billed API. This row cannot write.')
+          if (overrides.length > 0) {
+            notes.push(`Configured override: ${this.overrideFactsLine(overrides)}`)
+          }
+          break
+        }
+        if (overrides.length > 0) {
+          notes.push('Overridden by Host YAML: the advanced '
+            + `${overrides.map(entry => entry.field).join(' and ')} field(s) own this capability's endpoint/credential `
+            + 'configuration, so this billing choice cannot be written here. Review profile YAML to change it; '
+            + 'the stored billing mode below stays the Host value and is not lost.')
+          notes.push(`Configured override: ${this.overrideFactsLine(overrides)}`)
+        }
+        notes.push(WebSettingsPage.BILLING_NOTE)
         break
+      }
+      case 'web-search-advanced':
+      case 'web-fetch-advanced': {
+        const settings = facts.kind === 'ready' ? facts.settings : undefined
+        if (settings?.advanced.legacyOverrideDetected === true) {
+          notes.push('Legacy single-endpoint fields are present in the Host configuration. '
+            + 'Legacy web-deepseek-api.baseURL/apiKeyEnv/apiKey no longer control Search/Fetch. '
+            + 'Review profile YAML and explicitly configure search*/fetch* overrides; no automatic conversion.')
+        } else {
+          notes.push('Legacy web-deepseek-api.baseURL/apiKeyEnv/apiKey no longer control Search/Fetch. '
+            + 'Review profile YAML and explicitly configure search*/fetch* overrides; no automatic conversion.')
+        }
+        notes.push('This override is YAML-only and owned by the Host profile: it is read-only here, Enter never opens '
+          + 'an editor, and a non-empty override decides the endpoint/credential for its own capability only '
+          + '(Search and Fetch stay independent). Configure it in the profile YAML, never from this page.')
+        break
+      }
     }
     if (notes.length === 0) return []
     return ['', ...notes.flatMap(note => wrapTextWithAnsi(note, Math.max(1, width)))]
@@ -1374,14 +1869,14 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
 
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     if (this.disposed) return undefined
-    if (this.endpointPanel !== undefined) {
-      // The endpoint draft owns its own editing semantics; this page publishes
-      // no pointer grant inside it.
-      return event.type === 'wheel' ? { handled: true } : undefined
-    }
     if (event.type === 'wheel') {
       const delta = event.wheelDelta ?? 0
       if (delta === 0) return undefined
+      // An EFFECTIVE wheel input starts a new semantic frame even when it
+      // scrolls nothing (a boundary, a short viewport): a bar press that began
+      // before it can never complete against the scrolled frame.
+      this.revision += 1
+      this.paintedConfirmTarget = undefined
       const width = this.liveWidth()
       const bodyRows = this.liveBodyRows()
       if (this.paintsBothRegions(width, bodyRows)) {

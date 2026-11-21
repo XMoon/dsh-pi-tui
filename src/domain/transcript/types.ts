@@ -58,8 +58,9 @@ export interface TranscriptContextPresentation {
    * Durable delivery provenance: this injected row entered the agent inbox as
    * a `next-step` item during the SAME turn it materialized in (derived by the
    * fold from the `agent/inbox/spliced` insert/claim identity chain). Only the
-   * two exact Working-delivery pairs may carry it — a producer-declared
-   * `tool-jobs` / `notice` row or an `agent-message` / `relay` row; every other
+   * three exact Working-delivery pairs may carry it — a producer-declared
+   * `tool-jobs` / `notice`, `agent-message` / `relay` or `subagent-settled` /
+   * `notice` row; every other
    * source and every missing/foreign claim stays absent and therefore fails
    * open (independent Context). Presentation-only — never a Session fact.
    */

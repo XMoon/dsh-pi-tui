@@ -14,7 +14,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createRemotePresentationSource } from '../../src/app/remote/presentation-source.ts'
-import type { ExperimentalRemoteRuntime, RemoteBackendRuntime } from '../../src/app/remote/runtime.ts'
+import type { RemoteBackendRuntime } from '../../src/app/remote/runtime.ts'
+import type { ExperimentalRemoteRuntime } from '../support/m3-inprocess/runtime.ts'
 
 interface TaskActivityHarness {
   /** The selected Task read's commit-time activity fact. */

@@ -19,7 +19,12 @@ function tarCandidate(directory, name, metadata, files = {}) {
     writeFileSync(target, content)
   }
   const tarball = join(directory, name)
-  const result = spawnSync('tar', ['-czf', tarball, '-C', stage, 'package'], { encoding: 'utf8' })
+  // COPYFILE_DISABLE: macOS bsdtar stores AppleDouble `._*` sidecars by
+  // default; the fixture archive must contain exactly the files written here.
+  const result = spawnSync('tar', ['-czf', tarball, '-C', stage, 'package'], {
+    encoding: 'utf8',
+    env: { ...process.env, COPYFILE_DISABLE: '1' },
+  })
   assert.equal(result.status, 0, result.stderr)
   rmSync(stage, { recursive: true, force: true })
   return tarball

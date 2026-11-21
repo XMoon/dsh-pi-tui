@@ -30,3 +30,31 @@ no fd/fdfind on PATH
 # them, so a skip for either reason means the environment changed under us.
 # Accepting them here would report that change as a healthy run; leaving them
 # out makes it FAIL, which is the point.
+
+# The Darwin KERNEL primitives cannot exist on Linux: the seat is an O_EXLOCK
+# file and process identity is libproc. The Linux runner must NOT provide
+# them, so this class is the platform boundary itself, not a capability that
+# disappeared from the image. The real-kernel positive and negative evidence
+# is recorded from macOS; the macOS product path is owned by later PRs.
+Darwin kernel seats require macOS
+Darwin kernel process identity requires macOS
+
+# The schema 2 registry publication, the account-home Host seat dispatch and
+# the Darwin detached managed-start fallback are the macOS side of the local
+# split backend (PR-2). Their contracts are executed and recorded on the macOS
+# product lane; the Linux runner sees the platform boundary skip, and the
+# Linux schema 1/abstract-seat side runs for real here.
+Darwin libproc identity requires macOS
+the macOS classifier requires the real libproc identity
+Darwin file seats require macOS
+Darwin schema 2 requires the real libproc identity
+the real Darwin detached fallback requires macOS
+
+# The macOS launchd manager and the native plist decoder are platform
+# capabilities that Linux cannot provision. The macOS product lane executes
+# the real launchd/plutil path; the Linux runner sees only the boundary.
+the Darwin admin seat requires macOS
+the launchd public-start route requires macOS
+the native launchd lifecycle requires macOS
+the launchd manager uses the macOS native plist decoder
+the native plist decoder is macOS-only

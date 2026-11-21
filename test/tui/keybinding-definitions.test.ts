@@ -1,14 +1,13 @@
 /**
- * The action definition table contract (plan §21): unique ids, valid
- * default keys, protected actions, and no accidental duplicate overlapping
- * defaults. This is the M0 gate — the defaults MUST match the
- * pre-migration behavior.
+ * The action definition table contract: unique ids, valid defaults,
+ * protected actions, and no accidental duplicate overlapping defaults.
  * @module @xmoon76/dsh-pi-tui/keybinding-definitions.test
  */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { APP_KEYBINDINGS, NON_CONFIGURABLE_ACTIONS, PROTECTED_HOST_ACTIONS, VIEWER_BLOCKED_PARENT_ACTIONS } from '../../src/tui/keybindings/definitions.ts'
+import { componentKeymap } from '../../src/tui/keybindings/component-keymap.ts'
 import { isValidKeyId } from '../../src/tui/keybindings/config.ts'
 import { scopesOverlap } from '../../src/tui/keybindings/conflicts.ts'
 import type { AppKeybindingId } from '../../src/tui/keybindings/types.ts'
@@ -46,7 +45,7 @@ test('every definition carries description, category and scope', () => {
   }
 })
 
-test('the M0 gate: default keys match the pre-migration behavior', () => {
+test('unrelated host default keys remain stable', () => {
   const defaults = (id: AppKeybindingId): readonly string[] => APP_KEYBINDINGS[id].defaultKeys
   assert.deepEqual(defaults('app.input.submit'), ['enter'])
   assert.deepEqual(defaults('app.input.submitAccelerated'), ['ctrl+enter'])
@@ -58,7 +57,11 @@ test('the M0 gate: default keys match the pre-migration behavior', () => {
   assert.deepEqual(defaults('app.input.dequeue'), ['alt+up'])
   assert.deepEqual(defaults('app.agent.interrupt'), ['escape'])
   assert.deepEqual(defaults('app.exit.request'), ['ctrl+c', 'ctrl+d'])
-  assert.deepEqual(defaults('app.transcript.search'), ['ctrl+f', 'ctrl+shift+f'])
+  assert.deepEqual(defaults('app.transcript.search.view'), ['ctrl+f'])
+  assert.deepEqual(defaults('app.transcript.search'), ['ctrl+shift+f'])
+  assert.deepEqual(defaults('app.transcript.search.scope'), ['tab'])
+  assert.equal(APP_KEYBINDINGS['app.transcript.search.view'].configurable, true)
+  assert.equal(APP_KEYBINDINGS['app.transcript.search.scope'].configurable, false)
   assert.deepEqual(defaults('app.transcript.toggleExpand'), ['ctrl+o'])
   assert.deepEqual(defaults('app.transcript.toggleThinking'), ['alt+t'])
   assert.deepEqual(defaults('app.transcript.toggleFullscreen'), [])
@@ -119,6 +122,7 @@ test('viewer-blocked parent actions are all defined and configurable', () => {
   assert.ok(VIEWER_BLOCKED_PARENT_ACTIONS.has('app.input.dequeue'))
   assert.ok(VIEWER_BLOCKED_PARENT_ACTIONS.has('app.permission.cycle'))
   assert.ok(VIEWER_BLOCKED_PARENT_ACTIONS.has('app.transcript.search'))
+  assert.ok(VIEWER_BLOCKED_PARENT_ACTIONS.has('app.transcript.search.view'))
   assert.ok(VIEWER_BLOCKED_PARENT_ACTIONS.has('app.exit.request'))
   assert.ok(VIEWER_BLOCKED_PARENT_ACTIONS.has('app.editor.external'))
   assert.ok(VIEWER_BLOCKED_PARENT_ACTIONS.has('app.todo.toggle'))
@@ -127,10 +131,12 @@ test('viewer-blocked parent actions are all defined and configurable', () => {
   assert.ok(VIEWER_BLOCKED_PARENT_ACTIONS.has('app.tasks.open'))
 })
 
-test('non-configurable actions are the focused-component set plus the reserved session/model tier', () => {
-  for (const action of NON_CONFIGURABLE_ACTIONS) {
+test('non-configurable actions are the focused-component set plus the reserved session/model tier', () => {  for (const action of NON_CONFIGURABLE_ACTIONS) {
     assert.ok(action.startsWith('question.') || action.startsWith('tasks.')
       || action.startsWith('app.transcript.search.')
+      // The split Client's forwarded Question/Approval seat is a focused
+      // component contract, like the QuestionFlow keys themselves.
+      || action === 'interaction.navigateWorkspace'
       // The RESERVED session/model actions are not implemented this
       // version — never user-configurable no-op keys (convergence §7).
       || action.startsWith('app.session.') || action === 'app.model.open',
@@ -144,4 +150,14 @@ test('non-configurable actions are the focused-component set plus the reserved s
       assert.equal(definition.availability, 'reserved', `"${action}" must be availability:reserved`)
     }
   }
+})
+
+test('tasks.jobs.toggleHistory is the ONE focused, non-configurable j disclosure action', () => {
+  const definition = APP_KEYBINDINGS['tasks.jobs.toggleHistory']
+  assert.equal(definition.id, 'tasks.jobs.toggleHistory')
+  assert.deepEqual(definition.defaultKeys, ['j'])
+  assert.equal(definition.scope, 'tasks')
+  assert.equal(definition.configurable, false)
+  assert.ok(NON_CONFIGURABLE_ACTIONS.has('tasks.jobs.toggleHistory'))
+  assert.equal(componentKeymap.keyHint('tasks.jobs.toggleHistory'), 'J', 'the panel control derives its key badge from the one keymap')
 })

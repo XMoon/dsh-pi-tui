@@ -11,6 +11,7 @@
  */
 
 import type { StatusSnapshotReader } from '../../domain/status/types.ts'
+import type { DisplayState } from '../../domain/display/preset.ts'
 import type { TspNativeFooterConfig } from '../../domain/footer/tsp-native-config.ts'
 import type { SurfaceRendererMount } from '../surface/runtime.ts'
 
@@ -40,9 +41,40 @@ export interface RendererSelectionDeps {
     readonly composer: import('../submission/composer-port.ts').SubmissionComposerPort
     readonly modelPresentation?: import('../command/model-presentation.ts').ModelPresentation | undefined
     readonly presetPresentation?: import('../command/preset-presentation.ts').PresetPresentation | undefined
+    /** M5-W PR-C: the native `/web` presenter. */
+    readonly webPresentation?: import('../command/web-access-presentation.ts').WebAccessPresentation | undefined
+    /** PO-5E: the native `/acp` presenter. */
+    readonly acpPresentation?: import('../command/acp-access-presentation.ts').AcpAccessPresentation | undefined
     readonly sessionBrowserPresentation?: import('../command/session-browser-presentation.ts').SessionBrowserPresentation | undefined
+    /** PR-Q: the native Queue manager presentation (undefined when the pane
+     *  did not negotiate the kinds the sheet needs). */
+    readonly queuePresentation?: import('../queue/manager.ts').QueueManagerPresentation | undefined
     readonly interaction: import('../surface/interaction-presenter.ts').SurfaceInteractionPresenter
+    /** M6 UX PR1: the renderer's ONE Client-local Exit Choice seat. */
+    readonly exitChoice: import('../surface/exit-choice.ts').SurfaceExitChoiceSeam
     readonly bindInput: (handlers: import('../surface/runtime.ts').SurfaceInputBinding) => void
+    /**
+     * TSP I-C: publish ONE effective slash-command catalog commit onto the
+     * connected renderer. The composition root forwards it verbatim; it holds no
+     * catalog, no provider and no candidate state of its own.
+     */
+    readonly installCommandCompletions: (
+      installation: import('../surface/runtime.ts').TspCommandCompletionInstallation,
+    ) => void
+    /**
+     * TSP I-D: install the ONE inline-attachment stager on the connected
+     * renderer. Forwarded verbatim like the catalog commit above; this
+     * projection holds no stager, stake, draft or attachment state. The surface
+     * runtime's mount slot is OPTIONAL, so THIS forward is what makes the
+     * production TSP composition carry the stager at all.
+     *
+     * Optional on the CONNECTOR INPUT so a scripted test connector can express
+     * "no attachment plane"; the production connector below declares it
+     * REQUIRED, because a connected TSP renderer always carries it.
+     */
+    readonly installInlineAttachmentStager?: (
+      stager: import('../surface/runtime.ts').TspInlineAttachmentStager,
+    ) => void
     /**
      * PR-C: install the ONE image binding (the mount's loader + scope
      * sampler) on the connected renderer. It is SYNCHRONOUS and ONE-TIME:
@@ -62,6 +94,34 @@ export interface RendererSelectionDeps {
      * re-reads nothing later (a settings change needs a TSP restart).
      */
     readonly bindNativeFooterConfig: (config: TspNativeFooterConfig) => void
+    /**
+     * TSP I-E: install the ONE read-only History-search capability bundle on the
+     * connected renderer. Forwarded verbatim like the image binding and the
+     * status reader: this projection holds no source, no cwd, no Session scope,
+     * no rows and no seat — only the renderer's own mount installs the seat.
+     *
+     * Optional on the CONNECTOR INPUT so a scripted test connector can express
+     * "no History plane"; the production connector below declares it REQUIRED,
+     * because a connected TSP renderer always carries the seat.
+     */
+    readonly bindHistorySearch?: (
+      binding: import('../surface/runtime.ts').TspHistorySearchBinding,
+    ) => void
+    /**
+     * T3-B1: install the ONE read-only semantic-search binding on the connected
+     * renderer. Forwarded verbatim like the History bundle: this projection
+     * holds no Folder, no match, no seat and no coverage fact — the surface's
+     * binding is the only reader of the selected Folder.
+     *
+     * Optional on the CONNECTOR INPUT so a scripted test connector can express
+     * "no semantic-search plane"; the production connector below declares it
+     * REQUIRED, because a connected TSP renderer always carries the seat.
+     */
+    readonly bindTranscriptSemanticSearch?: (
+      binding: import('../surface/runtime.ts').TspTranscriptSemanticSearchBinding,
+    ) => void
+    /** PR-Q: install the application-level Queue manager controller ONCE. */
+    readonly bindQueueManager?: (controller: import('../queue/manager.ts').QueueManagerController) => void
     readonly dispose: () => Promise<void>
   } | undefined>
   /** The environment read (production: `process.env`). */
@@ -101,19 +161,50 @@ export async function selectRendererMount(deps: RendererSelectionDeps): Promise<
     // TSP-7 PR-D: the footer config binds exactly once at the mount, BEFORE
     // the first status commit can paint a row (a resolver throw propagates —
     // the mount-failure release path owns the session).
-    mount: (binding, statusReader) => {
+    mount: (binding, statusReader, historySearch, semanticSearch, queueManager) => {
       tsp.bindStatusReader(statusReader)
       tsp.bindNativeFooterConfig(deps.resolveFooterConfig())
       tsp.bindImages(binding)
+      // TSP I-E: the History-search capability is installed SYNCHRONOUSLY at
+      // the same one-time mount, AFTER the terminal-owning bindings and BEFORE
+      // any input can reach the renderer. A scripted connector without the
+      // member mounts a renderer with NO History plane (its seat stays
+      // unbound, so `Ctrl+R` states the truth instead of opening a fake card) —
+      // never a second lifecycle and never a silent fallback.
+      tsp.bindHistorySearch?.(historySearch)
+      // T3-B1: the semantic-search binding is installed at the SAME one-time
+      // mount, strictly AFTER the History bundle and BEFORE the queue, and all
+      // of it happens before any input can reach the renderer. A scripted
+      // connector without the member mounts a renderer with NO semantic-search
+      // plane (its seat stays unbound, so the entry states the truth instead of
+      // opening a fake card).
+      tsp.bindTranscriptSemanticSearch?.(semanticSearch)
+      // PR-Q: the application-level Queue manager is installed at the SAME
+      // one-time mount, before any input can reach the renderer. A scripted
+      // connector without the member mounts a renderer with no queue sheet; the
+      // TSP builtin capability gate refuses `/queue` there instead of mounting a
+      // half-rendered page.
+      if (queueManager !== undefined) tsp.bindQueueManager?.(queueManager)
       return {
         display: tsp.display,
         taskPresentation: tsp.taskPresentation,
         composer: tsp.composer,
         modelPresentation: tsp.modelPresentation,
         presetPresentation: tsp.presetPresentation,
+        webPresentation: tsp.webPresentation,
+        acpPresentation: tsp.acpPresentation,
         sessionBrowserPresentation: tsp.sessionBrowserPresentation,
+        queuePresentation: tsp.queuePresentation,
         interaction: tsp.interaction,
+        exitChoice: tsp.exitChoice,
         bindInput: (handlers) => tsp.bindInput(handlers),
+        // TSP I-C: the ONE catalog commit forwarded to the renderer's own seat.
+        // No catalog, no provider and no candidate list is held here.
+        installCommandCompletions: (installation) => tsp.installCommandCompletions(installation),
+        // TSP I-D: the ONE inline-attachment stager forwarded the same way. The
+        // surface runtime's mount slot is optional, so a projection that forgot
+        // this member would silently ship a mount with no attachment intake.
+        installInlineAttachmentStager: (stager) => tsp.installInlineAttachmentStager?.(stager),
         dispose: () => tsp.dispose(),
       }
     },
@@ -123,8 +214,13 @@ export async function selectRendererMount(deps: RendererSelectionDeps): Promise<
 
 /** The PRODUCTION connector inputs: lazy import + the official SDK connect. */
 export interface ProductionTspConnectorDeps {
-  readonly cwd: string
+  /** The ONE live display authority the composition root resolved before the
+   *  first compose; forwarded as the SAME object, never a boot-time snapshot. */
+  readonly displayState: DisplayState
+  /** The session-aware exit INTENT (it may present the in-place choice). */
   readonly requestExit: () => void
+  /** The FINAL exit commit for the pre-bind emergency and the fatal fallback. */
+  readonly requestImmediateExit?: () => void
   readonly onFatal: (error: unknown) => void
   readonly log: (message: string, fields?: Record<string, unknown>) => void
   readonly logError: (message: string, fields?: Record<string, unknown>) => void
@@ -150,6 +246,11 @@ export interface ProductionTspConnectorDeps {
    * renderer, which owns no clipboard policy of its own.
    */
   readonly copyVisual: (text: string) => Promise<boolean>
+  /** PR-Q: the LIVE effective `app.queue.open` keys, read from the SAME action
+   *  table + user keybindings the PiTui keymap compiles. The TSP renderer owns
+   *  no keymap; this getter is how its raw key stream and `Manage` label point
+   *  at the same effective action. */
+  readonly queueOpenKeys?: () => readonly string[]
 }
 
 /** The PRODUCTION connector: lazy import + the official SDK connect. */
@@ -161,11 +262,47 @@ export function productionTspConnector(
   readonly composer: import('../submission/composer-port.ts').SubmissionComposerPort
   readonly modelPresentation?: import('../command/model-presentation.ts').ModelPresentation | undefined
   readonly presetPresentation?: import('../command/preset-presentation.ts').PresetPresentation | undefined
+  /** M5-W PR-C: the native `/web` presenter. */
+  readonly webPresentation?: import('../command/web-access-presentation.ts').WebAccessPresentation | undefined
+  /** PO-5E: the native `/acp` presenter. */
+  readonly acpPresentation?: import('../command/acp-access-presentation.ts').AcpAccessPresentation | undefined
   readonly sessionBrowserPresentation?: import('../command/session-browser-presentation.ts').SessionBrowserPresentation | undefined
   readonly interaction: import('../surface/interaction-presenter.ts').SurfaceInteractionPresenter
+  /** M6 UX PR1: the renderer's ONE Client-local Exit Choice seat. */
+  readonly exitChoice: import('../surface/exit-choice.ts').SurfaceExitChoiceSeam
   readonly bindInput: (handlers: import('../surface/runtime.ts').SurfaceInputBinding) => void
+  /** TSP I-C: the ONE catalog commit forwarded to the renderer's own seat (see
+   *  the connector input above). Required: a connected TSP renderer always
+   *  carries the seat, and a test connector is that contract's fake. */
+  readonly installCommandCompletions: (
+    installation: import('../surface/runtime.ts').TspCommandCompletionInstallation,
+  ) => void
+  /** TSP I-D: the ONE inline-attachment stager forwarded to the renderer's own
+   *  mount (see the connector input above). Required: a connected TSP renderer
+   *  always carries the attachment plane, and a test connector is that
+   *  contract's fake. */
+  readonly installInlineAttachmentStager: (
+    stager: import('../surface/runtime.ts').TspInlineAttachmentStager,
+  ) => void
   readonly bindImages: (binding: import('../surface/runtime.ts').SurfaceImageBinding) => void
   readonly bindStatusReader: (reader: StatusSnapshotReader) => void
+  /** TSP I-E: the ONE History-search install on the renderer's own mount (see
+     the connector input above). Required: a connected TSP renderer always
+     carries the seat, and a test connector is that contract's fake. */
+  readonly bindHistorySearch: (
+    binding: import('../surface/runtime.ts').TspHistorySearchBinding,
+  ) => void
+  /** T3-B1: the ONE semantic-search install on the renderer's own mount (see
+   *  the connector input above). Required: a connected TSP renderer always
+   *  carries the seat, and a test connector is that contract's fake. */
+  readonly bindTranscriptSemanticSearch: (
+    binding: import('../surface/runtime.ts').TspTranscriptSemanticSearchBinding,
+  ) => void
+  /** PR-Q: install the application-level Queue manager controller ONCE. */
+  readonly bindQueueManager?: (controller: import('../queue/manager.ts').QueueManagerController) => void
+  /** PR-Q: the native Queue manager sheet (undefined without a controller or
+   *  without the negotiated kinds). */
+  readonly queuePresentation?: import('../queue/manager.ts').QueueManagerPresentation | undefined
   readonly bindNativeFooterConfig: (config: TspNativeFooterConfig) => void
   readonly dispose: () => Promise<void>
 } | undefined> {

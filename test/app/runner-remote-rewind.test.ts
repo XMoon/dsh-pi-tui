@@ -29,7 +29,7 @@ import { Config as TuiConfigSchema } from '../../src/index.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { applyRunnerWithRuntime } from '../../src/app/bootstrap.ts'
 import type { RemoteApplicationOverride } from '../../src/app/application-runtime.ts'
-import { createRemoteApplicationRuntime } from '../../src/app/remote/runtime.ts'
+import { createRemoteApplicationRuntime } from '../support/m3-inprocess/application-runtime.ts'
 import { waitFor } from '../support/remote-application-fixture.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -324,8 +324,13 @@ test('stale rewind: select A\'s old turn → switch away mid-loadThrough → the
   const hostIdsBefore = new Set(host.ctx.sessions.list().map(session => String(session.id)))
   app.setDraft(`/resume ${sessionB}`)
   app.submitDraft()
+  // The fullscreen Session Workspace covers the transcript while `/resume`
+  // resolves its direct match, so "answer 6 is gone" no longer proves the
+  // switch committed (the old picker kept the transcript visible). Wait for
+  // the replacement Session's own painted identity, i.e. the same ordering the
+  // case always asserted: the switch has committed while loadThrough is held.
   await waitFor('B is the current subject', () =>
-    vt.getViewport().join('').includes('answer 6') === false, 20_000)
+    vt.getViewport().join('').includes(sessionB), 20_000)
 
   // Release: the stale selection must NOT fork — no new child session, no
   // draft install, and the truthful notice on the CURRENT surface.

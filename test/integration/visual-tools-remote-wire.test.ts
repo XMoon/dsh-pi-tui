@@ -29,8 +29,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { join } from 'node:path'
-import { createRemoteClientRuntime } from '../../src/app/remote/client-runtime.ts'
-import { createRemoteHostRuntime } from '../../src/app/remote/host-runtime.ts'
+import { createRemoteClientRuntime } from '../support/m3-inprocess/client-runtime.ts'
+import { createRemoteHostRuntime } from '../support/m3-inprocess/host-runtime.ts'
 import { createRemoteBackendRuntime } from '../../src/app/remote/runtime.ts'
 import { RemoteConfigPort } from '../../src/runtime/remote/config-remote.ts'
 import {

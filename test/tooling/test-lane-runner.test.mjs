@@ -1,34 +1,19 @@
 /**
- * The test LANE RUNNER's cross-platform command-line contract.
- *
- * The runner passes the lane's file list to Node's test runner as command
- * line arguments. The ABSOLUTE form of that list exceeds the Windows
- * command-line limit: the product lane is ~491 files, and absolute paths in a
- * typical Windows checkout total ~60,000 characters against
- * `CreateProcessW`'s 32,767 — so `pnpm test:product` would fail to start
- * on a common Windows development directory, and only the Linux CI would
- * miss it.
- *
- * The runner therefore passes the list RELATIVE to the repository root and
- * runs the child with that root as its working directory. These cases prove
- * the CONTRACT, not one platform's spelling: the length bound, the relative
- * form, and the working directory the tests depend on.
- *
- * The last case owns the runner's SIGNAL contract on POSIX: the child leads
- * its own process group, so the signal reaches the `node --test` worker tree
- * and the disposable temp root survives until that whole tree is gone.
+ * The lane runner must launch a discovered test set of arbitrary size with
+ * bounded argv while keeping Node-native shard, concurrency, reporter, cwd,
+ * and process-tree signal/cleanup contracts.
  *
  * @module @xmoon76/dsh-pi-tui/test/tooling/test-lane-runner.test
  */
 
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { basename, dirname, join, relative, resolve } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep, win32 } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
-import { parseConcurrency, sanitizeTestEnvironment } from '../../scripts/run-test-lane.mjs'
+import { orderWeightedProductFiles, parseConcurrency, sanitizeTestEnvironment } from '../../scripts/run-test-lane.mjs'
 import { resolveLane } from '../../scripts/test-discovery.mjs'
 import { LANES } from '../../scripts/test-lanes.mjs'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
@@ -38,7 +23,6 @@ import {
 import { waitForFileLine } from '../support/wait-for-file.ts'
 
 const ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)), '..', '..')
-const TEST_ROOT = join(ROOT, 'test')
 const SIGNAL_TREE_DESCENDANT = join(ROOT, 'test', 'fixtures', 'signal-tree', 'descendant.mjs')
 const POSIX_ONLY = process.platform === 'win32' ? 'signal forwarding to a process group is POSIX-only' : false
 
@@ -152,95 +136,143 @@ function deferWrapperCleanup(life, { child, closed, marker, descendantFixture = 
   })
 }
 
-/**
- * The Windows command-line limit: `CreateProcessW` caps the command line at
- * 32,767 characters, including the executable and every argument.
- */
-const WINDOWS_COMMAND_LINE_LIMIT = 32_767
-
-/**
- * The command line the runner builds for a lane, in the WINDOWS spelling:
- * a checkout under `C:\Users\<name>\projects\<repo>\`.
- */
-function windowsCommandLineLength(lane) {
-  const files = resolveLane(TEST_ROOT, lane.patterns, lane.suffixes, lane.exclude ?? [])
-  const checkout = 'C:\\\\Users\\\\owner\\\\projects\\\\dsh-pi-tui\\\\'
-  const commandArguments = files.map(rel => `${checkout}test\\\\${rel.replaceAll('/', '\\\\')}`)
-  return {
-    // The executable and the fixed flags take a little room too.
-    length: 'C:\\\\Program Files\\\\nodejs\\\\node.exe --test '.length
-      + commandArguments.join(' ').length,
-    fileCount: files.length,
+/** Copy the production lane sources into a test-owned fixture repository. */
+function copyLaneRunnerSources(scripts) {
+  mkdirSync(join(scripts, 'lib'), { recursive: true })
+  for (const name of ['run-test-lane.mjs', 'test-discovery.mjs', 'test-case-reporter.mjs']) {
+    writeFileSync(join(scripts, name), readFileSync(join(ROOT, 'scripts', name)))
   }
+  writeFileSync(join(scripts, 'lib', 'owned-process-group.mjs'),
+    readFileSync(join(ROOT, 'scripts', 'lib', 'owned-process-group.mjs')))
+  writeFileSync(join(scripts, 'lib', 'test-temp-root.mjs'),
+    readFileSync(join(ROOT, 'scripts', 'lib', 'test-temp-root.mjs')))
+  // The runner imports the shared kernel-identity seam for process-group
+  // teardown, so a fixture repository must carry those modules too — otherwise
+  // the fixture runner dies at import and no readiness line ever appears.
+  const fixtureRoot = join(scripts, '..')
+  const nativeProcess = join(fixtureRoot, 'src', 'runtime', 'native-process')
+  mkdirSync(nativeProcess, { recursive: true })
+  for (const name of ['identity.ts', 'darwin.ts']) {
+    writeFileSync(join(nativeProcess, name), readFileSync(join(ROOT, 'src', 'runtime', 'native-process', name)))
+  }
+  // The identity seam imports node-koffi LAZILY; the sanitized lane child has
+  // no NODE_PATH, so the copied repository must resolve the REAL devDependency
+  // itself (a koffi resolved from an ambient global path could be another
+  // version entirely). The symlink keeps the fixture hermetic.
+  mkdirSync(join(fixtureRoot, 'node_modules'), { recursive: true })
+  symlinkSync(join(ROOT, 'node_modules', 'koffi'), join(fixtureRoot, 'node_modules', 'koffi'), 'dir')
 }
 
-test('the product lane command line fits the Windows limit in the RELATIVE form', () => {
-  const lane = LANES.product
-  const files = resolveLane(TEST_ROOT, lane.patterns, lane.suffixes, lane.exclude ?? [])
-  const checkout = 'C:\\\\Users\\\\owner\\\\projects\\\\dsh-pi-tui\\\\'
-  // The RELATIVE form the runner uses: the path under the repository root.
-  const relativeArguments = files.map(rel => `test\\\\${rel.replaceAll('/', '\\\\')}`)
-  const length = 'C:\\\\Program Files\\\\nodejs\\\\node.exe --test '.length
-    + relativeArguments.join(' ').length
-  assert.ok(
-    length < WINDOWS_COMMAND_LINE_LIMIT,
-    `the relative command line must fit the Windows limit: ${length} > ${WINDOWS_COMMAND_LINE_LIMIT}`,
-  )
-})
 
-test('the ABSOLUTE form would NOT fit the Windows limit, so the relative form is required', () => {
-  // The regression this protects: if the runner ever goes back to the
-  // absolute form, this case shows the breakage is real.
-  const lane = LANES.product
-  const { length, fileCount } = windowsCommandLineLength(lane)
-  assert.ok(fileCount > 400, `the product lane is the large one: ${fileCount} files`)
-  assert.ok(
-    length > WINDOWS_COMMAND_LINE_LIMIT,
-    `the absolute form must exceed the Windows limit for this case to be meaningful: ${length} <= ${WINDOWS_COMMAND_LINE_LIMIT}`,
-  )
-})
+test('a checkout-local TMPDIR leaves the lane worker in an external owned root', (t) => {
+  const life = testLifecycle(t)
+  const fixture = life.tempDir('dsh-lane-external-tmp-')
+  const scripts = join(fixture, 'scripts')
+  copyLaneRunnerSources(scripts)
+  writeFileSync(join(scripts, 'test-lanes.mjs'), `export const LANES = {
+  probe: { description: 'external temp root probe', patterns: ['probe/**'], suffixes: ['.test.mjs'] },
+}\n`)
+  const probe = join(fixture, 'test', 'probe')
+  mkdirSync(probe, { recursive: true })
+  writeFileSync(join(probe, 'temp-root.test.mjs'), `
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { writeFileSync } from 'node:fs'
 
-test('the SHARDED command line still fits the Windows limit', () => {
-  // The shard argument and the reporter flag ADD to the command line, and
-  // the shard path is exactly what the CI measurement uses. If the
-  // measurement's own command line did not fit, the sharded lane would
-  // fail to START on a Windows runner — and the failure would look like a
-  // test failure rather than a command-line failure.
-  const lane = LANES.product
-  const files = resolveLane(TEST_ROOT, lane.patterns, lane.suffixes, lane.exclude ?? [])
-  const relativeArguments = files.map(rel => `test\\${rel.replaceAll('/', '\\')}`)
-  // The fixed part: the executable, `--test`, the shard argument and the
-  // reporter flag the measurement adds.
-  const fixed = 'C:\\Program Files\\nodejs\\node.exe --test --test-shard=1/4 --test-reporter=C:\\Users\\owner\\projects\\dsh-pi-tui\\scripts\\test-case-reporter.mjs '.length
-  const length = fixed + relativeArguments.join(' ').length
-  assert.ok(
-    length < WINDOWS_COMMAND_LINE_LIMIT,
-    `the sharded command line must fit the Windows limit: ${length} >= ${WINDOWS_COMMAND_LINE_LIMIT}`,
-  )
+test('worker uses one owned temp root for all temp variables', () => {
+  assert.equal(process.env.TMPDIR, process.env.TMP)
+  assert.equal(process.env.TMPDIR, process.env.TEMP)
+  writeFileSync(process.env.PROBE_MARKER, process.env.TMPDIR)
 })
-
-test('the runner passes the file list RELATIVE to the repository root', () => {
-  // The runner's own source is the contract: it must build the argument
-  // list from the test-root-relative paths and set the child's working
-  // directory to the repository root.
-  const source = readFileSync(join(ROOT, 'scripts', 'run-test-lane.mjs'), 'utf8')
-  assert.match(source, /const relativeFiles = files\.map\(rel => join\('test', rel\)\)/u,
-    'the runner must pass the file list relative to the repository root')
-  assert.match(source, /cwd: ROOT/u,
-    "the child must run with the repository root as its working directory")
-  assert.doesNotMatch(source, /files\.map\(rel => join\(TEST_ROOT, rel\)\)/u,
-    'the runner must not pass absolute paths')
-})
-
-test('the child runs with the repository root as its working directory', (t) => {
-  // The tests depend on it: 22 of them read `process.cwd()`.
-  const result = spawnSync(process.execPath, ['-e', 'process.stdout.write(process.cwd())'], {
-    cwd: ROOT,
+`)
+  const localTmp = join(fixture, 'temp')
+  mkdirSync(localTmp)
+  const marker = join(fixture, 'temp-root.txt')
+  const result = spawnSync(process.execPath, [join(scripts, 'run-test-lane.mjs'), 'probe'], {
+    cwd: fixture,
     encoding: 'utf8',
+    timeout: 30_000,
+    env: { ...process.env, TMPDIR: localTmp, TMP: localTmp, TEMP: localTmp,
+      PROBE_MARKER: marker, NODE_TEST_CONTEXT: undefined, DSH_TEST_KEEP_TMP: undefined },
   })
-  assert.equal(result.status, 0, result.stderr)
-  assert.equal(resolve(result.stdout), resolve(ROOT),
-    'the child must see the repository root as its working directory')
+  assert.equal(result.status, 0, result.stderr ?? result.error?.message)
+  const childTmp = readFileSync(marker, 'utf8')
+  const rel = relative(realpathSync(fixture), childTmp)
+  assert.ok(rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel),
+    `the worker cannot inherit a temp root inside its own checkout: ${childTmp}`)
+  assert.equal(existsSync(childTmp), false, 'the lane runner removes its external root after a successful run')
+})
+
+const WINDOWS_COMMAND_LINE_LIMIT = 32_767
+
+test('the real lane starts above the Windows argv budget with complete shard and reporter evidence', (t) => {
+  const fixture = testLifecycle(t).tempDir('dsh-lane-argv-')
+  const scripts = join(fixture, 'scripts')
+  copyLaneRunnerSources(scripts)
+  writeFileSync(join(scripts, 'test-lanes.mjs'), `export const LANES = {
+  probe: { description: 'long argv probe', patterns: ['probe/**'], suffixes: ['.test.mjs'] },
+}\n`)
+  const probe = join(fixture, 'test', 'probe')
+  mkdirSync(probe, { recursive: true })
+  const filenames = []
+  for (let index = 0; index < 400; index += 1) {
+    const filename = `${String(index).padStart(3, '0')}-${'x'.repeat(80)}.test.mjs`
+    filenames.push(filename)
+    writeFileSync(join(probe, filename), `import test from 'node:test'
+test('probe ${index}', () => {
+  if (process.cwd() !== process.env.PROBE_ROOT) throw new Error('wrong test cwd')
+  if (process.env.DSH_TEST_JSONL !== undefined) throw new Error('reporter destination leaked to a worker')
+})
+`)
+  }
+  const hypotheticalOldArgv = filenames.map(name => win32.join('test', 'probe', name)).join(' ').length
+  assert.ok(hypotheticalOldArgv > WINDOWS_COMMAND_LINE_LIMIT,
+    `the fixture must exceed the old Windows argv limit: ${hypotheticalOldArgv}`)
+
+  const diagnostics = join(fixture, 'diagnostics')
+  mkdirSync(diagnostics, { recursive: true })
+  const casesPath = join(diagnostics, 'cases.jsonl')
+  const effectivePath = join(diagnostics, 'effective-params.json')
+  const result = spawnSync(process.execPath, [
+    join(scripts, 'run-test-lane.mjs'), 'probe', '--shard=1/128', '--test-concurrency=2',
+  ], {
+    cwd: fixture,
+    encoding: 'utf8',
+    timeout: 30_000,
+    env: { ...process.env, NODE_TEST_CONTEXT: undefined, DSH_TEST_JSONL: casesPath,
+      DSH_TEST_EFFECTIVE_JSON: effectivePath, PROBE_ROOT: fixture },
+  })
+  assert.equal(result.status, 0, result.stderr ?? result.error?.message)
+  const applied = JSON.parse(readFileSync(effectivePath, 'utf8'))
+  assert.equal(applied.laneFileCount, 400)
+  assert.equal(applied.shard, '1/128')
+  assert.equal(applied.testConcurrency, 2)
+  assert.ok(applied.argvPrefix.join(' ').length < WINDOWS_COMMAND_LINE_LIMIT,
+    'the child invocation must not grow with the discovered file set')
+
+  const records = readFileSync(casesPath, 'utf8').trim().split('\n').map(line => JSON.parse(line))
+  assert.equal(records.filter(record => record.name === record.file).length, 4,
+    'Node native shard 1/128 must run four of 400 files')
+  assert.equal(records.filter(record => record.name.startsWith('probe ')).length, 4,
+    'the reporter must record the four real test cases')
+  assert.ok(records.every(record => record.result === 'pass'))
+
+  // A failing worker must still fail the outer lane; the programmatic API
+  // does not set process.exitCode for us. Exercise the reporter-free path too.
+  writeFileSync(join(probe, filenames[0]), `import test from 'node:test'
+test('failure propagation', () => { throw new Error('expected failure') })
+`)
+  const failed = spawnSync(process.execPath, [
+    join(scripts, 'run-test-lane.mjs'), 'probe', '--shard=1/128', '--test-concurrency=2',
+  ], {
+    cwd: fixture,
+    encoding: 'utf8',
+    timeout: 30_000,
+    env: { ...process.env, NODE_TEST_CONTEXT: undefined,
+      DSH_TEST_JSONL: undefined, DSH_TEST_EFFECTIVE_JSON: undefined },
+  })
+  assert.equal(failed.status, 1, failed.stderr ?? failed.error?.message)
+  assert.match(failed.stdout, /failure propagation/u)
 })
 
 // ---------------------------------------------------------------------------
@@ -279,6 +311,65 @@ test('a malformed concurrency is a FAILURE, not a silent default', () => {
   assert.throws(() => parseConcurrency(['--test-concurrency=-1']), /whole number/u)
 })
 
+// ---------------------------------------------------------------------------
+// P2-B: scheduling HINTS must never become test-discovery authority.
+// Node's own shard=index%total still selects the files at each position.
+// ---------------------------------------------------------------------------
+
+test('weighted product scheduling preserves every real product file in native shards', () => {
+  const lane = LANES.product
+  const files = resolveLane(join(ROOT, 'test'), lane.patterns, lane.suffixes, lane.exclude ?? [])
+  assert.ok(files.length > 0)
+  for (const total of [2, 3, 4]) {
+    const planned = orderWeightedProductFiles(files, total)
+    assert.deepEqual([...planned].sort(), files, `native ${total}-way sharding must keep the complete lane`)
+    assert.deepEqual(orderWeightedProductFiles(files, total), planned, 'the plan must be deterministic')
+    for (let slot = 0; slot < total; slot += 1) {
+      const nativeFiles = planned.filter((_, index) => index % total === slot)
+      assert.equal(nativeFiles.length, Math.ceil((files.length - slot) / total),
+        `shard ${slot + 1}/${total} must retain its native index-modulo capacity`)
+    }
+  }
+  assert.notDeepEqual(orderWeightedProductFiles(files, 4), files,
+    'the experiment must actually reorder product tests on this checkout')
+  assert.deepEqual(orderWeightedProductFiles(files, 1), files,
+    'one shard must preserve the original discovered order')
+  assert.deepEqual(orderWeightedProductFiles(files, 128), files,
+    'native shard totals above the profiled CI range must retain the sorted order')
+})
+
+test('weighted interleaving preserves native slots when hinted bins have unequal capacities', () => {
+  const files = [
+    'app/a-new.test.ts',
+    'app/b-new.test.ts',
+    'app/c-new.test.ts',
+    'app/d-new.test.ts',
+    'app/e-new.test.ts',
+    'app/settings-workspace-visual.test.ts',
+    'integration/cli-session-launcher.test.ts',
+    'integration/kitty-zellij-screen.test.ts',
+    'integration/tern-tsp-headless-commands.test.ts',
+  ]
+  const planned = orderWeightedProductFiles(files, 4)
+  assert.deepEqual(planned, [
+    'app/settings-workspace-visual.test.ts',
+    'integration/kitty-zellij-screen.test.ts',
+    'integration/cli-session-launcher.test.ts',
+    'integration/tern-tsp-headless-commands.test.ts',
+    'app/d-new.test.ts',
+    'app/c-new.test.ts',
+    'app/b-new.test.ts',
+    'app/a-new.test.ts',
+    'app/e-new.test.ts',
+  ], 'unequal final bin lengths must not shift any earlier native shard positions')
+  const withoutLargestHint = files.filter(file => file !== 'app/settings-workspace-visual.test.ts')
+  const changed = orderWeightedProductFiles(withoutLargestHint, 4)
+  assert.deepEqual([...changed].sort(), withoutLargestHint,
+    'removing a previously hinted file must never require updating discovery')
+  assert.ok(changed.includes('app/e-new.test.ts'),
+    'new unprofiled files must stay in the native partition')
+})
+
 test('the lane child never inherits the developer terminal identity or ambient module paths', () => {
   const sanitized = sanitizeTestEnvironment({
     PATH: '/bin',
@@ -312,71 +403,44 @@ test('the lane child never inherits the developer terminal identity or ambient m
   assert.deepEqual(sanitizeTestEnvironment({ PATH: '/bin' }), { PATH: '/bin' })
 })
 
-test('the runner FORWARDS the concurrency to Node, and Node applies it', () => {
-  // The runner's own ARGUMENT construction is what matters, so it is
-  // asserted on the runner's SOURCE: the flag must be part of the spawned
-  // argument list. The BEHAVIOUR that the flag produces is proved by the
-  // next case.
-  const source = readFileSync(join(ROOT, 'scripts', 'run-test-lane.mjs'), 'utf8')
-  assert.match(source, /\.\.\.\(concurrency === undefined \? \[\] : \[concurrency\]\)/u,
-    'the runner must put the parsed concurrency into the spawned argument list')
-  assert.match(source, /const concurrency = parseConcurrency\(args\)/u,
-    'the runner must parse the concurrency from its own arguments')
-})
-
-test('the CONCURRENCY level changes how many files Node keeps in flight', () => {
-  // The end-to-end proof that the flag means what it says: four files that
-  // each hold the event loop for 400ms take about 1.6s at concurrency 1 and
-  // about 0.4s at concurrency 4.
-  //
-  // The probe files are named RELATIVE to the working directory: Node only
-  // treats a path as a test file when it can recognise it as one, and an
-  // absolute path outside the working directory is not recognised — the run
-  // then reports nothing and looks instantly fast.
-  const directory = join(ROOT, 'temp', `dsh-concurrency-probe-${process.pid}`)
-  mkdirSync(directory, { recursive: true })
-  try {
-    const files = []
-    for (let index = 0; index < 4; index += 1) {
-      const file = join(directory, `probe-${index}.test.mjs`)
-      // The fixed hold is the MEASURED quantity, not a blind wait for a
-      // signal: each probe file occupies one worker for a known window, so
-      // the wall clock tells us how many files Node kept in flight.
-      writeFileSync(file,
-        `import test from 'node:test'\n`
-        // The window IS the experiment: concurrency 1 sums these windows
-        // while higher levels overlap them, so the wall clock is the window
-        // count. The wait is the measured quantity, not a blind sleep.
-        // deadline: none — the probe is bounded by its own 400 ms window.
-        + `test('hold ${index}', async () => { await new Promise(r => setTimeout(r, 400)) })\n`)
-      files.push(relative(ROOT, file))
-    }
-    const timeAt = (concurrency) => {
-      const start = Date.now()
-      const result = spawnSync(process.execPath, [
-        '--test', `--test-concurrency=${concurrency}`, '--test-reporter=spec', ...files,
-      ], {
-        cwd: ROOT,
-        encoding: 'utf8',
-        // The child of a test runner is told it is a test child. Inheriting
-        // that marker makes Node treat the probe run as an already-running
-        // test context instead of a fresh runner, and it then executes
-        // nothing at all — the run reports success in milliseconds.
-        env: { ...process.env, NODE_TEST_CONTEXT: undefined },
-      })
-      assert.equal(result.status, 0, result.stderr)
-      assert.match(result.stdout, /hold 3/u,
-        'the probe files must actually run')
-      return Date.now() - start
-    }
-    const serial = timeAt(1)
-    const parallel = timeAt(4)
-    assert.ok(serial >= 1400, `the serial run must take the sum of the files: ${serial}ms`)
-    assert.ok(parallel < serial - 600,
-      `the parallel run must be materially faster than the serial one: ${parallel}ms vs ${serial}ms`)
-  } finally {
-    rmSync(directory, { recursive: true, force: true })
+test('the lane runner actually applies concurrency to real test workers', (t) => {
+  // The 400ms window is the measured concurrency contract: four workers
+  // require roughly 1.6s serially and can overlap at concurrency 4.
+  const fixture = testLifecycle(t).tempDir('dsh-lane-concurrency-')
+  const scripts = join(fixture, 'scripts')
+  copyLaneRunnerSources(scripts)
+  writeFileSync(join(scripts, 'test-lanes.mjs'), `export const LANES = {
+  probe: { description: 'concurrency probe', patterns: ['probe/**'], suffixes: ['.test.mjs'] },
+}\n`)
+  const probe = join(fixture, 'test', 'probe')
+  mkdirSync(probe, { recursive: true })
+  for (let index = 0; index < 4; index += 1) {
+    writeFileSync(join(probe, `hold-${index}.test.mjs`),
+      `import test from 'node:test'
+// reason: the 400ms hold is the measured concurrency window, not a settlement delay.
+test('hold ${index}', async () => { await new Promise(resolve => setTimeout(resolve, 400)) })
+`)
   }
+  const timeAt = (level) => {
+    const start = Date.now()
+    const result = spawnSync(process.execPath, [
+      join(scripts, 'run-test-lane.mjs'), 'probe', `--test-concurrency=${level}`,
+    ], {
+      cwd: fixture,
+      encoding: 'utf8',
+      timeout: 30_000,
+      env: { ...process.env, NODE_TEST_CONTEXT: undefined,
+        DSH_TEST_JSONL: undefined, DSH_TEST_EFFECTIVE_JSON: undefined },
+    })
+    assert.equal(result.status, 0, result.stderr ?? result.error?.message)
+    assert.match(result.stdout, /hold 3/u, 'the fourth test must run')
+    return Date.now() - start
+  }
+  const serial = timeAt(1)
+  const parallel = timeAt(4)
+  assert.ok(serial >= 1_400, `the serial run must hold all four files: ${serial}ms`)
+  assert.ok(parallel < serial - 600,
+    `the parallel run must overlap test workers: ${parallel}ms vs ${serial}ms`)
 })
 
 // ---------------------------------------------------------------------------
@@ -398,11 +462,7 @@ async function assertSignalReachesWorkerTree(t, signal) {
   // exercises. The probe itself runs in a real `node --test` WORKER and starts
   // a descendant that ignores every forwarded signal.
   const scripts = join(fixture, 'scripts')
-  mkdirSync(join(scripts, 'lib'), { recursive: true })
-  for (const name of ['run-test-lane.mjs', 'test-discovery.mjs']) {
-    writeFileSync(join(scripts, name), readFileSync(join(ROOT, 'scripts', name)))
-  }
-  writeFileSync(join(scripts, 'lib', 'owned-process-group.mjs'), readFileSync(join(ROOT, 'scripts', 'lib', 'owned-process-group.mjs')))
+  copyLaneRunnerSources(scripts)
   writeFileSync(join(scripts, 'test-lanes.mjs'), `export const LANES = {
   probe: { description: 'the wrapper signal probe', patterns: ['probe/**'], suffixes: ['.test.mjs'] },
 }
@@ -486,11 +546,7 @@ test('a lane whose leader handles SIGTERM and exits 0 still yields the interrupt
   const fixture = life.tempDir('dsh-lane-handled-')
   const marker = join(fixture, 'evidence.log')
   const scripts = join(fixture, 'scripts')
-  mkdirSync(join(scripts, 'lib'), { recursive: true })
-  for (const name of ['run-test-lane.mjs', 'test-discovery.mjs']) {
-    writeFileSync(join(scripts, name), readFileSync(join(ROOT, 'scripts', name)))
-  }
-  writeFileSync(join(scripts, 'lib', 'owned-process-group.mjs'), readFileSync(join(ROOT, 'scripts', 'lib', 'owned-process-group.mjs')))
+  copyLaneRunnerSources(scripts)
   writeFileSync(join(scripts, 'test-lanes.mjs'), `export const LANES = {
   probe: { description: 'the wrapper handled-signal probe', patterns: ['probe/**'], suffixes: ['.test.mjs'] },
 }
@@ -505,10 +561,9 @@ test('stays alive until the interruption', async () => {
   await new Promise(() => {})
 })
 `)
-  // NODE_OPTIONS loads this hook in EVERY Node process the lane starts. Only
-  // the `node --test` LEADER is the runner's direct child (it carries `--test`
-  // in execArgv); this makes THAT process handle the interruption and exit 0.
-  writeFileSync(join(fixture, 'signal-hook.cjs'), 'if (process.execArgv.includes("--test")) {\n'
+  // NODE_OPTIONS loads this hook in every Node process. Only the real lane
+  // child is the wrapper's direct child (it carries --lane-child in argv).
+  writeFileSync(join(fixture, 'signal-hook.cjs'), 'if (process.argv[2] === "--lane-child") {\n'
     + '  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(signal, () => process.exit(0))\n'
     + '}\n')
   const child = spawn(process.execPath, [join(scripts, 'run-test-lane.mjs'), 'probe'], {
@@ -549,11 +604,7 @@ test('a lane whose worker leaves a running descendant keeps its temp root', { sk
   // A fixture repository whose probe test starts a descendant and RETURNS:
   // `node --test` finishes normally while the descendant keeps the group alive.
   const scripts = join(fixture, 'scripts')
-  mkdirSync(join(scripts, 'lib'), { recursive: true })
-  for (const name of ['run-test-lane.mjs', 'test-discovery.mjs']) {
-    writeFileSync(join(scripts, name), readFileSync(join(ROOT, 'scripts', name)))
-  }
-  writeFileSync(join(scripts, 'lib', 'owned-process-group.mjs'), readFileSync(join(ROOT, 'scripts', 'lib', 'owned-process-group.mjs')))
+  copyLaneRunnerSources(scripts)
   writeFileSync(join(scripts, 'test-lanes.mjs'), `export const LANES = {
   probe: { description: 'the wrapper lingering probe', patterns: ['probe/**'], suffixes: ['.test.mjs'] },
 }

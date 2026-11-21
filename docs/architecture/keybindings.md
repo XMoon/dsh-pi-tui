@@ -65,12 +65,46 @@ non-capturing plugin keybindings
 ```
 
 **Fixed overlay-key precedence.** While a capturing overlay is open its
-NON-CONFIGURABLE keys (search close/next/previous, question/tasks flow
-keys) win by precedence — a configurable action (e.g. the search toggle)
-remapped to one of those keys is ECLIPSED inside the overlay (the
-binding still works outside it). The config parser warns on such a
-collision (`FIXED_OVERLAY_KEYS`); the overlay never resolves the
-configurable action first (§3.3).
+NON-CONFIGURABLE keys (search close/next/previous/scope, question/tasks flow
+keys) win by precedence — a configurable action remapped to one of those keys is
+ECLIPSED inside the overlay (the binding still works outside it). The config
+parser warns on such a collision (`FIXED_OVERLAY_KEYS`); the overlay never
+resolves the configurable action first (§3.3).
+
+### The TSP renderer's own ladder (a separate input owner)
+
+The experimental TSP renderer does not consume this keymap: it reads the raw SDK
+`Key` stream and runs its own ladder inside `src/tui/tsp/session.ts`. The
+relative order is the durable contract, because a seat inserted in the wrong
+place silently steals another owner's key:
+
+```text
+temporary Screen (Reader) / modal seat
+  ↓
+History card (`Ctrl+R`, open)
+  ↓
+Session Search card (`Alt+Shift+S`, open)
+  ↓
+`Alt+Q` continued questions → `Ctrl+C` interrupt/cancel → the presenters
+  (Work Hub, Session Browser, Web/Preset/Model pickers, Queue sheet)
+  ↓
+the low composer popovers (quick Model menu, Permission menu, completion list)
+  ↓
+visual chords / paste-media / the composer reducer
+```
+
+Two rules belong to this ladder and not to the PiTui keymap:
+
+- `Alt+Shift+S` is a TSP-renderer-local chord, not a `TuiAction`: it is not
+  configurable, it is not in the Host effective keymap and it never reaches the
+  PiTui surface. A higher seat that is active takes the key first, so the chord
+  cannot open a search behind a Modal or a picker.
+- While the Session Search card is open it consumes every key it does not
+  delegate. `Enter`/`Shift+Enter` step the card targets and `Tab`/`Shift+Tab`
+  cycle the seat's own focus ring (query → Prev → Next → Close); the ONE
+  deliberate exception is `Ctrl+C`, which retires the card and then reaches the
+  original interrupt/cancel owner exactly once. `Ctrl+F` and `Ctrl+Shift+F` stay
+  the client's own Find actions in every state.
 
 ### The conditional task affordance vs the actual route
 
@@ -121,6 +155,14 @@ a way across a modal. `test/tui/surface-modal-affordance.test.ts` locks the
 modal source→route→footer behavior, and the keybinding integration suite
 locks the remap/leader boundary.
 
+The forwarded Question/Approval seat (split Client) exposes the
+non-configurable component action `interaction.navigateWorkspace` (default
+`Alt+W`). It is matched through the component keymap — never a raw physical
+chord — and sits after the modal's fixed response keys but before the ordinary
+editor/plugin ladder. It commits the presentation-only navigation hold and
+opens the existing Session Workspace without answering the pending
+interaction; it is not a global editor binding.
+
 The hint also tracks the EFFECTIVE keymap, not only the seat/modal state. It
 advertises the `↓` trigger, so the gate asks whether the action still owns
 that key in the live read model —
@@ -142,6 +184,29 @@ fullscreen footers, the disabled action, the pure-remap case (the conditional
 `↓` survives), the `↓`-taken case, and a positive control proving that
 re-enabling restores both the hint and the real route through the keymap
 rebuild alone.
+
+### The Task Center Work/Team component keys
+
+The Full Task Center (`/tasks`) owns its own non-configurable `tasks.*` keys
+while it holds the focused seat. `Tab`/`Shift+Tab` — the `tasks.tab.next` /
+`tasks.tab.previous` actions — switch between the `Work` and `Team` pages; the
+former `tasks.type.next` / `tasks.type.previous` type-cycling actions are
+RETIRED. The explicit `tasks.type.filter` (`f`) opens the Work type list (`All`
+plus the types the current Work rows own), applied with `Enter` and cancelled
+with `Esc`. In Work search mode a printable `f` is query text, while
+`Tab`/`Shift+Tab` switch pages and preserve each page's own query, cursor and
+search mode. A pending Work Stop consumes `Tab`/`Shift+Tab` WITHOUT switching
+pages, and the open type list consumes them without leaving the list. These
+keys are scope `tasks`, `configurable: false`, and never alter the global Host
+keymap or `app.tasks.open`.
+
+`tasks.jobs.toggleHistory` (`j`) is the ONE fixed action for the Full Work
+Tracked terminal-Job history disclosure. It acts only while the Work page is in
+`[TRACKED]` scope, no search editor is open, the type-filter list is closed and
+no Stop is pending; in Work search mode `j` is query text, and on the Team page,
+in the type list, during a pending Stop or in the Active scope it has no Work
+effect. It has no `app.*` alias and no TSP route; the painted Show/Hide control
+is the pointer equivalent of the same action.
 
 ## Key decisions
 
@@ -238,22 +303,34 @@ rebuild alone.
     sanctioned seams (read-only viewer guard, the Ctrl+C clear-draft
     semantic discriminator, approval dialog keys, replacement-editor Enter
     seams, the effective-submit Shift+Enter exclusion).
-12. **A fullscreen Job workspace re-scopes the EFFECTIVE Find binding to
-    its own Output.** While a Job workspace owns the physical screen, the
-    winning resolution of `app.transcript.search` is interpreted as
-    "find in the current retained Output": the key is consumed by the Job
-    panel, the global Transcript search handler is never entered and the
-    fork's built-in search overlay is never opened. This reuses the LIVE
-    winner (so a remap, a disable or a leader-only binding moves the Job
-    key too, and a disabled Find advertises nothing) without creating a
-    second configurable action id or a second keymap truth; `/` stays a
-    non-configurable Job-local alias, active only while the query is not
-    being edited. A leader completion is the same action's effective
-    completion: the Job input branch feeds exactly the exit-bound and
-    Find-bound completing keys to the shared machine and cancels every
-    other completion without dispatching it, and the leader activation
-    wiring intercepts Find for the Job BEFORE the host action dispatch —
-    never "open the Transcript search, then repair it".
+12. **Transcript Find has separate View and Full actions with one winner.**
+    `app.transcript.search.view` is the configurable global View action, default
+    Ctrl+F. `app.transcript.search` keeps its historical Full semantic and is the
+    configurable global Full action, default Ctrl+Shift+F. View reads only the
+    current mounted rendered transcript; Full reads the active semantic Folder.
+    Both actions open or switch the same Search overlay and preserve its one
+    query. While that overlay owns input, fixed close/next/previous and the
+    non-configurable `app.transcript.search.scope` Tab action run before the
+    effective View/Full winner; Tab outside Search remains owned by its original
+    editor/component.
+
+    An explicit stored binding for the historical Full action remains Full. If
+    the user binds Full to Ctrl+F, its priority-200 rule shadows the View
+    builtin, and the same winner is shown by the keybinding read model and used
+    by the real fullscreen input path. A remap or `false` replaces/disables the
+    selected action; no hidden builtin or second search mode is fabricated.
+    Same-priority user collisions deactivate both rules with the normal
+    diagnostic. The Host-private View action is not added to the Stable plugin
+    `TuiAction` set.
+
+    A fullscreen Job workspace re-scopes the winning resolution of EITHER Find
+    action to its own retained Output. The panel consumes the winner before the
+    global Transcript handler; direct and leader completions never open a
+    parent Search overlay. Its one hint prefers an available View direct key,
+    then Full direct, View leader and Full leader, excluding Job-reserved keys;
+    `/` remains the local alias. Job-local Find works through Ctrl+F,
+    Ctrl+Shift+F, a custom binding or a leader sequence.
+
 13. **A fullscreen Job workspace has fixed Job-local read-only verbs that
     are NOT configurable action ids.** `v` opens the shell Command page
     from the Output page and `C` (`shift+c`) copies the CURRENT reading
@@ -271,6 +348,15 @@ rebuild alone.
     inert and the Action Bar advertises none of them. The Command page
     never advertises or dispatches Stop; `Esc` there is the page's own
     return to Output, and only an Output-page `Esc` runs the close.
+14. **The Host Editor `←←` Workspace entry is a contextual editor gesture,
+    not a binding.** `left` stays in `EDITOR_OWNED_KEY_IDS`, so the first
+    unclaimed Left always reaches the fork editor and a user remap or a
+    higher-priority Host winner keeps its own route. Two such presses in the
+    empty Host main Editor open the EXISTING registered Session Workspace;
+    that behavior is owned by
+    [surface-session.md](./surface-session.md#session-workspace). There is
+    no bindable action for it, and `app.session.open` remains reserved and
+    unbindable.
 
 ## User configuration
 
@@ -404,6 +490,15 @@ the user's live bindings:
   different exit key replaces the armed trigger. The default Ctrl+D remains
   editor-owned while the visible editor has content. The footer renders the
   effective trigger label dynamically.
+- **The builtin physical Ctrl+C is the one key with a busy exception.** Only the
+  effective DEFAULT `app.exit.request` Ctrl+C consults the current Session's
+  authoritative activity: `working` performs ONE existing interrupt-path cancel
+  (no exit confirmation, no draft clear), `unknown` refuses to arm the exit and
+  notifies, and `idle` keeps the historical clear-then-same-key double press.
+  A remapped exit key, a leader completion, or Ctrl+C remapped onto
+  `app.agent.interrupt` keeps its own action semantics; the exception is never
+  hard-coded into the raw input router outside the effective keymap. TSP has no
+  user keymap and applies the same rule to its bound raw keys.
 - **User-facing strings derive key labels from the keymap**
   (`keyHint()` / `keysFor()` — e.g. the guard notices and the `/settings`
   row descriptions). A remap updates the copy automatically; a disabled

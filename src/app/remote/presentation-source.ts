@@ -51,6 +51,8 @@ import type { ClientRemote } from '@deepseek-ai/dsh-api-gateway/client'
 import type { RemoteApplicationSources,
   RemoteTransportLifetime,
 } from '../application-runtime.ts'
+import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
+import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { SessionPresentationEvent } from '../surface/session-presentation.ts'
 
 /**
@@ -99,6 +101,10 @@ export interface RemoteSessionFacts {
   captureTransportToken(sessionId: string): unknown
   /** Whether the captured transport token still matches the live identity. */
   isTransportTokenCurrent(sessionId: string, token: unknown): boolean
+  /** The exact current official main-view retain fact of one Session (its
+   *  already-retained binding is held by the `tuiMainView` owner). A generic
+   *  binding kept alive by another source is NOT a view. */
+  mainViewRetained(sessionId: string): boolean
   /**
    * S3-R0 read→commit proof for one window re-fold. Returns the official
    * identity (Connection generation + exact retained binding) together with the
@@ -146,6 +152,18 @@ export interface RemotePresentationClientSource extends RemoteM3ARuntimeSource {
 }
 
 /**
+ * Convert the neutral full reference into the official `ImageAttachmentRef`
+ * the Client Session face declares. `attachmentId` is the ONLY branded field
+ * and the brand is compile-time-only: the exact opaque id (and every optional
+ * metadata field) is passed through unchanged. This is an explicit typed
+ * boundary assertion — never a reconstruction, never a partial object, never a
+ * `never` cast that hides a real signature/wire mismatch.
+ */
+function officialAttachmentRef(attachment: ImageAttachmentRefLike): ImageAttachmentRef {
+  return attachment as ImageAttachmentRef
+}
+
+/**
  * Assemble the Remote application presentation source from the ONE shared
  * Client runtime source (the M3-1 Client runtime or the real split Client's
  * mounted official Domains). Every member reuses a face that source already
@@ -168,8 +186,14 @@ export function createRemotePresentationSource(
   const sessionReader = backendRuntime.semantics.sessionReader
   const planSource = sessions as RemotePlanBindingSource
   // The ONE shared live-ingress factory, referenced by both the main-surface
-  // bundle member and the child-view source (never a second instance).
-  const liveIngress = createRemoteLiveIngress(sessions, generation, CURRENT_STATUS_PROJECTION_KEYS)
+  // bundle member and the child-view source (never a second instance). It
+  // follows the status keys PLUS the official `inbox` projection: another
+  // Client's queued/steering occurrence is Host-owned pending input whose
+  // projection value must re-join the pending pane after it lands (the durable
+  // event and the projection value travel on different streams, so the event
+  // alone cannot order the read). `inbox` stays OUT of the status-key contract:
+  // `CURRENT_STATUS_PROJECTION_KEYS` remains exactly what `sessionStatus` reads.
+  const liveIngress = createRemoteLiveIngress(sessions, generation, [...CURRENT_STATUS_PROJECTION_KEYS, 'inbox'])
   // The ONE semantic Task read over the SAME Client faces. It retains the root
   // Job roster watch for the session it last read.
   const taskReader = new RemoteTaskReader(sessions, client.jobs, generation)
@@ -229,6 +253,13 @@ export function createRemotePresentationSource(
         if (captured === undefined || typeof captured !== 'object') return false
         if (!Object.is(captured.generation, generation.getSnapshot())) return false
         return sessions.binding(sessionId as never) === captured.binding
+      },
+      mainViewRetained(sessionId: string): boolean {
+        // The EXACT current main-view retain fact: a binding kept alive by
+        // another source (operation/child) is not a view, and a released
+        // main-view reference is not a view either.
+        if (sessions.binding(sessionId as never) === undefined) return false
+        return (sessions.retainInfo(sessionId as never).getSnapshot().retainedBy.tuiMainView ?? 0) > 0
       },
       windowRefoldProof(sessionId: string, revision: number): PresentationWindowRefoldProof | undefined {
         const current = generation.getSnapshot()
@@ -293,7 +324,7 @@ export function createRemotePresentationSource(
     attachments: {
       async readDurableImage(
         sessionId: string,
-        attachmentId: string,
+        attachment: ImageAttachmentRefLike,
         expectedLifetime: RemoteTransportLifetime,
       ): Promise<{ ref: unknown; data: Uint8Array }> {
         const capturedGeneration = generation.getSnapshot()
@@ -310,7 +341,7 @@ export function createRemotePresentationSource(
         if (binding !== expectedLifetime.binding) {
           throw new Error(`the presentation's Session binding for ${sessionId} is retired`)
         }
-        const result = await binding.session.readAttachment(attachmentId as never)
+        const result = await binding.session.readAttachment(officialAttachmentRef(attachment))
         if (!Object.is(capturedGeneration, generation.getSnapshot())
           || sessions.binding(sessionId as never) !== binding) {
           throw new Error(`the Session binding for ${sessionId} changed while the attachment was read`)

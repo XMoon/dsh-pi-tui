@@ -7,6 +7,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { unavailableAcpAccess, unavailableWebAccess, unavailableMcpServers } from '../support/web-access-fake.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
@@ -34,6 +35,7 @@ import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-comm
 import { confirmSettingsChoice, openSettingsRows, paintedSelectedRowCell, selectSettingsRow } from '../support/settings-workspace-navigation.ts'
 import { SettingsRegistry } from '../../src/extension/internal/settings-registry.ts'
 import { ThemeRegistry } from '../../src/extension/internal/theme-registry.ts'
+import { unconfiguredPolicyObservation, unconfiguredSessionPolicyPort } from '../support/session-policy-fake.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test (the process slot is released by the FINAL
@@ -89,7 +91,7 @@ function setupSettings(options: { terminalProgress?: string; failWrite?: boolean
     find: () => undefined,
     execute: async () => undefined,
   } as never)
-  ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
+  ctx.provide('settings', { describe: () => [{ ns: 'pi-tui-preferences', user: {} }] } as never)
   const settings = fakeSettings({
     theme: 'auto',
     footer: 'full',
@@ -107,6 +109,9 @@ function setupSettings(options: { terminalProgress?: string; failWrite?: boolean
   if (options.failWrite) settings.value.replace = () => { throw new Error('settings unavailable') }
   const appliedModes: string[] = []
   const runner: TuiCommandRunner = {
+    webAccess: unavailableWebAccess(),
+    acpAccess: unavailableAcpAccess(),
+    mcpServers: unavailableMcpServers(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,
@@ -114,6 +119,8 @@ function setupSettings(options: { terminalProgress?: string; failWrite?: boolean
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
     get defaultIntentOutcome() { return undefined },
     ...sessionScopeFacts(() => undefined, () => 0),
+    sessionPolicy: unconfiguredSessionPolicyPort(),
+    policy: unconfiguredPolicyObservation(),
     currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -135,8 +142,7 @@ function setupSettings(options: { terminalProgress?: string; failWrite?: boolean
     commandRegistry: ctx.get('commands') as import('../../src/commands.ts').CommandRegistryLike | undefined,
     clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
-    hostShellCompletion: true,
-    transcriptExportAvailable: true,
+    hostShellCompletion: { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) },
     interaction: {
       questions: {
         onRequest: () => true,
@@ -146,8 +152,7 @@ function setupSettings(options: { terminalProgress?: string; failWrite?: boolean
         answerContinued: async () => 'not-continued' as const,
       },
       onApprovalRequest: () => {},
-      setApprovalPolicy: () => true,
-    },
+      },
     sessionWriter: {
       prompt: async () => ({ kind: 'committed' as const, value: undefined }),
       updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
@@ -196,7 +201,7 @@ function setupSettings(options: { terminalProgress?: string; failWrite?: boolean
     },
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, createPluginManagerPage: () => undefined,
+    openTasksBrowser: () => {}, openScheduleWorkspace: () => ({ kind: 'success' } as const), createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),

@@ -13,6 +13,7 @@ import test from 'node:test'
 import { bindCommandRuntime } from '../../src/app/command/runtime.ts'
 import { SupersededReadError } from '../../src/runtime/read-error.ts'
 import type { LiveSessionScope, SessionScopeAuthority } from '../../src/app/session/scope.ts'
+import { unconfiguredPolicyObservation } from '../support/session-policy-fake.ts'
 
 const SCOPE = { sessionId: 'session-a' } as unknown as LiveSessionScope
 
@@ -36,6 +37,7 @@ function harness(options: {
       withWriter: async <T>(_scope: unknown, task: () => T) => task(),
     } as never,
     skills: {} as never,
+    policy: unconfiguredPolicyObservation(),
     surface: {
       listScopedCommands: () => [],
       sessionRunning: () => false,

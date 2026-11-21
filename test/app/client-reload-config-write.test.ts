@@ -85,7 +85,7 @@ function fakeSource(options: {
       value: {
         writable: true,
         hasDocument: true,
-        namespaces: [namespaceView('agent-preset-registry', 7), namespaceView('tui-app', 3)],
+        namespaces: [namespaceView('agent-preset-registry', 7), namespaceView('pi-tui-preferences', 3)],
       },
     }),
     update: async (): Promise<RemoteResultLike<RemoteSettingsNamespaceView>> => ({ ok: true, value: namespaceView('x', 1) }),

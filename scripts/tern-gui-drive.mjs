@@ -250,6 +250,7 @@ async function createHarness({ ternBin, root, display }) {
   }
 
   const results = []
+  let finishMetadata = {}
   const check = (label, ok, detail = '') => {
     results.push({ label, ok: ok === true, detail: String(detail).slice(0, 400) })
     log(`ASSERT ${ok === true ? 'PASS' : 'FAIL'} ${label}${detail === '' ? '' : ` :: ${detail}`}`)
@@ -428,10 +429,18 @@ exec node --import tsx/esm ${JSON.stringify(subject)} 2>> ${JSON.stringify(join(
   }
 
   function finish(extra = {}) {
+    finishMetadata = { ...finishMetadata, ...extra }
     const failed = results.filter((r) => !r.ok)
     const informational = results.filter((r) => r.informational === true).length
+    const checks = results.filter((r) => r.informational !== true)
+    const finalMetadata = { ...finishMetadata }
+    if (typeof finalMetadata.qualification === 'string'
+      && finalMetadata.qualification.endsWith('_PASS')
+      && (checks.length === 0 || failed.length > 0)) {
+      finalMetadata.qualification = 'FAILED_ASSERTIONS'
+    }
     writeFileSync(join(root, 'assertions.json'), JSON.stringify({
-      total: results.length, failed: failed.length, informational, ...extra, results,
+      ...finalMetadata, total: results.length, failed: failed.length, informational, results,
     }, null, 1))
     log(`SUMMARY total=${results.length} failed=${failed.length} measured=${informational}`)
     console.log(`artifacts: ${root}`)

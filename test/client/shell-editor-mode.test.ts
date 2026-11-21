@@ -8,11 +8,12 @@
  * @module @xmoon76/dsh-pi-tui/shell-editor-mode.test
  */
 
+import { spawnSync } from 'node:child_process'
 import assert from 'node:assert/strict'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
-import { mkdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { chmodSync, mkdirSync, existsSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { TuiApp, type SubagentViewerTarget } from '../../src/tui-app.ts'
 import { EditorRegistry } from '../../src/extension/internal/editor-registry.ts'
 import { EditorSeatHolder } from '../../src/tui/interaction/editor-seat-holder.ts'
@@ -20,9 +21,33 @@ import { Text } from '@xmoon76/pi-tui'
 import type { EditorHost, ExtensionEditor } from '../../src/extension/public-types.ts'
 import { runOwned, type OwnedTaskOptions } from '../../src/runtime/process/tasks.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
-import { resetCommandCacheForTest, setCompgenRunnerForTest } from '../../src/client/shell/compgen.ts'
+import { resetCommandCacheForTest, requestShellCandidates, setCompgenRunnerForTest } from '../../src/client/shell/compgen.ts'
+import { parseShellWords } from '../../src/client/shell/words.ts'
+import type { HostShellCompletionPort, HostShellCompletionRequest } from '../../src/runtime/host-shell-completion-port.ts'
 import { MentionProvider } from '../../src/tui/interaction/autocomplete/provider.ts'
 import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
+import type { HostFileScope } from '../../src/runtime/host-file-port.ts'
+
+/** The fixture's confirmed Workspace scope + registry over its root. */
+const SHELL_WORKSPACE_ID = 'workspace-shell'
+
+function workspacePort(cwd: string): DirectHostFilePort {
+  return new DirectHostFilePort(() => undefined, null, {
+    get: (name: string) => name === 'workspaceRegistry'
+      ? {
+          create: async () => { throw new Error('the fixture never creates a workspace') },
+          list: () => [],
+          get: (id: string) => id === SHELL_WORKSPACE_ID ? { path: cwd } : undefined,
+        }
+      : undefined,
+  })
+}
+
+function workspaceScope(): HostFileScope {
+  return { kind: 'workspace', workspaceId: SHELL_WORKSPACE_ID, selectionRevision: 1 }
+}
+import { createHostShellPathCompletionBridge } from '../../src/runtime/remote/pi-tui-host-user-shell-host-bridge.ts'
+import { EMPTY_DIRECT_SHELL_COMPLETION } from '../support/host-shell-completion.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 
@@ -45,6 +70,23 @@ const owned = <T>(label: string, task: () => T | Promise<T>, options: Omit<Owned
 
 /** A never-aborted signal for direct provider calls. */
 const abort = new AbortController().signal
+
+const directShellCompletion: HostShellCompletionPort = {
+  pathAuthority: 'client',
+  async complete({ request, signal }) {
+    if (request.kind === 'paths') return { kind: 'ok', candidates: [] }
+    const query: Exclude<HostShellCompletionRequest, { kind: 'paths' }> = request
+    const candidateRequest = query.kind === 'commands'
+      ? { kind: 'commands' as const }
+      : query.kind === 'variables'
+        ? { kind: 'variables' as const, prefix: query.prefix }
+        : { kind: 'subcommands' as const, command: query.command }
+    return {
+      kind: 'ok',
+      candidates: await requestShellCandidates(candidateRequest, process.cwd(), signal),
+    }
+  },
+}
 
 /** A throwaway workspace (completion fixtures live under the cwd). */
 function fixtureWorkspace(life: TestLifecycle): string {
@@ -71,6 +113,7 @@ function startApp(
      * port-backed — tests that exercise it wire the Direct adapter
      * (fallback mode), the rest keep the unavailable default. */
     fileReferences?: import('../../src/runtime/host-file-port.ts').HostFilePort
+    scope?: import('../../src/runtime/host-file-port.ts').HostFileScope
   } = {},
 ): { vt: VirtualTerminal; app: TuiApp; submitted: string[]; accelerated: string[]; cancels: number } {
   const vt = new VirtualTerminal(100, 24)
@@ -89,7 +132,16 @@ function startApp(
     onExit: () => {},
     onCancel: () => { cancels += 1 },
   })
-  app.setCommandCompletions(options.commands ?? [], cwd, options.fileReferences ?? null)
+  app.setCommandCompletions(
+    options.commands ?? [],
+    cwd,
+    options.fileReferences ?? null,
+    undefined,
+    options.scope ?? workspaceScope(),
+    undefined,
+    [],
+    directShellCompletion,
+  )
   app.start()
   startedApps.add(app)
   return { vt, app, submitted, accelerated, get cancels() { return cancels } }
@@ -693,7 +745,7 @@ test('a shell-mode draft round-trips through a plugin editor handoff with its mo
   const vt = new VirtualTerminal(100, 24)
   const submitted: string[] = []
   const app = new TuiApp(vt, { onSubmit: (text) => submitted.push(text), onExit: () => {} }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(life), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null, undefined, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -733,7 +785,7 @@ test('a plugin draft without a shell prefix restores in PROMPT mode (no stale !)
   const vt = new VirtualTerminal(100, 24)
   const submitted: string[] = []
   const app = new TuiApp(vt, { onSubmit: (text) => submitted.push(text), onExit: () => {} }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(life), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null, undefined, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -782,7 +834,7 @@ test('task-browser routing and the footer hint follow the VISIBLE seat editor, n
     if (entered) opened += 1
     return entered
   }
-  app.setCommandCompletions([], fixtureWorkspace(life), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null, undefined, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -851,7 +903,7 @@ test('the ↓ hint is gated on the ROUTING gate, not host-editor emptiness (the 
     if (entered) opened += 1
     return entered
   }
-  app.setCommandCompletions([], fixtureWorkspace(life), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null, undefined, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -917,7 +969,7 @@ test('the plugin action sink steers the wire form and clears the editor', async 
     onExit: () => {},
     onSteer: (text) => steered.push(text),
   }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(life), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null, undefined, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -997,7 +1049,7 @@ test('a busy Esc cancels BEFORE a consuming plugin editor sees it', async (t) =>
     onExit: () => {},
     onCancel: () => { cancels += 1 },
   }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(life), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null, undefined, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -1161,7 +1213,7 @@ test('a plugin editor that DECLINES Esc still arms the host double-Esc cancel', 
     onExit: () => {},
     onCancel: () => { cancels += 1 },
   }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(life), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null, undefined, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -1209,7 +1261,7 @@ test('a consumed plugin Esc disarms a window armed by a prior declined Esc', asy
     onExit: () => {},
     onCancel: () => { cancels += 1 },
   }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(life), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null, undefined, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -1260,7 +1312,7 @@ test('a consumed onSingleEscape disarms the pending double-Esc window', async (t
     // that opened between the presses).
     onSingleEscape: () => { escCount += 1; return escCount === 2 },
   })
-  app.setCommandCompletions([], fixtureWorkspace(life), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null, undefined, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -1287,7 +1339,7 @@ test('the external editor round-trips the WIRE form (shell modes switchable in $
     openExternalEditor: async (draft) => { seenDraft = draft; return '!!pwd' },
     runOwned: owned,
   })
-  app.setCommandCompletions([], fixtureWorkspace(life), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null, undefined, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -1315,7 +1367,7 @@ test('a prompt-mode draft edited into a shell line in $EDITOR comes back as shel
     openExternalEditor: async () => '!pwd',
     runOwned: owned,
   })
-  app.setCommandCompletions([], fixtureWorkspace(life), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null, undefined, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -1373,8 +1425,9 @@ test('a large shell paste (>10 lines) enters the shell mode through the paste re
 
 test('a prompt-mode dropdown closes when ! enters shell mode', async (t) => {
   const life = testLifecycle(t)
-  const { vt, app } = startApp(fixtureWithFiles(life), {
-    fileReferences: new DirectHostFilePort(() => undefined, null),
+  const root = fixtureWithFiles(life)
+  const { vt, app } = startApp(root, {
+    fileReferences: workspacePort(root),
   })
   life.defer(() => app.stop())
   await vt.waitForRender()
@@ -1407,6 +1460,7 @@ test('a shell-mode dropdown closes when Backspace returns to the prompt', async 
     ok: true,
     lines: expression.includes('compgen -A command') ? ['git', 'gist', 'grep'] : [],
   }))
+  resetCommandCacheForTest()
   try {
     vt.sendInput('!')
     await vt.waitForRender()
@@ -1453,7 +1507,7 @@ test('the Stable autocomplete extension query keeps the WIRE document in shell m
   app.setCommandCompletions([], fixtureWorkspace(life), null, async (query) => {
     queries.push({ lines: [...query.lines], cursorCol: query.cursorCol })
     return null
-  })
+  }, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -1559,7 +1613,7 @@ test('a pasted @dir/ path reopens the mention dropdown like ordinary input', asy
   // Direct adapter in FALLBACK mode (no fd binary) serves the directory
   // children, exactly like the pre-migration fd/fallback path.
   const { vt, app } = startApp(root, {
-    fileReferences: new DirectHostFilePort(() => undefined, null),
+    fileReferences: workspacePort(root),
   })
   life.defer(() => app.stop())
   await vt.waitForRender()
@@ -1630,7 +1684,7 @@ test('the Stable autocomplete extension query keeps the wire document on MULTILI
   app.setCommandCompletions([], fixtureWorkspace(life), null, async (query) => {
     queries.push({ lines: [...query.lines], cursorLine: query.cursorLine, cursorCol: query.cursorCol })
     return null
-  })
+  }, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -1656,23 +1710,36 @@ test('the Stable autocomplete extension query keeps the wire document on MULTILI
   }
 })
 
-test('MentionProvider completes a multiline shell draft with the wire line-0 prefix only', async (t) => {
+test('MentionProvider completes every independently complete command line of a multiline shell draft', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
   let mode: 'prompt' | 'shell-context' | 'shell-local' = 'shell-context'
   const source = (): 'prompt' | 'shell-context' | 'shell-local' => mode
-  const provider = new MentionProvider([], root, null, source, undefined, undefined, undefined, [], true)
-  // Cursor on line 0: the virtual prefix applies.
-  const first = await provider.getSuggestions(['gi', 'more'], 0, 2, { signal: abort })
-  assert.ok(first !== null && first.items.some(item => item.value === 'git'), 'line 0 completes as a shell command')
-  // Cursor on line 1: the wire document has NO prefix there — plain path
-  // completion semantics (a non-`!` line is not a shell line).
-  const second = await provider.getSuggestions(['git', 'more'], 1, 4, { signal: abort, force: true })
-  assert.equal(second, null, 'a later body line never gets a synthetic prefix')
-  // applyCompletion on a later line must not strip anything either: the
-  // inner provider's plain word replacement (no shell trailing space).
-  const applied = provider.applyCompletion(['git', 'more'], 1, 4, { value: 'x', label: 'x' }, 'more')
-  assert.deepEqual(applied, { lines: ['git', 'x'], cursorLine: 1, cursorCol: 1 })
+  const port = {
+    pathAuthority: 'client' as const,
+    async complete({ request }: { request: { kind: string } }) {
+      if (request.kind === 'commands') return { kind: 'ok' as const, candidates: ['zoom'] }
+      if (request.kind === 'subcommands') return { kind: 'ok' as const, candidates: ['checkout'] }
+      return { kind: 'ok' as const, candidates: [] }
+    },
+  }
+  const provider = new MentionProvider([], root, null, source, undefined, undefined, undefined, [], port as never)
+  // Line 0: the virtual `!` prefix applies as before.
+  const first = await provider.getSuggestions(['zo', 'git che'], 0, 2, { signal: abort, force: true })
+  assert.ok(first !== null && first.items.some(item => item.value === 'zoom'), 'line 0 completes a command')
+  // Line 1 is a NEW, independently complete command: it is Shell too, and the
+  // synthetic prefix belongs to the CURSOR line — it is never written.
+  const second = await provider.getSuggestions(['git status', 'git che'], 1, 7, { signal: abort, force: true })
+  assert.ok(second !== null && second.items.some(item => item.value === 'checkout'), 'line 1 completes a git subcommand')
+  const item = second.items.find(candidate => candidate.value === 'checkout')
+  assert.ok(item !== undefined)
+  assert.deepEqual(provider.applyCompletion(['git status', 'git che'], 1, 7, item, second.prefix),
+    { lines: ['git status', 'git checkout '], cursorLine: 1, cursorCol: 13 })
+  // An OPEN previous command (unfinished quote) is not a fresh command: no
+  // Shell command candidate is guessed for that line.
+  const unsafe = await provider.getSuggestions(['echo "open', 'zo'], 1, 2, { signal: abort, force: true })
+  assert.ok(unsafe === null || !unsafe.items.some(candidate => candidate.value === 'zoom'),
+    'an untrusted continuation must never produce a shell command candidate')
 })
 
 // ── review round: Ctrl+C clears the shell mode with the body ──────────────
@@ -1700,7 +1767,7 @@ test('Ctrl+C on a BARE ! (empty body, shell mode) clears the mode and arms the e
     onSubmit: () => {},
     onExit: () => { exits += 1 },
   })
-  app.setCommandCompletions([], fixtureWorkspace(life), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null, undefined, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -1724,7 +1791,7 @@ test('a plugin DECLINED ! round-trips through the host shell mode into the wire 
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(life), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null, undefined, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -1796,6 +1863,405 @@ test('accepting an absolute-path completion in a shell mode never doubles the sl
   assert.equal(app.seatTextForTest(), '/usr/', 'shell-local accepts the absolute path without a doubled slash')
 })
 
+test('Host path completion inserts literal Shell words before real command execution', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-host-shell-injection-')
+  const sentinelName = 'unexpected-command-executed'
+  const sentinel = join(root, sentinelName)
+  const marker = 'F1_LITERAL_PATH_CONTENT'
+  const backtick = String.fromCharCode(96)
+  const cases: readonly {
+    prefix: string
+    name: string
+    quote: string
+    command: string
+    directory: boolean
+    expectedPath?: string
+    /** A decoy file that the OLD trimmed/unquoted Host query would rank ahead
+     * of the literal filename; it must never be the accepted value. */
+    decoy?: string
+  }[] = [
+    { prefix: '~f1-literal-tilde-', name: '~f1-literal-tilde-$(touch unexpected-command-executed).txt', quote: '', command: 'cat', directory: false },
+    { prefix: '~/f1-quoted-tilde-', name: '~/f1-quoted-tilde-$(touch unexpected-command-executed).txt', quote: '"', command: 'cat', directory: false },
+    { prefix: './f1-dollar-', name: `f1-dollar-$(touch ${sentinelName}).txt`, quote: '', command: 'cat', directory: false },
+    { prefix: './f1-backtick-', name: `f1-backtick-${backtick}touch ${sentinelName}${backtick}.txt`, quote: '', command: 'cat', directory: false },
+    { prefix: './f1-semicolon-', name: `f1-semicolon-;touch ${sentinelName};#.txt`, quote: '', command: 'cat', directory: false },
+    { prefix: './f1-space-', name: `f1-space-$(touch ${sentinelName}) part.txt`, quote: '"', command: 'cat', directory: false },
+    { prefix: './f1-single-', name: `f1-single-';touch ${sentinelName};#.txt`, quote: "'", command: 'cat', directory: false },
+    { prefix: './f1-double-', name: `f1-double-"$(touch ${sentinelName}).txt`, quote: '"', command: 'cat', directory: false },
+    { prefix: './f1-backslash-', name: 'f1-backslash-\\name.txt', quote: '', command: 'cat', directory: false },
+    { prefix: './f1-newline-', name: `f1-newline-\ntouch ${sentinelName}\n.txt`, quote: '', command: 'cat', directory: false },
+    // A basename whose FIRST byte is a literal space: the semantic token keeps
+    // the leading space (the user opens a double quote before it), and the
+    // accepted Host path must stay one literal argument with the `$(` inside
+    // the double quotes escaped, never a command substitution.
+    { prefix: './ f1-leading-space-', name: ` f1-leading-space-$(touch ${sentinelName}).txt`, quote: '"', command: 'cat', directory: false },
+    // A basename whose FIRST byte is a literal double quote: the user types the
+    // quote UNQUOTED and backslash-escaped (`./\"`), so the semantic token is
+    // the real filename byte; the accepted value is single-quoted and the
+    // `$(` stays literal.
+    { prefix: './\\"f1-leading-double-quote-', name: `"f1-leading-double-quote-$(touch ${sentinelName}).txt`, quote: '', command: 'cat', directory: false },
+    // The SAME two literal bytes at the START of the shell WORD, typed with a
+    // backslash escape: the Host bridge receives an already-decoded semantic
+    // prefix, so the leading space/quote byte is filename data, never Shell
+    // syntax to strip. Each decoy has the trimmed/unquoted name, so a second
+    // parse would rank (and accept) the decoy instead.
+    { prefix: '\\ f1-root-space-', name: ` f1-root-space-$(touch ${sentinelName}).txt`, quote: '', command: 'cat', directory: false, expectedPath: ` f1-root-space-$(touch ${sentinelName}).txt`, decoy: 'f1-root-space-decoy.txt' },
+    { prefix: '\\"f1-root-quote-', name: `"f1-root-quote-$(touch ${sentinelName}).txt`, quote: '', command: 'cat', directory: false, expectedPath: `"f1-root-quote-$(touch ${sentinelName}).txt`, decoy: 'f1-root-quote-decoy.txt' },
+    { prefix: './f1-directory-', name: `f1-directory-$(touch ${sentinelName})`, quote: '', command: 'cd', directory: true },
+  ]
+  const bridge = createHostShellPathCompletionBridge()
+  const hostShell: HostShellCompletionPort = {
+    pathAuthority: 'host',
+    async complete({ request, signal }) {
+      if (request.kind !== 'paths') return { kind: 'ok', candidates: [] }
+      return await bridge.complete(root, request.prefix, signal)
+    },
+  }
+  const submissions: string[] = []
+  const vt = new VirtualTerminal(120, 32)
+  const app = new TuiApp(vt, {
+    onSubmit: text => { submissions.push(text) },
+    onExit: () => {},
+  })
+  app.setCommandCompletions([], root, null, undefined, undefined, undefined, [], hostShell)
+  app.start()
+  startedApps.add(app)
+  life.defer(() => app.stop())
+  await vt.waitForRender()
+
+  for (const item of cases) {
+    assert.equal(existsSync(sentinel), false, `side-effect sentinel starts absent for ${item.prefix}`)
+    const actualName = item.name
+    const actualPath = join(root, actualName)
+    mkdirSync(dirname(actualPath), { recursive: true })
+    if (item.directory) {
+      mkdirSync(actualPath)
+    } else {
+      writeFileSync(actualPath, marker)
+    }
+    if (item.decoy !== undefined) writeFileSync(join(root, item.decoy), 'DECOY')
+    app.setEditorText('')
+    await vt.waitForRender()
+    vt.sendInput('!')
+    vt.sendInput(`${item.command} ${item.quote}${item.prefix}`)
+    const typed = app.seatTextForTest()
+    vt.sendInput('\t')
+    // The Host completion is a real asynchronous finder request: wait for its
+    // own settled outcome (a dropdown or an applied value), never for one
+    // render tick. A 20 ms frame can beat the finder on a loaded machine.
+    await pollUntil(
+      () => app.seatTextForTest() !== typed || app.isShowingAutocompleteForTest(),
+      `Host path completion to settle for ${item.prefix}`,
+    )
+    if (app.isShowingAutocompleteForTest()) {
+      vt.sendInput('\t')
+      await pollUntil(
+        () => app.seatTextForTest() !== typed,
+        `Host path completion to apply for ${item.prefix}`,
+      )
+    }
+    const body = app.seatTextForTest()
+    const expectedPath = item.expectedPath
+      ?? (item.name.startsWith('~') && !item.name.startsWith('~/')
+        ? item.name
+        : `./${item.name}${item.directory ? '/' : ''}`)
+    assert.deepEqual(parseShellWords(body), [item.command, expectedPath],
+      `TUI completion maps the chosen file to one literal Shell argument for ${item.prefix}: ${JSON.stringify(body)}`)
+    if (item.directory) vt.sendInput(' && pwd')
+    vt.sendInput('\r')
+    await vt.waitForRender()
+    const submitted = submissions.pop()
+    assert.equal(submitted, `!${body}${item.directory ? ' && pwd' : ''}`)
+    const executed = spawnSync('bash', ['-c', submitted.slice(1)], { cwd: root, encoding: 'utf8' })
+    assert.equal(executed.status, 0, `the accepted Host path remains one valid Shell argument: ${executed.stderr}`)
+    if (item.directory) assert.equal(executed.stdout, `${actualPath}\n`)
+    else assert.equal(executed.stdout, marker)
+    assert.equal(existsSync(sentinel), false, `completion of ${item.prefix} did not execute a second command`)
+  }
+})
+
+test('Host path completion inserts literal Shell words at a cursor mid-token', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-host-shell-cursor-mid-')
+  const marker = 'F1_CURSOR_MID_TOKEN_CONTENT'
+  const sentinelName = 'unexpected-command-executed'
+  const sentinel = join(root, sentinelName)
+  const suffix = `suffix-$(touch ${sentinelName}).txt`
+  const name = `f1-mid-${suffix}`
+  writeFileSync(join(root, name), marker)
+  const bridge = createHostShellPathCompletionBridge()
+  const hostShell: HostShellCompletionPort = {
+    pathAuthority: 'host',
+    async complete({ request, signal }) {
+      if (request.kind !== 'paths') return { kind: 'ok', candidates: [] }
+      return await bridge.complete(root, request.prefix, signal)
+    },
+  }
+  const submissions: string[] = []
+  const vt = new VirtualTerminal(120, 32)
+  const app = new TuiApp(vt, {
+    onSubmit: text => { submissions.push(text) },
+    onExit: () => {},
+  })
+  app.setCommandCompletions([], root, null, undefined, undefined, undefined, [], hostShell)
+  app.start()
+  startedApps.add(app)
+  life.defer(() => app.stop())
+  await vt.waitForRender()
+  vt.sendInput('!')
+  vt.sendInput(`cat ./f1-mid-${suffix}`)
+  await vt.waitForRender()
+  // Cursor sits BETWEEN the typed prefix `./f1-mid-` and the suffix
+  // `suffix-$(touch sentinel).txt`. The Host candidate is the FULL matching
+  // filename, so accepting it must replace the whole word — never leave the
+  // already-typed suffix behind (`./f1-mid-suffix-…txtsuffix-…txt`).
+  for (let index = 0; index < suffix.length; index += 1) vt.sendInput('\x1b[D')
+  await vt.waitForRender()
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  if (app.isShowingAutocompleteForTest()) {
+    vt.sendInput('\t')
+    await vt.waitForRender()
+  }
+  const body = app.seatTextForTest()
+  assert.equal(existsSync(sentinel), false, 'completion itself must never execute the suffix command substitution')
+  assert.deepEqual(parseShellWords(body), ['cat', `./${name}`],
+    `a mid-token completion must replace the whole word, not append the suffix: ${JSON.stringify(body)}`)
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  const submitted = submissions.pop()
+  assert.equal(submitted, `!${body}`, 'the mid-token completion submits the same body it left in the editor')
+  const executed = spawnSync('bash', ['-c', submitted.slice(1)], { cwd: root, encoding: 'utf8' })
+  assert.equal(executed.status, 0, `the mid-token Host path remains one valid Shell argument: ${executed.stderr}`)
+  assert.equal(executed.stdout, marker, 'the accepted Host path resolves the exact existing file')
+  assert.equal(existsSync(sentinel), false, 'the accepted Host path must not execute the suffix command substitution')
+})
+
+test('Host mid-token path completion preserves the following separate words', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-host-shell-cursor-mid-words-')
+  const marker = 'F1_CURSOR_MID_WORDS_CONTENT'
+  const name = 'f1-words-suffix.txt'
+  writeFileSync(join(root, name), marker)
+  const bridge = createHostShellPathCompletionBridge()
+  const hostShell: HostShellCompletionPort = {
+    pathAuthority: 'host',
+    async complete({ request, signal }) {
+      if (request.kind !== 'paths') return { kind: 'ok', candidates: [] }
+      return await bridge.complete(root, request.prefix, signal)
+    },
+  }
+  const submissions: string[] = []
+  const vt = new VirtualTerminal(120, 32)
+  const app = new TuiApp(vt, {
+    onSubmit: text => { submissions.push(text) },
+    onExit: () => {},
+  })
+  app.setCommandCompletions([], root, null, undefined, undefined, undefined, [], hostShell)
+  app.start()
+  startedApps.add(app)
+  life.defer(() => app.stop())
+  await vt.waitForRender()
+  vt.sendInput('!')
+  const tail = 'suffix.txt && echo preserved'
+  vt.sendInput(`cat ./f1-words-${tail}`)
+  await vt.waitForRender()
+  // The cursor splits ONE Shell word (`./f1-words-|suffix.txt`); the words
+  // after the separating whitespace are NOT part of the replaced range.
+  for (let index = 0; index < tail.length; index += 1) vt.sendInput('\x1b[D')
+  await vt.waitForRender()
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  if (app.isShowingAutocompleteForTest()) {
+    vt.sendInput('\t')
+    await vt.waitForRender()
+  }
+  const body = app.seatTextForTest()
+  assert.deepEqual(parseShellWords(body), ['cat', `./${name}`, '&&', 'echo', 'preserved'],
+    `only the cursor's own word is replaced: ${JSON.stringify(body)}`)
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  const submitted = submissions.pop()
+  assert.equal(submitted, `!${body}`, 'the following words survive submission')
+  const executed = spawnSync('bash', ['-c', submitted.slice(1)], { cwd: root, encoding: 'utf8' })
+  assert.equal(executed.status, 0, `the completed word remains one valid Shell argument: ${executed.stderr}`)
+  assert.equal(executed.stdout, `${marker}preserved\n`)
+})
+
+test('a quoted $VAR completion keeps its quote and never appends a quoted space', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  setCompgenRunnerForTest(() => Promise.resolve({ ok: true, lines: ['HOME'] }))
+  try {
+    const vt = new VirtualTerminal(120, 32)
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+    app.setCommandCompletions([], root, null, undefined, undefined, undefined, [], directShellCompletion)
+    app.start()
+    startedApps.add(app)
+    life.defer(() => app.stop())
+    await vt.waitForRender()
+    vt.sendInput('!')
+    vt.sendInput('echo "$HO')
+    await vt.waitForRender()
+    vt.sendInput('\t')
+    await vt.waitForRender()
+    if (app.isShowingAutocompleteForTest()) {
+      vt.sendInput('\t')
+      await vt.waitForRender()
+    }
+    assert.equal(app.seatTextForTest(), 'echo "$HOME',
+      'the quoted variable keeps its opening quote and adds no space inside it')
+  } finally {
+    setCompgenRunnerForTest(undefined)
+    resetCommandCacheForTest()
+  }
+})
+
+test('Host path completion starts a new word after an unquoted control operator', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-host-shell-operator-word-')
+  const name = 'f1-semi-target.sh'
+  writeFileSync(join(root, name), '#!/bin/sh\necho semicolon-target\n')
+  chmodSync(join(root, name), 0o755)
+  const bridge = createHostShellPathCompletionBridge()
+  const hostShell: HostShellCompletionPort = {
+    pathAuthority: 'host',
+    async complete({ request, signal }) {
+      if (request.kind !== 'paths') return { kind: 'ok', candidates: [] }
+      return await bridge.complete(root, request.prefix, signal)
+    },
+  }
+  const submissions: string[] = []
+  const vt = new VirtualTerminal(120, 32)
+  const app = new TuiApp(vt, {
+    onSubmit: text => { submissions.push(text) },
+    onExit: () => {},
+  })
+  app.setCommandCompletions([], root, null, undefined, undefined, undefined, [], hostShell)
+  app.start()
+  startedApps.add(app)
+  life.defer(() => app.stop())
+  await vt.waitForRender()
+  vt.sendInput('!')
+  // NO blank after `;`: the path word STARTS at the operator, so a
+  // whitespace-only word start would query the whole `true;./f1-semi-` text.
+  vt.sendInput('true;./f1-semi-')
+  await vt.waitForRender()
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  if (app.isShowingAutocompleteForTest()) {
+    vt.sendInput('\t')
+    await vt.waitForRender()
+  }
+  const body = app.seatTextForTest()
+  assert.equal(body, `true;'./${name}'`,
+    `only the word after the operator is replaced: ${JSON.stringify(body)}`)
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  const submitted = submissions.pop()
+  assert.equal(submitted, `!${body}`)
+  const executed = spawnSync('bash', ['-c', submitted.slice(1)], { cwd: root, encoding: 'utf8' })
+  assert.equal(executed.status, 0, `the completed word is a valid command after the operator: ${executed.stderr}`)
+  assert.equal(executed.stdout, 'semicolon-target\n')
+})
+
+test('Host command completion starts a new word after an unquoted control operator', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const requests: HostShellCompletionRequest[] = []
+  const hostShell: HostShellCompletionPort = {
+    pathAuthority: 'host',
+    async complete({ request }) {
+      requests.push(request)
+      return request.kind === 'commands'
+        ? { kind: 'ok', candidates: ['echo'] }
+        : { kind: 'ok', candidates: [] }
+    },
+  }
+  const submissions: string[] = []
+  const vt = new VirtualTerminal(120, 32)
+  const app = new TuiApp(vt, {
+    onSubmit: text => { submissions.push(text) },
+    onExit: () => {},
+  })
+  app.setCommandCompletions([], root, null, undefined, undefined, undefined, [], hostShell)
+  app.start()
+  startedApps.add(app)
+  life.defer(() => app.stop())
+  await vt.waitForRender()
+  vt.sendInput('!')
+  // NO blank after `;`: the second line is a COMMAND word, not an argument.
+  vt.sendInput('echo hi;ec')
+  await vt.waitForRender()
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  if (app.isShowingAutocompleteForTest()) {
+    vt.sendInput('\t')
+    await vt.waitForRender()
+  }
+  const body = app.seatTextForTest()
+  assert.equal(body, 'echo hi;echo ',
+    `only the command word after the separator is replaced: ${JSON.stringify(body)}`)
+  assert.deepEqual(requests.at(-1), { kind: 'commands', prefix: 'ec' })
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  // The shell submission drops the completion's trailing separator space.
+  assert.equal(submissions.pop(), `!${body.trimEnd()}`)
+  assert.equal(spawnSync('bash', ['-n', '-c', body], { encoding: 'utf8' }).status, 0,
+    'the command line after the separator stays syntactically valid')
+})
+
+test('Host path completion at a cursor before an opening quote replaces the quoted tail', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-host-shell-cursor-before-quote-')
+  const marker = 'F1_CURSOR_BEFORE_QUOTE_CONTENT'
+  const name = 'f1-empty-quote.txt'
+  writeFileSync(join(root, name), marker)
+  const bridge = createHostShellPathCompletionBridge()
+  const hostShell: HostShellCompletionPort = {
+    pathAuthority: 'host',
+    async complete({ request, signal }) {
+      if (request.kind !== 'paths') return { kind: 'ok', candidates: [] }
+      return await bridge.complete(root, request.prefix, signal)
+    },
+  }
+  const submissions: string[] = []
+  const vt = new VirtualTerminal(120, 32)
+  const app = new TuiApp(vt, {
+    onSubmit: text => { submissions.push(text) },
+    onExit: () => {},
+  })
+  app.setCommandCompletions([], root, null, undefined, undefined, undefined, [], hostShell)
+  app.start()
+  startedApps.add(app)
+  life.defer(() => app.stop())
+  await vt.waitForRender()
+  vt.sendInput('!')
+  vt.sendInput('cat "')
+  await vt.waitForRender()
+  // The cursor sits BEFORE the opening quote: the empty word is completed and
+  // the dangling quoted tail belongs to the range the acceptance replaces.
+  vt.sendInput('\x1b[D')
+  await vt.waitForRender()
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  if (app.isShowingAutocompleteForTest()) {
+    vt.sendInput('\t')
+    await vt.waitForRender()
+  }
+  const body = app.seatTextForTest()
+  assert.equal(body, `cat '${name}'`,
+    `the dangling quote is replaced exactly once: ${JSON.stringify(body)}`)
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  const submitted = submissions.pop()
+  assert.equal(submitted, `!${body}`)
+  const executed = spawnSync('bash', ['-c', submitted.slice(1)], { cwd: root, encoding: 'utf8' })
+  assert.equal(executed.status, 0, `the quoted completion is one valid argument: ${executed.stderr}`)
+  assert.equal(executed.stdout, marker)
+})
+
 test('a Stable extension suggestion applies through the wire adapter symmetrically', async (t) => {
   const life = testLifecycle(t)
   const vt = new VirtualTerminal(100, 24)
@@ -1812,7 +2278,7 @@ test('a Stable extension suggestion applies through the wire adapter symmetrical
       ],
       prefix: '/zzz-no-such',
     }
-  })
+  }, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -1916,7 +2382,7 @@ test('a Stable extension prefix computed on the WIRE line applies without corrup
     // legitimately includes the synthetic `!`.
     items: [{ value: 'checkout', label: 'checkout' }],
     prefix: '!ch',
-  }))
+  }), undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -1925,6 +2391,7 @@ test('a Stable extension prefix computed on the WIRE line applies without corrup
   // plugin chain is consulted. ONE item is auto-applied by the fork on
   // the first forced Tab — the exact path that must not corrupt.
   setCompgenRunnerForTest(() => Promise.resolve({ ok: false, lines: [] }))
+  resetCommandCacheForTest()
   try {
     vt.sendInput('!')
     vt.sendInput('ch')
@@ -1950,7 +2417,7 @@ test('a mid-body ! completion token (echo !ch) keeps its literal !', async (t) =
     // the extension prefix includes it and it must survive the apply.
     items: [{ value: '!checkout', label: '!checkout' }],
     prefix: '!ch',
-  }))
+  }), undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -2036,7 +2503,7 @@ test('a continuation-line /u in shell-local is a PATH (no slash commands, no dou
 test('provider-level: a continuation-line /u applies as a path on any shell line', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
-  const provider = new MentionProvider([], root, null, () => 'shell-context' as const, undefined, undefined, undefined, [], true)
+  const provider = new MentionProvider([], root, null, () => 'shell-context' as const, undefined, undefined, undefined, [], EMPTY_DIRECT_SHELL_COMPLETION)
   const applied = provider.applyCompletion(['git status', '/u'], 1, 2, { value: '/usr/', label: 'usr' }, '/u')
   assert.deepEqual(applied, { lines: ['git status', '/usr/'], cursorLine: 1, cursorCol: 5 },
     'the synthetic prefix never enters a continuation line and the slash is never doubled')
@@ -2063,7 +2530,7 @@ test('the extension chain is NOT consulted on a continuation-line natural / trig
       ],
       prefix: '/zzz-no-such',
     }
-  })
+  }, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -2147,7 +2614,7 @@ test('completion uses the VISIBLE seat mode — a hidden host shell mode never l
   app.setCommandCompletions([], fixtureWorkspace(life), null, async (query) => {
     queries.push({ lines: [...query.lines] })
     return null
-  })
+  }, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -2229,7 +2696,7 @@ test('a replacement editor submit keeps the shell wire form through the host fal
   const vt = new VirtualTerminal(100, 24)
   const submitted: string[] = []
   const app = new TuiApp(vt, { onSubmit: (text) => submitted.push(text), onExit: () => {} }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(life), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null, undefined, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -2285,7 +2752,7 @@ test('a replacement plugin Tab runs the shell completion grammar of the wire doc
   app.setCommandCompletions([], fixtureWorkspace(life), null, async (query) => {
     queries.push({ lines: [...query.lines], cursorCol: query.cursorCol })
     return null
-  })
+  }, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -2357,7 +2824,7 @@ test('a text change after a declined Tab cancels the stale dropdown (no stale ac
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(life), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null, undefined, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -2408,10 +2875,10 @@ test('a text change after a declined Tab cancels the stale dropdown (no stale ac
     assert.equal(plugin.getText(), '!echo $gs', 'a stale dropdown must never accept into the edited document')
     // The pending refresh resolves with the FRESH candidates; the next Tab
     // accepts through the NEW dropdown into the plugin wire document.
-    resolveRefresh!({ ok: true, lines: ['gist', 'gist'] })
+    resolveRefresh!({ ok: true, lines: ['gsomething', 'gsomething'] })
     await vt.waitForRender()
     vt.sendInput('\t')
-    await pollUntil(() => plugin.getText() === '!echo $gist ',
+    await pollUntil(() => plugin.getText() === '!echo $gsomething ',
       'the fresh completion applies into the plugin wire document')
   } finally {
     setCompgenRunnerForTest(undefined)
@@ -2426,7 +2893,7 @@ test('a declined pageUp/pageDown keeps the open dropdown alive (fork parity)', a
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(life), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null, undefined, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
@@ -2503,7 +2970,7 @@ test('a synchronous rejection restore survives the fallback sync-back', async (t
     },
     onExit: () => {},
   }, { editorRegistry: registry })
-  app.setCommandCompletions([], fixtureWorkspace(life), null)
+  app.setCommandCompletions([], fixtureWorkspace(life), null, undefined, undefined, undefined, [], directShellCompletion)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())

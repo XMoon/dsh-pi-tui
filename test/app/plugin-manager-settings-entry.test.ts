@@ -28,6 +28,7 @@ import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { settingsDirectPageConfig } from '../support/settings-direct-page-stubs.ts'
 import { selectSettingsCategory } from '../support/settings-rail.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
+import { unconfiguredPolicyObservation } from '../support/session-policy-fake.ts'
 
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
@@ -163,6 +164,7 @@ function setup(options: { columns?: number; rows?: number } = {}): {
     clearExtensionError: () => {},
     captureExtensionHealthRef: () => () => {},
     currentSessionId: undefined,
+    policy: unconfiguredPolicyObservation(),
     captureLiveSessionScope: () => undefined,
     // C3 About seams: this fixture composes no StatusRuntime, so a Session read
     // can only be attempted through the sessionless path (which must not run).
@@ -194,7 +196,16 @@ function setup(options: { columns?: number; rows?: number } = {}): {
     config: settingsDirectPageConfig({
       configReadiness: () => 'ready' as const,
       permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined },
-      subagentModelSelection: { available: () => false },
+      subagentLimits: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
+      subagentModelSelection: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
       web: { available: () => false },
       credentials: { available: () => false },
     }),
@@ -272,7 +283,7 @@ test('selecting Plugins previews the page in place; Enter only moves the keys', 
   const preview = plain(vt.getViewport())
   assert.match(preview, /PLUGIN PAGE/, 'the right column paints the real list preview')
   assert.match(preview, /Settings · Categories/, 'the rail keeps the keyboard (its header owns the trail)')
-  assert.match(plain([vt.getViewport().at(-1)!]), /Esc close/, 'the rail owns the physical last row')
+  assert.match(plain([vt.getViewport().at(-1)!]), /Close \[Esc\]/, 'the rail owns the physical last row')
   assert.equal(pages[0]!.focused, false, 'the preview does not own the input focus')
   assert.equal(counts.disposed, 0)
 
@@ -289,7 +300,7 @@ test('selecting Plugins previews the page in place; Enter only moves the keys', 
   assert.equal(counts.page, 1)
   assert.equal(counts.disposed, 0, 'a yield never disposes the page')
   assert.equal(pages[0]!.focused, false)
-  assert.match(plain([vt.getViewport().at(-1)!]), /Esc close/)
+  assert.match(plain([vt.getViewport().at(-1)!]), /Close \[Esc\]/)
   // A second Esc closes the Settings lease and notifies the page once.
   vt.sendInput('\x1b')
   await vt.waitForRender()
@@ -305,8 +316,8 @@ test('120×40 previews Categories | List | Details and 80×24 previews Categorie
     await selectPlugins(vt)
     await vt.waitForRender()
     const view = vt.getViewport()
-    const headerRow = rowOf(view, 'Categories (9)')
-    assert.match(plain([view[headerRow]!]), /\[Categories \(9\)\]/, `${columns}: the rail is the ONE active device`)
+    const headerRow = rowOf(view, 'Categories (10)')
+    assert.match(plain([view[headerRow]!]), /\[Categories \(10\)\]/, `${columns}: the rail is the ONE active device`)
     assert.equal(cellIndexOf(view, headerRow, 'Plugins'), 24, `${columns}: the preview starts after the rail`)
     if (dual) {
       assert.match(plain([view[headerRow]!]), /Details/, `${columns}: the wide preview keeps the Details column label`)
@@ -409,7 +420,7 @@ test('narrow 44×20 mounts the page only on Enter and restores the rail with Plu
   assert.doesNotMatch(view, /PLUGIN PAGE/, 'a narrow rail selection paints no plugin content')
   assert.equal(counts.page, 0, 'a narrow rail selection mounts nothing')
   assert.match(view, /> Plugins/)
-  assert.match(view, /Esc close/)
+  assert.match(view, /Close \[Esc\]/)
   vt.sendInput('\r')
   await vt.waitForRender()
   assert.equal(counts.page, 1, 'Enter mounts the page once')

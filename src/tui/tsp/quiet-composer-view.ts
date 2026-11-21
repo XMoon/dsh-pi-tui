@@ -3,10 +3,10 @@
  *
  * ONE pure view over render-time read-only values and synchronous click
  * callbacks: the controlled production `ui.editor`, the left Permission
- * trigger + popup, and the right Model / Effort / Stop / Send controls inside
- * the ONE rounded composer shell. It owns no business state, no timer and no
- * SDK session; the renderer passes the already-controlled editor node and
- * live values sampled at render time.
+ * trigger + popup, and the right combined Model·Effort trigger (with its
+ * anchored quick menu), Stop and Send inside the ONE rounded composer shell.
+ * It owns no business state, no timer and no SDK session; the renderer passes
+ * the already-controlled editor node and live values sampled at render time.
  *
  * The single scoped stylesheet below is the Owner-frozen v2 demo sheet mapped
  * to the product role namespace (`dsh.composer.*` / `dsh.footer.group`).
@@ -15,6 +15,13 @@
 
 import { html, ui } from '@stencil-hq/tern'
 import type { Node } from '@stencil-hq/tern'
+import type {
+  QuickMenuIntent,
+  QuickMenuRenderState,
+  QuickMenuRow,
+} from './model-quick-menu.ts'
+import type { TspInputCompletionPopup } from './input-completion.ts'
+import { TSP_SEARCH_CHORD_LABEL } from '../keybindings/hints.ts'
 
 /** The ONE surface-scoped stylesheet name the renderer installs. */
 export const QUIET_COMPOSER_SHEET = 'dsh-quiet-composer'
@@ -28,11 +35,40 @@ export const QUIET_COMPOSER_ROLES = {
   permissionMenu: 'dsh.composer.permission-menu',
   permissionOption: 'dsh.composer.permission.option',
   right: 'dsh.composer.right',
+  modelStack: 'dsh.composer.model-stack',
   model: 'dsh.composer.model',
-  effort: 'dsh.composer.effort',
+  modelName: 'dsh.composer.model-name',
+  modelEffort: 'dsh.composer.model-effort',
+  modelChevron: 'dsh.composer.model-chevron',
+  quickMenu: 'dsh.composer.quick-menu',
+  quickHead: 'dsh.composer.quick-head',
+  quickItem: 'dsh.composer.quick-item',
+  quickLabel: 'dsh.composer.quick-label',
+  quickValue: 'dsh.composer.quick-value',
+  quickScroller: 'dsh.composer.quick-scroller',
+  quickFooter: 'dsh.composer.quick-footer',
+  quickSearch: 'dsh.composer.quick-search',
+  quickNotice: 'dsh.composer.quick-notice',
+  quickEmpty: 'dsh.composer.quick-empty',
+  quickFailure: 'dsh.composer.quick-failure',
   send: 'dsh.composer.send',
   stop: 'dsh.composer.stop',
+  /** T3-B1: the ONE `Search session` entry, beside the existing controls. It
+   *  carries no search state and no query: it calls the SAME seat entry the
+   *  `Alt+Shift+S` chord calls. */
+  search: 'dsh.composer.search',
   footerGroup: 'dsh.footer.group',
+  // TSP I-C/I-D: the ONE anchored candidate list. It is ONE child of the Composer
+  // shell and positioned absolutely against it, so it floats above the Composer
+  // and takes NO layout height — the editor keeps its exact node path and the
+  // Composer box never moves. I-C raised it from a Slash-only menu to the shared
+  // seat's menu (command, Host `@`, local path, inline action/skill rows all ride
+  // THIS list), so the role family is named for what it now shows.
+  completionMenu: 'dsh.composer.completion-menu',
+  completionItem: 'dsh.composer.completion-item',
+  completionText: 'dsh.composer.completion-text',
+  completionDescription: 'dsh.composer.completion-description',
+  completionHint: 'dsh.composer.completion-hint',
 } as const
 
 /** One selectable permission preset in the v2 menu (fixed standard set). */
@@ -61,16 +97,194 @@ export interface QuietComposerViewInput {
     /** The menu expansion identity; a stale option click never matches. */
     readonly menuEpoch: number
   }
-  readonly model: { readonly label: string; readonly title: string; readonly interactive: boolean }
-  readonly effort: { readonly label: string; readonly title: string; readonly interactive: boolean }
+  /** The ONE combined Model / Reasoning Effort trigger and the quick menu it
+   *  anchors. The menu is a SIBLING of the button inside the trigger's own
+   *  positioning container, so it floats over the editor without occupying any
+   *  layout height of its own. */
+  readonly modelQuick: {
+    /** The model half of the label: the committed Status value, sanitized. */
+    readonly name: string
+    /** The effort half, or `undefined` when the selection carries none — then
+     *  no empty effort slot is reserved. */
+    readonly effort: string | undefined
+    /** The complete sanitized Model + Effort facts, never a truncated value. */
+    readonly title: string
+    readonly interactive: boolean
+    readonly expanded: boolean
+    readonly panel: QuickMenuRenderState | undefined
+  }
   readonly busy: boolean
   readonly sendable: boolean
+  /**
+   * TSP I-C/I-D: the candidate list this frame shows, or `undefined` when the
+   * seat has nothing to paint. It is the SEAT's own render-time projection —
+   * already filtered, already ordered by the shared provider and already
+   * windowed — so this view re-sorts nothing, re-queries nothing and claims no
+   * availability the catalog did not state. Its rows carry the Provider's own
+   * display text for the seat they came from: a `/command`, an official `@`
+   * mention, a real local path or an inline `/action`.
+   */
+  readonly completion: TspInputCompletionPopup | undefined
   readonly onPermissionToggle: () => void
   readonly onPermissionChoose: (id: string, menuEpoch: number) => void
-  readonly onModel: () => void
-  readonly onEffort: () => void
+  /** The combined trigger: opens, or closes, the anchored quick menu. */
+  readonly onModelQuickToggle: () => void
+  /** One interaction of the CURRENT menu frame. */
+  readonly onModelQuickIntent: (intent: QuickMenuIntent) => void
+  /** Choose ONE candidate of the CURRENT list frame (row id + revision). */
+  readonly onCompletionChoose: (id: string, revision: number) => void
   readonly onSend: () => void
   readonly onStop: () => void
+  /**
+   * T3-B1: the ONE `Search session` entry of this shell.
+   *
+   * `enabled` is the mount's admission predicate result (the SAME one that
+   * gates the click), so the painted affordance and the accepted gesture can
+   * never disagree. `narrow` re-arranges the EXISTING controls for a narrow
+   * pane: the editor keeps a full row, Permission/Model keep their real
+   * controls and popover anchors, and the action row carries `Search session`,
+   * the optional Stop and the ORIGINAL single Send — never a second Send.
+   */
+  readonly searchSession: {
+    /** Whether this pane has the semantic-search plane at all. `false` paints
+     *  no entry: a permanently disabled button is not an honest affordance. */
+    readonly available: boolean
+    /** Whether the entry is operable right now (a higher seat may hold input or
+     *  a Modal may be up). Painted disabled, and re-checked by the click. */
+    readonly enabled: boolean
+    readonly narrow: boolean
+    readonly onOpen: () => void
+  }
+}
+
+/** One selectable menu row, bound to the intent its own frame minted. */
+function quickItem(
+  row: QuickMenuRow,
+  onIntent: (intent: QuickMenuIntent) => void,
+): Node {
+  const marker = row.selected || row.highlighted
+  return html.button({
+    key: row.key,
+    role: QUIET_COMPOSER_ROLES.quickItem,
+    title: row.label,
+    aria: row.label,
+    ...(marker
+      ? {
+          attrs: {
+            ...(row.selected ? { 'data-selected': 'true' } : {}),
+            ...(row.highlighted ? { 'data-highlight': 'true' } : {}),
+          } as Readonly<Record<string, string>>,
+        }
+      : {}),
+    onClick: () => onIntent(row.intent),
+  },
+    html.span({ role: QUIET_COMPOSER_ROLES.quickLabel }, `${row.label}${row.selected ? ' ✓' : ''}`),
+    ...(row.value === undefined && row.chevron === false
+      ? []
+      : [html.span({ role: QUIET_COMPOSER_ROLES.quickValue }, `${row.value ?? ''}${row.chevron ? ' ›' : ''}`)]),
+  )
+}
+
+/** The anchored quick menu: a fixed header (Back / Search), the ONE scrolling
+ *  body, and the fixed Full footer — all inside the trigger's own positioning
+ *  container, so it covers the editor area without taking any layout height. */
+function quickMenuNode(
+  panel: QuickMenuRenderState,
+  onIntent: (intent: QuickMenuIntent) => void,
+): Node {
+  const body: Node[] = []
+  for (const section of panel.sections) {
+    if (section.head !== '') {
+      body.push(html.div({
+        key: `${section.key}-head`,
+        role: QUIET_COMPOSER_ROLES.quickHead,
+      }, section.head))
+    }
+    for (const row of section.rows) body.push(quickItem(row, onIntent))
+  }
+  // A provider that failed to read is inert CONTEXT about the list, so it lives
+  // INSIDE the scrolling body: its count comes from the directory and is not
+  // bounded, and the fixed Back/search/Full chrome must stay reachable whatever
+  // that count is (a short pane with a dozen failed providers is reachable).
+  for (const failure of panel.failures) {
+    body.push(html.div({
+      key: failure.key,
+      role: QUIET_COMPOSER_ROLES.quickFailure,
+      title: failure.detail,
+      aria: failure.label,
+      attrs: { 'data-detail': failure.detail } as Readonly<Record<string, string>>,
+    }, failure.label))
+  }
+  return html.div(
+    {
+      key: `composer-quick-menu-${panel.serial}`,
+      role: QUIET_COMPOSER_ROLES.quickMenu,
+      aria: 'Model and reasoning effort',
+    },
+    ...(panel.back === undefined ? [] : [quickItem(panel.back, onIntent)]),
+    ...(panel.page === 'models'
+      ? [ui.input({
+          key: panel.searchKey,
+          role: QUIET_COMPOSER_ROLES.quickSearch,
+          text: panel.query,
+          cursor: panel.cursor,
+          placeholder: 'Search models…',
+          aria: 'Search models',
+          // A pointer click on an UNFOCUSED field is a `focus` event, not a key:
+          // without this the panel would keep browsing the list while the client
+          // believes the caret is in the search box. The SDK dispatches it from the
+          // view it last rendered, so a stale frame's click resolves to nothing.
+          onFocus: () => onIntent({ kind: 'focus-search', revision: panel.revision }),
+        })]
+      : []),
+    ...(panel.notice === undefined
+      ? []
+      : [html.div({
+          key: `q${panel.serial}-notice`,
+          role: QUIET_COMPOSER_ROLES.quickNotice,
+          attrs: { 'data-tone': panel.notice.tone } as Readonly<Record<string, string>>,
+        }, panel.notice.text)]),
+    html.div({ key: `q${panel.serial}-scroller`, role: QUIET_COMPOSER_ROLES.quickScroller }, ...body),
+    ...(panel.empty === undefined
+      ? []
+      : [html.div({ key: `q${panel.serial}-empty`, role: QUIET_COMPOSER_ROLES.quickEmpty }, panel.empty)]),
+
+    html.div(
+      { key: `q${panel.serial}-footer`, role: QUIET_COMPOSER_ROLES.quickFooter },
+      quickItem(panel.footer, onIntent),
+    ),
+  )
+}
+
+/** One row of the anchored candidate list. A row is a COMPLETION, never an
+ *  execution: `title`/`aria` carry the seat's own display text plus the
+ *  Provider's description so a reviewer or a reader can tell two similar rows
+ *  apart from the frame alone (a Host `@src/a.ts` and a local `src/a.ts` are
+ *  different sources even when the letters match), and the highlighted row is
+ *  marked by exactly one active signal. */
+function completionRow(
+  scope: string,
+  popup: TspInputCompletionPopup,
+  row: TspInputCompletionPopup['rows'][number],
+  onChoose: (id: string, revision: number) => void,
+): Node {
+  const description = row.description ?? ''
+  const full = description === '' ? row.text : `${row.text} — ${description}`
+  return html.button({
+    key: `completion-${scope}-${popup.revision}-${row.id.replace(/[^A-Za-z0-9._-]+/g, '_')}`,
+    role: QUIET_COMPOSER_ROLES.completionItem,
+    title: full,
+    aria: full,
+    ...(row.highlighted
+      ? { attrs: { 'data-highlight': 'true' } as Readonly<Record<string, string>> }
+      : {}),
+    onClick: () => onChoose(row.id, popup.revision),
+  },
+    html.span({ role: QUIET_COMPOSER_ROLES.completionText }, `${row.highlighted ? '›' : ' '}${row.text}`),
+    ...(description === ''
+      ? []
+      : [html.span({ role: QUIET_COMPOSER_ROLES.completionDescription }, description)]),
+  )
 }
 
 /** Build the ONE Quiet Composer shell (editor + controls). */
@@ -101,9 +315,84 @@ export function quietComposerView(input: QuietComposerViewInput): Node {
       )
     : undefined
 
+  const completionMenu = input.completion === undefined || input.completion.rows.length === 0
+    ? undefined
+    : ui.col(
+        {
+          key: `composer-completion-menu-${input.scope}-${input.completion.revision}`,
+          role: QUIET_COMPOSER_ROLES.completionMenu,
+          aria: 'Completion candidates',
+          gap: 'none',
+        },
+        ...input.completion.rows.map(row => completionRow(
+          input.scope,
+          input.completion!,
+          row,
+          input.onCompletionChoose,
+        )),
+        ui.text({
+          key: `composer-completion-hint-${input.completion.revision}`,
+          wrap: 'none',
+          text: '↑↓ select · Tab/Enter complete · Esc close',
+        }),
+      )
+
+  // T3-B1: the ONE `Search session` entry. `available` is the pane's REAL
+  // semantic-search capability: a pane without it paints NO button at all
+  // (a permanently disabled control is worse than none — the chord still states
+  // the truth), and the click is re-admitted by the SAME mount predicate the
+  // mount evaluated to `available`.
+  const searchButton = (): Node | undefined => input.searchSession.available
+    ? html.button({
+        key: `composer-search-${scope}`,
+        role: QUIET_COMPOSER_ROLES.search,
+        title: `Search this session (${TSP_SEARCH_CHORD_LABEL})`,
+        aria: 'Search this session',
+        ...(input.searchSession.enabled
+          ? {}
+          : { attrs: { 'aria-disabled': 'true' } as Readonly<Record<string, string>> }),
+        onClick: () => input.searchSession.onOpen(),
+      }, 'Search session')
+    : undefined
+
+  const sendButton = (): Node => html.button({
+    key: `composer-send-${scope}`,
+    role: QUIET_COMPOSER_ROLES.send,
+    title: input.sendable ? 'Send message' : 'Type a message to send',
+    aria: 'Send message',
+    ...(input.sendable ? {} : { attrs: { 'aria-disabled': 'true', disabled: 'disabled' } as Readonly<Record<string, string>> }),
+    onClick: () => input.onSend(),
+  }, '↑')
+
+  const stopButton = (): Node => html.button({
+    key: `composer-stop-${scope}r${input.busyEpoch}`,
+    role: QUIET_COMPOSER_ROLES.stop,
+    title: 'Stop the running turn',
+    aria: 'Stop the running turn',
+    onClick: () => input.onStop(),
+  }, 'Stop')
+
   return ui.col(
     { key: 'quiet-composer', role: QUIET_COMPOSER_ROLES.shell, gap: 'none' },
+    // TSP I-C/I-D: the candidate list is ONE child of the shell it anchors to, so
+    // the editor keeps its EXACT existing node path
+    // (`dock.quiet-composer.composer`) — no new wrapper, no focus-path change.
+    // Absolute positioning takes it out of flow, so the Composer keeps the
+    // height it had before and the transcript never moves.
+    ...(completionMenu === undefined ? [] : [completionMenu]),
     input.editor,
+    // A NARROW pane keeps the EXISTING Permission/Model controls on their own
+    // row and moves the actions (Search session · optional Stop · the ORIGINAL
+    // Send) to a third row, so nothing is clipped and there is still exactly ONE
+    // Send. A wide pane keeps the historical single control row.
+    ...(input.searchSession.narrow
+      ? [ui.row(
+          { key: 'composer-actions-narrow', role: QUIET_COMPOSER_ROLES.right, gap: 'sm', align: 'center' },
+          ...(searchButton() === undefined ? [] : [searchButton()]),
+          ...(input.busy ? [stopButton()] : []),
+          sendButton(),
+        )]
+      : []),
     ui.row(
       { key: 'composer-controls', role: QUIET_COMPOSER_ROLES.controls, gap: 'sm', align: 'center' },
       ui.col(
@@ -120,37 +409,36 @@ export function quietComposerView(input: QuietComposerViewInput): Node {
       ),
       ui.row(
         { key: 'composer-right', role: QUIET_COMPOSER_ROLES.right, gap: 'sm', align: 'center' },
-        html.button({
-          key: `composer-model-${scope}`,
-          role: QUIET_COMPOSER_ROLES.model,
-          title: input.model.title,
-          aria: 'Switch model',
-          ...(input.model.interactive ? {} : { attrs: { 'aria-disabled': 'true' } as Readonly<Record<string, string>> }),
-          onClick: () => input.onModel(),
-        }, input.model.label),
-        html.button({
-          key: `composer-effort-${scope}`,
-          role: QUIET_COMPOSER_ROLES.effort,
-          title: input.effort.title,
-          aria: 'Change reasoning effort',
-          ...(input.effort.interactive ? {} : { attrs: { 'aria-disabled': 'true' } as Readonly<Record<string, string>> }),
-          onClick: () => input.onEffort(),
-        }, input.effort.label),
-        ...(input.busy ? [html.button({
-          key: `composer-stop-${scope}r${input.busyEpoch}`,
-          role: QUIET_COMPOSER_ROLES.stop,
-          title: 'Stop the running turn',
-          aria: 'Stop the running turn',
-          onClick: () => input.onStop(),
-        }, 'Stop')] : []),
-        html.button({
-          key: `composer-send-${scope}`,
-          role: QUIET_COMPOSER_ROLES.send,
-          title: input.sendable ? 'Send message' : 'Type a message to send',
-          aria: 'Send message',
-          ...(input.sendable ? {} : { attrs: { 'aria-disabled': 'true', disabled: 'disabled' } as Readonly<Record<string, string>> }),
-          onClick: () => input.onSend(),
-        }, '↑'),
+        html.div(
+          { key: 'composer-model-stack', role: QUIET_COMPOSER_ROLES.modelStack },
+          html.button({
+            key: `composer-model-quick-${scope}`,
+            role: QUIET_COMPOSER_ROLES.model,
+            title: input.modelQuick.title,
+            aria: 'Model and reasoning effort',
+            ...(input.modelQuick.interactive ? {} : { attrs: { 'aria-disabled': 'true' } as Readonly<Record<string, string>> }),
+            onClick: () => input.onModelQuickToggle(),
+          },
+            // The three label parts carry explicit KEYS: the effort part appears
+            // and disappears with the committed fact, and without a key the SDK
+            // would address the children by position — remounting the chevron
+            // under the pointer every time a model gains or loses an effort.
+            html.span({ key: 'model-name', role: QUIET_COMPOSER_ROLES.modelName }, input.modelQuick.name),
+            ...(input.modelQuick.effort === undefined
+              ? []
+              : [html.span({ key: 'model-effort', role: QUIET_COMPOSER_ROLES.modelEffort }, `· ${input.modelQuick.effort}`)]),
+            html.span(
+              { key: 'model-chevron', role: QUIET_COMPOSER_ROLES.modelChevron },
+              input.modelQuick.expanded ? '▴' : '▾',
+            ),
+          ),
+          ...(input.modelQuick.expanded && input.modelQuick.panel !== undefined
+            ? [quickMenuNode(input.modelQuick.panel, (intent) => input.onModelQuickIntent(intent))]
+            : []),
+        ),
+        ...(input.searchSession.narrow || searchButton() === undefined ? [] : [searchButton()]),
+        ...(input.busy && input.searchSession.narrow !== true ? [stopButton()] : []),
+        ...(input.searchSession.narrow ? [] : [sendButton()]),
       ),
     ),
   )
@@ -201,13 +489,15 @@ export const QUIET_COMPOSER_STYLES = `
     position: relative;
     flex-shrink: 0;
   }
+  /* The two dropdown triggers carry the menu's own soft rounding, so a hover
+     paints a rounded block instead of a square one beside the round Send. */
   [data-role='dsh.composer.permission'] {
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    padding: 4px 2px;
+    padding: 4px 8px;
     border: 0;
-    border-radius: 0;
+    border-radius: 8px;
     background: transparent;
     color: var(--t2);
     font-family: var(--sans);
@@ -271,17 +561,25 @@ export const QUIET_COMPOSER_STYLES = `
     min-width: 0;
     flex-wrap: nowrap;
   }
-  [data-role='dsh.composer.model'] {
-    display: inline-block;
-    flex-shrink: 1;
-    max-width: 240px;
+  /* The combined Model / Effort trigger is ONE flex child of composer-right and
+     the direct positioning container of its menu, so a Stop button inserted to
+     its right never moves the menu anchor. */
+  [data-role='dsh.composer.model-stack'] {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
     min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    padding: 4px 2px;
+    flex-shrink: 1;
+  }
+  [data-role='dsh.composer.model'] {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    flex-shrink: 1;
+    padding: 4px 8px;
     border: 0;
-    border-radius: 0;
+    border-radius: 8px;
     background: transparent;
     color: var(--t1);
     font-family: var(--sans);
@@ -291,22 +589,150 @@ export const QUIET_COMPOSER_STYLES = `
     cursor: pointer;
   }
   [data-role='dsh.composer.model']:hover {
-    color: var(--t1);
     background: var(--l1);
   }
-  [data-role='dsh.composer.effort'] {
+  [data-role='dsh.composer.model'][aria-disabled='true'] {
+    color: var(--t3);
+    cursor: not-allowed;
+  }
+  [data-role='dsh.composer.model'] [data-role='dsh.composer.model-name'] {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  [data-role='dsh.composer.model'] [data-role='dsh.composer.model-effort'] {
+    color: var(--t3);
     flex-shrink: 0;
-    padding: 4px 2px;
-    border: none;
+    white-space: nowrap;
+  }
+  [data-role='dsh.composer.model'] [data-role='dsh.composer.model-chevron'] {
+    color: var(--t3);
+    flex-shrink: 0;
+    width: 10px;
+    text-align: center;
+  }
+  /* The quick menu is anchored to the trigger it belongs to: it floats UP from
+     the button, right-aligned with it, and MAY cover the editor. It takes no
+     layout height, so the Composer box and the transcript scroll never move. */
+  [data-role='dsh.composer.quick-menu'] {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 4px);
+    z-index: 10;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    width: 300px;
+    max-width: min(320px, calc(100vw - 24px));
+    /* The budget must fit the space ABOVE the trigger inside the pane, not just
+       a fraction of the viewport: measured on the client, the shortest supported
+       pane (900x360) leaves ~224px above the trigger, and a 65vh menu overflowed
+       the top of the pane and cut Back and the search field. 55vh keeps the whole
+       anchored menu inside the pane at every supported size and still caps at
+       440px on a normal one. */
+    max-height: min(440px, 55vh);
+    padding: 4px;
+    border: 1px solid var(--l2);
+    border-radius: 8px;
+    background: var(--pop-bg);
+    box-shadow: none;
+  }
+  [data-role='dsh.composer.quick-menu'] [data-role='dsh.composer.quick-scroller'] {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    overflow-y: auto;
+    min-height: 0;
+  }
+  [data-role='dsh.composer.quick-menu'] [data-role='dsh.composer.quick-head'] {
+    padding: 6px 8px 2px;
+    color: var(--t3);
+    font-family: var(--sans);
+    font-size: 11px;
+    line-height: 1.4;
+  }
+  [data-role='dsh.composer.quick-menu'] [data-role='dsh.composer.quick-item'] {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    min-height: 32px;
+    padding: 5px 8px;
+    border: 0;
+    border-radius: 6px;
     background: transparent;
+    color: var(--t2);
+    font-family: var(--sans);
+    font-size: 12px;
+    line-height: 1.5;
+    text-align: left;
+    cursor: pointer;
+  }
+  [data-role='dsh.composer.quick-menu'] [data-role='dsh.composer.quick-item']:hover {
+    background: rgb(from var(--t1) r g b / 4%);
+    color: var(--t1);
+  }
+  [data-role='dsh.composer.quick-menu'] [data-role='dsh.composer.quick-item'][data-highlight='true'] {
+    background: rgb(from var(--t1) r g b / 7%);
+    color: var(--t1);
+  }
+  [data-role='dsh.composer.quick-menu'] [data-role='dsh.composer.quick-item'][data-selected='true'] {
+    color: var(--t1);
+    font-weight: 500;
+  }
+  /* The row's own text is the thing that must survive a narrow anchor: a model
+     name truncates here. The right-hand summary is secondary, so IT truncates
+     first and never eats the row's label (measured on the pinned client: with a
+     non-shrinking value the 300px menu dropped the leading word entirely). */
+  [data-role='dsh.composer.quick-menu'] [data-role='dsh.composer.quick-label'] {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex-shrink: 1;
+  }
+  [data-role='dsh.composer.quick-menu'] [data-role='dsh.composer.quick-value'] {
+    color: var(--t3);
+    min-width: 0;
+    max-width: 45%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex-shrink: 1;
+  }
+  [data-role='dsh.composer.quick-search'] {
+    margin: 2px 4px;
+  }
+  [data-role='dsh.composer.quick-notice'] {
+    padding: 4px 8px;
     color: var(--t3);
     font-family: var(--sans);
     font-size: 12px;
     line-height: 1.5;
-    cursor: pointer;
   }
-  [data-role='dsh.composer.effort']:hover {
-    color: var(--t1);
+  [data-role='dsh.composer.quick-notice'][data-tone='error'] {
+    color: var(--bad);
+  }
+  [data-role='dsh.composer.quick-empty'] {
+    padding: 4px 8px;
+    color: var(--t4);
+    font-family: var(--sans);
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  [data-role='dsh.composer.quick-failure'] {
+    padding: 2px 8px;
+    color: var(--bad);
+    font-family: var(--sans);
+    font-size: 11px;
+    line-height: 1.4;
+  }
+  [data-role='dsh.composer.quick-footer'] {
+    display: flex;
+    flex-direction: column;
+    padding-top: 4px;
+    border-top: 1px solid var(--l1);
   }
   [data-role='dsh.composer.send'] {
     display: inline-flex;
@@ -337,6 +763,41 @@ export const QUIET_COMPOSER_STYLES = `
     cursor: not-allowed;
     filter: none;
   }
+  /* T3-B1: the ONE Search-session entry. It shares the Permission/Model chip
+     family, so it reads as a control of THIS shell and never as a second primary
+     verb (Send stays the only filled control). */
+  [data-role='dsh.composer.search'] {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 10px;
+    border: 1px solid var(--l2);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--t2);
+    font-family: var(--sans);
+    font-size: 12px;
+    line-height: 1.5;
+    cursor: pointer;
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+  [data-role='dsh.composer.search']:hover {
+    background: var(--l1);
+    color: var(--t1);
+  }
+  [data-role='dsh.composer.search'][aria-disabled='true'] {
+    color: var(--t4);
+    border-color: var(--l1);
+    cursor: not-allowed;
+  }
+  /* The narrow action row: the search entry and Stop keep their intrinsic width,
+     the single Send keeps its round 30px hit target, and the row never wraps
+     (a wrapped Send would be clipped by the shell's own overflow). */
+  [data-role='dsh.composer.right'][data-narrow='true'],
+  [data-role='dsh.composer.controls'] {
+    flex-wrap: nowrap;
+  }
   [data-role='dsh.composer.stop'] {
     flex-shrink: 0;
     padding: 4px 10px;
@@ -352,6 +813,100 @@ export const QUIET_COMPOSER_STYLES = `
   }
   [data-role='dsh.composer.stop']:hover {
     background: rgb(from var(--bad) r g b / 10%);
+  }
+  /* TSP I-C: the shell is the anchor of its own candidate list. The relative
+     position adds no box, no padding and no height, so the Composer keeps the
+     exact metrics it had before this seat existed. */
+  [data-role='dsh.composer.shell'] {
+    position: relative;
+  }
+  /* The candidate list floats UP from the Composer shell and MAY cover the
+     transcript above it. It is out of flow, so the Composer, the control line
+     and the Footer never move. The height budget is the REAL measured one: the
+     pane is at its shortest in the 900x360 matrix cell, where a 220px/40vh cap
+     clipped the sixth painted row and the hint row OUTSIDE the box (proved on
+     the pinned client: the row's visible span was zero). Six rows plus the hint
+     need ~196px, so this cap shows the whole window wherever the pane has room and
+     scrolls only where it does not — at 900x360 the last row is clipped, which the
+     Owner accepted as a recorded limitation because the client reports no pane
+     height for the program to adapt to. */
+  [data-role='dsh.composer.completion-menu'] {
+    position: absolute;
+    left: 12px;
+    right: 12px;
+    bottom: calc(100% + 4px);
+    z-index: 10;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    max-width: 100%;
+    max-height: min(196px, 40vh);
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 4px;
+    border: 1px solid var(--l2);
+    border-radius: 8px;
+    background: var(--pop-bg);
+    box-shadow: none;
+  }
+  /* A row must never grow past the box it was anchored into: measured on the
+     client at 400x600 the buttons took their intrinsic width (719px inside a
+     342px menu) and painted command text outside the popup. A zero min-width plus
+     the hidden overflow keep the row inside its frame at every width. */
+  [data-role='dsh.composer.completion-item'] {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    padding: 4px 8px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--t2);
+    font-family: var(--sans);
+    font-size: 12px;
+    line-height: 1.5;
+    text-align: left;
+    cursor: pointer;
+  }
+  [data-role='dsh.composer.completion-item']:hover {
+    background: rgb(from var(--t1) r g b / 4%);
+    color: var(--t1);
+  }
+  [data-role='dsh.composer.completion-item'][data-highlight='true'] {
+    background: rgb(from var(--t1) r g b / 7%);
+    color: var(--t1);
+  }
+  /* The candidate text is the thing that must survive a narrow anchor; the
+     description is secondary and truncates first, so a row never loses what it
+     names (the same rule the quick menu's label/value pair follows). Both stay inside the box: when even the name cannot fit it
+     ellipsizes — the row's title/aria still carry the complete text, and a
+     truncated row is never a different command because the composer receives
+     the Provider's own full value, not the painted label. */
+  [data-role='dsh.composer.completion-text'] {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex-shrink: 1;
+    color: var(--t1);
+  }
+  [data-role='dsh.composer.completion-description'] {
+    color: var(--t3);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex-shrink: 8;
+  }
+  [data-role='dsh.composer.completion-menu'] .sf-text {
+    padding: 2px 8px;
+    color: var(--t4);
+    font-family: var(--sans);
+    font-size: 11px;
+    line-height: 1.4;
   }
   [data-role='dsh.footer.group'] {
     display: flex;

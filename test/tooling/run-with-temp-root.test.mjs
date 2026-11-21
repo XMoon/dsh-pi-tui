@@ -9,9 +9,9 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { spawn, spawnSync } from 'node:child_process'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import {
@@ -152,6 +152,31 @@ test('the runner passes the child exit code through and removes its root', async
   const failed = run(['node', '-e', 'process.exit(5)'], { env })
   assert.equal(failed.status, 5)
   assert.deepEqual(readdirSync(isolatedTmp), [], 'a normal run must not leave a runner root behind')
+})
+
+test('checkout-local TMPDIR and its symlink do not contaminate the command runner', (t) => {
+  const life = testLifecycle(t)
+  const checkout = realpathSync(fileURLToPath(new URL('../../', import.meta.url)))
+  const checkoutTemp = join(checkout, 'temp')
+  mkdirSync(checkoutTemp, { recursive: true })
+  const inCheckout = life.tempDir('runner-in-checkout-', checkoutTemp)
+  const symlink = join(inCheckout, 'alias')
+  if (process.platform !== 'win32') symlinkSync(inCheckout, symlink, 'dir')
+
+  for (const base of process.platform === 'win32' ? [inCheckout] : [inCheckout, symlink]) {
+    const result = run([process.execPath, '-e',
+      'process.stdout.write(JSON.stringify([process.env.TMPDIR, process.env.TMP, process.env.TEMP]))'], {
+      env: { ...process.env, TMPDIR: base, TMP: base, TEMP: base, DSH_TEST_KEEP_TMP: undefined },
+    })
+    assert.equal(result.status, 0, result.stderr ?? result.error?.message)
+    const [root, tmp, temp] = JSON.parse(result.stdout)
+    assert.equal(tmp, root)
+    assert.equal(temp, root)
+    const rel = relative(checkout, root)
+    assert.ok(rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel),
+      `runner root must be outside the checkout, got ${root}`)
+    assert.equal(existsSync(root), false, 'the external runner root is removed after the child settles')
+  }
 })
 
 test('a child killed by a signal maps to 128+signo', () => {

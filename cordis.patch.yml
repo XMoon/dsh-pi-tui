@@ -11,6 +11,13 @@
     - id: tui-startup
       name: '@xmoon76/dsh-pi-tui/startup'
 
+    # M6-2A: the daemon Coordinator. Mounts ONLY when the startup row published
+    # `tuiDaemonStartup` (the daemon backend); it spawns the ONE foreground Client
+    # and owns its exit. It owns no Host, Session or Writer.
+    - id: pi-tui-daemon-launcher
+      name: '@xmoon76/dsh-pi-tui/daemon-launcher'
+      inject: [tuiDaemonStartup]
+
     # The extension platform (M3/E): the host provides the piTuiExtensions
     # service (third-party plugins inject it), the builtins row registers
     # the first-party chrome contributions through the SAME public API, and
@@ -19,10 +26,12 @@
     - id: pi-tui-extension-host
       name: '@xmoon76/dsh-pi-tui/extensions'
       inject: [tuiStartup]
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
 
     - id: pi-tui-builtins
       name: '@xmoon76/dsh-pi-tui/builtins'
       inject: [tuiStartup, piTuiExtensions]
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
 
     # The bundle's OWN Host performance projection (plan PR-1): the single
     # authority for the R5 / All model-request output rate and the recent TTFB.
@@ -35,6 +44,7 @@
     - id: pi-tui-performance-host
       name: '@xmoon76/dsh-pi-tui/performance-host'
       inject: [tuiStartup, sessionProjections]
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
 
     # Workspace file service (the OFFICIAL `@deepseek-ai/dsh-api-workspace-files`):
     # the ONE Host owner of the `workspaceFiles` Remote namespace the delivered-
@@ -47,6 +57,7 @@
     - id: workspace-files
       name: '@deepseek-ai/dsh-api-workspace-files'
       inject: [tuiStartup]
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
 
     # Visual tools: three Host tool definitions — the two generators
     # (`dsh_pi_tui_chart`, `dsh_pi_tui_svg`) and the publication tool
@@ -64,9 +75,53 @@
     # `present` and `agent-instructions` rows read). The result contract carries
     # no `presentationMeta` — the final durable content is the drawing's
     # admission source.
+    # M6-2A: a Host business row that does NOT gate on `tuiStartup`. In the
+    # daemon supervisor PID it must not register tools or own Host state; the
+    # real Host (detached local-host.mjs) owns them. Disabled only for the
+    # daemon supervisor, live in Direct / Host-only.
     - id: pi-tui-visual-tools
       name: '@xmoon76/dsh-pi-tui/visual-tools'
       inject: [tools, agents, sessionQuery, sessionProjections]
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+    # The ONE Host MCP manager: the official `@deepseek-ai/dsh-mcp-manager`
+    # service (`ctx.mcpManager`) that owns the profile's `mcp-manager.servers`
+    # fleet plus every plugin `register()`ed server, and exposes `list`/`watch`/
+    # `probe`/`restart` to the Host and the authenticated Remote. It is declared
+    # ONCE here as a SHARED Host row — deliberately NOT a Web row — so Direct
+    # owns it with the Web frontend off and a Split Host keeps the SAME instance
+    # across `/web` on/off. No `config.servers` is declared: the user's profile
+    # configuration is inherited through the same row id, and the loader commits
+    # live `servers` updates without remounting the row.
+    #
+    # `credentials` is the official provider the manager resolves
+    # `${credential:…}` entry templates through; the class's own static
+    # `inject: ['tools']` still supplies the tool registry. The daemon
+    # supervisor PID owns no Host business state, so the row is absent there
+    # exactly like the other Host-owned rows below.
+    - id: mcp-manager
+      name: '@deepseek-ai/dsh-mcp-manager'
+      inject: [credentials]
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+    # The profile-owned Web startup preference (M5-W PR-C): ONE durable boolean,
+    # `autoStart`, that a NEW Split Host reads BEFORE it becomes Ready. The row
+    # performs no work; it exists so the official Settings service projects the
+    # section and the Loader persists the user patch. It is deliberately NOT
+    # gated on `tuiStartup`: a Direct process also loads the profile and must be
+    # able to edit the preference for the Split Host it may start later.
+    - id: pi-tui-web-preferences
+      name: '@xmoon76/dsh-pi-tui/web-preferences'
+
+    # The profile-owned ACP startup preference (PO-1B): ONE durable boolean,
+    # `autoStart`, that a NEW Split Host reads BEFORE it becomes Ready to decide
+    # whether to bind the local ACP v1 Unix socket listener. The row performs no
+    # work; it exists so the official Settings service projects the section and
+    # the Loader persists the user patch. It is deliberately NOT gated on
+    # `tuiStartup`: a Direct process also loads the profile and must be able to
+    # edit the preference for the Split Host it may start later.
+    - id: pi-tui-acp-preferences
+      name: '@xmoon76/dsh-pi-tui/acp-preferences'
 
     # The OFFICIAL Host browser-callback listener for DeepSeek Account sign-in.
     # The account provider registers `/oauth/callback` on this instance while an
@@ -80,9 +135,28 @@
     - id: webserver
       name: '@deepseek-ai/dsh-host-webserver'
       inject: [tuiStartup]
+      # M6-2A: `webserver` is an app-boot REQUIRED entry. Under the daemon
+      # backend the CLI/supervisor PID publishes `tuiDaemonStartup` and must not
+      # serve (the real Host does); leaving the row enabled-but-pending on
+      # `tuiStartup` would fail startup with "1 required plugin did not
+      # activate". A conditional `disabled` makes the row legitimately absent in
+      # the daemon supervisor and live in Direct / Host-only graphs.
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
       config:
         host: 127.0.0.1
         port: 0
+
+    # The canonical profile-owned TUI preferences (M6 PR-A): the ONE hidden,
+    # profile-persisted Config carrier every backend reads — Direct, the Split
+    # Host and, through the Host settings wire, every Remote Client. It is a
+    # CONFIG-ONLY row: no TUI, Agent, Session, Gateway, timer or watcher. It is
+    # NOT gated on `tuiStartup` (a profile that runs `--help` still needs the
+    # canonical authority settled), and it is disabled only in the daemon
+    # supervisor, which owns no Host state. Its auto-generated settings page is
+    # hidden by the row itself; the TUI's own /settings drives it.
+    - id: pi-tui-preferences
+      name: '@xmoon76/dsh-pi-tui/preferences'
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
 
     - id: tui-app
       name: '@xmoon76/dsh-pi-tui'
@@ -105,6 +179,22 @@
       # are published, otherwise the Account page could start a sign-in the
       # Host cannot complete.
       inject: [tuiStartup, piTuiExtensions, authorization, workspaceRegistry, pluginManager, jobController, piTuiPerformanceReady, deepseekAccount, webServer]
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+      config:
+        sessionId: ''
+
+    # The Split Host's ONE built-in Host Runtime row (the private contribution
+    # plus its business services). It is DECLARED here, disabled by default, so
+    # its config belongs to this bundle patch and the USER profile can own every
+    # saved preference; the Host-only overlay only flips `disabled: false`.
+    # Declaring it in that overlay instead would make the official ConfigEditor
+    # refuse every save ("overridden by a home patch or command-line overlay"),
+    # because this row is the Split Host's ONE live TUI settings authority.
+    # Direct keeps the `tui-app` row and the daemon supervisor mounts neither.
+    - id: split-host-pi-tui-runtime
+      name: '@xmoon76/dsh-pi-tui/host-runtime'
+      inject: [typert, agents, fileReferences, workingDirectory, sessions, subprocess, workspaceRegistry, skills, agentPresets]
+      disabled: true
       config:
         sessionId: ''
 
@@ -118,6 +208,8 @@
     # no Connection, no transport.
     - id: job-controller
       name: '@deepseek-ai/dsh-api-job-controller'
+      # M6-2A: not gated on `tuiStartup`; must not mount in the daemon supervisor.
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
 
     # Host-owned workspace membership (`ctx.workspaceRegistry`): D2.4 Direct
     # fork mirrors the official Host rule (use the source's directly owning
@@ -131,6 +223,88 @@
     # documented in docs/architecture/host-client.md.
     - id: workspace
       name: '@deepseek-ai/dsh-workspace'
+      # M6-2A: mounting this row performs the official one-time history bootstrap
+      # that WRITES workspace records. The daemon supervisor must not write Host
+      # state, so it is disabled only under the daemon backend.
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+    # The ONE Host Workspace commands/follow owner over the registry above
+    # (`ctx.workspaceController`, Typert namespace `workspace`): the same
+    # official row ID the web bundle mounts, so a Direct Host and a Host-only
+    # Split Host expose one Workspace Remote authority instead of two. Gating on
+    # `tuiStartup` is Direct's command-line admission only (`--help` starts no
+    # Host mutation); the Host-only overlay removes exactly that dependency in
+    # place, and the class's own `static inject` still supplies
+    # `remoteAccess`/`typert`/`workspaceRegistry`. Mounting it registers the
+    # generated `workspace` Remote namespace; it creates no Workspace and no
+    # directory by itself.
+    - id: workspace-controller
+      name: '@deepseek-ai/dsh-api-workspace-controller'
+      inject: [tuiStartup]
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+    # The ONE official Host directory-browsing backend (`ctx.directoryPicker`,
+    # browse capability): the existing Workspace Controller mounts its
+    # `DirectoryPickerController` child over this seam, and that child is what
+    # serves the generated `directoryPicker/list` Remote verb. The browse
+    # backend is chosen deliberately instead of the `auto` package, which may
+    # pick the host-display `native` chooser and leave remote clients without
+    # listing primitives. Mounting it creates no Workspace and no directory.
+    # `tuiStartup` is Direct's command-line admission; the Host-only overlay
+    # removes exactly that dependency in place, and no overlay inserts a second
+    # picker row.
+    - id: directory-picker
+      name: '@deepseek-ai/dsh-host-directory-picker-browse'
+      inject: [tuiStartup]
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+    # ── Host Schedule management (S5-PR4) ──────────────────────────────────
+    # ONE Host Schedule domain shared by Direct and the Host-only Split
+    # overlay: the official durable task store, the single timer, the session
+    # FIFO and the delivery receipts all belong to this row. The Host-only
+    # overlay removes only the `tuiStartup` gate IN PLACE (`inject:
+    # [sessionController]`) and never inserts a second copy.
+    #
+    # `sessionController` is injected as a readiness barrier, not as a second
+    # owner: the Schedule runtime creates a `new`/`new_once` target Session
+    # through the one official Host Session controller, so the row must not
+    # arm its timer before that provider exists. The class's own inject still
+    # supplies agents/sessions/storageDomain/sessionPersistence, and
+    # `--help` (no tuiStartup) mounts neither this row nor the three Direct
+    # prerequisites below.
+    - id: pi-tui-schedule
+      name: '@deepseek-ai/dsh-schedule'
+      inject: [tuiStartup, sessionController]
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+    # The three OFFICIAL Direct activation prerequisites of a Schedule target
+    # that creates Sessions, declared exactly once for the Direct graph:
+    # `SessionController` injects `fileUploads`, and `FileUploads` injects the
+    # Host `connection`. They are the same packages the web bundle and the
+    # Split Host-only overlay mount; the Split overlay disables exactly these
+    # three Direct rows so one Host PID never holds two Connections, two
+    # FileUploads or two Session controllers. `trustedHosts: []` keeps the
+    # loopback listener and the listener's own bind IP as the only accepted
+    # authorities, and `nativeOpen: false` keeps the controller from opening a
+    # host-side native surface for a Remote client.
+    - id: pi-tui-direct-connection
+      name: '@deepseek-ai/dsh-client-connection'
+      inject: [tuiStartup, credentials, webServer]
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+      config:
+        trustedHosts: []
+
+    - id: pi-tui-direct-file-upload
+      name: '@deepseek-ai/dsh-client-file-upload'
+      inject: [tuiStartup, agents, attachments, commands, connection]
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+    - id: pi-tui-direct-session-controller
+      name: '@deepseek-ai/dsh-api-session-controller'
+      inject: [tuiStartup, agentDefaultModel, agents, attachments, fileUploads, fs, llm, remoteAccess, sessions, sessionProjections, sessionQuery, typert, typertGateway, workspaceRegistry]
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+      config:
+        nativeOpen: false
 
     # The OFFICIAL Host `@`-file reference authority (M3-3A): this row is
     # the same one the official web bundle mounts. It provides
@@ -144,6 +318,15 @@
     # historical send-time absolute-path rewrite is retired with it.
     - id: file-reference-local
       name: '@deepseek-ai/dsh-file-reference-local'
+      # M6-2A: not gated on `tuiStartup`; must not mount in the daemon supervisor.
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+    # Shared Host prompt guidance for delivered file links and present results.
+    # Independent of Web serving; inherited unchanged by Direct and Split Host.
+    - id: deliverable-file-references
+      name: '@deepseek-ai/dsh-deliverable-file-references'
+      # M6-2A: not gated on `tuiStartup`; must not mount in the daemon supervisor.
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
 
     # The 0.1.7 declarative preset registry: preset identity, revisions and
     # default/selection policy are registry-owned (deployment `default` here;
@@ -159,8 +342,9 @@
         default: standard
 
     # The official standard preset composes its `subagent` tool with
-    # `modelSelectionSettings: true`, which injects this Host-owned setting
-    # service — the row is required for the standard composition to mount.
+    # `modelSelection: true` + `modelDiscovery: true`, which injects this
+    # Host-owned setting service — the row is required for the standard
+    # composition to mount.
     # Mounting the service ALONE enables nothing: it only owns the
     # `subagent-model-selection` settings section (default enabled=false,
     # empty allowlist). Each NEW session samples that section at
@@ -194,8 +378,8 @@
 # their host infrastructure, `permission`, `approval`, `sandbox*`,
 # `fs-observation-policy`, `spill*`, `timeout-policy`, `repeat-tool-reminder`,
 # `session-*`, `token-meter`. The base's official `ptc-runtime` row also stays:
-# it provides `ptcRuntime`, which the `ptc` preset's `tool-presentation` row
-# waits for, and this overlay owns no second PTC runtime.
+# it provides `ptcRuntime`, which the `ptc` preset's `tool-executor-ptc` row
+# injects, and this overlay owns no second PTC runtime.
 # `command-goal` is disabled below and reintroduced
 # only by presets that own that command in their scoped composition.
 
@@ -241,9 +425,6 @@
 - id: tool-subagent-control
   disabled: true
 
-- id: tool-subagent-list-agents
-  disabled: true
-
 - id: tool-subagent
   disabled: true
 
@@ -264,3 +445,78 @@
 
 - id: tool-web
   disabled: true
+
+# ── M6-2A daemon-supervisor Host-business isolation ────────────────────────
+# Under the daemon backend the `dsh --profile pi-tui` CLI is a short-lived
+# supervisor; the real Host is the detached local-host.mjs. These are the
+# official dsh-base rows that would be a SECOND Host Session/Storage/Jobs/
+# Gateway/Account authority if they mounted in the supervisor, so they are
+# disabled for the daemon backend only (condition evaluated per entry; Direct
+# and Host-only never publish tuiDaemonStartup and keep every row unchanged).
+
+- id: session
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: session-log-deepseek
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: session-persistence-jsonl
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: session-query-sqlite
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: storage
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: storage-json
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: storage-domain
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: session-projection
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: session-projection-cache
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: session-title
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: session-title-llm
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: jobs
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: typert-gateway
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: remote-access
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: plugin-manager
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: plugin-package-inventory-deepseek
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: credentials
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: deepseek-account
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: authorization
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: otel
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: session-telemetry-otel
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
+- id: attachment-local
+  disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+

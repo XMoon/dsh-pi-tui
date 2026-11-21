@@ -117,14 +117,23 @@ function makeRunner(
         subscribe: () => undefined, onRequest: () => true, snapshot: () => undefined,
         claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const,
       },
-      onApprovalRequest: () => {}, setApprovalPolicy: () => true,
+      onApprovalRequest: () => {},
     },
     catalog: { models: { available: () => false } } as never,
     config: settingsDirectPageConfig({
       configReadiness: () => 'ready' as const,
       footerCustomItems: { rawForPersistence: () => rawUnavailable ? { kind: 'unavailable' as const } : rawFooterItems(fixture) },
       permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined },
-      subagentModelSelection: { available: () => false },
+      subagentLimits: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
+      subagentModelSelection: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
       web: { available: () => false },
       credentials: { available: () => false },
     }) as never,
@@ -178,8 +187,7 @@ function makeRunner(
       }
     },
     backendKind: 'direct' as const,
-    hostShellCompletion: true,
-    transcriptExportAvailable: true,
+    hostShellCompletion: { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) },
     forceContextMeasurementResult: () => ({ value: undefined, observation: 'unavailable' as const }),
     subscribeSessionScopeInvalidation: () => () => {},
     listScopedCommands: () => [],
@@ -219,7 +227,7 @@ function setup(options: {
   ctx.provide('commands', commands.service as never)
   ctx.provide('settings', {
     describe: () => [{
-      ns: 'tui-app',
+      ns: 'pi-tui-preferences',
       value: options.fixture?.document() ?? { footer: 'default' },
       user: {},
       revision: options.fixture?.revision() ?? 1,
@@ -272,7 +280,7 @@ function assertOneSettingsChrome(h: Harness): void {
     'exactly ONE Settings header is painted')
 }
 
-test('R5-L6-01 /footer deeplinks into the same lease, edits and saves through the one Footer transaction', async () => {
+test('/footer deeplinks into the same lease, edits and saves through the one Footer transaction', async () => {
   const h = setup({ fixture: createDirectSettingsFixture({ footer: 'default', footerCustomItems: [] }) })
   const result = await h.invoke('footer')
   assert.deepEqual(result, { kind: 'success' })
@@ -283,7 +291,7 @@ test('R5-L6-01 /footer deeplinks into the same lease, edits and saves through th
   assert.match(h.view(), /Settings · Appearance · Configure footer layout…/u, 'the Footer page is the Appearance child')
   assert.match(h.view(), /Footer layout · Select row/u, 'the shared pane header names the page')
   assert.match(h.view(), /Select row to edit/u, 'the row selector is painted')
-  assert.match(lastLine(h), /Esc Close/u, 'the ONE Action Bar is the physical last row')
+  assert.match(lastLine(h), /Close \[Esc\]/u, 'the ONE Action Bar is the physical last row')
 
   // Enter the row, remove the first item, walk back and save explicitly.
   await press(h.vt, '\r')
@@ -308,12 +316,12 @@ test('R5-L6-01 /footer deeplinks into the same lease, edits and saves through th
   h.app.stop()
 })
 
-test('R5-L6-01a browsing and Esc write nothing; a compact Confirm persists both modes and applies the live footer', async () => {
+test('browsing and Esc write nothing; a compact Confirm persists both modes and applies the live footer', async () => {
   const fixture = createDirectSettingsFixture({ footer: 'default' })
   const h = setup({ fixture })
   await h.invoke('settings')
   await frames(h.vt)
-  for (let step = 0; step < 4; step += 1) await press(h.vt, '\x1b[B')
+  for (let step = 0; step < 5; step += 1) await press(h.vt, '\x1b[B') // About -> General -> ... -> Appearance
   await press(h.vt, '\r')
   await press(h.vt, '\x1b[B')
   await press(h.vt, '\x1b[B')
@@ -335,12 +343,12 @@ test('R5-L6-01a browsing and Esc write nothing; a compact Confirm persists both 
   h.app.stop()
 })
 
-test('R5-L6-01d an unreadable USER footer layer refuses the mode write with zero calls', async () => {
+test('an unreadable USER footer layer refuses the mode write with zero calls', async () => {
   const fixture = createDirectSettingsFixture({ footer: 'default' })
   const h = setup({ fixture, rawUnavailable: true })
   await h.invoke('settings')
   await frames(h.vt)
-  for (let step = 0; step < 4; step += 1) await press(h.vt, '\x1b[B')
+  for (let step = 0; step < 5; step += 1) await press(h.vt, '\x1b[B') // About -> General -> ... -> Appearance
   await press(h.vt, '\r')
   await press(h.vt, '\x1b[B')
   await press(h.vt, '\x1b[B')
@@ -355,12 +363,12 @@ test('R5-L6-01d an unreadable USER footer layer refuses the mode write with zero
   h.app.stop()
 })
 
-test('R5-L6-01b the Footer mode writer seeds a custom layout and persists the restart fallback first', async () => {
+test('the Footer mode writer seeds a custom layout and persists the restart fallback first', async () => {
   const fixture = createDirectSettingsFixture({ footer: 'default', footerLayout: undefined })
   const h = setup({ fixture })
   await h.invoke('settings')
   await frames(h.vt)
-  for (let step = 0; step < 4; step += 1) await press(h.vt, '\x1b[B') // About -> Appearance
+  for (let step = 0; step < 5; step += 1) await press(h.vt, '\x1b[B') // About -> General -> ... -> Appearance
   await press(h.vt, '\r') // rows
   await press(h.vt, '\x1b[B') // Icon style
   await press(h.vt, '\x1b[B') // Status line mode
@@ -389,7 +397,7 @@ async function openEditorFromRows(
 ): Promise<void> {
   await h.invoke('settings')
   await frames(h.vt)
-  const categoryStep = target === 'footer' ? 4 : 6
+  const categoryStep = target === 'footer' ? 5 : 7
   for (let step = 0; step < categoryStep; step += 1) await press(h.vt, '\x1b[B')
   await press(h.vt, '\r') // the rail's Enter enters the Rows level
   assert.match(h.view(), target === 'footer'
@@ -431,7 +439,7 @@ for (const target of ['footer', 'keybindings'] as const) {
   }
 }
 
-test('R5-L6-02a ← is the back verb on the query-less Footer root page', async () => {
+test('← is the back verb on the query-less Footer root page', async () => {
   const footerFixture = createDirectSettingsFixture({ footer: 'default', footerCustomItems: [] })
   const footer = setup({ fixture: footerFixture })
   await footer.invoke('footer')
@@ -448,7 +456,7 @@ test('R5-L6-02a ← is the back verb on the query-less Footer root page', async 
   startedApps.delete(footer.app)
 })
 
-test('R5-L6-02f a dirty Footer turns the root-page ← into the in-page guard', async () => {
+test('a dirty Footer turns the root-page ← into the in-page guard', async () => {
   const fixture = createDirectSettingsFixture({ footer: 'default', footerCustomItems: [] })
   const h = setup({ fixture })
   await h.invoke('footer')
@@ -468,7 +476,7 @@ test('R5-L6-02f a dirty Footer turns the root-page ← into the in-page guard', 
   startedApps.delete(h.app)
 })
 
-test('R5-L6-02e ← is the back verb on the query-less Keyboard root list', async () => {
+test('← is the back verb on the query-less Keyboard root list', async () => {
   const keyboard = setup({ fixture: createDirectSettingsFixture({ footer: 'default' }) })
   await keyboard.invoke('keybindings')
   await frames(keyboard.vt)
@@ -483,7 +491,7 @@ test('R5-L6-02e ← is the back verb on the query-less Keyboard root list', asyn
   startedApps.delete(keyboard.app)
 })
 
-test('R5-L6-02d ← with a non-empty keybinding query edits the search and never leaves the page', async () => {
+test('← with a non-empty keybinding query edits the search and never leaves the page', async () => {
   const h = setup({ fixture: createDirectSettingsFixture({ footer: 'default' }) })
   await h.invoke('keybindings')
   await frames(h.vt)
@@ -498,7 +506,7 @@ test('R5-L6-02d ← with a non-empty keybinding query edits the search and never
   h.app.stop()
 })
 
-test('R5-L6-02 a dirty Footer Esc opens the in-page guard; Keep writes nothing and stays, Discard closes without a write', async () => {
+test('a dirty Footer Esc opens the in-page guard; Keep writes nothing and stays, Discard closes without a write', async () => {
   const h = setup({ fixture: createDirectSettingsFixture({ footer: 'default', footerCustomItems: [] }) })
   await h.invoke('footer')
   await frames(h.vt)
@@ -528,7 +536,7 @@ test('R5-L6-02 a dirty Footer Esc opens the in-page guard; Keep writes nothing a
   h.app.stop()
 })
 
-test('R5-L6-02b a category rail press cannot bypass a dirty Footer guard', async () => {
+test('a category rail press cannot bypass a dirty Footer guard', async () => {
   const fixture = createDirectSettingsFixture({ footer: 'default', footerCustomItems: [] })
   const h = setup({ columns: 120, rows: 40, fixture })
   await h.invoke('footer')
@@ -552,7 +560,7 @@ test('R5-L6-02b a category rail press cannot bypass a dirty Footer guard', async
   h.app.stop()
 })
 
-test('R5-L6-02g a forced Settings workspace close still surfaces a failed Footer write', async () => {
+test('a forced Settings workspace close still surfaces a failed Footer write', async () => {
   const fixture = createDirectSettingsFixture({ footer: 'default', footerCustomItems: [] })
   let releaseReplace!: () => void
   let signalStarted!: () => void
@@ -591,7 +599,7 @@ test('R5-L6-02g a forced Settings workspace close still surfaces a failed Footer
   startedApps.delete(h.app)
 })
 
-test('R5-L6-02c a forced Settings workspace close keeps the committed Footer write but never revives the page', async () => {
+test('a forced Settings workspace close keeps the committed Footer write but never revives the page', async () => {
   const fixture = createDirectSettingsFixture({ footer: 'default', footerCustomItems: [] })
   let releaseReplace!: () => void
   let signalStarted!: () => void
@@ -639,7 +647,7 @@ test('R5-L6-02c a forced Settings workspace close keeps the committed Footer wri
   startedApps.delete(h.app)
 })
 
-test('R5-L6-03 bare /keybindings deeplinks into the same lease; recording writes the USER document and applies the live keymap', async () => {
+test('bare /keybindings deeplinks into the same lease; recording writes the USER document and applies the live keymap', async () => {
   const h = setup({ fixture: createDirectSettingsFixture({ footer: 'default' }) })
   const result = await h.invoke('keybindings')
   assert.deepEqual(result, { kind: 'success' })
@@ -647,7 +655,7 @@ test('R5-L6-03 bare /keybindings deeplinks into the same lease; recording writes
   assertOneSettingsChrome(h)
   assert.match(h.view(), /Settings · Input & Terminal · Keyboard shortcuts…/u)
   assert.match(h.view(), /Search: type to filter/u)
-  assert.match(lastLine(h), /Esc close/u)
+  assert.match(lastLine(h), /Back \[Esc\]/u)
 
   await press(h.vt, 'submit')
   await press(h.vt, '\r') // action detail
@@ -679,7 +687,7 @@ test('R5-L6-03 bare /keybindings deeplinks into the same lease; recording writes
   h.app.stop()
 })
 
-test('R5-L6-03a a pending keybinding write owns the detail page until its result is painted', async () => {
+test('a pending keybinding write owns the detail page until its result is painted', async () => {
   const fixture = createDirectSettingsFixture({ footer: 'default' })
   let releaseReplace!: () => void
   let signalStarted!: () => void
@@ -720,13 +728,13 @@ test('R5-L6-03a a pending keybinding write owns the detail page until its result
   startedApps.delete(h.app)
 })
 
-test('R5-L6-04 low viewports keep ONE physical Action Bar and never paint an oversized page', async () => {
+test('low viewports keep ONE physical Action Bar and never paint an oversized page', async () => {
   for (const [columns, rows] of [[44, 8], [44, 20], [80, 24]] as const) {
     const h = setup({ columns, rows, fixture: createDirectSettingsFixture({ footer: 'default' }) })
     await h.invoke('footer')
     await frames(h.vt)
     assertOneSettingsChrome(h)
-    assert.match(lastLine(h), /Esc (?:Close|Back)/u, `the bar is the last row at ${columns}x${rows}`)
+    assert.match(lastLine(h), /(?:Close|Back) \[Esc\]/u, `the bar is the last row at ${columns}x${rows}`)
     assert.match(h.view(), /Select row to edit|Row 1/u, `the selector body is painted at ${columns}x${rows}`)
     const footerRoot = (h.app as unknown as {
       workspaceLease?: { panel: { render(width: number): string[] } }
@@ -747,7 +755,7 @@ test('R5-L6-04 low viewports keep ONE physical Action Bar and never paint an ove
     await k.invoke('keybindings')
     await frames(k.vt)
     assertOneSettingsChrome(k)
-    assert.match(lastLine(k), /Esc (?:close|clear)/u, `the keyboard bar is the last row at ${columns}x${rows}`)
+    assert.match(lastLine(k), /(?:Back|Clear) \[Esc\]/u, `the keyboard bar is the last row at ${columns}x${rows}`)
     assert.match(k.view(), /Search:/u, `the keyboard search/body is painted at ${columns}x${rows}`)
     const keyboardRoot = (k.app as unknown as {
       workspaceLease?: { panel: { render(width: number): string[] } }
@@ -762,7 +770,7 @@ test('R5-L6-04 low viewports keep ONE physical Action Bar and never paint an ove
   }
 })
 
-test('R5-L6-04d a bar-only Keybinding grant cannot act on hidden controls', async () => {
+test('a bar-only Keybinding grant cannot act on hidden controls', async () => {
   // The Settings root can grant a specialist as little as the ONE Action Bar
   // (its own low-terminal floor). Find whether the real root reaches that
   // grant; if it does, a key that would act on an unpainted control must be
@@ -805,7 +813,7 @@ test('R5-L6-04d a bar-only Keybinding grant cannot act on hidden controls', asyn
   assert.equal(sawBarOnly, true, 'the real root really can grant a bar-only Keybinding frame')
 })
 
-test('R5-L6-03b a settled-but-unpainted keybinding result survives non-Esc keys and the root lock', async () => {
+test('a settled-but-unpainted keybinding result survives non-Esc keys and the root lock', async () => {
   const fixture = createDirectSettingsFixture({ footer: 'default' })
   const base = fixture.settings
   let releaseReplace!: () => void
@@ -842,7 +850,7 @@ test('R5-L6-03b a settled-but-unpainted keybinding result survives non-Esc keys 
   startedApps.delete(h.app)
 })
 
-test('R5-L6-04b a press whose frame moves under a resize cannot activate the repainted row', async () => {
+test('a press whose frame moves under a resize cannot activate the repainted row', async () => {
   const h = setup({ columns: 100, rows: 30, fixture: createDirectSettingsFixture({ footer: 'default' }) })
   await h.invoke('footer')
   await frames(h.vt)
@@ -860,12 +868,12 @@ test('R5-L6-04b a press whose frame moves under a resize cannot activate the rep
   h.app.stop()
 })
 
-test('R5-L6-04c a stored command-mode footer is reported as manual and never offered as a candidate', async () => {
+test('a stored command-mode footer is reported as manual and never offered as a candidate', async () => {
   const h = setup({ fixture: createDirectSettingsFixture({ footer: 'command', footerCommand: { schemaVersion: 1, command: 'echo hi' } }) })
   await h.invoke('settings')
   await frames(h.vt)
   // Appearance -> Status line mode.
-  for (let step = 0; step < 4; step += 1) await press(h.vt, '\x1b[B')
+  for (let step = 0; step < 5; step += 1) await press(h.vt, '\x1b[B') // About -> General -> ... -> Appearance
   await press(h.vt, '\r')
   await press(h.vt, '\x1b[B')
   await press(h.vt, '\x1b[B')
@@ -880,7 +888,7 @@ test('R5-L6-04c a stored command-mode footer is reported as manual and never off
   h.app.stop()
 })
 
-test('R5-L6-07 a page factory failure after the lease is a real command error, never a silent row', async () => {
+test('a page factory failure after the lease is a real command error, never a silent row', async () => {
   // The preflight read succeeds; the page factory's later read fails (a real
   // race). The command must close the just-leased Settings screen and return an
   // error — not leave an empty row or a second overlay behind.
@@ -923,7 +931,7 @@ test('R5-L6-07 a page factory failure after the lease is a real command error, n
   startedApps.delete(keyboard.app)
 })
 
-test('R5-L6-05 a failed Footer write keeps the dirty page and never applies the runtime layout', async () => {
+test('a failed Footer write keeps the dirty page and never applies the runtime layout', async () => {
   const fixture = createDirectSettingsFixture({ footer: 'default', footerCustomItems: [] })
   const failing: TuiSettingsLike = {
     get: () => fixture.settings.get(),
@@ -944,7 +952,7 @@ test('R5-L6-05 a failed Footer write keeps the dirty page and never applies the 
   h.app.stop()
 })
 
-test('R5-L6-06 a throwing settings document is a real command error, never a fake page or overlay', async () => {
+test('a throwing settings document is a real command error, never a fake page or overlay', async () => {
   const h = setup({
     settings: {
       get: () => { throw new Error('settings read exploded') },

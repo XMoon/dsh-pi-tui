@@ -25,10 +25,13 @@
  *   `@xmoon76/dsh-pi-tui`-named stand-in (the exact-name Current-TUI
  *   negative-control target). Both are manifests only; no package process runs.
  *
+ * - the S5-PR2 update path: one real registry install of 1.0.0 seeded through
+ *   the Host, then the official `listVersions`/`updateBundle` and forwarded
+ *   `plugin-manager/update-state` over the generated Remote, driven from the
+ *   real `/plugins` page to the durable 1.1.0 profile dependency
+ *
  * DELIBERATELY ABSENT
- * - real package installation (the network/pnpm install L6-F scenario is
- *   retained at the L5 Remote-event level, the `L5:` scenario below; this suite
- *   does not claim it as L6)
+ * - public npm credentials/endpoints (the registry is loopback and test-owned)
  * - Task Center / child viewer, Job viewer, public Remote selector, global
  *   reconnect/HMR closure outside the Plugin Manager invalidation
  *
@@ -43,7 +46,7 @@ import { afterEach, test } from 'node:test'
 import { Config as TuiConfigSchema } from '../../../src/index.ts'
 import { TuiApp } from '../../../src/tui-app.ts'
 import { applyRunnerWithRuntime } from '../../../src/app/bootstrap.ts'
-import { createRemoteApplicationRuntime } from '../../../src/app/remote/runtime.ts'
+import { createRemoteApplicationRuntime } from '../../support/m3-inprocess/application-runtime.ts'
 import type { RemoteApplicationOverride } from '../../../src/app/application-runtime.ts'
 import { PI_TUI_EXTENSIONS_SERVICE } from '../../../src/extensions.ts'
 import { RemotePluginManagerPort } from '../../../src/runtime/remote/plugin-manager-remote.ts'
@@ -52,6 +55,8 @@ import { waitFor } from '../../support/remote-application-fixture.ts'
 import { testLifecycle, type TestLifecycle } from '../../support/temp-lifecycle.ts'
 import { installVirtualProcessTerminal } from '../../support/runner-harness.ts'
 import { VirtualTerminal } from '../../support/virtual-terminal.ts'
+import { packFixturePackage, startLocalNpmRegistry } from '../../support/local-npm-registry.ts'
+import type { PluginUpdateProgressFact } from '../../../src/runtime/plugin-manager-port.ts'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
@@ -77,6 +82,14 @@ function bundleLine(viewport: readonly string[], bundleName: string): string | u
   return plain(viewport).split('\n').find(line => line.includes(bundleName))
 }
 
+/** The rendered line carrying one bundle name AND its status chip: in the
+ *  dual List|Details frame the Detail title also names the bundle, so the chip
+ *  row is the list row, not the first name match. */
+function bundleChipLine(viewport: readonly string[], bundleName: string): string | undefined {
+  return plain(viewport).split('\n')
+    .find(line => line.includes(bundleName) && /\[(?:enabled|disabled)\]/u.test(line))
+}
+
 async function settle(ms = 80): Promise<void> {
   await new Promise(resolve => setTimeout(resolve, ms))
 }
@@ -100,15 +113,26 @@ async function mountPluginManagerRunner(
      * the negative-control authority (present on the Host Context, never
      * reported by the selected Remote TUI extension runtime). */
     readonly hostExtensionBadge?: { readonly id: string; readonly text: string }
+    /** Replace the default installed fixture profile (the S5-PR2 update test
+     *  seeds its own real registry install into an EMPTY profile). */
+    readonly pluginManagerProfile?: boolean | { readonly emptyProfile?: boolean }
+    /** Isolate HOME/XDG/npm caches for a real registry `pnpm` operation. */
+    readonly isolateHome?: boolean
+    /** Run REAL Host setup (for example a registry install) before the Remote
+     *  application runtime and the runner mount. */
+    readonly seed?: (host: Awaited<ReturnType<typeof import('../../support/remote-application-fixture.ts')['createRemoteApplicationHostFixture']>>) => Promise<void>
   } = {},
 ): Promise<Fixture> {
   const { createRemoteApplicationHostFixture, PLUGIN_MANAGER_FIXTURE_BUNDLE } =
     await import('../../support/remote-application-fixture.ts')
   const host = await createRemoteApplicationHostFixture(life, 'm3-5-pr4-plugin-preset', {
-    pluginManagerProfile: true,
+    pluginManagerProfile: options.pluginManagerProfile ?? true,
+    ...(options.isolateHome === true ? { isolateHome: true } : {}),
   })
   assert.ok(host.pluginManager !== undefined)
   assert.equal(host.pluginManager.bundleName, PLUGIN_MANAGER_FIXTURE_BUNDLE)
+
+  if (options.seed !== undefined) await options.seed(host)
 
   const runnerCtx = host.ctx
   const { TUI_STARTUP_SERVICE } = await import('../../../src/startup.ts')
@@ -229,8 +253,11 @@ async function selectListRow(vt: VirtualTerminal, name: string): Promise<void> {
 /**
  * The real user mutation path over the ALREADY-OPEN list: select the fixture
  * bundle, open its detail and activate the official Enable action, then wait
- * for the authoritative reread to repaint the enabled truth. Returns with the
- * panel in DETAIL mode.
+ * for the authoritative reread to repaint the enabled truth. The reread keeps
+ * the list `busy` until it commits (the controller clears `busyValue` only
+ * after the authoritative read returns), so the Detail `Disable` alone is NOT
+ * a settled frame: the list chip is waited for too. Returns with the panel in
+ * DETAIL mode.
  */
 async function enableFixtureBundleThroughPanel(fixture: Fixture, bundle: string): Promise<void> {
   await selectListRow(fixture.vt, bundle)
@@ -245,6 +272,8 @@ async function enableFixtureBundleThroughPanel(fixture: Fixture, bundle: string)
   fixture.vt.sendInput('\r')
   await waitFor('the panel repaints the enabled truth from the authoritative reread', () =>
     /\bDisable\b/.test(plain(fixture.vt.getViewport())), 20_000)
+  await waitFor('the authoritative reread paints the settled enabled chip', () =>
+    (bundleChipLine(fixture.vt.getViewport(), bundle) ?? '').includes('[enabled]'), 20_000)
 }
 
 test('the real Remote /plugins reads the real Host PluginManager through the generated Remote', async (t) => {
@@ -421,10 +450,10 @@ test('the Settings → Plugins entry hosts the SAME Remote controller/panel and 
 
   submit(fixture, '/settings')
   await waitFor('the Settings workspace opens', () => /Settings · Categories/.test(plain(fixture.vt.getViewport())), 20_000)
-  // The workspace opens on its About home; the rail order is About, Models,
-  // Account, Agent, Appearance, Conversation, Input & Terminal, Tools, Plugins,
-  // so eight Down presses reach Plugins.
-  for (let step = 0; step < 8; step += 1) fixture.vt.sendInput('\x1b[B')
+  // The workspace opens on its About home; the rail order is About, General,
+  // Models, Account, Agent, Appearance, Conversation, Input & Terminal, Tools,
+  // Plugins, so nine Down presses reach Plugins.
+  for (let step = 0; step < 9; step += 1) fixture.vt.sendInput('\x1b[B')
   await fixture.vt.waitForRender()
   fixture.vt.sendInput('\r')
   await waitFor('the Plugin Manager page is hosted by Settings', () =>
@@ -477,9 +506,11 @@ test('one real Remote mutation reaches Host authority and the authoritative rere
   // reread — not from the operation reply.
   await waitFor('the Host profile truth is written', () =>
     profile.selectedBundles().includes(bundle), 20_000)
-  const detail = plain(fixture.vt.getViewport())
-  assert.match(detail, /Enabled\s+Yes/, 'the reread renders the enabled status')
-  assert.doesNotMatch(detail, /Enabled\s+No/, 'the stale disabled truth is gone')
+  // The list row's status chip is the truthful reread projection; the Detail
+  // label is `Selected in profile` (the Host selection, never a run claim).
+  const rereadLine = bundleChipLine(fixture.vt.getViewport(), bundle) ?? ''
+  assert.match(rereadLine, /\[enabled\]/u, 'the reread renders the enabled status')
+  assert.doesNotMatch(rereadLine, /\[disabled\]/u, 'the stale disabled truth is gone')
 
   // Truthful disposition: no hmr in this composition, so the Host reports
   // restart-required rather than pretending a live application.
@@ -507,7 +538,7 @@ test('an external Host change invalidates an open Remote panel with no manual re
   // No `R` key is ever sent: only the invalidation-driven authoritative reread
   // can repaint the already-open panel.
   await waitFor('the open panel repaints from the externally changed Host truth', () =>
-    (bundleLine(fixture.vt.getViewport(), bundle) ?? '').includes('[enabled]'), 20_000)
+    (bundleChipLine(fixture.vt.getViewport(), bundle) ?? '').includes('[enabled]'), 20_000)
 })
 
 test('a new Connection generation rereads authoritative truth without replaying the prior mutation', async (t) => {
@@ -652,7 +683,11 @@ test('a Remote mutation reply carried by a superseded Connection generation neve
   fixture.vt.sendInput('\r')
   await replyReached
   await waitFor('the real Host write is dispatched exactly once', () => hostWrites === 1, 20_000)
-  assert.match(plain(fixture.vt.getViewport()), /Enabled\s+No/, 'the pending operation has not repainted the Host truth')
+  // The Detail `Selected in profile` fact wraps onto the following physical
+  // row in the dual frame, so it is matched with one bounded wildcard. The
+  // chip can read `busy` while the Host reply is withheld.
+  assert.match(plain(fixture.vt.getViewport()), /Selected in profile[\s\S]{0,160}?\bNo\b/u,
+    'the pending operation has not repainted the Host truth')
 
   // Switch the official Connection generation while the operation is pending.
   const connection = fixture.aggregate.wire.client.connection as unknown as {
@@ -668,7 +703,7 @@ test('a Remote mutation reply carried by a superseded Connection generation neve
   // The new generation's authoritative inventory reread is the only painter:
   // the real Host write really happened, so the truth is enabled.
   await waitFor('the new generation reread paints the authoritative enabled truth', () =>
-    /Enabled\s+Yes/.test(plain(fixture.vt.getViewport())), 20_000)
+    /Selected in profile[\s\S]{0,160}?\bYes\b/u.test(plain(fixture.vt.getViewport())), 20_000)
 
   // Now the old-generation reply lands on the new surface.
   releaseReply()
@@ -683,6 +718,145 @@ test('a Remote mutation reply carried by a superseded Connection generation neve
     'the notice names the authoritative reread as the decision owner')
   assert.doesNotMatch(view, /enable\/disable failed/,
     'the applied mutation is never presented as a definite failure')
-  assert.match(view, /Enabled\s+Yes/, 'the authoritative inventory still paints the applied truth')
+  assert.match(plain(fixture.vt.getViewport()), /Selected in profile[\s\S]{0,160}?\bYes\b/u,
+    'the authoritative inventory still paints the applied truth')
   assert.deepEqual([...profile.selectedBundles()], [bundle], 'the durable Host truth is exactly the one real write')
+})
+
+// ── S5-PR2: real Remote registry update L6 ──────────────────────────────────
+
+const REMOTE_UPDATE_BUNDLE = 'dsh-s5-pr2-l6-update-bundle'
+
+function remoteUpdatePackage(version: string, root: string): ReturnType<typeof packFixturePackage> {
+  return packFixturePackage(root, {
+    name: REMOTE_UPDATE_BUNDLE,
+    version,
+    manifest: {
+      name: REMOTE_UPDATE_BUNDLE,
+      version,
+      main: 'index.js',
+      dsh: { bundle: { patch: 'cordis.patch.yml' } },
+    },
+    files: { 'cordis.patch.yml': '[]\n', 'index.js': `export default function v${version.replace(/\W/g, '')}() {}\n` },
+  }, { directory: 'package', tarballDirectory: 'tarball' })
+}
+
+test('the REAL runner /plugins drives one registry update through the generated Remote', async (t) => {
+  const life = testLifecycle(t)
+  const packRoot = life.tempDir('s5-pr2-l6-update-pack-')
+  const from = remoteUpdatePackage('1.0.0', join(packRoot, 'from'))
+  const to = remoteUpdatePackage('1.1.0', join(packRoot, 'to'))
+  const fromManifest = { name: REMOTE_UPDATE_BUNDLE, version: '1.0.0', main: 'index.js', dsh: { bundle: { patch: 'cordis.patch.yml' } } }
+  const toManifest = { name: REMOTE_UPDATE_BUNDLE, version: '1.1.0', main: 'index.js', dsh: { bundle: { patch: 'cordis.patch.yml' } } }
+  const registry = await startLocalNpmRegistry(from, {
+    manifest: fromManifest,
+    additionalVersions: [{ packed: to, manifest: toManifest, tags: ['latest'] }],
+  })
+  life.defer(() => registry.close())
+
+  let updateDispatches = 0
+  const fixture = await mountPluginManagerRunner(life, {
+    pluginManagerProfile: { emptyProfile: true },
+    isolateHome: true,
+    seed: async (host) => {
+      const { symbols } = await import('@deepseek-ai/cordis')
+      const proxy = host.ctx.get('pluginManager') as unknown as Record<symbol, unknown> & {
+        installBundle(spec: string, options?: { registry?: string; enabled?: boolean }): Promise<{ version?: string }>
+        updateBundle(name: string, version: string, options?: unknown): Promise<unknown>
+      }
+      const service = (proxy[symbols.original] ?? proxy) as typeof proxy
+      const installed = await service.installBundle(`${REMOTE_UPDATE_BUNDLE}@1.0.0`, {
+        registry: registry.url,
+        enabled: true,
+      })
+      assert.equal(installed.version, '1.0.0', 'the fixture profile holds the real registry 1.0.0')
+      const original = service.updateBundle
+      service.updateBundle = function patchedUpdate(this: unknown, name: string, version: string, options?: unknown): Promise<unknown> {
+        updateDispatches += 1
+        return original.call(this, name, version, options)
+      }
+      life.defer(() => { service.updateBundle = original })
+    },
+  })
+  const profile = fixture.host.pluginManager!
+  const port = fixture.aggregate.selected.backend.pluginManager
+  const progress: PluginUpdateProgressFact[] = []
+  const disposeProgress = port.subscribeUpdate(update => progress.push(update))
+  life.defer(disposeProgress)
+
+  submit(fixture, '/plugins')
+  await waitFor('the registry bundle is listed', () =>
+    plain(fixture.vt.getViewport()).includes(REMOTE_UPDATE_BUNDLE), 20_000)
+  // Explicit search keeps the long catalog out of the way.
+  fixture.vt.sendInput('/')
+  for (const character of REMOTE_UPDATE_BUNDLE) fixture.vt.sendInput(character)
+  fixture.vt.sendInput('\r')
+  await fixture.vt.waitForRender()
+  await selectListRow(fixture.vt, REMOTE_UPDATE_BUNDLE)
+  fixture.vt.sendInput('\r')
+  await waitFor('the Details focus frame', () =>
+    /\[Details\]/.test(plain(fixture.vt.getViewport())), 20_000)
+  fixture.vt.sendInput('\x1b[B') // Disable… -> Check updates…
+  await fixture.vt.waitForRender()
+  // Enter either reveals the action or activates it; the selection never
+  // moves off Check updates…, so every attempt names the same action.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (plain(fixture.vt.getViewport()).includes('Update bundle ·')) break
+    fixture.vt.sendInput('\r')
+    await fixture.vt.waitForRender()
+  }
+  await waitFor('the Update page identity', () =>
+    plain(fixture.vt.getViewport()).includes(`Update bundle · ${REMOTE_UPDATE_BUNDLE}`), 30_000)
+  await waitFor('the Host listVersions target over the wire', () =>
+    /\b1\.1\.0\b/.test(plain(fixture.vt.getViewport())), 30_000)
+  fixture.vt.sendInput('\r')
+  await waitFor('the confirmation frame', () =>
+    /From\s+1\.0\.0/.test(plain(fixture.vt.getViewport())), 20_000)
+  fixture.vt.sendInput('\x1b[A') // Cancel -> Confirm update
+  await fixture.vt.waitForRender()
+  fixture.vt.sendInput('\r')
+
+  // The durable Host profile now holds 1.1.0: the update write traversed the
+  // generated Remote into the real Host.
+  await waitFor('the Host profile dependency 1.1.0', () => {
+    const manifest = JSON.parse(readFileSync(join(profile.profileDir, 'package.json'), 'utf8')) as {
+      dependencies?: Record<string, string>
+    }
+    return manifest.dependencies?.[REMOTE_UPDATE_BUNDLE] === '1.1.0'
+  }, 90_000)
+  await waitFor('the authoritative reread frame', () =>
+    /Observed installed version\s+1\.1\.0/.test(plain(fixture.vt.getViewport())), 30_000)
+  assert.equal(updateDispatches, 1, 'exactly one Host updateBundle dispatch')
+  assert.ok(progress.every(update => update.requestId.length > 0))
+  assert.ok(progress.some(update => update.step === 'checking'), 'the Host checking step crossed the wire')
+  assert.ok(progress.some(update => update.step === 'installing'), 'the Host installing step crossed the wire')
+})
+
+test('the forwarded plugin-manager/update-state reaches the Remote adapter over the real wire', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = await mountPluginManagerRunner(life)
+  const port = fixture.aggregate.selected.backend.pluginManager
+  const received: PluginUpdateProgressFact[] = []
+  const dispose = port.subscribeUpdate(progress => received.push(progress))
+  life.defer(dispose)
+  // The CONTROL subscription is the delivery barrier: the same event that the
+  // disposed subscription must not receive is proven to have crossed the real
+  // wire because this live listener observes it. No arbitrary sleep is needed.
+  const control: PluginUpdateProgressFact[] = []
+  const disposeControl = port.subscribeUpdate(progress => control.push(progress))
+  life.defer(disposeControl)
+
+  const emit = fixture.host.ctx.emit as unknown as (name: string, payload: unknown) => void
+  emit('plugin-manager/update-state', { requestId: 'pr6-update-1', step: 'checking' })
+  emit('plugin-manager/update-state', { requestId: 'pr6-update-1', step: 'restoring' })
+  await waitFor('the forwarded update events arrive over the real wire', () => received.length === 2 && control.length === 2, 20_000)
+  assert.deepEqual(received, [
+    { requestId: 'pr6-update-1', step: 'checking' },
+    { requestId: 'pr6-update-1', step: 'restoring' },
+  ])
+  dispose()
+  emit('plugin-manager/update-state', { requestId: 'pr6-update-2', step: 'installing' })
+  await waitFor('the control listener receives the post-disposal event', () => control.length === 3, 20_000)
+  assert.equal(received.length, 2, 'a disposed update subscription delivers nothing later')
+  assert.deepEqual(control.at(-1), { requestId: 'pr6-update-2', step: 'installing' })
 })

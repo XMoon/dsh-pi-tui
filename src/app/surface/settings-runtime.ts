@@ -82,7 +82,7 @@ export interface SettingsRuntimeDeps {
   readonly surface: SettingsSurface
   /** The runner lifetime signal (the footer command runners share it). */
   readonly signal: AbortSignal
-  readonly tuiSettings: SettingsDocLike
+  readonly tuiSettings: SettingsDocLike | undefined
   /** Persistence-availability gate only (the Direct forms adapter stays in the
    *  composition root; the owner never calls it). */
   readonly settingsForms: unknown
@@ -401,7 +401,7 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
     // retried while the runtime is already on that preset.
     if (result.kind === 'applied') deps.status.refresh()
     const settings = deps.tuiSettings
-    if (deps.settingsForms !== undefined) {
+    if (settings !== undefined) {
       runDetached('settings display preset write', () => serializeTuiSettingsMutation(
          settings,
          () => settings.replace({ ...settings.get(), footerCustomItems: userFooterCustomItemsForSave(), displayPreset: preset }),
@@ -422,7 +422,7 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
    */
   const setFullscreen = (fullscreen: boolean): void => {
     const settings = deps.tuiSettings
-    if (deps.settingsForms !== undefined) {
+    if (settings !== undefined) {
       runDetached('settings fullscreen write', () => serializeTuiSettingsMutation(
         settings,
         () => settings.replace({ ...settings.get(), footerCustomItems: userFooterCustomItemsForSave(), fullscreen: fullscreen ? 'on' : 'off' }),
@@ -598,7 +598,7 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
       ? deps.backend.config.footerCustomItems.get()
       : { items: [], invalidCount: 0 }
     return resolveTspNativeFooterConfig({
-      doc: deps.tuiSettings.get(),
+      doc: deps.tuiSettings?.get(),
       readiness,
       userItems,
     })

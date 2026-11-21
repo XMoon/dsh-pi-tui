@@ -159,9 +159,18 @@ test('the waiter closes the registration gap between its first read and the watc
   // Negative control: the SAME probe against the frozen read-then-watch
   // implementation must time out, so this case fails for the old algorithm
   // instead of passing on superficial output shape.
-  const frozenHelper = join(dir, 'frozen-old-wait-for-file.mjs')
-  writeFileSync(frozenHelper, FROZEN_OLD_WAIT_FOR_FILE)
-  const stale = runProbe(frozenHelper, join(dir, 'frozen-marker.log'))
-  assert.equal(stale.status, 3, stale.stdout + stale.stderr)
-  assert.match(stale.stderr, /no line matching/u)
+  //
+  // Linux-only by construction: the gap exists because inotify never emits an
+  // event for a write that happened before watch() created its descriptor.
+  // macOS FSEvents REPLAYS recent directory history to a new stream, so the
+  // frozen algorithm observably works there — the timeout is a property of
+  // the inotify backend, not of the algorithm. The positive control above is
+  // the platform-independent contract.
+  if (process.platform === 'linux') {
+    const frozenHelper = join(dir, 'frozen-old-wait-for-file.mjs')
+    writeFileSync(frozenHelper, FROZEN_OLD_WAIT_FOR_FILE)
+    const stale = runProbe(frozenHelper, join(dir, 'frozen-marker.log'))
+    assert.equal(stale.status, 3, stale.stdout + stale.stderr)
+    assert.match(stale.stderr, /no line matching/u)
+  }
 })

@@ -60,9 +60,19 @@ export function waitForFileLine(file: string, pattern: RegExp, deadlineMs: numbe
       if (name !== undefined && String(name) !== basename(file)) return
       check()
     })
+    // macOS FSEvents can silently drop the write event that lands in the SAME
+    // tick the FIRST watcher of a heavily-churning process is armed (the
+    // Darwin split lanes run exactly that shape). The drop is of the EVENT,
+    // never of the CONTENT: one content re-read on the next macrotask and one
+    // short-later re-read close that window by re-reading the CURRENT file.
+    // Both are content facts, not clock waits.
+    const deferredCheck = setImmediate(check)
+    const deferredTimer = setTimeout(check, 50)
     // reason: a bounded deadline around a file event, not a settle window — the
     // fixture writes its line synchronously when it reaches the state.
     timer = setTimeout(() => {
+      clearTimeout(deferredTimer)
+      clearImmediate(deferredCheck)
       let content: string
       try {
         content = existsSync(file) ? readFileSync(file, 'utf8') : '(the file does not exist)'

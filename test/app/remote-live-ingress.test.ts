@@ -96,7 +96,9 @@ interface SinkLog {
   refolds: string[]
   refoldReasons?: Array<string | undefined>
   snapshots?: string[]
-  projections?: string[]
+  /** Each coalesced projection notification: the session id plus the REAL
+   *  projection keys that fired in that microtask batch. */
+  projections?: Array<{ id: string; keys: readonly string[] }>
 }
 
 function transientEntry(attemptId: string, turn: number, step: number, index: number, text: string) {
@@ -128,7 +130,7 @@ function sinksOf(log: SinkLog): RemoteLiveIngressSinks {
       log.refoldReasons?.push(reason)
     },
     onSessionSnapshotChanged: id => { log.snapshots?.push(id) },
-    onProjectionsChanged: id => { log.projections?.push(id) },
+    onProjectionsChanged: (id, changedKeys) => { log.projections?.push({ id, keys: changedKeys }) },
   }
 }
 
@@ -868,21 +870,34 @@ test('the compaction cache SEED uses the hydrate outcome token, never a fresh ca
     'the slot is cleared by exactly one invalidator')
 })
 
-test('a projection change reaches the sink through the per-key faces, coalesced, and a stale generation detaches', async () => {
+test('a projection change reaches the sink with its real changed keys, coalesced, and a stale binding detaches', async () => {
   const log: SinkLog = { durable: [], live: [], refolds: [], projections: [] }
   const source = sourceWith({ entries: [], revision: 1, hasMore: false })
   const generation = generationSource()
-  const ingress = createRemoteLiveIngress(source.sessions, generation, ['model'])
+  const ingress = createRemoteLiveIngress(source.sessions, generation, ['model', 'workingDirectory'])
   const handle = ingress.subscribe('s', sinksOf(log))
   assert.ok(handle !== undefined)
+  // A real `workingDirectory` notification and a normal key notification land
+  // in the SAME microtask batch: the sink still receives ONE notification, and
+  // it carries the exact distinct key set (never the subscribed inventory, and
+  // never only an id the consumer would have to guess from).
+  source.publishProjection('workingDirectory')
   source.publishProjection('model')
-  source.publishProjection('model')
+  source.publishProjection('workingDirectory')
   await Promise.resolve()
-  assert.deepEqual(log.projections, ['s'], 'one Host frame coalesces into one projection refresh')
-  assert.equal(source.projectionKeyCount(), 1, 'only the declared keys are followed')
+  assert.deepEqual(log.projections, [{ id: 's', keys: ['workingDirectory', 'model'] }],
+    'one Host frame coalesces into one notification with its real keys')
+  assert.equal(source.projectionKeyCount(), 2, 'only the declared keys are followed')
+  // A queued notification from a REPLACED binding must not reach the new
+  // owner: the microtask re-checks the exact binding identity before the sink.
+  source.publishProjection('workingDirectory')
   source.replaceBinding({ ...source.getBinding()! })
-  source.publishProjection('model')
   await Promise.resolve()
-  assert.deepEqual(log.projections, ['s'], 'a replaced binding detaches the projection subscription too')
+  assert.deepEqual(log.projections, [{ id: 's', keys: ['workingDirectory', 'model'] }],
+    'a queued notification from the replaced binding is dropped')
+  source.publishProjection('workingDirectory')
+  await Promise.resolve()
+  assert.deepEqual(log.projections, [{ id: 's', keys: ['workingDirectory', 'model'] }],
+    'a replaced binding detaches the projection subscription too')
   handle.dispose()
 })

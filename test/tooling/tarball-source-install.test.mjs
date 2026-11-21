@@ -8,10 +8,12 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
 import { COMPAT_MATRIX } from '../../scripts/lib/dsh-compat.mjs'
+import { isInside } from '../../scripts/tarball-smoke.mjs'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -32,7 +34,7 @@ function tarPackage(directory, fileName, metadata, files = {}) {
     writeFileSync(path, content)
   }
   const tarball = join(directory, fileName)
-  const result = spawnSync('tar', ['-czf', tarball, '-C', staging, 'package'], { encoding: 'utf8' })
+  const result = spawnSync('tar', ['-czf', tarball, '-C', staging, 'package'], { encoding: 'utf8', env: { ...process.env, COPYFILE_DISABLE: '1' } })
   assert.equal(result.status, 0, result.stderr)
   rmSync(staging, { recursive: true, force: true })
   return tarball
@@ -52,7 +54,7 @@ function candidateFiles() {
     'dist/performance-host.mjs': "export const name = 'pi-tui-performance-host'\n",
     // M4-B2-HF: the ONE built-in PiTui Host Runtime Loader entry.
     'dist/host-runtime.mjs': "export const name = 'pi-tui-host-runtime'\n"
-      + "export const inject = ['typert', 'agents', 'fileReferences', 'workingDirectory']\n"
+      + "export const inject = ['typert', 'agents', 'fileReferences', 'workingDirectory', 'sessions', 'sandboxPolicy', 'sandbox', 'subprocess']\n"
       + "export async function apply() {}\n",
     // The REAL published row surface, including the two tool names it has
     // exported since it shipped (the tarball smoke asserts them).
@@ -60,6 +62,22 @@ function candidateFiles() {
       + "export const inject = ['tools']\n"
       + "export const CHART_TOOL_NAME = 'dsh_pi_tui_chart'\n"
       + "export const SVG_TOOL_NAME = 'dsh_pi_tui_svg'\n"
+      + "export const apply = () => {}\n",
+    // M5-W PR-C: the profile-owned Web startup preference row.
+    'dist/web-preferences.mjs': "export const name = 'pi-tui-web-preferences'\n"
+      + "export const Config = () => {}\n"
+      + "export const apply = () => {}\n",
+    // M6-2A: the daemon Coordinator Loader row.
+    'dist/daemon-launcher.mjs': "export const name = 'pi-tui-daemon-launcher'\n"
+      + "export const inject = ['tuiDaemonStartup']\n"
+      + "export const apply = () => {}\n",
+    // PO-1B: the profile-owned ACP startup preference row.
+    'dist/acp-preferences.mjs': "export const name = 'pi-tui-acp-preferences'\n"
+      + "export const Config = () => {}\n"
+      + "export const apply = () => {}\n",
+    // M6 PR-A: the canonical profile-owned TUI preference row.
+    'dist/preferences.mjs': "export const name = 'pi-tui-preferences'\n"
+      + "export const Config = () => {}\n"
       + "export const apply = () => {}\n",
     'dist/index.d.mts': 'export declare const SOURCE_PROBE: boolean\n',
     'dist/startup.d.mts': 'export declare const STARTUP_PROBE: boolean\n',
@@ -76,9 +94,33 @@ function candidateFiles() {
       + 'export declare const CHART_TOOL_NAME: string\n'
       + 'export declare const SVG_TOOL_NAME: string\n'
       + 'export declare const apply: () => void\n',
+    'dist/web-preferences.d.mts': 'export declare const name: string\n'
+      + 'export declare const Config: unknown\n'
+      + 'export declare const apply: () => void\n',
+    'dist/daemon-launcher.d.mts': 'export declare const name: string\n'
+      + 'export declare const inject: string[]\n'
+      + 'export declare const apply: () => void\n',
+    'dist/acp-preferences.d.mts': 'export declare const name: string\n'
+      + 'export declare const Config: unknown\n'
+      + 'export declare const apply: () => void\n',
+    'dist/preferences.d.mts': 'export declare const name: string\n'
+      + 'export declare const Config: unknown\n'
+      + 'export declare const apply: () => void\n',
+    'generated/web-access/cordis.patch.yml': '- insert: []\n',
     'cordis.patch.yml': 'patch: []\n',
+    // The smoke also asserts the pinned Darwin native payload; a synthetic
+    // candidate must therefore mirror the REAL published asset tree instead
+    // of passing only because the native checks were skipped.
+    'dist/native/darwin/prebuilds/darwin-arm64/darwin-platform.node': readFileSync(join(
+      ROOT, 'packages', 'pi-tui', 'native', 'darwin', 'prebuilds', 'darwin-arm64', 'darwin-platform.node')),
+    'dist/native/darwin/prebuilds/darwin-x64/darwin-platform.node': readFileSync(join(
+      ROOT, 'packages', 'pi-tui', 'native', 'darwin', 'prebuilds', 'darwin-x64', 'darwin-platform.node')),
     'README.md': '# source probe\n',
     'README.en.md': '# source probe\n',
+    // The smoke asserts the packaged LICENSE carries the upstream pi-tui
+    // notice for the newly distributed Darwin binaries; the synthetic
+    // candidate mirrors the real root LICENSE rather than skipping the gate.
+    'LICENSE': readFileSync(join(ROOT, 'LICENSE'), 'utf8'),
   }
 }
 
@@ -133,7 +175,11 @@ function makeFixture(life, { includePresets = true, candidatePeers = { [DSH_CLI]
       './builtins': './dist/builtins.mjs',
       './performance-host': './dist/performance-host.mjs',
       './visual-tools': './dist/visual-tools.mjs',
+      './web-preferences': './dist/web-preferences.mjs',
+      './acp-preferences': './dist/acp-preferences.mjs',
       './host-runtime': './dist/host-runtime.mjs',
+      './daemon-launcher': './dist/daemon-launcher.mjs',
+      './preferences': './dist/preferences.mjs',
     },
     peerDependencies: candidatePeers,
     // The smoke asserts the packed manifest restates the repo matrix floor, so
@@ -195,8 +241,8 @@ function runSourceSmoke(fixture, { cliDistribution = fixture.distribution, envDi
   })
 }
 
-function runNpmSmoke(fixture) {
-  const env = smokeEnvironment(fixture)
+function runNpmSmoke(fixture, environment = {}) {
+  const env = { ...smokeEnvironment(fixture), ...environment }
   delete env.TARBALL_SMOKE_SKIP_INSTALL
   const cwd = join(fixture.root, 'clean-cwd')
   mkdirSync(cwd, { recursive: true })
@@ -351,4 +397,38 @@ test('npm mode without a distribution keeps the existing fresh npm install path'
   assert.equal(result.status, 0, output)
   assert.match(output, /tarball installs standalone \(npm install --omit=dev\)/)
   assert.match(output, /all exports entries import/)
+})
+
+test('npm mode keeps the probe isolated when TMPDIR is inside the checkout', (t) => {
+  const life = testLifecycle(t)
+  const fixture = makeFixture(life, { candidatePeers: {} })
+  // A lane runner may put its own temp root inside the checkout (or the
+  // caller sets TMPDIR there). The smoke must still create its install probe
+  // where Node cannot resolve this workspace's node_modules; otherwise the
+  // self-contained row reads the workspace fork and fails as if the tarball
+  // leaked it. The `temp/` roots still go through the lifecycle owner so the
+  // temp-hygiene gate sees one owner for every test fixture dir. Creating this
+  // shared ignored scratch parent is accepted; only the fixture is lifecycle-
+  // owned and removed.
+  mkdirSync(join(ROOT, 'temp'), { recursive: true })
+  const inCheckout = life.tempDir('tarball-smoke-inrepo-', join(ROOT, 'temp'))
+  const result = runNpmSmoke(fixture, { TMPDIR: inCheckout, TMP: inCheckout, TEMP: inCheckout })
+  const output = outputOf(result)
+  assert.equal(result.status, 0, output)
+  assert.match(output, /ok\s+@xmoon76\/pi-tui is not resolvable from the installed package \(self-contained\)/)
+})
+
+test('checkout containment keeps a ..-prefixed child path inside', () => {
+  const parent = join(tmpdir(), 'tarball-smoke-containment')
+  assert.equal(isInside(parent, parent), true)
+  // The regression this guards: `relative(parent, parent/..cache)` is
+  // `..cache`, which a `startsWith('..')` test would misclassify as outside.
+  assert.equal(isInside(join(parent, '..cache'), parent), true,
+    'a child whose NAME starts with two dots is still inside the checkout')
+  assert.equal(isInside(join(parent, '..cache', 'probe'), parent), true)
+  assert.equal(isInside(join(parent, '..', 'outside'), parent), false)
+  assert.equal(isInside(parent, join(parent, '..cache')), false)
+  if (process.platform === 'win32') {
+    assert.equal(isInside('D:\\repo', 'C:\\repo'), false, 'a different drive is outside')
+  }
 })

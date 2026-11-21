@@ -103,16 +103,29 @@ import {
   type HistoryOpenScope,
   type StatusData,
   type TranscriptSearchCloseReason,
+  type TranscriptSearchCoverage,
+  type TranscriptSearchScope,
   type TranscriptSearchPresentation,
   type TranscriptSearchPresentationTarget,
   type TuiApp,
   type TuiAppEvents,
   type TuiAppOptions,
+  type WorkflowAction,
+  type NoAnswerNavigationControl,
+  type EditorWorkspaceEntryControl,
 } from '../../tui-app.ts'
+import type { ProgramStatus } from '../../domain/terminal-progress/program-status.ts'
 import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
 import type { CompactionPhase } from './compaction-presentation.ts'
 import type { SubmissionComposerPort } from '../submission/composer-port.ts'
+import {
+  PASTE_PENDING_NOTICE,
+  type PastedImageIntakePort,
+  type PastedPathReceipt,
+} from './pasted-image-intake.ts'
 import type { ModelPresentation } from '../command/model-presentation.ts'
+import type { WebAccessPresentation } from '../command/web-access-presentation.ts'
+import type { AcpAccessPresentation } from '../command/acp-access-presentation.ts'
 import type { PresetPresentation } from '../command/preset-presentation.ts'
 import type { SessionBrowserPresentation } from '../command/session-browser-presentation.ts'
 import { pituiSurfaceInteractionPresenter, type SurfaceInteractionPresenter } from './interaction-presenter.ts'
@@ -132,9 +145,11 @@ import { initialStatusSnapshot } from '../../domain/status/snapshot.ts'
 import { deriveActivityStatus, type ActivityFacts } from '../../domain/status/derive-activity.ts'
 import { plainSectionEqual } from '../../domain/status/equal.ts'
 import { assistantPresentationRevision, assistantStepOf, type TranscriptFolder } from '../../domain/transcript/folder.ts'
+import { transcriptSearchMatchKey } from '../../domain/transcript/search.ts'
 import type { TranscriptMessage, TurnActivity } from '../../domain/transcript/types.ts'
 import { eligibleFinalAssistant } from '../../domain/transcript/final-assistant.ts'
 import { deliveredTurnsOf, type DeliveredFilesCapability, type DeliveredFilesSnapshot } from '../../domain/deliverables/catalog.ts'
+import type { QueueManagerController, QueueManagerPresentation } from '../queue/manager.ts'
 import type { DeliveredFilePreviewCapability } from '../../runtime/deliverables-port.ts'
 import { collectPublishedVisuals, type PublishedVisual } from '../../domain/visual/publication.ts'
 import {
@@ -147,7 +162,14 @@ import type { TranscriptSearchMatch } from '../../domain/transcript/search.ts'
 import type { TranscriptWindowController } from '../../domain/transcript/window.ts'
 import { streamingToolPreviewSnapshot, type StreamingToolPreview } from './streaming-tool-preparing.ts'
 import { buildPendingPresentation } from './pending-presentation.ts'
-import { refreshedSearchState, steppedSearchOverlayState } from './search-overlay.ts'
+import {
+  projectFullFindNavigationTargets,
+  recoverFullNavigationTargetIndex,
+  refreshedSearchState,
+  steppedFullNavigationTarget,
+  type FullFindNavigationQualification,
+  type FullFindNavigationTarget,
+} from './search-overlay.ts'
 import { createSearchProfiler, searchProfilingEnabled, type SearchProfile } from './search-profile.ts'
 import { createOpeningJournal, type OpeningJournal } from './opening-journal.ts'
 import { parseTerminalProgressMode, type TerminalProgressOutcome } from '../../domain/terminal-progress/settings.ts'
@@ -184,8 +206,11 @@ import {
   type RoutedSessionEvent,
   type SurfaceEventRoutingSource,
 } from './event-routing.ts'
-import type { DisplayStatusFacts, SurfaceDisplaySeam, DisplayActivityFacts } from './display-seam.ts'
+import type { DisplayStatusFacts, SurfaceDisplaySeam, DisplayActivityFacts, DisplayWelcomeEligibility } from './display-seam.ts'
 import { pituiDisplaySeam } from './display-seam-pitui.ts'
+import type { SurfaceExitChoiceSeam } from './exit-choice.ts'
+import type { ExitSessionActivity } from '../../domain/command/policy.ts'
+import { pituiExitChoiceSeam } from './exit-choice-pitui.ts'
 import { pituiTaskCenterPresentation } from './task-presentation-pitui.ts'
 import type { TaskCenterPresentationPort } from './task-presentation-port.ts'
 
@@ -210,6 +235,105 @@ export type {
 const REPAINT_FLUSH_MS = 50
 
 /**
+ * TSP I-C: ONE slash candidate row, published by the command layer. It is
+ * declared STRUCTURAL on purpose — the same three display facts
+ * `setCommandCompletions` already builds from a `SurfaceCommandSummary` —
+ * because the application mount contract must not name a renderer-package
+ * type, and a row is a display fact only: never a claim, never an execution
+ * right, never a provenance tag the renderer has to re-derive.
+ */
+export interface TspCommandCompletionCandidate {
+  readonly name: string
+  readonly description: string
+  readonly argumentHint?: string
+}
+
+/** The plugin autocomplete chain's query/result shape, declared structurally
+ *  for the same reason: the identical fields, no renderer-package type name. */
+export type TspCommandCompletionExtensionSuggest = (query: {
+  lines: readonly string[]
+  cursorLine: number
+  cursorCol: number
+  signal: AbortSignal
+  force?: boolean
+}) => Promise<{ items: { value: string; label: string; description?: string }[]; prefix: string } | null>
+
+/**
+ * TSP I-C: what the ONE catalog commit publishes to a renderer that has no
+ * PiTui editor. The member set is EXACTLY the batch of inputs
+ * `TuiApp.setCommandCompletions` receives, so a mounted renderer composes the
+ * SAME installed provider over the SAME effective catalog — no second
+ * catalog, no second resolver, no second claims map. `commands` is already
+ * this renderer's displayable set, screened by REAL source provenance at the
+ * single commit point (`src/commands.ts`): a row it does not carry was never
+ * admitted for this renderer.
+ *
+ * The mount owns the provider lifecycle: every new installation REPLACES the
+ * previous source (a withdrawn command leaves the menu), and disposal removes
+ * the source before the renderer is released. The surface stores none of it.
+ */
+export interface TspCommandCompletionInstallation {
+  readonly commands: readonly TspCommandCompletionCandidate[]
+  readonly cwd: string
+  /** The Host-file port that owns `@`-mention discovery (migration M1.10).
+   *  I-C never opens a file seat, so it stays an unread input here. */
+  readonly fileReferences: import('../../runtime/host-file-port.ts').HostFilePort | null
+  readonly extensionSuggest?: TspCommandCompletionExtensionSuggest
+  /** Resolved at SUGGESTION time, so a session switch never needs a reinstall. */
+  readonly scope: () => import('../../runtime/host-file-port.ts').HostFileScope
+  /** The Client-local base, kept independent from the Host session cwd. */
+  readonly localCwd: () => string
+  readonly skillReferences: readonly import('../../domain/catalog/skill.ts').HumanSkillSummary[]
+  readonly hostShellCompletion: import('../../runtime/host-shell-completion-port.ts').HostShellCompletionPort | undefined
+  /**
+   * The command source FAILED (a contribution/host name collision withdrew every
+   * displayed candidate while the Host claims stayed live). A renderer's
+   * completion seat must then offer NOTHING — including from a plugin fallback —
+   * until a later, successful commit replaces it. Absent means a normal commit.
+   */
+  readonly sourceFailed?: boolean
+}
+
+/**
+ * TSP I-D: the structural projection of ONE inline-attachment intake STAKE —
+ * the immutable description of a file the user just accepted at an inline
+ * attachment seat, plus the editor-side fences the command plane consumes
+ * through it. The AUTHORITY for this contract stays
+ * `InlineAttachmentStake` in `src/tui/interaction/autocomplete/inline-attachment.ts`;
+ * this mirror exists for the same reason `TspCommandCompletionInstallation`
+ * above does — the application layer never imports the concrete TUI layer
+ * (`scripts/application-architecture-gate.mjs`, `app-imports-tui`), so the
+ * forwarding seam is declared by its owning layer and consumed structurally.
+ */
+export interface TspInlineAttachmentStake {
+  /** The declared attachment command (`image` / `attach`). */
+  readonly command: string
+  /** The chosen path exactly as the user selected it (quotes removed). */
+  readonly path: string
+  /** The raw draft the acceptance installed. */
+  readonly rawDraft: string
+  /** The raw fragment the canonical placeholder replaces (inline half-open). */
+  readonly span: { readonly line: number; readonly start: number; readonly end: number }
+  /** Whether the seat this stake was taken for is still the live one. */
+  current(): boolean
+  /** The live raw draft, or undefined when the seat moved away. */
+  draft(): string | undefined
+  /** Commit the canonical placeholder as ONE atomic editor edit. */
+  commit(placeholder: string): boolean
+  /** One transient notice (the intake's success/refusal feedback). */
+  notify(message: string, kind?: 'info' | 'error'): void
+}
+
+/**
+ * TSP I-D: the command plane's inline-attachment entry the mounted TSP renderer
+ * installs — the SAME `runAttachmentIntake` authority the leading `/image`
+ * `/attach` commands use. It is a FUNCTION, not a service: the surface stores
+ * only the mount's installer reference, never a stager instance, a stake or any
+ * attachment state.
+ */
+export type TspInlineAttachmentStager = (stake: TspInlineAttachmentStake) => void
+
+/**
  * PR3-B §3.3 (the B1 slice): the renderer-facing input binding — a NARROW
  * structural projection of the existing `TuiAppEvents` (the lifecycle/user
  * activity members), constructed at the `SurfaceRuntime.start` composition
@@ -227,12 +351,27 @@ export interface SurfaceInputBinding {
    */
   cancel(): void
   /**
+   * M6 UX PR1: the LIVE authoritative activity fact for the raw exit keys
+   * (Ctrl+C while working cancels once; an unknown state refuses to arm the
+   * double-press exit). Optional: a mount without it keeps the historical
+   * immediate/double-press behavior.
+   */
+  sessionActivity?(): ExitSessionActivity
+  /**
    * The submission entry (PR3-B B2): the EXISTING application submit path
    * (`ApplicationEvents.events.onSubmit`), so a TSP Enter rides the ONE
    * `SubmissionController` — never a renderer-owned writer. The renderer
    * clears the composer BEFORE this call (§3.4 ordering).
+   *
+   * TSP I-A: `scopeToken` is the accepted submission's OCCURRENCE token from
+   * the renderer's recall kernel, forwarded verbatim into the existing
+   * submission entry so the write owner can settle exactly that occurrence;
+   * `undefined` whenever the recall did not accept the input (refused by the
+   * History policy, blank, or a shell line TSP does not present).
    */
-  submit(text: string, request: ComposerSubmitRequest): void
+  submit(text: string, request: ComposerSubmitRequest, scopeToken?: number): void
+  /** PR2: the synchronous submit admission (see `TuiAppEventsBase`). */
+  beginComposerSubmission?(text: string, request: ComposerSubmitRequest | 'steer'): 'held' | 'legacy' | 'refused'
   /** The draft-steer entry (B2): `ApplicationEvents.events.onSteer`. */
   steer(text: string): void
   /**
@@ -242,6 +381,29 @@ export interface SurfaceInputBinding {
    * renderer never probes the clipboard itself.
    */
   pasteMedia(): void
+  /**
+   * ONE real bracketed paste (`Key{name:'paste'}`) was inserted into the main
+   * composer as text. A DIFFERENT source from {@link pasteMedia}: the
+   * terminal sent the text, the OS clipboard was never read. The application
+   * intake owner applies the image-file-path grammar, reads/stages the file
+   * and replaces the exact tracked span; a non-candidate paste is inert.
+   */
+  pastedPath(receipt: PastedPathReceipt): void
+  /**
+   * The pasted-image delivery admission, consulted BEFORE the composer draft
+   * is cleared. false = a pasted path in `text` is still being attached (the
+   * retry notice was shown); the draft/caret/Undo stay untouched.
+   */
+  admitPastedPathDelivery(text: string): boolean
+  /**
+   * TSP I-A: the HISTORY-eligibility predicate for one admitted draft — the
+   * SAME `ApplicationEvents.shouldRememberInput` policy PiTui's
+   * `TuiApp.rememberInput` consults (staged attachments, a pasted path whose
+   * read is still in flight). It answers ONLY whether this input may enter the
+   * plain-text recall; it is NOT the business submit admission (the submission
+   * controller owns that, and still receives the submission either way).
+   */
+  shouldRememberInput(text: string): boolean
   /** Real user input on the editor seat (editable/submit keys). */
   noteUserInput(): void
   /**
@@ -267,6 +429,13 @@ export interface SurfaceInputBinding {
    * a fabricated picker request. PiTui supplies no consumer.
    */
   openModelPicker(entry: 'models' | 'effort'): void
+  /**
+   * TSP-7 PR-G: open the composer's combined Model/Effort control's QUICK
+   * selector. The same late-bound route as `openModelPicker` over the SAME
+   * registered `/model` command; the command (not the renderer) decides
+   * whether the current subject gets the quick panel or the full one.
+   */
+  openModelQuick(): void
   /** Whether the native `/model` picker UI entry is actually installed
    *  (registered, not Host-owned) — the real business-entry fact. */
   modelPickerAvailable(): boolean
@@ -282,6 +451,40 @@ export interface SurfaceInputBinding {
    * itself and never keeps optimistic state.
    */
   selectPermission(id: string): void
+  /**
+   * TSP-7 Welcome D: open the SAME registered `/sessions` Session Browser the
+   * typed command runs, from the Welcome's single Resume action. The
+   * composition root late-binds this to the command surface's registered entry
+   * BEFORE the renderer input is bound, so a click before the binding (or on a
+   * mount whose registration degraded) reaches a refused entry — never a
+   * renderer-side listing, session id or switch of its own. PiTui supplies no
+   * consumer.
+   */
+  openSessionBrowser(request?: { readonly addDirectory?: boolean }): void
+  /** Whether that `/sessions` UI entry is actually installed (registered, not
+   *  Host-owned) — the business-entry fact the Welcome button paints. */
+  sessionBrowserAvailable(): boolean
+  /**
+   * Mouse PR4: open the SAME registered `/tasks` (`/subagents`) browser the
+   * typed command runs, from the TSP native Tasks status segment. The
+   * composition root late-binds this to the command surface's registered
+   * entry BEFORE the renderer input is bound, so an action before the binding
+   * (or on a mount whose registration degraded) reaches a refused entry —
+   * never a renderer-side Task read, Session admission or browser of its own.
+   * PiTui supplies no consumer.
+   */
+  openTasksBrowserUi(): void
+  /** Whether that `/tasks` UI entry is really usable (registration fact AND
+   *  the live mounted Task Center capability) — the fact the TSP status
+   *  segment paints its action from. */
+  tasksBrowserUiAvailable(): boolean
+  /**
+   * Open the existing read-only Work Hub scoped to one Workflow Phase or Run.
+   * The ONE TaskRuntime resolves the action from its current authoritative row.
+   */
+  openWorkflowScopedAgents?(action: Extract<WorkflowAction, { kind: 'open-phase-agents' | 'open-run-agents' }>): void
+  /** Whether that scoped entry and its Work Hub are live on this mount. */
+  workflowScopedAgentsAvailable?(): boolean
 }
 
 /**
@@ -314,6 +517,70 @@ export interface SurfaceImageBinding {
    * never serve a stale occurrence list.
    */
   readonly draftImages: SurfaceDraftImageProjection
+}
+
+/**
+ * T3-B1: the ONE read-only semantic-search binding a mounted TSP renderer
+ * receives.
+ *
+ * It is a PRESENTATION-side projection of the application's already-selected
+ * transcript source: the surface picks the active main/viewed-child
+ * `TranscriptFolder` (the SAME fold the repaint uses), hands the renderer an
+ * OPAQUE source token (never the mutable fold), and answers three questions
+ * through that ONE token:
+ *
+ * - `snapshot(query)` — run the Folder's OWN `search()` for the current
+ *   source and return the current matches plus the officially committed
+ *   coverage label;
+ * - `resolve(source, match)` — the current representative message of one
+ *   match, read from the SAME live Folder;
+ * - `current(source)` — whether that token still names the selected, committed
+ *   subject.
+ *
+ * The binding owns NO corpus, NO index, NO cache and NO Host read: the Folder
+ * stays the single search authority (`TranscriptFolder.search()`), and the
+ * renderer keeps only transient navigation state. A `snapshot` taken against a
+ * released, hydrating or replaced surface answers `undefined` — never a stale
+ * result.
+ */
+export interface TspTranscriptSemanticSearchBinding {
+  /** Run the Folder's own search for the CURRENT source. `refinement` is the
+   *  previous round's identity; the Folder validates it internally and falls
+   *  back to a full scan when it no longer applies. */
+  snapshot(query: string, refinement?: {
+    readonly previousQuery: string
+    readonly previousMatches: readonly TranscriptSearchMatch[]
+    readonly revision: number
+    readonly source: object
+  }): TspTranscriptSemanticSearchSnapshot | undefined
+  /** The current representative message of one match, from the SAME live
+   *  Folder, or `undefined` when the source moved on. */
+  resolve(source: object, match: TranscriptSearchMatch): TranscriptMessage | undefined
+  /** Whether this token still names the selected, committed subject. */
+  current(source: object): boolean
+  /**
+   * The Folder's own `searchRevision()` for this token's CURRENT subject, or
+   * `undefined` when the source moved on. A CHEAP read (one counter): the seat's
+   * refresh probes it so an unchanged revision never re-scans history.
+   */
+  revision(source: object): number | undefined
+}
+
+/** One immutable semantic-search snapshot: matches plus the coverage fact. */
+export interface TspTranscriptSemanticSearchSnapshot {
+  /** The opaque source token this snapshot belongs to. */
+  readonly source: object
+  readonly subjectKind: 'main' | 'viewed-child'
+  readonly subjectId: string | undefined
+  /** The Folder's own projection revision the matches were computed on. */
+  readonly revision: number
+  readonly matches: readonly TranscriptSearchMatch[]
+  /**
+   * The officially committed coverage of this subject. Direct boots complete;
+   * Remote starts at loaded history and only an acknowledged official
+   * hydrate/refold may widen it. It is NEVER inferred from a match count.
+   */
+  readonly coverage: TranscriptSearchCoverage
 }
 
 /** One ordered staged-image occurrence of the LIVE composer draft. */
@@ -370,6 +637,29 @@ export function createSurfaceDraftImageProjection(
 }
 
 /**
+ * TSP I-E: the ONE read-only History-search capability bundle a mounted renderer
+ * receives at the mount. It is a forwarding projection of the SAME three inputs
+ * the PiTui branch already gets through {@link buildOptions} — the single
+ * `HistorySearchSource`, the live session cwd and the one atomic
+ * `captureHistoryScope()` bridge — so a TSP mount never constructs a second
+ * source, never re-derives a Session identity and never reads the history file
+ * or the `InputHistory` owner itself.
+ *
+ * Like {@link TspInlineAttachmentStake}, this mirror is declared by its OWNING
+ * layer and consumed structurally, because the application layer never imports
+ * the concrete TUI layer (`scripts/application-architecture-gate.mjs`,
+ * `app-imports-tui`).
+ */
+export interface TspHistorySearchBinding {
+  /** The runner-owned search source: the ONLY history read authority. */
+  readonly source: OptionCapability<'historySearchSource'>
+  /** The live session cwd, read once per Ctrl+R open by the seat. */
+  readonly cwd: () => string
+  /** The ONE atomic History currentness capture (exact owner + generation). */
+  readonly captureScope: () => HistoryOpenScope
+}
+
+/**
  * PR3-A: one already-connected renderer mount the composition root hands to
  * {@link SurfaceRuntime.start} instead of the default PiTui process mount.
  * The mount owns its own terminal (the TSP SDK session); the surface never
@@ -390,9 +680,39 @@ export interface SurfaceRendererMount {
    * this surface created at `createSurfaceRuntime` — never the store itself, so
    * no renderer gains an update/subscribe capability of its own.
    */
-  mount(binding: SurfaceImageBinding, statusReader: StatusSnapshotReader): {
+  mount(
+    binding: SurfaceImageBinding,
+    statusReader: StatusSnapshotReader,
+    /**
+     * TSP I-E: the ONE read-only History-search capability bundle. REQUIRED: a
+     * connected TSP renderer always carries the seat, and a scripted mount that
+     * wants to express "no History plane" passes a binding whose SOURCE fails
+     * closed — never an empty `search()` that pretends success.
+     */
+    historySearch: TspHistorySearchBinding,
+    /**
+     * T3-B1: the ONE read-only semantic-search binding. REQUIRED for the same
+     * reason the History bundle is: a connected TSP renderer always carries the
+     * seat, and a scripted mount that wants to express "no semantic search"
+     * passes a binding whose every answer fails closed — never an empty
+     * `snapshot()` that pretends a zero-match result.
+     */
+    semanticSearch: TspTranscriptSemanticSearchBinding,
+    /** The application-level Queue manager controller, or `undefined` when this
+     *  mount has none. EXPLICIT `| undefined` (not optional): the semantic
+     *  binding above is required, and an optional parameter may not precede a
+     *  required one. */
+    queueManager: QueueManagerController | undefined,
+  ): {
     /** The renderer-facing display seam implementation. */
     readonly display: SurfaceDisplaySeam
+    /**
+     * M6 UX PR1: the renderer's ONE Client-local Exit Choice seat. The exit
+     * intent coordinator presents through this seam; every mount supplies it
+     * (its own degradation is the reachability truth), and no business
+     * decision lives here.
+     */
+    readonly exitChoice: SurfaceExitChoiceSeam
     /**
      * B3-A1: the renderer's Task Center presentation sink. The ONE Task
      * Runtime keeps every business fact; this port only carries the rows and
@@ -409,8 +729,16 @@ export interface SurfaceRendererMount {
     readonly modelPresentation?: ModelPresentation | undefined
     /** The native `/preset` presenter, beside the Model one. */
     readonly presetPresentation?: PresetPresentation | undefined
+    /** M5-W PR-C: the native `/web` presenter, beside the other two. */
+    readonly webPresentation?: WebAccessPresentation | undefined
+    /** PO-5E: the native `/acp` presenter, beside `/web`. */
+    readonly acpPresentation?: AcpAccessPresentation | undefined
     /** Internal read-only Session Browser presenter; no production command opens it in B1-A. */
     readonly sessionBrowserPresentation?: SessionBrowserPresentation | undefined
+    /** PR-Q: the native Queue manager sheet presentation. OPTIONAL: a pane
+     *  without the negotiated kinds mounts nothing and `/queue` is refused by
+     *  the TSP builtin capability gate. */
+    readonly queuePresentation?: QueueManagerPresentation | undefined
     /**
      * PR3-B §3.2: the renderer's modal presenter. B1 keeps the INERT
      * implementation (no TSP form exists; every ask rejects — fail-closed,
@@ -426,6 +754,24 @@ export interface SurfaceRendererMount {
      * editor-local/lifecycle projection; B2 widens it with submissions.
      */
     readonly bindInput: (handlers: SurfaceInputBinding) => void
+    /**
+     * TSP I-C: publish ONE effective slash-command catalog commit onto the
+     * mounted renderer. OPTIONAL: a renderer with no command-completion seat
+     * (and the PiTui branch, which keeps its own `setCommandCompletions`
+     * route) supplies nothing, and the command layer says so in a diagnostic.
+     * Every call REPLACES the previous source; it is synchronous and carries
+     * no command execution right.
+     */
+    readonly installCommandCompletions?: (installation: TspCommandCompletionInstallation) => void
+    /**
+     * TSP I-D: install the ONE inline-attachment stager onto the mounted
+     * renderer. OPTIONAL for the same reason the installer above is: the PiTui
+     * branch installs it on the mounted `TuiApp`, and a renderer without an
+     * inline attachment plane supplies nothing. It is synchronous, carries no
+     * read/store authority of its own, and the surface keeps NO copy — only the
+     * mount's installer reference (cleared with the mount).
+     */
+    readonly installInlineAttachmentStager?: (stager: TspInlineAttachmentStager) => void
     /**
      * Stop the renderer and release its terminal ONCE (the TSP branch closes
      * the SDK surface then the session). May be async; the surface disposal
@@ -455,6 +801,13 @@ export interface SurfaceRendererMount {
 export interface SurfaceMountDeps {
   /** The application input contract (session/submission/command owners). */
   readonly events: TuiAppEvents
+  /**
+   * The ONE application intake owner of a terminal bracketed pasted image
+   * file path. The PiTui branch injects it into `TuiApp` directly; the TSP
+   * branch routes real paste receipts and the delivery admission through the
+   * renderer input binding. Absent keeps pasted paths ordinary text.
+   */
+  readonly terminalPastedPath?: PastedImageIntakePort
   /**
    * PR3-A (experimental): an already-connected renderer mount that owns the
    * terminal instead of the default PiTui process mount. When present, no
@@ -522,6 +875,10 @@ export interface SurfaceMountDeps {
    * store, forwarded to TuiAppOptions.draftImageStoreForTest. Production
    * paths never read it. */
   readonly draftImageStoreForTest?: import('../../client/media/image/draft-store.ts').DraftImageStore
+  /** Headless-test seam: the runner's live generic-file draft store,
+   * forwarded to TuiAppOptions.draftFileStoreForTest. Production paths never
+   * read it. */
+  readonly draftFileStoreForTest?: import('../../client/media/attachment/file-draft.ts').DraftFileStore
   /** The READ-ONLY composer preview projection (image UX PR1): the live
    *  draft store's staged values. The TUI never stages or reorders through
    *  it; absent means no preview band. */
@@ -571,6 +928,14 @@ export interface SurfaceRuntimeOptions {
    *  protocol by default), parsed through the shared terminal-progress parser. */
   readonly terminalProgress: string | undefined
   /**
+   * H1: a READ-ONLY observer of the main-Agent logical program status the
+   * mounted PiTui surface derives for itself. It is a Client-local notification
+   * (the external Pane reporter), never a Backend port, and is forwarded into
+   * the existing `startProcessTui` mount unchanged. The TSP renderer branch has
+   * no `TuiApp` and therefore never calls it.
+   */
+  readonly onProgramStatus?: (status: ProgramStatus) => void
+  /**
    * Which adapter OWNS the main-Agent terminal outcome (R1 §5.3): the Direct
    * local durable events, or the Remote Host evidence stream. Decided once by
    * the composition root from the selected backend — the durable `session/event`
@@ -579,6 +944,17 @@ export interface SurfaceRuntimeOptions {
    * (STOP-DOUBLE).
    */
   readonly mainProgressAuthority: MainProgressAuthority
+  /** Direct owns a complete log; Remote starts conservatively at loaded history. */
+  readonly initialSearchCoverage?: TranscriptSearchCoverage
+  /**
+   * Split-Client only: the application's ONE committed-Session authority. When
+   * supplied, the PiTUI branch's forwarded Question/Approval admission is
+   * narrowed from "every request" to exactly this committed subject (plus a
+   * legal opening target), so a request that belongs to another Session is
+   * never presented on the current editor. Direct keeps `undefined`, preserving
+   * its original unconditional delegation.
+   */
+  readonly committedSessionId?: (() => string | undefined) | null
   /** The runner's diagnostics channel: the terminal-progress evidence fold
    *  reports an UNKNOWN upstream `turn/end.reason.kind` here instead of
    *  guessing an outcome. Optional for headless fixtures. */
@@ -589,6 +965,19 @@ export interface SurfaceRuntimeOptions {
    * application owner imports a `tui/**` path.
    */
   readonly createPluginManagerPanel: PluginManagerPanelFactory
+  /**
+   * Read-only observer of ONE successfully committed official Plugin Manager
+   * inventory snapshot. The composition root binds it to the CURRENT Client's
+   * external-extension mount owner; it never fires on invalidation or failure
+   * and is never a second inventory.
+   */
+  readonly onPluginInventoryCommitted?: (snapshot: import('../../runtime/plugin-manager-port.ts').PluginManagerSnapshot) => void
+  /**
+   * R8-E PR-4: the CURRENT Client's real per-package Loader observation source.
+   * The Plugin Manager page reads it late-bound for its independent
+   * `This Client ./tui` facts; it is never part of the Host snapshot.
+   */
+  readonly clientExtensionObservation?: () => import('../client-extensions/mount-owner.ts').ClientExtensionObservationSource | undefined
   /**
    * PR2 (experimental, absent on the production path): a READ-ONLY observer of
    * the active transcript projection the surface has ALREADY selected and
@@ -624,6 +1013,12 @@ export interface SurfaceRuntimeOptions {
    * async owner.
    */
   readonly openModelPicker?: (entry: 'models' | 'effort') => void
+  /**
+   * TSP-7 PR-G: the LATE-BOUND quick `/model` UI entry the composer's combined
+   * Model/Effort control calls. Same assignment window, same loud placeholder
+   * contract and same owned-promise rule as {@link openModelPicker}.
+   */
+  readonly openModelQuick?: () => void
   /** PR-C/PR-F: whether the native `/model` picker UI entry is actually
    *  installed. The footer's model/reasoning fallback reads this fact, not
    *  the presence of a painted composer button. */
@@ -639,6 +1034,38 @@ export interface SurfaceRuntimeOptions {
     options(): readonly string[]
     select(id: string): void
   }
+  /**
+   * TSP-7 Welcome D: the ONE READ-ONLY Host blank-session authority the Welcome
+   * eligibility consumes (`backend.sessionReader.blank`). Injected by the
+   * composition root like the Model entries and consulted ONLY for the live
+   * MAIN subject of a renderer mount that presents the Welcome — the PiTui
+   * branch performs no read here. `undefined` from the authority means the
+   * Host fact is unknown, which is NEVER treated as blank.
+   */
+  readonly welcomeSessionBlank?: (sessionId: string) => boolean | undefined
+  /**
+   * TSP-7 Welcome D: the LATE-BOUND UI entry into the registered `/sessions`
+   * command (the Welcome's only action). Same assignment window, same loud
+   * placeholder contract and same owned-promise rule as
+   * {@link openModelQuick}; the command owns every read, switch and notice.
+   */
+  readonly openSessionBrowser?: (request?: { readonly addDirectory?: boolean }) => void
+  /** TSP-7 Welcome D: whether that `/sessions` UI entry is actually installed
+   *  (registered, not Host-owned) — the real business-entry fact the Welcome
+   *  button paints, never the presence of a painted button. */
+  readonly sessionBrowserAvailable?: () => boolean
+  /**
+   * Mouse PR4: the LATE-BOUND UI entry into the registered `/tasks` command
+   * (the TSP native Tasks status segment's only pointer entry). Same
+   * assignment window, same loud-placeholder contract and same owned-promise
+   * rule as {@link openSessionBrowser}; the command owns the Session
+   * admission, the capability refusal and the ONE Task Runtime opener.
+   */
+  readonly openTasksBrowserUi?: () => void
+  /** Mouse PR4: whether that `/tasks` UI entry is really usable now (the
+   *  registration fact AND the live mounted Task Center capability) — the
+   *  business-entry fact the TSP status segment paints its action from. */
+  readonly tasksBrowserUiAvailable?: () => boolean
 }
 
 /**
@@ -705,6 +1132,10 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
   readonly modelPresentation?: ModelPresentation | undefined
   /** Native /preset presentation, absent until a supported renderer mounts. */
   readonly presetPresentation?: PresetPresentation | undefined
+  /** M5-W PR-C: native /web presentation, absent on PiTui and unsupported TSP panes. */
+  readonly webPresentation?: WebAccessPresentation | undefined
+  /** PO-5E: native /acp presentation, absent on PiTui and unsupported TSP panes. */
+  readonly acpPresentation?: AcpAccessPresentation | undefined
   /** Internal read-only Session Browser seam; absent on PiTui and unsupported TSP panes. */
   readonly sessionBrowserPresentation?: SessionBrowserPresentation | undefined
   /**
@@ -712,6 +1143,12 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
    * renderer). Throws if read before {@link SurfaceRuntime.start}.
    */
   readonly display: SurfaceDisplaySeam
+  /**
+   * M6 UX PR1: the mounted renderer's ONE Exit Choice seat, or undefined
+   * before a mount. The exit-intent coordinator presents the Client-local
+   * choice through it; no other owner writes this surface.
+   */
+  readonly exitChoice: SurfaceExitChoiceSeam | undefined
   /**
    * PR3-A: the ONE renderer-release promise. Resolves immediately on the
    * PiTui branch (the app disposal is synchronous); on the TSP branch it
@@ -910,6 +1347,29 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
    */
   withdrawReplacedPresentation(): void
   /**
+   * Split-Client only: withdraw the CURRENT local modal presentation (Question
+   * flow / Approval sheet) for a presentation-only navigation hold. The caller
+   * MUST have committed the root navigation hold before calling this — the
+   * official request keeps its own Host lifetime and each withdrawn attempt's
+   * local cancellation is discarded by the root delivery, never sent as an
+   * answer. Reuses the SAME collect → atomic withdraw → settle order as
+   * {@link withdrawReplacedPresentation} but is not tied to a subject change.
+   */
+  withdrawPresentationForNavigation(): void
+  /**
+   * Install (or clear) the ONE modal-safe no-answer navigation control the
+   * mounted PiTUI app exposes through Alt+W. A renderer mount without a TuiApp
+   * (the TSP branch) is inert by construction.
+   */
+  setNoAnswerNavigation(control: NoAnswerNavigationControl | undefined): void
+  /**
+   * Install (or clear) the ONE PiTUI Host Editor `←←` composition control: the
+   * registered `/sessions` availability, the A3 scope currentness capture and
+   * the All-scope open of that same command. A renderer mount without a TuiApp
+   * (the TSP branch) is inert by construction.
+   */
+  setEditorWorkspaceEntry(control: EditorWorkspaceEntryControl | undefined): void
+  /**
    * Phase 3B / B3-B: retire a mounted History editor-seat tenant whose captured
    * Session scope is no longer current. It is the runner's publication-commit
    * half of the History currentness policy, called from the three `publishOwner`
@@ -977,6 +1437,15 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
    */
   refreshPendingInput(): void
   /**
+   * PR-Q: install the ONE application-level Queue manager controller before the
+   * renderer mounts. The PiTui/TSP presentation is attached at the mount and
+   * detached at teardown; the controller itself outlives both.
+   */
+  attachQueueManager(controller: QueueManagerController): void
+  /** PR-Q: whether the current mount really installed the Queue sheet
+   *  presentation (the TSP builtin capability gate reads this). */
+  queuePresentationAvailable(): boolean
+  /**
    * A4-4: clear the pending-input presentation and the own-input memory at a
    * session-generation bump (the original `resetForGeneration` clearing).
    */
@@ -992,6 +1461,8 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
   repaint(): void
   /** A4-8: clear the search presentation at a session-generation bump. */
   resetSearchPresentation(): void
+  /** Commit a coverage fact from the current official Reader snapshot. */
+  setTranscriptSearchCoverage(coverage: TranscriptSearchCoverage): void
   /**
    * M3-4 PR4 §6.4: clear the SUBJECT-OWNED status sections (access,
    * composition, collaboration) at a session-generation bump. This is the
@@ -1020,6 +1491,26 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
    * PiTui branch (its events table is wired by the mount itself).
    */
   bindRendererInput(): void
+  /**
+   * TSP I-C: forward ONE effective slash-command catalog commit to the CURRENT
+   * TSP mount, SYNCHRONOUSLY. This owner stores only the mount's installer
+   * function reference — never a catalog, never a candidate list, never a
+   * second completion state — and a renderer that is not mounted (or is
+   * already disposed) receives nothing. The PiTui branch never calls this: its
+   * catalog keeps going through `app.setCommandCompletions` at the same single
+   * commit point.
+   */
+  installTspCommandCompletions(installation: TspCommandCompletionInstallation): void
+  /**
+   * TSP I-D: forward the ONE inline-attachment stager to the CURRENT TSP mount,
+   * SYNCHRONOUSLY, through the same installer-reference pattern as the catalog
+   * commit above. This owner stores only the mount's installer reference — never
+   * a stager, a stake, a draft or any attachment state — and a renderer that is
+   * not mounted (or is already disposed) receives nothing. The PiTui branch never
+   * calls this: its stager keeps going through `app.setInlineAttachmentStager`
+   * at the same single registration site.
+   */
+  installTspInlineAttachmentStager(stager: TspInlineAttachmentStager): void
   /**
    * Early teardown: release the Plugin Manager install-event subscription at
    * its original EARLY cleanup position (a late install event must never
@@ -1107,7 +1598,19 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   let composerPort: SubmissionComposerPort | undefined
   let modelPresentation: ModelPresentation | undefined
   let presetPresentation: PresetPresentation | undefined
+  let webPresentation: WebAccessPresentation | undefined
+  let acpPresentation: AcpAccessPresentation | undefined
   let sessionBrowserPresentation: SessionBrowserPresentation | undefined
+  /** PR-Q: the application-level Queue manager and the CURRENT mount's
+   *  presentation. The controller is installed before the mount; the
+   *  presentation is attached at the mount and detached at teardown. */
+  let queueManager: QueueManagerController | undefined
+  let queuePresentation: QueueManagerPresentation | undefined
+  const attachQueuePresentation = (presentation: QueueManagerPresentation | undefined): void => {
+    if (queueManager === undefined || presentation === undefined) return
+    queuePresentation = presentation
+    queueManager.attach(presentation)
+  }
   /**
    * PR3-B §3.3: the renderer input projection constructed at `start()` and the
    * mount that will receive it. `bindRendererInput()` performs the ONE bind
@@ -1116,11 +1619,27 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   let pendingInputBinding: SurfaceInputBinding | undefined
   let inputBindTarget: { bindInput(handlers: SurfaceInputBinding): void } | undefined
   /**
+   * TSP I-C: the CURRENT TSP mount's command-completion installer, and
+   * NOTHING else. The catalog itself lives with its owner
+   * (`src/commands.ts`), the candidate/provider state lives inside the mount —
+   * this slot is only the forwarding reference, cleared with the mount.
+   */
+  let rendererCommandCompletionsInstaller: ((installation: TspCommandCompletionInstallation) => void) | undefined
+  /**
+   * TSP I-D: the CURRENT TSP mount's inline-attachment stager installer, and
+   * NOTHING else — the stager itself stays owned by the command plane
+   * (`src/commands.ts` + `src/tui/commands/artifacts.ts`), the acceptance and
+   * draft state stay inside the mount. Cleared with the mount.
+   */
+  let rendererInlineAttachmentStagerInstaller: ((stager: TspInlineAttachmentStager) => void) | undefined
+  /**
    * PR3-B §3.2: the live modal presenter projection. PiTui assigns the
    * mounted app (structurally a `SurfaceInteractionPresenter`); a renderer
    * mount injects its own presenter.
    */
   let interactionPresenter: SurfaceInteractionPresenter | undefined
+  /** M6 UX PR1: the mounted renderer's ONE Exit Choice seat. */
+  let exitChoiceSeam: SurfaceExitChoiceSeam | undefined
   /**
    * PR3-A: the non-PiTui renderer's disposer (assigned by `start()` on the
    * renderer branch; released once in `dispose()`).
@@ -1151,6 +1670,12 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     mounted: () => mounted(),
     service: () => extension.service(),
     createPanel: options.createPluginManagerPanel,
+    ...(options.onPluginInventoryCommitted === undefined
+      ? {}
+      : { onInventoryCommitted: options.onPluginInventoryCommitted }),
+    ...(options.clientExtensionObservation === undefined
+      ? {}
+      : { clientExtensions: options.clientExtensionObservation }),
   })
   // A4-7 presentation event routing (plan §16): the injected routing source the
   // router and this aggregate's own pending-input/search coordination read. The
@@ -1475,17 +2000,43 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     presenter: () => presenterSeam(),
     livePresenter: () => interactionPresenter,
     display: () => displaySeam(),
-    currentSessionId: () => routingSource?.currentSessionId(),
+    // The committed Session authority (split Client) or the routed display
+    // subject (Direct/TSP legacy). When the split authority is supplied it is
+    // the ONLY Session identity this owner reads — a missing committed subject
+    // is a real "no session" fact, never a fallback to a stale routed id.
+    // (`undefined` authority = Direct/headless legacy: the routed subject.)
+    currentSessionId: () => options.committedSessionId === undefined
+      ? routingSource?.currentSessionId()
+      : options.committedSessionId?.(),
     // ADMISSION/PRESENTATION currentness (B3 findings F10/F12/F13): the surface's
     // OWN authority — the Session it shows, plus a Session it is currently
     // OPENING (a tentative opening is not an owner replacement, so its request is
-    // still admitted and keeps its flow). A renderer-OWNED presentation (the TSP
-    // modal seat) is the only branch this policy was authorized for: the PiTui
-    // branch — the default and the SDK-declined fallback — answers `true`
-    // unconditionally and keeps its original delegation semantics.
-    isAdmissibleSession: sessionId => rendererOwnedPresentation
-      ? sessionId === routingSource?.currentSessionId() || openingJournal.isOpening(sessionId)
-      : true,
+    // still admitted and keeps its flow). The renderer-OWNED presentation (the
+    // TSP modal seat) keeps its original shown-Session authority; the split
+    // Client's PiTUI branch uses the application's committed subject; Direct
+    // (no committed-session authority supplied) keeps its unconditional
+    // delegation semantics.
+    isAdmissibleSession: sessionId => {
+      // A renderer-OWNED presentation (the TSP modal seat) keeps its original
+      // authority (the surface's shown Session plus a legal opening target).
+      if (rendererOwnedPresentation) {
+        return sessionId === routingSource?.currentSessionId() || openingJournal.isOpening(sessionId)
+      }
+      // The split Client's PiTUI branch narrows to the application's ONE
+      // committed Session: a forwarded request whose own Session is not
+      // committed yet is HELD, never painted over another Session's editor.
+      // `null` means the authority IS installed and the surface is currently
+      // SESSIONLESS: nothing is admissible (no fallback to the legacy `true`,
+      // which would paint a foreign request over a sessionless editor).
+      // `undefined` means no split authority was supplied at all (Direct,
+      // headless fixtures): the pre-M5 unconditional delegation is kept.
+      if (options.committedSessionId !== undefined) {
+        const committedSessionId = options.committedSessionId?.()
+        if (committedSessionId === undefined) return false
+        return sessionId === committedSessionId || openingJournal.isOpening(sessionId)
+      }
+      return true
+    },
     schedulePaint: () => schedulePaint(),
     diag: () => task.diag(),
     isCleanedUp: () => isCleanedUp(),
@@ -1534,7 +2085,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   const activeWindow = (): TranscriptWindowController =>
     viewedChildMounted() ? routing().viewedChild().window : routing().main().window
   const activeStreamingToolPreviews = (): readonly StreamingToolPreview[] => {
-    if (!activeWindow().isLatest()) return []
+    // TSP has no application-level history window. Native Tern owns scroll;
+    // a stale/virtual controller anchor must not hide the active turn's preview.
+    if (!rendererOwnedPresentation && !activeWindow().isLatest()) return []
     return streamingToolPreviewSnapshot(
       viewedChildMounted() ? routing().viewedChild().previews : routing().main().previews,
     )
@@ -1587,6 +2140,113 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     && left.controller === right.controller
     && left.subjectKind === right.subjectKind
     && left.subjectId === right.subjectId
+
+  /**
+   * T3-B1: the subject identity each issued source token was minted under, so
+   * `current()`/`resolve()` compare the SUBJECT (kind + id), never the folder
+   * token alone. Deliberately NOT the window controller: scrolling the window is
+   * not a subject change and must never retire a live card.
+   */
+  const searchTokenSubjects = new WeakMap<object, { readonly subjectKind: 'main' | 'viewed-child'; readonly subjectId: string | undefined }>()
+
+  /**
+   * T3-B1: the officially committed search coverage, SCOPED to the source token
+   * it was committed for.
+   *
+   * It is a READ PROJECTION of facts this surface already receives — the boot
+   * `initialSearchCoverage`, the Remote generation reset and the acknowledged
+   * official hydrate/refold outcomes — kept ONLY so the TSP semantic-search
+   * binding can label its own snapshot. It is never inferred from a match
+   * count, never widened by a client repaint, and it is not a second coverage
+   * state machine: every write is the SAME commit the PiTui branch already
+   * forwards through `setTranscriptSearchCoverage`.
+   *
+   * The `source` half is what keeps a Remote `hasMore` fact from being lent to a
+   * DIFFERENT subject: a commit recorded against one token is only ever read
+   * back for that same token, and a source with no commit of its own answers the
+   * boot default.
+   */
+  let searchCoverage: { readonly source: object; readonly coverage: TranscriptSearchCoverage } | undefined
+
+  /** The coverage of ONE source token: its own commit, else the boot default. */
+  const coverageFor = (source: object): TranscriptSearchCoverage =>
+    searchCoverage !== undefined && searchCoverage.source === source
+      ? searchCoverage.coverage
+      : options.initialSearchCoverage ?? 'loaded-history'
+
+  /**
+   * T3-B1: the ONE read-only semantic-search binding of this surface. Every
+   * answer is derived at call time from the LIVE selected Folder and the
+   * current projection target, so a snapshot can never outlive its subject.
+   *
+   * The refinement is forwarded only when the caller's source token is STILL
+   * the current one; the Folder itself then validates the prefix/revision (the
+   * same contract the PiTui search uses). Nothing here builds a corpus, a
+   * token index or a second match cache.
+   */
+  const semanticSearchBinding: TspTranscriptSemanticSearchBinding = {
+    snapshot(query, refinement) {
+      // A released, hydrating or unmounted surface has no selected subject to
+      // search: `undefined` is the truthful answer, never a stale result.
+      if (disposed || isCleanedUp() || routingSource === undefined) return undefined
+      const target = captureProjectionTarget(activeFolder(), activeWindow())
+      const source = projectionTokenFor(target.folder)
+      // A refinement belongs to a PREVIOUS round: it may only be applied when
+      // it names this very source. A different token means the subject moved,
+      // so the full scan runs (the Folder would reject the refinement anyway).
+      const matches = refinement !== undefined && refinement.source === source
+        ? target.folder.search(query, {
+            previousQuery: refinement.previousQuery,
+            previousMatches: refinement.previousMatches,
+            revision: refinement.revision,
+          })
+        : target.folder.search(query)
+      const revision = target.folder.searchRevision()
+      // The Folder's own search can synchronously run plugin/transcript work; a
+      // target that moved under it makes this snapshot a lie, so it is dropped
+      // rather than relabelled with the new subject's identity.
+      const current = captureProjectionTarget(activeFolder(), activeWindow())
+      if (!sameProjectionTarget(target, current)) return undefined
+      searchTokenSubjects.set(source, { subjectKind: target.subjectKind, subjectId: target.subjectId })
+      return {
+        source,
+        subjectKind: target.subjectKind,
+        subjectId: target.subjectId,
+        revision,
+        matches,
+        coverage: coverageFor(source),
+      }
+    },
+    resolve(source, match) {
+      if (disposed || isCleanedUp() || routingSource === undefined) return undefined
+      const target = captureProjectionTarget(activeFolder(), activeWindow())
+      if (projectionTokenFor(target.folder) !== source) return undefined
+      // The token must still name the subject it was minted under (kind + id);
+      // the window controller is deliberately NOT part of this comparison.
+      const minted = searchTokenSubjects.get(source)
+      if (minted !== undefined
+        && (minted.subjectKind !== target.subjectKind || minted.subjectId !== target.subjectId)) return undefined
+      return target.folder.resolveSearchMatch(match)
+    },
+    current(source) {
+      if (disposed || isCleanedUp() || routingSource === undefined) return false
+      const target = captureProjectionTarget(activeFolder(), activeWindow())
+      if (projectionTokenFor(target.folder) !== source) return false
+      const minted = searchTokenSubjects.get(source)
+      if (minted !== undefined
+        && (minted.subjectKind !== target.subjectKind || minted.subjectId !== target.subjectId)) return false
+      return true
+    },
+    revision(source) {
+      if (disposed || isCleanedUp() || routingSource === undefined) return undefined
+      const target = captureProjectionTarget(activeFolder(), activeWindow())
+      if (projectionTokenFor(target.folder) !== source) return undefined
+      const minted = searchTokenSubjects.get(source)
+      if (minted !== undefined
+        && (minted.subjectKind !== target.subjectKind || minted.subjectId !== target.subjectId)) return undefined
+      return target.folder.searchRevision()
+    },
+  }
 
   /**
    * PR2: publish ONE already-computed projection to the optional read-only
@@ -1674,24 +2334,86 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     readonly session: object
     readonly sessionId: string
     readonly seq: number
-    readonly originRevision: number
+    readonly token: string
     readonly index: VisualPublicationIndex
   } | undefined
+  /**
+   * One STABLE `PublishedVisual` object per reference. When a committed
+   * revision is re-derived, a publication whose display content is unchanged
+   * keeps its previous object, so APPENDING a later figure never
+   * re-allocates the earlier ones and the sidecar's element-identity
+   * comparison keeps unrelated historical figure rows at their current
+   * revision. The cached objects carry only durable fact content (no session
+   * identity). Memory shape: after a subject/source switch the map is
+   * cleared (see `publicationsOf`), so it holds at most the CURRENT
+   * Session's published refs — the same entries the publication index
+   * itself references (one shared object each, never a second copy of the
+   * chart/SVG content) — the same order of magnitude as that Session's
+   * in-memory event log.
+   */
+  const stablePublicationsByRef = new Map<string, { readonly publication: PublishedVisual; readonly token: string }>()
   /** One-shot guard for the post-commit successor repaint. A re-entrant
    * setTranscript handover is not allowed to recurse without bound; the next
    * application repaint owns any further switch. */
   let visualSuccessorRepaint = false
+  /**
+   * The display-content token of ONE publication. It covers exactly what a
+   * figure card paints (ref, final chart fact / SVG credential and admission
+   * width) and deliberately nothing else: the visual sidecar advances only
+   * when this content changes, so an unrelated Session event (a plain `seq`
+   * bump) must not re-materialize historical figure rows. The SVG source
+   * bytes are covered by their digest.
+   */
+  const publicationContentToken = (publication: PublishedVisual): string => {
+    const source = publication.source
+    if (source.chart !== undefined) return `${publication.ref}\u0001${JSON.stringify(source.chart)}`
+    const svg = source.svg
+    return `${publication.ref}\u0001${svg === undefined ? '' : `${svg.title}\u0001${svg.description}\u0001${svg.digest}\u0001${svg.bytes}\u0001${String(source.svgAdmissionWidth)}`}\u0001${String(source.svgSource?.length ?? -1)}`
+  }
   const publicationsOf = (snapshot: VisualEventSnapshot): VisualPublicationIndex => {
     const memo = visualSnapshotMemo
-    // The origin revision is part of the identity: an async fork-lineage proof
-    // settles for the SAME Session seq, so without it the stale index would
-    // mask the newly proven inherited publications forever.
+    // A subject/source switch retires the previous Session's stabilization
+    // entries (see the `stablePublicationsByRef` memory shape).
+    if (memo !== undefined
+      && (memo.session !== snapshot.session || memo.sessionId !== snapshot.sessionId)) {
+      stablePublicationsByRef.clear()
+    }
+    // O(1) fast path: the same Session object at the SAME committed seq has
+    // already been fully derived, and an unchanged snapshot is the common
+    // case for every non-transcript repaint. `seq` is ONLY a derivation
+    // short-circuit here — it never re-enters the Assistant display stamp.
     if (memo !== undefined
       && memo.session === snapshot.session
       && memo.sessionId === snapshot.sessionId
-      && memo.seq === snapshot.seq
-      && memo.originRevision === snapshot.originRevision) return memo.index
-    const publications = collectPublishedVisuals(snapshot.sessionId, snapshot.events, snapshot.verifiedOriginSpans)
+      && memo.seq === snapshot.seq) return memo.index
+    // Re-derive ONCE per committed revision, then stabilize element
+    // identities BY REF (see `stablePublicationsByRef`).
+    const publications = collectPublishedVisuals(snapshot.events).map(publication => {
+      const token = publicationContentToken(publication)
+      const known = stablePublicationsByRef.get(publication.ref)
+      if (known !== undefined && known.token === token) return known.publication
+      stablePublicationsByRef.set(publication.ref, { publication, token })
+      return publication
+    })
+    const token = publications.map(publicationContentToken).join('\u0002')
+    // A content-identical re-derivation (the common case: an unrelated
+    // session event bumped the committed seq) keeps the SAME index object, so
+    // no historical figure row ever re-materializes for it. The short-circuit
+    // cursor MOVES to the current committed seq: the next repaint at the same
+    // seq is O(1) again, never a second full derivation.
+    if (memo !== undefined
+      && memo.session === snapshot.session
+      && memo.sessionId === snapshot.sessionId
+      && memo.token === token) {
+      visualSnapshotMemo = {
+        session: snapshot.session,
+        sessionId: snapshot.sessionId,
+        seq: snapshot.seq,
+        token: memo.token,
+        index: memo.index,
+      }
+      return memo.index
+    }
     const byTurn = new Map<number, PublishedVisual[]>()
     for (const publication of publications) {
       const existing = byTurn.get(publication.turn)
@@ -1703,7 +2425,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       session: snapshot.session,
       sessionId: snapshot.sessionId,
       seq: snapshot.seq,
-      originRevision: snapshot.originRevision,
+      token,
       index,
     }
     return index
@@ -1763,7 +2485,6 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         sourceIdentity,
         session: snapshot.session,
         sessionId: snapshot.sessionId,
-        seq: snapshot.seq,
         turn: message.turn,
         step: assistantStepOf(message),
         text: message.text,
@@ -1788,6 +2509,50 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   // it returns undefined).
   let searchBindingForRepaint: (() => TranscriptSearchPresentation | undefined) | undefined
 
+  /**
+   * TSP-7 Welcome D: the display-only Welcome eligibility of ONE already
+   * SELECTED projection, computed at the SAME instant the repaint picked its
+   * subject so a frame can never pair one subject's fold with another's blank
+   * read.
+   *
+   * The ONE blank authority is the injected read-only `SessionReader.blank`
+   * port; `undefined` from it means the Host fact is unknown and is NEVER
+   * inferred from the projection, the window or a running state. The fold's own
+   * turn knowledge is the positive veto (a turn it has seen hides the Welcome),
+   * and an empty fold is never proof of blankness on its own. The veto reads
+   * BOTH turn facts because they answer different questions: the grouped index
+   * covers turns that produced displayable cards, the activity map covers a
+   * `turn/start` that has produced none yet.
+   *
+   * It answers `undefined` — the argument stays ABSENT — when this frame speaks
+   * for no subject the Welcome question can be asked about: no injected
+   * authority (an older/test composition), the PiTui branch (its WelcomeCard
+   * stays app-owned and gains no Host read here), or a surface that has no
+   * Session yet. The sessionless invitation is the application's OWN formal
+   * commit (`setWelcomeIdle(true)`); it is never reverse-derived from an empty
+   * `setTranscript`, and an empty projection must never HIDE what the app just
+   * formally committed.
+   */
+  const welcomeEligibilityFor = (
+    folder: TranscriptFolder,
+    turnCount: number,
+  ): DisplayWelcomeEligibility | undefined => {
+    const readBlank = options.welcomeSessionBlank
+    if (readBlank === undefined || app !== undefined) return undefined
+    const viewedChildId = routing().viewedChildId()
+    if (viewedChildId !== undefined) return 'hidden'
+    const sessionId = routing().currentSessionId()
+    if (sessionId === undefined || folder !== routing().mainFolder()) return undefined
+    if (readBlank(sessionId) !== true) return 'hidden'
+    // A turn the fold KNOWS began vetoes the empty state even while the
+    // authority still claims blank. `groupedTurns` counts only turns that have
+    // produced displayable cards, so a Remote summary whose snapshot has not
+    // refreshed yet would otherwise keep the Welcome — and its live Resume
+    // action — over a Session that already started. The `turn/start` alone is
+    // the missing witness, and the fold records it as turn ACTIVITY.
+    return turnCount === 0 && folder.turnActivities().size === 0 ? 'blank-session' : 'hidden'
+  }
+
   /** Project one SELECTED target. The projection/geometry algorithms stay in
    *  `domain/transcript/**`; this is the repaint glue moved verbatim from the
    *  runner. */
@@ -1798,12 +2563,32 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     searchPresentation?: () => TranscriptSearchPresentation | undefined,
     onProjected?: () => void,
   ): void => {
-    controller.setTurns(folder.groupedTurns())
+    // The Welcome eligibility reuses THIS fold's complete turn index (the same
+    // call the window already needs), never a second history scan.
+    const groupedTurns = folder.groupedTurns()
+    controller.setTurns(groupedTurns)
     const endTurn = controller.endTurn()
-    const projection = folder.window({
-      maxTurns: controller.windowTurns,
-      ...(endTurn === undefined ? {} : { endTurn }),
-    })
+    const projection = rendererOwnedPresentation
+      ? {
+          messages: folder.messages(),
+          firstTurn: undefined,
+          lastTurn: undefined,
+          hasOlder: false,
+          hasNewer: false,
+        }
+      : folder.window({
+          maxTurns: controller.windowTurns,
+          ...(endTurn === undefined ? {} : { endTurn }),
+        })
+    const windowPresentation = rendererOwnedPresentation
+      ? { mode: 'latest' as const, hasOlder: false, hasNewer: false }
+      : {
+          ...controller.state(),
+          firstTurn: projection.firstTurn,
+          lastTurn: projection.lastTurn,
+          hasOlder: projection.hasOlder,
+          hasNewer: projection.hasNewer,
+        }
     onProjected?.()
     // Capture the subject identity and its source at ONE instant BEFORE the
     // commit; both the visual sidecars and the read-only observer are scoped to
@@ -1826,12 +2611,10 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         sourceIdentity: projectionTokenFor(folder),
       })
     }
-    displaySeam().setTranscript(projection.messages, activities, {
-      ...controller.state(),
-      firstTurn: projection.firstTurn,
-      lastTurn: projection.lastTurn,
-      hasNewer: projection.hasNewer,
-    }, streamingToolPreviews, (searchPresentation ?? searchBindingForRepaint)?.(), projectionTokenFor(folder))
+    // The Welcome eligibility rides THIS selection: computed BEFORE the
+    // commit, from the same instant as the subject/visual scoping.
+    const welcomeEligibility = welcomeEligibilityFor(folder, groupedTurns.length)
+    displaySeam().setTranscript(projection.messages, activities, windowPresentation, streamingToolPreviews, (searchPresentation ?? searchBindingForRepaint)?.(), projectionTokenFor(folder), welcomeEligibility)
     if (target === undefined) return
     // setTranscript can SYNCHRONOUSLY run plugin/modal callbacks that hand the
     // session to another owner. The pre-commit derivation is then stale: clear
@@ -1980,7 +2763,21 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   // stays in search-overlay.ts. The runner owns the folder instances and
   // supplies them through the routing source.
   let searchMatches: TranscriptSearchMatch[] = []
+  /** Raw semantic index of the navigation target's representative match. */
   let searchCurrent = -1
+  let navigationTargets: FullFindNavigationTarget[] = []
+  let navigationCurrent = -1
+  const navigationQualifications = new Map<string, FullFindNavigationQualification>()
+  /** Stable key of the match the mounted TuiApp last presented. A merged card
+   * target may represent its group by the FIRST occurrence, while the explicit
+   * jump that created it presented a LATER occurrence; identity checks and
+   * subsequent qualification must use the match actually on screen. */
+  /** Non-search structural epoch recorded with the cached qualifications. A
+   * resize/theme/preset/disclosure/remeasure moves it; an ordinary jump does not. */
+  let lastSearchQualificationEpoch = -1
+  let presentedNavigationMatchKey: string | undefined
+  let activeSearchScope: TranscriptSearchScope | undefined
+  let activeSearchQuery = ''
   // Opt-in local wall-clock profiling of the Ctrl+F hot path (perf plan S1
   // §4.2). A no-op unless DSH_TUI_SEARCH_PROFILE=1.
   const searchProfiler: SearchProfile = createSearchProfiler(searchProfilingEnabled())
@@ -2000,6 +2797,47 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
    * published representative objects (weak-highlight scope). */
   let searchMatchRepresentativeIds: number[] = []
   let searchMatchMessages: ReadonlySet<TranscriptMessage> = new Set()
+  const navigationMatchKey = (target: FullFindNavigationTarget | undefined): string | undefined =>
+    target === undefined ? undefined : target.kind === 'occurrence' ? target.matchKey : transcriptSearchMatchKey(target.match)
+  const publishNavigationTarget = (): void => {
+    // The projection carries the raw result index; never re-scan 3k+ matches per
+    // step just to recover an index the projection already knows.
+    searchCurrent = navigationTargets[navigationCurrent]?.matchIndex ?? -1
+  }
+  const rebuildFullNavigationTargets = (
+    folder: TranscriptFolder,
+    previous: FullFindNavigationTarget | undefined,
+    previousIndex: number,
+    preferredMatchKey?: string,
+  ): void => {
+    navigationTargets = projectFullFindNavigationTargets(
+      searchMatches,
+      id => folder.searchRepresentativeMemberCount(id),
+      navigationQualifications,
+    )
+    const preferredIndex = preferredMatchKey === undefined ? -1 : navigationTargets.findIndex(target =>
+      target.kind === 'occurrence'
+        ? target.matchKey === preferredMatchKey
+        : target.groupedMatchKeys.includes(preferredMatchKey),
+    )
+    navigationCurrent = preferredIndex >= 0
+      ? preferredIndex
+      : recoverFullNavigationTargetIndex(previous, navigationTargets, previousIndex)
+    publishNavigationTarget()
+  }
+  /** Expire cached grouping when the NON-search frame changed (resize, theme,
+   * display preset, disclosure, content remeasure). The cache is disposable and
+   * this runs once per structural epoch, never once per search step. */
+  const invalidateStaleNavigationQualifications = (folder: TranscriptFolder): void => {
+    const epoch = mounted().searchQualificationEpochForRuntime()
+    if (epoch === lastSearchQualificationEpoch) return
+    lastSearchQualificationEpoch = epoch
+    navigationQualifications.clear()
+    if (navigationTargets.length === 0) return
+    const previous = navigationTargets[navigationCurrent]
+    rebuildFullNavigationTargets(folder, previous, navigationCurrent)
+    displaySeam().setSearchResult(navigationCurrent + 1, navigationTargets.length)
+  }
   const sameMessageSet = (left: ReadonlySet<TranscriptMessage>, right: ReadonlySet<TranscriptMessage>): boolean => {
     if (left.size !== right.size) return false
     for (const message of left) if (!right.has(message)) return false
@@ -2076,14 +2914,28 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     })
   }
 
-  const resetSearchPresentation = (options: { preserveCurrentReveal?: boolean; rebuild?: boolean } = {}): void => {
+  const resetSearchPresentation = (options: {
+    preserveCurrentReveal?: boolean
+    rebuild?: boolean
+    keepActiveScopeQuery?: boolean
+  } = {}): void => {
+    if (options.keepActiveScopeQuery !== true) {
+      activeSearchScope = undefined
+      activeSearchQuery = ''
+    }
+    app?.clearRenderedViewSearch({ rebuild: false })
     // Only a runner that actually holds search state needs to publish the
     // atomic clear: an unconditional empty commit would force a pointless
     // message-tree rebuild on every Ctrl+End in regular fullscreen use.
-    const hadState = lastSearchQuery !== '' || searchMatches.length > 0
+    const hadState = lastSearchQuery !== '' || searchMatches.length > 0 || navigationTargets.length > 0
       || searchMatchRepresentativeIds.length > 0 || searchMatchMessages.size > 0
     searchMatches = []
     searchCurrent = -1
+    navigationTargets = []
+    navigationCurrent = -1
+    navigationQualifications.clear()
+    lastSearchQualificationEpoch = -1
+    presentedNavigationMatchKey = undefined
     lastSearchQuery = ''
     lastSearchRevision = 0
     lastSearchFolder = undefined
@@ -2107,6 +2959,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // same-window fast path against the projection the user is looking at.
     const folder = activeFolder()
     searchBoundRevision = folder.searchRevision()
+    if (activeSearchScope === 'view') return undefined
     if (lastSearchQuery === '' || lastSearchFolder === undefined || folder !== lastSearchFolder) return undefined
     // A PASSIVE commit (a settlement, a read-group split) can replace the card a
     // stored match was resolved against: the old representative then no longer
@@ -2117,7 +2970,10 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // not move).
     refreshSearchMatchesIfStale()
     refreshSearchMatchMessages()
-    return { matchMessages: resolveSearchMatchMessages(), target: resolveSearchTarget(), grantReveal: false }
+    invalidateStaleNavigationQualifications(folder)
+    const target = resolveSearchTarget()
+    presentedNavigationMatchKey = target === undefined ? undefined : transcriptSearchMatchKey(target.match)
+    return { matchMessages: resolveSearchMatchMessages(), target, grantReveal: false }
   }
   // PR D1 P1: while the search overlay is open the transcript keeps
   // changing (settlements, read-group reflow, new messages), so Next/Prev
@@ -2127,16 +2983,26 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   // previously current OCCURRENCE by its match key, and clamps the index.
   const refreshSearchMatchesIfStale = (): void => {
     const folder = activeFolder()
+    const previous = navigationTargets[navigationCurrent]
+    const previousIndex = navigationCurrent
     const refreshed = refreshedSearchState(
       { matches: searchMatches, current: searchCurrent, query: lastSearchQuery, revision: lastSearchRevision, folder: lastSearchFolder },
       folder,
     )
     if (!refreshed.changed) return
     searchMatches = refreshed.matches
-    searchCurrent = refreshed.current
     lastSearchRevision = refreshed.revision
     lastSearchFolder = folder
-    displaySeam().setSearchResult(searchCurrent + 1, searchMatches.length)
+    navigationQualifications.clear()
+    rebuildFullNavigationTargets(
+      folder,
+      previous,
+      previousIndex,
+      refreshed.matches[refreshed.current] === undefined
+        ? undefined
+        : transcriptSearchMatchKey(refreshed.matches[refreshed.current]!),
+    )
+    displaySeam().setSearchResult(navigationCurrent + 1, navigationTargets.length)
   }
   /** The search presentation for an EXPLICIT navigation: `grantReveal` so the
    * temporary reveal is (re-)granted, and the representative set / target
@@ -2150,14 +3016,74 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       grantReveal: true,
     }
   }
+  /** Commit only the qualification the mounted TuiApp just proved for this
+   * target. The projection remains disposable overlay state; semantic matches
+   * and representative sets stay Folder-derived. */
+  const commitCurrentNavigationQualification = (
+    folder: TranscriptFolder,
+    match: TranscriptSearchMatch,
+  ): void => {
+    const qualification = mounted().currentFullNavigationQualification()
+    if (qualification === undefined) return
+    const key = transcriptSearchMatchKey(match)
+    if (qualification.semanticMatchKey !== key || qualification.representativeId !== match.id) return
+    if (activeFolder() !== folder || lastSearchFolder !== folder || folder.searchRevision() !== lastSearchRevision) return
+    const current = navigationTargets[navigationCurrent]
+    const previousQualification = navigationQualifications.get(key)
+    navigationQualifications.set(key, qualification)
+    // An EXACT occurrence stays an occurrence: its grouping shape cannot change,
+    // so the O(matches) target projection does not need to run per step.
+    if (current?.kind === 'occurrence'
+      && qualification.verdict === 'exact' && qualification.groupScope === 'occurrence') {
+      displaySeam().setSearchResult(navigationCurrent + 1, navigationTargets.length)
+      return
+    }
+    // Re-projection is only needed when this target's grouping can actually
+    // change (first card qualification or a changed verdict/scope).
+    if (previousQualification !== undefined
+      && previousQualification.verdict === qualification.verdict
+      && previousQualification.groupScope === qualification.groupScope) {
+      displaySeam().setSearchResult(navigationCurrent + 1, navigationTargets.length)
+      return
+    }
+    const previousIndex = navigationCurrent
+    rebuildFullNavigationTargets(folder, current, previousIndex, key)
+    displaySeam().setSearchResult(navigationCurrent + 1, navigationTargets.length)
+  }
+
+  /** Re-qualify the CURRENT target from the live TuiApp frame. Called before
+   * every explicit step so a disclosure/theme/resize change (which rebuilds the
+   * frame without necessarily changing the folder revision) cannot keep a stale
+   * card grouping. The projection changes, never the semantic corpus. */
+  const syncCurrentNavigationQualification = (folder: TranscriptFolder): void => {
+    const current = navigationTargets[navigationCurrent]
+    if (current === undefined) return
+    if (lastSearchFolder !== folder || lastSearchRevision !== folder.searchRevision()) return
+    const presentedKey = presentedNavigationMatchKey
+    if (presentedKey === undefined) return
+    const qualification = mounted().currentFullNavigationQualification()
+    if (qualification === undefined) return
+    if (qualification.semanticMatchKey !== presentedKey || qualification.representativeId !== current.match.id) return
+    const previous = navigationQualifications.get(presentedKey)
+    // The presentation revision moves on every jump; only a verdict/scope
+    // change can change the grouping, so never re-project for the epoch alone.
+    if (previous !== undefined
+      && previous.verdict === qualification.verdict
+      && previous.groupScope === qualification.groupScope) return
+    navigationQualifications.set(presentedKey, qualification)
+    const previousIndex = navigationCurrent
+    rebuildFullNavigationTargets(folder, current, previousIndex, presentedKey)
+    displaySeam().setSearchResult(navigationCurrent + 1, navigationTargets.length)
+  }
   const jumpToSearchMatch = (): void => {
-    // `jumpToSearchMatch` is the ONLY caller of the stale refresh and the ONLY
-    // place that derives the representative ids: one O(searchMatches) dedupe
-    // pass per operation, over the FINAL result set (a 3000-result query must
-    // not pay it two or three times per keystroke).
+    // Refresh before resolving the projected target. Full target count may
+    // differ from the Folder's raw occurrence count, but raw match identity is
+    // the only authority used to resolve the visible representative.
     refreshSearchMatchesIfStale()
     refreshSearchMatchMessages()
-    const match = searchMatches[searchCurrent]
+    invalidateStaleNavigationQualifications(activeFolder())
+    const navigationTarget = navigationTargets[navigationCurrent]
+    const match = navigationTarget?.match
     if (match === undefined) {
       // Publish the current (empty) representative set AND the cleared target
       // in ONE atomic commit. A bare setTranscriptSearchTarget(undefined)
@@ -2173,6 +3099,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // step (same empty set, target already cleared) is a no-op and MUST NOT
       // be reported as a rebuild.
       if (mounted().setTranscriptSearchPresentation(presentation)) searchProfiler.stage('search.rebuild')
+      presentedNavigationMatchKey = undefined
       displaySeam().setSearchResult(0, 0)
       return
     }
@@ -2194,7 +3121,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       if (mounted().setTranscriptSearchPresentation(presentation)) searchProfiler.stage('search.rebuild')
       mounted().scrollToSearchTarget()
       searchProfiler.stage('search.scroll')
-      displaySeam().setSearchResult(searchCurrent + 1, searchMatches.length)
+      presentedNavigationMatchKey = transcriptSearchMatchKey(match)
+      commitCurrentNavigationQualification(folder, match)
+      displaySeam().setSearchResult(navigationCurrent + 1, navigationTargets.length)
       return
     }
     // Off-window: ONE fold snapshot (plan §19) — the anchored message window
@@ -2219,7 +3148,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     searchBoundRevision = folder.searchRevision()
     mounted().scrollToSearchTarget()
     searchProfiler.stage('search.scroll')
-    displaySeam().setSearchResult(searchCurrent + 1, searchMatches.length)
+    presentedNavigationMatchKey = transcriptSearchMatchKey(match)
+    commitCurrentNavigationQualification(folder, match)
+    displaySeam().setSearchResult(navigationCurrent + 1, navigationTargets.length)
   }
 
   // Virtual history boundaries preserve the rendered overlap anchor;
@@ -2306,18 +3237,60 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   // (lightweight indexed projection — never a full materialization); each jump
   // re-windows the view so the matched turn is visible (older turns collapse
   // above it into the summary entry).
-  const openSearch = (): void => {
-    // A stale search presentation from a previous session must never
-    // leak its reveal/highlight into the fresh overlay.
-    mounted().setTranscriptSearchTarget(undefined)
+  const openSearch = (scope: TranscriptSearchScope): boolean => {
+    if (app === undefined || disposed || activeSearchScope !== undefined) return false
+    resetSearchPresentation({ preserveCurrentReveal: false, rebuild: false })
+    activeSearchScope = scope
+    activeSearchQuery = ''
+    displaySeam().setSearchResult(0, 0)
+    app.setSearchScope(scope)
+    return true
+  }
+  const switchSearchScope = (scope: TranscriptSearchScope): void => {
+    if (activeSearchScope === undefined || activeSearchScope === scope) return
+    const query = activeSearchQuery
+    activeSearchScope = scope
+    resetSearchPresentation({ preserveCurrentReveal: false, rebuild: false, keepActiveScopeQuery: true })
+    activeSearchScope = scope
+    activeSearchQuery = query
+    mounted().setSearchScope(scope)
+    mounted().requestRender()
+    displaySeam().setSearchResult(0, 0)
+    if (scope === 'view') {
+      if (query === '') {
+        mounted().clearRenderedViewSearch({ rebuild: false })
+        mounted().requestRender()
+        return
+      }
+      const result = mounted().setRenderedViewSearchQuery(query)
+      if (result.currentIndex < 0 || result.count === 0) displaySeam().setSearchResult(0, 0)
+      return
+    }
+    if (query !== '') runSearchQuery(query)
+    else mounted().requestRender()
+  }
+  const changeSearchQuery = (query: string): void => {
+    if (activeSearchScope === undefined) return
+    activeSearchQuery = query
+    if (activeSearchScope === 'view') {
+      if (query === '') {
+        mounted().clearRenderedViewSearch({ rebuild: false })
+        mounted().requestRender()
+        return
+      }
+      mounted().setRenderedViewSearchQuery(query)
+      return
+    }
+    runSearchQuery(query)
   }
   const runSearchQuery = (query: string): void => {
+    if (activeSearchScope !== 'full') return
+    activeSearchQuery = query
     searchProfiler.start()
     const folder = activeFolder()
-    // Prefix refinement reuses the previous candidate set only when the
-    // query EXTENDS it on the SAME folder; the folder itself also
-    // requires an unchanged projection revision (a live append or group
-    // reflow between queries invalidates the candidates).
+    // Prefix refinement remains entirely Folder-owned and preserves every raw
+    // semantic occurrence. The overlay projects temporary navigation units only
+    // after the authoritative result list is complete.
     searchMatches = folder.search(query, lastSearchQuery !== '' && folder === lastSearchFolder
       ? { previousQuery: lastSearchQuery, previousMatches: searchMatches, revision: lastSearchRevision }
       : undefined)
@@ -2325,58 +3298,92 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     lastSearchQuery = query
     lastSearchRevision = folder.searchRevision()
     lastSearchFolder = folder
-    searchCurrent = searchMatches.length > 0 ? 0 : -1
-    // The jump owns the single representative pass for this operation.
-    // Always run the jump path: an empty/no-match query must CLEAR the
-    // stale search presentation target (0/0), not leave the previous
-    // reveal/highlight on screen.
+    navigationQualifications.clear()
+    navigationTargets = projectFullFindNavigationTargets(
+      searchMatches,
+      id => folder.searchRepresentativeMemberCount(id),
+    )
+    navigationCurrent = navigationTargets.length > 0 ? 0 : -1
+    publishNavigationTarget()
+    lastSearchQualificationEpoch = mounted().searchQualificationEpochForRuntime()
     jumpToSearchMatch()
     searchProfiler.end()
   }
   const searchNext = (): void => {
+    if (activeSearchScope === 'view') {
+      mounted().stepRenderedViewSearch(1)
+      return
+    }
+    if (activeSearchScope !== 'full') return
     searchProfiler.start()
-    // PR D1 P1: refresh BEFORE stepping — an empty candidate list
-    // still refreshes (a match that arrived while the overlay stayed
-    // open must be discoverable), and the step is computed on the
-    // REFRESHED list. The policy lives in steppedSearchOverlayState,
-    // shared by both handlers.
-    const folder = activeFolder()
-    const stepped = steppedSearchOverlayState(
-      { matches: searchMatches, current: searchCurrent, query: lastSearchQuery, revision: lastSearchRevision, folder: lastSearchFolder },
-      folder,
-      1,
-    )
-    searchMatches = stepped.matches
-    searchCurrent = stepped.current
-    lastSearchRevision = stepped.revision
-    lastSearchFolder = folder
-    // The jump owns the single representative pass for this operation.
-    // An emptied list steps to -1: the jump path still runs so the
-    // stale target/highlight is cleared (0/0).
+    // The overlay can gain its FIRST targets while it stays open. The
+    // pre-refresh index is the entry sentinel: Next must land on the FIRST
+    // fresh target, Prev on the LAST, never one step past it.
+    const previousCurrent = navigationCurrent
+    refreshSearchMatchesIfStale()
+    invalidateStaleNavigationQualifications(activeFolder())
+    syncCurrentNavigationQualification(activeFolder())
+    if (navigationTargets.length === 0) {
+      jumpToSearchMatch()
+      searchProfiler.end()
+      return
+    }
+    const current = navigationTargets[navigationCurrent]
+    const next = steppedFullNavigationTarget(previousCurrent, navigationCurrent, navigationTargets.length, 1)
+    if (next === navigationCurrent && current?.kind === 'card') {
+      // A single card target is already on screen: keep 1/1 without rebuilding,
+      // but only when the presented match really belongs to this card.
+      if (presentedNavigationMatchKey !== undefined && current.groupedMatchKeys.includes(presentedNavigationMatchKey)) {
+        displaySeam().setSearchResult(navigationCurrent + 1, navigationTargets.length)
+        searchProfiler.end()
+        return
+      }
+    }
+    navigationCurrent = next
+    publishNavigationTarget()
     jumpToSearchMatch()
     searchProfiler.end()
   }
   const searchPrev = (): void => {
+    if (activeSearchScope === 'view') {
+      mounted().stepRenderedViewSearch(-1)
+      return
+    }
+    if (activeSearchScope !== 'full') return
     searchProfiler.start()
-    const folder = activeFolder()
-    const stepped = steppedSearchOverlayState(
-      { matches: searchMatches, current: searchCurrent, query: lastSearchQuery, revision: lastSearchRevision, folder: lastSearchFolder },
-      folder,
-      -1,
-    )
-    searchMatches = stepped.matches
-    searchCurrent = stepped.current
-    lastSearchRevision = stepped.revision
-    lastSearchFolder = folder
-    // The jump owns the single representative pass for this operation.
+    const previousCurrent = navigationCurrent
+    refreshSearchMatchesIfStale()
+    invalidateStaleNavigationQualifications(activeFolder())
+    syncCurrentNavigationQualification(activeFolder())
+    if (navigationTargets.length === 0) {
+      jumpToSearchMatch()
+      searchProfiler.end()
+      return
+    }
+    const current = navigationTargets[navigationCurrent]
+    const previous = steppedFullNavigationTarget(previousCurrent, navigationCurrent, navigationTargets.length, -1)
+    if (previous === navigationCurrent && current?.kind === 'card') {
+      if (presentedNavigationMatchKey !== undefined && current.groupedMatchKeys.includes(presentedNavigationMatchKey)) {
+        displaySeam().setSearchResult(navigationCurrent + 1, navigationTargets.length)
+        searchProfiler.end()
+        return
+      }
+    }
+    navigationCurrent = previous
+    publishNavigationTarget()
     jumpToSearchMatch()
     searchProfiler.end()
   }
   const closeSearch = (reason: TranscriptSearchCloseReason): void => {
     const live = mounted()
+    const scope = activeSearchScope
+    const preserveFullReveal = reason === 'dismiss'
+      && scope === 'full'
+      && !live.isTemporarySearchReader()
     if (reason === 'dismiss') {
-      const anchor = live.captureTranscriptViewportAnchor()
-      resetSearchPresentation({ preserveCurrentReveal: true })
+      const anchor = preserveFullReveal ? live.captureTranscriptViewportAnchor() : undefined
+      resetSearchPresentation({ preserveCurrentReveal: preserveFullReveal })
+      displaySeam().setSearchResult(0, 0)
       if (anchor !== undefined) live.restoreTranscriptViewportAnchor(anchor, 'top')
       return
     }
@@ -2419,6 +3426,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // document; runtime switches go through app.setIconStyle (the /settings
     // write path) — never a deep settings read per render.
     iconStyle: deps.iconStyle,
+     initialSearchCoverage: options.initialSearchCoverage,
     extensionHost: extension.host(),
     // M0: the unified status projection store (the app projects its own
     // surface state into it; the runner derives the DSH-owned sections).
@@ -2434,10 +3442,12 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     deliveredFilePreview: deps.deliveredFilePreview,
     onDeliveredFileDiagnostic: deps.reportDeliveredFileFailure,
     draftImageStoreForTest: deps.draftImageStoreForTest,
+    draftFileStoreForTest: deps.draftFileStoreForTest,
     draftImagePreviewSource: deps.draftImagePreviewSource,
     draftImagePreviewLiveDraft: deps.draftImagePreviewLiveDraft,
     draftImagePreviewReserve: deps.draftImagePreviewReserve,
     draftImagePreviewUndo: deps.draftImagePreviewUndo,
+    ...(deps.terminalPastedPath === undefined ? {} : { terminalPastedPath: deps.terminalPastedPath }),
     // Fullscreen OSC 8 link clicks + the Windows right-click paste.
     openExternalUrl: deps.openExternalUrl,
     readClipboardText: deps.readClipboardText,
@@ -2470,6 +3480,15 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // Post-B4-B: Quick's distinct navigation action opens the same Full Task
     // Center owner as `/tasks`, without manufacturing a TaskPanelItem value.
     onQuickTaskOpenFull: () => task.openTasksBrowser('full'),
+    // PR3: the two first-party FULLSCREEN footer navigation entries. The
+    // model entry is the SAME late-bound registered `/model` command body;
+    // the tasks entry is the SAME Full Task Center owner `/tasks` uses.
+    // `displaySeam().supportsTaskCenter` is the TaskRuntime's own reachability
+    // truth (never a shadow capability), read at release time.
+    onFooterModelOpen: () => options.openModelPicker?.('models'),
+    footerModelAvailable: () => options.openModelPicker !== undefined && options.modelPickerAvailable?.() === true,
+    onFooterTasksOpen: () => task.openTasksBrowser('full'),
+    footerTasksAvailable: () => displaySeam().supportsTaskCenter,
   })
 
   return {
@@ -2482,10 +3501,13 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     },
     get modelPresentation() { return modelPresentation },
     get presetPresentation() { return presetPresentation },
+    get webPresentation() { return webPresentation },
+    get acpPresentation() { return acpPresentation },
     get sessionBrowserPresentation() { return sessionBrowserPresentation },
     get display(): SurfaceDisplaySeam {
       return displaySeam()
     },
+    get exitChoice() { return exitChoiceSeam },
     whenRendererReleased: () => rendererRelease,
     status,
     openingJournal,
@@ -2664,6 +3686,20 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     withdrawReplacedPresentation() {
       interaction.withdrawReplacedPresentation()
     },
+    withdrawPresentationForNavigation() {
+      interaction.withdrawPresentationForNavigation()
+    },
+    setNoAnswerNavigation(control) {
+      // The control is meaningful only for the mounted PiTUI app; a TSP mount
+      // has its own native modal seat and never reaches this entry.
+      app?.setNoAnswerNavigation(control)
+    },
+    setEditorWorkspaceEntry(control) {
+      // Same renderer mount ownership as the no-answer control above: the TSP
+      // branch has no TuiApp, so the Host Editor gesture simply does not exist
+      // there.
+      app?.setEditorWorkspaceEntry(control)
+    },
     retireStaleHistorySeat() {
       // The PiTui-only mounted app owns the optional seat; a TSP renderer mount
       // (no `app`) and a pre-mount/disposed surface are strict no-ops. The app's
@@ -2682,11 +3718,37 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     applyAssistantInput: (input) => eventRouting.applyAssistantInput(input),
     applyResumedCompaction: (id, active, phase) => eventRouting.applyResumedCompaction(id, active, phase),
     refreshPendingInput,
+    attachQueueManager(controller) {
+      queueManager = controller
+      // A controller installed AFTER the mount (tests/HMR) attaches to the
+      // live PiTui presentation immediately; the TSP branch never has an app
+      // here (its presentation is attached inside `start`).
+      if (app !== undefined) app.attachQueueManager(controller)
+    },
+    queuePresentationAvailable: () => queuePresentation !== undefined,
     resetPendingPresentation,
     schedulePaint,
     paintNow,
     repaint: () => repaintActive(),
-    resetSearchPresentation,
+    resetSearchPresentation() {
+      if (activeSearchScope !== undefined && app?.isSearching() === true) {
+        app.closeTranscriptSearch('surface-change')
+        return
+      }
+      resetSearchPresentation()
+    },
+    setTranscriptSearchCoverage: coverage => {
+      // T3-B1: the SAME commit feeds the TSP semantic-search read projection,
+      // SCOPED to the subject it was committed for. The PiTui branch
+      // additionally forwards to its own app; the TSP branch has no app, so
+      // without this line the renderer would have no authoritative coverage fact
+      // at all.
+      if (routingSource !== undefined) {
+        const target = captureProjectionTarget(activeFolder(), activeWindow())
+        searchCoverage = { source: projectionTokenFor(target.folder), coverage }
+      }
+      app?.setTranscriptSearchCoverage(coverage)
+    },
 
     resetSubjectStatus,
     disposeJobEvents() {
@@ -2733,9 +3795,21 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         // TSP-7 PR-A: the mount receives the READ-ONLY projection of the ONE
         // store (`status`), never the store itself — the surface stays the sole
         // writer and the renderer can only sample an already-committed snapshot.
+        // TSP I-E: the History-search binding is the SAME three read-only
+        // inputs the PiTui branch already receives — the one search source, the
+        // live session cwd and the one atomic currentness bridge. Nothing here
+        // constructs a second source, reads a history file or re-derives a
+        // Session identity; the renderer's seat consumes exactly this bundle.
         const mounted = deps.renderer.mount(
           { imageLoader, imageScope: deps.imageScope, draftImages },
           { snapshot: () => status.snapshot() },
+          {
+            source: deps.historySearchSource,
+            cwd: () => deps.sessionCwd(),
+            captureScope: deps.captureHistoryScope,
+          },
+          semanticSearchBinding,
+          queueManager,
         )
         // TSP-7 PR-B: the TSP branch's seam is the renderer's own, wrapped by a
         // NARROW surface-side proxy over `commitStatusFacts` only. The proxy
@@ -2751,9 +3825,21 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         composerPort = mounted.composer
         modelPresentation = mounted.modelPresentation
         presetPresentation = mounted.presetPresentation
+        webPresentation = mounted.webPresentation
+        acpPresentation = mounted.acpPresentation
         sessionBrowserPresentation = mounted.sessionBrowserPresentation
         interactionPresenter = mounted.interaction
+        exitChoiceSeam = mounted.exitChoice
+        attachQueuePresentation(mounted.queuePresentation)
         rendererDispose = mounted.dispose
+        // TSP I-C: keep ONLY the mount's installer reference (no catalog, no
+        // candidate state). A mount without a completion seat leaves this
+        // unset, and the command layer reports the skipped install.
+        rendererCommandCompletionsInstaller = mounted.installCommandCompletions
+        // TSP I-D: the same installer-reference pattern for the ONE inline
+        // attachment stager. A mount without an attachment plane leaves this
+        // unset, and the forward below then installs NOTHING.
+        rendererInlineAttachmentStagerInstaller = mounted.installInlineAttachmentStager
         // PR3-B §3.3: the input projection is constructed HERE (from the EXACT
         // already-built callbacks, preserving their receiver/signature) but
         // BOUND LATER, through `bindRendererInput()`. Binding at this instant
@@ -2764,7 +3850,14 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         pendingInputBinding = {
           exit: () => deps.events.onExit(),
           cancel: () => deps.events.onCancel?.(),
-          submit: (text, request) => deps.events.onSubmit(text, request),
+          ...(deps.events.sessionActivity === undefined
+            ? {}
+            : { sessionActivity: () => deps.events.sessionActivity!() }),
+          submit: (text, request, scopeToken) => deps.events.onSubmit(text, request, scopeToken),
+          // PR2: the ONE synchronous admission shared with the application.
+          // Absent wiring keeps the pre-PR2 (clear-first) TSP sequence.
+          beginComposerSubmission: (text, request) =>
+            deps.events.beginComposerSubmission?.(text, request) ?? 'legacy',
           // `onSteer` is optional on the events table (the capability is
           // guarded at construction): an absent one leaves the gesture a
           // committed no-op rather than a fabricated submission.
@@ -2774,6 +3867,18 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
           // table, so an events object without it leaves the gesture a
           // committed no-op). The renderer never probes the OS clipboard.
           pasteMedia: () => deps.events.onClipboardPaste?.(),
+          pastedPath: (receipt) => deps.events.onTerminalPastedPath?.(receipt),
+          admitPastedPathDelivery: (text) => {
+            if (deps.terminalPastedPath?.blocksDelivery(text) !== true) return true
+            displaySeam().notify(PASTE_PENDING_NOTICE, 'info')
+            return false
+          },
+          // TSP I-A: the recall-eligibility read, projected from the SAME
+          // application policy PiTui's `rememberInput` consults. An events
+          // table without the predicate accepts (the predicate is an
+          // attachment/paste REFUSAL, and its absence means nothing to
+          // refuse) — exactly the PiTui `?.(text) === false` shape.
+          shouldRememberInput: (text) => deps.events.shouldRememberInput?.(text) !== false,
           noteUserInput: () => deps.events.onUserInput?.(),
           // PR3-B B3 (§3.8): the Alt+Q continued-Question read/reopen cross
           // through the SAME interaction owner. They are bound here but can
@@ -2792,6 +3897,14 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
             if (open === undefined) throw new Error('the model picker command entry is not wired in this composition')
             open(entry)
           },
+          // TSP-7 PR-G: the late-bound quick `/model` UI entry, forwarded
+          // verbatim. Same loud-placeholder rule: an unwired composition must
+          // not leave the combined composer control dead.
+          openModelQuick: () => {
+            const open = options.openModelQuick
+            if (open === undefined) throw new Error('the model quick command entry is not wired in this composition')
+            open()
+          },
           modelPickerAvailable: () => options.modelPickerAvailable?.() ?? false,
           // TSP-7 PR-E: the late-bound Permission UI seam. The catalog read
           // returns empty when no owner is composed; the action refuses loudly
@@ -2802,6 +3915,33 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
             if (permissionUi === undefined) throw new Error('permission UI owner is not composed')
             permissionUi.select(id)
           },
+          // TSP-7 Welcome D: the late-bound `/sessions` UI entry, forwarded
+          // verbatim. Same loud-placeholder rule as the model entries: an
+          // unwired composition must not leave the Welcome action dead, and
+          // availability answers the real business-entry fact (false before
+          // the binding, never an optimistic true).
+          openSessionBrowser: () => {
+            const open = options.openSessionBrowser
+            if (open === undefined) throw new Error('the session browser command entry is not wired in this composition')
+            open()
+          },
+          sessionBrowserAvailable: () => options.sessionBrowserAvailable?.() ?? false,
+          // Mouse PR4: the late-bound `/tasks` UI entry, forwarded verbatim.
+          // Same loud-placeholder rule as the model/session entries: an
+          // unwired composition must not leave the status segment's action
+          // dead, and availability answers the real business-entry fact
+          // (false before the binding, never an optimistic true).
+          openTasksBrowserUi: () => {
+            const open = options.openTasksBrowserUi
+            if (open === undefined) throw new Error('the tasks browser command entry is not wired in this composition')
+            open()
+          },
+          tasksBrowserUiAvailable: () => options.tasksBrowserUiAvailable?.() ?? false,
+          // The TSP Workflow scoped entry owns no browser of its own: the
+          // SAME TaskRuntime and Task Center decide from the current action.
+          openWorkflowScopedAgents: action => task.handleWorkflowAction(action),
+          workflowScopedAgentsAvailable: () => task.scopedBrowserAvailable()
+            && displaySeam().supportsViewer === false,
         }
         inputBindTarget = mounted
         return
@@ -2817,8 +3957,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         onTranscriptTurnNewer: () => transcriptTurnNewer(),
         onTranscriptMoveNewer: () => transcriptMoveNewer(),
         onTranscriptJumpLatest: () => transcriptJumpLatest(),
-        onSearchOpen: () => openSearch(),
-        onSearchQuery: query => runSearchQuery(query),
+        onSearchOpen: scope => openSearch(scope),
+        onSearchScope: scope => switchSearchScope(scope),
+        onSearchQuery: query => changeSearchQuery(query),
         onSearchNext: () => searchNext(),
         onSearchPrev: () => searchPrev(),
         onSearchClose: reason => closeSearch(reason),
@@ -2834,8 +3975,11 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         ...buildOptions(deps, imageLoader, rasterLoader),
         initialTerminalProgress: interval.snapshot().active,
         terminalProgressMode: parseTerminalProgressMode(options.terminalProgress),
+        ...(options.onProgramStatus === undefined ? {} : { onProgramStatus: options.onProgramStatus }),
       })
       display = pituiDisplaySeam(app)
+      exitChoiceSeam = pituiExitChoiceSeam(app)
+      if (queueManager !== undefined) app.attachQueueManager(queueManager)
       // B3-A1: the PiTui Task Center presentation sink is the ONE live app
       // itself, wrapped by the pure delegation adapter. It is installed
       // BEFORE the post-mount attention republish below, so that republish
@@ -2863,6 +4007,20 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       if (target === undefined || handlers === undefined) return
       target.bindInput(handlers)
     },
+    installTspCommandCompletions(installation) {
+      // TSP I-C: one synchronous forward to the CURRENT mount's installer.
+      // Absent (no renderer mounted, a renderer without a completion seat, or
+      // already disposed) means NOTHING is installed — the command layer
+      // reports the skipped install instead of keeping a second copy here.
+      rendererCommandCompletionsInstaller?.(installation)
+    },
+    installTspInlineAttachmentStager(stager) {
+      // TSP I-D: one synchronous forward, exactly like the catalog commit above.
+      // Absent (no renderer mounted, a renderer without an attachment plane, or
+      // already disposed) means NOTHING is installed; the mount, not this owner,
+      // reports the fact.
+      rendererInlineAttachmentStagerInstaller?.(stager)
+    },
     disposePluginManager() {
       // Release the Plugin Manager install-event subscription at its original
       // EARLY position. This never cancels a Host install: only the official
@@ -2884,9 +4042,26 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // disposed-but-present TuiApp.
       const releaseRenderer = rendererDispose
       rendererDispose = undefined
+      // TSP I-C: withdraw the catalog source BEFORE the renderer is released,
+      // so no late catalog commit can reach a disposed mount (and nothing
+      // survives into a remount, which mounts a NEW installer reference).
+      rendererCommandCompletionsInstaller = undefined
+      // M6 UX PR1: the choice seat dies with its mount; a late coordinator
+      // update/close then finds no seat instead of painting into a dead app.
+      exitChoiceSeam = undefined
+      // TSP I-D: withdraw the stager installer with the mount it points at, so a
+      // late registration can never reach a disposed mount and a remount binds
+      // its OWN installer reference.
+      rendererInlineAttachmentStagerInstaller = undefined
       modelPresentation = undefined
       presetPresentation = undefined
+      webPresentation = undefined
+      acpPresentation = undefined
       sessionBrowserPresentation = undefined
+      if (queueManager !== undefined && queuePresentation !== undefined) {
+        queueManager.detach(queuePresentation)
+      }
+      queuePresentation = undefined
       // A disposed surface never binds its renderer input afterwards.
       pendingInputBinding = undefined
       inputBindTarget = undefined

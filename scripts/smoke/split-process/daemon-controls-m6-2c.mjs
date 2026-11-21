@@ -1,0 +1,962 @@
+/**
+ * M6-2C daemon management native qualification cases.
+ *
+ * These selectable cases drive the PUBLIC `dsh --profile pi-tui daemon ...`
+ * commands (never an internal entry harness) against an isolated packed install
+ * and inspect the real systemd user manager, the real detached fallback Host and
+ * the real Profile scope. They are strictly environment-gated: a run only
+ * qualifies itself as a dedicated isolated test account whose account home IS
+ * the isolated home and whose `systemctl --user` channel is genuinely reachable
+ * (or genuinely absent for the fallback case). Everywhere else each case returns
+ * an honest `NOT_VERIFIED` and never touches the real user manager, never
+ * fabricates a PASS and never signs a stand-in as real L6.
+ *
+ * @module split-process/daemon-controls-m6-2c
+ */
+
+import { spawn, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:net'
+import { dirname, join } from 'node:path'
+import { userInfo } from 'node:os'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+
+import { findIsolatedProcesses, killIsolatedProcesses } from '../../lib/split-smoke-processes.mjs'
+import { createSplitSmokeProfile } from '../../lib/split-smoke-profile.mjs'
+import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
+import { hostAssistantHasText, hostSessionEvents, hostUserTexts } from '../../lib/split-smoke-sessions.mjs'
+import { installedArtifactBuildId, managedHostGateReason, stopAndRemoveManagedUnit, unitBelongsToRun } from './managed-host-m6-2b.mjs'
+
+const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
+
+const ISOLATED_HOME_ENV = 'SPLIT_PROCESS_MANAGED_HOST_ISOLATED_HOME'
+const ISOLATED_FLAG_ENV = 'SPLIT_PROCESS_MANAGED_HOST_ISOLATED'
+const ISOLATED_MARKER = '.dsh-pi-tui-managed-host-isolated'
+const SYSTEMCTL = '/usr/bin/systemctl'
+const OWNER_MARKER = 'local-host-manager-v1'
+
+function assert(condition, message) {
+  if (!condition) throw new SplitSmokeAssertionError(message)
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+/** The same attested isolated-account gate the managed-host cases use. */
+function isolatedGate() {
+  const isolatedHome = process.env[ISOLATED_HOME_ENV]
+  const optIn = process.env[ISOLATED_FLAG_ENV]
+  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
+  let accountHome
+  try { accountHome = userInfo().homedir } catch { accountHome = undefined }
+  let markerExists = false
+  if (isolatedHome !== undefined && isolatedHome !== '' && accountHome !== undefined) {
+    try { markerExists = existsSync(join(requireRealpath(accountHome), ISOLATED_MARKER)) } catch { markerExists = false }
+  }
+  const reason = managedHostGateReason({ isolatedHome, optIn, markerExists, uid, accountHome })
+  if (reason === null) return { qualified: true }
+  return { qualified: false, reason }
+}
+
+function requireRealpath(path) {
+  try { return realpathSync(path) } catch { return path }
+}
+
+function runtimeDir() {
+  const uid = process.getuid()
+  return existsSync(`/run/user/${String(uid)}`) ? `/run/user/${String(uid)}` : undefined
+}
+
+function systemctl(args) {
+  return spawnSync(SYSTEMCTL, args, {
+    encoding: 'utf8',
+    timeout: 15_000,
+    env: runtimeDir() === undefined ? process.env : { ...process.env, XDG_RUNTIME_DIR: runtimeDir() },
+  })
+}
+
+function managerAvailable() {
+  return systemctl(['--user', '--no-pager', '--no-ask-password', 'show-environment']).status === 0
+}
+
+/** The real `systemctl show` properties for one unit (never Host readiness). */
+function showUnitProps(unit) {
+  const result = systemctl(['--user', '--no-pager', '--no-ask-password', 'show', '-p', 'LoadState', '-p', 'ActiveState', '-p', 'FragmentPath', '-p', 'MainPID', '-p', 'UnitFileState', '-p', 'DropInPaths', unit])
+  if (result.status !== 0) throw new SplitSmokeAssertionError(`daemon-control: systemctl show failed for ${unit}`)
+  const props = {}
+  for (const line of (result.stdout ?? '').split('\n')) {
+    const at = line.indexOf('=')
+    if (at > 0) props[line.slice(0, at)] = line.slice(at + 1).trim()
+  }
+  return props
+}
+
+/**
+ * The explicit install step: real `daemon install` creates/loads ONE inactive
+ * unit, never starts or enables it, and a repeat install is idempotent.
+ */
+function installVerifiedUnit(installation) {
+  const uid = process.getuid()
+  const scopeId = profileScopeId(uid, installation.profileDir)
+  const unit = profileUnitName('pi-tui', scopeId)
+  const unitPath = unitPathOf(unit)
+  assert(!existsSync(unitPath), 'the systemd case must begin with no installed unit')
+  assert(hostPids(installation.dshHome).length === 0, 'the systemd case must begin with no Host')
+  const installed = runDaemon(installation, ['install'])
+  assert(installed.status === 0, `daemon install failed: ${installed.stderr.slice(-800)}`)
+  assert(existsSync(unitPath), 'daemon install did not create the profile unit')
+  const props = showUnitProps(unit)
+  assert(props.LoadState === 'loaded', `install did not make the manager load the unit (LoadState=${String(props.LoadState)})`)
+  assert(props.ActiveState === 'inactive', `install must not start the unit (ActiveState=${String(props.ActiveState)})`)
+  assert(props.UnitFileState !== 'enabled', 'install must not enable the unit')
+  assert(Number(props.MainPID ?? '0') === 0, 'install must not start a Host')
+  assert(hostPids(installation.dshHome).length === 0, 'install must not start a Host process')
+  const repeat = runDaemon(installation, ['install'])
+  assert(repeat.status === 0, `a repeat install must be idempotent: ${repeat.stderr.slice(-500)}`)
+  const repeatProps = showUnitProps(unit)
+  assert(repeatProps.ActiveState === 'inactive' && Number(repeatProps.MainPID ?? '0') === 0,
+    'a repeat install must not start the unit or a Host')
+  return { unit, unitPath }
+}
+
+function profileScopeId(uid, profileDir) {
+  return createHash('sha256')
+    .update(`dsh-pi-tui/local-scope/1\0${String(uid)}\0${realpathSync(profileDir)}`)
+    .digest('hex')
+}
+
+function profileUnitName(profile, scopeId) {
+  let slug = ''
+  for (const character of profile) slug += /[A-Za-z0-9_.-]/u.test(character) ? character : '_'
+  if (slug === '') slug = 'profile'
+  if (!/[A-Za-z0-9]/u.test(slug[0])) slug = `p${slug}`
+  return `dsh-pi-tui@${slug.slice(0, 32)}-${scopeId.slice(0, 16)}.service`
+}
+
+function unitPathOf(unit) {
+  return join(realpathSync(userInfo().homedir), '.config', 'systemd', 'user', unit)
+}
+
+function classify(pid) {
+  let cmdline
+  try { cmdline = readFileSync(`/proc/${String(pid)}/cmdline`, 'utf8') } catch { return undefined }
+  if (cmdline.includes('local-host.mjs')) return 'host'
+  if (cmdline.includes('local-client.mjs')) return 'client'
+  return undefined
+}
+
+function processCounts(dshHome) {
+  const roles = findIsolatedProcesses(dshHome).map(classify)
+  return { host: roles.filter(role => role === 'host').length, client: roles.filter(role => role === 'client').length }
+}
+
+function hostPids(dshHome) {
+  return findIsolatedProcesses(dshHome).filter(pid => classify(pid) === 'host')
+}
+
+/** Run ONE public management command without a TTY. */
+function runDaemon(installation, args, env = {}) {
+  const [executable, ...prefix] = installation.dshInvocation
+  const result = spawnSync(executable, [...prefix, '--profile', 'pi-tui', 'daemon', ...args], {
+    cwd: installation.profileDir,
+    env: { ...installation.env, ...env },
+    encoding: 'utf8',
+    timeout: 120_000,
+    shell: false,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  return {
+    status: result.status,
+    signal: result.signal,
+    stdout: result.stdout ?? '',
+    stderr: result.stderr ?? '',
+    error: result.error,
+  }
+}
+
+/** Asynchronous public management command (for the concurrency race). */
+function spawnDaemon(installation, args, env = {}) {
+  const [executable, ...prefix] = installation.dshInvocation
+  const child = spawn(executable, [...prefix, '--profile', 'pi-tui', 'daemon', ...args], {
+    cwd: installation.profileDir,
+    env: { ...installation.env, ...env },
+    shell: false,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let stdout = ''
+  let stderr = ''
+  child.stdout.setEncoding('utf8')
+  child.stderr.setEncoding('utf8')
+  child.stdout.on('data', chunk => { stdout += chunk })
+  child.stderr.on('data', chunk => { stderr += chunk })
+  return new Promise(resolve => {
+    child.once('close', (code, signal) => resolve({ status: code, signal, stdout, stderr }))
+    child.once('error', error => resolve({ status: null, signal: null, stdout, stderr, error }))
+  })
+}
+
+/** Parse the stable key=value status block (last occurrence wins). */
+function statusOf(stdout) {
+  const fields = {}
+  for (const line of stdout.split('\n')) {
+    const at = line.indexOf('=')
+    if (at > 0) fields[line.slice(0, at)] = line.slice(at + 1).trim()
+  }
+  return fields
+}
+
+/**
+ * The Direct-only TUI/Host rows that must never appear as `pending (waiting for
+ * services: ... tuiStartup)` in the daemon supervisor. The management command
+ * captures BOTH streams, but real Host/manager diagnostics are allowed: only a
+ * warning naming one of these rows is the misleading condition.
+ */
+const DIRECT_ONLY_SUPERVISOR_IDS = [
+  'pi-tui-extension-host', 'pi-tui-builtins', 'pi-tui-performance-host', 'workspace-files', 'tui-app',
+  'workspace-controller', 'directory-picker', 'pi-tui-schedule',
+  'pi-tui-direct-connection', 'pi-tui-direct-file-upload', 'pi-tui-direct-session-controller',
+]
+
+/** Fail on a real supervisor warning that any Direct-only row is pending on tuiStartup. */
+function assertNoDirectOnlyPendingWarnings(result, label) {
+  const lines = `${result.stdout}\n${result.stderr}`.split('\n')
+  for (const line of lines) {
+    if (!line.includes('pending (waiting for')) continue
+    const id = DIRECT_ONLY_SUPERVISOR_IDS.find(candidate => line.trim().startsWith(candidate)
+      || line.includes(`${candidate} (`))
+    assert(id === undefined, `${label}: ${id} stayed pending in the daemon supervisor: ${line.trim()}`)
+  }
+}
+
+function assertStatus(result, fields, message) {
+  assert(result.status === 0, `${message}: expected exit 0, saw ${String(result.status)}: ${result.stderr.slice(-500)}`)
+  const status = statusOf(result.stdout)
+  for (const [key, value] of Object.entries(fields)) {
+    assert(status[key] === value, `${message}: expected ${key}=${value}, saw ${String(status[key])}\n${result.stdout}`)
+  }
+  return status
+}
+
+async function waitFor(predicate, label, timeoutMs) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (predicate()) return
+    await sleep(120)
+  }
+  throw new SplitSmokeAssertionError(`daemon-control: ${label} did not settle before the deadline`)
+}
+
+function cleanupCase(installation, trace) {
+  stopAndRemoveManagedUnit(installation, trace)
+  killIsolatedProcesses(installation.dshHome)
+}
+
+/** The stable NOT_VERIFIED result for an environment that cannot qualify. */
+function notVerified(reason) {
+  return { status: 'NOT_VERIFIED', reason }
+}
+
+/**
+ * status-safety: a no-Host status is a pure read with `user-manager=not-checked`,
+ * the basic daemon needs no unit, an explicit install beside a running
+ * independent Host does not migrate it, and an active-but-unauthenticated Host is
+ * never Ready.
+ */
+export async function runDaemonControlStatusSafety({ installation, trace, dshHome }) {
+  const gate = isolatedGate()
+  if (!gate.qualified) return notVerified(gate.reason)
+  const uid = process.getuid()
+  const scopeId = profileScopeId(uid, installation.profileDir)
+  const scopeDir = join(dshHome, 'run', 'dsh-pi-tui', scopeId)
+  const unit = profileUnitName('pi-tui', scopeId)
+  const unitPath = unitPathOf(unit)
+  const scopeBefore = existsSync(scopeDir)
+  const unitBefore = existsSync(unitPath)
+  let launchBefore
+  let launchPath
+  let failure
+  let result
+  try {
+    assert(processCounts(dshHome).host === 0, 'the status-safety scene must begin with no Host')
+    assert(!unitBefore, 'the status-safety scene must begin with no installed unit')
+    for (const env of [{ DSH_PI_TUI_BACKEND: 'direct' }, { DSH_PI_TUI_BACKEND: 'daemon' }, { DSH_PI_TUI_BACKEND: 'wire-local' }, {}]) {
+      const probe = runDaemon(installation, ['status'], env)
+      assertStatus(probe, {
+        host: 'stopped',
+        manager: 'unmanaged',
+        unit: 'none',
+        'unit-state': 'not-found',
+        'user-manager': 'not-checked',
+      }, `no-Host status with ${JSON.stringify(env)}`)
+      assert(processCounts(dshHome).host === 0 && processCounts(dshHome).client === 0,
+        'a read-only status must not start a Host or Client')
+    }
+    assert(existsSync(scopeDir) === scopeBefore, 'status must not create the profile run directory')
+    assert(existsSync(unitPath) === unitBefore, 'status must not create or delete a profile unit')
+    // The BASIC daemon needs no unit: an explicit start creates one independent
+    // Host and reports manager=process/unit=none.
+    const basic = assertStatus(runDaemon(installation, ['start']), { host: 'ready', manager: 'process', unit: 'none' }, 'the basic daemon start')
+    assert(processCounts(dshHome).host === 1, 'the basic start must create exactly one independent Host')
+    // An explicit install beside the running independent Host installs/loads the
+    // unit but must NOT migrate the Host instance.
+    const installed = runDaemon(installation, ['install'])
+    assert(installed.status === 0, `daemon install beside an independent Host failed: ${installed.stderr.slice(-500)}`)
+    const afterInstall = assertStatus(runDaemon(installation, ['status']), { host: 'ready', manager: 'process', unit }, 'status after install')
+    assert(afterInstall.instance === basic.instance, 'daemon install must not migrate or replace the running independent Host')
+    // A warm start still reuses that independent Host; only an explicit stop
+    // ends it, and the NEXT start takes over through the installed unit.
+    const warm = assertStatus(runDaemon(installation, ['start']), { host: 'ready', manager: 'process' }, 'warm start after install')
+    assert(warm.instance === basic.instance, 'a warm start must reuse the independent Host instead of migrating it')
+    const stoppedIndependent = assertStatus(runDaemon(installation, ['stop']), { host: 'stopped' }, 'stopping the independent Host after install')
+    assert(stoppedIndependent.pid === undefined, 'the stopped independent Host must no longer be reported live')
+    await waitFor(() => hostPids(dshHome).length === 0, 'the independent Host exit before unit takeover', 30_000)
+    const takenOver = assertStatus(runDaemon(installation, ['start']), { host: 'ready', manager: 'systemd', unit, 'unit-state': 'active' }, 'start taking over through the installed unit')
+    launchPath = join(scopeDir, 'launch.json')
+    launchBefore = readFileSync(launchPath, 'utf8')
+    const material = JSON.parse(launchBefore)
+    material.connectUrl = String(material.connectUrl).replace(/token=[^&]+/u, 'token=tampered')
+    writeFileSync(launchPath, `${JSON.stringify(material)}\n`, { mode: 0o600 })
+    const tampered = runDaemon(installation, ['status'])
+    assert(tampered.status !== 0, 'a Host that fails authentication must make status nonzero')
+    const tamperedStatus = statusOf(tampered.stdout)
+    assert(tamperedStatus.host !== 'ready' && tamperedStatus.host !== 'stopped',
+      `an unauthenticated Host must not report ready or stopped: ${tampered.stdout}`)
+    // The Owner contract: an authentication failure is not a unit-ownership
+    // verdict. With the launch material still broken, an EXPLICIT stop must
+    // still manage the verified unit through systemd; the product does not
+    // auto-recover.
+    const tamperedStop = runDaemon(installation, ['stop'])
+    assertStatus(tamperedStop, { host: 'stopped' }, 'stop with tampered authentication')
+    await waitFor(() => hostPids(dshHome).length === 0, 'the tampered-auth service Host exit', 30_000)
+    assert(processCounts(dshHome).host === 0, 'the explicit stop must stop the verified unit, not leave a second Host')
+    writeFileSync(launchPath, launchBefore, { mode: 0o600 })
+    launchBefore = undefined
+    trace('daemon-control-status-safety', { instance: takenOver.instance, basicInstance: basic.instance, tamperedExit: tampered.status, tamperedStop: tamperedStop.status })
+    result = { status: 'PASS', scope: 'REAL_SYSTEMD_USER_L6', noHostStatusPure: true, basicDaemonNoUnit: true, installNoMigration: true, activeNotReady: true, envIndependent: true, authenticationFailureRecoverable: true }
+  } catch (error) {
+    failure = error
+  } finally {
+    if (launchBefore !== undefined && launchPath !== undefined) {
+      try { writeFileSync(launchPath, launchBefore, { mode: 0o600 }) } catch { /* best effort */ }
+    }
+    cleanupCase(installation, trace)
+  }
+  if (failure !== undefined) throw failure
+  return result
+}
+
+/** The full public lifecycle against the real user manager. */
+export async function runDaemonControlSystemdLifecycle({ installation, trace, dshHome, workDir }) {
+  const gate = isolatedGate()
+  if (!gate.qualified) return notVerified(gate.reason)
+  if (!managerAvailable()) return notVerified('NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: systemctl --user show-environment did not succeed')
+  const uid = process.getuid()
+  const scopeId = profileScopeId(uid, installation.profileDir)
+  const unit = profileUnitName('pi-tui', scopeId)
+  const unitPath = unitPathOf(unit)
+  const profileManifest = readFileSync(join(installation.profileDir, 'package.json'))
+  const dropInDir = `${unitPath}.d`
+  let dropInPath
+  let failure
+  let result
+  try {
+    installVerifiedUnit(installation)
+    const started = runDaemon(installation, ['start'])
+    const ready = assertStatus(started, { host: 'ready', manager: 'systemd', 'unit-state': 'active' }, 'daemon start')
+    assert(typeof ready.instance === 'string' && ready.instance !== '', 'start must print the instance identity')
+    assert(existsSync(unitPath), 'daemon install must have created the profile unit')
+    const warm = runDaemon(installation, ['start'])
+    const warmStatus = assertStatus(warm, { host: 'ready' }, 'daemon start warm reuse')
+    assert(warmStatus.instance === ready.instance && warmStatus.pid === ready.pid, 'a warm start must reuse the same Host instance')
+    // The registry+authentication Ready is committed before the Host's readable
+    // ready record; the journal is the only observable proof that the default
+    // sink has flushed. Bounded wait, never a fixed sleep.
+    await waitFor(() => {
+      const probe = runDaemon(installation, ['logs', '--lines', '20'])
+      return probe.status === 0 && /dsh-pi-tui host: ready/u.test(probe.stdout) ? true : undefined
+    }, 'the default Host ready journal line', 10_000)
+    const logs = runDaemon(installation, ['logs', '--lines', '20'])
+    assert(logs.status === 0 && logs.stdout.trim() !== '', 'daemon logs must read the owned unit journal')
+    assert(/dsh-pi-tui host: ready/u.test(logs.stdout), 'the default systemd Host journal must carry the readable ready line')
+    assert(!/"m4a0"|ownerEntries|profile-booted|services/u.test(logs.stdout), 'the default systemd Host journal must not carry qualification JSON')
+    const stopped = runDaemon(installation, ['stop'])
+    assertStatus(stopped, { host: 'stopped' }, 'daemon stop')
+    await waitFor(() => hostPids(dshHome).length === 0, 'the stopped Host exit', 30_000)
+    const stoppedAgain = runDaemon(installation, ['stop'])
+    assertStatus(stoppedAgain, { host: 'stopped' }, 'daemon stop idempotence')
+    const defaults = readFileSync(unitPath, 'utf8')
+    const customized = `${defaults}\n[Service]\nEnvironment="MY_CUSTOM_FLAG=1"\nRestartSec=5\nExecStartPre=/usr/bin/true\n`
+    writeFileSync(unitPath, customized, { mode: 0o600 })
+    chmodSync(unitPath, 0o644)
+    assert(systemctl(['--user', 'daemon-reload']).status === 0, 'reload the user-edited service')
+    const edited = assertStatus(runDaemon(installation, ['start']), { host: 'ready', manager: 'systemd' }, 'user-edited 0644 service')
+    assert(readFileSync(`/proc/${edited.pid}/environ`, 'utf8').split('\0').includes('MY_CUSTOM_FLAG=1'), 'the real Host received the user Environment directive')
+    assertStatus(runDaemon(installation, ['status']), { host: 'ready' }, 'custom service status')
+    assertStatus(runDaemon(installation, ['stop']), { host: 'stopped' }, 'custom service stop')
+    assert(readFileSync(unitPath, 'utf8') === customized && (statSync(unitPath).mode & 0o777) === 0o644, 'management preserves user service text and 0644 mode')
+
+    // Exercise the native systemctl edit workflow using an editor that writes
+    // only the fixture's requested drop-in. script supplies systemctl's TTY.
+    // Newer systemd passes a `+<line>` hint before the drop-in path, so the
+    // drop-in file is always the editor's last argument.
+    const editor = join(workDir, 'user-unit-editor.sh')
+    writeFileSync(editor, "#!/bin/sh\nfor file in \"$@\"; do :; done\nprintf '%s\\n' '[Service]' 'Environment=\"MY_DROPIN_FLAG=1\"' 'RestartSec=5' > \"$file\"\n", { mode: 0o700 })
+    const edit = spawnSync('script', ['-qefc', `${SYSTEMCTL} --user edit ${unit}`, '/dev/null'], {
+      env: { ...process.env, XDG_RUNTIME_DIR: runtimeDir(), SYSTEMD_EDITOR: editor }, encoding: 'utf8', timeout: 30_000,
+    })
+    assert(edit.status === 0, `native systemctl edit must succeed: ${edit.stderr?.slice(-400)}`)
+    const loadedDropIns = systemctl(['--user', 'show', unit, '-p', 'DropInPaths', '--value'])
+    dropInPath = join(dropInDir, 'override.conf')
+    assert(loadedDropIns.status === 0 && loadedDropIns.stdout.includes(dropInPath), 'systemd loaded the actual user drop-in')
+    const dropInBytes = readFileSync(dropInPath, 'utf8')
+    const beforeRestart = assertStatus(runDaemon(installation, ['start']), { host: 'ready' }, 'start with a real drop-in')
+    assert(readFileSync(`/proc/${beforeRestart.pid}/environ`, 'utf8').split('\0').includes('MY_DROPIN_FLAG=1'), 'the Host received the real drop-in environment')
+    const afterRestart = assertStatus(runDaemon(installation, ['restart']), { host: 'ready' }, 'restart preserves customized service and drop-in')
+    assert(afterRestart.instance !== beforeRestart.instance, 'restart must produce a NEW Host instance')
+    assert(hostPids(dshHome).length === 1, 'restart must not leave two Hosts')
+    assert(readFileSync(unitPath, 'utf8') === customized && readFileSync(dropInPath, 'utf8') === dropInBytes, 'restart must not restore defaults or change drop-ins')
+    assertStatus(runDaemon(installation, ['stop']), { host: 'stopped' }, 'stop before the bad ExecStart control')
+
+    const broken = customized.replace(/^ExecStart=.*$/mu, 'ExecStart=/usr/bin/false')
+    writeFileSync(unitPath, broken)
+    assert(systemctl(['--user', 'daemon-reload']).status === 0, 'reload the user-selected non-Host command')
+    const failedStart = runDaemon(installation, ['start'])
+    assert(failedStart.status !== 0 && /MANAGER_OR_OS_FAILURE|TRANSITION_UNCERTAIN/u.test(failedStart.stderr), 'a non-Host service reports an actual startup/readiness failure')
+    assert(hostPids(dshHome).length === 0 && processCounts(dshHome).client === 0, 'bad ExecStart starts no fallback Host or Client')
+    assert(readFileSync(unitPath, 'utf8') === broken, 'failed start must not rewrite user configuration')
+    assert(systemctl(['--user', 'stop', unit]).status === 0, 'stop the fixture non-Host service')
+    writeFileSync(unitPath, customized)
+    const sourceDir = join(workDir, 'user-service-source')
+    mkdirSync(sourceDir, { mode: 0o700 })
+    const source = join(sourceDir, unit)
+    writeFileSync(source, customized, { mode: 0o644 })
+    unlinkSync(unitPath)
+    symlinkSync(source, unitPath)
+    assert(systemctl(['--user', 'daemon-reload']).status === 0, 'reload the user-linked service')
+    const linked = assertStatus(runDaemon(installation, ['start']), { host: 'ready', manager: 'systemd' }, 'user-linked service start')
+    const fragment = systemctl(['--user', 'show', unit, '-p', 'FragmentPath', '--value'])
+    assert(fragment.status === 0 && realpathSync(fragment.stdout.trim()) === realpathSync(source), 'manager FragmentPath resolves to the exact user configuration source')
+    assertStatus(runDaemon(installation, ['status']), { host: 'ready' }, 'linked service status')
+    assert(runDaemon(installation, ['logs']).status === 0, 'drop-ins and links do not deny the target unit journal')
+    assertStatus(runDaemon(installation, ['stop']), { host: 'stopped' }, 'linked service stop')
+    assertStatus(runDaemon(installation, ['start']), { host: 'ready' }, 'linked service restart precondition')
+    const removed = runDaemon(installation, ['uninstall'])
+    assertStatus(removed, { unit: 'none', host: 'stopped' }, 'daemon uninstall')
+    assert(existsSync(unitPath) === false, 'uninstall must remove only the profile unit link')
+    assert(readFileSync(source, 'utf8') === customized, 'uninstall preserves the linked configuration source')
+    assert(readFileSync(dropInPath, 'utf8') === dropInBytes, 'uninstall preserves user drop-ins')
+    assert(readFileSync(join(installation.profileDir, 'package.json')).equals(profileManifest),
+      'uninstall must not rewrite the Profile manifest')
+    trace('daemon-control-systemd-lifecycle', { instance: afterRestart.instance, customUnitPreserved: true, loadedDropIn: true, mode0644: true, sourcePreserved: true, badExecNoFallback: true })
+    result = {
+      status: 'PASS',
+      scope: 'REAL_SYSTEMD_USER_L6',
+      warmReuse: true,
+      stopIdempotent: true,
+      newInstanceOnRestart: true,
+      journalLogs: true,
+      uninstallProfilePreserved: true,
+    }
+  } catch (error) {
+    failure = error
+  } finally {
+    cleanupCase(installation, trace)
+    if (dropInPath !== undefined) {
+      // This isolated Profile's drop-in was created by this case; the public
+      // uninstall assertion above proved it survived. Fixture teardown owns it.
+      rmSync(dropInDir, { recursive: true, force: true })
+      systemctl(['--user', 'daemon-reload'])
+    }
+  }
+  if (failure !== undefined) throw failure
+  return result
+}
+
+/** The basic independent-process lifecycle (no installed unit, no manager query). */
+export async function runDaemonControlProcessFallback({ installation, trace, dshHome }) {
+  const gate = isolatedGate()
+  if (!gate.qualified) return notVerified(gate.reason)
+  const uid = process.getuid()
+  const scopeId = profileScopeId(uid, installation.profileDir)
+  const scopeDir = join(dshHome, 'run', 'dsh-pi-tui', scopeId)
+  const hostLog = join(scopeDir, 'host.log')
+  const unitPath = unitPathOf(profileUnitName('pi-tui', scopeId))
+  let failure
+  let result
+  try {
+    // Fault negative: the management entry itself must report a missing
+    // launcher row as the existing nonzero controlNotMountedMessage and start
+    // no Host/Client. This is a real user-patch disable, never a stderr filter.
+    {
+      const patchPath = join(installation.profileDir, 'cordis.patch.yml')
+      const original = existsSync(patchPath) ? readFileSync(patchPath, 'utf8') : undefined
+      try {
+        const stock = (original ?? '').split('\n').filter(line => line.trim() !== '[]').join('\n')
+        writeFileSync(patchPath, `${stock.replace(/\s*$/u, '')}\n- id: pi-tui-daemon-launcher\n  disabled: true\n`, { mode: 0o600 })
+        const refused = runDaemon(installation, ['status'])
+        assert(refused.status !== 0, 'a profile without the daemon launcher row must fail status nonzero')
+        assert(/daemon launcher row did not mount/u.test(`${refused.stdout}${refused.stderr}`),
+          `the launcher-missing failure must print the existing controlNotMountedMessage, saw: ${refused.stderr.slice(-800)}`)
+        const counts = processCounts(dshHome)
+        assert(counts.host === 0 && counts.client === 0,
+          `a launcher-missing management entry must create no Host/Client, saw ${JSON.stringify(counts)}`)
+        trace('daemon-control-launcher-missing-negative', { exit: refused.status, host: counts.host, client: counts.client })
+      } finally {
+        if (original === undefined) rmSync(patchPath, { force: true })
+        else writeFileSync(patchPath, original, { mode: 0o600 })
+      }
+      // The restored Profile is the ordinary management graph again.
+      assertStatus(runDaemon(installation, ['status']), { host: 'stopped', 'user-manager': 'not-checked' }, 'the restored profile status')
+    }
+    const initialStatusResult = runDaemon(installation, ['status'])
+    const initialStatus = assertStatus(initialStatusResult, { host: 'stopped', unit: 'none', 'user-manager': 'not-checked' }, 'the basic pre-start status')
+    assert(initialStatus.manager === 'unmanaged', 'a no-Host/no-unit status must be unmanaged')
+    assertNoDirectOnlyPendingWarnings(initialStatusResult, 'the basic pre-start status')
+    const started = runDaemon(installation, ['start'])
+    const ready = assertStatus(started, { host: 'ready', manager: 'process', unit: 'none' }, 'the basic start')
+    assertNoDirectOnlyPendingWarnings(started, 'the basic start')
+    assert(!existsSync(unitPath), 'the basic daemon must never install a unit')
+    assert(hostPids(dshHome).length === 1, 'the fallback start must create exactly one Host')
+    const readyStatus = runDaemon(installation, ['status'])
+    assertStatus(readyStatus, { host: 'ready', manager: 'process' }, 'the basic ready status')
+    assertNoDirectOnlyPendingWarnings(readyStatus, 'the basic ready status')
+    assert(existsSync(hostLog), 'the fallback Host must write its private host.log')
+    assert((statSync(hostLog).mode & 0o777) === 0o600, 'the fallback host.log must be 0600')
+    // The Host publishes its registry identity before the readable ready record;
+    // wait for the record itself so the following one-shot log read is deterministic.
+    await waitFor(() => (readFileSync(hostLog, 'utf8').includes('dsh-pi-tui host: ready') ? true : undefined),
+      'the default Host ready log line', 10_000)
+    const logHashBefore = createHash('sha256').update(readFileSync(hostLog)).digest('hex')
+    const logs = runDaemon(installation, ['logs', '--lines', '20'])
+    assert(logs.status === 0, `the fallback logs must read the private host.log: ${logs.stderr.slice(-300)}`)
+    assertNoDirectOnlyPendingWarnings(logs, 'the basic logs')
+    assert(/dsh-pi-tui host: ready/u.test(logs.stdout), 'the default fallback Host log must carry the readable ready line')
+    assert(!/"m4a0"|ownerEntries|profile-booted|services/u.test(logs.stdout), 'the default fallback Host log must not carry qualification JSON')
+    const logHashAfter = createHash('sha256').update(readFileSync(hostLog)).digest('hex')
+    assert(logHashBefore === logHashAfter, 'reading the private Host log must not change it')
+    const stopped = runDaemon(installation, ['stop'])
+    assertStatus(stopped, { host: 'stopped' }, 'the fallback stop')
+    assertNoDirectOnlyPendingWarnings(stopped, 'the fallback stop')
+    await waitFor(() => hostPids(dshHome).length === 0, 'the fallback Host SIGTERM exit', 60_000)
+    const stoppedStatus = runDaemon(installation, ['status'])
+    assertStatus(stoppedStatus, { host: 'stopped' }, 'the fallback stopped status')
+    assertNoDirectOnlyPendingWarnings(stoppedStatus, 'the fallback stopped status')
+    const restartedFromStopped = runDaemon(installation, ['start'])
+    const beforeRestart = assertStatus(restartedFromStopped, { host: 'ready' }, 'the fallback restart precondition')
+    const restarted = runDaemon(installation, ['restart'])
+    const afterRestart = assertStatus(restarted, { host: 'ready' }, 'the fallback restart')
+    assert(afterRestart.instance !== beforeRestart.instance, 'the fallback restart must create a new instance')
+    assertNoDirectOnlyPendingWarnings(restarted, 'the fallback restart')
+    const uninstalled = runDaemon(installation, ['uninstall'])
+    assertStatus(uninstalled, { unit: 'none' }, 'the fallback uninstall')
+    assertNoDirectOnlyPendingWarnings(uninstalled, 'the fallback uninstall')
+    assert(hostPids(dshHome).length === 1, 'uninstall must not kill an independent Host')
+    const finalStop = runDaemon(installation, ['stop'])
+    assertStatus(finalStop, { host: 'stopped' }, 'the fallback final stop')
+    assertNoDirectOnlyPendingWarnings(finalStop, 'the fallback final stop')
+    trace('daemon-control-process-fallback', { instance: ready.instance })
+    result = {
+      status: 'PASS',
+      scope: 'REAL_BASIC_DAEMON_L6',
+      privateLog: true,
+      sigtermExit: true,
+      restartNewInstance: true,
+      uninstallKeepsFallbackHost: true,
+    }
+  } catch (error) {
+    failure = error
+  } finally {
+    cleanupCase(installation, trace)
+  }
+  if (failure !== undefined) throw failure
+  return result
+}
+
+/** A reachable-but-unusable user manager must fail closed with no fallback. */
+export async function runDaemonControlManagerError({ installation, trace, dshHome }) {
+  const gate = isolatedGate()
+  if (!gate.qualified) return notVerified(gate.reason)
+  if (process.env.SPLIT_PROCESS_MANAGED_HOST_FORCE_MANAGER_ERROR !== '1') {
+    return notVerified('NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: set SPLIT_PROCESS_MANAGED_HOST_FORCE_MANAGER_ERROR=1 in a genuinely failing user-bus environment')
+  }
+  if (managerAvailable()) return notVerified('NOT_A_BROKEN_MANAGER_ENV: the user manager is reachable; use the systemd case')
+  const uid = process.getuid()
+  const scopeId = profileScopeId(uid, installation.profileDir)
+  const unitPath = unitPathOf(profileUnitName('pi-tui', scopeId))
+  // A broken manager cannot run the explicit install, so the operator must have
+  // pre-provisioned this candidate build's unit while the manager was usable.
+  if (!existsSync(unitPath)) {
+    return notVerified('NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: provision the profile unit with daemon install while the manager is usable, then run this case with a genuinely broken user bus')
+  }
+  const content = readFileSync(unitPath, 'utf8')
+  const foreign = unitBelongsToRun(content, { scopeId, publishedBuildId: installedArtifactBuildId(installation) })
+  if (foreign !== null) {
+    return notVerified(`NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: the pre-provisioned unit is not this candidate build (${foreign})`)
+  }
+  let failure
+  let result
+  try {
+    assert(processCounts(dshHome).host === 0, 'the manager-error scene must begin with no Host')
+    for (const args of [['status'], ['start'], ['restart'], ['install'], ['logs'], ['uninstall']]) {
+      const command = runDaemon(installation, args)
+      assert(command.status !== 0, `daemon ${args[0]} must fail closed with an installed unit and a broken user manager`)
+      assert(/MANAGER_OR_OS_FAILURE|HOST_MANAGER_ERROR|LOG_SOURCE_UNAVAILABLE/u.test(`${command.stdout}${command.stderr}`),
+        `daemon ${args[0]} must report the manager failure, saw: ${command.stderr.slice(-500)}`)
+      assert(processCounts(dshHome).host === 0, `daemon ${args[0]} must not fall back to a process Host`)
+      assert(existsSync(unitPath), `daemon ${args[0]} must not remove or rewrite the installed unit`)
+      assert(readFileSync(unitPath, 'utf8') === content, `daemon ${args[0]} must leave the installed unit byte-identical`)
+    }
+    trace('daemon-control-manager-error', { manager: 'error', unitInstalled: true })
+    result = { status: 'PASS', scope: 'REAL_MANAGER_ERROR_L6', failClosed: true, noFallbackHost: true, installedUnitPreserved: true }
+  } catch (error) {
+    failure = error
+  } finally {
+    // The manager is deliberately broken: no manager stop/reload is possible.
+    // Remove exactly the verified pre-provisioned unit this case checked above.
+    try { unlinkSync(unitPath) } catch { /* already gone */ }
+    killIsolatedProcesses(dshHome)
+  }
+  if (failure !== undefined) throw failure
+  return result
+}
+
+/** Owner-safe actions across two profiles and an explicit old controlled build. */
+export async function runDaemonControlOwnerAndMultiProfile({ installation, trace, dshHome, tarball, targetDshVersion, workDir }) {
+  const gate = isolatedGate()
+  if (!gate.qualified) return notVerified(gate.reason)
+  if (!managerAvailable()) return notVerified('NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: systemctl --user show-environment did not succeed')
+  assert(typeof tarball === 'string' && typeof targetDshVersion === 'string' && typeof workDir === 'string',
+    'the owner/multi-profile case needs the lane tarball/workDir facts')
+  const uid = process.getuid()
+  const second = createSplitSmokeProfile({ tarball, targetDshVersion, workDir: join(workDir, 'profile-b') })
+  const scopeA = profileScopeId(uid, installation.profileDir)
+  const scopeB = profileScopeId(uid, second.profileDir)
+  const unitA = profileUnitName('pi-tui', scopeA)
+  const unitB = profileUnitName('pi-tui', scopeB)
+  const unitPathA = unitPathOf(unitA)
+  const unitPathB = unitPathOf(unitB)
+  let failure
+  let result
+  try {
+    assert(scopeA !== scopeB && unitA !== unitB, 'the two profiles must have distinct scopes and units')
+    installVerifiedUnit(installation)
+    installVerifiedUnit(second)
+    const readyA = assertStatus(runDaemon(installation, ['start']), { host: 'ready', unit: unitA }, 'profile A start')
+    const readyB = assertStatus(runDaemon(second, ['start']), { host: 'ready' }, 'profile B start')
+    assert(readyA.instance !== readyB.instance, 'the two profiles must not share a Host instance')
+    assert(hostPids(installation.dshHome).length === 1 && hostPids(second.dshHome).length === 1, 'each profile must own one Host')
+    // Stopping A must never affect B.
+    assertStatus(runDaemon(installation, ['stop']), { host: 'stopped' }, 'profile A stop')
+    assertStatus(runDaemon(second, ['status']), { host: 'ready' }, 'profile B after A stop')
+    // Restarting A must never affect B.
+    const restartedA = assertStatus(runDaemon(installation, ['restart']), { host: 'ready' }, 'profile A restart')
+    assert(restartedA.instance !== readyA.instance, 'the restart of A must create a new instance')
+    assertStatus(runDaemon(second, ['status']), { host: 'ready' }, 'profile B after A restart')
+    assert(hostPids(second.dshHome).length === 1, 'profile B Host was replaced by profile A management')
+    // A foreign same-named unit file must be refused and left untouched.
+    assertStatus(runDaemon(installation, ['stop']), { host: 'stopped' }, 'profile A stop before the foreign-unit negative')
+    const foreign = `[Unit]\nDescription=foreign\nX-DshPiTuiOwner=someone-else\nX-DshPiTuiScopeId=${scopeA}\nX-DshPiTuiProfileIdentity=x\nX-DshPiTuiInstallBuild=${'0'.repeat(64)}\n\n[Service]\nType=exec\nExecStart=/bin/true\nRestart=on-failure\n`
+    writeFileSync(unitPathA, foreign, { mode: 0o600 })
+    const refused = runDaemon(installation, ['status'])
+    assert(refused.status === 3, `a foreign unit must be refused with exit 3, saw ${String(refused.status)}`)
+    assert(readFileSync(unitPathA, 'utf8') === foreign, 'a foreign unit must never be rewritten or removed')
+    unlinkSync(unitPathA)
+    // Same-Profile unit from a HISTORICAL installed build: its generated record
+    // names a physical store-shaped package root and an old install build. The
+    // explicit restart must ADOPT the current install with exactly the bounded
+    // generated-field rewrite, then start a new authenticated managed Host.
+    const oldBuildId = 'a'.repeat(64)
+    const encoded = value => `"${value.replace(/\\/gu, '\\\\').replace(/"/gu, '\\"').replace(/%/gu, '%%').replace(/\$/gu, '$$')}"`
+    const legacyPackage = join(workDir, 'legacy-store', 'node_modules', '@xmoon76', 'dsh-pi-tui')
+    mkdirSync(dirname(legacyPackage), { recursive: true })
+    cpSync(installation.profilePackage, legacyPackage, { recursive: true, dereference: true })
+    const legacyEntry = join(legacyPackage, 'dist', 'local-host.mjs')
+    const stableEntry = join(realpathSync(installation.profileDir), 'node_modules', '@xmoon76', 'dsh-pi-tui', 'dist', 'local-host.mjs')
+    const buildUnit = entry => [
+      '[Unit]',
+      'Description=dsh-pi-tui local Host (profile-scoped)',
+      `X-DshPiTuiOwner=${OWNER_MARKER}`,
+      `X-DshPiTuiScopeId=${scopeA}`,
+      `X-DshPiTuiProfileIdentity=${createHash('sha256').update(`dsh-pi-tui/profile-identity/1\0${realpathSync(installation.profileDir)}`).digest('hex')}`,
+      `X-DshPiTuiInstallBuild=${oldBuildId}`,
+      'StartLimitIntervalSec=60s',
+      'StartLimitBurst=3',
+      '',
+      '[Service]',
+      'Type=exec',
+      `ExecStart=${encoded(process.execPath)} ${encoded(entry)}`,
+      `WorkingDirectory=${realpathSync(installation.profileDir).replace(/%/gu, '%%')}`,
+      `Environment="DSH_HOME=${installation.dshHome.replace(/%/gu, '%%')}"`,
+      `Environment="SPLIT_PROCESS_DSH_ANCHOR=${installation.anchor.replace(/%/gu, '%%')}"`,
+      'Environment="SPLIT_PROCESS_PROFILE=pi-tui"',
+      'Restart=on-failure',
+      'RestartSec=2s',
+      'TimeoutStopSec=15s',
+      'KillMode=control-group',
+      'StandardOutput=journal',
+      'StandardError=journal',
+      '',
+    ].join('\n')
+    const oldUnit = buildUnit(legacyEntry)
+    writeFileSync(unitPathA, oldUnit, { mode: 0o600 })
+    assert(systemctl(['--user', '--no-pager', '--no-ask-password', 'daemon-reload']).status === 0, 'daemon-reload failed before the historical-unit restart')
+    const adopted = assertStatus(runDaemon(installation, ['restart']), {
+      manager: 'systemd',
+      host: 'ready',
+      unit: unitA,
+      'unit-state': 'active',
+      compatibility: 'compatible',
+    }, 'profile A restart adopting the historical unit')
+    const currentBuildId = installedArtifactBuildId(installation)
+    assert(typeof currentBuildId === 'string' && /^[0-9a-f]{64}$/u.test(currentBuildId),
+      'the installed artifact buildId is unavailable')
+    const expectedUnit = oldUnit
+      .replace(`ExecStart=${encoded(process.execPath)} ${encoded(legacyEntry)}`, `ExecStart=${encoded(process.execPath)} ${encoded(stableEntry)}`)
+      .replace(`X-DshPiTuiInstallBuild=${oldBuildId}`, `X-DshPiTuiInstallBuild=${currentBuildId}`)
+    assert(readFileSync(unitPathA, 'utf8') === expectedUnit,
+      'the generated-field migration must change exactly the ExecStart target and install build')
+    assert(showUnitProps(unitA).MainPID === String(adopted.pid), 'the adopted Host is not the managed unit MainPID')
+    assert(hostPids(dshHome).length === 1, 'profile A must run exactly one Host after adoption')
+    // The PRODUCT uninstall (never a manual unlink) removes the adopted unit.
+    assertStatus(runDaemon(installation, ['uninstall']), { unit: 'none', 'unit-state': 'not-found', host: 'stopped' },
+      'profile A uninstall of the adopted unit')
+    assert(existsSync(unitPathA) === false, 'the product uninstall must remove the profile unit')
+    // A unit that STILL records another installed build is removable by the
+    // explicit uninstall without any rewrite: the historical build is diagnostic.
+    writeFileSync(unitPathA, oldUnit, { mode: 0o600 })
+    assert(systemctl(['--user', '--no-pager', '--no-ask-password', 'daemon-reload']).status === 0, 'daemon-reload failed before the old-build uninstall')
+    assertStatus(runDaemon(installation, ['uninstall']), { unit: 'none', 'unit-state': 'not-found' }, 'profile A old-build uninstall')
+    assert(existsSync(unitPathA) === false, 'a verified old-build unit must be removable by the product uninstall')
+    // No unit now: the basic detached Host is still the cold-start path.
+    assertStatus(runDaemon(installation, ['start']), { host: 'ready', manager: 'process', unit: 'none' },
+      'profile A detached start after the unit removal')
+    assertStatus(runDaemon(installation, ['stop']), { host: 'stopped' }, 'profile A detached stop')
+    // Reinstall the current-build unit so the closing uninstall assertion
+    // exercises the owner-scoped uninstall path again.
+    const reinstalledA = runDaemon(installation, ['install'])
+    assert(reinstalledA.status === 0, `reinstalling profile A must succeed: ${reinstalledA.stderr.slice(-300)}`)
+    assertStatus(runDaemon(second, ['status']), { host: 'ready' }, 'profile B after the historical-unit adoption')
+    // Uninstall A removes only A's unit; B stays ready.
+    assertStatus(runDaemon(installation, ['uninstall']), { unit: 'none' }, 'profile A uninstall')
+    assert(existsSync(unitPathA) === false, 'uninstall must remove only profile A unit')
+    assert(existsSync(unitPathB) === true, 'uninstall must never touch profile B unit')
+    assertStatus(runDaemon(second, ['status']), { host: 'ready' }, 'profile B after A uninstall')
+    trace('daemon-control-owner-multi-profile', { unitA, unitB })
+    result = {
+      status: 'PASS',
+      scope: 'REAL_SYSTEMD_USER_L6',
+      twoProfiles: true,
+      crossProfileUnaffected: true,
+      foreignUnitRefused: true,
+      historicalUnitAdopted: true,
+      boundedGeneratedFieldMigration: true,
+      oldBuildUninstall: true,
+      uninstallOwnerScoped: true,
+    }
+  } catch (error) {
+    failure = error
+  } finally {
+    cleanupCase(installation, trace)
+    // The second profile was provisioned by this case; clean its own unit/Host.
+    stopAndRemoveManagedUnit(second, trace)
+    killIsolatedProcesses(second.dshHome)
+  }
+  if (failure !== undefined) throw failure
+  return result
+}
+
+/** The admin seat serializes mutating verbs; two profiles stay independent. */
+export async function runDaemonControlConcurrentControls({ installation, trace, dshHome, tarball, targetDshVersion, workDir }) {
+  const gate = isolatedGate()
+  if (!gate.qualified) return notVerified(gate.reason)
+  if (!managerAvailable()) return notVerified('NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: systemctl --user show-environment did not succeed')
+  assert(typeof tarball === 'string' && typeof targetDshVersion === 'string' && typeof workDir === 'string',
+    'the concurrency case needs the lane tarball/workDir facts')
+  const uid = process.getuid()
+  const scopeA = profileScopeId(uid, installation.profileDir)
+  const seatName = `\0dsh-pi-tui-admin-${scopeA.slice(0, 40)}`
+  const second = createSplitSmokeProfile({ tarball, targetDshVersion, workDir: join(workDir, 'profile-b') })
+  let seat
+  let failure
+  let result
+  try {
+    // A held admin seat makes the second operation a deterministic BUSY.
+    seat = createServer()
+    await new Promise((resolve, reject) => {
+      seat.once('error', reject)
+      seat.listen(seatName, resolve)
+    })
+    assert(processCounts(dshHome).host === 0, 'the concurrency scene must begin with no Host')
+    const busy = runDaemon(installation, ['stop'])
+    assert(busy.status === 5, `a concurrent management command must exit 5, saw ${String(busy.status)}: ${busy.stderr.slice(-300)}`)
+    assert(/DAEMON_CONTROL_BUSY/u.test(busy.stderr), 'the busy failure must be reported as DAEMON_CONTROL_BUSY')
+    assert(processCounts(dshHome).host === 0, 'a BUSY refusal must not start or stop a Host')
+    // A different profile's MUTATING command takes its own seat and is never
+    // blocked by this profile's held seat.
+    const otherStop = runDaemon(second, ['stop'])
+    assert(otherStop.status === 0, `another profile must not be blocked by this profile's seat: ${otherStop.stderr.slice(-300)}`)
+    await new Promise(resolve => seat.close(resolve))
+    seat = undefined
+    // Two concurrent starts produce exactly one Host.
+    const [left, right] = await Promise.all([
+      spawnDaemon(installation, ['start']),
+      spawnDaemon(installation, ['start']),
+    ])
+    assert(left.status === 0 || right.status === 0, 'at least one concurrent start must succeed')
+    assert(hostPids(dshHome).length === 1, `two management starts must converge on ONE Host, saw ${String(hostPids(dshHome).length)}`)
+    const ready = assertStatus(runDaemon(installation, ['status']), { host: 'ready' }, 'the converged concurrent Host')
+    assert(typeof ready.instance === 'string', 'the converged Host must publish an instance identity')
+    trace('daemon-control-concurrent-controls', { busy: busy.status, starts: [left.status, right.status] })
+    result = {
+      status: 'PASS',
+      scope: 'REAL_SYSTEMD_USER_L6',
+      adminSeatBusy: true,
+      crossProfileIndependent: true,
+      concurrentStartsOneHost: true,
+    }
+  } catch (error) {
+    failure = error
+  } finally {
+    if (seat !== undefined) await new Promise(resolve => seat.close(resolve))
+    cleanupCase(installation, trace)
+    stopAndRemoveManagedUnit(second, trace)
+    killIsolatedProcesses(second.dshHome)
+  }
+  if (failure !== undefined) throw failure
+  return result
+}
+
+/**
+ * C13: a REAL Host Session turn stays in flight across `stop`, and the restarted
+ * Host never replays it.
+ *
+ * A systemd-managed Host strips the internal test-patch channel, so the offline
+ * model route is installed as ORDINARY profile configuration (a row in the
+ * profile's own `cordis.patch.yml` pointing at a module inside the profile).
+ * The fixture creates one real Agent through the official service, sends one
+ * follow-up turn and holds the model stream until the Host's shutdown signal.
+ */
+export async function runDaemonControlInflightStop({ installation, trace, dshHome, workDir }) {
+  const gate = isolatedGate()
+  if (!gate.qualified) return notVerified(gate.reason)
+  if (!managerAvailable()) return notVerified('NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: systemctl --user show-environment did not succeed')
+  const proofPath = join(workDir, 'c13-inflight.jsonl')
+  const sessionId = `m6-2c-inflight-${String(process.pid)}-${String(Date.now())}`
+  const fixturePath = join(installation.profileDir, 'm6-2c-inflight-work.mjs')
+  const patchPath = join(installation.profileDir, 'cordis.patch.yml')
+  writeFileSync(proofPath, '', { mode: 0o600 })
+  writeFileSync(fixturePath, readFileSync(join(SCRIPT_DIR, '..', '..', 'fixtures', 'daemon-control-inflight-work.mjs')), { mode: 0o600 })
+  const markerPath = join(installation.profileDir, 'm6-2c-inflight-submitted.marker')
+  const patchBefore = readFileSync(patchPath, 'utf8')
+  const proofEvents = () => readFileSync(proofPath, 'utf8').split('\n').filter(Boolean).flatMap(line => {
+    try { return [JSON.parse(line)] } catch { return [] }
+  })
+  let failure
+  let result
+  try {
+    writeFileSync(patchPath, [
+      '- insert:',
+      '    - id: m6-2c-inflight-work',
+      `      name: '${pathToFileURL(fixturePath).href}'`,
+      '      inject: [llm, agents, tools]',
+      '      config:',
+      `        proofPath: '${proofPath}'`,
+      `        sessionId: '${sessionId}'
+        markerPath: '${markerPath}'`,
+      `        cwd: '${installation.profileDir}'`,
+      '- id: agent-default-model',
+      '  config:',
+      '    provider: c1-qualification',
+      '    model: c1',
+      '',
+    ].join('\n'), { mode: 0o600 })
+
+    installVerifiedUnit(installation)
+    const started = runDaemon(installation, ['start'])
+    assertStatus(started, { host: 'ready', manager: 'systemd' }, 'the C13 managed Host')
+
+    // The turn must be REAL and in flight before stop: the offline route has
+    // already produced its first chunk and is still holding the stream.
+    const deadline = Date.now() + 120_000
+    while (Date.now() < deadline && !proofEvents().some(event => event.kind === 'turn-start')) {
+      await sleep(200)
+    }
+    const inFlight = proofEvents().find(event => event.kind === 'turn-start')
+    assert(inFlight !== undefined, 'the C13 turn never started inside the managed Host')
+    const startedSession = proofEvents().find(event => event.kind === 'session-created')
+    assert(startedSession !== undefined, 'the C13 Agent was never created')
+
+    // The turn is unbounded, so the Host cannot always drain inside
+    // TimeoutStopSec. Both truthful outcomes are allowed — a reported failure
+    // and a reported stop — but a "success" MUST mean the Host really exited,
+    // and a failure MUST use the stable taxonomy. Neither may claim completion.
+    const stopped = runDaemon(installation, ['stop'])
+    if (stopped.status === 0) {
+      assertStatus(stopped, { host: 'stopped' }, 'the C13 in-flight stop')
+    } else {
+      assert(/MANAGER_OR_OS_FAILURE|HOST_STOP_TIMEOUT|TRANSITION_UNCERTAIN/u.test(`${stopped.stdout}${stopped.stderr}`),
+        `the C13 in-flight stop must report a stable failure code, saw: ${stopped.stderr.slice(-500)}`)
+    }
+    await waitFor(() => hostPids(dshHome).length === 0, 'the C13 Host exit with an in-flight turn', 60_000)
+    assert(systemctl(['--user', '--no-pager', 'is-active', profileUnitName('pi-tui', profileScopeId(process.getuid(), installation.profileDir))]).stdout.trim() !== 'active',
+      'the C13 unit must not stay active after an in-flight stop')
+    // A graceful stop must abort the in-flight turn (the fixture records the
+    // Host's own shutdown signal reaching the stream). A manager-enforced stop
+    // kills the cgroup, so no abort is observable — but in BOTH cases the turn
+    // must leave no completed assistant message (asserted below against the
+    // durable Session log, which is the settlement authority).
+    const aborted = proofEvents().some(event => event.kind === 'turn-aborted')
+    if (stopped.status === 0) {
+      assert(aborted, 'a successful in-flight stop must abort the turn instead of letting it settle')
+    }
+    // A failed stop leaves the unit in `failed`; an explicit start clears it.
+    systemctl(['--user', '--no-pager', 'reset-failed'])
+    const restarted = runDaemon(installation, ['start'])
+    const after = assertStatus(restarted, { host: 'ready', manager: 'systemd' }, 'the C13 restart')
+    assert(after.instance !== statusOf(started.stdout).instance, 'the C13 restart must create a new instance')
+    // reason: bounded observation window for an automatic replay; the restarted
+    // Host has no client, so any second turn-start would be a replay.
+    await sleep(15_000)
+    const turnStarts = proofEvents().filter(event => event.kind === 'turn-start').length
+    assert(turnStarts === 1,
+      `the restarted Host must never replay the interrupted turn (turn-start=${String(turnStarts)}: ${JSON.stringify(proofEvents().map(event => event.kind))})`)
+
+    const events = hostSessionEvents(dshHome, String(startedSession.sessionId))
+    assert(events !== undefined, 'the interrupted Session must keep its durable log')
+    assert(hostUserTexts(events).includes('C13 in-flight turn'),
+      'the interrupted turn must keep its real user message')
+    assert(!events.some(event => event.type === 'assistant/message'),
+      'the interrupted turn must never settle into an assistant message')
+    assert(!hostAssistantHasText(events, 'C13 partial answer finished'),
+      'the interrupted turn must never gain its completion text')
+
+    trace('daemon-control-inflight-stop', {
+      session: String(startedSession.sessionId),
+      instance: after.instance,
+      stopExit: stopped.status,
+      turnAborted: aborted,
+      turnStarts,
+    })
+    result = {
+      status: 'PASS',
+      scope: 'REAL_SYSTEMD_USER_L6',
+      inFlightAtStop: true,
+      hostExited: true,
+      stopExit: stopped.status,
+      turnAborted: aborted,
+      noReplay: true,
+      noFabricatedCompletion: true,
+    }
+  } catch (error) {
+    failure = error
+  } finally {
+    try { writeFileSync(patchPath, patchBefore, { mode: 0o600 }) } catch { /* best effort */ }
+    try { unlinkSync(fixturePath) } catch { /* best effort */ }
+    try { unlinkSync(markerPath) } catch { /* best effort */ }
+    cleanupCase(installation, trace)
+  }
+  if (failure !== undefined) throw failure
+  return result
+}

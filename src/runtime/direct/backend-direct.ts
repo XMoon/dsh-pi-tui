@@ -15,6 +15,7 @@
  * @module @xmoon76/dsh-pi-tui/runtime/direct/backend-direct
  */
 
+import type { Context } from '@deepseek-ai/cordis'
 import type { Diag } from '../process/diagnostics.ts'
 import type { Backend } from '../backend.ts'
 import { createDirectBackend } from '../backend.ts'
@@ -34,17 +35,32 @@ import { DirectCatalogPort } from './catalog-direct.ts'
 import { DirectConfigPort } from './config-direct.ts'
 import { DirectHostFilePort } from './host-file-direct.ts'
 import { DirectSessionArchive } from './session-archive-direct.ts'
+import { DirectSessionMarkdown } from './session-markdown-direct.ts'
 import { DirectHostCommandPort } from './host-command-direct.ts'
 import { DirectPluginManagerPort } from './plugin-manager-direct.ts'
 import { DirectJobObservationPort } from './job-observation-direct.ts'
-import { DirectHostUserShellPort, type DirectShellCapability } from './host-user-shell-direct.ts'
+import { DirectHostUserShellPort } from './host-user-shell-direct.ts'
+import { DirectHostShellCompletionPort, type DirectShellCandidateReader } from './host-shell-completion-direct.ts'
+import type { WorkingDirectoryServiceLike } from './working-directory-direct.ts'
 import { DirectDeliveredFileReadPort } from './deliverables-direct.ts'
+import { DirectSessionWorkspaceFacts } from './session-workspace-facts-direct.ts'
+import { DirectSchedulePort } from './schedule-direct.ts'
+import { DirectHostDirectoryBrowsePort } from './host-directory-browse-direct.ts'
+import { DirectSessionPolicyPort } from './session-policy-direct.ts'
+import { DirectTeamModePort } from './team-mode-direct.ts'
+import { DirectTeamBoardReadPort } from './team-board-read-direct.ts'
+import { DirectMcpServerPort } from './mcp-server-direct.ts'
+import { DirectCuaAccessPort } from './cua-access-direct.ts'
+import type { WebAccessPort, WebAccessStatus, WebAccessUrl } from '../web-access-port.ts'
+import type { AcpAccessPort, AcpAccessStatus } from '../acp-access-port.ts'
 
 /** The minimal Host context surface the Direct adapters need (structural;
  * the services resolve from the running dsh installation). */
 export interface DirectBackendContextLike {
   get(name: string): unknown
-  on(event: string, listener: unknown): () => void
+  /** The framework's typed `on` (cordis 4.1 restricts names to `keyof Events`);
+   *  the Direct adapters only subscribe to official DSH events. */
+  on: Context['on']
 }
 
 /** The live-Agent surface the Direct assembly hands to its adapters: the
@@ -67,18 +83,86 @@ export interface DirectBackendDeps {
   readonly modelSelections: SessionModelSelectionOwnerLike & DurableModelSelectionReader
   /** The Direct Session ownership pool (lifecycle retirement/claim). */
   readonly ownerPool: DirectOwnerPoolLike
+  /** The current Direct Host Session working directory supplied by the status owner. */
+  readonly sessionCwd: () => string
   /** Resolve one preset composition (the runner's compose). */
   readonly compose: (presetId?: string) => Promise<CompositionLike>
   /** The exact live Agent of one Session, or undefined when not mounted. */
   readonly agentFor: (sessionId: string) => DirectLiveAgentLike | undefined
   /** The live Agent plus the interactive continuable child currently viewed. */
   readonly queueAgentFor: (sessionId: string) => DirectLiveAgentLike | undefined
+  /** The existing Direct compgen implementation, injected across the composition boundary. */
+  readonly shellCandidates: DirectShellCandidateReader
   /** The Host Session/Agent accessors the Direct session reader projects. */
   readonly liveResolvers: DirectSessionLiveResolvers
 }
 
+/**
+ * The Direct backend's Web frontend control: a truthful UNAVAILABLE capability.
+ *
+ * The official Web frontend toggle is a Split-Client capability (it belongs to
+ * the Split Host's private `piTuiWebAccess` service). The Direct process owns no
+ * such toggle, and this adapter touches no Host row, starts no Host and opens no
+ * browser — it answers the real missing capability so `/web` can say exactly
+ * that.
+ */
+class DirectUnavailableWebAccess implements WebAccessPort {
+  async getStatus(): Promise<WebAccessStatus> {
+    return { state: 'unavailable', reason: DIRECT_WEB_ACCESS_REASON }
+  }
+
+  async setEnabled(): Promise<WebAccessStatus> {
+    return { state: 'unavailable', reason: DIRECT_WEB_ACCESS_REASON }
+  }
+
+  async getAuthenticatedUrl(): Promise<WebAccessUrl> {
+    throw new Error(DIRECT_WEB_ACCESS_REASON)
+  }
+}
+
+/** The ONE statement of the Direct capability gap (presentation reads it). */
+export const DIRECT_WEB_ACCESS_REASON = 'Web frontend controls are available only in a Split Client.'
+
+/**
+ * The Direct backend's local ACP listener control: a truthful UNAVAILABLE
+ * capability.
+ *
+ * The local ACP listener is a Split Host capability (it belongs to the Split
+ * Host's entry-owned controller surfaced through the private `piTuiAcpAccess`
+ * service). The Direct process owns no such listener; this adapter touches no
+ * socket, starts no Host and reports the real missing capability so the Settings
+ * row can say exactly that. The persisted `autoStart` preference is edited
+ * separately through the ConfigPort and remains writable on Direct.
+ */
+class DirectUnavailableAcpAccess implements AcpAccessPort {
+  async getStatus(): Promise<AcpAccessStatus> {
+    return { state: 'unavailable', reason: DIRECT_ACP_ACCESS_REASON }
+  }
+
+  async setEnabled(): Promise<AcpAccessStatus> {
+    return { state: 'unavailable', reason: DIRECT_ACP_ACCESS_REASON }
+  }
+
+  /** Direct owns no transport generation. */
+  currentGeneration(): unknown {
+    return undefined
+  }
+
+  subscribeGeneration(): () => void {
+    return () => {}
+  }
+}
+
+/** The ONE statement of the Direct ACP capability gap (presentation reads it). */
+export const DIRECT_ACP_ACCESS_REASON = 'The local ACP listener is available only in a Split Host.'
+
 /** Assemble the complete Direct `Backend` from the runner's resolvers. */
 export function createDirectRuntimeBackend(deps: DirectBackendDeps): Backend {
+  // FR3: the ONE manager adapter owns the Host generation identity; the
+  // configuration-source read is bound to the SAME identity so a source
+  // verdict can never be mixed with another generation's roster.
+  const mcpServers = new DirectMcpServerPort(deps.ctx)
+  const cuaAccess = new DirectCuaAccessPort(deps.ctx)
   return createDirectBackend(
     new DirectSubagentPort(deps.ctx),
     new DirectSessionReader(deps.ctx, deps.liveResolvers, deps.modelSelections),
@@ -87,23 +171,73 @@ export function createDirectRuntimeBackend(deps: DirectBackendDeps): Backend {
     new DirectSessionLifecycle(deps.ctx, deps.compose, deps.ownerPool),
     new DirectInteractionPort(deps.ctx, deps.agentFor),
     new DirectCatalogPort(deps.ctx, deps.agentFor, deps.modelSelections, deps.diag),
-    new DirectConfigPort(deps.ctx, deps.tuiSettings, deps.agentFor),
+    new DirectConfigPort(deps.ctx, deps.tuiSettings, deps.agentFor, () => mcpServers.currentGeneration()),
     new DirectHostFilePort(deps.agentFor, deps.ctx),
     new DirectSessionArchive(deps.ctx),
+    // S5-PR3: the official Markdown read is a separate semantic capability
+    // from the ZIP archive; the Host Session Query snapshot and the official
+    // formatter are resolved/consumed in-process, never in the Client.
+    new DirectSessionMarkdown(deps.ctx),
     new DirectHostCommandPort(deps.ctx, deps.agentFor),
     new DirectPluginManagerPort(deps.ctx),
     new DirectJobObservationPort(deps.ctx, deps.diag),
-    // The Direct Host user-shell adapter (M3-4 PR3): spawn lives behind
-    // adapter ownership; the sandbox policy runs the dsh shell executor and
-    // fails closed when absent. The `shell` capability resolver stays here as
-    // the one Direct-only seam this assembly hands the adapter (resolved
-    // lazily per call inside adapter ownership).
-    new DirectHostUserShellPort(
-      deps.ctx,
-      () => deps.ctx.get('shell') as unknown as DirectShellCapability | undefined,
-    ),
+    // The Direct Host user-shell adapter (M3-4 PR3): both policies run the
+    // official one-shot subprocess core; sandbox additionally needs the
+    // official sandbox policy/provider. The resolvers stay here as the one
+    // Direct-only assembly seam (resolved lazily per run inside the adapter).
+    new DirectHostUserShellPort({
+      subprocess: () => deps.ctx.get('subprocess') as never,
+      sandbox: () => deps.ctx.get('sandbox') as never,
+      sandboxPolicy: () => deps.ctx.get('sandboxPolicy') as never,
+      sessionFor: sessionId => deps.agentFor(sessionId)?.session,
+      // The request's cwd/policy are EXPECTED values. Both readers answer from
+      // the LIVE authorities on every call — the official Session directory
+      // owner and the persisted TUI preference the submission owner read —
+      // never from a cached snapshot; missing authorities fail closed.
+      effectiveCwdFor: (session) => {
+        const workingDirectory = deps.ctx.get('workingDirectory') as WorkingDirectoryServiceLike | undefined
+        if (workingDirectory === undefined) return undefined
+        const cwd = workingDirectory.get(session)
+        return typeof cwd === 'string' && cwd !== '' ? cwd : undefined
+      },
+      shellPolicy: () => deps.tuiSettings?.get().localShellSandbox === 'sandbox' ? 'sandbox' : 'bypass',
+    }),
+    new DirectHostShellCompletionPort(deps.sessionCwd, deps.agentFor, deps.shellCandidates),
     // Delivered files PR2: the official Host file service read in-process,
     // under the same Session-derived scope the official Remote lookup uses.
     new DirectDeliveredFileReadPort(deps.ctx),
+    // M5-W PR-C: the Direct process owns no official Web frontend toggle; the
+    // adapter reports that missing capability instead of faking a control.
+    new DirectUnavailableWebAccess(),
+    // PO-1B: the Direct process owns no local ACP listener; report that missing
+    // capability instead of faking a control.
+    new DirectUnavailableAcpAccess(),
+    // M5-U-A: the ONE read-authority port. Direct reads the live Agent status
+    // and the official Workspace registry it already owns; it never fabricates
+    // a cross-Session pending fact.
+    new DirectSessionWorkspaceFacts(deps.ctx, deps.agentFor),
+    // S5-PR4: the official Host Schedule domain, resolved per operation from
+    // the SAME Host Context. Never a Client task store and never a
+    // `runner.ctx.schedule` shortcut around this port.
+    new DirectSchedulePort(deps.ctx),
+    // Session Workspace PR1: the official Host directory-picker controller's
+    // own `list` handler, resolved per read from the SAME Host Context. This
+    // adapter owns no filesystem scan and no Workspace write.
+    new DirectHostDirectoryBrowsePort(deps.ctx),
+    // M6-1 F8: the exact-Session policy facts + the official approval write,
+    // resolved per call from the SAME Host Context (the exact live
+    // Session/Agent identity is resolved inside the adapter).
+    new DirectSessionPolicyPort(deps.ctx, sessionId => deps.agentFor(sessionId)),
+    // FR1: the official Root-only Team authority behind the ONE Team port.
+    // Every call re-resolves the exact live Agent and its tree root.
+    new DirectTeamModePort(deps.ctx, sessionId => deps.agentFor(sessionId)),
+    // FR2: the official Root-only READ-ONLY Team board behind the ONE board
+    // port. Same exact-live-Agent Root proof; no write is reachable here.
+    new DirectTeamBoardReadPort(deps.ctx, sessionId => deps.agentFor(sessionId)),
+    // FR3: the ONE official in-process MCP manager behind the semantic port.
+    // The adapter owns no fleet: watch/probe/restart forward to `ctx.mcpManager`
+    // and every settlement is generation-bound.
+    mcpServers,
+    cuaAccess,
   )
 }

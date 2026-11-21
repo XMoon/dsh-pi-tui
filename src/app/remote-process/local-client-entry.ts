@@ -4,11 +4,13 @@
  *
  * The Client PID owns a real Cordis root and mounts only the Client-local
  * subtree plus the official Node Client transport. Its one scope is the
- * canonical DSH profile: it first claims the kernel single-TUI seat, then
- * discovers (or safely ensures) the Host, authenticates it through the
- * official `/connect` cookie, verifies the authenticated identity, and only
- * then installs the official three-layer transport on the same A0 Client
- * Context.
+ * canonical DSH profile: the frozen `qualification` mode first claims the
+ * qualification-only kernel Client seat (the real `surface` and `peer` modes
+ * do not), then discovers (or safely ensures) the Host, authenticates it
+ * through the official `/connect` cookie, verifies the authenticated
+ * identity, and only then installs the official three-layer transport on the
+ * same A0 Client Context. The Host Singleton keeps its own separate kernel
+ * seat in every mode.
  *
  * Client admission compares the required local wire protocol and the exact
  * DSH runtime version, not the package bundle/build fingerprint. A different
@@ -33,18 +35,26 @@ import { dirname, isAbsolute, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type { Context, Fiber } from '@deepseek-ai/cordis'
 import { mergeCause } from '../remote/dispose-cause.ts'
-import { attachEntryControl, createEntryDiag, writeEntryRecord, type EntryRecordSink } from './entry-control.ts'
+import type { CliSessionLaunchIntent } from '../../startup.ts'
+import { attachEntryControl, createEntryDiag, writeEntryRecord, type EntryControlRequest, type EntryRecordSink } from './entry-control.ts'
 import {
-  bindProcessSeat,
+  bindProfileKernelSeat,
+  NO_PROCESS_SEAT,
   computeBuildId,
   installedPackageRootFromEntry,
   LocalScopeError,
   readInstalledDshVersion,
-  readLinuxStarttime,
+  readProcessStartDiagnostic,
   scopeFromInstalledProfile,
   type ProcessSeat,
 } from './local-scope.ts'
 import { ensureLocalHost, type VerifiedLocalHost } from './local-discovery.ts'
+import type { DaemonControlProfile } from './local-daemon-control.ts'
+import { createProfileDaemonAdmin, profileDaemonAdminRun } from './local-profile-daemon-admin.ts'
+import {
+  classifyLaunchWorkspace,
+  type LaunchWorkspaceVerdict,
+} from './local-workspace-equivalence.ts'
 import type {
   LocalClientComposition,
   LocalClientHandle,
@@ -61,6 +71,28 @@ import {
 import { createLocalClientSurfaceBridge } from './local-client-surface.ts'
 import { runDetached } from '../../runtime/process/tasks.ts'
 import type { ClientReloadProcessRefusal, ClientReloadRequestResult } from '../application-runtime.ts'
+
+/**
+ * The Client process's OWN launch directory, captured ONCE at module start.
+ * A later `process.cwd()` change (a shell builtin, a plugin) is not the launch
+ * fact, so the automatic Workspace classifier never follows drift.
+ */
+const CLIENT_LAUNCH_CWD = process.cwd()
+/** The DIRECTORY OBJECT the Client started in, captured at the same instant as
+ *  `CLIENT_LAUNCH_CWD`. A later rename+recreation of the path must not be
+ *  mistaken for the launch directory (external review EXT-P1). An unreadable
+ *  capture stays `undefined`; the classifier then falls back to its own real
+ *  `stat('.')` object and still fails closed. */
+const CLIENT_LAUNCH_OBJECT = ((): { device: string; inode: string } | undefined => {
+  try {
+    // Exact bigint device/inode: a 64-bit inode must never be truncated by JS
+    // number precision before it becomes part of the proof.
+    const stat = statSync('.', { bigint: true })
+    return stat.isDirectory() ? { device: stat.dev.toString(), inode: stat.ino.toString() } : undefined
+  } catch {
+    return undefined
+  }
+})()
 
 interface OfficialClientHostModules {
   readonly Context: new () => import('@deepseek-ai/cordis').Context
@@ -113,20 +145,25 @@ export interface LocalClientEntryOptions {
   readonly presetId?: string
 }
 
-/** Project the authenticated record without the profile path or cookie. */
+/** Project the authenticated record without the profile path or cookie. The
+ *  schema-specific identity is projected explicitly; no field is read from the
+ *  other schema's shape. */
 function hostRecordForTrace(host: VerifiedLocalHost): Record<string, unknown> {
   const record = host.identity
-  return {
+  const shared = {
+    schema: record.schema,
     scopeId: record.scopeId,
     instanceId: record.instanceId,
     hostPid: record.hostPid,
-    hostStarttime: record.hostStarttime,
     origin: record.origin,
     protocol: record.protocol,
     bundleVersion: record.bundleVersion,
     dshVersion: record.dshVersion,
     buildId: record.buildId,
   }
+  return record.schema === 1
+    ? { ...shared, hostStarttime: record.hostStarttime }
+    : { ...shared, hostKernelIdentity: record.hostKernelIdentity }
 }
 
 /**
@@ -136,11 +173,12 @@ function hostRecordForTrace(host: VerifiedLocalHost): Record<string, unknown> {
  * profile path. The parent directory's REAL path and ownership are validated
  * before the file is opened; a symlinked target is refused.
  */
-function createSurfaceRecordSink(): { emit: EntryRecordSink; close(): void } {
+function createSurfaceRecordSink(): { emit: EntryRecordSink; close(): void } | undefined {
   const target = process.env.SPLIT_PROCESS_CLIENT_RECORD_FILE
-  if (target === undefined || target === '') {
-    throw new Error('local client entry: surface mode requires SPLIT_PROCESS_CLIENT_RECORD_FILE')
-  }
+  // Optional: a real daemon Client is launched with NO record file. The
+  // surface sink is initialized only when the qualification channel explicitly
+  // injects one; otherwise the caller uses a silent, non-tty observation sink.
+  if (target === undefined || target === '') return undefined
   if (!isAbsolute(target)) {
     throw new Error('local client entry: the surface record file path must be absolute')
   }
@@ -170,9 +208,97 @@ function createSurfaceRecordSink(): { emit: EntryRecordSink; close(): void } {
   }
 }
 
+/** The private v1 public-launch data channel (M6-2A). Carries ONLY the public
+ *  `sessionLaunch`/`presetId` intent from the daemon Coordinator; it never
+ *  carries a token, Host URL, Profile secret or exact Session id. */
+const CLIENT_LAUNCH_ENVELOPE_ENV = 'SPLIT_PROCESS_CLIENT_LAUNCH_V1'
+/** A hard ceiling on the decoded envelope size (plan §A4.1: 16 KiB). */
+const MAX_CLIENT_LAUNCH_ENVELOPE_BYTES = 16 * 1024
+
+/** The decoded public launch envelope. */
+export interface ClientLaunchEnvelope {
+  readonly sessionLaunch?: CliSessionLaunchIntent
+  readonly presetId?: string
+  /** The read-only launch backend source (value + env/profile provenance). */
+  readonly backendSource?: { readonly value: 'direct' | 'daemon'; readonly source: 'env' | 'profile' }
+}
+
+/** Decode ONE public launch intent, strictly: exactly the known keys, a browse
+ *  with an empty query, or a lookup with a non-empty query, or a continue with
+ *  no query. Every other shape fails closed before the Host is ensured. */
+function decodeLaunchIntent(value: unknown): CliSessionLaunchIntent {
+  if (!isRecord(value)) throw new Error('local client entry: the launch envelope sessionLaunch must be an object')
+  const keys = Object.keys(value).sort()
+  if (value.kind === 'browse') {
+    if (keys.length !== 2 || value.query !== '') {
+      throw new Error('local client entry: a browse launch is exactly { kind: "browse", query: "" }')
+    }
+    return { kind: 'browse', query: '' }
+  }
+  if (value.kind === 'lookup') {
+    if (keys.length !== 2 || typeof value.query !== 'string' || value.query.trim() === '') {
+      throw new Error('local client entry: a lookup launch needs exactly a non-empty "query"')
+    }
+    return { kind: 'lookup', query: value.query.trim() }
+  }
+  if (value.kind === 'continue') {
+    if (keys.length !== 1) throw new Error('local client entry: a continue launch carries no query')
+    return { kind: 'continue' }
+  }
+  throw new Error('local client entry: unknown launch envelope sessionLaunch kind')
+}
+
+/** Decode the raw envelope: bounded, valid JSON, exactly the known keys, and a
+ *  validated public intent. `version` is frozen at 1. */
+export function decodeClientLaunchEnvelope(raw: string): ClientLaunchEnvelope {
+  if (Buffer.byteLength(raw, 'utf8') > MAX_CLIENT_LAUNCH_ENVELOPE_BYTES) {
+    throw new Error('local client entry: the launch envelope exceeds 16 KiB')
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch (error) {
+    throw new Error('local client entry: the launch envelope is not valid JSON', { cause: error })
+  }
+  if (!isRecord(parsed)) throw new Error('local client entry: the launch envelope must be a JSON object')
+  for (const key of Object.keys(parsed)) {
+    if (key !== 'version' && key !== 'sessionLaunch' && key !== 'presetId' && key !== 'backendSource') {
+      throw new Error(`local client entry: unexpected launch envelope key ${JSON.stringify(key)}`)
+    }
+  }
+  if (parsed.version !== 1) throw new Error('local client entry: the launch envelope version must be 1')
+  const envelope: { sessionLaunch?: CliSessionLaunchIntent; presetId?: string; backendSource?: { value: 'direct' | 'daemon'; source: 'env' | 'profile' } } = {}
+  if ('sessionLaunch' in parsed) envelope.sessionLaunch = decodeLaunchIntent(parsed.sessionLaunch)
+  if ('backendSource' in parsed) {
+    const bs = parsed.backendSource
+    if (!isRecord(bs) || (bs.value !== 'direct' && bs.value !== 'daemon') || (bs.source !== 'env' && bs.source !== 'profile')) {
+      throw new Error('local client entry: the launch envelope backendSource must be { value: "direct"|"daemon", source: "env"|"profile" }')
+    }
+    envelope.backendSource = { value: bs.value, source: bs.source }
+  }
+  if ('presetId' in parsed) {
+    if (typeof parsed.presetId !== 'string' || parsed.presetId.trim() === '') {
+      throw new Error('local client entry: the launch envelope presetId must be a non-empty string')
+    }
+    envelope.presetId = parsed.presetId
+  }
+  return envelope
+}
+
+/** Read and decode the envelope when it is present; absent otherwise. */
+function readClientLaunchEnvelope(): ClientLaunchEnvelope | undefined {
+  const raw = process.env[CLIENT_LAUNCH_ENVELOPE_ENV]
+  return raw === undefined ? undefined : decodeClientLaunchEnvelope(raw)
+}
+
 /** The surface-mode startup intent: an explicit internal input, never a
- *  control-channel override of published behavior. */
-function surfaceStartupFacts(options: LocalClientEntryOptions): { sessionId?: string; presetId?: string } {
+ *  control-channel override of published behavior. The public envelope and the
+ *  internal exact `SPLIT_PROCESS_CLIENT_SESSION` channel are mutually exclusive;
+ *  the exact channel is what reexec and qualification use. */
+export function surfaceStartupFacts(
+  options: LocalClientEntryOptions,
+  envelope: ClientLaunchEnvelope | undefined,
+): { sessionId?: string; presetId?: string; sessionLaunch?: CliSessionLaunchIntent } {
   const sessionId = process.env.SPLIT_PROCESS_CLIENT_SESSION
   const presetId = process.env.SPLIT_PROCESS_CLIENT_PRESET
   if (options.mode !== 'surface') return {}
@@ -182,9 +308,18 @@ function surfaceStartupFacts(options: LocalClientEntryOptions): { sessionId?: st
   if (presetId !== undefined && presetId.trim() === '') {
     throw new Error('local client entry: SPLIT_PROCESS_CLIENT_PRESET must be non-empty when set')
   }
+  if (envelope !== undefined && sessionId !== undefined) {
+    throw new Error('local client entry: the public launch envelope is mutually exclusive with the internal exact Session channel')
+  }
+  const effectivePreset = envelope?.presetId !== undefined
+    ? envelope.presetId
+    : presetId === undefined || presetId === ''
+      ? undefined
+      : presetId
   return {
     ...(sessionId === undefined || sessionId === '' ? {} : { sessionId }),
-    ...(presetId === undefined || presetId === '' ? {} : { presetId }),
+    ...(effectivePreset === undefined ? {} : { presetId: effectivePreset }),
+    ...(envelope?.sessionLaunch === undefined ? {} : { sessionLaunch: envelope.sessionLaunch }),
   }
 }
 
@@ -234,11 +369,19 @@ const OLD_CLIENT_ENVIRONMENT = [
   'SPLIT_PROCESS_CLIENT_HOLD_ASSEMBLY',
   'SPLIT_PROCESS_CLIENT_HOLD_BEFORE_START',
   'SPLIT_PROCESS_CLIENT_HOLD_STARTUP_GATE',
+  'SPLIT_PROCESS_CLIENT_EXTENSION_CONFIG_PROBE',
+  'SPLIT_PROCESS_CLIENT_EXTENSION_CONFIG_PACKAGES',
+  'SPLIT_PROCESS_CLIENT_EXTENSION_LOADER_PROBE',
+  'SPLIT_PROCESS_CLIENT_EXTENSION_LOADER_PACKAGES',
+  'SPLIT_PROCESS_CLIENT_EXTENSION_LOADER_KEEP_BYTES',
+  'SPLIT_PROCESS_CLIENT_EXTENSION_LOADER_NOTICE_PROBE',
   'SPLIT_PROCESS_CLIENT_FORCE_FAILURE',
   'SPLIT_PROCESS_CLIENT_FORCE_STARTUP_FATAL',
   'SPLIT_PROCESS_CLIENT_FORCE_REFRESH_UNRESPONSIVE_ONCE',
   'SPLIT_PROCESS_CLIENT_DROP_PROMPT_ACK',
+  'SPLIT_PROCESS_CLIENT_DROP_MODEL_ACK',
   'SPLIT_PROCESS_CLIENT_OMIT_COOKIE',
+  'SPLIT_PROCESS_CLIENT_WORKSPACE_INTENT_PATH',
 ] as const
 
 function failureMessage(error: unknown): string {
@@ -262,12 +405,7 @@ export function inspectClientReexecTarget(packageRoot: string, dshVersion: strin
   } catch (error) {
     throw new Error('local client reexec: the target package root is not readable', { cause: error })
   }
-  const rootInfo = lstatSync(root)
-  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
-  if (!rootInfo.isDirectory()) throw new Error('local client reexec: the target package root is not a directory')
-  if (uid !== undefined && rootInfo.uid !== uid) {
-    throw new Error('local client reexec: the target package root is not owned by this process user')
-  }
+  if (!lstatSync(root).isDirectory()) throw new Error('local client reexec: the target package root is not a directory')
   let manifest: unknown
   try {
     manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as unknown
@@ -284,15 +422,27 @@ export function inspectClientReexecTarget(packageRoot: string, dshVersion: strin
   if (!isRecord(devDependencies) || devDependencies[DSH_PIN_PACKAGE] !== dshVersion) {
     throw new Error('local client reexec: the target package is pinned to a different DSH runtime')
   }
+  // The named entry keeps `<root>/dist/local-client.mjs` as the INVOKED path;
+  // the replacement Client locates its package root from that path, so a legal
+  // dist/entry symlink still resolves this exact package root.
   const entry = join(root, 'dist', 'local-client.mjs')
-  let entryInfo
+  let realEntry: string
   try {
-    entryInfo = lstatSync(entry)
+    realEntry = realpathSync(entry)
   } catch (error) {
     throw new Error('local client reexec: the target package has no Client entry', { cause: error })
   }
-  if (entryInfo.isSymbolicLink() || !entryInfo.isFile() || (uid !== undefined && entryInfo.uid !== uid)) {
-    throw new Error('local client reexec: the target Client entry must be a regular file owned by this process user')
+  if (!lstatSync(realEntry).isFile()) {
+    throw new Error('local client reexec: the target Client entry must resolve to a regular file')
+  }
+  let entryRoot: string
+  try {
+    entryRoot = installedPackageRootFromEntry(pathToFileURL(entry).href)
+  } catch (error) {
+    throw new Error('local client reexec: the target Client entry cannot locate its installed package root', { cause: error })
+  }
+  if (entryRoot !== root) {
+    throw new Error('local client reexec: the target Client entry resolves a different installed package root')
   }
   return {
     packageRoot: root,
@@ -488,6 +638,10 @@ export function createClientReexecChildEnvironment(
   for (const name of OLD_CLIENT_ENVIRONMENT) delete env[name]
   // A handoff never creates a fresh Session through a preset.
   delete env.SPLIT_PROCESS_CLIENT_PRESET
+  // The public launch envelope is consumed by the ORIGINAL Client only; a
+  // replacement Client resumes the confirmed exact Session instead, so the
+  // envelope must never ride the handoff (it would re-run lookup/-c).
+  delete env.SPLIT_PROCESS_CLIENT_LAUNCH_V1
   env.SPLIT_PROCESS_CLIENT_MODE = 'surface'
   env.SPLIT_PROCESS_CLIENT_EXPECTED_INSTANCE_ID = intent.expectedInstanceId
   env.SPLIT_PROCESS_DSH_ANCHOR = intent.dshAnchor
@@ -568,15 +722,16 @@ export function routeReexecTermination(
   return true
 }
 
-/** The one Client shutdown tail: seat close strictly precedes any child spawn. */
+/** The one Client shutdown tail: the mode-held seat close and the complete stop precede any child spawn. */
 export interface ClientEntryShutdownOptions {
   readonly seat: ProcessSeat
   readonly reexec?: {
     readonly intent: ClientReexecIntent
     readonly teardownSucceeded: boolean
     /**
-     * Live pre-spawn cancellation latch. It is read AFTER the seat close, so a
-     * termination signal arriving while that close is pending is observed.
+     * Live pre-spawn cancellation latch. It is read AFTER the seat close (a
+     * no-op for `surface`), so a termination signal arriving while that close
+     * is pending is observed.
      */
     readonly cancelled?: () => boolean
   }
@@ -593,7 +748,8 @@ export interface ClientEntryShutdownOptions {
 }
 
 /**
- * Finish the ONE Client process: close the kernel seat, and only after a fully
+ * Finish the ONE Client process: release the process seat this mode actually
+ * holds (qualification) or close the no-op seat, and only after a fully
  * successful teardown re-validate the replacement package and run the child.
  * A failed teardown, seat close, target re-check or spawn never starts C1 and
  * never touches the Host. Returns the replacement exit code when a handoff was
@@ -815,6 +971,45 @@ interface PeerRemoteService {
   readonly userQuestions?: {
     answer(sessionId: string, callId: string, answer: unknown): Promise<{ readonly ok: boolean; readonly value?: boolean; readonly error?: { readonly code?: string } }>
   }
+  /** The package's private official-Web-frontend toggle (`piTuiWebAccess`). */
+  readonly piTuiWebAccess?: {
+    getStatus(): Promise<PeerRemoteResult>
+    setEnabled(enabled: boolean): Promise<PeerRemoteResult>
+    getAuthenticatedUrl(): Promise<PeerRemoteResult>
+  }
+  /** The package's private local ACP listener control (`piTuiAcpAccess`, PO-1B). */
+  readonly piTuiAcpAccess?: {
+    getStatus(): Promise<PeerRemoteResult>
+    setEnabled(enabled: boolean): Promise<PeerRemoteResult>
+  }
+  /**
+   * The official generated settings namespace. The qualification Peer uses it
+   * to read/write the profile-owned Web startup preference through the SAME
+   * revision-checked wire the Remote ConfigPort uses — never a local file edit.
+   */
+  readonly settings?: {
+    describe(): Promise<PeerRemoteResult>
+    mutate(
+      ns: string,
+      ops: readonly { readonly op: 'set'; readonly path: readonly string[]; readonly value: unknown }[],
+      expectedRevision?: number,
+    ): Promise<PeerRemoteResult>
+  }
+  /**
+   * The official generated Workspace namespace. The qualification Peer adopts
+   * ONE existing absolute directory as a Workspace through the SAME wire the
+   * Web/UI domains use; it creates no Host route and writes no profile file.
+   */
+  readonly workspace?: {
+    create(input: { readonly path: string }): Promise<PeerRemoteResult>
+  }
+}
+
+/** One RemoteResult as the Client face resolves it (structural, non-secret). */
+interface PeerRemoteResult {
+  readonly ok: boolean
+  readonly value?: unknown
+  readonly error?: { readonly code?: string; readonly message?: string }
 }
 
 /** Production fail-closed preflight for the interaction startup gate.
@@ -962,39 +1157,81 @@ function observeQualificationSocket(
  */
 export async function runLocalClientEntry(options: LocalClientEntryOptions): Promise<void> {
   // Handoff mode is validated before ANY process seat or Context exists: a
-  // contradictory environment is refused without touching the Client seat.
+  // contradictory environment is refused without touching a seat.
   const expectedHostInstanceId = expectedHostInstanceFromEnvironment(options.mode)
   assertHandoffSignalExclusivity(options.mode, expectedHostInstanceId)
+  // Decode the public launch envelope BEFORE any Host/seat/Context work: a
+  // malformed, oversized or contradictory envelope fails closed with no Host
+  // interaction. Surface mode only; the qualification/peer channels never read it.
+  const launchEnvelope = options.mode === 'surface' ? readClientLaunchEnvelope() : undefined
+  // Mutually-exclusive channels are checked HERE, before ensureHost / seat /
+  // Context: a contradictory public envelope + internal exact Session input must
+  // have ZERO Host side effects. The later surfaceStartupFacts check stays as a
+  // second fence but this is the zero-side-effect gate.
+  if (launchEnvelope !== undefined && process.env.SPLIT_PROCESS_CLIENT_SESSION !== undefined) {
+    throw new Error('local client entry: the public launch envelope is mutually exclusive with the internal exact Session channel')
+  }
+  if (launchEnvelope?.backendSource !== undefined) {
+    // A read-only launch fact for the Settings row. It is NOT DSH_PI_TUI_BACKEND
+    // (so it can never recurse into backend selection) and is never persisted.
+    process.env.SPLIT_PROCESS_CLIENT_LAUNCH_BACKEND = JSON.stringify(launchEnvelope.backendSource)
+  }
   const hostModules = await loadOfficialClientHost(options.dshAnchor)
   const dshHome = hostModules.resolveDshHome()
-  const packageRoot = installedPackageRootFromEntry(import.meta.url)
+  const invokedEntry = process.argv[1]
+  const packageRoot = installedPackageRootFromEntry(invokedEntry === undefined ? import.meta.url : pathToFileURL(invokedEntry).href)
   const profileDir = hostModules.resolveProfileDir(options.profile, dshHome)
+  const installedDshVersion = readInstalledDshVersion(options.dshAnchor)
   const scope = scopeFromInstalledProfile({
     dshHome,
     profileDir,
     packageRoot,
-    dshVersion: readInstalledDshVersion(options.dshAnchor),
+    dshVersion: installedDshVersion,
   })
-  const processStartIdentity = readLinuxStarttime()
+  // M6 UX PR2: the ONE Client-local daemon administration capability. The
+  // Profile identity is the SAME officially verified start-up fact set the
+  // scope above was built from — never an argv/cwd guess and never anything
+  // routed through the Host wire. Constructing the port performs no IO: the
+  // existing control plane is only reached when the user explicitly chooses
+  // `Install service` or `Stop daemon Host and exit`.
+  const daemonAdminProfile: DaemonControlProfile = {
+    name: options.profile,
+    dir: profileDir,
+    home: dshHome,
+    installAnchor: options.dshAnchor,
+    packageRoot,
+    dshVersion: installedDshVersion,
+  }
+  const profileDaemonAdmin = createProfileDaemonAdmin(daemonAdminProfile, {
+    run: profileDaemonAdminRun(daemonAdminProfile),
+  })
+  const processStartIdentity = readProcessStartDiagnostic()
   // Surface mode separates the terminal (owned by PiTui) from the structured
   // telemetry channel (a private 0600 JSONL file). Qualification keeps the
   // frozen JSONL control channel on stdin/stdout.
   const recordSink = options.mode === 'surface' ? createSurfaceRecordSink() : undefined
-  const emit: EntryRecordSink = recordSink?.emit ?? writeEntryRecord
+  // Surface mode never writes JSON to the terminal. With no explicitly injected
+  // record file the sink is a silent, non-tty observation sink (never a
+  // writeEntryRecord fallback that would corrupt the TUI).
+  const emit: EntryRecordSink = recordSink?.emit ?? (options.mode === 'surface' ? () => {} : writeEntryRecord)
   // Publish the business PID before any seat/assembly work: a signal-stop test
   // must be able to address THIS process while it is still assembling and no
   // ready record exists yet. No secret/path is carried.
   emit({ m4a0: 'client-started', processRole: 'client', pid: process.pid, phase: 'startup' })
-  // The single-TUI seat precedes discovery: a second Client never spawns a
-  // Host or touches the existing connection.
-  // The qualification-only answering Peer is NOT a TUI and must not take the
-  // single-TUI seat: it is the protocol counterpart used by the stale-result
-  // negative controls while the real TUI Client owns the seat.
-  const seat: ProcessSeat = options.mode === 'peer'
-    ? { close: async () => {} }
-    : await bindProcessSeat(scope.clientSeatSocketName, 'CLIENT_ALREADY_ACTIVE')
+  // Admission: the Host Singleton keeps its own kernel seat in every mode. The
+  // Client kernel seat is qualification-only — the frozen qualification harness
+  // must still fail CLIENT_ALREADY_ACTIVE on a second process, while every real
+  // `surface` (and the answering `peer`) is an independent Client that reaches
+  // the same authenticated Host without a profile-global seat.
+  const seat: ProcessSeat = options.mode === 'qualification'
+    ? await bindProfileKernelSeat(scope, 'qualification-client', 'CLIENT_ALREADY_ACTIVE')
+    : NO_PROCESS_SEAT
   let context: import('@deepseek-ai/cordis').Context | undefined
   let loaderFiber: Fiber | undefined
+  /** The SAME official Loader installed below (surface/peer modes only). */
+  let clientLoader: import('@deepseek-ai/cordis-plugin-loader').Loader | undefined
+  /** The SAME official `PluginPackages` service this Client process resolved. */
+  let clientPluginPackages: import('../client-extensions/discovery.ts').CurrentClientPackageLookup | undefined
   let startupGate: InteractionStartupGate | undefined
   let installedTransport: InstalledLocalClientTransport | undefined
   let transport: LocalClientTransport | undefined
@@ -1022,7 +1259,12 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
     revisionTask = run.then(() => {}, () => {})
     return run
   }
-  const diag = createEntryDiag('client', recordSink?.emit)
+  const diag = createEntryDiag('client', recordSink?.emit ?? (options.mode === 'surface' ? () => {} : undefined))
+  /** Monotonic process-relative stamp for the shutdown qualification records.
+   *  Surface mode writes these ONLY to its private 0600 JSONL sink; the real
+   *  terminal never carries timing JSON. */
+  const processStartedAt = performance.now()
+  const elapsedMs = (): number => Math.round((performance.now() - processStartedAt) * 10) / 10
   const CLIENT_DISPOSE_DEADLINE_MS = 10_000
   const disposeWithinDeadline = async (dispose: () => Promise<void>, errors: unknown[]): Promise<boolean> => {
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -1066,6 +1308,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
     // chain then unwinds exactly the graph it created, and this coordinator
     // performs the ONE transport/root release after it settles.
     startupAbort.abort(failure ?? new Error('local client entry: stop requested during startup'))
+    emit({ m4a0: 'shutdown-stage', processRole: 'client', phase: 'requested', pid: process.pid, atMs: elapsedMs() })
     stopping = (async () => {
       if (failure !== undefined) {
         const primary = failure instanceof Error ? failure : new Error(String(failure))
@@ -1104,8 +1347,12 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
           // A same-process surface revision in flight owns the Context until it
           // settles. Stop aborted its signal first; now wait for the ONE serial
           // revision slot before releasing the root.
+          const revisionAt = performance.now()
           await revisionTask
+          emit({ m4a0: 'shutdown-stage', processRole: 'client', phase: 'revision-drained', pid: process.pid, durationMs: Math.round((performance.now() - revisionAt) * 10) / 10, atMs: elapsedMs() })
+          const disposeAt = performance.now()
           try { await handle.dispose() } catch (error) { errors.push(error) }
+          emit({ m4a0: 'shutdown-stage', processRole: 'client', phase: 'handle-disposed', pid: process.pid, durationMs: Math.round((performance.now() - disposeAt) * 10) / 10, atMs: elapsedMs() })
           rootReleased = true
           return
         }
@@ -1124,12 +1371,13 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
         try { await context?.fiber.dispose() } catch (error) { errors.push(error) }
         rootReleased = true
       }, errors)
+      emit({ m4a0: 'shutdown-stage', processRole: 'client', phase: 'dispose-settled', pid: process.pid, timedOut, atMs: elapsedMs() })
       if (options.mode === 'surface' && handle !== undefined) {
         // The final owner inventory the qualification reads after the process
         // left: every Client-owned service row and `tuiMainView` reference is
         // released (0), while the Host is untouched. Emitted BEFORE the record
         // sink closes and before the process exits.
-        emit({ m4b2s: 'client-closed', ...traceStatus(handle.status) })
+        emit({ m4b2s: 'client-closed', ...traceStatus(handle.status), atMs: elapsedMs() })
       }
       const transportCleanupFailed = errors.some(error => error instanceof Error && (error as { cleanupFailed?: boolean }).cleanupFailed === true)
       if (errors.length > 0 || timedOut) {
@@ -1148,14 +1396,22 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       } else {
         process.exitCode = code
         // The handoff tail may start only after THIS coordinator released the
-        // root, official transport, Client seat and every owned object.
+        // root, official transport, the seat this mode actually held and every
+        // owned object.
         if (code === 0 && reexecIntent !== undefined) reexecTeardownSucceeded = true
       }
       // Pause the qualification control channel so its resumed stdin pipe no
       // longer keeps the process alive after disposal. The dispatcher's own
       // stop hook does the same for a control-channel shutdown.
+      // Surface mode owns the tty: an async terminal/channel failure that
+      // drives this stop path also gets ONE sanitized human line (a clean
+      // /exit or signal carries no failure and prints nothing).
+      if (options.mode === 'surface' && failure !== undefined) {
+        process.stderr.write(`${surfaceStartupFailureLine(failure, options.profile)}\n`)
+      }
       process.stdin.pause()
       resolveStopped?.()
+      emit({ m4a0: 'shutdown-stage', processRole: 'client', phase: 'cleanup-complete', pid: process.pid, atMs: elapsedMs(), failure: failure !== undefined, errors: errors.length })
       if (timedOut || transportCleanupFailed) forceExitAfterCleanupFailure()
     })()
     return stopping
@@ -1201,10 +1457,18 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
   try {
     const host = await ensureLocalHost({
       scope,
+      signal: startupAbort.signal,
       hostEntryPath: join(packageRoot, 'dist', 'local-host.mjs'),
       dshAnchor: options.dshAnchor,
       profile: options.profile,
       ...(expectedHostInstanceId === undefined ? {} : { expectedInstanceId: expectedHostInstanceId }),
+      // ONLY the real public surface launch (a strictly-decoded M6-2A envelope,
+      // no internal exact-id handoff) asks for a managed Host start. Legacy
+      // qualification/peer/manual surface and the reexec expectation keep the
+      // historical process path and never install a user unit.
+      ...(options.mode === 'surface' && launchEnvelope !== undefined && expectedHostInstanceId === undefined
+        ? { hostStartPolicy: 'public' as const }
+        : {}),
     })
     startupAbort.signal.throwIfAborted()
     emit({
@@ -1223,6 +1487,8 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
     context = new hostModules.Context()
     const packageFiber = context.plugin(hostModules.PluginPackages as never, { resolution } as never)
     await packageFiber
+    clientPluginPackages = context.get('pluginPackages') as unknown as
+      import('../client-extensions/discovery.ts').CurrentClientPackageLookup | undefined
     emit({ m4a0: 'context-ready', processRole: 'client', pid: process.pid, phase: 'context-ready' })
 
     // The official resolution interception is live before these dynamic
@@ -1247,10 +1513,17 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       // until the Session resolver and the root interaction listeners exist;
       // the upstream `ClientRemoteService` sees that pending entry in
       // `loader.await()` and therefore does not start `connection.start()`.
-      loaderFiber = clientContext.plugin(hostModules.Loader as never, {} as never)
+      loaderFiber = clientContext.plugin(hostModules.Loader as never, {
+        // The official Loader resolves bare plugin specifiers from this base.
+        // A Split Client Context is created bare, so without the profile anchor
+        // a dynamically created `<pkg>/tui` entry could not import. This is
+        // the ONE existing Loader — never a second resolver or Context.
+        baseUrl: pathToFileURL(join(profileDir, 'package.json')).href,
+      } as never)
       await loaderFiber
       const loader = clientContext.get('loader') as import('@deepseek-ai/cordis-plugin-loader').Loader | undefined
       if (loader === undefined) throw new Error('local client entry: the official Cordis Loader did not install')
+      clientLoader = loader
       startupGate = createInteractionStartupGate()
       loader.builtins[INTERACTION_STARTUP_GATE] = startupGate.plugin as never
       await loader.create({ name: `cordis:${INTERACTION_STARTUP_GATE}` })
@@ -1270,6 +1543,18 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
         diag,
         signal: startupAbort.signal,
         onFatal: onTransportFatal,
+        // Qualification-only: when the smoke's prompt-ACK-drop fault is armed,
+        // record the one real hit in this Client's own 0600 JSONL sink. The
+        // record carries no user text, Session id, Cookie, Host URL or path;
+        // a surface Client without a record sink, and every production Client,
+        // emit nothing because the fault env is never set.
+        ...(options.mode === 'surface' && process.env.SPLIT_PROCESS_CLIENT_DROP_PROMPT_ACK === '1'
+          ? {
+              qualificationPromptAckDropped: (): void => {
+                emit({ m4b2s: 'qualification', op: 'prompt-ack-dropped' })
+              },
+            }
+          : {}),
         ...(options.mode === 'peer'
           ? { qualificationWebSocketObserver: (_url, socket) => observeQualificationSocket(socket, emit) }
           : {}),
@@ -1399,6 +1684,419 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
             })
             return false
           }
+          if (request.op === 'qualification-web-access') {
+            // Qualification-only: the SAME authenticated non-TUI Peer drives
+            // the Host's private official-Web-frontend toggle through the real
+            // v2 Gateway. It is a control op of this internal entry: it never
+            // appears on a published CLI, a Surface stream or an HTTP bypass,
+            // and the response carries only the status vocabulary.
+            const enabled = request.webAccessEnabled
+            const webAccess = remoteService?.piTuiWebAccess
+            if (webAccess === undefined) {
+              throw new Error('local client entry: the qualification Peer has no piTuiWebAccess namespace')
+            }
+            // A supplied value is NOT validated here: the v2 Remote contract's
+            // argument codec is the one authority, so a malformed value is
+            // refused by the Gateway exactly like any other Remote caller.
+            const result = enabled === undefined
+              ? await webAccess.getStatus()
+              : await webAccess.setEnabled(enabled as boolean)
+            emit({
+              m4a0: 'qualification',
+              op: 'web-access',
+              processRole: 'client',
+              pid: process.pid,
+              action: enabled === undefined ? 'getStatus' : 'setEnabled',
+              ...(enabled === undefined ? {} : { enabled }),
+              ok: result.ok === true,
+              ...(result.ok
+                ? { status: result.value }
+                : {
+                    errorCode: result.error?.code,
+                    ...(result.error?.message === undefined ? {} : { error: result.error.message.slice(0, 300) }),
+                  }),
+              ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
+            })
+            return false
+          }
+          if (request.op === 'qualification-workspace-create') {
+            // Qualification-only: adopt ONE existing absolute directory as a
+            // Workspace through the official generated `workspace` Remote. The
+            // real Browser then starts the Session in that Workspace through its
+            // own UI; no Host route, profile file or second authority is added.
+            const workspace = remoteService?.workspace
+            if (workspace === undefined) {
+              throw new Error('local client entry: the qualification Peer has no workspace namespace')
+            }
+            const path = request.workspacePath
+            if (typeof path !== 'string' || path === '') {
+              throw new Error('local client entry: qualification-workspace-create requires an absolute workspacePath')
+            }
+            const result = await workspace.create({ path })
+            const value = result.ok
+              ? result.value as { readonly created?: unknown; readonly workspace?: { readonly workspaceId?: unknown } } | undefined
+              : undefined
+            emit({
+              m4a0: 'qualification',
+              op: 'workspace-create',
+              processRole: 'client',
+              pid: process.pid,
+              ok: result.ok === true,
+              ...(value === undefined
+                ? { errorCode: result.error?.code }
+                : {
+                    created: value.created === true,
+                    ...(typeof value.workspace?.workspaceId === 'string' ? { workspaceId: value.workspace.workspaceId } : {}),
+                  }),
+              ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
+            })
+            return false
+          }
+          if (request.op === 'qualification-web-autostart') {
+            // Qualification-only: read/write the profile-owned Web startup
+            // preference through the SAME official generated `settings` wire the
+            // Remote ConfigPort consumes. It never edits a profile file and never
+            // touches the current Host's Web rows.
+            const settings = remoteService?.settings
+            if (settings === undefined) throw new Error('local client entry: the qualification Peer has no settings namespace')
+            const preferenceOf = (value: unknown): { autoStart: boolean; revision: number; userOverridden: boolean } | undefined => {
+              const namespaces = (value as { readonly namespaces?: readonly {
+                readonly ns?: unknown
+                readonly value?: unknown
+                readonly user?: unknown
+                readonly revision?: unknown
+              }[] } | undefined)?.namespaces
+              const entry = namespaces?.find(candidate => candidate.ns === 'pi-tui-web-preferences')
+              if (entry === undefined) return undefined
+              const projected = entry.value as { readonly autoStart?: unknown } | undefined
+              if (typeof projected?.autoStart !== 'boolean' || typeof entry.revision !== 'number') return undefined
+              const user = entry.user as { readonly autoStart?: unknown } | undefined
+              return {
+                autoStart: projected.autoStart,
+                revision: entry.revision,
+                userOverridden: user?.autoStart !== undefined,
+              }
+            }
+            const before = await settings.describe()
+            const current = before.ok ? preferenceOf(before.value) : undefined
+            if (current === undefined) {
+              emit({
+                m4a0: 'qualification',
+                op: 'web-autostart',
+                processRole: 'client',
+                pid: process.pid,
+                ok: false,
+                errorCode: 'preference/unavailable',
+                ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
+              })
+              return false
+            }
+            const requested = request.webAutoStart
+            if (requested === undefined) {
+              emit({
+                m4a0: 'qualification',
+                op: 'web-autostart',
+                processRole: 'client',
+                pid: process.pid,
+                action: 'read',
+                ...current,
+                ok: true,
+                ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
+              })
+              return false
+            }
+            if (typeof requested !== 'boolean') throw new Error('local client entry: qualification-web-autostart requires a boolean webAutoStart')
+            const write = await settings.mutate(
+              'pi-tui-web-preferences',
+              [{ op: 'set', path: ['autoStart'], value: requested }],
+              current.revision,
+            )
+            const after = await settings.describe()
+            const settled = after.ok ? preferenceOf(after.value) : undefined
+            emit({
+              m4a0: 'qualification',
+              op: 'web-autostart',
+              processRole: 'client',
+              pid: process.pid,
+              action: 'write',
+              requested,
+              ok: write.ok && settled !== undefined,
+              ...(settled === undefined ? {} : settled),
+              readBack: settled?.autoStart === requested,
+              ...(write.ok
+                ? {}
+                : {
+                    errorCode: write.error?.code,
+                    ...(write.error?.message === undefined ? {} : { error: write.error.message.slice(0, 300) }),
+                  }),
+              ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
+            })
+            return false
+          }
+          if (request.op === 'qualification-tui-preferences') {
+            // Qualification-only: read/write the canonical TUI preference row
+            // through the SAME official generated `settings` wire the Remote
+            // ConfigPort consumes. It never edits a profile file directly and
+            // never touches a legacy namespace.
+            const settings = remoteService?.settings
+            if (settings === undefined) throw new Error('local client entry: the qualification Peer has no settings namespace')
+            const preferenceOf = (value: unknown): {
+              readonly revision: number
+              readonly value: Record<string, unknown>
+              readonly user: Record<string, unknown>
+            } | undefined => {
+              const namespaces = (value as { readonly namespaces?: readonly {
+                readonly ns?: unknown
+                readonly value?: unknown
+                readonly user?: unknown
+                readonly revision?: unknown
+              }[] } | undefined)?.namespaces
+              const entry = namespaces?.find(candidate => candidate.ns === 'pi-tui-preferences')
+              if (entry === undefined || typeof entry.revision !== 'number') return undefined
+              const plain = (input: unknown): Record<string, unknown> =>
+                input !== null && typeof input === 'object' && !Array.isArray(input)
+                  ? input as Record<string, unknown>
+                  : {}
+              return { revision: entry.revision, value: plain(entry.value), user: plain(entry.user) }
+            }
+            const before = await settings.describe()
+            const current = before.ok ? preferenceOf(before.value) : undefined
+            if (current === undefined) {
+              emit({
+                m4a0: 'qualification',
+                op: 'tui-preferences',
+                processRole: 'client',
+                pid: process.pid,
+                ok: false,
+                errorCode: 'preferences/unavailable',
+                ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
+              })
+              return false
+            }
+            if (request.tuiPreferencesField === undefined) {
+              emit({
+                m4a0: 'qualification',
+                op: 'tui-preferences',
+                processRole: 'client',
+                pid: process.pid,
+                action: 'read',
+                ok: true,
+                ns: 'pi-tui-preferences',
+                revision: current.revision,
+                valueText: JSON.stringify(current.value),
+                userText: JSON.stringify(current.user),
+                ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
+              })
+              return false
+            }
+            if (typeof request.tuiPreferencesField !== 'string' || typeof request.tuiPreferencesValue !== 'string') {
+              throw new Error('local client entry: qualification-tui-preferences requires a string field/value')
+            }
+            const write = await settings.mutate(
+              'pi-tui-preferences',
+              [{ op: 'set', path: [request.tuiPreferencesField], value: request.tuiPreferencesValue }],
+              request.tuiPreferencesRevision as number | undefined,
+            )
+            const after = await settings.describe()
+            const settled = after.ok ? preferenceOf(after.value) : undefined
+            emit({
+              m4a0: 'qualification',
+              op: 'tui-preferences',
+              processRole: 'client',
+              pid: process.pid,
+              action: 'write',
+              field: request.tuiPreferencesField,
+              requested: request.tuiPreferencesValue,
+              ok: write.ok === true && settled !== undefined,
+              ...(settled === undefined
+                ? {}
+                : {
+                    revision: settled.revision,
+                    valueText: JSON.stringify(settled.value),
+                    userText: JSON.stringify(settled.user),
+                    readBack: settled.value[request.tuiPreferencesField] === request.tuiPreferencesValue,
+                  }),
+              ...(write.ok
+                ? {}
+                : {
+                    errorCode: write.error?.code,
+                    ...(write.error?.message === undefined ? {} : { error: write.error.message.slice(0, 300) }),
+                  }),
+              ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
+            })
+            return false
+          }
+          if (request.op === 'qualification-acp-access') {
+            // PO-1B qualification-only: the SAME authenticated non-TUI Peer drives
+            // the Host's private local ACP listener control through the real v2
+            // Gateway. Internal control op only — never a published CLI/HTTP
+            // surface; the response carries only the status vocabulary.
+            const enabled = request.acpEnabled
+            const acpAccess = remoteService?.piTuiAcpAccess
+            if (acpAccess === undefined) {
+              throw new Error('local client entry: the qualification Peer has no piTuiAcpAccess namespace')
+            }
+            // A supplied value is passed UNVALIDATED: the v2 Remote contract's
+            // argument codec is the one authority.
+            const result = enabled === undefined
+              ? await acpAccess.getStatus()
+              : await acpAccess.setEnabled(enabled as boolean)
+            emit({
+              m4a0: 'qualification',
+              op: 'acp-access',
+              processRole: 'client',
+              pid: process.pid,
+              action: enabled === undefined ? 'getStatus' : 'setEnabled',
+              ...(enabled === undefined ? {} : { enabled }),
+              ok: result.ok === true,
+              ...(result.ok
+                ? { status: result.value }
+                : {
+                    errorCode: result.error?.code,
+                    ...(result.error?.message === undefined ? {} : { error: result.error.message.slice(0, 300) }),
+                  }),
+              ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
+            })
+            return false
+          }
+          if (request.op === 'qualification-acp-autostart') {
+            // PO-1B qualification-only: read/write the profile-owned ACP startup
+            // preference through the SAME official generated `settings` wire the
+            // Remote ConfigPort consumes. It never edits a profile file and never
+            // touches the current Host's ACP listener.
+            const settings = remoteService?.settings
+            if (settings === undefined) throw new Error('local client entry: the qualification Peer has no settings namespace')
+            const preferenceOf = (value: unknown): { autoStart: boolean; revision: number; userOverridden: boolean } | undefined => {
+              const namespaces = (value as { readonly namespaces?: readonly {
+                readonly ns?: unknown
+                readonly value?: unknown
+                readonly user?: unknown
+                readonly revision?: unknown
+              }[] } | undefined)?.namespaces
+              const entry = namespaces?.find(candidate => candidate.ns === 'pi-tui-acp-preferences')
+              if (entry === undefined) return undefined
+              const projected = entry.value as { readonly autoStart?: unknown } | undefined
+              if (typeof projected?.autoStart !== 'boolean' || typeof entry.revision !== 'number') return undefined
+              const user = entry.user as { readonly autoStart?: unknown } | undefined
+              return {
+                autoStart: projected.autoStart,
+                revision: entry.revision,
+                userOverridden: user?.autoStart !== undefined,
+              }
+            }
+            const before = await settings.describe()
+            const current = before.ok ? preferenceOf(before.value) : undefined
+            if (current === undefined) {
+              emit({
+                m4a0: 'qualification',
+                op: 'acp-autostart',
+                processRole: 'client',
+                pid: process.pid,
+                ok: false,
+                errorCode: 'preference/unavailable',
+                ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
+              })
+              return false
+            }
+            const requested = request.acpAutoStart
+            if (requested === undefined) {
+              emit({
+                m4a0: 'qualification',
+                op: 'acp-autostart',
+                processRole: 'client',
+                pid: process.pid,
+                action: 'read',
+                ...current,
+                ok: true,
+                ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
+              })
+              return false
+            }
+            if (typeof requested !== 'boolean') throw new Error('local client entry: qualification-acp-autostart requires a boolean acpAutoStart')
+            const write = await settings.mutate(
+              'pi-tui-acp-preferences',
+              [{ op: 'set', path: ['autoStart'], value: requested }],
+              current.revision,
+            )
+            const after = await settings.describe()
+            const settled = after.ok ? preferenceOf(after.value) : undefined
+            emit({
+              m4a0: 'qualification',
+              op: 'acp-autostart',
+              processRole: 'client',
+              pid: process.pid,
+              action: 'write',
+              requested,
+              ok: write.ok && settled !== undefined,
+              ...(settled === undefined ? {} : settled),
+              readBack: settled?.autoStart === requested,
+              ...(write.ok
+                ? {}
+                : {
+                    errorCode: write.error?.code,
+                    ...(write.error?.message === undefined ? {} : { error: write.error.message.slice(0, 300) }),
+                  }),
+              ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
+            })
+            return false
+          }
+          if (request.op === 'qualification-web-access-url') {
+            // Qualification-only: obtain the official authenticated launch URL and
+            // prove it can really be exchanged for a page. The URL and its launch
+            // token are NEVER emitted: only the protocol, the parameter SHAPE,
+            // the exchange status and the follow-up page status are recorded.
+            const webAccess = remoteService?.piTuiWebAccess
+            if (webAccess === undefined) throw new Error('local client entry: the qualification Peer has no piTuiWebAccess namespace')
+            const result = await webAccess.getAuthenticatedUrl()
+            if (!result.ok) {
+              emit({
+                m4a0: 'qualification',
+                op: 'web-access-url',
+                processRole: 'client',
+                pid: process.pid,
+                ok: false,
+                ...(result.error?.code === undefined ? {} : { errorCode: result.error.code }),
+                ...(result.error?.message === undefined ? {} : { error: result.error.message.slice(0, 300) }),
+                ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
+              })
+              return false
+            }
+            const url = new URL((result.value as { readonly url: string }).url)
+            const exchange = await fetch(url, { redirect: 'manual' })
+            await exchange.body?.cancel()
+            const cookies = exchange.headers.getSetCookie()
+              .map(header => header.split(';')[0] ?? '')
+              .filter(pair => pair !== '')
+            const cookieHeader = cookies.join('; ')
+            let pageStatus: number | undefined
+            let pageBytes = 0
+            if (cookieHeader !== '') {
+              const page = await fetch(`${url.origin}/`, {
+                redirect: 'manual',
+                headers: { cookie: cookieHeader },
+              })
+              const body = await page.text()
+              pageStatus = page.status
+              pageBytes = body.length
+            }
+            emit({
+              m4a0: 'qualification',
+              op: 'web-access-url',
+              processRole: 'client',
+              pid: process.pid,
+              ok: true,
+              loopback: url.hostname === '127.0.0.1',
+              protocol: url.protocol,
+              pathname: url.pathname,
+              tokenParams: url.searchParams.getAll('token').length,
+              paramNames: [...url.searchParams.keys()],
+              exchangeStatus: exchange.status,
+              cookieNames: cookies.map(pair => pair.split('=')[0]),
+              ...(pageStatus === undefined ? {} : { pageStatus, pageBytes }),
+              ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
+            })
+            return false
+          }
           if (request.op === 'shutdown') {
             await stop(0)
             return true
@@ -1439,7 +2137,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
     }
     const clientContext = context
     if (clientContext === undefined) throw new Error('local client entry: the Client root Context is missing')
-    const surfaceFacts = surfaceStartupFacts(options)
+    const surfaceFacts = surfaceStartupFacts(options, launchEnvelope)
     /**
      * The ONE allowed process-composition edge into `app/bootstrap.ts`
      * (architecture gate: exact lazy dynamic import, this entry only). It runs
@@ -1456,12 +2154,42 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       // callback after a same-process surface replacement.
       activeBridge = bridge
       const { applyRunnerWithRuntime } = await import('../bootstrap.ts')
+      // M6-1/F5-B: the ONE automatic Workspace eligibility check. It runs after
+      // the official Host authentication and before this surface revision's
+      // runner exists; the verdict only permits an AUTO host-path proposal (the
+      // Host still signs the WorkspaceId). Every unreadable/uncertain fact is
+      // `unverified`, so the surface stays unselected until the user picks a
+      // Host Workspace through the existing Browser.
+      const launchWorkspace: LaunchWorkspaceVerdict = await classifyLaunchWorkspace(host.identity, CLIENT_LAUNCH_CWD, {
+        ...(CLIENT_LAUNCH_OBJECT === undefined ? {} : { launchObject: CLIENT_LAUNCH_OBJECT }),
+        scope,
+        signal: startupAbort.signal,
+        ...(transport === undefined ? {} : { transport }),
+      })
+      // The Workspace observation is a new network await. A stop/HMR that
+      // aborted the startup while it ran must not mount this revision's runner.
+      startupAbort.signal.throwIfAborted()
       let runnerFiber: Fiber | undefined
       try {
         runnerFiber = clientContext.plugin(pluginContext => {
           applyRunnerWithRuntime(pluginContext, input.config, input.override, {
             surfaceReady: () => bridge.markMounted(),
             surfaceFailed: error => bridge.fail(error),
+            // M6 compatible-cross-build UX: the two authenticated build
+            // identities of THIS Client process and the Host it connected to.
+            // `scope.buildId` is the RUNNING Client's fingerprint; the Host
+            // value comes from the completed `ensureLocalHost` authentication
+            // chain — never from the installed Profile or `instance.json`.
+            authenticatedBuilds: {
+              clientBuildId: scope.buildId,
+              hostBuildId: host.identity.buildId,
+              initialSurface: input.mountKind === 'initial',
+            },
+            // M6 PR-C C3: the presence revision scope is the Client
+            // CONNECTION root — it survives the qualification-only Surface
+            // replacement (a fresh plugin fiber per revision would reset the
+            // per-Peer revision counter into a `stale-revision` refusal).
+            presencePeerScope: clientContext,
             // M4 PR4: the ONE process-owned manual reload capability of this
             // real surface mount. The command handler has already made the
             // Client-local safety decision in the SAME synchronous stack; this
@@ -1469,7 +2197,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
             ...(reexecHandler === undefined
               ? {}
               : { requestClientReload: () => reexecHandler!.request('manual') }),
-          })
+          }, launchWorkspace)
         })
         await runnerFiber
       } catch (error) {
@@ -1575,7 +2303,19 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
           domains: mountedDomains,
           interactionDelivery,
           mountRunner,
+          profileDaemonAdmin,
           diag,
+          ...(clientLoader === undefined || clientPluginPackages === undefined
+            ? {}
+            : {
+                clientExtensions: {
+                  loader: clientLoader,
+                  pluginPackages: clientPluginPackages,
+                  // This module lives inside the installed Client package, so
+                  // Node resolves the profile package table from its real path.
+                  parentURL: import.meta.url,
+                },
+              }),
           onStatus: status => {
             emit({ m4b2s: 'surface-status', ...traceStatus(status) })
           },
@@ -1685,15 +2425,70 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
         return false
       }
       if (request.op === 'qualification-host-foundation') {
-        // Qualification-only: mount the two Remote contributions on THIS live
-        // Client Context, prove the official/private RPC and unmount them. The
-        // module is loaded dynamically so it never joins the normal startup
-        // path or the Client entry's static dependency graph.
+        // Qualification-only: mount the Remote contributions on THIS live
+        // Client Context, prove the official/private RPC and (when requested)
+        // the official `workspace` namespace, then unmount them. The module is
+        // loaded dynamically so it never joins the normal startup path or the
+        // Client entry's static dependency graph.
         if (context === undefined) throw new Error('local client entry: the qualification probe has no Client Context')
+        // `workspacePath` is the harness-created directory the Host must
+        // canonicalize and register. It is a qualification control input only:
+        // the surface runtime and the package API never receive it. Absent = the
+        // caller does not request the Workspace proof (the M4 cross-build lane
+        // runs a new Client against a Host that predates the namespace); a
+        // supplied value must be a real path string.
+        const qualificationRequest = request as EntryControlRequest & {
+          readonly workspacePath?: unknown
+          readonly workspaceResume?: unknown
+          readonly schedule?: unknown
+        }
+        const workspacePath = qualificationRequest.workspacePath
+        if (workspacePath !== undefined && (typeof workspacePath !== 'string' || workspacePath === '')) {
+          throw new Error('local client entry: a supplied workspacePath must be a non-empty string')
+        }
+        // `workspaceResume` asks for the generation-currentness proof: the probe
+        // holds the live Workspace stream open while THIS entry drops the
+        // Client's physical carrier, so the stream can only continue by
+        // resuming on the replacement generation. Qualification-only; the
+        // surface runtime never receives it.
+        const workspaceResume = qualificationRequest.workspaceResume
+        if (workspaceResume !== undefined && workspaceResume !== true) {
+          throw new Error('local client entry: workspaceResume must be the boolean true when supplied')
+        }
+        if (workspaceResume === true && workspacePath === undefined) {
+          throw new Error('local client entry: the generation-resume control requires a workspacePath')
+        }
+        // `schedule` asks for the official Schedule Remote namespace proof. It
+        // is a qualification control input only and must never leak into the
+        // surface runtime or the package API.
+        const schedule = qualificationRequest.schedule
+        if (schedule !== undefined && schedule !== true) {
+          throw new Error('local client entry: schedule must be the boolean true when supplied')
+        }
         const { runHostFoundationProbe } = await import('./host-foundation-probe.ts')
         const proof = await runHostFoundationProbe(context, {
           dshAnchor: options.dshAnchor,
           host,
+          ...(workspacePath === undefined ? {} : { workspacePath }),
+          ...(schedule === true ? { schedule: true } : {}),
+          ...(workspaceResume !== true
+            ? {}
+            : {
+                // The entry's own transport projection is the generation
+                // authority the smoke already reads; the probe never resolves
+                // the Client Context's `connection` service itself.
+                readGeneration: () => transport?.status().generationId,
+                dropCarrier: () => {
+                  transport?.dropWebSocketsForQualification()
+                  emit({
+                    m4a0: 'qualification',
+                    op: 'drop-websocket',
+                    label: 'workspace-hold',
+                    processRole: 'client',
+                    pid: process.pid,
+                  })
+                },
+              }),
           ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
         })
         emit({
@@ -1753,13 +2548,15 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       ...(primary.stack === undefined ? {} : { stack: primary.stack }),
       ...(primary.cause === undefined ? {} : { cause: primary.cause instanceof Error ? primary.cause.message : String(primary.cause) }),
     })
-    // Surface mode owns the tty. A handoff Client reports ONE concise line for
-    // any restore failure (expected Host/Session/preflight); the live-Host
-    // protocol refusal keeps its existing actionable line.
-    if (options.mode === 'surface' && expectedHostInstanceId !== undefined) {
-      process.stderr.write(`${handoffStartupFailureLine(failure)}\n`)
-    } else if (options.mode === 'surface' && failure instanceof LocalScopeError && failure.code === 'HOST_PROTOCOL_INCOMPATIBLE') {
-      process.stderr.write(`${surfaceStartupFailureLine(failure)}\n`)
+    // Surface mode owns the tty: EVERY startup failure gets ONE concise,
+    // actionable human line on stderr (a handoff Client gets its own restore
+    // line; every other failure, including ordinary Host init / Loader /
+    // assembly failures, gets the sanitized surface line). Never a bare exit 1.
+    if (options.mode === 'surface') {
+      const line = expectedHostInstanceId !== undefined
+        ? handoffStartupFailureLine(failure)
+        : surfaceStartupFailureLine(failure, options.profile)
+      process.stderr.write(`${line}\n`)
     }
     process.stdin.pause()
     if (cleanupErrors.length === 0 && !timedOut && !transportCleanupFailed) {
@@ -1778,7 +2575,8 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
     if (timedOut || transportCleanupFailed) forceExitAfterCleanupFailure()
   } finally {
     process.stdin.pause()
-    // The ONE shutdown tail: the kernel Client seat is closed BEFORE any
+    // The ONE shutdown tail: release the seat this mode actually holds (the
+    // qualification Client seat; `surface`/`peer` hold none) BEFORE any
     // replacement Client can spawn. A reexec starts only for a fully successful
     // teardown; its child inherits this process's terminal only after the old
     // surface/root are gone.
@@ -1841,19 +2639,57 @@ async function waitForStartupHold(path: string, signal: AbortSignal): Promise<vo
   signal.throwIfAborted()
 }
 
+/** Quote an official Profile name for a copy-pasteable shell command. */
+function shellProfileArg(profile: string): string {
+  if (/^[A-Za-z0-9_.-]+$/u.test(profile)) return profile
+  return `'${profile.replace(/'/gu, "'\\''")}'`
+}
+
 /**
  * The human-facing surface line for one startup failure. The live-Host
  * protocol/DSH refusal gets a dedicated, actionable line that names the code,
- * keeps the old Host untouched, requires an explicit owner-verified OS stop
- * and says that automatic in-memory migration is unsupported. It never
- * includes the registry PID, the launch URL/token or a private profile path.
- * Every other startup failure keeps the existing diagnostic.
+ * keeps the old Host untouched and points at the public daemon management
+ * commands for THIS official Profile. It never includes the registry PID, the
+ * launch URL/token or a private profile path. Every other startup failure
+ * keeps the existing diagnostic plus the same daemon-oriented recovery
+ * guidance.
  */
-export function surfaceStartupFailureLine(error: unknown): string {
-  if (error instanceof LocalScopeError && error.code === 'HOST_PROTOCOL_INCOMPATIBLE') {
-    return 'HOST_PROTOCOL_INCOMPATIBLE: Another live local Host for this profile uses a different local protocol or DSH runtime. The Host has not been stopped or replaced. Finish or save your work in that Host, then explicitly stop that Host through its normal operating-system shutdown signal and start a compatible Host. Automatic upgrade and migration of in-memory work are not supported.'
+export function surfaceStartupFailureLine(error: unknown, profile: string): string {
+  const daemon = (verb: string): string => `dsh --profile ${shellProfileArg(profile)} daemon ${verb}`
+  if (error instanceof LocalScopeError) {
+    if (error.code === 'HOST_PROTOCOL_INCOMPATIBLE') {
+      return `HOST_PROTOCOL_INCOMPATIBLE: Another live local Host for this profile uses a different local protocol or DSH runtime. The Host has not been stopped or replaced. Inspect it with: ${daemon('status')}; read its logs with: ${daemon('logs')}. If you decide this Profile service is yours to recover, run: ${daemon('restart')}. Recovery is not guaranteed; Automatic upgrade and migration of in-memory work are not supported.`
+    }
+    // Every other typed scope failure is a controlled code; never echo the raw
+    // message (it can carry a private profile path / Host origin).
+    return `split client surface: cannot establish the local Host (${error.code}); the Host was not stopped. Inspect it with: ${daemon('status')}; read its logs with: ${daemon('logs')}. If you choose to recover, run: ${daemon('restart')}; recovery is not guaranteed.`
   }
-  return `split client surface: ${error instanceof Error ? error.message : String(error)}`
+  return `split client surface: ${controlledSurfaceReason(error, daemon)}`
+}
+
+/**
+ * The ONLY text a surface startup failure is allowed to print: a fixed concise
+ * reason for unknown errors, or our OWN authored entry message stripped of
+ * terminal control characters, absolute paths and URLs. Detailed diagnostics stay
+ * in the controlled Client/Host log; the TTY never receives a raw error, a path
+ * or a Host launch URL.
+ */
+function controlledSurfaceReason(error: unknown, daemon: (verb: string) => string): string {
+  const raw = error instanceof Error ? error.message : String(error)
+  const entryPrefix = 'local client entry: '
+  if (raw.startsWith(entryPrefix)) {
+    return `${sanitizeSurfaceText(raw.slice(entryPrefix.length))} The Host was not stopped. Inspect with: ${daemon('status')} and ${daemon('logs')}; if you choose to recover, run ${daemon('restart')} (not guaranteed).`
+  }
+  return `startup failed before the TUI mounted; see the Host log for detail. The Host was not stopped. Inspect with: ${daemon('status')} and ${daemon('logs')}; if you choose to recover, run ${daemon('restart')} (not guaranteed).`
+}
+
+/** Strip control characters, URLs and absolute paths; bound the length. */
+export function sanitizeSurfaceText(text: string): string {
+  let out = text.replace(/[\u0000-\u001f\u007f]/gu, ' ')
+  out = out.replace(/[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s'"]+/gu, '<url>')
+  out = out.replace(/(?:\/[\w.@+-]+){2,}\/?/gu, '<path>')
+  out = out.replace(/\s+/gu, ' ').trim().slice(0, 200)
+  return out === '' ? 'startup failed' : out
 }
 
 /**
@@ -1862,7 +2698,9 @@ export function surfaceStartupFailureLine(error: unknown): string {
  * replacement package, or Session history open) and says how to recover
  * manually. Only fixed entry-owned messages are surfaced: an arbitrary
  * startup/spawn error may carry a private path or PID and is replaced with a
- * generic reason. No Cookie/token/launch URL ever enters this line.
+ * generic reason. No Cookie/token/launch URL ever enters this line. This is
+ * intentionally NOT the daemon-restart guidance: a handoff failure is about a
+ * replaced expected Client instance, not a Host that should be restarted.
  */
 export function handoffStartupFailureLine(error: unknown): string {
   let reason: string
@@ -1923,7 +2761,7 @@ if (import.meta.main) {
       // on stderr, never a JSON record on the terminal.
       const handoff = process.env.SPLIT_PROCESS_CLIENT_EXPECTED_INSTANCE_ID
       const line = handoff === undefined || handoff === ''
-        ? surfaceStartupFailureLine(error)
+        ? surfaceStartupFailureLine(error, process.env.SPLIT_PROCESS_PROFILE ?? 'pi-tui')
         : handoffStartupFailureLine(error)
       process.stderr.write(`${line}\n`)
     } else {

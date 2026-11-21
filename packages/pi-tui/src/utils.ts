@@ -330,6 +330,56 @@ export function stripTerminalSequences(str: string): string {
 	return result;
 }
 
+function extractAnsiCodes(str: string): string {
+	let result = "";
+	let i = str.indexOf("\x1b");
+	while (i !== -1) {
+		const length = ansiCodeLength(str, i);
+		if (length > 0) {
+			result += str.substring(i, i + length);
+			i += length;
+		} else {
+			i++;
+		}
+		i = str.indexOf("\x1b", i);
+	}
+	return result;
+}
+
+// Same character set as String.prototype.trim()
+const WHITESPACE_REGEX = /\s/;
+
+/**
+ * Whether a token's visible text is only whitespace. Codes closing a styled word attach to the following space,
+ * e.g. "\x1b[22m ", so they are skipped. Stops at the first visible non-whitespace text without allocating a
+ * stripped copy, because styled words reach this check on every wrap.
+ */
+function isWhitespaceToken(token: string): boolean {
+	let i = 0;
+	while (i < token.length) {
+		const code = token.charCodeAt(i);
+		if (code === 0x1b) {
+			const length = ansiCodeLength(token, i);
+			if (length === 0) return false; // A lone ESC is visible text
+			i += length;
+		} else if (code === 0x20 || (code >= 0x09 && code <= 0x0d)) {
+			i++;
+		} else if (code < 0x80 || !WHITESPACE_REGEX.test(token[i]!)) {
+			return false;
+		} else {
+			i++;
+		}
+	}
+	return true;
+}
+
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]+/g;
+
+/** Replace each run of C0 and C1 control characters (ESC, BEL, newlines, ...) with one space. */
+export function replaceControlCharacters(str: string): string {
+	return str.replace(CONTROL_CHARACTERS, " ");
+}
+
 interface GraphemeCellRange {
 	start: number;
 	end: number;
@@ -998,11 +1048,13 @@ function wrapSingleLine(line: string, width: number): string[] {
 
 	for (const token of tokens) {
 		const tokenVisibleLength = visibleWidth(token);
-		const isWhitespace = token.trim() === "";
+		const isWhitespace = isWhitespaceToken(token);
 
 		// Token itself is too long - break it character by character
 		if (tokenVisibleLength > width && !isWhitespace) {
 			if (currentLine) {
+				// Trim before adding the reset, which would otherwise block the final trimEnd()
+				currentLine = currentLine.trimEnd();
 				// Add specific reset for underline only (preserves background)
 				const lineEndReset = tracker.getLineEndReset();
 				if (lineEndReset) {
@@ -1029,6 +1081,12 @@ function wrapSingleLine(line: string, width: number): string[] {
 		if (totalNeeded > width && currentVisibleLength > 0) {
 			// Trim trailing whitespace, then add underline reset (not full reset, to preserve background)
 			let lineToWrap = currentLine.trimEnd();
+			if (isWhitespace) {
+				// The dropped space may carry codes (e.g. closing a styled word). Keep them on the wrapped line so
+				// the style ends there and is not re-opened on the next line.
+				lineToWrap += extractAnsiCodes(token);
+				updateTrackerFromText(token, tracker);
+			}
 			const lineEndReset = tracker.getLineEndReset();
 			if (lineEndReset) {
 				lineToWrap += lineEndReset;
@@ -1038,10 +1096,14 @@ function wrapSingleLine(line: string, width: number): string[] {
 				// Don't start new line with whitespace
 				currentLine = tracker.getActiveCodes();
 				currentVisibleLength = 0;
-			} else {
-				currentLine = tracker.getActiveCodes() + token;
-				currentVisibleLength = tokenVisibleLength;
+				continue;
 			}
+			currentLine = tracker.getActiveCodes() + token;
+			currentVisibleLength = tokenVisibleLength;
+		} else if (isWhitespace && totalNeeded > width && token.includes("\x1b")) {
+			// Whitespace wider than an empty line. Plain spaces are removed by the final trimEnd(), but codes after
+			// them (e.g. a trailing reset) would block that and leave the line wider than width. Keep only the codes.
+			currentLine += extractAnsiCodes(token);
 		} else {
 			// Add to current line
 			currentLine += token;
@@ -1415,8 +1477,13 @@ export function extractSegments(
 			// Include ANSI codes in their respective segments
 			if (currentCol < beforeEnd) {
 				pendingAnsiBefore += ansi.code;
-			} else if (currentCol >= afterStart && currentCol < afterEnd && afterStarted) {
-				// Only include after we've started "after" (styling already prepended)
+			} else if (
+				currentCol >= afterStart &&
+				currentCol < afterEnd &&
+				(afterStarted || ansi.code.startsWith("\x1b_"))
+			) {
+				// SGR codes are only included after "after" started (styling already prepended). Zero-width APC
+				// markers like CURSOR_MARKER are not tracked styling, so keep them at the boundary too.
 				after += ansi.code;
 			}
 			i += ansi.length;

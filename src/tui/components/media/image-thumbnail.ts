@@ -3,8 +3,9 @@
  *
  * Renders a durable attachment through the pi-tui `Image` component when
  * the terminal supports inline graphics (Kitty / iTerm2), and falls back to
- * a one-line text summary otherwise (unsupported terminal, tmux, narrow
- * terminal, still-loading, or a failed read — §17.1-§17.3).
+ * a one-line text summary otherwise (unsupported terminal, tmux, a grant
+ * with no pixel width after the component's 2-cell margins — 1..2 columns,
+ * still-loading, or a failed read — §17.1-§17.3).
  *
  * The INFO BAR (`🖼️ name · W×H · bytes`) is CONSTANT: it renders above the
  * image in every state, so an attachment is always identifiable. The image
@@ -88,8 +89,6 @@ function paintedImageColumns(body: readonly string[], protocol: 'kitty' | 'iterm
 /** The thumbnail sizing constants (kimi parity, §17). */
 export const MAX_IMAGE_ROWS = 12
 export const MAX_IMAGE_WIDTH = 40
-/** Widths below this many cells fall back to text (§17.2). */
-export const NARROW_WIDTH_THRESHOLD = 42
 /** The fullscreen info control's painted width: ASCII `[-]` / `[+]`. */
 const COLLAPSE_CONTROL_WIDTH = 3
 /** The gap between the identity text and the right-aligned control. */
@@ -385,8 +384,11 @@ export class ImageThumbnail implements Component {
     // keeps a previous render's body from surviving a state change that reuses
     // the same width (collapse, protocol flip, read failure).
     this.paintedBody = undefined
-    // Narrow terminals fall back BEFORE any load (round-2 finding 4).
-    if (width < NARROW_WIDTH_THRESHOLD) {
+    // PR-4B: the old <42-cell blanket ban is gone. The component adapts to the
+    // actual grant through maxWidthCells = min(MAX_IMAGE_WIDTH, width - 2), so
+    // the ONLY width that cannot paint is one with no pixel width after the
+    // component's own 2-cell margins: 1..2 columns keep the info-only row.
+    if (width <= 2) {
       return this.infoOnly(width, this.infoLine())
     }
     // Inline graphics only when THIS surface may really paint them; an

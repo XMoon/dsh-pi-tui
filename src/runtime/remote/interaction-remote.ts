@@ -16,12 +16,10 @@
  * late answer      -> remote.userQuestions.answer(sessionId, callId, answer)
  * ```
  *
- * Explicitly unsupported on the wire:
- * `setApprovalPolicy` has no dedicated approval-policy Remote and no
- * synchronous exact-equivalent carrier in rc.2, so it returns `false` — the
- * Remote `/settings` approval row is shown unavailable, never guessed as
- * `ask`. No private Host seam, no event-log reconstruction and no preset-name
- * inference back it.
+ * The session approval-policy WRITE does not ride this port (M6-1 F8): the
+ * Remote `SessionPolicyPort` owns it over the private `piTuiSessionPolicy`
+ * namespace. This adapter carries only the forwarded approval REQUEST
+ * waterfall.
  *
  * The adapter never leaks a generated Typert stream object: `QuestionWaitClaim`
  * is the transport-neutral lifetime and this class owns the underlying
@@ -31,7 +29,6 @@
  * @module @xmoon76/dsh-pi-tui/runtime/remote/interaction-remote
  */
 
-import type { ApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import type { AskUserQuestionAnswer, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions/types'
 import type {
   ApprovalRequestListener,
@@ -99,8 +96,59 @@ export interface SplitClientSurfaceInteraction {
   readonly onApproval: ApprovalRequestListener
 }
 
+/**
+ * One forwarded request THIS Client root is still holding for an answer: the
+ * official invocation closure is live and the Gateway has not settled it. It is
+ * a TRANSIENT read view over the delivery owner's own callback stack, never a
+ * Host pending store: no question payload, option, answer or Session snapshot
+ * crosses it, and a token vanishes the moment its invocation settles/aborts or
+ * the Client root disposes.
+ */
+export interface ForwardedAnswerEligibility {
+  readonly sessionId: string
+  readonly kind: 'question' | 'approval'
+  readonly live: true
+}
+
+/** The one-shot navigation-hold release returned by
+ *  {@link SplitClientInteractionDelivery.beginNavigationHold}. */
+export interface NavigationHoldRelease {
+  release(): void
+}
+
+/**
+ * The split Client's root interaction-delivery seam. ONE implementation lives
+ * for the whole Client root and borrows the CURRENT surface revision's two
+ * providers. The revision number is a local identity token, never Host or
+ * Question authority.
+ */
 export interface SplitClientInteractionDelivery {
   attachSurface(revision: number, input: SplitClientSurfaceInteraction): () => void
+  /**
+   * The requests this root currently holds and has not settled. Only an
+   * official, live invocation creates an entry; a Reader-side `attention`
+   * candidate never does.
+   */
+  currentEligibleRequests(): readonly ForwardedAnswerEligibility[]
+  /** Observe eligibility add/remove; the read view itself never answers. */
+  subscribeEligibility(listener: () => void): () => void
+  /**
+   * Bind the ONE committed-Session authority of the application that hosts the
+   * CURRENT surface revision. A new revision replaces the previous binding; the
+   * returned disposer is inert once replaced.
+   */
+  bindCommittedSession(
+    currentSessionId: () => string | undefined,
+    subscribeCommittedSession: (listener: () => void) => () => void,
+  ): () => void
+  /**
+   * Mark a presentation-only navigation hold BEFORE a local modal seat is
+   * withdrawn: every older presentation attempt becomes stale (its local
+   * cancellation can never be forwarded as a Host answer) and no new attempt is
+   * presented until the returned release is called. Host request lifetimes and
+   * Session ownership are untouched.
+   */
+  beginNavigationHold(): NavigationHoldRelease
 }
 
 /** One Client projection face (value deliberately `unknown`). */
@@ -505,12 +553,5 @@ export class RemoteInteractionPort implements InteractionPort {
     this.detachSurface()
     this.questionsPort.dispose()
     for (const off of this.owned.splice(0)) off()
-  }
-
-  setApprovalPolicy(_sessionId: string, _policy: ApprovalPolicy): boolean {
-    // INTENTIONAL_UNSUPPORTED_IN_M3: rc.2 has
-    // no dedicated approval-policy Remote and no synchronous exact carrier.
-    // Never a silent fallback to a different semantic.
-    return false
   }
 }

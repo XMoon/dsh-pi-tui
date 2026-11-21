@@ -65,7 +65,7 @@ test('an exit during the TSP SDK handshake after a resume releases the renderer 
     if (previousRenderer === undefined) delete process.env.DSH_PI_TUI_RENDERER
     else process.env.DSH_PI_TUI_RENDERER = previousRenderer
   })
-  pane.queueWithHandshake('\u0004')
+  pane.queueWithHandshake('\u0003')
   const inputListenerBaseline = pane.input.listenerCount('data')
   const rawModeBaseline = pane.input.isRaw
   const probe = installProbe()
@@ -84,9 +84,11 @@ test('an exit during the TSP SDK handshake after a resume releases the renderer 
   let appExitCalls = 0
   fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id }, () => { appExitCalls += 1 })
 
-  // The production connector reached the SDK DA1 probe; the queued Ctrl+D is
-  // decoded in the SAME handshake batch and the legal early-exit gesture runs
-  // while the tty is still owned by the acquisition stage.
+  // The production connector reached the SDK DA1 probe; the queued Ctrl+C is
+  // decoded in the SAME handshake batch and the ONE sanctioned pre-bind
+  // emergency exit runs while the tty is still owned by the acquisition
+  // stage. Ctrl+D is NOT a pre-bind emergency: it is held for the bound
+  // same-key double-press contract.
   await waitUntil(() => pane.probed(), 'the SDK handshake probe')
   await waitUntil(() => appExitCalls === 1, 'the early-exit gesture')
   assert.equal(probe.apps.length, 0, 'no PiTui surface is mounted while the SDK handshake owns the tty')
@@ -103,7 +105,8 @@ test('an exit during the TSP SDK handshake after a resume releases the renderer 
   const events = harness.retirementEvents
   assert.equal(events.filter(event => event === `cancel:${resumed.id}`).length, 1, 'the resumed owner is cancelled exactly once')
   assert.equal(events.filter(event => event === `dispose:${resumed.id}`).length, 1, 'the resumed owner is disposed exactly once')
-  assert.equal(events.filter(event => event === `flush:${resumed.id}`).length, 1, 'the resumed owner is flushed exactly once')
+  assert.equal(events.filter(event => event === `flush:${resumed.id}`).length, 0,
+    'the early-exit shutdown retirement runs no explicit flush (DSH close owns durability)')
 })
 
 test('an HMR unload during a held TSP handshake after a resume releases the renderer and retires the owner once', async (t) => {
@@ -167,6 +170,7 @@ test('an HMR unload during a held TSP handshake after a resume releases the rend
   assert.equal(pane.input.isRaw, rawModeBaseline, 'the scripted tty is restored to cooked mode')
   const events = harness.retirementEvents
   assert.equal(events.filter(event => event === `cancel:${resumed.id}`).length, 1, 'the resumed owner is cancelled exactly once')
-  assert.equal(events.filter(event => event === `flush:${resumed.id}`).length, 1, 'the resumed owner is flushed exactly once')
+  assert.equal(events.filter(event => event === `flush:${resumed.id}`).length, 0,
+    'the HMR shutdown retirement runs no explicit flush (DSH close owns durability)')
   assert.equal(events.filter(event => event === `dispose:${resumed.id}`).length, 1, 'the resumed owner is disposed exactly once')
 })

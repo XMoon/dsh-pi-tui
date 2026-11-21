@@ -21,11 +21,23 @@ import type { Catalog } from './catalog-port.ts'
 import type { ConfigPort } from './config-port.ts'
 import type { HostFilePort } from './host-file-port.ts'
 import type { SessionArchivePort } from './session-archive-port.ts'
+import type { SessionMarkdownPort } from './session-markdown-port.ts'
 import type { HostCommandPort } from './host-command-port.ts'
 import type { PluginManagerPort } from './plugin-manager-port.ts'
 import type { JobObservationPort } from './job-observation-port.ts'
 import type { HostUserShellPort } from './host-user-shell-port.ts'
+import type { HostShellCompletionPort } from './host-shell-completion-port.ts'
 import type { DeliveredFileReadPort } from './deliverables-port.ts'
+import type { WebAccessPort } from './web-access-port.ts'
+import type { AcpAccessPort } from './acp-access-port.ts'
+import type { SessionWorkspaceFactsPort } from './session-workspace-facts-port.ts'
+import type { SchedulePort } from './schedule-port.ts'
+import type { HostDirectoryBrowsePort } from './host-directory-browse-port.ts'
+import type { SessionPolicyPort } from './session-policy-port.ts'
+import type { TeamModePort } from './team-mode-port.ts'
+import type { TeamBoardReadPort } from './team-board-read-port.ts'
+import type { McpServerPort } from './mcp-server-port.ts'
+import type { CuaAccessPort } from './cua-access-port.ts'
 
 /** The transport backends the TUI can run on. `direct` remains the
  * production/default; `remote` is the experimental M3-3B assembly that can be
@@ -61,6 +73,10 @@ export interface Backend {
   /** The session ARCHIVE domain port (Pre-Stage-D): one complete
    * Session-tree archive stream per root Session. */
   readonly sessionArchive: SessionArchivePort
+  /** The Session MARKDOWN domain port (S5-PR3): the official complete
+   * committed Session transcript read by id, never the Client transcript
+   * projection. */
+  readonly sessionMarkdown: SessionMarkdownPort
   /** The Host command execution domain port (D2.1). */
   readonly hostCommand: HostCommandPort
   /** The Plugin Manager domain port (P1-A): bundles, plugins, installs. */
@@ -68,15 +84,58 @@ export interface Backend {
   /** The selected-Job observation domain port (P1-B): one non-consuming
    * observation stream for the Job the user opened. */
   readonly jobObservation: JobObservationPort
-  /** The Host user-shell execution port (M3-4 PR3 shell amendment): the
-   * backend's execution authority — Direct serves the in-process Host
-   * adapter; Remote serves the truthful-unavailable adapter (CARRIER_GAP). */
+  /** The shared Host user-shell execution authority: Direct runs in-process;
+   * Remote uses the authenticated one-shot Host stream. */
   readonly hostUserShell: HostUserShellPort
+  /** Read-only command/variable/git/path completion facts from the selected Host. */
+  readonly hostShellCompletion: HostShellCompletionPort
   /** The delivered-file READ port (Delivered files PR2): bounded Host
    * `stat`/`read` for one declared file, under the Session-derived workspace
    * scope. Direct reads the official Host service in-process; Remote calls the
    * official generated `workspaceFiles` namespace. */
   readonly deliveredFileRead: DeliveredFileReadPort
+  /** The Split-Client Web frontend control port (M5-W PR-C): the explicit
+   *  `/web` surface over the Host's private `piTuiWebAccess` service. Direct
+   *  serves the truthful-unavailable adapter. */
+  readonly webAccess: WebAccessPort
+  /** The Split-Client local ACP listener control port (PO-1B): the explicit
+   *  Settings row over the Host's private `piTuiAcpAccess` service. Direct
+   *  serves the truthful-unavailable adapter. */
+  readonly acpAccess: AcpAccessPort
+  /** The UI-neutral read-authority port (M5-U-A): Session activity facts over
+   *  the caller's authorized roster plus the ONE official Workspace stream.
+   *  Read-only; it owns no writer, store or cross-session cache. */
+  readonly sessionWorkspaceFacts: SessionWorkspaceFactsPort
+  /** The Host Schedule management port (S5-PR4): the official Host task
+   *  domain with its CAS writes and delivery receipts. Direct forwards to the
+   *  in-process service, Remote to the authenticated generated namespace; the
+   *  Host stays the only task store and the only timer. */
+  readonly schedule: SchedulePort
+  /** The Host directory-browse READ port (Session Workspace PR1): one official
+   *  `directoryPicker/list` level over the SAME Host the other ports reach.
+   *  Read-only; it never registers a Workspace or creates a Session. */
+  readonly hostDirectoryBrowse: HostDirectoryBrowsePort
+  /** The exact-Session policy port (M6-1 F8): the independent
+   *  approval/sandbox facts of one live Session and the single official
+   *  approval-policy write. Both backends serve the SAME contract. */
+  readonly sessionPolicy: SessionPolicyPort
+  /** The exact-Root Agent Team mode port (FR1): the official saved selection,
+   *  its model-request history and the single official Team mode write. Both
+   *  backends serve the SAME contract; no client-side Team truth exists. */
+  readonly teamMode: TeamModePort
+  /** The exact-Root READ-ONLY Agent Team board port (FR2): the official
+   *  `agentTeam` projection's shared task board. No Team write is reachable
+   *  through this port; `/model` keeps the only Team write (`teamMode`). */
+  readonly teamBoard: TeamBoardReadPort
+  /** The MCP server management port (FR3): the ONE official Host manager's
+   *  roster/probe/restart. The Host stays the only fleet and status authority;
+   *  the configuration-source keys ride `config.mcpServerSources`. */
+  readonly mcpServers: McpServerPort
+  /** The official Computer Use provider's permission/application access port
+   *  (PR-5/MAC-09 v2). Direct resolves the live Host `cuaAccess` service;
+   *  Remote consumes the official generated namespace. Absence is a definite
+   *  unavailable, never a fabricated denied or Ready state. */
+  readonly cuaAccess: CuaAccessPort
 }
 
 /** Assemble the Direct backend: in-process adapters over `ctx.*` services.
@@ -93,11 +152,23 @@ export function createDirectBackend(
   config: ConfigPort,
   hostFile: HostFilePort,
   sessionArchive: SessionArchivePort,
+  sessionMarkdown: SessionMarkdownPort,
   hostCommand: HostCommandPort,
   pluginManager: PluginManagerPort,
   jobObservation: JobObservationPort,
   hostUserShell: HostUserShellPort,
+  hostShellCompletion: HostShellCompletionPort,
   deliveredFileRead: DeliveredFileReadPort,
+  webAccess: WebAccessPort,
+  acpAccess: AcpAccessPort,
+  sessionWorkspaceFacts: SessionWorkspaceFactsPort,
+  schedule: SchedulePort,
+  hostDirectoryBrowse: HostDirectoryBrowsePort,
+  sessionPolicy: SessionPolicyPort,
+  teamMode: TeamModePort,
+  teamBoard: TeamBoardReadPort,
+  mcpServers: McpServerPort,
+  cuaAccess: CuaAccessPort,
 ): Backend {
   return {
     kind: 'direct',
@@ -112,10 +183,22 @@ export function createDirectBackend(
     config,
     hostFile,
     sessionArchive,
+    sessionMarkdown,
     hostCommand,
     pluginManager,
     jobObservation,
     hostUserShell,
+    hostShellCompletion,
     deliveredFileRead,
+    webAccess,
+    acpAccess,
+    sessionWorkspaceFacts,
+    schedule,
+    hostDirectoryBrowse,
+    sessionPolicy,
+    teamMode,
+    teamBoard,
+    mcpServers,
+    cuaAccess,
   }
 }

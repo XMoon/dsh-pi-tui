@@ -26,6 +26,7 @@ import { bundle } from '../support/plugin-workspace-harness.ts'
 import { settingsDirectPageConfig } from '../support/settings-direct-page-stubs.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
+import { unconfiguredPolicyObservation } from '../support/session-policy-fake.ts'
 
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
@@ -107,6 +108,7 @@ function proxyRunner(
     captureExtensionHealthRef: () => () => {},
     // A sessionless surface: both entries must work before any Session exists.
     currentSessionId: undefined,
+    policy: unconfiguredPolicyObservation(),
     agents: {
       create: async () => {
         counts.sessions += 1
@@ -154,12 +156,49 @@ function proxyRunner(
         read: () => ({ enabled: true, revision: 1, userOverridden: false, applied: true }),
         setEnabled: async (_enabled: boolean, _revision: number) => {},
       },
+      webStartupPreference: {
+        read: () => ({ autoStart: false, revision: 1, userOverridden: false }),
+        setAutoStart: async (_value: boolean, _revision: number) => {},
+      },
+      backendStartupPreference: {
+        read: () => ({ backend: 'direct' as const, revision: 1, userOverridden: false }),
+        readFresh: async () => ({ backend: 'direct' as const, revision: 1, userOverridden: false }),
+        setBackend: async (_value: 'direct' | 'daemon', _revision: number) => {},
+      },
+      acpStartupPreference: {
+        read: () => ({ autoStart: false, revision: 1, userOverridden: false }),
+        setAutoStart: async (_value: boolean, _revision: number) => {},
+      },
       permissions: {
         presetNames: () => [],
         defaultPreset: () => undefined,
         approvalOverrideOf: () => undefined,
       },
-      subagentModelSelection: { available: () => false },
+      subagentLimits: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
+      subagentModelSelection: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
+      agentLoopSettings: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
+      shellExecutionSettings: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
+      sessionLogUpload: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
       // The Web provider section is Host-only (S2/PR-B): this stub composes no
       // Host settings plane, so the section reports unavailable and offers no write.
       web: { available: () => false },
@@ -237,7 +276,7 @@ test('/plugins is registered by the real registrar and dispatches success into t
   assert.match(view, /PLUGIN PAGE/, 'the embedded page is painted by the Settings content column')
 })
 
-test('T01 the real /plugins chain mounts the PRODUCTION page and reads the inventory exactly once', async () => {
+test('the real /plugins chain mounts the PRODUCTION page and reads the inventory exactly once', async () => {
   // §8.1 T01: the REAL Client command registry -> the REAL Settings lease ->
   // the REAL `createPluginManagerWorkspacePanel` over a real Controller and the
   // semantic PluginManagerPort. Only the Host port is a fixture; the page,
@@ -273,6 +312,9 @@ test('T01 the real /plugins chain mounts the PRODUCTION page and reads the inven
     waitForInstall: async () => null,
     cancelInstall: async () => ({ status: 'not-running' }),
     subscribeInstall: () => () => {},
+    listVersions: async () => ({ status: 'refused', problem: 'not-updatable', reason: 'the fixture has no updatable bundle', attempts: [] }),
+    updateBundle: async () => { throw new Error('updateBundle is not used by this fixture') },
+    subscribeUpdate: () => () => {},
     subscribeInvalidation: () => () => {},
   }
   // The PRODUCTION surface owner: ONE controller + the token-owned host claim +
@@ -298,6 +340,7 @@ test('T01 the real /plugins chain mounts the PRODUCTION page and reads the inven
     clearExtensionError: () => {},
     captureExtensionHealthRef: () => () => {},
     currentSessionId: undefined,
+    policy: unconfiguredPolicyObservation(),
     // A sessionless entry must not create/open a Session OR admit an About read.
     agents: {
       create: async () => { counts.sessions += 1; throw new Error('a sessionless entry must not create a Session') },
@@ -334,7 +377,16 @@ test('T01 the real /plugins chain mounts the PRODUCTION page and reads the inven
     config: settingsDirectPageConfig({
       configReadiness: () => 'ready' as const,
       permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined },
-      subagentModelSelection: { available: () => false },
+      subagentLimits: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
+      subagentModelSelection: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
       web: { available: () => false },
       credentials: { available: () => false },
     }),

@@ -36,8 +36,9 @@
     "sessions",
     "subagents"
   ],
-  "client/artifact/transcript-markdown.ts": [
-    "import:dsh-session"
+  "app/remote-process/local-host-entry.ts": [
+    "agentPresets",
+    "settings"
   ],
   "commands.ts": [
     "import:dsh-agent",
@@ -59,7 +60,7 @@
     "import:dsh-agent"
   ],
   "runtime/direct/backend-direct.ts": [
-    "shell"
+    "sandboxPolicy"
   ],
   "runtime/direct/catalog-direct.ts": [
     "agentDefaultModel",
@@ -70,13 +71,15 @@
   "runtime/direct/config-direct.ts": [
     "agentPresets",
     "agents",
-    "approval",
     "authorization",
     "commands",
     "credentials",
     "llm",
     "permissionPresets",
     "settings"
+  ],
+  "runtime/direct/cua-access-direct.ts": [
+    "cuaAccess"
   ],
   "runtime/direct/deliverables-direct.ts": [
     "sandboxPolicy",
@@ -90,13 +93,15 @@
     "fileReferences"
   ],
   "runtime/direct/interaction-direct.ts": [
-    "approval",
     "sessionProjections",
     "userQuestions"
   ],
   "runtime/direct/job-observation-direct.ts": [
     "jobController",
     "jobs"
+  ],
+  "runtime/direct/mcp-server-direct.ts": [
+    "mcpManager"
   ],
   "runtime/direct/model-selection-direct.ts": [
     "import:dsh-agent"
@@ -122,6 +127,15 @@
     "sessionQuery",
     "workspaceRegistry"
   ],
+  "runtime/direct/session-markdown-direct.ts": [
+    "import:dsh-session",
+    "sessionPersistence",
+    "sessionQuery"
+  ],
+  "runtime/direct/session-policy-direct.ts": [
+    "approval",
+    "sandboxPolicy"
+  ],
   "runtime/direct/session-preset-direct.ts": [
     "agentPresets",
     "import:dsh-session",
@@ -145,6 +159,14 @@
   ],
   "runtime/direct/surface-catalog.ts": [
     "commands"
+  ],
+  "runtime/direct/team-board-read-direct.ts": [
+    "sessionProjections",
+    "subagents"
+  ],
+  "runtime/direct/team-mode-direct.ts": [
+    "sessionProjections",
+    "subagents"
   ],
   "runtime/direct/turn-outline-compat.ts": [
     "import:dsh-session"

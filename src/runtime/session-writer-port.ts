@@ -30,6 +30,17 @@ export type QueueAction =
 import type { WriteError, WriteOutcome } from './write-outcome.ts'
 export type { WriteError, WriteOutcome } from './write-outcome.ts'
 
+/** Options for one ordinary-prompt delivery (PR2): the acceptance callback
+ * proves the HOST accepted the message (Direct: the Inbox insertion committed
+ * synchronously; Remote: the official `beginSubmission.onAccept`). It is a
+ * one-way latch, fired exactly once on acceptance and NEVER on refusal — and
+ * it is not the write's terminal state: an accepted prompt can still fail
+ * later during execution. */
+export interface PromptOptions {
+  /** Called exactly once when the Host accepted this prompt. */
+  readonly onAccepted?: () => void
+}
+
 /** The session WRITE domain port. */
 export interface SessionWriter {
   /** Deliver one ordinary human prompt with the caller-resolved mode. */
@@ -37,6 +48,7 @@ export interface SessionWriter {
     sessionId: string,
     message: PreparedMessage,
     mode: SessionDeliveryMode,
+    options?: PromptOptions,
   ): Promise<WriteOutcome>
 
   /** Apply one official occurrence-level queue mutation. The adapter preserves

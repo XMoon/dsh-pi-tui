@@ -244,10 +244,12 @@ async function mounted(
     submit: () => assert.fail('the picker must capture Enter'),
     steer() {},
     pasteMedia: () => {},
+    pastedPath: () => {},
+    admitPastedPathDelivery: () => true, shouldRememberInput: () => true,
     noteUserInput() {},
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,
-    openModelPicker() {},
+    openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true, openTasksBrowserUi() {}, tasksBrowserUiAvailable: () => true,
   })
   const applies: string[] = []
   const defaults: string[] = []

@@ -114,23 +114,22 @@ export class DefaultIntentTracker<TSelection = ModelSelectionValue> {
   }
 
   /**
-   * Reconcile every CONSECUTIVE unresolved operation against ONE authoritative
-   * Host snapshot: the nearest matching selection commits; every non-matching
-   * unresolved operation is failed (which may restore the next unresolved
-   * ancestor), and the SAME snapshot is then applied to it. Stops at a pending
-   * ancestor (a future write cannot be guessed) or when no unresolved operation
-   * remains. Never guesses: only the caller-provided authoritative matcher decides.
+   * Reconcile the ACTIVE unresolved operation against ONE authoritative Host
+   * snapshot. Reconciliation is CONFIRM-ONLY: a MATCHING snapshot commits the
+   * unresolved choice; a NON-matching snapshot leaves it untouched.
+   *
+   * This is the single place that decides how an authoritative read affects an
+   * unsettled write. An older/other snapshot is NOT proof that an in-flight
+   * write did not land: the official `saveSelection()` is asynchronous and may
+   * commit AFTER this read, so a mismatch must never fail the choice or clear
+   * the unconfirmed marker. Every caller (the automatic post-save re-read and
+   * the `/model` panel load/Retry) therefore shares this one rule.
+   * A pending operation is a future write that cannot be guessed — no-op.
    */
   reconcile(matches: (selection: TSelection) => boolean): void {
-    for (;;) {
-      const active = this.active
-      if (active === undefined || active.status !== 'unresolved') return
-      if (matches(active.selection)) {
-        this.settle(active.id, 'committed')
-        return
-      }
-      this.settle(active.id, 'failed')
-    }
+    const active = this.active
+    if (active === undefined || active.status !== 'unresolved') return
+    if (matches(active.selection)) this.settle(active.id, 'committed')
   }
 
   /** The active intent (latest PENDING or an UNRESOLVED operation awaiting a

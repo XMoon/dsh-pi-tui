@@ -1,6 +1,6 @@
 /**
  * S4-D3 application fixture (S4-D3 §6): mount the REAL PiTui runner on the
- * SAME real rc.2 Host composition the S4-D2 optional-bundle fixture boots, so
+ * SAME real rc.2 Host composition the optional-bundle fixture boots, so
  * one test can follow an official Bundle → Host Service/Tool/Session →
  * existing Direct reader/port → mounted `TuiApp` sink.
  *
@@ -31,7 +31,7 @@ import { TUI_STARTUP_SERVICE } from '../../src/startup.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { installVirtualProcessTerminal } from './runner-harness.ts'
 import {
-  startS4D2Host,
+  startOptionalBundleHost,
   type OptionalBundleHost,
   type OptionalBundleHostOptions,
 } from './optional-bundle-fixture.ts'
@@ -85,7 +85,7 @@ export async function startS4D3Application(
   const { sessionId, presetId, columns = 120, rows = 40, config = {}, launchCwd, prepareHost, ...hostOptions } = options
   // One module instance for every Host package: the official settings write
   // path depends on the boot/ConfigEditor identity.
-  const host = await startS4D2Host(t, { ...hostOptions, installationBoot: hostOptions.installationBoot ?? true })
+  const host = await startOptionalBundleHost(t, { ...hostOptions, installationBoot: hostOptions.installationBoot ?? true })
   const life = testLifecycle(t)
   // The production runner reads the LAUNCH directory as the new Session cwd
   // (`process.cwd()` in `src/app/bootstrap.ts`); stand in for `dsh` being

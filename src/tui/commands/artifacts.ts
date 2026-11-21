@@ -20,6 +20,7 @@ import { probeAttachment } from '../../client/media/attachment/intake.ts'
 import { parseShellWords } from '../../client/shell/words.ts'
 import type { RegisterOne, RegisterTuiCommand, TuiCommandRunner } from '../../commands.ts'
 import type { SessionScope } from '../../app/session/scope.ts'
+import { TRANSCRIPT_SAVE_UNAVAILABLE_TEXT } from '../../app/command/tsp-capability.ts'
 import type {
   InlineAttachmentStager,
   InlineAttachmentStake,
@@ -43,7 +44,6 @@ type ArtifactsCommandRunner = Pick<
   | 'requireLiveSessionScope'
   | 'sessionTransitionPending'
   | 'signal'
-  | 'transcriptExportAvailable'
 >
 
 export interface ArtifactsCommandDeps {
@@ -193,7 +193,21 @@ export async function runAttachmentIntake(deps: AttachmentIntakeDeps): Promise<v
     return target.seatCurrent()
   }
 
-  /** The ONE commit segment (synchronous): prune, add, write, notice. */
+  /** The ONE commit segment (synchronous): prune, add, write, notice.
+   *
+   * The success notice reports a COMPLETED write, so it is reached only when the
+   * placeholder really landed. A refused commit rolls back exactly this staged
+   * item and stops there — an entry the user cannot see in the draft is never
+   * announced as attached, and an accepted-but-unwritten token must not invite an
+   * Enter that sends nothing.
+   *
+   * Why the Session owner is the whole notice gate here: `target.commit()` is
+   * only handed out while the seat still owns the surface, the app-side commit
+   * re-proves the accepted fragment, and the commit and this notice share ONE
+   * synchronous segment — no disposal, catalog install or seat replacement can
+   * interleave between them. Requiring the acceptance snapshot here instead would
+   * be self-defeating: a successful in-place write is exactly what invalidates
+   * that snapshot, so every legitimate success would go unannounced. */
   const commitStaged = (
     add: () => { readonly id: number; readonly placeholder: string },
     remove: (id: number) => void,
@@ -203,7 +217,10 @@ export async function runAttachmentIntake(deps: AttachmentIntakeDeps): Promise<v
     pruneUnreferencedDraftAttachments(commit.draft(), runner.imageStore, runner.fileStore)
     const staged = add()
     try {
-      if (!commit.commit(staged.placeholder)) remove(staged.id)
+      if (!commit.commit(staged.placeholder)) {
+        remove(staged.id)
+        return
+      }
     } catch (error) {
       // Only an item whose token never reached the draft is dropped; a visible
       // placeholder keeps its bytes and keeps the owned task's classification.
@@ -382,7 +399,14 @@ export function createArtifactsCommands(deps: ArtifactsCommandDeps): ArtifactsCo
                 }
               : undefined,
             notify: (message, kind) => {
-              if (!stillOwned()) return
+              // The success notice reports the COMPLETED commit, so it is gated
+              // on the operation's Session OWNER, not on the acceptance snapshot:
+              // the in-place placeholder write is exactly what invalidates that
+              // snapshot, and re-using it here would swallow every real success.
+              // The seat half of the fence stays where it belongs — BEFORE the
+              // write (`commit()` above and `stake.current()` inside it) — so a
+              // moved seat still cannot write or announce anything.
+              if (!runner.isSessionScopeCurrent(scope)) return
               stake.notify(message, kind)
             },
             explain: (message, kind) => {
@@ -528,33 +552,21 @@ export function createArtifactsCommands(deps: ArtifactsCommandDeps): ArtifactsCo
   const registerTranscript = (): void => {
     registerOne({
       name: 'transcript',
-      description: 'Export a readable Markdown transcript of this session when supported',
+      description: 'Export this session as official Markdown',
       handler: (invocation) => {
         // /transcript mirrors /export: no arguments, acknowledgement only; the
         // Client-local save workflow starts after successful command
-        // settlement.
+        // settlement and reads the official Host Markdown by captured id.
         if (invocation.rawInput.trim() !== '') {
           return { kind: 'error', text: 'The /transcript command does not accept a path.' }
         }
-        // Truthful-unavailable on the wire backend (the explicit capability,
-        // never the M8-retiring Host-mirror field): the Markdown renderer
-        // reads the whole Session event history (`snapshotEvents`), for which
-        // no transport-neutral seam exists yet — the Remote post-success
-        // artifact save would resolve the projected agent and crash inside
-        // `renderTranscriptMarkdown` after the command already reported
-        // success. The capability is REQUIRED on every assembly, so refusing
-        // on `!== true` is the explicit business rule, not an optional
-        // compatibility default.
-        // `/export` stays available on both backends (it renders from
-        // `SessionArchivePort`, not the Session).
-        if (runner.transcriptExportAvailable !== true) {
-          const text = 'transcript export is unavailable on this backend'
-          // Unchanged PiTui route: with a PiTui app mounted this is the
-          // long-standing inline notice beside the command card. A renderer
-          // without one refuses `/transcript` in the admission gate before this
-          // handler runs, so its returned error text keeps its own owner there.
-          app?.notify(text, 'error')
-          return { kind: 'error', text }
+        // The business Port is available on both backends, but the Client-local
+        // save location is a real mounted-renderer capability: a renderer
+        // without a TuiApp has no save dialog, so the command refuses
+        // explicitly instead of reporting a success whose post-success save can
+        // never run.
+        if (app === undefined) {
+          return { kind: 'error', text: TRANSCRIPT_SAVE_UNAVAILABLE_TEXT }
         }
         return { kind: 'success', text: 'Transcript export requested.' }
       },

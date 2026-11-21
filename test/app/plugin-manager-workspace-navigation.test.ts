@@ -8,11 +8,11 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import type { Component } from '@xmoon76/pi-tui'
+import { visibleWidth, type Component } from '@xmoon76/pi-tui'
 import { PluginManagerController } from '../../src/app/plugin-manager/controller.ts'
 import { PluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
-import type { PluginBundleFact, PluginChangeFact } from '../../src/runtime/plugin-manager-port.ts'
+import type { PluginBundleFact, PluginChangeFact, PluginUpdateResultFact } from '../../src/runtime/plugin-manager-port.ts'
 import { SELF_BUNDLE } from '../../src/app/plugin-manager/classify.ts'
 import { EXPERIMENTAL_NAMES, bundle, openWorkspace, plain, row, type WorkspaceHarness } from '../support/plugin-workspace-harness.ts'
 
@@ -86,7 +86,7 @@ test('Esc hides a running install without cancelling it and `i` reopens the SAME
   harness.vt.sendInput('\x1b')
   await harness.waitForFrame()
   assert.equal(harness.panel.currentView(), 'list')
-  assert.match(plain([harness.viewport().at(-1)!]), /Esc back/,
+  assert.match(plain([harness.viewport().at(-1)!]), /Back \[Esc\]/,
     'hiding the running install returns to the embedded List, whose Esc yields to Categories')
 
   harness.vt.sendInput('i')
@@ -200,11 +200,11 @@ test('a running install copies its retained log byte-exact while the display sta
 
 test('the embedded page always names its real Esc destination', async () => {
   const harness = await open({ columns: 120, rows: 30 })
-  assert.match(plain([harness.viewport().at(-1)!]), /Esc back/,
+  assert.match(plain([harness.viewport().at(-1)!]), /Back \[Esc\]/,
     'the List root yields to Categories, it never closes the Settings lease')
   harness.vt.sendInput('i')
   await harness.waitForFrame()
-  assert.match(plain([harness.viewport().at(-1)!]), /Esc back/,
+  assert.match(plain([harness.viewport().at(-1)!]), /Back \[Esc\]/,
     'the install editor returns to the LIST, so it must not claim Esc close')
   harness.vt.sendInput('\t') // spec -> registry focus
   await harness.waitForFrame()
@@ -218,7 +218,7 @@ test('the embedded page always names its real Esc destination', async () => {
   // The List root yields to the rail, whose ONE bar names the real close.
   harness.vt.sendInput('\x1b')
   await harness.waitForFrame()
-  assert.match(plain([harness.viewport().at(-1)!]), /Esc close/,
+  assert.match(plain([harness.viewport().at(-1)!]), /Close \[Esc\]/,
     'the rail owns the physical last row after the yield')
   assert.equal(harness.panel.focused, false, 'the rail owns the input focus')
 })
@@ -237,7 +237,7 @@ test('80x10 keeps the removal consequence and both choices reachable', async () 
   assert.match(view, /unloads the bundle/, 'the dependency consequence is visible')
   assert.match(view, /Cancel/)
   assert.match(view, /Remove/)
-  assert.match(plain([harness.viewport().at(-1)!]), /Esc cancel/)
+  assert.match(plain([harness.viewport().at(-1)!]), /Cancel \[Esc\]/)
 })
 
 test('80x10 reveals then admits the official Install action and keeps its intent visible', async () => {
@@ -255,7 +255,7 @@ test('80x10 reveals then admits the official Install action and keeps its intent
   assert.match(harness.view(), /offered version 0\.2\.1-rc\.2/)
   assert.match(harness.view(), /Activates the bundle/)
   assert.match(harness.view(), /Install/)
-  assert.match(plain([harness.viewport().at(-1)!]), /Esc edit/)
+  assert.match(plain([harness.viewport().at(-1)!]), /Edit \[Esc\]/)
 })
 
 test('a resize mid-install keeps the same request and a truthful last-row bar', async () => {
@@ -275,7 +275,7 @@ test('a resize mid-install keeps the same request and a truthful last-row bar', 
   await harness.waitForFrame()
   assert.equal(harness.panel.currentView(), 'install')
   assert.equal(harness.controller.installView()?.requestId, requestId)
-  assert.match(plain([harness.viewport().at(-1)!]), /Esc hide/)
+  assert.match(plain([harness.viewport().at(-1)!]), /Hide \[Esc\]/)
   for (const line of harness.viewport()) {
     assert.ok(plain([line]).length <= 80)
   }
@@ -308,6 +308,9 @@ test('a second workspace lease is refused; an external disposal notifies exactly
     waitForInstall: async () => null,
     cancelInstall: async () => ({ status: 'not-running' }),
     subscribeInstall: () => () => {},
+    listVersions: async () => ({ status: 'refused', problem: 'not-updatable', reason: 'the fixture has no updatable bundle', attempts: [] }),
+    updateBundle: async () => { throw new Error('updateBundle is not used by this fixture') },
+    subscribeUpdate: () => () => {},
     subscribeInvalidation: () => () => {},
   }, {
     requestRender: () => {},
@@ -639,7 +642,7 @@ test('a zero-row list frame advertises no Enter invite and keeps the real Esc', 
   harness.vt.resize(80, 2)
   await harness.waitForFrame()
   const bar = plain([harness.viewport().at(-1)!])
-  assert.equal(bar.trim(), 'Esc back', 'the zero-row list bar advertises ONLY the real Esc destination')
+  assert.equal(bar.trim(), 'Back [Esc]', 'the zero-row list bar advertises ONLY the real Esc destination')
   // The hidden row is not just a missing hint: the navigation admission must
   // agree with it (Enter and Right cannot enter an invisible card's Details).
   harness.vt.sendInput('\r')
@@ -661,7 +664,7 @@ test('a zero-row search edit advertises only the real Esc and refuses the apply'
   await harness.waitForFrame()
   const bar = plain([harness.viewport().at(-1)!])
   assert.doesNotMatch(bar, /Enter apply/u, 'the frozen short-screen rule drops the invisible apply hint')
-  assert.match(bar, /Esc clear search/u, 'the real Esc effect stays advertised')
+  assert.match(bar, /Clear \[Esc\]/u, 'the real Esc effect stays advertised')
   // The hint is truthful: the zero-row Enter cannot apply an input whose body
   // cell is not painted. Enter and ordinary typing are both dropped.
   harness.vt.sendInput('x')
@@ -728,7 +731,7 @@ test('a zero-row body revokes the B03 danger action until it is painted again', 
   assert.equal(harness.panel.currentView(), 'confirm')
   const zeroBar = plain([harness.viewport().at(-1)!])
   assert.doesNotMatch(zeroBar, /Enter/u, 'a zero-row frame never advertises a no-op Enter')
-  assert.match(zeroBar, /Esc cancel/u, 'the real Esc destination stays advertised')
+  assert.match(zeroBar, /Cancel \[Esc\]/u, 'the real Esc destination stays advertised')
   harness.vt.sendInput('\r')
   await harness.waitForFrame()
   assert.equal(harness.panel.currentView(), 'confirm', 'Enter on a zero-row frame is a no-op')
@@ -767,7 +770,7 @@ test('a zero-row body revokes ordinary Remove and Detail actions', async () => {
   await remove.waitForFrame()
   const removeBar = plain([remove.viewport().at(-1)!])
   assert.doesNotMatch(removeBar, /Enter/u, 'a zero-row confirm never advertises Enter')
-  assert.match(removeBar, /Esc cancel/u)
+  assert.match(removeBar, /Cancel \[Esc\]/u)
   remove.vt.sendInput('\r')
   await remove.waitForFrame()
   assert.deepEqual(remove.removeBundle, [], 'a zero-row Remove frame cannot write')
@@ -789,10 +792,512 @@ test('a zero-row body revokes ordinary Remove and Detail actions', async () => {
   await detail.waitForFrame()
   const detailBar = plain([detail.viewport().at(-1)!])
   assert.doesNotMatch(detailBar, /Enter/u, 'a zero-row Detail never advertises Enter action')
-  assert.match(detailBar, /Esc back/u)
+  assert.match(detailBar, /Back \[Esc\]/u)
   detail.vt.sendInput('\r')
   await detail.waitForFrame()
   assert.equal(detail.panel.currentView(), 'details', 'a zero-row Detail frame cannot activate an action')
   started.delete(detail)
   detail.app.dispose()
+})
+
+test('a Host default-hidden installation bundle appears only on explicit search and stays enable-able', async () => {
+  const hidden = '@deepseek-ai/dsh-experimental-hidden-optional'
+  const harness = await open({
+    columns: 140,
+    rows: 40,
+    bundles: [
+      bundle({ name: SELF_BUNDLE, source: 'file:/tmp/tui', rows: [{ rowId: 'tui-app', moduleName: SELF_BUNDLE, entryId: 'e-tui' }] }),
+      bundle({ name: '@vendor/foo', source: 'file:/tmp/foo', enabled: false }),
+      bundle({
+        name: hidden,
+        official: true,
+        availability: 'installation',
+        installed: false,
+        enabled: false,
+        optional: true,
+        removable: false,
+        source: undefined,
+        listedByDefault: false,
+      }),
+    ],
+  })
+  const view = (): string => harness.view()
+
+  // D: the Host default listing hides it from the untouched All list, and ONE
+  // existing hint line explains the explicit route.
+  assert.doesNotMatch(view(), new RegExp(hidden))
+  assert.match(view(), /\/ searches hidden official bundles/u)
+  // A status filter does not resurrect a default-hidden card either.
+  harness.vt.sendInput('\t')
+  await harness.waitForFrame()
+  assert.doesNotMatch(view(), new RegExp(hidden))
+  harness.vt.sendInput('\t')
+  harness.vt.sendInput('\t')
+  await harness.waitForFrame()
+  assert.doesNotMatch(view(), new RegExp(hidden))
+
+  // The explicit search reads the same model card.
+  harness.vt.sendInput('/')
+  for (const character of 'hidden-optional') harness.vt.sendInput(character)
+  harness.vt.sendInput('\r')
+  await harness.waitForFrame()
+  const value = `bundle:${hidden}`
+  assert.equal(harness.panel.selectedCardValue(), value, 'the search selects the hidden card')
+  assert.match(view(), new RegExp(hidden))
+
+  // It stays a fully manageable bundle: Details → Enable… dispatches the Host write.
+  harness.vt.sendInput('\r')
+  await harness.waitForFrame()
+  for (let attempt = 0; attempt < 2 && harness.setBundle.length === 0; attempt += 1) {
+    harness.vt.sendInput('\r')
+    await harness.waitForFrame()
+  }
+  assert.deepEqual(harness.setBundle, [{ name: hidden, enabled: true }])
+
+  // Clearing the search restores the default listing and re-anchors the
+  // selection on a card that is really visible.
+  harness.vt.sendInput('\x1b') // leave Details
+  harness.vt.sendInput('/')
+  await harness.waitForFrame()
+  harness.vt.sendInput('\x1b') // clear the query
+  await harness.waitForFrame()
+  assert.doesNotMatch(view(), new RegExp(hidden))
+  assert.notEqual(harness.panel.selectedCardValue(), value)
+})
+
+// ── S5-PR2: the Update page through the real Settings workspace ─────────────
+
+const UPDATABLE_BUNDLES = (): readonly PluginBundleFact[] => [
+  bundle({
+    name: 'updatable',
+    update: 'registry',
+    version: '1.0.0',
+    source: 'https://registry.example/updatable',
+    enabled: false,
+  }),
+]
+
+/** From the List: open the card Detail, move from Disable… to Check updates…,
+ *  and activate it. The action must be painted by the frame that admits Enter. */
+async function openCheckUpdates(harness: WorkspaceHarness): Promise<void> {
+  if (harness.panel.currentView() === 'list') {
+    await selectCard(harness, 'bundle:updatable')
+    harness.vt.sendInput('\r')
+    await harness.waitForFrame()
+  }
+  assert.equal(harness.panel.currentView(), 'details')
+  harness.vt.sendInput('\x1b[B') // Disable… -> Check updates…
+  await harness.waitForFrame()
+  harness.vt.sendInput('\r')
+  await harness.waitForFrame()
+  assert.equal(harness.panel.currentView(), 'update')
+}
+
+test('the Detail Check updates entry drives one exact update through confirm, stop and result', async () => {
+  const gate = deferred<PluginUpdateResultFact>()
+  const harness = await open({
+    columns: 120,
+    rows: 40,
+    bundles: UPDATABLE_BUNDLES(),
+    plugins: [],
+    updateImpl: () => gate.promise,
+    cancelImpl: async () => ({ status: 'cancelled' }),
+  })
+  await openCheckUpdates(harness)
+
+  // checking -> selecting (the fixture list resolves immediately).
+  assert.equal(harness.listVersionCalls.length, 1)
+  assert.equal(harness.controller.updateView()?.phase, 'selecting')
+  assert.match(harness.view(), /Update bundle · updatable/)
+  assert.match(harness.view(), /Installed\s+1\.0\.0/)
+  assert.match(harness.view(), /1\.1\.0/)
+  assert.match(harness.view(), /Registry\s+https:\/\/registry\.example\//)
+  assert.match(harness.view(), /Enter choose/)
+
+  // Esc returns to the SAME Detail; re-entering reuses the completed list.
+  harness.vt.sendInput('\x1b')
+  await harness.waitForFrame()
+  assert.equal(harness.panel.currentView(), 'details')
+  await openCheckUpdates(harness)
+  assert.equal(harness.listVersionCalls.length, 1, 're-entering never repeats the registry read')
+  assert.equal(harness.controller.updateView()?.selectedExactVersion, '1.1.0')
+
+  // Enter selects the version and opens the confirmation; Cancel is the default.
+  harness.vt.sendInput('\r')
+  await harness.waitForFrame()
+  assert.equal(harness.controller.updateView()?.phase, 'confirm')
+  const confirm = harness.view()
+  assert.match(confirm, /From\s+1\.0\.0/)
+  assert.match(confirm, /To\s+1\.1\.0/)
+  assert.match(confirm, /Plugins may stop during the update/)
+  assert.match(confirm, /Host attempts to restore the former version/)
+  assert.match(confirm, /> Cancel/)
+  harness.vt.sendInput('\r')
+  await harness.waitForFrame()
+  assert.equal(harness.controller.updateView()?.phase, 'selecting', 'Enter on the default Cancel writes nothing')
+  assert.equal(harness.updateCalls.length, 0)
+
+  // Re-confirm deliberately: Up moves from Cancel to Confirm update.
+  harness.vt.sendInput('\r')
+  await harness.waitForFrame()
+  assert.equal(harness.controller.updateView()?.phase, 'confirm')
+  harness.vt.sendInput('\x1b[A')
+  await harness.waitForFrame()
+  harness.vt.sendInput('\r')
+  await harness.waitForFrame()
+  const running = harness.controller.updateView()!
+  assert.equal(running.phase, 'running')
+  assert.equal(harness.updateCalls.length, 1)
+  assert.deepEqual({
+    name: harness.updateCalls[0]!.name,
+    version: harness.updateCalls[0]!.version,
+    registry: harness.updateCalls[0]!.registry,
+    requestId: harness.updateCalls[0]!.requestId,
+  }, {
+    name: 'updatable',
+    version: '1.1.0',
+    registry: 'https://registry.example/',
+    requestId: running.requestId,
+  })
+
+  // The request id is hidden on screen but complete in the copy/diagnostics
+  // payload, so Host update/install events can be correlated.
+  harness.vt.sendInput('c')
+  await harness.waitForFrame()
+  const copied = harness.copied.at(-1) ?? ''
+  assert.match(copied, new RegExp(`request id: ${running.requestId!}`, 'u'))
+  assert.match(copied, /registry: https:\/\/registry\.example\//u)
+
+  // The Host step and the matched install phase appear; only then Stop.
+  harness.emitUpdate({ requestId: running.requestId!, step: 'checking' })
+  await harness.waitForFrame()
+  assert.match(harness.view(), /Checking the exact target/)
+  harness.emitUpdate({ requestId: running.requestId!, step: 'installing' })
+  await harness.waitForFrame()
+  assert.doesNotMatch(harness.view(), /stop target install/, 'the matched install-state has not arrived yet')
+  harness.emit({ kind: 'phase', phase: { requestId: running.requestId!, phase: 'installing' } })
+  await harness.waitForFrame()
+  assert.match(harness.view(), /Installing the target version/)
+  assert.match(harness.view(), /s stop target install/)
+
+  harness.vt.sendInput('s')
+  await harness.waitForFrame()
+  assert.deepEqual(harness.cancelInstallCalls, [running.requestId], 'Stop names ONLY the update request id')
+  assert.equal(harness.controller.updateView()?.phase, 'running', 'cancelling the target install never ends the update')
+
+  gate.resolve({
+    from: '1.0.0',
+    to: '1.1.0',
+    step: 'install',
+    result: { changed: true, application: 'applied', stage: 'install', target: 'updatable@1.1.0', bundle: 'updatable', version: '1.1.0' },
+  })
+  await harness.waitForFrame(16)
+  assert.equal(harness.controller.updateView()?.phase, 'done')
+  assert.equal(harness.controller.updateView()?.readback, 'ready')
+  const done = harness.view()
+  assert.match(done, /Target result/)
+  assert.match(done, /Restore result/)
+  assert.match(done, /Not required; the Host did not reinstall the former version\./)
+  assert.match(done, /Observed installed version\s+1\.1\.0/)
+  assert.match(done, /Outcome\s+applied/)
+
+  // Esc returns to the same Bundle Detail; the result stays on the Controller.
+  harness.vt.sendInput('\x1b')
+  await harness.waitForFrame()
+  assert.equal(harness.panel.currentView(), 'details')
+  assert.equal(harness.controller.updateView()?.phase, 'done')
+  assert.equal(harness.updateCalls.length, 1)
+})
+
+test('a running update hides without cancelling; `u` reopens the one result after it settles', async () => {
+  const gate = deferred<PluginUpdateResultFact>()
+  const harness = await open({
+    columns: 120,
+    rows: 40,
+    bundles: UPDATABLE_BUNDLES(),
+    plugins: [],
+    updateImpl: () => gate.promise,
+  })
+  await openCheckUpdates(harness)
+  harness.vt.sendInput('\r')
+  await harness.waitForFrame()
+  harness.vt.sendInput('\x1b[A')
+  await harness.waitForFrame()
+  harness.vt.sendInput('\r')
+  await harness.waitForFrame()
+  assert.equal(harness.controller.updateView()?.phase, 'running')
+
+  harness.vt.sendInput('\x1b')
+  await harness.waitForFrame()
+  assert.equal(harness.panel.currentView(), 'list', 'a running update hides to the List')
+  assert.equal(harness.cancelInstallCalls.length, 0, 'Esc never cancels the Host operation')
+  assert.match(harness.view(), /u update result/, 'the List names the single recoverable update')
+
+  gate.resolve({
+    from: '1.0.0',
+    to: '1.1.0',
+    step: 'install',
+    result: { changed: true, application: 'restart-required', stage: 'install', target: 'updatable@1.1.0', bundle: 'updatable', version: '1.1.0', restartReason: 'no-hmr' },
+  })
+  await harness.waitForFrame(16)
+  await harness.waitForFrame(4)
+  assert.equal(harness.controller.updateView()?.phase, 'done')
+  harness.vt.sendInput('u')
+  await harness.waitForFrame()
+  assert.equal(harness.panel.currentView(), 'update')
+  assert.match(harness.view(), /Restart\s+no-hmr/)
+  assert.match(harness.view(), /Observed installed version\s+1\.1\.0/)
+  assert.equal(harness.updateCalls.length, 1)
+})
+
+test('a resize between pressing a version row and releasing it refuses the stale choice', async () => {
+  const harness = await open({
+    columns: 120,
+    rows: 40,
+    bundles: UPDATABLE_BUNDLES(),
+    plugins: [],
+  })
+  await openCheckUpdates(harness)
+  const lines = plain(harness.viewport()).split('\n')
+  const y = lines.findIndex(line => line.includes('1.1.0'))
+  assert.ok(y >= 0, 'the version row is painted')
+  harness.panel.onCellPress(2, y)
+  // A new grant invalidates the painted frame before the release.
+  harness.panel.setViewport({ width: 118, rows: 40, allowDual: false })
+  harness.panel.onCellClick(2, y)
+  await harness.waitForFrame()
+  assert.equal(harness.controller.updateView()?.phase, 'selecting', 'the stale press never opens the confirmation')
+  assert.equal(harness.updateCalls.length, 0)
+})
+
+test('update diagnostics copy masks a Host registry credential and its control bytes', async () => {
+  const hostile = 'https://user:secret@registry.example/path\u001b]52;c;ZXZpbA==\u0007'
+  const harness = await open({
+    columns: 120,
+    rows: 40,
+    bundles: UPDATABLE_BUNDLES(),
+    plugins: [],
+    versionsImpl: async () => ({
+      status: 'listed',
+      installed: '1.0.0',
+      registry: hostile,
+      attempts: [{ registry: hostile }],
+      versions: [{ version: '1.1.0', tags: ['latest'], prerelease: false, bundle: true }],
+      omitted: 0,
+    }),
+  })
+  await openCheckUpdates(harness)
+  const frame = harness.view()
+  assert.doesNotMatch(frame, /secret/u, 'the painted registry never exposes userinfo')
+  assert.doesNotMatch(frame, /ZXZpbA/u, 'the painted registry never carries the OSC payload')
+  harness.vt.sendInput('c')
+  await harness.waitForFrame()
+  const copied = harness.copied.at(-1) ?? ''
+  assert.doesNotMatch(copied, /secret/u, 'the copied registry never exposes userinfo')
+  assert.doesNotMatch(copied, /\x1b/u, 'the copied metadata carries no terminal escape')
+  assert.match(copied, /registry: https:\/\/\*\*\*@registry\.example\/path/u,
+    'the copied registry uses the shared masked projection')
+})
+
+test('a refused Host version list sanitizes its reason and every attempt reason', async () => {
+  const harness = await open({
+    columns: 120,
+    rows: 40,
+    bundles: UPDATABLE_BUNDLES(),
+    plugins: [],
+    versionsImpl: async () => ({
+      status: 'refused',
+      problem: 'network',
+      reason: 'network down \u001b]0;owned-title\u0007',
+      attempts: [{
+        registry: 'https://user:secret@registry.example/',
+        problem: 'network',
+        reason: 'boom \u001b[31mred\u001b[0m \u001b]52;c;ZXZpbA==\u0007',
+      }],
+    }),
+  })
+  await openCheckUpdates(harness)
+  const frame = harness.view()
+  assert.match(frame, /Refused: network/u)
+  assert.doesNotMatch(frame, /owned-title|ZXZpbA|secret/u, 'the refused reasons carry no injected terminal text or credential')
+  assert.match(frame, /boom red/u, 'the reason text survives in its sanitized form')
+})
+
+test('a read-only Check updates preview never blocks disabling its bundle', async () => {
+  const harness = await open({
+    columns: 120,
+    rows: 40,
+    bundles: [bundle({
+      name: 'updatable',
+      update: 'registry',
+      version: '1.0.0',
+      source: 'https://registry.example/updatable',
+      enabled: true,
+    })],
+    plugins: [],
+  })
+  await openCheckUpdates(harness)
+  assert.equal(harness.controller.updateView()?.phase, 'selecting')
+  // Back to the Detail without updating, then Disable….
+  harness.vt.sendInput('\x1b')
+  await harness.waitForFrame()
+  assert.equal(harness.panel.currentView(), 'details')
+  for (let attempt = 0; attempt < 3 && harness.setBundle.length === 0; attempt += 1) {
+    harness.vt.sendInput('\r')
+    await harness.waitForFrame()
+  }
+  assert.deepEqual(harness.setBundle, [{ name: 'updatable', enabled: false }],
+    'a read-only version preview must never block the Host write path')
+  assert.equal(harness.updateCalls.length, 0)
+})
+
+test('a completed update can be checked and applied again from the same Bundle Detail', async () => {
+  let check = 0
+  const harness = await open({
+    columns: 120,
+    rows: 40,
+    bundles: [bundle({
+      name: 'updatable',
+      update: 'registry',
+      version: '1.0.0',
+      source: 'https://registry.example/updatable',
+      enabled: false,
+    })],
+    plugins: [],
+    versionsImpl: async () => {
+      check += 1
+      return {
+        status: 'listed',
+        installed: check === 1 ? '1.0.0' : '1.1.0',
+        registry: 'https://registry.example/',
+        attempts: [{ registry: 'https://registry.example/' }],
+        versions: [{ version: check === 1 ? '1.1.0' : '1.2.0', tags: ['latest'], prerelease: false, bundle: true }],
+        omitted: 0,
+      }
+    },
+  })
+  const runUpdate = async (): Promise<void> => {
+    harness.vt.sendInput('\r')
+    await harness.waitForFrame()
+    harness.vt.sendInput('\x1b[A') // Cancel -> Confirm update
+    await harness.waitForFrame()
+    harness.vt.sendInput('\r')
+    await harness.waitForFrame(16)
+    assert.equal(harness.controller.updateView()?.phase, 'done')
+  }
+  await openCheckUpdates(harness)
+  await runUpdate()
+  assert.equal(harness.updateCalls.length, 1)
+  assert.equal(harness.controller.updateView()?.lastObservedVersion, '1.1.0')
+
+  // Esc returns to the SAME Detail; Check updates… is a NEW intent.
+  harness.vt.sendInput('\x1b')
+  await harness.waitForFrame()
+  assert.equal(harness.panel.currentView(), 'details')
+  await openCheckUpdates(harness)
+  assert.equal(harness.listVersionCalls.length, 2, 'a completed update does not freeze the version check')
+  assert.equal(harness.updateCalls.length, 1, 'the new check dispatches no write on its own')
+  assert.match(harness.view(), /\b1\.2\.0\b/u)
+  assert.match(harness.view(), /Installed\s+1\.1\.0/u)
+
+  // The second update is a full explicit lifecycle with no reused request.
+  const firstRequest = harness.updateCalls[0]!.requestId
+  await runUpdate()
+  assert.equal(harness.updateCalls.length, 2)
+  assert.equal(harness.updateCalls[1]!.version, '1.2.0')
+  assert.notEqual(harness.updateCalls[1]!.requestId, firstRequest)
+  assert.equal(harness.controller.updateView()?.lastObservedVersion, '1.2.0')
+})
+
+test('the painted Esc span is the ONE plain-text affordance geometry of the bar', async () => {
+  // 80 columns: the content owns the full local column, so the root paints the
+  // page's bar at content column 0 and the page-local span is the plain one.
+  const harness = await open({ columns: 80, rows: 24 })
+  const span = harness.panel.paintedEscapeSpan()
+  assert.ok(span !== undefined, 'the complete Esc affordance is recorded')
+  const painted = harness.viewport().at(-1)!
+  const text = plain([painted])
+  assert.equal(text.slice(span.startCol, span.endCol), 'Back [Esc]',
+    'the span covers exactly the plain Esc token')
+  assert.equal(span.endCol - span.startCol, visibleWidth('Back [Esc]'),
+    'painting the affordance never changes its visible width')
+  assert.equal(visibleWidth(painted), 80, 'the bar keeps the granted width')
+})
+
+test('the painted Esc span stays in the page own content columns, never terminal columns', async () => {
+  // 120 columns keeps the Categories rail, so the page is granted only its own
+  // content width: the span must stay local to that grant (the root owns the
+  // translation onto the physical row).
+  const harness = await open({ columns: 120, rows: 40 })
+  const span = harness.panel.paintedEscapeSpan()
+  assert.ok(span !== undefined)
+  const layout = harness.panel.contentLayout()
+  const contentWidth = layout.dual ? layout.leftWidth + 2 + layout.rightWidth : layout.leftWidth
+  assert.ok(span.endCol <= contentWidth,
+    `the span ends inside the page content (${span.endCol} <= ${contentWidth})`)
+  assert.equal(span.endCol - span.startCol, visibleWidth('Back [Esc]'))
+})
+
+test('each plugin phase advertises the Esc verb its own handleEscape really runs', async () => {
+  const gate = deferred<PluginChangeFact>()
+  const harness = await open({
+    columns: 80,
+    rows: 24,
+    installImpl: () => gate.promise,
+    cancelImpl: async () => ({ status: 'too-late' }),
+  })
+  const expectVerb = (verb: string): void => {
+    const span = harness.panel.paintedEscapeSpan()
+    assert.ok(span !== undefined, `the ${verb} affordance is complete`)
+    const text = plain([harness.viewport().at(-1)!])
+    assert.equal(text.slice(span.startCol, span.endCol), `${verb} [Esc]`,
+      `the bar names the ${verb} effect at this phase`)
+  }
+
+  // List root: Esc yields to the Categories rail and never closes the page.
+  expectVerb('Back')
+  assert.equal(harness.panel.currentView(), 'list')
+
+  // Search editing: Esc CLEARS the query instead of leaving the page.
+  harness.vt.sendInput('/')
+  await harness.waitForFrame()
+  harness.vt.sendInput('foo')
+  await harness.waitForFrame()
+  expectVerb('Clear')
+  harness.vt.sendInput('\x1b')
+  await harness.waitForFrame()
+  assert.equal(harness.panel.currentView(), 'list', 'Clear never closed the page')
+  assert.match(harness.view(), /Search: \//u, 'the query was cleared')
+  expectVerb('Back')
+
+  // Running install: Esc HIDES the view and never cancels the Host operation.
+  harness.vt.sendInput('\x1b[F')
+  await harness.waitForFrame()
+  harness.vt.sendInput('\r')
+  await harness.waitForFrame()
+  for (let attempt = 0; attempt < 3 && harness.panel.currentView() === 'details'; attempt += 1) {
+    harness.vt.sendInput('\r')
+    await harness.waitForFrame()
+  }
+  assert.equal(harness.panel.currentView(), 'install', 'the explicit Install action opened the editor')
+  harness.vt.sendInput('\r') // explicit install confirm
+  await harness.waitForFrame()
+  assert.equal(harness.installCalls.length, 1)
+  expectVerb('Hide')
+  harness.vt.sendInput('\x1b')
+  await harness.waitForFrame()
+  assert.equal(harness.panel.currentView(), 'list', 'Hide returned to the List')
+  assert.deepEqual(harness.cancelInstallCalls, [], 'Hide never aborted the Host install')
+  gate.resolve({ changed: true, application: 'applied', stage: 'install', target: 'x' })
+  await harness.waitForFrame()
+})
+
+test('a truncated or unpublished bar reports NO Esc geometry', async () => {
+  const harness = await open({ columns: 80, rows: 24 })
+  harness.panel.setViewport({ width: 9, rows: 3, allowDual: false })
+  assert.equal(harness.panel.paintedEscapeSpan(), undefined,
+    'a grant change invalidates the previous frame before it repaints')
+  harness.panel.render(9)
+  assert.equal(harness.panel.paintedEscapeSpan(), undefined,
+    'the only surviving segment is cut, so no half affordance is clickable')
 })

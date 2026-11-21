@@ -199,6 +199,13 @@ export interface SearchablePickerOptions {
    */
   showHint?: boolean
   /**
+   * The caller renders the footer hint ITSELF (a composed surface that owns
+   * extra strips below the list, e.g. `/model`). The picker then reserves and
+   * paints no hint rows at all, even though search is enabled; every other
+   * consumer keeps the historical "search implies hint" behavior.
+   */
+  externalHint?: boolean
+  /**
    * Override the footer hint text. Defaults to the generic picker hint;
    * existing consumers omit it and keep the default wording.
    */
@@ -229,6 +236,9 @@ export interface SearchablePickerOptions {
 }
 
 export class SearchablePicker implements Component, Focusable {
+  /** The picker owns tui.select.pageUp/pageDown itself: a mounted picker must
+   *  keep those keys instead of letting the background transcript scroll. */
+  readonly capturesViewportInput = true
   private items: SearchablePickerItem[] = []
   private filteredItems: SearchablePickerItem[] = []
   /**
@@ -334,7 +344,7 @@ export class SearchablePicker implements Component, Focusable {
   /** Reserve the list chrome before deriving the item count. */
   private recomputeVisibleBudget(): void {
     const prefix = (this.options.header === undefined ? 0 : 2) + (this.searchEnabled ? 2 : 0)
-    const hint = this.options.showHint === true || this.searchEnabled ? 2 : 0
+    const hint = this.options.showHint === true || (this.searchEnabled && this.options.externalHint !== true) ? 2 : 0
     const indicator = this.filteredItems.length > 1 ? 1 : 0
     const group = this.filteredItems.some(item => this.groupKeyOf(item) !== '') ? 1 : 0
     // selected-below: the selected row's detail is a real physical row, so
@@ -396,6 +406,18 @@ export class SearchablePicker implements Component, Focusable {
   setSelectedValue(value: string): void {
     const index = this.filteredItems.findIndex(item => item.value === value)
     if (index !== -1) this.selectedIndex = index
+  }
+
+  /**
+   * Clear the active row so the list paints NO cursor. This is the one
+   * presentation counterpart of "the owner has no selected occurrence yet"
+   * (a lost Dock preselection): the rows stay visible and selectable, but no
+   * first/second row looks like the current action target. The zero-match
+   * navigation invariant still holds for the keyboard owner; this method is
+   * only called by an owner that routes navigation itself.
+   */
+  clearSelection(): void {
+    this.selectedIndex = -1
   }
 
   /**
@@ -462,7 +484,7 @@ export class SearchablePicker implements Component, Focusable {
       // — or wrapped into extra rows — by its own status text.
       const noMatch = truncateToWidth(singlePhysicalLine(this.options.noMatchText ?? '  No matching commands'), width, '')
       push(this.theme.noMatch(noMatch), { kind: 'inert' }, ROW_PRIORITY.noMatch)
-      if (this.options.showHint === true || this.searchEnabled) this.addHintLine(lines, hits, priorities, width)
+      if (this.options.showHint === true || (this.searchEnabled && this.options.externalHint !== true)) this.addHintLine(lines, hits, priorities, width)
       const result = this.finalizeEmpty(lines, hits)
       this.hitMap = result.hits
       this.lastRenderWidth = width
@@ -470,7 +492,7 @@ export class SearchablePicker implements Component, Focusable {
     }
 
     const primaryColumnWidth = this.getPrimaryColumnWidth()
-    const showHint = this.options.showHint === true || this.searchEnabled
+    const showHint = this.options.showHint === true || (this.searchEnabled && this.options.externalHint !== true)
     const limit = Number.isFinite(this.maxRows) ? Math.max(1, Math.floor(this.maxRows)) : Number.POSITIVE_INFINITY
     const hintRows = showHint ? 2 : 0
 
@@ -650,7 +672,9 @@ export class SearchablePicker implements Component, Focusable {
 
     // Add scroll indicators if needed
     if (startIndex > 0 || endIndex < this.filteredItems.length) {
-      const scrollText = `  (${this.selectedIndex + 1}/${this.filteredItems.length})`
+      const scrollText = this.selectedIndex < 0
+        ? `  (0/${this.filteredItems.length})`
+        : `  (${this.selectedIndex + 1}/${this.filteredItems.length})`
       // Truncate if too long for terminal
       lines.push(this.theme.scrollInfo(truncateToWidth(scrollText, width - 2, '')))
       hits.push({ kind: 'inert' })
@@ -738,17 +762,23 @@ export class SearchablePicker implements Component, Focusable {
    * Wheel moves one logical selection step (wrapping like the keyboard).
    */
   handleMouse(event: TuiMouseEvent): TuiMouseDispatchResult | TuiMouseEventResult | undefined {
-    // A click ends any gesture, and every left press starts a fresh
-    // one: release the pressed identity up front — BEFORE the width
-    // guard / hit lookup / search dispatch / inert return, so a
-    // delegated search press (or a press on stale-width or missing-hit
-    // geometry) still replaces the old latch. The TUI keeps the picker
-    // as the press target for a handled search press, so a later
-    // release on the same cell synthesizes a click that must not match
-    // a stale identity. The local copy still guards the valid-row
+    // A click ends any gesture, every left press starts a fresh one, and an
+    // EFFECTIVE wheel (a non-zero delta, even at a boundary that changes no
+    // selection) retires the old item press: a release on the cell that still
+    // shows the pressed row must never activate an item a wheel has already
+    // navigated away from. These boundaries come BEFORE the width guard / hit
+    // lookup / search dispatch / inert return, so a delegated search press (or
+    // a press on stale-width or missing-hit geometry) still replaces the old
+    // latch. The TUI keeps the picker as the press target for a handled search
+    // press, so a later release on the same cell synthesizes a click that must
+    // not match a stale identity. The local copy still guards the valid-row
     // comparison below.
     const pressedValue = this.mousePressedValue
-    if (event.type === 'click' || (event.type === 'press' && event.button === 'left')) {
+    if (
+      event.type === 'click'
+      || (event.type === 'press' && event.button === 'left')
+      || (event.type === 'wheel' && (event.wheelDelta ?? 0) !== 0)
+    ) {
       this.mousePressedValue = undefined
     }
     // The hit map is only valid for the last painted width: a resize
@@ -822,6 +852,18 @@ export class SearchablePicker implements Component, Focusable {
     }
 
     return undefined
+  }
+
+  /**
+   * Host-driven gesture boundary (mouse parity): retire the item press when
+   * another input — keyboard navigation, a wheel outside this picker's item
+   * rows or a new gesture on the owning surface — invalidates it. The next
+   * synthesized click may no longer activate the previously pressed item.
+   * Candidate selection, Enter/Esc handling and onSelect ordering are
+   * unchanged.
+   */
+  clearMousePress(): void {
+    this.mousePressedValue = undefined
   }
 
   /** Re-derive the filtered list from the current query and clamp selection.
@@ -1112,5 +1154,21 @@ export class SearchablePicker implements Component, Focusable {
   getSelectedItem(): SearchablePickerItem | null {
     const item = this.filteredItems[this.selectedIndex]
     return item || null
+  }
+
+  /**
+   * The selected item ONLY while the LAST painted frame really drew a row for
+   * it (a read-only presentation fact, never a second selection authority).
+   *
+   * The `/view-image` list offers its `View` action from the pinned bar; that
+   * action must not point at an item the tiny-grant fit dropped from the paint
+   * (a hidden selection is not a visible target). The answer is derived from
+   * the SAME hit map pointer events use, so the bar and the rows can never
+   * disagree about what was painted.
+   */
+  paintedSelectedItem(): SearchablePickerItem | null {
+    const selected = this.filteredItems[this.selectedIndex]
+    if (selected === undefined) return null
+    return this.hitMap.some(hit => hit.kind === 'item' && hit.value === selected.value) ? selected : null
   }
 }

@@ -16,6 +16,7 @@
  * @module @xmoon76/dsh-pi-tui/runtime/direct/config-direct
  */
 
+import { symbols, type Context } from '@deepseek-ai/cordis'
 import { randomUUID } from 'node:crypto'
 import {
   credentialKeyId,
@@ -38,7 +39,15 @@ import {
   providerProfileProjectionOf,
 } from '../../domain/catalog/provider.ts'
 import { cancellationError } from '../process/tasks.ts'
+import { SupersededReadError } from '../read-error.ts'
 import { safeErrorMessage } from '../process/errors.ts'
+import { projectSubagentLimits, projectSubagentModelSelection } from '../subagent-settings.ts'
+import {
+  projectAgentLoopSettings,
+  projectSessionLogUpload,
+  projectShellExecutionSettings,
+  type SectionFacts,
+} from '../host-settings-sections.ts'
 import {
   resolveTrustedFooterCommand,
   resolveUserCommandItemActivationIds,
@@ -46,10 +55,24 @@ import {
   resolveUserLayerFooterMode,
 } from '../../domain/footer/command-trust.ts'
 import { parseFooterCustomItems, type FooterCustomItemsParseResult } from '../../domain/footer/custom-items.ts'
+import {
+  assertFetchProviderId,
+  assertFetchProviderReplaceable,
+  assertSearchApiCount,
+  assertSearchProviderId,
+  assertSearchProviderReplaceable,
+  assertWebApiBilling,
+  readWebApiBilling,
+  webApiAdvancedFactsOf,
+  webProviderSelectionFactsOf,
+} from '../../domain/web-provider-settings.ts'
 import type {
   AccountBalanceOutcome,
   AccountClientMetadata,
   AccountConfig,
+  AccountObservation,
+  AccountObservationLease,
+  AccountWatchEvent,
   AccountProfile,
   AccountProfileOutcome,
   AccountView,
@@ -69,15 +92,55 @@ import type {
   ProviderCatalogSnapshot,
   ProviderProfileConfig,
   ProviderProfileFacts,
-  SubagentAllowedModelRoute,
+  SubagentLimits,
+  SubagentLimitsConfig,
+  SubagentModelSelection,
   SubagentModelSelectionConfig,
+  AgentLoopSettings,
+  AgentLoopSettingsConfig,
+  HostShellExecutor,
+  ShellExecutionSettings,
+  ShellExecutionSettingsConfig,
+  SessionLogUpload,
+  SessionLogUploadConfig,
+  SectionPatch,
+  SectionRead,
+  SectionMutationOutcome,
   TuiSettingsConfig,
   VisualToolsConfig,
   VisualToolsState,
   WebProviderConfig,
   WebProviderSettings,
+  WebStartupPreferenceConfig,
+  WebStartupPreferenceState,
+  BackendStartupPreferenceConfig,
+  BackendStartupPreferenceState,
+  PublicBackendValue,
+  AcpStartupPreferenceConfig,
+  AcpStartupPreferenceState,
   ConfigReadiness,
+  McpServerSources,
+  McpServerSourcesConfig,
+  McpServerConfiguration,
+  McpServerConfigurationConfig,
+  McpConfigWriteOutcome,
+  ExtensionConfigDataOp,
+  ExtensionConfigRead,
+  ExtensionConfigsConfig,
 } from '../config-port.ts'
+import { extensionConfigRowId } from '../../domain/extension-config/row-id.ts'
+import {
+  extensionConfigUserDataPresent,
+  projectExtensionConfigData,
+  snapshotExtensionConfigOps,
+} from '../../domain/extension-config/data.ts'
+import { CANONICAL_TUI_SETTINGS_NS } from '../config-port.ts'
+import {
+  baseDictKeysOf,
+  classifyMcpServerProvenance,
+  projectMcpServerEntry,
+  type McpClassifiedServerEntry,
+} from '../../domain/mcp/server-config.ts'
 import {
   VISUAL_TOOLS_STATUS_SERVICE,
   type VisualToolsRuntimeStatus,
@@ -87,7 +150,7 @@ import {
  * a package dependency; the services resolve from the dsh installation). */
 export interface HostContextLike {
   get(name: string): unknown
-  on?(event: string, listener: unknown): unknown
+  on?: Context['on']
 }
 
 /** The structural 0.1.7 SettingsForms surface (descriptor projection +
@@ -98,10 +161,15 @@ export interface SettingsServiceLike {
   describe(options?: { readonly redactSecrets?: boolean }): readonly SettingsDescriptorLike[] | undefined
   mutate(
     ns: string,
-    ops: readonly { op: 'set'; path: readonly string[]; value: unknown }[],
+    ops: readonly SettingsMutationOp[],
     expectedRevision?: number,
   ): Promise<unknown>
 }
+
+/** One official settings path op (set + unset), the FR4 wire shape. */
+export type SettingsMutationOp =
+  | { op: 'set'; path: readonly string[]; value: unknown }
+  | { op: 'unset'; path: readonly string[] }
 
 /** The structural credentials service surface. */
 export interface CredentialsServiceLike {
@@ -119,11 +187,6 @@ export interface PermissionPresetsServiceLike {
    * volatile `defaultPreset` user preference) — the owner already exposes
    * the value, so the TUI must not read it back through Settings forms. */
   readonly defaultPreset?: string
-}
-
-/** The structural approval service surface (the session override read). */
-export interface ApprovalServiceLike {
-  overrideOf(session: unknown): 'ask' | 'never' | undefined
 }
 
 /** The structural commands service surface (permission application only). */
@@ -165,15 +228,29 @@ export class DirectConfigPort implements ConfigPort {
   readonly account: AccountConfig
   readonly permissions: PermissionConfig
   readonly presetDefault: PresetDefaultConfig
+  readonly subagentLimits: SubagentLimitsConfig
   readonly subagentModelSelection: SubagentModelSelectionConfig
+  readonly agentLoopSettings: AgentLoopSettingsConfig
+  readonly shellExecutionSettings: ShellExecutionSettingsConfig
+  readonly sessionLogUpload: SessionLogUploadConfig
   readonly web: WebProviderConfig
   readonly visualTools: VisualToolsConfig
+  readonly webStartupPreference: WebStartupPreferenceConfig
+  readonly backendStartupPreference: BackendStartupPreferenceConfig
+  readonly acpStartupPreference: AcpStartupPreferenceConfig
+  readonly extensionConfigs: ExtensionConfigsConfig
+  readonly mcpServerSources: McpServerSourcesConfig
+  readonly mcpServerConfiguration: McpServerConfigurationConfig
+  /** FR3: the live Host MCP generation the source read is bound to. */
+  private readonly mcpGeneration: (() => object) | undefined
 
   constructor(
     ctx: HostContextLike,
     tuiSettings: TuiSettingsConfig | undefined,
     agentFor: (sessionId: string) => unknown | undefined,
+    mcpGeneration?: () => object,
   ) {
+    this.mcpGeneration = mcpGeneration
     this.tuiSettings = tuiSettings
     this.footerCommandTrust = new DirectFooterCommandTrust(ctx)
     this.footerCustomItems = new DirectFooterCustomItems(ctx)
@@ -183,9 +260,19 @@ export class DirectConfigPort implements ConfigPort {
     this.account = new DirectAccountConfig(ctx)
     this.permissions = new DirectPermissionConfig(ctx, agentFor)
     this.presetDefault = new DirectPresetDefaultConfig(ctx)
+    this.subagentLimits = new DirectSubagentLimitsConfig(ctx)
     this.subagentModelSelection = new DirectSubagentModelSelectionConfig(ctx)
+    this.agentLoopSettings = new DirectAgentLoopSettingsConfig(ctx)
+    this.shellExecutionSettings = new DirectShellExecutionSettingsConfig(ctx)
+    this.sessionLogUpload = new DirectSessionLogUploadConfig(ctx)
     this.web = new DirectWebProviderConfig(ctx)
     this.visualTools = new DirectVisualToolsConfig(ctx)
+    this.webStartupPreference = new DirectWebStartupPreferenceConfig(ctx)
+    this.backendStartupPreference = new DirectBackendStartupPreferenceConfig(ctx)
+    this.acpStartupPreference = new DirectAcpStartupPreferenceConfig(ctx)
+    this.extensionConfigs = new DirectExtensionConfigsConfig(ctx)
+    this.mcpServerSources = new DirectMcpServerSourcesConfig(ctx, mcpGeneration)
+    this.mcpServerConfiguration = new DirectMcpServerConfigurationConfig(ctx, mcpGeneration)
   }
 }
 
@@ -194,6 +281,8 @@ interface SettingsDescriptorLike {
   readonly ns: string
   /** Form-projected effective value (volatile fields only). */
   readonly value?: unknown
+  /** The composition base layer (inherited config, defaults resolved). */
+  readonly base?: unknown
   readonly user?: unknown
   readonly revision?: number
 }
@@ -212,9 +301,99 @@ function readSettingsDescriptor(settings: SettingsServiceLike | undefined, ns: s
   }
 }
 
-/** The Direct M5 footer-command trust read: the USER layer of the `tui-app`
- * settings descriptor decides BOTH the command mode and the command (plan
- * §17.4 — a project layer can never silently trigger the user's command).
+function settingsAuthorityOf(settings: SettingsServiceLike): object {
+  const cordisService = settings as SettingsServiceLike & { readonly [symbols.original]?: SettingsServiceLike }
+  return cordisService[symbols.original] ?? settings
+}
+
+type DirectDescriptorRead =
+  | {
+      readonly kind: 'ready'
+      readonly settings: SettingsServiceLike
+      readonly descriptors: readonly SettingsDescriptorLike[]
+    }
+  | { readonly kind: 'unavailable' | 'unreadable'; readonly reason: string }
+
+/** ONE `describe()` read of the current Host settings service, shared by
+ *  every typed section read so a single snapshot never mixes revisions. */
+function readDirectDescriptors(ctx: HostContextLike): DirectDescriptorRead {
+  const settings = ctx.get('settings') as SettingsServiceLike | undefined
+  if (settings === undefined) return { kind: 'unavailable', reason: 'the Host settings service is unavailable' }
+
+  let descriptors: readonly SettingsDescriptorLike[] | undefined
+  try {
+    descriptors = settings.describe()
+  } catch (error) {
+    return { kind: 'unreadable', reason: `the Host settings descriptor read failed: ${safeErrorMessage(error)}` }
+  }
+  if (!Array.isArray(descriptors)) {
+    return { kind: 'unreadable', reason: 'the Host settings descriptor list is not readable' }
+  }
+  return { kind: 'ready', settings, descriptors }
+}
+
+function projectDirectDescriptor<T extends object>(
+  settings: SettingsServiceLike,
+  descriptor: SettingsDescriptorLike,
+  project: (effective: unknown, inherited: unknown) => SectionFacts<T> | undefined,
+): SectionRead<T> {
+  if (typeof descriptor.revision !== 'number' || !Number.isSafeInteger(descriptor.revision) || descriptor.revision < 0) {
+    return { kind: 'unreadable', reason: 'the official Host settings revision is not readable' }
+  }
+  let projected: SectionFacts<T> | undefined
+  try {
+    projected = project(descriptor.value, descriptor.base)
+  } catch (error) {
+    return { kind: 'unreadable', reason: `the official Host settings value is not readable: ${safeErrorMessage(error)}` }
+  }
+  if (projected === undefined) {
+    return { kind: 'unreadable', reason: 'the official Host settings value or inherited base is not readable' }
+  }
+  return {
+    kind: 'ready',
+    generation: settingsAuthorityOf(settings),
+    revision: descriptor.revision,
+    ...projected,
+  }
+}
+
+function readDirectSection<T extends object>(
+  ctx: HostContextLike,
+  namespace: string,
+  project: (effective: unknown, inherited: unknown) => SectionFacts<T> | undefined,
+): SectionRead<T> {
+  const read = readDirectDescriptors(ctx)
+  if (read.kind !== 'ready') return read
+  const descriptor = read.descriptors.find(entry => entry.ns === namespace)
+  if (descriptor === undefined) {
+    return { kind: 'unavailable', reason: 'the official Host settings section is not mounted' }
+  }
+  return projectDirectDescriptor(read.settings, descriptor, project)
+}
+
+/** The official model-tool shell settings are bound to the Host-served
+ *  namespace, following dsh-web: `pwsh-sandbox` wins when both are served,
+ *  otherwise the single served row is used, and no served row is unavailable. */
+const SHELL_EXECUTOR_ROWS: readonly { readonly executor: HostShellExecutor; readonly namespace: string }[] = [
+  { executor: 'pwsh', namespace: 'pwsh-sandbox' },
+  { executor: 'bash', namespace: 'bash-sandbox' },
+]
+
+function readDirectShellExecutionSection(ctx: HostContextLike): SectionRead<ShellExecutionSettings> {
+  const read = readDirectDescriptors(ctx)
+  if (read.kind !== 'ready') return read
+  const active = SHELL_EXECUTOR_ROWS.find(row => read.descriptors.some(entry => entry.ns === row.namespace))
+  if (active === undefined) {
+    return { kind: 'unavailable', reason: 'no active Host shell executor settings row is mounted' }
+  }
+  const descriptor = read.descriptors.find(entry => entry.ns === active.namespace)!
+  return projectDirectDescriptor(read.settings, descriptor, projectShellExecutionSettings(active.executor))
+}
+
+/** The Direct M5 footer-command trust read: the USER layer of the canonical
+ * `pi-tui-preferences` settings descriptor decides BOTH the command mode and
+ * the command (plan §17.4 — a project layer can never silently trigger the
+ * user's command).
  * The adapter owns the descriptor access; a Remote adapter replays the same
  * facts from the wire. */
 class DirectFooterCommandTrust implements FooterCommandTrust {
@@ -230,13 +409,13 @@ class DirectFooterCommandTrust implements FooterCommandTrust {
   get userFooterMode(): string | undefined {
     const descriptor = this.readDescriptor()
     if (descriptor === undefined) return undefined
-    return resolveUserLayerFooterMode([descriptor], 'tui-app')
+    return resolveUserLayerFooterMode([descriptor], CANONICAL_TUI_SETTINGS_NS)
   }
 
   get command() {
     const descriptor = this.readDescriptor()
     if (descriptor === undefined) return undefined
-    return resolveTrustedFooterCommand([descriptor], 'tui-app')
+    return resolveTrustedFooterCommand([descriptor], CANONICAL_TUI_SETTINGS_NS)
   }
 
   /** The ids the USER layer authorizes for custom command item execution
@@ -248,7 +427,7 @@ class DirectFooterCommandTrust implements FooterCommandTrust {
   get userCommandItemActivationIds() {
     const descriptor = this.readDescriptor()
     if (descriptor === undefined) return new Set<string>()
-    return resolveUserCommandItemActivationIds([descriptor], 'tui-app')
+    return resolveUserCommandItemActivationIds([descriptor], CANONICAL_TUI_SETTINGS_NS)
   }
 
   /** The ids authorized for the native FALLBACK surface (the USER's own
@@ -256,7 +435,7 @@ class DirectFooterCommandTrust implements FooterCommandTrust {
   get userCommandItemFallbackActivationIds() {
     const descriptor = this.readDescriptor()
     if (descriptor === undefined) return new Set<string>()
-    return resolveUserCommandItemFallbackActivationIds([descriptor], 'tui-app')
+    return resolveUserCommandItemFallbackActivationIds([descriptor], CANONICAL_TUI_SETTINGS_NS)
   }
 
   /** One describe() read per synchronous evaluation: the two getters are
@@ -265,7 +444,7 @@ class DirectFooterCommandTrust implements FooterCommandTrust {
   private readDescriptor(): SettingsDescriptorLike | undefined {
     if (this.descriptorCache !== null) return this.descriptorCache
     const settings = this.ctx.get('settings') as SettingsServiceLike | undefined
-    const found = readSettingsDescriptor(settings, 'tui-app')
+    const found = readSettingsDescriptor(settings, CANONICAL_TUI_SETTINGS_NS)
     this.descriptorCache = found
     // The cache is per-synchronous-evaluation only: reset on the next
     // macrotask so a settings change is picked up.
@@ -307,7 +486,7 @@ class DirectFooterCustomItems implements FooterCustomItemsConfig {
   private readConfigRaw(): { value: unknown; failed: boolean } {
     try {
       const settings = this.ctx.get('settings') as SettingsServiceLike | undefined
-      const descriptor = readSettingsDescriptor(settings, 'tui-app')
+      const descriptor = readSettingsDescriptor(settings, CANONICAL_TUI_SETTINGS_NS)
       if (descriptor === undefined) return { value: undefined, failed: true }
       const user = descriptor.user
       if (user === undefined) return { value: undefined, failed: false }
@@ -831,7 +1010,7 @@ export class DirectCredentialConfig implements CredentialConfig {
 
   onChanged(listener: () => void): () => void {
     const disposers: Array<() => void> = []
-    const register = (event: string): void => {
+    const register = (event: 'credentials/reference-updated' | 'credentials/record-updated'): void => {
       const dispose = this.ctx.on?.(event, listener)
       if (typeof dispose === 'function') disposers.push(dispose as () => void)
     }
@@ -940,6 +1119,18 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
     // array copy would still alias the Host's method rows).
     return authorizationTargets(authorization?.list() ?? [])
       .map(target => ({ ...target, methods: target.methods.map(method => ({ ...method })) }))
+  }
+
+  /** The in-process registry is read on demand: there is no mirror to refresh
+   *  and no Connection generation to fence. */
+  refreshTargets(): Promise<void> {
+    return Promise.resolve()
+  }
+
+  targetsState(): 'ready' | 'unavailable' {
+    // Direct is always current: `unavailable` means the official plugin is not
+    // installed, which is a definite fact, never an unread snapshot.
+    return this.available() ? 'ready' : 'unavailable'
   }
 
   onEvent(listener: (event: AuthorizationFlowEvent) => void): () => void {
@@ -1244,9 +1435,17 @@ export interface WebServerServiceLike {
  * root — a Client never supplies one. */
 export class DirectAccountConfig implements AccountConfig {
   private readonly ctx: HostContextLike
+  private readonly observationLeases = new WeakMap<object, { epoch: number; active: boolean }>()
+  private readonly serviceInvalidationListeners = new Set<() => void>()
+  private observationEpoch = 0
 
   constructor(ctx: HostContextLike) {
     this.ctx = ctx
+    ctx.on?.('internal/service', name => {
+      if (name !== 'deepseekAccount') return
+      this.invalidateObservations()
+      for (const listener of [...this.serviceInvalidationListeners]) listener()
+    })
   }
 
   private account(): DeepSeekAccountServiceLike | undefined {
@@ -1257,26 +1456,56 @@ export class DirectAccountConfig implements AccountConfig {
     return this.account() !== undefined
   }
 
-  async getState(): Promise<AccountView> {
-    const account = this.account()
-    if (account === undefined) throw new Error('DeepSeek Account service unavailable')
-    return accountViewOf(await account.getState())
+  private observe(view: AccountView, lease: object = {}): AccountObservation {
+    this.observationLeases.set(lease, { epoch: this.observationEpoch, active: true })
+    return { view, lease: lease as AccountObservationLease }
   }
 
-  async getProfile(client: AccountClientMetadata): Promise<AccountProfileOutcome> {
+  private invalidateObservations(): void {
+    this.observationEpoch += 1
+  }
+
+  private assertObservation(lease: AccountObservationLease, method: string): void {
+    const record = this.observationLeases.get(lease)
+    if (record === undefined || !record.active || record.epoch !== this.observationEpoch || !this.available()) {
+      throw new SupersededReadError(`Direct account.${method} does not have a current Host observation`)
+    }
+  }
+
+  isObservationCurrent(lease: AccountObservationLease): boolean {
+    const record = this.observationLeases.get(lease)
+    return record !== undefined && record.active && record.epoch === this.observationEpoch && this.available()
+  }
+
+  async getState(): Promise<AccountObservation> {
+    const account = this.account()
+    if (account === undefined) throw new Error('DeepSeek Account service unavailable')
+    const epoch = this.observationEpoch
+    const view = accountViewOf(await account.getState())
+    if (epoch !== this.observationEpoch || !this.available()) {
+      throw new SupersededReadError('Direct account.getState was superseded by Host observation invalidation')
+    }
+    return this.observe(view)
+  }
+
+  async getProfile(client: AccountClientMetadata, lease: AccountObservationLease): Promise<AccountProfileOutcome> {
+    this.assertObservation(lease, 'getProfile')
     const account = this.account()
     if (account === undefined) throw new Error('DeepSeek Account service unavailable')
     const outcome = await account.getProfile({ ...client })
+    this.assertObservation(lease, 'getProfile')
     if (outcome === null) return null
     const value = outcome as { status?: unknown; value?: unknown }
     if (value.status !== 'ready') return { status: 'failed' }
     return { status: 'ready', value: accountProfileOf(value.value) }
   }
 
-  async getBalance(client: AccountClientMetadata): Promise<AccountBalanceOutcome> {
+  async getBalance(client: AccountClientMetadata, lease: AccountObservationLease): Promise<AccountBalanceOutcome> {
+    this.assertObservation(lease, 'getBalance')
     const account = this.account()
     if (account === undefined) throw new Error('DeepSeek Account service unavailable')
     const outcome = await account.getBalance({ ...client })
+    this.assertObservation(lease, 'getBalance')
     if (outcome === null) return null
     const value = outcome as { status?: unknown; value?: unknown; bonusWallets?: unknown }
     if (value.status !== 'ready') return { status: 'failed' }
@@ -1287,25 +1516,73 @@ export class DirectAccountConfig implements AccountConfig {
     }
   }
 
-  watch(signal: AbortSignal): AsyncIterable<AccountView> {
-    const account = this.account()
-    if (account === undefined) {
-      // No service: an EMPTY subscription rather than a fabricated state.
-      return (async function* empty(): AsyncGenerator<AccountView> {})()
-    }
-    const source = account.watch(signal)
-    return (async function* projected(): AsyncGenerator<AccountView> {
-      const iterator = source[Symbol.asyncIterator]()
+  watch(signal: AbortSignal): AsyncIterable<AccountWatchEvent> {
+    const owner = this
+    return (async function* directAccountWatch(): AsyncGenerator<AccountWatchEvent> {
+      const lease = {}
+      const watchEpoch = owner.observationEpoch
+      const account = owner.account()
+      if (account === undefined) {
+        owner.invalidateObservations()
+        yield { kind: 'invalidated', reason: 'service-unavailable' }
+        return
+      }
+      const revokeWatchLease = (): void => {
+        const record = owner.observationLeases.get(lease)
+        if (record !== undefined) record.active = false
+      }
+      const invalidateOwner = (): void => {
+        owner.invalidateObservations()
+        revokeWatchLease()
+      }
+      let resolveServiceChanged!: () => void
+      const serviceChanged = new Promise<void>(resolve => { resolveServiceChanged = resolve })
+      const onServiceChanged = (): void => { resolveServiceChanged() }
+      owner.serviceInvalidationListeners.add(onServiceChanged)
+      if (owner.observationEpoch !== watchEpoch) resolveServiceChanged()
       try {
-        for (;;) {
-          const next = await iterator.next()
-          if (next.done === true) return
-          yield accountViewOf(next.value)
+        const source = account.watch(signal)
+        const iterator = source[Symbol.asyncIterator]()
+        try {
+          while (!signal.aborted) {
+            const nextResult = iterator.next().then(
+              result => ({ kind: 'next' as const, result }),
+              error => ({ kind: 'error' as const, error }),
+            )
+            const winner = await Promise.race([
+              nextResult,
+              serviceChanged.then(() => ({ kind: 'service-changed' as const })),
+            ])
+            if (winner.kind === 'service-changed') {
+              revokeWatchLease()
+              yield { kind: 'invalidated', reason: 'service-changed' }
+              return
+            }
+            if (winner.kind === 'error') throw winner.error
+            if (owner.observationEpoch !== watchEpoch) {
+              revokeWatchLease()
+              yield { kind: 'invalidated', reason: 'service-changed' }
+              return
+            }
+            if (winner.result.done === true) {
+              invalidateOwner()
+              if (!signal.aborted) yield { kind: 'invalidated', reason: 'watch-ended' }
+              return
+            }
+            if (signal.aborted) return
+            yield { kind: 'current', observation: owner.observe(accountViewOf(accountUpdateStateOf(winner.result.value)), lease) }
+          }
+        } finally {
+          await iterator.return?.(undefined)
+        }
+      } catch {
+        if (!signal.aborted) {
+          invalidateOwner()
+          yield { kind: 'invalidated', reason: 'watch-failed' }
         }
       } finally {
-        // Ending the signal is the only cancellation (never cancelSignIn):
-        // the official iterator owns its own listener release.
-        await iterator.return?.(undefined)
+        owner.serviceInvalidationListeners.delete(onServiceChanged)
+        revokeWatchLease()
       }
     })()
   }
@@ -1334,34 +1611,43 @@ export class DirectAccountConfig implements AccountConfig {
     return url.origin
   }
 
-  async startSignIn(client: AccountClientMetadata): Promise<AccountView> {
+  async startSignIn(client: AccountClientMetadata, lease: AccountObservationLease): Promise<AccountObservation> {
+    this.assertObservation(lease, 'startSignIn')
     const account = this.account()
     if (account === undefined) throw new Error('DeepSeek Account service unavailable')
     const callbackOrigin = this.getCallbackOrigin()
     if (callbackOrigin === undefined) throw new Error('the Host browser callback listener is unavailable')
     // `web` is the only login source a TUI may present (never Desktop).
-    return accountViewOf(await account.startSignIn({ ...client }, callbackOrigin, 'web'))
+    const view = accountViewOf(await account.startSignIn({ ...client }, callbackOrigin, 'web'))
+    this.assertObservation(lease, 'startSignIn')
+    return { view, lease }
   }
 
-  async cancelSignIn(id: string): Promise<AccountView> {
+  async cancelSignIn(id: string, lease: AccountObservationLease): Promise<AccountObservation> {
+    this.assertObservation(lease, 'cancelSignIn')
     const account = this.account()
     if (account === undefined) throw new Error('DeepSeek Account service unavailable')
-    return accountViewOf(await account.cancelSignIn(id))
+    const view = accountViewOf(await account.cancelSignIn(id))
+    this.assertObservation(lease, 'cancelSignIn')
+    return { view, lease }
   }
 
-  async signOut(client: AccountClientMetadata): Promise<AccountView> {
+  async signOut(client: AccountClientMetadata, lease: AccountObservationLease): Promise<AccountObservation> {
+    this.assertObservation(lease, 'signOut')
     const account = this.account()
     if (account === undefined) throw new Error('DeepSeek Account service unavailable')
-    return accountViewOf(await account.signOut({ ...client }))
+    const view = accountViewOf(await account.signOut({ ...client }))
+    this.assertObservation(lease, 'signOut')
+    return { view, lease }
   }
 
-  hasRunningAccountTasks(): boolean {
+  async hasRunningAccountTasks(lease: AccountObservationLease): Promise<boolean> {
+    this.assertObservation(lease, 'hasRunningAccountTasks')
     // Mirrors the official `isRunningAccountTask` predicate: a running Agent
-    // whose latest bound request used the account provider. The predicate is
-    // kept structural so this adapter never imports (or duplicates) a Host
-    // package; the Host's own signed-out listener owns the actual cancel.
-    const agents = this.ctx.get('agents') as { list?(): readonly unknown[] } | undefined
-    if (typeof agents?.list !== 'function') return false
+    // whose latest bound request used the account provider. The Host's own
+    // signed-out listener remains the cancellation owner.
+    const agents = this.ctx.get('agents') as { list(): readonly unknown[] } | undefined
+    if (agents === undefined) throw new Error('Host Agent service unavailable')
     return agents.list().some(candidate => {
       const agent = candidate as {
         readonly status?: unknown
@@ -1380,6 +1666,26 @@ export class DirectAccountConfig implements AccountConfig {
  *  provider, so the adapter must not advertise it). */
 function isLoopbackUrlHost(hostname: string): boolean {
   return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]'
+}
+
+/** The rc.2 `account/watch` frame envelope: every frame is
+ *  `{type: 'snapshot' | 'credentials-changed', state}`. This is the external
+ *  Host data boundary, so the published envelope is checked here and the
+ *  payload is handed to `accountViewOf` as a plain detached copy. A
+ *  `credentials-changed` frame is a fresh snapshot of the same view, never a
+ *  sign-out: only the Host-approved view shape is forwarded. */
+function accountUpdateStateOf(value: unknown): unknown {
+  if (typeof value !== 'object' || value === null) {
+    throw new Error('DeepSeek Account watch frame is not an AccountUpdate')
+  }
+  const update = value as { readonly type?: unknown; readonly state?: unknown }
+  if (
+    (update.type !== 'snapshot' && update.type !== 'credentials-changed')
+    || typeof update.state !== 'object' || update.state === null
+  ) {
+    throw new Error('DeepSeek Account watch frame is not an AccountUpdate')
+  }
+  return update.state
 }
 
 /** A detached account state copy (no Host record is aliased). */
@@ -1465,27 +1771,6 @@ export class DirectPermissionConfig implements PermissionConfig {
     ])
   }
 
-  approvalOverrideAvailable(): boolean {
-    // Direct reads and writes the official session approval policy in-process.
-    return true
-  }
-
-  approvalOverrideOf(sessionId: string): 'ask' | 'never' | undefined {
-    const approval = this.ctx.get('approval') as ApprovalServiceLike | undefined
-    if (approval === undefined) return undefined
-    // The semantic port resolves the session id to the EXACT live Agent
-    // internally; the session object never crosses the boundary.
-    const agent = this.agentFor(sessionId) as { readonly session: unknown } | undefined
-    if (agent === undefined) return undefined
-    try {
-      return approval.overrideOf(agent.session)
-    } catch {
-      // A throwing approval service degrades to "no override", never
-      // breaks the settings read.
-      return undefined
-    }
-  }
-
   async applyPermissionPreset(
     sessionId: string,
     presetId: string,
@@ -1546,12 +1831,64 @@ export class DirectPresetDefaultConfig implements PresetDefaultConfig {
   }
 }
 
-/** The Direct subagent model-selection config: the OFFICIAL
- * `subagentModelSelection` service (`subagent-model-selection-settings`
- * entry) owns the live preference read; the entry's Settings form is the
- * WRITE surface — mounting the service alone does NOT enable anything;
- * the section defaults to disabled with an empty allowlist, and each NEW
- * session samples the preference at composition time. */
+/** Official typed sections use the caller's captured Settings authority and CAS revision. */
+async function mutateDirectSection(
+  ctx: HostContextLike,
+  namespace: string,
+  ops: readonly SettingsMutationOp[],
+  expectedRevision: number,
+  generation: object,
+): Promise<SectionMutationOutcome> {
+  const settings = ctx.get('settings') as SettingsServiceLike | undefined
+  if (settings === undefined || !Object.is(settingsAuthorityOf(settings), generation)) {
+    return { kind: 'rejected', reason: 'the Host settings authority changed; refresh before saving' }
+  }
+  if (ops.length === 0) return { kind: 'rejected', reason: 'no settings fields were staged' }
+  try {
+    await settings.mutate(namespace, ops, expectedRevision)
+    return { kind: 'accepted' }
+  } catch (error) {
+    const reason = safeErrorMessage(error)
+    if ((error as { readonly code?: unknown } | null)?.code === 'SETTINGS_CONFLICT') {
+      return { kind: 'conflict', reason }
+    }
+    // ConfigEditor can persist before Loader reconciliation throws. An unknown
+    // dispatched failure therefore cannot prove the profile stayed unchanged.
+    return { kind: 'outcome-unconfirmed', reason }
+  }
+}
+
+export class DirectSubagentLimitsConfig implements SubagentLimitsConfig {
+  private readonly ctx: HostContextLike
+
+  constructor(ctx: HostContextLike) {
+    this.ctx = ctx
+  }
+
+  read(): SectionRead<SubagentLimits> {
+    return readDirectSection(this.ctx, 'subagent', projectSubagentLimits)
+  }
+
+  async refresh(): Promise<void> {}
+
+  async mutate(
+    patch: SectionPatch<SubagentLimits>,
+    expectedRevision: number,
+    generation: object,
+  ): Promise<SectionMutationOutcome> {
+    const ops: SettingsMutationOp[] = []
+    for (const field of ['maxDepth', 'maxActiveSubagents'] as const) {
+      const edit = patch[field]
+      if (edit === undefined) continue
+      ops.push(edit.kind === 'reset'
+        ? { op: 'unset', path: [field] }
+        : { op: 'set', path: [field], value: edit.value })
+    }
+    return mutateDirectSection(this.ctx, 'subagent', ops, expectedRevision, generation)
+  }
+}
+
+/** The official model-selection section is sampled by new top-level Sessions. */
 export class DirectSubagentModelSelectionConfig implements SubagentModelSelectionConfig {
   private readonly ctx: HostContextLike
 
@@ -1559,73 +1896,137 @@ export class DirectSubagentModelSelectionConfig implements SubagentModelSelectio
     this.ctx = ctx
   }
 
-  private settings(): SettingsServiceLike | undefined {
-    return this.ctx.get('settings') as SettingsServiceLike | undefined
+  read(): SectionRead<SubagentModelSelection> {
+    return readDirectSection(this.ctx, 'subagent-model-selection-settings', projectSubagentModelSelection)
   }
 
-  private selection(): { current(): { enabled: boolean; allowedModels: readonly SubagentAllowedModelRoute[] } } | undefined {
-    return this.ctx.get('subagentModelSelection') as { current(): { enabled: boolean; allowedModels: readonly SubagentAllowedModelRoute[] } } | undefined
-  }
+  async refresh(): Promise<void> {}
 
-  available(): boolean {
-    // The OFFICIAL capability is the subagentModelSelection service (its
-    // settings entry exists only while the service mounts). Without the
-    // official service the /settings rows must not appear at all.
-    return this.selection() !== undefined && this.settings() !== undefined
-  }
-
-  get(): { enabled: boolean; allowedModels: readonly SubagentAllowedModelRoute[] } {
-    const selection = this.selection()
-    // No official service mounted at all: this is the shipped default, and
-    // `available()` already refuses to offer the rows (a caller that still asks
-    // gets the honest absence of a section, not a fabricated saved value).
-    if (selection === undefined) return { enabled: false, allowedModels: [] }
-    // A THROWING official read is UNREADABLE, never `{enabled:false, []}`: the
-    // shipped default is not the stored value, and handing it to a writer would
-    // let `enabled:false` + an empty list overwrite routes the Host still holds.
-    // The read therefore fails loud and every writer/verifier must handle it.
-    const current = selection.current()
-    return {
-      enabled: current.enabled === true,
-      allowedModels: (current.allowedModels ?? []).flatMap(route => {
-        const candidate = route as { provider?: unknown; model?: unknown }
-        return typeof candidate?.provider === 'string' && typeof candidate?.model === 'string'
-          ? [{ provider: candidate.provider, model: candidate.model }]
-          : []
-      }),
+  async mutate(
+    patch: SectionPatch<SubagentModelSelection>,
+    expectedRevision: number,
+    generation: object,
+  ): Promise<SectionMutationOutcome> {
+    const ops: SettingsMutationOp[] = []
+    if (patch.enabled !== undefined) {
+      ops.push(patch.enabled.kind === 'reset'
+        ? { op: 'unset', path: ['enabled'] }
+        : { op: 'set', path: ['enabled'], value: patch.enabled.value })
     }
-  }
-
-  async set(value: { enabled: boolean; allowedModels: readonly SubagentAllowedModelRoute[] }): Promise<void> {
-    // Client-side pre-validation with the OFFICIAL rules (fail fast before
-    // the write; the Host validates again on the section boundary):
-    // duplicates by provider+model, and enabled requires at least one route.
-    assertOfficialSubagentRoutes(value.allowedModels)
-    if (value.enabled && value.allowedModels.length === 0) {
-      throw new Error('enabled subagent model selection requires at least one allowed model')
+    if (patch.allowedModels !== undefined) {
+      ops.push(patch.allowedModels.kind === 'reset'
+        ? { op: 'unset', path: ['allowedModels'] }
+        : { op: 'set', path: ['allowedModels'], value: patch.allowedModels.value.map(route => ({ ...route })) })
     }
-    const settings = this.settings()
-    if (settings === undefined) throw new Error('settings service unavailable')
-    await mutateSettings(settings, 'subagent-model-selection-settings', [
-      { op: 'set', path: ['enabled'], value: value.enabled },
-      { op: 'set', path: ['allowedModels'], value: value.allowedModels.map(route => ({ ...route })) },
-    ])
+    return mutateDirectSection(this.ctx, 'subagent-model-selection-settings', ops, expectedRevision, generation)
   }
 }
 
-/** The official route-list rules (mirrored client-side so a malformed edit
- * fails before the Host write; same messages as the Host validator). */
-function assertOfficialSubagentRoutes(routes: readonly SubagentAllowedModelRoute[]): void {
-  const seen = new Set<string>()
-  for (const route of routes) {
-    if (route.provider.length === 0 || route.model.length === 0) {
-      throw new Error('subagent model selection requires non-empty provider and model ids')
+/** The official Agent-loop scheduling section (`agent-loop`). */
+const AGENT_LOOP_NS = 'agent-loop'
+/** The official DeepSeek session-log contribution section. */
+const SESSION_LOG_UPLOAD_NS = 'session-log-deepseek'
+
+export class DirectAgentLoopSettingsConfig implements AgentLoopSettingsConfig {
+  private readonly ctx: HostContextLike
+
+  constructor(ctx: HostContextLike) {
+    this.ctx = ctx
+  }
+
+  read(): SectionRead<AgentLoopSettings> {
+    return readDirectSection(this.ctx, AGENT_LOOP_NS, projectAgentLoopSettings)
+  }
+
+  async refresh(): Promise<void> {}
+
+  async mutate(
+    patch: SectionPatch<AgentLoopSettings>,
+    expectedRevision: number,
+    generation: object,
+  ): Promise<SectionMutationOutcome> {
+    const ops: SettingsMutationOp[] = []
+    if (patch.maxParallelToolCalls !== undefined) {
+      ops.push(patch.maxParallelToolCalls.kind === 'reset'
+        ? { op: 'unset', path: ['maxParallelToolCalls'] }
+        : { op: 'set', path: ['maxParallelToolCalls'], value: patch.maxParallelToolCalls.value })
     }
-    const key = `${route.provider}\u0000${route.model}`
-    if (seen.has(key)) {
-      throw new Error(`subagent model selection repeats route "${route.provider}/${route.model}"`)
+    return mutateDirectSection(this.ctx, AGENT_LOOP_NS, ops, expectedRevision, generation)
+  }
+}
+
+/** The two numeric caps of the Host-served model-tool shell executor. The
+ *  namespace follows the official dsh-web served-bound rule (`pwsh` preferred),
+ *  never the Client OS; no served row is unavailable. */
+export class DirectShellExecutionSettingsConfig implements ShellExecutionSettingsConfig {
+  private readonly ctx: HostContextLike
+
+  constructor(ctx: HostContextLike) {
+    this.ctx = ctx
+  }
+
+  read(): SectionRead<ShellExecutionSettings> {
+    return readDirectShellExecutionSection(this.ctx)
+  }
+
+  async refresh(): Promise<void> {}
+
+  async mutate(
+    patch: SectionPatch<ShellExecutionSettings>,
+    expectedRevision: number,
+    generation: object,
+    expectedExecutor: HostShellExecutor,
+  ): Promise<SectionMutationOutcome> {
+    if (patch.executor !== undefined) {
+      return { kind: 'rejected', reason: 'the Host shell executor identity is a Host observation, not an editable setting' }
     }
-    seen.add(key)
+    // Re-resolve the served-bound row at dispatch: a profile change between
+    // the page's read and Save must not write the other namespace.
+    const current = readDirectShellExecutionSection(this.ctx)
+    if (current.kind !== 'ready') {
+      return { kind: 'rejected', reason: current.reason }
+    }
+    if (current.effective.executor !== expectedExecutor) {
+      return { kind: 'rejected', reason: 'the Host served shell row changed; refresh before saving' }
+    }
+    const namespace = SHELL_EXECUTOR_ROWS.find(row => row.executor === current.effective.executor)!.namespace
+    const ops: SettingsMutationOp[] = []
+    for (const field of ['timeoutMs', 'maxOutputBytes'] as const) {
+      const edit = patch[field]
+      if (edit === undefined) continue
+      ops.push(edit.kind === 'reset'
+        ? { op: 'unset', path: [field] }
+        : { op: 'set', path: [field], value: edit.value })
+    }
+    return mutateDirectSection(this.ctx, namespace, ops, expectedRevision, generation)
+  }
+}
+
+export class DirectSessionLogUploadConfig implements SessionLogUploadConfig {
+  private readonly ctx: HostContextLike
+
+  constructor(ctx: HostContextLike) {
+    this.ctx = ctx
+  }
+
+  read(): SectionRead<SessionLogUpload> {
+    return readDirectSection(this.ctx, SESSION_LOG_UPLOAD_NS, projectSessionLogUpload)
+  }
+
+  async refresh(): Promise<void> {}
+
+  async mutate(
+    patch: SectionPatch<SessionLogUpload>,
+    expectedRevision: number,
+    generation: object,
+  ): Promise<SectionMutationOutcome> {
+    const ops: SettingsMutationOp[] = []
+    if (patch.enabled !== undefined) {
+      ops.push(patch.enabled.kind === 'reset'
+        ? { op: 'unset', path: ['enabled'] }
+        : { op: 'set', path: ['enabled'], value: patch.enabled.value })
+    }
+    return mutateDirectSection(this.ctx, SESSION_LOG_UPLOAD_NS, ops, expectedRevision, generation)
   }
 }
 
@@ -1637,9 +2038,6 @@ const WEB_SEARCH_API_NS = 'web-deepseek-api'
 /** The credential reference the official DeepSeek web providers resolve
  *  (`apiKeyEnv`'s shipped default); the TUI never writes a literal key. */
 const WEB_API_KEY_REF = 'DEEPSEEK_API_KEY'
-/** Shipped range of the official `web-deepseek-api.count` schema. */
-const WEB_SEARCH_API_COUNT_MIN = 1
-const WEB_SEARCH_API_COUNT_MAX = 50
 
 /** The Direct Web provider config (`ctx.settings` + `ctx.credentials`): the
  *  official `web` / `web-deepseek-api` sections behind the semantic
@@ -1675,22 +2073,48 @@ export class DirectWebProviderConfig implements WebProviderConfig {
   async read(): Promise<WebProviderSettings | undefined> {
     const settings = this.settings()
     if (settings === undefined) return undefined
+    // Availability is the cheap synchronous pre-check: a half-mounted
+    // configuration is UNAVAILABLE before the credential store is consulted.
+    if (readSettingsDescriptor(settings, WEB_PROVIDER_NS) === undefined
+      || readSettingsDescriptor(settings, WEB_SEARCH_API_NS) === undefined) return undefined
+    // The credential presence is the read's ONLY await. Every descriptor fact
+    // is projected AFTER it, so the returned value/base/user facts are the
+    // Host state at this SYNCHRONOUS return. That is what lets the command
+    // queue's reset decision and the adapter's revision-checked dispatch act on
+    // the same state instead of a snapshot the credential read outlived.
+    const credential = await this.credentialFact()
     // Both official descriptors must be readable form projections: a missing
-    // or malformed one is UNAVAILABLE, never a defaulted value.
-    const provider = formValueOf(readSettingsDescriptor(settings, WEB_PROVIDER_NS))
+    // or malformed one is UNAVAILABLE, never a defaulted value. The `web`
+    // descriptor is read ONCE: its `value`, `base` and `user` are the same
+    // snapshot, so the layering facts can never be stitched from mismatched
+    // reads.
+    const providerDescriptor = readSettingsDescriptor(settings, WEB_PROVIDER_NS)
+    const provider = formValueOf(providerDescriptor)
     const api = formValueOf(readSettingsDescriptor(settings, WEB_SEARCH_API_NS))
     if (provider === undefined || api === undefined) return undefined
-    const baseURL = api.baseURL
+    // `base`/`user` are official projections (always objects when the section
+    // is readable). A missing/non-object layer is UNAVAILABLE — never "there is
+    // no USER override".
+    const providerSelection = webProviderSelectionFrom(providerDescriptor)
+    if (providerSelection === undefined) return undefined
+    // There is NO single `baseURL` requirement: an unset Search/Fetch endpoint
+    // keeps the read ready (the Host selects the actual provider at request
+    // time). A missing/foreign billing value, though, is UNAVAILABLE — never a
+    // silent `auto`.
+    const searchBilling = readWebApiBilling(api, 'searchBilling')
+    const fetchBilling = readWebApiBilling(api, 'fetchBilling')
     const count = api.count
     const sendOriginalQuestion = api.sendOriginalQuestion
-    if (typeof baseURL !== 'string' || baseURL === '') return undefined
+    if (searchBilling === undefined || fetchBilling === undefined) return undefined
     if (typeof count !== 'number' || !Number.isInteger(count)) return undefined
     if (typeof sendOriginalQuestion !== 'boolean') return undefined
     return {
       searchProvider: optionalId(provider.searchProvider),
       fetchProvider: optionalId(provider.fetchProvider),
-      api: { baseURL, count, sendOriginalQuestion },
-      credential: await this.credentialFact(),
+      providerSelection,
+      api: { searchBilling, fetchBilling, count, sendOriginalQuestion },
+      advanced: webApiAdvancedFactsOf(api),
+      credential,
     }
   }
 
@@ -1709,12 +2133,20 @@ export class DirectWebProviderConfig implements WebProviderConfig {
 
   async setSearchProvider(id: 'deepseek-official' | 'deepseek-search-api'): Promise<void> {
     assertSearchProviderId(id)
-    await this.mutate('web', [{ op: 'set', path: ['searchProvider'], value: id }])
+    await this.mutate('web', [{ op: 'set', path: ['searchProvider'], value: id }], descriptor => {
+      const current = formValueOf(descriptor)
+      if (current === undefined) throw new Error('the official Host Web settings section is unreadable')
+      assertSearchProviderReplaceable(current.searchProvider)
+    })
   }
 
   async setFetchProvider(id: 'http' | 'deepseek-fetch-api'): Promise<void> {
     assertFetchProviderId(id)
-    await this.mutate('web', [{ op: 'set', path: ['fetchProvider'], value: id }])
+    await this.mutate('web', [{ op: 'set', path: ['fetchProvider'], value: id }], descriptor => {
+      const current = formValueOf(descriptor)
+      if (current === undefined) throw new Error('the official Host Web settings section is unreadable')
+      assertFetchProviderReplaceable(current.fetchProvider)
+    })
   }
 
   async setSearchApiCount(count: number): Promise<void> {
@@ -1726,9 +2158,54 @@ export class DirectWebProviderConfig implements WebProviderConfig {
     await this.mutate(WEB_SEARCH_API_NS, [{ op: 'set', path: ['sendOriginalQuestion'], value: enabled }])
   }
 
-  async setSearchApiBaseURL(url: string): Promise<void> {
-    assertSearchApiBaseURL(url)
-    await this.mutate(WEB_SEARCH_API_NS, [{ op: 'set', path: ['baseURL'], value: url }])
+  async setSearchBilling(mode: 'auto' | 'account' | 'api-key'): Promise<void> {
+    assertWebApiBilling(mode)
+    await this.mutate(WEB_SEARCH_API_NS, [{ op: 'set', path: ['searchBilling'], value: mode }])
+  }
+
+  async setFetchBilling(mode: 'auto' | 'account' | 'api-key'): Promise<void> {
+    assertWebApiBilling(mode)
+    await this.mutate(WEB_SEARCH_API_NS, [{ op: 'set', path: ['fetchBilling'], value: mode }])
+  }
+
+  async restoreSearchProvider(): Promise<void> {
+    await this.restoreProvider('searchProvider')
+  }
+
+  async restoreFetchProvider(): Promise<void> {
+    await this.restoreProvider('fetchProvider')
+  }
+
+  /** The ONE official USER-layer reset of one provider selection: a single
+   *  `unset` path op at the descriptor revision the reset decision read. A
+   *  readable section whose USER layer does not own the field is a real no-op
+   *  (there is nothing to remove); an unreadable `base`/`user` layer is an
+   *  error, never an assumed "no override". This deliberately does NOT consult
+   *  the effective value: a custom route is a reason to refuse an explicit SET,
+   *  never a reason to hide an official reset of the USER layer.
+   *
+   *  The synchronous descriptor read below is the CAS source on purpose: it runs
+   *  in the same Promise-continuation chain as the command owner's fresh read
+   *  (after that read's final synchronous projection there is no macrotask
+   *  boundary before this method), so the revision submitted as
+   *  `expectedRevision` belongs to the state the user's reset intent was just
+   *  validated against. A Host writer's SettingsForms/ConfigEditor commit is
+   *  file-I/O based and cannot interleave there; any writer that commits after
+   *  this read makes the CAS fail rather than silently overwriting. */
+  private async restoreProvider(field: 'searchProvider' | 'fetchProvider'): Promise<void> {
+    const settings = this.settings()
+    if (settings === undefined) throw new Error('settings service unavailable')
+    const descriptor = readSettingsDescriptor(settings, WEB_PROVIDER_NS)
+    if (descriptor === undefined) {
+      throw new Error(`the official Host settings section "${WEB_PROVIDER_NS}" is not mounted`)
+    }
+    const user = plainRecordOf(descriptor.user)
+    const base = plainRecordOf(descriptor.base)
+    if (user === undefined || base === undefined) {
+      throw new Error('the official Host Web settings section does not report its USER/base layers')
+    }
+    if (!Object.hasOwn(user, field)) return
+    await settings.mutate(WEB_PROVIDER_NS, [{ op: 'unset', path: [field] }], descriptor.revision)
   }
 
   /** One revision-checked official settings mutation. The section must be a
@@ -1736,74 +2213,48 @@ export class DirectWebProviderConfig implements WebProviderConfig {
    *  than a write against an invented namespace. */
   private async mutate(
     ns: typeof WEB_PROVIDER_NS | typeof WEB_SEARCH_API_NS,
-    ops: readonly { op: 'set'; path: readonly string[]; value: unknown }[],
+    ops: readonly SettingsMutationOp[],
+    validate?: (descriptor: SettingsDescriptorLike) => void,
   ): Promise<void> {
     const settings = this.settings()
     if (settings === undefined) throw new Error('settings service unavailable')
-    if (readSettingsDescriptor(settings, ns) === undefined) {
+    const descriptor = readSettingsDescriptor(settings, ns)
+    if (descriptor === undefined) {
       throw new Error(`the official Host settings section "${ns}" is not mounted`)
     }
-    await mutateSettings(settings, ns, ops)
+    validate?.(descriptor)
+    // This descriptor both validates the provider choice and supplies the CAS
+    // token; never reread a newer revision after making that decision.
+    await settings.mutate(ns, ops, descriptor.revision)
   }
 }
 
 /** The form-projected value of one settings descriptor (volatile fields only),
  *  or `undefined` when the descriptor or its value is unusable. */
 function formValueOf(descriptor: SettingsDescriptorLike | undefined): Record<string, unknown> | undefined {
-  const value = descriptor?.value
+  return plainRecordOf(descriptor?.value)
+}
+
+/** One detached plain record, or `undefined` for a non-object value. */
+function plainRecordOf(value: unknown): Record<string, unknown> | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
   return value as Record<string, unknown>
+}
+
+/** The SAME `web` descriptor's per-capability layering facts, or `undefined`
+ *  when either the `base` or the `user` projection is unreadable. */
+function webProviderSelectionFrom(
+  descriptor: SettingsDescriptorLike | undefined,
+): WebProviderSettings['providerSelection'] | undefined {
+  const search = webProviderSelectionFactsOf(descriptor?.base, descriptor?.user, 'searchProvider')
+  const fetch = webProviderSelectionFactsOf(descriptor?.base, descriptor?.user, 'fetchProvider')
+  if (search === undefined || fetch === undefined) return undefined
+  return { search, fetch }
 }
 
 /** A configured provider id, or `undefined` for an absent/empty selection. */
 function optionalId(value: unknown): string | undefined {
   return typeof value === 'string' && value !== '' ? value : undefined
-}
-
-/** The official candidate ids (the only values this UI ever writes). */
-function assertSearchProviderId(id: string): void {
-  if (id !== 'deepseek-official' && id !== 'deepseek-search-api') {
-    throw new Error(`unsupported web search provider id "${id}"`)
-  }
-}
-
-function assertFetchProviderId(id: string): void {
-  if (id !== 'http' && id !== 'deepseek-fetch-api') {
-    throw new Error(`unsupported web fetch provider id "${id}"`)
-  }
-}
-
-/** The official `count` rule, checked before the write (the Host validates
- *  again on the section boundary). */
-function assertSearchApiCount(count: number): void {
-  if (!Number.isInteger(count) || count < WEB_SEARCH_API_COUNT_MIN || count > WEB_SEARCH_API_COUNT_MAX) {
-    throw new Error(`the web search API count must be an integer from ${WEB_SEARCH_API_COUNT_MIN} through ${WEB_SEARCH_API_COUNT_MAX}`)
-  }
-}
-
-/**
- * The API base rule for the human write entry: an absolute `https:` URL with no
- * userinfo, query, fragment, or trailing `/search` / `/fetch` action name. The
- * official provider still owns runtime availability — this only keeps an
- * unusable or dangerous base out of the durable configuration.
- */
-function assertSearchApiBaseURL(url: string): void {
-  let parsed: URL
-  try {
-    parsed = new URL(url)
-  } catch {
-    throw new Error('the Search/Fetch API endpoint must be an absolute https:// URL')
-  }
-  if (parsed.protocol !== 'https:') throw new Error('the Search/Fetch API endpoint must use https://')
-  if (parsed.username !== '' || parsed.password !== '') {
-    throw new Error('the Search/Fetch API endpoint must not carry credentials in the URL')
-  }
-  if (parsed.search !== '' || parsed.hash !== '') {
-    throw new Error('the Search/Fetch API endpoint must not carry a query or fragment')
-  }
-  if (/\/(?:search|fetch)$/u.test(parsed.pathname)) {
-    throw new Error('the Search/Fetch API endpoint is the API base: drop the trailing /search or /fetch action')
-  }
 }
 
 /** The official profile entry id of the Host row that owns the built-in
@@ -1869,5 +2320,555 @@ class DirectVisualToolsConfig implements VisualToolsConfig {
     await mutateSettings(settings, VISUAL_TOOLS_NS, [
       { op: 'set', path: ['enabled'], value: enabled },
     ], expectedRevision)
+  }
+}
+
+/** The official profile entry id of the Host row that owns the Web startup
+ *  preference (its Loader row id is also its Settings namespace). */
+const WEB_STARTUP_PREFERENCE_NS = 'pi-tui-web-preferences'
+
+/**
+ * The Direct Web startup preference: the `pi-tui-web-preferences` form
+ * section's effective `autoStart` value. The write is a revision-checked path
+ * mutation of the exact `autoStart` field — never a whole-section replace, so
+ * an unrelated or unknown field is never pinned into the USER layer.
+ *
+ * It deliberately does NOT read or touch the private `piTuiWebAccess` service:
+ * the preference is the NEXT Host launch's behavior, and the current Host's
+ * Web state stays that service's sole authority.
+ */
+class DirectWebStartupPreferenceConfig implements WebStartupPreferenceConfig {
+  private readonly ctx: HostContextLike
+
+  constructor(ctx: HostContextLike) {
+    this.ctx = ctx
+  }
+
+  read(): WebStartupPreferenceState | undefined {
+    const settings = this.ctx.get('settings') as SettingsServiceLike | undefined
+    const descriptor = readSettingsDescriptor(settings, WEB_STARTUP_PREFERENCE_NS)
+    if (descriptor === undefined) return undefined
+    const value = formValueOf(descriptor)
+    const autoStart = value?.autoStart
+    // A missing or non-boolean effective value is NOT the schema default:
+    // report the section as unreadable instead of inventing `false`.
+    if (typeof autoStart !== 'boolean') return undefined
+    const revision = descriptor.revision
+    // Without the read revision the decision cannot be submitted conditionally;
+    // report the section unreadable rather than allowing a silent overwrite.
+    if (typeof revision !== 'number') return undefined
+    const user = descriptor.user
+    const userSection = typeof user === 'object' && user !== null && !Array.isArray(user)
+      ? user as Record<string, unknown>
+      : undefined
+    return {
+      autoStart,
+      revision,
+      userOverridden: userSection?.autoStart !== undefined,
+    }
+  }
+
+  async setAutoStart(value: boolean, expectedRevision: number): Promise<void> {
+    const settings = this.ctx.get('settings') as SettingsServiceLike | undefined
+    if (settings === undefined) throw new Error('the Host settings service is unavailable')
+    if (readSettingsDescriptor(settings, WEB_STARTUP_PREFERENCE_NS) === undefined) {
+      throw new Error(`the "pi-tui-web-preferences" Host settings section is not mounted`)
+    }
+    // Submit the revision the USER's decision was read at — never a revision
+    // observed at write time, which would turn an external edit into a silent
+    // overwrite.
+    await mutateSettings(settings, WEB_STARTUP_PREFERENCE_NS, [
+      { op: 'set', path: ['autoStart'], value },
+    ], expectedRevision)
+  }
+}
+
+/** The official profile entry id of the Host row that owns the startup backend
+ *  selection (its Loader row id is also its Settings namespace). */
+const TUI_STARTUP_NS = 'tui-startup'
+
+/**
+ * The Direct startup backend preference: the `tui-startup` form section's
+ * effective `backend` value. The write is a revision-checked path mutation of
+ * the exact `backend` field — never a whole-section replace, so an unrelated or
+ * unknown field is never pinned into the USER layer.
+ *
+ * FAIL-CLOSED: an effective `backend` value outside `direct|daemon` is NOT a
+ * read — `read()` returns `undefined` rather than mapping it to `direct`, so an
+ * illegal Profile value without an environment override fails closed in the
+ * launcher and the Settings row reports it as unreadable.
+ */
+class DirectBackendStartupPreferenceConfig implements BackendStartupPreferenceConfig {
+  private readonly ctx: HostContextLike
+
+  constructor(ctx: HostContextLike) {
+    this.ctx = ctx
+  }
+
+  read(): BackendStartupPreferenceState | undefined {
+    const settings = this.ctx.get('settings') as SettingsServiceLike | undefined
+    const descriptor = readSettingsDescriptor(settings, TUI_STARTUP_NS)
+    if (descriptor === undefined) return undefined
+    const value = formValueOf(descriptor)
+    const backend = value?.backend
+    if (!isPublicBackendValue(backend)) return undefined
+    const revision = descriptor.revision
+    if (typeof revision !== 'number') return undefined
+    const user = descriptor.user
+    const userSection = typeof user === 'object' && user !== null && !Array.isArray(user)
+      ? user as Record<string, unknown>
+      : undefined
+    return { backend, revision, userOverridden: userSection?.backend !== undefined }
+  }
+
+  async setBackend(value: PublicBackendValue, expectedRevision: number): Promise<void> {
+    const settings = this.ctx.get('settings') as SettingsServiceLike | undefined
+    if (settings === undefined) throw new Error('the Host settings service is unavailable')
+    if (readSettingsDescriptor(settings, TUI_STARTUP_NS) === undefined) {
+      throw new Error('the "tui-startup" Host settings section is not mounted')
+    }
+    await mutateSettings(settings, TUI_STARTUP_NS, [
+      { op: 'set', path: ['backend'], value },
+    ], expectedRevision)
+  }
+
+  async readFresh(): Promise<BackendStartupPreferenceState | undefined> {
+    // Direct's Host is in-process: the settings service read IS the live
+    // authoritative config read. There is no snapshot to force past.
+    return this.read()
+  }
+}
+
+/** The typed guard for the closed public backend vocabulary. */
+function isPublicBackendValue(value: unknown): value is PublicBackendValue {
+  return value === 'direct' || value === 'daemon'
+}
+
+/** The official profile entry id of the Host row that owns the ACP startup
+ *  preference (its Loader row id is also its Settings namespace). */
+const ACP_STARTUP_PREFERENCE_NS = 'pi-tui-acp-preferences'
+
+/**
+ * The Direct ACP startup preference: the `pi-tui-acp-preferences` form
+ * section's effective `autoStart` value. The write is a revision-checked path
+ * mutation of the exact `autoStart` field — never a whole-section replace, so an
+ * unrelated or unknown field is never pinned into the USER layer.
+ *
+ * It deliberately does NOT read or touch the private `piTuiAcpAccess` service:
+ * the preference is the NEXT Host launch's behavior, and the current Host's
+ * listener state stays that service's sole authority.
+ */
+class DirectAcpStartupPreferenceConfig implements AcpStartupPreferenceConfig {
+  private readonly ctx: HostContextLike
+
+  constructor(ctx: HostContextLike) {
+    this.ctx = ctx
+  }
+
+  read(): AcpStartupPreferenceState | undefined {
+    const settings = this.ctx.get('settings') as SettingsServiceLike | undefined
+    const descriptor = readSettingsDescriptor(settings, ACP_STARTUP_PREFERENCE_NS)
+    if (descriptor === undefined) return undefined
+    const value = formValueOf(descriptor)
+    const autoStart = value?.autoStart
+    if (typeof autoStart !== 'boolean') return undefined
+    const revision = descriptor.revision
+    if (typeof revision !== 'number') return undefined
+    const user = descriptor.user
+    const userSection = typeof user === 'object' && user !== null && !Array.isArray(user)
+      ? user as Record<string, unknown>
+      : undefined
+    return { autoStart, revision, userOverridden: userSection?.autoStart !== undefined }
+  }
+
+  async setAutoStart(value: boolean, expectedRevision: number): Promise<void> {
+    const settings = this.ctx.get('settings') as SettingsServiceLike | undefined
+    if (settings === undefined) throw new Error('the Host settings service is unavailable')
+    if (readSettingsDescriptor(settings, ACP_STARTUP_PREFERENCE_NS) === undefined) {
+      throw new Error(`the "pi-tui-acp-preferences" Host settings section is not mounted`)
+    }
+    await mutateSettings(settings, ACP_STARTUP_PREFERENCE_NS, [
+      { op: 'set', path: ['autoStart'], value },
+    ], expectedRevision)
+  }
+}
+
+
+/** The `servers` map of one descriptor layer (own keys), or undefined. */
+function plainServersOf(layer: unknown): Record<string, unknown> | undefined {
+  if (typeof layer !== 'object' || layer === null || Array.isArray(layer)) return undefined
+  const servers = (layer as { servers?: unknown }).servers
+  return typeof servers === 'object' && servers !== null && !Array.isArray(servers)
+    ? servers as Record<string, unknown>
+    : undefined
+}
+
+/** The official settings namespace the shared Host MCP manager owns. */
+const MCP_SERVER_SOURCES_NS = 'mcp-manager'
+
+/** Whether one detached value equals the `set` value of the same path (the
+ *  read-back proof that an op really is in force). */
+function sameJson(left: unknown, right: unknown): boolean {
+  if (left === right) return true
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right)
+      && left.length === right.length
+      && left.every((item, index) => sameJson(item, right[index]))
+  }
+  if (typeof left === 'object' && left !== null && typeof right === 'object' && right !== null) {
+    const leftKeys = Object.keys(left)
+    return leftKeys.length === Object.keys(right).length
+      && leftKeys.every(key => Object.hasOwn(right, key)
+        && sameJson((left as Record<string, unknown>)[key], (right as Record<string, unknown>)[key]))
+  }
+  return false
+}
+
+/** Read one path off a detached value (own keys only). */
+function valueAt(root: unknown, path: readonly string[]): unknown {
+  let node: unknown = root
+  for (const key of path) {
+    if (typeof node !== 'object' || node === null || !Object.hasOwn(node, key)) return undefined
+    node = (node as Record<string, unknown>)[key]
+  }
+  return node
+}
+
+/**
+ * Whether every op of a committed batch is in force in the read-back. A `set`
+ * must show its value; an `unset` must show the ABSENCE it asked for — either
+ * the whole entry is gone (a User-added Delete) or the specific key/field is
+ * absent (a per-key patch or a reset that restored the base value into a
+ * different shape). An `unset` that merely happens to leave the entry present
+ * is NOT proof, so it can never make the batch look committed.
+ */
+function opsHold(read: McpServerConfiguration, ops: readonly { readonly op: 'set' | 'unset'; readonly path: readonly string[]; readonly value?: unknown }[]): boolean {
+  if (read.kind !== 'ready') return false
+  const entries = new Map(read.entries.map(entry => [entry.name, entry]))
+  for (const op of ops) {
+    const name = op.path[1]
+    if (name === undefined) return false
+    const entry = entries.get(name)
+    if (op.op === 'unset') {
+      // `unset ['servers', name]`: the entry must be GONE from the effective
+      // configuration (a Reset keeps it only when the base still provides it,
+      // which the read-back reports as a present entry — so a Reset is proven
+      // by its `set`-free shape only when the entry disappeared, and otherwise
+      // the batch is not proven and the outcome stays unconfirmed).
+      if (op.path.length === 2) {
+        if (entry !== undefined) return false
+        continue
+      }
+      if (entry === undefined) return false
+      if (valueAt(entry.effective, op.path.slice(2)) !== undefined) return false
+      continue
+    }
+    if (entry === undefined) return false
+    const relative = op.path.slice(2)
+    if (relative.length === 0) continue
+    if (!sameJson(valueAt(entry.effective, relative), op.value)) return false
+  }
+  return true
+}
+
+/** Whether the read-back proves the batch did NOT take effect (the revision
+ *  never moved AND no `set` value is in force). */
+function opsRejected(read: McpServerConfiguration, expectedRevision: number, ops: readonly { readonly op: 'set' | 'unset'; readonly path: readonly string[]; readonly value?: unknown }[]): boolean {
+  if (read.kind !== 'ready') return false
+  if (read.revision !== expectedRevision) return false
+  return !opsHold(read, ops)
+}
+
+/**
+ * The Direct MCP configuration-source read. It projects the EFFECTIVE
+ * `mcp-manager.servers` key set from the official Host settings descriptor —
+ * the only evidence of which manager entries the configuration holds. It
+ * exposes no entry, transport, credential or secret, and it never writes.
+ */
+export class DirectMcpServerSourcesConfig implements McpServerSourcesConfig {
+  private readonly ctx: HostContextLike
+  private readonly generation: () => object
+  /** A stable fallback identity for a composition that never wires the MCP
+   *  manager generation: it can never match a real roster generation, so a
+   *  consumer honestly reports Unknown instead of mixing authorities. */
+  private readonly unwiredGeneration = Object.freeze({})
+
+  constructor(ctx: HostContextLike, generation?: () => object) {
+    this.ctx = ctx
+    this.generation = generation ?? (() => this.unwiredGeneration)
+  }
+
+  read(): McpServerSources {
+    const settings = this.ctx.get('settings') as SettingsServiceLike | undefined
+    if (settings === undefined) {
+      return { kind: 'unavailable', reason: 'the Host settings service is unavailable' }
+    }
+    const descriptor = readSettingsDescriptor(settings, MCP_SERVER_SOURCES_NS)
+    if (descriptor === undefined) {
+      return {
+        kind: 'unavailable',
+        reason: 'the "mcp-manager" Host settings section is not mounted',
+      }
+    }
+    const value = descriptor.value
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      return { kind: 'unavailable', reason: 'the "mcp-manager" settings section is not readable' }
+    }
+    const servers = (value as Record<string, unknown>).servers
+    if (typeof servers !== 'object' || servers === null || Array.isArray(servers)) {
+      return { kind: 'unavailable', reason: 'the "mcp-manager.servers" configuration is not readable' }
+    }
+    const configuredNames = Object.freeze(Object.keys(servers as Record<string, unknown>))
+    return {
+      kind: 'ready',
+      configuredNames,
+      generation: this.generation(),
+      ...descriptor.revision === undefined ? {} : { revision: descriptor.revision },
+    }
+  }
+
+  /** Direct reads the in-process Host authority, so a read is already current. */
+  async refresh(): Promise<void> {}
+}
+
+/**
+ * The Direct FR4 MCP server configuration read/write. It reads the official
+ * `mcp-manager` descriptor's value/base/user layers in ONE `describe()` and
+ * classifies every entry's provenance from that same descriptor; every write
+ * is ONE official `settings.mutate('mcp-manager', ops, expectedRevision)`
+ * call. The write never touches `TuiSettingsDoc` and never writes a file.
+ */
+export class DirectMcpServerConfigurationConfig implements McpServerConfigurationConfig {
+  private readonly ctx: HostContextLike
+  private readonly generation: () => object
+  private readonly unwiredGeneration = Object.freeze({})
+
+  constructor(ctx: HostContextLike, generation?: () => object) {
+    this.ctx = ctx
+    this.generation = generation ?? (() => this.unwiredGeneration)
+  }
+
+  read(): McpServerConfiguration {
+    const settings = this.ctx.get('settings') as SettingsServiceLike | undefined
+    if (settings === undefined) {
+      return { kind: 'unavailable', reason: 'the Host settings service is unavailable' }
+    }
+    let descriptor: SettingsDescriptorLike | undefined
+    try {
+      descriptor = readSettingsDescriptor(settings, MCP_SERVER_SOURCES_NS)
+    } catch {
+      descriptor = undefined
+    }
+    if (descriptor === undefined) {
+      return { kind: 'unavailable', reason: 'the "mcp-manager" Host settings section is not mounted' }
+    }
+    const value = descriptor.value
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      return { kind: 'unavailable', reason: 'the "mcp-manager" settings section is not readable' }
+    }
+    const servers = (value as Record<string, unknown>).servers
+    if (typeof servers !== 'object' || servers === null || Array.isArray(servers)) {
+      return { kind: 'unavailable', reason: 'the "mcp-manager.servers" configuration is not readable' }
+    }
+    if (typeof descriptor.revision !== 'number') {
+      return { kind: 'unavailable', reason: 'the "mcp-manager" settings revision is not readable' }
+    }
+    // ONE descriptor, projected detached: base/user/effective all belong to
+    // the same read; a name that appears in neither layer of THIS descriptor
+    // is not config-owned and is simply absent from the entries.
+    const entries: McpClassifiedServerEntry[] = []
+    const baseServers = plainServersOf(descriptor.base)
+    for (const name of Object.keys(servers as Record<string, unknown>)) {
+      const provenance = classifyMcpServerProvenance(descriptor.base, { servers }, name)
+      if (provenance === undefined) continue
+      const effective = projectMcpServerEntry(detachedSection((servers as Record<string, unknown>)[name]))
+      if (effective === undefined) continue
+      const baseKeys = baseDictKeysOf(baseServers?.[name])
+      entries.push({ name, provenance, effective, ...baseKeys === undefined ? {} : { baseKeys } })
+    }
+    return {
+      kind: 'ready',
+      generation: this.generation(),
+      revision: descriptor.revision,
+      entries: Object.freeze(entries),
+    }
+  }
+
+  /** Direct reads the in-process Host authority, so a read is already current. */
+  async refresh(): Promise<void> {}
+
+  async mutate(
+    ops: readonly { readonly op: 'set' | 'unset'; readonly path: readonly string[]; readonly value?: unknown }[],
+    expectedRevision: number,
+    pinnedGeneration: object,
+  ): Promise<McpConfigWriteOutcome> {
+    // The Host-generation fence: a decision taken against another generation
+    // is never dispatched against the current one.
+    if (!Object.is(this.generation(), pinnedGeneration)) {
+      return {
+        kind: 'failed',
+        failure: { kind: 'rejected', reason: 'the Host authority changed; re-read the configuration before saving' },
+      }
+    }
+    const settings = this.ctx.get('settings') as SettingsServiceLike | undefined
+    if (settings === undefined) {
+      return { kind: 'failed', failure: { kind: 'rejected', reason: 'the Host settings service is unavailable' } }
+    }
+    const wireOps: readonly SettingsMutationOp[] = ops.map(op => op.op === 'set'
+      ? { op: 'set' as const, path: [...op.path], value: op.value }
+      : { op: 'unset' as const, path: [...op.path] })
+    try {
+      await settings.mutate(MCP_SERVER_SOURCES_NS, wireOps, expectedRevision)
+    } catch (error) {
+      const code = (error as { code?: unknown } | null)?.code
+      const message = safeErrorMessage(error)
+      if (code === 'SETTINGS_CONFLICT') {
+        // The official CAS refusal is its own outcome: the draft survives and
+        // the user re-reads instead of the write being reported as a rejection.
+        return { kind: 'failed', failure: { kind: 'conflict', reason: message } }
+      }
+      // The official `ConfigEditor.edit` PERSISTS the profile patch and only
+      // then reconciles the Loader, so a throw from `settings.mutate` does NOT
+      // prove the write was refused — the entry may already be on disk. The
+      // read-back is the only honest classifier: if the caller's op is now in
+      // force the write COMMITTED (report `saved`), if it is provably absent
+      // the Host refused it, and anything else is unobservable.
+      const observed = this.read()
+      if (observed.kind === 'ready' && Object.is(this.generation(), pinnedGeneration)) {
+        if (opsHold(observed, ops)) return { kind: 'saved', revision: observed.revision }
+        if (opsRejected(observed, expectedRevision, ops)) {
+          return { kind: 'failed', failure: { kind: 'rejected', reason: message } }
+        }
+      }
+      return { kind: 'failed', failure: { kind: 'outcome-unconfirmed', reason: message } }
+    }
+    // Saved is a READ-BACK fact from the SAME Host authority: re-read the
+    // descriptor and report the committed revision only when it is still
+    // readable AND the generation the caller pinned is still current. A Host
+    // replacement during the write makes the outcome unobservable here, never
+    // a `saved` claim about another authority's namespace.
+    const readBack = this.read()
+    if (readBack.kind !== 'ready') {
+      return {
+        kind: 'failed',
+        failure: { kind: 'outcome-unconfirmed', reason: readBack.reason },
+      }
+    }
+    if (!Object.is(this.generation(), pinnedGeneration)) {
+      return {
+        kind: 'failed',
+        failure: { kind: 'outcome-unconfirmed', reason: 'the Host authority changed while the write settled' },
+      }
+    }
+    return { kind: 'saved', revision: readBack.revision }
+  }
+}
+
+/* ------------------------------------------------------------------------- *
+ * R8-E PR-2: per-package extension configuration.
+ * ------------------------------------------------------------------------- */
+
+function validSettingsRevision(revision: unknown): revision is number {
+  return typeof revision === 'number' && Number.isSafeInteger(revision) && revision >= 0
+}
+
+/**
+ * The Direct per-package extension-config domain: ONE official Settings
+ * descriptor read per `read()`, ONE revision-checked `settings.mutate` per
+ * `mutate()` with `['data', ...relativePath]` ops, and a fresh authoritative
+ * read-back before `accepted`. The row identity is derived from the real npm
+ * package name; no namespace, row id or profile path crosses the port.
+ */
+export class DirectExtensionConfigsConfig implements ExtensionConfigsConfig {
+  private readonly ctx: HostContextLike
+
+  constructor(ctx: HostContextLike) {
+    this.ctx = ctx
+  }
+
+  read(packageName: string): ExtensionConfigRead {
+    const read = readDirectDescriptors(this.ctx)
+    if (read.kind !== 'ready') return read
+    const namespace = extensionConfigRowId(packageName)
+    const descriptor = read.descriptors.find(entry => entry.ns === namespace)
+    if (descriptor === undefined) {
+      return { kind: 'unavailable', reason: `the "${namespace}" extension Config row is not mounted` }
+    }
+    if (!validSettingsRevision(descriptor.revision)) {
+      return { kind: 'unreadable', reason: 'the official Host settings revision is not readable' }
+    }
+    const effective = projectExtensionConfigData(descriptor.value)
+    const inherited = projectExtensionConfigData(descriptor.base)
+    const user = projectExtensionConfigData(descriptor.user)
+    if (effective.kind === 'invalid') return { kind: 'unreadable', reason: effective.reason }
+    if (inherited.kind === 'invalid') return { kind: 'unreadable', reason: inherited.reason }
+    if (user.kind === 'invalid') return { kind: 'unreadable', reason: user.reason }
+    return {
+      kind: 'ready',
+      packageName,
+      generation: settingsAuthorityOf(read.settings),
+      revision: descriptor.revision,
+      effective: effective.value,
+      inherited: inherited.value,
+      user: user.value,
+      userDataPresent: extensionConfigUserDataPresent(descriptor.user),
+    }
+  }
+
+  async refresh(): Promise<void> {}
+
+  async mutate(
+    packageName: string,
+    ops: readonly ExtensionConfigDataOp[],
+    expectedRevision: number,
+    pinnedGeneration: object,
+  ): Promise<SectionMutationOutcome> {
+    const settings = this.ctx.get('settings') as SettingsServiceLike | undefined
+    if (settings === undefined || !Object.is(settingsAuthorityOf(settings), pinnedGeneration)) {
+      return { kind: 'rejected', reason: 'the Host settings authority changed; refresh before saving' }
+    }
+    if (ops.length === 0) return { kind: 'rejected', reason: 'no settings fields were staged' }
+    const snapshot = snapshotExtensionConfigOps(ops)
+    if (snapshot.kind === 'invalid') return { kind: 'rejected', reason: snapshot.reason }
+    const read = readDirectDescriptors(this.ctx)
+    if (read.kind !== 'ready') return { kind: 'rejected', reason: read.reason }
+    const namespace = extensionConfigRowId(packageName)
+    const descriptor = read.descriptors.find(entry => entry.ns === namespace)
+    if (descriptor === undefined) {
+      return { kind: 'rejected', reason: `the "${namespace}" extension Config row is not mounted` }
+    }
+    if (!validSettingsRevision(descriptor.revision)) {
+      return { kind: 'rejected', reason: 'the official Host settings revision is not readable' }
+    }
+    if (descriptor.revision !== expectedRevision) {
+      return { kind: 'conflict', reason: 'the Host settings section changed since it was read' }
+    }
+    const wireOps: readonly SettingsMutationOp[] = snapshot.ops.map(op => op.op === 'set'
+      ? { op: 'set' as const, path: ['data', ...op.path], value: op.value }
+      : { op: 'unset' as const, path: ['data', ...op.path] })
+    try {
+      await settings.mutate(namespace, wireOps, expectedRevision)
+    } catch (error) {
+      const reason = safeErrorMessage(error)
+      if ((error as { readonly code?: unknown } | null)?.code === 'SETTINGS_CONFLICT') {
+        return { kind: 'conflict', reason }
+      }
+      // The official ConfigEditor can persist before its Loader reconciliation
+      // fails (or before the official post-write read fails). A dispatched
+      // exception therefore cannot prove the profile is unchanged.
+      return { kind: 'outcome-unconfirmed', reason }
+    }
+    const readBack = readDirectDescriptors(this.ctx)
+    if (readBack.kind !== 'ready') {
+      return { kind: 'outcome-unconfirmed', reason: readBack.reason }
+    }
+    if (!Object.is(settingsAuthorityOf(readBack.settings), pinnedGeneration)) {
+      return { kind: 'outcome-unconfirmed', reason: 'the Host settings authority changed while the write settled' }
+    }
+    const settled = readBack.descriptors.find(entry => entry.ns === namespace)
+    if (settled === undefined || !validSettingsRevision(settled.revision)) {
+      return { kind: 'outcome-unconfirmed', reason: 'the official Host settings row is not readable after the write' }
+    }
+    return { kind: 'accepted' }
   }
 }

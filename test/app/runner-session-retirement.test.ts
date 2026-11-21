@@ -1,9 +1,13 @@
 /** Direct owned-session retirement coverage (exit / HMR / transition): a
- * currently owned Session is retired exactly once in the required order
- * (cancel -> idle -> drain -> flush -> dispose) across every reachable
- * shutdown and transition timing. */
+ * currently owned Session is retired exactly once in the mode-specific
+ * order — transition `cancel → idle → drain → flush → dispose`, shutdown
+ * `cancel → idle → drain → dispose` (DSH's AgentHandle.dispose joins the
+ * durable close; no explicit flush races the closing write handle) — across
+ * every reachable shutdown and transition timing. */
 
 import assert from 'node:assert/strict'
+import { readFileSync, readdirSync } from 'node:fs'
+import { join } from 'node:path'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-subagent'
@@ -22,6 +26,7 @@ import {
 } from '../support/runner-harness.ts'
 import { installProbe } from '../support/runner-session-fixtures.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
+import { provideFakeHostWorkspaceRegistry } from '../support/workspace-registry.ts'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
@@ -37,7 +42,7 @@ function retirementSubagents(events: string[]): { drainContinuableDescendants: (
   }
 }
 
-test('fiber unload retires the Direct owned session: cancel → idle → drain → flush → dispose (HMR path)', async (t) => {
+test('fiber unload retires the Direct owned session: cancel → idle → drain → dispose (HMR path, DSH close owns durability)', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-retire-hmr-')
   const previousHome = process.env.DSH_HOME
@@ -84,8 +89,10 @@ test('fiber unload retires the Direct owned session: cancel → idle → drain �
     'a retirement-time session event must not apply to the disposed stats folder')
   assert.equal(probe.capturedWelcomeModels.length, welcomeCardsBeforeRetirement,
     'retirement-time provider/settings events must not repaint the disposed welcome card')
-  // The retirement order is the fixed Direct order; the drain of the
-  // continuable descendants happens BEFORE the parent handle dispose.
+  // The retirement order is the fixed Direct SHUTDOWN order; the drain of
+  // the continuable descendants happens BEFORE the parent handle dispose,
+  // and no explicit flush runs (the fiber unload races the JSONL backend's
+  // own close sweep — DSH's dispose joins the durable close/drain).
   const events = harness.retirementEvents
   const cancel = events.filter(event => event === 'cancel:retire-hmr-session')
   const idle = events.filter(event => event === 'idle:retire-hmr-session')
@@ -95,17 +102,15 @@ test('fiber unload retires the Direct owned session: cancel → idle → drain �
   assert.equal(cancel.length, 1, 'the owned agent must be cancelled exactly once')
   assert.equal(drain.length, 1, 'drainContinuableDescendants must be called exactly once')
   assert.equal(dispose.length, 1, 'the owned handle must be disposed exactly once')
+  assert.equal(flush.length, 0, 'a shutdown/HMR retirement must NOT run an explicit flush')
   assert.ok(events.indexOf('drain:retire-hmr-session') < events.indexOf('dispose:retire-hmr-session'),
     'descendant drain must complete before the parent handle dispose')
-  assert.ok(events.indexOf('flush:retire-hmr-session') < events.indexOf('dispose:retire-hmr-session'),
-    'the final flush must complete before the parent handle dispose')
   assert.ok(events.indexOf('cancel:retire-hmr-session') < events.indexOf('drain:retire-hmr-session'),
     'cancel must precede the descendant drain')
   assert.ok(idle.length >= 1, 'whenIdle must be awaited during retirement')
-  assert.ok(flush.length >= 1, 'the final flush must run during retirement')
 })
 
-test('a successful /new retires the OLD owner post-commit (cancel → idle → drain → flush → dispose)', async (t) => {
+test('a successful /new retires the OLD owner post-commit (cancel → idle → drain → flush → dispose) and checkpoints the committed child', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-retire-switch-')
   const previousHome = process.env.DSH_HOME
@@ -134,11 +139,13 @@ test('a successful /new retires the OLD owner post-commit (cancel → idle → d
   await settle()
   // The OLD owner is stopped at the navigation ADMISSION (a keepInbox user
   // cancel, before the create) and then retired post-commit with the official
-  // close order: cancel + drain + dispose exactly once each.
+  // LIVE-HOST transition close order: cancel + drain + flush + dispose
+  // exactly once each.
   const events = harness.retirementEvents
   const navigationStops = events.filter(event => event === 'cancel:keepInbox:retire-switch-old')
   const oldCancel = events.filter(event => event === 'cancel:retire-switch-old')
   const oldDrain = events.filter(event => event === 'drain:retire-switch-old')
+  const oldFlush = events.filter(event => event === 'flush:retire-switch-old')
   const oldDispose = events.filter(event => event === 'dispose:retire-switch-old')
   assert.equal(navigationStops.length, 1, 'the /new navigation stop cancels the old agent exactly once')
   assert.equal(oldCancel.length, 1, 'the retirement close order still cancels the old agent exactly once')
@@ -146,10 +153,20 @@ test('a successful /new retires the OLD owner post-commit (cancel → idle → d
   assert.equal(oldDispose.length, 1, 'the old handle must be disposed exactly once post-commit')
   assert.ok(events.indexOf('drain:retire-switch-old') < events.indexOf('dispose:retire-switch-old'),
     'the old descendant drain must precede the old handle dispose')
+  assert.ok(oldFlush.length >= 1, 'the LIVE-HOST transition keeps the explicit old-owner flush')
+  assert.ok(events.indexOf('flush:retire-switch-old') < events.indexOf('dispose:retire-switch-old'),
+    'the old-owner flush must precede the old handle dispose')
   // The child stays current: the surface still owns the NEW session.
   const created = harness.createdSessions.at(-1)
   assert.ok(created, '/new must create a child session')
   assert.notEqual(created.id, 'retire-switch-old')
+  // The committed child's post-commit durability checkpoint: one flush of
+  // the NEW owner, between the commit and the surface init.
+  const childFlush = events.filter(event => event === `flush:${created.id}`)
+  assert.equal(childFlush.length, 1, 'the committed child must be flushed exactly once post-commit')
+  const initIndex = events.findIndex(event => event.startsWith('init:'))
+  assert.ok(initIndex < 0 || events.indexOf(`flush:${created.id}`) < initIndex,
+    'the committed child checkpoint must precede the surface init')
   // A later teardown retires the NEW owner exactly once (the old owner is
   // not retired again — the memoized retirement is per-owner).
   await fiber.dispose()
@@ -157,6 +174,8 @@ test('a successful /new retires the OLD owner post-commit (cancel → idle → d
   const newDispose = events.filter(event => event === `dispose:${created.id}`)
   assert.equal(newDispose.length, 1, 'the new current owner must be retired on teardown')
   assert.equal(oldDispose.length, 1, 'the old owner must never be retired twice')
+  assert.equal(events.filter(event => event === `flush:${created.id}`).length, 1,
+    'the teardown (shutdown mode) must not flush the closing child handle again')
 })
 
 test('a failed child create does NOT drain or dispose the current old owner', async (t) => {
@@ -849,13 +868,17 @@ test('a pre-mount unload while the resume whenIdle is pending cancels the agent 
   context.provide('sessionPersistence', harness.persistence as never)
   context.provide('sessionQuery', harness.sessionQuery as never)
   context.provide('agents', harness.agents as never)
+  // WS-2: the official Host Workspace registry the Direct lifecycle pre-selects through.
+  provideFakeHostWorkspaceRegistry(context)
   context.provide('sessions', harness.sessions as never)
   context.provide('agentDefaultModel', harness.defaultModel as never)
   context.provide('llm', harness.llm as never)
   context.provide('commands', harness.commands as never)
   context.provide('subagents', harness.subagents as never)
   context.provide('loader', { await: async () => {} } as never)
-  const fiber = context.plugin((pluginCtx) => applyRunner(pluginCtx, TuiConfigSchema({ sessionId: resumed.id } as never)))
+  const tuiConfig = TuiConfigSchema({ sessionId: resumed.id } as never)
+  context.provide('piTuiPreferences', tuiConfig)
+  const fiber = context.plugin((pluginCtx) => applyRunner(pluginCtx, tuiConfig))
   await fiber
   await whenIdleStartedPromise
   await disposeContext(context)
@@ -864,8 +887,8 @@ test('a pre-mount unload while the resume whenIdle is pending cancels the agent 
   const events = harness.retirementEvents
   assert.equal(events.filter(event => event === 'cancel:premount-whenidle-session').length, 1,
     'the abort must cancel the agent exactly once so the pre-mount whenIdle settles')
-  assert.equal(events.filter(event => event === 'flush:premount-whenidle-session').length, 1,
-    'the pre-mount abort must flush the resumed owner exactly once')
+  assert.equal(events.filter(event => event === 'flush:premount-whenidle-session').length, 0,
+    'the pre-mount abort is a shutdown retirement: no explicit flush (DSH dispose owns durability)')
   assert.equal(events.filter(event => event === 'dispose:premount-whenidle-session').length, 1,
     'the just-created owner must be retired exactly once')
   assert.equal((harness.agents as { get(id: string): unknown }).get('premount-whenidle-session'), undefined,
@@ -988,6 +1011,8 @@ test('exit during the post-commit child quiesce skips surface init and retires t
   const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
   assert.ok(newHandler, 'the real runner must register the /new transition command')
   const transition = newHandler()
+  // Bounded microtask drain (not a wall-clock wait): the transition parks in its
+  // gated child create before the test releases it.
   await settle()
   releaseCreate()
   await settle()
@@ -1008,9 +1033,9 @@ test('exit during the post-commit child quiesce skips surface init and retires t
     'the committed child must be cancelled EXACTLY once by the abort-aware quiesce, not again by retirement')
 })
 
-test('a retirement flush failure warns the user on stderr (durability is not silently lost)', async (t) => {
+test('a shutdown dispose failure warns the user on stderr (durability unconfirmed, not silent)', async (t) => {
   const life = testLifecycle(t)
-  const home = life.tempDir('dsh-pi-tui-retire-warn-')
+  const home = life.tempDir('dsh-pi-tui-retire-warn-dispose-')
   const previousHome = process.env.DSH_HOME
   process.env.DSH_HOME = home
   life.defer(() => {
@@ -1024,16 +1049,15 @@ test('a retirement flush failure warns the user on stderr (durability is not sil
   life.defer(() => { if (context !== undefined) return disposeContext(context) })
   life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
   const resumed: FakeSession = fakeSession({
-    id: 'retire-warn-session',
-    header: { id: 'retire-warn-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    id: 'retire-warn-dispose-session',
+    header: { id: 'retire-warn-dispose-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
     events: sessionEvents('resumed answer'),
   })
   const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, retirementSubagents)
-  // The final retirement flush fails (disk full): the user must see a
-  // warning, not a silent clean exit.
-  ;(harness.sessions as { flush: (session?: unknown) => Promise<unknown> }).flush = async () => {
-    throw new Error('disk full')
-  }
+  // The shutdown's durable close/drain fails (a DSH handle close rejecting
+  // with e.g. disk full): the user must see that durability could NOT be
+  // confirmed — never a silent clean exit, and never the flush wording.
+  harness.disposeFailures.add('retire-warn-dispose-session')
   const stderrWrites: string[] = []
   const originalWrite = process.stderr.write.bind(process.stderr)
   process.stderr.write = ((chunk: unknown) => {
@@ -1045,10 +1069,73 @@ test('a retirement flush failure warns the user on stderr (durability is not sil
   fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
   await fiber.dispose()
   fiber = undefined
-  assert.ok(stderrWrites.some(write => write.includes('session flush failed during retirement') && write.includes('disk full')),
-    `the user must see the flush-failure warning on stderr: ${JSON.stringify(stderrWrites)}`)
-  assert.ok(stderrWrites.some(write => write.includes('the latest events may not be persisted')),
+  assert.ok(stderrWrites.some(write => write.includes('session close failed during retirement') && write.includes('dispose failed for retire-warn-dispose-session')),
+    `the user must see the close-failure warning on stderr: ${JSON.stringify(stderrWrites)}`)
+  assert.ok(stderrWrites.some(write => write.includes('durability could not be confirmed')),
     'the warning must state the durability consequence')
+  assert.ok(!stderrWrites.some(write => write.includes('session flush failed during retirement')),
+    'a dispose failure must not be reported with the flush wording')
+  assert.ok(!stderrWrites.some(write => write.includes('the latest events may not be persisted')),
+    'a dispose failure must not claim a flush happened and failed')
+})
+
+test('a transition flush failure aborts the switch with a visible error (durability is not silently lost)', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-retire-warn-flush-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'retire-warn-flush-session',
+    header: { id: 'retire-warn-flush-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('resumed answer'),
+  })
+  const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, retirementSubagents)
+  // The LIVE-HOST old-owner transition flush fails (disk full): the /new
+  // pre-commit quiesce's explicit `flush(flushOwner)` fails, so the /new
+  // command itself must surface the durability warning to the user.
+  ;(harness.sessions as { flush: (session?: unknown) => Promise<unknown> }).flush = async (session?: unknown) => {
+    if ((session as { id?: string } | undefined)?.id === 'retire-warn-flush-session') {
+      throw new Error('disk full')
+    }
+  }
+  const stderrWrites: string[] = []
+  const originalWrite = process.stderr.write.bind(process.stderr)
+  process.stderr.write = ((chunk: unknown) => {
+    stderrWrites.push(String(chunk))
+    return true
+  }) as typeof process.stderr.write
+  life.defer(() => { process.stderr.write = originalWrite })
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+  const notices: string[] = []
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const originalNotify = app.notify.bind(app)
+  app.notify = (message: string, kind?: string) => {
+    notices.push(`${String(kind)}:${message}`)
+    return originalNotify(message, kind as 'error')
+  }
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the real runner must register the /new transition command')
+  const result = await newHandler() as { kind: string; text?: string }
+  // The /new pre-commit flush failure aborts the switch (the old session
+  // stays current) and the command result carries the real error: the user
+  // sees the durability failure, never a silent fallback.
+  assert.equal(result.kind, 'error')
+  assert.ok(result.text?.includes('disk full'),
+    `the failed /new must surface the flush failure: ${JSON.stringify(result)}`)
+  await fiber.dispose()
+  fiber = undefined
 })
 
 test('a retirement descendant-drain failure warns with the failing phases (not the flush wording)', async (t) => {
@@ -1094,4 +1181,901 @@ test('a retirement descendant-drain failure warns with the failing phases (not t
     `the warning must name the failing phase: ${JSON.stringify(stderrWrites)}`)
   assert.ok(!stderrWrites.some(write => write.includes('the latest events may not be persisted')),
     'a non-flush failure must not claim a durability loss')
+})
+
+test('a shutdown retirement does NOT flush a handle DSH already started closing (deterministic close-first gate)', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-retire-closed-handle-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'retire-closed-handle-session',
+    header: { id: 'retire-closed-handle-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('resumed answer'),
+  })
+  const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, retirementSubagents)
+  // DETERMINISTIC close-first race (the real Debian symptom reduced to a
+  // fake): DSH's root teardown sets the JSONL handle's `closing` flag BEFORE
+  // the pi-tui retirement runs. From that moment, `sessions.flush` on that
+  // session throws the closed-handle error, while `AgentHandle.dispose`
+  // still settles by joining the already-started close.
+  let handleClosing = false
+  ;(harness.sessions as { flush: (session?: unknown) => Promise<unknown> }).flush = async (session?: unknown) => {
+    if (handleClosing && (session as { id?: string } | undefined)?.id === 'retire-closed-handle-session') {
+      throw new Error('session "retire-closed-handle-session": flush on a closed handle')
+    }
+  }
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+  // Patch the LIVE agent AFTER the startup resume created it (the fake
+  // harness registers it lazily on resume): from the SECOND whenIdle on,
+  // the DSH write handle is already `closing` — before any retirement phase.
+  const liveAgent = (harness.agents as { get: (id: string) => unknown }).get('retire-closed-handle-session') as {
+    whenIdle: () => Promise<void>
+  } | undefined
+  assert.ok(liveAgent, 'the resumed session must have a live Agent')
+  const originalIdle = liveAgent.whenIdle.bind(liveAgent)
+  liveAgent.whenIdle = async () => {
+    handleClosing = true
+    await originalIdle()
+  }
+  await fiber.dispose()
+  fiber = undefined
+  const events = harness.retirementEvents
+  // The fix's contract: the shutdown retirement makes ZERO flush calls (a
+  // flush would have hit the closed handle), and exactly ONE dispose joins
+  // the already-started DSH close — with NO durability warning, because
+  // nothing failed.
+  assert.equal(events.filter(event => event === 'flush:retire-closed-handle-session').length, 0,
+    'the shutdown retirement must not flush a handle that DSH is already closing')
+  assert.equal(events.filter(event => event === 'dispose:retire-closed-handle-session').length, 1,
+    'the shutdown retirement must still join the handle close exactly once')
+})
+
+test('a shutdown dispose rejection is a visible durability-unconfirmed failure, never a benign closed-handle case', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-retire-dispose-reject-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'retire-dispose-reject-session',
+    header: { id: 'retire-dispose-reject-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('resumed answer'),
+  })
+  const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, retirementSubagents)
+  // The DSH close/drain itself fails (a dispose rejecting like a failed
+  // final drain): the failure must be reported as durability-unconfirmed,
+  // never swallowed as a benign closed-handle case.
+  harness.disposeFailures.add('retire-dispose-reject-session')
+  const stderrWrites: string[] = []
+  const originalWrite = process.stderr.write.bind(process.stderr)
+  process.stderr.write = ((chunk: unknown) => {
+    stderrWrites.push(String(chunk))
+    return true
+  }) as typeof process.stderr.write
+  life.defer(() => { process.stderr.write = originalWrite })
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+  await fiber.dispose()
+  fiber = undefined
+  assert.ok(stderrWrites.some(write => write.includes('session close failed during retirement') && write.includes('dispose failed for retire-dispose-reject-session')),
+    `the dispose rejection must be visible: ${JSON.stringify(stderrWrites)}`)
+  assert.ok(stderrWrites.some(write => write.includes('durability could not be confirmed')),
+    'the warning must state the unconfirmed durability')
+})
+
+test('a committed child checkpoint flush failure keeps the child and warns clearly (no failed-switch lie)', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-retire-child-flush-fail-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'retire-child-flush-fail-old',
+    header: { id: 'retire-child-flush-fail-old', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('old answer'),
+  })
+  const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, retirementSubagents)
+  // ONLY the committed child's post-commit checkpoint fails: the old owner's
+  // transition flush and the startup resume stay green.
+  ;(harness.sessions as { flush: (session?: unknown) => Promise<unknown> }).flush = async (session?: unknown) => {
+    const id = (session as { id?: string } | undefined)?.id
+    if (id !== undefined && id !== 'retire-child-flush-fail-old') {
+      throw new Error('disk full')
+    }
+  }
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const notices: string[] = []
+  const originalNotify = app.notify.bind(app)
+  app.notify = (message: string, kind?: string) => {
+    notices.push(`${String(kind)}:${message}`)
+    return originalNotify(message, kind as 'error')
+  }
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the real runner must register the /new transition command')
+  const result = await newHandler() as { kind: string; text?: string }
+  // The switch COMMITTED despite the checkpoint failure: the command must
+  // report SUCCESS (never a failed transition), the child stays current.
+  assert.equal(result.kind, 'success', `the committed switch must not be misreported as failed: ${JSON.stringify(result)}`)
+  const created = harness.createdSessions.at(-1)
+  assert.ok(created, '/new must create a child session')
+  assert.ok(notices.some(entry => entry.startsWith('error:') && entry.includes('session committed') && entry.includes('durability checkpoint failed') && entry.includes('disk full')),
+    `the user must see the committed-durability warning: ${JSON.stringify(notices)}`)
+  // The later teardown still joins the child's dispose exactly once.
+  await fiber.dispose()
+  fiber = undefined
+  const events = harness.retirementEvents
+  assert.equal(events.filter(event => event === `dispose:${created.id}`).length, 1,
+    'the committed child must still be retired exactly once on teardown')
+})
+
+test('a transition retiring an old owner AFTER the lifecycle aborted does NOT flush its closing handle', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-retire-late-transition-flush-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'late-transition-flush-old',
+    header: { id: 'late-transition-flush-old', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('old answer'),
+  })
+  // The fake create is NON-COOPERATIVE: it ignores lifecycle cancellation and
+  // resolves only after the interactive exit already started the root teardown.
+  // Its post-commit retireOld therefore runs with the lifecycle ABORTED, and by
+  // then the replaced session's write handle is already closing (exactly the
+  // production ordering of the closed-handle race, one step later).
+  let releaseCreate!: () => void
+  const createRelease = new Promise<void>(resolve => { releaseCreate = resolve })
+  let createStarted!: () => void
+  const createStartedPromise = new Promise<void>(resolve => { createStarted = resolve })
+  const harness = makeHarness(
+    home,
+    resumed,
+    { provider: 'p', model: 'm' },
+    undefined,
+    async () => {
+      createStarted()
+      await createRelease
+    },
+    retirementSubagents,
+  )
+  // Record EVERY flush call (like the harness fake) so the assertion can
+  // actually fail, then reject the one that lands on the closing handle.
+  let handleClosing = false
+  const flushCalls: string[] = []
+  const flushOriginal = (harness.sessions as { flush: (session?: unknown) => Promise<unknown> }).flush.bind(harness.sessions)
+  ;(harness.sessions as { flush: (session?: unknown) => Promise<unknown> }).flush = async (session?: unknown) => {
+    const id = (session as { id?: string } | undefined)?.id ?? '?'
+    flushCalls.push(`${id}${handleClosing ? ':closing' : ''}`)
+    await flushOriginal(session)
+    if (handleClosing && id === 'late-transition-flush-old') {
+      throw new Error('session "late-transition-flush-old": flush on a closed handle')
+    }
+  }
+  const stderrWrites: string[] = []
+  const originalWrite = process.stderr.write.bind(process.stderr)
+  process.stderr.write = ((chunk: unknown) => {
+    stderrWrites.push(String(chunk))
+    return true
+  }) as typeof process.stderr.write
+  life.defer(() => { process.stderr.write = originalWrite })
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id }, () => {
+    // appExit: the root teardown is starting, so the write handle closes.
+    handleClosing = true
+    void fiber?.dispose()
+  })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the real runner must register the /new transition command')
+  const transition = newHandler()
+  await createStartedPromise
+  // Interactive exit while the create is still pending: pre-cancel + appExit.
+  app.setDraft('exit')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  // Bounded microtask drain: the exit latch reaches appExit before the release.
+  await settle()
+  // The non-cooperative create now commits AFTER appExit began: the post-commit
+  // retireOld runs under an aborted lifecycle and must NOT flush the closing
+  // handle.
+  releaseCreate()
+  await transition
+  // Bounded microtask drain (no wall-clock wait): the appExit disposal settles.
+  await settle()
+  const events = harness.retirementEvents
+  const child = harness.createdSessions.at(-1)
+  assert.ok(child, 'the non-cooperative create still commits a child')
+  // The pre-commit old-owner flush, plus the COMMITTED CHILD's own checkpoint
+  // (which must be attempted even under an aborted lifecycle, because close
+  // cannot materialize an empty session). The OLD owner's retirement flush is
+  // the one that must never happen.
+  assert.deepEqual(flushCalls, ['late-transition-flush-old', `${child.id}:closing`],
+    `the aborted-lifecycle transition retirement must not flush the old owner: ${JSON.stringify(flushCalls)}`)
+  assert.equal(events.filter(event => event === 'dispose:late-transition-flush-old').length, 1,
+    'the replaced owner must still be disposed exactly once')
+  assert.ok(!stderrWrites.some(write => write.includes('session flush failed during retirement')),
+    `a skipped flush must never surface a flush failure: ${JSON.stringify(stderrWrites)}`)
+})
+
+test('the committed child is checkpointed even when its quiesce REJECTS (the artifact must not depend on quiescence)', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-retire-quiesce-reject-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'quiesce-reject-old',
+    header: { id: 'quiesce-reject-old', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('old answer'),
+  })
+  const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, retirementSubagents)
+  // The COMMITTED CHILD's whenIdle REJECTS (a real Agent failure). The
+  // checkpoint is a MATERIALIZATION boundary issued at the commit, so it must
+  // have already run: a shutdown can close the handle and DSH's close does not
+  // materialize an empty session, which is why the artifact cannot wait for a
+  // quiescence that may never come.
+  const agents = harness.agents as {
+    create: (options: { sessionId: unknown }) => Promise<{ agent: { whenIdle: () => Promise<void> } }>
+  }
+  const originalCreate = agents.create.bind(agents)
+  agents.create = async (options) => {
+    const handle = await originalCreate(options)
+    handle.agent.whenIdle = async () => { throw new Error('child quiesce exploded') }
+    return handle
+  }
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the real runner must register the /new transition command')
+  const result = await newHandler() as { kind: string }
+  assert.equal(result.kind, 'success', 'the committed switch still reports success')
+  const created = harness.createdSessions.at(-1)
+  assert.ok(created, '/new must create a child session')
+  const events = harness.retirementEvents
+  assert.equal(events.filter(event => event === `flush:${created.id}`).length, 1,
+    `the committed child must be checkpointed exactly once, before any quiesce: ${JSON.stringify(events)}`)
+  // The rejected quiesce is contained: the child still initializes and is
+  // retired exactly once on teardown.
+  await fiber.dispose()
+  fiber = undefined
+  assert.equal(events.filter(event => event === `dispose:${created.id}`).length, 1,
+    'the committed child is still retired exactly once on teardown')
+})
+
+test('an exit beginning DURING the old-owner retirement (mode already resolved) does NOT flush the closing handle', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-retire-midflight-abort-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'midflight-abort-old',
+    header: { id: 'midflight-abort-old', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('old answer'),
+  })
+  // Park the OLD owner's retirement in its `descendants` phase: the retirement
+  // has ALREADY resolved its mode, and its `cancel` phase made `whenIdle`
+  // return immediately, so the descendant drain is the phase that actually
+  // spans the exit. The drain is the harness subagents fake (the real
+  // retirement's own phase), not a fabricated seam.
+  let retirementDrainStarted!: () => void
+  const retirementDrain = new Promise<void>(resolve => { retirementDrainStarted = resolve })
+  let releaseRetirementDrain!: () => void
+  const retirementDrainGate = new Promise<void>(resolve => { releaseRetirementDrain = resolve })
+  const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, (events: string[]) => ({
+    drainContinuableDescendants: async (parents: readonly unknown[]) => {
+      const parent = parents[0] as { session: { id: string } } | undefined
+      events.push(`drain:${parent?.session.id ?? '?'}`)
+      if (parent?.session.id === 'midflight-abort-old') {
+        retirementDrainStarted()
+        await retirementDrainGate
+      }
+    },
+  }))
+  // The old session's write handle starts closing the moment the exit's
+  // appExit hook runs (the DSH root teardown).
+  let handleClosing = false
+  const flushCalls: string[] = []
+  const flushOriginal = (harness.sessions as { flush: (session?: unknown) => Promise<unknown> }).flush.bind(harness.sessions)
+  ;(harness.sessions as { flush: (session?: unknown) => Promise<unknown> }).flush = async (session?: unknown) => {
+    const id = (session as { id?: string } | undefined)?.id ?? '?'
+    flushCalls.push(`${id}${handleClosing ? ':closing' : ''}`)
+    await flushOriginal(session)
+    if (handleClosing && id === 'midflight-abort-old') {
+      throw new Error('session "midflight-abort-old": flush on a closed handle')
+    }
+  }
+  const stderrWrites: string[] = []
+  const originalWrite = process.stderr.write.bind(process.stderr)
+  process.stderr.write = ((chunk: unknown) => {
+    stderrWrites.push(String(chunk))
+    return true
+  }) as typeof process.stderr.write
+  life.defer(() => { process.stderr.write = originalWrite })
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id }, () => {
+    handleClosing = true
+    void fiber?.dispose()
+  })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the real runner must register the /new transition command')
+  // A failed assertion must never leave the parked drain holding the file.
+  life.defer(() => releaseRetirementDrain())
+  const transition = newHandler()
+  // The transition commits, checkpoints the child, retires the OLD owner, and
+  // parks in the old owner's drain.
+  await retirementDrain
+  const created = harness.createdSessions.at(-1)
+  assert.ok(created, 'the transition commits a child before the old retirement')
+  const flushesBeforeExit = [...flushCalls]
+  assert.deepEqual(flushesBeforeExit, ['midflight-abort-old', created.id],
+    `the pre-commit old-owner flush and the child checkpoint precede the exit: ${JSON.stringify(flushesBeforeExit)}`)
+  // Exit NOW: the lifecycle aborts while the retirement is mid-flight, and the
+  // old session's handle starts closing. The retirement had already chosen the
+  // transition regime BEFORE this happened.
+  app.setDraft('exit')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  // Bounded microtask drain: the exit latch reaches appExit while drain parks.
+  await settle()
+  releaseRetirementDrain()
+  await transition
+  // Bounded microtask drain (no wall-clock wait): the appExit disposal settles.
+  await settle()
+  // The pre-commit old-owner flush, plus the committed child's own checkpoint.
+  // Neither targets the now-closing OLD handle.
+  const child = harness.createdSessions.at(-1)
+  assert.ok(child, 'the transition commits a child')
+  // The child checkpoint ran BEFORE the exit (no `:closing` marker) — the
+  // ordering this fix guarantees — and the OLD handle is never flushed after
+  // the mid-flight exit.
+  assert.deepEqual(flushCalls, ['midflight-abort-old', child.id],
+    `no flush of the closing old handle may run after the mid-flight exit: ${JSON.stringify(flushCalls)}`)
+  assert.equal(harness.retirementEvents.filter(event => event === 'dispose:midflight-abort-old').length, 1,
+    'the old owner must still be disposed exactly once')
+  assert.ok(!stderrWrites.some(write => write.includes('session flush failed during retirement')),
+    `a skipped flush must never surface a flush failure: ${JSON.stringify(stderrWrites)}`)
+})
+
+test('a flush failure OVERTAKEN by the shutdown is NOT swallowed: the real error stays visible', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-precommit-flush-overtaken-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'precommit-overtaken-old',
+    header: { id: 'precommit-overtaken-old', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('old answer'),
+  })
+  const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, retirementSubagents)
+  // Park the PRE-COMMIT old-owner flush and let the shutdown overtake it. The
+  // error text is DELIBERATELY not a closed-handle error: `sessions.flush()`
+  // waits on every persistence listener, so a genuine I/O failure is
+  // indistinguishable here — and must never be reclassified as benign just
+  // because the lifecycle aborted.
+  let flushStarted!: () => void
+  const flushStartedPromise = new Promise<void>(resolve => { flushStarted = resolve })
+  let releaseFlush!: () => void
+  const flushGate = new Promise<void>(resolve => { releaseFlush = resolve })
+  const flushOriginal = (harness.sessions as { flush: (session?: unknown) => Promise<unknown> }).flush.bind(harness.sessions)
+  let exitBegan = false
+  ;(harness.sessions as { flush: (session?: unknown) => Promise<unknown> }).flush = async (session?: unknown) => {
+    if ((session as { id?: string } | undefined)?.id === 'precommit-overtaken-old') {
+      flushStarted()
+      await flushGate
+      if (exitBegan) throw new Error('persistence listener failed: disk full')
+    }
+    await flushOriginal(session)
+  }
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id }, () => {
+    exitBegan = true
+    void fiber?.dispose()
+  })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the real runner must register the /new transition command')
+  const transition = newHandler()
+  await flushStartedPromise
+  app.setDraft('exit')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  // Bounded microtask drain: the exit latch reaches appExit while flush parks.
+  await settle()
+  releaseFlush()
+  await transition
+  // Bounded microtask drain: the appExit-triggered disposal settles.
+  await settle()
+  // The genuine failure must survive the shutdown: it reaches the diagnostics
+  // channel with its original message.
+  const diagText = readdirSync(join(home, 'logs'))
+    .filter(name => name.startsWith('pi-tui-') && name.endsWith('.log'))
+    .map(name => readFileSync(join(home, 'logs', name), 'utf8'))
+    .join('\n')
+  assert.ok(diagText.includes('persistence listener failed: disk full'),
+    `a real flush failure must never be swallowed by the shutdown: ${JSON.stringify(diagText.slice(-800))}`)
+  // It must be reported as a FAILURE (error level), not reclassified into an
+  // informational "superseded by shutdown" line: an aborted lifecycle does not
+  // prove the failure was a close takeover.
+  assert.ok(/ERROR [^\n]*transition quiesce failed[^\n]*persistence listener failed: disk full/u.test(diagText),
+    `the flush failure must be recorded as an error, not reclassified: ${JSON.stringify(diagText.slice(-800))}`)
+  await fiber.dispose()
+  fiber = undefined
+})
+
+test('a retirement flush failure during an overtaking shutdown is recorded as a failure, not reclassified', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-retire-flush-overtaken-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'retire-flush-overtaken-old',
+    header: { id: 'retire-flush-overtaken-old', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('old answer'),
+  })
+  const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, retirementSubagents)
+  // The FIRST old-owner flush is the pre-commit one (succeeds). The SECOND is
+  // the retirement's own flush; park it, start the exit, then fail it with a
+  // real persistence error. The retirement must report it as a failure.
+  let oldFlushCalls = 0
+  let retirementFlushStarted!: () => void
+  const retirementFlush = new Promise<void>(resolve => { retirementFlushStarted = resolve })
+  let releaseRetirementFlush!: () => void
+  const retirementFlushGate = new Promise<void>(resolve => { releaseRetirementFlush = resolve })
+  let exitBegan = false
+  const flushOriginal = (harness.sessions as { flush: (session?: unknown) => Promise<unknown> }).flush.bind(harness.sessions)
+  ;(harness.sessions as { flush: (session?: unknown) => Promise<unknown> }).flush = async (session?: unknown) => {
+    const id = (session as { id?: string } | undefined)?.id
+    if (id === 'retire-flush-overtaken-old') {
+      oldFlushCalls += 1
+      if (oldFlushCalls === 2) {
+        retirementFlushStarted()
+        await retirementFlushGate
+        if (exitBegan) throw new Error('retirement flush failed: disk full')
+      }
+    }
+    await flushOriginal(session)
+  }
+  life.defer(() => releaseRetirementFlush())
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id }, () => {
+    exitBegan = true
+    void fiber?.dispose()
+  })
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the real runner must register the /new transition command')
+  const transition = newHandler()
+  await retirementFlush
+  app_exit_during_retirement_flush()
+  // Bounded microtask drain: the exit latch reaches appExit while flush parks.
+  await settle()
+  releaseRetirementFlush()
+  await transition
+  // Bounded microtask drain: the appExit-triggered disposal settles.
+  await settle()
+  const diagText = readdirSync(join(home, 'logs'))
+    .filter(name => name.startsWith('pi-tui-') && name.endsWith('.log'))
+    .map(name => readFileSync(join(home, 'logs', name), 'utf8'))
+    .join('\n')
+  assert.ok(/ERROR [^\n]*(?:retire phase failed|transition retire failed)[^\n]*retirement flush failed: disk full/u.test(diagText),
+    `the retirement flush failure must be reported as a failure: ${JSON.stringify(diagText.slice(-1200))}`)
+  await fiber.dispose()
+  fiber = undefined
+
+  function app_exit_during_retirement_flush() {
+    const app = probe.apps.at(-1)
+    assert.ok(app, 'the production runner must create a TuiApp')
+    app.setDraft('exit')
+    ;(app as unknown as { submitDraft(): void }).submitDraft()
+  }
+})
+
+test('the committed child is checkpointed BEFORE the OLD owner retirement (an empty session cannot be stranded behind its drain)', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-checkpoint-ordering-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'checkpoint-order-old',
+    header: { id: 'checkpoint-order-old', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('old answer'),
+  })
+  // Park the OLD owner's retirement in its descendant drain: the child's
+  // checkpoint must already have run, because DSH's close cannot materialize an
+  // empty session and the exit closes the handle concurrently with this
+  // transaction.
+  let oldDrainStarted!: () => void
+  const oldDrain = new Promise<void>(resolve => { oldDrainStarted = resolve })
+  let releaseOldDrain!: () => void
+  const oldDrainGate = new Promise<void>(resolve => { releaseOldDrain = resolve })
+  const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, (events: string[]) => ({
+    drainContinuableDescendants: async (parents: readonly unknown[]) => {
+      const parent = parents[0] as { session: { id: string } } | undefined
+      events.push(`drain:${parent?.session.id ?? '?'}`)
+      if (parent?.session.id === 'checkpoint-order-old') {
+        oldDrainStarted()
+        await oldDrainGate
+      }
+    },
+  }))
+  const childCheckpoints: string[] = []
+  const flushOriginal = (harness.sessions as { flush: (session?: unknown) => Promise<unknown> }).flush.bind(harness.sessions)
+  ;(harness.sessions as { flush: (session?: unknown) => Promise<unknown> }).flush = async (session?: unknown) => {
+    const id = (session as { id?: string } | undefined)?.id
+    if (id !== undefined && id !== 'checkpoint-order-old') childCheckpoints.push(id)
+    await flushOriginal(session)
+  }
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id }, () => { void fiber?.dispose() })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the real runner must register the /new transition command')
+  // A failed assertion must never leave the parked drain holding the file.
+  life.defer(() => releaseOldDrain())
+  const transition = newHandler()
+  // The OLD owner's drain is now parked, i.e. its retirement is in flight.
+  await oldDrain
+  const created = harness.createdSessions.at(-1)
+  assert.ok(created, '/new must commit its child')
+  // THE ORDERING CONTRACT: the child's materialization checkpoint is already
+  // done, even though the OLD owner's (unbounded) drain has not finished.
+  assert.deepEqual(childCheckpoints, [created.id],
+    `the committed child must be checkpointed before the OLD owner retirement: ${JSON.stringify(childCheckpoints)}`)
+  // Now exit while the drain is parked: the artifact already exists, so the
+  // shutdown cannot strand the empty session.
+  app.setDraft('exit')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  // Bounded microtask drain: the exit latch reaches appExit before the release.
+  await settle()
+  releaseOldDrain()
+  await transition
+  // Bounded microtask drain: the appExit-triggered disposal settles.
+  await settle()
+  assert.equal(harness.retirementEvents.filter(event => event === `dispose:${created.id}`).length, 1,
+    'the committed child must still be retired exactly once')
+  await fiber.dispose()
+  fiber = undefined
+})
+
+test('a committed-child checkpoint failure is diagnosed AT THE FAILURE, before the old-owner drain settles (T3)', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-checkpoint-immediate-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'checkpoint-immediate-old',
+    header: { id: 'checkpoint-immediate-old', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('old answer'),
+  })
+  let oldDrainStarted!: () => void
+  const oldDrain = new Promise<void>(resolve => { oldDrainStarted = resolve })
+  let releaseOldDrain!: () => void
+  const oldDrainGate = new Promise<void>(resolve => { releaseOldDrain = resolve })
+  life.defer(() => releaseOldDrain())
+  const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, (events: string[]) => ({
+    drainContinuableDescendants: async (parents: readonly unknown[]) => {
+      const parent = parents[0] as { session: { id: string } } | undefined
+      events.push(`drain:${parent?.session.id ?? '?'}`)
+      if (parent?.session.id === 'checkpoint-immediate-old') {
+        oldDrainStarted()
+        await oldDrainGate
+      }
+    },
+  }))
+  const flushOriginal = (harness.sessions as { flush: (session?: unknown) => Promise<unknown> }).flush.bind(harness.sessions)
+  ;(harness.sessions as { flush: (session?: unknown) => Promise<unknown> }).flush = async (session?: unknown) => {
+    if ((session as { id?: string } | undefined)?.id !== 'checkpoint-immediate-old') {
+      throw new Error('durability checkpoint failed: disk full')
+    }
+    await flushOriginal(session)
+  }
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const notices: string[] = []
+  const originalNotify = app.notify.bind(app)
+  app.notify = (message: string, kind?: string) => {
+    notices.push(`${String(kind)}:${message}`)
+    return originalNotify(message, kind as 'error')
+  }
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the real runner must register the /new transition command')
+  const transition = newHandler()
+  // The OLD owner's drain is parked: the checkpoint has already settled.
+  await oldDrain
+  const created = harness.createdSessions.at(-1)
+  assert.ok(created, '/new must commit its child before the old retirement')
+  const diagNow = readdirSync(join(home, 'logs'))
+    .filter(name => name.startsWith('pi-tui-') && name.endsWith('.log'))
+    .map(name => readFileSync(join(home, 'logs', name), 'utf8'))
+    .join('\n')
+  // BEFORE the drain is released: the exact session id and the original error.
+  assert.ok(diagNow.includes('committed session durability checkpoint failed') && diagNow.includes(created.id),
+    `the checkpoint failure must be diagnosed at the failure itself: ${JSON.stringify(diagNow.slice(-600))}`)
+  assert.ok(diagNow.includes('durability checkpoint failed: disk full'),
+    `the original error must be captured verbatim: ${JSON.stringify(diagNow.slice(-600))}`)
+  // A single user notice while the surface is still live.
+  assert.equal(notices.filter(entry => entry.includes('durability checkpoint failed')).length, 1,
+    `exactly one user notice: ${JSON.stringify(notices)}`)
+  // v2 §3.3: exactly ONE checkpoint-specific diagnosis. The transaction summary
+  // may list the same failure once (the plan keeps `retired` for that summary),
+  // but it must never become a second "durability checkpoint failed" line.
+  assert.equal(diagNow.split('\n').filter(line => line.includes('committed session durability checkpoint failed')).length, 1,
+    `the checkpoint failure must be diagnosed exactly once: ${JSON.stringify(diagNow.slice(-600))}`)
+  releaseOldDrain()
+  await transition
+  // Bounded microtask drain: the appExit-triggered disposal settles.
+  await settle()
+  // The committed child stands; the switch still reports success, and the
+  // shutdown retirement retires it exactly once.
+  await fiber.dispose()
+  fiber = undefined
+  assert.equal(harness.retirementEvents.filter(event => event === `dispose:${created.id}`).length, 1,
+    'the committed child must still be retired exactly once')
+})
+
+test('a checkpoint failure diagnosed before the old drain is not duplicated when the exit lands in that drain (T4)', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-checkpoint-immediate-exit-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'checkpoint-immediate-exit-old',
+    header: { id: 'checkpoint-immediate-exit-old', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('old answer'),
+  })
+  let oldDrainStarted!: () => void
+  const oldDrain = new Promise<void>(resolve => { oldDrainStarted = resolve })
+  let releaseOldDrain!: () => void
+  const oldDrainGate = new Promise<void>(resolve => { releaseOldDrain = resolve })
+  life.defer(() => releaseOldDrain())
+  const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, (events: string[]) => ({
+    drainContinuableDescendants: async (parents: readonly unknown[]) => {
+      const parent = parents[0] as { session: { id: string } } | undefined
+      events.push(`drain:${parent?.session.id ?? '?'}`)
+      if (parent?.session.id === 'checkpoint-immediate-exit-old') {
+        oldDrainStarted()
+        await oldDrainGate
+      }
+    },
+  }))
+  const flushOriginal = (harness.sessions as { flush: (session?: unknown) => Promise<unknown> }).flush.bind(harness.sessions)
+  ;(harness.sessions as { flush: (session?: unknown) => Promise<unknown> }).flush = async (session?: unknown) => {
+    if ((session as { id?: string } | undefined)?.id !== 'checkpoint-immediate-exit-old') {
+      throw new Error('durability checkpoint failed: disk full')
+    }
+    await flushOriginal(session)
+  }
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id }, () => { void fiber?.dispose() })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const notices: string[] = []
+  const originalNotify = app.notify.bind(app)
+  app.notify = (message: string, kind?: string) => {
+    notices.push(`${String(kind)}:${message}`)
+    return originalNotify(message, kind as 'error')
+  }
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the real runner must register the /new transition command')
+  const transition = newHandler()
+  await oldDrain
+  const created = harness.createdSessions.at(-1)
+  assert.ok(created, '/new must commit its child')
+  // Exit NOW, while the old drain is still parked, then release it.
+  app.setDraft('exit')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  // Bounded microtask drain: the exit latch reaches appExit while drain parks.
+  await settle()
+  releaseOldDrain()
+  await transition
+  // Bounded microtask drain: the appExit-triggered disposal settles.
+  await settle()
+  const diagText = readdirSync(join(home, 'logs'))
+    .filter(name => name.startsWith('pi-tui-') && name.endsWith('.log'))
+    .map(name => readFileSync(join(home, 'logs', name), 'utf8'))
+    .join('\n')
+  const checkpointLines = diagText.split('\n').filter(line => line.includes('committed session durability checkpoint failed'))
+  assert.equal(checkpointLines.length, 1,
+    `the same checkpoint failure must be diagnosed once, not re-reported: ${JSON.stringify(checkpointLines)}`)
+  // The one permitted repeat is the TRANSACTION SUMMARY listing the failure —
+  // and it must appear once, not once per re-diagnosis.
+  const summaryLines = diagText.split('\n').filter(line => line.includes('transition retire failed (child committed)'))
+  assert.equal(summaryLines.length, 1,
+    `the transaction summary must appear once: ${JSON.stringify(summaryLines)}`)
+  assert.equal(notices.filter(entry => entry.includes('durability checkpoint failed')).length, 1,
+    `no second notice may target the disposed surface: ${JSON.stringify(notices)}`)
+  // The committed child is not rolled back and is retired exactly once.
+  await fiber.dispose()
+  fiber = undefined
+  assert.equal(harness.retirementEvents.filter(event => event === `dispose:${created.id}`).length, 1,
+    'the committed child must still be retired exactly once')
+})
+
+test('an in-flight TRANSITION-RETIREMENT flush failure is retained on the runner path (T6)', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-retirement-flush-retained-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'retirement-flush-retained-old',
+    header: { id: 'retirement-flush-retained-old', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('old answer'),
+  })
+  const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, retirementSubagents)
+  // The FIRST old-owner flush is the pre-commit one; the SECOND is the
+  // retirement's own. Park the second, start the exit, then fail it with a real
+  // persistence error while the close/dispose still succeeds.
+  let oldFlushCalls = 0
+  let retirementFlushStarted!: () => void
+  const retirementFlush = new Promise<void>(resolve => { retirementFlushStarted = resolve })
+  let releaseRetirementFlush!: () => void
+  const retirementFlushGate = new Promise<void>(resolve => { releaseRetirementFlush = resolve })
+  let exitBegan = false
+  const flushOriginal = (harness.sessions as { flush: (session?: unknown) => Promise<unknown> }).flush.bind(harness.sessions)
+  ;(harness.sessions as { flush: (session?: unknown) => Promise<unknown> }).flush = async (session?: unknown) => {
+    if ((session as { id?: string } | undefined)?.id === 'retirement-flush-retained-old') {
+      oldFlushCalls += 1
+      if (oldFlushCalls === 2) {
+        retirementFlushStarted()
+        await retirementFlushGate
+        if (exitBegan) throw new Error('retirement flush failed: disk full')
+      }
+    }
+    await flushOriginal(session)
+  }
+  life.defer(() => releaseRetirementFlush())
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id }, () => {
+    exitBegan = true
+    void fiber?.dispose()
+  })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the real runner must register the /new transition command')
+  const transition = newHandler()
+  await retirementFlush
+  app.setDraft('exit')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  // Bounded microtask drain: the exit latch reaches appExit while flush parks.
+  await settle()
+  releaseRetirementFlush()
+  await transition
+  // Bounded microtask drain: the appExit-triggered disposal settles.
+  await settle()
+  const diagText = readdirSync(join(home, 'logs'))
+    .filter(name => name.startsWith('pi-tui-') && name.endsWith('.log'))
+    .map(name => readFileSync(join(home, 'logs', name), 'utf8'))
+    .join('\n')
+  // The flush failure is retained with its phase; the close itself succeeded, so
+  // nothing may present this exit as a durable success.
+  assert.ok(/ERROR [^\n]*transition retire failed \(child committed\)[^\n]*old flush: retirement flush failed: disk full/u.test(diagText),
+    `the retirement flush failure must be retained on the runner path: ${JSON.stringify(diagText.slice(-1200))}`)
+  await fiber.dispose()
+  fiber = undefined
 })

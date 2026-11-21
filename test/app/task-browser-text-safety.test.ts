@@ -177,6 +177,17 @@ function startHarness(options: HarnessOptions = {}): Harness {
   return { vt, app, tasks, observation, interrupts, notices, stream: () => written.join('') }
 }
 
+async function clickFullscreenAction(vt: VirtualTerminal, label: string): Promise<void> {
+  const viewport = vt.getViewport()
+  const row = viewport.findIndex(line => line.includes(label))
+  assert.ok(row >= 0, `Fullscreen action '${label}' must be painted:\n${viewport.join('\n')}`)
+  const x = viewport[row]!.indexOf(label)
+  assert.ok(x >= 0)
+  vt.sendInput(`\x1b[<0;${x + 1};${row + 1}M`)
+  vt.sendInput(`\x1b[<0;${x + 1};${row + 1}m`)
+  await vt.waitForRender()
+}
+
 /** Open `/tasks`, select the first row and confirm the S → Y Stop chord. */
 async function openBrowserAndStop(harness: Harness): Promise<void> {
   harness.tasks.openTasksBrowser('full')
@@ -190,7 +201,7 @@ async function openBrowserAndStop(harness: Harness): Promise<void> {
 
 // ── S-02: the real Job Stop notice ─────────────────────────────────────────
 
-test('S-02 a hostile Job label never reaches the terminal through a real Task Browser Stop', async () => {
+test('a hostile Job label never reaches the terminal through a real Task Browser Stop', async () => {
   const harness = startHarness({ jobLabel: HOSTILE })
   await flush()
   await openBrowserAndStop(harness)
@@ -210,7 +221,7 @@ test('S-02 a hostile Job label never reaches the terminal through a real Task Br
   harness.app.stop()
 })
 
-test('S-02b a hostile Job label never reaches the terminal through a FAILED Stop notice', async () => {
+test('a hostile Job label never reaches the terminal through a FAILED Stop notice', async () => {
   const harness = startHarness({ jobLabel: HOSTILE })
   await flush()
   harness.observation.stopOutcome = { kind: 'rejected', message: 'the registry refused' }
@@ -227,7 +238,7 @@ test('S-02b a hostile Job label never reaches the terminal through a FAILED Stop
   harness.app.stop()
 })
 
-test('S-02c a hostile Job label never reaches the terminal through a THROWING Stop dispatch', async () => {
+test('a hostile Job label never reaches the terminal through a THROWING Stop dispatch', async () => {
   const harness = startHarness({ jobLabel: HOSTILE })
   await flush()
   harness.observation.stopFailure = new Error('kill admission refused')
@@ -244,7 +255,7 @@ test('S-02c a hostile Job label never reaches the terminal through a THROWING St
   harness.app.stop()
 })
 
-test('S-04 a benign label is unchanged, so the hostile-byte guard is not vacuous', async () => {
+test('a benign label is unchanged, so the hostile-byte guard is not vacuous', async () => {
   const harness = startHarness({ jobLabel: 'plain build' })
   await flush()
   await openBrowserAndStop(harness)
@@ -257,9 +268,32 @@ test('S-04 a benign label is unchanged, so the hostile-byte guard is not vacuous
   harness.app.stop()
 })
 
+test('Fullscreen SGR Stop and Confirm reach the original TaskRuntime sink once', async () => {
+  const harness = startHarness({ jobLabel: 'plain build' })
+  await flush()
+  harness.app.setFullscreen(true)
+  await harness.vt.waitForRender()
+  harness.tasks.openTasksBrowser('full')
+  await harness.vt.waitForRender()
+
+  await clickFullscreenAction(harness.vt, 'Stop [')
+  assert.deepEqual(harness.observation.stops, [], 'Stop only opens the existing pending state')
+  await clickFullscreenAction(harness.vt, 'Cancel [Esc]')
+  assert.deepEqual(harness.observation.stops, [], 'mouse Cancel never reaches the Observation sink')
+
+  await clickFullscreenAction(harness.vt, 'Stop [')
+  await clickFullscreenAction(harness.vt, 'Confirm stop [Y]')
+  await flush()
+  await harness.vt.waitForRender()
+  assert.deepEqual(harness.observation.stops, ['job-a'], 'Confirm dispatches the original Stop exactly once')
+  assert.ok(harness.notices.some(notice => notice.text === 'stopping plain build'),
+    'the TaskRuntime keeps its original success notice')
+  harness.app.stop()
+})
+
 // ── S-03: the symmetric Subagent interrupt notices ─────────────────────────
 
-test('S-03 a hostile Subagent label never reaches the terminal through a committed interrupt', async () => {
+test('a hostile Subagent label never reaches the terminal through a committed interrupt', async () => {
   const harness = startHarness({ subagentLabel: HOSTILE, interrupt: async () => ({ kind: 'committed' }) })
   await flush()
   await openBrowserAndStop(harness)
@@ -274,7 +308,7 @@ test('S-03 a hostile Subagent label never reaches the terminal through a committ
   harness.app.stop()
 })
 
-test('S-03b a hostile Subagent label never reaches the terminal through a rejected interrupt', async () => {
+test('a hostile Subagent label never reaches the terminal through a rejected interrupt', async () => {
   const harness = startHarness({
     subagentLabel: HOSTILE,
     interrupt: async () => ({ kind: 'rejected', reason: { kind: 'error', message: 'denied' } }),
@@ -291,7 +325,7 @@ test('S-03b a hostile Subagent label never reaches the terminal through a reject
   harness.app.stop()
 })
 
-test('S-03c a hostile Subagent label never reaches the terminal through an indeterminate interrupt', async () => {
+test('a hostile Subagent label never reaches the terminal through an indeterminate interrupt', async () => {
   const harness = startHarness({
     subagentLabel: HOSTILE,
     interrupt: async () => ({ kind: 'indeterminate', message: 'carrier went away' }),
@@ -309,7 +343,7 @@ test('S-03c a hostile Subagent label never reaches the terminal through an indet
   harness.app.stop()
 })
 
-test('S-03d a hostile Subagent label never reaches the terminal through a THROWING interrupt dispatch', async () => {
+test('a hostile Subagent label never reaches the terminal through a THROWING interrupt dispatch', async () => {
   const harness = startHarness({
     subagentLabel: HOSTILE,
     interrupt: async () => { throw new Error('admission refused') },
@@ -328,7 +362,7 @@ test('S-03d a hostile Subagent label never reaches the terminal through a THROWI
   harness.app.stop()
 })
 
-test('S-03e a superseded parent subject never dispatches the selected child Stop', async () => {
+test('a superseded parent subject never dispatches the selected child Stop', async () => {
   let current = true
   const harness = startHarness({
     subagentLabel: 'plain child',
@@ -336,13 +370,14 @@ test('S-03e a superseded parent subject never dispatches the selected child Stop
     subjectCurrent: () => current,
   })
   await flush()
+  harness.app.setFullscreen(true)
+  await harness.vt.waitForRender()
   harness.tasks.openTasksBrowser('full')
   await harness.vt.waitForRender()
-  harness.vt.sendInput('S')
-  await harness.vt.waitForRender()
+  await clickFullscreenAction(harness.vt, 'Stop [')
   // The owner generation moves between arming and confirming the Stop.
   current = false
-  harness.vt.sendInput('y')
+  await clickFullscreenAction(harness.vt, 'Confirm stop [Y]')
   await flush()
   await harness.vt.waitForRender()
   assert.deepEqual([...harness.interrupts], [],
@@ -354,7 +389,7 @@ test('S-03e a superseded parent subject never dispatches the selected child Stop
 
 // ── S-04: currentness — a closed browser receives no late notice ────────────
 
-test('S-04 a browser closed before the Stop settles receives no late notice', async () => {
+test('a browser closed before the Stop settles receives no late notice', async () => {
   const harness = startHarness({ jobLabel: HOSTILE })
   await flush()
   harness.observation.holdStop = true

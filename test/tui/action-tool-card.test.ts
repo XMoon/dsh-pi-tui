@@ -6,10 +6,13 @@ import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import {
   compactToolExpandedLines,
   compactToolPresentation,
+  FOLDED_JSON_RESULT_TOOLS,
+  foldedResultSummaryFor,
   formatAgentListSummary,
   presentCallPresentation,
   focusToolDisplay,
   interruptAgentCallPresentation,
+  isCompactActionTool,
   listAgentsCallPresentation,
   sendMessageCallPresentation,
   summarizeAgentListResult,
@@ -57,8 +60,15 @@ test('action call presenters normalize standard and Team shapes', () => {
   assert.deepEqual(terminalSendCallPresentation(JSON.stringify({ sessionId: 'pty-3', text: 'make test' })), {
     sessionId: 'pty-3', text: 'make test',
   })
-  assert.deepEqual(listAgentsCallPresentation('{}'), { scope: 'children' })
-  assert.deepEqual(listAgentsCallPresentation(''), { scope: 'children' })
+  // rc.2 renamed the target field to `agent`; it wins over historical names.
+  assert.deepEqual(sendMessageCallPresentation(JSON.stringify({ agent: 'named-child', agent_id: 'old-id', target: 'team', message: 'hi' })), {
+    target: 'named-child', message: 'hi',
+  })
+  assert.deepEqual(interruptAgentCallPresentation(JSON.stringify({ agent: 'named-child', agent_id: 'old-id' })), { target: 'named-child' })
+  // rc.2 list_agents takes no arguments: there is no scope to present.
+  assert.deepEqual(listAgentsCallPresentation('{}'), {})
+  assert.deepEqual(listAgentsCallPresentation(''), {})
+  // A persisted rc.1 scope stays readable for historical replay only.
   assert.deepEqual(listAgentsCallPresentation('{"scope":"descendants"}'), { scope: 'descendants' })
 
   assert.equal(sendMessageCallPresentation(JSON.stringify({ agent_id: 'child-1' })), undefined)
@@ -146,7 +156,232 @@ test('compact action presentations are payload-first and receipt-safe', () => {
   assert.equal(focusToolDisplay({ name: 'send_message', args: JSON.stringify({ target: 'reviewer', message: 'Inspect the card.' }) }), 'Send message reviewer · Inspect the card.')
   assert.equal(focusToolDisplay({ name: 'terminal_send', args: JSON.stringify({ sessionId: 'pty-3', text: 'make test' }) }), 'Terminal pty-3 · make test')
   assert.equal(focusToolDisplay({ name: 'interrupt_agent', args: JSON.stringify({ agent_id: 'child-1' }) }), 'Interrupt agent child-1')
-  assert.equal(focusToolDisplay({ name: 'list_agents', args: '{}' }), 'List agents children')
+  assert.equal(focusToolDisplay({ name: 'list_agents', args: '{}' }), 'List agents')
+})
+
+test('schedule cards use the fixed no-registry fallback titles and identities', () => {
+  // The Direct live definition's own `presentCall` still wins when the
+  // registry holds it; these assertions cover the replay/Remote fallback
+  // where no definition is available.
+  assert.deepEqual(toolCardHeader('schedule_create', '{"title":"Morning report","prompt":"secret instruction"}'), {
+    title: 'Create scheduled task', summary: 'Morning report',
+  })
+  // A create call without a title never leaks its prompt into the header.
+  assert.deepEqual(toolCardHeader('schedule_create', '{"prompt":"secret instruction"}'), {
+    title: 'Create scheduled task', summary: '',
+  })
+  assert.deepEqual(toolCardHeader('schedule_list', '{}'), { title: 'List scheduled tasks', summary: '' })
+  assert.deepEqual(toolCardHeader('schedule_list', ''), { title: 'List scheduled tasks', summary: '' })
+  assert.deepEqual(toolCardHeader('schedule_view', '{"id":"s1"}'), { title: 'View scheduled task', summary: 's1' })
+  assert.deepEqual(toolCardHeader('schedule_edit', '{"id":"s1","action":"update"}'), { title: 'Edit scheduled task', summary: 's1' })
+  assert.deepEqual(toolCardHeader('schedule_edit', '{"id":"s1","action":"delete"}'), { title: 'Delete scheduled task', summary: 's1' })
+  // The historical rc5 names keep their own identities.
+  assert.deepEqual(toolCardHeader('schedule_update', '{"id":"s1"}'), { title: 'Update reminder', summary: 's1' })
+  assert.deepEqual(toolCardHeader('schedule_delete', '{"id":"s1"}'), { title: 'Delete reminder', summary: 's1' })
+  // A mistyped identity leaves an empty summary, never a generic args/prompt dump.
+  assert.deepEqual(toolCardHeader('schedule_edit', '{"id":7,"action":"update","prompt":"secret"}'), {
+    title: 'Edit scheduled task', summary: '',
+  })
+  // Unparseable arguments are NOT an identity: the fixed title stays and the
+  // summary is empty (the generic first-string derivation could surface the prompt).
+  assert.deepEqual(toolCardHeader('schedule_create', 'not json'), { title: 'Create scheduled task', summary: '' })
+  assert.deepEqual(toolCardHeader('schedule_create', '{"prompt":"secret'), { title: 'Create scheduled task', summary: '' })
+  assert.deepEqual(toolCardHeader('schedule_list', 'not json'), { title: 'List scheduled tasks', summary: '' })
+  assert.deepEqual(toolCardHeader('schedule_view', '{"id":'), { title: 'View scheduled task', summary: '' })
+  // The compact Focus line uses the same fallback title.
+  assert.equal(focusToolDisplay({ name: 'schedule_list', args: '{}' }), 'List scheduled tasks')
+  assert.equal(focusToolDisplay({ name: 'schedule_edit', args: '{"id":"s1","action":"delete"}' }), 'Delete scheduled task s1')
+  assert.equal(focusToolDisplay({ name: 'schedule_create', args: '{"title":"Morning report","prompt":"secret"}' }), 'Create scheduled task Morning report')
+  assert.equal(focusToolDisplay({ name: 'schedule_create', args: 'not json' }), 'Create scheduled task')
+  // An unknown third-party tool keeps the generic row.
+  const unknown = toolCardHeader('totally_custom', '{"id":"s1"}')
+  assert.equal(unknown.title, 'Tool call')
+  assert.match(unknown.summary, /^totally_custom · s1$/u)
+})
+
+// ── PR3: the five rc.3 Team / wait tools carry fixed card identities and a
+// bounded, schema-derived result preview, never a first-string or raw-JSON
+// fallback. These are the exact official names; every other name stays generic.
+test('team task and wait tools use fixed titles and safe call identities', () => {
+  assert.deepEqual(toolCardHeader('team_task_create', JSON.stringify({ subject: 'Scout one file', description: 'SECRET description' })), {
+    title: 'Create team task', summary: 'Scout one file',
+  })
+  // A malicious / reordered description is never the header, and a multiline
+  // subject collapses to its first line.
+  assert.deepEqual(toolCardHeader('team_task_create', JSON.stringify({ description: 'SECRET first field', subject: 'Real subject' })), {
+    title: 'Create team task', summary: 'Real subject',
+  })
+  assert.deepEqual(toolCardHeader('team_task_create', JSON.stringify({ subject: 'Line one\nLine two', description: 'x' })), {
+    title: 'Create team task', summary: 'Line one',
+  })
+  assert.deepEqual(toolCardHeader('team_task_create', JSON.stringify({ description: 'only a description' })), {
+    title: 'Create team task', summary: '',
+  })
+  assert.deepEqual(toolCardHeader('team_task_create', 'not json'), { title: 'Create team task', summary: '' })
+  assert.deepEqual(toolCardHeader('team_task_create', '{"subject":"unterminated'), { title: 'Create team task', summary: '' })
+
+  assert.deepEqual(toolCardHeader('team_task_list', '{}'), { title: 'List team tasks', summary: '' })
+  assert.deepEqual(toolCardHeader('team_task_list', ''), { title: 'List team tasks', summary: '' })
+  assert.deepEqual(toolCardHeader('team_task_list', JSON.stringify({ status: 'pending', owner: 'scout', ready: true })), {
+    title: 'List team tasks', summary: 'status pending · owner scout · ready yes',
+  })
+  assert.deepEqual(toolCardHeader('team_task_list', JSON.stringify({ unowned: true })), {
+    title: 'List team tasks', summary: 'unowned yes',
+  })
+  assert.deepEqual(toolCardHeader('team_task_list', JSON.stringify({ status: 'in_progress', unowned: false })), {
+    title: 'List team tasks', summary: 'status in_progress · unowned no',
+  })
+  // The official tool rejects owner + unowned together: show no guessed filter.
+  assert.deepEqual(toolCardHeader('team_task_list', JSON.stringify({ owner: 'scout', unowned: false })), {
+    title: 'List team tasks', summary: '',
+  })
+  // Exclusivity is key-presence based: an empty-string owner still counts as a
+  // present owner key, so the officially-rejected pair shows no filter either.
+  assert.deepEqual(toolCardHeader('team_task_list', JSON.stringify({ owner: '', unowned: true })), {
+    title: 'List team tasks', summary: '',
+  })
+  // cursor/limit are execution parameters, never part of the identity.
+  assert.deepEqual(toolCardHeader('team_task_list', JSON.stringify({ cursor: 10, limit: 5 })), {
+    title: 'List team tasks', summary: '',
+  })
+  // An unknown status filter is not a verifiable fact; it is dropped, never shown raw.
+  assert.deepEqual(toolCardHeader('team_task_list', JSON.stringify({ status: 'bogus' })), {
+    title: 'List team tasks', summary: '',
+  })
+  assert.deepEqual(toolCardHeader('team_task_list', 'not json'), { title: 'List team tasks', summary: '' })
+
+  assert.deepEqual(toolCardHeader('team_task_get', JSON.stringify({ task_id: 'task-1' })), {
+    title: 'View team task', summary: 'task-1',
+  })
+  assert.deepEqual(toolCardHeader('team_task_get', JSON.stringify({ task_id: '' })), {
+    title: 'View team task', summary: '',
+  })
+  assert.deepEqual(toolCardHeader('team_task_get', JSON.stringify({})), { title: 'View team task', summary: '' })
+
+  assert.deepEqual(toolCardHeader('team_task_update', JSON.stringify({ task_id: 'task-1', expected_revision: 1, action: 'claim' })), {
+    title: 'Update team task', summary: 'claim · task-1',
+  })
+  // subject/description/owner/expected_revision are request values, not identity.
+  assert.deepEqual(
+    toolCardHeader('team_task_update', JSON.stringify({ task_id: 'task-1', expected_revision: 3, action: 'edit', subject: 'SECRET', description: 'd', owner: 'scout' })),
+    { title: 'Update team task', summary: 'edit · task-1' },
+  )
+  // An action outside the official enum falls back to the fixed title and no summary.
+  assert.deepEqual(toolCardHeader('team_task_update', JSON.stringify({ task_id: 't', expected_revision: 1, action: 'bogus' })), {
+    title: 'Update team task', summary: '',
+  })
+  assert.deepEqual(toolCardHeader('team_task_update', JSON.stringify({ expected_revision: 1, action: 'claim' })), {
+    title: 'Update team task', summary: '',
+  })
+
+  assert.deepEqual(toolCardHeader('wait_agent', '{}'), { title: 'Wait for input', summary: '' })
+  assert.deepEqual(toolCardHeader('wait_agent', ''), { title: 'Wait for input', summary: '' })
+  assert.deepEqual(toolCardHeader('wait_agent', JSON.stringify({ timeout_ms: 30000 })), {
+    title: 'Wait for input', summary: '30000 ms',
+  })
+  // 0 / string / fractional / out-of-range are not an explicit legal timeout.
+  for (const timeoutMs of [0, '30000', 30000.5, 4000000, 9999]) {
+    assert.deepEqual(toolCardHeader('wait_agent', JSON.stringify({ timeout_ms: timeoutMs })), {
+      title: 'Wait for input', summary: '',
+    })
+  }
+
+  // An unregistered lookalike keeps the generic Web row, never a prefix guess.
+  const lookalike = toolCardHeader('team_task_assign', '{"id":"t"}')
+  assert.equal(lookalike.title, 'Tool call')
+  assert.match(lookalike.summary, /^team_task_assign · t$/u)
+
+  // The compact Focus line reuses the same fixed identity.
+  assert.equal(focusToolDisplay({ name: 'team_task_create', args: JSON.stringify({ subject: 'Scout one file', description: 'x' }) }), 'Create team task Scout one file')
+  assert.equal(focusToolDisplay({ name: 'wait_agent', args: '{}' }), 'Wait for input')
+  assert.equal(focusToolDisplay({ name: 'team_task_update', args: JSON.stringify({ task_id: 'task-1', expected_revision: 1, action: 'claim' }) }), 'Update team task claim · task-1')
+})
+
+/** A minimal legal official Team task value for the folded-result matrix. */
+function teamTaskValue(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: 'task-1',
+    revision: 1,
+    subject: 'Scout one file',
+    description: 'Read one file and report its content.',
+    status: 'pending',
+    blockedBy: [],
+    writeScopes: [],
+    ready: false,
+    writeScopeWarnings: [],
+    ...overrides,
+  }
+}
+
+test('team task result snapshots fold to bounded facts and never infer an owner', () => {
+  // The four official statuses with their ready/owner projection.
+  assert.equal(foldedResultSummaryFor('team_task_create', JSON.stringify(teamTaskValue({ status: 'pending', ready: true }))), 'pending · ready · unowned · rev 1')
+  assert.equal(foldedResultSummaryFor('team_task_get', JSON.stringify(teamTaskValue({ status: 'pending', ready: false }))), 'pending · unowned · rev 1')
+  assert.equal(foldedResultSummaryFor('team_task_get', JSON.stringify(teamTaskValue({ status: 'in_progress', owner: 'scout', revision: 2 }))), 'in_progress · owner scout · rev 2')
+  assert.equal(foldedResultSummaryFor('team_task_update', JSON.stringify(teamTaskValue({ status: 'completed', owner: 'lead', revision: 3 }))), 'completed · owner lead · rev 3')
+  assert.equal(foldedResultSummaryFor('team_task_update', JSON.stringify(teamTaskValue({ status: 'deleted', owner: 'lead', revision: 4 }))), 'deleted · owner lead · rev 4')
+  // ready only prints for a PENDING task; ready=false is not "blocked".
+  assert.equal(foldedResultSummaryFor('team_task_get', JSON.stringify(teamTaskValue({ status: 'in_progress', ready: true }))), 'in_progress · unowned · rev 1')
+
+  // Missing / mistyped identity fields and an unknown status yield NO note.
+  assert.equal(foldedResultSummaryFor('team_task_create', JSON.stringify({ revision: 1, status: 'pending', ready: true })), undefined, 'missing id')
+  assert.equal(foldedResultSummaryFor('team_task_create', JSON.stringify({ id: 't', revision: -1, status: 'pending', ready: true })), undefined, 'negative revision')
+  assert.equal(foldedResultSummaryFor('team_task_create', JSON.stringify({ id: 't', revision: 1.5, status: 'pending', ready: true })), undefined, 'fractional revision')
+  assert.equal(foldedResultSummaryFor('team_task_create', JSON.stringify({ id: 't', revision: 1, status: 'running', ready: true })), undefined, 'unknown status')
+  assert.equal(foldedResultSummaryFor('team_task_create', JSON.stringify({ id: 't', revision: 1, status: 'pending' })), undefined, 'missing ready')
+  assert.equal(foldedResultSummaryFor('team_task_create', JSON.stringify({ id: 't', revision: 1, status: 'pending', ready: true, owner: 7 })), undefined, 'non-string owner')
+  // An error object (or a success shape carrying a code) is failure identity only.
+  assert.equal(foldedResultSummaryFor('team_task_create', JSON.stringify({ code: 'TEAM_TASK_NOT_FOUND', message: 'gone' })), undefined, 'error code object')
+  assert.equal(foldedResultSummaryFor('team_task_create', JSON.stringify({ code: 'CONFLICT', id: 't', revision: 1, status: 'pending', ready: true })), undefined, 'mixed error object')
+  assert.equal(foldedResultSummaryFor('team_task_create', 'not json'), undefined, 'non-JSON result')
+
+  // A legacy ownerName/ownerId is never promoted into the displayed owner.
+  assert.equal(
+    foldedResultSummaryFor('team_task_get', JSON.stringify(teamTaskValue({ status: 'pending', ready: false, ownerName: 'scout', ownerId: 'sess-1' }))),
+    'pending · unowned · rev 1',
+  )
+})
+
+test('team task list and wait results fold to bounded counts and input state', () => {
+  const a = teamTaskValue({ id: 'task-a' })
+  const b = teamTaskValue({ id: 'task-b', status: 'in_progress', owner: 'scout', revision: 2 })
+  assert.equal(foldedResultSummaryFor('team_task_list', JSON.stringify({ tasks: [] })), 'no team tasks')
+  assert.equal(foldedResultSummaryFor('team_task_list', JSON.stringify({ tasks: [a] })), '1 team task')
+  assert.equal(foldedResultSummaryFor('team_task_list', JSON.stringify({ tasks: [a, b] })), '2 team tasks')
+  assert.equal(foldedResultSummaryFor('team_task_list', JSON.stringify({ tasks: [a, b], nextCursor: 2 })), '2 team tasks · more')
+  // No fabricated `N of total`: the official value carries no total.
+  assert.ok(!foldedResultSummaryFor('team_task_list', JSON.stringify({ tasks: [a, b], nextCursor: 2 }))!.includes(' of '))
+  // A malformed entry invalidates the WHOLE page (never a silent miscount).
+  assert.equal(foldedResultSummaryFor('team_task_list', JSON.stringify({ tasks: [a, { id: 'task-c' }] })), undefined, 'pseudo task entry')
+  assert.equal(foldedResultSummaryFor('team_task_list', JSON.stringify({ tasks: 'x' })), undefined, 'tasks not an array')
+  assert.equal(foldedResultSummaryFor('team_task_list', JSON.stringify({ tasks: [], nextCursor: -1 })), undefined, 'negative cursor')
+  assert.equal(foldedResultSummaryFor('team_task_list', JSON.stringify({ tasks: [], nextCursor: 1.5 })), undefined, 'fractional cursor')
+  assert.equal(foldedResultSummaryFor('team_task_list', JSON.stringify({ tasks: [], nextCursor: '2' })), undefined, 'string cursor')
+
+  assert.equal(foldedResultSummaryFor('wait_agent', JSON.stringify({ timedOut: false })), 'input pending')
+  assert.equal(foldedResultSummaryFor('wait_agent', JSON.stringify({ timedOut: true })), 'timed out')
+  for (const bad of ['null', '"false"', '1', '{"timedOut":null}', '{"timedOut":"false"}', '{"timedOut":0}', '{"code":"WAIT_INVALID_TIMEOUT"}', 'finished']) {
+    assert.equal(foldedResultSummaryFor('wait_agent', bad), undefined, `wait_agent ${bad} is not an outcome`)
+  }
+  // The wait fold never claims an agent/task outcome.
+  const waitSummaries = [foldedResultSummaryFor('wait_agent', '{"timedOut":false}'), foldedResultSummaryFor('wait_agent', '{"timedOut":true}')]
+  for (const phrase of waitSummaries) {
+    assert.ok(!/finished|completed|task ready|succeeded/iu.test(phrase ?? ''), `wait fold leaked an outcome: ${phrase}`)
+  }
+})
+
+test('the five Team/wait tools are result-folded but never action-compacted', () => {
+  for (const name of ['team_task_create', 'team_task_list', 'team_task_get', 'team_task_update', 'wait_agent']) {
+    assert.ok(FOLDED_JSON_RESULT_TOOLS.has(name), `${name} must be in the folded JSON-result family`)
+    // The result snapshot tools must remain ordinary full tool results (their
+    // compact lines would REPLACE the raw task fields); only folded previews.
+    assert.equal(compactToolPresentation(name, '{}', ''), undefined, `${name} must not use the action compact fallback`)
+    assert.equal(isCompactActionTool(name, '{}'), false)
+    assert.equal(compactToolExpandedLines(name, '{}', ''), undefined)
+  }
+  // The shared-name subagent tools stay excluded from the name-keyed set.
+  assert.equal(FOLDED_JSON_RESULT_TOOLS.has('send_message'), false)
+  assert.equal(FOLDED_JSON_RESULT_TOOLS.has('interrupt_agent'), false)
 })
 
 test('list_agents summarizes structured and rendered historical snapshots', () => {
@@ -161,6 +396,28 @@ test('list_agents summarizes structured and rendered historical snapshots', () =
     { kind: 'diagnostic', id: 'x', reason: 'unavailable' },
   ]))!), '1 entry · 1 diagnostic')
   assert.equal(formatAgentListSummary(summarizeAgentListResult('1 [running] — a\n2 [idle] — b\n3 [ready] — c')!), '3 agents · 1 running · 1 idle · 1 ready')
+  // The REAL rc.2 render uses `[inactive]` for the root/non-running child; it
+  // is a resumable agent, never a diagnostic. Keep the official text form
+  // alongside the structured snapshot and the historical rc.1 text replay.
+  const officialRc2Text = 'lead [inactive] — root agent\nreviewer [running] — Review the diff\n'
+    + 'broken [corrupt] — corrupt row\nlegacy [unsupported] — unsupported row\ngone [unavailable] — unavailable row'
+  assert.equal(formatAgentListSummary(summarizeAgentListResult(officialRc2Text)!),
+    '5 entries · 1 running · 1 ready · 3 diagnostics')
+  assert.equal(compactToolPresentation('list_agents', '{}', officialRc2Text)?.result,
+    '5 entries · 1 running · 1 ready · 3 diagnostics')
+  // Agent descriptions are untrusted text: a `[status]`-looking token INSIDE
+  // the description must never override the authoritative field before the
+  // separator. This is a valid official row, not damaged data.
+  assert.equal(formatAgentListSummary(summarizeAgentListResult(
+    'lead [inactive] — root agent\nreviewer [running] — Review the diff')!),
+  '2 agents · 1 running · 1 ready')
+  const pollutedDescriptions = 'lead [inactive] — Check the [running] state\n'
+    + 'reviewer [running] — Mentions [inactive] in the brief\n'
+    + 'broken [corrupt] — Description says [running] but the row is corrupt'
+  assert.equal(formatAgentListSummary(summarizeAgentListResult(pollutedDescriptions)!),
+    '3 entries · 1 running · 1 ready · 1 diagnostic')
+  assert.equal(compactToolPresentation('list_agents', '{}', pollutedDescriptions)?.result,
+    '3 entries · 1 running · 1 ready · 1 diagnostic')
   assert.equal(formatAgentListSummary(summarizeAgentListResult('(no subagents)')!), 'no subagents')
   assert.equal(formatAgentListSummary(summarizeAgentListResult('x [diagnostic: corrupt]')!), '1 entry · 1 diagnostic')
   // Descendants rows carry parent/depth position; the status regex must not
@@ -181,11 +438,58 @@ test('list_agents summarizes structured and rendered historical snapshots', () =
 
   const list = compactToolPresentation('list_agents', '{}', '1 [running] — a\n2 [idle] — b\n3 [ready] — c')
   assert.equal(list?.title, 'List agents')
-  assert.equal(list?.summary, 'children')
+  assert.equal(list?.summary, undefined, 'a no-argument rc.2 call advertises no scope')
   assert.equal(list?.result, '3 agents · 1 running · 1 idle · 1 ready')
+
+  // rc.2 returns the whole tree including the root `lead`; corrupt/unsupported/
+  // unavailable rows are diagnostics, never idle/ready agents.
+  const rc2 = summarizeAgentListResult(JSON.stringify([
+    { name: 'lead', status: 'inactive' },
+    { name: 'reviewer', status: 'running', description: 'reviews the diff' },
+    { name: 'broken', status: 'corrupt' },
+    { name: 'legacy', status: 'unsupported' },
+    { name: 'gone', status: 'unavailable' },
+  ]))!
+  assert.equal(formatAgentListSummary(rc2), '5 entries · 1 running · 1 ready · 3 diagnostics')
   assert.deepEqual(compactToolExpandedLines('list_agents', '{}', '1 [running] — a\n2 [idle] — b'), [
     '1 [running] — a', '2 [idle] — b',
   ])
+})
+
+test('rc.2 agent targets and list rows render without legacy scope or terminal escapes', async () => {
+  const vt = new VirtualTerminal(100, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  app.setTranscriptDetailExpanded(true)
+  app.setTranscript([
+    actionMessage('send_message', { agent: 'named-child', message: 'Review the diff.' }, JSON.stringify({ accepted: true })),
+    actionMessage('interrupt_agent', { agent: 'named-child' }, JSON.stringify({ accepted: true })),
+    actionMessage('list_agents', {}, JSON.stringify([
+      { name: 'lead', status: 'inactive' },
+      { name: 'reviewer', status: 'running', description: 'reviews' },
+      { name: 'bad\u001b[31mname', status: 'corrupt', description: 'esc \u001b[2Jdesc' },
+    ])),
+  ])
+  const view = await viewport(vt)
+  assert.ok(view.includes('Send message · named-child'), view)
+  assert.ok(view.includes('Interrupt agent · named-child'), view)
+  assert.ok(view.includes('List agents [ok]'), 'the rc.2 no-argument call carries no scope label')
+  assert.equal(view.includes('List agents · children'), false, 'no legacy scope is presented as a capability')
+  // The expanded card keeps the structured snapshot; the folded summary counts
+  // the same rows without inventing agents from corrupt/unsupported entries.
+  const rc2Rows = JSON.stringify([
+    { name: 'lead', status: 'inactive' },
+    { name: 'reviewer', status: 'running', description: 'reviews' },
+    { name: 'bad', status: 'corrupt' },
+  ])
+  assert.equal(compactToolPresentation('list_agents', '{}', rc2Rows)?.result,
+    '3 entries · 1 running · 1 ready · 1 diagnostic')
+  // Untrusted rc.2 name/description text must never reach the terminal as a raw
+  // control sequence; the structured snapshot JSON-escapes it instead.
+  assert.equal(view.includes('\u001b[31mname'), false, 'raw SGR from a name is never painted')
+  assert.equal(view.includes('\u001b[2Jdesc'), false, 'raw control sequence from a description is never painted')
+  assert.ok(view.includes('\\u001b[31mname'), view)
 })
 
 test('CompactTextPreview is Unicode-safe, capped, and re-derived on resize', () => {

@@ -1,0 +1,9 @@
+# R8-E PR-1 fixture A: ONE Config-only profile row and no Host row of its own.
+# The row id is sha256("@r8-pr1-fixture/a")'s first 32 hex characters.
+- insert:
+    - id: pi-tui-extcfg-d7fa9de1d5de190a92d683a273637c09
+      name: '@xmoon76/dsh-pi-tui/extension-config'
+      config:
+        data:
+          label: alpha
+          limit: 3

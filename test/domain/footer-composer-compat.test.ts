@@ -4,9 +4,9 @@
  * separators, same wrap/cap/dim behavior. The reference is re-implemented
  * here as the string-level oracle (plan 2026-08-31 §6.2: each logical row
  * occupies 1..2 physical lines inside the global budget; a row WITH a
- * right zone keeps its single-line fitted contract; the Host instruction
- * APPENDS as an independent line and never replaces a user row — the
- * legacy replace-last-row swap is gone).
+ * right zone keeps its single-line fitted contract). The Host instruction
+ * transiently REPLACES the last existing physical row — no extra line, no
+ * budget shift, and the instruction row is not dimmed by the footer pass.
  * @module @xmoon76/dsh-pi-tui/footer-composer-compat.test
  */
 
@@ -457,21 +457,29 @@ test('compact preset output is byte-equivalent to the reference compact footer',
   assert.equal(actual, expected)
 })
 
-test('the dynamic exit instruction appends as an INDEPENDENT line (the stats row survives)', () => {
-  // plan 2026-08-31 §7: the instruction is no longer a Row-2 REPLACER —
-  // it reserves its own line from the global budget; the user layout rows
-  // render beside it, position-independent.
+test('the dynamic exit instruction replaces the last physical row (height stable)', () => {
+  // plan §2.2: the instruction is a transient overlay of the Footer's last
+  // EXISTING physical row. The footer keeps its height, its earlier rows
+  // stay byte-identical, and the instruction row keeps the span contrast
+  // (strong key) instead of the footer-wide dim pass.
   const snap = mainSnapshot()
-  const expected = [
-    referenceFooter(defaultReferenceRows(snap, CONTEXT, ''), 100),
-    color.textDim('Press Ctrl+Shift+X again to exit'),
-  ].join('\n')
+  const baselineRows = referenceFooter(defaultReferenceRows(snap, CONTEXT, ''), 100).split('\n')
+  const instructionRow = `Press ${color.textStrong('Ctrl+Shift+X')} again to exit`
+  const expected = [...baselineRows.slice(0, -1), instructionRow].join('\n')
   const actual = composer.render({
     snapshot: snap,
     layout: DEFAULT_FOOTER_LAYOUT,
     width: 100,
     context: CONTEXT,
-    instruction: { id: 'exit-confirm', text: [{ text: 'Press Ctrl+Shift+X again to exit' }], priority: 100 },
+    instruction: {
+      id: 'exit-confirm',
+      text: [
+        { text: 'Press ' },
+        { text: 'Ctrl+Shift+X', emphasis: 'strong' },
+        { text: ' again to exit' },
+      ],
+      priority: 100,
+    },
   })
   assert.equal(actual, expected)
 })
@@ -547,42 +555,63 @@ test('a throwing item is isolated (omitted, never crashes the composer)', () => 
   assert.ok(!actual.includes('boom'), `the throwing item must be omitted:\n${actual}`)
 })
 
-test('mergeCommandSurface keeps its contract under the new capacity (smoke)', () => {
-  // The COMMAND footer surface is deliberately UNCHANGED by the capacity
-  // work: trusted command rows keep their row list, and the instruction
-  // still merges onto the last row slot of the COMMAND surface (its own
-  // contract, distinct from the native row allocator), tail-capped at
-  // narrow widths.
-  const instruction = { id: 'exit-confirm', text: [{ text: 'Press Ctrl+Shift+X again to exit' }], priority: 100 }
+test('mergeCommandSurface overlays the instruction on the last visible command row', () => {
+  // Both branches use the SAME visible rule: get the rows this branch
+  // would paint without an instruction, then replace the LAST one. The
+  // command surface never grows a row for the Host instruction.
+  const instruction = {
+    id: 'exit-confirm',
+    text: [{ text: 'Press Ctrl+Shift+X again to exit' }],
+    priority: 100,
+  }
+  // Legacy (no budget): two command rows keep only their first row.
   assert.equal(mergeCommandSurface(['cmd row one', 'cmd row two'], instruction, 20)
     .replace(/\x1b\[[0-9;]*m/g, ''),
     'cmd row one\nPress Ctrl+Shift+X…')
+  // Legacy with ONE command row: the row is replaced, not appended.
   assert.equal(mergeCommandSurface(['cmd row one'], instruction, 100)
     .replace(/\x1b\[[0-9;]*m/g, ''),
-    'cmd row one\nPress Ctrl+Shift+X again to exit')
+    'Press Ctrl+Shift+X again to exit')
   assert.equal(mergeCommandSurface(['only'], undefined, 100), 'only')
+  // Empty command rows: the single-line safety exception only when the
+  // instruction is visible.
+  assert.equal(mergeCommandSurface([], instruction, 100), 'Press Ctrl+Shift+X again to exit')
+  assert.equal(mergeCommandSurface([], undefined, 100), '')
   // Budget normalization mirrors the native composer: exactly 0 grants
-  // nothing; negative totals are invalid input and floor at 1 (the hint
-  // can never be silently hidden by an underflow); absurd values clamp to
-  // the hard capacity; degenerate widths still bound every row.
-  const instr = { id: 'exit-confirm', text: [{ text: 'Press Ctrl+Shift+X again to exit' }], priority: 100 }
+  // nothing; negative totals are invalid input and floor at 1; absurd
+  // values clamp to the hard capacity; degenerate widths still bound
+  // every row.
+  const instr = instruction
   assert.equal(mergeCommandSurface(['cmd'], instr, 20, { total: 0 }), '')
   assert.equal(
     mergeCommandSurface(['cmd'], instr, 20, { total: -1 }).replace(/\x1b\[[0-9;]*m/g, ''),
     'Press Ctrl+Shift+X…',
   )
+  // Budget 999 clamps to 4; the single command row is still the last
+  // EXISTING row and is replaced — the instruction never appends.
   assert.equal(
     mergeCommandSurface(['cmd'], instr, 20, { total: 999 }).replace(/\x1b\[[0-9;]*m/g, ''),
-    'cmd\nPress Ctrl+Shift+X…',
+    'Press Ctrl+Shift+X…',
+  )
+  // With room for more command rows, only the last is replaced.
+  assert.equal(
+    mergeCommandSurface(['cmd one', 'cmd two'], instr, 20, { total: 4 }).replace(/\x1b\[[0-9;]*m/g, ''),
+    'cmd one\nPress Ctrl+Shift+X…',
+  )
+  // Empty rows with a positive budget paint the instruction exception.
+  assert.equal(
+    mergeCommandSurface([], instr, 20, { total: 2 }).replace(/\x1b\[[0-9;]*m/g, ''),
+    'Press Ctrl+Shift+X…',
   )
   // A degenerate width normalizes to the width-1 surface: every row
   // collapses to its 1-cell ellipsis form.
   assert.equal(
     mergeCommandSurface(['cmd'], instr, Number.NaN, { total: 4 }).replace(/\x1b\[[0-9;]*m/g, ''),
-    '…\n…',
+    '…',
   )
-  // OMITTED budget = the legacy contract BYTE-IDENTICAL — the caller's
-  // width passes through un-normalized (edge widths included).
+  // OMITTED budget = the legacy contract BYTE-IDENTICAL when no
+  // instruction is active — the caller's width passes through
+  // un-normalized (edge widths included).
   for (const edgeWidth of [Number.NaN, 0, -5, 7.5]) {
     const actual = mergeCommandSurface(['cmd row one', 'cmd row two'], instr, edgeWidth as number)
     const legacyWrapped = wrapTextWithAnsi('Press Ctrl+Shift+X again to exit', edgeWidth as number)
@@ -594,10 +623,13 @@ test('mergeCommandSurface keeps its contract under the new capacity (smoke)', ()
     assert.equal(actual, expected, `omitted-budget legacy behavior at width ${edgeWidth}:\n${actual}`)
   }
   // An INVISIBLE instruction is absent on the command surface too: it
-  // neither paints a line nor consumes a budget slot (native parity).
+  // neither paints a line nor consumes a budget slot (native parity). This
+  // holds for the legacy no-budget branch as well.
   for (const text of ['  ', '\u001b[38;2;0;0;0m\u001b[39m  ']) {
     const withBlank = mergeCommandSurface(['cmd'], { id: 'b', text: [{ text }], priority: 100 }, 20, { total: 2 })
     assert.equal(withBlank.replace(/\x1b\[[0-9;]*m/g, ''), 'cmd', `a blank instruction must be treated as absent:\n${withBlank}`)
+    const legacyBlank = mergeCommandSurface(['cmd row one', 'cmd row two'], { id: 'b', text: [{ text }], priority: 100 }, 20)
+    assert.equal(legacyBlank, 'cmd row one\ncmd row two', `a blank instruction must be absent on the legacy path:\n${legacyBlank}`)
   }
   // Non-finite totals are SUPPLIED budgets: they fall back to the hard
   // capacity instead of bypassing the budget (the legacy path is only
@@ -605,7 +637,7 @@ test('mergeCommandSurface keeps its contract under the new capacity (smoke)', ()
   for (const nonFinite of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
     const lines = mergeCommandSurface(['cmd', 'cmd two'], instr, 20, { total: nonFinite })
       .replace(/\x1b\[[0-9;]*m/g, '').split('\n')
-    assert.ok(lines.length <= 4, `non-finite total ${nonFinite} must stay inside the capacity:\n${lines}`)
+    assert.ok(lines.length <= 2, `non-finite total ${nonFinite} must stay inside the capacity:\n${lines}`)
     assert.ok(lines[lines.length - 1]!.includes('Press Ctrl+Shift+X'), `the hint must survive a non-finite total ${nonFinite}:\n${lines}`)
   }
 })
@@ -704,10 +736,10 @@ test('a row that becomes the ONLY logical line follows the SAME 1..2-line contra
   }
 })
 
-test('the instruction as the ONLY logical line caps to one physical row', () => {
-  // A 1-row layout whose status row renders empty + the dynamic exit
-  // instruction: the instruction's own INDEPENDENT surface contract caps
-  // it to one physical row (plan 2026-08-31 §7).
+test('EMPTY_FOOTER_EXCEPTION: an otherwise empty footer paints one instruction row', () => {
+  // Plan §2.3: a normal layout that renders no row has no last row to
+  // overlay. With a positive budget the instruction's own safety exception
+  // paints exactly one visible row (capped to one physical row).
   const snap = emptyStatusSnapshot()
   const text = composer.render({
     snapshot: snap,
@@ -745,4 +777,120 @@ test('an EMPTY stats row does not cap the status row as if it were the stats tai
   const plain = text.replace(/\x1b\[[0-9;]*m/g, '')
   const lines = plain.split('\n')
   assert.ok(lines.length > 1, `the status row must keep its budgeted wrap:\n${plain}`)
+})
+
+/** A snapshot whose builtin `model` and `tasks` placements render richly. */
+function clickableSnapshot(): StatusSnapshot {
+  const snap = emptyStatusSnapshot() as DeepMutable<StatusSnapshot>
+  snap.composition.model = { provider: 'deepseek', id: 'deepseek-v4-flash', displayName: 'deepseek-v4-flash' }
+  snap.access.permissionPreset = { id: 'danger-full-access', label: 'danger-full-access', matched: true }
+  snap.activity.taskCount = 2
+  snap.activity.childAgentCount = 1
+  snap.workspace = { cwd: '/home/xmoon/project/dsh-pi-tui', branch: 'feat/footer-click' }
+  snap.usage.tokens = { input: 1200, output: 3400, cacheRead: 0, cacheWrite: 0 }
+  snap.usage.turns = 12
+  snap.usage.steps = 38
+  snap.usage.context = { usedTokens: 160000, windowTokens: 1_000_000, percent: 16 }
+  return snap as StatusSnapshot
+}
+
+const plainRows = (text: string): string[] => text.split('\n').map(row => row.replace(/\x1b\[[0-9;:]*m/g, ''))
+
+test('compose() is the byte-identical render() plus exact first-party hit cells', () => {
+  const snap = clickableSnapshot()
+  for (const layout of [DEFAULT_FOOTER_LAYOUT, COMPACT_FOOTER_LAYOUT]) {
+    for (const width of [200, 120, 80, 44]) {
+      const options = { snapshot: snap, layout, width, context: CONTEXT }
+      const projection = composer.compose(options)
+      assert.equal(projection.text, composer.render(options), `render() must stay the compatibility entry (w=${width})`)
+      assert.ok(projection.hits.length >= 2, `model and tasks must publish hits at w=${width}`)
+      const rows = plainRows(projection.text)
+      for (const hit of projection.hits) {
+        assert.ok(hit.row >= 0 && hit.row < rows.length, `hit row must be a painted row (w=${width})`)
+        assert.ok(hit.startCol >= 0 && hit.startCol < hit.endCol && hit.endCol <= width,
+          `hit cells must stay inside the terminal (w=${width}): ${JSON.stringify(hit)}`)
+        const slice = rows[hit.row]!.slice(hit.startCol, hit.endCol)
+        if (hit.id === 'model') assert.ok(slice.includes('deepseek/') || slice.includes('deepseek-'), `model cells: ${JSON.stringify(slice)}`)
+        else assert.ok(slice.startsWith('[') && slice.endsWith(']'), `tasks cells: ${JSON.stringify(slice)}`)
+        assert.ok(!slice.includes('  '), `a hit never spans the separator/gap: ${JSON.stringify(slice)}`)
+      }
+    }
+  }
+})
+
+test('command mode, instruction cells and a zero budget publish no hit, and neither does a spoofing custom item', () => {
+  const snap = clickableSnapshot()
+  assert.deepEqual(
+    composer.compose({
+      snapshot: snap,
+      layout: DEFAULT_FOOTER_LAYOUT,
+      width: 100,
+      context: CONTEXT,
+    }).hits.map(hit => hit.id).sort(),
+    ['model', 'tasks'],
+  )
+  const noBudget = composer.compose({
+    snapshot: snap,
+    layout: DEFAULT_FOOTER_LAYOUT,
+    width: 100,
+    context: CONTEXT,
+    physicalLineBudget: { perRow: 2, total: 0 },
+  })
+  assert.deepEqual(noBudget, { text: '', hits: [] })
+  // A user item that spells the builtin badge stays inert: identity is the
+  // builtin DEFINITION OBJECT, never the id or the text.
+  const registry = createBuiltinFooterRegistry()
+  registry.setCustomSource({
+    ids: () => ['user:model'],
+    definition: () => ({
+      id: 'user:model',
+      label: 'Fake model',
+      defaultZone: 'left',
+      defaultImportance: 100,
+      formats: ['badge'],
+      defaultFormat: 'badge',
+      render: () => ({ spans: [{ text: '[deepseek/deepseek-v4-flash]' }] }),
+    }),
+  })
+  const withCustom = new FooterComposer(registry).compose({
+    snapshot: snap,
+    layout: { schemaVersion: 1, rows: [{ left: [{ id: 'user:model' }, { id: 'tasks' }], right: [] }] },
+    width: 100,
+    context: CONTEXT,
+  })
+  assert.deepEqual(withCustom.hits.map(hit => hit.id), ['tasks'],
+    'only the real builtin object publishes a hit; the same words from a custom item do not')
+  // The instruction OVERLAYS the last painted row and never publishes a
+  // cell there; the Footer height is unchanged.
+  const baseline = composer.compose({
+    snapshot: snap,
+    layout: DEFAULT_FOOTER_LAYOUT,
+    width: 100,
+    context: CONTEXT,
+  })
+  const withInstruction = composer.compose({
+    snapshot: snap,
+    layout: DEFAULT_FOOTER_LAYOUT,
+    width: 100,
+    context: CONTEXT,
+    instruction: { id: 'exit-confirm', text: [{ text: 'Press Ctrl+D again to exit' }], priority: 100 },
+  })
+  const baselineRows = plainRows(baseline.text)
+  const instructionRows = plainRows(withInstruction.text)
+  assert.equal(instructionRows.length, baselineRows.length, 'the instruction must not change the Footer height')
+  const instructionRow = instructionRows.length - 1
+  assert.ok(instructionRows[instructionRow]!.includes('Press Ctrl+D again to exit'))
+  assert.ok(withInstruction.hits.every(hit => hit.row !== instructionRow),
+    'the Host instruction line is never clickable')
+  // The `↓ view` hint is the KEYBOARD Quick admission, never the mouse
+  // capability: without the hint the tasks placement still publishes its hit.
+  const withoutHint = composer.compose({
+    snapshot: snap,
+    layout: COMPACT_FOOTER_LAYOUT,
+    width: 120,
+    context: { taskBrowserAvailable: false, extensionFooterText: '' },
+  })
+  assert.ok(!plainRows(withoutHint.text).join('\n').includes('↓ view'), 'the hint is genuinely absent')
+  assert.ok(withoutHint.hits.some(hit => hit.id === 'tasks'),
+    'the Full Task Center click does not depend on the ↓ Quick hint')
 })

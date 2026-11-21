@@ -13,13 +13,12 @@
  */
 
 import type { TerminalProgressOutcome } from '../../domain/terminal-progress/settings.ts'
+import type { ProgramStatus } from '../../domain/terminal-progress/program-status.ts'
 import type { RunPhase } from '../../domain/status/types.ts'
 
-/** The closed OSC 7501 root-record vocabulary this TUI reports. */
-export type ProgramStatus =
-  | { state: 'idle' | 'working' | 'done' | 'error' }
-  | { state: 'blocked'; kind: 'permission' | 'question' }
-  | { state: 'clear' }
+/** The closed program-status vocabulary (owned by the neutral domain module;
+ *  re-exported here for the existing terminal-presentation consumers). */
+export type { ProgramStatus } from '../../domain/terminal-progress/program-status.ts'
 
 /** The fixed application identity carried by every non-clear record. */
 const PROGRAM_STATUS_APP = 'dsh-pi-tui'

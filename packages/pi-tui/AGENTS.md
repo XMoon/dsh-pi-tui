@@ -1,9 +1,9 @@
 # pi-tui Agent Guide
 
 `packages/pi-tui` is a vendored copy of pi-tui from the upstream pi-mono
-project, pinned to Earendil `v1.1.0` (see `UPSTREAM.json` — the single
-source of truth for the baseline; generated reports may repeat the pin but
-must not become a second hand-maintained source). It is no longer patched via
+project, pinned according to `UPSTREAM.json` (currently Earendil `v1.5.0`) —
+the single source of truth for the baseline; generated reports may repeat the
+pin but must not become a second hand-maintained source. It is no longer patched via
 pnpm patches — all local fixes are applied directly to the source. The differential-rendering behavior in `src/tui.ts`
 matches upstream; the schema-v2 `vendor-divergences.json` is the authoritative
 inventory, and `DIVERGENCES.md` is the generated human report.
@@ -53,13 +53,15 @@ inventory, and `DIVERGENCES.md` is the generated human report.
   upstream.
 - **Package shell contract:** name stays `@xmoon76/pi-tui`, `private: true`,
   tsdown build producing `dist/index.mjs` + `dist/index.d.mts`. Do not
-  switch to the upstream tsgo contract. Native prebuilds are deliberately NOT
-  vendored (supported surface: Linux/WSL/SSH into Linux). "Degrade" is
-  input-capability loss, not a crash: without the prebuilds Shift+Tab is
-  indistinguishable from Tab and the Windows/Apple Terminal Shift+Enter
-  modifier fallback is unavailable — `terminal.ts` falls back to sequence
-  heuristics only. If Windows/macOS become supported platforms, vendor the
-  matching `native/` prebuilds from the pinned upstream tarball.
+  switch to the upstream tsgo contract. The pinned Darwin arm64/x64 prebuilds
+  are vendored under `native/darwin/prebuilds/` (supported surface: macOS plus
+  Linux/WSL/SSH into Linux); the Linux X11 and Windows prebuilds remain
+  deliberately NOT vendored. "Degrade" is input-capability loss, not a crash:
+  without the matching prebuild Shift+Tab is indistinguishable from Tab and the
+  Windows/Apple Terminal Shift+Enter modifier fallback is unavailable —
+  `terminal.ts` falls back to sequence heuristics only, and the clipboard helper
+  resolves to `undefined`. If Windows becomes a supported platform, vendor its
+  matching `native/` prebuild from the pinned upstream tarball.
 - **When an upstream file conflicts with a local divergence, the Earendil
   file is the base** — re-apply the necessary patch on top. Never go the
   other direction (local file as base, cherry-picking upstream code back).

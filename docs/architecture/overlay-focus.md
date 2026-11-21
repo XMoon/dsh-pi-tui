@@ -147,6 +147,15 @@ Keyboard routing follows this priority:
    support it;
 2. fixed Question response keys (the component) and Approval fixed/reading keys
    (the approval runtime/sheet);
+2a. the split Client's modal-safe no-answer navigation entry (`Alt+W`), only
+   while a LIVE forwarded Question/Approval owns the seat (the Agent is blocked
+   on this answer — never a continued late-answer form) and the registered,
+   presentable Session Workspace entry is installed: it commits the root
+   presentation-only hold, withdraws the local modal seat, and opens the ONE
+   existing Session Workspace; no cancel, deny, answer or second listing is
+   sent. It is the only modal key that suspends the answer seat for navigation;
+   the advertised verb paints only where the control is installed (Direct and
+   the TSP native seat never show it);
 3. a direct trigger of the explicit inspection-safe semantic allowlist;
 4. a leader prefix or completion, when the completed semantic action is in the
    same inspection-safe allowlist;
@@ -161,14 +170,118 @@ mutate the answer, submit/steer editor input, change session/context identity,
 or trigger lifecycle/business/plugin actions. Todo presentation is allowed;
 Todo/business mutation is not.
 
-Transcript Search is intended inspection, not a product-level prohibition. It
-is deferred from this PR because the current `OverlayBroker` mounts a new
-managed overlay under an active Question/Approval suspension as hidden; making
-Search a temporary keyboard owner would require a new nested inspection-child
-ownership primitive. The follow-up is **Milestone A follow-up — nested
-transcript Search under Question/Approval**. Until that ownership proof exists,
-the existing modal routing consumes Search input rather than falling through to
-the generic Host ladder.
+Transcript Search is an inspection action, not a product-level prohibition,
+but the current `OverlayBroker` mounts a new managed overlay as hidden during
+an active Question/Approval suspension. There is no nested inspection-child
+keyboard owner for Search. Therefore the modal routing consumes Search input;
+it must not fall through to the generic Host ladder or falsely appear
+interactive under the blocked response seat.
+
+### 6.0 The official plan-review Question branch
+
+An OFFICIAL plan-review Question (the exact intent shape: one question whose
+`intent.kind` is `plan-review`, whose `intent.approve` names one of its own
+options, and which offers at least one other option — nothing else, never a
+header or label match) replaces the generic Q1→Review→Submit pages with ONE
+compact decision component in the same editor seat:
+
+- Decision rows keep the frozen order `View plan → Keep planning… →
+  <official approve label> plan` in the normal Fullscreen layout (a
+  detail-bearing request does NOT add a row there), and in the ordinary Regular
+  layout (see below). `View review text` is the §3.5 EXCEPTION entry, present
+  only where the transcript inspection cannot be executed at all (Regular has
+  no app-owned seek) AND the official card is NOT provably present in the
+  mounted transcript — the presence probe shares the inspection's READ-ONLY
+  admission (the flow is still the live seat owner, the official Question's
+  Session provably equals the current display subject, then the local
+  `intent.callId` lookup); a mismatched or unknown Session is never provable,
+  is never claimed as "the plan above", and keeps the question's own detail
+  entry. No Host service and no second Reader. With a provable card Regular
+  keeps its frozen ordinary layout
+  (the `Read the plan above in terminal history.` line plus Keep/Approve, Keep
+  default); only the card-unprovable exception replaces that line with
+  `View review text` (the complete in-flow text, never a claimed-located
+  transcript). On Fullscreen a FAILED locate degrades `View plan` to that same
+  detail page. Any further official non-approve options never add rows: the
+  FIRST non-approve option in the official order is the keep-planning class and
+  the label this branch answers with. The default cursor is the FIRST available
+  reading row (View plan, else View review text, else Keep) — never Approve.
+  Answer values are always the OFFICIAL option labels.
+- `View plan` triggers the host's one-shot read-only inspection: it requires a
+  PROVEN identity first — the official Question's own Session (the
+  presentation-only `reviewSessionId` the surface controller forwards) and the
+  current display subject's Session must both be known and equal; either one
+  unknown fails closed to the detail fallback, never a callId-only locate. It
+  then resolves the official `intent.callId` against the CURRENT transcript
+  (a native `tool.callId` or a nested PTC `subCallId`), commits a DEDICATED
+  one-shot presentation (the located card plus its hiding ancestors open
+  through the SAME reveal path resolution the search navigation uses — no
+  search target, no synthetic match, no second ScrollView, no manual
+  disclosure write), and scrolls the same fullscreen viewport to the card's
+  measured row. A proven locate enters the READING step; every failed proof
+  ROLLS THE PRESENTATION BACK, and the question degrades to its own `detail`
+  full-text page (paged to the very end) — never a half-applied reveal and
+  never a claimed-located reading state.
+- A PTC sub-call target opens its own disclosure inside the located root card
+  and renders the presenter's generic call body (the same card-presentation
+  authority the top-level card uses), so a RUNNING `exit_plan_mode` plan body
+  is readable from its call arguments before the call settles.
+- Reading: `↑/↓`, `PgUp/PgDn` and `Home/End` drive the SAME transcript
+  viewport through the same ScrollView (Home/End use its existing
+  start/end owners); `Enter` is inert; `Esc` returns to the decision list (never
+  a cancel) and releases the one-shot presentation. Every EXPLICIT user collapse
+  of a container the lease opened — the located card's own disclosure, its PTC
+  child, its Compact Work span, its Context cluster or its Focus Thought —
+  revokes the lease for the rest of that reading step (and never writes a
+  manual expansion for a temporary one); a NEW explicit `View plan` re-opens
+  it. Settling the question, a session switch and a failed locate release the
+  lease too.
+- The plan inspection and the transcript SEARCH navigation are INDEPENDENT
+  temporary requests. They may both be alive at once (a search parked behind
+  the review), the effective reveal path is the UNION of both requests' hiding
+  ancestors (one never shadows the other), and their explicit-collapse records
+  stay separate: the SEARCH navigation owns the PTC child-suppression record,
+  while the plan inspection keeps NO suppression of its own — an explicit
+  collapse of a plan-opened child revokes the whole one-shot lease. Collapse
+  OWNERSHIP is per-request, never the union: an explicit collapse of one
+  container (card / PTC child / Work span / Context cluster / Focus Thought /
+  the Ctrl+O bulk) revokes only the temporary request that opened THAT
+  container or whose target lives inside it — collapsing a Search-opened span
+  must not cancel an unrelated Plan lease, and collapsing a Plan-opened
+  container must not suppress the search grant. A plan View/reading/release
+  never writes or clears a search suppression, and vice versa.
+- Regular/Main has no app-owned seek: it offers no `View plan` and never
+  claims a located reading state. With a provable card the decision list
+  carries the frozen single-line guidance `Read the plan above in terminal
+  history.` (the plan is the tool card already painted in the native
+  scrollback, expanded through the effective disclosure key) and the two
+  ordinary rows Keep/Approve; with NO provable card the question's own detail
+  keeps the full text readable in-flow through `View review text`; a
+  detail-less official shape keeps the guidance line alone.
+- Keep planning… opens the feedback input (draft survives Esc); Enter answers
+  the official keep label with the optional custom text. The generic
+  custom-first submit path is never used (it would clear the selected label).
+  A real feedback edit reports the SAME answer-mutation fact the generic
+  free-text path does (it freezes a timed claim and keeps the park/reopen
+  draft live); cursor-only keys never do.
+- `Esc` on the decision list is the OFFICIAL dismiss (`onCancel` →
+  `ASK_CANCELLED`); `Ctrl+C` is the official cancel everywhere in the branch.
+- The pointer route follows §6's Question contract: the decision rows are real
+  click targets (keyboard-Enter parity), the action bar carries the same verbs
+  with last-painted identity, and Regular has no application pointer path.
+- A plan-review Question keeps the ordinary Question lifetime: the
+  `QuestionSurfaceController`, the FIFO queue, park/reopen and the continued
+  lifecycle own it exactly like any other question. The branch owns only its
+  local step state (decision/reading/feedback/fallback) and the feedback
+  draft; `draftSnapshot` carries only that draft.
+
+The plan-mode composer hint (`Plan mode · describe the task`, and the pending
+variants `Plan requested · pending` / `Plan mode · change pending`) is a
+presentation of the ONE committed collaboration plan fact: the official `plan`
+projection's `{active, pending}` wire view. The committed `plan/mode` event
+carries only the committed bit, so the event handler must re-derive the official
+projection instead of assuming the event is the whole fact; the composer and
+the footer badge then read the same committed section.
 
 Fullscreen Question pointer handling uses the same semantic boundary:
 
@@ -182,6 +295,50 @@ Fullscreen Question pointer handling uses the same semantic boundary:
 - press/release uses the last-painted geometry and semantic owner/row/hit
   identity, with a Question-instance fence;
 - a presentation rebuild must not change modal focus ownership.
+- the Question frame's one bottom Action Bar is shared by pointer actions and
+  keyboard hints within the original row budget. On Fullscreen it carries the
+  complete visible Back, Progress/Edit, Leave edit, Submit and Cancel spans;
+  Submit appears only once in the bottom bar. Each span calls the same flow
+  method as its keyboard action. The final keyboard hint is replaced, not
+  duplicated.
+- on Fullscreen the generic Question's top stage row is a pointer surface:
+  every completely painted `Qn` / `Review` tab is a pure navigation target
+  (the currently painted tab is a no-op), and `Review` only shows the summary
+  page — it is never Submit. Hits are derived from the SAME last-painted tab
+  row that painted the labels (never from clipped or re-measured text), carry
+  the source page/question identity, and a release must match the same
+  target, row, start/end span and content width. Status-row appearance,
+  resize, keyboard paging, inter-tab gaps, overflow `…` and omitted tabs are
+  inert. A narrow strip keeps the current page and the complete `Review` tab
+  when both fit; otherwise it keeps the current page first and paints no
+  partial hit. Regular/Main and the official plan-review branch expose no
+  generic stage-tab pointer route.
+- the ordinary Question body owns the Fullscreen wheel while that flow is the
+  visible seat owner AND holds the physical input seat: a wheel over its
+  last-painted body scrollport moves only that body by the configured line
+  step (never a page step), and a real scroll revokes an in-flight tab/action
+  press and cancels the pending cursor follow instead of snapping back. A
+  tab/page transition revokes the previous page's painted scrollport and hit
+  geometry immediately, so an event delivered before the next paint cannot
+  scroll the newly selected page. The tab row, action bar, frame chrome,
+  borders and the area outside the frame
+  are inert while the Question owns the input seat and must never scroll the
+  transcript or a hidden Approval. A focused managed overlay explicitly raised
+  above the Question keeps its own pointer plane. PlanReview keeps its own
+  reading path and enters no generic Question wheel route; Regular/Main has no
+  application wheel route.
+- the action bar keeps required keyboard guidance in the same row as muted,
+  lower-priority hints: list selection/choice/toggle, edit cursor, scroll/expand,
+  and only an eligible Split browse hint. `Esc` always names the real state
+  action and stays last. In a text edit, `Leave edit [Esc]` leaves the edit and
+  the separate click-only `Cancel flow` cancels the request; navigation/Review
+  Esc cancels.
+- the one-row action press/release must retain the same flow instance,
+  question/review position, edit mode, painted span and content width. A
+  body/separator press, page change, keyboard input, resize or replacement
+  cannot turn into an action.
+- Regular/Main has no application Question pointer route. Its terminal-native
+  selection and scrolling behavior is unchanged.
 
 Approval keyboard inspection uses the same semantic allowlist. Approval's own
 fixed and reading keys (`y/n/Esc/Ctrl+C`, arrows, PgUp/PgDn, Home/End, `c`,
@@ -288,9 +445,6 @@ frame, auto-reopen, report a Host-driven end as user cancel, or add an
 `ASK_ABORTED`, `QUESTION_REPLY_QUEUED`, `ContinuedQuestionEntry`),
 `QuestionFlow`, `src/runtime/interaction-port.ts`.
 
-Proof: `test/app/question-park-reopen.test.ts`,
-`test/app/question-remote-lifecycle.test.ts`.
-
 ### 6.3 Esc and visible-seat priority
 
 - The Host busy-cancel runs before the shell-mode exit and before a replacement
@@ -303,6 +457,47 @@ Proof: `test/app/question-park-reopen.test.ts`,
 - Never let a mode-less plugin seat inject `prompt` into a Host `!` submit (that
   would leak a session-excluded command into the model path), and never let a
   stale hidden-host mode drive completion routing.
+
+### 6.4 Navigation-first forwarded interaction admission
+
+The split Client's ONE root interaction delivery owner holds each official
+forwarded Question/Approval invocation. The PiTUI/Split surface presents that
+invocation only while all of these hold: the application has committed the
+request's own Session as the current subject, no presentation-only navigation
+hold is active, and the official request signal is live. A request for another
+Session is HELD, never painted onto the current editor; a Reader-side
+`attention` candidate is not answer authority.
+
+For the `Alt+W` navigation hold, the root hold and presentation epoch are
+committed BEFORE the local seat is withdrawn. A committed-Session replacement
+is instead fenced synchronously by the committed-subject check: once the new
+owner is published, the outgoing request's Session is no longer the committed
+subject, and the coalesced scope notification also bumps the epoch. In both
+cases the withdrawn attempt's local cancellation cannot be forwarded as a human
+Host decision, and the SAME official invocation (the original callback and
+`nextOnce`) is re-offered only when its Session is current again. The
+official request aborts, the first settlement by another Client, or root
+disposal ends the wait; no local pending DTO, second RPC or request id is
+created.
+
+The hold is released by the physical Session Workspace close (user Esc, a
+committed Session switch, or blocking-owner pre-emption). If the entry cannot
+lease/present, the hold is released at once so the original dialog is
+re-offered instead of leaving the editor under a hold with no future close.
+Direct keeps its original unconditional presentation delegation; the TSP
+native modal seat keeps its own admission.
+
+Authority: `src/app/remote-process/client-interaction-delivery.ts`,
+`src/app/surface/interaction-runtime.ts`, `src/app/surface/runtime.ts`,
+`src/tui-app.ts`.
+
+Proof: `test/app/remote-process-client-interaction-delivery.test.ts`
+(root admission, epoch, hold, re-offer), `test/app/no-answer-navigation.test.ts`
+(Alt+W seat withdrawal and workspace-close release),
+`test/app/interaction-navigation-yield.test.ts` (surface collect/atomic
+withdraw/settle), and the real two-PTY split-process case
+`interaction.navigation-first-answerability`.
+
 
 ## 7. Regression checklist for future changes
 
@@ -365,6 +560,60 @@ When you add or change an overlay path, cover the family it belongs to:
   operations; focus/blur counts around internal restores; the logical
   `remountOrder` front after a reentrant mount; no shadow state (`wasFocused`,
   `desiredFocus`, ordinals, `previouslyFocused`) may reappear.
+
+### Fullscreen pointer-journey coverage for interactive surface changes
+
+Adding or materially changing a **user-reachable PiTui interaction** (workspace,
+picker, modal, specialist Settings page, or embedded editor-seat view) requires
+an explicit **Fullscreen/AltScreen pointer-coverage disposition**, even if the
+diff only adds keyboard handling or paints a new action hint. Review the
+**complete user journey**, not only the rows that already implement
+`handleMouse` or a successful individual click.
+
+- **Inventory the painted actions in each reachable state.** For entry,
+  selection, editing, primary action/commit, confirmation, cancellation,
+  back/close and failure recovery where relevant, record the keyboard intent,
+  currently painted affordance, pointer target and semantic owner. Classify
+  each as pointer-action, contract-backed keyboard-only, informational/inert,
+  disabled/unavailable, or not visible/applicable. A missing pointer route
+  cannot be reclassified as intentionally keyboard-only without an owning
+  product-contract reason. Neither `Enter`/`Esc` text nor every Action Bar hint
+  is automatically a clickable button.
+- **Prove the intended mouse-supported task end to end.** A pointer-capable
+  primary flow must not depend on an undisclosed keyboard-only `Enter` to
+  commit or `Esc` to back out. Exercise a pointer-only positive journey and
+  its applicable cancel/back/close branch; an existing explicitly frozen
+  keyboard-only or partially pointer-enabled surface is an exception to
+  **document**, not permission to silently change it. Expanding such a
+  surface's action scope requires the owning product-contract/Owner decision.
+- **Converge on one semantic admission path.** A pointer action and its keyboard
+  equivalent reach the same existing action/controller and authority; pointer
+  entry creates no second Host writer, persistent draft, or cancellation
+  state. Preserve state-dependent `Esc` ladders, pending confirmation,
+  disabled/read-only restrictions, and selection-vs-commit separation (for
+  example, choosing an effort candidate must not itself persist the choice).
+- **Prove real, current targets.** Only complete, actually painted action
+  spans/rows in the live owner are eligible. Match press and release to the
+  same action, view/state and last-painted geometry. Invalidate on relevant
+  keyboard navigation, page/selection changes, re-projection, resize,
+  scroll, modal replacement, focus/seat transfer and asynchronous identity
+  retirement. The applicable modal/seat owner must win; stale input must not
+  reach a newer action or business sink.
+- **Use proportional evidence.** Test the real pointer event route through a
+  positive user journey plus meaningful negatives (inert/disabled/unpainted
+  target, stale or mismatched press/release, relevant narrow layout), and
+  retain the keyboard route. A direct handler call or an existing row-click
+  unit test alone does not prove mouse completeness. Record headless/injected,
+  real terminal and physical-device evidence separately; mark unrun lanes
+  `NOT_RUN`/`NOT_VERIFIED`, never `PASS`.
+
+This gate **does not** create generic pointer handlers or broaden existing
+scoped Action Bar/status-bar exceptions in
+[design-language.md](./design-language.md) and
+[surface-behavior.md](./surface-behavior.md). Regular/Main retains its
+existing no-application-pointer boundary. TSP-native surfaces use their own
+SDK/client event and qualification contract in
+[../tsp/foundation.md](../tsp/foundation.md), not PiTui cell hit maps.
 
 ## 8. By-design boundaries
 
@@ -446,8 +695,9 @@ that grant instead of the whole terminal height.
   only one that did, for its `Theme`, `Keyboard shortcuts`, `Subagent allowed
   models`, Web endpoint and Web credential rows. Each of those fields is now
   edited by the workspace's own choice, by a same-lease specialist page, or by
-  the embedded Web page (which reuses `WebEndpointPanel` as its own draft
-  editor, not as a row submenu). The component's `submenu` slot and its budget
+  the embedded Web page (whose rows are choice/read-only facts; the rc.1
+  endpoint draft editor was retired with the rc.2 schema, not moved into a row
+  submenu). The component's `submenu` slot and its budget
   forwarding stay as the fork's contract, exercised by its own divergences and
   by the picker unit tests rather than by a live settings row. The fork's
   SettingsList still lacks filtered-state Home/End paging, and such a list still
@@ -464,6 +714,16 @@ has exactly ONE per-open finalizer, and every close route funnels through it:
   hide and the finalizer as INDEPENDENT steps (`runSyncDisposalSteps`), so a
   throwing hide cannot strand the owner notification and a throwing notification
   cannot leave the overlay mounted. A repeated call is a no-op.
+- **The output viewer's fullscreen bar is pointer-capable ONLY while the
+  overlay's own mount screen is the CURRENT active fullscreen screen.** The
+  route is gated on that screen identity (never on the user's display mode
+  flag), so a Regular/Main viewer keeps its historical keyboard-only hint and
+  gains no application pointer path, and a viewer whose mount screen is no
+  longer active fails closed. Only the complete painted Stop/Close segments are
+  targets; Stop re-reads the LIVE capability at the release and then calls the
+  existing stop sink, Close calls the ONE `requestClose`. Both the key and the
+  click funnel through those same sinks — the pointer route never creates a
+  second close/stop path.
 - **A physical disposal that never calls the closer** (`TuiApp.dispose`, a
   fullscreen screen swap, a broker detach): the owning
   `ResponsiveOverlayFrame.dispose()` fires its FOURTH constructor argument
@@ -628,7 +888,7 @@ same screen are untouched.
 workspace with the same temporary physical-screen lease as the Job workspace, and
 the two leases are MUTUALLY EXCLUSIVE. The whole surface is a read projection
 whose writable-row set and value contracts are owned by
-[surface-behavior.md](./surface-behavior.md) `Settings Workspace`; this section
+[surface-settings.md](./surface-settings.md) `Settings Workspace`; this section
 owns only the lease, focus and write-lifecycle mechanics.
 
 - **One lease latch for every workspace.** `TuiApp.openSettingsWorkspace` mints a
@@ -679,7 +939,7 @@ owns only the lease, focus and write-lifecycle mechanics.
   same L2 transition. `Esc`/`Backspace` step back (and close at L0) — wide,
   medium and narrow behave identically, and a new open starts on the About
   home. The `Tab`/`Shift+Tab` region-key contract is owned by
-  [surface-behavior.md](./surface-behavior.md#settings-workspace); those keys
+  [surface-settings.md](./surface-settings.md#settings-workspace); those keys
   only re-focus an existing region and never activate a page, row or write.
   Leaving the workspace is therefore always one reachable key (the Action Bar
   is pinned to the physical last row at every height, down to a one-row
@@ -691,7 +951,7 @@ owns only the lease, focus and write-lifecycle mechanics.
   projection or the real page) and no configuration pane — except the Plugins
   page, whose 76..119 content focus gives the frame to `List | Details` (also
   subject to the six-real-body-row floor) and lets the rail step aside (see
-  [surface-behavior.md](./surface-behavior.md) § Plugin Manager). No second
+  [surface-plugins.md](./surface-plugins.md) § Plugin Manager). No second
   "visible window" state is stored, hidden panes are neither painted nor
   addressable, and row text is laid out against the pane width it is actually
   painted in.
@@ -811,20 +1071,35 @@ an OverlayBroker node. It is mutually exclusive with the Job, Settings and
 direct `/plugins` leases, and it obeys the same paused-return-surface,
 modal-pre-emption, exactly-once close and final-dispose rules.
 
-- **Why a screen, not an overlay.** The pinned renderer's overlay compositor
-  returns the BASE line unchanged when that line already contains an inline
-  image (`compositeTuiLine` → `isImageLine(baseLine)`), so a framed overlay
-  would silently drop its rows over transcript images and could not reliably
-  paint the image itself. A leased screen makes the image an ordinary BASE line
-  of its own `TuiAltScreen` — the proven `Image` rendering path — with the
-  transcript screen paused underneath.
+- **Why a screen, not an overlay.** `compositeTuiLine` still returns the BASE
+  line unchanged when that line already contains an inline image
+  (`isImageLine(baseLine)`), so a framed overlay cannot composite itself onto an
+  image anchor row. A Native Kitty placement is instead preempted BEFORE
+  compositing: `compositeOverlays` drops the whole covered `a=p`/`a=T` block
+  from that frame's projection — only the projection, never the component, the
+  overlay stack or the image owner — so the overlay paints on an empty base,
+  and the physical Screen deletes the old placement and re-places the same
+  image once the overlay is gone (X077 in
+  `packages/pi-tui/vendor-divergences.json`). That is a single-frame visual
+  yield, not a viewer. The workspace still needs its own list/viewer states,
+  focus owner, scroll and occurrence lifecycle, so it keeps the SAME temporary
+  physical-screen lease as §10.1/§10.3: a leased screen keeps the viewed image
+  an ordinary BASE line of its own `TuiAltScreen` — the proven `Image` rendering
+  path — with the transcript screen paused underneath.
 - **Two internal states, one screen owner.** The workspace panel hosts the
   mounted-window occurrence LIST (`SearchablePicker`, no full-text search) and
   the read-only VIEWER as mutually exclusive states of the SAME layout root.
   Enter moves list → viewer; `Esc back` returns to the exact same list instance
   and selection; a second Esc closes the workspace. A viewer opened directly
   from a transcript image body has no list below and advertises `Esc close`.
-  No nested Alt Screen, no second focus owner, no overlay fallback.
+  No nested Alt Screen, no second focus owner, no overlay fallback. The
+  workspace's own complete painted exit spans are pointer targets: the LIST
+  bar's `View`/`Close`, the raster VIEWER's right-aligned `Back [Esc]` /
+  `Close [Esc]` (a Viewer opened from the list backs out; a direct Viewer
+  closes the lease), resolved against the last-painted frame, the live
+  selection and the current mode, so a press can never cross the LIST↔VIEWER
+  boundary. The SVG Viewer keeps its own local controller and cell dispatch;
+  the workspace root never claims its cells.
 - **The return surface is paused, never rebuilt.** Opening/closing the workspace
   never rebuilds, scrolls, collapses or expands the transcript; the paused
   screen's object tree, focus, draft and scroll state survive. A session
@@ -836,12 +1111,61 @@ modal-pre-emption, exactly-once close and final-dispose rules.
   and `attachmentId`; one subscription, one idempotent unsubscribe, no second
   cache or read service. The workspace Viewer paints real pixels on Kitty and
   on Direct SIXEL once the terminal's own live DA1, cell-size and background
-  facts admit it. iTerm2 remains outside the Viewer/SVG pixel scope: the
-  AltScreen deliberately disables its image capability and its cursor-up
-  framing is outside the fork's ANSI width layer, so the iTerm2 workspace shows
-  the real metadata plus `Preview unavailable`; native iTerm2 workspace pixels
-  remain deferred to separate renderer/protocol work. Transcript thumbnails
-  keep their existing per-surface capability behavior.
+  facts admit it, and Direct iTerm2 paints through the fork's OSC 1337 `Image`
+  path (X080). Multiplexer panes and `PI_IMAGE_PROTOCOL=none` remain text-only;
+  AltScreen no longer mutates the process-wide iTerm2 capability. Transcript
+  SVG iTerm2 thumbnails may paint pixels but do not publish clickable
+  pixel-body geometry; the ordinary raster thumbnail keeps its legacy iTerm2
+  hit body, and the explicit View action remains the SVG viewer entry.
+
+### 10.5 Session Workspace: the fourth leased screen
+
+`/sessions`, `/search` and bare `/resume` lease the SAME temporary screen
+through `TuiApp.openSessionWorkspace` (`kind: 'sessions'`). It is mutually
+exclusive with the Job, Settings and Image leases and obeys the same paused
+return surface, blocking-owner pre-emption, re-entrant `assertStillOpening` and
+final-dispose rules; the panel's root Esc and every forced teardown close
+through the ONE record `close()`.
+
+- **Owner-origin close is quiet.** When the read owner/presenter retires its
+  own workspace it calls the handle's `close()`, which suppresses the lease's
+  `onClose` notification; a user Esc, blocking-owner pre-emption or surface
+  teardown still notifies the owner exactly once. The retirement callback can
+  therefore never re-enter the owner that triggered it.
+- **The lease is latched before any read.** A refused lease throws before the
+  per-open official Workspace follow or the Session listing starts, and the
+  command returns one error instead of leaving a hidden reader.
+- **The per-open Workspace follow is caller-owned.** On close the token is
+  retired FIRST, then its `AbortController` is aborted, then its handle is
+  disposed exactly once, then the lease closes; every later frame is fenced by
+  the token and the captured subject, so a late baseline can never repaint a
+  replacement screen.
+
+### 10.6 Schedule workspace: the fifth leased screen
+
+`/schedule` opens the Host task manager through the SAME temporary
+physical-screen primitive as §10.1–§10.5 (`leaseWorkspaceScreen('schedule', …)`
+commits the one `this.workspaceLease`), never an OverlayBroker node. It is
+mutually exclusive with the Job/Image/Settings leases and obeys the same
+paused-return-surface, modal-pre-emption, exactly-once close and final-dispose
+rules; a blocking Question/Approval/Save owner refuses the lease outright.
+
+- **One panel, layered states.** The leased layout root is the single
+  `ScheduleWorkspacePanel`. List, detail, delivery history, editor, one help
+  page and ONE confirmation question are STATES of that panel — never nested
+  screens, overlays or a second lease. `Esc` walks one layer back
+  (help/confirm → editor/history → detail → list) and closes the workspace only
+  at the list root.
+- **The panel owns no Host.** It paints the controller snapshot and dispatches
+  user intents; every Host read/write, read epoch, confirmation generation and
+  CAS revision lives in the controller (and, below it, the Host). Render never
+  starts a read. Pointer actions are resolved against the row ids painted in the
+  LATEST frame, so a click on a stale frame performs nothing.
+- **Screen teardown never cancels a dispatched write.** Closing the workspace,
+  a session switch, pre-emption or final dispose disposes the controller and
+  drops every subscription; a Host write that was already dispatched simply
+  becomes unknown until the next authoritative read. Focus and the paused
+  return surface behave exactly like the other three workspaces.
 
 ## 11. Optional seat tenant: PARK / REFUSE
 A private Client-local caller may project ONE optional tenant into the editor
@@ -1052,7 +1376,15 @@ becomes a second authority over them or over the editor seat.
   terminal selection/scrollback stays untouched. A result click only SELECTS;
   the explicit `[Use selected]` / `[Copy all]` actions (and Enter / `Alt+C`)
   accept or copy, and a button pressed for one entry never acts on whatever moved
-  into its painted cells.
+  into its painted cells. In Fullscreen the Footer's complete painted
+  `Cancel [Esc]`, `Scope [Tab]` and `Expand`/`Collapse [F2]` spans are pointer
+  targets too, plus `Use [Enter]` / `Copy All [Alt+C]` fallbacks ONLY when the
+  Preview heading dropped its own matching button; every fallback keeps that
+  button's identity and eligibility, and the pure browsing hints stay inert.
+  All of them re-prove the same last-painted frame and search generation, the
+  seat's scope/expanded state and (for Use/Copy) the pressed result identity;
+  a replaced page, a park, a resize or a screen swap revokes them. Regular/Main
+  paints no Footer target at all.
 - **Approval seat mount fence.** `ApprovalRuntime.showNext()` commits `active =
   pending` BEFORE the park / save cancellation / seat projection, and re-reads
   that same stage identity (`ownsStage`) after EVERY mount-phase hook that can run

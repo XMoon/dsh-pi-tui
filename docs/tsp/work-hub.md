@@ -31,11 +31,24 @@ or Questions.
 
 ## Entry and capability admission
 
-The only entries are the registered `/tasks` command and its registered alias
-`/subagents`. Both reach the unchanged handler
+The entries are the registered `/tasks` command, its registered alias
+`/subagents`, and the CURRENT TSP native first-party Tasks status segment. All
+three reach the unchanged handler
 (`requireLiveSessionScope()` → `runner.openTasksBrowser()`) and therefore the
 unchanged `TaskRuntime` opener. The renderer never parses a slash line itself
 and never opens the browser on its own initiative.
+
+The status segment is a POINTER entry, not a second business surface and not a
+write: only the first-party builtin `tasks` segment the projection really paints
+carries the action, in the configured `default`, `compact` and `custom` layouts
+alike (a repeated custom placement is still one intent). It is inert unless the
+same facts admit the typed command — the pane negotiated the Work Hub, the
+registered handler is live (a genuine Host-owned `/tasks` or `/subagents` name
+leaves no TUI entry), the badge has a real fact to paint, and no modal, Reader,
+Picker or other seat owner holds the surface. A missing fact paints no badge at
+all, so no synthetic click target exists. A click is admitted only for the exact
+node identity of the frame the client committed; `/tasks` remains the keyboard
+entry when the client's own priority policy drops the segment.
 
 Admission is decided after classification, by the existing command classifier
 and the mounted renderer's capability:
@@ -77,12 +90,42 @@ optional side Inspector:
 - **Work · Subagents** — the current DSH descendant set in the catalog's stable
   pre-order, nested by parent and depth, with its mode and running/inactive
   activity.
-- **Work · Jobs** — the flat current Job roster of the same Session scope.
+- **Work · Jobs** — the flat current Job roster of the same Session scope. The
+  default view shows only ACTIVE Jobs (`running`/`stopping`); retained terminal
+  Jobs are folded behind ONE native `Show N past jobs` / `Show N jobs` action
+  and restored by the same action (`Hide N past jobs`). The disclosure is a
+  panel-local per-open choice, never settings, Session or cross-browser state.
 
-Search filters the visible rows only. Selection, query and focus are the Hub's
-own discardable state; they never address a business target. The Inspector,
-when the pane is wide enough to request one, restates the selected row's facts
-and is client-presented, not a second source.
+Search filters the visible rows only, but its corpus is the FULL current roster:
+a non-empty query reaches a retained terminal Job even while the manual
+disclosure is collapsed, and never treats that temporary reveal as a manual
+expand. Selection, query and focus are the Hub's own discardable state; they
+never address a business target. The Inspector, when the pane is wide enough to
+request one, restates the selected row's facts and is client-presented, not a
+second source.
+
+### Job history disclosure
+
+The disclosure is one existing native `PickerAction` in the action bar, in the
+fixed order `Close → Show/Hide history → View details`. It exists only while the
+current empty-query roster has at least one retained terminal Job, so a Job-free
+roster (including a Workflow-scoped child subset) paints no history control at
+all. Its count and label are derived from the current committed `TaskPanelItem`
+roster: `Show N past jobs` when active Jobs are visible, `Show N jobs` when none
+are, and `Hide N past jobs` after expansion.
+
+The status subtitle keeps the FULL-roster truth while folded (for example
+`2 running · 1 failed · 2 retained Jobs hidden`). The Picker subtitle is
+client-presented: its visibility is client-owned and may be tooltip-only,
+while the native `Show N past jobs` label itself states the hidden count. A
+folded failure is still a status fact, never an acknowledgement or an
+"unreviewed" claim. Opening the
+disclosure selects the first real retained Job, and closing it never leaves a
+hidden row selected: a still-visible selection survives, otherwise the first
+visible ACTIVE Job (or the ordinary neighbouring row) becomes current. A
+refreshed roster keeps the manual expansion while it still has a terminal
+candidate and resets it when the last one disappears; a new browser or Session
+starts collapsed.
 
 ## Read-only Work Details
 
@@ -100,14 +143,42 @@ The Reader is not a business surface: it holds no catalog, mutates nothing and
 never calls the row's business selection router. A row whose facts changed while
 the Reader was open repaints from the current projection without resetting the
 reading anchor; a row that no longer exists is retired by the Reader's existing
-currentness rules rather than silently replaced by a neighbour.
+currentness rules rather than silently replaced by a neighbour. Returning from a
+retained-Job reading restores the SAME manual disclosure state, query and
+selection, and a history action token painted before the reading cannot toggle
+the newer frame.
+
+## Workflow-scoped read-only dataset
+
+The native Workflow Run/Phase card may carry one scoped browse entry when the
+same facts that paint it also admit the Work Hub. The entry is a fixed local
+action id; the exact target is never captured in the painted node. On arrival
+the renderer re-checks the current frame, source scope, seat and live scoped
+entry, re-resolves the canonical Workflow row from the current transcript, and
+builds the dataset from that row's CURRENT phase/run members. The payload is the
+same `open-phase-agents` / `open-run-agents` action the shared Task Runtime
+already consumes, so the existing `TaskRuntime.handleWorkflowAction` opens the
+ONE read-only Work Hub with a `TaskBrowserDatasetScope` containing exactly those
+`childIds`. A run whose membership changed since the frame therefore opens its
+current members, and a retired owner/phase refuses instead of routing stale ids.
+
+This entry is a read entry only. It opens the same native Picker/Inspector and
+Work Details Reader described above; it never enters a child transcript Viewer,
+never stops or interrupts a work item, never answers a Question and never opens
+the global `/tasks` dataset in place of the scoped one. The Work Hub's header is
+client-presented, so the contract does not promise a Workflow-specific title.
+When the Task Center, its scoped entry or the seat admission is unavailable, no
+browse control is painted at all.
 
 ## Input, focus and return
 
 - Up/Down, Home/End, PageUp/PageDown and pointer selection change the Hub's
   current row and the Inspector only.
-- Typing edits the search query; the query and selection survive a Reader round
-  trip.
+- Typing edits the search query; ordinary letters such as `j` are always query
+  text. `Alt+J` is the exact keyboard twin of the native history action: it runs
+  only with an empty query and a real retained candidate, and never writes query
+  text or falls through to the composer. The query and selection survive a
+  Reader round trip.
 - `Esc` or the native `← Work` row closes the Reader and returns to the SAME
   Hub with the same selection and query.
 - While the temporary Screen is open or still closing it is the frontmost seat:
@@ -141,6 +212,11 @@ Every state describes what the current source really returned:
 - When both halves are genuinely empty the Hub states that empty roster and
   keeps its usable actions; it never fabricates a completed or placeholder work
   item.
+- A collapsed view whose only retained rows are terminal Jobs paints no Jobs
+  group or phantom row; it states `No active Jobs in this view.` while the
+  native `Show N jobs` action remains the primary, reachable route to them.
+  `loading`/`stale` keep their own truthful source state instead of being
+  reported as an empty roster.
 - A pane too narrow to present the Hub keeps its existing explicit
   unavailable message and exits with `Esc`. Pane width never changes
   `supportsTaskCenter`; it is a presentation fact of the moment.
@@ -166,6 +242,9 @@ The Work Hub is read-only by contract:
 - No Stop, Interrupt, Answer, Skip, Open Agent or View Output control exists,
   and no Hub or Reader input reaches a Job writer, the subagent interrupt path,
   a Question answerer or the business `TaskPresentation` selection router.
+- The history disclosure reads the current projection only: it never reads Job
+  output or Host history, never acknowledges `failedAttention`, and never calls
+  `onViewportExpose` (a native Picker's viewport is not a verified acknowledgement).
 - Question rows are attention, never work, and are never answered from here.
 - `supportsViewer` stays `false`; the existing subagent viewer authority is not
   reachable from the Hub.

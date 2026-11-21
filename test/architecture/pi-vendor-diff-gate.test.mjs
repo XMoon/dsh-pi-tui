@@ -51,7 +51,7 @@ function makeFakeUpstreamTarball(root) {
   const localUtils = readFileSync(join(ROOT, 'packages', 'pi-tui', 'src', 'utils.ts'), 'utf8')
   writeFileSync(join(tree, 'packages', 'tui', 'src', 'utils.ts'), localUtils)
   const tarball = join(root, 'upstream.tar.gz')
-  const packed = spawnSync('tar', ['-czf', tarball, '-C', root, 'pi-fake'])
+  const packed = spawnSync('tar', ['-czf', tarball, '-C', root, 'pi-fake'], { encoding: 'utf8', env: { ...process.env, COPYFILE_DISABLE: '1' } })
   assert.equal(packed.status, 0, 'fixture tarball must be created')
   return tarball
 }
@@ -74,7 +74,7 @@ function makeMatchingUpstreamTarball(root) {
   const upstreamSrc = join(tree, 'packages', 'tui', 'src')
   cpSync(join(ROOT, 'packages', 'pi-tui', 'src'), upstreamSrc, { recursive: true })
   const tarball = join(root, 'matching-upstream.tar.gz')
-  const packed = spawnSync('tar', ['-czf', tarball, '-C', root, 'pi-matching'])
+  const packed = spawnSync('tar', ['-czf', tarball, '-C', root, 'pi-matching'], { encoding: 'utf8', env: { ...process.env, COPYFILE_DISABLE: '1' } })
   assert.equal(packed.status, 0, 'matching fixture tarball must be created')
   return tarball
 }

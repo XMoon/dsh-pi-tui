@@ -54,6 +54,8 @@ export type AppKeybindingId =
   | 'app.exit.request'
   // Transcript
   | 'app.transcript.search'
+  | 'app.transcript.search.view'
+  | 'app.transcript.search.scope'
   | 'app.transcript.jumpLatest'
   | 'app.transcript.search.next'
   | 'app.transcript.search.previous'
@@ -72,6 +74,8 @@ export type AppKeybindingId =
   | 'app.permission.cycle'
   | 'app.todo.toggle'
   | 'app.tasks.open'
+  /** PR-Q: open the per-occurrence queued-message manager. */
+  | 'app.queue.open'
   | 'app.history.search'
   // User shell
   | 'app.shell.dismissSettled'
@@ -91,13 +95,18 @@ export type AppKeybindingId =
   | 'question.pageDown'
   | 'question.toggleExpand'
   | 'question.toggleSelection'
+  /** Split-Client forwarded Question/Approval seat: open the existing Session
+   *  Workspace without answering the pending interaction. */
+  | 'interaction.navigateWorkspace'
   // Focused component: the Task Center (plan §3.3/§29)
   | 'tasks.open'
   | 'tasks.search.enter'
   | 'tasks.search.exit'
   | 'tasks.scope.toggle'
-  | 'tasks.type.next'
-  | 'tasks.type.previous'
+  | 'tasks.tab.next'
+  | 'tasks.tab.previous'
+  | 'tasks.type.filter'
+  | 'tasks.jobs.toggleHistory'
   | 'tasks.tree.expand'
   | 'tasks.tree.collapse'
   | 'tasks.stop'

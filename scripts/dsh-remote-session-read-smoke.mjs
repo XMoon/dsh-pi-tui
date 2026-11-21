@@ -47,7 +47,7 @@ const WRITE_ENDPOINTS = new Set([
   'commands/execute',
   'subagent/prompt',
   'subagents/prompt',
-  'subagents/interruptByParent',
+  'subagents/interruptByUser',
   'approval/respond',
   'question/respond',
   'interaction/respond',

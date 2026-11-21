@@ -775,3 +775,9 @@ test('a navigation stop receipt pins the generation the quiesce must observe', a
   binding2.setRunning(false)
   assert.equal(await waiting, false, 'the same-generation receipt still observes a real idle settle')
 })
+
+test('the Remote retirement declares detach-client navigation ownership', () => {
+  const h = harness()
+  assert.equal(h.services.retirement.navigationKind, 'detach-client',
+    'the Host owns the Agent, so leaving a Session only releases this Client reference')
+})

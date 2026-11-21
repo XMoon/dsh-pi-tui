@@ -20,7 +20,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { TestContext } from 'node:test'
-import { mkdirSync, readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, realpathSync, symlinkSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Context, type Fiber, RegistryService, symbols } from '@deepseek-ai/cordis'
@@ -29,6 +29,7 @@ import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deep
 import CommandRuntime from '@deepseek-ai/dsh-commands'
 import AgentPresetRegistry from '@deepseek-ai/dsh-agent-preset-registry'
 import TypertGatewayService from '@deepseek-ai/dsh-api-gateway'
+import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import { RemoteAccessService } from '@deepseek-ai/dsh-api-remote-access'
 import JobController from '@deepseek-ai/dsh-api-job-controller'
 import { CredentialProvider } from '@deepseek-ai/dsh-credentials'
@@ -44,30 +45,40 @@ import { SqliteSessionQueryEngine } from '@deepseek-ai/dsh-session-query-sqlite'
 import Storage from '@deepseek-ai/dsh-storage'
 import * as StorageJson from '@deepseek-ai/dsh-storage-json'
 import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
-import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
+import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
+import LocalSandboxProvider from '@deepseek-ai/dsh-sandbox-local'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
+import WorkspaceController from '@deepseek-ai/dsh-api-workspace-controller'
 import WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import { JobId, type JobHandle } from '@deepseek-ai/dsh-jobs'
 import * as toolJobs from '@deepseek-ai/dsh-tool-jobs'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
 import * as piTuiHostRuntime from '../../../src/app/host/pi-tui-host-runtime.ts'
+import { PreferencesConfig as CanonicalPreferencesConfig } from '../../../src/app/config/schema.ts'
+import SkillRegistry from '@deepseek-ai/dsh-skill'
 import * as performanceHost from '../../../src/app/host/performance-host.ts'
-import { loadExperimentalRemoteRuntime } from '../../../src/runtime/backend-loader.ts'
+import { createExperimentalRemoteRuntime } from '../../support/m3-inprocess/runtime.ts'
 import { RemoteJobObservationPort } from '../../../src/runtime/remote/job-observation-remote.ts'
+import { RemoteSessionLifecycle } from '../../../src/runtime/remote/session-lifecycle-remote.ts'
+import { WorkspaceSelectionError } from '../../../src/runtime/session-lifecycle-port.ts'
 import type { JobObservedSnapshot } from '../../../src/runtime/job-observation-port.ts'
 import {
-  createRemoteClientRuntime,
   disposeRemoteContributions,
   createScopedClientModuleLoader,
   installScopedModuleLoaderShim,
   loadOfficialClientModulesOnce,
   OFFICIAL_CLIENT_BUNDLES,
-  type RemoteClientRuntime,
+  REMOTE_CONTRIBUTIONS,
+  REMOTE_CONTRIBUTION_SPECIFIERS,
 } from '../../../src/app/remote/client-runtime.ts'
-import { createRemoteHostRuntime, type RemoteHostRuntime } from '../../../src/app/remote/host-runtime.ts'
+import {
+  createRemoteClientRuntime,
+  type RemoteClientRuntime,
+} from '../../support/m3-inprocess/client-runtime.ts'
+import { createRemoteHostRuntime, type RemoteHostRuntime } from '../../support/m3-inprocess/host-runtime.ts'
 import { mergeCause } from '../../../src/app/remote/dispose-cause.ts'
-import type { ExperimentalRemoteRuntime } from '../../../src/app/remote/runtime.ts'
+import type { ExperimentalRemoteRuntime } from '../../support/m3-inprocess/runtime.ts'
 import { testLifecycle, type TestLifecycle } from '../../support/temp-lifecycle.ts'
 
 const SEED_SESSION_ID = 'm3-l5-seed'
@@ -116,7 +127,8 @@ async function waitFor(label: string, predicate: () => boolean, timeoutMs = 15_0
  * - the real rc.2 Host services the composition requires: Jsonl Session
  *   persistence, storage/domain, credentials, workspace registry, filesystem,
  *   SQLite session-query, commands, agent presets, user questions, the official
- *   `LocalJobRegistry` + `JobController` rows, and the AgentLoop harness that
+ *   `LocalJobRegistry` + `JobController` rows, the official `WorkspaceController`
+ *   row (the `workspace` Remote owner), and the AgentLoop harness that
  *   composes real live Agents/Sessions
  * - the official in-process Client/Gateway path over the real carrier
  *   (`createExperimentalRemoteRuntime`), including the official Client `IJobs`
@@ -137,6 +149,11 @@ async function waitFor(label: string, predicate: () => boolean, timeoutMs = 15_0
  *   post-PR2 L6 starts at a real Remote Task Center Job row and is NOT claimed
  *   here (this is L5 wire evidence only)
  * - no second Client graph and no second Host Jobs/JobController mount
+ * - the Workspace Controller's `DirectoryPickerController` child (no picking
+ *   backend is composed, so the Host registers no `directoryPicker` namespace)
+ *   and the `ClientWorkspaceModel` Client plugin: this suite mounts the
+ *   GENERATED `workspace` Remote namespace only, asserting no Client-side
+ *   Workspace store exists
  */
 interface HostFixture {
   ctx: Context
@@ -202,14 +219,18 @@ async function createHostFixture(
     // `@`-file reference provider injects the directory owner: both require
     // the real `workingDirectory` service (the same row dsh-base mounts once).
     await ctx.plugin(WorkingDirectory)
-    // M4-B2-HF: the built-in PiTui Host Runtime owns the package contribution
-    // and both private Host services exactly once; Performance stays its own row.
-    await ctx.plugin(piTuiHostRuntime)
-    await ctx.plugin(performanceHost)
+    await ctx.plugin(LocalSandboxProvider)
+    await ctx.plugin(LocalSubprocessRuntime)
+    // M6-1 F1/F6: the built-in Host Runtime injects the official Workspace,
+    // Skills and preset authorities, so they mount BEFORE the runtime row.
     await ctx.plugin(Storage)
     await ctx.plugin(StorageJson, { root: join(workRoot, 'storages') })
     await ctx.plugin(StorageDomain, { backend: 'json' })
     await ctx.plugin(WorkspaceRegistry)
+    await ctx.plugin(SkillRegistry)
+    ctx.provide('piTuiPreferences', CanonicalPreferencesConfig({} as never))
+    await ctx.plugin(piTuiHostRuntime, { sessionId: '' } as never)
+    await ctx.plugin(performanceHost)
     // The rc.2 credentials service ships one concrete provider whose
     // declaration is `abstract`; construct it inside the plugin fiber the way
     // the dsh base layer mounts it.
@@ -228,6 +249,14 @@ async function createHostFixture(
     await ctx.inject(TypertGatewayService.inject, gatewayCtx => {
       new TypertGatewayService(gatewayCtx, { websocketHeartbeatIntervalMs: 50 })
     })
+    // M5-WS1: the ONE official Workspace Controller row the bundle mounts (the
+    // same class the Loader row instantiates). It is a REAL Host service over
+    // the REAL registry, never `ctx.provide('workspaceController', {})`: the
+    // `workspace` Typert namespace it registers is what the Client namespace
+    // dispatches to. Its deferred `DirectoryPickerController` child stays
+    // uncomposed because this Host composes no picking backend, so no
+    // `directoryPicker` namespace exists to serve those verbs.
+    await ctx.plugin(WorkspaceController)
     poison?.(ctx)
   } catch (error) {
     disposed = true
@@ -294,9 +323,9 @@ function seedHostSession(host: HostFixture): void {
   host.ctx.sessions.create(SessionId(SEED_SESSION_ID), { meta: { cwd: host.anchorDir } })
 }
 
-/** Load the Remote composition through the sanctioned lazy boundary. */
-function loadRuntimeModule(): Promise<typeof import('../../../src/app/remote/runtime.ts')> {
-  return loadExperimentalRemoteRuntime()
+/** The retired M3 wire composer, now a TEST-ONLY fixture module. */
+function loadRuntimeModule(): Promise<typeof import('../../support/m3-inprocess/runtime.ts')> {
+  return import('../../support/m3-inprocess/runtime.ts')
 }
 
 // ---------------------------------------------------------------------------
@@ -1040,12 +1069,22 @@ test('the Client composition never crosses the Host legacy-settings boundary', (
   // half of the proof is the whole suite above, which composes, connects,
   // lists and disposes under the runner's contained temp DSH_HOME.
   const clientRuntimeDir = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'src', 'app', 'remote')
-  for (const file of ['client-runtime.ts', 'host-runtime.ts', 'runtime.ts']) {
+  const m3CarrierDir = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'support', 'm3-inprocess')
+  // The Host-side composition is the retired in-process carrier now, so its
+  // token scan follows it into the test-only module.
+  for (const file of ['client-runtime.ts', 'runtime.ts', 'application-stage.ts', 'application-runtime.ts']) {
     const source = readFileSync(join(clientRuntimeDir, file), 'utf8')
     assert.doesNotMatch(source, /legacy-settings-migration/, `${file} must not import the legacy settings migration`)
     assert.doesNotMatch(source, /profileContext/, `${file} must not read profileContext`)
     assert.doesNotMatch(source, /settings\.yaml/, `${file} must not open \$DSH_HOME/settings.yaml(.imported)`)
     assert.doesNotMatch(source, /\$DSH_HOME/, `${file} must not read \$DSH_HOME`)
+  }
+  for (const file of ['host-runtime.ts', 'client-runtime.ts', 'runtime.ts', 'application-runtime.ts']) {
+    const source = readFileSync(join(m3CarrierDir, file), 'utf8')
+    assert.doesNotMatch(source, /legacy-settings-migration/, `${file} must not import the legacy settings migration`)
+    assert.doesNotMatch(source, /profileContext/, `${file} must not read profileContext`)
+    assert.doesNotMatch(source, /settings\.yaml/, `${file} must not open $DSH_HOME/settings.yaml(.imported)`)
+    assert.doesNotMatch(source, /\$DSH_HOME/, `${file} must not read $DSH_HOME`)
   }
 })
 
@@ -1092,17 +1131,387 @@ declare module '@deepseek-ai/dsh-typert-protocol/types' {
 const IN_PROCESS_BASE = 'http://dsh-pi-tui-remote.in-process'
 
 /** One unary Remote request envelope for the shared `/api` channel. */
-function unaryRemoteRequest(endpoint: string, rpcId: string): Request {
+function unaryRemoteRequest(endpoint: string, rpcId: string, args: Record<string, unknown> = {}): Request {
   return new Request(`${IN_PROCESS_BASE}/api/${endpoint}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     // The Gateway's unary payload is the decoded `RemoteRequest`: exactly one
     // plain-object `args` field (the reserved empty `session/list` request).
-    body: JSON.stringify({ type: 'client-request', rpcId, method: endpoint, payload: { args: {} } }),
+    body: JSON.stringify({ type: 'client-request', rpcId, method: endpoint, payload: { args } }),
   })
 }
 
 type UnaryEnvelope = { readonly result: { readonly ok: boolean; readonly error?: { readonly code?: string } } }
+
+// ---------------------------------------------------------------------------
+// WORKSPACE - the official generated `workspace` Remote namespace
+// ---------------------------------------------------------------------------
+
+/** One Workspace projection as the Host Controller returns it (only the fields the suite reads). */
+interface WorkspaceRowLike {
+  readonly workspaceId: string
+  readonly path: string
+  readonly title: string
+  readonly sessionIds: readonly string[]
+}
+
+/** One `workspace/follow` frame, structurally. */
+interface WorkspaceFrameLike {
+  readonly type: string
+  readonly value?: {
+    readonly items?: readonly WorkspaceRowLike[]
+    readonly archivedSessionIds?: readonly string[]
+    readonly pinnedSessionIds?: readonly string[]
+  }
+  readonly workspace?: WorkspaceRowLike
+}
+
+/** The generated `workspace` namespace as the Client exposes it. */
+interface WorkspaceNamespaceLike {
+  create(request: { readonly path: string }): Promise<{
+    readonly ok: boolean
+    readonly value?: { readonly workspace?: WorkspaceRowLike; readonly created?: boolean }
+    readonly error?: { readonly code?: string }
+  }>
+  follow(signal?: AbortSignal): {
+    [Symbol.asyncIterator](): AsyncIterator<WorkspaceFrameLike>
+    dispose(): void
+  }
+}
+
+/** Bounded test-local wait for one Workspace frame; a stall is a failure. */
+async function nextWorkspaceFrame(
+  iterator: AsyncIterator<WorkspaceFrameLike>,
+  label: string,
+  timeoutMs = 20_000,
+): Promise<WorkspaceFrameLike> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => { reject(new Error(`timed out waiting for ${label}`)) }, timeoutMs)
+  })
+  try {
+    const next = await Promise.race([iterator.next(), timeout])
+    if (next.done === true) throw new Error(`the Workspace stream ended before ${label}`)
+    return next.value
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** Await the authoritative `upsert` for one Workspace, letting other frames interleave. */
+async function waitForWorkspaceUpsert(
+  iterator: AsyncIterator<WorkspaceFrameLike>,
+  workspaceId: string,
+): Promise<WorkspaceRowLike> {
+  for (let frames = 0; frames < 64; frames += 1) {
+    const frame = await nextWorkspaceFrame(iterator, `the "${workspaceId}" upsert`)
+    if (frame.type === 'upsert' && frame.workspace?.workspaceId === workspaceId) return frame.workspace
+  }
+  throw new Error(`the Workspace stream never upserted "${workspaceId}"`)
+}
+
+test('WS1-TABLE. the frozen /remote tables agree by package identity and the Client plugin allowlist stays six', () => {
+  assert.equal(OFFICIAL_CLIENT_BUNDLES.length, 6,
+    'the official Client plugin allowlist must stay exactly six bundles')
+  assert.equal(REMOTE_CONTRIBUTION_SPECIFIERS.length, REMOTE_CONTRIBUTIONS.length,
+    'the statically imported and installed-anchor tables must have the same length')
+  const packages = REMOTE_CONTRIBUTIONS.map(contribution => contribution.package)
+  assert.equal(new Set(packages).size, packages.length,
+    'each official generated Remote package must be mounted once')
+  assert.deepEqual(
+    packages,
+    REMOTE_CONTRIBUTION_SPECIFIERS.map(specifier => specifier.replace(/\/remote$/u, '')),
+    'both tables must name the same packages in the same frozen order',
+  )
+  const pluginManagerIndex = packages.indexOf('@deepseek-ai/dsh-plugin-manager')
+  const mcpManagerIndex = packages.indexOf('@deepseek-ai/dsh-mcp-manager')
+  assert.ok(pluginManagerIndex >= 0 && mcpManagerIndex === pluginManagerIndex + 1,
+    'FR3: the generated mcpManager namespace follows Plugin Manager in the frozen /remote order')
+  const settingsIndex = packages.indexOf('@deepseek-ai/dsh-api-settings-controller')
+  const accountIndex = packages.indexOf('@deepseek-ai/dsh-deepseek-account')
+  assert.ok(settingsIndex >= 0 && accountIndex === settingsIndex + 1,
+    'the generated Account namespace follows Settings in the /remote contribution order')
+  const workspaceIndex = packages.indexOf('@deepseek-ai/dsh-api-workspace-controller')
+  const scheduleIndex = packages.indexOf('@deepseek-ai/dsh-schedule')
+  assert.ok(workspaceIndex >= 0 && scheduleIndex > workspaceIndex,
+    'the generated Workspace and Schedule capabilities keep their dependency order')
+  assert.equal(OFFICIAL_CLIENT_BUNDLES.some(bundle => /workspace-controller|deepseek-account/u.test(bundle.specifier)), false,
+    'Workspace and Account owners are /remote descriptors, never extra Client plugins')
+})
+
+test('WORKSPACE. the official workspace namespace creates and follows the Host Workspace registry', async (t) => {
+  const life = testLifecycle(t)
+  const host = await createHostFixture(life)
+  const composed = await (await loadRuntimeModule()).createExperimentalRemoteRuntime({
+    hostContext: host.ctx,
+    waitForHostPrerequisites: async () => {},
+  })
+  // Deferred on the SAME lifecycle as the fixture, so this runtime is disposed
+  // BEFORE the fixture's Host Context: the lifecycle runs disposers in reverse
+  // registration order, and the fixture's own disposer was registered first.
+  life.defer(() => composed.dispose())
+  const remote = (composed.client.remote as unknown as { readonly workspace?: WorkspaceNamespaceLike }).workspace
+  assert.ok(remote !== undefined, 'the Client must mount the generated official `workspace` namespace')
+  // The mounted namespace is exactly the GENERATED surface: no Client-side
+  // Workspace store, cache or list API exists beside the Host stream.
+  for (const method of [
+    'create', 'rename', 'delete', 'follow', 'initializeDefault', 'insertBefore',
+    'insertSessionBefore', 'archiveSession', 'unarchiveSession', 'pinSession', 'unpinSession',
+  ]) {
+    assert.equal(typeof (remote as unknown as Record<string, unknown>)[method], 'function',
+      `the generated namespace must expose "${method}"`)
+  }
+  for (const absent of ['list', 'store', 'state', 'getSnapshot']) {
+    assert.equal(absent in (remote as unknown as Record<string, unknown>), false,
+      `the Client must not keep a local Workspace "${absent}" beside the Host authority`)
+  }
+
+  const registry = host.ctx.workspaceRegistry
+  assert.deepEqual(registry.list(), [], 'the isolated Host starts with no Workspace record')
+  const target = join(host.workRoot, 'workspace-target')
+  mkdirSync(target)
+  const canonical = realpathSync(target)
+  let createdId = ''
+
+  await t.test('follow opens with the authoritative Host baseline before any mutation', async () => {
+    const stream = remote.follow()
+    const iterator = stream[Symbol.asyncIterator]()
+    try {
+      const opening = await nextWorkspaceFrame(iterator, 'the Workspace baseline')
+      assert.equal(opening.type, 'baseline')
+      assert.deepEqual(opening.value?.items, [], 'the baseline is the Host registry, not a Client default')
+      assert.deepEqual(opening.value?.archivedSessionIds, [])
+      assert.deepEqual(opening.value?.pinnedSessionIds, [])
+    } finally {
+      stream.dispose()
+      assert.equal((await iterator.next()).done, true, 'a disposed stream must end instead of idling')
+    }
+  })
+
+  await t.test('create records a REAL Host Workspace and the live stream upserts it', async () => {
+    const stream = remote.follow()
+    const iterator = stream[Symbol.asyncIterator]()
+    try {
+      const opening = await nextWorkspaceFrame(iterator, 'the Workspace baseline')
+      assert.equal(opening.type, 'baseline')
+      const result = await remote.create({ path: target })
+      assert.equal(result.ok, true, `workspace/create must be served by the Host: ${JSON.stringify(result)}`)
+      assert.equal(result.value?.created, true, 'the first create must report created=true')
+      const created = result.value?.workspace
+      assert.ok(created !== undefined, 'workspace/create must return the Workspace projection')
+      createdId = created.workspaceId
+      assert.notEqual(createdId, '', 'the Host must assign a Workspace identity')
+      assert.equal(created.path, canonical, 'the returned path is the Host canonical directory path')
+      assert.deepEqual(created.sessionIds, [], 'a fresh directory accounts for no Session')
+      // The Host registry — never the Client — owns the identity and the path.
+      const registered = registry.list().find(candidate => String(candidate.id) === createdId)
+      assert.ok(registered !== undefined, 'the Host registry must own the Workspace id the Client received')
+      assert.equal(registered.path, canonical)
+      const upserted = await waitForWorkspaceUpsert(iterator, createdId)
+      assert.equal(upserted.path, created.path, 'the upsert frame must carry the same canonical path')
+      assert.deepEqual(upserted.sessionIds, created.sessionIds)
+    } finally {
+      stream.dispose()
+    }
+  })
+
+  await t.test('the same directory is idempotent and a symlink to it reuses the identity', async () => {
+    assert.notEqual(createdId, '', 'the previous case must have created the Workspace')
+    const repeated = await remote.create({ path: target })
+    assert.equal(repeated.ok, true)
+    assert.equal(repeated.value?.created, false, 'an existing directory must resolve instead of creating')
+    assert.equal(repeated.value?.workspace?.workspaceId, createdId, 'the repeated create must return the same id')
+    const link = join(host.workRoot, 'workspace-target-link')
+    symlinkSync(target, link, 'dir')
+    const viaLink = await remote.create({ path: link })
+    assert.equal(viaLink.ok, true)
+    assert.equal(viaLink.value?.created, false, 'a symlink to an existing Workspace must resolve it')
+    assert.equal(viaLink.value?.workspace?.workspaceId, createdId, 'the symlink must reuse the canonical identity')
+    assert.equal(viaLink.value?.workspace?.path, canonical, 'the symlink must resolve to the canonical path')
+    assert.equal(registry.list().length, 1, 'the Host registry must hold exactly one Workspace')
+  })
+
+  await t.test('relative and non-existent paths are refused without a local correction or a Host mutation', async () => {
+    const before = registry.list().length
+    for (const path of ['relative/workspace', join(host.workRoot, 'workspace-does-not-exist')]) {
+      const result = await remote.create({ path })
+      assert.equal(result.ok, false, `workspace/create(${JSON.stringify(path)}) must fail`)
+      assert.equal(result.error?.code, 'workspace/invalid-path',
+        `workspace/create(${JSON.stringify(path)}) must report the official invalid-path code`)
+    }
+    assert.equal(registry.list().length, before, 'a refused path must never mutate the Host registry')
+  })
+
+  await t.test('a no-policy guest Peer cannot mutate the registry while the owner can', async () => {
+    const connection = host.ctx.connection
+    const shared = connection.createSharedFetchHandler('/api')
+    const guest = connection.createPeer({ principal: { kind: 'test-guest', guest: 'workspace' } })
+    try {
+      const envelope = await (await shared.fetch(
+        unaryRemoteRequest('workspace/create', 'm5-ws1-guest', { request: { path: target } }),
+        guest,
+      )).json() as UnaryEnvelope
+      assert.equal(envelope.result.ok, false, 'a guest Peer must not reach a Workspace mutation')
+      assert.equal(envelope.result.error?.code, 'remote-access/denied',
+        'the refusal must be the official authorization code, not a business error')
+    } finally {
+      await guest.dispose()
+    }
+    // Owner positive control on the SAME carrier and the SAME payload: the
+    // refusal above is authorization, not a malformed request.
+    const ownerEnvelope = await (await shared.fetch(
+      unaryRemoteRequest('workspace/create', 'm5-ws1-owner', { request: { path: target } }),
+      connection.browserPeer,
+    )).json() as UnaryEnvelope
+    assert.equal(ownerEnvelope.result.ok, true, 'the owner Peer must be admitted for the identical request')
+    assert.equal(registry.list().length, 1, 'the guest attempt must not have added a second Workspace')
+  })
+
+  await t.test('a no-policy guest Peer cannot READ the Workspace registry through follow', async () => {
+    // Read-side control on the Host Gateway's OWN wire-stream entry (the same
+    // `wireStream.open` the production carriers call): an owner Workspace
+    // exists, so a visibility regression would deliver it to the guest and the
+    // official `remote-access` policy must instead refuse the generation.
+    assert.notEqual(createdId, '', 'the owner Workspace must exist for the visibility control')
+    const connection = host.ctx.connection
+    const wireStream = host.ctx.typertGateway.wireStream as unknown as {
+      open(
+        endpoint: string,
+        payload: unknown,
+        uplink: AsyncIterable<unknown>,
+        peer: unknown,
+        signal: AbortSignal,
+      ): Promise<AsyncIterable<unknown>>
+    }
+    const emptyUplink = async function* (): AsyncGenerator<unknown> {}
+    const guest = connection.createPeer({ principal: { kind: 'test-guest', guest: 'workspace-follow' } })
+    const controller = new AbortController()
+    try {
+      let delivered: unknown
+      let failure: unknown
+      try {
+        const stream = await wireStream.open(
+          'workspace/follow',
+          { args: {} },
+          emptyUplink(),
+          guest,
+          controller.signal,
+        )
+        const iterator = stream[Symbol.asyncIterator]()
+        const first = await iterator.next()
+        delivered = first.done === true ? undefined : first.value
+        await iterator.return?.(undefined)
+      } catch (error) {
+        failure = error
+      }
+      assert.equal(delivered, undefined, 'a no-policy guest must never receive a Workspace baseline')
+      assert.ok(failure instanceof Error, 'the Workspace stream must be refused, not silently idle')
+      assert.equal((failure as { code?: unknown }).code, 'remote-access/denied',
+        'the stream refusal must be the official authorization code, not a business or carrier error')
+      const refusal = `${(failure as Error).message} ${JSON.stringify(
+        Object.getOwnPropertyNames(failure).map(name => [name, (failure as unknown as Record<string, unknown>)[name]]),
+      )}`
+      assert.equal(refusal.includes(createdId), false,
+        'the refusal must not leak the owner Workspace identity')
+      assert.equal(refusal.includes(canonical), false,
+        'the refusal must not leak the owner Workspace path')
+    } finally {
+      controller.abort()
+      await guest.dispose()
+    }
+    // Owner positive control on the SAME seam: the identical endpoint yields a
+    // Host baseline that carries the owner Workspace, so the refusal above is
+    // authorization rather than a broken stream entry.
+    const ownerController = new AbortController()
+    try {
+      const stream = await wireStream.open(
+        'workspace/follow',
+        { args: {} },
+        emptyUplink(),
+        connection.browserPeer,
+        ownerController.signal,
+      )
+      const iterator = stream[Symbol.asyncIterator]()
+      const opening = await iterator.next()
+      assert.equal(opening.done, false, 'the owner baseline stream ended before its baseline')
+      const frame = opening.value as { readonly type?: string; readonly value?: { readonly items?: readonly { readonly workspaceId?: string }[] } }
+      assert.equal(frame.type, 'baseline')
+      assert.deepEqual((frame.value?.items ?? []).map(item => item.workspaceId), [createdId],
+        'the owner baseline must carry the owner Workspace')
+      await iterator.return?.(undefined)
+    } finally {
+      ownerController.abort()
+    }
+  })
+
+  await t.test('an ordinary Remote create names the Host WorkspaceId and attaches the Session', async () => {
+    const lifecycle = new RemoteSessionLifecycle(
+      composed.client.sessions,
+      composed.client.connection.generation,
+      remote as never,
+      composed.client.remote.session as never,
+    )
+    // Pre-selection resolves the EXISTING Host Workspace by its canonical path.
+    const resolved = await lifecycle.resolveWorkspace({ kind: 'host-path', path: target })
+    assert.deepEqual(resolved, { workspaceId: createdId, path: canonical },
+      'the pre-selection must resolve the Host Workspace, never re-create it')
+    assert.equal(registry.list().length, 1, 'the pre-selection must not add a second Workspace')
+
+    const requested = 'session-ws2-workspace-create'
+    const created = await lifecycle.create({ sessionId: requested, workspaceId: resolved.workspaceId })
+    assert.equal(created.ownership, 'current', `WS2 create ownership: ${created.ownership}/${created.outcome.kind}`)
+    assert.equal(created.outcome.kind, 'created', `WS2 create failed: ${created.ownership}/${created.outcome.kind}`)
+    if (created.outcome.kind !== 'created') return
+    const published = created.outcome.handle.session.id
+    const hostSession = host.ctx.sessions.get(SessionId(published))
+    assert.ok(hostSession !== undefined, 'the Host must own the created Session')
+    assert.equal(hostSession.header.cwd, canonical,
+      'the durable Host header cwd must be the Workspace canonical path (never a Client cwd)')
+    const row = registry.list().find(candidate => String(candidate.id) === createdId)
+    assert.ok(row !== undefined, 'the Host registry must still own the Workspace')
+    assert.ok([...row.sessionIds].map(String).includes(published),
+      'the published Session must be attached to the Host Workspace')
+
+    // The source-Session route reads the OFFICIAL membership, not a status cwd.
+    const viaSource = await lifecycle.resolveWorkspace({ kind: 'source-session', sessionId: published })
+    assert.deepEqual(viaSource, { workspaceId: createdId, path: canonical })
+
+    // An unknown WorkspaceId is refused at preflight with ZERO Session dispatch
+    // and, once dispatched, is a single proven Host refusal (never a cwd retry).
+    const preflight = await lifecycle.resolveWorkspace({ kind: 'workspace-id', workspaceId: 'workspace-does-not-exist' })
+      .then(() => undefined, (error: unknown) => error)
+    assert.ok(preflight instanceof WorkspaceSelectionError)
+    assert.equal(preflight.kind, 'refused')
+    assert.equal(preflight.code, 'workspace/not-found')
+    const refused = await lifecycle.create({ sessionId: 'session-ws2-unknown-workspace', workspaceId: 'workspace-does-not-exist' })
+    assert.equal(refused.outcome.kind, 'rejected', `WS2 unknown Workspace must refuse: ${refused.ownership}/${refused.outcome.kind}`)
+    if (refused.outcome.kind === 'rejected') assert.equal(refused.outcome.error.code, 'workspace/not-found')
+    assert.equal(host.ctx.sessions.get(SessionId('session-ws2-unknown-workspace')), undefined,
+      'a refused create publishes no Host Session')
+    created.outcome.handle.client?.release()
+  })
+
+  await t.test('dispose ends the iterator and a new stream restores the complete Host baseline', async () => {
+    assert.notEqual(createdId, '', 'the Host Workspace must exist for the baseline proof')
+    const first = remote.follow()
+    const firstIterator = first[Symbol.asyncIterator]()
+    assert.equal((await nextWorkspaceFrame(firstIterator, 'the first baseline')).type, 'baseline')
+    first.dispose()
+    assert.equal((await firstIterator.next()).done, true,
+      'a disposed stream must not keep delivering frames to its old iterator')
+    const second = remote.follow()
+    const secondIterator = second[Symbol.asyncIterator]()
+    try {
+      const restored = await nextWorkspaceFrame(secondIterator, 'the replacement baseline')
+      assert.equal(restored.type, 'baseline', 'a new generation must start from a baseline, never a delta')
+      assert.deepEqual((restored.value?.items ?? []).map(item => item.workspaceId), [createdId],
+        'the replacement baseline must carry the Host Workspace the first generation created')
+      assert.equal(restored.value?.items?.[0]?.path, canonical)
+    } finally {
+      second.dispose()
+    }
+  })
+})
 
 test('PEER. the carrier speaks for the Host Connection owner Peer on Fetch and Stream, with guest and disposed controls', async (t) => {
   const life = testLifecycle(t)

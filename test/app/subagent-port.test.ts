@@ -32,9 +32,7 @@ function context(overrides: Partial<SubagentPromptContext> = {}): SubagentPrompt
 
 interface RecordedCall {
   requestId: string
-  parentSessionId: string
   childSessionId: string
-  mode: string
   delivery: string
   content: readonly SubagentPromptContentPart[]
   clientTimeZone: string | undefined
@@ -45,9 +43,7 @@ function service(calls: RecordedCall[]): SubagentPromptService {
     prompt: async (payload) => {
       calls.push({
         requestId: payload.requestId,
-        parentSessionId: payload.parentSessionId,
         childSessionId: payload.childSessionId,
-        mode: payload.mode,
         delivery: payload.delivery,
         content: payload.content,
         clientTimeZone: payload.clientTimeZone,
@@ -75,9 +71,7 @@ test('delivers through ctx.subagents.prompt with the official request shape and 
   assert.equal(outcome.kind, 'ok')
   if (outcome.kind === 'ok') assert.equal(outcome.messageId, 'inbox-session-child-1')
   assert.equal(calls.length, 1, 'prompt called exactly once')
-  assert.equal(calls[0].parentSessionId, 'session-parent')
   assert.equal(calls[0].childSessionId, 'session-child')
-  assert.equal(calls[0].mode, 'continuable')
   assert.equal(calls[0].delivery, 'queue')
   assert.deepEqual(calls[0].content, request.content)
   assert.match(calls[0].requestId, /^[0-9a-f-]{36}$/u, 'the adapter mints a UUID identity before the call')
@@ -212,7 +206,7 @@ test('interrupt classifies the uppercase UNAUTHORIZED authority code', async () 
   assert.deepEqual(outcome, { kind: 'rejected', reason: { kind: 'unauthorized', message: 'parent rejected' } })
 })
 
-test('interrupt routes the explicit parent and child to the Direct authority shape', async () => {
+test('interrupt routes the exact child to the rc.2 user interrupt without a parent claim', async () => {
   const calls: Array<{ childSessionId: string; authority: unknown }> = []
   const port = new DirectSubagentPort(host({
     ...service([]),
@@ -223,10 +217,7 @@ test('interrupt routes the explicit parent and child to the Direct authority sha
     childSessionId: 'session-child',
     mode: 'continuable',
   }), { kind: 'committed' })
-  assert.deepEqual(calls, [{
-    childSessionId: 'session-child',
-    authority: { kind: 'user', parentSessionId: 'session-parent' },
-  }])
+  assert.deepEqual(calls, [{ childSessionId: 'session-child', authority: { kind: 'user' } }])
 })
 
 test('interrupt classifies an absent service and a known authority refusal', async () => {
@@ -267,7 +258,7 @@ test('interrupt settles a missing addressed child as a rejected unavailable, not
     ...service([]),
     interrupt: () => {
       const error = new Error('child is gone') as Error & { code?: string }
-      error.code = 'subagent/not-found'
+      error.code = 'subagent/not-resumable'
       throw error
     },
   }

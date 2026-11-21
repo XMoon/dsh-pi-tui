@@ -1,0 +1,1907 @@
+/**
+ * Split-smoke input qualification and failure diagnostics guard for the two
+ * split-process lanes.
+ *
+ * The two real lanes — the split-process lane (`scripts/split-process-smoke.mjs`,
+ * inventory T01-T60) and the split-upgrade lane (`scripts/split-process-upgrade-smoke.mjs`,
+ * inventory U01-U09) — install packaged artifacts into an
+ * isolated profile and drive real Host/Client processes. Before any of that
+ * happens they must reject an artifact whose own manifest declares a different
+ * exact DSH runtime than the one this checkout pins: the production Client
+ * reexec preflight refuses such a target, so a mismatched pairing would surface
+ * as a product-looking timeout instead of an invalid test input.
+ *
+ * The synthetic tarballs here contain ONLY `package/package.json`. They exist to
+ * prove the preflight fires before any work root, install or process exists —
+ * they are never a qualification run and never replace the real PTY/process lane.
+ *
+ * @module @xmoon76/dsh-pi-tui/test/tooling/split-smoke-diagnostics.test
+ */
+
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { createHash } from 'node:crypto'
+import { chmodSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { basename, dirname, join } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import ts from 'typescript'
+import { testLifecycle } from '../support/temp-lifecycle.ts'
+import { npmDshVersion } from '../../scripts/lib/dsh-distribution.mjs'
+import {
+  classifyHandoffRejection,
+  FAILURE_CATEGORIES,
+  formatFailureSummary,
+  LANE_ERROR_CODES,
+  emitInputFailure,
+  isLaneSourceFile,
+  LANE_SOURCE_FILES,
+  laneAssertionSite,
+  safeFailureSummary,
+  SplitSmokeAssertionError,
+  writeFailureReport,
+  classifyReloadNoticeLine,
+  classifyReloadNotices,
+  createSmokeDiagnostics,
+  projectFailureReport,
+  requireExactSmokeDshPin,
+  smokeArtifactIdentity,
+  SplitSmokeInputError,
+  SplitSmokeWaitError,
+} from '../../scripts/lib/split-smoke-diagnostics.mjs'
+import { waitForAcceptedHandoff, waitForReloadNotice, writeRequestedEvidence } from '../../scripts/split-process-upgrade-smoke.mjs'
+import { assertProfileClientPeers, exitUpgradeClientKeepHost } from '../../scripts/lib/split-upgrade-support.mjs'
+import { waitForAnyReady, waitForSurfaceStatus } from '../../scripts/lib/split-smoke-processes.mjs'
+import { waitForHostSessionEvent } from '../../scripts/lib/split-smoke-sessions.mjs'
+import { waitForC1WorkEvent } from '../../scripts/lib/split-smoke-fixtures.mjs'
+import { runHostRuntimeDisabled } from '../../scripts/smoke/split-process/host-runtime-disabled.mjs'
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
+const UPGRADE_SCRIPT = join(ROOT, 'scripts', 'split-process-upgrade-smoke.mjs')
+const UPGRADE_SUPPORT = join(ROOT, 'scripts', 'lib', 'split-upgrade-support.mjs')
+const UPGRADE_SELECTION = join(ROOT, 'scripts', 'lib', 'split-upgrade-selection.mjs')
+const CROSS_BUILD_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-upgrade', 'cross-build-compatibility.mjs')
+const MANUAL_RELOAD_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-upgrade', 'manual-client-reload.mjs')
+const SOURCE_ISOLATION_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-upgrade', 'reload-source-isolation.mjs')
+const PROCESS_SCRIPT = join(ROOT, 'scripts', 'split-process-smoke.mjs')
+const LIB = join(ROOT, 'scripts', 'lib', 'split-smoke-diagnostics.mjs')
+const PROCESSES_LIB = join(ROOT, 'scripts', 'lib', 'split-smoke-processes.mjs')
+const SESSIONS_LIB = join(ROOT, 'scripts', 'lib', 'split-smoke-sessions.mjs')
+const FIXTURES_LIB = join(ROOT, 'scripts', 'lib', 'split-smoke-fixtures.mjs')
+const PROFILE_LIB = join(ROOT, 'scripts', 'lib', 'split-smoke-profile.mjs')
+const SELECTION_LIB = join(ROOT, 'scripts', 'lib', 'split-smoke-selection.mjs')
+const CASE_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'host-runtime-disabled.mjs')
+const ENTRY_ADMISSION_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'entry-admission.mjs')
+const RECOVERY_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'runtime-artifact-recovery.mjs')
+const TRANSPORT_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'authenticated-lifecycle.mjs')
+const PTY_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'pty-session-write-recovery.mjs')
+const C1_SCENE_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'c1-scene.mjs')
+const SHARED_SESSION_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'shared-session-interactions.mjs')
+const NAVIGATION_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'non-destructive-client-lifecycle.mjs')
+const DETACHED_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'detached-turn-interactions.mjs')
+const HMR_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'client-hmr-signals.mjs')
+const UNKNOWN_WRITE_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'unknown-write-host-death.mjs')
+const WEB_HELPERS_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'web-helpers.mjs')
+const OFFICIAL_WEB_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'official-web-composition.mjs')
+const WEB_TOGGLE_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'web-runtime-toggle.mjs')
+const WEB_PREF_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'web-startup-preference.mjs')
+const WEB_PRODUCT_SCRIPT = join(ROOT, 'scripts', 'smoke', 'split-process', 'web-product.mjs')
+const PACKAGE_NAME = '@xmoon76/dsh-pi-tui'
+const DSH_AGENT = '@deepseek-ai/dsh-agent'
+const TARGET_PIN = npmDshVersion()
+/** Another published runtime: a real exact pin that is deliberately not the target. */
+const OTHER_PIN = '0.2.1-rc.4'
+
+function manifestOf(version, pin) {
+  const manifest = { name: PACKAGE_NAME, version, devDependencies: {} }
+  if (pin !== undefined) manifest.devDependencies[DSH_AGENT] = pin
+  return manifest
+}
+
+/**
+ * One fake packaged artifact holding ONLY the manifest the preflight reads. The
+ * archive layout matches npm (`package/package.json`) so the lanes read it
+ * through their real `tar` path.
+ */
+function syntheticTarball(root, name, manifest) {
+  const stage = join(root, `${name}-stage`)
+  mkdirSync(join(stage, 'package'), { recursive: true })
+  writeFileSync(join(stage, 'package', 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`)
+  const path = join(root, `${name}.tgz`)
+  const packed = spawnSync('tar', ['-czf', path, '-C', stage, 'package'], { encoding: 'utf8', env: { ...process.env, COPYFILE_DISABLE: '1' } })
+  assert.equal(packed.status, 0, `the synthetic fixture could not be packed: ${packed.stderr}`)
+  return path
+}
+
+/** Run one real lane CLI with a private temp root, inside a hard time budget. */
+function runLane(script, args, tmpRoot) {
+  const started = Date.now()
+  const result = spawnSync(process.execPath, [script, ...args], {
+    encoding: 'utf8',
+    timeout: 5_000,
+    env: {
+      ...process.env,
+      TMPDIR: tmpRoot,
+      // These tests exercise the CANDIDATE input boundary of the full lane,
+      // not its platform guard. Off Linux the full form is refused by
+      // platform BEFORE the candidate preflight, so the child is pinned to
+      // the lane's Linux form through the one documented test override.
+      ...(process.platform === 'linux' ? {} : { SPLIT_PROCESS_TEST_PLATFORM: 'linux' }),
+    },
+  })
+  return { elapsedMs: Date.now() - started, ...result }
+}
+
+/**
+ * A rejected input must never reach the lane's own setup: assert the private
+ * temp root still holds no work root and no install transaction.
+ */
+function assertNoLaneSetup(tmpRoot, workPrefix) {
+  const entries = readdirSync(tmpRoot, { withFileTypes: true })
+  const workRoots = entries.filter(entry => entry.name.startsWith(workPrefix)).map(entry => entry.name)
+  assert.deepEqual(workRoots, [], `no ${workPrefix}* work root may exist for a rejected input`)
+  const installs = entries.filter(entry => entry.name === 'node_modules' || entry.name === 'pnpm-lock.yaml')
+  assert.deepEqual(installs.map(entry => entry.name), [], 'a rejected input may not start an install transaction')
+}
+
+test('the exact-pin guard accepts only the lane target pin for every role', () => {
+  for (const role of ['candidate', 'old', 'new']) {
+    assert.equal(requireExactSmokeDshPin(role, manifestOf('1.2.3', TARGET_PIN), TARGET_PIN), TARGET_PIN)
+  }
+  // No range and no "compatible enough" reading: a caret/tilde/range form (or a
+  // non-string) is not an exact pin, whatever the runtime would resolve.
+  for (const pin of ['^0.2.1-rc.5', '>=0.2.1-rc.2', '', '   ', null, undefined, 42]) {
+    assert.throws(
+      () => requireExactSmokeDshPin('old', manifestOf('1.2.3', pin), TARGET_PIN),
+      error => error.code === 'INPUT_DSH_PIN_MISSING_OR_INVALID' && error.role === 'old',
+    )
+  }
+  // A well-formed pin of ANOTHER runtime is a mismatch, never a missing pin: the
+  // two classifications stay distinct so the report can name the real reason.
+  assert.throws(
+    () => requireExactSmokeDshPin('old', manifestOf('1.2.3', '0.2.1'), TARGET_PIN),
+    error => error.code === 'INPUT_DSH_PIN_MISMATCH' && error.artifactPin === '0.2.1',
+  )
+  assert.throws(() => requireExactSmokeDshPin('ancient', manifestOf('1.2.3', TARGET_PIN), TARGET_PIN), TypeError)
+  assert.throws(() => requireExactSmokeDshPin('old', manifestOf('1.2.3', TARGET_PIN), '>=0.2.1'), TypeError)
+})
+
+test('a differently pinned artifact is an INPUT_UNQUALIFIED mismatch, never a product claim', () => {
+  for (const role of ['candidate', 'old', 'new']) {
+    let caught
+    try {
+      requireExactSmokeDshPin(role, manifestOf('1.2.3', OTHER_PIN), TARGET_PIN)
+    } catch (error) {
+      caught = error
+    }
+    assert.ok(caught instanceof SplitSmokeInputError, 'the mismatch must be the dedicated input error')
+    assert.equal(caught.code, 'INPUT_DSH_PIN_MISMATCH')
+    assert.equal(caught.role, role)
+    assert.equal(caught.artifactPin, OTHER_PIN)
+    assert.equal(caught.targetDshVersion, TARGET_PIN)
+    assert.match(caught.message, /INPUT_UNQUALIFIED/u)
+    assert.match(caught.message, /INVALID_TEST_PAIRING/u)
+    assert.match(caught.message, /not a product regression/u)
+    assert.ok(caught.message.includes(OTHER_PIN) && caught.message.includes(TARGET_PIN),
+      'the message must state both exact versions so the operator can rebuild the right artifact')
+  }
+})
+
+test('the guard never echoes an arbitrary manifest value', () => {
+  const sentinel = 'COOKIE_SENTINEL https://secret.invalid/x ./evil-target.sh'
+  for (const pin of [sentinel, `${sentinel}\n`, 42]) {
+    const thrown = (() => {
+      try {
+        requireExactSmokeDshPin('old', manifestOf('1.2.3', pin), TARGET_PIN)
+      } catch (error) {
+        return error
+      }
+      assert.fail(`an invalid pin must be refused: ${String(pin)}`)
+    })()
+    assert.equal(thrown.code, 'INPUT_DSH_PIN_MISSING_OR_INVALID')
+    assert.doesNotMatch(thrown.message, /COOKIE_SENTINEL|secret\.invalid|evil-target/u)
+  }
+})
+
+test('the upgrade lane refuses a mismatched OLD artifact before any install', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('split-upgrade-input-guard-')
+  const oldPath = syntheticTarball(dir, 'old', manifestOf('0.5.5-old.1', OTHER_PIN))
+  const newPath = syntheticTarball(dir, 'new', manifestOf('0.5.5', TARGET_PIN))
+  const result = runLane(UPGRADE_SCRIPT, ['--old', oldPath, '--new', newPath], dir)
+  assert.notEqual(result.status, 0, 'a mismatched pairing must exit nonzero')
+  assert.equal(result.signal, null, 'the lane must fail by itself inside the budget, not be killed by it')
+  assert.match(result.stderr, /INPUT_UNQUALIFIED/u)
+  assert.match(result.stderr, /INPUT_DSH_PIN_MISMATCH/u)
+  assert.match(result.stderr, /\bold\b/u)
+  assert.ok(result.stderr.includes(OTHER_PIN) && result.stderr.includes(TARGET_PIN),
+    `both exact versions must be reported:\n${result.stderr}`)
+  assert.ok(!result.stderr.includes('qualified=true'),
+    `an unqualified pairing must never announce itself as qualified:\n${result.stderr}`)
+  assertNoLaneSetup(dir, 'dsh-split-upgrade-')
+})
+
+test('the upgrade lane refuses a mismatched NEW artifact and a missing old pin separately', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('split-upgrade-input-guard-')
+  const mismatchNew = runLane(UPGRADE_SCRIPT, [
+    '--old', syntheticTarball(dir, 'good-old', manifestOf('0.5.5-old.1', TARGET_PIN)),
+    '--new', syntheticTarball(dir, 'bad-new', manifestOf('0.5.5', OTHER_PIN)),
+  ], dir)
+  assert.notEqual(mismatchNew.status, 0)
+  assert.match(mismatchNew.stderr, /INPUT_DSH_PIN_MISMATCH/u)
+  assert.match(mismatchNew.stderr, /\bnew\b/u)
+
+  const missingOld = runLane(UPGRADE_SCRIPT, [
+    '--old', syntheticTarball(dir, 'unpinned-old', manifestOf('0.5.5-old.1', undefined)),
+    '--new', syntheticTarball(dir, 'good-new', manifestOf('0.5.5', TARGET_PIN)),
+  ], dir)
+  assert.notEqual(missingOld.status, 0)
+  assert.match(missingOld.stderr, /INPUT_DSH_PIN_MISSING_OR_INVALID/u)
+  assert.match(missingOld.stderr, /\bold\b/u)
+  assertNoLaneSetup(dir, 'dsh-split-upgrade-')
+})
+
+test('the process lane refuses a candidate with another exact pin before any install', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('split-process-input-guard-')
+  const source = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
+  // The candidate identity check is the lane's own: name and version must match
+  // this checkout, so only the DSH pin differs here.
+  const candidate = syntheticTarball(dir, 'candidate', manifestOf(source.version, OTHER_PIN))
+  // The refused pairing must keep the already-validated candidate identity in
+  // the default report: role, name, version, SHA256 and both exact pins.
+  const candidateSha256 = createHash('sha256').update(readFileSync(candidate)).digest('hex')
+  const expectedIdentity = `candidate: ${PACKAGE_NAME}@${source.version}; pin=${OTHER_PIN}; sha256=${candidateSha256}`
+  const result = runLane(PROCESS_SCRIPT, [candidate], dir)
+  assert.notEqual(result.status, 0, 'a mismatched candidate must exit nonzero')
+  assert.equal(result.signal, null, 'the lane must fail by itself inside the budget, not be killed by it')
+  assert.match(result.stderr, /INPUT_UNQUALIFIED/u)
+  assert.match(result.stderr, /INPUT_DSH_PIN_MISMATCH/u)
+  assert.match(result.stderr, /\bcandidate\b/u)
+  assert.ok(result.stderr.includes(expectedIdentity),
+    `the full lane must keep the candidate identity in the refused-pairing report:\n${result.stderr}`)
+  assert.ok(result.stderr.includes(OTHER_PIN) && result.stderr.includes(TARGET_PIN),
+    `both exact versions must be reported:\n${result.stderr}`)
+  assert.ok(!result.stderr.includes('qualified=true'),
+    `an unqualified candidate must never announce itself as qualified:\n${result.stderr}`)
+  assertNoLaneSetup(dir, 'dsh-split-process-')
+  // The selected entry runs the SAME preflight: it refuses the pairing before a
+  // work root or install, with the same identity and both pins.
+  const selected = runLane(PROCESS_SCRIPT, [candidate, '--case', 'bootstrap.host-runtime-disabled'], dir)
+  assert.notEqual(selected.status, 0, 'a mismatched candidate must fail the selected case too')
+  assert.equal(selected.signal, null)
+  assert.match(selected.stderr, /INPUT_UNQUALIFIED/u)
+  assert.match(selected.stderr, /INPUT_DSH_PIN_MISMATCH/u)
+  assert.match(selected.stderr, /\bcandidate\b/u)
+  assert.ok(selected.stderr.includes(expectedIdentity),
+    `the selected lane must keep the candidate identity in the refused-pairing report:\n${selected.stderr}`)
+  assert.ok(selected.stderr.includes(OTHER_PIN) && selected.stderr.includes(TARGET_PIN),
+    `the selected report must carry both exact pins:\n${selected.stderr}`)
+  assert.ok(!selected.stderr.includes('qualified=true'))
+  assertNoLaneSetup(dir, 'dsh-split-process-')
+})
+
+// ── The default failure report ──────────────────────────────────────────────
+
+const REPORT_KEYS = [
+  'schemaVersion', 'lane', 'status', 'category', 'reason', 'checkpoint', 'failedStep', 'assertion',
+  'waitLabel', 'elapsedMs', 'runtimeDshPin', 'artifacts', 'expected', 'observed', 'progress', 'processes',
+  'error',
+]
+
+/** Capture one function's stderr writes without losing the real stream. */
+function captureStderr(run) {
+  const original = process.stderr.write
+  const chunks = []
+  process.stderr.write = (chunk, ...rest) => {
+    chunks.push(String(chunk))
+    return true
+  }
+  try {
+    run()
+  } finally {
+    process.stderr.write = original
+  }
+  return chunks.join('')
+}
+
+function failureHandles(count, records) {
+  return Array.from({ length: count }, (_unused, index) => ({
+    role: `host-${String(index)}`,
+    exited: false,
+    records: Array.from({ length: records }, (_u, line) => ({
+      m4a0: 'ready',
+      pid: 1000 + line,
+      // Everything here is arbitrary payload and must never be reported.
+      cookie: `COOKIE_SENTINEL-${String(line)}`,
+      token: `TOKEN_SENTINEL-${String(line)}`,
+      url: 'https://secret.invalid/launch',
+      connectUrl: 'https://secret.invalid/mux?token=TOKEN_SENTINEL',
+      user: 'the session user text must not leak',
+      stderr: 'raw terminal bytes with COOKIE_SENTINEL',
+    })),
+    stderr: 'raw stderr COOKIE_SENTINEL',
+    raw: 'raw pty bytes TOKEN_SENTINEL',
+  }))
+}
+
+test('the report holds only the whitelisted fields inside its fixed budgets', (t) => {
+  const privateTmp = testLifecycle(t).tempDir('split-smoke-report-root-')
+  process.env.TMPDIR = privateTmp
+  t.after(() => { delete process.env.TMPDIR })
+  const diagnostics = createSmokeDiagnostics({
+    lane: 'split-upgrade',
+    heading: 'SPLIT_PROCESS_UPGRADE_SMOKE',
+    marker: 'U',
+    runtimeDshPin: TARGET_PIN,
+    artifacts: [
+      smokeArtifactIdentity('old', manifestOf('0.5.5-old.1', TARGET_PIN), 'a'.repeat(64)),
+      smokeArtifactIdentity('new', manifestOf('0.5.5', TARGET_PIN), 'b'.repeat(64)),
+    ],
+  })
+  // 30 boundaries, 10 processes, 12 records each: the caps are 24 / 8 / 8.
+  for (let index = 0; index < 30; index += 1) diagnostics.checkpoint(`U08/phase-${String(index)}`)
+  const stderr = captureStderr(() => diagnostics.reportFailure(
+    new SplitSmokeWaitError('WAIT_TIMEOUT', { code: 'FRAME_WAIT_TIMEOUT', waitLabel: 'a fixed label', elapsedMs: 1234 }),
+    { processes: failureHandles(10, 12) },
+  ))
+  assert.match(stderr, /SPLIT_PROCESS_UPGRADE_SMOKE_FAILURE/u)
+  const report = projectFailureReport({
+    lane: 'split-upgrade',
+    category: 'WAIT_TIMEOUT',
+    runtimeDshPin: TARGET_PIN,
+    progress: diagnostics.progress(),
+    processes: failureHandles(10, 12),
+  })
+  assert.deepEqual(Object.keys(report).filter(key => !REPORT_KEYS.includes(key)), [],
+    'the report may not grow a field outside the fixed schema')
+  assert.equal(report.progress.length, 24, 'a checkpoint ring keeps at most 24 boundaries')
+  assert.equal(report.progress.at(-1).name, 'U08/phase-29', 'and it keeps the RECENT ones')
+  assert.equal(report.processes.length, 8, 'at most 8 process summaries')
+  for (const handle of report.processes) {
+    assert.equal(handle.events.length, 8, 'at most 8 events per process')
+    assert.deepEqual(Object.keys(handle.events[0]), ['m4a0'], 'only the official event names are projected')
+  }
+})
+
+test('the report keeps the raw error while the summary stays a fixed projection', (t) => {
+  const privateTmp = testLifecycle(t).tempDir('split-smoke-report-root-')
+  process.env.TMPDIR = privateTmp
+  t.after(() => { delete process.env.TMPDIR })
+  const diagnostics = createSmokeDiagnostics({
+    lane: 'split-process',
+    heading: 'SPLIT_PROCESS_SMOKE',
+    marker: 'T',
+    runtimeDshPin: TARGET_PIN,
+    artifacts: [smokeArtifactIdentity('candidate', manifestOf('0.5.5', TARGET_PIN), 'c'.repeat(64))],
+  })
+  const evidenceDirectory = join(privateTmp, 'ci-evidence')
+  mkdirSync(evidenceDirectory, { mode: 0o700 })
+  const evidencePath = join(evidenceDirectory, 'failure.json')
+  const stderr = captureStderr(() => diagnostics.reportFailure(
+    new SplitSmokeWaitError('PROCESS_EXITED', {
+      code: 'PROCESS_EXITED_BEFORE_RECORD',
+      waitLabel: 'Host ready',
+      processRole: 'host',
+      elapsedMs: 500,
+    }),
+    { processes: failureHandles(3, 4), evidencePath },
+  ))
+  // The human summary is the fixed projection: no free-form payload.
+  for (const sentinel of ['COOKIE_SENTINEL', 'TOKEN_SENTINEL', 'secret.invalid', 'user text', 'raw terminal', 'raw pty', 'raw stderr']) {
+    assert.ok(!stderr.includes(sentinel), `the stderr summary must not contain ${sentinel}`)
+  }
+  const reported = stderr.match(/report: (\S+)/u)?.[1]
+  assert.ok(reported !== undefined, `the summary must print the report path:\n${stderr}`)
+  const content = readFileSync(reported, 'utf8')
+  const report = JSON.parse(content)
+  // The report is where the REAL root cause must survive: name + message +
+  // stack are retained (bounded), while the summary above stays fixed.
+  assert.equal(report.error?.name, 'SplitSmokeWaitError')
+  assert.match(report.error?.message ?? '', /PROCESS_EXITED.*Host ready/u)
+  assert.match(report.error?.stack ?? '', /SplitSmokeWaitError/u)
+  const info = statSync(reported)
+  assert.equal(info.mode & 0o777, 0o600, 'the report file is private')
+  assert.equal(statSync(dirname(reported)).mode & 0o777, 0o700, 'the report directory is private')
+  assert.equal(readFileSync(evidencePath, 'utf8'), content, 'the CI evidence twin contains the same report')
+  assert.equal(statSync(evidencePath).mode & 0o777, 0o600, 'the CI evidence twin is private')
+  assert.equal(statSync(evidenceDirectory).mode & 0o777, 0o700, 'the CI evidence directory is private')
+  assert.equal(basename(reported), 'failure.json')
+  rmSync(dirname(reported), { recursive: true, force: true })
+})
+
+
+test('runStep reports START/DONE/ERROR and names the failed scope', async (t) => {
+  const privateTmp = testLifecycle(t).tempDir('split-smoke-runstep-')
+  process.env.TMPDIR = privateTmp
+  t.after(() => { delete process.env.TMPDIR })
+  const diagnostics = createSmokeDiagnostics({
+    lane: 'split-process',
+    heading: 'SPLIT_PROCESS_SMOKE',
+    marker: 'T',
+    runtimeDshPin: TARGET_PIN,
+  })
+  const chunks = []
+  const original = process.stderr.write
+  process.stderr.write = (chunk) => { chunks.push(String(chunk)); return true }
+  let caught
+  try {
+    await diagnostics.runStep('case/ok', async () => 'done')
+    await diagnostics.runStep('case/outer', async () => {
+      await diagnostics.runStep('case/outer/inner', async () => {
+        throw new SplitSmokeAssertionError('maintenance did not leave the Host UNKNOWN')
+      })
+    })
+  } catch (error) {
+    caught = error
+  } finally {
+    process.stderr.write = original
+  }
+  const stderr = chunks.join('')
+  const lines = stderr.split('\n').filter(line => line.startsWith('[split] '))
+  assert.equal(lines.length, 6, `expected START/DONE + START/START/ERROR/ERROR, got:\n${stderr}`)
+  assert.match(lines[0], /^\[split\] \d{4}-\d{2}-\d{2}T[\d:.]+Z START case\/ok$/u)
+  assert.match(lines[1], /^\[split\] \d{4}-\d{2}-\d{2}T[\d:.]+Z DONE case\/ok durationMs=\d+$/u)
+  assert.match(lines[2], /^\[split\] \S+ START case\/outer$/u)
+  assert.match(lines[3], /^\[split\] \S+ START case\/outer\/inner$/u)
+  assert.match(lines[4], /^\[split\] \S+ ERROR case\/outer\/inner durationMs=\d+$/u)
+  assert.match(lines[5], /^\[split\] \S+ ERROR case\/outer durationMs=\d+$/u)
+  // The progress ring records phases (not a second checkpoint vocabulary), and
+  // the failed scope is the last ERROR — never the earlier DONE.
+  const progress = diagnostics.progress()
+  assert.equal(progress.filter(step => step.phase === 'done').length, 1)
+  assert.equal(progress.filter(step => step.phase === 'error').length, 2)
+  assert.equal(diagnostics.failedStep(), 'case/outer/inner')
+  assert.equal(caught.category, 'ASSERTION_FAILED')
+  const report = diagnostics.reportFailure(caught)
+  assert.equal(report.failedStep, 'case/outer/inner')
+  // The raw assertion text and its stack are retained in the report.
+  assert.match(report.error?.message ?? '', /maintenance did not leave the Host UNKNOWN/u)
+  assert.match(report.error?.stack ?? '', /SplitSmokeAssertionError/u)
+  // The fixed summary never quotes that text.
+  assert.ok(!stderr.includes('maintenance did not leave the Host UNKNOWN'))
+})
+
+test('only a Web case scope is passed through the credential redactor', async (t) => {
+  const privateTmp = testLifecycle(t).tempDir('split-smoke-web-redaction-')
+  process.env.TMPDIR = privateTmp
+  t.after(() => { delete process.env.TMPDIR })
+  const secret = 'tok-SENTINEL-123456'
+  const browserMessage = `driver failed: https://127.0.0.1:4567/x?token=${secret}\nCookie: session=${secret}\nAuthorization: Bearer ${secret}`
+  const runOne = async (stepName) => {
+    const diagnostics = createSmokeDiagnostics({
+      lane: 'split-process',
+      heading: 'SPLIT_PROCESS_SMOKE',
+      marker: 'T',
+      runtimeDshPin: TARGET_PIN,
+    })
+    let caught
+    try {
+      await diagnostics.runStep(stepName, async () => { throw new Error(browserMessage) })
+    } catch (error) {
+      caught = error
+    }
+    return { diagnostics, report: diagnostics.reportFailure(caught) }
+  }
+  const web = await runOne('case/web.product-browser-tui')
+  const webText = JSON.stringify(web.report)
+  for (const forbidden of [secret, '127.0.0.1:4567', 'Bearer tok']) {
+    assert.ok(!webText.includes(forbidden), `the Web report leaked ${forbidden}:\n${webText}`)
+  }
+  assert.match(web.report.error?.message ?? '', /<redacted>/u)
+  assert.equal(web.report.failedStep, 'case/web.product-browser-tui')
+  // A non-Web scope keeps its real message: the redactor is targeted, not a
+  // blanket "hide every error" policy.
+  const plain = await runOne('case/transport.authenticated-lifecycle')
+  assert.match(plain.report.error?.message ?? '', new RegExp(secret, 'u'))
+})
+
+test('a qualified run announces its identity and creates NO report artifact', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('split-smoke-passing-identity-')
+  const script = `
+    const lib = await import(${JSON.stringify(pathToFileURL(join(ROOT, 'scripts', 'lib', 'split-smoke-diagnostics.mjs')).href)})
+    const diagnostics = lib.createSmokeDiagnostics({
+      lane: 'split-process',
+      heading: 'SPLIT_PROCESS_SMOKE',
+      marker: 'T',
+      runtimeDshPin: ${JSON.stringify(TARGET_PIN)},
+      artifacts: [lib.smokeArtifactIdentity('candidate', {
+        name: ${JSON.stringify(PACKAGE_NAME)},
+        version: '0.5.5',
+        devDependencies: { ${JSON.stringify(DSH_AGENT)}: ${JSON.stringify(TARGET_PIN)} },
+      }, 'd'.repeat(64))],
+    })
+    process.stderr.write(diagnostics.identityLine() + '\\n')
+    diagnostics.checkpoint('preflight/candidate-input')
+    diagnostics.checkpoint('t18')
+  `
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+    encoding: 'utf8',
+    env: { ...process.env, TMPDIR: dir },
+  })
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stderr, /SPLIT_PROCESS_SMOKE_START candidate=@xmoon76\/dsh-pi-tui@0\.5\.5/u)
+  assert.ok(result.stderr.includes(`pin=${TARGET_PIN}`), `the identity line names the exact target pin:\n${result.stderr}`)
+  assert.match(result.stderr, /qualified=true$/mu)
+  assert.match(result.stderr, /\[T checkpoint\] preflight\/candidate-input/u)
+  assert.match(result.stderr, /\[T checkpoint\] t18/u, 'checkpoints are visible WITHOUT TRACE or KEEP')
+  assert.deepEqual(
+    readdirSync(dir).filter(name => name.startsWith('dsh-pi-tui-smoke-failure-')),
+    [],
+    'a passing run leaves no failure artifact behind',
+  )
+})
+
+test('a real lane INPUT failure leaves one private report outside any work root and mirrors --evidence', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('split-upgrade-report-')
+  const evidence = join(dir, 'evidence.json')
+  const result = runLane(UPGRADE_SCRIPT, [
+    '--old', syntheticTarball(dir, 'old', manifestOf('0.5.5-old.1', OTHER_PIN)),
+    '--new', syntheticTarball(dir, 'new', manifestOf('0.5.5', TARGET_PIN)),
+    '--evidence', evidence,
+  ], dir)
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /SPLIT_PROCESS_UPGRADE_SMOKE_FAILURE/u)
+  const reported = result.stderr.match(/report: (\S+)/u)?.[1]
+  assert.ok(reported !== undefined, `the summary must print the report path:\n${result.stderr}`)
+  assert.ok(reported.startsWith(dir), 'the report lives under the lane-controlled temp root')
+  assert.ok(!reported.includes('dsh-split-upgrade-'), 'the report is NOT inside the deletable work root')
+  const report = JSON.parse(readFileSync(reported, 'utf8'))
+  assert.equal(report.schemaVersion, 1)
+  assert.equal(report.status, 'FAIL')
+  assert.equal(report.category, 'INPUT_UNQUALIFIED')
+  assert.equal(report.reason, 'INPUT_DSH_PIN_MISMATCH')
+  assert.equal(report.runtimeDshPin, TARGET_PIN)
+  assert.deepEqual(report.artifacts.map(entry => [entry.role, entry.version, entry.dshPin]), [
+    ['old', '0.5.5-old.1', OTHER_PIN],
+    ['new', '0.5.5', TARGET_PIN],
+  ])
+  assert.equal(statSync(reported).mode & 0o777, 0o600)
+  assert.equal(statSync(dirname(reported)).mode & 0o777, 0o700)
+  // The `--evidence` FAIL twin holds the same safe fields, never the work root.
+  assert.deepEqual(JSON.parse(readFileSync(evidence, 'utf8')), report)
+  assert.equal(statSync(evidence).mode & 0o777, 0o600)
+})
+
+test('the reload notice and rejection classifiers only ever return fixed enums', () => {
+  // A painted notice row is recognised only in the product's fixed shape.
+  assert.equal(classifyReloadNoticeLine('✗ Client reload skipped: this Client already runs the installed build.'), 'ALREADY_CURRENT')
+  assert.equal(classifyReloadNoticeLine('ℹ Client reload blocked: remove or submit the staged attachments first.'), 'ATTACHMENTS')
+  assert.equal(classifyReloadNoticeLine('✗ Client reload failed: the installed replacement Client is unavailable or incompatible.'), 'TARGET_INVALID')
+  // Anything else — including the same words inside user text — is NOT a notice.
+  for (const line of [
+    '❯ Client reload skipped: this Client already runs the installed build.',
+    '✗ please run Client reload skipped: this Client already runs the installed build.',
+    '✗ Client reload skipped: this Client already runs the installed build, plus COOKIE_SENTINEL',
+    'https://secret.invalid/mux?token=TOKEN_SENTINEL',
+    '',
+  ]) {
+    assert.equal(classifyReloadNoticeLine(line), undefined, `${line} must not classify`)
+  }
+  assert.deepEqual(
+    classifyReloadNotices([
+      '',
+      '✗ Client reload skipped: this Client already runs the installed build.',
+      '❯ Client reload skipped: this Client already runs the installed build.',
+      '✗ Client reload skipped: this Client already runs the installed build.',
+    ]),
+    ['ALREADY_CURRENT'],
+    'only fixed notice rows count, and each type is named once',
+  )
+  // The internal rejection field maps to a diagnostic enum and never echoes.
+  assert.equal(classifyHandoffRejection('local client reexec: the target package is pinned to a different DSH runtime'),
+    'TARGET_INVALID_DSH_PIN_MISMATCH')
+  assert.equal(classifyHandoffRejection('local client reexec: the installed Client already runs this build'), 'ALREADY_CURRENT')
+  assert.equal(classifyHandoffRejection('some arbitrary failure containing COOKIE_SENTINEL'), 'TARGET_INVALID_UNCLASSIFIED')
+  assert.equal(classifyHandoffRejection(undefined), 'TARGET_INVALID_UNCLASSIFIED')
+})
+
+// ── The U reload waits: early FAIL, PTY-only PASS ───────────────────────────
+
+const ALREADY_CURRENT = 'Client reload skipped: this Client already runs the installed build.'
+const ATTACHMENTS = 'Client reload blocked: remove or submit the staged attachments first.'
+const TARGET_INVALID = 'Client reload failed: the installed replacement Client is unavailable or incompatible.'
+const PIN_REJECTION = 'local client reexec: the target package is pinned to a different DSH runtime'
+const SHORT_WAIT_MS = 300
+
+/** A contract-shaped Client view: the real waiters only use these members. */
+function fakeClient({ records = [], painted = [], exited = false, recordError = undefined }) {
+  return {
+    role: 'surface-client',
+    records,
+    exited,
+    recordError,
+    async viewport() {
+      return painted
+    },
+    finalRecordRead() {
+      return undefined
+    },
+  }
+}
+
+async function rejection(run) {
+  try {
+    await run()
+  } catch (error) {
+    return error
+  }
+  assert.fail('the wait must fail')
+}
+
+test('waitForReloadNotice PASSES only on the painted fixed notice row', async () => {
+  const client = fakeClient({ painted: ['some row', `✗ ${ALREADY_CURRENT}`, 'another row'] })
+  assert.equal(await waitForReloadNotice(client, ALREADY_CURRENT, 'U08 already-current notice', 0, SHORT_WAIT_MS),
+    'ALREADY_CURRENT')
+  // The info-marked form of the same fixed notice is equally real evidence.
+  assert.equal(await waitForReloadNotice(
+    fakeClient({ painted: [`ℹ ${ALREADY_CURRENT}`] }), ALREADY_CURRENT, 'U08 already-current notice', 0, SHORT_WAIT_MS),
+    'ALREADY_CURRENT')
+})
+
+test('user text that repeats the notice wording can neither pass nor refuse the wait', async () => {
+  // The same bytes as the notice, on a row the product never paints as a notice:
+  // a prompt echo, an indented transcript row, a longer sentence that merely
+  // contains the notice, and the attachments wording inside the composer. None
+  // of them is a `✗`/`ℹ Client reload …` row, so the wait must run to its own
+  // deadline and report the timeout with nothing observed.
+  for (const painted of [
+    [`❯ ${ALREADY_CURRENT}`],
+    [`  ${ALREADY_CURRENT}`],
+    [`✗ Client reload skipped: this Client already runs the installed build, plus ${ALREADY_CURRENT}`],
+    ['u08-reload-client-hold', `echo ${ALREADY_CURRENT}`],
+    [`❯ ${ATTACHMENTS}`],
+  ]) {
+    const error = await rejection(() => waitForReloadNotice(
+      fakeClient({ painted }), ALREADY_CURRENT, 'U08 already-current notice', 0, SHORT_WAIT_MS,
+    ))
+    assert.equal(error.category, 'WAIT_TIMEOUT', `a non-notice row must not decide the wait: ${painted.join('|')}`)
+    assert.equal(error.expected, 'ALREADY_CURRENT')
+    assert.equal(error.observed, undefined, `a non-notice row must not be reported as observed: ${painted.join('|')}`)
+  }
+  // The real row still classifies, so this is a shape rule, not a ban.
+  const refused = await rejection(() => waitForReloadNotice(
+    fakeClient({ painted: [`✗ ${ATTACHMENTS}`] }), ALREADY_CURRENT, 'U08 already-current notice', 0, SHORT_WAIT_MS,
+  ))
+  assert.equal(refused.category, 'UNEXPECTED_RELOAD_REFUSAL')
+  assert.equal(refused.observed, 'ATTACHMENTS')
+})
+
+test('waitForReloadNotice fails a refusal that can never paint the expected notice', async () => {
+  // The recorded rejection of THIS action says pin mismatch; the wait expects
+  // already-current. That is decisive, so it must not consume the 120s budget.
+  const started = Date.now()
+  const error = await rejection(() => waitForReloadNotice(
+    fakeClient({ records: [{ m4r: 'handoff-request-rejected', error: PIN_REJECTION }] }),
+    ALREADY_CURRENT, 'U08 already-current notice', 0,
+  ))
+  assert.equal(error.category, 'UNEXPECTED_RELOAD_REFUSAL')
+  assert.equal(error.code, 'PROCESS_REFUSED_RELOAD')
+  assert.equal(error.expected, 'ALREADY_CURRENT')
+  assert.equal(error.observed, 'TARGET_INVALID_DSH_PIN_MISMATCH')
+  assert.ok(Date.now() - started < 5_000, `the refusal must fail fast, took ${String(Date.now() - started)}ms`)
+  // A DIFFERENT painted notice is equally decisive.
+  const painted = await rejection(() => waitForReloadNotice(
+    fakeClient({ painted: [`✗ ${ATTACHMENTS}`] }), ALREADY_CURRENT, 'U08 already-current notice', 0, SHORT_WAIT_MS,
+  ))
+  assert.equal(painted.category, 'UNEXPECTED_RELOAD_REFUSAL')
+  assert.equal(painted.code, 'PAINTED_NOTICE_MISMATCH')
+  assert.equal(painted.observed, 'ATTACHMENTS')
+})
+
+test('waitForReloadNotice never PASSES from telemetry alone', async () => {
+  // An internal refusal that AGREES with the expectation still has to be
+  // painted: without a rendered notice this wait times out, it does not pass.
+  const error = await rejection(() => waitForReloadNotice(
+    fakeClient({ records: [{ m4r: 'handoff-request-rejected', error: 'local client reexec: the installed Client already runs this build' }] }),
+    ALREADY_CURRENT, 'U08 already-current notice', 0, SHORT_WAIT_MS,
+  ))
+  assert.equal(error.category, 'WAIT_TIMEOUT')
+  assert.equal(error.expected, 'ALREADY_CURRENT')
+})
+
+test('waitForReloadNotice attributes only THIS action records to THIS action', async () => {
+  // A refusal left BEFORE the boundary belongs to an earlier command, so it can
+  // never decide the current wait: this one still runs to its own deadline.
+  const stale = await rejection(() => waitForReloadNotice(
+    fakeClient({ records: [{ m4r: 'handoff-request-rejected', error: PIN_REJECTION }] }),
+    TARGET_INVALID, 'U08 target-invalid notice', 1, SHORT_WAIT_MS,
+  ))
+  assert.equal(stale.category, 'WAIT_TIMEOUT', 'a pre-boundary refusal must not decide the current wait')
+  // The same slot, with a refusal that contradicts THIS expectation, is decisive.
+  const decided = await rejection(() => waitForReloadNotice(
+    fakeClient({ records: [{ m4r: 'handoff-request-ignored', reason: 'not-ready' }, { m4r: 'handoff-request-rejected', error: 'local client reexec: the installed Client already runs this build' }] }),
+    TARGET_INVALID, 'U08 target-invalid notice', 1, SHORT_WAIT_MS,
+  ))
+  assert.equal(decided.category, 'UNEXPECTED_RELOAD_REFUSAL')
+  assert.equal(decided.observed, 'ALREADY_CURRENT')
+})
+
+test('waitForReloadNotice reports a dead or unreadable Client by its own category', async () => {
+  const dead = await rejection(() => waitForReloadNotice(
+    fakeClient({ exited: true }), ALREADY_CURRENT, 'U08 already-current notice', 0, SHORT_WAIT_MS,
+  ))
+  assert.equal(dead.category, 'PROCESS_EXITED')
+  const unreadable = await rejection(() => waitForReloadNotice(
+    fakeClient({ recordError: new Error('malformed') }), ALREADY_CURRENT, 'U08 already-current notice', 0, SHORT_WAIT_MS,
+  ))
+  assert.equal(unreadable.category, 'INFRA_FAILURE')
+})
+
+test('waitForAcceptedHandoff requires this action request for this PID', async () => {
+  const accepted = { m4r: 'handoff-requested', pid: 4242, source: 'user-command' }
+  const client = fakeClient({ records: [accepted] })
+  assert.equal(await waitForAcceptedHandoff(client, 4242, 'U08 accepted reload', 0, SHORT_WAIT_MS), accepted)
+  // Another PID is not this Client's own request.
+  const wrongPid = await rejection(() => waitForAcceptedHandoff(
+    fakeClient({ records: [accepted] }), 9999, 'U08 accepted reload', 0, SHORT_WAIT_MS,
+  ))
+  assert.equal(wrongPid.category, 'WAIT_TIMEOUT')
+  // A request left by the PREVIOUS command does not satisfy this one.
+  const stale = await rejection(() => waitForAcceptedHandoff(
+    fakeClient({ records: [accepted] }), 4242, 'U08 accepted reload', 1, SHORT_WAIT_MS,
+  ))
+  assert.equal(stale.category, 'WAIT_TIMEOUT')
+})
+
+test('waitForAcceptedHandoff reports the actual refusal of the same action', async () => {
+  const rejected = await rejection(() => waitForAcceptedHandoff(
+    fakeClient({ records: [{ m4r: 'handoff-request-rejected', error: PIN_REJECTION }] }), 4242, 'U08 accepted reload', 0,
+  ))
+  assert.equal(rejected.category, 'UNEXPECTED_RELOAD_REFUSAL')
+  assert.equal(rejected.observed, 'TARGET_INVALID_DSH_PIN_MISMATCH')
+  const ignored = await rejection(() => waitForAcceptedHandoff(
+    fakeClient({ records: [{ m4r: 'handoff-request-ignored', reason: 'already-requested' }] }), 4242, 'U08 accepted reload', 0,
+  ))
+  assert.equal(ignored.code, 'PROCESS_IGNORED_RELOAD')
+  assert.equal(ignored.observed, 'STOPPING')
+})
+
+// ── The Upgrade safe exit: only a confirmed safe default may send Enter ─────
+
+/** One exact-width rounded frame mirroring `Frame.render` row padding. */
+function exitChoiceFrame(rows, width = 64) {
+  const inner = width - 4
+  return [
+    `╭${'─'.repeat(width - 2)}╮`,
+    ...rows.map(row => `│ ${row.padEnd(inner)} │`),
+    `╰${'─'.repeat(width - 2)}╯`,
+  ]
+}
+
+/** The real painted Busy Choice rows (`ExitChoicePanel` inside its frame). */
+const BUSY_EXIT_FRAME = exitChoiceFrame([
+  'Disconnect from dsh-pi-tui',
+  '',
+  'The current session is still working.',
+  '',
+  '> Keep working and disconnect',
+  '  Stop current work and disconnect',
+  '  Stay in the TUI',
+  '',
+  '↑↓ Select · Enter Confirm · Esc Stay',
+])
+
+/** The real painted Unknown Choice rows: the other daemon safe default. */
+const UNKNOWN_EXIT_FRAME = exitChoiceFrame([
+  'Disconnect from dsh-pi-tui',
+  '',
+  "The current session's running state cannot be verified.",
+  '',
+  '> Disconnect without stopping',
+  '  Stay in the TUI',
+  '',
+  '↑↓ Select · Enter Confirm · Esc Stay',
+])
+
+/**
+ * A contract-shaped Exit Choice Client: exactly the four members the helper
+ * uses. `waitForExit` settles only after the helper sent its one Enter, so a
+ * blind PASS from a painted string alone is impossible.
+ */
+function fakeExitClient({ frames, exitsOnSlash = false, exit = { code: 0, signal: null }, exitError = undefined }) {
+  const sends = []
+  let entered = false
+  let exited = false
+  return {
+    role: 'surface-client',
+    sends,
+    get exited() {
+      return exited
+    },
+    send(data) {
+      sends.push(data)
+      if (data === '/exit\r' && exitsOnSlash) exited = true
+      if (data === '\r') {
+        entered = true
+        exited = true
+      }
+    },
+    async viewport() {
+      return typeof frames === 'function' ? frames() : frames
+    },
+    async waitForExit() {
+      if (!entered && !exitsOnSlash) {
+        throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
+          code: 'PROCESS_EXIT_TIMEOUT',
+          waitLabel: 'process exit',
+          processRole: 'surface-client',
+          elapsedMs: 0,
+        })
+      }
+      if (exitError !== undefined) throw exitError
+      return exit
+    },
+  }
+}
+
+test('exitUpgradeClientKeepHost takes a proven idle direct exit without any Enter', async () => {
+  const client = fakeExitClient({ frames: [], exitsOnSlash: true })
+  const exit = await exitUpgradeClientKeepHost(client, 'idle Client', SHORT_WAIT_MS)
+  assert.deepEqual(exit, { code: 0, signal: null })
+  assert.deepEqual(client.sends, ['/exit\r'], 'an immediate exit never sends an extra key')
+})
+
+test('exitUpgradeClientKeepHost confirms the painted Busy safe default exactly once', async () => {
+  const client = fakeExitClient({ frames: BUSY_EXIT_FRAME })
+  const exit = await exitUpgradeClientKeepHost(client, 'busy Client', SHORT_WAIT_MS)
+  assert.deepEqual(exit, { code: 0, signal: null })
+  assert.deepEqual(client.sends, ['/exit\r', '\r'], 'only the one safe default Enter follows /exit')
+})
+
+test('exitUpgradeClientKeepHost reads the focused row from a composited transcript frame', async () => {
+  // The overlay compositor keeps the transcript cells OUTSIDE the frame on the
+  // same terminal row, so the title and the focused option never start at col 0.
+  const composited = BUSY_EXIT_FRAME.map(line => `left transcript cells              ${line} right transcript cells`)
+  const client = fakeExitClient({ frames: composited })
+  const exit = await exitUpgradeClientKeepHost(client, 'composited Client', SHORT_WAIT_MS)
+  assert.deepEqual(exit, { code: 0, signal: null })
+  assert.deepEqual(client.sends, ['/exit\r', '\r'])
+})
+
+test('exitUpgradeClientKeepHost finds the exit choice below an unrelated rounded card', async () => {
+  // The C1 qualification card is a real 100-wide rounded box above the choice
+  // in the U07 reexec frame; only the daemon choice box may drive the action.
+  const card = exitChoiceFrame([
+    'dsh-pi-tui  dsh-0.2.2-rc.5 · tui-v0.5.7',
+    'model    c1-qualification/c1',
+    'preset   standard',
+    'session  session-00000000-0000-0000-0000-000000000000',
+  ], 100)
+  const client = fakeExitClient({ frames: [...card, ...BUSY_EXIT_FRAME] })
+  const exit = await exitUpgradeClientKeepHost(client, 'card above Client', SHORT_WAIT_MS)
+  assert.deepEqual(exit, { code: 0, signal: null })
+  assert.deepEqual(client.sends, ['/exit\r', '\r'])
+})
+
+test('exitUpgradeClientKeepHost ignores exit-choice-shaped transcript outside the real box', async () => {
+  // A transcript row may repeat the title or a focused-looking option. Only the
+  // complete rounded overlay frame may decide the choice.
+  const client = fakeExitClient({ frames: [
+    'Exit dsh-pi-tui',
+    '> Stop current work and disconnect',
+    ...BUSY_EXIT_FRAME,
+  ] })
+  const exit = await exitUpgradeClientKeepHost(client, 'transcript noise Client', SHORT_WAIT_MS)
+  assert.deepEqual(exit, { code: 0, signal: null })
+  assert.deepEqual(client.sends, ['/exit\r', '\r'], 'the real box still carries the one safe default')
+})
+
+test('exitUpgradeClientKeepHost confirms the painted Unknown safe default exactly once', async () => {
+  const client = fakeExitClient({ frames: UNKNOWN_EXIT_FRAME })
+  const exit = await exitUpgradeClientKeepHost(client, 'unknown Client', SHORT_WAIT_MS)
+  assert.deepEqual(exit, { code: 0, signal: null })
+  assert.deepEqual(client.sends, ['/exit\r', '\r'], 'only the one safe default Enter follows /exit')
+})
+
+test('exitUpgradeClientKeepHost refuses to confirm a destructive or foreign choice', async () => {
+  const stopFocused = exitChoiceFrame([
+    'Disconnect from dsh-pi-tui',
+    '',
+    'The current session is still working.',
+    '',
+    '  Keep working and disconnect',
+    '> Stop current work and disconnect',
+    '  Stay in the TUI',
+    '',
+    '↑↓ Select · Enter Confirm · Esc Stay',
+  ])
+  for (const [label, frames] of [
+    ['Stop focused', stopFocused],
+    ['daemon Host stop', exitChoiceFrame([
+      'Exit this daemon Client · Backend preference is now Direct',
+      '',
+      '> Leave daemon Host running and exit',
+    ])],
+    ['Direct family', exitChoiceFrame(['Exit dsh-pi-tui'])],
+  ]) {
+    const client = fakeExitClient({ frames })
+    const error = await rejection(() => exitUpgradeClientKeepHost(client, label, SHORT_WAIT_MS))
+    assert.equal(error.name, 'SplitSmokeAssertionError', `${label} must fail as a real assertion`)
+    assert.ok(error.message.includes(label), `${label} must name its case`)
+    assert.deepEqual(client.sends, ['/exit\r'], `${label} must never send Enter or an escape`)
+  }
+})
+
+test('exitUpgradeClientKeepHost waits out a non-actionable choice and sends no key', async () => {
+  for (const [label, frames] of [
+    ['title only', exitChoiceFrame(['Disconnect from dsh-pi-tui'])],
+    ['unfocused safe label', exitChoiceFrame([
+      'Disconnect from dsh-pi-tui',
+      '',
+      '  Keep working and disconnect',
+      '  Stop current work and disconnect',
+    ])],
+    ['title in box, focus in transcript', [
+      ...exitChoiceFrame(['Disconnect from dsh-pi-tui']),
+      '> Keep working and disconnect',
+    ]],
+    ['misleading transcript', ['Disconnect from dsh-pi-tui', '> Keep working and disconnect']],
+    ['ordinary transcript', ['cross-build-hold', '  the command was /exit']],
+  ]) {
+    const started = Date.now()
+    const client = fakeExitClient({ frames })
+    const error = await rejection(() => exitUpgradeClientKeepHost(client, label, 150))
+    assert.equal(error.name, 'SplitSmokeAssertionError', `${label} must fail as a real assertion`)
+    assert.ok(error.message.includes('CHOICE_NOT_ACTIONABLE'), `${label} must report the actionable choice gap`)
+    assert.ok(error.message.includes(label), `${label} must name its case`)
+    assert.ok(Date.now() - started < 5_000, `${label} must stay inside its own budget`)
+    assert.deepEqual(client.sends, ['/exit\r'], `${label} must never guess an Enter`)
+  }
+})
+
+test('exitUpgradeClientKeepHost never treats a non-zero, signalled or timed-out exit as PASS', async () => {
+  for (const [label, options] of [
+    ['non-zero', { frames: BUSY_EXIT_FRAME, exit: { code: 1, signal: null } }],
+    ['signalled', { frames: BUSY_EXIT_FRAME, exit: { code: 0, signal: 'SIGTERM' } }],
+    ['timeout', {
+      frames: BUSY_EXIT_FRAME,
+      exitError: new SplitSmokeWaitError('WAIT_TIMEOUT', {
+        code: 'PROCESS_EXIT_TIMEOUT',
+        waitLabel: 'process exit',
+        processRole: 'surface-client',
+        elapsedMs: 0,
+      }),
+    }],
+  ]) {
+    const client = fakeExitClient(options)
+    const error = await rejection(() => exitUpgradeClientKeepHost(client, label, SHORT_WAIT_MS))
+    assert.equal(error.name, 'SplitSmokeAssertionError', `${label} must not PASS`)
+    assert.ok(error.message.includes(label), `${label} must name its case`)
+    assert.deepEqual(client.sends, ['/exit\r', '\r'], `${label} still sends the one safe Enter`)
+    if (label === 'timeout') {
+      assert.equal(error.cause?.code, 'PROCESS_EXIT_TIMEOUT', 'the real wait cause must survive')
+    }
+  }
+})
+
+test('a real process wait failure reports no terminal or record payload', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('split-smoke-wait-payload-')
+  const entry = join(dir, 'silent-exit.mjs')
+  writeFileSync(entry, 'process.exit(0)\n')
+  const probe = `
+    const { createSplitProcessScope } = await import(${JSON.stringify(pathToFileURL(PROCESSES_LIB).href)})
+    const scope = createSplitProcessScope()
+    const { EntryProcess, SurfaceEntryProcess } = scope
+    const options = {
+      cwd: ${JSON.stringify(dir)},
+      env: { ...process.env },
+      anchor: ${JSON.stringify(join(dir, 'anchor.json'))},
+      profile: 'pi-tui',
+      scratch: ${JSON.stringify(dir)},
+      workDir: ${JSON.stringify(dir)},
+      ...(process.platform === 'darwin' ? { darwinScope: scope.darwinScope } : {}),
+    }
+    const failures = []
+    const plain = new EntryProcess('probe-host', ${JSON.stringify(entry)}, options)
+    try { await plain.waitFor(record => record.m4a0 === 'ready', 'probe Host ready', 10_000) }
+    catch (error) { failures.push({ category: error.category, code: error.code, message: error.message }) }
+    const surface = new SurfaceEntryProcess(${JSON.stringify(entry)}, options)
+    try { await surface.waitForScreen('never painted', 'probe notice', 10_000) }
+    catch (error) { failures.push({ category: error.category, code: error.code, message: error.message }) }
+    await surface.dispose()
+    if (process.platform === 'darwin') await scope.darwinScope.stopServer()
+    process.stdout.write(JSON.stringify(failures))
+  `
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', probe], {
+    encoding: 'utf8',
+    timeout: 60_000,
+    cwd: dir,
+  })
+  assert.equal(result.status, 0, `the probe process failed:\n${result.stderr}`)
+  const failures = JSON.parse(result.stdout)
+  assert.equal(failures.length, 2, `both waiters must fail: ${result.stderr}`)
+  for (const failure of failures) {
+    assert.equal(failure.category, 'PROCESS_EXITED')
+    // The reported context is bounded; the bytes stay where they belong: the
+    // private JSONL under KEEP, never the default error line.
+    assert.ok(!/records=|stderr=|raw=|viewport=/u.test(failure.message),
+      `a waiter error must not carry a payload dump: ${failure.message}`)
+    assert.ok(failure.message.length < 300, `a waiter error must stay short: ${failure.message}`)
+  }
+  assert.match(failures[0].message, /probe Host ready/u)
+  assert.match(failures[1].message, /probe notice/u)
+})
+
+// ── The default output never carries foreign text ───────────────────────────
+
+test('the default final line is the fixed classification, never an Error.message', () => {
+  const foreign = new Error(`COOKIE_SENTINEL token=TOKEN_SENTINEL https://secret.invalid/mux `
+    + `at /home/operator/private/xmoon76-dsh-pi-tui-0.5.5.tgz records=[{"m4a0":"ready"}]`)
+  assert.equal(safeFailureSummary(foreign), 'INFRA_FAILURE')
+  assert.equal(safeFailureSummary(new Error('ASSERTION_FAILED: the Host did not publish the old buildId')), 'ASSERTION_FAILED')
+  assert.equal(safeFailureSummary(new SplitSmokeInputError('INPUT_DSH_PIN_MISMATCH', 'private text', { role: 'old' })),
+    'INPUT_UNQUALIFIED: INPUT_DSH_PIN_MISMATCH')
+  const wait = new SplitSmokeWaitError('UNEXPECTED_RELOAD_REFUSAL', {
+    code: 'PROCESS_REFUSED_RELOAD',
+    waitLabel: 'U08 already-current notice',
+    processRole: 'surface-client',
+    elapsedMs: 83,
+    expected: 'ALREADY_CURRENT',
+    observed: 'TARGET_INVALID_DSH_PIN_MISMATCH',
+  })
+  assert.equal(safeFailureSummary(wait), 'UNEXPECTED_RELOAD_REFUSAL: PROCESS_REFUSED_RELOAD')
+  // The real error object still carries its own message, and the report
+  // projection retains it; the summary line never does.
+  assert.match(foreign.message, /COOKIE_SENTINEL/u)
+  assert.match(projectFailureReport({ lane: 'split-upgrade', error: foreign }).error?.message ?? '', /COOKIE_SENTINEL/u)
+})
+
+test('a failure before the diagnostics collector still leaves one safe report', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('split-upgrade-preflight-failure-')
+  const evidence = join(dir, 'evidence.json')
+  const result = runLane(UPGRADE_SCRIPT, [
+    '--old', join(dir, 'missing-old.tgz'),
+    '--new', join(dir, 'missing-new.tgz'),
+    '--evidence', evidence,
+  ], dir)
+  assert.notEqual(result.status, 0)
+  assert.equal(result.signal, null, 'the lane must fail by itself inside the budget')
+  assert.match(result.stderr, /SPLIT_PROCESS_UPGRADE_SMOKE_FAILURE/u)
+  assert.match(result.stderr, /category: INFRA_FAILURE/u)
+  // The real caught error is part of the default output now: the FIRST missing
+  // artifact is named by the actual error instead of being hidden.
+  assert.ok(result.stderr.includes(join(dir, 'missing-old.tgz')),
+    `the real error must name the first missing artifact:\n${result.stderr}`)
+  assertNoLaneSetup(dir, 'dsh-split-upgrade-')
+  const report = JSON.parse(readFileSync(evidence, 'utf8'))
+  assert.equal(report.status, 'FAIL')
+  assert.equal(report.category, 'INFRA_FAILURE')
+  assert.equal(report.lane, 'split-upgrade')
+  assert.equal(report.artifacts, undefined, 'no artifact identity may be invented')
+  assert.equal(report.processes, undefined, 'no process may be invented')
+})
+
+test('an unreadable artifact reports the category and the real error', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('split-upgrade-unreadable-')
+  writeFileSync(join(dir, 'junk-old.tgz'), 'not a gzip stream at all\n')
+  const result = runLane(UPGRADE_SCRIPT, [
+    '--old', join(dir, 'junk-old.tgz'),
+    '--new', syntheticTarball(dir, 'new', manifestOf('0.5.5', TARGET_PIN)),
+  ], dir)
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /category: INFRA_FAILURE/u)
+  // The root cause is no longer hidden behind the fixed category: the real
+  // caught error text is printed by default.
+  assert.match(result.stderr, /SPLIT_PROCESS_UPGRADE_SMOKE_FAILURE: INFRA_FAILURE/u)
+  assert.match(result.stderr, /not a gzip stream at all|Error:/u)
+})
+
+test('the raw error is printed without KEEP and KEEP only preserves the scene', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('split-upgrade-forensics-')
+  const args = [
+    '--old', syntheticTarball(dir, 'old', manifestOf('0.5.5-old.1', OTHER_PIN)),
+    '--new', syntheticTarball(dir, 'new', manifestOf('0.5.5', TARGET_PIN)),
+  ]
+  const quiet = runLane(UPGRADE_SCRIPT, args, dir)
+  assert.notEqual(quiet.status, 0)
+  assert.match(quiet.stderr, /SPLIT_PROCESS_UPGRADE_SMOKE_FAILURE: INPUT_UNQUALIFIED/u)
+  // The real error name/message is part of the default output, not a KEEP-only
+  // forensic line.
+  assert.match(quiet.stderr, /SplitSmokeInputError/u)
+  assert.ok(!quiet.stderr.includes('FORENSICS'), `KEEP-only wording must be gone:\n${quiet.stderr}`)
+  const kept = spawnSync(process.execPath, [UPGRADE_SCRIPT, ...args], {
+    encoding: 'utf8',
+    timeout: 5_000,
+    env: { ...process.env, TMPDIR: dir, SPLIT_UPGRADE_KEEP: '1' },
+  })
+  assert.notEqual(kept.status, 0)
+  assert.match(kept.stderr, /SplitSmokeInputError/u)
+  assert.ok(kept.stderr.length >= quiet.stderr.length,
+    'KEEP may only add the preserved-scene information, never remove the error')
+})
+
+test('an existing --evidence file is replaced on a private inode, never rewritten in place', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('split-upgrade-evidence-mode-')
+  const evidence = join(dir, 'evidence.json')
+  writeFileSync(evidence, '{}\n')
+  chmodSync(evidence, 0o644)
+  assert.equal(statSync(evidence).mode & 0o777, 0o644, 'the fixture must start group/world readable')
+  const result = runLane(UPGRADE_SCRIPT, [
+    '--old', syntheticTarball(dir, 'old', manifestOf('0.5.5-old.1', OTHER_PIN)),
+    '--new', syntheticTarball(dir, 'new', manifestOf('0.5.5', TARGET_PIN)),
+    '--evidence', evidence,
+  ], dir)
+  assert.notEqual(result.status, 0)
+  assert.equal(statSync(evidence).mode & 0o777, 0o600, 'the FAIL twin must land private')
+  assert.equal(JSON.parse(readFileSync(evidence, 'utf8')).category, 'INPUT_UNQUALIFIED')
+  assert.deepEqual(readdirSync(dir).filter(name => name.includes('.tmp')), [], 'no temp file may survive')
+})
+
+test('one real lane failure leaves exactly one report and one evidence twin', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('split-smoke-report-count-')
+  const evidence = join(dir, 'evidence.json')
+  const result = runLane(UPGRADE_SCRIPT, [
+    '--old', syntheticTarball(dir, 'old', manifestOf('0.5.5-old.1', OTHER_PIN)),
+    '--new', syntheticTarball(dir, 'new', manifestOf('0.5.5', TARGET_PIN)),
+    '--evidence', evidence,
+  ], dir)
+  assert.notEqual(result.status, 0)
+  const reports = readdirSync(dir, { withFileTypes: true })
+    .filter(entry => entry.isDirectory() && entry.name.startsWith('dsh-pi-tui-smoke-failure-'))
+  assert.equal(reports.length, 1, `one failure must leave one report directory: ${String(reports.length)}`)
+  const reportPath = join(dir, reports[0].name, 'failure.json')
+  assert.deepEqual(
+    readdirSync(join(dir, reports[0].name)),
+    ['failure.json'],
+    'the private report directory holds the report and nothing else',
+  )
+  // The twin is a real second file on the operator's path with the same fields.
+  const report = JSON.parse(readFileSync(reportPath, 'utf8'))
+  assert.deepEqual(JSON.parse(readFileSync(evidence, 'utf8')), report)
+  assert.notEqual(realpathSync(evidence), realpathSync(reportPath),
+    'the twin must live on the operator path, not inside the report directory')
+  assert.equal(readdirSync(dir).filter(name => name.includes('.tmp')).length, 0, 'no temp file may survive')
+})
+
+test('an unknown error code is never reported, and never changes the category', () => {
+  const foreign = Object.assign(new Error('a parser or library message'), {
+    code: 'COOKIE_SENTINEL https://secret.invalid/x TOKEN_SENTINEL',
+  })
+  assert.equal(safeFailureSummary(foreign), 'INFRA_FAILURE')
+  const report = projectFailureReport({ lane: 'split-upgrade', category: 'INFRA_FAILURE', reason: foreign.code })
+  assert.equal(report.reason, undefined, 'an unknown code must not become reported text')
+  assert.equal(projectFailureReport({ lane: 'split-upgrade', reason: 'MADE_UP_REASON' }).reason, undefined)
+  // Declared codes survive, and every code the lanes actually use is declared.
+  assert.equal(safeFailureSummary(Object.assign(new Error('x'), { code: 'FRAME_WAIT_TIMEOUT' })),
+    'INFRA_FAILURE: FRAME_WAIT_TIMEOUT')
+  // Every code the lanes can raise must be declared, or it silently disappears
+  // from the report. Each scan targets an actual RAISE site shape, and the same
+  // scan collects the raised set used by the reverse check below.
+  const declared = new Set(LANE_ERROR_CODES)
+  const raised = new Set()
+  for (const [name, source] of [
+    ['split-process', readFileSync(PROCESS_SCRIPT, 'utf8')],
+    ['split-upgrade', readFileSync(UPGRADE_SCRIPT, 'utf8')],
+    ['split-upgrade-support', readFileSync(UPGRADE_SUPPORT, 'utf8')],
+    ['split-upgrade-selection', readFileSync(UPGRADE_SELECTION, 'utf8')],
+    ['cross-build-compatibility', readFileSync(CROSS_BUILD_SCRIPT, 'utf8')],
+    ['manual-client-reload', readFileSync(MANUAL_RELOAD_SCRIPT, 'utf8')],
+    ['reload-source-isolation', readFileSync(SOURCE_ISOLATION_SCRIPT, 'utf8')],
+    ['the shared module', readFileSync(LIB, 'utf8')],
+    ['split-smoke-processes', readFileSync(PROCESSES_LIB, 'utf8')],
+    ['split-smoke-sessions', readFileSync(SESSIONS_LIB, 'utf8')],
+    ['split-smoke-fixtures', readFileSync(FIXTURES_LIB, 'utf8')],
+    ['split-smoke-profile', readFileSync(PROFILE_LIB, 'utf8')],
+    ['split-smoke-selection', readFileSync(SELECTION_LIB, 'utf8')],
+    ['host-runtime-disabled', readFileSync(CASE_SCRIPT, 'utf8')],
+    ['entry-admission', readFileSync(ENTRY_ADMISSION_SCRIPT, 'utf8')],
+    ['runtime-artifact-recovery', readFileSync(RECOVERY_SCRIPT, 'utf8')],
+    ['authenticated-lifecycle', readFileSync(TRANSPORT_SCRIPT, 'utf8')],
+    ['pty-session-write-recovery', readFileSync(PTY_SCRIPT, 'utf8')],
+    ['c1-scene', readFileSync(C1_SCENE_SCRIPT, 'utf8')],
+    ['shared-session-interactions', readFileSync(SHARED_SESSION_SCRIPT, 'utf8')],
+    ['non-destructive-client-lifecycle', readFileSync(NAVIGATION_SCRIPT, 'utf8')],
+    ['detached-turn-interactions', readFileSync(DETACHED_SCRIPT, 'utf8')],
+    ['client-hmr-signals', readFileSync(HMR_SCRIPT, 'utf8')],
+    ['unknown-write-host-death', readFileSync(UNKNOWN_WRITE_SCRIPT, 'utf8')],
+    ['web-helpers', readFileSync(WEB_HELPERS_SCRIPT, 'utf8')],
+    ['official-web-composition', readFileSync(OFFICIAL_WEB_SCRIPT, 'utf8')],
+    ['web-runtime-toggle', readFileSync(WEB_TOGGLE_SCRIPT, 'utf8')],
+    ['web-startup-preference', readFileSync(WEB_PREF_SCRIPT, 'utf8')],
+    ['web-product', readFileSync(WEB_PRODUCT_SCRIPT, 'utf8')],
+  ]) {
+    // A waiter failure site: fail('<category>', '<code>') or, where the read must
+    // happen first, settleOrFail('<category>', '<code>').
+    for (const match of source.matchAll(/\b(?:fail|settleOrFail)\(\s*'([A-Z_]+)'\s*,\s*'([A-Z0-9_]+)'/gu)) {
+      assert.ok(FAILURE_CATEGORIES.includes(match[1]), `${name} raises an undeclared category: ${match[1]}`)
+      assert.ok(declared.has(match[2]), `${name} raises an undeclared code: ${match[2]}`)
+      raised.add(match[2])
+    }
+    // A direct waiter construction: the facts object names its code beside its label.
+    for (const match of source.matchAll(/code: '([A-Z0-9_]+)',\s*\n\s*waitLabel:/gu)) {
+      assert.ok(declared.has(match[1]), `${name} reports an undeclared code: ${match[1]}`)
+      raised.add(match[1])
+    }
+    // The input guard's own constructor call.
+    for (const match of source.matchAll(/new SplitSmokeInputError\(\s*'([A-Z0-9_]+)'/gu)) {
+      assert.ok(declared.has(match[1]), `${name} throws an undeclared input code: ${match[1]}`)
+      raised.add(match[1])
+    }
+    // A thrown classified object: category and code are set together.
+    for (const match of source.matchAll(/category: '([A-Z_]+)',\s*\n?\s*code: '([A-Z0-9_]+)'/gu)) {
+      assert.ok(FAILURE_CATEGORIES.includes(match[1]), `${name} throws an undeclared category: ${match[1]}`)
+      assert.ok(declared.has(match[2]), `${name} throws an undeclared code: ${match[2]}`)
+      raised.add(match[2])
+    }
+  }
+  // The other direction, over the SAME collected raise sites: a declared code
+  // with no raise site is dead vocabulary. The declaration list itself is never
+  // accepted as evidence that anything raises a code.
+  assert.deepEqual(
+    LANE_ERROR_CODES.filter(code => !raised.has(code)),
+    [],
+    'every declared code must have a scanned raise site',
+  )
+})
+
+test('a PASS that cannot land its requested evidence document fails instead', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('split-upgrade-evidence-unwritable-')
+  const readOnly = join(dir, 'read-only')
+  mkdirSync(readOnly, { mode: 0o500 })
+  try {
+    const stderr = captureStderr(() => assert.throws(
+      () => writeRequestedEvidence(join(readOnly, 'evidence.json'), { status: 'PASS' }),
+      error => error.category === 'INFRA_FAILURE' && error.code === 'EVIDENCE_WRITE_FAILED',
+    ))
+    assert.match(stderr, /DIAGNOSTIC_WRITE_FAILURE/u, 'the write failure is still announced')
+    assert.ok(!stderr.includes(readOnly), `the path must not be echoed:\n${stderr}`)
+  } finally {
+    chmodSync(readOnly, 0o700)
+  }
+})
+
+// ── Round 8: the reviewer's four P2 findings ────────────────────────────────
+
+test('an event value outside the official names is omitted, never truncated into the report', () => {
+  const report = projectFailureReport({
+    lane: 'split-process',
+    category: 'ASSERTION_FAILED',
+    processes: [{
+      role: 'host',
+      exited: false,
+      records: [
+        { m4a0: 'COOKIE_SENTINEL', m4r: 'https://secret.invalid/x', m4b2s: 'TOKEN_SENTINEL' },
+        { m4a0: 'ready', m4r: 'handoff-request-rejected', m4b2s: 'surface-status' },
+      ],
+    }],
+  })
+  const text = JSON.stringify(report)
+  for (const sentinel of ['COOKIE_SENTINEL', 'TOKEN_SENTINEL', 'secret.invalid']) {
+    assert.ok(!text.includes(sentinel), `an unknown event value must never be reported: ${sentinel}`)
+  }
+  assert.deepEqual(report.processes[0].events, [
+    { m4a0: 'ready', m4r: 'handoff-request-rejected', m4b2s: 'surface-status' },
+  ], 'official names survive; the record carrying only unknown names is dropped')
+  // The same rule holds on stderr, not only in the JSON.
+  const written = writeFailureReport(report)
+  const stderr = captureStderr(() => {
+    process.stderr.write(`${formatFailureSummary(report, written)}\n`)
+  })
+  assert.ok(!/SENTINEL|secret\.invalid/u.test(stderr), `stderr leaked an event value:\n${stderr}`)
+  rmSync(dirname(written), { recursive: true, force: true })
+})
+
+test('a reexec is attributed to the NEWEST Client identity in the same record stream', () => {
+  const stream = [
+    { m4a0: 'ready', pid: 1000 },
+    { m4a0: 'client-started', pid: 2000 },
+  ]
+  const beforeReplacementReady = projectFailureReport({
+    processes: [{ role: 'surface-client', exited: false, records: stream }],
+  })
+  assert.equal(beforeReplacementReady.processes[0].pid, 2000,
+    'the replacement Client is named as soon as it starts; the handed-off PID is not')
+  const afterReplacementReady = projectFailureReport({
+    processes: [{ role: 'surface-client', exited: false, records: [...stream, { m4a0: 'ready', pid: 2000 }] }],
+  })
+  assert.equal(afterReplacementReady.processes[0].pid, 2000)
+  const noReexec = projectFailureReport({
+    processes: [{ role: 'surface-client', exited: false, records: [{ m4a0: 'ready', pid: 1000 }, { m4a0: 'status' }] }],
+  })
+  assert.equal(noReexec.processes[0].pid, 1000, 'a single-Client stream still reports its own PID')
+})
+
+/** This test file as the trusted source set, so the locator mechanism is observable here. */
+const SELF_SOURCE = new Set(['split-smoke-diagnostics.test.mjs'])
+
+/** Shaped exactly like a lane's assert helper chain. */
+function laneAssert(condition, message, sources) {
+  if (!condition) throw new SplitSmokeAssertionError(message, { sources })
+}
+function laneAssertEqual(actual, expected, message, sources) {
+  laneAssert(actual === expected, message ?? `expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`, sources)
+}
+
+test('an assertion failure is locatable without quoting its message', () => {
+  const error = (() => {
+    try {
+      laneAssertEqual(1, 2, 'COOKIE_SENTINEL host role mismatch https://secret.invalid/x', SELF_SOURCE)
+    } catch (caught) {
+      return caught
+    }
+    return assert.fail('the assertion must fail')
+  })()
+  assert.equal(error.category, 'ASSERTION_FAILED')
+  // The site is this call's line, not the helper frames above it.
+  assert.match(String(error.assertion), /^split-smoke-diagnostics\.test\.mjs:\d+$/u)
+  const reportedLine = Number(error.assertion.split(':')[1])
+  assert.ok(reportedLine > 0 && reportedLine <= readFileSync(import.meta.filename, 'utf8').split('\n').length)
+  // The extractor proved the mechanism above; the PUBLISHED report only accepts
+  // a locator from a trusted lane source, so the reporting half uses one.
+  const published = 'split-process-smoke.mjs:4321'
+  const report = projectFailureReport({ lane: 'split-process', category: error.category, assertion: published })
+  assert.equal(report.assertion, published, 'the report keeps a trusted locator')
+  const stderr = captureStderr(() => {
+    process.stderr.write(`${formatFailureSummary(report, '/tmp/none')}\n`)
+    process.stderr.write(`SPLIT_PROCESS_SMOKE_FAILURE: ${safeFailureSummary(Object.assign(
+      new SplitSmokeAssertionError('x'), { assertion: published },
+    ))}\n`)
+  })
+  assert.match(stderr, /assertion: split-process-smoke\.mjs:4321/u)
+  assert.match(stderr, /ASSERTION_FAILED at split-process-smoke\.mjs:4321/u)
+  // Locating the check must not smuggle the assertion text back into the output.
+  for (const sentinel of ['COOKIE_SENTINEL', 'secret.invalid', 'host role mismatch']) {
+    assert.ok(!stderr.includes(sentinel), `the default output leaked the assertion text: ${sentinel}`)
+  }
+})
+
+test('a registry-aliased scenario assertion still reports the scenario location', (t) => {
+  const dir = testLifecycle(t).tempDir('split-smoke-alias-locator-')
+  writeFileSync(join(dir, 'detached-turn-interactions.mjs'), `
+    import { SplitSmokeAssertionError } from ${JSON.stringify(pathToFileURL(LIB).href)}
+    function assert(condition, message) {
+      if (!condition) throw new SplitSmokeAssertionError(message)
+    }
+    export async function runDetachedTurnInteractions() {
+      await Promise.resolve()
+      assert(false, 'maintenance did not leave the Host UNKNOWN')
+    }
+  `)
+  writeFileSync(join(dir, 'split-process-smoke.mjs'), `
+    import { runDetachedTurnInteractions } from './detached-turn-interactions.mjs'
+    const cases = [{ run: runDetachedTurnInteractions }]
+    let caught
+    for (const registeredCase of cases) {
+      try {
+        await registeredCase.run()
+      } catch (error) {
+        caught = error
+        break
+      }
+    }
+    process.stdout.write(JSON.stringify({ assertion: caught.assertion }))
+  `)
+  const result = spawnSync(process.execPath, [join(dir, 'split-process-smoke.mjs')], {
+    encoding: 'utf8',
+    timeout: 20_000,
+  })
+  assert.equal(result.status, 0, `the alias probe must run: ${result.stderr}`)
+  const { assertion } = JSON.parse(result.stdout)
+  // The registry stores the case as `run: runDetachedTurnInteractions`, so V8
+  // renders the frame with an `[as run]` alias. That frame is the REAL
+  // assertion site; the async caller frame (the registry loop) must never win.
+  assert.match(String(assertion), /^detached-turn-interactions\.mjs:\d+$/u,
+    `the aliased scenario frame must become the locator, got ${String(assertion)}`)
+  assert.ok(!String(assertion).startsWith('split-process-smoke.mjs:'),
+    'the async registry caller line must not be reported as the assertion')
+})
+
+test('the locator trusts only the lane sources and fails closed otherwise', () => {
+  const attempt = (sources) => {
+    try {
+      laneAssert(false, 'a plain check', sources)
+    } catch (caught) {
+      return caught
+    }
+    return assert.fail('the assertion must fail')
+  }
+  // Default trust set = the lane entries plus the extracted support files that
+  // raise their OWN locatable assertions; this test file is NOT one of them.
+  assert.equal(attempt(undefined).assertion, undefined,
+    'a frame outside the trusted lane sources must not become a locator')
+  // The boundary that matters is trusted lane sources vs everything else; this
+  // is not a frozen roster snapshot, so adding a lane source does not require
+  // editing the test.
+  for (const trusted of ['split-process-smoke.mjs', 'split-process-upgrade-smoke.mjs',
+    'host-runtime-disabled.mjs', 'split-smoke-processes.mjs', 'web-product.mjs']) {
+    assert.equal(isLaneSourceFile(trusted), true, `${trusted} must stay trusted`)
+  }
+  for (const untrusted of ['foreign-driver.mjs', 'split-smoke-sessions.mjs',
+    'split-smoke-diagnostics.test.mjs']) {
+    assert.equal(isLaneSourceFile(untrusted), false, `${untrusted} must not be trusted`)
+  }
+  // The default trust set is data, not a Set a caller can widen.
+  assert.ok(Object.isFrozen(LANE_SOURCE_FILES), 'the exported list must be frozen')
+  assert.equal(typeof LANE_SOURCE_FILES.add, 'undefined', 'there must be no mutator to widen the trust set')
+  // Every real trusted source is trusted by its own basename.
+  for (const lane of LANE_SOURCE_FILES) {
+    assert.ok(isLaneSourceFile(basename(lane)))
+  }
+  // An empty trust set and a trust set naming something else both fail closed.
+  assert.equal(attempt(new Set()).assertion, undefined)
+  assert.equal(attempt(new Set(['some-other-script.mjs'])).assertion, undefined)
+  // Called straight from a trusted file, the REAL caller line wins — and it is
+  // the helper functions' own lines that never become the site.
+  const direct = laneAssertionSite(undefined, SELF_SOURCE)
+  assert.match(String(direct), /^split-smoke-diagnostics\.test\.mjs:\d+$/u,
+    'a direct call from a trusted file resolves to the caller')
+  const helperLines = [...readFileSync(import.meta.filename, 'utf8').matchAll(/^function laneAssert(?:Equal)?\(/gmu)]
+    .map(match => readFileSync(import.meta.filename, 'utf8').slice(0, match.index).split('\n').length)
+  assert.ok(!helperLines.includes(Number(String(direct).split(':')[1])),
+    'a helper frame must never be reported as the assertion site')
+})
+
+test('a forged or unusable frame never becomes a locator', () => {
+  // The locator is derived from the REAL stack, so a forged `at …` line in the
+  // message must not influence it.
+  const forged = (() => {
+    try {
+      laneAssert(false, 'at assert (split-process-smoke.mjs:999:1)', SELF_SOURCE)
+    } catch (caught) {
+      return caught
+    }
+    return assert.fail('the assertion must fail')
+  })()
+  assert.match(String(forged.assertion), /^split-smoke-diagnostics\.test\.mjs:\d+$/u,
+    'the site comes from the stack, never from the message')
+  assert.ok(!String(forged.assertion).includes(':999:'), 'a message-supplied line must not be adopted')
+  // An unusable shape is rejected by the report projection as well.
+  for (const bad of [
+    'process.cwd()',                                   // no basename shape
+    '/abs/path/scripts/split-process-smoke.mjs:12',    // absolute path
+    'C:\\Users\\me\\lane.mjs:12',                    // Windows path
+    'split-process-smoke.mjs:0',                       // invalid line
+    'split-process-smoke.mjs:12:3',                    // frame, not a site
+    '%73plit-process-smoke.mjs:12',                    // encoded
+    'split-process-smoke.mjs:'.padEnd(90, '9'),        // over-long
+  ]) {
+    assert.equal(projectFailureReport({ lane: 'split-process', assertion: bad }).assertion, undefined,
+      `the projection must refuse ${JSON.stringify(bad)}`)
+  }
+})
+
+test('the report only accepts a locator from a trusted lane source', (t) => {
+  // `reportFailure` writes a report under TMPDIR; keep it in this test's root.
+  const privateTmp = testLifecycle(t).tempDir('split-smoke-locator-')
+  const previousTmp = process.env.TMPDIR
+  process.env.TMPDIR = privateTmp
+  t.after(() => {
+    if (previousTmp === undefined) delete process.env.TMPDIR
+    else process.env.TMPDIR = previousTmp
+  })
+  // A real lane file is accepted (shape + source).
+  assert.equal(projectFailureReport({ lane: 'split-process', assertion: 'split-process-smoke.mjs:12' }).assertion,
+    'split-process-smoke.mjs:12')
+  assert.equal(projectFailureReport({ lane: 'split-upgrade', assertion: 'split-process-upgrade-smoke.mjs:99' }).assertion,
+    'split-process-upgrade-smoke.mjs:99')
+  // The extracted scenario and its support modules are trusted by their own
+  // basenames, exactly as their real assertions expect.
+  for (const trusted of ['host-runtime-disabled.mjs:31', 'split-smoke-processes.mjs:312',
+    'split-smoke-fixtures.mjs:93', 'split-smoke-profile.mjs:64']) {
+    assert.equal(projectFailureReport({ lane: 'split-process', assertion: trusted }).assertion, trusted)
+  }
+  // A well-shaped locator naming anything else is refused by the PROJECTION,
+  // not only by the stack extractor: an error that merely carries an
+  // `assertion` property must not smuggle a foreign file into the report.
+  for (const foreign of ['foreign.mjs:123', 'foreign-driver.mjs:5',
+    'split-smoke-diagnostics.test.mjs:7', 'another-lane.mjs:1', 'split-smoke-sessions.mjs:8']) {
+    assert.equal(projectFailureReport({ lane: 'split-process', assertion: foreign }).assertion, undefined,
+      `the projection must refuse ${foreign}`)
+  }
+  // And the summary line respects the same rule.
+  assert.ok(!safeFailureSummary(Object.assign(new Error('x'), {
+    category: 'ASSERTION_FAILED', assertion: 'foreign.mjs:123',
+  })).includes('foreign.mjs'))
+  // Production reporting ignores an `.assertion` property unless the locator was
+  // derived by the assertion class itself.
+  const forged = Object.assign(new Error('forged'), { category: 'ASSERTION_FAILED', assertion: 'split-process-smoke.mjs:42' })
+  const diagnostics = createSmokeDiagnostics({ lane: 'split-process', heading: 'SPLIT_PROCESS_SMOKE', marker: 'T' })
+  const report = diagnostics.reportFailure(forged)
+  assert.equal(report.assertion, undefined, 'an arbitrary error may not contribute a locator')
+})
+
+test('a real assertion in the selected scenario reports its trusted source location without payload', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('split-smoke-case-assertion-')
+  const error = await (async () => {
+    try {
+      await runHostRuntimeDisabled({
+        EntryProcess: class {
+          constructor() { throw new Error('the scenario must prove the artifact before it spawns a Host') }
+        },
+        entries: { host: join(dir, 'local-host.mjs') },
+        base: {},
+        workDir: dir,
+        dshHome: join(dir, 'dsh-home'),
+        profilePackage: join(dir, 'missing-profile'),
+        failpoint: () => {},
+      })
+    } catch (caught) {
+      return caught
+    }
+    assert.fail('the scenario must fail on the missing Host Runtime artifact')
+  })()
+  assert.equal(error.category, 'ASSERTION_FAILED')
+  assert.match(String(error.assertion), /^host-runtime-disabled\.mjs:\d+$/u,
+    'the locator must name the real case file')
+  const summary = safeFailureSummary(error)
+  assert.match(summary, /^ASSERTION_FAILED at host-runtime-disabled\.mjs:\d+$/u)
+  const published = projectFailureReport({ lane: 'split-process', category: error.category, assertion: error.assertion })
+  assert.equal(published.assertion, error.assertion, 'the trusted site survives the projection')
+  // The payload stays out of the default output; only the locator travels.
+  const text = `${JSON.stringify(published)}${summary}`
+  for (const sentinel of ['missing-profile', 'Host Runtime artifact', 'must prove the artifact']) {
+    assert.ok(!text.includes(sentinel), `the default projection must not carry the assertion text: ${sentinel}`)
+  }
+})
+
+test('the raw assertion property has exactly ONE reader in the shared module', () => {
+  // The producer rule has been missed at three output paths (collector,
+  // pre-collector, summary). The containment is structural: `publishedAssertionOf`
+  // is the only reader of an error's `assertion`, and every consumer goes through
+  // it. Parsed with the TypeScript AST so alias, destructure and bracket forms are
+  // covered, not just `error.assertion`.
+  const source = readFileSync(LIB, 'utf8')
+  const file = ts.createSourceFile('diagnostics.mjs', source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.JS)
+  const insideReader = (node) => {
+    // Ascend to the nearest function declaration; the reader is the only allowed owner.
+    for (let cursor = node.parent; cursor !== undefined; cursor = cursor.parent) {
+      if (ts.isFunctionDeclaration(cursor) && cursor.name?.text === 'publishedAssertionOf') return true
+    }
+    return false
+  }
+  /** A consumer of an ALREADY-VALIDATED site, not a read of a raw error property. */
+  const isSafeObject = (node) => node.kind === ts.SyntaxKind.ThisKeyword
+    || (ts.isIdentifier(node) && ['report', 'input', 'extra'].includes(node.text))
+  /** A WRITE defines the property; only reads can leak a forged value. */
+  const isAssignmentTarget = (node) => ts.isBinaryExpression(node.parent)
+    && node.parent.left === node
+    && node.parent.operatorToken.kind === ts.SyntaxKind.EqualsToken
+  const offenders = []
+  const visit = (node) => {
+    if (insideReader(node)) return
+    // error.assertion
+    if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.name) && node.name.text === 'assertion'
+      && !isSafeObject(node.expression) && !isAssignmentTarget(node)) {
+      offenders.push(`dot access at ${String(file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1)}`)
+    }
+    // error['assertion'] / error["assertion"]
+    if (ts.isElementAccessExpression(node) && ts.isStringLiteralLike(node.argumentExpression)
+      && node.argumentExpression.text === 'assertion') {
+      offenders.push(`bracket access at ${String(file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1)}`)
+    }
+    // const { assertion } = error / const { assertion: site } = error
+    if (ts.isObjectBindingPattern(node)) {
+      for (const element of node.elements) {
+        const name = element.propertyName ?? element.name
+        if (ts.isIdentifier(name) && name.text === 'assertion') {
+          offenders.push(`destructure at ${String(file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1)}`)
+        }
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(file)
+  assert.deepEqual(offenders, [],
+    `every assertion read must go through publishedAssertionOf; found: ${offenders.join(', ')}`)
+  // The reader itself must still exist, or the check above is trivially satisfied.
+  assert.match(source, /function publishedAssertionOf\(error\) \{/u)
+})
+
+test('a forged locator on a plain error never reaches the summary or the report', (t) => {
+  const privateTmp = testLifecycle(t).tempDir('split-smoke-forged-')
+  const previousTmp = process.env.TMPDIR
+  process.env.TMPDIR = privateTmp
+  t.after(() => {
+    if (previousTmp === undefined) delete process.env.TMPDIR
+    else process.env.TMPDIR = previousTmp
+  })
+  // A TRUSTED-LOOKING site: the shape AND the source are legitimate, so only the
+  // producer rule can reject it. The earlier case used a foreign filename, which
+  // the projection already refused — that proved the wrong thing.
+  const forged = Object.assign(new Error('forged'), {
+    category: 'ASSERTION_FAILED',
+    assertion: 'split-process-smoke.mjs:42',
+  })
+  assert.equal(safeFailureSummary(forged), 'ASSERTION_FAILED', 'the summary must not carry the site')
+  assert.ok(!safeFailureSummary(forged).includes('split-process-smoke.mjs:42'))
+  const reported = projectFailureReport({ lane: 'split-process', category: 'ASSERTION_FAILED' })
+  assert.equal(reported.assertion, undefined)
+  const diagnostics = createSmokeDiagnostics({ lane: 'split-process', heading: 'SPLIT_PROCESS_SMOKE', marker: 'T' })
+  assert.equal(diagnostics.reportFailure(forged).assertion, undefined)
+  const stderr = captureStderr(() => {
+    const report = emitInputFailure({ lane: 'split-process', heading: 'SPLIT_PROCESS_SMOKE', error: forged })
+    assert.equal(report.assertion, undefined, 'the pre-collector path must refuse it too')
+    process.stderr.write(`SPLIT_PROCESS_SMOKE_FAILURE: ${safeFailureSummary(forged)}\n`)
+  })
+  assert.ok(!stderr.includes('split-process-smoke.mjs:42'), `a forged trusted-looking site leaked:\n${stderr}`)
+  // The genuine class still publishes everywhere.
+  const genuine = Object.assign(new SplitSmokeAssertionError('x'), { assertion: 'split-process-smoke.mjs:4321' })
+  assert.equal(safeFailureSummary(genuine), 'ASSERTION_FAILED at split-process-smoke.mjs:4321')
+})
+
+test('a pre-collector failure cannot publish a forged assertion locator', (t) => {
+  // The report is written under TMPDIR; keep this test's artifacts in its own root.
+  const privateTmp = testLifecycle(t).tempDir('split-smoke-precollector-')
+  const previousTmp = process.env.TMPDIR
+  process.env.TMPDIR = privateTmp
+  t.after(() => {
+    if (previousTmp === undefined) delete process.env.TMPDIR
+    else process.env.TMPDIR = previousTmp
+  })
+  // Same producer rule as the collector, on the path used when the failure
+  // happens before the diagnostics object exists.
+  const forged = Object.assign(new Error('forged pre-collector failure'), {
+    category: 'INFRA_FAILURE',
+    assertion: 'split-process-smoke.mjs:42',
+  })
+  const stderr = captureStderr(() => {
+    const report = emitInputFailure({ lane: 'split-process', heading: 'SPLIT_PROCESS_SMOKE', error: forged })
+    assert.equal(report.assertion, undefined, 'a plain error may not contribute a locator')
+    assert.ok(!JSON.stringify(report).includes('split-process-smoke.mjs:42'))
+  })
+  assert.ok(!stderr.includes('split-process-smoke.mjs:42'), `the summary leaked the forged site:\n${stderr}`)
+  // The real class still publishes on that path.
+  const genuine = new SplitSmokeAssertionError('a real pre-collector assertion')
+  if (genuine.assertion === undefined) return // not a lane source: nothing to publish
+  const report = emitInputFailure({ lane: 'split-process', heading: 'SPLIT_PROCESS_SMOKE', error: genuine })
+  assert.equal(report.assertion, genuine.assertion)
+})
+
+test('a real upgrade support helper assertion publishes a trusted site without its payload', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('split-upgrade-helper-assertion-')
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ dependencies: {} }))
+  let error
+  try {
+    assertProfileClientPeers(dir, TARGET_PIN, 'UPGRADE_HELPER_SENTINEL')
+  } catch (caught) {
+    error = caught
+  }
+  assert.equal(error?.category, 'ASSERTION_FAILED')
+  assert.match(String(error.assertion), /^split-upgrade-support\.mjs:\d+$/u)
+  assert.ok(!safeFailureSummary(error).includes('UPGRADE_HELPER_SENTINEL'))
+})
+
+test('a setup failure is reported and leaves no half-created scene behind', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('split-smoke-setup-failure-')
+  const source = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
+  // A candidate that PASSES the pin preflight, so the failure lands in setup.
+  const candidate = syntheticTarball(dir, 'candidate', manifestOf(source.version, TARGET_PIN))
+  const locked = join(dir, 'locked-tmp')
+  mkdirSync(locked, { mode: 0o500 })
+  const started = Date.now()
+  let result
+  let selected
+  try {
+    result = spawnSync(process.execPath, [PROCESS_SCRIPT, candidate], {
+      encoding: 'utf8', timeout: 10_000,
+      env: { ...process.env, TMPDIR: locked, ...(process.platform === 'linux' ? {} : { SPLIT_PROCESS_TEST_PLATFORM: 'linux' }) },
+    })
+    // The selected entry reaches the same setup boundary (after its own
+    // qualified preflight) and must clean up exactly the same way.
+    selected = spawnSync(process.execPath, [PROCESS_SCRIPT, candidate, '--case', 'bootstrap.host-runtime-disabled'], {
+      encoding: 'utf8', timeout: 10_000,
+      env: { ...process.env, TMPDIR: locked, ...(process.platform === 'linux' ? {} : { SPLIT_PROCESS_TEST_PLATFORM: 'linux' }) },
+    })
+  } finally {
+    chmodSync(locked, 0o700)
+  }
+  assert.equal(result.signal, null, `the lane must fail by itself: ${result.error?.message}`)
+  assert.notEqual(result.status, 0)
+  assert.ok(Date.now() - started < 10_000)
+  // The report write also cannot land, and that is announced as an errno only —
+  // the failure itself never turns into silence or into a payload dump.
+  assert.match(result.stderr, /SPLIT_PROCESS_SMOKE_FAILURE\n/u, `the fixed block must print:\n${result.stderr}`)
+  assert.match(result.stderr, /category: INFRA_FAILURE/u)
+  assert.match(result.stderr, /DIAGNOSTIC_WRITE_FAILURE: E[A-Z]+/u)
+  assert.match(result.stderr, /SPLIT_PROCESS_SMOKE_FAILURE: INFRA_FAILURE$/mu)
+  // The report could not be written, but the REAL caught error is still part of
+  // the default output; only the errno vocabulary is used for the write failure
+  // announcement itself.
+  assert.match(result.stderr, /Error: EACCES/u)
+  assert.deepEqual(readdirSync(locked), [], 'no work root may survive the setup failure')
+  assert.equal(selected.signal, null, `the selected lane must fail by itself: ${selected.error?.message}`)
+  assert.notEqual(selected.status, 0)
+  assert.match(selected.stderr, /SPLIT_PROCESS_SMOKE_FAILURE\n/u)
+  assert.match(selected.stderr, /category: INFRA_FAILURE/u)
+  assert.match(selected.stderr, /DIAGNOSTIC_WRITE_FAILURE: E[A-Z]+/u)
+  assert.match(selected.stderr, /SPLIT_PROCESS_SMOKE_FAILURE: INFRA_FAILURE$/mu)
+  assert.match(selected.stderr, /Error: EACCES/u)
+  assert.deepEqual(readdirSync(locked), [], 'no work root may survive the selected setup failure')
+})
+
+// ── Round 12: every bounded wait must classify itself ───────────────────────
+
+test('the fixture and session waits classify their timeout instead of INFRA_FAILURE', async (t) => {
+  // An empty work root: the wait can only time out, which is the point.
+  const life = testLifecycle(t)
+  const empty = life.tempDir('split-smoke-wait-')
+  mkdirSync(empty, { recursive: true })
+  const workProof = await rejection(() => waitForC1WorkEvent(empty, () => false, 'a fixture proof', 120))
+  assert.equal(workProof.category, 'WAIT_TIMEOUT')
+  assert.equal(workProof.code, 'WORK_PROOF_WAIT_TIMEOUT')
+  assert.equal(workProof.waitLabel, 'a fixture proof')
+  assert.ok(workProof.elapsedMs >= 120, `the timeout reports the real elapsed time, got ${String(workProof.elapsedMs)}`)
+  assert.ok(workProof.elapsedMs < 5_000, 'and not an unrelated budget')
+  const session = await rejection(() => waitForHostSessionEvent(empty, 'session-x', () => false, 'a Session event', 120))
+  assert.equal(session.category, 'WAIT_TIMEOUT')
+  assert.equal(session.code, 'SESSION_EVENT_WAIT_TIMEOUT')
+  assert.equal(session.waitLabel, 'a Session event')
+  assert.ok(session.elapsedMs >= 120 && session.elapsedMs < 5_000)
+})
+
+test('the surface-status wait classifies its timeout against the Client', async () => {
+  /** A contract-shaped SurfaceEntryProcess: the poller's own read is injectable. */
+  const fakeSurface = ({ records = [], exited = false, lateRead }) => ({
+    role: 'surface-client',
+    records,
+    exited,
+    finalRecordRead(label) {
+      // Mirrors the real contract: one synchronous read of the complete tail.
+      if (lateRead !== undefined) lateRead(this, label)
+      return undefined
+    },
+  })
+  const client = fakeSurface({})
+  const error = await rejection(() => waitForSurfaceStatus(client, () => false, 'a surface status', 120))
+  assert.equal(error.category, 'WAIT_TIMEOUT')
+  assert.equal(error.code, 'SURFACE_STATUS_WAIT_TIMEOUT')
+  assert.equal(error.processRole, 'surface-client')
+  assert.equal(error.waitLabel, 'a surface status')
+  assert.ok(error.elapsedMs >= 120 && error.elapsedMs < 5_000)
+  // A Client that died while the status never arrived fails fast and by its own
+  // category: reporting `timeoutMs` here would hide the early exit.
+  const dead = fakeSurface({ exited: true })
+  const exited = await rejection(() => waitForSurfaceStatus(dead, () => false, 'a surface status', 5_000))
+  assert.equal(exited.category, 'PROCESS_EXITED')
+  assert.equal(exited.code, 'PROCESS_EXITED_BEFORE_STATUS')
+  assert.ok(exited.elapsedMs < 1_000,
+    `an early exit must not consume the whole budget, got ${String(exited.elapsedMs)}`)
+})
+
+test('a status written just before the close is read, not reported missing', async () => {
+  // The poller stops on close, so the LAST line may still be unread when the
+  // Client exits: the wait must take the final synchronous read before it
+  // concludes the status never arrived.
+  const late = { m4b2s: 'surface-status', sessionOpen: true }
+  const client = {
+    role: 'surface-client',
+    records: [],
+    exited: true,
+    finalRecordRead() {
+      this.records = [late]
+      return undefined
+    },
+  }
+  const status = await waitForSurfaceStatus(client, record => record.sessionOpen === true, 'a surface status', 5_000)
+  assert.equal(status, late, 'the late-written status must satisfy the wait')
+})
+
+test('a final record read that fails is an infrastructure failure, not a timeout', async () => {
+  const client = {
+    role: 'surface-client',
+    records: [],
+    exited: true,
+    finalRecordRead(label) {
+      return new SplitSmokeWaitError('INFRA_FAILURE', {
+        code: 'RECORD_READ_FAILED',
+        waitLabel: label,
+        processRole: this.role,
+      })
+    },
+  }
+  const error = await rejection(() => waitForSurfaceStatus(client, () => false, 'a surface status', 5_000))
+  assert.equal(error.category, 'INFRA_FAILURE')
+  assert.equal(error.code, 'RECORD_READ_FAILED')
+})
+
+test('the ready race separates an early exit from a timeout', async () => {
+  // Every contender already exited: that is PROCESS_EXITED, not a timeout.
+  const exited = [{
+    role: 'host-1',
+    exited: true,
+    records: [{ m4a0: 'failure', code: 'HOST_START_TIMEOUT' }],
+    exitResult: { code: 1, signal: null },
+  }]
+  const exitedError = await rejection(() => waitForAnyReady(exited, 'a ready contender', 5_000))
+  assert.equal(exitedError.category, 'PROCESS_EXITED')
+  assert.equal(exitedError.code, 'READY_RACE_EXITED')
+  assert.equal(exitedError.waitLabel, 'a ready contender')
+  assert.ok(Number.isInteger(exitedError.elapsedMs), 'the exit category still carries an elapsed time')
+  assert.ok(exitedError.elapsedMs < 5_000, 'measured, not the budget')
+  // A live-but-never-ready contender is a genuine timeout.
+  const live = [{ role: 'host-2', exited: false, records: [], exitResult: undefined }]
+  const timeoutError = await rejection(() => waitForAnyReady(live, 'a ready contender', 120))
+  assert.equal(timeoutError.category, 'WAIT_TIMEOUT')
+  assert.equal(timeoutError.code, 'READY_RACE_TIMEOUT')
+  assert.ok(timeoutError.elapsedMs >= 120 && timeoutError.elapsedMs < 5_000)
+})
+
+test('a ready race that lost every contender reports EVERY one of them', async (t) => {
+  // The REAL T08 topology: sixteen processes whose role is `host` and which never
+  // publish `ready`. A projection that folds on `(role, pid)` would then merge all
+  // of them into a single summary — hiding fifteen failures.
+  const privateTmp = testLifecycle(t).tempDir('split-smoke-ready-race-')
+  const previousTmp = process.env.TMPDIR
+  process.env.TMPDIR = privateTmp
+  t.after(() => {
+    if (previousTmp === undefined) delete process.env.TMPDIR
+    else process.env.TMPDIR = previousTmp
+  })
+  const contenders = Array.from({ length: 10 }, (_unused, index) => ({
+    role: 'host',
+    exited: true,
+    // No `ready` record at all: the handle has NO discoverable PID.
+    records: [{ m4a0: 'failure', code: 'HOST_START_TIMEOUT' }],
+    // Distinguishable so a collapse is visible as a wrong count, not a coincidence.
+    exitResult: { code: 20 + index, signal: null },
+  }))
+  const error = await rejection(() => waitForAnyReady(contenders, 'T08 16-host race', 50))
+  assert.equal(error.category, 'PROCESS_EXITED')
+  // Go through the REAL reporting path, not the projection in isolation.
+  const diagnostics = createSmokeDiagnostics({
+    lane: 'split-process', heading: 'SPLIT_PROCESS_SMOKE', marker: 'T',
+  })
+  const stderr = captureStderr(() => diagnostics.reportFailure(error))
+  const reportPath = stderr.match(/report: (\S+)/u)?.[1]
+  assert.ok(reportPath !== undefined, `the summary must print the report path:\n${stderr}`)
+  const written = JSON.parse(readFileSync(reportPath, 'utf8'))
+  assert.equal(written.processes.length, 8, 'the cap keeps 8 summaries, not 1')
+  const codes = written.processes.map(handle => handle.exitCode).sort((a, b) => a - b)
+  assert.deepEqual(codes, [22, 23, 24, 25, 26, 27, 28, 29],
+    `each kept summary must be a DIFFERENT process (last 8 of 20..29), got ${JSON.stringify(codes)}`)
+  for (const handle of written.processes) {
+    assert.equal(handle.role, 'host')
+    assert.equal(handle.exited, true)
+    assert.equal(handle.pid, undefined, 'a contender that never published ready has no PID')
+    assert.deepEqual(handle.events, [{ m4a0: 'failure' }], 'only official event names')
+  }
+  // Privacy: the record payload must not ride along with the summaries.
+  assert.ok(!readFileSync(reportPath, 'utf8').includes('HOST_START_TIMEOUT'))
+  assert.ok(!stderr.includes('HOST_START_TIMEOUT'))
+})
+
+test('the SAME handle passed twice is one process, with or without a PID', () => {
+  const withoutPid = { role: 'host', exited: true, records: [{ m4a0: 'failure' }], exitResult: { code: 3, signal: null } }
+  const once = projectFailureReport({ lane: 'split-process', processes: [withoutPid] })
+  const twice = projectFailureReport({ lane: 'split-process', processes: [withoutPid, withoutPid] })
+  assert.equal(once.processes.length, 1)
+  assert.equal(twice.processes.length, 1, 'the same handle must not be counted twice just for lacking a PID')
+  // Two DIFFERENT handles of the same role without a PID are two processes.
+  const sibling = { role: 'host', exited: true, records: [{ m4a0: 'failure' }], exitResult: { code: 4, signal: null } }
+  const both = projectFailureReport({ lane: 'split-process', processes: [withoutPid, sibling] })
+  assert.equal(both.processes.length, 2)
+  assert.deepEqual(both.processes.map(handle => handle.exitCode), [3, 4])
+  // A KNOWN pid still identifies the same process across two distinct wrappers.
+  const withPidA = { role: 'surface-client', exited: false, records: [{ m4a0: 'ready', pid: 4242 }] }
+  const withPidB = { role: 'surface-client', exited: true, records: [{ m4a0: 'ready', pid: 4242 }], exitResult: { code: 0, signal: null } }
+  const merged = projectFailureReport({ lane: 'split-process', processes: [withPidA, withPidB] })
+  assert.equal(merged.processes.length, 1, 'one PID is one process')
+  assert.equal(merged.processes[0].exited, true, 'the exit fact from either wrapper survives')
+  assert.equal(merged.processes[0].exitCode, 0, 'the exit code survives the merge')
+  // EACH fact must come from the OTHER wrapper, not from itself: a merge that
+  // only repeats the first wrapper's values silently drops what it learned.
+  const signalled = { role: 'surface-client', exited: true, records: [{ m4a0: 'ready', pid: 4343 }], exitResult: { code: null, signal: 'SIGTERM' } }
+  const signalFirst = { role: 'surface-client', exited: false, records: [{ m4a0: 'ready', pid: 4343 }] }
+  const signalMerged = projectFailureReport({ lane: 'split-process', processes: [signalFirst, signalled] })
+  assert.equal(signalMerged.processes.length, 1)
+  assert.equal(signalMerged.processes[0].exitSignal, 'SIGTERM',
+    'the second wrapper\'s signal must survive the merge')
+  // And the reverse order must produce the same facts.
+  const reverse = projectFailureReport({ lane: 'split-process', processes: [signalled, signalFirst] })
+  assert.equal(reverse.processes[0].exitSignal, 'SIGTERM', 'order must not change the merged facts')
+  assert.equal(reverse.processes[0].exited, true)
+})

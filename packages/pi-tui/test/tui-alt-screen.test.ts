@@ -7,6 +7,7 @@ import {
 } from "../src/alt-screen-search.ts";
 import { AltScreenSearchIndex as RootAltScreenSearchIndex } from "../src/index.ts";
 import { Box } from "../src/components/box.ts";
+import { Editor } from "../src/components/editor.ts";
 import { Container, type OverlayHandle } from "../src/tui.ts";
 import { Input } from "../src/components/input.ts";
 import { HStack } from "../src/components/h-stack.ts";
@@ -30,9 +31,10 @@ import {
 		type SixelScreenPort,
 		type SixelVisibleCandidate,
 } from "../src/terminal-image.ts";
-import type { TuiMouseEvent } from "../src/tui.ts";
+import { renderFakeCursor, type TuiMouseEvent } from "../src/tui.ts";
 import { TuiAltScreen } from "../src/tui-alt-screen.ts";
 import { stripTerminalSequences, visibleWidth } from "../src/utils.ts";
+import { defaultEditorTheme } from "./test-themes.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
@@ -1186,13 +1188,13 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
-	it("does not emit Kitty graphics commands or OSC 133 zones in iTerm2", async () => {
+	it("emits iTerm2 OSC 1337 pixels and no Kitty commands (X080)", async () => {
 		setCapabilities({ images: "iterm2", trueColor: true, hyperlinks: true });
 		try {
 			const terminal = new RecordingTerminal(20, 3);
 			const tui = new TuiAltScreen(terminal);
 			tui.addChild({
-				render: () => ["\x1b]133;B\x07\x1b]133;C\x07\x1b]133;A\x07content"],
+				render: () => ["content"],
 				invalidate: () => {},
 			});
 			tui.addChild(
@@ -1207,10 +1209,14 @@ describe("TuiAltScreen", () => {
 			tui.start();
 			await terminal.waitForRender();
 			tui.stop();
-			assert.ok(terminal.events.every((event) => event.type !== "write" || !event.data.includes("\x1b_G")));
-			assert.ok(terminal.events.every((event) => event.type !== "write" || !event.data.includes("\x1b]133;")));
-			assert.ok(terminal.events.every((event) => event.type !== "write" || !event.data.includes("\x1b]1337;File=")));
-			assert.ok(terminal.events.some((event) => event.type === "write" && event.data.includes("[Image:")));
+			const wire = terminal.events
+				.filter((event) => event.type === "write")
+				.map((event) => (event.type === "write" ? event.data : ""))
+				.join("");
+			assert.ok(!wire.includes("\x1b_G"), "no Kitty APC in the iTerm2 path");
+			assert.ok(!wire.includes("\x1b]133;"), "no OSC 133 zone markers in the iTerm2 path");
+			assert.ok(wire.includes("\x1b]1337;File="), "iTerm2 paints real OSC 1337 pixels");
+			assert.ok(!wire.includes("[Image:"), "no text fallback when the capability admits pixels");
 		} finally {
 			resetCapabilitiesCache();
 		}
@@ -1351,6 +1357,91 @@ describe("TuiAltScreen", () => {
 			assert.ok(!redrawWrites.includes("\x1b_Ga=T"));
 			assert.ok(redrawWrites.length < 2000, `expected placement-only redraw, got ${redrawWrites.length} bytes`);
 			assert.ok(terminal.getViewport().some((line) => line.trimEnd() === "changed"));
+			tui.stop();
+		} finally {
+			resetCapabilitiesCache();
+		}
+	});
+
+	it("yields a displayed native Kitty placement to an overlay and re-places it afterwards", async () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		try {
+			const terminal = new RecordingTerminal(20, 6);
+			const tui = new TuiAltScreen(terminal);
+			const imageId = 4242;
+			const imageLine = encodeKitty("AAAA", { columns: 2, rows: 3, imageId, moveCursor: false });
+			registerKittyImageMetadata({ imageId, columns: 2, rows: 3, widthPx: 100, heightPx: 100 });
+			tui.addChild({ render: () => ["header", imageLine, "", "", "tail"], invalidate: () => {} });
+			const wire = (): string =>
+				terminal.events
+					.filter((event): event is { type: "write"; data: string } => event.type === "write")
+					.map((event) => event.data)
+					.join("");
+			tui.start();
+			await terminal.waitForRender();
+			assert.ok(wire().includes(`i=${imageId}`), "the placement paints while nothing covers it");
+
+			// The overlay lands on the block's third row: a body row, not the anchor.
+			terminal.events.length = 0;
+			const overlay = { render: () => ["MODAL"], invalidate: () => {} };
+			const handle = tui.showOverlay(overlay, { row: 3, col: 0, width: 10 });
+			tui.renderNow();
+			await terminal.waitForRender();
+			const covered = wire();
+			assert.ok(covered.includes("\x1b_Ga=d,d=a,q=2\x1b\\"), "the old placement is removed for the frame");
+			assert.ok(!covered.includes("a=p,"), "the covered placement is not placed this frame");
+			assert.ok(covered.includes("MODAL"), "the overlay itself is painted");
+			assert.ok(!covered.includes("a=d,d=I"), "no image data is freed");
+
+			handle.hide();
+			terminal.events.length = 0;
+			tui.renderNow();
+			await terminal.waitForRender();
+			const restored = wire();
+			assert.ok(restored.includes("a=p,"), "the placement returns after close");
+			assert.ok(restored.includes(`i=${imageId}`), "the same image id is re-placed");
+			assert.ok(!restored.includes("a=d,d=I"), "closing frees no image data");
+			assert.ok(
+				terminal.getViewport().every((line) => !line.includes("MODAL")),
+				"the overlay text is gone from the screen",
+			);
+			tui.stop();
+		} finally {
+			resetCapabilitiesCache();
+		}
+	});
+
+	it("yields a Direct iTerm2 image block to an overlay inside AltScreen and restores it (X080)", async () => {
+		setCapabilities({ images: "iterm2", trueColor: true, hyperlinks: false });
+		try {
+			const terminal = new RecordingTerminal(20, 6);
+			const tui = new TuiAltScreen(terminal);
+			const anchorLine = "\x1b[2A\x1b]1337;File=inline=1;size=4;width=2;height=auto:AAAA\x07";
+			tui.addChild({ render: () => ["header", "", "", anchorLine, "tail"], invalidate: () => {} });
+			const wire = (): string =>
+				terminal.events
+					.filter((event): event is { type: "write"; data: string } => event.type === "write")
+					.map((event) => event.data)
+					.join("");
+			tui.start();
+			await terminal.waitForRender();
+			assert.ok(wire().includes("]1337;File="), "the image paints while nothing covers it");
+
+			// The overlay lands on the block's TOP row, not the anchor row.
+			terminal.events.length = 0;
+			const handle = tui.showOverlay({ render: () => ["MODAL"], invalidate: () => {} }, { row: 1, col: 0, width: 10 });
+			tui.renderNow();
+			await terminal.waitForRender();
+			const covered = wire();
+			assert.ok(!covered.includes("]1337;File="), "the covered block is not re-emitted in this frame");
+			assert.ok(covered.includes("MODAL"), "the overlay itself is painted");
+			assert.ok(terminal.getViewport().some((line) => line.includes("MODAL")), "the overlay text is readable");
+
+			handle.hide();
+			terminal.events.length = 0;
+			tui.renderNow();
+			await terminal.waitForRender();
+			assert.ok(wire().includes("]1337;File="), "the same image returns after close");
 			tui.stop();
 		} finally {
 			resetCapabilitiesCache();
@@ -1716,6 +1807,9 @@ describe("TuiAltScreen", () => {
 		for (const { line, needle } of [
 			{ line: "extensions/starline/fixed-editor/compositor.ts", needle: "starline" },
 			{ line: "earendil-works/pi-tui", needle: "works" },
+			{ line: "~/.pi/agent/settings.json", needle: "agent" },
+			{ line: "~\\Documents\\pi", needle: "Documents" },
+			{ line: "foo+bar", needle: "bar" },
 		]) {
 			const copied: string[] = [];
 			const terminal = new RecordingTerminal(80, 1);
@@ -2404,6 +2498,149 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 });
+
+	it("crops a Kitty image in a padded, colored box whose first line is above the viewport", async () => {
+		const terminal = new RecordingTerminal(20, 3);
+		const tui = new TuiAltScreen(terminal);
+		const imageId = 11271;
+		const imageLine = encodeKitty("AAAA", { columns: 2, rows: 3, imageId, moveCursor: false });
+		registerKittyImageMetadata({ imageId, columns: 2, rows: 3, widthPx: 100, heightPx: 100 });
+		const box = new Box(1, 0, (text: string) => `\x1b[44m${text}\x1b[49m`);
+		box.addChild({ render: () => [imageLine, "", ""], invalidate: () => {} });
+		tui.addChild({ render: () => ["before"], invalidate: () => {} });
+		tui.addChild(box);
+		tui.addChild({ render: () => ["after", "end"], invalidate: () => {} });
+		tui.start();
+		await terminal.waitForRender();
+
+		assert.strictEqual(tui.viewportTop, 3);
+		assert.ok(
+			terminal.events.some(
+				(event) => event.type === "write" && event.data.includes("i=11271") && event.data.includes("y=66,h=34,r=1"),
+			),
+		);
+
+		tui.stop();
+	});
+
+	it("crops a Kitty image whose placeholder rows contain text when its first line is above the viewport", async () => {
+		// Regression test for #11271: borders or side-by-side text on placeholder rows stopped the search.
+		const terminal = new RecordingTerminal(20, 3);
+		const tui = new TuiAltScreen(terminal);
+		const imageId = 11272;
+		const imageLine = encodeKitty("AAAA", { columns: 2, rows: 3, imageId, moveCursor: false });
+		registerKittyImageMetadata({ imageId, columns: 2, rows: 3, widthPx: 100, heightPx: 100 });
+		tui.addChild({ render: () => ["before", imageLine, "   | side", "   | side"], invalidate: () => {} });
+		tui.addChild({ render: () => ["after", "end"], invalidate: () => {} });
+		tui.start();
+		await terminal.waitForRender();
+
+		assert.strictEqual(tui.viewportTop, 3);
+		assert.ok(
+			terminal.events.some(
+				(event) => event.type === "write" && event.data.includes("i=11272") && event.data.includes("y=66,h=34,r=1"),
+			),
+		);
+
+		tui.stop();
+	});
+
+	it("keeps the selection highlight after a fake cursor cell", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text(`> ${renderFakeCursor("a")}bcd`, 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<0;1;1M");
+		terminal.sendInput("\x1b[<32;6;1M");
+		terminal.sendInput("\x1b[<3;6;1m");
+		await terminal.waitForRender();
+
+		assert.ok(
+			terminal.events.some((event) => event.type === "write" && event.data.includes("\x1b[27m\x1b[7mbcd")),
+			"selection inverse must be reapplied after the fake cursor ends",
+		);
+
+		tui.stop();
+	});
+
+	it("defers viewport keys to a focused list instead of scrolling the transcript (#7629)", async () => {
+		const terminal = new VirtualTerminal(20, 6);
+		const tui = new TuiAltScreen(terminal);
+		const list = new SelectList(
+			Array.from({ length: 12 }, (_, index) => ({ value: `item-${index}`, label: `item-${index}` })),
+			3,
+			{
+				selectedPrefix: (text) => text,
+				selectedText: (text) => text,
+				description: (text) => text,
+				scrollInfo: (text) => text,
+				noMatch: (text) => text,
+			},
+		);
+		tui.addChild(new Text(Array.from({ length: 12 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0));
+		tui.addChild(list);
+		tui.setFocus(list);
+		tui.start();
+		await terminal.waitForRender();
+		const topBefore = tui.viewportTop;
+
+		terminal.sendInput("\x1b[6~"); // PageDown
+		terminal.sendInput("\x1b[1;5H"); // Ctrl+Home
+		await terminal.waitForRender();
+		assert.strictEqual(list.getSelectedItem()?.value, "item-3");
+		assert.strictEqual(tui.viewportTop, topBefore);
+		tui.stop();
+	});
+
+	it("gives viewport keys back to the transcript when editor autocomplete closes (#7629)", async () => {
+		const terminal = new VirtualTerminal(40, 8);
+		const tui = new TuiAltScreen(terminal);
+		const editor = new Editor(tui, defaultEditorTheme);
+		let submitted = "";
+		editor.onSubmit = (text) => {
+			submitted = text;
+		};
+		editor.setAutocompleteProvider({
+			getSuggestions: async () => ({
+				items: Array.from({ length: 12 }, (_, index) => ({
+					value: `/command-${index}`,
+					label: `command-${index}`,
+				})),
+				prefix: "/",
+			}),
+			applyCompletion: (lines, cursorLine, _cursorCol, item) => ({
+				lines: lines.map((line, index) => (index === cursorLine ? item.value : line)),
+				cursorLine,
+				cursorCol: item.value.length,
+			}),
+		});
+		tui.addChild(new Text(Array.from({ length: 30 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0));
+		tui.addChild(editor);
+		tui.setFocus(editor);
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("/");
+		await new Promise((resolve) => setImmediate(resolve));
+		await terminal.waitForRender();
+		assert.strictEqual(editor.isShowingAutocomplete(), true);
+		const topWithMenu = tui.viewportTop;
+		terminal.sendInput("\x1b[6~"); // PageDown pages the menu
+		await terminal.waitForRender();
+		assert.strictEqual(tui.viewportTop, topWithMenu);
+
+		terminal.sendInput("\r");
+		await terminal.waitForRender();
+		assert.strictEqual(submitted, "/command-5");
+		assert.strictEqual(editor.isShowingAutocomplete(), false);
+		const topWithoutMenu = tui.viewportTop;
+		terminal.sendInput("\x1b[5~"); // PageUp scrolls the transcript again
+		await terminal.waitForRender();
+		assert.ok(tui.viewportTop < topWithoutMenu);
+		tui.stop();
+	});
 
 	it("notifies the host when dragging the primary scrollbar to an edge", async () => {
 		const terminal = new RecordingTerminal(10, 5);
@@ -4384,7 +4621,7 @@ describe("TuiAltScreen overlay text selection (X068)", () => {
 				.join("");
 		}
 
-		it("uses the instance Kitty protocol while preserving iTerm2 suppression and restore", async () => {
+		it("keeps the process capability while an instance Kitty override is active (X080)", async () => {
 			setCapabilities({ images: "iterm2", trueColor: true, hyperlinks: true });
 			registerKittyImageMetadata({ imageId: 777, columns: 2, rows: 2, widthPx: 10, heightPx: 10 });
 			try {
@@ -4394,7 +4631,7 @@ describe("TuiAltScreen overlay text selection (X068)", () => {
 				tui.addChild(anchor);
 				tui.start();
 				await terminal.waitForRender();
-				assert.strictEqual(getCapabilities().images, null, "the existing iTerm2 global suppression still runs");
+				assert.strictEqual(getCapabilities().images, "iterm2", "AltScreen no longer mutates the process capability");
 
 				terminal.events.length = 0;
 				anchor.show = false;
@@ -4404,7 +4641,7 @@ describe("TuiAltScreen overlay text selection (X068)", () => {
 				assert.ok(!wire.includes("\x1b[2J"), "the iTerm2 whole-screen branch is not used");
 
 				tui.stop();
-				assert.strictEqual(getCapabilities().images, "iterm2", "the existing iTerm2 restore lifecycle still runs");
+				assert.strictEqual(getCapabilities().images, "iterm2", "the process capability remains unchanged after stop");
 			} finally {
 				resetCapabilitiesCache();
 			}

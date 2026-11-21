@@ -8,9 +8,10 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { deriveAccessStatus, sandboxModeName, type ApprovalServiceLike, type PermissionPresetsLike, type SandboxPolicyLike } from '../../src/domain/status/derive-access.ts'
+import { deriveAccessStatus, type PermissionPresetsLike } from '../../src/domain/status/derive-access.ts'
 import { deriveActivityPhase, deriveActivityStatus } from '../../src/domain/status/derive-activity.ts'
 import { derivePlanStatus } from '../../src/domain/status/derive-plan.ts'
+import { foldGoal, goalTextOf } from '../../src/domain/status/derive-goal.ts'
 import { usageFromStats } from '../../src/domain/status/derive-usage.ts'
 import type { SessionStats } from '../../src/domain/status/stats.ts'
 
@@ -23,59 +24,28 @@ function presets(current: string, label?: string): PermissionPresetsLike {
   }
 }
 
-function sandbox(mode: string): SandboxPolicyLike {
-  return { resolve: () => ({ mode }) }
-}
-
-function approval(policy: 'ask' | 'never'): ApprovalServiceLike {
-  return { overrideOf: () => policy }
-}
-
-test('access: read-only + ask derives independent facts', () => {
-  const status = deriveAccessStatus(
-    {
-      permissionPresets: presets('read-only'),
-      sandboxPolicy: sandbox('read-only'),
-      approval: approval('ask'),
-    },
-    {},
-  )
+test('access: the preset fold no longer derives the sandbox/approval knobs (M6-1 F8)', () => {
+  const status = deriveAccessStatus({ permissionPresets: presets('read-only') }, {})
   assert.deepEqual(status, {
     permissionPreset: { id: 'read-only', label: 'read-only', matched: true },
-    sandbox: { mode: 'read-only' },
-    approval: { policy: 'ask' },
-  })
+  }, 'the independent knobs arrive from the policy observation, never this fold')
 })
 
-test('access: danger-full-access + never', () => {
-  const status = deriveAccessStatus(
-    {
-      permissionPresets: presets('danger-full-access', 'Danger'),
-      sandboxPolicy: sandbox('danger-full-access'),
-      approval: approval('never'),
-    },
-    {},
-  )
+test('access: the preset label/matched fold stays exact', () => {
+  const status = deriveAccessStatus({ permissionPresets: presets('danger-full-access', 'Danger') }, {})
   assert.equal(status.permissionPreset?.id, 'danger-full-access')
   assert.equal(status.permissionPreset?.label, 'Danger')
   assert.equal(status.permissionPreset?.matched, true)
-  assert.equal(status.sandbox?.mode, 'danger-full-access')
-  assert.equal(status.approval?.policy, 'never')
 })
 
 test('access: custom is a neutral unmatched combination, never danger', () => {
-  const status = deriveAccessStatus(
-    {
-      permissionPresets: presets('custom'),
-      sandboxPolicy: sandbox('workspace-write'),
-      approval: approval('ask'),
-    },
-    {},
-  )
+  const status = deriveAccessStatus({ permissionPresets: presets('custom') }, {})
   assert.equal(status.permissionPreset?.id, 'custom')
   assert.equal(status.permissionPreset?.matched, false)
-  // The sandbox fact stays independent — custom does not imply danger.
-  assert.equal(status.sandbox?.mode, 'workspace-write')
+  // The sandbox/approval facts are independent observation facts — the
+  // derive never infers them from a preset name (custom does not imply danger).
+  assert.equal('sandbox' in status, false)
+  assert.equal('approval' in status, false)
 })
 
 test('access: missing services degrade to absent facts', () => {
@@ -83,24 +53,22 @@ test('access: missing services degrade to absent facts', () => {
   assert.deepEqual(status, {})
 })
 
-test('access: throwing services degrade to absent facts', () => {
+test('access: a throwing preset service degrades to an absent fact', () => {
   const status = deriveAccessStatus(
     {
       permissionPresets: { current: () => { throw new Error('boom') }, optionOf: () => { throw new Error('boom') } },
-      sandboxPolicy: { resolve: () => { throw new Error('boom') } },
-      approval: { overrideOf: () => { throw new Error('boom') } },
     },
     {},
   )
   assert.deepEqual(status, {})
 })
 
-test('access: unknown sandbox modes are omitted, never guessed', () => {
-  assert.equal(sandboxModeName('read-only'), 'read-only')
-  assert.equal(sandboxModeName('workspace-write'), 'workspace-write')
-  assert.equal(sandboxModeName('danger-full-access'), 'danger-full-access')
-  assert.equal(sandboxModeName('full'), undefined)
-  assert.equal(sandboxModeName(undefined), undefined)
+test('access: unknown modes never reach the snapshot (the observation owns the vocabulary)', () => {
+  // The wire contract's closed `SandboxMode` union (the strict codec refuses
+  // an unknown mode before it can reach a snapshot) owns this rule now; the
+  // domain derive keeps no second mode-normalization path.
+  const status = deriveAccessStatus({})
+  assert.equal('sandbox' in status, false)
 })
 
 // ── Plan ──────────────────────────────────────────────────────────────────
@@ -253,4 +221,30 @@ test('usage PR-2: usageFromStats contributes ONLY the lifetime llmMs, never a fo
   const official = { tokens: { uncachedInputTokens: 100, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0 } }
   assert.deepEqual(usageFromStats(STATS, undefined, official).performance, { llmMs: 120000 },
     'the Remote projection-override branch keeps the same rule')
+})
+
+// ── Goal badge (FR6: the domain keeps the objective whole) ───────────────
+
+test('goalTextOf keeps a long objective whole instead of the fixed 24-character cut', () => {
+  const objective = 'ship the 0.5.7 goal dock with full width aware truncation behavior'
+  assert.equal(goalTextOf({ phase: 'active', objective }), `goal ● ${objective}`)
+})
+
+test('goalTextOf maps every non-complete phase to its mark and hides completion', () => {
+  assert.equal(goalTextOf({ phase: 'active', objective: 'fix the build' }), 'goal ● fix the build')
+  assert.equal(goalTextOf({ phase: 'paused', objective: 'fix the build' }), 'goal ‖ fix the build')
+  assert.equal(goalTextOf({ phase: 'blocked', objective: 'fix the build' }), 'goal ◌ fix the build')
+  assert.equal(goalTextOf({ phase: 'complete', objective: 'fix the build' }), undefined)
+})
+
+test('the log fold and the projection render IDENTICALLY for the same goal fact', () => {
+  const goal = { phase: 'active', objective: 'same objective' }
+  const fromLog = foldGoal([{ type: 'goal/change', data: { operation: 'create', goal } }])
+  assert.equal(fromLog, goalTextOf(goal))
+  // The latest goal/change wins; a clear hides the badge.
+  const cleared = foldGoal([
+    { type: 'goal/change', data: { operation: 'create', goal } },
+    { type: 'goal/change', data: { operation: 'clear', goal } },
+  ])
+  assert.equal(cleared, undefined)
 })

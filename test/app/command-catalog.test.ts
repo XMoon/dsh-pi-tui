@@ -8,6 +8,8 @@
  */
 
 import assert from 'node:assert/strict'
+import { fakeAgentModel } from '../support/agent-model-double.ts'
+import { unavailableAcpAccess, unavailableWebAccess, unavailableMcpServers } from '../support/web-access-fake.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
@@ -32,6 +34,7 @@ import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { visibleWidth, type SettingItem } from '@xmoon76/pi-tui'
+import { unconfiguredPolicyObservation, unconfiguredSessionPolicyPort } from '../support/session-policy-fake.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -48,9 +51,12 @@ afterEach(() => {
  * flip status to 'running' (agent-loop's wakeDriver), so tests exercise the
  * same status transitions production sees. */
 function fakeAgent(sessionId: string, delivered: { kind: 'steer' | 'followup' | 'inject'; text: string }[] = [], status: 'idle' | 'running' = 'idle'): Agent {
+  const options = { provider: 'p', model: 'm' }
   const agent = {
     session: { id: sessionId, header: { cwd: '/ws' }, events: [] },
-    options: { provider: 'p', model: 'm' },
+    options,
+    // DSH 0.2.2: the Agent owns its model selection (`AgentModel`).
+    model: fakeAgentModel(undefined, options),
     status,
   } as unknown as Agent & { status: 'idle' | 'running' }
   Object.assign(agent, {
@@ -104,8 +110,13 @@ function stubRunner(
     ctx,
     app,
     deliveredFilesSnapshot: () => undefined,
+    webAccess: unavailableWebAccess(),
+    acpAccess: unavailableAcpAccess(),
+    mcpServers: unavailableMcpServers(),
     diag,
     ...sessionScopeFacts(() => state.agent, () => options.generation?.() ?? 1, catalog.skills),
+    sessionPolicy: unconfiguredSessionPolicyPort(),
+    policy: unconfiguredPolicyObservation(),
     // The scoped collision baseline must read the FAKE registry (which
     // reflects registrations in its global view), exactly like the real
     // commands service does through the production provider.
@@ -125,7 +136,13 @@ function stubRunner(
           replace: async () => undefined,
         } as never,
     applyFooterSettings: () => {},
-    agents: {} as never,
+    // WS-2: `/new` pre-selects a Host Workspace before it enters the
+    // transition; this stub runner never creates/opens a real Session.
+    agents: {
+      resolveWorkspace: async () => ({ workspaceId: 'workspace-test', path: '/workspace' }),
+      create: async () => { throw new Error('the stub runner never creates a Session') },
+      open: async () => { throw new Error('the stub runner never opens a Session') },
+    } as never,
     sessionReader: {
       list: async () => [],
       search: async () => ({ items: [], hasMore: false }),
@@ -140,8 +157,7 @@ function stubRunner(
     commandRegistry: ctx.get('commands') as import('../../src/commands.ts').CommandRegistryLike | undefined,
     clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort((sessionId) => state.agent?.session.id === sessionId ? state.agent : undefined),
-    hostShellCompletion: true,
-    transcriptExportAvailable: true,
+    hostShellCompletion: { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) },
     interaction: {
       questions: {
         onRequest: () => true,
@@ -151,8 +167,7 @@ function stubRunner(
         answerContinued: async () => 'not-continued' as const,
       },
       onApprovalRequest: () => {},
-      setApprovalPolicy: () => true,
-    },
+      },
     sessionWriter: {
       prompt: async (_sessionId: string, message: unknown, mode: 'queue' | 'steer') => {
         const outcome = state.writerOutcome
@@ -218,7 +233,7 @@ function stubRunner(
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, createPluginManagerPage: () => undefined,
+    openTasksBrowser: () => {}, openScheduleWorkspace: () => ({ kind: 'success' } as const), createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => options.transitionPending ?? false,
     withSessionTransition: async <T>(
@@ -1764,7 +1779,7 @@ test('capability-truthful discovery copy is registered for the conditional comma
   assert.equal(descriptionOf('attach'),
     'Attach an image or file to the draft; generic-file delivery requires backend support (tab completes the path)')
   assert.equal(descriptionOf('transcript'),
-    'Export a readable Markdown transcript of this session when supported')
+    'Export this session as official Markdown')
   assert.equal(descriptionOf('login'),
     'Open Models to configure provider credentials or sign in to DeepSeek Account')
   assert.equal(descriptionOf('logout'),
@@ -1803,12 +1818,15 @@ test('the built-in command decomposition preserves the exact primary set and reg
   // command, registered immediately after its primary. `/status` is the
   // `/settings` alias (C5).
   const ALIASES = new Set(['quit', 'status', 'statusline', 'resume', 'subagents', 'image', 'rename'])
-  // The 29 built-in primaries, in their frozen registration order.
+  // The built-in primaries, in their frozen registration order. `/web` is the
+  // M5-W PR-C Split-Client control entry and registers immediately after
+  // Settings; `/acp` is the PO-5E Split-Client ACP quick control and
+  // registers immediately after `/web`.
   assert.deepEqual(
     services.registered.filter(name => !ALIASES.has(name)),
     [
-      'exit', 'reload-client', 'settings', 'footer', 'display', 'focus', 'sessions', 'skill', 'reload', 'model',
-      'new', 'tasks', 'plugins', 'yolo', 'preset', 'search', 'title', 'copy', 'attach', 'view-image',
+      'exit', 'reload-client', 'settings', 'web', 'acp', 'footer', 'display', 'focus', 'sessions', 'skill', 'reload', 'model',
+      'new', 'tasks', 'queue', 'schedule', 'plugins', 'yolo', 'preset', 'search', 'title', 'copy', 'attach', 'view-image',
       'export', 'transcript', 'deliverables', 'fork', 'rewind', 'login', 'logout', 'help', 'keybindings',
     ],
   )
@@ -1817,6 +1835,8 @@ test('the built-in command decomposition preserves the exact primary set and reg
     'exit', 'quit',
     'reload-client',
     'settings', 'status',
+    'web',
+    'acp',
     'footer', 'statusline',
     'display', 'focus',
     'sessions', 'resume',
@@ -1824,6 +1844,8 @@ test('the built-in command decomposition preserves the exact primary set and reg
     'model',
     'new',
     'tasks', 'subagents',
+    'queue',
+    'schedule',
     'plugins',
     'yolo', 'preset',
     'search',
@@ -1902,7 +1924,7 @@ test('/new keeps the accepted-stop phase when a commit throw escapes the transac
 
 // ── M4 PR4: `/reload-client` ────────────────────────────────────────────────
 
-test('M4 PR4 `/reload-client` is a bare reserved sessionless Client command with fixed notices', () => {
+test('`/reload-client` is a bare reserved sessionless Client command with fixed notices', () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -1963,7 +1985,7 @@ test('M4 PR4 `/reload-client` is a bare reserved sessionless Client command with
   app.stop()
 })
 
-test('M4 PR4 `/reload-client` on Direct (no process capability) is an explicit local refusal', () => {
+test('`/reload-client` on Direct (no process capability) is an explicit local refusal', () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })

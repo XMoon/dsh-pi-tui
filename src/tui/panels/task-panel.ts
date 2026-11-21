@@ -13,9 +13,10 @@ import { Input, matchesKey, truncateToWidth, visibleWidth } from '@xmoon76/pi-tu
 import { dispatchMouseEvent } from '@xmoon76/pi-tui'
 import type { Component, Focusable, TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-tui'
 import { componentKeymap } from '../keybindings/component-keymap.ts'
+import { formatKeyId } from '../keybindings/hints.ts'
 import { color, taskStatusColor, taskStatusWord } from '../theme/runtime.ts'
 import { SelectedMarquee } from '../components/marquee.ts'
-import { renderActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
+import { ACTION_BAR_SEPARATOR, layoutActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import {
   isTaskItemActive,
@@ -25,8 +26,34 @@ import {
   type TaskScope,
 } from '../../app/surface/task-presentation.ts'
 import type { TaskBrowserViewState } from '../../app/surface/task-runtime.ts'
+import type { TeamBrowserPresentation, TeamMemberPresentation } from '../../app/surface/task-presentation-port.ts'
+import type { TeamBoardSnapshot, TeamBoardTask } from '../../runtime/team-board-read-port.ts'
 
 export type { TaskPanelItem, TaskScope } from '../../app/surface/task-presentation.ts'
+
+type TaskMouseAction =
+  | 'stop'
+  | 'confirm-stop'
+  | 'cancel-stop'
+  | 'work-close'
+  | 'work-search-back'
+  | 'team-close'
+  | 'team-search-back'
+  | 'filter-cancel'
+
+interface TaskMouseActionHit {
+  action: TaskMouseAction
+  value: string
+  pendingValue: string | undefined
+  startCol: number
+  endCol: number
+}
+
+interface TaskMouseActionGesture extends TaskMouseActionHit {
+  row: number
+  width: number
+  height: number
+}
 
 /** One physical row of the last painted panel frame (mouse hit-testing).
  * The map is built from the EXACT final rows render() returns (including
@@ -35,7 +62,45 @@ export type { TaskPanelItem, TaskScope } from '../../app/surface/task-presentati
 type TaskMouseHit =
   | { kind: 'search' }
   | { kind: 'item'; value: string; index: number; listWidth?: number }
+  | { kind: 'actions'; actions: readonly TaskMouseActionHit[] }
+  | { kind: 'tab'; spans: readonly TabSpan[] }
+  | {
+      /** The Work history disclosure chrome row: only the painted action label
+       *  is a target; the informational `!N unreviewed` suffix is not. */
+      kind: 'job-history'
+      startCol: number
+      endCol: number
+      expanded: boolean
+      count: number
+      unreviewed: number
+    }
   | { kind: 'inert' }
+
+/** One painted tab label's column range and the page it switches to. */
+interface TabSpan {
+  readonly target: 'work' | 'team'
+  readonly startCol: number
+  readonly endCol: number
+}
+
+/**
+ * ONE captured FR2 pointer gesture — the last-painted identity a press locked.
+ * A click is accepted only when it resolves the SAME identity on the SAME
+ * painted geometry (row + grant), so a repaint/refresh between press and
+ * release can never retarget the action. Wheel is NOT a gesture (it moves the
+ * selection with no commit) and never requires a press.
+ */
+type Fr2Gesture =
+  | { readonly kind: 'tab'; readonly target: 'work' | 'team'; readonly startCol: number; readonly endCol: number; readonly row: number; readonly width: number; readonly height: number }
+  | { readonly kind: 'team-row'; readonly value: string; readonly row: number; readonly width: number; readonly height: number }
+  | { readonly kind: 'filter'; readonly token: string; readonly chosen: string | null; readonly row: number; readonly width: number; readonly height: number }
+  | { readonly kind: 'job-history'; readonly startCol: number; readonly endCol: number; readonly expanded: boolean; readonly count: number; readonly row: number; readonly width: number; readonly height: number }
+
+/** One selectable Team page row (Root/member or shared task). Section headers
+ *  are derived from kind transitions during render and are never selectable. */
+type TeamViewRow =
+  | { readonly kind: 'member'; readonly value: string; readonly member: TeamMemberPresentation }
+  | { readonly kind: 'task'; readonly value: string; readonly task: TeamBoardTask }
 
 /** Options for {@link TaskBrowserPanel}. */
 export interface TaskPanelOptions {
@@ -47,8 +112,10 @@ export interface TaskPanelOptions {
   noMatchText?: string
   /** Whether the `/` search action is available (Full mode). */
   enableSearch?: boolean
-  /** Confirmed Stop: emitted only after the S → Y confirmation chord. */
+  /** Stop intent emitted only after its existing keyboard confirmation. */
   onStop?: (value: string) => void
+  /** Whether this browser is currently mounted inside the AltScreen pointer route. */
+  mouseActionsEnabled?: () => boolean
   /**
    * Called ONCE per attention row the first time it enters the open
    * viewport (scroll window), with the fresh ids. The runner uses it to
@@ -74,6 +141,11 @@ export interface TaskPanelOptions {
   groupLabels?: boolean
   /** Test hook: the selected-row marquee's clock. */
   marqueeNow?: () => number
+  /** FR2: the READ-ONLY Team page DTO. Absent = Work-only (no Team tab). */
+  team?: TeamBrowserPresentation
+  /** FR2: physical pointer final admission (captured subject / browser token /
+   *  non-cleanup), read by the tab/filter/Team hit paths. */
+  interactionCurrent?: () => boolean
 }
 
 /** Render elapsed seconds as `2s`, `1m5s`, or `1h2m`. */
@@ -145,6 +217,10 @@ export class TaskBrowserPanel implements Component, Focusable {
    * enrichment repaint between press and release must never activate
    * whatever moved into the same physical row. */
   private mousePressedValue: string | undefined
+  private mousePressedSelectionOnly = false
+  private mousePressedAction: TaskMouseActionGesture | undefined
+  /** FR2: the ONE captured last-painted pointer gesture (tab / team row / filter). */
+  private fr2Pressed: Fr2Gesture | undefined
   private readonly onSelect: (value: string) => void
   private readonly onCancel: () => void
   private readonly onStop: ((value: string) => void) | undefined
@@ -161,6 +237,30 @@ export class TaskBrowserPanel implements Component, Focusable {
   private loading: boolean
   private refreshError: string | undefined
   private preferredValue: string | undefined
+  /** Full Tracked presentation: the user opened the terminal-Job history. */
+  private jobHistoryExpanded = false
+  /** The captured job-history disclosure press (same last-painted gesture
+   *  identity contract as the FR2 tab/team/filter gestures). */
+  private jobHistoryPressed: Fr2Gesture | undefined
+
+  // ── FR2: Work/Team pages + Work type-filter list ──────────────────────────
+  /** The active page. Both pages share the ONE physical panel/overlay. */
+  private pageView: 'work' | 'team' = 'work'
+  /** The READ-ONLY Team page DTO (undefined = Work-only, no Team tab). */
+  private team: TeamBrowserPresentation | undefined
+  /** Team view-only local state: selection identity, scroll, search, disclosure. */
+  private teamSelectedValue: string | undefined
+  private teamScroll = 0
+  /** The ACTUAL Team viewport rows the last render painted (page-step size). */
+  private teamLastRenderedCount = 1
+  private teamSearchMode = false
+  private readonly teamSearchInput = new Input()
+  /** At most ONE expanded Team task id (stable, never a row index). */
+  private teamExpandedTaskId: string | undefined
+  /** The Work explicit type-filter list (a transient focus state, not an overlay). */
+  private filterOpen = false
+  private filterSelected = 0
+  private readonly interactionCurrent: (() => boolean) | undefined
 
   constructor(
     items: readonly TaskPanelItem[],
@@ -208,6 +308,16 @@ export class TaskBrowserPanel implements Component, Focusable {
       }
     }
     this.searchInput.onSubmit = () => this.openSelected()
+    this.team = options.team
+    this.interactionCurrent = options.interactionCurrent
+    this.teamSearchInput.onEscape = () => {
+      if (this.teamSearchMode) this.exitTeamSearchMode()
+      else this.onCancel()
+    }
+    this.teamSearchInput.onSubmit = () => this.toggleTeamSelected()
+    // Seed the Team selection so an Enter that arrives before the first paint
+    // still targets the first selectable row.
+    if (this.team !== undefined) this.teamSelectedValue = this.teamSelectableValues()[0]
     this.rebuildTypeCycle()
     // A restored type filter that no row satisfies produces a dead view;
     // validate it against the initial row set exactly like setItems does.
@@ -223,6 +333,10 @@ export class TaskBrowserPanel implements Component, Focusable {
    * indicator + optional refresh-error line). */
   setMaxRows(rows: number): void {
     this.maxRows = Number.isFinite(rows) ? Math.max(1, Math.floor(rows)) : Number.POSITIVE_INFINITY
+    // Any live row-budget change is a resize boundary: a press captured
+    // against the old grant can never survive it, even if a later resize
+    // restores the same numbers before the release.
+    this.jobHistoryPressed = undefined
     this.recomputeVisibleBudget()
     this.ensureVisible()
     // Before the first paint the recorded viewport is the live grant (the
@@ -234,18 +348,23 @@ export class TaskBrowserPanel implements Component, Focusable {
   /** Derive the item window from the current chrome and row budget. */
   private recomputeVisibleBudget(): void {
     const prefix = (this.options.header === undefined ? 0 : 2) + (this.searchMode ? 2 : 0)
+    const history = this.historyControlVisible() ? 1 : 0
     const trailing = 2 // blank separator + navigation hint
     const refreshLine = this.refreshError !== undefined ? 1 : 0
     const group = this.filtered.some(item => item.group !== undefined) ? 1 : 0
     const budget = this.maxRows === Number.POSITIVE_INFINITY
       ? this.configuredMaxVisible
-      : this.maxRows - prefix - trailing - refreshLine - group
+      : this.maxRows - prefix - history - trailing - refreshLine - group
     this.maxVisible = Math.max(1, Math.min(this.configuredMaxVisible, budget))
   }
 
   /** Replace rows while preserving the selected identity where possible. */
   setItems(items: readonly TaskPanelItem[], preferredValue?: string): void {
+    this.mousePressedAction = undefined
+    this.jobHistoryPressed = undefined
     const previousValue = this.filtered[this.selected]?.value
+    const previousIndex = this.selected
+    const previousSource = this.filtered[this.selected]?.source
     this.items = [...items]
     this.loading = false
     // Forget exposures whose row left the attention set: a STABLE id can
@@ -264,23 +383,63 @@ export class TaskBrowserPanel implements Component, Focusable {
     if (preferredValue !== undefined) this.preferredValue = preferredValue
     this.rebuildTypeCycle()
     if (this.activeType !== null && !this.typeOrder.includes(this.activeType)) this.activeType = null
+    // The manual history disclosure is meaningful only while the authority
+    // still lists a terminal Job (a type filter hiding all of them does NOT
+    // clear it — switching the filter back restores the same manual state).
+    if (!this.items.some(item => item.source === 'job' && !isTaskItemActive(item))) {
+      this.jobHistoryExpanded = false
+    }
     this.reproject(false)
     if (this.pendingStopValue !== undefined && !this.canStop(this.items.find(item => item.value === this.pendingStopValue))) {
       this.pendingStopValue = undefined
     }
-    if (this.selectionTouched && previousValue !== undefined) {
-      const index = this.filtered.findIndex(item => item.value === previousValue)
-      if (index !== -1) {
-        this.selected = index
-        this.ensureVisible()
+    // Identity-first restoration: a still-visible row keeps the cursor. A Job
+    // the new projection hid (terminal transition / history collapse) falls
+    // back to the first visible ACTIVE Job, then to the nearest projected
+    // index; a non-Job row keeps the original preference behavior.
+    const keptIndex = previousValue === undefined ? -1 : this.filtered.findIndex(item => item.value === previousValue)
+    if (this.selectionTouched && keptIndex !== -1) {
+      this.selected = keptIndex
+      this.ensureVisible()
+      this.cancelPendingStopIfSelectionMoved()
+      return
+    }
+    if (!this.selectionTouched) {
+      this.selectPreferred()
+      // An untouched cursor follows the caller's preferred row while it is
+      // visible; otherwise the Job-transition fallback below applies.
+      if (this.preferredValue !== undefined && this.filtered.some(item => item.value === this.preferredValue)) {
+        this.cancelPendingStopIfSelectionMoved()
         return
       }
     }
+    if (previousSource === 'job') {
+      const activeJobIndex = this.filtered.findIndex(item => item.source === 'job' && isTaskItemActive(item))
+      this.selected = activeJobIndex !== -1
+        ? activeJobIndex
+        : Math.max(0, Math.min(previousIndex, this.filtered.length - 1))
+      this.ensureVisible()
+      this.cancelPendingStopIfSelectionMoved()
+      return
+    }
     if (!this.selectionTouched) this.selectPreferred()
+    this.cancelPendingStopIfSelectionMoved()
+  }
+
+  /** A refresh that moves the selection away from the armed task must cancel
+   *  the destructive confirmation, mirroring keyboard navigation. Otherwise
+   *  the bar would paint a Confirm action whose target is no longer the
+   *  selected row and whose mouse currentness check would reject it. */
+  private cancelPendingStopIfSelectionMoved(): void {
+    if (this.pendingStopValue === undefined) return
+    if (this.filtered[this.selected]?.value === this.pendingStopValue) return
+    this.pendingStopValue = undefined
   }
 
   /** Set the async refresh state without discarding cached rows. */
   setRefreshState(state: 'loading' | 'ready' | 'stale', error?: string): void {
+    this.mousePressedAction = undefined
+    this.jobHistoryPressed = undefined
     this.loading = state === 'loading'
     this.refreshError = state === 'stale' ? error ?? 'Refresh failed' : undefined
     if (state === 'ready') this.loading = false
@@ -288,6 +447,51 @@ export class TaskBrowserPanel implements Component, Focusable {
     // paging/ack do not keep the pre-banner window until the next projection.
     this.recomputeVisibleBudget()
     this.requestRender()
+  }
+
+  /**
+   * FR2: replace the READ-ONLY Team page DTO (forwarded from the runtime's
+   * one subscription). Team state only: Work rows, its type order, Stop state
+   * and selection are never touched here.
+   */
+  setTeamPage(value: TeamBrowserPresentation | undefined): void {
+    if (value === undefined) {
+      // Root eligibility went unknown → not-root: REVOKE the Team page and fall
+      // back to Work-only. Work state is untouched.
+      this.team = undefined
+      this.teamSelectedValue = undefined
+      this.teamScroll = 0
+      this.teamExpandedTaskId = undefined
+      this.teamSearchMode = false
+      if (this.pageView === 'team') this.pageView = 'work'
+      this.updateInputFocus()
+      this.requestRender()
+      return
+    }
+    this.team = value
+    // Drop an expanded task that no longer exists in the new snapshot (identity,
+    // not index — a revision reuse must not carry disclosure).
+    if (this.teamExpandedTaskId !== undefined) {
+      const snapshot = value.snapshot
+      const stillExists = snapshot.kind === 'ready'
+        && snapshot.tasks.some(task => task.id === this.teamExpandedTaskId)
+      if (!stillExists) this.teamExpandedTaskId = undefined
+    }
+    // Keep the Team selection valid against the new selectable set.
+    const selectable = this.teamSelectableValues()
+    if (this.teamSelectedValue === undefined || !selectable.includes(this.teamSelectedValue)) {
+      this.teamSelectedValue = selectable[0]
+    }
+    if (this.pageView === 'team') {
+      this.ensureTeamVisible()
+      this.requestRender()
+    }
+  }
+
+  /** Re-apply input focus against the current page + search-mode state. */
+  private updateInputFocus(): void {
+    this.searchInput.focused = this._focused && this.pageView === 'work' && this.searchMode
+    this.teamSearchInput.focused = this._focused && this.pageView === 'team' && this.teamSearchMode
   }
 
   /** Current rows after scope/type/search/disclosure projection. */
@@ -345,6 +549,116 @@ export class TaskBrowserPanel implements Component, Focusable {
     return this.filtered.length
   }
 
+  /** Terminal Job rows after the CURRENT Work type filter. Derived from the
+   *  current authoritative rows on demand — never cached as a second roster. */
+  private jobHistoryCandidates(): TaskPanelItem[] {
+    return this.items.filter(item => item.source === 'job'
+      && !isTaskItemActive(item)
+      && (this.activeType === null || item.type === this.activeType))
+  }
+
+  /** Active Job rows after the CURRENT Work type filter. */
+  private activeJobCount(): number {
+    return this.items.filter(item => item.source === 'job'
+      && isTaskItemActive(item)
+      && (this.activeType === null || item.type === this.activeType)).length
+  }
+
+  /** Whether the Work history disclosure is paintable/actionable: Full Work
+   *  Tracked, no search editing or non-empty query, no pending Stop, no type
+   *  list, and at least one terminal Job candidate. */
+  private historyControlVisible(): boolean {
+    return !this.disposed
+      && this.pageView === 'work'
+      && !this.filterOpen
+      && this.scope === 'all'
+      && !this.searchMode
+      && this.pendingStopValue === undefined
+      && this.getFilter().trim() === ''
+      && this.jobHistoryCandidates().length > 0
+  }
+
+  /** The ONE Work history disclosure chrome row. Only the complete painted
+   *  action label is a pointer target; the `!N unreviewed` suffix is
+   *  informational and never the click span. */
+  private historyControl(width: number): { line: string; hit: TaskMouseHit } | undefined {
+    if (!this.historyControlVisible()) return undefined
+    const candidates = this.jobHistoryCandidates()
+    const count = candidates.length
+    const unreviewed = candidates.filter(item => item.attention === true).length
+    const expanded = this.jobHistoryExpanded
+    const verb = expanded
+      ? `Hide ${count} past jobs`
+      : this.activeJobCount() > 0 ? `Show ${count} past jobs` : `Show ${count} jobs`
+    const key = componentKeymap.keyHint('tasks.jobs.toggleHistory')
+    const glyph = expanded ? '▾' : '▸'
+    const actionPlain = `${glyph} ${verb} [${key}]`
+    const actionStyled = `${color.textMuted(glyph)} ${color.text(verb)} ${color.textMuted(`[${key}]`)}`
+    const suffixPlain = unreviewed > 0 ? ` · !${unreviewed} unreviewed` : ''
+    const suffixStyled = unreviewed > 0
+      ? `${color.textMuted(' · ')}${color.error(`!${unreviewed} unreviewed`)}`
+      : ''
+    const actionWidth = visibleWidth(actionPlain)
+    if (actionWidth > width) {
+      // A truncated action label is honest text but an inert target: the
+      // pointer may only hit the COMPLETE painted Show/Hide label.
+      return { line: truncateToWidth(`${actionStyled}${suffixStyled}`, width, '…'), hit: { kind: 'inert' } }
+    }
+    let line = actionStyled
+    if (suffixPlain !== '') {
+      const remaining = width - actionWidth
+      if (remaining > 0) line += truncateToWidth(suffixStyled, remaining, '…')
+    }
+    return {
+      line,
+      hit: { kind: 'job-history', startCol: 0, endCol: actionWidth, expanded, count, unreviewed },
+    }
+  }
+
+  /** The ONE toggle shared by `j` and the painted control. It changes only
+   *  the panel-local disclosure, re-projects, restores a legal selection and
+   *  requests a repaint — never a roster/ack/Stop mutation. */
+  private toggleJobHistory(): void {
+    if (!this.historyControlVisible()) return
+    const candidates = this.jobHistoryCandidates()
+    if (candidates.length === 0) return
+    const previousValue = this.filtered[this.selected]?.value
+    const previousIndex = this.selected
+    this.jobHistoryExpanded = !this.jobHistoryExpanded
+    this.selectionTouched = true
+    this.reproject(false)
+    if (this.jobHistoryExpanded) {
+      const firstHistory = this.filtered.findIndex(item => item.source === 'job' && !isTaskItemActive(item))
+      if (firstHistory !== -1) {
+        this.selected = firstHistory
+        this.ensureVisible()
+      }
+    } else {
+      const keptIndex = previousValue === undefined ? -1 : this.filtered.findIndex(item => item.value === previousValue)
+      if (keptIndex !== -1) {
+        this.selected = keptIndex
+      } else {
+        const activeJobIndex = this.filtered.findIndex(item => item.source === 'job' && isTaskItemActive(item))
+        this.selected = activeJobIndex !== -1
+          ? activeJobIndex
+          : Math.max(0, Math.min(previousIndex, this.filtered.length - 1))
+      }
+      this.ensureVisible()
+    }
+    this.cancelPendingStopIfSelectionMoved()
+    this.requestRender()
+  }
+
+  /** The live identity of one job-history hit: the same candidates, the same
+   *  expanded state, the same complete label span. */
+  private jobHistoryControlCurrent(hit: { readonly expanded: boolean; readonly count: number }): boolean {
+    if (!this.historyControlVisible()) return false
+    if (this.options.mouseActionsEnabled?.() !== true) return false
+    if (this.interactionCurrent?.() !== true) return false
+    return this.jobHistoryCandidates().length === hit.count
+      && this.jobHistoryExpanded === hit.expanded
+  }
+
   private rebuildTypeCycle(): void {
     const seen: string[] = []
     for (const item of this.items) {
@@ -363,6 +677,9 @@ export class TaskBrowserPanel implements Component, Focusable {
       collapsedIds: this.collapsedIds,
       autoExpandRunning: true,
       includeAttentionInActive: false,
+      hideInactiveJobs: this.scope === 'all'
+        && !this.jobHistoryExpanded
+        && query.trim() === '',
     })
     this.filtered = [...projection.rows]
     // The projection changed the row set: re-derive the live item budget
@@ -387,23 +704,6 @@ export class TaskBrowserPanel implements Component, Focusable {
     this.ensureVisible()
   }
 
-  private cycleType(direction: 1 | -1): void {
-    if (this.typeOrder.length === 0) return
-    const index = this.activeType === null ? -1 : this.typeOrder.indexOf(this.activeType)
-    if (index === -1) {
-      // All (null): forward enters the first type, backward the last, so
-      // the cycle is symmetric without a second code path.
-      this.activeType = direction > 0
-        ? this.typeOrder[0]!
-        : this.typeOrder[this.typeOrder.length - 1]!
-    } else {
-      const next = index + direction
-      this.activeType = next < 0 || next >= this.typeOrder.length ? null : this.typeOrder[next]!
-    }
-    this.selectionTouched = true
-    this.reproject(true)
-  }
-
   private toggleScope(): void {
     this.scope = this.scope === 'active' ? 'all' : 'active'
     this.selectionTouched = true
@@ -413,7 +713,7 @@ export class TaskBrowserPanel implements Component, Focusable {
   private enterSearchMode(): void {
     if (!this.searchEnabled || this.searchMode) return
     this.searchMode = true
-    this.searchInput.focused = this._focused
+    this.updateInputFocus()
     this.selectionTouched = true
     // The search chrome (2 rows) enters the budget estimate immediately.
     this.recomputeVisibleBudget()
@@ -423,10 +723,501 @@ export class TaskBrowserPanel implements Component, Focusable {
   private exitSearchMode(): void {
     if (!this.searchMode) return
     this.searchMode = false
-    this.searchInput.focused = false
+    this.updateInputFocus()
     // The search chrome (2 rows) leaves the budget estimate immediately.
     this.recomputeVisibleBudget()
     this.requestRender()
+  }
+
+  private enterTeamSearchMode(): void {
+    if (this.teamSearchMode) return
+    this.teamSearchMode = true
+    this.updateInputFocus()
+    this.requestRender()
+  }
+
+  private exitTeamSearchMode(): void {
+    if (!this.teamSearchMode) return
+    this.teamSearchMode = false
+    this.updateInputFocus()
+    this.requestRender()
+  }
+
+  // ── FR2 Team page: read-only data / selection helpers ─────────────────────
+
+  private teamQuery(): string {
+    return (this.teamSearchInput.getValue() ?? '').trim().toLowerCase()
+  }
+
+  /** The filtered, ordered Team rows: members first, then shared tasks. */
+  private teamViewRows(): TeamViewRow[] {
+    const team = this.team
+    if (team === undefined) return []
+    const query = this.teamQuery()
+    const rows: TeamViewRow[] = []
+    for (const member of team.members) {
+      if (query !== '' && !`${member.name} ${member.id} ${member.kind}`.toLowerCase().includes(query)) continue
+      rows.push({ kind: 'member', value: member.value, member })
+    }
+    const snapshot = team.snapshot
+    if (snapshot.kind === 'ready') {
+      for (const task of snapshot.tasks) {
+        const haystack = `${task.subject} ${task.description} ${task.ownerName ?? ''} ${task.ownerId ?? ''} ${task.id}`.toLowerCase()
+        if (query !== '' && !haystack.includes(query)) continue
+        rows.push({ kind: 'task', value: `task:${task.id}`, task })
+      }
+    }
+    return rows
+  }
+
+  private teamSelectableValues(): string[] {
+    return this.teamViewRows().map(row => row.value)
+  }
+
+  private resetTeamSelectionToFirst(): void {
+    const values = this.teamSelectableValues()
+    if (this.teamSelectedValue === undefined || !values.includes(this.teamSelectedValue)) {
+      this.teamSelectedValue = values[0]
+    }
+  }
+
+  private moveTeam(delta: number): void {
+    const values = this.teamSelectableValues()
+    if (values.length === 0) return
+    const index = this.teamSelectedValue === undefined ? -1 : values.indexOf(this.teamSelectedValue)
+    const next = index < 0 ? 0 : Math.max(0, Math.min(values.length - 1, index + delta))
+    this.teamSelectedValue = values[next]
+    this.ensureTeamVisible()
+    this.requestRender()
+  }
+
+  private pageTeam(direction: -1 | 1): void {
+    const values = this.teamSelectableValues()
+    if (values.length === 0) return
+    const index = this.teamSelectedValue === undefined ? -1 : values.indexOf(this.teamSelectedValue)
+    const step = Math.max(1, this.teamLastRenderedCount)
+    const next = index < 0 ? 0 : Math.max(0, Math.min(values.length - 1, index + direction * step))
+    this.teamSelectedValue = values[next]
+    this.ensureTeamVisible()
+    this.requestRender()
+  }
+
+  /** Enter on a Team TASK row toggles its (single) disclosure; a member row
+   *  has NO write and NO navigation. */
+  private toggleTeamSelected(): void {
+    const selected = this.teamViewRows().find(row => row.value === this.teamSelectedValue)
+    if (selected === undefined || selected.kind !== 'task') return
+    this.teamExpandedTaskId = this.teamExpandedTaskId === selected.task.id ? undefined : selected.task.id
+    this.requestRender()
+  }
+
+  /** The Team page row budget from the live grant + current chrome. */
+  private teamBudget(): number {
+    if (!Number.isFinite(this.maxRows)) return Math.max(1, this.configuredMaxVisible)
+    // Header (1) + blank (1) + team status (1) + optional failure/stale line +
+    // footer blank (1) + hint (1).
+    const chrome = 1 + 1 + 1 + 1 + 1
+    return Math.max(1, this.maxRows - chrome)
+  }
+
+  private ensureTeamVisible(): void {
+    const total = this.teamSelectableValues().length
+    const budget = this.teamBudget()
+    const values = this.teamSelectableValues()
+    const index = this.teamSelectedValue === undefined ? -1 : values.indexOf(this.teamSelectedValue)
+    if (index < 0) return
+    if (index < this.teamScroll) this.teamScroll = index
+    else if (index >= this.teamScroll + budget) this.teamScroll = index - budget + 1
+    this.teamScroll = Math.max(0, Math.min(this.teamScroll, Math.max(0, total - budget)))
+  }
+
+  // ── FR2 Team page: rendering ──────────────────────────────────────────────
+
+  /** The `Tasks · [Work]  Team` / `Tasks · Work  [Team]` tab prefix. */
+  private tabsPrefix(active: 'work' | 'team'): string {
+    return this.tabSpans(active).text
+  }
+
+  private teamStatusShort(): string {
+    const snapshot = this.team!.snapshot
+    if (snapshot.kind === 'ready') return snapshot.enabled ? 'Agent Team: On (read-only)' : 'Agent Team: Off'
+    if (snapshot.kind === 'stale') return 'Agent Team: stale'
+    return 'Agent Team: unavailable'
+  }
+
+  /** The one optional status/error line under the Team header (never fabricated
+   *  empty data — a stale/unavailable board says so explicitly). */
+  private teamErrorLine(): string | undefined {
+    const snapshot = this.team!.snapshot
+    if (snapshot.kind === 'stale') return `stale: ${snapshot.reason}`
+    if (snapshot.kind === 'unavailable') return `unavailable: ${snapshot.reason}`
+    if (snapshot.failure !== undefined) return `warning: ${snapshot.failure}`
+    if (!snapshot.enabled) return 'Team is Off · Enable it from /model'
+    return undefined
+  }
+
+  private teamHeaderLine(): string {
+    return `${this.tabsPrefix('team')}   ${this.teamStatusShort()}`
+  }
+
+  private emptyTeamText(): string {
+    return this.team?.snapshot.kind === 'ready' ? 'No shared tasks' : 'Team board unavailable'
+  }
+
+  private teamTaskStatusWord(task: TeamBoardTask): string {
+    if (task.status === 'completed') return 'completed'
+    if (task.status === 'in_progress') return 'in_progress'
+    return task.ready ? 'ready' : 'blocked'
+  }
+
+  private teamTaskStatusColor(task: TeamBoardTask): (text: string) => string {
+    if (task.status === 'completed') return color.textDim
+    if (task.status === 'in_progress') return color.primary
+    return task.ready ? color.success : color.warning
+  }
+
+  private teamRowMain(row: TeamViewRow, selected: boolean, width: number): string {
+    const pointer = selected ? color.primary(POINTER) : ' '
+    if (row.kind === 'member') {
+      const indent = '  '.repeat(Math.max(0, row.member.depth))
+      const plain = `${pointer} ${indent}${sanitizedPhysicalLine(row.member.name)} · ${row.member.activity}`
+      if (selected) return truncateToWidth(color.textStrong(plain), width, '…')
+      const tone = row.member.activity === 'running' ? color.primary
+        : row.member.activity === 'idle' ? color.textDim : color.textMuted
+      return truncateToWidth(tone(plain), width, '…')
+    }
+    const owner = row.task.ownerName ?? row.task.ownerId ?? ''
+    const statusWord = this.teamTaskStatusWord(row.task)
+    const body = `${statusWord.padEnd(11)} ${sanitizedPhysicalLine(row.task.subject)}${owner === '' ? '' : ` · ${sanitizedPhysicalLine(owner)}`}`
+    const plain = `${pointer} ${body}`
+    if (selected) return truncateToWidth(color.textStrong(plain), width, '…')
+    return truncateToWidth(this.teamTaskStatusColor(row.task)(plain), width, '…')
+  }
+
+  private memberDetailLines(member: TeamMemberPresentation): string[] {
+    return ['Selected', member.name, `kind      ${member.kind}`, `activity  ${member.activity}`, `session   ${member.id}`]
+      .map(sanitizedPhysicalLine)
+  }
+
+  /** The `Tasks · [Work]  Team` tab bar plus the PAINTED column ranges of each
+   *  tab label, so pointer hits target the real labels (not the whole row). */
+  private tabSpans(active: 'work' | 'team'): { text: string; spans: readonly TabSpan[] } {
+    // The title is caller/durable text and is painted through
+    // `sanitizedPhysicalLine`; measure the SAME sanitized projection so control
+    // bytes can never shift the logical label columns away from the cells.
+    const title = sanitizedPhysicalLine(this.options.header ?? 'Tasks')
+    const workLabel = active === 'work' ? '[Work]' : 'Work'
+    const teamLabel = active === 'team' ? '[Team]' : 'Team'
+    const sep = ' · '
+    const gap = '  '
+    const text = `${title}${sep}${workLabel}${gap}${teamLabel}`
+    const workStart = visibleWidth(title) + visibleWidth(sep)
+    const workEnd = workStart + visibleWidth(workLabel)
+    const teamStart = workEnd + visibleWidth(gap)
+    const teamEnd = teamStart + visibleWidth(teamLabel)
+    return {
+      text,
+      spans: [
+        { target: 'work', startCol: workStart, endCol: workEnd },
+        { target: 'team', startCol: teamStart, endCol: teamEnd },
+      ],
+    }
+  }
+
+  /** Resolve the complete Work/Team labels in the header text that was really
+   *  painted. `fullHeaderPlain` is the sanitized, untruncated header and
+   *  `paintedHeaderPlain` is exactly what entered the frame; a clipped label
+   *  (including one covered by the final `…`) publishes no span. */
+  private tabHitForPaintedHeader(
+    active: 'work' | 'team',
+    fullHeaderPlain: string,
+    paintedHeaderPlain: string,
+  ): TaskMouseHit {
+    if (this.options.mouseActionsEnabled?.() !== true || this.team === undefined) return { kind: 'inert' }
+    const truncated = visibleWidth(paintedHeaderPlain) < visibleWidth(fullHeaderPlain)
+    const paintedLimit = truncated
+      ? Math.max(0, visibleWidth(paintedHeaderPlain) - 1)
+      : visibleWidth(paintedHeaderPlain)
+    const spans = this.tabSpans(active).spans.filter(span => span.endCol <= paintedLimit)
+    return spans.length === 0 ? { kind: 'inert' } : { kind: 'tab', spans }
+  }
+
+  private teamDetailLines(task: TeamBoardTask): string[] {
+    const lines = ['Selected', task.subject, `status    ${this.teamTaskStatusWord(task)}`, `owner     ${task.ownerName ?? task.ownerId ?? '—'}`]
+    if (task.blockedBy.length > 0) lines.push(`blocked by ${task.blockedBy.join(', ')}`)
+    if (task.writeScopes.length > 0) lines.push(`scopes    ${task.writeScopes.join(', ')}`)
+    for (const warning of task.writeScopeWarnings) lines.push(`warning   ${warning}`)
+    lines.push(`desc      ${task.description}`)
+    return lines.map(sanitizedPhysicalLine)
+  }
+
+  /** The compact inline detail shown under the SELECTED, expanded Team task at
+   *  widths below 110 — it must expose the SAME contracted read-only facts
+   *  (description, blockers, write scopes and advisory warnings) the >=110 side
+   *  pane does, never just status/owner. */
+  private teamTaskInlineDetail(task: TeamBoardTask): string[] {
+    const lines: string[] = []
+    if (task.description !== '') lines.push(`desc: ${task.description}`)
+    if (task.blockedBy.length > 0) lines.push(`blocked by: ${task.blockedBy.join(', ')}`)
+    if (task.writeScopes.length > 0) lines.push(`scopes: ${task.writeScopes.join(', ')}`)
+    for (const warning of task.writeScopeWarnings) lines.push(`warning: ${warning}`)
+    if (lines.length === 0) lines.push('no extra details')
+    return lines.map(sanitizedPhysicalLine)
+  }
+
+  private teamSearchLine(width: number): string {
+    const value = this.teamSearchInput.getValue() ?? ''
+    const rendered = this.teamSearchInput.render(Math.max(1, width - 2))[0] ?? ''
+    const stripped = rendered.startsWith('> ') ? rendered.slice(2) : rendered
+    return value === '' ? ' / search…' : ` ${stripped}`
+  }
+
+  private renderTeam(safeWidth: number): string[] {
+    const team = this.team
+    if (team === undefined) {
+      // A Team page must never be reachable without a DTO; fail closed to Work.
+      this.pageView = 'work'
+      return this.renderWork(safeWidth)
+    }
+    const limit = Number.isFinite(this.maxRows) ? Math.max(1, Math.floor(this.maxRows)) : Number.POSITIVE_INFINITY
+    const rows = this.teamViewRows()
+    if (this.teamSelectedValue === undefined || !rows.some(row => row.value === this.teamSelectedValue)) {
+      this.teamSelectedValue = rows[0]?.value
+    }
+    const fullHeaderPlain = sanitizedPhysicalLine(this.teamHeaderLine())
+    const headerText = truncateToWidth(fullHeaderPlain, safeWidth, '…')
+    const headerHit = this.tabHitForPaintedHeader('team', fullHeaderPlain, headerText)
+    const errorRaw = this.teamErrorLine()
+    const errorText = errorRaw === undefined ? undefined : truncateToWidth(sanitizedPhysicalLine(errorRaw), safeWidth, '…')
+    const searchLine = this.teamSearchMode ? this.teamSearchLine(safeWidth) : undefined
+    // The Team hint is action-bar budgeted so `Esc close` (highest retention)
+    // survives very narrow grants instead of being cut mid-word. At >=110 the
+    // right pane ALWAYS shows the selected task's details, so `Enter` no longer
+    // toggles anything visible there — do not advertise it at that width.
+    const teamHintSegments: ActionBarSegment[] = [{ text: '↑↓ select', priority: 80 }]
+    if (safeWidth < 110) teamHintSegments.push({ text: 'Enter details', priority: 90 })
+    teamHintSegments.push({ text: `${componentKeymap.keyHint('tasks.tab.next')} Work`, priority: 15 })
+    const teamTargets = new Map<number, {
+      action: TaskMouseAction
+      value: string
+      pendingValue: string | undefined
+      role: 'primary' | 'secondary'
+    }>()
+    if (this.options.mouseActionsEnabled?.() === true) {
+      // S0 whitelist: the Team page's ONLY new pointer exits. Esc in search
+      // mode backs out of the query (never closes the browser), so the two
+      // states advertise different verbs.
+      const back = this.teamSearchMode
+      teamTargets.set(teamHintSegments.length, {
+        action: back ? 'team-search-back' : 'team-close',
+        value: '',
+        pendingValue: undefined,
+        role: 'secondary',
+      })
+      teamHintSegments.push({ text: back ? 'Back [Esc]' : 'Close [Esc]', priority: 1000 })
+    } else {
+      teamHintSegments.push({ text: 'Esc close', priority: 1000 })
+    }
+    const hint = this.paintActionBar(teamHintSegments, Math.max(0, safeWidth - 2), teamTargets)
+    const selectedIndex = rows.findIndex(row => row.value === this.teamSelectedValue)
+
+    const build = (count: number, start: number): { lines: string[]; hits: TaskMouseHit[] } => {
+      const out: string[] = []
+      const outHits: TaskMouseHit[] = []
+      out.push(color.textStrong(headerText)); outHits.push(headerHit)
+      if (searchLine !== undefined) {
+        out.push(this.teamSearchMode && this.teamQuery() === '' ? color.textDim(searchLine) : searchLine)
+        outHits.push({ kind: 'search' })
+      }
+      if (errorText !== undefined) { out.push(color.warning(errorText)); outHits.push({ kind: 'inert' }) }
+      out.push(''); outHits.push({ kind: 'inert' })
+      const listLines: string[] = []
+      const listHits: TaskMouseHit[] = []
+      const end = Math.min(rows.length, start + count)
+      let lastKind: TeamViewRow['kind'] | undefined
+      for (let index = start; index < end; index += 1) {
+        const row = rows[index]!
+        if (row.kind !== lastKind) {
+          listLines.push(color.textMuted(row.kind === 'member' ? 'Members' : 'Shared Tasks'))
+          listHits.push({ kind: 'inert' })
+          lastKind = row.kind
+        }
+        const selected = index === selectedIndex
+        listLines.push(this.teamRowMain(row, selected, safeWidth))
+        listHits.push({ kind: 'item', value: row.value, index })
+        if (safeWidth < 110 && selected && row.kind === 'task' && this.teamExpandedTaskId === row.task.id) {
+          for (const detail of this.teamTaskInlineDetail(row.task)) {
+            listLines.push(color.textDim(truncateToWidth(`    ${detail}`, safeWidth, '…')))
+            listHits.push({ kind: 'inert' })
+          }
+        }
+      }
+      if (rows.length === 0) {
+        listLines.push(color.textDim(truncateToWidth(this.emptyTeamText(), safeWidth, '…')))
+        listHits.push({ kind: 'inert' })
+      }
+      if (safeWidth >= 110) {
+        const selected = rows[selectedIndex]
+        const details = selected === undefined ? ['Selected', '—']
+          : selected.kind === 'task' ? this.teamDetailLines(selected.task) : this.memberDetailLines(selected.member)
+        const listWidth = Math.max(40, Math.floor((safeWidth - 3) * 0.58))
+        const detailWidth = Math.max(24, safeWidth - listWidth - 3)
+        const max = Math.max(listLines.length, details.length)
+        for (let index = 0; index < max; index += 1) {
+          const left = truncateToWidth(listLines[index] ?? '', listWidth, '…')
+          const leftPad = ' '.repeat(Math.max(0, listWidth - visibleWidth(left)))
+          const right = truncateToWidth(details[index] ?? '', detailWidth, '…')
+          out.push(`${left}${leftPad} ${color.border('│')} ${right}`)
+          const windowHit = listHits[index]
+          // The left list cell is the only pointer target; the right detail
+          // pane is inert (carry listWidth so handleTeamMouse can reject it).
+          outHits.push(windowHit !== undefined && windowHit.kind === 'item' ? { ...windowHit, listWidth } : (windowHit ?? { kind: 'inert' }))
+        }
+      } else {
+        out.push(...listLines)
+        outHits.push(...listHits)
+      }
+      if (rows.length > count) {
+        out.push(color.textMuted(`  ${selectedIndex + 1}/${rows.length}`)); outHits.push({ kind: 'inert' })
+      }
+      out.push(''); outHits.push({ kind: 'inert' })
+      out.push(hint.line); outHits.push(hint.hit)
+      return { lines: out, hits: outHits }
+    }
+
+    // The window is SELECTED-CENTERED (like Work's fit loop): every shrink
+    // re-derives start around selectedIndex, so the selected main row is always
+    // inside the painted window no matter how far the grant shrinks.
+    const windowStart = (windowCount: number): number => {
+      if (selectedIndex < 0) return 0
+      const desired = Math.max(0, selectedIndex - Math.floor(windowCount / 2))
+      return Math.min(desired, Math.max(0, rows.length - windowCount))
+    }
+    let count = Math.min(Math.max(rows.length, 1), this.teamBudget())
+    let start = windowStart(count)
+    let candidate = build(count, start)
+    while (candidate.lines.length > limit && count > 1) {
+      count -= 1
+      start = windowStart(count)
+      candidate = build(count, start)
+    }
+    if (candidate.lines.length > limit) {
+      // Very short grant: keep header, search (if any), the selected main row
+      // and the hint — never a decorative blank over the selected row/Esc.
+      const slim: string[] = [color.textStrong(headerText)]
+      const slimHits: TaskMouseHit[] = [headerHit]
+      if (searchLine !== undefined) { slim.push(searchLine); slimHits.push({ kind: 'search' }) }
+      const selected = rows[selectedIndex]
+      if (selected !== undefined) {
+        slim.push(this.teamRowMain(selected, true, safeWidth))
+        slimHits.push({ kind: 'item', value: selected.value, index: selectedIndex })
+      } else if (rows.length === 0) {
+        slim.push(color.textDim(truncateToWidth(this.emptyTeamText(), safeWidth, '…')))
+        slimHits.push({ kind: 'inert' })
+      }
+      if (slim.length + 1 <= limit) { slim.push(hint.line); slimHits.push(hint.hit) }
+      candidate = { lines: slim.slice(0, limit), hits: slimHits.slice(0, limit) }
+      count = selected === undefined ? 0 : 1
+    }
+    this.teamLastRenderedCount = Math.max(1, count)
+    this.teamScroll = start
+    this.hitMap = candidate.hits
+    return candidate.lines
+  }
+
+  private renderFilter(safeWidth: number): string[] {
+    const limit = Number.isFinite(this.maxRows) ? Math.max(1, Math.floor(this.maxRows)) : Number.POSITIVE_INFINITY
+    const candidates = this.filterCandidates()
+    this.filterSelected = Math.max(0, Math.min(candidates.length - 1, this.filterSelected))
+    const pointer = this.options.mouseActionsEnabled?.() === true
+    const lines: string[] = []
+    const hits: TaskMouseHit[] = []
+    lines.push(color.textStrong(truncateToWidth('Type filter', safeWidth, '…'))); hits.push({ kind: 'inert' })
+    lines.push(''); hits.push({ kind: 'inert' })
+    // Chrome = title + blank + blank + hint. The scroll indicator is budgeted in
+    // TOO when the list overflows, so a scrolling list never degrades just
+    // because the indicator pushed it one row past the grant.
+    const available = Number.isFinite(limit) ? Math.max(1, limit - 4) : candidates.length
+    const scrolling = candidates.length > available
+    const budget = scrolling && Number.isFinite(limit) ? Math.max(1, available - 1) : available
+    let start = 0
+    if (candidates.length > budget) start = Math.max(0, Math.min(this.filterSelected, candidates.length - budget))
+    const end = Math.min(candidates.length, start + budget)
+    for (let index = start; index < end; index += 1) {
+      const chosen = candidates[index]
+      const label = chosen === null ? 'All' : chosen
+      // A Job `kind` is open-extension text: project to ONE safe physical row and
+      // width-truncate before it enters the line budget / hit map.
+      const safeLabel = truncateToWidth(sanitizedPhysicalLine(label), Math.max(1, safeWidth - 2), '…')
+      const selected = index === this.filterSelected
+      const pointerMark = selected ? color.primary('> ') : '  '
+      lines.push(`${pointerMark}${selected ? color.textStrong(safeLabel) : color.text(safeLabel)}`)
+      hits.push({ kind: 'item', value: chosen === null ? 'filter:__ALL__' : `filter:type:${chosen}`, index })
+    }
+    if (candidates.length > budget) {
+      lines.push(color.textMuted(`  ${this.filterSelected + 1}/${candidates.length}`)); hits.push({ kind: 'inert' })
+    }
+    lines.push(''); hits.push({ kind: 'inert' })
+    // The normal and degraded FULLSCREEN paths share this ONE result: the same
+    // complete `Cancel [Esc]` span and `filter-cancel` action. The old
+    // `↑↓ · Enter · Esc` fallback tail is gone from Fullscreen; Regular/Main
+    // keeps its keyboard-only hint with no target.
+    const actionHint = pointer
+      ? this.paintActionBar(
+        [
+          { text: '↑↓ select', priority: 80 },
+          { text: 'Enter apply', priority: 90 },
+          { text: 'Cancel [Esc]', priority: 1000 },
+        ],
+        Math.max(0, safeWidth - 2),
+        new Map([[2, { action: 'filter-cancel' as const, value: '', pendingValue: undefined, role: 'secondary' as const }]]),
+      )
+      : {
+          line: color.textMuted(truncateToWidth('  ↑↓ select · Enter apply · Esc cancel', safeWidth, '…')),
+          hit: { kind: 'inert' as const },
+        }
+    lines.push(actionHint.line)
+    hits.push(actionHint.hit)
+    if (lines.length > limit) {
+      const chosen = candidates[this.filterSelected]
+      const label = chosen === null ? 'All' : chosen ?? ''
+      const safeLabel = truncateToWidth(sanitizedPhysicalLine(label), Math.max(1, safeWidth - 2), '…')
+      const candidateLine = `${color.primary('> ')}${color.textStrong(safeLabel)}`
+      const candidateHit: TaskMouseHit = {
+        kind: 'item',
+        value: chosen === null ? 'filter:__ALL__' : `filter:type:${chosen ?? ''}`,
+        index: this.filterSelected,
+      }
+      if (pointer) {
+        // Fullscreen budget ladder: >=3 keeps title + candidate + the complete
+        // Action Bar; exactly 2 keeps candidate + Cancel; 1 paints only the
+        // candidate and publishes no invisible exit.
+        const slim = limit >= 3
+          ? [
+              color.textStrong(truncateToWidth('Type filter', safeWidth, '…')),
+              candidateLine,
+              actionHint.line,
+            ].slice(0, limit)
+          : limit === 2 ? [candidateLine, actionHint.line] : [candidateLine]
+        const slimHits = limit >= 3
+          ? [{ kind: 'inert' as const }, candidateHit, actionHint.hit].slice(0, limit)
+          : limit === 2 ? [candidateHit, actionHint.hit] : [candidateHit]
+        this.hitMap = slimHits
+        return slim
+      }
+      // Regular/Main has no application pointer: preserve its keyboard-only
+      // fallback without inventing a button target.
+      const slim = [
+        color.textStrong(truncateToWidth('Type filter', safeWidth, '…')),
+        candidateLine,
+        color.textMuted(truncateToWidth('  ↑↓ · Enter · Esc', safeWidth, '…')),
+      ]
+      const slimHits: TaskMouseHit[] = [{ kind: 'inert' }, candidateHit, { kind: 'inert' }]
+      this.hitMap = slimHits.slice(0, limit)
+      return slim.slice(0, limit)
+    }
+    this.hitMap = hits
+    return lines
   }
 
   private move(delta: number): void {
@@ -458,6 +1249,48 @@ export class TaskBrowserPanel implements Component, Focusable {
     return item.canStop ?? false
   }
 
+  private taskMouseActionCurrent(target: TaskMouseActionHit): boolean {
+    if (this.disposed || this.options.mouseActionsEnabled?.() !== true) return false
+    // The Owner-approved exit whitelist (surface-behavior §Task Center): the
+    // action is current only in the EXACT state that painted it. A pending
+    // destructive confirmation is a modal state: no exit may step around it.
+    if (target.action === 'work-close') {
+      return !this.filterOpen && this.pageView === 'work' && !this.searchMode
+        && this.pendingStopValue === undefined && this.interactionCurrent?.() !== false
+    }
+    if (target.action === 'work-search-back') {
+      return !this.filterOpen && this.pageView === 'work' && this.searchMode
+        && this.pendingStopValue === undefined && this.interactionCurrent?.() !== false
+    }
+    if (target.action === 'team-close') {
+      return !this.filterOpen && this.pageView === 'team' && !this.teamSearchMode
+        && this.pendingStopValue === undefined && this.team !== undefined
+        && this.interactionCurrent?.() !== false
+    }
+    if (target.action === 'team-search-back') {
+      return !this.filterOpen && this.pageView === 'team' && this.teamSearchMode
+        && this.pendingStopValue === undefined && this.team !== undefined
+        && this.interactionCurrent?.() !== false
+    }
+    if (target.action === 'filter-cancel') {
+      return this.filterOpen && this.pendingStopValue === undefined && this.interactionCurrent?.() !== false
+    }
+    const selected = this.selectedItem()
+    if (target.action === 'stop') {
+      return target.pendingValue === undefined
+        && this.pendingStopValue === undefined
+        && selected?.value === target.value
+        && this.canStop(selected)
+    }
+    if (target.action === 'confirm-stop') {
+      return target.pendingValue === target.value
+        && this.pendingStopValue === target.value
+        && selected?.value === target.value
+        && this.canStop(selected)
+    }
+    return target.pendingValue === target.value && this.pendingStopValue === target.value
+  }
+
   private openSelected(): void {
     const item = this.selectedItem()
     if (item === undefined) return
@@ -468,12 +1301,23 @@ export class TaskBrowserPanel implements Component, Focusable {
     const item = this.selectedItem()
     if (!this.canStop(item)) return
     this.pendingStopValue = item!.value
+    // The pending state hides the history control; re-derive the window
+    // budget so its row is returned to the task list in the same frame.
+    this.recomputeVisibleBudget()
+    this.requestRender()
+  }
+
+  private clearPendingStop(): void {
+    if (this.pendingStopValue === undefined) return
+    this.pendingStopValue = undefined
+    this.recomputeVisibleBudget()
     this.requestRender()
   }
 
   private confirmStop(): void {
     const value = this.pendingStopValue
     this.pendingStopValue = undefined
+    this.recomputeVisibleBudget()
     if (value === undefined) return
     const item = this.items.find(candidate => candidate.value === value)
     if (!this.canStop(item)) return
@@ -519,20 +1363,42 @@ export class TaskBrowserPanel implements Component, Focusable {
 
   /** Input ownership is forwarded by FocusForwardingFrame. */
   handleInput(data: string): void {
+    this.mousePressedValue = undefined
+    this.mousePressedAction = undefined
+    this.fr2Pressed = undefined
+    this.jobHistoryPressed = undefined
     // B4-B: the modal Quick mode is retired — the on-demand Task Quick
     // accessory replaced it. This panel is the Full Task Center only, and
     // the Full state machine below is the only keyboard surface.
 
+    // FR2: the Work explicit type-filter list owns input while open. It is a
+    // bounded single-select state, not a second overlay: Tab/Shift+Tab are
+    // CONSUMED here (never a page switch) so a half-finished selection cannot
+    // lose focus.
+    if (this.filterOpen) {
+      this.handleFilterInput(data)
+      return
+    }
+
+    // FR2: the Team page owns input while active. A Team keystroke never reaches
+    // Work Stop/Scope/TypeFilter (no side effects).
+    if (this.pageView === 'team') {
+      this.handleTeamInput(data)
+      return
+    }
+
     if (this.pendingStopValue !== undefined) {
       if (matchesKey(data, 'escape')) {
-        this.pendingStopValue = undefined
-        this.requestRender()
+        this.clearPendingStop()
         return
       }
       if (matchesKey(data, 'y') || data === 'Y') {
         this.confirmStop()
         return
       }
+      // A Work Stop confirmation forbids a page switch: Tab/Shift+Tab are
+      // consumed with no effect while the destructive confirmation is pending.
+      if (componentKeymap.matches(data, 'tasks.tab.next') || componentKeymap.matches(data, 'tasks.tab.previous')) return
       // A navigation gesture changes selection and therefore invalidates the
       // destructive confirmation. Other keys are ignored, never dispatched.
       if (componentKeymap.matches(data, 'tasks.cursorUp')) this.move(-1)
@@ -543,6 +1409,11 @@ export class TaskBrowserPanel implements Component, Focusable {
     }
 
     if (this.searchMode) {
+      // While search-mode editing, Tab/Shift+Tab switch pages but PRESERVE this
+      // page's query/cursor/searchMode; the keystroke is never appended to the
+      // other page's input.
+      if (componentKeymap.matches(data, 'tasks.tab.next')) { this.switchPage('next'); return }
+      if (componentKeymap.matches(data, 'tasks.tab.previous')) { this.switchPage('prev'); return }
       if (componentKeymap.matches(data, 'tasks.search.exit')) {
         this.exitSearchMode()
         return
@@ -552,10 +1423,8 @@ export class TaskBrowserPanel implements Component, Focusable {
       if (componentKeymap.matches(data, 'tasks.pageUp')) { this.page(-1); return }
       if (componentKeymap.matches(data, 'tasks.pageDown')) { this.page(1); return }
       if (componentKeymap.matches(data, 'tasks.open')) { this.openSelected(); return }
-      if (componentKeymap.matches(data, 'tasks.type.next')) { this.cycleType(1); return }
-      if (componentKeymap.matches(data, 'tasks.type.previous')) { this.cycleType(-1); return }
       // In search mode arrows/editing remain with Input. In particular S, A,
-      // R, N and every other printable character are query text, never an
+      // R, F, N and every other printable character are query text, never an
       // action with side effects.
       this.selectionTouched = true
       this.searchInput.handleInput(data)
@@ -567,6 +1436,16 @@ export class TaskBrowserPanel implements Component, Focusable {
       this.enterSearchMode()
       return
     }
+    // Full Work Tracked only, after the four owning states above: `j` toggles
+    // the panel-local terminal-Job history disclosure. In search mode the
+    // same printable remains query text.
+    if (componentKeymap.matches(data, 'tasks.jobs.toggleHistory')) {
+      this.toggleJobHistory()
+      return
+    }
+    if (componentKeymap.matches(data, 'tasks.tab.next')) { this.switchPage('next'); return }
+    if (componentKeymap.matches(data, 'tasks.tab.previous')) { this.switchPage('prev'); return }
+    if (componentKeymap.matches(data, 'tasks.type.filter')) { this.openFilterList(); return }
     if (componentKeymap.matches(data, 'tasks.scope.toggle')) {
       this.toggleScope()
       return
@@ -587,14 +1466,6 @@ export class TaskBrowserPanel implements Component, Focusable {
       this.onRefresh?.()
       return
     }
-    if (componentKeymap.matches(data, 'tasks.type.next')) {
-      this.cycleType(1)
-      return
-    }
-    if (componentKeymap.matches(data, 'tasks.type.previous')) {
-      this.cycleType(-1)
-      return
-    }
     if (componentKeymap.matches(data, 'tasks.cursorUp')) { this.move(-1); return }
     if (componentKeymap.matches(data, 'tasks.cursorDown')) { this.move(1); return }
     if (componentKeymap.matches(data, 'tasks.pageUp')) { this.page(-1); return }
@@ -602,6 +1473,111 @@ export class TaskBrowserPanel implements Component, Focusable {
     if (componentKeymap.matches(data, 'tasks.open')) { this.openSelected(); return }
     if (componentKeymap.matches(data, 'tasks.search.exit')) this.onCancel()
   }
+
+  /** Switch between the Work and Team pages, preserving each page's own state
+   *  (query / cursor / searchMode / disclosure). A no-op when there is no Team
+   *  page (Work-only: a Child, a Workflow-scoped browser, or no Team source). */
+  private switchPage(direction: 'next' | 'prev'): void {
+    void direction
+    if (this.team === undefined) return
+    this.setPage(this.pageView === 'work' ? 'team' : 'work')
+  }
+
+  private setPage(target: 'work' | 'team'): void {
+    if (this.team === undefined || this.pageView === target) return
+    // The ONE page-switch admission: a pending Work Stop confirmation forbids a
+    // page switch from BOTH the keyboard and the pointer (never leave an
+    // unresolved destructive confirmation).
+    if (this.pendingStopValue !== undefined) return
+    this.pageView = target
+    if (target === 'team') this.ensureTeamVisible()
+    else this.ensureVisible()
+    this.updateInputFocus()
+    this.requestRender()
+  }
+
+  private openFilterList(): void {
+    // The candidate list is derived from the CURRENT Work rows (this.typeOrder).
+    const candidates = this.filterCandidates()
+    if (candidates.length === 0) return
+    const current = this.activeType
+    const index = candidates.findIndex(candidate => candidate === current)
+    this.filterSelected = index < 0 ? 0 : index
+    this.filterOpen = true
+    this.requestRender()
+  }
+
+  /** `All` (null) followed by every current Work row type, in row order. */
+  private filterCandidates(): Array<string | null> {
+    return [null, ...this.typeOrder]
+  }
+
+  private handleFilterInput(data: string): void {
+    if (componentKeymap.matches(data, 'tasks.search.exit')) {
+      // Esc cancels the selection without changing the active filter.
+      this.filterOpen = false
+      this.requestRender()
+      return
+    }
+    if (componentKeymap.matches(data, 'tasks.tab.next') || componentKeymap.matches(data, 'tasks.tab.previous')) {
+      // Consumed by the selection state: never a page switch.
+      return
+    }
+    const candidates = this.filterCandidates()
+    if (componentKeymap.matches(data, 'tasks.cursorUp')) {
+      this.filterSelected = Math.max(0, this.filterSelected - 1)
+      this.requestRender()
+      return
+    }
+    if (componentKeymap.matches(data, 'tasks.cursorDown')) {
+      this.filterSelected = Math.min(candidates.length - 1, this.filterSelected + 1)
+      this.requestRender()
+      return
+    }
+    if (componentKeymap.matches(data, 'tasks.open')) {
+      const chosen = candidates[this.filterSelected]
+      if (chosen === undefined) {
+        // A selected candidate removed by a refresh before commit: cancel.
+        this.filterOpen = false
+        this.requestRender()
+        return
+      }
+      this.activeType = chosen
+      this.filterOpen = false
+      this.selectionTouched = true
+      this.reproject(true)
+      this.requestRender()
+    }
+  }
+
+  private handleTeamInput(data: string): void {
+    if (this.teamSearchMode) {
+      if (componentKeymap.matches(data, 'tasks.search.exit')) { this.exitTeamSearchMode(); return }
+      if (componentKeymap.matches(data, 'tasks.cursorUp')) { this.moveTeam(-1); return }
+      if (componentKeymap.matches(data, 'tasks.cursorDown')) { this.moveTeam(1); return }
+      if (componentKeymap.matches(data, 'tasks.pageUp')) { this.pageTeam(-1); return }
+      if (componentKeymap.matches(data, 'tasks.pageDown')) { this.pageTeam(1); return }
+      if (componentKeymap.matches(data, 'tasks.open')) { this.toggleTeamSelected(); return }
+      if (componentKeymap.matches(data, 'tasks.tab.next')) { this.switchPage('next'); return }
+      if (componentKeymap.matches(data, 'tasks.tab.previous')) { this.switchPage('prev'); return }
+      this.teamSearchInput.handleInput(data)
+      this.resetTeamSelectionToFirst()
+      this.requestRender()
+      return
+    }
+    if (componentKeymap.matches(data, 'tasks.search.enter')) { this.enterTeamSearchMode(); return }
+    if (componentKeymap.matches(data, 'tasks.tab.next')) { this.switchPage('next'); return }
+    if (componentKeymap.matches(data, 'tasks.tab.previous')) { this.switchPage('prev'); return }
+    if (componentKeymap.matches(data, 'tasks.cursorUp')) { this.moveTeam(-1); return }
+    if (componentKeymap.matches(data, 'tasks.cursorDown')) { this.moveTeam(1); return }
+    if (componentKeymap.matches(data, 'tasks.pageUp')) { this.pageTeam(-1); return }
+    if (componentKeymap.matches(data, 'tasks.pageDown')) { this.pageTeam(1); return }
+    if (componentKeymap.matches(data, 'tasks.open')) { this.toggleTeamSelected(); return }
+    if (componentKeymap.matches(data, 'tasks.search.exit')) { this.onCancel(); return }
+    // Everything else (s, a, f, r, Y, …) is inert on the Team page: no Work
+    // Stop/Scope/TypeFilter route exists here.
+  }
+
 
   /**
    * Mouse parity: the hit map from the LAST render decides what a pointer
@@ -625,15 +1601,66 @@ export class TaskBrowserPanel implements Component, Focusable {
     // a stale identity. The local copy still guards the valid-row
     // comparison below.
     const pressedValue = this.mousePressedValue
-    if (event.type === 'click' || (event.type === 'press' && event.button === 'left')) {
+    const pressedSelectionOnly = this.mousePressedSelectionOnly
+    const pressedAction = this.mousePressedAction
+    const fr2Pressed = this.fr2Pressed
+    const jobHistoryPressed = this.jobHistoryPressed
+    if (event.type === 'click' || (event.type === 'press' && event.button === 'left') || event.type === 'wheel') {
       this.mousePressedValue = undefined
+      this.mousePressedSelectionOnly = false
+      this.mousePressedAction = undefined
+      this.fr2Pressed = undefined
+      this.jobHistoryPressed = undefined
     }
+    if (event.type === 'click' && pressedSelectionOnly) return { handled: true }
+    if (this.disposed) return undefined
     // The hit map is only valid for the last painted width: a resize
     // that has not been repainted must not dispatch against stale
     // geometry (last-painted geometry is authoritative).
     if (event.width !== this.lastRenderWidth) return undefined
     const hit = this.hitMap[event.y]
     if (!hit) return undefined
+
+    // The pinned Action Bar is shared by every state: its complete painted
+    // spans are resolved before the page-specific item handling (a Team/filter
+    // page paints no `tab`/`item` hit on the hint row anyway).
+    if (hit.kind === 'job-history') return this.handleJobHistoryMouse(event, hit, jobHistoryPressed)
+    if (hit.kind === 'actions') {
+      if (event.button !== 'left' || (event.type !== 'press' && event.type !== 'click')) return undefined
+      const target = hit.actions.find(action => event.x >= action.startCol && event.x < action.endCol)
+      if (event.type === 'press') {
+        if (target === undefined || !this.taskMouseActionCurrent(target)) return undefined
+        this.mousePressedAction = {
+          ...target,
+          row: event.y,
+          width: event.width,
+          height: event.height,
+        }
+        return { handled: true, focus: true }
+      }
+      if (target === undefined || pressedAction === undefined) return undefined
+      if (pressedAction.action !== target.action
+        || pressedAction.value !== target.value
+        || pressedAction.pendingValue !== target.pendingValue
+        || pressedAction.row !== event.y
+        || pressedAction.startCol !== target.startCol
+        || pressedAction.endCol !== target.endCol
+        || pressedAction.width !== event.width
+        || pressedAction.height !== event.height
+        || !this.taskMouseActionCurrent(target)) return undefined
+      this.activateBarAction(target.action)
+      return { handled: true }
+    }
+
+    // FR2: the Work type-filter list owns the pointer while open.
+    if (this.filterOpen) return this.handleFilterMouse(event, hit, fr2Pressed)
+    // FR2: the tab labels are shared by both pages — the SAME painted-span,
+    // press→release identity path governs either page's switch. setPage()
+    // refuses a pending Work Stop, so a mouse Tab can never bypass the
+    // confirmation.
+    if (hit.kind === 'tab') return this.handleTabMouse(event, hit, fr2Pressed)
+    // FR2: the Team page owns the pointer while active (item rows only).
+    if (this.pageView === 'team') return this.handleTeamMouse(event, hit, fr2Pressed)
 
     if (hit.kind === 'search') {
       if (event.type !== 'press') return undefined
@@ -649,13 +1676,7 @@ export class TaskBrowserPanel implements Component, Focusable {
       // activate the row merely because it shares the y.
       if (hit.listWidth !== undefined && event.x >= hit.listWidth) return undefined
       if (event.type === 'wheel' && event.wheelDelta) {
-        if (this.filtered.length === 0) return undefined
-        const delta = event.wheelDelta < 0 ? -1 : 1
-        this.pendingStopValue = undefined
-        this.selectionTouched = true
-        this.selected = Math.max(0, Math.min(this.filtered.length - 1, this.selected + delta))
-        this.ensureVisible()
-        return { handled: true, render: true }
+        return this.wheelTaskList(event.wheelDelta)
       }
       if (event.button !== 'left' || (event.type !== 'press' && event.type !== 'click')) return undefined
       if (event.type === 'press') {
@@ -666,11 +1687,12 @@ export class TaskBrowserPanel implements Component, Focusable {
         // press — the pressed row no longer exists.
         const currentIndex = this.filtered.findIndex(candidate => candidate.value === hit.value)
         if (currentIndex === -1) return undefined
-        this.mousePressedValue = hit.value
+        const pendingAtPress = this.pendingStopValue
+        this.mousePressedSelectionOnly = pendingAtPress !== undefined
+        this.mousePressedValue = pendingAtPress === undefined ? hit.value : undefined
         if (this.selected !== currentIndex) {
-          // Changing selection cancels a pending destructive
-          // confirmation (mirror the keyboard navigation state machine:
-          // cursor/page moves clear pendingStopValue).
+          // A click begun while a Stop is pending is selection-only. Its
+          // release must not inherit the now-cleared pending state and open.
           this.pendingStopValue = undefined
           this.selected = currentIndex
           this.selectionTouched = true
@@ -685,6 +1707,7 @@ export class TaskBrowserPanel implements Component, Focusable {
       // between press and release may have reordered/replaced rows
       // WITHOUT a repaint yet, so the index in the stale hit map can
       // point at a different item). No match => drop.
+      if (pressedSelectionOnly) return { handled: true }
       if (pressedValue !== hit.value) return undefined
       // A pending destructive confirmation is a modal state: the click
       // must not bypass it (keyboard Enter is ignored there).
@@ -697,6 +1720,193 @@ export class TaskBrowserPanel implements Component, Focusable {
     }
 
     return undefined
+  }
+
+  /** The ONE sink of a clicked Action Bar span: every whitelisted action
+   *  replays its ORIGINAL local transition (never a second business path). */
+  private activateBarAction(action: TaskMouseAction): void {
+    if (action === 'stop') this.requestStop()
+    else if (action === 'confirm-stop') this.confirmStop()
+    else if (action === 'cancel-stop') this.clearPendingStop()
+    else if (action === 'work-close' || action === 'team-close') this.onCancel()
+    else if (action === 'work-search-back') this.exitSearchMode()
+    else if (action === 'team-search-back') this.exitTeamSearchMode()
+    else {
+      this.filterOpen = false
+      this.requestRender()
+    }
+  }
+
+  private decodeFilterToken(token: string): string | null {
+    // `All` and a real type get disjoint identities, so a legal Job kind of
+    // `__all__` can never alias the All option.
+    return token === 'filter:__ALL__' ? null : token.slice('filter:type:'.length)
+  }
+
+  /** Whether a click resolves the SAME last-painted identity as the captured
+   *  press (kind + row + grant + kind-specific identity). */
+  private sameFr2Gesture(pressed: Fr2Gesture | undefined, current: Fr2Gesture): boolean {
+    if (pressed === undefined || pressed.kind !== current.kind) return false
+    if (pressed.row !== current.row || pressed.width !== current.width || pressed.height !== current.height) return false
+    if (pressed.kind === 'tab' && current.kind === 'tab') {
+      return pressed.target === current.target && pressed.startCol === current.startCol && pressed.endCol === current.endCol
+    }
+    if (pressed.kind === 'team-row' && current.kind === 'team-row') return pressed.value === current.value
+    if (pressed.kind === 'filter' && current.kind === 'filter') return pressed.token === current.token
+    if (pressed.kind === 'job-history' && current.kind === 'job-history') {
+      return pressed.startCol === current.startCol
+        && pressed.endCol === current.endCol
+        && pressed.expanded === current.expanded
+        && pressed.count === current.count
+    }
+    return false
+  }
+
+  /** The ONE list-wheel owner: selection movement without commit. Shared by
+   *  item rows and the history chrome row so a wheel over the control never
+   *  toggles the disclosure but still scrolls the visible task list. */
+  private wheelTaskList(wheelDelta: number): TuiMouseEventResult | undefined {
+    if (this.filtered.length === 0) return undefined
+    const delta = wheelDelta < 0 ? -1 : 1
+    this.pendingStopValue = undefined
+    this.selectionTouched = true
+    this.selected = Math.max(0, Math.min(this.filtered.length - 1, this.selected + delta))
+    this.ensureVisible()
+    return { handled: true, render: true }
+  }
+
+  /** One Work history disclosure gesture: press only locks the last-painted
+   *  identity; the matching release runs the SAME `toggleJobHistory()` as the
+   *  keyboard. Wheel stays on the shared list-scroll owner and never toggles. */
+  private handleJobHistoryMouse(
+    event: TuiMouseEvent,
+    hit: Extract<TaskMouseHit, { kind: 'job-history' }>,
+    pressed: Fr2Gesture | undefined,
+  ): TuiMouseEventResult | undefined {
+    if (event.type === 'wheel') {
+      if (!event.wheelDelta) return undefined
+      // The hit map is last-painted geometry: a page/scope/search/Stop/owner
+      // change since that paint makes this control hit stale. Then the wheel
+      // must not touch the hidden Work list.
+      if (!this.jobHistoryControlCurrent(hit)) return undefined
+      return this.wheelTaskList(event.wheelDelta)
+    }
+    if (event.button !== 'left' || (event.type !== 'press' && event.type !== 'click')) return undefined
+    if (event.x < hit.startCol || event.x >= hit.endCol) return undefined
+    if (!this.jobHistoryControlCurrent(hit)) return undefined
+    const current: Fr2Gesture = {
+      kind: 'job-history',
+      startCol: hit.startCol,
+      endCol: hit.endCol,
+      expanded: hit.expanded,
+      count: hit.count,
+      row: event.y,
+      width: event.width,
+      height: event.height,
+    }
+    if (event.type === 'press') {
+      this.jobHistoryPressed = current
+      return { handled: true, focus: true }
+    }
+    if (pressed === undefined || !this.sameFr2Gesture(pressed, current)) return undefined
+    this.toggleJobHistory()
+    return { handled: true }
+  }
+
+  private handleFilterMouse(event: TuiMouseEvent, hit: TaskMouseHit, pressed: Fr2Gesture | undefined): TuiMouseEventResult | undefined {
+    if (hit.kind !== 'item' || !hit.value.startsWith('filter:')) return undefined
+    // Wheel events use `button: 'none'`: handle them BEFORE the left-button gate.
+    // They still require the pointer final-admission fence (a stale/retired
+    // panel must not mutate even local selection state).
+    if (event.type === 'wheel' && event.wheelDelta) {
+      if (this.interactionCurrent?.() !== true) return undefined
+      const candidates = this.filterCandidates()
+      const delta = event.wheelDelta < 0 ? -1 : 1
+      this.filterSelected = Math.max(0, Math.min(candidates.length - 1, this.filterSelected + delta))
+      return { handled: true, render: true }
+    }
+    if (event.button !== 'left') return undefined
+    const current: Fr2Gesture = { kind: 'filter', token: hit.value, chosen: this.decodeFilterToken(hit.value), row: event.y, width: event.width, height: event.height }
+    if (event.type === 'press') {
+      if (this.interactionCurrent?.() !== true) return undefined
+      // Record the gesture ONLY: mutating `filterSelected` here would let the
+      // press-triggered repaint re-window the list, moving the row under the
+      // pointer before the release. The click commits selection + filter.
+      this.fr2Pressed = current
+      return { handled: true, focus: true }
+    }
+    if (event.type !== 'click') return undefined
+    if (this.interactionCurrent?.() !== true) return undefined
+    if (pressed === undefined || pressed.kind !== 'filter' || !this.sameFr2Gesture(pressed, current)) return undefined
+    // Apply the PRESSED type by identity — never the current row index (the
+    // candidate set may have changed between paint and release). If that pressed
+    // type vanished, cancel rather than submit a different one.
+    const chosen = pressed.chosen
+    const candidates = this.filterCandidates()
+    if (chosen !== null && !candidates.includes(chosen)) {
+      this.filterOpen = false
+      this.requestRender()
+      return { handled: true }
+    }
+    this.filterSelected = chosen === null ? 0 : candidates.indexOf(chosen)
+    this.activeType = chosen
+    this.filterOpen = false
+    this.selectionTouched = true
+    this.reproject(true)
+    this.requestRender()
+    return { handled: true }
+  }
+
+  private handleTeamMouse(event: TuiMouseEvent, hit: TaskMouseHit, pressed: Fr2Gesture | undefined): TuiMouseEventResult | undefined {
+    if (hit.kind !== 'item') return undefined
+    // Wide-layout right detail pane is inert: reject press/click/wheel there.
+    if (hit.listWidth !== undefined && event.x >= hit.listWidth) return undefined
+    // Wheel events use `button: 'none'`: handle them BEFORE the left-button gate.
+    // They still require the pointer final-admission fence (no stale mutation).
+    if (event.type === 'wheel' && event.wheelDelta) {
+      if (this.interactionCurrent?.() !== true) return undefined
+      this.moveTeam(event.wheelDelta < 0 ? -1 : 1)
+      return { handled: true, render: true }
+    }
+    if (event.button !== 'left') return undefined
+    const current: Fr2Gesture = { kind: 'team-row', value: hit.value, row: event.y, width: event.width, height: event.height }
+    if (event.type === 'press') {
+      if (this.interactionCurrent?.() !== true) return undefined
+      // Record the gesture ONLY: moving `teamSelectedValue` here would let the
+      // press-triggered selected-centered repaint move the row under the
+      // pointer before the release. The click commits selection + action.
+      this.fr2Pressed = current
+      return { handled: true, focus: true }
+    }
+    if (event.type !== 'click') return undefined
+    if (this.interactionCurrent?.() !== true) return undefined
+    if (!this.sameFr2Gesture(pressed, current)) return undefined
+    this.teamSelectedValue = hit.value
+    // A member row is SELECTION ONLY: no viewer, no write. A task row toggles
+    // its single disclosure. Text inside the detail pane is inert.
+    const row = this.teamViewRows().find(candidate => candidate.value === hit.value)
+    if (row?.kind === 'task') this.toggleTeamSelected()
+    return { handled: true }
+  }
+
+  private handleTabMouse(event: TuiMouseEvent, hit: TaskMouseHit, pressed: Fr2Gesture | undefined): TuiMouseEventResult | undefined {
+    if (hit.kind !== 'tab') return undefined
+    if (event.button !== 'left' || (event.type !== 'press' && event.type !== 'click')) return { handled: true }
+    const span = hit.spans.find(candidate => event.x >= candidate.startCol && event.x < candidate.endCol)
+    if (span === undefined) return undefined
+    const current: Fr2Gesture = { kind: 'tab', target: span.target, startCol: span.startCol, endCol: span.endCol, row: event.y, width: event.width, height: event.height }
+    if (event.type === 'press') {
+      // Refuse to arm a tab gesture while a Work Stop confirmation is pending:
+      // the mouse path honors the same ban as the keyboard Tab.
+      if (this.pendingStopValue !== undefined || this.interactionCurrent?.() !== true) return undefined
+      this.fr2Pressed = current
+      return { handled: true, focus: true }
+    }
+    if (this.pendingStopValue !== undefined) return undefined
+    if (this.interactionCurrent?.() !== true) return undefined
+    if (!this.sameFr2Gesture(pressed, current)) return undefined
+    this.setPage(span.target)
+    return { handled: true }
   }
 
   private ensureVisible(): void {
@@ -718,6 +1928,10 @@ export class TaskBrowserPanel implements Component, Focusable {
 
   dispose(): void {
     this.disposed = true
+    this.mousePressedValue = undefined
+    this.mousePressedSelectionOnly = false
+    this.mousePressedAction = undefined
+    this.jobHistoryPressed = undefined
     if (this.tickTimer !== undefined) clearInterval(this.tickTimer)
     this.tickTimer = undefined
     this.marquee.dispose()
@@ -729,17 +1943,33 @@ export class TaskBrowserPanel implements Component, Focusable {
 
   set focused(value: boolean) {
     this._focused = value
-    this.searchInput.focused = value && this.searchMode
+    this.updateInputFocus()
   }
 
   invalidate(): void {
+    // An invalidation revokes the last-painted pointer frame: an armed press or
+    // hit map from the invalidated frame must not complete before the next
+    // render rebuilds them. (The keyboard/search state stays untouched.)
+    this.mousePressedValue = undefined
+    this.mousePressedSelectionOnly = false
+    this.mousePressedAction = undefined
+    this.fr2Pressed = undefined
+    this.jobHistoryPressed = undefined
+    this.hitMap = []
     this.searchInput.invalidate()
+    this.teamSearchInput.invalidate()
   }
 
   render(width: number): string[] {
     this.now = Date.now()
     const safeWidth = Math.max(1, width)
     this.lastRenderWidth = safeWidth
+    if (this.filterOpen) return this.renderFilter(safeWidth)
+    if (this.pageView === 'team') return this.renderTeam(safeWidth)
+    return this.renderWork(safeWidth)
+  }
+
+  private renderWork(safeWidth: number): string[] {
     const lines: string[] = []
     const hits: TaskMouseHit[] = []
     const push = (line: string, hit: TaskMouseHit): void => {
@@ -747,7 +1977,8 @@ export class TaskBrowserPanel implements Component, Focusable {
       hits.push(hit)
     }
     const limit = Number.isFinite(this.maxRows) ? Math.max(1, Math.floor(this.maxRows)) : Number.POSITIVE_INFINITY
-    const hintLine = color.textMuted(`  ${this.hint()}`)
+    const hint = this.hintFor(safeWidth)
+    const hintLine = hint.line
     const searchOn = this.searchMode
     // The retry verb is a Full action; the retired Quick no longer exists.
     const retrySuffix = this.mode === 'full' ? ' · R retry' : ''
@@ -766,17 +1997,27 @@ export class TaskBrowserPanel implements Component, Focusable {
     // run name and phase label), so it is projected to a single SAFE
     // physical row (escape/control bytes removed) before truncation — one
     // returned row is one physical row.
-    const headerText = this.options.header === undefined ? undefined
-      : truncateToWidth(sanitizedPhysicalLine(this.headerText()), safeWidth, '…')
+    const fullHeaderPlain = this.options.header === undefined ? undefined : sanitizedPhysicalLine(this.headerText())
+    const headerText = fullHeaderPlain === undefined ? undefined
+      : truncateToWidth(fullHeaderPlain, safeWidth, '…')
+    const headerHit = fullHeaderPlain === undefined || headerText === undefined
+      ? { kind: 'inert' as const }
+      : this.tabHitForPaintedHeader('work', fullHeaderPlain, headerText)
     const searchEmpty = this.getFilter() === ''
     const searchRowText = !searchOn ? '' : (() => {
       const searchLine = this.searchInput.render(Math.max(1, safeWidth - 2))[0] ?? ''
       const stripped = searchLine.startsWith('> ') ? searchLine.slice(2) : searchLine
       return searchEmpty ? ' / search…' : ` ${stripped}`
     })()
+    const historyControl = this.historyControl(safeWidth)
 
     if (headerText !== undefined) {
-      push(color.textStrong(headerText), { kind: 'inert' })
+      push(color.textStrong(headerText), headerHit)
+    }
+    if (historyControl !== undefined) {
+      push(historyControl.line, historyControl.hit)
+    }
+    if (headerText !== undefined) {
       push('', { kind: 'inert' })
     }
 
@@ -784,7 +2025,7 @@ export class TaskBrowserPanel implements Component, Focusable {
       push(color.textDim('Loading tasks…'), { kind: 'inert' })
       if (this.refreshError !== undefined) push(color.textMuted(refreshErrorLine!), { kind: 'inert' })
       push('', { kind: 'inert' })
-      push(hintLine, { kind: 'inert' })
+      push(hintLine, hint.hit)
       this.lastRenderedStart = 0
       this.lastRenderedCount = 0
       this.hasRenderedViewport = true
@@ -808,15 +2049,33 @@ export class TaskBrowserPanel implements Component, Focusable {
       // refresh-error banner (a long dynamic message must never wrap into
       // extra terminal rows, and must never carry an escape sequence).
       const noMatchText = this.refreshError === undefined
-        ? truncateToWidth(sanitizedPhysicalLine(this.options.noMatchText ?? 'No matching tasks'), safeWidth, '…')
+        ? truncateToWidth(sanitizedPhysicalLine(historyControl !== undefined
+          ? 'No active tasks in this view'
+          : this.options.noMatchText ?? 'No matching tasks'), safeWidth, '…')
         : 'Could not load tasks'
-      push(color.textDim(noMatchText), { kind: 'inert' })
-      if (this.refreshError !== undefined) push(color.textMuted(refreshErrorLine!), { kind: 'inert' })
-      push('', { kind: 'inert' })
-      push(hintLine, { kind: 'inert' })
       this.lastRenderedStart = 0
       this.lastRenderedCount = 0
       this.hasRenderedViewport = true
+      if (historyControl !== undefined) {
+        // The ONLY empty-with-history projection: the truth is "nothing is
+        // active", never "nothing here". The control keeps the hidden roster
+        // reachable; no fake task row and no phantom group header.
+        const result = this.renderEmptyWithHistory(
+          headerText,
+          headerHit,
+          historyControl,
+          noMatchText,
+          this.refreshError === undefined ? undefined : refreshErrorLine,
+          hintLine,
+          hint.hit,
+        )
+        this.hitMap = result.hits
+        return result.lines
+      }
+      push(color.textDim(noMatchText), { kind: 'inert' })
+      if (this.refreshError !== undefined) push(color.textMuted(refreshErrorLine!), { kind: 'inert' })
+      push('', { kind: 'inert' })
+      push(hintLine, hint.hit)
       const result = this.finalizeEmpty(lines, hits)
       this.hitMap = result.hits
       return result.lines
@@ -889,7 +2148,7 @@ export class TaskBrowserPanel implements Component, Focusable {
       out.push('')
       outHits.push({ kind: 'inert' })
       out.push(hintLine)
-      outHits.push({ kind: 'inert' })
+      outHits.push(hint.hit)
       return { lines: out, hits: outHits }
     }
     let candidate = assemble()
@@ -919,12 +2178,12 @@ export class TaskBrowserPanel implements Component, Focusable {
     }
 
     // Very short grants: true semantic degradation — search input
-    // (searchMode) > selected main > hint > header > group > detail >
-    // indicator > blank spacers. The selected main row is never squeezed
-    // out by decorative blanks or the header (this path does not keep the
-    // chrome prefix unconditionally). The final layout is decided BEFORE
-    // the exposure ack: an extreme grant can drop the selected row
-    // entirely (a 1-row grant + search mode paints only the search
+    // (searchMode) > selected main > hint > history control > header >
+    // group > detail > indicator > blank spacers. The selected main row is
+    // never squeezed out by decorative blanks or the header (this path does
+    // not keep the chrome prefix unconditionally). The final layout is
+    // decided BEFORE the exposure ack: an extreme grant can drop the selected
+    // row entirely (a 1-row grant + search mode paints only the search
     // input), and only rows the FINAL layout actually paints may be
     // acknowledged.
     const entries = this.windowEntries(start, itemCount, listWidth)
@@ -934,9 +2193,12 @@ export class TaskBrowserPanel implements Component, Focusable {
       searchRowText,
       searchEmpty,
       headerText,
+      headerHit,
       rows.length > itemCount ? `  ${this.selected + 1}/${rows.length}` : undefined,
       limit,
       hintLine,
+      hint.hit,
+      historyControl,
     )
     this.lastRenderedStart = degraded.paintsSelectedMain ? start : 0
     this.lastRenderedCount = degraded.paintsSelectedMain ? 1 : 0
@@ -947,20 +2209,23 @@ export class TaskBrowserPanel implements Component, Focusable {
   }
 
   /** True semantic degradation for very short grants. The declared
-   * priority (search input > selected main > hint > header > group >
-   * detail > indicator) is enforced by INCLUSION — the chrome prefix is
-   * rebuilt from the hoisted texts and only kept when it fits after the
-   * mandatory content, so the selected main row cannot lose to two
-   * decorative blanks + the header. Returns whether the selected main row
-   * is actually painted, so the callers ack only what the user saw. */
+   * priority (search input > selected main > hint > history control >
+   * header > group > detail > indicator) is enforced by INCLUSION — the
+   * chrome prefix is rebuilt from the hoisted texts and only kept when it
+   * fits after the mandatory content, so the selected main row cannot lose
+   * to two decorative blanks + the header. Returns whether the selected main
+   * row is actually painted, so the callers ack only what the user saw. */
   private degradedFallback(
     selectedEntry: { group: string | undefined; main: string; details: string[] } | undefined,
     searchRowText: string,
     searchEmpty: boolean,
     headerText: string | undefined,
+    headerHit: TaskMouseHit,
     indicatorText: string | undefined,
     limit: number,
     hintLine: string,
+    hintHit: TaskMouseHit,
+    historyControl: { line: string; hit: TaskMouseHit } | undefined,
   ): { lines: string[]; hits: TaskMouseHit[]; paintsSelectedMain: boolean } {
     const mainRow = selectedEntry?.main
     const groupRow = selectedEntry !== undefined && selectedEntry.group !== undefined
@@ -988,7 +2253,10 @@ export class TaskBrowserPanel implements Component, Focusable {
     }
     const hintIncluded = content.length + 1 <= limit
     let used = content.length + (hintIncluded ? 1 : 0)
-    // Optional chrome (priority 4-7) fills the leftover rows.
+    // Optional chrome (priority 4-7) fills the leftover rows. The history
+    // control outranks the decorative header/group/detail rows.
+    let historyShown = false
+    if (historyControl !== undefined && used + 1 <= limit) { historyShown = true; used += 1 }
     let headerShown = false
     if (headerText !== undefined && used + 1 <= limit) { headerShown = true; used += 1 }
     let groupShown = false
@@ -1007,11 +2275,15 @@ export class TaskBrowserPanel implements Component, Focusable {
     const outHits: TaskMouseHit[] = []
     if (headerShown) {
       out.push(color.textStrong(headerText!))
-      outHits.push({ kind: 'inert' })
+      outHits.push(headerHit)
     }
     if (searchShown !== '') {
       out.push(searchShown)
       outHits.push({ kind: 'search' })
+    }
+    if (historyShown) {
+      out.push(historyControl!.line)
+      outHits.push(historyControl!.hit)
     }
     if (groupShown) {
       out.push(groupRow!)
@@ -1028,8 +2300,12 @@ export class TaskBrowserPanel implements Component, Focusable {
       outHits.push({ kind: 'inert' })
     }
     if (hintIncluded) {
-      out.push(...(hintBlank ? ['', hintLine] : [hintLine]))
-      outHits.push(...(hintBlank ? [{ kind: 'inert' }, { kind: 'inert' }] : [{ kind: 'inert' }]) as TaskMouseHit[])
+      if (hintBlank) {
+        out.push('')
+        outHits.push({ kind: 'inert' })
+      }
+      out.push(hintLine)
+      outHits.push(hintHit)
     }
     // The main row is always painted in this branch (the extreme branch
     // above was the only path that could drop it).
@@ -1064,6 +2340,45 @@ export class TaskBrowserPanel implements Component, Focusable {
       entries.push({ group: item.group, main, details, selected: index === this.selected })
     }
     return entries
+  }
+
+  /** Empty-with-history is its own honest projection: the roster still holds
+   *  terminal Jobs, but nothing is active. Safety/content order under a very
+   *  short grant is hint (the exit) > history control > message > refresh >
+   *  header > blank; the result never keeps an orphan clickable hit. */
+  private renderEmptyWithHistory(
+    headerText: string | undefined,
+    headerHit: TaskMouseHit,
+    historyControl: { line: string; hit: TaskMouseHit },
+    message: string,
+    refreshErrorLine: string | undefined,
+    hintLine: string,
+    hintHit: TaskMouseHit,
+  ): { lines: string[]; hits: TaskMouseHit[] } {
+    const entries: Array<{ line: string; hit: TaskMouseHit; priority: number }> = []
+    if (headerText !== undefined) {
+      entries.push({ line: color.textStrong(headerText), hit: headerHit, priority: 10 })
+    }
+    entries.push({ line: historyControl.line, hit: historyControl.hit, priority: 500 })
+    entries.push({ line: color.textDim(message), hit: { kind: 'inert' }, priority: 100 })
+    if (refreshErrorLine !== undefined) {
+      entries.push({ line: color.textMuted(refreshErrorLine), hit: { kind: 'inert' }, priority: 90 })
+    }
+    entries.push({ line: '', hit: { kind: 'inert' }, priority: 0 })
+    entries.push({ line: hintLine, hit: hintHit, priority: 1000 })
+    if (!Number.isFinite(this.maxRows)) {
+      return { lines: entries.map(entry => entry.line), hits: entries.map(entry => entry.hit) }
+    }
+    const limit = Math.max(1, Math.floor(this.maxRows))
+    const kept = [...entries]
+    while (kept.length > limit) {
+      let lowest = 0
+      for (let index = 1; index < kept.length; index += 1) {
+        if (kept[index]!.priority < kept[lowest]!.priority) lowest = index
+      }
+      kept.splice(lowest, 1)
+    }
+    return { lines: kept.map(entry => entry.line), hits: kept.map(entry => entry.hit) }
   }
 
   /** Finalize the empty/no-match assembly against the live grant
@@ -1116,7 +2431,10 @@ export class TaskBrowserPanel implements Component, Focusable {
     if (done > 0) stats.push(`${done} done`)
     if (failed > 0) stats.push(`${failed} failed`)
     stats.push(`${visible}/${real.length} shown`)
-    return `${this.options.header ?? 'Tasks'} ${chips.join(' ')}  ${stats.join(' · ')}`
+    // The `Tasks · [Work]  Team` tabs appear ONLY when a Team page exists
+    // (a proved Root); a Work-only browser keeps the original title-only header.
+    const prefix = this.team === undefined ? (this.options.header ?? 'Tasks') : this.tabsPrefix('work')
+    return `${prefix} ${chips.join(' ')}  ${stats.join(' · ')}`
   }
 
   private renderRow(item: TaskPanelItem, selected: boolean, width: number): string[] {
@@ -1168,7 +2486,7 @@ export class TaskBrowserPanel implements Component, Focusable {
       if (item.startedAt !== undefined) lines.push(`started   ${new Date(item.startedAt).toISOString()}`)
       if (item.detail !== undefined && item.detail !== '') lines.push(`detail    ${item.detail}`)
     }
-    if (this.pendingStopValue === item.value) lines.push(`Stop ${item.label}?  Y confirm · Esc cancel`)
+    if (this.pendingStopValue === item.value) lines.push(`Stop ${item.label}?`)
     // Single-row contract: every semantic line detailLines returns is
     // budgeted as one physical terminal row (the wide side pane and the
     // compact inline detail both truncate these). Dynamic text (label,
@@ -1185,47 +2503,134 @@ export class TaskBrowserPanel implements Component, Focusable {
     return [truncateToWidth(`    ${color.textDim(detail)}`, width, '…')]
   }
 
-  private hint(): string {
-    return this.hintFor(this.lastRenderWidth)
-  }
-
   /** D8: preserve action order and drop lower-priority whole segments before
    *  the final Esc segment. The caller reserves the two-cell row indent. */
-  private hintFor(width: number): string {
+  private hintFor(width: number): { line: string; hit: TaskMouseHit } {
     const actionWidth = Math.max(0, width - 2)
-    if (this.pendingStopValue !== undefined) {
-      return renderActionBarRow([
-        { text: 'Y confirm stop', priority: 90 },
-        { text: 'Esc cancel', priority: 1000 },
-      ], actionWidth)
+    const segments: ActionBarSegment[] = []
+    const actionByInputIndex = new Map<number, {
+      action: TaskMouseAction
+      value: string
+      pendingValue: string | undefined
+      role: 'primary' | 'secondary'
+    }>()
+    const add = (
+      segment: ActionBarSegment,
+      target?: { action: TaskMouseAction; value: string; pendingValue: string | undefined; role: 'primary' | 'secondary' },
+    ): void => {
+      const inputIndex = segments.length
+      segments.push(segment)
+      if (target !== undefined) actionByInputIndex.set(inputIndex, target)
     }
-    if (this.searchMode) {
+
+    if (this.pendingStopValue !== undefined) {
+      const value = this.pendingStopValue
+      if (this.options.mouseActionsEnabled?.() === true) {
+        add({ text: 'Confirm stop [Y]', priority: 90, short: 'Confirm stop' }, {
+          action: 'confirm-stop', value, pendingValue: value, role: 'primary',
+        })
+        add({ text: 'Cancel [Esc]', priority: 1000, short: 'Cancel' }, {
+          action: 'cancel-stop', value, pendingValue: value, role: 'secondary',
+        })
+      } else {
+        add({ text: 'Y confirm stop', priority: 90 })
+        add({ text: 'Esc cancel', priority: 1000 })
+      }
+    } else if (this.searchMode) {
       // Printable keys and the arrows are query/edit input in search mode;
       // only the actions handled by this state are advertised. Esc backs out
       // of search without closing the Full Task Center.
-      const segments: ActionBarSegment[] = [
-        { text: 'Enter open', priority: 90 },
-        { text: '↑↓ select', priority: 80 },
-        { text: '←→ edit', priority: 70 },
-        { text: `${componentKeymap.keyHint('tasks.type.previous')} type`, priority: 60 },
-        { text: 'type to filter', priority: 10 },
-        { text: 'Esc back', priority: 1000 },
-      ]
-      return renderActionBarRow(segments, actionWidth)
+      add({ text: 'Enter open', priority: 90 })
+      add({ text: '↑↓ select', priority: 80 })
+      add({ text: '←→ edit', priority: 70 })
+      if (this.team !== undefined) add({ text: `${componentKeymap.keyHint('tasks.tab.next')} Team`, priority: 15 })
+      add({ text: 'type to filter', priority: 10 })
+      if (this.options.mouseActionsEnabled?.() === true) {
+        add({ text: 'Back [Esc]', priority: 1000 }, {
+          action: 'work-search-back', value: '', pendingValue: undefined, role: 'secondary',
+        })
+      } else {
+        add({ text: 'Esc back', priority: 1000 })
+      }
+    } else {
+      add({ text: 'Enter open', priority: 90 })
+      add({ text: '↑↓ select', priority: 80 })
+      add({ text: '←→ tree', priority: 70 })
+      const selected = this.selectedItem()
+      if (this.canStop(selected)) {
+        if (this.options.mouseActionsEnabled?.() === true) {
+          const key = componentKeymap.keysFor('tasks.stop')[0]
+          const text = key === undefined ? 'Stop' : `Stop [${formatKeyId(key)}]`
+          add({ text, priority: 95 }, {
+            action: 'stop', value: selected!.value, pendingValue: undefined, role: 'secondary',
+          })
+        } else {
+          add({ text: 's stop', priority: 60 })
+        }
+      }
+      if (this.searchEnabled) add({ text: '/ search', priority: 30 })
+      add({ text: 'a scope', priority: 20 })
+      if (this.team !== undefined) add({ text: `${componentKeymap.keyHint('tasks.tab.next')} Team`, priority: 15 })
+      add({ text: `${componentKeymap.keyHint('tasks.type.filter')} type`, priority: 10 })
+      if (this.options.mouseActionsEnabled?.() === true) {
+        add({ text: 'Close [Esc]', priority: 1000 }, {
+          action: 'work-close', value: '', pendingValue: undefined, role: 'secondary',
+        })
+      } else {
+        add({ text: 'Esc close', priority: 1000 })
+      }
     }
-    const segments: ActionBarSegment[] = [
-      { text: 'Enter open', priority: 90 },
-      { text: '↑↓ select', priority: 80 },
-      { text: '←→ tree', priority: 70 },
-      // The hint advertises the SELECTED row's capability: an external catalog
-      // leaf (or any other non-stoppable row) has no Stop action at all, so the
-      // key would be a silent no-op. Dropping the segment keeps the bar truthful.
-      ...(this.canStop(this.selectedItem()) ? [{ text: 's stop', priority: 60 }] : []),
-      ...(this.searchEnabled ? [{ text: '/ search', priority: 30 }] : []),
-      { text: 'a scope', priority: 20 },
-      { text: `${componentKeymap.keyHint('tasks.type.previous')} type`, priority: 10 },
-      { text: 'Esc close', priority: 1000 },
-    ]
-    return renderActionBarRow(segments, actionWidth)
+
+    return this.paintActionBar(segments, actionWidth, actionByInputIndex)
   }
+
+  /**
+   * Lay out ONE Fullscreen Action Bar and publish the COMPLETE painted action
+   * spans of the final row (never a substring search over the rendered text).
+   * Regular/Main (`mouseActionsEnabled` false) keeps the historical keyboard
+   * hint with no target at all. The caller owns the two-cell row indent.
+   */
+  private paintActionBar(
+    segments: readonly ActionBarSegment[],
+    width: number,
+    targets: ReadonlyMap<number, {
+      action: TaskMouseAction
+      value: string
+      pendingValue: string | undefined
+      role: 'primary' | 'secondary'
+    }>,
+  ): { line: string; hit: TaskMouseHit } {
+    const layout = layoutActionBarRow(segments, Math.max(0, width))
+    if (this.options.mouseActionsEnabled?.() !== true || layout.truncated || layout.spans.length === 0) {
+      return { line: color.textMuted(`  ${layout.text}`), hit: { kind: 'inert' } }
+    }
+    const actions: TaskMouseActionHit[] = []
+    const painted = layout.spans.map(span => {
+      const target = targets.get(span.inputIndex)
+      if (target === undefined) return color.textMuted(span.text)
+      actions.push({
+        action: target.action,
+        value: target.value,
+        pendingValue: target.pendingValue,
+        startCol: span.startCol + 2,
+        endCol: span.endCol + 2,
+      })
+      return paintActionSpan(span.text, target.role)
+    })
+    const segmentWidth = layout.spans.reduce((sum, span) => sum + visibleWidth(span.text), 0)
+      + Math.max(0, layout.spans.length - 1) * visibleWidth(ACTION_BAR_SEPARATOR)
+    const padding = Math.max(0, visibleWidth(layout.text) - segmentWidth)
+    return {
+      line: `  ${painted.join(color.textMuted(ACTION_BAR_SEPARATOR))}${' '.repeat(padding)}`,
+      hit: actions.length > 0 ? { kind: 'actions', actions } : { kind: 'inert' },
+    }
+  }
+}
+
+/** Owner Fullscreen dense Action Bar ink: primary verb `text`, secondary verb
+ *  `textDim`, keycap muted. Visible text and hit spans stay unchanged. */
+function paintActionSpan(text: string, role: 'primary' | 'secondary'): string {
+  const ink = role === 'primary' ? color.text : color.textDim
+  const match = /^(.*) \[([^\]]+)\]$/.exec(text)
+  return match === null ? ink(text) : `${ink(match[1]!)}${color.textMuted(` [${match[2]}]`)}`
 }

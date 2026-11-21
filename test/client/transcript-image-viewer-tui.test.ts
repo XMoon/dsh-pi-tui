@@ -17,6 +17,7 @@ import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
 import { createToolResultMessage, ToolCallId, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { getKeybindings, resetCapabilitiesCache, setCapabilities, visibleWidth } from '@xmoon76/pi-tui'
+import { color } from '../../src/tui/theme/runtime.ts'
 import { ImageWorkspacePanel } from '../../src/tui/components/media/image-workspace.ts'
 import { TranscriptFolder } from '../../src/transcript.ts'
 import { TuiApp } from '../../src/tui-app.ts'
@@ -111,26 +112,42 @@ async function clickControl(vt: VirtualTerminal, needle: string, nth = 0): Promi
   assert.ok(row !== -1, `missing ${needle} #${nth + 1}:\n${view}`)
   const line = view.split('\n')[row - 1]!
   const cell = controlCell(line)
-  vt.sendInput(`\x1b[<0;${cell};${row}M`)
-  vt.sendInput(`\x1b[<0;${cell};${row}m`)
-  await settleClick(vt)
+  await clickCell(vt, cell, row)
   return row
 }
 
+/**
+ * Only two gestures on the same painted row can select the same word within
+ * the fork's 500ms multi-click window; different rows cannot. Keep a
+ * per-terminal, test-only timestamp so unrelated clicks need only wait for
+ * the real rendered frame, not an unconditional 600ms timer.
+ *
+ * Guard the WHOLE ROW, rather than only the exact x cell: the fork's text
+ * selection double-click groups cells by word, while the component path
+ * additionally keys by target component + exact x/y.
+ */
+const lastPointerRow = new WeakMap<VirtualTerminal, { row: number; at: number }>()
+
 async function clickCell(vt: VirtualTerminal, x: number, row: number): Promise<void> {
+  const last = lastPointerRow.get(vt)
+  if (last !== undefined && last.row === row) {
+    const remainingMs = Math.max(0, 550 - (Date.now() - last.at))
+    if (remainingMs > 0) {
+      // reason: the same-row fork DOUBLE_CLICK_INTERVAL_MS=500 contract
+      await new Promise<void>(resolve => setTimeout(resolve, remainingMs))
+    }
+  }
   vt.sendInput(`\x1b[<0;${x};${row}M`)
   vt.sendInput(`\x1b[<0;${x};${row}m`)
-  await settleClick(vt)
+  lastPointerRow.set(vt, { row, at: Date.now() })
+  await vt.waitForRender()
 }
 
 /**
- * Wait out the alt screen's DOUBLE_CLICK window before the next pointer cell.
- *
- * The fork treats a fast repeat at the same cell as a double click (word
- * selection), so two consecutive disclosure clicks on one cell need the window
- * to elapse first; this is the contract under test, not a blind sleep. The
- * bound is the fork's own `DOUBLE_CLICK_INTERVAL_MS` (500) with one frame of
- * slack.
+ * Preserve the complete fork multi-click observation window for MANUALLY
+ * delivered pointer gestures that test a negative or stale-click outcome.
+ * Ordinary helper-driven clicks use the same-row guard in clickCell() above
+ * and await the terminal's real rendered frame instead.
  */
 async function settleClick(vt: VirtualTerminal): Promise<void> {
   // The bounded window IS the contract (fork DOUBLE_CLICK_INTERVAL_MS = 500).
@@ -176,7 +193,7 @@ test('the info control folds only its own occurrence; the body opens the Viewer 
   await clickCell(vt, 4, secondInfo + 1)
   const opened = await viewport(vt)
   assert.ok(opened.includes('Image · second.png'), `the Viewer names the clicked occurrence:\n${opened}`)
-  assert.ok(opened.includes('Esc close'), `the Viewer advertises Esc close:\n${opened}`)
+  assert.ok(opened.includes('Close [Esc]'), `the Viewer advertises Close [Esc]:\n${opened}`)
   assert.ok(opened.includes('800×100 · image/png · 33 B'), `the Viewer shows the metadata row:\n${opened}`)
   // Esc closes the Viewer (one layer): the transcript is back, still folded.
   vt.sendInput('\x1b')
@@ -576,7 +593,7 @@ test('a protocol-unsupported raster paints a text fallback that is NOT a clickab
 test('the workspace pins its action bar to the LAST physical row in BOTH states', async () => {
   // Real frame assertion, not "the text exists somewhere": the bar must be the
   // bottom row of the viewport. A short image (and a two-candidate list) would
-  // otherwise leave `Esc close` floating directly under the content with dead
+  // otherwise leave `Close [Esc]` floating directly under the content with dead
   // space below — the physical row is the contract.
   resetCapabilitiesCache()
   setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
@@ -603,8 +620,8 @@ test('the workspace pins its action bar to the LAST physical row in BOTH states'
   const listView = await viewport(vt)
   const listRows = listView.split('\n')
   const listLast = listRows[listRows.length - 1] ?? ''
-  assert.ok(listLast.includes('Esc close'), `the LIST bar is the last physical row:\n${listLast}`)
-  assert.ok(listLast.includes('Enter view'), `the LIST bar advertises Enter view:\n${listLast}`)
+  assert.ok(listLast.includes('Close [Esc]'), `the LIST bar is the last physical row:\n${listLast}`)
+  assert.ok(listLast.includes('View [Enter]'), `the LIST bar advertises View [Enter]:\n${listLast}`)
   const candidates = listRows.filter(line => /#\d+ · /.test(line))
   assert.equal(candidates.length, 2, `both candidates are listed:\n${listView}`)
   assert.ok(listRows.findIndex(line => line.includes('Images · current transcript')) < listRows.length - 1,
@@ -619,7 +636,7 @@ test('the workspace pins its action bar to the LAST physical row in BOTH states'
   assert.ok(viewerView.includes('Image · shot.png'), `the Viewer opened:\n${viewerView}`)
   // Opened FROM the list, so Esc really goes back (D13: the verb names the
   // real effect) — and it is still the bar on the LAST physical row.
-  assert.ok(viewerLast.includes('Esc back'), `the VIEWER bar is the last physical row:\n${viewerLast}`)
+  assert.ok(viewerLast.includes('Back [Esc]'), `the VIEWER bar is the last physical row:\n${viewerLast}`)
   assert.ok(visibleWidth(viewerLast) === 100, `the bar fills the row width (${visibleWidth(viewerLast)})`)
   app.setFullscreen(false)
   app.stop()
@@ -822,21 +839,21 @@ test('the list action bar advertises the LIVE keybindings and degrades by whole 
 
   // Defaults come from the same binding source the picker uses.
   const defaults = barAt(80)
-  assert.ok(defaults.includes('Enter view'), `the default confirm key is advertised: ${defaults}`)
-  assert.ok(defaults.includes('Esc close'), `the default close key is advertised: ${defaults}`)
+  assert.ok(defaults.includes('View [Enter]'), `the default confirm key is advertised: ${defaults}`)
+  assert.ok(defaults.includes('Close [Esc]'), `the default close key is advertised: ${defaults}`)
   assert.ok(defaults.includes('navigate'), `the navigation keys are advertised: ${defaults}`)
 
   // A remap MUST change the bar: this is the assertion the hard-coded string failed.
   keybindings.setUserBindings({ 'tui.select.confirm': ['ctrl+y'], 'tui.select.cancel': ['ctrl+g'] })
   try {
     const remapped = barAt(80)
-    assert.ok(remapped.includes('Ctrl+Y view'), `the bar follows the live confirm binding: ${remapped}`)
-    assert.ok(remapped.includes('Ctrl+G close'), `the bar follows the live close binding: ${remapped}`)
+    assert.ok(remapped.includes('View [Ctrl+Y]'), `the bar follows the live confirm binding: ${remapped}`)
+    assert.ok(remapped.includes('Close [Ctrl+G]'), `the bar follows the live close binding: ${remapped}`)
     assert.ok(!remapped.includes('Enter view'), `the stale default is gone: ${remapped}`)
   } finally {
     keybindings.setUserBindings({})
   }
-  assert.ok(barAt(80).includes('Enter view'), 'restoring the bindings restores the hint')
+  assert.ok(barAt(80).includes('View [Enter]'), 'restoring the bindings restores the hint')
 
   // An EMPTY cancel binding is a reachable state (`KeybindingsManager` accepts
   // `[]`), and it must not produce a bar that promises a key doing nothing:
@@ -856,7 +873,7 @@ test('the list action bar advertises the LIVE keybindings and degrades by whole 
     })
     const lines = workspace.render(60)
     const bar = strip(lines[lines.length - 1] ?? '').trimEnd()
-    assert.ok(bar.includes('Esc close'), `an unbound cancel still advertises the fixed Esc: ${bar}`)
+    assert.ok(bar.includes('Close [Esc]'), `an unbound cancel still advertises the fixed Esc: ${bar}`)
     workspace.handleInput('\x1b')
     assert.equal(closes, 1, 'the advertised Esc REALLY closes the workspace (no dead hint)')
     workspace.dispose()
@@ -864,18 +881,160 @@ test('the list action bar advertises the LIVE keybindings and degrades by whole 
     keybindings.setUserBindings({})
   }
 
-  // Whole-segment degradation: `Esc close` survives every width, and no
+  // Whole-segment degradation: the complete `Close` VERB survives every width
+  // (its key badge is the first thing the compacted short form drops), and no
   // surviving row is ever wider than its grant.
   for (const width of [40, 30, 24, 20, 14, 8]) {
     const bar = barAt(width)
     assert.ok(visibleWidth(bar) <= width, `the bar fits ${width} cells: ${JSON.stringify(bar)}`)
-    assert.ok(bar.includes('Esc'), `Esc survives at width ${width}: ${JSON.stringify(bar)}`)
+    assert.ok(bar.includes('Close'), `the close verb survives at width ${width}: ${JSON.stringify(bar)}`)
     // Whole-segment drops never leave a dangling separator or an ellipsis
     // (a single surviving segment is the only thing the helper may truncate).
     if (width >= 24) {
       assert.ok(!bar.includes('…'), `no truncation marker at ${width}: ${JSON.stringify(bar)}`)
       assert.ok(!/[·]\s*$/.test(bar), `no dangling separator at ${width}: ${JSON.stringify(bar)}`)
     }
+  }
+})
+
+test('the /view-image list affordances keep Role 14 primary ink', () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  try {
+    const workspace = new ImageWorkspacePanel({
+      rows: () => 8,
+      requestRender: () => {},
+      theme: { fallbackColor: (text: string) => text },
+      candidates: [{ value: '1', label: '#1 · shot.png' }],
+      resolve: () => ({ ref: { ...IMAGE_REF, mediaType: 'image/png' as const }, scope: {} }),
+      onStale: () => {},
+      onClose: () => {},
+      initial: { kind: 'list' },
+    })
+    const raw = workspace.render(80)
+    const bar = raw[raw.length - 1] ?? ''
+    assert.ok(bar.includes(color.primary('View [Enter]')), `the View affordance is primary ink: ${JSON.stringify(bar)}`)
+    assert.ok(bar.includes(color.primary('Close [Esc]')), `the Close affordance is primary ink: ${JSON.stringify(bar)}`)
+    assert.ok(bar.includes(color.textMuted('Up/Down navigate')), `the browsing hint stays muted: ${JSON.stringify(bar)}`)
+    workspace.dispose()
+  } finally {
+    resetCapabilitiesCache()
+  }
+})
+
+test('an unbound confirm key paints a complete pointer-only View action', () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const keybindings = getKeybindings()
+  keybindings.setUserBindings({ 'tui.select.confirm': [] })
+  try {
+    const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+    let opens = 0
+    const workspace = new ImageWorkspacePanel({
+      rows: () => 8,
+      requestRender: () => {},
+      theme: { fallbackColor: (text: string) => text },
+      candidates: [{ value: '1', label: '#1 · shot.png' }],
+      resolve: () => { opens += 1; return { ref: { ...IMAGE_REF, mediaType: 'image/png' as const }, scope: {} } },
+      onStale: () => {},
+      onClose: () => {},
+      initial: { kind: 'list' },
+    })
+    const lines = workspace.render(80)
+    const bar = strip(lines[lines.length - 1] ?? '').trimEnd()
+    assert.ok(bar.includes('View'), `the pointer-only View is painted: ${bar}`)
+    assert.ok(!bar.includes('View ['), `no key badge is invented when the action is unbound: ${bar}`)
+    // The complete span is a real target and activates the SAME picker path.
+    const col = bar.indexOf('View')
+    const event = (type: 'press' | 'click'): import('@xmoon76/pi-tui').TuiMouseEvent => ({
+      type, button: 'left', x: col, y: lines.length - 1, screenX: col, screenY: lines.length - 1,
+      width: 80, height: lines.length, shift: false, alt: false, ctrl: false,
+    })
+    assert.ok(workspace.handleMouse(event('press'))?.handled)
+    assert.ok(workspace.handleMouse(event('click'))?.handled)
+    assert.equal(opens, 1, 'the pointer-only View resolves the live selection through the picker path')
+    assert.ok(strip(workspace.render(80)[0] ?? '').includes('Image · shot.png'), 'the Viewer opened')
+    workspace.dispose()
+  } finally {
+    keybindings.setUserBindings({})
+    resetCapabilitiesCache()
+  }
+})
+
+test('workspace invalidation drops the armed bar gesture until the next paint', () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  try {
+    let opens = 0
+    const workspace = new ImageWorkspacePanel({
+      rows: () => 8,
+      requestRender: () => {},
+      theme: { fallbackColor: (text: string) => text },
+      candidates: [{ value: '1', label: '#1 · shot.png' }],
+      resolve: () => { opens += 1; return { ref: { ...IMAGE_REF, mediaType: 'image/png' as const }, scope: {} } },
+      onStale: () => {},
+      onClose: () => {},
+      initial: { kind: 'list' },
+    })
+    const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+    const lines = workspace.render(80)
+    const bar = strip(lines[lines.length - 1] ?? '')
+    const col = bar.indexOf('View [Enter]')
+    const event = (type: 'press' | 'click'): import('@xmoon76/pi-tui').TuiMouseEvent => ({
+      type, button: 'left', x: col, y: lines.length - 1, screenX: col, screenY: lines.length - 1,
+      width: 80, height: lines.length, shift: false, alt: false, ctrl: false,
+    })
+    assert.ok(workspace.handleMouse(event('press'))?.handled)
+    workspace.invalidate()
+    assert.equal(workspace.handleMouse(event('click')), undefined,
+      'a press from the invalidated frame can never complete before the next paint')
+    assert.equal(opens, 0)
+    // The NEXT paint republishes the target; a fresh independent click works.
+    const repainted = workspace.render(80)
+    const repaintedBar = strip(repainted[repainted.length - 1] ?? '')
+    const repaintedCol = repaintedBar.indexOf('View [Enter]')
+    const fresh = (type: 'press' | 'click'): import('@xmoon76/pi-tui').TuiMouseEvent => ({
+      type, button: 'left', x: repaintedCol, y: repainted.length - 1, screenX: repaintedCol,
+      screenY: repainted.length - 1, width: 80, height: repainted.length, shift: false, alt: false, ctrl: false,
+    })
+    assert.ok(workspace.handleMouse(fresh('press'))?.handled)
+    assert.ok(workspace.handleMouse(fresh('click'))?.handled)
+    assert.equal(opens, 1, 'a new independent press completes normally after the repaint')
+    workspace.dispose()
+  } finally {
+    resetCapabilitiesCache()
+  }
+})
+
+test('workspace teardown drops the armed bar gesture', () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  try {
+    let opens = 0
+    const workspace = new ImageWorkspacePanel({
+      rows: () => 8,
+      requestRender: () => {},
+      theme: { fallbackColor: (text: string) => text },
+      candidates: [{ value: '1', label: '#1 · shot.png' }],
+      resolve: () => { opens += 1; return { ref: { ...IMAGE_REF, mediaType: 'image/png' as const }, scope: {} } },
+      onStale: () => {},
+      onClose: () => {},
+      initial: { kind: 'list' },
+    })
+    const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+    const lines = workspace.render(80)
+    const bar = strip(lines[lines.length - 1] ?? '')
+    const col = bar.indexOf('View [Enter]')
+    const event = (type: 'press' | 'click'): import('@xmoon76/pi-tui').TuiMouseEvent => ({
+      type, button: 'left', x: col, y: lines.length - 1, screenX: col, screenY: lines.length - 1,
+      width: 80, height: lines.length, shift: false, alt: false, ctrl: false,
+    })
+    assert.ok(workspace.handleMouse(event('press'))?.handled)
+    workspace.dispose()
+    assert.equal(workspace.handleMouse(event('click')), undefined, 'a press armed before dispose can never complete')
+    assert.equal(opens, 0)
+  } finally {
+    resetCapabilitiesCache()
   }
 })
 
@@ -1045,7 +1204,7 @@ test('JPEG and WebP paint real Kitty pixels after their derived PNGs, and body c
   app.stop()
 })
 
-test('/view-image list → Viewer paints real JPEG pixels; Esc back then Esc close restores the transcript', async () => {
+test('/view-image list → Viewer paints real JPEG pixels; Back [Esc] then Close [Esc] restores the transcript', async () => {
   resetCapabilitiesCache()
   setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
   const jpeg = jpegRef()
@@ -1076,7 +1235,7 @@ test('/view-image list → Viewer paints real JPEG pixels; Esc back then Esc clo
   assert.ok(listView.includes('Images · current transcript'), `the list opened:\n${listView}`)
   assert.ok(listView.includes('#1 · photo.jpg · 120×80 · image/jpeg'), `the JPEG candidate is listed:\n${listView}`)
   assert.ok(listView.includes('#2 · graphic.webp · 48×32 · image/webp'), `the WebP candidate is listed:\n${listView}`)
-  assert.ok(listView.includes('Esc close'), 'the list advertises its real close route')
+  assert.ok(listView.includes('Close [Esc]'), 'the list advertises its real close route')
 
   const transcriptIds = writtenKittyImageIds(vt).length
   vt.sendInput('\r')
@@ -1084,14 +1243,14 @@ test('/view-image list → Viewer paints real JPEG pixels; Esc back then Esc clo
   assert.ok(viewer.includes('Image · photo.jpg'), `Enter opens the Viewer:\n${viewer}`)
   assert.ok(viewer.includes('120×80 · image/jpeg'), `the Viewer keeps the ORIGINAL ref metadata:\n${viewer}`)
   assert.ok(!viewer.includes('Preview unavailable'), `the 6A derivative paints real JPEG pixels:\n${viewer}`)
-  assert.ok(viewer.includes('Esc back'), 'a Viewer opened from the list returns to it')
+  assert.ok(viewer.includes('Back [Esc]'), 'a Viewer opened from the list returns to it')
   assert.ok(writtenKittyImageIds(vt).length > transcriptIds, 'the Viewer wrote its own PNG placement')
 
   vt.sendInput('\x1b')
   await settleClick(vt)
   const back = await viewport(vt)
-  assert.ok(back.includes('Images · current transcript'), `Esc back returns to the SAME list:\n${back}`)
-  assert.ok(back.includes('Esc close'), 'the list still advertises Esc close')
+  assert.ok(back.includes('Images · current transcript'), `Back [Esc] returns to the SAME list:\n${back}`)
+  assert.ok(back.includes('Close [Esc]'), 'the list still advertises Close [Esc]')
 
   vt.sendInput('\x1b')
   await settleClick(vt)
@@ -1251,6 +1410,388 @@ test('invalidating a running JPEG conversion never paints its late derivative', 
   assert.equal(writtenKittyImageIds(vt).length, writesBefore, 'the stale settle paints no new placement')
   const view = await viewport(vt)
   assert.ok(view.includes('🖼️ photo.jpg · 120×80'), 'the identity row survives')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+// ── PR-B B1: the fullscreen view/navigation/exit pointer journey ────────────
+
+/** The 1-based cell of `text` on one 1-based viewport row. */
+function cellOfText(view: string, row: number, text: string): number {
+  const line = view.split('\n')[row - 1] ?? ''
+  const index = line.indexOf(text)
+  assert.ok(index >= 0, `row ${row} must paint '${text}': ${JSON.stringify(line)}`)
+  return index + 1
+}
+
+test('pointer B1: LIST row click opens the Viewer; Back [Esc] returns to the SAME list; Close [Esc] restores the transcript', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    userMessage([{ type: 'image', attachment: IMAGE_REF }], 1),
+    userMessage([{ type: 'image', attachment: IMAGE_REF_2 }], 2),
+  ])
+  app.setTranscript(folder.messages())
+  vt.resize(100, 30)
+  await vt.waitForRender()
+  ;(app as unknown as { openTranscriptImagePicker(): void }).openTranscriptImagePicker()
+  const list = await viewport(vt)
+  const rowA = rowOfNth(list, '#1 · shot.png', 0)
+  assert.ok(rowA > 0, `the list paints both occurrences:\n${list}`)
+  // ONE row click → the click's own press selects, its synthesized release
+  // opens the Viewer for THAT occurrence.
+  await clickCell(vt, cellOfText(list, rowA, '#1 · shot.png'), rowA)
+  const viewer = await viewport(vt)
+  assert.ok(viewer.includes('Image · shot.png'), `the row click opens its occurrence:\n${viewer}`)
+  assert.ok(viewer.includes('Back [Esc]'), 'a Viewer opened from the list advertises Back [Esc]')
+  // Back returns to the SAME list instance with the same selection.
+  const backRow = rowOfNth(viewer, 'Back [Esc]', 0)
+  await clickCell(vt, cellOfText(viewer, backRow, 'Back [Esc]'), backRow)
+  const back = await viewport(vt)
+  assert.ok(back.includes('Images · current transcript'), `Back returns to the list:\n${back}`)
+  assert.ok(back.split('\n').some(line => line.startsWith('> ') && line.includes('#1 · shot.png')),
+    'the clicked row stays selected')
+  // The list bar Close completes the lease.
+  const closeRow = rowOfNth(back, 'Close [Esc]', 0)
+  await clickCell(vt, cellOfText(back, closeRow, 'Close [Esc]'), closeRow)
+  const closed = await viewport(vt)
+  assert.ok(!closed.includes('Images · current transcript'), `Close leaves the workspace:\n${closed}`)
+  assert.ok(closed.includes('🖼️ shot.png'), 'the paused transcript is restored')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('pointer B1: the LIST View bar opens the LAST-PAINTED selection and rejects stale/absent targets', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    userMessage([{ type: 'image', attachment: IMAGE_REF }], 1),
+    userMessage([{ type: 'image', attachment: IMAGE_REF_2 }], 2),
+  ])
+  app.setTranscript(folder.messages())
+  vt.resize(100, 30)
+  await vt.waitForRender()
+  ;(app as unknown as { openTranscriptImagePicker(): void }).openTranscriptImagePicker()
+  const list = await viewport(vt)
+  const viewRow = rowOfNth(list, 'View [Enter]', 0)
+  assert.ok(viewRow > 0, `the bar paints the complete View target:\n${list}`)
+  const viewCol = cellOfText(list, viewRow, 'View [Enter]')
+  // A press on the bar, a keyboard selection move, then the release: the
+  // pressed selection is no longer the painted one → no Viewer.
+  vt.sendInput(`\x1b[<0;${viewCol};${viewRow}M`)
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B') // select the second occurrence
+  await vt.waitForRender()
+  vt.sendInput(`\x1b[<0;${viewCol};${viewRow}m`)
+  await settleClick(vt)
+  assert.ok(!(await viewport(vt)).includes('Image · '), 'a press for the previous selection never opens the new one')
+  // The freshly painted View target opens the CURRENT selection.
+  const fresh = await viewport(vt)
+  const freshRow = rowOfNth(fresh, 'View [Enter]', 0)
+  await clickCell(vt, cellOfText(fresh, freshRow, 'View [Enter]'), freshRow)
+  const viewer = await viewport(vt)
+  assert.ok(viewer.includes('Image · second.png'), `the bar opens the painted selection:\n${viewer}`)
+  // Back, then a click on the bar separator is inert.
+  const backRow = rowOfNth(viewer, 'Back [Esc]', 0)
+  await clickCell(vt, cellOfText(viewer, backRow, 'Back [Esc]'), backRow)
+  const back = await viewport(vt)
+  const barRow = rowOfNth(back, 'Close [Esc]', 0)
+  const barLine = back.split('\n')[barRow - 1] ?? ''
+  const separatorCol = barLine.indexOf(' · ') + 2
+  assert.ok(separatorCol > 1, `the bar separates its segments:\n${barLine}`)
+  vt.sendInput(`\x1b[<0;${separatorCol};${barRow}M`)
+  vt.sendInput(`\x1b[<0;${separatorCol};${barRow}m`)
+  await settleClick(vt)
+  assert.ok((await viewport(vt)).includes('Images · current transcript'),
+    'the separator between complete spans is never a target')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('pointer B1: a resize between the bar press and release never opens the Viewer', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  const folder = new TranscriptFolder()
+  folder.apply([userMessage([{ type: 'image', attachment: IMAGE_REF }], 1)])
+  app.setTranscript(folder.messages())
+  vt.resize(100, 30)
+  await vt.waitForRender()
+  ;(app as unknown as { openTranscriptImagePicker(): void }).openTranscriptImagePicker()
+  const list = await viewport(vt)
+  const viewRow = rowOfNth(list, 'View [Enter]', 0)
+  const viewCol = cellOfText(list, viewRow, 'View [Enter]')
+  vt.sendInput(`\x1b[<0;${viewCol};${viewRow}M`)
+  await vt.waitForRender()
+  vt.resize(96, 30)
+  await vt.waitForRender()
+  vt.sendInput(`\x1b[<0;${viewCol};${viewRow}m`)
+  await settleClick(vt)
+  const after = await viewport(vt)
+  assert.ok(!after.includes('Image · '), `a stale-geometry release opens nothing:\n${after}`)
+  assert.ok(after.includes('Images · current transcript'), 'the list stays open')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('pointer B1: a one-row grant paints no View target for the invisible list', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  let closes = 0
+  const workspace = new ImageWorkspacePanel({
+    rows: () => 1,
+    requestRender: () => {},
+    theme: { fallbackColor: (text: string) => text },
+    candidates: [{ value: '1', label: '#1 · shot.png' }],
+    resolve: () => ({ ref: { ...IMAGE_REF, mediaType: 'image/png' as const }, scope: {} }),
+    onStale: () => {},
+    onClose: () => { closes += 1 },
+    initial: { kind: 'list' },
+  })
+  const line = (workspace.render(60)[0] ?? '').replace(/\x1b\[[0-9;]*m/g, '')
+  assert.ok(!line.includes('View [Enter]'), `no painted row, no View target: ${line}`)
+  assert.ok(line.includes('Close [Esc]'), `the close verb still survives: ${line}`)
+  // The keyboard hint stays a hint: a click on it performs nothing.
+  const col = line.indexOf('Enter view')
+  const event = (type: 'press' | 'click'): import('@xmoon76/pi-tui').TuiMouseEvent => ({
+    type, button: 'left', x: col + 1, y: 0, screenX: col + 1, screenY: 0, width: 60, height: 1,
+    shift: false, alt: false, ctrl: false,
+  })
+  assert.equal(workspace.handleMouse(event('press')), undefined)
+  assert.equal(workspace.handleMouse(event('click')), undefined)
+  assert.equal(closes, 0)
+  workspace.dispose()
+})
+
+test('pointer B1: a direct Viewer closes through its painted Close [Esc] span', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    userMessage([{ type: 'text', text: 'body' }, { type: 'image', attachment: IMAGE_REF_2 }], 1),
+    userMessage([{ type: 'text', text: 'NEXT' }], 2),
+  ])
+  app.setTranscript(folder.messages())
+  vt.resize(100, 30)
+  const painted = await viewport(vt)
+  // The INFO row (identity + metadata), not the user text that also names the
+  // attachment: the body row is directly under the painted info bar.
+  const info = rowOfNth(painted, '🖼️ second.png · 800×100', 0)
+  assert.ok(info > 0, `the image body is painted:\n${painted}`)
+  await clickCell(vt, 4, info + 1)
+  const viewer = await viewport(vt)
+  assert.ok(viewer.includes('Image · second.png'), `the body click opens the direct Viewer:\n${viewer}`)
+  assert.ok(!viewer.includes('Back [Esc]'), 'a direct Viewer has no list to go back to')
+  const closeRow = rowOfNth(viewer, 'Close [Esc]', 0)
+  await clickCell(vt, cellOfText(viewer, closeRow, 'Close [Esc]'), closeRow)
+  const closed = await viewport(vt)
+  assert.ok(!closed.includes('Image · second.png'), `the painted Close span leaves the direct Viewer:\n${closed}`)
+  assert.ok(closed.includes('NEXT'), 'the transcript is restored')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+// ── PR-B review: intervening input revokes the pending image gesture ────────
+
+/** One minimal event at a workspace frame's exact grant. */
+function imageMouse(
+  type: 'press' | 'click' | 'wheel',
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  wheelDelta?: number,
+): import('@xmoon76/pi-tui').TuiMouseEvent {
+  return {
+    type,
+    button: type === 'wheel' ? 'none' : 'left',
+    x, y, screenX: x, screenY: y, width, height,
+    shift: false, alt: false, ctrl: false,
+    ...(type === 'wheel' ? { wheelDelta: wheelDelta ?? 1 } : {}),
+  }
+}
+
+test('image gesture: a wheel between a list row press and release never opens the Viewer', () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  try {
+    let opens = 0
+    const workspace = new ImageWorkspacePanel({
+      rows: () => 8,
+      requestRender: () => {},
+      theme: { fallbackColor: (text: string) => text },
+      candidates: [
+        { value: '1', label: '#1 · shot.png' },
+        { value: '2', label: '#2 · second.png' },
+      ],
+      resolve: () => {
+        opens += 1
+        return { ref: { ...IMAGE_REF, mediaType: 'image/png' as const }, scope: {} }
+      },
+      onStale: () => {},
+      onClose: () => {},
+      initial: { kind: 'list' },
+    })
+    workspace.render(80)
+    // Row 2 is the first occurrence; the wheel really moves the selection.
+    assert.ok(workspace.handleMouse(imageMouse('press', 5, 2, 80, 8))?.handled)
+    assert.ok(workspace.handleMouse(imageMouse('wheel', 5, 2, 80, 8, 1))?.handled)
+    assert.equal(workspace.handleMouse(imageMouse('click', 5, 2, 80, 8)), undefined,
+      'a wheel between press and release makes the old row click inert')
+    assert.equal(opens, 0, 'no Viewer was opened by the wheel-scrolled press')
+    // The next independent press remains legitimate.
+    assert.ok(workspace.handleMouse(imageMouse('press', 5, 2, 80, 8))?.handled)
+    assert.ok(workspace.handleMouse(imageMouse('click', 5, 2, 80, 8))?.handled)
+    assert.equal(opens, 1, 'a fresh press→release after the wheel opens exactly once')
+    workspace.dispose()
+  } finally {
+    resetCapabilitiesCache()
+  }
+})
+
+test('image gesture: invalidation and keyboard input revoke a pending row press', () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  try {
+    let opens = 0
+    const make = (): ImageWorkspacePanel => new ImageWorkspacePanel({
+      rows: () => 8,
+      requestRender: () => {},
+      theme: { fallbackColor: (text: string) => text },
+      candidates: [
+        { value: '1', label: '#1 · shot.png' },
+        { value: '2', label: '#2 · second.png' },
+      ],
+      resolve: () => {
+        opens += 1
+        return { ref: { ...IMAGE_REF, mediaType: 'image/png' as const }, scope: {} }
+      },
+      onStale: () => {},
+      onClose: () => {},
+      initial: { kind: 'list' },
+    })
+    const invalidated = make()
+    invalidated.render(80)
+    assert.ok(invalidated.handleMouse(imageMouse('press', 5, 2, 80, 8))?.handled)
+    invalidated.invalidate()
+    invalidated.render(80)
+    assert.equal(invalidated.handleMouse(imageMouse('click', 5, 2, 80, 8)), undefined,
+      'a press invalidated before its release cannot open the Viewer')
+    invalidated.dispose()
+
+    const keyed = make()
+    keyed.render(80)
+    assert.ok(keyed.handleMouse(imageMouse('press', 5, 2, 80, 8))?.handled)
+    keyed.handleInput('\x1b[B') // a real keyboard selection move
+    keyed.render(80)
+    assert.equal(keyed.handleMouse(imageMouse('click', 5, 2, 80, 8)), undefined,
+      'a keyboard move between press and release cannot open the old row')
+    keyed.dispose()
+    assert.equal(opens, 0)
+  } finally {
+    resetCapabilitiesCache()
+  }
+})
+
+test('image gesture: a wheel revokes a pending list Close and Viewer exit press', () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  try {
+    let closes = 0
+    const list = new ImageWorkspacePanel({
+      rows: () => 8,
+      requestRender: () => {},
+      theme: { fallbackColor: (text: string) => text },
+      candidates: [
+        { value: '1', label: '#1 · shot.png' },
+        { value: '2', label: '#2 · second.png' },
+      ],
+      resolve: () => ({ ref: { ...IMAGE_REF, mediaType: 'image/png' as const }, scope: {} }),
+      onStale: () => {},
+      onClose: () => { closes += 1 },
+      initial: { kind: 'list' },
+    })
+    const lines = list.render(80)
+    const bar = lines[lines.length - 1]!.replace(/\x1b\[[0-9;]*m/g, '')
+    const closeCol = bar.indexOf('Close [Esc]')
+    assert.ok(list.handleMouse(imageMouse('press', closeCol, 7, 80, 8))?.handled)
+    list.handleMouse(imageMouse('wheel', 5, 2, 80, 8, 1))
+    assert.equal(list.handleMouse(imageMouse('click', closeCol, 7, 80, 8)), undefined)
+    assert.equal(closes, 0, 'a wheel between the Close press and release keeps the workspace')
+    list.dispose()
+
+    const viewer = new ImageWorkspacePanel({
+      rows: () => 8,
+      requestRender: () => {},
+      theme: { fallbackColor: (text: string) => text },
+      candidates: [],
+      resolve: () => undefined,
+      onStale: () => {},
+      onClose: () => { closes += 1 },
+      initial: { kind: 'viewer', source: { ref: { ...IMAGE_REF, mediaType: 'image/png' as const }, scope: {} } },
+    })
+    const viewerLines = viewer.render(80)
+    const last = viewerLines[viewerLines.length - 1]!.replace(/\x1b\[[0-9;]*m/g, '')
+    const exitCol = last.indexOf('Close [Esc]')
+    assert.ok(viewer.handleMouse(imageMouse('press', exitCol, 7, 80, 8))?.handled)
+    viewer.handleMouse(imageMouse('wheel', 5, 2, 80, 8, 1))
+    assert.equal(viewer.handleMouse(imageMouse('click', exitCol, 7, 80, 8)), undefined)
+    assert.equal(closes, 0, 'a wheel between the Viewer exit press and release keeps the Viewer')
+    // A fresh independent press still closes.
+    assert.ok(viewer.handleMouse(imageMouse('press', exitCol, 7, 80, 8))?.handled)
+    assert.ok(viewer.handleMouse(imageMouse('click', exitCol, 7, 80, 8))?.handled)
+    assert.equal(closes, 1)
+    viewer.dispose()
+  } finally {
+    resetCapabilitiesCache()
+  }
+})
+
+test('pointer B1: a real wheel between a list row press and release never opens the Viewer', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    userMessage([{ type: 'image', attachment: IMAGE_REF }], 1),
+    userMessage([{ type: 'image', attachment: IMAGE_REF_2 }], 2),
+  ])
+  app.setTranscript(folder.messages())
+  vt.resize(100, 30)
+  await vt.waitForRender()
+  ;(app as unknown as { openTranscriptImagePicker(): void }).openTranscriptImagePicker()
+  const list = await viewport(vt)
+  const rowA = rowOfNth(list, '#1 · shot.png', 0)
+  const colA = cellOfText(list, rowA, '#1 · shot.png')
+  // Press, then a REAL wheel (the picker really moves the selection), then
+  // release on the pressed cell: no Viewer may open and the old row click is
+  // dead.
+  vt.sendInput(`\x1b[<0;${colA};${rowA}M`)
+  await vt.waitForRender()
+  vt.sendInput(`\x1b[<65;${colA};${rowA}M`)
+  await vt.waitForRender()
+  vt.sendInput(`\x1b[<0;${colA};${rowA}m`)
+  await settleClick(vt)
+  const after = await viewport(vt)
+  assert.ok(!after.includes('Image · '), `a wheel between press and release opens no Viewer:\n${after}`)
+  assert.ok(after.includes('Images · current transcript'), 'the list stays open')
+  assert.ok(after.split('\n').some(line => line.startsWith('> ') && line.includes('#2')),
+    `the wheel really moved the list selection:\n${after}`)
+  // A fresh independent click on the same row still opens its occurrence.
+  const fresh = await viewport(vt)
+  const freshRow = rowOfNth(fresh, '#1 · shot.png', 0)
+  await clickCell(vt, cellOfText(fresh, freshRow, '#1 · shot.png'), freshRow)
+  assert.ok((await viewport(vt)).includes('Image · shot.png'), 'a fresh press→release after the wheel opens normally')
   app.setFullscreen(false)
   app.stop()
 })

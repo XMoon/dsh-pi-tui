@@ -110,6 +110,10 @@ export interface TaskBrowserAgentInput {
   readonly depth?: number
   /** Diagnostic rows carry the fold reason instead of identity facts. */
   readonly reason?: 'corrupt' | 'unsupported' | 'unavailable'
+  /** Official Root-relative slash-separated agent path, when the catalog
+   * carries a complete one (never derived from a label/id). Used only by the
+   * Team board's member labels; Work row labels/identity stay unchanged. */
+  readonly path?: string
 }
 
 /** One task-browser row. The value is the picker row id. */
@@ -143,6 +147,8 @@ export type TaskBrowserRow =
       readonly hasChildren: false
       readonly parentId: string
       readonly depth: number
+      /** Official member path when known (Team board label only). */
+      readonly path?: string
     }
   | {
       readonly kind: 'subagent'
@@ -166,6 +172,8 @@ export type TaskBrowserRow =
       readonly parentId: string
       /** Edge distance from the requested root; direct children are 1. */
       readonly depth: number
+      /** Official member path when known (Team board label only). */
+      readonly path?: string
     }
 
 const isActiveJob = (status: string): boolean => status === 'running' || status === 'stopping'
@@ -222,6 +230,7 @@ export function buildTaskRows(
         hasChildren: false,
         parentId: entry.parentId ?? '',
         depth: entry.depth ?? 1,
+        ...(entry.path === undefined ? {} : { path: entry.path }),
       })
       continue
     }
@@ -236,6 +245,7 @@ export function buildTaskRows(
       hasChildren: entry.hasChildren ?? false,
       parentId: entry.parentId ?? '',
       depth: entry.depth ?? 1,
+      ...(entry.path === undefined ? {} : { path: entry.path }),
     })
   }
   // The tree order is the catalog order: no running-first re-sort.

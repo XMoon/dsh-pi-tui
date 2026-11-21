@@ -170,6 +170,9 @@ function memoryPort(options: {
     waitForInstall: async () => null,
     cancelInstall: async () => ({ status: 'not-running' }),
     subscribeInstall: () => () => {},
+    listVersions: async () => ({ status: 'refused', problem: 'not-updatable', reason: 'the fixture has no updatable bundle', attempts: [] }),
+    updateBundle: async () => { throw new Error('updateBundle is not used by this fixture') },
+    subscribeUpdate: () => () => {},
     subscribeInvalidation: () => () => {},
   } as unknown as PluginManagerPort
 }
@@ -453,7 +456,7 @@ test('an absent extension service paints Unavailable and copies nothing', async 
     assert.equal(harness.panel.currentView(), 'diagnostics')
     assert.match(harness.view(), /Extension diagnostics unavailable/)
     assert.match(harness.view(), /r reread/)
-    assert.match(harness.view(), /Esc back/)
+    assert.match(harness.view(), /Back \[Esc\]/)
     assert.doesNotMatch(harness.view(), /c copy/)
     assert.doesNotMatch(harness.view(), /C copy all/)
     assert.doesNotMatch(harness.view(), /Up\/Down/)

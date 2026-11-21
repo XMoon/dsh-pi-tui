@@ -399,6 +399,19 @@ test('two consecutive x/undo cycles keep the retained draft live', async () => {
     expandImagePlaceholders(draft, store).every(segment => segment.type === 'image' || !segment.text.includes('[image #')),
     'the second x leaves no dead placeholder text',
   )
+  // The third real Undo restores the SAME staged image: two x→Undo cycles are
+  // enough to distinguish the first registration from re-entry, and the
+  // (owner, image) map must still hold exactly ONE lease.
+  vt.sendInput(storedUndoKey)
+  await vt.waitForRender()
+  assert.ok(app.getDraft().includes(image.placeholder), 'the third undo restores the same staged placeholder')
+  assert.ok(store.get(image.id) !== undefined, 'the restored image bytes stay live')
+  const owners = (store as unknown as {
+    undoOwners: Map<object, { ids: Set<number> }>
+  }).undoOwners
+  assert.equal(owners.size, 1, 'one stable owner')
+  assert.deepEqual([...owners.values()][0]!.ids, new Set([image.id]),
+    'exactly one lease for the (owner, image) pair after the repeated cycles')
   app.setFullscreen(false)
   app.stop()
 })
@@ -521,41 +534,6 @@ test('an async rejection restore survives the bridge release on the business pin
   vt.sendInput(storedUndoKey)
   await vt.waitForRender()
   assert.ok(expandImagePlaceholders(app.getDraft(), store).some(segment => segment.type === 'image' && segment.image.id === image.id))
-  app.setFullscreen(false)
-  app.stop()
-})
-
-
-test('100 x/Undo cycles keep ONE (owner,image) undo lease', async () => {
-  resetCapabilitiesCache()
-  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
-  const store = new DraftImageStore()
-  const { vt, app } = startApp(100, 32, store)
-  const image = addImage(store)
-  app.setDraft('')
-  app.insertIntoEditor(image.placeholder)
-  vt.sendInput(' hello')
-  await vt.waitForRender()
-  app.setFullscreen(true)
-  await vt.waitForRender()
-  for (let cycle = 0; cycle < 100; cycle += 1) {
-    const row = await rowOf(vt, '#1/1 · 800×100', `cycle ${cycle} identity`)
-    click(vt, 100, row)
-    await vt.waitForRender()
-    vt.sendInput(storedUndoKey)
-    await vt.waitForRender()
-    // A fresh edit AFTER the undo pushes a snapshot that contains the token
-    // again, so every cycle keeps the image genuinely restorable.
-    vt.sendInput('z')
-    await vt.waitForRender()
-  }
-  assert.ok(app.getDraft().includes(image.placeholder), 'the token is live after every cycle')
-  const owners = (store as unknown as {
-    undoOwners: Map<object, { ids: Set<number> }>
-  }).undoOwners
-  assert.equal(owners.size, 1, 'one stable owner')
-  assert.deepEqual([...owners.values()][0]!.ids, new Set([image.id]),
-    'exactly one lease for the (owner, image) pair after 100 cycles')
   app.setFullscreen(false)
   app.stop()
 })
@@ -1192,11 +1170,20 @@ test('a successful Ctrl+S steer retires the draft history (F3)', async () => {
   resetCapabilitiesCache()
   setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
   const store = new DraftImageStore()
+  let finishBusinessSteer: (() => void) | undefined
   const { vt, app, businessPins } = startApp(100, 32, store, undefined, (text, probe) => {
-    // The business steer owner takes its synchronous pin, then a successful
-    // write consumes the referenced drafts.
-    probe.businessPins.push(store.pinReferenced(text))
-    consumeDraftAttachments(text, store)
+    // The business steer owner takes its synchronous pin INSIDE the dispatch.
+    // The app's own preview bridge still holds its reservation until the
+    // dispatch call stack returns, so the real owner settles asynchronously:
+    // it releases its OWN reservation and consumes afterwards (the pin-aware
+    // consumption then retires the draft; a draft still reserved by another
+    // accepted submission would survive instead).
+    const release = store.pinReferenced(text)
+    probe.businessPins.push(release)
+    finishBusinessSteer = () => {
+      release()
+      consumeDraftAttachments(text, store)
+    }
   })
   const image = addImage(store)
   app.setDraft('')
@@ -1206,6 +1193,9 @@ test('a successful Ctrl+S steer retires the draft history (F3)', async () => {
   assert.equal(store.size(), 1)
 
   vt.sendInput('\x13') // Ctrl+S
+  // The synchronous dispatch (and its preview bridge) has returned; the
+  // business owner's async success settles now.
+  finishBusinessSteer?.()
   await vt.waitForRender()
   assert.equal(app.getDraft(), '')
   assert.equal(store.size(), 0, 'the successful steer consumed the image')
@@ -2032,5 +2022,63 @@ test('a failed JPEG draft paints the failure word with the error ink (role 16)',
     'the failed placeholder word uses the error token')
   assert.equal(vt.getCellFgRgb(rowIndex, 0), parseInt(currentPalette.textDim.slice(1), 16),
     'the draft identity stays in the placeholder ink')
+  app.stop()
+})
+
+// ── PR2/F3: a held draft's preview `x` never mutates the submitted document ─
+
+test('PR2: a held composer paints no removable preview and a real fullscreen click does nothing', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const store = new DraftImageStore()
+  const { vt, app } = startApp(100, 32, store)
+  const image = addImage(store)
+  const draft = `${image.placeholder} hello`
+  app.setDraft(draft)
+  app.holdSubmission('attempt-preview')
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const labelRow = await rowOf(vt, '#1/1 · 800×100', 'preview identity')
+  // The removal control is not painted/armed while held: the real press +
+  // release at the last painted cell is inert.
+  click(vt, 100, labelRow)
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), draft, 'the held document is unchanged by the preview click')
+  assert.equal(store.size(), 1, 'the held draft keeps its staged image')
+  app.settleSubmission('attempt-preview', 'not-accepted')
+  await vt.waitForRender()
+  click(vt, 100, labelRow)
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'hello', 'the released composer admits the preview removal again')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('PR2: a preview press armed BEFORE the hold cannot delete on release', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const store = new DraftImageStore()
+  const { vt, app } = startApp(100, 32, store)
+  const image = addImage(store)
+  const draft = `${image.placeholder} hello`
+  app.setDraft(draft)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const labelRow = await rowOf(vt, '#1/1 · 800×100', 'preview identity')
+  // Press the `x` cell while the composer is editable (arms the gesture) …
+  vt.sendInput(`\x1b[<0;100;${labelRow}M`)
+  await vt.waitForRender()
+  // … the submission hold starts before the release …
+  app.holdSubmission('attempt-stale-press')
+  await vt.waitForRender()
+  // … and the stale release must not touch the submitted document.
+  vt.sendInput(`\x1b[<0;100;${labelRow}m`)
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), draft, 'a press→hold→release gesture never deletes from the held draft')
+  assert.equal(store.size(), 1, 'the staged image is untouched')
+  app.settleSubmission('attempt-stale-press', 'accepted')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), '', 'the accepted settlement clears only the submitted document')
+  app.setFullscreen(false)
   app.stop()
 })

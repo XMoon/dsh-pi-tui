@@ -126,8 +126,8 @@ legacy bootstrap state and Source Mode diagnosis; it is not the status writer
 for `mise run setup`:
 
 ```bash
-pnpm dev:doctor
-pnpm dev:bootstrap
+mise exec -- pnpm dev:doctor
+mise exec -- pnpm dev:bootstrap
 ```
 
 ### Source mode
@@ -322,6 +322,11 @@ not copy commits independently into both branches.
 
 ## Build order
 
+Prefer named `mise run` tasks for daily development. For specialized
+`package.json` scripts without a mise task, use `mise exec -- pnpm <script>`
+with the pinned toolchain. `pnpm` remains the underlying package manager.
+
+
 The root bundle embeds `@xmoon76/pi-tui`, so build the fork first:
 
 ```text
@@ -329,13 +334,49 @@ fork typecheck -> root typecheck -> fork tsdown -> root tsdown
 ```
 
 ```bash
-pnpm typecheck:fork
-pnpm typecheck
-pnpm build
+mise run typecheck
+mise run build
 ```
 
 Building only the root can embed a stale fork `dist`. Never test a stale fork
 dist and never share/symlink a whole `node_modules` between worktrees.
+
+## Local pre-push checks
+
+After the targeted tests for your change pass, run the pre-push gate from a
+prepared worktree:
+
+```bash
+mise run check
+```
+
+`mise run check` forwards to `pnpm check`, which builds the vendored fork, runs
+every typecheck, runs the tooling test lane, and then runs the shared gate
+preflight `pnpm check:gates`. The gate list and its execution live in ONE place,
+`scripts/run-quality-gates.mjs`; do not copy the list into a task or workflow.
+Every gate is classified as `local-preflight` (routine preflight), `ci-only`
+(needs a packed candidate or a CI-runner facility) or `on-demand` (a targeted
+diagnostic outside the routine preflight). The registry is the single source
+of truth; each entry declares its classification. Keep it that way: add new
+gates there, run local-preflight gates through `pnpm check:gates`, and keep
+the exact packed-candidate source-leak command as CI's only direct gate step.
+
+The workspace must already be materialized: npm mode after `mise run setup` (or
+an equivalent frozen install), Source Mode after `mise run source:bootstrap`
+with `mise run source:doctor` reporting `READY`. The check never switches the
+tracked mode, reinstalls dependencies, rewrites the lockfile, or prepares a
+source distribution.
+
+`check` is a pre-push signal, not a release qualification. It does not replace
+targeted subsystem tests, dedicated runtime/wire/UI smokes, the full product
+suite, or `mise run verify:release` (which reuses the same gate preflight for its
+static-gate portion — skipping the one gate whose exact test the release
+product suite runs again — but still runs the release-specific tests, audit and
+packed artifacts). Source Mode's exact-SHA remote closure smokes remain explicit
+smoke/CI work, and `ci-only` gates remain CI's responsibility. Treat a failed
+gate as a real defect: fix it, or report it as `NOT_VERIFIED` with the concrete
+environment blocker, and never ignore it. CI keeps its independent jobs, steps
+and diagnostics; the local check does not change the CI verdict.
 
 ## Diagnosing unpublished/local DSH targets
 
@@ -386,22 +427,25 @@ TARBALL_SMOKE_SKIP_INSTALL=1 node scripts/tarball-smoke.mjs <tgz>
 This checks structure/content only; re-run without the skip once the family is
 published. The official-presets smoke with `--distribution` boots `standard`,
 `ptc`, `minimal` and `cordis` explicitly (a standard-only boot can hide a missing
-Host service). The `pi2dsh` check always runs against the published ecosystem —
-it installs the published DSH and pi2dsh from the registry — so it refuses a
-source pack and reports that combination as a SKIP. A SKIP is not a pass, the
-npm lane must not run against source tarballs, and the gate is blocking in
-both modes.
+Host service). The `pi2dsh` check always runs against the published ecosystem:
+every run resolves `pi2dsh@latest` and the highest published DSH intersection
+from the public registry, so it requires online access and never uses a source
+pack (`--distribution` is refused non-zero). No candidate pack means no
+compatibility claim, and the check is an optional, non-blocking signal — its own
+`ecosystem-compat` job, log and debug artifact are the authority. For local use:
+`mise exec -- pnpm smoke:pi2dsh -- <tgz>`; the selection method is owned by
+[dsh-compatibility.md](./dsh-compatibility.md).
 
 ## Benchmarks and profilers
 
 Benchmark entry points:
 
-- `pnpm bench` — full sweep;
-- `pnpm bench:fast` — short sweep;
-- `pnpm bench:smoke` — reduced sweep, exercised by `test/tooling/bench-smoke.test.mjs`.
+- `mise exec -- pnpm bench` — full sweep;
+- `mise exec -- pnpm bench:fast` — short sweep;
+- `mise exec -- pnpm bench:smoke` — reduced sweep, exercised by `test/tooling/bench-smoke.test.mjs`.
 
 They are observational, manual and non-default. Compare on the same machine and
-Node version after `pnpm build`; `bench:smoke` asserts no timing threshold. Never
+Node version after `mise run build`; `bench:smoke` asserts no timing threshold. Never
 turn a wall-clock number into a CI gate, and never compare numbers across
 machines or Node versions.
 

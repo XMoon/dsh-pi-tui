@@ -9,6 +9,18 @@ on:
       - 'v*'
       - 'next-v*'
   pull_request:
+  workflow_dispatch:
+    inputs:
+      run_split_process:
+        description: Run full Host/Client Split qualification on the selected npm-mode branch
+        required: false
+        type: boolean
+        default: false
+      split_process_case:
+        description: Optional registered Split case id for the manual qualification (empty runs the full lane)
+        required: false
+        type: string
+        default: ''
 
 # Default to the minimum permission required by normal CI jobs.
 # The publish job explicitly adds id-token: write for npm Trusted Publishing.
@@ -17,7 +29,7 @@ permissions:
 
 # Cancel superseded branch/PR runs, but never cancel release-tag runs.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}${{ github.event_name == 'workflow_dispatch' && inputs.run_split_process && '-split-manual' || '' }}
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 # PARTIAL RE-RUNS. GitHub's "Re-run failed jobs" re-executes only the failed
@@ -242,7 +254,7 @@ jobs:
   # ---------------------------------------------------------------------------
   release-context:
     name: Resolve release context
-    if: startsWith(github.ref, 'refs/tags/')
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -381,11 +393,11 @@ jobs:
       # non-zero exit with the script name and the tail of its output.
       - name: D1 closure gate
         if: env.DSH_MODE == 'source'
-        run: pnpm smoke:remote-d1-closure
+        run: pnpm smoke:remote-read-capability-closure
 
       - name: D2 closure smoke
         if: env.DSH_MODE == 'source'
-        run: pnpm smoke:remote-d2-closure
+        run: pnpm smoke:remote-fork-rewind-closure
 
       # The tmux terminal-tooling suite. The lane was historically named
       # `test:docs`, but it never tested `docs/**`: it proves the tmux
@@ -393,23 +405,11 @@ jobs:
       - name: Test tmux terminal tooling
         run: pnpm test:tmux
 
-      - name: Validate installation documentation
-        run: pnpm gate:installation-doc
-
       # Development-tooling suite: dev-environment fixtures, DSH distribution
       # gates. Kept OUT of the packed artifact path so the artifact never
       # depends on the developer git/CI environment.
       - name: Test development tooling
         run: pnpm test:tooling
-
-      - name: Pi component compatibility contract
-        run: pnpm gate:pi-surface-compat
-
-      # Every production file a test reads by path must EXIST: a renamed or
-      # moved production module would otherwise leave a source lock
-      # silently pointing at a DIFFERENT file.
-      - name: Verify the production reads of the test tree
-        run: pnpm gate:production-reads
 
       # The JSON ledger is authoritative; this step proves the checked-in
       # human report is deterministic and has not been hand-edited.
@@ -419,17 +419,14 @@ jobs:
           git diff --exit-code -- packages/pi-tui/DIVERGENCES.md
           git diff --check -- packages/pi-tui/DIVERGENCES.md
 
-      - name: Validate vendored divergence ledger
-        run: pnpm gate:pi-divergence-ledger
-
-      # Vendored-fork divergence gate: every local src change must be
-      # covered by vendor-divergences.json against the pinned upstream
-      # blobs (resolved via the codeload tarball fallback on CI).
-      - name: Vendored fork divergence gate
-        run: pnpm gate:pi-vendor-diff --strict
-
-      - name: Verify naming and packaging contracts
-        run: node scripts/naming-gate.mjs
+      # The single local-preflight gate list and its execution live in
+      # scripts/run-quality-gates.mjs. This is the same entry that
+      # `mise run check` and `pnpm verify:release` use. Each gate is
+      # classified local-preflight / ci-only / on-demand; ci-only gates
+      # (for example the packed-candidate source-leak gate) keep their own
+      # independent steps.
+      - name: Run the shared local-preflight gates
+        run: pnpm check:gates
 
   # ---------------------------------------------------------------------------
   # Build and run the Remote Session read gates against the exact DSH version
@@ -1055,28 +1052,29 @@ jobs:
   # the digest is re-proven before and after the run so the probe can never
   # qualify a tarball other than the one every other gate saw.
   #
-  # The smoke is npm-only AND release-tag-only: ordinary PRs and branch pushes
-  # do not run it (split-process development work runs it manually under its
-  # own task plan); in Source Mode this job is skipped and `ci-verdict` requires
-  # exactly that `skipped`, never a silent success. On an npm release tag a
-  # skipped, failed or cancelled run is a publication blocker.
+  # The smoke is npm-only and required on release tags. Any npm-mode
+  # refs/heads/... branch may run the same candidate-backed proof through
+  # workflow_dispatch when the explicit boolean input is enabled; ordinary
+  # pushes, PRs and Source Mode skip it.
   # ---------------------------------------------------------------------------
   split-process:
     name: Host/Client split-process bootstrap
     needs:
       - dsh-context
       - candidate
-    # `always()` suppresses the implicit all-needs success check: in npm mode
-    # the transitive `prepare-dsh-source` need is legitimately skipped, and
-    # without `always()` that skip propagates into this job and leaves the
-    # required split-process proof unrun. The explicit result checks and the
-    # ref/tag condition below keep the gate fail-closed: only an npm release
-    # tag runs it.
-    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && needs.dsh-context.result == 'success' && needs.candidate.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
+    # `always()` suppresses the implicit all-needs success check: npm mode
+    # skips the transitive source-pack need. Tags always run the proof; a manual
+    # run is allowed on any npm-mode refs/heads/... branch with the explicit
+    # boolean input. The verdict receives the same event/input facts and
+    # requires success when requested.
+    if: ${{ always() && needs.dsh-context.result == 'success' && needs.candidate.result == 'success' && needs.dsh-context.outputs.mode == 'npm' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/') && inputs.run_split_process)) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
+      # The ONE pinned Playwright version of the product Browser qualification.
+      # It is a qualification tool only: never a product dependency.
+      PLAYWRIGHT_VERSION: 1.64.1
 
     steps:
       - name: Checkout
@@ -1100,6 +1098,27 @@ jobs:
             --mode "$DSH_MODE_RESOLVED" \
             --distribution "$RUNNER_TEMP/dsh-source-pack" \
             --workspace "$GITHUB_WORKSPACE"
+
+      # The product Browser x real Split TUI qualification runs on the SAME
+      # release-tag job as the packed smoke, against the SAME downloaded
+      # candidate. Playwright Chromium lives in an isolated tools directory and
+      # never enters the product tarball or the runtime dependency graph.
+      - name: Install the isolated Playwright Chromium qualification tools
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.split_process_case == '' }}
+        run: |
+          set -euo pipefail
+          TOOLS="$RUNNER_TEMP/m5-web-product-tools"
+          mkdir -p "$TOOLS"
+          npm install --prefix "$TOOLS" --no-save --no-audit --no-fund --ignore-scripts "playwright@$PLAYWRIGHT_VERSION"
+          PLAYWRIGHT_BROWSERS_PATH="$TOOLS/browsers" "$TOOLS/node_modules/.bin/playwright" install --with-deps chromium
+          node -e "console.log('qualified Playwright ' + require(process.argv[1] + '/node_modules/playwright/package.json').version)" "$TOOLS"
+          {
+            echo "SPLIT_PROCESS_PLAYWRIGHT_ROOT=$TOOLS"
+            echo "SPLIT_PROCESS_PLAYWRIGHT_BROWSERS=$TOOLS/browsers"
+            echo "SPLIT_PROCESS_REQUIRE_WEB_BROWSER=1"
+            echo "SPLIT_PROCESS_REQUIRE_WEB_PRODUCT=1"
+            echo "M5_WEB_PRODUCT_EVIDENCE=$RUNNER_TEMP/m5-web-product-evidence"
+          } >> "$GITHUB_ENV"
 
       - name: Download the candidate
         uses: actions/download-artifact@v8
@@ -1130,8 +1149,44 @@ jobs:
           echo "CANDIDATE=${TARBALLS[0]}" >> "$GITHUB_ENV"
           echo "the candidate is the produced tarball ($ACTUAL)"
 
+      - name: Prepare private Split failure evidence directory
+        run: |
+          set -euo pipefail
+          EVIDENCE_DIR="$RUNNER_TEMP/dsh-pi-tui-split-failure"
+          install -d -m 700 "$EVIDENCE_DIR"
+          echo "SPLIT_PROCESS_FAILURE_EVIDENCE=$EVIDENCE_DIR/failure.json" >> "$GITHUB_ENV"
+
       - name: Host/Client split-process bootstrap
-        run: pnpm smoke:split-process -- "$CANDIDATE"
+        id: split_smoke
+        env:
+          SPLIT_PROCESS_CASE: ${{ inputs.split_process_case }}
+        run: |
+          set -euo pipefail
+          if [ -n "${SPLIT_PROCESS_CASE}" ]; then
+            pnpm smoke:split-process -- --case "$SPLIT_PROCESS_CASE" "$CANDIDATE"
+          else
+            pnpm smoke:split-process -- "$CANDIDATE"
+          fi
+
+      - name: Upload sanitized Split smoke failure report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: split-process-failure
+          path: ${{ runner.temp }}/dsh-pi-tui-split-failure/failure.json
+          if-no-files-found: ignore
+          overwrite: true
+          retention-days: 7
+
+      - name: Upload the product Browser qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m5-web-product-evidence
+          path: ${{ runner.temp }}/m5-web-product-evidence
+          if-no-files-found: ignore
+          overwrite: true
+          retention-days: 3
 
       - name: Re-prove the candidate was not replaced during qualification
         env:
@@ -1172,7 +1227,6 @@ jobs:
       - source-checks
       - client-family-compat
       - compat-smoke
-      - ecosystem-compat
       - official-preset-assembly
       - runtime-boundary
       - security-audit
@@ -1209,11 +1263,16 @@ jobs:
       - name: Require every upstream phase to have SUCCEEDED
         env:
           DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
+          RUN_SPLIT_PROCESS: ${{ inputs.run_split_process }}
         run: |
           set -euo pipefail
+          SPLIT_PROCESS_ARGS=()
+          if [ "${RUN_SPLIT_PROCESS:-false}" = "true" ]; then SPLIT_PROCESS_ARGS+=(--run-split-process); fi
           node scripts/ci-verdict.mjs qualify \
             --mode "$DSH_MODE" \
             --ref "$GITHUB_REF" \
+            --event "$GITHUB_EVENT_NAME" \
+            "${SPLIT_PROCESS_ARGS[@]}" \
             --phase "dsh-context=${{ needs.dsh-context.result }}" \
             --phase "mise-toolchain=${{ needs['mise-toolchain'].result }}" \
             --phase "prepare-dsh-source=${{ needs['prepare-dsh-source'].result }}" \
@@ -1227,7 +1286,6 @@ jobs:
             --phase "split-process=${{ needs['split-process'].result }}" \
             --phase "source-checks=${{ needs['source-checks'].result }}" \
             --phase "compat-smoke=${{ needs['compat-smoke'].result }}" \
-            --phase "ecosystem-compat=${{ needs['ecosystem-compat'].result }}" \
             --phase "official-preset-assembly=${{ needs['official-preset-assembly'].result }}" \
             --phase "runtime-boundary=${{ needs['runtime-boundary'].result }}" \
             --phase "security-audit=${{ needs['security-audit'].result }}"
@@ -1294,7 +1352,6 @@ jobs:
       - source-checks
       - client-family-compat
       - compat-smoke
-      - ecosystem-compat
       - official-preset-assembly
       - runtime-boundary
       - security-audit
@@ -1324,17 +1381,22 @@ jobs:
           DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
           EFFECTIVE_CONFIG: ${{ needs.dsh-context.outputs.effective_config }}
           STARTED: ${{ needs.dsh-context.outputs.started_epoch }}
-          IS_RELEASE: ${{ startsWith(github.ref, 'refs/tags/') }}
+          IS_RELEASE: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
+          RUN_SPLIT_PROCESS: ${{ inputs.run_split_process }}
         run: |
           set -euo pipefail
           RELEASE_ARG=""
           if [ "$IS_RELEASE" = "true" ]; then RELEASE_ARG="--release"; fi
+          SPLIT_PROCESS_ARGS=()
+          if [ "${RUN_SPLIT_PROCESS:-false}" = "true" ]; then SPLIT_PROCESS_ARGS+=(--run-split-process); fi
           echo "effective configuration: ${EFFECTIVE_CONFIG:-<unresolved>}"
           node scripts/ci-verdict.mjs summary \
             --mode "$DSH_MODE" \
             --ref "$GITHUB_REF" \
+            --event "$GITHUB_EVENT_NAME" \
             --started "${STARTED:-}" \
             $RELEASE_ARG \
+            "${SPLIT_PROCESS_ARGS[@]}" \
             --phase "dsh-context=${{ needs.dsh-context.result }}" \
             --phase "mise-toolchain=${{ needs['mise-toolchain'].result }}" \
             --phase "prepare-dsh-source=${{ needs['prepare-dsh-source'].result }}" \
@@ -1348,7 +1410,6 @@ jobs:
             --phase "split-process=${{ needs['split-process'].result }}" \
             --phase "source-checks=${{ needs['source-checks'].result }}" \
             --phase "compat-smoke=${{ needs['compat-smoke'].result }}" \
-            --phase "ecosystem-compat=${{ needs['ecosystem-compat'].result }}" \
             --phase "official-preset-assembly=${{ needs['official-preset-assembly'].result }}" \
             --phase "runtime-boundary=${{ needs['runtime-boundary'].result }}" \
             --phase "security-audit=${{ needs['security-audit'].result }}" \
@@ -1374,9 +1435,9 @@ jobs:
   # Test the EXACT packed artifact against the supported Node.js boundaries.
   #
   # Important:
-  #   22.19.0 = minimum Node 22 supported by package.json
-  #   24.0.0  = minimum Node 24 covered by >=24
-  #   26      = current/newer supported major
+  #   24.9.0 = minimum Node declared by package.json `engines.node` (and by the
+  #            DSH CLI's own `engines.node` floor)
+  #   26     = current/newer supported major
   #
   # Node 24 used during qualification already runs every packed-artifact smoke.
   # The matrix additionally performs a clean fresh install; Source Mode injects
@@ -1399,8 +1460,7 @@ jobs:
       fail-fast: false
       matrix:
         node:
-          - '22.19.0'
-          - '24.0.0'
+          - '24.9.0'
           - '26'
 
     steps:
@@ -1481,26 +1541,29 @@ jobs:
           fi
 
   # ---------------------------------------------------------------------------
-  # Test the EXACT packed artifact against the published pi2dsh bridge and a
-  # real Pi component in a real pseudo-terminal. This is intentionally outside
-  # the packed-artifact runner: local packing stays offline and non-interactive. The published
-  # ecosystem is evaluated in BOTH modes: the smoke installs the published DSH
-  # and pi2dsh from the registry, at the pairing the ecosystem manifest
-  # declares — an external consumer pairing, not this checkout's DSH target — so
-  # Source Mode does not skip it. A failing pi2dsh peer declaration is an
-  # ECOSYSTEM_CONTRACT_BLOCKER, never a forced install.
+  # Test the EXACT provisional candidate against the CURRENT published pi2dsh
+  # latest release and a real Pi component in a real pseudo-terminal. This is
+  # intentionally outside the packed-artifact runner: local packing stays
+  # offline and non-interactive. The published ecosystem is evaluated in BOTH
+  # modes: every run resolves `pi2dsh@latest` from the public registry and the
+  # highest published DSH version both sides actually declare; a source pack is
+  # never used. The job stays visible on failure (`continue-on-error`) and is
+  # NOT part of the release qualification graph: it neither delays nor blocks
+  # `qualified`, `publish` or `release`. When no provisional candidate exists
+  # the job is SKIPPED, which is not a compatibility pass.
   # ---------------------------------------------------------------------------
   ecosystem-compat:
     name: External compatibility / pi2dsh
     needs:
       - dsh-context
-      - prepare-dsh-source
-      - qualify
-    if: ${{ always() && needs.dsh-context.result == 'success' && needs.qualify.result == 'success' && (needs.dsh-context.outputs.mode == 'npm' || needs.prepare-dsh-source.result == 'success') }}
+      - candidate
+    if: ${{ always() && needs.dsh-context.result == 'success' && needs.candidate.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    env:
-      DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
+    # pi2dsh is an optional external ecosystem, not a hard release dependency:
+    # a failure here stays visible but must not fail the workflow or block main
+    # and release publication.
+    continue-on-error: true
 
     steps:
       - name: Checkout
@@ -1533,12 +1596,14 @@ jobs:
             echo "npm_config_userconfig=$RUNNER_TEMP/dsh-npmrc"
           } >> "$GITHUB_ENV"
 
-      # The PROVISIONAL artifact: these gates must run before the final
-      # qualified artifact exists, and none of them has publication authority.
-      - name: Download the provisional candidate
+      # The candidate tarball produced by the `candidate` job. The probe runs
+      # before formal qualification (which later re-proves the same bytes and
+      # republishes them as `dsh-pi-tui-provisional`), so it consumes the
+      # producer that actually exists at this point. No publication authority.
+      - name: Download the candidate tarball
         uses: actions/download-artifact@v8
         with:
-          name: dsh-pi-tui-provisional
+          name: dsh-pi-tui-candidate
           path: tarball
 
       - name: Install tmux
@@ -1549,28 +1614,31 @@ jobs:
       - name: Run pi2dsh compatibility smoke
         env:
           PI2DSH_COMPAT_DEBUG_DIR: pi2dsh-compat-debug
-        shell: bash
+          EXPECTED_SHA256: ${{ needs.candidate.outputs.sha256 }}
+          EXPECTED_TARBALL: ${{ needs.candidate.outputs.tarball }}
         run: |
           set -euo pipefail
-
           mapfile -t TARBALLS < <(
             find tarball -maxdepth 1 -type f \
               -name 'xmoon76-dsh-pi-tui-*.tgz' \
               -print \
               | sort
           )
-
           if [ "${#TARBALLS[@]}" -ne 1 ]; then
             echo "Expected exactly one tarball, found ${#TARBALLS[@]}" >&2
             printf '%s\n' "${TARBALLS[@]}" >&2
             exit 1
           fi
-
-          # The NARROW stale-peer allowance: only a TUI-peer-only metadata
-          # mismatch proceeds to the targeted real runtime smoke (whose
-          # result decides). DSH peer mismatches, missing dsh peers, and
-          # runtime/fixture failures stay blocking.
-          node scripts/pi2dsh-compat-smoke.mjs "${TARBALLS[0]}" --allow-stale-tui-peer
+          if [ "$(basename "${TARBALLS[0]}")" != "$EXPECTED_TARBALL" ]; then
+            echo "the candidate artifact is $(basename "${TARBALLS[0]}"), not the produced $EXPECTED_TARBALL" >&2
+            exit 1
+          fi
+          ACTUAL="$(sha256sum "${TARBALLS[0]}" | cut -d' ' -f1)"
+          if [ "$ACTUAL" != "$EXPECTED_SHA256" ]; then
+            echo "the candidate artifact is $ACTUAL, not the produced $EXPECTED_SHA256" >&2
+            exit 1
+          fi
+          node scripts/pi2dsh-compat-smoke.mjs "${TARBALLS[0]}"
 
       - name: Upload pi2dsh compatibility diagnostics
         if: failure()
@@ -1668,6 +1736,8 @@ jobs:
 
       - name: Run official preset assembly smoke
         shell: bash
+        env:
+          OFFICIAL_PRESETS_FAILURE_EVIDENCE: ${{ runner.temp }}/dsh-pi-tui-official-preset-failure/failure.json
         run: |
           set -euo pipefail
           mapfile -t TARBALLS < <(
@@ -1686,6 +1756,16 @@ jobs:
           else
             node scripts/official-presets-smoke.mjs "${TARBALLS[0]}"
           fi
+
+      - name: Upload sanitized official preset failure evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: official-preset-failure
+          path: ${{ runner.temp }}/dsh-pi-tui-official-preset-failure/failure.json
+          if-no-files-found: ignore
+          overwrite: true
+          retention-days: 7
 
   # ---------------------------------------------------------------------------
   # Verify the EXACT packed artifact rejects the old Harness. The unsupported
@@ -1794,7 +1874,7 @@ jobs:
   release-metadata:
     name: Prepare release metadata
 
-    if: startsWith(github.ref, 'refs/tags/')
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
     needs:
       - release-context
 
@@ -1854,7 +1934,7 @@ jobs:
     needs:
       - dsh-context
       - qualified
-    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && needs.dsh-context.result == 'success' && needs.qualified.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
+    if: ${{ always() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && needs.dsh-context.result == 'success' && needs.qualified.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -1932,7 +2012,7 @@ jobs:
   publish:
     name: Publish to npm
 
-    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && needs.dsh-context.result == 'success' && needs.release-context.result == 'success' && needs.source-checks.result == 'success' && needs.qualified.result == 'success' && needs.client-family-compat.result == 'success' && needs.compat-smoke.result == 'success' && needs.ecosystem-compat.result == 'success' && needs.official-preset-assembly.result == 'success' && needs.runtime-boundary.result == 'success' && needs.security-audit.result == 'success' && needs.release-metadata.result == 'success' && needs.release-packed-check.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
+    if: ${{ always() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && needs.dsh-context.result == 'success' && needs.release-context.result == 'success' && needs.source-checks.result == 'success' && needs.qualified.result == 'success' && needs.client-family-compat.result == 'success' && needs.compat-smoke.result == 'success' && needs.official-preset-assembly.result == 'success' && needs.runtime-boundary.result == 'success' && needs.security-audit.result == 'success' && needs.release-metadata.result == 'success' && needs.release-packed-check.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
 
     needs:
       - dsh-context
@@ -1941,7 +2021,6 @@ jobs:
       - source-checks
       - qualified
       - compat-smoke
-      - ecosystem-compat
       - official-preset-assembly
       - runtime-boundary
       - security-audit
@@ -2051,8 +2130,8 @@ jobs:
   #
   # The assets are the SAME artifact chain as npm: the candidate packed from
   # the verified build, qualified by the smokes and the leak gate, gated by
-  # compat-smoke and the pi2dsh ecosystem gate, joined by `qualified`, then
-  # published by publish — never a rebuild. A SHA256 file rides along for
+  # compat-smoke, joined by `qualified`, then published by publish — never a
+  # rebuild. A SHA256 file rides along for
   # download verification.
   #
   # The job is re-runnable: an existing release is edited in place and assets
@@ -2061,7 +2140,7 @@ jobs:
   release:
     name: Create GitHub Release
 
-    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && needs.dsh-context.result == 'success' && needs.release-context.result == 'success' && needs.publish.result == 'success' && needs.qualified.result == 'success' && needs.release-metadata.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
+    if: ${{ always() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && needs.dsh-context.result == 'success' && needs.release-context.result == 'success' && needs.publish.result == 'success' && needs.qualified.result == 'success' && needs.release-metadata.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
 
     needs:
       - dsh-context

@@ -15,11 +15,35 @@ import { createRemoteBackendRuntime } from '../../src/app/remote/runtime.ts'
 import type { BackendKind } from '../../src/runtime/backend.ts'
 
 test('the Remote backend advertises exactly its implemented capabilities', () => {
-  const parts = {
-    subagent: {}, sessionReader: {}, pendingInputReader: {}, sessionWriter: {},
-    sessionLifecycle: {}, interaction: {}, catalog: {}, config: {}, hostFile: {},
-    sessionArchive: {}, hostCommand: {}, pluginManager: {}, jobObservation: {},
-  } as unknown as RemoteBackendParts
+  const parts: RemoteBackendParts = {
+    subagent: {} as RemoteBackendParts['subagent'],
+    sessionReader: {} as RemoteBackendParts['sessionReader'],
+    pendingInputReader: {} as RemoteBackendParts['pendingInputReader'],
+    sessionWriter: {} as RemoteBackendParts['sessionWriter'],
+    sessionLifecycle: {} as RemoteBackendParts['sessionLifecycle'],
+    interaction: {} as RemoteBackendParts['interaction'],
+    catalog: {} as RemoteBackendParts['catalog'],
+    config: {} as RemoteBackendParts['config'],
+    hostFile: {} as RemoteBackendParts['hostFile'],
+    sessionArchive: {} as RemoteBackendParts['sessionArchive'],
+    sessionMarkdown: {} as RemoteBackendParts['sessionMarkdown'],
+    hostCommand: {} as RemoteBackendParts['hostCommand'],
+    pluginManager: {} as RemoteBackendParts['pluginManager'],
+    jobObservation: {} as RemoteBackendParts['jobObservation'],
+    hostUserShell: {} as RemoteBackendParts['hostUserShell'],
+    hostShellCompletion: {} as RemoteBackendParts['hostShellCompletion'],
+    deliveredFileRead: {} as RemoteBackendParts['deliveredFileRead'],
+    webAccess: {} as RemoteBackendParts['webAccess'],
+    acpAccess: {} as RemoteBackendParts['acpAccess'],
+    sessionWorkspaceFacts: {} as RemoteBackendParts['sessionWorkspaceFacts'],
+    schedule: {} as RemoteBackendParts['schedule'],
+    hostDirectoryBrowse: {} as RemoteBackendParts['hostDirectoryBrowse'],
+    sessionPolicy: {} as RemoteBackendParts['sessionPolicy'],
+    teamMode: {} as RemoteBackendParts['teamMode'],
+    teamBoard: {} as RemoteBackendParts['teamBoard'],
+    mcpServers: {} as RemoteBackendParts['mcpServers'],
+    cuaAccess: {} as RemoteBackendParts['cuaAccess'],
+  }
   const backend = createRemoteBackend(parts)
   assert.equal(backend.kind, 'remote')
   assert.deepEqual([...backend.capabilities].sort(), [...REMOTE_IMPLEMENTED_CAPABILITIES].sort())
@@ -30,6 +54,16 @@ test('the Remote backend advertises exactly its implemented capabilities', () =>
   assert.equal(backend.config, parts.config)
   assert.equal(backend.interaction, parts.interaction)
   assert.equal(backend.sessionArchive, parts.sessionArchive)
+  assert.equal(backend.sessionMarkdown, parts.sessionMarkdown)
+  assert.equal(backend.schedule, parts.schedule, 'S5-PR4: the required Schedule port is the very adapter handed in')
+  assert.equal(backend.hostDirectoryBrowse, parts.hostDirectoryBrowse,
+    'Session Workspace PR1: the required directory-browse port is the very adapter handed in')
+  assert.equal(backend.teamMode, parts.teamMode,
+    'FR1: the required Team mode port is the very adapter handed in')
+  assert.equal(backend.teamBoard, parts.teamBoard,
+    'FR2: the required read-only Team board port is the very adapter handed in')
+  assert.equal(backend.cuaAccess, parts.cuaAccess,
+    'PR-5/MAC-09 v2: the required CUA access port is the very adapter handed in')
 })
 
 test('BackendKind accepts remote while Direct stays the production default', () => {
@@ -69,8 +103,12 @@ function fakeRuntime(settingsDescribe: () => Promise<unknown>): {
       skills: { list: async () => ({ ok: true, value: { skills: [] } }) },
       fileReferences: { list: async () => ({ ok: true, value: [] }) },
       commands: { execute: async () => ({ ok: true, value: undefined }) },
-      subagents: { prompt: async () => ({ ok: true, value: { messageId: 'm' } }), interruptByParent: async () => ({ ok: true, value: {} }) },
+      subagents: { prompt: async () => ({ ok: true, value: { messageId: 'm' } }), interruptByUser: async () => ({ ok: true, value: {} }) },
       userQuestions: { attachWait: () => Object.assign((async function* () {})(), { dispose: () => {} }), answer: async () => ({ ok: true, value: true }) },
+      // M5-U-A: the passive read-authority faces the assembly hands the ONE
+      // facts adapter. The assembly never calls them during construction.
+      state: async () => ({ ok: true, value: { running: false, pendingInput: [] } }),
+      projections: async () => ({ ok: true, value: null }),
       pluginManager: {},
       settings: {
         describe: async () => { describeCalls += 1; return settingsDescribe() },
@@ -81,6 +119,9 @@ function fakeRuntime(settingsDescribe: () => Promise<unknown>): {
       credentials: { describe: async () => ({ ok: true, value: {} }), set: async () => ({ ok: true, value: undefined }), unset: async () => ({ ok: true, value: undefined }) },
       permissionPresets: { catalog: async () => ({ ok: true, value: { options: [] } }) },
       $on: () => () => {},
+      // M5-U-A: the generated `workspace` namespace the ONE facts adapter
+      // follows. It lives at the `remote` level, never under `session`.
+      workspace: { follow: () => Object.assign((async function* () {})(), { dispose: () => {} }) },
     },
     jobs: { state: { getSnapshot: () => ({ rows: {}, observed: {} }), subscribe: () => () => {} }, watchRows: () => () => {}, observe: () => () => {} },
     connection: { generation },
@@ -91,7 +132,7 @@ function fakeRuntime(settingsDescribe: () => Promise<unknown>): {
 test('the assembly performs the config FIRST mirror read as its readiness barrier', async () => {
   const fake = fakeRuntime(async () => ({
     ok: true,
-    value: { writable: true, hasDocument: true, namespaces: [{ ns: 'tui-app', value: { theme: 'auto' }, revision: 1, applies: 'live', secrets: [], autoGenerate: false, schema: {} }] },
+    value: { writable: true, hasDocument: true, namespaces: [{ ns: 'pi-tui-preferences', value: { theme: 'auto' }, revision: 1, applies: 'live', secrets: [], autoGenerate: false, schema: {} }] },
   }))
   const runtime = await createRemoteBackendRuntime({
     runtime: fake.runtime,
@@ -121,12 +162,73 @@ test('a failing config first read is recorded and still yields a backend (never 
   runtime.dispose()
 })
 
+test('the ONE composition uploader keeps Command receipt staging alive when a prompt serializer is injected', async () => {
+  const fake = fakeRuntime(async () => ({
+    ok: true,
+    value: { writable: true, hasDocument: true, namespaces: [], revision: 1 },
+  }))
+  const requests: { readonly url: string; readonly bytes: number }[] = []
+  const runtime = await createRemoteBackendRuntime({
+    runtime: fake.runtime,
+    // An injected serializer bypasses the production prompt serializer, but
+    // must NOT remove the command path's official receipt capability.
+    promptSerializer: {
+      preflight: () => ({ kind: 'unsupported', reason: 'test' }),
+      serialize: async () => ({ kind: 'unsupported', reason: 'test' }),
+    },
+    fetch: async (input, init) => {
+      let bytes = 0
+      const body = init?.body
+      if (body !== undefined && body !== null) {
+        const reader = (body as ReadableStream<Uint8Array>).getReader()
+        try {
+          for (;;) {
+            const chunk = await reader.read()
+            if (chunk.done) break
+            bytes += chunk.value.byteLength
+          }
+        } finally {
+          reader.releaseLock()
+        }
+      }
+      requests.push({ url: String(input), bytes })
+      return new Response(JSON.stringify({
+        ok: true,
+        value: { receiptId: 'receipt-remote', file: { attachmentId: 'att-remote', name: 'report.bin', bytes } },
+      }), { status: 200, headers: { 'content-type': 'application/json' } })
+    },
+  })
+  try {
+    const file: import('../../src/runtime/prepared-prompt.ts').PreparedFile = {
+      name: 'report.bin',
+      byteLength: 4,
+      source: {
+        kind: 'client-stream',
+        open: async function* () { yield new Uint8Array([1, 2, 3, 4]) },
+      },
+    }
+    const staged = await runtime.backend.hostCommand.stageFileReceipt({
+      sessionId: 'session-a',
+      file,
+      signal: new AbortController().signal,
+    })
+    assert.deepEqual(staged, { receiptId: 'receipt-remote' })
+    assert.equal(requests.length, 1, 'the command staged through the official raw upload route exactly once')
+    assert.match(requests[0]!.url, /\/api\/session\/uploadFileBinary\?sessionId=session-a&name=report\.bin/)
+    assert.equal(requests[0]!.bytes, 4, 'the exact Client bytes reached the authenticated route')
+  } finally {
+    runtime.dispose()
+  }
+})
+
 test('a post-adapter construction failure reverse-unwinds every constructed part (backend partial state does not survive)', async () => {
   // The injection lands EXACTLY in the "adapters already constructed, factory
-  // has not returned" window: `options.fetch` is read AFTER the semantics
-  // bundle and the ConfigPort (with its mirror subscriptions) are
-  // constructed, but BEFORE the backend object is assembled and returned. A
-  // throwing getter there rejects the factory with both parts alive.
+  // has not returned" window: the final backend assembly reads the optional
+  // `piTuiWebAccess` namespace AFTER the semantics bundle and the ConfigPort
+  // (with its mirror subscriptions) are constructed, but BEFORE the backend
+  // object is returned. A throwing getter there rejects the factory with both
+  // parts alive (the composition-owned receipt uploader is a plain function
+  // value and cannot throw).
   //
   // The unwind is observed through the REAL subscription lifecycle: the
   // fake runtime's `$on` hands out subscribes whose unsubscribes count —
@@ -134,25 +236,29 @@ test('a post-adapter construction failure reverse-unwinds every constructed part
   // observable proof that the config port's subscriptions did not survive.
   const fake = fakeRuntime(async () => ({
     ok: true,
-    value: { writable: true, hasDocument: true, namespaces: [{ ns: 'tui-app', value: { theme: 'auto' }, revision: 1, applies: 'live', secrets: [], autoGenerate: false, schema: {} }] },
+    value: { writable: true, hasDocument: true, namespaces: [{ ns: 'pi-tui-preferences', value: { theme: 'auto' }, revision: 1, applies: 'live', secrets: [], autoGenerate: false, schema: {} }] },
   }))
   const induced = new Error('induced post-adapter construction failure')
   let activeSubscriptions = 0
   let totalSubscriptions = 0
-  const runtime = fake.runtime as unknown as { remote: { $on: () => () => {} } }
+  const runtime = fake.runtime as unknown as { remote: { $on: () => () => {}; piTuiWebAccess: unknown } }
   const originalOn = runtime.remote.$on
   runtime.remote.$on = (() => {
     activeSubscriptions += 1
     totalSubscriptions += 1
     return () => { activeSubscriptions -= 1 }
   }) as never
+  Object.defineProperty(runtime.remote, 'piTuiWebAccess', {
+    configurable: true,
+    get(): never { throw induced },
+  })
   try {
     await assert.rejects(
       createRemoteBackendRuntime({
         runtime: fake.runtime,
         promptSerializer: { preflight: () => ({ kind: 'unsupported', reason: 'test' }), serialize: async () => ({ kind: 'unsupported', reason: 'test' }) },
-        get fetch(): typeof fetch { throw induced },
-      } as never),
+        fetch: async () => new Response(null, { status: 404 }),
+      }),
       (error: unknown) => {
         assert.equal(error, induced, 'the original construction failure surfaces unmasked')
         return true
@@ -163,5 +269,6 @@ test('a post-adapter construction failure reverse-unwinds every constructed part
       'the reverse-unwind released every construction-time subscription (no surviving backend partial state)')
   } finally {
     runtime.remote.$on = originalOn
+    delete (runtime.remote as { piTuiWebAccess?: unknown }).piTuiWebAccess
   }
 })

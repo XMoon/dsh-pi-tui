@@ -18,6 +18,7 @@ import { renderDiffLine } from '../../src/tui/components/transcript/diff.ts'
 import {
   foldedCallPreview, genericRawInputLines, parseReadEnvelopes, parseSkillEnvelope, resultTextLines, subagentModelDisplay, systemContextBody, toolPresenterFrom, webCardLines,
 } from '../../src/tui/transcript/tool-presentation.ts'
+import { createClientToolPresenter } from '../../src/tui/transcript/client-tool-presenter.ts'
 import { parseUserKeybindings } from '../../src/tui/keybindings/config.ts'
 import { HostKeybindingManager } from '../../src/tui/keybindings/manager.ts'
 import { KeybindingEditorPanel } from '../../src/tui/keybindings/ui/list.ts'
@@ -27,10 +28,12 @@ import { darkColors, lightColors } from '../../src/domain/display/theme.ts'
 import { color, currentPalette, setTheme } from '../../src/tui/theme/runtime.ts'
 import { iconFor } from '../../src/tui/icons.ts'
 import { TuiApp, BulletedComponent, TRANSCRIPT_RIGHT_GUTTER, transcriptContentWidth, TranscriptGutterComponent, type TranscriptViewportAnchor } from '../../src/tui-app.ts'
+import { AssistantMarkdownComponent } from '../../src/tui/components/transcript/assistant-markdown-source-proof.ts'
+import { HOST_MARKDOWN_OPTIONS, markdownTheme } from '../../src/tui/theme/runtime.ts'
 import { WorkingIndicator, workingFramesFor } from '../../src/tui/components/working-indicator.ts'
 import { TranscriptFolder, type TranscriptMessage, type TurnActivity, type WorkflowRunId } from '../../src/transcript.ts'
 import { TranscriptWindowController } from '../../src/domain/transcript/window.ts'
-import { Text, visibleWidth, wrapTextWithAnsi, stripTerminalSequences, type Terminal } from '@xmoon76/pi-tui'
+import { getCapabilities, Markdown, resetCapabilitiesCache, setCapabilities, sliceByColumn, Text, visibleWidth, wrapTextWithAnsi, stripTerminalSequences, type Terminal } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { mountEmbeddedPage } from '../support/embedded-page-harness.ts'
 import { hasFocusHeader } from '../support/focus-header.ts'
@@ -426,7 +429,8 @@ test('review page stays inside the dialog: the hint survives long answers', asyn
   await viewport(vt)
   vt.sendInput('\x1b[C') // → review page
   const view = await viewport(vt)
-  assert.ok(view.includes('Submit'), `Submit tab missing:\n${view}`)
+  assert.ok(view.includes('Review your answer before submit'), `review page missing:\n${view}`)
+  assert.ok(!view.includes('○ Submit') && !view.includes('✓ Submit'), `the old Submit stage tab is gone:\n${view}`)
   assert.ok(!view.includes('Cancel'), `the two-choice Cancel action is gone:\n${view}`)
   assert.ok(view.includes('esc cancel'), `hint missing:\n${view}`)
   await vt.sendInput('\x1b')
@@ -719,7 +723,7 @@ test('the embedded keybindings page keeps its query/detail and its ONE last-row 
   try {
     await vt.waitForRender()
     let lines = vt.getViewport().map(strip)
-    assert.match(lines[lines.length - 1]!, /Esc close/, 'the page bar must be the physical last row')
+    assert.match(lines[lines.length - 1]!, /Back \[Esc\]/, 'the page bar must be the physical last row')
     assert.ok(!lines.some(line => line.includes('╭') || line.includes('╰')), 'the page paints no overlay Frame')
     assert.ok(panel.render(84).length <= app.keybindingEditorMaxRows(), 'the standalone cap still bounds the page')
     // Search/navigation still works end to end.
@@ -955,7 +959,7 @@ test('a fullscreen click on an option row selects it', async () => {
   await vt.waitForRender()
   view = await viewport(vt)
   // Single-select on the last question advances to the review page.
-  assert.ok(view.includes('Submit'), `click must select the option:\n${view}`)
+  assert.ok(view.includes('Review your answer before submit'), `click must select the option:\n${view}`)
   vt.sendInput('\r')
   assert.deepEqual(await promise, [{ id: 'q1', selected: ['Yes'] }])
 })
@@ -1014,7 +1018,7 @@ test('a question resize refreshes the click geometry in both dimensions', async 
   clickCell(vt, 10, movedIdx)
   await vt.waitForRender()
   view = await viewport(vt)
-  assert.ok(view.includes('Submit'), `a post-resize click must select the option:\n${view}`)
+  assert.ok(view.includes('Review your answer before submit'), `a post-resize click must select the option:\n${view}`)
   await vt.sendInput('\x1b')
   await assert.rejects(promise, /cancelled/)
 })
@@ -1107,25 +1111,21 @@ test('a fullscreen click on the "Type something." row enters free-text mode', as
   await assert.rejects(promise, /cancelled/)
 })
 
-test('a fullscreen click is inert on the review page', async () => {
+test('a fullscreen click on the review Submit action settles the answer', async () => {
   const { vt, app } = startApp()
   app.setFullscreen(true)
   await vt.waitForRender()
   const promise = app.askQuestions([{ id: 'q1', question: 'Proceed?', options: [{ label: 'Yes' }] }])
   await vt.waitForRender()
   vt.sendInput('1') // single-select advances to the review page
-  let view = await viewport(vt)
+  const view = await viewport(vt)
   const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
-  assert.ok(view.includes('Submit'), `review page missing:\n${view}`)
-  const submitIdx = view.split('\n').findIndex(line => strip(line).includes('Submit'))
-  assert.ok(submitIdx >= 0, `Submit row missing:\n${view}`)
+  assert.ok(view.includes('Review your answer before submit'), `review page missing:\n${view}`)
+  const submitIdx = view.split('\n').findIndex(line => strip(line).includes('Submit [Enter]'))
+  assert.ok(submitIdx >= 0, `Submit action row missing:\n${view}`)
   clickCell(vt, 10, submitIdx)
-  await vt.waitForRender()
-  const after = await viewport(vt)
-  // The review page has no hit map and no scroll marker: the click is inert.
-  assert.equal(after, view, `click must be inert on the review page:\n${after}`)
-  await vt.sendInput('\x1b')
-  await assert.rejects(promise, /cancelled/)
+  assert.deepEqual(await promise, [{ id: 'q1', selected: ['Yes'] }],
+    'the painted Submit action must settle the original answer promise')
 })
 
 test('askQuestions toggles multi-select options', async () => {
@@ -1985,56 +1985,56 @@ test('fullscreen scrollback search opens with ctrl+shift+f', async () => {
   assert.ok(view.includes('Find transcript'), `search bar missing:\n${view}`)
 })
 
-test('ctrl+f opens and closes the transcript search (no fullscreen toggle)', async () => {
+test('Ctrl+F opens View Find and a second Ctrl+F closes it without toggling fullscreen', async () => {
   const { vt, app } = startApp()
   app.setTranscript([{ kind: 'user', turn: 0, text: 'needle' }])
   await viewport(vt)
   assert.equal(app.isFullscreen(), false)
-  vt.sendInput('\x06') // ctrl+f → search, NOT fullscreen
+  vt.sendInput('\x06') // Ctrl+F -> View search, NOT fullscreen
   let view = await viewport(vt)
-  assert.ok(view.includes('Find transcript'), `search bar missing:\n${view}`)
-  assert.equal(app.isFullscreen(), false, 'ctrl+f must not toggle fullscreen')
-  vt.sendInput('\x06') // ctrl+f again closes the overlay
+  assert.ok(view.includes('[View]'), `View search bar missing:\n${view}`)
+  assert.equal(app.isFullscreen(), true, 'Regular Find leases the existing fullscreen transcript reader')
+  vt.sendInput('\x06') // same active scope action closes the overlay
   view = await viewport(vt)
   assert.ok(!view.includes('Find transcript'), `search bar still open:\n${view}`)
+  assert.equal(app.isFullscreen(), false, 'closing the temporary reader returns to Regular')
 })
 
-test('transcript search: Ctrl+C closes the overlay and the hint advertises next/prev/close', async () => {
+test('transcript search: Ctrl+C and Esc close Full and the hint stays honest at fixed width', async () => {
   const { vt, app } = startApp()
   app.setTranscript([{ kind: 'user', turn: 0, text: 'needle' }])
   await viewport(vt)
-  vt.sendInput('\x06') // ctrl+f opens search
+  vt.sendInput('\x1b[102;6u') // Ctrl+Shift+F opens Full from Regular.
   let view = await viewport(vt)
-  assert.ok(view.includes('Find transcript'), `search bar missing:\n${view}`)
-  // The next/prev/close hint rides under the input. Its labels are rendered
-  // from the (non-configurable) keymap definitions and compacted to this exact
-  // overlay line, so the assertion pins the WHOLE hint rather than recomputing
-  // it in the test.
-  assert.ok(view.includes('↵ next · ⇧↵ prev · esc/ctrl+c close'), `search hint must render the full next/prev/close line:\n${view}`)
-  // Ctrl+C closes search (the old behavior: the overlay's shared Input
-  // swallowed Ctrl+C as its generic cancel and search stayed open).
-  vt.sendInput('\x03') // ctrl+c
+  assert.ok(view.includes('[Full]'), `Full search bar missing:\n${view}`)
+  assert.ok(view.includes('Loaded ·') || view.includes('Loaded history'), `loaded coverage stays visible in a readable short form:\n${view}`)
+  assert.ok(!view.includes('Entire session'), `standalone TuiApp never claims complete Session coverage:\n${view}`)
+  assert.ok(view.includes('returns inline'), `temporary Reader has an explicit return action:\n${view}`)
+  // Ctrl+C closes Search (not its generic Input and never the parent action).
+  vt.sendInput('\x03')
   view = await viewport(vt)
   assert.ok(!view.includes('Find transcript'), `Ctrl+C must close search:\n${view}`)
-  // Esc still closes, Enter/Shift+Enter still navigate (semantic close
-  // keeps both routes — no regression).
-  vt.sendInput('\x06')
+  assert.equal(app.isFullscreen(), false, 'Ctrl+C returns the temporary reader')
+  vt.sendInput('\x1b[102;6u')
   await viewport(vt)
   vt.sendInput('\x1b')
   view = await viewport(vt)
-  assert.ok(!view.includes('Find transcript'), `Esc must still close search:\n${view}`)
+  assert.ok(!view.includes('Find transcript'), `Esc must close search:\n${view}`)
+  assert.equal(app.isFullscreen(), false, 'Esc returns the temporary reader')
 })
 
-test('transcript search hint stays on one line at min-width (no layout break)', async () => {
-  const { vt, app } = startApp(24, 24) // the overlay minWidth
+test('transcript search scope labels stay on one row at min width', async () => {
+  const { vt, app } = startApp(24, 24)
   app.setTranscript([{ kind: 'user', turn: 0, text: 'needle' }])
   await viewport(vt)
-  vt.sendInput('\x06')
+  vt.sendInput('\x06') // View opens the temporary Reader.
   const view = await viewport(vt)
-  assert.ok(view.includes('Find transcript'), `search bar missing at min width:\n${view}`)
-  const hintRow = view.split('\n').find(line => line.includes('next'))
-  assert.ok(hintRow !== undefined, `hint must render at min width:\n${view}`)
-  assert.ok((hintRow ?? '').length <= 24, `hint must not overflow the overlay width:\n${view}`)
+  assert.ok(view.includes('[View] | Full'), `the minimum-width title keeps both scope identities:\n${view}`)
+  const rows = view.split('\n')
+  assert.ok(!rows.some((row, index) => index > 0 && /\[V\]|\[F\]/.test(row)),
+    `the title must stay on one row at the overlay min width:\n${view}`)
+  assert.ok(view.includes('Esc'), `the close/return action stays recognizable:\n${view}`)
+  assert.ok(!view.includes('Find transcript'), `the low-priority long title label drops first:\n${view}`)
 })
 
 test('transcript search: Left/Right/Home/End edit the query inside the overlay', async () => {
@@ -3990,6 +3990,170 @@ test('BulletedComponent keeps the bullet on an empty first row but empties conti
   assert.equal(lines[2]!.trimEnd(), '  tail', 'the text after the blank still indents')
 })
 
+test('AssistantMarkdownComponent renders exactly like the bulleted live Markdown it wraps', () => {
+  const previousCapabilities = getCapabilities()
+  setCapabilities({ images: null, trueColor: true, hyperlinks: true })
+  try {
+    const sources = [
+      'plain needle text',
+      '## heading needle\n\ntext',
+      '- first\n  - nested needle\n\n> quote needle',
+      '前缀**匹配词**后缀 家庭 👨‍👩‍👧 needle',
+      '[label](https://example.invalid/needle) needle',
+      '```js\nconst needle = 1\n```',
+      '$$\nneedle\n$$',
+    ]
+    const bullets = ['∙  ', '🐋  ', '']
+    for (const source of sources) {
+      for (const width of [11, 44, 80]) {
+        for (const bullet of bullets) {
+          const expected = new BulletedComponent(
+            new Markdown(source, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS),
+            bullet,
+          )
+          const actual = new AssistantMarkdownComponent(
+            new Markdown(source, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS),
+            bullet,
+          )
+          const expectedRows = expected.render(width)
+          const actualRows = actual.render(width)
+          assert.deepEqual(actualRows, expectedRows,
+            `${JSON.stringify(source)} at ${width} with bullet ${JSON.stringify(bullet)}: the subclass must not change a single byte`)
+          assert.equal(actual.render(width), actualRows,
+            'same child array + same width must return the SAME array (the inherited reference-stable cache)')
+          assert.deepEqual(actual.render(width + 7), expected.render(width + 7),
+            'a width change re-wraps the live child identically')
+        }
+      }
+    }
+  } finally {
+    setCapabilities(previousCapabilities)
+    resetCapabilitiesCache()
+  }
+})
+
+test('AssistantMarkdownComponent maps a proven source range by exactly the bullet width', () => {
+  const previousCapabilities = getCapabilities()
+  setCapabilities({ images: null, trueColor: true, hyperlinks: true })
+  try {
+    const rangeOf = (source: string, target: string, nth = 0): { start: number; end: number } => {
+      let index = -1
+      for (let occurrence = 0; occurrence <= nth; occurrence += 1) index = source.indexOf(target, index + 1)
+      assert.ok(index >= 0, `target ${JSON.stringify(target)} is not in the source`)
+      return { start: index, end: index + target.length }
+    }
+    const provenCases: Array<{ source: string; targets: Array<{ target: string; innerWidths: readonly number[]; nth?: number }> }> = [
+      {
+        source: 'needle alpha needle beta',
+        targets: [{ target: 'needle', innerWidths: [11, 44] }, { target: 'alpha needle', innerWidths: [44] }],
+      },
+      { source: '# needle heading', targets: [{ target: 'needle heading', innerWidths: [44] }] },
+      {
+        source: '前缀**匹配词**后缀 needle',
+        targets: [{ target: '匹配词', innerWidths: [11, 44] }, { target: 'needle', innerWidths: [44] }],
+      },
+      {
+        source: '[label](https://example.invalid/needle) needle',
+        targets: [{ target: 'label', innerWidths: [11, 44] }, { target: 'needle', innerWidths: [44], nth: 1 }],
+      },
+      { source: '| h |\n|---|\n| needle |', targets: [{ target: 'needle', innerWidths: [44] }] },
+      {
+        source: 'cafe\u0301 needle',
+        targets: [{ target: 'e\u0301', innerWidths: [11, 44] }, { target: 'needle', innerWidths: [44] }],
+      },
+    ]
+    for (const bullet of ['∙  ', '🐋  ']) {
+      const bulletWidth = visibleWidth(bullet)
+      for (const testCase of provenCases) {
+        for (const { target, innerWidths, nth = 0 } of testCase.targets) {
+          for (const innerWidth of innerWidths) {
+            const range = rangeOf(testCase.source, target, nth)
+            const rawProof = new Markdown(testCase.source, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS)
+              .proveSourceSpan(range, innerWidth)
+            assert.equal(rawProof.kind, 'PROVEN',
+              `${JSON.stringify(target)} must be a provable Markdown leaf: ${JSON.stringify(rawProof)}`)
+            const cardWidth = innerWidth + bulletWidth
+            const component = new AssistantMarkdownComponent(
+              new Markdown(testCase.source, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS),
+              bullet,
+            )
+            const cardRows = component.render(cardWidth)
+            const cardProof = component.proveSourceSpan(range, cardWidth)
+            assert.equal(cardProof.kind, 'PROVEN')
+            assert.deepEqual(cardProof.segments, rawProof.kind === 'PROVEN'
+              ? rawProof.segments.map(segment => ({
+                  row: segment.row,
+                  startCol: segment.startCol + bulletWidth,
+                  endCol: segment.endCol + bulletWidth,
+                }))
+              : [], 'the card proof is the component proof shifted by exactly the bullet width')
+            assert.equal(component.render(cardWidth), cardRows,
+              'a proof must not write the mounted render output or its cache')
+            for (const segment of cardProof.segments) {
+              assert.ok(segment.startCol >= bulletWidth,
+                'a proven segment can never cover the bullet/continuation indent band')
+              assert.equal(
+                stripTerminalSequences(sliceByColumn(cardRows[segment.row]!, segment.startCol, segment.endCol - segment.startCol, true)),
+                target,
+                'the shifted segment reads back the exact source text from the bulleted rows',
+              )
+            }
+          }
+        }
+      }
+    }
+
+    // A NOT_PAINTED / UNPROVEN answer is returned verbatim (no shift, no
+    // downgrade to the wrong kind), so the Host keeps its honest anchor.
+    const refusals: Array<{ source: string; target: string }> = [
+      { source: '[label](https://example.invalid/hiddenneedle) body', target: 'hiddenneedle' },
+      { source: 'before **needle** after', target: '**' },
+      { source: '\\(needle and more', target: 'needle' },
+      { source: '**ab** cd', target: 'ab** cd' },
+    ]
+    for (const refusal of refusals) {
+      const range = rangeOf(refusal.source, refusal.target)
+      const rawProof = new Markdown(refusal.source, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS)
+        .proveSourceSpan(range, 44)
+      assert.notEqual(rawProof.kind, 'PROVEN', `fixture: ${JSON.stringify(refusal.target)} must be refused`)
+      const component = new AssistantMarkdownComponent(
+        new Markdown(refusal.source, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS),
+        '∙  ',
+      )
+      assert.deepEqual(component.proveSourceSpan(range, 44 + visibleWidth('∙  ')), rawProof,
+        'a refused range is returned unchanged, never shifted or reclassified')
+    }
+
+    // The card width below the indent still clamps to the same inner width 1
+    // the inherited render uses.
+    const clampedSource = 'needle'
+    const clamped = new AssistantMarkdownComponent(
+      new Markdown(clampedSource, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS),
+      '🐋  ',
+    )
+    const rawClamped = new Markdown(clampedSource, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS)
+      .proveSourceSpan({ start: 0, end: 6 }, 1)
+    assert.equal(rawClamped.kind, 'PROVEN')
+    assert.deepEqual(
+      clamped.proveSourceSpan({ start: 0, end: 6 }, 2),
+      rawClamped.kind === 'PROVEN'
+        ? {
+            kind: 'PROVEN',
+            segments: rawClamped.segments.map(segment => ({
+              row: segment.row,
+              startCol: segment.startCol + visibleWidth('🐋  '),
+              endCol: segment.endCol + visibleWidth('🐋  '),
+            })),
+          }
+        : rawClamped,
+      'a card narrower than its bullet proves the same clamped inner width the render used',
+    )
+  } finally {
+    setCapabilities(previousCapabilities)
+    resetCapabilitiesCache()
+  }
+})
+
 test('assistant markdown tables reflow on terminal resize', async () => {
   const { vt, app } = startApp(80)
   const table = [
@@ -4359,20 +4523,94 @@ test('foldedResultSummaryFor derives a friendly phrase, never the JSON', async (
   )
   // A bare-JSON ralph result (no render prefix) falls back to status/rounds.
   assert.equal(foldedResultSummaryFor('ralph', '{"status":"blocked","roundsStarted":3,"report":{}}'), 'blocked · 3 rounds')
-  // schedule family.
-  assert.equal(foldedResultSummaryFor('schedule_list', '[{"kind":"after","id":"s1"}]'), '1 scheduled')
+  // A JSON document with legal leading whitespace is still machine JSON: the
+  // trimmed first line starts with `{`, so the parsed summary wins, never the
+  // raw payload as a human phrase.
+  assert.equal(
+    foldedResultSummaryFor('ralph', '  {"status":"completed","roundsStarted":2}'),
+    'completed · 2 rounds',
+  )
+  // schedule family — current schema (create/view/edit task + paged list).
+  assert.equal(foldedResultSummaryFor('schedule_create', '{"kind":"after","id":"s1","status":"active"}'), 'after · active')
+  assert.equal(foldedResultSummaryFor('schedule_view', '{"kind":"weekly","id":"s1","status":"paused"}'), 'weekly · paused')
+  assert.equal(foldedResultSummaryFor('schedule_edit', '{"kind":"at","id":"s1","status":"ended"}'), 'at · ended')
+  assert.equal(foldedResultSummaryFor('schedule_list', '{"items":[],"shown":0,"total":0,"limit":20,"offset":0}'), 'no scheduled tasks')
+  assert.equal(
+    foldedResultSummaryFor('schedule_list', '{"items":[{"kind":"after","id":"a","status":"active"},{"kind":"weekly","id":"b","status":"paused"}],"shown":2,"total":9,"limit":20,"offset":0}'),
+    '2 of 9 scheduled',
+  )
+  // An offset past the last task is a legal EMPTY page: it must not claim "no tasks".
+  assert.equal(
+    foldedResultSummaryFor('schedule_list', '{"items":[],"shown":0,"total":9,"limit":20,"offset":999}'),
+    '0 of 9 scheduled',
+  )
+  // rc5 historical schema: bare array list and the update/delete receipts.
+  assert.equal(foldedResultSummaryFor('schedule_list', '[{"kind":"after","id":"s1","state":"scheduled"}]'), '1 scheduled')
   assert.equal(foldedResultSummaryFor('schedule_list', '[]'), 'no scheduled jobs')
-  assert.equal(foldedResultSummaryFor('schedule_create', '{"kind":"after","id":"s1","state":"pending"}'), 'after · pending')
+  assert.equal(foldedResultSummaryFor('schedule_create', '{"kind":"after","id":"s1","state":"scheduled"}'), 'after · scheduled')
+  assert.equal(foldedResultSummaryFor('schedule_update', '{"kind":"every","id":"s1","state":"overdue"}'), 'every · overdue')
+  assert.equal(foldedResultSummaryFor('schedule_update', '{"id":"s1","updated":false,"code":"schedule_ended"}'), 'schedule_ended')
   assert.equal(foldedResultSummaryFor('schedule_delete', '{"id":"s1","deleted":true}'), 'deleted')
   assert.equal(foldedResultSummaryFor('schedule_delete', '{"id":"s1","deleted":false}'), 'not found')
+  assert.equal(foldedResultSummaryFor('schedule_delete', '{"id":"s1","deleted":false,"code":"schedule_not_found"}'), 'not found')
+  // Every OTHER explicit error code wins over a boolean delete receipt.
+  assert.equal(foldedResultSummaryFor('schedule_delete', '{"id":"s1","deleted":false,"code":"schedule_conflict"}'), 'schedule_conflict')
+  assert.equal(foldedResultSummaryFor('schedule_delete', '{"id":"s1","deleted":true,"code":"schedule_conflict"}'), 'schedule_conflict',
+    'a contradictory success receipt never overrides an explicit error code')
+  assert.equal(foldedResultSummaryFor('schedule_delete', '{"id":"s1","deleted":true,"code":"schedule_not_found"}'), 'schedule_not_found',
+    'only the documented deleted:false not-found receipt renders "not found"')
+  // rc1 edit delete success / not-found / conflict.
+  assert.equal(foldedResultSummaryFor('schedule_edit', '{"id":"s1","deleted":true}'), 'deleted')
+  assert.equal(foldedResultSummaryFor('schedule_edit', '{"id":"s1","code":"schedule_not_found"}'), 'schedule_not_found')
+  assert.equal(foldedResultSummaryFor('schedule_edit', '{"id":"s1","code":"schedule_conflict"}'), 'schedule_conflict')
+  // Error objects win over any success-shaped field.
+  assert.equal(foldedResultSummaryFor('schedule_create', '{"code":"subagent_session","message":"nope"}'), 'subagent_session')
   assert.equal(foldedResultSummaryFor('schedule_list', '{"code":"schedule_error","message":"boom"}'), 'schedule_error')
   // cordis inspect family.
   assert.equal(foldedResultSummaryFor('cordis_inspect_list', '{"providers":[{"platform":"p"},{"platform":"q"}]}'), '2 providers')
   assert.equal(foldedResultSummaryFor('cordis_inspect_list', '{"providers":[]}'), 'no providers')
   assert.equal(foldedResultSummaryFor('cordis_inspect_query', '{"platform":"p","provider":"x","method":"query"}'), 'p · x · query')
   assert.equal(foldedResultSummaryFor('cordis_inspect_self', '{"mode":"plugins","plugins":[]}'), 'mode plugins')
-  // Undeducible results yield undefined (the caller shows NO preview).
+  // Malformed / inconsistent / unproven results yield undefined (no JSON fallback).
   assert.equal(foldedResultSummaryFor('schedule_create', 'not json at all'), undefined)
+  assert.equal(foldedResultSummaryFor('schedule_create', '{"kind":"after","id":"s1","state":"pending"}'), undefined, 'the rc5 enum is not a current status')
+  assert.equal(foldedResultSummaryFor('schedule_create', '{"kind":"monthly","status":"active"}'), undefined, 'an unknown kind is not claimed')
+  assert.equal(foldedResultSummaryFor('schedule_list', '{"items":[{"kind":"after"}],"shown":2,"total":9,"limit":20,"offset":0}'), undefined, 'shown must equal items.length')
+  assert.equal(foldedResultSummaryFor('schedule_list', '{"items":[],"shown":0,"total":9,"limit":0,"offset":0}'), undefined, 'a zero limit is not a page')
+  assert.equal(foldedResultSummaryFor('schedule_list', '{"items":[],"shown":0,"total":9,"limit":20}'), undefined, 'a missing offset is not a page')
+  assert.equal(foldedResultSummaryFor('schedule_list', '{"items":[],"shown":0,"total":9,"limit":20,"offset":-1}'), undefined, 'a negative offset is not a page')
+  assert.equal(foldedResultSummaryFor('schedule_list', '{"items":[],"shown":0,"total":9,"limit":20,"offset":0.5}'), undefined, 'a fractional offset is not a page')
+  assert.equal(foldedResultSummaryFor('schedule_list', '"nope"'), undefined)
+  assert.equal(foldedResultSummaryFor('schedule_create', 'null'), undefined)
+  assert.equal(foldedResultSummaryFor('schedule_create', '[]'), undefined)
+  assert.equal(
+    foldedResultSummaryFor('schedule_list', '{"items":[{"kind":"after"},{"kind":"after"}],"shown":2,"total":1,"limit":20,"offset":0}'),
+    undefined,
+    'total below shown contradicts the page',
+  )
+  // Every item must prove a canonical Task: an unknown kind, a missing status
+  // and a pseudo-object entry all make the page unprovable.
+  assert.equal(
+    foldedResultSummaryFor('schedule_list', '{"items":[{"kind":"bogus","status":"active"}],"shown":1,"total":1,"limit":20,"offset":0}'),
+    undefined,
+    'an unknown task kind is not a scheduled task',
+  )
+  assert.equal(
+    foldedResultSummaryFor('schedule_list', '{"items":[{"kind":"after","id":"a"}],"shown":1,"total":1,"limit":20,"offset":0}'),
+    undefined,
+    'a task without a legal status/state is not counted',
+  )
+  assert.equal(
+    foldedResultSummaryFor('schedule_list', '{"items":[{"kind":"after","status":"active"},{"kind":"after"}],"shown":2,"total":2,"limit":20,"offset":0}'),
+    undefined,
+    'one pseudo entry invalidates the whole page count',
+  )
+  // The historical bare array applies the same Task proof.
+  assert.equal(foldedResultSummaryFor('schedule_list', '[{"kind":"bogus"}]'), undefined)
+  assert.equal(foldedResultSummaryFor('schedule_list', '[{"kind":"after","id":"s1"}]'), undefined,
+    'a historical task needs its state, not just a kind')
+  assert.equal(foldedResultSummaryFor('schedule_list', '[{"kind":"after","state":"scheduled"},{"kind":"bogus"}]'), undefined)
+  assert.equal(foldedResultSummaryFor('schedule_delete', '{"id":"s1","deleted":"yes"}'), undefined, 'only a boolean receipt decides deletion')
   assert.equal(foldedResultSummaryFor('cordis_inspect_query', '{"data":42}'), undefined)
 })
 
@@ -4381,7 +4619,7 @@ test('folded JSON-result cards show the summary, never the raw JSON', async () =
   app.setTranscript([
     {
       kind: 'tool', turn: 0, name: 'schedule_list', args: '{}',
-      result: '[{"kind":"after","id":"s1","prompt":"ping","scheduledAt":"t","state":"pending","deliveryMode":"queue","afterSeconds":30}]',
+      result: '[{"kind":"after","id":"s1","prompt":"ping","scheduledAt":"t","state":"scheduled","deliveryMode":"queue","afterSeconds":30}]',
       status: 'ok',
     },
     {
@@ -4402,6 +4640,154 @@ test('folded JSON-result cards show the summary, never the raw JSON', async () =
   assert.ok(!view.includes('"afterSeconds"'), `raw schedule JSON leaked into the fold:\n${view}`)
   assert.ok(!view.includes('"providers"'), `raw cordis JSON leaked into the fold:\n${view}`)
   assert.ok(!view.includes('"summary"'), `raw ralph report JSON leaked into the fold:\n${view}`)
+  app.stop()
+})
+
+test('a current-schema schedule list page folds to counts and keeps its exact JSON expanded', async () => {
+  const result = JSON.stringify({
+    items: [
+      { id: 'a', kind: 'after', status: 'active', title: 'first', scheduledAt: 't', scheduledAtLocal: 'l' },
+      { id: 'b', kind: 'weekly', status: 'paused', title: 'second', scheduledAt: 't', scheduledAtLocal: 'l' },
+    ],
+    shown: 2,
+    total: 9,
+    limit: 20,
+    offset: 0,
+  })
+  const { vt, app } = startApp()
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'schedule_list', args: '{"limit":20,"offset":0}', result, status: 'ok' },
+  ])
+  const folded = await viewport(vt)
+  assert.ok(folded.includes('List scheduled tasks'), `schedule header missing:\n${folded}`)
+  assert.ok(folded.includes('— 2 of 9 scheduled'), `schedule page summary missing:\n${folded}`)
+  assert.ok(!folded.includes('"items"'), `raw page JSON leaked into the fold:\n${folded}`)
+  assert.ok(!folded.includes('scheduledAtLocal'), `raw task JSON leaked into the fold:\n${folded}`)
+
+  app.setTranscriptDetailExpanded(true)
+  const expanded = await viewport(vt)
+  // The expanded body is the model-facing result TEXT, byte for byte. The
+  // viewport wraps it physically, so unwrap the painted rows before matching.
+  const unwrapped = stripTerminalSequences(expanded).replace(/\r?\n\s*/gu, '')
+  assert.ok(unwrapped.includes(result), `the exact tool result must be visible expanded:\n${expanded}`)
+  app.stop()
+})
+
+/** A minimal legal official Team task value for the folded-card cases. */
+function teamTaskResult(overrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    id: 'task-1',
+    revision: 1,
+    subject: 'Scout the config',
+    description: 'Read the config and report the timeout value.',
+    status: 'pending',
+    blockedBy: [],
+    writeScopes: [],
+    ready: true,
+    writeScopeWarnings: [],
+    ...overrides,
+  })
+}
+
+/** Normalize a painted viewport to single-spaced text (undoes physical wrap). */
+function flattenView(text: string): string {
+  return stripTerminalSequences(text).replace(/\s+/gu, ' ')
+}
+
+test('a folded team_task_create card shows a bounded status note, never the raw JSON or description', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'team_task_create', args: JSON.stringify({ subject: 'Scout the config', description: 'Read the config and report the timeout value.' }), result: teamTaskResult(), status: 'ok' },
+  ])
+  const folded = await viewport(vt)
+  assert.ok(folded.includes('Create team task'), `the fixed card identity is missing:\n${folded}`)
+  assert.ok(folded.includes('pending · ready · unowned · rev 1'), `the bounded status note is missing:\n${folded}`)
+  assert.ok(!folded.includes('"id"'), `raw task JSON leaked into the fold:\n${folded}`)
+  assert.ok(!folded.includes('Read the config and report'), `the description leaked into the fold:\n${folded}`)
+
+  app.setTranscriptDetailExpanded(true)
+  const expanded = await viewport(vt)
+  const flatExpanded = flattenView(expanded)
+  assert.ok(flatExpanded.includes('Read the config and report the timeout value.'), `the full task body must be visible expanded:\n${expanded}`)
+  assert.ok(flatExpanded.includes('"id":"task-1"'), `the exact raw task JSON must be visible expanded:\n${expanded}`)
+  app.stop()
+})
+
+test('a folded team_task_list card reports count and cursor, leaving the full page to the expanded body', async () => {
+  const result = JSON.stringify({
+    tasks: [
+      { id: 'task-a', revision: 1, subject: 'First', description: 'a', status: 'pending', blockedBy: [], writeScopes: [], ready: true, writeScopeWarnings: [] },
+      { id: 'task-b', revision: 2, subject: 'Second', description: 'b', status: 'in_progress', owner: 'scout', blockedBy: [], writeScopes: [], ready: false, writeScopeWarnings: [] },
+    ],
+    nextCursor: 2,
+  })
+  const { vt, app } = startApp()
+  app.setTranscript([{ kind: 'tool', turn: 0, name: 'team_task_list', args: '{}', result, status: 'ok' }])
+  const folded = await viewport(vt)
+  assert.ok(folded.includes('List team tasks'), `the fixed card identity is missing:\n${folded}`)
+  assert.ok(folded.includes('2 team tasks · more'), `the list fold is missing the count/cursor:\n${folded}`)
+  assert.ok(!/team tasks? of /u.test(folded), `a fabricated total leaked into the fold:\n${folded}`)
+  assert.ok(!folded.includes('"tasks"'), `raw page JSON leaked into the fold:\n${folded}`)
+
+  app.setTranscriptDetailExpanded(true)
+  const expanded = await viewport(vt)
+  const flatExpanded = flattenView(expanded)
+  assert.ok(flatExpanded.includes('"status":"in_progress"'), `the expanded body must carry the real status:\n${expanded}`)
+  assert.ok(flatExpanded.includes('"owner":"scout"'), `the expanded body must carry the real owner:\n${expanded}`)
+  app.stop()
+})
+
+test('a folded wait_agent card reports input state, never an agent or task outcome', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'wait_agent', args: '{}', result: JSON.stringify({ timedOut: false }), status: 'ok' },
+    { kind: 'tool', turn: 0, name: 'wait_agent', args: '{"timeout_ms":30000}', result: JSON.stringify({ timedOut: true }), status: 'ok' },
+  ])
+  const folded = await viewport(vt)
+  assert.ok(folded.includes('Wait for input'), `the fixed card identity is missing:\n${folded}`)
+  assert.ok(folded.includes('input pending'), `timedOut:false must fold to input pending:\n${folded}`)
+  assert.ok(folded.includes('timed out'), `timedOut:true must fold to timed out:\n${folded}`)
+  assert.ok(!/finished|completed|task ready/u.test(folded), `the wait fold must not claim an outcome:\n${folded}`)
+  assert.ok(!folded.includes('{"timedOut"'), `raw wait JSON leaked into the fold:\n${folded}`)
+
+  app.setTranscriptDetailExpanded(true)
+  const expanded = await viewport(vt)
+  assert.ok(flattenView(expanded).includes('"timedOut":false'), `the official wait JSON must stay expanded:\n${expanded}`)
+  app.stop()
+})
+
+test('a failed team_task card keeps its [error] identity and never shows a success summary', async () => {
+  const rejection = JSON.stringify({ code: 'APPROVAL_REJECTED', message: 'the approval was rejected' })
+  const { vt, app } = startApp()
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'team_task_update', args: JSON.stringify({ task_id: 'task-1', expected_revision: 1, action: 'claim' }), result: rejection, status: 'error', error: { name: 'ApprovalError', code: 'APPROVAL_REJECTED' } },
+  ])
+  const folded = await viewport(vt)
+  assert.ok(folded.includes('Update team task'), `the fixed card identity is missing:\n${folded}`)
+  assert.ok(folded.includes('[error]'), `the durable error status must stay painted:\n${folded}`)
+  assert.ok(!/in_progress|completed|owner |rev \d/u.test(folded), `a success summary leaked into the failed fold:\n${folded}`)
+
+  app.setTranscriptDetailExpanded(true)
+  const expanded = await viewport(vt)
+  assert.ok(flattenView(expanded).includes('APPROVAL_REJECTED'), `the structured error identity must stay visible:\n${expanded}`)
+  app.stop()
+})
+
+test('a failed rc1 schedule_edit card keeps [error], the error code and the result detail', async () => {
+  const result = '{"id":"s1","code":"schedule_conflict","message":"the task changed after that result"}'
+  const { vt, app } = startApp()
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'schedule_edit', args: '{"id":"s1","action":"update"}', result, status: 'error' },
+  ])
+  const folded = await viewport(vt)
+  assert.ok(folded.includes('Edit scheduled task s1 [error]'), `error card identity missing:\n${folded}`)
+  assert.ok(folded.includes('— schedule_conflict'), `the error code must be the folded verdict:\n${folded}`)
+  assert.ok(!folded.includes('the task changed'), `the folded row keeps the summary, not the raw message:\n${folded}`)
+
+  app.setTranscriptDetailExpanded(true)
+  const expanded = await viewport(vt)
+  assert.ok(expanded.includes('schedule_conflict'), `the expanded error code must stay visible:\n${expanded}`)
+  assert.ok(expanded.includes('the task changed after that result'), `the expanded error message must stay visible:\n${expanded}`)
   app.stop()
 })
 
@@ -4592,6 +4978,56 @@ test('exit_plan_mode renders its content plan body while running', async () => {
   assert.ok(view.includes('Step one.'), `plan body missing:\n${view}`)
   assert.ok(view.includes('Step two.'), `plan body truncated:\n${view}`)
   assert.ok(!view.includes('"plan"'), `raw JSON leaked:\n${view}`)
+  app.stop()
+})
+
+test('a SETTLED exit_plan_mode card keeps the full plan body and appends the outcome', async () => {
+  // The plan is the CALL's content for the card's whole life: the settled
+  // result is the review OUTCOME, never a replacement for the plan (the
+  // Transcript is the only long-term reading entry).
+  const plan = `# Settled Plan\n## Scope\n- keep the body\n${'x'.repeat(120)}\ntail-of-plan-marker`
+  const vt = new VirtualTerminal(100, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => ({ card: 'generic', title: 'Settled Plan', kind: 'other', content: [{ type: 'text', text: plan }] }),
+      result: () => ({ card: 'generic', title: 'Plan review', content: [{ type: 'text', text: 'Plan approved — carry it out.' }] }),
+    },
+  })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'exit_plan_mode',
+    args: JSON.stringify({ plan }), result: 'Plan approved — carry it out.', status: 'ok',
+    resultBlocks: [{ type: 'text', text: 'Plan approved — carry it out.' }],
+  }])
+  app.setTranscriptDetailExpanded(true)
+  const view = await viewport(vt)
+  assert.ok(view.includes('## Scope'), `the settled card lost the plan body:\n${view}`)
+  assert.ok(view.includes('keep the body'), `the settled card lost the plan body lines:\n${view}`)
+  assert.ok(view.includes('tail-of-plan-marker'), `the settled card lost the plan tail:\n${view}`)
+  assert.ok(view.includes('Plan approved — carry it out.'), `the review outcome is missing:\n${view}`)
+  assert.ok(!view.includes('"plan"'), `raw JSON leaked:\n${view}`)
+  app.stop()
+})
+
+test('a replayed Remote-shape settled exit_plan_mode card derives the plan body from the arguments', async () => {
+  // The Remote branch has no Host registry: the Client presenter derives the
+  // same generic card from the logged arguments, so a replayed Session (a
+  // settled tool row) still reads the plan body.
+  const plan = '# Remote Plan\n## Steps\n- one\n- two'
+  const presenter = createClientToolPresenter()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: presenter })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'exit_plan_mode',
+    args: JSON.stringify({ plan }), result: 'The user chose to keep planning; revise the plan and present it again.', status: 'error',
+  }])
+  app.setTranscriptDetailExpanded(true)
+  const view = await viewport(vt)
+  assert.ok(view.includes('## Steps'), `the replayed Remote card lost the plan body:\n${view}`)
+  assert.ok(view.includes('- one') && view.includes('- two'), `the replayed Remote card lost plan lines:\n${view}`)
   app.stop()
 })
 
@@ -4858,7 +5294,10 @@ test('folded tool / system / compaction rows respect the transcript gutter', asy
   // The editor border (a full-width rule) is chrome, not a transcript
   // row: only check the rows above it.
   const border = lines.findIndex(line => /^[─═]+$/.test(line.trim()))
-  const rows = lines.slice(0, border === -1 ? lines.length : border).filter(line => line.trim() !== '')
+  const rows = lines.slice(0, border === -1 ? lines.length : border)
+    // The welcome card is surface chrome, not a transcript block: the compact
+    // shell card keeps the frame short enough that it can stay in view here.
+    .filter(line => line.trim() !== '' && !line.includes('dsh-pi-tui'))
   for (const line of rows) {
     assert.ok(visibleWidth(line) <= transcriptContentWidth(40),
       `a folded card row exceeds the 38-col content width: ${JSON.stringify(line)}`)
@@ -5329,4 +5768,28 @@ test('a width-clipped ANSI/CJK folded preview keeps exactly ONE hidden-content m
   assert.ok(!plainRow.includes('second'), 'the records past the width cut are not painted')
   assert.equal(tool.result, raw, 'the raw result is untouched')
   app.stop()
+})
+
+test('a bare URL stops before a balanced full-width parenthetical at the assistant transcript sink', async () => {
+  // Hyperlinks are a terminal CAPABILITY: the headless sink emits OSC 8 only
+  // when the capability is declared, so pin it for this production-shaped case.
+  setCapabilities({ images: null, trueColor: true, hyperlinks: true })
+  try {
+    const { vt, app, writes } = startAppWithWrites(100)
+    const source = '见 https://example.com/issues/521（说明） 的说明'
+    const message: TranscriptMessage = { kind: 'assistant', turn: 0, text: source }
+    app.setTranscript([message])
+    await vt.waitForRender()
+
+    const stream = writes.join('')
+    assert.ok(stream.includes('\u001b]8;;https://example.com/issues/521\u001b\\'),
+      'the OSC 8 target stops before the full-width parenthesis')
+    assert.ok(!/\u001b\]8;;[^\u001b]*（/.test(stream), 'no hyperlink target contains CJK punctuation')
+    const painted = vt.getViewport().join('')
+    assert.ok(painted.includes('（说明）'), 'the following parenthetical stays visible and unlinked')
+    assert.equal(message.text, source, 'the display projection never rewrites the raw transcript text')
+    app.stop()
+  } finally {
+    resetCapabilitiesCache()
+  }
 })

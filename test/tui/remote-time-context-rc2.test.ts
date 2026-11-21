@@ -43,7 +43,7 @@ import { LlmAdapter, createUserMessage, type GenerateOptions, type StreamChunk }
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Context } from '@deepseek-ai/cordis'
 import { RemoteSessionLifecycle } from '../../src/runtime/remote/session-lifecycle-remote.ts'
-import { loadExperimentalRemoteRuntime } from '../../src/runtime/backend-loader.ts'
+import { createExperimentalRemoteRuntime } from '../support/m3-inprocess/runtime.ts'
 import { TranscriptFolder } from '../../src/transcript.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { createRemoteApplicationHostFixture } from '../support/remote-application-fixture.ts'
@@ -208,14 +208,15 @@ async function prepareTimeContextHost(
   const llm = new CapturingLlmAdapter()
   const host = await createRemoteApplicationHostFixture(life, 's3-time-context-preset', { llmAdapter: llm })
   if (options.plugin) await mountTimeContext(host.ctx, options.config ?? { timeZone: HOST_ZONE })
-  const runtime = await (await loadExperimentalRemoteRuntime()).createExperimentalRemoteRuntime({
+  const runtime = await createExperimentalRemoteRuntime({
     hostContext: host.ctx,
     waitForHostPrerequisites: async () => {},
   })
   life.defer(() => runtime.dispose().catch(() => {}))
   const sessions = runtime.client.sessions
-  const created = await new RemoteSessionLifecycle(sessions, runtime.client.connection.generation)
-    .create({ sessionId: SESSION, cwd: host.anchorDir })
+  const lifecycle = new RemoteSessionLifecycle(sessions, runtime.client.connection.generation, runtime.client.remote.workspace, runtime.client.remote.session)
+  const workspaceId = (await lifecycle.resolveWorkspace({ kind: 'host-path', path: host.anchorDir })).workspaceId
+  const created = await lifecycle.create({ sessionId: SESSION, workspaceId })
   assert.equal(created.outcome.kind, 'created',
     `the real create must publish the Session: ${created.ownership}/${created.outcome.kind}`)
   return { host, sessions, clock, llm }

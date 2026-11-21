@@ -31,6 +31,7 @@ import { connect as sdkConnect } from '@stencil-hq/tern'
 import type { Op } from '@stencil-hq/tern'
 import { installTspPane, type TspPane } from '../support/tsp-terminal-fixture.ts'
 import { wireNodes, type WireNode } from '../support/tsp-picker-wire.ts'
+import { waitForEditableComposer } from '../support/tsp-composer-readiness.ts'
 import { mountTspRenderer, type TspRenderer } from '../../src/tui/tsp/session.ts'
 import type { ApprovalOutcome, ApprovalPromptRequest, TuiQuestion, TuiQuestionAnswer, TuiQuestionStatus } from '../../src/app/surface/interaction-presenter.ts'
 
@@ -160,6 +161,8 @@ async function mountHarness(options: {
     submit: text => { submits.push(text) },
     steer: () => {},
     pasteMedia: () => {},
+    pastedPath: () => {},
+    admitPastedPathDelivery: () => true, shouldRememberInput: () => true,
     noteUserInput: () => {},
     listContinuedQuestions: () => harness.continued,
     reopenContinuedQuestion: (sessionId, callId) => {
@@ -168,7 +171,7 @@ async function mountHarness(options: {
       harness.onReopen?.()
       return true
     },
-    openModelPicker() {},
+    openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true, openTasksBrowserUi() {}, tasksBrowserUiAvailable: () => true,
   })
   harness.renderer = renderer
   return harness
@@ -1199,8 +1202,134 @@ test('the composer accepts input again only after the NEW projection scope commi
   }
 })
 
+test('the shared composer-readiness probe retries a key the hydration fence drops and succeeds after the new projection scope commits', async (t) => {
+  // The probe under test is the one the Direct TSP lanes use: it must survive
+  // a key the fence DROPS, not be saved by it. This case opens the real fence,
+  // lets the probe inject while every byte is lost, commits a new projection
+  // source, and asserts the SAME pending probe then lands and erases.
+  const harness = await mountHarness()
+  // Count ONLY the probe's own tty bytes, read from the pane's real data
+  // stream — never from the helper's internals.
+  let injections = 0
+  const onData = (chunk: unknown): void => {
+    const text = typeof chunk === 'string' ? chunk : new TextDecoder().decode(chunk as Uint8Array)
+    if (text === 'x') injections += 1
+  }
+  try {
+    // The mounted pane's controlled editor, from ONE folded wire snapshot.
+    const readComposer = (): { readonly text: string; readonly cursor: number } => {
+      const editor = wireNodes(harness.pane).find(node => node.id === 'dock.composer')
+      if (editor === undefined) return { text: '', cursor: -1 }
+      return { text: String(editor.p.text ?? ''), cursor: Number(editor.p.cursor ?? -1) }
+    }
+    // A committed subject, so the fence below has something to retire.
+    harness.renderer.display.setTranscript(
+      [{ kind: 'assistant', turn: 1, text: 'the outgoing subject' }],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { identity: 'outgoing' },
+    )
+    await waitFor(() => {
+      const state = readComposer()
+      return state.text === '' && state.cursor === 0
+    }, 'the composer starts empty on the wire')
+
+    // The switch opens the fence and the probe starts — NOT awaited yet, so it
+    // keeps retrying while every probe byte is fenced out.
+    harness.renderer.display.beginSessionHydration()
+    harness.pane.input.on('data', onData)
+    const probe = waitForEditableComposer(harness.pane, readComposer)
+    const outcome = probe.then(
+      () => ({ ok: true as const }),
+      (error: unknown) => ({ ok: false as const, error }),
+    )
+    let fencedDraft: string | undefined
+    let fencedFailure: unknown
+    try {
+      await waitFor(() => injections >= 2, 'the fenced probe is really re-injected', 5_000)
+      // The keys above were injected inside the fence; the delivery window is the
+      // fixture's documented bound for ONE input dispatch, so the draft read
+      // below is an observation and not a lucky read.
+      await waitForKeyDeliveryWindow()
+      fencedDraft = harness.renderer.composer.getDraft()
+    } catch (error) {
+      // Keep the primary failure, but still settle the probe below: a pending
+      // readiness pass must not outlive this case on a red path.
+      fencedFailure = error
+    }
+
+    // The NEW subject commits on EVERY path, so the pending probe settles
+    // instead of retrying against a fence nobody lifts for its own 30s budget.
+    harness.renderer.display.setTranscript(
+      [{ kind: 'assistant', turn: 1, text: 'the incoming subject' }],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { identity: 'incoming' },
+    )
+    const settled = await outcome
+    const wire = readComposer()
+    t.diagnostic(`probe injections=${injections} last=${JSON.stringify(wire)}`
+      + (settled.ok ? '' : ` error=${String(settled.error)}`)
+      + (fencedFailure === undefined ? '' : ` injection-check=${String(fencedFailure)}`))
+    if (!settled.ok) throw settled.error
+    if (fencedFailure !== undefined) throw fencedFailure
+    assert.equal(fencedDraft, '',
+      'the hydration fence dropped the probe bytes instead of holding them for replay')
+    assert.equal(wire.text, '',
+      `the accepted probe was erased again on the wire (last ${JSON.stringify(wire)})`)
+    assert.equal(wire.cursor, 0, 'the accepted probe left the caret at the empty editor')
+    assert.equal(harness.renderer.composer.getDraft(), '',
+      'the client composer draft stayed empty through the probe')
+  } finally {
+    harness.pane.input.off('data', onData)
+    await harness.dispose()
+  }
+})
+
+test('the shared composer-readiness probe refuses a pre-existing x draft instead of erasing it', async () => {
+  // The probe owns ONLY the bytes it typed in THIS call. An editor that already
+  // holds an all-`x` draft is somebody else's state: erasing it would hide
+  // exactly the leaked-draft regression the readiness wait exists to surface.
+  const harness = await mountHarness()
+  try {
+    const readComposer = (): { readonly text: string; readonly cursor: number } => {
+      const editor = wireNodes(harness.pane).find(node => node.id === 'dock.composer')
+      if (editor === undefined) return { text: '', cursor: -1 }
+      return { text: String(editor.p.text ?? ''), cursor: Number(editor.p.cursor ?? -1) }
+    }
+    // A committed subject, so the composer is on a real mounted wire.
+    harness.renderer.display.setTranscript(
+      [{ kind: 'assistant', turn: 1, text: 'a committed subject' }],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { identity: 'pre-draft' },
+    )
+    for (const draft of ['x', 'xx']) {
+      harness.renderer.composer.setDraft(draft)
+      await waitFor(() => {
+        const state = readComposer()
+        return state.text === draft && state.cursor === draft.length
+      }, `the pre-existing ${JSON.stringify(draft)} draft on the wire`)
+      await assert.rejects(() => waitForEditableComposer(harness.pane, readComposer),
+        /pre-existing editor draft/u,
+        `the probe refuses the pre-existing ${JSON.stringify(draft)} draft`)
+      const wire = readComposer()
+      assert.equal(wire.text, draft, 'the pre-existing draft is not erased')
+      assert.equal(wire.cursor, draft.length, 'the pre-existing caret is not moved')
+      assert.equal(harness.renderer.composer.getDraft(), draft, 'the client draft is untouched')
+    }
+  } finally {
+    await harness.dispose()
+  }
+})
+
 // ── The native composite branch (the negotiated Questions/Approval forms) ────
-//
 // These cases opt the scripted pane into the EXACT kind set the native
 // composites paint, so the seat takes its native branch; every case above keeps
 // the default advertised set and therefore qualifies the LEGACY branch. The
@@ -2153,7 +2282,7 @@ test('clicking the ALREADY selected option still hides the keyboard cursor witho
   }
 })
 
-test('RFL-004: a masked multi-select page toggles its visible options on pointer, in source order', async () => {
+test('a masked multi-select page toggles its visible options on pointer, in source order', async () => {
   const harness = await mountNativeHarness()
   const recorder = statusOf()
   try {
@@ -2201,7 +2330,7 @@ test('RFL-004: a masked multi-select page toggles its visible options on pointer
   }
 })
 
-test('RFL-003: a masked page WITH options opens on option navigation, not on text editing', async () => {
+test('a masked page WITH options opens on option navigation, not on text editing', async () => {
   const harness = await mountNativeHarness()
   const recorder = statusOf()
   try {
@@ -2246,7 +2375,7 @@ function overlayIdOfAnswer(harness: Harness): string {
   return wireNodes(harness.pane).find(node => node.k === 'input' && node.id.endsWith('.answer'))?.id ?? 'none'
 }
 
-test('F5: a masked page with options shows the keyboard cursor and hides it on a pointer pick', async () => {
+test('a masked page with options shows the keyboard cursor and hides it on a pointer pick', async () => {
   const harness = await mountNativeHarness()
   const recorder = statusOf()
   try {
@@ -2275,7 +2404,7 @@ test('F5: a masked page with options shows the keyboard cursor and hides it on a
   }
 })
 
-test('F5: the cursor line names the MULTI-select keys (space toggle, enter continue)', async () => {
+test('the cursor line names the MULTI-select keys (space toggle, enter continue)', async () => {
   const harness = await mountNativeHarness()
   const recorder = statusOf()
   try {
@@ -2301,7 +2430,7 @@ test('F5: the cursor line names the MULTI-select keys (space toggle, enter conti
   }
 })
 
-test('F6: a `(recommended)` suffix keeps its mark on the native form', async () => {
+test('a `(recommended)` suffix keeps its mark on the native form', async () => {
   const harness = await mountNativeHarness()
   try {
     const suffix = harness.renderer.interaction.askQuestions(
@@ -2320,7 +2449,7 @@ test('F6: a `(recommended)` suffix keeps its mark on the native form', async () 
   }
 })
 
-test('F6: `intent.approve` recommends the same way the suffix does', async () => {
+test('`intent.approve` recommends the same way the suffix does', async () => {
   // A separate harness: one seat shows one request at a time, so a queued
   // second ask would never be painted for the assertion to read.
   const harness = await mountNativeHarness()
@@ -2343,7 +2472,7 @@ test('F6: `intent.approve` recommends the same way the suffix does', async () =>
   }
 })
 
-test('F6: the safe form restores the recommendation mark for a masked page', async () => {
+test('the safe form restores the recommendation mark for a masked page', async () => {
   const harness = await mountNativeHarness()
   try {
     const masked = harness.renderer.interaction.askQuestions(
@@ -2362,7 +2491,7 @@ test('F6: the safe form restores the recommendation mark for a masked page', asy
   }
 })
 
-test('F6: the recommended answer value is still the ORIGINAL label', async () => {
+test('the recommended answer value is still the ORIGINAL label', async () => {
   const harness = await mountNativeHarness()
   try {
     const answers = harness.renderer.interaction.askQuestions(
@@ -2382,7 +2511,7 @@ test('F6: the recommended answer value is still the ORIGINAL label', async () =>
   }
 })
 
-test('P3: a 10th option advertises no keycap it cannot honour', async () => {
+test('a 10th option advertises no keycap it cannot honour', async () => {
   const harness = await mountNativeHarness()
   try {
     const options = Array.from({ length: 10 }, (_unused, index) => ({ label: `opt-${index}` }))
@@ -2404,7 +2533,7 @@ test('P3: a 10th option advertises no keycap it cannot honour', async () => {
   }
 })
 
-test('F7: on a masked page WITH options, Enter selects the highlighted option and Next skips — never both', async () => {
+test('on a masked page WITH options, Enter selects the highlighted option and Next skips — never both', async () => {
   const harness = await mountNativeHarness()
   const recorder = statusOf()
   try {
@@ -2434,7 +2563,7 @@ test('F7: on a masked page WITH options, Enter selects the highlighted option an
   }
 })
 
-test('F7: a free-text page keeps its ⏎ keycap, because Enter really commits the text', async () => {
+test('a free-text page keeps its ⏎ keycap, because Enter really commits the text', async () => {
   const harness = await mountNativeHarness()
   const recorder = statusOf()
   try {
@@ -2457,7 +2586,7 @@ test('F7: a free-text page keeps its ⏎ keycap, because Enter really commits th
   }
 })
 
-test('F7: clicking Next on an unanswered masked page with options skips the question', async () => {
+test('clicking Next on an unanswered masked page with options skips the question', async () => {
   const harness = await mountNativeHarness()
   const recorder = statusOf()
   try {
@@ -2488,7 +2617,7 @@ test('F7: clicking Next on an unanswered masked page with options skips the ques
   }
 })
 
-test('F7b: after Esc leaves the edit, Next no longer claims ⏎ (Enter re-enters the edit)', async () => {
+test('after Esc leaves the edit, Next no longer claims ⏎ (Enter re-enters the edit)', async () => {
   const runtime = await mountNativeHarness()
   const recorder = statusOf()
   try {
@@ -2527,7 +2656,7 @@ test('F7b: after Esc leaves the edit, Next no longer claims ⏎ (Enter re-enters
   }
 })
 
-test('F7b: the same Esc→Enter rule holds on a MASKED free-text page', async () => {
+test('the same Esc→Enter rule holds on a MASKED free-text page', async () => {
   const runtime = await mountNativeHarness()
   const recorder = statusOf()
   try {

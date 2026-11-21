@@ -34,7 +34,7 @@ function leakTarball(life, leakText) {
   writeFileSync(join(pkgDir, 'README.md'), 'readme\n')
   writeFileSync(join(pkgDir, 'README.en.md'), 'readme\n')
   const tarball = join(dir, 'leak.tgz')
-  const tar = spawnSync('tar', ['-czf', tarball, '-C', dir, 'package'])
+  const tar = spawnSync('tar', ['-czf', tarball, '-C', dir, 'package'], { encoding: 'utf8', env: { ...process.env, COPYFILE_DISABLE: '1' } })
   assert.equal(tar.status, 0, tar.stderr)
   return { dir, tarball }
 }
@@ -70,6 +70,22 @@ test('tarball smoke flags another machine\'s Unix home path (never seen on this 
 test('tarball smoke flags a CI workspace path', (t) => {
   const life = testLifecycle(t)
   const { tarball } = leakTarball(life, '/home/runner/work/dsh-pi-tui/dsh-pi-tui/dist/index.mjs')
+  const result = runSmoke(tarball)
+  assert.notEqual(result.status, 0, result.stdout)
+  assert.match(result.stdout, /FAIL no workspace absolute paths in packaged files/)
+})
+
+test('tarball smoke allows escaped slash sequences in regex literals', (t) => {
+  const life = testLifecycle(t)
+  const fakeCursorPattern = String.raw`const marker = /(\\x1b_pi:c\\x07)\\x1b_pi:fc\\x07(.*?)(?:\\x1b_pi:\\/fc\\x07|$)/s;`
+  const { tarball } = leakTarball(life, fakeCursorPattern)
+  const result = runSmoke(tarball)
+  assert.match(result.stdout, /ok\s+no workspace absolute paths in packaged files/)
+})
+
+test('tarball smoke flags a short Windows drive path', (t) => {
+  const life = testLifecycle(t)
+  const { tarball } = leakTarball(life, 'C:\\repo\\README.md')
   const result = runSmoke(tarball)
   assert.notEqual(result.status, 0, result.stdout)
   assert.match(result.stdout, /FAIL no workspace absolute paths in packaged files/)

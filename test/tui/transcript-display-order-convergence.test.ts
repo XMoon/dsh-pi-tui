@@ -2178,3 +2178,26 @@ test('a still-declared Tool converges the same from LIVE and COLD raw placements
   assert.deepEqual(liveClosed, ['tool:c', 'assistant:reply'], 'closure keeps the declaration')
   assert.deepEqual(coldClosed, liveClosed, 'closure must not reintroduce the placement divergence')
 })
+
+// A retry source is a NON-user source: the Folder must drop its empty-content
+// row at the non-user empty-text gate (never paint an empty Human/Context
+// bubble), while a real human prompt and a non-empty injected Context row stay.
+test('an empty non-user retry user/message paints no bubble while real human and Context rows stay visible', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    // The official retry source carries no visible content: it is a Context
+    // candidate, not a human prompt, and its empty text must disappear.
+    eventAt('user/message', { id: 'u-retry-empty', role: 'user', content: [], source: { kind: 'retry' } }, T0 + 1, 1),
+    // Control: a real direct human prompt stays visible.
+    eventAt('user/message', { id: 'u-human', role: 'user', content: [{ type: 'text', text: 'real human prompt' }], source: { kind: 'user' } }, T0 + 2, 2),
+    // Control: a non-empty non-user Context injection stays visible (the gate
+    // is NOT "drop every non-user source").
+    eventAt('user/message', { id: 'u-context', role: 'user', content: [{ type: 'text', text: 'injected instructions text' }], source: { kind: 'instructions' } }, T0 + 3, 3),
+  ])
+  for (const row of folder.messages()) {
+    if ('text' in row) assert.notEqual(row.text, '', `an empty ${row.kind} row was painted`)
+  }
+  assert.deepEqual(logicalRows(folder), ['user:real human prompt', 'system:injected instructions text'],
+    'only the real human prompt and the non-empty Context row appear; the empty retry is dropped')
+})

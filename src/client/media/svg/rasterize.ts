@@ -7,18 +7,28 @@
  * abort (resvg's own unbounded-viewBox failure was measured as a real
  * `SIGABRT`); the admission gate in `domain/visual/svg-admission.ts` already
  * refuses the known crash inputs, and process isolation contains the residual
- * native risk. A POSIX virtual-memory cap and a hard timeout bound the child;
- * The production composition only enables this rasterizer on Linux, where the
- * `ulimit` boundary is verified. Platforms without a verifiable native memory
- * bound (macOS, Windows) use the description + source text fallback; a DIRECT
- * call also refuses there. A `ulimit` installation failure exits the child
- * with code 97 BEFORE the native rasterizer runs — it never silently continues.
+ * native risk. Linux keeps a POSIX virtual-memory cap and a hard timeout bounds
+ * every child; a `ulimit` installation failure exits the child with code 97
+ * BEFORE the native rasterizer runs — it never silently continues.
+ *
+ * The tested finite `RLIMIT_AS`/`RLIMIT_DATA` settings fail on macOS; no
+ * qualifying kernel-enforced hard bound was proven (MAC-08A:
+ * HARD_MEMORY_BOUND_NOT_PROVEN, kept as the technical fact). Under the
+ * Owner-accepted policy (MAC-08_POLICY: OWNER_RISK_ACCEPTED) Darwin runs the
+ * SAME isolated child without the kernel cap, while the process boundary,
+ * single lane, 3,000 ms timeout, input/output budgets, close-before-settle rule
+ * and PNG validation remain in force. The residual risk is that a pathological
+ * SVG can pressure native memory inside that short-lived child before the
+ * timeout; it is not claimed as an OOM guarantee. Windows and every other
+ * platform keep the description + source text fallback; a DIRECT call also
+ * refuses there.
  * @module @xmoon76/dsh-pi-tui/client/media/svg/rasterize
  */
 
 import { spawn } from 'node:child_process'
 import { admitSvg } from '../../../domain/visual/svg-admission.ts'
 import { createRequire } from 'node:module'
+import { performance } from 'node:perf_hooks'
 import {
   SVG_MAX_PNG_BYTES,
   SVG_MAX_RASTER_PIXELS,
@@ -34,6 +44,45 @@ export interface SvgRasterResult {
   readonly base64: string
   readonly widthPx: number
   readonly heightPx: number
+}
+
+/**
+ * The failure kinds a raster child can end with. The kind is a TYPE fact the
+ * loader reads to decide whether a user-driven retry is meaningful; it is a
+ * read-only supplement to `Error.message` (which stays verbatim for existing
+ * diagnostics and tests), never a second error-handling pipeline.
+ *
+ * - `timeout` / `spawn` / `worker-exit`: TRANSIENT child/lane failures a user
+ *   may retry once.
+ * - `cancelled`, `output-overflow`, `invalid-output`, `rejected`,
+ *   `unavailable`: deterministic outcomes a retry would only repeat.
+ */
+export type SvgRasterFailureKind =
+  | 'timeout'
+  | 'spawn'
+  | 'worker-exit'
+  | 'cancelled'
+  | 'output-overflow'
+  | 'invalid-output'
+  | 'rejected'
+  | 'unavailable'
+
+/** The typed raster failure carrying its classification kind. */
+export class SvgRasterFailure extends Error {
+  readonly kind: SvgRasterFailureKind
+  constructor(kind: SvgRasterFailureKind, message: string) {
+    super(message)
+    this.name = 'SvgRasterFailure'
+    this.kind = kind
+  }
+}
+
+/** The kinds a single user-driven retry may recover: transient child/lane facts. */
+const RETRYABLE_KINDS: ReadonlySet<SvgRasterFailureKind> = new Set(['timeout', 'spawn', 'worker-exit'])
+
+/** Whether this failure kind is one an explicit user retry may recover. */
+export function isRetryableRasterFailure(error: unknown): boolean {
+  return error instanceof SvgRasterFailure && RETRYABLE_KINDS.has(error.kind)
 }
 
 /** The injectable rasterizer seam (the loader owns dedupe and stale fences). */
@@ -53,9 +102,17 @@ const POSIX_MEMORY_CAP_KB = 4 * 1024 * 1024
  */
 const WORKER_SOURCE = `
 import { pathToFileURL } from 'node:url'
+// DIAGNOSTIC: one bounded record per milestone — the text "rp ", one of the five
+// names request|import|ctor|render|answer, then "=" and the whole milliseconds
+// since this child started. The parent treats a line as a record ONLY under that
+// exact grammar: a new phase name must be added to its pattern too, and anything
+// else stays ordinary stderr that the exit message still reports.
+const rpStart = performance.now()
+const rp = (phase) => process.stderr.write('rp ' + phase + '=' + Math.round(performance.now() - rpStart) + '\\n')
 const chunks = []
 process.stdin.on('data', chunk => chunks.push(chunk))
 process.stdin.on('end', async () => {
+  rp('request')
   let input
   try {
     input = JSON.parse(Buffer.concat(chunks).toString('utf8'))
@@ -65,6 +122,7 @@ process.stdin.on('end', async () => {
   }
   try {
     const module = await import(pathToFileURL(input.modulePath).href)
+    rp('import')
     const Resvg = module.Resvg ?? (module.default && module.default.Resvg)
     if (typeof Resvg !== 'function') throw new Error('resvg module has no Resvg export')
     // The parent sends the EXACT declared CSS viewport; never derive it from
@@ -74,6 +132,7 @@ process.stdin.on('end', async () => {
     const canvasWidth = input.width
     const canvasHeight = Math.ceil(input.width * (input.viewportHeight / input.viewportWidth))
     const renderer = new Resvg(input.svg, { fitTo: { mode: 'width', value: input.width } })
+    rp('ctor')
     if (!Number.isInteger(canvasWidth) || !Number.isInteger(canvasHeight)
       || canvasWidth <= 0 || canvasHeight <= 0
       || canvasWidth > ${SVG_MAX_RASTER_SIDE} || canvasHeight > ${SVG_MAX_RASTER_SIDE}
@@ -86,7 +145,9 @@ process.stdin.on('end', async () => {
       return
     }
     const png = renderer.render().asPng()
+    rp('render')
     process.stdout.write(JSON.stringify({ ok: true, png: Buffer.from(png).toString('base64') }))
+    rp('answer')
   } catch (error) {
     process.stdout.write(JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }))
   }
@@ -94,12 +155,39 @@ process.stdin.on('end', async () => {
 `
 
 /**
- * Whether this deployment has a verified native memory boundary for the
- * raster child. Only Linux is qualified today (`ulimit -v` was measured); every
- * other platform converges to the description/source text mode.
+ * Whether this deployment runs the isolated SVG raster child.
+ *
+ * Linux has the verified `ulimit -v` boundary. Darwin runs the same isolated
+ * child under MAC-08_POLICY: OWNER_RISK_ACCEPTED — the hard native-memory
+ * bound was not proven (MAC-08A stays HARD_MEMORY_BOUND_NOT_PROVEN), but the
+ * Owner accepted the residual pressure risk in exchange for the existing
+ * normal preview capability. Every other platform keeps the description/source
+ * text fallback.
  */
 export function isolatedSvgRasterSupported(): boolean {
-  return process.platform === 'linux'
+  return process.platform === 'linux' || process.platform === 'darwin'
+}
+
+/**
+ * The child launcher of ONE raster process.
+ *
+ * Linux is unchanged: `/bin/sh` installs the 4 GiB virtual-memory cap and
+ * `exit 97` refuses to exec the rasterizer if it cannot. Darwin has no usable
+ * finite rlimit on this OS, so the child is spawned directly with the same V8
+ * heap flag; that flag bounds the V8 heap only, never native allocations, and
+ * the Owner-accepted policy above is the reason the child still runs.
+ */
+function rasterChildCommand(): { readonly command: string; readonly args: string[] } {
+  if (process.platform === 'linux') {
+    return {
+      command: '/bin/sh',
+      args: ['-c', `ulimit -v ${POSIX_MEMORY_CAP_KB} || exit 97; exec "$0" --max-old-space-size=256 --input-type=module -e "$1"`, process.execPath, WORKER_SOURCE],
+    }
+  }
+  if (process.platform === 'darwin') {
+    return { command: process.execPath, args: ['--max-old-space-size=256', '--input-type=module', '-e', WORKER_SOURCE] }
+  }
+  throw new Error('SVG rasterization requires a supported isolated child platform')
 }
 
 /** Resolve the platform binary package once per call (fail with a clear message). */
@@ -141,28 +229,33 @@ export type SpawnProcess = typeof spawn
 export function createSvgRasterizer(spawnProcess: SpawnProcess = spawn): SvgRasterize {
   return async (source, options) => {
     if (!isolatedSvgRasterSupported()) {
-      throw new Error('SVG rasterization requires a verifiable native memory bound; this platform uses the text/source fallback')
+      throw new SvgRasterFailure('unavailable', 'SVG rasterization requires a supported isolated child platform; this platform uses the text/source fallback')
     }
     // Re-run the bounded admission to obtain the EXACT source-declared
     // viewport, then refuse an over-budget canvas BEFORE spawning the native
     // child (the post-render IHDR check remains the last line of defense).
     const admission = admitSvg(source)
     if (!admission.ok) {
-      throw new Error(`SVG rasterizer rejected the document: ${admission.reason}`)
+      throw new SvgRasterFailure('rejected', `SVG rasterizer rejected the document: ${admission.reason}`)
     }
     const width = Math.max(1, Math.min(SVG_MAX_RASTER_SIDE, Math.floor(options.targetWidth)))
     const canvasWidth = width
     const canvasHeight = Math.ceil(width * (admission.viewportHeight / admission.viewportWidth))
     if (canvasWidth > SVG_MAX_RASTER_SIDE || canvasHeight > SVG_MAX_RASTER_SIDE
       || canvasWidth * canvasHeight > SVG_MAX_RASTER_PIXELS) {
-      throw new Error(`SVG raster canvas ${canvasWidth}x${canvasHeight} exceeds the ${SVG_MAX_RASTER_SIDE}px / ${SVG_MAX_RASTER_PIXELS}-pixel budget`)
+      throw new SvgRasterFailure('rejected', `SVG raster canvas ${canvasWidth}x${canvasHeight} exceeds the ${SVG_MAX_RASTER_SIDE}px / ${SVG_MAX_RASTER_PIXELS}-pixel budget`)
     }
-    const modulePath = resvgModulePath()
-    // `|| exit 97` is the fail-closed gate: if the shell cannot install the
-    // virtual-memory cap, the native rasterizer must never run. The parent
-    // reports the exit and the card keeps its description/source text.
-    const command = '/bin/sh'
-    const args = ['-c', `ulimit -v ${POSIX_MEMORY_CAP_KB} || exit 97; exec "$0" --max-old-space-size=256 --input-type=module -e "$1"`, process.execPath, WORKER_SOURCE]
+    let modulePath: string
+    try {
+      modulePath = resvgModulePath()
+    } catch (error) {
+      throw new SvgRasterFailure('unavailable', error instanceof Error ? error.message : String(error))
+    }
+    // Linux's `|| exit 97` is the fail-closed gate: if the shell cannot install
+    // the virtual-memory cap, the native rasterizer must never run. Darwin's
+    // launcher has no kernel cap by policy; both paths keep the same isolated
+    // child, timeout, output and PNG validation.
+    const { command, args } = rasterChildCommand()
     return await new Promise<SvgRasterResult>((resolve, reject) => {
       const child = spawnProcess(command, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
       let stdout = ''
@@ -172,6 +265,44 @@ export function createSvgRasterizer(spawnProcess: SpawnProcess = spawn): SvgRast
       let cancelled = false
       let overflow = false
       let timer: NodeJS.Timeout | undefined
+      // ── DIAGNOSTIC (branch fix/svg-raster-coldstart-timeout-20261105) ──────
+      // The relative phase timeline of ONE child, so a tripped bound names the
+      // stalled boundary instead of only reporting "exceeded 3000 ms". The
+      // parent-side marks carry numbers and a code/signal only: no SVG source,
+      // no PNG bytes, no child stderr text. The only child-supplied text the
+      // timeout message adds is the worker's own milestone records, matched by
+      // their exact grammar below.
+      //
+      // Two DIFFERENT authorities, never conflated by one mark:
+      //   `stdinWritten`  = this process's `Writable.end()` callback ran: OUR loop
+      //                     finished handing the bytes to the OS pipe. It is not a
+      //                     worker receipt, and a late value only says the write
+      //                     completion was delayed — this loop not being scheduled
+      //                     and pipe backpressure both produce it.
+      //   `rp request`    = the worker's own record that its stdin reached EOF. Its
+      //                     absence says the worker never reported that, which is
+      //                     still not proof the bytes never arrived: a process
+      //                     killed before it wrote anything reports nothing.
+      // So these marks narrow a stall down; saying WHO stalled needs them read
+      // together with the other marks of the same occurrence, never one timestamp
+      // alone.
+      const startedAt = performance.now()
+      const phases: string[] = []
+      const mark = (phase: string, detail?: string): void => {
+        phases.push(`${phase}=${Math.round(performance.now() - startedAt)}${detail !== undefined ? `(${detail})` : ''}`)
+      }
+      mark('spawn')
+      // The child's own milestone records, kept separate from any real stderr so
+      // neither message buries the other. Matching is the EXACT record grammar
+      // the worker writes, never a bare prefix: a native error line that happens
+      // to begin `rp ` is real stderr and must stay visible in the exit message
+      // instead of being absorbed as a phase. A missing or empty milestone set is
+      // a valid answer (`''`): nothing parses the numbers, so an absent field can
+      // never raise a new failure over the real one.
+      const isMilestone = (line: string): boolean => /^rp (?:request|import|ctor|render|answer)=\d+$/u.test(line)
+      const workerPhases = (): string => stderr.split('\n').filter(isMilestone).join(' ')
+      const workerStderr = (): string => stderr.split('\n').filter(line => !isMilestone(line)).join('\n').trim().slice(0, 200)
+      // ───────────────────────────────────────────────────────────────────────
       const finish = (error: Error | undefined, result?: SvgRasterResult): void => {
         if (settled) return
         settled = true
@@ -179,6 +310,10 @@ export function createSvgRasterizer(spawnProcess: SpawnProcess = spawn): SvgRast
         options.signal.removeEventListener('abort', onAbort)
         if (error !== undefined) reject(error)
         else resolve(result as SvgRasterResult)
+      }
+      /** Wrap one terminal failure in its typed kind (message stays verbatim). */
+      const fail = (kind: SvgRasterFailureKind, message: string): void => {
+        finish(new SvgRasterFailure(kind, message))
       }
       // A termination only kills the child. The promise settles on the child's
       // `close` event, so the loader's single worker lane cannot start the NEXT
@@ -189,6 +324,7 @@ export function createSvgRasterizer(spawnProcess: SpawnProcess = spawn): SvgRast
         if (reason === 'cancelled') cancelled = true
         else if (reason === 'timeout') timedOut = true
         else overflow = true
+        mark('terminate', reason)
         child.kill('SIGKILL')
       }
       const onAbort = (): void => terminate('cancelled')
@@ -196,55 +332,61 @@ export function createSvgRasterizer(spawnProcess: SpawnProcess = spawn): SvgRast
       child.stdout.setEncoding('utf8')
       child.stderr.setEncoding('utf8')
       child.stdout.on('data', (chunk: string) => {
+        if (stdout.length === 0) mark('firstStdout')
         stdout += chunk
         if (Buffer.byteLength(stdout, 'utf8') > MAX_STDOUT_BYTES) terminate('overflow')
       })
+      child.stdout.on('end', () => mark('stdoutEnd', `${Buffer.byteLength(stdout, 'utf8')}b`))
       child.stderr.on('data', (chunk: string) => {
         if (stderr.length < MAX_STDERR_BYTES) stderr += chunk
       })
-      child.on('error', (error: Error) => finish(new Error(`SVG rasterizer failed to start: ${error.message}`)))
+      child.on('error', (error: Error) => fail('spawn', `SVG rasterizer failed to start: ${error.message}`))
+      child.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
+        mark('exit', `code=${code ?? 'null'} signal=${signal ?? 'null'}`)
+      })
       child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
+        mark('close', `code=${code ?? 'null'} signal=${signal ?? 'null'}`)
         if (timedOut) {
-          finish(new Error(`SVG rasterization exceeded ${SVG_RASTER_TIMEOUT_MS} ms`))
+          fail('timeout', `SVG rasterization exceeded ${SVG_RASTER_TIMEOUT_MS} ms [${phases.join(' ')}] [${workerPhases()}]`)
           return
         }
         if (cancelled) {
-          finish(new Error('SVG rasterization was cancelled'))
+          fail('cancelled', 'SVG rasterization was cancelled')
           return
         }
         if (overflow) {
-          finish(new Error('SVG rasterizer produced too much output'))
+          fail('output-overflow', 'SVG rasterizer produced too much output')
           return
         }
         if (code !== 0) {
-          finish(new Error(`SVG rasterizer exited (${code ?? signal ?? 'unknown'}): ${stderr.trim().slice(0, 200)}`))
+          fail('worker-exit', `SVG rasterizer exited (${code ?? signal ?? 'unknown'}): ${workerStderr()}`)
           return
         }
         let message: unknown
         try {
           message = JSON.parse(stdout)
         } catch {
-          finish(new Error('SVG rasterizer returned an unreadable answer'))
+          fail('invalid-output', 'SVG rasterizer returned an unreadable answer')
           return
         }
         const answer = message as { ok?: unknown; png?: unknown; error?: unknown }
         if (answer.ok !== true || typeof answer.png !== 'string') {
-          finish(new Error(typeof answer.error === 'string' ? `SVG rasterizer rejected the document: ${answer.error}` : 'SVG rasterizer rejected the document'))
+          fail('rejected', typeof answer.error === 'string' ? `SVG rasterizer rejected the document: ${answer.error}` : 'SVG rasterizer rejected the document')
           return
         }
         const png = Buffer.from(answer.png, 'base64')
         if (png.length === 0 || png.length > SVG_MAX_PNG_BYTES) {
-          finish(new Error(`SVG rasterizer produced an out-of-budget PNG (${png.length} bytes)`))
+          fail('invalid-output', `SVG rasterizer produced an out-of-budget PNG (${png.length} bytes)`)
           return
         }
         const dimensions = pngDimensions(png)
         if (dimensions === undefined) {
-          finish(new Error('SVG rasterizer produced an invalid PNG'))
+          fail('invalid-output', 'SVG rasterizer produced an invalid PNG')
           return
         }
         if (dimensions.width > SVG_MAX_RASTER_SIDE || dimensions.height > SVG_MAX_RASTER_SIDE
           || dimensions.width * dimensions.height > SVG_MAX_RASTER_PIXELS) {
-          finish(new Error(`SVG raster exceeded the pixel budget (${dimensions.width}×${dimensions.height})`))
+          fail('invalid-output', `SVG raster exceeded the pixel budget (${dimensions.width}×${dimensions.height})`)
           return
         }
         finish(undefined, { png, base64: answer.png, widthPx: dimensions.width, heightPx: dimensions.height })
@@ -254,17 +396,22 @@ export function createSvgRasterizer(spawnProcess: SpawnProcess = spawn): SvgRast
         terminate('cancelled')
       } else {
         options.signal.addEventListener('abort', onAbort, { once: true })
+        // DIAGNOSTIC: the parent-side write boundary (see the block above): this
+        // callback runs when OUR loop pushed the bytes into the pipe.
         child.stdin.end(JSON.stringify({
         modulePath,
         svg: source,
         width,
         viewportWidth: admission.viewportWidth,
         viewportHeight: admission.viewportHeight,
-      }))
+      }), () => mark('stdinWritten'))
       }
     })
   }
 }
 
-/** The production rasterizer (Linux-only, verified native memory bound). */
+/**
+ * The production rasterizer. Linux runs with the verified native memory bound;
+ * macOS runs the same isolated child under the Owner-accepted risk policy.
+ */
 export const rasterizeSvg: SvgRasterize = createSvgRasterizer()

@@ -7,6 +7,8 @@
  */
 
 import assert from 'node:assert/strict'
+import { fakeAgentModel } from '../support/agent-model-double.ts'
+import { unavailableAcpAccess, unavailableWebAccess, unavailableMcpServers } from '../support/web-access-fake.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
@@ -46,6 +48,7 @@ import { SettingsRegistry } from '../../src/extension/internal/settings-registry
 import { ThemeRegistry } from '../../src/extension/internal/theme-registry.ts'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { currentPalette } from '../../src/tui/theme/runtime.ts'
+import { unconfiguredPolicyObservation, unconfiguredSessionPolicyPort } from '../support/session-policy-fake.ts'
 
 
 /** The plain (ANSI-stripped) viewport of one VT frame. */
@@ -120,6 +123,8 @@ function fakeAgent(sessionId: string, events: readonly { type: string }[] = []):
     },
     ctx: { on: () => () => {} },
     options: { provider: 'p', model: 'm' },
+    // DSH 0.2.2: the Agent owns its model selection (`AgentModel`).
+    model: fakeAgentModel(undefined, { provider: 'p', model: 'm' }),
   } as unknown as Agent
 }
 
@@ -273,6 +278,9 @@ function stubRunner(options: {
   })
   if (options.presetsPort !== undefined) Object.assign(catalog, { presets: options.presetsPort })
   const runner: TuiCommandRunner = {
+    webAccess: unavailableWebAccess(),
+    acpAccess: unavailableAcpAccess(),
+    mcpServers: unavailableMcpServers(),
     beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx: options.ctx,
@@ -282,6 +290,8 @@ function stubRunner(options: {
       () => options.state !== undefined ? options.state.agent : options.agent,
       () => options.state?.generation ?? 0,
     ),
+    sessionPolicy: unconfiguredSessionPolicyPort(),
+    policy: unconfiguredPolicyObservation(),
     // /help and the collision baseline read the FAKE registry through the
     // scoped-command facade, exactly like the production provider.
     listScopedCommands: () => (options.ctx.get('commands') as unknown as { list(): readonly SurfaceCommandSummary[] }).list(),
@@ -302,6 +312,7 @@ function stubRunner(options: {
     tuiSettings: options.tuiSettings,
     applyFooterSettings: () => {},
     agents: options.agents ?? {
+      resolveWorkspace: async () => ({ workspaceId: 'ws-a', path: '/ws' }),
       create: async () => ({}) as never,
       open: async () => ({}) as never,
     },
@@ -318,8 +329,7 @@ function stubRunner(options: {
     commandRegistry: options.ctx.get('commands') as import('../../src/commands.ts').CommandRegistryLike | undefined,
     clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
-    hostShellCompletion: true,
-    transcriptExportAvailable: true,
+    hostShellCompletion: { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) },
     interaction: {
       questions: {
         onRequest: () => true,
@@ -329,8 +339,7 @@ function stubRunner(options: {
         answerContinued: async () => 'not-continued' as const,
       },
       onApprovalRequest: () => {},
-      setApprovalPolicy: () => true,
-    },
+      },
     sessionWriter: {
       prompt: async () => ({ kind: 'committed' as const, value: undefined }),
       updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
@@ -378,7 +387,7 @@ function stubRunner(options: {
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, createPluginManagerPage: () => undefined,
+    openTasksBrowser: () => {}, openScheduleWorkspace: () => ({ kind: 'success' } as const), createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -465,7 +474,7 @@ function setup(options: {
   startedApps.add(app)
   const commands = fakeCommands(options.commandsListRegistered === true, options.commandsPresetOverride)
   ctx.provide('commands', commands.service as never)
-  if (options.settings === undefined) ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
+  if (options.settings === undefined) ctx.provide('settings', { describe: () => [{ ns: 'pi-tui-preferences', user: {} }] } as never)
   const presets = presetService(options.rows ?? SHIPPED_ROWS, options.defaultPresetId, options.selectFailure, options.selectLocked, options.roster, options.resolve, options.selectHook)
   if (options.noPresets !== true) ctx.provide('agentPresets', presets.service as never)
   if (options.settings !== undefined) ctx.provide('settings', options.settings as never)
@@ -726,6 +735,7 @@ test('/new refuses a registry default no declaration supplies — no guessed rep
   const t = setup({
     defaultPresetId: 'code',
     agents: {
+      resolveWorkspace: async () => ({ workspaceId: 'ws-a', path: '/ws' }),
       create: async options => {
         created.push({ agentPreset: options.agentPreset })
         return {} as never
@@ -752,17 +762,17 @@ test('/sessions opens input-first and shows projection-pending rows before enric
   })
   const result = await t.runCommand('sessions')
   assert.deepEqual(result, { kind: 'success' })
-  // The overlay owns the input immediately (loading frame); the listing is
-  // behind a scheduler yield, so poll until the row lands — still without
-  // the pending preset.
+  // The workspace owns the input immediately (loading frame); the listing is
+  // behind a scheduler yield, so poll until the row lands — still without the
+  // pending projection's title enrichment.
   const initial = await t.view()
   assert.ok(initial.includes('Loading sessions…') || initial.includes('cold'),
     `the first frame must be interactive (loading row or listed row):\n${initial}`)
   await waitFor(async () => (await t.view()).includes('cold'))
   const pending = await t.view()
-  assert.ok(!pending.includes('preset:standard'), 'a pending projection must not show an effective preset')
-  resolveBatch(new Map([['session-cold', { preset: 'standard' }]]))
-  await waitFor(async () => (await t.view()).includes('preset:standard'))
+  assert.ok(!pending.includes('cold projected title'), 'a pending projection must not show an enriched title')
+  resolveBatch(new Map([['session-cold', { title: 'cold projected title' }]]))
+  await waitFor(async () => (await t.view()).includes('cold projected title'))
   t.app.stop()
 })
 
@@ -771,6 +781,7 @@ test('/new honors the launch-time effective preset', async () => {
   const t = setup({
     effectivePresetId: 'minimal',
     agents: {
+      resolveWorkspace: async () => ({ workspaceId: 'ws-a', path: '/ws' }),
       create: async options => {
         created.push({ agentPreset: options.agentPreset })
         return {} as never
@@ -1752,9 +1763,9 @@ async function settlePresetThroughOuterOwner(
     isScopeCurrent: () => true,
     refuseByTransitionFence: () => {},
     lateAttachmentRefusal: () => undefined,
-    commandSubmitAttachments: () => [],
     isTuiOwnedCommand: () => false,
     commandPlaneOwnsLine: () => false,
+    beginNavigationIntent: () => undefined,
     submittedHostClaim: () => undefined,
     commandSignal: () => new AbortController().signal,
     invokeCommandPlane: async () => {
@@ -1795,6 +1806,7 @@ async function settlePresetThroughOuterOwner(
     wasAdvertisedAtSubmit: false,
     parsedName: 'preset',
     submitTurn: { wait: Promise.resolve(), release: () => {} },
+    preparedCommandAttachments: { segments: [] },
   })
   await done
   await new Promise(resolve => setImmediate(resolve))
@@ -2175,4 +2187,100 @@ test('a sessionless /preset stages the next preset without reading a policy rost
   assert.equal(t.pending.value, 'minimal')
   assert.equal(rosterReads, 0, 'the sessionless selection must not read a chooser-policy roster')
   t.app.stop()
+})
+
+test('the navigation intent starts only for the final TUI-owned route and never on an early refusal', async () => {
+  // A genuine Host-owned `/new` must not register a TUI navigation intent, and
+  // the late attachment refusal (a post-admission refusal before the executor
+  // runs) must return without ever registering one: a leaked intent would keep
+  // `SessionTransitionGate.pending` true forever.
+  const run = async (options: {
+    lateRefusal?: string
+    commandPlaneLine: boolean
+    tuiOwnedCommand: boolean
+  }): Promise<string[]> => {
+    const events: string[] = []
+    let acked!: () => void
+    const ack = new Promise<void>(resolve => { acked = resolve })
+    const deps = {
+      isDisposed: () => false,
+      notify: () => {},
+      loggerError: () => {},
+      readDraft: () => '',
+      mergeDraftIntoEditor: () => true,
+      restoreSubmissionDraft: () => {},
+      consumeDraftAttachments: () => {},
+      draftHasAttachments: () => options.lateRefusal !== undefined,
+      pinDraftAttachments: () => () => {},
+      settleLocalSubmission: () => {},
+      settleSubmitAck: () => { acked() },
+      notifySubmissionFailure: () => {},
+      isScopeCurrent: () => true,
+      refuseByTransitionFence: () => {},
+      lateAttachmentRefusal: () => options.lateRefusal,
+        commandPlaneOwnsLine: () => options.commandPlaneLine,
+      isTuiOwnedCommand: () => options.tuiOwnedCommand,
+      beginNavigationIntent: (name: string | undefined) => {
+        events.push(`begin:${String(name)}`)
+        return () => { events.push(`finish:${String(name)}`) }
+      },
+      submittedHostClaim: () => undefined,
+      commandSignal: () => new AbortController().signal,
+      invokeCommandPlane: async () => {
+        events.push('invoke')
+        return {
+          kind: 'committed' as const,
+          matched: true,
+          execution: { commandId: 'cmd-navigation-intent', result: { kind: 'success' } },
+        }
+      },
+      beginCommandSettlement: () => {},
+      abortCommandSettlement: () => {},
+      settleCommandSettlement: () => {},
+      trackSettlementWork: () => {},
+      captureCommandHealthRef: () => undefined,
+      clearCommandHealthError: () => {},
+      recordCommandHealthError: () => {},
+      readCommandDraftDisposition: () => undefined,
+      shouldConsumeAdvertisedMiss: () => false,
+      isIndeterminateSkillWrite: () => false,
+      startArtifactSave: () => {},
+      submitPrompt: async () => {},
+      commandSessionId: () => 's1',
+      markTurnTransferred: () => {},
+      diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+    }
+    executeHostCommandSubmission(deps as unknown as HostCommandSubmissionDeps, {
+      text: '/new',
+      toggled: '/new',
+      scope: { sessionId: 's1' } as never,
+      submitRequestId: 'req-navigation-intent',
+      submitAckToken: 1,
+      generation: 0,
+      localEchoInstalled: false,
+      wasAdvertisedAtSubmit: false,
+      parsedName: 'new',
+      submitTurn: { wait: Promise.resolve(), release: () => {} },
+      preparedCommandAttachments: { segments: [] },
+    })
+    await ack
+    await new Promise(resolve => setImmediate(resolve))
+    return events
+  }
+
+  assert.deepEqual(
+    await run({ lateRefusal: 'commands do not accept attachments', commandPlaneLine: true, tuiOwnedCommand: true }),
+    [],
+    'the late attachment refusal must return without registering an intent or invoking the plane',
+  )
+  assert.deepEqual(
+    await run({ commandPlaneLine: true, tuiOwnedCommand: false }),
+    ['invoke'],
+    'a genuine Host-owned /new must execute without a TUI navigation intent',
+  )
+  assert.deepEqual(
+    await run({ commandPlaneLine: true, tuiOwnedCommand: true }),
+    ['begin:new', 'invoke', 'finish:new'],
+    'the TUI-owned /new route registers one intent and finishes it at the terminal sink',
+  )
 })

@@ -38,7 +38,7 @@ import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-j
 import { SqliteSessionQueryEngine } from '@deepseek-ai/dsh-session-query-sqlite'
 import { CommandRuntime } from '@deepseek-ai/dsh-commands'
 import { RemoteSessionLifecycle } from '../../src/runtime/remote/session-lifecycle-remote.ts'
-import { loadExperimentalRemoteRuntime } from '../../src/runtime/backend-loader.ts'
+import { createExperimentalRemoteRuntime } from '../support/m3-inprocess/runtime.ts'
 import { createRemoteSessionOwnerServices } from '../../src/app/remote/session-owners.ts'
 import { apply as applyRunner, Config as TuiConfigSchema } from '../../src/index.ts'
 import { TUI_STARTUP_SERVICE } from '../../src/startup.ts'
@@ -156,9 +156,9 @@ test('a REAL Direct resume of an interrupted-turn session mounts without waiting
   context.provide('loader', { await: async () => {} } as never)
   await mountAgentLoopTestHarness(context)
 
-  const fiber = await context.plugin(pluginCtx => {
-    applyRunner(pluginCtx, TuiConfigSchema({ fullscreen: 'off', sessionId: String(sessionId) } as never))
-  })
+  const tuiConfig = TuiConfigSchema({ fullscreen: 'off', sessionId: String(sessionId) } as never)
+  context.provide('piTuiPreferences', tuiConfig)
+  const fiber = await context.plugin(pluginCtx => applyRunner(pluginCtx, tuiConfig))
   life.defer(() => fiber.dispose())
 
   // The pre-mount quiesce resolved: the real runner painted its first frame.
@@ -236,16 +236,17 @@ test('an official Remote running binding keeps the pre-mount idle wait open unti
   const life = testLifecycle(t)
   const llm = new HeldWireLlmAdapter()
   const host = await createRemoteApplicationHostFixture(life, 'prd-remote-startup-running', { llmAdapter: llm })
-  const runtime = await (await loadExperimentalRemoteRuntime()).createExperimentalRemoteRuntime({
+  const runtime = await createExperimentalRemoteRuntime({
     hostContext: host.ctx,
     waitForHostPrerequisites: async () => {},
   })
   life.defer(() => runtime.dispose().catch(() => {}))
   const sessions = runtime.client.sessions
   await sessions.refresh()
-  const lifecycle = new RemoteSessionLifecycle(sessions, runtime.client.connection.generation)
+  const lifecycle = new RemoteSessionLifecycle(sessions, runtime.client.connection.generation, runtime.client.remote.workspace, runtime.client.remote.session)
   const id = 'prd-remote-startup-running'
-  const created = await lifecycle.create({ sessionId: id, cwd: host.anchorDir })
+  const workspaceId = (await lifecycle.resolveWorkspace({ kind: 'host-path', path: host.anchorDir })).workspaceId
+  const created = await lifecycle.create({ sessionId: id, workspaceId })
   assert.equal(created.outcome.kind, 'created', `the official create must commit: ${created.ownership}/${created.outcome.kind}`)
   if (created.outcome.kind !== 'created') return
   const handle = created.outcome.handle

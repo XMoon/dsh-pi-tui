@@ -17,76 +17,39 @@
  */
 
 import { cancellationError } from '../../runtime/process/tasks.ts'
-import { sessionUnchanged } from './steer.ts'
 import type { SessionWriter } from '../../runtime/session-writer-port.ts'
 import { TransitionInProgressError } from '../session/operation-barrier.ts'
-import { SessionScopeSupersededError } from '../session/scope.ts'
-
-/** The minimal agent surface the shell submit needs (the runner's live agent). */
-export interface ShellSubmitAgentLike {
-  session: { id: string }
-}
+import { SessionScopeSupersededError, type LiveSessionScope } from '../session/scope.ts'
 
 export type ShellSubmitOutcome = 'ok' | 'stale' | 'indeterminate'
 
 /** Injectable dependencies of {@link submitShellResult}. */
 export interface ShellSubmitDeps {
-  /** Current live agent, re-read on every access (TOCTOU detection). */
-  currentAgent(): ShellSubmitAgentLike | undefined
-  /** Current session generation, re-read (session switch detection). */
-  currentGeneration(): number
+  /** The exact live Session captured synchronously by this shell gesture. */
+  readonly scope: LiveSessionScope
+  /** Read the existing SessionScopeAuthority; no Client Agent is required. */
+  readonly isScopeCurrent: (scope: LiveSessionScope) => boolean
   notify(message: string, kind: 'info' | 'error'): void
-  /** Notice for a session switch detected mid-send. */
   staleNotice(): string
-  /**
-   * A post-admission LOCAL VALIDITY fence (surface lifetime / disposed). It runs
-   * only after the writer section was entered, so it MUST NOT read the session
-   * transition gate: an admitted writer is never truncated by a waiting
-   * transition — that admission belongs to `SessionRuntime.withWriter` alone.
-   * Optional; absent keeps the historical behavior.
-   */
   fence?: () => boolean
-  /** The fence refusal notice (defaults to {@link staleNotice}). */
   fenceNotice?: () => string
-  /**
-   * The submission writer admission (convergence plan phase 3): the shell
-   * write runs inside this section, so a transition started while the
-   * shell result awaits drains it first. The runner binds it to the captured
-   * live scope through `SubmissionRuntime.withWriter`, so the operation
-   * barrier has exactly ONE admission owner. Optional; absent keeps the
-   * direct/unit-call behavior.
-   */
-  writerSection?: <T>(task: () => Promise<T>) => Promise<T>
-  /** Deliver the shell result through the semantic session writer. */
+  /** The writer section must admit this captured scope, not a later current scope. */
+  writerSection?: <T>(scope: LiveSessionScope, task: () => Promise<T>) => Promise<T>
   writer: Pick<SessionWriter, 'prompt'>
-  /** Build the user message (runner-side creation, keeps this module dsh-free). */
-  createMessage(text: string): unknown
-  /** Called once the message was accepted by the agent (followup sent). */
+  /** Remote must build the immutable transport snapshot for the captured exact Session. */
+  prepareMessage?: (scope: LiveSessionScope, text: string) => Promise<unknown>
+  /** Direct's existing message builder; used when no transport preparer is composed. */
+  createMessage: (text: string) => unknown
   onSubmitted(): void
 }
 
-/**
- * Submit a completed `!` shell run's command+output to the session:
- * barrier → capture identity → re-validate → followup. No-op without an
- * agent. `stale` aborts for a retry against the new session (the
- * caller's card keeps the output visible either way).
- */
 export async function submitShellResult(deps: ShellSubmitDeps, text: string): Promise<ShellSubmitOutcome> {
-  // Capture before entering the barrier: a delayed shell result belongs to
-  // the session that was current when this submit began, never whichever
-  // Agent happens to be live after a transition drains.
-  const agent = deps.currentAgent()
-  if (agent === undefined) return 'ok'
-  const generation = deps.currentGeneration()
+  const { scope } = deps
   const writerSection = deps.writerSection
   if (writerSection !== undefined) {
     try {
-      return await writerSection(async () => submitShellResultCore(deps, text, agent, generation))
+      return await writerSection(scope, async () => submitShellResultCore(deps, text))
     } catch (error) {
-      // A frozen transition and a superseded capture are DIFFERENT refusals
-      // (both wrote NOTHING): report the refusal that actually happened and keep
-      // the card's output visible for a retry — never the transition notice for a
-      // stale capture.
       if (error instanceof TransitionInProgressError) {
         deps.notify(deps.fenceNotice !== undefined ? deps.fenceNotice() : deps.staleNotice(), 'info')
         return 'stale'
@@ -98,31 +61,30 @@ export async function submitShellResult(deps: ShellSubmitDeps, text: string): Pr
       throw error
     }
   }
-  return submitShellResultCore(deps, text, agent, generation)
+  return submitShellResultCore(deps, text)
 }
 
-async function submitShellResultCore(
-  deps: ShellSubmitDeps,
-  text: string,
-  agent: ShellSubmitAgentLike,
-  generation: number,
-): Promise<ShellSubmitOutcome> {
-  // TOCTOU re-validation: the session must still be the exact one the
-  // identity was captured from, or the submission is aborted for a retry
-  // against the new session.
-  if (!sessionUnchanged({ subject: agent, generation }, deps.currentAgent(), deps.currentGeneration())) {
+async function submitShellResultCore(deps: ShellSubmitDeps, text: string): Promise<ShellSubmitOutcome> {
+  if (!deps.isScopeCurrent(deps.scope)) {
     deps.notify(deps.staleNotice(), 'error')
     return 'stale'
   }
-  // The post-admission local validity fence (surface lifetime): the writer
-  // section was already entered, so this must never consult the session
-  // transition gate. The caller's card keeps the output visible; the `!` line
-  // can be re-run after the transition settles.
   if (deps.fence?.() === true) {
     deps.notify(deps.fenceNotice !== undefined ? deps.fenceNotice() : deps.staleNotice(), 'info')
     return 'stale'
   }
-  const outcome = await deps.writer.prompt(agent.session.id, deps.createMessage(text), 'queue')
+  const message = deps.prepareMessage === undefined
+    ? deps.createMessage(text)
+    : await deps.prepareMessage(deps.scope, text)
+  if (!deps.isScopeCurrent(deps.scope)) {
+    deps.notify(deps.staleNotice(), 'error')
+    return 'stale'
+  }
+  if (deps.fence?.() === true) {
+    deps.notify(deps.fenceNotice !== undefined ? deps.fenceNotice() : deps.staleNotice(), 'info')
+    return 'stale'
+  }
+  const outcome = await deps.writer.prompt(deps.scope.sessionId, message, 'queue')
   if (outcome.kind === 'committed') {
     deps.onSubmitted()
     return 'ok'
@@ -135,6 +97,7 @@ async function submitShellResultCore(
   deps.notify(outcome.kind === 'rejected' ? outcome.error.message : outcome.reason, 'error')
   return 'stale'
 }
+
 
 /**
  * Classify one `!` line: 'context' submits the command+output to the

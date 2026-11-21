@@ -25,8 +25,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { Context, RegistryService, symbols, type Fiber } from '@deepseek-ai/cordis'
-import type { InProcessHostCarrier } from '../../src/app/remote/host-runtime.ts'
-import { createRemoteHostRuntime } from '../../src/app/remote/host-runtime.ts'
+import type { InProcessHostCarrier } from '../support/m3-inprocess/host-runtime.ts'
+import { createRemoteHostRuntime } from '../support/m3-inprocess/host-runtime.ts'
 import {
   loadOfficialClientModulesOnce,
   mountRemoteClientDomains,

@@ -139,7 +139,11 @@ test('svg admission: every measured hostile shape is refused', () => {
     hugeViewBox: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100000000 100000000"><rect width="100" height="100"/></svg>',
     pxBomb: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="9999999999px" height="9999999999px"/>',
     noNamespace: '<svg viewBox="0 0 32 32"><rect width="32" height="32"/></svg>',
-    currentColor: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect fill="currentColor"/></svg>',
+    // PR-4B admits an EXACT `currentColor` paint (fill/stroke/stop-color) — the
+    // hostile `currentColor` entry became the admitted static case in the
+    // paint-subset test below. Mixed tokens and non-paint fields stay hostile.
+    mixedCurrentColor: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect fill="url(#g) currentColor"/></svg>',
+    currentColorOnClipPath: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect clip-path="currentColor"/></svg>',
   }
   for (const [name, source] of Object.entries(cases)) {
     const verdict = admitSvg(source)
@@ -204,6 +208,12 @@ test('svg admission: percentages and theme-paint keywords are value-bounded', ()
     '<rect fill="VAR(--fg)" width="8" height="8"/>',
   ]) {
     const verdict = admitSvg(base(body))
+    if (body.includes('currentcolor') || body.includes('CurrentColor')) {
+      // PR-4B: an EXACT currentColor paint value is the admitted static case;
+      // its evaluation source is the document's own inherited `color`.
+      assert.equal(verdict.ok, true, `${body} is now admitted: ${JSON.stringify(verdict)}`)
+      continue
+    }
     assert.equal(verdict.ok, false, `${body} must be refused: ${JSON.stringify(verdict)}`)
   }
   const inheritedFont = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2048 64" font-size="1000"><rect width="100em" height="64"/></svg>'
@@ -266,6 +276,83 @@ test('svg admission: percentages and theme-paint keywords are value-bounded', ()
   assert.equal(admitSvg(base('<rect width="100px" height="8"/>')).ok, true)
   assert.equal(admitSvg(base('<rect width="10mm" height="8"/>')).ok, true)
   assert.equal(admitSvg(base('<rect width="1in" height="8"/>')).ok, true)
+})
+
+// ── PR-4B: bounded static paint attributes ─────────────────────────────────
+
+test('svg admission: the four new static paint attributes are admitted and bounded', () => {
+  const base = (body: string): string => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32">${body}</svg>`
+  // Positive: each new attribute individually.
+  for (const body of [
+    '<path d="M0 0 L64 32" stroke="#000" stroke-dasharray="4 2"/>',
+    '<path d="M0 0 L64 32" stroke-dasharray="none"/>',
+    '<path d="M0 0 L64 32" stroke-dasharray="2,4, 8"/>',
+    '<path d="M0 0 L64 32" stroke-dasharray="0 0"/>',
+    '<path d="M0 0 L64 32" stroke-dasharray="1.5"/>',
+    '<path d="M0 0 L64 32" stroke-dashoffset="1.5"/>',
+    '<path d="M0 0 L64 32" stroke-dashoffset="-3.5"/>',
+    '<path d="M0 0 L64 32" stroke-miterlimit="8"/>',
+    '<path d="M0 0 L64 32" stroke-miterlimit="1"/>',
+    '<path d="M0 0 L64 32" stroke-miterlimit="1000"/>',
+    '<g color="#123456"><rect width="8" height="8" fill="currentColor"/></g>',
+    '<g color="red"><rect width="8" height="8" stroke="currentColor"/></g>',
+    '<g color="rgb(1,2,3)"><rect width="8" height="8" fill="CurrentColor"/></g>',
+    '<g color="#aabbcc"><stop offset="0" stop-color="currentColor"/></g>',
+  ]) {
+    const verdict = admitSvg(base(body))
+    assert.equal(verdict.ok, true, `expected admission: ${body}: ${JSON.stringify(verdict)}`)
+  }
+  // The 32-term dash list is the exact boundary; 33 terms are refused.
+  const dash32 = Array.from({ length: 32 }, (_, i) => i + 1).join(' ')
+  const dash33 = Array.from({ length: 33 }, (_, i) => i + 1).join(' ')
+  assert.equal(admitSvg(base(`<path d="M0 0 L64 32" stroke-dasharray="${dash32}"/>`)).ok, true)
+  assert.equal(admitSvg(base(`<path d="M0 0 L64 32" stroke-dasharray="${dash33}"/>`)).ok, false)
+  // Negative: every measured hostile value for the new attributes.
+  for (const body of [
+    '<path d="M0 0 L64 32" stroke-dasharray="100em 2"/>',
+    '<path d="M0 0 L64 32" stroke-dasharray="50% 2"/>',
+    '<path d="M0 0 L64 32" stroke-dasharray="1e3 2"/>',
+    '<path d="M0 0 L64 32" stroke-dasharray="calc(2)"/>',
+    '<path d="M0 0 L64 32" stroke-dasharray="-4 2"/>',
+    '<path d="M0 0 L64 32" stroke-dasharray="100001"/>',
+    '<path d="M0 0 L64 32" stroke-dashoffset="var(--x)"/>',
+    '<path d="M0 0 L64 32" stroke-dashoffset="2px"/>',
+    '<path d="M0 0 L64 32" stroke-dashoffset="100001"/>',
+    '<path d="M0 0 L64 32" stroke-miterlimit="0.5"/>',
+    '<path d="M0 0 L64 32" stroke-miterlimit="1001"/>',
+    '<path d="M0 0 L64 32" stroke-miterlimit="-1"/>',
+    '<rect color="currentColor" width="8" height="8"/>',
+    '<rect color="inherit" width="8" height="8"/>',
+    '<rect color="none" width="8" height="8"/>',
+    '<rect color="var(--x)" width="8" height="8"/>',
+    '<rect color="url(#x)" width="8" height="8"/>',
+    '<rect color="notacolor!" width="8" height="8"/>',
+    // Mixed currentColor tokens stay hostile on the value fields.
+    '<rect fill="url(#g) currentColor" width="8" height="8"/>',
+    '<rect fill="currentColor blue" width="8" height="8"/>',
+    // Non-value paint fields keep the strict subset.
+    '<rect clip-path="currentColor" width="8" height="8"/>',
+    '<rect mask="currentColor" width="8" height="8"/>',
+  ]) {
+    const verdict = admitSvg(base(body))
+    assert.equal(verdict.ok, false, `${body} must be refused: ${JSON.stringify(verdict)}`)
+  }
+})
+
+test('svg authorization: exact currentColor paint with a static inherited color round-trips', () => {
+  const source = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32">'
+    + '<g color="#123456"><rect width="64" height="32" fill="currentColor"/></g></svg>'
+  const args = { title: 'Ink', description: 'desc', svg: source }
+  const fact = svgFactFromArgs(args)
+  assert.equal(fact.digest, svgDigest(source))
+  const auth = authorizeSvg(JSON.stringify(args), svgContentBlocks(fact), 'ok')
+  assert.equal(auth.state, 'ready', JSON.stringify(auth))
+  // The authorization consumes the EXACT original bytes; a rewritten document
+  // (color resolved into fill) is a different digest and never authorizes.
+  const rewritten = source.replace('fill="currentColor"', 'fill="#123456"')
+  const other = svgFactFromArgs({ title: 'Ink', description: 'desc', svg: rewritten })
+  const mismatch = authorizeSvg(JSON.stringify(args), svgContentBlocks(other), 'ok')
+  assert.equal(mismatch.state, 'text')
 })
 
 test('the final fact title is carried by the display projections, not just the call args', () => {

@@ -25,6 +25,10 @@
  *   credentials-backed provider; `saveSelection` is a no-op. With
  *   `profileDefault`, this substitution is removed: the real default service,
  *   Loader profile row, ConfigEditor and SettingsForms are mounted instead
+ * - TEST STAND-IN: with `reasoningFixtureModel`, the scripted exact model
+ *   advertises `low`/`high` reasoning metadata (default `low`) so the official
+ *   LLM accepts a REAL explicit effort for the request/header qualification.
+ *   The endpoint, the session and the Agent loop stay real
  * - the empty `fileReferences` stand-in (the workspace index)
  * - the scripted tty in the default mode; `externalTern` uses Tern-owned stdio
  *
@@ -42,6 +46,7 @@
 import { mkdirSync } from 'node:fs'
 import { SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
@@ -61,10 +66,13 @@ import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import * as toolJobs from '@deepseek-ai/dsh-tool-jobs'
-import { LlmAdapter, ToolCallId, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { LlmAdapter, ReasoningEffortId, ToolCallId, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { WriteOutcome } from '../../src/runtime/session-writer-port.ts'
 import { DirectSessionWriter } from '../../src/runtime/direct/session-writer-direct.ts'
 import SkillRegistry from '@deepseek-ai/dsh-skill'
+import TokenMeter from '@deepseek-ai/dsh-token-meter'
+import { BasicCompactionEngine } from '@deepseek-ai/dsh-compaction-basic'
+import * as CommandCompact from '@deepseek-ai/dsh-command-compact'
 import { apply as applyRunner, Config as TuiConfigSchema } from '../../src/index.ts'
 import { apply as applyExtensionHost, PI_TUI_EXTENSIONS_SERVICE } from '../../src/extensions.ts'
 import { apply as applyBuiltins } from '../../src/builtins.ts'
@@ -89,6 +97,7 @@ export class ScriptedStreamingAdapter extends LlmAdapter {
   /** Every model request that observed its caller's ABORT (the authoritative
    *  fact that an existing cancellation path reached the live request). */
   readonly aborts: string[] = []
+  readonly emittedReasoningChunks: Array<{ readonly step: number; readonly text: string }> = []
   /** How many model requests were issued (the skill path issues one too). */
   calls = 0
   constructor(deltas: readonly string[], hold?: () => Promise<void>) {
@@ -124,6 +133,89 @@ export class ScriptedStreamingAdapter extends LlmAdapter {
     yield { type: 'block-start', index: 0, blockType: 'text' }
     for (const delta of this.deltas) yield { type: 'text-delta', index: 0, text: delta }
     yield { type: 'block-end', index: 0, block: { type: 'text', text: this.deltas.join('') } }
+  }
+}
+
+/** One real model step in a scripted Direct qualification sequence. An optional
+ *  `toolCall` is emitted as a native DSH call; a text-only step becomes a
+ *  durable Assistant intermediate row between surrounding Work spans. */
+interface ScriptedModelStep {
+  readonly text: string
+  readonly toolCall?: { readonly callId: string; readonly name: string; readonly arguments: string }
+}
+
+/** The adapter with a finite sequence of real model steps (the production
+ *  Agent loop executes every Tool call), followed by its ordinary final text. */
+class ScriptedToolStepSequenceAdapter extends ScriptedStreamingAdapter {
+  private readonly scriptedSteps: readonly ScriptedModelStep[]
+  private readonly holdBeforeStep: ((stepIndex: number, signal?: AbortSignal) => Promise<void>) | undefined
+  private readonly holdToolArguments: ((stepIndex: number, signal?: AbortSignal) => Promise<void>) | undefined
+  private readonly scriptedReasoningDeltas: readonly string[] | undefined
+  private readonly holdReasoningDelta: ((stepIndex: number, deltaIndex: number, signal?: AbortSignal) => Promise<void>) | undefined
+  private stepIndex = 0
+
+  constructor(
+    deltas: readonly string[],
+    steps: readonly ScriptedModelStep[],
+    hold?: () => Promise<void>,
+    holdBeforeStep?: (stepIndex: number, signal?: AbortSignal) => Promise<void>,
+    holdToolArguments?: (stepIndex: number, signal?: AbortSignal) => Promise<void>,
+    scriptedReasoningDeltas?: readonly string[],
+    holdReasoningDelta?: (stepIndex: number, deltaIndex: number, signal?: AbortSignal) => Promise<void>,
+  ) {
+    super(deltas, hold)
+    this.scriptedSteps = steps
+    this.holdBeforeStep = holdBeforeStep
+    this.holdToolArguments = holdToolArguments
+    this.scriptedReasoningDeltas = scriptedReasoningDeltas
+    this.holdReasoningDelta = holdReasoningDelta
+  }
+
+  override async *stream(options: { readonly signal?: AbortSignal }): AsyncIterable<StreamChunk> {
+    const scripted = this.scriptedSteps[this.stepIndex]
+    if (scripted === undefined) {
+      yield* super.stream(options)
+      return
+    }
+    const stepIndex = this.stepIndex
+    this.calls += 1
+    await this.holdBeforeStep?.(stepIndex, options.signal)
+    this.stepIndex += 1
+    const { text, toolCall } = scripted
+    const reasoning = this.scriptedReasoningDeltas
+    const textIndex = reasoning === undefined ? 0 : 1
+    const toolCallIndex = reasoning === undefined ? 1 : 2
+    if (reasoning !== undefined) {
+      yield { type: 'block-start', index: 0, blockType: 'reasoning' }
+      for (const [deltaIndex, delta] of reasoning.entries()) {
+        await this.holdReasoningDelta?.(stepIndex, deltaIndex, options.signal)
+        this.emittedReasoningChunks.push({ step: stepIndex, text: delta })
+        yield { type: 'reasoning-delta', index: 0, text: delta }
+      }
+      yield { type: 'block-end', index: 0, block: { type: 'reasoning', text: reasoning.join('') } }
+    }
+    yield { type: 'block-start', index: textIndex, blockType: 'text' }
+    yield { type: 'text-delta', index: textIndex, text }
+    yield { type: 'block-end', index: textIndex, block: { type: 'text', text } }
+    if (toolCall === undefined) {
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
+    yield { type: 'block-start', index: toolCallIndex, blockType: 'tool-call' }
+    yield {
+      type: 'tool-call-delta',
+      index: toolCallIndex,
+      id: ToolCallId(toolCall.callId),
+      name: toolCall.name,
+      argumentsDelta: toolCall.arguments,
+    }
+    await this.holdToolArguments?.(stepIndex, options.signal)
+    yield {
+      type: 'block-end',
+      index: toolCallIndex,
+      block: { type: 'tool-call', id: ToolCallId(toolCall.callId), name: toolCall.name, arguments: toolCall.arguments },
+    }
+    yield { type: 'finish', reason: { kind: 'tool-calls' } }
   }
 }
 
@@ -168,6 +260,42 @@ class ScriptedToolCallAdapter extends ScriptedStreamingAdapter {
   }
 }
 
+/**
+ * The REAL official compaction engine with the ONE controlled summarizer used
+ * by the manual-`/compact` ordering cases. `summarize` runs only after the
+ * production transaction has appended its durable `compaction/start` marker, so
+ * holding it here holds an OPEN official maintenance — never a fabricated
+ * "isCompacting" flag. Everything around it (selection, markers, maintenance
+ * claim, command/Inbox semantics, persistence) stays real.
+ */
+class FixtureCompactionEngine extends BasicCompactionEngine {
+  /** Held before the summary result is produced. */
+  gate: Promise<void> = Promise.resolve()
+  /** How many times a real transaction reached summarization. */
+  entries = 0
+
+  override async summarize(
+    ...args: Parameters<BasicCompactionEngine['summarize']>
+  ): Promise<Awaited<ReturnType<BasicCompactionEngine['summarize']>>> {
+    void args
+    this.entries += 1
+    await this.gate
+    return {
+      summary: [{ type: 'text', text: 'fixture checkpoint: condensed older history' }],
+      provider: DIRECT_TSP_PROVIDER,
+      model: DIRECT_TSP_MODEL,
+    }
+  }
+}
+
+/** The controllable summarizer of the fixture-mounted official engine. */
+export interface FixtureOfficialCompact {
+  /** How many real transactions reached summarization. */
+  summarizeEntries(): number
+  /** Hold summarization until this gate resolves (always keep a fallback release). */
+  holdSummary(gate: Promise<void>): void
+}
+
 export interface DirectTspFixture {
   readonly pane: TspPane
   readonly ctx: Context
@@ -178,6 +306,8 @@ export interface DirectTspFixture {
   cancellations(): number
   /** How many model requests the scripted adapter served. */
   modelCalls(): number
+  /** Actual reasoning-delta chunks emitted by configured sequence steps. */
+  reasoningChunks(): readonly { readonly step: number; readonly text: string }[]
   /**
    * Attach a ONE-TO-ONE recorder to the PRODUCTION-CREATED Direct session
    * writer's `prompt` (the review's exact-once qualification). The patch
@@ -205,8 +335,14 @@ export interface DirectTspFixture {
     readonly message: unknown
     readonly agentStatus: string
     readonly outcome: WriteOutcome
+    readonly sessionEvents: () => readonly { readonly type: string; readonly data?: unknown }[]
   }) => void): { readonly calls: () => number; readonly detach: () => void }
   settle(): Promise<void>
+  /** Release the parked mount Workspace preflight (only with
+   *  `holdWorkspacePreflight`). */
+  readonly releaseWorkspacePreflight?: () => void
+  /** The fixture-mounted official `/compact` engine (only with `officialCompact`). */
+  readonly officialCompact?: FixtureOfficialCompact
 }
 
 /** Wait a fixed slice so the renderer/application frames can settle. */
@@ -262,6 +398,23 @@ export interface DirectTspFixtureOptions {
   /** Script ONE real model tool call on the first stream (the production Agent
    *  loop executes it), then continue with the scripted text. */
   readonly scriptedToolCall?: { readonly callId: string; readonly name: string; readonly arguments: string }
+  /** Script several real model tool calls on consecutive Agent requests; each
+   *  request's optional text becomes an official Assistant message between
+   *  canonical Work spans. */
+  readonly scriptedToolCalls?: readonly ScriptedModelStep[]
+  /** Reasoning deltas emitted in-order for every configured sequence step. */
+  readonly scriptedReasoningDeltas?: readonly string[]
+  /** Hold one reasoning delta before delivery for a source-to-UI live witness. */
+  readonly holdScriptedReasoningDelta?: (stepIndex: number, deltaIndex: number, signal?: AbortSignal) => Promise<void>
+  /** A narrow, test-only observation barrier before one sequence index; when
+   *  supplied the callback owns the release/abort race for that model step. */
+  readonly holdScriptedToolStep?: (stepIndex: number, signal?: AbortSignal) => Promise<void>
+  /** TEST-ONLY race hook: register one official Workspace at `anchorDir`
+   *  before the TUI mounts, then park the NEXT `workspace.create` until the
+   *  caller releases it (the sessionless mount preflight). */
+  readonly holdWorkspacePreflight?: boolean
+  /** Hold one native tool-call argument stream before its authoritative block end. */
+  readonly holdScriptedToolCallArguments?: (stepIndex: number, signal?: AbortSignal) => Promise<void>
   /** Extra TUI plugin config (e.g. `{ busyEnter: 'steer' }`) — the SAME
    *  volatile authority `applyRunner` reads, so the busy preference under
    *  test is the real configured one. */
@@ -291,8 +444,18 @@ export interface DirectTspFixtureOptions {
   readonly modelPicker?: boolean
   /** Advertise the `el` kind so the native composer action row mounts. */
   readonly composerActions?: boolean
+  /** TSP-7 PR-G: advertise the native `input` kind the composer's quick
+   *  Model / Effort menu searches through. */
+  readonly modelQuick?: boolean
   readonly presetPicker?: boolean
   readonly sessionBrowser?: boolean
+  /**
+   * TSP I-E: advertise the exact kinds and features the native `Ctrl+R` History
+   * card really paints (`input` query, `el` buttons, two native `scroll`
+   * containers, plus the `styles` sheet). A pane that does not advertise them
+   * must state the card is unavailable, so the negative case omits this.
+   */
+  readonly historySearch?: boolean
   /**
    * Advertise the NATIVE IMAGE capability on the scripted pane (the `image`
    * kind + the `blobs` feature): a pane that does not advertise them can
@@ -307,6 +470,9 @@ export interface DirectTspFixtureOptions {
   /** Replace the historical default stand-in with the official isolated
    * profile/configuration plane for Model persistence qualification. */
   readonly profileDefault?: { readonly provider: string; readonly model: string; readonly reasoningEffort?: string }
+  /** TEST STAND-IN: advertise `low`/`high` reasoning on the scripted exact model
+   *  so the official LLM accepts a real explicit effort (default: absent). */
+  readonly reasoningFixtureModel?: true
   /** Extra agent presets registered into the REAL registry beside the
    *  fixture's own (a second real switch target). */
   readonly presets?: ReadonlyArray<{ readonly id: string; readonly name?: string; readonly description?: string }>
@@ -377,6 +543,8 @@ export interface DirectTspFixtureOptions {
    * `/logout` truthfully instead of reporting success).
    */
   readonly withoutCredentials?: boolean
+  /** Mount the official PTC tool executor with the supplied qualification runtime. */
+  readonly ptcMode?: { readonly runtime: unknown }
   /**
    * Mount the official `@deepseek-ai/dsh-working-directory` Session directory
    * owner (the same row the shipped base layer provides) through the testkit's
@@ -391,6 +559,13 @@ export interface DirectTspFixtureOptions {
    * (the same physical-terminal stand-in every PiTui runner suite uses).
    */
   readonly renderer?: 'tsp' | 'pi-tui'
+  /**
+   * Mount the OFFICIAL manual-compaction chain into the real Host composition:
+   * the official `TokenMeter`, the official `BasicCompactionEngine` (with the
+   * fixture's gated summarizer) and the official `dsh-command-compact`
+   * definition. Off by default; every other fixture assembly is unchanged.
+   */
+  readonly officialCompact?: true
 }
 
 export interface DirectTspExternalFixture extends Omit<DirectTspFixture, 'pane'> {}
@@ -427,6 +602,8 @@ export async function createDirectTspFixture(
         nativeImages: options.nativeImages,
         nativeChart: options.nativeChart,
         composerActions: options.composerActions,
+        modelQuick: options.modelQuick,
+        historySearch: options.historySearch,
       })
   // OWNERSHIP, not success-contingency: scripted mode replaces the PROCESS tty
   // and clears five env vars; external-Tern and PiTui modes must leave the
@@ -458,6 +635,8 @@ export async function createDirectTspFixture(
   /** Disposers of the pre-boot genuine Host commands (see the interface). */
   const hostCommandDisposers: Array<() => void> = []
   let persistenceFiber: Fiber | undefined
+  let releaseWorkspacePreflight: (() => void) | undefined
+  let officialCompact: FixtureOfficialCompact | undefined
   let settlement: Promise<void> | undefined
   const settle = (): Promise<void> => {
     settlement ??= (async () => {
@@ -477,15 +656,51 @@ export async function createDirectTspFixture(
   }
   try {
   ctx = new Context()
+  // Production `boot()` gives the root context a module-resolution base before
+  // mounting Loader. The profile compatibility preflight refuses a composition
+  // that carries a `profileContext` without one, so the reproduction must
+  // supply it exactly like the real launcher does.
+  ctx.baseUrl = pathToFileURL(join(workRoot, 'profile')).href + '/'
   ownCleanup(() => ctx.fiber.dispose())
 
+  if (options.ptcMode !== undefined) ctx.provide('ptcRuntime', options.ptcMode.runtime as never)
   await ctx.plugin(TypertRegistry)
-  await mountAgentLoopTestDependencies(ctx, options.workingDirectory === true ? { workingDirectory: true } : {})
+  await mountAgentLoopTestDependencies(ctx, {
+    ...(options.workingDirectory === true || options.ptcMode !== undefined ? { workingDirectory: true } : {}),
+    ...(options.ptcMode !== undefined ? { tools: { mode: 'ptc' as const } } : {}),
+  })
   persistenceFiber = await ctx.plugin(JsonlSessionPersistence, { root: join(workRoot, 'persistence') })
   await mountAgentLoopTestHarness(ctx)
-  llmAdapter = options.scriptedToolCall === undefined
-    ? new ScriptedStreamingAdapter(options.deltas ?? ['B2', '-DIRECT', '-OK'], options.streamHold)
-    : new ScriptedToolCallAdapter(options.deltas ?? ['B2', '-DIRECT', '-OK'], options.scriptedToolCall, options.streamHold)
+  llmAdapter = options.scriptedToolCalls !== undefined
+    ? new ScriptedToolStepSequenceAdapter(
+      options.deltas ?? ['B2', '-DIRECT', '-OK'],
+      options.scriptedToolCalls,
+      options.streamHold,
+      options.holdScriptedToolStep,
+      options.holdScriptedToolCallArguments,
+      options.scriptedReasoningDeltas,
+      options.holdScriptedReasoningDelta,
+    )
+    : options.scriptedToolCall === undefined
+      ? new ScriptedStreamingAdapter(options.deltas ?? ['B2', '-DIRECT', '-OK'], options.streamHold)
+      : new ScriptedToolCallAdapter(options.deltas ?? ['B2', '-DIRECT', '-OK'], options.scriptedToolCall, options.streamHold)
+  if (options.reasoningFixtureModel === true) {
+    // TEST STAND-IN: exact-model reasoning metadata only. The official LLM rejects
+    // an explicit effort the resolved model does not advertise, so the endpoint's
+    // own advertised capability — not a request shortcut — must carry `low`/`high`.
+    llmAdapter.resolveModel = async (provider, model) => ({
+      provider,
+      id: model,
+      name: model,
+      reasoning: {
+        efforts: [
+          { id: ReasoningEffortId('low'), name: 'Low' },
+          { id: ReasoningEffortId('high'), name: 'High' },
+        ],
+        defaultEffort: ReasoningEffortId('low'),
+      },
+    })
+  }
   ctx.llm.registerAdapter([DIRECT_TSP_PROVIDER], llmAdapter)
   await ctx.plugin(CommandRuntime)
   for (const command of options.hostCommands ?? []) {
@@ -495,6 +710,22 @@ export async function createDirectTspFixture(
       ...(command.definitionId === undefined ? {} : { definitionId: command.definitionId as never }),
       handler: (invocation) => command.handler({ rawInput: invocation.rawInput }) as never,
     }))
+  }
+  if (options.officialCompact === true) {
+    // The official manual-compaction chain, mounted exactly where the shipped
+    // bundle mounts it: the engine provides `compaction`, the official command
+    // plugin registers `/compact` over `commands` + `compaction`.
+    await ctx.plugin(TokenMeter)
+    const engine = new FixtureCompactionEngine(ctx, { auto: false } as never)
+    await ctx.plugin({
+      name: CommandCompact.name,
+      inject: CommandCompact.inject,
+      apply: CommandCompact.apply,
+    } as never, undefined as never)
+    officialCompact = {
+      summarizeEntries: () => engine.entries,
+      holdSummary: (gate) => { engine.gate = gate },
+    }
   }
   if (options.profileDefault === undefined) {
     ctx.provide('agentDefaultModel', {
@@ -546,6 +777,24 @@ export async function createDirectTspFixture(
   await ctx.plugin(StorageJson, { root: join(workRoot, 'storages') })
   await ctx.plugin(StorageDomain, { backend: 'json' })
   await ctx.plugin(WorkspaceRegistry)
+  if (options.holdWorkspacePreflight === true) {
+    const registry = ctx.get('workspaceRegistry') as unknown as { create(path: string): Promise<unknown> }
+    // The official Folder exists BEFORE the gate so the Browser has something
+    // to select while the mount preflight is still parked.
+    await registry.create(anchorDir)
+    let release!: () => void
+    const parked = new Promise<void>(resolve => { release = resolve })
+    const originalCreate = registry.create.bind(registry)
+    let held = false
+    registry.create = async (path: string) => {
+      if (!held) {
+        held = true
+        await parked
+      }
+      return originalCreate(path)
+    }
+    releaseWorkspacePreflight = release
+  }
   if (options.withoutCredentials !== true) {
     await ctx.plugin(LocalCredentials, { path: join(workRoot, '.credentials.yaml'), watch: false })
   }
@@ -690,10 +939,11 @@ export async function createDirectTspFixture(
     const { default: SubagentRuntime } = await import('@deepseek-ai/dsh-subagent')
     await ctx.plugin(SubagentRuntime as never, { maxDepth: 3 } as never)
   }
-  const runnerFiber = await ctx.plugin(pluginCtx => applyRunner(
-    pluginCtx,
-    TuiConfigSchema({ fullscreen: 'off', ...options.tuiConfig } as never),
-  ))
+  const tuiConfig = TuiConfigSchema({ fullscreen: 'off', ...options.tuiConfig } as never)
+  // The canonical preferences row publishes the live references the Direct
+  // runner consumes (the legacy schema object is kept only for sessionId).
+  ctx.provide('piTuiPreferences', tuiConfig)
+  const runnerFiber = await ctx.plugin(pluginCtx => applyRunner(pluginCtx, tuiConfig))
   fibers.push(runnerFiber, contributionFiber, builtinsFiber, extensionFiber)
 
   life.defer(() => settle())
@@ -722,22 +972,38 @@ export async function createDirectTspFixture(
     readonly message: unknown
     readonly agentStatus: string
     readonly outcome: WriteOutcome
+    readonly sessionEvents: () => readonly { readonly type: string; readonly data?: unknown }[]
   }) => void): { readonly calls: () => number; readonly detach: () => void } => {
     const prototype = DirectSessionWriter.prototype as unknown as {
-      prompt(this: DirectSessionWriter, sessionId: string, message: unknown, mode: 'queue' | 'steer'): Promise<WriteOutcome>
+      prompt(
+        this: DirectSessionWriter,
+        sessionId: string,
+        message: unknown,
+        mode: 'queue' | 'steer',
+        options?: { readonly onAccepted?: () => void },
+      ): Promise<WriteOutcome>
     }
     const originalPrompt = prototype.prompt
     const settled: unknown[] = []
-    prototype.prompt = async function (this: DirectSessionWriter, sessionId, message, mode) {
-      const outcome = await originalPrompt.call(this, sessionId, message, mode)
+    prototype.prompt = async function (this: DirectSessionWriter, sessionId, message, mode, options) {
+      // PR2: the recorder TRANSPARENTLY forwards the Host-acceptance option —
+      // dropping it would make every recorded prompt settle as "committed
+      // without acceptance proof" in the application.
+      const outcome = await originalPrompt.call(this, sessionId, message, mode, options)
       // The record — and the count — exist only AFTER the write settles: a
       // caller waiting on `calls()` can never observe an entry whose settled
       // record is still missing (the round-4 fake-green: the busy guard once
       // matched the warm-up's committed record while the real second write
       // was still pending and later rejected).
       settled.push(undefined)
-      const agent = (this as unknown as { agentFor(id: string): { session: { id: string }; status: string } | undefined }).agentFor(sessionId)
-      record({ sessionId, mode, message, agentStatus: agent?.status ?? 'unresolved', outcome })
+      const agent = (this as unknown as {
+        agentFor(id: string): {
+          session: { readonly id: string; snapshotEvents(): readonly { readonly type: string; readonly data?: unknown }[] }
+          status: string
+        } | undefined
+      }).agentFor(sessionId)
+      const sessionEvents = (): readonly { readonly type: string; readonly data?: unknown }[] => agent?.session.snapshotEvents() ?? []
+      record({ sessionId, mode, message, agentStatus: agent?.status ?? 'unresolved', outcome, sessionEvents })
       return outcome
     }
     return {
@@ -752,8 +1018,11 @@ export async function createDirectTspFixture(
     hostCommandDisposers,
     cancellations: () => llmAdapter.aborts.length,
     modelCalls: () => llmAdapter.calls,
+    reasoningChunks: () => [...llmAdapter.emittedReasoningChunks],
     recordPrompts,
     settle,
+    ...(releaseWorkspacePreflight === undefined ? {} : { releaseWorkspacePreflight }),
+    ...(officialCompact === undefined ? {} : { officialCompact }),
   }
   return pane === undefined ? fixture : { ...fixture, pane }
 }

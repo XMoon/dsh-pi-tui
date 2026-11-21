@@ -158,8 +158,7 @@ release date `YYYY-MM-DD`:
    promotion path it is usually already reserved in Phase A, so this step is
    a consistency confirmation, not a fresh edit.
 2. Update `src/dsh-compat-matrix.json`, the single source for the DSH/TUI
-   pairing shared by `src/startup.ts`, the release tooling and the
-   installation-doc gate. When the shipped DSH target changes, update `current`
+   pairing shared by `src/startup.ts` and the release tooling. When the shipped DSH target changes, update `current`
    (`since`, `requires`, `upgradeDsh`, `upgradeCommand`, `guidance`) and append
    or adjust the `matrix` row for the new DSH line (`dshFrom`, `tui`, and the
    covered `versions`); a row without `tui` means no released TUI supports that
@@ -244,13 +243,17 @@ package version, or installation guidance is incomplete; do not bypass it.
 The repository has ONE local release gate:
 
 ```sh
-pnpm verify:release
+mise run verify:release
 ```
 
 It runs the fork typecheck/tests, the benchmark typecheck, the tmux and
-tooling suites, the installation-doc / pi-divergence / naming /
+tooling suites, the compatibility / pi-divergence / naming /
 session-event / boundary / architecture / production-reads / keybinding
 gates, the production dependency audit, and finally `pnpm pack:release`.
+The pi component compatibility contract runs inside the release product
+suite (`test/extension/pi-component-compat.test.ts`), so the release path
+skips that one gate in `check:gates` instead of executing the same test
+twice.
 
 `pack:release` is an explicit local ORCHESTRATOR, not a lifecycle hook:
 `clean` -> `clean:fork` -> `build` -> `typecheck:bundle` -> `test:product`
@@ -259,6 +262,15 @@ pack entry and is strictly `pnpm pack --config.ignore-scripts=true`: it
 never builds, tests or runs smokes. `smoke:release` runs the eight
 packed-artifact smokes against that exact tarball. Do not treat source tests
 alone as sufficient.
+
+For everyday pre-push work, run `mise run check` instead. It builds the
+vendored fork, runs the typechecks and tooling suite, and executes the shared
+`pnpm check:gates` preflight; the single gate registry, with each gate
+classified `local-preflight` / `ci-only` / `on-demand`, lives in
+`scripts/run-quality-gates.mjs` and is also what CI Source checks and
+`verify:release` run. It is a preflight, not a release claim: a green `check`
+does not authorize skipping `verify:release`, the packed-artifact smokes, or
+the CI qualification before tagging.
 
 Git push has no automatic local hook. Run `verify:release` explicitly before
 tagging; the `nofork` shortcut no longer exists.
@@ -274,14 +286,28 @@ the startup handshake. There is no second pack route and no
 content-equivalence proof: the candidate's identity is its SHA-256,
 re-proved at every consumer. `scripts/ci-verdict.mjs` is the final gate:
 every required job must be exactly `success`, the mode-dependent jobs must
-show the status their mode requires, and the split-process job must be
-exactly `success` on an npm release tag and exactly `skipped` on PR/branch
-refs (Source Mode always requires `skipped`). The Linux split-process smoke
-runs automatically ONLY on an npm release tag; ordinary PR and branch CI
-reports it as `skipped`. Host/Client split-process development work must run
-`pnpm smoke:split-process -- <candidate>` manually under its task plan against
-the actual candidate tarball and report the package SHA, DSH version, command,
-and PASS/FAIL (or `NOT_RUN`).
+show the status their mode requires, and the split-process job must be exactly
+`success` on npm release-tag pushes, exactly `success` on an explicitly opted-in
+npm `workflow_dispatch` on any `refs/heads/...` branch, and exactly `skipped`
+on ordinary PR/branch runs and Source Mode. The Linux split-process smoke is
+required for tag publication. To exercise that exact lane against a branch's
+current candidate before tagging, use GitHub Actions **Run workflow** on that
+npm-mode remote branch and enable `Run full Host/Client Split qualification on
+the selected npm-mode branch`. This manual input works on any npm-mode
+`refs/heads/...` branch; the verdict then requires the Split job to succeed.
+Leaving it disabled preserves the normal status (`skipped`), and a Source Mode
+or non-branch ref request fails explicitly. A manual run qualifies only the
+candidate SHA of that run; it does not replace any gate on the release-tag
+candidate or authorize publication. When the Split smoke writes its bounded
+failure report, the job uploads `failure.json` as the `split-process-failure`
+artifact; it now includes the real error message/stack (Web credential values
+redacted). Download it before considering a rerun:
+
+```sh
+gh run download <RUN_ID> --name split-process-failure --dir <destination>
+```
+
+Raw PTY logs and credentials are not included in that artifact.
 
 A failed run is recovered without re-testing the jobs that already passed:
 GitHub's "Re-run failed jobs" (`gh run rerun <RUN_ID> --failed`) keeps the
@@ -300,8 +326,12 @@ For CI-equivalent dependency resolution, especially after dependency changes,
 run the frozen install before the verification gate:
 
 ```sh
-pnpm install --frozen-lockfile
+mise install --locked
+mise run setup
 ```
+
+For an npm-mode worktree, `mise run setup` performs the frozen pnpm install.
+Source Mode requires the separate `source:bootstrap` procedure.
 
 After the gate, verify that the package and lockfile are correct:
 

@@ -98,6 +98,43 @@ try {
   }
   restoreAgentsResume = () => { agents.resume = originalResume }
 
+  // The production Workspace contract: the browser's folder tree comes from the
+  // official `workspaceRegistry`. This fixture's blank persisted Sessions are
+  // written after the registry's one-time history bootstrap, so they carry no
+  // membership yet; register the fixture directory through the SAME official
+  // registry API a real Host uses and attach the two persisted Sessions, so the
+  // Browser sees one real official folder instead of an Unassigned bucket.
+  const registry = fixture.ctx.get('workspaceRegistry') as unknown as {
+    list(): ReadonlyArray<{
+      readonly id: string
+      readonly title: string
+      readonly path: string
+      readonly sessionIds: readonly string[]
+      attachSession(sessionId: never): Promise<void>
+    }>
+    create(path: string, title?: string): Promise<{
+      readonly id: string
+      readonly title: string
+      readonly path: string
+      readonly sessionIds: readonly string[]
+      attachSession(sessionId: never): Promise<void>
+    }>
+  }
+  const existing = registry.list()[0]
+  const workspace = existing ?? await registry.create(workRoot, 'Direct')
+  for (const sessionId of [sourceId, targetId]) {
+    if (!workspace.sessionIds.includes(sessionId)) await workspace.attachSession(sessionId as never)
+  }
+  note({
+    kind: 'workspace.ready',
+    run,
+    workspaceId: String(workspace.id),
+    title: workspace.title,
+    path: workspace.path,
+    sessionIds: workspace.sessionIds.map(String),
+    created: existing === undefined,
+  })
+
   note({ kind: 'fixture.ready', run, startupSessionId, sourceId, targetId, workRoot })
   await exitRequested
   await setupCleanup!()

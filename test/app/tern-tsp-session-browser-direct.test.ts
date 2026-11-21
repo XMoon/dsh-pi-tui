@@ -63,10 +63,12 @@ test('REAL_DIRECT_HEADLESS: persisted main Session → DirectSessionReader → p
       submit: () => assert.fail('the read-only Browser must not submit'),
       steer() {},
       pasteMedia: () => {},
+      pastedPath: () => {},
+      admitPastedPathDelivery: () => true, shouldRememberInput: () => true,
       noteUserInput() {},
       listContinuedQuestions: () => [],
       reopenContinuedQuestion: () => false,
-      openModelPicker() {},
+      openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true, openTasksBrowserUi() {}, tasksBrowserUiAvailable: () => true,
     })
     const browserPresentation = renderer.sessionBrowserPresentation
     assert.ok(browserPresentation)
@@ -91,7 +93,7 @@ test('REAL_DIRECT_HEADLESS: persisted main Session → DirectSessionReader → p
     assert.equal(pickerNode(browserPane, BROWSER)?.p.selected, 'session:blank-live-1')
     assert.deepEqual(pickerNode(browserPane, BROWSER)?.p.current, [], 'the read-only sessionless Browser does not invent a Current marker')
     assert.equal(props(browserPane).layout, 'tree')
-    assert.equal(props(browserPane).scope, 'workspace')
+    assert.equal(props(browserPane).scopes, undefined, 'the retired scope selector is not rendered')
   } finally {
     owner?.dispose()
     diag.dispose()
@@ -101,7 +103,7 @@ test('REAL_DIRECT_HEADLESS: persisted main Session → DirectSessionReader → p
   }
 })
 
-test('REAL_DIRECT_HEADLESS: cross-workspace persisted Fork lineage reaches the production Tree in parent order', async (t) => {
+test('REAL_DIRECT_HEADLESS: legacy persisted Fork headers stay flat roots across workspace runs', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, {
@@ -117,8 +119,10 @@ test('REAL_DIRECT_HEADLESS: cross-workspace persisted Fork lineage reaches the p
   }
   const now = Date.now()
   // Persist isolated parentSession/isSeeded headers through the authoritative
-  // storage service. The CWD split models imported/legacy cross-workspace lineage,
-  // not a live user session or a call to SessionStore.fork().
+  // storage service. The CWD split models imported/legacy cross-workspace
+  // metadata, not a live user session or a call to SessionStore.fork(). rc.1
+  // ordinary fork children are independent Sessions, so these legacy headers
+  // must NOT fabricate a Tree edge.
   for (const header of [
     {
       id: 'lineage-cross-child',
@@ -177,10 +181,12 @@ test('REAL_DIRECT_HEADLESS: cross-workspace persisted Fork lineage reaches the p
       submit: () => assert.fail('the read-only Browser must not submit'),
       steer() {},
       pasteMedia: () => {},
+      pastedPath: () => {},
+      admitPastedPathDelivery: () => true, shouldRememberInput: () => true,
       noteUserInput() {},
       listContinuedQuestions: () => [],
       reopenContinuedQuestion: () => false,
-      openModelPicker() {},
+      openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true, openTasksBrowserUi() {}, tasksBrowserUiAvailable: () => true,
     })
     const browserPresentation = renderer.sessionBrowserPresentation
     assert.ok(browserPresentation)
@@ -202,27 +208,19 @@ test('REAL_DIRECT_HEADLESS: cross-workspace persisted Fork lineage reaches the p
     await waitFor('the Direct parent reaches the TSP Picker', () =>
       (props(browserPane).items as Array<{ readonly id?: string }> | undefined)
         ?.some((item) => item.id === 'session:blank-live-1') === true)
-    sendAction(browserPane, 'scope', 'all', pickerNode(browserPane, BROWSER)!.id)
-    await waitFor('All workspaces includes the cross-workspace Fork child', () =>
-      props(browserPane).scope === 'all'
-      && (props(browserPane).items as Array<{ readonly id?: string }> | undefined)
+    await waitFor('the flat fallback lists the cross-workspace Fork child without widening a scope', () =>
+      (props(browserPane).items as Array<{ readonly id?: string }> | undefined)
         ?.some((item) => item.id === 'session:lineage-return-child') === true)
 
     const items = props(browserPane).items as Array<Record<string, unknown>>
     const ids = items.map((item) => item.id)
     const lineageIds = ['session:blank-live-1', 'session:lineage-cross-child', 'session:lineage-return-child']
     const positions = lineageIds.map((id) => ids.indexOf(id))
-    assert.ok(positions[0]! < positions[1]! && positions[1]! < positions[2]!, 'the production Picker preserves parent-before-child order')
-    assert.deepEqual(positions.map((index) => items[index]?.depth), [0, 1, 2])
+    assert.ok(positions.every(index => index >= 0), 'all three legacy Sessions are listed')
+    assert.deepEqual(positions.map((index) => items[index]?.depth), [0, 0, 0],
+      'legacy ordinary-fork parentSession metadata does not fabricate a tree edge')
     const order = props(browserPane).order as Array<string | PickerGroup>
-    const groups = order.filter((entry): entry is PickerGroup => typeof entry !== 'string')
-    assert.deepEqual(order.filter((entry): entry is string => typeof entry === 'string'), ids)
-    assert.deepEqual(groups.map((group) => [group.label, group.count]), [
-      [workspaceKey(fixture.workRoot), 1],
-      [workspaceKey(otherWorkspace), 1],
-      [workspaceKey(fixture.workRoot), 1],
-    ])
-    assert.equal(new Set(groups.map((group) => group.group)).size, groups.length, 'each A→B→A run has a distinct PickerGroup identity')
+    assert.deepEqual(order, ids, 'the flat fallback has no PickerGroup headers and no scope filter')
   } finally {
     owner?.dispose()
     diag.dispose()

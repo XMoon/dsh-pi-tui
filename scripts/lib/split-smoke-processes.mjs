@@ -1,0 +1,1191 @@
+/**
+ * Shared real-OS process/PTY support for the two split-process smoke lanes.
+ *
+ * One CLI run owns ONE `createSplitProcessScope()`: the scope binds the entry
+ * constructors to its own active set and to one monotonically increasing
+ * sequence, so a Host/Client wrapper can never be tracked, killed or named by
+ * another lane or another run. Importing this module performs no I/O and
+ * starts no process; entries exist only when a caller instantiates one.
+ *
+ * It is also the ONE owner of the operational helpers the extracted selectable
+ * scenarios share with the still-inline full-lane blocks (status probes,
+ * installed-payload facts, the authenticated Host HTTP/identity checks). Those
+ * are test-operation helpers only; they are never imported by product code.
+ *
+ * @module split-smoke-processes
+ */
+
+import { spawn, spawnSync } from 'node:child_process'
+import { chmodSync, existsSync, readFileSync, readlinkSync, readdirSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:net'
+import { dirname, join } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import xterm from '@xterm/headless'
+
+import { SplitSmokeAssertionError, SplitSmokeWaitError } from './split-smoke-diagnostics.mjs'
+import { currentPtyScriptArgv } from './pty-script.mjs'
+import { createDarwinSurfacePtyScope, darwinKeyTokensOf, darwinHostSeatFileFree } from './split-smoke-darwin-pty.mjs'
+
+function assert(condition, message) {
+  if (!condition) throw new SplitSmokeAssertionError(message)
+}
+
+/** Quote one argument for the `sh -c` command string system `script(1)` runs. */
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", "'\\''")}'`
+}
+
+function sleep(ms) {
+  return new Promise(resolveSleep => setTimeout(resolveSleep, ms))
+}
+
+/** A status response belongs to exactly one qualification request. */
+export function statusMatches(record, requestId) {
+  return record.m4a0 === 'status' && record.requestId === requestId
+}
+
+/** The kernel starttime of one live process (`/proc/<pid>/stat` field 22). */
+export function readStartIdentity(pid) {
+  try {
+    const stat = readFileSync(`/proc/${String(pid)}/stat`, 'utf8')
+    return stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[19]
+  } catch {
+    return undefined
+  }
+}
+
+export function readProcState(pid) {
+  try {
+    const stat = readFileSync(`/proc/${String(pid)}/stat`, 'utf8')
+    return stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[0]
+  } catch {
+    return undefined
+  }
+}
+
+export function alive(pid) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The REAL cwd and environment of one live process, read from the OS rather
+ * than from the directory a test only created.
+ *
+ * Linux reads `/proc/<pid>/cwd` and `/proc/<pid>/environ`; Darwin has neither,
+ * so it asks the same questions through `lsof` (the cwd file descriptor) and
+ * `ps -Eww` (the environment `ps` appends after the command line). Both
+ * platforms report the same two facts, so a locality assertion can require the
+ * SAME evidence wherever the lane runs instead of skipping the check.
+ */
+export function readProcessFacts(pid, platform = process.platform) {
+  if (!Number.isInteger(pid) || pid <= 0) throw new SplitSmokeAssertionError(`invalid process id for process facts: ${String(pid)}`)
+  if (platform === 'linux') {
+    const cwd = realpathSync(readlinkSync(`/proc/${String(pid)}/cwd`))
+    const env = Object.fromEntries(readFileSync(`/proc/${String(pid)}/environ`).toString('utf8')
+      .split('\0').filter(Boolean).map(entry => {
+        const equals = entry.indexOf('=')
+        return [entry.slice(0, equals), entry.slice(equals + 1)]
+      }))
+    return { cwd, env }
+  }
+  if (platform === 'darwin') {
+    const cwdLines = spawnSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], { encoding: 'utf8' })
+    if (cwdLines.status !== 0) {
+      throw new SplitSmokeAssertionError(`cannot read the cwd of process ${String(pid)}: ${cwdLines.stderr ?? cwdLines.error?.message ?? 'lsof failed'}`)
+    }
+    const cwdPath = (cwdLines.stdout ?? '').split('\n').find(line => line.startsWith('n'))
+    if (cwdPath === undefined) throw new SplitSmokeAssertionError(`process ${String(pid)} reports no cwd file descriptor`)
+    const psLines = spawnSync('ps', ['-Eww', '-p', String(pid)], { encoding: 'utf8' })
+    if (psLines.status !== 0) {
+      throw new SplitSmokeAssertionError(`cannot read the environment of process ${String(pid)}: ${psLines.stderr ?? psLines.error?.message ?? 'ps failed'}`)
+    }
+    // `ps -Eww` prints `  PID TTY TIME CMD <argv…> <KEY=VALUE>…`: the environment
+    // is appended after the command line, so the LAST occurrence of a key wins.
+    // Values may contain spaces, so slice between assignment starts instead of
+    // splitting on whitespace.
+    const command = (psLines.stdout ?? '').split('\n')[1] ?? ''
+    const assignments = [...command.matchAll(/(?:^|\s)([A-Za-z_][A-Za-z0-9_]*)=/gu)]
+      .map(match => ({ key: match[1], start: match.index + match[0].length - match[1].length - 1, valueAt: match.index + match[0].length }))
+    const env = {}
+    for (const [index, assignment] of assignments.entries()) {
+      const next = assignments[index + 1]
+      const valueEnd = next === undefined ? command.length : next.start - 1
+      env[assignment.key] = command.slice(assignment.valueAt, valueEnd)
+    }
+    return { cwd: realpathSync(cwdPath.slice(1)), env }
+  }
+  throw new SplitSmokeAssertionError(`process facts are not supported on ${platform}`)
+}
+
+/**
+ * The identity facts one entry published ABOUT ITSELF, read from its own JSONL
+ * records: a Host's `ready` record carries the local Host identity, a surface
+ * Client's `surface-status` record carries its own pid and the Host identity it
+ * authenticated against. The selected runner reports these after the process
+ * objects are gone, so the PASS line can name the real Host/Client instances
+ * instead of only the candidate hash. Nothing is inferred when a record is
+ * absent: the field is simply not reported.
+ */
+function publishedIdentityFacts(process) {
+  const pid = process.child?.pid
+  if (process.role === 'host') {
+    const ready = process.records.find(record => record.m4a0 === 'ready')
+    const localHost = ready?.localHost
+    return {
+      role: 'host',
+      pid: typeof localHost?.hostPid === 'number' ? localHost.hostPid : pid,
+      ...(typeof localHost?.instanceId === 'string' ? { instanceId: localHost.instanceId } : {}),
+      ...(typeof localHost?.scopeId === 'string' ? { scopeId: localHost.scopeId } : {}),
+      ...(localHost?.hostKernelIdentity?.uniqueId === undefined
+        ? {}
+        : { kernelUniqueId: String(localHost.hostKernelIdentity.uniqueId) }),
+    }
+  }
+  const statuses = process.records.filter(record => record.m4b2s === 'surface-status')
+  const status = [...statuses].reverse().find(record => record.host !== undefined)
+  const sessionIds = [...new Set(statuses
+    .map(record => record.openSessionId)
+    .filter(sessionId => typeof sessionId === 'string' && sessionId !== ''))]
+  return {
+    role: process.role,
+    pid: typeof status?.pid === 'number' ? status.pid : pid,
+    ...(typeof status?.host?.hostPid === 'number' ? { hostPid: status.host.hostPid } : {}),
+    ...(typeof status?.host?.instanceId === 'string' ? { instanceId: status.host.instanceId } : {}),
+    ...(sessionIds.length === 0 ? {} : { sessionIds }),
+  }
+}
+
+/**
+ * One lane's process ownership: the entry constructors bound to THIS scope's
+ * active set and path sequence. A second lane creates its own scope, so its
+ * cleanup can never kill or report this lane's children.
+ */
+export function createSplitProcessScope() {
+  let sequence = 0
+  const activeProcesses = new Set()
+  /**
+   * Every process this scope ever created, in creation order. Entries are
+   * never removed: the selected runner takes a slice per case so the verdict
+   * can name the REAL Host/Client identities that case created, after the
+   * processes themselves are gone.
+   */
+  const createdProcesses = []
+  /**
+   * The Darwin surface PTY scope: the ONE private tmux server this lane run
+   * owns. It is created lazily (no tmux server exists until the first Darwin
+   * surface pane) and `stopDarwinSurfaceServer()` is the scoped teardown.
+   */
+  const darwinScope = createDarwinSurfacePtyScope()
+
+  /** One OS entry process with parsed JSON records. Bound to this scope's active set and path sequence. */
+  class EntryProcess {
+    constructor(role, entry, options) {
+      this.role = role
+      this.records = []
+      this.stderr = ''
+      this.exited = false
+      this.exitResult = undefined
+      const effectiveScratch = options.env?.SPLIT_PROCESS_SCRATCH ?? join(options.scratch, `${role}-${++sequence}`)
+      this.effectiveScratch = effectiveScratch
+      this.child = spawn(process.execPath, [entry], {
+        cwd: options.cwd,
+        env: {
+          ...options.env,
+          DSH_PI_TUI_ENTRY_RECORDS: '1',
+          SPLIT_PROCESS_DSH_ANCHOR: options.anchor,
+          SPLIT_PROCESS_PROFILE: options.profile,
+          SPLIT_PROCESS_SCRATCH: effectiveScratch,
+        },
+        stdio: ['pipe', 'pipe', 'pipe'],
+        detached: true,
+      })
+      activeProcesses.add(this)
+      createdProcesses.push(this)
+      this.child.stdout.setEncoding('utf8')
+      this.child.stderr.setEncoding('utf8')
+      let buffer = ''
+      this.child.stdout.on('data', chunk => {
+        buffer += chunk
+        for (let newline = buffer.indexOf('\n'); newline >= 0; newline = buffer.indexOf('\n')) {
+          const line = buffer.slice(0, newline).trim()
+          buffer = buffer.slice(newline + 1)
+          if (line === '') continue
+          this.records.push(JSON.parse(line))
+        }
+      })
+      this.child.stderr.on('data', chunk => { this.stderr += chunk })
+      this.exit = new Promise(resolveExit => {
+        // `close` fires after the child's stdio streams close; `exit` may fire
+        // first and would let a caller read a truncated record tail.
+        this.child.on('close', (code, signal) => {
+          this.exited = true
+          this.exitResult = { code, signal }
+          activeProcesses.delete(this)
+          resolveExit(this.exitResult)
+        })
+      })
+    }
+
+    /** @see publishedIdentityFacts */
+    identityFacts() {
+      return publishedIdentityFacts(this)
+    }
+
+    waitFor(predicate, label, timeoutMs = 120_000) {
+      const existing = this.records.find(predicate)
+      if (existing !== undefined) return Promise.resolve(existing)
+      return new Promise((resolveWait, reject) => {
+        const started = Date.now()
+        const settle = (record) => {
+          clearInterval(interval)
+          clearTimeout(timer)
+          resolveWait(record)
+        }
+        const fail = (category, code) => {
+          clearInterval(interval)
+          clearTimeout(timer)
+          // Only the fixed label, the elapsed time and this process's bounded
+          // summary travel in the error: never captured stderr or record bytes.
+          reject(new SplitSmokeWaitError(category, {
+            code,
+            waitLabel: label,
+            processRole: this.role,
+            elapsedMs: Date.now() - started,
+            process: this,
+          }))
+        }
+        const poll = () => {
+          const record = this.records.find(predicate)
+          if (record !== undefined) {
+            settle(record)
+            return
+          }
+          if (this.exited) fail('PROCESS_EXITED', 'PROCESS_EXITED_BEFORE_RECORD')
+        }
+        const interval = setInterval(poll, 20)
+        const timer = setTimeout(() => fail('WAIT_TIMEOUT', 'RECORD_WAIT_TIMEOUT'), timeoutMs)
+        poll()
+      })
+    }
+
+    waitForExit(timeoutMs = 120_000) {
+      let timer
+      const started = Date.now()
+      const deadline = new Promise((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(new SplitSmokeWaitError('WAIT_TIMEOUT', {
+            code: 'PROCESS_EXIT_TIMEOUT',
+            waitLabel: 'process exit',
+            processRole: this.role,
+            elapsedMs: Date.now() - started,
+            process: this,
+          }))
+        }, timeoutMs)
+      })
+      // A pending deadline is a live handle: without clearing it the whole smoke
+      // stays alive until the longest timeout expires even though every child exited.
+      return Promise.race([this.exit, deadline]).finally(() => clearTimeout(timer))
+    }
+
+    send(request) {
+      this.child.stdin.write(`${JSON.stringify(request)}\n`)
+    }
+
+    async shutdown() {
+      this.send({ op: 'shutdown' })
+      return await this.waitForExit()
+    }
+
+    kill(signal) {
+      try {
+        process.kill(-this.child.pid, signal)
+      } catch {
+        try { this.child.kill(signal) } catch { /* already gone */ }
+      }
+    }
+  }
+
+  /**
+   * One REAL PiTui surface Client.
+   *
+   * Linux drives the system `script(1)` pseudo-TTY (unchanged); Darwin drives
+   * ONE real private-tmux pane (`split-smoke-darwin-pty.mjs`) because BSD
+   * `script(1)` cannot take a live keystroke stream from a Node pipe parent.
+   * Both drivers expose the SAME surface: structured telemetry reads the
+   * private `0600` JSONL record file the entry owns (never the terminal);
+   * "the frame shows …" is an escape-aware fact from the REAL painted terminal
+   * (the headless xterm parser on Linux, the pane capture on Darwin); the
+   * process tree on Linux is `script -> node dist/local-client.mjs` and on
+   * Darwin the pane's process tree; the business PID is the one in the `ready`
+   * record, and signals for the surface Client go to THAT pid.
+   */
+  class SurfaceEntryProcess {
+    constructor(entry, options) {
+      this.role = 'surface-client'
+      this.records = []
+      this.raw = ''
+      this.stderr = ''
+      this.exited = false
+      this.exitResult = undefined
+      this.recordError = undefined
+      this.recordPath = join(options.workDir, `surface-client-${String(++sequence)}.jsonl`)
+      this.platform = process.platform
+      if (this.platform === 'darwin') {
+        // The scope owns the ONE private tmux server: its panes are created
+        // through the scope binding, never a per-call option (every direct
+        // constructor caller gets the same driver for free).
+        const exitPath = join(options.workDir, `surface-client-exit-${String(sequence)}.txt`)
+        this.darwin = darwinScope.createPane({
+          entry,
+          cwd: options.cwd,
+          env: {
+            ...options.env,
+            SPLIT_PROCESS_DSH_ANCHOR: options.anchor,
+            SPLIT_PROCESS_PROFILE: options.profile,
+            SPLIT_PROCESS_SCRATCH: options.effectiveScratch ?? join(options.scratch, `surface-${String(sequence)}`),
+            SPLIT_PROCESS_CLIENT_MODE: 'surface',
+            SPLIT_PROCESS_CLIENT_RECORD_FILE: this.recordPath,
+            COLUMNS: String(options.columns ?? 100),
+            LINES: String(options.rows ?? 30),
+          },
+          columns: options.columns ?? 100,
+          rows: options.rows ?? 30,
+          recordPath: this.recordPath,
+          exitPath,
+          role: `surface-${String(sequence)}`,
+        })
+        // The REAL wrapper pid of the pane: a process distinct from the
+        // business Client, tracked for identity/wrapper assertions only. The
+        // Darwin teardown never signals through it (the pane owns the tree).
+        this.child = { pid: this.darwin.panePid }
+        this.term = undefined
+        this.columns = options.columns ?? 100
+        this.rows = options.rows ?? 30
+        this.exit = new Promise(resolveExit => { this.resolveExit = resolveExit })
+        this.recordTimer = setInterval(() => {
+          try {
+            this.readRecords()
+          } catch (error) {
+            this.recordError = error
+          }
+        }, 25)
+        this.panePollTimer = setInterval(() => {
+          if (this.exited) return
+          const facts = this.darwin.deadFacts()
+          if (!facts.dead) return
+          this.exited = true
+          activeProcesses.delete(this)
+          clearInterval(this.recordTimer)
+          clearInterval(this.panePollTimer)
+          if (facts.status === null) {
+            // The pane/session disappeared WITHOUT the wrapper recording a
+            // status. That is a scoped teardown (kill-session), never a Client
+            // exit: report the fact instead of inventing a code, and let any
+            // exit assertion fail on it.
+            this.exitResult = { code: null, signal: null, unrecorded: true }
+            this.resolveExit(this.exitResult)
+            return
+          }
+          // The REAL business Client exited; capture its shell-reported status.
+          this.exitResult = { code: facts.status, signal: null }
+          this.resolveExit(this.exitResult)
+        }, 50)
+        activeProcesses.add(this)
+        createdProcesses.push(this)
+        return
+      }
+      this.term = new xterm.Terminal({
+        cols: options.columns ?? 100,
+        rows: options.rows ?? 30,
+        disableStdin: true,
+        allowProposedApi: true,
+      })
+      const pty = currentPtyScriptArgv(`${shellQuote(process.execPath)} ${shellQuote(entry)}`)
+      this.child = spawn(pty.program, pty.args, {
+        cwd: options.cwd,
+        env: {
+          ...options.env,
+          SPLIT_PROCESS_DSH_ANCHOR: options.anchor,
+          SPLIT_PROCESS_PROFILE: options.profile,
+          SPLIT_PROCESS_SCRATCH: options.effectiveScratch ?? join(options.scratch, `surface-${String(sequence)}`),
+          SPLIT_PROCESS_CLIENT_MODE: 'surface',
+          SPLIT_PROCESS_CLIENT_RECORD_FILE: this.recordPath,
+          COLUMNS: String(options.columns ?? 100),
+          LINES: String(options.rows ?? 30),
+        },
+        stdio: ['pipe', 'pipe', 'pipe'],
+        detached: true,
+      })
+      activeProcesses.add(this)
+      createdProcesses.push(this)
+      this.child.stdout.setEncoding('utf8')
+      this.child.stderr.setEncoding('utf8')
+      this.child.stdout.on('data', chunk => {
+        this.raw += chunk
+        this.term.write(chunk)
+      })
+      this.child.stderr.on('data', chunk => { this.stderr += chunk })
+      this.exit = new Promise(resolveExit => {
+        this.child.on('close', (code, signal) => {
+          this.exited = true
+          this.exitResult = { code, signal }
+          activeProcesses.delete(this)
+          clearInterval(this.recordTimer)
+          resolveExit(this.exitResult)
+        })
+      })
+      this.recordTimer = setInterval(() => {
+        try {
+          this.readRecords()
+        } catch (error) {
+          this.recordError = error
+        }
+      }, 25)
+    }
+
+    /**
+     * Parse only COMPLETE lines: the entry appends while this polls.
+     *
+     * A malformed line stays a real failure with its own text here — this private
+     * `recordPath` JSONL is the record authority, and the bounded default report
+     * never copies it.
+     */
+    readRecords() {
+      if (!existsSync(this.recordPath)) return
+      const text = readFileSync(this.recordPath, 'utf8')
+      const end = text.lastIndexOf('\n')
+      if (end < 0) return
+      const lines = text.slice(0, end).split('\n').filter(line => line !== '')
+      this.records = lines.map((line, index) => {
+        try {
+          return JSON.parse(line)
+        } catch (error) {
+          throw new Error(`${this.role}: malformed record line ${String(index)}: ${line.slice(0, 200)} (${String(error)})`)
+        }
+      })
+    }
+
+    /** @see publishedIdentityFacts */
+    identityFacts() {
+      return publishedIdentityFacts(this)
+    }
+
+    waitFor(predicate, label, timeoutMs = 120_000) {
+      const existing = this.records.find(predicate)
+      if (existing !== undefined) return Promise.resolve(existing)
+      return new Promise((resolveWait, reject) => {
+        const started = Date.now()
+        let settled = false
+        const cleanup = () => {
+          clearInterval(interval)
+          clearTimeout(timer)
+        }
+        const finish = (error, record) => {
+          if (settled) return
+          settled = true
+          cleanup()
+          if (error !== undefined && error !== null) reject(error)
+          else resolveWait(record)
+        }
+        // A bounded wait failure: the fixed label, the elapsed time and this
+        // process's projection — never `raw`, `stderr` or the record bytes.
+        const fail = (category, code) => finish(new SplitSmokeWaitError(category, {
+          code,
+          waitLabel: label,
+          processRole: this.role,
+          elapsedMs: Date.now() - started,
+          process: this,
+        }))
+        // Before a timeout or an early exit is reported, take ONE synchronous
+        // read of the complete JSONL tail: the 25ms poller and the failure
+        // snapshot must never disagree about the last records.
+        const settleOrFail = (category, code) => {
+          const unread = this.finalRecordRead(label)
+          if (unread !== undefined) {
+            finish(unread)
+            return
+          }
+          const record = this.records.find(predicate)
+          if (record !== undefined) finish(undefined, record)
+          else fail(category, code)
+        }
+        const poll = () => {
+          if (this.recordError !== undefined) fail('INFRA_FAILURE', 'RECORD_READ_FAILED')
+          else if (this.exited) settleOrFail('PROCESS_EXITED', 'PROCESS_EXITED_BEFORE_RECORD')
+          else {
+            const record = this.records.find(predicate)
+            if (record !== undefined) finish(undefined, record)
+          }
+        }
+        const interval = setInterval(poll, 20)
+        const timer = setTimeout(() => settleOrFail('WAIT_TIMEOUT', 'RECORD_WAIT_TIMEOUT'), timeoutMs)
+        poll()
+      })
+    }
+
+    /**
+     * The text a Client-local copy actually handed to the terminal/tmux
+     * clipboard sink, when the driver can observe it.
+     *
+     * Linux owns the Client's byte stream, so the OSC 52 sequence is read from
+     * `raw`. A Darwin pane is a REAL terminal: it consumes the escape and the
+     * product's tmux leg (`load-buffer -w -`, socket from `$TMUX`) leaves the
+     * text in this pane's private tmux buffer. Both are the same product fact —
+     * the confirmed copy reached its sink — read through the platform's own
+     * observable.
+     */
+    async clipboardText() {
+      if (this.platform !== 'darwin') return undefined
+      return this.darwin.bufferText()
+    }
+
+    /** Flush the headless terminal and return its visible viewport. */
+    async viewport() {
+      if (this.platform === 'darwin') {
+        // The tmux pane capture IS the painted frame; pad/clip to the pane
+        // size so the viewport height matches the Linux xterm viewport.
+        return this.darwin.captureLines()
+      }
+      await new Promise(resolveFlush => this.term.write('', resolveFlush))
+      const lines = []
+      const buffer = this.term.buffer.active
+      for (let index = 0; index < this.term.rows; index += 1) {
+        const line = buffer.getLine(buffer.viewportY + index)
+        lines.push(line === undefined ? '' : line.translateToString(true))
+      }
+      return lines
+    }
+
+    /**
+     * One final synchronous JSONL read before a wait gives up, so the poller and
+     * the failure snapshot cannot disagree about the record tail. A malformed line
+     * stays a real failure; its bytes never enter the reported context.
+     */
+    finalRecordRead(label) {
+      try {
+        this.readRecords()
+      } catch {
+        return new SplitSmokeWaitError('INFRA_FAILURE', {
+          code: 'RECORD_READ_FAILED',
+          waitLabel: label,
+          processRole: this.role,
+          process: this,
+        })
+      }
+      return undefined
+    }
+
+    /** Wait until the PAINTED frame contains the text (escape-aware). */
+    async waitForScreen(needle, label, timeoutMs = 60_000) {
+      const started = Date.now()
+      while (Date.now() - started < timeoutMs) {
+        const viewport = await this.viewport()
+        if (viewport.join('\n').includes(needle)) return
+        if (this.exited) {
+          const unread = this.finalRecordRead(label)
+          throw unread ?? new SplitSmokeWaitError('PROCESS_EXITED', {
+            code: 'PROCESS_EXITED_BEFORE_FRAME',
+            waitLabel: label,
+            processRole: this.role,
+            elapsedMs: Date.now() - started,
+            process: this,
+          })
+        }
+        await sleep(50)
+      }
+      const unread = this.finalRecordRead(label)
+      throw unread ?? new SplitSmokeWaitError('WAIT_TIMEOUT', {
+        code: 'FRAME_WAIT_TIMEOUT',
+        waitLabel: label,
+        processRole: this.role,
+        elapsedMs: Date.now() - started,
+        process: this,
+        frameTail: this.viewportFrameTail(),
+      })
+    }
+
+    /**
+     * The LAST painted rows, bounded, for a failure report: the operator's
+     * frame at wait-timeout without the whole ANSI scrollback.
+     */
+    viewportFrameTail(rows = 60, width = 120) {
+      try {
+        const buffer = this.term.buffer.active
+        const lines = []
+        for (let index = 0; index < this.term.rows; index += 1) {
+          const line = buffer.getLine(buffer.viewportY + index)
+          lines.push(line === undefined ? '' : line.translateToString(true))
+        }
+        return lines.slice(-rows).map(text => text.replace(/\s+$/u, '').slice(0, width)).filter(text => text !== '')
+      } catch {
+        return []
+      }
+    }
+
+    /**
+     * The COMPOSER box text of one viewport.
+     *
+     * The input box is drawn between its top and bottom rule; the SECOND-TO-LAST
+     * rule is used as the box top so the footer rule below it is not mistaken for
+     * the box. Returns `undefined` when the frame has no box.
+     */
+    composerOf(viewport) {
+      const separators = []
+      for (let index = 0; index < viewport.length; index += 1) {
+        if (/^─+$/u.test(viewport[index].trim())) separators.push(index)
+      }
+      if (separators.length === 0) return undefined
+      const top = separators.length >= 2 ? separators[separators.length - 2] : separators[separators.length - 1]
+      const bottom = separators.length >= 2 ? separators[separators.length - 1] : viewport.length
+      return viewport.slice(top + 1, bottom).join('\n')
+    }
+
+    /** Wait until the COMPOSER line (after the last separator) holds the text. */
+    async waitForComposerDraft(text, timeoutMs = 30_000) {
+      const started = Date.now()
+      while (Date.now() - started < timeoutMs) {
+        const composer = this.composerOf(await this.viewport())
+        if (composer !== undefined && composer.includes('❯') && composer.includes(text)) return
+        if (this.exited) {
+          const unread = this.finalRecordRead('composer draft')
+          throw unread ?? new SplitSmokeWaitError('PROCESS_EXITED', {
+            code: 'PROCESS_EXITED_BEFORE_COMPOSER',
+            waitLabel: 'composer draft',
+            processRole: this.role,
+            elapsedMs: Date.now() - started,
+            process: this,
+          })
+        }
+        await sleep(50)
+      }
+      const unread = this.finalRecordRead('composer draft')
+      throw unread ?? new SplitSmokeWaitError('WAIT_TIMEOUT', {
+        code: 'COMPOSER_WAIT_TIMEOUT',
+        waitLabel: 'composer draft',
+        processRole: this.role,
+        elapsedMs: Date.now() - started,
+        process: this,
+      })
+    }
+
+    /** The current composer text, or `undefined` when no box is painted. */
+    async composerText() {
+      return this.composerOf(await this.viewport())
+    }
+
+    /**
+     * Clear a restored draft through the REAL editor: one backspace per character,
+     * then wait until the text is gone from the composer. Used where a case must
+     * send a SECOND independent prompt on the same process.
+     */
+    async clearComposerDraft(text, timeoutMs = 30_000) {
+      const started = Date.now()
+      if (text !== '') this.send('\x7f'.repeat(text.length))
+      while (Date.now() - started < timeoutMs) {
+        const composer = await this.composerText()
+        if (composer !== undefined && !composer.includes(text)) return
+        await sleep(50)
+      }
+      const unread = this.finalRecordRead('composer cleared')
+      throw unread ?? new SplitSmokeWaitError('WAIT_TIMEOUT', {
+        code: 'COMPOSER_CLEAR_TIMEOUT',
+        waitLabel: 'composer cleared',
+        processRole: this.role,
+        elapsedMs: Date.now() - started,
+        process: this,
+      })
+    }
+
+    /**
+     * Wait until a previously painted row DISAPPEARS (escape-aware). Used to
+     * observe the exit-confirmation window closing: the footer hint is the
+     * product's own armed state, so the wait is bounded by that real cue instead
+     * of a blind sleep.
+     */
+    async waitForScreenGone(needle, label, timeoutMs = 60_000) {
+      const started = Date.now()
+      while (Date.now() - started < timeoutMs) {
+        const viewport = await this.viewport()
+        if (!viewport.join('\n').includes(needle)) return
+        if (this.exited) {
+          // The process left while the row was still painted: that is the caller's
+          // negative-control failure, not a timeout.
+          const unread = this.finalRecordRead(label)
+          throw unread ?? new SplitSmokeWaitError('PROCESS_EXITED', {
+            code: 'PROCESS_EXITED_BEFORE_FRAME',
+            waitLabel: label,
+            processRole: this.role,
+            elapsedMs: Date.now() - started,
+            process: this,
+          })
+        }
+        await sleep(50)
+      }
+      const unread = this.finalRecordRead(label)
+      throw unread ?? new SplitSmokeWaitError('WAIT_TIMEOUT', {
+        code: 'FRAME_WAIT_TIMEOUT',
+        waitLabel: label,
+        processRole: this.role,
+        elapsedMs: Date.now() - started,
+        process: this,
+        frameTail: this.viewportFrameTail(),
+      })
+    }
+
+    /** Send terminal input to the Client through the pty master. */
+    send(data) {
+      if (this.platform === 'darwin') {
+        // REAL keystrokes: named tmux keys for the control/CSI classes, literal
+        // text otherwise. An unmapped byte throws; nothing is dropped.
+        this.darwin.sendTokens(darwinKeyTokensOf(data))
+        return
+      }
+      this.child.stdin.write(data)
+    }
+
+    /** Signal the business Client process (never the `script` wrapper / tmux). */
+    signalBusiness(signal) {
+      const pid = this.records.find(record => record.m4a0 === 'ready')?.pid
+        ?? this.records.find(record => record.m4a0 === 'client-started')?.pid
+      assert(Number.isInteger(pid), `${this.role}: no business PID is known yet`)
+      if (this.platform === 'darwin') {
+        // A bare POSIX signal to the exact published business pid, never a
+        // process-group or /proc-based guess: the pane wrapper (tmux server)
+        // is never addressed.
+        process.kill(pid, signal)
+        return
+      }
+      process.kill(pid, signal)
+    }
+
+    waitForExit(timeoutMs = 120_000) {
+      let timer
+      const started = Date.now()
+      const deadline = new Promise((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(new SplitSmokeWaitError('WAIT_TIMEOUT', {
+            code: 'PROCESS_EXIT_TIMEOUT',
+            waitLabel: 'process exit',
+            processRole: this.role,
+            elapsedMs: Date.now() - started,
+            process: this,
+          }))
+        }, timeoutMs)
+      })
+      return Promise.race([this.exit, deadline])
+        .then(result => {
+          if (result?.unrecorded === true) {
+            throw new SplitSmokeAssertionError(
+              `NOT_QUIESCED: the ${this.role} Darwin pane disappeared without a recorded exit status; `
+                + 'a scoped teardown is not a business Client exit',
+            )
+          }
+          return result
+        })
+        .finally(() => clearTimeout(timer))
+    }
+
+    async dispose() {
+      clearInterval(this.recordTimer)
+      if (this.platform === 'darwin') {
+        // The pane poller is the ONLY resolver of `this.exit`: never clear it
+        // before the business Client's end was observed. A Client still alive
+        // gets its own pane torn down first; the poller then records what the
+        // wrapper actually reported (a real status or the explicit unrecorded
+        // teardown fact).
+        if (!this.exited) {
+          await this.darwin.dispose()
+          const settled = await Promise.race([
+            this.exit.then(() => true, () => true),
+            new Promise(resolveWait => setTimeout(() => resolveWait(false), 5_000)),
+          ])
+          clearInterval(this.panePollTimer)
+          activeProcesses.delete(this)
+          if (!settled) {
+            throw new SplitSmokeAssertionError(
+              `NOT_QUIESCED: the ${this.role} Darwin pane did not die after its session was killed`,
+            )
+          }
+          return
+        }
+        clearInterval(this.panePollTimer)
+        activeProcesses.delete(this)
+        return
+      }
+      try { process.kill(-this.child.pid, 'SIGKILL') } catch { /* already gone */ }
+      try { await this.waitForExit(15_000) } catch { /* best effort */ }
+    }
+  }
+  return {
+    EntryProcess,
+    SurfaceEntryProcess,
+    activeProcesses,
+    createdProcesses,
+    darwinScope,
+    darwinHostSeatFileFree,
+  }
+}
+
+/** The last `surface-status` record of a surface Client (no stdin channel). */
+export function lastSurfaceStatus(client) {
+  return client.records.filter(record => record.m4b2s === 'surface-status').at(-1)
+}
+
+/** Wait for a surface status matching the predicate. */
+export async function waitForSurfaceStatus(client, predicate, label, timeoutMs = 120_000) {
+  const started = Date.now()
+  const deadline = started + timeoutMs
+  /** Read the complete JSONL tail once, then re-check the status. */
+  const settleOrFail = (category, code) => {
+    const unread = client.finalRecordRead(label)
+    if (unread !== undefined) throw unread
+    const late = lastSurfaceStatus(client)
+    if (late !== undefined && predicate(late)) return late
+    throw new SplitSmokeWaitError(category, {
+      code,
+      waitLabel: label,
+      processRole: client.role,
+      elapsedMs: Date.now() - started,
+      process: client,
+    })
+  }
+  while (Date.now() < deadline) {
+    const status = lastSurfaceStatus(client)
+    if (status !== undefined && predicate(status)) return status
+    // A Client that died while the status never arrived is not a timeout: that
+    // is the failure itself, and it must not consume the whole budget. The
+    // poller stops on close, so the LAST line may still be unread — read it
+    // before deciding the status is missing.
+    if (client.exited) return settleOrFail('PROCESS_EXITED', 'PROCESS_EXITED_BEFORE_STATUS')
+    await sleep(25)
+  }
+  // Same read before a timeout: a status written just before the deadline must
+  // not be reported as never having arrived.
+  return settleOrFail('WAIT_TIMEOUT', 'SURFACE_STATUS_WAIT_TIMEOUT')
+}
+
+/** Wait for the first ready record among concurrent entries. */
+export async function waitForAnyReady(processes, label, timeoutMs) {
+  const started = Date.now()
+  const deadline = started + timeoutMs
+  while (Date.now() < deadline) {
+    for (const process of processes) {
+      const record = process.records.find(candidate => candidate.m4a0 === 'ready')
+      if (record !== undefined) return { process, record }
+    }
+    if (processes.every(process => process.exited)) {
+      // The close callback removed every contender from `activeProcesses`, so a
+      // report built later would show NO process at all for exactly the failure
+      // that involves all of them. Carry them on the error for the projection.
+      throw new SplitSmokeWaitError('PROCESS_EXITED', {
+        code: 'READY_RACE_EXITED',
+        waitLabel: label,
+        elapsedMs: Date.now() - started,
+        processes,
+      })
+    }
+    await sleep(25)
+  }
+  throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
+    code: 'READY_RACE_TIMEOUT',
+    waitLabel: label,
+    elapsedMs: Date.now() - started,
+  })
+}
+
+/**
+ * Wait until one seat is released.
+ *
+ * The seat is a platform fact, not a lane choice: Linux abstracts it as a
+ * `\0`-prefixed abstract socket that can be re-bound, while Darwin holds an
+ * `O_EXLOCK` file under the account home (there is no abstract-socket
+ * namespace to re-bind). `options.scopeId` is the FULL scope id the Darwin
+ * seat file is keyed by; the Linux name carries only its 40-char prefix, so a
+ * Darwin caller must pass the untruncated id.
+ */
+export async function seatFree(name, timeoutMs = 5_000, options = {}) {
+  const platform = options.platform ?? process.platform
+  if (platform === 'darwin') {
+    const scopeId = options.scopeId
+    assert(typeof scopeId === 'string' && scopeId !== '',
+      `the Darwin seat probe needs the full scope id, not the truncated name ${JSON.stringify(name)}`)
+    if (await darwinHostSeatFileFree(scopeId, { timeoutMs })) return
+    throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
+      code: 'SEAT_RELEASE_TIMEOUT',
+      waitLabel: 'abstract seat release',
+      elapsedMs: timeoutMs,
+    })
+  }
+  const started = Date.now()
+  const deadline = started + timeoutMs
+  while (Date.now() < deadline) {
+    const free = await new Promise(resolveFree => {
+      const server = createServer()
+      server.once('error', () => resolveFree(false))
+      server.listen(name, () => {
+        server.close(() => resolveFree(true))
+      })
+    })
+    if (free) return
+    await sleep(50)
+  }
+  throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
+    code: 'SEAT_RELEASE_TIMEOUT',
+    waitLabel: 'abstract seat release',
+    elapsedMs: Date.now() - started,
+  })
+}
+
+/** Read a live process starttime and kill only the process that still matches it. */
+export function killTracked(pid, starttime, signal) {
+  if (starttime !== undefined && readStartIdentity(pid) !== starttime) return
+  try {
+    process.kill(-pid, signal)
+  } catch {
+    try { process.kill(pid, signal) } catch { /* already gone */ }
+  }
+}
+
+/**
+ * Failure backstop for detached processes the smoke did not learn about: only
+ * PIDs whose environment carries THIS isolated DSH home and whose command line
+ * is one of the two internal entries are killed.
+ */
+export function findIsolatedProcesses(dshHome) {
+  const marker = `DSH_HOME=${dshHome}`
+  let entries
+  try {
+    entries = readdirSync('/proc')
+  } catch {
+    return []
+  }
+  const pids = []
+  for (const name of entries) {
+    if (!/^\d+$/u.test(name)) continue
+    const pid = Number(name)
+    let cmdline
+    let environ
+    try {
+      cmdline = readFileSync(`/proc/${pid}/cmdline`, 'utf8')
+      environ = readFileSync(`/proc/${pid}/environ`, 'utf8')
+    } catch {
+      continue
+    }
+    if (!cmdline.includes('local-host.mjs') && !cmdline.includes('local-client.mjs')) continue
+    if (!environ.split('\0').includes(marker)) continue
+    pids.push(pid)
+  }
+  return pids
+}
+
+export function killIsolatedProcesses(dshHome) {
+  for (const pid of findIsolatedProcesses(dshHome)) {
+    try { process.kill(-pid, 'SIGKILL') } catch { try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ } }
+  }
+}
+
+export async function waitGone(pid, timeoutMs = 15_000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (!alive(pid)) return true
+    await sleep(50)
+  }
+  return !alive(pid)
+}
+
+/** Whether one Linux abstract-socket seat can be claimed again. */
+export async function seatIsFree(name) {
+  return await new Promise((resolveSeat, rejectSeat) => {
+    const server = createServer()
+    let settled = false
+    server.once('error', error => {
+      if (settled) return
+      settled = true
+      if (error.code === 'EADDRINUSE') resolveSeat(false)
+      else rejectSeat(error)
+    })
+    server.listen(name, () => {
+      if (settled) return
+      settled = true
+      server.close(() => resolveSeat(true))
+    })
+  })
+}
+
+// ── Shared operational helpers ───────────────────────────────────────────────
+// Moved out of `scripts/split-process-smoke.mjs` so the extracted selectable
+// scenarios and the still-inline full-lane blocks call the SAME implementation.
+// The Host HTTP/identity helpers are also consumed by the still-inline Web
+// qualification; PR2-D re-homes the Web-only part into its own owner module.
+
+/** The repository root, for the installed-payload helpers below. */
+const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
+
+/** One qualification request id sequence for the two status probes. */
+let statusSequence = 0
+
+/** Ask one real Host for a current status snapshot and wait for ITS answer. */
+export function hostStatus(host) {
+  const requestId = `status-${++statusSequence}`
+  host.send({ op: 'status', requestId })
+  return host.waitFor(record => statusMatches(record, requestId), `host status ${requestId}`, 30_000)
+}
+
+/** Ask one qualification Client for a current status snapshot. */
+export function clientStatus(client) {
+  const requestId = `status-${++statusSequence}`
+  client.send({ op: 'status', requestId })
+  return client.waitFor(record => statusMatches(record, requestId), `client status ${requestId}`, 30_000)
+}
+
+export function readJson(path) {
+  return JSON.parse(readFileSync(path, 'utf8'))
+}
+
+export function modeOf(path) {
+  return statSync(path).mode & 0o777
+}
+
+/** Remember one private file's exact bytes and permission bits. */
+export function saveFile(path) {
+  return { bytes: readFileSync(path), mode: modeOf(path) }
+}
+
+/** Put saved bytes back with their original mode (replacing any symlink). */
+export function restoreFile(path, saved) {
+  try { unlinkSync(path) } catch { /* missing is fine */ }
+  writeFileSync(path, saved.bytes, { mode: saved.mode })
+  chmodSync(path, saved.mode)
+}
+
+/** Wait for the ONE ready/failure outcome a Host or Client entry reports. */
+export async function waitForOutcome(process, label, timeoutMs = 120_000) {
+  return await process.waitFor(record => record.m4a0 === 'ready' || record.m4a0 === 'failure', label, timeoutMs)
+}
+
+/** Assert the refusal record carries the exact expected stable code. */
+export function expectFailureRecord(process, label, expectedCode) {
+  const failure = process.records.find(record => record.m4a0 === 'failure')
+  assert(failure !== undefined, `${label}: no failure record; records=${JSON.stringify(process.records.slice(-3))}`)
+  assert(failure.code === expectedCode, `${label}: expected ${expectedCode}, got ${JSON.stringify(failure.code ?? failure.error)}`)
+}
+
+/** The ONE installed dist chunk whose file name starts with the prefix. */
+export function chunk(profilePackage, prefix) {
+  const file = readdirSync(join(profilePackage, 'dist')).find(name => name.startsWith(prefix) && name.endsWith('.mjs'))
+  if (file === undefined) throw new Error(`missing ${prefix} chunk in installed package`)
+  return join(profilePackage, 'dist', file)
+}
+
+/** The production build fingerprint of one installed payload. */
+export function productionBuildId(packageRoot, dshVersion) {
+  const moduleUrl = pathToFileURL(join(PACKAGE_ROOT, 'src', 'app', 'remote-process', 'local-scope.ts')).href
+  const code = `import { computeBuildId } from ${JSON.stringify(moduleUrl)}; process.stdout.write(computeBuildId(process.argv[1], process.argv[2]))`
+  const result = spawnSync(
+    process.execPath,
+    ['--import', 'tsx/esm', '--input-type=module', '-e', code, packageRoot, dshVersion],
+    { cwd: PACKAGE_ROOT, env: process.env, encoding: 'utf8', timeout: 60_000 },
+  )
+  if (result.status !== 0) {
+    throw new Error(`the production build fingerprint could not be computed for ${packageRoot}: ${result.stderr || String(result.error ?? '')}`)
+  }
+  const value = result.stdout.trim()
+  if (!/^[0-9a-f]{64}$/u.test(value)) {
+    throw new Error(`the production build fingerprint is not 64 hex characters: ${JSON.stringify(value)}`)
+  }
+  return value
+}
+
+/** One service-bound HTTP request with redirects and cache left to the caller. */
+export async function fetchStatus(url, init = {}) {
+  const response = await fetch(url, { redirect: 'manual', ...init })
+  const body = await response.text()
+  const setCookie = response.headers.getSetCookie?.() ?? []
+  return {
+    status: response.status,
+    headers: response.headers,
+    body,
+    setCookie,
+  }
+}
+
+/** Exchange the private launch URL for one qualification Cookie (never logged). */
+export async function connectCookie(origin, launch) {
+  const url = new URL(launch.connectUrl)
+  url.searchParams.set('interactions', 'answer')
+  const response = await fetch(url, { redirect: 'manual', cache: 'no-store' })
+  assert(response.status === 302, `valid /connect returned HTTP ${String(response.status)}`)
+  assert(/\bno-store\b/iu.test(response.headers.get('cache-control') ?? ''), '/connect response is not no-store')
+  const redirect = new URL(response.headers.get('location') ?? '/', url)
+  assert(redirect.origin === origin && redirect.pathname === '/api/remote.mux', '/connect redirected outside the local mux')
+  const setCookie = response.headers.getSetCookie?.() ?? []
+  assert(setCookie.length > 0, '/connect returned no signed cookie')
+  await response.body?.cancel()
+  return setCookie[0].split(';', 1)[0].trim()
+}
+
+/** Every published Host identity field must match the expected facts. */
+export function assertIdentityFields(actual, expected, label) {
+  for (const key of [
+    'schema',
+    'scopeId',
+    'profileRealpath',
+    'instanceId',
+    'hostPid',
+    'hostStarttime',
+    'origin',
+    'protocol',
+    'bundleVersion',
+    'dshVersion',
+    'buildId',
+  ]) {
+    assert(actual?.[key] === expected?.[key], `${label}: ${key} mismatch`)
+  }
+}
+
+/** A Client's echoed Host facts must name the SAME Host the lane is proving. */
+export function assertClientHostFacts(client, host, label) {
+  for (const key of [
+    'scopeId',
+    'instanceId',
+    'hostPid',
+    'hostStarttime',
+    'origin',
+    'protocol',
+    'bundleVersion',
+    'dshVersion',
+    'buildId',
+  ]) {
+    assert(client?.[key] === host?.[key], `${label}: Client host ${key} mismatch`)
+  }
+}
+
+/**
+ * Bounded wait for one qualification condition. A caller-owned `signal` stops
+ * the polling loop for real: a race that only *returns* early would leave the
+ * loop's own timer holding the process until the full budget.
+ */
+export async function waitForCondition(predicate, label, timeoutMs, signal) {
+  const started = Date.now()
+  while (Date.now() - started < timeoutMs) {
+    if (signal?.aborted === true) {
+      throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
+        code: 'QUALIFICATION_CONDITION_ABORTED',
+        waitLabel: label,
+        elapsedMs: Date.now() - started,
+      })
+    }
+    if (await predicate()) return true
+    await sleep(100)
+  }
+  throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
+    code: 'QUALIFICATION_CONDITION_TIMEOUT',
+    waitLabel: label,
+    elapsedMs: Date.now() - started,
+  })
+}

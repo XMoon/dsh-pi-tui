@@ -20,13 +20,14 @@ import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { runDetached } from '../../runtime/process/tasks.ts'
 import {
   LocalScopeError,
-  readProcessStarttime,
   type LocalScope,
 } from './local-scope.ts'
 import {
+  assertRecordedHostKernelIdentityCurrent,
   connectForCookie,
   readLaunchMaterial,
   readLocalRecord,
+  sameLocalInstanceRecord,
   type LocalInstanceRecord,
   type VerifiedLocalHost,
 } from './local-discovery.ts'
@@ -40,6 +41,8 @@ const NODE_CLIENT_MODULES = [
 
 /** Bound on the first real Gateway generation after HTTP authentication. */
 const GENERATION_READY_TIMEOUT_MS = 30_000
+/** Bounded wait for the re-admitted generation after an expired operator. */
+const OPERATOR_RECOVERY_TIMEOUT_MS = 30_000
 
 /** Connection states the official handle publishes. */
 export type ConnectionState = 'connected' | 'connecting' | 'disconnected'
@@ -57,6 +60,8 @@ export interface LocalTransportConnection {
     getSnapshot(): ConnectionGeneration | undefined
     subscribe(listener: () => void): () => void
   }
+  /** Reset retry progression and replace the current attempt immediately. */
+  reconnect(): void
 }
 
 /** A status snapshot built at call time from the official Connection. */
@@ -102,9 +107,24 @@ export interface InstalledLocalClientTransport extends LocalClientTransport {
   awaitReady(options?: { readonly signal?: AbortSignal }): Promise<LocalClientTransport>
 }
 
+/** Whether one wire frame carries the settings-document invalidation event. */
+function isSettingsDocumentUpdatedFrame(event: { readonly data?: unknown }): boolean {
+  const data = event.data
+  if (typeof data === 'string') return data.includes('settings/document-updated')
+  if (data instanceof Uint8Array) return Buffer.from(data).toString('utf8').includes('settings/document-updated')
+  return false
+}
+
 export interface StartLocalTransportOptions {
   /** Installed `@deepseek-ai/dsh/package.json` anchor. */
   readonly dshAnchor: string
+  /**
+   * Test-only seam over the installed-module loader: a disposal-contract test
+   * supplies the structural module set instead of a real DSH installation.
+   * Production never passes this; the anchor path stays the only production
+   * source of the official client modules.
+   */
+  readonly modulesOverride?: LoadedLocalTransportModules
   /** Optional lifecycle signal for the first-generation wait. */
   readonly signal?: AbortSignal
   /** Authenticated Host candidate and this Client process's Cookie. */
@@ -118,6 +138,15 @@ export interface StartLocalTransportOptions {
    *  capture the official `$events` clientId/eventId without patching Gateway
    *  internals. */
   readonly qualificationWebSocketObserver?: (url: string, socket: ConnectionWebSocketLike) => void
+  /**
+   * Qualification-only witness of the injected prompt ACK drop: fired ONCE,
+   * synchronously, after the real `session/prompt` request reached the Host and
+   * its response body was discarded, immediately before the injected transport
+   * error. It proves the fault injection actually hit; it is never acceptance,
+   * an RPC outcome or a UI fact. Production never sets the fault env, so this
+   * observer does not exist on a production path.
+   */
+  readonly qualificationPromptAckDropped?: () => void
   /**
    * Terminal transport failure. The Client entry must stop and report this
    * error; the official Connection loop must not silently retry a replaced
@@ -206,6 +235,7 @@ function cookieFetch(
   origin: string,
   currentCookie: () => string,
   includeCookie: boolean,
+  qualificationPromptAckDropped?: () => void,
 ): (input: string | URL, init?: RequestInit) => Promise<Response> {
   // Qualification-only post-dispatch prompt ACK drop (T35): the request reaches
   // the Host, then the response is discarded so the caller observes a real
@@ -213,6 +243,23 @@ function cookieFetch(
   // write. Production never sets this variable.
   const dropPromptAck = process.env.SPLIT_PROCESS_CLIENT_DROP_PROMPT_ACK === '1'
   let promptAckDropped = false
+  // Qualification-only post-dispatch ACK drop for the sessionless default-model
+  // save: the request reaches the Host (which performs the official
+  // `agentDefaultModel.saveSelection`) and then the response is discarded, so the
+  // Client observes a real post-write transport failure and can only report
+  // `indeterminate`. Fires exactly once and never replays the write. Production
+  // never sets this variable.
+  const dropModelAck = process.env.SPLIT_PROCESS_CLIENT_DROP_MODEL_ACK === '1'
+  let modelAckDropped = false
+  const expireOperatorOnce = process.env.SPLIT_PROCESS_CLIENT_EXPIRE_OPERATOR_ONCE
+  /**
+   * Qualification-only delay before the forged operator expires: a real TTL
+   * can only elapse while the Client is already live, so the injected 401 must
+   * land mid-session instead of inside the startup request chain.
+   */
+  const expireOperatorAfterMs = Number(process.env.SPLIT_PROCESS_CLIENT_EXPIRE_OPERATOR_AFTER_MS ?? '0')
+  const installedAt = Date.now()
+  let expiredOperatorInjected = false
   return async (input, init = {}) => {
     const url = new URL(typeof input === 'string' ? input : input.href, `${origin}/`)
     if (url.origin !== origin) {
@@ -220,6 +267,20 @@ function cookieFetch(
     }
     const headers = new Headers(init.headers)
     if (includeCookie) headers.set('cookie', currentCookie())
+    // Qualification-only: forge the operator Cookie on exactly ONE replayable
+    // request whose route contains this substring ('1' matches any), so the
+    // Host answers a REAL 401 and the operator-recovery path runs against the
+    // real wire at a controlled point in the scene. Production never sets it.
+    const forgeThis = expireOperatorOnce !== undefined
+      && Date.now() - installedAt >= expireOperatorAfterMs
+      && (expireOperatorOnce === '1' || url.pathname.includes(expireOperatorOnce))
+    if (!expiredOperatorInjected && forgeThis
+      && typeof init.body === 'string' && !url.pathname.includes('$events/')) {
+      expiredOperatorInjected = true
+      const pair = currentCookie()
+      const separator = pair.indexOf('=')
+      headers.set('cookie', `${separator > 0 ? pair.slice(0, separator) : 'dsh-auth'}=qualification-forged-operator`)
+    }
     const request: LocalRequestInit = { ...init, headers, redirect: 'manual', cache: 'no-store' }
     if (dropPromptAck && !promptAckDropped && typeof init.body === 'string') {
       let method: unknown
@@ -232,8 +293,19 @@ function cookieFetch(
         promptAckDropped = true
         const response = await fetch(url, request)
         await response.body?.cancel()
+        // The witness fires only after the real Host round trip completed and
+        // the response was discarded: it is the qualification proof that the
+        // fault injection hit, never an acceptance or RPC-outcome signal.
+        qualificationPromptAckDropped?.()
         throw new Error('local transport: qualification dropped the session/prompt ACK after Host receipt')
       }
+    }
+    if (dropModelAck && !modelAckDropped && typeof init.body === 'string'
+      && init.body.includes('piTuiDefaultModel/saveSelection')) {
+      modelAckDropped = true
+      const response = await fetch(url, request)
+      await response.body?.cancel()
+      throw new Error('local transport: qualification dropped the piTuiDefaultModel/saveSelection ACK after Host receipt')
     }
     return await fetch(url, request)
   }
@@ -278,6 +350,7 @@ function lazyWebSocket(
     notify('close', {})
     release()
   }
+  const suppressSettingsEvent = process.env.SPLIT_PROCESS_CLIENT_SUPPRESS_SETTINGS_EVENT === '1'
   const start = async (): Promise<void> => {
     try {
       const socket = await open()
@@ -293,7 +366,14 @@ function lazyWebSocket(
       adopt(socket)
       socket.addEventListener('open', event => { notify('open', event) }, { once: true })
       socket.addEventListener('error', event => { notify('error', event) })
-      socket.addEventListener('message', event => { notify('message', event) })
+      socket.addEventListener('message', event => {
+        // Qualification-only wire boundary: hold back the settings
+        // invalidation event for a deliberately stale Client. The Mirror's own
+        // invalidation rule stays unconditional; this only decides whether the
+        // frame ever reaches it. Production never sets the flag.
+        if (suppressSettingsEvent && isSettingsDocumentUpdatedFrame(event as { readonly data?: unknown })) return
+        notify('message', event)
+      })
       socket.addEventListener('close', event => { closed = true; notify('close', event); release() }, { once: true })
     } catch (error) {
       fail(error instanceof Error ? error : new Error(String(error)))
@@ -375,6 +455,239 @@ function cookieWebSocketFactory(
 }
 
 /**
+ * Wait until the official Connection publishes a generation OTHER than the one
+ * an expired operator belonged to. The recovery below must never retry a
+ * request before the re-admitted generation exists: the retried request has to
+ * arrive as the operator that owns the NEW stream, and the old generation must
+ * already be unable to commit further event results.
+ */
+function waitForReplacementGeneration(
+  connection: LocalTransportConnection,
+  previousId: number | undefined,
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+): Promise<void> {
+  return new Promise<void>((resolveWait, rejectWait) => {
+    let settled = false
+    let unsubscribe: (() => void) | undefined
+    const current = (): ConnectionGeneration | undefined => connection.generation.getSnapshot()
+    const cleanup = (): void => {
+      settled = true
+      unsubscribe?.()
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+    }
+    const finish = (error?: Error): void => {
+      if (settled) return
+      cleanup()
+      if (error === undefined) resolveWait()
+      else rejectWait(error)
+    }
+    const onAbort = (): void => finish(signal?.reason instanceof Error
+      ? signal.reason
+      : new Error('local transport: operator recovery aborted'))
+    const timer = setTimeout(() => finish(new LocalScopeError(
+      'HOST_UNRESPONSIVE',
+      `local transport: no replacement Connection generation within ${String(timeoutMs / 1000)}s`,
+    )), timeoutMs)
+    if (signal?.aborted === true) {
+      onAbort()
+      return
+    }
+    unsubscribe = connection.generation.subscribe(() => {
+      const generation = current()
+      if (generation !== undefined && generation.id !== previousId) finish()
+    })
+    signal?.addEventListener('abort', onAbort, { once: true })
+    const afterSubscribe = current()
+    if (afterSubscribe !== undefined && afterSubscribe.id !== previousId) finish()
+  })
+}
+
+/**
+ * Await one shared operation but let THIS caller stop waiting when its own
+ * request is cancelled. The shared operation itself keeps running for the other
+ * waiters; only this caller's await is released.
+ */
+export function settleWithOwnSignal(operation: Promise<void>, signal: AbortSignal | undefined): Promise<void> {
+  if (signal === undefined) return operation
+  return new Promise<void>((resolveWait, rejectWait) => {
+    if (signal.aborted) {
+      operation.catch(() => {})
+      rejectWait(signal.reason instanceof Error ? signal.reason : new Error('local transport: request aborted'))
+      return
+    }
+    const onAbort = (): void => {
+      operation.catch(() => {})
+      rejectWait(signal.reason instanceof Error ? signal.reason : new Error('local transport: request aborted'))
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    operation.then(
+      () => { signal.removeEventListener('abort', onAbort); resolveWait() },
+      error => { signal.removeEventListener('abort', onAbort); rejectWait(error) },
+    )
+  })
+}
+
+/**
+ * Whether one 401 answer may be retried after the operator was rebuilt. The two
+ * hard rules live here, not in the caller:
+ *
+ * - a forwarded-event RESULT belongs to the stream (and Peer) that received the
+ *   invocation; replaying it with the replacement operator would answer as
+ *   "another Peer", so the official generation abort + Host re-delivery is the
+ *   ONLY recovery for `$events/result`;
+ * - a body this transport cannot replay (a stream/FormData upload) is not
+ *   re-sent, because the first attempt may have consumed it.
+ */
+export function operatorRecoveryMayRetry(
+  input: string | URL,
+  init: RequestInit | undefined,
+  origin: string,
+): boolean {
+  return operatorRecoveryDecision(input, init, origin).retry
+}
+
+/**
+ * Whether this request signal is aborted right now. A function call keeps the
+ * check honest across an `await`: narrowing a property read would make the
+ * compiler treat a later abort as unreachable.
+ */
+function isSignalAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true
+}
+
+/** The truthful cancellation reason of one request signal. */
+export function abortReasonOf(signal: AbortSignal | undefined, fallback: unknown): Error {
+  if (signal?.reason instanceof Error) return signal.reason
+  if (fallback instanceof Error) return fallback
+  return new Error('local transport: request aborted')
+}
+
+/**
+ * The ONE auth-recovery wrapper for the official unary carrier and every
+ * borrowed authenticated route.
+ *
+ * Two DIFFERENT questions are kept apart:
+ *
+ * 1. Must the connection be rebuilt? YES for every 401 except a forwarded event
+ *    RESULT, whose payload belongs to the stream and Peer that received the
+ *    invocation — there the Gateway's own generation abort + Host re-delivery
+ *    is the only correct recovery. A dead operator affects EVERY route, so a
+ *    non-replayable request (a stream/FormData upload) still triggers the
+ *    rebuild even though it cannot be re-sent; otherwise that upload would
+ *    leave every later request on the expired operator.
+ * 2. May THIS payload be re-sent? Only a replayable body, only once, and only
+ *    after the re-admitted generation is ready. A 401 is rejected before Host
+ *    dispatch, so this retry cannot duplicate a write.
+ *
+ * A caller cancellation is ALWAYS reported as cancellation, never as an HTTP
+ * auth failure: the official rpc caller throws on `!response.ok` before it
+ * re-checks the abort signal, so a 401 returned to a cancelled caller would
+ * surface as an authentication error. A genuine re-admit failure still returns
+ * the original 401.
+ */
+export async function sendWithOperatorRecovery(
+  deps: OperatorRecoveryDeps,
+  input: string | URL,
+  init?: RequestInit,
+): Promise<Response> {
+  const signal = init?.signal ?? undefined
+  const response = await deps.send(input, init)
+  if (response.status !== 401) return response
+  // Cancelled while the HTTP answer was settling: the 401 is not this caller's
+  // answer to act on (and it must not be mistaken for auth failure). No
+  // recovery is started on a cancelled caller's behalf either.
+  if (isSignalAborted(signal)) throw abortReasonOf(signal, undefined)
+  // Read the flags before awaiting: they describe THIS 401 and this payload.
+  const { rebuild, retry } = operatorRecoveryDecision(input, init, deps.origin)
+  if (!rebuild) return response
+  try {
+    await settleWithOwnSignal(deps.recoverOperator(signal), signal)
+  } catch (error) {
+    if (isSignalAborted(signal)) throw abortReasonOf(signal, error)
+    // A recovery that cannot re-admit leaves the original 401 with the caller:
+    // the authentication failure is never hidden.
+    return response
+  }
+  // A request cancelled while the re-admit was running is not re-sent.
+  if (isSignalAborted(signal)) throw abortReasonOf(signal, undefined)
+  if (!retry) return response
+  return await deps.send(input, init)
+}
+
+/** What the recovery wrapper needs beyond the request itself. */
+export interface OperatorRecoveryDeps {
+  readonly send: (input: string | URL, init?: RequestInit) => Promise<Response>
+  readonly recoverOperator: (signal: AbortSignal | undefined) => Promise<void>
+  readonly origin: string
+}
+
+/** The two independent decisions one 401 requires. */
+export interface OperatorRecoveryDecision {
+  /** Rebuild the connection and its operator? (A dead operator affects every route.) */
+  readonly rebuild: boolean
+  /** Re-send THIS request once after the rebuild completed? */
+  readonly retry: boolean
+}
+
+/**
+ * Decide what one 401 requires. Rebuilding and re-sending are separate facts:
+ * a forwarded event RESULT is owned by the Gateway's generation abort + Host
+ * re-delivery (neither), while a non-replayable upload must still rebuild the
+ * connection (otherwise every later request keeps using the expired operator)
+ * even though the upload itself cannot be re-sent.
+ */
+export function operatorRecoveryDecision(
+  input: string | URL,
+  init: RequestInit | undefined,
+  origin: string,
+): OperatorRecoveryDecision {
+  const route = new URL(typeof input === 'string' ? input : input.href, `${origin}/`)
+  if (route.pathname.includes('$events/result')) return { rebuild: false, retry: false }
+  // A caller that already cancelled needs no connection rebuilt on ITS behalf;
+  // any other 401 waiter drives the shared re-admit.
+  if (init?.signal?.aborted === true) return { rebuild: false, retry: false }
+  const retry = init?.body === undefined || typeof init.body === 'string'
+  return { rebuild: true, retry }
+}
+
+/**
+ * The ONE production recovery for an expired/invalidated operator Cookie.
+ *
+ * The official Connection is told to replace its attempt; that closes the
+ * current mux socket (its generation's tasks stop committing) BEFORE the socket
+ * factory mints the replacement operator for the RE-open. The caller then waits
+ * for the replacement generation so a retried request can only arrive on the new
+ * operator that owns the new stream. A request whose invocation was already
+ * dispatched to the old stream (`$events/result`) is NEVER retried: its clientId
+ * belongs to the old Peer and the official generation abort + Host re-delivery
+ * is the only correct recovery.
+ */
+function createOperatorRecovery(
+  current: () => LocalTransportConnection | undefined,
+  lifetime: AbortSignal,
+): (signal: AbortSignal | undefined) => Promise<void> {
+  let inflight: Promise<void> | undefined
+  return async signal => {
+    inflight ??= (async () => {
+      const connection = current()
+      if (connection === undefined) {
+        throw new LocalScopeError('HOST_UNRESPONSIVE', 'local transport: no Connection to re-admit')
+      }
+      const previousId = connection.generation.getSnapshot()?.id
+      connection.reconnect()
+      // The SHARED re-admit is bounded by the transport lifetime only. A
+      // caller's own signal is usually generation-bound: `reconnect()` aborts
+      // it immediately, so joining it here would cancel the recovery for every
+      // other waiter the moment the first caller's generation closed.
+      await waitForReplacementGeneration(connection, previousId, lifetime, OPERATOR_RECOVERY_TIMEOUT_MS)
+    })().finally(() => { inflight = undefined })
+    await inflight
+  }
+}
+
+/**
  * Wait for the first real `$events` generation, bounded so a Client without a
  * serving Host fails instead of spinning forever. Generation identity comes
  * only from the official Connection handle.
@@ -440,33 +753,23 @@ function assertIdentityStillCurrent(scope: LocalScope, expected: LocalInstanceRe
   if (current === undefined) {
     throw new LocalScopeError('HOST_IDENTITY_MISMATCH', 'local transport: the Host registry disappeared before connected')
   }
-  for (const key of [
-    'scopeId',
-    'profileRealpath',
-    'instanceId',
-    'hostPid',
-    'hostStarttime',
-    'origin',
-    'protocol',
-    'bundleVersion',
-    'dshVersion',
-    'buildId',
-  ] as const) {
-    if (current[key] !== expected[key]) {
-      throw new LocalScopeError('HOST_IDENTITY_MISMATCH', `local transport: the Host identity changed at ${key} before connected`)
-    }
+  if (!sameLocalInstanceRecord(current, expected)) {
+    throw new LocalScopeError('HOST_IDENTITY_MISMATCH', 'local transport: the Host identity changed before connected')
   }
-  const liveStarttime = readProcessStarttime(expected.hostPid)
-  if (liveStarttime === undefined) {
-    throw new LocalScopeError('PROCESS_STARTTIME_UNAVAILABLE', 'local transport: the Host process starttime is unavailable')
-  }
-  if (liveStarttime !== expected.hostStarttime) {
-    throw new LocalScopeError('HOST_IDENTITY_MISMATCH', 'local transport: the Host PID is no longer the authenticated process')
-  }
+  assertRecordedHostKernelIdentityCurrent(expected)
 }
 
-/** Wait for a set of sockets to close, bounded so disposal cannot park forever. */
-async function closeRemainingSockets(sockets: Set<RawSocket>): Promise<void> {
+/**
+ * Wait for a set of sockets to close, bounded so disposal cannot park forever.
+ * The timeout is a HANG PROTECTION, not a second socket owner: the losing timer
+ * is cancelled on every path so a normally closed socket leaves no referenced
+ * Node handle behind disposal.
+ */
+export async function closeRemainingSockets(
+  sockets: Set<RawSocket>,
+  diag: Diag,
+  timeoutMs = 2_000,
+): Promise<void> {
   if (sockets.size === 0) return
   const closures: Promise<void>[] = []
   for (const socket of sockets) {
@@ -477,10 +780,56 @@ async function closeRemainingSockets(sockets: Set<RawSocket>): Promise<void> {
     }))
   }
   if (closures.length === 0) return
-  await Promise.race([
-    Promise.all(closures),
-    new Promise<void>(resolve => setTimeout(resolve, 2_000)),
-  ])
+  const startedAt = performance.now()
+  // The timeout is a BOUND on a genuinely hung close, not a second owner of
+  // the socket lifecycle: once the close promise wins, the losing timer must
+  // be cancelled or it keeps a referenced Node handle alive past disposal.
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<void>(resolve => {
+    timer = setTimeout(resolve, timeoutMs)
+  })
+  try {
+    await Promise.race([Promise.all(closures), deadline])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+  diag.debug('local transport: remaining sockets settled', {
+    sockets: sockets.size,
+    durationMs: Math.round((performance.now() - startedAt) * 10) / 10,
+  })
+}
+
+/**
+ * Dispose ONE official Fiber under its ORIGINAL hang budget. This is a fault
+ * bound, never a second completion path: the timer is cancelled when the Fiber
+ * settles or rejects so a normal disposal cannot leave a referenced 5s handle
+ * keeping the Client process alive.
+ */
+export async function disposeFiberWithinDeadline(
+  fiber: { dispose(): Promise<unknown> },
+  label: string,
+  diag: Diag,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const startedAt = performance.now()
+  let timedOut = false
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true
+      reject(new Error(`local transport: ${label} disposal timed out`))
+    }, timeoutMs)
+  })
+  try {
+    await Promise.race([fiber.dispose(), deadline])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+    diag.debug('local transport: fiber disposal settled', {
+      fiber: label,
+      timedOut,
+      durationMs: Math.round((performance.now() - startedAt) * 10) / 10,
+    })
+  }
 }
 
 /**
@@ -494,9 +843,17 @@ export async function installLocalTransport(
   options: StartLocalTransportOptions,
 ): Promise<InstalledLocalClientTransport> {
   const { dshAnchor, host, scope, diag } = options
-  const modules = await loadLocalTransportModules(dshAnchor)
+  const modules = options.modulesOverride ?? await loadLocalTransportModules(dshAnchor)
   const origin = host.record.origin
   let disposed = false
+  /**
+   * The ONE in-flight/completed disposal. Every caller of `dispose()` — the
+   * exit root's early release, the surface handle teardown, the startup
+   * failure unwind — awaits the SAME settlement and observes the SAME failure:
+   * a later call must never return success over an unwind that already failed
+   * (the release's `cleanupFailed` would otherwise be silently lost).
+   */
+  let disposalPromise: Promise<void> | undefined
   const disposal = new AbortController()
   let fatalReported = false
   let live = false
@@ -521,7 +878,7 @@ export async function installLocalTransport(
   }
   const isTerminalRefreshFailure = (error: unknown): boolean =>
     !(error instanceof LocalScopeError && error.code === 'HOST_UNRESPONSIVE')
-  const refreshCookie = async (): Promise<void> => {
+  const refreshCookie = async (signal?: AbortSignal): Promise<void> => {
     if (process.env.SPLIT_PROCESS_CLIENT_FORCE_REFRESH_UNRESPONSIVE_ONCE === '1' && !forcedRetryableRefresh) {
       // Qualification-only probe: a transient refresh failure must remain an
       // ordinary carrier loss for the official same-Host retry, not a fatal.
@@ -532,7 +889,7 @@ export async function installLocalTransport(
       refreshPromise = (async () => {
         try {
           const launch = readLaunchMaterial(scope, host.identity)
-          cookie = await connectForCookie(host.identity, launch)
+          cookie = await connectForCookie(host.identity, launch, signal)
         } catch (error) {
           // Identity/auth/file/build failures are terminal. A transient
           // transport-level HOST_UNRESPONSIVE remains an ordinary carrier loss
@@ -552,7 +909,25 @@ export async function installLocalTransport(
   const includeCookie = process.env.SPLIT_PROCESS_CLIENT_OMIT_COOKIE !== '1'
   // The borrowed HTTP fetch for the Remote archive adapter: the SAME origin
   // and Cookie policy the official Connection's unary carrier uses.
-  const fetchAuthenticated = cookieFetch(origin, () => cookie, includeCookie)
+  const fetchAuthenticated = cookieFetch(
+    origin,
+    () => cookie,
+    includeCookie,
+    options.qualificationPromptAckDropped,
+  )
+  // The official unary carrier is ONE installation-lifetime object, exactly
+  // like `fetchAuthenticated`: its once-only qualification injections (the
+  // prompt/model ACK drops and the forged operator Cookie) are factory-local
+  // state. Constructing it per request would reset those flags and the
+  // AFTER_MS timer on every RPC.
+  const fetchOfficial = cookieFetch(
+    origin,
+    () => cookie,
+    includeCookie,
+    options.qualificationPromptAckDropped,
+  )
+  /** Borrowed-route send; re-assigned below once the Connection exists. */
+  let sendAuthenticated: (input: string | URL, init?: RequestInit) => Promise<Response> = fetchAuthenticated
 
   let typertFiber: Fiber | undefined
   let connectionFiber: Fiber | undefined
@@ -574,7 +949,7 @@ export async function installLocalTransport(
       }
     }
     try {
-      await closeRemainingSockets(sockets)
+      await closeRemainingSockets(sockets, diag)
     } catch (error) {
       errors.push(error)
     }
@@ -585,12 +960,7 @@ export async function installLocalTransport(
     ] as const) {
       if (fiber === undefined) continue
       try {
-        await Promise.race([
-          fiber.dispose(),
-          new Promise((_, reject) => {
-            setTimeout(() => reject(new Error(`local transport: ${label} disposal timed out`)), 5_000)
-          }),
-        ])
+        await disposeFiberWithinDeadline(fiber, label, diag)
       } catch (error) {
         errors.push(error)
       }
@@ -605,11 +975,36 @@ export async function installLocalTransport(
     options.signal?.throwIfAborted()
 
     const createWebSocket = cookieWebSocketFactory(origin, () => cookie, refreshCookie, sockets, wrappers, diag, includeCookie)
+    const recoverOperator = createOperatorRecovery(() => connection, disposal.signal)
+    /**
+     * The ONE auth-recovery wrapper for the official unary carrier and every
+     * borrowed authenticated route. Two DIFFERENT questions are kept apart:
+     *
+     * 1. Must the connection be rebuilt? YES for every 401 except a forwarded
+     *    event RESULT, whose payload belongs to the stream and Peer that
+     *    received the invocation — there the Gateway's own generation abort +
+     *    Host re-delivery is the only correct recovery. A dead operator affects
+     *    EVERY route, so a non-replayable request (a stream/FormData upload)
+     *    still triggers the rebuild even though it cannot be re-sent; otherwise
+     *    that upload would leave every later request on the expired operator.
+     * 2. May THIS payload be re-sent? Only a replayable body, only once, and
+     *    only after the re-admitted generation is ready. A 401 is rejected
+     *    before Host dispatch, so this retry cannot duplicate a write.
+     */
+    sendAuthenticated = (input, init) => sendWithOperatorRecovery(
+      { send: fetchAuthenticated, recoverOperator, origin },
+      input,
+      init,
+    )
     connectionFiber = context.plugin(connectionContext => {
       modules.connection.installConnection(connectionContext, {
         interactions: 'answer',
         transport: {
-          fetch: cookieFetch(origin, () => cookie, includeCookie),
+          fetch: (input, init) => sendWithOperatorRecovery(
+            { send: fetchOfficial, recoverOperator, origin },
+            input,
+            init,
+          ),
           createWebSocket: url => {
             const socket = createWebSocket(url)
             options.qualificationWebSocketObserver?.(url, socket)
@@ -691,13 +1086,17 @@ export async function installLocalTransport(
         if (installed.generation.getSnapshot() === undefined) {
           throw new LocalScopeError('HOST_UNRESPONSIVE', 'local transport: no current authenticated Host generation')
         }
-        // A later peer always needs the refreshed Cookie (the Host releases the
-        // old peer when its mux socket closed); the archive call is a one-shot
-        // user action, never a hot-loop path.
-        await refreshCookie()
+        // The borrowed fetch speaks with the SAME operator Cookie as the live
+        // connection: minting a second operator here would make this request
+        // arrive as a different Peer than the one that owns the open
+        // forwarded-event stream, and the Gateway refuses that Peer's answer
+        // ("$events/result: Remote event result belongs to another Peer").
+        // The connection's own re-admit is the ONLY Cookie rotation point (the
+        // socket factory refreshes before every RE-open), so a reconnect
+        // carries the new operator and this fetch simply follows it.
         if (disposed) throw new Error('local transport: the authenticated fetch is unavailable after disposal')
         if (fatalError !== undefined) throw fatalError
-        return await fetchAuthenticated(input, init)
+        return await sendAuthenticated(input, init)
       },
       dropWebSocketsForQualification(): void {
         for (const socket of [...sockets]) {
@@ -705,14 +1104,20 @@ export async function installLocalTransport(
         }
       },
       async dispose(): Promise<void> {
-        if (disposed) return
+        if (disposalPromise !== undefined) return await disposalPromise
         disposed = true
-        const errors = await unwind()
-        if (errors.length === 0) return
-        const primary = errors[0] instanceof Error ? errors[0] : new Error(String(errors[0]))
-        for (const secondary of errors.slice(1)) mergeCause(primary, secondary)
-        ;(primary as Error & { cleanupFailed?: boolean }).cleanupFailed = true
-        throw primary
+        disposalPromise = (async () => {
+          const errors = await unwind()
+          if (errors.length === 0) return
+          const primary = errors[0] instanceof Error ? errors[0] : new Error(String(errors[0]))
+          for (const secondary of errors.slice(1)) mergeCause(primary, secondary)
+          ;(primary as Error & { cleanupFailed?: boolean }).cleanupFailed = true
+          throw primary
+        })()
+        // A later caller awaiting the same disposal must not swallow the
+        // unhandled-rejection contract of the first caller's race slot.
+        disposalPromise.catch(() => {})
+        return await disposalPromise
       },
     }
     return handle

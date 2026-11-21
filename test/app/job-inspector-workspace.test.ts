@@ -144,15 +144,21 @@ interface TaskHarness {
 
 /** Attach the REAL TaskRuntime owner to the real app (the production wiring:
  *  `mounted()` returns this app). */
-function attachTasks(app: TuiApp, options: { jobIds?: readonly string[] } = {}): TaskHarness {
+function attachTasks(app: TuiApp, options: { jobIds?: readonly string[]; jobStatuses?: readonly string[] } = {}): TaskHarness {
   const jobIds = [...(options.jobIds ?? [])]
-  const jobSnapshots = (): TaskBrowserJobInput[] => jobIds.map((id, index) => ({
-    id,
-    kind: 'bash',
-    label: `job ${id}`,
-    status: 'running',
-    startedAt: 1_000 + index,
-  }))
+  const jobStatuses = [...(options.jobStatuses ?? [])]
+  const jobSnapshots = (): TaskBrowserJobInput[] => jobIds.map((id, index) => {
+    const status = jobStatuses[index] ?? 'running'
+    const terminal = status !== 'running' && status !== 'stopping'
+    return {
+      id,
+      kind: 'bash',
+      label: `job ${id}`,
+      status,
+      startedAt: 1_000 + index,
+      ...(terminal ? { finishedAt: 2_000 + index } : {}),
+    }
+  })
   const observation = new JobObservationDouble()
   const subject = {} as SessionSubject
   let rosterReads = 0
@@ -256,7 +262,7 @@ const openingRow = (id = 'job-a'): JobInspectorState => ({
 
 // ── A-01: the pure typed projection ─────────────────────────────────────────
 
-test('A-01 the projector separates connecting / observed / empty / gap+error+settled / unavailable', () => {
+test('the projector separates connecting / observed / empty / gap+error+settled / unavailable', () => {
   // (1) no snapshot yet: the opener identity is a FALLBACK, the phase is
   // connecting and no retained output is claimed.
   const connecting = deriveJobInspectorView(openingRow())
@@ -321,7 +327,7 @@ test('A-01 the projector separates connecting / observed / empty / gap+error+set
   assert.equal(unavailable.settled, false)
 })
 
-test('A-01b the panel header keeps status/gap/error visible and its Action Bar is the last row at every budget', () => {
+test('the panel header keeps status/gap/error visible and its Action Bar is the last row at every budget', () => {
   const budgets = [
     { width: 80, rows: 8 },
     { width: 80, rows: 24 },
@@ -342,6 +348,7 @@ test('A-01b the panel header keeps status/gap/error visible and its Action Bar i
       },
       {
         rows: () => budget.rows,
+        columns: () => budget.width,
         requestRender: () => {},
         notice: () => undefined,
         onClose: () => {},
@@ -386,7 +393,7 @@ test('A-01b the panel header keeps status/gap/error visible and its Action Bar i
     // The pinned chrome never exceeds the granted row budget: the Action Bar is
     // the LAST rendered row and the layout always has room for it.
     assert.ok(lines.length <= Math.max(1, budget.rows - 1), 'the pinned chrome must leave a body row')
-    assert.match(lines.at(-1)!, /Esc back/, `the Action Bar is the last rendered row at ${budget.width}x${budget.rows}`)
+    assert.match(stripTerminalSequences(lines.at(-1)!), /Back \[Esc\]/, `the Action Bar is the last rendered row at ${budget.width}x${budget.rows}`)
     if (budget.width >= 80) {
       // The bounded preview is disclosed at every standard budget — by the
       // DEDICATED reading-facts row where the frame grants it, and by the pinned
@@ -414,11 +421,12 @@ test('A-01b the panel header keeps status/gap/error visible and its Action Bar i
   }
 })
 
-test('A-01c the Action Bar drops the Stop verb (never Esc back) when the capability dies', () => {
+test('the Action Bar drops the Stop verb (never Esc back) when the capability dies', () => {
   let live = true
   let closes = 0
   const panel = new JobInspectorPanel(openingRow(), {
     rows: () => 24,
+    columns: () => 120,
     requestRender: () => {},
     notice: () => undefined,
     onClose: () => { closes += 1 },
@@ -431,11 +439,11 @@ test('A-01c the Action Bar drops the Stop verb (never Esc back) when the capabil
     paintedBox: () => undefined,
     setNativeCopyOnSelect: () => {},
   })
-  assert.match(panel.render(100).at(-1)!, /stop/)
-  assert.match(panel.render(100).at(-1)!, /Esc back/)
+  assert.match(stripTerminalSequences(panel.render(100).at(-1)!), /stop/)
+  assert.match(stripTerminalSequences(panel.render(100).at(-1)!), /Back \[Esc\]/)
   live = false
-  const settled = panel.render(100).at(-1)!
-  assert.match(settled, /Esc back/)
+  const settled = stripTerminalSequences(panel.render(100).at(-1)!)
+  assert.match(settled, /Back \[Esc\]/)
   assert.ok(!/stop/.test(settled), 'a settled Job must not advertise Stop')
   // The panel's only intents are Esc (close) and the gated stop action.
   panel.handleInput('s')
@@ -445,7 +453,7 @@ test('A-01c the Action Bar drops the Stop verb (never Esc back) when the capabil
   panel.dispose()
 })
 
-test('A-01d a long Job identity and a long error text never hide the status or the independent markers', () => {
+test('a long Job identity and a long error text never hide the status or the independent markers', () => {
   const longId = `job-${'x'.repeat(120)}`
   const panel = new JobInspectorPanel(
     {
@@ -458,6 +466,7 @@ test('A-01d a long Job identity and a long error text never hide the status or t
     },
     {
       rows: () => 24,
+    columns: () => 120,
       requestRender: () => {},
       notice: () => undefined,
       onClose: () => {},
@@ -484,7 +493,66 @@ test('A-01d a long Job identity and a long error text never hide the status or t
   panel.dispose()
 })
 
-test('A-01e the ONE chrome plan keeps the Action Bar on screen at every height, notice included', () => {
+test('a Job bar gesture is revoked when the terminal resizes before the next paint', () => {
+  let rows = 24
+  let columns = 80
+  let closes = 0
+  let boxes: Array<{ x: number; y: number; width: number; height: number }> = []
+  const panel = new JobInspectorPanel(
+    { opening: { jobId: 'job-a', kind: 'bash', label: 'pnpm build', status: 'running' } },
+    {
+      rows: () => rows,
+      columns: () => columns,
+      requestRender: () => {},
+      notice: () => undefined,
+      onClose: () => { closes += 1 },
+      canStop: () => false,
+      onStop: () => {},
+      isFindKey: () => false,
+      findHint: () => '',
+      focusComponent: () => {},
+      onCopy: () => {},
+      // The frame-painted pass reads the header then the pinned bar in order.
+      paintedBox: () => boxes.shift(),
+      setNativeCopyOnSelect: () => {},
+    },
+  )
+  const paint = (): string => {
+    boxes = [
+      { x: 0, y: 0, width: columns, height: 4 },
+      { x: 0, y: rows - 1, width: columns, height: 1 },
+    ]
+    const lines = panel.render(columns)
+    panel.onFramePainted()
+    return stripTerminalSequences(lines.at(-1)!)
+  }
+  const bar = paint()
+  const col = bar.indexOf('Back')
+  assert.ok(col >= 0, `the bar paints its Back affordance:\n${bar}`)
+
+  // A resize between press and release (no repaint yet) revokes the gesture:
+  // the old physical cells must never replay the previous Esc outcome.
+  panel.onChromePress(col, rows - 1)
+  rows = 20
+  panel.onChromeClick(col, 23)
+  assert.equal(closes, 0, 'a pre-repaint row resize revokes the bar gesture')
+
+  // The same fence covers a width-only change.
+  rows = 24
+  panel.onChromePress(col, 23)
+  columns = 100
+  panel.onChromeClick(col, 23)
+  assert.equal(closes, 0, 'a pre-repaint width change revokes the bar gesture')
+
+  // Positive control: on an UNCHANGED frame the same cells act exactly once.
+  columns = 80
+  panel.onChromePress(col, 23)
+  panel.onChromeClick(col, 23)
+  assert.equal(closes, 1, 'an unchanged painted frame still runs the ONE close intent')
+  panel.dispose()
+})
+
+test('the ONE chrome plan keeps the Action Bar on screen at every height, notice included', () => {
   const flags = (): JobInspectorState => ({
     ...openingRow(),
     observed: {
@@ -495,6 +563,7 @@ test('A-01e the ONE chrome plan keeps the Action Bar on screen at every height, 
   })
   const panelAt = (rows: number, noticeLive: boolean): JobInspectorPanel => new JobInspectorPanel(flags(), {
     rows: () => rows,
+    columns: () => 120,
     requestRender: () => {},
     notice: () => (noticeLive ? { text: 'could not stop job job-a: refused', kind: 'error' } : undefined),
     onClose: () => {},
@@ -512,7 +581,7 @@ test('A-01e the ONE chrome plan keeps the Action Bar on screen at every height, 
   // marker survives on the status row, and the Action Bar is the last row.
   const compact = panelAt(8, false).render(44)
   assert.equal(compact.length, 4, 'a compact header (status, summary, tabs) plus the pinned Action Bar (1)')
-  assert.match(compact.at(-1)!, /Esc back/)
+  assert.match(stripTerminalSequences(compact.at(-1)!), /Back \[Esc\]/)
   assert.match(compact.join('\n'), /\[GAP\]/)
   assert.match(compact.join('\n'), /\[ERROR\]/)
   assert.match(compact.join('\n'), /\[SETTLED\]/)
@@ -523,7 +592,7 @@ test('A-01e the ONE chrome plan keeps the Action Bar on screen at every height, 
   // because taking a row would leave the Output with nothing.
   const tight = panelAt(4, true).render(44)
   assert.equal(tight.length, 2, 'only the status row and the pinned Action Bar fit a 4-row grant')
-  assert.match(tight.at(-1)!, /Esc back/)
+  assert.match(stripTerminalSequences(tight.at(-1)!), /Back \[Esc\]/)
   assert.ok(!/could not stop/.test(tight.join('\n')), 'no notice row on a 4-row grant')
 
   // A 5-row grant is still too few for the notice (plan B1-D §3.2 grants it only
@@ -533,13 +602,13 @@ test('A-01e the ONE chrome plan keeps the Action Bar on screen at every height, 
     'a 5-row grant still has no notice row')
   const withNotice = panelAt(6, true).render(44)
   assert.equal(withNotice.length, 5, 'the notice is inside the height budget, never below the bar')
-  assert.match(withNotice.at(-1)!, /Esc back/)
+  assert.match(stripTerminalSequences(withNotice.at(-1)!), /Back \[Esc\]/)
   assert.match(withNotice.join('\n'), /✗ could not stop job job-a: refused/)
 
   // 80×2 with a live notice: the notice YIELDS to the header and the Action Bar.
   const tiny = panelAt(2, true).render(80)
   assert.equal(tiny.length, 2, 'only the status row and the pinned Action Bar')
-  assert.match(tiny.at(-1)!, /Esc back/)
+  assert.match(stripTerminalSequences(tiny.at(-1)!), /Back \[Esc\]/)
   assert.match(tiny[0]!, /Failed/)
   assert.match(tiny.join('\n'), /\[GAP\]/)
   assert.ok(!/could not stop/.test(tiny.join('\n')), 'the notice yields on a 2-row terminal')
@@ -548,11 +617,11 @@ test('A-01e the ONE chrome plan keeps the Action Bar on screen at every height, 
   // 80×1 with a live notice: the Action Bar ALONE — it is never budgeted away.
   const one = panelAt(1, true).render(80)
   assert.equal(one.length, 1)
-  assert.match(one[0]!, /Esc back/)
+  assert.match(stripTerminalSequences(one[0]!), /Back \[Esc\]/)
 })
 
 // ── A-02: the real Task Browser → Job workspace → same browser ─────────────
-test('A-02 selecting a Job in the real Task Browser opens the fullscreen Job workspace and Esc returns to the SAME browser', async () => {
+test('selecting a Job in the real Task Browser opens the fullscreen Job workspace and Esc returns to the SAME browser', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a', 'job-b'] })
   await flush()
@@ -598,9 +667,62 @@ test('A-02 selecting a Job in the real Task Browser opens the fullscreen Job wor
   app.stop()
 })
 
+test('an expanded terminal Job opens its workspace and returns to the SAME browser with query/type/selection intact', async () => {
+  const { vt, app } = startApp()
+  const harness = attachTasks(app, { jobIds: ['job-live', 'job-old'], jobStatuses: ['running', 'completed'] })
+  await flush()
+  harness.tasks.openTasksBrowser('full')
+  await vt.waitForRender()
+  assert.ok(view(vt).includes('Show 1 past jobs [J]'), `precondition — terminal history collapsed:\n${view(vt)}`)
+  assert.ok(!view(vt).includes('job job-old'))
+
+  vt.sendInput('j') // explicit history disclosure
+  await vt.waitForRender()
+  assert.ok(view(vt).includes('Hide 1 past jobs [J]'), `j expands the history:\n${view(vt)}`)
+  assert.ok(view(vt).includes('job job-old'))
+
+  vt.sendInput('f') // type list: All → bash
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B')
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.ok(view(vt).includes('[bash]'), `the type filter is applied:\n${view(vt)}`)
+
+  vt.sendInput('/')
+  for (const key of 'old') vt.sendInput(key)
+  await vt.waitForRender()
+  assert.equal(harness.lastBrowser()?.getViewState?.().selectedId, 'job:job-old', 'search selects the matching history Job')
+  vt.sendInput('\x1b') // exit search, keep the query
+  await vt.waitForRender()
+  vt.sendInput('\r') // open the selected terminal Job
+  await vt.waitForRender()
+  assert.match(view(vt), /Job · job-old · bash/, `the terminal Job opens its workspace:\n${view(vt)}`)
+
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  const back = harness.lastBrowser()!
+  const state = back.getViewState!()
+  assert.equal(state.searchQuery, 'old', 'the search query survives the viewer round trip')
+  assert.equal(state.typeFilter, 'bash', 'the type filter survives the viewer round trip')
+  assert.equal(state.selectedId, 'job:job-old', 'the selected terminal Job survives the viewer round trip')
+  assert.ok(view(vt).includes('Jobs / executions'), 'the SAME Full browser instance is restored')
+  assert.ok(view(vt).includes('[search: old]') && view(vt).includes('[bash]'), `search/type chrome is intact:\n${view(vt)}`)
+
+  // Clearing the query restores the expanded history chosen before the viewer.
+  vt.sendInput('/')
+  for (let index = 0; index < 'old'.length; index += 1) vt.sendInput('\x7f')
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.ok(view(vt).includes('Hide 1 past jobs [J]'), 'the manual history expansion survived the round trip')
+  assert.ok(view(vt).includes('job job-old'))
+  back.close()
+  await vt.waitForRender()
+  app.stop()
+})
+
 // ── A-03/A-04: the paused return surface and the user's display mode ────────
 
-test('A-03 regular → Job → regular: the SAME main screen restarts, the draft/cursor and the browser selection survive, and no display preference is written', async () => {
+test('regular → Job → regular: the SAME main screen restarts, the draft/cursor and the browser selection survive, and no display preference is written', async () => {
   let fullscreenChanges = 0
   const { vt, app } = startApp({}, { onFullscreenChange: () => { fullscreenChanges += 1 } })
   const screens = recordScreenStarts()
@@ -638,7 +760,7 @@ test('A-03 regular → Job → regular: the SAME main screen restarts, the draft
   app.stop()
 })
 
-test('A-04 transcript fullscreen → Job → fullscreen: the SAME alt screen restarts with its NON-DEFAULT scroll state, and the user preference changes exactly once', async () => {
+test('transcript fullscreen → Job → fullscreen: the SAME alt screen restarts with its NON-DEFAULT scroll state, and the user preference changes exactly once', async () => {
   let fullscreenChanges = 0
   const { vt, app } = startApp({}, { onFullscreenChange: () => { fullscreenChanges += 1 } })
   const screens = recordScreenStarts()
@@ -696,7 +818,7 @@ test('A-04 transcript fullscreen → Job → fullscreen: the SAME alt screen res
 
 // ── A-05: ONE observer, live pushes, gated Stop ─────────────────────────────
 
-test('A-05 ONE observer pushes every snapshot into the painted workspace and Stop runs through the port once under its live gate', async () => {
+test('ONE observer pushes every snapshot into the painted workspace and Stop runs through the port once under its live gate', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -730,7 +852,7 @@ test('A-05 ONE observer pushes every snapshot into the painted workspace and Sto
   app.stop()
 })
 
-test('A-05c a Stop settlement failure is visible INSIDE the workspace (its own notice row) with no optimistic state change', async () => {
+test('a Stop settlement failure is visible INSIDE the workspace (its own notice row) with no optimistic state change', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -762,15 +884,15 @@ test('A-05c a Stop settlement failure is visible INSIDE the workspace (its own n
   assert.match(second, /Job · job-a · bash.*‣ Running/, 'still no optimistic state change')
   assert.deepEqual(harness.observation.stops, ['job-a', 'job-a'], 'each press dispatches exactly one port Stop')
   // The pinned Action Bar stays the last row even with the notice row present.
-  const barRow = rawView(vt).findIndex(line => /Esc back/.test(line))
+  const barRow = rawView(vt).findIndex(line => /Back \[Esc\]/.test(line))
   assert.equal(barRow, 23, 'the Action Bar stays pinned to the physical bottom')
-  assert.equal(headerBefore.includes('Esc back'), true)
+  assert.equal(headerBefore.includes('Back [Esc]'), true)
   // The same notice on an extremely short REAL terminal: the pins hold.
   vt.resize(80, 2)
   await vt.waitForRender()
   const tiny = rawView(vt)
   assert.equal(tiny.length, 2)
-  assert.match(tiny[1]!, /Esc back/, `the Action Bar must survive an 80x2 grant with a live notice:\n${tiny.join('\n')}`)
+  assert.match(tiny[1]!, /Back \[Esc\]/, `the Action Bar must survive an 80x2 grant with a live notice:\n${tiny.join('\n')}`)
   assert.ok(!/could not stop/.test(tiny.join('\n')), 'the notice yields to the pinned chrome')
 
   // 44×4: the notice still yields — the Output keeps its row.
@@ -778,7 +900,7 @@ test('A-05c a Stop settlement failure is visible INSIDE the workspace (its own n
   await vt.waitForRender()
   const tight = rawView(vt)
   assert.equal(tight.length, 4)
-  assert.match(tight[3]!, /Esc back/, `the Action Bar stays last at 44x4:\n${tight.join('\n')}`)
+  assert.match(tight[3]!, /Back \[Esc\]/, `the Action Bar stays last at 44x4:\n${tight.join('\n')}`)
   assert.ok(!/could not stop/.test(tight.join('\n')), 'a notice never squeezes the last output row away')
   assert.match(tight.join('\n'), /retained job-a/, `the Output keeps its row at 44x4:\n${tight.join('\n')}`)
 
@@ -788,7 +910,7 @@ test('A-05c a Stop settlement failure is visible INSIDE the workspace (its own n
   await vt.waitForRender()
   const five = rawView(vt)
   assert.equal(five.length, 5)
-  assert.match(five[4]!, /Esc back/, 'the Action Bar stays the last row')
+  assert.match(five[4]!, /Back \[Esc\]/, 'the Action Bar stays the last row')
   assert.ok(!/could not stop/.test(five.join('\n')),
     `a notice still yields at 44x5:\n${five.join('\n')}`)
   assert.match(five.join('\n'), /retained job-a/, `the Output keeps its row at 44x5:\n${five.join('\n')}`)
@@ -799,7 +921,7 @@ test('A-05c a Stop settlement failure is visible INSIDE the workspace (its own n
   await vt.waitForRender()
   const six = rawView(vt)
   assert.equal(six.length, 6)
-  assert.match(six[5]!, /Esc back/, 'the Action Bar stays the last row at 44x6')
+  assert.match(six[5]!, /Back \[Esc\]/, 'the Action Bar stays the last row at 44x6')
   assert.match(six.join('\n'), /could not stop job job-a/, `the notice shows once an output row is still guaranteed:\n${six.join('\n')}`)
   assert.match(six.join('\n'), /retained job-a/, `the Output keeps its row at 44x6:\n${six.join('\n')}`)
 
@@ -809,7 +931,7 @@ test('A-05c a Stop settlement failure is visible INSIDE the workspace (its own n
   app.stop()
 })
 
-test('A-05b a failed observation open still opens the workspace with the reason visible and Esc usable', async () => {
+test('a failed observation open still opens the workspace with the reason visible and Esc usable', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   harness.observation.openFailure = 'no job controller'
@@ -831,7 +953,7 @@ test('A-05b a failed observation open still opens the workspace with the reason 
 
 // ── A-06: real terminal budgets and resize ──────────────────────────────────
 
-test('A-06 the workspace re-budgets with the LIVE terminal: tail and Action Bar stay visible on short/narrow/large screens', async () => {
+test('the workspace re-budgets with the LIVE terminal: tail and Action Bar stay visible on short/narrow/large screens', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -849,10 +971,10 @@ test('A-06 the workspace re-budgets with the LIVE terminal: tail and Action Bar 
     const lines = rawView(vt)
     assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, true)
     assert.match(lines.join('\n'), /Job · job-a · bash.*‣ Running/, `the header must survive ${width}x${height}`)
-    const barRow = lines.findIndex(line => /Esc back/.test(line))
+    const barRow = lines.findIndex(line => /Back \[Esc\]/.test(line))
     assert.notEqual(barRow, -1, `the Action Bar must be painted at ${width}x${height}`)
     assert.ok(barRow < height, `the Action Bar must be inside the screen at ${width}x${height}`)
-    assert.ok(lines[barRow]!.includes('Retained preview') || lines[barRow]!.includes('Esc back'))
+    assert.ok(lines[barRow]!.includes('Retained preview') || lines[barRow]!.includes('Back [Esc]'))
     assert.match(lines.join('\n'), /LATEST TAIL LINE/, `the latest retained line must be visible at ${width}x${height}`)
     for (const line of lines) {
       assert.ok(visibleWidth(line) <= width, `no physical line may exceed ${width} columns at ${height} rows`)
@@ -867,7 +989,7 @@ test('A-06 the workspace re-budgets with the LIVE terminal: tail and Action Bar 
 
 // ── A-07: same-session replacement and closure re-entry ─────────────────────
 
-test('A-07 a same-session A → B replacement releases each observer once and a re-entrant open inside A\'s close owns the final workspace', async () => {
+test('a same-session A → B replacement releases each observer once and a re-entrant open inside A\'s close owns the final workspace', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a', 'job-b'] })
   await flush()
@@ -890,7 +1012,7 @@ test('A-07 a same-session A → B replacement releases each observer once and a 
   app.stop()
 })
 
-test('A-07b a re-entrant Job open inside the closing workspace\'s onClose wins over the outer replacement', async () => {
+test('a re-entrant Job open inside the closing workspace\'s onClose wins over the outer replacement', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a', 'job-b', 'job-c'] })
   await flush()
@@ -943,7 +1065,7 @@ test('A-07b a re-entrant Job open inside the closing workspace\'s onClose wins o
 
 // ── A-08: every external close path ─────────────────────────────────────────
 
-test('A-08 the parent browser close, resetTasks, the explicit observer release and TUI dispose all close the workspace exactly once', async () => {
+test('the parent browser close, resetTasks, the explicit observer release and TUI dispose all close the workspace exactly once', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -989,7 +1111,7 @@ test('A-08 the parent browser close, resetTasks, the explicit observer release a
   assert.deepEqual(harness.observation.forJob('job-a'), [1, 1, 1, 1], 'disposal releases the workspace observer once')
 })
 
-test('A-08b a Job workspace requested while a blocking modal owns the surface is REFUSED without a half screen', async () => {
+test('a Job workspace requested while a blocking modal owns the surface is REFUSED without a half screen', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -1021,7 +1143,7 @@ test('A-08b a Job workspace requested while a blocking modal owns the surface is
 
 // ── A-09: blocking-owner pre-emption while the Job is open ──────────────────
 
-test('A-09 a Question / Approval / Save request arriving while the Job is open leaves the workspace BEFORE it can swallow the keys', async () => {
+test('a Question / Approval / Save request arriving while the Job is open leaves the workspace BEFORE it can swallow the keys', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -1048,7 +1170,7 @@ test('A-09 a Question / Approval / Save request arriving while the Job is open l
   app.stop()
 })
 
-test('A-09b an Approval arriving while the Job is open leaves the workspace and really receives the keys', async () => {
+test('an Approval arriving while the Job is open leaves the workspace and really receives the keys', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -1074,7 +1196,7 @@ test('A-09b an Approval arriving while the Job is open leaves the workspace and 
   app.stop()
 })
 
-test('A-09c a Save Location prompt arriving while the Job is open leaves the workspace and really receives the keys', async () => {
+test('a Save Location prompt arriving while the Job is open leaves the workspace and really receives the keys', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -1108,7 +1230,7 @@ test('A-09c a Save Location prompt arriving while the Job is open leaves the wor
   app.stop()
 })
 
-test('A-09d a Question presented BY the workspace close callback queues the older request instead of overwriting it', async () => {
+test('a Question presented BY the workspace close callback queues the older request instead of overwriting it', async () => {
   const { vt, app } = startApp()
   let innerQuestion: Promise<unknown> | undefined
   let reentered = false
@@ -1151,7 +1273,7 @@ test('A-09d a Question presented BY the workspace close callback queues the olde
   app.stop()
 })
 
-test('A-09e a Save Location request whose abandonment callback presents a Question is REFUSED, never mounted over it', async () => {
+test('a Save Location request whose abandonment callback presents a Question is REFUSED, never mounted over it', async () => {
   const { vt, app } = startApp()
   let innerQuestion: Promise<unknown> | undefined
   let reentered = false
@@ -1189,7 +1311,7 @@ test('A-09e a Save Location request whose abandonment callback presents a Questi
   app.stop()
 })
 
-test('A-09k an ALREADY-aborted Approval never preempts the Job workspace', async () => {
+test('an ALREADY-aborted Approval never preempts the Job workspace', async () => {
   const { vt, app } = startApp()
   const handle = app.openJobInspector({
     initial: openingRow(),
@@ -1217,7 +1339,7 @@ test('A-09k an ALREADY-aborted Approval never preempts the Job workspace', async
   app.stop()
 })
 
-test('A-09f the effective exit request keeps its Host admission inside the workspace', async () => {
+test('the effective exit request keeps its Host admission inside the workspace', async () => {
   let exits = 0
   const { vt, app } = startApp({}, { onExit: () => { exits += 1 } })
   const handle = app.openJobInspector({
@@ -1243,7 +1365,7 @@ test('A-09f the effective exit request keeps its Host admission inside the works
   app.stop()
 })
 
-test('A-09g a throwing workspace close never truncates the stop teardown', async () => {
+test('a throwing workspace close never truncates the stop teardown', async () => {
   const { vt, app } = startApp()
   const stops: TuiMainScreen[] = []
   const originalStop = TuiMainScreen.prototype.stop
@@ -1272,7 +1394,7 @@ test('A-09g a throwing workspace close never truncates the stop teardown', async
   }
 })
 
-test('A-09h a workspace leased BY the close callback during stop() is refused: no lease, no observer and no input owner survives', async () => {
+test('a workspace leased BY the close callback during stop() is refused: no lease, no observer and no input owner survives', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a', 'job-b'] })
   await flush()
@@ -1335,7 +1457,7 @@ test('A-09h a workspace leased BY the close callback during stop() is refused: n
   app.stop()
 })
 
-test('A-09i a workspace leased BY the abandonment callback while a blocking owner arrives is refused: the Question is visible and owns the keyboard', async () => {
+test('a workspace leased BY the abandonment callback while a blocking owner arrives is refused: the Question is visible and owns the keyboard', async () => {
   const failures: unknown[] = []
   const { vt, app } = startApp({}, {
     // The failure channel of `routeTerminalSettlementFailure`: the abandonment
@@ -1401,7 +1523,7 @@ test('A-09i a workspace leased BY the abandonment callback while a blocking owne
   app.stop()
 })
 
-test('A-09j a leader-bound effective exit still leaves the TUI while every other leader action stays blocked', async () => {
+test('a leader-bound effective exit still leaves the TUI while every other leader action stays blocked', async () => {
   let exits = 0
   let tasksOpened = 0
   const { vt, app } = startApp({}, { onExit: () => { exits += 1 } })
@@ -1467,7 +1589,7 @@ test('A-09j a leader-bound effective exit still leaves the TUI while every other
 
 // ── A-10: read-only workspace ───────────────────────────────────────────────
 
-test('A-10 ordinary keys and host shortcuts are inert inside the workspace and never touch the editor, transcript or browser; the effective Find opens ONLY the Job Find', async () => {
+test('ordinary keys and host shortcuts are inert inside the workspace and never touch the editor, transcript or browser; the effective Find opens ONLY the Job Find', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -1483,9 +1605,9 @@ test('A-10 ordinary keys and host shortcuts are inert inside the workspace and n
   // so "B1-B never enters the background search" is a real call count.
   const originalStartTranscriptSearch = app.startTranscriptSearch
   let transcriptSearches = 0
-  app.startTranscriptSearch = function (this: TuiApp): void {
+  app.startTranscriptSearch = function (this: TuiApp, scope): void {
     transcriptSearches += 1
-    originalStartTranscriptSearch.call(this)
+    originalStartTranscriptSearch.call(this, scope)
   }
 
   for (const chunk of ['x', '\r', '\x0f', '\x1b[B', '\x1b[A', '1']) {
@@ -1526,7 +1648,7 @@ test('A-10 ordinary keys and host shortcuts are inert inside the workspace and n
 
 // ── A-11: the legacy sibling path is untouched ──────────────────────────────
 
-test('A-11 the standalone output viewer stays the legacy overlay and never becomes a Job workspace', async () => {
+test('the standalone output viewer stays the legacy overlay and never becomes a Job workspace', async () => {
   const { vt, app } = startApp()
   let closes = 0
   const closer = app.openOutputViewer({
@@ -1553,7 +1675,7 @@ test('A-11 the standalone output viewer stays the legacy overlay and never becom
 
 // ── A-12: failure propagation and re-entry ──────────────────────────────────
 
-test('A-12 a throwing workspace open releases the observation once, retires the viewer token and rethrows the real error', async () => {
+test('a throwing workspace open releases the observation once, retires the viewer token and rethrows the real error', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a', 'job-b'] })
   await flush()
@@ -1586,7 +1708,7 @@ test('A-12 a throwing workspace open releases the observation once, retires the 
   app.stop()
 })
 
-test('A-12b a throwing workspace onClose still releases the screen and panel once and restores the return surface', async () => {
+test('a throwing workspace onClose still releases the screen and panel once and restores the return surface', async () => {
   const { vt, app } = startApp()
   const screens = recordScreenStarts()
   const panelDisposals: number[] = []
@@ -1623,7 +1745,7 @@ test('A-12b a throwing workspace onClose still releases the screen and panel onc
   app.stop()
 })
 
-test('A-12d a REAL failing Job screen start unwinds: the observation is released once, the return surface is restarted and the terminal owner is restored', async () => {
+test('a REAL failing Job screen start unwinds: the observation is released once, the return surface is restarted and the terminal owner is restored', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a', 'job-b'] })
   await flush()
@@ -1674,7 +1796,7 @@ test('A-12d a REAL failing Job screen start unwinds: the observation is released
   app.stop()
 })
 
-test('A-12e a REAL failing Job screen stop never strands the panel, the return surface or the observation', async () => {
+test('a REAL failing Job screen stop never strands the panel, the return surface or the observation', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -1723,7 +1845,7 @@ test('A-12e a REAL failing Job screen stop never strands the panel, the return s
   app.stop()
 })
 
-test('A-12c a second workspace lease is refused while one is open, and a disposed surface refuses both', async () => {
+test('a second workspace lease is refused while one is open, and a disposed surface refuses both', async () => {
   const { vt, app } = startApp()
   const handle = app.openJobInspector({
     initial: openingRow(),
@@ -1754,7 +1876,7 @@ test('A-12c a second workspace lease is refused while one is open, and a dispose
   }), /disposed surface/)
 })
 
-test('A-13 entering the Job workspace re-samples the observation its predecessor lost', async () => {
+test('entering the Job workspace re-samples the observation its predecessor lost', async () => {
   const saved = {
     NO_COLOR: process.env.NO_COLOR,
     FORCE_COLOR: process.env.FORCE_COLOR,
@@ -1817,4 +1939,168 @@ test('A-13 entering the Job workspace re-samples the observation its predecessor
     if (saved.COLORFGBG === undefined) delete process.env.COLORFGBG
     else process.env.COLORFGBG = saved.COLORFGBG
   }
+})
+
+// ── PR-4 R1: an effective wheel revokes a pressed header/bar gesture ─────────
+
+test('PR-4 R1: an effective Output-body wheel revokes a pressed header entry (no ghost Command page)', async () => {
+  const { vt, app } = startApp()
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  harness.tasks.openTasksBrowser('full')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  const longBody = Array.from({ length: 120 }, (_, line) => `wheel proof line ${String(line).padStart(3, '0')}`).join('\n')
+  harness.observation.latest()!.emit({ text: longBody })
+  await flush()
+  await vt.waitForRender()
+
+  const locate = (needle: string): { readonly row: number; readonly col: number } => {
+    const lines = rawView(vt)
+    const row = lines.findIndex(line => line.includes(needle))
+    assert.ok(row >= 0, `no painted row with ${needle}:\n${lines.join('\n')}`)
+    return { row, col: lines[row]!.indexOf(needle) }
+  }
+  const press = (cell: { readonly row: number; readonly col: number }): void => {
+    vt.sendInput(`\x1b[<0;${cell.col + 1};${cell.row + 1}M`)
+  }
+  const release = (cell: { readonly row: number; readonly col: number }): void => {
+    vt.sendInput(`\x1b[<0;${cell.col + 1};${cell.row + 1}m`)
+  }
+  // The visible body TEXT window (scrollbar glyphs move with the scroll position
+  // and are not part of the window identity).
+  const bodyWindow = (): string => rawView(vt)
+    .map(line => /wheel proof line (\d{3})/.exec(line)?.[1])
+    .filter((value): value is string => value !== undefined)
+    .join(',')
+
+  // The fresh positive: the painted entry IS a real click target.
+  const entry = locate('↗ Command')
+  press(entry)
+  await vt.waitForRender()
+  release(entry)
+  await vt.waitForRender()
+  assert.match(rawView(vt).join('\n'), /Copy All/, 'precondition: a fresh entry click opens the Command page')
+  const back = locate('Output [Esc]')
+  press(back)
+  await vt.waitForRender()
+  release(back)
+  await vt.waitForRender()
+  assert.ok(rawView(vt).some(line => line.includes('wheel proof line 119')), 'precondition: the Output page is back')
+
+  // ROUND-TRIP regression: an effective scroll away AND back to the press-time
+  // position must still retire the press (the boundary is the scroll, not the
+  // final position).
+  const roundTripEntry = locate('↗ Command')
+  const roundTripBody = locate('wheel proof line 119')
+  press(roundTripEntry)
+  await vt.waitForRender()
+  const atPress = bodyWindow()
+  vt.sendInput(`\x1b[<64;12;${Math.max(4, Math.min(roundTripBody.row, 20))}M`)
+  await vt.waitForRender()
+  assert.notEqual(bodyWindow(), atPress, 'round-trip leg 1: the wheel scrolled the body')
+  vt.sendInput(`\x1b[<65;12;${Math.max(4, Math.min(roundTripBody.row, 20))}M`)
+  await vt.waitForRender()
+  assert.equal(bodyWindow(), atPress, 'round-trip leg 2: the wheel scrolled back to the press-time window')
+  release(roundTripEntry)
+  await vt.waitForRender()
+  assert.ok(!rawView(vt).join('\n').includes('Copy All'), 'the stale press must stay retired across a round-trip scroll')
+
+  // Control: a ZERO-EFFECT wheel (down at the follow tail) keeps the same-cell
+  // press valid — the fence revokes only on a REAL viewport move.
+  const heldEntry = locate('↗ Command')
+  // Use a different cell inside the SAME painted segment: the round-trip press
+  // just released on the text cell, and a second same-cell click within the
+  // fork's double-click interval becomes a word-selection click, not a
+  // disclosure.
+  const heldCell = { row: heldEntry.row, col: heldEntry.col + 3 }
+  const tailRow = locate('wheel proof line 119')
+  const tailWheelRow = Math.max(4, Math.min(tailRow.row, 20))
+  press(heldCell)
+  await vt.waitForRender()
+  const atTail = rawView(vt).join('\n')
+  const boundaryBefore = bodyWindow()
+  vt.sendInput(`\x1b[<65;12;${tailWheelRow}M`)
+  await vt.waitForRender()
+  // The first bottom wheel may pause follow (a real state change); the SECOND
+  // is a true no-op. Both leave the OUTPUT WINDOW unmoved.
+  vt.sendInput(`\x1b[<65;12;${tailWheelRow}M`)
+  await vt.waitForRender()
+  assert.equal(bodyWindow(), boundaryBefore, 'the bottom-boundary wheels leave the painted body window unchanged')
+  release(heldCell)
+  await vt.waitForRender()
+  assert.match(rawView(vt).join('\n'), /Copy All/, `a zero-effect wheel keeps the legitimate same-cell press (existing contract):\n${rawView(vt).join('\n')}`)
+  const back2 = locate('Output [Esc]')
+  press(back2)
+  await vt.waitForRender()
+  release(back2)
+  await vt.waitForRender()
+
+  // The stale journey: press the entry, let a REAL wheel scroll the body, then
+  // release on the same cell. The wheel must actually move the window.
+  const staleEntry = locate('↗ Command')
+  const bodyRow = locate('wheel proof line 119')
+  press(staleEntry)
+  await vt.waitForRender()
+  const before = bodyWindow()
+  const wheelRow = Math.max(4, Math.min(bodyRow.row, 20))
+  vt.sendInput(`\x1b[<64;12;${wheelRow}M`)
+  await vt.waitForRender()
+  assert.notEqual(bodyWindow(), before, 'the wheel really scrolled the Output body window')
+  release(staleEntry)
+  await vt.waitForRender()
+  assert.ok(!rawView(vt).join('\n').includes('Copy All'), 'the stale header press must not open the Command page after an effective wheel')
+  app.stop()
+})
+
+// ── PR-4 R1: same-tick opposite-wheel burst ─────────────────────────────────
+
+test('PR-4 R1: a same-tick opposite-wheel burst still retires the pressed header entry', async () => {
+  const { vt, app } = startApp()
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  harness.tasks.openTasksBrowser('full')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  const longBody = Array.from({ length: 120 }, (_, line) => `burst proof line ${String(line).padStart(3, '0')}`).join('\n')
+  harness.observation.latest()!.emit({ text: longBody })
+  await flush()
+  await vt.waitForRender()
+  const lines = (): string[] => rawView(vt)
+  const row = lines().findIndex(line => line.includes('↗ Command'))
+  assert.ok(row >= 0, `the header entry is painted:\n${lines().join('\n')}`)
+  const col = lines()[row]!.indexOf('↗ Command')
+  const bodyRow = lines().findIndex(line => line.includes('burst proof line 119'))
+  const wheelRow = Math.max(4, Math.min(bodyRow, 20))
+  vt.sendInput(`\x1b[<0;${col + 1};${row + 1}M`)
+  // Two opposite effective wheels in the SAME input turn, before any paint.
+  vt.sendInput(`\x1b[<64;12;${wheelRow}M`)
+  vt.sendInput(`\x1b[<65;12;${wheelRow}M`)
+  vt.sendInput(`\x1b[<0;${col + 1};${row + 1}m`)
+  await vt.waitForRender()
+  assert.ok(!lines().join('\n').includes('Copy All'), 'the same-tick round-trip must not revive the stale press')
+
+  // The control proves Home/End really move the Output viewport.
+  harness.observation.latest()!.emit({ text: longBody })
+  await flush()
+  await vt.waitForRender()
+  vt.sendInput('\x1b[H')
+  await vt.waitForRender()
+  assert.match(lines().join('\n'), /burst proof line 000/, 'Home really jumps the Output viewport to the head')
+  vt.sendInput('\x1b[F')
+  await vt.waitForRender()
+  assert.match(lines().join('\n'), /burst proof line 119/, 'End really jumps the Output viewport back to the tail')
+
+  // The same-tick Home -> End burst (no paint between the two jumps) must too.
+  const entryRow = lines().findIndex(line => line.includes('↗ Command'))
+  const entryCol = lines()[entryRow]!.indexOf('↗ Command')
+  vt.sendInput(`\x1b[<0;${entryCol + 1};${entryRow + 1}M`)
+  vt.sendInput('\x1b[H')
+  vt.sendInput('\x1b[F')
+  vt.sendInput(`\x1b[<0;${entryCol + 1};${entryRow + 1}m`)
+  await vt.waitForRender()
+  assert.ok(!lines().join('\n').includes('Copy All'), 'a same-tick Home/End round-trip must not revive the stale press')
+  app.stop()
 })

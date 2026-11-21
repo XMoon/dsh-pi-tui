@@ -30,6 +30,17 @@ import { ScrollView, type ScrollViewScrollToOptions } from '@xmoon76/pi-tui'
 export class JobOutputScrollView extends ScrollView {
   /** The ONE client-local follow intent. Never re-derived from `scrollTop`. */
   private followRequested = true
+  /** Notified on EVERY effective viewport move of this scroll owner (wheel,
+   *  page, line, scrollbar drag, follow auto-scroll, resize shrink): the panel
+   *  uses it to retire a pressed chrome gesture the moment content moves under
+   *  it — including a scroll that returns to the press-time position before the
+   *  next paint. */
+  onViewportMoved: (() => void) | undefined
+
+  /** Notify the panel when a scroll path actually moved the viewport. */
+  private notifyIfMoved(before: number): void {
+    if (this.scrollTop !== before) this.onViewportMoved?.()
+  }
 
   /** The user's current follow intent (NOT `ScrollView.isFollowingEnd`). */
   get isFollowRequested(): boolean {
@@ -53,8 +64,10 @@ export class JobOutputScrollView extends ScrollView {
    * jump) and restores the inherited tail-follow behavior.
    */
   resumeFollow(): void {
+    const before = this.scrollTop
     this.followRequested = true
     super.scrollToEnd()
+    this.notifyIfMoved(before)
   }
 
   /**
@@ -64,40 +77,50 @@ export class JobOutputScrollView extends ScrollView {
    * PAUSED. The inherited clamp applies.
    */
   rebaseTo(scrollTop: number): void {
+    const before = this.scrollTop
     super.scrollTo(scrollTop, { disableFollow: true })
+    this.notifyIfMoved(before)
   }
 
   /** A wheel/page/line scroll is manual browsing: pause, move, then re-write
    *  the native suppression so reaching the last row never re-arms follow.
    *  The fork's remaining-delta return value is preserved. */
   override scrollBy(lines: number): number {
+    const before = this.scrollTop
     this.pauseFollow()
     const remaining = super.scrollBy(lines)
     super.scrollTo(this.scrollTop, { disableFollow: true })
+    if (this.scrollTop !== before) this.onViewportMoved?.()
     return remaining
   }
 
   /** A scrollbar drag or a search-target jump is manual browsing. The caller's
    *  options never re-arm follow. */
   override scrollTo(scrollTop: number, _options: ScrollViewScrollToOptions = {}): void {
+    const before = this.scrollTop
     this.pauseFollow()
     super.scrollTo(scrollTop, { disableFollow: true })
+    this.notifyIfMoved(before)
   }
 
   /** `Home` / scroll-to-top: pause and suppress, even on short content. */
   override scrollToStart(): void {
+    const before = this.scrollTop
     this.pauseFollow()
     super.scrollToStart()
     super.scrollTo(this.scrollTop, { disableFollow: true })
+    this.notifyIfMoved(before)
   }
 
   /** A viewport-requested jump to the end (e.g. a remapped `Ctrl+End`) is a
    *  manual jump, NEVER the follow re-arm: it pauses, jumps and suppresses.
    *  Only {@link resumeFollow} may arm follow again. */
   override scrollToEnd(): void {
+    const before = this.scrollTop
     this.pauseFollow()
     super.scrollToEnd()
     super.scrollTo(this.scrollTop, { disableFollow: true })
+    this.notifyIfMoved(before)
   }
 
   /** After a resize or a content shrink the inherited layout pass may clamp the
@@ -106,7 +129,9 @@ export class JobOutputScrollView extends ScrollView {
    *  can never steal the user's historical row. While the intent is FOLLOW the
    *  inherited tail-follow behavior is kept untouched. */
   override updateLayout(contentHeight: number, viewportHeight: number, requestRender: () => void): void {
+    const before = this.scrollTop
     super.updateLayout(contentHeight, viewportHeight, requestRender)
     if (!this.followRequested) super.scrollTo(this.scrollTop, { disableFollow: true })
+    this.notifyIfMoved(before)
   }
 }

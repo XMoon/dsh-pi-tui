@@ -561,6 +561,11 @@ export function createViewerRuntime<Event extends SessionPresentationEvent>(
         onProjectionsChanged: () => {
           if (viewing === undefined || viewing.id !== childId) return
           deps.refreshStatus()
+          // The child's official `inbox` projection changed (its own submission
+          // or another Client's occurrence): re-join the pending pane for the
+          // CURRENT subject — never the parent's queue while this viewer owns
+          // the editor seat.
+          deps.surface.refreshPendingInput()
         },
       })
       deps.surface.app.enterFocusViewerScope()
@@ -721,7 +726,6 @@ export function createViewerRuntime<Event extends SessionPresentationEvent>(
     // Dispose the child ingress BEFORE releasing the child handle: a
     // synchronous teardown effect must not repaint the dead viewer.
     releaseViewHandle()
-    deps.surface.app.clearLocalMessages()
     deps.surface.app.clearNotify() // a viewer notify (if any) is stale now
     deps.surface.app.setViewerMode(undefined)
     // M3-5 PR1 §9.7: the display subject returns to MAIN. StatusRuntime

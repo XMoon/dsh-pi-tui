@@ -1,12 +1,10 @@
 /**
  * The single source of truth for the HOST action definitions (plan §5).
- * Every default key here MUST match the pre-migration behavior — M0's
- * gate is "no production behavior change" (plan §20 M0). When a new host
- * shortcut lands, extend THIS table in the same commit (and the
- * RESERVED_HOST_KEYS plugin-registration guard in extension/internal/keybinding-registry.ts
- * if plugins must not claim the new default — that list is NOT the
- * runtime authority; the effective keymap and the action-driven
- * hostResolves reservation are).
+ * Every default key here MUST match current product behavior; adding a host
+ * action or changing a default updates this table in the same commit. Extend
+ * `RESERVED_HOST_KEYS` in `extension/internal/keybinding-registry.ts` when a
+ * plugin must not claim a host default. That list is only a registration
+ * guard; runtime reservation follows the effective keymap and `hostResolves`.
  *
  * Scope semantics (plan §4): the static context contract used for conflict
  * detection and diagnostics. The resolver additionally honors per-rule
@@ -98,20 +96,36 @@ export const APP_KEYBINDINGS: Record<AppKeybindingId, AppKeybindingDefinition> =
     // Key-neutral on purpose: the description shows in /keybindings and
     // must not hard-code a physical chord (a remap must not make it a
     // lie — see the copy-convention in docs/architecture/keybindings.md).
-    description: 'Quit the TUI (keyboard exit requires a same-key second press; the default clear-draft and forward-delete editor behaviors are preserved)',
+    description: 'Exit this TUI (a same-key second press confirms; a daemon Host keeps running; the editor keeps its default clear-draft and forward-delete behavior)',
     category: 'Agent',
     scope: 'global',
     configurable: true,
   },
 
   // ── Transcript ─────────────────────────────────────────────────────────
-  'app.transcript.search': {
-    id: 'app.transcript.search',
-    defaultKeys: ['ctrl+f', 'ctrl+shift+f'],
-    description: 'Search the transcript',
+  'app.transcript.search.view': {
+    id: 'app.transcript.search.view',
+    defaultKeys: ['ctrl+f'],
+    description: 'Search the rendered transcript view',
     category: 'Transcript',
     scope: 'global',
     configurable: true,
+  },
+  'app.transcript.search': {
+    id: 'app.transcript.search',
+    defaultKeys: ['ctrl+shift+f'],
+    description: 'Search the full transcript history',
+    category: 'Transcript',
+    scope: 'global',
+    configurable: true,
+  },
+  'app.transcript.search.scope': {
+    id: 'app.transcript.search.scope',
+    defaultKeys: ['tab'],
+    description: 'Switch transcript search scope',
+    category: 'Transcript',
+    scope: 'search',
+    configurable: false,
   },
   'app.transcript.jumpLatest': {
     id: 'app.transcript.jumpLatest',
@@ -246,6 +260,17 @@ export const APP_KEYBINDINGS: Record<AppKeybindingId, AppKeybindingDefinition> =
     description: 'Open the task browser',
     category: 'Panels',
     scope: 'editor',
+    configurable: true,
+  },
+  'app.queue.open': {
+    id: 'app.queue.open',
+    defaultKeys: ['alt+i'],
+    // Key-neutral on purpose: /keybindings and the Dock's `Manage` affordance
+    // read the EFFECTIVE key (`keyHint`). A remap or a disabled binding must
+    // never leave the physical chord hard-coded in the copy.
+    description: 'Manage queued messages',
+    category: 'Panels',
+    scope: 'global',
     configurable: true,
   },
   'app.history.search': {
@@ -394,6 +419,22 @@ export const APP_KEYBINDINGS: Record<AppKeybindingId, AppKeybindingDefinition> =
     configurable: false,
   },
 
+  // ── Focused component: forwarded Question/Approval seat (split Client) ──
+  'interaction.navigateWorkspace': {
+    id: 'interaction.navigateWorkspace',
+    defaultKeys: ['alt+w'],
+    // Key-neutral on purpose: /keybindings lists the action and the copy must
+    // not hard-code the physical chord (component actions are non-configurable
+    // in this version, but the gate's copy convention still applies).
+    description: 'Open the Session Workspace without answering the pending interaction',
+    category: 'Question',
+    // The action is dispatched from BOTH the Question and Approval seats, so it
+    // declares the mutually-exclusive capturing-overlay context rather than
+    // narrowing to the QuestionFlow scope.
+    scope: 'overlay',
+    configurable: false,
+  },
+
   // ── Focused component: Task Center (plan §3.3/§29) ──────────────────────
   'tasks.open': {
     id: 'tasks.open',
@@ -427,18 +468,34 @@ export const APP_KEYBINDINGS: Record<AppKeybindingId, AppKeybindingDefinition> =
     scope: 'tasks',
     configurable: false,
   },
-  'tasks.type.next': {
-    id: 'tasks.type.next',
+  'tasks.tab.next': {
+    id: 'tasks.tab.next',
     defaultKeys: ['tab'],
-    description: 'Cycle the task type filter forward',
+    description: 'Switch to the Team page of the Task Center',
     category: 'Tasks',
     scope: 'tasks',
     configurable: false,
   },
-  'tasks.type.previous': {
-    id: 'tasks.type.previous',
+  'tasks.tab.previous': {
+    id: 'tasks.tab.previous',
     defaultKeys: ['shift+tab'],
-    description: 'Cycle the task type filter backward',
+    description: 'Switch back to the Work page of the Task Center',
+    category: 'Tasks',
+    scope: 'tasks',
+    configurable: false,
+  },
+  'tasks.type.filter': {
+    id: 'tasks.type.filter',
+    defaultKeys: ['f'],
+    description: 'Open the Work type filter list',
+    category: 'Tasks',
+    scope: 'tasks',
+    configurable: false,
+  },
+  'tasks.jobs.toggleHistory': {
+    id: 'tasks.jobs.toggleHistory',
+    defaultKeys: ['j'],
+    description: 'Show or hide tracked past Jobs',
     category: 'Tasks',
     scope: 'tasks',
     configurable: false,
@@ -565,6 +622,7 @@ export const VIEWER_BLOCKED_PARENT_ACTIONS: ReadonlySet<AppKeybindingId> = new S
   'app.input.dequeue',
   'app.permission.cycle',
   'app.transcript.search',
+  'app.transcript.search.view',
   // PR2.5: the published-visual actions target the PARENT transcript; a
   // subagent viewer must consume them instead of copying/opening the parent.
   'app.visual.selectNext',

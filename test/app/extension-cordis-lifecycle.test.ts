@@ -715,7 +715,12 @@ test('command/theme/setting registrations are fiber-bound (owner unload cleans u
         handler: () => { kind: 'success' }
       }): { id: string; dispose(): void }
       registerTheme(contribution: { id: string; name: string; palette: object }): { id: string; dispose(): void }
-      registerSetting(contribution: { id: string; label: string; currentValue: string }): { id: string; dispose(): void }
+      registerSetting(contribution: {
+        id: string
+        label: string
+        currentValue: string
+        persisted?: { path: readonly string[]; choices: readonly { id: string; op: 'set'; value: unknown }[] }
+      }): { id: string; dispose(): void }
       registerAutocomplete(contribution: { id: string; provider: object }): { id: string; dispose(): void }
       registerKeybinding(contribution: {
         id: string
@@ -724,7 +729,10 @@ test('command/theme/setting registrations are fiber-bound (owner unload cleans u
       }): { id: string; dispose(): void }
       commands: { isLocal(name: string, statics: ReadonlySet<string>): boolean; hasAny(): boolean }
       themes: { names(): string[]; hasAny(): boolean }
-      settings: { rows(): unknown[]; hasAny(): boolean }
+      settings: {
+        rows(): readonly { id: string; mode: 'runtime' | 'persisted'; registrationToken: number }[]
+        hasAny(): boolean
+      }
       autocomplete: { hasAny(): boolean }
       keybindings: { hasAny(): boolean }
     }
@@ -735,6 +743,17 @@ test('command/theme/setting registrations are fiber-bound (owner unload cleans u
       svc.registerCommand({ id: 'cmd-a', name: 'acmd', description: 'a', handler: () => ({ kind: 'success' }) })
       svc.registerTheme({ id: 'theme-a', name: 'A Theme', palette: { text: '#fff' } })
       svc.registerSetting({ id: 'set-a', label: 'A Setting', currentValue: 'v' })
+      // R8-E PR-4: the persisted branch is registered through the SAME public
+      // entry and is still a normal fiber-owned record.
+      svc.registerSetting({
+        id: 'set-p',
+        label: 'Persisted Setting',
+        currentValue: 'alpha',
+        persisted: {
+          path: ['label'],
+          choices: [{ id: 'alpha', op: 'set', value: 'alpha' }, { id: 'omega', op: 'set', value: 'omega' }],
+        },
+      })
       svc.registerAutocomplete({ id: 'auto-a', provider: { getSuggestions: async () => null } })
       svc.registerKeybinding({
         id: 'key-a',
@@ -748,7 +767,10 @@ test('command/theme/setting registrations are fiber-bound (owner unload cleans u
     await settle()
     assert.equal(service.commands.isLocal('acmd', new Set()), true)
     assert.deepEqual(service.themes.names(), ['A Theme'])
-    assert.equal(service.settings.rows().length, 1)
+    assert.equal(service.settings.rows().length, 2)
+    const persistedRecord = service.settings.rows().find(record => record.id === 'set-p')
+    assert.equal(persistedRecord?.mode, 'persisted')
+    assert.equal(typeof persistedRecord?.registrationToken, 'number')
     assert.equal(service.commands.hasAny(), true)
     assert.equal(service.themes.hasAny(), true)
     assert.equal(service.settings.hasAny(), true)

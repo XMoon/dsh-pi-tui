@@ -19,6 +19,10 @@ export function pituiModelPresentation(app: TuiApp): ModelPresentation {
           if (!picker.isDisposed()) closer()
         },
         runOwned: request.runOwned,
+        ...(request.team === undefined ? {} : { team: request.team }),
+        // The confirmation is a sibling root seat: TuiApp mounts and owns it,
+        // so closing this picker never cancels an already-captured OFF write.
+        openTeamDisableConfirmation: (confirmation) => app.openTeamDisableConfirmation(confirmation),
       })
       closer = app.openModelPicker(picker)
       return {

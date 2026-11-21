@@ -196,6 +196,30 @@ export class ApprovalRuntime {
   }
 
   /**
+   * Withdraw the PRESENTATION of every listed live approval (the split
+   * Client's navigation hold / subject replacement). Matching QUEUED prompts
+   * leave the queue before the active prompt is settled, so a successor that is
+   * also being withdrawn is never promoted onto the seat. Each matching prompt
+   * settles its OWN local promise locally (`cancelled`); the split root
+   * delivery discards it because the hold/epoch is already stale, so it is
+   * never forwarded as a Host decision. The official request lifetime is
+   * untouched.
+   */
+  withdrawPresentations(lifetimes: readonly AbortSignal[]): void {
+    if (lifetimes.length === 0) return
+    const selected = new Set(lifetimes)
+    for (const pending of [...this.queue]) {
+      if (pending.request.signal !== undefined && selected.has(pending.request.signal)) {
+        this.settle(pending, 'cancelled')
+      }
+    }
+    const active = this.active
+    if (active !== undefined && active.request.signal !== undefined && selected.has(active.request.signal)) {
+      this.settle(active, 'cancelled')
+    }
+  }
+
+  /**
    * Queue an approval prompt and resolve when the user decides.
    * @param request - the tool, reason, and optional abort signal.
    * @param agentInputWait - whether the main Agent is blocked on this approval;

@@ -30,6 +30,7 @@ import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { createDirectTspFixture, waitFor } from '../support/direct-tsp-fixture.ts'
 import { readTspBlobMessages } from '../support/tsp-blob-wire.ts'
+import type { TspWireFrame } from '../support/tsp-terminal-fixture.ts'
 
 const SESSION_ID = 'prc-direct-image-session'
 
@@ -73,7 +74,25 @@ async function sessionOf(fixture: { readonly ctx: { sessions: { get(id: unknown)
   return session!
 }
 
-/** The blob ids the pane actually received, in order. */
+function expandToolCards(fixture: { readonly pane: { event(value: unknown): void; frames(): readonly TspWireFrame[] } }): void {
+  const frames = fixture.pane.frames()
+  const sf = frames.at(-1)?.sf
+  if (sf === undefined) throw new Error('the pane has no surface frame to address the Tool disclosure')
+  const toolIds = new Set<string>()
+  for (const frame of frames) {
+    for (const op of frame.ops) {
+      if (op[0] !== 'add') continue
+      const node = op[4] as { id?: string; k?: string; c?: readonly unknown[] } | undefined
+      const visit = (current: { id?: string; k?: string; c?: readonly unknown[] } | undefined): void => {
+        if (current?.k === 'tool' && typeof current.id === 'string') toolIds.add(current.id)
+        for (const child of current?.c ?? []) visit(child as never)
+      }
+      visit(node)
+    }
+  }
+  for (const id of toolIds) fixture.pane.event({ ev: 'toggle', sf, id, collapsed: false, key: id.slice(id.lastIndexOf('.') + 1), raw: {} })
+}
+
 function blobIds(wire: string): string[] {
   return readTspBlobMessages(wire).map(blob => blob.id)
 }
@@ -144,6 +163,8 @@ test('a tool result image is read through the REAL Direct attachment service and
     // The `b` write and the `f` that carries its blob id are SEPARATE SDK writes
     // (the frame waits for a credit), so the wait observes both facts the
     // assertions below read instead of only the earlier one.
+    await waitFor('the Direct Tool node to materialize before disclosure', () => fixture.pane.output.text().includes('"k":"tool"'), 30_000)
+    expandToolCards(fixture)
     await waitFor('the pane drew a native image node carrying the real image blob', () => {
       const sent = fixture.pane.output.text()
       return blobIds(sent).includes(expectedBlobId) && drewImage(sent, expectedBlobId)
@@ -212,6 +233,8 @@ test('an attachment the REAL service cannot read is refused and never painted', 
       },
     }, { surfaceOp: 'append' })
 
+    await waitFor('the Direct Tool node to materialize before disclosure', () => fixture.pane.output.text().includes('"k":"tool"'), 30_000)
+    expandToolCards(fixture)
     await waitFor('the pane rendered the failed image row', () =>
       fixture.pane.output.text().includes('Image read failed'), 30_000)
     assert.deepEqual(blobIds(fixture.pane.output.text()), [],
@@ -272,8 +295,6 @@ test('a REAL durable image reaches a User body and an Assistant body as native b
     }, { surfaceOp: 'append' })
 
     // Both body images have to be SENT (their `b` frames) and DRAWN (the later
-    // `f` ops that reference them): a blob write alone does not imply the frame
-    // has left the SDK's credit queue.
     await waitFor('the pane drew both body images from their blobs', () => {
       const sent = fixture.pane.output.text()
       const ids = blobIds(sent)
@@ -341,6 +362,8 @@ test('PI_IMAGE_PROTOCOL=none keeps the real Direct attachment chain at zero blob
       },
     }, { surfaceOp: 'append' })
 
+    await waitFor('the Direct Tool node to materialize before disclosure', () => fixture.pane.output.text().includes('"k":"tool"'), 30_000)
+    expandToolCards(fixture)
     await waitFor('the pane rendered the disabled image status', () =>
       fixture.pane.output.text().includes('Image preview disabled by PI_IMAGE_PROTOCOL'), 30_000)
     const wire = fixture.pane.output.text()

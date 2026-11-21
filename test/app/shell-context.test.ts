@@ -14,71 +14,76 @@ import {
   shellCommandOf,
   shellModeOf,
   submitShellResult,
-  type ShellSubmitAgentLike,
   type ShellSubmitDeps,
 } from '../../src/app/submission/shell-context.ts'
 import { TransitionInProgressError } from '../../src/app/session/operation-barrier.ts'
-import { SessionScopeSupersededError } from '../../src/app/session/scope.ts'
+import { SessionScopeSupersededError, type LiveSessionScope } from '../../src/app/session/scope.ts'
 
-interface FakeAgent extends ShellSubmitAgentLike {
+interface FakeAgent {
+  readonly session: { readonly id: string }
   followup(message: unknown): void
-  followed: { id: string; text: string }[]
+  readonly followed: { id: string; text: string }[]
 }
 
 function fakeAgent(id = 'session-shell'): FakeAgent {
   const followed: { id: string; text: string }[] = []
   return {
     session: { id },
-    followup: (message) => { followed.push(message as { id: string; text: string }) },
+    followup: message => { followed.push(message as { id: string; text: string }) },
     followed,
   }
 }
 
+function scopeOf(sessionId: string): LiveSessionScope {
+  return { sessionId, subject: {} } as LiveSessionScope
+}
+
 function makeDeps(options: {
-  agent: () => ShellSubmitAgentLike | undefined
-  generation?: () => number
-  writer?: ShellSubmitDeps['writer']
-}): {
+  readonly agent?: () => FakeAgent | undefined
+  readonly scope?: LiveSessionScope
+  readonly isScopeCurrent?: () => boolean
+  readonly writer?: ShellSubmitDeps['writer']
+} = {}): {
   deps: ShellSubmitDeps
   notices: { message: string; kind: 'info' | 'error' }[]
-  /** Mutable counter (AGENTS.md trap: a number would be copied by value). */
   cleared: { count: number }
+  writes: { sessionId: string; message: unknown }[]
 } {
   const notices: { message: string; kind: 'info' | 'error' }[] = []
   const cleared = { count: 0 }
-  let firstAgent: FakeAgent | undefined
-  const currentAgent = (): ShellSubmitAgentLike | undefined => {
-    const current = options.agent()
-    if (firstAgent === undefined && current !== undefined) firstAgent = current as FakeAgent
-    return current
-  }
+  const writes: { sessionId: string; message: unknown }[] = []
+  const initialAgent = options.agent?.()
+  const scope = options.scope ?? scopeOf(initialAgent?.session.id ?? 'session-shell')
   const deps: ShellSubmitDeps = {
-    currentAgent,
-    currentGeneration: options.generation ?? (() => 1),
+    scope,
+    isScopeCurrent: options.isScopeCurrent ?? (() => options.agent === undefined || options.agent() === initialAgent),
     notify: (message, kind) => { notices.push({ message, kind }) },
     staleNotice: () => 'stale',
     writer: options.writer ?? {
-      prompt: async (_sessionId, message) => {
-        firstAgent!.followup(message)
+      prompt: async (sessionId, message) => {
+        writes.push({ sessionId, message })
+        initialAgent?.followup(message)
         return { kind: 'committed' as const, value: undefined }
       },
     },
-    createMessage: (text) => ({ id: `msg-${text.length}`, text }),
+    createMessage: text => ({ id: `msg-${text.length}`, text }),
     onSubmitted: () => { cleared.count += 1 },
   }
-  return { deps, notices, cleared }
+  return { deps, notices, cleared, writes }
 }
 
-/** A fake writer section whose task waits on a manual resolve: the write is
- * IN FLIGHT (draining) until the test releases it. */
 function stallingWriterSection(): {
-  writerSection: <T>(task: () => Promise<T>) => Promise<T>
+  writerSection: <T>(scope: LiveSessionScope, task: () => Promise<T>) => Promise<T>
   release: () => void
 } {
   let resolve!: () => void
   const promise = new Promise<void>(res => { resolve = res })
-  return { writerSection: <T>(task: () => Promise<T>) => promise.then(task), release: () => resolve() }
+  return {
+    writerSection: <T>(_scope: LiveSessionScope, task: () => Promise<T>) => promise.then(task),
+    release: () => resolve(),
+  }
 }
+
 
 // --- classification ---
 
@@ -107,76 +112,94 @@ test('formatShellSubmitText echoes the command $ -style above the result', () =>
 
 // --- submitShellResult: happy path ---
 
-test('submitShellResult: accepted send follows up and clears the card', async () => {
-  const agent = fakeAgent()
-  const { deps, cleared } = makeDeps({ agent: () => agent })
+test('submitShellResult writes once to the captured Session scope and clears the card', async () => {
+  const { deps, cleared, writes } = makeDeps({ scope: scopeOf('session-captured') })
   const outcome = await submitShellResult(deps, '$ ls\n[exit 0]')
   assert.equal(outcome, 'ok')
-  assert.equal(agent.followed.length, 1)
-  assert.equal(agent.followed[0]!.text, '$ ls\n[exit 0]')
+  assert.deepEqual(writes.map(write => write.sessionId), ['session-captured'])
+  assert.equal(writes.length, 1)
   assert.equal(cleared.count, 1, 'the settled card is cleared once the send is accepted')
 })
 
-test('submitShellResult: no agent is a no-op (no card to clear)', async () => {
-  const { deps, cleared } = makeDeps({ agent: () => undefined })
-  const outcome = await submitShellResult(deps, '$ ls\n[exit 0]')
-  assert.equal(outcome, 'ok')
-  assert.equal(cleared.count, 0)
+test('submitShellResult writes to the captured Host Session without a Client Agent', async () => {
+  const { deps, cleared, writes } = makeDeps({ scope: scopeOf('remote-session') })
+  assert.equal(await submitShellResult(deps, '$ ls\n[exit 0]'), 'ok')
+  assert.equal(writes.length, 1)
+  assert.equal(writes[0]!.sessionId, 'remote-session')
+  assert.equal(cleared.count, 1)
 })
 
 // --- submitShellResult: TOCTOU session switch ---
 
-test('submitShellResult: a session switch mid-send aborts stale', async () => {
-  const agentA = fakeAgent('session-a')
-  const agentB = fakeAgent('session-b')
-  // The send captures the surface once before the barrier and the core
-  // re-validates it once (session-b) — the deterministic model of a session
-  // switch in between. The identity check must refuse.
-  let reads = 0
-  const { deps, notices, cleared } = makeDeps({
-    agent: () => (reads += 1) <= 1 ? agentA : agentB,
+test('submitShellResult: a switched scope aborts before the semantic writer', async () => {
+  const { deps, notices, cleared, writes } = makeDeps({
+    scope: scopeOf('session-a'),
+    isScopeCurrent: () => false,
   })
   const outcome = await submitShellResult(deps, '$ ls\n[exit 0]')
   assert.equal(outcome, 'stale')
-  assert.equal(agentA.followed.length, 0, 'nothing is written to the session the identity checked')
-  assert.equal(agentB.followed.length, 0, 'nothing is written to the new session either')
+  assert.equal(writes.length, 0, 'nothing is written after the captured Session scope goes stale')
   assert.equal(cleared.count, 0, 'the card stays: the output was not submitted')
   assert.equal(notices.some(n => n.message === 'stale'), true)
 })
 
-test('submitShell: a session switch while the Host command RAN skips the result submit entirely (generation fence)', async () => {
-  // The run STARTED under generation N; the switch bumps it before settle.
-  // The wrapper-level fence must skip the submit (zero writer call, zero
-  // card dismissal, a truthful notice) — the completed result NEVER enters
-  // the replacement session.
+test('submitShellResult uses the transport message builder for the captured Remote Session', async () => {
+  const scope = scopeOf('remote-session')
+  const { deps, writes, cleared } = makeDeps({ scope })
+  let directBuilds = 0
+  deps.createMessage = () => { directBuilds += 1; throw new Error('Remote must not build a Direct UserMessage') }
+  deps.prepareMessage = async (captured, text) => ({ sessionId: captured.sessionId, segments: [{ type: 'text', text }] })
+  assert.equal(await submitShellResult(deps, '$ echo remote result'), 'ok')
+  assert.equal(directBuilds, 0)
+  assert.equal(writes.length, 1)
+  assert.deepEqual(writes[0], {
+    sessionId: 'remote-session',
+    message: { sessionId: 'remote-session', segments: [{ type: 'text', text: '$ echo remote result' }] },
+  })
+  assert.equal(cleared.count, 1)
+})
+
+test('submitShellResult revalidates the captured scope after asynchronous transport preparation', async () => {
+  const scope = scopeOf('remote-session')
+  let current = true
+  const { deps, writes, notices, cleared } = makeDeps({ scope, isScopeCurrent: () => current })
+  deps.prepareMessage = async (captured, text) => {
+    assert.strictEqual(captured, scope)
+    current = false
+    return { sessionId: captured.sessionId, text }
+  }
+  assert.equal(await submitShellResult(deps, '$ echo stale result'), 'stale')
+  assert.equal(writes.length, 0)
+  assert.equal(cleared.count, 0)
+  assert.deepEqual(notices, [{ message: 'stale', kind: 'error' }])
+})
+
+test('submitShell: a stale run scope skips the result submit entirely', async () => {
   const { submitShell } = await import('../../src/app/submission/runtime.ts')
   const written: unknown[] = []
   const notices: { message: string; kind: string }[] = []
   const ackReasons: string[] = []
-  let generation = 7
   submitShell({
     command: 'pwd',
     result: 'out\n[exit 0]',
-    generationAtRun: generation,
+    scope: scopeOf('session-a'),
     isDisposed: () => false,
-    currentGeneration: () => { generation += 1; return generation },
-    currentSessionId: () => 'session-b',
-    currentAgent: () => ({ session: { id: 'session-b' } }) as never,
-    terminalAck: (reason: string) => { ackReasons.push(reason) },
-    clearSettledLocalMessages: () => { throw new Error('the card must not be dismissed') },
+    isScopeCurrent: () => false,
+    terminalAck: reason => { ackReasons.push(reason) },
+    removeCommittedShellCard: () => { throw new Error('the card must not be dismissed') },
+    onSubmissionFailure: () => {},
     notify: (message, kind) => notices.push({ message, kind }),
     markDispatch: () => {},
-    writerSection: <T,>(task: () => Promise<T>) => task(),
+    writerSection: async (_scope, task) => task(),
     writer: { prompt: async () => { written.push(1); return { kind: 'committed' as const, value: undefined } } },
     createMessage: (text: string) => ({ text }),
     diag: { debug: () => {}, warn: () => {}, error: () => {}, info: () => {} } as never,
     onSettled: () => {},
   })
   await new Promise(resolve => setTimeout(resolve, 50))
-  assert.equal(written.length, 0, 'the result is NEVER submitted into the replacement session')
-  assert.equal(ackReasons.length > 0, true, "the gesture's ack row terminates on the skip")
-  assert.equal(notices.some(n => n.message.includes('not submitted')), true,
-    'the skip is surfaced truthfully')
+  assert.equal(written.length, 0, 'the result is never submitted to a replacement Session')
+  assert.equal(ackReasons.length > 0, true, 'the gesture ack row terminates on the skip')
+  assert.ok(notices.some(notice => notice.message.includes('not submitted')))
 })
 
 test('submitShellResult: cancelled semantic write is cancellation-shaped', async () => {
@@ -257,6 +280,36 @@ test('submitShellResult: a stale capture refuses stale, never as a frozen transi
   assert.equal(cleared.count, 0, 'the card stays (the output is not lost)')
   assert.deepEqual(notices, [{ message: 'stale', kind: 'info' }],
     'a stale capture takes the stale refusal — the output stays on the card')
+})
+
+test('submitShell keeps the transition-fence info reason on the retained card', async () => {
+  const { submitShell } = await import('../../src/app/submission/runtime.ts')
+  const failureNotice = 'a session transition is in progress — the output stays on the card; re-run ! after it settles'
+  const failures: { kind: string; reason: string }[] = []
+  const notices: { message: string; kind: string }[] = []
+  submitShell({
+    command: 'pwd',
+    result: '/tmp\n[exit 0]',
+    scope: scopeOf('session-a'),
+    isDisposed: () => false,
+    isScopeCurrent: () => true,
+    terminalAck: () => {},
+    removeCommittedShellCard: () => { throw new Error('a fenced write must not remove the card') },
+    onSubmissionFailure: failure => { failures.push(failure) },
+    notify: (message, kind) => notices.push({ message, kind }),
+    markDispatch: () => {},
+    writerSection: async () => { throw new TransitionInProgressError() },
+    writer: { prompt: async () => { throw new Error('the fenced writer must not run') } },
+    createMessage: (text: string) => ({ text }),
+    diag: { debug: () => {}, warn: () => {}, error: () => {}, info: () => {} } as never,
+    onSettled: () => {},
+  })
+  for (let round = 0; round < 50 && failures.length === 0; round += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  assert.equal(notices[0]?.kind, 'info', 'the transition fence is an INFO notice')
+  assert.deepEqual(failures, [{ kind: 'not-submitted', reason: failureNotice }],
+    'the retained card keeps the original fence reason, not a generic fallback')
 })
 
 test('submitShellResult delivers normally after the writer section drains', async () => {

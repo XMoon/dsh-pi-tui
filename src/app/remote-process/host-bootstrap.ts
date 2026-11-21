@@ -5,9 +5,11 @@
  * (`@deepseek-ai/dsh/profile-boot`). This module runs after that boot and owns
  * only the Host verdict: the shared Remote Host prerequisite set must be live,
  * the B1-only Connection/API-remotes rows must be the sole active owners, the
- * base Gateway must be active exactly once, the loopback webserver must be
- * bound, and the TUI/Client-UI rows the Host-only overlay disables must not be
- * active. It never composes a second Host graph.
+ * base Gateway must be active exactly once, the ONE official Workspace registry
+ * and Workspace Controller rows must be the sole owners of their packages (the
+ * controller with a real `workspace` Typert binding), the loopback webserver
+ * must be bound, and the TUI/Client-UI rows the Host-only overlay disables must
+ * not be active. It never composes a second Host graph.
  *
  * @module app/remote-process/host-bootstrap
  */
@@ -20,6 +22,13 @@ import {
 import { PI_TUI_HOST_READY_SERVICE } from '../host/pi-tui-host-runtime.ts'
 import { PI_TUI_FILE_REFERENCES_NAMESPACE } from '../../runtime/remote/pi-tui-file-reference-contract.ts'
 import { PI_TUI_TERMINAL_PROGRESS_NAMESPACE } from '../../runtime/remote/pi-tui-terminal-progress-contract.ts'
+import { PI_TUI_WEB_ACCESS_NAMESPACE } from '../../runtime/remote/pi-tui-web-access-contract.ts'
+import { PI_TUI_ACP_ACCESS_NAMESPACE } from '../../runtime/remote/pi-tui-acp-access-contract.ts'
+import { PI_TUI_SKILLS_NAMESPACE } from '../../runtime/remote/pi-tui-skills-contract.ts'
+import { PI_TUI_AUTHORIZATION_NAMESPACE } from '../../runtime/remote/pi-tui-authorization-contract.ts'
+import { PI_TUI_CREDENTIAL_RECORDS_NAMESPACE } from '../../runtime/remote/pi-tui-credential-records-contract.ts'
+import { PI_TUI_SESSION_POLICY_NAMESPACE } from '../../runtime/remote/pi-tui-session-policy-contract.ts'
+import { PI_TUI_DEFAULT_MODEL_NAMESPACE } from '../../runtime/remote/pi-tui-default-model-contract.ts'
 
 /** Cordis `FiberState.ACTIVE` (the enum is a const enum with no runtime value). */
 const FIBER_ACTIVE = 2
@@ -30,7 +39,7 @@ const FORBIDDEN_HOST_ENTRY_IDS = ['tui-app', 'pi-tui-extension-host', 'pi-tui-bu
 /** Minimal structural view of one Loader entry. */
 interface LoaderEntryLike {
   readonly options: { readonly id: string; readonly name: string; readonly disabled?: boolean }
-  readonly fiber?: { readonly state: number }
+  readonly fiber?: { readonly state: number; readonly uid?: number }
 }
 
 /** Minimal structural view of the running Loader service. */
@@ -58,8 +67,19 @@ export interface HostEntryStatus {
   readonly profile: string
   readonly services: Record<string, boolean>
   readonly terminalProgressWatches: number
+  /** Live private Skills invalidation subscriptions on THIS Host. */
+  readonly skillInvalidationWatches: number
+  /** Live private provider-authorization attempts on THIS Host. */
+  readonly authorizationAttempts: number
   readonly ownerEntries: Record<string, readonly string[]>
-  readonly entries: ReadonlyArray<{ id: string; name: string; state: string }>
+  /**
+   * Per-row Loader facts. `fiberUid` is the CURRENT Loader fiber identity of
+   * that row, read straight from the live `loader.entries()` object; it is a
+   * qualification diagnosis only (never an authentication, compatibility or
+   * admission input) and lets a Client-only surface revision prove that the
+   * Host rows were not re-mounted.
+   */
+  readonly entries: ReadonlyArray<{ id: string; name: string; state: string; fiberUid?: number }>
   readonly forbiddenActive: readonly string[]
   readonly webServer?: { host: string; port: number }
 }
@@ -93,6 +113,37 @@ interface TerminalProgressServiceLike {
  * prove the Host watch was cancelled, so the split-process smoke reads this
  * count from the Host status after the probe.
  */
+function skillInvalidationWatchCount(context: Context): number {
+  const service = context.reflect.get('piTuiSkills') as
+    (SkillsServiceLike & { readonly [symbols.original]?: SkillsServiceLike }) | undefined
+  if (service === undefined) {
+    throw new Error('local host entry: the private Skills service is not readable')
+  }
+  const raw = service[symbols.original] ?? service
+  if (typeof raw.activeSubscriptions !== 'number') {
+    throw new Error('local host entry: the private Skills service has no subscription count')
+  }
+  return raw.activeSubscriptions
+}
+
+interface SkillsServiceLike {
+  readonly activeSubscriptions?: number
+}
+
+function authorizationAttemptCount(context: Context): number {
+  const service = context.reflect.get('piTuiAuthorization') as
+    { readonly [symbols.original]?: { readonly activeAttempts?: unknown } } | undefined
+  if (service === undefined) {
+    throw new Error('local host entry: the private authorization service is not readable')
+  }
+  const raw = service[symbols.original] ?? service
+  const attempts = (raw as { readonly activeAttempts?: unknown }).activeAttempts
+  if (typeof attempts !== 'number') {
+    throw new Error('local host entry: the private authorization service has no attempt count')
+  }
+  return attempts
+}
+
 function terminalProgressWatchCount(context: Context): number {
   const service = context.reflect.get('piTuiTerminalProgress') as
     (TerminalProgressServiceLike & { readonly [symbols.original]?: TerminalProgressServiceLike }) | undefined
@@ -109,17 +160,84 @@ function terminalProgressWatchCount(context: Context): number {
   return watches
 }
 
+/** One Host Cordis inspect provider directory row (the read-only official view). */
+interface CordisInspectProviderLike {
+  readonly platform: 'host' | 'client'
+  readonly id: string
+}
+
+interface CordisInspectRegistryLike {
+  list(): readonly CordisInspectProviderLike[]
+}
+
+/** The four first-party Host inspect providers the Split Host registers once. */
+const REQUIRED_HOST_INSPECT_PROVIDERS = ['Service', 'Event', 'Config', 'Tool'] as const
+
+/**
+ * Prove the process-global Cordis inspect registry holds the four Host
+ * providers exactly once. The Loader row being ACTIVE alone is not proof: the
+ * official plugin registers inside its Fiber, so an absent or duplicate
+ * provider must fail Host Ready before publication.
+ */
+function assertHostInspectProviders(context: Context): void {
+  const registry = context.reflect.get('cordisInspect') as CordisInspectRegistryLike | undefined
+  if (registry === undefined) {
+    throw new Error('local host entry: the official cordisInspect registry is not live')
+  }
+  const hostProviders = registry.list().filter(provider => provider.platform === 'host')
+  for (const id of REQUIRED_HOST_INSPECT_PROVIDERS) {
+    const matches = hostProviders.filter(provider => provider.id === id)
+    if (matches.length !== 1) {
+      throw new Error(
+        `local host entry: expected exactly one "${id}" Host Cordis inspect provider, found ${String(matches.length)}`,
+      )
+    }
+  }
+}
+
 /** The official Session-serving services whose Typert namespace must be real. */
 const OFFICIAL_TYPERT_BINDINGS = [
   { serviceKey: 'sessionController', namespace: 'session' },
   { serviceKey: 'fileUploads', namespace: 'fileUploads' },
   { serviceKey: 'settingsController', namespace: 'settings' },
+  { serviceKey: 'deepseekAccount', namespace: 'account' },
+  // The Host Workspace Remote owner the bundle mounts: `workspace/create` and
+  // `follow` reach the registry only through this binding, so a readable
+  // service object without it is not a working Workspace API.
+  { serviceKey: 'workspaceController', namespace: 'workspace' },
+  // The Workspace Controller's own child owner of the `directoryPicker`
+  // namespace: the directory LIST verb reaches the official browse backend
+  // only through this binding, so the controller row alone is not a working
+  // directory read API.
+  { serviceKey: 'directoryPickerController', namespace: 'directoryPicker' },
 ] as const
 
-/** The package's two private endpoint bindings. */
+/** The official Loader owners whose package identity must be unique. */
+const OFFICIAL_LOADER_OWNER_PACKAGES = [
+  { owner: 'workspaceRegistry', id: 'workspace', name: '@deepseek-ai/dsh-workspace' },
+  { owner: 'workspaceController', id: 'workspace-controller', name: '@deepseek-ai/dsh-api-workspace-controller' },
+  // The ONE official Host directory-browse backend the Workspace Controller's
+  // child controller drives: a second instance would register
+  // `ctx.directoryPicker` twice, and a missing one leaves every list verb
+  // refusing.
+  { owner: 'directoryPicker', id: 'directory-picker', name: '@deepseek-ai/dsh-host-directory-picker-browse' },
+  // The rc.2 base bundle's concrete `deepseekAccount` owner is the ONE official
+  // account Typert owner: the Host-only overlay must not mount a second
+  // controller row.
+  { owner: 'deepseekAccount', id: 'deepseek-account', name: '@deepseek-ai/dsh-deepseek-account' },
+] as const
+
+/** The package's private endpoint bindings. */
 const PRIVATE_TYPERT_BINDINGS = [
   { serviceKey: 'piTuiFileReferences', namespace: PI_TUI_FILE_REFERENCES_NAMESPACE },
   { serviceKey: 'piTuiTerminalProgress', namespace: PI_TUI_TERMINAL_PROGRESS_NAMESPACE },
+  { serviceKey: 'piTuiWebAccess', namespace: PI_TUI_WEB_ACCESS_NAMESPACE },
+  { serviceKey: 'piTuiAcpAccess', namespace: PI_TUI_ACP_ACCESS_NAMESPACE },
+  { serviceKey: PI_TUI_SKILLS_NAMESPACE, namespace: PI_TUI_SKILLS_NAMESPACE },
+  { serviceKey: 'piTuiAuthorization', namespace: PI_TUI_AUTHORIZATION_NAMESPACE },
+  { serviceKey: PI_TUI_CREDENTIAL_RECORDS_NAMESPACE, namespace: PI_TUI_CREDENTIAL_RECORDS_NAMESPACE },
+  { serviceKey: PI_TUI_SESSION_POLICY_NAMESPACE, namespace: PI_TUI_SESSION_POLICY_NAMESPACE },
+  { serviceKey: PI_TUI_DEFAULT_MODEL_NAMESPACE, namespace: PI_TUI_DEFAULT_MODEL_NAMESPACE },
 ] as const
 
 /**
@@ -190,12 +308,38 @@ export function collectHostEntryStatus(
     'sessionController',
     'fileUploads',
     'settingsController',
+    'deepseekAccount',
+    // The Workspace Remote owner this overlay ENABLES is evidence too: `ready`
+    // must not be published while `ctx.remote.workspace` has no Host owner.
+    'workspaceController',
+    // The child directory-picker Remote owner: `directoryPicker/list` has no
+    // Host handler without it.
+    'directoryPickerController',
     PI_TUI_FILE_REFERENCES_NAMESPACE,
     PI_TUI_TERMINAL_PROGRESS_NAMESPACE,
+    // The Web frontend toggle is a Host-ready service even though the Web
+    // frontend itself stays OFF by default: the Host must be Ready with Web
+    // disabled, and the toggle must never be a Web-composition prerequisite.
+    PI_TUI_WEB_ACCESS_NAMESPACE,
+    // The ACP listener control facade is a Host-ready service even though the
+    // listener itself stays OFF by default: Ready must not depend on the socket
+    // being enabled, only on the control service being reachable.
+    PI_TUI_ACP_ACCESS_NAMESPACE,
+    PI_TUI_SKILLS_NAMESPACE,
+    PI_TUI_AUTHORIZATION_NAMESPACE,
+    PI_TUI_CREDENTIAL_RECORDS_NAMESPACE,
+    PI_TUI_SESSION_POLICY_NAMESPACE,
+    PI_TUI_DEFAULT_MODEL_NAMESPACE,
     PI_TUI_HOST_READY_SERVICE,
     'piTuiPerformanceReady',
   ]) {
     services[service] = context.reflect.get(service) !== undefined
+  }
+  // Web-only Host providers the Browser roster owns. They are absent while Web
+  // is off and must not become a Host-ready prerequisite; record them only when
+  // the enabled Web composition publishes them.
+  for (const service of ['messageFeedback', 'pluginInventory', 'sessionReferenceResolver']) {
+    if (context.reflect.get(service) !== undefined) services[service] = true
   }
   /** Only ACTIVE rows own a service; a disabled/absent row proves nothing. */
   const activeIds = (id: string): readonly string[] => entries
@@ -218,12 +362,26 @@ export function collectHostEntryStatus(
     turnOutline: activeIds('split-host-turn-outline'),
     sessionController: activeIds('split-host-session-controller'),
     settingsController: activeIds('split-host-settings-controller'),
+    deepseekAccount: activeIds('deepseek-account'),
     sessionLogExport: activeIds('split-host-session-log-download'),
     piTuiHostRuntime: activeIds('split-host-pi-tui-runtime'),
+    // The ONE process-global Cordis inspect provider registration. A missing,
+    // inactive or duplicated row is a Host composition failure.
+    cordisInspectProviders: activeIds('split-host-cordis-inspect-providers'),
     // The pre-existing bundle rows must remain the sole owners: Performance
     // publishes `piTuiPerformanceReady`, Visual Tools stays an independent row.
     performance: activeIds('pi-tui-performance-host'),
     visualTools: activeIds('pi-tui-visual-tools'),
+    // The ONE official Workspace registry and the ONE official Workspace
+    // Controller this overlay reuses/retunes in place. A duplicate registry or a
+    // `split-host-workspace-controller`-style second owner is a Host startup
+    // failure, never a degraded ready.
+    workspaceRegistry: activeIds('workspace'),
+    workspaceController: activeIds('workspace-controller'),
+    // The ONE official browse backend row the Workspace Controller's child
+    // reads through. Readiness requires it ACTIVE exactly once, under its own
+    // official package, alongside the controller binding above.
+    directoryPicker: activeIds('directory-picker'),
   }
   for (const [owner, ids] of Object.entries(ownerEntries)) {
     if (ids.length !== 1) {
@@ -233,6 +391,20 @@ export function collectHostEntryStatus(
       )
     }
   }
+  for (const { owner, id, name } of OFFICIAL_LOADER_OWNER_PACKAGES) {
+    const active = entries.filter(entry => entry.fiber?.state === FIBER_ACTIVE && entry.options.name === name)
+    if (active.length !== 1 || active[0].options.id !== id) {
+      const visible = active.length === 0
+        ? 'none'
+        : active.map(entry => entry.options.id).join(',')
+      throw new Error(
+        `local host entry: expected exactly one active ${owner} row for "${name}" named "${id}", found ${visible}`,
+      )
+    }
+  }
+  // The node-level Loader row is only a carrier: the real registration lives in
+  // the official registry. Prove the four Host providers exist exactly once.
+  assertHostInspectProviders(context)
   for (const { serviceKey, namespace } of [...OFFICIAL_TYPERT_BINDINGS, ...PRIVATE_TYPERT_BINDINGS]) {
     assertTypertBinding(context, serviceKey, namespace)
   }
@@ -275,11 +447,16 @@ export function collectHostEntryStatus(
     profile: identity.profile,
     services,
     terminalProgressWatches: terminalProgressWatchCount(context),
+    skillInvalidationWatches: skillInvalidationWatchCount(context),
+    authorizationAttempts: authorizationAttemptCount(context),
     ownerEntries,
     entries: entries.map(entry => ({
       id: entry.options.id,
       name: entry.options.name,
       state: fiberStateLabel(entry),
+      // The live fiber identity of THIS row, or nothing. A row whose fiber never
+      // started has no UID and must not be given a fabricated one.
+      ...(typeof entry.fiber?.uid === 'number' ? { fiberUid: entry.fiber.uid } : {}),
     })),
     forbiddenActive: [],
     webServer: { host: webServer.host, port: webServer.port },

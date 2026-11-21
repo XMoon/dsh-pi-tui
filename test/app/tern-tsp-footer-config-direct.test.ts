@@ -29,6 +29,33 @@ import { installTspPane, type TspPane } from '../support/tsp-terminal-fixture.ts
 import { wireNodes } from '../support/tsp-picker-wire.ts'
 import { waitUntil } from '../support/tsp-runner-harness.ts'
 
+/**
+ * TSP I-E: the History-search mount parameter these pre-I-E cases do not
+ * exercise. It is FAIL-CLOSED on purpose — a source that rejects, never an
+ * empty `search()` that would let a card report "no history" as a success.
+ * The mount still BINDS it (one install, like every other capability), so a
+ * `Ctrl+R` here would open a card whose every read fails into the honest
+ * failed state; none of these cases press that chord, so the seat is bound and
+ * simply never opened.
+ */
+const INERT_HISTORY_BINDING = {
+  source: { search: () => Promise.reject(new Error('History search is not exercised by this case')) },
+  cwd: () => '/tmp/dsh-inert-cwd',
+  captureScope: () => ({ sessionId: undefined, isCurrent: () => false }),
+}
+
+/**
+ * T3-B1: the "no semantic-search plane" binding. These cases never open the
+ * Session Search card, so every answer fails closed — never an empty snapshot
+ * that would read as a zero-match success.
+ */
+const INERT_SEMANTIC_SEARCH_BINDING = {
+  snapshot: () => undefined,
+  resolve: () => undefined,
+  current: () => false,
+  revision: () => undefined,
+}
+
 /** One projection node's own props. */
 function props(node: Node): Record<string, unknown> {
   return node.props as Record<string, unknown>
@@ -59,7 +86,7 @@ function hostContext(doc: TestDoc, options: {
 } = {}): HostContextLike {
   const settings: SettingsServiceLike = {
     describe: () => [{
-      ns: 'tui-app',
+      ns: 'pi-tui-preferences',
       value: {
         ...doc,
         ...(options.projectItems === undefined ? {} : { footerCustomItems: [...options.projectItems] }),
@@ -241,7 +268,7 @@ test('the REAL Direct chain projects a custom USER config onto the native wire t
       resolveFooterConfig: () => runtime.resolveTspFooterConfig(),
       connectTsp: productionTspConnector({
         copyVisual: async () => false,
-        cwd: '/tmp',
+        displayState: { preset: 'full' },
         requestExit: () => {},
         onFatal: () => {},
         log: () => {},
@@ -359,7 +386,7 @@ test('a merged PROJECT command config with no USER trust never executes and surf
       env: { DSH_PI_TUI_RENDERER: 'tsp' },
       resolveFooterConfig: () => runtime.resolveTspFooterConfig(),
       connectTsp: productionTspConnector({
-        copyVisual: async () => false, cwd: '/tmp', requestExit: () => {}, onFatal: () => {}, log: () => {}, logError: () => {},
+        copyVisual: async () => false, displayState: { preset: 'full' }, requestExit: () => {}, onFatal: () => {}, log: () => {}, logError: () => {},
         connect: async () => session,
       }),
     })
@@ -425,7 +452,7 @@ test('the mount wiring binds the footer config exactly once through the producti
       },
       connectTsp: productionTspConnector({
         copyVisual: async () => false,
-        cwd: '/tmp',
+        displayState: { preset: 'full' },
         requestExit: () => {},
         onFatal: () => {},
         log: () => {},
@@ -436,7 +463,7 @@ test('the mount wiring binds the footer config exactly once through the producti
     assert.ok(mount !== undefined)
     // The FIRST production mount binds the reader + footer config together;
     // run it so the resolver evaluation is the mount's own (never a test's).
-    mount.mount({} as never, { snapshot: () => richSnapshot() })
+    mount.mount({} as never, { snapshot: () => richSnapshot() }, INERT_HISTORY_BINDING, INERT_SEMANTIC_SEARCH_BINDING, undefined)
     assert.equal(resolves, 1, 'the resolver ran exactly once, at the mount')
     // The footer bind is one-shot on the renderer: the mount's SECOND bind
     // attempt (driven through a fresh production connector over the same

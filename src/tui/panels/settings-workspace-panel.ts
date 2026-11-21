@@ -40,7 +40,8 @@ import {
   type TuiMouseEventResult,
 } from '@xmoon76/pi-tui'
 import { formatKeyId } from '../keybindings/hints.ts'
-import { renderActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
+import { ACTION_BAR_SEPARATOR, layoutActionBarRow, renderActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
+import { paintActionSpan } from '../presentation/action-ink.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color } from '../theme/runtime.ts'
 import { pickWelcomeWhaleVariant, renderWelcomeWhaleLines, WELCOME_WHALE_WIDTH } from '../components/welcome-whale.ts'
@@ -55,7 +56,7 @@ import type { EmbeddedPluginPage, PluginWorkspaceView } from '../plugin-manager/
  * ONE CONDITIONAL category: it is selectable only while the extension settings
  * registry has live rows (see {@link SettingsWorkspacePanel.currentCategoryOrder}). */
 export type SettingsWorkspaceCategoryId =
-  | 'about' | 'models' | 'account' | 'agent' | 'appearance' | 'conversation'
+  | 'about' | 'general' | 'models' | 'account' | 'agent' | 'appearance' | 'conversation'
   | 'input-terminal' | 'tools' | 'plugins' | 'extensions'
 
 /** The navigation level of the LEGACY configuration categories: `categories`
@@ -95,15 +96,23 @@ export type SettingsWorkspaceRowId =
   | 'notification-method'
   | 'terminal-progress'
   | 'visual-tools'
+  | 'web-autostart'
+  | 'startup-backend'
+  | 'acp-runtime'
+  | 'acp-autostart'
   | 'web-settings'
   | 'approval'
   | 'default-permission'
-  | 'subagent-model-allowlist'
-  | 'subagent-model-selection'
+  | 'subagent-settings'
+  | 'agent-loop'
+  | 'shell-execution'
+  | 'session-log-upload'
   | 'local-shell-sandbox'
   | 'footer-mode'
   | 'footer-configurator'
   | 'keyboard-shortcuts'
+  | 'mcp-servers'
+  | 'computer-use'
   | `ext-setting:${string}`
 
 /** The prefix that separates a dynamic extension-setting row from the static
@@ -127,13 +136,15 @@ export type SettingsWorkspaceFreshness = 'runtime' | 'ready' | 'last-known' | 'u
  * setting stays behind its category's `existing settings editor` launcher.
  */
 export type SettingsWorkspaceWritableField =
-  | 'theme' | 'display-preset' | 'visual-tools'
+  | 'theme' | 'display-preset' | 'visual-tools' | 'web-autostart' | 'startup-backend'
+  | 'acp-runtime' | 'acp-autostart'
   | 'icon-style' | 'expand' | 'thinking'
   | 'progress-updates' | 'response-style'
   | 'busy-enter' | 'git-attribution'
   | 'home-end-keys' | 'fullscreen' | 'wheel-scroll-lines'
   | 'notification-mode' | 'notification-method' | 'terminal-progress'
-  | 'approval' | 'default-permission' | 'subagent-model-selection' | 'local-shell-sandbox'
+  | 'approval' | 'default-permission' | 'local-shell-sandbox'
+  | 'session-log-upload'
   | 'footer-mode'
   // C2-R6: a live extension registration's own field identity. The command
   // layer routes it to the extension settings registry; it never reaches a
@@ -173,6 +184,11 @@ export interface SettingsWorkspaceEdit {
    *  `unknown — …` when there was no document to read. The panel never guesses
    *  which of those it is. */
   readonly persisted: string
+  /** R8-E PR-4: the complete Host-profile fact block of a persisted extension
+   *  setting, one exact line each (effective / inherited / USER field /
+   *  difference / this Client's runtime). Rendered verbatim below the primary
+   *  fact so Host persistence and Client runtime never merge into one claim. */
+  readonly persistedFacts?: readonly string[]
   /** A SECOND live effect fact that is NOT the primary `Value`, painted as its
    *  own `Runtime` line. Only the session approval row needs it today: its
    *  `Value` already is a runtime fact (the captured session's override), while
@@ -185,6 +201,18 @@ export interface SettingsWorkspaceEdit {
    *  the read and the Confirm can never be silently overwritten. Rows whose
    *  writer is not revision-addressed omit it. */
   readonly revision?: number
+  /** The opaque Host generation this candidate source was read at, for writers
+   *  that must also refuse a REPLACED Host authority (Session log upload). */
+  readonly generation?: object
+  /** A risk statement that must be FULLY painted in the L2 confirmation frame
+   *  before a Confirm may dispatch (keyboard and pointer alike). */
+  readonly confirmationWarning?: string
+  /** Whether a non-verified settlement offers `Retry save` (default true).
+   *  A dispatched-unknown write that requires a fresh current read sets false. */
+  readonly retryable?: boolean
+  /** Restrict manual Retry to a definite `Not saved` settlement (unknown or
+   *  unverified outcomes remain read-only until an explicit re-read). */
+  readonly retryOnlyWhenDefinite?: boolean
 }
 
 /**
@@ -211,7 +239,9 @@ export interface SettingsWorkspaceRow {
    *  Search / Fetch settings page). It is a presentation seam only — no
    *  document field, no writer, no second lease. A row without it never has a
    *  specialist page. */
-  readonly specialist?: 'subagent-allowlist' | 'web-settings' | 'footer-configurator' | 'keybindings'
+  readonly specialist?:
+    | 'subagent-settings' | 'web-settings' | 'footer-configurator' | 'keybindings' | 'mcp-servers'
+    | 'computer-use' | 'agent-loop-settings' | 'shell-execution-settings'
   /** Whether the row's specialist page may be opened RIGHT NOW. Absent = yes.
    *  A non-current authority (a stale/unavailable backend) paints the row and
    *  its last-known facts but offers no Manage action, because the page could
@@ -250,6 +280,9 @@ export interface SettingsWorkspaceCommitRequest {
   /** The revision the confirmed candidate was read at (revision-checked rows
    *  only): the writer submits it as its expected revision. */
   readonly revision?: number
+  /** The opaque Host generation the candidate was read at, when the writer
+   *  must refuse a replaced Host authority. */
+  readonly generation?: object
   /** C2-R6: the extension registration the confirmed candidate belongs to.
    *  Present ONLY for `ext-setting:` fields: the command layer forwards it to
    *  `SettingsRegistry.applyDetailed`, which refuses a stale registration
@@ -272,13 +305,23 @@ export interface SettingsWorkspaceCommitRequest {
 export interface SettingsWorkspaceCommitOutcome {
   readonly outcome: 'verified' | 'not-saved' | 'unverified' | 'indeterminate'
   readonly reason?: string
-  /** C2-R3: the ONE typed follow-up navigation a refusal may carry (the
-   *  subagent toggle refused because the allowlist is empty points the user at
-   *  the allowlist row). It is a one-shot UI instruction returned ONLY with a
-   *  `not-saved` outcome; the panel applies it while this request is still the
-   *  live one. It is not a second settings authority and it is never derived
-   *  from the reason text. */
-  readonly followUpRowId?: 'subagent-model-allowlist'
+  /**
+   * M6 UX PR2: the ONE verified-transition follow-up the command layer decided
+   * this Client may offer in the SAME lease. It is a pure presentation hand-off:
+   * the command layer already proved the verified write AND the local install
+   * capability, and the panel only paints the transient choice. Absent on every
+   * non-`verified` outcome and on every other field.
+   */
+  readonly followUp?: {
+    readonly kind: 'daemon-service-install'
+    /**
+     * Whether this composition can actually offer the install action: a local
+     * Linux/macOS platform AND a proven official Profile identity. `false`
+     * keeps the explanatory block and the truthful refusal line, but never
+     * paints an actable install control.
+     */
+    readonly installable: boolean
+  }
 }
 
 /** The row's commit status as the Detail pane paints it: the status WORD, its
@@ -361,7 +404,10 @@ export interface SettingsWorkspacePanelIntents {
    * the intent (Esc/Left/Shift+Tab at its list root) and the root commits the
    * focus change; it never closes the page by itself.
    */
-  readonly onOpenPlugins?: (onYieldNavigation: () => void) => EmbeddedPluginPage | undefined
+  readonly onOpenPlugins?: (
+    onYieldNavigation: () => void,
+    onManageComputerUse: () => string | undefined,
+  ) => EmbeddedPluginPage | undefined
   /** The lazily built Models direct page (the Settings category keeps the
    * same screen lease). `openAccount` switches this workspace to the Account
    * page when the Models list's account entry is activated. */
@@ -371,15 +417,16 @@ export interface SettingsWorkspacePanelIntents {
   ) => SettingsAuthPage | undefined
   /** The lazily built Account direct page. */
   readonly createAccountPage?: (initial: AccountInitialView) => SettingsAuthPage | undefined
-  /**
-   * C2-R3: the ONE embedded specialist page factory, activated ONLY by an
-   * explicit Manage/Enter on a row that carries `specialist`. It returns the
-   * EXISTING subagent allowlist picker instance, which is mounted in this
-   * workspace's body under the SAME screen lease (no second alt-screen).
-   * `done` returns to the Agent rows; `onAuthoritativeChange` asks the root
-   * for a fresh snapshot of that row.
-   */
-  readonly createSubagentAllowlistPicker?: (
+  /** FR5-A: one staged page for both official subagent Settings sections,
+   * mounted in this workspace body under the SAME screen lease. */
+  readonly createSubagentSettingsPage?: (
+    done: () => void,
+    onAuthoritativeChange: () => void,
+  ) => EmbeddedSpecialistPage | undefined
+  /** FR5-B: the ONE numeric page shared by the Agent-loop and Shell-execution
+   *  rows, mounted in this workspace body under the SAME screen lease. */
+  readonly createHostNumericSettingsPage?: (
+    kind: 'agent-loop' | 'shell-execution',
     done: () => void,
     onAuthoritativeChange: () => void,
   ) => EmbeddedSpecialistPage | undefined
@@ -415,6 +462,22 @@ export interface SettingsWorkspacePanelIntents {
     done: () => void,
     onAuthoritativeChange: () => void,
   ) => EmbeddedSpecialistPage | undefined
+  /**
+   * FR3: the ONE MCP servers page factory. It returns the per-open page over
+   * the existing Settings lease; `done` returns to the Tools row that opened
+   * it. There is no writable document field and no second Observation owner.
+   */
+  readonly createMcpServersPage?: (done: () => void) => EmbeddedSpecialistPage | undefined
+  /**
+   * PR-5 / MAC-09 v2: the ONE per-open Computer Use specialist page. It
+   * forwards only the official CUA access port, the existing Plugin Manager
+   * roster and the existing preset-default writer; `done` returns to the Tools
+   * row that opened it. No second Settings lease or permission store.
+   */
+  readonly createComputerUsePage?: (
+    done: () => void,
+    openPlugins: () => void,
+  ) => EmbeddedSpecialistPage | undefined
   /** The live terminal row budget (the panel never reads the terminal itself). */
   readonly rows: () => number
   /** The live terminal column budget (the projection's width). */
@@ -437,6 +500,16 @@ export interface SettingsWorkspacePanelIntents {
     request: SettingsWorkspaceCommitRequest,
     settle: (outcome: SettingsWorkspaceCommitOutcome) => void,
   ) => void
+  /**
+   * M6 UX PR2: the ONE explicit user-confirmed Profile service install, offered
+   * only after a verified `direct → daemon` transition in the SAME lease. The
+   * command layer owns the install task and calls `settle` exactly once with the
+   * control plane's own result; the panel never retries and never invents an
+   * outcome. Absent when the composition cannot prove the local capability.
+   */
+  readonly onBackendServiceInstall?: (
+    settle: (result: { readonly ok: boolean; readonly detail?: string }) => void,
+  ) => void
 }
 
 /**
@@ -453,6 +526,10 @@ type SettingsWorkspaceEditPhase =
       readonly field: SettingsWorkspaceWritableField
       readonly candidate: string
       readonly index: number
+      /** The exact Host revision/generation captured when L2 opened. Candidate
+       *  movement never changes it; Confirm dispatches only while the current
+       *  row still carries the same fence. */
+      readonly fence: { readonly revision?: number; readonly generation?: object }
       readonly registrationToken?: number
     }
   | {
@@ -571,6 +648,17 @@ export interface SettingsAuthPage extends Component {
   onCellClick?(x: number, y: number): 'handled' | 'exit' | 'open-account' | void
   /** Revoke one in-flight press when another owner claims the gesture. */
   cancelPointer?(): void
+  /** The complete visible Esc affordance span of the LAST rendered frame, in
+   *  this page's own content columns (undefined when it painted none). The
+   *  Settings root owns the ONE physical last row and registers the pointer
+   *  target from THIS span; the page never registers a second last-row owner. */
+  paintedEscapeSpan?(): { readonly startCol: number; readonly endCol: number } | undefined
+  /** The page's own SEMANTIC identity for a pointer gesture: the current view
+   *  plus every transient phase that decides what its Esc really does. The root
+   *  stores it at press and requires the same value at release, so a child
+   *  repaint that leaves the bar cells unchanged can never hand a press to a
+   *  different Esc outcome. */
+  gestureIdentity?(): string
   /** True while a Host mutation must settle on this page: the workspace root
    *  must not dispose it from USER navigation (category rail / Back / deep
    *  link). Blocking-owner teardown still bypasses this guard. */
@@ -617,6 +705,32 @@ export interface EmbeddedSpecialistPage extends Component {
    *  resize or a sub-view transition). The root forwards only the real Esc
    *  until that frame paints; pointer gestures are refused outright. */
   grantAwaitingPaint?(): boolean
+  /** The complete visible Esc affordance span of the LAST rendered frame, in
+   *  this page's own content columns (undefined when it painted none). The
+   *  Settings root owns the ONE physical last row and registers the pointer
+   *  target from THIS span. */
+  paintedEscapeSpan?(): { readonly startCol: number; readonly endCol: number } | undefined
+  /** The page's own SEMANTIC identity for a pointer gesture (view + the
+   *  transient phases its Esc really acts on), re-proved at the release. */
+  gestureIdentity?(): string
+  /** PR-D: whether a pointer press may arm against the CURRENT painted frame.
+   *  A Host/configuration observation change that has landed without repainting
+   *  makes the previous frame's bar cells stale even though no paint is
+   *  pending; such a press must not be recorded. Pages without this admission
+   *  keep their previous behavior. */
+  pointerFrameCurrent?(): boolean
+  /**
+   * The NON-Esc last-row spans the page's own Action Bar really painted, with
+   * an opaque page-owned intent id. The Root owns the physical row (it paints
+   * it, and Esc stays the Root's single target): these spans DELEGATE to the
+   * page through {@link activateBarSpan} at release. The spans are in the
+   * page's own content columns of the LAST rendered frame; a span the layout
+   * dropped is absent, so a pointer target is never invented.
+   */
+  paintedBarSpans?(): readonly { readonly id: string; readonly startCol: number; readonly endCol: number }[]
+  /** Invoke one delegated last-row intent (the id came from
+   *  {@link paintedBarSpans} of the same frame). */
+  activateBarSpan?(id: string): void
 }
 
 /** One pane the current frame actually paints: its level and absolute geometry.
@@ -628,7 +742,7 @@ interface PaneLayout {
 }
 
 interface HitTarget {
-  readonly kind: 'category' | 'row' | 'pane' | 'change' | 'retry' | 'manage' | 'option' | 'confirm' | 'cancel' | 'about-action'
+  readonly kind: 'category' | 'row' | 'pane' | 'change' | 'retry' | 'manage' | 'option' | 'confirm' | 'cancel' | 'about-action' | 'bar-escape' | 'bar-open' | 'bar-span' | 'service-install' | 'service-dismiss'
   /** The stable identity: a category id, a row id, the pane name, a candidate
    *  value or the button verb. */
   readonly id: string
@@ -638,10 +752,35 @@ interface HitTarget {
   readonly endCol: number
 }
 
+/** The ONE physical last-row Action Bar a render produced: its painted line and,
+ *  when the Esc affordance was FULLY visible, its unpainted cell span (the ONE
+ *  pointer geometry — never re-derived from the painted ANSI string). */
+interface PaintedBarLine {
+  readonly line: string
+  readonly span?: { readonly startCol: number; readonly endCol: number }
+  /** The painted OPEN hint's cell span (rail state): the pointer analogue of
+   *  Enter/Right. Present only when every hint of that verb painted in full. */
+  readonly openSpan?: { readonly startCol: number; readonly endCol: number }
+}
+
+/** The id every painted Esc affordance carries: it names the ONE semantic this
+ *  root accepts (replay the current Esc ladder). */
+const BAR_ESCAPE_ID = 'escape'
+/** The id the painted rail OPEN hint carries: it replays the Enter ladder. */
+const BAR_OPEN_ID = 'open'
+/** The ActionBar's OWN target kinds. EVERY gate that treats the physical last
+ *  row as one bar gesture must use this predicate: the wheel-cancel rule and
+ *  the root-owned release branch previously listed the kinds by hand, so a new
+ *  bar kind could be half-wired (press armed, wheel cancel and release blind). */
+const isActionBarTargetKind = (kind: HitTarget['kind']): boolean =>
+  kind === 'bar-escape' || kind === 'bar-open' || kind === 'bar-span'
+/** The painted hint labels that mean "open/focus the selected rail entry". */
+const BAR_OPEN_HINTS: readonly string[] = ['Right open', 'Enter open', 'Enter/Right focus']
+
 /** One painted Detail action. A button publishes a hit target ONLY when the
  *  frame really painted it inside the pane width. */
 interface DetailButton {
-  readonly verb: 'change' | 'retry' | 'manage' | 'confirm' | 'cancel'
+  readonly verb: 'change' | 'retry' | 'manage' | 'confirm' | 'cancel' | 'service-install' | 'service-dismiss'
   readonly text: string
   /** The identity the painted button acts on: the candidate it commits, or the
    *  selected row it belongs to. It is the painted hit target's id. */
@@ -666,20 +805,24 @@ interface DetailProjection {
   readonly optionRegion?: DetailRegionProjection
   /** Whether this frame paints the selected candidate's identity-bearing head. */
   readonly confirmCandidateVisible: boolean
+  /** Whether THIS frame really paints BOTH actable follow-up candidate rows
+   *  inside the granted viewport (never a clipped/off-screen action). */
+  readonly serviceInstallActionsVisible: boolean
 }
 
-/** The NINE category ids that always exist, in their visible order. `extensions`
+/** The TEN category ids that always exist, in their visible order. `extensions`
  *  is deliberately NOT a member: it is the ONE conditional category, appended
  *  by {@link SettingsWorkspacePanel.currentCategoryOrder} only while the
  *  extension settings registry has live rows. This is the ONE fixed order
  *  every projection, keyboard path and hit map reads. */
 const FIXED_CATEGORY_ORDER = [
-  'about', 'models', 'account', 'agent', 'appearance',
+  'about', 'general', 'models', 'account', 'agent', 'appearance',
   'conversation', 'input-terminal', 'tools', 'plugins',
 ] as const satisfies readonly SettingsWorkspaceCategoryId[]
 
 const CATEGORY_LABELS: Record<SettingsWorkspaceCategoryId, string> = {
   about: 'About',
+  general: 'General',
   models: 'Models',
   account: 'Account',
   agent: 'Agent',
@@ -729,15 +872,23 @@ function isWorkspaceRowId(id: string): id is SettingsWorkspaceRowId {
     || id === 'notification-method'
     || id === 'terminal-progress'
     || id === 'visual-tools'
+    || id === 'web-autostart'
+    || id === 'startup-backend'
     || id === 'web-settings'
     || id === 'approval'
     || id === 'default-permission'
-    || id === 'subagent-model-allowlist'
-    || id === 'subagent-model-selection'
+    || id === 'subagent-settings'
+    || id === 'agent-loop'
+    || id === 'shell-execution'
+    || id === 'session-log-upload'
+    || id === 'acp-runtime'
+    || id === 'acp-autostart'
     || id === 'local-shell-sandbox'
     || id === 'footer-mode'
     || id === 'footer-configurator'
     || id === 'keyboard-shortcuts'
+    || id === 'mcp-servers'
+    || id === 'computer-use'
     || id.startsWith(EXTENSION_SETTING_ROW_PREFIX)
 }
 
@@ -770,7 +921,7 @@ const SETTINGS_REGION_LABELS = {
   backward: formatKeyId(Key.shift(Key.tab)),
 } as const
 const CHOICE_CONFIRM_HINT: ActionBarSegment = { text: 'Enter confirm', priority: 7 }
-const CHOICE_BACK_HINT: ActionBarSegment = { text: 'Esc back', short: 'Esc', priority: 8 }
+const CHOICE_BACK_HINT: ActionBarSegment = { text: 'Back [Esc]', short: 'Back', priority: 8 }
 
 /** The minimum column count of the two-column (medium) projection. */
 export const SETTINGS_WORKSPACE_MEDIUM_MIN_COLUMNS = 76
@@ -1055,6 +1206,7 @@ export class SettingsWorkspacePanel implements Component {
   /** Facts from the current painted projection, used to grant choice actions. */
   private paintedChoiceCandidateVisible = false
   private paintedEnterConfirm = false
+  private confirmationWarningRead = false
   private paintedChoiceNavigation = false
   private paintedChoiceFactScroll = false
   private paintedRevision = -1
@@ -1066,6 +1218,38 @@ export class SettingsWorkspacePanel implements Component {
   /** The per-open commit identity: a settlement that does not match the live
    *  request is refused (a superseded or post-close result can never repaint). */
   private editRequestId = 0
+  /**
+   * M6 UX PR2: the ONE transient post-verified service-install follow-up. It
+   * exists only inside the SAME lease that earned it (the verified
+   * `direct → daemon` commit request identity), and it is withdrawn by Esc,
+   * `Not now`, a row change, a new choice, or this workspace's teardown —
+   * never by undoing the already-verified Profile save.
+   */
+  private serviceInstall: {
+    /** The verified commit request this follow-up belongs to. */
+    readonly requestId: number
+    /** The follow-up's own installable fact from the command layer. */
+    readonly installable: boolean
+    phase: 'asking' | 'installing'
+    focus: 'not-now' | 'install'
+  } | undefined
+  /** The LAST settled install result, kept for ONE round of the same follow-up. */
+  private serviceInstallResult: { readonly ok: boolean; readonly detail: string } | undefined
+  /** Whether THIS frame really painted the follow-up's actable actions. */
+  private paintedServiceInstallActions = false
+  /** The content-index range of the follow-up block of the LAST content
+   *  projection: the grant requires the WHOLE block on screen, not just its
+   *  heading. Reset before each `detailContent` call. */
+  private serviceInstallBlock: { readonly start: number; readonly end: number } | undefined
+  /** M6 UX PR2: the follow-up risk-copy line range (heading + blast-radius
+   *  sentences) that must be READ before an install may be granted. */
+  private serviceInstallRisk: { readonly start: number; readonly end: number } | undefined
+  /** The risk line indices already scrolled into view (a jump past them does
+   *  NOT mark them read). Latched read = every risk line seen at least once. */
+  private serviceInstallRiskSeen = new Set<number>()
+  /** The projection signature (width + risk range) the seen set belongs to;
+   *  a change clears the set so a resize can never alias stale indices. */
+  private serviceInstallRiskSignature: string | undefined
   /** The lazily built embedded Plugin Manager page (ONE instance per open,
    *  kept across Categories/content focus changes until the category really
    *  changes or this workspace is disposed). */
@@ -1091,6 +1275,19 @@ export class SettingsWorkspacePanel implements Component {
   private pendingInitialSpecialist: {
     readonly rowId: SettingsWorkspaceRowId
     readonly specialist: SettingsWorkspaceSpecialistRoute
+  } | undefined
+  /** PR-5: an in-lease Plugin Manager → Tools · Computer Use navigation,
+   *  consumed at the START of the next frame (before the direct projection is
+   *  chosen) so the retired Plugin page cannot be painted by the old frame. */
+  private pendingComputerUseNavigation: {
+    readonly pluginPage: EmbeddedPluginPage
+    readonly categoryId: SettingsWorkspaceCategoryId
+    readonly view: import('../plugin-manager/workspace.ts').PluginWorkspaceView
+    readonly width: number
+    readonly rows: number
+    readonly notice: string | undefined
+    readonly cardValue: string | undefined
+    readonly focus: SettingsWorkspaceFocus
   } | undefined
   /** The ONE command-facing settlement of the typed deeplink: it resolves on
    *  the frame that really mounts the page (or on a failure/teardown), so the
@@ -1378,6 +1575,7 @@ export class SettingsWorkspacePanel implements Component {
    *  write is NOT cancelled: its owner keeps settling it, it simply has no row
    *  left to paint on, and its late settlement finds no matching request id. */
   private discardTransientEdit(): void {
+    this.clearServiceInstall()
     if (this.editPhase.kind === 'browsing') return
     this.editPhase = { kind: 'browsing' }
     this.choiceOffset = 0
@@ -1400,6 +1598,7 @@ export class SettingsWorkspacePanel implements Component {
         field: phase.field,
         candidate: phase.candidate,
         index,
+        fence: phase.fence,
         ...phase.registrationToken === undefined ? {} : { registrationToken: phase.registrationToken },
       }
     }
@@ -1589,6 +1788,27 @@ export class SettingsWorkspacePanel implements Component {
 
   // ── rendering ────────────────────────────────────────────────────────────
 
+  /**
+   * Revoke the ENTIRE transient ACP edit intent for ONE writable field after
+   * that row's Host authority changed (a Connection generation change). This
+   * covers EVERY transient phase — `choosing`, `pending` and `settled`
+   * (including a stale `Retry save`) — so no old-Host selection, pending ack or
+   * retry can ever be confirmed into a write against another Host. It reuses the
+   * ONE existing lifecycle primitive (`discardTransientEdit`, which bumps the
+   * request identity so a late settlement/confirm is inert) instead of inventing
+   * a second state. A `pending` write is NOT cancelled: its app-owned writer
+   * keeps settling and reporting health/diagnostics; only its UI presentation is
+   * retired. The user re-enters the edit against the new authority.
+   */
+  invalidateChoice(field: SettingsWorkspaceWritableField): void {
+    if (this.disposed) return
+    const phase = this.editPhase
+    if (phase.kind === 'browsing' || phase.field !== field) return
+    this.discardTransientEdit()
+    this.bumpRevision()
+    this.intents.requestRender()
+  }
+
   render(width: number): string[] {
     // The conditional `Extensions` directory is reconciled BEFORE the chrome is
     // planned: a frame must never be composed against a membership the input
@@ -1614,6 +1834,10 @@ export class SettingsWorkspacePanel implements Component {
     }
     this.lastRenderWidth = width
     this.lastRenderRows = liveRows
+    // PR-5: a Plugin Manager → Computer Use switch is a same-lease navigation.
+    // It must be committed BEFORE `direct` is chosen: `direct` would otherwise
+    // still describe the retired Plugins category and paint the closed page.
+    this.consumeComputerUseNavigation()
     const choosing = this.choiceField() !== undefined
     const direct = this.paintsDirectPage(width)
     const plan = planSettingsChrome(
@@ -1641,6 +1865,7 @@ export class SettingsWorkspacePanel implements Component {
     this.paintedEnterConfirm = false
     this.paintedChoiceNavigation = false
     this.paintedChoiceFactScroll = false
+    this.paintedServiceInstallActions = false
     // C2-R5: the typed deeplink is consumed on THIS first real frame, BEFORE the
     // direct/legacy projection is chosen. A stale/degraded snapshot that no
     // longer carries the row (or selects a direct category) therefore fails and
@@ -1678,7 +1903,17 @@ export class SettingsWorkspacePanel implements Component {
     if (plan.noticeRows === 1) lines.push(this.renderNotice(plan))
     if (plan.bodyRows > 0) lines.push(...this.renderBody(plan, chromeGeometry(plan).bodyTop, targets, panes))
     this.paintedPanes = panes
-    if (plan.actionRows === 1) lines.push(this.renderActionBar(plan))
+    if (plan.actionRows === 1) {
+      const bar = this.renderActionBar(plan)
+      lines.push(bar.line)
+      if (bar.span !== undefined) targets.push(this.barEscapeTarget(lines.length - 1, bar.span))
+      // The PAINTED open hint is a real pointer route on the single-pane frames:
+      // it replays the Enter ladder, so a pointer-only journey can leave the
+      // category rail without a keyboard step.
+      if (bar.openSpan !== undefined) {
+        targets.push({ kind: 'bar-open', id: BAR_OPEN_ID, row: lines.length - 1, startCol: bar.openSpan.startCol, endCol: bar.openSpan.endCol })
+      }
+    }
     this.paintedTargets = targets
     this.paintedPanes = panes
     this.paintedRevision = this.revision
@@ -1751,13 +1986,13 @@ export class SettingsWorkspacePanel implements Component {
     // the frame's physical last row instead of letting the child own it.
     const childHeight = contentRows + plan.actionRows
     const contentColumn = this.renderContentColumn(contentWidth, childHeight)
-    const semanticBar = contentColumn[childHeight - 1] ?? ''
+    const semanticBar = contentColumn.lines[childHeight - 1] ?? ''
     // C3: the About page's own painted targets (field Copy / Copy All /
     // Refresh rows), collected during the content render in COLUMN coordinates.
     const aboutTargets = this.takePaintedAboutTargets()
     const visible = narrow ? [] : this.visibleCategories(contentRows)
     for (let index = 0; index < contentRows; index += 1) {
-      const content = fit(contentColumn[index] ?? '', contentWidth)
+      const content = fit(contentColumn.lines[index] ?? '', contentWidth)
       if (narrow) {
         lines.push(content)
       } else {
@@ -1788,8 +2023,24 @@ export class SettingsWorkspacePanel implements Component {
     // owns the keyboard, else the semantic hint the child page generated. It
     // starts at X=0 and spans the whole frame; the child chose its segments
     // against the content width it really paints.
-    const bar = this.focus === 'categories' ? this.renderNavigationActionBar(plan.width) : semanticBar
-    lines.push(fit(bar, plan.width))
+    const navigation = this.focus === 'categories' ? this.renderNavigationActionBar(plan.width) : undefined
+    lines.push(fit(navigation?.line ?? semanticBar, plan.width))
+    // The ONE physical last-row Esc target: the rail's own Esc while the rail
+    // owns the keyboard, otherwise the span the content page itself painted (a
+    // child that painted none leaves NO target — never a full-row guess).
+    const barSpan = navigation?.span
+      ?? this.authPage?.paintedEscapeSpan?.()
+      ?? contentColumn.aboutBarSpan
+    if (barSpan !== undefined) {
+      // The physical bar starts at X=0 and spans the whole frame (the child
+      // chose its segments against the content width, but the root paints the
+      // row from column 0), so the page-local span is already in panel columns.
+      targets.push(this.barEscapeTarget(lines.length - 1, barSpan))
+    }
+    const openSpan = navigation?.openSpan
+    if (openSpan !== undefined) {
+      targets.push({ kind: 'bar-open', id: BAR_OPEN_ID, row: lines.length - 1, startCol: openSpan.startCol, endCol: openSpan.endCol })
+    }
     this.paintedContentBox = { x: contentX, top: contentTop, width: contentWidth, rows: contentRows }
     const categories = this.currentCategoryOrder()
     this.paintedPanes = {
@@ -1822,16 +2073,16 @@ export class SettingsWorkspacePanel implements Component {
    * read-only projection with the root's own semantic bar. The root moves that
    * last line to the physical last row and paints only the body here.
    */
-  private renderContentColumn(width: number, rows: number): string[] {
+  private renderContentColumn(width: number, rows: number): { readonly lines: string[]; readonly aboutBarSpan?: { readonly startCol: number; readonly endCol: number } } {
     const page = this.authPage
     if (page !== undefined) {
       page.setBodyHeight(rows)
       const column = page.render(width).slice(0, rows)
       while (column.length < rows) column.push(fit('', width))
       if (this.focus === 'categories') {
-        column[rows - 1] = fit(this.renderNavigationActionBar(width), width)
+        column[rows - 1] = fit(this.renderNavigationActionBar(width).line, width)
       }
-      return column
+      return { lines: column }
     }
     const aboutRows = Math.max(0, rows - 1)
     // The About projection belongs to the About category alone: a direct page
@@ -1844,7 +2095,10 @@ export class SettingsWorkspacePanel implements Component {
       : this.renderAboutActionBar(width)
     const padded = [...about]
     while (padded.length < aboutRows) padded.push(fit('', width))
-    return [...padded.slice(0, aboutRows), fit(bar, width)]
+    return {
+      lines: [...padded.slice(0, aboutRows), fit(bar.line, width)],
+      ...(this.focus === 'categories' ? {} : { aboutBarSpan: bar.span }),
+    }
   }
 
   /**
@@ -2297,9 +2551,54 @@ export class SettingsWorkspacePanel implements Component {
    * body floor every navigation target is invisible, so only the Esc
    * semantics survive.
    */
-  private renderNavigationActionBar(width: number): string {
-    if (this.bodyFloor() < 1) return color.textMuted('Esc close')
-    return color.textMuted(renderActionBarRow(this.navigationActionBarSegments(), width))
+  private renderNavigationActionBar(width: number): PaintedBarLine {
+    if (this.bodyFloor() < 1) return this.paintBar([{ text: 'Close [Esc]', priority: 8 }], width)
+    return this.paintBar(this.navigationActionBarSegments(), width, true)
+  }
+
+  /** Paint the shared Settings row: the LAST (Esc) segment carries the scoped
+   *  Fullscreen secondary-verb ink while every other hint and the separator stay
+   *  `textMuted` (design language §7.1). The unpainted complete span of the Esc
+   *  segment is the ONE pointer geometry this frame may publish; a truncated or
+   *  dropped segment publishes none. */
+  private paintBar(segments: readonly ActionBarSegment[], width: number, openHint: boolean = false): PaintedBarLine {
+    const layout = layoutActionBarRow(segments, width)
+    if (layout.truncated || layout.spans.length === 0) return { line: color.textMuted(layout.text) }
+    const escapeIndex = segments.length - 1
+    let span: { startCol: number; endCol: number } | undefined
+    // A pointer OPEN affordance exists only while EVERY open hint painted in
+    // full: a truncated or dropped hint publishes no geometry, exactly like the
+    // Esc affordance.
+    let openSpan: { startCol: number; endCol: number } | undefined
+    const openSpans: Array<{ startCol: number, endCol: number }> = []
+    const painted = layout.spans.map(candidate => {
+      if (openHint && BAR_OPEN_HINTS.includes(candidate.text)) {
+        openSpans.push({ startCol: candidate.startCol, endCol: candidate.endCol })
+      }
+      if (candidate.inputIndex !== escapeIndex) return color.textMuted(candidate.text)
+      span = { startCol: candidate.startCol, endCol: candidate.endCol }
+      return paintActionSpan(candidate.text, 'secondary')
+    })
+    if (openSpans.length > 0) {
+      openSpan = {
+        startCol: Math.min(...openSpans.map(part => part.startCol)),
+        endCol: Math.max(...openSpans.map(part => part.endCol)),
+      }
+    }
+    const segmentWidth = layout.spans.reduce((sum, candidate) => sum + visibleWidth(candidate.text), 0)
+      + Math.max(0, layout.spans.length - 1) * visibleWidth(ACTION_BAR_SEPARATOR)
+    const padding = Math.max(0, visibleWidth(layout.text) - segmentWidth)
+    return {
+      line: painted.join(color.textMuted(ACTION_BAR_SEPARATOR)) + ' '.repeat(padding),
+      span,
+      ...(openSpan === undefined ? {} : { openSpan }),
+    }
+  }
+
+  /** The painted Esc target of the ONE physical last row: the row, the cells and
+   *  the stable action id. The caller pushes it into the frame's hit map. */
+  private barEscapeTarget(row: number, span: { readonly startCol: number; readonly endCol: number }): HitTarget {
+    return { kind: 'bar-escape', id: BAR_ESCAPE_ID, row, startCol: span.startCol, endCol: span.endCol }
   }
 
   /** The About page's own action bar: it scrolls and it returns to the
@@ -2308,21 +2607,21 @@ export class SettingsWorkspacePanel implements Component {
    *  only for a selected fact that is on screen, `C copy all` only while the
    *  painted About view is still the controller's current snapshot. Below the
    *  body floor every navigation target is invisible, so only Esc survives. */
-  private renderAboutActionBar(width: number): string {
-    if (this.bodyFloor() < 1) return color.textMuted('Esc back')
+  private renderAboutActionBar(width: number): PaintedBarLine {
+    if (this.bodyFloor() < 1) return this.paintBar([{ text: 'Back [Esc]', priority: 8 }], width)
     const about = this.categoryId === 'about' && this.paintedAboutController() !== undefined
     const factCopyable = about
       && !this.aboutActionSelected
       && this.aboutSelectedFactId !== undefined
       && this.paintedAboutVisibleFactIds.has(this.aboutSelectedFactId)
-    return color.textMuted(renderActionBarRow([
+    return this.paintBar([
       ...(this.aboutScrollExtent > 0 ? [{ text: 'Up/Down scroll', priority: 4 }] : []),
       ...(factCopyable ? [{ text: `${SETTINGS_LOCAL_KEYS.copy} copy fact`, priority: 3 }] : []),
       ...(about ? [{ text: `${SETTINGS_LOCAL_KEYS.copy.toUpperCase()} copy all`, priority: 2 }] : []),
       ...(this.aboutSelected() ? [{ text: `${SETTINGS_LOCAL_KEYS.refresh} refresh`, priority: 5 }] : []),
       ...this.regionActionBarHints('focus', true),
-      { text: 'Esc back', priority: 8 },
-    ], width))
+      { text: 'Back [Esc]', priority: 8 },
+    ], width)
   }
 
   /**
@@ -2375,7 +2674,7 @@ export class SettingsWorkspacePanel implements Component {
         { text: 'Up/Down navigate', priority: 4 },
         { text: 'Enter/Right focus', priority: 6 },
         ...(regionKeyUsable ? this.regionActionBarHints('focus', false) : []),
-        { text: 'Esc close', priority: 8 },
+        { text: 'Close [Esc]', priority: 8 },
       ]
     }
     return [
@@ -2383,7 +2682,7 @@ export class SettingsWorkspacePanel implements Component {
       { text: 'Right open', priority: 6 },
       { text: 'Enter open', priority: 5 },
       ...(regionKeyUsable && this.currentRows().length > 0 ? this.regionActionBarHints('panes', false) : []),
-      { text: 'Esc close', priority: 8 },
+      { text: 'Close [Esc]', priority: 8 },
     ]
   }
 
@@ -2588,6 +2887,7 @@ export class SettingsWorkspacePanel implements Component {
       const detail = this.detailLines(pane.width, contentRows)
       detailProjection = detail
       this.paintedChoiceCandidateVisible = detail.confirmCandidateVisible
+      this.paintedServiceInstallActions = detail.serviceInstallActionsVisible
       const buttonRow = contentTop + Math.max(0, contentRows - 1)
       for (const painted of detail.buttons) {
         itemHits.push({
@@ -2708,6 +3008,7 @@ export class SettingsWorkspacePanel implements Component {
     }
     const detail = this.detailLines(width, viewport)
     this.paintedChoiceCandidateVisible = detail.confirmCandidateVisible
+    this.paintedServiceInstallActions = detail.serviceInstallActionsVisible
     panes.detail = {
       x: 0,
       width,
@@ -2866,6 +3167,37 @@ export class SettingsWorkspacePanel implements Component {
     this.detailOffset = offset
     const lines: string[] = []
     for (let i = 0; i < scrollViewport; i += 1) lines.push(content[offset + i] ?? '')
+    // M6 UX PR2: the follow-up's actable rows earn their painted grant ONLY when
+    // the WHOLE risk copy has been READ (every risk line scrolled into view at
+    // least once — a jump/End past it does NOT count) AND both complete action
+    // labels land in the granted viewport. This satisfies plan §3.2 ("only a
+    // complete label is clickable") and G3 (risk fully readable before the
+    // trigger), while staying scroll-reachable on short screens (G8/RFL-006).
+    let serviceInstallActionsVisible = false
+    if (this.serviceInstall !== undefined && this.serviceInstall.installable && this.serviceInstall.phase === 'asking') {
+      // Mark the risk lines currently in view as seen (accumulates across
+      // renders; a jump past them never marks them). The set is keyed to the
+      // CURRENT projection signature (cleared on width/range change) so a
+      // resize that re-wraps the risk can never let stale indices prove a new
+      // line was read.
+      const risk = this.serviceInstallRisk
+      let riskRead = false
+      if (risk !== undefined) {
+        const lo = Math.max(offset, risk.start)
+        const hi = Math.min(offset + scrollViewport, risk.end)
+        for (let i = lo; i < hi; i += 1) this.serviceInstallRiskSeen.add(i)
+        // Every CURRENT risk line must have been seen; a stale or partial set
+        // never grants.
+        riskRead = true
+        for (let i = risk.start; i < risk.end; i += 1) {
+          if (!this.serviceInstallRiskSeen.has(i)) { riskRead = false; break }
+        }
+      }
+      const shown = lines.map(line => line.replace(/\x1b\[[0-9;]*m/gu, ''))
+      const actionsVisible = shown.some(line => /\bNot now\b/u.test(line))
+        && shown.some(line => /\bInstall service\b/u.test(line))
+      serviceInstallActionsVisible = riskRead && actionsVisible
+    }
     const painted = pinned === 1 ? this.layoutButtons(width, buttons) : { text: '', painted: [] }
     if (pinned === 1) {
       // The note rides beside the painted buttons when it fits WHOLE, and keeps
@@ -2875,7 +3207,15 @@ export class SettingsWorkspacePanel implements Component {
       const decorated = painted.text === '' ? noteInk : noteInk === '' ? painted.text : `${painted.text}  ${noteInk}`
       lines.push(fit(visibleWidth(decorated) <= width ? decorated : painted.text, width))
     }
-    return { lines, content, viewport: scrollViewport, buttons: painted.painted, optionRows: [], confirmCandidateVisible: false }
+    return {
+      lines,
+      content,
+      viewport: scrollViewport,
+      buttons: painted.painted,
+      optionRows: [],
+      confirmCandidateVisible: false,
+      serviceInstallActionsVisible,
+    }
   }
 
   /** Compose facts, optional heading, candidate viewport and pinned buttons.
@@ -2884,6 +3224,14 @@ export class SettingsWorkspacePanel implements Component {
     const actionRows = viewport >= 2 ? 1 : 0
     const scrollableRows = Math.max(0, viewport - actionRows)
     const options = row.edit?.options ?? []
+    // The row's own risk statement is a scrollable confirmation fact. It need
+    // not share one frame with the candidate/Confirm on a short terminal, but
+    // it must have been fully painted before Confirm settles.
+    const warning = row.edit?.confirmationWarning
+    const warningLines = warning === undefined
+      ? []
+      : wrapTextWithAnsi(color.warning(escapedPhysicalLine(warning)), Math.max(1, width))
+    const contentRows = scrollableRows
     const blocks = this.choiceBlocks(row, width)
     const flattened = blocks.flat()
     const phase = this.editPhase
@@ -2891,9 +3239,9 @@ export class SettingsWorkspacePanel implements Component {
     const identityRows = selectedOption === undefined
       ? 0
       : wrapTextWithAnsi(escapedPhysicalLine(selectedOption.value), Math.max(1, width - 2)).length
-    let factRows = scrollableRows >= 6 ? 3 : scrollableRows >= 4 ? 2 : scrollableRows >= 2 ? 1 : 0
-    let headingRows = scrollableRows - factRows >= 2 ? 1 : 0
-    let optionViewport = Math.max(0, scrollableRows - factRows - headingRows)
+    let factRows = contentRows >= 6 ? 3 : contentRows >= 4 ? 2 : contentRows >= 2 ? 1 : 0
+    let headingRows = contentRows - factRows >= 2 ? 1 : 0
+    let optionViewport = Math.max(0, contentRows - factRows - headingRows)
     if (identityRows > optionViewport) {
       // Keep the original split by default. A long selected identity first
       // reclaims the optional heading, then facts only down to the old Value row;
@@ -2901,16 +3249,19 @@ export class SettingsWorkspacePanel implements Component {
       const previousFactRows = this.paintedPanes.detail?.factRegion?.rows ?? 0
       const previousOptionRows = this.paintedPanes.detail?.optionRegion?.rows ?? 0
       headingRows = 0
-      optionViewport = Math.max(0, scrollableRows - factRows)
+      optionViewport = Math.max(0, contentRows - factRows)
       if (identityRows > optionViewport && factRows > 1) {
-        factRows = Math.max(1, scrollableRows - identityRows)
-        optionViewport = Math.max(0, scrollableRows - factRows)
+        factRows = Math.max(1, contentRows - identityRows)
+        optionViewport = Math.max(0, contentRows - factRows)
       }
       if (previousFactRows !== factRows || previousOptionRows !== optionViewport) this.detailOffset = 0
     }
-    const factContent = this.detailContent(row, width, false, true)
+    const factContent = [...warningLines, ...this.detailContent(row, width, false, true)]
     const factMaxOffset = Math.max(0, factContent.length - factRows)
     this.detailOffset = Math.min(Math.max(0, this.detailOffset), factMaxOffset)
+    if (warning === undefined || this.detailOffset + factRows >= warningLines.length) {
+      this.confirmationWarningRead = true
+    }
     const visibleFacts: string[] = []
     for (let i = 0; i < factRows; i += 1) visibleFacts.push(factContent[this.detailOffset + i] ?? '')
 
@@ -2969,6 +3320,7 @@ export class SettingsWorkspacePanel implements Component {
         },
       }),
       confirmCandidateVisible,
+      serviceInstallActionsVisible: false,
     }
   }
 
@@ -3070,7 +3422,11 @@ export class SettingsWorkspacePanel implements Component {
     const edit = row.edit
     if (edit !== undefined && edit.options.length > 0 && phase.kind !== 'pending') {
       buttons.push({ verb: 'change', text: 'Change…', id: row.id })
-      if (phase.kind === 'settled' && phase.field === edit.field && phase.outcome !== 'verified') {
+      const retryAllowed = edit.retryOnlyWhenDefinite === true
+        ? phase.kind === 'settled' && phase.outcome === 'not-saved'
+        : true
+      if (phase.kind === 'settled' && phase.field === edit.field && phase.outcome !== 'verified'
+        && edit.retryable !== false && retryAllowed) {
         buttons.push({ verb: 'retry', text: 'Retry save', id: phase.attempted })
       }
     }
@@ -3079,18 +3435,50 @@ export class SettingsWorkspacePanel implements Component {
     // carries the specialist page, the composition supplies its factory AND the
     // row has not been refused availability.
     if (row.specialist !== undefined && row.specialistAvailable !== false) {
-      const factoryAvailable = row.specialist === 'subagent-allowlist'
-        ? this.intents.createSubagentAllowlistPicker !== undefined
-        : this.intents.createWebSettingsPage !== undefined
-      if (factoryAvailable) {
-        buttons.push({
-          verb: 'manage',
-          text: row.specialist === 'subagent-allowlist' ? 'Manage allowed models…' : 'Configure Web…',
-          id: row.id,
-        })
+      const special = this.specialistEntryFor(row.specialist)
+      if (special !== undefined) {
+        buttons.push({ verb: 'manage', text: special.label, id: row.id })
       }
     }
+    // M6 UX PR2: the follow-up's own pointer route. It exists ONLY while the
+    // follow-up is asking AND the command layer proved the local install
+    // capability; the installing phase paints no actable button (no second
+    // submission), and `Not now` is the safe dismissal.
+    if (this.serviceInstall !== undefined && row.id === 'startup-backend'
+      && this.serviceInstall.installable && this.serviceInstall.phase === 'asking') {
+      buttons.push({ verb: 'service-install', text: 'Install service', id: row.id })
+      buttons.push({ verb: 'service-dismiss', text: 'Not now', id: row.id })
+    }
     return buttons
+  }
+
+  /**
+   * The ONE explicit Manage entry of a specialist row: its factory (present
+   * only when the composition supplied it) and its exact label. Each route has
+   * its own wording — an MCP row must never inherit the Web page's
+   * `Configure Web…`.
+   */
+  private specialistEntryFor(
+    specialist: NonNullable<SettingsWorkspaceRow['specialist']>,
+  ): { readonly label: string } | undefined {
+    switch (specialist) {
+      case 'subagent-settings':
+        return this.intents.createSubagentSettingsPage === undefined ? undefined : { label: 'Configure subagent settings…' }
+      case 'web-settings':
+        return this.intents.createWebSettingsPage === undefined ? undefined : { label: 'Configure Web…' }
+      case 'footer-configurator':
+        return this.intents.createFooterConfiguratorPage === undefined ? undefined : { label: 'Configure footer…' }
+      case 'keybindings':
+        return this.intents.createKeybindingsPage === undefined ? undefined : { label: 'Configure shortcuts…' }
+      case 'mcp-servers':
+        return this.intents.createMcpServersPage === undefined ? undefined : { label: 'Manage MCP servers…' }
+      case 'computer-use':
+        return this.intents.createComputerUsePage === undefined ? undefined : { label: 'Manage Computer Use…' }
+      case 'agent-loop-settings':
+        return this.intents.createHostNumericSettingsPage === undefined ? undefined : { label: 'Configure Agent loop…' }
+      case 'shell-execution-settings':
+        return this.intents.createHostNumericSettingsPage === undefined ? undefined : { label: 'Configure Shell execution…' }
+    }
   }
 
   /** Paint the pinned action row, dropping every button that cannot fit WHOLE:
@@ -3146,6 +3534,8 @@ export class SettingsWorkspacePanel implements Component {
     const labelWidth = width >= 26 ? 12 : 8
     const bodyWidth = Math.max(1, width - labelWidth)
     const lines: string[] = []
+    // The follow-up block range is recomputed per projection (it may be absent).
+    this.serviceInstallBlock = undefined
     const fullFacts: string[] = []
     if (includeTitle) lines.push(color.textStrong(sanitizedPhysicalLine(row.label)))
     // Roles 3/4/5: labels are textDim, the PRIMARY field's value is `text` and
@@ -3199,8 +3589,11 @@ export class SettingsWorkspacePanel implements Component {
       field('Value', row.summary, color.text, true)
       if (edit !== undefined) {
         if (edit.runtimeEffect !== undefined) field('Runtime', edit.runtimeEffect, color.textDim, true)
-        if (edit.primary === 'persisted') field('Runtime', edit.runtime, color.textDim, true)
-        else field('Persisted', edit.persisted, color.textDim, true)
+        if (edit.primary === 'persisted') {
+          if (edit.persistedFacts === undefined) field('Runtime', edit.runtime, color.textDim, true)
+          // The first fact is the row's primary Value; never paint it twice.
+          else for (const fact of edit.persistedFacts.slice(1)) field('', fact, color.textDim, true)
+        } else field('Persisted', edit.persisted, color.textDim, true)
       }
       lines.push(...fullFacts)
     } else {
@@ -3221,8 +3614,11 @@ export class SettingsWorkspacePanel implements Component {
     if (edit !== undefined) {
       if (!inlineChoice) {
         if (edit.runtimeEffect !== undefined) field('Runtime', edit.runtimeEffect)
-        if (edit.primary === 'persisted') field('Runtime', edit.runtime)
-        else field('Persisted', edit.persisted)
+        if (edit.primary === 'persisted') {
+          if (edit.persistedFacts === undefined) field('Runtime', edit.runtime)
+          // The first fact is the row's primary Value; never paint it twice.
+          else for (const fact of edit.persistedFacts.slice(1)) field('', fact)
+        } else field('Persisted', edit.persisted)
       }
       const status = this.editStatus(row, edit.field)
       if (status !== undefined) {
@@ -3238,6 +3634,69 @@ export class SettingsWorkspacePanel implements Component {
     field('Freshness', freshnessText(row, this.snapshot.configReadiness))
     field('Description', row.description)
     if (row.freshness === 'read-error' && this.snapshot.readIssue !== undefined) field('Issue', this.snapshot.readIssue)
+    // M6 UX PR2: the ONE transient service-install follow-up, painted inside
+    // the SAME Detail lease. The explanation and the truthfulness line are the
+    // frozen copy; the actable candidate rows exist ONLY while the command
+    // layer proved the local install capability AND the follow-up is still in
+    // its asking phase. Installing locks the seat (no second submission), and
+    // a settled round keeps its one result line until it is superseded.
+    if (this.serviceInstall !== undefined && row.id === 'startup-backend') {
+      // The follow-up's risk copy is wrapped to the pane width (never a
+      // truncated sentence), and the whole block's content range is recorded
+      // so `detailLines` can prove every risk line AND both actions are on
+      // screen before any install may be confirmed.
+      const blockStart = lines.length
+      const wrapLine = (text: string): void => {
+        const parts = wrapTextWithAnsi(escapedPhysicalLine(text), width)
+        for (const part of parts.length === 0 ? [''] : parts) lines.push(part)
+      }
+      lines.push('')
+      lines.push(color.textStrong('Optional OS supervision'))
+      const riskStart = lines.length - 1
+      wrapLine('Daemon works without installing a service.')
+      wrapLine("Install creates this Profile's user service only; it does not start,")
+      wrapLine('enable, restart, stop or migrate any running Host.')
+      // The risk copy (heading + blast-radius sentences) is what must be READ
+      // before an install is granted; its line range drives the seen-tracking.
+      this.serviceInstallRisk = { start: riskStart, end: lines.length }
+      // A width/range change re-wraps the risk: clear the seen set so stale line
+      // indices can never prove a NEW risk line was read.
+      const riskSignature = `${width}|${riskStart}|${lines.length}`
+      if (this.serviceInstallRiskSignature !== riskSignature) {
+        this.serviceInstallRiskSignature = riskSignature
+        this.serviceInstallRiskSeen = new Set<number>()
+      }
+      if (this.serviceInstall.phase === 'installing') {
+        lines.push(fit(color.textDim('Status'), labelWidth) + color.textDim('Installing service…'))
+      } else if (this.serviceInstallResult !== undefined) {
+        const paint = this.serviceInstallResult.ok ? color.success : color.error
+        lines.push(fit(color.textDim('Status'), labelWidth) + paint(this.serviceInstallResult.ok
+          ? 'Service installed (or already owned) · Verified'
+          : `Install could not be verified · ${this.serviceInstallResult.detail}`))
+      } else if (!this.serviceInstall.installable) {
+        lines.push(fit(color.textDim('Status'), labelWidth) + color.textDim('Daemon service install is available on local Linux/macOS only'))
+      } else {
+        lines.push(fit(color.textDim('Status'), labelWidth) + color.textDim('Not installed by this action'))
+      }
+      if (this.serviceInstall.installable && this.serviceInstall.phase === 'asking') {
+        lines.push('')
+        for (const action of ['not-now', 'install'] as const) {
+          const label = action === 'not-now' ? 'Not now' : 'Install service'
+          // The candidate rows are fitted to the pane width like every other
+          // painted line, so a row that does not fit WHOLE is never claimed as
+          // painted (the grant check below matches the complete label).
+          const row = this.serviceInstall.focus === action
+            ? `${color.primary('> ')}${color.textStrong(label)}`
+            : `  ${color.text(label)}`
+          lines.push(fit(row, width))
+        }
+      }
+      this.serviceInstallBlock = { start: blockStart, end: lines.length }
+      // The painted grant is NOT set here: this is only the content
+      // projection, before the viewport clip. The grant is set by
+      // `detailLines` only when the WHOLE block (risk copy + both rows) really
+      // lands on screen.
+    }
     return lines
   }
 
@@ -3245,10 +3704,10 @@ export class SettingsWorkspacePanel implements Component {
    *  first and `Esc` LAST, while `Esc` keeps the highest drop priority. Whole
    *  segments are dropped by priority through the shared row layout, so a hint
    *  is never cut mid-word. */
-  private renderActionBar(plan: SettingsChromePlan): string {
+  private renderActionBar(plan: SettingsChromePlan): PaintedBarLine {
     const row = this.selectedRow()
-    const back = this.focus === 'categories' ? 'Esc close' : 'Esc back'
-    if (this.bodyFloor() < 1) return fit(color.textMuted(back), plan.width)
+    const back = this.focus === 'categories' ? 'Close [Esc]' : 'Back [Esc]'
+    if (this.bodyFloor() < 1) return this.paintBar([{ text: back, priority: 8 }], plan.width)
     let segments: ActionBarSegment[]
     let choiceFactScrollAvailable = false
     if (this.choiceField() !== undefined) {
@@ -3322,12 +3781,14 @@ export class SettingsWorkspacePanel implements Component {
     // Role 13: hints are the WEAKEST readable ink (`textMuted`), one step below
     // the diagnostic line, so the bar never competes with content. The shared
     // row layout already padded/truncated to the pane width.
-    const rendered = renderActionBarRow(segments, plan.width)
+    // The open hints (`Right open` / `Enter open`) are REAL pointer targets in
+    // every state that paints them, not keyboard-only text.
+    const rendered = this.paintBar(segments, plan.width, true)
     const choosing = this.choiceField() !== undefined
-    this.paintedChoiceNavigation = choosing && rendered.includes('Up/Down')
+    this.paintedChoiceNavigation = choosing && rendered.line.includes('Up/Down')
     this.paintedChoiceFactScroll = choosing && choiceFactScrollAvailable
-    this.paintedEnterConfirm = choosing && rendered.includes(CHOICE_CONFIRM_HINT.text)
-    return color.textMuted(rendered)
+    this.paintedEnterConfirm = choosing && rendered.line.includes(CHOICE_CONFIRM_HINT.text)
+    return rendered
   }
 
   // ── state helpers ────────────────────────────────────────────────────────
@@ -3576,7 +4037,13 @@ export class SettingsWorkspacePanel implements Component {
     // (its list or its detail) above the single Action Bar. The two C2-R5 pages
     // may be mounted with ZERO content rows (bar-only) because a command
     // deeplink must still land on them and their own bar keeps Esc reachable.
-    const floor = row.specialist === 'subagent-allowlist' ? 2 : row.specialist === 'web-settings' ? 1 : 0
+    const floor = row.specialist === 'subagent-settings'
+      || row.specialist === 'agent-loop-settings'
+      || row.specialist === 'shell-execution-settings'
+      ? 1
+      : row.specialist === 'web-settings' || row.specialist === 'mcp-servers' || row.specialist === 'computer-use'
+        ? 1
+        : 0
     if (this.bodyFloor() < floor) return
     let page: EmbeddedSpecialistPage | undefined
     // The page's own `done` closes THIS instance only: a stale late callback of a
@@ -3589,15 +4056,16 @@ export class SettingsWorkspacePanel implements Component {
       // category rail like every other Settings level, instead of first landing
       // on a Detail summary the user never asked for. The other embedded pages
       // keep their documented `Detail → row` ladder.
-      if ((row.specialist === 'footer-configurator' || row.specialist === 'keybindings')
+      if ((row.specialist === 'footer-configurator' || row.specialist === 'keybindings' || row.specialist === 'subagent-settings'
+        || row.specialist === 'agent-loop-settings' || row.specialist === 'shell-execution-settings')
         && this.focus === 'detail') {
         this.leaveDetailTo('rows')
       }
     }
     const changed = (): void => { this.refreshSpecialistSummary() }
     switch (row.specialist) {
-      case 'subagent-allowlist':
-        page = this.intents.createSubagentAllowlistPicker?.(done, changed)
+      case 'subagent-settings':
+        page = this.intents.createSubagentSettingsPage?.(done, changed)
         break
       case 'web-settings':
         page = this.intents.createWebSettingsPage?.(done, (initial) => {
@@ -3609,6 +4077,18 @@ export class SettingsWorkspacePanel implements Component {
         break
       case 'keybindings':
         page = this.intents.createKeybindingsPage?.(done, changed)
+        break
+      case 'mcp-servers':
+        page = this.intents.createMcpServersPage?.(done)
+        break
+      case 'computer-use':
+        page = this.intents.createComputerUsePage?.(done, () => this.navigateComputerUseToPlugins())
+        break
+      case 'agent-loop-settings':
+        page = this.intents.createHostNumericSettingsPage?.('agent-loop', done, changed)
+        break
+      case 'shell-execution-settings':
+        page = this.intents.createHostNumericSettingsPage?.('shell-execution', done, changed)
         break
     }
     if (page === undefined) return
@@ -3760,7 +4240,22 @@ export class SettingsWorkspacePanel implements Component {
     this.paintedSpecialistBox = page === undefined
       ? undefined
       : { x: 0, top: geometry.contentTop, width: plan.width, rows: contentRows }
-    this.paintedTargets = []
+    // The last row's Esc target stays the ROOT's single owner. The child's
+    // own NON-Esc Action-Bar spans are registered as DELEGATED targets: the
+    // root owns the physical row and forwards the release to the child's
+    // `activateBarSpan` (never a second mouse handler over the same cells).
+    const barSpan = page?.paintedEscapeSpan?.()
+    const delegated = (page?.paintedBarSpans?.() ?? []).map(span => ({
+      kind: 'bar-span' as const,
+      id: span.id,
+      row: lines.length - 1,
+      startCol: span.startCol,
+      endCol: span.endCol,
+    }))
+    this.paintedTargets = [
+      ...barSpan === undefined ? [] : [this.barEscapeTarget(lines.length - 1, barSpan)],
+      ...delegated,
+    ]
     this.paintedPanes = {}
     this.paintedContentBox = undefined
     this.paintedRevision = this.revision
@@ -3785,9 +4280,9 @@ export class SettingsWorkspacePanel implements Component {
     readonly allowDual: boolean
   } {
     const width = plan.width
-    // A business page (install/confirm/diagnostics) owns the FULL width: its
-    // risk text and actions are never squeezed beside the Categories rail.
-    if (view === 'install' || view === 'confirm' || view === 'diagnostics') {
+    // A business page (install/update/confirm/diagnostics) owns the FULL width:
+    // its risk text and actions are never squeezed beside the Categories rail.
+    if (view === 'install' || view === 'update' || view === 'confirm' || view === 'diagnostics') {
       return { showCategories: false, contentX: 0, contentWidth: Math.max(1, width), allowDual: false }
     }
     if (width >= 120) {
@@ -3822,7 +4317,10 @@ export class SettingsWorkspacePanel implements Component {
    */
   private ensurePluginPageMounted(): void {
     if (this.pluginPage !== undefined || this.disposed) return
-    const page = this.intents.onOpenPlugins?.(() => this.yieldPluginNavigation())
+    const page = this.intents.onOpenPlugins?.(
+      () => this.yieldPluginNavigation(),
+      () => this.requestComputerUseNavigation(),
+    )
     if (page === undefined) return
     this.pluginPage = page
     this.bumpRevision()
@@ -3883,6 +4381,111 @@ export class SettingsWorkspacePanel implements Component {
   }
 
   /**
+   * PR-5: the Plugin Manager's explicit `Manage Computer Use…` intent. It
+   * validates the SAME lease destination before anything is retired, so a
+   * missing row/factory returns the exact reason to the plugin page instead of
+   * closing it into a dead end. The actual switch is consumed on the next frame
+   * (a synchronous close inside the plugin's own input/dispatch stack would
+   * dispose the caller under itself).
+   */
+  private requestComputerUseNavigation(): string | undefined {
+    if (this.disposed) return 'The Settings workspace is closing.'
+    if (this.pendingComputerUseNavigation !== undefined) return undefined
+    if (this.categoryId !== 'plugins') return 'The Plugin Manager page is not current.'
+    const pluginPage = this.pluginPage
+    if (pluginPage === undefined) return 'The Plugin Manager page is not open.'
+    if (this.specialistPage !== undefined) return 'Another Settings page is already open.'
+    if (this.pluginPageHasPendingMutation()) return 'The Plugin Manager is still saving a change; wait for it to settle.'
+    if (this.intents.createComputerUsePage === undefined) return 'The Computer Use settings page is not available in this build.'
+    const row = this.snapshot.rows.find(candidate => candidate.id === 'computer-use')
+    if (row === undefined || row.category !== 'tools' || row.specialist !== 'computer-use' || row.specialistAvailable === false) {
+      return 'The Computer Use settings row is not available right now.'
+    }
+    if (this.bodyFloor() < 1) return 'The window is too small to show the Computer Use page.'
+    this.pendingComputerUseNavigation = {
+      pluginPage,
+      categoryId: this.categoryId,
+      view: pluginPage.currentView(),
+      width: this.lastRenderWidth,
+      rows: this.lastRenderRows,
+      notice: this.noticeKey(),
+      cardValue: typeof pluginPage.selectedCardValue === 'function' ? pluginPage.selectedCardValue() : undefined,
+      focus: this.focus,
+    }
+    this.intents.requestRender()
+    return undefined
+  }
+
+  /**
+   * PR-5: consume the one deferred Plugin → Computer Use navigation. Order is
+   * load-bearing: retire the Plugin child and release its Host claim FIRST,
+   * commit the Tools row/focus SECOND, and mount the specialist THIRD.
+   */
+  /** A stable identity for the shared App notice (the object is rebuilt). */
+  private noticeKey(): string | undefined {
+    const notice = this.intents.notice()
+    return notice === undefined ? undefined : `${notice.kind}\u0000${notice.text}`
+  }
+
+  private consumeComputerUseNavigation(): void {
+    const pending = this.pendingComputerUseNavigation
+    if (pending === undefined) return
+    this.pendingComputerUseNavigation = undefined
+    if (this.disposed) return
+    // The SAME child/view/category the user requested from must still be live:
+    // a newer input, a category change, a resize/notice or a replacement page
+    // makes this deferred navigation stale.
+    if (this.categoryId !== pending.categoryId) return
+    if (this.pluginPage !== pending.pluginPage) return
+    if (pending.pluginPage.currentView() !== pending.view) return
+    if (this.lastRenderWidth !== pending.width || this.lastRenderRows !== pending.rows) return
+    if (this.noticeKey() !== pending.notice) return
+    if (this.focus !== pending.focus) return
+    if (typeof pending.pluginPage.selectedCardValue === 'function'
+      && pending.pluginPage.selectedCardValue() !== pending.cardValue) return
+    if (this.pluginPageHasPendingMutation()) return
+    const destination = this.snapshot.rows.find(candidate => candidate.id === 'computer-use')
+    if (destination === undefined || destination.specialist !== 'computer-use'
+      || destination.specialistAvailable === false || this.intents.createComputerUsePage === undefined) return
+    if (this.bodyFloor() < 1) return
+    this.closePluginPage()
+    this.categoryId = 'tools'
+    this.rowId = 'computer-use'
+    this.focus = 'rows'
+    this.rowOffset = 0
+    this.detailOffset = 0
+    this.resetChoice()
+    this.pressedGesture = undefined
+    this.contentPressed = undefined
+    this.specialistPressed = undefined
+    this.bumpRevision()
+    const row = this.snapshot.rows.find(candidate => candidate.id === 'computer-use')
+    if (row !== undefined) this.openSpecialist(row)
+  }
+
+  /**
+   * PR-5: the Computer Use page's explicit `Open Settings → Plugins` navigation.
+   * It retires THIS specialist first and switches the SAME Settings lease to
+   * the Plugins direct page; the lazy Plugin Manager mount then starts its one
+   * inventory read. Never a second settings surface.
+   */
+  private navigateComputerUseToPlugins(): void {
+    if (this.disposed || this.specialistRow !== 'computer-use') return
+    this.closeSpecialist()
+    this.categoryId = 'plugins'
+    this.focus = 'content'
+    this.rowId = undefined
+    this.rowOffset = 0
+    this.detailOffset = 0
+    this.resetChoice()
+    this.pressedGesture = undefined
+    this.contentPressed = undefined
+    this.specialistPressed = undefined
+    this.bumpRevision()
+    this.intents.requestRender()
+  }
+
+  /**
    * Recompute the plugin page's grant from the LIVE chrome (width, height, App
    * notice) and return the content box the CURRENT chrome paints. Mouse input
    * calls this BEFORE translating a cell: a grant installed by the keyboard path
@@ -3926,8 +4529,14 @@ export class SettingsWorkspacePanel implements Component {
       for (let index = 0; index < geometry.contentRows; index += 1) {
         lines.push(fit(index === 0 ? color.textDim('The Plugin Manager is unavailable in this composition.') : '', plan.width))
       }
-      lines.push(fit(this.focus === 'categories' ? this.renderNavigationActionBar(plan.width) : color.textMuted('Esc back'), plan.width))
-      this.paintedTargets = []
+      const navigation = this.focus === 'categories' ? this.renderNavigationActionBar(plan.width) : undefined
+      const fallback = navigation ?? this.paintBar([{ text: 'Back [Esc]', priority: 8 }], plan.width)
+      lines.push(fit(fallback.line, plan.width))
+      this.paintedTargets = fallback.span === undefined
+        ? []
+        : [this.barEscapeTarget(lines.length - 1, navigation === undefined
+          ? fallback.span
+          : { startCol: fallback.span.startCol, endCol: fallback.span.endCol })]
       this.paintedPanes = {}
       this.paintedContentBox = undefined
       this.paintedRevision = this.revision
@@ -3959,8 +4568,14 @@ export class SettingsWorkspacePanel implements Component {
     }
     // The page's semantic bar is its LOCAL last row; while the rail owns the
     // keyboard the root's navigation bar takes the physical last row instead.
-    const bar = this.focus === 'categories' ? this.renderNavigationActionBar(plan.width) : (child[childRows - 1] ?? '')
-    lines.push(fit(bar, plan.width))
+    const navigation = this.focus === 'categories' ? this.renderNavigationActionBar(plan.width) : undefined
+    lines.push(fit(navigation?.line ?? (child[childRows - 1] ?? ''), plan.width))
+    const barSpan = navigation?.span ?? page.paintedEscapeSpan?.()
+    if (barSpan !== undefined) {
+      // Same ONE physical row: painted from column 0, so the page-local span is
+      // already in panel columns (never shifted by the content-column origin).
+      targets.push(this.barEscapeTarget(lines.length - 1, barSpan))
+    }
     this.paintedContentBox = { x: projection.contentX, top: contentTop, width: projection.contentWidth, rows: contentRows }
     const categories = this.currentCategoryOrder()
     this.paintedPanes = projection.showCategories
@@ -3990,6 +4605,7 @@ export class SettingsWorkspacePanel implements Component {
     switch (view) {
       case 'details': return 'Plugins · Details'
       case 'install': return 'Plugins · Install'
+      case 'update': return 'Plugins · Update'
       case 'confirm': return 'Plugins · Confirm'
       case 'diagnostics': return 'Plugins · Diagnostics'
       default: return 'Plugins'
@@ -4023,6 +4639,7 @@ export class SettingsWorkspacePanel implements Component {
     switch (view) {
       case 'details': return 'Details'
       case 'install': return 'Plugins · Install'
+      case 'update': return 'Plugins · Update'
       case 'confirm': return 'Plugins · Confirm'
       case 'diagnostics': return 'Plugins · Diagnostics'
       default: return 'Plugins'
@@ -4058,6 +4675,15 @@ export class SettingsWorkspacePanel implements Component {
 
   handleInput(data: string): void {
     if (this.disposed) return
+    // PR-5: a newer keyboard input supersedes a deferred Plugin → Computer Use
+    // navigation. Without this, a buffered Enter+Esc (or a resize/notice before
+    // the next frame) would still teleport after the user backed out.
+    this.pendingComputerUseNavigation = undefined
+    // A keyboard interaction SUPERSEDES any in-flight pointer gesture: the
+    // press-time painted target may repaint into a different action, and a
+    // hosted page may switch its own Question/Picker sub-view, before the
+    // release. Revoking here means a release after a keypress is always inert.
+    this.cancelPointerOwners()
     // The conditional directory is a fail-closed boundary of its own: a changed
     // registry membership revokes the painted grants BEFORE any dispatch, and
     // the event that DISCOVERED the change never navigates with it. Until a
@@ -4082,6 +4708,15 @@ export class SettingsWorkspacePanel implements Component {
     // transition) only the real Esc is admitted — a key must never act on a
     // body the user cannot see.
     if (this.specialistPage !== undefined) {
+      // RFL-016: the root chrome (an App notice/choice) can shrink the hosted
+      // grant without changing the terminal size. The pointer path already
+      // refuses a stale hit map; the keyboard path must revoke the specialist's
+      // old action grant too. Only the real Esc passes.
+      if (this.chromeGeometryStale() && !matchesKey(data, 'escape')) {
+        this.cancelPointerOwners()
+        this.intents.requestRender()
+        return
+      }
       if (!matchesKey(data, 'escape') && this.specialistPage.grantAwaitingPaint?.() === true) return
       this.specialistPage.handleInput(data)
       // The child's own model changed THIS frame's business content; the root
@@ -4097,6 +4732,47 @@ export class SettingsWorkspacePanel implements Component {
       if (this.rootProjectionAwaitingPaint() && !matchesKey(data, 'escape')) return
       this.handleContentInput(data)
       return
+    }
+    // M6 UX PR2: the follow-up owns the SAME back/focus/commit keys the choice
+    // owns, gated by the painted grant: only actions THIS frame really painted
+    // can act. Esc and the back key withdraw the follow-up (zero admin IO, the
+    // verified save stays); the focus keys move between the two actions; Enter
+    // commits the focused one. A very small frame that dropped the candidate
+    // rows refuses every action (the painted grant is false).
+    if (this.serviceInstall !== undefined && this.focus === 'detail') {
+      const asking = this.serviceInstall.phase === 'asking' && this.serviceInstall.installable
+      const painted = asking
+        && this.paintedServiceInstallActions
+        && this.lastRenderWidth === this.intents.columns()
+        && this.lastRenderRows === this.intents.rows()
+      // Esc / the back key withdraw the follow-up in EVERY phase: zero admin IO
+      // and the verified save stays. A task already dispatched keeps its own
+      // process owner; only the transient view goes.
+      if (matchesKey(data, 'escape') || matchesKey(data, 'left') || matchesKey(data, 'backspace')) {
+        this.dismissServiceInstall()
+        return
+      }
+      // The installing seat locks the commit/focus keys: no second submission
+      // and no focus churn while the owned task runs.
+      if (this.serviceInstall.phase === 'installing'
+        && (matchesKey(data, 'enter') || matchesKey(data, 'tab') || matchesKey(data, 'shift+tab')
+          || matchesKey(data, 'up') || matchesKey(data, 'down'))) {
+        return
+      }
+      if (asking && (matchesKey(data, 'up') || matchesKey(data, 'down') || matchesKey(data, 'tab') || matchesKey(data, 'shift+tab'))) {
+        if (painted) this.serviceInstall.focus = this.serviceInstall.focus === 'not-now' ? 'install' : 'not-now'
+        this.intents.requestRender()
+        return
+      }
+      if (asking && matchesKey(data, 'enter')) {
+        if (painted) {
+          if (this.serviceInstall.focus === 'install') this.beginServiceInstall()
+          else this.dismissServiceInstall()
+        }
+        return
+      }
+      // Any other key keeps the Detail's own semantics (paging/refresh): the
+      // follow-up is a block inside the SAME scrolling pane, never a modal.
     }
     if (matchesKey(data, 'escape')) return this.goBack()
     // §4.2 admits only the REAL Esc while the destination frame is stale (Backspace
@@ -4281,6 +4957,7 @@ export class SettingsWorkspacePanel implements Component {
       this.choiceOffset = 0
       this.editRequestId += 1
     }
+    this.clearServiceInstall()
     this.bumpRevision()
     this.intents.requestRender()
   }
@@ -4675,6 +5352,7 @@ export class SettingsWorkspacePanel implements Component {
    *  resize-driven replacement). Pending/settled phases survive: their write is
    *  already owned by the app. */
   private resetChoice(): void {
+    this.clearServiceInstall()
     if (this.editPhase.kind !== 'choosing') return
     this.editPhase = { kind: 'browsing' }
     this.choiceOffset = 0
@@ -4704,6 +5382,7 @@ export class SettingsWorkspacePanel implements Component {
       field: phase.field,
       candidate: option.value,
       index: next,
+      fence: phase.fence,
       ...phase.registrationToken === undefined ? {} : { registrationToken: phase.registrationToken },
     }
     // The candidate change is a state version: a press recorded against the
@@ -4733,6 +5412,10 @@ export class SettingsWorkspacePanel implements Component {
       field: fresh.edit.field,
       candidate: options[index]!.value,
       index,
+      // Capture the exact Host fence ONCE. Candidate movement and any later
+      // snapshot refresh never rebase it; Confirm compares it with the row it
+      // is about to dispatch for.
+      fence: { revision: fresh.edit.revision, generation: fresh.edit.generation },
       // The registration the choice was opened for: an HMR replacement keeps
       // the same field string, so this token is its write identity.
       ...fresh.extensionRegistrationToken === undefined ? {} : { registrationToken: fresh.extensionRegistrationToken },
@@ -4743,6 +5426,10 @@ export class SettingsWorkspacePanel implements Component {
     this.lastChoiceIndex = -1
     this.lastChoiceViewport = -1
     this.lastChoiceWidth = -1
+    this.confirmationWarningRead = false
+    // A new choice withdraws the follow-up (a row change): the verified save
+    // stays, only the transient follow-up block goes.
+    this.clearServiceInstall()
     this.bumpRevision()
     this.intents.requestRender()
   }
@@ -4773,6 +5460,24 @@ export class SettingsWorkspacePanel implements Component {
       return
     }
     if (!this.paintedEnterConfirm) return
+    if (edit.confirmationWarning !== undefined && !this.confirmationWarningRead) {
+      // Keep the current fact offset so PgUp/PgDn can reveal the warning; a
+      // Confirm before it was read never settles a write.
+      this.bumpRevision()
+      this.intents.requestRender()
+      return
+    }
+    // The L2 capture is the decision fence. A refresh that changed the row while
+    // the SAME painted choice stays open must not silently rebase the CAS.
+    if (phase.fence.revision !== undefined || phase.fence.generation !== undefined) {
+      if (edit.revision !== phase.fence.revision || !Object.is(edit.generation, phase.fence.generation)) {
+        this.settle(phase.field, phase.candidate, {
+          outcome: 'not-saved',
+          reason: 'Host settings changed since this choice was opened; refresh to review',
+        }, phase.registrationToken)
+        return
+      }
+    }
     const option = edit.options.find(candidate => candidate.value === phase.candidate)
     if (option === undefined) {
       // The source vanished between the paint and the confirm: report it instead of
@@ -4790,7 +5495,7 @@ export class SettingsWorkspacePanel implements Component {
       }, phase.registrationToken)
       return
     }
-    this.dispatch(phase.field, phase.candidate, edit.revision, phase.registrationToken)
+    this.dispatch(phase.field, phase.candidate, phase.fence.revision, phase.fence.generation, phase.registrationToken)
   }
 
   /** `[Retry save]`: re-dispatch the FAILED attempt's value, re-proving that its
@@ -4813,7 +5518,7 @@ export class SettingsWorkspacePanel implements Component {
       }, phase.registrationToken)
       return
     }
-    this.dispatch(phase.field, value, edit.revision, phase.registrationToken)
+    this.dispatch(phase.field, value, edit.revision, edit.generation, phase.registrationToken)
   }
 
   /** The ONE dispatch: commit the pending phase, then hand the request to the
@@ -4826,6 +5531,7 @@ export class SettingsWorkspacePanel implements Component {
     field: SettingsWorkspaceWritableField,
     value: string,
     revision?: number,
+    generation?: object,
     registrationToken?: number,
   ): void {
     const onCommit = this.intents.onCommit
@@ -4853,6 +5559,7 @@ export class SettingsWorkspacePanel implements Component {
         field,
         value,
         ...revision === undefined ? {} : { revision },
+        ...generation === undefined ? {} : { generation },
         ...registrationToken === undefined ? {} : { registrationToken },
       },
       outcome => this.settlePending(requestId, outcome),
@@ -4867,16 +5574,7 @@ export class SettingsWorkspacePanel implements Component {
     const phase = this.editPhase
     if (phase.kind !== 'pending' || phase.requestId !== requestId) return
     this.settle(phase.field, phase.attempted, outcome, phase.registrationToken)
-    // C2-R3: the ONE typed follow-up a refusal may carry. It is applied only
-    // after the settlement is committed above and only while this request is
-    // still the live one, so a late or superseded result can never move the
-    // user. Navigation only — never a write.
-    const followUp = outcome.followUpRowId
-    if (followUp === undefined || outcome.outcome !== 'not-saved') return
-    const current = this.editPhase
-    if (current.kind !== 'settled' || current.attempted !== phase.attempted) return
-    if (!this.snapshot.rows.some(row => row.id === followUp && row.category === this.categoryId)) return
-    this.selectRow(followUp, 'rows')
+
   }
 
   /** Record a settled outcome and re-read the authorities: the Detail then shows
@@ -4898,7 +5596,61 @@ export class SettingsWorkspacePanel implements Component {
     }
     this.editRequestId += 1
     this.choiceOffset = 0
+    // M6 UX PR2: the ONE verified-transition follow-up. It is offered exactly
+    // once per verified `direct → daemon` commit, in the SAME lease; a new
+    // follow-up supersedes any previous round's result line. Every other
+    // outcome/field leaves an existing follow-up alone.
+    if (outcome.outcome === 'verified' && field === 'startup-backend'
+      && outcome.followUp?.kind === 'daemon-service-install') {
+      this.serviceInstall = {
+        requestId: this.editRequestId,
+        installable: outcome.followUp.installable,
+        phase: 'asking',
+        focus: 'not-now',
+      }
+      this.serviceInstallResult = undefined
+      this.serviceInstallRisk = undefined
+      this.serviceInstallRiskSeen = new Set<number>()
+    }
     this.refresh()
+  }
+
+  /** The ONE explicit install confirmation of the follow-up. The seat locks
+   *  while the command layer's owned task runs; a late or superseded settlement
+   *  can never repaint a newer follow-up. */
+  private beginServiceInstall(): void {
+    const follow = this.serviceInstall
+    if (follow === undefined || follow.phase !== 'asking' || !follow.installable) return
+    if (this.intents.onBackendServiceInstall === undefined) return
+    const requestId = follow.requestId
+    follow.phase = 'installing'
+    this.intents.requestRender()
+    this.intents.onBackendServiceInstall(result => {
+      if (this.disposed) return
+      const current = this.serviceInstall
+      if (current === undefined || current.requestId !== requestId) return
+      current.phase = 'asking'
+      this.serviceInstallResult = { ok: result.ok, detail: result.detail ?? '' }
+      this.refresh()
+    })
+  }
+
+  /** Withdraw the follow-up (Esc / `Not now` / row change): zero admin IO and
+   *  zero change to the already-verified Profile save. */
+  private dismissServiceInstall(): void {
+    if (this.serviceInstall === undefined) return
+    this.clearServiceInstall()
+    this.intents.requestRender()
+  }
+
+  /** The field-only withdrawal shared by every retirement path (row change,
+   *  new choice, extension-group switch, teardown): no repaint of its own. */
+  private clearServiceInstall(): void {
+    this.serviceInstall = undefined
+    this.serviceInstallResult = undefined
+    this.serviceInstallRisk = undefined
+    this.serviceInstallRiskSeen = new Set<number>()
+    this.paintedServiceInstallActions = false
   }
 
   // ── mouse ────────────────────────────────────────────────────────────────
@@ -4922,6 +5674,25 @@ export class SettingsWorkspacePanel implements Component {
    *  through to the alt screen's `onCellPress`/`onCellClick` identity path. */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     if (this.disposed) return undefined
+    // PR-5: a newer pointer input also supersedes a deferred navigation.
+    this.pendingComputerUseNavigation = undefined
+    // PR-D (Owner-approved scope amendment): a pending press recorded on the
+    // physical Action Bar is retired by ANY effective wheel. That row is
+    // outside the hosted body box, so the child never sees this wheel and could
+    // not revoke its own delegated target; an immaterial wheel therefore used
+    // to leave a bar press (search Done, Remove, a dangerous Y) alive to
+    // complete on release. Rail/content presses keep their own RFL-012 rule
+    // (an immaterial wheel does not cancel them).
+    if (event.type === 'wheel' && (event.wheelDelta ?? 0) !== 0) {
+      if (this.pressedGesture !== undefined && isActionBarTargetKind(this.pressedGesture.target.kind)) {
+        this.pressedGesture = undefined
+      }
+      // A hosted page's BODY press is revoked too: the child only receives
+      // wheels inside its own body box, so a wheel on the shared last row (or
+      // anywhere outside the box) would otherwise leave the press alive and its
+      // release would complete against the newer frame.
+      this.specialistPressed = undefined
+    }
     // The extension-settings DIRECTORY is re-proved before a wheel may resolve
     // against any painted box: a registry membership change revokes every grant
     // of the previous frame (independently of whether a cell happens to match).
@@ -5034,15 +5805,29 @@ export class SettingsWorkspacePanel implements Component {
    */
   private childGestureIdentity(): string {
     const page = this.pluginPage
-    if (page === undefined) return 'none'
-    // `liveIdentity()` is the child-side authority: it carries the page's
-    // monotonic semantic generation (a change that REVERTS inside the gesture),
-    // the Controller's monotonic transition count (an asynchronous phase round
-    // trip), the install editor's field values, and the semantic state/grant/
-    // Controller facts. Because it is a VALUE, a repaint that only catches up with
-    // facts already live before the press stays comparable. The view/mutation/
-    // yield triple is appended for readable failures; it is already implied.
-    return `${page.liveIdentity()}:${page.currentView()}:${page.pendingMutation() ? 'pending' : 'idle'}:${page.canYieldFocusToNavigation() ? 'yield' : 'hold'}`
+    if (page !== undefined) {
+      // `liveIdentity()` is the child-side authority: it carries the page's
+      // monotonic semantic generation (a change that REVERTS inside the gesture),
+      // the Controller's monotonic transition count (an asynchronous phase round
+      // trip), the install editor's field values, and the semantic state/grant/
+      // Controller facts. Because it is a VALUE, a repaint that only catches up with
+      // facts already live before the press stays comparable. The view/mutation/
+      // yield triple is appended for readable failures; it is already implied.
+      return `${page.liveIdentity()}:${page.currentView()}:${page.pendingMutation() ? 'pending' : 'idle'}:${page.canYieldFocusToNavigation() ? 'yield' : 'hold'}`
+    }
+    // The hosted specialist and auth pages own their own sub-view machinery and
+    // can repaint the SAME bar cells with a DIFFERENT Esc outcome without
+    // touching the root revision; their own semantic identity is part of the
+    // gesture for exactly the same reason.
+    const specialist = this.specialistPage
+    if (specialist !== undefined) {
+      return `specialist:${specialist.title}:${specialist.gestureIdentity?.() ?? ''}`
+    }
+    const auth = this.authPage
+    if (auth !== undefined) {
+      return `auth:${this.categoryId}:${auth.gestureIdentity?.() ?? ''}`
+    }
+    return 'none'
   }
 
   /** Whether one panel cell belongs to the painted content column. */
@@ -5053,6 +5838,7 @@ export class SettingsWorkspacePanel implements Component {
 
   onCellPress(x: number, y: number): void {
     if (this.disposed) return
+    this.pendingComputerUseNavigation = undefined
     // A directory change invalidates the WHOLE painted hit map, not just the
     // cells that happen to move: the press is refused and the release may never
     // resurrect a target of the previous registry generation.
@@ -5086,6 +5872,23 @@ export class SettingsWorkspacePanel implements Component {
     // A new press always supersedes the other owner's press state.
     this.pressedGesture = undefined
     this.contentPressed = undefined
+    // The last row belongs to the ROOT's gesture path — BOTH of its target
+    // kinds: the Esc affordance and the child's DELEGATED Action-Bar spans.
+    // Both are recorded with the same owning identity and never reach a child
+    // content/body owner (no second owner for one release).
+    const barTarget = this.barTargetAt(x, y)
+    if (barTarget !== undefined) {
+      // A bar press may only arm against a body whose CURRENT frame painted —
+      // exactly like the body press below. Refuse both windows: a grant that
+      // awaits its paint (a keyboard field move that has not repainted) AND a
+      // painted frame whose semantic identity is already stale (a Host or
+      // configuration observation change that landed without repainting). The
+      // release may never carry such a press onto the newer frame.
+      if (this.specialistPage?.grantAwaitingPaint?.() === true) return
+      if (this.specialistPage?.pointerFrameCurrent?.() === false) return
+      this.recordGesture(barTarget)
+      return
+    }
     if (this.specialistPage !== undefined) {
       const box = this.paintedSpecialistBox
       this.specialistPressed = undefined
@@ -5196,6 +5999,7 @@ export class SettingsWorkspacePanel implements Component {
 
   onCellClick(x: number, y: number): void {
     if (this.disposed) return
+    this.pendingComputerUseNavigation = undefined
     // The same directory fence on release: a gesture that began before a
     // registration/unload/dispose can never complete against the new directory.
     this.syncExtensionDirectory()
@@ -5219,6 +6023,13 @@ export class SettingsWorkspacePanel implements Component {
     if (this.rootProjectionAwaitingPaint()) {
       this.cancelPointerOwners()
       this.intents.requestRender()
+      return
+    }
+    // A recorded last-row Esc gesture resolves against the ROOT's painted hit
+    // map only (the child content owner is never consulted for it).
+    if (this.pressedGesture !== undefined && isActionBarTargetKind(this.pressedGesture.target.kind)) {
+      const target = this.takeGesture(x, y)
+      if (target !== undefined) this.activate(target)
       return
     }
     if (this.specialistPage !== undefined) {
@@ -5294,26 +6105,8 @@ export class SettingsWorkspacePanel implements Component {
       }
       this.contentPressed = undefined
       page?.cancelPointer()
-      const pressed = this.pressedGesture
-      this.pressedGesture = undefined
-      const target = this.targetAt(x, y)
-      if (pressed === undefined || target === undefined) return
-      if (
-        this.revision !== pressed.revision
-        || this.focus !== pressed.focus
-        || this.categoryId !== pressed.categoryId
-        || this.intents.columns() !== pressed.columns
-        || this.intents.rows() !== pressed.rows
-        || this.childGestureIdentity() !== pressed.childIdentity
-        || target.kind !== pressed.target.kind
-        || target.id !== pressed.target.id
-        || target.row !== pressed.target.row
-        || target.startCol !== pressed.target.startCol
-        || target.endCol !== pressed.target.endCol
-      ) {
-        return
-      }
-      this.activate(target)
+      const target = this.takeGesture(x, y)
+      if (target !== undefined) this.activate(target)
       return
     }
     if (this.authPage !== undefined) {
@@ -5352,35 +6145,35 @@ export class SettingsWorkspacePanel implements Component {
       this.contentPressed = undefined
       this.authPage.cancelPointer?.()
     }
-    const pressed = this.pressedGesture
-    this.pressedGesture = undefined
-    const target = this.targetAt(x, y)
-    if (pressed === undefined || target === undefined) return
-    // The gesture must still resolve to the SAME painted target AND the same
-    // state version/level/category/terminal geometry: a refresh, a selection
-    // change, a page switch, a category change OR a resize — including one whose
-    // repaint has not run yet — refuses the click rather than acting on the
-    // newer state.
-    if (
-      this.revision !== pressed.revision ||
-      this.focus !== pressed.focus ||
-      this.categoryId !== pressed.categoryId ||
-      this.intents.columns() !== pressed.columns ||
-      this.intents.rows() !== pressed.rows ||
-      this.childGestureIdentity() !== pressed.childIdentity ||
-      target.kind !== pressed.target.kind ||
-      target.id !== pressed.target.id ||
-      target.row !== pressed.target.row ||
-      target.startCol !== pressed.target.startCol ||
-      target.endCol !== pressed.target.endCol
-    ) {
-      return
-    }
-    this.activate(target)
+    const target = this.takeGesture(x, y)
+    if (target !== undefined) this.activate(target)
   }
 
   private activate(target: HitTarget): void {
     switch (target.kind) {
+      case 'bar-escape': {
+        // The ONE painted Esc affordance replays the CURRENT state's legitimate
+        // return through the EXISTING keyboard priority ladder: an embedded
+        // specialist page's own Esc, a direct page's return handling, or the
+        // root's goBack/close (which still records the user exit and honours
+        // every pending/dirty refusal). It is never a second visible-layer
+        // `if (focus === ...)` navigation ladder.
+        this.handleInput('\x1b')
+        return
+      }
+      case 'bar-open': {
+        // The painted OPEN hint is the pointer analogue of Enter/Right on the
+        // rail: it replays the SAME keyboard ladder, so the rail's selection,
+        // focus transfer and page mounting stay single-owner.
+        this.handleInput('\r')
+        return
+      }
+      case 'bar-span': {
+        // A DELEGATED last-row intent: the child's own Action Bar painted this
+        // span and owns the semantics; the root only owns the physical row.
+        this.specialistPage?.activateBarSpan?.(target.id)
+        return
+      }
       case 'category': {
         if (!isCategoryId(target.id)) return
         // `isCategoryId` only proves the id is a category at all; the painted
@@ -5394,6 +6187,18 @@ export class SettingsWorkspacePanel implements Component {
         // (Enter/Right then decide between the Detail, the choice and the
         // row's specialist page).
         this.selectRow(target.id, 'rows')
+        // Pages whose row IS the whole gesture open on the click, exactly like
+        // Enter/Right. The Computer Use row belongs here: on the single-pane
+        // (narrow/medium) frame there is no Detail pane, so the Detail's Manage
+        // affordance does not exist and this click is the ONLY pointer route to
+        // the embedded page.
+        if (target.id === 'subagent-settings' || target.id === 'agent-loop' || target.id === 'shell-execution' || target.id === 'computer-use') {
+          const row = this.selectedRow()
+          const specialist = row?.specialist
+          if (row !== undefined
+            && (specialist === 'subagent-settings' || specialist === 'agent-loop-settings'
+              || specialist === 'shell-execution-settings' || specialist === 'computer-use')) this.openSpecialist(row)
+        }
         return
       }
       case 'about-action': {
@@ -5439,6 +6244,26 @@ export class SettingsWorkspacePanel implements Component {
         return
       case 'cancel':
         this.leaveDetailTo('rows')
+        return
+      case 'service-install':
+        // The painted button IS the single explicit confirmation, but the
+        // follow-up's risk copy must be on screen too: the same painted grant
+        // the keyboard uses gates the pointer, so a clipped/hidden block can
+        // never be confirmed blindly. The id must still be the row this frame
+        // selected (a newer row has already withdrawn the follow-up).
+        if (this.serviceInstall !== undefined && target.id === 'startup-backend'
+          && this.paintedServiceInstallActions
+          && this.lastRenderWidth === this.intents.columns()
+          && this.lastRenderRows === this.intents.rows()) {
+          this.takeColumnFocus('detail')
+          this.beginServiceInstall()
+        }
+        return
+      case 'service-dismiss':
+        if (this.serviceInstall !== undefined && target.id === 'startup-backend') {
+          this.takeColumnFocus('detail')
+          this.dismissServiceInstall()
+        }
         return
       case 'pane': {
         if (!isWorkspacePage(target.id)) return
@@ -5522,6 +6347,58 @@ export class SettingsWorkspacePanel implements Component {
     return this.paintedTargets.find(target => target.row === y && x >= target.startCol && x < target.endCol)
   }
 
+  /** The ONE physical last-row Esc affordance at a cell, or undefined. */
+  private barEscapeTargetAt(x: number, y: number): HitTarget | undefined {
+    return this.paintedTargets.find(target =>
+      target.kind === 'bar-escape' && target.row === y && x >= target.startCol && x < target.endCol)
+  }
+
+  /** The last-row target at a cell — the Root-owned Esc affordance OR a child's
+   *  DELEGATED Action-Bar span (both live on the Root's physical row). */
+  private barTargetAt(x: number, y: number): HitTarget | undefined {
+    return this.paintedTargets.find(target =>
+      isActionBarTargetKind(target.kind)
+      && target.row === y && x >= target.startCol && x < target.endCol)
+  }
+
+  /** Record the ONE press-time target with the complete owning identity the
+   *  release must still match (revision, focus, category, terminal geometry and
+   *  the hosted child's own currentness). */
+  private recordGesture(target: HitTarget): void {
+    this.pressedGesture = {
+      target,
+      revision: this.revision,
+      focus: this.focus,
+      categoryId: this.categoryId,
+      columns: this.intents.columns(),
+      rows: this.intents.rows(),
+      childIdentity: this.childGestureIdentity(),
+    }
+  }
+
+  /** Resolve the recorded gesture against the CURRENT painted hit map: the same
+   *  target AND the same owning state/geometry must still hold. A refresh, a
+   *  selection change, a page switch, a category change or a resize — including
+   *  one whose repaint has not run yet — refuses the click. */
+  private takeGesture(x: number, y: number): HitTarget | undefined {
+    const pressed = this.pressedGesture
+    this.pressedGesture = undefined
+    const target = this.targetAt(x, y)
+    if (pressed === undefined || target === undefined) return undefined
+    if (this.revision !== pressed.revision
+      || this.focus !== pressed.focus
+      || this.categoryId !== pressed.categoryId
+      || this.intents.columns() !== pressed.columns
+      || this.intents.rows() !== pressed.rows
+      || this.childGestureIdentity() !== pressed.childIdentity
+      || target.kind !== pressed.target.kind
+      || target.id !== pressed.target.id
+      || target.row !== pressed.target.row
+      || target.startCol !== pressed.target.startCol
+      || target.endCol !== pressed.target.endCol) return undefined
+    return target
+  }
+
   /** Translate one panel-global mouse event into the page-local coordinates its
    * last-painted hit map uses. */
   private translateMouseEvent(event: TuiMouseEvent): TuiMouseEvent {
@@ -5559,6 +6436,10 @@ export class SettingsWorkspacePanel implements Component {
     // teardown finds no live request and can never repaint a newer surface.
     this.editPhase = { kind: 'browsing' }
     this.editRequestId += 1
+    // The follow-up and its install task settlement die with the panel: a
+    // late result can never repaint a newer surface, and the already-dispatched
+    // install keeps its own process owner.
+    this.clearServiceInstall()
     this.pressedGesture = undefined
     this.paintedTargets = []
     this.paintedPanes = {}

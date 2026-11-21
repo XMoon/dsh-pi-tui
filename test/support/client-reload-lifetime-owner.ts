@@ -107,7 +107,6 @@ export function createClientReloadLifetimeOwner(): ClientReloadLifetimeOwner {
     insertIntoEditor: (text: string) => { draft += text },
     notify: (message: string) => { notices.push(message) },
     setSubmitPending: () => {},
-    clearSettledLocalMessages: () => {},
   }
   const deps: SubmissionControllerDeps<AgentLike> = {
     app: () => composer,
@@ -120,6 +119,9 @@ export function createClientReloadLifetimeOwner(): ClientReloadLifetimeOwner {
       generation: () => core.generation(),
       captureSubject: () => core.subject(),
       transitionPending: () => false,
+      awaitTransitionSettled: async () => {},
+      beginNavigationIntent: () => () => {},
+      soleNavigationIntentPending: () => false,
     },
     scope: {
       captureLive: () => scopeAuthority.captureLive(),
@@ -164,7 +166,7 @@ export function createClientReloadLifetimeOwner(): ClientReloadLifetimeOwner {
       clearError: () => {},
     },
     artifacts: { start: () => {} },
-    shell: { run: () => {}, interrupt: () => {} },
+    shell: { capturePlacement: () => ({ anchor: undefined, turn: undefined, target: 'beginning' as const, acceptedOrder: 0 }), run: () => {}, interrupt: () => {}, cancelRun: () => false },
     supportsLocalShellCards: true,
     supportsTuiBuiltinUi: true,
     retainsStaleDraftRestore: true,

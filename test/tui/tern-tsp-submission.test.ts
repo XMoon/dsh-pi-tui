@@ -86,13 +86,19 @@ interface Harness {
 }
 
 async function mountPane(
-  onSubmit: (text: string, request: string) => void,
+  onSubmit: (text: string, request: string, scopeToken?: number) => void,
   /** Opt out of the commit-point bind so a test can drive the held window. */
   options: {
     bind?: boolean
     /** Lifecycle-intent recorders for the default binding (cancel/exit). */
     onCancel?: () => void
     onExit?: () => void
+    /** The pasted-image delivery admission (default: always admitted). */
+    admitPastedPathDelivery?: () => boolean
+    /** The HISTORY-eligibility policy (default: remember). */
+    shouldRememberInput?: () => boolean
+    /** PR2: the synchronous submit admission. Absent keeps the legacy clear. */
+    beginComposerSubmission?: (text: string, request: string) => 'held' | 'legacy' | 'refused'
   } = {},
 ): Promise<Harness> {
   const input = new FakeInput()
@@ -124,10 +130,16 @@ async function mountPane(
     renderer.bindInput({
       exit: () => { options.onExit?.() },
       cancel: () => { options.onCancel?.() },
-      submit: (text, request) => onSubmit(text, request),
+      submit: (text, request, scopeToken) => onSubmit(text, request, scopeToken),
       steer: () => {},
       pasteMedia: () => {},
-      noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {},
+      pastedPath: () => {},
+      admitPastedPathDelivery: () => options.admitPastedPathDelivery?.() ?? true,
+      shouldRememberInput: () => options.shouldRememberInput?.() ?? true,
+      noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true, openTasksBrowserUi() {}, tasksBrowserUiAvailable: () => true,
+      ...(options.beginComposerSubmission === undefined
+        ? {}
+        : { beginComposerSubmission: (text: string, request: 'enter' | 'accelerated' | 'steer' | 'explicit-queue') => options.beginComposerSubmission!(text, request) }),
     })
   }
   return {
@@ -259,6 +271,36 @@ test('an accepted submit leaves an empty composer, so a second Enter cannot doub
   }
 })
 
+// ── The pasted-image delivery gate (before the clear) ───────────────────────
+
+test('a submit while a pasted image path is still attaching is refused before the clear', async () => {
+  let admit = false
+  const submissions: string[] = []
+  const harness = await mountPane((text) => { submissions.push(text) }, {
+    admitPastedPathDelivery: () => admit,
+  })
+  try {
+    harness.input.type('/tmp/shot.png ')
+    await awaitTyped(harness, '/tmp/shot.png ')
+    harness.input.type('\r')
+    await settle()
+    assert.deepEqual(submissions, [], 'no submit reaches the application while the read is in flight')
+    assert.equal(harness.renderer.composer.getDraft(), '/tmp/shot.png ',
+      'the draft survives the refusal (no clear, no lost paste span)')
+    assert.equal(lastComposerText(harness.output.text()), '/tmp/shot.png ',
+      'the refused gesture never clears the controlled composer')
+
+    admit = true
+    harness.input.type('\r')
+    await awaitFact(() => submissions.length === 1, 'the retried submit')
+    assert.deepEqual(submissions, ['/tmp/shot.png '],
+      'the retry delivers the same draft once the attachment settled')
+    assert.equal(harness.renderer.composer.getDraft(), '')
+  } finally {
+    await harness.dispose()
+  }
+})
+
 // ── The session/hydration input fence (§3.4 row 1) ──────────────────────────
 
 test('the hydration window accepts NO composer key and never submits', async () => {
@@ -325,7 +367,7 @@ test('a key HELD across a generation bump cannot submit when the bind replays it
     harness.renderer.bindInput({
       exit: () => {}, cancel: () => {},
       submit: (text) => { submissions.push(text) },
-      steer: () => {}, pasteMedia: () => {}, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {},
+      steer: () => {}, pasteMedia: () => {}, pastedPath: () => {}, admitPastedPathDelivery: () => true, shouldRememberInput: () => true, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true, openTasksBrowserUi() {}, tasksBrowserUiAvailable: () => true
     })
     await settle()
     assert.deepEqual(submissions, [], 'the held Enter did NOT cross the hydration fence at the replay')
@@ -684,7 +726,7 @@ function wireHasText(wire: string, text: string): boolean {
   return [...wireState(wire).values()].some(node => node.p['text'] === text)
 }
 
-test('B3-S01: the preview the renderer is given reaches the wire as ONE native row', async () => {
+test('the preview the renderer is given reaches the wire as ONE native row', async () => {
   const harness = await mountPane(() => {})
   try {
     harness.renderer.display.setTranscript(
@@ -713,7 +755,7 @@ test('B3-S01: the preview the renderer is given reaches the wire as ONE native r
   }
 })
 
-test('B3-S02: more bytes re-text the SAME row, and the formal call removes it', async () => {
+test('more bytes re-text the SAME row, and the formal call removes it', async () => {
   const harness = await mountPane(() => {})
   try {
     const source = { subject: 'A' }
@@ -773,7 +815,7 @@ test('B3-S02: more bytes re-text the SAME row, and the formal call removes it', 
   }
 })
 
-test('B3-S03: the retired source\'s Preparing rows can never revive the Loading state', async () => {
+test('the retired source\'s Preparing rows can never revive the Loading state', async () => {
   const harness = await mountPane(() => {})
   try {
     const retired = { subject: 'A' }
@@ -845,6 +887,345 @@ test('B3-S03: the retired source\'s Preparing rows can never revive the Loading 
     const rows = wirePreparingRows(finalWire)
     assert.equal(rows.length, 1, 'the new subject shows exactly its own row')
     assert.equal(rows[0]!.text, 'Preparing Read… · 12 B')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+// ── TSP I-A: the recall OCCURRENCE token on the real submit path ────────────
+/*
+ * These cases run the REAL `mountTspRenderer` over the scripted pane, so what
+ * they prove is the renderer half of the I-A contract: the Enter/Send path
+ * allocates ONE occurrence token from the mount's own recall kernel, forwards
+ * it as the EXISTING submission entry's third argument, and the three history
+ * display seams are real kernel commits instead of the old no-ops.
+ *
+ * Evidence level (deliberate, not a gap to paper over):
+ *  - PRODUCTION: the real renderer, its real composer, its real dispatchKey
+ *    route and the real `SurfaceDisplaySeam` object.
+ *  - TEST STAND-IN: the scripted pane is not a physical Tern client, and the
+ *    bound `submit` handler here stands in for `ApplicationEvents.onSubmit`.
+ *    These cases therefore prove the RENDERER half only. Everything past that
+ *    handler is pinned elsewhere, and no case here may be read as covering it:
+ *    the real application binding + the production `InputHistory` writer + the
+ *    real JSONL row + the same-mount settlement are one run in
+ *    `test/app/tern-tsp-live-mount.test.ts`, and the refused `!` line's
+ *    business facts (no row, draft restored) are on the real Direct
+ *    composition in `test/integration/tern-tsp-direct-admission.test.ts`.
+ *  - NOT COVERED: the token's effect on the recall SNAPSHOT ORDER is a kernel
+ *    fact proven in `test/client/history-recall-scope.test.ts`; TSP shows no
+ *    ↑/↓ recall yet, so no case here may be read as a visible-history or
+ *    physical-GUI qualification (that is I-B).
+ */
+
+/** One recorded submission with the occurrence token it carried. */
+interface Sent {
+  readonly text: string
+  readonly gesture: string
+  readonly scopeToken: number | undefined
+}
+
+async function recordEnter(harness: Harness, text: string): Promise<void> {
+  harness.input.type(text)
+  await awaitTyped(harness, text)
+  harness.input.type('\r')
+}
+
+test('a real TSP Enter allocates one occurrence token and forwards it as the submit third arg', async () => {
+  const sent: Sent[] = []
+  const harness = await mountPane((text, request, scopeToken) => {
+    sent.push({ text, gesture: String(request), scopeToken })
+  })
+  try {
+    await recordEnter(harness, 'first prompt')
+    await awaitFact(() => sent.length === 1, 'the Enter to reach the bound submit')
+    assert.equal(sent[0]!.text, 'first prompt')
+    assert.equal(typeof sent[0]!.scopeToken, 'number',
+      'the sessionless boot pool is an OPEN scope, so an accepted Enter is an occurrence')
+
+    await recordEnter(harness, 'second prompt')
+    await awaitFact(() => sent.length === 2, "the second Enter")
+    assert.equal(typeof sent[1]!.scopeToken, 'number')
+    assert.notEqual(sent[1]!.scopeToken, sent[0]!.scopeToken,
+      'two Enters are two distinct occurrences — never attributed by matching the text')
+    assert.equal(sent[1]!.gesture, 'enter', 'the gesture rides along unchanged')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('the TSP history display seams are real commits: a reseed closes the scope, a publication reopens it', async () => {
+  const sent: Sent[] = []
+  const harness = await mountPane((text, _request, scopeToken) => {
+    sent.push({ text, gesture: String(_request), scopeToken })
+  })
+  try {
+    // The owner's hydration reseed COMMITS through the seam and closes its
+    // scope: the submission path itself is untouched, so Enter still submits —
+    // it just records no new occurrence. This is the witness that
+    // `resetInputHistory` is no longer a renderer no-op.
+    harness.renderer.display.resetInputHistory(['reseeded row'], 'session-a')
+    await recordEnter(harness, 'after the reseed')
+    await awaitFact(() => sent.length === 1, 'the post-reseed Enter')
+    assert.equal(sent[0]!.text, 'after the reseed',
+      'a CLOSED recall scope still takes its ORIGINAL submission path')
+    assert.equal(sent[0]!.scopeToken, undefined,
+      'a closed scope allocates no occurrence')
+
+    // A formal publication re-opens the scope for the next owner (the SAME two
+    // existing application call sites the PiTui adapter uses).
+    harness.renderer.display.beginInputHistoryScope('session-b')
+    await recordEnter(harness, 'for the new owner')
+    await awaitFact(() => sent.length === 2, 'the post-publish Enter')
+    assert.equal(typeof sent[1]!.scopeToken, 'number',
+      'the published owner has an OPEN scope again')
+
+    // A settlement of the live occurrence is routed into the kernel and leaves
+    // the draft, the composer state and the token allocation untouched.
+    const before = harness.renderer.composer.getDraft()
+    harness.renderer.display.settleScopeInput({
+      token: sent[1]!.scopeToken,
+      owner: 'session-b',
+      outcome: 'written',
+      text: 'for the new owner',
+    })
+    assert.equal(harness.renderer.composer.getDraft(), before,
+      'a settlement never writes the draft')
+    await recordEnter(harness, 'still open')
+    await awaitFact(() => sent.length === 3, 'the Enter after the settlement')
+    assert.equal(typeof sent[2]!.scopeToken, 'number',
+      'a settlement is not a scope close')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('a TSP input the History policy refuses still submits and records no occurrence', async () => {
+  // Renderer-local half of N01: whatever the application's ONE
+  // `shouldRememberInput` policy answers, the mount records no occurrence and
+  // STILL hands the draft to the existing submit entry. The policy's real
+  // attachment/paste content is the application owner's (the binding only
+  // projects it — see the `SurfaceRuntime` case in
+  // `test/app/tern-tsp-live-mount.test.ts`); the business admission stays with
+  // the submission controller.
+  const sent: Sent[] = []
+  let reads = 0
+  const harness = await mountPane((text, request, scopeToken) => {
+    sent.push({ text, gesture: String(request), scopeToken })
+  }, {
+    shouldRememberInput: () => { reads += 1; return false },
+  })
+  try {
+    await recordEnter(harness, '<img staged-1>')
+    await awaitFact(() => sent.length === 1, 'the refused-input submission')
+    assert.equal(sent[0]!.text, '<img staged-1>', 'the submission still reaches the application')
+    assert.equal(sent[0]!.scopeToken, undefined, 'a refused input records NO occurrence')
+    assert.equal(reads, 1, 'the eligibility policy is consulted EXACTLY ONCE per gesture')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('a refused TSP paste leaves no occurrence, and a blank handover allocates nothing', async () => {
+  // N01 (the paste half) + the blank rule: the refusal happens BEFORE the
+  // clear, so the draft/caret survive and the recall never saw the input.
+  let admit = false
+  const sent: Sent[] = []
+  const harness = await mountPane((text, _request, scopeToken) => {
+    sent.push({ text, gesture: String(_request), scopeToken })
+  }, { admitPastedPathDelivery: () => admit })
+  try {
+    await recordEnter(harness, '/tmp/shot.png')
+    await settle(200)
+    assert.equal(sent.length, 0, 'a paste still attaching submits nothing')
+    assert.equal(harness.renderer.composer.getDraft(), '/tmp/shot.png',
+      'the refusal keeps the live draft')
+
+    admit = true
+    harness.input.type('\r')
+    await awaitFact(() => sent.length === 1, 'the retried submit')
+    assert.equal(typeof sent[0]!.scopeToken, 'number',
+      'the retry is a REAL accepted occurrence (the refusal left no trace)')
+
+    // An Enter on the now-empty composer hands over a blank draft: the kernel
+    // rejects it, so no occurrence is allocated for a non-submission.
+    harness.input.type('\r')
+    await awaitFact(() => sent.length === 2, 'the blank handover')
+    assert.equal(sent[1]!.text, '')
+    assert.equal(sent[1]!.scopeToken, undefined, 'a blank handover allocates no occurrence')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('a TSP `!` line reaches the application submit path but records no occurrence', async () => {
+  // The recall-local half of N02 ONLY: a `!` line allocates no occurrence and
+  // still reaches the existing submit entry. The refused shell's BUSINESS facts
+  // (no JSONL row, draft restored, no Session) are qualified on the real Direct
+  // composition by `test/integration/tern-tsp-direct-admission.test.ts`, not
+  // here — this handler is a recorder, not the submission controller.
+  const sent: Sent[] = []
+  const harness = await mountPane((text, _request, scopeToken) => {
+    sent.push({ text, gesture: String(_request), scopeToken })
+  })
+  try {
+    await recordEnter(harness, '!echo hi')
+    await awaitFact(() => sent.length === 1, 'the shell line to reach the application')
+    assert.deepEqual(sent[0]!.text, '!echo hi',
+      'the shell line still takes the ORIGINAL submit path (the controller owns the refusal)')
+    assert.equal(sent[0]!.scopeToken, undefined,
+      'a line this renderer cannot run is not an accepted recall occurrence')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('keys held before the TSP bind allocate nothing, and a dispose allocates nothing', async () => {
+  // N07: the pre-bind window and the disposed mount must never reach the
+  // kernel. The held-key replay is fenced by the existing §3.4 gate, and after
+  // `dispose()` the renderer routes nothing at all.
+  const sent: Sent[] = []
+  const harness = await mountPane((text, _request, scopeToken) => {
+    sent.push({ text, gesture: String(_request), scopeToken })
+  }, { bind: false })
+  try {
+    harness.input.type('held before the bind\r')
+    await settle(200)
+    assert.deepEqual(sent, [], 'a pre-bind key reaches neither the composer nor the recall')
+
+    await harness.dispose()
+    harness.input.type('after the dispose\r')
+    await settle(200)
+    assert.deepEqual(sent, [], 'nothing is submitted, tokened or scoped after dispose')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('a Welcome or hydration display commit never closes the open TSP recall scope', async () => {
+  // N04: the recall scope may ONLY be opened by the publication seam and
+  // closed by that owner's reseed seam. Every OTHER display commit the
+  // lifecycle makes must leave the open scope open, so a later Enter still
+  // allocates its occurrence.
+  const sent: Sent[] = []
+  const harness = await mountPane((text, _request, scopeToken) => {
+    sent.push({ text, gesture: String(_request), scopeToken })
+  })
+  try {
+    harness.renderer.display.beginInputHistoryScope('session-a')
+    harness.renderer.display.setWelcomeIdle(true)
+    harness.renderer.display.beginSessionHydration()
+    harness.renderer.display.clearActiveDraft()
+    harness.renderer.display.setTranscript([], undefined, undefined, undefined, undefined, { subject: 'a' })
+    await settle(120)
+
+    harness.input.type('after the lifecycle commits')
+    await awaitTyped(harness, 'after the lifecycle commits')
+    harness.input.type('\r')
+    await awaitFact(() => sent.length === 1, 'the Enter after the lifecycle commits')
+    assert.equal(typeof sent[0]!.scopeToken, 'number',
+      'no lifecycle commit other than the owner\'s reseed closed the scope')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+// ── PR2: the held submission (composer-freezing admission) ──────────────────
+// The application opens the attempt through the composer port and the renderer
+// freezes the document: Enter/Send/paste/typing never mutate or re-submit it,
+// the SDK editor is painted `readonly`, and only the `'accepted'` settlement
+// clears the draft.
+
+async function lastComposerProps(output: string): Promise<{ readonly?: boolean; sendable?: boolean }> {
+  let props: { readonly?: boolean; sendable?: boolean } = {}
+  for (const match of output.matchAll(/\u001b_tsp;f;([\s\S]*?)\u001b\\/g)) {
+    const frame = JSON.parse(match[1]!) as { ops: unknown[][] }
+    for (const op of frame.ops) {
+      if (op[0] === 'add') {
+        const node = op[4] as { c?: Array<{ id?: string; p?: Record<string, unknown> }> } | undefined
+        for (const child of node?.c ?? []) {
+          if (child.id === 'dock.composer') {
+            props = {
+              ...(typeof child.p?.readonly === 'boolean' ? { readonly: child.p.readonly } : {}),
+              ...(typeof child.p?.sendable === 'boolean' ? { sendable: child.p.sendable } : {}),
+            }
+          }
+        }
+      } else if (op[0] === 'set' && (op[1] === 'dock.composer' || op[1] === 'dock.composer-editor')) {
+        const next = op[2] as { readonly?: unknown; sendable?: unknown }
+        if (typeof next.readonly === 'boolean') props.readonly = next.readonly
+        if (typeof next.sendable === 'boolean') props.sendable = next.sendable
+      }
+    }
+  }
+  return props
+}
+
+test('PR2: a held submit keeps the draft, freezes editing, and only acceptance clears it', async () => {
+  const submissions: string[] = []
+  let heldId: string | undefined
+  const harness = await mountPane(
+    (text) => { submissions.push(text) },
+    {
+      beginComposerSubmission: (text) => {
+        heldId = 'attempt-1'
+        harness.renderer.composer.holdSubmission?.(heldId)
+        // The application starts the dispatch itself; the renderer must NOT.
+        return 'held'
+      },
+    },
+  )
+  try {
+    harness.input.type('held text')
+    await awaitTyped(harness, 'held text')
+    harness.input.type('\r')
+    await awaitFact(() => heldId !== undefined, 'the admission to open the attempt')
+    assert.equal(harness.renderer.composer.getDraft(), 'held text',
+      'the held document stays exactly as submitted')
+    assert.deepEqual(submissions, [], 'the renderer never submits a held line itself')
+    await settle(60)
+    const heldProps = await lastComposerProps(harness.output.text())
+    assert.equal(heldProps.readonly, true, 'the held frame paints the composer read-only')
+    // Typing and a second Enter are consumed: the document never changes.
+    harness.input.type('more')
+    harness.input.type('\r')
+    await settle(120)
+    assert.equal(harness.renderer.composer.getDraft(), 'held text',
+      'typing and a repeated submit cannot mutate or re-send the held document')
+    assert.deepEqual(submissions, [], 'no second submission path ran')
+    // The refusal settlement unlocks the editor with the draft intact.
+    harness.renderer.composer.settleSubmission?.('attempt-1', 'not-accepted')
+    await settle(60)
+    harness.input.type('!')
+    await awaitFact(() => harness.renderer.composer.getDraft() === 'held text!', 'the unlocked editor to accept typing')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('PR2: the accepted settlement clears the held draft and the recall records it', async () => {
+  const submissions: string[] = []
+  let hold = false
+  const harness = await mountPane(
+    (text) => { submissions.push(text) },
+    {
+      beginComposerSubmission: () => {
+        hold = true
+        harness.renderer.composer.holdSubmission?.('attempt-accept')
+        return 'held'
+      },
+    },
+  )
+  try {
+    harness.input.type('accepted text')
+    await awaitTyped(harness, 'accepted text')
+    harness.input.type('\r')
+    await awaitFact(() => hold, 'the admit')
+    assert.equal(harness.renderer.composer.getDraft(), 'accepted text')
+    harness.renderer.composer.settleSubmission?.('attempt-accept', 'accepted')
+    await awaitFact(() => harness.renderer.composer.getDraft() === '', 'the acceptance clear')
+    assert.equal(lastComposerText(harness.output.text()), '', 'the cleared composer is on the wire')
+    assert.deepEqual(submissions, [], 'the acceptance never re-dispatches the prompt')
   } finally {
     await harness.dispose()
   }

@@ -34,6 +34,7 @@ import { visibleWidth } from "../src/utils.ts";
 const ENV_KEYS = [
 	"TERM",
 	"TERM_PROGRAM",
+	"ORCA_IMAGE_PROTOCOL",
 	"TERMINAL_EMULATOR",
 	"COLORTERM",
 	"TMUX",
@@ -318,15 +319,44 @@ describe("detectCapabilities", () => {
 	});
 
 	// #10573
-	it("enables hyperlinks without images for Herdr", () => {
+	it("enables hyperlinks and Kitty images for Herdr", () => {
 		withEnv({ TERM_PROGRAM: "herdr", TERM: "xterm-256color", COLORTERM: "truecolor", KITTY_WINDOW_ID: "1" }, () => {
 			const caps = detectCapabilities();
 			assert.strictEqual(caps.hyperlinks, true);
-			assert.strictEqual(caps.images, null);
+			assert.strictEqual(caps.images, "kitty");
 			assert.strictEqual(caps.trueColor, true);
 		});
 		withEnv({ TERM_PROGRAM: "herdr", PI_HYPERLINKS: "0" }, () => {
 			assert.strictEqual(detectCapabilities().hyperlinks, false);
+		});
+	});
+
+	// #11131
+	it("enables hyperlinks without images for Rex", () => {
+		withEnv({ TERM_PROGRAM: "rex", TERM: "xterm-256color", KITTY_WINDOW_ID: "1" }, () => {
+			const caps = detectCapabilities();
+			assert.strictEqual(caps.hyperlinks, true);
+			assert.strictEqual(caps.images, "kitty");
+			assert.strictEqual(caps.trueColor, true);
+		});
+		withEnv({ TERM_PROGRAM: "rex", PI_HYPERLINKS: "0" }, () => {
+			assert.strictEqual(detectCapabilities().hyperlinks, false);
+		});
+	});
+
+	it("keeps images disabled for Orca without an image capability signal", () => {
+		withEnv({ TERM_PROGRAM: "Orca" }, () => {
+			const caps = detectCapabilities();
+			assert.strictEqual(caps.images, null);
+		});
+	});
+
+	it("enables images and hyperlinks for Orca advertising Kitty support", () => {
+		withEnv({ TERM_PROGRAM: "Orca", ORCA_IMAGE_PROTOCOL: "kitty" }, () => {
+			const caps = detectCapabilities();
+			assert.strictEqual(caps.images, "kitty");
+			assert.strictEqual(caps.trueColor, true);
+			assert.strictEqual(caps.hyperlinks, true);
 		});
 	});
 

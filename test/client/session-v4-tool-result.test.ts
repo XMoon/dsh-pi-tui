@@ -12,7 +12,7 @@
  * - call/result pairing by native `toolCallId` for interleaved parallel calls
  *   including same-name calls;
  * - empty and multimodal result content preserved verbatim (order included);
- * - the Markdown transcript projection reading `message.content` directly;
+ * - the TUI transcript fold reading `message.content` directly;
  * - historical released-V3 data reaching the fold ONLY through the official
  *   `@deepseek-ai/dsh-session-format-v3-to-v4` migration.
  *
@@ -25,9 +25,8 @@ import { createToolResultMessage, MessageId, ToolCallId, type ContentBlock } fro
 import { SessionFormatEventCollector } from '@deepseek-ai/dsh-session-format'
 import { createSessionFormatV3ToV4, sessionFormatV3ToV4 } from '@deepseek-ai/dsh-session-format-v3-to-v4'
 import { SessionSeq, TOOL_NOT_STARTED, TOOL_OUTCOME_UNKNOWN, type SessionEvent } from '@deepseek-ai/dsh-session'
-import { resultTextLines, type JsonValue } from '../../src/tui/transcript/tool-presentation.ts'
+import { foldedResultSummaryFor, resultTextLines, type JsonValue } from '../../src/tui/transcript/tool-presentation.ts'
 import { TranscriptFolder, type TranscriptMessage } from '../../src/transcript.ts'
-import { renderTranscriptMarkdown } from '../../src/client/artifact/transcript-markdown.ts'
 
 type ToolCard = Extract<TranscriptMessage, { kind: 'tool' }>
 
@@ -145,6 +144,54 @@ test('message.isError alone is the outcome authority when no structured error de
   assert.equal(card.error, undefined)
 })
 
+test('rc1 Schedule CRUD results replay as exact tool cards with the folded summary', () => {
+  // The rc1 Schedule tools return their error objects as NORMAL tool results
+  // (the output schema carries `{code,message}`); the card status therefore
+  // follows `message.isError`, while the folded summary still shows the error
+  // code instead of claiming success.
+  const createValue = {
+    id: 's1', kind: 'rrule', status: 'active', title: 'Daily digest', target: { kind: 'thread' },
+    scheduledAt: '2026-11-07T00:00:00Z', scheduledAtLocal: '2026-11-07T08:00:00+08:00', rrule: 'FREQ=DAILY',
+  }
+  const listValue = { items: [createValue], shown: 1, total: 3, limit: 20, offset: 0 }
+  const deletedValue = { id: 's1', deleted: true }
+  const notFoundValue = { id: 's1', code: 'schedule_not_found' }
+  const conflictValue = { id: 's1', code: 'schedule_conflict' }
+  const messages = fold([
+    turnStart(),
+    toolCall(1, 'create-1', 'schedule_create', { title: 'Daily digest', prompt: 'p', rrule: 'FREQ=DAILY', target: 'thread' }),
+    toolResult(2, 'create-1', [text(JSON.stringify(createValue))]),
+    toolCall(3, 'list-1', 'schedule_list', { limit: 20 }),
+    toolResult(4, 'list-1', [text(JSON.stringify(listValue))]),
+    toolCall(5, 'delete-1', 'schedule_edit', { id: 's1', action: 'delete' }),
+    toolResult(6, 'delete-1', [text(JSON.stringify(deletedValue))]),
+    toolCall(7, 'missing-1', 'schedule_edit', { id: 's1', action: 'update' }),
+    toolResult(8, 'missing-1', [text(JSON.stringify(notFoundValue))]),
+    toolCall(9, 'conflict-1', 'schedule_edit', { id: 's1', action: 'update' }),
+    toolResult(10, 'conflict-1', [text(JSON.stringify(conflictValue))], {
+      isError: true,
+      error: { name: 'ScheduleConflictError', code: 'schedule_conflict' },
+    }),
+    turnEnd(11),
+  ])
+  const cards = toolCards(messages)
+  assert.equal(cards.length, 5)
+  assert.deepEqual(cards.map(card => card.status), ['ok', 'ok', 'ok', 'ok', 'error'])
+  // The canonical results are preserved byte for byte for the expanded body.
+  assert.deepEqual(resultTextLines(cards[0]!.resultBlocks ?? []), [JSON.stringify(createValue)])
+  assert.deepEqual(resultTextLines(cards[1]!.resultBlocks ?? []), [JSON.stringify(listValue)])
+  assert.deepEqual(resultTextLines(cards[2]!.resultBlocks ?? []), [JSON.stringify(deletedValue)])
+  // The folded preview derives from the exact result, never the raw JSON.
+  assert.equal(foldedResultSummaryFor(cards[0]!.name, cards[0]!.result), 'rrule · active')
+  assert.equal(foldedResultSummaryFor(cards[1]!.name, cards[1]!.result), '1 of 3 scheduled')
+  assert.equal(foldedResultSummaryFor(cards[2]!.name, cards[2]!.result), 'deleted')
+  assert.equal(foldedResultSummaryFor(cards[3]!.name, cards[3]!.result), 'schedule_not_found',
+    'a normal-result error object never folds to a success phrase')
+  assert.equal(foldedResultSummaryFor(cards[4]!.name, cards[4]!.result), 'schedule_conflict')
+  assert.deepEqual(cards[4]!.error, { name: 'ScheduleConflictError', code: 'schedule_conflict' },
+    'the structured error detail survives only beside an authoritative isError')
+})
+
 test('parallel results settle their own call regardless of arrival order', () => {
   const messages = fold([
     turnStart(),
@@ -204,23 +251,6 @@ test('multimodal result content keeps its exact block order and text summary', (
   assert.deepEqual(card.resultBlocks, content)
   assert.equal(card.result, 'beforeafter')
   assert.deepEqual(resultTextLines(card.resultBlocks ?? []), ['before', '[image]', '📄 report.pdf · 12.3 KiB', 'after'])
-})
-
-test('the Markdown transcript reads the native message.content in order', () => {
-  const events = [
-    turnStart(),
-    toolCall(1, 'c1', 'screenshot_tool'),
-    toolResult(2, 'c1', [text('tool before'), FILE_BLOCK, text('tool after')]),
-    turnEnd(3),
-  ]
-  const markdown = renderTranscriptMarkdown({
-    header: { id: 'session-v4-tool-result', cwd: '/ws', version: 4, createdAt: 0, isSeeded: false, delegationDepth: 0 },
-    snapshotEvents: () => events,
-  } as never)
-  assert.ok(markdown.includes('tool before'))
-  assert.ok(markdown.includes('tool after'))
-  assert.ok(markdown.indexOf('tool before') < markdown.indexOf('📄 report.pdf · 12.3 KiB'))
-  assert.ok(markdown.indexOf('📄 report.pdf · 12.3 KiB') < markdown.indexOf('tool after'))
 })
 
 /** Drive one released-V3 body through the OFFICIAL V3→V4 migration stage. */
@@ -397,8 +427,8 @@ test('a reused call id from another turn or step must not donate its tool name',
 test('an earlier observed call does not leak across a reused id in another step', () => {
   // Malformed/id-reusing log: c1 genuinely starts and settles in step 0,
   // then a LATER request reuses c1 in step 2 and closes not-started. The
-  // earlier observation must not suppress the later recovery diagnostic —
-  // both in the fold and in the Markdown export.
+  // earlier observation must not suppress the later recovery diagnostic in
+  // the TUI transcript fold.
   const events = [
     turnStart(),
     event('step/start', { turn: 0, step: 0 }, 1),
@@ -418,14 +448,6 @@ test('an earlier observed call does not leak across a reused id in another step'
   assert.equal(cards[0]!.origin, undefined)
   assert.equal(cards[1]!.origin, 'tool-not-started')
   assert.equal(cards[1]!.name, 'read', 'the later request recovers its own identity despite the earlier observed call')
-
-  const markdown = renderTranscriptMarkdown({
-    header: { id: 'session-tool-not-started-id-reuse', cwd: '/ws', version: 4, createdAt: 0, isSeeded: false, delegationDepth: 0 },
-    snapshotEvents: () => events,
-  } as never)
-  assert.ok(markdown.includes('### Tool bash'), `the earlier ordinary call keeps its heading:\n${markdown}`)
-  assert.ok(markdown.includes('### Tool request not started: read'),
-    `the later reused-id recovery is NOT suppressed by the earlier observation:\n${markdown}`)
 })
 
 test('an observed tool/call outranks a contradictory TOOL_NOT_STARTED result', () => {
@@ -447,26 +469,6 @@ test('an observed tool/call outranks a contradictory TOOL_NOT_STARTED result', (
   assert.equal(card.name, 'bash')
   assert.equal(card.args, JSON.stringify({ command: 'ls' }))
   assert.equal(card.status, 'error')
-
-  // The Markdown export mirrors the fold's guard: an observed tool/call
-  // keeps the ordinary heading + result output, never a not-started
-  // diagnostic heading.
-  const markdown = renderTranscriptMarkdown({
-    header: { id: 'session-tool-not-started-contradiction', cwd: '/ws', version: 4, createdAt: 0, isSeeded: false, delegationDepth: 0 },
-    snapshotEvents: () => [
-      turnStart(),
-      assistantToolRequest(1, 'c1', 'bash'),
-      toolCall(2, 'c1', 'bash', { command: 'ls' }),
-      toolResult(3, 'c1', [text(NOT_STARTED_RECOVERY_TEXT)], {
-        isError: true,
-        error: { name: 'ToolNotStartedError', code: TOOL_NOT_STARTED },
-      }),
-      turnEnd(4),
-    ],
-  } as never)
-  assert.ok(markdown.includes('### Tool bash'), `the ordinary call heading survives:\n${markdown}`)
-  assert.ok(markdown.includes('<details><summary>result</summary>'), `the ordinary result block survives:\n${markdown}`)
-  assert.ok(!markdown.includes('Tool request not started'), `no contradictory not-started heading is invented:\n${markdown}`)
 })
 
 test('TOOL_OUTCOME_UNKNOWN stays a genuine started tool with error outcome', () => {
@@ -487,37 +489,4 @@ test('TOOL_OUTCOME_UNKNOWN stays a genuine started tool with error outcome', () 
   assert.equal(card.callCount, 1, 'a real tool/call was observed: genuine call cardinality')
   assert.equal(card.name, 'bash')
   assert.equal(card.status, 'error')
-})
-
-test('the Markdown export states the not-started fact without inventing a tool call', () => {
-  const events = [
-    turnStart(),
-    event('step/start', { turn: 0, step: 0 }, 1),
-    assistantToolRequest(2, 'c1', 'bash'),
-    notStartedResult(3, 'c1'),
-    event('step/end', { turn: 0, step: 0 }, 4),
-    turnEnd(5),
-  ]
-  const markdown = renderTranscriptMarkdown({
-    header: { id: 'session-tool-not-started', cwd: '/ws', version: 4, createdAt: 0, isSeeded: false, delegationDepth: 0 },
-    snapshotEvents: () => events,
-  } as never)
-  assert.ok(markdown.includes('### Tool request not started: bash'), `the diagnostic heading is present:\n${markdown}`)
-  assert.ok(markdown.includes('interrupted before the Harness recorded it as started'), `the upstream recovery guidance survives:\n${markdown}`)
-  assert.ok(!markdown.includes('### Tool bash'), `no durable-call heading is invented:\n${markdown}`)
-  assert.ok(!/<details><summary>result<\/summary>/.test(markdown), `the not-started result is not presented as an ordinary result:\n${markdown}`)
-})
-
-test('the Markdown export degrades to an anonymous not-started heading without identity', () => {
-  const events = [
-    turnStart(),
-    notStartedResult(1, 'c1'),
-    turnEnd(2),
-  ]
-  const markdown = renderTranscriptMarkdown({
-    header: { id: 'session-tool-not-started-anon', cwd: '/ws', version: 4, createdAt: 0, isSeeded: false, delegationDepth: 0 },
-    snapshotEvents: () => events,
-  } as never)
-  assert.ok(markdown.includes('### Tool request not started\n'), `the anonymous diagnostic heading is present:\n${markdown}`)
-  assert.ok(!markdown.includes('### Tool request not started:'), `no unproven tool identity is named:\n${markdown}`)
 })

@@ -2,9 +2,12 @@
  * Experimental Remote implementation of the semantic SubagentPort (D2.2).
  *
  * Continuation prompts use the official generated `subagents.prompt` Remote with
- * the exact durable direct-parent address and the required `continuable`
- * discriminator; interruption uses `subagents.interruptByParent` with the
- * caller's explicit parent/child pair. The adapter never calls
+ * the rc.2 request vocabulary — caller-minted `requestId`, the child address,
+ * delivery, prompt parts and the sampled Client zone. The viewer's parent
+ * relation stays a Client-side currentness fact and is never sent as a Host
+ * authorization claim (rc.2 removed `parentSessionId`/`mode` from the request).
+ * Interruption uses `subagents.interruptByUser(child)`, the official user
+ * interrupt whose target authorization is the Host's. The adapter never calls
  * `ClientSessions.openSubagent()` merely to send or stop a child, and never
  * infers parent authority from UI nesting.
  *
@@ -33,12 +36,10 @@ export type RemoteSubagentResult<T> =
   | { readonly ok: true; readonly value: T }
   | { readonly ok: false; readonly error: unknown }
 
-/** The official `subagents.prompt` request (the mode discriminator is required). */
+/** The rc.2 official `subagents.prompt` request (the child address only). */
 export interface RemoteSubagentPromptRequest {
   readonly requestId: string
-  readonly parentSessionId: string
   readonly childSessionId: string
-  readonly mode: 'continuable'
   readonly delivery: 'queue' | 'steer'
   readonly content: readonly SubagentPromptContentPart[]
   readonly clientTimeZone?: string
@@ -50,10 +51,8 @@ export interface RemoteSubagentSource {
     request: RemoteSubagentPromptRequest,
     signal?: AbortSignal,
   ): Promise<RemoteSubagentResult<{ readonly messageId: unknown }>>
-  interruptByParent(
+  interruptByUser(
     childSessionId: string,
-    parentSessionId: string,
-    mode: 'continuable',
   ): Promise<RemoteSubagentResult<{ readonly accepted: true }>>
 }
 
@@ -67,9 +66,7 @@ function classifyInterruptFailure(error: unknown): SubagentInterruptOutcome {
   const message = remoteFailureMessage(error)
   const code = errorCode(error)
   switch (code) {
-    case 'subagent/not-found':
-    case 'subagent/catalog-diagnostic':
-    case 'subagent/parent-unavailable':
+    case 'subagent/not-resumable':
     case 'subagent/delivery-unavailable':
       return { kind: 'rejected', reason: { kind: 'unavailable', message } }
     case 'subagent/unauthorized':
@@ -175,9 +172,7 @@ export class RemoteSubagentPort implements SubagentPort {
     const result = await this.subagents.prompt(
       {
         requestId,
-        parentSessionId: request.parentSessionId,
         childSessionId: request.childSessionId,
-        mode: 'continuable',
         delivery: request.delivery,
         content: canonical,
         clientTimeZone: timeZone,
@@ -190,11 +185,9 @@ export class RemoteSubagentPort implements SubagentPort {
 
   async interrupt(request: SubagentInterruptRequest): Promise<SubagentInterruptOutcome> {
     // No defensive catch: the generated Remote resolves to `RemoteResult`.
-    const result = await this.subagents.interruptByParent(
-      request.childSessionId,
-      request.parentSessionId,
-      'continuable',
-    )
+    // The rc.2 official face interrupts the exact child; the Host authorizes
+    // the caller for that target, so no parent parameter is fabricated here.
+    const result = await this.subagents.interruptByUser(request.childSessionId)
     if (result.ok) return { kind: 'committed' }
     return classifyInterruptFailure(result.error)
   }

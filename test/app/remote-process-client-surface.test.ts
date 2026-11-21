@@ -32,6 +32,7 @@ import { startLocalClient, observeHandoffOpen, SurfaceRevisionTasks } from '../.
 import { createLocalClientSurfaceBridge } from '../../src/app/remote-process/local-client-surface.ts'
 import type { LocalClientTransport } from '../../src/app/remote-process/local-transport.ts'
 import type { LocalInstanceRecord } from '../../src/app/remote-process/local-discovery.ts'
+import { LOCAL_PROTOCOL } from '../../src/app/remote-process/local-scope.ts'
 
 const HOST_RECORD = {
   scopeId: 'scope',
@@ -40,7 +41,7 @@ const HOST_RECORD = {
   hostPid: 1,
   hostStarttime: '1',
   origin: 'http://127.0.0.1:1',
-  protocol: 'dsh-pi-tui/local/1',
+  protocol: LOCAL_PROTOCOL as typeof LOCAL_PROTOCOL,
   bundleVersion: '0.5.4',
   dshVersion: '0.2.1-rc.4',
   buildId: 'build',

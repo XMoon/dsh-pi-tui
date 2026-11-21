@@ -1,10 +1,10 @@
 /**
- * S4-D2 optional-bundle Host fixture (implementation plan §4.1).
+ * Optional-bundle Host fixture (implementation plan §4.1).
  *
  * ONE isolated, real composition per bundle:
  *
  * ```text
- * temp installation manifest (the 12 shipped Optional bundles @ exact target)
+ * temp installation manifest (the shipped Optional bundles @ exact target)
  *   └─ temp profile package.json (dsh.profile.bundles: base [+ target])
  *       └─ official loadProfileDirectory() reads the REAL bundle manifest and
  *          its REAL cordis.patch.yml files from the installation
@@ -37,9 +37,11 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { boot, getDshRuntimeVersion, loadOverlayPatches, loadProfileDirectory, OFFICIAL_ON_DEMAND_CATALOG, OPTIONAL_BUNDLES } from '@deepseek-ai/dsh-app-boot'
+import { boot, getDshRuntimeVersion, loadOverlayPatches, loadProfileDirectory } from '@deepseek-ai/dsh-app-boot'
+import { OFFICIAL_ON_DEMAND_CATALOG, OPTIONAL_BUNDLES } from '@deepseek-ai/dsh-official-bundles'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { TestContext } from 'node:test'
+import { parseDocument, Scalar, stringify, visit } from 'yaml'
 import { testLifecycle } from './temp-lifecycle.ts'
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -50,9 +52,9 @@ const TARGET_DSH_VERSION = getDshRuntimeVersion()
 const BASE_BUNDLE = '@deepseek-ai/dsh-base'
 const BIN_NAME = 'dsh'
 
-/** The exact target Optional/on-demand bundle identities (B01–B14). */
-export const S4_D2_BUNDLE_IDS = [
-  '@deepseek-ai/dsh-experimental-agent-team-profile',
+/** The verified TUI boundary identities (B01–B14). This is the frozen
+ *  presentation contract, NOT the complete official catalog. */
+export const OPTIONAL_BUNDLE_IDS = [
   '@deepseek-ai/dsh-experimental-voice-input-bundle',
   '@deepseek-ai/dsh-experimental-auto-review',
   '@deepseek-ai/dsh-experimental-inspector-profile',
@@ -68,21 +70,41 @@ export const S4_D2_BUNDLE_IDS = [
   '@deepseek-ai/dsh-subagent-claude-code',
 ] as const
 
-export type S4D2BundleId = typeof S4_D2_BUNDLE_IDS[number]
+/** The three Optional bundles the current release adds beyond the legacy
+ *  B01–B14 verified subset. They are a TEST-LOCAL qualification set, never a
+ *  second catalog authority: the real roster stays `OPTIONAL_BUNDLES`, and
+ *  every name here must still appear in it. */
+export const S5_OPTIONAL_BUNDLE_IDS = [
+  '@deepseek-ai/dsh-personalized-recommendations',
+  '@deepseek-ai/dsh-experimental-liveshare',
+  '@deepseek-ai/dsh-experimental-forge-bundle',
+] as const
 
-/** The official target Optional + on-demand identity set (12 + 2). */
+export type S5OptionalBundleId = typeof S5_OPTIONAL_BUNDLE_IDS[number]
+
+export type OptionalBundleId = typeof OPTIONAL_BUNDLE_IDS[number]
+
+/** Any bundle identity this fixture can provision into its isolated Host. */
+export type OptionalBundlePackageId = OptionalBundleId | S5OptionalBundleId
+
+/** The COMPLETE official target Optional + on-demand identity set. Its size is
+ *  an upstream fact (`OPTIONAL_BUNDLES` + `OFFICIAL_ON_DEMAND_CATALOG`), never a
+ *  local constant; the fixture's B01–B14 list below is the TUI's own VERIFIED
+ *  boundary subset and may legitimately be smaller. */
 const OFFICIAL_BUNDLE_IDS = [
   ...OPTIONAL_BUNDLES,
   ...OFFICIAL_ON_DEMAND_CATALOG.map(entry => entry.packageName),
 ] as const
 
-/** Prove the fixture identity set against the OFFICIAL catalog constants, so a
- *  rename/shape drift fails loudly instead of comparing a constant to itself. */
+/** Prove the fixture's verified identity subset against the OFFICIAL catalog
+ *  constants: a renamed or removed bundle fails loudly, and a newly added
+ *  official bundle is allowed (it simply carries no verified TUI boundary in
+ *  this fixture). */
 function assertOfficialBundleIdentitySet(): void {
-  const expected = new Set(OFFICIAL_BUNDLE_IDS)
-  const actual = new Set(S4_D2_BUNDLE_IDS)
-  if (expected.size !== actual.size || [...expected].some(name => !actual.has(name as S4D2BundleId))) {
-    throw new Error(`S4-D2 fixture: bundle identity drift; official=${[...expected].join(',')} fixture=${[...actual].join(',')}`)
+  const official = new Set(OFFICIAL_BUNDLE_IDS)
+  const missing = [...OPTIONAL_BUNDLE_IDS, ...S5_OPTIONAL_BUNDLE_IDS].filter(name => !official.has(name))
+  if (missing.length > 0) {
+    throw new Error(`Optional-bundle fixture: ${missing.join(',')} are no longer in the official Optional/on-demand catalog`)
   }
 }
 
@@ -102,7 +124,7 @@ const GENERATED_PRESETS = ['standard', 'ptc', 'minimal', 'cordis'] as const
 
 type BootPatches = NonNullable<Parameters<typeof boot>[2]>
 
-export interface S4D2Installation {
+export interface OptionalBundleInstallation {
   /** Directory whose `node_modules` holds the provisioned target packages. */
   readonly root: string
   /** `node_modules` of the provisioned installation tree. */
@@ -110,15 +132,15 @@ export interface S4D2Installation {
 }
 
 /** The provisioned installation root, or an explicit BLOCKED reason. */
-export type S4D2InstallationResolution =
-  | { readonly ok: true; readonly installation: S4D2Installation }
+export type OptionalBundleInstallationResolution =
+  | { readonly ok: true; readonly installation: OptionalBundleInstallation }
   | { readonly ok: false; readonly reason: string }
 
 function installationCandidates(): readonly string[] {
-  const configured = process.env.DSH_PI_TUI_S4_D2_INSTALLATION
+  const configured = process.env.DSH_PI_TUI_OPTIONAL_BUNDLE_INSTALLATION
   return [
     ...(configured === undefined || configured === '' ? [] : [configured]),
-    join(REPO_ROOT, 'temp', 's4-d2-bundles'),
+    join(REPO_ROOT, 'temp', 'optional-bundles'),
   ]
 }
 
@@ -131,8 +153,8 @@ function readManifest(path: string): Record<string, unknown> | undefined {
 }
 
 /** Format a `t.skip()` reason for an unavailable provisioned installation. */
-export function skippedInstallationReason(required: readonly S4D2BundleId[] = S4_D2_BUNDLE_IDS): string | undefined {
-  const resolution = resolveS4D2Installation(required)
+export function skippedInstallationReason(required: readonly OptionalBundlePackageId[] = OPTIONAL_BUNDLE_IDS): string | undefined {
+  const resolution = resolveOptionalBundleInstallation(required)
   return resolution.ok ? undefined : resolution.reason
 }
 
@@ -141,7 +163,7 @@ export function skippedInstallationReason(required: readonly S4D2BundleId[] = S4
  * bundles. A missing or wrong-version package is a concrete BLOCKED fact, never
  * a local same-name substitute.
  */
-export function resolveS4D2Installation(required: readonly S4D2BundleId[] = S4_D2_BUNDLE_IDS): S4D2InstallationResolution {
+export function resolveOptionalBundleInstallation(required: readonly OptionalBundlePackageId[] = OPTIONAL_BUNDLE_IDS): OptionalBundleInstallationResolution {
   assertOfficialBundleIdentitySet()
   const requiredPackages = [BASE_BUNDLE, ...required]
   const attempts: string[] = []
@@ -174,14 +196,14 @@ export function resolveS4D2Installation(required: readonly S4D2BundleId[] = S4_D
   return {
     ok: false,
     reason: `BLOCKED: no provisioned official DSH ${TARGET_DSH_VERSION} Optional-bundle installation was found. `
-      + `Provision it with scripts/dsh-s4-d2-bundles-smoke.mjs --provision (or set DSH_PI_TUI_S4_D2_INSTALLATION); `
+      + `Provision it with scripts/dsh-optional-bundles-smoke.mjs --provision (or set DSH_PI_TUI_OPTIONAL_BUNDLE_INSTALLATION); `
       + `checked: ${attempts.join(' | ')}`,
   }
 }
 
 export interface OptionalBundleHostOptions {
   /** The exact bundle packages whose real patch layers compose after base. */
-  readonly bundles?: readonly S4D2BundleId[]
+  readonly bundles?: readonly OptionalBundlePackageId[]
   /**
    * Bundle packages installed as PROFILE-owned dependencies (the on-demand
    * B13/B14 shape: a real published package in the profile). Shipped Optional
@@ -213,7 +235,7 @@ export interface OptionalBundleHost {
   readonly ctx: Context
   readonly root: string
   readonly profileDir: string
-  readonly installation: S4D2Installation
+  readonly installation: OptionalBundleInstallation
   /** The bundle layers that participated in THIS boot, base first. */
   readonly activeBundles: readonly string[]
   /** The official Host plugin manager of this profile. */
@@ -241,7 +263,7 @@ interface HostTracker {
 
 interface HostOptions {
   readonly root: string
-  readonly installation: S4D2Installation
+  readonly installation: OptionalBundleInstallation
   readonly settings: OptionalBundleHostOptions
   readonly tracker: HostTracker
   readonly environment: EnvironmentOwner
@@ -271,7 +293,7 @@ function selectedBundles(profileDir: string): string[] {
   const manifest = readManifest(join(profileDir, 'package.json'))
   const bundles = (manifest?.['dsh'] as { profile?: { bundles?: unknown } } | undefined)?.profile?.bundles
   if (!Array.isArray(bundles) || bundles.some(entry => typeof entry !== 'string')) {
-    throw new Error(`S4-D2 fixture: ${join(profileDir, 'package.json')} has no readable dsh.profile.bundles`)
+    throw new Error(`Optional-bundle fixture: ${join(profileDir, 'package.json')} has no readable dsh.profile.bundles`)
   }
   return bundles as string[]
 }
@@ -281,19 +303,45 @@ function writeProfile(
   bundles: readonly string[],
   dependencies: Readonly<Record<string, string>>,
   installationBoot: boolean,
+  persistedPatches: BootPatches,
 ): void {
   writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
-    name: 's4-d2-optional-bundle-profile',
+    name: 'optional-bundle-optional-bundle-profile',
     private: true,
     dependencies,
     dsh: { profile: { bundles, patch: 'cordis.patch.yml' } },
   }, null, 2))
   // HMR is deliberately disabled in this Host-only fixture (no application
   // readiness owner). Only the installation-boot variant performs official
-  // ConfigEditor recomposes (real settings writes), so only it needs the same
-  // fact on DISK; the default fixture keeps the historical empty profile patch.
-  writeFileSync(join(profileDir, 'cordis.patch.yml'), installationBoot ? '- id: hmr\n  disabled: true\n' : '[]\n')
+  // ConfigEditor recomposes (real settings writes); the official reconcile
+  // restores the root Include from THIS file, so every fixture-only layer that
+  // must survive a settings write is persisted here. The default fixture never
+  // recomposes and keeps the historical empty profile patch.
+  if (installationBoot) {
+    writePatchDocument(join(profileDir, 'cordis.patch.yml'), [
+      ...persistedPatches,
+      { id: 'hmr', disabled: true },
+    ])
+  } else {
+    writeFileSync(join(profileDir, 'cordis.patch.yml'), '[]\n')
+  }
   writeFileSync(join(profileDir, 'cordis.yml'), '[]\n')
+}
+
+/** Persist loaded overlay patches as a real profile patch document. Loaded
+ *  `!!js` expressions arrive as `{ __jsExpr }` markers; write them back as the
+ *  same YAML tag the official patch reader evaluates. */
+function writePatchDocument(path: string, patches: BootPatches): void {
+  const document = parseDocument(stringify(patches))
+  visit(document, {
+    Map(_key, node) {
+      if (node.items.length !== 1 || typeof node.get('__jsExpr') !== 'string') return
+      const expression = new Scalar(node.get('__jsExpr'))
+      expression.tag = 'tag:yaml.org,2002:js'
+      return expression
+    },
+  })
+  writeFileSync(path, String(document))
 }
 
 /** The official agent-plane layer of the TUI overlay, without its screen rows. */
@@ -315,10 +363,11 @@ function presetPatches(): BootPatches {
 /** Create the temp root and the real profile/installation documents on disk. */
 function prepareRoot(
   root: string,
-  installation: S4D2Installation,
+  installation: OptionalBundleInstallation,
   bundles: readonly string[],
   profileDependencies: Readonly<Record<string, string>>,
   installationBoot: boolean,
+  persistedPatches: BootPatches,
 ): string {
   const profileDir = join(root, 'profile')
   const home = join(root, 'home')
@@ -329,7 +378,7 @@ function prepareRoot(
     symlinkSync(installation.nodeModules, join(installationDir, 'node_modules'), 'dir')
   }
   writeFileSync(join(installationDir, 'package.json'), JSON.stringify({
-    name: 's4-d2-installation',
+    name: 'optional-bundle-installation',
     private: true,
     dependencies: {
       [BASE_BUNDLE]: TARGET_DSH_VERSION,
@@ -341,7 +390,7 @@ function prepareRoot(
     // links the ONE provisioned tree instead of duplicating it.
     symlinkSync(installation.nodeModules, join(profileDir, 'node_modules'), 'dir')
   }
-  writeProfile(profileDir, bundles, profileDependencies, installationBoot)
+  writeProfile(profileDir, bundles, profileDependencies, installationBoot, persistedPatches)
   return profileDir
 }
 
@@ -360,25 +409,27 @@ async function bootAt(options: HostOptions): Promise<OptionalBundleHost> {
   const installationManifest = join(options.root, 'installation', 'package.json')
   const profile = loadProfileDirectory(BIN_NAME, profileDir, installationManifest)
   if (profile.skippedBundles.length > 0) {
-    throw new Error(`S4-D2 fixture: the profile could not load its selected bundles: ${profile.skippedBundles
+    throw new Error(`Optional-bundle fixture: the profile could not load its selected bundles: ${profile.skippedBundles
       .map(bundle => `${bundle.packageName}: ${bundle.reason}`).join(' | ')}`)
   }
   const basePatches = profile.layers.filter(layer => layer.packageName === BASE_BUNDLE).flatMap(layer => layer.patches)
   const bundlePatches = profile.layers.filter(layer => layer.packageName !== BASE_BUNDLE).flatMap(layer => layer.patches)
-  if (basePatches.length === 0) throw new Error('S4-D2 fixture: the profile did not compose the official dsh-base bundle')
+  if (basePatches.length === 0) throw new Error('Optional-bundle fixture: the profile did not compose the official dsh-base bundle')
+  const persisted = options.settings.installationBoot === true
   const patches: BootPatches = [
     ...basePatches,
-    ...(options.settings.presets === true ? agentPlanePatches() : []),
-    ...(options.settings.presets === true ? presetPatches() : []),
-    // HMR needs a real application readiness owner; this Host-only fixture has
-    // no TUI/CLI surface, so the module watcher is deliberately not mounted.
-    { id: 'hmr', disabled: true },
+    // An installation boot persists these fixture-only layers into the profile
+    // patch document (see writeProfile), so the official ConfigEditor reconcile
+    // keeps them after a real settings write. Other modes apply them in memory.
+    ...(persisted || options.settings.presets !== true ? [] : agentPlanePatches()),
+    ...(persisted || options.settings.presets !== true ? [] : presetPatches()),
+    ...(persisted ? [] : [{ id: 'hmr', disabled: true }]),
     ...bundlePatches,
     ...profile.patches,
-    ...(options.settings.patches ?? []),
+    ...(persisted ? [] : options.settings.patches ?? []),
   ]
   const profileContext = {
-    name: 's4-d2-optional-bundle-profile',
+    name: 'optional-bundle-optional-bundle-profile',
     dir: profileDir,
     patchPath: join(profileDir, 'cordis.patch.yml'),
     installAnchor: installationManifest,
@@ -435,7 +486,7 @@ async function bootAt(options: HostOptions): Promise<OptionalBundleHost> {
     async restart() {
       // A disposed host has released its shared lease; a new boot would never
       // restore the original environment. Callers must start a fresh host.
-      if (options.lease.released) throw new Error('S4-D2 fixture: cannot restart a disposed host')
+      if (options.lease.released) throw new Error('Optional-bundle fixture: cannot restart a disposed host')
       await ctx.fiber.dispose()
       // A restart is a fresh boot of THIS host's profile root: re-apply its
       // disposable environment before boot even when another host is live.
@@ -562,14 +613,14 @@ function restoreEnvironment(previous: ReadonlyMap<string, string | undefined>): 
  * root and the per-test environment restore are owned by the test (shared
  * refcount, so concurrent hosts restore the original only at the last release).
  */
-export async function startS4D2Host(
+export async function startOptionalBundleHost(
   t: TestContext,
   settings: OptionalBundleHostOptions,
 ): Promise<OptionalBundleHost> {
-  const resolution = resolveS4D2Installation(settings.bundles ?? [])
+  const resolution = resolveOptionalBundleInstallation(settings.bundles ?? [])
   if (!resolution.ok) throw new Error(resolution.reason)
   const life = testLifecycle(t)
-  const root = life.tempDir('dsh-s4-d2-')
+  const root = life.tempDir('dsh-optional-bundle-')
   const tracker: HostTracker = { current: undefined }
   const lease: HostLease = { released: false }
   const environment = acquireEnvironment(t, root)
@@ -586,6 +637,11 @@ export async function startS4D2Host(
     [BASE_BUNDLE, ...(settings.bundles ?? [])],
     settings.profileDependencies ?? {},
     settings.installationBoot === true,
+    [
+      ...(settings.presets === true ? agentPlanePatches() : []),
+      ...(settings.presets === true ? presetPatches() : []),
+      ...(settings.patches ?? []),
+    ],
   )
   return bootAt(options)
 }

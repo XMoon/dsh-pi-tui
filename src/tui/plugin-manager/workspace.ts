@@ -33,18 +33,27 @@ import {
   type TuiMouseEvent,
   type TuiMouseEventResult,
 } from '@xmoon76/pi-tui'
-import { renderActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
+import { ACTION_BAR_SEPARATOR, layoutActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
+import { paintActionSpan } from '../presentation/action-ink.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color } from '../theme/runtime.ts'
-import type { PluginInstallView, PluginManagerController } from '../../app/plugin-manager/controller.ts'
+import type { PluginInstallView, PluginManagerController, PluginUpdateView } from '../../app/plugin-manager/controller.ts'
+import type {
+  PluginChangeFact,
+  PluginVersionFact,
+  PluginVersionListFact,
+} from '../../runtime/plugin-manager-port.ts'
 import {
+  classifyCurrentClientPluginStatus,
   formatTuiContributionDiagnostic,
   formatTuiExtensionCapabilities,
   formatTuiExtensionRegistryCounts,
   serializeTuiExtensionDiagnostics,
+  type CurrentClientPluginStatus,
   type TuiContributionDiagnostic,
   type TuiExtensionDiagnostics,
 } from '../../app/plugin-manager/extension-inventory.ts'
+import type { ClientExtensionObservationSource } from '../../app/client-extensions/mount-owner.ts'
 import {
   AUTO_REVIEW_BUNDLE,
   AUTO_REVIEW_DISABLE_WARNING,
@@ -53,9 +62,13 @@ import {
   cardStatusChip,
   cardStatusTone,
   changeSummary,
+  errorText,
+  incompatibleText,
+  isSelectableUpdateVersion,
   maskedSource,
   rowToggleEntryId,
   rowToggleValue,
+  updateVersionBlocker,
   type PluginCardView,
   type PluginDetailAction,
   type PluginDetailView,
@@ -79,10 +92,24 @@ const FILTER_LABELS: Record<PluginListFilter, string> = {
   available: 'Available',
 }
 
+/** Compact source-labelled Client status for the real 30-42-column List pane.
+ *  The full words live in the Detail; the List keeps the host chip and adds
+ *  this second labelled fact only when the actual painted width is safe. */
+const CLIENT_LIST_LABELS: Readonly<Record<CurrentClientPluginStatus, string>> = Object.freeze({
+  ACTIVE: 'act',
+  PENDING: 'pend',
+  ERROR: 'err',
+  RELOAD_REQUIRED: 'reload',
+  UNAVAILABLE: 'unavail',
+  NOT_OPTED_IN: 'not opted',
+  NOT_SELECTED: 'not selected',
+})
+
 /** Surface-local keys (the handler the Action Bar names). */
 const WORKSPACE_KEYS = {
   search: '/',
   install: 'i',
+  update: 'u',
   refresh: 'r',
   copy: 'c',
   copyAll: 'C',
@@ -114,8 +141,33 @@ const DIAGNOSTICS_ACTION = {
   back: 'diagnostics:back',
 } as const
 
+/** The Update view's page-local actions. `check` is contextual: it re-reads the
+ *  Host version list while selecting and the authoritative inventory while the
+ *  update outcome is unknown. */
+const UPDATE_ACTION = {
+  check: 'update:check',
+  choose: 'update:choose',
+  confirm: 'update:confirm',
+  execute: 'update:execute',
+  cancel: 'update:cancel',
+  stop: 'update:stop-target',
+  acknowledge: 'update:acknowledge',
+  copy: 'update:copy',
+  back: 'update:back',
+} as const
+
+/** The action-value prefix of one selectable version row. */
+function updateChooseValue(version: string): string {
+  return `${UPDATE_ACTION.choose}:${version}`
+}
+
+function updateChooseVersion(value: string): string | undefined {
+  const prefix = `${UPDATE_ACTION.choose}:`
+  return value.startsWith(prefix) ? value.slice(prefix.length) : undefined
+}
+
 /** Which page-local view is showing. */
-export type PluginWorkspaceView = 'list' | 'details' | 'install' | 'confirm' | 'diagnostics'
+export type PluginWorkspaceView = 'list' | 'details' | 'install' | 'confirm' | 'diagnostics' | 'update'
 
 /**
  * The local viewport the Settings root grants the embedded page for ONE frame.
@@ -135,6 +187,8 @@ export interface PluginContentViewport {
  * application layer keeps seeing a plain `Component`.
  */
 export interface EmbeddedPluginPage extends Component {
+  /** The selected Plugin card value, when the page can name its source. */
+  selectedCardValue?(): string | undefined
   focused: boolean
   /** Release this page and the Host claim it owns, exactly once. */
   dispose(): void
@@ -182,11 +236,18 @@ export interface EmbeddedPluginPage extends Component {
    * drift from the columns the page really painted.
    */
   contentLayout(): { readonly dual: boolean; readonly leftWidth: number; readonly rightWidth: number }
+  /**
+   * The complete visible Esc affordance span of the LAST PAINTED frame, in this
+   * page's own content columns (`undefined` when it painted none). Read-only
+   * geometry: the Settings root owns the ONE physical last-row hit and only
+   * translates this span, never a second owner.
+   */
+  paintedEscapeSpan?(): { readonly startCol: number; readonly endCol: number } | undefined
 }
 
 /** One painted hit target of the LAST frame (never a screen-index authority). */
 interface HitTarget {
-  readonly kind: 'card' | 'action' | 'filter' | 'pane' | 'search' | 'diagnostic-fact' | 'diagnostic-action'
+  readonly kind: 'card' | 'action' | 'filter' | 'pane' | 'search' | 'diagnostic-fact' | 'diagnostic-action' | 'notice'
   readonly value: string
   readonly row: number
   readonly startCol: number
@@ -296,6 +357,23 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   private confirmOffset = 0
   private paintedConfirmScrollMax = 0
   private installSelection = 0
+  /** The Update view's LOCAL selection/scroll/focus state. The Controller owns
+   *  every business fact; this page only remembers what the user is pointing at. */
+  private updateSelection = 0
+  private updateOffset = 0
+  private updateConfirmSelection = 1
+  private updateConfirmOffset = 0
+  private updateActionSelection = 0
+  /** The action values actually painted in the LAST Update frame. */
+  private paintedUpdateActions: ReadonlySet<string> = new Set()
+  /** Version values whose row was really painted in the LAST update frame. */
+  private paintedUpdateVersions: ReadonlySet<string> = new Set()
+  private currentUpdateActions: readonly PluginDetailAction[] = []
+  private paintedUpdateActionValues: readonly string[] = []
+  private paintedUpdateConfirmScrollMax = 0
+  /** The LAST painted Update content size (scroll bounds, never authority). */
+  private paintedUpdateLineCount = 0
+  private paintedUpdateViewport = 0
   /** The diagnostics page's own immutable read (captured on entry/refresh)
    *  and its fact selection/scroll state. */
   private diagnosticsSnapshot: TuiExtensionDiagnostics | undefined
@@ -329,6 +407,10 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   private paintedTargets: readonly HitTarget[] = []
   private paintedRevision = -1
   private paintedChrome: ChromePlan | undefined
+  /** The complete Esc affordance of the LAST painted bar, in this page's own
+   *  content columns. Cleared by `setViewport`/`dispose`, so a grant change
+   *  never leaves the previous frame's geometry clickable. */
+  private paintedEscapeSpanValue: { readonly startCol: number; readonly endCol: number } | undefined
   /** Whether the selected Detail action was inside the last painted viewport. */
   private paintedDetailSelectionVisible = false
   /** The action values actually painted in the last install/confirm frame. */
@@ -355,6 +437,9 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   private lastModelKey: string | undefined
   private lastView: PluginWorkspaceView | undefined
   private lastPhase: string | undefined
+  /** The Controller's update projection at the last paint (phase + facts). */
+  private lastUpdateKey: string | undefined
+  private lastUpdatePhase: string | undefined
   private lastNotice: string | undefined
   private lastStatusState: 'loading' | 'ready' | 'error' | undefined
   private lastSelectedValue: string | undefined
@@ -362,6 +447,8 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   private lastFilter: PluginListFilter | undefined
   private lastQuery: string | undefined
   private readonly onDispose: (() => void) | undefined
+  private readonly clientExtensions: () => ClientExtensionObservationSource | undefined
+  private disposeClientObservation: (() => void) | undefined
   private disposeNotified = false
 
   constructor(
@@ -372,6 +459,19 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.controller = controller
     this.intents = intents
     this.onDispose = options.onDispose
+    this.clientExtensions = intents.clientExtensions ?? (() => undefined)
+    // ONE observation lease per page: a real Client activation change repaints
+    // this same page (never re-runs the Host inventory read) and is released
+    // with the panel/surface lease.
+    const source = this.clientExtensions()
+    if (source !== undefined) {
+      this.disposeClientObservation = source.subscribe(() => {
+        if (this.disposed) return
+        this.bumpRevision()
+        this.bumpSemantic()
+        this.intents.requestRender()
+      })
+    }
     // Every page starts on the Plugin List. A previous attempt (running or
     // terminal) is NOT auto-opened: the Controller keeps its request id/log and
     // the explicit `i` reopens the SAME attempt from the list.
@@ -405,6 +505,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     // resize round trip restores the SAME action the user was on.
     this.revokePaintedGrants()
     this.pressedGesture = undefined
+    this.paintedEscapeSpanValue = undefined
     this.grantAwaitingPaintArmed = true
     this.bumpRevision(); this.bumpSemantic()
   }
@@ -449,6 +550,13 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     return { dual: plan.dual, leftWidth: plan.leftWidth, rightWidth: plan.rightWidth }
   }
 
+  /** The complete visible Esc affordance span of the LAST PAINTED frame, in
+   *  this page's own content-column coordinates; undefined when the frame
+   *  painted no complete Esc affordance. */
+  paintedEscapeSpan(): { readonly startCol: number; readonly endCol: number } | undefined {
+    return this.paintedEscapeSpanValue
+  }
+
   invalidate(): void {
     this.searchInput.invalidate()
     this.specInput.invalidate()
@@ -458,6 +566,9 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    this.disposeClientObservation?.()
+    this.disposeClientObservation = undefined
+    this.paintedEscapeSpanValue = undefined
     this.searchInput.focused = false
     this.specInput.focused = false
     this.registryInput.focused = false
@@ -480,6 +591,20 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
 
   handleInput(data: string): void {
     if (this.disposed) return
+    if (this.firstCuaEnableNotice) {
+      if (data === 'o' || data === 'O') {
+        this.firstCuaEnableNotice = false
+        const reason = this.intents.openComputerUseSettings?.()
+        if (reason !== undefined) this.controller.explain(reason)
+        return
+      }
+      if (data === 'l' || data === 'L' || matchesKey(data, 'escape')) {
+        this.firstCuaEnableNotice = false
+        return
+      }
+      // Any other key means "later": dismiss the notice and process the key.
+      this.firstCuaEnableNotice = false
+    }
     this.syncInputFocus()
     if (matchesKey(data, 'escape')) {
       this.handleEscape()
@@ -500,6 +625,10 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     }
     if (this.view === 'install') {
       this.handleInstallInput(data)
+      return
+    }
+    if (this.view === 'update') {
+      this.handleUpdateInput(data)
       return
     }
     if (this.view === 'confirm') {
@@ -539,6 +668,13 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     }
     if (this.view === 'install') {
       if (this.scrollInstall(delta, plan)) {
+        this.bumpRevision(); this.bumpSemantic()
+      }
+      this.intents.requestRender()
+      return { handled: true }
+    }
+    if (this.view === 'update') {
+      if (this.scrollUpdate(delta, plan)) {
         this.bumpRevision(); this.bumpSemantic()
       }
       this.intents.requestRender()
@@ -724,6 +860,11 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     }
     if (data === WORKSPACE_KEYS.install || data === WORKSPACE_KEYS.install.toUpperCase()) {
       this.openInstallView()
+      return
+    }
+    if ((data === WORKSPACE_KEYS.update || data === WORKSPACE_KEYS.update.toUpperCase())
+      && this.controller.updateView() !== undefined) {
+      this.openUpdateResult()
       return
     }
     if (data === WORKSPACE_KEYS.diagnostics) {
@@ -1136,6 +1277,10 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       this.closeConfirmation()
       return
     }
+    if (this.view === 'update') {
+      this.handleUpdateEscape()
+      return
+    }
     if (this.view === 'diagnostics') {
       this.leaveDiagnostics()
       return
@@ -1314,6 +1459,15 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     ]
     for (const entry of view.entries) facts.push(this.diagnosticsEntryFact(entry, 'associated'))
     for (const entry of view.unmappedEntries) facts.push(this.diagnosticsEntryFact(entry, 'unassociated'))
+    // R8-E PR-4: a SEPARATE read-only group. It is deliberately appended after
+    // the extension ledger facts and never merged into Host install logs.
+    for (const client of view.clientExtensions ?? []) {
+      facts.push({
+        id: `diagnostics:client:${client.packageName}`,
+        label: 'Client extension status (this Client)',
+        copy: `${client.packageName} · ${client.status}${client.reason === undefined ? '' : ` · ${client.reason}`}`,
+      })
+    }
     return facts
   }
 
@@ -1732,6 +1886,15 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       case 'action':
         this.dispatchAction(target.value)
         return
+      case 'notice':
+        this.firstCuaEnableNotice = false
+        if (target.value === 'first-cua-open') {
+          const reason = this.intents.openComputerUseSettings?.()
+          if (reason !== undefined) this.controller.explain(reason)
+        }
+        this.bumpRevision()
+        this.intents.requestRender()
+        return
       case 'diagnostic-fact': {
         const fact = this.diagnosticsFacts().find(candidate => candidate.id === target.value)
         if (fact === undefined) return
@@ -1746,6 +1909,19 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
 
   private dispatchAction(value: string): void {
     const card = this.selectedCard()
+    const chosenVersion = updateChooseVersion(value)
+    if (chosenVersion !== undefined) {
+      const update = this.controller.updateView()
+      const version = update === undefined
+        ? undefined
+        : this.updateVersionsOf(update).find(candidate => candidate.version === chosenVersion)
+      if (version !== undefined) this.selectAndConfirmVersion(version)
+      return
+    }
+    if (value.startsWith('update:')) {
+      this.dispatchUpdateAction(value)
+      return
+    }
     const rowEntry = rowToggleEntryId(value)
     if (rowEntry !== undefined) {
       if (card !== undefined && this.controller.toggleRow(card.value, rowEntry)) this.openConfirmation()
@@ -1755,12 +1931,35 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       case PLUGIN_ACTION.back:
         this.leaveDetails()
         return
+      case PLUGIN_ACTION.checkUpdates:
+        if (card === undefined) return
+        this.openUpdateFromDetail(card)
+        return
       case PLUGIN_ACTION.toggle:
-        if (card !== undefined && this.controller.toggleCard(card.value)) this.openConfirmation()
+        if (card === undefined) return
+        if (this.controller.toggleCard(card.value)) {
+          this.openConfirmation()
+        } else if (card.name === '@deepseek-ai/dsh-cua-bundle' && !card.enabled) {
+          // Remember only the INTENT; the notice is published in render() after
+          // the Host mutation result and a fresh inventory read show enabled.
+          this.pendingCuaFirstEnable = card.value
+        }
         return
       case PLUGIN_ACTION.remove:
         if (card !== undefined && this.controller.requestRemove(card.value)) this.openConfirmation()
         return
+      case PLUGIN_ACTION.manageComputerUse: {
+        if (card === undefined) return
+        const detail = this.detailView(card)
+        const action = detail.actions.find(candidate => candidate.value === PLUGIN_ACTION.manageComputerUse)
+        if (action === undefined || !action.enabled) {
+          this.controller.explain(action?.reason ?? 'The Computer Use settings page is not available.')
+          return
+        }
+        const reason = this.intents.openComputerUseSettings?.()
+        if (reason !== undefined) this.controller.explain(reason)
+        return
+      }
       case PLUGIN_ACTION.officialInstall: {
         if (card === undefined) return
         const detail = this.detailView(card)
@@ -1946,9 +2145,15 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     return this.controller.card(this.selectedValue)
   }
 
-  /** The pure Detail projection with the profile's current exemptions. */
+  /** The pure Detail projection with the profile's current exemptions AND the
+   *  CURRENT Client's live Loader observations (read late-bound at paint time;
+   *  never written back into the Host model). */
   private detailView(card: PluginCardView): PluginDetailView {
-    return buildPluginDetailView(card, this.controller.model().exemptions)
+    return buildPluginDetailView(
+      card,
+      this.controller.model().exemptions,
+      this.clientExtensions()?.observation(),
+    )
   }
 
   private static matchesQuery(card: PluginCardView, query: string): boolean {
@@ -1974,11 +2179,34 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     }
   }
 
+  /**
+   * The Host's own default-listing decision, projected ONCE here: a bundle the
+   * Host hides by default (`listedByDefault:false`) stays out of the untouched
+   * list unless the profile selects it, it is profile-installed, or a live row
+   * proves it actually runs. A non-empty explicit search lifts the gate over
+   * the SAME model cards; this predicate never drops an entry from the model
+   * or the controller.
+   */
+  private hiddenByDefault(card: PluginCardView): boolean {
+    if (card.target !== 'bundle') return false
+    if (card.listedByDefault !== false) return false
+    if (this.query.trim() !== '') return false
+    if (card.enabled || card.installed) return false
+    return !card.rows.some(row => row.live && row.fiberPhase === 'active')
+  }
+
+  /** The ONE visible-card predicate shared by the list and the selection. */
+  private visibleCard(card: PluginCardView): boolean {
+    return !this.hiddenByDefault(card)
+      && this.matchesFilter(card)
+      && PluginManagerWorkspacePanel.matchesQuery(card, this.query)
+  }
+
   private filteredCards(model: ReturnType<PluginManagerController['model']>): readonly PluginCardView[] {
     const out: PluginCardView[] = []
     for (const section of model.sections) {
       for (const card of section.cards) {
-        if (this.matchesFilter(card) && PluginManagerWorkspacePanel.matchesQuery(card, this.query)) out.push(card)
+        if (this.visibleCard(card)) out.push(card)
       }
     }
     return out
@@ -2038,8 +2266,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       }]
     }
     for (const section of model.sections) {
-      const cards = section.cards.filter(card =>
-        this.matchesFilter(card) && PluginManagerWorkspacePanel.matchesQuery(card, this.query))
+      const cards = section.cards.filter(card => this.visibleCard(card))
       if (cards.length === 0) {
         // The unfiltered view keeps every frozen section discoverable with an
         // honest empty state; a filter/query drops the empty group instead.
@@ -2068,6 +2295,16 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       } else {
         for (const card of cards) entries.push({ kind: 'card', label: card.name, value: card.value, card })
       }
+    }
+    // ONE hint line: the untouched list is the Host's default listing, and an
+    // explicit `/` search reads the complete inventory. It is the FIRST body
+    // row so it cannot fall below the list viewport (the list's own paging
+    // moves between cards and would never guarantee scrolling to a tail hint).
+    if (model.cards.some(card => this.hiddenByDefault(card))) {
+      entries.unshift({
+        kind: 'empty',
+        label: '/ searches hidden official bundles',
+      })
     }
     return entries
   }
@@ -2148,6 +2385,11 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
 
   private installOffset = 0
 
+  /** The CUA bundle value awaiting a settled first enable (never a pre-result). */
+  private pendingCuaFirstEnable: string | undefined
+  /** The one-shot first-enable notice's Open/Later keyboard window. */
+  private firstCuaEnableNotice = false
+
   // ── rendering ────────────────────────────────────────────────────────────
 
   render(width: number): string[] {
@@ -2159,8 +2401,10 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     }
     this.syncInputFocus()
     this.syncFrameState()
+    this.settleFirstCuaEnableNotice()
     this.ensureSelection()
     this.ensureDetailSelection()
+    this.ensureUpdateSelection()
     this.ensureDiagnosticsSelection(this.diagnosticsFacts().length)
     // Diagnostics paints extension health only: a Host inventory notice must
     // not dominate a freshly read extension projection, and the shared App
@@ -2170,7 +2414,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     const lines: string[] = []
     const targets: HitTarget[] = []
     if (plan.searchRows === 1) lines.push(this.renderSearchRow(plan, 0, targets))
-    if (plan.noticeRows === 1) lines.push(this.renderNotice(plan))
+    if (plan.noticeRows === 1) lines.push(this.renderNotice(plan, targets))
     const bodyTop = this.bodyTop(plan)
     if (plan.bodyRows > 0) {
       lines.push(...this.renderBody(plan, bodyTop, targets))
@@ -2200,6 +2444,10 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.paintedConfirmActions = new Set()
     this.paintedConfirmActionValues = []
     this.paintedConfirmScrollMax = 0
+    this.paintedUpdateActions = new Set()
+    this.paintedUpdateVersions = new Set()
+    this.paintedUpdateActionValues = []
+    this.paintedUpdateConfirmScrollMax = 0
     this.diagnosticsScrollable = false
     this.diagnosticsSelectionVisible = false
   }
@@ -2238,6 +2486,24 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     }
     if (this.lastNotice !== notice) { this.lastNotice = notice; changed = true }
     if (this.lastStatusState !== statusState) { this.lastStatusState = statusState; changed = true }
+    const update = this.controller.updateView()
+    const updateKey = update === undefined ? 'none' : JSON.stringify(update)
+    if (this.lastUpdateKey !== updateKey) { this.lastUpdateKey = updateKey; changed = true }
+    if (this.lastUpdatePhase !== update?.phase) {
+      this.lastUpdatePhase = update?.phase
+      this.updateConfirmSelection = 1
+      this.updateConfirmOffset = 0
+      this.updateActionSelection = 0
+      if (update?.phase === 'selecting') {
+        const list = update.versions
+        const index = list?.status === 'listed' && update.selectedExactVersion !== undefined
+          ? list.versions.findIndex(version => version.version === update.selectedExactVersion)
+          : -1
+        this.updateSelection = index >= 0 ? index : 0
+        this.updateOffset = 0
+      }
+      changed = true
+    }
     if (this.lastSelectedValue !== this.selectedValue) { this.lastSelectedValue = this.selectedValue; changed = true }
     if (this.lastFocus !== this.focus) { this.lastFocus = this.focus; changed = true }
     if (this.lastFilter !== this.filter) { this.lastFilter = this.filter; changed = true }
@@ -2267,6 +2533,27 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     }
     if (this.detailSelection >= detail.actions.length) {
       this.detailSelection = detail.actions.length - 1
+      this.bumpRevision(); this.bumpSemantic()
+    }
+  }
+
+  /** The Controller's current update projection as a comparable paint key. */
+  private updateStateKey(): string {
+    const view = this.controller.updateView()
+    return view === undefined ? 'none' : JSON.stringify(view)
+  }
+
+  private ensureUpdateSelection(): void {
+    if (this.view !== 'update') return
+    const update = this.controller.updateView()
+    if (update === undefined) return
+    const count = this.updateVersionsOf(update).length
+    if (count === 0) {
+      this.updateSelection = 0
+      return
+    }
+    if (this.updateSelection >= count) {
+      this.updateSelection = count - 1
       this.bumpRevision(); this.bumpSemantic()
     }
   }
@@ -2338,7 +2625,50 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   /** The page's OWN Host notice row: a settled/refused operation message, a
    *  failed inventory read or a version-exemption warning. The shared App
    *  notice is NOT a second source here — the Settings root paints it once. */
-  private renderNotice(plan: ChromePlan): string {
+  /**
+   * v2 §3.4 first-enable guidance: publish ONLY after the official toggle
+   * result + inventory readback show the bundle enabled and the mutation is no
+   * longer busy. A failed/no-op enable never claims success.
+   */
+  private settleFirstCuaEnableNotice(): void {
+    const pending = this.pendingCuaFirstEnable
+    if (pending === undefined || this.controller.busy() !== undefined) return
+    const card = this.controller.cards().find(candidate => candidate.value === pending)
+    if (card === undefined) {
+      this.pendingCuaFirstEnable = undefined
+      return
+    }
+    if (card.enabled && card.error === undefined) {
+      this.pendingCuaFirstEnable = undefined
+      this.firstCuaEnableNotice = true
+      this.controller.explain('Computer Use is enabled. Press o to open Settings → Tools · Computer Use and authorize Accessibility and Screen Recording on the Host Mac, or l to continue later.')
+    } else if (card.enabled) {
+      // Selection saved but the official provider reports a preparation error:
+      // never overwrite that error with a first-use success claim.
+      this.pendingCuaFirstEnable = undefined
+    } else if (this.controller.notice() !== undefined) {
+      // The settled Host result was a failure/no-op; its generic message owns
+      // the explanation and no first-use claim is made.
+      this.pendingCuaFirstEnable = undefined
+    }
+  }
+
+  private renderNotice(plan: ChromePlan, targets: HitTarget[]): string {
+    if (this.firstCuaEnableNotice) {
+      const narrow = plan.width < 60
+      const label = narrow ? 'Computer Use enabled. ' : 'Computer Use is enabled. '
+      const openLabel = narrow ? '[Open]' : '[Open Computer Use settings]'
+      const laterLabel = '[Later]'
+      const text = `${color.textMuted('ℹ ')}${label}${color.primary(openLabel)} ${color.textDim(laterLabel)}`
+      const row = plan.searchRows
+      const openStart = visibleWidth(`${color.textMuted('ℹ ')}${label}`)
+      const openEnd = openStart + visibleWidth(openLabel)
+      const laterStart = openEnd + 1
+      const laterEnd = laterStart + visibleWidth(laterLabel)
+      if (openEnd <= plan.width) targets.push({ kind: 'notice', value: 'first-cua-open', row, startCol: openStart, endCol: openEnd })
+      if (laterEnd <= plan.width) targets.push({ kind: 'notice', value: 'first-cua-later', row, startCol: laterStart, endCol: laterEnd })
+      return fit(text, plan.width)
+    }
     const model = this.controller.model()
     const exemptionWarning = model.exemptionWarnings.length === 0
       ? undefined
@@ -2359,8 +2689,23 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   }
 
   private renderActionBar(plan: ChromePlan): string {
-    const segments = this.actionBarSegments(plan)
-    return color.textMuted(renderActionBarRow(segments, plan.width))
+    const layout = layoutActionBarRow(this.actionBarSegments(plan), plan.width)
+    this.paintedEscapeSpanValue = undefined
+    // `truncated` means the last surviving segment itself was cut: no complete
+    // segment is visible, so no affordance may be clicked.
+    if (layout.truncated) return color.textMuted(layout.text)
+    const separator = color.textMuted(ACTION_BAR_SEPARATOR)
+    let painted = ''
+    for (const [index, span] of layout.spans.entries()) {
+      if (index > 0) painted += separator
+      if (isEscapeSegment(span.text)) {
+        painted += paintActionSpan(span.text, 'secondary')
+        this.paintedEscapeSpanValue = { startCol: span.startCol, endCol: span.endCol }
+      } else {
+        painted += color.textMuted(span.text)
+      }
+    }
+    return painted
   }
 
   private actionBarSegments(plan: ChromePlan): ActionBarSegment[] {
@@ -2370,46 +2715,46 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     // the input gate admits — so the bar can never promise an invisible action
     // (a hidden Enter/search/filter/refresh must not look executable).
     return plan.bodyRows <= 0
-      ? segments.filter(segment => segment.text.startsWith('Esc '))
+      ? segments.filter(segment => isEscapeSegment(segment.text))
       : segments
   }
 
   private frameActionBarSegments(): ActionBarSegment[] {
     // The page is ALWAYS embedded in the Settings lease: Esc at the list root
     // yields to the Categories rail and never closes the screen.
-    const back = 'Esc back'
+    const back = 'Back [Esc]'
     if (this.searchEditing) {
       return [
         { text: 'Enter apply', priority: 80 },
-        { text: 'Esc clear search', priority: 100 },
+        { text: 'Clear [Esc]', priority: 100 },
       ]
     }
     if (this.view === 'install') {
       const install = this.controller.installView()
-      if (install === undefined) return [{ text: 'Esc back', priority: 100 }]
+      if (install === undefined) return [{ text: 'Back [Esc]', priority: 100 }]
       if (install.phase === 'editing') {
         return [
           { text: 'Tab switch field', priority: 80 },
           { text: 'Enter inspect', priority: 70 },
           // Esc returns to the LIST, never closes the page: the hint must name
           // that real destination on both entry hosts.
-          { text: 'Esc back', priority: 100 },
+          { text: 'Back [Esc]', priority: 100 },
         ]
       }
       if (install.phase === 'inspecting') {
-        return [{ text: 'Esc back', priority: 100 }]
+        return [{ text: 'Back [Esc]', priority: 100 }]
       }
       if (install.phase === 'confirm') {
         return install.inspection?.status === 'accepted'
-          ? [{ text: 'Enter install', priority: 90 }, { text: 'Esc edit', priority: 100 }]
-          : [{ text: 'Esc edit', priority: 100 }]
+          ? [{ text: 'Enter install', priority: 90 }, { text: 'Edit [Esc]', priority: 100 }]
+          : [{ text: 'Edit [Esc]', priority: 100 }]
       }
       if (install.phase === 'starting' || install.phase === 'installing' || install.phase === 'applying' || install.phase === 'cancelling') {
         return [
           ...(install.cancellable ? [{ text: 's stop', priority: 90 }] : []),
           { text: 'l logs', priority: 70 },
           { text: 'c copy', priority: 60 },
-          { text: 'Esc hide', priority: 100 },
+          { text: 'Hide [Esc]', priority: 100 },
         ]
       }
       return [
@@ -2417,7 +2762,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         ...(install.phase === 'unknown' ? [] : [{ text: 'n new', priority: 55 }]),
         { text: 'l logs', priority: 70 },
         { text: 'c copy', priority: 60 },
-        { text: 'Esc back', priority: 100 },
+        { text: 'Back [Esc]', priority: 100 },
       ]
     }
     if (this.view === 'confirm') {
@@ -2425,14 +2770,53 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       return [
         { text: hasPrimary ? 'Enter confirm' : 'Enter cancel', priority: 90 },
         ...(this.paintedConfirmScrollMax > 0 ? [{ text: 'PgUp/PgDn details', priority: 80 }] : []),
-        { text: 'Esc cancel', priority: 100 },
+        { text: 'Cancel [Esc]', priority: 100 },
+      ]
+    }
+    if (this.view === 'update') {
+      const update = this.controller.updateView()
+      if (update === undefined) return [{ text: 'Back [Esc]', priority: 100 }]
+      if (update.phase === 'checking') return [{ text: 'Hide [Esc]', priority: 100 }]
+      if (update.phase === 'selecting') {
+        return [
+          { text: 'Enter choose', priority: 90 },
+          ...(this.paintedUpdateLineCount > this.paintedUpdateViewport ? [{ text: 'PgUp/PgDn page', priority: 80 }] : []),
+          { text: `${WORKSPACE_KEYS.refresh} retry`, priority: 70 },
+          { text: 'Back [Esc]', priority: 100 },
+        ]
+      }
+      if (update.phase === 'confirm') {
+        return [
+          { text: this.paintedUpdateActions.has(UPDATE_ACTION.execute) ? 'Enter confirm' : 'Enter cancel', priority: 90 },
+          ...(this.paintedUpdateConfirmScrollMax > 0 ? [{ text: 'PgUp/PgDn details', priority: 80 }] : []),
+          { text: 'Back [Esc]', priority: 100 },
+        ]
+      }
+      if (update.phase === 'running') {
+        return [
+          ...(update.canStopTargetInstall ? [{ text: `${WORKSPACE_KEYS.stop} stop target install`, priority: 90 }] : []),
+          { text: `${WORKSPACE_KEYS.copy} copy`, priority: 60 },
+          { text: 'Hide [Esc]', priority: 100 },
+        ]
+      }
+      if (update.phase === 'done') {
+        return [
+          { text: `${WORKSPACE_KEYS.copy} copy`, priority: 60 },
+          { text: 'Back [Esc]', priority: 100 },
+        ]
+      }
+      return [
+        { text: 'Enter action', priority: 80 },
+        { text: `${WORKSPACE_KEYS.refresh} reread`, priority: 70 },
+        { text: `${WORKSPACE_KEYS.copy} copy`, priority: 60 },
+        { text: 'Hide [Esc]', priority: 100 },
       ]
     }
     if (this.view === 'diagnostics') {
       if (this.diagnosticsSnapshot === undefined) {
         return [
           { text: `${WORKSPACE_KEYS.refresh} reread`, priority: 60 },
-          { text: 'Esc back', priority: 100 },
+          { text: 'Back [Esc]', priority: 100 },
         ]
       }
       return [
@@ -2441,7 +2825,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         ...(this.diagnosticsSelectionVisible ? [{ text: `${WORKSPACE_KEYS.copy} copy`, priority: 70 }] : []),
         { text: `${WORKSPACE_KEYS.copyAll} copy all`, priority: 65 },
         { text: `${WORKSPACE_KEYS.refresh} reread`, priority: 60 },
-        { text: 'Esc back', priority: 100 },
+        { text: 'Back [Esc]', priority: 100 },
       ]
     }
     // `i` never replaces a terminal attempt; name what it will actually open.
@@ -2453,13 +2837,14 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         { text: installHint, priority: 60 },
         { text: 'c copy', priority: 50 },
         { text: 'r refresh', priority: 40 },
-        { text: 'Esc back', priority: 100 },
+        { text: 'Back [Esc]', priority: 100 },
       ]
     }
     return [
       { text: 'Enter details', priority: 80 },
       { text: '/ search', priority: 70 },
       { text: installHint, priority: 60 },
+      ...(this.controller.updateView() === undefined ? [] : [{ text: `${WORKSPACE_KEYS.update} update result`, priority: 55 }]),
       { text: 'Tab filter', priority: 50 },
       { text: `${WORKSPACE_KEYS.diagnostics} diagnostics`, priority: 45 },
       { text: 'r refresh', priority: 40 },
@@ -2469,6 +2854,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
 
   private renderBody(plan: ChromePlan, bodyTop: number, targets: HitTarget[]): string[] {
     if (this.view === 'install') return this.renderInstallBody(plan, bodyTop, targets)
+    if (this.view === 'update') return this.renderUpdateBody(plan, bodyTop, targets)
     if (this.view === 'confirm') return this.renderConfirmBody(plan, bodyTop, targets)
     if (this.view === 'diagnostics') return this.renderDiagnosticsBody(plan, bodyTop, targets)
     if (!plan.dual) {
@@ -2540,6 +2926,22 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       || card.rows.some(row => busyValue === rowToggleValue(row.entryId))
     const chip = busy ? 'busy' : cardStatusChip(card)
     let chipText = chip === undefined ? '' : `[${chip}]`
+    // R8-E PR-4: the second, independently labelled Client signal only when the
+    // pane is wide enough; a narrow pane drops this secondary chip (the Detail
+    // still carries both facts verbatim).
+    if (card.target === 'bundle' && width >= 38) {
+      const source = this.clientExtensions()
+      if (source !== undefined) {
+        const client = classifyCurrentClientPluginStatus(
+          card.name,
+          card.installed,
+          card.enabled,
+          source.observation(),
+        )
+        const compact = CLIENT_LIST_LABELS[client.status]
+        chipText = chipText === '' ? `[Client:${compact}]` : `${chipText} · Client:${compact}`
+      }
+    }
     let chipWidth = visibleWidth(chipText)
     // The floor guarantee: at an absurdly narrow width the chip yields WHOLE
     // rather than being cut by the line fit.
@@ -2823,8 +3225,692 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     }
   }
 
-  private renderConfirmBody(plan: ChromePlan, bodyTop: number, targets: HitTarget[]): string[] {
-    const card = this.controller.confirmingCard()
+  // ── update view ──────────────────────────────────────────────────────────
+
+  private openUpdateFromDetail(card: PluginCardView): void {
+    this.controller.beginUpdate(card.value)
+    const update = this.controller.updateView()
+    if (update === undefined || update.cardValue !== card.value) return
+    this.enterUpdateView(update)
+  }
+
+  /** `u` on the List reopens the ONE existing update lifecycle (result or in-flight). */
+  private openUpdateResult(): void {
+    const update = this.controller.updateView()
+    if (update === undefined) return
+    const card = this.controller.card(update.cardValue)
+    if (card !== undefined) this.selectedValue = card.value
+    this.enterUpdateView(update)
+  }
+
+  private enterUpdateView(update: PluginUpdateView): void {
+    this.view = 'update'
+    this.updateConfirmSelection = 1
+    this.updateConfirmOffset = 0
+    this.updateActionSelection = 0
+    this.updateOffset = 0
+    const list = update.versions
+    const index = list !== undefined && list.status === 'listed' && update.selectedExactVersion !== undefined
+      ? list.versions.findIndex(version => version.version === update.selectedExactVersion)
+      : -1
+    this.updateSelection = index >= 0 ? index : 0
+    this.bumpRevision(); this.bumpSemantic()
+    this.intents.requestRender()
+  }
+
+  /** Esc owns the REAL destination of the current phase (never a Host write). */
+  private handleUpdateEscape(): void {
+    const update = this.controller.updateView()
+    if (update === undefined) {
+      this.leaveUpdate('list')
+      return
+    }
+    this.controller.hideUpdate()
+    if (update.phase === 'running' || update.phase === 'unknown') {
+      this.leaveUpdate('list')
+      return
+    }
+    const card = this.controller.card(update.cardValue)
+    if (card !== undefined) {
+      this.selectedValue = card.value
+      this.focus = 'details'
+      this.detailOffset = 0
+      this.detailSelection = 0
+      this.detailReveal = false
+      this.leaveUpdate('details')
+      return
+    }
+    this.leaveUpdate('list')
+  }
+
+  private leaveUpdate(destination: 'list' | 'details'): void {
+    this.view = destination
+    this.focus = destination === 'details' ? 'details' : 'list'
+    this.bumpRevision(); this.bumpSemantic()
+    this.intents.requestRender()
+  }
+
+  private updateVersionsOf(update: PluginUpdateView): readonly PluginVersionFact[] {
+    const list = update.versions
+    return list !== undefined && list.status === 'listed' ? list.versions : []
+  }
+
+  private moveUpdateSelection(delta: number): void {
+    const update = this.controller.updateView()
+    if (update?.phase !== 'selecting') return
+    const count = this.updateVersionsOf(update).length
+    if (count === 0) return
+    const next = Math.min(Math.max(0, this.updateSelection + delta), count - 1)
+    if (next === this.updateSelection) return
+    this.updateSelection = next
+    this.bumpRevision(); this.bumpSemantic()
+    this.intents.requestRender()
+  }
+
+  private moveUpdateActionSelection(delta: number): void {
+    const actions = this.currentUpdateActions
+    if (actions.length === 0) return
+    const next = Math.min(Math.max(0, this.updateActionSelection + delta), actions.length - 1)
+    if (next === this.updateActionSelection) return
+    this.updateActionSelection = next
+    this.bumpRevision(); this.bumpSemantic()
+    this.intents.requestRender()
+  }
+
+  /** Wheel scrolling of the update body. While `selecting` the wheel browses
+   *  the version rows (the pinned action rows never move). */
+  private scrollUpdate(delta: number, plan: ChromePlan | undefined): boolean {
+    const update = this.controller.updateView()
+    if (update === undefined) return false
+    if (update.phase === 'selecting') {
+      const count = this.updateVersionsOf(update).length
+      if (count === 0) return false
+      const next = Math.min(Math.max(0, this.updateSelection + (delta > 0 ? 1 : -1)), count - 1)
+      if (next === this.updateSelection) return false
+      this.updateSelection = next
+      return true
+    }
+    const viewport = this.paintedUpdateViewport > 0
+      ? this.paintedUpdateViewport
+      : Math.max(1, (plan?.bodyRows ?? 1) - Math.min(2, plan?.bodyRows ?? 1))
+    if (update.phase === 'confirm') {
+      if (this.paintedUpdateConfirmScrollMax <= 0) return false
+      const next = Math.min(Math.max(0, this.updateConfirmOffset + delta), this.paintedUpdateConfirmScrollMax)
+      if (next === this.updateConfirmOffset) return false
+      this.updateConfirmOffset = next
+      return true
+    }
+    const max = Math.max(0, this.paintedUpdateLineCount - viewport)
+    const next = Math.min(Math.max(0, this.updateOffset + delta), max)
+    if (next === this.updateOffset) return false
+    this.updateOffset = next
+    return true
+  }
+
+  /** One page of the Update version list (the painted body minus its header). */
+  private updatePageStep(): number {
+    return Math.max(1, this.paintedUpdateViewport - 1)
+  }
+
+  private scrollUpdatePage(direction: 1 | -1, page: boolean): void {
+    const update = this.controller.updateView()
+    if (update === undefined) return
+    const step = page ? Math.max(1, this.paintedUpdateViewport - 1) : 1
+    const viewport = Math.max(1, this.paintedUpdateViewport)
+    if (update.phase === 'confirm') {
+      if (this.paintedUpdateConfirmScrollMax <= 0) return
+      const next = Math.min(
+        Math.max(0, this.updateConfirmOffset + direction * step),
+        this.paintedUpdateConfirmScrollMax,
+      )
+      if (next === this.updateConfirmOffset) return
+      this.updateConfirmOffset = next
+    } else {
+      const max = Math.max(0, this.paintedUpdateLineCount - viewport)
+      const next = Math.min(Math.max(0, this.updateOffset + direction * step), max)
+      if (next === this.updateOffset) return
+      this.updateOffset = next
+    }
+    this.bumpRevision(); this.bumpSemantic()
+    this.intents.requestRender()
+  }
+
+  private handleUpdateInput(data: string): void {
+    const update = this.controller.updateView()
+    if (update === undefined) {
+      this.leaveUpdate('list')
+      return
+    }
+    const selecting = update.phase === 'selecting'
+    if (matchesKey(data, 'up') || matchesKey(data, 'ctrl+p')) {
+      if (selecting) this.moveUpdateSelection(-1)
+      else this.moveUpdateActionSelection(-1)
+      return
+    }
+    if (matchesKey(data, 'down') || matchesKey(data, 'ctrl+n')) {
+      if (selecting) this.moveUpdateSelection(1)
+      else this.moveUpdateActionSelection(1)
+      return
+    }
+    if (matchesKey(data, 'pageUp')) {
+      if (selecting) this.moveUpdateSelection(-this.updatePageStep())
+      else this.scrollUpdatePage(-1, true)
+      return
+    }
+    if (matchesKey(data, 'pageDown')) {
+      if (selecting) this.moveUpdateSelection(this.updatePageStep())
+      else this.scrollUpdatePage(1, true)
+      return
+    }
+    if (matchesKey(data, 'home')) {
+      if (selecting) this.moveUpdateSelection(-Number.MAX_SAFE_INTEGER)
+      else this.scrollUpdatePage(-1, false)
+      return
+    }
+    if (matchesKey(data, 'end')) {
+      if (selecting) this.moveUpdateSelection(Number.MAX_SAFE_INTEGER)
+      else this.scrollUpdatePage(1, false)
+      return
+    }
+    if (matchesKey(data, 'enter')) {
+      if (selecting) this.activateUpdateChoice()
+      else this.activateUpdateAction()
+      return
+    }
+    if (data === WORKSPACE_KEYS.refresh || data === WORKSPACE_KEYS.refresh.toUpperCase()) {
+      if (update.phase === 'selecting') this.controller.retryUpdateCheck()
+      else if (update.phase === 'unknown') this.controller.refresh()
+      this.afterUpdateIntent()
+      return
+    }
+    if (data === WORKSPACE_KEYS.stop || data === WORKSPACE_KEYS.stop.toUpperCase()) {
+      if (update.canStopTargetInstall) {
+        this.controller.stopUpdateTargetInstall()
+        this.afterUpdateIntent()
+      }
+      return
+    }
+    if (data === WORKSPACE_KEYS.copy || data === WORKSPACE_KEYS.copy.toUpperCase()) {
+      this.copyUpdateDiagnostics()
+    }
+  }
+
+  /** Enter on a listed version: select it and enter the confirmation view. */
+  private activateUpdateChoice(): void {
+    const update = this.controller.updateView()
+    if (update?.phase !== 'selecting') return
+    const version = this.updateVersionsOf(update)[this.updateSelection]
+    if (version === undefined) return
+    this.selectAndConfirmVersion(version)
+  }
+
+  private selectAndConfirmVersion(version: PluginVersionFact): void {
+    const blocker = updateVersionBlocker(version)
+    if (blocker !== undefined) {
+      this.controller.explain(blocker)
+      return
+    }
+    if (!this.frameIsCurrent() || !this.paintedUpdateVersions.has(version.version)) return
+    this.controller.selectUpdateVersion(version.version)
+    this.controller.confirmUpdateVersion()
+    // The Controller's own hook requests a repaint, but this page also owns a
+    // local view transition: request it here so the confirmation is never
+    // painted only after an unrelated later frame.
+    this.afterUpdateIntent()
+  }
+
+  /** One explicit page-level repaint request after an Update intent. */
+  private afterUpdateIntent(): void {
+    this.bumpRevision()
+    this.intents.requestRender()
+  }
+
+  private activateUpdateAction(): void {
+    const actions = this.currentUpdateActions
+    const action = actions[Math.min(this.updateActionSelection, Math.max(0, actions.length - 1))]
+    if (action === undefined) return
+    if (!this.frameIsCurrent() || !this.paintedUpdateActions.has(action.value)) return
+    if (!action.enabled) {
+      this.controller.explain(action.reason ?? 'this update action is not available')
+      return
+    }
+    this.dispatchUpdateAction(action.value)
+  }
+
+  private dispatchUpdateAction(value: string): void {
+    switch (value) {
+      case UPDATE_ACTION.check: {
+        const update = this.controller.updateView()
+        if (update?.phase === 'unknown') this.controller.refresh()
+        else this.controller.retryUpdateCheck()
+        this.afterUpdateIntent()
+        return
+      }
+      case UPDATE_ACTION.execute:
+        if (!this.frameIsCurrent() || !this.paintedUpdateActions.has(UPDATE_ACTION.execute)) return
+        this.controller.executeUpdate()
+        this.afterUpdateIntent()
+        return
+      case UPDATE_ACTION.cancel:
+        this.controller.cancelUpdateConfirmation()
+        this.afterUpdateIntent()
+        return
+      case UPDATE_ACTION.stop:
+        if (!this.frameIsCurrent() || !this.paintedUpdateActions.has(UPDATE_ACTION.stop)) return
+        this.controller.stopUpdateTargetInstall()
+        this.afterUpdateIntent()
+        return
+      case UPDATE_ACTION.acknowledge:
+        if (!this.frameIsCurrent() || !this.paintedUpdateActions.has(UPDATE_ACTION.acknowledge)) return
+        this.controller.acknowledgeUpdateUncertainty()
+        this.afterUpdateIntent()
+        return
+      case UPDATE_ACTION.copy:
+        this.copyUpdateDiagnostics()
+        return
+      case UPDATE_ACTION.back:
+        this.handleUpdateEscape()
+        return
+      default:
+        return
+    }
+  }
+
+  /** The pinned action rows of the current update phase. Keyboard indexes this
+   *  exact list and every activation re-checks the painted value. */
+  private updateActions(update: PluginUpdateView): readonly PluginDetailAction[] {
+    switch (update.phase) {
+      case 'checking':
+        return []
+      case 'selecting':
+        return [
+          { value: UPDATE_ACTION.check, label: 'Check versions again', enabled: true, tone: 'normal' },
+          { value: UPDATE_ACTION.back, label: 'Back', enabled: true, tone: 'normal' },
+        ]
+      case 'confirm': {
+        const version = this.updateVersionsOf(update).find(candidate => candidate.version === update.selectedExactVersion)
+        const selectable = version !== undefined && isSelectableUpdateVersion(version)
+        return [
+          {
+            value: UPDATE_ACTION.execute,
+            label: 'Confirm update',
+            enabled: selectable,
+            ...(selectable ? {} : { reason: version === undefined ? 'the selected version is no longer listed' : updateVersionBlocker(version) }),
+            tone: 'warning' as const,
+          },
+          { value: UPDATE_ACTION.cancel, label: 'Cancel', enabled: true, tone: 'normal' },
+        ]
+      }
+      case 'running':
+        return [
+          { value: UPDATE_ACTION.copy, label: 'Copy details', enabled: true, tone: 'normal' },
+          { value: UPDATE_ACTION.back, label: 'Hide', enabled: true, tone: 'normal' },
+          ...(update.canStopTargetInstall
+            ? [{ value: UPDATE_ACTION.stop, label: 'Stop target install', enabled: true, tone: 'warning' as const }]
+            : []),
+        ]
+      case 'done':
+        return [
+          { value: UPDATE_ACTION.copy, label: 'Copy details', enabled: true, tone: 'normal' },
+          { value: UPDATE_ACTION.back, label: 'Back', enabled: true, tone: 'normal' },
+        ]
+      case 'unknown':
+        return [
+          { value: UPDATE_ACTION.check, label: 'Reread inventory', enabled: true, tone: 'normal' },
+          update.readback === 'ready'
+            ? { value: UPDATE_ACTION.acknowledge, label: 'Acknowledge uncertainty', enabled: true, tone: 'warning' as const }
+            : {
+              value: UPDATE_ACTION.acknowledge,
+              label: 'Acknowledge uncertainty',
+              enabled: false,
+              reason: 'an authoritative inventory reread must succeed first',
+              tone: 'warning' as const,
+            },
+          { value: UPDATE_ACTION.copy, label: 'Copy details', enabled: true, tone: 'normal' },
+          { value: UPDATE_ACTION.back, label: 'Hide', enabled: true, tone: 'normal' },
+        ]
+      default:
+        return []
+    }
+  }
+
+  /** Render the ONE Update page: fixed identity header, scrollable facts, pinned
+   *  action rows. A dangerous primary is painted only when its whole warning is
+   *  visible on the SAME frame. */
+  private renderUpdateBody(plan: ChromePlan, bodyTop: number, targets: HitTarget[]): string[] {
+    const update = this.controller.updateView()
+    if (update === undefined) return padBody([color.textDim('No update is open')], plan.bodyRows, plan.width)
+    // The identity header is FIXED above the scrollable body; the action rows
+    // are pinned below it. Only the remaining rows scroll.
+    const headerRows = Math.min(1, plan.bodyRows)
+    const afterHeader = Math.max(0, plan.bodyRows - headerRows)
+    let actions: readonly PluginDetailAction[] = this.updateActions(update)
+    const actionRowsFor = (count: number): number => Math.min(count, afterHeader)
+    let built = this.updateLayout(update, plan.width, actions, false)
+    const fullContentViewport = Math.max(0, afterHeader - actionRowsFor(actions.length))
+    const riskVisible = built.riskStart < 0
+      || (fullContentViewport > 0 && built.riskStart >= this.updateConfirmOffset && built.riskEnd < this.updateConfirmOffset + fullContentViewport)
+    if (update.phase === 'confirm' && !riskVisible && actions.some(action => action.value === UPDATE_ACTION.execute)) {
+      // The confirmation's consequence is inseparable from its primary action.
+      actions = actions.filter(action => action.value !== UPDATE_ACTION.execute)
+      built = this.updateLayout(update, plan.width, actions, true)
+    }
+    this.currentUpdateActions = actions
+    const actionRows = actionRowsFor(actions.length)
+    const contentViewport = Math.max(0, afterHeader - actionRows)
+    const offsetTarget = update.phase === 'confirm' ? this.updateConfirmOffset : this.updateOffset
+    let offset = offsetTarget
+    // Keep the selected version fully visible (Up/Down moves the cursor).
+    if (update.phase === 'selecting') {
+      const row = built.versionRows[this.updateSelection]
+      if (row !== undefined && contentViewport > 0) {
+        if (row.start < offset) offset = row.start
+        else if (row.start + row.count > offset + contentViewport) offset = row.start + row.count - contentViewport
+      }
+    }
+    const max = Math.max(0, built.contentLength - contentViewport)
+    const clamped = Math.min(Math.max(0, offset), max)
+    if (update.phase === 'confirm') {
+      this.paintedUpdateConfirmScrollMax = max
+      this.updateConfirmOffset = clamped
+    } else {
+      this.updateOffset = clamped
+      this.paintedUpdateConfirmScrollMax = 0
+    }
+    this.paintedUpdateLineCount = built.contentLength
+    this.paintedUpdateViewport = contentViewport
+    // Resolve the action cursor against the PAINTED list before painting, so a
+    // withheld primary can never leave Enter pointing at it.
+    const previousValue = this.paintedUpdateActionValues[this.updateActionSelection]
+    const visibleList = actions.slice(0, actionRows)
+    const previousIndex = previousValue === undefined ? -1 : visibleList.findIndex(action => action.value === previousValue)
+    const cancelIndex = visibleList.findIndex(action => action.value === UPDATE_ACTION.cancel)
+    const safeDefault = update.phase === 'confirm'
+      ? Math.max(0, cancelIndex)
+      : Math.min(this.updateActionSelection, Math.max(0, visibleList.length - 1))
+    const selection = previousIndex >= 0 ? previousIndex : safeDefault
+    this.updateActionSelection = Math.min(selection, Math.max(0, visibleList.length - 1))
+    // In `selecting` the keyboard really owns the VERSION list: the pinned
+    // actions are pointer-only labels, so they never paint a second cursor.
+    const actionCursor = update.phase === 'selecting' ? -1 : this.updateActionSelection
+    const actionPaint = paintActions([], actions, actionCursor, plan.width, false)
+    const content = built.lines.slice(0, built.contentLength)
+    const visibleContent = content.slice(clamped, clamped + contentViewport)
+    const out: string[] = []
+    if (headerRows === 1) out.push(fit(built.header, plan.width))
+    out.push(...padBody([...visibleContent], contentViewport, plan.width))
+    const paintedValues: string[] = []
+    this.paintedUpdateActions = new Set()
+    for (const actionLine of actionPaint.actionLines) {
+      if (actionLine.line < 0 || actionLine.line >= actionRows) continue
+      const y = headerRows + contentViewport + actionLine.line
+      paintedValues.push(actionLine.value)
+      this.paintedUpdateActions = new Set([...this.paintedUpdateActions, actionLine.value])
+      targets.push({ kind: 'action', value: actionLine.value, row: bodyTop + y, startCol: 0, endCol: plan.width })
+      out.push(fit(actionPaint.lines[actionLine.line]!, plan.width))
+    }
+    this.paintedUpdateActionValues = paintedValues
+    // Version rows are clickable exactly where they were really painted.
+    const paintedVersions = new Set<string>()
+    for (const row of built.versionRows) {
+      for (let line = row.start; line < row.start + row.count; line += 1) {
+        const y = line - clamped
+        if (y < 0 || y >= contentViewport) continue
+        paintedVersions.add(row.value)
+        targets.push({
+          kind: 'action',
+          value: updateChooseValue(row.value),
+          row: bodyTop + headerRows + y,
+          startCol: 0,
+          endCol: plan.width,
+        })
+      }
+    }
+    this.paintedUpdateVersions = paintedVersions
+    return padBody(out, plan.bodyRows, plan.width)
+  }
+
+  /** Build the Update content and its version-row spans. Action rows are
+   *  appended AFTER `contentLength` so the caller can pin them. */
+  private updateLayout(
+    update: PluginUpdateView,
+    width: number,
+    actions: readonly PluginDetailAction[],
+    withheldPrimary: boolean,
+  ): {
+    header: string
+    lines: string[]
+    contentLength: number
+    actionLines: readonly PaintedActionLine[]
+    riskStart: number
+    riskEnd: number
+    versionRows: readonly { readonly value: string; readonly start: number; readonly count: number }[]
+  } {
+    const content: string[] = []
+    const versionRows: { value: string; start: number; count: number }[] = []
+    let riskStart = -1
+    let riskEnd = -1
+    // The identity header is FIXED: it never scrolls with the body.
+    const header = color.textStrong(truncateToWidth(`Update bundle · ${sanitizedPhysicalLine(update.name)}`, width, '…'))
+    const pushWrapped = (text: string, ink: (value: string) => string): void => {
+      for (const line of wrapTextWithAnsi(sanitizedPhysicalLine(text), width)) content.push(ink(line))
+    }
+    if (update.phase === 'checking') {
+      content.push(color.textDim('Checking published versions…'))
+    } else if (update.phase === 'selecting') {
+      this.updateSelectingContent(update, content, versionRows, width)
+    } else if (update.phase === 'confirm') {
+      const version = this.updateVersionsOf(update).find(candidate => candidate.version === update.selectedExactVersion)
+      if (withheldPrimary) {
+        pushWrapped('The consequence does not fit this frame. Enlarge the terminal to read it; Confirm update is withheld until the whole warning is visible.', color.warning)
+      }
+      // The warning is the FIRST fact after the identity (and after the
+      // withheld explanation): a body short enough to clip everything else
+      // still shows the whole consequence before the frame may paint the
+      // dangerous primary.
+      riskStart = content.length
+      if (version?.prerelease === true) {
+        pushWrapped('This is a prerelease version. It is not a published stable release.', color.warning)
+      }
+      pushWrapped(
+        'Plugins may stop during the update. The Host attempts to restore the former version when the target installation fails; a restart may be required.',
+        color.warning,
+      )
+      riskEnd = content.length - 1
+      content.push('')
+      content.push(color.textDim(`From  ${sanitizedPhysicalLine(update.sourceInstalled)}`))
+      content.push(color.textDim(`To    ${sanitizedPhysicalLine(update.selectedExactVersion ?? '(none)')}`))
+      content.push(color.textDim(`Registry  ${maskedSource(sanitizedPhysicalLine(update.registry ?? 'pnpm configuration default'))}`))
+    } else if (update.phase === 'running') {
+      const step = update.hostStep
+      const status = update.settling
+        ? 'Update finished; reading the authoritative inventory…'
+        : step === undefined
+          ? 'Starting the update…'
+          : step === 'checking'
+            ? 'Checking the exact target with the Host…'
+            : step === 'removing'
+              ? 'Removing the previous version…'
+              : step === 'installing'
+                ? 'Installing the target version…'
+                : 'Restoring the previous version…'
+      content.push(color.textStrong(status))
+      if (update.hostStep === 'installing' && update.matchedInstallPhase === undefined) {
+        content.push(color.textDim('Waiting for the Host target installation to start…'))
+      }
+      if (update.matchedInstallPhase !== undefined) {
+        content.push(color.textDim(`Host installation phase  ${sanitizedPhysicalLine(update.matchedInstallPhase)}`))
+      }
+      if (update.announcedSteps.length > 0) {
+        content.push(color.textDim(`Host steps  ${update.announcedSteps.join(' → ')}`))
+      }
+      if (update.cancelStatus !== undefined) {
+        content.push(color.textMuted(`Target installation  ${sanitizedPhysicalLine(update.cancelStatus)}`))
+      }
+      if (update.log.length > 0) {
+        content.push('')
+        content.push(color.textDim('Recent Host output'))
+        const visible = 6
+        const log = update.log.slice(0, LOG_TAIL_LINES)
+        const start = Math.max(0, log.length - visible)
+        for (const line of log.slice(start, start + visible)) {
+          content.push(truncateToWidth(sanitizedPhysicalLine(line), width, '…'))
+        }
+      }
+    } else if (update.phase === 'done') {
+      content.push(color.textStrong('Target result'))
+      if (update.result !== undefined) {
+        content.push(...updateChangeFacts(update.result.result, width))
+      } else {
+        content.push(color.warning('No official update result was received.'))
+      }
+      content.push('')
+      content.push(color.textStrong('Restore result'))
+      if (update.result?.restore !== undefined) {
+        content.push(...updateChangeFacts(update.result.restore, width))
+      } else {
+        content.push(color.textDim('Not required; the Host did not reinstall the former version.'))
+      }
+      content.push('')
+      content.push(...this.updateObservedInventoryFacts(update, width))
+    } else {
+      content.push(color.textStrong('Update outcome unknown'))
+      pushWrapped('The Host may still be applying this update. This TUI did not retry it and cannot prove success, failure or cancellation.', color.warning)
+      content.push('')
+      content.push(...this.updateObservedInventoryFacts(update, width))
+      content.push('')
+      pushWrapped('Check the observed version, then acknowledge the uncertainty to release the plugin-change lock. The Host may still be finishing this update in the background.', color.textDim)
+    }
+    if (update.message !== undefined && update.phase !== 'unknown' && !update.settling) {
+      pushWrapped(update.message, color.textMuted)
+    }
+    content.push('')
+    const painted = paintActions([], actions, update.phase === 'selecting' ? -1 : this.updateActionSelection, width, false)
+    const actionLines = painted.actionLines.map(actionLine => Object.freeze({
+      value: actionLine.value,
+      line: actionLine.line + content.length,
+    }))
+    return {
+      header,
+      lines: [...content, ...painted.lines],
+      contentLength: content.length,
+      actionLines,
+      riskStart,
+      riskEnd,
+      versionRows,
+    }
+  }
+
+  private updateSelectingContent(
+    update: PluginUpdateView,
+    content: string[],
+    versionRows: { value: string; start: number; count: number }[],
+    width: number,
+  ): void {
+    const list = update.versions
+    if (list === undefined) {
+      content.push(color.warning('No usable version list is loaded.'))
+      return
+    }
+    if (list.status === 'refused') {
+      content.push(color.error(`Refused: ${sanitizedPhysicalLine(list.problem)}`))
+      for (const line of wrapTextWithAnsi(sanitizedPhysicalLine(list.reason), width)) content.push(color.textMuted(line))
+      if (list.attempts.length > 0) {
+        const asked = list.attempts
+          .map(attempt => `${maskedSource(sanitizedPhysicalLine(attempt.registry ?? 'pnpm default'))}${attempt.problem === undefined ? '' : ` (${attempt.problem})`}`)
+          .join(' · ')
+        for (const line of wrapTextWithAnsi(`Registries asked: ${asked}`, width)) content.push(color.textDim(line))
+        for (const attempt of list.attempts) {
+          if (attempt.reason === undefined || attempt.reason === '') continue
+          for (const line of wrapTextWithAnsi(`  ${sanitizedPhysicalLine(attempt.reason)}`, width)) content.push(color.textMuted(line))
+        }
+      }
+      return
+    }
+    content.push(color.textDim(`Installed  ${sanitizedPhysicalLine(list.installed)}`))
+    content.push(color.textDim(`Registry   ${maskedSource(sanitizedPhysicalLine(list.registry ?? 'pnpm configuration default'))}`))
+    if (list.versions.length === 0) {
+      content.push(color.textMuted('No newer published versions'))
+      return
+    }
+    content.push('')
+    list.versions.forEach((version, index) => {
+      const blocked = updateVersionBlocker(version)
+      const selected = index === this.updateSelection
+      const marker = selected ? color.primary('> ') : '  '
+      const tags = version.tags.length === 0 ? '' : ` [${version.tags.map(tag => sanitizedPhysicalLine(tag)).join(', ')}]`
+      const published = version.publishedAt === undefined ? '' : ` · ${sanitizedPhysicalLine(version.publishedAt)}`
+      const identity = truncateToWidth(`${version.version}${tags}`, Math.max(1, width - 2), '…')
+      const ink = blocked === undefined
+        ? selected ? color.textStrong : color.text
+        : color.textDim
+      const start = content.length
+      content.push(fit(`${marker}${ink(identity)}${color.textDim(truncateToWidth(published, Math.max(1, width - 2 - visibleWidth(identity)), '…'))}`, width))
+      const facts: string[] = [`bundle: ${version.bundle ? 'yes' : 'no'}`]
+      if (version.prerelease) facts.push('prerelease')
+      if (version.deprecated !== undefined) facts.push('deprecated')
+      if (version.incompatible !== undefined) facts.push('incompatible')
+      let detail = facts.join(' · ')
+      if (version.incompatible !== undefined) detail += ` — ${incompatibleText(version.incompatible)}`
+      else if (version.deprecated !== undefined) detail += ` — ${sanitizedPhysicalLine(version.deprecated)}`
+      else if (blocked !== undefined) detail += ` — ${blocked}`
+      else if (version.prerelease) detail += ' — explicit choice required'
+      const lines = wrapTextWithAnsi(sanitizedPhysicalLine(detail), Math.max(1, width - 2))
+      for (const line of lines.length === 0 ? [''] : lines) {
+        content.push(fit(`  ${blocked === undefined ? color.textMuted(line) : color.warning(line)}`, width))
+      }
+      versionRows.push({ value: version.version, start, count: content.length - start })
+    })
+    if (list.omitted > 0) {
+      content.push(color.textDim(`${list.omitted} newer version(s) are beyond the Host list limit`))
+    }
+    if (update.selectedExactVersion === undefined
+      && list.versions.some(version => version.prerelease && isSelectableUpdateVersion(version))
+      && !list.versions.some(version => !version.prerelease && isSelectableUpdateVersion(version))) {
+      content.push(color.warning('Only prerelease targets are available; select one explicitly.'))
+    }
+  }
+
+  private updateObservedInventoryFacts(update: PluginUpdateView, width: number): string[] {
+    if (update.readback === 'ready') {
+      return factLines(
+        'Observed installed version',
+        update.lastObservedVersion ?? 'unverified',
+        'normal',
+        width,
+      )
+    }
+    if (update.readback === 'error') {
+      return factLines('Inventory', 'stale; the current installed version is unverified', 'warning', width)
+    }
+    return factLines('Inventory', 'reading the authoritative snapshot…', 'dim', width)
+  }
+
+  private copyUpdateDiagnostics(): void {
+    const update = this.controller.updateView()
+    if (update === undefined) return
+    const result = update.result
+    const headers: string[] = [
+      `update ${sanitizedPhysicalLine(update.name)} ${sanitizedPhysicalLine(update.sourceInstalled)} → ${sanitizedPhysicalLine(update.selectedExactVersion ?? result?.to ?? 'unknown')}`,
+      `phase: ${update.phase} · readback: ${update.readback}`,
+      ...(update.requestId === undefined ? [] : [`request id: ${update.requestId}`]),
+      ...(update.registry === undefined ? [] : [`registry: ${maskedSource(sanitizedPhysicalLine(update.registry ?? 'pnpm default'))}`]),
+    ]
+    if (update.result !== undefined) {
+      headers.push(`target: ${sanitizedPhysicalLine(changeSummary(update.result.result))}`)
+      if (update.result.restore === undefined) headers.push('restore: not required')
+      else headers.push(`restore: ${sanitizedPhysicalLine(changeSummary(update.result.restore))}`)
+    }
+    if (update.lastObservedVersion !== undefined) headers.push(`observed installed version: ${sanitizedPhysicalLine(update.lastObservedVersion)}`)
+    if (update.cancelStatus !== undefined) headers.push(`target installation: ${update.cancelStatus}`)
+    if (update.message !== undefined) headers.push(sanitizedPhysicalLine(update.message))
+    const outputs = [result?.result.packageResult?.output, result?.restore?.packageResult?.output]
+      .filter((output): output is string => output !== undefined && output !== '')
+    const diagnostic = outputs.length > 0 ? outputs.join('\n') : update.log.join('\n')
+    this.intents.onCopy(diagnostic === '' ? headers.join('\n') : `${headers.join('\n')}\n${diagnostic}`)
+  }
+
+  private renderConfirmBody(plan: ChromePlan, bodyTop: number, targets: HitTarget[]): string[] {    const card = this.controller.confirmingCard()
     const kind = this.controller.confirmationKind()
     const name = this.controller.confirmingName() ?? '(unknown)'
     const entryId = this.controller.confirmationEntryId()
@@ -2862,10 +3948,13 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       riskStart = content.length
       content.push(...wrapTextWithAnsi(AUTO_REVIEW_DISABLE_WARNING, plan.width).map(line => color.warning(line)))
       riskEnd = content.length - 1
-      // The Host teardown detail is supplemental, not part of the required
-      // consequence; it may scroll without withholding the primary.
+      // The unload consequence is supplemental, not part of the required
+      // warning; it may scroll without withholding the primary. The shipped
+      // rc.1 integration migrates live Auto sessions when the integration
+      // UNLOADS while the Host is still running; a Host shutdown ends its
+      // sessions without a migration write, so this text must not promise one.
       content.push(...wrapTextWithAnsi(
-        'The official Host teardown moves existing Auto sessions to Full access; Auto Review is not a sandbox.',
+        'Disabling Auto Review moves live Auto sessions to Full access when the integration unloads; a Host that shuts down ends its sessions without that migration. Auto Review is not a sandbox.',
         plan.width,
       ).map(line => color.textDim(line)))
     } else if (kind === 'remove') {
@@ -2955,7 +4044,14 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
    *  releases that must be refused — and any fact that could change a pixel or
    *  an action changes the key as well. */
   private modelStateKey(): string {
-    return JSON.stringify([this.controller.readGeneration(), this.controller.model()])
+    return JSON.stringify([
+      this.controller.readGeneration(),
+      this.controller.model(),
+      // R8-E PR-4: the CURRENT Client's observation revision is part of the
+      // painted fact set. A Loader activation change invalidates the old hit
+      // map even though the Host inventory did not re-read.
+      this.clientExtensions()?.revision() ?? 0,
+    ])
   }
 
   /** True only while the live semantic facts AND the LOCAL viewport grant still
@@ -3005,23 +4101,25 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       this.viewport.width,
       this.viewport.rows,
       this.viewport.allowDual,
-      this.modelStateKey(),
-      this.controller.installView()?.phase,
-      this.controller.notice(),
-      this.controller.status().state,
-    ])
-  }
+       this.modelStateKey(),
+      this.updateStateKey(),
+       this.controller.installView()?.phase,
+       this.controller.notice(),
+       this.controller.status().state,
+     ])
+   }
 
-  private frameIsCurrent(): boolean {
-    return this.paintedRevision === this.revision
-      && this.lastRenderWidth === this.viewport.width
-      && this.lastRenderRows === this.viewport.rows
-      && this.lastRenderAllowDual === this.viewport.allowDual
-      && this.modelStateKey() === this.lastModelKey
-      && this.controller.installView()?.phase === this.lastPhase
-      && this.controller.notice() === this.lastNotice
-      && this.controller.status().state === this.lastStatusState
-  }
+   private frameIsCurrent(): boolean {
+     return this.paintedRevision === this.revision
+       && this.lastRenderWidth === this.viewport.width
+       && this.lastRenderRows === this.viewport.rows
+       && this.lastRenderAllowDual === this.viewport.allowDual
+       && this.modelStateKey() === this.lastModelKey
+      && this.updateStateKey() === this.lastUpdateKey
+       && this.controller.installView()?.phase === this.lastPhase
+       && this.controller.notice() === this.lastNotice
+       && this.controller.status().state === this.lastStatusState
+   }
 
   private bumpRevision(): void {
     this.revision += 1
@@ -3048,6 +4146,18 @@ export interface PluginManagerWorkspacePanelIntents {
   /** The Settings root's navigation yield (Esc/Left/Shift+Tab at the list
    * root). The page only reports the intent; the ROOT commits the focus. */
   readonly onYieldNavigation: () => void
+  /** PR-5/MAC-09 v2: request the SAME Settings lease's Tools · Computer Use
+   *  page. Undefined = the switch was scheduled; a string = the exact reason
+   *  it cannot happen right now (the page explains it and stays put). */
+  readonly openComputerUseSettings?: () => string | undefined
+  /**
+   * R8-E PR-4: the CURRENT Client's real per-package Loader observation
+   * source. Read late-bound on every paint; the page subscribes only for a
+   * repaint notification and releases the lease on dispose. Undefined means
+   * this composition has no Client mount owner (the Detail then reports the
+   * Client facts as unavailable rather than inventing them).
+   */
+  readonly clientExtensions?: () => ClientExtensionObservationSource | undefined
 }
 
 /**
@@ -3074,6 +4184,11 @@ export function createPluginManagerWorkspacePanel(
  * The adjacent List|Details pair additionally requires a dual-allowing root
  * grant, 76 local columns AND six real business body rows.
  */
+/** The Esc affordance is the ONE segment painted as `Verb [Esc]`. */
+function isEscapeSegment(text: string): boolean {
+  return text.endsWith(' [Esc]')
+}
+
 function planChrome(viewport: PluginContentViewport, view: PluginWorkspaceView, noticeLive: boolean): ChromePlan {
   const width = Math.max(1, Math.floor(viewport.width))
   const rows = Math.max(1, Math.floor(viewport.rows))
@@ -3250,6 +4365,26 @@ function factLines(label: string, value: string, tone: 'normal' | 'dim' | 'succe
     if (index === 0) lines.push(fit(`${color.textDim(labelText)}${paint(line)}`, width))
     else lines.push(fit(`${' '.repeat(labelColumn)}${paint(line)}`, width))
   })
+  return lines
+}
+
+/** The independent facts of ONE official change result (target or restore). */
+function updateChangeFacts(change: PluginChangeFact, width: number): string[] {
+  const lines: string[] = []
+  lines.push(...factLines(
+    'Outcome',
+    change.application,
+    change.application === 'failed' ? 'error' : change.application === 'restart-required' ? 'warning' : 'normal',
+    width,
+  ))
+  lines.push(...factLines('Stage', change.stage, 'dim', width))
+  if (change.version !== undefined) lines.push(...factLines('Version', change.version, 'dim', width))
+  if (change.restartReason !== undefined) lines.push(...factLines('Restart', change.restartReason, 'warning', width))
+  if (change.error !== undefined) lines.push(...factLines('Error', errorText(change.error), 'error', width))
+  if (change.pendingBuilds !== undefined && change.pendingBuilds.length > 0) {
+    lines.push(...factLines('Pending builds', change.pendingBuilds.join(', '), 'warning', width))
+  }
+  for (const warning of change.warnings ?? []) lines.push(...factLines('Warning', warning, 'warning', width))
   return lines
 }
 

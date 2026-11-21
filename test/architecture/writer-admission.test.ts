@@ -17,13 +17,13 @@
  * 4. A3-4: the SUBMISSION-domain writer sections (busy/steer, queue pull-back,
  *    HostCommandPort submission) enter through the submission runtime's
  *    `withWriter`, which delegates to `SessionRuntime.withWriter`; the runner
- *    holds no direct `barrier.runWriter` site and the command layer no
- *    `withSessionWriter`.
+ *    delegates Writer admission to SessionRuntime, which alone calls the
+ *    operation barrier's Writer and narrowly scoped Control entry points.
  * @module @xmoon76/dsh-pi-tui/writer-admission.test
  */
 
 import assert from 'node:assert/strict'
-import { readFileSync, readdirSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import {
   bindSessionRuntime,
@@ -36,10 +36,12 @@ import {
   deliverBusy,
   executeHostCommandSubmission,
   type HostCommandSubmissionDeps,
+  type PromptAttemptHooks,
   type PromptSubmission,
   type SteerSubmissionDeps,
   type SubmissionRuntimeSurface,
 } from '../../src/app/submission/runtime.ts'
+import { acceptSubmitAck, freshSubmitAckState, settleSubmitAck } from '../../src/app/submission/ack.ts'
 import { SessionOperationBarrier, TransitionInProgressError } from '../../src/app/session/operation-barrier.ts'
 import { SESSION_WRITER_HELD_GUIDANCE } from '../../src/runtime/remote/write-failure.ts'
 import { compositionSource } from '../support/composition-surface.ts'
@@ -288,6 +290,202 @@ test('negative control: an indeterminate prompt result never restores the draft'
   ], 'an unproven post-dispatch result is not restored and not reclassified as a rejection')
 })
 
+// ── an ACCEPTED attempt's late terminal settle ────────────────────────────
+//
+// Regression: Issue #731 — the obsolete T35 `indeterminate` oracle and the
+// accepted-terminal submit-ack gap. The plan's AC mapping lives in the PR
+// body, not in these titles (docs/guides/testing.md §7 rule 1).
+//
+// Once the Host accepted the prompt, a late transport failure is an EXECUTION
+// problem, not a Composer problem: the draft never comes back, nothing is
+// re-sent, and the gesture's temporary submit ack must still reach its own
+// tokenized terminal (it can otherwise hang as `Submitting…`/`Queued…`).
+// These cases drive the REAL `bindSubmissionRuntime` and fire the acceptance
+// through the write's own `onAccepted` callback, never a preset boolean.
+
+interface AckSettle {
+  readonly reason: string
+  readonly token: number
+  readonly terminal: true
+}
+
+/** One attempt's hook log: the composer owner sees at most one settlement. */
+function attemptRecorder(): { hooks: PromptAttemptHooks; settled: string[] } {
+  const settled: string[] = []
+  return {
+    settled,
+    hooks: {
+      onAccepted: () => { settled.push('accepted') },
+      onRejected: () => { settled.push('rejected') },
+      onUnknown: () => { settled.push('unknown') },
+    },
+  }
+}
+
+/** A recording surface whose prompt callback fires the REAL acceptance first. */
+function acceptedOutcomeSurface(
+  outcome: 'indeterminate' | 'rejected' | 'throw' | 'cancelled' | 'committed',
+): {
+  surface: SubmissionRuntimeSurface
+  calls: string[]
+  ackSettles: AckSettle[]
+} {
+  const ackSettles: AckSettle[] = []
+  const { surface, calls } = recordingSurface({
+    prepareMessage: async () => undefined,
+    prompt: async (_sessionId, _message, options) => {
+      options?.onAccepted?.()
+      if (outcome === 'throw') throw new Error('writer exploded after acceptance')
+      if (outcome === 'indeterminate') {
+        return { kind: 'indeterminate' as const, error: { code: 'session/write-indeterminate', message: 'ACK dropped' } }
+      }
+      if (outcome === 'rejected') {
+        return { kind: 'rejected' as const, error: { code: 'session/agent-busy', message: 'busy' } }
+      }
+      if (outcome === 'cancelled') return { kind: 'cancelled' as const }
+      return { kind: 'committed' as const, value: undefined }
+    },
+    settleSubmitAck: (reason, options) => {
+      ackSettles.push({ reason, token: options.token, terminal: options.terminal })
+    },
+  })
+  return { surface, calls, ackSettles }
+}
+
+test('early Host acceptance + indeterminate settles this gesture\'s ACK once with no restore or replay', async () => {
+  const { surface, calls, ackSettles } = acceptedOutcomeSurface('indeterminate')
+  const { hooks, settled } = attemptRecorder()
+  let releases = 0
+  const runtime = bindSubmissionRuntime({ surface })
+  await runtime.submitPrompt(SUBMISSION, { attempt: hooks, releaseReservation: () => { releases += 1 } })
+  assert.deepEqual(settled, ['accepted'], 'the acceptance latch is the ONE attempt settlement')
+  assert.deepEqual(calls, [
+    'dispatch',
+    'consume',
+  ], 'the accepted gesture consumes once and settles only the temporary ACK — no echo removal, restore or uncertainty notice')
+  assert.deepEqual(ackSettles, [{
+    reason: 'session write settled after Host acceptance',
+    token: SUBMISSION.ackToken,
+    terminal: true,
+  }], 'the terminal settle carries the ORIGINAL gesture token, never a tokenless clear')
+  assert.equal(releases, 1, 'the reservation releases exactly once')
+})
+
+test('accepted + late rejected settles the ACK with the gesture token and no restore or notice', async () => {
+  const { surface, calls, ackSettles } = acceptedOutcomeSurface('rejected')
+  const { hooks, settled } = attemptRecorder()
+  const runtime = bindSubmissionRuntime({ surface })
+  await runtime.submitPrompt(SUBMISSION, { attempt: hooks, releaseReservation: () => {} })
+  assert.deepEqual(settled, ['accepted'], 'an early acceptance wins over the late error')
+  assert.deepEqual(calls, [
+    'dispatch',
+    'consume',
+  ], 'the accepted refusal keeps the committed draft gone and shows no refusal notice')
+  assert.deepEqual(ackSettles.map(settle => [settle.token, settle.terminal]),
+    [[SUBMISSION.ackToken, true]], 'the tokenized terminal ack survives the late refusal')
+})
+
+test('accepted + writer throw settles the ACK with the gesture token and no restore or notice', async () => {
+  const { surface, calls, ackSettles } = acceptedOutcomeSurface('throw')
+  const { hooks, settled } = attemptRecorder()
+  const runtime = bindSubmissionRuntime({ surface })
+  await runtime.submitPrompt(SUBMISSION, { attempt: hooks, releaseReservation: () => {} })
+  assert.deepEqual(settled, ['accepted'], 'the accepted attempt is not re-settled as rejected by the throw')
+  assert.deepEqual(calls, [
+    'dispatch',
+    'consume',
+  ], 'the throw path settles only the temporary ACK — the reserved-submit restore never runs')
+  assert.deepEqual(ackSettles.map(settle => [settle.token, settle.terminal]),
+    [[SUBMISSION.ackToken, true]], 'the catch path owns the same tokenized terminal settle')
+})
+
+test('accepted + cancelled keeps its existing echo + ACK settlement', async () => {
+  const { surface, calls, ackSettles } = acceptedOutcomeSurface('cancelled')
+  const { hooks, settled } = attemptRecorder()
+  const runtime = bindSubmissionRuntime({ surface })
+  await runtime.submitPrompt(SUBMISSION, { attempt: hooks })
+  assert.deepEqual(settled, ['accepted'], 'the acceptance latch already settled the attempt')
+  assert.deepEqual(calls, [
+    'dispatch',
+    'consume',
+    'settleLocal',
+  ], 'the cancelled-after-acceptance exit keeps its dedicated local echo + ACK settlement')
+  assert.deepEqual(ackSettles.map(settle => [settle.token, settle.terminal]),
+    [[SUBMISSION.ackToken, true]], 'the existing cancelled settle stays tokenized')
+})
+
+test('accepted + committed settles no temporary ACK inside the runtime', async () => {
+  // The normal committed path rides the official inbox/user-message/turn-start
+  // bridge; an unconditional early ACK settle here would change that feedback
+  // timing even though this issue proves nothing wrong with it.
+  const { surface, calls, ackSettles } = acceptedOutcomeSurface('committed')
+  const { hooks, settled } = attemptRecorder()
+  const runtime = bindSubmissionRuntime({ surface })
+  await runtime.submitPrompt(SUBMISSION, { attempt: hooks, releaseReservation: () => {} })
+  assert.deepEqual(settled, ['accepted'])
+  assert.deepEqual(calls, ['dispatch', 'consume'], 'the committed path consumes once and leaves the ACK to its existing event bridge')
+  assert.deepEqual(ackSettles, [], 'no unconditional ACK settle was added to the committed path')
+})
+
+test('an old gesture\'s accepted+indeterminate settle never clears the newer pending ack row', async () => {
+  // The real SubmitAckState + the runtime wiring: gesture A is accepted, then
+  // B supersedes its epoch while A's write is still in flight. A's late
+  // terminal settle must carry A's token, so the state machine ignores it.
+  const ack = freshSubmitAckState()
+  const tokenA = acceptSubmitAck(ack, { detail: 'submit', now: 1_000 })
+  const tokenB = acceptSubmitAck(ack, { detail: 'queued', now: 1_100 })
+  assert.equal(ack.epoch, tokenB)
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const settles: number[] = []
+  const { surface } = recordingSurface({
+    prepareMessage: async () => undefined,
+    prompt: async (_sessionId, _message, options) => {
+      options?.onAccepted?.()
+      await gate
+      return { kind: 'indeterminate' as const, error: { code: 'session/write-indeterminate', message: 'ACK dropped' } }
+    },
+    settleSubmitAck: (reason, options) => {
+      settles.push(options.token)
+      settleSubmitAck(ack, { now: 2_000, token: options.token })
+    },
+  })
+  const { hooks } = attemptRecorder()
+  const runtime = bindSubmissionRuntime({ surface })
+  const pending = runtime.submitPrompt({ ...SUBMISSION, ackToken: tokenA }, { attempt: hooks })
+  await flush()
+  release()
+  await pending
+  assert.deepEqual(settles, [tokenA], 'the late terminal settle names the ORIGINAL gesture token')
+  assert.equal(ack.detail, 'queued', 'the newer gesture still owns the pending row')
+})
+
+test('unaccepted + indeterminate keeps the draft, notifies and settles with the token', async () => {
+  const ackSettles: AckSettle[] = []
+  const { surface, calls } = recordingSurface({
+    prepareMessage: async () => undefined,
+    prompt: async () => ({ kind: 'indeterminate' as const, error: { code: 'session/write-indeterminate', message: 'carrier lost' } }),
+    settleSubmitAck: (reason, options) => {
+      ackSettles.push({ reason, token: options.token, terminal: options.terminal })
+    },
+  })
+  const { hooks, settled } = attemptRecorder()
+  const runtime = bindSubmissionRuntime({ surface })
+  await runtime.submitPrompt(SUBMISSION, { attempt: hooks })
+  assert.deepEqual(settled, ['unknown'], 'no acceptance proof means the attempt settles unknown')
+  assert.deepEqual(calls, [
+    'dispatch',
+    'settleLocal',
+    'notify:error:session write result is indeterminate — do not retry automatically',
+  ], 'the unaccepted result keeps the draft/echo path and its explicit uncertainty notice')
+  assert.deepEqual(ackSettles, [{
+    reason: 'session write result indeterminate',
+    token: SUBMISSION.ackToken,
+    terminal: true,
+  }], 'the unaccepted path keeps its existing tokenized terminal ACK')
+  assert.ok(!calls.includes('consume'), 'an unproven result consumes no attachment')
+})
+
 test('negative control: an unsupported prompt result keeps its generic failure path', async () => {
   const { surface } = recordingSurface({
     prepareMessage: async () => undefined,
@@ -346,7 +544,9 @@ test('the queue-recall state and the plain-submit write body live in app/submiss
   const controller = readFileSync(new URL('../../src/app/submission/controller.ts', import.meta.url), 'utf8')
   assert.equal((controller.match(/deps\.submissionRuntime\.submitPrompt\(/g) ?? []).length, 1,
     'the agent-facing write must delegate to the submission runtime through submitPrompt')
-  assert.ok(controller.includes('submitPrompt: (submission) => deps.submissionRuntime.submitPrompt(submission)'),
+  // PR2: the ONE delegation also carries the composer-acceptance hooks (the
+  // attempt settle), but it stays ONE call site — never a second write path.
+  assert.equal((controller.match(/submitPrompt: \(submission, options\) => deps\.submissionRuntime\.submitPrompt\(/g) ?? []).length, 1,
     'the delegation is the command-submission fallback hook (never a second write path)')
 })
 
@@ -466,7 +666,7 @@ test('the moved domains refuse a STALE capture with SessionScopeSupersededError,
   assert.equal(barrier.activeWriters, 0, 'a stale admission never occupies the writer')
 })
 
-// ── A3-4: the four static exit criteria ────────────────────────────────────
+// ── A3-4: static admission and authority guards ────────────────────────────
 
 function span(source: string, start: string, end: string): string {
   const from = source.indexOf(start)
@@ -476,34 +676,12 @@ function span(source: string, start: string, end: string): string {
   return source.slice(from, to)
 }
 
-/** Every `.ts` file under src/, as a path relative to src/. */
-function srcTsFiles(dir: URL, prefix = ''): string[] {
-  const out: string[] = []
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const rel = prefix === '' ? entry.name : `${prefix}/${entry.name}`
-    if (entry.isDirectory()) out.push(...srcTsFiles(new URL(`${entry.name}/`, dir), rel))
-    else if (entry.name.endsWith('.ts')) out.push(rel)
-  }
-  return out
-}
-
-test('exit: index.ts has ZERO direct writer admission; commands.ts has ZERO withSessionWriter', () => {
-  const index = compositionSource()
-  const commands = readFileSync(new URL('../../src/commands.ts', import.meta.url), 'utf8')
-  assert.equal(index.includes('ownership.barrier.runWriter('), false,
-    'the composition surface must hold no direct runWriter site')
-  assert.equal(index.includes('.barrier.runWriter('), false,
-    'the composition surface must reach no raw barrier writer admission')
-  assert.equal(commands.includes('withSessionWriter'), false,
-    'TuiCommandRunner.withSessionWriter must be deleted')
-})
-
 test('exit: sessionTransitionPending() is used ONLY by the attachment-intake UX fence', () => {
   const commands = readFileSync(new URL('../../src/commands.ts', import.meta.url), 'utf8')
   // TS1 moved the attachment-intake fence into the artifacts command owner.
   const artifacts = readFileSync(new URL('../../src/tui/commands/artifacts.ts', import.meta.url), 'utf8')
   // The /skill semantic write enters through withWriter: no gate.busy re-check.
-  const skill = span(commands, 'const loadSkill = async (', '\n  const skillDisposers = new Map<string, () => void>()')
+  const skill = span(commands, 'const loadSkill = async (', '\n  const replaceSkillCommands = ')
   assert.equal(skill.includes('sessionTransitionPending()'), false,
     'the /skill writer section must not pre-check the transition gate')
   // The only remaining uses are the attachment-intake UX fence (a draft-stage
@@ -600,24 +778,24 @@ test('exit: sessionTransitionPending() is used ONLY by the attachment-intake UX 
 })
 
 test('exit: SessionRuntime is the SOLE operation-barrier writer admission owner', () => {
-  const root = new URL('../../src/', import.meta.url)
-  const offenders = srcTsFiles(root)
-    .filter(rel => rel !== 'app/session/runtime.ts')
-    .filter(rel => readFileSync(new URL(rel, root), 'utf8').includes('.barrier.runWriter('))
+  const offenders = productionSources()
+    .filter(({ rel }) => rel !== 'src/app/session/runtime.ts')
+    .filter(({ source }) => source.includes('.barrier.runWriter('))
+    .map(({ rel }) => rel)
   assert.deepEqual(offenders, [],
-    'only SessionRuntime.withWriter may call the operation barrier')
+    'only SessionRuntime.withWriter may call the operation barrier, across all production source extensions')
 })
 
 test('exit: SessionRuntime is the SOLE operation-barrier CONTROL admission owner', () => {
   // `runControl` is the ONE narrow Stop bypass around the transition freeze.
   // Only the session runtime may call it; a UI/submission module reaching the
   // barrier directly would turn it into a general writer bypass.
-  const root = new URL('../../src/', import.meta.url)
-  const offenders = srcTsFiles(root)
-    .filter(rel => rel !== 'app/session/runtime.ts')
-    .filter(rel => readFileSync(new URL(rel, root), 'utf8').includes('.barrier.runControl('))
+  const offenders = productionSources()
+    .filter(({ rel }) => rel !== 'src/app/session/runtime.ts')
+    .filter(({ source }) => source.includes('.barrier.runControl('))
+    .map(({ rel }) => rel)
   assert.deepEqual(offenders, [],
-    'only SessionRuntime.withControl/interrupt may call the operation barrier control hook')
+    'only SessionRuntime.withControl/interrupt may call the barrier control hook, across all production source extensions')
 })
 
 test('no production fence carries the transition gate into an admitted writer', () => {
@@ -685,18 +863,28 @@ test('the queue pull-back reconciles a STALE pre-entry refusal distinctly from a
     'the stale notice text is the session change, not a transition')
 })
 
-test('the transition gate has exactly ONE production reader: the intake UX fence', () => {
+test('the transition gate has exactly TWO production readers, each with ONE admission role', () => {
   const runtime = readFileSync(new URL('../../src/app/submission/runtime.ts', import.meta.url), 'utf8')
-  // The gate has exactly ONE production reader across ALL of `src/**` (not just
-  // the composition surface): the attachment-intake UX fence
-  // (`sessionTransitionPending`). Reading only the composition surface made a
-  // second reader in an unlisted module invisible. The HostCommand quick fence
-  // was removed; `SessionRuntime.withWriter` is the sole writer-admission
-  // authority.
+  // The gate has exactly TWO production readers across ALL of `src/**` (not
+  // just the composition surface), with DISTINCT responsibilities:
+  //   1. the attachment-intake UX fence (`transition.pending`, consumed by
+  //      `sessionTransitionPending`), and
+  //   2. the M6-1 F8 session-policy READ-admission fence (`canStartRead`): a
+  //      revocation repaint inside an owner-commit callback must not reach a
+  //      Host projection read.
+  // Reading only the composition surface made a second reader in an unlisted
+  // module invisible. The HostCommand quick fence was removed;
+  // `SessionRuntime.withWriter` remains the sole writer-admission authority —
+  // neither reader grants or refuses a WRITE.
   const readers = productionSources()
     .flatMap(({ rel, source }) => Array.from(source.matchAll(/ownership\.gate\.busy/g), () => rel))
-  assert.deepEqual(readers, ['src/app/bootstrap.ts'],
-    'the gate may be read only by the attachment-intake UX fence (in src/app/bootstrap.ts)')
+  assert.deepEqual(readers, ['src/app/bootstrap.ts', 'src/app/bootstrap.ts'],
+    'the transition gate may be read only by the two sanctioned fences in src/app/bootstrap.ts')
+  const bootstrap = readFileSync(new URL('../../src/app/bootstrap.ts', import.meta.url), 'utf8')
+  assert.ok(bootstrap.includes('pending: () => ownership.gate.busy,'),
+    'the attachment-intake UX fence keeps its gate read')
+  assert.ok(bootstrap.includes('canStartRead: () => !ownership.gate.busy,'),
+    'the F8 policy read-admission fence is the only OTHER gate read')
   assert.equal(runtime.includes('isTransitionBusy'), false,
     'app/submission must not read the transition gate')
   const command = runtime.slice(
@@ -726,7 +914,6 @@ test('the HostCommand path maps a frozen transition to the proven-refusal settle
     isScopeCurrent: () => true,
     refuseByTransitionFence: () => { calls.push('fence') },
     lateAttachmentRefusal: () => undefined,
-    commandSubmitAttachments: () => [],
     isTuiOwnedCommand: () => false,
     commandPlaneOwnsLine: () => false,
     submittedHostClaim: () => undefined,
@@ -759,6 +946,7 @@ test('the HostCommand path maps a frozen transition to the proven-refusal settle
     wasAdvertisedAtSubmit: true,
     parsedName: 'compact',
     submitTurn: { wait: Promise.resolve(), release: () => {} },
+    preparedCommandAttachments: { segments: [] },
   })
   await flush()
   await flush()
@@ -830,16 +1018,19 @@ test('a session/writer-held steer rejection is settled by the submission owner',
   deliverBusy(deps as unknown as SteerSubmissionDeps, { text: 'held draft' })
   assert.equal(await drainUntil(() => calls.some(call => call.startsWith('ack:'))), true,
     'the steer gesture must settle its ack')
-  assert.ok(calls.includes('merge:held draft'),
-    'the submission owner restores the draft')
+  // PR2/F3: the owner-aware restore is the ONE restore seam — the runtime asks
+  // it (which merges when no hold owns the editor) and never ALSO merges.
+  assert.deepEqual(calls.filter(call => call.startsWith('restore:')), ['restore:held draft'],
+    'the submission owner restores the draft exactly once')
+  assert.equal(calls.some(call => call.startsWith('merge:')), false,
+    'the helper never merges behind the owner (no double restore)')
   assert.ok(calls.some(call => call.includes(SESSION_WRITER_HELD_GUIDANCE)),
     'the writer-held guidance is surfaced')
   assert.ok(calls.some(call => call.startsWith('ack:steer rejected: session/writer-held')),
     'the owner reads the rejection code')
   assert.ok(calls.every(call => !call.includes('try again')),
     'a proven refusal never tells the user to try again')
-  assert.deepEqual(calls.filter(call => call.startsWith('restore:')), [],
-    'the helper never restores behind the owner (no double restore)')
+
 })
 
 test('a steer gone stale across a REPLACED owner does not reseed a switch-dropping renderer', async () => {
@@ -1103,7 +1294,6 @@ test('a command settlement whose subject was REPLACED performs cleanup only, nev
     isScopeCurrent: () => scopeCurrent,
     refuseByTransitionFence: () => { calls.push('fence') },
     lateAttachmentRefusal: () => undefined,
-    commandSubmitAttachments: () => [],
     isTuiOwnedCommand: () => false,
     commandPlaneOwnsLine: () => false,
     submittedHostClaim: () => undefined,
@@ -1144,6 +1334,7 @@ test('a command settlement whose subject was REPLACED performs cleanup only, nev
     wasAdvertisedAtSubmit: true,
     parsedName: 'export',
     submitTurn: { wait: Promise.resolve(), release: () => { released = true; calls.push('turnRelease') } },
+    preparedCommandAttachments: { segments: [] },
   })
   await drainUntil(() => calls.includes('fallbackPin'))
   assert.equal(released, true, 'the submit turn is ALWAYS released (leak prevention)')
@@ -1175,7 +1366,6 @@ test('positive control: a current-scope settlement performs the normal visible b
     isScopeCurrent: () => true,
     refuseByTransitionFence: () => { calls.push('fence') },
     lateAttachmentRefusal: () => undefined,
-    commandSubmitAttachments: () => [],
     isTuiOwnedCommand: () => false,
     commandPlaneOwnsLine: () => false,
     submittedHostClaim: () => undefined,
@@ -1209,10 +1399,35 @@ test('positive control: a current-scope settlement performs the normal visible b
     wasAdvertisedAtSubmit: true,
     parsedName: 'export',
     submitTurn: { wait: Promise.resolve(), release: () => {} },
+    preparedCommandAttachments: { segments: [] },
   })
   await drainUntil(() => calls.includes('artifactSave'))
   assert.ok(calls.includes('artifactSave'), 'a current-scope /export success starts the artifact save')
   assert.ok(calls.includes('settleLocal') && calls.some(call => call.startsWith('ack:')),
     'a current-scope settlement settles its rows normally')
   assert.ok(calls.includes('consume'), 'a current-scope success consumes the draft attachments')
+})
+
+test('R6-1A: a stale exit behind ANOTHER attempt’s hold goes through the stale-policy authority', async () => {
+  const calls: string[] = []
+  const staleSubject = { owner: 'owner-a' }
+  const { surface } = recordingSurface({
+    isDisposed: () => false,
+    // The captured scope died BEFORE the write, while a DIFFERENT attempt owns
+    // the composer hold.
+    isScopeCurrent: () => false,
+    prepareMessage: async () => undefined,
+    composerHoldActive: () => true,
+    ownsComposerHold: () => false,
+    restoreSubmissionDraft: (_text, owner) => { calls.push(`plain:${String(owner)}`) },
+    restoreStaleDraftIntoEditor: (text, subject, owner) => {
+      calls.push(`stale:${text}:${JSON.stringify(subject)}:${String(owner)}`)
+      return 'merged-verbatim'
+    },
+  })
+  const runtime = bindSubmissionRuntime({ surface })
+  await runtime.submitPrompt({ ...SUBMISSION, staleSubject: staleSubject as never })
+  assert.deepEqual(calls, [
+    `stale:hello:${JSON.stringify(staleSubject)}:request-1`,
+  ], 'the foreign-hold stale exit carries the ORIGINATING subject and request through the stale policy — never the plain restore')
 })

@@ -128,6 +128,7 @@ export const RESERVED_HOST_KEYS: readonly NormalizedKey[] = [
   { key: 'tab', ctrl: false, alt: false, shift: true, super: false },   // Shift+Tab permission cycle
   { key: 'up', ctrl: false, alt: true, shift: false, super: false },    // Alt+Up recall-all
   { key: 't', ctrl: false, alt: true, shift: false, super: false },     // Alt+T thinking detail toggle
+  { key: 'i', ctrl: false, alt: true, shift: false, super: false },     // Alt+I queue manager
   { key: 'k', ctrl: false, alt: true, shift: false, super: false },     // Alt+K dismiss settled local shell cards
   { key: 'end', ctrl: true, alt: false, shift: false, super: false },    // Ctrl+End jump latest
 ]

@@ -32,6 +32,15 @@ import { parseCommand } from '@deepseek-ai/dsh-commands'
 export const SESSIONLESS_COMMANDS = new Set([
   'display', 'exit', 'focus', 'footer', 'settings', 'help', 'attach', 'image', 'login', 'logout', 'model', 'reload',
   'sessions', 'resume', 'search', 'new', 'fork', 'rewind', 'preset', 'keybindings', 'plugins',
+  // `/web` (M5-W PR-C) controls the Split Host's official Web frontend from the
+  // Client. It must answer before any Session exists (the Web frontend is a
+  // Host feature, not a conversation), so a first-boot `/web` never creates a
+  // Session and never submits a prompt.
+  'web',
+  // `/acp` (PO-5E) is the SAME kind of Split-Client quick control for the local
+  // ACP v1 listener: it must answer before any Session exists and never creates
+  // one just to toggle a Host feature.
+  'acp',
   // `/quit` is `/exit`'s canonical command alias (the runner registers
   // /exit → /quit); before a session exists both must exit WITHOUT creating
   // one — the alias must not silently drift out of the sessionless set
@@ -57,6 +66,47 @@ export const SESSIONLESS_COMMANDS = new Set([
   // installed build — it never needs a Session and must not create one on a
   // first-boot invocation (a sessionless split Client is a legal reload).
   'reload-client',
+  // `/schedule` (S5-PR4) opens the Host-wide Schedule manager. It must answer
+  // before any Session exists: managing Host tasks never creates or opens one.
+  'schedule',
+  // `/queue` (PR-Q) opens the per-occurrence pending-input manager. It must
+  // answer before any Session exists (the panel then states the empty state)
+  // and never creates a Session just to show it.
+  'queue',
+])
+
+/**
+ * Sessionless commands that are IMMEDIATE controls: they do not depend on the
+ * Session identity a pending navigation will publish.
+ *
+ * - `/exit` / `/quit`: the user's quit must not wait for a navigation; a
+ *   stuck Workspace pre-selection would otherwise hang the slash exit.
+ * - `/reload-client`: its safety decision reads the live facts synchronously
+ *   and must be made at request time. Deferring it past the transition would
+ *   re-judge the request after `pending` cleared and reload a Client the
+ *   in-flight-transition policy was refusing.
+ *
+ * The submission transition fence must never defer these behind an unsettled
+ * navigation (it would change the control's decision point).
+ */
+export const IMMEDIATE_SESSIONLESS_COMMANDS = new Set(['exit', 'quit', 'reload-client'])
+
+/**
+ * Session-navigation entries whose SESSIONLESS local route is their OWN
+ * admission: `/new`'s single-flight marker, the session-browser picker
+ * (`/sessions`, `/resume`, `/search`) and the `/fork`/`/rewind` entries.
+ *
+ * The submission transition fence defers a sessionless-capable command until a
+ * pending Session transition settles, so the route decision sees the settled
+ * surface. These names are the navigation authority themselves and must run
+ * IMMEDIATELY: their own guard answers the pending transition (a deferred
+ * `/new` would no longer be the documented "already starting" refusal — it
+ * would create a SECOND Session after the first settled), and their
+ * sessionless effects (a picker, an explicit refusal) are visible without a
+ * command card.
+ */
+export const SESSION_NAVIGATION_COMMANDS = new Set([
+  'new', 'sessions', 'resume', 'search', 'fork', 'rewind',
 ])
 
 /**
@@ -87,6 +137,13 @@ export const LOCAL_COMMANDS = new Set([
   'model', 'new', 'preset', 'plugins', 'quit', 'reload', 'rename', 'resume', 'rewind',
   'search', 'sessions', 'settings', 'skill', 'status', 'subagents', 'tasks',
   'title', 'transcript', 'yolo',
+  // `/web` (M5-W PR-C) is a Client-local control entry: it is reserved for this
+  // surface (no plugin may shadow it) and it is never a Host/model line.
+  'web',
+  // `/acp` (PO-5E) is the same Client-local control entry for the local ACP
+  // listener. It performs an explicit Host mutation, so it is NOT in
+  // READ_ONLY_LOCAL_COMMANDS.
+  'acp',
   // Image UX PR2: `/view-image` is a Client-local transcript presentation
   // command (mounted window → PiTui picker/Viewer), never a Host/model line.
   'view-image',
@@ -101,6 +158,15 @@ export const LOCAL_COMMANDS = new Set([
   // reserved local name (plugins can never shadow it) and is NOT the
   // catalog/settings `/reload`, which keeps its own unchanged semantics.
   'reload-client',
+  // `/schedule` (S5-PR4) is a reserved local name: it opens the Client's ONE
+  // Schedule workspace and is never a Host/model line. Its panel performs
+  // Host writes only through the controller's owned, confirmed operations.
+  'schedule',
+  // `/queue` (PR-Q) is a reserved local name: it opens the Client's ONE
+  // per-occurrence pending-input manager. Its panel performs the official
+  // queue edit/remove only through the controller's confirmed operations;
+  // the command itself never writes.
+  'queue',
 ])
 
 /**
@@ -352,6 +418,67 @@ export function shouldConsumeAdvertisedMiss(
  */
 export function isPlainExitPrompt(text: string): boolean {
   return text.trim() === 'exit'
+}
+
+/** The backend whose live authority classifies one exit intent. */
+export type ExitBackendKind = 'direct' | 'daemon'
+
+/**
+ * The exact current Session's authoritative activity for the exit decision:
+ * `working` is proven work, `idle` a proven no-work state, and `unknown` any
+ * state the live authority cannot prove (a missing Remote `running` bit, a
+ * rolled Connection/binding, a live owner without an observable agent).
+ * Unknown never degrades to idle.
+ */
+export type ExitSessionActivity = 'working' | 'idle' | 'unknown'
+
+/** The user entry that raised one exit intent (provenance only — never a
+ *  relaxation of the safety classification). */
+export type ExitIntentEntry = 'slash' | 'plain' | 'keyboard'
+
+/**
+ * The one classified outcome of an exit intent. `direct-exit` leaves the
+ * Direct process through the existing exit controller; `client-detach` leaves
+ * the daemon Client while the Host keeps running; the `show-*-choice` outcomes
+ * need one Client-local choice before anything is committed.
+ */
+export type ExitIntentDecision =
+  | 'direct-exit'
+  | 'client-detach'
+  | 'show-daemon-choice'
+  | 'show-direct-choice'
+  | 'show-unknown-choice'
+
+/** The frozen classifier input (no host/renderer object ever enters here). */
+export interface ExitIntentInput {
+  readonly currentBackend: ExitBackendKind
+  /** `none` only when no Session exists AND no submission admission is open. */
+  readonly sessionPresence: 'none' | 'live'
+  readonly activity: ExitSessionActivity
+  readonly entry: ExitIntentEntry
+}
+
+/**
+ * Classify one exit intent against the live authority facts. This is the ONE
+ * exit classifier: Direct and daemon branches differ only in the final
+ * destination, and an unknown activity is NEVER treated as idle (a daemon
+ * Client must not detach as if nothing were running, and a Direct process
+ * must not claim the in-process Host has nothing to retire).
+ * @param input - the captured backend/presence/activity/entry facts.
+ * @returns the single decision the exit-intent coordinator executes.
+ */
+export function classifyExitIntent(input: ExitIntentInput): ExitIntentDecision {
+  // A sessionless surface cannot be "working". A caller that reports any other
+  // activity with no live Session is internally inconsistent: fail safe.
+  if (input.sessionPresence === 'none') {
+    if (input.activity !== 'idle') return 'show-unknown-choice'
+    return input.currentBackend === 'direct' ? 'direct-exit' : 'client-detach'
+  }
+  if (input.activity === 'unknown') return 'show-unknown-choice'
+  if (input.activity === 'working') {
+    return input.currentBackend === 'direct' ? 'show-direct-choice' : 'show-daemon-choice'
+  }
+  return input.currentBackend === 'direct' ? 'direct-exit' : 'client-detach'
 }
 
 /**

@@ -683,7 +683,7 @@ async function paintZellijRaster(
   throw new Error('timed out waiting for the Zellij SIXEL raster')
 }
 
-test('ZA01: a matching Kitty OK first locks kitty even when DA1 attr4 arrives later', (t) => {
+test('a matching Kitty OK first locks kitty even when DA1 attr4 arrives later', (t) => {
   setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
   const h = negotiatedFactory(t, createFakeZellijCli(t))
   h.graphics.terminal.start(() => {}, () => {})
@@ -701,7 +701,7 @@ test('ZA01: a matching Kitty OK first locks kitty even when DA1 attr4 arrives la
   assert.equal(h.terminal.text.includes('\x1bP0;1;q'), false, 'zero SIXEL DCS')
 })
 
-test('ZA02: DA1 attr4 first cannot outrun a later Kitty OK inside 500 ms', (t) => {
+test('attr4 first cannot outrun a later Kitty OK inside 500 ms', (t) => {
   const h = negotiatedFactory(t, createFakeZellijCli(t))
   h.graphics.terminal.start(() => {}, () => {})
   h.terminal.declareSixel(true)
@@ -713,7 +713,7 @@ test('ZA02: DA1 attr4 first cannot outrun a later Kitty OK inside 500 ms', (t) =
   assert.equal(h.terminal.text.includes('\x1bP0;1;q'), false)
 })
 
-test('ZA03: Kitty denied + DA1 attr4 + eligible version selects SIXEL, text until the owner has facts', async (t) => {
+test('Kitty denied + DA1 attr4 + eligible version selects SIXEL, text until the owner has facts', async (t) => {
   const h = negotiatedFactory(t, createFakeZellijCli(t))
   h.graphics.terminal.start(() => {}, () => {})
   h.terminal.declareSixel(true)
@@ -735,7 +735,7 @@ test('ZA03: Kitty denied + DA1 attr4 + eligible version selects SIXEL, text unti
   assert.ok(h.sixelSettled() >= 1, 'the product SIXEL settle seam was notified')
 })
 
-test('ZA04: Kitty denied + DA1 without attr4 locks text and rejects inherited host hints', (t) => {
+test('Kitty denied + DA1 without attr4 locks text and rejects inherited host hints', (t) => {
   setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
   const h = negotiatedFactory(t, createFakeZellijCli(t), { TERM_PROGRAM: 'ghostty', GHOSTTY_RESOURCES_DIR: '/ghostty' })
   h.graphics.terminal.start(() => {}, () => {})
@@ -749,7 +749,7 @@ test('ZA04: Kitty denied + DA1 without attr4 locks text and rejects inherited ho
   assert.equal(h.terminal.text.includes('\x1bP0;1;q'), false)
 })
 
-test('ZA05: no DA1 within 800 ms locks text permanently; a late true never upgrades', async (t) => {
+test('no DA1 within 800 ms locks text permanently; a late true never upgrades', async (t) => {
   const h = negotiatedFactory(t, createFakeZellijCli(t))
   h.graphics.terminal.start(() => {}, () => {})
   h.terminal.sendInput(probeReply(h.terminal, 'ENOTSUPPORTED:disabled'))
@@ -761,7 +761,7 @@ test('ZA05: no DA1 within 800 ms locks text permanently; a late true never upgra
   assert.equal(h.graphics.canPaint(), false)
 })
 
-test('ZA06: ineligible, missing, malformed or timed-out Zellij versions never select SIXEL', async (t) => {
+test('ineligible, missing, malformed or timed-out Zellij versions never select SIXEL', async (t) => {
   const cases: ReadonlyArray<{ name: string; version?: string; delayMs?: number; path?: string }> = [
     { name: '0.44.9', version: 'zellij 0.44.9\n' },
     { name: 'malformed', version: 'zellij 0.45.x\n' },
@@ -805,7 +805,7 @@ test('zellijVersionEligible strictly parses the local program version', (t) => {
 })
 
 
-test('ZA06b: a synchronous Kitty rejection during start still sees the version gate once it arrives', async (t) => {
+test('a synchronous Kitty rejection during start still sees the version gate once it arrives', async (t) => {
   class SyncRejectTerminal extends RecordingTerminal {
     override write(data: string): void {
       super.write(data)
@@ -833,7 +833,7 @@ test('ZA06b: a synchronous Kitty rejection during start still sees the version g
   graphics.dispose()
 })
 
-test('ZA07: topology and explicit-protocol gates stay exactly as before', (t) => {
+test('topology and explicit-protocol gates stay exactly as before', (t) => {
   const cli = createFakeZellijCli(t)
   const base = zellijSixelEnvironment(cli)
   const gates: ReadonlyArray<readonly [string, NodeJS.ProcessEnv]> = [
@@ -877,7 +877,7 @@ test('ZA07: topology and explicit-protocol gates stay exactly as before', (t) =>
   assert.equal((explicitSixelNoDa1.terminal.text.match(/a=q,/g) ?? []).length, 0)
 })
 
-test('ZA08: after Kitty is locked, every late DA1 and duplicate probe reply is inert', (t) => {
+test('after Kitty is locked, every late DA1 and duplicate probe reply is inert', (t) => {
   const h = negotiatedFactory(t, createFakeZellijCli(t))
   h.graphics.terminal.start(() => {}, () => {})
   h.terminal.sendInput(probeReply(h.terminal))
@@ -889,7 +889,7 @@ test('ZA08: after Kitty is locked, every late DA1 and duplicate probe reply is i
   assert.equal(h.terminal.text.includes('\x1bP0;1;q'), false)
 })
 
-test('ZA09: a later complete DA1 false permanently revokes a selected SIXEL surface', async (t) => {
+test('a later complete DA1 false permanently revokes a selected SIXEL surface', async (t) => {
   const h = negotiatedFactory(t, createFakeZellijCli(t))
   h.graphics.terminal.start(() => {}, () => {})
   h.terminal.declareSixel(true)
@@ -915,7 +915,7 @@ test('ZA09: a later complete DA1 false permanently revokes a selected SIXEL surf
 })
 
 
-test('ZA09b: a real Screen stop -> start re-verifies an already selected SIXEL pane once', async (t) => {
+test('a real Screen stop -> start re-verifies an already selected SIXEL pane once', async (t) => {
   const h = negotiatedFactory(t, createFakeZellijCli(t))
   h.graphics.terminal.start(() => {}, () => {})
   h.terminal.declareSixel(true)
@@ -932,7 +932,7 @@ test('ZA09b: a real Screen stop -> start re-verifies an already selected SIXEL p
 })
 
 
-test('ZA09c: a negative re-query reply is consumed before the editor and revokes SIXEL', async (t) => {
+test('a negative re-query reply is consumed before the editor and revokes SIXEL', async (t) => {
   const h = negotiatedFactory(t, createFakeZellijCli(t))
   const input: string[] = []
   h.graphics.terminal.start(data => input.push(data), () => {})
@@ -948,7 +948,7 @@ test('ZA09c: a negative re-query reply is consumed before the editor and revokes
   assert.deepEqual(input, [], 'the re-query DA1 reply never reaches the editor')
 })
 
-test('ZA10: dispose during the timers/write path leaves no late promotion or render callback', async (t) => {
+test('dispose during the timers/write path leaves no late promotion or render callback', async (t) => {
   const cli = createFakeZellijCli(t)
   const h = negotiatedFactory(t, cli)
   h.graphics.terminal.start(() => {}, () => {})
@@ -963,7 +963,7 @@ test('ZA10: dispose during the timers/write path leaves no late promotion or ren
   assert.equal(h.terminal.text.includes('\x1bP0;1;q'), false)
 })
 
-test('ZA11: thirty text renders run the version gate once and never re-probe', async (t) => {
+test('thirty text renders run the version gate once and never re-probe', async (t) => {
   const cli = createFakeZellijCli(t)
   const h = negotiatedFactory(t, cli)
   h.graphics.terminal.start(() => {}, () => {})
@@ -980,7 +980,7 @@ test('ZA11: thirty text renders run the version gate once and never re-probe', a
   assert.equal((h.terminal.text.match(/a=q,/g) ?? []).length, 1, 'one initial Kitty probe')
 })
 
-test('ZA12: the old Kitty factory and Direct SIXEL gates keep their exact behavior', (t) => {
+test('the old Kitty factory and Direct SIXEL gates keep their exact behavior', (t) => {
   const cli = createFakeZellijCli(t)
   const environment = zellijSixelEnvironment(cli)
   const old = createZellijKittyGraphics(new RecordingTerminal(), {}, environment, () => {})

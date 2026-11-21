@@ -7,8 +7,8 @@
  * enabled/read-only/removable/availability/official/source/installTarget facts
  * are rendered exactly as the port delivers them. The ONLY local policies are
  * the Current-TUI surface-safety layer (which NARROWS effective actions) and
- * the version-limited rc.2 presentation identity lists (which SELECT a section,
- * never create a card or fabricate catalog facts).
+ * the version-limited legacy presentation identity lists (which SELECT a
+ * section, never create a card or fabricate catalog facts).
  *
  * @module @xmoon76/dsh-pi-tui/app/plugin-manager/model
  */
@@ -25,6 +25,7 @@ import type {
   PluginReadOnlyReason,
   PluginRegistriesFact,
   PluginRowFact,
+  PluginVersionFact,
 } from '../../runtime/plugin-manager-port.ts'
 import {
   EXPERIMENTAL_BUNDLE_IDS,
@@ -37,6 +38,8 @@ import {
   type PluginPresentationSection,
 } from './classify.ts'
 import type { TuiExtensionFacts } from './classify.ts'
+import { classifyCurrentClientPluginStatus, type CurrentClientPluginFact } from './extension-inventory.ts'
+import type { ClientExtensionObservation } from '../client-extensions/mount-owner.ts'
 
 /** One declared/live plugin row of a package card. */
 export interface PluginRowView {
@@ -75,17 +78,15 @@ interface ExperimentalBundleSupport {
 }
 
 /**
- * The FROZEN rc.2 product-support copy (§3). This is bounded presentation
- * evidence for the exact package identities, NOT Host capability state: it
- * never reads enablement/fiber/availability and never claims a live Host PASS.
- * It is deliberately module-private — no runtime qualification store is built
- * from it (the live ledger stays in `docs/architecture/host-client.md`).
+ * The FROZEN official product-support copy (§3) — the historical rc.2 Bxx set
+ * plus the rc.3 `@deepseek-ai/dsh-deepseek-chat-import` Web-only member. This is
+ * bounded presentation evidence for the exact package identities, NOT Host
+ * capability state: it never reads enablement/fiber/availability and never
+ * claims a live Host PASS. It is deliberately module-private — no runtime
+ * qualification store is built from it (the live ledger stays in
+ * `docs/architecture/host-client.md`).
  */
 const EXPERIMENTAL_BUNDLE_SUPPORT: Readonly<Record<string, ExperimentalBundleSupport>> = Object.freeze({
-  '@deepseek-ai/dsh-experimental-agent-team-profile': {
-    surface: 'Host Team tools; child and task activity use existing Tool/Activity views.',
-    limit: 'No native Team roster or task board. Global delegation tools differ from preset-local tools.',
-  },
   '@deepseek-ai/dsh-experimental-voice-input-bundle': {
     surface: 'Speech services are Host-side; browser microphone UI is not available in PiTui.',
     limit: 'Local model preparation or API credentials may be required; no TUI recording/transcription flow.',
@@ -143,6 +144,31 @@ const EXPERIMENTAL_BUNDLE_SUPPORT: Readonly<Record<string, ExperimentalBundleSup
     limit: 'One-shot only; no Continue/Resume in PiTui. Qualified with a DeepSeek Anthropic-compatible endpoint; native Anthropic accounts and other platforms remain unverified. A system CLI is not a substitute.',
     risk: true,
   },
+  '@deepseek-ai/dsh-personalized-recommendations': {
+    surface: 'Upstream Action Cards and creation/plugin recommendations are an opt-in Host/Web consumption surface; this TUI has no native Action Card interaction.',
+    limit: 'Web recommendations are not TUI cards. No plugin is installed and no recommendation action runs from here; a model or plugin suggestion is not a completed action.',
+    risk: true,
+  },
+  '@deepseek-ai/dsh-experimental-liveshare': {
+    surface: 'A separate Host Session share/Relay/Web consumption surface; this TUI has no native share controller.',
+    limit: 'Relay, owner identity/credentials, view vs bounded write, attachments and fork permissions apply. Sharing is never started by default, no public URL is copied and credentials are never painted.',
+    risk: true,
+  },
+  '@deepseek-ai/dsh-experimental-forge-bundle': {
+    surface: 'Host Git/worktree/change-request capability with an optional Web Forge panel; this TUI has no native Forge panel.',
+    limit: 'Requires a Git repository; GitHub authorization/writes and worktree/Session ownership are external. Only provable state is shown; no TUI approval flow is promised.',
+    risk: true,
+  },
+  '@deepseek-ai/dsh-deepseek-chat-import': {
+    surface: 'Official optional Host bundle; DeepSeek chat export import is available through the Web UI, not as a PiTui import action.',
+    limit: 'Owner-only Web upload of a DeepSeek export ZIP can create persistent Sessions in a selected Workspace. The Host buffers up to 512 MiB per upload by default; importing again creates duplicates. PiTui cannot upload, inspect or cancel that import. Imported Sessions remain after the bundle is disabled.',
+    risk: true,
+  },
+  '@deepseek-ai/dsh-cua-bundle': {
+    surface: 'Opt-in CUA/PTC/native control on a supported macOS Host with system consent; the TUI only offers bundle management state and errors.',
+    limit: 'darwin-only platform, a native helper, Accessibility and Screen Recording permissions, Consent, and relative coordinates 0..999 apply. Never presented as usable on an unsupported Host.',
+    risk: true,
+  },
 })
 
 /** One package card: a bundle, or a standalone managed plugin entry. */
@@ -154,7 +180,7 @@ export interface PluginCardView {
   readonly role: PluginPresentationRole
   readonly section: PluginPresentationSection
   readonly origin: PluginOrigin
-  /** One of the 14 rc.2 Experimental identities. */
+  /** One of the release's official Experimental identities. */
   readonly experimental: boolean
   /** `Third-party → Unverified origin`: provenance could not be proven. */
   readonly unverified: boolean
@@ -166,6 +192,17 @@ export interface PluginCardView {
   readonly official: boolean
   readonly availability: PluginAvailability
   readonly installTarget?: PluginInstallTargetFact
+  /** Host `BundleInfo.listedByDefault`; absent = the Host declares no default
+   *  listing decision. Only a default-list projection may hide such a card. */
+  readonly listedByDefault?: boolean
+  /** Host `BundleInfo.update`: how the Host can update the bundle at all
+   *  (`registry` or `git`), absent when it cannot. Presentation fact only. */
+  readonly update?: 'registry' | 'git'
+  /** REGISTRY-ONLY executable UI capability, derived from
+   *  `BundleInfo.update === 'registry'`: only that mode licenses the
+   *  `Check updates…` action and its Host listVersions/updateBundle calls.
+   *  A standalone entry is never a Host bundle, so it is always `false`. */
+  readonly updatable: boolean
   /** Host profile-owned dependency spec (user information already stripped). */
   readonly source?: string
   readonly enabled: boolean
@@ -256,10 +293,14 @@ export function entryValue(entryId: string): string {
   return `entry:${entryId}`
 }
 
+/** The one official Computer Use bundle whose card owns the Settings deep link. */
+const CUA_BUNDLE_NAME = '@deepseek-ai/dsh-cua-bundle'
+
 /** The action values the workspace maps to controller operations. */
 export const PLUGIN_ACTION = {
   install: 'action:install',
   officialInstall: 'action:official-install',
+  checkUpdates: 'plugin:check-updates',
   refresh: 'action:refresh',
   close: 'action:close',
   toggle: 'action:toggle',
@@ -270,6 +311,7 @@ export const PLUGIN_ACTION = {
   approveBuilds: 'action:approve-builds',
   reconcileInstall: 'action:reconcile-install',
   hideInstall: 'action:hide-install',
+  manageComputerUse: 'action:manage-computer-use',
 } as const
 
 /** The row-level toggle value for one addressable plugin entry id. */
@@ -301,9 +343,15 @@ export function availabilityLabel(availability: PluginAvailability): string {
   }
 }
 
+/** The plain-language reading of the official `unsupported-platform` code. It
+ *  describes the Host refusal only; it never claims the bundle is installed,
+ *  enabled or runnable. */
+const UNSUPPORTED_PLATFORM_EXPLANATION = 'This bundle cannot be enabled on the DSH Host platform.'
+
 /** Render one Host error fact as an actionable line. */
 export function errorText(error: PluginErrorFact): string {
   const parts = [error.code]
+  if (error.code === 'unsupported-platform') parts.push(UNSUPPORTED_PLATFORM_EXPLANATION)
   if (error.diagnostic !== undefined && error.diagnostic !== '') parts.push(error.diagnostic)
   for (const entry of error.incompatible ?? []) parts.push(incompatibleText(entry))
   return parts.join(' — ')
@@ -345,10 +393,58 @@ export function cardStatusTone(card: PluginCardView): 'muted' | 'warning' | 'err
   return 'muted'
 }
 
-function cardStatusFacts(card: PluginCardView): PluginDetailFact[] {
+/** The independent Host vs CURRENT Client status facts of one bundle. The Host
+ *  facts here are the same official snapshot the rest of the Detail renders;
+ *  the Client fact comes from THIS Client's live Loader observations only. */
+function clientStatusFacts(
+  card: PluginCardView,
+  observations: readonly ClientExtensionObservation[] | undefined,
+): PluginDetailFact[] {
+  // No CURRENT Client observation source in this composition: do not invent a
+  // Client section by treating "not readable" as "not opted in".
+  if (card.target !== 'bundle' || observations === undefined) return []
+  const client: CurrentClientPluginFact = classifyCurrentClientPluginStatus(
+    card.name,
+    card.installed,
+    card.enabled,
+    observations,
+  )
+  const tone = client.status === 'ACTIVE'
+    ? 'success' as const
+    : client.status === 'ERROR'
+      ? 'error' as const
+      : client.status === 'PENDING' || client.status === 'RELOAD_REQUIRED' || client.status === 'UNAVAILABLE'
+        ? 'warning' as const
+        : 'dim' as const
   const facts: PluginDetailFact[] = [
+    {
+      label: 'Host package',
+      value: card.installed ? 'Installed' : 'Not installed',
+      tone: card.installed ? 'normal' : 'dim',
+    },
+    {
+      label: 'Host profile',
+      value: card.enabled ? 'Selected' : 'Not selected',
+      tone: card.enabled ? 'normal' : 'dim',
+    },
+    { label: 'This Client ./tui', value: client.label, tone },
+  ]
+  if (client.reason !== undefined) facts.push({ label: 'Client reason', value: client.reason, tone: 'dim' })
+  return facts
+}
+
+function cardStatusFacts(card: PluginCardView): PluginDetailFact[] {  const facts: PluginDetailFact[] = [
     { label: 'Installed', value: card.installed ? 'Yes' : 'No', tone: card.installed ? 'normal' : 'dim' },
-    { label: 'Enabled', value: card.enabled ? 'Yes' : 'No', tone: card.enabled ? 'normal' : 'dim' },
+    // The SAME Host `enabled` boolean means different things per target: a
+    // bundle's flag is the profile SELECTION (never proof that the layer
+    // loaded or runs), while a standalone Loader entry's flag is its effective
+    // enablement (including disabled ancestor groups). `Fiber` below stays the
+    // separate runtime fact in both cases.
+    {
+      label: card.target === 'bundle' ? 'Selected in profile' : 'Effective enabled',
+      value: card.enabled ? 'Yes' : 'No',
+      tone: card.enabled ? 'normal' : 'dim',
+    },
     { label: 'Availability', value: availabilityLabel(card.availability), tone: card.availability === 'missing' ? 'warning' : 'dim' },
     { label: 'Origin', value: originLabel(card.origin), tone: card.origin === 'unknown' ? 'warning' : 'dim' },
   ]
@@ -402,10 +498,33 @@ function upgradeGuidance(card: PluginCardView): PluginDetailFact | undefined {
     const removal = card.canRemove
       ? ''
       : ' Removal is not permitted from this profile; do not reinstall over it here.'
+    if (card.updatable) {
+      return {
+        label: 'Upgrade',
+        value: 'Host-supported registry updates are available through Check updates…; the Host checks the exact target again before changing the profile.',
+        tone: 'normal',
+      }
+    }
+    if (card.update === 'git') {
+      return {
+        label: 'Upgrade',
+        value: 'This bundle is managed from its Git source and is updated through that source. The Plugin Manager does not run registry updates for it.',
+        tone: 'normal',
+      }
+    }
     return {
       label: 'Upgrade',
       value: `Upgrade: Profile-owned. Remove the current bundle first, then explicitly install the desired package version. No in-place update.${removal}`,
       tone: 'normal',
+    }
+  }
+  if (card.installBlockedReason !== undefined && card.installTarget !== undefined) {
+    // An offered target the Host itself refuses (for example
+    // `unsupported-platform`) is not an install route the user can take.
+    return {
+      label: 'Upgrade',
+      value: `Install unavailable: ${card.installBlockedReason}`,
+      tone: 'warning',
     }
   }
   if (card.installTarget === undefined) {
@@ -454,6 +573,25 @@ function cardSourceFacts(card: PluginCardView): PluginDetailFact[] {
   }
   const guidance = upgradeGuidance(card)
   if (guidance !== undefined) facts.push(guidance)
+  if (card.target === 'bundle') {
+    // Both are Host declarations, not TUI capabilities: a hidden default
+    // listing never hides a selected/installed bundle, and `updatable` never
+    // creates an update action in this screen.
+    facts.push({
+      label: 'Default listing',
+      value: card.listedByDefault === undefined ? 'Host default' : card.listedByDefault ? 'Shown' : 'Hidden',
+      tone: card.listedByDefault === false ? 'warning' : 'dim',
+    })
+    facts.push({
+      label: 'Host update source',
+      value: card.update === 'registry'
+        ? 'registry'
+        : card.update === 'git'
+          ? 'git (updated through its Git source, not the Plugin Manager)'
+          : 'none',
+      tone: 'dim',
+    })
+  }
   return facts
 }
 
@@ -569,6 +707,27 @@ function cardWarningFacts(card: PluginCardView, exemptions: readonly PluginExemp
   return facts
 }
 
+/** Why one published version cannot replace the installed bundle, or undefined
+ *  when the TUI may select it. A missing bundle, a host-incompatible version,
+ *  or a deprecated version is not selectable; a legal prerelease is (the
+ *  confirmation view warns about it separately). */
+export function updateVersionBlocker(version: PluginVersionFact): string | undefined {
+  if (!version.bundle) return 'This version declares no bundle and cannot replace one.'
+  if (version.incompatible !== undefined) return incompatibleText(version.incompatible)
+  if (version.deprecated !== undefined) return `Deprecated: ${version.deprecated}`
+  return undefined
+}
+
+/** One published version the TUI may select as an update target. This is a
+ *  LOCAL narrowing of the Host list only (`bundle`/`incompatible`/`deprecated`);
+ *  it never answers whether the bundle itself may be updated (`Host
+ *  BundleInfo.update`) or whether the Host accepts the version (the Host
+ *  re-checks the exact target before changing anything). A legal prerelease
+ *  stays selectable: the user may explicitly choose it after its warning. */
+export function isSelectableUpdateVersion(version: PluginVersionFact): boolean {
+  return updateVersionBlocker(version) === undefined
+}
+
 function cardActions(card: PluginCardView): PluginDetailAction[] {
   const actions: PluginDetailAction[] = []
   if (card.isSelf) {
@@ -592,6 +751,12 @@ function cardActions(card: PluginCardView): PluginDetailAction[] {
         reason: card.installBlockedReason ?? 'No official install target is available',
         tone: 'warning',
       })
+    // A selected bundle whose files are missing/refused stays manageable: the
+    // user can always drop a selection the Host itself will not run. The Host
+    // write (never a local one) is what makes the profile selection false.
+    if (card.enabled && card.canToggle) {
+      actions.push({ value: PLUGIN_ACTION.toggle, label: 'Disable…', enabled: true, tone: 'normal' })
+    }
   } else {
     actions.push(card.canToggle
       ? {
@@ -607,6 +772,17 @@ function cardActions(card: PluginCardView): PluginDetailAction[] {
         reason: card.toggleBlockedReason ?? 'This bundle is read-only',
         tone: 'warning',
       })
+  }
+  // Only a Host registry-updatable third-party profile bundle exposes the
+  // official version-update entry. The Host re-checks the exact target before
+  // writing; a `git`-managed bundle never reaches this branch.
+  if (card.target === 'bundle' && card.updatable && !card.isSelf) {
+    actions.push({
+      value: PLUGIN_ACTION.checkUpdates,
+      label: 'Check updates…',
+      enabled: true,
+      tone: 'normal',
+    })
   }
   // Only a profile-owned, Host-removable bundle EVER shows Remove. A shipped
   // installation bundle, a missing catalog entry and a standalone Loader
@@ -627,6 +803,26 @@ function cardActions(card: PluginCardView): PluginDetailAction[] {
         tone: 'warning',
       })
   }
+  // PR-5/MAC-09 v2: the official Experimental Computer Use card's ONE bounded
+  // navigation into the same Settings→Tools page. It is a pure navigation
+  // intent: no permission read, no second store, and no action on any other
+  // card. A disabled action carries the Host's exact reason.
+  if (card.target === 'bundle' && card.name === CUA_BUNDLE_NAME) {
+    const reason = card.error !== undefined
+      ? errorText(card.error)
+      : card.availability === 'missing'
+        ? 'The Computer use bundle files are not installed.'
+        : card.enabled
+          ? undefined
+          : 'The Computer use bundle is not enabled in this profile.'
+    actions.push({
+      value: PLUGIN_ACTION.manageComputerUse,
+      label: 'Manage Computer Use…',
+      enabled: reason === undefined,
+      ...(reason === undefined ? {} : { reason }),
+      tone: reason === undefined ? 'normal' : 'warning',
+    })
+  }
   for (const row of card.rows) {
     if (!row.canToggle) continue
     actions.push({
@@ -646,9 +842,18 @@ function cardActions(card: PluginCardView): PluginDetailAction[] {
 export function buildPluginDetailView(
   card: PluginCardView,
   exemptions: readonly PluginExemptionFact[] = [],
+  liveClientObservations?: readonly ClientExtensionObservation[],
 ): PluginDetailView {
+  const clientFacts = clientStatusFacts(card, liveClientObservations)
+  // With a Client observation source the bundle Status group carries the
+  // explicit Host package/profile facts; the older short `Installed` /
+  // `Selected in profile` rows would state the same Host truth twice, so they
+  // are replaced only on that path. A standalone entry keeps the original rows.
+  const hostFacts = clientFacts.length === 0
+    ? cardStatusFacts(card)
+    : cardStatusFacts(card).filter(fact => fact.label !== 'Installed' && fact.label !== 'Selected in profile')
   const groups: PluginDetailGroup[] = [
-    { title: 'Status', facts: cardStatusFacts(card) },
+    { title: 'Status', facts: [...hostFacts, ...clientFacts] },
     { title: 'Source', facts: cardSourceFacts(card) },
   ]
   if (card.description !== undefined && card.description !== '') {
@@ -715,18 +920,29 @@ function bundleMutationBlocked(bundle: PluginBundleFact, isSelf: boolean): strin
   if (isSelf) return 'This bundle provides the Current TUI and cannot be changed from here.'
   if (bundle.readOnlyReason === 'management-required') return 'Required by DSH management; it cannot be changed here.'
   if (bundle.readOnlyReason === 'unaddressable') return 'Not addressable through the profile patch.'
+  // A CURRENT selection is always removable by the user: the Host itself
+  // permits clearing a selection it cannot run (an unsupported platform, a
+  // missing package or a failed load). Only ENABLE is refused below.
+  if (bundle.enabled) return undefined
+  if (bundle.error !== undefined) return errorText(bundle.error)
   if (bundle.availability === 'missing') {
     return bundle.installTarget === undefined
       ? 'The bundle is not installed and no official install target is available.'
       : 'The bundle is not installed; install it from its official catalog entry.'
   }
-  if (bundle.error !== undefined) return errorText(bundle.error)
   return undefined
 }
 
+/**
+ * Whether the Host would accept removing this profile-owned dependency. It is
+ * deliberately INDEPENDENT of `bundleMutationBlocked()`: an enable error (an
+ * unsupported platform, an incompatible version) must not lock the one
+ * recovery path the Host still offers.
+ */
 function bundleRemoveBlocked(bundle: PluginBundleFact, isSelf: boolean): string | undefined {
-  const mutation = bundleMutationBlocked(bundle, isSelf)
-  if (mutation !== undefined) return mutation
+  if (isSelf) return 'This bundle provides the Current TUI and cannot be changed from here.'
+  if (bundle.readOnlyReason === 'management-required') return 'Required by DSH management; it cannot be changed here.'
+  if (bundle.readOnlyReason === 'unaddressable') return 'Not addressable through the profile patch.'
   if (!bundle.removable) return 'Shipped with this DSH installation; it is not removable.'
   if (bundle.availability !== 'profile') return 'Only profile-owned bundles can be removed.'
   return undefined
@@ -776,14 +992,22 @@ export function buildPluginManagerModel(
     })
     const toggleBlocked = bundleMutationBlocked(bundle, isSelf)
     const removeBlocked = bundleRemoveBlocked(bundle, isSelf)
+    // The Host refused the platform itself: its official catalog Install is
+    // never an escape hatch, whatever `installTarget` the entry carries.
+    const platformBlocked = bundle.error?.code === 'unsupported-platform' ? errorText(bundle.error) : undefined
     const installBlocked = bundle.availability !== 'missing'
       ? 'Only a missing official catalog entry can be installed.'
       : isSelf
         ? 'This bundle provides the Current TUI and cannot be installed from here.'
-        : bundle.installTarget === undefined
-          ? 'No official install target is available for this entry.'
-          : undefined
-    const canInstall = bundle.availability === 'missing' && bundle.installTarget !== undefined && !isSelf
+        : platformBlocked !== undefined
+          ? platformBlocked
+          : bundle.installTarget === undefined
+            ? 'No official install target is available for this entry.'
+            : undefined
+    const canInstall = bundle.availability === 'missing'
+      && bundle.installTarget !== undefined
+      && !isSelf
+      && platformBlocked === undefined
     cards.push(Object.freeze({
       value,
       target: 'bundle' as const,
@@ -799,6 +1023,9 @@ export function buildPluginManagerModel(
       official: bundle.official,
       availability: bundle.availability,
       ...(bundle.installTarget === undefined ? {} : { installTarget: bundle.installTarget }),
+      ...(bundle.listedByDefault === undefined ? {} : { listedByDefault: bundle.listedByDefault }),
+      ...(bundle.update === undefined ? {} : { update: bundle.update }),
+      updatable: bundle.update === 'registry',
       ...(bundle.source === undefined ? {} : { source: bundle.source }),
       enabled: bundle.enabled,
       installed: bundle.installed,
@@ -851,6 +1078,7 @@ export function buildPluginManagerModel(
       ...(entry.description === undefined ? {} : { description: entry.description }),
       official: false,
       availability: 'profile' as const,
+      updatable: false,
       enabled: entry.enabled,
       installed: true,
       optional: false,
@@ -877,7 +1105,9 @@ export function buildPluginManagerModel(
   }
   for (const card of cards) grouped[card.section].push(card)
   // Current TUI is first inside its section; the rest keep the official Host
-  // catalog order. Experimental follows the frozen rc.2 B01–B14 order.
+  // catalog order. Experimental keeps the legacy B01–B14 presentation order
+  // first and appends every other official Experimental identity in the Host
+  // order (a stable sort leaves the unlisted ones untouched).
   grouped.tui.sort((left, right) => {
     if (left.isSelf !== right.isSelf) return left.isSelf ? -1 : 1
     return 0

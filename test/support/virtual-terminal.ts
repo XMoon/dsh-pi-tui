@@ -20,6 +20,9 @@ export class VirtualTerminal implements Terminal {
 	/** Test hook: every raw chunk written to the terminal, in order — the
 	 * FINAL terminal-bound bytes (framing, colors and payload alike). */
 	readonly writes: string[] = [];
+	/** U1 synchronous process-exit restoration; tests install a spy, while an
+	 * unset member keeps the runtime-capability semantics of the real sink. */
+	restoreOnExit?: (before: string, after: string) => void;
 
 	constructor(columns = 80, rows = 24) {
 		this._columns = columns;
@@ -184,8 +187,9 @@ export class VirtualTerminal implements Terminal {
 	}
 
 	/**
-	 * Whether one viewport cell carries the INVERSE attribute — the current
-	 * transcript-search occurrence highlight (the fork's `ESC[1;7m` style).
+	 * Whether one viewport cell carries the INVERSE attribute. Transcript search
+	 * no longer uses inverse for its highlight; the accessor stays available for
+	 * surfaces/tests that assert an inverse attribute of their own.
 	 */
 	getCellInverse(row: number, col: number): boolean {
 		const buffer = this.xterm.buffer.active;
@@ -206,8 +210,9 @@ export class VirtualTerminal implements Terminal {
 	}
 
 	/**
-	 * Whether one viewport cell carries the UNDERLINE attribute — the WEAK
-	 * transcript-search occurrence highlight (the fork's `ESC[4m` style).
+	 * Whether one viewport cell carries the UNDERLINE attribute. Transcript
+	 * search uses themed background blocks, not underline; the accessor stays
+	 * available for surfaces/tests that assert an underline of their own.
 	 */
 	getCellUnderline(row: number, col: number): boolean {
 		const buffer = this.xterm.buffer.active;
@@ -242,6 +247,54 @@ export class VirtualTerminal implements Terminal {
 		const cell = line.getCell(col);
 		if (cell === undefined || !cell.isBgRGB()) return undefined;
 		return cell.getBgColor();
+	}
+
+	/**
+	 * Get the painted character(s) of one viewport cell. A wide glyph owns its
+	 * lead cell; the environment's own width model is authoritative here, so
+	 * tests never have to assume the renderer's `visibleWidth` table and the
+	 * terminal's agree (an emoji bullet may occupy a different number of cells
+	 * than the string-width model reports).
+	 */
+	getCellText(row: number, col: number): string | undefined {
+		const buffer = this.xterm.buffer.active;
+		const line = buffer.getLine(buffer.viewportY + row);
+		return line?.getCell(col)?.getChars();
+	}
+
+	/**
+	 * Every contiguous run of viewport cells painted with one truecolor RGB
+	 * background, as `{ row, startCol, endCol, text }` in row/cell order. The
+	 * text is read from the terminal's OWN cells, so a test never has to assume
+	 * the renderer's `visibleWidth` table and the terminal's agree.
+	 */
+	getRgbBackgroundRuns(rgb: number): Array<{ row: number; startCol: number; endCol: number; text: string }> {
+		const buffer = this.xterm.buffer.active;
+		const runs: Array<{ row: number; startCol: number; endCol: number; text: string }> = [];
+		for (let row = 0; row < this._rows; row++) {
+			const line = buffer.getLine(buffer.viewportY + row);
+			if (line === undefined) continue;
+			let run: { row: number; startCol: number; endCol: number; text: string } | undefined;
+			for (let col = 0; col < this._columns; col++) {
+				const cell = line.getCell(col);
+				const painted = cell !== undefined && cell.isBgRGB() && cell.getBgColor() === rgb;
+				if (painted) {
+					const text = cell.getChars();
+					if (run === undefined) run = { row, startCol: col, endCol: col + 1, text };
+					else {
+						run.endCol = col + 1;
+						run.text += text;
+					}
+					continue;
+				}
+				if (run !== undefined) {
+					runs.push(run);
+					run = undefined;
+				}
+			}
+			if (run !== undefined) runs.push(run);
+		}
+		return runs;
 	}
 
 	/**

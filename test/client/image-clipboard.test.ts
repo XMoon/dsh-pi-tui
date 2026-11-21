@@ -8,7 +8,9 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { writeFileSync } from 'node:fs'
 import { clipboardBackendOf, commandOnPath, readClipboardImage, type ClipboardEnvironment, type RunCommand } from '../../src/client/clipboard/read.ts'
+import { ClipboardImageError } from '../../src/domain/media/errors.ts'
 
 /** A tiny valid PNG header (1×1). */
 function pngBytes(): Buffer {
@@ -19,6 +21,49 @@ function pngBytes(): Buffer {
   bytes.writeUInt32BE(1, 16)
   bytes.writeUInt32BE(1, 20)
   return bytes
+}
+
+/** A minimal JPEG with one SOF0 frame (1×1). */
+function jpegBytes(): Buffer {
+  return Buffer.from([
+    0xff, 0xd8,
+    0xff, 0xc0, 0x00, 0x0b,
+    0x08, 0x00, 0x01,
+    0x00, 0x01, 0x01,
+    0x01, 0x11, 0x00,
+  ])
+}
+
+/** A minimal lossy WebP header (VP8, 1×1). */
+function webpBytes(): Buffer {
+  const bytes = Buffer.alloc(30)
+  bytes.write('RIFF', 0, 'ascii')
+  bytes.writeUInt32LE(22, 4)
+  bytes.write('WEBP', 8, 'ascii')
+  bytes.write('VP8 ', 12, 'ascii')
+  bytes.writeUInt32LE(10, 16)
+  bytes.writeUInt16LE(1, 26)
+  bytes.writeUInt16LE(1, 28)
+  return bytes
+}
+
+/** A minimal GIF89a logical screen descriptor (1×1). */
+function gifBytes(): Buffer {
+  const bytes = Buffer.alloc(13)
+  bytes.write('GIF89a', 0, 'ascii')
+  bytes.writeUInt16LE(1, 6)
+  bytes.writeUInt16LE(1, 8)
+  return bytes
+}
+
+const INVALID_IMAGE_MESSAGE = 'Clipboard image data is invalid or unsupported. Supported: PNG, JPEG, WebP, GIF.'
+const UNSUPPORTED_FORMAT_MESSAGE = 'Clipboard image format is unsupported. Supported: PNG, JPEG, WebP, GIF.'
+const NO_IMAGE_DATA_MESSAGE = 'Clipboard advertised an image but no image data could be read.'
+
+/** Assert one rejection is the fixed ClipboardImageError contract. */
+async function rejectsWith(promise: Promise<unknown>, message: string): Promise<void> {
+  await assert.rejects(promise, (error: unknown) =>
+    error instanceof ClipboardImageError && error.message === message)
 }
 
 function envOf(overrides: Partial<ClipboardEnvironment> = {}): ClipboardEnvironment {
@@ -130,11 +175,43 @@ test('macOS probes through osascript', async () => {
   const run = (async (command: string) => {
     ran.push(command)
     assert.equal(command, 'osascript')
-    return { stdout: Buffer.from('ok'), stderr: Buffer.alloc(0), code: 0 }
+    // The first probe returns "no PNG": the script's own no-image outcome.
+    return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), code: 0 }
   }) as unknown as RunCommand
   const result = await readClipboardImage(run, envOf({ platform: 'darwin' }))
   assert.ok(ran.includes('osascript'), 'osascript probed for the PNG')
   assert.equal(result.kind, 'text', 'no PNG file → plain-text fallback probe')
+})
+
+test('macOS: PNG data that fails to write to the temp file rejects instead of pasting empty text', async () => {
+  const run = (async (_command: string, args: readonly string[]) => {
+    const script = args[1] ?? ''
+    if (script.includes('writeToFile')) {
+      return { stdout: Buffer.from('write-failed'), stderr: Buffer.alloc(0), code: 0 }
+    }
+    return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), code: 0 }
+  }) as unknown as RunCommand
+  await rejectsWith(
+    readClipboardImage(run, envOf({ platform: 'darwin' })),
+    'Failed to write the clipboard image to a temporary file.',
+  )
+})
+
+test('macOS: an ok probe without a readable temp PNG rejects instead of pasting empty text', async () => {
+  // The reviewer's probe: the script reports a written PNG but the temp file
+  // is missing, so the confirmed image read failure must reject — never fall
+  // back to an (empty) text payload.
+  let textProbeRan = false
+  const run = (async (_command: string, args: readonly string[]) => {
+    const script = args[1] ?? ''
+    if (script.includes('the clipboard as text')) textProbeRan = true
+    return { stdout: Buffer.from('ok'), stderr: Buffer.alloc(0), code: 0 }
+  }) as unknown as RunCommand
+  await rejectsWith(
+    readClipboardImage(run, envOf({ platform: 'darwin' })),
+    'Failed to read the clipboard image from the temporary file.',
+  )
+  assert.equal(textProbeRan, false, 'a confirmed image never degrades to the text fallback')
 })
 
 test('clipboardBackendOf names the platform backend', () => {
@@ -215,4 +292,170 @@ test('the PowerShell text fallback loads System.Windows.Forms itself (review fin
   const fallback = commands.find(command => command.includes('GetText'))
   assert.ok(fallback !== undefined, 'the text fallback ran')
   assert.ok(fallback!.includes('Add-Type -AssemblyName System.Windows.Forms'), 'the fallback loads the assembly itself')
+})
+
+// ── advertised images that cannot be decoded are errors, never empty text ──
+
+const WAYLAND_ENV = envOf({ env: { WAYLAND_DISPLAY: 'wayland-0' } })
+const X11_ENV = envOf({ env: { DISPLAY: ':0' } })
+
+test('Wayland: an advertised image/png with invalid bytes rejects instead of pasting empty text', async () => {
+  // The old imageFromBytes() returned { kind: 'text', text: '' } here, making a
+  // real image Ctrl+V look like a no-op.
+  await rejectsWith(
+    readClipboardImage(waylandMock(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 1, 2, 3])), WAYLAND_ENV),
+    INVALID_IMAGE_MESSAGE,
+  )
+})
+
+test('X11: a non-zero image probe exit rejects even when stdout is non-empty', async () => {
+  const run = (async (command: string, args: readonly string[]) => {
+    if (args.includes('TARGETS')) {
+      return { stdout: Buffer.from('UTF8_STRING\nimage/png'), stderr: Buffer.alloc(0), code: 0 }
+    }
+    return { stdout: pngBytes(), stderr: Buffer.alloc(0), code: 4 }
+  }) as unknown as RunCommand
+  await rejectsWith(readClipboardImage(run, X11_ENV), 'clipboard command failed: xclip (exit 4)')
+})
+
+test('a clipboard advertising only an unsupported image format rejects without reading default text', async () => {
+  const waylandCalls: string[][] = []
+  const wayland = (async (_command: string, args: readonly string[]) => {
+    waylandCalls.push([...args])
+    if (args.includes('--list-types')) {
+      return { stdout: Buffer.from('text/plain\nimage/tiff'), stderr: Buffer.alloc(0), code: 0 }
+    }
+    return { stdout: Buffer.from('plain text'), stderr: Buffer.alloc(0), code: 0 }
+  }) as unknown as RunCommand
+  await rejectsWith(readClipboardImage(wayland, WAYLAND_ENV), UNSUPPORTED_FORMAT_MESSAGE)
+  assert.deepEqual(waylandCalls.map(args => [...args]), [['--list-types']],
+    'no default-text read may run once an image was advertised')
+
+  const x11Calls: string[][] = []
+  const x11 = (async (_command: string, args: readonly string[]) => {
+    x11Calls.push([...args])
+    if (args.includes('TARGETS')) {
+      return { stdout: Buffer.from('UTF8_STRING\nimage/tiff'), stderr: Buffer.alloc(0), code: 0 }
+    }
+    return { stdout: Buffer.from('plain text'), stderr: Buffer.alloc(0), code: 0 }
+  }) as unknown as RunCommand
+  await rejectsWith(readClipboardImage(x11, X11_ENV), UNSUPPORTED_FORMAT_MESSAGE)
+  assert.equal(x11Calls.length, 1, 'only the TARGETS lookup ran for an unsupported image format')
+})
+
+test('an advertised supported image with only empty payloads rejects as no image data', async () => {
+  const wayland = (async (_command: string, args: readonly string[]) => {
+    if (args.includes('--list-types')) {
+      return { stdout: Buffer.from('image/png'), stderr: Buffer.alloc(0), code: 0 }
+    }
+    return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), code: 0 }
+  }) as unknown as RunCommand
+  await rejectsWith(readClipboardImage(wayland, WAYLAND_ENV), NO_IMAGE_DATA_MESSAGE)
+
+  const x11 = (async (_command: string, args: readonly string[]) => {
+    if (args.includes('TARGETS')) {
+      return { stdout: Buffer.from('image/png'), stderr: Buffer.alloc(0), code: 0 }
+    }
+    return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), code: 0 }
+  }) as unknown as RunCommand
+  await rejectsWith(readClipboardImage(x11, X11_ENV), NO_IMAGE_DATA_MESSAGE)
+
+  // A genuinely image-less clipboard keeps its text semantics, empty included.
+  const textOnlyEmpty = (async () => ({ stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), code: 0 })) as unknown as RunCommand
+  assert.deepEqual(await readClipboardImage(textOnlyEmpty, WAYLAND_ENV), { kind: 'text', text: '' })
+})
+
+test('an image payload is classified by its MAGIC bytes, not by the advertised MIME string', async () => {
+  const payloads: ReadonlyArray<readonly [string, Buffer]> = [
+    ['image/png', pngBytes()],
+    ['image/jpeg', jpegBytes()],
+    ['image/webp', webpBytes()],
+    ['image/gif', gifBytes()],
+  ]
+  for (const [advertised, payload] of payloads) {
+    const run = (async (_command: string, args: readonly string[]) => {
+      if (args.includes('--list-types')) {
+        return { stdout: Buffer.from(`text/plain\n${advertised}`), stderr: Buffer.alloc(0), code: 0 }
+      }
+      return { stdout: payload, stderr: Buffer.alloc(0), code: 0 }
+    }) as unknown as RunCommand
+    const result = await readClipboardImage(run, WAYLAND_ENV)
+    assert.equal(result.kind, 'image', `${advertised} payload must parse`)
+    if (result.kind === 'image') {
+      assert.equal(result.mediaType, advertised, 'the parsed MIME matches the payload')
+      assert.deepEqual([result.width, result.height], [1, 1])
+    }
+  }
+  // The advertised label is a hint only: a PNG label carrying JPEG bytes is
+  // classified by the parser (the MIME magic stays the authority).
+  const mismatched = (async (_command: string, args: readonly string[]) => {
+    if (args.includes('--list-types')) {
+      return { stdout: Buffer.from('image/png'), stderr: Buffer.alloc(0), code: 0 }
+    }
+    return { stdout: jpegBytes(), stderr: Buffer.alloc(0), code: 0 }
+  }) as unknown as RunCommand
+  const result = await readClipboardImage(mismatched, WAYLAND_ENV)
+  assert.equal(result.kind, 'image')
+  if (result.kind === 'image') assert.equal(result.mediaType, 'image/jpeg', 'magic bytes win over the advertised label')
+})
+
+test('macOS: a PNG pasteboard still reads directly; a TIFF-only pasteboard rejects as unsupported', async () => {
+  const pngRun = (async (_command: string, args: readonly string[]) => {
+    const script = args[1] ?? ''
+    const match = /POSIX file "([^"]+)"/u.exec(script)
+    if (match === null) return { stdout: Buffer.from('clipboard text'), stderr: Buffer.alloc(0), code: 0 }
+    writeFileSync(match[1]!, pngBytes())
+    return { stdout: Buffer.from('ok'), stderr: Buffer.alloc(0), code: 0 }
+  }) as unknown as RunCommand
+  const image = await readClipboardImage(pngRun, envOf({ platform: 'darwin' }))
+  assert.equal(image.kind, 'image', 'the AppKit PNG payload parses')
+
+  const sentinelCalls: string[] = []
+  const tiffRun = (async (_command: string, args: readonly string[]) => {
+    sentinelCalls.push(args[1] ?? '')
+    return { stdout: Buffer.from('unsupported-image'), stderr: Buffer.alloc(0), code: 0 }
+  }) as unknown as RunCommand
+  await rejectsWith(readClipboardImage(tiffRun, envOf({ platform: 'darwin' })), UNSUPPORTED_FORMAT_MESSAGE)
+  assert.equal(sentinelCalls.length, 1, 'a TIFF sentinel never triggers the plain-text fallback')
+
+  const noImageRun = (async (_command: string, args: readonly string[]) => {
+    const script = args[1] ?? ''
+    if (script.includes('the clipboard as text')) {
+      return { stdout: Buffer.from('real clipboard text'), stderr: Buffer.alloc(0), code: 0 }
+    }
+    return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), code: 0 }
+  }) as unknown as RunCommand
+  assert.deepEqual(await readClipboardImage(noImageRun, envOf({ platform: 'darwin' })),
+    { kind: 'text', text: 'real clipboard text' },
+    'no PNG and no TIFF keeps the unchanged plain-text fallback')
+})
+
+test('Windows: a failing GetText fallback rejects instead of masquerading as an empty clipboard', async () => {
+  const run = (async (_command: string, args: readonly string[]) => {
+    if (args.some(arg => arg.includes('GetImage'))) {
+      return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), code: 0 }
+    }
+    return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), code: 5 }
+  }) as unknown as RunCommand
+  await rejectsWith(readClipboardImage(run, envOf({ platform: 'win32' })), 'powershell failed (exit 5)')
+
+  // The unchanged empty-text success path stays a valid empty clipboard.
+  const emptyRun = (async (_command: string, args: readonly string[]) => ({
+    stdout: Buffer.alloc(0),
+    stderr: Buffer.alloc(0),
+    code: 0,
+  })) as unknown as RunCommand
+  assert.deepEqual(await readClipboardImage(emptyRun, envOf({ platform: 'win32' })), { kind: 'text', text: '' })
+})
+
+test('Windows: the GetImage script verifies the saved temp PNG exists (no silent no-file save)', async () => {
+  const run = (async (_command: string, args: readonly string[]) => {
+    const script = args[2] ?? ''
+    assert.ok(script.includes('Test-Path -LiteralPath'),
+      `the Save must be followed by an existence check: ${script}`)
+    // The guard exits non-zero when the saved file is missing: the failure is
+    // reported, never interpreted as "no image".
+    return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), code: 3 }
+  }) as unknown as RunCommand
+  await rejectsWith(readClipboardImage(run, envOf({ platform: 'win32' })), 'powershell failed (exit 3)')
 })

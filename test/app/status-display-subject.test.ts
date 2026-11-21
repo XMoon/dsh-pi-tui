@@ -9,16 +9,23 @@
 
 import assert from 'node:assert/strict'
 import { mkdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
-import test from 'node:test'
-import { createStatusRuntime, type StatusRuntimeDeps } from '../../src/app/surface/status-runtime.ts'
+import { basename, join } from 'node:path'
+import test, { afterEach } from 'node:test'
+import { createStatusRuntime, type StatusLiveAgent, type StatusRuntimeDeps } from '../../src/app/surface/status-runtime.ts'
+import { gitBranch } from '../../src/client/git/branch.ts'
 import type { SessionStatusProjection } from '../../src/runtime/session-reader-port.ts'
 import { StatsFolder } from '../../src/domain/status/stats.ts'
 import { StatusStore } from '../../src/domain/status/store.ts'
-import { emptyStatusSnapshot, type StatusPatch } from '../../src/domain/status/types.ts'
+import { emptyStatusSnapshot, type StatusPatch, type StatusSnapshot } from '../../src/domain/status/types.ts'
+import { ExtensionLedger } from '../../src/extension/internal/ledger.ts'
+import { SurfaceHost } from '../../src/extension/internal/surface-host.ts'
+import { createBuiltinFooterRegistry } from '../../src/tui/footer/builtin-items.ts'
+import { FooterComposer } from '../../src/tui/footer/composer.ts'
 import { renderViewerSubjectBar } from '../../src/tui/presentation/viewer-subject-bar.ts'
-import type { DisplaySubjectPresentation, StatusData, TuiApp } from '../../src/tui-app.ts'
+import { TuiApp, type DisplaySubjectPresentation, type StatusData } from '../../src/tui-app.ts'
+import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
+import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
 /** The viewed child identity the selector reads (ViewerRuntime's read model). */
 interface ViewerRead {
@@ -46,7 +53,25 @@ function childStats(): StatsFolder {
   return folder
 }
 
-function makeHarness(options: { remote?: boolean } = {}): {
+function makeHarness(options: {
+  remote?: boolean
+  /** A TRUE sessionless surface (no current Session id). */
+  sessionless?: boolean
+  /** The confirmed-save-with-unreadable-directory fact for the P2 status. */
+  defaultUnavailable?: boolean
+  /** M6-1 F8: the ONE session-policy observation the access derivation reads. */
+  policyObservation?: { readSnapshot(sessionId: string): import('../../src/app/command/policy-observation-state.ts').PolicyObservationState; subscribe(listener: () => void): () => void }
+  /** R10: a REAL Direct live Agent (session.id/header.cwd + options); absent = the Agent-less path. */
+  liveAgent?: () => StatusLiveAgent | undefined
+  /** R10: the dynamic current Session id (default 'main', or undefined when sessionless). */
+  currentSessionId?: () => string | undefined
+  /** R10: the resolved CLIENT working directory (default '/client'). */
+  clientCwd?: string
+  /** R10 (A6): share ONE StatusStore with a real TuiApp. */
+  store?: StatusStore
+  /** R10 (A6): route the atomic commit through the real `TuiApp.commitDisplaySubject` merge path. */
+  commitStatus?: (patch: StatusPatch, legacy: Partial<StatusData>, presentation: DisplaySubjectPresentation | undefined) => void
+} = {}): {
   runtime: ReturnType<typeof createStatusRuntime>
   commits: Commit[]
   store: StatusStore
@@ -54,7 +79,7 @@ function makeHarness(options: { remote?: boolean } = {}): {
   setChild(child: ViewerRead | undefined): void
   setStatus(sessionId: string, status: SessionStatusProjection | undefined): void
 } {
-  const store = new StatusStore(emptyStatusSnapshot())
+  const store = options.store ?? new StatusStore(emptyStatusSnapshot())
   const commits: Commit[] = []
   const statuses = new Map<string, SessionStatusProjection>()
   const mainStats = new StatsFolder()
@@ -64,28 +89,29 @@ function makeHarness(options: { remote?: boolean } = {}): {
       // Only commitStatus is exercised by refreshStatusCheap.
       app: {} as TuiApp,
       status: { snapshot: () => store.snapshot() },
-      commitStatus: (
+      commitStatus: options.commitStatus ?? ((
         patch: StatusPatch,
         legacy: Partial<StatusData>,
         presentation: DisplaySubjectPresentation | undefined,
       ) => {
         commits.push({ patch, legacy, presentation })
         store.update(patch)
-      },
+      }),
     },
     updateTerminalTitle: () => {},
     isCleanedUp: () => false,
     // The harness exercises the DIRECT (Agent-less) status path; the main
     // subject's sections are asserted from the store, not from a live Agent.
-    liveAgent: () => undefined,
+    liveAgent: options.liveAgent ?? (() => undefined),
     generation: () => 1,
-    currentSessionId: () => 'main',
+    currentSessionId: options.currentSessionId ?? (options.sessionless === true ? () => undefined : () => 'main'),
     measureContext: () => 42,
     sessionStatus: (sessionId: string) => statuses.get(sessionId),
     model: {
       selection: () => undefined,
       currentOf: () => undefined,
       defaultSelection: () => undefined,
+      defaultUnavailable: () => options.defaultUnavailable === true,
       marker: () => undefined,
       preset: () => undefined,
     },
@@ -97,10 +123,11 @@ function makeHarness(options: { remote?: boolean } = {}): {
       sessionProjections: undefined,
     }),
     ...options.remote === true ? { remote: { plan: () => undefined } } : {},
+    ...options.policyObservation === undefined ? {} : { policyObservation: options.policyObservation },
     presentation: { mainStats: () => mainStats },
     viewer: { read: () => child },
     diag: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {}, dispose: () => {} },
-    clientCwd: '/client',
+    clientCwd: options.clientCwd ?? '/client',
   } as unknown as StatusRuntimeDeps)
   const harness = {
     runtime,
@@ -120,6 +147,29 @@ function childRead(id: string, label = id): ViewerRead {
   return { id, label, mode: 'continuable', activity: 'running', cwd: '/child/header', stats: childStats() }
 }
 
+/** A real FooterComposer over the builtin registry, to prove the `git-branch`
+ *  item truly HIDES a Remote-live branch and SHOWS a Client-local one. */
+const footerComposer = new FooterComposer(createBuiltinFooterRegistry())
+
+/** Render ONLY the `git-branch` footer item from a real committed snapshot
+ *  (ANSI-stripped) — the footer sink of the same status fact under test. */
+function renderGitBranchFooter(snapshot: StatusSnapshot): string {
+  return plain(footerComposer.render({
+    snapshot,
+    layout: { schemaVersion: 1, rows: [{ left: [{ id: 'git-branch' }], right: [] }] },
+    width: 120,
+    context: { taskBrowserAvailable: true, extensionFooterText: '' },
+  }))
+}
+
+// Every real TuiApp constructed by the A6 combo test is disposed after each
+// test — the vendored-fork process slot is released only by the FINAL dispose,
+// never by stop() (mirrors test/domain/footer-view-subject.test.ts).
+const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
+afterEach(() => {
+  disposeStartedApps()
+})
+
 test('the main subject keeps the main view with the live session sections', () => {
   const h = makeHarness()
   h.runtime.refresh()
@@ -127,6 +177,17 @@ test('the main subject keeps the main view with the live session sections', () =
   assert.deepEqual(h.store.snapshot().view, { subject: { kind: 'main' } })
   assert.equal(h.store.snapshot().workspace.cwd, '/client')
   assert.equal(commit.presentation, undefined, 'no display-subject projection on the main subject')
+})
+
+test('a sessionless Remote surface shows UNKNOWN (not no model) for a confirmed save whose directory is unreadable', () => {
+  const unknown = makeHarness({ remote: true, sessionless: true, defaultUnavailable: true })
+  unknown.runtime.refresh()
+  assert.equal(unknown.commits.at(-1)!.legacy?.model, 'model unknown',
+    'a confirmed default whose Host directory cannot be read is UNKNOWN, never fabricated')
+  const absent = makeHarness({ remote: true, sessionless: true, defaultUnavailable: false })
+  absent.runtime.refresh()
+  assert.equal(absent.commits.at(-1)!.legacy?.model, 'no model',
+    'a genuinely absent default stays no model')
 })
 
 test('every child Session-owned section comes from SessionStatus(childId)', () => {
@@ -430,4 +491,253 @@ test('TPS PR-2: the display subject’s OWN Host projection is the performance a
     tokensPerSec: 30,
     sessionTokensPerSec: 30,
   }, 'the child renders its own figures; a measured 0ms TTFB stays a visible zero, never absence')
+})
+
+
+test('M6-1 F8: sandbox/approval access facts come from the ONE observation of the DISPLAY SUBJECT', () => {
+  const observation = (read: (sessionId: string) => import('../../src/app/command/policy-observation-state.ts').PolicyObservationState) => ({
+    readSnapshot: read,
+    subscribe: () => () => {},
+  })
+  // The main subject's proven facts ride the access section independently.
+  const main = makeHarness({
+    policyObservation: observation(sessionId => ({
+      kind: 'ready',
+      read: {
+        kind: 'ready',
+        sessionId,
+        approval: { state: 'ready', effective: 'never', override: 'never' },
+        sandbox: { state: 'ready', effective: 'read-only', override: 'read-only' },
+      },
+    })),
+  })
+  main.runtime.refresh()
+  const mainAccess = main.store.snapshot().access
+  assert.deepEqual(mainAccess.approval, { policy: 'never' })
+  assert.deepEqual(mainAccess.sandbox, { mode: 'read-only' })
+  assert.equal('enforcement' in (mainAccess.sandbox ?? {}), false, 'the policy fact never claims sandbox enforcement')
+
+  // A viewed child reads the CHILD's OWN observed facts — never the parent's.
+  const childObservation = makeHarness({
+    policyObservation: observation(sessionId => sessionId === 'child-a'
+      ? {
+        kind: 'ready',
+        read: {
+          kind: 'ready',
+          sessionId,
+          approval: { state: 'ready', effective: 'ask' },
+          sandbox: { state: 'ready', effective: 'workspace-write' },
+        },
+      }
+      : { kind: 'checking' }),
+  })
+  childObservation.setStatus('child-a', {
+    cwd: '/child-a/ws', permission: 'read-only', model: undefined, preset: undefined, todos: [],
+  } as never)
+  childObservation.setChild(childRead('child-a', 'research'))
+  childObservation.runtime.refresh()
+  const childAccess = childObservation.store.snapshot().access
+  assert.deepEqual(childAccess.permissionPreset, { id: 'read-only', label: 'read-only', matched: true })
+  assert.deepEqual(childAccess.approval, { policy: 'ask' }, 'the child approval is the child subject\'s own')
+  assert.deepEqual(childAccess.sandbox, { mode: 'workspace-write' }, 'the child sandbox is the child subject\'s own')
+
+  // A non-ready observation leaves those facts ABSENT (never a guessed default).
+  const pending = makeHarness({ policyObservation: observation(() => ({ kind: 'checking' })) })
+  pending.runtime.refresh()
+  const pendingAccess = pending.store.snapshot().access
+  assert.equal('approval' in pendingAccess, false)
+  assert.equal('sandbox' in pendingAccess, false)
+})
+
+
+test('M6-1 F8: an invalidated Remote policy cannot leak the last-known sandbox/approval through the preset fallback', () => {
+  // The historical §6.4 fallback keeps the last-known PRESET when the
+  // permissions projection is unavailable. The independent sandbox/approval
+  // facts must NOT ride that fallback: after a Connection generation change
+  // (the observation answers checking) and an unavailable permission
+  // projection, the footer may keep only the preset row.
+  const pending = makeHarness({
+    remote: true,
+    policyObservation: {
+      readSnapshot: () => ({ kind: 'checking' }),
+      subscribe: () => () => {},
+    },
+  })
+  // The PREVIOUS committed access still carries all three facts (the last Host).
+  pending.store.update({
+    access: {
+      permissionPreset: { id: 'read-only', label: 'read-only', matched: true },
+      sandbox: { mode: 'workspace-write' as const },
+      approval: { policy: 'never' },
+    },
+  })
+  pending.runtime.refresh()
+  const access = pending.store.snapshot().access
+  assert.deepEqual(access.permissionPreset, { id: 'read-only', label: 'read-only', matched: true },
+    'the preset row keeps its subject-scoped last-known fallback')
+  assert.equal('sandbox' in access, false,
+    'the revoked sandbox fact must not survive through the preset fallback')
+  assert.equal('approval' in access, false,
+    'the revoked approval fact must not survive through the preset fallback')
+})
+
+// ─── R10: Remote Git branch locality ─────────────────────────────────────────
+// The Client's `.git/HEAD` is a CLIENT filesystem fact. A Remote LIVE Session's
+// cwd belongs to the Host, so it can never authorize reading this Client's
+// `.git/HEAD` — its branch is omitted, never inferred. Direct and a Remote
+// SESSIONLESS surface describe a directory on THIS Client and keep their local
+// branch. Every case below drives the REAL `createStatusRuntime` + `gitBranch`.
+
+/** Write a READABLE decoy branch into a checkout root — the local derivation
+ *  CAN see it; the point is that a Remote LIVE Session must NOT. */
+function decoy(root: string): string {
+  mkdirSync(join(root, '.git'), { recursive: true })
+  writeFileSync(join(root, '.git', 'HEAD'), 'ref: refs/heads/R10_CLIENT_DECOY\n')
+  return root
+}
+
+test('R10 A1: a Remote live MAIN Session never shows a Client-local git branch, even from a readable checkout', (t) => {
+  const root = decoy(testLifecycle(t).tempDir('dsh-pi-tui-r10-main-'))
+  // Non-vacuous: this process CAN read the decoy branch from `root`.
+  assert.equal(gitBranch(root), 'R10_CLIENT_DECOY')
+  const h = makeHarness({ remote: true })
+  h.setStatus('main', { sessionId: 'main', cwd: root })
+  h.runtime.refresh()
+  const snap = h.store.snapshot()
+  assert.equal(snap.workspace.cwd, root, 'the Host cwd is the workspace fact')
+  assert.equal(snap.workspace.project, basename(root), 'the project follows the Host cwd')
+  assert.equal(snap.workspace.branch, undefined,
+    'a Remote live MAIN branch is ABSENT — never the Client .git/HEAD')
+  assert.equal(h.commits.at(-1)!.legacy.branch, '',
+    'the legacy branch is EXPLICITLY cleared (maps to absence downstream)')
+  assert.ok(!renderGitBranchFooter(snap).includes('R10_CLIENT_DECOY'),
+    'the footer git-branch item stays hidden though the control directory is readable')
+})
+
+test('R10 A2: a Direct live main Session KEEPS the local git branch (locality is not over-restricted)', (t) => {
+  const root = decoy(testLifecycle(t).tempDir('dsh-pi-tui-r10-direct-'))
+  const h = makeHarness({
+    liveAgent: () => ({ session: { id: 'main', header: { cwd: root } }, options: {} }),
+  })
+  h.setStatus('main', { sessionId: 'main', cwd: root })
+  h.runtime.refresh()
+  const commit = h.commits.at(-1)!
+  assert.equal(commit.patch.workspace?.branch, 'R10_CLIENT_DECOY',
+    'Direct main reads this machine’s own .git/HEAD')
+  assert.equal(commit.legacy.branch, 'R10_CLIENT_DECOY', 'the legacy branch matches')
+  assert.ok(renderGitBranchFooter(h.store.snapshot()).includes('R10_CLIENT_DECOY'),
+    'the footer shows the Direct local branch')
+})
+
+test('R10 A3: a Remote main AND its viewed child both omit the Client branch, with no stale value across the transition', (t) => {
+  const root = decoy(testLifecycle(t).tempDir('dsh-pi-tui-r10-child-'))
+  const h = makeHarness({ remote: true })
+  h.setStatus('main', { sessionId: 'main', cwd: root })
+  h.setStatus('child-a', { sessionId: 'child-a', cwd: root })
+  // MAIN: no branch.
+  h.runtime.refresh()
+  assert.equal(h.store.snapshot().workspace.branch, undefined, 'Remote main: no Client branch')
+  assert.equal(h.commits.at(-1)!.legacy.branch, '', 'Remote main legacy: cleared')
+  // ENTER child (its Host cwd is also a readable checkout): still no branch.
+  h.setChild(childRead('child-a'))
+  h.runtime.refresh()
+  assert.equal(h.store.snapshot().workspace.branch, undefined, 'Remote child: no Client branch')
+  assert.equal(h.commits.at(-1)!.legacy.branch, '',
+    'the legacy slot (the LIVE/main owner) is cleared — never the child cwd’s')
+  // EXIT back to main: still no branch, no child/main residue.
+  h.setChild(undefined)
+  h.runtime.refresh()
+  assert.equal(h.store.snapshot().workspace.branch, undefined, 'back to Remote main: still no branch')
+  assert.equal(h.commits.at(-1)!.legacy.branch, '', 'and the legacy branch stays cleared')
+})
+
+test('R10 A4: a Remote SESSIONLESS surface KEEPS its own Client launch-cwd branch (the distinguishing control)', (t) => {
+  const root = decoy(testLifecycle(t).tempDir('dsh-pi-tui-r10-sessionless-'))
+  const h = makeHarness({ remote: true, sessionless: true, clientCwd: root })
+  h.runtime.refresh()
+  const snap = h.store.snapshot()
+  assert.equal(snap.workspace.cwd, root, 'the Client launch cwd is the Sessionless workspace')
+  assert.equal(snap.workspace.branch, 'R10_CLIENT_DECOY',
+    'Sessionless Remote reads its OWN Client .git/HEAD (no Host Session is open)')
+  assert.equal(h.commits.at(-1)!.legacy.branch, 'R10_CLIENT_DECOY', 'the legacy branch matches')
+  assert.ok(renderGitBranchFooter(snap).includes('R10_CLIENT_DECOY'),
+    'the footer shows the Sessionless local branch')
+})
+
+test('R10 A5: Remote session switch / effective-cwd change / unavailable cwd never leave a Client branch or a stale value', (t) => {
+  const life = testLifecycle(t)
+  const rootA = decoy(life.tempDir('dsh-pi-tui-r10-a-'))
+  const rootB = decoy(life.tempDir('dsh-pi-tui-r10-b-'))
+  const rootC = decoy(life.tempDir('dsh-pi-tui-r10-c-'))
+  let current: string | undefined = 'A'
+  const h = makeHarness({ remote: true, currentSessionId: () => current })
+  h.setStatus('A', { sessionId: 'A', cwd: rootA })
+  h.setStatus('B', { sessionId: 'B', cwd: rootB })
+  const noBranch = (label: string, expectedCwd: string): void => {
+    const snap = h.store.snapshot()
+    assert.equal(snap.workspace.cwd, expectedCwd, `${label}: cwd`)
+    assert.equal(snap.workspace.project, basename(expectedCwd), `${label}: project`)
+    assert.equal(snap.workspace.branch, undefined, `${label}: no Client branch`)
+    assert.equal(h.commits.at(-1)!.legacy.branch, '', `${label}: legacy branch cleared`)
+    assert.ok(!renderGitBranchFooter(snap).includes('R10_CLIENT_DECOY'), `${label}: footer hides branch`)
+  }
+  h.runtime.refresh(); noBranch('A', rootA)
+  current = 'B'; h.runtime.refresh(); noBranch('A→B', rootB)
+  // An OFFICIAL committed working-directory change (observable status value).
+  h.setStatus('B', { sessionId: 'B', cwd: rootC }); h.runtime.refresh(); noBranch('B cwd change', rootC)
+  current = 'A'; h.runtime.refresh(); noBranch('B→A (no residue)', rootA)
+  // B returns but its status is GONE: the cwd is unavailable, never a fallback.
+  current = 'B'; h.setStatus('B', undefined); h.runtime.refresh()
+  const snap = h.store.snapshot()
+  assert.equal(snap.workspace.cwd, '', 'unavailable: cwd is empty, never a Client fallback')
+  assert.equal(snap.workspace.cwdUnavailable, true, 'unavailable: the fact is stated in words')
+  assert.equal(snap.workspace.branch, undefined, 'unavailable: no branch')
+  assert.equal(h.commits.at(-1)!.legacy.branch, '', 'unavailable: legacy branch cleared')
+})
+
+test('R10 A6: the real TuiApp legacy merge + Extension + Footer clear an old branch when a Remote live Session takes over', async (t) => {
+  const root = decoy(testLifecycle(t).tempDir('dsh-pi-tui-r10-combo-'))
+  // The Remote live Session's Host cwd IS this same readable checkout: the decoy
+  // sits right there, yet Remote live must NOT show it (the airtight case).
+  // ONE shared StatusStore wired into a REAL TuiApp + VirtualTerminal + Extension.
+  const store = new StatusStore(emptyStatusSnapshot())
+  const vt = new VirtualTerminal(120, 24)
+  const extensionHost = new SurfaceHost(new ExtensionLedger(), () => {})
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { statusStore: store, extensionHost })
+  app.start()
+  startedApps.add(app)
+  // Capture the legacy slot AND drive the REAL product merge path.
+  const commits: Commit[] = []
+  let current: string | undefined = undefined
+  const h = makeHarness({
+    remote: true,
+    clientCwd: root,
+    currentSessionId: () => current,
+    store,
+    commitStatus: (patch, legacy, presentation) => {
+      commits.push({ patch, legacy, presentation })
+      app.commitDisplaySubject(patch, legacy, presentation)
+    },
+  })
+  h.setStatus('main', { sessionId: 'main', cwd: root })
+  // Phase 1 — Remote SESSIONLESS: the Client launch-cwd branch is present.
+  h.runtime.refresh()
+  await vt.waitForRender()
+  assert.equal(store.snapshot().workspace.branch, 'R10_CLIENT_DECOY',
+    'Sessionless: the local branch is present (the OLD value)')
+  assert.equal(extensionHost.state().session.branch, 'R10_CLIENT_DECOY',
+    'Sessionless: the Extension v2 snapshot carries the branch')
+  // Phase 2 — a Remote LIVE Session takes over (Host cwd = the same checkout).
+  current = 'main'
+  h.runtime.refresh()
+  await vt.waitForRender()
+  const snap = store.snapshot()
+  assert.equal(snap.workspace.branch, undefined,
+    'Remote live: the structured branch is ABSENT (the old value cleared)')
+  assert.equal(commits.at(-1)!.legacy.branch, '',
+    'Remote live: legacy branch \'\' drives the merge/Extension sync to CLEAR the old value')
+  assert.equal(extensionHost.state().session.branch, undefined,
+    'Remote live: the Extension v2 snapshot branch is cleared to undefined')
+  assert.ok(!renderGitBranchFooter(snap).includes('R10_CLIENT_DECOY'),
+    'Remote live: the real Footer Composer hides the branch')
 })

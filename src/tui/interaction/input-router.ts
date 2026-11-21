@@ -120,6 +120,7 @@ export interface InputRouterContext {
  * as plain constants so it never imports the keybindings module. */
 const TUI_ACTION_FOLD = 'app.transcript.toggleExpand'
 const TUI_ACTION_SEARCH = 'app.transcript.search'
+const TUI_ACTION_SEARCH_VIEW = 'app.transcript.search.view'
 
 /** The outcome of one input event. */
 export type InputRouteResult =
@@ -211,7 +212,9 @@ export class InputRouter {
       if (matchesKey(data, 'escape') || matchesKey(data, 'ctrl+c')
         || matchesKey(data, 'enter')
         || matchesKey(data, 'shift+enter')
-        || (ctx.matchesEffective?.(TUI_ACTION_SEARCH, data) ?? matchesKey(data, 'ctrl+f'))) {
+        || matchesKey(data, 'tab')
+        || (ctx.matchesEffective?.(TUI_ACTION_SEARCH, data) ?? matchesKey(data, 'ctrl+shift+f'))
+        || (ctx.matchesEffective?.(TUI_ACTION_SEARCH_VIEW, data) ?? matchesKey(data, 'ctrl+f'))) {
         return { kind: 'consumed' }
       }
       return { kind: 'editor' }

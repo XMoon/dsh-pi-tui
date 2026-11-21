@@ -83,6 +83,8 @@ reading is an additional rendering container, never a second renderer.
 | TSP connection and terminal input lifecycle | Composition bootstrap + mounted renderer + pinned SDK | A second direct stdin reader or ad-hoc wire pump |
 | Surface regions and emitted node projection | `src/tui/tsp/session.ts` (one base `surface.render`, plus the one temporary screen's own `render` for a reading) | Independently mounted competing renderers, or a second surface for any non-reading surface |
 | Modal seat/keyboard precedence | `src/tui/tsp/session.ts` + `interaction.ts` and its application owner | `modal:true` as an automatic JavaScript keyboard handler |
+| Input completion browse (command name, Host `@` mention, Client-local `/attach`/`/image` argument, inline `/name` action + skill) | One mount-local seat (`src/tui/tsp/input-completion.ts`) fed by the ONE catalog commit the command layer publishes through the mount's install port and by the SAME shared installed provider, admitted only inside the existing keyboard precedence; the position and the writable span come from the original file-completion classifier, never from a renderer-local parser | A second candidate catalog, provider, ranking or claims map; a second or parallel OPEN list; a popup that owns submit/cancel; a completion that executes; a Host answer re-scanned on the Client filesystem or a Client path answer queried from the Host port; a rewrite outside the accepted token |
+| Inline attachment intake settlement (the FILE an inline path candidate selected) | The command plane's ONE stager (`src/tui/commands/artifacts.ts` `runAttachmentIntake`), installed on the mount through `commands.ts` → `app/command/surface.ts` → `app/surface/runtime.ts` → the mount's `installInlineAttachmentStager`, and invoked only after the composer's atomic edit committed the accepted document/caret; currentness rides the composer edit revision plus the mount's own alive/hydration facts | A renderer-owned file read, draft store, Session-scope authority or retry controller; an optimistic placeholder; staging on a refused, stale or uninstalled write; a structural row marker or a plugin-supplied label standing in for the provider's own request identity |
 | UI highlight, draft, pending, local page | The current presenter for that UI | Durable business authority |
 | SDK frame/ACK/current sent View | Installed SDK `Surface`/`Session` | A second application-side reconciler without a demonstrated gap |
 | The temporary reading surface, its reading identity and its close | `src/tui/tsp/session.ts` (the reader slot) | A presenter-owned surface, a business owner, a second Session, or a persisted reading state |
@@ -358,6 +360,24 @@ content that already carries one frame is not wrapped in a second. Real-GUI,
 headless, SDK-level and business-chain evidence are separate tiers that do not
 substitute for one another.
 
+**Client-local Exit Choice.** `/exit`/`/quit`, the bare `exit` word and the
+bounded raw exit keys all reach the SAME application exit-intent coordinator;
+the renderer owns only the chosen seat's presentation. The TSP choice is a
+native `ui.overlay({modal:true})` in the SAME modal-first layer as the official
+Interaction seat, with real `ui.button` options (never text rows pretending to
+be buttons), `↑`/`↓` + Enter + Esc, and pointer `action` events admitted only
+for the CURRENT frame epoch's exact node ids; a superseded visit's click is
+dropped. The official Question/Approval seat always outranks it: a request that
+takes the seat dismisses the Client choice with zero business action, and the
+choice can never open on top of an active official modal or the Alt+Q list.
+Ctrl+C inside the choice is `Stay` (it never cancels the background Turn), and
+the Stop-in-flight window accepts no key until the exact-owner idle proof
+settles. Bound raw input keeps the product rule: idle Ctrl+C and empty-draft
+Ctrl+D need the same-key 1.5-second second press, working Ctrl+C cancels once,
+unknown Ctrl+C refuses to arm; the pre-bind Ctrl+C emergency exit is unchanged.
+The choice's stop/idle proof, session currentness and final exit commit stay in
+the application coordinator — the renderer never calls a Host cancel itself.
+
 Where a composite's own affordance contradicts the application's key contract,
 the minimum correction is ONE scoped rule installed once on the surface, never a
 per-render style write and never a broad client theme override.
@@ -532,7 +552,10 @@ store.
 clipboard-paste entry that owns the OS probe FIFO, the image limits and the
 draft write. The renderer never probes the clipboard and owns no media queue. A
 bracketed text paste remains the editor's atomic text edit and is a different
-key. The existing hydration fence, modal seat and pre-bind held-key replay apply
+key; when its complete body is one terminal-local image file path, the renderer
+additionally forwards ONE `pastedPath` receipt over the proven paste span to
+the same application intake owner (never the clipboard probe), as specified in
+[surface behavior](../architecture/surface-input.md#attachments-and-input-completion). The existing hydration fence, modal seat and pre-bind held-key replay apply
 unchanged, so a paste during those windows reaches nothing.
 
 The headless lane mounts the production projections over one official inline
@@ -585,11 +608,13 @@ the current switch value.
   (`visual-v1:{"type":"chart"|"svg",…}`) plus the readable value rows. When the
   call has a live Agent, is a root call and runs inside an open `step/start`,
   the tool's `projectContent` inserts ONE additional TEXT block immediately
-  before that fact: `visual-ref-v1:sv1_<20 lowercase hex>`. The reference is the
-  truncated SHA-256 of the exact `(sessionId, turn, step/start seq, callId, "")`
-  tuple, so the same figure produced twice is two references while a replayed
-  log derives the same one. The hash is an IDENTITY, never a permission token:
-  every publication re-verifies the tuple against committed events.
+  before that fact: `visual-ref-v2:sv2_<20 lowercase hex>`. The reference is the
+  first 20 hex digits of SHA-256 over the NUL-joined
+  `['sv2', turn, absolute step/start seq, callId, '']` tuple — deliberately
+  SESSION-FREE — so the same figure produced twice is two references while a
+  fork-inherited log derives the same one without reading an ancestor Session.
+  The hash is an IDENTITY, never a permission token: every publication
+  re-verifies the tuple against committed events.
 - `present_visual({visuals:[{ref}]})` accepts 1–8 references and declares the
   explicit publication intent. It reads the executing Session through the
   official `sessionQuery.observeSession` lease, fences the `turnBoundary`
@@ -609,14 +634,21 @@ the current switch value.
   proven by the durable `present_visual` call plus its FINAL result; a
   model-written `visual-published-v1:` line, a `bash` forgery or an orphan
   result has no authority. No new Session event, durable publication table or
-  cache is created: cold replay derives the same facts from the log.
-- Human-facing surfaces (Tool Card folded preview and expanded body, TSP result
-  nodes, transcript search, `/transcript` readable Markdown) drop ONLY the
-  official tail machine blocks of these three tools, identified by position plus
-  the tool NAME proven from the durable `tool/call`. Another tool whose text
-  merely resembles a machine line keeps its full text, and the raw Session
-  JSONL keeps every block. Current renderers still show the ordinary Tool Card;
-  Assistant in-place or trailing visuals are a later stage.
+  cache is created: cold replay derives the same facts from the log. The live
+  write and cold replay share ONE event-epoch index derived synchronously from
+  the official `session/end-seed { inherited: true }` markers: an inherited
+  SUCCESSFUL publication replays from its own epoch, while a child's
+  `present_visual` of an inherited generating result is refused across epochs.
+- TUI/TSP/search display derivations (Tool Card folded preview and expanded
+  body, TSP result nodes, transcript search) drop ONLY the official tail machine
+  blocks of these three tools, identified by position plus the tool NAME proven
+  from the durable `tool/call`. Another tool whose text merely resembles a
+  machine line keeps its full text, and the raw Session JSONL keeps every block.
+  The `/transcript` readable Markdown does NOT consume this derivation: its
+  content authority is the official Host `formatSessionMarkdown` over the
+  committed Session events, which does not promise the same filtering. Current
+  renderers still show the ordinary Tool Card; Assistant in-place or trailing
+  visuals are a later stage.
 
 
 - A chart result carries one versioned machine line in its own text block
@@ -653,9 +685,13 @@ the current switch value.
   a platform with a verified native memory bound (Linux today) and mounts the
   existing image component/budget; macOS/Windows keep the description + source
   text fallback, and a failed memory-cap installation never reaches the native
-  rasterizer. Neither derivative is a durable fact: cold replay, search and
-  Markdown export read the final result content and the durable call arguments,
-  never a blob id, a PNG or a cache.
+  rasterizer. Neither derivative is a durable fact: cold replay, search and the
+  TSP/graphical display derivations read the final result content and the
+  durable call arguments, never a blob id, a PNG or a cache. The independent
+  `/transcript` export is produced by the official Host formatter from the
+  committed Session events — its `tool/call` arguments and `tool/result`
+  content — so it may retain machine text and does not call this visual
+  placement/filtering.
 - All three tool definitions are Host-plane registrations (explicit `inject` +
   `ctx.reflect.get`) independent of the renderer, Tern hello, client capability,
   session or resize. Direct and Remote consume the same durable facts; a

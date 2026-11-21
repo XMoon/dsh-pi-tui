@@ -14,12 +14,14 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
+import { credentialKey, credentialRef } from '@deepseek-ai/dsh-credentials'
 import { DirectConfigPort, type HostContextLike } from '../../src/runtime/direct/config-direct.ts'
+import { DirectSessionPolicyPort } from '../../src/runtime/direct/session-policy-direct.ts'
 import { CredentialWorkflow, resolveLoginDestination, resolveLogoutDestination } from '../../src/app/command/credential-workflow.ts'
 import type { ProviderProfileConfig } from '../../src/runtime/config-port.ts'
 
 function host(services: Record<string, unknown>): HostContextLike {
-  return { get: (name) => services[name], on: () => {} }
+  return { get: (name) => services[name], on: (() => false) as unknown as HostContextLike['on'] }
 }
 
 /** The 0.1.7 SettingsForms surface over an in-memory form document:
@@ -53,9 +55,10 @@ function workflowOver(providers: ProviderProfileConfig): CredentialWorkflow {
       listRecords: async () => [],
       onChanged: () => () => {},
     },
-    authorization: { available: () => false, listTargets: () => [], begin: async () => ({ kind: 'unavailable' as const }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
+    authorization: { available: () => false, listTargets: () => [], refreshTargets: async () => {}, targetsState: () => 'unavailable' as const, begin: async () => ({ kind: 'unavailable' as const }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
     account: {
       available: () => false,
+      isObservationCurrent: () => false,
       getState: async () => { throw new Error('unused') },
       getProfile: async () => null,
       getBalance: async () => null,
@@ -64,7 +67,7 @@ function workflowOver(providers: ProviderProfileConfig): CredentialWorkflow {
       startSignIn: async () => { throw new Error('unused') },
       cancelSignIn: async () => { throw new Error('unused') },
       signOut: async () => { throw new Error('unused') },
-      hasRunningAccountTasks: () => false,
+      hasRunningAccountTasks: async () => false,
     },
     catalog: { models: { available: () => false, discoverModels: async () => [] } },
     signal: new AbortController().signal,
@@ -985,8 +988,8 @@ test('credential onChanged subscribes both reference- and record-updated', async
   const refreshes: string[] = []
   new DirectConfigPort(ctx as never, undefined, () => undefined)
     .credentials.onChanged(() => { refreshes.push('refresh') })
-  ctx.emit('credentials/reference-updated', 'DEEPSEEK_API_KEY' as never)
-  ctx.emit('credentials/record-updated', 'llm-pi-ai/openai' as never)
+  ctx.emit('credentials/reference-updated', credentialRef('DEEPSEEK_API_KEY'))
+  ctx.emit('credentials/record-updated', credentialKey('llm-pi-ai', 'openai'))
   await Promise.resolve()
   assert.deepEqual(refreshes, ['refresh', 'refresh'])
 })
@@ -1006,81 +1009,27 @@ test('credential onChanged returns a disposer (a remount never accumulates liste
   assert.deepEqual(refreshes, ['refresh'], 'after dispose no credential event reaches the listener')
 })
 
-// ── approval override (alpha.4 session-oriented read) ─────────────────────
+// ── session policy (M6-1 F8: the independent facts moved to SessionPolicyPort) ──
 
-test('permissions approvalOverrideOf resolves the session id to its live Agent and reads the official override', () => {
+test('the session-policy port reads the exact live Session and classifies each side independently', async () => {
   const overrides = new Map<string, 'ask' | 'never'>([['session-live', 'never']])
-  const config = port({
-    approval: { overrideOf: (session: { id?: string }) => overrides.get(session?.id ?? '') },
-  }).permissions
-  assert.equal(config.approvalOverrideOf('session-live'), 'never')
-  assert.equal(config.approvalOverrideOf('session-ghost'), undefined, 'no live Agent for the session stays undefined')
-  const without = port({}).permissions
-  assert.equal(without.approvalOverrideOf('session-live'), undefined, 'a missing approval service degrades')
-  const throwing = port({ approval: { overrideOf: () => { throw new Error('boom') } } }).permissions
-  assert.equal(throwing.approvalOverrideOf('session-live'), undefined, 'a throwing service degrades to undefined')
+  const ctx = {
+    get: (name: string) => name === 'approval'
+      ? { overrideOf: (session: { id?: string }) => overrides.get(session?.id ?? ''), config: {} }
+      : undefined,
+  }
+  const liveAgent = { session: { id: 'session-live' } }
+  const policy = new DirectSessionPolicyPort(ctx as never, id => id === 'session-live' ? liveAgent : undefined)
+  const read = await policy.read('session-live')
+  assert.ok(read.kind === 'ready')
+  assert.ok(read.approval.state === 'ready' && read.approval.effective === 'never' && read.approval.override === 'never')
+  assert.equal(read.sandbox.state, 'unavailable', 'a missing sandbox service is that side\'s unavailable fact')
+  const ghost = await policy.read('session-ghost')
+  assert.deepEqual(ghost, { kind: 'unavailable', sessionId: 'session-ghost', reason: 'session-not-live' })
 })
 
-// ── subagent model selection (the official settings section) ──────────────
-
-test('subagentModelSelection reads the official service and degrades to the shipped default', () => {
-  const config = port({
-    subagentModelSelection: { current: () => ({ enabled: true, allowedModels: [{ provider: 'p', model: 'm1' }, { provider: 'p', model: 'm2' }] }) },
-    settings: settings({}),
-  }).subagentModelSelection
-  assert.equal(config.available(), true)
-  const current = config.get()
-  assert.equal(current.enabled, true)
-  assert.deepEqual(current.allowedModels, [{ provider: 'p', model: 'm1' }, { provider: 'p', model: 'm2' }])
-
-  // A THROWING official read is UNREADABLE, never the shipped default: a writer
-  // handed `{enabled:false, []}` would erase routes the Host still stores.
-  const throwing = port({ subagentModelSelection: { current: () => { throw new Error('official read failed') } }, settings: settings({}) }).subagentModelSelection
-  assert.throws(() => throwing.get(), /official read failed/u,
-    'an unreadable official section must fail loud, not fabricate the default')
-
-  const missing = port({ subagentModelSelection: { current: () => ({ enabled: false, allowedModels: [] }) }, settings: settings({}) }).subagentModelSelection
-  assert.deepEqual(missing.get(), { enabled: false, allowedModels: [] }, 'the service reads its own shipped default')
-  const noService = port({}).subagentModelSelection
-  assert.equal(noService.available(), false)
-  assert.deepEqual(noService.get(), { enabled: false, allowedModels: [] })
-  // A generic settings service WITHOUT the official subagentModelSelection
-  // service is NOT the capability: the /settings rows must not appear.
-  const settingsOnly = port({ settings: settings({}) }).subagentModelSelection
-  assert.equal(settingsOnly.available(), false, 'settings alone must not advertise the official section')
-})
-
-test('subagentModelSelection writes the whole official section through the settings service', async () => {
-  const writes: Array<{ ns: string; ops: unknown }> = []
-  const config = port({ settings: settings({}, writes) }).subagentModelSelection
-  await config.set({ enabled: true, allowedModels: [{ provider: 'p', model: 'm1' }] })
-  assert.equal(writes.length, 1)
-  assert.equal(writes[0]!.ns, 'subagent-model-selection-settings')
-  assert.deepEqual(writes[0]!.ops, [
-    { op: 'set', path: ['enabled'], value: true },
-    { op: 'set', path: ['allowedModels'], value: [{ provider: 'p', model: 'm1' }] },
-  ])
-})
-
-test('subagentModelSelection enforces the official validation rules client-side', async () => {
-  const writes: Array<{ ns: string; ops: unknown }> = []
-  const config = port({ settings: settings({}, writes) }).subagentModelSelection
-  await assert.rejects(
-    config.set({ enabled: true, allowedModels: [] }),
-    /requires at least one allowed model/u,
-    'enabling with an empty allowlist is refused before the Host write',
-  )
-  await assert.rejects(
-    config.set({ enabled: false, allowedModels: [{ provider: 'p', model: 'm' }, { provider: 'p', model: 'm' }] }),
-    /repeats route/u,
-    'duplicate provider+model routes are refused',
-  )
-  await assert.rejects(
-    config.set({ enabled: false, allowedModels: [{ provider: '', model: 'm' }] }),
-    /non-empty provider and model/u,
-  )
-  assert.deepEqual(writes, [], 'a rejected write never reaches the settings service')
-})
+// Typed subagent descriptor/CAS/reset behavior is covered by the owner-layer
+// test/runtime/direct/config-subagent-direct.test.ts suite.
 
 // ── the profile-wide visual tools switch ──────────────────────────────────
 
@@ -1186,4 +1135,95 @@ test('visualTools.setEnabled submits the decision revision, so an external edit 
     'the stale decision is refused instead of overwriting the external edit')
   assert.deepEqual(writes, [{ revision: 21 }], 'the ORIGINAL read revision is the fence')
   assert.equal(config.read()?.revision, 22, 'the authoritative read re-establishes the newer revision')
+})
+
+// ── M5-W PR-C: the profile-owned Web startup preference ────────────────────
+
+test('webStartupPreference reads the effective value and its USER provenance', () => {
+  const config = port({
+    settings: {
+      describe: () => [{
+        ns: 'pi-tui-web-preferences',
+        value: { autoStart: false },
+        user: {},
+        revision: 9,
+      }],
+      mutate: async () => {},
+    },
+  }).webStartupPreference
+  assert.deepEqual(config.read(), { autoStart: false, revision: 9, userOverridden: false })
+
+  const overridden = port({
+    settings: {
+      describe: () => [{
+        ns: 'pi-tui-web-preferences',
+        value: { autoStart: true },
+        user: { autoStart: true },
+        revision: 4,
+      }],
+      mutate: async () => {},
+    },
+  }).webStartupPreference
+  assert.deepEqual(overridden.read(), { autoStart: true, revision: 4, userOverridden: true })
+})
+
+test('webStartupPreference reports an unreadable section instead of the schema default', () => {
+  assert.equal(port({ settings: settings({}) }).webStartupPreference.read(), undefined,
+    'a missing namespace is unavailable, never Off')
+  assert.equal(port({
+    settings: {
+      describe: () => [{ ns: 'pi-tui-web-preferences', value: { autoStart: 'yes' }, revision: 1 }],
+      mutate: async () => {},
+    },
+  }).webStartupPreference.read(), undefined, 'a non-boolean effective value is unreadable')
+  assert.equal(port({}).webStartupPreference.read(), undefined, 'no settings service at all is unreadable')
+})
+
+test('webStartupPreference.setAutoStart writes the exact namespace path and the decision revision', async () => {
+  const writes: Array<{ ns: string; ops: unknown; revision?: number }> = []
+  const config = port({
+    settings: {
+      describe: () => [{ ns: 'pi-tui-web-preferences', value: { autoStart: false }, revision: 12 }],
+      mutate: async (ns: string, ops: unknown, revision?: number) => {
+        writes.push({ ns, ops, revision })
+      },
+    },
+  }).webStartupPreference
+  await config.setAutoStart(true, 12)
+  assert.deepEqual(writes, [{
+    ns: 'pi-tui-web-preferences',
+    ops: [{ op: 'set', path: ['autoStart'], value: true }],
+    revision: 12,
+  }])
+
+  const unavailable = port({ settings: settings({}) }).webStartupPreference
+  await assert.rejects(unavailable.setAutoStart(true, 1), /not mounted/u, 'an absent section is an explicit refusal')
+  const noSettings = port({}).webStartupPreference
+  await assert.rejects(noSettings.setAutoStart(true, 1), /settings service is unavailable/u)
+})
+
+test('webStartupPreference submits the decision revision, so an external edit is a conflict', async () => {
+  let revision = 31
+  const writes: Array<{ revision?: number }> = []
+  const config = port({
+    settings: {
+      describe: () => [{ ns: 'pi-tui-web-preferences', value: { autoStart: false }, revision }],
+      mutate: async (_ns: string, _ops: unknown, expectedRevision?: number) => {
+        writes.push({ revision: expectedRevision })
+        if (expectedRevision !== revision) {
+          throw Object.assign(new Error(`expected revision ${String(expectedRevision)}, actual ${revision}`), {
+            code: 'SETTINGS_CONFLICT',
+          })
+        }
+        revision += 1
+      },
+    },
+  }).webStartupPreference
+  const decision = config.read()
+  assert.equal(decision?.revision, 31)
+  revision = 32
+  await assert.rejects(config.setAutoStart(true, decision.revision), /expected revision 31, actual 32/u,
+    'the stale decision is refused instead of overwriting the external edit')
+  assert.deepEqual(writes, [{ revision: 31 }], 'the ORIGINAL read revision is the fence')
+  assert.equal(config.read()?.revision, 32)
 })

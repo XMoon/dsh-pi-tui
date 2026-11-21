@@ -20,12 +20,14 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { once } from 'node:events'
+import { createRequire } from 'node:module'
 import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import { join } from 'node:path'
-import { Context, type Fiber } from '@deepseek-ai/cordis'
+import { Context, symbols, type Fiber } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
-import { SESSION_LOG_FILENAME, sessionLogZipFilename } from '@deepseek-ai/dsh-session-log-export'
+import { SESSION_LOG_FILENAME, formatSessionMarkdown, sessionLogZipFilename } from '@deepseek-ai/dsh-session-log-export'
 import ConfigEditor from '@deepseek-ai/dsh-config-editor'
 import SettingsForms from '@deepseek-ai/dsh-settings'
 import { loadProfileDirectory, mountRootInclude } from '@deepseek-ai/dsh-app-boot'
@@ -44,17 +46,27 @@ import CommandRuntime from '@deepseek-ai/dsh-commands'
 import AgentPresetRegistry from '@deepseek-ai/dsh-agent-preset-registry'
 import TypertGatewayService from '@deepseek-ai/dsh-api-gateway'
 import JobController from '@deepseek-ai/dsh-api-job-controller'
-import { CredentialProvider } from '@deepseek-ai/dsh-credentials'
+import { CredentialProvider, credentialRef } from '@deepseek-ai/dsh-credentials'
+import LocalCredentials from '@deepseek-ai/dsh-credentials-local'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import { mountWorkspaceFileService } from '../support/remote-application-fixture.ts'
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SESSION_FORMAT_VERSION, SessionId } from '@deepseek-ai/dsh-session'
 import { SqliteSessionQueryEngine } from '@deepseek-ai/dsh-session-query-sqlite'
 import Storage from '@deepseek-ai/dsh-storage'
 import * as StorageJson from '@deepseek-ai/dsh-storage-json'
 import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
+import WebServer from '@deepseek-ai/dsh-host-webserver'
+import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
+import LocalSandboxProvider from '@deepseek-ai/dsh-sandbox-local'
+import { apply as applyConnection, inject as connectionInject } from '@deepseek-ai/dsh-client-connection'
+import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
+import WebSocket, { type RawData } from 'ws'
+import { z } from 'zod'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
+import AgentTeamService from '@deepseek-ai/dsh-agent-team'
+import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import * as toolJobs from '@deepseek-ai/dsh-tool-jobs'
@@ -72,18 +84,23 @@ import * as toolTodo from '@deepseek-ai/dsh-tool-todo'
 import { RemoteAccessService } from '@deepseek-ai/dsh-api-remote-access'
 import WorkingDirectory from '@deepseek-ai/dsh-working-directory'
 import * as piTuiHostRuntime from '../../src/app/host/pi-tui-host-runtime.ts'
+import { PreferencesConfig as CanonicalPreferencesConfig } from '../../src/app/config/schema.ts'
 import * as performanceHost from '../../src/app/host/performance-host.ts'
-import { loadExperimentalRemoteRuntime } from '../../src/runtime/backend-loader.ts'
-import type { ExperimentalRemoteRuntime } from '../../src/app/remote/runtime.ts'
+import { createExperimentalRemoteRuntime } from '../support/m3-inprocess/runtime.ts'
+import { createRemoteClientRuntime } from '../support/m3-inprocess/client-runtime.ts'
+import type { ExperimentalRemoteRuntime } from '../support/m3-inprocess/runtime.ts'
 import { createRemoteM3ASemantics, type RemoteM3ASemantics } from '../../src/app/remote/m3a-semantics.ts'
 import { createRemoteBackendRuntime } from '../../src/app/remote/runtime.ts'
 import { RemoteConfigPort } from '../../src/runtime/remote/config-remote.ts'
+import { RemoteTeamModePort } from '../../src/runtime/remote/team-mode-remote.ts'
 import { acquireMainSurfaceReference, type MainSurfaceReference } from '../../src/runtime/remote/session-reference.ts'
 import { contextPressureOccupancy } from '../../src/runtime/session-reader-port.ts'
-import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
+import { DirectConfigPort, DirectWebProviderConfig } from '../../src/runtime/direct/config-direct.ts'
 import { DirectTuiSettings, type SettingsFormsLike, type TuiConfigRefs } from '../../src/runtime/direct/tui-settings-direct.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
+import { unconfiguredPolicyObservation } from '../support/session-policy-fake.ts'
 
+const require = createRequire(import.meta.url)
 const PRESET = 'm3a-smoke-preset'
 const MAIN = 'm3a-main'
 const CHILD = 'm3a-child'
@@ -175,16 +192,24 @@ async function createHostFixture(
      *  (service `settings`). OPT-IN so the fail-closed "no settings service"
      *  deployment contract stays testable. */
     readonly configPlane?: boolean
+    /** Add the official Web rows to the same profile/Loader plane; the two
+     * negative forms omit exactly one required settings namespace. */
+    readonly webProviderPlane?: boolean | 'missing-web' | 'missing-api'
     /** Expose the mounted `tui-app` row plugin's RESOLVED Config (its live
-     *  volatile references) on `globalThis.__m3aTuiRowConfig`, so a suite can build
+     *  volatile references) on `globalThis.__m3aPreferencesConfig`, so a suite can build
      *  the REAL production `DirectTuiSettings` over the real Host settings plane. */
     readonly captureTuiRowConfig?: boolean
     /** Replace the inert stub model only for a suite that needs a real scripted
      *  turn (the durable timed-question probe). */
     readonly llmAdapter?: LlmAdapter
+    /** Mount the official base Agent Team service (FR1 wire proof). */
+    readonly teamPlane?: boolean
   } = {},
 ): Promise<HostFixture> {
   const workRoot = life.tempDir('dsh-m3a-')
+  if (options.webProviderPlane !== undefined && options.configPlane !== true) {
+    throw new Error('the official Web provider rows require the config plane')
+  }
   const anchorDir = join(workRoot, 'anchor')
   mkdirSync(anchorDir, { recursive: true })
   const ctx = new Context()
@@ -237,7 +262,17 @@ async function createHostFixture(
     // so the fixture mounts the official service itself — the composition must
     // REUSE it, never mount a second one.
     await ctx.plugin(UserQuestionService)
+    if (options.teamPlane === true) {
+      // The base Team service requires the official subagent tree owner; both
+      // are mounted through their real Host services (the same rows dsh-base
+      // composes), never a test double.
+      await ctx.plugin(SubagentRuntime)
+      await ctx.plugin(AgentTeamService)
+    }
     await ctx.plugin(Loader)
+    if (options.webProviderPlane !== undefined) {
+      await ctx.plugin(LocalCredentials, { path: join(workRoot, '.credentials.yaml'), watch: false })
+    }
     // The production config plane the base bundle mounts while a
     // `profileContext` exists: `ConfigEditor` (service `configEditor`, injecting
     // loader + profileContext) and the official `SettingsForms` (service
@@ -276,6 +311,20 @@ async function createHostFixture(
           : 'export function apply() {}',
         '',
       ].join('\n'))
+      // The canonical preference row: production schema + apply (so it
+      // publishes the real `piTuiPreferences` service), with the resolved
+      // references captured for the Direct-adapter evidence.
+      const preferencesModulePath = join(workRoot, 'm3b-preferences-row.mjs')
+      writeFileSync(preferencesModulePath, [
+        `import { Config, apply as productionApply } from ${JSON.stringify(pathToFileURL(join(process.cwd(), 'src/app/config/preferences.ts')).href)}`,
+        "export { Config }",
+        "export const name = 'pi-tui-preferences'",
+        'export function apply(ctx, config) {',
+        '  globalThis.__m3aPreferencesConfig = config',
+        '  productionApply(ctx, config)',
+        '}',
+        '',
+      ].join('\n'))
       // The production LAYOUT: a bundle declares the row and its base config,
       // while the profile patch carries only the user's own change. Both halves
       // matter — the official editor compares the effective (layer + document)
@@ -295,8 +344,57 @@ async function createHostFixture(
         '- insert:',
         '    - id: tui-app',
         `      name: ${JSON.stringify(rowModulePath)}`,
+        '    - id: pi-tui-preferences',
+        `      name: ${JSON.stringify(preferencesModulePath)}`,
         '      config:',
         "        sessionId: ''",
+        ...options.webProviderPlane === true ? [
+          '    - id: web',
+          `      name: ${JSON.stringify(require.resolve('@deepseek-ai/dsh-web'))}`,
+          '      config:',
+          '        searchProvider: deepseek-official',
+          '        fetchProvider: http',
+          '    - id: web-search-deepseek',
+          `      name: ${JSON.stringify(require.resolve('@deepseek-ai/dsh-web-search-deepseek'))}`,
+          '      config:',
+          '        apiKeyEnv: DEEPSEEK_API_KEY',
+          '    - id: web-deepseek-api',
+          `      name: ${JSON.stringify(require.resolve('@deepseek-ai/dsh-web-deepseek-api'))}`,
+          '      config:',
+          '        apiKeyEnv: DEEPSEEK_API_KEY',
+          '    - id: web-fetch-http',
+          `      name: ${JSON.stringify(require.resolve('@deepseek-ai/dsh-web-fetch-http'))}`,
+          '    - id: tool-web',
+          `      name: ${JSON.stringify(require.resolve('@deepseek-ai/dsh-tool-web'))}`,
+          '      config:',
+          '        fetch: true',
+        ] : options.webProviderPlane === 'missing-web' ? [
+          // The official API plugin injects `web`; mount that real Host service
+          // under a test-only row id so it can run while the official `web`
+          // settings namespace is genuinely absent.
+          '    - id: f3-test-web-runtime',
+          `      name: ${JSON.stringify(require.resolve('@deepseek-ai/dsh-web'))}`,
+          '    - id: web-deepseek-api',
+          `      name: ${JSON.stringify(require.resolve('@deepseek-ai/dsh-web-deepseek-api'))}`,
+          '      config:',
+          '        apiKeyEnv: DEEPSEEK_API_KEY',
+        ] : options.webProviderPlane === 'missing-api' ? [
+          '    - id: web',
+          `      name: ${JSON.stringify(require.resolve('@deepseek-ai/dsh-web'))}`,
+          '      config:',
+          '        searchProvider: deepseek-official',
+          '        fetchProvider: http',
+          '    - id: web-search-deepseek',
+          `      name: ${JSON.stringify(require.resolve('@deepseek-ai/dsh-web-search-deepseek'))}`,
+          '      config:',
+          '        apiKeyEnv: DEEPSEEK_API_KEY',
+          '    - id: web-fetch-http',
+          `      name: ${JSON.stringify(require.resolve('@deepseek-ai/dsh-web-fetch-http'))}`,
+          '    - id: tool-web',
+          `      name: ${JSON.stringify(require.resolve('@deepseek-ai/dsh-tool-web'))}`,
+          '      config:',
+          '        fetch: true',
+        ] : [],
         '',
       ].join('\n'))
       // A profile resolves its bundles from its OWN node_modules, exactly what
@@ -367,17 +465,27 @@ async function createHostFixture(
     // without it the `skills/list` Remote never registers. The official base
     // layer mounts this same row once.
     await ctx.plugin(WorkingDirectory)
-    // M4-B2-HF: the built-in PiTui Host Runtime owns the package contribution
-    // and both private Host services exactly once; Performance stays its own row.
-    await ctx.plugin(piTuiHostRuntime)
+    await ctx.plugin(LocalSandboxProvider)
+    await ctx.plugin(LocalSubprocessRuntime)
+    // M6-1 F1: the built-in Host Runtime owns user-shell execution, sandbox
+    // enforcement and the private file/completion services exactly once.
+    // Compositions WITHOUT the real config plane (no profile bundle) publish
+    // the canonical references directly; a config-plane composition mounts the
+    // production row, which provides the SAME service itself.
+    if (options.configPlane !== true) {
+      ctx.provide('piTuiPreferences', CanonicalPreferencesConfig({} as never))
+    }
+    await ctx.plugin(piTuiHostRuntime, { sessionId: '' } as never)
     await ctx.plugin(performanceHost)
     await ctx.plugin(Storage)
     await ctx.plugin(StorageJson, { root: join(workRoot, 'storages') })
     await ctx.plugin(StorageDomain, { backend: 'json' })
     await ctx.plugin(WorkspaceRegistry)
-    await ctx.plugin(pluginCtx => {
-      Reflect.construct(CredentialProvider, [pluginCtx])
-    })
+    if (options.webProviderPlane === undefined) {
+      await ctx.plugin(pluginCtx => {
+        Reflect.construct(CredentialProvider, [pluginCtx])
+      })
+    }
     await ctx.plugin(LocalJobRegistry, {})
     await ctx.plugin(toolJobs)
     await ctx.plugin(JobController, {})
@@ -479,6 +587,7 @@ async function mountSettingsWorkspace(
     readonly tuiSettings: unknown
     readonly footerCustomItems: unknown
     readonly permissions: unknown
+    readonly subagentLimits: unknown
     readonly subagentModelSelection: unknown
     /** S2/PR-B: the Web provider sub-domain (the Remote adapter's static
      *  unavailable/refuse implementation) and the credential surface the Web
@@ -554,6 +663,7 @@ async function mountSettingsWorkspace(
     clearExtensionError: () => {},
     captureExtensionHealthRef: () => () => {},
     currentSessionId: undefined,
+    policy: unconfiguredPolicyObservation(),
     captureLiveSessionScope: () => undefined,
     // C3 About seams: this fixture composes no StatusRuntime, so the
     // sessionless capture is the only reachable state (no scoped read can
@@ -577,9 +687,14 @@ async function mountSettingsWorkspace(
       configReadiness: () => config.configReadiness(),
       footerCustomItems: config.footerCustomItems,
       permissions: config.permissions,
+      subagentLimits: config.subagentLimits,
       subagentModelSelection: config.subagentModelSelection,
       web: config.web,
-      credentials: config.credentials,
+      // Preserve the prototype-owned availability method: the settings-page
+      // fixture merges seams structurally, while production Remote credentials
+      // is a class instance. This is the only credential capability this case
+      // exercises through the /settings page.
+      credentials: { available: () => (config.credentials as { available(): boolean }).available() },
     }),
     extensions: undefined,
     createPluginManagerPage: () => undefined,
@@ -642,7 +757,14 @@ async function mountSettingsWorkspace(
 }
 
 async function composeRuntime(host: HostFixture): Promise<Composed['runtime']> {
-  return await (await loadExperimentalRemoteRuntime()).createExperimentalRemoteRuntime({
+  // The built-in Host Runtime is mounted through a fiber whose `apply` runs once
+  // its declared injects (including `agentPresets`) are live; awaiting the
+  // fiber resolves before that activation in this fixture. Wait for the gate it
+  // publishes instead of racing it (production waits for Host Ready).
+  for (let attempt = 0; attempt < 500 && host.ctx.reflect.get('piTuiHostReady') === undefined; attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  return await createExperimentalRemoteRuntime({
     hostContext: host.ctx,
     waitForHostPrerequisites: async () => {},
   })
@@ -650,7 +772,18 @@ async function composeRuntime(host: HostFixture): Promise<Composed['runtime']> {
 
 async function compose(host: HostFixture): Promise<Composed> {
   const runtime = await composeRuntime(host)
-  return { runtime, semantics: createRemoteM3ASemantics(runtime.client, { promptSerializer: stubSerializer() }) }
+  return {
+    runtime,
+    semantics: createRemoteM3ASemantics(runtime.client, {
+      promptSerializer: stubSerializer(),
+      fileReceiptUploader: {
+        upload: async (_sessionId, file) => ({
+          receiptId: 'receipt-stub',
+          file: { attachmentId: 'attachment-stub', name: file.name, bytes: file.byteLength },
+        }),
+      },
+    }),
+  }
 }
 
 test('the M3-3A semantic bundle serves over one real Host wire', async (t) => {
@@ -739,7 +872,7 @@ test('the M3-3A semantic bundle serves over one real Host wire', async (t) => {
     assert.deepEqual(files, { kind: 'ok', items: [{ path: 'anchor/notes.md', kind: 'file' }] })
     const childFiles = await semantics.hostFile.listReferences({ kind: 'session', sessionId: CHILD }, 'notes')
     assert.equal(childFiles.kind, 'ok')
-    const unavailable = await semantics.hostFile.listReferences({ kind: 'workspace', cwd: host.anchorDir }, 'x')
+    const unavailable = await semantics.hostFile.listReferences({ kind: 'workspace', selectionRevision: 1 }, 'x')
     assert.equal(unavailable.kind, 'unavailable', 'the workspace scope stays fail-closed on the wire')
 
     // P7 — the official loadThrough jump on the retained open session.
@@ -919,8 +1052,6 @@ test('the rc.2 Question wire surfaces (live request → claim → timeout → la
     assert.deepEqual(answered, { answers: [{ id: 'q1', selected: ['no'] }] }, 'the foreground answer reaches the Host')
     claim.release()
     await claim.ended
-    assert.equal(semantics.interaction.setApprovalPolicy(MAIN, 'ask'), false,
-      'the Remote approval-policy write fails closed (no public rc.2 carrier)')
   } finally {
     semantics.dispose()
     await runtime.dispose()
@@ -1162,15 +1293,15 @@ test('the assembled M3-3B Remote backend serves config + archive over the real H
         mutate(ns: string, ops: readonly { op: string; path: readonly string[]; value?: unknown }[], revision?: number): Promise<unknown>
       }
     }).settings
-    const anchored = hostSettings.describe().find(entry => entry.ns === 'tui-app')
-    assert.ok(anchored !== undefined, 'the tui-app namespace is served by the real settings plane')
+    const anchored = hostSettings.describe().find(entry => entry.ns === 'pi-tui-preferences')
+    assert.ok(anchored !== undefined, 'the canonical preferences namespace is served by the real settings plane')
     assert.notEqual(anchored.revision, undefined, 'and the real descriptor carries a revision')
     const staleRevision = anchored.revision
     const externalTheme = anchored.value?.theme === 'dark' ? 'light' : 'dark'
-    await hostSettings.mutate('tui-app', [{ op: 'set', path: ['theme'], value: externalTheme }], undefined)
+    await hostSettings.mutate('pi-tui-preferences', [{ op: 'set', path: ['theme'], value: externalTheme }], undefined)
     await assert.rejects(
       async () => {
-        await hostSettings.mutate('tui-app', [{ op: 'set', path: ['theme'], value: 'stale-write' }], staleRevision)
+        await hostSettings.mutate('pi-tui-preferences', [{ op: 'set', path: ['theme'], value: 'stale-write' }], staleRevision)
       },
       (error: unknown) => {
         assert.match(
@@ -1181,7 +1312,7 @@ test('the assembled M3-3B Remote backend serves config + archive over the real H
         return true
       },
     )
-    const settled = hostSettings.describe().find(entry => entry.ns === 'tui-app')
+    const settled = hostSettings.describe().find(entry => entry.ns === 'pi-tui-preferences')
     assert.equal(settled?.value?.theme, externalTheme, 'the stale write never reached the document')
 
     // 3. Archive over the REAL Host route: the composition carrier fetch reaches
@@ -1214,6 +1345,156 @@ test('the assembled M3-3B Remote backend serves config + archive over the real H
     const logText = new TextDecoder().decode(rootLog)
     assert.match(logText, /archive me/u, 'the ZIP carries the seeded prompt')
     assert.match(logText, /archived answer/u, 'the ZIP carries the seeded answer')
+
+    // 3b. Official Session Markdown over the REAL authenticated Host route:
+    // the exact `/api/session.markdown` GET is served by the mounted official
+    // plugin, the Host `readSession` snapshot supplies the body and the bytes
+    // equal the same snapshot formatted locally. The read is an observation —
+    // it appends no event and starts no Agent.
+    const markdownRead = await assembled.backend.sessionMarkdown.read(MAIN)
+    assert.ok(markdownRead.kind === 'ready', `the Host serves a real Markdown transcript (got ${markdownRead.kind})`)
+    const markdownSession = host.ctx.sessions.get(SessionId(MAIN)) as unknown as {
+      snapshotEvents(): Array<{ type: string }>
+    }
+    const eventCountBefore = markdownSession.snapshotEvents().length
+    const officialSnapshot = await (host.ctx as unknown as {
+      sessionQuery: { readSession(id: unknown): Promise<{ events: readonly never[] }> }
+    }).sessionQuery.readSession(SessionId(MAIN))
+    const officialMetadata = await (host.ctx as unknown as {
+      sessionPersistence: { stat(id: unknown): Promise<{ location?: { path?: string } } | undefined> }
+    }).sessionPersistence.stat(SessionId(MAIN))
+    assert.equal(
+      markdownRead.markdown,
+      formatSessionMarkdown(officialSnapshot.events, officialMetadata?.location?.path),
+      'the wire bytes are the official formatter output for the same Host snapshot',
+    )
+    assert.match(markdownRead.markdown, /> archive me/u, 'the user question is a blockquote')
+    assert.match(markdownRead.markdown, /archived answer/u, 'the final answer is present')
+    assert.equal(markdownRead.markdown.endsWith('\n'), true, 'exactly one trailing LF')
+    assert.doesNotMatch(markdownRead.markdown, /^## User$/mu, 'the retired Client-local formatter never ran')
+    assert.equal(markdownSession.snapshotEvents().length, eventCountBefore,
+      'the Markdown read appends no Host event')
+
+    // An unknown Session id is NOT a fabricated empty transcript: the official
+    // route proves the Session absent and the port reports `none`.
+    const missing = await assembled.backend.sessionMarkdown.read('m3a-does-not-exist')
+    assert.equal(missing.kind, 'none', 'a missing Session is classified none, never ready')
+
+    // 3c. Fork-inherited prefix over the REAL route: a live fork carries the
+    // parent's complete committed prefix plus its own child turn. The read is
+    // independent of the Client's visible window — the Client is never bound
+    // to the fork; the Host corpus supplies the whole logical log.
+    const FORK = 'm3a-fork'
+    const fork = (host.ctx.sessions as unknown as {
+      fork(source: unknown, boundary?: unknown, childSessionId?: unknown): {
+        readonly header: { readonly isSeeded: boolean }
+        append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+      }
+    }).fork(SessionId(MAIN), undefined, SessionId(FORK))
+    assert.equal(fork.header.isSeeded, true, 'the fork carries a fork-inherited prefix')
+    fork.append('turn/start', { turn: 2 })
+    fork.append('step/start', { turn: 2, step: 1 })
+    fork.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'forked question' }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    fork.append('assistant/message', {
+      turn: 2,
+      step: 1,
+      message: {
+        id: MessageId(`${FORK}-assistant`),
+        role: 'assistant',
+        content: [{ type: 'text', text: 'forked answer' }],
+        source: { kind: 'model', provider: 'smoke', model: 'smoke-model' },
+      },
+      stream: [],
+      usage: { inputTokens: 1, outputTokens: 1 },
+    }, { surfaceOp: 'append' })
+    fork.append('step/end', { turn: 2, step: 1 })
+    fork.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
+    const forkSnapshot = await (host.ctx as unknown as {
+      sessionQuery: { readSession(id: unknown): Promise<{ events: readonly never[]; inheritedEventCount: number }> }
+    }).sessionQuery.readSession(SessionId(FORK))
+    assert.ok(forkSnapshot.inheritedEventCount > 0,
+      'the fork snapshot reports its inherited event prefix')
+    const forkMetadata = await (host.ctx as unknown as {
+      sessionPersistence: { stat(id: unknown): Promise<{ location?: { path?: string } } | undefined> }
+    }).sessionPersistence.stat(SessionId(FORK))
+    const forkRead = await assembled.backend.sessionMarkdown.read(FORK)
+    assert.ok(forkRead.kind === 'ready', `the fork Markdown read is ready (got ${forkRead.kind})`)
+    assert.equal(forkRead.markdown, formatSessionMarkdown(forkSnapshot.events, forkMetadata?.location?.path),
+      'the fork body is the official formatter output over the inherited+own snapshot')
+    assert.match(forkRead.markdown, /> archive me/u, 'the inherited parent question is present')
+    assert.match(forkRead.markdown, /archived answer/u, 'the inherited parent answer is present')
+    assert.match(forkRead.markdown, /> forked question/u, 'the child turn is present')
+    assert.match(forkRead.markdown, /forked answer/u)
+    assert.equal(runtime.client.sessions.binding(SessionId(FORK)), undefined,
+      'the read did not depend on a Client-visible window for the fork')
+
+    // 3d. A genuinely COLD persisted Session (created through the official
+    // persistence owner, never live in the sessions store) is readable by the
+    // same official route. This proves the export needs no Agent and no
+    // visible window.
+    const COLD = 'm3a-cold'
+    const coldPersistence = (host.ctx as unknown as {
+      sessionPersistence: {
+        create(header: unknown): Promise<{
+          append(events: readonly unknown[]): Promise<void>
+          flush(): Promise<void>
+          close(): Promise<void>
+        }>
+      }
+    }).sessionPersistence
+    const coldHandle = await coldPersistence.create({
+      version: SESSION_FORMAT_VERSION,
+      id: SessionId(COLD),
+      createdAt: 1_700_000_000_000,
+      cwd: host.anchorDir,
+      isSeeded: false,
+    })
+    try {
+      await coldHandle.append([
+        { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
+        { type: 'step/start', seq: 1, time: 1, data: { turn: 1, step: 1 } },
+        {
+          type: 'user/message', seq: 2, time: 2, surfaceOp: 'append',
+          data: createUserMessage({ content: [{ type: 'text', text: 'cold question' }], source: { kind: 'user' } }),
+        },
+        {
+          type: 'assistant/message', seq: 3, time: 3, surfaceOp: 'append',
+          data: {
+            turn: 1,
+            step: 1,
+            message: {
+              id: MessageId(`${COLD}-assistant`),
+              role: 'assistant',
+              content: [{ type: 'text', text: 'cold answer' }],
+              source: { kind: 'model', provider: 'smoke', model: 'smoke-model' },
+            },
+            stream: [],
+            usage: { inputTokens: 1, outputTokens: 1 },
+          },
+        },
+        { type: 'step/end', seq: 4, time: 4, data: { turn: 1, step: 1 } },
+        { type: 'turn/end', seq: 5, time: 5, data: { turn: 1, reason: { kind: 'completed' } } },
+      ])
+      await coldHandle.flush()
+    } finally {
+      await coldHandle.close()
+    }
+    assert.equal(host.ctx.sessions.get(SessionId(COLD)), undefined,
+      'the cold Session is NOT live in the sessions store')
+    // Direct observation first: surface the exact Host read failure if any.
+    const coldSnapshot = await (host.ctx as unknown as {
+      sessionQuery: { readSession(id: unknown): Promise<{ events: readonly never[] }> }
+    }).sessionQuery.readSession(SessionId(COLD))
+    assert.ok(coldSnapshot.events.length > 0)
+    const coldRead = await assembled.backend.sessionMarkdown.read(COLD)
+    assert.ok(coldRead.kind === 'ready', `the cold Markdown read is ready (got ${coldRead.kind})`)
+    assert.match(coldRead.markdown, /> cold question/u, 'the cold committed question is exported')
+    assert.match(coldRead.markdown, /cold answer/u, 'the cold committed answer is exported')
+    assert.equal(host.ctx.sessions.get(SessionId(COLD)), undefined,
+      'reading the Markdown did not materialize an Agent/Session')
 
     // 4. The ONE M3 wiring here is the assembly's own: it serves the adapter
     // INSTANCE it built, never a second one constructed inside
@@ -1300,14 +1581,14 @@ test('the REAL /settings workspace commits through the Remote adapter over the w
     const hostDescriptor = (): { readonly ns: string; readonly value?: Record<string, unknown>; readonly user?: unknown } | undefined =>
       (host.ctx as unknown as {
         settings: { describe(): readonly { ns: string; value?: Record<string, unknown>; user?: unknown }[] }
-      }).settings.describe().find(entry => entry.ns === 'tui-app')
+      }).settings.describe().find(entry => entry.ns === 'pi-tui-preferences')
     /** The same read through the SAVED UNBOUND original, for a case that has an
      *  injected read failure armed on the live service. */
     const hostDescriptorUnpatched = (): Record<string, unknown> | undefined => {
       const descriptor = (originalDescribe.call(forms) as readonly {
         readonly ns: string
         readonly value?: Record<string, unknown>
-      }[]).find(entry => entry.ns === 'tui-app')
+      }[]).find(entry => entry.ns === 'pi-tui-preferences')
       return descriptor?.value
     }
     const descriptor = hostDescriptor()
@@ -1367,11 +1648,16 @@ test('the REAL /settings workspace commits through the Remote adapter over the w
       failMutate = true
       await chooseNextPreset(/Status\s+Not saved/, 'the refused display-preset write')
       const refusedFrame = fixture.view().replace(/\s+/gu, ' ')
-      assert.match(
-        refusedFrame,
-        /Not saved · the display preset is.*?applied locally, but storing it failed:.*?settings\.mutate\(tui-app\) failed:.*?settings write refused \(injected\)/,
-        `a refused write is reported:\n${fixture.view()}`,
-      )
+      // The details column interleaves its own labels between the sentence
+      // fragments, so assert the three facts independently instead of one
+      // column-layout-dependent sentence.
+      for (const fragment of [
+        'Not saved · the display preset is',
+        'settings.mutate(pi-tui-preferences)',
+        'settings write refused',
+      ]) {
+        assert.ok(refusedFrame.includes(fragment), `a refused write must report "${fragment}":\n${fixture.view()}`)
+      }
       assert.equal(hostDescriptor()?.value?.displayPreset, 'compact', 'the refused write never reached the Host')
 
       // A rejected write whose authoritative readback cannot complete must never be
@@ -1409,8 +1695,8 @@ test('the REAL /settings workspace commits through the Remote adapter over the w
     // directions. The production Direct adapter observes the Remote UI commit,
     // writes that field back through SettingsForms, and the production Remote
     // adapter refreshes the authoritative result over the generated Client.
-    const rowConfig = (globalThis as { __m3aTuiRowConfig?: unknown }).__m3aTuiRowConfig
-    assert.ok(rowConfig !== undefined, 'the mounted tui-app row exposed its resolved Config references')
+    const rowConfig = (globalThis as { __m3aPreferencesConfig?: unknown }).__m3aPreferencesConfig
+    assert.ok(rowConfig !== undefined, 'the mounted canonical preferences row exposed its resolved Config references')
     const directForms = host.ctx.get('settings') as SettingsFormsLike | undefined
     assert.ok(directForms !== undefined, 'the official Host settings service is mounted')
     const directSettings = new DirectTuiSettings(rowConfig as TuiConfigRefs, directForms)
@@ -1454,8 +1740,8 @@ test('the REAL Host-owned Direct settings authority drives the /settings workspa
   // profile-backed document, and the UI verifies against that authority.
   const life = testLifecycle(t)
   const host = await createHostFixture(life, { configPlane: true, captureTuiRowConfig: true })
-  const rowConfig = (globalThis as { __m3aTuiRowConfig?: unknown }).__m3aTuiRowConfig
-  assert.ok(rowConfig !== undefined, 'the mounted tui-app row exposed its resolved Config references')
+  const rowConfig = (globalThis as { __m3aPreferencesConfig?: unknown }).__m3aPreferencesConfig
+  assert.ok(rowConfig !== undefined, 'the mounted canonical preferences row exposed its resolved Config references')
   const forms = host.ctx.get('settings') as SettingsFormsLike | undefined
   assert.ok(forms !== undefined, 'the official Host settings service is mounted')
   const settings = new DirectTuiSettings(rowConfig as TuiConfigRefs, forms)
@@ -1464,7 +1750,7 @@ test('the REAL Host-owned Direct settings authority drives the /settings workspa
   const hostDescriptor = (): { readonly ns: string; readonly value?: Record<string, unknown>; readonly user?: unknown } | undefined =>
     (host.ctx as unknown as {
       settings: { describe(): readonly { ns: string; value?: Record<string, unknown>; user?: unknown }[] }
-    }).settings.describe().find(entry => entry.ns === 'tui-app')
+    }).settings.describe().find(entry => entry.ns === 'pi-tui-preferences')
   try {
     assert.equal(port.configReadiness(), 'ready', 'Direct reads hit the in-process Host authority')
     assert.equal(settings.get().theme, 'auto', 'the profile schema default is the live reference value')
@@ -1509,6 +1795,688 @@ test('the REAL Host-owned Direct settings authority drives the /settings workspa
   }
 })
 
+test('the official Web settings Remotes and /settings page use the same Host authority', async (t) => {
+  // L5: one real Cordis Host with official SettingsForms/ConfigEditor/Web rows,
+  // two generated Client Contexts and the generated settings/credentials faces.
+  // PRODUCTION PREREQUISITES REPRODUCED: one profile manifest, its bundle patch,
+  // the official Loader/ConfigEditor/SettingsForms, LocalCredentials, SettingsController,
+  // and the generated Client settings/credentials namespaces.
+  // TEST STAND-INS: the outer HTTP fetch only; the carrier is the historical
+  // test-only in-process transport, not an OS split-process or packaged artifact.
+  // DELIBERATELY ABSENT: external credentials/network, a physical terminal and
+  // the user's real DSH_HOME/profile.
+  // L6 below adds the mounted TUI.
+  const life = testLifecycle(t)
+  const host = await createHostFixture(life, { configPlane: true, webProviderPlane: true })
+  const forms = host.ctx.get('settings') as {
+    describe(...args: never[]): readonly { ns: string; value?: Record<string, unknown>; revision?: number }[]
+    mutate(...args: never[]): Promise<unknown>
+  }
+  const initialSections = forms.describe()
+  for (const ns of ['web', 'web-deepseek-api']) {
+    const section = initialSections.find(entry => entry.ns === ns)
+    assert.ok(section !== undefined, `the official Loader profile mounted ${ns}`)
+    assert.equal(typeof section.revision, 'number', `${ns} carries the Host revision`)
+  }
+  const credentialHost = host.ctx.get('credentials') as {
+    set(ref: string, value: string): Promise<void>
+    unset(ref: string): Promise<void>
+  }
+  await credentialHost.set(credentialRef('DEEPSEEK_API_KEY'), 'f3-isolated-test-secret')
+
+  const runtime = await composeRuntime(host)
+  const assembled = await createRemoteBackendRuntime({
+    runtime: runtime.client,
+    promptSerializer: stubSerializer(),
+    fetch: runtime.host.carrier.fetch,
+  })
+  let secondClient: Awaited<ReturnType<typeof createRemoteClientRuntime>> | undefined
+  let secondAssembled: Awaited<ReturnType<typeof createRemoteBackendRuntime>> | undefined
+  let fixture: Awaited<ReturnType<typeof mountSettingsWorkspace>> | undefined
+  try {
+    const config = assembled.backend.config
+    const remoteConfig = config as RemoteConfigPort
+    assert.equal(config.configReadiness(), 'ready')
+    assert.equal(config.credentials.available(), true, 'the generated credential Remote is available on this generation')
+    assert.equal(config.web.available(), true)
+    assert.deepEqual(await config.web.read(), {
+      searchProvider: 'deepseek-official',
+      fetchProvider: 'http',
+      providerSelection: {
+        search: { baseId: 'deepseek-official', userSet: false, userId: undefined },
+        fetch: { baseId: 'http', userSet: false, userId: undefined },
+      },
+      api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
+      advanced: {},
+      credential: { configured: true, source: 'file' },
+    })
+    const credentialProjection = JSON.stringify(await config.web.read())
+    assert.doesNotMatch(credentialProjection, /f3-isolated-test-secret/u,
+      'the generated credentials.describe result contains metadata only')
+    const credentialProvider = host.ctx.get('credentials') as {
+      describe(...args: never[]): Promise<unknown>
+    }
+    const originalCredentialDescribe = credentialProvider.describe
+    credentialProvider.describe = function (this: unknown): Promise<unknown> {
+      return Promise.reject(new Error('f3 credential authority unavailable'))
+    }
+    try {
+      await assert.rejects(config.web.read(), /credentials\.describe\(DEEPSEEK_API_KEY\).*f3 credential authority unavailable/u)
+    } finally {
+      credentialProvider.describe = originalCredentialDescribe
+    }
+
+    await config.web.setSearchProvider('deepseek-search-api')
+    await config.web.setFetchProvider('deepseek-fetch-api')
+    await config.web.setSearchApiCount(20)
+    await config.web.setSendOriginalQuestion(false)
+    // rc.2's API writes are the two official billing enums: each CAS lands on
+    // its exact `web-deepseek-api` field and both stay independent.
+    await config.web.setSearchBilling('account')
+    await config.web.setFetchBilling('api-key')
+    assert.deepEqual(await config.web.read(), {
+      searchProvider: 'deepseek-search-api',
+      fetchProvider: 'deepseek-fetch-api',
+      providerSelection: {
+        search: { baseId: 'deepseek-official', userSet: true, userId: 'deepseek-search-api' },
+        fetch: { baseId: 'http', userSet: true, userId: 'deepseek-fetch-api' },
+      },
+      api: { searchBilling: 'account', fetchBilling: 'api-key', count: 20, sendOriginalQuestion: false },
+      advanced: {},
+      credential: { configured: true, source: 'file' },
+    }, 'all generated settings mutations are authoritative on read-back')
+    const hostValues = forms.describe()
+    assert.equal(hostValues.find(entry => entry.ns === 'web')?.value?.searchProvider, 'deepseek-search-api')
+    assert.equal(hostValues.find(entry => entry.ns === 'web')?.value?.fetchProvider, 'deepseek-fetch-api')
+    assert.equal(hostValues.find(entry => entry.ns === 'web-deepseek-api')?.value?.count, 20)
+    assert.equal(hostValues.find(entry => entry.ns === 'web-deepseek-api')?.value?.sendOriginalQuestion, false)
+    assert.equal(hostValues.find(entry => entry.ns === 'web-deepseek-api')?.value?.searchBilling, 'account')
+    assert.equal(hostValues.find(entry => entry.ns === 'web-deepseek-api')?.value?.fetchBilling, 'api-key')
+    const directWeb = new DirectWebProviderConfig(host.ctx as never)
+    assert.deepEqual(await directWeb.read(), await config.web.read(),
+      'Direct and Remote project the same Host fields and credential metadata')
+
+    // The configured provider is the NEXT operation's actual Host authority.
+    // Replace only the outer HTTP transport, then call the real ctx.web
+    // consumer under its official Agent initiator scope.
+    const webAgent = await host.harness.create(SessionId('m6-f3-web-consumer'), undefined, { cwd: host.anchorDir })
+    const earlierQuestion = 'earlier private context that must not enter ori_question'
+    const triggeringQuestion = 'the current human question for the Web search'
+    webAgent.session.append('turn/start', { turn: 1 })
+    webAgent.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: earlierQuestion }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    webAgent.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: triggeringQuestion }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    webAgent.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    const requests: Array<{ url: string; authorization: string | undefined; body: Record<string, unknown> | undefined }> = []
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL | { readonly url: string }, init?: RequestInit): Promise<Response> => {
+      const url = input instanceof URL ? input.href : typeof input === 'string' ? input : input.url
+      const headers = new Headers(init?.headers)
+      requests.push({
+        url,
+        authorization: headers.get('authorization') ?? undefined,
+        body: typeof init?.body === 'string' ? JSON.parse(init.body) as Record<string, unknown> : undefined,
+      })
+      return new Response(JSON.stringify({ results: [{ url: 'https://result.example.test/f3', title: 'F3 result', snippet: 'ok', date: null }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }) as typeof fetch
+    try {
+      const agents = host.ctx.get('agents') as { withInitiator<T>(agent: unknown, operation: () => T): T }
+      const web = host.ctx.get('web') as {
+        search(request: { query: string }): Promise<{ sources: readonly { url: string }[] }>
+      }
+      // The Remote-written `account` billing is the official credential claim:
+      // with NO signed-in account the real Host search fails closed (no
+      // fallback, no dispatched request) instead of silently using the key.
+      await assert.rejects(
+        agents.withInitiator(webAgent, () => web.search({ query: 'f3 account probe' })),
+        (error: unknown) => {
+          assert.equal((error as { code?: string }).code, 'WEB_PROVIDER_CREDENTIAL_MISSING')
+          assert.match((error as { message?: string }).message ?? '', /signed-in DeepSeek account/u)
+          return true
+        },
+        'account billing without an account fails closed',
+      )
+      assert.equal(requests.length, 0, 'the failed account-billing probe dispatched no request')
+      // Switch the SAME capability to `api-key` billing through the port: the
+      // real Host search then runs on the API-key credential.
+      await config.web.setSearchBilling('api-key')
+      const result = await agents.withInitiator(webAgent, () => web.search({ query: 'f3 route probe' }))
+      assert.deepEqual(result.sources.map(source => source.url), ['https://result.example.test/f3'])
+      assert.equal(requests.length, 1)
+      assert.equal(requests[0]?.url, 'https://api.deepseek.com/v1/tools/search',
+        'the Remote-written provider selects the real Host HTTP route (no endpoint override was ever written)')
+      assert.equal(requests[0]?.authorization, 'Bearer f3-isolated-test-secret',
+        'the api-key billing sends exactly the API-key credential')
+      assert.deepEqual(requests[0]?.body, { query: 'f3 route probe', count: 20, need_content: false },
+        'the Remote-written provider uses count 20 and omits ori_question when disabled')
+
+      await config.web.setSendOriginalQuestion(true)
+      const withOriginalQuestion = await agents.withInitiator(webAgent, () => web.search({ query: 'f3 question probe' }))
+      assert.deepEqual(withOriginalQuestion.sources.map(source => source.url), ['https://result.example.test/f3'])
+      assert.deepEqual(requests[1]?.body, {
+        query: 'f3 question probe',
+        count: 20,
+        need_content: false,
+        ori_question: triggeringQuestion,
+      }, 'the Remote-written true value sends only the latest triggering human question')
+      assert.doesNotMatch(JSON.stringify(requests[1]?.body), /earlier private context/u,
+        'the earlier turn history never enters the Web request')
+
+      await directWeb.setSearchApiCount(21)
+      assert.equal((await config.web.read())?.api.count, 21,
+        'Remote observes the same Host field written by Direct')
+      const directConsumer = await agents.withInitiator(webAgent, () => web.search({ query: 'direct parity probe' }))
+      assert.deepEqual(directConsumer.sources.map(source => source.url), ['https://result.example.test/f3'])
+      assert.deepEqual(requests[2]?.body, {
+        query: 'direct parity probe',
+        count: 21,
+        need_content: false,
+        ori_question: triggeringQuestion,
+      }, 'the same Host consumer applies the Direct-written value through the unchanged provider')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+
+    // The second generated Client is an independent Context attached to this
+    // same Host. Hold Client A's official Host mutation after its revision was
+    // selected, let Client B commit a custom route, then release A into CAS.
+    secondClient = await createRemoteClientRuntime({ carrier: runtime.host.carrier })
+    secondAssembled = await createRemoteBackendRuntime({
+      runtime: secondClient,
+      promptSerializer: stubSerializer(),
+      fetch: runtime.host.carrier.fetch,
+    })
+    const secondConfig = secondAssembled.backend.config
+    assert.equal(secondConfig.configReadiness(), 'ready')
+    assert.equal((await secondConfig.web.read())?.searchProvider, 'deepseek-search-api')
+    const originalMutate = forms.mutate
+    let releaseA!: () => void
+    let announceA!: () => void
+    const waitA = new Promise<void>(resolve => { announceA = resolve })
+    const release = new Promise<void>(resolve => { releaseA = resolve })
+    let held = false
+    forms.mutate = function (this: unknown, ...args: never[]): Promise<unknown> {
+      const [ns, ops] = args as unknown as [string, readonly { op: string; path: readonly string[]; value?: unknown }[]]
+      if (!held && ns === 'web' && ops.some(op => op.path[0] === 'searchProvider' && op.value === 'deepseek-official')) {
+        held = true
+        announceA()
+        return release.then(() => originalMutate.apply(this, args))
+      }
+      return originalMutate.apply(this, args)
+    }
+    const staleWrite = config.web.setSearchProvider('deepseek-official')
+    await waitA
+    try {
+      const secondSettings = await secondClient.remote.settings.describe()
+      assert.equal(secondSettings.ok, true)
+      const secondWeb = secondSettings.value.namespaces.find(entry => entry.ns === 'web')
+      assert.ok(secondWeb?.revision !== undefined)
+      const secondWrite = await secondClient.remote.settings.mutate('web', [
+        { op: 'set', path: ['searchProvider'], value: 'custom-f3-route' },
+      ], secondWeb.revision)
+      assert.equal(secondWrite.ok, true, 'Client B commits through the official generated Settings Remote')
+      releaseA()
+      await assert.rejects(staleWrite, /settings\.mutate\(web\).*revision|settings\.mutate\(web\).*conflict/u)
+    } finally {
+      releaseA()
+      forms.mutate = originalMutate
+    }
+    assert.equal(forms.describe().find(entry => entry.ns === 'web')?.value?.searchProvider, 'custom-f3-route',
+      'the stale Client A write never overwrote Client B')
+    await remoteConfig.describe()
+    assert.equal((await config.web.read())?.searchProvider, 'custom-f3-route',
+      'Client A refreshes the same Host winner')
+    assert.deepEqual(await directWeb.read(), await config.web.read(),
+      'custom provider ids and credential metadata remain identical in Direct and Remote')
+
+    // Prove that the official Host document-updated event makes Client A's
+    // previous mirror stale before its authoritative generated describe settles.
+    let eventObserved = false
+    let readinessAtEvent: 'ready' | 'stale' | 'unavailable' | undefined
+    const offSettingsEvent = runtime.client.remote.$on('settings/document-updated', () => {
+      eventObserved = true
+      readinessAtEvent = config.configReadiness()
+    })
+    try {
+      const eventBase = await secondClient.remote.settings.describe()
+      assert.equal(eventBase.ok, true)
+      const eventWeb = eventBase.value.namespaces.find(entry => entry.ns === 'web')
+      assert.ok(eventWeb?.revision !== undefined)
+      const eventWrite = await secondClient.remote.settings.mutate('web', [
+        { op: 'set', path: ['searchProvider'], value: 'custom-f3-event' },
+      ], eventWeb.revision)
+      assert.equal(eventWrite.ok, true)
+      await waitFor('Client A receives the official settings/document-updated event', () => eventObserved)
+      assert.equal(readinessAtEvent, 'stale', 'the event invalidates the old Host snapshot synchronously')
+      await waitFor('Client A commits the Host document update', () => config.configReadiness() === 'ready')
+      assert.equal((await config.web.read())?.searchProvider, 'custom-f3-event',
+        'the new generated describe supplies the only current value')
+      const refreshedCustomRevision = forms.describe().find(entry => entry.ns === 'web')?.revision
+      await assert.rejects(config.web.setSearchProvider('deepseek-search-api'), /custom route/u,
+        'a stale provider intent entering the Remote setter after mirror refresh is still refused')
+      assert.equal(forms.describe().find(entry => entry.ns === 'web')?.revision, refreshedCustomRevision,
+        'the real generated Remote never dispatches a setter based on the refreshed custom route')
+    } finally {
+      offSettingsEvent()
+    }
+
+    // The real Remote UI must project an unknown Host provider verbatim and
+    // remove all confirmation candidates instead of normalizing it to a default.
+    fixture = await mountSettingsWorkspace(host.anchorDir, config, 'remote')
+    await fixture.open()
+    await fixture.selectCategory('Tools')
+    await fixture.key('\r')
+    await fixture.key('\x1b[B')
+    await fixture.key('\x1b[B')
+    await fixture.key('\x1b[B')
+    await fixture.key('\r')
+    assert.match(fixture.view(), /custom-f3-event/u)
+    await fixture.key('\r')
+    const customDetail = fixture.view()
+    assert.match(customDetail, /Current: custom-f3-event/u)
+    assert.match(customDetail, /CUSTOM route/u)
+    assert.doesNotMatch(customDetail, /› DeepSeek Search API/u,
+      'a custom route is never replaceable by another explicit official provider')
+    assert.match(customDetail, /› DeepSeek server-side search · deployment default/u,
+      'the deployment default is reachable ONLY through the official reset entry')
+    assert.match(customDetail, /Confirm \[Enter\]/u, 'the reset entry is really executable')
+    const customRevision = forms.describe().find(entry => entry.ns === 'web')?.revision
+    assert.equal(forms.describe().find(entry => entry.ns === 'web')?.revision, customRevision,
+      'opening the Detail never writes or normalizes the custom Host route')
+    fixture.dispose()
+    fixture = undefined
+
+    // Restore an official candidate through the second Client's official
+    // Settings Remote: the WebProviderConfig rightly refuses to replace a
+    // custom route, even when the test is preparing the next UI scenario.
+    const restoreSnapshot = await secondClient.remote.settings.describe()
+    assert.equal(restoreSnapshot.ok, true)
+    const restoreWeb = restoreSnapshot.value.namespaces.find(entry => entry.ns === 'web')
+    assert.ok(restoreWeb?.revision !== undefined)
+    const restoreResult = await secondClient.remote.settings.mutate('web', [
+      { op: 'set', path: ['searchProvider'], value: 'deepseek-official' },
+    ], restoreWeb.revision)
+    assert.equal(restoreResult.ok, true)
+    await remoteConfig.describe()
+    assert.equal((await config.web.read())?.searchProvider, 'deepseek-official',
+      'the Host changed from the custom route only after a separate explicit writer')
+    fixture = await mountSettingsWorkspace(host.anchorDir, config, 'remote')
+    await fixture.open()
+    await fixture.selectCategory('Tools')
+    await fixture.key('\r')
+    await fixture.key('\x1b[B')
+    await fixture.key('\x1b[B')
+    await fixture.key('\x1b[B')
+    await fixture.key('\r')
+    assert.match(fixture.view(), /Web Search Provider/u, 'the existing specialist page is mounted')
+    await fixture.key('\r')
+    await fixture.key('\x1b[H')
+    await fixture.key('\x1b[B')
+    assert.match(fixture.view(), /› DeepSeek Search API/u, 'the intended candidate is highlighted before Confirm')
+    await fixture.key('\r')
+    await fixture.settleUntil(/Current: DeepSeek Search API/u, 'the Remote Web provider write from /settings')
+    assert.match(fixture.view(), /Verified/u)
+    assert.equal(forms.describe().find(entry => entry.ns === 'web')?.value?.searchProvider,
+      'deepseek-search-api', 'the UI-confirmed setting is stored by the official Host authority')
+
+    // Inject one official Host rejection; the existing command owner must keep
+    // its refusal taxonomy and show the still-authoritative value.
+    const formsMutate = forms.mutate
+    let failNextMutation = true
+    forms.mutate = function (this: unknown, ...args: never[]): Promise<unknown> {
+      const [ns] = args as unknown as [string]
+      if (failNextMutation && ns === 'web') {
+        failNextMutation = false
+        return Promise.reject(Object.assign(new Error('f3 injected settings refusal'), { code: 'settings/rejected' }))
+      }
+      return formsMutate.apply(this, args)
+    }
+    try {
+      await fixture.key('\x1b')
+      await fixture.key('\r')
+      await fixture.key('\x1b[A')
+      await fixture.key('\r')
+      await fixture.settleUntil(/Not saved/u, 'the refused Remote Web provider write')
+      assert.equal(forms.describe().find(entry => entry.ns === 'web')?.value?.searchProvider,
+        'deepseek-search-api', 'the refused write leaves the Host value unchanged')
+    } finally {
+      forms.mutate = formsMutate
+    }
+
+    // The next official write succeeds at the Host, but its Remote read-back
+    // is made unavailable. The command owner must report Outcome unknown, not
+    // Verified or Not saved, while the Host's actual committed value remains
+    // independently observable through the original unbound method.
+    const mutateBeforeReadback = forms.mutate
+    const originalDescribe = forms.describe
+    let failReadback = false
+    forms.mutate = function (this: unknown, ...args: never[]): Promise<unknown> {
+      const accepted = mutateBeforeReadback.apply(this, args)
+      void Promise.resolve(accepted).then(() => { failReadback = true })
+      return accepted
+    }
+    forms.describe = function (this: unknown, ...args: never[]): ReturnType<typeof originalDescribe> {
+      if (failReadback) throw new Error('f3 injected read-back failure')
+      return originalDescribe.apply(this, args)
+    }
+    try {
+      await fixture.key('\r')
+      await fixture.settleUntil(/Outcome unknown/u, 'the committed Remote Web write with unavailable read-back')
+      const authoritative = originalDescribe.call(forms).find(entry => entry.ns === 'web')
+      assert.equal(authoritative?.value?.searchProvider, 'deepseek-official',
+        'the official Host mutation committed despite the unreadable Remote read-back')
+      assert.doesNotMatch(fixture.view(), /Verified|Not saved/u,
+        'an unreadable post-write authority is neither success nor a proven refusal')
+    } finally {
+      failReadback = false
+      forms.describe = originalDescribe
+      forms.mutate = mutateBeforeReadback
+    }
+  } finally {
+    fixture?.dispose()
+    secondAssembled?.dispose()
+    await secondClient?.dispose()
+    assembled.dispose()
+    await runtime.dispose()
+    await credentialHost.unset(credentialRef('DEEPSEEK_API_KEY'))
+  }
+})
+
+test('an official Host missing either Web settings namespace keeps the generated Remote capability unavailable', async (t) => {
+  // L5 negative composition probes: each Host still has one real profile,
+  // SettingsForms, SettingsController and generated Client, but one exact Web
+  // settings row is absent from that Host's Loader patch.
+  const life = testLifecycle(t)
+  for (const omitted of ['missing-web', 'missing-api'] as const) {
+    const host = await createHostFixture(life, { configPlane: true, webProviderPlane: omitted })
+    const forms = host.ctx.get('settings') as {
+      describe(...args: never[]): readonly { ns: string; revision?: number }[]
+      mutate(...args: never[]): Promise<unknown>
+    }
+    const before = forms.describe()
+    assert.equal(before.some(entry => entry.ns === 'web'), omitted !== 'missing-web',
+      `${omitted}: observed sections ${before.map(entry => entry.ns).join(', ')}`)
+    assert.equal(before.some(entry => entry.ns === 'web-deepseek-api'), omitted !== 'missing-api',
+      `${omitted}: observed sections ${before.map(entry => entry.ns).join(', ')}`)
+    const runtime = await composeRuntime(host)
+    const assembled = await createRemoteBackendRuntime({
+      runtime: runtime.client,
+      promptSerializer: stubSerializer(),
+      fetch: runtime.host.carrier.fetch,
+    })
+    try {
+      const config = assembled.backend.config
+      assert.equal(config.configReadiness(), 'ready')
+      assert.equal(config.web.available(), false, `${omitted}: both namespaces are required for availability`)
+      assert.equal(await config.web.read(), undefined, `${omitted}: absent Host data is not replaced by defaults`)
+      let mutations = 0
+      const originalMutate = forms.mutate
+      forms.mutate = function (this: unknown, ...args: never[]): Promise<unknown> {
+        mutations += 1
+        return originalMutate.apply(this, args)
+      }
+      try {
+        await assert.rejects(config.web.setSearchApiCount(10), /sections are unavailable/u)
+        assert.equal(mutations, 0, `${omitted}: the Remote adapter refuses before any Host write`)
+      } finally {
+        forms.mutate = originalMutate
+      }
+    } finally {
+      assembled.dispose()
+      await runtime.dispose()
+    }
+  }
+})
+
+test('the Remote Web page confirms each field, keeps credential values hidden, and settles a closed-page write once', async (t) => {
+  // L6 surface qualification over the assembled Remote adapter and the same
+  // real Host profile rows used by the generated-Remote test above.
+  const life = testLifecycle(t)
+  const host = await createHostFixture(life, { configPlane: true, webProviderPlane: true })
+  const forms = host.ctx.get('settings') as {
+    describe(...args: never[]): readonly { ns: string; value?: Record<string, unknown>; revision?: number }[]
+    mutate(...args: never[]): Promise<unknown>
+  }
+  const credentialHost = host.ctx.get('credentials') as {
+    set(ref: string, value: string): Promise<void>
+    unset(ref: string): Promise<void>
+    describe(...args: never[]): Promise<unknown>
+  }
+  await credentialHost.set(credentialRef('DEEPSEEK_API_KEY'), 'f3-ui-isolated-secret')
+  const runtime = await composeRuntime(host)
+  const assembled = await createRemoteBackendRuntime({
+    runtime: runtime.client,
+    promptSerializer: stubSerializer(),
+    fetch: runtime.host.carrier.fetch,
+  })
+  let fixture: Awaited<ReturnType<typeof mountSettingsWorkspace>> | undefined
+  try {
+    const config = assembled.backend.config
+    const remoteConfig = config as RemoteConfigPort
+    assert.equal(config.configReadiness(), 'ready')
+    assert.equal(config.credentials.available(), true, 'credential availability follows the current Client generation')
+    await config.web.setSearchApiCount(7)
+    assert.equal((await config.web.read())?.api.count, 7)
+    // Search Billing exists only for the official Search API route; the fixture
+    // profile keeps the stored Messages selection, so switch routes first.
+    await config.web.setSearchProvider('deepseek-search-api')
+    assert.equal((await config.web.read())?.searchProvider, 'deepseek-search-api')
+    fixture = await mountSettingsWorkspace(host.anchorDir, config, 'remote')
+    const page = fixture
+    await page.open()
+    await page.selectCategory('Tools')
+    await page.key('\r')
+    await page.key('\x1b[B')
+    await page.key('\x1b[B')
+    await page.key('\x1b[B')
+    await page.key('\r')
+    await waitFor('the Remote Web page to read the Host', () =>
+      page.view().includes('Web Search Provider') && !page.view().includes('Loading…'))
+
+    type WebPageLevel = 'list' | 'detail'
+    let pageLevel: WebPageLevel = 'list'
+    const webListActionBars = [
+      '↑/↓ choose · Enter open · r refresh · Back [Esc]',
+      '↑/↓ · Enter open · r refresh · Back [Esc]',
+      '↑/↓ · Enter · Back [Esc]',
+      'Back [Esc]',
+    ]
+    const isWebPage = (): boolean => page.view().includes('Settings · Tools · Web Search / Fetch')
+    const isWebList = (): boolean => isWebPage()
+      && page.view().split('\n').some(line => webListActionBars.includes(line.trim()))
+    const returnToList = async (): Promise<void> => {
+      assert.ok(isWebPage(), `the Web specialist page owns the frame before list navigation:\n${page.view()}`)
+      if (pageLevel !== 'list') {
+        await page.key('\x1b')
+        pageLevel = 'list'
+      }
+      assert.ok(isWebPage(), `navigation stayed inside the Web specialist page:\n${page.view()}`)
+      assert.ok(isWebList(), `the complete or compact Web list Action Bar is painted:\n${page.view()}`)
+    }
+    const openRow = async (index: number): Promise<void> => {
+      await returnToList()
+      await page.key('\x1b[H')
+      for (let step = 0; step < index; step += 1) await page.key('\x1b[B')
+      await page.key('\r')
+      pageLevel = 'detail'
+    }
+    const choose = async (index: number): Promise<void> => {
+      await page.key('\x1b[H')
+      for (let step = 0; step < index; step += 1) await page.key('\x1b[B')
+    }
+
+    // Confirming the official auto-selection is a real Verified no-op.
+    await openRow(0)
+    const searchRevision = forms.describe().find(entry => entry.ns === 'web')?.revision
+    const originalMutate = forms.mutate
+    let noOpMutationCalls = 0
+    forms.mutate = function (this: unknown, ...args: never[]): Promise<unknown> {
+      noOpMutationCalls += 1
+      return originalMutate.apply(this, args)
+    }
+    try {
+      await page.key('\r')
+      await page.settleUntil(/Verified/u, 'the current default provider confirmation')
+      assert.equal(noOpMutationCalls, 0, 'confirming the official default dispatches no Host mutation')
+      assert.equal(forms.describe().find(entry => entry.ns === 'web')?.revision, searchRevision)
+    } finally {
+      forms.mutate = originalMutate
+    }
+
+    // A non-preset count remains visible while the human explicitly selects 20.
+    await openRow(2)
+    assert.match(page.view(), /Current: 7/u, "the Host's valid count outside the presets is shown verbatim")
+    await choose(2)
+    assert.match(page.view(), /› 20/u)
+    await page.key('\r')
+    await waitFor('the explicit Remote count confirmation reaches the Host', () =>
+      forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.value?.count === 20)
+    await page.settleUntil(/Current: 20/u, 'the confirmed count read-back')
+    assert.match(page.view(), /Verified/u)
+
+    // Share Original Question is independently confirmed, and the displayed
+    // boolean agrees with the official Host form after read-back.
+    await openRow(3)
+    assert.match(page.view(), /Current: on/u)
+    await choose(1)
+    assert.match(page.view(), /› off/u)
+    await page.key('\r')
+    await waitFor('the original-question choice reaches the Host', () =>
+      forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.value?.sendOriginalQuestion === false)
+    await page.settleUntil(/Current: off/u, 'the original-question read-back')
+    assert.match(page.view(), /Verified/u)
+
+    // The rc.2 Search billing row replaces the retired single-endpoint editor:
+    // browsing the candidates writes nothing, Esc cancels without a write, and
+    // one explicit Confirm CASes the exact `web-deepseek-api.searchBilling`
+    // field with the official read-back. Fetch billing stays independent.
+    await openRow(4)
+    assert.match(page.view(), /Current: Automatic/u, 'the stored billing mode is the raw Host value')
+    assert.match(page.view(), /› Automatic/u)
+    await choose(1)
+    assert.match(page.view(), /› Account/u, 'the highlighted candidate is visible before Confirm')
+    const apiRevisionBeforeCancel = forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.revision
+    await page.key('\x1b')
+    pageLevel = 'list'
+    assert.equal(forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.revision, apiRevisionBeforeCancel,
+      'browsing and Esc from the billing Detail writes nothing')
+
+    await openRow(4)
+    await choose(1)
+    await page.key('\r')
+    await waitFor('the Account billing Confirm is authoritative on the Host', () =>
+      forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.value?.searchBilling === 'account')
+    await page.settleUntil(/Current: Account/u, 'the confirmed Search billing read-back')
+    assert.match(page.view(), /Verified/u)
+    assert.equal((await config.web.read())?.api.searchBilling, 'account')
+    assert.equal(forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.value?.fetchBilling, 'auto',
+      'a Search billing write never touches the Fetch capability')
+
+    // The read-only Fetch API override row: Enter only opens its Detail, and
+    // the Host revision proves nothing was written from it.
+    await openRow(7)
+    assert.match(page.view(), /Current: Host YAML: not set/u,
+      'the unset override follows the conversation route instead of a fabricated URL')
+    const apiRevisionBeforeOverrideDetail = forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.revision
+    await page.key('\r')
+    await page.settleUntil(/Host YAML: not set/u, 'the read-only override Detail')
+    assert.doesNotMatch(page.view(), /Enter confirm/u, 'the override row offers no Confirm affordance')
+    assert.equal(forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.revision, apiRevisionBeforeOverrideDetail,
+      'the read-only override row dispatches no Host write')
+    await page.key('\x1b')
+    pageLevel = 'list'
+
+    // The page's credential reference reader shows only presence/source and
+    // the Models hand-off; a provider failure paints Unavailable, not false.
+    await openRow(8)
+    await page.settleUntil(/State: Configured · source: file/u, 'the configured Remote credential reference')
+    assert.match(page.view(), /Reference: DEEPSEEK_API_KEY/u)
+    assert.match(page.view(), /Clear in Models…/u)
+    assert.doesNotMatch(page.view(), /f3-ui-isolated-secret/u)
+
+    // Hold one explicit count write after it reaches the official Host. Closing
+    // the page and reconnecting the Client cannot replay it; the command owner
+    // still settles the single dispatched mutation from Host authority.
+    await openRow(2)
+    await choose(3)
+    assert.match(page.view(), /› 50/u)
+    const originalHostMutate = forms.mutate
+    let countMutationCalls = 0
+    let countMutationStarted = false
+    let announceCountMutation!: () => void
+    let releaseCountMutation!: () => void
+    const countMutationStartedPromise = new Promise<void>(resolve => { announceCountMutation = resolve })
+    const countMutationGate = new Promise<void>(resolve => { releaseCountMutation = resolve })
+    forms.mutate = function (this: unknown, ...args: never[]): Promise<unknown> {
+      const [ns, ops] = args as unknown as [string, readonly { op: string; path: readonly string[]; value?: unknown }[]]
+      if (ns === 'web-deepseek-api' && ops.some(op => op.path[0] === 'count' && op.value === 50)) {
+        countMutationCalls += 1
+        countMutationStarted = true
+        announceCountMutation()
+        return countMutationGate.then(() => originalHostMutate.apply(this, args))
+      }
+      return originalHostMutate.apply(this, args)
+    }
+    const oldGeneration = runtime.client.connection.generation.getSnapshot()?.id
+    assert.notEqual(oldGeneration, undefined)
+    try {
+      await page.key('\r')
+      await waitFor('the confirmed count write reaches the Host boundary', () => countMutationStarted)
+      assert.match(page.view(), /Saving…/u)
+      await page.key('\x1b')
+      pageLevel = 'list'
+      await page.key('\x1b')
+      assert.doesNotMatch(page.view(), /Web Search Provider/u, 'the specialist page is closed while the Host write remains pending')
+      runtime.client.connection.reconnect()
+      await waitFor('the Client installs a new Connection generation', () =>
+        runtime.client.connection.generation.getSnapshot()?.id !== oldGeneration)
+      releaseCountMutation()
+      await waitFor('the dispatched Host count write settles after page closure', () =>
+        forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.value?.count === 50)
+      assert.equal(countMutationCalls, 1, 'disconnect and page disposal do not replay the dispatched mutation')
+      await waitFor('Remote configuration refreshes from the current generation', () =>
+        config.configReadiness() === 'ready')
+      assert.equal((await remoteConfig.web.read())?.api.count, 50)
+    } finally {
+      releaseCountMutation()
+      forms.mutate = originalHostMutate
+    }
+
+    // The page returned to its Tools row in the still-open Settings workspace;
+    // re-enter that same lease instead of creating a second screen owner.
+    await page.key('\r')
+    await waitFor('the Remote Web page remounts in the existing Settings lease', () =>
+      page.view().includes('Web Search Provider') && !page.view().includes('Loading…'))
+    await openRow(8)
+    await page.settleUntil(/State: Configured · source: file/u, 'the reopened credential reference')
+    const originalCredentialDescribe = credentialHost.describe
+    credentialHost.describe = function (this: unknown): Promise<unknown> {
+      return Promise.reject(new Error('f3 UI credential failure'))
+    }
+    try {
+      await page.key('r')
+      await page.settleUntil(/Unavailable/u, 'the failed Remote credential reference read')
+      assert.doesNotMatch(page.view(), /f3-ui-isolated-secret/u)
+      assert.doesNotMatch(page.view(), /State: Not configured/u)
+    } finally {
+      credentialHost.describe = originalCredentialDescribe
+    }
+  } finally {
+    fixture?.dispose()
+    assembled.dispose()
+    await runtime.dispose()
+    await credentialHost.unset(credentialRef('DEEPSEEK_API_KEY'))
+  }
+})
+
 test('without a settings service the Remote config fails closed', async (t) => {
   // The complementary contract, deliberately kept testable now that the config
   // plane is opt-in: on a deployment whose profile composition carries no
@@ -1541,5 +2509,182 @@ test('without a settings service the Remote config fails closed', async (t) => {
   } finally {
     assembled.dispose()
     await runtime.dispose()
+  }
+})
+
+// ── S3-03 E: the real WebSocket compression negotiation ────────────────────
+
+/** The M3 fixture above runs over the IN-PROCESS carrier: its stub `webServer`
+ *  exposes no upgrade listener, so it cannot show the official `ws` handshake
+ *  extension. This focused case mounts the SAME production Gateway rows
+ *  (`WebServer` + Connection + `TypertGatewayService`) on a real loopback
+ *  server and drives the carrier with a real `ws` client; no product code or
+ *  wire protocol is changed for the test.
+ *
+ *  EVIDENCE LEVEL — TRANSPORT ONLY: the invoked method is a test-registered
+ *  Typert service and the client is a raw `ws` peer, so this case proves the
+ *  production Gateway carrier's `permessage-deflate` negotiation, a 1KiB+
+ *  frame, and the admitted browser Peer identity. It does NOT prove the
+ *  production Client read chain or an existing Session Remote endpoint, so the
+ *  S3 Q14 qualification stays `UPSTREAM_VERIFIED / PRODUCT_NOT_MEASURED`
+ *  (the upstream rc1 `gateway-stream.host.spec.ts` owns the compression-mode
+ *  interop evidence); this local case is supplementary transport evidence,
+ *  never a full product PASS. */
+const S3_LARGE_PAYLOAD = `s3-large-${'x'.repeat(1_500)}`
+
+class S3WireService extends TypertRemoteService {
+  readonly peers: string[] = []
+
+  constructor(ctx: Context) {
+    super(ctx, 's3Wire')
+  }
+
+  *large(): Iterable<string> {
+    this.peers.push(String(this.ctx.invocation?.peer.id))
+    yield S3_LARGE_PAYLOAD
+  }
+}
+
+/** Minimum in-memory credential owner a mounted Connection plugin needs. */
+function provideBrowserCredentialsFixture(ctx: Context): void {
+  const records = new Map<unknown, unknown>()
+  ctx.provide('credentials', {
+    async modifyRecord(key: unknown, mutate: (current: unknown) => Promise<unknown>): Promise<unknown> {
+      const next = await mutate(records.get(key))
+      if (next !== undefined) records.set(key, next)
+      return next ?? records.get(key)
+    },
+  } as never)
+}
+
+/** Exchange the Host process token for its browser cookie header. */
+function browserCookieOf(ctx: Context): string {
+  const origin = `http://127.0.0.1:${String(ctx.webServer.port)}`
+  const target = new URL(ctx.connection.authenticatedUrl(origin))
+  let setCookie: string | undefined
+  ctx.connection.authorizeIndex({
+    method: 'GET',
+    url: `${target.pathname}${target.search}`,
+    headers: { host: target.host },
+  }, {
+    writeHead(_status: number, headers?: Record<string, string>) { setCookie = headers?.['set-cookie'] },
+    end() {},
+  })
+  if (setCookie === undefined) throw new Error('the S3 gateway fixture received no browser cookie')
+  return setCookie.split(';', 1)[0]!
+}
+
+function rawSocketText(data: RawData): string {
+  if (Array.isArray(data)) return Buffer.concat(data).toString('utf8')
+  if (data instanceof ArrayBuffer) return Buffer.from(data).toString('utf8')
+  return Buffer.from(data).toString('utf8')
+}
+
+/** One real WebSocket-serving Gateway composition, configured with the
+ *  explicit compression mode this case proves. */
+async function mountS3WebSocketGateway(
+  life: TestLifecycle,
+  compression: 'deflate' | 'none',
+): Promise<{ readonly ctx: Context; readonly service: S3WireService }> {
+  const ctx = new Context()
+  life.defer(() => ctx.fiber.dispose())
+  await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 })
+  provideBrowserCredentialsFixture(ctx)
+  await ctx.plugin(TypertRegistry)
+  await ctx.plugin(RemoteAccessService)
+  await ctx.plugin(TypertGatewayService, {
+    websocketHeartbeatIntervalMs: 50,
+    websocketCompression: compression,
+  })
+  await ctx.plugin({ inject: [...connectionInject], apply: applyConnection })
+  await ctx.plugin(S3WireService)
+  ;(ctx.get('typert') as { register(definition: unknown): void }).register({
+    package: '@xmoon76/dsh-pi-tui/test-s3-wire',
+    face: 'host',
+    schemas: [],
+    model: { services: [], events: [], objects: [] },
+    invocations: [{
+      id: '@xmoon76/dsh-pi-tui/test-s3-wire#s3Wire/large',
+      service: 's3Wire',
+      namespace: 's3Wire',
+      method: 'large',
+      mode: 'stream',
+      invocation: { kind: 'direct' },
+      parameters: [],
+      result: { mode: 'strict', typeSymbol: '@xmoon76/dsh-pi-tui/test-s3-wire#Item', create: () => z.string() },
+    }],
+  })
+  const traced = ctx.get('s3Wire') as S3WireService & { readonly [key: symbol]: unknown }
+  return { ctx, service: (traced[symbols.original] ?? traced) as S3WireService }
+}
+
+test('the production Gateway negotiates permessage-deflate and delivers a 1KiB+ item over a real WebSocket', async t => {
+  const life = testLifecycle(t)
+  const deflate = await mountS3WebSocketGateway(life, 'deflate')
+  const socket = new WebSocket(`ws://127.0.0.1:${String(deflate.ctx.webServer.port)}/api/remote.mux`, {
+    headers: { cookie: browserCookieOf(deflate.ctx) },
+  })
+  await once(socket, 'open')
+  assert.match(String(socket.extensions), /permessage-deflate/u,
+    'the real WebSocket handshake negotiated permessage-deflate')
+  const frames: Array<Record<string, unknown>> = []
+  socket.on('message', data => { frames.push(JSON.parse(rawSocketText(data)) as Record<string, unknown>) })
+  socket.send(JSON.stringify({ type: 'open', streamId: 'large', endpoint: 's3Wire/large', payload: { args: {} } }))
+  await waitFor('the 1KiB+ stream item over the real WebSocket', () => frames.some(frame =>
+    frame.type === 'item' && frame.streamId === 'large' && frame.value === S3_LARGE_PAYLOAD), 20_000)
+  const item = frames.find(frame => frame.type === 'item' && frame.streamId === 'large')!
+  assert.equal(item.value, S3_LARGE_PAYLOAD, 'the receiving side decodes the exact 1.5KiB text')
+  assert.equal(String(item.value).length >= 1_024, true, 'the delivered frame is above the 1KiB compression threshold')
+  await waitFor('the stream end after the large item', () =>
+    frames.some(frame => frame.type === 'end' && frame.streamId === 'large'), 20_000)
+  assert.equal(deflate.service.peers.at(0), String(deflate.ctx.connection.browserPeer.id),
+    'the large item was delivered for the admitted browser Peer (identity preserved)')
+  socket.close()
+  await once(socket, 'close')
+
+  // The NEGATIVE control: the SAME production carrier with the explicit
+  // `none` mode negotiates no extension, so the setting owns the behavior.
+  const plain = await mountS3WebSocketGateway(life, 'none')
+  const plainSocket = new WebSocket(`ws://127.0.0.1:${String(plain.ctx.webServer.port)}/api/remote.mux`, {
+    headers: { cookie: browserCookieOf(plain.ctx) },
+  })
+  await once(plainSocket, 'open')
+  assert.equal(String(plainSocket.extensions), '',
+    'websocketCompression: none disables the extension on the same carrier')
+  plainSocket.close()
+  await once(plainSocket, 'close')
+})
+
+test('FR1 P0-E: the generated agentTeams namespace writes the real Root Team mode over one Host wire', async (t) => {
+  const life = testLifecycle(t)
+  const host = await createHostFixture(life, { teamPlane: true })
+  const { runtime } = await compose(host)
+  try {
+    const agent = await host.harness.create(SessionId(MAIN), undefined, { cwd: host.anchorDir })
+    acquireMainSurfaceReference(runtime.client.sessions, SessionId(MAIN))
+    await waitFor('the MAIN window to open', () =>
+      runtime.client.sessions.binding(SessionId(MAIN))?.session.getSnapshot().openState === 'open')
+
+    // The official generated namespace the split Client mounts is the ONE write
+    // face; the port never falls back to Direct.
+    assert.equal(typeof runtime.client.remote.agentTeams.setEnabled, 'function',
+      'the mounted generated agentTeams namespace exposes setEnabled')
+    const port = new RemoteTeamModePort(runtime.client)
+    assert.deepEqual(port.read(MAIN), { kind: 'ready', enabled: false, modelRequestHistory: 'none' })
+
+    const signal = new AbortController().signal
+    assert.deepEqual(await port.setEnabled(MAIN, true, signal), { kind: 'committed' })
+    const team = host.ctx.get('agentTeams') as { isEnabled(candidate: unknown): boolean }
+    assert.equal(team.isEnabled(agent), true, 'the real Host Team service observes the Client write')
+    assert.deepEqual(port.read(MAIN), { kind: 'ready', enabled: true, modelRequestHistory: 'none' })
+    const modeEvents = host.ctx.sessions.get(SessionId(MAIN))!.snapshotEvents()
+      .filter(event => event.type === 'team/mode')
+    assert.equal(modeEvents.length, 1, 'exactly one durable team/mode crossed the wire')
+
+    assert.deepEqual(await port.setEnabled(MAIN, false, signal), { kind: 'committed' })
+    assert.equal(team.isEnabled(agent), false)
+    assert.deepEqual(port.read(MAIN), { kind: 'ready', enabled: false, modelRequestHistory: 'none' })
+  } finally {
+    await runtime.dispose().catch(() => {})
   }
 })

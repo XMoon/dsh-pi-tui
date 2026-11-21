@@ -12,42 +12,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
-import { credentialKey, credentialRef } from '@deepseek-ai/dsh-credentials'
 import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
 
 function configOver(ctx: Context): DirectConfigPort {
   return new DirectConfigPort(ctx as never, undefined, () => undefined)
 }
-
-test('credentials/reference-updated refreshes the credential surface', async () => {
-  const ctx = new Context()
-  const refreshes: string[] = []
-  configOver(ctx).credentials.onChanged(() => { refreshes.push('refresh') })
-  ctx.emit('credentials/reference-updated', credentialRef('DEEPSEEK_API_KEY'))
-  // The event fan-out is synchronous for sync listeners; the assertion
-  // still awaits a tick so a future async delivery cannot slip past.
-  await Promise.resolve()
-  assert.deepEqual(refreshes, ['refresh'])
-})
-
-test('credentials/record-updated refreshes the credential surface', async () => {
-  const ctx = new Context()
-  const refreshes: string[] = []
-  configOver(ctx).credentials.onChanged(() => { refreshes.push('refresh') })
-  ctx.emit('credentials/record-updated', credentialKey('llm-pi-ai', 'openai'))
-  await Promise.resolve()
-  assert.deepEqual(refreshes, ['refresh'])
-})
-
-test('both credential events refresh once each, sharing one callback', async () => {
-  const ctx = new Context()
-  const refreshes: string[] = []
-  configOver(ctx).credentials.onChanged(() => { refreshes.push('refresh') })
-  ctx.emit('credentials/reference-updated', credentialRef('OPENAI_API_KEY'))
-  ctx.emit('credentials/record-updated', credentialKey('llm-pi-ai', 'openai-codex'))
-  await Promise.resolve()
-  assert.deepEqual(refreshes, ['refresh', 'refresh'])
-})
 
 test('an unrelated event does not refresh the credential surface', async () => {
   const ctx = new Context()

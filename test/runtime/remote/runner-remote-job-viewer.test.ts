@@ -470,7 +470,7 @@ test('the REAL Job viewer observes the Remote stream, updates live without consu
   const key = stopKey(app)
   assert.ok(viewerStopSegmentPainted(view()),
     `the workspace must advertise the component keymap's tasks.stop hint before Stop:\n${view()}`)
-  assert.ok(view().includes('Esc back'), `the Action Bar must keep Esc back:\n${view()}`)
+  assert.ok(view().includes('Back [Esc]'), `the Action Bar must keep its Back affordance:\n${view()}`)
 
   // ── Negative control (c): a PROVEN `requested` admission that never reaches
   // the Host (the settled path is injected as requested) must still not be
@@ -533,8 +533,11 @@ test('the REAL Job viewer observes the Remote stream, updates live without consu
   fx.fixture.vt.sendInput('\x1b')
   await waitFor('Esc closed only the Job workspace', () => !jobWorkspacePainted(view()), 10_000)
   // The screen swap commits synchronously; wait for the repaint that reveals
-  // the restored browser (the workspace owns the old frame until then).
-  await waitFor('the restored browser frame painted', () => view().includes('bash · m3-5-pr3-build-one'), 10_000)
+  // the restored browser (the workspace owns the old frame until then). The
+  // settled Job is collapsed behind the default history disclosure: open it.
+  await waitFor('the restored browser frame painted', () => view().includes('Show 1 jobs'), 10_000)
+  fx.fixture.vt.sendInput('j')
+  await waitFor('the restored browser history painted', () => view().includes('bash · m3-5-pr3-build-one'), 10_000)
   assert.equal(app.overlayGraphState().handles, 1, 'the Task Browser survived the workspace round trip')
   const restored = view()
   assert.match(restored, /bash · m3-5-pr3-build-one/u, `the parent browser must be preserved:\n${restored}`)
@@ -562,8 +565,8 @@ test('a SECOND real Job stops through the Task-Center row confirmation (the SAME
   const killCallsBefore = fx.killControl.calls
   const hostKillsBefore = fx.hostKillCalls()
   fx.fixture.vt.sendInput(key)
-  // The REAL two-step confirmation affordance: the panel renders its
-  // `Y confirm stop · Esc cancel` chord hint and latches the pending stop.
+  // The production Remote runner opens this Task Browser on Regular/Main, so
+  // its keyboard-only confirmation hint remains the existing chord text.
   await waitFor('the row stop confirmation rendered', () =>
     /Y confirm stop · Esc cancel/u.test(view()), 10_000)
   fx.fixture.vt.sendInput('y')
@@ -576,6 +579,7 @@ test('a SECOND real Job stops through the Task-Center row confirmation (the SAME
   assert.equal(fx.hostKillCalls() - hostKillsBefore, 1,
     'exactly one Host kill admission must serve the row stop')
   assert.equal(fx.rosterStatus(control.id), 'running', 'the other Job must be untouched by the row stop')
+  fx.fixture.vt.sendInput('j') // the settled row is collapsed by default: open the history
   await waitFor('the Task-Center row rendered the converged status', () => view().includes('killed'), 10_000)
 
   // ── Negative control 11(b): opening the detail acquires the observer, Esc
@@ -598,6 +602,8 @@ test('a SECOND real Job stops through the Task-Center row confirmation (the SAME
   await waitFor('the Task Center closed', () => app.overlayGraphState().handles === 0, 10_000)
   submit(app, '/tasks')
   await waitFor('the Task Center re-opened', () => app.overlayGraphState().handles === 1, 10_000)
+  await waitFor('the re-opened Task Center rendered the default view', () => view().includes('jobs [J]'), 20_000)
+  fx.fixture.vt.sendInput('j') // terminal Job history is collapsed by default
   await waitFor('the re-opened Task Center rendered the rows', () => view().includes(JOB_TWO_LABEL), 20_000)
   assert.equal(fx.observeAcquires(), acquiresAtClose,
     'returning to /tasks must NOT create a second selected-Job observer')
@@ -779,8 +785,20 @@ test('a main-Session switch with a Stop in flight drops the stale settlement and
     fx.killControl.resolveHeld !== undefined, 10_000)
   const noticesBefore = fx.notices.length
 
-  // Switch the viewed main Session while the observation stream is open and the
-  // Stop settlement is still in flight.
+  // A fullscreen Session Workspace lease is mutually exclusive with the Job
+  // workspace: `/resume` while the Job detail owns the screen is refused and
+  // the Job observation stays intact. This is the M5-U-C lease contract; the
+  // switch itself is re-issued after the user leaves the Job workspace.
+  submit(app, `/resume ${MAIN_B_ID}`)
+  await waitFor('the refused resume is visible', () =>
+    fx.notices.some(notice => notice.includes('session workspace unavailable')), 10_000)
+  assert.ok(jobWorkspacePainted(view()), 'a refused /resume keeps the Job workspace')
+  assert.equal(view().includes('mainb answer 1'), false, 'a refused /resume never switches the Session')
+
+  // Leave the Job workspace (the Task Browser is restored), then switch while
+  // the Stop settlement is STILL in flight.
+  fx.fixture.vt.sendInput('\x1b')
+  await waitFor('the Task Browser is restored', () => view().includes('↑↓ select'), 10_000)
   submit(app, `/resume ${MAIN_B_ID}`)
   await waitFor('the replacement main session hydrated', () => view().includes('mainb answer 1'), 20_000)
   assert.equal(app.statusStore.snapshot().view?.subject?.kind, 'main',
@@ -964,7 +982,7 @@ test('the Remote Client roster label reaches the Command page and Copy All copie
   fx.fixture.vt.sendInput('\t')
   await waitFor('the Command reader painted', () => view().includes('Copy All [C]'), 10_000)
   assert.match(view(), /Full command/u, 'the Command page discloses that it shows the full command')
-  assert.match(view(), /Esc output/u, 'Esc on the Command page returns to Output, never out of the workspace')
+  assert.match(view(), /Output \[Esc\]/u, 'Esc on the Command page returns to Output, never out of the workspace')
 
   // The clipboard capability is the SAME Client-local one the surface uses.
   const copied: string[] = []

@@ -71,12 +71,33 @@ export type NavigationCancelSettlement =
   | { readonly kind: 'indeterminate'; readonly detail: string }
 
 /**
+ * What LEAVING a Session means for the owner this backend is replacing during
+ * a USER NAVIGATION (`/new`, a selected-session switch or `/resume <id>`).
+ * This is a read-only backend capability, not a user option and not a second
+ * Host state: it states whether the adapter that releases a replaced owner
+ * owns that owner's Host Agent lifecycle.
+ *
+ * - `stop-and-quiesce` (Direct): the TUI and the Host share one process and
+ *   this adapter owns the Agent, so a navigation must first STOP the old
+ *   Turn, then wait for that exact owner to settle and run its final flush.
+ * - `detach-client` (Remote): the Host owns the Agent and a retained Client
+ *   reference's release never stops it, so a navigation only detaches the
+ *   Client view. No Host cancel is dispatched, and neither the old owner's
+ *   idle nor the committed child's idle is awaited — the ordinary transition
+ *   still drains the admitted Client writers and commits synchronously.
+ */
+export type SessionNavigationOwnership = 'stop-and-quiesce' | 'detach-client'
+
+/**
  * The owner retirement the session layer needs: quiesce/cancel one owner and
  * retire it in the official session-close order. `mode` selects the cancel
  * policy (`'transition'` = an explicit session switch; `'shutdown'` = the
  * runner is exiting), never a different order.
  */
 export interface SessionOwnerRetirement {
+  /** The backend's navigation ownership, assigned ONCE per adapter (see
+   *  {@link SessionNavigationOwnership}). */
+  readonly navigationKind: SessionNavigationOwnership
   /** Await the owner's quiescence and report which condition ended the wait:
    *  `true` when `signal` aborted first, `false` when the EXACT owner was
    *  OBSERVED settling by itself, and `'unobservable'` when the exact owner

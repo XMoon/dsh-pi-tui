@@ -13,7 +13,6 @@ import { CommandId } from '@deepseek-ai/dsh-commands'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { RetryId } from '@deepseek-ai/dsh-llm-retry'
 import { foldTranscript, groupConsecutiveReads, PTC_MAX_DEPTH, subCallDisplayStatus, TranscriptFolder, windowMessages, workflowPhaseKey, type TranscriptMessage } from '../../src/transcript.ts'
-import { renderTranscriptMarkdown } from '../../src/client/artifact/transcript-markdown.ts'
 import { projectFocus } from '../../src/tui/transcript/focus-projection.ts'
 import { computeStats, StatsFolder } from '../../src/domain/status/stats.ts'
 import { TranscriptWindowController } from '../../src/domain/transcript/window.ts'
@@ -5705,124 +5704,9 @@ test('a committed MESSAGE settlement never removes text — the durable message 
   assert.equal(messages[0].text, 'authoritative', 'the settled message text survives the end frame')
 })
 
-test('open opaque attempt state is excluded from markdown export', () => {
-  const finalized = { type: 'future-final', payload: { value: 'kept' } } as unknown as ContentBlock
-  const markdown = renderTranscriptMarkdown({
-    header: { id: 'session-export' as never, cwd: '/workspace' },
-    snapshotEvents: () => [
-      event('assistant/attempt', {
-        turn: 0,
-        step: 0,
-        stream: [{ type: 'chunk', time: 1, chunk: { type: 'block-start', index: 0, blockType: 'future-open' } as never }],
-      }, 1),
-      assistantMessageWithBlocks(2, [finalized]),
-    ],
-  } as never)
-  assert.doesNotMatch(markdown, /future-open|Unknown block: future-open/)
-  assert.match(markdown, /Unknown block: future-final/)
-})
-
-test('workflow lifecycle events survive the markdown export (plan §8.13)', () => {
-  const markdown = renderTranscriptMarkdown({
-    header: { id: 'session-export' as never, cwd: '/workspace' },
-    snapshotEvents: () => [
-      rawEvent('tool-workflow/run-start', { runId: 'run-1', name: 'audit' }, 1),
-      rawEvent('tool-workflow/agent-start', { runId: 'run-1', seq: 1, label: 'checker', phase: 'review', childId: 'session-x' }, 2),
-      rawEvent('tool-workflow/agent-end', { runId: 'run-1', seq: 1, outcome: 'completed' }, 3),
-      rawEvent('tool-workflow/run-end', { runId: 'run-1', stopReason: 'completed' }, 4),
-    ],
-  } as never)
-  assert.match(markdown, /Workflow: audit — completed/)
-  assert.match(markdown, /review \/ checker — completed/)
-})
-
-test('a workflow run without a terminal event still exports its current state', () => {
-  const markdown = renderTranscriptMarkdown({
-    header: { id: 'session-export' as never, cwd: '/workspace' },
-    snapshotEvents: () => [
-      rawEvent('tool-workflow/run-start', { runId: 'run-2', name: 'audit' }, 1),
-      rawEvent('tool-workflow/agent-start', { runId: 'run-2', seq: 1, label: 'checker', childId: 'session-x' }, 2),
-    ],
-  } as never)
-  assert.match(markdown, /Workflow: audit — running/)
-  assert.match(markdown, /checker — running/)
-})
-
-test('a workflow run whose step closed without a terminal event exports as running', () => {
-  const markdown = renderTranscriptMarkdown({
-    header: { id: 'session-export' as never, cwd: '/workspace' },
-    snapshotEvents: () => [
-      rawEvent('turn/start', { turn: 0 }, 0),
-      rawEvent('step/start', { turn: 0, step: 0 }, 1),
-      rawEvent('tool-workflow/run-start', { runId: 'run-3', name: 'audit' }, 2),
-      rawEvent('tool-workflow/agent-start', { runId: 'run-3', seq: 1, label: 'checker', childId: 'session-x' }, 3),
-      // The step closes with no run-end: the record is still open, exactly
-      // like the visual Transcript projection (shared WorkflowProjection).
-      rawEvent('step/end', { turn: 0, step: 0 }, 4),
-    ],
-  } as never)
-  assert.match(markdown, /Workflow: audit — running/)
-  assert.match(markdown, /checker — running/)
-  assert.doesNotMatch(markdown, /interrupted/)
-})
-
-test('a workflow run whose turn closed without a terminal event exports as running', () => {
-  const markdown = renderTranscriptMarkdown({
-    header: { id: 'session-export' as never, cwd: '/workspace' },
-    snapshotEvents: () => [
-      rawEvent('turn/start', { turn: 0 }, 0),
-      rawEvent('tool-workflow/run-start', { runId: 'run-4', name: 'audit' }, 1),
-      rawEvent('tool-workflow/agent-start', { runId: 'run-4', seq: 1, label: 'checker', childId: 'session-x' }, 2),
-      rawEvent('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 3),
-    ],
-  } as never)
-  assert.match(markdown, /Workflow: audit — running/)
-  assert.match(markdown, /checker — running/)
-  assert.doesNotMatch(markdown, /interrupted/)
-})
-
-test('a settled member keeps its durable outcome while the run record is still open', () => {
-  const markdown = renderTranscriptMarkdown({
-    header: { id: 'session-export' as never, cwd: '/workspace' },
-    snapshotEvents: () => [
-      rawEvent('turn/start', { turn: 0 }, 0),
-      rawEvent('step/start', { turn: 0, step: 0 }, 1),
-      rawEvent('tool-workflow/run-start', { runId: 'run-5', name: 'audit' }, 2),
-      rawEvent('tool-workflow/agent-start', { runId: 'run-5', seq: 1, label: 'checker', childId: 'session-x' }, 3),
-      rawEvent('tool-workflow/agent-end', { runId: 'run-5', seq: 1, outcome: 'completed' }, 4),
-      rawEvent('step/end', { turn: 0, step: 0 }, 5),
-    ],
-  } as never)
-  assert.match(markdown, /Workflow: audit — running/)
-  assert.match(markdown, /checker — completed/)
-})
-
-test('a replayed step fragment after turn/end cannot fabricate a Workflow terminal fact', () => {
-  const markdown = renderTranscriptMarkdown({
-    header: { id: 'session-export' as never, cwd: '/workspace' },
-    snapshotEvents: () => [
-      rawEvent('turn/start', { turn: 0 }, 0),
-      rawEvent('step/start', { turn: 0, step: 0 }, 1),
-      rawEvent('tool-workflow/run-start', { runId: 'run-1', name: 'audit' }, 2),
-      rawEvent('step/end', { turn: 0, step: 0 }, 3),
-      rawEvent('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 4),
-      // Replayed fragment: a late step/start + step/end for the closed turn
-      // must not affect any Workflow record.
-      rawEvent('step/start', { turn: 0, step: 0 }, 5),
-      rawEvent('tool-workflow/run-start', { runId: 'run-2', name: 'audit' }, 6),
-      rawEvent('step/end', { turn: 0, step: 0 }, 7),
-    ],
-  } as never)
-  // Both runs have no terminal fact: open records, never interrupted by a
-  // replayed step/end.
-  assert.match(markdown, /Workflow: audit — running/)
-  assert.doesNotMatch(markdown, /Workflow: audit — interrupted/)
-})
-
-test('the markdown export settles W1/W2/W3 from the same terminal facts as the fold', () => {
-  // The SAME event prefix feeds the real TranscriptFolder and the real
-  // Markdown formatter: the two derivations must agree on the exact status
-  // words, so the export can never drift from the visual projection.
+test('the fold settles W1/W2/W3 from their own terminal facts', () => {
+  // The SAME event prefix feeds the real TranscriptFolder for all three
+  // terminal facts: the fold must report the exact durable status words.
   const prefix = (runId: string): SessionEvent[] => [
     rawEvent('turn/start', { turn: 0 }, 0),
     rawEvent('step/start', { turn: 0, step: 0 }, 1),
@@ -5855,13 +5739,6 @@ test('the markdown export settles W1/W2/W3 from the same terminal facts as the f
     assert.ok(run !== undefined && run.kind === 'workflow')
     assert.equal(run.status, c.run, `${c.runId} fold run status`)
     assert.equal(run.members[0]?.status, c.member, `${c.runId} fold member status`)
-    const markdown = renderTranscriptMarkdown({
-      header: { id: 'session-export' as never, cwd: '/workspace' },
-      snapshotEvents: () => events,
-    } as never)
-    assert.match(markdown, new RegExp(`Workflow: audit — ${c.run}`), `${c.runId} export run status`)
-    assert.match(markdown, new RegExp(`checker — ${c.member}`), `${c.runId} export member status`)
-    assert.doesNotMatch(markdown, /Workflow: audit — interrupted/, `${c.runId} must never synthesize interrupted`)
   }
 })
 
@@ -5944,12 +5821,11 @@ test('failed-attempt reasoning resets on retry and matches a cold replay', () =>
   assert.equal(liveThinking[0].text, 'attempt B reasoning', 'the retry reset the failed attempt\'s reasoning text')
 })
 
-test('image/offload is a safe presentation no-op across transcript, markdown, stats and Focus', () => {
+test('image/offload is a safe presentation no-op across transcript, stats and Focus', () => {
   // The official 0.1.6 plugin-owned durable event changes the MODEL-visible
-  // image surface only; it must never add a human transcript row, an export
-  // line, a stats count, or a Focus anchor. The TUI deliberately has no
+  // image surface only; it must never add a human transcript row, a stats
+  // count, or a Focus anchor. The TUI deliberately has no
   // `image/offload` case — the fold ignores it structurally.
-  const header = { id: 's1' as never, cwd: '/ws', version: 1, createdAt: 0 }
   // A REAL image occurrence on the user message: `image/offload` targets a
   // current image-bearing node, so the safe-ignore assertion is not vacuous.
   const IMAGE_REF = { attachmentId: 'att-image-1', mediaType: 'image/png', bytes: 4, width: 800, height: 600, name: 'shot.png' }
@@ -5999,23 +5875,17 @@ test('image/offload is a safe presentation no-op across transcript, markdown, st
   )
   // 1. No human transcript row is added.
   assert.deepEqual(offloaded.messages(), plain.messages(), 'image/offload must not create a transcript row')
-  // 2. No markdown export line is added.
-  assert.equal(
-    renderTranscriptMarkdown({ header, snapshotEvents: () => after } as never),
-    renderTranscriptMarkdown({ header, snapshotEvents: () => base() } as never),
-    'image/offload must not change the markdown export',
-  )
-  // 3. No turn/step/tool/user count changes.
+  // 2. No turn/step/tool/user count changes.
   assert.deepEqual(computeStats(after), computeStats(base()), 'image/offload must not change stats')
-  // 4. Focus owner/anchor projection is unchanged.
+  // 3. Focus owner/anchor projection is unchanged.
   assert.deepEqual(
     projectFocus(offloaded.messages(), offloaded.turnActivities(), new Set([0]), true),
     projectFocus(plain.messages(), plain.turnActivities(), new Set([0]), true),
     'image/offload must not move a Focus anchor',
   )
-  // 5. Replay is deterministic and does not crash.
+  // 4. Replay is deterministic and does not crash.
   assert.deepEqual(fold(after).messages(), offloaded.messages(), 'replay of the offload stream must be stable')
-  // 6. An ordinary user/assistant presentation after the event is normal.
+  // 5. An ordinary user/assistant presentation after the event is normal.
   const postMessages = fold([
     ...after,
     event('user/message', {

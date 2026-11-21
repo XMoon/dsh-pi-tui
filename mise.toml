@@ -46,6 +46,10 @@ run = "pnpm test:tmux"
 description = "Run every test lane (build timing stays with the caller)"
 run = "pnpm test"
 
+[tasks.check]
+description = "Run local pre-push quality gates"
+run = "pnpm check"
+
 [tasks."verify:release"]
 description = "Run the main release verification pipeline"
 run = "pnpm verify:release"

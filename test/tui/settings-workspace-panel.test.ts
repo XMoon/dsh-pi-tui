@@ -20,6 +20,7 @@ import {
   type SettingsWorkspaceCommitOutcome,
   type SettingsWorkspaceCommitRequest,
   type SettingsWorkspacePanelIntents,
+  type SettingsWorkspaceRow,
   type SettingsWorkspaceSnapshot,
 } from '../../src/tui/panels/settings-workspace-panel.ts'
 import type { AboutStatusController } from '../../src/app/command/about-status.ts'
@@ -372,14 +373,14 @@ const SNAPSHOT: SettingsWorkspaceSnapshot = {
       },
     },
     {
-      id: 'subagent-model-allowlist',
+      id: 'subagent-settings',
       category: 'agent',
-      label: 'Subagent allowed models',
-      summary: '1 route',
-      scope: 'Official subagent model-selection section',
+      label: 'Subagent settings',
+      summary: 'Limits: depth 1, parallelism 8 · Model selection: Off · 0 routes',
+      scope: 'Host profile · official settings',
       freshness: 'ready',
-      description: 'the official allowed child routes',
-      specialist: 'subagent-allowlist',
+      description: 'Stage subagent limits, model selection and allowed routes in one page, then Save.',
+      specialist: 'subagent-settings',
     },
     {
       id: 'default-permission',
@@ -489,8 +490,7 @@ class FakePage implements SettingsAuthPage {
  * CURRENT page and only inside its own painted cells.
  */
 class FakeSpecialistPage implements EmbeddedSpecialistPage {
-  readonly title = 'Subagent allowed models'
-  readonly breadcrumbSuffix = 'Allowed models'
+  readonly title = 'Subagent settings'
   inputs: string[] = []
   presses: { readonly type: string; readonly x: number; readonly y: number }[] = []
   grants: number[] = []
@@ -645,6 +645,8 @@ interface Harness {
   readonly specialistBuilds: () => number
   /** How many times the row-level authority re-read was requested. */
   readonly specialistRefreshes: () => number
+  readonly computerUsePages: FakeSpecialistPage[]
+  readonly computerUseBuilds: () => number
 }
 
 function setup(options: {
@@ -662,7 +664,7 @@ function setup(options: {
   readonly snapshot?: () => SettingsWorkspaceSnapshot
   /** The LIVE extension directory seam (`SettingsWorkspaceSource.extensionDirectory`). */
   readonly directory?: () => { readonly revision: number; readonly count: number }
-  /** C2-R3: build the embedded subagent allowlist page for the Agent row. */
+  /** C2-R3: build the embedded single Subagent settings page for the Agent row. */
   readonly specialistPage?: boolean
   /** C2-R4: build the embedded Web Search / Fetch page for the Tools row. */
   readonly webPage?: boolean
@@ -752,10 +754,16 @@ function setup(options: {
       return page
     },
     ...options.specialistPage === true ? {
-      createSubagentAllowlistPicker: (done: () => void, onAuthoritativeChange: () => void) => {
+      createComputerUsePage: (done: () => void) => {
+        computerUseBuilds += 1
+        const page = new FakeSpecialistPage()
+        ;(page as unknown as { done: () => void }).done = done
+        computerUsePages.push(page)
+        return page
+      },
+      createSubagentSettingsPage: (done: () => void, onAuthoritativeChange: () => void) => {
         specialistBuilds += 1
         const page = new FakeSpecialistPage()
-        // The picker's own close returns to the Agent rows (never a category).
         ;(page as unknown as { done: () => void }).done = done
         ;(page as unknown as { refresh: () => void }).refresh = () => {
           specialistRefreshes += 1
@@ -767,6 +775,8 @@ function setup(options: {
       },
     } : {},
   }
+  const computerUsePages: FakeSpecialistPage[] = []
+  let computerUseBuilds = 0
   const readSnapshot = options.snapshot ?? ((): SettingsWorkspaceSnapshot => SNAPSHOT)
   const panel = new SettingsWorkspacePanel(
     options.directory === undefined
@@ -793,6 +803,8 @@ function setup(options: {
     webBuilds: () => webBuilds,
     modelsInitials,
     specialistBuilds: () => specialistBuilds,
+    computerUsePages,
+    computerUseBuilds: () => computerUseBuilds,
     specialistRefreshes: () => specialistRefreshes,
   }
 }
@@ -809,7 +821,7 @@ const detailColumn = (harness: Harness): string =>
 
 /** The painted category order of the default fixture (no extension rows). */
 const CATEGORY_ORDER = [
-  'about', 'models', 'account', 'agent', 'appearance',
+  'about', 'general', 'models', 'account', 'agent', 'appearance',
   'conversation', 'input-terminal', 'tools', 'plugins',
 ] as const
 
@@ -826,7 +838,8 @@ const walkTo = (h: Harness, category: (typeof CATEGORY_ORDER)[number]): void => 
 
 test('the wide rail mounts the selected direct page exactly once', () => {
   const h = setup()
-  h.panel.handleInput('\u001b[B') // About -> Models
+  h.panel.handleInput('\u001b[B') // About -> General
+  h.panel.handleInput('\u001b[B') // General -> Models
   assert.equal(h.built.length, 1, 'the rail mounted the Models page once')
   assert.equal(h.built[0]?.id, 'models:list', 'the rail mounted the Models list')
   h.panel.handleInput('\u001b[B') // Models -> Account
@@ -839,6 +852,7 @@ test('a narrow rail mounts nothing until the content takes the focus', () => {
   const h = setup({ columns: 44, rows: 20 })
   // The narrow first frame is the About CONTENT: Esc returns to the list.
   h.panel.handleInput('\u001b')
+  h.panel.handleInput('\u001b[B')
   h.panel.handleInput('\u001b[B')
   h.panel.handleInput('\u001b[B')
   assert.equal(h.built.length, 0, 'browsing an invisible category mounted no page')
@@ -862,7 +876,8 @@ test('a page built for a superseded selection is disposed instead of mounted', (
       root.handleInput('\u001b[B')
     },
   })
-  h.panel.handleInput('\u001b[B') // About -> Models (the factory reenters here)
+  h.panel.handleInput('\u001b[B') // About -> General
+  h.panel.handleInput('\u001b[B') // General -> Models (the factory reenters here)
   assert.equal(h.built.length, 2, 'the reentrant selection built its own page')
   assert.equal(h.built[0]?.disposed, true, 'the superseded page was disposed')
   assert.equal(h.built[1]?.disposed, false, 'the current page stays mounted')
@@ -871,8 +886,9 @@ test('a page built for a superseded selection is disposed instead of mounted', (
 
 test('the content focus hands the keyboard to the page, and Esc returns it to the rail', () => {
   const h = setup()
-  h.panel.handleInput('\u001b[B')
-  h.panel.handleInput('\u001b[B') // Account
+  h.panel.handleInput('\u001b[B') // About -> General
+  h.panel.handleInput('\u001b[B') // General -> Models
+  h.panel.handleInput('\u001b[B') // Models -> Account
   h.panel.handleInput('\r')
   const page = h.built[1]
   assert.ok(page !== undefined)
@@ -889,7 +905,8 @@ test('the content focus hands the keyboard to the page, and Esc returns it to th
 
 test('a page that owns a pending Host mutation keeps the keyboard and the lease', () => {
   const h = setup()
-  h.panel.handleInput('\u001b[B') // About -> Models
+  h.panel.handleInput('\u001b[B') // About -> General
+  h.panel.handleInput('\u001b[B') // General -> Models
   h.panel.handleInput('\u001b[B') // Models -> Account
   h.panel.handleInput('\r') // the content takes the focus
   const page = h.built[1]
@@ -925,7 +942,8 @@ test('a page that owns a pending Host mutation keeps the keyboard and the lease'
 
 test('a pending Host mutation keeps the workspace open even when the rail owns the keyboard', () => {
   const h = setup()
-  h.panel.handleInput('\u001b[B') // About -> Models: the rail keeps the focus
+  h.panel.handleInput('\u001b[B') // About -> General
+  h.panel.handleInput('\u001b[B') // General -> Models: the rail keeps the focus
   assert.equal(h.closes(), 0, 'the workspace is open')
   // The page now owns an in-flight Host operation (the page's own owner
   // started it); the close must be refused whatever the focus is.
@@ -941,7 +959,8 @@ test('a narrow rail selection is mounted when the terminal grows and the content
   const h = setup({ columns: 44, rows: 20 })
   // The narrow first frame is the About content: Esc returns to the list.
   h.panel.handleInput('\u001b')
-  h.panel.handleInput('\u001b[B') // About -> Models
+  h.panel.handleInput('\u001b[B') // About -> General
+  h.panel.handleInput('\u001b[B') // General -> Models
   h.panel.handleInput('\u001b[B') // Models -> Account
   assert.equal(h.built.length, 0, 'the narrow rail browsed an invisible category: no page was created')
 
@@ -974,7 +993,8 @@ test('Tab enters each direct content page and returns About/Account content to t
 
     // Models: the rail Tab hands the keyboard over; inside the page both
     // region keys are forwarded unchanged.
-    h.panel.handleInput('\u001b[B') // About -> Models
+    h.panel.handleInput('\u001b[B') // About -> General
+    h.panel.handleInput('\u001b[B') // General -> Models
     plain(h)
     assert.equal(h.built.length, 1, 'the rail mounted the Models page once')
     h.panel.handleInput('\t')
@@ -1078,7 +1098,8 @@ test('a narrow frame keeps the root Tab inert and its existing drill-down path',
   assert.match(header(h), /Settings · Categories/u, 'Esc still returns to the narrow rail')
 
   // Models: browsing the rail mounts nothing; Tab grants no hidden page key.
-  h.panel.handleInput('\u001b[B')
+  h.panel.handleInput('\u001b[B') // About -> General
+  h.panel.handleInput('\u001b[B') // General -> Models
   assert.equal(h.built.length, 0, 'the narrow rail selected Models without mounting it')
   h.panel.handleInput('\t')
   h.panel.handleInput('\u001b[Z')
@@ -1110,8 +1131,9 @@ test('a narrow frame keeps the root Tab inert and its existing drill-down path',
 test('Account content keeps the keyboard while a confirmation or an operation is live', () => {
   const h = setup({ columns: 120 })
   plain(h)
-  h.panel.handleInput('\u001b[B')
-  h.panel.handleInput('\u001b[B') // About -> Account (via Models)
+  h.panel.handleInput('\u001b[B') // About -> General
+  h.panel.handleInput('\u001b[B') // General -> Models
+  h.panel.handleInput('\u001b[B') // Models -> Account (via General)
   h.panel.handleInput('\t') // rail -> content
   const account = h.built[1]!
   assert.equal(account.id, 'account:page')
@@ -1187,8 +1209,8 @@ test('the embedded Plugin Manager owns the content keys while the rail keeps the
   assert.equal(h.pluginPages[0]!.focused, false, 'the yielded page stopped owning the input focus')
   assert.equal(h.closes(), 0, 'the workspace stayed open')
   const frame = plain(h)
-  assert.match(frame, /Categories \(9\)/u, 'the rail is painted after the yield')
-  assert.match(frame, /Esc close/u, 'the rail bar owns the last row after the yield')
+  assert.match(frame, /Categories \(10\)/u, 'the rail is painted after the yield')
+  assert.match(frame, /Close \[Esc\]/u, 'the rail bar owns the last row after the yield')
   // Esc on the rail closes the Settings lease.
   h.panel.handleInput('\u001b')
   assert.equal(h.closes(), 1, 'the second Esc closes the workspace')
@@ -1251,7 +1273,7 @@ test('a pending legacy write never advertises the direct rail Tab until it settl
 // own last-painted rule), never retargeted to the newer, unpainted snapshot.
 // The epoch alone cannot distinguish the two publications — object identity
 // can — so this case fails if the guard compares `view.epoch` again.
-test('C3 a same-epoch publication is not copyable until the frame paints it', () => {
+test('a same-epoch publication is not copyable until the frame paints it', () => {
   const copied: string[] = []
   const loading: AboutStatusView = {
     runtime: { tui: '0.5.3', dsh: 'test', backend: 'direct' },
@@ -1324,7 +1346,7 @@ function staticAboutSource(view: AboutStatusView, onRefresh: () => void = () => 
 // modifyOtherKeys — reaches the clipboard owner at ANY level or edit phase.
 // The negative control is the CLIPBOARD SINK (not "no Host call") and every
 // positive configuration behavior (change/confirm/retry) still runs.
-test('PR3 Legacy rows never copy: no badge, no hint, no c/C clipboard at any level or phase', () => {
+test('Legacy rows never copy: no badge, no hint, no c/C clipboard at any level or phase', () => {
   const encodedCopyKeys = ['c', 'C', '\x1b[99u', '\x1b[99:67:99;2u', '\x1b[27;2;67~'] as const
   for (const columns of [72, 100, 120] as const) {
     const copied: string[] = []
@@ -1401,7 +1423,7 @@ test('PR3 Legacy rows never copy: no badge, no hint, no c/C clipboard at any lev
 })
 
 // ── PR3: About keeps keyboard c / C with the ONE body Copy All badge ──────
-test('PR3 About: a visible selected fact copies with c, never from a per-fact badge; rail focus keeps only Shift+C', () => {
+test('About: a visible selected fact copies with c, never from a per-fact badge; rail focus keeps only Shift+C', () => {
   const view: AboutStatusView = {
     runtime: { tui: '0.5.3', dsh: 'test', backend: 'direct' },
     session: { kind: 'ready', sessionId: 'sess-pr3', title: 'pr3 proof', cwd: '/ws', context: 'fresh' },
@@ -1447,7 +1469,7 @@ test('PR3 About: a visible selected fact copies with c, never from a per-fact ba
   assert.equal(copied.length, before + 1, 'C still copies the whole report')
 })
 
-test('PR3 About: a fact scrolled out of the viewport is not copyable until it is painted again', () => {
+test('About: a fact scrolled out of the viewport is not copyable until it is painted again', () => {
   const view: AboutStatusView = {
     runtime: { tui: '0.5.3', dsh: 'test', backend: 'direct' },
     session: {
@@ -1506,7 +1528,7 @@ test('PR3 About: a fact scrolled out of the viewport is not copyable until it is
 })
 
 // ── C3: the Refresh action is SELECTED before Enter can fire it ───────────
-test('C3 Enter refreshes only the selected Refresh action, never an ordinary fact', () => {
+test('Enter refreshes only the selected Refresh action, never an ordinary fact', () => {
   let refreshes = 0
   const view: AboutStatusView = {
     runtime: { tui: '0.5.3', dsh: 'test', backend: 'direct' },
@@ -1538,7 +1560,7 @@ test('C3 Enter refreshes only the selected Refresh action, never an ordinary fac
 })
 
 // ── C3: no per-fact badge and no per-fact hit target ──────────────────────
-test('C3 every fact paints without a Copy badge and has no hit target; keyboard c copies the selected value', () => {
+test('every fact paints without a Copy badge and has no hit target; keyboard c copies the selected value', () => {
   for (const title of ['x'.repeat(31), '路径'.repeat(16)]) {
     const copied: string[] = []
     const view: AboutStatusView = {
@@ -1578,7 +1600,7 @@ test('C3 every fact paints without a Copy badge and has no hit target; keyboard 
 })
 
 // ── C3: the final Status row has its own unique fact identity ─────────────
-test('C3 End copies the final Status row of a degraded view, not the Projection row', () => {
+test('End copies the final Status row of a degraded view, not the Projection row', () => {
   const copied: string[] = []
   const view: AboutStatusView = {
     runtime: { tui: '0.5.3', dsh: 'test', backend: 'direct' },
@@ -1605,7 +1627,7 @@ test('C3 End copies the final Status row of a degraded view, not the Projection 
 })
 
 // ── C3: every About branch applies the per-field copy guard ───────────────
-test('C3 a loading hostile Session ID copies through the same control guard', () => {
+test('a loading hostile Session ID copies through the same control guard', () => {
   const copied: string[] = []
   const view: AboutStatusView = {
     runtime: { tui: '0.5.3', dsh: 'test', backend: 'direct' },
@@ -1626,7 +1648,7 @@ test('C3 a loading hostile Session ID copies through the same control guard', ()
   assert.equal(copied.at(-1), 'sess-id', 'the loading Session ID single-field copy is control-safe')
 })
 
-test('C3 C1 controls in a title never reach either About copy path', () => {
+test('controls in a title never reach either About copy path', () => {
   const copied: string[] = []
   const view: AboutStatusView = {
     runtime: { tui: '0.5.3', dsh: 'test', backend: 'direct' },
@@ -1657,7 +1679,7 @@ test('C3 C1 controls in a title never reach either About copy path', () => {
   assert.ok(report.includes('Title: title-tail'), 'Copy All keeps the ordinary suffix')
 })
 
-test('C3 a newline/tab title cannot forge a Copy All report line', () => {
+test('a newline/tab title cannot forge a Copy All report line', () => {
   const copied: string[] = []
   const view: AboutStatusView = {
     runtime: { tui: '0.5.3', dsh: 'test', backend: 'direct' },
@@ -1694,7 +1716,7 @@ test('C3 a newline/tab title cannot forge a Copy All report line', () => {
   assert.ok(report.includes('Title: normal\\nBackend: Remote\\t- tail'), 'the title stays one escaped line')
 })
 
-test('C3 a generic ESC intermediate/final sequence is dropped whole in both copy paths', () => {
+test('a generic ESC intermediate/final sequence is dropped whole in both copy paths', () => {
   const copied: string[] = []
   const view: AboutStatusView = {
     runtime: { tui: '0.5.3', dsh: 'test', backend: 'direct' },
@@ -1726,7 +1748,7 @@ test('C3 a generic ESC intermediate/final sequence is dropped whole in both copy
   assert.ok(copied.at(-1)!.includes('Title: pre-post'), 'Copy All drops the whole ESC sequence')
 })
 
-test('C3 invalid ESC/C1 CSI bytes keep the ordinary character in paint and copy', () => {
+test('invalid ESC/C1 CSI bytes keep the ordinary character in paint and copy', () => {
   for (const title of ['pre\u001b[鲸-post', 'pre\u009b鲸-post']) {
     const copied: string[] = []
     const view: AboutStatusView = {
@@ -1770,24 +1792,27 @@ test('the region hints never crowd the About copy/refresh verbs out of a tight b
   assert.match(tightBar, /c copy fact/u, 'the field copy stays visible at 90')
   assert.match(tightBar, /C copy all/u, 'the full-report copy stays visible at 90')
   assert.match(tightBar, /r refresh/u, 'the refresh stays visible at 90')
-  assert.match(tightBar, /Esc back/u)
+  assert.match(tightBar, /Back \[Esc\]/u)
   assert.doesNotMatch(tightBar, /Tab focus/u, 'the region key is dropped before any semantic verb')
   assert.match(tightBar, /Shift\+Tab back/u, 'the remaining region hint only survives because the verbs fit')
 
-  // 100 columns fit the complete row (76 cells): no semantic verb is lost.
+  // 100 columns leave the content column 76 cells: PR2's `Back [Esc]`
+  // affordance (+2 cells over the old `Esc back`) makes the LOWEST-priority
+  // forward region hint yield first — every semantic verb still survives.
   const roomy = setup({ columns: 100, rows: 30, aboutStatusSource: staticAboutSource(view) })
   plain(roomy, 100)
   roomy.panel.handleInput('\r')
   const roomyBar = plain(roomy, 100).split('\n').at(-1)!
-  assert.match(roomyBar, /c copy fact · C copy all · r refresh · Tab focus · Shift\+Tab back · Esc back/u,
-    `every hint fits at 100:\n${roomyBar}`)
+  assert.match(roomyBar, /c copy fact · C copy all · r refresh · Shift\+Tab back · Back \[Esc\]/u,
+    `every semantic verb fits at 100:\n${roomyBar}`)
+  assert.doesNotMatch(roomyBar, /Tab focus/u, 'the forward region hint is the first segment dropped')
 
   // There is room at 120 columns: the same verbs survive WITH the region keys.
   const wide = setup({ columns: 120, rows: 40, aboutStatusSource: staticAboutSource(view) })
   plain(wide, 120)
   wide.panel.handleInput('\r')
   const wideBar = plain(wide, 120).split('\n').at(-1)!
-  assert.match(wideBar, /c copy fact · C copy all · r refresh · Tab focus · Shift\+Tab back · Esc back/u,
+  assert.match(wideBar, /c copy fact · C copy all · r refresh · Tab focus · Shift\+Tab back · Back \[Esc\]/u,
     `every hint fits at 120:\n${wideBar}`)
 })
 
@@ -1799,7 +1824,7 @@ test('the legacy 90-column bars keep refresh when the region hints drop and neve
   const rowsBar = plain(h, 90).split('\n').at(-1)!
   assert.match(rowsBar, /Enter choose/u, 'the row action stays visible')
   assert.match(rowsBar, /r refresh/u, 'the refresh stays visible')
-  assert.match(rowsBar, /Esc back/u)
+  assert.match(rowsBar, /Back \[Esc\]/u)
   assert.doesNotMatch(rowsBar, /Tab panes|Shift\+Tab back/u, 'the region hints drop first')
 
   h.panel.handleInput('\t') // rows -> Detail browsing (no choice)
@@ -1818,28 +1843,29 @@ test('the legacy 90-column bars keep refresh when the region hints drop and neve
 test('the pane header names the keyboard owner at 80 and 120 columns', () => {
   for (const columns of [120, 80] as const) {
     const h = setup({ columns, rows: 24 })
-    h.panel.handleInput('\u001b[B') // About -> Models: the rail keeps the keys
+    h.panel.handleInput('\u001b[B') // About -> General
+    h.panel.handleInput('\u001b[B') // General -> Models: the rail keeps the keys
     const preview = plain(h, columns).split('\n')
-    const previewPane = preview.findIndex(line => line.includes('[Categories (9)]'))
+    const previewPane = preview.findIndex(line => line.includes('[Categories (10)]'))
     assert.ok(previewPane >= 0, `the direct pane header paints at ${columns}:\n${preview.join('\n')}`)
-    assert.match(preview[previewPane]!, /\[Categories \(9\)\].*Models/u,
+    assert.match(preview[previewPane]!, /\[Categories \(10\)\].*Models/u,
       `the rail owns the active device:\n${preview[previewPane]}`)
     assert.doesNotMatch(preview[previewPane]!, /Rows \(/u, 'the direct pane header fakes no Rows pane')
 
     h.panel.handleInput('\r') // the content takes the keyboard, the page is reused
     const content = plain(h, columns).split('\n')
-    const contentPane = content.findIndex(line => line.includes('Categories (9)'))
+    const contentPane = content.findIndex(line => line.includes('Categories (10)'))
     assert.ok(contentPane >= 0)
-    assert.match(content[contentPane]!, /Categories \(9\).*\[Models\]/u,
+    assert.match(content[contentPane]!, /Categories \(10\).*\[Models\]/u,
       `the page owns the active device:\n${content[contentPane]}`)
 
     // The legacy projection keeps its own pane names on the same shared row.
     const legacy = setup({ columns, rows: 24 })
     walkTo(legacy, 'appearance')
     const l0 = plain(legacy, columns).split('\n')
-    const l0Pane = l0.findIndex(line => line.includes('[Categories (9)]'))
+    const l0Pane = l0.findIndex(line => line.includes('[Categories (10)]'))
     assert.ok(l0Pane >= 0)
-    assert.match(l0[l0Pane]!, /\[Categories \(9\)\].*Rows \(4\)/u)
+    assert.match(l0[l0Pane]!, /\[Categories \(10\)\].*Rows \(4\)/u)
     legacy.panel.handleInput('\t') // categories -> rows
     const l1 = plain(legacy, columns).split('\n')
     const l1Pane = l1.findIndex(line => line.includes('[Rows (4)]'))
@@ -1851,7 +1877,8 @@ test('the pane header names the keyboard owner at 80 and 120 columns', () => {
 test('the pane header publishes no hit target and a focus key reuses the mounted page', () => {
   const h = setup({ columns: 120, rows: 24 })
   plain(h, 120)
-  h.panel.handleInput('\u001b[B') // About -> Models
+  h.panel.handleInput('\u001b[B') // About -> General
+  h.panel.handleInput('\u001b[B') // General -> Models
   const page = h.built[0]
   assert.ok(page !== undefined)
   plain(h, 120)
@@ -1863,7 +1890,7 @@ test('the pane header publishes no hit target and a focus key reuses the mounted
 
   // The header row is display-only: a click there owns no target.
   const frame = plain(h, 120).split('\n')
-  const paneRow = frame.findIndex(line => line.includes('Categories (9)'))
+  const paneRow = frame.findIndex(line => line.includes('Categories (10)'))
   assert.ok(paneRow >= 0)
   h.panel.onCellPress(2, paneRow)
   h.panel.onCellClick(2, paneRow)
@@ -1883,7 +1910,8 @@ test('the pane header publishes no hit target and a focus key reuses the mounted
 test('render and pre-repaint input hand the page the identical body grant', () => {
   const h = setup({ columns: 100, rows: 24 })
   plain(h, 100)
-  h.panel.handleInput('\u001b[B') // About -> Models
+  h.panel.handleInput('\u001b[B') // About -> General
+  h.panel.handleInput('\u001b[B') // General -> Models
   const page = h.built[0]
   assert.ok(page !== undefined)
   plain(h, 100)
@@ -1916,7 +1944,7 @@ test('one- and two-row frames paint only the truthful bar and publish no body ta
     const before = plain(h, 100)
     const frame = before.split('\n')
     assert.equal(frame.length, rows, `the frame must paint exactly ${rows} rows`)
-    assert.equal(frame.filter(line => /Esc close|Esc back/u.test(line)).length, 1,
+    assert.equal(frame.filter(line => /Close \[Esc\]|Back \[Esc\]/u.test(line)).length, 1,
       `exactly one Esc bar at ${rows} rows:\n${before}`)
     assert.doesNotMatch(before, /Categories \(|Rows \(|Details| page/u, 'no pane header or page body is painted below the body grant')
     h.panel.handleInput('\u001b[B')
@@ -1931,7 +1959,8 @@ test('one- and two-row frames paint only the truthful bar and publish no body ta
 test('below the body floor the content focus forwards only Esc, never a hidden page action', () => {
   const h = setup({ columns: 120, rows: 40 })
   plain(h, 120)
-  h.panel.handleInput('\u001b[B') // About -> Models
+  h.panel.handleInput('\u001b[B') // About -> General
+  h.panel.handleInput('\u001b[B') // General -> Models
   h.panel.handleInput('\r') // the content takes the keyboard
   const page = h.built[0]
   assert.ok(page !== undefined)
@@ -2072,14 +2101,14 @@ const wheelAt = (h: Harness, x: number, y: number, delta = 1): void => {
   })
 }
 
-test('T01 the directory is the nine fixed categories with no Other settings and no Extensions', () => {
+test('the directory is the ten fixed categories with no Other settings and no Extensions', () => {
   const h = setup({ pluginPage: true })
   const frame = plain(h)
-  assert.match(frame, /Categories \(9\)/u, 'the rail states the real category count')
+  assert.match(frame, /Categories \(10\)/u, 'the rail states the real category count')
   assert.deepEqual(railLabels(h), [
-    'About', 'Models', 'Account', 'Agent', 'Appearance',
+    'About', 'General', 'Models', 'Account', 'Agent', 'Appearance',
     'Conversation', 'Input & Terminal', 'Tools', 'Plugins',
-  ], 'the fixed order is the frozen nine')
+  ], 'the fixed order is the frozen ten')
   assert.doesNotMatch(frame, /Other settings/u, 'no Other settings category exists')
   assert.doesNotMatch(frame, /Extensions/u, 'no Extensions category exists without live rows')
   // End reaches the LAST existing category, never a category the directory lacks.
@@ -2090,7 +2119,7 @@ test('T01 the directory is the nine fixed categories with no Other settings and 
   assert.equal(h.commits(), 0, 'reaching the rail end writes nothing')
 })
 
-test('T02 a live extension appends Extensions; its rows are the live registration and browsing writes', () => {
+test('a live extension appends Extensions; its rows are the live registration and browsing writes', () => {
   let count = 0
   let revision = 0
   let rows: SettingsWorkspaceSnapshot['rows'] = []
@@ -2099,14 +2128,14 @@ test('T02 a live extension appends Extensions; its rows are the live registratio
     snapshot: () => snapshotWithExtensions(count, revision, rows),
   })
   plain(h)
-  assert.match(plain(h), /Categories \(9\)/u, 'the empty directory paints nine categories')
+  assert.match(plain(h), /Categories \(10\)/u, 'the empty directory paints nine categories')
   // A registration lands: the next frame appends Extensions without stealing
   // the selection, and the tenth category is reachable only after that paint.
   revision = 1
   count = 1
   rows = defaultExtensionRows()
   const appended = plain(h)
-  assert.match(appended, /Categories \(10\)/u, 'the frame that paints the registration states ten')
+  assert.match(appended, /Categories \(11\)/u, 'the frame that paints the registration states eleven')
   assert.deepEqual(railLabels(h).at(-1), 'Extensions', 'Extensions is the appended last category')
   assert.match(appended, />\s*About/u, 'appending the category never steals the selection')
   h.panel.handleInput('\u001b[F')
@@ -2133,7 +2162,7 @@ test('T02 a live extension appends Extensions; its rows are the live registratio
   assert.equal(h.closes(), 0, 'the extension rows never close the workspace')
 })
 
-test('T03 display rows live in Conversation while Theme/Icon stay in Appearance', () => {
+test('display rows live in Conversation while Theme/Icon stay in Appearance', () => {
   const h = setup()
   plain(h)
   walkTo(h, 'conversation')
@@ -2161,12 +2190,12 @@ test('T03 display rows live in Conversation while Theme/Icon stay in Appearance'
   assert.deepEqual(ids, [...CATEGORY_ORDER], 'the painted rail publishes exactly the current directory')
 })
 
-test('T04 Agent has no legacy launcher while Input & Terminal ends on the Keyboard shortcuts handoff', () => {
+test('Agent has no legacy launcher while Input & Terminal ends on the Keyboard shortcuts handoff', () => {
   const h = setup()
   plain(h)
   walkTo(h, 'agent')
   const agent = plain(h)
-  assert.match(agent, /Subagent allowed models|Default permission/u, 'the migrated Agent rows are painted')
+  assert.match(agent, /Subagent settings|Default permission/u, 'the migrated Agent rows are painted')
   assert.doesNotMatch(agent, /Agent settings…/u, 'Agent has no unmigrated field left, so it paints no launcher')
   assert.equal(h.closes(), 0, 'focusing the Agent rail closes nothing')
   assert.equal(h.commits(), 0, 'browsing never writes')
@@ -2191,7 +2220,7 @@ test('T04 Agent has no legacy launcher while Input & Terminal ends on the Keyboa
   assert.doesNotMatch(rows, /Choose value|\[Confirm\]/u, 'the page row paints no scalar editor')
 })
 
-test('T05 a width cycle keeps the selected category/row/focus and refuses old coordinates', () => {
+test('a width cycle keeps the selected category/row/focus and refuses old coordinates', () => {
   const h = setup({ columns: 120, rows: 40 })
   plain(h)
   walkTo(h, 'conversation')
@@ -2223,7 +2252,7 @@ test('T05 a width cycle keeps the selected category/row/focus and refuses old co
   assert.equal(h.closes(), 0)
 })
 
-test('T06 losing the Extensions directory falls back to Plugins and refuses every stale gesture', () => {
+test('losing the Extensions directory falls back to Plugins and refuses every stale gesture', () => {
   let count = 1
   let revision = 1
   const h = setup({
@@ -2255,7 +2284,7 @@ test('T06 losing the Extensions directory falls back to Plugins and refuses ever
   // The repaint shows the nine fixed categories with Plugins selected, never an
   // empty Extensions page.
   const recovered = plain(h)
-  assert.match(recovered, /Categories \(9\)/u)
+  assert.match(recovered, /Categories \(10\)/u)
   assert.match(recovered, /> Plugins/u, 'Plugins is the stable fallback category')
   assert.doesNotMatch(recovered, /Extensions/u, 'the spent Extensions entry is gone')
   h.panel.handleInput('\u001b[F')
@@ -2264,12 +2293,12 @@ test('T06 losing the Extensions directory falls back to Plugins and refuses ever
   revision = 3
   count = 2
   const appended = plain(h)
-  assert.match(appended, /Categories \(10\)/u)
+  assert.match(appended, /Categories \(11\)/u)
   assert.match(appended, /> Plugins/u, 'the re-appended category never steals the selection')
   assert.doesNotMatch(appended, /Settings · Extensions/u, 'the keyboard stays on the rail')
 })
 
-test('T07 a same-count revision change refuses the old press until the new frame paints', () => {
+test('a same-count revision change refuses the old press until the new frame paints', () => {
   let revision = 1
   let rows: SettingsWorkspaceSnapshot['rows'] = [
     extensionSettingRow({ id: 'first', owner: '1:demo', token: 1, label: 'First row' }),
@@ -2312,7 +2341,7 @@ test('T07 a same-count revision change refuses the old press until the new frame
   assert.match(plain(h), /> Second row/u, 'the repainted row accepts the fresh gesture')
 })
 
-test('T08 a 44x8 frame scrolls and reveals the rail and never activates an off-screen row', () => {
+test('a 44x8 frame scrolls and reveals the rail and never activates an off-screen row', () => {
   const h = setup({ columns: 44, rows: 8 })
   const first = plain(h, 44)
   assert.equal(first.split('\n').length, 8, 'the frame keeps its physical budget')
@@ -2525,7 +2554,7 @@ test('the five new rows expose no copy verb', () => {
   assert.deepEqual(copied, [], 'no configuration row copies anything')
 })
 
-test('T06b an app-driven fact reread that discovers an empty directory recovers before it paints', () => {
+test('an app-driven fact reread that discovers an empty directory recovers before it paints', () => {
   let count = 1
   let revision = 1
   let snapshot = snapshotWithExtensions(count, revision)
@@ -2551,7 +2580,7 @@ test('T06b an app-driven fact reread that discovers an empty directory recovers 
   // the next frame paints the fixed nine with Plugins selected.
   assert.match(header(h), /Settings · Categories/u, 'the reread already moved the recovery')
   const frame = plain(h)
-  assert.match(frame, /Categories \(9\)/u)
+  assert.match(frame, /Categories \(10\)/u)
   assert.match(frame, /> Plugins/u, 'Plugins is the stable fallback')
   assert.doesNotMatch(frame, /Extensions/u, 'the spent category is gone')
   assert.equal(h.closes(), 0, 'the reread closed nothing')
@@ -2688,7 +2717,7 @@ test('losing the Extensions category still repairs the selection and its offsets
   const recovered = plain(h)
   assert.match(header(h), /Settings · Categories/u, 'the recovery moved the keyboard to the rail')
   assert.match(recovered, /^> Plugins/mu, 'Plugins is the stable fallback category')
-  assert.match(recovered, /Categories \(9\)/u)
+  assert.match(recovered, /Categories \(10\)/u)
   assert.doesNotMatch(recovered, /Extensions/u)
   // The repaired selection really owns the next key: Down from Plugins is
   // clamped, Up moves the CATEGORY, proving the rail — not a stale row — owns it.
@@ -2843,7 +2872,7 @@ test('an unloaded selected group lands on the first live group and its first row
   revision = 3
   rows = []
   const emptied = plain(h)
-  assert.match(emptied, /Categories \(9\)/u)
+  assert.match(emptied, /Categories \(10\)/u)
   assert.match(emptied, /> Plugins/u, 'the stable fallback category is selected')
   assert.doesNotMatch(emptied, /Extensions/u, 'no empty Extensions page holds the frame')
 })
@@ -3113,19 +3142,21 @@ test('the extension Detail states the raw facts and the readonly / choice-mismat
   assert.match(detail, /Change…/u, 'a writable registration still offers its choice')
 })
 
-// ── C2-R3: the ONE embedded specialist page (subagent allowlist) ───────────
+// ── C2-R3: the ONE embedded Subagent settings page ─────────────────────────
 
-/** Walk the rail to Agent and its Rows level, then to the allowlist row. */
-const openAllowlistRow = (h: Harness): void => {
+/** Walk the rail to Agent and its Rows level, then to the single page row. */
+const openSubagentRow = (h: Harness): void => {
   walkTo(h, 'agent')
   h.panel.handleInput('\r') // rail -> rows
 }
 
-test('R3-C1 the specialist row mounts ONE embedded page inside the same workspace and delegates only to it', () => {
+test('the single Subagent settings row mounts ONE embedded page inside the same workspace and delegates only to it', () => {
   const h = setup({ specialistPage: true })
-  openAllowlistRow(h)
+  openSubagentRow(h)
   const rows = plain(h)
-  assert.match(rows, /Subagent allowed models/u, 'the allowlist row is painted')
+  assert.match(rows, /Subagent settings/u, 'the single page row is painted')
+  assert.doesNotMatch(rows, /Subagent allowed models|Subagent model selection/u,
+    'the two retired instant rows are gone')
   assert.equal(h.specialistBuilds(), 0, 'focusing the row never builds the page')
   h.panel.handleInput('\r') // rows -> detail (no choice for a specialist row)
   assert.equal(h.closes(), 0, 'entering the Detail never closes the workspace')
@@ -3136,13 +3167,13 @@ test('R3-C1 the specialist row mounts ONE embedded page inside the same workspac
   // The page owns the BODY: its own lines are painted and the hint is the
   // physical last row.
   const frame = plain(h)
-  assert.match(frame, /SPECIALIST HEADER/u, `the picker body is painted inside the workspace:\n${frame}`)
-  assert.match(frame, /\nspecialist hint\s*$/u, 'the picker hint becomes the ONE last-row bar')
-  assert.match(frame, /Settings · Agent · Subagent allowed models · Allowed models/u,
+  assert.match(frame, /SPECIALIST HEADER/u, `the page body is painted inside the workspace:\n${frame}`)
+  assert.match(frame, /\nspecialist hint\s*$/u, 'the page hint becomes the ONE last-row bar')
+  assert.match(frame, /Settings · Agent · Subagent settings/u,
     'the header states the sub-view identity')
-  // Keyboard goes to the picker only.
+  // Keyboard goes to the page only.
   h.panel.handleInput('x')
-  assert.deepEqual(page.inputs, ['x'], 'the picker owns the keyboard')
+  assert.deepEqual(page.inputs, ['x'], 'the page owns the keyboard')
   assert.equal(h.closes(), 0, 'a plain key never closes the workspace')
   // Entering again never builds a second page.
   h.panel.handleInput('\r')
@@ -3150,7 +3181,7 @@ test('R3-C1 the specialist row mounts ONE embedded page inside the same workspac
   assert.ok(page.grants.length > 0 && page.grants.every(grant => grant >= 1), 'the body granted at least one row')
 })
 
-test('R3-C2 the picker Esc returns to the Agent rows with a fresh official snapshot and never closes the workspace', () => {
+test('the page Esc returns to the Agent rows with a fresh official snapshot and never closes the workspace', () => {
   let reads = 0
   const h = setup({
     specialistPage: true,
@@ -3159,23 +3190,23 @@ test('R3-C2 the picker Esc returns to the Agent rows with a fresh official snaps
       return SNAPSHOT
     },
   })
-  openAllowlistRow(h)
+  openSubagentRow(h)
   h.panel.handleInput('\r')
   const page = h.specialistPages[0]!
   const before = reads
-  ;(page as unknown as { done: () => void }).done() // the picker's own Esc
-  assert.equal(h.closes(), 0, 'the picker Esc never closes the workspace')
+  ;(page as unknown as { done: () => void }).done() // the page's own Esc
+  assert.equal(h.closes(), 0, 'the page Esc never closes the workspace')
   assert.equal(page.disposed, true, 'the page is disposed exactly once')
   assert.ok(reads > before, 'returning re-reads the row authority')
-  assert.doesNotMatch(plain(h), /SPECIALIST HEADER/u, 'the picker body is gone')
-  assert.match(plain(h), /Settings · Agent · Subagent allowed models/u,
-    'the Agent row that opened the page owns the frame again')
+  assert.doesNotMatch(plain(h), /SPECIALIST HEADER/u, 'the page body is gone')
+  assert.match(plain(h), /Settings · Agent · Rows/u,
+    'closing the specialist returns to the single Subagent settings row list')
   assert.match(plain(h), /Rows \(2\)|\[Rows \(2\)\]/u, 'the rows pane is painted again')
 })
 
-test('R3-C3 a category change and a workspace teardown dispose the page; late callbacks never revive it', () => {
+test('a category change and a workspace teardown dispose the page; late callbacks never revive it', () => {
   const change = setup({ specialistPage: true })
-  openAllowlistRow(change)
+  openSubagentRow(change)
   change.panel.handleInput('\r')
   const page = change.specialistPages[0]!
   // A category change while the page is mounted disposes it. The mounted page
@@ -3187,7 +3218,7 @@ test('R3-C3 a category change and a workspace teardown dispose the page; late ca
   assert.doesNotMatch(plain(change), /SPECIALIST HEADER/u, 'the disposed page is never painted')
 
   const teardown = setup({ specialistPage: true })
-  openAllowlistRow(teardown)
+  openSubagentRow(teardown)
   teardown.panel.handleInput('\r')
   const last = teardown.specialistPages[0]!
   teardown.panel.dispose()
@@ -3198,7 +3229,7 @@ test('R3-C3 a category change and a workspace teardown dispose the page; late ca
   assert.equal(teardown.specialistBuilds(), 1, 'nothing re-mounts a page after teardown')
 })
 
-test('R3-C4 a row change while the page is mounting disposes the superseded instance', () => {
+test('a row change while the page is mounting disposes the superseded instance', () => {
   let built = 0
   const h = setup({
     specialistPage: true,
@@ -3210,20 +3241,20 @@ test('R3-C4 a row change while the page is mounting disposes the superseded inst
       if (built === 1) (panel as unknown as { selectRow: (id: string) => void }).selectRow('default-permission')
     },
   })
-  openAllowlistRow(h)
+  openSubagentRow(h)
   h.panel.handleInput('\r')
   assert.equal(h.specialistBuilds(), 1, 'the factory really ran once')
   assert.equal(h.specialistPages[0]?.disposed, true, 'the superseded page was disposed instead of mounted')
   assert.doesNotMatch(plain(h), /SPECIALIST HEADER/u, 'a page for a spent row is never painted')
 })
 
-test('R3-C5 a pointer gesture only resolves inside the painted page cells under the same frame revision', () => {
+test('a pointer gesture only resolves inside the painted page cells under the same frame revision', () => {
   const h = setup({ columns: 120, rows: 40, specialistPage: true })
-  openAllowlistRow(h)
+  openSubagentRow(h)
   h.panel.handleInput('\r')
   const page = h.specialistPages[0]!
   const frame = plain(h).split('\n')
-  const paneHeaderRow = frame.findIndex(line => line.includes('[Subagent allowed models]'))
+  const paneHeaderRow = frame.findIndex(line => line.includes('[Subagent settings]'))
   assert.ok(paneHeaderRow >= 0, `the specialist pane header is painted:\n${frame.join('\n')}`)
   // The page's own FIRST body line paints one row below the pane header.
   const bodyRow = paneHeaderRow + 1
@@ -3250,103 +3281,47 @@ test('R3-C5 a pointer gesture only resolves inside the painted page cells under 
   assert.deepEqual(page.presses, [], 'chrome cells never reach the embedded page')
 })
 
-test('R3-C6 the specialist page is refused on a frame with no body row and the row still paints', () => {
+test('the specialist page mounts with one body row and is never built without a body', () => {
   const h = setup({ columns: 120, rows: 3, specialistPage: true })
-  openAllowlistRow(h)
+  openSubagentRow(h)
   const frame = plain(h)
   assert.match(frame, /Settings · Agent · Rows/u, 'the rows level still paints at the floor')
   h.panel.handleInput('\r')
-  // Below the body floor the root admits no activation: no page is built.
-  assert.equal(h.specialistBuilds(), 0, 'an invisible body never starts the picker')
+  assert.equal(h.specialistBuilds(), 1, 'one real content row may mount the specialist page')
+
+  const floor = setup({ columns: 120, rows: 2, specialistPage: true })
+  openSubagentRow(floor)
+  floor.panel.handleInput('\r')
+  assert.equal(floor.specialistBuilds(), 0, 'an invisible body never starts the page')
 })
 
-test('R3-C7 an 80x24 frame still reaches the Agent rows and the picker grant stays inside the body', () => {
+test('an 80x24 frame still reaches the Agent rows and the page grant stays inside the body', () => {
   const h = setup({ columns: 80, rows: 24, specialistPage: true })
-  openAllowlistRow(h)
+  openSubagentRow(h)
   h.panel.handleInput('\r')
   // The grant is set by the FIRST frame that paints the page.
   plain(h)
   const page = h.specialistPages[0]!
-  assert.equal(page.disposed, false, 'a regular short frame mounts the picker')
+  assert.equal(page.disposed, false, 'a regular short frame mounts the page')
   // The grant is the body + the ONE physical action row, never the whole
   // terminal: the chrome rows are not handed to the child.
   const grant = page.grants.at(-1) ?? 0
   const frame = plain(h).split('\n')
   assert.ok(frame.length <= 24, `the frame never exceeds the terminal rows:\n${frame.join('\n')}`)
-  assert.ok(grant >= 1 && grant < 24, `the picker grant is bounded by the body, got ${grant}`)
-  assert.match(frame.at(-1) ?? '', /specialist hint/u, 'the picker hint owns the ONE last row')
+  assert.ok(grant >= 1 && grant < 24, `the page grant is bounded by the body, got ${grant}`)
+  assert.match(frame.at(-1) ?? '', /specialist hint/u, 'the page hint owns the ONE last row')
 })
 
-test('R3-C8 a picker write that settles AFTER the picker closed still refreshes the Agent row summary', () => {
-  let sections = ['0 routes']
-  let reads = 0
-  const h = setup({
-    specialistPage: true,
-    snapshot: () => {
-      reads += 1
-      return {
-        ...SNAPSHOT,
-        rows: SNAPSHOT.rows.map(row => row.id === 'subagent-model-allowlist'
-          ? { ...row, summary: sections[sections.length - 1]! }
-          : row),
-      }
-    },
-  })
-  openAllowlistRow(h)
-  h.panel.handleInput('\r') // mount the picker
-  const page = h.specialistPages[0]!
-  const readsBefore = reads
-  ;(page as unknown as { done: () => void }).done() // the picker closes FIRST
-  assert.ok(reads > readsBefore, 'closing re-reads the facts once')
-  assert.match(plain(h), /0 routes/u, 'the row still shows the pre-write summary')
-
-  // The write settles AFTER the close: the authoritative summary CHANGED, and
-  // the live workspace must show it instead of staying stale.
-  sections = [...sections, '1 route']
-  const readsAfterClose = reads
-  ;(page as unknown as { refresh: () => void }).refresh()
-  assert.ok(reads > readsAfterClose, 'a late settlement re-reads the row authority')
-  assert.match(plain(h), /1 route/u, `the row converges after the late settle:\n${plain(h)}`)
-  assert.doesNotMatch(plain(h), /SPECIALIST HEADER/u, 'the closed picker is never repainted')
-})
-
-test('R3-C9 a late settlement after the WORKSPACE was disposed changes nothing', () => {
-  let sections = ['0 routes']
-  let renders = 0
-  const h = setup({
-    specialistPage: true,
-    snapshot: () => ({
-      ...SNAPSHOT,
-      rows: SNAPSHOT.rows.map(row => row.id === 'subagent-model-allowlist'
-        ? { ...row, summary: sections[sections.length - 1]! }
-        : row),
-    }),
-  })
-  openAllowlistRow(h)
-  h.panel.handleInput('\r')
-  const page = h.specialistPages[0]!
-  h.panel.dispose()
-  sections = [...sections, '1 route']
-  renders = 0
-  const before = plain(h)
-  ;(page as unknown as { refresh: () => void }).refresh()
-  assert.equal(plain(h), before, 'a disposed workspace is never repainted or re-read into a live frame')
-  assert.doesNotMatch(plain(h), /SPECIALIST HEADER/u, 'and no picker is resurrected')
-})
-
-test('R3-C10 an unreadable official section withholds the delegation rows instead of fabricating them', () => {
-  // The projection reads the section through a throwing-seam case: the Agent
-  // category must still paint (it is a fixed category) but the two delegation
-  // rows may not be invented from the shipped default.
+test('a removed specialist row leaves the Agent category and its empty-state navigation reachable', () => {
+  // This is the Root's directory-removal contract. The Subagent command source
+  // separately decides whether its row is present and how it marks availability.
   let reads = 0
   const h = setup({
     snapshot: () => {
       reads += 1
-      // The production projection withholds the rows when the read fails; this
-      // fixture mirrors that contract by simply not painting them.
       return {
         ...SNAPSHOT,
-        rows: SNAPSHOT.rows.filter(row => row.id !== 'subagent-model-allowlist'),
+        rows: SNAPSHOT.rows.filter(row => row.id !== 'subagent-settings'),
       }
     },
   })
@@ -3354,7 +3329,7 @@ test('R3-C10 an unreadable official section withholds the delegation rows instea
   h.panel.handleInput('\r')
   const frame = plain(h)
   assert.match(frame, /Settings · Agent · Rows/u, `the Agent category still paints:\n${frame}`)
-  assert.doesNotMatch(frame, /Subagent allowed models/u, 'an unreadable section paints no allowlist row')
+  assert.doesNotMatch(frame, /Subagent settings/u, 'an unreadable section paints no page row')
   // …and the Agent category, once EVERY row is withheld, states its real empty
   // state instead of painting an unexplained blank list.
   // A WIDE frame has room for the whole sentence.
@@ -3404,7 +3379,7 @@ const openToolsRows = (h: Harness): void => {
   h.panel.handleInput('\r') // rail -> rows
 }
 
-test('R4-C1 the Web row mounts ONE embedded page in this workspace with its own pane header', () => {
+test('the Web row mounts ONE embedded page in this workspace with its own pane header', () => {
   const h = setup({ webPage: true })
   openToolsRows(h)
   assert.match(plain(h), /Web Search \/ Fetch/u, 'the Web row is painted')
@@ -3432,7 +3407,7 @@ test('R4-C1 the Web row mounts ONE embedded page in this workspace with its own 
   assert.doesNotMatch(plain(h), /WEB PAGE LIST/u)
 })
 
-test('R4-C2 the credential route retires the Web page BEFORE mounting Models with the typed initial view', () => {
+test('the credential route retires the Web page BEFORE mounting Models with the typed initial view', () => {
   const h = setup({ webPage: true })
   openToolsRows(h)
   h.panel.handleInput('\u001b[B')
@@ -3454,7 +3429,7 @@ test('R4-C2 the credential route retires the Web page BEFORE mounting Models wit
   assert.equal(h.built.length, mountsBeforeStaleRoute, 'a retired page can never switch the workspace again')
 })
 
-test('R4-C3 a category change and a teardown dispose the Web page; late callbacks never revive it', () => {
+test('a category change and a teardown dispose the Web page; late callbacks never revive it', () => {
   const change = setup({ webPage: true })
   openToolsRows(change)
   change.panel.handleInput('\u001b[B')
@@ -3477,7 +3452,7 @@ test('R4-C3 a category change and a teardown dispose the Web page; late callback
   assert.equal(teardown.webBuilds(), 1, 'nothing re-mounts a page after teardown')
 })
 
-test('R4-C4 pointer gestures only resolve inside the page cells and never across a resize', () => {
+test('pointer gestures only resolve inside the page cells and never across a resize', () => {
   const h = setup({ columns: 120, rows: 40, webPage: true })
   openToolsRows(h)
   h.panel.handleInput('\u001b[B')
@@ -3508,7 +3483,7 @@ test('R4-C4 pointer gestures only resolve inside the page cells and never across
   assert.deepEqual(page.presses, [])
 })
 
-test('R4-C5 the page mounts from ONE real body row and is never built without a body', () => {
+test('the page mounts from ONE real body row and is never built without a body', () => {
   const h = setup({ columns: 120, rows: 3, webPage: true })
   openToolsRows(h)
   h.panel.handleInput('\u001b[B')
@@ -3527,7 +3502,7 @@ test('R4-C5 the page mounts from ONE real body row and is never built without a 
   assert.equal(floor.webBuilds(), 0, 'an invisible body never starts the page')
 })
 
-test('R4-C6 the Web row paints the ONE Configure Web… entry and never a second surface', () => {
+test('the Web row paints the ONE Configure Web… entry and never a second surface', () => {
   const h = setup({ webPage: true })
   openToolsRows(h)
   h.panel.handleInput('\u001b[B')
@@ -3540,7 +3515,7 @@ test('R4-C6 the Web row paints the ONE Configure Web… entry and never a second
 
 // ── C2-R7: the row contract has no legacy action left ─────────────────────
 
-test('R7-TS1 read-only / writable / specialist rows own their own verb and a row hit activates only the painted row', () => {
+test('read-only / writable / specialist rows own their own verb and a row hit activates only the painted row', () => {
   // READ-ONLY row (Visual tools without a candidate source): Enter opens the
   // Detail, states the read-only fact and never starts a choice.
   const readonly = setup()
@@ -3608,4 +3583,212 @@ test('R7-TS1 read-only / writable / specialist rows own their own verb and a row
   assert.equal(pointer.webBuilds(), 0, 'a row hit only selects; it never mounts the page')
   assert.equal(pointer.commits(), 0, 'a row hit writes nothing')
   assert.equal(pointer.closes(), 0, 'a row hit never closes the workspace')
+})
+
+// ── FR5-B: the L2 CAS fence and the confirmation warning ──────────────────
+
+function scalarSnapshot(options: {
+  readonly revision: number
+  readonly generation: object
+  readonly warning?: string
+}): SettingsWorkspaceSnapshot {
+  const row: SettingsWorkspaceRow = {
+    id: 'visual-tools',
+    category: 'tools',
+    label: 'Visual tools',
+    summary: 'Off',
+    value: 'Off',
+    scope: 'Host profile',
+    freshness: 'ready',
+    description: 'the scalar test row',
+    edit: {
+      field: 'visual-tools',
+      primary: 'persisted',
+      revision: options.revision,
+      generation: options.generation,
+      runtime: 'configured Off',
+      persisted: 'Off',
+      options: [
+        { value: 'Off', label: 'Off', available: true, current: true },
+        { value: 'On', label: 'On', available: true, current: false },
+      ],
+      ...(options.warning === undefined ? {} : { confirmationWarning: options.warning }),
+    },
+  }
+  return { ...SNAPSHOT, rows: [row] }
+}
+
+function openScalarChoice(h: ReturnType<typeof setup>): void {
+  plain(h)
+  walkTo(h, 'tools')
+  h.panel.handleInput('\r') // categories -> rows
+  h.panel.handleInput('\r') // rows -> the L2 choice
+  assert.match(plain(h), /Choose value/u)
+}
+
+test('a same-Host revision change while L2 stays painted refuses Confirm with zero dispatch', () => {
+  let revision = 5
+  const generation = {}
+  const h = setup({ columns: 120, rows: 40, snapshot: () => scalarSnapshot({ revision, generation }) })
+  openScalarChoice(h)
+  revision = 6
+  ;(h.panel as unknown as { refresh(requestRender?: boolean): void }).refresh(false)
+  plain(h)
+  h.panel.handleInput('\r')
+  assert.equal(h.commits(), 0, 'the rebased row never dispatches')
+  assert.match(plain(h), /Not saved/u, 'the stale fence is reported')
+  assert.match(plain(h), /Host settings changed since/u)
+})
+
+test('a replaced Host generation with the SAME revision refuses Confirm with zero dispatch', () => {
+  let generation: object = {}
+  const h = setup({ columns: 120, rows: 40, snapshot: () => scalarSnapshot({ revision: 5, generation }) })
+  openScalarChoice(h)
+  generation = {}
+  ;(h.panel as unknown as { refresh(requestRender?: boolean): void }).refresh(false)
+  plain(h)
+  h.panel.handleInput('\r')
+  assert.equal(h.commits(), 0, 'a same-revision Host replacement is not the captured fence')
+  assert.match(plain(h), /Not saved/u)
+})
+
+test('the confirmation warning is scrollable in L2 and must be read before Confirm', () => {
+  const warning = 'Risk: May send chat content to DeepSeek API'
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    snapshot: () => scalarSnapshot({ revision: 1, generation: {}, warning }),
+  })
+  openScalarChoice(h)
+  const frame = plain(h)
+  assert.match(frame, /Risk: May send chat content to DeepSeek API/u, 'the L2 choice paints the risk')
+  const lines = frame.split('\n')
+  const confirmRow = lines.findIndex(line => line.includes('Confirm'))
+  assert.ok(confirmRow >= 0, `the pointer Confirm is painted in the same warning frame:\n${frame}`)
+  const confirmColumn = lines[confirmRow]!.indexOf('Confirm')
+  h.panel.onCellPress(confirmColumn, confirmRow)
+  h.panel.onCellClick(confirmColumn, confirmRow)
+  assert.equal(h.commits(), 1, 'a fully painted warning admits the pointer Confirm')
+
+  const longWarning = `Risk: ${'sensitive-session-content '.repeat(30)}`
+  const short = setup({
+    columns: 120,
+    rows: 10,
+    snapshot: () => scalarSnapshot({ revision: 1, generation: {}, warning: longWarning }),
+  })
+  plain(short)
+  walkTo(short, 'tools')
+  short.panel.handleInput('\r') // categories -> rows
+  short.panel.handleInput('\r') // rows -> the L2 choice
+  assert.match(plain(short), /Risk:/u, 'the warning starts painting')
+  short.panel.handleInput('\r')
+  assert.equal(short.commits(), 0, 'Confirm before the warning is read never writes')
+  // PageDown reveals the scrollable warning; once read, the SAME Confirm can
+  // settle even though warning/candidate/Confirm are not in one frame.
+  for (let page = 0; page < 40 && short.commits() === 0; page += 1) {
+    short.panel.handleInput('\x1b[6~')
+    plain(short)
+    short.panel.handleInput('\r')
+    plain(short)
+  }
+  assert.equal(short.commits(), 1, 'a scrolled/read warning admits the keyboard Confirm')
+})
+
+test('a pointer click on the Computer Use row opens the page on the single-pane frame', () => {
+  // RFL-009 (v2 scope): on the narrow/medium single-pane frame there is no
+  // Detail pane, so the Detail's Manage affordance does not exist. The row
+  // itself must be a real pointer route to the embedded Computer Use page.
+  // The page's own row is added ONLY here: the shared fixture is the other
+  // tests' navigation baseline.
+  const withComputerUse = (): SettingsWorkspaceSnapshot => ({
+    ...SNAPSHOT,
+    rows: [...SNAPSHOT.rows, {
+      id: 'computer-use',
+      category: 'tools' as const,
+      label: 'Computer Use',
+      summary: 'Permissions · applications · PTC',
+      scope: 'DSH Host · official Computer Use provider',
+      freshness: 'runtime' as const,
+      description: 'the official Computer Use provider page',
+      specialist: 'computer-use' as const,
+    }],
+  })
+  const h = setup({ columns: 44, rows: 24, specialistPage: true, snapshot: withComputerUse })
+  // The narrow first frame is the About CONTENT: Esc returns to the list, the
+  // rail walk selects Tools, and Enter opens that category's content.
+  h.panel.handleInput('\x1b')
+  walkTo(h, 'tools')
+  // POINTER-ONLY: the painted `Enter open` hint is a real target that replays
+  // the Enter ladder, so no keyboard step is needed to reach the Tools rows.
+  const barRow = plain(h, 44).split('\n').findIndex(line => line.includes('Enter open'))
+  assert.ok(barRow >= 0, `the open hint is painted:\n${plain(h, 44)}`)
+  const openCol = (plain(h, 44).split('\n')[barRow] ?? '').indexOf('Enter open')
+  h.panel.onCellPress(openCol + 1, barRow)
+  h.panel.onCellClick(openCol + 1, barRow)
+  const openedRows = plain(h, 44)
+  assert.match(openedRows, /Computer Use/u, `the painted open hint must open the Tools rows:\n${openedRows}`)
+  const view = plain(h, 44)
+  const rowIndex = view.split('\n').findIndex(line => line.includes('Computer Use'))
+  assert.ok(rowIndex >= 0, `the Computer Use row is painted:\n${view}`)
+  // The narrow frame is the legacy single-column projection: the rows pane
+  // publishes ITS OWN box, not the wide layout's content box.
+  const rowsPane = (h.panel as unknown as { paintedPanes?: { rows?: { x: number, contentTop: number } } }).paintedPanes?.rows
+  assert.ok(rowsPane !== undefined, 'the narrow rows pane is recorded by the frame')
+  const y = rowIndex
+  const x = Math.max(rowsPane.x, (view.split('\n')[rowIndex] ?? '').indexOf('Computer Use'))
+  h.panel.onCellPress(x, y)
+  h.panel.onCellClick(x, y)
+  assert.equal(h.computerUseBuilds(), 1,
+    'the click on the Computer Use row must open the embedded page, not only select the row')
+  h.panel.handleInput('\x1b')
+})
+
+test('any non-zero wheel on the bar revokes a painted open press (positive and cancel contrast)', () => {
+  // RFL-024: the NEW bar kind must obey the SAME ActionBar gesture class as the
+  // Esc affordance / child spans — a wheel anywhere on the bar revokes the
+  // press, even when it is immaterial for scrolling.
+  const withComputerUse = (): SettingsWorkspaceSnapshot => ({
+    ...SNAPSHOT,
+    rows: [...SNAPSHOT.rows, {
+      id: 'computer-use',
+      category: 'tools' as const,
+      label: 'Computer Use',
+      summary: 'Permissions · applications · PTC',
+      scope: 'DSH Host · official Computer Use provider',
+      freshness: 'runtime' as const,
+      description: 'the official Computer Use provider page',
+      specialist: 'computer-use' as const,
+    }],
+  })
+  const openCell = (h: Harness): { x: number, y: number } => {
+    const frame = plain(h, 44).split('\n')
+    const y = frame.findIndex(line => line.includes('Enter open'))
+    assert.ok(y >= 0, `the open hint is painted:\n${frame.join('\n')}`)
+    return { x: (frame[y] ?? '').indexOf('Enter open') + 1, y }
+  }
+  // POSITIVE: a press + release with no wheel opens the Tools rows.
+  const positive = setup({ columns: 44, rows: 24, specialistPage: true, snapshot: withComputerUse })
+  positive.panel.handleInput('\x1b')
+  walkTo(positive, 'tools')
+  const cell = openCell(positive)
+  positive.panel.onCellPress(cell.x, cell.y)
+  positive.panel.onCellClick(cell.x, cell.y)
+  assert.match(plain(positive, 44), /Computer Use/u, 'the un-interrupted press+release opens the rows')
+  positive.panel.handleInput('\x1b')
+
+  // CANCEL: an IMMATERIAL wheel (delta 1) on the same bar cell revokes it.
+  const cancelled = setup({ columns: 44, rows: 24, specialistPage: true, snapshot: withComputerUse })
+  cancelled.panel.handleInput('\x1b')
+  walkTo(cancelled, 'tools')
+  const cancelCell = openCell(cancelled)
+  cancelled.panel.onCellPress(cancelCell.x, cancelCell.y)
+  cancelled.panel.handleMouse({
+    type: 'wheel', button: 'none', x: cancelCell.x, y: cancelCell.y,
+    screenX: cancelCell.x, screenY: cancelCell.y, width: 44, height: 24,
+    shift: false, alt: false, ctrl: false, wheelDelta: 1,
+  })
+  cancelled.panel.onCellClick(cancelCell.x, cancelCell.y)
+  const afterCancel = plain(cancelled, 44)
+  assert.doesNotMatch(afterCancel, /Computer Use ·|Computer Use\s+Permissions/u,
+    `an immaterial wheel on the bar must revoke the open press:\n${afterCancel}`)
 })

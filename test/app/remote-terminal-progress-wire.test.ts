@@ -58,8 +58,8 @@ import {
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { RemoteStreamHandle } from '@deepseek-ai/dsh-typert-protocol'
 import type { RemoteMainProgressFact } from '../../src/app/application-runtime.ts'
-import { createRemoteClientRuntime, type RemoteClientRuntime } from '../../src/app/remote/client-runtime.ts'
-import { createRemoteHostRuntime, type RemoteHostRuntime } from '../../src/app/remote/host-runtime.ts'
+import { createRemoteClientRuntime, type RemoteClientRuntime } from '../support/m3-inprocess/client-runtime.ts'
+import { createRemoteHostRuntime, type RemoteHostRuntime } from '../support/m3-inprocess/host-runtime.ts'
 import {
   consumeRemoteTerminalProgress,
   createRemoteTerminalProgressSource,

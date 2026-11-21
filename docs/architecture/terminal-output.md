@@ -31,7 +31,7 @@ hyperlinks) is trusted and must survive untouched.
 | Terminal style for **external** log text | the whitelist below | `sanitizeDisplayLog` |
 | Plugin install operations, session identities, picker ids | existing controllers / `SessionReader` | display-only string projections |
 | TSP frame/currentness | installed SDK + `src/tui/tsp/session.ts` | `sanitizeDisplayText` on node **text props only** |
-| Display `/copy` payload | official latest `assistant/message` + same-Session Folder settlement + PR1 publications + `planVisualPlacement` | text spans only; raw Session/`/transcript` keep the marker |
+| Display `/copy` payload | official latest `assistant/message` + same-Session Folder settlement + PR1 publications + `planVisualPlacement` | text spans only; raw Session bytes and the official Markdown text block keep the marker |
 
 The source of truth — event objects, raw observations, copy payloads, search
 source keys, navigation ids, exact-copy offsets and persistence — is **never**
@@ -42,7 +42,10 @@ published-visual marker line that the renderer CONSUMED is not part of what the
 user reads, so the clipboard payload omits that exact source span while every
 other byte stays original (see `docs/architecture/transcript.md`, "Display
 `/copy` for consumed visual markers"). The durable Session body, the model
-history, search and the raw `/transcript` export never take this projection. Rendering is a disposable projection over it: the same raw
+history, search and the `/transcript` export never take this projection: the
+export is the official Host Markdown formatter's output, not a
+terminal-sanitized display projection. Rendering is a disposable projection
+over it: the same raw
 value can be copied byte-exactly and also painted safely.
 
 ## The two policies
@@ -273,12 +276,12 @@ retirement and the resident budget.
   `image`+`blobs` native node path and never mounts a PiTui graphics handle;
   the Tern PiTui fallback uses the same Direct capability above. Every Alt
   Screen derives its image clear/redraw/release strategy from the one managed
-  Native handle when that handle exists, even when the static process
-  capability is `null` or `iterm2`; without a managed handle the existing
-  static protocol (including the iTerm2 suppression/restore lifecycle) is
-  unchanged. The tmux virtual path is a separate strict automatic admission
-  with its own live-server probe (below). All paths fail closed, and every
-  managed path deletes only its own ids.
+  Native handle when that handle exists, even when the static process capability
+  is `null` or `iterm2`; without a managed handle, Direct iTerm2 uses the fork's
+  OSC 1337 `Image` path and multiplexer/none topologies remain text-only. The
+  tmux virtual path is a separate strict automatic admission with its own live
+  server probe (below). All paths fail closed, and every managed path deletes
+  only its own ids.
 
 ### tmux virtual backend (strict automatic admission)
 
@@ -377,8 +380,8 @@ the live server, identity, hard-off or revoke checks.
   id/geometry, never emits one anchor per row, never relocates an unmarked
   foreign virtual image, and leaves visible-anchor, Native and text output
   unchanged. Authority: `src/tui/graphics/tmux-image.ts`,
-  `src/tui/graphics/kitty-terminal.ts`, `src/layout.ts` +
-  `src/terminal-image.ts` (vendored divergence X067); proof:
+  `src/tui/graphics/kitty-terminal.ts`, `packages/pi-tui/src/layout.ts` +
+  `packages/pi-tui/src/terminal-image.ts` (vendored divergence X067); proof:
   `packages/pi-tui/test/layout.test.ts` plus the real-Screen first-middle and
   foreign-negative cases in `test/integration/kitty-tmux-screen.test.ts`.
 - **Grid provenance is per row; content is never proof.** Every managed grid row

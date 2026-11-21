@@ -58,9 +58,10 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { mkdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { isDeepStrictEqual } from 'node:util'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
 import { LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -69,13 +70,17 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import * as toolTodo from '@deepseek-ai/dsh-tool-todo'
 import { Config as TuiConfigSchema } from '../../src/index.ts'
+import { bundleVersion } from '../../src/client/launcher/version.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { applyRunnerWithRuntime } from '../../src/app/bootstrap.ts'
+import type { LaunchWorkspaceVerdict } from '../../src/app/remote-process/local-workspace-equivalence.ts'
+import { statSync } from 'node:fs'
 import type { ClientReloadRequestResult, RemoteApplicationOverride, RunnerStartupSettlement } from '../../src/app/application-runtime.ts'
 import { TUI_STARTUP_SERVICE } from '../../src/startup.ts'
-import { createRemoteApplicationRuntime } from '../../src/app/remote/runtime.ts'
+import { createRemoteApplicationRuntime } from '../support/m3-inprocess/application-runtime.ts'
 import { testPromptSerializer, waitFor } from '../support/remote-application-fixture.ts'
 import { appendHistoryRecord, historyFilePath, loadHistoryRecords } from '../../src/client/history/store.ts'
+import { FileHistorySearchSource } from '../../src/client/history/search.ts'
 import { dshHome } from '../../src/runtime/process/diagnostics.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -214,6 +219,22 @@ export async function mountRemotePresentationHost(
  * Host. The runner consumes only the aggregate's selected core + the
  * presentation-source bundle — no Direct graph is ever constructed.
  */
+/** An in-process VERIFIED launch proof for composition tests. The REAL
+ * classifier's evidence is validated by its own unit contract and the packed
+ * OS lane; this fixture only needs a legal sessionless Workspace target. */
+function launchProof(cwd: string): LaunchWorkspaceVerdict {
+  const evidence = statSync(cwd, { bigint: true })
+  return {
+    kind: 'verified',
+    launchCwd: cwd,
+    instanceId: 'in-process-fixture-host',
+    hostPid: process.pid,
+    device: evidence.dev.toString(),
+    inode: evidence.ino.toString(),
+    revalidate: async () => true,
+  }
+}
+
 export async function mountRemoteRunner(
   life: TestLifecycle,
   options: {
@@ -236,7 +257,10 @@ export async function mountRemoteRunner(
     /** Invoked with the Remote presentation bundle BEFORE the runner fiber
      *  mounts: a suite that must hold the startup hydration wraps the
      *  presentation reader here (the runner reads it lazily at call time). */
-    beforeRunnerMount?: (presentation: RemoteApplicationOverride['presentation']) => void
+    beforeRunnerMount?: (
+      presentation: RemoteApplicationOverride['presentation'],
+      aggregate: Awaited<ReturnType<typeof createRemoteApplicationRuntime>>,
+    ) => void
     /** Mount the production TSP renderer over the scripted pane instead of PiTui. */
     renderer?: 'pi-tui' | 'tsp'
     /** Advertise the TSP Session Browser presenter (for /sessions and /resume). */
@@ -249,6 +273,12 @@ export async function mountRemoteRunner(
      *  ONE process-owned manual-reload capability). Absent keeps the Direct
      *  pending behavior. */
     startupSettlement?: RunnerStartupSettlement
+    /** M6 compatible-cross-build UX: the process-local daemon administration
+     *  port. A pure connection notice must never call it; a counting fake can
+     *  witness that. */
+    profileDaemonAdmin?: RemoteApplicationOverride['profileDaemonAdmin']
+    /** PR2: the public CLI Session launch intent carried by `tuiStartup`. */
+    sessionLaunch?: { readonly kind: 'lookup' | 'browse' | 'continue'; readonly query?: string }
   } = {},
 ): Promise<RemoteRunnerFixture> {
   const presetId = options.presetId ?? 'm3-4-pr2-preset'
@@ -271,9 +301,29 @@ export async function mountRemoteRunner(
     },
   })
   life.defer(() => aggregate.selected.disposeTransport().catch(() => {}))
+  if (options.sessionLaunch !== undefined) {
+    // The split Client process mounts and awaits its official Client domains
+    // BEFORE the runner starts; this in-process fixture creates the aggregate
+    // asynchronously, so wait for the SAME official Client session-list baseline
+    // before handing the runner the CLI launch intent. This is fixture setup,
+    // not a second read: the adapter's own `list()` below still performs the
+    // one production read under the runner's lifecycle signal.
+    const deadline = Date.now() + 20_000
+    for (;;) {
+      const rows = await aggregate.selected.backend.sessionReader.list(undefined)
+      if (rows !== undefined) break
+      if (Date.now() > deadline) throw new Error('timed out waiting for the official Client session-list baseline')
+      await new Promise<void>(resolve => setTimeout(resolve, 20))
+    }
+  }
 
   const vt = new VirtualTerminal(100, 30)
   let pane: TspPane | undefined
+  const previousRenderer = process.env.DSH_PI_TUI_RENDERER
+  life.defer(() => {
+    if (previousRenderer === undefined) delete process.env.DSH_PI_TUI_RENDERER
+    else process.env.DSH_PI_TUI_RENDERER = previousRenderer
+  })
   if (options.renderer === 'tsp') {
     pane = installTspPane({
       nativeImages: options.nativeImages,
@@ -303,12 +353,14 @@ export async function mountRemoteRunner(
   runnerCtx.provide(TUI_STARTUP_SERVICE, {
     sessionId: options.resumeSessionId,
     ...(options.launchPresetId === undefined ? {} : { presetId: options.launchPresetId }),
+    ...(options.sessionLaunch === undefined ? {} : { sessionLaunch: options.sessionLaunch }),
     shippedPresetRoot: host.workRoot,
   })
   const override: RemoteApplicationOverride = {
     selected: aggregate.selected,
     presentation: aggregate.presentation,
     extensionService: aggregate.clientUi.extensionService,
+    ...(options.profileDaemonAdmin === undefined ? {} : { profileDaemonAdmin: options.profileDaemonAdmin }),
   }
   const aggregateRef = aggregate
   // The mounted TuiApp instance, captured exactly like the Direct runner
@@ -321,13 +373,17 @@ export async function mountRemoteRunner(
     return originalStart.call(this)
   }
   life.defer(() => { TuiApp.prototype.start = originalStart })
-  options.beforeRunnerMount?.(override.presentation)
+  options.beforeRunnerMount?.(override.presentation, aggregate)
   const runnerFiber = runnerCtx.plugin(pluginCtx => {
     applyRunnerWithRuntime(
       pluginCtx,
       TuiConfigSchema({ fullscreen: 'off', sessionId: options.resumeSessionId } as never),
       override,
       options.startupSettlement,
+      // The REAL classifier is proven by its own unit contract and the packed
+      // OS lane; this in-process composition only needs a sessionless first
+      // create to have a legal Host Workspace target.
+      launchProof(process.cwd()),
     )
   })
   await runnerFiber
@@ -363,8 +419,11 @@ function seedTurn(
 ): void {
   const session = fixture.host.ctx.sessions.get(SessionId(sessionId))
   if (session === undefined) throw new Error(`seedTurn: no Host session ${sessionId}`)
+  // rc.2 gives `Session.append` an additional array overload; the single-event
+  // fixture seam therefore goes through `unknown` rather than claiming the two
+  // signatures overlap.
   const append = (type: string, data: unknown, options?: { surfaceOp?: 'append' }): void => {
-    (session.append as (t: string, d: unknown, o?: { surfaceOp?: 'append' }) => void)(type, data, options)
+    (session.append as unknown as (t: string, d: unknown, o?: { surfaceOp?: 'append' }) => void)(type, data, options)
   }
   append('turn/start', { turn })
   append('step/start', { turn, step: 1 })
@@ -421,7 +480,26 @@ test('a Remote resumed session hydrates the real transcript and status through t
     session.append('step/end', { turn: 1, step: 1 })
     session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
   }
-  const fixture = await mountRemoteRunner(life, { presetId: hostPreset, resumeSessionId: mainId, host: seedHost })
+  let officialHasMore: boolean | undefined
+  const fixture = await mountRemoteRunner(life, {
+    presetId: hostPreset,
+    resumeSessionId: mainId,
+    host: seedHost,
+    beforeRunnerMount: presentation => {
+      // Keep the official Remote reader and its real event rows, while controlling
+      // the one authoritative page-boundary bit for this coverage qualification.
+      const reader = presentation.presentationReader as {
+        read(sessionId: string, signal?: AbortSignal): Promise<{ readonly hasMore: boolean; readonly coverage: string } | undefined>
+      }
+      const originalRead = reader.read
+      reader.read = async function controlledBoundary(sessionId: string, signal?: AbortSignal) {
+        const snapshot = await originalRead.call(reader, sessionId, signal)
+        if (snapshot === undefined) return undefined
+        officialHasMore = snapshot.hasMore
+        return { ...snapshot, hasMore: true, coverage: 'bounded' }
+      }
+    },
+  })
   await waitFor('transcript hydration', () => {
     const text = fixture.vt.getViewport().join('\n')
     return text.includes('hello remote') && text.includes('remote answer one')
@@ -431,6 +509,78 @@ test('a Remote resumed session hydrates the real transcript and status through t
   // duplicate identity (the local-echo ledger never ran: no submit happened).
   assert.equal(frame.includes('hello remote'), true, 'the resumed user row is rendered')
   assert.equal(frame.includes('remote answer one'), true, 'the resumed assistant row is rendered')
+  assert.equal(officialHasMore, false, 'the fixture captures the official Reader boundary before controlling the positive')
+  const app = fixture.runnerApp() as TuiApp
+  await waitFor('Remote search coverage commit', () => app.transcriptSearchCoverageForTest() === 'loaded-history-with-more', 5_000)
+  app.startTranscriptSearch('full')
+  await waitFor('honest Remote Full coverage label', () => fixture.vt.getViewport().join('\n').includes('Older not searched'), 5_000)
+  assert.ok(!fixture.vt.getViewport().join('\n').includes('Entire session'),
+    'Remote never describes the loaded query scope as a complete Session')
+})
+
+test('a Remote Full Find with the official complete window says only Loaded history', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr2-search-complete-window'
+  const hostPreset = 'm3-4-pr2-preset'
+  const host = await mountRemotePresentationHost(life, hostPreset)
+  await host.harness.create(SessionId(mainId), undefined, { cwd: host.anchorDir })
+  const session = host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+    append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+  }
+  session.append('turn/start', { turn: 1 })
+  session.append('step/start', { turn: 1, step: 1 })
+  session.append('user/message', {
+    id: 'u-complete-search',
+    role: 'user',
+    content: [{ type: 'text', text: 'complete remote reader window' }],
+    source: { kind: 'user' },
+  }, { surfaceOp: 'append' })
+  session.append('assistant/message', {
+    turn: 1,
+    step: 1,
+    message: {
+      id: 'a-complete-search',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'remote response' }],
+      source: { kind: 'model', provider: 'smoke', model: 'smoke' },
+    },
+    stream: [],
+    usage: { inputTokens: 4, outputTokens: 2 },
+  }, { surfaceOp: 'append' })
+  session.append('step/end', { turn: 1, step: 1 })
+  session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+
+  let officialHasMore: boolean | undefined
+  const fixture = await mountRemoteRunner(life, {
+    presetId: hostPreset,
+    resumeSessionId: mainId,
+    host,
+    beforeRunnerMount: presentation => {
+      // Observe and return the official Reader value unchanged: the test covers
+      // the production hasMore=false projection all the way to the Search hint.
+      const reader = presentation.presentationReader as {
+        read(sessionId: string, signal?: AbortSignal): Promise<{ readonly hasMore: boolean; readonly coverage: string } | undefined>
+      }
+      const originalRead = reader.read
+      reader.read = async function observedOfficialBoundary(sessionId: string, signal?: AbortSignal) {
+        const snapshot = await originalRead.call(reader, sessionId, signal)
+        if (snapshot !== undefined) officialHasMore = snapshot.hasMore
+        return snapshot
+      }
+    },
+  })
+  await waitFor('complete Remote hydration', () => fixture.vt.getViewport().join('\n').includes('complete remote reader window'), 20_000)
+  assert.equal(officialHasMore, false, 'the real official Reader snapshot proves this window is complete')
+  const app = fixture.runnerApp() as TuiApp
+  await waitFor('complete-window coverage commit', () => app.transcriptSearchCoverageForTest() === 'loaded-history', 5_000)
+  fixture.vt.resize(200, 30)
+  await fixture.vt.waitForRender()
+
+  app.startTranscriptSearch('full')
+  await waitFor('Remote loaded-history label', () => fixture.vt.getViewport().join('\n').includes('Loaded history'), 5_000)
+  const frame = fixture.vt.getViewport().join('\n')
+  assert.ok(!frame.includes('Entire session'), 'a bounded Remote Reader never claims a complete Session corpus')
+  assert.ok(!frame.includes('earlier history not searched'), 'hasMore=false adds no earlier-history suffix')
 })
 
 test('the resumed Remote startup keeps input accepted while its hydration read is held', async (t) => {
@@ -470,6 +620,27 @@ test('the resumed Remote startup keeps input accepted while its hydration read i
   let releaseRead!: () => void
   const readGate = new Promise<void>(resolve => { releaseRead = resolve })
   let gated = false
+  let historyReadEntered = false
+  let releaseHistoryRead!: () => void
+  const historyReadGate = new Promise<void>(resolve => { releaseHistoryRead = resolve })
+  let historyGated = false
+  const realHistoryRead = FileHistorySearchSource.prototype.readSessionRecall
+  FileHistorySearchSource.prototype.readSessionRecall = async function gatedHistoryRead(
+    this: FileHistorySearchSource,
+    sessionId: string,
+    signal?: AbortSignal,
+  ) {
+    if (historyGated) return realHistoryRead.call(this, sessionId, signal)
+    historyGated = true
+    // The REAL cold read completes first (its snapshot is exactly what
+    // production would carry); the gate then holds its RESULT so the terminal
+    // keeps accepting input while the hydration continuation is still pending.
+    const captured = await realHistoryRead.call(this, sessionId, signal)
+    historyReadEntered = true
+    await historyReadGate
+    return captured
+  }
+  life.defer(() => { FileHistorySearchSource.prototype.readSessionRecall = realHistoryRead })
   const fixture = await mountRemoteRunner(life, {
     presetId: hostPreset,
     resumeSessionId: mainId,
@@ -536,12 +707,16 @@ test('the resumed Remote startup keeps input accepted while its hydration read i
   await waitFor('the first submission persisted under the resumed Session', () =>
     ownersOf('first remote prompt').includes(mainId), 20_000)
 
-  // Release the hydration and accept the second submission in the SAME
-  // synchronous stack: its persistence continuation is queued BEHIND the
-  // released hydration continuation.
+  // Release the transport read; the hydration then starts its COLD HISTORY
+  // read, whose completed snapshot this test holds so the window stays open.
   releaseRead()
+  await waitFor('the held cold history read to be entered', () => historyReadEntered, 20_000)
+  // Accept the second submission while the history snapshot (captured before
+  // it) is still parked: its persistence continuation is queued behind the
+  // released hydration continuation.
   editor.setDraft('pending remote prompt')
   editor.submitDraft()
+  releaseHistoryRead()
   await waitFor('the resumed hydration committed', () => commits.length > 0, 20_000)
   // The reseed that commits while the second submission's row is still absent
   // from the file: its snapshot carries the persisted submission only …
@@ -550,11 +725,15 @@ test('the resumed Remote startup keeps input accepted while its hydration read i
     `the snapshot carries the persisted submission only: ${JSON.stringify(first.entries)}`)
   assert.equal(first.entries.includes('pending remote prompt'), false,
     'the accepted-but-unpersisted submission is NOT in the snapshot')
-  // … and the recall it commits still holds that input, at its submission rank.
-  assert.deepEqual(first.recall, ['pending remote prompt', 'first remote prompt'],
-    `the hydration reconcile keeps the pending submission: ${JSON.stringify(first.recall)}`)
+  // PR2: the second submission's recall occurrence completes at its Host
+  // ACCEPTANCE, which follows the write — so the hydration commit that runs
+  // first legitimately carries only the persisted submission, while the
+  // pending one is still the LIVE DRAFT (held) at that moment.
+  assert.deepEqual(first.recall, ['first remote prompt'],
+    `the hydration commit carries the persisted submission only: ${JSON.stringify(first.recall)}`)
+  await waitFor('the pending submission accepted', () => editor.getDraft() === '', 20_000)
   assert.deepEqual([...editor.getInputHistory()], ['pending remote prompt', 'first remote prompt'],
-    'the hydration reconcile keeps the pending submission and never doubles the persisted one')
+    'the acceptance-boundary recall keeps the pending submission and never doubles the persisted one')
 
   // The late append lands under the SAME Session after the reseed, and the
   // recall is unchanged by it (its occurrence is already represented).
@@ -570,6 +749,142 @@ test('the resumed Remote startup keeps input accepted while its hydration read i
   } finally {
     // Never leave the startup hydration parked, whatever failed above.
     releaseRead()
+    releaseHistoryRead()
+    FileHistorySearchSource.prototype.readSessionRecall = realHistoryRead
+  }
+})
+
+test('a resumed Remote Session recalls cross-cwd history through the real PiTui runner editor', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-r11-cross-cwd-pitui'
+  const presetId = 'm3-4-r11-cross-cwd-preset'
+  const host = await mountRemotePresentationHost(life, presetId)
+  await host.harness.create(SessionId(mainId), undefined, { cwd: host.anchorDir })
+  const currentFile = historyFilePath(host.workRoot, host.anchorDir)
+  mkdirSync(dirname(currentFile), { recursive: true })
+  appendHistoryRecord(currentFile, { v: 2, content: 'current cwd row', cwd: host.anchorDir, ts: 10, sessionId: mainId }, undefined)
+  const otherFile = historyFilePath(host.workRoot, '/client-other-cwd')
+  mkdirSync(dirname(otherFile), { recursive: true })
+  appendHistoryRecord(otherFile, { v: 2, content: 'other cwd newest', cwd: '/client-other-cwd', ts: 20, sessionId: mainId }, undefined)
+  appendHistoryRecord(otherFile, { v: 2, content: 'foreign session row', cwd: '/client-other-cwd', ts: 30, sessionId: 'session-foreign' }, undefined)
+  const fixture = await mountRemoteRunner(life, { presetId, resumeSessionId: mainId, host })
+  const editor = fixture.runnerApp() as unknown as {
+    setDraft(text: string): void
+    getDraft(): string
+    getInputHistory(): readonly string[]
+  }
+  try {
+    await waitFor('the cross-cwd cold seed reaches the real runner recall', () =>
+      [...editor.getInputHistory()].includes('other cwd newest'), 10_000)
+    assert.ok(!editor.getInputHistory().includes('foreign session row'),
+      'another Session never leaks into the resumed recall')
+    editor.setDraft('')
+    fixture.vt.sendInput('\x1b[A')
+    await waitFor('the first ↑ recalls the other cwd row', () => editor.getDraft() === 'other cwd newest', 5_000)
+    fixture.vt.sendInput('\x1b[A')
+    await waitFor('the second ↑ recalls the current cwd row', () => editor.getDraft() === 'current cwd row', 5_000)
+  } finally {
+    await fixture.dispose()
+  }
+})
+
+test('a resumed Remote Session recalls cross-cwd history through the real TSP runner composer', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-r11-cross-cwd-tsp'
+  const presetId = 'm3-4-r11-cross-cwd-tsp-preset'
+  const host = await mountRemotePresentationHost(life, presetId)
+  await host.harness.create(SessionId(mainId), undefined, { cwd: host.anchorDir })
+  const currentFile = historyFilePath(host.workRoot, host.anchorDir)
+  mkdirSync(dirname(currentFile), { recursive: true })
+  appendHistoryRecord(currentFile, { v: 2, content: 'current cwd row', cwd: host.anchorDir, ts: 10, sessionId: mainId }, undefined)
+  const otherFile = historyFilePath(host.workRoot, '/client-other-cwd')
+  mkdirSync(dirname(otherFile), { recursive: true })
+  appendHistoryRecord(otherFile, { v: 2, content: 'other cwd newest', cwd: '/client-other-cwd', ts: 20, sessionId: mainId }, undefined)
+  let recallDone = false
+  const realHistoryRead = FileHistorySearchSource.prototype.readSessionRecall
+  FileHistorySearchSource.prototype.readSessionRecall = async function (
+    this: FileHistorySearchSource, sessionId: string, signal?: AbortSignal,
+  ) {
+    const seed = await realHistoryRead.call(this, sessionId, signal)
+    recallDone = true
+    return seed
+  }
+  life.defer(() => { FileHistorySearchSource.prototype.readSessionRecall = realHistoryRead })
+  const fixture = await mountRemoteRunner(life, { presetId, resumeSessionId: mainId, host, renderer: 'tsp' })
+  const pane = fixture.pane
+  assert.ok(pane, 'the Remote TSP pane must be mounted')
+  const composerText = (): string => {
+    const node = wireNodes({ frames: () => pane.frames() }).find(candidate => candidate.id === 'dock.composer')
+    return typeof node?.p.text === 'string' ? node.p.text : ''
+  }
+  try {
+    await waitFor('the TSP cold seed read settles', () => recallDone, 10_000)
+    pane.input.type('\x1b[A')
+    await waitFor('the first TSP ↑ recalls the other cwd row', () => composerText() === 'other cwd newest', 5_000)
+    pane.input.type('\x1b[A')
+    await waitFor('the second TSP ↑ recalls the current cwd row', () => composerText() === 'current cwd row', 5_000)
+  } finally {
+    FileHistorySearchSource.prototype.readSessionRecall = realHistoryRead
+    await fixture.dispose()
+  }
+})
+
+test('a Remote transport rollover during a held cross-cwd recall read refuses the stale seed', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-r10-transport-rollover'
+  const presetId = 'm3-4-r10-rollover-preset'
+  const host = await mountRemotePresentationHost(life, presetId)
+  await host.harness.create(SessionId(mainId), undefined, { cwd: host.anchorDir })
+  const otherFile = historyFilePath(host.workRoot, '/rolled-client-cwd')
+  mkdirSync(dirname(otherFile), { recursive: true })
+  appendHistoryRecord(otherFile, {
+    v: 2, content: 'stale cross-cwd seed', cwd: '/rolled-client-cwd', ts: Date.now() + 1000, sessionId: mainId,
+  }, undefined)
+  let readEntered = false
+  let readReturned = false
+  let releaseRead!: () => void
+  const gate = new Promise<void>(resolve => { releaseRead = resolve })
+  let gated = false
+  const realHistoryRead = FileHistorySearchSource.prototype.readSessionRecall
+  FileHistorySearchSource.prototype.readSessionRecall = async function (
+    this: FileHistorySearchSource, sessionId: string, signal?: AbortSignal,
+  ) {
+    if (gated) return realHistoryRead.call(this, sessionId, signal)
+    gated = true
+    const captured = await realHistoryRead.call(this, sessionId, signal)
+    readEntered = true
+    await gate
+    readReturned = true
+    return captured
+  }
+  life.defer(() => { FileHistorySearchSource.prototype.readSessionRecall = realHistoryRead })
+  const fixture = await mountRemoteRunner(life, { presetId, resumeSessionId: mainId, host })
+  const editor = fixture.runnerApp() as unknown as {
+    getInputHistory(): readonly string[]
+    resetInputHistory(entries: readonly string[], owner?: string, writeIds?: readonly (string | undefined)[]): void
+  }
+  const resets: Array<readonly string[]> = []
+  const originalReset = editor.resetInputHistory.bind(editor)
+  editor.resetInputHistory = ((entries, owner, writeIds) => {
+    resets.push([...entries])
+    originalReset(entries, owner, writeIds)
+  }) as typeof editor.resetInputHistory
+  try {
+    await waitFor('the held cross-cwd recall read is entered', () => readEntered, 10_000)
+    const connection = fixture.aggregate.wire.client.connection as unknown as { reconnect(): void }
+    connection.reconnect()
+    releaseRead()
+    await waitFor('the held read returned', () => readReturned, 10_000)
+    // Flush the read→helper→commit/discard continuation before asserting.
+    await new Promise<void>(resolve => setImmediate(resolve))
+    assert.equal(resets.some(entries => entries.includes('stale cross-cwd seed')), false,
+      'the stale seed read under the previous transport generation never reaches the recall commit')
+    assert.equal(editor.getInputHistory().includes('stale cross-cwd seed'), false,
+      'the stale seed is absent from the live recall projection')
+  } finally {
+    releaseRead()
+    FileHistorySearchSource.prototype.readSessionRecall = realHistoryRead
+    await fixture.dispose()
   }
 })
 
@@ -635,6 +950,133 @@ test('sessionStatus serves the retained session facts and stays absent for unret
   assert.ok(pending !== undefined, 'the official pendingSubmissions source serves the retained session')
   assert.equal(pending.length, 0, 'no submission begun ⇒ the official echo list is authoritatively empty')
   assert.equal(fixture.override.presentation.submissionPresentation.snapshot('no-such-session'), undefined)
+})
+
+test('a Remote resume and live change follow the effective Host working directory while the creation cwd and Workspace membership stay put', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm6-remote-effective-cwd'
+  const hostPreset = 'm6-remote-effective-cwd-preset'
+  const host = await mountRemotePresentationHost(life, hostPreset)
+  // Three distinct absolute directories inside the ONE fixture private root:
+  // A = the Session's immutable creation directory, B = the effective cwd the
+  // Runner must first resume into, C = the same Session's later live cwd.
+  const creationCwd = join(host.anchorDir, 'cwd-alpha')
+  const firstEffectiveCwd = join(host.anchorDir, 'cwd-beta')
+  const liveEffectiveCwd = join(host.anchorDir, 'cwd-gamma')
+  for (const directory of [creationCwd, firstEffectiveCwd, liveEffectiveCwd]) mkdirSync(directory, { recursive: true })
+  const agent = await host.harness.create(SessionId(mainId), undefined, { cwd: creationCwd })
+  // The official Workspace MEMBERSHIP is seeded at the creation path A — the
+  // effective directory B/C must never replace it.
+  const registry = host.ctx.get('workspaceRegistry') as {
+    create(path: string): Promise<{
+      attachSession(id: unknown): Promise<void>
+      readonly sessionIds: readonly unknown[]
+    }>
+  }
+  const workspace = await registry.create(creationCwd)
+  await workspace.attachSession(SessionId(mainId))
+  // Commit B through the REAL Host working-directory service BEFORE the
+  // Remote runner first resumes: the first status/footer/OSC 0 read is the
+  // official projection, not a list-row/header re-read at mount time.
+  await host.ctx.workingDirectory.set(agent, firstEffectiveCwd)
+  assert.equal(agent.session.header.cwd, creationCwd, 'the durable Session header keeps the creation directory A')
+  assert.equal(host.ctx.workingDirectory.get(agent.session), firstEffectiveCwd)
+
+  const osc0Frames: string[] = []
+  const originalIsTTY = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY')
+  const originalWrite = Object.getOwnPropertyDescriptor(process.stdout, 'write')
+  // `setTerminalTitle` writes OSC 0 to process.stdout and is a no-op off a
+  // TTY: the capture exists only for this protected window and restores the
+  // original descriptors below.
+  Object.defineProperty(process.stdout, 'isTTY', { configurable: true, value: true })
+  Object.defineProperty(process.stdout, 'write', {
+    configurable: true,
+    value: (data: string | Uint8Array): boolean => {
+      if (typeof data === 'string' && data.includes('\x1b]0;')) osc0Frames.push(data)
+      return true
+    },
+  })
+  let fixture: Awaited<ReturnType<typeof mountRemoteRunner>> | undefined
+  try {
+    fixture = await mountRemoteRunner(life, { presetId: hostPreset, resumeSessionId: mainId, host })
+    const mounted = fixture
+    const footer = (): string => (mounted.runnerApp() as { footerRenderRowsForTest(): readonly string[] })
+      .footerRenderRowsForTest().join('\n')
+    const lastOsc0Title = (): string | undefined => {
+      const frame = osc0Frames.at(-1)
+      if (frame === undefined) return undefined
+      return /\x1b\]0;([^\x07]*)\x07/u.exec(frame)?.[1]
+    }
+
+    // FIRST REMOTE RESUME: the official `workingDirectory` projection B is the
+    // status/footer fact and the session-title-less OSC 0 identity fallback.
+    await waitFor('first resume status reports the effective cwd B', () =>
+      mounted.override.presentation.sessionFacts.sessionStatus(mainId)?.cwd === firstEffectiveCwd, 20_000)
+    await waitFor('first resume footer reports B', () => footer().includes('anchor/cwd-beta'), 20_000)
+    await waitFor('first resume OSC 0 fallback is B', () =>
+      lastOsc0Title() === 'dsh · anchor/cwd-beta', 20_000)
+
+    // The creation fact and Workspace membership are NOT overwritten at any
+    // stage: the official list row still reports A.
+    const firstRows = await mounted.aggregate.selected.backend.sessionReader.list(undefined)
+    assert.equal(firstRows?.find(row => row.id === mainId)?.cwd, creationCwd,
+      'SessionReader.list keeps the creation directory A')
+    assert.ok(workspace.sessionIds.map(String).includes(mainId),
+      'official Workspace membership still contains the Session at the creation path')
+
+    // An UNRELATED projection (token usage) refreshes the status but must not
+    // rewrite OSC 0: only the `workingDirectory` key owns that refresh. The
+    // check runs on the settled initial batch (no cwd change is in flight).
+    await new Promise<void>(resolve => setImmediate(resolve))
+    const osc0BeforeTokenChange = osc0Frames.length
+    {
+      const session = host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+        append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+      }
+      session.append('turn/start', { turn: 1 })
+      session.append('step/start', { turn: 1, step: 1 })
+      session.append('assistant/message', {
+        turn: 1, step: 1,
+        message: {
+          id: 'a-token-only', role: 'assistant',
+          content: [{ type: 'text', text: 'token projection only' }],
+          source: { kind: 'model', provider: 'smoke', model: 'smoke' },
+        },
+        stream: [], usage: { inputTokens: 10, outputTokens: 5 },
+      }, { surfaceOp: 'append' })
+      session.append('step/end', { turn: 1, step: 1 })
+      session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    }
+    await waitFor('the unrelated tokenUsage projection landed', () =>
+      mounted.override.presentation.sessionFacts.sessionStatus(mainId)?.usage?.outputTokens === 5, 20_000)
+    // One event-loop turn flushes the coalesced projection microtask (a
+    // microtask is guaranteed to run before a macrotask).
+    await new Promise<void>(resolve => setImmediate(resolve))
+    assert.equal(osc0Frames.length, osc0BeforeTokenChange,
+      'an unrelated tokenUsage/context projection notification never rewrites OSC 0')
+
+    // LIVE CHANGE in the SAME resumed Session: commit C through the real Host
+    // service; the official Client projection drives status/footer/OSC 0.
+    await host.ctx.workingDirectory.set(agent, liveEffectiveCwd)
+    await waitFor('live status reports the effective cwd C', () =>
+      mounted.override.presentation.sessionFacts.sessionStatus(mainId)?.cwd === liveEffectiveCwd, 20_000)
+    await waitFor('live footer reports C', () => footer().includes('anchor/cwd-gamma'), 20_000)
+    await waitFor('live OSC 0 fallback is C', () =>
+      lastOsc0Title() === 'dsh · anchor/cwd-gamma', 20_000)
+    assert.equal(agent.session.header.cwd, creationCwd, 'the header stays A after the live change')
+    assert.equal(host.ctx.workingDirectory.get(agent.session), liveEffectiveCwd)
+    const liveRows = await mounted.aggregate.selected.backend.sessionReader.list(undefined)
+    assert.equal(liveRows?.find(row => row.id === mainId)?.cwd, creationCwd,
+      'the list row stays the creation directory A after the live change')
+    assert.ok(workspace.sessionIds.map(String).includes(mainId),
+      'Workspace membership is unchanged by the live effective-directory change')
+  } finally {
+    if (originalWrite === undefined) delete (process.stdout as { write?: unknown }).write
+    else Object.defineProperty(process.stdout, 'write', originalWrite)
+    if (originalIsTTY === undefined) delete (process.stdout as { isTTY?: unknown }).isTTY
+    else Object.defineProperty(process.stdout, 'isTTY', originalIsTTY)
+    await fixture?.dispose()
+  }
 })
 
 test('live assistant transient output streams through the official eventSource ingress', async (t) => {
@@ -811,40 +1253,189 @@ test('the real boundary gesture extends the loaded official history through the 
   }, 15_000)
 })
 
-test('the official pendingSubmissions echo drives the pending-presentation join (user-visible rows)', async (t) => {
+test('accepted-only: a registered submission is invisible until Host acceptance, then joins by requestId', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr2-pending'
   const hostPreset = 'm3-4-pr2-preset'
   const seedHost = await mountRemotePresentationHost(life, hostPreset)
-  await seedHost.harness.create(SessionId(mainId), undefined, { cwd: seedHost.anchorDir })
+  // The agent needs its route, else the accepted turn errors before the
+  // durable user message exists (and the test would time out for the wrong
+  // reason).
+  await seedHost.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' } as never, { cwd: seedHost.anchorDir })
   const fixture = await mountRemoteRunner(life, { presetId: hostPreset, resumeSessionId: mainId, host: seedHost })
   const app = await waitForApp(fixture)
   // Baseline: the join renders nothing pending.
   assert.deepEqual(app.pendingInputForTest().queued, [])
   assert.deepEqual(app.pendingInputForTest().tail, [])
-  // The OFFICIAL optimistic echo: the real Client's beginSubmission on the
-  // retained binding — the exact gesture the official composer makes (PR2
-  // proves the READ/presentation side; no prompt dispatch happens).
   const binding = fixture.aggregate.wire.client.sessions.binding(SessionId(mainId) as never) as {
-    session: { beginSubmission(input: { mode: 'queue' | 'steer'; text: string; attachments: readonly [] }): { requestId: string } }
+    session: {
+      getSnapshot(): { readonly pendingSubmissions: readonly { readonly requestId: string }[] }
+      beginSubmission(input: {
+        readonly mode: 'queue' | 'steer'
+        readonly text: string
+        readonly attachments: readonly []
+        readonly onAccept?: () => void
+      }): { readonly requestId: string }
+      prompt(
+        content: readonly { readonly type: 'text'; readonly text: string }[],
+        mode: 'queue' | 'steer',
+        signal?: AbortSignal,
+        requestId?: string,
+      ): Promise<{ readonly ok: boolean }>
+    }
   } | undefined
-  assert.ok(binding !== undefined, 'the retained binding serves the official beginSubmission')
-  const submission = binding.session.beginSubmission({ mode: 'queue', text: 'official echo drives the pane', attachments: [] })
-  await waitFor('official snapshot carries the echo', () => {
-    return (fixture.override.presentation.submissionPresentation.snapshot(mainId) ?? []).length > 0
-  }, 5_000)
-  // The official snapshot now carries the echo; the surface refresh joins it
-  // into the rendered rows (the queue pane for a queued placement when
-  // running; the tail lane otherwise — both are user-visible pending rows).
-  await waitFor('official echo joined into the pending rows', () => {
-    const pending = app.pendingInputForTest()
-    return pending.queued.length + pending.tail.length > 0
+  assert.ok(binding !== undefined, 'the retained binding serves the official beginSubmission/prompt faces')
+
+  // 1. REGISTER ONLY. rc.1 publishes a submission echo only after Host
+  //    acceptance, so the pre-accept snapshot and the product join stay empty.
+  const text = 'accepted-only submission drives the pane'
+  let accepts = 0
+  let acceptedSnapshot: { readonly pendingSubmissions: readonly { readonly requestId: string }[] } | undefined
+  const submission = binding.session.beginSubmission({
+    mode: 'queue',
+    text,
+    attachments: [],
+    onAccept: () => {
+      accepts += 1
+      acceptedSnapshot = binding.session.getSnapshot()
+    },
+  })
+  assert.equal(accepts, 0, 'registration alone never claims acceptance')
+  assert.equal(binding.session.getSnapshot().pendingSubmissions.some(entry => entry.requestId === submission.requestId), false,
+    'the official snapshot must not publish an unaccepted submission')
+  assert.equal(
+    (fixture.override.presentation.submissionPresentation.snapshot(mainId) ?? [])
+      .some(entry => entry.requestId === submission.requestId),
+    false,
+    'the product pending source projects no unaccepted submission',
+  )
+  assert.deepEqual(app.pendingInputForTest().queued, [], 'no unaccepted echo may appear in the queue pane')
+  assert.deepEqual(app.pendingInputForTest().tail, [], 'no unaccepted echo may appear in the tail lane')
+
+  // 2. The IDENTIFIED prompt carries the registered requestId. Acceptance
+  //    fires onAccept exactly once and publishes the echo in the SAME update;
+  //    the idle prompt may reach durable admission immediately, so no fixed
+  //    transient echo window is assumed.
+  const accepted = await binding.session.prompt([{ type: 'text', text }], 'queue', undefined, submission.requestId)
+  assert.equal(accepted.ok, true, 'the identified Host prompt must be accepted')
+  assert.equal(accepts, 1, 'onAccept fires exactly once')
+  assert.ok(acceptedSnapshot !== undefined, 'onAccept observes the accepted snapshot synchronously')
+  assert.ok(acceptedSnapshot.pendingSubmissions.some(entry => entry.requestId === submission.requestId),
+    'the accepted snapshot already publishes the submission echo')
+
+  // 3. DURABLE correlation: exactly ONE Host user/message carries the SAME
+  //    requestId, and its content is the submitted text.
+  type HostUserMessage = {
+    readonly source: { readonly kind?: string; readonly rpcId?: unknown }
+    readonly content: readonly { readonly type?: string; readonly text?: string }[]
+  }
+  const hostUserMessages = (): readonly HostUserMessage[] => {
+    const session = seedHost.ctx.sessions.get(SessionId(mainId)) as unknown as {
+      snapshotEvents(): ReadonlyArray<{ type: string; data: unknown }>
+    }
+    return session.snapshotEvents()
+      .filter(event => event.type === 'user/message')
+      .map(event => event.data as HostUserMessage)
+      .filter(message => message.source.kind === 'user')
+  }
+  await waitFor('the identified Host user message is durable', () =>
+    hostUserMessages().some(message => message.source.rpcId === submission.requestId), 20_000)
+  const identified = hostUserMessages().filter(message => message.source.rpcId === submission.requestId)
+  assert.equal(identified.length, 1, 'exactly one durable message carries the submission requestId')
+  assert.equal(identified[0]!.content.filter(part => part.type === 'text').map(part => part.text).join(''), text,
+    'the durable message content is the submitted text')
+  await waitFor('the durable row is painted', () => fixture.vt.getViewport().join('\n').includes(text), 20_000)
+  assert.equal(fixture.vt.getViewport().join('\n').split('\n').filter(line => line.includes(text)).length, 1,
+    'the user text appears exactly once (never a pending echo plus its durable replacement)')
+
+  // 4. A TRULY failed identified prompt manufactures no committed/durable
+  //    display: the Host refuses empty content, the official Client retires the
+  //    echo and onAccept never fires.
+  const durableBefore = hostUserMessages().length
+  let failedAccepts = 0
+  const failed = binding.session.beginSubmission({
+    mode: 'queue',
+    text: '   ',
+    attachments: [],
+    onAccept: () => { failedAccepts += 1 },
+  })
+  const rejected = await binding.session.prompt([{ type: 'text', text: '   ' }], 'queue', undefined, failed.requestId)
+  assert.equal(rejected.ok, false, 'the Host must refuse an empty prompt')
+  assert.equal(failedAccepts, 0, 'a rejected prompt never fires onAccept')
+  assert.equal(binding.session.getSnapshot().pendingSubmissions.some(entry => entry.requestId === failed.requestId), false,
+    'a rejected prompt never publishes an accepted echo')
+  assert.equal(hostUserMessages().length, durableBefore, 'a rejected prompt commits no durable message')
+})
+
+test('an external inbox projection update re-joins the queue pane without a durable session event', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr2-inbox-face'
+  const hostPreset = 'm3-4-pr2-preset'
+  const seedHost = await mountRemotePresentationHost(life, hostPreset)
+  // The Agent route is required for the PRIMING turn to reach the adapter.
+  await seedHost.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke-model' } as never, { cwd: seedHost.anchorDir })
+  const fixture = await mountRemoteRunner(life, { presetId: hostPreset, resumeSessionId: mainId, host: seedHost })
+  const app = await waitForApp(fixture)
+  const binding = fixture.aggregate.wire.client.sessions.binding(SessionId(mainId) as never) as {
+    session: {
+      getSnapshot(): { readonly running: boolean }
+      prompt(content: readonly { readonly type: 'text'; readonly text: string }[], mode: 'queue' | 'steer'): Promise<unknown>
+      readonly projections: {
+        apply(key: string, value: unknown, seq: number): void
+        seqOf(key: string): number | undefined
+        faceOf(key: string): { getSnapshot(): unknown }
+      }
+    }
+  } | undefined
+  assert.ok(binding !== undefined, 'the retained binding serves the official inbox projection face')
+  // Readiness gate: a REAL primed turn must be PAINTED through the live
+  // ingress. That proves the per-session projection faces are subscribed
+  // before the projection-only change below (the ingress installs them).
+  await binding.session.prompt([{ type: 'text', text: 'prime the live ingress' }], 'queue')
+  await waitFor('the live ingress paints the real answer', () => {
+    return fixture.vt.getViewport().join('\n').includes('remote reply')
+  }, 20_000)
+  // The Host inbox has drained and the projection caught up: no late frame can
+  // overwrite the injected value below (the session is idle and has no pending
+  // input, so no further inbox mutation is produced).
+  await waitFor('the primed turn settled and the Host inbox drained', () => {
+    if (binding.session.getSnapshot().running) return false
+    const inbox = binding.session.projections.faceOf('inbox').getSnapshot() as {
+      readonly 'next-turn': readonly unknown[]
+      readonly 'next-step': readonly unknown[]
+    } | undefined
+    return inbox !== undefined && inbox['next-turn'].length === 0 && inbox['next-step'].length === 0
+  }, 20_000)
+  assert.deepEqual(app.pendingInputForTest().queued, [], 'the primed turn leaves no queued row')
+  assert.deepEqual(app.pendingInputForTest().tail, [], 'the primed turn leaves no tail row')
+  // The OFFICIAL Host frame path for ANOTHER Client's mutation: the whole
+  // inbox projection value is delivered to the retained Client store. No
+  // durable `agent/inbox/spliced` event, no local echo, no keyboard input —
+  // the projection notification is the ONLY possible trigger.
+  const occurrence = {
+    id: 'm3-4-pr2-external-inbox',
+    role: 'user',
+    content: [{ type: 'text', text: 'queued by another client' }],
+    source: { kind: 'user', rpcId: 'm3-4-pr2-external-rpc' },
+  }
+  binding.session.projections.apply('inbox', {
+    'next-turn': [occurrence],
+    'next-step': [],
+  }, (binding.session.projections.seqOf('inbox') ?? 0) + 1)
+  await waitFor('the external inbox occurrence joins the queue pane', () => {
+    return app.pendingInputForTest().queued.some(row => row.text === 'queued by another client')
   }, 15_000)
-  const pending = app.pendingInputForTest()
-  const rows = [...pending.queued, ...pending.tail] as Array<{ row?: { text?: string }; text?: string }>
-  const joined = rows.some(row => (row.row?.text ?? row.text) === 'official echo drives the pane')
-  assert.equal(joined, true, 'the OFFICIAL echo text is rendered through the pending-presentation join')
-  void submission
+  assert.equal(
+    app.pendingInputForTest().tail.some(row => row.row?.text === 'queued by another client'),
+    false,
+    'a queued occurrence never rides the transcript tail lane',
+  )
+  // The occurrence exists ONLY in the projection: the durable Host window has
+  // no matching user message (a projection frame is the sole trigger).
+  const read = await fixture.override.presentation.presentationReader.read(mainId)
+  assert.ok(read !== undefined, 'the presentation reader serves the retained session')
+  assert.equal(JSON.stringify(read.durableEvents).includes('queued by another client'), false,
+    'the projection-only occurrence must not appear as a durable Host event')
 })
 
 async function waitForApp(fixture: RemoteRunnerFixture): Promise<{
@@ -943,35 +1534,43 @@ test('an edit tool card renders from RAW durable call/result facts (no Host pres
     'the settled result text renders for an unknown tool')
 })
 
-test('the Remote branch OMITS the Host-derived access section when the permission projection carries no value (no sandbox fact is painted)', async (t) => {
+test('the Remote branch derives sandbox/approval from the EXACT Session policy and still omits a projection-less preset (M6-1 F8)', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr2-access'
   const hostPreset = 'm3-4-pr2-preset'
   const seedHost = await mountRemotePresentationHost(life, hostPreset)
-  // A Host sandbox service that answers WITHOUT a session (the exact hole the
-  // plan's §6.6 forbids on Remote): `resolve(undefined)` yields a mode. The
-  // fixture now mounts the OFFICIAL `sandboxPolicy` service (the Remote
-  // composition's workspace-file prerequisite needs it), so the hole is
-  // reproduced by overriding that live service — a second `provide` would
-  // collide with the already-registered service.
+  // The AGENTLESS sandbox default (the retired §6.6 hole) answers a different
+  // mode: an F8 read passes the exact live Session, so this default must never
+  // reach the footer. The fixture mounts the official `sandboxPolicy` service,
+  // so the discrimination is a patched resolve that special-cases a missing
+  // request — never a second service.
   const sandbox = seedHost.ctx.get('sandboxPolicy') as unknown as {
-    resolve(session?: unknown): { readonly mode: string }
+    resolve(request?: { readonly session?: unknown }): { readonly mode: string }
   }
-  sandbox.resolve = () => ({ mode: 'danger-full-access' })
+  const originalResolve = sandbox.resolve.bind(sandbox)
+  sandbox.resolve = request => (request?.session === undefined ? { mode: 'danger-full-access' } : originalResolve(request))
   await seedHost.harness.create(SessionId(mainId), undefined, { cwd: seedHost.anchorDir })
   const fixture = await mountRemoteRunner(life, { presetId: hostPreset, resumeSessionId: mainId, host: seedHost })
   const app = await waitForApp(fixture)
   // The committed STATUS projection is what every access-rendering item reads
-  // (permission-preset / sandbox-mode / approval-policy): assert the section
-  // itself is absent, not just whether a particular layout paints it.
+  // (permission-preset / sandbox-mode / approval-policy).
   const accessOf = (): unknown => (app as unknown as {
-    statusStore: { snapshot(): { access?: { sandbox?: unknown; permissionPreset?: unknown; approval?: unknown } } }
+    statusStore: { snapshot(): { access?: { sandbox?: { mode?: string }; permissionPreset?: unknown; approval?: unknown } } }
   }).statusStore.snapshot().access
-  await new Promise(resolve => setTimeout(resolve, 300))
-  const access = accessOf() as { sandbox?: unknown; permissionPreset?: unknown; approval?: unknown } | undefined
-  assert.equal(access?.sandbox, undefined,
-    'the Remote status must not carry a Host-derived sandbox mode (§6.6)')
+  // The policy read is an async authoritative read: wait for its commit.
+  await waitFor('the observed sandbox fact rendered on Remote', () => accessOf() !== undefined
+    && (accessOf() as { sandbox?: unknown }).sandbox !== undefined, 20_000)
+  const access = accessOf() as { sandbox?: { mode?: string }; permissionPreset?: unknown; approval?: unknown } | undefined
+  const session = seedHost.ctx.sessions.get(SessionId(mainId))
+  assert.equal(access?.sandbox?.mode, originalResolve({ session }).mode,
+    'the Remote sandbox fact is the SESSION-scoped policy')
+  assert.notEqual(access?.sandbox?.mode, 'danger-full-access',
+    'the agentless sandbox default never stands in for the exact Session policy')
+  // The permission PRESET still needs the official projection: with none, the
+  // preset row stays omitted (a projection-less window is not "no permission").
   assert.equal(access?.permissionPreset, undefined)
+  // This fixture mounts no approval service: that side is a definite
+  // unavailable fact and stays absent, never a guessed `ask`.
   assert.equal(access?.approval, undefined)
 })
 
@@ -1250,10 +1849,11 @@ test('navigation: switch, same-id rollover and reconnect re-init the presentatio
   assert.ok(childId !== undefined, 'the fork created a child session')
   assert.notEqual(childId, sessionA, 'the child is a DIFFERENT session')
   const childHeader = (seedHost.ctx.sessions.get(SessionId(childId!)) as unknown as {
-    header: { readonly parentSession?: string }
+    header: { readonly parentSession?: string; readonly isSeeded?: boolean }
   }).header
-  assert.equal(String(childHeader.parentSession), sessionA,
-    'the child carries the official fork lineage to the parent')
+  assert.equal(childHeader.parentSession, undefined,
+    'rc.1 ordinary fork children are independent Sessions with no parent lineage')
+  assert.equal(childHeader.isSeeded, true, 'the fork child must be seeded')
   assert.ok(bindingOf(childId!) !== undefined, 'the Client retained the adopted child')
   await waitFor('forked child hydrated', () => viewport().includes('alpha answer 3'), 20_000)
   assert.equal(viewport().includes('beta answer 3'), false,
@@ -1280,10 +1880,10 @@ test('navigation: switch, same-id rollover and reconnect re-init the presentatio
   void app
 })
 
-test('a real Remote /new cancels the running old turn through the official Host cancel, then commits the fresh Session', async (t) => {
+test('a real Remote /new leaves the running old turn alive while it commits the fresh Session', async (t) => {
   const life = testLifecycle(t)
   const presetId = 'm3-4-pr2-preset'
-  const mainId = 'm3-4-pr2-navigation-cancel'
+  const mainId = 'm3-4-pr2-navigation-detach'
   const adapter = new StubStreamingLlmAdapter()
   const seedHost = await mountRemotePresentationHost(life, presetId, { llmAdapter: adapter })
   await seedHost.harness.create(
@@ -1331,23 +1931,15 @@ test('a real Remote /new cancels the running old turn through the official Host 
   const hostIdsBefore = new Set(seedHost.ctx.sessions.list().map(session => String(session.id)))
 
   // The REAL user gesture: a /new typed into the mounted Remote composer.
+  const retainCount = (): number =>
+    fixture.aggregate.wire.client.sessions.retainInfo(SessionId(mainId)).getSnapshot().referenceCount
+  const refsBefore = retainCount()
   const mounted = fixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(): void }
   mounted.setDraft('/new')
   mounted.submitDraft()
 
-  // 1. The official Host cancel reached the EXACT old generation: the held turn
-  //    aborts WITHOUT the test releasing the hold, and the durable boundary is
-  //    the user-cancellation reason.
-  await waitFor('the old Host turn aborted by the navigation stop', () => oldAgent.status !== 'running', 20_000)
-  const lastEnd = oldSession.snapshotEvents().filter(event => event.type === 'turn/end').at(-1)?.data as
-    { reason?: { kind?: string; reason?: { kind?: string } } } | undefined
-  assert.equal(lastEnd?.reason?.kind, 'aborted', 'the old turn ended through the durable cancellation reason')
-  assert.equal(lastEnd?.reason?.reason?.kind, 'user', 'the cancellation is the user navigation stop, not a shutdown cancel')
-  assert.ok(oldSession.snapshotEvents().some(event => event.type === 'step/start'),
-    'the aborted step is the held model request that only the navigation stop could end')
-
-  // 2. Exactly ONE fresh Host Session is created and becomes the current Remote
-  //    owner; the old Session stays durable.
+  // 1. Exactly ONE fresh Host Session is created and becomes the current Remote
+  //    owner: the /new transaction COMMITTED while the old Turn was still held.
   await waitFor('exactly one fresh Host session', () => {
     return seedHost.ctx.sessions.list().filter(session => !hostIdsBefore.has(String(session.id))).length === 1
   }, 20_000)
@@ -1359,12 +1951,34 @@ test('a real Remote /new cancels the running old turn through the official Host 
   await waitFor('the fresh Remote owner is retained', () => {
     return fixture.aggregate.wire.client.sessions.binding(SessionId(freshId)) !== undefined
   }, 20_000)
+
+  // 2. The navigation left the old Host Turn RUNNING: no Host cancel was
+  //    dispatched. The no-cancel proof is the AGENT STATE plus the durable log:
+  //    the old Agent still reports `running` after the fresh owner committed,
+  //    and the old Session carries no `turn/end` at all — only a cancellation
+  //    could have ended the held step (this test never releases the hold).
+  //    The adapter counter is cumulative, so it only proves WHICH model
+  //    request was held before the navigation; it is not a live-state probe.
+  assert.equal(oldAgent.status, 'running', 'the old Host Agent kept running across the navigation')
+  assert.ok(adapter.heldStreamCount >= 1, 'the held model request had entered its gate before the navigation')
+  assert.equal(oldSession.snapshotEvents().some(event => event.type === 'turn/end'), false,
+    'the old Turn wrote no durable end: the navigation must not cancel it')
+  assert.ok(oldSession.snapshotEvents().some(event => event.type === 'step/start'),
+    'the held step is the model request the navigation left alone')
+
+  // 3. The Client detached from the old owner: its reference count dropped and
+  //    the surface re-initialized onto the fresh Session, while the old
+  //    Session stays persisted.
+  await waitFor('the navigation released the old Client reference', () => retainCount() < refsBefore, 20_000)
+  await waitFor('the fresh Session owns the surface', () => {
+    return !fixture.vt.getViewport().join('\n').includes('hold the old turn open')
+  }, 20_000)
   assert.ok(seedHost.ctx.sessions.list().some(session => String(session.id) === mainId),
-    'the old Session remains persisted (a cancel is not a delete)')
+    'the old Session remains persisted (a Client detach is not a delete)')
   void app
 })
 
-test('pending: queued -> queue pane, steering -> tail lane, and the echo -> authoritative identity handoff', async (t) => {
+test('pending: accepted queued -> queue pane, accepted steering -> official status, and the echo -> durable identity handoff', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr2-pending-running'
   const hostPreset = 'm3-4-pr2-preset'
@@ -1381,43 +1995,87 @@ test('pending: queued -> queue pane, steering -> tail lane, and the echo -> auth
   const app = await waitForApp(fixture)
   const binding = fixture.aggregate.wire.client.sessions.binding(SessionId(mainId)) as unknown as {
     session: {
-      getSnapshot(): { readonly running: boolean }
+      getSnapshot(): {
+        readonly running: boolean
+        readonly pendingSubmissions: readonly {
+          readonly requestId: string
+          readonly placement: 'queued' | 'steering' | 'transcript'
+        }[]
+      }
+      projections: { faceOf(key: string): { getSnapshot(): unknown } }
       prompt(
         content: readonly { readonly type: 'text'; readonly text: string }[],
         mode: 'queue' | 'steer',
         signal?: AbortSignal,
-        requestId?: unknown,
-      ): Promise<unknown>
+        requestId?: string,
+      ): Promise<{ readonly ok: boolean }>
       beginSubmission(input: {
         readonly mode: 'queue' | 'steer'
         readonly text: string
         readonly attachments: readonly unknown[]
-      }): { readonly requestId: unknown }
+        readonly onAccept?: () => void
+      }): { readonly requestId: string }
     }
   }
   assert.ok(binding !== undefined, 'the retained binding serves the official prompt/echo faces')
+  const inboxNextTurnOf = (): readonly { readonly source?: { readonly rpcId?: unknown } }[] => {
+    const inbox = binding.session.projections.faceOf('inbox').getSnapshot() as
+      | { readonly 'next-turn'?: readonly { readonly source?: { readonly rpcId?: unknown } }[] }
+      | undefined
+    return inbox?.['next-turn'] ?? []
+  }
   // Hold one real turn OPEN so the session is officially `running`: the
-  // placement of every echo below is the official `running ? queued/steering :
-  // transcript` rule, computed by the Client itself.
+  // placement of every accepted submission below is the official
+  // `running ? queued/steering : transcript` rule, computed by the Client.
   const release = adapter.hold()
   await binding.session.prompt([{ type: 'text', text: 'hold the turn open' }], 'queue')
   await waitFor('session running', () => binding.session.getSnapshot().running, 15_000)
 
-  // QUEUED: a queue-mode echo on a running session lands in the QUEUE pane.
-  const queued = binding.session.beginSubmission({ mode: 'queue', text: 'queued echo body', attachments: [] })
-  await waitFor('queued row in the queue pane', () => {
-    return app.pendingInputForTest().queued.some(row => (row as { text?: string }).text === 'queued echo body')
-  }, 15_000)
-  assert.equal(app.pendingInputForTest().tail.some(row => row.row?.text === 'queued echo body'), false,
-    'a queued echo never rides the transcript tail lane')
+  // QUEUED: registration alone is invisible; the identified prompt reaches the
+  // running Host, the Inbox carries the SAME requestId, and the accepted echo
+  // joins the real Host row into exactly ONE queue-pane row.
+  const queuedText = 'queued echo body'
+  const queued = binding.session.beginSubmission({ mode: 'queue', text: queuedText, attachments: [] })
+  assert.equal(app.pendingInputForTest().queued.some(row => (row as { text?: string }).text === queuedText), false,
+    'a registered-but-unaccepted queued submission is never painted')
+  const queuedAccepted = await binding.session.prompt([{ type: 'text', text: queuedText }], 'queue', undefined, queued.requestId)
+  assert.equal(queuedAccepted.ok, true, 'the identified queued prompt is accepted')
+  await waitFor('the Host Inbox carries the queued requestId', () =>
+    inboxNextTurnOf().some(item => item.source?.rpcId === queued.requestId), 15_000)
+  await waitFor('exactly one joined queued row', () =>
+    app.pendingInputForTest().queued.filter(row => (row as { text?: string }).text === queuedText).length === 1, 15_000)
+  assert.equal(app.pendingInputForTest().tail.some(row => row.row?.text === queuedText), false,
+    'a queued occurrence never rides the transcript tail lane')
 
-  // STEERING: a steer-mode echo on the running session lands in the tail lane.
-  binding.session.beginSubmission({ mode: 'steer', text: 'steering echo body', attachments: [] })
-  await waitFor('steering row in the tail lane', () => {
-    return app.pendingInputForTest().tail.some(row => row.row?.text === 'steering echo body' && row.row?.status === 'steering')
-  }, 15_000)
-  assert.equal(app.pendingInputForTest().queued.some(row => (row as { text?: string }).text === 'steering echo body'), false,
-    'a steering echo never rides the queue pane')
+  // STEERING: the identified steer prompt is accepted by the Host; the official
+  // onAccept snapshot is the observable status row (placement `steering`). The
+  // steer interrupts the held turn, so no fixed transient echo window is
+  // assumed — the durable identity proof below is the settlement.
+  const steeringText = 'steering echo body'
+  let steeringAccepts = 0
+  let steeringAcceptedSnapshot: ReturnType<typeof binding.session.getSnapshot> | undefined
+  const steering = binding.session.beginSubmission({
+    mode: 'steer',
+    text: steeringText,
+    attachments: [],
+    onAccept: () => {
+      steeringAccepts += 1
+      steeringAcceptedSnapshot = binding.session.getSnapshot()
+    },
+  })
+  assert.equal(app.pendingInputForTest().tail.some(row => row.row?.text === steeringText), false,
+    'a registered-but-unaccepted steering submission is never painted')
+  const steeringAccepted = await binding.session.prompt([{ type: 'text', text: steeringText }], 'steer', undefined, steering.requestId)
+  assert.equal(steeringAccepted.ok, true, 'the identified steer prompt is accepted')
+  assert.equal(steeringAccepts, 1, 'steering onAccept fires exactly once')
+  assert.ok(steeringAcceptedSnapshot !== undefined, 'the steering acceptance snapshot is observable')
+  assert.ok(steeringAcceptedSnapshot.pendingSubmissions.some(entry =>
+    entry.requestId === steering.requestId && entry.placement === 'steering'),
+  'the accepted steering submission carries the official steering status')
+  assert.equal(app.pendingInputForTest().queued.some(row => (row as { text?: string }).text === steeringText), false,
+    'a steering occurrence never rides the queue pane')
+  assert.ok(app.pendingInputForTest().tail.filter(row => row.row?.text === steeringText).length <= 1,
+    'the steering occurrence is never duplicated across the tail lane')
 
   // CONTEXT: a NON-user `next-step` inbox message (here a goal-injected one)
   // is the official CONTEXT placement — it rides the generic tail row, never
@@ -1439,18 +2097,46 @@ test('pending: queued -> queue pane, steering -> tail lane, and the echo -> auth
     'a non-user occurrence never rides the user/steering lane',
   )
 
-  // HANDOFF: the identified prompt carries the echo's OWN requestId; once the
-  // Host admits the durable user message the echo retires by IDENTITY and the
-  // authoritative row takes its place (never a text-based dedupe).
-  await binding.session.prompt([{ type: 'text', text: 'queued echo body' }], 'queue', undefined, queued.requestId)
+  // HANDOFF: both accepted submissions keep their OWN requestId; the durable
+  // Host user/messages carry exactly those ids, the queued echo retires by
+  // IDENTITY (never by text), and each text paints once.
   release()
-  await waitFor('echo retired into the durable row', () => {
+  await waitFor('the queued echo retired into the durable row', () => {
     const pending = app.pendingInputForTest()
-    return pending.queued.every(row => (row as { text?: string }).text !== 'queued echo body')
+    return pending.queued.every(row => (row as { text?: string }).text !== queuedText)
   }, 20_000)
-  await waitFor('durable user row painted', () => {
-    return fixture.vt.getViewport().join('\n').includes('queued echo body')
-  }, 20_000)
+  type HostUserMessage = {
+    readonly source: { readonly kind?: string; readonly rpcId?: unknown }
+    readonly content: readonly { readonly type?: string; readonly text?: string }[]
+  }
+  const hostUserMessages = (): readonly HostUserMessage[] => {
+    const session = seedHost.ctx.sessions.get(SessionId(mainId)) as unknown as {
+      snapshotEvents(): ReadonlyArray<{ type: string; data: unknown }>
+    }
+    return session.snapshotEvents()
+      .filter(event => event.type === 'user/message')
+      .map(event => event.data as HostUserMessage)
+      .filter(message => message.source.kind === 'user')
+  }
+  await waitFor('both identified durable rows landed', () =>
+    [queued.requestId, steering.requestId].every(requestId =>
+      hostUserMessages().some(message => message.source.rpcId === requestId)), 20_000)
+  for (const [requestId, expectedText] of [
+    [queued.requestId, queuedText],
+    [steering.requestId, steeringText],
+  ] as const) {
+    const identified = hostUserMessages().filter(message => message.source.rpcId === requestId)
+    assert.equal(identified.length, 1, `exactly one durable message carries requestId ${requestId}`)
+    assert.equal(identified[0]!.content.filter(part => part.type === 'text').map(part => part.text).join(''), expectedText,
+      'the durable identity carries the submitted content')
+  }
+  await waitFor('both durable user rows painted', () =>
+    fixture.vt.getViewport().join('\n').includes(queuedText) && fixture.vt.getViewport().join('\n').includes(steeringText), 20_000)
+  const painted = fixture.vt.getViewport().join('\n').split('\n')
+  assert.equal(painted.filter(line => line.includes(queuedText)).length, 1,
+    'the queued text paints exactly once (no echo plus durable duplicate)')
+  assert.equal(painted.filter(line => line.includes(steeringText)).length, 1,
+    'the steering text paints exactly once (no echo plus durable duplicate)')
 })
 
 test('a real Remote ordinary submit carries the Client-sampled request zone — not the Host zone — into the Host source and its time-context injection', async (t) => {
@@ -1617,6 +2303,122 @@ test('a projection-owned value changed by ANOTHER writer reaches the surface thr
     'the live projection channel refreshed the current-value fact (a stale footer would still say first-model)')
 })
 
+test('ONE real Host event updates MULTIPLE Client projection faces, and the reconnect baseline reverts a poisoned value', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr2-projection-multikey'
+  const hostPreset = 'm3-4-pr2-preset'
+  const seedHost = await mountRemotePresentationHost(life, hostPreset)
+  await seedHost.harness.create(
+    SessionId(mainId),
+    { provider: 'smoke', model: 'smoke' } as never,
+    { cwd: seedHost.anchorDir },
+  )
+  const session = seedHost.ctx.sessions.get(SessionId(mainId)) as unknown as {
+    append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+  }
+  seedTurns(session, 1, 2, 'multi')
+  const fixture = await mountRemoteRunner(life, { presetId: hostPreset, resumeSessionId: mainId, host: seedHost })
+  const app = await waitForApp(fixture)
+  const binding = fixture.aggregate.wire.client.sessions.binding(SessionId(mainId) as never) as {
+    session: {
+      readonly projections: {
+        faceOf(key: string): { getSnapshot(): unknown }
+        apply(key: string, value: unknown, seq: number): void
+        seqOf(key: string): number | undefined
+      }
+    }
+  } | undefined
+  assert.ok(binding !== undefined, 'the retained binding serves the official projection faces')
+  const statusStore = (app as unknown as {
+    statusStore: { snapshot(): { usage?: { tokens?: { input?: number; output?: number } } } }
+  }).statusStore
+  /** The official Host projection registry: its per-event change listener is
+   *  the SAME change set the wire frame carries (the Client's control frame is
+   *  `{seq, changes[]}`), so the keys/seq below are observed, never invented. */
+  const projections = seedHost.ctx.get('sessionProjections') as unknown as {
+    onEventChanged(listener: (session: unknown, changes: readonly { readonly key: string }[], seq: unknown) => void): () => void
+    snapshot(session: unknown, keys: readonly string[]): { readonly values: Readonly<Record<string, unknown>> }
+  }
+  const frames: Array<{ readonly keys: string[]; readonly seq: number }> = []
+  const unsubscribe = projections.onEventChanged((changedSession, changes, seq) => {
+    if (changedSession !== session) return
+    frames.push({ keys: changes.map(change => change.key), seq: Number(seq) })
+  })
+  life.defer(unsubscribe)
+  // The baseline painted the seeded lifetime usage (2 turns x 1 token) through
+  // the official tokenUsage projection — the consumer state a stale frame must
+  // not survive.
+  await waitFor('the seeded tokenUsage baseline painted', () => {
+    const tokens = statusStore.snapshot().usage?.tokens
+    return tokens?.input === 2 && tokens?.output === 2
+  }, 20_000)
+
+  // ONE real committed event that changes MULTIPLE client-visible units. The
+  // exact key set comes from the Host's own per-event change listener.
+  session.append('assistant/message', {
+    turn: 3,
+    step: 0,
+    message: {
+      id: 'multi-key-assistant',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'multi-key answer' }],
+      source: { kind: 'model', provider: 'smoke', model: 'smoke' },
+    },
+    stream: [{ type: 'chunk', time: Date.now() - 1, chunk: { type: 'text-delta', index: 0, text: 'x' } }],
+    usage: { inputTokens: 7, outputTokens: 11 },
+  }, { surfaceOp: 'append' })
+  await waitFor('a real MULTI-KEY Host projection frame', () =>
+    frames.some(frame => frame.keys.length >= 2 && frame.keys.includes('tokenUsage')), 20_000)
+  const frame = frames.find(entry => entry.keys.length >= 2 && entry.keys.includes('tokenUsage'))!
+  const frameTruth = projections.snapshot(session, frame.keys)
+  const facesMatch = (truth: Readonly<Record<string, unknown>>): boolean =>
+    frame.keys.every(key => isDeepStrictEqual(binding.session.projections.faceOf(key).getSnapshot(), truth[key]))
+  await waitFor('every changed key of the frame crossed the wire', () => facesMatch(frameTruth.values), 20_000)
+  for (const key of frame.keys) {
+    assert.deepEqual(binding.session.projections.faceOf(key).getSnapshot(), frameTruth.values[key],
+      `the Client faceOf(${key}) equals the official session/projections readback in the SAME frame`)
+  }
+  const usageTruth = frameTruth.values.tokenUsage as {
+    readonly uncachedInputTokens: number
+    readonly outputTokens: number
+  }
+  await waitFor('the mounted consumer repaints the new tokenUsage truth', () => {
+    const tokens = statusStore.snapshot().usage?.tokens
+    return tokens?.input === usageTruth.uncachedInputTokens && tokens?.output === usageTruth.outputTokens
+  }, 20_000)
+
+  // POISON the pre-reconnect generation's Client store for one changed key: a
+  // value the Host never produced, at a higher seq than the live frame.
+  const poison = { uncachedInputTokens: 999_999, outputTokens: 888_888, cacheReadTokens: 0, cacheWriteTokens: 0 }
+  binding.session.projections.apply('tokenUsage', poison, (binding.session.projections.seqOf('tokenUsage') ?? 0) + 1_000)
+  assert.deepEqual(binding.session.projections.faceOf('tokenUsage').getSnapshot(), poison,
+    'the pre-reconnect Client store now holds the poisoned value')
+
+  // RECONNECT: the new generation's authoritative baseline must REVERT the
+  // poisoned value and re-establish every key of the observed frame.
+  const connection = fixture.aggregate.wire.client.connection as unknown as {
+    generation: { getSnapshot(): { readonly id: number } | undefined }
+    reconnect(): void
+  }
+  const generationBefore = connection.generation.getSnapshot()?.id
+  connection.reconnect()
+  await waitFor('reconnected on a NEW generation', () => {
+    const id = connection.generation.getSnapshot()?.id
+    return id !== undefined && id !== generationBefore
+  }, 20_000)
+  await waitFor('the reconnect baseline reverts the poisoned tokenUsage face', () =>
+    isDeepStrictEqual(binding.session.projections.faceOf('tokenUsage').getSnapshot(), frameTruth.values.tokenUsage), 20_000)
+  await waitFor('the mounted consumer repaints the authoritative usage', () => {
+    const tokens = statusStore.snapshot().usage?.tokens
+    return tokens?.input === usageTruth.uncachedInputTokens && tokens?.output === usageTruth.outputTokens
+  }, 20_000)
+  const truthAfterReconnect = projections.snapshot(session, frame.keys)
+  for (const key of frame.keys) {
+    assert.deepEqual(binding.session.projections.faceOf(key).getSnapshot(), truthAfterReconnect.values[key],
+      `the reconnect baseline re-established the official ${key} value`)
+  }
+})
+
 /* ───────────── §7.4-10/11 LIVE tool lifecycle (review F8) ───────────── */
 
 /** The LIVE tool-call LLM script: one turn that requests the fixture tool
@@ -1658,8 +2460,8 @@ test('LIVE: a mounted Remote surface renders the tool call as it executes on the
   // mounted card must ride the bounded generic fallback (§7.4-11's mounted
   // proof), while the live→settled convergence (§7.4-10's live proof) is
   // the Host executing this very call through the official loop.
-  const tools = await import('@deepseek-ai/dsh-tools')
-  host.ctx.tools.register(tools.defineContentToolFixture({
+  const testkit = await import('@deepseek-ai/dsh-tool-testkit')
+  host.ctx.tools.register(testkit.defineContentToolFixture({
     name: 'pr4_live_fixture',
     description: 'the live lifecycle fixture tool',
     parameters: {},
@@ -1837,17 +2639,16 @@ test('literal skill gesture over a mounted Remote surface: the Client delivers t
   // reads. The Client NEVER loads a body on this branch (its semantic
   // resolveSkill is explicitly unavailable), so the marker can only come
   // from the Host pre-step.
-  const skillSummary = {
-    name: 'pr4-skill', description: 'the fixture skill',
+  // The fixture Host mounts the REAL official Skill registry; the fixture
+  // skill is a real runtime contribution on it (the Host pre-step reads the
+  // same authority a filesystem provider would supply).
+  host.ctx.skills.register({
+    name: 'pr4-skill',
+    description: 'the fixture skill',
+    content: BODY_MARKER,
+    source: 'runtime',
     invocation: { userInvocable: true, modelInvocable: false },
-  }
-  host.ctx.provide('skills', {
-    list: async () => [skillSummary],
-    snapshot: async () => ({ skills: [skillSummary], complete: true }),
-    get: async (name: string) => name === 'pr4-skill'
-      ? { ...skillSummary, provider: 'fixture', content: BODY_MARKER }
-      : undefined,
-  } as never)
+  })
   const toolSkill = await import('@deepseek-ai/dsh-tool-skill')
   await host.ctx.plugin(toolSkill as never, undefined as never)
   await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
@@ -1967,8 +2768,12 @@ test('mounted /status (the /settings alias): lifetime totals and the RECENT figu
   let panelView = ''
   for (let page = 0; page < 6; page += 1) {
     panelView += `\n${fixture.vt.getViewport().join('\n')}`
+    // Stop only once EVERY figure this case asserts is actually painted in the
+    // collected pages: a long private root wraps the CWD fact over more rows,
+    // so TTFB can be the last visible row of a page while R5 is the next one.
     if (/Input tokens\s+5035/u.test(panelView)
-      && /TTFB \(recent\)\s+0\.[1-9]\d*s/u.test(panelView)) break
+      && /TTFB \(recent\)\s+0\.[1-9]\d*s/u.test(panelView)
+      && /R5 tokens\/sec\s+[1-9]\d*(?:\.\d)? tok\/s/u.test(panelView)) break
     fixture.vt.sendInput('\x1b[6~') // PageDown: scroll the painted About rows.
     await fixture.vt.waitForRender()
   }
@@ -2339,7 +3144,7 @@ test('a TRUE indeterminate Remote /title <name> is consumed by the outer settlem
 // view serializes the OFFICIAL figures. This is the Remote half of the
 // plan §3.3 proof 2: absent projections stay absent, no bounded-window
 // fold ever stands in for a session total.
-test('C3 Remote proof: official projections → the About controller view → the exact report', async (t) => {
+test('Remote proof: official projections → the About controller view → the exact report', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'c3-about-remote'
   const hostPreset = 'c3-about-preset'
@@ -2440,6 +3245,135 @@ test('C3 Remote proof: official projections → the About controller view → th
   }
 })
 
+/**
+ * The painted About `CWD` value, re-assembled from its OWN physical rows: the
+ * fact head owns the first row, a wrapped value continues under the SAME value
+ * column, and anything else ends the group. The label must be unique and the
+ * value non-empty — a missing or duplicated CWD fact is a failure, never an
+ * absent assertion.
+ *
+ * `complete` requires the NEXT semantic fact row to be painted inside the
+ * About content area. The full-screen Settings surface pins its action bar as
+ * the LAST frame row, so a group whose final row is the content bottom is
+ * followed by that bar — a clipped value, never a complete one. In that case
+ * the raw facts and the Copy All payload own the untouched value.
+ */
+function aboutCwdPaintedValue(rows: readonly string[]): { readonly value: string; readonly complete: boolean } {
+  const head = 'CWD  '
+  const starts = rows.flatMap((row, index) => row.includes(head) ? [index] : [])
+  assert.equal(starts.length, 1, `exactly one painted CWD fact row:\n${rows.join('\n')}`)
+  const first = starts[0]!
+  const valueStart = rows[first]!.indexOf(head) + head.length
+  const contentX = valueStart - 7
+  // The frame pads every physical row to the panel width; the declared CWD is
+  // a padding-free absolute path, so only that trailing fill is removed.
+  const parts = [rows[first]!.slice(valueStart).trimEnd()]
+  let next = first + 1
+  // A wrapped value continues the fact under marker + head (7 columns): the
+  // continuation is exactly that indentation, with content after it.
+  while (next < rows.length
+    && rows[next]!.startsWith(' '.repeat(7), contentX)
+    && rows[next]!.length > valueStart) {
+    parts.push(rows[next]!.slice(valueStart).trimEnd())
+    next += 1
+  }
+  const value = parts.join('')
+  assert.ok(value !== '', `the painted CWD fact carries a value:\n${rows.join('\n')}`)
+  // Everything before the pinned bar is the About content area. Only a
+  // DIFFERENT semantic fact painted after the group proves the value ended: a
+  // clipped group is followed by the bar (or the frame bottom), never by a
+  // fact row.
+  const nextRow = next < rows.length - 1 ? rows[next]! : undefined
+  const marker = nextRow?.slice(contentX, contentX + 2)
+  const complete = nextRow !== undefined
+    && (marker === '  ' || marker === '> ')
+    && /^[A-Za-z]/.test(nextRow.slice(contentX + 2))
+  return { value, complete }
+}
+
+// ── M6 Client identity: the Remote runner's ONE DSH version source ────────
+test('Remote runner: the injected DSH install anchor is the version for Welcome/header/footer/About and stays stable after a Session opens', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('remote-runner-dsh-anchor-')
+  const anchor = join(root, 'package.json')
+  writeFileSync(anchor, JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.2-anchor-b' }))
+  const previousMode = process.env.SPLIT_PROCESS_CLIENT_MODE
+  const previousAnchor = process.env.SPLIT_PROCESS_DSH_ANCHOR
+  life.defer(() => {
+    if (previousMode === undefined) delete process.env.SPLIT_PROCESS_CLIENT_MODE
+    else process.env.SPLIT_PROCESS_CLIENT_MODE = previousMode
+    if (previousAnchor === undefined) delete process.env.SPLIT_PROCESS_DSH_ANCHOR
+    else process.env.SPLIT_PROCESS_DSH_ANCHOR = previousAnchor
+  })
+  process.env.SPLIT_PROCESS_CLIENT_MODE = 'surface'
+  process.env.SPLIT_PROCESS_DSH_ANCHOR = anchor
+
+  const fixture = await mountRemoteRunner(life, { presetId: 'm3-4-pr2-preset' })
+  const expectedDsh = '0.2.2-anchor-b'
+  const expectedTui = bundleVersion()
+  assert.notEqual(expectedDsh, expectedTui, 'the test pins deliberately different DSH and TUI versions')
+  const viewport = (): string => fixture.vt.getViewport().join('\n')
+  const app = fixture.runnerApp() as unknown as {
+    setFooterLayout(layout: unknown): void
+    footerRenderRowsForTest(): readonly string[]
+    headerRenderRowsForTest(): readonly string[]
+    setDraft(text: string): void
+    submitDraft(): void
+  }
+  await waitFor('the Remote Welcome paints the injected DSH and true TUI versions', () =>
+    viewport().includes(`dsh-${expectedDsh} · tui-v${expectedTui}`), 20_000)
+  assert.ok(app.headerRenderRowsForTest().join('\n').includes(`dsh-${expectedDsh} · tui-v${expectedTui}`),
+    'the real header badge reads the same Client DSH identity')
+
+  // The footer's three formats read StatusSnapshot.host.{dshVersion,tuiVersion}.
+  app.setFooterLayout({
+    schemaVersion: 1,
+    rows: [{
+      left: [
+        { id: 'version', format: 'tui' },
+        { id: 'version', format: 'dsh' },
+        { id: 'version', format: 'both' },
+      ],
+      right: [],
+    }],
+  })
+  await waitFor('the footer version formats read the same status facts', () => {
+    const footer = app.footerRenderRowsForTest().join(' ')
+    return footer.includes(`v${expectedTui}`)
+      && footer.includes(`dsh-${expectedDsh}`)
+      && footer.includes(`dsh-${expectedDsh}/tui-${expectedTui}`)
+  }, 20_000)
+
+  const execute = (line: string): void => {
+    app.setDraft(line)
+    app.submitDraft()
+  }
+  // Open a Session: the version is the Client process's install identity, so
+  // it must not change with Session ownership.
+  const before = (await fixture.aggregate.selected.backend.sessionReader.list(undefined)) ?? []
+  const beforeIds = new Set(before.map(row => String(row.id)))
+  execute('/new')
+  const deadline = Date.now() + 20_000
+  for (;;) {
+    const rows = (await fixture.aggregate.selected.backend.sessionReader.list(undefined)) ?? []
+    if (rows.some(row => !beforeIds.has(String(row.id)))) break
+    if (Date.now() > deadline) throw new Error('timed out waiting for /new to create a Host Session')
+    await new Promise<void>(resolve => setTimeout(resolve, 20))
+  }
+  await waitFor('the header still reports the same DSH identity after a Session opens', () =>
+    app.headerRenderRowsForTest().join('\n').includes(`dsh-${expectedDsh} · tui-v${expectedTui}`), 20_000)
+
+  // About reads the SAME Client version facts through the real Settings
+  // command factory (`aboutVersionFacts`) and AboutStatusController.
+  execute('/settings')
+  await waitFor('the About runtime facts paint the injected DSH version', () => {
+    const frame = viewport()
+    return frame.includes('DSH') && frame.includes(expectedDsh)
+  }, 20_000)
+  assert.equal(viewport().includes('Unknown'), false,
+    'a proven install anchor never paints Unknown/0.0.0 in the Remote version surfaces')
+})
+
 // ── C3 (Phase 3C): the PRODUCTION-RUNNER Remote source→sink proof ─────────
 //
 // The plan §3.3 Remote positive through the REAL production composition: the
@@ -2453,7 +3387,7 @@ test('C3 Remote proof: official projections → the About controller view → th
 // Backend: Remote). A second session seeded WITHOUT the performance/usage
 // projection rows is the absent-authority negative: the report words the
 // gap, never a fabricated figure.
-test('C3 Remote production lane: /settings → real About panel → [Copy All] click → OSC 52 payload', async (t) => {
+test('Remote production lane: /settings → real About panel → [Copy All] click → OSC 52 payload', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'c3-prod-remote'
   const hostPreset = 'c3-prod-preset'
@@ -2545,24 +3479,31 @@ test('C3 Remote production lane: /settings → real About panel → [Copy All] c
       mountedFixture.vt.getViewport().join('\n').includes('dsh-pi-tui'), 15_000)
 
     // The About home paints the semantic fact rows from the REAL command
-    // runtime's reads (the official Remote projections).
+    // runtime's reads (the official Remote projections). Only the labels that
+    // are ALWAYS above the value wrap (Session ID and the CWD fact's own head)
+    // are required here: a long private root wraps the CWD value over more
+    // physical rows and pushes the lower groups below the frame, so those are
+    // asserted on the SCROLLED frame below.
     await waitFor('the About facts paint from the official projections', () => {
-      const frame = mountedFixture.vt.getViewport().map((line: string) => line).join('\n')
-      return frame.includes('Session ID') && frame.includes('Turns') && frame.includes('R5 tokens/sec')
+      const frame = mountedFixture.vt.getViewport().join('\n')
+      return frame.includes('Session ID') && frame.includes('CWD  ')
     }, 15_000)
     const frameText = mountedFixture.vt.getViewport().map((line: string) => line).join('\n')
     assert.ok(frameText.includes('c3-prod-remote'), 'the OFFICIAL session id paints')
     assert.ok(frameText.includes('Backend') && frameText.includes('Remote'), 'the Remote backend fact paints')
-    // THE OFFICIAL CWD, verbatim: the projection's list-row cwd of THIS session.
-    assert.ok(frameText.includes(seedHost.anchorDir), `the official cwd paints: ${frameText.match(/CWD.*/)?.[0]}`)
-    // The official lifetime fold of the seeded turn.
-    assert.ok(/Turns\s+1\b/.test(frameText), `the lifetime turns paint: ${frameText.match(/Turns.*/)?.[0]}`)
-    assert.ok(/Steps\s+1\b/.test(frameText), 'the lifetime steps paint')
-    // The Host piTuiPerformance projection's MEASURED figures paint (the
-    // seeded real sample: a real TTFB in the 0.1s-0.4s class and real rates).
-    assert.ok(/TTFB \(recent\)\s+0\.[1-3]/.test(frameText), `the seeded TTFB paints: ${frameText.match(/TTFB.*/)?.[0]}`)
-    assert.ok(/R5 tokens\/sec\s+[1-9]/.test(frameText), 'the seeded R5 rate paints non-zero')
-    assert.ok(/All tokens\/sec\s+[1-9]/.test(frameText), 'the seeded All rate paints non-zero')
+    // THE OFFICIAL CWD, from the PHYSICAL rows of its own fact: a long private
+    // root wraps the value under the fact column, so the raw path can never be
+    // required as one contiguous frame substring. When the frame ends inside
+    // the group the visible value is the correct prefix; the untouched full
+    // path stays proven by the raw facts and the Copy All payload.
+    const cwdPainted = aboutCwdPaintedValue(mountedFixture.vt.getViewport())
+    if (cwdPainted.complete) {
+      assert.equal(cwdPainted.value, seedHost.anchorDir,
+        `the official cwd paints every cell of its own fact:\n${frameText}`)
+    } else {
+      assert.ok(seedHost.anchorDir.startsWith(cwdPainted.value),
+        `the visible cwd prefix is the official value: ${JSON.stringify(cwdPainted.value)}`)
+    }
 
     // ── THE REAL COPY: SGR press/release on the painted [Copy All C]. ──
     // The action row paints BELOW the fold at 100×30: the About-local End
@@ -2573,6 +3514,25 @@ test('C3 Remote production lane: /settings → real About panel → [Copy All] c
     mountedFixture.vt.sendInput('\r') // Enter: the rail hands the keyboard to the content.
     await waitFor('the content focus took the keyboard', () =>
       mountedFixture.vt.getViewport().join('\n').includes('c copy fact'), 15_000)
+
+    // NEGATIVE CONTROL for the completion rule: a short 100×12 frame makes the
+    // CWD fact's FIRST row the last row of the About content area, so its value
+    // is clipped while the pinned action bar still paints as the last row. A
+    // bar row after the group must never be read as "the value ended".
+    mountedFixture.vt.resize(100, 12)
+    await waitFor('the short About frame paints the clipped CWD fact', () =>
+      mountedFixture.vt.getViewport().join('\n').includes('CWD  '), 15_000)
+    const clippedCwd = mountedFixture.vt.getViewport()
+    const clipped = aboutCwdPaintedValue(clippedCwd)
+    assert.equal(clipped.complete, false,
+      `a CWD group clipped by the content bottom is never complete:\n${clippedCwd.join('\n')}`)
+    assert.ok(clipped.value !== '' && seedHost.anchorDir.startsWith(clipped.value),
+      `the clipped CWD paints a non-empty prefix of the official value: ${JSON.stringify(clipped.value)}`)
+    // Restore the production 100×30 surface the rest of the lane drives.
+    mountedFixture.vt.resize(100, 30)
+    await waitFor('the full-size About frame is restored', () =>
+      /Turns\s+1/.test(mountedFixture.vt.getViewport().join('\n')), 15_000)
+
     mountedFixture.vt.sendInput('\x1b[6~') // PageDown: scroll the painted rows to the bottom.
     await waitFor('the scrolled frame settled', () => {
       const view = mountedFixture.vt.getViewport().join('\n')
@@ -2585,6 +3545,17 @@ test('C3 Remote production lane: /settings → real About panel → [Copy All] c
     }
     void rows
     const actionRow = rows[actionRowIndex]!
+    // The lifetime fold and the Host piTuiPerformance figures sit BELOW the
+    // initial fold once the CWD fact wraps over several physical rows for a
+    // long private root: assert them on the SCROLLED frame where they really
+    // are visible. The Copy All payload below independently proves the same
+    // values byte-for-byte.
+    const scrolledText = rows.join('\n')
+    assert.ok(/Turns\s+1\b/.test(scrolledText), `the lifetime turns paint: ${scrolledText.match(/Turns.*/)?.[0]}`)
+    assert.ok(/Steps\s+1\b/.test(scrolledText), 'the lifetime steps paint')
+    assert.ok(/TTFB \(recent\)\s+0\.[1-3]/.test(scrolledText), `the seeded TTFB paints: ${scrolledText.match(/TTFB.*/)?.[0]}`)
+    assert.ok(/R5 tokens\/sec\s+[1-9]/.test(scrolledText), 'the seeded R5 rate paints non-zero')
+    assert.ok(/All tokens\/sec\s+[1-9]/.test(scrolledText), 'the seeded All rate paints non-zero')
     const copyAllCol = actionRow.indexOf('Copy All [')
     mountedFixture.vt.sendInput(`\x1b[<0;${copyAllCol + 3};${actionRowIndex + 1}M`)
     mountedFixture.vt.sendInput(`\x1b[<0;${copyAllCol + 3};${actionRowIndex + 1}m`)
@@ -2671,7 +3642,7 @@ test('C3 Remote production lane: /settings → real About panel → [Copy All] c
 // an absence). The About route must word the sample-less groups Unavailable,
 // keep the authoritative ones (including the honest zero), and never fill a
 // gap from a bounded-window fold.
-test('C3 Remote negative: the sample-less performance/context groups word Unavailable through the production route (tokenUsage stays the authoritative zero)', async (t) => {
+test('Remote negative: the sample-less performance/context groups word Unavailable through the production route (tokenUsage stays the authoritative zero)', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'c3-absent-remote'
   const hostPreset = 'c3-absent-preset'
@@ -2734,8 +3705,18 @@ test('C3 Remote negative: the sample-less performance/context groups word Unavai
       mountedFixture.vt.getViewport().join('\n').includes('dsh-pi-tui'), 15_000)
     await waitFor('the authoritative lifetime group paints', () => {
       const frame = mountedFixture.vt.getViewport().join('\n')
-      return /Turns\s+1\b/.test(frame)
+      return frame.includes('Session ID') && frame.includes('CWD  ')
     }, 15_000)
+    // The About content is taller than this frame once the CWD fact wraps over
+    // several physical rows for a long private root: hand the keyboard to the
+    // content and page to the pinned action row exactly like the positive lane
+    // before clicking it. The lifetime values stay proven by the payload below.
+    mountedFixture.vt.sendInput('\r')
+    await waitFor('the About content took the keyboard', () =>
+      mountedFixture.vt.getViewport().join('\n').includes('c copy fact'), 15_000)
+    mountedFixture.vt.sendInput('\x1b[6~')
+    await waitFor('the scrolled action row paints', () =>
+      mountedFixture.vt.getViewport().join('\n').includes('Copy All ['), 15_000)
     const rows = mountedFixture.vt.getViewport()
     const actionRowIndex = rows.findIndex((line: string) => line.includes('Copy All ['))
     assert.ok(actionRowIndex !== -1, `the action row paints:\n${rows.join('\n')}`)
@@ -2886,7 +3867,7 @@ class CountingLlmAdapter extends StubStreamingLlmAdapter {
  * the real PTY/install/reload process proof is the two-package upgrade smoke
  * (U08).
  */
-test('M4 PR4: the live /reload-client command reaches the ONE process capability with its fixed notice', async (t) => {
+test('the live /reload-client command reaches the ONE process capability with its fixed notice', async (t) => {
   const life = testLifecycle(t)
   const results: ClientReloadRequestResult[] = []
   let next: ClientReloadRequestResult = { kind: 'accepted' }
@@ -2939,6 +3920,350 @@ test('M4 PR4: the live /reload-client command reaches the ONE process capability
     app.submitDraft()
     await waitFor('argued line became an ordinary submission', () => adapter.streams === 1, 20_000)
     assert.equal(results.length, 2, 'an argued /reload-client line reached the reload handler')
+  } finally {
+    await fixture.dispose()
+  }
+})
+
+/** Seed one completed durable turn on a pre-mounted Host fixture. */
+async function seedHostCompletedTurn(
+  host: Awaited<ReturnType<typeof mountRemotePresentationHost>>,
+  sessionId: string,
+  prompt: string,
+  response: string,
+  cwd: string = host.anchorDir,
+): Promise<void> {
+  await host.harness.create(SessionId(sessionId), undefined, { cwd })
+  const session = host.ctx.sessions.get(SessionId(sessionId)) as unknown as {
+    append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+  }
+  session.append('turn/start', { turn: 1 })
+  session.append('step/start', { turn: 1, step: 1 })
+  session.append('user/message', {
+    id: `u-${sessionId}`, role: 'user', content: [{ type: 'text', text: prompt }], source: { kind: 'user' },
+  }, { surfaceOp: 'append' })
+  session.append('assistant/message', {
+    turn: 1, step: 1,
+    message: {
+      id: `a-${sessionId}`, role: 'assistant',
+      content: [{ type: 'text', text: response }],
+      source: { kind: 'model', provider: 'smoke', model: 'smoke' },
+    },
+    stream: [], usage: { inputTokens: 10, outputTokens: 5 },
+  }, { surfaceOp: 'append' })
+  session.append('step/end', { turn: 1, step: 1 })
+  session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+}
+
+test('a preselected Remote runner resolves a unique prefix through the official Client roster and publishes the resumed owner', async (t) => {
+  const life = testLifecycle(t)
+  const hostPreset = 'm3-4-pr2-preset'
+  const target = 'abcdef12-remote-cli-target'
+  const host = await mountRemotePresentationHost(life, hostPreset)
+  await seedHostCompletedTurn(host, target, 'remote cli prompt', 'remote cli resumed answer')
+  const fixture = await mountRemoteRunner(life, {
+    presetId: hostPreset,
+    host,
+    sessionLaunch: { kind: 'lookup', query: 'abcdef12' },
+  })
+  await waitFor('Remote CLI unique-prefix resume', () => fixture.vt.getViewport().join('\n').includes('remote cli resumed answer'), 20_000)
+  const frame = fixture.vt.getViewport().join('\n')
+  assert.ok(!frame.includes('type a message to start a session'), 'a resumed Session replaces the sessionless Welcome')
+  assert.ok(!frame.includes('Back [Esc]'), 'a pre-mount resume never opens the Session Browser')
+})
+
+test('a Remote generation replacement between the Workspace baseline and the roster abandons -c', async (t) => {
+  const life = testLifecycle(t)
+  const hostPreset = 'm3-4-pr2-preset'
+  const target = 'remote-cli-generation-target'
+  const host = await mountRemotePresentationHost(life, hostPreset)
+  await seedHostCompletedTurn(host, target, 'remote generation prompt', 'remote generation answer', process.cwd())
+  const registry = host.ctx.get('workspaceRegistry') as {
+    create(path: string): Promise<{ attachSession(id: unknown): Promise<void>; detachSession(id: unknown): Promise<void> }>
+  }
+  const workspace = await registry.create(process.cwd())
+  await workspace.attachSession(SessionId(target))
+
+  const fixture = await mountRemoteRunner(life, {
+    presetId: hostPreset,
+    host,
+    sessionLaunch: { kind: 'continue' },
+    beforeRunnerMount: (_presentation, aggregate) => {
+      const backend = aggregate.selected.backend as unknown as {
+        sessionReader: { list(...args: unknown[]): Promise<unknown> }
+      }
+      const originalList = backend.sessionReader.list.bind(backend.sessionReader)
+      let reconnected = false
+      backend.sessionReader.list = async (...args: unknown[]) => {
+        if (!reconnected) {
+          reconnected = true
+          const connection = aggregate.wire.client.connection as unknown as {
+            generation: { getSnapshot(): { readonly id: number } | undefined }
+            reconnect(): void
+          }
+          const before = connection.generation.getSnapshot()?.id
+          connection.reconnect()
+          await waitFor('a new Remote generation before the roster', () => {
+            const id = connection.generation.getSnapshot()?.id
+            return id !== undefined && id !== before
+          }, 20_000)
+          // The membership changes under the NEW generation: only a stale
+          // baseline would still contain this Session, so pairing it with the
+          // new roster would fabricate a candidate.
+          await workspace.detachSession(SessionId(target))
+        }
+        return originalList(...args)
+      }
+    },
+  })
+
+  await waitFor('continue connection-change notice', () => fixture.vt.getViewport().join('\n')
+    .includes('the Host connection changed while reading the workspace'), 20_000)
+  const frame = fixture.vt.getViewport().join('\n')
+  assert.ok(frame.includes('type a message to start a session'), 'the generation change keeps the sessionless Welcome')
+  assert.ok(!frame.includes('Back [Esc]'), '-c never opens the Browser on a generation change')
+  assert.ok(!frame.includes('remote generation answer'), 'no stale-membership owner was published')
+})
+
+test('a preselected Remote runner continues the confirmed Workspace member selected by the official Workspace facts', async (t) => {
+  const life = testLifecycle(t)
+  const hostPreset = 'm3-4-pr2-preset'
+  const target = 'remote-cli-continue-target'
+  const host = await mountRemotePresentationHost(life, hostPreset)
+  await seedHostCompletedTurn(host, target, 'remote continue prompt', 'remote continue answer', process.cwd())
+  // The Host Workspace membership is a Host fact: seed the official registry
+  // row the same way the Host controller would for a Session created there.
+  const registry = host.ctx.get('workspaceRegistry') as {
+    create(path: string): Promise<{ attachSession(id: unknown): Promise<void> }>
+  }
+  const workspace = await registry.create(process.cwd())
+  await workspace.attachSession(SessionId(target))
+  const fixture = await mountRemoteRunner(life, {
+    presetId: hostPreset,
+    host,
+    sessionLaunch: { kind: 'continue' },
+  })
+  await waitFor('Remote CLI continue resume', () => fixture.vt.getViewport().join('\n').includes('remote continue answer'), 20_000)
+  const frame = fixture.vt.getViewport().join('\n')
+  assert.ok(!frame.includes('No readable sessions in this Host workspace'), 'the official membership contains the seeded Session')
+  assert.ok(!frame.includes('Back [Esc]'), '-c never opens the Session Browser')
+})
+
+// --- M6 compatible-cross-build client UX -----------------------------------
+
+const COMPATIBLE_OTHER_BUILD_NOTICE =
+  'Connected to a compatible Host with a different PiTui build. To use the installed Host build, run `daemon restart` when work is idle.'
+
+/** A counting daemon-administration port: a pure connection notice must never
+ *  invoke a Host management verb. */
+function countingDaemonAdmin(): {
+  readonly port: NonNullable<RemoteApplicationOverride['profileDaemonAdmin']>
+  readonly calls: string[]
+} {
+  const calls: string[] = []
+  return {
+    calls,
+    port: {
+      profile: 'pi-tui',
+      async run(verb) {
+        calls.push(verb)
+        return { code: 0, stdout: '', stderr: '' }
+      },
+    },
+  }
+}
+
+/** The visible viewport with line wraps normalized to single spaces. */
+function viewportText(fixture: RemoteRunnerFixture): string {
+  return fixture.vt.getViewport().join(' ').replace(/\s+/gu, ' ')
+}
+
+test('M6 compatible cross-build: the initial PiTui surface shows ONE info notice and never touches Host management', async (t) => {
+  const life = testLifecycle(t)
+  const admin = countingDaemonAdmin()
+  const fixture = await mountRemoteRunner(life, {
+    profileDaemonAdmin: admin.port,
+    startupSettlement: {
+      surfaceReady: () => {},
+      surfaceFailed: () => {},
+      authenticatedBuilds: {
+        clientBuildId: 'client-build-a',
+        hostBuildId: 'host-build-b',
+        initialSurface: true,
+      },
+    },
+  })
+  try {
+    await waitFor('compatible-build info notice', () => viewportText(fixture).includes(COMPATIBLE_OTHER_BUILD_NOTICE), 20_000)
+    const app = fixture.runnerApp() as unknown as { notifyTextForTest(): string }
+    assert.equal(app.notifyTextForTest(), COMPATIBLE_OTHER_BUILD_NOTICE, 'the ONE existing notify slot carries the fixed text')
+    const wide = fixture.vt.getViewport().join('\n')
+    assert.match(wide, /ℹ Connected to a compatible Host/u, 'the notice paints in the existing info role')
+    assert.doesNotMatch(wide, /✗ Connected to a compatible Host/u, 'it is never an error notice')
+    // Narrow 72x24 keeps the same non-blocking notice readable.
+    fixture.vt.resize(72, 24)
+    await waitFor('narrow compatible-build repaint', () => viewportText(fixture).includes(COMPATIBLE_OTHER_BUILD_NOTICE), 20_000)
+    assert.deepEqual(admin.calls, [], 'a pure connection notice never invokes a Host management verb')
+  } finally {
+    await fixture.dispose()
+  }
+})
+
+test('M6 compatible cross-build: the TSP Dock shows the same info notice and never touches Host management', async (t) => {
+  const life = testLifecycle(t)
+  const admin = countingDaemonAdmin()
+  const fixture = await mountRemoteRunner(life, {
+    renderer: 'tsp',
+    profileDaemonAdmin: admin.port,
+    startupSettlement: {
+      surfaceReady: () => {},
+      surfaceFailed: () => {},
+      authenticatedBuilds: {
+        clientBuildId: 'client-build-a',
+        hostBuildId: 'host-build-b',
+        initialSurface: true,
+      },
+    },
+  })
+  try {
+    const pane = fixture.pane
+    assert.ok(pane, 'the Remote TSP pane must be mounted')
+    await waitFor('TSP dock compatible-build notice',
+      () => wireNodes(pane).some(node => node.p.text === COMPATIBLE_OTHER_BUILD_NOTICE), 20_000)
+    const notices = wireNodes(pane).filter(node => node.k === 'text' && String(node.p.text ?? '') === COMPATIBLE_OTHER_BUILD_NOTICE)
+    assert.equal(notices.length, 1, 'the existing dock notice queue carries the message exactly once')
+    assert.ok(notices.every(node => !String(node.p.text ?? '').startsWith('! ')), 'it is an info notice, never an error')
+    assert.deepEqual(admin.calls, [], 'a pure connection notice never invokes a Host management verb')
+  } finally {
+    await fixture.dispose()
+  }
+})
+
+test('M6 compatible cross-build: the same build keeps the surface quiet', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = await mountRemoteRunner(life, {
+    // A real resume failure is emitted AFTER the compatibility slot, so this
+    // proves the startup reached the notice stage without painting it.
+    resumeSessionId: 'missing-compatible-same-build',
+    startupSettlement: {
+      surfaceReady: () => {},
+      surfaceFailed: () => {},
+      authenticatedBuilds: {
+        clientBuildId: 'same-build-id',
+        hostBuildId: 'same-build-id',
+        initialSurface: true,
+      },
+    },
+  })
+  try {
+    await waitFor('the real resume error notice', () => fixture.vt.getViewport().join('\n').includes('could not be resumed'), 20_000)
+    const app = fixture.runnerApp() as unknown as { notifyTextForTest(): string }
+    assert.match(app.notifyTextForTest(), /could not be resumed/u)
+    assert.ok(!fixture.vt.writes.join('').includes(COMPATIBLE_OTHER_BUILD_NOTICE),
+      'a same-build connection never paints the compatible-build notice')
+  } finally {
+    await fixture.dispose()
+  }
+})
+
+test('M6 compatible cross-build: absent identity facts keep the surface quiet', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = await mountRemoteRunner(life, {
+    resumeSessionId: 'missing-compatible-no-facts',
+  })
+  try {
+    await waitFor('the real resume error notice', () => fixture.vt.getViewport().join('\n').includes('could not be resumed'), 20_000)
+    const app = fixture.runnerApp() as unknown as { notifyTextForTest(): string }
+    assert.match(app.notifyTextForTest(), /could not be resumed/u)
+    assert.ok(!fixture.vt.writes.join('').includes(COMPATIBLE_OTHER_BUILD_NOTICE),
+      'a composition without the authenticated pair never paints the compatible-build notice')
+  } finally {
+    await fixture.dispose()
+  }
+})
+
+test('M6 compatible cross-build: an HMR replacement Surface does not repeat the notice', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = await mountRemoteRunner(life, {
+    resumeSessionId: 'missing-compatible-hmr',
+    startupSettlement: {
+      surfaceReady: () => {},
+      surfaceFailed: () => {},
+      authenticatedBuilds: {
+        clientBuildId: 'client-build-a',
+        hostBuildId: 'host-build-b',
+        initialSurface: false,
+      },
+    },
+  })
+  try {
+    await waitFor('the real resume error notice', () => fixture.vt.getViewport().join('\n').includes('could not be resumed'), 20_000)
+    assert.ok(!fixture.vt.writes.join('').includes(COMPATIBLE_OTHER_BUILD_NOTICE),
+      'only the initial physical Surface mount may project the notice')
+  } finally {
+    await fixture.dispose()
+  }
+})
+
+test('M6 compatible cross-build: a real startup resume failure keeps priority over the info notice', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = await mountRemoteRunner(life, {
+    resumeSessionId: 'missing-compatible-priority',
+    startupSettlement: {
+      surfaceReady: () => {},
+      surfaceFailed: () => {},
+      authenticatedBuilds: {
+        clientBuildId: 'client-build-a',
+        hostBuildId: 'host-build-b',
+        initialSurface: true,
+      },
+    },
+  })
+  try {
+    await waitFor('the real resume error notice', () => fixture.vt.getViewport().join('\n').includes('could not be resumed'), 20_000)
+    const app = fixture.runnerApp() as unknown as { notifyTextForTest(): string }
+    assert.match(app.notifyTextForTest(), /could not be resumed/u,
+      'the later real startup error owns the visible notify line')
+    assert.match(fixture.vt.getViewport().join('\n'), /✗ session missing-compatible-priority could not be resumed/u,
+      'the error paints in the error role')
+  } finally {
+    await fixture.dispose()
+  }
+})
+
+test('M6 compatible cross-build: a startup Session Browser refusal keeps priority over the info notice', async (t) => {
+  const life = testLifecycle(t)
+  // A real PiTui fullscreen-lease refusal: the Workspace opener throws
+  // synchronously, exactly like a blocking modal / foreign workspace owning
+  // the one fullscreen lease, so the CLI startup Browser admission returns a
+  // real error result.
+  const originalOpenWorkspace = TuiApp.prototype.openSessionWorkspace
+  TuiApp.prototype.openSessionWorkspace = function patchedOpenSessionWorkspace(): never {
+    throw new Error('a blocking workspace owns the surface')
+  }
+  life.defer(() => { TuiApp.prototype.openSessionWorkspace = originalOpenWorkspace })
+  const fixture = await mountRemoteRunner(life, {
+    sessionLaunch: { kind: 'browse' },
+    startupSettlement: {
+      surfaceReady: () => {},
+      surfaceFailed: () => {},
+      authenticatedBuilds: {
+        clientBuildId: 'client-build-a',
+        hostBuildId: 'host-build-b',
+        initialSurface: true,
+      },
+    },
+  })
+  try {
+    await waitFor('the startup browser refusal notice',
+      () => fixture.vt.getViewport().join('\n').includes('session browser unavailable'), 20_000)
+    const app = fixture.runnerApp() as unknown as { notifyTextForTest(): string }
+    assert.match(app.notifyTextForTest(), /session browser unavailable: session workspace unavailable: a blocking workspace owns the surface/u,
+      'the browser refusal remains the visible single notify line')
+    assert.doesNotMatch(app.notifyTextForTest(), /compatible Host with a different PiTui build/u,
+      'the compatible-build info must be emitted before the browser refusal, not after it')
+    assert.match(fixture.vt.getViewport().join('\n'), /✗ session browser unavailable: session workspace unavailable/u,
+      'the refusal paints in the error role')
   } finally {
     await fixture.dispose()
   }

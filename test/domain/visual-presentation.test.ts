@@ -1,7 +1,8 @@
 /**
  * The Assistant visual-projection sidecar: presentation-only caching keyed by
- * the exact display subject, Session instance, committed revision and the
- * Assistant row's own body identity.
+ * the exact display subject, Session instance and the Assistant row's own body
+ * identity — never by the Session's committed seq, so an unrelated session
+ * event cannot re-materialize a historical figure row.
  * @module @xmoon76/dsh-pi-tui/domain/visual-presentation.test
  */
 
@@ -50,7 +51,6 @@ function baseKey(): VisualPresentationKey {
     sourceIdentity: {},
     session: {},
     sessionId: 'session-1',
-    seq: 12,
     turn: 0,
     step: 1,
     text: 'answer',
@@ -59,8 +59,8 @@ function baseKey(): VisualPresentationKey {
   }
 }
 
-const REF_A = `sv1_${'a'.repeat(20)}`
-const REF_B = `sv1_${'b'.repeat(20)}`
+const REF_A = `sv2_${'a'.repeat(20)}`
+const REF_B = `sv2_${'b'.repeat(20)}`
 
 test('a first committed projection starts at revision 1 and exposes its publications', () => {
   const message = {}
@@ -95,7 +95,6 @@ const KEY_CHANGES: readonly { readonly field: string; readonly apply: (key: Visu
   { field: 'sourceIdentity', apply: key => ({ ...key, sourceIdentity: {} }) },
   { field: 'session', apply: key => ({ ...key, session: {} }) },
   { field: 'sessionId', apply: key => ({ ...key, sessionId: 'session-2' }) },
-  { field: 'seq', apply: key => ({ ...key, seq: 13 }) },
   { field: 'turn', apply: key => ({ ...key, turn: 1 }) },
   { field: 'step', apply: key => ({ ...key, step: 2 }) },
   { field: 'text', apply: key => ({ ...key, text: 'changed' }) },

@@ -24,20 +24,9 @@ wrong home:
 - **Settings reads are schema-shaped.** History is opaque runtime data; a
   preferences schema has no business validating it.
 
-### What other agents do
-
-| Agent | Location | Format | Keyed by |
-|---|---|---|---|
-| kimi-code | `<dataDir>/user-history/<md5(cwd)>.jsonl` | JSONL `{"content": …}` | per cwd |
-| Claude Code | `~/.claude/history.jsonl` | JSONL | global |
-| Codex CLI | `~/.codex/history.jsonl` | JSONL | per machine |
-| aider | `<git_root>/.aider.input.history` | plain lines | per project |
-| Gemini CLI | none — derives ↑ recall from session logs at runtime | — | per session |
-| shells | `~/.bash_history` etc. | plain lines | per user |
-
-Nobody stores input history in a settings/preferences file. The closest
-match for dsh-pi-tui's per-directory requirement is **kimi-code**: a
-dedicated data file keyed by the working directory. We adopt that shape.
+The dedicated per-directory JSONL file avoids high-frequency updates in the
+user-editable settings document. Its independent append writer is also what
+prevents a settings whole-file replacement from erasing another window's input.
 
 ## The chosen design
 
@@ -49,12 +38,14 @@ dedicated data file keyed by the working directory. We adopt that shape.
   `JSON.stringify`), so pastes cannot corrupt the layout.
   - **v1** (legacy, kimi layout): `{"content": "..."}` — still read forever.
   - **v2** (canonical since the Ctrl+R milestone): `{"v":2,"content":"...",
-    "cwd":"...","ts":<epoch-ms>,"sessionId":"ses_..."}`. New rows carry the
-    working directory and a submission timestamp so the all-directory
-    history search can merge files and order globally by time. Unknown
-    future fields are tolerated; a v2 row with invalid metadata degrades
-    the field to null (content stays searchable) instead of dropping the
-    row.
+    "cwd":"...","ts":<epoch-ms>,"sessionId":"ses_..."}`. New rows may also
+    carry an optional `writeId` (a per-append identity used ONLY to recognise
+    the open recall scope's own row at a cold reseed; old v2 rows omit it and
+    stay valid). New rows carry the working directory and a submission
+    timestamp so the all-directory history search can merge files and order
+    globally by time. Unknown future fields are tolerated; a v2 row with
+    invalid metadata degrades the field to null (content stays searchable)
+    instead of dropping the row.
 - Writes: append-only (`O_APPEND`), 0600 file, 0700 directory, created on
   demand. Consecutive repeats and empty lines are skipped (shell-history
   behavior); non-consecutive repeats are legal history and survive.
@@ -62,13 +53,11 @@ dedicated data file keyed by the working directory. We adopt that shape.
   - **Recall**: `HISTORY_RECALL_LIMIT` (100) entries seed the editor's
     ↑/↓ history. The canonical JSONL is NEVER truncated or rewritten on
     read — a concurrent append from another window must never land in an
-    orphaned inode. Auto-compaction is a planned maintenance milestone
-    (`HISTORY_FILE_MAX_ENTRIES`, 5000), not part of the read/append
-    contract.
+    orphaned inode. No read-side compaction may rewrite the append-only file or
+    replace the inode while concurrent writers can hold it.
 - Corrupt lines are skipped on load, never fatal.
 - `!` shell commands are stored verbatim (with the `!`), so ↑ recall
-  restores them as text and Enter re-runs the shell branch (kimi does the
-  same with its bash-mode flag).
+  restores them as text and Enter re-runs the shell branch.
 - The runner loads the file per session (and once at boot for the launch
   cwd, so a fresh window recalls immediately — see below) and appends on
   every submitted line.
@@ -79,13 +68,23 @@ dedicated data file keyed by the working directory. We adopt that shape.
 (host-reserved key; plugins can never claim it). It is "find and EDIT", never
 "find and run": the Transcript keeps rendering above it and the ordinary footer
 below it, and the panel is an editor-seat tenant — not an overlay and not a
-second screen.
+second screen. The Scope, filtering, currentness, Enter, Esc, Ctrl+C and Copy
+rules below are renderer-independent behavior contracts. The **layout,
+pointer and visual rules in the remainder of this section are PiTui-specific
+presentation**; the TSP renderer's native presentation has its own section
+below.
 
 - **Scopes**: `Tab` cycles the scope; the query survives the switch.
   - `Current session` (the default when a live session exists) — only the
-    CURRENT session's inputs: v2 rows whose `sessionId` matches the live
-    session id. v1 rows and v2 rows without a sessionId are excluded —
-    never guessed (legacy data has no reliable session proof).
+    CURRENT session's inputs, searched across EVERY history file: v2 rows
+    whose `sessionId` matches the live session id. A Session can outlive the
+    working directory it was submitted from, so its rows may live in several
+    per-cwd files; the scope scans all of them. v1 rows and v2 rows without a
+    sessionId are excluded — never guessed (legacy data has no reliable
+    session proof). A matching row's displayed directory is its own `cwd`
+    when it validates the file hash, else the same file's trusted proof
+    (Rule 1/2), else unknown (`Directory:` omitted) — never the open-time
+    cwd.
   - `Current directory` — the live cwd's file, every trusted row.
   - `All directories` — every history file with the cwd-proof rules.
   - Without a session identity (a deferred start before the first prompt)
@@ -143,7 +142,15 @@ second screen.
   (it does not accept); the explicit `Use Selected [Enter]` / `Copy All [Alt+C]`
   cells act,
   the wheel scrolls the list or the Preview under the pointer only, and a
-  Preview drag copies the exact original source substring. The regular main
+  Preview drag copies the exact original source substring. Every COMPLETE
+  painted Header scope label is also a direct target for that scope — the
+  click selects the requested scope instead of simulating a Tab cycle; the
+  active scope is a strict no-op, a sessionless seat has no Session label, the
+  query survives, and the same last-painted frame, generation and captured
+  tenant currentness fences govern the gesture. Header title/blank/F2 and any
+  clipped label are inert, and the Header follows the same pointer-capability
+  guard as the rest of the seat. The Footer `Scope [Tab]` action and the
+  keyboard `Tab` keep their original cycle semantics. The regular main
   screen has NO application mouse: it is fully keyboard-driven and the
   terminal's native selection/scrollback is untouched.
 - **Storage**: v2 rows carry `cwd` + `ts` + `sessionId`; v1 rows inherit
@@ -155,6 +162,57 @@ second screen.
   `src/tui/panels/history-panel.ts` (the editor-seat surface). The exact
   original-text cell mapping the Preview drag shares with the Job Command page
   lives in `src/tui/components/source-text-layout.ts`.
+
+### TSP native History presentation
+
+The experimental Tern Surface Protocol renderer presents the SAME `Ctrl+R`
+input-history behavior as one short-lived Dock card above the ONE Quiet
+Composer, inside the existing inline surface. It is not a `mode:'screen'`, an
+overlay, a second stdin reader, a second composer or a second History owner.
+The Main transcript and the ordinary native footer keep rendering above and
+below it, and the Composer stays visible (its business controls are disabled
+while the card owns the seat).
+
+- **One authority per fact.** The card consumes the SAME
+  `HistorySearchSource`, open-time session cwd and atomic
+  `captureHistoryScope()` pair the PiTui panel consumes; it never scans a file,
+  re-derives a Session identity from a string, caches rows across sessions or
+  owns a clipboard policy. Copy uses the existing Client-local copy callback
+  with the exact stored bytes, and Restore uses the ONE controlled composer's
+  whole-document write — never a submit, a steer, a History write or an
+  attachment intake.
+- **Scopes and currentness.** A live Session opens in `Session`; a sessionless
+  start opens in `Directory` and never offers a Session Scope. The single Scope
+  control cycles `Session → Directory → All → Session` (or the two-scope ring)
+  with the query preserved. `Tab`/`Shift+Tab` and the keyboard/pointer routes
+  converge on the same admission. Every acting entry — a key, a click, a read
+  settlement, a copy settlement — re-checks the captured owner+generation, so a
+  publication, a same-id reopen or a generation bump retires the older card.
+- **Keys.** `Ctrl+R` opens one card or returns the caret to the SAME instance.
+  `↑/↓`, `PgUp`/`PgDn` select within the settled first page and reveal the
+  selected row; `Alt+↑/↓`, `Alt+PgUp/PgDn`, `Alt+Home/End` scroll the Preview
+  independently. `Tab`/`Shift+Tab` cycle the Scope, `F2` expands or collapses
+  the same card, `Enter` restores only, `Alt+C`/`Copy all` copies only, and
+  `Esc`/`Ctrl+C`/`×` cancel only. While the card owns the seat every key is
+  consumed by it: a closing `Ctrl+C` never interrupts the Agent. The next
+  independent Enter follows the normal submission contract.
+- **Pointer.** Result rows are native buttons whose click SELECTS; the explicit
+  `Restore to draft` button is the one draft write. The Scope, Expand, Close,
+  Copy and Retry controls are native buttons too. A click addressed at a
+  retired frame is refused by the frame's real node identity; a card under a
+  Question/Approval parks the SAME instance and returns after the last blocker,
+  while a non-blocking Presenter closes it synchronously.
+- **Presentation.** The card is ONE light-bordered Dock surface: Header + one
+  neutral Scope button + Expand/Close, one official native search input, a
+  scrollable results list and an independently scrollable full Preview, and the
+  `Copy all` / `Restore to draft` action row. Wide panes put the list beside the
+  Preview; narrow panes stack them; short panes compress decoration first and
+  keep the query, at least one result row, both actions, the Composer and the
+  Footer. The Preview keeps the original soft-wrapped text — never a `… more`
+  pretence — and states `Time unknown` for a legacy row. `Results · N shown`
+  counts the displayed first page, never a global total. Panes that did not
+  negotiate the kinds and features this card really paints state that History
+  search is unavailable instead of painting a reduced secondary UI.
 
 ### The session-scope persist gate (deferred start)
 
@@ -175,10 +233,11 @@ The search never parses a whole history file. Every call reads the JSONL
 store from the tail backwards through `src/client/history/reverse-reader.ts`
 (fixed-size chunks, lines reassembled across chunk boundaries, UTF-8 safe)
 and consumes a GLOBAL scan budget — `HISTORY_SEARCH_SCAN_LIMIT` (5000)
-physical lines across ALL files per call, never per file. The `All
-directories` scope stats the candidates with bounded concurrency and scans
-them serially in mtime-DESC order (most recently active workspace first);
-mtime only schedules files, the final order is always row.ts.
+physical lines across ALL files per call, never per file. The multi-file
+scopes (`Current session` and `All directories`) stat the candidates with
+bounded concurrency and scan them serially in mtime-DESC order (most recently
+active workspace first); mtime only schedules files, the final order is always
+row.ts. `Current directory` keeps its single file.
 
 The result is a `HistorySearchPage`: the matches NEW to the call's window,
 plus a `HistorySearchContinuation` when older history remains. A
@@ -206,12 +265,49 @@ Two intentional trade-offs of the bounded window:
 
 ### Recall-order contract (trap: get this backwards and ↑ shows the OLDEST entry)
 
-The file is oldest-first; `TuiApp.resetInputHistory` takes **newest-first**
-(`seedInputHistory` iterates it reversed into the editor, whose recall list
-is newest-first). The runner therefore reverses the loaded entries before
-seeding. The first `↑` must recall the MOST RECENT submission — this is
-pinned by `test/tui/input-experience.test.ts` ("seeded input history recalls
-entries with the up arrow") and `test/client/tui-app.test.ts`.
+The file is oldest-first; the recall API (`SurfaceDisplaySeam.resetInputHistory`,
+implemented by each renderer's adapter over the shared kernel) takes
+**newest-first**. Both editors consume that projection: the PiTui adapter
+mirrors the kernel snapshot into its editor stack in reverse (the editor's
+`addToHistory` unshifts), and the TSP composer reads the kernel's newest-first
+snapshot directly at each arrow. The runner therefore reverses the loaded
+entries before seeding. The first `↑` must recall the MOST RECENT submission —
+this is pinned by `test/tui/input-experience.test.ts` ("seeded input history
+recalls entries with the up arrow"), `test/client/tui-app.test.ts` and the TSP
+composer tests.
+
+### The two editors' ↑/↓ presentation
+
+Both editor adapters read the SAME newest-first kernel projection; their
+vertical-caret model is deliberately different because the layout owner is
+different:
+
+- PiTui owns its own visual soft-wrap map, so ↑/↓ first move across the lines
+  it actually painted, then walk its editor history stack at the first/last
+  VISUAL line.
+- The Tern Surface Protocol's `ui.editor` owns the TSP renderer's layout, so
+  the TSP composer moves by hard logical lines (`\n`; a complete CRLF pair is
+  one cluster), keeps its desired column in grapheme clusters and consults the
+  kernel only at the first/last LOGICAL line. It never guesses the client's
+  soft-wrap width. Soft-wrapped visual-row arrow parity with PiTui is not part
+  of this contract; the client's own editor remains the layout authority.
+
+In both adapters, leaving index 0 downward restores the exact draft and caret
+that browsing replaced; a real text edit ends the browse and makes the recalled
+row ordinary editable content. Browsing never submits, writes a row, switches a
+Session or paints a second input surface. A formal owner publication
+(`beginInputHistoryScope`, before the kernel commit) retires the short-lived
+browse bookmark; a current-owner asynchronous cold reseed
+(`resetInputHistory`) instead restores the exact pre-browse draft/caret, ends
+that browse and replaces the projection, while a settlement, a repaint or a
+pre-publication hydration window leaves the current browse alone. Entering the
+first recalled row consults the application's existing pasted-path delivery and
+plain-history eligibility; a refusal keeps the draft, caret and live paste
+leases, starts no browse, and discards the aborted attempt's pending bookmark so
+the next successful entry records the draft position that actually entered (an
+empty scope starts no browse and keeps no bookmark either). A whole-document
+recall replacement retires old pasted-path leases, so a late image read cannot
+rewrite bytes inside a history row.
 
 ### Seeding at boot (trap: deferred start has no session)
 
@@ -223,11 +319,21 @@ first session is born (and on every session switch).
 
 ### Editor recall scope: session-first (↑/↓), cwd-first (Ctrl+R)
 
-The EDITOR's ↑/↓ recall is session-scoped once a live session exists:
-`initLiveSession` seeds it with **only the rows whose `sessionId` matches
-the live session** (`recallHistoryForSession` in `src/client/history/store.ts`) —
-resuming session A in a shared cwd never recalls session B's inputs. With
-no live session (fresh/deferred start) the recall pool is the whole cwd
+The EDITOR's ↑/↓ recall is session-scoped once a live session exists: the
+hydration reseed reads the SAME Client-local history source's
+`readSessionRecall(sessionId)` — every client history file, only valid v2
+rows whose `sessionId` matches, no content dedupe, the globally newest
+`HISTORY_RECALL_LIMIT` (100) rows by stored `ts` (then file path and byte
+offset). A resumed Session therefore recalls its inputs across every working
+directory it submitted from. v1/sessionless/other-session rows never
+participate and are never guessed. The read is asynchronous: its ownership
+generation (and, on Remote, the exact transport binding token) is captured
+before the read and re-checked in the same synchronous stack as the recall
+commit; a Session replacement or teardown aborts the in-flight scan, and a
+superseded read is discarded without touching the recall kernel. A global history-read failure is
+diagnosed and falls back to the same Session's CURRENT cwd file (with the
+same optional `writeId` provenance), never to an empty or unfiltered pool.
+With no live session (fresh/deferred start) the recall pool is the whole cwd
 file, v1 legacy rows included. Explicitly **no automatic fallback**: when
 the session's rows run out, ↑ stops (it never silently switches to cwd
 history — the scope would become invisible to the user).
@@ -261,9 +367,17 @@ task (`runDetached` invokes its factory synchronously and `appendFileSync` runs
 there); the ORDERING between the submission body and the reseed is what races,
 never the append.
 
-`TuiApp` therefore keeps the open scope's SCOPE-BOUND TEMPORARY SUBMISSIONS as
-the scope's TRUE submission sequence (newest first), and the hydration reseed
-reconciles them:
+The open scope's SCOPE-BOUND TEMPORARY SUBMISSIONS are kept as the scope's TRUE
+submission sequence (newest first) in ONE Client-local pure kernel,
+`src/client/history/recall-scope.ts` (`createHistoryRecallScope()`): no IO, no
+renderer, no SDK, no Session reader. Every mounted renderer owns exactly ONE
+instance and commits the same three signals into it through the existing
+`SurfaceDisplaySeam` (`beginInputHistoryScope` / `resetInputHistory` /
+`settleScopeInput`); the PiTui adapter mirrors the kernel's snapshot into its
+editor stack, and the TSP adapter keeps the ONE composer's browse state while
+reading that same snapshot on demand. A renderer that presents no recall UI
+keeps the same projection without painting it. The hydration reseed reconciles
+them:
 
 - the scope is OPEN FROM CONSTRUCTION: the SESSIONLESS POOL is a real scope (a
   deferred start, and the Remote startup resume whose `remote.read` await leaves
@@ -275,7 +389,8 @@ reconciles them:
   ordinary transition, the fork adoption and the first-session creation. A
   REPLACED owner's entries are dropped with the scope, so Session A's input can
   never cross into Session B's recall;
-- `rememberInput()` records every accepted input in the scope while it is open —
+- `rememberInput()` → `HistoryRecallScope.rememberAccepted()` records every
+  accepted input in the scope while it is open —
   it never compresses a repeat away, because only the FINAL seed can see where
   another writer's row lands between two identical submissions. The scope's own
   cap counts RUNS of consecutive identical text, exactly like the editor/mirror
@@ -286,11 +401,19 @@ reconciles them:
   CWD-level consecutive dedupe anchor, so a later run member can legitimately
   append: its row is simply re-emitted from the snapshot.) The mirror keeps its unchanged duplicate rule, so an input identical
   to the outgoing Session's last row is still recalled after the reseed;
-- EVERY accepted Enter — each editor seat, a sessionless or local command, a
-  `!`/`!!` shell line — becomes an occurrence with its own internal OCCURRENCE
-  TOKEN that rides its submission into the persistence record. The token — never
-  the text — is what attributes a settlement to exactly one occurrence, so
-  repeated identical submissions stay distinguishable (`a → b → a` keeps both
+- EVERY Enter the mounted renderer ACCEPTS into its recall — each editor seat,
+  a sessionless or local command — becomes an occurrence with its own internal
+  OCCURRENCE TOKEN that rides its submission into the persistence record.
+  Acceptance is the renderer's, on top of the shared History policy
+  (`shouldRememberInput`: staged attachments, an in-flight pasted path): PiTui
+  accepts a `!`/`!!` shell line like any other input (its shell really runs and
+  its row is stored verbatim so ↑ re-runs the branch), while the TSP renderer
+  declines `!` lines because its user-shell is refused outright by the
+  submission controller — a line that can never run must not sit in the recall.
+  Declining the occurrence never declines the BUSINESS submission: the input
+  still takes the original submit path and the controller still owns it. The
+  token — never the text — is what attributes a settlement to exactly one
+  occurrence, so repeated identical submissions stay distinguishable (`a → b → a` keeps both
   `a`s), and no occurrence is discarded before the final seed compresses
   adjacent duplicates;
 - the write owner reports EVERY settled submission, in APPEND ORDER, through
@@ -316,8 +439,8 @@ reconciles them:
   append boundary it recorded — after the rows that preceded it and before those
   that followed, whether or not their own settlements survived the cap (only a skip
   whose whole boundary lies outside the covered window falls at its end);
-- `resetInputHistory(entries, owner)` commits that owner's reseed from that
-  evidence alone, in ONE linear pass (the frozen plan bounds it at O(100)):
+- `HistoryRecallScope.reset(entries, owner)` commits that owner's reseed from
+  that evidence alone, in ONE linear pass (the frozen plan bounds it at O(100)):
   occurrence token → rank is built once, the snapshot's newest written-count rows
   ARE the owner's appends in reverse (a count watermark, never text matching), and
   a single ordered cursor interleaves the occurrences the window does not carry —
@@ -327,6 +450,27 @@ reconciles them:
   nothing, and a written row older than the recall window (the 100-row cap) is not
   in the projection at all. The seed then performs the adjacent-duplicate
   compression and the 100-entry truncation LAST, exactly as the baseline did.
+- The cold CROSS-CWD seed may also supply a `writeIds` array aligned with
+  `entries` (the optional v2 `writeId`, undefined for old rows). When present
+  for the reseed owner, `reset` rebuilds the deterministic prefix instead of
+  trusting the disk `ts` order: the open scope's successful WRITTEN
+  settlements of that owner — the true synchronous append order, including
+  tokenless steer/extension appends, never a `ts` guess — are the newest rows
+  (bounded to the last 100); their exact `(writeId, text)` pairs are removed
+  from the disk baseline (a reused id with different text is a different row
+  and stays), and the reversed append order prepends the remaining baseline.
+  A written settlement without a `writeId` fails loudly: a production writer
+  that omits it broke the provenance contract, and silently falling back to
+  `ts` would be wrong. `writeId` is only this row identity — not a Session
+  id, a cross-client order or a lock. The reset is a PROJECTION replace, not
+  an owner publication: the renderer's open search/completion seats for the
+  CURRENT owner survive it (only `beginInputHistoryScope` retires them on an
+  owner change), so an asynchronous hydration commit can never close a card
+  the user opened in the new Session. A reseed that lands while the user is
+browsing provisional recall with a non-empty draft restores that exact draft
+and caret from each renderer's own browse bookmark (and a reseed with no open
+browse leaves the document/edit revision untouched), so asynchronous
+hydration can never lose a draft or falsely refuse a live attachment intake.
 
 While a reseed is still pending, the outgoing Session's rows remain recallable
 (`resetForGeneration` is an invalidation signal, not a confirmed switch); they
@@ -334,7 +478,10 @@ are replaced by the new owner's projection at the commit above.
 
 No second history authority is created: the per-cwd JSONL stays the snapshot
 authority, and the write policy (trim, empty / consecutive-repeat / attachment
-skips, cwd `lastHistoryContent`, the `sessionId` field) is unchanged.
+skips, cwd `lastHistoryContent`, the `sessionId` field) is unchanged. The kernel
+is a short-lived projection of the reports those owners already make — it reads
+no file, opens no subscription, decides no persistence, and is not a Session or
+cwd authority; a new mount starts from its own boot seed.
 
 ## Migration
 
@@ -370,7 +517,9 @@ unwritten entries.
 - `src/client/history/search.ts` — the Ctrl+R search source (`HistorySearchSource`
   seam + `FileHistorySearchSource`): scope, bounded recent-first reverse
   scanning, the global scan budget, the page/continuation contract, legacy
-  cwd recovery, matching, ordering, dedupe, cancellation. Pinned by
+  cwd recovery, matching, ordering, dedupe, cancellation, and the SAME
+  source's cold `readSessionRecall(sessionId)` editor-recall reader (all
+  files, no content dedupe, newest 100, per-file error isolation). Pinned by
   `test/client/history-search.test.ts`.
 - `src/client/history/reverse-reader.ts` — the reverse JSONL batch reader
   (EOF-backwards chunks, cross-chunk/UTF-8-safe line assembly, revision-

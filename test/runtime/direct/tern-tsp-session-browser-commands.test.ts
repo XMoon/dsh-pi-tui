@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { DirectSessionReader } from '../../../src/runtime/direct/session-direct.ts'
 import type { SessionContentSearchPage, SessionSummary } from '../../../src/runtime/session-reader-port.ts'
-import { createDirectTspFixture, directSettle, waitFor, waitForInputDelivery } from '../../support/direct-tsp-fixture.ts'
+import { createDirectTspFixture, directSettle, waitFor, waitForInputDelivery, type DirectTspFixture } from '../../support/direct-tsp-fixture.ts'
 import { pickerActionByBase, pickerNode, pickerProps, sendActivate, sendPickerAction, sendSelect, wireNodes } from '../../support/tsp-picker-wire.ts'
 
 const BROWSER = 'session-browser-'
@@ -33,11 +33,53 @@ async function submitInput(
   pane.input.type('\r')
 }
 
-function welcomeSessionIds(pane: Parameters<typeof wireNodes>[0]): string[] {
-  const prefix = 'dock.welcome-'
-  return wireNodes(pane)
-    .filter((node) => node.id.startsWith(prefix))
-    .map((node) => node.id.slice(prefix.length))
+/**
+ * The live Host Agents this Direct surface owns, by Session id.
+ *
+ * AUTHORITY: the real Host `agents` registry — the runner resumes/creates an
+ * Agent there and retires it there. The retired Dock welcome line only DISPLAYED
+ * an id the registry already owned, so "the current Agent" is now read at its
+ * owner instead of through the renderer: it answers `[]` for a sessionless
+ * surface (a positive sessionless fact, which the old line proved only by its
+ * absence) and it answers with the id a switch really published.
+ */
+function liveAgentIds(fixture: DirectTspFixture): string[] {
+  const agents = fixture.ctx.get('agents') as unknown as { list(): readonly { session: { id: string } }[] }
+  return agents.list().map(agent => agent.session.id)
+}
+
+/** The authoritative persisted Session headers (the official persistence seam). */
+async function sessionHeaders(fixture: DirectTspFixture): Promise<Array<{ id: string }>> {
+  const persistence = fixture.ctx.get('sessionPersistence') as unknown as {
+    list(): Promise<readonly { header: { id: string } }[]>
+  }
+  return (await persistence.list()).map(row => ({ id: row.header.id }))
+}
+
+/**
+ * Wait until the REAL Session store holds exactly one NEW row beyond `known` and
+ * return its id. This is the id authority for "the turn created this Session":
+ * the store row IS the Session, where the retired Dock line was a display of it.
+ */
+async function waitForNewSessionId(
+  fixture: DirectTspFixture,
+  label: string,
+  known: readonly string[],
+  timeoutMs = 25_000,
+): Promise<string> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const fresh = (await sessionHeaders(fixture)).filter(row => !known.includes(row.id))
+    if (fresh.length === 1) return fresh[0]!.id
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${label} (got ${JSON.stringify(fresh)})`)
+    await new Promise(resolve => setTimeout(resolve, 25))
+  }
+}
+
+/** Whether Main currently presents the TSP-7 Welcome D empty state: a
+ *  sessionless or blank main subject. NEVER a Session identity witness. */
+function welcomeMainPresented(pane: Parameters<typeof wireNodes>[0]): boolean {
+  return wireNodes(pane).some(node => node.id.startsWith('main.welcome-'))
 }
 
 /**
@@ -117,8 +159,9 @@ test('sessionless resume, UI A→B, and typed resume follow the production lifec
     await waitForInputDelivery(seedA.pane)
     await submitInput(seedA.pane, 'seed session A')
     await waitFor('the first real Agent completes its seed turn', () => seedA.modelCalls() === 1)
-    await directSettle(500)
-    sourceId = welcomeSessionIds(seedA.pane)[0]
+    // The seed turn's Session id is the store's new row (the durable fact), not
+    // a line the renderer used to paint.
+    sourceId = await waitForNewSessionId(seedA, 'the seed A Session in the real store', [])
     assert.ok(sourceId)
   } finally {
     await seedA.settle()
@@ -128,12 +171,18 @@ test('sessionless resume, UI A→B, and typed resume follow the production lifec
   const seedB = await createDirectTspFixture(life, { workRoot })
   let targetId: string | undefined
   try {
+    await waitForInputDelivery(seedB.pane)
     await directSettle(4_000)
-    assert.deepEqual(welcomeSessionIds(seedB.pane), [], 'a fresh sessionless runner does not resume A implicitly')
+    // "Does not resume A implicitly" is now TWO positive facts: the Host
+    // registry owns no Agent at all, and Main presents the sessionless Welcome D
+    // empty state — while A stays exactly one durable row in the shared store.
+    assert.deepEqual(liveAgentIds(seedB), [], 'a fresh sessionless runner owns no live Agent')
+    assert.ok(welcomeMainPresented(seedB.pane), 'a fresh runner presents the sessionless Welcome empty state')
+    assert.deepEqual((await sessionHeaders(seedB)).map(row => row.id), [sourceId],
+      'the shared store holds A and nothing else')
     await submitInput(seedB.pane, 'seed session B')
     await waitFor('the second real Agent completes its seed turn', () => seedB.modelCalls() === 1)
-    await directSettle(500)
-    targetId = welcomeSessionIds(seedB.pane)[0]
+    targetId = await waitForNewSessionId(seedB, 'the seed B Session in the real store', [sourceId])
     assert.ok(targetId)
     assert.notEqual(targetId, sourceId)
   } finally {
@@ -197,8 +246,12 @@ test('sessionless resume, UI A→B, and typed resume follow the production lifec
       && event.sessionId === oldSessionId && event.outcome === 'rejected'), false)
   }
   try {
+    await waitForInputDelivery(fixture.pane)
     await directSettle(4_000)
-    assert.deepEqual(welcomeSessionIds(fixture.pane), [], 'the Browser fixture starts without a current Agent')
+    // "No current Agent" is the Host registry's own fact, plus the sessionless
+    // Welcome D in Main; the retired Dock line was only a display of the same.
+    assert.deepEqual(liveAgentIds(fixture), [], 'the Browser fixture starts without a current Agent')
+    assert.ok(welcomeMainPresented(fixture.pane), 'the Browser fixture presents the sessionless Welcome empty state')
     const initialList = listCalls.length
     await submitInput(fixture.pane, '/sessions')
     await waitFor('the registered /sessions command opens the native Browser', () => pickerNode(fixture.pane, BROWSER) !== undefined)
@@ -313,7 +366,10 @@ test('sessionless resume, UI A→B, and typed resume follow the production lifec
       && event.sessionId === targetId && event.outcome === 'rejected').length, 1)
     assert.equal(flushFailureEvents.some((event) => event.kind === 'open' && event.sessionId === sourceId), false,
       'a rejected old-session flush never reaches lifecycle.open')
-    assert.ok(welcomeSessionIds(fixture.pane).includes(targetId), 'a rejected flush leaves B current')
+    // The refused switch left B as the ONLY Agent the Host registry owns: A never
+    // reached `agents.resume`, so this is the currentness fact itself, read at the
+    // owner rather than from the Dock line that used to display it.
+    assert.deepEqual(liveAgentIds(fixture), [targetId], 'a rejected flush leaves B current')
     assert.equal(currentContains(fixture.pane, targetId), true)
     assert.equal(pickerProps(fixture.pane, BROWSER).selected, `session:${sourceId}`)
 
@@ -341,7 +397,8 @@ test('sessionless resume, UI A→B, and typed resume follow the production lifec
     assert.equal(lifecycleTrace.slice(refusalTraceStart).filter((event) => event.kind === 'open'
       && event.sessionId === sourceId && event.outcome === 'starting').length, 1,
     'one failed Footer attempt reaches the Direct open boundary')
-    assert.ok(welcomeSessionIds(fixture.pane).includes(targetId), 'the refused open leaves B current')
+    assert.deepEqual(liveAgentIds(fixture), [targetId],
+      'the refused open leaves B as the only live owner Agent')
     assert.equal(currentContains(fixture.pane, targetId), true, 'the original Browser scope remains current')
     assert.equal(pickerProps(fixture.pane, BROWSER).selected, `session:${sourceId}`)
     assert.equal(pickerActionByBase(fixture.pane, 'resume', BROWSER)?.disabled, undefined,
@@ -351,7 +408,7 @@ test('sessionless resume, UI A→B, and typed resume follow the production lifec
     const scopeBeforeRetryResume = projectionScopeId(fixture.pane)
     sendPickerAction(fixture.pane, 'resume', BROWSER)
     await waitFor('retrying Footer Resume switches to A', () => pickerNode(fixture.pane, BROWSER) === undefined
-      && welcomeSessionIds(fixture.pane).includes(sourceId))
+      && liveAgentIds(fixture).includes(sourceId))
     // The Browser's retirement is NOT the end of the switch: the composer input
     // stays fenced until A's own projection scope commits.
     await waitForNewProjectionScope(fixture.pane, scopeBeforeRetryResume)
@@ -409,7 +466,7 @@ test('sessionless resume, UI A→B, and typed resume follow the production lifec
     assert.equal(listCalls.length, directResumeStart + 1, 'typed direct resume performs one shared listing')
     assert.equal(listCalls[directResumeStart]?.currentSessionId, targetId)
     assert.ok(listCalls[directResumeStart]?.rows?.some((row) => row.id === sourceId))
-    await waitFor('typed direct resume publishes A', () => welcomeSessionIds(fixture.pane).includes(sourceId))
+    await waitFor('typed direct resume publishes A', () => liveAgentIds(fixture).includes(sourceId))
     assertOldFlushBeforeOpen(directTraceStart, targetId, sourceId)
     assert.equal(lifecycleTrace.slice(directTraceStart).filter((event) => event.kind === 'open'
       && event.sessionId === sourceId && event.outcome === 'starting').length, 1,
@@ -440,7 +497,7 @@ test('sessionless resume, UI A→B, and typed resume follow the production lifec
     const scopeBeforeNativeActivate = projectionScopeId(fixture.pane)
     sendActivate(fixture.pane, `session:${targetId}`, activatePicker)
     await waitFor('native row activate switches A→B', () => pickerNode(fixture.pane, BROWSER) === undefined
-      && welcomeSessionIds(fixture.pane).includes(targetId))
+      && liveAgentIds(fixture).includes(targetId))
     // The Browser's retirement is NOT the end of the switch: the composer input
     // stays fenced until B's own projection scope commits.
     await waitForNewProjectionScope(fixture.pane, scopeBeforeNativeActivate)
@@ -461,15 +518,27 @@ test('sessionless resume, UI A→B, and typed resume follow the production lifec
     sendPickerAction(fixture.pane, 'close', BROWSER)
     await waitFor('the final activate reread closes', () => pickerNode(fixture.pane, BROWSER) === undefined)
 
+    // AUTHORITY for "the current Session did not change": the PRODUCTION Direct
+    // session writer settled this very prompt on B (`sessionId` is the Agent the
+    // writer itself resolved), which the retired Dock line only displayed. The
+    // one-to-one recorder comes from the fixture, so the recorded count is the
+    // settled write count.
+    const ordinaryWrites: Array<{ readonly sessionId: string }> = []
+    const ordinaryPromptRecorder = fixture.recordPrompts(call => ordinaryWrites.push({ sessionId: call.sessionId }))
     const ordinaryPromptStart = fixture.modelCalls()
     await submitInput(fixture.pane, '/not-a-session-browser-command ordinary prompt')
     await waitFor('an unknown slash line remains an ordinary model submission', () =>
       fixture.modelCalls() > ordinaryPromptStart)
     assert.equal(fixture.modelCalls(), ordinaryPromptStart + 1)
+    await waitFor('the ordinary prompt write to settle on the production writer', () =>
+      ordinaryPromptRecorder.calls() === 1)
+    ordinaryPromptRecorder.detach()
+    assert.deepEqual(ordinaryWrites, [{ sessionId: targetId }],
+      'the ordinary prompt does not change the current Session')
+    assert.ok(liveAgentIds(fixture).includes(targetId),
+      'the ordinary prompt leaves B as a live owner Agent')
     assert.equal(pickerNode(fixture.pane, BROWSER), undefined,
       'an ordinary slash prompt does not open the Browser')
-    assert.ok(welcomeSessionIds(fixture.pane).includes(targetId),
-      'the ordinary prompt does not change the current Session')
 
     const blankSearchListStart = listCalls.length
     await submitInput(fixture.pane, '/search')

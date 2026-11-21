@@ -1,12 +1,13 @@
 /**
  * ArtifactSaveOwner (A5b-3, plan §A5b-3): the ONE owner of the client-local
- * artifact save workflow (`/export` session archive + `/transcript` readable
- * Markdown), including the in-flight dedupe set and the save-location dialog.
+ * artifact save workflow (`/export` session archive + `/transcript` official
+ * Session Markdown), including the in-flight dedupe set and the save-location
+ * dialog.
  *
  * The module is deliberately neutral: the exact Agent type is a generic
  * parameter, and the mounted app, the runner lifetime signal, the semantic
- * session-archive port and the resolved CLIENT directory arrive as narrow
- * injected capabilities.
+ * session-archive/session-markdown ports and the resolved CLIENT directory
+ * arrive as narrow injected capabilities.
  * @module @xmoon76/dsh-pi-tui/app/command/artifacts
  */
 
@@ -19,8 +20,8 @@ import { isCancellation, runOwned } from '../../runtime/process/tasks.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import type { SessionArchivePort } from '../../runtime/session-archive-port.ts'
+import type { SessionMarkdownPort } from '../../runtime/session-markdown-port.ts'
 import type { SaveLocationResult, TuiApp } from '../../tui-app.ts'
-import { renderTranscriptMarkdown } from '../../client/artifact/transcript-markdown.ts'
 
 /**
  * The fixed artifact filenames (Pre-Stage-D export convergence, inlined by
@@ -66,6 +67,8 @@ export interface ArtifactSaveDeps<ExactAgent> {
   readonly diag: Diag
   /** The semantic session-archive port (the /export read). */
   readonly sessionArchive: SessionArchivePort
+  /** The official Session Markdown read port (the /transcript read). */
+  readonly sessionMarkdown: SessionMarkdownPort
   /** The resolved CLIENT working directory (the default save location). */
   readonly clientCwd: string
 }
@@ -80,7 +83,7 @@ export interface ArtifactSaveOwner<ExactAgent> {
 
 /** Create the artifact-save owner (plan §A5b-3). */
 export function createArtifactSaveOwner<
-  ExactAgent extends { readonly session: Parameters<typeof renderTranscriptMarkdown>[0] & { readonly id: string } },
+  ExactAgent extends { readonly session: { readonly id: string } },
 >(
   deps: ArtifactSaveDeps<ExactAgent>,
 ): ArtifactSaveOwner<ExactAgent> {
@@ -168,11 +171,17 @@ export function createArtifactSaveOwner<
       if (deps.isCleanedUp()) return { kind: 'cancelled' }
       return { kind: 'saved', path }
     }
-    // /transcript: render from the CAPTURED originating Session after the
-    // command lifecycle settled — never `liveAgent` at delayed settle time.
+    // /transcript: read the OFFICIAL complete committed Markdown of the
+    // CAPTURED originating Session after the command lifecycle settled —
+    // never `liveAgent` at delayed settle time, never the Client transcript
+    // projection. The save location was already chosen (a cancellation never
+    // reaches the Host).
     if (deps.isCleanedUp()) return { kind: 'cancelled' }
-    const markdown = renderTranscriptMarkdown(agent.session)
-    const path = await writeTextAtomically(target, markdown, deps.signal, result.overwrite)
+    const read = await deps.sessionMarkdown.read(sessionId, deps.signal)
+    if (deps.isCleanedUp()) return { kind: 'cancelled' }
+    if (read.kind === 'none') throw new ArtifactSaveFailure('Session was not found.')
+    if (read.kind === 'unavailable') throw new ArtifactSaveFailure('Session Markdown export is unavailable.')
+    const path = await writeTextAtomically(target, read.markdown, deps.signal, result.overwrite)
     if (deps.isCleanedUp()) return { kind: 'cancelled' }
     return { kind: 'saved', path }
   }

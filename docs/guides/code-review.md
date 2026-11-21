@@ -46,6 +46,22 @@ trigger a scan of its root cause across callers, siblings, symmetric operations
 and equivalent paths within the affected contract; report unrelated issues
 separately rather than expanding the authorized fix scope.
 
+**Review test value before assertion quality.** For added, rewritten,
+retained-as-mandatory or retired tests, identify the distinct observable
+failure class, other existing proof and whether a legitimate extension or
+behavior-preserving refactor would fail the test. Decide **KEEP**, **REDUCE**
+or **RETIRE** before requesting tighter assertions or replacement coverage. A
+historical inventory, private source shape, passing CI result or accepted-plan
+case count is not by itself a contract. Conversely, keep a unique static guard
+for a current security, architecture, authority, trust or compatibility boundary.
+
+If a test has no independent detection value, deletion can be the correct fix;
+do not demand a replacement without identifying a required failure class that
+would lose its last protection. Check whether test-only production hooks and
+fixtures have real remaining consumers. Scale this reasoning to the change —
+do not require a per-test matrix for ordinary reviews. See
+[`testing.md` §2](testing.md#2-contract-first) for the owning rule.
+
 For applicable areas, ask:
 
 - Who owns the fact and its composition? Did a projection, cache, presentation
@@ -89,6 +105,16 @@ terminal check — then record what was actually run. Visual quality itself is a
 **Owner/Reviewer judgement**: "all tests pass" never closes a visual item, and an
 unrun frame or terminal check is reported `NOT_RUN`, never as PASS. The vocabulary
 lives in that one document; do not restate it here.
+
+**Interaction-only changes are not exempt:** When a PR adds or changes a
+user-reachable PiTui Fullscreen keyboard/mouse route, state transition or
+specialist page without changing painted cells, review the complete relevant
+AltScreen mouse journey under
+[`overlay-focus.md` §7](../architecture/overlay-focus.md#7-regression-checklist-for-future-changes)
+(including explicit contract-backed keyboard-only exceptions). An existing
+clickable row or a passing `handleMouse` test does not prove Enter/confirm,
+Esc/back/cancel and recovery coverage. Record the actual pointer-route evidence
+and its provenance; Regular/Main and TSP-native retain their separate contracts.
 
 **Renderer-qualified visual review:** For PiTui-painted ANSI changes, keep the VirtualTerminal and real-terminal checks above. For changes to **TSP-native** nodes (Picker, Strip, Reader, native overlay), the VirtualTerminal is not evidence of Tern's layout, scroll or input. In addition to the source→intent→admission→business sink proof, require the relevant versioned Tern headless client lane, real pane dimensions, node/ancestor clipping and PNG plus pointer/keyboard paths appropriate to the changed behavior. Treat the physical GUI, IME, wheel/trackpad, font scaling and the real OS dark appearance not actually run as `NOT_VERIFIED` or Owner-accepted limitations, never `PASS`; the client's own light/dark rendering is reachable headlessly (`appearance`) and in a live window via the `appearance:dark` action (`plugins run appearance:dark`, sent once) or Preferences › Appearance, so a headless run is not by itself a reason to mark it unverified. The GUI lane's pointer/key input is `CONTROL_INJECTED_INPUT`, not `OS_INPUT_VERIFIED`; do not promote it to physical-input evidence. A unit CI pass cannot close Owner visual acceptance. See [`tsp/foundation.md`](../tsp/foundation.md) §6 and the owning TSP product contract; do not duplicate their specification here.
 

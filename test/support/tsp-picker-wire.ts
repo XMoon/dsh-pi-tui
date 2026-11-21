@@ -153,6 +153,8 @@ export function wireTextPerFrame(pane: TspPane): string[][] {
 export const MODEL_LAYER_PREFIX = 'model-'
 /** The `/preset` layer's key prefix. */
 export const PRESET_LAYER_PREFIX = 'preset-'
+/** The `/web` layer's key prefix. */
+export const WEB_LAYER_PREFIX = 'web-'
 
 /** Every mounted node of ONE picker layer: the layer key prefixes its whole
  *  subtree, so one filter addresses that layer and nothing else on the surface. */

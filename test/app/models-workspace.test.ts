@@ -13,13 +13,14 @@ import { test } from 'node:test'
 import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { ModelsWorkspacePage, type ModelsInitialView, type ModelsProviderRow, type ModelsWorkspaceSource } from '../../src/tui/panels/models-workspace-page.ts'
 import { CredentialWorkflow } from '../../src/app/command/credential-workflow.ts'
+import { SupersededReadError } from '../../src/runtime/read-error.ts'
 import {
   resolveLoginDestination,
   resolveLogoutDestination,
   genericAuthorizationTargets,
   ACCOUNT_AUTHORIZATION_KEY,
 } from '../../src/app/command/credential-workflow.ts'
-import type { CredentialProviderOption, AuthorizationFlowTarget } from '../../src/runtime/config-port.ts'
+import type { AccountObservation, AccountObservationLease, AccountView, CredentialProviderOption, AuthorizationFlowTarget } from '../../src/runtime/config-port.ts'
 
 const PROVIDERS: readonly CredentialProviderOption[] = [
   { route: 'deepseek-official', label: 'deepseek official', ref: 'DEEPSEEK_API_KEY', configured: true, declared: false, namesCredential: true, group: 'configured', canProvisionProfile: false },
@@ -31,6 +32,10 @@ const FLOWS: readonly AuthorizationFlowTarget[] = [
   { kind: 'authorization', key: ACCOUNT_AUTHORIZATION_KEY, label: 'DeepSeek', methods: [{ id: 'browser', label: 'DeepSeek' }], inFlight: false },
   { kind: 'authorization', route: 'anthropic', key: 'llm-pi-ai/anthropic', label: 'Anthropic', methods: [{ id: 'oauth', label: 'OAuth' }], inFlight: false },
 ]
+
+function accountObservation(view: AccountView): AccountObservation {
+  return { view, lease: {} as AccountObservationLease }
+}
 
 function flush(times = 8): Promise<void> {
   return (async () => {
@@ -369,8 +374,8 @@ test('CredentialWorkflow.createProvider reports a profile write and a separate k
       listRecords: async () => [],
       onChanged: () => () => {},
     },
-    authorization: { available: () => false, listTargets: () => [], begin: async () => ({ kind: 'unavailable' }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
-    account: { available: () => false, getState: async () => { throw new Error('x') }, getProfile: async () => null, getBalance: async () => null, watch: async function* () {}, getCallbackOrigin: () => undefined, startSignIn: async () => { throw new Error('x') }, cancelSignIn: async () => { throw new Error('x') }, signOut: async () => { throw new Error('x') }, hasRunningAccountTasks: () => false },
+    authorization: { available: () => false, listTargets: () => [], refreshTargets: async () => {}, targetsState: () => 'unavailable' as const, begin: async () => ({ kind: 'unavailable' }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
+    account: { available: () => false, isObservationCurrent: () => false, getState: async () => { throw new Error('x') }, getProfile: async () => null, getBalance: async () => null, watch: async function* () {}, getCallbackOrigin: () => undefined, startSignIn: async () => { throw new Error('x') }, cancelSignIn: async () => { throw new Error('x') }, signOut: async () => { throw new Error('x') }, hasRunningAccountTasks: async () => false },
     catalog: { models: { available: () => true, discoverModels: async () => [] } },
     signal: new AbortController().signal,
     diag: { error: () => {}, warn: () => {} },
@@ -433,6 +438,94 @@ test('provider-native sign-in presents the Host notice and a masked prompt, then
   assert.match(viewText(page), /signed in to Anthropic — provider profile recorded/u)
 })
 
+test('a transport-lost native attempt paints the unconfirmed outcome, never a business failure', async () => {
+  const { source, calls } = fakeSource()
+  const listeners = new Set<(event: import('../../src/runtime/config-port.ts').AuthorizationFlowEvent) => void>()
+  const emit = (event: import('../../src/runtime/config-port.ts').AuthorizationFlowEvent): void => {
+    for (const listener of listeners) listener(event)
+  }
+  source.authorizationEvents = listener => {
+    listeners.add(listener)
+    return () => { listeners.delete(listener) }
+  }
+  source.beginAuthorization = async key => {
+    calls.push(`begin:${key}`)
+    return { kind: 'started', attemptId: 'auth-lost' }
+  }
+  let catalogReads = 0
+  source.readCatalog = async () => {
+    catalogReads += 1
+    return { kind: 'ready', rows: makeRows() }
+  }
+  const page = openWith(source, { view: 'provider', route: 'anthropic' }, 26)
+  await flush()
+  viewText(page)
+  page.handleInput('\r')
+  await flush()
+  emit({ kind: 'unconfirmed', attemptId: 'auth-lost', reason: 'the authorization stream was lost' })
+  await flush()
+  const text = viewText(page)
+  assert.match(text, /sign-in outcome unconfirmed — refresh credentials before retrying/u)
+  assert.doesNotMatch(text, /sign-in failed/u)
+  assert.doesNotMatch(text, /sign-in cancelled/u)
+  assert.doesNotMatch(text, /signed in to/u)
+  assert.ok(catalogReads >= 1, 'the unconfirmed outcome re-reads the Host credential roster')
+})
+
+test('a dispatch-unknown sign-in is the unconfirmed outcome, not a failure, and re-reads the Host', async () => {
+  const { source } = fakeSource()
+  let catalogs = 0
+  source.readCatalog = async () => {
+    catalogs += 1
+    return { kind: 'ready', rows: makeRows() }
+  }
+  source.beginAuthorization = async () => {
+    const error = new Error('the Host did not acknowledge the authorization attempt')
+    ;(error as { code?: string }).code = 'DISPATCH_UNKNOWN'
+    throw error
+  }
+  const page = openWith(source, { view: 'provider', route: 'anthropic' }, 26)
+  await flush()
+  viewText(page)
+  page.handleInput('\r')
+  await flush()
+  const text = viewText(page)
+  assert.match(text, /sign-in outcome unknown — refresh credentials before retrying/u)
+  assert.doesNotMatch(text, /sign-in failed/u)
+  assert.ok(catalogs >= 2, 'the unknown outcome re-reads the Host catalog before another manual attempt')
+})
+
+test('a real official NO_FLOW refusal still paints the definite failure taxonomy', async () => {
+  const { source } = fakeSource()
+  source.beginAuthorization = async () => {
+    const error = new Error('no authorization flow is registered')
+    ;(error as { code?: string }).code = 'NO_FLOW'
+    throw error
+  }
+  const page = openWith(source, { view: 'provider', route: 'anthropic' }, 26)
+  await flush()
+  viewText(page)
+  page.handleInput('\r')
+  await flush()
+  assert.match(viewText(page), /login method is no longer available/u)
+})
+
+test('the catalog authorization notice states that native sign-in is unavailable without hiding the API key list', async () => {
+  const { source } = fakeSource()
+  source.readCatalog = async () => ({
+    kind: 'ready',
+    rows: makeRows(),
+    authorizationNotice: 'provider-native sign-in is unavailable on this Host',
+  })
+  const page = openWith(source, { view: 'list' }, 30)
+  await flush()
+  const text = viewText(page)
+  assert.match(text, /provider-native sign-in is unavailable on this Host/u)
+  // The API-key provider rows and the list's write actions stay available.
+  assert.match(text, /Acme Gateway/u)
+  assert.match(text, /Add Provider/u)
+})
+
 test('cancelling the Models page during a native attempt calls the Host cancel for that attempt', async () => {
   const { source, calls } = fakeSource()
   source.beginAuthorization = async () => ({ kind: 'started', attemptId: 'auth-9' })
@@ -470,8 +563,8 @@ test('the stored-credential list excludes the DeepSeek Account grant (MA14)', as
       ],
       onChanged: () => () => {},
     },
-    authorization: { available: () => true, listTargets: () => FLOWS, begin: async () => ({ kind: 'unavailable' }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
-    account: { available: () => true, getState: async () => ({ status: 'credential-stored', links: { usageUrl: '', topUpUrl: '' }, attempt: null }), getProfile: async () => null, getBalance: async () => null, watch: async function* () {}, getCallbackOrigin: () => undefined, startSignIn: async () => { throw new Error('x') }, cancelSignIn: async () => { throw new Error('x') }, signOut: async () => { throw new Error('x') }, hasRunningAccountTasks: () => false },
+    authorization: { available: () => true, listTargets: () => FLOWS, refreshTargets: async () => {}, targetsState: () => 'ready' as const, begin: async () => ({ kind: 'unavailable' }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
+    account: { available: () => true, isObservationCurrent: (_lease: AccountObservationLease) => true, getState: async () => accountObservation({ status: 'credential-stored', links: { usageUrl: '', topUpUrl: '' }, attempt: null }), getProfile: async () => null, getBalance: async () => null, watch: async function* () {}, getCallbackOrigin: () => undefined, startSignIn: async () => { throw new Error('x') }, cancelSignIn: async () => { throw new Error('x') }, signOut: async () => { throw new Error('x') }, hasRunningAccountTasks: async () => false },
     catalog: { models: { available: () => false, discoverModels: async () => [] } },
     signal: new AbortController().signal,
     diag: { error: () => {}, warn: () => {} },
@@ -578,7 +671,7 @@ test('a stored credential RECORD is deleted through deleteRecord and never throu
   await flush()
   assert.ok(calls.includes('delete:llm-pi-ai/anthropic'), calls.join(','))
   assert.equal(calls.some(call => call.startsWith('unset:')), false)
-  assert.match(viewText(page), /signed out locally — stored credential cleared/u)
+  assert.match(viewText(page), /local stored credential cleared \(not revoked at the issuer/u)
 })
 
 test('Esc on a running native attempt cancels the exact attempt and returns to the list only after settlement', async () => {
@@ -673,10 +766,13 @@ test('a withdrawn older prompt never closes the newer prompt UI (RFL-003)', asyn
   page.handleInput('\r')
   await flush()
   assert.match(viewText(page), /FIRST PROMPT/u)
+  const retiredOwner = page.gestureIdentity()
   emit({ kind: 'prompt-withdrawn', attemptId: 'auth-2', promptId: 'p1' })
   await flush()
   assert.match(viewText(page), /SECOND PROMPT/u)
   assert.doesNotMatch(viewText(page), /FIRST PROMPT/u)
+  assert.notEqual(page.gestureIdentity(), retiredOwner,
+    'the queued prompt takes over as a NEW owner; a press made on the retired prompt must stay stale')
   for (const character of 'second-answer') page.handleInput(character)
   page.handleInput('\r')
   page.handleInput('\r')
@@ -1070,6 +1166,7 @@ test('a pending API-key write cannot be left by Esc and still verifies on settle
   const page = openWith(source, { view: 'reference', ref: 'ACME_API_KEY', label: 'Acme Gateway' }, 24)
   await flush()
   viewText(page)
+  const idleIdentity = page.gestureIdentity()
   page.handleInput('\r')
   await flush()
   viewText(page)
@@ -1279,7 +1376,7 @@ test('the login-method picker reserves heading and action-bar rows on a short sc
   page.handleInput('\r') // open the method picker
   const lines = page.render(100).map(stripTerminalSequences)
   assert.equal(lines.length, 8)
-  assert.match(lines.at(-1) ?? '', /Esc cancel/u)
+  assert.match(lines.at(-1) ?? '', /Cancel \[Esc\]/u)
   assert.ok(lines.some(line => line.includes('Method 0')), lines.join('\n'))
 })
 
@@ -1315,7 +1412,6 @@ test('closing the Models page while a native attempt runs cancels it and the own
   await signInTask
   // If the owned sign-in task is still pending this test times out; the
   // assertion above plus the await is the no-hang evidence.
-  assert.ok(true)
 })
 
 test('a failed credential-record refresh invalidates the old presence instead of keeping it (P2)', async () => {
@@ -2077,10 +2173,11 @@ test('a failed authoritative read cannot authorize a write', async () => {
       listRecords: async () => [],
       onChanged: () => () => {},
     },
-    authorization: { available: () => true, listTargets: () => [], begin: async () => ({ kind: 'unavailable' as const }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
+    authorization: { available: () => true, listTargets: () => [], refreshTargets: async () => {}, targetsState: () => 'ready' as const, begin: async () => ({ kind: 'unavailable' as const }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
     account: {
       available: () => false,
-      getState: async () => ({ status: 'signed-out', links: { usageUrl: '', topUpUrl: '' }, attempt: null }),
+      isObservationCurrent: () => false,
+      getState: async () => accountObservation({ status: 'signed-out', links: { usageUrl: '', topUpUrl: '' }, attempt: null }),
       getProfile: async () => null,
       getBalance: async () => null,
       watch: async function* () {},
@@ -2088,7 +2185,7 @@ test('a failed authoritative read cannot authorize a write', async () => {
       startSignIn: async () => { throw new Error('unused') },
       cancelSignIn: async () => { throw new Error('unused') },
       signOut: async () => { throw new Error('unused') },
-      hasRunningAccountTasks: () => false,
+      hasRunningAccountTasks: async () => false,
     },
     catalog: { models: { available: () => false, discoverModels: async () => [] } },
     signal: new AbortController().signal,
@@ -2128,10 +2225,11 @@ test('a stale catalog authorizes neither the keyless profile write nor the creat
       listRecords: async () => [],
       onChanged: () => () => {},
     },
-    authorization: { available: () => true, listTargets: () => [], begin: async () => ({ kind: 'unavailable' as const }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
+    authorization: { available: () => true, listTargets: () => [], refreshTargets: async () => {}, targetsState: () => 'ready' as const, begin: async () => ({ kind: 'unavailable' as const }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
     account: {
       available: () => false,
-      getState: async () => ({ status: 'signed-out', links: { usageUrl: '', topUpUrl: '' }, attempt: null }),
+      isObservationCurrent: () => false,
+      getState: async () => accountObservation({ status: 'signed-out', links: { usageUrl: '', topUpUrl: '' }, attempt: null }),
       getProfile: async () => null,
       getBalance: async () => null,
       watch: async function* () {},
@@ -2139,7 +2237,7 @@ test('a stale catalog authorizes neither the keyless profile write nor the creat
       startSignIn: async () => { throw new Error('unused') },
       cancelSignIn: async () => { throw new Error('unused') },
       signOut: async () => { throw new Error('unused') },
-      hasRunningAccountTasks: () => false,
+      hasRunningAccountTasks: async () => false,
     },
     catalog: { models: { available: () => false, discoverModels: async () => [] } },
     signal: new AbortController().signal,
@@ -2273,8 +2371,8 @@ test('a pending delete keeps the confirmation locked while a refresh happens', a
     deleted = true
   }
   // The store really REMOVES the record: the final success assertion below
-  // can only pass on the authoritative absence, because the failure text
-  // ("Not cleared: …") also contains the word "cleared".
+  // can only pass on the authoritative absence (the failure texts do not
+  // claim a local clear).
   source.storedCredentials = async () => ({
     rows: deleted
       ? []
@@ -2305,7 +2403,7 @@ test('a pending delete keeps the confirmation locked while a refresh happens', a
   // The Host write finishes: the outcome is reported.
   for (const release of releases) release()
   await flush()
-  assert.match(viewText(page), /Anthropic signed out locally — stored credential cleared/u)
+  assert.match(viewText(page), /Anthropic — local stored credential cleared \(not revoked at the issuer/u)
   assert.doesNotMatch(viewText(page), /Not cleared/u)
   assert.deepEqual(calls, ['delete:llm-pi-ai/anthropic'], 'the delete must not be dispatched twice')
 })
@@ -2329,8 +2427,241 @@ test('a delete that returns but leaves the record present is NOT reported as cle
   page.handleInput('\r')
   await flush()
   assert.deepEqual(calls, ['delete:llm-pi-ai/anthropic'])
-  assert.match(viewText(page), /Not cleared: the stored record is still present after the clear/u)
-  assert.doesNotMatch(viewText(page), /stored credential cleared/u)
+  assert.match(viewText(page), /Still stored: the stored record is present on the current Host/u)
+  assert.doesNotMatch(viewText(page), /local stored credential cleared/u)
+  assert.doesNotMatch(viewText(page), /Not cleared/u, 'a present record is not a "delete did not run" claim')
+})
+
+test('an UNCONFIRMED record delete never claims failure and only offers a fresh read (F7B)', async () => {
+  const { source, calls } = fakeSource()
+  let present = true
+  source.storedCredentials = async () => ({
+    rows: present
+      ? [{ kind: 'record' as const, key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' }]
+      : [],
+    recordCleanupUnavailable: false,
+    referenceReadFailures: [],
+  })
+  source.deleteRecord = async (key: string) => {
+    calls.push(`delete:${key}`)
+    // The Host may have committed, but the Client never observed the ACK.
+    const error = new Error('the stored credential record delete outcome is unconfirmed: carrier lost')
+    Object.assign(error, { code: 'RECORD_DELETE_UNCONFIRMED' })
+    throw error
+  }
+  const page = openWith(source, {
+    view: 'logout',
+    target: { kind: 'record', key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' },
+  }, 24)
+  await flush()
+  page.handleInput('\r')
+  await flush()
+  const text = viewText(page)
+  assert.match(text, /Outcome unconfirmed — refresh stored credentials before retrying\./u)
+  assert.doesNotMatch(text, /Not cleared/u, 'an unobserved ACK is never a definite failure')
+  assert.doesNotMatch(text, /Still stored/u, 'an unobserved ACK is never a definite presence')
+  assert.match(text, /Refresh records \[r\]/u)
+  assert.doesNotMatch(text, /Clear credential/u, 'the old confirmation must not be reused')
+  assert.deepEqual(calls, ['delete:llm-pi-ai/anthropic'], 'the delete is dispatched exactly once')
+  // The user's explicit read is the ONLY next step: the current Host truth is
+  // now "no record", and only then is the page done (no second delete).
+  present = false
+  page.handleInput('r')
+  await flush()
+  assert.match(viewText(page), /Nothing stored for this target/u)
+  assert.deepEqual(calls, ['delete:llm-pi-ai/anthropic'], 'the refresh never re-sends the delete')
+  // An unconfirmed outcome may be left (unlike a pending mutation).
+  page.handleInput('\u001b')
+  await flush()
+  assert.match(viewText(page), /Models & Credentials/u, 'the unconfirmed view is exit-able')
+})
+
+test('a RE-ENTRANT failed refresh after an unconfirmed delete stays unconfirmed (F7B)', async () => {
+  const { source, calls } = fakeSource()
+  let reads = 0
+  const held: { reject: (error: Error) => void }[] = []
+  source.storedCredentials = async () => {
+    reads += 1
+    if (reads === 1) {
+      return {
+        rows: [{ kind: 'record' as const, key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' }],
+        recordCleanupUnavailable: false,
+        referenceReadFailures: [],
+      }
+    }
+    return await new Promise<never>((_resolve, reject) => { held.push({ reject }) })
+  }
+  source.deleteRecord = async (key: string) => {
+    calls.push(`delete:${key}`)
+    const error = new Error('the stored credential record delete outcome is unconfirmed: carrier lost')
+    Object.assign(error, { code: 'RECORD_DELETE_UNCONFIRMED' })
+    throw error
+  }
+  const page = openWith(source, {
+    view: 'logout',
+    target: { kind: 'record', key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' },
+  }, 24)
+  await flush()
+  page.handleInput('\r')
+  await flush()
+  // The first refresh read hangs (the failing connection that caused the
+  // unknown outcome); a SECOND refresh arrives while it is still in flight.
+  page.handleInput('r')
+  await flush()
+  assert.equal(held.length, 1, 'the first refresh read is in flight')
+  page.handleInput('r')
+  await flush()
+  assert.equal(held.length, 2, 'the second refresh read is in flight')
+  held[0]!.reject(new Error('the first refresh read failed'))
+  held[1]!.reject(new Error('the second refresh read failed'))
+  await flush()
+  const text = viewText(page)
+  assert.match(text, /Outcome unconfirmed — refresh stored credentials before retrying\./u,
+    'the re-entrant failed refresh may not lose the post-dispatch unknown class')
+  assert.match(text, /Refresh records \[r\]/u)
+  assert.doesNotMatch(text, /Not cleared/u)
+  assert.doesNotMatch(text, /Still stored/u)
+  assert.deepEqual(calls, ['delete:llm-pi-ai/anthropic'], 'neither refresh re-sends the delete')
+})
+
+test('a FAILED refresh after an unconfirmed delete stays unconfirmed, never Not cleared (F7B)', async () => {
+  const { source, calls } = fakeSource()
+  let reads = 0
+  source.storedCredentials = async () => {
+    reads += 1
+    // The opening read confirms the target; every later refresh FAILS.
+    if (reads === 1) {
+      return {
+        rows: [{ kind: 'record' as const, key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' }],
+        recordCleanupUnavailable: false,
+        referenceReadFailures: [],
+      }
+    }
+    throw new Error('the Host record list could not be re-read')
+  }
+  source.deleteRecord = async (key: string) => {
+    calls.push(`delete:${key}`)
+    const error = new Error('the stored credential record delete outcome is unconfirmed: carrier lost')
+    Object.assign(error, { code: 'RECORD_DELETE_UNCONFIRMED' })
+    throw error
+  }
+  const page = openWith(source, {
+    view: 'logout',
+    target: { kind: 'record', key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' },
+  }, 24)
+  await flush()
+  page.handleInput('\r')
+  await flush()
+  assert.match(viewText(page), /Outcome unconfirmed/u)
+  // The user's manual refresh reads the CURRENT Host and that read FAILS: the
+  // dispatched delete remains an unknown outcome, never "Not cleared".
+  page.handleInput('r')
+  await flush()
+  const text = viewText(page)
+  assert.match(text, /Outcome unconfirmed — refresh stored credentials before retrying\./u)
+  assert.match(text, /Refresh records \[r\]/u)
+  assert.doesNotMatch(text, /Not cleared/u)
+  assert.doesNotMatch(text, /Still stored/u)
+  assert.deepEqual(calls, ['delete:llm-pi-ai/anthropic'], 'the failed refresh never re-sends the delete')
+})
+
+test('the UNCONFIRMED safety outcome survives a 10-row frame (F7B)', async () => {
+  const { source } = fakeSource()
+  source.storedCredentials = async () => ({
+    rows: [{ kind: 'record' as const, key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' }],
+    recordCleanupUnavailable: false,
+    referenceReadFailures: [],
+  })
+  source.deleteRecord = async () => {
+    const error = new Error('the stored credential record delete outcome is unconfirmed: carrier lost')
+    Object.assign(error, { code: 'RECORD_DELETE_UNCONFIRMED' })
+    throw error
+  }
+  const page = openWith(source, {
+    view: 'logout',
+    target: { kind: 'record', key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' },
+  }, 10)
+  await flush()
+  page.handleInput('\r')
+  await flush()
+  const text = viewText(page)
+  assert.match(text, /Outcome unconfirmed — refresh stored credentials before retrying\./u,
+    'the short frame pins the safety outcome above the facts')
+  assert.match(text, /Refresh records \[r\]/u)
+  assert.doesNotMatch(text, /Clear credential/u)
+})
+
+test('a definite pre-dispatch record refusal is reported as Not sent (F7B)', async () => {
+  const { source, calls } = fakeSource()
+  source.storedCredentials = async () => ({
+    rows: [{ kind: 'record' as const, key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' }],
+    recordCleanupUnavailable: false,
+    referenceReadFailures: [],
+  })
+  source.deleteRecord = async (key: string) => {
+    calls.push(`delete:${key}`)
+    throw new SupersededReadError('the credential write was not dispatched: no current Connection generation')
+  }
+  const page = openWith(source, {
+    view: 'logout',
+    target: { kind: 'record', key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' },
+  }, 24)
+  await flush()
+  page.handleInput('\r')
+  await flush()
+  assert.match(viewText(page), /Not sent: .*not dispatched/u)
+  assert.doesNotMatch(viewText(page), /Not cleared/u)
+})
+
+test('a definite record input refusal is reported as Failed, not unconfirmed (F7B)', async () => {
+  const { source, calls } = fakeSource()
+  source.storedCredentials = async () => ({
+    rows: [{ kind: 'record' as const, key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' }],
+    recordCleanupUnavailable: false,
+    referenceReadFailures: [],
+  })
+  source.deleteRecord = async (key: string) => {
+    calls.push(`delete:${key}`)
+    throw new Error(`piTuiCredentialRecords.delete(${key}) was rejected: the wire field key was refused`)
+  }
+  const page = openWith(source, {
+    view: 'logout',
+    target: { kind: 'record', key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' },
+  }, 24)
+  await flush()
+  page.handleInput('\r')
+  await flush()
+  assert.match(viewText(page), /Failed: .*was rejected/u)
+  assert.doesNotMatch(viewText(page), /Outcome unconfirmed/u)
+})
+
+test('a record delete whose authoritative readback fails is unconfirmed, never done/not-cleared (F7B)', async () => {
+  const { source, calls } = fakeSource()
+  let reads = 0
+  source.deleteRecord = async (key: string) => { calls.push(`delete:${key}`) }
+  source.storedCredentials = async () => {
+    reads += 1
+    // The FIRST read (before the delete) succeeds; the READBACK fails.
+    if (reads === 1) {
+      return {
+        rows: [{ kind: 'record' as const, key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' }],
+        recordCleanupUnavailable: false,
+        referenceReadFailures: [],
+      }
+    }
+    throw new Error('the Host record list could not be re-read')
+  }
+  const page = openWith(source, {
+    view: 'logout',
+    target: { kind: 'record', key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' },
+  }, 24)
+  await flush()
+  page.handleInput('\r')
+  await flush()
+  assert.match(viewText(page), /Outcome unconfirmed — refresh stored credentials before retrying\./u)
+  assert.doesNotMatch(viewText(page), /local stored credential cleared/u)
+  assert.doesNotMatch(viewText(page), /Not cleared/u)
+  assert.deepEqual(calls, ['delete:llm-pi-ai/anthropic'])
 })
 
 test('the Models list may yield the focus to the Settings category rail', () => {
@@ -2578,7 +2909,7 @@ test('Tab works exactly when the body and action regions fit, on every Tab encod
   const warningLines = warning.split('\n')
   assert.match(warning, /Resize the terminal to show the page actions/u)
   assert.equal(warningLines.length, 3, 'the page paints exactly its granted rows')
-  assert.match(warningLines.at(-1)!, /Esc back/u, 'the resize fallback pins the truthful Esc bar last')
+  assert.match(warningLines.at(-1)!, /Back \[Esc\]/u, 'the resize fallback pins the truthful Esc bar last')
   page.handleInput('\t')
   assert.equal(viewText(page), warning, 'the resize warning never grants an invisible selection')
 
@@ -2586,7 +2917,7 @@ test('Tab works exactly when the body and action regions fit, on every Tab encod
   page.setBodyHeight(1)
   const one = viewText(page).split('\n')
   assert.equal(one.length, 1)
-  assert.match(one[0]!, /^Esc back/u)
+  assert.match(one[0]!, /^Back \[Esc\]/u)
   assert.doesNotMatch(one[0]!, /Resize|Enter/u, 'a one-row page advertises only the real Esc action')
 })
 
@@ -2602,9 +2933,9 @@ test('an active picker, QuestionFlow or model picker keeps its own Tab', async (
   assert.match(picker, /Wire protocol/u)
   page.handleInput('\t')
   assert.equal(viewText(page), picker, 'Tab does not move the page cursor under a picker')
-  assert.match(picker, /Esc cancel/u, 'the picker keeps its own action bar')
+  assert.match(picker, /Cancel \[Esc\]/u, 'the picker keeps its own action bar')
   page.handleInput('\u001b')
-  assert.doesNotMatch(viewText(page), /Esc cancel/u, 'Esc closes the picker')
+  assert.doesNotMatch(viewText(page), /Cancel \[Esc\]/u, 'Esc closes the picker')
   assert.match(viewText(page), /Tab sections/u, 'the form action bar is back')
 
   // The embedded QuestionFlow (Route field).
@@ -2670,7 +3001,7 @@ test('Tab revokes a straddling Models row press and the action bar advertises it
   assert.match(viewText(page), /Tab sections/u)
   const narrow = viewText(page, 40)
   assert.doesNotMatch(narrow, /Tab sections/u)
-  assert.match(narrow, /Esc back/u)
+  assert.match(narrow, /Back \[Esc\]/u)
 })
 
 test('the Models region hint never crowds the HOME refresh or catalog filter hints', async () => {
@@ -2683,7 +3014,7 @@ test('the Models region hint never crowds the HOME refresh or catalog filter hin
     assert.match(bar, /r refresh/u, `the HOME refresh hint stays visible at ${width}`)
     assert.match(bar, /Up\/Down select/u, `the row navigation hint stays visible at ${width}`)
     assert.doesNotMatch(bar, /Tab sections/u, `the region hint is the first segment dropped at ${width}`)
-    assert.match(bar, /Esc back/u, `Esc stays visible at ${width}`)
+    assert.match(bar, /Back \[Esc\]/u, `Esc stays visible at ${width}`)
   }
 
   // Add catalog: `type to filter` outranks the region hint.
@@ -2699,7 +3030,7 @@ test('the Models region hint never crowds the HOME refresh or catalog filter hin
     const bar = viewText(catalog, width).split('\n').at(-1)!
     assert.match(bar, /type to filter/u, `the catalog filter hint stays visible at ${width}`)
     assert.doesNotMatch(bar, /Tab sections/u, `the region hint is the first segment dropped at ${width}`)
-    assert.match(bar, /Esc back/u, `Esc stays visible at ${width}`)
+    assert.match(bar, /Back \[Esc\]/u, `Esc stays visible at ${width}`)
   }
 
   // A roomy bar still advertises the region key.
@@ -2719,11 +3050,11 @@ test('short picker, QuestionFlow and model-picker frames keep their bar on the p
   page.setBodyHeight(3)
   const picker = viewText(page).split('\n')
   assert.equal(picker.length, 3)
-  assert.match(picker.at(-1)!, /Esc cancel/u, 'the picker bar is the last physical row')
+  assert.match(picker.at(-1)!, /Cancel \[Esc\]/u, 'the picker bar is the last physical row')
   page.setBodyHeight(1)
   const pickerOne = viewText(page).split('\n')
   assert.equal(pickerOne.length, 1)
-  assert.match(pickerOne[0]!, /^Esc cancel/u, 'one row paints only the real Esc action')
+  assert.match(pickerOne[0]!, /^Cancel \[Esc\]/u, 'one row paints only the real Esc action')
   page.setBodyHeight(30)
   page.handleInput('\u001b') // close the picker before driving the form below
 
@@ -2735,12 +3066,12 @@ test('short picker, QuestionFlow and model-picker frames keep their bar on the p
   page.setBodyHeight(6)
   const question = viewText(page).split('\n')
   assert.equal(question.length, 6)
-  assert.match(question.at(-1)!, /Esc cancel/u, 'the only real question key stays on the last row')
+  assert.match(question.at(-1)!, /Cancel \[Esc\]/u, 'the only real question key stays on the last row')
   assert.ok(question.some(line => line.includes('Resize the terminal: the full form')), 'the warning keeps a body row')
   page.setBodyHeight(1)
   const questionOne = viewText(page).split('\n')
   assert.equal(questionOne.length, 1)
-  assert.match(questionOne[0]!, /Esc cancel/u, 'a one-row question advertises no hidden submit')
+  assert.match(questionOne[0]!, /Cancel \[Esc\]/u, 'a one-row question advertises no hidden submit')
 
   // The endpoint-discovered model multi-select picker.
   const discovery = fakeSource()
@@ -2772,11 +3103,11 @@ test('short picker, QuestionFlow and model-picker frames keep their bar on the p
   pickerPage.setBodyHeight(4)
   const modelPicker = viewText(pickerPage).split('\n')
   assert.equal(modelPicker.length, 4)
-  assert.match(modelPicker.at(-1)!, /Esc cancel/u, 'the model picker bar is the last physical row')
+  assert.match(modelPicker.at(-1)!, /Cancel \[Esc\]/u, 'the model picker bar is the last physical row')
   pickerPage.setBodyHeight(1)
   const modelPickerOne = viewText(pickerPage).split('\n')
   assert.equal(modelPickerOne.length, 1)
-  assert.match(modelPickerOne[0]!, /^Esc cancel/u)
+  assert.match(modelPickerOne[0]!, /^Cancel \[Esc\]/u)
 })
 
 
@@ -2788,6 +3119,7 @@ test('a pending reference write names Esc wait on the clipped fallback', async (
   const page = openWith(source, { view: 'reference', ref: 'ACME_API_KEY', label: 'Acme Gateway' }, 24)
   await flush()
   viewText(page)
+  const idleIdentity = page.gestureIdentity()
   page.handleInput('\r')
   await flush()
   viewText(page)
@@ -2799,7 +3131,9 @@ test('a pending reference write names Esc wait on the clipped fallback', async (
   page.setBodyHeight(2)
   const rows = viewText(page).split('\n')
   assert.equal(rows.length, 2)
-  assert.match(rows.at(-1)!, /Esc wait/u, 'the fallback names the pending write before the page can leave')
+  assert.match(rows.at(-1)!, /Wait \[Esc\]/u, 'the fallback names the pending write before the page can leave')
+  assert.equal(page.paintedEscapeSpan(), undefined, 'the wait fact publishes no clickable Esc span')
+  assert.notEqual(page.gestureIdentity(), idleIdentity, 'the pending phase changes the page gesture identity')
   page.handleInput('\u001b')
   assert.match(viewText(page), /API Key Reference/u, 'Esc did not leave the page under the pending write')
   resolveWrite?.()
@@ -2828,7 +3162,8 @@ test('a pending clear names Esc wait on the clipped fallback', async () => {
   page.setBodyHeight(2)
   const rows = viewText(page).split('\n')
   assert.equal(rows.length, 2)
-  assert.match(rows.at(-1)!, /Esc wait/u, 'the fallback names the pending clear before the page can leave')
+  assert.match(rows.at(-1)!, /Wait \[Esc\]/u, 'the fallback names the pending clear before the page can leave')
+  assert.equal(page.paintedEscapeSpan(), undefined, 'the pending clear publishes no clickable Esc span')
   page.handleInput('\u001b')
   assert.match(viewText(page), /Clear stored credential/u, 'Esc did not leave the page under the pending clear')
   configured = false

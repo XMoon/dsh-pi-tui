@@ -19,9 +19,9 @@ import {
 } from '../../src/domain/visual/placement.ts'
 import type { PublishedVisual } from '../../src/domain/visual/publication.ts'
 
-const REF_A = `sv1_${'a'.repeat(20)}`
-const REF_B = `sv1_${'b'.repeat(20)}`
-const REF_C = `sv1_${'c'.repeat(20)}`
+const REF_A = `sv2_${'a'.repeat(20)}`
+const REF_B = `sv2_${'b'.repeat(20)}`
+const REF_C = `sv2_${'c'.repeat(20)}`
 
 function marker(ref: string): string {
   return `[dsh-visual-${ref}]: <#>`
@@ -114,6 +114,15 @@ function definitionPrefix(plan: ReturnType<typeof planVisualPlacement>, blockInd
 }
 
 // ── positive placement ───────────────────────────────────────────────────
+
+test('a legacy sv1 marker line is ordinary text and grants no placement', () => {
+  const legacy = `[dsh-visual-sv1_${'a'.repeat(20)}]: <#>`
+  const text = `Before.\n\n${legacy}\n\nAfter.`
+  const plan = planVisualPlacement({ text, publications: [] })
+  assert.deepEqual(shape(plan.pieces), [
+    { kind: 'text', blockIndex: 0, start: 0, end: text.length, source: text },
+  ], 'the old marker grammar is not consumed and no visual is granted')
+})
 
 test('a marker between two paragraphs produces text, visual, text with exact UTF-16 spans', () => {
   const before = '这是依赖图。'
@@ -262,7 +271,7 @@ const NEGATIVE_DOCUMENTS: readonly { readonly title: string; readonly doc: strin
   { title: 'a marker with an https destination', doc: `before\n\n[dsh-visual-${REF_A}]: <https://example.com>\n\nafter` },
   { title: 'a marker with a plain URL destination', doc: `before\n\n[dsh-visual-${REF_A}]: https://example.com\n\nafter` },
   { title: 'an uppercase-ref marker', doc: `before\n\n[dsh-visual-${REF_A.toUpperCase()}]: <#>\n\nafter` },
-  { title: 'a short-ref marker', doc: `before\n\n[dsh-visual-sv1_abc]: <#>\n\nafter` },
+  { title: 'a short-ref marker', doc: `before\n\n[dsh-visual-sv2_abc]: <#>\n\nafter` },
   { title: 'an escaped-label marker', doc: `before\n\n\\[dsh-visual-${REF_A}\\]: <#>\n\nafter` },
   { title: 'a marker missing the colon', doc: `before\n\n[dsh-visual-${REF_A}] <#>\n\nafter` },
   { title: 'a marker missing the angle brackets', doc: `before\n\n[dsh-visual-${REF_A}]: #\n\nafter` },
@@ -292,10 +301,10 @@ test('a visual-label-shaped definition with a non-marker destination stays an or
 })
 
 test('a valid visual marker label with an invalid ref spelling stays an ordinary definition', () => {
-  const line = '[dsh-visual-sv1_abc]: <#>'
+  const line = '[dsh-visual-sv2_abc]: <#>'
   const plan = planVisualPlacement({ text: `before\n\n${line}\n\nafter`, publications: [publication(REF_A)] })
   assert.deepEqual(visualPieces(plan.pieces).map(piece => piece.placement), ['tail'])
-  assert.match(definitionPrefix(plan, 0), /\[dsh-visual-sv1_abc\]: <#>/u)
+  assert.match(definitionPrefix(plan, 0), /\[dsh-visual-sv2_abc\]: <#>/u)
 })
 
 test('a marker whose definition is not top-level (blockquote) is not consumed', () => {

@@ -13,14 +13,15 @@
 
 import assert from 'node:assert/strict'
 import test, { type TestContext } from 'node:test'
-import { mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { createRequire } from 'node:module'
 import { Context } from '@deepseek-ai/cordis'
 import { PI_TUI_EXTENSIONS_SERVICE } from '../../src/extensions.ts'
 import { startLocalClient, type LocalClientStatus } from '../../src/app/remote-process/client-bootstrap.ts'
-import { createControlDispatcher } from '../../src/app/remote-process/entry-control.ts'
+import { attachEntryControl, createControlDispatcher } from '../../src/app/remote-process/entry-control.ts'
 import {
   assertHandoffRestored,
   assertHandoffSignalExclusivity,
@@ -39,9 +40,9 @@ import {
   type ClientReexecIntent,
   type ReexecChildHandle,
 } from '../../src/app/remote-process/local-client-entry.ts'
-import { LocalScopeError } from '../../src/app/remote-process/local-scope.ts'
+import { LOCAL_PROTOCOL, LocalScopeError } from '../../src/app/remote-process/local-scope.ts'
 import { collectHostEntryStatus } from '../../src/app/remote-process/host-bootstrap.ts'
-import { finishHostFailureCleanup, HOST_ONLY_PATCH } from '../../src/app/remote-process/local-host-entry.ts'
+import { drainHmrTransactions, finishHostFailureCleanup, HOST_ONLY_PATCH } from '../../src/app/remote-process/local-host-entry.ts'
 import {
   assertRemoteHostPrerequisites,
   REMOTE_HOST_PREREQUISITE_SERVICES,
@@ -52,16 +53,29 @@ test('the Host-only overlay disables the TUI runner and the Client UI rows only'
   // The value matters as much as the id: matching only `- id:` lets a broken
   // `disabled: false` silently leave a Client UI row mounted.
   const disabled = [...HOST_ONLY_PATCH.matchAll(/^- id: (\S+)\n  disabled: true$/gmu)].map(match => match[1])
-  assert.deepEqual(disabled, ['tui-app', 'pi-tui-extension-host', 'pi-tui-builtins'])
-  assert.equal((HOST_ONLY_PATCH.match(/disabled: true/gu) ?? []).length, 3)
+  // The three TUI surface rows plus the three Direct-only Schedule activation
+  // prerequisites: the overlay mounts the split-host owners instead, so a
+  // Host-only PID holds exactly ONE Connection/FileUploads/SessionController.
+  assert.deepEqual(disabled, [
+    'tui-app',
+    'pi-tui-extension-host',
+    'pi-tui-builtins',
+    'pi-tui-direct-connection',
+    'pi-tui-direct-file-upload',
+    'pi-tui-direct-session-controller',
+  ])
+  // The 59 default-disabled official Web rows live inside the INSERTED Web
+  // group (owned by the foundation composition test), so they are not
+  // top-level declarations of this overlay.
+  assert.equal((HOST_ONLY_PATCH.match(/^- id: \S+\n  disabled: true$/gmu) ?? []).length, 6)
   assert.doesNotMatch(HOST_ONLY_PATCH, /id: tui-startup/u,
     'the overlay must not disable or redefine the tui-startup row itself')
 
   // Negative control: if any one disabled value is broken, this same assertion
-  // no longer sees all three rows.
+  // no longer sees all six rows.
   const broken = HOST_ONLY_PATCH.replace('disabled: true', 'disabled: false')
   const stillDisabled = [...broken.matchAll(/^- id: (\S+)\n  disabled: true$/gmu)].map(match => match[1])
-  assert.notDeepEqual(stillDisabled, ['tui-app', 'pi-tui-extension-host', 'pi-tui-builtins'])
+  assert.notDeepEqual(stillDisabled, disabled)
 })
 
 test('the shared Host prerequisite gate names the first missing service', () => {
@@ -140,6 +154,100 @@ test('a rejected control handler is reported and does not strand later commands'
   assert.equal(records.filter(record => record.m4a0 === 'control-failure').length, 1)
 })
 
+/** A control stream that only records what the attachment does to it. */
+function fakeControlStdin() {
+  const listeners = new Set<(chunk: string) => void>()
+  const foreign: string[] = []
+  return {
+    encoding: '',
+    paused: false,
+    listeners,
+    foreign,
+    /** One listener this attachment does NOT own: release must leave it. */
+    addForeignListener(): void { listeners.add(chunk => { foreign.push(chunk) }) },
+    setEncoding(encoding: string): void { this.encoding = encoding },
+    resume(): void { this.paused = false },
+    pause(): void { this.paused = true },
+    on(_event: 'data', listener: (chunk: string) => void): void { listeners.add(listener) },
+    off(_event: 'data', listener: (chunk: string) => void): void { listeners.delete(listener) },
+    emit(chunk: string): void { for (const listener of [...listeners]) listener(chunk) },
+  }
+}
+
+test('releasing the entry control channel pauses stdin, drops only its own listener and is idempotent', () => {
+  const stdin = fakeControlStdin()
+  stdin.addForeignListener()
+  const channel = attachEntryControl(() => false, stdin)
+  assert.equal(stdin.encoding, 'utf8')
+  assert.equal(stdin.paused, false, 'the live channel must keep reading')
+  assert.equal(stdin.listeners.size, 2, 'the attachment adds exactly one listener')
+  channel.release()
+  assert.equal(stdin.paused, true, 'a released channel must not keep the event loop alive')
+  assert.equal(stdin.listeners.size, 1, 'release drops the attachment listener only')
+  channel.release()
+  assert.equal(stdin.listeners.size, 1, 'release is idempotent')
+  const seen = [...stdin.listeners][0]
+  assert.notEqual(seen, undefined)
+})
+
+test('the attached control channel still serves status and shutdown before it is released', async () => {
+  const stdin = fakeControlStdin()
+  const seen: string[] = []
+  const channel = attachEntryControl(request => {
+    seen.push(request.op)
+    return request.op === 'shutdown'
+  }, stdin)
+  stdin.emit('{"op":"status"}\n')
+  await new Promise<void>(resolve => { setImmediate(resolve) })
+  assert.deepEqual(seen, ['status'], 'the live channel must answer status')
+  stdin.emit('{"op":"shutdown"}\n')
+  await new Promise<void>(resolve => { setImmediate(resolve) })
+  assert.deepEqual(seen, ['status', 'shutdown'], 'the live channel must admit shutdown')
+  // The control `shutdown` op releases the channel itself; the shutdown owner
+  // then only has to call the SAME idempotent release.
+  assert.equal(stdin.paused, true)
+  assert.equal(stdin.listeners.size, 0)
+  channel.release()
+  assert.equal(stdin.listeners.size, 0)
+})
+
+test('a post-boot failure drains the HMR transaction queue before the Host disposes', async () => {
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const seen: string[] = []
+  const context = {
+    get: (name: string) => name === 'hmr'
+      ? {
+        runExclusive: async (operation: () => Promise<unknown>) => {
+          seen.push('queued')
+          await gate
+          await operation()
+          seen.push('ran')
+        },
+      }
+      : undefined,
+  }
+  let drained = false
+  const drain = drainHmrTransactions(context).then(() => { drained = true })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(seen, ['queued'], 'the drain must join the PUBLIC HMR queue')
+  assert.equal(drained, false, 'the drain must wait for the in-flight HMR transaction')
+  release()
+  await drain
+  assert.deepEqual(seen, ['queued', 'ran'], 'the drain resolves only after the in-flight transaction settled')
+})
+
+test('a stuck HMR transaction queue rejects the drain instead of hanging the failure cleanup', async () => {
+  const context = { get: () => ({ runExclusive: () => new Promise<unknown>(() => {}) }) }
+  await assert.rejects(drainHmrTransactions(context, 10), /did not drain before failure cleanup/u)
+})
+
+test('a Host without the HMR service has nothing to drain', async () => {
+  await drainHmrTransactions({})
+  await drainHmrTransactions({ get: () => undefined })
+  await drainHmrTransactions({ get: () => ({}) })
+})
+
 test('a rejecting Host shutdown reports cleanup-failure and never claims completed', async () => {
   const records: Array<Record<string, unknown>> = []
   const completed = await finishHostFailureCleanup(
@@ -214,8 +322,16 @@ test('the Host-only overlay adds exactly the two B1 owner rows and no second gat
   // turned into a second Loader row for the same service.
   assert.doesNotMatch(HOST_ONLY_PATCH, /^    - id: (?:typert-gateway|webserver|agent|session|job-controller)$/mu)
   assert.match(HOST_ONLY_PATCH, /^- insert:$/mu)
-  assert.doesNotMatch(HOST_ONLY_PATCH, /split-host-connection\n(?:.*\n)*?      disabled: true/u)
-  assert.doesNotMatch(HOST_ONLY_PATCH, /split-host-api-remotes\n(?:.*\n)*?      disabled: true/u)
+  // The inserted-row block of ONE row ends at the next `- id:` line, so the
+  // `disabled` fact is read from that row itself instead of the whole overlay
+  // (the Web insert legitimately carries 68 `disabled: true` rows later).
+  const insertedRowBlock = (id: string): string => {
+    const match = new RegExp(`^    - id: ${id}\\n(?:      [^\\n]*\\n)*`, 'mu').exec(HOST_ONLY_PATCH)
+    assert.ok(match !== null, `the overlay must insert a "${id}" row`)
+    return match[0]
+  }
+  assert.doesNotMatch(insertedRowBlock('split-host-connection'), /disabled/u)
+  assert.doesNotMatch(insertedRowBlock('split-host-api-remotes'), /disabled/u)
 })
 
 test('the Host identity route rides the official owner-only Fetch registry', () => {
@@ -260,7 +376,7 @@ test('the Client status is projected from the official state/generation at call 
     hostPid: 42,
     hostStarttime: '99',
     origin: 'http://127.0.0.1:41000',
-    protocol: 'dsh-pi-tui/local/1' as const,
+    protocol: LOCAL_PROTOCOL as typeof LOCAL_PROTOCOL,
     bundleVersion: '0.5.4',
     dshVersion: '0.2.1-rc.4',
     buildId: 'b'.repeat(64),
@@ -316,7 +432,7 @@ test('a disposing transport failure is primary and the Client root failure rides
     hostPid: 42,
     hostStarttime: '99',
     origin: 'http://127.0.0.1:41000',
-    protocol: 'dsh-pi-tui/local/1' as const,
+    protocol: LOCAL_PROTOCOL as typeof LOCAL_PROTOCOL,
     bundleVersion: '0.5.4',
     dshVersion: '0.2.1-rc.4',
     buildId: 'b'.repeat(64),
@@ -362,30 +478,36 @@ test('the B1 Client transport mounts exactly the three Node client halves and no
   assert.match(source, /streamBaseUrl: origin/u)
 })
 
-test('a surface startup protocol refusal states the code, preserved Host and explicit manual stop', () => {
+test('a surface startup protocol refusal states the code, preserved Host and daemon recovery guidance', () => {
   const line = surfaceStartupFailureLine(
     new LocalScopeError('HOST_PROTOCOL_INCOMPATIBLE', 'local discovery: the live Host uses a different local protocol or DSH runtime'),
+    'pi-tui',
   )
   assert.match(line, /^HOST_PROTOCOL_INCOMPATIBLE: /u)
   assert.match(line, /different local protocol or DSH runtime/u)
   assert.match(line, /has not been stopped or replaced/u)
-  assert.match(line, /explicitly stop that Host through its normal operating-system shutdown signal/u)
-  assert.match(line, /start a compatible Host/u)
+  assert.match(line, /dsh --profile pi-tui daemon status/u)
+  assert.match(line, /dsh --profile pi-tui daemon logs/u)
+  assert.match(line, /dsh --profile pi-tui daemon restart/u)
+  assert.match(line, /Recovery is not guaranteed/u)
+  assert.doesNotMatch(line, /operating-system shutdown signal/u)
   assert.match(line, /Automatic upgrade and migration of in-memory work are not supported/u)
   // The refusal must not turn an unauthenticated registry candidate into a
   // displayed PID/kill target or leak the private launch material.
   assert.doesNotMatch(line, /\bpid\b|connectUrl|token|cookie|\/home\/|\/users\//iu)
-  // Other startup failures keep the existing surface diagnostic.
-  assert.equal(
-    surfaceStartupFailureLine(new LocalScopeError('HOST_UNRESPONSIVE', 'local discovery: identity route answered HTTP 503')),
-    'split client surface: local discovery: identity route answered HTTP 503',
-  )
-  assert.equal(
-    surfaceStartupFailureLine(new LocalScopeError('HOST_BUILD_INCOMPATIBLE', 'local discovery: the Host cannot publish identity for another installed build')),
-    'split client surface: local discovery: the Host cannot publish identity for another installed build',
-  )
+  // Other typed scope failures are reported by CODE with a fixed recovery line;
+  // the raw message (which can carry an endpoint / detail) is never echoed.
+  for (const code of ['HOST_UNRESPONSIVE', 'HOST_BUILD_INCOMPATIBLE'] as const) {
+    const other = surfaceStartupFailureLine(new LocalScopeError(code, 'local discovery: identity route answered HTTP 503 at http://10.0.0.1/x'), 'pi-tui')
+    assert.match(other, new RegExp(`cannot establish the local Host \\(${code}\\)`, 'u'))
+    assert.match(other, /dsh --profile pi-tui daemon status/u)
+    assert.match(other, /dsh --profile pi-tui daemon logs/u)
+    assert.match(other, /dsh --profile pi-tui daemon restart/u)
+    assert.doesNotMatch(other, /503|10\.0\.0\.1|identity route/iu)
+  }
 })
 
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const REEXEC_HOST_INSTANCE = '00000000-0000-4000-8000-000000000000'
 
 const CONNECTED_STATUS: LocalClientStatus = {
@@ -400,12 +522,13 @@ const CONNECTED_STATUS: LocalClientStatus = {
   extensionService: { present: true },
   startupFacts: {},
   host: {
+    schema: 1,
     scopeId: 'a'.repeat(64),
     instanceId: REEXEC_HOST_INSTANCE,
     hostPid: 77,
     hostStarttime: '123',
     origin: 'http://127.0.0.1:40000',
-    protocol: 'dsh-pi-tui/local/1',
+    protocol: LOCAL_PROTOCOL as typeof LOCAL_PROTOCOL,
     bundleVersion: '0.5.4',
     dshVersion: '0.2.1-rc.4',
     buildId: 'b'.repeat(64),
@@ -468,13 +591,35 @@ test('the reexec target must be a real package pinned to the same DSH runtime', 
   rmSync(join(missingEntry, 'dist', 'local-client.mjs'))
   assert.throws(() => inspectClientReexecTarget(missingEntry, '0.2.1-rc.4'), /has no Client entry/u)
 
+  // A shared npm store / legal package-entry symlink is a normal install: the
+  // NAMED entry path is kept so the replacement Client locates this package
+  // root from its invoked path.
   const symlinkedEntry = join(root, 'symlinked-entry')
   writePackage(symlinkedEntry)
-  const outside = join(root, 'outside-entry.mjs')
-  writeFileSync(outside, 'export {}\n')
+  const sharedEntry = join(symlinkedEntry, 'dist', 'shared-client.mjs')
+  writeFileSync(sharedEntry, 'export {}\n')
   rmSync(join(symlinkedEntry, 'dist', 'local-client.mjs'))
-  symlinkSync(outside, join(symlinkedEntry, 'dist', 'local-client.mjs'))
-  assert.throws(() => inspectClientReexecTarget(symlinkedEntry, '0.2.1-rc.4'), /regular file owned by this process user/u)
+  symlinkSync(sharedEntry, join(symlinkedEntry, 'dist', 'local-client.mjs'))
+  assert.equal(inspectClientReexecTarget(symlinkedEntry, '0.2.1-rc.4').entry, join(realpathSync(symlinkedEntry), 'dist', 'local-client.mjs'))
+
+  // A symlinked `dist` to a shared directory outside the package is legal too:
+  // the named <root>/dist entry still resolves <root>/package.json.
+  const externalEntry = join(root, 'external-entry')
+  writePackage(externalEntry)
+  const sharedDist = join(root, 'shared-dist')
+  mkdirSync(sharedDist, { recursive: true })
+  rmSync(join(externalEntry, 'dist'), { recursive: true })
+  writeFileSync(join(sharedDist, 'local-client.mjs'), 'export {}\n')
+  writeFileSync(join(sharedDist, 'index.mjs'), 'export const value = 1\n')
+  symlinkSync(sharedDist, join(externalEntry, 'dist'))
+  assert.equal(inspectClientReexecTarget(externalEntry, '0.2.1-rc.4').entry, join(realpathSync(externalEntry), 'dist', 'local-client.mjs'))
+
+  // A directory carrying the entry name is still refused.
+  const directoryEntry = join(root, 'directory-entry')
+  writePackage(directoryEntry)
+  rmSync(join(directoryEntry, 'dist', 'local-client.mjs'))
+  mkdirSync(join(directoryEntry, 'dist', 'local-client.mjs'), { recursive: true })
+  assert.throws(() => inspectClientReexecTarget(directoryEntry, '0.2.1-rc.4'), /regular file/u)
 
   assert.throws(() => inspectClientReexecTarget('relative/package', '0.2.1-rc.4'), /must be absolute/u)
 
@@ -482,6 +627,61 @@ test('the reexec target must be a real package pinned to the same DSH runtime', 
   // candidate cannot pass the preflight with a stale build identity.
   writeFileSync(join(packageRoot, 'dist', 'index.mjs'), 'export const value = 2\n')
   assert.notEqual(inspectClientReexecTarget(packageRoot, '0.2.1-rc.4').buildId, target.buildId)
+})
+
+test('the real reexec spawn runs a Client from an external dist symlink that locates this package root', async t => {
+  const root = testLifecycle(t).tempDir('dsh-pr3-reexec-symlink-')
+  const packageRoot = join(root, 'package')
+  writePackage(packageRoot)
+  const sharedDist = join(root, 'shared-dist')
+  renameSync(join(packageRoot, 'dist'), sharedDist)
+  symlinkSync(sharedDist, join(packageRoot, 'dist'))
+  const proofPath = join(root, 'proof.json')
+  const helperUrl = pathToFileURL(join(ROOT, 'src', 'app', 'remote-process', 'local-scope.ts')).href
+  writeFileSync(join(sharedDist, 'local-client.mjs'), [
+    `import { installedPackageRootFromEntry } from ${JSON.stringify(helperUrl)}`,
+    `import { pathToFileURL } from 'node:url'`,
+    `import { writeFileSync } from 'node:fs'`,
+    `writeFileSync(process.env.SPLIT_PROCESS_REEXEC_PROOF, JSON.stringify({ argv: process.argv[1], root: installedPackageRootFromEntry(pathToFileURL(process.argv[1]).href) }))`,
+    '',
+  ].join('\n'))
+  const target = inspectClientReexecTarget(packageRoot, '0.2.1-rc.4')
+  assert.equal(target.entry, join(realpathSync(packageRoot), 'dist', 'local-client.mjs'))
+
+  const previousNodeOptions = process.env.NODE_OPTIONS
+  const previousProof = process.env.SPLIT_PROCESS_REEXEC_PROOF
+  const tsxLoader = pathToFileURL(createRequire(import.meta.url).resolve('tsx/esm')).href
+  process.env.NODE_OPTIONS = [previousNodeOptions, '--import', tsxLoader].filter(Boolean).join(' ')
+  process.env.SPLIT_PROCESS_REEXEC_PROOF = proofPath
+  try {
+    const code = await finishClientEntryShutdown({
+      seat: { assertCurrent: () => {}, close: async () => {} },
+      reexec: {
+        intent: {
+          expectedInstanceId: REEXEC_HOST_INSTANCE,
+          dshAnchor: join(root, 'dsh', 'package.json'),
+          profile: 'pi-tui',
+          dshVersion: '0.2.1-rc.4',
+          targetPackageRoot: target.packageRoot,
+          targetEntry: target.entry,
+          targetBuildId: target.buildId,
+          targetBundleVersion: target.bundleVersion,
+        },
+        teardownSucceeded: true,
+      },
+      emit: () => {},
+      stderr: () => {},
+    })
+    assert.equal(code, 0, 'the replacement Client probe must exit 0')
+  } finally {
+    if (previousNodeOptions === undefined) delete process.env.NODE_OPTIONS
+    else process.env.NODE_OPTIONS = previousNodeOptions
+    if (previousProof === undefined) delete process.env.SPLIT_PROCESS_REEXEC_PROOF
+    else process.env.SPLIT_PROCESS_REEXEC_PROOF = previousProof
+  }
+  const proof = JSON.parse(readFileSync(proofPath, 'utf8')) as { readonly argv: string; readonly root: string }
+  assert.equal(proof.argv, target.entry, 'the child must run the NAMED symlinked entry')
+  assert.equal(realpathSync(proof.root), realpathSync(packageRoot), 'the child must locate THIS package root')
 })
 
 test('the default reexec target resolves through the active official profile', t => {
@@ -768,7 +968,7 @@ test('the shutdown tail closes the seat before spawning and propagates the repla
   const order: string[] = []
   const records: Array<Record<string, unknown>> = []
   const code = await finishClientEntryShutdown({
-    seat: { close: async () => { order.push('seat-close') } },
+    seat: { assertCurrent: () => {}, close: async () => { order.push('seat-close') } },
     reexec: { intent: fixture.intent, teardownSucceeded: true },
     emit: record => { records.push(record) },
     stderr: line => { order.push(`stderr:${line}`) },
@@ -785,7 +985,7 @@ test('the shutdown tail closes the seat before spawning and propagates the repla
   assert.equal(records.filter(record => record.m4r === 'handoff-parent-exit').length, 1)
 
   const signaled = await finishClientEntryShutdown({
-    seat: { close: async () => {} },
+    seat: { assertCurrent: () => {}, close: async () => {} },
     reexec: { intent: fixture.intent, teardownSucceeded: true },
     emit: record => { records.push(record) },
     stderr: () => {},
@@ -800,7 +1000,7 @@ test('a failed seat close or teardown never spawns a replacement Client', async 
   const records: Array<Record<string, unknown>> = []
   const stderr: string[] = []
   const seatFailure = await finishClientEntryShutdown({
-    seat: { close: async () => { throw new Error('seat close exploded') } },
+    seat: { assertCurrent: () => {}, close: async () => { throw new Error('seat close exploded') } },
     reexec: { intent: fixture.intent, teardownSucceeded: true },
     emit: record => { records.push(record) },
     stderr: line => { stderr.push(line) },
@@ -818,7 +1018,7 @@ test('a failed seat close or teardown never spawns a replacement Client', async 
     'the teardown failure line leaked a private detail')
 
   const teardownFailure = await finishClientEntryShutdown({
-    seat: { close: async () => {} },
+    seat: { assertCurrent: () => {}, close: async () => {} },
     reexec: { intent: fixture.intent, teardownSucceeded: false },
     emit: record => { records.push(record) },
     stderr: line => { stderr.push(line) },
@@ -837,7 +1037,7 @@ test('a failed Client seat close stays a nonzero normal exit without a replaceme
   const records: Array<Record<string, unknown>> = []
   const stderr: string[] = []
   const code = await finishClientEntryShutdown({
-    seat: { close: async () => { throw new Error('seat close exploded') } },
+    seat: { assertCurrent: () => {}, close: async () => { throw new Error('seat close exploded') } },
     emit: record => { records.push(record) },
     stderr: line => { stderr.push(line) },
   })
@@ -853,7 +1053,7 @@ test('a replacement package that changed after the preflight is refused without 
   writeFileSync(join(fixture.packageRoot, 'dist', 'index.mjs'), 'export const value = 9\n')
   const records: Array<Record<string, unknown>> = []
   const code = await finishClientEntryShutdown({
-    seat: { close: async () => {} },
+    seat: { assertCurrent: () => {}, close: async () => {} },
     reexec: { intent: fixture.intent, teardownSucceeded: true },
     emit: record => { records.push(record) },
     stderr: line => { stderr.push(line) },
@@ -871,7 +1071,7 @@ test('a failing spawn is visible, nonzero and leaves no second Client owner', as
   const stderr: string[] = []
   const records: Array<Record<string, unknown>> = []
   const code = await finishClientEntryShutdown({
-    seat: { close: async () => {} },
+    seat: { assertCurrent: () => {}, close: async () => {} },
     reexec: { intent: fixture.intent, teardownSucceeded: true },
     emit: record => { records.push(record) },
     stderr: line => { stderr.push(line) },
@@ -913,7 +1113,7 @@ test('a handoff cancelled before spawn never spawns and reports one visible line
   const stderr: string[] = []
   const records: Array<Record<string, unknown>> = []
   const code = await finishClientEntryShutdown({
-    seat: { close: async () => {} },
+    seat: { assertCurrent: () => {}, close: async () => {} },
     reexec: { intent: fixture.intent, teardownSucceeded: true, cancelled: () => true },
     emit: record => { records.push(record) },
     stderr: line => { stderr.push(line) },
@@ -938,7 +1138,7 @@ test('a termination signal during the seat close race cancels before spawn', asy
   let releaseSeat!: () => void
   const seatClose = new Promise<void>(resolve => { releaseSeat = resolve })
   const pending = finishClientEntryShutdown({
-    seat: { close: async () => { await seatClose } },
+    seat: { assertCurrent: () => {}, close: async () => { await seatClose } },
     reexec: {
       intent: fixture.intent,
       teardownSucceeded: true,
@@ -965,7 +1165,7 @@ test('the spawned replacement child is exposed to the waiting parent exactly onc
   const seen: ReexecChildHandle[] = []
   const child: ReexecChildHandle = { kill: () => true }
   const code = await finishClientEntryShutdown({
-    seat: { close: async () => {} },
+    seat: { assertCurrent: () => {}, close: async () => {} },
     reexec: { intent: fixture.intent, teardownSucceeded: true },
     emit: () => {},
     stderr: () => {},
@@ -1050,7 +1250,7 @@ test('the handoff-restored claim re-checks the LIVE Host, transport and surface'
   )
 })
 
-test('the reexec trigger is internal, singular and starts only after the ONE seat close', () => {
+test('the reexec trigger is internal, singular and starts only after the ONE shutdown tail', () => {
   const source = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'app', 'remote-process', 'local-client-entry.ts'),
     'utf8',
@@ -1080,7 +1280,13 @@ test('the reexec trigger is internal, singular and starts only after the ONE sea
   assert.ok(finishSource.indexOf('await options.seat.close()') >= 0)
   assert.ok(
     finishSource.indexOf('await options.seat.close()') < finishSource.indexOf('await spawnChild('),
-    'the replacement Client must not spawn before the Client seat close',
+    'the replacement Client must not spawn before the shutdown tail calls seat.close() (a no-op for surface)',
+  )
+  // The tail's complete-stop gate is the real pre-spawn requirement; the
+  // qualification seat is only one input to it, never a Surface mutex.
+  assert.ok(
+    finishSource.indexOf('!seatClosed || !reexec.teardownSucceeded') < finishSource.indexOf('await spawnChild('),
+    'the replacement Client must not spawn before the complete Client stop succeeded',
   )
   assert.match(source, /expectedInstanceId: expectedHostInstanceId/u,
     'the handoff Client must pass the expected instance into discovery')

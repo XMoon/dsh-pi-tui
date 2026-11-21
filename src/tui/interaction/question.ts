@@ -15,12 +15,41 @@ import { decodeKittyPrintable, getKeybindings, Input, matchesKey, type KeyId, ty
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import type { Component, Focusable } from '@xmoon76/pi-tui'
-import { getGraphemeSegmenter, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
+import { getGraphemeSegmenter, truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
 import { Frame } from '../components/frame.ts'
+import { ACTION_BAR_SEPARATOR, layoutActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
 import { componentKeymap } from '../keybindings/component-keymap.ts'
+import { formatKeyId } from '../keybindings/hints.ts'
+
+/**
+ * Whether the split composition installed the modal-safe no-answer navigation
+ * control on the live TuiApp. Direct/TSP never install one, so their modals
+ * never paint the navigation verb. The app sets this once per surface mount.
+ */
+let noAnswerNavigationInstalledFlag = false
+let noAnswerNavigationAvailable: () => boolean = () => false
+export function setNoAnswerNavigationInstalled(installed: boolean, available?: () => boolean): void {
+  noAnswerNavigationInstalledFlag = installed
+  noAnswerNavigationAvailable = available ?? (() => false)
+}
+export function noAnswerNavigationInstalled(): boolean {
+  return noAnswerNavigationInstalledFlag
+}
+/** Whether the modal-safe navigation may run RIGHT NOW: the hint paints only
+ *  when this is true, matching what pressing the key would actually do. */
+export function noAnswerNavigationUsable(): boolean {
+  return noAnswerNavigationInstalledFlag && noAnswerNavigationAvailable()
+}
 import { color } from '../theme/runtime.ts'
 
 const segmenter = getGraphemeSegmenter()
+
+/** Official rc.3 `cuaPermissions` risk copy for the application-consent card. */
+const CUA_APPROVAL_RISK_NOTICE = `The agent can access only apps you approve, and can read and control them in the background.
+
+Online games, messaging apps, and other applications may restrict automated control. Violating their rules can lead to your account with that app being suspended or banned.
+
+Proceed at your own risk. To stop automated control at any time, press Stop in DeepSeek Harness.`
 
 /** One question in a user-questions ask (dsh shape mirrored for testability). */
 export interface QuestionFlowQuestion {
@@ -36,8 +65,10 @@ export interface QuestionFlowQuestion {
   options?: readonly { label: string; description?: string }[]
   /** Whether more than one option may be selected. */
   multiSelect?: boolean
-  /** Presentation intent: approve names the recommended option label. */
-  intent?: { kind: string; approve?: string }
+  /** Presentation intent: approve names the recommended option label; the
+   * official plan-review intent also carries the reviewed tool call identity
+   * (presentation-only — the answer encoding is identical either way). */
+  intent?: { kind: string; approve?: string; callId?: string }
   /** Mask the free-text row's rendered content (an authorization secret
    *  prompt). The real value stays in the input's memory (the answer
    *  returns it); only the DISPLAY is bullets, and nothing here logs,
@@ -86,6 +117,9 @@ const OTHER_ROW = '\u0000other'
  * that repaints into the marker row must not toggle the expanded panel
  * (and vice versa). */
 const MARKER_ROW = '\u0000marker'
+/** The plan-review feedback Input row's hit identity (click to place the
+ * text cursor; never a row selection). */
+const PLAN_FEEDBACK_ROW = '\u0000plan-feedback'
 
 /** The semantic keybindings consumed by pi-tui Input before it inserts text.
  * Keeping this ownership predicate beside QuestionFlow prevents an app-level
@@ -239,9 +273,138 @@ function appendContentFirst(
   return Math.max(0, budget - used)
 }
 
-/** The current question's tab label: `Q{n}` or Submit. */
+/** Paint one action-bar segment: the verb carries the role ink and a trailing
+ *  `[Key]` cap is muted. The visible text and its layout span are unchanged. */
+function paintActionSpan(text: string, role: ActionInkRole): string {
+  const ink = role === 'primary' ? color.text : color.textDim
+  const match = /^(.*) \[([^\]]+)\]$/.exec(text)
+  return match === null ? ink(text) : `${ink(match[1]!)}${color.textMuted(` [${match[2]}]`)}`
+}
+
+/** The current question's stage tab: `Q{n}` or `Review`. */
 function tabLabel(index: number, total: number): string {
-  return index === total ? 'Submit' : `Q${index + 1}`
+  return index === total ? 'Review' : `Q${index + 1}`
+}
+
+/** One painted top-stage tab: the plain (uncoloured) text whose cells define
+ *  the hit span, the themed paint, and the stable target it navigates to
+ *  (`questions.length` is the Review stage). */
+interface QuestionTabSegment {
+  plain: string
+  painted: string
+  targetTab: number
+}
+
+/** One full-tab hit span in flow-content columns. */
+interface PaintedQuestionTabSpan {
+  targetTab: number
+  startCol: number
+  endCol: number
+}
+
+/**
+ * Lay out the single-painted-stage-row tab strip and derive its hit spans from
+ * the SAME plain segments. All tabs keep their established order and
+ * two-space separators while they fit. When they do not, a contiguous window
+ * around the current page is painted, the complete Review stage is kept when
+ * it fits, and every omitted side is replaced by an inert `…`. Hits exist only
+ * for fully painted tabs: no half label, clipped tail or rejected overflow is
+ * ever clickable.
+ */
+function layoutQuestionTabRow(
+  segments: readonly QuestionTabSegment[],
+  current: number,
+  width: number,
+): { text: string; spans: readonly PaintedQuestionTabSpan[] } {
+  const segmentWidth = (segment: QuestionTabSegment): number => visibleWidth(segment.plain)
+  const partsWidth = (parts: readonly (QuestionTabSegment | undefined)[]): number =>
+    parts.reduce((sum, part) => sum + (part === undefined ? 1 : segmentWidth(part)), 0)
+      + Math.max(0, parts.length - 1) * 2
+  const materialize = (parts: readonly (QuestionTabSegment | undefined)[]): {
+    text: string
+    spans: readonly PaintedQuestionTabSpan[]
+  } => {
+    const spans: PaintedQuestionTabSpan[] = []
+    let text = ''
+    let column = 0
+    parts.forEach((part, index) => {
+      if (index > 0) {
+        text += '  '
+        column += 2
+      }
+      if (part === undefined) {
+        text += color.textDim('…')
+        column += 1
+        return
+      }
+      text += part.painted
+      spans.push({ targetTab: part.targetTab, startCol: column, endCol: column + segmentWidth(part) })
+      column += segmentWidth(part)
+    })
+    return { text, spans }
+  }
+  const first = segments[0]
+  if (first === undefined) return { text: '', spans: [] }
+  const review = segments[segments.length - 1]!
+  // A flow with no question pages paints only the Review stage.
+  if (segments.length === 1) {
+    if (visibleWidth(review.plain) <= width) return materialize([review])
+    return { text: color.textDim(truncateToWidth(review.plain, width, '…')), spans: [] }
+  }
+  const lastQuestion = segments.length - 2
+  // All parts fit: the untouched established layout.
+  const buildParts = (lo: number, hi: number, withReview: boolean): (QuestionTabSegment | undefined)[] => {
+    const parts: (QuestionTabSegment | undefined)[] = []
+    if (lo > 0) parts.push(undefined)
+    for (let index = lo; index <= hi; index += 1) parts.push(segments[index])
+    if (withReview) {
+      // A middle ellipsis marks the question pages omitted before Review.
+      if (hi < lastQuestion) parts.push(undefined)
+      parts.push(review)
+    } else {
+      // The omitted tail includes every remaining question page and Review.
+      parts.push(undefined)
+    }
+    return parts
+  }
+  const full = buildParts(0, lastQuestion, true)
+  if (partsWidth(full) <= width) return materialize(full)
+  const isReview = current >= segments.length - 1
+  let lo = isReview ? lastQuestion : current
+  let hi = isReview ? lastQuestion : current
+  let withReview = isReview
+  if (!isReview) withReview = partsWidth(buildParts(lo, hi, true)) <= width
+  const currentAloneFits = (): boolean => partsWidth([segments[current]]) <= width
+  const fallbackCurrent = (): { text: string; spans: readonly PaintedQuestionTabSpan[] } => {
+    if (currentAloneFits()) return materialize([segments[current]])
+    return { text: color.textDim(truncateToWidth(segments[current]!.plain, width, '…')), spans: [] }
+  }
+  if (isReview) {
+    // Review expands backwards from the last question page.
+    while (lo > 0 && partsWidth(buildParts(lo - 1, hi, true)) <= width) lo -= 1
+  } else {
+    // Alternate one page up, then one page down, until neither side fits.
+    let side: 'prev' | 'next' = 'prev'
+    for (;;) {
+      let added = false
+      for (let attempt = 0; attempt < 2 && !added; attempt += 1) {
+        const direction = side
+        side = side === 'prev' ? 'next' : 'prev'
+        if (direction === 'prev' && lo > 0 && partsWidth(buildParts(lo - 1, hi, withReview)) <= width) {
+          lo -= 1
+          added = true
+        } else if (direction === 'next' && hi < lastQuestion
+          && partsWidth(buildParts(lo, hi + 1, withReview)) <= width) {
+          hi += 1
+          added = true
+        }
+      }
+      if (!added) break
+    }
+  }
+  const parts = buildParts(lo, hi, withReview)
+  if (partsWidth(parts) > width) return fallbackCurrent()
+  return materialize(parts)
 }
 
 /** Split a conventional recommendation suffix off the DISPLAY label (the
@@ -265,40 +428,123 @@ interface Row {
 }
 
 /**
- * The press-time semantic identity of a QuestionFlow mouse gesture
- * (mouse parity): the release click may only act on the EXACT target
- * that was pressed — a question advance / repaint between press and
- * release must not transfer the click to whatever repainted onto the
- * same cell.
+ * The OFFICIAL plan-review question shape (presentation-only): exactly one
+ * question whose `intent.kind` is `plan-review`, whose `intent.approve` names
+ * one of its own options, and which offers at least one other option (the
+ * keep-planning class). Anything else — multiple questions, a forged intent,
+ * a missing approve option — is NOT a plan review and keeps the generic
+ * QuestionFlow. Labels are read from the official request; nothing here
+ * matches display text or headers.
+ */
+export function planReviewOf(
+  questions: readonly QuestionFlowQuestion[],
+): { question: QuestionFlowQuestion; approve: string } | undefined {
+  if (questions.length !== 1) return undefined
+  const question = questions[0]
+  const intent = question?.intent
+  if (intent === undefined || intent.kind !== 'plan-review') return undefined
+  const approve = intent.approve
+  if (approve === undefined || approve === '') return undefined
+  const options = question.options ?? []
+  const hasApprove = options.some(option => option.label === approve)
+  const hasOther = options.some(option => option.label !== approve)
+  if (!hasApprove || !hasOther) return undefined
+  return { question, approve }
+}
+
+/** The host-installed plan-review capability (FR7 A4). `canInspect` is the
+ * LIVE executability probe (Fullscreen can toggle while the flow stays parked
+ * in the seat), `inspect` the one-shot transcript locate, and `cardPresent` a
+ * local read-only probe answering whether the reviewed plan card is provably
+ * present in the mounted transcript (the "plan above in terminal history"). */
+interface PlanInspectionSeam {
+  canInspect: () => boolean
+  inspect: () => boolean
+  cardPresent: () => boolean
+}
+
+/** The local step of the plan-review branch (one flow, one step at a time):
+ * the decision list, the reading viewport, the keep-planning feedback input,
+ * or the question-detail full-text fallback. */
+type PlanReviewStep = 'decision' | 'reading' | 'feedback' | 'fallback'
+
+type QuestionPointerAction = 'back' | 'progress' | 'edit' | 'leave-edit' | 'cancel' | 'submit'
+
+type QuestionMouseHitKind = 'action' | 'tab' | 'option' | 'other' | 'marker' | 'inert'
+
+/** Owner Fullscreen dense Action Bar ink: primary verbs use `text`, secondary
+ *  verbs `textDim`; keycaps are muted. No bold and no `primary` flood. */
+type ActionInkRole = 'primary' | 'secondary'
+
+interface PaintedQuestionActionHit {
+  row: number
+  action: QuestionPointerAction
+  startCol: number
+  endCol: number
+  tab: number
+  questionId: string | undefined
+  editingOther: boolean
+  width: number
+}
+
+/** One painted top-stage tab span: the same render commits the painted strip
+ *  and this discardable target map. `tab` + `questionId` are the SOURCE page
+ *  the strip was painted for, so a press can never complete against a newer
+ *  page's identically located target. */
+interface PaintedQuestionTabHit {
+  row: number
+  targetTab: number
+  startCol: number
+  endCol: number
+  tab: number
+  questionId: string | undefined
+  editingOther: boolean
+  width: number
+}
+
+/**
+ * The press-time semantic identity of a QuestionFlow mouse gesture. A release
+ * may only act on the same flow, page, mode and last-painted hit geometry.
  */
 export interface QuestionMouseGesture {
-  /** The question INDEX within this flow at press time (the flow's own
-   * unique in-flow identity — the caller-provided question id is NOT
-   * guaranteed unique within a batch, so a duplicate id must not let a
-   * press from Q[n] activate Q[n+1] after a keyboard advance). */
+  flow: QuestionFlow
   questionIndex: number
-  /** The question id at press time (a question advance rejects the
-   * release). */
-  questionId: string
-  /** The LAST-PAINTED hit at the pressed row: an option key, OTHER_ROW,
-   * the MARKER_ROW sentinel (the scroll marker is a distinct semantic
-   * target — an inert press that repaints into the marker row must not
-   * toggle the expanded panel), or undefined for inert chrome. */
+  questionId: string | undefined
+  hitKind: QuestionMouseHitKind
   hit: string | undefined
+  row: number
+  editingOther: boolean
+  width: number
+  action?: QuestionPointerAction
+  startCol?: number
+  endCol?: number
+  /** The stable top-stage target for a `tab` gesture (questions.length is
+   *  the Review stage). */
+  targetTab?: number
+  /** The plan-review local step at press time (only for a plan flow): a
+   * release after a step transition may never be re-interpreted against the
+   * newer step's painted state. */
+  planStep?: PlanReviewStep
 }
 
 /**
  * The interactive question flow. Renders one question at a time with a tab
  * strip (answered marks), a navigable option list (↑↓/digits/Enter), a real
- * Input for free text, and a final REVIEW page with NO two-choice control:
- * Enter submits, Esc cancels, ← edits the last answer (plan item 4). Esc
- * cancels the whole flow; the app layer resolves the batch on done().
+ * Input for free text, and a final REVIEW page with a clickable action row:
+ * Enter submits, Esc cancels, and ← edits the last answer. Esc inside a text
+ * edit keeps its existing leave-edit behavior; the app owns batch settlement.
  */
 /** Caller-owned presentation status of one live Question flow: a mutable
  * status line the flow renders above its tabs while set. M3-3B uses it for
  * the timed-claim / remaining-time / continued-late-answer guidance. */
 export interface QuestionFlowStatus {
   text?: string
+  /**
+   * Split-Client only: the flow is a LIVE forwarded interaction the Agent is
+   * blocked on. The modal-safe navigation verb paints only when this is true
+   * AND the split composition installed the navigation control.
+   */
+  navigationEligible?: boolean
 }
 
 export class QuestionFlow implements Component, Focusable {
@@ -357,6 +603,12 @@ export class QuestionFlow implements Component, Focusable {
   /** Hit map from the last render: content row -> option row key. Built each
    * render; drives fullscreen click-to-select. */
   private readonly hitMap = new Map<number, string>()
+  /** Whether this flow is currently painted inside an AltScreen pointer route. */
+  private mouseActionsEnabled = false
+  /** Clickable spans committed by the last render's action row. */
+  private paintedActionHits: PaintedQuestionActionHit[] = []
+  /** Clickable spans committed by the last render's top stage row. */
+  private paintedTabHits: PaintedQuestionTabHit[] = []
   /** Visible width of the free-text row's prefix (pointer + marker +
    * space) from the last render: a click while editing must translate to
    * the Input's local column. (Mouse parity.) */
@@ -383,6 +635,12 @@ export class QuestionFlow implements Component, Focusable {
   /** Content rows visible in the region from the last render (region minus
    * the marker row when overflowing). */
   private lastVisibleRows = 0
+  /** The unified body scrollport's content-row range in the last render's
+   * output (`[start, end)`), or -1 when this frame painted no ordinary
+   * question body (Review / plan-review / header-only frames). Wheel events
+   * are resolved against THIS record, never against a re-measured layout. */
+  private lastScrollportStart = -1
+  private lastScrollportEnd = -1
   /** Whether the page content overflows the scrollport on the last render —
    * 'e' (and the scroll verbs) are available when true. */
   private lastExpandable = false
@@ -400,6 +658,31 @@ export class QuestionFlow implements Component, Focusable {
    */
   private readonly onAnswerMutation: (() => void) | undefined
   private readonly onDraftChange: ((draft: QuestionFlowDraft) => void) | undefined
+  /**
+   * The OFFICIAL plan-review this flow renders (exact shape only — see
+   * {@link planReviewOf}). While set, the flow replaces its generic
+   * Q1→Review→Submit pages with the plan decision/reading/feedback steps;
+   * the ordinary question machinery above stays untouched for every other
+   * shape.
+   */
+  private readonly planReview: { question: QuestionFlowQuestion; approve: string } | undefined
+  /** The current local plan-review step (the decision list by default). */
+  private planStep: PlanReviewStep = 'decision'
+  /** The highlighted plan decision row as an ACTION identity (never a row
+   * index): the View row can appear/disappear when the host's live inspection
+   * capability changes, and a remembered index would silently reinterpret
+   * Keep as Approve. */
+  private planCursorAction: 'view' | 'review' | 'keep' | 'approve' = 'view'
+  /** The current row list's highlighted index (derived from
+   * {@link planCursorAction}; recomputed on every use). */
+  private planCursor = 0
+  /** The keep-planning feedback Input (Client-local ephemeral text; the draft
+   * survives Esc back to the decision list). */
+  private planFeedbackInput = new Input({ prompt: '' })
+  /** Scroll offset of the plan FALLBACK full-text page (question.detail). */
+  private planFallbackScroll = 0
+  /** The visible content rows the last fallback render windowed (paging). */
+  private planFallbackVisible = 1
 
   constructor(
     questions: readonly QuestionFlowQuestion[],
@@ -415,6 +698,7 @@ export class QuestionFlow implements Component, Focusable {
     this.onCancel = onCancel
     this.onAnswerMutation = onAnswerMutation
     this.onDraftChange = onDraftChange
+    this.planReview = planReviewOf(questions)
     this.drafts = questions.map((_question, index) => {
       const seed = initialDraft?.answers[index]
       return {
@@ -425,6 +709,11 @@ export class QuestionFlow implements Component, Focusable {
     })
     if (initialDraft !== undefined) {
       this.tab = Math.min(Math.max(0, initialDraft.tab), questions.length)
+      // The plan branch re-seeds ONLY its feedback draft (its single local
+      // progress fact); a parked decision cursor starts fresh at View/Keep.
+      if (this.planReview !== undefined) {
+        this.planFeedbackInput.setValue(initialDraft.answers[0]?.custom ?? '')
+      }
     }
     // The free-text input keeps the last answer for re-entry.
     this.otherInput.onSubmit = (value) => this.commitOther(value)
@@ -434,8 +723,125 @@ export class QuestionFlow implements Component, Focusable {
     // outer state (handleOtherEscape → exitOther; question.cancel /
     // navigation-state Ctrl+C → onCancel).
     this.otherInput.onEscape = () => this.handleOtherEscape()
+    // The plan-review branch's feedback Input submits/leaves through the plan
+    // step machine, never the generic commitOther path (which would clear the
+    // selected label on custom text).
+    this.planFeedbackInput.onSubmit = (value) => this.submitPlanFeedback(value)
+    this.planFeedbackInput.onEscape = () => { this.planStep = 'decision' }
     // An optionless first question edits text from the start.
     this.syncEditMode()
+  }
+
+  /** The plan decision rows in FIXED order: `View plan` first (Fullscreen
+   * only, offered by the host through {@link beginPlanInspection}), then
+   * `Keep planning…` (feedback), then the official approve label last. The
+   * approve row is never the default cursor. */
+  private planDecisionRows(): { action: 'view' | 'review' | 'keep' | 'approve'; label: string }[] {
+    if (this.planReview === undefined) return []
+    const rows: { action: 'view' | 'review' | 'keep' | 'approve'; label: string }[] = []
+    if (this.planInspection?.canInspect() === true) rows.push({ action: 'view', label: 'View plan' })
+    // 3.5's EXCEPTION, not a normal row: the in-flow full text is the reading
+    // entry ONLY where the transcript cannot be read by this surface (Regular
+    // has no app-owned seek) AND the official card is NOT provably present in
+    // the mounted transcript. With a provable card Regular keeps the frozen
+    // 3.4 ordinary layout (the plan above in terminal history); in Fullscreen
+    // the frozen three-row layout stands and a FAILED locate degrades View
+    // plan to this same detail page.
+    const detail = this.planReview.question.detail
+    const cardProvable = this.planInspection?.cardPresent() === true
+    if (this.planInspection?.canInspect() !== true && !cardProvable
+      && detail !== undefined && detail.trim() !== '') {
+      rows.push({ action: 'review', label: 'View review text' })
+    }
+    // The official request may offer several non-approve options; the frozen
+    // decision UI is ONE Keep row, so the FIRST non-approve option (the
+    // official option order) is the keep-planning class and the label this
+    // branch answers with. It is never chosen by display text.
+    const keep = (this.planReview.question.options ?? [])
+      .find(option => option.label !== this.planReview!.approve)
+    if (keep !== undefined) rows.push({ action: 'keep', label: `${keep.label}…` })
+    rows.push({ action: 'approve', label: `${this.planReview.approve} plan` })
+    return rows
+  }
+
+  /** The host-installed plan inspection capability (A4): a read-only
+   * viewport request the flow triggers from the `View plan` decision row, plus
+   * the LIVE executability probe (Fullscreen can toggle while this flow stays
+   * parked in the seat). The flow itself owns no transcript geometry. */
+  private planInspection: PlanInspectionSeam | undefined
+
+  /** Install the host's plan inspection capability (A4). Called by the
+   * mounting host after the flow exists AND on every queued handover;
+   * `undefined` removes the capability (the decision list then has no View
+   * row). Returns false when the flow is not a plan review. */
+  setPlanInspection(seam: PlanInspectionSeam | undefined): boolean {
+    if (this.planReview === undefined) return false
+    this.planInspection = seam
+    return true
+  }
+
+  /** Resolve the highlighted row index from the remembered ACTION: a row that
+   * no longer exists (the View row lost its live capability) falls back to the
+   * FIRST row (Keep) — never to Approve, and never silently. */
+  private planCursorIndex(rows: readonly { action: 'view' | 'review' | 'keep' | 'approve' }[]): number {
+    const index = rows.findIndex(row => row.action === this.planCursorAction)
+    if (index >= 0) return index
+    const fallback = rows[0]
+    this.planCursorAction = fallback?.action ?? 'keep'
+    return 0
+  }
+
+  /** Whether this flow renders the official plan-review branch. */
+  isPlanReviewFlow(): boolean {
+    return this.planReview !== undefined
+  }
+
+  /** The official plan-review question DTO, for the HOST's read-only
+   * inspection (the intent's callId is the reviewed tool invocation). */
+  planReviewQuestionForHost(): QuestionFlowQuestion | undefined {
+    return this.planReview?.question
+  }
+
+  /** Whether the plan branch currently shows its reading step. */
+  isPlanReading(): boolean {
+    return this.planReview !== undefined && this.planStep === 'reading'
+  }
+
+  /** The plan branch's feedback draft (the park/reopen snapshot keeps the
+   * user's in-progress revision text). */
+  private planFeedbackText(): string {
+    return this.planFeedbackInput.getValue()
+  }
+
+  /** Enter the reading step: the host's one-shot inspection already ran (it
+   * returned true); the flow only swaps its local step. */
+  enterPlanReading(): void {
+    if (this.planReview === undefined) return
+    this.planStep = 'reading'
+  }
+
+  /** The keep-planning feedback submit: an empty text answers the OFFICIAL
+   * keep-planning label alone; non-empty text adds it as `custom`. Never
+   * clears `selected` (the generic submit's custom-first behavior would). */
+  private submitPlanFeedback(value: string): void {
+    const plan = this.planReview
+    if (plan === undefined) return
+    const keep = (plan.question.options ?? []).find(option => option.label !== plan.approve)?.label
+    if (keep === undefined) return
+    this.notifyMutation()
+    this.onDone([{
+      id: plan.question.id,
+      selected: [keep],
+      ...value.trim() === '' ? {} : { custom: value },
+    }])
+  }
+
+  /** The plan approve submit: the OFFICIAL approve label, nothing else. */
+  private submitPlanApprove(): void {
+    const plan = this.planReview
+    if (plan === undefined) return
+    this.notifyMutation()
+    this.onDone([{ id: plan.question.id, selected: [plan.approve] }])
   }
 
   /**
@@ -451,6 +857,7 @@ export class QuestionFlow implements Component, Focusable {
   set focused(value: boolean) {
     this._focused = value
     if (this.editingOther) this.otherInput.focused = value
+    if (this.planReview !== undefined && this.planStep === 'feedback') this.planFeedbackInput.focused = value
   }
 
   /**
@@ -461,6 +868,15 @@ export class QuestionFlow implements Component, Focusable {
    */
   setMaxRows(rows: number): void {
     this.budget = Math.max(MIN_SUPPORTED_BUDGET, Math.min(MAX_BUDGET, Math.floor(rows)))
+  }
+
+  /** The read-only interaction identity of the CURRENT tab: which question is
+   *  shown and whether the free-text editor owns the keys. A host that keeps a
+   *  pointer gesture across a keyboard interaction re-proves it before the
+   *  release, so leaving EDIT can never turn the same cell into a flow cancel. */
+  interactionIdentity(): string {
+    if (this.planReview !== undefined) return `plan:${this.planStep}`
+    return `${this.tab}:${this.editingOther ? 'edit' : 'navigate'}`
   }
 
   /**
@@ -482,6 +898,14 @@ export class QuestionFlow implements Component, Focusable {
   /** Snapshot the local progress for a park (addendum §6). Kept separate from
    *  the internal per-question `draft()` accessor. */
   draftSnapshot(): QuestionFlowDraft {
+    if (this.planReview !== undefined) {
+      // The plan branch's local progress is its feedback draft (the decision
+      // itself is never a durable answer until submitted).
+      return {
+        tab: 0,
+        answers: [{ selected: [], custom: this.planFeedbackText(), skipped: false }],
+      }
+    }
     return {
       tab: this.tab,
       answers: this.drafts.map(entry => ({
@@ -507,6 +931,34 @@ export class QuestionFlow implements Component, Focusable {
    * transcript action.
    */
   ownsFixedKey(data: string): boolean {
+    if (this.planReview !== undefined) {
+      if (this.planStep === 'feedback') {
+        return inputOwnsKey(data)
+          || componentKeymap.matches(data, 'question.confirm')
+          || componentKeymap.matches(data, 'question.cancel')
+          || componentKeymap.matches(data, 'question.pageUp')
+          || componentKeymap.matches(data, 'question.pageDown')
+      }
+      if (this.planStep === 'reading') {
+        return componentKeymap.matches(data, 'question.cancel')
+          || componentKeymap.matches(data, 'question.cursorUp')
+          || componentKeymap.matches(data, 'question.cursorDown')
+          || componentKeymap.matches(data, 'question.pageUp')
+          || componentKeymap.matches(data, 'question.pageDown')
+          || matchesKey(data, 'home')
+          || matchesKey(data, 'end')
+      }
+      if (this.planStep === 'fallback') {
+        return componentKeymap.matches(data, 'question.cancel')
+          || componentKeymap.matches(data, 'question.pageUp')
+          || componentKeymap.matches(data, 'question.pageDown')
+      }
+      // Decision list.
+      return componentKeymap.matches(data, 'question.confirm')
+        || componentKeymap.matches(data, 'question.cancel')
+        || componentKeymap.matches(data, 'question.cursorUp')
+        || componentKeymap.matches(data, 'question.cursorDown')
+    }
     if (this.editingOther) {
       return inputOwnsKey(data)
         || componentKeymap.matches(data, 'question.confirm')
@@ -545,11 +997,26 @@ export class QuestionFlow implements Component, Focusable {
   /**
    * Reset the view (scroll + expanded + pending cursor follow) — called on
    * every tab change so each question starts at its top, collapsed.
+   * The last painted body/hit geometry belongs to the OLD page: the host may
+   * deliver another event (wheel/click) before the deferred repaint, so the
+   * old scrollport and hit maps must be revoked here as well.
    */
   private resetBodyView(): void {
     this.bodyScroll = 0
     this.bodyExpanded = false
     this.pendingCursorScroll = false
+    this.lastScrollportStart = -1
+    this.lastScrollportEnd = -1
+    this.lastRegionHeight = 0
+    this.lastContentRows = 0
+    this.lastVisibleRows = 0
+    this.lastExpandable = false
+    this.lastMarkerRow = -1
+    this.pinnedOtherRow = -1
+    this.hitMap.clear()
+    this.paintedActionHits = []
+    this.paintedTabHits = []
+    this.mousePressGesture = undefined
   }
 
   /**
@@ -561,6 +1028,35 @@ export class QuestionFlow implements Component, Focusable {
     if (visible <= 0 || this.lastContentRows <= visible) return
     const maxScroll = this.lastContentRows - visible
     this.bodyScroll = Math.max(0, Math.min(this.bodyScroll + direction * visible, maxScroll))
+  }
+
+  /**
+   * Wheel over the question body: move the unified scrollport by a whole
+   * event's line delta, resolved ONLY against the LAST painted body range.
+   * Returns whether the body really scrolled; a row outside the scrollport
+   * (tabs, action bar, border), a non-overflowing page, a Review page and a
+   * clamped boundary stay inert. The plan-review branch has its own reading
+   * path and never enters here.
+   */
+  wheelBy(deltaLines: number, localRow: number): boolean {
+    if (this.planReview !== undefined || deltaLines === 0) return false
+    if (this.lastScrollportStart < 0 || localRow < this.lastScrollportStart
+      || localRow >= this.lastScrollportEnd) return false
+    const visible = this.lastVisibleRows
+    if (visible <= 0 || this.lastContentRows <= visible) return false
+    const maxScroll = this.lastContentRows - visible
+    const next = Math.max(0, Math.min(this.bodyScroll + deltaLines, maxScroll))
+    if (next === this.bodyScroll) return false
+    this.bodyScroll = next
+    // A real scroll invalidates any in-flight click gesture: the host
+    // consumes the wheel before the alt screen can retire it, so the
+    // press/release identity must be dropped HERE or a release could still
+    // activate a tab/action that was pressed before the viewport moved.
+    this.mousePressGesture = undefined
+    // A wheel move is the user's explicit viewport command: never let the
+    // next render's cursor-follow snap the body back to the highlighted row.
+    this.pendingCursorScroll = false
+    return true
   }
 
   /** Toggle the expanded panel ('e' or a click on the scroll marker).
@@ -583,13 +1079,72 @@ export class QuestionFlow implements Component, Focusable {
    * row alone, so a question advance or repaint between press and
    * release can never transfer the click to a different target.
    */
-  beginMousePress(row: number): QuestionMouseGesture | undefined {
+  beginMousePress(row: number, x?: number): QuestionMouseGesture | undefined {
+    this.mousePressGesture = undefined
     const question = this.questions[this.tab]
-    if (question === undefined) return undefined
+    const actionHit = x === undefined ? undefined : this.paintedActionHits.find(hit =>
+      hit.row === row && x >= hit.startCol && x < hit.endCol,
+    )
+    if (actionHit !== undefined
+      && actionHit.tab === this.tab
+      && actionHit.questionId === question?.id
+      && actionHit.editingOther === this.editingOther
+      && actionHit.width === this.lastContentWidth) {
+      const gesture: QuestionMouseGesture = {
+        flow: this,
+        questionIndex: this.tab,
+        questionId: question?.id,
+        hitKind: 'action',
+        hit: undefined,
+        row,
+        editingOther: this.editingOther,
+        width: this.lastContentWidth,
+        action: actionHit.action,
+        startCol: actionHit.startCol,
+        endCol: actionHit.endCol,
+        ...(this.planReview === undefined ? {} : { planStep: this.planStep }),
+      }
+      this.mousePressGesture = gesture
+      return gesture
+    }
+
+    const tabHit = x === undefined ? undefined : this.paintedTabHits.find(hit =>
+      hit.row === row && x >= hit.startCol && x < hit.endCol,
+    )
+    if (tabHit !== undefined
+      && tabHit.tab === this.tab
+      && tabHit.questionId === question?.id
+      && tabHit.editingOther === this.editingOther
+      && tabHit.width === this.lastContentWidth) {
+      const gesture: QuestionMouseGesture = {
+        flow: this,
+        questionIndex: this.tab,
+        questionId: question?.id,
+        hitKind: 'tab',
+        hit: undefined,
+        row,
+        editingOther: this.editingOther,
+        width: this.lastContentWidth,
+        targetTab: tabHit.targetTab,
+        startCol: tabHit.startCol,
+        endCol: tabHit.endCol,
+        ...(this.planReview === undefined ? {} : { planStep: this.planStep }),
+      }
+      this.mousePressGesture = gesture
+      return gesture
+    }
+
+    const hit = this.hitMap.get(row)
     const gesture: QuestionMouseGesture = {
+      flow: this,
       questionIndex: this.tab,
-      questionId: question.id,
-      hit: this.hitMap.get(row),
+      questionId: question?.id,
+      hitKind: hit === undefined ? 'inert' : hit === OTHER_ROW ? 'other' : hit === MARKER_ROW ? 'marker' : hit === PLAN_FEEDBACK_ROW ? 'other' : 'option',
+      hit,
+      row,
+      editingOther: this.editingOther,
+      width: this.lastContentWidth,
+      ...(this.planReview === undefined ? {} : { planStep: this.planStep }),
     }
     this.mousePressGesture = gesture
     return gesture
@@ -610,15 +1165,120 @@ export class QuestionFlow implements Component, Focusable {
     this.mousePressGesture = undefined
     if (gesture === undefined || gesture !== pressedGesture) return
     const question = this.questions[this.tab]
-    if (question === undefined) return
-    // The question INDEX is the flow's own unique in-flow identity: the
-    // caller-provided id is not guaranteed unique within a batch, so a
-    // duplicate id must not let a press from Q[n] activate Q[n+1] after
-    // a keyboard advance.
-    if (gesture.questionIndex !== this.tab) return
-    if (gesture.questionId !== question.id) return
-    if (this.hitMap.get(row) !== gesture.hit) return
+    if (gesture.flow !== this
+      || gesture.questionIndex !== this.tab
+      || gesture.row !== row
+      || gesture.editingOther !== this.editingOther
+      || gesture.width !== this.lastContentWidth) return
+    if (gesture.questionId !== question?.id) return
+    // FR7: a plan step transition between press and release makes the old
+    // gesture inert — the same painted cells in another step are another verb.
+    if (gesture.planStep !== undefined && this.planReview !== undefined && gesture.planStep !== this.planStep) return
+
+    if (gesture.hitKind === 'action') {
+      if (x === undefined || gesture.action === undefined) return
+      const actionHit = this.paintedActionHits.find(hit =>
+        hit.row === row && x >= hit.startCol && x < hit.endCol,
+      )
+      if (actionHit === undefined
+        || actionHit.action !== gesture.action
+        || actionHit.startCol !== gesture.startCol
+        || actionHit.endCol !== gesture.endCol
+        || actionHit.tab !== this.tab
+        || actionHit.questionId !== question?.id
+        || actionHit.editingOther !== this.editingOther
+        || actionHit.width !== this.lastContentWidth) return
+      this.applyPointerAction(actionHit.action)
+      return
+    }
+
+    if (gesture.hitKind === 'tab') {
+      if (x === undefined || gesture.targetTab === undefined) return
+      const tabHit = this.paintedTabHits.find(hit =>
+        hit.row === row && x >= hit.startCol && x < hit.endCol,
+      )
+      if (tabHit === undefined
+        || tabHit.targetTab !== gesture.targetTab
+        || tabHit.startCol !== gesture.startCol
+        || tabHit.endCol !== gesture.endCol
+        || tabHit.tab !== this.tab
+        || tabHit.questionId !== question?.id
+        || tabHit.editingOther !== this.editingOther
+        || tabHit.width !== this.lastContentWidth) return
+      this.navigateToTab(tabHit.targetTab)
+      return
+    }
+
+    if (gesture.hitKind === 'inert') return
+    const hit = this.hitMap.get(row)
+    if (hit !== gesture.hit) return
+    const hitKind = hit === OTHER_ROW || hit === PLAN_FEEDBACK_ROW ? 'other' : hit === MARKER_ROW ? 'marker' : 'option'
+    if (hitKind !== gesture.hitKind) return
     this.clickRow(row, x)
+  }
+
+  private applyPointerAction(action: QuestionPointerAction): void {
+    if (this.planReview !== undefined) {
+      this.applyPlanPointerAction(action)
+      return
+    }
+    switch (action) {
+      case 'back':
+        this.backToPreviousQuestion()
+        return
+      case 'progress':
+        if (this.editingOther) this.commitOther(this.otherInput.getValue())
+        else this.continueCurrentQuestion()
+        return
+      case 'edit':
+        this.enterOther()
+        return
+      case 'leave-edit':
+        this.handleOtherEscape()
+        return
+      case 'cancel':
+        this.onCancel()
+        return
+      case 'submit':
+        this.submit()
+        return
+    }
+  }
+
+  /** The plan branch's pointer actions: each painted span names the plan step
+   * verb it really performs; the generic question verbs are never reused
+   * (submit never fires from a reading Back row). */
+  private applyPlanPointerAction(action: QuestionPointerAction): void {
+    if (this.planStep === 'decision') {
+      if (action === 'edit') {
+        this.executePlanRow('keep')
+        return
+      }
+      if (action === 'progress') {
+        this.executePlanRow('view')
+        return
+      }
+      if (action === 'submit') {
+        this.executePlanRow('approve')
+        return
+      }
+      if (action === 'cancel') this.onCancel()
+      return
+    }
+    if (this.planStep === 'feedback') {
+      if (action === 'submit') {
+        this.submitPlanFeedback(this.planFeedbackText())
+        return
+      }
+      if (action === 'back') this.planStep = 'decision'
+      return
+    }
+    // reading + fallback: Back only (never a submit).
+    if (action === 'back') {
+      if (this.planStep === 'reading') this.onPlanReadingEnd?.()
+      this.planStep = 'decision'
+      this.planFallbackScroll = 0
+    }
   }
 
   /**
@@ -631,6 +1291,45 @@ export class QuestionFlow implements Component, Focusable {
    * what the user sees.
    */
   clickRow(row: number, x?: number): void {
+    if (this.planReview !== undefined) {
+      // The plan decision rows are real click targets (keyboard Enter
+      // parity); the feedback Input row positions its cursor; the fallback
+      // scroll marker pages the plan text.
+      const key = this.hitMap.get(row)
+      if (key === PLAN_FEEDBACK_ROW) {
+        if (this.planStep !== 'feedback' || x === undefined) return
+        const localX = x - 2
+        if (localX < 0) return
+        this.planFeedbackInput.handleMouse?.({
+          type: 'press',
+          button: 'left',
+          x: localX,
+          y: 0,
+          screenX: x,
+          screenY: row,
+          width: Math.max(1, this.lastContentWidth - 2),
+          height: 1,
+          shift: false,
+          alt: false,
+          ctrl: false,
+        })
+        return
+      }
+      if (key === MARKER_ROW) {
+        if (this.planStep !== 'fallback') return
+        this.planFallbackScroll += Math.max(1, this.planFallbackVisible)
+        return
+      }
+      if (this.planStep === 'decision' && key !== undefined && key.startsWith('plan:')) {
+        const action = key.slice('plan:'.length)
+        if (action === 'view' || action === 'review' || action === 'keep' || action === 'approve') {
+          this.planCursorAction = action
+          this.planCursor = this.planCursorIndex(this.planDecisionRows())
+          this.executePlanRow(action)
+        }
+      }
+      return
+    }
     if (row < 0 || this.tab >= this.questions.length) return
     const key = this.hitMap.get(row)
     if (key === OTHER_ROW) {
@@ -774,6 +1473,17 @@ export class QuestionFlow implements Component, Focusable {
       left,
     )
     hits.push(...new Array(lines.length).fill(undefined))
+    // The official CUA application-consent card carries a separate Risks
+    // warning (rc.3 `ApplicationApproval.tsx`). The generic Question detail is
+    // only "manage permissions on the plugin page"; the warning is a distinct
+    // presentation-only branch on the SAME question seat/answer writer.
+    if (question.id === 'cua-app-access' && question.intent?.kind === 'approval') {
+      left = appendWrappedBudgeted(lines, '   ', '   ', color.warning('Risks · Computer use risks'), width, left)
+      for (const paragraph of CUA_APPROVAL_RISK_NOTICE.split('\n')) {
+        if (left <= 0) break
+        left = appendWrappedBudgeted(lines, '   ', '   ', color.warning(sanitizeDisplayText(paragraph)), width, left)
+      }
+    }
     if (question.detail !== undefined && question.detail !== '') {
       for (const line of question.detail.split('\n')) {
         if (left <= 1) {
@@ -883,7 +1593,13 @@ export class QuestionFlow implements Component, Focusable {
         ...option.description === undefined ? {} : { description: option.description },
       }
     })
-    if ((question.options?.length ?? 0) > 0) {
+    // The official CUA application consent has a fixed 2–3-option answer
+    // contract; a free-text row would be offered but refused by the Host. Keep
+    // the same Question seat and answer writer, without inventing a writer/app
+    // consent input the official card does not have.
+    const fixedCuaApproval = (question.id === 'cua-app-access' || question.id === 'cua-mouse-control')
+      && question.intent?.kind === 'approval'
+    if ((question.options?.length ?? 0) > 0 && !fixedCuaApproval) {
       rows.push({ key: OTHER_ROW, label: 'Type something.', recommended: false })
     }
     return rows
@@ -1040,6 +1756,27 @@ export class QuestionFlow implements Component, Focusable {
   /** Move to the next question (or the review page on the last one). */
   private advance(): void {
     this.tab += 1
+    this.cursor = 0
+    this.syncEditMode()
+  }
+
+  private backToPreviousQuestion(): void {
+    if (this.tab <= 0) return
+    this.tab -= 1
+    this.cursor = 0
+    this.syncEditMode()
+  }
+
+  /**
+   * Jump directly to one top-stage target: a question page or the Review
+   * stage. Pure navigation: it never skips, answers, mutates or submits a
+   * draft. Switching re-runs {@link syncEditMode} so the target page starts
+   * with its own cursor/focus/input owner, exactly like sequential paging.
+   */
+  private navigateToTab(targetIndex: number): void {
+    if (targetIndex < 0 || targetIndex > this.questions.length) return
+    if (targetIndex === this.tab) return
+    this.tab = targetIndex
     this.cursor = 0
     this.syncEditMode()
   }
@@ -1211,6 +1948,165 @@ export class QuestionFlow implements Component, Focusable {
     this.onDone(answers)
   }
 
+  /** The plan-review branch's input routing. Esc semantics by step:
+   * decision = the OFFICIAL dismiss (onCancel); reading/feedback/fallback =
+   * back to the decision list, never a dismiss. Enter never submits from
+   * reading or fallback. Ctrl+C is always the official cancel (the §3.6
+   * table: no step may leave an orphaned reading state). */
+  private handlePlanInput(data: string): void {
+    const plan = this.planReview
+    if (plan === undefined) return
+    // Ctrl+C is the official cancel in EVERY plan step — checked before the
+    // step branches so the shared Input's own cancel binding never turns it
+    // into a local back.
+    if (matchesKey(data, 'ctrl+c')) {
+      if (this.planStep === 'reading') this.onPlanReadingEnd?.()
+      this.onCancel()
+      return
+    }
+    if (this.planStep === 'feedback') {
+      if (componentKeymap.matches(data, 'question.cancel')) {
+        // Esc leaves the feedback edit back to the decision list, keeping
+        // the draft (the Input's own onEscape does the step move).
+        this.planFeedbackInput.handleInput(data)
+        return
+      }
+      if (componentKeymap.matches(data, 'question.confirm')) {
+        // The Input's onSubmit seam drives submitPlanFeedback.
+        this.planFeedbackInput.handleInput(data)
+        return
+      }
+      // Every editing key belongs to the shared Input; a REAL value change is
+      // the same answer-mutation fact the generic free-text path reports
+      // (freezes a timed claim and keeps the park/reopen draft live).
+      const before = this.planFeedbackInput.getValue()
+      this.planFeedbackInput.handleInput(data)
+      if (this.planFeedbackInput.getValue() !== before) this.notifyMutation()
+      return
+    }
+    if (this.planStep === 'reading') {
+      // Reading is a HOST-owned viewport (the transcript's own scroll);
+      // the flow owns the Esc-back verb and forwards scroll keys. Every
+      // other key is a no-op in the seat (never an approve).
+      if (componentKeymap.matches(data, 'question.cancel')) {
+        this.planStep = 'decision'
+        this.onPlanReadingEnd?.()
+        return
+      }
+      if (componentKeymap.matches(data, 'question.cursorUp')) {
+        this.onPlanReadingScroll?.(-1, false)
+        return
+      }
+      if (componentKeymap.matches(data, 'question.cursorDown')) {
+        this.onPlanReadingScroll?.(1, false)
+        return
+      }
+      if (componentKeymap.matches(data, 'question.pageUp')) {
+        this.onPlanReadingScroll?.(-1, true)
+        return
+      }
+      if (componentKeymap.matches(data, 'question.pageDown')) {
+        this.onPlanReadingScroll?.(1, true)
+        return
+      }
+      // §3.2: Home/End jump to the transcript start/end (the existing
+      // ScrollView owners), through the same reading-lease seam.
+      if (matchesKey(data, 'home')) {
+        this.onPlanReadingEdge?.('start')
+        return
+      }
+      if (matchesKey(data, 'end')) {
+        this.onPlanReadingEdge?.('end')
+        return
+      }
+      return
+    }
+    if (this.planStep === 'fallback') {
+      if (componentKeymap.matches(data, 'question.cancel')) {
+        this.planStep = 'decision'
+        this.planFallbackScroll = 0
+        return
+      }
+      if (componentKeymap.matches(data, 'question.pageUp')) {
+        this.planFallbackScroll = Math.max(0, this.planFallbackScroll - Math.max(1, this.planFallbackVisible))
+        return
+      }
+      if (componentKeymap.matches(data, 'question.pageDown')) {
+        this.planFallbackScroll += Math.max(1, this.planFallbackVisible)
+        return
+      }
+      return
+    }
+    // Decision list: ↑↓ move, Enter executes the highlighted row, Esc/Ctrl+C
+    // dismiss through the official cancel.
+    const rows = this.planDecisionRows()
+    const cursor = this.planCursorIndex(rows)
+    if (componentKeymap.matches(data, 'question.cursorUp')) {
+      const next = (cursor - 1 + rows.length) % rows.length
+      this.planCursorAction = rows[next]!.action
+      this.planCursor = next
+      return
+    }
+    if (componentKeymap.matches(data, 'question.cursorDown')) {
+      const next = (cursor + 1) % rows.length
+      this.planCursorAction = rows[next]!.action
+      this.planCursor = next
+      return
+    }
+    if (componentKeymap.matches(data, 'question.cancel')) {
+      this.onCancel()
+      return
+    }
+    if (componentKeymap.matches(data, 'question.confirm')) {
+      this.executePlanRow(rows[cursor]?.action)
+    }
+  }
+
+  /** Execute one plan decision row (keyboard Enter and the pointer route
+   * share this ONE verb; a missing inspection capability degrades View to
+   * the question-detail fallback). */
+  private executePlanRow(action: 'view' | 'review' | 'keep' | 'approve' | undefined): void {
+    if (action === 'view') {
+      if (this.planInspection?.canInspect() !== true) return
+      const inspected = this.planInspection.inspect() === true
+      if (inspected) {
+        this.planStep = 'reading'
+      } else {
+        // No provable transcript target: the official question's OWN detail
+        // is the fallback full text (never a claimed-located reading state).
+        this.planStep = 'fallback'
+        this.planFallbackScroll = 0
+      }
+      return
+    }
+    if (action === 'review') {
+      // The official question's own detail: §3.5's exception. ALWAYS the full
+      // text (paged to the end), never a claimed-located transcript state.
+      this.planStep = 'fallback'
+      this.planFallbackScroll = 0
+      return
+    }
+    if (action === 'keep') {
+      this.planStep = 'feedback'
+      this.planFeedbackInput.focused = this.focused
+      return
+    }
+    if (action === 'approve') {
+      this.submitPlanApprove()
+    }
+  }
+
+  /** Host hook fired when the reading step ends (Esc back): the host's
+   * transcript scroll/read lease is released here (Client-local). */
+  onPlanReadingEnd: (() => void) | undefined
+  /** Host hook that scrolls the TRANSCRIPT viewport while the reading step
+   * is active (the flow owns no transcript geometry). `page` asks for one
+   * viewport page, otherwise one line; the host clamps. */
+  onPlanReadingScroll: ((direction: -1 | 1, page: boolean) => void) | undefined
+  /** Host hook for the reading step's Home/End jumps: the host owns the
+   * ScrollView's start/end positions (the flow owns no geometry). */
+  onPlanReadingEdge: ((edge: 'start' | 'end') => void) | undefined
+
   handleInput(data: string): void {
     if (data === '\u0000') return
     // Any keyboard input terminates an unfinished mouse gesture: the
@@ -1221,6 +2117,12 @@ export class QuestionFlow implements Component, Focusable {
     // must never re-enter the edit when the release lands before the
     // repaint.
     this.mousePressGesture = undefined
+    // The plan-review branch owns its own step machine; the generic
+    // question machinery below is untouched for every other shape.
+    if (this.planReview !== undefined) {
+      this.handlePlanInput(data)
+      return
+    }
     // Text mode: printable/cursor keys go to the real Input; Enter/Esc are
     // the flow's own verbs. PageUp/PageDown scroll the body even while
     // typing ('e' stays a letter here — expand is a list-mode verb).
@@ -1255,21 +2157,15 @@ export class QuestionFlow implements Component, Focusable {
     }
     const rows = this.rows()
     if (this.tab >= this.questions.length) {
-      // Review page (the 2026-08-22 plan, item 4): a pure review — NO
-      // Submit/Cancel two-choice control, no focus, no ↑↓. Enter submits
-      // the whole batch, Esc cancels the flow, ← returns to the last
-      // question (drafts survive). The keys match user intuition and the
-      // page carries one less state machine. `h` stays the vim alias for
-      // ← (the review page has no text input to steal from).
+      // The Review page has no option cursor: Enter submits, Esc cancels,
+      // and ← returns to the last question with drafts intact. The action row
+      // is a pointer entry to those same methods, not a second state machine.
       if (componentKeymap.matches(data, 'question.confirm')) {
         this.submit()
       } else if (componentKeymap.matches(data, 'question.cancel')) {
         this.onCancel()
       } else if (componentKeymap.matches(data, 'question.previous') || data === 'h') {
-        // ← back to the last question (drafts survive).
-        this.tab = Math.max(0, this.questions.length - 1)
-        this.cursor = 0
-        this.syncEditMode()
+        this.backToPreviousQuestion()
       }
       return
     }
@@ -1357,12 +2253,7 @@ export class QuestionFlow implements Component, Focusable {
     // below (round finding — typing 'hello'/'linux' was hijacked).
     if (componentKeymap.matches(data, 'question.previous')
       || (!this.isOptionless() && data === 'h')) {
-      // ← back: previous question (keeps the draft).
-      if (this.tab > 0) {
-        this.tab -= 1
-        this.cursor = 0
-        this.syncEditMode()
-      }
+      this.backToPreviousQuestion()
       return
     }
     if (componentKeymap.matches(data, 'question.next')
@@ -1425,6 +2316,326 @@ export class QuestionFlow implements Component, Focusable {
 
   invalidate(): void {
     this.otherInput.invalidate()
+    this.planFeedbackInput.invalidate()
+  }
+
+  setMouseActionsEnabled(enabled: boolean): void {
+    if (this.mouseActionsEnabled === enabled) return
+    this.mouseActionsEnabled = enabled
+    this.paintedActionHits = []
+    this.paintedTabHits = []
+    this.mousePressGesture = undefined
+  }
+
+  private pointerActionSegments(): {
+    segments: ActionBarSegment[]
+    actionByInputIndex: Map<number, { action: QuestionPointerAction; role: ActionInkRole }>
+  } {
+    const segments: ActionBarSegment[] = []
+    const actionByInputIndex = new Map<number, { action: QuestionPointerAction; role: ActionInkRole }>()
+    const add = (
+      action: QuestionPointerAction,
+      label: string,
+      key: 'question.previous' | 'question.next' | 'question.confirm' | 'question.cancel' | undefined,
+      priority: number,
+      role: ActionInkRole,
+    ): void => {
+      const primaryKey = key === undefined ? undefined : componentKeymap.keysFor(key)[0]
+      const keycap = primaryKey === undefined
+        ? ''
+        : primaryKey === 'left'
+          ? '←'
+          : primaryKey === 'right'
+            ? '→'
+            : formatKeyId(primaryKey)
+      actionByInputIndex.set(segments.length, { action, role })
+      segments.push({ text: keycap === '' ? label : `${label} [${keycap}]`, short: label, priority })
+    }
+    const addHint = (text: string, priority: number): void => {
+      segments.push({ text, priority })
+    }
+    const addBack = (): void => {
+      if (this.tab > 0) add('back', 'Back', 'question.previous', 40, 'secondary')
+    }
+    const isLast = this.tab === this.questions.length - 1
+    const progress = this.answered() ? (isLast ? 'Review' : 'Continue') : 'Skip'
+    const browse = this.status?.navigationEligible === true && noAnswerNavigationUsable()
+      ? `${componentKeymap.keyHint('interaction.navigateWorkspace')} browse`
+      : ''
+
+    if (this.editingOther) {
+      add('progress', isLast ? 'Review' : 'Next', 'question.confirm', 95, 'primary')
+      add('cancel', 'Cancel flow', undefined, 90, 'secondary')
+      if (this.lastExpandable) addHint('PgUp/PgDn scroll', 10)
+      if (browse !== '') addHint(browse, 1)
+      add('leave-edit', 'Leave edit', 'question.cancel', 1000, 'secondary')
+      return { segments, actionByInputIndex }
+    }
+
+    if (this.tab >= this.questions.length) {
+      add('submit', 'Submit', 'question.confirm', 95, 'primary')
+      addBack()
+      add('cancel', 'Cancel', 'question.cancel', 1000, 'secondary')
+      return { segments, actionByInputIndex }
+    }
+
+    // Skip is navigation, not the primary forward action; Continue/Review is.
+    add('progress', progress, 'question.next', 95, progress === 'Skip' ? 'secondary' : 'primary')
+    if (this.isOptionless()) {
+      add('edit', 'Edit', 'question.confirm', 50, 'secondary')
+    }
+    addBack()
+    if (!this.isOptionless()) {
+      addHint('↑↓ select', 25)
+      const count = Math.min(this.rows().length, 9)
+      if (count > 0) addHint(`1-${count} choose`, 20)
+      if (this.questions[this.tab]?.multiSelect === true) addHint('Space toggle', 30)
+    }
+    if (this.lastExpandable) addHint('PgUp/PgDn scroll', 10)
+    if (!this.isOptionless() && (this.lastExpandable || this.bodyExpanded)) {
+      const expandKey = componentKeymap.keysFor('question.toggleExpand')[0]
+      if (expandKey !== undefined) {
+        // A bare unmodified letter stays lowercase in a keyboard hint
+        // (design language §4.1); named keys keep their formatted label.
+        const label = expandKey.length === 1 ? expandKey : formatKeyId(expandKey)
+        addHint(`${label} ${this.bodyExpanded ? 'collapse' : 'expand'}`, 5)
+      }
+    }
+    if (browse !== '') addHint(browse, 1)
+    add('cancel', 'Cancel', 'question.cancel', 1000, 'secondary')
+    return { segments, actionByInputIndex }
+  }
+
+  private appendPointerActionRow(lines: string[], width: number): void {
+    if (!this.mouseActionsEnabled) return
+    const { segments, actionByInputIndex } = this.pointerActionSegments()
+    const layout = layoutActionBarRow(segments, width)
+    const row = lines.length
+    if (layout.truncated || layout.spans.length === 0) {
+      lines.push(color.textMuted(layout.text))
+      return
+    }
+
+    const painted = layout.spans.map(span => {
+      const entry = actionByInputIndex.get(span.inputIndex)
+      if (entry === undefined) return color.textMuted(span.text)
+      this.paintedActionHits.push({
+        row,
+        action: entry.action,
+        startCol: span.startCol,
+        endCol: span.endCol,
+        tab: this.tab,
+        questionId: this.questions[this.tab]?.id,
+        editingOther: this.editingOther,
+        width,
+      })
+      return paintActionSpan(span.text, entry.role)
+    })
+    const segmentWidth = layout.spans.reduce((sum, span) => sum + visibleWidth(span.text), 0)
+      + Math.max(0, layout.spans.length - 1) * visibleWidth(ACTION_BAR_SEPARATOR)
+    const padding = Math.max(0, visibleWidth(layout.text) - segmentWidth)
+    lines.push(painted.join(color.textMuted(ACTION_BAR_SEPARATOR)) + ' '.repeat(padding))
+  }
+
+  /** The plan review's safe single-line title: the official detail's FIRST
+   * markdown heading, single-lined and width-truncated. Display only — never
+   * a permission, state or locator. */
+  private planTitle(width: number): string {
+    const detail = this.planReview?.question.detail ?? ''
+    const heading = /^#{1,6}\s+(.+?)\s*$/m.exec(detail)?.[1] ?? this.planReview?.question.question ?? 'Plan'
+    return truncateToWidth(sanitizedPhysicalLine(heading), Math.max(1, width - 2), '…')
+  }
+
+  /** Render the plan-review branch: a compact decision component in the
+   * editor seat (title + fixed action rows), the reading hint, the feedback
+   * input, or the full-text fallback page. The plan BODY never renders here
+   * — it lives in the transcript Tool Card (Fullscreen) or the fallback page. */
+  private renderPlanReview(width: number): string[] {
+    const plan = this.planReview
+    if (plan === undefined) return []
+    const lines: string[] = []
+    const statusText = this.status?.text
+    if (statusText !== undefined && this.budget > MIN_SUPPORTED_BUDGET + 1) {
+      appendWrappedBudgeted(lines, '', '', color.textDim(sanitizeDisplayText(statusText)), width, 1)
+    }
+    if (this.planStep === 'reading') {
+      lines.push(color.textStrong('Plan review · Reading the submitted plan'))
+      lines.push('')
+      lines.push(color.textDim('↑↓ / PgUp/PgDn scroll the transcript · Esc back'))
+      return lines
+    }
+    if (this.planStep === 'feedback') {
+      lines.push(color.textStrong('Plan review · Request changes'))
+      lines.push('')
+      lines.push(color.textDim('What should be changed? (optional)'))
+      const inputLine = this.planFeedbackInput.render(Math.max(1, width - 2))[0] ?? ''
+      // The single-line feedback Input is a real pointer target (click to
+      // place the text cursor), reached through the flow's own row hit map.
+      this.pinnedOtherRow = lines.length
+      this.hitMap.set(lines.length, PLAN_FEEDBACK_ROW)
+      lines.push(`> ${this.planFeedbackText() === '' ? color.textDim('type feedback…') : inputLine}`)
+      return lines
+    }
+    if (this.planStep === 'fallback') {
+      lines.push(color.textStrong(`Plan review · ${this.planTitle(width)}`))
+      lines.push(color.textDim('Full review text (from the question)'))
+      lines.push('')
+      const detail = plan.question.detail ?? ''
+      const wrapped: string[] = []
+      for (const raw of detail.split('\n')) {
+        wrapped.push(...wrapTextWithAnsi(sanitizeDisplayText(raw), Math.max(1, width - 2)))
+      }
+      // The fallback never silently drops the tail: the scroll window is
+      // clamped so the LAST lines stay reachable (no fixed 256-row cap here).
+      // The budget reserves BOTH trailing rows this render adds: the overflow
+      // marker AND the hint/action bar the caller appends below — one row for
+      // the marker only used the space bar, overflowing the seat on short
+      // screens (8-row budget rendered 9 rows).
+      const chrome = lines.length + 2
+      const visible = Math.max(1, this.budget - chrome)
+      this.planFallbackVisible = visible
+      const maxScroll = Math.max(0, wrapped.length - visible)
+      this.planFallbackScroll = Math.min(this.planFallbackScroll, maxScroll)
+      const start = this.planFallbackScroll
+      for (let i = start; i < start + visible && i < wrapped.length; i += 1) {
+        lines.push(wrapped[i] ?? '')
+      }
+      if (wrapped.length > visible) {
+        const marker = start > 0 && start + visible < wrapped.length
+          ? `↑ ${start} up · ↓ ${wrapped.length - (start + visible)} more lines`
+          : start > 0 ? `↑ ${start} up` : `↓ ${wrapped.length - visible} more lines`
+        this.lastMarkerRow = lines.length
+        this.hitMap.set(lines.length, MARKER_ROW)
+        lines.push(color.textDim(marker))
+      }
+      return lines
+    }
+    // Decision list (§3.1): title row (with the right-aligned status fact),
+    // blank, fixed rows; the hint/action bar is painted by the caller below.
+    const title = `Plan review · ${this.planTitle(width)}`
+    const statusFact = 'Waiting for decision'
+    const gap = 2
+    const titleWidth = visibleWidth(title)
+    const factWidth = visibleWidth(statusFact)
+    lines.push(titleWidth + gap + factWidth <= width
+      ? `${color.textStrong(title)}${' '.repeat(width - titleWidth - factWidth)}${color.textMuted(statusFact)}`
+      : color.textStrong(title))
+    lines.push('')
+    // §3.4 ordinary UI: without the Fullscreen inspection there is no
+    // app-owned seek, so the decision list names the plan ALREADY painted
+    // above in the native terminal scrollback (the tool card; expand it with
+    // the effective disclosure key). The in-flow `View review text` exception
+    // row (rendered only when the card is NOT provably present) replaces this
+    // line, so the two never claim the same reading path.
+    const detailBody = (this.planReview?.question.detail ?? '').trim() !== ''
+    const cardProvable = this.planInspection?.cardPresent() === true
+    if (this.planInspection?.canInspect() !== true && (cardProvable || !detailBody)) {
+      lines.push(color.textDim(truncateToWidth('Read the plan above in terminal history.', Math.max(1, width), '…')))
+    }
+    const rows = this.planDecisionRows()
+    this.planCursor = this.planCursorIndex(rows)
+    rows.forEach((row, index) => {
+      const pointer = index === this.planCursor ? color.primary('>') : ' '
+      const label = sanitizeDisplayText(row.label)
+      const text = index === this.planCursor ? color.textStrong(label) : label
+      lines.push(`${pointer} ${text}`)
+      this.hitMap.set(lines.length - 1, `plan:${row.action}`)
+    })
+    return lines
+  }
+
+  /** The plan branch's keyboard hint row (non-mouse mode): names the REAL
+   * Esc effect per step (design language D13) and composes from whole
+   * segments that fit. */
+  private planHintRow(width: number): string {
+    if (this.planStep === 'reading') {
+      return '↑↓ scroll · esc back'
+    }
+    if (this.planStep === 'feedback') {
+      const cancel = 'esc back'
+      const parts = ['enter send revision']
+      let hint = ''
+      for (const part of parts) {
+        const next = hint === '' ? part : `${hint} · ${part}`
+        if (visibleWidth(`${next} · ${cancel}`) > width) break
+        hint = next
+      }
+      return hint === '' ? cancel : `${hint} · ${cancel}`
+    }
+    if (this.planStep === 'fallback') {
+      return 'pgup/pgdn scroll · esc back'
+    }
+    const cancel = 'esc discuss'
+    const parts = ['↑↓ select', 'enter choose']
+    let hint = ''
+    for (const part of parts) {
+      const next = hint === '' ? part : `${hint} · ${part}`
+      if (visibleWidth(`${next} · ${cancel}`) > width) break
+      hint = next
+    }
+    return hint === '' ? cancel : `${hint} · ${cancel}`
+  }
+
+  /** The plan branch's Fullscreen action bar: the same verbs as the
+   * keyboard, painted as clickable spans with press/release identity (the
+   * shared paintedActionHits fence). */
+  private appendPlanPointerActionRow(lines: string[], width: number): void {
+    const segments: ActionBarSegment[] = []
+    const actionByIndex = new Map<number, QuestionPointerAction>()
+    const add = (
+      action: QuestionPointerAction,
+      label: string,
+      key: 'question.confirm' | 'question.cancel' | undefined,
+      priority: number,
+    ): void => {
+      const primaryKey = key === undefined ? undefined : componentKeymap.keysFor(key)[0]
+      const keycap = primaryKey === undefined ? '' : formatKeyId(primaryKey)
+      actionByIndex.set(segments.length, action)
+      segments.push({ text: keycap === '' ? label : `${label} [${keycap}]`, short: label, priority })
+    }
+    const addHint = (text: string, priority: number): void => {
+      segments.push({ text, short: text, priority })
+    }
+    if (this.planStep === 'decision') {
+      // The THREE decision rows are the pointer targets for View/Keep/
+      // Approve (a click equals selecting that row, keyboard-Enter parity).
+      // The bar itself is the frozen §3.1 hint row (`↑↓ select · Enter
+      // choose · Esc discuss`), with only the real `Discuss [Esc]` span
+      // clickable — a painted hint never invents a second click route.
+      addHint('↑↓ select', 25)
+      addHint('Enter choose', 20)
+      add('cancel', 'Discuss', 'question.cancel', 1000)
+    } else if (this.planStep === 'feedback') {
+      add('submit', 'Send revision', 'question.confirm', 95)
+      add('back', 'Back', 'question.cancel', 90)
+    } else {
+      // reading + fallback share the Back verb (Esc semantics).
+      add('back', 'Back', 'question.cancel', 95)
+    }
+    const layout = layoutActionBarRow(segments, width)
+    if (layout.truncated || layout.spans.length === 0) {
+      lines.push(color.textMuted(layout.text))
+      return
+    }
+    const painted = layout.spans.map(span => {
+      const action = actionByIndex.get(span.inputIndex)
+      if (action === undefined) return color.textMuted(span.text)
+      this.paintedActionHits.push({
+        row: lines.length,
+        action,
+        startCol: span.startCol,
+        endCol: span.endCol,
+        tab: 0,
+        questionId: this.planReview?.question.id,
+        editingOther: false,
+        width,
+      })
+      return paintActionSpan(span.text, 'primary')
+    })
+    const segmentWidth = layout.spans.reduce((sum, span) => sum + visibleWidth(span.text), 0)
+      + Math.max(0, layout.spans.length - 1) * visibleWidth(ACTION_BAR_SEPARATOR)
+    const padding = Math.max(0, visibleWidth(layout.text) - segmentWidth)
+    lines.push(painted.join(color.textMuted(ACTION_BAR_SEPARATOR)) + ' '.repeat(padding))
   }
 
   render(width: number): string[] {
@@ -1433,24 +2644,42 @@ export class QuestionFlow implements Component, Focusable {
     const lines: string[] = []
     // The hit map reflects THIS frame only (the review page populates none).
     this.hitMap.clear()
+    this.paintedActionHits = []
+    this.paintedTabHits = []
     this.lastMarkerRow = -1
     this.pinnedOtherRow = -1
-    // Tab strip: Q1(✓) Q2(○) … Submit — answered marks, current highlighted.
+    // The wheel scrollport belongs to the frame being painted NOW: every
+    // early return (plan-review, Review page, header-only) leaves it absent.
+    this.lastScrollportStart = -1
+    this.lastScrollportEnd = -1
+    if (this.planReview !== undefined) {
+      const planLines = this.renderPlanReview(safeWidth)
+      lines.push(...planLines)
+      if (this.mouseActionsEnabled) this.appendPlanPointerActionRow(lines, safeWidth)
+      else lines.push(color.textDim(this.planHintRow(safeWidth)))
+      return lines
+    }
+    // Tab strip: Q1(✓) Q2(○) … Review — answered marks, current highlighted.
     // Tabs carry NO leading/trailing spaces of their own (the box border
     // provides the padding), so every content row starts at the same column.
     // One pass derives BOTH the per-tab marks and the Submit mark.
     const answeredFlags = this.drafts.map(draft => this.draftAnswered(draft))
-    const tabs = this.questions.map((_, index) => {
+    const tabSegments: QuestionTabSegment[] = this.questions.map((_, index) => {
       const label = tabLabel(index, this.questions.length)
       const mark = answeredFlags[index] === true ? '✓' : '○'
-      return this.tab === index
-        ? color.textStrong(`${mark} ${label}`)
-        : color.textDim(`${mark} ${label}`)
+      const plain = `${mark} ${label}`
+      return {
+        plain,
+        painted: this.tab === index ? color.textStrong(plain) : color.textDim(plain),
+        targetTab: index,
+      }
     })
-    const submitText = `${answeredFlags.every(answered => answered) ? '✓' : '○'} Submit`
-    tabs.push(this.tab === this.questions.length
-      ? color.textStrong(submitText)
-      : color.textDim(submitText))
+    const reviewPlain = `${answeredFlags.every(answered => answered) ? '✓' : '○'} Review`
+    tabSegments.push({
+      plain: reviewPlain,
+      painted: this.tab === this.questions.length ? color.textStrong(reviewPlain) : color.textDim(reviewPlain),
+      targetTab: this.questions.length,
+    })
     // Caller-owned status (timed claim / remaining time / continued
     // guidance) rides ABOVE the tabs and INSIDE the budget, so the header
     // math below accounts for it. It never renders without room.
@@ -1458,17 +2687,29 @@ export class QuestionFlow implements Component, Focusable {
     if (statusText !== undefined && this.budget > MIN_SUPPORTED_BUDGET + 1) {
       appendWrappedBudgeted(lines, '', '', color.textDim(sanitizeDisplayText(statusText)), safeWidth, 1)
     }
-    lines.push(tabs.join('  '))
+    const tabLayout = layoutQuestionTabRow(tabSegments, this.tab, safeWidth)
+    const tabRow = lines.length
+    lines.push(tabLayout.text)
+    if (this.mouseActionsEnabled) {
+      const questionId = this.questions[this.tab]?.id
+      for (const span of tabLayout.spans) {
+        this.paintedTabHits.push({
+          row: tabRow,
+          targetTab: span.targetTab,
+          startCol: span.startCol,
+          endCol: span.endCol,
+          tab: this.tab,
+          questionId,
+          editingOther: this.editingOther,
+          width: safeWidth,
+        })
+      }
+    }
     lines.push('')
     if (this.tab >= this.questions.length) {
-      // Review page (plan item 4): every answer, then the fixed hint — NO
-      // Submit/Cancel action row (Enter submits, Esc cancels, ← edits).
-      // The page shares the SAME physical-row budget as the rest of the
-      // dialog: no matter how long the answers are, the hint must stay
-      // visible — it is the ONLY required tail row now (the blank
-      // separator before it yields when space is tight, round-3 finding),
-      // and title, separators, questions and answers share everything
-      // else, row-budgeted with the usual `... N more lines` cut marker.
+      // Review page: the top tab names the Review stage; its bottom Action Bar
+      // owns the one real Submit action alongside Back and Cancel. Without the
+      // AltScreen mouse route the established keyboard-only hint remains.
       let reviewBudget = this.budget - lines.length - 1
       reviewBudget = appendWrappedBudgeted(
         lines,
@@ -1519,7 +2760,8 @@ export class QuestionFlow implements Component, Focusable {
         lines.push('')
         reviewBudget -= 1
       }
-      lines.push(color.textDim('← back · ↵ submit · esc cancel'))
+      if (this.mouseActionsEnabled) this.appendPointerActionRow(lines, safeWidth)
+      else lines.push(color.textDim('← back · ↵ submit · esc cancel'))
       return lines
     }
     const question = this.questions[this.tab]
@@ -1529,11 +2771,10 @@ export class QuestionFlow implements Component, Focusable {
     const multi = question.multiSelect === true
     const skippedRow = draft.skipped ? 1 : 0
     const optionless = this.isOptionless(rows)
-    // Required tail — the rows that must render below the scrollport:
-    //   choice page: (skipped) note + trailing blank + hint = 2 + skippedRow
-    //   optionless:  input row + (skipped) note + trailing blank + hint =
-    //                3 + skippedRow
-    const tail = optionless ? 3 + skippedRow : 2 + skippedRow
+    // Required tail — rows that must render below the scrollport:
+    //   choice page: (skipped) note + blank + one action bar/hint
+    //   optionless: input + (skipped) note + blank + one action bar/hint
+    const tail = (optionless ? 3 : 2) + skippedRow
     const header = question.header
     // The header is decorative: it renders only when the scrollport still
     // gets at least one row (the required-first guarantee below).
@@ -1571,11 +2812,14 @@ export class QuestionFlow implements Component, Focusable {
         }
       }
     }
+    const scrollportStart = lines.length
     for (let index = this.bodyScroll; index < this.bodyScroll + visible && index < content.lines.length; index++) {
       const hit = content.hits[index]
       if (hit !== undefined) this.hitMap.set(lines.length, hit)
       lines.push(content.lines[index]!)
     }
+    this.lastScrollportStart = scrollportStart
+    this.lastScrollportEnd = lines.length
     if (overflow && regionHeight >= 2) {
       const above = this.bodyScroll
       const below = content.lines.length - (this.bodyScroll + visible)
@@ -1621,6 +2865,10 @@ export class QuestionFlow implements Component, Focusable {
       lines.push(color.textDim('(skipped)'))
     }
     lines.push('')
+    if (this.mouseActionsEnabled) {
+      this.appendPointerActionRow(lines, safeWidth)
+      return lines
+    }
     // The hint describes the CURRENT mode, never a generic list-mode verb
     // set:
     // - text EDIT (choices or optionless): ←→ are the TEXT cursor, Enter
@@ -1641,11 +2889,20 @@ export class QuestionFlow implements Component, Focusable {
     const scrollable = this.lastExpandable
     const isLastQuestion = this.tab === this.questions.length - 1
     const continueVerb = isLastQuestion ? '↵ review' : '↵ continue'
+    // The modal-safe navigation verb is derived from the component keymap (no
+    // hard-coded chord). It paints only for a LIVE forwarded interaction and
+    // only when the split composition installed the navigation control; a
+    // continued late-answer form (and Direct) never shows it. It is LOW
+    // priority: narrow widths drop it before the fixed response verbs.
+    const browseVerb = this.status?.navigationEligible === true && noAnswerNavigationUsable()
+      ? `${componentKeymap.keyHint('interaction.navigateWorkspace')} browse`
+      : ''
     if (this.editingOther) {
       const editParts = [
         '←→ edit',
         continueVerb,
         scrollable ? 'pgup/pgdn scroll' : '',
+        browseVerb,
       ].filter(part => part !== '')
       const cancel = 'esc back'
       let hint = ''
@@ -1663,6 +2920,7 @@ export class QuestionFlow implements Component, Focusable {
       const navParts = [
         '↵ edit',
         this.questions.length > 1 || this.tab > 0 ? '← back · → skip' : '→ skip',
+        browseVerb,
       ].filter(part => part !== '')
       const cancel = 'esc cancel'
       let hint = ''
@@ -1683,6 +2941,7 @@ export class QuestionFlow implements Component, Focusable {
       scrollable ? 'pgup/pgdn scroll' : '',
       this.bodyExpanded ? 'e collapse' : scrollable ? 'e expand' : '',
       this.questions.length > 1 ? '← back · → skip' : '→ skip',
+      browseVerb,
       'esc cancel',
     ].filter(part => part !== '')
     const cancel = 'esc cancel'
@@ -1710,21 +2969,24 @@ export class QuestionFlow implements Component, Focusable {
 export class QuestionFrame extends Frame implements Focusable {
   private readonly flow: QuestionFlow
   private readonly heightOf: () => number
+  private readonly mouseEnabled: () => boolean
   /** Rendered height of the last frame (fullscreen click hit-testing). */
   private lastRows = 0
   /** Terminal height the last render used (click staleness guard). */
   private lastTermRows = 0
 
-  constructor(flow: QuestionFlow, heightOf: () => number) {
+  constructor(flow: QuestionFlow, heightOf: () => number, mouseEnabled: () => boolean) {
     super(flow, true)
     this.flow = flow
     this.heightOf = heightOf
+    this.mouseEnabled = mouseEnabled
   }
 
   render(width: number): string[] {
     const rows = Math.max(1, this.heightOf())
     this.lastTermRows = rows
     this.lastTermColumns = width
+    this.flow.setMouseActionsEnabled(this.mouseEnabled())
     // The 60% cap is the DEFAULT (keeps the transcript visible); an explicit
     // body expand ('e' or a click on the scroll marker) grows the frame
     // toward 80% — the user asked for the room, and the flow's budget math

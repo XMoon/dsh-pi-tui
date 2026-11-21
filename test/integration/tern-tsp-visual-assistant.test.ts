@@ -30,27 +30,29 @@ import test from 'node:test'
 import { EventEmitter } from 'node:events'
 import { Context } from '@deepseek-ai/cordis'
 import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
-import { LlmAdapter, ToolCallId, createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
-import { SessionId, SessionLogOffset, SessionSeq, buildForkSeed, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { LlmAdapter, MessageId, ToolCallId, createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import SessionQuerySqlite from '@deepseek-ai/dsh-session-query-sqlite'
 import { connect as sdkConnect } from '@stencil-hq/tern'
 import type { Op, TermInput, TermOutput } from '@stencil-hq/tern'
 import { apply as applyVisualTools } from '../../src/app/host/visual-tools.ts'
+import { DirectSessionLifecycle } from '../../src/runtime/direct/session-lifecycle-direct.ts'
 import {
   createSurfaceRuntime,
   type SurfaceEventRoutingSource,
   type SurfaceRendererMount,
 } from '../../src/app/surface/runtime.ts'
-import { ownVisualOriginSpans, type VerifiedVisualOriginSpan } from '../../src/domain/visual/origin.ts'
 import { createVisualEventSnapshotProvider, type VisualEventSnapshotProvider } from '../../src/app/bootstrap/visual-snapshot.ts'
-import { proveVisualLineage, type VisualLineageQuery } from '../../src/app/bootstrap/visual-lineage.ts'
-import { asVisualSessionEvents, collectPublishedVisuals } from '../../src/domain/visual/publication.ts'
-import type { VisualEventSnapshot } from '../../src/domain/visual/presentation.ts'
+import { asVisualSessionEvents, collectPublishedVisuals, type VisualSessionEvent } from '../../src/domain/visual/publication.ts'
+import { visualReference } from '../../src/domain/visual/reference.ts'
+import { visualFactLine } from '../../src/domain/visual/visual-facts.ts'
+import { assistantVisualPresentation, assistantVisualPresentationRevision, type VisualEventSnapshot } from '../../src/domain/visual/presentation.ts'
 import { TranscriptFolder, type TranscriptMessage } from '../../src/transcript.ts'
 import { TranscriptWindowController } from '../../src/domain/transcript/window.ts'
 import { createPluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
 import { mountTspRenderer, type TspRenderer } from '../../src/tui/tsp/session.ts'
 import { CHART_TOOL_NAME, PRESENT_VISUAL_TOOL_NAME, SVG_TOOL_NAME } from '../../src/domain/visual/tools.ts'
+import type { ChartFact } from '../../src/domain/visual/chart.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 import { readTspBlobMessages } from '../support/tsp-blob-wire.ts'
 
@@ -297,7 +299,7 @@ class ScriptedAdapter extends LlmAdapter {
 }
 
 function refsInPrompt(prompt: string): string[] {
-  return [...prompt.matchAll(/visual-ref-v1:(sv1_[0-9a-f]{20})/gu)].map(match => match[1] as string)
+  return [...prompt.matchAll(/visual-ref-v2:(sv2_[0-9a-f]{20})/gu)].map(match => match[1] as string)
 }
 
 function marker(ref: string): string {
@@ -319,30 +321,23 @@ interface RealSession {
   run(steps: readonly StepPlan[]): Promise<void>
 }
 
-/** Create one official fork child of a live Session in the SAME Host context. */
-async function forkTspSession(ctx: Context, source: RealSession, label: string): Promise<RealSession> {
-  const events = source.session.snapshotEvents()
-  const boundary = events.length - 1
-  assert.ok(boundary >= 0, 'the fork source has a committed event')
-  const sessionId = `${label}-${Math.random().toString(36).slice(2, 10)}`
-  const handle = await ctx.agents.create({
-    sessionId: SessionId(sessionId) as never,
-    seed: buildForkSeed(events, SessionSeq(boundary)),
-    inheritedEventCount: SessionLogOffset(boundary + 1),
-    meta: { parentSession: SessionId(source.sessionId), isSeeded: true },
-    agentOptions: { provider: source.provider, model: 'm' },
-    setup: () => {},
-  })
-  const agent = handle.agent as unknown as {
+/** Create one REAL production Direct fork child of a Session in the SAME Host context. */
+async function forkTspSession(source: RealSession): Promise<RealSession> {
+  const lifecycle = new DirectSessionLifecycle(source.ctx as never, async () => ({ setup: () => {} }))
+  const result = await lifecycle.fork({ sourceSessionId: source.sessionId })
+  assert.equal(result.outcome.kind, 'forked', 'the production Direct fork must settle forked')
+  if (result.outcome.kind !== 'forked') throw new Error('unreachable')
+  const handle = result.outcome.handle
+  const agent = handle.direct?.agent as unknown as {
     followup(message: unknown): void
     whenIdle(): Promise<void>
     session: RealSession['session']
   }
   return {
-    sessionId,
+    sessionId: handle.session.id,
     adapter: source.adapter,
     provider: source.provider,
-    ctx,
+    ctx: source.ctx,
     session: agent.session,
     async run(steps: readonly StepPlan[]): Promise<void> {
       source.adapter.plans = [...steps]
@@ -364,6 +359,7 @@ async function bootRealSession(life: TestLifecycle, label: string): Promise<Real
   const adapter = new ScriptedAdapter()
   const provider = `visual-assistant-${label}`
   ctx.llm.registerAdapter([provider], adapter)
+  ctx.provide('agentDefaultModel', { currentSelection: () => ({ provider, model: 'm' }) } as never)
   const handle = await ctx.agents.create({
     sessionId: SessionId(sessionId) as never,
     agentOptions: { provider, model: 'm' },
@@ -434,6 +430,7 @@ async function mountTspSurface(
         presetPresentation: renderer.presetPresentation,
         sessionBrowserPresentation: renderer.sessionBrowserPresentation,
         interaction: renderer.interaction,
+        exitChoice: renderer.exitChoice,
         bindInput: handlers => renderer.bindInput(handlers),
         dispose: () => renderer.dispose(),
       }
@@ -481,6 +478,7 @@ async function mountTspSurface(
     settleLocalSubmitAck: () => {},
     markSubmitLatency: () => {},
     observeDurableSubmission: () => {},
+    observeDirectPendingSubmissionEvent: () => false,
     markContextDirty: () => {},
     refreshContextMeasurement: () => {},
     currentWorkingFromLog: () => false,
@@ -514,8 +512,6 @@ async function mountTspSurface(
       sessionId: session.sessionId,
       seq: session.session.seq,
       events: asVisualSessionEvents(session.session.snapshotEvents()),
-      verifiedOriginSpans: ownVisualOriginSpans(session.sessionId, 0, session.session.seq),
-      originRevision: 0,
     })),
   })
   surface.attachEventRouting(source)
@@ -558,6 +554,17 @@ function replayEvents(harness: TspSurfaceHarness, folder: TranscriptFolder, even
     folder.apply([event])
     harness.repaint()
   }
+}
+
+/** Every wire id of the committed figure subtrees (roots and descendants). */
+function figureSubtreeIds(tern: ScriptedTern): Set<string> {
+  const ids = new Set<string>()
+  const walk = (node: LiveNode): void => {
+    ids.add(node.id)
+    for (const child of node.children) walk(child)
+  }
+  for (const figure of nodesWhere(tern, node => node.kind === 'col' && node.props['role'] === 'dsh.visual.figure')) walk(figure)
+  return ids
 }
 
 // ── The answer plans ────────────────────────────────────────────────────────
@@ -679,6 +686,10 @@ test('a generated but never published chart stays only in the tool card', async 
   try {
     replayEvents(harness, folder, session.session.snapshotEvents())
     await until('the tool card frame', () => nodesWhere(harness.tern, node => node.kind === 'tool').length > 0)
+    // PR2: the tool result settles in a later targeted Main op, which can be
+    // queued behind an ack. Wait for the actual chart fact, not for the frame
+    // that first introduced the running tool card.
+    await until('the tool card native chart', () => nodesWhere(harness.tern, node => node.kind === 'chart').length === 1)
     assert.equal(figureIds(harness.tern).length, 0, 'the Assistant owns no unpublished figure')
     assert.equal(copyButtonIds(harness.tern).length, 0)
     assert.equal(harness.tern.blobs.length, 0)
@@ -700,7 +711,7 @@ test('a refused present_visual never reaches the Assistant body', async (t) => {
       calls: () => [{
         callId: 'call-present',
         name: PRESENT_VISUAL_TOOL_NAME,
-        args: { visuals: [{ ref: `sv1_${'f'.repeat(20)}` }] },
+        args: { visuals: [{ ref: `sv2_${'f'.repeat(20)}` }] },
       }],
     },
     { text: 'No figure was published.' },
@@ -734,7 +745,6 @@ test('the published refs are the SAME ones the real PR1 authority derives from t
     { text: markerAnswer('', '') },
   ])
   const published = collectPublishedVisuals(
-    session.sessionId,
     asVisualSessionEvents(session.session.snapshotEvents()),
   )
   assert.equal(published.length, 1, 'the real log qualifies exactly one publication')
@@ -753,7 +763,7 @@ test('the published refs are the SAME ones the real PR1 authority derives from t
   }
 })
 
-test('a REAL official fork child replays the inherited Chart and SVG into the mounted TSP surface', async (t) => {
+test('a REAL production ordinary fork replays its inherited Chart and SVG into the mounted TSP surface', async (t) => {
   const life = testLifecycle(t)
   const source = await bootRealSession(life, 'tsp-fork')
   await source.run([
@@ -772,50 +782,38 @@ test('a REAL official fork child replays the inherited Chart and SVG into the mo
     },
     { text: markerAnswer('Latency:\n\n', '\n\nDone.') },
   ])
-  const child = await forkTspSession(source.ctx, source, 'tsp-fork-child')
-  // The child id over the inherited prefix is exactly the pre-fix revocation.
+  const child = await forkTspSession(source)
+  assert.equal(child.session.header.isSeeded, true)
+  assert.equal(child.session.header.parentSession, undefined,
+    'the rc1 ordinary fork child is an independent Session with NO parent pointer')
+  const childEvents = child.session.snapshotEvents()
+  assert.equal(childEvents[child.session.inheritedEventCount]?.type, 'session/end-seed',
+    'the official fork marker sits exactly at the child-owned cut')
   assert.deepEqual(
-    collectPublishedVisuals(child.sessionId, asVisualSessionEvents(child.session.snapshotEvents())),
-    [],
+    collectPublishedVisuals(asVisualSessionEvents(childEvents)).map(entry => entry.source.type),
+    ['chart', 'svg'],
+    'both inherited publications replay immediately from the child’s own log',
   )
 
   const folder = new TranscriptFolder()
-  folder.apply(child.session.snapshotEvents())
-  let latest: VisualEventSnapshot | undefined
-  let surfaceRef: TspSurfaceHarness | undefined
-  const tasks: Promise<void>[] = []
-  const query = source.ctx.get('sessionQuery') as VisualLineageQuery
-  const provider: VisualEventSnapshotProvider = createVisualEventSnapshotProvider({
+  folder.apply(childEvents)
+  // The REAL provider: no ancestry query, no async proof and no second repaint.
+  const provider = createVisualEventSnapshotProvider({
     isRemote: () => false,
     mainAgent: () => ({ session: child.session }),
     viewedChildAgent: () => undefined,
-    lineage: {
-      prove: sessionId => proveVisualLineage(sessionId, query),
-      run: (_label, task) => { tasks.push(task()) },
-      isCurrentSubject: (_subject, called) => called === child.session,
-      requestRepaint: () => { surfaceRef?.repaint() },
-    },
   })
-  const snapshotFor = (): VisualEventSnapshot | undefined => {
-    latest = provider({ subjectKind: 'main', subjectId: child.sessionId })
-    return latest
-  }
+  const snapshotFor = (): VisualEventSnapshot | undefined =>
+    provider({ subjectKind: 'main', subjectId: child.sessionId })
   const harness = await mountTspSurface(child, folder, snapshotFor)
-  surfaceRef = harness
   try {
-    replayEvents(harness, folder, child.session.snapshotEvents())
-    assert.ok(tasks.length >= 1, 'the mounted surface started the official lineage read')
-    await tasks[0]
+    replayEvents(harness, folder, childEvents)
     await until('the two inherited figures', () => figureIds(harness.tern).length === 2)
     assert.equal(figureDescendantKinds(harness.tern, 'chart').length, 1,
       'the inherited chart paints one native chart')
     assert.equal(figureDescendantKinds(harness.tern, 'image').length, 1,
       'the inherited SVG paints one native image')
     assert.equal(harness.tern.blobs.length, 1, 'the one content-addressed SVG blob is sent')
-    assert.deepEqual(latest?.verifiedOriginSpans, [
-      { startSeq: 0, endSeqExclusive: source.session.seq, sessionId: source.sessionId },
-      { startSeq: source.session.seq, endSeqExclusive: child.session.seq, sessionId: child.sessionId },
-    ], 'TSP consumes the SAME proven origin ranges as the PiTUI sidecar')
 
     // The SAME Alt+V/Alt+C path copies the inherited chart fact and SVG bytes.
     harness.tern.key('\u001bv')
@@ -829,6 +827,248 @@ test('a REAL official fork child replays the inherited Chart and SVG into the mo
     await until('the inherited SVG copy', () => harness.copies.length === 2)
     assert.equal(harness.copies[1], SVG_SOURCE, 'the inherited SVG source bytes are unchanged')
     assert.equal(harness.fatalErrors.length, 0)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('an unrelated later turn never re-materializes a committed historical figure', async (t) => {
+  const life = testLifecycle(t)
+  const session = await bootRealSession(life, 'stable-figure')
+  await session.run([
+    { calls: [{ callId: 'call-chart', name: CHART_TOOL_NAME, args: CHART }] },
+    {
+      calls: prompt => [{
+        callId: 'call-present',
+        name: PRESENT_VISUAL_TOOL_NAME,
+        args: { visuals: [{ ref: refsInPrompt(prompt)[0] }] },
+      }],
+    },
+    { text: markerAnswer('Before figure.\n\n', '\n\nAfter figure.') },
+  ])
+
+  const folder = new TranscriptFolder()
+  const harness = await mountTspSurface(session, folder)
+  try {
+    replayEvents(harness, folder, session.session.snapshotEvents())
+    await until('the committed figure', () => figureIds(harness.tern).length === 1)
+    const figureSubtree = figureSubtreeIds(harness.tern)
+    assert.ok(figureSubtree.size > 0, 'the figure subtree is committed and indexed')
+    // The exact fold row that owns the figure sidecar.
+    const figureRow = folder.messages().find(
+      message => message.kind === 'assistant' && assistantVisualPresentationRevision(message) > 0,
+    )
+    assert.ok(figureRow !== undefined, 'the production derivation attached a sidecar to the fold row')
+    const revisionBefore = assistantVisualPresentationRevision(figureRow)
+
+    // A follow-up turn of the SAME session commits new events (the snapshot
+    // grows) but publishes nothing. The PR2 sidecar identity has no committed
+    // `seq` part and the publication index keeps ONE stable derivation for
+    // content-identical re-reads, so the sidecar revision must NOT advance:
+    // that revision is an assistant stamp input, and an advancing one would
+    // re-materialize the historical figure row on every unrelated commit.
+    const known = session.session.snapshotEvents().length
+    const framesBefore = harness.tern.frames.length
+    await session.run([{ text: 'a plain follow-up answer with no visuals' }])
+    replayEvents(harness, folder, session.session.snapshotEvents().slice(known))
+    await until('the follow-up answer', () => mdTexts(harness.tern).some(text => text.includes('a plain follow-up')))
+
+    assert.equal(assistantVisualPresentationRevision(figureRow), revisionBefore,
+      'an unrelated session commit never advances the historical figure sidecar')
+
+    const touched = new Set<string>()
+    for (const frame of harness.tern.frames.slice(framesBefore)) {
+      for (const op of frame.ops) {
+        const id = op[1]
+        if (typeof id === 'string' && figureSubtree.has(id)) touched.add(id)
+      }
+    }
+    assert.deepEqual([...touched], [], 'no wire op targeted the historical figure subtree')
+    assert.equal(figureIds(harness.tern).length, 1, 'the historical figure is still painted')
+    assert.equal(harness.fatalErrors.length, 0)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('a later publication keeps unrelated historical figures at their revision', async (t) => {
+  const life = testLifecycle(t)
+  const session = await bootRealSession(life, 'append-figure')
+  await session.run([
+    { calls: [{ callId: 'call-chart-1', name: CHART_TOOL_NAME, args: { ...CHART, title: 'First chart' } }] },
+    {
+      calls: prompt => [{
+        callId: 'call-present-1',
+        name: PRESENT_VISUAL_TOOL_NAME,
+        args: { visuals: [{ ref: refsInPrompt(prompt)[0] }] },
+      }],
+    },
+    { text: markerAnswer('First figure.\n\n', '\n\nEnd of first.') },
+  ])
+
+  const folder = new TranscriptFolder()
+  const harness = await mountTspSurface(session, folder)
+  try {
+    replayEvents(harness, folder, session.session.snapshotEvents())
+    await until('the first figure', () => figureIds(harness.tern).length === 1)
+    const firstSubtree = figureSubtreeIds(harness.tern)
+    const firstRow = folder.messages().find(
+      message => message.kind === 'assistant' && assistantVisualPresentationRevision(message) > 0,
+    )
+    assert.ok(firstRow !== undefined, 'the first figure row owns a sidecar')
+    const revisionBefore = assistantVisualPresentationRevision(firstRow)
+
+    // A LATER turn of the SAME session publishes a second figure. The first
+    // figure's display content and authoritative identity are unchanged, so
+    // its stable object identity must survive the re-derivation: the first
+    // row's sidecar revision never advances and no wire op touches its
+    // subtree, even though the whole publication list grew by one entry.
+    const known = session.session.snapshotEvents().length
+    const framesBefore = harness.tern.frames.length
+    const firstRef = refsInPrompt(JSON.stringify(session.session.snapshotEvents()))[0]
+    await session.run([
+      { calls: [{ callId: 'call-chart-2', name: CHART_TOOL_NAME, args: { ...CHART, title: 'Second chart' } }] },
+      {
+        calls: prompt => [{
+          callId: 'call-present-2',
+          name: PRESENT_VISUAL_TOOL_NAME,
+          args: { visuals: [{ ref: refsInPrompt(prompt).find(ref => ref !== firstRef) }] },
+        }],
+      },
+      { text: 'Second answer, no marker.' },
+    ])
+    replayEvents(harness, folder, session.session.snapshotEvents().slice(known))
+    await until('the two figures', () => figureIds(harness.tern).length === 2)
+    assert.equal(assistantVisualPresentationRevision(firstRow), revisionBefore,
+      'appending a figure never advances the unrelated historical sidecar')
+    const touched = new Set<string>()
+    for (const frame of harness.tern.frames.slice(framesBefore)) {
+      for (const op of frame.ops) {
+        const id = op[1]
+        if (typeof id === 'string' && firstSubtree.has(id)) touched.add(id)
+      }
+    }
+    assert.deepEqual([...touched], [], 'no wire op touched the first figure subtree')
+    assert.equal(harness.fatalErrors.length, 0)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+// ── The publication-index derivation cost ───────────────────────────────────
+
+const TIMING_EVENTS = 40_000
+const TIMING_CHART_PAIRS = 500
+
+/**
+ * One committed log with a bounded amount of real derivation work: chart
+ * call/result pairs whose facts actually parse (qualification runs) plus
+ * plain tool pairs, and NO `present_visual` call (no publication sidecars —
+ * this measures ONLY the snapshot derivation path).
+ */
+function timingEvents(): VisualSessionEvent[] {
+  const events: VisualSessionEvent[] = []
+  let seq = 0
+  const next = (): number => seq++
+  events.push({ type: 'turn/start', seq: next(), data: { turn: 7 } })
+  for (let index = 0; index < TIMING_CHART_PAIRS; index += 1) {
+    events.push({ type: 'step/start', seq: next(), data: { turn: 7, step: index } })
+    events.push({
+      type: 'assistant/message', seq: next(), data: { turn: 7, step: index, message: { content: [] } },
+    })
+    const callId = `timing-chart-${index}`
+    const ref = visualReference({ turn: 7, stepStartSeq: seq - 1, callId })
+    events.push({
+      type: 'tool/call', seq: next(), data: { turn: 7, step: index, callId, name: CHART_TOOL_NAME, arguments: JSON.stringify(CHART) },
+    })
+    events.push({
+      type: 'tool/result', seq: next(), data: { turn: 7, step: index, message: {
+        toolCallId: callId,
+        content: [
+          { type: 'text', text: `visual-ref-v2:${ref}` },
+          { type: 'text', text: visualFactLine({ version: 1, type: 'chart', kind: 'bars' as const, title: CHART.title, unit: CHART.unit, series: CHART.series } satisfies ChartFact) },
+        ],
+      } },
+    })
+    events.push({ type: 'step/end', seq: next(), data: { turn: 7, step: index } })
+  }
+  while (events.length < TIMING_EVENTS) {
+    events.push({ type: 'step/start', seq: next(), data: { turn: 8, step: events.length } })
+    events.push({
+      type: 'tool/call', seq: next(), data: { turn: 8, step: events.length, callId: `filler-${events.length}`, name: 'bash', arguments: '{}' },
+    })
+    events.push({
+      type: 'tool/result', seq: next(), data: { turn: 8, step: events.length, message: { toolCallId: `filler-${events.length - 1}`, content: [{ type: 'text', text: 'ok' }] } },
+    })
+    events.push({ type: 'step/end', seq: next(), data: { turn: 8, step: events.length } })
+  }
+  return events
+}
+
+test('an unchanged snapshot derivation is short-circuited, not re-run per repaint', async (t) => {
+  const life = testLifecycle(t)
+  const session = await bootRealSession(life, 'timing')
+  const events = timingEvents()
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
+    {
+      type: 'user/message', seq: 1, time: 2, data: {
+        id: MessageId('u-timing'), role: 'user', content: [{ type: 'text', text: 'timing window' }], source: { kind: 'user' },
+      },
+    },
+    {
+      type: 'assistant/message', seq: 2, time: 3, data: {
+        turn: 1, step: 0,
+        message: { id: MessageId('a-timing'), role: 'assistant', content: [{ type: 'text', text: 'a plain answer' }], source: { kind: 'model', provider: 'p', model: 'm' }, stream: [] },
+      },
+    },
+    { type: 'turn/end', seq: 3, time: 4, data: { turn: 1, reason: { kind: 'completed' } } },
+  ] as unknown as SessionEvent[])
+  let committedSeq = 42
+  const snapshotFor = (): VisualEventSnapshot => ({
+    session: session.session,
+    sessionId: session.sessionId,
+    seq: committedSeq,
+    events,
+  })
+  const harness = await mountTspSurface(session, folder, snapshotFor)
+  try {
+    // The timing Session itself stays empty: commit the hand-built window with
+    // ONE explicit repaint (replayEvents has no events to drive).
+    harness.repaint()
+    await until('the timing answer', () => mdTexts(harness.tern).some(text => text.includes('a plain answer')))
+    assert.equal(harness.fatalErrors.length, 0)
+
+    // Same window, same journal work, ONLY the snapshot currency differs:
+    // A keeps the snapshot UNCHANGED (seq 42) — the publication index must be
+    // O(1)-short-circuited per repaint; B bumps the committed seq per repaint
+    // (an unrelated session event) — each repaint MUST re-derive the full log
+    // once (and then keep the previous index for unchanged content). The
+    // derivation cost shows up as the A→B delta, never inside A.
+    const repaints = 20
+    let started = performance.now()
+    for (let index = 0; index < repaints; index += 1) harness.repaint()
+    const unchangedMs = performance.now() - started
+    started = performance.now()
+    for (let index = 0; index < repaints; index += 1) {
+      committedSeq += 1
+      harness.repaint()
+    }
+    const unrelatedCommitMs = performance.now() - started
+    // C: the NEW committed revision is now STABLE. After the first repaint at
+    // this seq moved the short-circuit cursor, every further repaint here is
+    // the same seq and must be O(1) again — a token hit that does NOT move
+    // the cursor leaves every subsequent repaint at a full re-derivation,
+    // which this ratio detects deterministically.
+    started = performance.now()
+    for (let index = 0; index < repaints; index += 1) harness.repaint()
+    const settledMs = performance.now() - started
+    assert.equal(harness.fatalErrors.length, 0)
+    assert.ok(unrelatedCommitMs > unchangedMs * 3 && unrelatedCommitMs - unchangedMs > 40,
+      `an unchanged snapshot must not re-run the derivation per repaint (unchanged=${Math.round(unchangedMs)}ms, unrelated-commit=${Math.round(unrelatedCommitMs)}ms for ${repaints} repaints each)`)
+    assert.ok(unrelatedCommitMs > settledMs * 3,
+      `repaints at the NEW committed seq must be short-circuited again after the first one (settled=${Math.round(settledMs)}ms vs unrelated-commit=${Math.round(unrelatedCommitMs)}ms for ${repaints} repaints each)`)
   } finally {
     await harness.dispose()
   }

@@ -161,6 +161,18 @@ export class DraftImageStore {
     return this.forgetImage(id)
   }
 
+  /**
+   * Retire one CONSUMED image only when no OTHER accepted submission still
+   * reserves it. Undo leases are not another gesture's ownership: a consumed
+   * image keeps today's behavior (the undo snapshot is retired with it). The
+   * caller must release its OWN submission reservation before calling this.
+   */
+  consume(id: DraftImageId): boolean {
+    const pins = this.pins.get(id)
+    if (pins !== undefined && pins.submission > 0) return false
+    return this.forgetImage(id)
+  }
+
   /** Remove an id and every pin/lease/order entry for it. */
   private forgetImage(id: DraftImageId): boolean {
     const image = this.images.get(id)

@@ -381,14 +381,14 @@ function bodyViewOf(
   const view = transcriptView(projectTranscriptStructure([message]), new TranscriptNodeKeys(), {
     ...(states === undefined ? {} : { imageStates: states }),
   })
-  const cards: { kind: string; props: Record<string, unknown>; children: readonly { readonly kind: string; readonly props: Record<string, unknown> }[] }[] = []
+  const leaves: { kind: string; props: Record<string, unknown>; children: readonly { readonly kind: string; readonly props: Record<string, unknown> }[] }[] = []
   const walk = (node: { kind: string; props: Record<string, unknown>; children: readonly unknown[] }): void => {
-    if (node.kind === 'card') cards.push(node as never)
+    if (node.kind === 'message' || node.props['role'] === 'dsh.transcript.assistant') leaves.push(node as never)
     for (const child of node.children) walk(child as never)
   }
   walk(view as never)
-  const found = cards[0]
-  assert.ok(found !== undefined, 'the row must render one card node')
+  const found = leaves[0]
+  assert.ok(found !== undefined, 'the message leaf must render one native body container')
   return found
 }
 

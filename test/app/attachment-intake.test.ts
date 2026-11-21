@@ -1,5 +1,6 @@
 import { strict as assert } from 'node:assert'
 import { execFile } from 'node:child_process'
+import { renameSync, statSync, symlinkSync, utimesSync } from 'node:fs'
 import { rm, truncate, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -7,9 +8,12 @@ import { promisify } from 'node:util'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { DraftFileStore } from '../../src/client/media/attachment/file-draft.ts'
 import { admitDraftFiles } from '../../src/app/submission/direct-file-admission.ts'
+import { preparePrompt } from '../../src/app/submission/prepared-prompt.ts'
+import { RemotePromptSerializerProduction } from '../../src/runtime/remote/prompt-serializer-remote.ts'
 import { FILE_STREAM_CHUNK_BYTES } from '../../src/client/media/attachment/file-stream.ts'
 import { FileInputError } from '../../src/domain/media/errors.ts'
 import { probeAttachment } from '../../src/client/media/attachment/intake.ts'
+import { streamDraftFile } from '../../src/client/media/attachment/file-stream.ts'
 import { expandAttachmentPlaceholders } from '../../src/client/media/attachment/placeholder.ts'
 import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
 
@@ -37,6 +41,63 @@ test('a supported raster signature stays on the image path', async (t) => {
   await writeFile(path, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
   const result = await probeAttachment('broken.png', root)
   assert.deepEqual(result, { kind: 'image', path, mediaType: 'image/png' })
+})
+
+test('a symlinked attachment is canonicalized to its target, and a non-file target is refused', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-attachment-link-')
+  const target = join(root, 'report.pdf')
+  await writeFile(target, Buffer.from('%PDF-1.7\nbody'))
+  const link = join(root, 'link.pdf')
+  symlinkSync(target, link)
+  const probe = await probeAttachment('./link.pdf', root)
+  assert.equal(probe.kind, 'file')
+  if (probe.kind === 'file') {
+    // The existing return contract is the REAL target, including its display
+    // name: the Client must never key a draft on the symlink spelling, or a
+    // later rename of the link would look like a different file.
+    assert.equal(probe.path, target)
+    assert.equal(probe.name, 'report.pdf')
+    const targetStats = statSync(target, { bigint: true })
+    assert.equal(probe.fingerprint.ino, targetStats.ino)
+  }
+  // A symlink to a directory resolves to a non-regular target and is refused.
+  const directory = join(root, 'directory')
+  await import('node:fs/promises').then(fs => fs.mkdir(directory))
+  const directoryLink = join(root, 'dir-link')
+  symlinkSync(directory, directoryLink)
+  await assert.rejects(
+    probeAttachment('./dir-link', root),
+    (error: unknown) => error instanceof FileInputError && /Not a regular file/u.test(error.message),
+  )
+})
+
+test('a renamed/recreated source is refused by device+inode identity, not by path text', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-attachment-swap-')
+  const path = join(root, 'report.pdf')
+  const bytes = Buffer.from('%PDF-1.7\nbody')
+  await writeFile(path, bytes)
+  const probe = await probeAttachment('report.pdf', root)
+  assert.equal(probe.kind, 'file')
+  if (probe.kind !== 'file') return
+  const store = new DraftFileStore()
+  const draft = store.add({
+    name: probe.name,
+    byteLength: probe.byteLength,
+    source: { type: 'path', path: probe.path, fingerprint: probe.fingerprint },
+  })
+  // Move the original away and recreate the SAME path with the SAME bytes and
+  // mtime: only the device/inode identity can tell them apart. A path-text or
+  // size/mtime check would accept the replacement.
+  renameSync(path, `${path}.moved`)
+  await writeFile(path, bytes)
+  utimesSync(path, probe.fingerprint.mtimeNs ? Number(probe.fingerprint.mtimeNs / 1_000_000_000n) : 0, Number(probe.fingerprint.mtimeNs / 1_000_000_000n))
+  const stream = streamDraftFile(draft)
+  await assert.rejects(
+    (async () => { for await (const _chunk of stream) { /* drain */ } })(),
+    (error: unknown) => error instanceof FileInputError && /File changed since it was attached/u.test(error.message),
+  )
 })
 
 test('probeAttachment rejects a FIFO without opening a blocking reader', async (t) => {
@@ -122,6 +183,41 @@ test('generic admission streams bounded chunks and reuses recalled refs', async 
   })
   assert.equal(saves, 0)
   assert.deepEqual(recalledRefs[0], { attachmentId: 'sha256:old', name: 'old.bin', bytes: 3 })
+})
+
+test('a file changed after /attach never becomes an uploadable prepared prompt', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-attachment-')
+  const path = join(root, 'remote-mutable.bin')
+  const original = Buffer.alloc(FILE_STREAM_CHUNK_BYTES * 2, 5)
+  await writeFile(path, original)
+  const probe = await probeAttachment(path, root)
+  assert.equal(probe.kind, 'file')
+  if (probe.kind !== 'file') return
+  const files = new DraftFileStore()
+  const draft = files.add({
+    name: probe.name,
+    byteLength: probe.byteLength,
+    source: { type: 'path', path: probe.path, fingerprint: probe.fingerprint },
+  })
+  const prepared = preparePrompt('session-a', `remote ${draft.placeholder}`, { images: new DraftImageStore(), files })
+  // The source is replaced AFTER the immutable snapshot was prepared: the
+  // Remote upload must refuse the new bytes and produce no receipt.
+  await writeFile(path, Buffer.alloc(3, 9))
+  let receipts = 0
+  const serializer = new RemotePromptSerializerProduction(undefined, {
+    async upload(_sessionId, prepared, signal) {
+      if (prepared.source.kind !== 'client-stream') throw new Error('unexpected recalled source')
+      for await (const _chunk of prepared.source.open(signal)) { /* consume */ }
+      receipts += 1
+      return { receiptId: 'unexpected', file: { attachmentId: 'unexpected', name: prepared.name, bytes: 3 } }
+    },
+  })
+  await assert.rejects(
+    serializer.serialize(prepared, new AbortController().signal),
+    (error: unknown) => error instanceof FileInputError && error.message.includes('changed since it was attached'),
+  )
+  assert.equal(receipts, 0, 'the Remote path never obtains a Host receipt for changed bytes')
 })
 
 test('file mutation before or during streaming rejects and never completes admission', async (t) => {

@@ -1,0 +1,742 @@
+/**
+ * The ONE selectable-case registry and the strict selector grammar for
+ * `scripts/split-process-smoke.mjs`.
+ *
+ * The registry is the single static data fact behind `--list`, selector
+ * resolution, the actual run call and the selected result line: there is no
+ * second hand-written suite list and no directory scan. This module is pure —
+ * importing it installs nothing, creates no work root and instantiates no
+ * process.
+ *
+ * The default (no selector) mode stays the OLD full qualification lane; a
+ * selector only runs the registered cases below and never claims the complete
+ * inventory.
+ *
+ * @module split-smoke-selection
+ */
+
+import { runAuthenticatedLifecycle } from '../smoke/split-process/authenticated-lifecycle.mjs'
+import { runClientHmrSignals } from '../smoke/split-process/client-hmr-signals.mjs'
+import { runDetachedTurnInteractions } from '../smoke/split-process/detached-turn-interactions.mjs'
+import { runNonDestructiveClientLifecycle } from '../smoke/split-process/non-destructive-client-lifecycle.mjs'
+import { runDaemonUiHostStop, runDaemonUiHostStopPath3 } from '../smoke/split-process/daemon-ui-host-stop-m6-ux-pr2.mjs'
+import { runReadAuthority } from '../smoke/split-process/read-authority.mjs'
+import { runHostDirectoryBrowse } from '../smoke/split-process/host-directory-browse.mjs'
+import { runHostDirectoryInlineChooser } from '../smoke/split-process/host-directory-inline-chooser.mjs'
+import {
+  runWorkspaceFirstSubmitFailureRecovery,
+  runWorkspaceNewFailureRecovery,
+} from '../smoke/split-process/workspace-failure-recovery.mjs'
+import { runInteractionNavigationFirst } from '../smoke/split-process/interaction-admission.mjs'
+import { runPlanReview } from '../smoke/split-process/plan-review.mjs'
+import { runTeamBoard } from '../smoke/split-process/team-board.mjs'
+import { runSessionWorkspaceActivity } from '../smoke/split-process/session-workspace-activity.mjs'
+import { runSessionWorkspaceEditorEntry } from '../smoke/split-process/session-workspace-editor-entry.mjs'
+import {
+  runLiveSkillsHot,
+  runSessionlessSkillsHot,
+  runSkillsRecovery,
+} from '../smoke/split-process/skills.mjs'
+import { runEntryAdmission } from '../smoke/split-process/entry-admission.mjs'
+import { runOfficialWebComposition } from '../smoke/split-process/official-web-composition.mjs'
+import { runPtySessionWriteRecovery } from '../smoke/split-process/pty-session-write-recovery.mjs'
+import { runSessionlessHostFileF5B } from '../smoke/split-process/sessionless-host-file-f5b.mjs'
+import { runSessionlessDefaultModel } from '../smoke/split-process/sessionless-default-model.mjs'
+import { runRemoteGitBranchLocality } from '../smoke/split-process/remote-git-branch-locality.mjs'
+import { runSharedSessionInteractions } from '../smoke/split-process/shared-session-interactions.mjs'
+import { runPromptSessionFocusTurnParity } from '../smoke/split-process/prompt-session-focus-turn-parity.mjs'
+import { runHostRuntimeDisabled } from '../smoke/split-process/host-runtime-disabled.mjs'
+import { runHostUserShellF1 } from '../smoke/split-process/host-user-shell-f1.mjs'
+import { runSessionlessShellCompletionG14 } from '../smoke/split-process/sessionless-shell-completion-g14.mjs'
+import { runGenericFileUploadF4 } from '../smoke/split-process/generic-file-upload-f4.mjs'
+import { runHostCommandFileReceipt } from '../smoke/split-process/host-command-file-receipt.mjs'
+import { runRuntimeArtifactRecovery } from '../smoke/split-process/runtime-artifact-recovery.mjs'
+import { runUnknownWriteHostDeath } from '../smoke/split-process/unknown-write-host-death.mjs'
+import { runWebProductQualification } from '../smoke/split-process/web-product.mjs'
+import { runWebRuntimeToggle } from '../smoke/split-process/web-runtime-toggle.mjs'
+import { runMcpServersFr3 } from '../smoke/split-process/mcp-servers-fr3.mjs'
+import { runMcpServersFr4 } from '../smoke/split-process/mcp-servers-fr4.mjs'
+import { runSubagentSettingsFr5A } from '../smoke/split-process/subagent-settings-fr5a.mjs'
+import { runHostNumericSettingsFr5B } from '../smoke/split-process/host-numeric-settings-fr5b.mjs'
+import { runExtensionConfigPr2 } from '../smoke/split-process/r8-extension-config-pr2.mjs'
+import { runClientExtensionLoaderPr3 } from '../smoke/split-process/r8-extension-client-loader-pr3.mjs'
+import { runWebStartupPreference } from '../smoke/split-process/web-startup-preference.mjs'
+import { runWebCliM6 } from '../smoke/split-process/web-cli-m6.mjs'
+import { runProfilePreferencesQualification } from '../smoke/split-process/profile-preferences.mjs'
+import { runF2AccountComposition } from '../smoke/split-process/account-composition.mjs'
+import { runF7AProviderAuthorization } from '../smoke/split-process/provider-authorization-f7a.mjs'
+import { runF7BCredentialRecords } from '../smoke/split-process/provider-credential-records-f7b.mjs'
+import { runF8SessionPolicy } from '../smoke/split-process/session-policy-f8.mjs'
+import { runHerdrH1 } from '../smoke/split-process/herdr-h1.mjs'
+import { runWebProviderSettingsF3 } from '../smoke/split-process/web-provider-settings-f3.mjs'
+import { runHerdrH2, runHerdrH3 } from '../smoke/split-process/herdr-h2.mjs'
+import { runAcpPo1 } from '../smoke/split-process/acp-po1.mjs'
+import { runPublicDaemonEntry } from '../smoke/split-process/public-daemon-entry-m6-2a.mjs'
+import { runAcpPo1bOptInControl } from '../smoke/split-process/acp-po1b.mjs'
+import { runAcpPo2SessionView } from '../smoke/split-process/acp-po2-session-view.mjs'
+import {
+  runManagedHostAuthFailureNegative,
+  runManagedHostConcurrentColdStart,
+  runManagedHostCrashRestart,
+  runManagedHostFallback,
+  runManagedHostManagerError,
+  runManagedHostSystemd,
+  runManagedHostTwoProfileIsolation,
+} from '../smoke/split-process/managed-host-m6-2b.mjs'
+import { runAcpPo3aTurnEvents } from '../smoke/split-process/acp-po3a-turn-events.mjs'
+import { runAcpPo3bCancelApproval } from '../smoke/split-process/acp-po3b-cancel-approval.mjs'
+import { runAcpPo4aContentInput } from '../smoke/split-process/acp-po4a-content-input.mjs'
+import { runAcpPo4cContentOutput } from '../smoke/split-process/acp-po4c-content-output.mjs'
+import { runAcpSdkContentInteroperability } from '../smoke/split-process/acp-sdk-content-interoperability.mjs'
+import {
+  runDaemonControlConcurrentControls,
+  runDaemonControlInflightStop,
+  runDaemonControlManagerError,
+  runDaemonControlOwnerAndMultiProfile,
+  runDaemonControlProcessFallback,
+  runDaemonControlStatusSafety,
+  runDaemonControlSystemdLifecycle,
+} from '../smoke/split-process/daemon-controls-m6-2c.mjs'
+import { SplitSmokeInputError } from './split-smoke-diagnostics.mjs'
+
+/** The evidence scope every selected result declares. */
+const SELECTABLE_SCOPE = 'SELECTABLE_ONLY'
+
+/**
+ * The platform eligibility fact of one registry entry. It names the OS
+ * platforms where a REAL selected run of this case has actually been qualified
+ * to execute (the shared Darwin driver plus the eight business cases are the
+ * current Mac scope); every entry without proven native support stays
+ * `['linux']`. This is an executable support range, never a user product API.
+ */
+const LINUX_ONLY = Object.freeze(['linux'])
+const LINUX_DARWIN = Object.freeze(['linux', 'darwin'])
+
+/**
+ * The frozen selectable cases, in registration order.
+ *
+ * The order IS the fact: a suite runs these entries in exactly this sequence and
+ * the full lane runs every migrated entry through the same `run()` at its old
+ * position. `bootstrap` keeps the row-disabled pilot first, then the entry
+ * admission and artifact-recovery negatives; `transport` owns the whole
+ * authenticated-link chain; `surface`, `multi-client` and `navigation` own the
+ * real-surface, shared-Session and non-destructive Client scenes; `recovery`
+ * owns the detached-interaction, HMR/signal and unknown-write Host-death
+ * continuity evidence; `account` owns the official Account Controller, verified
+ * callback and PKCE proof; `subagent-settings` owns the FR5-A dual-namespace
+ * authenticated Settings proof; `web` owns the official Web composition, the live
+ * runtime toggle, the profile startup preference and the product Browser/TUI
+ * matrix.
+ */
+const CASE_REGISTRY = Object.freeze([
+  Object.freeze({
+    suite: 'bootstrap',
+    id: 'bootstrap.host-runtime-disabled',
+    title: 'a disabled Host Runtime owner refuses Ready without publishing a Host identity',
+    run: runHostRuntimeDisabled,
+  }),
+  Object.freeze({
+    suite: 'bootstrap',
+    id: 'bootstrap.entry-admission',
+    title: 'an inherited Host role without a mounted TUI surface is refused before Host admission',
+    run: runEntryAdmission,
+  }),
+  Object.freeze({
+    suite: 'bootstrap',
+    id: 'bootstrap.runtime-artifact-recovery',
+    title: 'a renamed-away Host Runtime artifact fails closed and the restored artifact reaches authenticated Ready',
+    run: runRuntimeArtifactRecovery,
+  }),
+  Object.freeze({
+    suite: 'transport',
+    id: 'transport.authenticated-lifecycle',
+    title: 'concurrent Host launches elect one authenticated owner whose Client lifecycle survives exits and signals',
+    run: runAuthenticatedLifecycle,
+  }),
+  Object.freeze({
+    suite: 'surface',
+    id: 'surface.host-user-shell-f1',
+    title: 'real installed Host Shell and Host completion use Host environment, bound output and exact Session writes',
+    run: runHostUserShellF1,
+  }),
+  Object.freeze({
+    suite: 'surface',
+    id: 'surface.sessionless-shell-completion-g14',
+    title: 'two real sessionless TUIs complete the Shell from their own Host Workspace environment and never from the Client or a Session',
+    run: runSessionlessShellCompletionG14,
+  }),
+  Object.freeze({
+    suite: 'surface',
+    id: 'surface.generic-file-upload-f4',
+    title: 'a real Client /attach uploads its own file bytes through the official Host receipt into the exact Session',
+    platforms: LINUX_DARWIN,
+    run: runGenericFileUploadF4,
+  }),
+  Object.freeze({
+    suite: 'surface',
+    id: 'surface.host-command-file-receipt',
+    title: 'a real Client /attach delivers its own FILE into a declared Host command through the official staged receipt',
+    run: runHostCommandFileReceipt,
+  }),
+  Object.freeze({
+    suite: 'surface',
+    id: 'surface.pty-session-write-recovery',
+    title: 'one authenticated Host drives real PTY surfaces through Session writes, recovery and stale-generation fences',
+    run: runPtySessionWriteRecovery,
+  }),
+  Object.freeze({
+    suite: 'surface',
+    id: 'surface.sessionless-host-file-f5b',
+    title: 'two real sessionless TUIs list their own Host Workspace @file markers, an explicit `@../`/absolute query reaches OUTSIDE the registered root by Host path while a bare query stays inside, and a different mount view and an unproved launch cwd adopt nothing',
+    platforms: LINUX_DARWIN,
+    run: runSessionlessHostFileF5B,
+  }),
+  Object.freeze({
+    suite: 'surface',
+    id: 'surface.sessionless-default-model',
+    title: 'a real sessionless /model Save default persists the Host default, survives an independent Host restart and becomes the next Session fallback — with two Clients saving in real receive order',
+    run: runSessionlessDefaultModel,
+  }),
+  Object.freeze({
+    suite: 'surface',
+    id: 'surface.remote-git-branch-locality',
+    title: 'a real split Client never presents its local Git HEAD as a live Host Session branch',
+    platforms: LINUX_DARWIN,
+    defaultLane: false,
+    run: runRemoteGitBranchLocality,
+  }),
+  Object.freeze({
+    suite: 'multi-client',
+    id: 'multi-client.shared-session-interactions',
+    title: 'two real Clients retain one Session and settle one Host Question or Approval exactly once',
+    platforms: LINUX_DARWIN,
+    run: runSharedSessionInteractions,
+  }),
+  Object.freeze({
+    suite: 'prompt',
+    id: 'prompt.session-focus-turn-parity',
+    title: 'per-Turn TUI prompt policy follows the live session-view roster: any Focus viewer wins, a frozen Turn survives its viewer exiting mid-turn, and a fresh Peer decides its own Turn',
+    platforms: LINUX_DARWIN,
+    run: runPromptSessionFocusTurnParity,
+  }),
+  Object.freeze({
+    suite: 'navigation',
+    id: 'navigation.non-destructive-client-lifecycle',
+    title: 'leaving a Session from one Client never stops the Host Turn another Client keeps reading',
+    run: runNonDestructiveClientLifecycle,
+  }),
+  Object.freeze({
+    suite: 'daemon-control',
+    defaultLane: false,
+    id: 'daemon-control.m6-ux-pr2-ui-host-stop',
+    title: 'the real Settings/Exit UI Leave keeps the old Host and a sibling Client alive, and an explicit Stop stops it exactly once',
+    run: runDaemonUiHostStop,
+  }),
+  Object.freeze({
+    suite: 'daemon-control',
+    defaultLane: false,
+    id: 'daemon-control.m6-ux-pr2-ui-host-stop-path3',
+    title: 'a real second Client write is caught by the real fresh read: the Stop confirm is refused, ZERO admin stops, and the old Host stays alive',
+    run: runDaemonUiHostStopPath3,
+  }),
+  Object.freeze({
+    suite: 'read',
+    id: 'read.official-read-authority',
+    title: 'A(Y) reads X\'s real Host pending/Workspace facts through the ONE read-authority port and answers X through the existing first-settlement path',
+    run: runReadAuthority,
+  }),
+  Object.freeze({
+    suite: 'read',
+    id: 'read.host-directory-browse',
+    title: 'a real Host-only directory-picker serves a Sessionless Split Client the Host home, an explicit Host level and an isolated Client directory exclusion through the ONE read-only browse port',
+    run: runHostDirectoryBrowse,
+  }),
+  Object.freeze({
+    suite: 'interaction',
+    id: 'interaction.navigation-first-answerability',
+    title: 'navigation-first admission holds a forwarded interaction until its Session commits and re-offers the SAME request after a no-answer navigation',
+    run: runInteractionNavigationFirst,
+  }),
+  Object.freeze({
+    suite: 'interaction',
+    id: 'interaction.workspace-needs-attention',
+    title: 'the Session Workspace proves a forwarded Question as a Needs-attention row, keeps its answer modal off the wrong editor, peeks read-only and answers only after the real Session commit',
+    run: runSessionWorkspaceActivity,
+  }),
+  Object.freeze({
+    suite: 'interaction',
+    id: 'interaction.workspace-editor-entry',
+    title: 'two real PTY Left presses from the empty PiTUI Host Editor open the ONE All-workspaces Session Workspace without switching, stopping or answering',
+    run: runSessionWorkspaceEditorEntry,
+  }),
+  Object.freeze({
+    suite: 'interaction',
+    id: 'interaction.host-directory-inline-chooser',
+    title: 'a real Sessionless Split Client completes a Host-only directory through the inline chooser and registers it through the ONE existing Workspace resolve without creating a Session',
+    run: runHostDirectoryInlineChooser,
+  }),
+  Object.freeze({
+    suite: 'interaction',
+    id: 'interaction.workspace-new-failure-recovery',
+    title: 'a real refused /new opens the full Workspace tree, Add registers only the Host directory and the explicit Folder New commits exactly one Session',
+    run: runWorkspaceNewFailureRecovery,
+  }),
+  Object.freeze({
+    suite: 'interaction',
+    id: 'interaction.workspace-first-submit-failure-recovery',
+    title: 'a real refused first submit restores its attachment-free draft, Verify registers only the Workspace and a second Enter writes the marker exactly once',
+    run: runWorkspaceFirstSubmitFailureRecovery,
+  }),
+  Object.freeze({
+    suite: 'interaction',
+    id: 'interaction.plan-review',
+    title: 'a real Split Client approves the OFFICIAL exit_plan_mode review through its ONE Question seat and the Host commits plan mode off only at the next accepted pre-step, while Keep planning leaves the plan active',
+    run: runPlanReview,
+  }),
+  Object.freeze({
+    suite: 'team',
+    id: 'team.board-host-to-tui',
+    title: 'the OFFICIAL team_task_create/update results reach the real Split Client\'s current /tasks Team page through the official agentTeam projection, and another Session never borrows the board',
+    run: runTeamBoard,
+  }),
+  Object.freeze({
+    suite: 'recovery',
+    id: 'recovery.detached-turn-interactions',
+    title: 'an accepted Turn, Tool, Job, Child and pending interaction survive the Client that started them',
+    run: runDetachedTurnInteractions,
+  }),
+  Object.freeze({
+    suite: 'recovery',
+    id: 'recovery.client-hmr-signals',
+    title: 'Client-only HMR, real PTY signals and Host kill keep the official disposition taxonomy',
+    run: runClientHmrSignals,
+  }),
+  Object.freeze({
+    suite: 'recovery',
+    id: 'recovery.unknown-write-host-death',
+    title: 'an ACK-dropped write survives Host death as one durable write and no fabricated answer',
+    run: runUnknownWriteHostDeath,
+  }),
+  Object.freeze({
+    suite: 'provider-authorization',
+    id: 'provider-authorization.f7a',
+    title: 'two real Split Clients drive the official provider-native authorization stream (notice, prompts, commit, same-key refusal, withdrawal, disconnect, cancel-vs-commit)',
+    run: runF7AProviderAuthorization,
+  }),
+  Object.freeze({
+    suite: 'provider-credential-records',
+    id: 'provider-credential-records.f7b',
+    title: 'two real Split Clients list, exact-key clear and re-read the official stored credential records on ONE Host',
+    run: runF7BCredentialRecords,
+  }),
+  Object.freeze({
+    suite: 'session-policy',
+    id: 'session-policy.f8',
+    title: 'two real Split Clients write and re-read one exact Session approval policy through the private service, and a fresh Host replays the durable facts',
+    run: runF8SessionPolicy,
+  }),
+  Object.freeze({
+    suite: 'web-settings',
+    id: 'web-settings.official-provider-f3',
+    title: 'two real sessionless TUIs edit, cross-read and race the official Web Search / Fetch Settings CAS on ONE Host',
+    run: runWebProviderSettingsF3,
+  }),
+  Object.freeze({
+    suite: 'account',
+    id: 'account.official-composition',
+    title: 'the official Host Account Controller serves one authenticated Client through a verified callback and PKCE exchange',
+    run: runF2AccountComposition,
+  }),
+  Object.freeze({
+    suite: 'web',
+    id: 'web.official-composition',
+    title: 'the official Web composition stays default-off and a real Browser plus real TUI share one authenticated Host',
+    run: runOfficialWebComposition,
+  }),
+  Object.freeze({
+    suite: 'mcp',
+    id: 'mcp.servers-fr3',
+    title: 'ONE real Split Host and Client mount the single official MCP manager, classify the configured source, probe and restart the real test server once, and keep the same manager fiber across /web off->on->off',
+    platforms: LINUX_DARWIN,
+    run: runMcpServersFr3,
+  }),
+  Object.freeze({
+    suite: 'mcp',
+    id: 'mcp.servers-fr4',
+    title: 'real Split Host and Clients edit the official mcp-manager configuration through the Settings CAS: inherited classification, Add/Edit/Disable/Enable/Delete/Reset, a dirty-discard with zero writes, a plugin-owned refusal and a two-client revision conflict',
+    platforms: LINUX_DARWIN,
+    run: runMcpServersFr4,
+  }),
+  Object.freeze({
+    suite: 'subagent-settings',
+    id: 'subagent.settings-fr5a',
+    title: 'two authenticated Split Clients save the official Subagent settings partial result and refuse the stale Profile revision',
+    run: runSubagentSettingsFr5A,
+  }),
+  Object.freeze({
+    suite: 'host-settings',
+    id: 'host-settings.fr5b',
+    title: 'two authenticated Split Clients save the migrated General preferences, the session-log switch, the Agent-loop page and the active-shell caps, and refuse a stale two-Client revision',
+    run: runHostNumericSettingsFr5B,
+  }),
+  Object.freeze({
+    suite: 'host-settings',
+    defaultLane: false,
+    id: 'host-settings.r8-extension-config-pr2',
+    title: 'two packed third-party packages installed by the official plugin command read/write independent per-package extension Config rows through the production Remote ConfigPort on a real Host and surface Client, refuse a stale revision and leave the canonical preferences row untouched',
+    run: runExtensionConfigPr2,
+  }),
+  Object.freeze({
+    suite: 'host-settings',
+    defaultLane: false,
+    id: 'host-settings.r8-extension-client-loader-pr3',
+    title: 'two real Split Clients mount the same packed third-party ./tui packages through the Client-local Loader owner, render each Footer and run each own Command while the plain Host bundle stays native and Client A exit keeps Client B and the Host identity',
+    platforms: LINUX_DARWIN,
+    run: runClientExtensionLoaderPr3,
+  }),
+  Object.freeze({
+    suite: 'host-settings',
+    id: 'profile.preferences',
+    title: 'the canonical pi-tui-preferences row persists through the real Split Host settings wire, a stale revision and a cold Host',
+    platforms: LINUX_DARWIN,
+    run: runProfilePreferencesQualification,
+  }),
+  Object.freeze({
+    suite: 'web',
+    id: 'web.runtime-toggle',
+    title: 'one live Host toggles the official Web runtime on and off without unloading the real TUI',
+    run: runWebRuntimeToggle,
+  }),
+  Object.freeze({
+    suite: 'web',
+    id: 'web.startup-preference',
+    title: 'the profile-owned Web startup preference applies on the next cold Host through the real settings wire',
+    run: runWebStartupPreference,
+  }),
+  Object.freeze({
+    suite: 'web',
+    id: 'web.headless-cli',
+    title: 'the real installed dsh web CLI reads and toggles one Host Web frontend, exchanges the printed URL into the official Web shell, and refuses unauthenticated/cross-site control',
+    platforms: LINUX_DARWIN,
+    run: runWebCliM6,
+  }),
+  Object.freeze({
+    suite: 'web',
+    id: 'web.product-browser-tui',
+    title: 'one packed official Web Browser and real Split TUI prove shared Host, competing writes, stale refusals, recovery and locality',
+    platforms: LINUX_DARWIN,
+    run: runWebProductQualification,
+  }),
+  Object.freeze({
+    suite: 'skills',
+    id: 'skills.sessionless-hot',
+    title: 'two real Sessionless TUIs read their own Host Workspace skills and hot-update them on Host file add/edit/delete without creating a Session',
+    platforms: LINUX_DARWIN,
+    run: runSessionlessSkillsHot,
+  }),
+  Object.freeze({
+    suite: 'skills',
+    id: 'skills.live-hot',
+    title: 'two real TUIs on ONE Live Session follow Host skill add/edit/delete through the official catalog without replacing the Session',
+    platforms: LINUX_DARWIN,
+    run: runLiveSkillsHot,
+  }),
+  Object.freeze({
+    suite: 'skills',
+    id: 'skills.recovery',
+    title: 'a SIGKILLed Sessionless Client is replaced by a new process that re-establishes Host skill observation on the same Host',
+    platforms: LINUX_DARWIN,
+    run: runSkillsRecovery,
+  }),
+  Object.freeze({
+    suite: 'herdr',
+    id: 'herdr.h1-split-surface',
+    title: 'real Split Clients report the Host Agent idle/working/blocked state to their own Herdr Pane, and only the Client owns that registration',
+    run: runHerdrH1,
+  }),
+  Object.freeze({
+    suite: 'herdr',
+    id: 'herdr.h2-session-publication',
+    title: 'a real Split Client reports the committed main Session to its Herdr Pane with the exact daemon resume argv, keeps only the latest owner, and re-registers it after a real transport rollover',
+    run: runHerdrH2,
+  }),
+  Object.freeze({
+    suite: 'herdr',
+    id: 'herdr.h3-abrupt-lifecycle',
+    title: 'real Client and Host OS process abrupt exits prove Pane authority withdrawal, the untouched sibling Pane, and re-confirmation on a new authenticated generation',
+    run: runHerdrH3,
+  }),
+  Object.freeze({
+    suite: 'acp',
+    id: 'acp.po1-uds-ready',
+    title: 'a real Host-owned bounded ACP v1 Unix socket initializes before Ready, fails Session methods closed, retires on stop and reclaims a stale inode',
+    run: runAcpPo1,
+  }),
+  Object.freeze({
+    suite: 'public-entry',
+    id: 'public-entry.daemon-client-m6-2a',
+    title: 'the real installed dsh --profile pi-tui CLI selects the daemon backend and launches one foreground Client against one local Host, and an illegal backend fails closed',
+    run: runPublicDaemonEntry,
+  }),
+  Object.freeze({
+    suite: 'acp',
+    id: 'acp.po1b-opt-in-control',
+    title: 'the opt-in default-off local ACP listener toggles at runtime, disconnects on disable and applies the persisted startup preference only on the next cold Host without recomposing the running one',
+    run: runAcpPo1bOptInControl,
+  }),
+  Object.freeze({
+    suite: 'acp',
+    id: 'acp.po2-session-view',
+    title: 'one live Host-owned ACP Session View shares a real TUI Session with one ACP connection, refuses a second attach, releases only its own View on close/teardown/Off, and creates a real Host Workspace Session',
+    run: runAcpPo2SessionView,
+  }),
+  Object.freeze({
+    suite: 'managed-host',
+    defaultLane: false,
+    id: 'managed-host.m6-2b-systemd',
+    title: 'a real daemon install first creates and loads ONE inactive owned profile unit without starting or enabling it; a public cold start then starts it through the manager, one authenticated Host serves it, and only SIGTERM stops it',
+    run: runManagedHostSystemd,
+  }),
+  Object.freeze({
+    suite: 'managed-host',
+    defaultLane: false,
+    id: 'managed-host.m6-2b-auth-failure-negative',
+    title: 'after an explicit install, an ACTIVE managed unit is not Host readiness: a new cold Client with tampered launch identity fails closed and the live Host/unit are neither killed nor replaced',
+    run: runManagedHostAuthFailureNegative,
+  }),
+  Object.freeze({
+    suite: 'managed-host',
+    defaultLane: false,
+    id: 'managed-host.m6-2b-concurrent-cold-start',
+    title: 'two public daemon Clients cold-start with NO installed unit and a reachable user manager, converge to exactly one independent authenticated Host, create no unit and report manager=process with user-manager=not-checked',
+    run: runManagedHostConcurrentColdStart,
+  }),
+  Object.freeze({
+    suite: 'managed-host',
+    defaultLane: false,
+    id: 'managed-host.m6-2b-crash-restart',
+    title: 'a SIGKILLed systemd-managed Host is restarted by Restart=on-failure as a NEW authenticated instance under the SAME installed unit',
+    run: runManagedHostCrashRestart,
+  }),
+  Object.freeze({
+    suite: 'managed-host',
+    defaultLane: false,
+    id: 'managed-host.m6-2b-two-profile-isolation',
+    title: 'two real Profile installations under one isolated account stay isolated: distinct scopes, Host instances and explicitly installed units, and stopping one profile never affects the other',
+    run: runManagedHostTwoProfileIsolation,
+  }),
+  Object.freeze({
+    suite: 'managed-host',
+    defaultLane: false,
+    id: 'managed-host.m6-2b-fallback',
+    title: 'a real public daemon cold start with no installed unit uses the basic independent process with a private 0600 host.log, creates no unit and the Host survives Client exit',
+    run: runManagedHostFallback,
+  }),
+  Object.freeze({
+    suite: 'managed-host',
+    defaultLane: false,
+    id: 'managed-host.m6-2b-manager-error',
+    title: 'an installed profile unit beside a genuinely broken user manager makes the public start/install/status/logs fail closed with a manager error and starts no fallback Host',
+    run: runManagedHostManagerError,
+  }),
+  Object.freeze({
+    suite: 'acp',
+    id: 'acp.po3a-turn-events',
+    title: 'one shared-host ACP prompt is admitted once, projects only the committed output of its exact claimed turn, answers a real stopReason and fails mixed turns closed',
+    run: runAcpPo3aTurnEvents,
+  }),
+  Object.freeze({
+    suite: 'acp',
+    id: 'acp.po3b-cancel-approval',
+    title: 'session/cancel and session/close scope to the exact shared-host turn (queued removal, exact running user-abort, mixed fail-closed) and the approval waterfall routes ACP-owned turns to the same connection only',
+    run: runAcpPo3bCancelApproval,
+  }),
+  Object.freeze({
+    suite: 'acp',
+    defaultLane: false,
+    id: 'acp.po4a-content-input',
+    title: 'one real Host and TUI admit standard ACP resource_link and image prompts, verify durable image refs, carry a fragmented frame above 1 MiB, reject invalid inputs and preserve the TUI turn on scoped cancellation',
+    run: runAcpPo4aContentInput,
+  }),
+  Object.freeze({
+    suite: 'daemon-control',
+    defaultLane: false,
+    id: 'daemon-control.m6-2c-status-safety',
+    title: 'a no-Host daemon status is a pure read with user-manager=not-checked; the basic daemon needs no unit; an explicit install beside a running independent Host does not migrate it; and an active-but-unauthenticated Host is reported nonzero and never as ready or stopped',
+    run: runDaemonControlStatusSafety,
+  }),
+  Object.freeze({
+    suite: 'daemon-control',
+    defaultLane: false,
+    id: 'daemon-control.m6-2c-systemd-lifecycle',
+    title: 'the explicit daemon install creates an inactive owned unit, then public start/status/stop/restart/logs/uninstall drive ONE verified profile unit, reuse a warm Host, create a new instance on restart and preserve the Profile',
+    run: runDaemonControlSystemdLifecycle,
+  }),
+  Object.freeze({
+    suite: 'daemon-control',
+    defaultLane: false,
+    id: 'daemon-control.m6-2c-process-fallback',
+    title: 'with no installed unit the public daemon commands manage only the authenticated independent Host, read its private 0600 log, never create a unit and never query systemd',
+    run: runDaemonControlProcessFallback,
+  }),
+  Object.freeze({
+    suite: 'daemon-control',
+    defaultLane: false,
+    id: 'daemon-control.m6-2c-manager-error',
+    title: 'an installed unit beside a reachable but unusable user manager makes daemon status/start/restart/install/logs/uninstall fail closed without a process fallback, Host or unit rewrite',
+    run: runDaemonControlManagerError,
+  }),
+  Object.freeze({
+    suite: 'daemon-control',
+    defaultLane: false,
+    id: 'daemon-control.m6-2c-owner-and-multi-profile',
+    title: 'two real Profiles keep independent Hosts and installed units; management of one never affects the other, a foreign unit is refused, and a same-Profile historical-build unit is adopted by the explicit restart with a bounded generated-field rewrite, then removable by uninstall',
+    run: runDaemonControlOwnerAndMultiProfile,
+  }),
+  Object.freeze({
+    suite: 'daemon-control',
+    defaultLane: false,
+    id: 'daemon-control.m6-2c-concurrent-controls',
+    title: 'the short-lived admin seat refuses a second profile-scoped management command with BUSY, leaves another Profile independent, and two concurrent starts converge on ONE Host',
+    run: runDaemonControlConcurrentControls
+  }),
+  Object.freeze({
+    suite: 'daemon-control',
+    defaultLane: false,
+    id: 'daemon-control.m6-2c-inflight-stop',
+    title: 'a REAL Host Session turn in flight is interrupted by stop, the Host exits, and the restarted Host never replays it or fabricates its completion',
+    run: runDaemonControlInflightStop,
+  }),
+  Object.freeze({
+    suite: 'acp',
+    defaultLane: false,
+    id: 'acp.po4c-content-output',
+    title: 'one real Host and TUI project committed assistant text/image/text, image-only output and one ordered tool_call_update with verified Host Store bytes, carry a standard image frame above 256 KiB, fail an absent image reference closed and isolate a slow reader from the sibling ACP connection and the real TUI',
+    run: runAcpPo4cContentOutput,
+  }),
+  Object.freeze({
+    suite: 'acp',
+    defaultLane: false,
+    id: 'acp.sdk-content-interoperability',
+    title: 'an independent standard ACP v1 SDK client consumes real split Host input, Markdown, image and tool output across two sequential scenes with exact turns, verified stored content and a closed View that leaves the TUI Session live',
+    run: runAcpSdkContentInteroperability,
+  }),
+])
+
+function fail(detail) {
+  throw new SplitSmokeInputError(
+    'INPUT_SMOKE_SELECTION_INVALID',
+    `INPUT_UNQUALIFIED: INPUT_SMOKE_SELECTION_INVALID (invalid smoke selection, not a product regression): ${detail}`,
+  )
+}
+
+/** The frozen registry, in registration order (read-only to every caller). */
+export function listSelectableCases() {
+  return CASE_REGISTRY
+}
+
+/**
+ * The cases the DEFAULT (no-selector) full lane runs. Environment-gated native
+ * cases (e.g. real systemd user-manager qualification) are selectable-only and
+ * never run as part of the continuously executed default lane.
+ */
+export function listDefaultLaneCases() {
+  return Object.freeze(CASE_REGISTRY.filter(entry => entry.defaultLane !== false))
+}
+
+/**
+ * Parse the lane arguments without side effects. Exactly one `--` (the pnpm
+ * separator) may lead; every option, value and positional is then strict.
+ * A missing/duplicate/combined selector, an unknown option, an extra
+ * positional, `--list` with anything else, and two candidates all fail closed.
+ */
+export function parseSelectionArgs(argv) {
+  const args = argv[0] === '--' ? argv.slice(1) : argv
+  let list = false
+  let caseId
+  let suiteId
+  let candidate
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index]
+    if (argument === '--list') {
+      if (list) fail('--list may appear only once')
+      list = true
+      continue
+    }
+    if (argument === '--case' || argument === '--suite') {
+      const value = args[index + 1]
+      if (value === undefined || value.startsWith('-')) fail(`${argument} requires exactly one value`)
+      if (argument === '--case') {
+        if (caseId !== undefined) fail('--case may appear only once')
+        caseId = value
+      } else {
+        if (suiteId !== undefined) fail('--suite may appear only once')
+        suiteId = value
+      }
+      index += 1
+      continue
+    }
+    if (argument.startsWith('-')) fail('unknown option')
+    if (candidate !== undefined) fail('at most one candidate tarball may be named')
+    candidate = argument
+  }
+  if (list) {
+    if (caseId !== undefined || suiteId !== undefined) fail('--list cannot be combined with --case or --suite')
+    if (candidate !== undefined) fail('--list does not take a candidate tarball')
+    return { mode: 'list' }
+  }
+  if (caseId !== undefined && suiteId !== undefined) fail('--case and --suite are mutually exclusive')
+  if (caseId !== undefined) return { mode: 'case', id: caseId, candidate }
+  if (suiteId !== undefined) return { mode: 'suite', suite: suiteId, candidate }
+  return { mode: 'full', candidate }
+}
+
+/**
+ * Resolve an already-parsed selection against the registry. An unknown
+ * id/suite fails closed, and an empty selection can never pass: every selected
+ * run executes at least one registered case.
+ *
+ * `platform` is the CURRENT process platform: every selected case (and every
+ * suite, as a whole) must be eligible there BEFORE any candidate inspection,
+ * work root or installation exists. An unsupported selection is the fixed
+ * `INPUT_PLATFORM_CASE_UNSUPPORTED` input refusal, never a case run.
+ */
+export function resolveSelection(selection, platform = process.platform) {
+  if (selection.mode === 'full' || selection.mode === 'list') return selection
+  const cases = CASE_REGISTRY.filter(entry => selection.mode === 'case'
+    ? entry.id === selection.id
+    : entry.suite === selection.suite)
+  if (cases.length === 0) fail(`unknown ${selection.mode}`)
+  const unsupported = cases.filter(entry => !(entry.platforms ?? LINUX_ONLY).includes(platform))
+  if (unsupported.length > 0) {
+    // A suite is refused as a WHOLE (never silently filtered): the names of
+    // every unsupported member travel with the refusal.
+    throw new SplitSmokeInputError(
+      'INPUT_PLATFORM_CASE_UNSUPPORTED',
+      `INPUT_UNQUALIFIED: INPUT_PLATFORM_CASE_UNSUPPORTED (invalid smoke selection, not a product regression): `
+        + `the ${selection.mode} ${selection.mode === 'case' ? selection.id : selection.suite} is not supported on `
+        + `platform=${platform}; unsupported case(s): ${unsupported.map(entry => entry.id).join(', ')}`,
+    )
+  }
+  return { ...selection, cases }
+}
+
+/** The registry-derived platform support one `--list` row appends. */
+export function casePlatformsOf(entry) {
+  return (entry.platforms ?? LINUX_ONLY).join(',')
+}
+
+/**
+ * The ONE selected result line. It keeps the historical prefix/id/scope for
+ * existing consumers and appends the platform fact the qualification must
+ * carry: the same case id may be qualified on more than one OS, so a PASS line
+ * without its platform would not say which executable support range it proved.
+ */
+export function selectedPassLine(caseId, platform) {
+  return `SPLIT_PROCESS_SELECTED_PASS id=${caseId} scope=${SELECTABLE_SCOPE} platform=${platform}`
+}
+
+/** The honest non-PASS sibling: same identity facts, never a success line. */
+export function selectedNotVerifiedLine(caseId, platform, reason) {
+  return `SPLIT_PROCESS_SELECTED_NOT_VERIFIED id=${caseId} scope=${SELECTABLE_SCOPE} platform=${platform} reason=${reason}`
+}

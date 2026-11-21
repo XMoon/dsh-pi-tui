@@ -80,8 +80,11 @@ export const DEPRECATED_READER_ALLOWLIST = [
   // projection, not a second writer or fold; the Remote composition returns no
   // snapshot at all (no complete-log seam exists there), so it fails closed.
   // The wiring-only selector lives in the bootstrap helper so it is executable
-  // in tests; the debt moved WITH the one call site.
-  { file: 'src/app/bootstrap/visual-snapshot.ts', call: 'snapshotEvents', site: ': asVisualSessionEvents(session.snapshotEvents())', why: 'published-visual final-answer projection reads the EXACT current Direct Session log; Remote returns undefined (no complete-log seam)' },
+  // in tests; the debt moved WITH the one call site. The read now also validates
+  // the official `isSeeded`/`inheritedEventCount`/inherited-marker cut before
+  // filtering, so the call site's expression changed while the ONE debt stayed
+  // in the same helper (S2-PR2 sv2/epoch: no ancestor query).
+  { file: 'src/app/bootstrap/visual-snapshot.ts', call: 'snapshotEvents', site: 'const rawEvents = session.snapshotEvents()', why: 'published-visual final-answer projection reads the EXACT current Direct Session log and validates the official seed/cut; Remote returns undefined (no complete-log seam)' },
   // M3-4 PR4 relocated the rewind picker authority OUT of the application
   // event owner (it reads SessionReader.turnOutline + loadThrough): the old
   // application-events.ts allowance was removed, not transferred.
@@ -102,7 +105,6 @@ export const DEPRECATED_READER_ALLOWLIST = [
   // debt moved WITH the call site, never doubled. The surface never reads the
   // live session log itself.
   { file: 'src/app/bootstrap/session-startup.ts', call: 'snapshotEvents', site: 'if (agent !== undefined) return workingFromLog(agent.session.snapshotEvents())', why: 'Direct compaction-end context re-measure from the in-process log (A4-7 injected capability; M3-4 PR2: the Remote branch folds the official reader window instead)' },
-  { file: 'src/runtime/direct/model-selection-direct.ts', call: 'snapshotEvents', site: 'const folded = foldPendingModelSelection(agent.session.snapshotEvents())', why: 'Direct model-selection replay over the in-process session log' },
   // M3-4 PR4 §18.4: the DIRECT-only compatibility fold for the whole-log
   // rewind outline. The shared picker owner reads the official `turnOutline`
   // projection on both branches; a minimal Direct composition that mounts no
@@ -114,10 +116,9 @@ export const DEPRECATED_READER_ALLOWLIST = [
   { file: 'src/runtime/direct/session-direct.ts', call: 'snapshotEvents', site: 'return directTurnOutlineCompat(agent.session.snapshotEvents())', why: 'Direct-only rewind-outline compatibility fold, capability absent (M3-4 PR4 §18.4; projection present always wins)' },
   { file: 'src/runtime/direct/session-direct.ts', call: 'snapshotEvents', site: 'return directTurnOutlineCompat(agent.session.snapshotEvents())', why: 'Direct-only rewind-outline compatibility fold, projection value absent (M3-4 PR4 §18.4; an authoritative [] never reaches this fold)' },
   { file: 'src/runtime/direct/presentation-read-direct.ts', call: 'snapshotEvents', site: 'const durableEvents = agent.session.snapshotEvents().map(event => detachedClone(event as PresentationDurableEvent))', why: 'Direct presentation read fold over the in-process session log' },
-  // TS8-D moved the `/transcript` full-log Markdown reconstruction (and this
-  // call site WITH it) out of the `src/transcript.ts` facade into the Client
-  // artifact formatter; the debt moved, never doubled.
-  { file: 'src/client/artifact/transcript-markdown.ts', call: 'snapshotEvents', site: 'for (const event of session.snapshotEvents()) {', why: 'Direct full transcript reconstruction from the in-process log' },
+  // S5-PR3 retired the `/transcript` Client-local formatter together with its
+  // snapshot reader; the official Host session-query snapshot is the exporter
+  // (no in-process Client full-log read remains for this feature).
 ]
 
 /** Collect the .ts files of one directory tree (src only; no fixtures). */

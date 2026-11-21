@@ -114,7 +114,12 @@ interface AgentLike {
 /** Minimal structural AgentRegistry contract. */
 interface AgentRegistryLike {
   list(): readonly AgentLike[]
-  roots?(): readonly AgentLike[]
+}
+
+/** Minimal structural `ctx.subagents` tree-root lookup (rc.2 replaced the
+ *  removed `agents.roots()` with `rootOf(liveAgent)`). */
+interface SubagentRootLookupLike {
+  rootOf(agent: unknown): unknown
 }
 
 /** Minimal structural Job projection the observer classifies. */
@@ -205,7 +210,7 @@ user-questions=@deepseek-ai/dsh-user-questions agent=@deepseek-ai/dsh-agent
 plugin-package-inventory-deepseek=@deepseek-ai/dsh-plugin-package-inventory-deepseek agent-default-model=@deepseek-ai/dsh-agent-default-model
 jobs=@deepseek-ai/dsh-jobs-local llm-retry=@deepseek-ai/dsh-llm-retry
 config-editor=@deepseek-ai/dsh-config-editor settings=@deepseek-ai/dsh-settings
-authorization=@deepseek-ai/dsh-authorization deepseek-account=@deepseek-ai/dsh-deepseek-account-platform
+authorization=@deepseek-ai/dsh-authorization deepseek-account=@deepseek-ai/dsh-deepseek-account
 credentials=@deepseek-ai/dsh-credentials-local llm-pi-ai=@deepseek-ai/dsh-llm-pi-ai
 session-persistence-jsonl=@deepseek-ai/dsh-session-persistence-jsonl attachment-local=@deepseek-ai/dsh-attachment-local
 session-query-sqlite=@deepseek-ai/dsh-session-query-sqlite working-directory=@deepseek-ai/dsh-working-directory
@@ -242,7 +247,8 @@ split-host-connection=@deepseek-ai/dsh-client-connection split-host-api-remotes=
 split-host-file-upload=@deepseek-ai/dsh-client-file-upload split-host-session-stats=@deepseek-ai/dsh-session-stats
 split-host-turn-outline=@deepseek-ai/dsh-session-turn-outline split-host-session-controller=@deepseek-ai/dsh-api-session-controller
 split-host-settings-controller=@deepseek-ai/dsh-api-settings-controller split-host-session-log-download=@deepseek-ai/dsh-session-log-export
-split-host-pi-tui-runtime=@xmoon76/dsh-pi-tui/host-runtime schedule=@deepseek-ai/dsh-schedule`.trim().split(/\s+/u).map(entry => {
+split-host-pi-tui-runtime=@xmoon76/dsh-pi-tui/host-runtime schedule=@deepseek-ai/dsh-schedule
+agent-team=@deepseek-ai/dsh-agent-team tool-agent-team=@deepseek-ai/dsh-tool-agent-team`.trim().split(/\s+/u).map(entry => {
     const separator = entry.indexOf('=')
     return [entry.slice(0, separator), entry.slice(separator + 1)] as const
   }),
@@ -400,12 +406,18 @@ export class HostActivityObserver implements HostLivenessObserver {
       reasons.add('source-unavailable')
       return { state: 'UNKNOWN', agents: [], readable: false }
     }
-    let roots: Set<AgentLike> | undefined
-    if (typeof registry.roots === 'function') {
+    // rc.2 removed `agents.roots()`: the official tree root is
+    // `subagents.rootOf(liveAgent)` and requires the EXACT Agent object from
+    // `registry.list()`. A missing/throwing lookup is never "no children": an
+    // active Agent keeps its positive reasons and the unproven relation adds
+    // `source-unavailable`, so quiescence is not certifiable.
+    const subagents = this.context.reflect.get('subagents') as SubagentRootLookupLike | undefined
+    const rootRelation = (agent: AgentLike): 'root' | 'child' | 'unknown' => {
+      if (subagents === undefined) return 'unknown'
       try {
-        roots = new Set(registry.roots())
+        return subagents.rootOf(agent) === agent ? 'root' : 'child'
       } catch {
-        roots = undefined
+        return 'unknown'
       }
     }
     let state: HostActivitySourceState = 'IDLE'
@@ -430,9 +442,15 @@ export class HostActivityObserver implements HostLivenessObserver {
         reasons.add('agent-inbox')
         state = 'ACTIVE'
       }
-      if (!running && pending === 0) maintenanceGap = true
-      if (roots !== undefined && !roots.has(agent) && (running || pending > 0)) {
-        reasons.add('child-active')
+      if (running || pending > 0) {
+        // Only an Agent with observable work needs its tree relation: a child
+        // running/inbox is named as child-active, while an unprovable relation
+        // is a coverage gap that must not be mistaken for a root-only tree.
+        const relation = rootRelation(agent)
+        if (relation === 'child') reasons.add('child-active')
+        else if (relation === 'unknown') reasons.add('source-unavailable')
+      } else {
+        maintenanceGap = true
       }
     }
     if (maintenanceGap) {

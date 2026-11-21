@@ -27,6 +27,12 @@ export interface ImageAttachmentRefLike {
   readonly width: number
   readonly height: number
   readonly name?: string
+  /** Input dimensions after EXIF orientation and before normalization
+   * scaling; present only when normalization reduced the image. */
+  readonly originalDimensions?: {
+    readonly width: number
+    readonly height: number
+  }
 }
 
 /** Structural subset of DSH's durable file reference. */

@@ -327,6 +327,42 @@ The selected Style is a persisted preference. On a narrow terminal the runtime
 may render a shorter density form to preserve more useful information; that
 does not rewrite the saved Style.
 
+## Fullscreen Footer navigation
+
+In the default PiTui **Fullscreen** surface, two builtin Footer placements are
+also navigation affordances while they are completely visible and owned by the
+main Session:
+
+- a click on the `model` placement opens the same model picker as `/model`;
+- a click on the `tasks` placement opens the same Full Task Center as `/tasks`
+  (not the Task Quick band — the `↓ view` hint keeps its own separate keyboard
+  meaning).
+
+The whole visible placement is the target, including a configured prefix or
+suffix. The Footer is otherwise unchanged: no new row, no background, hover,
+button frame or badge, and the existing tones stay authoritative.
+
+A placement that the responsive rules dropped, compacted away or truncated is
+not clickable. Neither are separators, the right-alignment gap, the transient
+Host instruction row (never clickable), whole-footer command output, a custom
+or extension item (even one that spells the same words), the Regular/Main
+surface, or the Footer of a viewed child Session (its `model` describes the
+child, while `/model` writes the main Session). A blocking Question, Approval
+or Save prompt, an open picker/overlay, and the Task Quick band block Footer
+clicks while they are in front. A press whose frame changed before release
+(resize, layout or subject switch, a repaint that moved the item) is dropped
+instead of acting on the new frame.
+
+While an exit confirmation or Leader which-key hint is active, the Host
+instruction temporarily replaces the Footer's LAST visible physical row; the
+original row returns when the hint clears, so the Footer never changes height
+and the surrounding Editor does not jump. The instruction itself is not
+clickable, and it does not change any item or command output — a covered
+placement is only temporarily not painted. An otherwise empty Footer paints
+just the one-line instruction so the exit confirmation stays visible. See
+[design-language.md](../architecture/design-language.md#12-surface-archetypes)
+(the Status bar archetype) for the durable layout rule.
+
 ## Viewer subject bar
 
 The child viewer identity is NOT a Footer item and is NOT configurable through
@@ -543,7 +579,11 @@ If the command is unavailable, invalid, times out, exits unsuccessfully, or
 produces no usable output, the TUI falls back to the native Footer surface.
 
 The Host instruction surface remains Host-owned; a command Footer cannot take
-over exit/cancellation instructions.
+over exit/cancellation instructions. While a Host instruction is active, it
+temporarily replaces the last visible command row, so the command Footer keeps
+its current height; the command output itself is unchanged and the covered row
+returns when the hint clears. See the
+[design-language Status bar rule](../architecture/design-language.md#12-surface-archetypes).
 
 ## Status JSON on stdin
 
@@ -695,6 +735,12 @@ Rules that follow from the read-only projection:
   their placement instead of being silently dropped or guessed.
 - `/footer` and `/statusline` remain PiTui-only configurators; they are not
   reachable inside a TSP session.
+- The first-party `tasks` status segment is the ONE exception to the read-only
+  statusline: when its fact is present and the Work Hub is reachable, clicking
+  that visible segment opens the SAME read-only Work Hub as `/tasks`. Every
+  other builtin, Custom and extension segment stays status-only (the native
+  Model control belongs to the Composer). See
+  [TSP Work Hub](../tsp/work-hub.md).
 - Very short panes (roughly under six rows) remain a known limitation for the
   whole dock; this is not a footer-config loss.
 

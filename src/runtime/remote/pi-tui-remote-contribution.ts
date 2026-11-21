@@ -20,13 +20,58 @@
  * so a drift between the descriptors the Host registers and the Client mounts
  * remains impossible by construction.
  *
+ * The features here are file references, terminal progress, the official
+ * Web frontend availability toggle, Host one-shot Shell/completion, Skills,
+ * the provider-native authorization + stored-credential-record bridges, the
+ * exact-Session policy (approval/sandbox) bridge, and the sessionless
+ * default-model save bridge.
+ *
  * @module @xmoon76/dsh-pi-tui/runtime/remote/pi-tui-remote-contribution
  */
 
 import type { TypertContribution } from '@deepseek-ai/dsh-typert-registry'
 import type { TypertRemoteContribution } from '@deepseek-ai/dsh-typert-protocol'
-import { PI_TUI_FILE_REFERENCES_LIST } from './pi-tui-file-reference-contract.ts'
+import {
+  PI_TUI_FILE_REFERENCES_LIST,
+  PI_TUI_FILE_REFERENCES_LIST_WORKSPACE,
+} from './pi-tui-file-reference-contract.ts'
+import {
+  PI_TUI_HOST_USER_SHELL_COMPLETE,
+  PI_TUI_HOST_USER_SHELL_COMPLETE_WORKSPACE,
+  PI_TUI_HOST_USER_SHELL_RUN,
+} from './pi-tui-host-user-shell-contract.ts'
 import { PI_TUI_TERMINAL_PROGRESS_WATCH } from './pi-tui-terminal-progress-contract.ts'
+import {
+  PI_TUI_WEB_ACCESS_GET_AUTHENTICATED_URL,
+  PI_TUI_WEB_ACCESS_GET_STATUS,
+  PI_TUI_WEB_ACCESS_SET_ENABLED,
+} from './pi-tui-web-access-contract.ts'
+import {
+  PI_TUI_ACP_ACCESS_GET_STATUS,
+  PI_TUI_ACP_ACCESS_SET_ENABLED,
+} from './pi-tui-acp-access-contract.ts'
+import {
+  PI_TUI_SKILLS_STANDING,
+  PI_TUI_SKILLS_WATCH_INVALIDATIONS,
+} from './pi-tui-skills-contract.ts'
+import {
+  PI_TUI_AUTHORIZATION_CANCEL,
+  PI_TUI_AUTHORIZATION_LIST,
+  PI_TUI_AUTHORIZATION_RESPOND,
+  PI_TUI_AUTHORIZATION_RUN,
+} from './pi-tui-authorization-contract.ts'
+import {
+  PI_TUI_CREDENTIAL_RECORDS_DELETE,
+  PI_TUI_CREDENTIAL_RECORDS_LIST,
+} from './pi-tui-credential-records-contract.ts'
+import {
+  PI_TUI_SESSION_POLICY_READ,
+  PI_TUI_SESSION_POLICY_SET_APPROVAL,
+} from './pi-tui-session-policy-contract.ts'
+import { PI_TUI_DEFAULT_MODEL_SAVE_SELECTION } from './pi-tui-default-model-contract.ts'
+import {
+  PI_TUI_PROMPT_PRESENCE_SYNC_VIEW,
+} from './pi-tui-prompt-presence-contract.ts'
 
 /** The npm package that owns every private Remote invocation here. A test
  *  guards that it equals each contract module's own package constant. */
@@ -38,11 +83,59 @@ export const PI_TUI_HOST_CONTRIBUTION: TypertContribution = {
   face: 'host',
   schemas: [],
   model: { services: [], events: [], objects: [] },
-  invocations: [PI_TUI_FILE_REFERENCES_LIST, PI_TUI_TERMINAL_PROGRESS_WATCH],
+  invocations: [
+    PI_TUI_FILE_REFERENCES_LIST,
+    PI_TUI_FILE_REFERENCES_LIST_WORKSPACE,
+    PI_TUI_HOST_USER_SHELL_RUN,
+    PI_TUI_HOST_USER_SHELL_COMPLETE,
+    PI_TUI_HOST_USER_SHELL_COMPLETE_WORKSPACE,
+    PI_TUI_TERMINAL_PROGRESS_WATCH,
+    PI_TUI_WEB_ACCESS_GET_STATUS,
+    PI_TUI_WEB_ACCESS_SET_ENABLED,
+    PI_TUI_WEB_ACCESS_GET_AUTHENTICATED_URL,
+    PI_TUI_ACP_ACCESS_GET_STATUS,
+    PI_TUI_ACP_ACCESS_SET_ENABLED,
+    PI_TUI_SKILLS_STANDING,
+    PI_TUI_SKILLS_WATCH_INVALIDATIONS,
+    PI_TUI_AUTHORIZATION_LIST,
+    PI_TUI_AUTHORIZATION_RUN,
+    PI_TUI_AUTHORIZATION_RESPOND,
+    PI_TUI_AUTHORIZATION_CANCEL,
+    PI_TUI_CREDENTIAL_RECORDS_LIST,
+    PI_TUI_CREDENTIAL_RECORDS_DELETE,
+    PI_TUI_SESSION_POLICY_READ,
+    PI_TUI_SESSION_POLICY_SET_APPROVAL,
+    PI_TUI_DEFAULT_MODEL_SAVE_SELECTION,
+    PI_TUI_PROMPT_PRESENCE_SYNC_VIEW,
+  ],
 }
 
 /** The explicit Client contribution mounted once with `ctx.remote.$mount`. */
 export const PI_TUI_CLIENT_CONTRIBUTION: TypertRemoteContribution = {
   package: PI_TUI_REMOTE_PACKAGE,
-  descriptors: [PI_TUI_FILE_REFERENCES_LIST, PI_TUI_TERMINAL_PROGRESS_WATCH],
+  descriptors: [
+    PI_TUI_FILE_REFERENCES_LIST,
+    PI_TUI_FILE_REFERENCES_LIST_WORKSPACE,
+    PI_TUI_HOST_USER_SHELL_RUN,
+    PI_TUI_HOST_USER_SHELL_COMPLETE,
+    PI_TUI_HOST_USER_SHELL_COMPLETE_WORKSPACE,
+    PI_TUI_TERMINAL_PROGRESS_WATCH,
+    PI_TUI_WEB_ACCESS_GET_STATUS,
+    PI_TUI_WEB_ACCESS_SET_ENABLED,
+    PI_TUI_WEB_ACCESS_GET_AUTHENTICATED_URL,
+    PI_TUI_ACP_ACCESS_GET_STATUS,
+    PI_TUI_ACP_ACCESS_SET_ENABLED,
+    PI_TUI_SKILLS_STANDING,
+    PI_TUI_SKILLS_WATCH_INVALIDATIONS,
+    PI_TUI_AUTHORIZATION_LIST,
+    PI_TUI_AUTHORIZATION_RUN,
+    PI_TUI_AUTHORIZATION_RESPOND,
+    PI_TUI_AUTHORIZATION_CANCEL,
+    PI_TUI_CREDENTIAL_RECORDS_LIST,
+    PI_TUI_CREDENTIAL_RECORDS_DELETE,
+    PI_TUI_SESSION_POLICY_READ,
+    PI_TUI_SESSION_POLICY_SET_APPROVAL,
+    PI_TUI_DEFAULT_MODEL_SAVE_SELECTION,
+    PI_TUI_PROMPT_PRESENCE_SYNC_VIEW,
+  ],
 }

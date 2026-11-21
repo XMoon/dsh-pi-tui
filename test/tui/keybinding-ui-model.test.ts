@@ -57,13 +57,10 @@ test('untouched rows expose only surviving effective defaults for editing', () =
 test('partial default shadowing leaves only the surviving default editable', () => {
   const { manager, model } = modelFor({ 'app.todo.toggle': 'ctrl+f' })
   try {
-    const search = model.rows.find(row => row.id === 'app.transcript.search')!
-    assert.deepEqual(search.defaults, [
-      { kind: 'direct', key: 'ctrl+f' },
-      { kind: 'direct', key: 'ctrl+shift+f' },
-    ])
-    assert.deepEqual(search.editableDefaults, [{ kind: 'direct', key: 'ctrl+shift+f' }])
-    assert.deepEqual(search.effective, [{ kind: 'direct', key: 'ctrl+shift+f' }])
+    const search = model.rows.find(row => row.id === 'app.transcript.search.view')!
+    assert.deepEqual(search.defaults, [{ kind: 'direct', key: 'ctrl+f' }])
+    assert.deepEqual(search.editableDefaults, [])
+    assert.deepEqual(search.effective, [])
   } finally {
     manager.dispose()
   }

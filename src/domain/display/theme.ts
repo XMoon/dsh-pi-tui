@@ -54,18 +54,27 @@ export interface ColorPalette {
   roleUserBg?: string
   /** Shell-mode accent (reserved for `!` shell mode). */
   shellMode: string
-  /** Transcript search: THE CURRENT exact occurrence's foreground. Paired with
+  /** Transcript search: ordinary visible occurrence foreground. */
+  searchMatchFg?: string
+  /** Transcript search: ordinary visible occurrence background. */
+  searchMatchBg?: string
+  /** Transcript search: THE CURRENT occurrence's foreground. In Full this is a
+   * source-proven occurrence; View also uses it for its current mounted rendered
+   * occurrence, which is NOT a Full source-cell proof. Paired with
    * {@link ColorPalette.searchCurrentBg}; the highlight is ALWAYS an explicit
    * themed block, never the terminal's inverse attribute. Optional only for a
-   * palette that predates the tokens — {@link withSearchCurrentTokens} fills it
+   * palette that predates the token — {@link withSearchCurrentTokens} fills it
    * at every theme-apply boundary. */
   searchCurrentFg?: string
-  /** Transcript search: the current exact occurrence's background. */
+  /** Transcript search: the current occurrence's background (Full proven cell or
+   * View mounted occurrence; a non-bold card anchor reuses the same colours). */
   searchCurrentBg?: string
-  /** Transcript search: the ANCHOR-ONLY current result's row background. The
-   * query occurrences on that row stay weak-underlined — the background marks
-   * the owning source/card row, never a proven occurrence. Deliberately weaker
-   * than {@link ColorPalette.searchCurrentBg}. */
+  /** Transcript search: the LEGACY anchor-only row wash used when no visible
+   * card-anchor geometry (a header or the first visible non-image text row) is
+   * available. Ordinary query words on that row keep their yellow block and are
+   * never covered; the wash marks only the owning row and is deliberately
+   * weaker than {@link ColorPalette.searchCurrentBg}. A card with visible anchor
+   * geometry uses the current orange card-anchor role. */
   searchAnchorBg?: string
 }
 
@@ -92,9 +101,12 @@ export const darkColors: ColorPalette = {
   shellMode: '#BD93F9',
   /** dsh-web `--dsw-specific-bubble` (dark): neutral bluish-850. */
   roleUserBg: '#2C2C2F',
-  /** Search current occurrence (dark): dark ink on a bright amber block. */
+  /** Search ordinary occurrence (dark): dark ink on a bright yellow block. */
+  searchMatchFg: '#141410',
+  searchMatchBg: '#F5C542',
+  /** Search current occurrence (dark): dark ink on an orange block. */
   searchCurrentFg: '#141410',
-  searchCurrentBg: '#F5C542',
+  searchCurrentBg: '#E58A24',
   /** Search anchor-only row (dark): a dim amber-tinted wash, clearly weaker
    * than the exact occurrence block. */
   searchAnchorBg: '#3A3220',
@@ -123,9 +135,12 @@ export const lightColors: ColorPalette = {
   shellMode: '#7C3AED',
   /** dsh-web `--dsw-specific-bubble` (light): deepseek-100. */
   roleUserBg: '#E4EDFD',
-  /** Search current occurrence (light): dark ink on a saturated amber block. */
-  searchCurrentFg: '#1A1A1A',
-  searchCurrentBg: '#FFD75E',
+  /** Search ordinary occurrence (light): dark ink on a pale yellow block. */
+  searchMatchFg: '#1A1A1A',
+  searchMatchBg: '#FFE68A',
+  /** Search current occurrence (light): white ink on a dark orange block. */
+  searchCurrentFg: '#FFFFFF',
+  searchCurrentBg: '#AE5005',
   /** Search anchor-only row (light): a pale amber wash. */
   searchAnchorBg: '#FFF0C2',
 }
@@ -155,12 +170,16 @@ function bodyTextIsLight(color: string): boolean {
  * current occurrence is always an explicit themed block, never the
  * terminal-inverse fallback. */
 export function withSearchCurrentTokens(palette: ColorPalette): ColorPalette {
-  if (palette.searchCurrentFg !== undefined && palette.searchCurrentBg !== undefined && palette.searchAnchorBg !== undefined) {
+  if (palette.searchMatchFg !== undefined && palette.searchMatchBg !== undefined
+    && palette.searchCurrentFg !== undefined && palette.searchCurrentBg !== undefined
+    && palette.searchAnchorBg !== undefined) {
     return palette
   }
   const base = bodyTextIsLight(palette.text) ? darkColors : lightColors
   return {
     ...palette,
+    searchMatchFg: palette.searchMatchFg ?? base.searchMatchFg,
+    searchMatchBg: palette.searchMatchBg ?? base.searchMatchBg,
     searchCurrentFg: palette.searchCurrentFg ?? base.searchCurrentFg,
     searchCurrentBg: palette.searchCurrentBg ?? base.searchCurrentBg,
     searchAnchorBg: palette.searchAnchorBg ?? base.searchAnchorBg,

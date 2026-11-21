@@ -5,7 +5,7 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { createToolResultMessage, ToolCallId, type ContentBlock } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { AssistantLiveChunk } from '../../src/runtime/assistant-stream-port.ts'
 import {
@@ -19,7 +19,6 @@ import { resultTextLines } from '../../src/tui/transcript/tool-presentation.ts'
 import { collectRewindCandidates } from '../../src/domain/session/rewind.ts'
 import { rewindPickerItem } from '../../src/tui/pickers/rewind.ts'
 import { TranscriptFolder } from '../../src/transcript.ts'
-import { renderTranscriptMarkdown } from '../../src/client/artifact/transcript-markdown.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -215,13 +214,6 @@ test('assistant finalized tool-result content uses an explicit fallback everywhe
   app.setTranscript(folder.messages())
   const view = await viewport(vt)
   assert.ok(view.includes('Unknown block: tool-result'), `assistant tool-result fallback missing:\n${view}`)
-
-  const md = renderTranscriptMarkdown({
-    header: { id: 'session-c1-tool-result' as never, cwd: '/ws', version: 1, createdAt: 0 },
-    snapshotEvents: () => [event],
-  } as never)
-  assert.ok(md.includes('Unknown block: tool-result'))
-  assert.ok(md.includes('assistant tool result'))
 })
 
 test('rewind recognizes file-only turns and generalizes the warning label', () => {
@@ -239,7 +231,7 @@ test('rewind recognizes file-only turns and generalizes the warning label', () =
   assert.equal(rewindPickerItem(candidates[0]!).label, 'turn 1 · [attachment] (attachment only)')
 })
 
-test('result and markdown projections retain files and bound unknown blocks', () => {
+test('the result projection retains files and bounds unknown blocks', () => {
   const unknown = genericBlock('payload')
   const lines = resultTextLines([
     { type: 'text', text: 'before' },
@@ -250,58 +242,6 @@ test('result and markdown projections retain files and bound unknown blocks', ()
   assert.ok(lines.includes('📄 report.pdf · 12.3 KiB'))
   assert.ok(lines.some(line => line.includes('Unknown block: future-test-block')))
   assert.ok(!lines.some(line => line.includes('att-file-1')))
-
-  const markdownUnknown = genericBlock('x'.repeat(21_000))
-  const md = renderTranscriptMarkdown({
-    header: { id: 'session-c1' as never, cwd: '/ws', version: 1, createdAt: 0 },
-    snapshotEvents: () => [userEvent([
-      { type: 'text', text: 'before' },
-      fileBlock(),
-      { type: 'text', text: 'after' },
-      markdownUnknown,
-    ], 1), {
-      type: 'assistant/message',
-      seq: 2,
-      time: 2,
-      data: {
-        turn: 0,
-        step: 0,
-        message: { content: [{ type: 'text', text: 'assistant before' }, fileBlock(), { type: 'text', text: 'assistant after' }] },
-      },
-    } as never, {
-      type: 'tool/result',
-      seq: 3,
-      time: 3,
-      data: {
-        turn: 0,
-        step: 0,
-        message: createToolResultMessage({
-          callId: ToolCallId('call-c1'),
-          content: [{ type: 'text', text: 'tool before' }, fileBlock(), { type: 'text', text: 'tool after' }],
-          isError: false,
-        }),
-      },
-    } as never],
-  } as never)
-  assert.ok(md.indexOf('before') < md.indexOf('📄 report.pdf · 12.3 KiB'))
-  assert.ok(md.indexOf('📄 report.pdf · 12.3 KiB') < md.indexOf('after'))
-  assert.ok(md.includes('attachment `att-file-1`'))
-  assert.ok(md.includes('Unknown block: future-test-block'))
-  assert.ok(md.includes('block payload truncated'))
-  assert.ok(!md.includes('x'.repeat(21_000)), 'the fallback must not dump an unbounded payload')
-  assert.equal((md.match(/📄 report\.pdf · 12\.3 KiB/g) ?? []).length, 3, 'user, assistant, and nested tool-result files must export')
-  assert.ok(md.includes('assistant before'))
-  assert.ok(md.includes('assistant after'))
-  assert.ok(md.indexOf('tool before') < md.lastIndexOf('📄 report.pdf · 12.3 KiB'))
-  assert.ok(md.lastIndexOf('📄 report.pdf · 12.3 KiB') < md.indexOf('tool after'))
-
-  const unsafeName = { type: 'file', attachment: { ...FILE_REF, name: '![x](https://example.invalid)' } } as never
-  const unsafeMd = renderTranscriptMarkdown({
-    header: { id: 'session-c1-unsafe' as never, cwd: '/ws', version: 1, createdAt: 0 },
-    snapshotEvents: () => [userEvent([unsafeName], 4)],
-  } as never)
-  assert.ok(unsafeMd.includes('\\!\\[x\\]\\(https://example.invalid\\)'))
-  assert.ok(!unsafeMd.includes('![x](https://example.invalid)'))
 })
 
 test('user and assistant file presentation is visible and width-safe', async () => {

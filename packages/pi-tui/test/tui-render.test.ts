@@ -5,16 +5,19 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import type { Terminal as XtermTerminalType } from "@xterm/headless";
 import { Image } from "../src/components/image.ts";
+import { Input } from "../src/components/input.ts";
 import type { Terminal } from "../src/terminal.ts";
 import {
 	deleteKittyImage,
+	deleteKittyImagePlacement,
 	encodeKitty,
 	resetCapabilitiesCache,
 	setCapabilities,
 	setCellDimensions,
 } from "../src/terminal-image.ts";
-import { Container, type Component, type TUI } from "../src/tui.ts";
+import { Container, type Component, CURSOR_MARKER, renderFakeCursor, type TUI } from "../src/tui.ts";
 import { TuiMainScreen } from "../src/tui-main-screen.ts";
+import { sliceByColumn } from "../src/utils.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
 class TestComponent implements Component {
@@ -216,6 +219,24 @@ describe("TUI bounded render output", () => {
 		assert.ok(output.startsWith("\x1b[?2026h"));
 		assert.ok(output.endsWith("\x1b[?2026l"));
 		assert.ok(!output.includes("\x1b[2J"), "the update should stay on the differential render path");
+	});
+});
+
+describe("TUI OSC 133 markers", () => {
+	it("does not write OSC 133 prompt markers to the terminal", () => {
+		// Terminals read 133;A as a new shell prompt and drop the OSC 7501 program status.
+		const terminal = new BoundedWriteTerminal();
+		const tui = new TuiMainScreen(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+		component.lines = ["\x1b]133;A\x07prompt", "\x1b]133;B\x07\x1b]133;C\x07output"];
+		tui.renderNow();
+		component.lines = [...component.lines, "\x1b]133;A\x1b\\reply", "\x1b]133;B\x1b\\\x1b]133;C\x1b\\done"];
+		tui.renderNow();
+
+		const output = terminal.writes.join("");
+		assert.ok(!output.includes("\x1b]133;"), "regular mode must not emit OSC 133 markers");
+		for (const text of ["prompt", "output", "reply", "done"]) assert.ok(output.includes(text));
 	});
 });
 
@@ -518,6 +539,558 @@ describe("TUI Kitty image cleanup", () => {
 		assert.ok(deleteIndex < clearIndex, "old image should be deleted before the screen is cleared");
 
 		tui.stop();
+	});
+});
+
+describe("TUI Native Kitty overlay preemption (X077)", () => {
+	/** A managed `a=p` placement anchor reserving `rows` cell rows, followed by
+	 *  `rows - 1` empty frame lines in the component's own render. */
+	const nativeAnchor = (imageId: number, placementId: number, columns: number, rows: number): string =>
+		`\x1b_Ga=p,i=${imageId},p=${placementId},c=${columns},r=${rows},C=1,q=2;\x1b\\`;
+
+	it("yields a native placement covered on its anchor row and restores it after close", async () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		setCellDimensions({ widthPx: 10, heightPx: 10 });
+		try {
+			const terminal = new LoggingVirtualTerminal(40, 10);
+			const tui: TUI = new TuiMainScreen(terminal);
+			const component = new TestComponent();
+			tui.addChild(component);
+			const anchor = nativeAnchor(4242, 1, 2, 3);
+			component.lines = ["top", anchor, "", "", "bottom"];
+			tui.start();
+			await terminal.waitForRender();
+			assert.ok(terminal.getWrites().includes(anchor), "the placement paints while nothing covers it");
+			terminal.clearWrites();
+
+			const overlay = new TestComponent();
+			overlay.lines = ["MODAL"];
+			const handle = tui.showOverlay(overlay, { row: 1, col: 0, width: 10 });
+			tui.renderNow();
+			await terminal.waitForRender();
+			const covered = terminal.getWrites();
+			assert.ok(
+				covered.includes(deleteKittyImagePlacement(4242, 1)),
+				"the covered placement is removed before the overlay text, keeping its data",
+			);
+			assert.ok(!covered.includes(deleteKittyImage(4242)), "a covered a=p placement never frees its data");
+			assert.ok(!covered.includes(anchor), "the covered placement is not painted in this frame");
+			assert.ok(covered.includes("MODAL"), "the overlay text itself is painted");
+			assert.ok(!covered.includes("\x1b[2J"), "covering an image does not clear the screen");
+			assert.ok(!covered.includes("\x1b[3J"), "covering an image does not clear scrollback");
+			assert.ok(terminal.getViewport()[1]?.includes("MODAL"), "the overlay wins the anchor row");
+
+			handle.hide();
+			terminal.clearWrites();
+			tui.renderNow();
+			await terminal.waitForRender();
+			const restored = terminal.getWrites();
+			assert.ok(restored.includes(anchor), "the same placement returns after the overlay closes");
+			assert.ok(!restored.includes(deleteKittyImage(4242)), "closing does not delete the image again");
+			assert.ok(!restored.includes(deleteKittyImagePlacement(4242, 1)), "closing frees nothing");
+			assert.equal(terminal.getViewport()[1], "", "the image row carries no stale overlay text");
+			tui.stop();
+		} finally {
+			resetCapabilitiesCache();
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+		}
+	});
+
+	it("yields the whole native placement when only a body row is covered", async () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		setCellDimensions({ widthPx: 10, heightPx: 10 });
+		try {
+			const terminal = new LoggingVirtualTerminal(40, 10);
+			const tui: TUI = new TuiMainScreen(terminal);
+			const component = new TestComponent();
+			tui.addChild(component);
+			const anchor = nativeAnchor(5151, 2, 2, 3);
+			component.lines = ["top", anchor, "", "", "bottom"];
+			tui.start();
+			await terminal.waitForRender();
+			terminal.clearWrites();
+
+			// The overlay lands on the block's second row; the anchor row stays outside it.
+			const overlay = new TestComponent();
+			overlay.lines = ["MODAL"];
+			const handle = tui.showOverlay(overlay, { row: 2, col: 0, width: 10 });
+			tui.renderNow();
+			await terminal.waitForRender();
+			const covered = terminal.getWrites();
+			assert.ok(covered.includes(deleteKittyImagePlacement(5151, 2)), "the covered block yields its placement as a whole");
+			assert.ok(!covered.includes(deleteKittyImage(5151)), "a body-row hit never frees the block data");
+			assert.ok(!covered.includes(anchor), "a body-row hit must not keep painting the placement");
+			assert.ok(covered.includes("MODAL"), "the overlay body row is painted");
+			assert.ok(terminal.getViewport()[2]?.includes("MODAL"), "the overlay body row is readable");
+
+			handle.hide();
+			terminal.clearWrites();
+			tui.renderNow();
+			await terminal.waitForRender();
+			assert.ok(terminal.getWrites().includes(anchor), "the placement returns after the overlay closes");
+			tui.stop();
+		} finally {
+			resetCapabilitiesCache();
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+		}
+	});
+
+	it("leaves an uncovered Kitty block and text rows untouched", async () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		setCellDimensions({ widthPx: 10, heightPx: 10 });
+		try {
+			const terminal = new LoggingVirtualTerminal(40, 12);
+			const tui: TUI = new TuiMainScreen(terminal);
+			const component = new TestComponent();
+			tui.addChild(component);
+			const above = nativeAnchor(6161, 3, 2, 2);
+			const below = nativeAnchor(7171, 4, 2, 2);
+			component.lines = [above, "", "text", below, "", "tail"];
+			tui.start();
+			await terminal.waitForRender();
+			terminal.clearWrites();
+
+			const overlay = new TestComponent();
+			overlay.lines = ["MODAL"];
+			const handle = tui.showOverlay(overlay, { row: 3, col: 0, width: 10 });
+			tui.renderNow();
+			await terminal.waitForRender();
+			const covered = terminal.getWrites();
+			assert.ok(covered.includes(deleteKittyImagePlacement(7171, 4)), "the covered block yields its placement");
+			assert.ok(!covered.includes(deleteKittyImage(6161)), "the untouched block above is never deleted");
+			assert.ok(!covered.includes(deleteKittyImagePlacement(6161, 3)), "the untouched block above is never touched");
+			assert.ok(!covered.includes(above), "the untouched block above is not repainted");
+			assert.ok(covered.includes("MODAL"), "the overlay itself is painted");
+
+			handle.hide();
+			terminal.clearWrites();
+			tui.renderNow();
+			await terminal.waitForRender();
+			assert.ok(!terminal.getWrites().includes(deleteKittyImage(6161)), "closing never touches the far block");
+			tui.stop();
+		} finally {
+			resetCapabilitiesCache();
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+		}
+	});
+
+	it("a preempted native `a=p` placement is removed by placement only", async () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		setCellDimensions({ widthPx: 10, heightPx: 10 });
+		try {
+			const terminal = new LoggingVirtualTerminal(40, 10);
+			const tui: TUI = new TuiMainScreen(terminal);
+			const component = new TestComponent();
+			tui.addChild(component);
+			const anchor = nativeAnchor(8181, 8, 2, 2);
+			component.lines = ["top", anchor, "", "bottom"];
+			tui.start();
+			await terminal.waitForRender();
+			terminal.clearWrites();
+
+			const overlay = new TestComponent();
+			overlay.lines = ["MODAL"];
+			const handle = tui.showOverlay(overlay, { row: 1, col: 0, width: 10 });
+			tui.renderNow();
+			await terminal.waitForRender();
+			const covered = terminal.getWrites();
+			assert.ok(
+				covered.includes(deleteKittyImagePlacement(8181, 8)),
+				"a preempted a=p placement is removed without freeing its data",
+			);
+			assert.ok(!covered.includes(deleteKittyImage(8181)), "a preempted a=p placement never frees its data");
+
+			handle.hide();
+			terminal.clearWrites();
+			tui.renderNow();
+			await terminal.waitForRender();
+			assert.ok(terminal.getWrites().includes(anchor), "the same placement returns after close");
+			tui.stop();
+		} finally {
+			resetCapabilitiesCache();
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+		}
+	});
+
+	it("removes only the covered placement when one image id has several placements", async () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		setCellDimensions({ widthPx: 10, heightPx: 10 });
+		try {
+			const terminal = new LoggingVirtualTerminal(40, 12);
+			const tui: TUI = new TuiMainScreen(terminal);
+			const component = new TestComponent();
+			tui.addChild(component);
+			const coveredAnchor = nativeAnchor(101, 1, 2, 2);
+			const siblingAnchor = nativeAnchor(101, 2, 2, 2);
+			component.lines = ["top", coveredAnchor, "", "mid", siblingAnchor, "", "bottom"];
+			tui.start();
+			await terminal.waitForRender();
+			terminal.clearWrites();
+
+			// The overlay covers only the first placement; the sibling placement of
+			// the SAME image id must keep painting.
+			const overlay = new TestComponent();
+			overlay.lines = ["MODAL"];
+			const handle = tui.showOverlay(overlay, { row: 1, col: 0, width: 10 });
+			tui.renderNow();
+			await terminal.waitForRender();
+			const covered = terminal.getWrites();
+			assert.ok(
+				covered.includes(deleteKittyImagePlacement(101, 1)),
+				"only the covered placement is removed, addressed by its placement id",
+			);
+			assert.ok(!covered.includes(deleteKittyImagePlacement(101)), "no image-wide placement delete is emitted");
+			assert.ok(!covered.includes(deleteKittyImage(101)), "no placement of the image frees its data");
+			// The unchanged sibling may be re-drawn by the screen's existing render
+			// range, but it must never be left deleted: any delete of it is followed
+			// by its own placement again in the SAME frame.
+			const siblingDelete = covered.indexOf(deleteKittyImagePlacement(101, 2));
+			if (siblingDelete !== -1) {
+				assert.ok(
+					covered.indexOf(siblingAnchor) > siblingDelete,
+					"the sibling placement is re-placed after its scoped delete",
+				);
+			}
+			assert.ok(
+				!covered.includes("\x1b_Ga=d,d=I") && !covered.includes("\x1b_Ga=d,d=A"),
+				"no destructive delete reaches the wire",
+			);
+
+			handle.hide();
+			terminal.clearWrites();
+			tui.renderNow();
+			await terminal.waitForRender();
+			assert.ok(terminal.getWrites().includes(coveredAnchor), "the covered placement returns after close");
+			tui.stop();
+		} finally {
+			resetCapabilitiesCache();
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+		}
+	});
+
+	it("a native placement without a placement id keeps its pre-existing behaviour", async () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		setCellDimensions({ widthPx: 10, heightPx: 10 });
+		try {
+			const terminal = new LoggingVirtualTerminal(40, 10);
+			const tui: TUI = new TuiMainScreen(terminal);
+			const component = new TestComponent();
+			tui.addChild(component);
+			tui.start();
+			await terminal.waitForRender();
+			const anchors = [
+				"\x1b_Ga=p,i=71717,c=2,r=2,C=1,q=2;\x1b\\", // no p key
+				"\x1b_Ga=p,i=71717,p=0,c=2,r=2,C=1,q=2;\x1b\\", // p=0 is the same "no explicit placement id"
+			];
+			for (const anchor of anchors) {
+				component.lines = ["top", anchor, "", "bottom"];
+				tui.renderNow();
+				await terminal.waitForRender();
+				terminal.clearWrites();
+
+				const overlay = new TestComponent();
+				overlay.lines = ["MODAL"];
+				const handle = tui.showOverlay(overlay, { row: 1, col: 0, width: 10 });
+				tui.renderNow();
+				await terminal.waitForRender();
+				const covered = terminal.getWrites();
+				// No positive placement id means the Screen cannot address that exact
+				// placement: it must not yield the block nor widen any deletion.
+				assert.ok(!covered.includes("\x1b_G"), "no image command is emitted for an unaddressable placement");
+				assert.ok(!covered.includes("MODAL"), "the pre-existing image-line behaviour is unchanged");
+				handle.hide();
+				tui.renderNow();
+				await terminal.waitForRender();
+			}
+			tui.stop();
+		} finally {
+			resetCapabilitiesCache();
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+		}
+	});
+
+	it("a changed a=p line keeps its data only while the same placement is still shown", async () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		setCellDimensions({ widthPx: 10, heightPx: 10 });
+		try {
+			const terminal = new LoggingVirtualTerminal(40, 10);
+			const tui: TUI = new TuiMainScreen(terminal);
+			const component = new TestComponent();
+			tui.addChild(component);
+			component.lines = ["top", nativeAnchor(9191, 9, 2, 2), "", "bottom"];
+			tui.start();
+			await terminal.waitForRender();
+			terminal.clearWrites();
+
+			// Same image id AND placement id: the block is re-placed by this frame, so
+			// the old placement is removed without freeing the data.
+			const resized = nativeAnchor(9191, 9, 3, 2);
+			component.lines = ["top", resized, "", "bottom"];
+			tui.renderNow();
+			await terminal.waitForRender();
+			const changed = terminal.getWrites();
+			assert.ok(changed.includes(deleteKittyImagePlacement(9191, 9)), "the re-shown placement is removed by placement only");
+			assert.ok(!changed.includes(deleteKittyImage(9191)), "a re-shown placement never frees its data");
+			assert.ok(changed.includes(resized), "the placement is drawn again in the same frame");
+
+			// The placement is genuinely gone: its data is freed as before.
+			terminal.clearWrites();
+			component.lines = ["top", "", "", "bottom"];
+			tui.renderNow();
+			await terminal.waitForRender();
+			assert.ok(terminal.getWrites().includes(deleteKittyImage(9191)), "a removed placement keeps the hard delete");
+			tui.stop();
+		} finally {
+			resetCapabilitiesCache();
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+		}
+	});
+
+	it("a legacy transmit-and-display line follows the same visual preemption", async () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		setCellDimensions({ widthPx: 10, heightPx: 10 });
+		try {
+			const terminal = new LoggingVirtualTerminal(40, 10);
+			const tui: TUI = new TuiMainScreen(terminal);
+			const component = new TestComponent();
+			tui.addChild(component);
+			const image = new Image(
+				"AAAA",
+				"image/png",
+				{ fallbackColor: (value) => value },
+				{ maxWidthCells: 3 },
+				{ widthPx: 30, heightPx: 30 },
+			);
+			const imageLines = image.render(40);
+			const imageId = image.getImageId();
+			assert.ok(imageId !== undefined, "the legacy Image allocates its own id");
+			const anchor = imageLines[0]!;
+			assert.ok(anchor.includes("a=T"), "the vendored Image paints a transmit-and-display command");
+			component.lines = ["top", ...imageLines, "bottom"];
+			tui.start();
+			await terminal.waitForRender();
+			terminal.clearWrites();
+
+			const overlay = new TestComponent();
+			overlay.lines = ["MODAL"];
+			const handle = tui.showOverlay(overlay, { row: 1 + imageLines.length - 1, col: 0, width: 10 });
+			tui.renderNow();
+			await terminal.waitForRender();
+			const covered = terminal.getWrites();
+			assert.ok(covered.includes(deleteKittyImage(imageId)), "the inline placement is deleted");
+			assert.ok(!covered.includes(anchor), "the inline placement yields the frame");
+			assert.ok(covered.includes("MODAL"), "the overlay is painted");
+			assert.ok(
+				terminal.getViewport()[imageLines.length]?.includes("MODAL"),
+				"the overlay body row is readable",
+			);
+
+			handle.hide();
+			terminal.clearWrites();
+			tui.renderNow();
+			await terminal.waitForRender();
+			assert.ok(terminal.getWrites().includes(anchor), "the legacy placement returns after close");
+			tui.stop();
+		} finally {
+			resetCapabilitiesCache();
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+		}
+	});
+
+	it("never classifies upload-only, virtual, iTerm2 or plain lines as native placements", async () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		setCellDimensions({ widthPx: 10, heightPx: 10 });
+		try {
+			const terminal = new LoggingVirtualTerminal(40, 12);
+			const tui: TUI = new TuiMainScreen(terminal);
+			const component = new TestComponent();
+			tui.addChild(component);
+			const uploadOnly = "\x1b_Ga=t,f=100,i=8888,q=2;AAAA\x1b\\";
+			const virtual = "\x1b_Ga=p,U=1,q=2,i=9999,p=5,c=2,r=1;\x1b\\";
+			const iterm = "\x1b]1337;File=inline=1;AAAA\x07";
+			component.lines = ["top", uploadOnly, virtual, iterm, "bottom"];
+			tui.start();
+			await terminal.waitForRender();
+			terminal.clearWrites();
+
+			// The overlay spans the whole band, so the frame rewrites every one of
+			// these rows and a wrongly classified line could not hide behind the diff.
+			const overlay = new TestComponent();
+			overlay.lines = ["MODAL", "MODAL", "MODAL", "MODAL"];
+			const handle = tui.showOverlay(overlay, { row: 0, col: 0, width: 10 });
+			tui.renderNow();
+			await terminal.waitForRender();
+			const covered = terminal.getWrites();
+			// A writer-level delete for any image line inside the changed range is the
+			// screen's pre-existing behaviour; the discriminator here is that these
+			// lines keep their exact bytes instead of yielding the frame.
+			assert.ok(covered.includes(uploadOnly), "the upload-only line keeps its exact bytes");
+			assert.ok(covered.includes(virtual), "the virtual placement keeps its exact bytes");
+			assert.ok(covered.includes(iterm), "the iTerm2 anchor keeps its exact bytes");
+			assert.ok(
+				[1, 2, 3].every((row) => !terminal.getViewport()[row]?.includes("MODAL")),
+				"upload-only, virtual and iTerm2 rows keep their existing character-driven behaviour",
+			);
+			assert.ok(!covered.includes("\x1b[3J"), "no scrollback clear");
+
+			handle.hide();
+			terminal.clearWrites();
+			tui.renderNow();
+			await terminal.waitForRender();
+			tui.stop();
+		} finally {
+			resetCapabilitiesCache();
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+		}
+	});
+
+	it("emits no image APC when the overlay is absent, hidden or zero-height", async () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		setCellDimensions({ widthPx: 10, heightPx: 10 });
+		try {
+			const terminal = new LoggingVirtualTerminal(40, 10);
+			const tui: TUI = new TuiMainScreen(terminal);
+			const component = new TestComponent();
+			tui.addChild(component);
+			const anchor = nativeAnchor(3131, 7, 2, 2);
+			component.lines = ["top", anchor, "", "bottom"];
+			tui.start();
+			await terminal.waitForRender();
+			const anchored = terminal.getWrites();
+			assert.ok(anchored.includes(anchor), "the placement paints when no overlay exists");
+
+			// A zero-height overlay covers no row: the block must not yield.
+			terminal.clearWrites();
+			const empty = new TestComponent();
+			empty.lines = [];
+			const emptyHandle = tui.showOverlay(empty, { row: 1, col: 0, width: 10 });
+			tui.renderNow();
+			await terminal.waitForRender();
+			assert.ok(!terminal.getWrites().includes("\x1b_G"), "a zero-height overlay emits no Kitty APC at all");
+			assert.ok(!terminal.getWrites().includes(deleteKittyImage(3131)), "a zero-height overlay deletes nothing");
+			assert.ok(!terminal.getWrites().includes("\x1b[2J"), "a zero-height overlay clears no screen");
+			assert.ok(!terminal.getWrites().includes("\x1b[3J"), "a zero-height overlay clears no scrollback");
+			emptyHandle.hide();
+
+			// A hidden overlay with real content is invisible: same rule.
+			terminal.clearWrites();
+			const hidden = new TestComponent();
+			hidden.lines = ["MODAL"];
+			const hiddenHandle = tui.showOverlay(hidden, { row: 1, col: 0, width: 10 });
+			hiddenHandle.setHidden(true);
+			tui.renderNow();
+			await terminal.waitForRender();
+			assert.ok(!terminal.getWrites().includes("\x1b_G"), "a hidden overlay emits no Kitty APC at all");
+			assert.ok(!terminal.getWrites().includes(deleteKittyImage(3131)), "a hidden overlay deletes nothing");
+			assert.ok(!terminal.getWrites().includes("MODAL"), "a hidden overlay paints nothing");
+			assert.ok(!terminal.getWrites().includes("\x1b[2J"), "a hidden overlay clears no screen");
+			assert.ok(!terminal.getWrites().includes("\x1b[3J"), "a hidden overlay clears no scrollback");
+			hiddenHandle.hide();
+
+			// A frame with no overlay at all keeps the original bytes.
+			terminal.clearWrites();
+			tui.renderNow();
+			await terminal.waitForRender();
+			assert.ok(!terminal.getWrites().includes("\x1b_G"), "an unoverlaid frame emits no extra Kitty APC");
+			assert.ok(!terminal.getWrites().includes("\x1b[2J"), "an unoverlaid frame clears nothing");
+			assert.ok(!terminal.getWrites().includes("\x1b[3J"), "an unoverlaid frame clears no scrollback");
+			tui.stop();
+		} finally {
+			resetCapabilitiesCache();
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+		}
+	});
+
+	it("renders a visible overlay once per frame and emits no destructive clear", async () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		setCellDimensions({ widthPx: 10, heightPx: 10 });
+		try {
+			const terminal = new LoggingVirtualTerminal(40, 10);
+			const tui: TUI = new TuiMainScreen(terminal);
+			const component = new TestComponent();
+			tui.addChild(component);
+			component.lines = ["top", nativeAnchor(1212, 6, 2, 2), "", "bottom"];
+			tui.start();
+			await terminal.waitForRender();
+			terminal.clearWrites();
+
+			let renders = 0;
+			const overlay: Component = {
+				render: () => {
+					renders += 1;
+					return ["MODAL"];
+				},
+				invalidate: () => {},
+			};
+			const handle = tui.showOverlay(overlay, { row: 1, col: 0, width: 10 });
+			let before = renders;
+			tui.renderNow();
+			assert.equal(renders - before, 1, "one frame renders the overlay exactly once");
+			await terminal.waitForRender();
+
+			before = renders;
+			tui.renderNow();
+			assert.equal(renders - before, 1, "a repeated frame still renders it exactly once");
+			await terminal.waitForRender();
+
+			handle.hide();
+			before = renders;
+			tui.renderNow();
+			assert.equal(renders - before, 0, "a hidden overlay is not rendered");
+			await terminal.waitForRender();
+			assert.ok(!terminal.getWrites().includes("\x1b[3J"), "opening and closing never clear scrollback");
+			assert.ok(!terminal.getWrites().includes("\x1b[2J"), "opening and closing never clear the screen");
+			tui.stop();
+		} finally {
+			resetCapabilitiesCache();
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+		}
+	});
+});
+
+describe("TUI Direct iTerm2 overlay preemption (X080)", () => {
+	/** The fork Image renders `rows - 1` blank frame lines and an anchor whose
+	 *  cursor-up prefix is the only height authority. */
+	const iterm2Anchor = (rows: number): string =>
+		`${rows > 1 ? `\x1b[${rows - 1}A` : ""}\x1b]1337;File=inline=1;size=4;width=2;height=auto:AAAA\x07`;
+
+	it("yields the whole iTerm2 image when an overlay covers its body and restores it after close", async () => {
+		setCapabilities({ images: "iterm2", trueColor: true, hyperlinks: false });
+		setCellDimensions({ widthPx: 10, heightPx: 10 });
+		try {
+			const terminal = new LoggingVirtualTerminal(40, 10);
+			const tui: TUI = new TuiMainScreen(terminal);
+			const component = new TestComponent();
+			tui.addChild(component);
+			const anchor = iterm2Anchor(3);
+			component.lines = ["top", "", "", anchor, "bottom"];
+			tui.start();
+			await terminal.waitForRender();
+			assert.ok(terminal.getWrites().includes(anchor), "the image paints while nothing covers it");
+			terminal.clearWrites();
+
+			// The overlay lands on the block's TOP row; the anchor row stays outside it.
+			const overlay = new TestComponent();
+			overlay.lines = ["MODAL"];
+			const handle = tui.showOverlay(overlay, { row: 1, col: 0, width: 10 });
+			tui.renderNow();
+			await terminal.waitForRender();
+			const covered = terminal.getWrites();
+			assert.ok(!covered.includes(anchor), "the covered block is not re-emitted in this frame");
+			assert.ok(covered.includes("MODAL"), "the overlay text is painted");
+			assert.ok(terminal.getViewport().some(line => line.includes("MODAL")), "the overlay wins the image body row");
+			assert.ok(!terminal.getViewport().some(line => line.includes("1337")), "no row carries a stale image anchor");
+
+			handle.hide();
+			terminal.clearWrites();
+			tui.renderNow();
+			await terminal.waitForRender();
+			assert.ok(terminal.getWrites().includes(anchor), "the same image returns after the overlay closes");
+			tui.stop();
+		} finally {
+			resetCapabilitiesCache();
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+		}
 	});
 });
 
@@ -1124,5 +1697,291 @@ describe("Main-screen final-row stop cleanup (dsh-pi-tui divergence X009)", () =
 		tui.setStopState(["last rendered row"], 1);
 		tui.invokeBeforeStop();
 		assert.strictEqual(terminal.writes.join(""), "\r\n");
+	});
+});
+
+describe("TUI fake cursor", () => {
+	it("draws the focused fake cursor in reverse video and omits it when the hardware cursor is shown", async () => {
+		const terminal = new LoggingVirtualTerminal(20, 5);
+		const tui: TUI = new TuiMainScreen(terminal);
+		const input = new Input();
+		// Fork X040: setValue places the cursor at the end, so ask for the
+		// historical clamped cursor to paint the FIRST cell.
+		input.setValue("abc", { cursor: "preserve" });
+		tui.addChild(input);
+		tui.setFocus(input);
+		tui.start();
+		await terminal.waitForRender();
+		assert.ok(terminal.getWrites().includes("> \x1b[7ma\x1b[27mbc"));
+
+		terminal.clearWrites();
+		tui.setShowHardwareCursor(true);
+		await terminal.waitForRender();
+		assert.ok(!terminal.getWrites().includes("\x1b[7m"));
+		assert.ok(!terminal.getWrites().includes("\x1b_pi:"));
+
+		tui.stop();
+	});
+
+	it("keeps the fake cursor of an unfocused input when the hardware cursor is shown", async () => {
+		const terminal = new LoggingVirtualTerminal(20, 5);
+		const tui: TUI = new TuiMainScreen(terminal, true);
+		const input = new Input();
+		input.setValue("abc", { cursor: "preserve" });
+		tui.addChild(input);
+		tui.start();
+		await terminal.waitForRender();
+		assert.ok(terminal.getWrites().includes("> \x1b[7ma\x1b[27mbc"));
+		tui.stop();
+	});
+
+	it("omits the focused fake cursor when truncation dropped its end marker", async () => {
+		const terminal = new LoggingVirtualTerminal(20, 5);
+		const tui: TUI = new TuiMainScreen(terminal, true);
+		const base = new TestComponent();
+		base.lines = [sliceByColumn(`ab${CURSOR_MARKER}${renderFakeCursor("c")}def`, 0, 3, true)];
+		tui.addChild(base);
+		tui.start();
+		await terminal.waitForRender();
+		assert.ok(!terminal.getWrites().includes("\x1b[7m"));
+		assert.ok(terminal.getWrites().endsWith("\x1b[3G"));
+		tui.stop();
+	});
+
+	it("keeps the cursor when an overlay ends directly left of it", async () => {
+		for (const showHardwareCursor of [false, true]) {
+			const terminal = new LoggingVirtualTerminal(20, 5);
+			const tui: TUI = new TuiMainScreen(terminal, showHardwareCursor);
+			const base = new TestComponent();
+			base.lines = [`abc${CURSOR_MARKER}${renderFakeCursor("d")}ef`];
+			tui.addChild(base);
+			const overlay = new TestComponent();
+			overlay.lines = ["XXX"];
+			tui.showOverlay(overlay, { row: 0, col: 0, width: 3 });
+			tui.start();
+			await terminal.waitForRender();
+
+			const writes = terminal.getWrites();
+			assert.ok(writes.includes("XXX"));
+			assert.strictEqual(writes.includes("\x1b[7md"), !showHardwareCursor);
+			// The hardware cursor is positioned at column 4 in both modes
+			assert.ok(writes.endsWith("\x1b[4G"));
+			tui.stop();
+		}
+	});
+});
+
+describe("Main-screen changes above the viewport (dsh-pi-tui divergence X078)", () => {
+	const HISTORY_LINES = 29;
+	const VIEWPORT_ROWS = 10;
+	const TICKS = 20;
+
+	function buildLines(spinner: string, viewportLast?: string): string[] {
+		const lines = Array.from({ length: HISTORY_LINES }, (_, i) => `history ${i}`);
+		lines.push(viewportLast ?? "history 29");
+		lines[0] = spinner;
+		return lines;
+	}
+
+	it("does not clear the screen or scrollback when only lines above the viewport change", async () => {
+		const terminal = new LoggingVirtualTerminal(60, VIEWPORT_ROWS);
+		const tui = new TuiMainScreen(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+		// 30 lines in a 10-row terminal: rows 0-19 are committed scrollback above
+		// the viewport, rows 20-29 are the physical viewport.
+		component.lines = buildLines("spinner 0");
+		tui.start();
+		await terminal.waitForRender();
+
+		const redrawsBefore = tui.fullRedraws;
+		terminal.clearWrites();
+		for (let tick = 1; tick <= TICKS; tick++) {
+			component.lines = buildLines(`spinner ${tick}`);
+			tui.requestRender();
+			await terminal.waitForRender();
+		}
+
+		assert.strictEqual(
+			tui.fullRedraws,
+			redrawsBefore,
+			"an off-screen spinner tick must not force a full redraw",
+		);
+		const writes = terminal.getWrites();
+		assert.ok(!writes.includes("\x1b[2J"), "off-screen changes must not clear the screen");
+		assert.ok(!writes.includes("\x1b[3J"), "off-screen changes must not clear scrollback");
+		const viewport = terminal.getViewport();
+		assert.ok(
+			viewport.some((line) => line.includes("history 29")),
+			"the viewport content is unchanged",
+		);
+		tui.stop();
+	});
+
+	it("still repaints a real change inside the viewport", async () => {
+		const terminal = new LoggingVirtualTerminal(60, VIEWPORT_ROWS);
+		const tui = new TuiMainScreen(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+		component.lines = buildLines("spinner 0");
+		tui.start();
+		await terminal.waitForRender();
+
+		const redrawsBefore = tui.fullRedraws;
+		terminal.clearWrites();
+		// Only the visible tail changes; the off-screen spinner keeps its text.
+		component.lines = buildLines("spinner 0", "updated tail");
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		assert.strictEqual(tui.fullRedraws, redrawsBefore, "an in-viewport change must stay differential");
+		const writes = terminal.getWrites();
+		assert.ok(!writes.includes("\x1b[2J"), "an in-viewport change must not clear the screen");
+		assert.ok(!writes.includes("\x1b[3J"), "an in-viewport change must not clear scrollback");
+		const viewport = terminal.getViewport();
+		assert.ok(
+			viewport.some((line) => line.includes("updated tail")),
+			"the changed viewport row is repainted",
+		);
+		tui.stop();
+	});
+
+	it("repaints a viewport change that accompanies an off-screen change without clearing", async () => {
+		const terminal = new LoggingVirtualTerminal(60, VIEWPORT_ROWS);
+		const tui = new TuiMainScreen(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+		component.lines = buildLines("spinner 0");
+		tui.start();
+		await terminal.waitForRender();
+
+		const redrawsBefore = tui.fullRedraws;
+		terminal.clearWrites();
+		component.lines = buildLines("spinner 1", "updated tail");
+		tui.requestRender();
+		await terminal.waitForRender();
+		const viewport = terminal.getViewport();
+		assert.ok(
+			viewport.some((line) => line.includes("updated tail")),
+			"the changed viewport row is repainted even though row 0 also changed",
+		);
+		const writes = terminal.getWrites();
+		assert.ok(!writes.includes("\x1b[2J"), "a mixed frame must not clear the screen");
+		assert.ok(!writes.includes("\x1b[3J"), "a mixed frame must not clear scrollback");
+		assert.strictEqual(tui.fullRedraws, redrawsBefore, "a mixed frame must stay differential");
+		tui.stop();
+	});
+
+	it("full re-renders a shrink that would move the viewport up while a viewport row changed", async () => {
+		// Witness for the second full-redraw disjunct (X078): without it, a shrink
+		// whose changed rows stay inside the old viewport paints differentially
+		// and leaves blank rows at the bottom instead of restoring the tail view.
+		const terminal = new LoggingVirtualTerminal(20, 5);
+		const tui = new TuiMainScreen(terminal);
+		tui.setClearOnShrink(false); // the guard itself must trigger, not clearOnShrink
+		const component = new TestComponent();
+		tui.addChild(component);
+		component.lines = Array.from({ length: 12 }, (_, i) => `Line ${i}`);
+		tui.start();
+		await terminal.waitForRender();
+
+		const redrawsBefore = tui.fullRedraws;
+		// 9 lines: rows 7-11 are deleted, row 8 changes INSIDE the old viewport
+		// (7 = previous viewport top), so the clamped diff lands on the paint path.
+		component.lines = [...Array.from({ length: 8 }, (_, i) => `Line ${i}`), "CHANGED 8"];
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		assert.ok(tui.fullRedraws > redrawsBefore, "a viewport-moving shrink must full-render");
+		assert.deepStrictEqual(terminal.getViewport(), [
+			"Line 4",
+			"Line 5",
+			"Line 6",
+			"Line 7",
+			"CHANGED 8",
+		]);
+		tui.stop();
+	});
+
+	it("full re-renders a pure tail deletion that would move the viewport up", async () => {
+		const terminal = new LoggingVirtualTerminal(60, VIEWPORT_ROWS);
+		const tui = new TuiMainScreen(terminal);
+		tui.setClearOnShrink(false); // the viewport-move-up guard itself must fire
+		const component = new TestComponent();
+		tui.addChild(component);
+		component.lines = Array.from({ length: 30 }, (_, i) => `Line ${i}`);
+		tui.start();
+		await terminal.waitForRender();
+
+		const redrawsBefore = tui.fullRedraws;
+		// Pure tail deletion: rows 0-24 are unchanged, rows 25-29 disappear. The
+		// deleted-lines path must apply the same viewport-move-up rule as the
+		// paint path, or the screen keeps rows 20-24 with blank rows below.
+		component.lines = Array.from({ length: 25 }, (_, i) => `Line ${i}`);
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		assert.ok(tui.fullRedraws > redrawsBefore, "a viewport-moving pure deletion must full-render");
+		assert.deepStrictEqual(terminal.getViewport(), [
+			"Line 15",
+			"Line 16",
+			"Line 17",
+			"Line 18",
+			"Line 19",
+			"Line 20",
+			"Line 21",
+			"Line 22",
+			"Line 23",
+			"Line 24",
+		]);
+		tui.stop();
+	});
+
+	it("keeps an off-screen kitty image in the cleanup record until a full render", async () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		setCellDimensions({ widthPx: 10, heightPx: 10 });
+		try {
+			const kittyAnchor = (imageId: number): string =>
+				`\x1b_Ga=p,i=${imageId},p=1,c=2,r=2,C=1,q=2;\x1b\\`;
+			const terminal = new LoggingVirtualTerminal(60, VIEWPORT_ROWS);
+			const tui = new TuiMainScreen(terminal);
+			const component = new TestComponent();
+			tui.addChild(component);
+			const lines = Array.from({ length: 30 }, (_, i) => `history ${i}`);
+			lines[0] = kittyAnchor(1); // image 1, above the viewport, committed
+			lines[1] = "";
+			component.lines = lines;
+			tui.start();
+			await terminal.waitForRender();
+
+			// Row 0 swaps image 1 -> image 2 (off-screen) while a visible row
+			// changes: the skipped swap must not touch the placed image, and the
+			// cleanup record must keep it until a full render rewrites scrollback.
+			const swapped = [...lines];
+			swapped[0] = kittyAnchor(2);
+			swapped[29] = "updated tail";
+			component.lines = swapped;
+			terminal.clearWrites();
+			tui.requestRender();
+			await terminal.waitForRender();
+
+			const mixed = terminal.getWrites();
+			assert.ok(!mixed.includes("\x1b[2J"), "the mixed frame must not clear the screen");
+			assert.ok(!mixed.includes("\x1b[3J"), "the mixed frame must not clear scrollback");
+			assert.ok(mixed.includes("updated tail"), "the visible change is painted");
+			assert.ok(!mixed.includes(deleteKittyImage(1)), "the skipped swap never touches the placed image");
+
+			// A later full render must delete the image the terminal still holds.
+			terminal.clearWrites();
+			terminal.resize(61, VIEWPORT_ROWS);
+			await terminal.waitForRender();
+			const full = terminal.getWrites();
+			assert.ok(full.includes(deleteKittyImage(1)), "the full render deletes the still-placed image");
+			assert.ok(full.includes(kittyAnchor(2)), "the full render paints the current image");
+			tui.stop();
+		} finally {
+			resetCapabilitiesCache();
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+		}
 	});
 });

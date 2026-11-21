@@ -28,11 +28,11 @@ import type { Diag } from '../../runtime/process/diagnostics.ts'
 import type { BackendKind } from '../../runtime/backend.ts'
 import { SupersededReadError } from '../../runtime/read-error.ts'
 import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
-import { runOwned } from '../../runtime/process/tasks.ts'
+import { runDetached, runOwned } from '../../runtime/process/tasks.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { normalizeSkillInvocation } from '../../domain/command/policy.ts'
 import type { SurfaceCatalogSnapshot, SurfaceCommandSummary } from '../../domain/catalog/surface.ts'
-import type { SkillCatalogCapability } from '../../runtime/catalog-port.ts'
+import type { SkillCatalogCapability, StandingSkillLocation, StandingSkillRead } from '../../runtime/catalog-port.ts'
 import type { SessionScopeAuthority } from '../session/scope.ts'
 import type { SessionRuntime as ApplicationSessionRuntime } from '../session/runtime.ts'
 import { CatalogRefreshCoordinator, CoalescingRefreshGate, type CatalogRefreshOutcome, type CatalogRefreshRequest, type CatalogRefreshSource } from './catalog-refresh.ts'
@@ -41,7 +41,9 @@ import type { ClientCommandRegistry } from './client-command-registry.ts'
 import type { SubmissionComposerPort } from '../submission/composer-port.ts'
 import type { RemoteCommandSourceFace } from '../application-runtime.ts'
 import { bindCommandRuntime, type CommandRuntimeSurface, type CommandSessionRuntime } from './runtime.ts'
-import { titleRefusalNoticeOwner, titleSuccessNoticeVisible } from './tsp-capability.ts'
+import type { SessionPolicyObservation } from './session-policy-observation.ts'
+import { titleRefusalNoticeOwner, titleSuccessNoticeVisible, type TspBuiltinPickers } from './tsp-capability.ts'
+import type { TspCommandCompletionInstallation, TspInlineAttachmentStager } from '../surface/runtime.ts'
 import type { DeliveredFilesSnapshot } from '../../domain/deliverables/catalog.ts'
 import { copyToClipboard } from '../../client/clipboard/copy.ts'
 import { isFocusDisplayPreset, type DisplayState } from '../../domain/display/preset.ts'
@@ -54,6 +56,8 @@ import type { TuiApp } from '../../tui-app.ts'
 import type { CommandRuntime } from './runtime.ts'
 import type { ModelSelectionOwner, SelectionRef } from './model-selection.ts'
 import type { ModelPresentation } from './model-presentation.ts'
+import type { WebAccessPresentation } from './web-access-presentation.ts'
+import type { AcpAccessPresentation } from './acp-access-presentation.ts'
 import type { PresetPresentation } from './preset-presentation.ts'
 import type { SessionBrowserPresentation } from './session-browser-presentation.ts'
 import type { NotificationMethod, NotificationMode } from '../../domain/notification/settings.ts'
@@ -65,7 +69,7 @@ export interface CommandCatalogCapability {
 
 /** One catalog refresh target (the semantic target, no Host type). */
 export type CommandCatalogTarget =
-  | { readonly kind: 'preset'; readonly presetId: string | undefined }
+  | { readonly kind: 'preset'; readonly presetId: string | undefined; readonly workspaceId?: string }
   | { readonly kind: 'agent'; readonly key: number }
 
 /** One catalog refresh request as this owner builds it. The composition root
@@ -136,6 +140,10 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   readonly modelPresentation?: () => ModelPresentation | undefined
   /** Only the Preset presenter; never an alternate command executor. */
   readonly presetPresentation?: () => PresetPresentation | undefined
+  /** M5-W PR-C: only the native `/web` presenter; never an alternate executor. */
+  readonly webPresentation?: () => WebAccessPresentation | undefined
+  /** PO-5E: only the native `/acp` presenter; never an alternate executor. */
+  readonly acpPresentation?: () => AcpAccessPresentation | undefined
   /** Native Session Browser presenter, read live; absent on unsupported renderers. */
   readonly sessionBrowserPresentation?: () => SessionBrowserPresentation | undefined
   /** PR3-A: the renderer-neutral notice sink (registration/refresh failures
@@ -157,11 +165,14 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
     /**
      * Run one gated session transition. `navigation` marks a USER NAVIGATION
      * (`/new`, a selected-session switch): the runtime captures that scope
-     * before its first await and its transition admission stops the captured
-     * old generation BEFORE the admitted writers drain. `undefined` (e.g. the
-     * `/preset` swap) keeps the plain transition admission and never cancels.
-     * The intent's `admission.oldStopAccepted` records whether the one-shot
-     * stop was accepted (always false without a navigation).
+     * before its first await, and its transition admission applies the
+     * backend's navigation ownership BEFORE the admitted writers drain — a
+     * `stop-and-quiesce` backend sends ONE exact-owner stop of the captured old
+     * generation, a `detach-client` backend sends no Host stop at all.
+     * `undefined` (e.g. the `/preset` swap) keeps the plain transition
+     * admission and never cancels. The intent's `admission.oldStopAccepted`
+     * records whether the one-shot stop was accepted (always false without a
+     * navigation, and false for a `detach-client` navigation).
      */
     run<T>(task: () => Promise<T> | T, navigation?: NavigationIntent): Promise<T>
   }
@@ -238,6 +249,11 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
     openJobView(jobId: string): void
     /** B4-B: the Full Task Center only — the quick modal is retired. */
     openTasksBrowser(viewMode: 'full'): void
+    /** S5-PR4: lease the ONE Schedule workspace over the selected backend. */
+    openScheduleWorkspace(): import('@deepseek-ai/dsh-commands').CommandResult
+    /** PR-Q: open the ONE per-occurrence queued-message manager. Optional for
+     *  legacy/headless assemblies with no mounted surface. */
+    openQueueManager?(): import('@deepseek-ai/dsh-commands').CommandResult
     /**
      * Image UX PR3-B: the LIVE mounted composer of the current renderer (the
      * draft seat the `/attach` `/image` intake commits into). Read at call
@@ -253,29 +269,85 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
      * can re-project, mutate or window the transcript through it.
      */
     deliveredFilesSnapshot(): DeliveredFilesSnapshot | undefined
+    /**
+     * TSP I-C: publish ONE effective slash-command catalog commit onto the
+     * CURRENTLY mounted TSP renderer. The command layer calls it at its single
+     * completion commit point; this owner forwards to the mount and stores
+     * nothing, so the PiTui branch (which keeps `app.setCommandCompletions`)
+     * and the catalog authority stay exactly as they were.
+     */
+    installTspCommandCompletions(installation: TspCommandCompletionInstallation): void
+    /**
+     * TSP I-D: install the ONE inline-attachment stager onto the CURRENTLY
+     * mounted TSP renderer. The command layer calls it at the SAME site where
+     * PiTui receives `app.setInlineAttachmentStager`; this owner forwards to the
+     * mount and stores nothing. The mount may lack the capability (a renderer
+     * with no attachment plane), but the COMPOSITION must supply the seam: a
+     * surface that wires the catalog forward and forgets the stager would ship a
+     * renderer whose inline attachment silently never stages.
+     */
+    installTspInlineAttachmentStager(stager: TspInlineAttachmentStager): void
+    /**
+     * TSP I-C: which native TUI-builtin presenters the mounted renderer
+     * actually installed — a READ of the existing mount capabilities, sampled
+     * live at each catalog commit and never a version/kind guess.
+     */
+    tspCommandPickerCapabilities(): TspBuiltinPickers
   }
   /** The semantic backend port slices the runner exposes unchanged. */
   readonly backend: {
     readonly kind: BackendKind
     readonly sessionReader: TuiCommandRunner['sessionReader']
+    /** M5-U-C: the official Host Workspace facts port, forwarded unchanged to
+     *  the internal command runner. This facade never caches, wraps or
+     *  re-derives it; the PiTUI Session Workspace is its only consumer. */
+    readonly sessionWorkspaceFacts: TuiCommandRunner['sessionWorkspaceFacts']
+    /** Session Workspace PR3: the official read-only Host directory-browse
+     *  port, forwarded unchanged. The PiTUI inline Add editor lists the Host
+     *  home/levels through it; this facade never scans a Client directory. */
+    readonly hostDirectoryBrowse: TuiCommandRunner['hostDirectoryBrowse']
+    /** M6-1 F8: the exact-Session policy port (independent approval/sandbox
+     *  facts + the single approval write), forwarded unchanged to the
+     *  runner's scope-bound write and the policy observation owner. */
+    readonly sessionPolicy: TuiCommandRunner['sessionPolicy']
+    /** FR1: the exact-Root Agent Team mode port, forwarded unchanged to the
+     *  `/model` picker's one Team write. Absent = no Team seam here. */
+    readonly teamMode?: TuiCommandRunner['teamMode']
+    /** Split-Client only (G567 capability): the Client-root forwarded-answer
+     *  eligibility read view, forwarded unchanged. Direct/TSP supply nothing. */
+    readonly forwardedAnswerEligibility?: TuiCommandRunner['forwardedAnswerEligibility']
+    readonly subscribeForwardedAnswerEligibility?: TuiCommandRunner['subscribeForwardedAnswerEligibility']
     readonly sessionWriter: TuiCommandRunner['sessionWriter']
     readonly interaction: TuiCommandRunner['interaction']
     readonly catalog: TuiCommandRunner['catalog']
     readonly config: TuiCommandRunner['config']
     readonly hostFile: TuiCommandRunner['hostFile']
+    /** M5-W PR-C: the Split-Client Web frontend control (`/web`). */
+    readonly webAccess: TuiCommandRunner['webAccess']
+    /** PO-1B: the Split-Client local ACP listener control (`/settings → Tools`). */
+    readonly acpAccess: TuiCommandRunner['acpAccess']
+    /** FR3: the ONE official Host MCP manager port (Settings MCP page). */
+    readonly mcpServers: TuiCommandRunner['mcpServers']
+    /** PR-5/MAC-09 v2: the official CUA access port and the official Plugin
+     *  Manager roster the Settings Computer Use page reuses. */
+    readonly cuaAccess: TuiCommandRunner['cuaAccess']
+    readonly pluginManager: TuiCommandRunner['pluginManager']
     /** Shell amendment (M3-4 PR3): whether Host-shell completion facts are
-     * reachable on the selected backend (Direct true / Remote false). */
-    readonly hostShellCompletion: boolean
-    /** M3-4 PR4 round 5: whether the readable-transcript artifact is
-     * renderable on the selected backend (Direct true — the renderer reads
-     * the in-process Session history; Remote false — no transport-neutral
-     * whole-history seam yet). An explicit business capability, never
-     * derived from the M8-retiring Host-registry compatibility mirror. */
-    readonly transcriptExportAvailable: boolean
+     * reachable on the selected backend. */
+    readonly hostShellCompletion: import('../../runtime/host-shell-completion-port.ts').HostShellCompletionPort
+    /** M6 UX PR2: the process-local daemon administration capability, when
+     *  provable; forwarded unchanged to the Settings follow-up. */
+    readonly profileDaemonAdmin?: TuiCommandRunner['profileDaemonAdmin']
+    /** M6 UX PR2: the transient daemon→direct user-conversion intent. */
+    readonly recordBackendExitTransition?: TuiCommandRunner['recordBackendExitTransition']
   }
   /** The bound session runtime entries the runner drives. */
   readonly session: {
+    readonly workspaceNextIntent?: TuiCommandRunner['workspaceNextIntent']
+    readonly cwd?: string
     ensureSession(): Promise<void>
+    awaitWorkspacePreflight?(): Promise<void>
+    validateAutoWorkspace?(): Promise<boolean>
     withWriter: CommandSessionRuntime['withWriter']
     switchSession(sessionId: string, expectedScope?: SessionScope): Promise<string | undefined>
     switchSessionOutcome?(sessionId: string, expectedScope?: SessionScope): Promise<import('../session/runtime.ts').SessionSwitchOutcome>
@@ -301,10 +373,22 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
      */
     subscribeSessionScopeInvalidation(listener: () => void): () => void
   }
+  /** M6-1 F8: the ONE application-level session-policy observation owner.
+   *  The SAME object reference the composition hands the status runtime —
+   *  Settings and Status/footer consume one snapshot source, never two. */
+  readonly policy: SessionPolicyObservation
+  /** M6-1 F8: the opaque current Connection generation identity (absent on
+   *  Direct); the Settings write chain binds an applied ACK and its readback
+   *  to this exact generation. */
+  readonly policyGeneration?: () => unknown
   /** The settings owner seams the runner delegates to. */
   readonly settings: {
     applyFooterSettings: TuiCommandRunner['applyFooterSettings']
     setDisplayPreset: NonNullable<TuiCommandRunner['setDisplayPreset']>
+    /** M6 PR-C C3: fired after a display-preset mutation whose local state
+     *  update bypassed the shared `settings.setDisplayPreset` seam (the
+     *  Settings workspace commit path applies through the app directly). */
+    onDisplayPresetMutated?(): void
   }
   /** The model-selection owner (the generic selection type). */
   readonly model: ModelSelectionOwner<Selection>
@@ -332,7 +416,10 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   /** The profile-wide Plugin Manager controller (never session-owned): its ONE
    *  embedded page belongs to the Settings workspace lease. */
   readonly pluginManager: {
-    page(onYieldNavigation: () => void): ReturnType<TuiCommandRunner['createPluginManagerPage']>
+    page(
+      onYieldNavigation: () => void,
+      onManageComputerUse?: () => string | undefined,
+    ): ReturnType<TuiCommandRunner['createPluginManagerPage']>
   }
   /** The shared client clipboard delivery policy. */
   readonly client: {
@@ -421,6 +508,69 @@ export interface CommandSurface<Selection extends ModelSelectionValue, ExactAgen
    *  (registered, not Host-owned). The footer affordance uses this real
    *  business-entry fact, never the painted button alone. */
   modelPickerAvailable(): boolean
+  /**
+   * TSP-7 PR-G: open the composer's anchored QUICK Model/Effort selector. It is
+   * the same registered `/model` command body as `openModelPicker`, presented
+   * by the mounted renderer's quick presenter; it is admitted only while that
+   * registration is live AND the mounted presenter really offers `openQuick`.
+   * A sessionless subject is NOT a refusal here: the command itself routes it
+   * to the full panel with its explicit `Save default`.
+   */
+  openModelQuick(): void
+  /**
+   * TSP-7 Welcome D: open the SAME registered `/sessions` Session Browser the
+   * typed command runs, from the Welcome screen's single Resume action. It is
+   * admitted only while the `/sessions` registration is live AND the mounted
+   * renderer really offers a Session Browser presentation; a refusal states
+   * itself through the existing notice path. The command owns every listing,
+   * switch, cancel and outcome — this entry opens it and nothing else.
+   *
+   * The optional scope is the PiTUI Host Editor gesture's frozen initial
+   * browse scope (`'all'`); the Welcome and every pre-existing caller omit it
+   * and keep the Current default.
+   */
+  openSessionBrowser(scope?: 'current' | 'all' | {
+    readonly scope?: 'current' | 'all'
+    readonly addDirectory?: boolean
+    readonly initialDirectoryEntry?: boolean
+    readonly initialDirectoryPath?: string
+  }): void
+  /**
+   * The CLI startup entry into the SAME registered `/sessions` Browser
+   * lifecycle. Unlike {@link openSessionBrowser} it RESOLVES with the opener's
+   * admission settlement, so the startup root can await the Browser admission
+   * (presenter/lease) before the first bound input — never the list/search
+   * content, which settles inside the read owner. Only the composition root
+   * calls it; a refusal states itself through the returned result.
+   */
+  openStartupSessionBrowser(request: {
+    readonly scope?: 'current' | 'all'
+    readonly initialQuery: string
+    /** Run the strict CLI exact/unique-prefix match through the existing
+     *  guarded Resume; the Browser itself is admitted before the roster read. */
+    readonly directMatch?: boolean
+  }): Promise<import('@deepseek-ai/dsh-commands').CommandResult>
+  /** Whether that `/sessions` UI entry is actually installed (registered AND
+   *  presentable on this mount) — the business-entry fact the Welcome button
+   *  paints, never the presence of a painted button. */
+  sessionBrowserAvailable(): boolean
+  /**
+   * Mouse PR4: open the SAME registered `/tasks` (`/subagents`) browser the
+   * typed command runs, from the TSP native Tasks status segment. It is
+   * admitted only while the `/tasks` registration actually succeeded
+   * (`commandsRegistered` with a live `tasksBrowserOpener`) AND this mount's
+   * live `supportsTaskCenter` capability holds; a refusal states itself once
+   * through the existing notice path and runs no handler. It opens no Screen
+   * of its own and reads no Task/Job/Question fact: every admission
+   * (`requireLiveSessionScope`), scope read and Task Runtime call stays with
+   * the registered `/tasks` command.
+   */
+  openTasksBrowserUi(): void
+  /** Whether that `/tasks` UI entry is really usable right now — the
+   *  registration fact AND the live structural capability. The TSP status
+   *  segment paints its action from this, so a badge no entry could open is
+   *  never claimed to be clickable. */
+  tasksBrowserUiAvailable(): boolean
   /** Request one catalog refresh through the coordinator. */
   requestCatalogRefresh(request: CatalogRefreshRequest): Promise<CatalogRefreshOutcome>
   /** Whether the catalog coordinator is registered yet. */
@@ -550,6 +700,40 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
    */
   let modelPickerOpener: ((entry: 'models' | 'effort') => Promise<import('@deepseek-ai/dsh-commands').CommandResult>) | undefined
 
+  /**
+   * TSP-7 PR-G: the installed QUICK `/model` UI entry, captured with the same
+   * registration success as {@link modelPickerOpener}. `undefined` means the
+   * `/model` registration degraded, so no quick read or write may run.
+   */
+  let modelQuickOpener: (() => Promise<import('@deepseek-ai/dsh-commands').CommandResult>) | undefined
+
+  /**
+   * TSP-7 Welcome D: the installed `/sessions` UI entry — the
+   * `openSessionBrowser` member `registerTuiCommands` returns, captured only
+   * when the `/sessions` registration itself succeeded. `undefined` means
+   * "not registered (yet)": the Welcome then paints its disabled form and the
+   * public entry refuses through the existing notice path instead of opening a
+   * Browser of its own.
+   */
+  let sessionBrowserOpener:
+    ((scope?: 'current' | 'all' | {
+      readonly scope?: 'current' | 'all'
+      readonly addDirectory?: boolean
+      readonly initialDirectoryEntry?: boolean
+      readonly initialDirectoryPath?: string
+      readonly initialQuery?: string
+    }) => Promise<import('@deepseek-ai/dsh-commands').CommandResult>) | undefined
+
+  /**
+   * Mouse PR4: the installed `/tasks` UI entry — the `openTasksBrowserUi`
+   * member `registerTuiCommands` returns, captured only when the `/tasks`
+   * (and its `/subagents` alias) registration itself succeeded. `undefined`
+   * means "not registered / Host-owned": the TSP status segment then paints
+   * an inert badge and the public entry refuses through the existing notice
+   * path instead of opening a browser of its own.
+   */
+  let tasksBrowserOpener: (() => Promise<import('@deepseek-ai/dsh-commands').CommandResult>) | undefined
+
   /** Consume TUI-local command draft dispositions after DSH normalizes the
    * public CommandResult. A missing id is used only for a thrown command
    * execution, which cannot return its generated id to this sink. */
@@ -563,41 +747,61 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
   
   let catalogRefreshRequest: ((request: CatalogRefreshRequest) => Promise<CatalogRefreshOutcome>) | undefined
 
-  /** `skills/change` coalescing: bursts of invalidation notifications cost
-   * at most two reads, and the follow-up re-read observes the CURRENT
-   * ownership (live agent vs standing preset). */
-  
   let skillsChangeSubscribed = false
+  let disposeSkillsChange: (() => void) | undefined
 
   // M3-6 PR2 §13.3.1: the Remote-only Connection-generation invalidation
-  // lifetime. `observedRemoteConnectionGeneration` is the last token the
-  // callback saw (the identity authority — never a `firstEvent` boolean);
-  // `disposeRemoteConnectionGeneration` is the official unsubscribe slot,
-  // released by `disposeCatalog()` BEFORE the coordinator goes away.
+  // lifetime, released by `disposeCatalog()` BEFORE the coordinator goes away.
   let observedRemoteConnectionGeneration: unknown | undefined
   let disposeRemoteConnectionGeneration: (() => void) | undefined
 
   const skillsChangeGate = new CoalescingRefreshGate(() => {
     runOwned('skills/change refresh', async () => {
+      const remote = deps.backend.kind !== 'direct'
+      // The Host invalidation stream emits its subscribe→reread startup frame
+      // as soon as it is attached, which can precede the launch Workspace
+      // preflight. Wait for that EXISTING single-flight barrier and re-read
+      // every owner fact below — never a target captured before the wait.
+      if (remote && deps.ownership.currentSessionId() === undefined) {
+        if (catalogRefreshRequest === undefined) return undefined
+        await deps.session.awaitWorkspacePreflight?.()
+      }
+      // Re-read the refresh slot AFTER the wait. `disposeCatalog()` retires the
+      // coordinator and this slot while a continuation is still pending; a
+      // retired surface owns nothing to refresh, so the continuation is a
+      // no-op (never a call through the disposed coordinator, never a false
+      // `catalog refresh failed` notice on exit).
       const refresh = catalogRefreshRequest
       if (refresh === undefined) return undefined
-      const liveAgent = deps.liveAgent()
-      const target = liveAgent === undefined
-        ? { kind: 'preset', presetId: deps.presets.pending() ?? deps.presets.launch } as const
-        : { kind: 'agent', key: deps.ownership.generation() } as const
+      const sessionId = remote ? deps.ownership.currentSessionId() : undefined
+      const liveAgent = remote ? undefined : deps.liveAgent()
+      if (sessionId !== undefined) {
+        return refresh({
+          source: 'invalidation',
+          target: { kind: 'agent', key: deps.ownership.generation() },
+          agent: remoteCatalogTargetOf(sessionId),
+        })
+      }
+      if (liveAgent !== undefined) {
+        return refresh({
+          source: 'invalidation',
+          target: { kind: 'agent', key: deps.ownership.generation() },
+          agent: deps.toCatalogAgent(liveAgent),
+        })
+      }
+      // An automatic sessionless invalidation is admitted only for a CONFIRMED
+      // Host workspace. Without one there is no legal Host read, so publish
+      // nothing: the Welcome/Workspace UX owns the prompt and an explicit
+      // `/reload` still reports its selection notice.
+      if (remote && confirmedHostWorkspaceId() === undefined) return undefined
       return refresh({
         source: 'invalidation',
-        target,
-        ...target.kind === 'agent' ? { agent: deps.toCatalogAgent(liveAgent!) } : {},
+        target: standingTargetOf(deps.presets.pending() ?? deps.presets.launch),
       })
     }, {
       diag: deps.diag,
-      sessionId: () => deps.liveAgent()?.session.id,
+      sessionId: () => deps.ownership.currentSessionId(),
       onResult: (outcome) => {
-        // NOTIFY BEFORE settled(): if app.notify throws, runOwned routes
-        // to onError, whose settled() is then the ONLY settle — a dirty
-        // follow-up cannot be double-settled (a second settle would clear
-        // the follow-up's in-flight flag while it is still running).
         if (outcome !== undefined && outcome.kind === 'applied' && outcome.notice !== undefined) {
           deps.notify(outcome.notice, 'error')
         }
@@ -611,18 +815,19 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     })
   })
 
-  /** Subscribe to the dsh-skill invalidation notification once, through
-   * the catalog capability (migration M1.8). The event carries no
-   * scope or cwd, so the refresh target follows the CURRENT ownership; an
-   * unavailable or throwing subscription degrades to no subscription —
-   * owner switches and /reload still refresh. The flag is set only after
-   * a successful subscribe, so a throwing subscribe can retry on a later
-   * registration attempt. */
-  
+  /** The Host event carries no scope or data; the current owner is reread. */
   const subscribeSkillsChangeEvents = (): void => {
     if (skillsChangeSubscribed) return
     try {
-      deps.catalog.skills.onSkillsChange(() => skillsChangeGate.notify())
+      disposeSkillsChange = deps.catalog.skills.onSkillsChange(
+        () => skillsChangeGate.notify(),
+        error => runDetached('Skills invalidation stream', () => { throw error }, {
+          diag: deps.diag,
+          sessionId: () => deps.ownership.currentSessionId(),
+          recoverable: () => true,
+          notify: message => deps.notify(message, 'error'),
+        }),
+      )
       skillsChangeSubscribed = true
     } catch (error) {
       deps.diag.warn('skills/change subscription unavailable', { error: safeErrorMessage(error) })
@@ -641,6 +846,29 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
   const remoteSessionIdOfCatalogTarget = (target: object): string | undefined => {
     const record = target as { [REMOTE_CATALOG_TARGET]?: string }
     return typeof record[REMOTE_CATALOG_TARGET] === 'string' ? record[REMOTE_CATALOG_TARGET] : undefined
+  }
+  /**
+   * The confirmed Host Workspace identity of this Remote surface, or undefined
+   * when the create intent is not a Host-issued `workspace-id`. `intent` is the
+   * identity authority (never `status` or `displayPath`): the standing read must
+   * not fabricate a Workspace from the Client cwd or a display label.
+   */
+  const confirmedHostWorkspaceId = (): string | undefined => {
+    if (deps.backend.kind === 'direct') return undefined
+    const intent = deps.session.workspaceNextIntent?.snapshot().intent
+    // The create intent is the owner: `intent` is the IDENTITY authority, so
+    // the still-confirmed target stays usable while a DIFFERENT Add verifies
+    // or is refused (`status` is transient, review P1). An UNSELECTED surface
+    // has no Host workspace: the standing read must not fabricate one.
+    return intent?.kind === 'workspace-id' ? intent.workspaceId : undefined
+  }
+  const standingTargetOf = (presetId: string | undefined): CatalogRefreshRequest['target'] => {
+    const workspaceId = confirmedHostWorkspaceId()
+    return {
+      kind: 'preset',
+      presetId,
+      ...(workspaceId === undefined ? {} : { workspaceId }),
+    }
   }
   /**
    * The Remote live-catalog read: the command source's generation-fenced
@@ -746,6 +974,11 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
   ): Promise<void> => {
     const refresh = catalogRefreshRequest
     if (refresh === undefined) return
+    // The by-id owner refresh is the Live Session START/SWITCH/STARTUP entry;
+    // it is explicitly owner-initiated, so a failed private invalidation stream
+    // is re-established here as well. Passive `skills/change` invalidations go
+    // through the coalescing gate below and never re-arm.
+    deps.catalog.skills.rearmSkillsChange?.()
     await refresh({
       source,
       target: { kind: 'agent', key: deps.ownership.generation() },
@@ -790,6 +1023,175 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
 
   const modelPickerAvailable = (): boolean => commandsRegistered && modelPickerOpener !== undefined
 
+  /**
+   * TSP-7 PR-G: the ONE quick `/model` UI entry. It admits through exactly the
+   * same registration fact as `openModelPicker` plus the mounted presenter's
+   * own `openQuick` availability, then forwards to the registered command's
+   * quick presentation. It never constructs a `ModelPickerRequest`, never
+   * touches a catalog and never decides full-vs-quick — the command makes that
+   * call on the Session subject it captured.
+   */
+  const openModelQuick = (): void => {
+    if (!commandsRegistered || modelQuickOpener === undefined) {
+      deps.notify('model selection is unavailable in this session (the /model command is not registered)', 'error')
+      return
+    }
+    // The TSP branch has no PiTui fallback presenter, so a mounted renderer that
+    // offers no quick presentation must be refused BEFORE the handler runs (the
+    // same fail-closed admission `openModelPicker` applies). A PiTui mount keeps
+    // its typed-presenter route; there the command itself states the refusal.
+    const presentation = deps.modelPresentation?.()
+    if (deps.app() === undefined && presentation?.openQuick === undefined) {
+      deps.notify("This command's UI is not available in TSP yet", 'error')
+      return
+    }
+    const opened = modelQuickOpener()
+    void opened.then((result) => { // allowlist: result observer — the command owns the task
+      if (result.kind === 'error' && typeof result.text === 'string' && result.text !== '') {
+        deps.notify(result.text, 'error')
+      }
+    }, (error: unknown) => { // allowlist: diagnostics observer, the command owns the task
+      deps.logError(`tui-runner: model quick UI entry failed: ${safeErrorMessage(error)}`)
+    })
+  }
+
+  /**
+   * TSP-7 Welcome D: the ONE `/sessions` UI entry — the registered handler's
+   * own body, admitted only while its registration is live AND the mounted
+   * renderer can present the Browser. It opens no Screen itself, reads no
+   * session list and switches nothing: every settlement, notice, cancel and
+   * stale check stays with the `/sessions` command and its Browser owner.
+   */
+  type SessionBrowserRequest = 'current' | 'all' | {
+    readonly scope?: 'current' | 'all'
+    readonly addDirectory?: boolean
+    readonly initialDirectoryEntry?: boolean
+    readonly initialDirectoryPath?: string
+    readonly initialQuery?: string
+    readonly directMatch?: boolean
+  }
+  /** The ONE admission both the void UI entry and the awaitable CLI startup
+   *  entry share. A string is the exact refusal text. */
+  const sessionBrowserRefusal = (): string | undefined => {
+    if (!commandsRegistered || sessionBrowserOpener === undefined) {
+      return 'session resume is unavailable in this session (the /sessions command is not registered)'
+    }
+    // The TSP branch has no PiTui fallback presenter, so a mounted renderer
+    // that offers no Session Browser presentation is refused BEFORE the
+    // handler runs — the same fail-closed admission the model entries apply.
+    if (deps.app() === undefined && deps.sessionBrowserPresentation?.() === undefined) {
+      return "This command's UI is not available in TSP yet"
+    }
+    return undefined
+  }
+  const openSessionBrowserCommand = (request: SessionBrowserRequest): Promise<import('@deepseek-ai/dsh-commands').CommandResult> => {
+    const refusal = sessionBrowserRefusal()
+    if (refusal !== undefined) return Promise.resolve({ kind: 'error', text: refusal })
+    return sessionBrowserOpener!(request)
+  }
+  const openSessionBrowser = (scope?: SessionBrowserRequest): void => {
+    const refusal = sessionBrowserRefusal()
+    if (refusal !== undefined) {
+      deps.notify(refusal, 'error')
+      return
+    }
+    const opened = sessionBrowserOpener!(scope)
+    void opened.then((result) => { // allowlist: result observer — the command owns the task
+      if (result.kind === 'error' && typeof result.text === 'string' && result.text !== '') {
+        deps.notify(result.text, 'error')
+      }
+    }, (error: unknown) => { // allowlist: diagnostics observer, the command owns the task
+      deps.logError(`tui-runner: session browser UI entry failed: ${safeErrorMessage(error)}`)
+    })
+  }
+  /** The CLI startup admission: resolves with the opener's own initialization
+   *  settlement (presenter/lease), never with the list/search content. */
+  const openStartupSessionBrowser = (request: {
+    readonly scope?: 'current' | 'all'
+    readonly initialQuery: string
+    readonly directMatch?: boolean
+  }): Promise<import('@deepseek-ai/dsh-commands').CommandResult> => openSessionBrowserCommand(request)
+
+  const sessionBrowserAvailable = (): boolean => commandsRegistered
+    && sessionBrowserOpener !== undefined
+    && (deps.sessionBrowserPresentation?.() !== undefined || deps.app() !== undefined)
+
+  /**
+   * The mounted renderer's ONE Task Center reachability truth, read LIVE
+   * through the SAME seam the typed `/tasks` admission already consumes
+   * (`tsp-capability`). It is the structural negotiated capability only; the
+   * transient seat/hydration admission stays with the renderer's own
+   * predicate.
+   */
+  const taskCenterCapable = (): boolean => deps.surface.tspCommandPickerCapabilities().taskCenter === true
+
+  /**
+   * Mouse PR4: whether the LIVE command authority would route an
+   * argument-free `/name` line to a GENUINE Host command.
+   *
+   * It is the SAME §D3 routing primitive the typed submission classifies
+   * with (`hostOriginClaimOf`, whose Direct compatibility mirrors are already
+   * subtracted upstream), so this surface's own registration never answers
+   * `true` here. A name can change hands AFTER startup: an Agent-scoped Host
+   * command installed later becomes the winner for `/name`, and the typed
+   * line then executes the Host handler. The mouse entry must follow that
+   * authority instead of the startup registration fact.
+   */
+  const hostOwnsCommandName = (name: string): boolean =>
+    hostOriginClaimOf?.({ name })?.claimed === true
+
+  /**
+   * Mouse PR4: the ONE admission fact of the `/tasks` UI entry. It answers
+   * "is this entry still the same business route the typed command uses?" —
+   * never "was the badge painted":
+   *
+   * - its registration really installed an opener;
+   * - no genuine Host command currently owns `/tasks` or `/subagents` (the
+   *   typed line would route there instead);
+   * - the mounted pane can present the Work Hub (`supportsTaskCenter`).
+   *
+   * Every term is read at CALL time, so a later Host override or a lost
+   * capability flips the answer without re-registration.
+   */
+  const tasksBrowserUiAdmitted = (): boolean => commandsRegistered
+    && tasksBrowserOpener !== undefined
+    && !hostOwnsCommandName('tasks')
+    && !hostOwnsCommandName('subagents')
+    && taskCenterCapable()
+
+  /**
+   * Mouse PR4: the ONE `/tasks` UI entry — the registered handler's own body,
+   * admitted only while {@link tasksBrowserUiAdmitted} holds. A refusal
+   * states itself once through the existing notice path; it never constructs
+   * a roster read, a Session admission or a Task Browser request of its own.
+   */
+  const openTasksBrowserUi = (): void => {
+    if (!commandsRegistered || tasksBrowserOpener === undefined) {
+      deps.notify('the task browser is unavailable in this session (the /tasks command is not registered)', 'error')
+      return
+    }
+    if (hostOwnsCommandName('tasks') || hostOwnsCommandName('subagents')) {
+      // The typed `/tasks` (or `/subagents`) line belongs to the Host now.
+      // Running the TUI handler here would be a mouse-only second route.
+      deps.notify('the status-line task entry is disabled: /tasks is currently served by the Host', 'error')
+      return
+    }
+    if (!taskCenterCapable()) {
+      deps.notify("This command's UI is not available in TSP yet", 'error')
+      return
+    }
+    const opened = tasksBrowserOpener()
+    void opened.then((result) => { // allowlist: result observer — the command owns the task
+      if (result.kind === 'error' && typeof result.text === 'string' && result.text !== '') {
+        deps.notify(result.text, 'error')
+      }
+    }, (error: unknown) => { // allowlist: diagnostics observer, the command owns the task
+      deps.logError(`tui-runner: tasks browser UI entry failed: ${safeErrorMessage(error)}`)
+    })
+  }
+
+  const tasksBrowserUiAvailable = (): boolean => tasksBrowserUiAdmitted()
+
   const registerCommands = (initial?: InitialCommandCatalog): void => {
     if (commandsRegistered) return
     commandsRegistered = true
@@ -821,7 +1223,26 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
           // Deliberately not cached — the mount (and any seat replacement) is
           // read at command time, exactly like `deps.app`.
           composer: () => deps.surface.composer(),
+          // TSP I-C: the catalog commit reaches the mounted renderer through
+          // the SAME live-read pattern — never a cached mount, never a second
+          // catalog. The capability read is sampled per commit, so a presenter
+          // that appears or goes away later changes the candidate set with it.
+          installTspCommandCompletions: installation => {
+            deps.surface.installTspCommandCompletions(installation)
+          },
+          // TSP I-D: the SAME live-read forwarding for the ONE inline-attachment
+          // stager. No runner, no draft stores and no `TuiApp` cross this seam;
+          // the mount owns the acceptance lifecycle, this owner owns nothing.
+          installTspInlineAttachmentStager: stager => {
+            deps.surface.installTspInlineAttachmentStager(stager)
+          },
+          tspCommandPickerCapabilities: () => deps.surface.tspCommandPickerCapabilities(),
         },
+        // M5-W PR-C: the native `/web` presenter, read LIVE like the Model and
+        // Preset ones (never a cached mount).
+        deps.webPresentation?.(),
+        // PO-5E: the same live read for the native `/acp` presenter.
+        deps.acpPresentation?.(),
       )
       // Per-name degradation notice (M3-4 PR2): a Host-claimed name (the
       // Remote Host composition mounts `/export` itself) fails only ITS own
@@ -846,6 +1267,17 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // mean the registration degraded (a Host-claimed name): the surface then
       // refuses the composer control truthfully instead of guessing a route.
       modelPickerOpener = installed.openModelPicker
+      // TSP-7 PR-G: the QUICK entry rides the SAME registration fact —
+      // `registerTuiCommands` supplies both or neither.
+      modelQuickOpener = installed.openModelQuick
+      // TSP-7 Welcome D: the `/sessions` UI entry rides the SAME registration
+      // fact — `registerTuiCommands` supplies it only when the `/sessions`
+      // registration really installed one.
+      sessionBrowserOpener = installed.openSessionBrowser
+      // Mouse PR4: the `/tasks` UI entry rides its own registration fact. An
+      // absent member means THAT registration degraded (a genuine Host-owned
+      // `/tasks`/`/subagents`), so the status segment's action is refused.
+      tasksBrowserOpener = installed.openTasksBrowserUi
       takeCommandDraftDisposition = installed.takeCommandDraftDisposition
       // The coordinator's surface hooks point INTO the command surface;
       // the command runtime's refresh facades (and the switch/first-session
@@ -868,13 +1300,26 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
           return directCatalog.readSurfaceCatalog(agent as unknown as ExactAgent, readSignal)
         },
         // The sessionless (preset) target reads the STANDING skill catalog
-        // through the catalog capability (migration M1.8) — the
-        // capability-gated cold path (standing key → global → degraded
-        // global with a notice), never an Agent probe: probes emit
-        // durable session events in this deployment (see
-        // docs/architecture/surface-catalog.md).
-        readStanding: (presetId, readSignal) =>
-          deps.catalog.skills.standing(presetId, deps.clientCwd, readSignal),
+        // through the catalog capability (migration M1.8). The location
+        // identity is decided by the backend: Remote requires the confirmed
+        // Host WorkspaceId captured at refresh admission; Direct is co-located
+        // with the Host and reads its own client cwd. A Remote target without
+        // a confirmed Workspace is a LOCAL unavailable/incomplete projection
+        // (never an RPC with the Client cwd, never a fabricated complete []).
+        readStanding: (presetId, workspaceId, readSignal): Promise<StandingSkillRead> => {
+          if (deps.backend.kind === 'direct') {
+            const location: StandingSkillLocation = { kind: 'co-located-directory', cwd: deps.clientCwd }
+            return deps.catalog.skills.standing(presetId, location, readSignal)
+          }
+          if (workspaceId === undefined) {
+            return Promise.resolve({
+              catalog: { skills: [], complete: false },
+              notice: 'Select a Host workspace to load skills.',
+            })
+          }
+          const location: StandingSkillLocation = { kind: 'host-workspace', workspaceId }
+          return deps.catalog.skills.standing(presetId, location, readSignal)
+        },
         // §2.2/§16 final-install fence: the Remote target's admission
         // transport identity (captured ONCE at refresh admission, only ever
         // COMPARED before installSnapshot — a same-id binding rollover in
@@ -914,11 +1359,47 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
             const next = source.connectionGeneration()
             if (Object.is(next, observedRemoteConnectionGeneration)) return
             observedRemoteConnectionGeneration = next
+            // M6-1 F8: the exact-Session policy facts belong to the OLD Host
+            // generation. Revoke them and repaint NOW (the next display
+            // refresh starts the new generation's controlled read) — this
+            // rides the discriminant's ONE existing generation subscription,
+            // never a second source subscription.
+            deps.policy.invalidate()
+            // The status refresh both repaints the revoked facts and starts
+            // the new generation's controlled read (the observation's
+            // read-admission fence is open on this transport edge).
+            deps.status.refresh()
             // Disconnected / connecting (§6 Must 2): keep the last-good
             // Host claims; NO catalog RPC, no Session retain, no UI clear.
             if (next === undefined) return
             const sessionId = deps.ownership.currentSessionId()
-            if (sessionId === undefined) return
+            if (sessionId === undefined) {
+              runOwned(
+                'remote reconnect standing refresh',
+                async () => {
+                  // The reconnect subscription does not replace the launch
+                  // Workspace preflight. Wait for that EXISTING single-flight
+                  // completion, then re-read the owner and the confirmed
+                  // Host WorkspaceId at execution time.
+                  if (catalogRefreshRequest === undefined) return undefined
+                  await deps.session.awaitWorkspacePreflight?.()
+                  // The surface may have retired while waiting: the retired
+                  // refresh slot owns no continuation and must not error.
+                  if (catalogRefreshRequest === undefined) return undefined
+                  const currentSessionId = deps.ownership.currentSessionId()
+                  if (currentSessionId !== undefined) {
+                    return refreshLiveCatalogById(currentSessionId, 'invalidation')
+                  }
+                  if (confirmedHostWorkspaceId() === undefined) return undefined
+                  return requestCatalogRefresh({
+                    source: 'invalidation',
+                    target: standingTargetOf(deps.presets.pending() ?? deps.presets.launch),
+                  })
+                },
+                { diag: deps.diag, sessionId: () => deps.ownership.currentSessionId() },
+              )
+              return
+            }
             runOwned(
               'remote reconnect catalog refresh',
               () => refreshLiveCatalogById(sessionId, 'invalidation'),
@@ -964,6 +1445,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
         withWriter: (scope, task) => deps.session.withWriter(scope, task),
       },
       skills: deps.catalog.skills,
+      policy: deps.policy,
       surface: {
         // PR4 §2.2: the Direct seams above (scoped commands, running, routing,
         // stats, last assistant text) are Direct-only; the Remote branch
@@ -1002,8 +1484,6 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
             cwd: deps.backend.sessionReader.sessionStatus(sessionId)?.cwd ?? deps.clientCwd,
           }
         },
-        approvalOverride: (sessionId) =>
-          deps.backend.config.permissions.approvalOverrideOf(sessionId),
         sessionStats: (sessionId) => deps.direct.sessionStats(sessionId),
         lastAssistantText: (sessionId) => deps.direct.lastAssistantText(sessionId),
         refreshLiveCatalog: async (sessionId, source) => {
@@ -1027,10 +1507,12 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
             agent: deps.toCatalogAgent(agent),
           })
         },
-        refreshStandingCatalog: (presetId, source) =>
-          catalogRefreshAvailable()
-            ? requestCatalogRefresh({ source, target: { kind: 'preset', presetId } })
-            : Promise.resolve({ kind: 'failed', error: 'catalog refresh unavailable' }),
+        refreshStandingCatalog: (presetId, source) => {
+          if (!catalogRefreshAvailable()) {
+            return Promise.resolve({ kind: 'failed', error: 'catalog refresh unavailable' })
+          }
+          return requestCatalogRefresh({ source, target: standingTargetOf(presetId) })
+        },
         promptAdmission: (sessionId, line, task) =>
           // M3-4 PR3 (§10.2): the Remote branch RETIRES the Direct-Agent
           // admission hook — the exact-owner resolution must not even run
@@ -1066,7 +1548,19 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       currentNotificationMode: () => deps.surface.currentNotificationMode(),
       currentNotificationMethod: () => deps.surface.currentNotificationMethod(),
       setTerminalProgressMode: (mode) => deps.surface.setTerminalProgressMode(mode),
+      workspaceNextIntent: deps.session.workspaceNextIntent,
       ensureSession: () => deps.session.ensureSession(),
+      awaitWorkspacePreflight: deps.session.awaitWorkspacePreflight === undefined
+        ? undefined
+        : () => deps.session.awaitWorkspacePreflight!(),
+      // The create-boundary AUTO Workspace re-proof (`/new`). The session owner
+      // is the only holder of the Client-local equivalence evidence, so the
+      // facade must forward its validator: a dropped member makes every Remote
+      // sessionless `/new` treat a preflight-confirmed candidate as stale and
+      // refuse the create.
+      validateAutoWorkspace: deps.session.validateAutoWorkspace === undefined
+        ? undefined
+        : () => deps.session.validateAutoWorkspace!(),
       get selected() { return deps.model.selected },
       // Legacy/display facade: the newest SESSIONLESS `/model` intent (pending
       // or unresolved) falling back to the persisted global default. A fresh
@@ -1093,6 +1587,23 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // the title batches, the context measurement and the export read go
       // through the port, never ctx directly.
       sessionReader: deps.backend.sessionReader,
+      sessionWorkspaceFacts: deps.backend.sessionWorkspaceFacts,
+      hostDirectoryBrowse: deps.backend.hostDirectoryBrowse,
+      // M6-1 F8: the exact-Session policy port (read + write), forwarded
+      // unchanged — the observation owner above is its read consumer.
+      sessionPolicy: deps.backend.sessionPolicy,
+      // FR1: the exact-Root Team mode port, forwarded unchanged. The `/model`
+      // command owns its scope admission and writer; the picker only presents.
+      ...(deps.backend.teamMode === undefined ? {} : { teamMode: deps.backend.teamMode }),
+      // The opaque Host-generation identity the write chain binds its ACK and
+      // readback to (undefined on Direct).
+      sessionPolicyGeneration: () => deps.policyGeneration?.(),
+      ...(deps.backend.forwardedAnswerEligibility === undefined
+        ? {}
+        : { forwardedAnswerEligibility: deps.backend.forwardedAnswerEligibility }),
+      ...(deps.backend.subscribeForwardedAnswerEligibility === undefined
+        ? {}
+        : { subscribeForwardedAnswerEligibility: deps.backend.subscribeForwardedAnswerEligibility }),
       // PR D2: the explicit About/status force — measure NOW through the
       // coordinator (mark dirty + semantic reader), repaint the footer
       // cheaply, and return the fresh (or last-good) value for the panel.
@@ -1105,6 +1616,16 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // composition's StatusStore subscription, forwarded unchanged).
       forceContextMeasurementResult: () => deps.status.forceContextMeasurementResult(),
       backendKind: deps.backend.kind,
+      // M6 UX PR2: the process-local daemon administration capability, when
+      // this composition can prove the official local Profile identity.
+      ...(deps.backend.profileDaemonAdmin === undefined
+        ? {}
+        : { profileDaemonAdmin: deps.backend.profileDaemonAdmin }),
+      // M6 UX PR2: the transient daemon→direct user-conversion intent,
+      // forwarded unchanged to the Settings command layer.
+      ...(deps.backend.recordBackendExitTransition === undefined
+        ? {}
+        : { recordBackendExitTransition: deps.backend.recordBackendExitTransition }),
       subscribeSessionScopeInvalidation: (listener) => deps.status.subscribeSessionScopeInvalidation(listener),
       // The session WRITE port (D2.1): ordinary prompts, Ctrl+S batch
       // delivery, exact queue removal, cancel and title ops go through the port.
@@ -1120,11 +1641,23 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // The Host-file port (migration M1.10): `@`-mention discovery and
       // send-time canonicalization against the Host filesystem.
       hostFile: deps.backend.hostFile,
+      // M5-W PR-C: the Split-Client Web frontend control (`/web`). The command
+      // layer owns every read/write through this ONE port; the presenters never
+      // reach the Host.
+      webAccess: deps.backend.webAccess,
+      // PO-1B: the Split-Client local ACP listener control for the Settings
+      // `ACP Server` runtime row.
+      acpAccess: deps.backend.acpAccess,
+      // FR3: the ONE official Host MCP manager port for the Settings page.
+      mcpServers: deps.backend.mcpServers,
+      cuaAccess: deps.backend.cuaAccess,
+      pluginManager: deps.backend.pluginManager,
       hostShellCompletion: deps.backend.hostShellCompletion,
-      // The readable-transcript business capability (round 5): explicitly
-      // backend-owned, NEVER derived from the commandRegistry mirror below
-      // (that mirror retires with M8).
-      transcriptExportAvailable: deps.backend.transcriptExportAvailable,
+      // The readable-transcript business capability is NOT a pre-read flag:
+      // the command only acknowledges, and the post-success save owner reads
+      // the official Session Markdown port at save time (`none`/`unavailable`
+      // are reported then). The Client-local save dialog is the mounted-app
+      // capability the handler checks.
       // The minimal commands registry for the TUI's OWN registrations
       // (migration M1.11) — the runner assembly dependency, never a Host
       // capability exposed to command handlers. Direct-only on PR4: the
@@ -1174,6 +1707,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
        * read and mutate the shared DisplayState through one setter. */
       displayPreset: () => deps.displayState.preset,
       setDisplayPreset: (preset) => deps.settings.setDisplayPreset(preset),
+      onDisplayPresetMutated: () => deps.settings.onDisplayPresetMutated?.(),
       /** @deprecated Focus compatibility facade. */
       focusEnabled: () => isFocusDisplayPreset(deps.displayState.preset),
       setFocusMode: (enabled) => { deps.settings.setDisplayPreset(enabled ? 'focus' : 'full') },
@@ -1205,13 +1739,22 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
         if (!deps.sessionScope.isCurrent(scope)) return { ownership: 'superseded' as const, outcome }
         return { ownership: 'current' as const, outcome }
       },
-      setSessionApprovalPolicy: (scope, value) => {
-        // Same contract for the synchronous write: validate, then dispatch in
-        // the SAME stack — the exact owner, never `sessionId` re-resolved later.
-        if (!deps.sessionScope.isCurrent(scope)) return 'superseded' as const
-        agentForLiveScope(scope)
-        deps.backend.interaction.setApprovalPolicy(scope.sessionId, value)
-        return 'applied' as const
+      setSessionApprovalPolicy: async (scope, value, signal) => {
+        // M6-1 F8: the transport-neutral exact-Session approval write. A stale
+        // scope BEFORE the dispatch proves nothing ran (`superseded`); a
+        // dispatched write keeps whatever the port settled even when the
+        // surface moved on — the two independent axes of
+        // `src/runtime/write-outcome.ts`. No Direct-Agent prerequisite: the
+        // Remote session reaches the SAME semantic through
+        // `piTuiSessionPolicy/setApproval`.
+        if (!deps.sessionScope.isCurrent(scope)) return { ownership: 'superseded' as const, outcome: undefined }
+        const outcome = await deps.backend.sessionPolicy.setApproval(
+          scope.sessionId,
+          value,
+          signal ?? deps.signal,
+        )
+        if (!deps.sessionScope.isCurrent(scope)) return { ownership: 'superseded' as const, outcome }
+        return { ownership: 'current' as const, outcome }
       },
       switchSession: (sessionId, expectedScope) => deps.session.switchSession(sessionId, expectedScope),
       ...(deps.session.switchSessionOutcome === undefined ? {} : { switchSessionOutcome: (sessionId, expectedScope) => deps.session.switchSessionOutcome!(sessionId, expectedScope) }),
@@ -1243,6 +1786,13 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // The zero-arg runner callback (commands.ts) is the `/tasks` surface:
       // it opens the FULL browser explicitly.
       openTasksBrowser: () => deps.surface.openTasksBrowser('full'),
+      openScheduleWorkspace: () => deps.surface.openScheduleWorkspace(),
+      // PR-Q: `/queue` forwards to the application-level manager; the command
+      // surface owns no queue state and performs no Host write.
+      openQueueManager: () => deps.surface.openQueueManager?.() ?? {
+        kind: 'error',
+        text: 'Queue management is unavailable',
+      },
       // Delivered files (PR1 / M2): the functional read capability the
       // `/deliverables` handler forwards to the mounted surface; no Folder or
       // runtime object crosses this seam.
@@ -1250,7 +1800,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       openRewindPicker: deps.openRewindPicker,
       // `/plugins` opens the profile-wide Plugin Manager panel (P1-A). It is
       // NOT session-owned: it never creates or switches a Session.
-      createPluginManagerPage: (onYieldNavigation) => deps.pluginManager.page(onYieldNavigation),
+      createPluginManagerPage: (onYieldNavigation, onManageComputerUse) => deps.pluginManager.page(onYieldNavigation, onManageComputerUse),
       // The attachment-intake UX fence: the ONE production reader of the
       // transition gate. Staging an attachment while a transition is in flight
       // (quiesce → commit) would inject a draft into a session about to be
@@ -1262,7 +1812,9 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // section via this seam. Host fork dispatch is outside this FIFO;
       // forked-child adoption and rewind navigation use their own gated
       // adoption path. `navigation` opts a USER NAVIGATION into the runtime's
-      // exact-owner stop-before-drain admission; `/preset` and every other
+      // backend-owned admission: a `stop-and-quiesce` backend stops the
+      // captured owner before the admitted-writer drain, a `detach-client`
+      // backend only re-checks the captured scope; `/preset` and every other
       // transition keep the plain admission.
       withSessionTransition: <T>(task: () => Promise<T> | T, navigation?: NavigationIntent) =>
         deps.transition.run(async () => {
@@ -1296,6 +1848,17 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
   const catalogRefreshAvailable = (): boolean => catalogRefreshRequest !== undefined
   const requestCatalogRefresh = (request: CatalogRefreshRequest): Promise<CatalogRefreshOutcome> => {
     if (catalogRefreshRequest === undefined) return Promise.reject(new Error('the command catalog is not registered'))
+    // OWNER ADMISSION: a live Session owns the official catalog
+    // (`skills.list` + commands). A sessionless standing refresh is admitted
+    // only while the surface owns no Session — `Add directory` stays reachable
+    // from a live Session Workspace and a startup preflight may race the first
+    // Session commit, so EVERY preset/workspace request passes this fence.
+    if (request.target.kind === 'preset' && deps.ownership.currentSessionId() !== undefined) {
+      return Promise.resolve({ kind: 'superseded' })
+    }
+    // An explicit owner refresh is the ONLY place a failed private
+    // invalidation stream is re-established (never a hidden retry loop).
+    deps.catalog.skills.rearmSkillsChange?.()
     return catalogRefreshRequest(request)
   }
   const disposeCatalog = (): void => {
@@ -1307,15 +1870,21 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     // refresh path behind this surface; the collected failure is surfaced
     // after both attempts.
     const generationUnsubscribe = disposeRemoteConnectionGeneration
+    const skillsUnsubscribe = disposeSkillsChange
     const coordinator = catalogCoordinator
     disposeRemoteConnectionGeneration = undefined
+    disposeSkillsChange = undefined
+    skillsChangeSubscribed = false
     catalogCoordinator = undefined
-    // The Direct `skills/change` capability offers no unsubscribe, so a late
-    // event can still reach the coalescing gate after teardown. Clearing the
-    // request slot makes both refresh paths no-ops (they guard on undefined)
+    // A late event can still reach the coalescing gate after teardown. Clearing
+    // the request slot makes both refresh paths no-ops (they guard on undefined)
     // instead of touching the disposed coordinator.
     catalogRefreshRequest = undefined
+    // ORDER: the Host/Direct invalidation subscription is released FIRST (no
+    // late frame can start a read), then the Remote generation listener, then
+    // the coordinator. One throwing disposer never skips the remaining steps.
     runSyncDisposalSteps('command catalog disposal', [
+      () => skillsUnsubscribe?.(),
       () => generationUnsubscribe?.(),
       () => coordinator?.dispose(),
     ])
@@ -1338,6 +1907,15 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     withCommandDelivery: (delivery, run) => withCommandDelivery(delivery, run),
     openModelPicker,
     modelPickerAvailable,
+    openModelQuick,
+    // TSP-7 Welcome D: the `/sessions` UI entry and its real availability.
+    openSessionBrowser,
+    openStartupSessionBrowser,
+    sessionBrowserAvailable,
+    // Mouse PR4: the `/tasks` UI entry and its real availability (the
+    // registration fact AND the live mounted Task Center capability).
+    openTasksBrowserUi,
+    tasksBrowserUiAvailable,
     requestCatalogRefresh,
     catalogRefreshAvailable,
     isSkillInvocation,

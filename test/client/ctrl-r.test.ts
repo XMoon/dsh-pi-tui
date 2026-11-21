@@ -284,6 +284,63 @@ test('Ctrl+R captures the session identity at OPEN time (a session switch moves 
     'the reopened seat must search the NEW session, not the construction snapshot')
 })
 
+test('Ctrl+R Session scope searches the session across cwds; Enter fills the draft and Directory stays single-cwd', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  const { VirtualTerminal } = await import('../support/virtual-terminal.ts')
+  const { TuiApp } = await import('../../src/tui-app.ts')
+  // The SAME session submitted from two working directories: one file per cwd.
+  seedHistory(home, '/work/a', [{ content: 'current cwd prompt', ts: 1, sessionId: 'ses_a' }])
+  seedHistory(home, '/work/b', [
+    { content: 'old cwd prompt', ts: 2, sessionId: 'ses_a' },
+    { content: 'other session in old cwd', ts: 3, sessionId: 'ses_b' },
+  ])
+  const vt = new VirtualTerminal(80, 24)
+  const submitted: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: (text) => submitted.push(text),
+    onExit: () => {},
+  }, {
+    historySearchSource: new FileHistorySearchSource({ dshHome: home }),
+    historySearchCwd: () => '/work/a',
+    captureHistoryScope: () => ({ sessionId: 'ses_a', isCurrent: () => true }),
+  })
+  app.start()
+  startedApps.add(app)
+  life.defer(() => app.stop())
+  await vt.waitForRender()
+  app.setDraft('draft before history')
+  await vt.waitForRender()
+  vt.sendInput('\x12') // Ctrl+R — a live session opens in Session scope
+  await vt.waitForRender()
+  // The old-cwd row of THIS session is visible in the default scope, while the
+  // other session's row in the same old-cwd file is never eligible.
+  await waitFor(() => strip(vt.getViewport()).includes('old cwd prompt'))
+  const sessionFrame = strip(vt.getViewport())
+  assert.ok(sessionFrame.includes('current cwd prompt'), 'the live-cwd row is listed too')
+  assert.ok(!sessionFrame.includes('other session in old cwd'), 'another session never leaks into Session scope')
+  vt.sendInput('\r') // Enter accepts the newest row (ts 2, from /work/b)
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'old cwd prompt', 'Enter restores the cross-cwd row into the CURRENT draft')
+  assert.deepEqual(submitted, [], 'accepting history never submits')
+  // Reopen and switch to Current Directory: only the live cwd's file is shown.
+  vt.sendInput('\x12')
+  await vt.waitForRender()
+  await waitFor(() => strip(vt.getViewport()).includes('old cwd prompt'))
+  vt.sendInput('\t') // Tab: Session -> Directory
+  await waitFor(() => {
+    const frame = strip(vt.getViewport())
+    return frame.includes('current cwd prompt') && !frame.includes('old cwd prompt')
+  })
+  const directoryFrame = strip(vt.getViewport())
+  assert.ok(directoryFrame.includes('current cwd prompt'), 'Directory shows the live cwd file')
+  assert.ok(!directoryFrame.includes('old cwd prompt'), 'Directory never scans another cwd file')
+  vt.sendInput('\x1b') // Esc
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'old cwd prompt', 'Esc leaves the draft untouched')
+  assert.deepEqual(submitted, [])
+})
+
 test('a Question PARKS the History seat and the SAME tenant (query + selection) is restored', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)

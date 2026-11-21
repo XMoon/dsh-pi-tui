@@ -12,9 +12,12 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { executeModelToolFixture } from '@deepseek-ai/dsh-tool-testkit'
+import { NativeToolExecutor } from '@deepseek-ai/dsh-tool-executor-native'
 import { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
-import ToolRuntime, { defineTool, renderToolsSdk, type ToolDefinition } from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
+import { renderToolsSdk } from '@deepseek-ai/dsh-tool-executor-ptc'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { apply as applyVisualTools, Config } from '../../src/app/host/visual-tools.ts'
 import {
@@ -33,9 +36,16 @@ import { visualReference } from '../../src/domain/visual/reference.ts'
 const SVG_SOURCE = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32">'
   + '<rect width="64" height="32" fill="#3b82f6"/></svg>'
 
-/** The turn-boundary stand-in: this suite never runs a model turn, so the
- *  projected reference is never injected and `stateOf` answers "no boundary". */
-const NO_BOUNDARY = { stateOf: () => undefined }
+/** The turn-boundary stand-in value: this suite never runs a model turn, so the
+ *  projected reference is never injected and the official reader answers
+ *  "no boundary" (the real `AgentRegistry.turnBoundaryOf` never returns
+ *  `undefined`; it returns the projection's initial state). */
+const NO_BOUNDARY = {
+  openTurnStartSeq: null,
+  lastStepStartSeq: null,
+  lastStepBoundary: null,
+  lastTurn: 0,
+}
 
 function mountRegistry(): Context {
   const ctx = new Context()
@@ -43,12 +53,17 @@ function mountRegistry(): Context {
     tools: () => {},
     section: () => () => {},
   })
-  ;(ctx as unknown as { provide(name: string, value: object): void }).provide('agents', { get: () => undefined })
+  ;(ctx as unknown as { provide(name: string, value: object): void }).provide('agents', {
+    get: () => undefined,
+    turnBoundaryOf: () => NO_BOUNDARY,
+  })
   ;(ctx as unknown as { provide(name: string, value: object): void }).provide('sessionQuery', {
     observeSession: async () => { throw new Error('this suite never observes a Session') },
   })
-  ;(ctx as unknown as { provide(name: string, value: object): void }).provide('sessionProjections', NO_BOUNDARY)
   new ToolRuntime(ctx)
+  // Test-owned registry: the official native executor supplies the batch
+  // settlement the production Base row would provide.
+  ctx.tools.setExecutor(new NativeToolExecutor(ctx))
   return ctx
 }
 
@@ -87,7 +102,7 @@ function svgArgs() {
 }
 
 async function execute(ctx: Context, name: string, args: unknown) {
-  return await ctx.tools.execute({
+  return await executeModelToolFixture(ctx, {
     signal: new AbortController().signal,
     callId: ToolCallId(`visual-${name}`),
     name,
@@ -451,14 +466,14 @@ test('a throwing disposer still attempts every release in reverse order', () => 
   assert.equal(applied(), true)
 })
 
-/** A registry whose `sessionProjections` reports one open step boundary. */
+/** A Host registry whose official `agents.turnBoundaryOf` reports one open
+ *  step boundary. */
 function mountWithBoundary(): { ctx: Context; boundary: { openTurnStartSeq: number | null; lastStepStartSeq: number | null; lastStepBoundary: { kind: 'start' | 'end'; seq: number } | null; lastTurn: number } } {
   const ctx = new Context()
   ;(ctx as unknown as { provide(name: string, value: object): void }).provide('systemPrompt', {
     tools: () => {},
     section: () => () => {},
   })
-  ;(ctx as unknown as { provide(name: string, value: object): void }).provide('agents', { get: () => undefined })
   ;(ctx as unknown as { provide(name: string, value: object): void }).provide('sessionQuery', {
     observeSession: async () => { throw new Error('this suite never observes a Session') },
   })
@@ -468,10 +483,14 @@ function mountWithBoundary(): { ctx: Context; boundary: { openTurnStartSeq: numb
     lastStepBoundary: { kind: 'start' as const, seq: 7 },
     lastTurn: 1,
   }
-  ;(ctx as unknown as { provide(name: string, value: object): void }).provide('sessionProjections', {
-    stateOf: () => boundary,
+  ;(ctx as unknown as { provide(name: string, value: object): void }).provide('agents', {
+    get: () => undefined,
+    turnBoundaryOf: () => boundary,
   })
   new ToolRuntime(ctx)
+  // Test-owned registry: the official native executor supplies the batch
+  // settlement the production Base row would provide.
+  ctx.tools.setExecutor(new NativeToolExecutor(ctx))
   return { ctx, boundary }
 }
 
@@ -488,7 +507,7 @@ test('a generating result inside an open model step projects its stable referenc
   const projected = projectContentOf(ctx, CHART_TOOL_NAME)
   const blocks = chartContentBlocks(chartFactFromArgs(chartArgs()))
   const session = { id: 'session-probe' }
-  const result = await ctx.tools.execute({
+  const result = await executeModelToolFixture(ctx, {
     signal: new AbortController().signal,
     callId: ToolCallId('call-ref'),
     name: CHART_TOOL_NAME,
@@ -502,12 +521,12 @@ test('a generating result inside an open model step projects its stable referenc
   assert.ok(content !== undefined, 'a real agent root call inside an open step gets a reference')
   const texts = content.map(block => block.type === 'text' ? block.text : '')
   assert.equal(texts.length, 3)
-  assert.match(texts[1] as string, /^visual-ref-v1:sv1_[0-9a-f]{20}$/u)
+  assert.match(texts[1] as string, /^visual-ref-v2:sv2_[0-9a-f]{20}$/u)
   assert.match(texts[2] as string, /^visual-v1:/u, 'the fact stays the LAST block')
   // The ref is the documented tuple projection, not an arbitrary id.
   assert.equal(
     texts[1],
-    `visual-ref-v1:${visualReference({ sessionId: 'session-probe', turn: 1, stepStartSeq: 7, callId: 'call-ref' })}`,
+    `visual-ref-v2:${visualReference({ turn: 1, stepStartSeq: 7, callId: 'call-ref' })}`,
   )
 })
 
@@ -547,8 +566,8 @@ test('a result without a trailing visual fact keeps its exact projection', () =>
 test('present_visual refuses agentless, nested, empty, oversized, duplicated and malformed arguments', async () => {
   const { ctx } = mountWithBoundary()
   applyVisualTools(ctx, { enabled: { get: () => true } } as never)
-  const ref = 'sv1_0123456789abcdef0123'
-  const run = async (visuals: unknown) => ctx.tools.execute({
+  const ref = 'sv2_0123456789abcdef0123'
+  const run = async (visuals: unknown) => executeModelToolFixture(ctx, {
     signal: new AbortController().signal,
     callId: ToolCallId('call-present'),
     name: PRESENT_VISUAL_TOOL_NAME,
@@ -557,7 +576,7 @@ test('present_visual refuses agentless, nested, empty, oversized, duplicated and
   // Empty.
   assert.equal((await run({ visuals: [] })).isError, true)
   // More than the hard cap.
-  const tooMany = Array.from({ length: 9 }, (_, index) => ({ ref: `sv1_${String(index).padStart(20, '0')}` }))
+  const tooMany = Array.from({ length: 9 }, (_, index) => ({ ref: `sv2_${String(index).padStart(20, '0')}` }))
   assert.equal((await run({ visuals: tooMany })).isError, true)
   // Agentless: the schema passes, the body refuses BEFORE any identity work.
   const agentless = await run({ visuals: [{ ref }] })
@@ -579,7 +598,7 @@ test('present_visual declares its concurrency safety and its exact output shape'
   // A well-formed argument set classifies as concurrency safe: the tool never
   // waits for a same-step source, it refuses it.
   assert.equal(
-    definition.isConcurrencySafe?.({ visuals: [{ ref: 'sv1_0123456789abcdef0123' }] }),
+    definition.isConcurrencySafe?.({ visuals: [{ ref: 'sv2_0123456789abcdef0123' }] }),
     true,
     'a same-step source is refused, never waited for',
   )
@@ -611,7 +630,6 @@ function mountWithControlledObservation(boundaryState: {
     tools: () => {},
     section: () => () => {},
   })
-  ;(ctx as unknown as { provide(name: string, value: object): void }).provide('agents', { get: () => undefined })
   let disposed = false
   let requested = false
   let resolvePending: ((value: unknown) => void) | undefined
@@ -623,12 +641,17 @@ function mountWithControlledObservation(boundaryState: {
     },
   })
   const boundary = boundaryState
-  ;(ctx as unknown as { provide(name: string, value: object): void }).provide('sessionProjections', {
-    // The real projection hands out a fresh value per read; returning one shared
-    // object would let a later mutation rewrite the tool body's OWN fence.
-    stateOf: () => ({ ...boundary, lastStepBoundary: boundary.lastStepBoundary === null ? null : { ...boundary.lastStepBoundary } }),
+  ;(ctx as unknown as { provide(name: string, value: object): void }).provide('agents', {
+    get: () => undefined,
+    // The real turnBoundaryOf hands out a fresh projection value per read;
+    // returning one shared object would let a later mutation rewrite the tool
+    // body's OWN fence.
+    turnBoundaryOf: () => ({ ...boundary, lastStepBoundary: boundary.lastStepBoundary === null ? null : { ...boundary.lastStepBoundary } }),
   })
   new ToolRuntime(ctx)
+  // Test-owned registry: the official native executor supplies the batch
+  // settlement the production Base row would provide.
+  ctx.tools.setExecutor(new NativeToolExecutor(ctx))
   return {
     ctx,
     boundary,
@@ -673,7 +696,7 @@ test('present_visual rejects a boundary change across its observation and releas
     arguments: {},
   }
   const running = definition.execute(
-    { visuals: [{ ref: 'sv1_0123456789abcdef0123' }] },
+    { visuals: [{ ref: 'sv2_0123456789abcdef0123' }] },
     exec as never,
   )
   // The observation is suspended and the turn advances to a DIFFERENT open
@@ -699,7 +722,7 @@ test('present_visual surfaces an aborted observation as cancellation and still r
   assert.ok(definition !== undefined)
   const controller = new AbortController()
   const running = definition.execute(
-    { visuals: [{ ref: 'sv1_0123456789abcdef0123' }] },
+    { visuals: [{ ref: 'sv2_0123456789abcdef0123' }] },
     {
       callId: ToolCallId('call-present-abort'),
       agent: { session: { id: SESSION_ID } },
@@ -729,7 +752,7 @@ test('present_visual refuses a prepared (non-live) observation', async () => {
   const definition = probe.ctx.tools.get(PRESENT_VISUAL_TOOL_NAME)
   assert.ok(definition !== undefined)
   const running = definition.execute(
-    { visuals: [{ ref: 'sv1_0123456789abcdef0123' }] },
+    { visuals: [{ ref: 'sv2_0123456789abcdef0123' }] },
     {
       callId: ToolCallId('call-present-prepared'),
       agent: { session: { id: SESSION_ID } },

@@ -1,0 +1,1380 @@
+/**
+ * Host-owned local ACP v1 front door over a pathname Unix domain socket.
+ *
+ * The one Host process that already owns a canonical profile scope opens a
+ * bounded `acp.sock` on ONE platform-specific physical endpoint: Linux keeps the
+ * 0700 scope directory and binds through `/proc/self/fd` so an over-long scope
+ * pathname still fits the kernel `sun_path`; Darwin publishes the same
+ * private-bind inode onto a short profile-scoped
+ * `/private/tmp/dpt-<uid>-<scope40>/acp.sock` pathname that stays within the
+ * Darwin `sockaddr_un.sun_path` byte limit. The listener speaks ACP v1 with
+ * the official `@agentclientprotocol/sdk` stream and request/notification
+ * dispatch, but it owns NO Agent, Session or business method in this phase: a
+ * valid `initialize` is answered with the installed bundle's own identity and
+ * every Session request fails closed with a machine-readable code. The listener
+ * is a Host-entry-local lifecycle object (`startLocalAcpListener()`), never a
+ * package export and never a second Host authority: the existing entry keeps the
+ * one Ready commit (`writeLocalRecord`) and the one shutdown owner, and the
+ * listener is bound BEFORE that Ready commit so a published registry never
+ * points at a socket that is not yet accepting.
+ *
+ * The SDK's default NDJSON stream uses an unbounded `LineBuffer` and no output
+ * backpressure, so this module wraps the socket in TWO bounded streams: an
+ * input reader that scans raw UTF-8 bytes for newlines under a per-frame and a
+ * queued-byte cap, and an output writer that refuses a frame or a buffered
+ * total above its cap. A cap breach closes only the offending connection.
+ *
+ * @module app/remote-process/local-acp-listener
+ */
+
+import { constants as bufferConstants } from 'node:buffer'
+import { chmodSync, constants, closeSync, linkSync, lstatSync, mkdirSync, openSync, rmdirSync, unlinkSync } from 'node:fs'
+import { connect as netConnect, createServer, type Server, type Socket } from 'node:net'
+import { join } from 'node:path'
+import {
+  agent,
+  methods,
+  ndJsonStream,
+  PROTOCOL_VERSION,
+  RequestError,
+  type AgentConnection,
+} from '@agentclientprotocol/sdk'
+import type { Diag } from '../../runtime/process/diagnostics.ts'
+import { type LocalScope } from './local-scope.ts'
+import { runDetached } from '../../runtime/process/tasks.ts'
+import {
+  AcpSessionViewRegistry,
+  LocalAcpViewError,
+  type AcpImageLimits,
+  type ConnectionViewState,
+  type HostAcpSessionAccess,
+} from './local-acp-session-view.ts'
+
+/** The ACP agent identity this front door advertises (never a copied brand). */
+const AGENT_NAME = 'dsh-pi-tui'
+
+/** One input line (a single NDJSON frame) may not exceed one mebibyte. */
+const MAX_INPUT_FRAME_BYTES = 1024 * 1024
+/**
+ * Total unconsumed input on ONE connection is bounded: the current partial
+ * line plus complete frames awaiting the SDK plus frames already enqueued into
+ * the bounded ReadableStream. All three are summed in bytes against this cap.
+ */
+const MAX_INPUT_UNCONSUMED_BYTES = 2 * 1024 * 1024
+/** At most this many requests may be dispatched concurrently on ONE connection. */
+const MAX_PENDING_REQUESTS = 8
+/** Bytes reserved per image block for JSON metadata around its encoded data. */
+const IMAGE_METADATA_BYTES = 65_536
+/** Bytes reserved for the JSON-RPC envelope and its trailing newline. */
+const JSON_ENVELOPE_BYTES = 4_096
+/**
+ * Text allowance of ONE outbound committed event when the connection derives
+ * its frame budget from Host attachment limits: a larger derived budget must
+ * not reject ordinary large text output that the legacy wire already bounded.
+ */
+const OUTPUT_TEXT_BYTES = 1024 * 1024
+
+/** The per-connection input bounds; image limits widen only this connection. */
+interface ConnectionInputBounds {
+  readonly maxFrameBytes: number
+  readonly maxUnconsumedBytes: number
+}
+
+/** The legacy text-only bounds every connection uses until it negotiates image. */
+const TEXT_ONLY_BOUNDS: ConnectionInputBounds = {
+  maxFrameBytes: MAX_INPUT_FRAME_BYTES,
+  maxUnconsumedBytes: MAX_INPUT_UNCONSUMED_BYTES,
+}
+
+/**
+ * Derive the bounded input budget of an image-negotiated connection from the
+ * Host's OWN boot-frozen attachment limits. The arithmetic models canonical
+ * base64, one configured count of image metadata allowances, the preserved
+ * text/wire budget and one JSON-RPC envelope. It is not a second image policy:
+ * real count/byte/pixel admission remains the official Attachment Store's.
+ *
+ * @param limits - the exact Host attachment limits, or undefined without a store.
+ * @returns the bounds, or undefined when a safe bound cannot be represented.
+ */
+export function deriveImageInputBounds(limits: AcpImageLimits | undefined): ConnectionInputBounds | undefined {
+  if (limits === undefined) return undefined
+  const { maxMessageImageBytes, maxImagesPerMessage } = limits
+  if (!Number.isSafeInteger(maxMessageImageBytes) || maxMessageImageBytes <= 0
+    || !Number.isSafeInteger(maxImagesPerMessage) || maxImagesPerMessage <= 0
+    || !Number.isSafeInteger(limits.maxImageBytes) || limits.maxImageBytes <= 0) {
+    return undefined
+  }
+  const encoded = 4 * Math.ceil(maxMessageImageBytes / 3)
+  const imageFrameBytes = encoded
+    + MAX_INPUT_FRAME_BYTES
+    + IMAGE_METADATA_BYTES * maxImagesPerMessage
+    + JSON_ENVELOPE_BYTES
+  const maxFrameBytes = Math.max(MAX_INPUT_FRAME_BYTES, imageFrameBytes)
+  const maxUnconsumedBytes = maxFrameBytes + MAX_INPUT_FRAME_BYTES
+  if (!Number.isSafeInteger(encoded) || !Number.isSafeInteger(imageFrameBytes) || !Number.isSafeInteger(maxFrameBytes)
+    || !Number.isSafeInteger(maxUnconsumedBytes)
+    || maxFrameBytes > bufferConstants.MAX_LENGTH || maxUnconsumedBytes > bufferConstants.MAX_LENGTH) {
+    return undefined
+  }
+  return { maxFrameBytes, maxUnconsumedBytes }
+}
+/**
+ * Derive ONE connection's outbound single-frame budget from the Host's OWN
+ * boot-frozen attachment limits. A committed image arrives from the official
+ * Store as ONE independently Base64-encoded object, and the Store's
+ * `maxMessageImageBytes` is a PROMPT-batch admission limit that does not bound
+ * a stored output image. The allowance therefore bounds each image by the
+ * Store's per-object admission ceiling (`maxImageBytes`), encodes every image
+ * separately and sums those encoded ceilings, then adds one metadata allowance
+ * per image, the JSON-RPC envelope and the preserved text allowance.
+ *
+ * This is a TRANSPORT resource bound, never an image acceptance policy and never
+ * a reason to drop, shrink or re-encode content: the official Attachment Store
+ * keeps every byte/pixel limit, and its normalization may even produce a stored
+ * image larger than `maxImageBytes` (the accepted upstream limitation). A frame
+ * above this allowance fails closed with `LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE`
+ * before any byte of that frame is written.
+ *
+ * @param limits - the exact Host attachment limits, or undefined without a store.
+ * @returns the per-frame byte budget, or undefined when it cannot be represented.
+ */
+export function deriveImageOutputBounds(limits: AcpImageLimits | undefined): number | undefined {
+  if (limits === undefined) return undefined
+  const { maxImagesPerMessage, maxImageBytes } = limits
+  if (!Number.isSafeInteger(maxImageBytes) || maxImageBytes <= 0
+    || !Number.isSafeInteger(maxImagesPerMessage) || maxImagesPerMessage <= 0) {
+    return undefined
+  }
+  // Each committed image is Base64-encoded on its own, so the batch ceiling is
+  // the SUM of per-image encoded ceilings (never one ceiling of a summed byte
+  // count, which would understate the encoded bytes).
+  const encodedPerImage = 4 * Math.ceil(maxImageBytes / 3)
+  const encoded = maxImagesPerMessage * encodedPerImage
+  const candidate = encoded + IMAGE_METADATA_BYTES * maxImagesPerMessage + JSON_ENVELOPE_BYTES + OUTPUT_TEXT_BYTES
+  const maxFrameBytes = Math.max(MAX_OUTPUT_FRAME_BYTES, candidate)
+  if (!Number.isSafeInteger(encodedPerImage) || !Number.isSafeInteger(encoded)
+    || !Number.isSafeInteger(candidate) || !Number.isSafeInteger(maxFrameBytes)
+    || maxFrameBytes > bufferConstants.MAX_LENGTH) {
+    return undefined
+  }
+  return maxFrameBytes
+}
+
+/** The legacy single outbound ACP frame cap (unchanged for a text-only Host). */
+const MAX_OUTPUT_FRAME_BYTES = 256 * 1024
+/** Total bytes buffered in the socket awaiting flush on ONE connection. */
+const MAX_OUTPUT_BUFFER_BYTES = 256 * 1024
+/** A frame above the legacy cap is written to the socket in bounded chunks. */
+const OUTPUT_WRITE_CHUNK_BYTES = 64 * 1024
+/** The longest ONE kernel-drain wait of a chunked frame may block the writer. */
+const OUTPUT_DRAIN_TIMEOUT_MS = 30_000
+/** How long a short stale-socket connect probe may run before it is treated as inert-unknown. */
+const CONNECT_PROBE_TIMEOUT_MS = 500
+/** The logical socket file name inside the 0700 scope directory. */
+const SOCKET_FILE = 'acp.sock'
+/** Owner-only private subdirectory (inside the 0700 scope) where the server is
+ *  actually BOUND before its inode is hard-linked onto the contract path. Node's
+ *  server.close() unlink always targets this private dir, so it can never delete
+ *  a foreign inode at the contract path. */
+const PRIVATE_DIR = '.acp-priv'
+/** The trusted, OS-owned sticky parent of the Darwin profile-scoped endpoint. Never
+ *  `$TMPDIR`, `DSH_HOME` or the user home: those are variable and unbounded. */
+const DARWIN_SOCKET_PARENT = '/private/tmp'
+/** Darwin `sockaddr_un.sun_path` capacity in bytes INCLUDING the trailing NUL. */
+const DARWIN_SUN_PATH_BYTES = 104
+/** Prefix of the one deterministic Darwin endpoint root per profile scope. */
+const DARWIN_ROOT_PREFIX = 'dpt-'
+/** Scope-id hex characters kept in the Darwin root name (the existing 160-bit
+ *  collision budget the local seats already use). */
+const DARWIN_SCOPE_PREFIX_HEX = 40
+
+const NEWLINE = 0x0a
+
+/** The fixed capacity rejection an over-limit connection receives before it is ended. */
+const CAPACITY_ERROR_LINE = `${JSON.stringify({
+  jsonrpc: '2.0',
+  id: null,
+  error: {
+    code: -32041,
+    message: 'ACP connection capacity exceeded',
+    data: { code: 'LOCAL_ACP_CAPACITY_EXCEEDED' },
+  },
+})}\n`
+
+/**
+ * The stable failure codes this module classifies. They are part of the
+ * internal Host contract (diagnostics and qualification assert them) and are
+ * never a substitute for an ACP method error code.
+ */
+export type LocalAcpErrorCode =
+  | 'LOCAL_ACP_INVALID_MAX_CONNECTIONS'
+  | 'LOCAL_ACP_UNSAFE_SOCKET'
+  | 'LOCAL_ACP_SOCKET_IN_USE'
+  | 'LOCAL_ACP_SOCKET_PATH_UNSUPPORTED'
+
+/** A startup failure that carries one stable local-ACP classification code. */
+export class LocalAcpError extends Error {
+  /** Stable classification asserted by the Host entry failure record. */
+  readonly code: LocalAcpErrorCode
+
+  constructor(code: LocalAcpErrorCode, message: string, cause?: unknown) {
+    super(message, cause === undefined ? undefined : { cause })
+    this.name = 'LocalAcpError'
+    this.code = code
+  }
+}
+
+/** The one Host-entry-local lifecycle handle for the bound local ACP listener. */
+export interface LocalAcpListener {
+  /**
+   * The PUBLIC contract socket pathname this listener published: Linux
+   * `<scope.dir>/acp.sock` and Darwin the short profile-scoped
+   * `/private/tmp/dpt-<uid>-<scope40>/acp.sock`. Never the private bind name and
+   * never a client-side fd-shortened alias.
+   */
+  readonly socketPath: string
+  /** The number of live connections this listener currently owns. */
+  readonly connectionCount: () => number
+  /**
+   * Read-only proof that THIS listener is still valid: the bound `net.Server`
+   * is listening AND the logical path still carries this process's exact saved
+   * socket inode. Never rebinds, never reclaims a foreign inode and never
+   * mutates state — it only observes the authoritative ownership facts.
+   */
+  isListening(): boolean
+  /** Stop accepting, tear down every connection, then retire the server. Idempotent. */
+  close(): Promise<void>
+  /** Synchronous, inode-identity-checked retirement of THIS process's own socket inode. */
+  cleanupSync(): void
+}
+
+/** Options for `startLocalAcpListener`; no Context, Agent or Session ever enters here. */
+export interface StartLocalAcpListenerOptions {
+  readonly scope: LocalScope
+  readonly maxConnections: number
+  readonly diag: Diag
+  /**
+   * The narrow, already-bound Host Session access. Present ONLY when a real Host
+   * installs the connection-scoped shared Session View (PO-2); absent keeps the
+   * PO-1 fail-closed Session behaviour (used by the raw socket contracts).
+   */
+  readonly sessionAccess?: HostAcpSessionAccess
+  /**
+   * The ONE View/claim registry. The controller owns it across listener
+   * rebinds so a retired-turn approval fence (or any claim) survives an
+   * Off -> On cycle and the one-View-per-Session rule keeps holding.
+   * Omitted keeps the bind-local registry (raw socket contracts).
+   */
+  readonly views?: AcpSessionViewRegistry
+}
+
+/**
+ * Parse the Host start-time connection limit from the raw environment value.
+ *
+ * Missing means the default of 4. Any present value MUST match `1..16` with no
+ * surrounding noise; a malformed value is a hard startup failure so a typo
+ * cannot silently widen or collapse the bound.
+ */
+export function parseAcpMaxConnections(raw: string | undefined): number {
+  if (raw === undefined) return 4
+  if (raw === '' || !/^(?:[1-9]|1[0-6])$/u.test(raw)) {
+    throw new LocalAcpError(
+      'LOCAL_ACP_INVALID_MAX_CONNECTIONS',
+      'local acp: DSH_PI_TUI_ACP_MAX_CONNECTIONS must be an integer in 1..16',
+    )
+  }
+  return Number(raw)
+}
+
+/** A live connection's internal bookkeeping; it never leaves this module. */
+interface ConnectionState {
+  initialized: boolean
+  pendingRequests: number
+  closed: boolean
+  /** Whether THIS connection negotiated inline image prompts during its initialize. */
+  imageEnabled: boolean
+  /** The input bounds derived from the Host image limits; text-only until negotiated. */
+  inputBounds: ConnectionInputBounds
+  /**
+   * This connection's outbound single-frame budget. It is derived ONCE at
+   * connection establish from the same boot-frozen Host attachment limits (or
+   * the legacy cap without a Store); the inbound image capability never widens
+   * or narrows it, because output images are committed content, not prompts.
+   */
+  maxOutputFrameBytes: number
+  /** The connection-scoped Session View state; present only when Session View is installed. */
+  view?: ConnectionViewState
+}
+
+/** The listener's accept-time facts shared by the connection factories. */
+interface ListenerContext {
+  readonly diag: Diag
+  readonly bundleVersion: string
+  readonly connections: Set<Socket>
+  readonly connectionStates: Map<Socket, ConnectionState>
+  /** The settled Host Session access, present only when a real Host installs Session View. */
+  readonly sessionAccess?: HostAcpSessionAccess
+  /** The per-listener View/claim registry; a fresh one per bind. */
+  readonly views?: AcpSessionViewRegistry
+}
+
+/** The ACP Session methods PO-1 must fail closed (business capability does not exist yet). */
+function rejectSessionNotReady(): never {
+  throw new RequestError(
+    -32042,
+    'ACP Session operations are not available on this connection',
+    { code: 'LOCAL_ACP_SESSION_NOT_READY' },
+  )
+}
+
+/** Build the bounded input side: raw UTF-8 byte lines under the connection's current caps. */
+/** @internal The owner test feeds real Unix-socket bytes while holding the stream reader. */
+export function createBoundedInput(
+  socket: Socket,
+  state: ConnectionState,
+  fail: (code: string) => void,
+): ReadableStream<Uint8Array> {
+  /** Fragments of the current, not-yet-terminated line. */
+  const line: Buffer[] = []
+  let lineBytes = 0
+  const queue: Uint8Array[] = []
+  let queuedByteCount = 0
+  let controller: ReadableStreamDefaultController<Uint8Array> | undefined
+  let finished = false
+  let controllerClosed = false
+  let paused = false
+
+  const closeController = (): void => {
+    if (controllerClosed || controller === undefined) return
+    controllerClosed = true
+    try {
+      controller.close()
+    } catch {
+      // Already closed by a concurrent cancel; the reader observes one end.
+    }
+  }
+
+  /** The stream's OWN already-enqueued bytes, measured against its fixed high-water mark. */
+  const streamBufferedBytes = (): number => controller === undefined
+    ? 0
+    : Math.max(0, MAX_INPUT_FRAME_BYTES - (controller.desiredSize ?? MAX_INPUT_FRAME_BYTES))
+
+  const pump = (): void => {
+    if (controller === undefined) return
+    while (queue.length > 0) {
+      if ((controller.desiredSize ?? 1) <= 0) break
+      const frame = queue.shift()
+      if (frame !== undefined) {
+        queuedByteCount -= frame.byteLength
+        controller.enqueue(frame)
+      }
+    }
+    if (queue.length > 0) {
+      if (!paused) {
+        paused = true
+        socket.pause()
+      }
+      return
+    }
+    if (paused) {
+      paused = false
+      socket.resume()
+    }
+    if (finished) closeController()
+  }
+
+  const detach = (): void => {
+    socket.off('data', onData)
+    socket.off('end', onEnd)
+    socket.off('close', onClose)
+    socket.off('error', onError)
+  }
+
+  const failConnection = (code: string): void => {
+    finished = true
+    detach()
+    fail(code)
+  }
+
+  const completeLine = (end: Buffer): void => {
+    // The established per-frame cap excludes the terminating newline.
+    if (lineBytes - 1 > state.inputBounds.maxFrameBytes) {
+      failConnection('LOCAL_ACP_INPUT_FRAME_TOO_LARGE')
+      return
+    }
+    line.push(end)
+    // ONE concatenation per complete frame, only when the line spanned chunks;
+    // a single-chunk line is copied so no socket pool buffer is retained.
+    const frame = line.length === 1
+      ? Uint8Array.prototype.slice.call(line[0]) as Uint8Array
+      : Buffer.concat(line)
+    line.length = 0
+    lineBytes = 0
+    queue.push(frame)
+    queuedByteCount += frame.byteLength
+  }
+
+  /**
+   * Scan one raw chunk by UTF-8 bytes. Every byte is forwarded verbatim; a
+   * newline completes exactly one NDJSON frame, so truncated or multi-byte
+   * characters stay intact across chunks.
+   */
+  const onData = (chunk: Buffer): void => {
+    if (finished) return
+    let offset = 0
+    while (offset < chunk.length) {
+      const newline = chunk.indexOf(NEWLINE, offset)
+      if (newline === -1) {
+        const rest = chunk.subarray(offset)
+        line.push(rest)
+        lineBytes += rest.length
+        break
+      }
+      lineBytes += newline + 1 - offset
+      completeLine(chunk.subarray(offset, newline + 1))
+      if (finished) return
+      offset = newline + 1
+    }
+    if (lineBytes > state.inputBounds.maxFrameBytes) {
+      failConnection('LOCAL_ACP_INPUT_FRAME_TOO_LARGE')
+      return
+    }
+    // Total unconsumed bytes across the partial line, the complete-frame queue
+    // and the stream's own already-enqueued buffer stay under the dynamic cap.
+    if (queuedByteCount + lineBytes + streamBufferedBytes() > state.inputBounds.maxUnconsumedBytes) {
+      failConnection('LOCAL_ACP_INPUT_OVERFLOW')
+      return
+    }
+    pump()
+  }
+
+  const onEnd = (): void => {
+    // A trailing fragment with no newline is an incomplete NDJSON frame and is
+    // discarded at end-of-stream; only complete lines ever reach the SDK.
+    finished = true
+    pump()
+  }
+
+  const onClose = (): void => {
+    finished = true
+    closeController()
+  }
+
+  const onError = (): void => {
+    finished = true
+    closeController()
+  }
+
+  return new ReadableStream<Uint8Array>({
+    start(streamController) {
+      controller = streamController
+      socket.on('data', onData)
+      socket.on('end', onEnd)
+      socket.on('close', onClose)
+      socket.on('error', onError)
+    },
+    pull() {
+      pump()
+    },
+    cancel() {
+      finished = true
+      detach()
+      socket.destroy()
+    },
+  }, new ByteLengthQueuingStrategy({ highWaterMark: MAX_INPUT_FRAME_BYTES }))
+}
+
+/**
+ * Wait for ONE `drain` of this socket under a fixed deadline. A socket
+ * `close`/`error` ends the wait immediately (the connection is gone), and the
+ * deadline fails this connection alone with the existing backpressure class.
+ * Every exit path removes the listeners and the timer.
+ */
+function waitForOutputDrain(socket: Socket, fail: (code: string) => void): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    let timer: NodeJS.Timeout | undefined
+    let finished = false
+    const cleanup = (): void => {
+      if (timer !== undefined) clearTimeout(timer)
+      socket.off('drain', onDrain)
+      socket.off('close', onClose)
+      socket.off('error', onError)
+    }
+    const finish = (outcome: 'drained' | 'closed' | 'timeout'): void => {
+      if (finished) return
+      finished = true
+      cleanup()
+      if (outcome === 'drained') resolve()
+      else if (outcome === 'closed') reject(new Error('local acp: output socket closed while draining'))
+      else {
+        fail('LOCAL_ACP_OUTPUT_BACKPRESSURE')
+        reject(new Error('local acp: output drain exceeded its bounded wait'))
+      }
+    }
+    const onDrain = (): void => { finish('drained') }
+    const onClose = (): void => { finish('closed') }
+    const onError = (): void => { finish('closed') }
+    timer = setTimeout(() => { finish('timeout') }, OUTPUT_DRAIN_TIMEOUT_MS)
+    socket.once('drain', onDrain)
+    socket.once('close', onClose)
+    socket.once('error', onError)
+  })
+}
+
+/**
+ * Write ONE frame above the legacy cap in bounded chunks. The connection's
+ * unwritten backlog may never exceed `MAX_OUTPUT_BUFFER_BYTES`: before each
+ * chunk the writer waits (bounded) for the kernel to drain, and a refused
+ * `socket.write()` waits for its own `drain` before the next chunk. A reader
+ * that never drains the socket therefore closes THIS connection on the existing
+ * backpressure class; the Host, the Agent and every sibling connection are
+ * untouched, and no Host prompt is retried.
+ */
+async function writeChunkedFrame(socket: Socket, frame: Uint8Array, fail: (code: string) => void): Promise<void> {
+  let offset = 0
+  while (offset < frame.byteLength) {
+    const end = Math.min(offset + OUTPUT_WRITE_CHUNK_BYTES, frame.byteLength)
+    // The backlog guard is checked BEFORE every chunk, so a chunk is never
+    // accepted past the connection's unwritten-output bound.
+    while (!socket.destroyed && socket.writableLength + (end - offset) > MAX_OUTPUT_BUFFER_BYTES) {
+      await waitForOutputDrain(socket, fail)
+    }
+    if (socket.destroyed) throw new Error('local acp: output socket closed while writing a frame')
+    const accepted = socket.write(frame.subarray(offset, end))
+    offset = end
+    if (!accepted) await waitForOutputDrain(socket, fail)
+  }
+}
+
+/**
+ * Build the bounded output side.
+ *
+ * Node reflects bytes accepted but not yet flushed to the kernel in
+ * `socket.writableLength`, so the pre-write cap on `writableLength + frame` is
+ * the enforced bound on "unwritten output": it closes a slow reader's
+ * connection instead of letting the queue grow without limit. Frames up to the
+ * legacy cap keep the original accept-then-resolve behavior. A larger frame —
+ * only possible when the connection derived a bounded budget from the Host's
+ * attachment limits — is written in 64 KiB chunks under the same backlog bound
+ * and a bounded kernel drain, so ONE legal committed image can reach a reading
+ * client without letting a stalled reader grow memory.
+ */
+function createBoundedOutput(
+  socket: Socket,
+  fail: (code: string) => void,
+  maxOutputFrameBytes: number,
+): WritableStream<Uint8Array> {
+  return new WritableStream<Uint8Array>({
+    async write(frame) {
+      if (socket.destroyed) throw new Error('local acp: output socket already closed')
+      // The frame-budget refusal happens BEFORE any byte of this frame is
+      // written; the connection closes and the content is never truncated.
+      if (frame.byteLength > maxOutputFrameBytes) {
+        fail('LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE')
+        throw new Error('local acp: output frame exceeds the connection frame budget')
+      }
+      if (frame.byteLength <= MAX_OUTPUT_FRAME_BYTES) {
+        if (socket.writableLength + frame.byteLength > MAX_OUTPUT_BUFFER_BYTES) {
+          fail('LOCAL_ACP_OUTPUT_BACKPRESSURE')
+          throw new Error('local acp: output backlog exceeds the connection cap')
+        }
+        socket.write(frame)
+        return
+      }
+      await writeChunkedFrame(socket, frame, fail)
+    },
+  }, new ByteLengthQueuingStrategy({ highWaterMark: MAX_OUTPUT_BUFFER_BYTES }))
+}
+
+/** Build the per-connection ACP agent app whose handlers own only connection-local state. */
+function buildAgentApp(
+  state: ConnectionState,
+  view: ConnectionViewState | undefined,
+  context: ListenerContext,
+  fail: (code: string) => void,
+) {
+  const app = agent({ name: AGENT_NAME })
+  let initializeComplete = false
+
+  const beginRequest = (): void => {
+    state.pendingRequests += 1
+    if (state.pendingRequests > MAX_PENDING_REQUESTS) {
+      state.pendingRequests -= 1
+      fail('LOCAL_ACP_TOO_MANY_PENDING_REQUESTS')
+      throw new RequestError(
+        -32044,
+        'too many outstanding ACP requests on this connection',
+        { code: 'LOCAL_ACP_TOO_MANY_PENDING_REQUESTS' },
+      )
+    }
+  }
+
+  app.onRequest(methods.agent.initialize, async request => {
+    beginRequest()
+    try {
+      if (state.initialized) {
+        throw new RequestError(
+          -32043,
+          'ACP connection is already initialized',
+          { code: 'LOCAL_ACP_ALREADY_INITIALIZED' },
+        )
+      }
+      const requested = request.params?.protocolVersion
+      if (requested !== PROTOCOL_VERSION) {
+        throw RequestError.invalidParams(
+          { code: 'LOCAL_ACP_PROTOCOL_UNSUPPORTED' },
+          `unsupported ACP protocol version ${String(requested)}; this endpoint supports ${String(PROTOCOL_VERSION)}`,
+        )
+      }
+      // Commit the initialized state before the response leaves the handler so
+      // a pipelined duplicate initialize is rejected deterministically. The
+      // capability itself is resolved ONCE, before the response: the Host's own
+      // exact default route and attachment store decide it, and the connection
+      // keeps this frozen result for every later session/prompt.
+      state.initialized = true
+      if (context.sessionAccess !== undefined && state.view !== undefined) {
+        const imageEnabled = await context.sessionAccess.supportsImagePrompts()
+        const bounds = imageEnabled ? deriveImageInputBounds(context.sessionAccess.imageLimits()) : undefined
+        if (bounds !== undefined) {
+          state.imageEnabled = true
+          state.inputBounds = bounds
+        }
+      }
+      initializeComplete = true
+      return {
+        protocolVersion: PROTOCOL_VERSION,
+        agentInfo: { name: AGENT_NAME, title: AGENT_NAME, version: context.bundleVersion },
+        agentCapabilities: {
+          loadSession: false,
+          promptCapabilities: { image: state.imageEnabled, audio: false, embeddedContext: false },
+          mcpCapabilities: { http: false, sse: false },
+          // Advertise the shared-Session capability ONLY when this Host really
+          // installed the connection-scoped View. `session/list`/`loadSession`
+          // stay unavailable, and image follows the Host capability above.
+          sessionCapabilities: context.sessionAccess !== undefined ? { resume: {}, close: {} } : {},
+        },
+        authMethods: [],
+      }
+    } finally {
+      state.pendingRequests -= 1
+    }
+  })
+
+  const rejectSessionOperation = (_request: { params: unknown }): never => {
+    beginRequest()
+    try {
+      rejectSessionNotReady()
+    } finally {
+      state.pendingRequests -= 1
+    }
+  }
+  // Register with a permissive params parser for the STILL-UNSUPPORTED methods:
+  // a schema rejection would otherwise answer -32602 instead of the
+  // deterministic fail-closed business code, and a client's params are
+  // irrelevant because the capability simply does not exist yet.
+  const acceptAnyParams = (params: unknown): unknown => params
+
+  const access = context.sessionAccess
+  const views = context.views
+  if (access !== undefined && views !== undefined && view !== undefined) {
+    // PO-2 shared Session View: the three lifecycle methods are decoded with the
+    // SDK's STANDARD schema (typed params), and any View rejection is mapped
+    // onto a JSON-RPC RequestError that keeps the stable data code.
+    const requireInitialized = (): void => {
+      if (!state.initialized || !initializeComplete) {
+        throw new RequestError(
+          -32042,
+          'ACP Session operations require a completed initialize',
+          { code: 'LOCAL_ACP_VIEW_NOT_INITIALIZED' },
+        )
+      }
+    }
+    const asRequestError = (error: unknown): unknown =>
+      error instanceof LocalAcpViewError
+        ? new RequestError(error.rpcCode, error.message, { ...error.data, code: error.code })
+        : error
+    app.onRequest(methods.agent.session.new, async ({ params }) => {
+      beginRequest()
+      try {
+        requireInitialized()
+        return await views.newSession(view, access, params)
+      } catch (error) {
+        throw asRequestError(error)
+      } finally {
+        state.pendingRequests -= 1
+      }
+    })
+    app.onRequest(methods.agent.session.resume, async ({ params }) => {
+      beginRequest()
+      try {
+        requireInitialized()
+        return await views.resumeSession(view, access, params)
+      } catch (error) {
+        throw asRequestError(error)
+      } finally {
+        state.pendingRequests -= 1
+      }
+    })
+    app.onRequest(methods.agent.session.close, async ({ params }) => {
+      beginRequest()
+      try {
+        requireInitialized()
+        return await views.closeSession(view, access, params.sessionId)
+      } catch (error) {
+        throw asRequestError(error)
+      } finally {
+        state.pendingRequests -= 1
+      }
+    })
+    // PO-3B: ONE text prompt per attached View. The request's own SDK context
+    // supplies the abort lifecycle and the ONLY notification + reverse-request
+    // sinks — this connection's client. Nothing here captures a mutable
+    // connection or invents a second sender.
+    app.onRequest(methods.agent.session.prompt, async ({ params, signal, client }) => {
+      beginRequest()
+      try {
+        requireInitialized()
+        return await views.promptSession(view, access, params, signal, state.imageEnabled, async update => {
+          await client.notify(methods.client.session.update, { sessionId: params.sessionId, update })
+        }, async (permissionParams, options) => {
+          return await client.request(methods.client.session.requestPermission, {
+            sessionId: permissionParams.sessionId,
+            toolCall: permissionParams.toolCall,
+            options: permissionParams.options,
+          }, options === undefined ? undefined : { cancellationSignal: options.signal })
+        })
+      } catch (error) {
+        throw asRequestError(error)
+      } finally {
+        state.pendingRequests -= 1
+      }
+    })
+  } else {
+    // No real Host Session View installed (raw socket contracts): the lifecycle
+    // methods stay fail-closed exactly like PO-1.
+    app.onRequest(methods.agent.session.new, acceptAnyParams, rejectSessionOperation)
+    app.onRequest(methods.agent.session.resume, acceptAnyParams, rejectSessionOperation)
+    app.onRequest(methods.agent.session.close, acceptAnyParams, rejectSessionOperation)
+    app.onRequest(methods.agent.session.prompt, acceptAnyParams, rejectSessionOperation)
+  }
+  // These methods remain genuinely unimplemented in PO-3A regardless of View:
+  // no session listing and no config mutation.
+  app.onRequest(methods.agent.session.list, acceptAnyParams, rejectSessionOperation)
+  app.onRequest(methods.agent.session.setConfigOption, acceptAnyParams, rejectSessionOperation)
+
+  if (access !== undefined && views !== undefined && view !== undefined) {
+    // A `session/cancel` notification carries no response. PO-3B scopes it to
+    // THIS connection's own unsettled View flight only: an idle View (or a
+    // Session this connection does not hold) is a no-op that never touches a
+    // Host Agent; a queued/running flight is addressed through the same scoped
+    // cancellation the close path uses, and the request settles on the real
+    // Host facts alone.
+    app.onNotification(methods.agent.session.cancel, ({ params }) => {
+      if (!state.initialized) return
+      if (typeof params?.sessionId !== 'string' || params.sessionId === '') return
+      views.cancelSession(view, access, params.sessionId)
+    })
+  } else {
+    // No Host Session View installed: a cancel notification stays a no-op.
+    app.onNotification(methods.agent.session.cancel, () => {})
+  }
+
+  return app
+}
+
+/** Wire one accepted socket to its own SDK connection; only this connection is affected by a fault. */
+function serveConnection(socket: Socket, context: ListenerContext): void {
+  const view = context.views?.createConnection()
+  const state: ConnectionState = {
+    initialized: false,
+    pendingRequests: 0,
+    closed: false,
+    imageEnabled: false,
+    inputBounds: TEXT_ONLY_BOUNDS,
+    maxOutputFrameBytes: deriveImageOutputBounds(context.sessionAccess?.imageLimits()) ?? MAX_OUTPUT_FRAME_BYTES,
+    ...(view === undefined ? {} : { view }),
+  }
+  context.connectionStates.set(socket, state)
+
+  let tornDown = false
+  let connection: AgentConnection | undefined
+
+  const fail = (code: string): void => {
+    if (state.closed) return
+    state.closed = true
+    context.diag.warn('local-acp.error', { code, connections: context.connections.size })
+    socket.destroy()
+  }
+
+  const teardown = (): void => {
+    if (tornDown) return
+    tornDown = true
+    state.closed = true
+    // BOTH `session/close` and a physical socket end/error/destroy (or Host Off)
+    // release through the SAME idempotent View path. PO-3B: a claim with an
+    // open flight keeps its scoped cancellation running (late insertions
+    // included) and is released only by its proven settlement; no Host
+    // Agent/Session is disposed or flushed.
+    if (view !== undefined) context.views?.releaseConnection(view, context.sessionAccess)
+    try {
+      connection?.close()
+    } catch {
+      // Closing an already-closed SDK connection is inert.
+    }
+    if (!socket.destroyed) socket.destroy()
+    context.connections.delete(socket)
+    context.connectionStates.delete(socket)
+    context.diag.info('local-acp.connection.close', { connections: context.connections.size })
+  }
+
+  socket.on('error', error => {
+    context.diag.warn('local-acp.error', {
+      code: (error as NodeJS.ErrnoException).code ?? 'LOCAL_ACP_SOCKET_ERROR',
+      connections: context.connections.size,
+    })
+    socket.destroy()
+  })
+  socket.on('close', teardown)
+
+  const input = createBoundedInput(socket, state, fail)
+  const output = createBoundedOutput(socket, fail, state.maxOutputFrameBytes)
+  const app = buildAgentApp(state, view, context, fail)
+  const stream = ndJsonStream(output, input)
+  connection = app.connect(stream)
+  const connected = connection
+  // Observe the SDK connection's own close so a peer close tears down this ONE
+  // connection's resources through the repository owned-task model rather than
+  // a bare fire-and-forget promise.
+  runDetached('local acp: connection teardown', () => connected.closed.then(teardown, teardown), { diag: context.diag })
+}
+
+/** Open the scope directory and require `/proc/self/fd` so a long path can be bound by short fd path. */
+function openScopeDirFd(scope: LocalScope): number {
+  let dirFd: number
+  try {
+    dirFd = openSync(scope.dir, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+  } catch (error) {
+    throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the scope directory could not be opened without following a link', error)
+  }
+  if (process.platform !== 'linux') {
+    closeSync(dirFd)
+    throw new LocalAcpError('LOCAL_ACP_SOCKET_PATH_UNSUPPORTED', 'local acp: the fd-shortened socket path requires Linux /proc/self/fd')
+  }
+  return dirFd
+}
+
+/** The short kernel-bind path derived from an open directory fd (Linux only). */
+function fdSocketPath(dirFd: number): string {
+  return `/proc/self/fd/${String(dirFd)}/${SOCKET_FILE}`
+}
+
+/** The physical, profile-scoped endpoint the Darwin Host binds and publishes. */
+export interface DarwinAcpSocketPaths {
+  /** The public contract pathname independent ACP peers connect to. */
+  readonly publicPath: string
+  /** The deterministic 0700 root owned by this uid and profile scope. */
+  readonly privateRoot: string
+  /** The private bind name the inode is published from (never a client address). */
+  readonly privateBindPath: string
+}
+
+/**
+ * Compute the FROZEN Darwin endpoint from the real profile scope id and the
+ * current OS uid: `/private/tmp/dpt-<decimal-uid>-<scope40>` holds one 0700 root
+ * whose `acp.sock` is the public address and whose `.acp-priv/acp.sock` is the
+ * private bind name. No configuration, environment variable or user path can
+ * change it, and both names must fit `sun_path[104]` INCLUDING the NUL. The
+ * caller creates/admits the root; this function performs no filesystem IO.
+ *
+ * @param scope - the canonical profile scope (its `scopeId` is a 64-hex SHA-256).
+ * @param uid - the current process uid; the root is scoped to this exact uid.
+ * @returns the public, root and private bind pathnames.
+ * @throws {LocalAcpError} `LOCAL_ACP_SOCKET_PATH_UNSUPPORTED` when a name exceeds
+ *   the Darwin kernel path capacity.
+ */
+export function darwinAcpSocketPaths(scope: LocalScope, uid: number): DarwinAcpSocketPaths {
+  const privateRoot = join(DARWIN_SOCKET_PARENT, `${DARWIN_ROOT_PREFIX}${String(uid)}-${scope.scopeId.slice(0, DARWIN_SCOPE_PREFIX_HEX)}`)
+  const publicPath = join(privateRoot, SOCKET_FILE)
+  const privateBindPath = join(privateRoot, PRIVATE_DIR, SOCKET_FILE)
+  if (Buffer.byteLength(publicPath, 'utf8') + 1 > DARWIN_SUN_PATH_BYTES
+    || Buffer.byteLength(privateBindPath, 'utf8') + 1 > DARWIN_SUN_PATH_BYTES) {
+    throw new LocalAcpError(
+      'LOCAL_ACP_SOCKET_PATH_UNSUPPORTED',
+      'local acp: the Darwin endpoint exceeds the kernel sun_path byte limit',
+    )
+  }
+  return { publicPath, privateRoot, privateBindPath }
+}
+
+/**
+ * Admit the trusted Darwin parent and create/reuse the ONE deterministic 0700
+ * root of this profile scope. `/private/tmp` must be the OS-owned, root-owned
+ * sticky directory the frozen endpoint contract relies on; the root itself must
+ * be a real directory owned by this uid (a symlink, file, foreign-owned entry or
+ * an EXISTING directory that is not 0700 is refused and never written through or
+ * silently repaired). The root is REUSED across ACP Off/On and Host crashes —
+ * only this scope's root is ever touched.
+ */
+function ensureDarwinSocketRoot(privateRoot: string, uid: number): void {
+  let parent: ReturnType<typeof lstatSync>
+  try {
+    parent = lstatSync(DARWIN_SOCKET_PARENT)
+  } catch (error) {
+    throw new LocalAcpError('LOCAL_ACP_SOCKET_PATH_UNSUPPORTED', 'local acp: the Darwin socket parent is not available', error)
+  }
+  if (parent.isSymbolicLink() || !parent.isDirectory() || parent.uid !== 0 || (parent.mode & 0o1000) === 0) {
+    throw new LocalAcpError(
+      'LOCAL_ACP_SOCKET_PATH_UNSUPPORTED',
+      'local acp: the Darwin socket parent is not a root-owned sticky directory',
+    )
+  }
+  let created = true
+  try {
+    mkdirSync(privateRoot, { mode: 0o700 })
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+      throw new LocalAcpError('LOCAL_ACP_SOCKET_PATH_UNSUPPORTED', 'local acp: the Darwin endpoint root could not be created', error)
+    }
+    created = false
+  }
+  const info = lstatSync(privateRoot)
+  if (info.isSymbolicLink() || !info.isDirectory() || info.uid !== uid) {
+    throw new LocalAcpError(
+      'LOCAL_ACP_UNSAFE_SOCKET',
+      'local acp: the Darwin endpoint root is not a private directory owned by this uid',
+    )
+  }
+  if (created) {
+    // The endpoint contract is 0700 for the root THIS run just created; force it
+    // so the caller's umask can never weaken the mode.
+    chmodSync(privateRoot, 0o700)
+    return
+  }
+  // An EXISTING root must already be the private directory the contract names.
+  // It is never silently repaired: a non-private mode means the directory is not
+  // the one this contract created.
+  if ((info.mode & 0o777) !== 0o700) {
+    throw new LocalAcpError(
+      'LOCAL_ACP_UNSAFE_SOCKET',
+      'local acp: the existing Darwin endpoint root is not a 0700 directory owned by this uid',
+    )
+  }
+}
+
+/** A ≤500ms connect probe used only to distinguish an inert stale socket from a live one. */
+function probeSocket(path: string): Promise<'open' | 'refused' | 'unknown'> {
+  return new Promise(resolve => {
+    let settled = false
+    const target = netConnect(path)
+    const finish = (verdict: 'open' | 'refused' | 'unknown'): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      target.destroy()
+      resolve(verdict)
+    }
+    const timer = setTimeout(() => finish('unknown'), CONNECT_PROBE_TIMEOUT_MS)
+    target.once('connect', () => finish('open'))
+    target.once('error', error => {
+      finish((error as NodeJS.ErrnoException).code === 'ECONNREFUSED' ? 'refused' : 'unknown')
+    })
+  })
+}
+
+/** One saved socket inode identity: the only authority this module may unlink. */
+interface SavedInode {
+  readonly dev: number
+  readonly ino: number
+  readonly uid: number
+}
+
+/** Read the socket inode identity at one path, or reject a non-socket / foreign / symlink entry. */
+function readSavedInode(path: string, uid: number): SavedInode {
+  const info = lstatSync(path)
+  if (info.isSymbolicLink() || !info.isSocket() || info.uid !== uid) {
+    throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the socket path is not a socket owned by this uid')
+  }
+  return { dev: info.dev, ino: info.ino, uid: info.uid }
+}
+
+/**
+ * Start the one Host-owned local ACP listener for this scope.
+ *
+ * Ordering: probe/reclaim the logical path, bind the fd-shortened path, force
+ * the inode to 0600 and prove it, and only then return. The caller is
+ * responsible for committing Ready AFTER this resolves.
+ */
+export async function startLocalAcpListener(options: StartLocalAcpListenerOptions): Promise<LocalAcpListener> {
+  const { scope, maxConnections, diag, sessionAccess, views: sharedViews } = options
+  const uid = process.getuid?.()
+  if (typeof uid !== 'number') {
+    throw new LocalAcpError('LOCAL_ACP_SOCKET_PATH_UNSUPPORTED', 'local acp: the current uid is unavailable')
+  }
+  if (!Number.isInteger(maxConnections) || maxConnections < 1 || maxConnections > 16) {
+    throw new LocalAcpError('LOCAL_ACP_INVALID_MAX_CONNECTIONS', 'local acp: maxConnections must be an integer in 1..16')
+  }
+  const platform = process.platform
+  const darwin = platform === 'darwin'
+  if (platform !== 'linux' && !darwin) {
+    throw new LocalAcpError('LOCAL_ACP_SOCKET_PATH_UNSUPPORTED', 'local acp: the local ACP endpoint is supported on Linux and macOS only')
+  }
+  // ONE platform-specific physical endpoint: Linux keeps the scope directory and
+  // shortens the bind through /proc/self/fd; Darwin publishes the inode onto the
+  // short, profile-scoped /private/tmp endpoint. Both are derived from the SAME
+  // canonical scope fact, never from $TMPDIR, $HOME or the current directory.
+  const darwinPaths = darwin ? darwinAcpSocketPaths(scope, uid) : undefined
+  const logicalPath = darwinPaths === undefined ? join(scope.dir, SOCKET_FILE) : darwinPaths.publicPath
+  let scopeDirFd: number | undefined
+  if (darwinPaths === undefined) {
+    // The scope dirfd is used ONLY to probe/reclaim a stale pathname BEFORE bind.
+    scopeDirFd = openScopeDirFd(scope)
+  } else {
+    // Admit the OS-owned sticky parent and create/reuse THIS scope's 0700 root
+    // before any probe, bind or publish uses the endpoint.
+    ensureDarwinSocketRoot(darwinPaths.privateRoot, uid)
+  }
+  const scopeProbePath = scopeDirFd === undefined ? logicalPath : fdSocketPath(scopeDirFd)
+  // The server is BOUND inside a private, owner-only subdirectory (fd-shortened
+  // on Linux, a direct short name on Darwin) and its inode is then hard-linked
+  // onto the contract path (then the private name is unlinked). Node's
+  // net.Server.close() unlinks the path it was told to listen on; because that
+  // private name is already gone, the automatic unlink is always ENOENT and can
+  // never touch a foreign inode at the contract path. On Linux the private dirfd
+  // is kept OPEN across close, so its /proc/self/fd path can never be redirected
+  // to another directory by fd-number reuse — the fix does NOT rely on a released
+  // fd staying unused. Darwin holds no directory fd and never uses /proc or
+  // /dev/fd.
+  const privDir = darwinPaths === undefined ? join(scope.dir, PRIVATE_DIR) : join(darwinPaths.privateRoot, PRIVATE_DIR)
+  let privFd: number | undefined
+  let scopeDirFdClosed = false
+  let privFdClosed = false
+
+  let saved: SavedInode | undefined
+  let server: Server | undefined
+  let stopping = false
+  let closed: Promise<void> | undefined
+
+  const context: ListenerContext = {
+    diag,
+    bundleVersion: scope.bundleVersion,
+    connections: new Set<Socket>(),
+    connectionStates: new Map<Socket, ConnectionState>(),
+    ...(sessionAccess === undefined
+      ? {}
+      : { sessionAccess, views: sharedViews ?? new AcpSessionViewRegistry(diag) }),
+  }
+
+  // The ONE Host fact/approval subscription. A BIND-LOCAL registry is owned by
+  // this listener and is disposed after its accepted work settles; a
+  // CONTROLLER-owned (shared) registry outlives listener rebinds and is
+  // disposed by the controller, so an Off -> On overlap never registers the
+  // same registry twice (R701-03). Installation is idempotent either way.
+  const views = context.views
+  const ownsFacts = views !== undefined && sessionAccess !== undefined && sharedViews === undefined
+  if (views !== undefined && sessionAccess !== undefined) views.observeFacts(sessionAccess)
+  const releasePromptFacts = (): void => {
+    if (!ownsFacts) return
+    views?.disposeFacts()
+  }
+
+  const closeScopeDirFd = (): void => {
+    if (scopeDirFdClosed || scopeDirFd === undefined) return
+    scopeDirFdClosed = true
+    try {
+      closeSync(scopeDirFd)
+    } catch {
+      // The fd was already closed by an earlier cleanup; nothing to release.
+    }
+  }
+
+  const closePrivFd = (): void => {
+    if (privFdClosed || privFd === undefined) return
+    privFdClosed = true
+    try {
+      closeSync(privFd)
+    } catch {
+      // Already closed.
+    }
+  }
+
+  const removePrivDir = (): void => {
+    try {
+      rmdirSync(privDir)
+    } catch {
+      // Not empty or already gone; best effort (never blocks retirement).
+    }
+  }
+
+  /**
+   * Remove ONLY this process's owned socket inode. Identity-checked against the
+   * exact saved (dev, ino, uid): a foreign inode that has since replaced the
+   * pathname is never unlinked. Used by graceful retire, bind-failure cleanup and
+   * the synchronous process-exit mirror.
+   */
+  const cleanupSync = (): void => {
+    if (saved === undefined) return
+    let current: ReturnType<typeof lstatSync>
+    try {
+      current = lstatSync(logicalPath)
+    } catch {
+      return
+    }
+    if (!current.isSocket() || current.uid !== saved.uid) return
+    if (current.dev !== saved.dev || current.ino !== saved.ino) return
+    try {
+      unlinkSync(logicalPath)
+    } catch {
+      // Another owner retired it first; the inode no longer needs this cleanup.
+    }
+  }
+
+  const retireServer = (): Promise<void> => {
+    if (closed !== undefined) return closed
+    stopping = true
+    closed = (async () => {
+      for (const socket of context.connections) socket.destroy()
+      // Retirement is the NETWORK entry's lifetime, never the Host work's:
+      // stop accepting, close the sockets and retire our inode immediately so
+      // a runtime Off or SIGTERM can always progress to the official Host
+      // shutdown (R701-01b). The ONE Host fact subscription is handed to its
+      // own settled-driven disposer instead of blocking here.
+      if (server !== undefined) {
+        // Keep privFd OPEN across close so the stored private bind path always
+        // resolves to OUR (now-empty) private dir → ENOENT; it can never be
+        // redirected to another directory by fd-number reuse.
+        await new Promise<void>(resolveClose => {
+          server!.close(() => resolveClose())
+        })
+      }
+      // Remove ONLY our owned contract-path inode (identity-checked).
+      cleanupSync()
+      closeScopeDirFd()
+      closePrivFd()
+      removePrivDir()
+      disposeFactsWhenSettled()
+    })()
+    return closed
+  }
+
+  /**
+   * Dispose the ONE Host fact subscription once every ACCEPTED piece of work
+   * has settled on real Host facts (a pending admission inserted/classified,
+   * a queued removal committed, the owned turn's terminal drained, or a
+   * retired-turn fence ended). It never cancels work the ACP View may not
+   * cancel (D23 mixed turns) and never guesses with a timer: the registry's
+   * own settlement transitions resolve it. Detached, so retirement and Host
+   * shutdown are never blocked by a shared turn's duration.
+   */
+  const disposeFactsWhenSettled = (): void => {
+    if (views === undefined || !ownsFacts) return
+    runDetached('local acp: Host fact subscription retirement', async () => {
+      await views.whenHostWorkSettled()
+      releasePromptFacts()
+    }, { diag })
+  }
+
+  try {
+    // 1. Inspect any existing logical path BEFORE binding. A non-socket,
+    //    symlink or foreign-owner entry is never removed.
+    let existing: ReturnType<typeof lstatSync> | undefined
+    try {
+      existing = lstatSync(logicalPath)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the socket path is not accessible', error)
+      }
+    }
+    if (existing !== undefined) {
+      if (existing.isSymbolicLink() || !existing.isSocket() || existing.uid !== uid) {
+        throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: a non-socket, symlink or foreign-owned entry occupies the socket path')
+      }
+      const verdict = await probeSocket(scopeProbePath)
+      if (verdict === 'open') {
+        throw new LocalAcpError('LOCAL_ACP_SOCKET_IN_USE', 'local acp: a live listener already answers on the socket path')
+      }
+      if (verdict !== 'refused') {
+        throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the existing socket path could not be proven stale')
+      }
+      // Refused AND the inode identity is unchanged since the probe: reclaim it.
+      const recheck = readSavedInode(logicalPath, uid)
+      if (recheck.dev !== existing.dev || recheck.ino !== existing.ino) {
+        throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the socket inode changed during the stale reclaim')
+      }
+      unlinkSync(logicalPath)
+    }
+
+    // 2. Prepare the private owner-only dir and BIND the fd-shortened private path.
+    //    Create it NON-recursively and VALIDATE an existing entry as a real dir we
+    //    own BEFORE any chmod (never chmod through a symlink / foreign dir).
+    let privCreated = true
+    try {
+      mkdirSync(privDir, { mode: 0o700 })
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+        throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the private bind directory could not be created', error)
+      }
+      privCreated = false
+    }
+    if (!privCreated) {
+      const dirInfo = lstatSync(privDir)
+      if (dirInfo.isSymbolicLink() || !dirInfo.isDirectory() || dirInfo.uid !== uid) {
+        throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the private bind path is not a directory owned by this uid')
+      }
+    }
+    chmodSync(privDir, 0o700)
+    let privBindPath: string
+    if (darwinPaths === undefined) {
+      privFd = openSync(privDir, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+      privBindPath = fdSocketPath(privFd)
+    } else {
+      // Darwin binds the direct short private name; no directory fd is held and
+      // no /proc or /dev/fd shortcut is used.
+      privBindPath = darwinPaths.privateBindPath
+    }
+    // Recover a stale PRIVATE bind name left by a crash BETWEEN the private bind
+    // and the private-name unlink (e.g. SIGKILL mid-startup). Only this one
+    // anchored private name is considered — never a scope-wide scan, never another
+    // .acp-* entry. A live/foreign/unsafe occupant is refused; a proven-stale own
+    // socket inode is unlinked so the next bind does not hit EADDRINUSE.
+    let privExisting: ReturnType<typeof lstatSync> | undefined
+    try {
+      privExisting = lstatSync(privBindPath)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the private bind path is not accessible', error)
+      }
+    }
+    if (privExisting !== undefined) {
+      if (privExisting.isSymbolicLink() || !privExisting.isSocket() || privExisting.uid !== uid) {
+        throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the private bind path is occupied by a non-socket, symlink or foreign-owned entry')
+      }
+      const privVerdict = await probeSocket(privBindPath)
+      if (privVerdict === 'open') {
+        throw new LocalAcpError('LOCAL_ACP_SOCKET_IN_USE', 'local acp: a live listener already occupies the private bind path')
+      }
+      if (privVerdict !== 'refused') {
+        throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the private bind path could not be proven stale')
+      }
+      const privRecheck = readSavedInode(privBindPath, uid)
+      if (privRecheck.dev !== privExisting.dev || privRecheck.ino !== privExisting.ino) {
+        throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the private socket inode changed during the stale recover')
+      }
+      unlinkSync(privBindPath)
+    }
+    server = createServer(socket => {
+      if (stopping) {
+        socket.destroy()
+        return
+      }
+      if (context.connections.size >= maxConnections) {
+        diag.warn('local-acp.connection.reject', { code: 'LOCAL_ACP_CAPACITY_EXCEEDED', connections: context.connections.size })
+        // A rejected socket is never tracked by serveConnection, so attach the
+        // one error guard here: a peer reset racing the bounded error write must
+        // not surface as an unhandled 'error' that could terminate the Host.
+        socket.on('error', () => socket.destroy())
+        socket.end(CAPACITY_ERROR_LINE, () => socket.destroy())
+        return
+      }
+      context.connections.add(socket)
+      diag.info('local-acp.connection.open', { connections: context.connections.size })
+      serveConnection(socket, context)
+    })
+    await new Promise<void>((resolveListen, rejectListen) => {
+      server!.once('error', rejectListen)
+      server!.listen(privBindPath, () => {
+        server!.off('error', rejectListen)
+        resolveListen()
+      })
+    })
+    // Keep one live error listener on the server for its whole lifetime so a
+    // late accept/backlog error is a classified diagnostic, never an unhandled
+    // 'error' event that would crash the Host.
+    server.on('error', error => {
+      diag.warn('local-acp.error', { code: (error as NodeJS.ErrnoException).code ?? 'LOCAL_ACP_SERVER_ERROR' })
+    })
+
+    // 3. Force the private inode to 0600, then publish it onto the contract path
+    //    with a no-replace hard link and drop the private name (see below).
+    chmodSync(join(privDir, SOCKET_FILE), 0o600)
+    // Publish the socket with a KERNEL-ATOMIC NO-REPLACE operation: hard-link the
+    // private socket inode onto the contract path. If ANY foreign entry occupies
+    // the path — including one that appeared during the race — linkSync fails
+    // EEXIST and we NEVER overwrite it. This closes the check-then-rename TOCTOU.
+    try {
+      linkSync(join(privDir, SOCKET_FILE), logicalPath)
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (code === 'EEXIST') {
+        throw new LocalAcpError('LOCAL_ACP_SOCKET_IN_USE', 'local acp: a foreign entry occupies the socket path (refusing to overwrite it)')
+      }
+      throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the socket path could not be published', error)
+    }
+    // The contract path now references OUR inode; capture identity immediately so
+    // any later failure removes only ours. Then drop the private name (the inode
+    // is kept by the contract link and the listening server fd); Node's later
+    // close-unlink targets this now-absent private name → ENOENT, never foreign.
+    const linked = lstatSync(logicalPath)
+    saved = { dev: linked.dev, ino: linked.ino, uid: linked.uid }
+    if (!linked.isSocket() || linked.uid !== uid) {
+      throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the published socket is not a socket owned by this uid')
+    }
+    unlinkSync(join(privDir, SOCKET_FILE))
+    if ((linked.mode & 0o777) !== 0o600) {
+      throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the bound socket is not a 0600 socket owned by this uid')
+    }
+    closeScopeDirFd()
+    diag.info('local-acp.listen', { connections: 0 })
+  } catch (error) {
+    // Any failure after bind must not leave OUR bound socket behind, and must
+    // never delete a foreign inode. Keep privFd open across close (private bind
+    // path → ENOENT), remove only our contract-path inode, then release fds.
+    for (const socket of context.connections) socket.destroy()
+    releasePromptFacts()
+    if (server !== undefined) {
+      try {
+        await new Promise<void>(resolveClose => {
+          server!.close(() => resolveClose())
+        })
+      } catch {
+        // The bind may never have completed; closing is best effort here.
+      }
+    }
+    cleanupSync()
+    closeScopeDirFd()
+    closePrivFd()
+    removePrivDir()
+    throw error
+  }
+
+  const isListening = (): boolean => {
+    // A stopping/closed server or a never-bound one is definitively not listening.
+    if (stopping || closed !== undefined || server === undefined || !server.listening) return false
+    if (saved === undefined) return false
+    // The owned bound server can outlive an externally removed/replaced inode;
+    // only the exact saved (dev,ino,uid) socket proves this listener still owns
+    // the pathname it advertises.
+    let current: ReturnType<typeof lstatSync>
+    try {
+      current = lstatSync(logicalPath)
+    } catch {
+      return false
+    }
+    return current.isSocket()
+      && current.uid === saved.uid
+      && current.dev === saved.dev
+      && current.ino === saved.ino
+  }
+
+  const handle: LocalAcpListener = {
+    socketPath: logicalPath,
+    connectionCount: () => context.connections.size,
+    isListening,
+    close: retireServer,
+    cleanupSync,
+  }
+
+  // The `stopping` flag now governs the accept callback for the server lifetime.
+  // A graceful close retires the path; a SIGKILL leaves it for the next seat
+  // winner to classify and reclaim.
+  return handle
+}

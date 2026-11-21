@@ -1,11 +1,14 @@
 import type { Context } from '@deepseek-ai/cordis'
+import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import { SESSION_FORMAT_VERSION, SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { ProcessTerminal } from '@xmoon76/pi-tui'
+import { fakeAgentModel } from './agent-model-double.ts'
 import { apply as applyRunner, Config as TuiConfigSchema } from '../../src/index.ts'
 import { TUI_STARTUP_SERVICE } from '../../src/startup.ts'
 import type { VirtualTerminal } from './virtual-terminal.ts'
+import { provideFakeHostWorkspaceRegistry } from './workspace-registry.ts'
 
 /** Build a minimal event envelope for tests. The type parameter is widened
  * to any string so legacy v1 `assistant/chunk` events (absent from master's
@@ -124,7 +127,7 @@ export interface RunnerHarness {
   readonly sessions: unknown
   readonly defaultModel: unknown
   readonly llm: unknown
-  readonly createOptions: { provider?: string; model?: string }[]
+  readonly createOptions: { provider?: string; model?: string; reasoningEffort?: string }[]
   readonly createInheritedEventCounts: (number | undefined)[]
   readonly createSignals: (AbortSignal | undefined)[]
   readonly resumeSignals: (AbortSignal | undefined)[]
@@ -133,9 +136,10 @@ export interface RunnerHarness {
   readonly subagents?: unknown
   /** An optional jobs registry service (the Task Center's jobs half). */
   jobs?: unknown
-  /** An optional shell executor service (the sandbox-policy user-shell
-   * path; absent models "sandbox unavailable in this composition"). */
+  /** An optional shell executor service (legacy sandbox-policy consumers). */
   shell?: unknown
+  /** An optional official subprocess provider; absent mounts the real local one. */
+  subprocess?: unknown
   /** PR3-B B2: flip `.value` to true to make the Direct writer COMMIT a prompt
    *  (default false keeps the historical `session/agent-busy` degradation every
    *  existing suite was written against). */
@@ -173,12 +177,20 @@ export function fakeAgent(
   promptAcceptance: { value: boolean } = { value: false },
   /** The harness-level delivery log (see `makeHarness`'s `delivered`). */
   delivered: DeliveredPrompt[] = [],
+  /** The Agent options (the production loop seeds them from the persisted
+   *  default at creation). */
+  agentOptions: { provider?: string; model?: string; reasoningEffort?: string } = { provider: 'p', model: 'm' },
 ): Agent {
   // A small structural Agent context is sufficient for the Direct setup
-  // callbacks.
+  // callbacks. It models the official Agent-scope `effect` (M6 PR-C C2): the
+  // per-Turn latch disposes with the Agent exactly as in production.
+  const effectDisposers: Array<() => void> = []
   const agentContext = {
     get: () => undefined,
     on: () => () => {},
+    effect: (fn: () => () => void) => {
+      effectDisposers.push(fn())
+    },
   }
   // cancel is idempotent and BREAKS a pending whenIdle (the real Agent
   // contract): a cancelled agent's whenIdle settles immediately, which is
@@ -201,7 +213,14 @@ export function fakeAgent(
   const agent = {
     session,
     ctx: agentContext,
-    options: { provider: 'p', model: 'm' },
+    options: agentOptions,
+    /** The fake's Agent-scope teardown hook (M6 PR-C C2): `handle.dispose`
+     *  runs the registered effect disposers like the real Agent scope. */
+    runEffectDisposers: () => {
+      for (const disposeEffect of effectDisposers.splice(0)) disposeEffect()
+    },
+    // DSH 0.2.2: the Agent owns its model selection (`AgentModel`).
+    model: fakeAgentModel(session, agentOptions),
     status: 'idle',
     inbox: { nextTurn: [], nextStep: [] },
     whenIdle: async () => {
@@ -285,7 +304,7 @@ export function makeHarness(
   /** PR3-B B2 round 3: the harness-level delivery log (`delivered`). */
   const deliveredLog: DeliveredPrompt[] = []
   const retirementEvents: string[] = []
-  const createOptions: { provider?: string; model?: string }[] = []
+  const createOptions: { provider?: string; model?: string; reasoningEffort?: string }[] = []
   const createInheritedEventCounts: (number | undefined)[] = []
   const createSignals: (AbortSignal | undefined)[] = []
   const resumeSignals: (AbortSignal | undefined)[] = []
@@ -294,13 +313,17 @@ export function makeHarness(
     persisted.set(session.id, session)
   }
 
-  const makeHandle = (session: FakeSession): { agent: Agent; dispose: () => Promise<void> } => {
+  const makeHandle = (
+    session: FakeSession,
+    options: { provider?: string; model?: string; reasoningEffort?: string } = initialDefault,
+  ): { agent: Agent; dispose: () => Promise<void> } => {
     const agent = fakeAgent(
       session,
       whenIdleGate === undefined ? undefined : () => whenIdleGate(session.id),
       retirementEvents,
       promptAcceptance,
       deliveredLog,
+      options,
     )
     live.set(session.id, agent)
     return {
@@ -309,6 +332,10 @@ export function makeHarness(
         retirementEvents.push(`dispose:${session.id}`)
         // A failing dispose must NOT remove the live owner: the handle is leaked.
         if (disposeFailures.has(session.id)) throw new Error(`dispose failed for ${session.id}`)
+        // The Agent-scope teardown runs the registered effect disposers
+        // (assigned first: the ASI-free spelling).
+        const teardownEffects = (agent as unknown as { runEffectDisposers(): void }).runEffectDisposers
+        teardownEffects()
         live.delete(session.id)
       },
     }
@@ -353,9 +380,10 @@ export function makeHarness(
       await resumeGate?.(String(resumeSessionId))
       return handle
     },
-    create: async ({ sessionId, agentOptions, setup, seed, inheritedEventCount, signal }: {
+    create: async ({ sessionId, meta, agentOptions, setup, seed, inheritedEventCount, signal }: {
       sessionId: unknown
-      agentOptions?: { provider?: string; model?: string }
+      meta?: { readonly cwd?: string }
+      agentOptions?: { provider?: string; model?: string; reasoningEffort?: string }
       setup?: (agentCtx: unknown, agent: Agent) => unknown
       seed?: readonly SessionEvent[]
       inheritedEventCount?: number
@@ -368,12 +396,15 @@ export function makeHarness(
       const id = String(sessionId)
       const session: FakeSession = fakeSession({
         id,
-        header: { id, cwd: home, createdAt: Date.now(), version: SESSION_FORMAT_VERSION },
+        // The durable header cwd is the semantic create's Host-resolved
+        // directory (the Direct adapter passes the Workspace path); `home` is
+        // only the fixture fallback for creates without one.
+        header: { id, cwd: meta?.cwd ?? home, createdAt: Date.now(), version: SESSION_FORMAT_VERSION },
         events: seed === undefined ? sessionEvents('created answer') : [...seed],
       })
       createdSessions.push(session)
       persisted.set(id, session)
-      const handle = makeHandle(session)
+      const handle = makeHandle(session, agentOptions ?? initialDefault)
       await setup?.(handle.agent.ctx, handle.agent)
       return handle
     },
@@ -438,6 +469,10 @@ export function makeHarness(
       const session = (agent as { session: FakeSession }).session
       const appendEvent = session.append as (type: string, data: unknown) => unknown
       const append = (phase: 'run' | 'done', type: string, data: unknown): void => {
+        // The ONE causal timeline: the executor's own appends and the
+        // retirement phases share this array, so a witness can prove that an
+        // owner's `dispose` really landed AFTER its `command/done`.
+        retirementEvents.push(`command-${phase}:${session.id}`)
         commandSettlements.push({ sessionId: session.id, phase, ownerLive: live.has(session.id) })
         appendEvent(type, data)
       }
@@ -522,7 +557,7 @@ export async function mountRunner(
   ctx: Context,
   home: string,
   harness: RunnerHarness,
-  startup: { sessionId?: string; presetId?: string },
+  startup: { sessionId?: string; presetId?: string; sessionLaunch?: unknown },
   /** Plain plugin-config input; resolved through the exported schema so the
    * live preference fields arrive as volatile references, exactly like a
    * Loader-mounted row. `fullscreen` defaults to OFF to preserve the
@@ -540,11 +575,17 @@ export async function mountRunner(
    *  without a Settings service uses this to reach the same reference the
    *  consumer reads, instead of asserting on a copied value. */
   onResolvedConfig?: (config: unknown) => void,
+  /** The Workspace registry stand-in, when a test must control the real
+   *  pre-publication await (the Direct Workspace `attachSession`). */
+  workspaceRegistry?: Parameters<typeof provideFakeHostWorkspaceRegistry>[1],
 ) {
   ctx.provide('appExit', appExit)
   ctx.provide(TUI_STARTUP_SERVICE, { ...startup, shippedPresetRoot: home })
   ctx.provide('sessionPersistence', harness.persistence as never)
   ctx.provide('sessionQuery', harness.sessionQuery as never)
+  // WS-2: the official Host Workspace registry stand-in (the ONE authority the
+  // Direct lifecycle resolves before an ordinary create).
+  provideFakeHostWorkspaceRegistry(ctx, workspaceRegistry)
   ctx.provide('agents', harness.agents as never)
   ctx.provide('sessions', harness.sessions as never)
   ctx.provide('agentDefaultModel', harness.defaultModel as never)
@@ -553,8 +594,14 @@ export async function mountRunner(
   if (harness.subagents !== undefined) ctx.provide('subagents', harness.subagents as never)
   if (harness.jobs !== undefined) ctx.provide('jobs', harness.jobs as never)
   if (harness.shell !== undefined) ctx.provide('shell', harness.shell as never)
+  if (harness.subprocess !== undefined) ctx.provide('subprocess', harness.subprocess as never)
+  else await ctx.plugin(LocalSubprocessRuntime)
   ctx.provide('loader', loader as never)
   const resolved = TuiConfigSchema({ fullscreen: 'off', ...config } as never)
+  // The canonical preferences row publishes the live references the Direct
+  // runner consumes. Tests that used to drive only the legacy `tui-app` schema
+  // now provide the SAME resolved references under the canonical service key.
+  ctx.provide('piTuiPreferences', resolved)
   onResolvedConfig?.(resolved)
   const fiber = ctx.plugin((pluginCtx) => applyRunner(pluginCtx, resolved))
   await fiber

@@ -5,12 +5,16 @@
  * refresh. */
 
 import assert from 'node:assert/strict'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { createToolResultMessage, MessageId, type ToolCallId } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-subagent'
 import { SESSION_FORMAT_VERSION, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { Config as TuiConfigSchema } from '../../src/index.ts'
+import { bundleVersion } from '../../src/client/launcher/version.ts'
+import { initialWorkspaceIntentFromEnvironment } from '../../src/app/bootstrap.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import type { StreamingToolPreview } from '../../src/app/surface/streaming-tool-preparing.ts'
 import {
@@ -85,6 +89,129 @@ async function pickSecondModel(app: TuiApp, harness: RunnerHarness): Promise<voi
   input('\r')
   await settle()
 }
+
+test('a Direct bootstrap with a missing Settings surface and a surviving legacy value refuses to mount', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('direct-prefs-barrier-')
+  const patchPath = join(home, 'cordis.patch.yml')
+  writeFileSync(patchPath, [
+    '- id: tui-app',
+    "  name: '@xmoon76/dsh-pi-tui'",
+    '  config:',
+    '    theme: dark',
+    '',
+  ].join('\n'))
+  const ctx = new Context()
+  ctx.provide('profileContext', { home, patchPath })
+  const harness = makeHarness(home)
+  let exited = false
+  try {
+    await mountRunner(ctx, home, harness, {}, {}, () => { exited = true })
+    assert.equal(exited, true,
+      'the missing migration surface must terminate the Direct bootstrap before a surface is admitted')
+    assert.equal(readFileSync(patchPath, 'utf8').includes('pi-tui-preferences'), false,
+      'the failed barrier must not create a canonical row')
+    assert.match(readFileSync(patchPath, 'utf8'), /theme: dark/u,
+      'the raw legacy value must be preserved')
+  } finally {
+    await disposeContext(ctx)
+  }
+})
+
+test('a completed canonical marker lets a settings-less Direct bootstrap start with preserved legacy rows', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('direct-prefs-current-')
+  const patchPath = join(home, 'cordis.patch.yml')
+  writeFileSync(patchPath, [
+    '- id: pi-tui-preferences',
+    "  name: '@xmoon76/dsh-pi-tui/preferences'",
+    '  config:',
+    '    theme: dark',
+    '    legacySettingsMigrationVersion: 2',
+    '- id: tui-app',
+    "  name: '@xmoon76/dsh-pi-tui'",
+    '  config:',
+    '    theme: dark',
+    '',
+  ].join('\n'))
+  const ctx = new Context()
+  ctx.provide('profileContext', { home, patchPath })
+  const harness = makeHarness(home)
+  let exited = false
+  try {
+    await mountRunner(ctx, home, harness, {}, {}, () => { exited = true })
+    assert.equal(exited, false,
+      'marker 2 proves the migration completed; preserved legacy rows must not block startup')
+  } finally {
+    await disposeContext(ctx)
+  }
+})
+
+test('a settings-less Direct bootstrap refuses an un-migrated legacy preset default', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('direct-prefs-preset-')
+  const patchPath = join(home, 'cordis.patch.yml')
+  writeFileSync(patchPath, '[]\n')
+  writeFileSync(join(home, 'settings.yaml'), ['agent-presets:', '  default: minimal', ''].join('\n'))
+  const ctx = new Context()
+  ctx.provide('profileContext', { home, patchPath })
+  const harness = makeHarness(home)
+  let exited = false
+  try {
+    await mountRunner(ctx, home, harness, {}, {}, () => { exited = true })
+    assert.equal(exited, true,
+      'the legacy preset default cannot be committed without a write surface; startup must not admit a wrong default')
+  } finally {
+    await disposeContext(ctx)
+  }
+})
+
+test('the Direct boot diagnostics separate DSH, bundle and the LOCAL Cordis services', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('direct-boot-diagnostics-')
+  const patchPath = join(home, 'cordis.patch.yml')
+  writeFileSync(patchPath, '[]\n')
+  const logPath = join(home, 'tui.log')
+  const dshRoot = join(home, 'node_modules', '@deepseek-ai', 'dsh')
+  mkdirSync(join(dshRoot, 'bin'), { recursive: true })
+  writeFileSync(join(dshRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.2-boot-b' }))
+  const bin = join(dshRoot, 'bin', 'dsh')
+  writeFileSync(bin, '')
+  const previousArgv = process.argv[1]
+  const previousLog = process.env.DSH_PI_TUI_LOG
+  const previousLevel = process.env.DSH_PI_TUI_LOG_LEVEL
+  process.argv[1] = bin
+  process.env.DSH_PI_TUI_LOG = logPath
+  process.env.DSH_PI_TUI_LOG_LEVEL = 'info'
+  life.defer(() => {
+    process.argv[1] = previousArgv
+    if (previousLog === undefined) delete process.env.DSH_PI_TUI_LOG
+    else process.env.DSH_PI_TUI_LOG = previousLog
+    if (previousLevel === undefined) delete process.env.DSH_PI_TUI_LOG_LEVEL
+    else process.env.DSH_PI_TUI_LOG_LEVEL = previousLevel
+  })
+  const ctx = new Context()
+  ctx.provide('profileContext', { home, patchPath })
+  const vt = new VirtualTerminal(100, 30)
+  life.defer(installVirtualProcessTerminal(vt))
+  const harness = makeHarness(home)
+  try {
+    await mountRunner(ctx, home, harness, {}, {})
+    await settle()
+  } finally {
+    await disposeContext(ctx)
+  }
+  const bootLine = readFileSync(logPath, 'utf8').split('\n').find(line => line.includes(' INFO boot '))
+  assert.ok(bootLine !== undefined, 'the boot diagnostics line must be written')
+  assert.match(bootLine, /dsh=0\.2\.2-boot-b/u,
+    'boot.dsh is the Direct CLI manifest version')
+  assert.ok(bootLine.includes(`bundle=${bundleVersion()}`),
+    'boot.bundle is the TUI bundle version, never the DSH version')
+  assert.match(bootLine, /localCordisServices=[^\s]*sessionPersistence/u,
+    'the diagnostic names the local Cordis services this process observed')
+  assert.doesNotMatch(bootLine, /\sservices=/u,
+    'the old ambiguous services key is gone')
+})
 
 test('the real runner hydrates resume, deferred create, and switch exactly once each', async (t) => {
   const life = testLifecycle(t)
@@ -379,8 +506,11 @@ test('a main Session opening cut preserves old-Agent bookkeeping and B transient
   // owner committed, so the model read-back below is already final (the previous
   // 70ms window was redundant with it).
   await settle()
-  assert.equal(probe.capturedModels.at(-1), 'p/m',
-    'opening model selection must be consumed by its matching request/header before the target commits')
+  // DSH 0.2.2: the matching request/header consumes the pending intent and the
+  // Session's OWN used route remains the display source (the AgentModel fold
+  // answers `lastUsed`); there is no global-default fallback behind it.
+  assert.equal(probe.capturedModels.at(-1), 'opening-provider/opening-model @high',
+    'the consumed opening selection resolves to the Session\'s own used route before the target commits')
   const openingMessages = probe.capturedMessages ?? []
   assert.ok(openingMessages.some(message => message.text === 'B opening prefix'),
     'B transient prefix must survive the commit-to-init opening gap')
@@ -484,8 +614,17 @@ test('/new without an explicit default intent observes the persisted default, ne
   assert.ok(newHandler, 'the real runner must register the /new transition command')
   await newHandler()
   await settle()
-  assert.deepEqual(harness.createOptions[0], { provider: 'provider-b', model: 'model-b' },
-    '/new must create with the persisted global default, never the old Session selection')
+  assert.deepEqual(harness.createOptions[0], { provider: 'provider-b', model: 'model-b', reasoningEffort: 'max' },
+    '/new must create with the COMPLETE persisted global default, never the old Session selection')
+  // The create input is only half the chain: the live Agent the runner drives must
+  // resolve the SAME complete selection from its own AgentModel.
+  const live = harness.liveAgents() as unknown as ReadonlyArray<{
+    readonly status: string
+    readonly model: { current(): { provider: string; model: string; reasoningEffort?: string } }
+  }>
+  assert.equal(live.length, 1, 'the /new transition leaves exactly one live Agent')
+  assert.deepEqual(live[0]!.model.current(), { provider: 'provider-b', model: 'model-b', reasoningEffort: 'max' },
+    'the new Agent model resolves the complete persisted default')
   assert.equal(durableSelectionOf(harness.createdSessions[0]!), undefined,
     '/new without an explicit default intent must not freeze a durable choice into the fresh Session')
 })
@@ -558,7 +697,9 @@ test('a FAILED sessionless default save is never seeded into the first create (v
   await pickSecondModel(app, harness)
   await settle()
   // An ambiguous (thrown) default write keeps an explicit unresolved footer
-  // marker until a Host read/reconnect establishes truth (v2 §0.3.2).
+  // marker until a MATCHING Host read/reconnect establishes truth (v2 §0.3.2);
+  // an automatic read that still reflects the OLD default is not proof the write
+  // failed, so the marker survives — the choice is never fabricated.
   assert.match(probe.capturedModels.at(-1) ?? '', /\(unconfirmed\)/,
     `the footer must show the unresolved marker: ${JSON.stringify(probe.capturedModels)}`)
   app.setDraft('first deferred prompt')
@@ -830,7 +971,7 @@ test('startup restores a persisted Compact preset unchanged and /display compact
   const mutations: Array<{ ns: string; ops: readonly { op: string; path: readonly string[]; value?: unknown }[] }> = []
   const settings = {
     describe: () => [{
-      ns: 'tui-app',
+      ns: 'pi-tui-preferences',
       value: effectiveConfigView({
         fullscreen: 'off',
         displayPreset: 'compact',
@@ -858,12 +999,10 @@ test('startup restores a persisted Compact preset unchanged and /display compact
   const app = probe.apps.at(-1)
   assert.ok(app !== undefined, 'the production runner must create a TuiApp')
   assert.equal(app.displayPreset(), 'compact', 'a persisted Compact must restore as Compact, never fall back to Full')
-  // The boot completes exactly the one-shot legacy-migration marker (no
-  // legacy document exists anywhere): NO preference field is pinned and the
-  // USER footer definitions are not copied over the project-layer value.
-  assert.deepEqual(mutations, [
-    { ns: 'tui-app', ops: [{ op: 'set', path: ['legacySettingsMigrationVersion'], value: 1 }] },
-  ], 'a canonical preset must not trigger a preference write')
+  // The runner pins NO preference field and never copies the USER footer
+  // definitions over the project-layer value. The one-shot migration marker is
+  // the Host-owned profile barrier's write, not a runner write.
+  assert.equal(mutations.length, 0, 'a canonical preset must not trigger a preference write')
 
   const displayHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('display')
   assert.ok(displayHandler !== undefined, 'the production runner must register /display')
@@ -871,12 +1010,12 @@ test('startup restores a persisted Compact preset unchanged and /display compact
   assert.deepEqual(compactResult, { kind: 'success', text: 'Display: compact.' })
   await settle()
   assert.equal(app.displayPreset(), 'compact', 'Compact stays the live preset')
-  assert.equal(mutations.length, 1, 'an unchanged value emits no write (no pinning; only the boot marker)')
+  assert.equal(mutations.length, 0, 'an unchanged value emits no write (no pinning)')
   const focusResult = await (displayHandler as unknown as (invocation: { rawInput: string }) => Promise<{ kind: string; text?: string }>)({ rawInput: 'focus' })
   assert.deepEqual(focusResult, { kind: 'success', text: 'Display: focus.' })
   await settle()
-  assert.equal(mutations.length, 2, 'a changed value persists through one more path-scoped mutation')
-  assert.deepEqual(mutations[1]!.ops, [
+  assert.equal(mutations.length, 1, 'a changed value persists through one path-scoped mutation')
+  assert.deepEqual(mutations[0]!.ops, [
     { op: 'set', path: ['displayPreset'], value: 'focus' },
   ], 'only the changed field is written; the user footer items are not re-pinned')
   await fiber.dispose()
@@ -910,7 +1049,7 @@ test('startup canonicalizes an invalid display preset, preserves raw fields, and
   let failFirstWrite = true
   const settings = {
     describe: () => [{
-      ns: 'tui-app',
+      ns: 'pi-tui-preferences',
       value: effectiveConfigView({
         fullscreen: 'off',
         displayPreset: 'garbage',
@@ -947,10 +1086,9 @@ test('startup canonicalizes an invalid display preset, preserves raw fields, and
 
   const first = await mount()
   assert.equal(first.app.displayPreset(), 'full', 'an invalid canonical value resolves to Full before the first frame')
-  // The boot writes: the one-shot marker completion, then the canonicalizing
-  // displayPreset set — raw fields are never re-pinned.
+  // The boot writes only the canonicalizing displayPreset set — raw fields are
+  // never re-pinned and the migration marker belongs to the Host barrier.
   assert.deepEqual(written, [
-    { op: 'set', path: ['legacySettingsMigrationVersion'], value: 1 },
     { op: 'set', path: ['displayPreset'], value: 'full' },
   ])
   await first.fiber.dispose()
@@ -958,8 +1096,7 @@ test('startup canonicalizes an invalid display preset, preserves raw fields, and
 
   const second = await mount()
   assert.equal(second.app.displayPreset(), 'full')
-  // The retry boot: the marker batch is now a no-op (the fake never commits
-  // the reference), so the canonicalizing write retries alone.
+  // The retry boot retries the canonicalizing write alone.
   assert.deepEqual(written.at(-1), { op: 'set', path: ['displayPreset'], value: 'full' },
     'a later boot must retry the failed canonicalization')
   await second.fiber.dispose()
@@ -1239,4 +1376,642 @@ test('a skills/change emitted after surface teardown performs no further catalog
   await new Promise(resolve => setTimeout(resolve, 400))
   assert.equal(snapshots, afterLive,
     'a post-teardown skills/change must not read the catalog again (the disposed coordinator must stay untouched)')
+})
+
+/**
+ * REGRESSION (Direct opening-journal handoff): the child `/new` Session is
+ * published and its cold transcript hydration has already installed the live
+ * Main folder/window/stats, but the transition still has to settle its
+ * post-hydration catalog refresh before it clears the opening journal. A TUI
+ * command that the official executor runs in that window (`command/run` +
+ * `command/done`, exactly the shape `/preset status` produces) must reach the
+ * live transcript — buffering it in a journal nobody merges after the cut
+ * loses it forever.
+ *
+ * The gate is a REAL production await inside that window (the Direct catalog
+ * read awaits the live skill catalog snapshot), never a sleep.
+ */
+test('a command issued while /new is still settling reaches the Direct main transcript', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-new-command-handoff-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 30)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const resumed: FakeSession = fakeSession({
+    id: 'new-command-handoff-old',
+    header: { id: 'new-command-handoff-old', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('old answer'),
+  })
+  const harness = makeHarness(home, resumed)
+  context = new Context()
+  // The controllable post-hydration barrier: arm it right before `/new` so
+  // only the child's transition catalog refresh parks here.
+  let armed = false
+  let releaseCatalog!: () => void
+  const catalogGate = new Promise<void>(resolve => { releaseCatalog = resolve })
+  life.defer(() => releaseCatalog())
+  let catalogEntered!: () => void
+  const catalogEnteredPromise = new Promise<void>(resolve => { catalogEntered = resolve })
+  context.provide('skills', {
+    snapshot: async () => {
+      if (armed) {
+        armed = false
+        catalogEntered()
+        await catalogGate
+      }
+      return { skills: [], complete: true }
+    },
+  } as never)
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+  await settle() // reason: drain the runner's startup microtasks before /new
+
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the real runner must register the /new transition command')
+  armed = true
+  const switchPromise = (newHandler as () => Promise<unknown>)()
+  // A bounded FAILURE bound, never an observation window: the gate itself is
+  // the authoritative signal that /new reached its post-hydration refresh.
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined
+  // reason: bounded failure deadline; the promise gate is the authoritative signal
+  const deadline = new Promise<false>(resolve => { deadlineTimer = setTimeout(() => resolve(false), 15_000) })
+  const entered = await Promise.race([catalogEnteredPromise.then(() => true), deadline])
+  if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
+  assert.equal(entered, true, '/new must reach its post-hydration catalog refresh')
+
+  const child = harness.createdSessions[0]
+  assert.ok(child !== undefined, '/new must have created the child Session')
+  assert.equal(liveAgentOf(harness, child.id) !== undefined, true, 'the child Session must be live')
+  // The official executor's exact lifecycle: command/run before the handler and
+  // command/done after it settles, both on the SAME Session and commandId.
+  const emitSessionEvent = (appended: SessionEvent): void =>
+    (context as unknown as { emit(name: string, session: unknown, payload: unknown): void }).emit('session/event', child as never, appended)
+  const commandId = 'cmd-new-handoff-1'
+  emitSessionEvent(child.append!('command/run', {
+    commandId,
+    name: 'preset',
+    args: ' status',
+    source: { kind: 'user' },
+  }) as SessionEvent)
+  emitSessionEvent(child.append!('command/done', {
+    commandId,
+    kind: 'success',
+    text: 'preset: cordis · default: standard',
+  }) as SessionEvent)
+  await settle() // reason: drain the routing's queued presentation microtasks
+
+  // The OFFICIAL log has the matched pair (the executor did its job)...
+  const commandEvents = child.snapshotEvents().filter(entry => {
+    const type = (entry as unknown as { type?: unknown }).type
+    return type === 'command/run' || type === 'command/done'
+  })
+  assert.equal(commandEvents.length, 2, 'the official Session log must hold command/run and command/done')
+  assert.equal(
+    (commandEvents[0] as unknown as { data: { commandId?: unknown } }).data.commandId,
+    (commandEvents[1] as unknown as { data: { commandId?: unknown } }).data.commandId,
+    'the official events must pair by commandId',
+  )
+  // ...and the LIVE Main transcript (the REAL folder → window → app path) holds
+  // it exactly once, on screen. The coalesced repaint is not synchronous.
+  const commandCards = (): number =>
+    (probe.capturedMessages ?? []).filter(message => message.kind === 'command').length
+  await new Promise(resolve => setTimeout(resolve, 70)) // the coalesced repaint flush
+  await vt.waitForRender()
+  assert.equal(commandCards(), 1,
+    'the command must reach the live Main transcript while /new is still settling')
+  const viewport = vt.getViewport().join('\n')
+  assert.ok(viewport.includes('/preset status'), 'the real terminal must paint the command row')
+  assert.ok(viewport.includes('preset: cordis · default: standard'), 'the real terminal must paint the settled outcome')
+
+  // Releasing the catalog refresh finishes /new (and its clearOpening tail).
+  // The already-presented card must neither disappear nor duplicate.
+  releaseCatalog()
+  await switchPromise
+  await settle() // reason: drain the transition's completion microtasks
+  await vt.waitForRender()
+  assert.equal(commandCards(), 1, 'settling /new must keep exactly the one command card')
+  assert.ok(vt.getViewport().join('\n').includes('/preset status'),
+    'the settled /new surface must still paint the command row')
+})
+
+/**
+ * REGRESSION (switch handoff): a command appended BEFORE the target Session
+ * is published is part of that Session's official log, so the cold hydration
+ * must paint it after the switch; a command that the official executor appends
+ * DURING the post-hydration catalog-refresh window is the formerly-lost one —
+ * the journal was still open after its cut had been consumed, so it was
+ * recorded and then discarded by `clearOpening` instead of reaching the live
+ * folds. (The journal cut's own merge path is pinned by "a main Session opening
+ * cut preserves old-Agent bookkeeping and B transient state".)
+ */
+test('a switch paints a pre-commit command and settles one issued after the fold install', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-opening-cut-command-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 30)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const sessionA: FakeSession = fakeSession({
+    id: 'opening-cut-command-a',
+    header: { id: 'opening-cut-command-a', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('A answer'),
+  })
+  const sessionB: FakeSession = fakeSession({
+    id: 'opening-cut-command-b',
+    header: { id: 'opening-cut-command-b', cwd: home, createdAt: 1_700_000_000_001, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('B history'),
+  })
+  let releaseResume!: () => void
+  const resumeGate = new Promise<void>(resolve => { releaseResume = resolve })
+  life.defer(() => releaseResume())
+  let resumeEntered!: () => void
+  const resumeEnteredPromise = new Promise<void>(resolve => { resumeEntered = resolve })
+  let releaseCatalog!: () => void
+  const catalogGate = new Promise<void>(resolve => { releaseCatalog = resolve })
+  life.defer(() => releaseCatalog())
+  let catalogEntered!: () => void
+  const catalogEnteredPromise = new Promise<void>(resolve => { catalogEntered = resolve })
+  let catalogHeld = false
+  context = new Context()
+  context.provide('skills', {
+    snapshot: async (options: { readonly scope?: { readonly session?: { readonly id?: unknown } } }) => {
+      // Gate ONLY the target Session's live catalog read: the startup read of
+      // A (and any other scope) answers immediately.
+      if (options?.scope?.session?.id === sessionB.id && !catalogHeld) {
+        catalogHeld = true
+        catalogEntered()
+        await catalogGate
+      }
+      return { skills: [], complete: true }
+    },
+  } as never)
+  const harness = makeHarness(
+    home,
+    [sessionA, sessionB],
+    { provider: 'p', model: 'm' },
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    async id => {
+      if (id !== sessionB.id) return
+      resumeEntered()
+      await resumeGate
+    },
+  )
+  fiber = await mountRunner(context, home, harness, { sessionId: sessionA.id }, { sessionId: sessionA.id })
+  await settle() // reason: drain the runner's startup microtasks before /resume
+
+  const resumeHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('resume')
+  assert.ok(resumeHandler, 'the real runner must register /resume')
+  const emitForB = (appended: SessionEvent): void =>
+    (context as unknown as { emit(name: string, session: unknown, payload: unknown): void }).emit('session/event', sessionB as never, appended)
+  const commandId = 'cmd-opening-cut-1'
+  const switchPromise = (resumeHandler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: sessionB.id })
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined
+  // reason: bounded failure deadline; the resume gate is the authoritative signal
+  const deadline = new Promise<false>(resolve => { deadlineTimer = setTimeout(() => resolve(false), 15_000) })
+  const resumeReached = await Promise.race([resumeEnteredPromise.then(() => true), deadline])
+  if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
+  assert.equal(resumeReached, true, '/resume must reach the target Session open')
+  const commandCards = (): number =>
+    (probe.capturedMessages ?? []).filter(message => message.kind === 'command').length
+  // Precondition: A's own frame is the current transcript subject.
+  await vt.waitForRender()
+  assert.ok((probe.capturedMessages ?? []).some(message => message.text === 'A answer'),
+    'the old Session transcript must be the current frame before the opening event')
+  // PRE-COMMIT event for the target: it is already part of B's official log
+  // (the real Host append precedes the emit), so the cold hydration must paint
+  // it once B commits — and it must NOT paint on the still-current A first.
+  emitForB(sessionB.append!('command/run', {
+    commandId,
+    name: 'preset',
+    args: ' status',
+    source: { kind: 'user' },
+  }) as SessionEvent)
+  await settle() // reason: drain the routing's queued presentation microtasks
+  // The transcript repaint is COALESCED (50 ms), so the negative needs to
+  // outlive that flush while the resume barrier still holds: a wrongly routed
+  // B event would otherwise leave the probe unchanged here and be erased by
+  // B's hydration before its timer fires. 70 ms is the existing justified
+  // flush bound, not a simulated slow machine.
+  await new Promise(resolve => setTimeout(resolve, 70))
+  assert.equal(commandCards(), 0,
+    "the opening target's command must not paint on the old Session before the commit")
+  assert.equal(vt.getViewport().join('\n').includes('/preset status'), false,
+    "the old Session's real terminal frame must not show the opening command")
+
+  releaseResume()
+  let catalogTimer: ReturnType<typeof setTimeout> | undefined
+  // reason: bounded failure deadline; the catalog gate is the authoritative signal
+  const catalogDeadline = new Promise<false>(resolve => { catalogTimer = setTimeout(() => resolve(false), 15_000) })
+  const catalogReached = await Promise.race([catalogEnteredPromise.then(() => true), catalogDeadline])
+  if (catalogTimer !== undefined) clearTimeout(catalogTimer)
+  assert.equal(catalogReached, true, 'the switch must reach its post-hydration catalog refresh')
+  // The commit published B and the cold hydration painted B's official log:
+  // exactly ONE running command row.
+  await new Promise(resolve => setTimeout(resolve, 70))
+  await vt.waitForRender()
+  assert.equal(commandCards(), 1, 'the pre-commit command must hydrate exactly once after the switch')
+  assert.ok(vt.getViewport().join('\n').includes('/preset status'),
+    'the hydrated pre-commit command must be painted')
+
+  // POST-HYDRATION event, before the transition's clearOpening tail: it must
+  // route incrementally into the SAME settled row.
+  emitForB(sessionB.append!('command/done', {
+    commandId,
+    kind: 'success',
+    text: 'preset: cordis · default: standard',
+  }) as SessionEvent)
+  await settle() // reason: drain the routing's queued presentation microtasks
+  await new Promise(resolve => setTimeout(resolve, 70))
+  await vt.waitForRender()
+  assert.equal(commandCards(), 1, 'settlement must reuse the single command row')
+  assert.ok(vt.getViewport().join('\n').includes('preset: cordis · default: standard'),
+    'the post-hydration command/done must settle the visible row')
+
+  releaseCatalog()
+  await switchPromise
+  await settle() // reason: drain the transition's completion microtasks
+  await vt.waitForRender()
+  assert.equal(commandCards(), 1, 'completing the switch must neither drop nor duplicate the command row')
+})
+
+/**
+ * REGRESSION (the first command after `/new`): the accepted navigation is not
+ * observable as "a transition" from its FIRST synchronous step. Two real
+ * windows exist before the TUI publishes the new Session:
+ *
+ * 1. the PRE-GATE Workspace pre-selection (`/new` awaits
+ *    `agents.resolveWorkspace` BEFORE entering the transition gate), and
+ * 2. the POST-CREATE publication gap (the Host `agent/created` announcement
+ *    completes before the Direct lifecycle's `workspace.attachSession` and the
+ *    synchronous owner publication).
+ *
+ * The Composer is live in both. A command submitted there must never be
+ * routed against the not-yet-replaced sessionless surface: a pure read such
+ * as `/preset status` would run locally and its successful text has no
+ * command card to render it, so the command used to silently disappear.
+ *
+ * Both barriers are the REAL production awaits (the Workspace registry create
+ * and the Direct Workspace attach), never sleeps: the intent registered by the
+ * navigation command keeps `gate.pending`/`whenSettled` covering the first
+ * window, the gate itself covers the second.
+ */
+test('commands submitted before /new publishes its Session run on the new Session, never the sessionless surface', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-new-command-fence-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 30)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const harness = makeHarness(home)
+  // Window 1: the PRE-GATE Workspace pre-selection.
+  let releaseCreate!: () => void
+  let createEntered!: () => void
+  const createGate = new Promise<void>(resolve => { releaseCreate = resolve })
+  const createReached = new Promise<void>(resolve => { createEntered = resolve })
+  // Window 2: the POST-CREATE owner publication (the Direct lifecycle await).
+  let releaseAttach!: () => void
+  let attachEntered!: () => void
+  const attachGate = new Promise<void>(resolve => { releaseAttach = resolve })
+  const attachReached = new Promise<void>(resolve => { attachEntered = resolve })
+  // A failing assertion before a release must not leave `/new` parked (the
+  // lifecycle cleanup would wait on it forever).
+  life.defer(() => releaseCreate())
+  life.defer(() => releaseAttach())
+  const workspace = {
+    id: 'workspace-new-command-fence',
+    path: home,
+    sessionIds: [] as string[],
+    attachSession: async (sessionId: unknown) => {
+      attachEntered()
+      await attachGate
+      workspace.sessionIds.push(String(sessionId))
+    },
+  }
+  const workspaceRegistry = {
+    create: async () => {
+      createEntered()
+      await createGate
+      return workspace
+    },
+    get: (id: string) => id === workspace.id ? workspace : undefined,
+    list: () => [workspace],
+  }
+  context = new Context()
+  // `/preset status` needs a preset roster to answer; the read itself is not
+  // what this test proves, only that the line reaches the new Session's
+  // official command plane.
+  let presetDefaultReads = 0
+  context.provide('agentPresets', {
+    remoteExportList: async () => ({ presets: [{ id: 'standard', isDefault: true }, { id: 'ptc' }] }),
+    resolve: async (id?: string) => ({ id: id ?? 'standard' }),
+    mount: async () => {},
+    // The status read resolves the displayed default through this property
+    // (`config.presetDefault.get()`): counting the read is the witness that
+    // the handler ran.
+    get defaultId() { presetDefaultReads += 1; return 'standard' },
+    composedPreset: () => undefined,
+  } as never)
+  fiber = await mountRunner(context, home, harness, {}, {}, () => {}, undefined, undefined, workspaceRegistry)
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const submit = (text: string): void => {
+    app.setDraft(text)
+    ;(app as unknown as { submitDraft(): void }).submitDraft()
+  }
+  const waitGate = async (gate: Promise<void>, label: string): Promise<void> => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    // reason: bounded failure deadline; the production gate is the authoritative signal
+    const deadline = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`${label} timed out`)), 15_000) })
+    try {
+      await Promise.race([gate, deadline])
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+    }
+  }
+
+  // The REAL composer path: /new is a sessionless navigation command, so its
+  // execution registers the navigation intent in the submission controller.
+  submit('/new')
+  await waitGate(createReached, '/new pre-gate Workspace resolution')
+  assert.equal(harness.createdSessions.length, 0, '/new must be parked in its pre-gate Workspace resolution')
+  const readsBeforePreGate = presetDefaultReads
+  submit('/preset status')
+  await settle() // reason: drain the submission's synchronous command turn
+  assert.equal(presetDefaultReads, readsBeforePreGate,
+    'the command must not run against the sessionless surface during the pre-gate window')
+  // A SESSION-NAVIGATION entry is the navigation authority itself and stays
+  // immediate: the second /new must keep the documented single-flight refusal.
+  submit('/new')
+  await settle() // reason: drain the local command handler's synchronous refusal
+  assert.equal(harness.createdSessions.length, 0, 'the second /new must not create a Session')
+  assert.ok(probe.notices.some(notice => /already starting/u.test(notice)),
+    `the second /new must surface its single-flight refusal: ${JSON.stringify(probe.notices)}`)
+
+  releaseCreate()
+  await waitGate(attachReached, '/new post-create Workspace attach')
+  assert.equal(harness.createdSessions.length, 1, '/new must have created the Host Session')
+  const child = harness.createdSessions[0]!
+  const readsBeforeAttach = presetDefaultReads
+  submit('/preset status')
+  await settle() // reason: drain the submission's synchronous command turn
+  assert.equal(presetDefaultReads, readsBeforeAttach,
+    'the command must not run against the sessionless surface before the owner is published')
+
+  releaseAttach()
+  // The deferred gestures run after the transition settles; drain their
+  // command execution (both enter the FIFO turn once /new releases).
+  const eventsOf = (type: string): readonly unknown[] =>
+    child.snapshotEvents().filter(entry => (entry as { type?: unknown }).type === type)
+  for (let attempt = 0; attempt < 2000 && eventsOf('command/done').length < 2; attempt += 1) {
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  const runs = eventsOf('command/run')
+  const dones = eventsOf('command/done')
+  assert.equal(runs.length, 2, 'both deferred commands must be dispatched on the new Session')
+  assert.equal(dones.length, 2, 'both deferred commands must settle on the new Session')
+  for (const done of dones) {
+    const data = (done as unknown as { data: { kind: string } }).data
+    assert.equal(data.kind, 'success')
+  }
+  for (const run of runs) {
+    const data = (run as unknown as { data: { name: string } }).data
+    assert.equal(data.name, 'preset')
+  }
+  assert.ok(presetDefaultReads > readsBeforeAttach,
+    'the status handlers must run after the transition settled, against the new Session')
+})
+
+/**
+ * REGRESSION (RFL-002): the navigation intent widens `gate.pending` from the
+ * navigation's FIRST step, so a queue pull-back that settles during the
+ * PRE-GATE Workspace resolution correctly defers its local draft restore to
+ * the transition. A refused pre-selection never enters
+ * `withSessionTransition`, so the transition's own settlement never runs: the
+ * intent's terminal release MUST settle the parked recall, or the confirmed
+ * queue removal has no local representation left (the recalled text/refs stay
+ * trapped and the draft never gets them back).
+ *
+ * The gate is the REAL pre-gate production await (`agents.resolveWorkspace` →
+ * the Workspace registry create), never a sleep; the pull-back is the real
+ * Alt+Up gesture against the real pending-input reader.
+ */
+/**
+ * REGRESSION (external review P2): `/exit` and `/quit` are immediate lifecycle
+ * controls. While `/new` is parked in its pre-gate Workspace resolution, the
+ * sessionless input fence must NOT queue the quit behind the navigation: a
+ * stuck Host Workspace IO would otherwise hang the slash exit.
+ */
+test('/exit is not deferred behind a pending /new pre-gate Workspace resolution', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-exit-pregate-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 30)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const harness = makeHarness(home)
+  let releaseCreate!: () => void
+  let createEntered!: () => void
+  const createGate = new Promise<void>(resolve => { releaseCreate = resolve })
+  const createReached = new Promise<void>(resolve => { createEntered = resolve })
+  life.defer(() => releaseCreate())
+  const workspace = {
+    id: 'workspace-exit-fence',
+    path: home,
+    sessionIds: [] as string[],
+    attachSession: async (sessionId: unknown) => { workspace.sessionIds.push(String(sessionId)) },
+  }
+  const workspaceRegistry = {
+    create: async () => {
+      createEntered()
+      await createGate
+      return workspace
+    },
+    get: (id: string) => id === workspace.id ? workspace : undefined,
+    list: () => [workspace],
+  }
+  context = new Context()
+  context.provide('agentPresets', {
+    remoteExportList: async () => ({ presets: [{ id: 'standard', isDefault: true }] }),
+    resolve: async (id?: string) => ({ id: id ?? 'standard' }),
+    mount: async () => {},
+    defaultId: 'standard',
+    composedPreset: () => undefined,
+  } as never)
+  let exits = 0
+  fiber = await mountRunner(context, home, harness, {}, {}, () => { exits += 1 }, undefined, undefined, workspaceRegistry)
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  let reachedPreGate = false
+  void createReached.then(() => { reachedPreGate = true })
+  app.setDraft('/new')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  for (let round = 0; round < 2000 && !reachedPreGate; round += 1) await new Promise(resolve => setImmediate(resolve))
+  assert.equal(reachedPreGate, true, '/new must reach its pre-gate Workspace resolution')
+
+  app.setDraft('/exit')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  for (let round = 0; round < 2000 && exits === 0; round += 1) await new Promise(resolve => setImmediate(resolve))
+  assert.equal(exits, 1, '/exit must request the exit immediately, not wait for the pending navigation')
+  releaseCreate()
+})
+
+test('a refused /new Workspace pre-selection restores a deferred queue pull-back', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-new-pullback-fence-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 30)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const resumed: FakeSession = fakeSession({
+    id: 'new-pullback-session',
+    header: { id: 'new-pullback-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('resumed answer'),
+  })
+  const harness = makeHarness(home, resumed)
+  // The real Direct Workspace pre-selection await, parked and then refused.
+  let releaseCreate!: () => void
+  let createEntered!: () => void
+  const createGate = new Promise<void>(resolve => { releaseCreate = resolve })
+  const createReached = new Promise<void>(resolve => { createEntered = resolve })
+  // A failing assertion before the release must not leave /new parked.
+  life.defer(() => releaseCreate())
+  const workspaceRegistry = {
+    create: async () => {
+      createEntered()
+      await createGate
+      throw new Error('workspace refused by the Host')
+    },
+    get: () => undefined,
+    list: () => [],
+  }
+  context = new Context()
+  context.provide('agentPresets', {
+    remoteExportList: async () => ({ presets: [{ id: 'standard', isDefault: true }] }),
+    resolve: async (id?: string) => ({ id: id ?? 'standard' }),
+    mount: async () => {},
+    defaultId: 'standard',
+    composedPreset: () => undefined,
+  } as never)
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id }, () => {}, undefined, undefined, workspaceRegistry)
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const agent = liveAgentOf(harness, resumed.id) as unknown as {
+    inbox: {
+      nextTurn: { id: string; content: unknown[]; source: unknown }[]
+      remove?: (id: string) => boolean
+    }
+  }
+  assert.ok(agent, 'the resumed Session must own a live Agent')
+  agent.inbox.nextTurn.push({
+    id: 'queued-recall',
+    content: [{ type: 'text', text: 'queued recall text' }],
+    source: { kind: 'user' },
+  })
+  const removed: string[] = []
+  agent.inbox.remove = (id: string): boolean => {
+    const index = agent.inbox.nextTurn.findIndex(item => item.id === id)
+    if (index < 0) return false
+    removed.push(agent.inbox.nextTurn.splice(index, 1)[0]!.id)
+    return true
+  }
+
+  app.setDraft('/new')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  let gateTimer: ReturnType<typeof setTimeout> | undefined
+  // reason: bounded failure deadline; the Workspace create is the authoritative signal
+  const deadline = new Promise<false>(resolve => { gateTimer = setTimeout(() => resolve(false), 15_000) })
+  const reached = await Promise.race([createReached.then(() => true), deadline])
+  if (gateTimer !== undefined) clearTimeout(gateTimer)
+  assert.equal(reached, true, '/new must reach its pre-gate Workspace resolution')
+
+  ;(app as unknown as {
+    actionDispatcher: { dispatch: (action: string) => boolean }
+  }).actionDispatcher.dispatch('app.input.dequeue')
+  for (let round = 0; round < 2000 && (removed.length === 0 || app.getDraft() !== ''); round += 1) {
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  assert.deepEqual(removed, ['queued-recall'], 'the real pull-back must remove the queued occurrence')
+  assert.equal(app.getDraft(), '', 'the recall must be deferred while the navigation intent is pending')
+
+  releaseCreate()
+  for (let round = 0; round < 2000 && !app.getDraft().includes('queued recall text'); round += 1) {
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  assert.match(app.getDraft(), /queued recall text/u,
+    'a refused pre-selection must restore the deferred recall into the draft')
+  assert.equal(removed.length, 1, 'the queued occurrence stays removed (the pull-back committed its removal)')
+})
+
+test('the first-session Workspace intent ignores the qualification override outside the surface entry', () => {
+  const launch = '/home/user/project'
+  assert.deepEqual(initialWorkspaceIntentFromEnvironment(launch, {}),
+    { kind: 'host-path', path: launch }, 'a normal launch proposes its own directory')
+  assert.deepEqual(initialWorkspaceIntentFromEnvironment(launch, {
+    SPLIT_PROCESS_CLIENT_MODE: 'surface',
+    SPLIT_PROCESS_CLIENT_WORKSPACE_INTENT_PATH: '/deliberately/invalid',
+  }), { kind: 'host-path', path: '/deliberately/invalid' },
+  'the qualification-only surface entry may inject the negative-control path')
+  // The override is NOT a user configuration: an inherited variable without
+  // the internal surface mode never redirects a Direct launch or a reexec.
+  assert.deepEqual(initialWorkspaceIntentFromEnvironment(launch, {
+    SPLIT_PROCESS_CLIENT_WORKSPACE_INTENT_PATH: '/deliberately/invalid',
+  }), { kind: 'host-path', path: launch })
 })

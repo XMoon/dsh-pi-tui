@@ -28,6 +28,8 @@ export const SETTINGS_DIRECT_PAGE_STUBS = {
   authorization: {
     available: () => false,
     listTargets: () => [] as readonly unknown[],
+    refreshTargets: async () => {},
+    targetsState: () => 'unavailable' as const,
     begin: async () => ({ kind: 'unavailable' as const }),
     onEvent: () => () => {},
     respond: async () => {},
@@ -47,13 +49,51 @@ export const SETTINGS_DIRECT_PAGE_STUBS = {
     startSignIn: async () => { throw new Error('account unavailable') },
     cancelSignIn: async () => { throw new Error('account unavailable') },
     signOut: async () => { throw new Error('account unavailable') },
-    hasRunningAccountTasks: () => false,
+    hasRunningAccountTasks: async () => false,
   },
   /** The shipped profile-wide visual-tools default: both tools registered and
    *  no USER override. The `/settings` snapshot reads it on every open. */
   visualTools: {
     read: () => ({ enabled: true, revision: 1, userOverridden: false, applied: true }),
     setEnabled: async (_enabled: boolean, _revision: number) => {},
+  },
+  /** The profile-owned Web startup preference: the schema default (OFF, no user
+   *  override) at revision 1. The `/settings` snapshot reads it on every open. */
+  webStartupPreference: {
+    read: () => ({ autoStart: false, revision: 1, userOverridden: false }),
+    setAutoStart: async (_value: boolean, _revision: number) => {},
+  },
+  /** The profile-owned startup backend: the schema default (`direct`, no user
+   *  override) at revision 1. Read on every `/settings` snapshot. */
+  backendStartupPreference: {
+    read: () => ({ backend: 'direct' as const, revision: 1, userOverridden: false }),
+    readFresh: async () => ({ backend: 'direct' as const, revision: 1, userOverridden: false }),
+    setBackend: async (_value: 'direct' | 'daemon', _revision: number) => {},
+  },
+  /** The profile-owned ACP startup preference: the schema default (OFF, no user
+   *  override) at revision 1. The `/settings` snapshot reads it on every open. */
+  acpStartupPreference: {
+    read: () => ({ autoStart: false, revision: 1, userOverridden: false }),
+    setAutoStart: async (_value: boolean, _revision: number) => {},
+  },
+  /** FR5-B: the official Agent-loop section is absent in a harness that composes
+   *  no Host settings plane; the row reports Unavailable and invites no write. */
+  agentLoopSettings: {
+    read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+    refresh: async () => {},
+    mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+  },
+  /** FR5-B: the official shell executor row is absent in the same harness. */
+  shellExecutionSettings: {
+    read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+    refresh: async () => {},
+    mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+  },
+  /** FR5-B: no official session-log contributor => the General row is absent. */
+  sessionLogUpload: {
+    read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+    refresh: async () => {},
+    mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
   },
 } as const
 
@@ -71,5 +111,11 @@ export function settingsDirectPageConfig(config: Record<string, unknown>): Recor
     credentials: { ...SETTINGS_DIRECT_PAGE_STUBS.credentials, ...(own.credentials ?? {}) },
     account: { ...SETTINGS_DIRECT_PAGE_STUBS.account, ...(own.account ?? {}) },
     visualTools: { ...SETTINGS_DIRECT_PAGE_STUBS.visualTools, ...(own.visualTools ?? {}) },
+    webStartupPreference: { ...SETTINGS_DIRECT_PAGE_STUBS.webStartupPreference, ...(own.webStartupPreference ?? {}) },
+    backendStartupPreference: { ...SETTINGS_DIRECT_PAGE_STUBS.backendStartupPreference, ...(own.backendStartupPreference ?? {}) },
+    acpStartupPreference: { ...SETTINGS_DIRECT_PAGE_STUBS.acpStartupPreference, ...(own.acpStartupPreference ?? {}) },
+    agentLoopSettings: { ...SETTINGS_DIRECT_PAGE_STUBS.agentLoopSettings, ...(own.agentLoopSettings ?? {}) },
+    shellExecutionSettings: { ...SETTINGS_DIRECT_PAGE_STUBS.shellExecutionSettings, ...(own.shellExecutionSettings ?? {}) },
+    sessionLogUpload: { ...SETTINGS_DIRECT_PAGE_STUBS.sessionLogUpload, ...(own.sessionLogUpload ?? {}) },
   }
 }

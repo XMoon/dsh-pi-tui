@@ -8,12 +8,12 @@
  * its original foundation position before the Thought. Collapsed turns HIDE
  * process rows (a committed pre-steer answer is the explicit exception) and
  * expanded turns restore raw chronology with the final assistant held back.
- * A foldable Context row (producer-declared Snapshot, a `tool-jobs` Notice or
- * an `agent-message` relay with durable same-turn next-step evidence) follows
- * the same rule unless it shares a raw-adjacent cluster with
- * `instructions`/`catalog`: it joins the Thought instead of becoming turn
- * foundation, while a mixed ambient cluster keeps its indivisible foundation
- * position.
+ * A foldable Context row (producer-declared Snapshot, a `tool-jobs` Notice, an
+ * `agent-message` relay or a `subagent-settled` Notice with durable same-turn
+ * next-step evidence) follows the same rule unless it shares a raw-adjacent
+ * cluster with `instructions`/`catalog`: it joins the Thought instead of
+ * becoming turn foundation, while a mixed ambient cluster keeps its indivisible
+ * foundation position.
  *
  * This module owns the pure policy only. The PiTui disclosure card, its width
  * formatting, its theme/icon chrome and its live duration provider live in
@@ -24,6 +24,9 @@
 
 import {
   assistantCommittedBeforeSteer,
+  assistantLatestStepOf,
+  assistantStepOf,
+  assistantStepSettledOf,
 } from '../../domain/transcript/folder.ts'
 import { eligibleFinalAssistant } from '../../domain/transcript/final-assistant.ts'
 import type { TranscriptMessage, TurnActivity } from '../../domain/transcript/types.ts'
@@ -32,6 +35,7 @@ import { clusterAdjacentAmbientContext, isNoticeContext, type ContextCluster } f
 import {
   isFoldableWorkContext,
   isWorkingAgentRelay,
+  isWorkingSubagentSettledNotice,
   projectTranscriptStructure,
   workByMemberOf,
   type TranscriptStructureBlock,
@@ -86,6 +90,12 @@ export type FocusProjectedBlock =
      * back final carry NO path — they are not owned by the Thought.
      */
     containerPath?: TranscriptContainerPath
+    /**
+     * The exact Focus occurrence whose native section physically contains this
+     * row in expanded Focus. This is placement metadata only: it never changes
+     * `containerPath`, which remains the semantic ancestry produced here.
+     */
+    focusPresentationOwner?: TranscriptMessage
   }
   | {
     kind: 'activity'
@@ -130,6 +140,8 @@ export type FocusProjectedBlock =
     /** The outer-to-inner ancestor of the Work container (set when TuiApp
      * materializes the nested header). */
     containerPath?: TranscriptContainerPath
+    /** The exact Focus occurrence that physically owns this nested Work node. */
+    focusPresentationOwner?: TranscriptMessage
   }
 
 /**
@@ -147,7 +159,7 @@ export type FocusProjectedBlock =
  * run-owner component cache supports that), and the semantic disclosure
  * identity stays the turn number.
  */
-function focusProjectionTurnOf(message: TranscriptMessage): number | undefined {
+export function focusProjectionTurnOf(message: TranscriptMessage): number | undefined {
   if (message.kind === 'command') return undefined
   if (message.kind === 'compaction' && message.sourceCommand !== undefined) return undefined
   return 'turn' in message ? message.turn : undefined
@@ -213,7 +225,8 @@ function focusActionStatsByTurn(messages: readonly TranscriptMessage[]): Map<num
  * renders an UNQUALIFIED durable mid-turn `form:'notice'` AFTER the Thought
  * (visible process feedback, never inside the hidden Action candidate set),
  * and hides ordinary Process inside the collapsed root. A proven Working
- * `tool-jobs` Notice or same-turn Agent relay follows the Thought instead.
+ * `tool-jobs` Notice, same-turn Agent relay or subagent settlement Notice is
+ * carried by that same Thought instead.
  * Expanded Focus restores the exact raw chronology.
  */
 export function projectFocus(
@@ -241,6 +254,12 @@ export function projectFocus(
     const group = consecutiveTurnGroup(messages, index, turn)
     index += group.length
     const activity = activities.get(turn)
+    // A partial/legacy window without the authoritative activity cannot own a
+    // Thought. Keep every original row in chronology instead of hiding Process.
+    if (activity === undefined) {
+      for (const member of group) out.push({ kind: 'message', message: member })
+      continue
+    }
     const actionStats = actionStatsByTurn.get(turn) ?? EMPTY_ACTION_STATS
     const expanded = expandedTurns.has(turn)
     // The final assistant is decided ONCE from the exact last assistant
@@ -249,7 +268,33 @@ export function projectFocus(
     const final = eligibleFinalAssistant(activity, group)
     const isCommittedAnswer = (member: TranscriptMessage): boolean =>
       activity !== undefined && assistantCommittedBeforeSteer(activity, member)
+    // Before `turn/end`, a settled Assistant that still owns the structural
+    // latest step is not yet known to be the official final. Keep it out of
+    // expanded chronology instead of treating the missing final qualification
+    // as permission to render it as a normal process row. A later Tool or other
+    // process row confirms the Assistant as intermediate; open display blocks
+    // and pre-steer committed answers keep their existing semantics.
+    let latestAssistantIndex = -1
+    for (let memberIndex = group.length - 1; memberIndex >= 0; memberIndex -= 1) {
+      if (group[memberIndex]?.kind === 'assistant') {
+        latestAssistantIndex = memberIndex
+        break
+      }
+    }
+    const latestAssistant = latestAssistantIndex < 0 ? undefined : group[latestAssistantIndex]
+    const laterProcess = latestAssistantIndex < 0 ? false : group.slice(latestAssistantIndex + 1)
+      .some(member => member.kind !== 'user' && !isSurfacedContext(member))
+    const pendingFinalAssistant = !activity.completed
+      && latestAssistant?.kind === 'assistant'
+      && assistantStepOf(latestAssistant) === assistantLatestStepOf(activity)
+      && assistantStepSettledOf(activity, latestAssistant)
+      && latestAssistant.displayBlocks === undefined
+      && !isCommittedAnswer(latestAssistant)
+      && !laterProcess
+      ? latestAssistant
+      : undefined
     if (expanded) {
+      const rootOwner = group[0]!
       // The open Thought reveals the FULL process in ORIGINAL order —
       // compaction cards included at their chronological position — with
       // the final assistant held back and appended LAST (a max-tokens
@@ -278,15 +323,21 @@ export function projectFocus(
       if (activity !== undefined) out.push(...focusActivityBlock(activity, group[0]!, actionStats, undefined))
       const emitTailRow = (member: TranscriptMessage): void => {
         if (isFocusPersistentInputRow(member)) {
-          out.push({ kind: 'message', message: member })
+          out.push({ kind: 'message', message: member, focusPresentationOwner: rootOwner })
           return
         }
         if (final !== undefined && member === final.message) return
+        if (member === pendingFinalAssistant) return
         if (isCommittedAnswer(member)) {
-          out.push({ kind: 'message', message: member })
+          out.push({ kind: 'message', message: member, focusPresentationOwner: rootOwner })
           return
         }
-        out.push({ kind: 'message', message: member, containerPath: [{ kind: 'focus-root', turn }] })
+        out.push({
+          kind: 'message',
+          message: member,
+          containerPath: [{ kind: 'focus-root', turn }],
+          focusPresentationOwner: rootOwner,
+        })
       }
       // The tail consumes the SAME canonical segmentation as Compact/Full
       // (`structure.ts`), computed over the UNFILTERED tail so the
@@ -297,7 +348,7 @@ export function projectFocus(
       // Focus-projected position.
       for (const block of focusExpandedTailStructure(group, boundary)) {
         if (block.kind === 'work') {
-          out.push({ kind: 'work', span: block.span, focusOwnerTurn: turn })
+          out.push({ kind: 'work', span: block.span, focusOwnerTurn: turn, focusPresentationOwner: rootOwner })
         } else if (block.kind === 'context-cluster') {
           for (const member of block.cluster.members) emitTailRow(member)
         } else {
@@ -316,8 +367,9 @@ export function projectFocus(
     // `form:'notice'` is the visible exception (see
     // {@link collapsedFocusRowDisposition}): it renders AFTER the Thought as
     // a post-thought row, never inside the hidden Action candidate set. A
-    // proven Working `tool-jobs` Notice or same-turn Agent relay is NOT an
-    // exception: it follows the Thought hidden set. A committed pre-steer
+    // proven Working `tool-jobs` Notice, same-turn Agent relay or subagent
+    // settlement Notice is NOT an exception: it follows the Thought hidden
+    // set, and only when canonical Work actually owns it. A committed pre-steer
     // answer is the other exception: from that exact raw boundary onward,
     // preserve the persistent rows and answer in chronology
     // so the answer cannot be swallowed by the Thought or move when the
@@ -467,8 +519,9 @@ function isFocusPersistentInputRow(message: TranscriptMessage): boolean {
  * stays BEFORE the Thought. Every other persistent input/context row keeps its
  * existing pre-Thought behavior, and ordinary Process stays hidden inside the
  * collapsed Thought (restored in raw chronology when the Thought opens). A
- * foldable Context row (Snapshot, a proven Working tool-jobs Notice or a
- * proven same-turn Agent relay) joins that hidden set INSTEAD of the
+ * foldable Context row (Snapshot, a proven Working tool-jobs Notice, a proven
+ * same-turn Agent relay or a proven same-turn subagent settlement Notice) joins
+ * that hidden set INSTEAD of the
  * post-Thought rule above when a real Thought owner exists; without one every
  * row must fail open. The ORDINARY Notice position decision reads the semantic
  * `form`, raw adjacency and raw position, never a producer name; the Working
@@ -478,15 +531,18 @@ function isFocusPersistentInputRow(message: TranscriptMessage): boolean {
  */
 type CollapsedFocusRowDisposition = 'pre-thought' | 'post-thought' | 'hidden'
 
-/** The foldable Context rows (Snapshot / proven Working tool-jobs Notice or
- * Agent relay) a collapsed Thought may carry instead of surfacing as turn
+/** The foldable Context rows (Snapshot / proven Working tool-jobs Notice,
+ * Agent relay or subagent settlement Notice) a collapsed Thought may carry
+ * instead of surfacing as turn
  * foundation.
  * `thoughtOwned` is false where no Thought block will be emitted (a truncated
  * window without an activity) — the rows then fail open instead of disappearing.
  * `workByMember` is the same group's canonical Work membership, used by the
  * Agent-relay rule: a claimed relay is only carried when a REAL Process run
  * owns it, so an activity-only turn (no Process at all) fails open. Snapshot
- * and Working tool-jobs Notice keep their established activity-owner rule.
+ * and Working tool-jobs Notice keep their established activity-owner rule; a
+ * settled subagent Notice follows the Agent-relay rule because its body is the
+ * recoverable child result and must never be lost.
  * The Thought-lead boundary decides WHICH rows are foundation; anything at or
  * after it is Thought content. */
 interface CollapsedFoldableSnapshotScope {
@@ -505,10 +561,12 @@ function collapsedFocusRowDisposition(
   if (foldableSnapshots.thoughtOwned
     && index >= leadBoundary
     && isFoldableWorkContext(message, foldableSnapshots.clusterByMember)
-    // A claimed Agent relay additionally needs its REAL Work (Process) owner:
-    // an activity-only turn has no Process for the relay to be recovered
-    // through, so hiding it there would lose the original Context.
-    && (!isWorkingAgentRelay(message) || foldableSnapshots.workByMember.has(message))) return 'hidden'
+    // A claimed Agent relay or subagent settlement Notice additionally needs
+    // its REAL Work (Process) owner: an activity-only turn has no Process for
+    // the Context to be recovered through, so hiding it there would lose the
+    // original Context (and the child's reported result).
+    && (!(isWorkingAgentRelay(message) || isWorkingSubagentSettledNotice(message))
+      || foldableSnapshots.workByMember.has(message))) return 'hidden'
   if (index >= leadBoundary && isNoticeContext(message)) return 'post-thought'
   return 'pre-thought'
 }
@@ -523,7 +581,15 @@ function collapsedFocusRowDisposition(
  * @param start - the run's first index.
  * @param turn - the run's turn number.
  */
-function consecutiveTurnGroup(messages: readonly TranscriptMessage[], start: number, turn: number): TranscriptMessage[] {
+/**
+ * The consecutive rows of ONE Focus projection turn, starting at `start`.
+ *
+ * Exported so a caller that needs the Focus disposition of a SINGLE row can
+ * project that turn's own group instead of the whole loaded history (the search
+ * seat's ancestry probe). It is the SAME segmentation `projectFocus` walks, so
+ * the slice and the full projection can never disagree.
+ */
+export function consecutiveTurnGroup(messages: readonly TranscriptMessage[], start: number, turn: number): TranscriptMessage[] {
   const group: TranscriptMessage[] = [messages[start]!]
   let index = start + 1
   while (index < messages.length) {
@@ -543,7 +609,8 @@ function consecutiveTurnGroup(messages: readonly TranscriptMessage[], start: num
  * group beginning. In both cases the boundary then consumes leading surfaced
  * Context rows that are NOT foldable (the wakeup cause, `instructions`,
  * `catalog`, an unqualified notice or relay). The first FOLDABLE Context row
- * (Snapshot, a proven Working tool-jobs Notice or Agent relay) ends the
+ * (Snapshot, a proven Working tool-jobs Notice, Agent relay or subagent
+ * settlement Notice) ends the
  * foundation and becomes Thought content — so a next-turn wakeup notice stays
  * visible while the Snapshot and same-turn deliveries that arrive during the
  * work fold with it. A mixed

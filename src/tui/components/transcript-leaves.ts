@@ -11,7 +11,7 @@
  * @module @xmoon76/dsh-pi-tui/tui/components/transcript-leaves
  */
 
-import { truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
+import { Text, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import type { Component } from '@xmoon76/pi-tui'
 import { iconLead } from '../icons.ts'
 import type { IconStyle } from '../../domain/display/icons.ts'
@@ -363,6 +363,19 @@ export class UserBubbleComponent implements Component {
    * structural guessing (`rendered.length - 1`). */
   disclosureBodyRowCount(): number {
     return this.cached?.length ?? 0
+  }
+
+  /** Render the SAME bubble layout for a disposable source-cell witness: the
+   * tagged text is the sanitized source with a zero-width OSC 8 marker around
+   * the current match. A fresh bubble reuses this instance's marker,
+   * background and compact policy and never touches the live render cache. */
+  renderSourceProbe(taggedDisplayText: string, width: number): string[] {
+    return new UserBubbleComponent(
+      new Text(taggedDisplayText, 0, 0),
+      this.marker,
+      this.bg,
+      this.compactOptions,
+    ).render(width)
   }
 
   render(width: number): string[] {

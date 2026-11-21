@@ -1,22 +1,21 @@
 /**
  * The public agent-composition helper's Direct implementation (plan §27):
  * resolve the preset an agent will be composed from and build the setup that
- * installs it — the Agent-scoped model selection, the preset mount, and the
- * TUI prompt sections.
+ * installs it — the Agent-scoped runtime contributions, the preset mount, and
+ * the TUI prompt sections.
  *
- * Direct-only by construction (the Host preset registry, `installModelSelection`),
- * so it lives under `app/direct`; the package entry keeps the public overloads
- * and delegates here, which keeps the entry point one-way (index -> bootstrap
- * -> app/direct).
+ * Direct-only by construction (the Host preset registry), so it lives under
+ * `app/direct`; the package entry keeps the public signature and delegates
+ * here, which keeps the entry point one-way (index -> bootstrap -> app/direct).
  * @module @xmoon76/dsh-pi-tui/app/direct/composition
  */
 
-import { installModelSelection } from '@deepseek-ai/dsh-agent'
-import type { Agent, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ProgressUpdatesState, ResponseStyleState } from '../../domain/communication/policy.ts'
 import type { GitAttributionState } from '../../domain/communication/git-attribution.ts'
 import { installDirectTuiSystemPromptSections } from './system-prompt.ts'
+import type { TuiPromptTurnPolicy } from '../agent/prompt-sections.ts'
 import type { DisplayState } from '../../domain/display/preset.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { recordedSessionPreset } from '../../runtime/direct/session-preset-direct.ts'
@@ -30,48 +29,49 @@ export interface DirectAgentComposition {
 }
 
 /**
- * Source-compatible composition returned for standalone callers that provide
- * their own ModelSelectionRef instead of an Agent-local installer.
+ * The narrow app-internal composition options (M6 PR-C C2). The exported
+ * `composeAgent` signature stays unchanged for third-party builds; production
+ * Direct passes the frozen per-Turn policy factory through here.
  */
-interface DirectLegacyAgentComposition {
-  /** Preset id for the session header, absent when the deployment composes no roster. */
-  agentPreset?: string
-  /** Standalone setup installs the caller-owned model selection ref. */
-  setup: (agentCtx: Context) => Promise<void> | void
+export interface DirectAgentCompositionOptions {
+  /**
+   * Install and return the per-Turn prompt policy for one composed Agent.
+   * Production Direct installs the frozen latch here (the official
+   * `turn/start` samples the current local view ONCE); absent keeps the
+   * pre-C2 live-display semantics of the public `composeAgent` helper.
+   */
+  readonly installTurnPolicy?: (agentCtx: Context, agent: Agent) => TuiPromptTurnPolicy
 }
+
 export async function composeDirectAgent(
   ctx: Context,
-  installSelection: ModelSelectionRef | ((agentCtx: Context, agent: Agent) => void),
+  installSelection: (agentCtx: Context, agent: Agent) => void,
   presetId?: string,
   displayState?: DisplayState,
   diag?: Diag,
   progressUpdatesState?: ProgressUpdatesState,
   responseStyleState?: ResponseStyleState,
   gitAttributionState?: GitAttributionState,
-): Promise<DirectLegacyAgentComposition | DirectAgentComposition> {
-  const installTuiPrompts = (agentCtx: Context): void => {
+  options?: DirectAgentCompositionOptions,
+): Promise<DirectAgentComposition> {
+  const installTuiPrompts = (agentCtx: Context, agent: Agent): void => {
     installDirectTuiSystemPromptSections(agentCtx, {
       displayState,
       diag,
       progressUpdatesState,
       responseStyleState,
       gitAttributionState,
+      ...options?.installTurnPolicy === undefined
+        ? {}
+        : { turnPolicy: options.installTurnPolicy(agentCtx, agent) },
     })
   }
   const presets = ctx.get('agentPresets')
   if (presets === undefined) {
-    if (typeof installSelection === 'function') {
-      return {
-        setup: (agentCtx: Context, agent: Agent): void => {
-          installSelection(agentCtx, agent)
-          installTuiPrompts(agentCtx)
-        },
-      }
-    }
     return {
-      setup: (agentCtx: Context): void => {
-        installModelSelection(agentCtx, installSelection)
-        installTuiPrompts(agentCtx)
+      setup: (agentCtx: Context, agent: Agent): void => {
+        installSelection(agentCtx, agent)
+        installTuiPrompts(agentCtx, agent)
       },
     }
   }
@@ -80,26 +80,17 @@ export async function composeDirectAgent(
   // Agent's composition. There is deliberately NO legacy alias here: a
   // requested id — `code` included — is an ordinary preset id.
   const resolved = await presets.resolve(presetId)
-  const finishSetup = async (agentCtx: Context): Promise<void> => {
+  const finishSetup = async (agentCtx: Context, agent: Agent): Promise<void> => {
     await presets.mount(agentCtx, resolved.id)
     // Install after the preset mounts its services. Preset-only recomposition
     // preserves these outer-scoped sections; a new agent installs them anew.
-    installTuiPrompts(agentCtx)
-  }
-  if (typeof installSelection === 'function') {
-    return {
-      agentPreset: resolved.id,
-      setup: async (agentCtx: Context, agent: Agent): Promise<void> => {
-        installSelection(agentCtx, agent)
-        await finishSetup(agentCtx)
-      },
-    }
+    installTuiPrompts(agentCtx, agent)
   }
   return {
     agentPreset: resolved.id,
-    setup: async (agentCtx: Context): Promise<void> => {
-      installModelSelection(agentCtx, installSelection)
-      await finishSetup(agentCtx)
+    setup: async (agentCtx: Context, agent: Agent): Promise<void> => {
+      installSelection(agentCtx, agent)
+      await finishSetup(agentCtx, agent)
     },
   }
 }

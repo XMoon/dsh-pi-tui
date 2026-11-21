@@ -23,7 +23,7 @@ import * as connectionClient from '@deepseek-ai/dsh-client-connection/client'
 import * as gatewayClient from '@deepseek-ai/dsh-api-gateway/client'
 import * as typertClient from '@deepseek-ai/dsh-typert-registry/client'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { createRemoteHostRuntime, type InProcessHostCarrier } from '../../src/app/remote/host-runtime.ts'
+import { createRemoteHostRuntime, type InProcessHostCarrier } from '../support/m3-inprocess/host-runtime.ts'
 import { mountRemoteClientDomainPrerequisites } from '../../src/app/remote/client-runtime.ts'
 import { createSplitClientInteractionDelivery } from '../../src/app/remote-process/client-interaction-delivery.ts'
 import {
@@ -96,6 +96,11 @@ test('the official Gateway does not start until the Loader gate, Session resolve
     remote: ctx.get('remote') as never,
     sessions: prerequisites.sessions,
   })
+  // The split root presents a forwarded request only while its own Session is
+  // the committed subject. This scene has one Session, bound once the Agent
+  // exists below; the subscription is inert because no switch happens.
+  let committedSessionId: string | undefined
+  delivery.bindCommittedSession(() => committedSessionId, () => () => {})
   delivery.attachSurface(1, {
     onQuestion: async () => {
       observedQuestion = true
@@ -117,6 +122,7 @@ test('the official Gateway does not start until the Loader gate, Session resolve
     ask(request: unknown): Promise<{ readonly answers: readonly { readonly id: string; readonly selected: readonly string[] }[] }>
   }
   const agent = await host.harness.create(SessionId('m4-c1b-loader-answer'))
+  committedSessionId = String(agent.session.id)
   const answer = await userQuestions.ask({
     agent,
     questions: [{ id: 'q1', question: 'Continue?', options: [{ label: 'Proceed' }] }],

@@ -11,10 +11,12 @@
  * @module @xmoon76/dsh-pi-tui/runtime/direct/plugin-manager-direct
  */
 
+import type { Context } from '@deepseek-ai/cordis'
 import type {
   BundleInfo,
   ChangeResult,
   InstallBundleOptions,
+  ListVersionsOptions,
   PluginEntryId,
   PluginInfo,
   PluginInstallCancellation,
@@ -23,6 +25,10 @@ import type {
   PluginInstallRequestId,
   PluginRegistries,
   PluginSpecInspection,
+  PluginUpdateProgress,
+  PluginUpdateResult,
+  PluginVersionList,
+  UpdateBundleOptions,
 } from '@deepseek-ai/dsh-plugin-manager'
 import type {
   PluginChangeFact,
@@ -32,13 +38,20 @@ import type {
   PluginManagerPort,
   PluginManagerSnapshot,
   PluginSpecInspectionFact,
+  PluginUpdateProgressFact,
+  PluginUpdateResultFact,
+  PluginVersionListFact,
 } from '../plugin-manager-port.ts'
+import { ownedClientExtensionEntryIds } from '../plugin-manager-ownership.ts'
 import {
   detachChange,
   detachInspection,
   detachLog,
   detachPhase,
   detachPluginManagerSnapshot,
+  detachPluginUpdateProgress,
+  detachPluginUpdateResult,
+  detachPluginVersionList,
   pluginInstallRequestId,
 } from '../plugin-manager-mapping.ts'
 
@@ -46,8 +59,9 @@ import {
  * service resolves from the dsh installation, never a package dependency). */
 export interface PluginManagerHostContextLike {
   get(name: string): unknown
-  /** Subscribe to the official `plugin-manager/*` events; returns a disposer. */
-  on(name: string, listener: (payload: unknown) => void): () => void
+  /** The framework's typed `on`; this adapter subscribes only to the official
+   *  `plugin-manager/*` events. */
+  on: Context['on']
 }
 
 /** The official Host service shape this adapter consumes. */
@@ -63,6 +77,8 @@ export interface PluginManagerServiceLike {
   installBundle(spec: string, options?: InstallBundleOptions): Promise<ChangeResult>
   waitForInstall(requestId: PluginInstallRequestId): Promise<ChangeResult | null>
   cancelInstall(requestId: PluginInstallRequestId): Promise<PluginInstallCancellation>
+  listVersions(name: string, options?: ListVersionsOptions, signal?: AbortSignal): Promise<PluginVersionList>
+  updateBundle(name: string, version: string, options?: UpdateBundleOptions): Promise<PluginUpdateResult>
 }
 
 /** The Direct backend's Plugin Manager port over the official Host service. */
@@ -93,11 +109,14 @@ export class DirectPluginManagerPort implements PluginManagerPort {
     // listVersionExemptions is synchronous and reports reader problems
     // instead of failing; the shared mapping carries the warnings so the
     // surface can show them.
+    const loader = this.ctx.get('loader')
+    const ownedClientEntryIds = ownedClientExtensionEntryIds(loader === undefined ? undefined : loader as object)
     return detachPluginManagerSnapshot({
       bundles,
       plugins,
       registries,
       exemptions: service.listVersionExemptions(),
+      ...(ownedClientEntryIds === undefined ? {} : { ownedClientEntryIds }),
     })
   }
 
@@ -142,6 +161,18 @@ export class DirectPluginManagerPort implements PluginManagerPort {
     return Object.freeze({ status: result.status })
   }
 
+  /** The Host's own default registry plan: the Client never supplies one here. */
+  async listVersions(name: string, signal?: AbortSignal): Promise<PluginVersionListFact> {
+    return detachPluginVersionList(await this.service().listVersions(name, {}, signal))
+  }
+
+  async updateBundle(name: string, version: string, registry: string | null, requestId: string): Promise<PluginUpdateResultFact> {
+    return detachPluginUpdateResult(await this.service().updateBundle(name, version, {
+      registry,
+      requestId: pluginInstallRequestId(requestId),
+    }))
+  }
+
   subscribeInstall(listener: (event: PluginInstallEvent) => void): () => void {
     const offState = this.ctx.on('plugin-manager/install-state', (payload) => {
       listener({ kind: 'phase', phase: detachPhase(payload as PluginInstallProgress) })
@@ -153,6 +184,13 @@ export class DirectPluginManagerPort implements PluginManagerPort {
       offState()
       offLog()
     }
+  }
+
+  /** The official update step announcements only: never `plugin-manager/changed`. */
+  subscribeUpdate(listener: (progress: PluginUpdateProgressFact) => void): () => void {
+    return this.ctx.on('plugin-manager/update-state', (payload) => {
+      listener(detachPluginUpdateProgress(payload as PluginUpdateProgress))
+    })
   }
 
   subscribeInvalidation(listener: () => void): () => void {

@@ -1,44 +1,25 @@
 /**
- * M3-4 PR1 — application runtime selection tests (plan §10.2).
+ * The application runtime-selection seam contract.
  *
- * The selector under test is the ONE internal application runtime-selection
- * seam. It must prove:
+ * The seam adopts the ONE application runtime core:
  *
  * ```text
- * Direct selection:
- *   remote loader not invoked
- *   selected.kind == direct
- *   backend/owners/retirement are the exact Direct instances
- *
- * Remote selection:
- *   Remote loader invoked once
- *   selected.kind == remote
- *   ONE application runtime returned
- *   no Direct factory invoked
+ * preselected (the internal split Client's FULLY ASSEMBLED Remote core)
+ *   -> adopted by IDENTITY, no construction of any kind
+ * kind: 'direct'
+ *   -> the supplied Direct factory runs exactly once
+ * any other kind without a preselected core
+ *   -> FAIL CLOSED (the retired M3 in-process aggregate is test-only)
  * ```
  *
- * TWO lanes:
- * - UNIT (counting doubles): the seam's branching and instance identity —
- *   the Remote lane injects a test loader through the seam's loader seam.
- * - REAL CHAIN (the production fixture): `selectApplicationRuntime` loads
- *   `runtime/backend-loader.ts` and constructs the REAL Remote aggregate —
- *   the canonical `seam -> backend-loader -> createRemoteApplicationRuntime`
- *   path the plan freezes, exercised end-to-end over a real Host Context
- *   (the fixture shape of test/app/remote-application-runtime.test.ts).
+ * The retired M3 wire composer is no longer reachable from `src/**`; the
+ * negative source locks below are what keep it that way.
  *
  * TEST STAND-INS / SUBSTITUTIONS
- * - unit lane: the Direct factory and the Remote loader are counting
- *   doubles; no Host Context is composed.
- * - real-chain lane: the prompt serializer (PR1 does not own production
- *   submission serialization), plus the shared fixture's minimal readiness
- *   inputs (`StubLlmAdapter` smoke route — registered on the Host `llm`
- *   service but never invoked by these proofs; hand-provided
- *   agentDefaultModel / attachments / webServer — no Remote-wire state, not
- *   read through the Client connection); the official Client/Gateway path
- *   and the M3 additive Host composition are real.
+ * - the Direct factory is a counting double; no Host Context is composed.
  *
  * DELIBERATELY ABSENT
- * - any mounted TUI main surface / secondary surfaces.
+ * - any mounted TUI main surface, any Host Context, and any Remote wire.
  *
  * @module @xmoon76/dsh-pi-tui/application-runtime-selection.test
  */
@@ -46,17 +27,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { readFileSync } from 'node:fs'
-import { SessionId } from '@deepseek-ai/dsh-session'
 import {
   selectApplicationRuntime,
-  __setApplicationRuntimeLoaderForTests,
 } from '../../src/app/bootstrap/runtime-selection.ts'
 import type { ApplicationRuntimeSelection } from '../../src/app/application-runtime.ts'
-import {
-  createRemoteApplicationHostFixture,
-  testLifecycle,
-  testPromptSerializer,
-} from '../support/remote-application-fixture.ts'
 
 // ---------------------------------------------------------------------------
 // Unit lane — counting doubles
@@ -77,68 +51,39 @@ function directFactoryDouble() {
   return { createDirect, parts, constructionCount: () => constructions }
 }
 
-test('Direct selection: the Remote loader is never invoked and the exact Direct instances are carried', async () => {
+test('Direct selection: the exact Direct instances are carried and the factory ran once', async () => {
   const direct = directFactoryDouble()
-  let remoteLoads = 0
-  const restore = __setApplicationRuntimeLoaderForTests(async () => {
-    remoteLoads += 1
-    return { createRemoteApplicationRuntime: (() => Promise.reject(new Error('must not run'))) as never }
+  const selected = await selectApplicationRuntime({
+    kind: 'direct',
+    createDirect: direct.createDirect,
   })
-  try {
-    const selected = await selectApplicationRuntime({
-      kind: 'direct',
-      createDirect: direct.createDirect,
-      remote: { hostContext: {}, waitForHostPrerequisites: async () => {}, promptSerializer: {}, clientUiStartup: {} },
-    })
-    assert.equal(remoteLoads, 0, 'a Direct selection must not even load the Remote module')
-    assert.equal(direct.constructionCount(), 1, 'the Direct factory ran exactly once')
-    assert.equal(selected.kind, 'direct')
-    assert.equal(selected.backend, direct.parts.backend, 'the exact Direct backend instance')
-    assert.equal(selected.owners, direct.parts.owners, 'the exact Direct owner provider instance')
-    assert.equal(selected.retirement, direct.parts.retirement, 'the exact Direct retirement instance')
-    await assert.doesNotReject(selected.disposeTransport())
-    await assert.doesNotReject(selected.disposeTransport())
-  } finally {
-    restore()
-  }
+  assert.equal(direct.constructionCount(), 1, 'the Direct factory ran exactly once')
+  assert.equal(selected.kind, 'direct')
+  assert.equal(selected.backend, direct.parts.backend, 'the exact Direct backend instance')
+  assert.equal(selected.owners, direct.parts.owners, 'the exact Direct owner provider instance')
+  assert.equal(selected.retirement, direct.parts.retirement, 'the exact Direct retirement instance')
+  await assert.doesNotReject(selected.disposeTransport())
+  await assert.doesNotReject(selected.disposeTransport())
 })
 
-test('Remote selection: the loader is invoked exactly once, the Direct factory is NEVER invoked, and the ONE aggregate core is returned', async () => {
+test('a preselected core is adopted by IDENTITY and the Direct factory is NEVER invoked', async () => {
   const direct = directFactoryDouble()
-  let remoteLoads = 0
-  const remoteSelected: import('../../src/app/application-runtime.ts').SelectedApplicationRuntime = {
+  const preselected: import('../../src/app/application-runtime.ts').SelectedApplicationRuntime = {
     kind: 'remote',
     backend: { kind: 'remote' } as never,
     owners: {} as never,
     retirement: {} as never,
     disposeTransport: async () => {},
   }
-  const restore = __setApplicationRuntimeLoaderForTests(async () => {
-    remoteLoads += 1
-    return {
-      createRemoteApplicationRuntime: (async (options: { promptSerializer: unknown, clientUiStartup: unknown }) => {
-        assert.equal(options.promptSerializer, PROMPT_STANDIN, 'the composition input crosses to the aggregate untouched')
-        assert.deepEqual(options.clientUiStartup, { sessionId: 'selection-client-ui-s' },
-          'the Client UI startup facts cross to the aggregate untouched (M3-6 PR1)')
-        return { selected: remoteSelected }
-      }) as never,
-    }
+  const selected = await selectApplicationRuntime({
+    kind: 'direct',
+    createDirect: direct.createDirect,
+    preselected,
   })
-  const PROMPT_STANDIN = { preflight: () => ({ kind: 'unsupported', reason: 'unit' }) }
-  try {
-    const selected = await selectApplicationRuntime({
-      kind: 'remote',
-      createDirect: direct.createDirect,
-      remote: { hostContext: {}, waitForHostPrerequisites: async () => {}, promptSerializer: PROMPT_STANDIN, clientUiStartup: { sessionId: 'selection-client-ui-s' } },
-    })
-    assert.equal(remoteLoads, 1, 'the Remote aggregate is constructed exactly once')
-    assert.equal(direct.constructionCount(), 0,
-      'a Remote selection must not invoke the Direct factory (plan §10.2: no Direct graph constructed)')
-    assert.equal(selected, remoteSelected, 'the selected core IS the aggregate\'s selected core — no second graph')
-    assert.equal(selected.kind, 'remote')
-  } finally {
-    restore()
-  }
+  assert.equal(direct.constructionCount(), 0,
+    'adopting the split Client core must construct no Direct graph')
+  assert.equal(selected, preselected, 'the selected core IS the caller\'s core — no copy, no second graph')
+  assert.equal(selected.kind, 'remote')
 })
 
 test('a Direct factory failure propagates (no partial selected core)', async () => {
@@ -146,40 +91,19 @@ test('a Direct factory failure propagates (no partial selected core)', async () 
     selectApplicationRuntime({
       kind: 'direct',
       createDirect: () => { throw new Error('induced direct construction failure') },
-      remote: undefined,
     }),
     /induced direct construction failure/,
   )
 })
 
-test('Remote selection without the composition input fails closed (and still invokes no Direct factory)', async () => {
+test('a Remote kind WITHOUT a preselected core fails closed and constructs nothing', async () => {
   const direct = directFactoryDouble()
   await assert.rejects(
-    selectApplicationRuntime({ kind: 'remote', createDirect: direct.createDirect, remote: undefined }),
-    /requires the Remote composition input/,
-    'the Remote branch must never fall back to constructing the Remote graph itself',
+    selectApplicationRuntime({ kind: 'remote', createDirect: direct.createDirect }),
+    /no pre-assembled Remote application runtime/,
+    'the seam must never build the retired in-process aggregate',
   )
   assert.equal(direct.constructionCount(), 0, 'failing closed must not construct a Direct graph either')
-})
-
-test('the Remote selection propagates a loader/aggregate failure (no partial selected core, no Direct fallback)', async () => {
-  const direct = directFactoryDouble()
-  const restore = __setApplicationRuntimeLoaderForTests(async () => ({
-    createRemoteApplicationRuntime: (() => Promise.reject(new Error('induced remote construction failure'))) as never,
-  }))
-  try {
-    await assert.rejects(
-      selectApplicationRuntime({
-        kind: 'remote',
-        createDirect: direct.createDirect,
-        remote: { hostContext: {}, waitForHostPrerequisites: async () => {}, promptSerializer: {}, clientUiStartup: {} },
-      }),
-      /induced remote construction failure/,
-    )
-    assert.equal(direct.constructionCount(), 0, 'a Remote failure must not fall back to constructing Direct')
-  } finally {
-    restore()
-  }
 })
 
 // ---------------------------------------------------------------------------
@@ -191,7 +115,10 @@ test('the production bootstrap calls the seam with the Direct branch only (no us
   const seamCall = bootstrapSource.match(/const selectedRuntime = await selectApplicationRuntime\(\{[\s\S]*?\}\)/)
   assert.ok(seamCall !== null, 'the bootstrap must construct its selected runtime through the seam')
   assert.ok(seamCall[0].includes("kind: 'direct'"), 'the production bootstrap selects Direct')
-  assert.ok(seamCall[0].includes('remote: undefined'), 'the production bootstrap passes no Remote composition input')
+  assert.ok(!seamCall[0].includes('remote:'),
+    'the production bootstrap passes no Remote composition input any more (the field is gone)')
+  assert.ok(seamCall[0].includes('preselected: override.selected'),
+    'the internal split Client\'s pre-assembled core is the ONE Remote-shaped input')
   assert.ok(seamCall[0].includes('createDirect: createDirectApplication'),
     'the production seam call supplies the DIRECT FACTORY (the construction runs inside the seam)')
   // The Direct construction site itself lives inside that factory — a
@@ -209,24 +136,27 @@ test('the production bootstrap calls the seam with the Direct branch only (no us
     'the bootstrap must not read any backend env/flag')
 })
 
-test('the seam reaches the Remote aggregate ONLY through the backend-loader boundary (source-locked)', async () => {
+test('the production src graph can no longer reach the retired M3 in-process composition (source-locked)', async () => {
   const selectionSource = readFileSync(new URL('../../src/app/bootstrap/runtime-selection.ts', import.meta.url), 'utf8')
-  assert.ok(selectionSource.includes("import { loadRemoteApplicationRuntime } from '../../runtime/backend-loader.ts'"),
-    'the selection seam statically imports the loader (the sanctioned bootstrap -> backend-loader edge)')
-  assert.ok(selectionSource.includes('await loadRemoteApplicationRuntimeForSelection()'),
-    'the seam loads the Remote aggregate through the loader binding (the production binding is the backend-loader boundary)')
-  assert.ok(selectionSource.includes('let loadRemoteApplicationRuntimeForSelection = loadRemoteApplicationRuntime'),
-    'the production loader binding IS the backend-loader boundary function (no product re-binding)')
+  // The seam holds no Remote composition edge at all: no loader, no aggregate.
+  assert.ok(!selectionSource.includes('backend-loader'),
+    'the seam must not import a Remote loader')
+  assert.equal(/\bcreateRemoteApplicationRuntime\b(?!FromClient)/u.test(selectionSource), false,
+    'the seam must not construct the retired Remote aggregate')
   assert.ok(!/from '\.\.\/app\/remote\//.test(selectionSource) && !/from '\.\.\/runtime\/remote\//.test(selectionSource),
     'the selection seam holds no static Remote composition edge of its own')
-  const loaderSource = readFileSync(new URL('../../src/runtime/backend-loader.ts', import.meta.url), 'utf8')
-  assert.ok(loaderSource.includes("import('../app/remote/runtime.ts')"),
-    'the loader owns the ONE dynamic edge into the entry module')
-  assert.ok(!loaderSource.includes("import('../app/remote/application-runtime.ts')"),
-    'the loader must NOT carry a second dynamic target (ONE edge, frozen contract)')
+  // The retired modules' ABSENCE is asserted by the architecture gate's own
+  // real-tree scan (`test/architecture/application-architecture-gate.test.mjs`),
+  // which lists the scanned tree instead of reading a file that must not exist.
   const entrySource = readFileSync(new URL('../../src/app/remote/runtime.ts', import.meta.url), 'utf8')
-  assert.ok(/export\s*\{[^}]*createRemoteApplicationRuntime[^}]*\}\s*from\s*'\.\/application-runtime\.ts'/.test(entrySource),
-    'the entry module statically re-exports the aggregate constructor (the single-entry join)')
+  assert.ok(!entrySource.includes('createRemoteApplicationRuntime'),
+    'the production Remote runtime module must not re-export the retired aggregate')
+  assert.ok(!entrySource.includes('createExperimentalRemoteRuntime'),
+    'the production Remote runtime module must not carry the retired in-process composer')
+  // The test-only carrier declares its own boundary.
+  const carrier = readFileSync(new URL('../support/m3-inprocess/host-runtime.ts', import.meta.url), 'utf8')
+  assert.match(carrier, /TEST_ONLY_M3_CARRIER/u,
+    'the legacy carrier must declare itself test-only')
 })
 
 test('Remote-selected Task composition resolves no Host ctx.jobs / ctx.subagents (source-locked, PR6)', async () => {
@@ -274,59 +204,4 @@ test('the extension service selection is branch-exclusive with NO Host fallback 
   const lookups = [...bootstrapSource.matchAll(/ctx\.get\(PI_TUI_EXTENSIONS_SERVICE\)/g)]
   assert.equal(lookups.length, 1,
     'bootstrap resolves Host piTuiExtensions exactly once (the Direct branch); no other read exists')
-})
-
-test('the canonical Remote selection forwards the clientUiStartup facts (source-locked, M3-6 PR1)', async () => {
-  const selectionSource = readFileSync(new URL('../../src/app/bootstrap/runtime-selection.ts', import.meta.url), 'utf8')
-  // The seam's Remote branch forwards the selection's REQUIRED startup
-  // facts to `createRemoteApplicationRuntime` — no default, no omission.
-  assert.match(
-    selectionSource,
-    /clientUiStartup: selection\.remote\.clientUiStartup,/,
-    'the Remote selection must forward the exact Client UI startup facts',
-  )
-})
-
-// ---------------------------------------------------------------------------
-// Real chain — seam -> backend-loader -> REAL aggregate over a real Host
-// ---------------------------------------------------------------------------
-
-test('REAL CHAIN: selectApplicationRuntime -> backend-loader -> the real Remote aggregate over a real Host', async (t) => {
-  const life = testLifecycle(t)
-  const host = await createRemoteApplicationHostFixture(life, 'm3-4-pr1-preset')
-  host.ctx.sessions.create(SessionId('m3-4-pr1-selection-seed'), { meta: { cwd: host.anchorDir } })
-  let prerequisites = 0
-  // The production seam, the production loader, the production aggregate.
-  // Stand-ins per the manifest above: the prompt serializer plus the shared
-  // fixture's readiness inputs (never invoked by these proofs); the counting
-  // Direct factory additionally proves no Direct graph is constructed.
-  const direct = directFactoryDouble()
-  const selected = await selectApplicationRuntime({
-    kind: 'remote',
-    createDirect: direct.createDirect,
-    remote: {
-      hostContext: host.ctx,
-      waitForHostPrerequisites: async () => { prerequisites += 1 },
-      promptSerializer: testPromptSerializer,
-      // The exact runner startup facts (M3-6 PR1): the aggregate's Client UI
-      // subtree mounts under the same detached sessionId the Host runner
-      // tuiStartup carries on this fixture.
-      clientUiStartup: { sessionId: 'm3-4-pr1-selection-seed' },
-    },
-  })
-  // The transport disposal is deferred through the lifecycle so an assertion
-  // failure after the composition still unwinds the Client/Host graph (the
-  // host fixture's own deferral only covers the ordinary Host Context).
-  life.defer(() => selected.disposeTransport())
-  try {
-    assert.equal(direct.constructionCount(), 0, 'the real Remote selection constructed no Direct graph')
-    assert.equal(prerequisites, 1, 'the composition waited on the Host prerequisite barrier')
-    assert.equal(selected.kind, 'remote')
-    assert.equal(selected.backend.kind, 'remote', 'the REAL aggregate backend came through the chain')
-    assert.notEqual(host.ctx.reflect.get('connection'), undefined, 'the M3 additive Host rows mounted')
-    await selected.disposeTransport()
-    assert.equal(host.ctx.reflect.get('connection'), undefined, 'the M3 rows unwind with the transport disposal')
-  } finally {
-    await host.dispose()
-  }
 })

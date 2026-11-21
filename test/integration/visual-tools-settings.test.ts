@@ -25,9 +25,11 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { NativeToolExecutor } from '@deepseek-ai/dsh-tool-executor-native'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
-import ToolRuntime, { defineTool, renderToolsSdk } from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
+import { renderToolsSdk } from '@deepseek-ai/dsh-tool-executor-ptc'
 import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
 import {
   CHART_TOOL_NAME,
@@ -70,11 +72,18 @@ interface Plane {
  *  structural stand-ins: the row only needs them to be PRESENT for the Loader
  *  to activate it. */
 function provideVisualRowDependencies(ctx: Context): void {
-  ctx.provide('agents', { get: () => undefined } as never)
+  ctx.provide('agents', {
+    get: () => undefined,
+    turnBoundaryOf: () => ({
+      openTurnStartSeq: null,
+      lastStepStartSeq: null,
+      lastStepBoundary: null,
+      lastTurn: 0,
+    }),
+  } as never)
   ctx.provide('sessionQuery', {
     observeSession: async () => { throw new Error('this plane never observes a Session') },
   } as never)
-  ctx.provide('sessionProjections', { stateOf: () => undefined } as never)
 }
 
 async function bootPlane(life: TestLifecycle, root: string, resetUserDocument = false): Promise<Plane> {
@@ -85,6 +94,7 @@ async function bootPlane(life: TestLifecycle, root: string, resetUserDocument = 
   } as never)
   provideVisualRowDependencies(ctx)
   new ToolRuntime(ctx)
+  ctx.tools.setExecutor(new NativeToolExecutor(ctx))
   await ctx.plugin(Loader)
   const { profileDir } = await mountVisualToolsSettingsPlane(ctx, root, { resetUserDocument })
   let disposed = false

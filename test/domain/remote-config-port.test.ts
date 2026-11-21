@@ -9,7 +9,8 @@
  * describe, invalidation-raced describe re-read, write serialization,
  * write→authoritative-refresh-before-UI-commit, disconnect/reconnect),
  * credential reference/event semantics, the explicit unsupported classes
- * (credential records, authorization, session approval override), permission
+ * (credential records, provider authorization, session approval override), and
+ * the official generated Account adapter (covered by its owner-layer suite), permission
  * catalog/apply, preset default, subagent model selection, footer USER-layer
  * trust parity, and raw settings field round-trips.
  * @module @xmoon76/dsh-pi-tui/remote-config-port.test
@@ -18,8 +19,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { RemoteConfigPort } from '../../src/runtime/remote/config-remote.ts'
+import { DirectWebProviderConfig, type HostContextLike } from '../../src/runtime/direct/config-direct.ts'
 import type { ProviderCatalogEntry } from '../../src/domain/catalog/provider.ts'
 import { serializeTuiSettingsMutation, type ProviderProfileConfig, type TuiSettingsDoc } from '../../src/runtime/config-port.ts'
+import { UNPARSEABLE_WEB_OVERRIDE_URL } from '../../src/domain/web-provider-settings.ts'
 import { createObservableGenerationHarness } from '../support/remote-generation.ts'
 import { CredentialWorkflow, resolveLoginDestination, resolveLogoutDestination } from '../../src/app/command/credential-workflow.ts'
 
@@ -30,6 +33,7 @@ import { CredentialWorkflow, resolveLoginDestination, resolveLogoutDestination }
 interface FakeNamespace {
   ns: string
   value: Record<string, unknown>
+  base?: Record<string, unknown>
   user?: Record<string, unknown>
   revision: number
 }
@@ -58,15 +62,45 @@ interface FakeState {
   credentialGate: (() => void | Promise<void>) | undefined
   /** Makes the next credential RPC fail (a real failure result). */
   credentialFailure: { code: string; message: string } | undefined
+  /** The stored RECORD metadata the private namespace reports. */
+  records: { key: string; kind: 'api-key' | 'grant' }[]
+  /** Holds the next record RPC open so a test can replace the generation mid-call. */
+  recordsGate: (() => void | Promise<void>) | undefined
+  recordsListFailure: { code: string; message: string } | undefined
+  recordsDeleteFailure: { code: string; message: string } | undefined
+  readonly recordsDeleteCalls: string[]
   readonly executeCalls: { sessionId: string; line: string; attachments: readonly unknown[]; signal: AbortSignal }[]
   executeResult: { ok: true; value: unknown } | { ok: false; error: unknown }
   readonly order: string[]
+  /** The private authorization roster the Host would report. */
+  authorizationRoster: readonly {
+    kind: 'authorization'
+    route?: string
+    key: string
+    label: string
+    methods: readonly { id: string; label: string }[]
+    inFlight: boolean
+  }[]
+  /** The roster read's next result (a definite unavailable, or a failure). */
+  authorizationListOutcome: { kind: 'unavailable'; reason: string } | { kind: 'throw'; error: { code: string; message: string } } | undefined
 }
 
 type EventListener = (...args: unknown[]) => void
 
-const TUI_NS = 'tui-app'
-const SUBAGENT_NS = 'subagent-model-selection-settings'
+const TUI_NS = 'pi-tui-preferences'
+const WEB_NS = 'web'
+const WEB_API_NS = 'web-deepseek-api'
+const WEB_DEFAULTS = {
+  searchProvider: 'deepseek-official',
+  fetchProvider: 'http',
+}
+/** The pure rc.2 default section (the schema-resolved shipped values). */
+const WEB_API_DEFAULTS = {
+  searchBilling: 'auto',
+  fetchBilling: 'auto',
+  count: 10,
+  sendOriginalQuestion: true,
+}
 
 /** The valid v1 custom layout both the Direct and Remote trust paths accept. */
 const VALID_LAYOUT = {
@@ -114,6 +148,17 @@ function applyPath(target: Record<string, unknown>, path: readonly string[], val
   current[path[path.length - 1]!] = value
 }
 
+/** Read one own-member path from a layer (undefined when absent or unreadable). */
+function pathValue(target: Record<string, unknown> | undefined, path: readonly string[]): unknown {
+  let current: unknown = target
+  for (const key of path) {
+    if (typeof current !== 'object' || current === null || Array.isArray(current)) return undefined
+    if (!Object.hasOwn(current, key)) return undefined
+    current = (current as Record<string, unknown>)[key]
+  }
+  return current
+}
+
 function unsetPath(target: Record<string, unknown>, path: readonly string[]): void {
   let current: Record<string, unknown> | undefined = target
   for (let index = 0; index < path.length - 1; index += 1) {
@@ -129,7 +174,7 @@ function tick(): Promise<void> {
   return new Promise(resolve => { setImmediate(resolve) })
 }
 
-function createBackend(seed?: (state: FakeState) => void) {
+function createBackend(seed?: (state: FakeState) => void, options: { readonly authorization?: boolean; readonly records?: boolean } = {}) {
   const generation = createObservableGenerationHarness({ id: 'gen-1' })
   const state: FakeState = {
     namespaces: new Map(),
@@ -147,9 +192,16 @@ function createBackend(seed?: (state: FakeState) => void) {
     credentialStore: new Map(),
     credentialGate: undefined,
     credentialFailure: undefined,
+    records: [],
+    recordsGate: undefined,
+    recordsListFailure: undefined,
+    recordsDeleteFailure: undefined,
+    recordsDeleteCalls: [],
     executeCalls: [],
     executeResult: { ok: true, value: { commandId: 'c' } },
     order: [],
+    authorizationRoster: [],
+    authorizationListOutcome: undefined,
   }
   seed?.(state)
 
@@ -160,6 +212,7 @@ function createBackend(seed?: (state: FakeState) => void) {
   const viewOf = (ns: FakeNamespace) => ({
     ns: ns.ns,
     value: structuredClone(ns.value),
+    ...ns.base === undefined ? {} : { base: structuredClone(ns.base) },
     ...ns.user === undefined ? {} : { user: structuredClone(ns.user) },
     revision: ns.revision,
     applies: 'live',
@@ -212,8 +265,24 @@ function createBackend(seed?: (state: FakeState) => void) {
               }
             }
             for (const op of ops) {
-              if (op.op === 'set') applyPath(entry.value, op.path, op.value)
-              else unsetPath(entry.value, op.path)
+              if (op.op === 'set') {
+                applyPath(entry.value, op.path, op.value)
+                entry.user ??= {}
+                applyPath(entry.user, op.path, op.value)
+                continue
+              }
+              // The rc.5 official `mutate` substitutes `set(base)` for an
+              // `unset` whose path has a deployment value; otherwise it removes
+              // the USER own-field.
+              const inherited = pathValue(entry.base, op.path)
+              if (inherited !== undefined) {
+                applyPath(entry.value, op.path, inherited)
+                entry.user ??= {}
+                applyPath(entry.user, op.path, inherited)
+              } else {
+                unsetPath(entry.value, op.path)
+                if (entry.user !== undefined) unsetPath(entry.user, op.path)
+              }
             }
             entry.revision += 1
           }
@@ -249,6 +318,26 @@ function createBackend(seed?: (state: FakeState) => void) {
         return { ok: true as const, value: undefined }
       },
     },
+    ...options.records === false ? {} : {
+      // The SAME mounted private namespace the package contribution publishes
+      // (M6-1 F7B): metadata-only rows, exact-key delete, official store state.
+      piTuiCredentialRecords: {
+        list: async () => {
+          state.order.push('records:list')
+          await state.recordsGate?.()
+          if (state.recordsListFailure !== undefined) return { ok: false as const, error: state.recordsListFailure }
+          return { ok: true as const, value: state.records.map(record => ({ ...record })) }
+        },
+        delete: async (key: string) => {
+          state.order.push(`records:delete:${key}`)
+          state.recordsDeleteCalls.push(key)
+          await state.recordsGate?.()
+          if (state.recordsDeleteFailure !== undefined) return { ok: false as const, error: state.recordsDeleteFailure }
+          state.records = state.records.filter(record => record.key !== key)
+          return { ok: true as const, value: undefined }
+        },
+      },
+    },
     commands: {
       execute: async (sessionId: string, line: string, attachments: readonly unknown[], signal: AbortSignal) => {
         state.executeCalls.push({ sessionId, line, attachments, signal })
@@ -273,6 +362,33 @@ function createBackend(seed?: (state: FakeState) => void) {
         ? { ok: false as const, error: { code: 'gateway/service-unavailable', message: 'no directory' } }
         : { ok: true as const, value: state.providers.map(entry => ({ ...entry, settingsPath: [...entry.settingsPath] })) },
       discoverModels: async () => ({ ok: true as const, value: [] }),
+    },
+    ...options.authorization === false ? {} : {
+      piTuiAuthorization: {
+        list: async () => {
+          state.order.push('authorization:list')
+          if (state.authorizationListOutcome?.kind === 'throw') {
+            throw new Error(state.authorizationListOutcome.error.message)
+          }
+          if (state.authorizationListOutcome?.kind === 'unavailable') {
+            return { ok: true as const, value: { kind: 'unavailable' as const, reason: state.authorizationListOutcome.reason } }
+          }
+          return {
+            ok: true as const,
+            value: {
+              kind: 'ready' as const,
+              targets: state.authorizationRoster.map(target => ({
+                ...target,
+                ...(target.route === undefined ? {} : { route: target.route }),
+                methods: target.methods.map(method => ({ ...method })),
+              })),
+            },
+          }
+        },
+        run: () => { throw new Error('authorization.run is unused by the ConfigPort') },
+        respond: async () => ({ ok: true as const, value: undefined }),
+        cancel: async () => ({ ok: true as const, value: undefined }),
+      },
     },
     // A METHOD with a real `this`, like the generated Client `$on`: it reads
     // its own service state, so a detached reference must throw. This is the
@@ -326,9 +442,10 @@ function workflowOver(providers: ProviderProfileConfig): CredentialWorkflow {
       listRecords: async () => [],
       onChanged: () => () => {},
     },
-    authorization: { available: () => false, listTargets: () => [], begin: async () => ({ kind: 'unavailable' as const }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
+    authorization: { available: () => false, listTargets: () => [], refreshTargets: async () => {}, targetsState: () => 'unavailable' as const, begin: async () => ({ kind: 'unavailable' as const }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
     account: {
       available: () => false,
+      isObservationCurrent: () => false,
       getState: async () => { throw new Error('unused') },
       getProfile: async () => null,
       getBalance: async () => null,
@@ -337,7 +454,7 @@ function workflowOver(providers: ProviderProfileConfig): CredentialWorkflow {
       startSignIn: async () => { throw new Error('unused') },
       cancelSignIn: async () => { throw new Error('unused') },
       signOut: async () => { throw new Error('unused') },
-      hasRunningAccountTasks: () => false,
+      hasRunningAccountTasks: async () => false,
     },
     catalog: { models: { available: () => false, discoverModels: async () => [] } },
     signal: new AbortController().signal,
@@ -586,15 +703,49 @@ test('a port dispose releases an active credential subscription exactly once', (
   assert.equal(state.order.filter(entry => entry === 'off:credentials/record-updated').length, 1)
 })
 
-test('credential record enumeration/deletion reject as unavailable (never an empty list)', async () => {
-  const { port } = createBackend()
+test('credential record list/delete map the mounted private namespace (metadata only)', async () => {
+  const { port, state, generation } = createBackend(current => {
+    current.records = [
+      { key: 'llm-pi-ai/f7b-grant', kind: 'grant' },
+      { key: 'other-plugin/f7b-orphan', kind: 'api-key' },
+    ]
+  })
+  assert.equal(port.credentials.recordsSupported(), true)
+  assert.deepEqual(await port.credentials.listRecords(), [
+    { key: 'llm-pi-ai/f7b-grant', kind: 'grant' },
+    { key: 'other-plugin/f7b-orphan', kind: 'api-key' },
+  ])
+  // The exact key deletes exactly one row through the private namespace; it is
+  // never an `unset()` of some derived reference.
+  await port.credentials.deleteRecord('llm-pi-ai/f7b-grant')
+  assert.deepEqual(state.recordsDeleteCalls, ['llm-pi-ai/f7b-grant'])
+  assert.deepEqual(await port.credentials.listRecords(), [{ key: 'other-plugin/f7b-orphan', kind: 'api-key' }])
+  // The empty store is a REAL answer, and it is never cached.
+  state.records = []
+  assert.deepEqual(await port.credentials.listRecords(), [])
+  // An invalid key is refused locally, before any dispatch.
+  await assert.rejects(() => port.credentials.deleteRecord('DEEPSEEK_API_KEY'), /<scope>\/<id>/u)
+  assert.deepEqual(state.recordsDeleteCalls, ['llm-pi-ai/f7b-grant'])
+  // A replaced Host must not present the old answer as the current list.
+  let release!: () => void
+  state.recordsGate = () => new Promise<void>(resolve => { release = resolve })
+  const stale = port.credentials.listRecords()
+  await tick()
+  generation.set({ id: 'gen-2' })
+  release()
+  await assert.rejects(stale, (error: unknown) => error instanceof Error && error.name === 'SupersededReadError')
+})
+
+test('a Host without the private record namespace is a truthful capability gap, never an empty list', async () => {
+  const { port } = createBackend(undefined, { records: false })
+  assert.equal(port.credentials.recordsSupported(), false)
   await assert.rejects(
     () => port.credentials.listRecords(),
-    /cannot enumerate stored credential records/,
+    /private record namespace is not mounted/,
   )
   await assert.rejects(
-    () => port.credentials.deleteRecord('scope/id'),
-    /cannot delete stored credential record "scope\/id"/,
+    () => port.credentials.deleteRecord('llm-pi-ai/f7b-grant'),
+    /private record namespace is not mounted/,
   )
 })
 
@@ -602,22 +753,93 @@ test('credential record enumeration/deletion reject as unavailable (never an emp
  * Explicitly unsupported classes.
  * ------------------------------------------------------------------------- */
 
-test('authorization is unavailable on the wire and never opens a private RPC', async () => {
-  const { port } = createBackend()
+test('a Host without the private authorization namespace reports an unavailable roster, never a fake flow', async () => {
+  const { port } = createBackend(undefined, { authorization: false })
+  // Before the first authoritative read the roster is STALE, never an empty
+  // ready catalog.
+  assert.equal(port.authorization.targetsState(), 'stale')
   assert.equal(port.authorization.available(), false)
+  assert.deepEqual(port.authorization.listTargets(), [])
+  await port.authorization.refreshTargets()
+  // The mounted contribution is the only provider of the namespace: its
+  // absence is a definite unavailable, distinct from "no flows registered".
+  assert.equal(port.authorization.targetsState(), 'unavailable')
   assert.deepEqual(port.authorization.listTargets(), [])
   assert.deepEqual(await port.authorization.begin({ key: 'openai' }), { kind: 'unavailable' })
   const unsubscribe = port.authorization.onEvent(() => {})
   assert.equal(typeof unsubscribe, 'function')
   unsubscribe()
-  await assert.rejects(() => port.authorization.respond('a', 'p', 'x'), /authorization is unavailable/)
-  await assert.rejects(() => port.authorization.cancel('a'), /authorization is unavailable/)
+  // No attempt was admitted, so there is no exact attempt to answer or cancel.
+  await assert.rejects(() => port.authorization.respond('a', 'p', 'x'), /no longer active/)
+  await assert.rejects(() => port.authorization.cancel('a'), /no longer active/)
 })
 
-test('approvalOverrideOf is always undefined (unavailable, never an ask guess)', () => {
-  const { port } = createBackend()
-  assert.equal(port.permissions.approvalOverrideOf('session-a'), undefined)
-  assert.equal(port.permissions.approvalOverrideOf('session-b'), undefined)
+test('the initial describe loads the REAL authorization roster once; a generation replacement marks it stale', async () => {
+  const { port, generation, state } = createBackend(current => {
+    current.authorizationRoster = [{
+      kind: 'authorization',
+      route: 'openai-codex',
+      key: 'llm-pi-ai/openai-codex',
+      label: 'ChatGPT (Codex)',
+      methods: [{ id: 'oauth', label: 'Sign in with ChatGPT' }],
+      inFlight: false,
+    }]
+  })
+  assert.equal(port.authorization.targetsState(), 'stale')
+  await port.describe()
+  assert.equal(port.authorization.targetsState(), 'ready')
+  assert.deepEqual(port.authorization.listTargets(), [{
+    kind: 'authorization',
+    route: 'openai-codex',
+    key: 'llm-pi-ai/openai-codex',
+    label: 'ChatGPT (Codex)',
+    methods: [{ id: 'oauth', label: 'Sign in with ChatGPT' }],
+    inFlight: false,
+  }])
+  const listCalls = state.order.filter(entry => entry === 'authorization:list').length
+  assert.equal(listCalls, 1, 'the initial barrier reads the roster exactly once')
+  // A second describe on a still-current generation does not re-poll it.
+  await port.describe()
+  assert.equal(state.order.filter(entry => entry === 'authorization:list').length, listCalls)
+  // A generation replacement immediately invalidates the roster.
+  generation.set({ id: 'gen-2' })
+  assert.equal(port.authorization.targetsState(), 'stale')
+  await port.describe()
+  assert.equal(port.authorization.targetsState(), 'ready')
+  assert.equal(state.order.filter(entry => entry === 'authorization:list').length, listCalls + 1)
+  port.dispose()
+})
+
+test('a generation replacement invalidates an UNAVAILABLE roster and describe re-reads the new Host capability', async () => {
+  const target = {
+    kind: 'authorization' as const,
+    route: 'openai-codex',
+    key: 'llm-pi-ai/openai-codex',
+    label: 'ChatGPT (Codex)',
+    methods: [{ id: 'oauth', label: 'Sign in with ChatGPT' }],
+    inFlight: false,
+  }
+  const { port, generation, state } = createBackend(current => {
+    current.authorizationListOutcome = { kind: 'unavailable', reason: 'the Host authorization service is not installed' }
+  })
+  await port.describe()
+  assert.equal(port.authorization.targetsState(), 'unavailable')
+  const calls = (): number => state.order.filter(entry => entry === 'authorization:list').length
+  const before = calls()
+
+  // Host A had no authorization service; the replacement Host B does. The old
+  // definite `unavailable` is a fact about A and must not survive the switch.
+  state.authorizationListOutcome = undefined
+  state.authorizationRoster = [target]
+  generation.set({ id: 'gen-2' })
+  assert.equal(port.authorization.targetsState(), 'stale',
+    'an unavailable verdict from the old generation is not current for the new one')
+  await port.describe()
+  assert.equal(port.authorization.targetsState(), 'ready')
+  assert.equal(calls(), before + 1, 'describe re-reads the roster for the new generation')
+  assert.deepEqual(port.authorization.listTargets(), [target])
+  assert.equal(port.authorization.available(), true)
+  port.dispose()
 })
 
 /* ------------------------------------------------------------------------- *
@@ -705,53 +927,8 @@ test('presetDefault falls back to the roster default and round-trips the saved v
   assert.equal(port.presetDefault.get(), 'alpha')
 })
 
-test('subagent model selection validates, writes the official section, and rolls back a failed write', async () => {
-  const { port, state } = createBackend(current => {
-    current.namespaces.set(SUBAGENT_NS, {
-      ns: SUBAGENT_NS,
-      value: { enabled: false, allowedModels: [] },
-      revision: 1,
-    })
-  })
-  await port.describe()
-  assert.equal(port.subagentModelSelection.available(), true)
-  assert.deepEqual(port.subagentModelSelection.get(), { enabled: false, allowedModels: [] })
-
-  await assert.rejects(
-    () => port.subagentModelSelection.set({ enabled: true, allowedModels: [] }),
-    /requires at least one allowed model/,
-  )
-  await assert.rejects(
-    () => port.subagentModelSelection.set({ enabled: false, allowedModels: [{ provider: '', model: 'm' }] }),
-    /non-empty provider and model ids/,
-  )
-  await assert.rejects(
-    () => port.subagentModelSelection.set({
-      enabled: false,
-      allowedModels: [{ provider: 'p', model: 'm' }, { provider: 'p', model: 'm' }],
-    }),
-    /repeats route "p\/m"/,
-  )
-
-  await port.subagentModelSelection.set({ enabled: true, allowedModels: [{ provider: 'p', model: 'm' }] })
-  assert.deepEqual(state.mutateCalls[state.mutateCalls.length - 1], {
-    ns: SUBAGENT_NS,
-    ops: [
-      { op: 'set', path: ['enabled'], value: true },
-      { op: 'set', path: ['allowedModels'], value: [{ provider: 'p', model: 'm' }] },
-    ],
-    revision: 1,
-  })
-  assert.deepEqual(port.subagentModelSelection.get(), { enabled: true, allowedModels: [{ provider: 'p', model: 'm' }] })
-
-  // A failed Host write must leave the authoritative state intact.
-  state.mutateFailure = { code: 'settings/rejected', message: 'refused' }
-  await assert.rejects(
-    () => port.subagentModelSelection.set({ enabled: true, allowedModels: [{ provider: 'q', model: 'n' }] }),
-    /settings\.mutate\(subagent-model-selection-settings\) failed: refused/,
-  )
-  assert.deepEqual(port.subagentModelSelection.get(), { enabled: true, allowedModels: [{ provider: 'p', model: 'm' }] })
-})
+// Typed subagent section behavior is covered by the owner-layer
+// test/runtime/remote/config-subagent-remote.test.ts suite.
 
 /* ------------------------------------------------------------------------- *
  * Footer trust / custom items (USER layer only).
@@ -823,6 +1000,73 @@ test('footerCustomItems reads the USER layer for both the runtime view and persi
   await port.describe()
   assert.deepEqual(port.footerCustomItems.get(), { items, invalidCount: 0 })
   assert.deepEqual(port.footerCustomItems.rawForPersistence(), { kind: 'available', value: items })
+})
+
+test('the canonical settings preserve raw USER footer definitions during an unrelated preference save', async () => {
+  const namespace = TUI_NS
+  const userItems = [{ schemaVersion: 9, id: 'user:future', opaque: { keep: ['bytes', 'unchanged'] } }]
+  const projectItems = [{ schemaVersion: 1, id: 'user:project', kind: 'text', text: 'project only' }]
+  const { port, state } = createBackend(current => {
+    current.namespaces.set(namespace, {
+      ns: namespace,
+      value: { ...TUI_DEFAULTS, footerCustomItems: projectItems },
+      user: { footerCustomItems: userItems },
+      revision: 7,
+    })
+  })
+  await port.describe()
+  const raw = port.footerCustomItems.rawForPersistence()
+  assert.equal(raw.kind, 'available')
+  if (raw.kind !== 'available') assert.fail('the Host USER layer must be readable before saving')
+  assert.deepEqual(raw.value, userItems, 'merged project definitions are not a USER persistence source')
+  const settings = port.tuiSettings
+  assert.ok(settings)
+  await settings.replace({ ...settings.get(), terminalProgress: 'off', footerCustomItems: raw.value })
+  assert.deepEqual(state.mutateCalls, [{
+    ns: namespace, revision: 7,
+    ops: [{ op: 'set', path: ['terminalProgress'], value: 'off' }],
+  }], 'the unrelated preference dispatches one revision-fenced Host operation')
+  assert.equal(settings.get().terminalProgress, 'off', 'the persisted mode reads back from the refreshed authority')
+  assert.deepEqual(state.namespaces.get(namespace)?.user?.footerCustomItems, userItems)
+  ;(raw.value as typeof userItems)[0].opaque.keep.push('client mutation')
+  assert.deepEqual(port.footerCustomItems.rawForPersistence(), { kind: 'available', value: userItems },
+    'mutating the detached read cannot change the mirrored raw USER layer')
+})
+
+test('footer custom items read the canonical USER layer only; the retired Host namespace is never a fallback', async () => {
+  const legacyNamespace = 'split-host-pi-tui-runtime'
+  const item = { schemaVersion: 1, id: 'user:clock', kind: 'text', text: 'hi' }
+  const host = createBackend(current => {
+    current.namespaces.set(legacyNamespace, { ns: legacyNamespace, value: {}, user: { footerCustomItems: [item] }, revision: 1 })
+  })
+  await host.port.describe()
+  assert.equal(host.port.tuiSettings, undefined,
+    'the retired Split namespace must not expose a TUI settings facade')
+  assert.deepEqual(host.port.footerCustomItems.get(), { items: [], invalidCount: 1 },
+    'with no canonical descriptor the trust read fails closed, never falls back')
+
+  // The canonical descriptor is the ONLY source the read consults, even when
+  // the legacy namespace still carries a definition.
+  host.state.namespaces.set(TUI_NS, { ns: TUI_NS, value: { footerCustomItems: [item] }, user: { footerCustomItems: [item] }, revision: 2 })
+  await host.port.describe()
+  assert.deepEqual(host.port.footerCustomItems.get(), { items: [item], invalidCount: 0 })
+  assert.deepEqual(host.port.footerCustomItems.rawForPersistence(), { kind: 'available', value: [item] },
+    'only the canonical USER layer is a persistence source')
+
+  // A project-only canonical definition is not promoted into the USER layer.
+  host.state.namespaces.delete(TUI_NS)
+  host.state.namespaces.set(TUI_NS, { ns: TUI_NS, value: { footerCustomItems: [item] }, revision: 3 })
+  await host.port.describe()
+  assert.deepEqual(host.port.footerCustomItems.rawForPersistence(), { kind: 'available', value: undefined },
+    'a project-only definition is not promoted into the absent USER layer')
+
+  // An unreadable canonical USER layer fails closed.
+  host.state.namespaces.get(TUI_NS)!.user = [] as unknown as Record<string, unknown>
+  await host.port.describe()
+  assert.deepEqual(host.port.footerCustomItems.rawForPersistence(), { kind: 'unavailable' })
+  host.state.namespaces.clear()
+  await host.port.describe()
+  assert.deepEqual(host.port.footerCustomItems.rawForPersistence(), { kind: 'unavailable' })
 })
 
 /* ------------------------------------------------------------------------- *
@@ -1190,7 +1434,7 @@ test('every terminalProgress mode round-trips through the Remote authority with 
     'restating the inherited value unsets the USER override instead of pinning it')
 })
 
-test('tuiSettings is undefined until the tui-app namespace is present', async () => {
+test('tuiSettings is undefined until the canonical preferences namespace is present', async () => {
   const { port } = createBackend()
   await port.describe()
   assert.equal(port.tuiSettings, undefined)
@@ -1324,7 +1568,7 @@ test('a committed write whose post-settlement refresh fails is not a refusal —
   state.mutateFailure = { code: 'settings/rejected', message: 'refused' }
   await assert.rejects(
     async () => { await port.tuiSettings!.replace({ ...port.tuiSettings!.get(), theme: 'light' }) },
-    /settings\.mutate\(tui-app\) failed: refused/u,
+    /settings\.mutate\(pi-tui-preferences\) failed: refused/u,
   )
   assert.equal(port.configReadiness(), 'ready', 'a refused mutate leaves the mirror current')
   assert.equal(port.tuiSettings!.get().theme, 'dark', 'and its authoritative value intact')
@@ -1353,34 +1597,14 @@ test('a committed write whose post-settlement refresh fails is not a refusal —
   state.mutateFailure = { code: 'settings/conflict', message: 'the revision moved' }
   await assert.rejects(
     async () => { await port.tuiSettings!.replace({ ...port.tuiSettings!.get(), theme: external }) },
-    /settings\.mutate\(tui-app\) failed/u,
+    /settings\.mutate\(pi-tui-preferences\) failed/u,
   )
   assert.equal(port.configReadiness(), 'ready', 'the forced re-read committed a current snapshot')
   assert.equal(port.tuiSettings!.get().theme, external, 'which already carries the requested value')
   state.mutateFailure = undefined
 
-  // NEGATIVE CONTROL: a direct `mutate` consumer keeps the FAILURE. Its caller
-  // re-reads the mirror and would otherwise present a last-known value as the
-  // committed one (the subagent model-selection toggle does exactly that).
-  const subagent = createBackend(current => {
-    current.namespaces.set(SUBAGENT_NS, {
-      ns: SUBAGENT_NS,
-      value: { enabled: false, allowedModels: [] },
-      revision: 1,
-    })
-  })
-  await subagent.port.describe()
-  subagent.state.describeFailure = { code: 'gateway/unavailable', message: 'offline again' }
-  await assert.rejects(
-    async () => {
-      await subagent.port.subagentModelSelection.set({
-        enabled: true,
-        allowedModels: [{ provider: 'smoke', model: 'smoke-model' }],
-      })
-    },
-    /settings\.describe failed/u,
-    'the rereading consumer must not treat a stale snapshot as a committed write',
-  )
+  // Subagent accepted writes with unreadable post-settlement snapshots have
+  // their own typed outcome/readback regression in config-subagent-remote.test.ts.
 })
 
 test('an empty replace diff is a no-op only once the mirror is current', async () => {
@@ -1553,4 +1777,499 @@ test('a visualTools confirm submits the revision the decision was read at, never
   assert.deepEqual(state.mutateCalls.at(-1)?.revision, 5,
     'the ORIGINAL decision revision was submitted, not the refreshed mirror revision')
   assert.equal(port.visualTools.read()?.enabled, false, 'the external value remains authoritative')
+})
+
+// ── M5-W PR-C: the profile-owned Web startup preference ────────────────────
+
+test('webStartupPreference mirrors the Host section and writes the exact autoStart path', async () => {
+  const { port, state } = createBackend(current => {
+    current.namespaces.set('pi-tui-web-preferences', {
+      ns: 'pi-tui-web-preferences',
+      value: { autoStart: false },
+      revision: 7,
+    })
+  })
+  assert.equal(port.webStartupPreference.read(), undefined, 'a never-described mirror has no authority to report')
+  await port.describe()
+  assert.deepEqual(port.webStartupPreference.read(), { autoStart: false, revision: 7, userOverridden: false })
+
+  await port.webStartupPreference.setAutoStart(true, 7)
+  assert.equal(state.mutateCalls.length, 1)
+  assert.equal(state.mutateCalls[0]!.ns, 'pi-tui-web-preferences')
+  assert.deepEqual(state.mutateCalls[0]!.ops, [{ op: 'set', path: ['autoStart'], value: true }])
+  assert.equal(state.mutateCalls[0]!.revision, 7, 'the write carries the revision the decision was read at')
+  assert.equal(port.webStartupPreference.read()?.autoStart, true,
+    'the post-settlement mirror refresh is the new authority')
+})
+
+test('webStartupPreference marks a USER-declared value and reports an absent section', async () => {
+  const { port } = createBackend(current => {
+    current.namespaces.set('pi-tui-web-preferences', {
+      ns: 'pi-tui-web-preferences',
+      value: { autoStart: true },
+      user: { autoStart: true },
+      revision: 3,
+    })
+  })
+  await port.describe()
+  assert.deepEqual(port.webStartupPreference.read(), { autoStart: true, revision: 3, userOverridden: true })
+
+  const absent = createBackend()
+  await absent.port.describe()
+  assert.equal(absent.port.webStartupPreference.read(), undefined)
+  await assert.rejects(absent.port.webStartupPreference.setAutoStart(true, 1), /not available in this deployment/u)
+})
+
+test('a stale webStartupPreference read stays last-known and the write is refused', async () => {
+  const { port, state } = createBackend(current => {
+    current.namespaces.set('pi-tui-web-preferences', {
+      ns: 'pi-tui-web-preferences',
+      value: { autoStart: false },
+      revision: 2,
+    })
+  })
+  await port.describe()
+  state.describeFailure = { code: 'gateway/disconnected', message: 'connection lost' }
+  await assert.rejects(port.describe())
+  assert.deepEqual(port.webStartupPreference.read(), { autoStart: false, revision: 2, userOverridden: false },
+    'the last-known value remains READABLE but non-current')
+  assert.equal(port.configReadiness(), 'stale')
+  const callsBefore = state.mutateCalls.length
+  await assert.rejects(port.webStartupPreference.setAutoStart(true, 2), /settings\.describe failed: connection lost/u)
+  assert.equal(state.mutateCalls.length, callsBefore, 'a stale mirror never dispatches the preference')
+})
+
+function seedWebNamespaces(state: FakeState, options: { readonly omit?: 'web' | 'api' } = {}): void {
+  if (options.omit !== 'web') {
+    state.namespaces.set(WEB_NS, {
+      ns: WEB_NS,
+      value: { ...WEB_DEFAULTS },
+      base: { fetchProvider: 'http' },
+      user: { searchProvider: 'deepseek-official' },
+      revision: 4,
+    })
+  }
+  if (options.omit !== 'api') {
+    state.namespaces.set(WEB_API_NS, { ns: WEB_API_NS, value: { ...WEB_API_DEFAULTS }, revision: 8 })
+  }
+}
+
+test('the Remote Web adapter reads both Host sections and writes each exact field through the mirror', async () => {
+  const { port, state } = createBackend(current => {
+    seedWebNamespaces(current)
+    current.credentialStore.set('DEEPSEEK_API_KEY', { configured: true, source: 'file' })
+  })
+  assert.equal(port.web.available(), false, 'an undescribed mirror has not observed the Host sections')
+  await port.describe()
+  assert.equal(port.web.available(), true)
+  assert.deepEqual(await port.web.read(), {
+    searchProvider: 'deepseek-official',
+    fetchProvider: 'http',
+    providerSelection: {
+      search: { baseId: undefined, userSet: true, userId: 'deepseek-official' },
+      fetch: { baseId: 'http', userSet: false, userId: undefined },
+    },
+    api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
+    advanced: {},
+    credential: { configured: true, source: 'file' },
+  })
+
+  await port.web.setSearchProvider('deepseek-search-api')
+  await port.web.setFetchProvider('deepseek-fetch-api')
+  await port.web.setSearchApiCount(20)
+  await port.web.setSendOriginalQuestion(false)
+  await port.web.setSearchBilling('account')
+  await port.web.setFetchBilling('api-key')
+  assert.deepEqual(state.mutateCalls.map(call => ({ ns: call.ns, ops: call.ops })), [
+    { ns: WEB_NS, ops: [{ op: 'set', path: ['searchProvider'], value: 'deepseek-search-api' }] },
+    { ns: WEB_NS, ops: [{ op: 'set', path: ['fetchProvider'], value: 'deepseek-fetch-api' }] },
+    { ns: WEB_API_NS, ops: [{ op: 'set', path: ['count'], value: 20 }] },
+    { ns: WEB_API_NS, ops: [{ op: 'set', path: ['sendOriginalQuestion'], value: false }] },
+    { ns: WEB_API_NS, ops: [{ op: 'set', path: ['searchBilling'], value: 'account' }] },
+    { ns: WEB_API_NS, ops: [{ op: 'set', path: ['fetchBilling'], value: 'api-key' }] },
+  ])
+  assert.deepEqual(await port.web.read(), {
+    searchProvider: 'deepseek-search-api',
+    fetchProvider: 'deepseek-fetch-api',
+    providerSelection: {
+      search: { baseId: undefined, userSet: true, userId: 'deepseek-search-api' },
+      fetch: { baseId: 'http', userSet: true, userId: 'deepseek-fetch-api' },
+    },
+    api: { searchBilling: 'account', fetchBilling: 'api-key', count: 20, sendOriginalQuestion: false },
+    advanced: {},
+    credential: { configured: true, source: 'file' },
+  }, 'the values come from the authoritative post-write describe')
+})
+
+test('the Remote Web adapter projects the YAML-only overrides and legacy presence as detached facts', async () => {
+  const { port } = createBackend(current => {
+    seedWebNamespaces(current)
+    current.namespaces.get(WEB_API_NS)!.value = {
+      ...WEB_API_DEFAULTS,
+      searchBaseURL: 'https://search-gateway.example.test/v1/tools',
+      searchApiKeyEnv: 'SEARCH_API_KEY_ENV',
+      // Legacy single-endpoint keys are NOT rc.2 schema fields; when a
+      // descriptor happens to project them only their presence is reported.
+      baseURL: 'https://old.example.test/v1/tools',
+      apiKey: 'sk-legacy-value-never-echo',
+    }
+  })
+  await port.describe()
+  const read = await port.web.read()
+  assert.deepEqual(read?.advanced, {
+    searchBaseURL: 'https://search-gateway.example.test/v1/tools',
+    searchApiKeyEnv: 'SEARCH_API_KEY_ENV',
+    legacyOverrideDetected: true,
+  }, 'only non-empty string override fields are copied; legacy keys contribute presence only')
+  assert.equal(read?.api.searchBilling, 'auto', 'the legacy keys never become effective billing/endpoint values')
+  assert.equal(JSON.stringify(read).includes('sk-legacy-value-never-echo'), false,
+    'the legacy apiKey value is never echoed through the port')
+  assert.equal(JSON.stringify(read).includes('https://old.example.test/v1/tools'), false,
+    'the legacy baseURL value is never echoed through the port')
+})
+
+test('a displayed Remote URL override is MASKED: userinfo and query/fragment never reach the port', async () => {
+  const { port } = createBackend(current => {
+    seedWebNamespaces(current)
+    current.namespaces.get(WEB_API_NS)!.value = {
+      ...WEB_API_DEFAULTS,
+      fetchBaseURL: 'https://user:secret@fetch.example.test/v1?token=x#frag',
+    }
+  })
+  await port.describe()
+  const read = await port.web.read()
+  assert.equal(read?.advanced.fetchBaseURL, 'https://***@fetch.example.test/v1',
+    'the userinfo is replaced and the query/fragment dropped')
+  const serialized = JSON.stringify(read)
+  assert.doesNotMatch(serialized, /secret|user:|token=/u,
+    `no credential material survives the projection:\n${serialized}`)
+
+  const multipleAt = createBackend(current => {
+    seedWebNamespaces(current)
+    current.namespaces.get(WEB_API_NS)!.value = {
+      ...WEB_API_DEFAULTS,
+      fetchBaseURL: 'https://alice:p1@p2@fetch.example.test/v1?token=x',
+    }
+  })
+  await multipleAt.port.describe()
+  const multipleRead = await multipleAt.port.web.read()
+  assert.equal(multipleRead?.advanced.fetchBaseURL, 'https://***@fetch.example.test/v1',
+    'multiple userinfo @ characters are fully masked on the Remote path')
+  assert.doesNotMatch(JSON.stringify(multipleRead), /alice|p1|p2|token=/u,
+    'no userinfo fragment survives the Remote multi-@ projection')
+
+  const newline = createBackend(current => {
+    seedWebNamespaces(current)
+    current.namespaces.get(WEB_API_NS)!.value = {
+      ...WEB_API_DEFAULTS,
+      fetchBaseURL: 'https://api.example.test/v1?token=abc\nSECRET_AFTER_NL',
+    }
+  })
+  await newline.port.describe()
+  const newlineRead = await newline.port.web.read()
+  assert.equal(newlineRead?.advanced.fetchBaseURL, UNPARSEABLE_WEB_OVERRIDE_URL,
+    'an unparseable/control-bearing URL is reported as configured only on the Remote path')
+  assert.doesNotMatch(JSON.stringify(newlineRead), /SECRET_AFTER_NL|token=/u,
+    'the unparseable Remote URL value never survives the DTO')
+})
+
+test('a foreign Remote billing value is UNAVAILABLE, never a silent auto', async () => {
+  const { port } = createBackend(current => {
+    seedWebNamespaces(current)
+    current.namespaces.get(WEB_API_NS)!.value.fetchBilling = 'subscription'
+  })
+  await port.describe()
+  assert.equal(await port.web.read(), undefined, 'an outside-the-enum value cannot be read as a billing fact')
+})
+
+test('the Remote Web adapter preserves a valid Host count outside the UI presets', async () => {
+  const { port, state } = createBackend(current => {
+    seedWebNamespaces(current)
+    current.namespaces.get(WEB_API_NS)!.value.count = 7
+  })
+  await port.describe()
+  assert.equal((await port.web.read())?.api.count, 7)
+  assert.deepEqual(state.mutateCalls, [], 'reading the stored value never normalizes it to a preset')
+})
+
+test('missing Web settings sections stay unavailable and no defaults or writes are invented', async () => {
+  for (const missing of ['web', 'api'] as const) {
+    const { port, state } = createBackend(current => { seedWebNamespaces(current, { omit: missing }) })
+    assert.equal(port.web.available(), false)
+    await port.describe()
+    assert.equal(await port.web.read(), undefined)
+    const callsBefore = state.mutateCalls.length
+    await assert.rejects(port.web.setSearchApiCount(10), /sections are unavailable/u)
+    assert.equal(state.mutateCalls.length, callsBefore)
+  }
+})
+
+test('a stale provider intent is refused after the Remote mirror already refreshed to a custom route', async () => {
+  const { port, state, emit } = createBackend(current => { seedWebNamespaces(current) })
+  await port.describe()
+  const web = state.namespaces.get(WEB_NS)!
+  web.value.searchProvider = 'custom-search'
+  web.revision += 1
+  emit('settings/document-updated')
+  assert.equal((await port.web.read())?.searchProvider, 'custom-search',
+    'the Host document update has already committed into the current mirror')
+  const callsBefore = state.mutateCalls.length
+  await assert.rejects(port.web.setSearchProvider('deepseek-search-api'), /custom route/u)
+  assert.equal(state.mutateCalls.length, callsBefore, 'the older provider intent never dispatches with the refreshed revision')
+  assert.equal(state.namespaces.get(WEB_NS)?.value.searchProvider, 'custom-search')
+})
+
+test('invalid Remote Web candidates match Direct validation and never read or mutate the Host', async () => {
+  const remote = createBackend()
+  const direct = new DirectWebProviderConfig({ get: (_name: string) => undefined } satisfies HostContextLike)
+  for (const count of [0, 51, 2.5, Number.NaN]) {
+    let remoteMessage = ''
+    let directMessage = ''
+    await assert.rejects(remote.port.web.setSearchApiCount(count), error => {
+      remoteMessage = (error as Error).message
+      return true
+    })
+    await assert.rejects(direct.setSearchApiCount(count), error => {
+      directMessage = (error as Error).message
+      return true
+    })
+    assert.equal(remoteMessage, directMessage)
+  }
+  // The billing mode is the official closed enum on BOTH backends, with the
+  // same refusal vocabulary and zero Host contact. The invalid values are cast
+  // through the enum type on purpose: the RUNTIME guard is the subject.
+  for (const mode of ['subscription', 'AUTO', 'api_key', ''] as readonly string[]) {
+    let remoteSearchMessage = ''
+    let remoteFetchMessage = ''
+    let directSearchMessage = ''
+    let directFetchMessage = ''
+    await assert.rejects(remote.port.web.setSearchBilling(mode as 'auto' | 'account' | 'api-key'), error => {
+      remoteSearchMessage = (error as Error).message
+      return true
+    })
+    await assert.rejects(remote.port.web.setFetchBilling(mode as 'auto' | 'account' | 'api-key'), error => {
+      remoteFetchMessage = (error as Error).message
+      return true
+    })
+    await assert.rejects(direct.setSearchBilling(mode as 'auto' | 'account' | 'api-key'), error => {
+      directSearchMessage = (error as Error).message
+      return true
+    })
+    await assert.rejects(direct.setFetchBilling(mode as 'auto' | 'account' | 'api-key'), error => {
+      directFetchMessage = (error as Error).message
+      return true
+    })
+    assert.equal(remoteSearchMessage, directSearchMessage)
+    assert.equal(remoteFetchMessage, directFetchMessage)
+  }
+  assert.equal(remote.state.describeCalls, 0)
+  assert.deepEqual(remote.state.mutateCalls, [])
+})
+
+test('a custom Host provider id reads verbatim while a credential RPC failure stays an error', async () => {
+  const { port, state } = createBackend(current => {
+    seedWebNamespaces(current)
+    current.namespaces.get(WEB_NS)!.value.searchProvider = 'custom-search'
+  })
+  await port.describe()
+  assert.equal((await port.web.read())?.searchProvider, 'custom-search')
+  state.credentialFailure = { code: 'gateway/service-unavailable', message: 'credential authority unavailable' }
+  await assert.rejects(port.web.read(), /credentials\.describe\(DEEPSEEK_API_KEY\) failed: credential authority unavailable/u)
+  assert.equal(state.mutateCalls.length, 0)
+})
+
+test('a settings invalidation during credential describe discards the mixed-time Remote Web read', async () => {
+  const { port, state, emit } = createBackend(current => {
+    seedWebNamespaces(current)
+    current.credentialStore.set('DEEPSEEK_API_KEY', { configured: true, source: 'file' })
+  })
+  await port.describe()
+  let raced = false
+  state.credentialGate = () => {
+    if (raced) return
+    raced = true
+    state.credentialGate = undefined
+    const web = state.namespaces.get(WEB_NS)!
+    web.value.searchProvider = 'custom-after-invalidation'
+    web.revision += 1
+    emit('settings/document-updated')
+  }
+  const result = await port.web.read()
+  assert.equal(result?.searchProvider, 'custom-after-invalidation')
+  assert.deepEqual(result?.credential, { configured: true, source: 'file' })
+  assert.equal(raced, true)
+  assert.equal(port.configReadiness(), 'ready')
+})
+
+test('a Host revision change before Remote Web dispatch rejects the stale mutation and preserves the winner', async () => {
+  const { port, state } = createBackend(current => { seedWebNamespaces(current) })
+  await port.describe()
+  state.mutateGate = async () => {
+    const web = state.namespaces.get(WEB_NS)!
+    web.value.searchProvider = 'custom-concurrent-writer'
+    web.revision += 1
+  }
+  await assert.rejects(port.web.setSearchProvider('deepseek-search-api'), /revision 4 != 5/u)
+  assert.equal(state.namespaces.get(WEB_NS)?.value.searchProvider, 'custom-concurrent-writer')
+  assert.equal(port.configReadiness(), 'ready', 'the failure path refreshed the authoritative winner')
+})
+
+// ── PR2: the mirrored web descriptor's USER/base layers + official reset ─────
+
+test('the Remote Web adapter projects the SAME namespace view value/base/user', async () => {
+  const { port } = createBackend(current => {
+    seedWebNamespaces(current)
+    const web = current.namespaces.get(WEB_NS)!
+    web.base = { searchProvider: 'deepseek-official', fetchProvider: 'http' }
+    web.user = { searchProvider: 'deepseek-search-api', fetchProvider: 'deepseek-fetch-api' }
+    web.value = { searchProvider: 'deepseek-search-api', fetchProvider: 'deepseek-fetch-api' }
+  })
+  await port.describe()
+  assert.deepEqual((await port.web.read())?.providerSelection, {
+    search: { baseId: 'deepseek-official', userSet: true, userId: 'deepseek-search-api' },
+    fetch: { baseId: 'http', userSet: true, userId: 'deepseek-fetch-api' },
+  })
+
+  // A non-object/missing layer is unreadable, never "no USER override".
+  for (const layer of ['base', 'user'] as const) {
+    const missing = createBackend(current => {
+      seedWebNamespaces(current)
+      Reflect.deleteProperty(current.namespaces.get(WEB_NS)!, layer)
+    })
+    await missing.port.describe()
+    assert.equal(await missing.port.web.read(), undefined, `a missing ${layer} layer is unavailable`)
+    await assert.rejects(missing.port.web.restoreSearchProvider(), /USER\/base layers/u)
+    assert.deepEqual(missing.state.mutateCalls, [])
+  }
+})
+
+test('the Remote Web reset dispatches the exact official unset on the mirror revision', async () => {
+  const { port, state } = createBackend(current => { seedWebNamespaces(current) })
+  await port.describe()
+  await port.web.restoreSearchProvider()
+  assert.deepEqual(state.mutateCalls.map(call => ({ ns: call.ns, ops: call.ops, revision: call.revision })), [
+    { ns: WEB_NS, ops: [{ op: 'unset', path: ['searchProvider'] }], revision: 4 },
+  ], 'one unset op carrying the descriptor revision, never a provider id write')
+  const read = await port.web.read()
+  assert.equal(read?.searchProvider, undefined, 'Search base is absent, so the effective value is Automatic')
+  assert.deepEqual(read?.providerSelection.search, { baseId: undefined, userSet: false, userId: undefined })
+  assert.equal(read?.fetchProvider, 'http', 'the Fetch sibling keeps its value')
+  // A reset with no USER own-field is a real no-op.
+  const before = state.mutateCalls.length
+  await port.web.restoreFetchProvider()
+  assert.equal(state.mutateCalls.length, before, 'no unset is dispatched when the USER field is absent')
+})
+
+test('an rc.5 sibling keeps an explicit USER value equal to the deployment base after reset (mirror projection)', async () => {
+  // The REAL rc.5 SettingsForms rewrites an unset whose path has a base value as
+  // `set(base)`; with a sibling USER override the persisted USER section keeps
+  // that explicit value. The adapter must project the Host's answer truthfully
+  // (the TUI then credits the reset by the effective value, not by a claim that
+  // the USER field was deleted).
+  const { port, state } = createBackend(current => {
+    seedWebNamespaces(current)
+    const web = current.namespaces.get(WEB_NS)!
+    web.value = { searchProvider: 'deepseek-search-api', fetchProvider: 'deepseek-fetch-api' }
+    web.user = { searchProvider: 'deepseek-search-api', fetchProvider: 'deepseek-fetch-api' }
+  })
+  await port.describe()
+  await port.web.restoreFetchProvider()
+  const read = await port.web.read()
+  assert.equal(read?.fetchProvider, 'http', 'the effective value returns to the deployment HTTP')
+  assert.deepEqual(read?.providerSelection.fetch, { baseId: 'http', userSet: true, userId: 'http' },
+    'the Host kept the explicit USER value; the adapter does not pretend it vanished')
+  assert.equal(read?.providerSelection.search.userSet, true, 'the Search sibling is untouched')
+  assert.deepEqual(state.mutateCalls.map(call => call.ops), [[{ op: 'unset', path: ['fetchProvider'] }]])
+})
+
+test('a custom effective Remote provider is restorable through unset while an explicit official set stays refused', async () => {
+  const { port, state } = createBackend(current => {
+    seedWebNamespaces(current)
+    const web = current.namespaces.get(WEB_NS)!
+    web.base = { searchProvider: 'deepseek-official', fetchProvider: 'http' }
+    web.user = { searchProvider: 'acme-search' }
+    web.value = { searchProvider: 'acme-search', fetchProvider: 'http' }
+  })
+  await port.describe()
+  assert.equal((await port.web.read())?.providerSelection.search.baseId, 'deepseek-official')
+  await assert.rejects(port.web.setSearchProvider('deepseek-search-api'), /custom route/u)
+  assert.equal(state.mutateCalls.length, 0, 'the explicit-set guard refuses before the Host mutate')
+  await port.web.restoreSearchProvider()
+  assert.deepEqual(state.mutateCalls.map(call => call.ops), [[{ op: 'unset', path: ['searchProvider'] }]])
+  assert.equal((await port.web.read())?.searchProvider, 'deepseek-official',
+    'the deployment default applies after the official reset')
+})
+
+test('a stale mirrored USER layer never authorizes a reset after the Host moved', async () => {
+  const { port, state, emit } = createBackend(current => { seedWebNamespaces(current) })
+  await port.describe()
+  // Another writer removes the USER override; an invalidation marks the mirror
+  // stale. The reset must re-read (the adapter's ensureCurrent + beforeDispatch)
+  // and then dispatch NOTHING, instead of unsetting the last-known layer.
+  const web = state.namespaces.get(WEB_NS)!
+  delete web.user!.searchProvider
+  web.value = { fetchProvider: 'http' }
+  web.revision += 1
+  emit('settings/document-updated')
+  // The captured layer no longer matches the refreshed descriptor: the reset is
+  // REFUSED at the dispatch fence with zero Host mutations (never re-targeted).
+  await assert.rejects(port.web.restoreSearchProvider(), /USER\/base selection changed before the reset was dispatched/u)
+  assert.deepEqual(state.mutateCalls, [], 'the refreshed layer no longer matches the captured facts')
+  assert.equal((await port.web.read())?.providerSelection.search.userSet, false)
+})
+
+test('a queued Remote reset is refused when another writer moved the USER value before dispatch', async () => {
+  // RFL-001: the reset captures the committed mirror facts synchronously and
+  // re-proves them against the descriptor that supplies the CAS revision. A
+  // writer that changes the same USER field while the reset waits in the
+  // serialized write queue must NOT be cleared by that older gesture.
+  const { port, state, emit } = createBackend(current => { seedWebNamespaces(current) })
+  await port.describe()
+  let releaseMutate: () => void = () => {}
+  state.mutateGate = () => new Promise<void>(resolve => { releaseMutate = resolve })
+  // Block the ONE shared mirror write queue with an unrelated API-section write.
+  const held = port.web.setSendOriginalQuestion(false)
+  for (let attempt = 0; attempt < 100 && state.mutateCalls.length === 0; attempt += 1) await tick()
+  assert.equal(state.mutateCalls.length, 1, 'the unrelated write reached the Host and is held')
+  // The reset observes the CURRENT USER value and queues behind the held write.
+  const reset = port.web.restoreSearchProvider()
+  // Let the adapter pass its pre-queue readiness check and join the queue.
+  await tick()
+  // Another writer moves the SAME field while the reset is queued.
+  const web = state.namespaces.get(WEB_NS)!
+  web.value = { searchProvider: 'deepseek-search-api', fetchProvider: 'http' }
+  web.user = { searchProvider: 'deepseek-search-api' }
+  web.revision += 1
+  emit('settings/document-updated')
+  releaseMutate()
+  await held
+  await assert.rejects(reset, /USER\/base selection changed before the reset was dispatched/u)
+  assert.equal(state.mutateCalls.filter(call => call.ns === WEB_NS).length, 0,
+    'the stale reset never reached the official Host mutate')
+  const read = await port.web.read()
+  assert.equal(read?.searchProvider, 'deepseek-search-api', 'the other writer\'s value is preserved')
+  assert.deepEqual(read?.providerSelection.search, { baseId: undefined, userSet: true, userId: 'deepseek-search-api' })
+})
+
+test('a queued Remote reset is refused when the deployment default moved before dispatch', async () => {
+  const { port, state, emit } = createBackend(current => { seedWebNamespaces(current) })
+  await port.describe()
+  let releaseMutate: () => void = () => {}
+  state.mutateGate = () => new Promise<void>(resolve => { releaseMutate = resolve })
+  const held = port.web.setSendOriginalQuestion(false)
+  for (let attempt = 0; attempt < 100 && state.mutateCalls.length === 0; attempt += 1) await tick()
+  assert.equal(state.mutateCalls.length, 1)
+  const reset = port.web.restoreSearchProvider()
+  await tick()
+  const web = state.namespaces.get(WEB_NS)!
+  // Same USER value, different deployment default: the gesture's meaning (the
+  // deployment default it was confirmed against) no longer holds.
+  web.base = { searchProvider: 'deepseek-official', fetchProvider: 'http' }
+  web.revision += 1
+  emit('settings/document-updated')
+  releaseMutate()
+  await held
+  await assert.rejects(reset, /USER\/base selection changed before the reset was dispatched/u)
+  assert.equal(state.mutateCalls.filter(call => call.ns === WEB_NS).length, 0)
+  assert.equal(state.namespaces.get(WEB_NS)?.base?.searchProvider, 'deepseek-official')
 })

@@ -199,7 +199,7 @@ test('negative lock: the command source module never widens the authority reader
 
 /* ── M3-6 PR2 §14.1: the generation delegation (RCS-G1/G2) ─────────────── */
 
-test('RCS-G1: connectionGeneration() returns the EXACT official snapshot object by identity', () => {
+test('connectionGeneration() returns the EXACT official snapshot object by identity', () => {
   const generation = { id: 7 } as RemoteConnectionGeneration
   const source = createRemoteCommandSource({
     authority: { commands: { list: async () => ({ ok: true, value: [] }) }, skills: { list: async () => ({ ok: true, value: { skills: [] } }) } },
@@ -210,7 +210,7 @@ test('RCS-G1: connectionGeneration() returns the EXACT official snapshot object 
     'the delegated snapshot IS the official token object (never a copied {id} DTO)')
 })
 
-test('RCS-G2: subscribeConnectionGeneration delegates exactly — one notify while subscribed, none after unsubscribe', () => {
+test('subscribeConnectionGeneration delegates exactly — one notify while subscribed, none after unsubscribe', () => {
   const generation = observableGenerationSource({ id: 1 } as RemoteConnectionGeneration)
   const source = createRemoteCommandSource({
     authority: { commands: { list: async () => ({ ok: true, value: [] }) }, skills: { list: async () => ({ ok: true, value: { skills: [] } }) } },

@@ -20,6 +20,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { projectCompact } from '../../src/tui/transcript/compact-projection.ts'
 import { summarizeWorkSpan } from '../../src/tui/transcript/work-summary.ts'
 import { projectFocus } from '../../src/tui/transcript/focus-projection.ts'
+import { projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
 import { askAnswersLines, askAnswersSummary } from '../../src/tui/transcript/tool-presentation.ts'
 import { SURFACED_INTERACTION_TOOL_NAMES, isSurfacedInteractionTool, isSurfacedInteractionToolName } from '../../src/domain/transcript/semantics.ts'
 import { TranscriptFolder, type TranscriptMessage } from '../../src/transcript.ts'
@@ -105,16 +106,32 @@ test('Compact: the question is neither counted nor chosen as the span Action pre
 // --- Q9: a RUNNING question stays process (QuestionFlow owns it) -----------
 
 test('a running question is not surfaced as a settled card', () => {
-  const running = question('running', '')
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'turn/start', seq: 0, time: 1000, data: { turn: TURN } },
+    { type: 'tool/call', seq: 1, time: 1001, data: { turn: TURN, step: 0, callId: ToolCallId('running-q-before'), name: 'read', arguments: '{}' } },
+    { type: 'tool/result', seq: 2, time: 1002, data: { turn: TURN, step: 0, message: { id: MessageId('running-q-before-result'), role: 'tool', toolCallId: ToolCallId('running-q-before'), content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('running-q-before') } } } },
+    { type: 'tool/call', seq: 3, time: 1003, data: { turn: TURN, step: 1, callId: ToolCallId('running-q-call'), name: 'ask_user_question', arguments: '{}' } },
+    { type: 'tool/call', seq: 4, time: 1004, data: { turn: TURN, step: 1, callId: ToolCallId('running-q-after'), name: 'bash', arguments: '{}' } },
+  ] as SessionEvent[])
+  const running = folder.messages().find(message => message.kind === 'tool' && message.name === 'ask_user_question')!
+  assert.ok(running.kind === 'tool')
+  assert.equal(running.status, 'running')
   assert.equal(isSurfacedInteractionTool(running), false)
-  const messages = [thinking('a'), tool('read'), running, tool('bash')]
+  const messages = folder.messages()
   // Compact keeps it inside the Work run (no boundary).
   assert.deepEqual(kindsOf(projectCompact(messages, noOptions)), ['work'])
   // Collapsed Focus keeps it inside the Thought (no hoist).
-  const collapsed = projectFocus(messages, new Map(), new Set(), true)
-  assert.deepEqual(kindsOf(collapsed), [], 'no persistent row is hoisted for a running question')
-  // Once settled, the same shape surfaces.
-  assert.equal(isSurfacedInteractionTool(question('ok', answersJson(1, 1))), true)
+  const collapsed = projectFocus(messages, folder.turnActivities(), new Set(), true)
+  assert.deepEqual(kindsOf(collapsed), ['activity'], 'the running question stays hidden as ordinary Process')
+  const work = projectTranscriptStructure(messages).find(block => block.kind === 'work')
+  assert.ok(work?.kind === 'work' && work.span.members.includes(running),
+    'the running interaction remains a canonical Work member')
+})
+
+test('only a settled question is surfaced outside the running Focus Process', () => {
+  const settled = question('ok', answersJson(1, 1))
+  assert.equal(isSurfacedInteractionTool(settled), true)
 })
 
 // --- Q7/Q8: partial, skipped, error and cancellation stay surfaced ---------
@@ -449,10 +466,26 @@ test('exit_plan_mode is a Compact Work boundary and hoists out of collapsed Focu
 })
 
 test('a RUNNING exit_plan_mode stays inside Work/Working (plan approval owns it)', () => {
-  const running = planReview('running', '')
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'turn/start', seq: 0, time: 2000, data: { turn: TURN } },
+    { type: 'tool/call', seq: 1, time: 2001, data: { turn: TURN, step: 0, callId: ToolCallId('running-plan-read'), name: 'read', arguments: '{}' } },
+    { type: 'tool/result', seq: 2, time: 2002, data: {
+      turn: TURN, step: 0,
+      message: { id: MessageId('running-plan-read-result'), role: 'tool', toolCallId: ToolCallId('running-plan-read'), content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('running-plan-read') } },
+    } },
+    { type: 'tool/call', seq: 3, time: 2003, data: { turn: TURN, step: 1, callId: ToolCallId('running-plan-call'), name: 'exit_plan_mode', arguments: '{}' } },
+    { type: 'tool/call', seq: 4, time: 2004, data: { turn: TURN, step: 1, callId: ToolCallId('running-plan-after'), name: 'bash', arguments: '{}' } },
+  ] as SessionEvent[])
+  const messages = folder.messages()
+  const running = messages.find(message => message.kind === 'tool' && message.name === 'exit_plan_mode')
+  assert.ok(running?.kind === 'tool')
+  assert.equal(running.status, 'running')
   assert.equal(isSurfacedInteractionTool(running), false)
-  assert.deepEqual(kindsOf(projectCompact([thinking('a'), tool('read'), running, tool('bash')], noOptions)), ['work'])
-  assert.deepEqual(kindsOf(projectFocus([thinking('a'), tool('read'), running, tool('bash')], new Map(), new Set(), true)), [])
+  assert.deepEqual(kindsOf(projectCompact(messages, noOptions)), ['work'])
+  assert.deepEqual(kindsOf(projectFocus(messages, folder.turnActivities(), new Set(), true)), ['activity'])
+  const work = projectTranscriptStructure(messages).find(block => block.kind === 'work')
+  assert.ok(work?.kind === 'work' && work.span.members.includes(running))
 })
 
 test('exit_plan_mode never counts or previews, and its plan body stays expandable', () => {

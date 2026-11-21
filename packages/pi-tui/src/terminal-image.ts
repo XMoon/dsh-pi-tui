@@ -86,10 +86,21 @@ function detectCapabilitiesFromEnvironment(tmuxForwardsHyperlink: () => boolean)
 		return { images: null, trueColor: hasTrueColorHint, hyperlinks: false };
 	}
 
-	// Herdr forwards OSC 8 hyperlinks. It runs inside another terminal whose variables, such as
-	// KITTY_WINDOW_ID, may leak into its panes, so check it first and leave image protocols off.
+	// Herdr forwards OSC 8 hyperlinks and supports the Kitty graphics protocol. Check it before
+	// outer-terminal detection because variables like KITTY_WINDOW_ID can leak into its panes.
 	if (termProgram === "herdr") {
-		return { images: null, trueColor: hasTrueColorHint, hyperlinks: true };
+		return { images: "kitty", trueColor: hasTrueColorHint, hyperlinks: true };
+	}
+
+	if (termProgram === "rex") {
+		return { images: "kitty", trueColor: true, hyperlinks: true };
+	}
+
+	// Orca supports Kitty graphics but only advertises it through ORCA_IMAGE_PROTOCOL. Require
+	// both signals so Orca releases predating that advertisement keep the text fallback instead
+	// of reserving image rows that nothing renders.
+	if (termProgram === "orca" && process.env.ORCA_IMAGE_PROTOCOL === "kitty") {
+		return { images: "kitty", trueColor: true, hyperlinks: true };
 	}
 
 	// Tern's terminal pane speaks the Kitty graphics protocol; classify it with
@@ -508,6 +519,22 @@ export function deleteKittyImage(imageId: number): string {
 }
 
 /**
+ * Delete Kitty image placements while keeping the uploaded image data resident
+ * (lowercase `d=i`).
+ *
+ * With a `placementId`, ONLY that placement is removed (the protocol contract:
+ * `a=d,d=i,i=<id>,p=<placement>`). Without one, every placement of the image
+ * id is removed — still data-retaining, so it is never a destructive delete.
+ *
+ * The Screen uses this when a line yields only for a frame — a visible overlay
+ * preemption (X077) — so the block can be placed again without a new
+ * transmission and an image the Screen does not own never loses its data.
+ */
+export function deleteKittyImagePlacement(imageId: number, placementId?: number): string {
+	return `\x1b_Ga=d,d=i,i=${imageId}${placementId === undefined ? "" : `,p=${placementId}`},q=2\x1b\\`;
+}
+
+/**
  * Delete all visible Kitty graphics images.
  * Uses uppercase 'A' to also free the image data.
  */
@@ -575,15 +602,24 @@ export interface KittyImagePlacement {
 
 const kittyImageMetadata = new Map<number, RegisteredKittyImageMetadata>();
 let kittyTransmissionGeneration = 0;
+// Tallest registered image. Bounds backward searches for image lines above a
+// viewport: no image line further up than this can reach into it.
+let maxKittyImageRows = 0;
 
 export function registerKittyImageMetadata(metadata: KittyImageMetadata): void {
 	kittyTransmissionGeneration += 1;
+	maxKittyImageRows = Math.max(maxKittyImageRows, metadata.rows);
 	kittyImageMetadata.delete(metadata.imageId);
 	kittyImageMetadata.set(metadata.imageId, { ...metadata, transmissionGeneration: kittyTransmissionGeneration });
 	if (kittyImageMetadata.size > 1000) {
 		const oldestImageId = kittyImageMetadata.keys().next().value;
 		if (oldestImageId !== undefined) kittyImageMetadata.delete(oldestImageId);
 	}
+}
+
+/** Return the row height of the tallest Kitty image registered so far. */
+export function getMaxKittyImageRows(): number {
+	return maxKittyImageRows;
 }
 
 function getRegisteredKittyImageMetadataFromControls(controls: string): RegisteredKittyImageMetadata | undefined {

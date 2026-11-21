@@ -5,8 +5,11 @@
  * subagent control path that touches `ctx`.
  *
  * The prompt service remains lazy per call and mints the caller-owned request
- * id. Interruption maps the explicit semantic parent/child request to the
- * official Direct authority shape.
+ * id. The rc.2 official prompt request carries ONLY the child address, delivery,
+ * content and the sampled zone: the viewer's parent relation is a Client-side
+ * currentness fact and never a Host authorization claim. Interruption is the
+ * official user interrupt on the child (`{kind:'user'}`), again without a
+ * fabricated parent parameter.
  *
  * Full contract: docs/architecture/host-client.md + docs/architecture/host-client.md.
  * @module @xmoon76/dsh-pi-tui/runtime/direct/subagent-direct
@@ -34,11 +37,12 @@ export interface HostContextLike {
   get(name: string): unknown
 }
 
-/** The Direct interrupt surface of `ctx.subagents`. */
+/** The Direct interrupt surface of `ctx.subagents` (rc.2: a user interrupt
+ *  targets the child; the Host owns target authorization). */
 export interface SubagentInterruptServiceLike {
   interrupt(
     targetSessionId: string,
-    authority: { readonly kind: 'user'; readonly parentSessionId: string },
+    authority: { readonly kind: 'user' },
   ): void
 }
 
@@ -56,9 +60,7 @@ function errorCode(error: unknown): string | undefined {
  */
 function classifyInterruptFailure(error: unknown): SubagentInterruptOutcome {
   switch (errorCode(error)) {
-    case 'subagent/not-found':
-    case 'subagent/catalog-diagnostic':
-    case 'subagent/parent-unavailable':
+    case 'subagent/not-resumable':
     case 'subagent/delivery-unavailable':
       return { kind: 'rejected', reason: { kind: 'unavailable', message: safeErrorMessage(error) } }
     case 'subagent/unauthorized':
@@ -122,10 +124,10 @@ export class DirectSubagentPort implements SubagentPort {
       return { kind: 'rejected', reason: { kind: 'unavailable', message: 'subagent service unavailable' } }
     }
     try {
-      service.interrupt(request.childSessionId, {
-        kind: 'user',
-        parentSessionId: request.parentSessionId,
-      })
+      // rc.2 official user interrupt: the child is the address; the Host
+      // re-validates the caller's authority for this exact target. The port's
+      // parentSessionId is viewer currentness, not a Host claim.
+      service.interrupt(request.childSessionId, { kind: 'user' })
     } catch (error: unknown) {
       return classifyInterruptFailure(error)
     }
@@ -135,17 +137,15 @@ export class DirectSubagentPort implements SubagentPort {
 
 /** The official `ctx.subagents.prompt` control surface (structural — never
  * a package dependency; the service resolves from the dsh installation).
- * The request shape is the official `SubagentPromptRequest` vocabulary:
- * caller-minted `requestId`, durable parent/child address, the required
- * `continuable` discriminator, explicit `queue` or `steer` delivery, prompt
- * parts, and the optional browser zone. */
+ * The request shape is the rc.2 official `SubagentPromptRequest` vocabulary:
+ * caller-minted `requestId`, the exact child address, explicit `queue` or
+ * `steer` delivery, prompt parts, and the optional browser zone. The rc.1
+ * `parentSessionId`/`mode` discriminator no longer exists on the wire. */
 export interface SubagentPromptService {
   prompt(
     request: {
       readonly requestId: string
-      readonly parentSessionId: string
       readonly childSessionId: string
-      readonly mode: 'continuable'
       readonly delivery: 'queue' | 'steer'
       readonly content: readonly SubagentPromptContentPart[]
       readonly clientTimeZone?: string
@@ -255,9 +255,7 @@ export async function submitSubagentPrompt(
     const receipt = await subagents.prompt(
       {
         requestId,
-        parentSessionId: request.parentSessionId,
         childSessionId: request.childSessionId,
-        mode: 'continuable',
         delivery: request.delivery,
         content: canonical,
         clientTimeZone: timeZone,

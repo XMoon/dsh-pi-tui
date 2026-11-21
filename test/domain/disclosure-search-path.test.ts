@@ -1124,7 +1124,7 @@ test('regular Focus Ctrl+O collapse revokes a nested-cluster search reveal under
     first,
     second,
     { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'ok', status: 'ok' },
-  ], new Map())
+  ], new Map([[1, activity(1)]]))
   app.expandFocusTurn(1) // MANUAL root: the Work stays open across Ctrl+O.
   await viewport(vt)
   app.setTranscriptSearchTarget(targetFor(second, 'NESTED_REVEAL_TARGET'))

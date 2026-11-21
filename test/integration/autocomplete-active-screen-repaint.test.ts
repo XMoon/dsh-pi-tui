@@ -313,3 +313,56 @@ test('regular: async slash-command suggestions paint the fresh list', async (t) 
     return draftVisible(view, '/im') && view.includes('Attach an image file')
   }, 'the fresh command dropdown must be visible')
 })
+
+// ── PR-4 R6: a stale autocomplete press cannot apply the pre-wheel item ─────
+
+test('fullscreen: a stale autocomplete press cannot apply the pre-wheel completion (X079)', async (t) => {
+  const life = testLifecycle(t)
+  const { startApp } = await import('../support/app-harness.ts')
+  const root = dirFixture(life)
+  const { vt, app } = startApp(root)
+  startedApps.add(app)
+  life.defer(() => app.stop())
+  await vt.waitForRender()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  vt.sendInput('@src')
+  await pollUntil(() => {
+    const view = vt.getViewport().join('\n')
+    return draftVisible(view, '@src') && view.includes('src/')
+  }, 'the first-level dropdown must be visible')
+  vt.sendInput('\t')
+  await pollUntil(() => app.seatTextForTest() === '@src/', 'Tab must accept the directory')
+  await pollUntil(() => {
+    const view = vt.getViewport().join('\n')
+    return draftVisible(view, '@src/') && childrenVisible(view)
+  }, 'the children dropdown must be visible')
+  const lines = (): string[] => vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/gu, ''))
+  const alphaRow = lines().findIndex(line => line.includes('alpha.ts'))
+  assert.ok(alphaRow >= 0, `the painted alpha row exists:\n${lines().join('\n')}`)
+  const alphaCol = lines()[alphaRow]!.indexOf('alpha.ts')
+  const press = (x: number, y: number): void => { vt.sendInput(`\x1b[<0;${x + 1};${y + 1}M`) }
+  const release = (x: number, y: number): void => { vt.sendInput(`\x1b[<0;${x + 1};${y + 1}m`) }
+  const wheelDown = (x: number, y: number): void => { vt.sendInput(`\x1b[<65;${x + 1};${y + 1}M`) }
+  // Press the painted alpha row, move the SELECTION with one real wheel notch
+  // on the next painted row (the window keeps its start, so alpha still sits
+  // on the pressed cell), then release on the same cell.
+  press(alphaCol + 2, alphaRow)
+  await vt.waitForRender()
+  wheelDown(alphaCol + 2, alphaRow + 2)
+  await vt.waitForRender()
+  release(alphaCol + 2, alphaRow)
+  await vt.waitForRender()
+  // The stale press is retired by the effective wheel: the draft stays the
+  // unaccepted '@src/' and the dropdown stays open for a fresh choice.
+  assert.equal(app.seatTextForTest(), '@src/', 'the stale press must not apply the pre-wheel completion')
+  assert.equal(isAutocompleteActive(app), true, 'the refused release leaves the dropdown open')
+  // A FRESH click on the newly selected row still applies its completion.
+  const betaRow = lines().findIndex(line => line.includes('beta.ts'))
+  assert.ok(betaRow >= 0, `the painted beta row exists:\n${lines().join('\n')}`)
+  const betaCol = lines()[betaRow]!.indexOf('beta.ts')
+  press(betaCol + 2, betaRow)
+  await vt.waitForRender()
+  release(betaCol + 2, betaRow)
+  await pollUntil(() => app.seatTextForTest().trimEnd() === '@src/beta.ts', 'a fresh beta click applies its completion')
+})

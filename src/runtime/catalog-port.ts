@@ -118,8 +118,10 @@ export interface ModelCatalog {
   defaultSelection(): ModelSelectionDto | undefined
   /** Persist the global default (`agentDefaultModel.saveSelection`) as a
    *  semantic settlement: a proven pre-write refusal is `rejected`, an
-   *  ambiguous write failure is `indeterminate`, and the Remote backend (which
-   *  has no TUI global-default write) is `unsupported`. */
+   *  ambiguous write failure is `indeterminate`. Direct writes in-process; the
+   *  Remote backend delegates to the Owner-only private
+   *  `piTuiDefaultModel/saveSelection` Host service (which calls the official
+   *  `agentDefaultModel.saveSelection`), never a settings/config-RPC write. */
   saveDefaultSelection(selection: ModelSelectionDto): Promise<WriteOutcome<void>>
   /** The effective selection of one currently live ordinary Session. */
   sessionSelection(sessionId: string): ModelSelectionDto | undefined
@@ -227,6 +229,10 @@ export interface StandingSkillRead {
   readonly notice?: string
 }
 
+export type StandingSkillLocation =
+  | { readonly kind: 'host-workspace'; readonly workspaceId: string }
+  | { readonly kind: 'co-located-directory'; readonly cwd: string }
+
 /** The skill catalog sub-domain: sessionless standing reads, live agent
  *  reads, the loaded-definition path and the host-vs-fallback injection
  *  decision. The pure catalog logic stays in `runtime/direct/skill-catalog.ts`;
@@ -235,8 +241,9 @@ export interface StandingSkillRead {
 export interface SkillCatalogCapability {
   /** The sessionless STANDING skill catalog of one preset (the deferred
    *  start, `/reload` and the `/preset` standing refresh). Never creates
-   *  an Agent/session/turn. */
-  standing(presetId: string | undefined, cwd: string, signal?: AbortSignal): Promise<StandingSkillRead>
+   *  an Agent/session/turn. The location identity is supplied by the backend
+   *  owner: Remote requires a Host-issued WorkspaceId; Direct is co-located. */
+  standing(presetId: string | undefined, location: StandingSkillLocation, signal?: AbortSignal): Promise<StandingSkillRead>
   /** The live agent's human-invocable skill catalog (the `/skill` picker).
    *  `undefined` = no skill registry reachable for the session. */
   listHumanSkills(sessionId: string, signal?: AbortSignal): Promise<HumanSkillCatalog | undefined>
@@ -247,10 +254,16 @@ export interface SkillCatalogCapability {
    *  agent (the double-injection guard: when true, the TUI leaves the
    *  body injection to the host; when false, the TUI falls back). */
   hostLoadsSkillBody(sessionId: string): boolean
-  /** Subscribe to the dsh-skill invalidation notification (the adapter
-   *  owns the event wiring; a throwing subscribe may propagate — the
-   *  caller degrades to no subscription). */
-  onSkillsChange(listener: () => void): void
+  /** Subscribe to the Host Skills invalidation notification. The callback
+   *  carries no scope or catalog; callers refresh their captured current owner.
+   *  The returned disposer ends the subscription before its coordinator is
+   *  disposed, and non-cancellation stream errors go to `onError`. */
+  onSkillsChange(listener: () => void, onError: (error: unknown) => void): () => void
+  /** Re-establish the Host invalidation subscription after a reported stream
+   *  failure. Called ONLY by an explicit owner refresh (`/reload`, live owner
+   *  switch, surface rebuild) — adapters never retry on their own. Direct has
+   *  no stream gap and omits it. */
+  rearmSkillsChange?(): void
 }
 
 /** The catalog assembly — one narrow sub-interface per catalog domain.

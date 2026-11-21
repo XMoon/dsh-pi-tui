@@ -41,29 +41,45 @@ import {
 } from '../../domain/footer/custom-items.ts'
 import { FooterItemRegistry } from '../footer/item-registry.ts'
 import { FooterConfiguratorModel, sameFooterCustomItem } from '../footer/configurator-model.ts'
-import { runOwned } from '../../runtime/process/tasks.ts'
+import { runDetached, runOwned } from '../../runtime/process/tasks.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { color } from '../theme/runtime.ts'
 import { themeDisplayName as themeDisplayNameOf } from '../pickers/theme-menu.ts'
-import { SubagentModelAllowlistPicker, allowlistSummary, lastRouteWhileEnabled } from '../pickers/subagent-model-menu.ts'
+import { allowlistSummary } from '../pickers/subagent-model-menu.ts'
+import { SubagentSettingsController } from '../../app/command/subagent-settings.ts'
+import { SubagentSettingsPage } from '../panels/subagent-settings-page.ts'
+import { HostNumericSettingsController, type HostNumericSettingsPort } from '../../app/command/host-numeric-settings.ts'
+import { HostNumericSettingsPage } from '../panels/host-numeric-settings-page.ts'
 import { resolveThemeSelection, themePickerRows } from '../../app/surface/theme-selection.ts'
+import { commitPersistedSetting, readPersistedSetting, resolvePersistedSettingOwner, type PersistedSettingCommitOutcome, type PersistedSettingRecord } from '../../app/client-extensions/persisted-setting.ts'
 import { normalizePersistedTheme } from '../../domain/display/theme-selection.ts'
-import { serializeTuiSettingsMutation, type ConfigPort, type TuiSettingsDoc, type VisualToolsState, type WebProviderSettings } from '../../runtime/config-port.ts'
+import { serializeTuiSettingsMutation, type ConfigPort, type TuiSettingsDoc, type VisualToolsState, type WebProviderSettings, type WebStartupPreferenceState, type BackendStartupPreferenceState, type PublicBackendValue, type AcpStartupPreferenceState, type SectionRead, type SectionMutationOutcome, type SessionLogUpload, type AgentLoopSettings, type ShellExecutionSettings } from '../../runtime/config-port.ts'
+import type { AcpAccessStatus } from '../../runtime/acp-access-port.ts'
+import { isWebApiBilling } from '../../domain/web-provider-settings.ts'
 import {
   WEB_FETCH_PROVIDER_CANDIDATES,
   WEB_SEARCH_PROVIDER_CANDIDATES,
   WEB_SETTINGS_PAGE_TITLE,
   WebSettingsPage,
+  webAdvancedFactsText,
+  webAdvancedOverrideFields,
+  webBillingLabel,
   type WebCommitResult,
+  type WebProviderCommitIntent,
   type WebSettingRowId,
+  type WebSettingsCommitRequest,
   type WebSettingsFacts,
 } from '../panels/web-settings-page.ts'
 import { ModelsWorkspacePage, type ModelsInitialView, type ModelsWorkspaceSource } from '../panels/models-workspace-page.ts'
+import { McpServersPage } from '../panels/mcp-servers-page.ts'
+import { McpServersController } from '../../app/command/mcp-servers.ts'
+import { ComputerUseSettingsPage, COMPUTER_USE_PAGE_TITLE } from '../panels/computer-use-settings-page.ts'
+import { CuaAccessSettingsController } from '../../app/command/cua-access-settings.ts'
 import { AccountWorkspacePage, type AccountInitialView } from '../panels/account-workspace-page.ts'
 import { CredentialWorkflow, type AuthDestination } from '../../app/command/credential-workflow.ts'
 import { AccountWorkflow } from '../../app/command/account-workflow.ts'
 import { AboutStatusController } from '../../app/command/about-status.ts'
-import { bundleVersion, dshVersion, packageVersion } from '../../client/launcher/version.ts'
+import { bundleVersion, dshVersion } from '../../client/launcher/version.ts'
 import { openExternalUrl } from '../../client/url/open.ts'
 import type {
   SettingsWorkspaceCategoryId,
@@ -90,13 +106,17 @@ import type {
 type SettingsCommandRunner = Pick<
   TuiCommandRunner,
   | 'applyFooterSettings'
+  | 'acpAccess'
   | 'backendKind'
   | 'captureLiveSessionScope'
   | 'catalog'
   | 'clientCommands'
   | 'config'
   | 'createPluginManagerPage'
-  | 'currentApprovalOverride'
+  | 'cuaAccess'
+  | 'pluginManager'
+  | 'policy'
+  | 'sessionPolicyGeneration'
   | 'currentNotificationMethod'
   | 'currentNotificationMode'
   | 'currentPreset'
@@ -106,10 +126,12 @@ type SettingsCommandRunner = Pick<
   | 'diag'
   | 'displayPreset'
   | 'extensions'
+  | 'mcpServers'
   | 'focusEnabled'
   | 'forceContextMeasurementResult'
   | 'gitAttributionState'
   | 'isSessionScopeCurrent'
+  | 'onDisplayPresetMutated'
   | 'progressUpdatesState'
   | 'refreshStatus'
   | 'responseStyleState'
@@ -125,7 +147,30 @@ type SettingsCommandRunner = Pick<
   | 'subscribeSessionScopeInvalidation'
   | 'copyToClipboard'
   | 'tuiSettings'
+  | 'profileDaemonAdmin'
+  | 'recordBackendExitTransition'
 >
+
+/**
+ * M6 UX PR2 Step D: the ONE decision rule for the transient user-conversion
+ * intent. Only a verified `daemon → direct` save made by a process that is
+ * STILL running the daemon backend grants the exit-intent owner permission to
+ * ASK at exit; a verified reverse save clears it. A same-value confirm, a
+ * Direct-process save, or any other combination is `none` — it never fakes a
+ * conversion the user did not make.
+ * @param base - the authoritative Profile value BEFORE the write.
+ * @param saved - the value the write committed.
+ * @param backendKind - the CURRENT process backend ('remote' == daemon).
+ */
+export function classifyBackendExitTransition(
+  base: 'direct' | 'daemon',
+  saved: 'direct' | 'daemon',
+  backendKind: 'direct' | 'remote',
+): 'daemon-to-direct' | 'clear' | 'none' {
+  if (base === 'daemon' && saved === 'direct' && backendKind === 'remote') return 'daemon-to-direct'
+  if (base === 'direct' && saved === 'daemon') return 'clear'
+  return 'none'
+}
 
 /** The R1 candidate identities, in their FROZEN order: the raw values the
  *  document stores and the commit sends. The labels are the same lowercase
@@ -152,7 +197,6 @@ const TERMINAL_PROGRESS_CANDIDATES = ['9;4+7501', '9;4', '7501', 'off'] as const
  *  bypass fallback). The default-permission roster is NOT a constant: its
  *  candidates are the Host's own advertised preset ids, in Host order. */
 const APPROVAL_CANDIDATES = ['ask', 'never'] as const
-const SUBAGENT_SELECTION_CANDIDATES = ['off', 'on'] as const
 const LOCAL_SHELL_SANDBOX_CANDIDATES = ['bypass', 'sandbox'] as const
 
 /** C2-R5: the Footer page's native-mode candidates, in their frozen order. The
@@ -165,6 +209,20 @@ const FOOTER_MODE_CANDIDATES = ['default', 'compact', 'custom'] as const
  *  refuse an unknown identity BEFORE it mutates anything. */
 function isCandidateOf<T extends string>(value: string, candidates: readonly T[]): value is T {
   return (candidates as readonly string[]).includes(value)
+}
+
+/** Render one detached JSON value for a persisted-setting fact. `undefined`
+ *  is the honest "not set" (never `{}`); a scalar keeps its literal identity. */
+function persistedValueText(value: unknown): string {
+  if (value === undefined) return 'not set'
+  if (typeof value === 'string') return value === '' ? '(empty string)' : value
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (value === null) return 'null'
+  try {
+    return JSON.stringify(value) ?? 'not set'
+  } catch {
+    return 'unreadable value'
+  }
 }
 
 export interface SettingsCommandDeps {
@@ -241,7 +299,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   const accountWorkflowOf = (): AccountWorkflow => {
     accountWorkflowInstance ??= new AccountWorkflow({
       account: runner.config.account,
-      version: packageVersion(),
+      version: dshVersion(),
       openUrl: (url: string) => openExternalUrl(url),
       copy: copyText,
       run: (label: string, task: () => Promise<void>) => { detach(label, task, { notify: false }) },
@@ -257,6 +315,15 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     // snapshot, so a refresh never repeats the directory enumeration or the
     // settings read per route.
     readCatalog: async () => {
+      // Re-read the Host authorization roster ONCE for this page snapshot: a
+      // Remote page must never paint "no provider flow" from a roster that was
+      // not loaded for the CURRENT Connection generation. A failure leaves the
+      // catalog stale instead of failing the provider list.
+      try {
+        await workflow.refreshAuthorizationTargets()
+      } catch {
+        // `targetsState()` reports `stale`; the catalog below carries it.
+      }
       const catalog = workflow.readCatalog()
       if (catalog.failure !== undefined) return { kind: 'failed' as const, reason: catalog.failure }
       const profileOf = (route: string) => catalog.profiles.get(route) ?? { route, configured: false, models: [] }
@@ -296,9 +363,12 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
               ? { route: '', configured: false, models: [] }
               : profileOf(target.route),
           })
+      const authorizationNotice = catalog.authorizationUnavailable
       // A stale mirror: the LAST KNOWN rows, explicitly not current.
-      if (catalog.stale === true) return { kind: 'stale' as const, rows }
-      return { kind: 'ready' as const, rows }
+      if (catalog.stale === true) {
+        return { kind: 'stale' as const, rows, ...(authorizationNotice === undefined ? {} : { authorizationNotice }) }
+      }
+      return { kind: 'ready' as const, rows, ...(authorizationNotice === undefined ? {} : { authorizationNotice }) }
     },
     accountSummary: () => workflow.accountSummary(),
     credentialState: async (ref: string) => {
@@ -349,6 +419,16 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   /** The `Tools`-category Web page row id (a NAVIGATION row: it never becomes a
    *  Workspace editable field, so the editable-row count is unchanged). */
   const WEB_LAUNCHER_ROW_ID = 'web-settings'
+  /** FR3: the Tools navigation row that opens the embedded MCP servers page. */
+  const MCP_SERVERS_ROW_LABEL = 'MCP servers'
+  const COMPUTER_USE_ROW_SUMMARY = 'Permissions · applications · PTC'
+  const MCP_SERVERS_ROW_SUMMARY = 'Inspect · probe · restart'
+  /** The ACP listener runtime row's fixed description (one string so the async
+   *  `refreshRow` repaint and the initial paint stay identical). */
+  const ACP_RUNTIME_DESCRIPTION = 'Enable or disable the local ACP v1 Unix socket listener on THIS Split Host. '
+    + 'This toggles the running Host only; it never changes the persisted auto-start preference and never starts, '
+    + 'stops or reconfigures any Session, Agent or other Host service. Off removes the socket and disconnects any '
+    + 'connected ACP peer; On re-binds the same socket through the same safety checks.'
   /** The SAME official candidate identities the Web page renders and the ONE
    *  commit entry accepts (one source, so the page and the writer can never
    *  disagree). */
@@ -432,13 +512,336 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     return await readWebSettings()
   }
 
+  // ── PO-1B: the ACP listener RUNTIME row (async Host read) ───────────────
+  //
+  // The row's value is the LIVE listener state, read from the Host through the
+  // `acpAccess` port. It is the same async pattern as the Web provider page: a
+  // serial numbers the LATEST read so an earlier settlement can never overwrite
+  // a newer observation, the committed fact repaints whichever panel generation
+  // owns the surface, and every read is (re)started on workspace open / `r` so a
+  // reopened workspace never sits on a pre-read snapshot.
+  let acpRuntimeStatus: AcpAccessStatus | undefined
+  /** The Connection generation the CURRENT `acpRuntimeStatus` was read under. A
+   *  cached observation is only current while this identity still matches the
+   *  live Host generation — `configReadiness()==='ready'` alone cannot prove a
+   *  reconnected Host B is the one that produced an earlier Host A state. */
+  let acpRuntimeGeneration: unknown
+  let acpRuntimeFailure: string | undefined
+  let acpRuntimeReadSerial = 0
+  let acpRuntimeReadSettled = false
+
+  const readAcpRuntimeStatus = async (): Promise<{ status: AcpAccessStatus | undefined; fresh: boolean }> => {
+    const serial = ++acpRuntimeReadSerial
+    // The generation is captured BEFORE dispatch; the port's own fence turns a
+    // read that races a generation change into a failure, and this captured
+    // identity is what the settled fact is bound to.
+    const generation = acpCurrentGeneration()
+    const promise = (async (): Promise<AcpAccessStatus | undefined> => await runner.acpAccess.getStatus())()
+    let status: AcpAccessStatus | undefined
+    let failure: string | undefined
+    try {
+      status = await promise
+    } catch (error) {
+      failure = safeErrorMessage(error)
+    }
+    const fresh = serial === acpRuntimeReadSerial
+    if (fresh) {
+      // A resolved read (including an `unavailable` status) REPLACES the value;
+      // a thrown failure is UNKNOWN and drops it. The generation binds the fact.
+      acpRuntimeStatus = failure === undefined ? status : undefined
+      acpRuntimeGeneration = generation
+      acpRuntimeFailure = failure
+      acpRuntimeReadSettled = true
+      activeSettingsWorkspace?.refreshAcpRuntimeRow()
+    }
+    return { status: failure === undefined ? status : undefined, fresh }
+  }
+
+  /**
+   * The CURRENT Host generation identity, read through the port's observation
+   * capability. A structural runner double that does not model the Split-Host
+   * generation reports `undefined` (treated as Direct-like: no cross-Host risk).
+   */
+  const acpCurrentGeneration = (): unknown =>
+    typeof runner.acpAccess?.currentGeneration === 'function' ? runner.acpAccess.currentGeneration() : undefined
+
+  /**
+   * Whether the cached ACP observation still belongs to the CURRENT Host
+   * generation. A generation change (Host A → Host B) revokes both the cached
+   * state AND any user selection derived from it, before any new Confirm.
+   */
+  const acpRuntimeGenerationCurrent = (): boolean =>
+    Object.is(acpRuntimeGeneration, acpCurrentGeneration())
+
+  /** Enter the pending state synchronously so no snapshot presents a stale value. */
+  const beginAcpRuntimeRead = (): void => {
+    acpRuntimeStatus = undefined
+    acpRuntimeGeneration = undefined
+    acpRuntimeFailure = undefined
+    acpRuntimeReadSettled = false
+  }
+
+  /** Start ONE authoritative ACP listener read; the settled fact repaints the row. */
+  const startAcpRuntimeRead = (): void => {
+    beginAcpRuntimeRead()
+    activeSettingsWorkspace?.refreshAcpRuntimeRow()
+    detach('acp listener status read', async () => {
+      await readAcpRuntimeStatus()
+    }, { notify: false })
+  }
+
+  /**
+   * The currentness of the ACP listener observation. The Direct process owns no
+   * Split-Host listener (`unavailable`); a Remote whose configuration plane is
+   * reconnecting (`stale`) or gone (`unavailable`) must NOT keep presenting a
+   * cached On/Off as the current Host fact.
+   */
+  const acpReadiness = (): 'ready' | 'stale' | 'unavailable' =>
+    runner.backendKind === 'direct' ? 'unavailable' : runner.config.configReadiness()
+
+  /** The row's human summary for the CURRENT listener state. */
+  const acpRuntimeSummaryOf = (): string => {
+    if (runner.backendKind === 'direct') return 'Unavailable — Split Host only'
+    const readiness = acpReadiness()
+    // A non-current Host never presents a cached On/Off as the current fact.
+    if (readiness === 'stale') return 'Checking…'
+    if (readiness === 'unavailable') return 'Unavailable'
+    if (acpRuntimeFailure !== undefined) return 'Unavailable'
+    if (!acpRuntimeReadSettled) return 'Loading…'
+    // A settled fact from a PRIOR Host generation is not a current fact.
+    if (!acpRuntimeGenerationCurrent()) return 'Checking…'
+    const status = acpRuntimeStatus
+    if (status === undefined) return 'Unavailable'
+    switch (status.state) {
+      case 'enabled': return 'On'
+      case 'disabled': return 'Off'
+      case 'changing': return 'Changing…'
+      case 'unavailable': return 'Unavailable'
+    }
+  }
+
+  /** The live runtime fact painted as the Detail `Runtime` line. */
+  const acpRuntimeFactOf = (): string => {
+    if (runner.backendKind === 'direct') return 'unavailable (Split Host only)'
+    const readiness = acpReadiness()
+    if (readiness === 'stale') return 'the Host is not current (reconnecting); the last ACP state is not shown as current'
+    if (readiness === 'unavailable') return 'the Host is unavailable'
+    if (acpRuntimeFailure !== undefined) return 'status could not be read'
+    if (!acpRuntimeReadSettled) return 'checking…'
+    if (!acpRuntimeGenerationCurrent()) return 'the Host changed; re-checking the current ACP state…'
+    const status = acpRuntimeStatus
+    if (status === undefined) return 'unavailable'
+    switch (status.state) {
+      case 'enabled': return 'Listening on this Host'
+      case 'disabled': return 'Not listening'
+      case 'changing': return 'Applying a change…'
+      case 'unavailable': return `unavailable (${status.reason})`
+    }
+  }
+
+  const acpRuntimeFreshnessOf = (): SettingsWorkspaceFreshness => {
+    if (runner.backendKind === 'direct') return 'unavailable'
+    const readiness = acpReadiness()
+    if (readiness === 'stale') return 'last-known'
+    if (readiness === 'unavailable') return 'unavailable'
+    if (acpRuntimeFailure !== undefined) return 'read-error'
+    if (!acpRuntimeReadSettled) return 'runtime'
+    if (!acpRuntimeGenerationCurrent()) return 'last-known'
+    const status = acpRuntimeStatus
+    if (status === undefined || status.state === 'unavailable') return 'unavailable'
+    if (status.state === 'changing') return 'runtime'
+    return 'ready'
+  }
+
+  /** A settled On/Off on a CURRENT Host is the only confirmable state; a stale/
+   *  unavailable Host, `changing`, or an unread authority offers NO candidate so
+   *  Confirm is impossible. */
+  const acpRuntimeEditOf = (): SettingsWorkspaceEdit => {
+    const status = acpRuntimeStatus
+    const confirmable = acpReadiness() === 'ready'
+      && acpRuntimeReadSettled
+      && acpRuntimeGenerationCurrent()
+      && acpRuntimeFailure === undefined
+      && (status?.state === 'enabled' || status?.state === 'disabled')
+    return {
+      field: 'acp-runtime',
+      primary: 'runtime',
+      options: confirmable
+        ? [
+            { value: 'On', label: 'On', available: true, current: status?.state === 'enabled' },
+            { value: 'Off', label: 'Off', available: true, current: status?.state === 'disabled' },
+          ]
+        : [],
+      runtime: acpRuntimeFactOf(),
+      persisted: 'Not applicable · runtime control',
+    }
+  }
+
+  // ── PO-1B: the ACP STARTUP preference row (persisted, next launch) ───────
+  const acpAutostartSummaryOf = (state: AcpStartupPreferenceState | undefined): string => {
+    if (state === undefined) return 'Unavailable'
+    // `Off (default)` marks the schema default the USER layer does not declare.
+    if (state.autoStart) return 'On'
+    return state.userOverridden ? 'Off' : 'Off (default)'
+  }
+
+  const acpAutostartEditOf = (
+    state: AcpStartupPreferenceState | undefined,
+    readiness: 'ready' | 'stale' | 'unavailable',
+  ): SettingsWorkspaceEdit => {
+    const editable = state !== undefined && readiness === 'ready'
+    return {
+      field: 'acp-autostart',
+      primary: 'persisted',
+      ...(state === undefined ? {} : { revision: state.revision }),
+      options: editable
+        ? [
+            { value: 'On', label: 'On', available: true, current: state.autoStart },
+            { value: 'Off', label: 'Off', available: true, current: !state.autoStart },
+          ]
+        : [],
+      runtime: 'applies on the next Split Host start; the current ACP listener is unchanged',
+      persisted: acpAutostartSummaryOf(state),
+    }
+  }
+
+  const acpAutostartFreshnessOf = (
+    state: AcpStartupPreferenceState | undefined,
+    readiness: 'ready' | 'stale' | 'unavailable',
+  ): SettingsWorkspaceFreshness => state === undefined
+    ? 'unavailable'
+    : readiness === 'ready' ? 'ready' : 'last-known'
+
+  const acpAutostartValueOf = (value: string): boolean | undefined =>
+    value === 'On' ? true : value === 'Off' ? false : undefined
+
+  const verifyCommittedAcpAutostart = (expected: boolean): SettingsWorkspaceCommitOutcome => {
+    const readiness = runner.config.configReadiness()
+    if (readiness !== 'ready') {
+      return { outcome: 'unverified', reason: `the configuration is ${readiness}; the committed preference could not be re-read` }
+    }
+    const state = runner.config.acpStartupPreference.read()
+    if (state === undefined) {
+      return { outcome: 'unverified', reason: 'the committed ACP startup preference could not be re-read' }
+    }
+    if (state.autoStart !== expected) {
+      return {
+        outcome: 'not-saved',
+        reason: `the write reported success, but the authoritative preference reads ${state.autoStart ? 'On' : 'Off'}`,
+      }
+    }
+    return { outcome: 'verified' }
+  }
+
+  const classifyRejectedAcpAutostart = (
+    base: boolean,
+    failureReason: string,
+  ): SettingsWorkspaceCommitOutcome => {
+    const state = runner.config.configReadiness() === 'ready'
+      ? runner.config.acpStartupPreference.read()
+      : undefined
+    if (state === undefined) {
+      return { outcome: 'indeterminate', reason: `${failureReason}; the authoritative preference could not be re-read` }
+    }
+    if (state.autoStart === base) return { outcome: 'not-saved', reason: failureReason }
+    return {
+      outcome: 'indeterminate',
+      reason: `${failureReason}; the authority no longer reads the value this request started from, so its outcome cannot be attributed`,
+    }
+  }
+
+  /** Commit the next-launch preference through the official revision-checked
+   *  settings write. It never touches the current Host's ACP listener. */
+  const commitAcpAutostart = async (
+    value: string,
+    revision: number | undefined,
+  ): Promise<SettingsWorkspaceCommitOutcome> => {
+    const autoStart = acpAutostartValueOf(value)
+    if (autoStart === undefined) {
+      return { outcome: 'not-saved', reason: `"${value}" is not an ACP startup preference candidate` }
+    }
+    if (revision === undefined) {
+      return { outcome: 'not-saved', reason: 'the Host setting exposed no revision this choice could be based on' }
+    }
+    const readiness = runner.config.configReadiness()
+    if (readiness !== 'ready') {
+      return { outcome: 'not-saved', reason: `the configuration is ${readiness}; the ACP startup preference was not changed` }
+    }
+    const base = runner.config.acpStartupPreference.read()
+    if (base === undefined) {
+      return { outcome: 'not-saved', reason: 'the Host ACP startup preference is unavailable; nothing was changed' }
+    }
+    try {
+      await runner.config.acpStartupPreference.setAutoStart(autoStart, revision)
+    } catch (error) {
+      return classifyRejectedAcpAutostart(base.autoStart, safeErrorMessage(error))
+    }
+    return verifyCommittedAcpAutostart(autoStart)
+  }
+
+  /** Commit the live listener toggle. It reads the authority BEFORE dispatch,
+   *  sends exactly ONE `setEnabled`, and reuses the authoritative reread for the
+   *  verdict. A rejected/dispatched-but-unreadable write is classified from a
+   *  fresh read and never replayed. */
+  const commitAcpRuntime = async (value: string): Promise<SettingsWorkspaceCommitOutcome> => {
+    const target = value === 'On' ? true : value === 'Off' ? false : undefined
+    if (target === undefined) return { outcome: 'not-saved', reason: `"${value}" is not an ACP listener candidate` }
+    const targetState = target ? 'enabled' : 'disabled'
+    const isDirect = runner.backendKind === 'direct'
+    // Bind the user's choice to the Host generation it was DISPLAYED under. A
+    // reconnected Host B must never receive a write derived from Host A's state.
+    const choiceGeneration = acpRuntimeGeneration
+    const dispatchGeneration = acpCurrentGeneration()
+    if (!isDirect && !Object.is(choiceGeneration, dispatchGeneration)) {
+      return { outcome: 'not-saved', reason: 'the Host changed since this setting was read; the change was not sent' }
+    }
+    const sameGeneration = (): boolean => Object.is(dispatchGeneration, acpCurrentGeneration())
+    const pre = await readAcpRuntimeStatus()
+    if (!sameGeneration()) {
+      return { outcome: 'not-saved', reason: 'the Host changed while reading the ACP state; the change was not sent' }
+    }
+    if (!pre.fresh || pre.status === undefined) {
+      return { outcome: 'indeterminate', reason: 'the authoritative ACP listener state could not be read' }
+    }
+    const before = pre.status
+    if (before.state === 'changing') return { outcome: 'not-saved', reason: 'an ACP listener transition is already in progress' }
+    if (before.state === 'unavailable') return { outcome: 'not-saved', reason: 'the ACP listener is unavailable' }
+    if (before.state === targetState) return { outcome: 'verified' }
+    try {
+      // Pass the expected generation so the port refuses to dispatch to a Host
+      // that changed after the user's choice was made (no cross-Host write).
+      await runner.acpAccess.setEnabled(target, dispatchGeneration)
+    } catch (error) {
+      if (!sameGeneration()) {
+        return { outcome: 'indeterminate', reason: `${safeErrorMessage(error)}; the Host changed during the write, so its outcome cannot be attributed` }
+      }
+      const after = await readAcpRuntimeStatus()
+      if (!sameGeneration() || !after.fresh || after.status === undefined) {
+        return { outcome: 'indeterminate', reason: `${safeErrorMessage(error)}; the authoritative ACP listener state could not be re-read` }
+      }
+      if (after.status.state === targetState) {
+        return { outcome: 'indeterminate', reason: `${safeErrorMessage(error)}; the listener now reports ${after.status.state}, so this outcome cannot be attributed` }
+      }
+      return { outcome: 'not-saved', reason: safeErrorMessage(error) }
+    }
+    if (!sameGeneration()) {
+      return { outcome: 'indeterminate', reason: 'the Host changed during the write; its outcome cannot be attributed' }
+    }
+    const settled = await readAcpRuntimeStatus()
+    if (!sameGeneration() || !settled.fresh || settled.status === undefined) {
+      return { outcome: 'indeterminate', reason: 'the write was dispatched but the ACP listener state could not be re-read for this Host' }
+    }
+    if (settled.status.state === targetState) return { outcome: 'verified' }
+    return { outcome: 'not-saved', reason: `the write reported success, but the ACP listener reads ${settled.status.state}` }
+  }
+
   const webSettingsAvailable = (): boolean => runner.config.web.available()
 
   /** Why the Web page may not commit right now. The page keeps painting the
    *  LAST read facts (they are readable), but it offers no confirmable
-   *  candidate, no endpoint draft and no credential action while the backend is
-   *  not current — the commit entry would refuse every one of them at its turn,
-   *  so offering them would be a false affordance. */
+   *  candidate and no credential action while the backend is not current — the
+   *  commit entry would refuse every one of them at its turn, so offering them
+   *  would be a false affordance. */
   const webWritableRefusal = (): string | undefined => {
     if (!webSettingsAvailable()) return 'the Host Web provider settings are not available on this backend'
     const readiness = runner.config.configReadiness()
@@ -474,11 +877,12 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   const webSettledValue = (id: WebSettingRowId): string | undefined => {
     if (webSettings === undefined) return undefined
     switch (id) {
-      case 'web-search-provider': return providerLabel(WEB_SEARCH_PROVIDER_VALUES, webSettings.searchProvider)
-      case 'web-fetch-provider': return providerLabel(WEB_FETCH_PROVIDER_VALUES, webSettings.fetchProvider)
       case 'web-search-count': return String(webSettings.api.count)
       case 'web-send-original-question': return webSettings.api.sendOriginalQuestion ? 'on' : 'off'
-      case 'web-search-endpoint': return webSettings.api.baseURL
+      case 'web-search-billing': return webBillingLabel(webSettings.api.searchBilling)
+      case 'web-fetch-billing': return webBillingLabel(webSettings.api.fetchBilling)
+      case 'web-search-advanced': return webAdvancedFactsText(webSettings.advanced, 'search')
+      case 'web-fetch-advanced': return webAdvancedFactsText(webSettings.advanced, 'fetch')
     }
   }
 
@@ -487,7 +891,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    *  the first frame already carries authoritative values; a missing or failed
    *  read is stated, never defaulted. */
   const webWorkspaceRowFacts = (): { summary: string; freshness: SettingsWorkspaceFreshness; description: string } => {
-    const description = 'Host Web settings for the base profile, not an Optional Bundle. Defaults: Messages search · HTTP fetch; other bundles never change them and the defaults call no billed API. The Search/Fetch APIs are billed separately as opt-in providers (a Messages plan does not guarantee coverage) and send the request to the configured endpoint. Share Original Question is on by default: it sends up to 128 characters of the human question (never the full history or system prompt). The key stays in the official credential reference and is never shown. Enter opens the Web Search / Fetch page in this same workspace: each value is written only by its own explicit Confirm and reads Verified only after the Host write and authoritative read-back agree.'
+    const description = 'Host Web settings for the base profile, not an Optional Bundle. Search: with no explicit provider the Host routes AUTOMATICALLY (DSH rc.5; older Host versions may decide differently) — DeepSeek model routes prefer DeepSeek server-side search (no per-search charge), while other models and requests outside a model route prefer the DeepSeek Search API (billed separately per call; a Messages plan does not guarantee coverage), an explicit provider always overrides the automatic routing, and the Host may pick another single usable provider or fail when no preferred provider is usable. Fetch: the official Host base configures HTTP (no billed API); DeepSeek Fetch API is the opt-in, separately billed alternative; other bundles never change these settings. Share Original Question is on by default: it sends up to 128 characters of the human question as ori_question (never the full history or system prompt). Each Search/Fetch API billing mode (Automatic/Account/API key) is one explicit choice; the YAML-only Search/Fetch endpoint overrides are read-only facts here and, when set, own their capability over the billing choice. Old baseURL/apiKeyEnv/apiKey keys no longer control Search/Fetch. The key stays in the official credential reference and is never shown. Enter opens the Web Search / Fetch page in this same workspace: each value is written only by its own explicit Confirm and reads Verified only after the Host write and authoritative read-back agree.'
     if (!webSettingsAvailable()) {
       return { summary: 'Unavailable', freshness: 'unavailable', description: `${description} Not supported on this backend.` }
     }
@@ -500,15 +904,15 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         : { summary: 'Loading…', freshness: 'runtime', description }
     }
     return {
-      summary: `Search: ${providerLabel(WEB_SEARCH_PROVIDER_VALUES, webSettings.searchProvider) ?? 'unavailable'} · Fetch: ${providerLabel(WEB_FETCH_PROVIDER_VALUES, webSettings.fetchProvider) ?? 'unavailable'}`,
+      summary: `Search: ${providerLabel(WEB_SEARCH_PROVIDER_VALUES, webSettings.searchProvider) ?? 'Automatic'} · Fetch: ${providerLabel(WEB_FETCH_PROVIDER_VALUES, webSettings.fetchProvider) ?? 'Automatic'}`,
       freshness: 'ready',
       description,
     }
   }
 
-  /** The ONE Web write chain of this command owner. Every Web mutation (the
-   *  page's five fields and the endpoint draft) joins THIS chain: a slow
-   *  earlier mutation can never land after a newer one. */
+  /** The ONE Web write chain of this command owner. Every Web mutation (every
+   *  writable page row) joins THIS chain: a slow earlier mutation can never
+   *  land after a newer one. */
   let webWriteChain: Promise<void> = Promise.resolve()
 
   /** Queue one Web-section operation on the ONE owner FIFO. */
@@ -519,19 +923,15 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   }
 
   /** The exact ConfigPort operation one choice row means (undefined = the value
-   *  is not one this UI writes, so the row is restored unchanged). The ENDPOINT
-   *  row is owned by the exclusive endpoint editor, which passes its draft
-   *  through `commitWebIntent` directly. */
+   *  is not one this UI writes, so the row is restored unchanged). The override
+   *  rows are read-only facts: they never carry a write. */
   const webWriteFor = (id: WebSettingRowId, value: string): (() => Promise<void>) | undefined => {
     switch (id) {
-      case 'web-search-provider': {
-        const candidate = WEB_SEARCH_PROVIDER_VALUES.find(entry => entry.label === value || entry.id === value)
-        return candidate === undefined ? undefined : () => runner.config.web.setSearchProvider(candidate.id)
-      }
-      case 'web-fetch-provider': {
-        const candidate = WEB_FETCH_PROVIDER_VALUES.find(entry => entry.label === value || entry.id === value)
-        return candidate === undefined ? undefined : () => runner.config.web.setFetchProvider(candidate.id)
-      }
+      case 'web-search-provider':
+      case 'web-fetch-provider':
+        // The provider rows commit through the typed intent path; this
+        // value-only mapping must never become a second provider writer.
+        return undefined
       case 'web-search-count': {
         const count = Number(value)
         return Number.isInteger(count) && count >= 1 && count <= 50
@@ -542,9 +942,13 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         return value !== 'on' && value !== 'off'
           ? undefined
           : () => runner.config.web.setSendOriginalQuestion(value === 'on')
-      case 'web-search-endpoint':
-        // Owned by the exclusive endpoint editor (it validates, writes and
-        // verifies before closing), so the row's own commit carries no write.
+      case 'web-search-billing':
+        return isWebApiBilling(value) ? () => runner.config.web.setSearchBilling(value) : undefined
+      case 'web-fetch-billing':
+        return isWebApiBilling(value) ? () => runner.config.web.setFetchBilling(value) : undefined
+      case 'web-search-advanced':
+      case 'web-fetch-advanced':
+        // Read-only YAML-only facts: no write path exists for them here.
         return undefined
     }
   }
@@ -552,34 +956,42 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   /** The RAW identity one requested value means, or undefined when this UI never
    *  writes it. Providers accept their official id OR their display label (the
    *  page submits ids, an already-stored label still names the same route); the
-   *  write itself only ever uses the official id. */
+   *  write itself only ever uses the official id. Billing rows accept only the
+   *  official closed enum. */
   const webRequestedIdentity = (id: WebSettingRowId, requested: string): string | undefined => {
     switch (id) {
       case 'web-search-provider':
-        return WEB_SEARCH_PROVIDER_VALUES.find(entry => entry.id === requested || entry.label === requested)?.id
       case 'web-fetch-provider':
-        return WEB_FETCH_PROVIDER_VALUES.find(entry => entry.id === requested || entry.label === requested)?.id
+        return undefined
       case 'web-search-count': {
         const count = Number(requested)
         return Number.isInteger(count) && count >= 1 && count <= 50 ? String(count) : undefined
       }
       case 'web-send-original-question':
         return requested === 'on' || requested === 'off' ? requested : undefined
-      case 'web-search-endpoint':
-        return requested.trim() === '' ? undefined : requested
+      case 'web-search-billing':
+      case 'web-fetch-billing':
+        return isWebApiBilling(requested) ? requested : undefined
+      case 'web-search-advanced':
+      case 'web-fetch-advanced':
+        return undefined
     }
   }
 
   /** The RAW identity the LATEST authoritative settings hold (never a display
    *  label): the write verdict compares THIS against the requested identity, so
-   *  a canonical form / a winning external writer is a readable difference. */
+   *  a canonical form / a winning external writer is a readable difference. The
+   *  billing rows report the raw billing mode; the read-only override rows
+   *  report their facts string (no write exists, so the identity is
+   *  display-only). */
   const webCommittedIdentity = (settings: WebProviderSettings, id: WebSettingRowId): string | undefined => {
     switch (id) {
-      case 'web-search-provider': return settings.searchProvider
-      case 'web-fetch-provider': return settings.fetchProvider
       case 'web-search-count': return String(settings.api.count)
       case 'web-send-original-question': return settings.api.sendOriginalQuestion ? 'on' : 'off'
-      case 'web-search-endpoint': return settings.api.baseURL
+      case 'web-search-billing': return settings.api.searchBilling
+      case 'web-fetch-billing': return settings.api.fetchBilling
+      case 'web-search-advanced': return webAdvancedFactsText(settings.advanced, 'search')
+      case 'web-fetch-advanced': return webAdvancedFactsText(settings.advanced, 'fetch')
     }
   }
 
@@ -595,17 +1007,17 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   }
 
   /**
-   * The ONE Web commit entry (C2-R4 §5): the page's five fields AND the legacy
-   * editor's rows both confirm through this function, so there is exactly ONE
-   * FIFO, ONE latest-read fence and ONE settlement vocabulary:
+   * The ONE Web commit entry (C2-R4 §5): every writable row confirms through
+   * this function, so there is exactly ONE FIFO, ONE latest-read fence and ONE
+   * settlement vocabulary:
    *
    *  - (1) the caller already decided the exact field + value;
    *  - (2) the intent joins the command-owned chain;
    *  - (3) its turn re-proves readiness/availability and takes the NEWEST
    *    committed read as the base — a snapshot a later read superseded is never
    *    a commit base;
-   *  - (4) the candidate / custom-provider / value guard runs with ZERO Host
-   *    writes on refusal;
+   *  - (4) the candidate / custom-provider / value / override guard runs with
+   *    ZERO Host writes on refusal;
    *  - (5) the ONE official setter is dispatched;
    *  - (6) a fresh read-back decides `verified` / `not-saved` / `outcome-unknown`;
    *  - (7) the result is returned to whichever presentation still exists.
@@ -613,7 +1025,172 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    * An already-current request writes NOTHING and is `verified` from the real
    * authority (browsing/confirming the current value is not a mutation).
    */
-  const commitWebIntent = async (id: WebSettingRowId, requested: string): Promise<WebCommitResult> =>
+  /** The provider capability one provider row addresses (undefined for every
+   *  other row, which keeps its plain value request). */
+  const providerCapability = (id: WebSettingRowId): 'search' | 'fetch' | undefined =>
+    id === 'web-search-provider' ? 'search' : id === 'web-fetch-provider' ? 'fetch' : undefined
+
+  /** One provider's display identity (the raw Automatic state is a fact, not a
+   *  missing read). */
+  const webProviderDisplay = (capability: 'search' | 'fetch', id: string | undefined): string => {
+    if (id === undefined) return 'Automatic'
+    return providerLabel(capability === 'search' ? WEB_SEARCH_PROVIDER_VALUES : WEB_FETCH_PROVIDER_VALUES, id) ?? id
+  }
+
+  /** The latest Host facts one provider decision needs, from the SAME read. */
+  const webProviderSnapshot = (
+    settings: WebProviderSettings,
+    capability: 'search' | 'fetch',
+  ): { readonly baseId: string | undefined; readonly userSet: boolean; readonly userId: string | undefined; readonly effective: string | undefined } => ({
+    ...(capability === 'search' ? settings.providerSelection.search : settings.providerSelection.fetch),
+    effective: capability === 'search' ? settings.searchProvider : settings.fetchProvider,
+  })
+
+  /**
+   * ONE typed provider commit. The page already decided the OFFICIAL semantic
+   * (`select` -> set, `restore` -> unset) against the SAME Host read; this
+   * queue-head re-read only proves that the gesture still describes the Host:
+   *
+   * - a deployment (`base`) change invalidates the page-time decision for BOTH
+   *   actions (`Not saved`, zero writes) — the deployment default the user saw
+   *   is not the one that now applies;
+   * - a USER-layer change invalidates a RESET gesture only (an explicit set
+   *   intentionally replaces the USER value), so the stale "clear" can never
+   *   erase a value another writer just stored;
+   * - `Verified` for a reset is the fresh effective value equal to the fresh
+   *   deployment `baseId` (the official Host may keep an explicit USER value
+   *   equal to the base while the same section carries another override; that
+   *   is the official rc.5 reset behaviour and is NOT reported as a failed
+   *   write). An explicit set is only Verified when the fresh USER own-field
+   *   really carries the requested id — never from an inherited effective value.
+   */
+  const commitWebProviderIntent = async (
+    id: 'web-search-provider' | 'web-fetch-provider',
+    capability: 'search' | 'fetch',
+    intent: WebProviderCommitIntent,
+    base: WebProviderSettings,
+  ): Promise<WebCommitResult> => {
+    const observed = intent.observed
+    const fresh = webProviderSnapshot(base, capability)
+    if (fresh.baseId !== observed.baseId) {
+      return {
+        kind: 'not-saved',
+        reason: 'the Host deployment selection changed since the page read it; nothing was written',
+      }
+    }
+    if (intent.kind === 'provider-restore') {
+      if (fresh.userSet !== observed.userSet || fresh.userId !== observed.userId) {
+        return {
+          kind: 'not-saved',
+          reason: 'the Host USER selection changed since the page read it; nothing was written',
+          ...fresh.effective === undefined ? {} : { actual: webProviderDisplay(capability, fresh.effective) },
+        }
+      }
+      if (!fresh.userSet) {
+        if (fresh.effective === fresh.baseId) {
+          return { kind: 'verified', actual: webProviderDisplay(capability, fresh.effective) }
+        }
+        return {
+          kind: 'not-saved',
+          reason: `the USER selection is already absent, but the Host reads "${webProviderDisplay(capability, fresh.effective)}" instead of "${webProviderDisplay(capability, fresh.baseId)}"`,
+          ...fresh.effective === undefined ? {} : { actual: webProviderDisplay(capability, fresh.effective) },
+        }
+      }
+      try {
+        await (capability === 'search' ? runner.config.web.restoreSearchProvider() : runner.config.web.restoreFetchProvider())
+      } catch (error) {
+        const reason = safeErrorMessage(error)
+        await settleWebReadAfterWrite()
+        if (webSettings === undefined) return { kind: 'outcome-unknown', reason }
+        const after = webProviderSnapshot(webSettings, capability)
+        if (after.effective === after.baseId) {
+          return {
+            kind: 'outcome-unknown',
+            reason: `${reason}; the Host now reads "${webProviderDisplay(capability, after.effective)}" as the deployment default, so the rejection cannot be attributed`,
+          }
+        }
+        return { kind: 'not-saved', reason, actual: webProviderDisplay(capability, after.effective) }
+      }
+      await settleWebReadAfterWrite()
+      if (webSettings === undefined) {
+        return { kind: 'outcome-unknown', reason: 'the Host reset could not be verified: the Web settings could not be read back' }
+      }
+      const after = webProviderSnapshot(webSettings, capability)
+      if (after.effective === after.baseId) {
+        return { kind: 'verified', actual: webProviderDisplay(capability, after.effective) }
+      }
+      return {
+        kind: 'not-saved',
+        reason: `the Host keeps "${webProviderDisplay(capability, after.effective)}" instead of the deployment default "${webProviderDisplay(capability, after.baseId)}"`,
+        actual: webProviderDisplay(capability, after.effective),
+      }
+    }
+    // Explicit selection: the official setter, NEVER the base-substitution.
+    let write: (() => Promise<void>) | undefined
+    if (capability === 'search') {
+      const target = WEB_SEARCH_PROVIDER_VALUES.find(candidate => candidate.id === intent.id)
+      if (target !== undefined) write = () => runner.config.web.setSearchProvider(target.id)
+    } else {
+      const target = WEB_FETCH_PROVIDER_VALUES.find(candidate => candidate.id === intent.id)
+      if (target !== undefined) write = () => runner.config.web.setFetchProvider(target.id)
+    }
+    if (write === undefined) {
+      return { kind: 'not-saved', reason: `"${intent.id}" is not an official provider this page writes` }
+    }
+    // A CUSTOM effective route is displayed verbatim and is NEVER overwritten
+    // here: zero writes, explicit cause. Only a fresh authority can change that.
+    if (fresh.effective !== undefined
+      && !(capability === 'search' ? WEB_SEARCH_PROVIDER_VALUES : WEB_FETCH_PROVIDER_VALUES)
+        .some(candidate => candidate.id === fresh.effective)) {
+      return {
+        kind: 'not-saved',
+        reason: `the configured provider is a custom route (${fresh.effective}); only the official candidates are selectable here`,
+      }
+    }
+    // The USER layer really carrying the requested id satisfies the intent with
+    // zero writes; an inherited effective value does NOT (the page's explicit
+    // pin intent must reach the official setter).
+    if (fresh.effective === intent.id && fresh.userSet && fresh.userId === intent.id) {
+      return { kind: 'verified', actual: intent.id }
+    }
+    try {
+      await write()
+    } catch (error) {
+      const reason = safeErrorMessage(error)
+      await settleWebReadAfterWrite()
+      if (webSettings === undefined) return { kind: 'outcome-unknown', reason }
+      const after = webProviderSnapshot(webSettings, capability)
+      if (after.effective !== intent.id) {
+        return { kind: 'not-saved', reason, actual: webProviderDisplay(capability, after.effective) }
+      }
+      return {
+        kind: 'outcome-unknown',
+        reason: `${reason}; the Host now reads the submitted value, so the rejection cannot be attributed`,
+      }
+    }
+    await settleWebReadAfterWrite()
+    if (webSettings === undefined) {
+      return { kind: 'outcome-unknown', reason: 'the Host write could not be verified: the Web settings could not be read back' }
+    }
+    const after = webProviderSnapshot(webSettings, capability)
+    if (after.effective === intent.id && after.userSet && after.userId === intent.id) {
+      return { kind: 'verified', actual: intent.id }
+    }
+    if (after.effective === intent.id) {
+      return {
+        kind: 'not-saved',
+        reason: `the Host reads "${webProviderDisplay(capability, after.effective)}" only as an inherited value; the requested USER selection was not stored`,
+        actual: intent.id,
+      }
+    }
+    return {
+      kind: 'not-saved',
+      reason: `the Host keeps "${webProviderDisplay(capability, after.effective)}" instead of the submitted value`,
+      actual: webProviderDisplay(capability, after.effective),
+    }
+  }
+
+  const commitWebIntent = async (id: WebSettingRowId, requested: WebSettingsCommitRequest): Promise<WebCommitResult> =>
     queueWebOperation(async (): Promise<WebCommitResult> => {
       if (!webSettingsAvailable()) {
         return { kind: 'not-saved', reason: 'the Host Web provider settings are unavailable on this backend' }
@@ -633,33 +1210,58 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       if (base === undefined) {
         return { kind: 'not-saved', reason: 'the current Web settings could not be read' }
       }
+      // The two provider rows commit through the TYPED intent (the page decided
+      // restore vs explicit select from the same read); every other row keeps
+      // its plain value request.
+      const capability = providerCapability(id)
+      if (capability !== undefined) {
+        if (typeof requested === 'string') {
+          return { kind: 'not-saved', reason: `"${requested}" is not a supported provider intent` }
+        }
+        return commitWebProviderIntent(id as 'web-search-provider' | 'web-fetch-provider', capability, requested, base)
+      }
+      if (typeof requested !== 'string') {
+        return { kind: 'not-saved', reason: 'a provider intent can only address the two provider rows' }
+      }
       const requestedIdentity = webRequestedIdentity(id, requested)
       if (requestedIdentity === undefined) {
         return { kind: 'not-saved', reason: `"${requested}" is not a value this page writes` }
       }
-      if (id === 'web-search-provider' || id === 'web-fetch-provider') {
-        const candidates = id === 'web-search-provider' ? WEB_SEARCH_PROVIDER_VALUES : WEB_FETCH_PROVIDER_VALUES
-        const currentId = webCommittedIdentity(base, id)
-        // A CUSTOM route is displayed verbatim and is NEVER overwritten here:
-        // zero writes, explicit cause. Only a fresh authority can change that.
-        if (currentId !== undefined && !candidates.some(candidate => candidate.id === currentId)) {
+      // A non-empty YAML-only override owns its capability's endpoint/credential
+      // configuration, and only the EXPLICITLY selected official API admits its
+      // Billing row. Both gates run BEFORE the already-current (zero-write
+      // Verified) shortcut: a stale Billing confirm queued while the route was
+      // writable must still be REFUSED (never Verified) after another Host
+      // writer moved the route, with zero writes either way.
+      if (id === 'web-search-billing' || id === 'web-fetch-billing') {
+        const capability = id === 'web-search-billing' ? 'search' : 'fetch'
+        const providerSelected = capability === 'search'
+          ? base.searchProvider === 'deepseek-search-api'
+          : base.fetchProvider === 'deepseek-fetch-api'
+        // Only the explicitly selected official API consumes its billing mode
+        // (the official Client's product policy). An AUTOMATIC route may still
+        // execute the Search API for other models' requests, so the stored
+        // Billing stays a Host setting — but this page refuses to edit it here.
+        if (!providerSelected) {
           return {
             kind: 'not-saved',
-            reason: `the configured provider is a custom route (${currentId}); only the official candidates are selectable here`,
+            reason: capability === 'search'
+              ? 'the DeepSeek Search API Billing is editable here only while that API is the explicitly selected provider; Automatic routes at request time'
+              : 'the Fetch route is not the DeepSeek Fetch API; Fetch Billing applies only to that API',
           }
         }
-        const candidate = candidates.find(entry => entry.id === requestedIdentity)
-        // The official auto-selection already applies the default candidate:
-        // confirming it is a zero-write Verified, never a redundant pin.
-        if (currentId === requestedIdentity || (currentId === undefined && candidate?.default === true)) {
-          return { kind: 'verified', actual: requestedIdentity }
+        const overrides = webAdvancedOverrideFields(base.advanced, capability)
+        if (overrides.length > 0) {
+          return {
+            kind: 'not-saved',
+            reason: `the ${capability} API is overridden by Host YAML (${overrides.map(entry => entry.field).join(' and ')}); the billing choice cannot be written here`,
+          }
         }
-      } else if (webCommittedIdentity(base, id) === requestedIdentity) {
+      }
+      if (webCommittedIdentity(base, id) === requestedIdentity) {
         return { kind: 'verified', actual: requestedIdentity }
       }
-      const write = id === 'web-search-endpoint'
-        ? () => runner.config.web.setSearchApiBaseURL(requested)
-        : webWriteFor(id, requested)
+      const write = webWriteFor(id, requested)
       if (write === undefined) {
         return { kind: 'not-saved', reason: `"${requested}" is not a value this page writes` }
       }
@@ -696,12 +1298,14 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    *  settles. A newer/closed generation never receives the result. The repaint is
    *  ROW-scoped: the Web authority changed, so the TUI settings document is never
    *  read a second time (one guarded document read per surface). */
-  let activeSettingsWorkspace: { readonly token: object; readonly refreshWebRow: () => void } | undefined
+  let activeSettingsWorkspace: { readonly token: object; readonly refreshWebRow: () => void; readonly refreshAcpRuntimeRow: () => void; readonly invalidateAcpChoice: () => void } | undefined
   /** The MOUNTED Web Search / Fetch page (C2-R4). It is created by the root's
    *  explicit activation, dies with the workspace, and is never a second
    *  settings authority: a fact settlement repaints the root, whose frame
    *  re-renders the page from the LATEST command-owned read. */
   let activeWebPage: WebSettingsPage | undefined
+  /** FR4: the ONE open MCP page's controller (a Settings refresh re-reads it). */
+  let activeMcpController: McpServersController | undefined
 
   interface WorkspaceOpenSpec {
     readonly initialRowId?: SettingsWorkspaceRowId
@@ -711,155 +1315,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     /** C2-R5: the typed professional page the first painted body mounts. It is
      *  valid ONLY with the exact `initialRowId` the panel's route table names. */
     readonly initialSpecialist?: import('../panels/settings-workspace-panel.ts').SettingsWorkspaceSpecialistRoute
-  }
-
-  /**
-   * C2-R3: the ONE official-section write queue of this command owner.
-   *
-   * The official `subagent-model-selection` section is ONE stored value with TWO
-   * halves, and every surface (the embedded allowlist picker and the workspace
-   * toggle) edits only ONE half per user action. A queue that merely serialized
-   * whole-section payloads captured BEFORE their turn would let an earlier
-   * intent be erased by a later payload built from a stale snapshot — the exact
-   * "a slow earlier write lands after a newer one" failure. Each queued item is
-   * therefore an INTENT over ONE half,
-   * and its payload is rebuilt from a FRESH official read INSIDE the queue,
-   * right before the write:
-   *  - a route edit replaces the allowlist and keeps the CURRENT `enabled`;
-   *  - an enabled edit sets the flag and keeps the CURRENT routes.
-   * It is a serialization + rebase barrier, not a settings authority: the
-   * official section stays the only stored value and each caller keeps its own
-   * real settlement.
-   */
-  interface OfficialSectionState {
-    readonly enabled: boolean
-    readonly allowedModels: readonly import('../../runtime/config-port.ts').SubagentAllowedModelRoute[]
-  }
-  let subagentSectionTail: Promise<void> = Promise.resolve()
-  const enqueueSubagentSectionWrite = <T>(write: () => Promise<T>): Promise<T> => {
-    // The tail absorbs the failure so one rejection can never lock the queue;
-    // the caller's own promise keeps the REAL settlement.
-    const turn = subagentSectionTail.then(write, write)
-    subagentSectionTail = turn.then(() => undefined, () => undefined)
-    return turn
-  }
-  /** Whether the official section may be written RIGHT NOW: the section must be
-   *  available AND the backend must vouch for its values. A stale/unavailable
-   *  mirror keeps readable last-known values, so a write built from it would
-   *  overwrite whatever the Host changed while this Client was not current. */
-  const subagentSectionWritable = (): boolean =>
-    runner.config.subagentModelSelection.available() && runner.config.configReadiness() === 'ready'
-  /**
-   * Why the official section could not be written when its turn came. A
-   * PRECONDITION refusal is the user's own setup problem (navigate + guide);
-   * every other cause is a real failure the caller must surface.
-   */
-  type OfficialSectionRefusal =
-    | { readonly kind: 'empty-allowlist' }
-    | { readonly kind: 'last-route-while-enabled' }
-    | { readonly kind: 'not-writable'; readonly reason: string }
-    | { readonly kind: 'unreadable'; readonly reason: string }
-  type OfficialSectionEditOutcome =
-    | { readonly kind: 'written'; readonly section: OfficialSectionState }
-    | { readonly kind: 'refused'; readonly refusal: OfficialSectionRefusal }
-
-  /** The current section, or why it cannot be used as a base right now. */
-  const readOfficialSection = (
-    section: import('../../runtime/config-port.ts').SubagentModelSelectionConfig,
-  ): { readonly section?: OfficialSectionState; readonly refusal?: OfficialSectionRefusal } => {
-    // The CAPABILITY is re-proved at the write's own turn, not only when the
-    // user acted: a section that became unavailable while this intent waited
-    // must not be written from whatever `get()` would answer then.
-    if (!section.available()) {
-      return { refusal: { kind: 'not-writable', reason: 'the official subagent settings are unavailable on this backend' } }
-    }
-    const readiness = runner.config.configReadiness()
-    if (readiness !== 'ready') {
-      // A stale/unavailable backend keeps readable LAST-KNOWN values: writing
-      // them back would overwrite whatever the Host changed while this Client
-      // was not current.
-      return { refusal: { kind: 'not-writable', reason: `the configuration is ${readiness}` } }
-    }
-    try {
-      const latest = section.get()
-      return {
-        section: {
-          enabled: latest.enabled,
-          allowedModels: latest.allowedModels.map(route => ({ ...route })),
-        },
-      }
-    } catch (error) {
-      // An UNREADABLE official section is never a usable base and never a
-      // verifiable result: the caller must surface the failure.
-      return { refusal: { kind: 'unreadable', reason: safeErrorMessage(error) } }
-    }
-  }
-
-  /**
-   * Queue ONE section edit. `rebase` runs INSIDE the queue against the FRESH
-   * official section and must change ONLY the half this intent owns, copying the
-   * other half verbatim. Returning `undefined` refuses the edit with ZERO writes
-   * for a caller-declared reason (the setup precondition).
-   *
-   * The outcome is EXPLICIT about why nothing was written: a non-writable
-   * backend and an unreadable section are NOT successful settlements, so no
-   * picker can paint a silent rollback as if its intent had committed.
-   */
-  const queueSubagentSectionEdit = (
-    rebase: (fresh: OfficialSectionState) => OfficialSectionState | undefined,
-    refusalOf?: (fresh: OfficialSectionState) => OfficialSectionRefusal | undefined,
-  ): Promise<OfficialSectionEditOutcome> => enqueueSubagentSectionWrite(async () => {
-    const section = runner.config.subagentModelSelection
-    const base = readOfficialSection(section)
-    if (base.refusal !== undefined) return { kind: 'refused', refusal: base.refusal }
-    const fresh = base.section!
-    const declared = refusalOf?.(fresh)
-    if (declared !== undefined) return { kind: 'refused', refusal: declared }
-    const payload = rebase(fresh)
-    if (payload === undefined) return { kind: 'refused', refusal: { kind: 'empty-allowlist' } }
-    await section.set(payload)
-    return { kind: 'written', section: payload }
-  })
-  /** The narrow queue-backed section adapter the existing picker consumes. A
-   *  refusal REJECTS: the picker must never treat "nothing was written" as a
-   *  successful settlement. */
-  const queuedSubagentSelection = (): import('../../runtime/config-port.ts').SubagentModelSelectionConfig => ({
-    available: () => subagentSectionWritable(),
-    get: () => runner.config.subagentModelSelection.get(),
-    set: async (value) => {
-      const outcome = await queueSubagentSectionEdit(fresh => ({
-        enabled: fresh.enabled,
-        allowedModels: value.allowedModels.map(route => ({ ...route })),
-      }))
-      if (outcome.kind === 'written') return
-      throw new Error(refusalMessage(outcome.refusal))
-    },
-  })
-  /**
-   * Apply ONE route intent against the section the queue really holds when the
-   * write's turn comes. Two picker instances therefore compose instead of
-   * overwriting each other: an add keeps every route the section already has,
-   * a remove drops exactly one `(provider, model)` pair.
-   */
-  const queuedRouteIntent = async (
-    route: import('../../runtime/config-port.ts').SubagentAllowedModelRoute,
-    direction: 'add' | 'remove',
-  ): Promise<void> => {
-    const outcome = await queueSubagentSectionEdit(
-      fresh => ({
-        enabled: fresh.enabled,
-        allowedModels: applyRouteIntent(fresh.allowedModels, route, direction),
-      }),
-      // Removing the LAST route of an ENABLED section would leave the official
-      // section invalid. This is decided HERE, from the FRESH section, in FIFO
-      // order — a locally-decided version would refuse an operation that a
-      // queued `enabled:false` makes legal.
-      fresh => lastRouteWhileEnabled(fresh.enabled, fresh.allowedModels, route)
-        ? { kind: 'last-route-while-enabled' }
-        : undefined,
-    )
-    if (outcome.kind === 'written') return
-    throw new Error(refusalMessage(outcome.refusal))
   }
 
   const openSettingsWorkspaceWith = (spec: WorkspaceOpenSpec): import('../../tui-app.ts').SettingsWorkspaceHandle => {
@@ -893,6 +1348,21 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     // The panel snapshots its source in its CONSTRUCTOR, so the pending state
     // must be in place before the lease is taken.
     if (webSettingsAvailable()) beginWebSettingsRead()
+    beginAcpRuntimeRead()
+    // M6-1 F8: the initial session-policy read starts only after this
+    // workspace's lease was granted. The panel's FIRST snapshot (constructor,
+    // inside the granted open) already starts the observation's controlled
+    // read, so the initial call only forces one when that snapshot is NOT
+    // `checking` (a proven old value that must be re-read). `r` forces it.
+    const startPolicyRead = (force: boolean): void => {
+      const scope = pinnedApprovalScope()
+      if (scope === undefined) return
+      if (!force && runner.policy.readSnapshot(scope.sessionId).kind === 'checking') return
+      runDetached('session policy read', async () => {
+        await runner.policy.refresh(scope.sessionId)
+        runner.refreshStatus()
+      }, { diag: runner.diag, sessionId: () => scope.sessionId })
+    }
     // C3: the ONE per-open About owner. Its subscription is acquired HERE
     // (page open), its `enter()` runs only AFTER `openSettingsWorkspace`
     // returned the live handle (no synchronous callback can target an
@@ -915,12 +1385,35 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       return aboutController
     }
     let handle: import('../../tui-app.ts').SettingsWorkspaceHandle | undefined
+    /** M6-1 F8: the observation settlement that repaints THIS open workspace's
+     *  rows. The panel captures its row facts at construction; the async Host
+     *  policy read settles later, so the settle must go through the existing
+     *  runtime-facts re-read seam (never a second observation state). Released
+     *  with the workspace lease. */
+    let disposePolicyWatch: (() => void) | undefined
+    /** PO-1B: the ACP listener observation lease. A Connection generation change
+     *  revokes the previous Host's ACP state/selection and re-reads the new Host
+     *  before any new Confirm; released with the workspace. */
+    let disposeAcpGenerationWatch: (() => void) | undefined
     // C2-R2: the per-open VERIFIED fullscreen intent. A Fullscreen confirm that
     // really stored its preference records the target here; the post-close
     // hand-off applies the LAST verified choice of THIS open only. It is not a
     // second persistence authority — it is the navigation action the stored
     // preference already implies, released with the workspace.
     let verifiedFullscreenIntent: 'on' | 'off' | undefined
+    // R8-E PR-4: ONE per-open extension Config refresh, started only after the
+    // workspace lease exists and re-entered on the explicit Refresh key. A late
+    // settlement from a closed/superseded open never repaints a newer page.
+    const hasPersistedExtensionSettings = (): boolean =>
+      runner.extensions?.settings.rows().some(record => record.mode === 'persisted') === true
+    const startExtensionConfigRefresh = (): void => {
+      if (!hasPersistedExtensionSettings()) return
+      detach('extension config refresh', async () => {
+        await runner.config.extensionConfigs.refresh()
+        if (activeSettingsWorkspace?.token !== token) return
+        app.refreshSettingsWorkspaceRuntimeFacts()
+      }, { notify: false })
+    }
     handle = app.openSettingsWorkspace(
       {
         readSnapshot: () => readSettingsWorkspaceSnapshot(pinnedApprovalScope()),
@@ -931,10 +1424,20 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           const registry = runner.extensions?.settings.snapshot()
           return { revision: registry?.revision ?? 0, count: registry?.rows.length ?? 0 }
         },
-        onRefresh: () => { startWebSettingsRead() },
+        onRefresh: () => {
+          startWebSettingsRead()
+          startAcpRuntimeRead()
+          startPolicyRead(true)
+          // R8-E PR-4: an explicit refresh re-reads the Host per-package Config
+          // mirror for the persisted extension rows of THIS open.
+          startExtensionConfigRefresh()
+          // FR4: the open MCP page re-reads its roster + configuration on an
+          // explicit refresh (never a background poll).
+          activeMcpController?.refresh()
+        },
       },
       {
-        onOpenPlugins: (onYieldNavigation) => runner.createPluginManagerPage(onYieldNavigation),
+        onOpenPlugins: (onYieldNavigation, onManageComputerUse) => runner.createPluginManagerPage(onYieldNavigation, onManageComputerUse),
         onCommit: async (request) => {
           const result = await commitSettingsWorkspaceField(request, pinnedApprovalScope())
           // Only a session that still belongs to THIS open may update the
@@ -948,43 +1451,137 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           }
           return result
         },
+        // M6 UX PR2: the ONE explicit service install. The panel guarantees a
+        // single in-flight confirmation; this owner guarantees ONE run per
+        // confirmed request through the existing process task owner, and the
+        // control plane's own result is the ONLY success/failure source. A
+        // refusal is reported as-is: no fallback install source, no start, no
+        // automatic retry. `Not now`/Esc never reach this callback.
+        onBackendServiceInstall: (settle) => {
+          const admin = runner.profileDaemonAdmin
+          if (admin === undefined) {
+            settle({ ok: false, detail: 'the local daemon administration capability is unavailable' })
+            return
+          }
+          runOwned('settings daemon service install', async () => {
+            const result = await admin.run('install')
+            settle(result.code === 0
+              ? { ok: true }
+              : { ok: false, detail: daemonInstallRefusalDetail(result) })
+          }, {
+            diag: runner.diag,
+            sessionId: () => runner.currentSessionId,
+            onError: () => settle({ ok: false, detail: 'the install task failed before the control plane reported a result' }),
+          })
+        },
         createModelsPage,
         createAccountPage,
-        // C2-R3: the ONE embedded specialist page — the EXISTING subagent
-        // allowlist picker mounted in this same workspace body. It is created
-        // only by an explicit Manage/Enter, reads the OFFICIAL section and the
-        // official model directory, and writes through the SAME serialized
-        // section queue as the workspace toggle.
-        createSubagentAllowlistPicker: (done, onAuthoritativeChange) => {
-          // The section must be AVAILABLE *and* CURRENT: opening a picker over a
-          // stale mirror would let the user toggle routes that can never commit.
-          if (!subagentSectionWritable() || !runner.catalog.models.available()) return undefined
-          return new SubagentModelAllowlistPicker({
-            selection: queuedSubagentSelection(),
-            // Each toggle submits ONLY the pair it changed, applied to the
-            // section the queue holds at write time (two picker instances compose).
-            routeIntent: {
-              add: route => queuedRouteIntent(route, 'add'),
-              remove: route => queuedRouteIntent(route, 'remove'),
+        createHostNumericSettingsPage: (kind, done, onAuthoritativeChange) => {
+          const requestRender = (): void => { if (!app.isDisposed()) app.requestRender() }
+          const runOwnedTask = (label: string, task: () => Promise<void>): void => {
+            runOwned(label, task, { diag: runner.diag, sessionId: () => runner.currentSessionId })
+          }
+          if (kind === 'agent-loop') {
+            const fields = [{ key: 'maxParallelToolCalls' as const, label: 'Parallel tool calls' }]
+            const controller = new HostNumericSettingsController<AgentLoopSettings>({
+              port: runner.config.agentLoopSettings,
+              fields,
+              requestRender,
+              onAuthoritativeChange,
+              runOwned: runOwnedTask,
+            })
+            return new HostNumericSettingsPage<AgentLoopSettings>({
+              controller,
+              fields,
+              spec: {
+                title: 'Agent loop',
+                sourceHeading: source => source.kind === 'ready'
+                  ? `Host profile · effective settings · revision ${source.revision}`
+                  : `Host profile · ${source.kind === 'unavailable' ? 'Unavailable' : 'Unreadable'}`,
+                help: [
+                  'The effective value is the current official agent-loop setting; Differs from base compares it with the inherited base.',
+                  'The next Agent step samples the new parallel cap. Tool calls already dispatched are never rewritten.',
+                  'Reset stages the official unset operation and then shows the Host readback; the USER patch may keep the inherited value.',
+                ],
+              },
+              requestRender,
+              done,
+            })
+          }
+          const shell = runner.config.shellExecutionSettings
+          const positiveFiniteText = (text: string): boolean => {
+            if (text.trim() === '') return false
+            const value = Number(text)
+            return Number.isFinite(value) && value > 0
+          }
+          const fields = [
+            {
+              key: 'timeoutMs' as const,
+              label: 'Command timeout (ms)',
+              validate: positiveFiniteText,
+              invalidHint: 'Enter a positive finite number.',
             },
-            catalog: runner.catalog.models,
-            notify: (message, kind) => app.notify(message, kind),
+            {
+              key: 'maxOutputBytes' as const,
+              label: 'Output cap per stream (bytes)',
+              validate: positiveFiniteText,
+              invalidHint: 'Enter a positive finite number.',
+            },
+          ]
+          // The controller's captured revision/generation and served-row
+          // identity stay current; the port re-resolves that row at dispatch.
+          const port: HostNumericSettingsPort<ShellExecutionSettings> = {
+            read: () => shell.read(),
+            refresh: () => shell.refresh(),
+            mutate: (patch, revision, generation, base) => shell.mutate(patch, revision, generation, base.effective.executor),
+          }
+          const controller = new HostNumericSettingsController<ShellExecutionSettings>({
+            port,
+            fields,
+            requestRender,
+            onAuthoritativeChange,
+            runOwned: runOwnedTask,
+            valueIdentity: value => value.executor,
+          })
+          return new HostNumericSettingsPage<ShellExecutionSettings>({
+            controller,
+            fields,
+            spec: {
+              title: 'Shell execution',
+              sourceHeading: source => source.kind === 'ready'
+                ? `Host model-tool executor · ${source.effective.executor === 'bash' ? 'POSIX Bash' : 'Windows PowerShell'}`
+                : 'Host model-tool executor · unavailable',
+              help: [
+                'These are the official model-tool shell caps of the Host-served executor. Both fields save as one revision-checked Host mutation.',
+                'New shell executions use the caps; a running subprocess keeps its current timeout. The ! / !! user-shell policy is separate.',
+                'Reset stages the official unset operation and then shows the Host readback; the USER patch may keep the inherited value.',
+              ],
+            },
+            requestRender,
+            done,
+          })
+        },
+        createSubagentSettingsPage: (done, onAuthoritativeChange) => {
+          const controller = new SubagentSettingsController({
+            limits: runner.config.subagentLimits,
+            selection: runner.config.subagentModelSelection,
             requestRender: () => app.requestRender(),
-            diag: runner.diag,
-            done: () => { done() },
-            // A settlement that lands after the user closed the picker still
-            // refreshes the Agent row facts of the workspace they are now
-            // looking at: the outer surface re-reads the OFFICIAL section, so
-            // the picker's display string is never trusted as the fact.
-            summarize: () => { onAuthoritativeChange() },
-            runOwned: (label, task, options) => {
-              runOwned(label, task, {
-                diag: runner.diag,
-                sessionId: () => runner.currentSessionId,
-                ...options,
-              })
+            onAuthoritativeChange,
+            runOwned: (label, task) => {
+              runOwned(label, task, { diag: runner.diag, sessionId: () => runner.currentSessionId })
             },
           })
+          const page = new SubagentSettingsPage({
+            controller,
+            catalog: runner.catalog.models,
+            requestRender: () => app.requestRender(),
+            done,
+            runOwned: (label, task, options) => {
+              runOwned(label, task, { diag: runner.diag, sessionId: () => runner.currentSessionId, ...options })
+            },
+          })
+          controller.start()
+          return page
         },
         // C2-R4: the ONE embedded Web Search / Fetch page, mounted in this same
         // workspace body on the Tools row's explicit activation. The page reads
@@ -1018,6 +1615,61 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         // workspace's body and never opens a second overlay.
         createFooterConfiguratorPage: (done, onAuthoritativeChange) => createFooterWorkspacePage(done, onAuthoritativeChange),
         createKeybindingsPage: (done, onAuthoritativeChange) => createKeybindingsWorkspacePage(done, onAuthoritativeChange),
+        // FR3: the ONE per-open MCP servers page. The controller holds only
+        // this open's transient state; it starts its ONE watch only after the
+        // real Settings lease is live (here), and the page's dispose retires it.
+        createMcpServersPage: (done) => {
+          const port = runner.mcpServers
+          if (port === undefined) return undefined
+          const controller = new McpServersController({
+            port,
+            sources: runner.config.mcpServerSources,
+            configuration: runner.config.mcpServerConfiguration,
+            requestRender: () => { if (!app.isDisposed()) app.requestRender() },
+            runOwned: (label, task, options) => runOwned(label, task, {
+              diag: runner.diag,
+              sessionId: () => runner.currentSessionId,
+              ...(options?.signal === undefined ? {} : { isCancellation: () => options.signal?.aborted === true }),
+            }),
+          })
+          const page = new McpServersPage({
+            controller,
+            requestRender: () => { if (!app.isDisposed()) app.requestRender() },
+            done: () => {
+              if (activeMcpController === controller) activeMcpController = undefined
+              done()
+            },
+          })
+          activeMcpController = controller
+          controller.start()
+          return page
+        },
+        // PR-5/MAC-09 v2: the ONE per-open Computer Use page. The controller
+        // reads the official CUA access port and reuses the existing Plugin
+        // Manager roster + preset-default writer; the page is disposed by the
+        // Settings lease and owns no second permission store.
+        createComputerUsePage: (done, openPlugins) => {
+          const cuaAccess = runner.cuaAccess
+          const pluginManager = runner.pluginManager
+          if (cuaAccess === undefined || pluginManager === undefined) return undefined
+          const controller = new CuaAccessSettingsController({
+            cuaAccess,
+            pluginManager,
+            presetDefault: runner.config.presetDefault,
+            diag: runner.diag,
+            locale: () => {
+              const locale = Intl.DateTimeFormat().resolvedOptions().locale
+              return locale === '' ? 'en-US' : locale
+            },
+          })
+          return new ComputerUseSettingsPage({
+            controller,
+            requestRender: () => { if (!app.isDisposed()) app.requestRender() },
+            done,
+            openPlugins,
+            diag: runner.diag,
+          })
+        },
         // The About page's two version facts: read ONCE per workspace open on
         // the Client side. `tui` is this bundle's own version and `dsh` the
         // installed Harness version — neither is derived from the other, and
@@ -1034,6 +1686,12 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           // inert before any physical switch is attempted.
           const wasActive = activeSettingsWorkspace?.token === token
           if (wasActive) activeSettingsWorkspace = undefined
+          // The policy observation subscription dies with this workspace.
+          disposePolicyWatch?.()
+          disposePolicyWatch = undefined
+          // The ACP generation observation dies with this workspace too.
+          disposeAcpGenerationWatch?.()
+          disposeAcpGenerationWatch = undefined
           // C2-R4: the mounted Web page's command reference dies with this open
           // (the panel itself disposes the instance on teardown). A late fact
           // settlement then repaints nothing.
@@ -1070,8 +1728,42 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         },
       },
     )
-    activeSettingsWorkspace = { token, refreshWebRow: () => handle?.refreshRow(WEB_LAUNCHER_ROW_ID, webWorkspaceRowFacts()) }
+    activeSettingsWorkspace = { token, refreshWebRow: () => handle?.refreshRow(WEB_LAUNCHER_ROW_ID, webWorkspaceRowFacts()), refreshAcpRuntimeRow: () => handle?.refreshRow('acp-runtime', { summary: acpRuntimeSummaryOf(), freshness: acpRuntimeFreshnessOf(), description: ACP_RUNTIME_DESCRIPTION }), invalidateAcpChoice: () => handle?.invalidateChoice('acp-runtime') }
+    // R8-E PR-4: the FIRST authoritative per-package Config read for the
+    // persisted extension rows of this open (never a background poll).
+    startExtensionConfigRefresh()
+    // The observation's committed reads re-read THIS open workspace's rows
+    // through the existing runtime-facts seam: a Host read that settles after
+    // the first frame replaces `Checking…` without a key press.
+    // BOTH events repaint the OPEN page: a committed read paints the proven
+    // facts, and a revocation (Connection generation/subject change) drops the
+    // old Host's fact back to `Checking…` immediately — this listener only
+    // re-reads the panel snapshot, so it is safe outside the commit callback.
+    disposePolicyWatch = runner.policy.subscribe(() => {
+      if (activeSettingsWorkspace?.token !== token) return
+      app.refreshSettingsWorkspaceRuntimeFacts()
+    })
     startWebSettingsRead()
+    startAcpRuntimeRead()
+    // A Connection generation change (Host A -> Host B) must revoke the previous
+    // Host's ACP observation and any selection derived from it, and re-read the
+    // new Host before a new Confirm is allowed. This subscription repaints even
+    // without a key press, so a cached On can never be revived as Host B's fact.
+    const subscribeAcpGeneration = runner.acpAccess?.subscribeGeneration
+    if (typeof subscribeAcpGeneration === 'function') {
+      disposeAcpGenerationWatch = subscribeAcpGeneration.call(runner.acpAccess, () => {
+        if (activeSettingsWorkspace?.token !== token) return
+        // Revoke the OLD Host's open selection FIRST (synchronously) so a stale
+        // choice can never be confirmed into the new Host, then re-read the new
+        // Host state. The user re-enters the choice against the new authority.
+        activeSettingsWorkspace?.invalidateAcpChoice()
+        startAcpRuntimeRead()
+      })
+    }
+    // M6-1 F8: the initial session-policy read starts only now that the
+    // workspace lease was granted (a refused open captures no scope and
+    // starts no read); the panel's first snapshot already started it.
+    startPolicyRead(false)
     // C3 (plan §3.2 step 6): the workspace's OWN home is About, so a plain
     // open IS a semantic About entry — exactly ONE scoped snapshot refresh,
     // started only now that `openSettingsWorkspace` returned its live handle
@@ -1579,6 +2271,427 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     return verifyCommittedVisualTools(enabled)
   }
 
+  /**
+   * The profile-owned Web startup preference (`pi-tui-web-preferences`). It is
+   * a NEXT-Host-launch fact only: this row never reports or changes the CURRENT
+   * Host's Web state, and committing it never calls the Web frontend toggle.
+   */
+  const webAutostartSummaryOf = (state: WebStartupPreferenceState | undefined): string => {
+    if (state === undefined) return 'Unavailable'
+    // `Off (default)` marks the schema default the USER layer does not declare;
+    // the Host form's provenance is the only source for that mark.
+    if (state.autoStart) return 'On'
+    return state.userOverridden ? 'Off' : 'Off (default)'
+  }
+
+  const webAutostartEditOf = (
+    state: WebStartupPreferenceState | undefined,
+    readiness: 'ready' | 'stale' | 'unavailable',
+  ): SettingsWorkspaceEdit => {
+    const editable = state !== undefined && readiness === 'ready'
+    return {
+      field: 'web-autostart',
+      primary: 'persisted',
+      ...(state === undefined ? {} : { revision: state.revision }),
+      options: editable
+        ? [
+            { value: 'On', label: 'On', available: true, current: state.autoStart },
+            { value: 'Off', label: 'Off', available: true, current: !state.autoStart },
+          ]
+        : [],
+      // The live effect statement: the preference applies to the NEXT Host
+      // launch and leaves the running one exactly as it is.
+      runtime: 'applies on the next Host launch; the current Host is unchanged',
+      persisted: webAutostartSummaryOf(state),
+    }
+  }
+
+  const webAutostartFreshnessOf = (
+    state: WebStartupPreferenceState | undefined,
+    readiness: 'ready' | 'stale' | 'unavailable',
+  ): SettingsWorkspaceFreshness => state === undefined
+    ? 'unavailable'
+    : readiness === 'ready' ? 'ready' : 'last-known'
+
+  /** A candidate identity ('On'/'Off') as the Host boolean. */
+  const webAutostartValueOf = (value: string): boolean | undefined =>
+    value === 'On' ? true : value === 'Off' ? false : undefined
+
+  /** The authoritative re-read of the committed PREFERENCE (never the current
+   *  Web state, which this row does not own). */
+  const verifyCommittedWebAutostart = (expected: boolean): SettingsWorkspaceCommitOutcome => {
+    const readiness = runner.config.configReadiness()
+    if (readiness !== 'ready') {
+      return { outcome: 'unverified', reason: `the configuration is ${readiness}; the committed preference could not be re-read` }
+    }
+    const state = runner.config.webStartupPreference.read()
+    if (state === undefined) {
+      return { outcome: 'unverified', reason: 'the committed Web startup preference could not be re-read' }
+    }
+    if (state.autoStart !== expected) {
+      return {
+        outcome: 'not-saved',
+        reason: `the write reported success, but the authoritative preference reads ${state.autoStart ? 'On' : 'Off'}`,
+      }
+    }
+    return { outcome: 'verified' }
+  }
+
+  /** Attribute a REJECTED preference write from a fresh authoritative read. */
+  const classifyRejectedWebAutostart = (
+    base: boolean,
+    failureReason: string,
+  ): SettingsWorkspaceCommitOutcome => {
+    const state = runner.config.configReadiness() === 'ready'
+      ? runner.config.webStartupPreference.read()
+      : undefined
+    if (state === undefined) {
+      return { outcome: 'indeterminate', reason: `${failureReason}; the authoritative preference could not be re-read` }
+    }
+    if (state.autoStart === base) return { outcome: 'not-saved', reason: failureReason }
+    return {
+      outcome: 'indeterminate',
+      reason: `${failureReason}; the authority no longer reads the value this request started from, so its outcome cannot be attributed`,
+    }
+  }
+
+  /** Commit the next-launch preference through the official revision-checked
+   *  settings write. It never touches the current Host's Web frontend. */
+  const commitWebAutostart = async (
+    value: string,
+    revision: number | undefined,
+  ): Promise<SettingsWorkspaceCommitOutcome> => {
+    const autoStart = webAutostartValueOf(value)
+    if (autoStart === undefined) {
+      return { outcome: 'not-saved', reason: `"${value}" is not a Web startup preference candidate` }
+    }
+    if (revision === undefined) {
+      return { outcome: 'not-saved', reason: 'the Host setting exposed no revision this choice could be based on' }
+    }
+    const readiness = runner.config.configReadiness()
+    if (readiness !== 'ready') {
+      return { outcome: 'not-saved', reason: `the configuration is ${readiness}; the Web startup preference was not changed` }
+    }
+    const base = runner.config.webStartupPreference.read()
+    if (base === undefined) {
+      return { outcome: 'not-saved', reason: 'the Host Web startup preference is unavailable; nothing was changed' }
+    }
+    try {
+      await runner.config.webStartupPreference.setAutoStart(autoStart, revision)
+    } catch (error) {
+      return classifyRejectedWebAutostart(base.autoStart, safeErrorMessage(error))
+    }
+    return verifyCommittedWebAutostart(autoStart)
+  }
+
+  /** The ONE General `Session log upload` row: the official
+   *  `session-log-deepseek.enabled` contributor. `Reset` is a real third
+   *  candidate (official `unset` + Host readback), not a hidden toggle. */
+  const sessionLogUploadRowOf = (
+    read: SectionRead<SessionLogUpload>,
+    readiness: 'ready' | 'stale' | 'unavailable',
+  ): SettingsWorkspaceRow[] => {
+    // No official namespace = no row at all: an absent contributor is never
+    // presented as a default-off switch.
+    if (read.kind === 'unavailable') return []
+    const ready = read.kind === 'ready'
+    const editable = ready && readiness === 'ready'
+    const value = ready ? read.effective.enabled ? 'On' : 'Off' : 'Current unknown'
+    return [{
+      id: 'session-log-upload',
+      category: 'general',
+      label: 'Session log upload',
+      summary: value,
+      ...(ready ? { value } : {}),
+      scope: 'DSH Host profile · official DeepSeek API requests',
+      freshness: ready && readiness === 'ready' ? 'ready' : ready ? 'last-known' : 'last-known',
+      description: 'Send session log data with requests to the official DeepSeek API. '
+        + 'Session data can include conversation content. This is the official session-log-deepseek contributor: '
+        + 'it uploads the not-yet-accepted session-log suffix only when the official Host conditions are met. '
+        + 'Turning it Off stops future contributions; it does not retract data already sent. '
+        + 'Reset sends the official unset and then shows whatever current value the Host reads back — which may be On again. '
+        + 'Whether data is really contributed is decided only by the current official Host descriptor.',
+      edit: {
+        field: 'session-log-upload',
+        primary: 'persisted',
+        // The L2 confirmation flow paints this risk as a scrollable fact and
+        // requires it to have been fully read before Confirm settles.
+        confirmationWarning: 'Risk: May send chat content to DeepSeek API',
+        // Only a definite refusal may offer a manual Retry; a lost ACK or a
+        // mismatched readback must not be blindly replayed.
+        retryOnlyWhenDefinite: true,
+        ...(ready ? { revision: read.revision, generation: read.generation } : {}),
+        options: editable
+          ? [
+              { value: 'On', label: 'On', available: true, current: read.effective.enabled },
+              { value: 'Off', label: 'Off', available: true, current: !read.effective.enabled },
+              // The official unset is always a legitimate intent while the
+              // current Host serves the section; it may read back On.
+              { value: 'Reset', label: 'Reset', available: true, current: false },
+            ]
+          : [],
+        runtime: 'Applies to future requests that meet the official contribution conditions; already-sent data is not retracted',
+        persisted: ready
+          ? `${read.effective.enabled ? 'On' : 'Off'} · ${read.overridden.enabled ? 'Differs from base' : 'Matches base'}${read.effective.enabled ? ' · may upload conversation content' : ''}`
+          : 'Current unknown',
+      },
+    }]
+  }
+
+  /** Commit the ONE official `session-log-deepseek.enabled` field. The write is
+   *  the caller's exact revision and Host generation; Reset is the official
+   *  field `unset`, and the verdict comes from a fresh current readback. */
+  const commitSessionLogUpload = async (
+    value: string,
+    revision: number | undefined,
+    generation: object | undefined,
+  ): Promise<SettingsWorkspaceCommitOutcome> => {
+    const patch = value === 'Reset'
+      ? { enabled: { kind: 'reset' as const } }
+      : value === 'On'
+        ? { enabled: { kind: 'set' as const, value: true } }
+        : value === 'Off'
+          ? { enabled: { kind: 'set' as const, value: false } }
+          : undefined
+    if (patch === undefined) {
+      return { outcome: 'not-saved', reason: `"${value}" is not a Session log upload candidate` }
+    }
+    if (revision === undefined || generation === undefined) {
+      return { outcome: 'not-saved', reason: 'the Host setting exposed no revision this choice could be based on' }
+    }
+    if (runner.config.configReadiness() !== 'ready') {
+      return { outcome: 'not-saved', reason: 'the Host settings are not current; the session log upload setting was not changed' }
+    }
+    const base = runner.config.sessionLogUpload.read()
+    if (base.kind !== 'ready') {
+      return { outcome: 'not-saved', reason: 'the Host session log upload setting is unavailable; nothing was changed' }
+    }
+    if (base.revision !== revision || base.generation !== generation) {
+      return { outcome: 'not-saved', reason: 'the Host settings changed since this choice was read; refresh to review' }
+    }
+    let outcome: SectionMutationOutcome
+    try {
+      outcome = await runner.config.sessionLogUpload.mutate(patch, revision, generation)
+    } catch (error) {
+      return { outcome: 'indeterminate', reason: `Outcome unconfirmed · ${safeErrorMessage(error)}; refresh before retrying` }
+    }
+    if (outcome.kind === 'conflict') {
+      return { outcome: 'not-saved', reason: `Not saved · ${outcome.reason}; refresh to review` }
+    }
+    if (outcome.kind === 'rejected') {
+      return { outcome: 'not-saved', reason: `Not saved · ${outcome.reason}` }
+    }
+    if (outcome.kind === 'outcome-unconfirmed') {
+      return { outcome: 'indeterminate', reason: `Outcome unconfirmed · ${outcome.reason}; possibly saved; refresh before retrying` }
+    }
+    const readback = runner.config.configReadiness() === 'ready'
+      ? runner.config.sessionLogUpload.read()
+      : undefined
+    if (readback === undefined || readback.kind !== 'ready' || readback.generation !== generation) {
+      return { outcome: 'unverified', reason: 'the accepted write has no current Host readback; refresh to review' }
+    }
+    // Reset is verified by the accepted official unset + current readback; the
+    // effective value may be On again and the USER field may stay materialized.
+    if (value === 'Reset') return { outcome: 'verified' }
+    const expected = value === 'On'
+    if (readback.effective.enabled !== expected) {
+      // An accepted official write whose fresh readback differs cannot be
+      // called a refusal: another writer may have overwritten it after the
+      // commit. It is an unverified accepted settlement, not "Not saved".
+      return {
+        outcome: 'unverified',
+        reason: `the accepted write has no matching current readback (reads ${readback.effective.enabled ? 'On' : 'Off'}); another writer may have changed it — refresh to review`,
+      }
+    }
+    return { outcome: 'verified' }
+  }
+
+  /**
+   * The profile-owned startup backend (`tui-startup.backend`). It is a NEXT
+   * cold-launch fact only: this row never reports or switches the CURRENT
+   * process's backend, and committing it never spawns or stops a Host. An
+   * explicit `DSH_PI_TUI_BACKEND` override is a separate LAUNCH fact shown
+   * read-only; it is never written into the persisted value.
+   */
+  const backendStartupSummaryOf = (state: BackendStartupPreferenceState | undefined): string => {
+    if (state === undefined) return 'Unavailable'
+    const label = state.backend === 'daemon' ? 'Daemon' : 'Direct'
+    // `(default)` marks the schema default the USER layer does not declare; the
+    // Host form's provenance is the only source for that mark.
+    return state.userOverridden ? label : `${label} (default)`
+  }
+
+  /** The read-only environment-override fact for the Detail: the `DSH_PI_TUI_BACKEND`
+   *  value a cold launch would really consume. It is NEVER part of the persisted
+   *  preference and NEVER editable. An invalid value is still reported (it is a
+   *  real launch fact), so the row never hides an illegal environment override. */
+  const backendLaunchOverrideOf = (): string | undefined => {
+    const raw = process.env.DSH_PI_TUI_BACKEND
+    if (raw !== undefined) {
+      if (raw === 'direct' || raw === 'daemon') return `Current launch: ${raw} (environment override)`
+      return `Current launch: invalid value ${JSON.stringify(raw)} (environment override)`
+    }
+    // A daemon Client is launched with DSH_PI_TUI_BACKEND cleared from its own
+    // environment (it must never recurse into backend selection); the read-only
+    // launch source rides SPLIT_PROCESS_CLIENT_LAUNCH_BACKEND instead. Only an
+    // `env`-sourced value is an environment override; a `profile`-sourced value
+    // is the persisted preference itself and shows no override.
+    const internal = process.env.SPLIT_PROCESS_CLIENT_LAUNCH_BACKEND
+    if (internal !== undefined) {
+      try {
+        const parsed = JSON.parse(internal) as { value?: unknown; source?: unknown }
+        if (parsed.source === 'env' && (parsed.value === 'direct' || parsed.value === 'daemon')) {
+          return `Current launch: ${parsed.value} (environment override)`
+        }
+      } catch {
+        // An unreadable internal fact is not a launch override.
+      }
+    }
+    return undefined
+  }
+
+  const backendStartupEditOf = (
+    state: BackendStartupPreferenceState | undefined,
+    readiness: 'ready' | 'stale' | 'unavailable',
+  ): SettingsWorkspaceEdit => {
+    const editable = state !== undefined && readiness === 'ready'
+    const launchOverride = backendLaunchOverrideOf()
+    return {
+      field: 'startup-backend',
+      primary: 'persisted',
+      ...(state === undefined ? {} : { revision: state.revision }),
+      options: editable
+        ? [
+            { value: 'Direct', label: 'Direct', available: true, current: state.backend === 'direct' },
+            { value: 'Daemon', label: 'Daemon', available: true, current: state.backend === 'daemon' },
+          ]
+        : [],
+      // The live effect statement: the preference applies to the NEXT cold
+      // launch and leaves the running TUI/Host exactly as it is.
+      runtime: 'Applies on next launch; current TUI/Host remains unchanged',
+      ...(launchOverride === undefined ? {} : { runtimeEffect: launchOverride }),
+      persisted: backendStartupSummaryOf(state),
+    }
+  }
+
+  const backendStartupFreshnessOf = (
+    state: BackendStartupPreferenceState | undefined,
+    readiness: 'ready' | 'stale' | 'unavailable',
+  ): SettingsWorkspaceFreshness => state === undefined
+    ? 'unavailable'
+    : readiness === 'ready' ? 'ready' : 'last-known'
+
+  /** A candidate identity ('Direct'/'Daemon') as the public backend value. */
+  const backendStartupValueOf = (value: string): PublicBackendValue | undefined =>
+    value === 'Direct' ? 'direct' : value === 'Daemon' ? 'daemon' : undefined
+
+  /** The authoritative re-read of the committed PREFERENCE (never the current
+   *  process's backend, which this row does not own). */
+  const verifyCommittedBackendStartup = (expected: PublicBackendValue): SettingsWorkspaceCommitOutcome => {
+    const readiness = runner.config.configReadiness()
+    if (readiness !== 'ready') {
+      return { outcome: 'unverified', reason: `the configuration is ${readiness}; the committed startup backend could not be re-read` }
+    }
+    const state = runner.config.backendStartupPreference.read()
+    if (state === undefined) {
+      return { outcome: 'unverified', reason: 'the committed startup backend preference could not be re-read' }
+    }
+    if (state.backend !== expected) {
+      return {
+        outcome: 'not-saved',
+        reason: `the write reported success, but the authoritative preference reads ${state.backend}`,
+      }
+    }
+    return { outcome: 'verified' }
+  }
+
+  /** Attribute a REJECTED preference write from a fresh authoritative read. */
+  const classifyRejectedBackendStartup = (
+    base: PublicBackendValue,
+    failureReason: string,
+  ): SettingsWorkspaceCommitOutcome => {
+    const state = runner.config.configReadiness() === 'ready'
+      ? runner.config.backendStartupPreference.read()
+      : undefined
+    if (state === undefined) {
+      return { outcome: 'indeterminate', reason: `${failureReason}; the authoritative preference could not be re-read` }
+    }
+    if (state.backend === base) return { outcome: 'not-saved', reason: failureReason }
+    return {
+      outcome: 'indeterminate',
+      reason: `${failureReason}; the authority no longer reads the value this request started from, so its outcome cannot be attributed`,
+    }
+  }
+
+  /** Commit the next-launch backend through the official revision-checked
+   *  settings write. It never spawns/stops a Host or switches the current TUI. */
+  const commitBackendStartup = async (
+    value: string,
+    revision: number | undefined,
+  ): Promise<SettingsWorkspaceCommitOutcome> => {
+    const backend = backendStartupValueOf(value)
+    if (backend === undefined) {
+      return { outcome: 'not-saved', reason: `"${value}" is not a startup backend candidate` }
+    }
+    if (revision === undefined) {
+      return { outcome: 'not-saved', reason: 'the Host setting exposed no revision this choice could be based on' }
+    }
+    const readiness = runner.config.configReadiness()
+    if (readiness !== 'ready') {
+      return { outcome: 'not-saved', reason: `the configuration is ${readiness}; the startup backend was not changed` }
+    }
+    const base = runner.config.backendStartupPreference.read()
+    if (base === undefined) {
+      return { outcome: 'not-saved', reason: 'the Host startup backend preference is unavailable; nothing was changed' }
+    }
+    try {
+      await runner.config.backendStartupPreference.setBackend(backend, revision)
+    } catch (error) {
+      return classifyRejectedBackendStartup(base.backend, safeErrorMessage(error))
+    }
+    const verified = verifyCommittedBackendStartup(backend)
+    // M6 UX PR2 Step D: record the ONE process-lifetime transient
+    // user-conversion intent. Only a verified transition made by THIS Client
+    // matters; any other outcome never touches it.
+    const transition = classifyBackendExitTransition(base.backend, backend, runner.backendKind)
+    if (verified.outcome === 'verified' && runner.recordBackendExitTransition !== undefined && transition !== 'none') {
+      runner.recordBackendExitTransition(transition === 'clear' ? undefined : 'daemon-to-direct')
+    }
+    // M6 UX PR2: the ONE verified-transition follow-up. Only a NEW value that
+    // the official readback confirmed (direct → daemon) may offer the optional
+    // service install in the SAME lease; a same-value confirm, a failed write
+    // or a Daemon→Direct save never does. `installable` folds the platform and
+    // the proven local Profile capability into one fact the panel presents;
+    // the command layer keeps the install task's only owner.
+    if (verified.outcome === 'verified' && base.backend === 'direct' && backend === 'daemon') {
+      return {
+        ...verified,
+        followUp: { kind: 'daemon-service-install', installable: backendServiceInstallable() },
+      }
+    }
+    return verified
+  }
+
+  /**
+   * Whether THIS composition may offer the explicit service install: a local
+   * Linux/macOS platform and the process-local admin capability (which exists
+   * only when the official local Profile identity was proven). This is a
+   * capability fact, never a Host/manager probe.
+   */
+  const backendServiceInstallable = (): boolean =>
+    (process.platform === 'linux' || process.platform === 'darwin')
+    && runner.profileDaemonAdmin !== undefined
+
+  /**
+   * The safe one-line refusal summary for a failed install: the control plane
+   * already sanitizes its stderr (no argv, cookie, private path or secret), so
+   * its first line is the stable manager/ownership reason the UI may show.
+   */
+  const daemonInstallRefusalDetail = (result: { readonly stderr: string }): string => {
+    const line = result.stderr.split('\n').map(part => part.trim()).find(part => part !== '')
+    return line === undefined || line === '' ? 'the install could not be verified' : line
+  }
+
   /** The TUI-settings-document writers. Deliberately NARROWER than
    *  {@link SettingsWorkspaceWritableField}: the Host visual-tools switch and
    *  the two runtime-only disclosure fields have no document field at all, so
@@ -1759,10 +2872,23 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       // Host profile section or the shared document serialization queue. The
       // prefix check runs FIRST so the exhaustive static switch below stays a
       // closed literal union.
-      if (request.field.startsWith('ext-setting:')) return commitExtensionSetting(request)
+      if (request.field.startsWith('ext-setting:')) {
+        // R8-E PR-4: the REGISTRATION MODE selects the writer. A persisted
+        // record's only writer is the official Host per-package Config CAS;
+        // the legacy runtime-only branch below is untouched.
+        const id = request.field.slice('ext-setting:'.length)
+        const record = runner.extensions?.settings.rows().find(candidate => candidate.id === id)
+        if (record?.mode === 'persisted') return commitPersistedExtensionSetting(request, record)
+        return commitExtensionSetting(request)
+      }
       const field = request.field as Exclude<SettingsWorkspaceWritableField, `ext-setting:${string}`>
       switch (field) {
         case 'visual-tools': return commitVisualTools(request.value, request.revision)
+        case 'web-autostart': return commitWebAutostart(request.value, request.revision)
+        case 'session-log-upload': return commitSessionLogUpload(request.value, request.revision, request.generation)
+        case 'startup-backend': return commitBackendStartup(request.value, request.revision)
+        case 'acp-runtime': return commitAcpRuntime(request.value)
+        case 'acp-autostart': return commitAcpAutostart(request.value, request.revision)
         case 'display-preset': return commitDisplayPreset(request.value)
         case 'theme': return commitTheme(request.value)
         case 'icon-style': return commitIconStyle(request.value)
@@ -1778,9 +2904,8 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         case 'notification-mode': return commitNotificationMode(request.value)
         case 'notification-method': return commitNotificationMethod(request.value)
         case 'terminal-progress': return commitTerminalProgress(request.value)
-        case 'approval': return Promise.resolve(commitApproval(request.value, approvalScope))
+        case 'approval': return commitApproval(request.value, approvalScope)
         case 'default-permission': return commitDefaultPermission(request.value)
-        case 'subagent-model-selection': return commitSubagentSelection(request.value)
         case 'local-shell-sandbox': return commitLocalShellSandbox(request.value)
         case 'footer-mode': return commitFooterMode(request.value)
         default: {
@@ -1874,6 +2999,62 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     }
     clearExtensionError?.(healthRef)
     return { outcome: 'verified' }
+  }
+
+  /**
+   * R8-E PR-4: commit ONE persisted extension setting through the official
+   * Host per-package Config CAS. The admission is re-proven immediately before
+   * dispatch (live registration token, exact owner->Loader entry->ACTIVE
+   * package, Host revision/generation fence). A verified Host save then asks
+   * the CURRENT Client's existing mount-owner reconcile for a precise Config
+   * re-read; that Client apply step is independent — its failure never
+   * downgrades the Host-verified save.
+   */
+  const commitPersistedExtensionSetting = async (
+    request: SettingsWorkspaceCommitRequest,
+    record: PersistedSettingRecord,
+  ): Promise<SettingsWorkspaceCommitOutcome> => {
+    const token = request.registrationToken
+    if (token === undefined || !Number.isInteger(token) || record.registrationToken !== token) {
+      return { outcome: 'not-saved', reason: 'The extension setting was unloaded or replaced' }
+    }
+    if (record.persisted === undefined) {
+      return { outcome: 'not-saved', reason: 'not a persisted extension setting' }
+    }
+    if (request.revision === undefined || request.generation === undefined) {
+      return { outcome: 'not-saved', reason: 'the Host Config fence is missing; refresh and review' }
+    }
+    const resolution = resolvePersistedSettingOwner(
+      record,
+      runner.extensions?.ownerEntryIds?.() ?? new Map(),
+      runner.extensions?.clientObservations?.() ?? [],
+    )
+    if (resolution.kind === 'unavailable') {
+      return { outcome: 'not-saved', reason: resolution.reason }
+    }
+    const outcome: PersistedSettingCommitOutcome = await commitPersistedSetting(
+      record,
+      {
+        packageName: resolution.packageName,
+        entryId: resolution.entryId,
+        registrationToken: resolution.registrationToken,
+      },
+      request.value,
+      runner.config.extensionConfigs,
+      request.revision,
+      request.generation,
+    )
+    if (outcome.outcome === 'verified') {
+      try {
+        runner.extensions?.refreshClientExtensions?.()
+      } catch (error) {
+        runner.diag.warn('persisted setting: Client apply refresh failed', {
+          packageName: resolution.packageName,
+          error: safeErrorMessage(error),
+        })
+      }
+    }
+    return outcome
   }
 
   /**
@@ -2302,59 +3483,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    * shell routing, the permission presets or the Host sandbox default is
    * touched here, and no local switch is introduced.
    */
-  /**
-   * The official section for READ-ONLY projection, or `undefined` when the
-   * authority cannot answer. Callers must treat `undefined` as "no rows", never
-   * as the shipped default: a fabricated `off`/empty section handed to a writer
-   * would erase routes the Host still stores.
-   */
-  const readSubagentSectionOrUndefined = (): OfficialSectionState | undefined => {
-    // An UNAVAILABLE section answers with the shipped default rather than
-    // throwing (the Direct adapter's absent-service shape), and that default is
-    // NOT a stored value: it may not become a rollback target, a write base or a
-    // saved summary.
-    if (!runner.config.subagentModelSelection.available()) return undefined
-    try {
-      const latest = runner.config.subagentModelSelection.get()
-      return {
-        enabled: latest.enabled,
-        allowedModels: latest.allowedModels.map(route => ({ ...route })),
-      }
-    } catch {
-      return undefined
-    }
-  }
-
-  /** Whether two official allowlists carry the SAME ordered (provider,model)
-   *  pairs. The pair is the only route identity: a display name never compares. */
-  /** The human-readable reason of one section refusal. */
-  const refusalMessage = (refusal: OfficialSectionRefusal): string => {
-    switch (refusal.kind) {
-      case 'empty-allowlist': return 'Select at least one Subagent allowed model before enabling model selection.'
-      case 'last-route-while-enabled': return 'disable subagent model selection before removing the last route'
-      case 'not-writable': return `${refusal.reason}; the official subagent settings were not changed`
-      case 'unreadable': return `the official subagent settings could not be read (${refusal.reason}); nothing was changed`
-    }
-  }
-
-  /** Apply one route intent to a FRESH route list (the queue's rebase step). */
-  const applyRouteIntent = (
-    fresh: readonly import('../../runtime/config-port.ts').SubagentAllowedModelRoute[],
-    route: import('../../runtime/config-port.ts').SubagentAllowedModelRoute,
-    direction: 'add' | 'remove',
-  ): readonly import('../../runtime/config-port.ts').SubagentAllowedModelRoute[] => {
-    const without = fresh.filter(existing => !(existing.provider === route.provider && existing.model === route.model))
-    return direction === 'remove'
-      ? without
-      : [...without, { provider: route.provider, model: route.model }]
-  }
-
-  const sameAllowlist = (
-    left: readonly import('../../runtime/config-port.ts').SubagentAllowedModelRoute[],
-    right: readonly import('../../runtime/config-port.ts').SubagentAllowedModelRoute[],
-  ): boolean => left.length === right.length
-    && left.every((route, index) => route.provider === right[index]?.provider && route.model === right[index]?.model)
-
   const commitLocalShellSandbox = (value: string): Promise<SettingsWorkspaceCommitOutcome> => {
     if (!isCandidateOf(value, LOCAL_SHELL_SANDBOX_CANDIDATES)) {
       return Promise.resolve({ outcome: 'not-saved', reason: `"${value}" is not a user shell sandbox policy candidate` })
@@ -2472,17 +3600,19 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   }
 
   /**
-   * C2-R3: RUNTIME-ONLY approval policy of the EXACT session this workspace was
-   * opened on. The pinned scope is the whole target identity: a scope that is no
-   * longer current is refused SYNCHRONOUSLY with no dispatch at all, so a stale
-   * Confirm can never land on the replacement Session. `Verified` means the
-   * official service now reads this value back for the SAME scope; it makes no
-   * persistence claim (there is no document field).
+   * C2-R3 + M6-1 F8: the EXACT session's independent approval policy. The
+   * pinned scope is the whole target identity: a scope that is no longer
+   * current is refused SYNCHRONOUSLY with no dispatch at all. The write is
+   * the transport-neutral `SessionPolicyPort.setApproval` (ONE dispatch, no
+   * retry); `Verified` requires a FRESH official readback of the effective
+   * policy through the observation owner — an already-effective no-op write
+   * still verifies (the official setter appends nothing when the effective
+   * policy already matches, and that is not a failure).
    */
-  const commitApproval = (
+  const commitApproval = async (
     value: string,
     approvalScope: import('../../app/session/scope.ts').LiveSessionScope | undefined,
-  ): SettingsWorkspaceCommitOutcome => {
+  ): Promise<SettingsWorkspaceCommitOutcome> => {
     if (!isCandidateOf(value, APPROVAL_CANDIDATES)) {
       return { outcome: 'not-saved', reason: `"${value}" is not an approval policy candidate` }
     }
@@ -2496,29 +3626,73 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         reason: 'the session this workspace was opened on is no longer current — reopen Settings to change the approval policy of the new session',
       }
     }
-    if (!runner.config.permissions.approvalOverrideAvailable()) {
-      return { outcome: 'not-saved', reason: 'this backend does not read or write a session approval override' }
+    // The commit gate is the observation's CURRENT snapshot: its Approval
+    // side must be a proven `ready` fact before a dispatch is admissible
+    // (checking/failed/unavailable refuse with zero writes).
+    const before = runner.policy.readSnapshot(approvalScope.sessionId)
+    if (before.kind !== 'ready' || before.read.kind !== 'ready' || before.read.approval.state !== 'ready') {
+      return { outcome: 'not-saved', reason: 'the current session approval policy has not been read from the Host yet — press r to refresh, then confirm' }
     }
-    if (runner.setSessionApprovalPolicy(approvalScope, value) === 'superseded') {
+    // ONE dispatch; the result axes (ownership × outcome) stay independent.
+    // The dispatch generation is captured HERE so an `applied` ACK and its
+    // fresh readback can only be verified against the SAME Host generation.
+    const dispatchGeneration = runner.sessionPolicyGeneration?.()
+    const sameGeneration = (): boolean => runner.sessionPolicyGeneration?.() === dispatchGeneration
+    const result = await runner.setSessionApprovalPolicy(approvalScope, value)
+    if (result.outcome === undefined) {
+      // Nothing ran (the scope went stale before the dispatch).
       app.notify('the session changed — the approval policy was not applied', 'error')
       return {
         outcome: 'not-saved',
         reason: 'the session changed — the approval policy was not applied',
       }
     }
-    // The official service is the reader: only a same-scope value that really
-    // reads back as the requested policy is Verified.
-    const readback = runner.currentApprovalOverride(approvalScope)
-    if (readback === value) {
-      runner.refreshStatus()
-      return { outcome: 'verified' }
+    if (result.outcome.kind === 'refused') {
+      return { outcome: 'not-saved', reason: `the Host refused the approval policy write (${result.outcome.reason})` }
     }
-    if (readback === undefined) {
-      return { outcome: 'unverified', reason: 'the session approval override could not be re-read' }
+    if (result.outcome.kind === 'unconfirmed') {
+      return {
+        outcome: 'indeterminate',
+        reason: `Outcome unconfirmed; refresh Session policy before retrying. (${result.outcome.reason})`,
+      }
+    }
+    if (!sameGeneration()) {
+      return {
+        outcome: 'unverified',
+        reason: 'the Connection changed before the session policy could be re-read — check the current Host policy',
+      }
+    }
+    // `applied`: verify through a fresh authoritative readback of the SAME
+    // exact session. Only an equal EFFECTIVE policy is Verified — an absent
+    // override with an equal effective is the official no-op success. The
+    // write's own durable event may legitimately supersede the first read
+    // with a NEWER observation read; a second (read-only) attempt lets that
+    // newer read land instead of reporting a superseded one as unverified.
+    let readback = await runner.policy.refresh(approvalScope.sessionId)
+    if (readback.kind !== 'ready' && sameGeneration()) {
+      readback = await runner.policy.refresh(approvalScope.sessionId)
+    }
+    if (!sameGeneration()) {
+      return {
+        outcome: 'unverified',
+        reason: 'the Connection changed during the policy readback — check the current Host policy',
+      }
+    }
+    if (readback.kind === 'ready' && readback.read.kind === 'ready' && readback.read.approval.state === 'ready') {
+      if (readback.read.approval.effective === value) {
+        runner.refreshStatus()
+        return { outcome: 'verified' }
+      }
+      // A DIFFERENT effective value is another writer's newer fact — the
+      // outcome is indeterminate, never "this request failed".
+      return {
+        outcome: 'indeterminate',
+        reason: `the session approval policy now reads ${readback.read.approval.effective} — another client changed it before this readback`,
+      }
     }
     return {
-      outcome: 'not-saved',
-      reason: `the session approval override reads ${readback}`,
+      outcome: 'unverified',
+      reason: 'the approval policy write was accepted, but the fresh policy read could not confirm it — refresh Session policy before retrying',
     }
   }
 
@@ -2572,109 +3746,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     }
   }
 
-  /**
-   * C2-R3: the official subagent model-selection toggle. It runs INSIDE the one
-   * section write queue, so a pending picker write can never be reordered. The
-   * fresh section read inside the queue is what decides the payload: enabling
-   * with ZERO allowed routes is refused with NO official write at all and the
-   * typed follow-up sends the user to the allowlist row. Disabling always keeps
-   * every saved route.
-   */
-  const commitSubagentSelection = async (value: string): Promise<SettingsWorkspaceCommitOutcome> => {
-    if (!isCandidateOf(value, SUBAGENT_SELECTION_CANDIDATES)) {
-      return { outcome: 'not-saved', reason: `"${value}" is not a subagent model selection candidate` }
-    }
-    const desired = value === 'on'
-    return enqueueSubagentSectionWrite(async (): Promise<SettingsWorkspaceCommitOutcome> => {
-      const section = runner.config.subagentModelSelection
-      if (!section.available()) {
-        return { outcome: 'not-saved', reason: 'the official subagent model-selection section is unavailable on this backend' }
-      }
-      // A stale/unavailable backend keeps readable LAST-KNOWN values: writing
-      // them back would overwrite whatever the Host changed while this Client
-      // was not current, so the commit is refused BEFORE any dispatch.
-      const readiness = runner.config.configReadiness()
-      if (readiness !== 'ready') {
-        return {
-          outcome: 'not-saved',
-          reason: `the configuration is ${readiness}; the official subagent section could not be confirmed current, so it was not changed`,
-        }
-      }
-      let latest: OfficialSectionState
-      try {
-        latest = section.get()
-      } catch (error) {
-        return { outcome: 'not-saved', reason: `the official subagent model-selection section could not be read: ${safeErrorMessage(error)}` }
-      }
-      if (desired && latest.allowedModels.length === 0) {
-        // Zero official writes: the setup precondition is stated where the user
-        // can still read it (the app notice survives the navigation) and the
-        // ONE typed follow-up moves the selection to the allowlist row.
-        const reason = 'Select at least one Subagent allowed model before enabling model selection.'
-        app.notify(reason, 'info')
-        return { outcome: 'not-saved', reason, followUpRowId: 'subagent-model-allowlist' }
-      }
-      // This intent owns the `enabled` half ONLY: the route list comes from the
-      // FRESH read made above (inside the queue), so a picker write that landed
-      // while this request waited is preserved instead of being overwritten by
-      // a stale snapshot.
-      const base: OfficialSectionState = {
-        enabled: latest.enabled,
-        allowedModels: latest.allowedModels.map(route => ({ ...route })),
-      }
-      try {
-        await section.set({ enabled: desired, allowedModels: base.allowedModels.map(route => ({ ...route })) })
-      } catch (error) {
-        // Attribute from a fresh official read: only a section still carrying
-        // the BASE value refutes THIS request. An unreadable readback cannot
-        // attribute anything, so the outcome stays indeterminate.
-        let readback: OfficialSectionState
-        try {
-          if (!section.available()) throw new Error('the section is no longer available')
-          readback = section.get()
-        } catch {
-          return {
-            outcome: 'indeterminate',
-            reason: `${safeErrorMessage(error)}; the official section could not be re-read, so the outcome cannot be attributed`,
-          }
-        }
-        if (readback.enabled === desired && sameAllowlist(readback.allowedModels, base.allowedModels)) {
-          return {
-            outcome: 'indeterminate',
-            reason: `the write failed (${safeErrorMessage(error)}), but the official section already reads this selection`,
-          }
-        }
-        if (readback.enabled === base.enabled && sameAllowlist(readback.allowedModels, base.allowedModels)) {
-          return { outcome: 'not-saved', reason: safeErrorMessage(error) }
-        }
-        return {
-          outcome: 'indeterminate',
-          reason: `${safeErrorMessage(error)}; the official section no longer reads the value this request started from either`,
-        }
-      }
-      // Save/verify means BOTH halves of the section: the toggle AND the list.
-      // A THROWING readback cannot refute the commit — the write DID return
-      // success, so the honest verdict is `unverified`, never `not-saved`.
-      let readback: OfficialSectionState
-      try {
-        if (!section.available()) throw new Error('the section is no longer available')
-        readback = section.get()
-      } catch (error) {
-        return {
-          outcome: 'unverified',
-          reason: `the write reported success, but the official section could not be re-read: ${safeErrorMessage(error)}`,
-        }
-      }
-      if (readback.enabled === desired && sameAllowlist(readback.allowedModels, base.allowedModels)) {
-        return { outcome: 'verified' }
-      }
-      return {
-        outcome: 'not-saved',
-        reason: `the write reported success, but the official section reads enabled=${readback.enabled ? 'on' : 'off'} with ${readback.allowedModels.length} allowed ${readback.allowedModels.length === 1 ? 'route' : 'routes'}`,
-      }
-    })
-  }
-
   const commitDisplayPreset = async (value: string): Promise<SettingsWorkspaceCommitOutcome> => {
     if (!isDisplayPreset(value) || !isDisplayPresetAvailable(value)) {
       return { outcome: 'not-saved', reason: `the display preset "${value}" is not available in this build` }
@@ -2690,7 +3761,14 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     if (applied.kind === 'unsupported') {
       return { outcome: 'not-saved', reason: `the display preset "${value}" is not available in this build` }
     }
-    if (applied.kind === 'applied') runner.refreshStatus()
+    if (applied.kind === 'applied') {
+      runner.refreshStatus()
+      // M6 PR-C C3: this commit path applies through the app DIRECTLY (its own
+      // persistence sequence below), bypassing the shared
+      // `settings.setDisplayPreset` seam — notify the Split-Client presence
+      // owner so the new view is re-projected to the Host.
+      runner.onDisplayPresetMutated?.()
+    }
     if (settings === undefined) {
       // The runtime fact really changed (Client-local); the persisted preference
       // has no authority to write to. Both halves are stated, neither is faked.
@@ -2816,6 +3894,69 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     const extensionSettings = runner.extensions?.settings
     const extensionRecords = extensionSettings?.rows() ?? []
     const extensionRevision = extensionSettings?.snapshot().revision ?? 0
+    // R8-E PR-4: the CURRENT Client's ownership facts are read once per
+    // snapshot from the same live registry/service the rows came from. The
+    // persisted row projection never accepts an author-supplied package name.
+    const extensionConfigs = runner.config.extensionConfigs
+    const extensionOwnerEntryIds = runner.extensions?.ownerEntryIds?.() ?? new Map<string, string>()
+    const extensionClientObservations = runner.extensions?.clientObservations?.() ?? []
+    const persistedExtensionRowOf = (record: (typeof extensionRecords)[number]): SettingsWorkspaceRow => {
+      const id = `ext-setting:${record.id}` as const
+      const resolution = resolvePersistedSettingOwner(record, extensionOwnerEntryIds, extensionClientObservations)
+      const read = resolution.kind === 'ready'
+        ? readPersistedSetting(record, resolution.packageName, extensionConfigs)
+        : undefined
+      const ready = read?.mode === 'ready' ? read : undefined
+      const reason = resolution.kind === 'unavailable'
+        ? resolution.reason
+        : read !== undefined && read.mode !== 'ready' ? read.reason : undefined
+      const facts: string[] = ready !== undefined
+        ? [
+            `Host profile · effective: ${persistedValueText(ready.effective)}`,
+            `Inherited: ${persistedValueText(ready.inherited)}`,
+            `USER field: ${ready.userFieldPresent ? `set ${persistedValueText(ready.user)}` : 'not set'}`,
+            `Differs from inherited: ${ready.overriddenDisplay}`,
+            `Runtime in this Client: ${ready.runtimeValue}`,
+          ]
+        : [`Unavailable · ${reason ?? 'Host Config is not current; refresh before editing'}`]
+      const choices = record.persisted?.choices ?? []
+      const options: SettingsWorkspaceEditOption[] = ready === undefined ? [] : choices.map(choice => ({
+        value: choice.id,
+        label: choice.label ?? (choice.op === 'unset' ? 'Use inherited' : persistedValueText(choice.value)),
+        available: true,
+        current: choice.id === ready.candidateId,
+      }))
+      const freshness: SettingsWorkspaceFreshness = ready !== undefined
+        ? 'ready'
+        : read?.mode === 'stale' ? 'last-known' : read?.mode === 'unreadable' ? 'read-error' : 'unavailable'
+      return {
+        id,
+        category: 'extensions',
+        label: record.label,
+        summary: ready !== undefined
+          ? `Host profile · effective: ${persistedValueText(ready.effective)}`
+          : `Unavailable · ${reason ?? 'Host Config is not current; refresh before editing'}`,
+        scope: resolution.kind === 'ready'
+          ? `DSH Host profile · package ${resolution.packageName}`
+          : 'DSH Host profile · this Client cannot address the package',
+        freshness,
+        description: `Registered at runtime by ${record.owner} (id ${record.id}) with an author-declared persisted path /${(record.persisted?.path ?? []).join('/')}. `
+          + 'The Host profile Config is the only persistence authority; the runtime value this Client reports is a separate fact. '
+          + 'Saving writes one USER Config field; Reset sends the official unset so the inherited value applies.',
+        extensionOwner: record.owner,
+        extensionRegistrationToken: record.registrationToken,
+        edit: {
+          field: id,
+          primary: 'persisted' as const,
+          options,
+          runtime: record.currentValue,
+          persisted: facts[0] ?? '',
+          persistedFacts: facts,
+          ...ready === undefined ? {} : { revision: ready.revision, generation: ready.generation },
+          retryable: false,
+        },
+      }
+    }
     const settings = runner.tuiSettings
     let doc: TuiSettingsDoc | undefined
     let readIssue: string | undefined
@@ -2920,46 +4061,86 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     // the shipped default.
     const visualTools = runner.config.visualTools.read()
     const visualToolsFreshness = visualToolsFreshnessOf(visualTools, configReadiness)
-    // ── C2-R3: the five Agent rows' read facts ────────────────────────────────
-    // PERMISSIONS. The approval row exists only for a LIVE, still-current
-    // captured scope on a backend that really reads and writes the override:
-    // a Remote composition (no capability) or a sessionless surface paints no
-    // approval row at all — never an `ask` the authority did not state.
-    const approvalLive = approvalScope !== undefined
-      && runner.isSessionScopeCurrent(approvalScope)
-      && runner.config.permissions.approvalOverrideAvailable()
-    const approvalOverride = approvalLive && approvalScope !== undefined
-      ? runner.currentApprovalOverride(approvalScope)
+    const webAutostart = runner.config.webStartupPreference.read()
+    const webAutostartFreshness = webAutostartFreshnessOf(webAutostart, configReadiness)
+    // The startup backend selection has its OWN authority (the `tui-startup`
+    // Config section), read on this same snapshot: an unavailable or illegal
+    // Profile value is never presented as the shipped `direct` default.
+    const backendStartup = runner.config.backendStartupPreference.read()
+    const backendStartupFreshness = backendStartupFreshnessOf(backendStartup, configReadiness)
+    const acpAutostart = runner.config.acpStartupPreference.read()
+    const acpAutostartFreshness = acpAutostartFreshnessOf(acpAutostart, configReadiness)
+    // FR5-B: the official Agent-loop, active-shell and session-log sections.
+    // Each read reports its own unavailable/unreadable state; no schema default
+    // is ever substituted for a failed read.
+    const agentLoopSettings = runner.config.agentLoopSettings.read()
+    const shellExecutionSettings = runner.config.shellExecutionSettings.read()
+    const sessionLogUpload = runner.config.sessionLogUpload.read()
+    // ── C2-R3 + M6-1 F8: the five Agent rows' read facts ────────────────────
+    // PERMISSIONS. The approval row exists for a LIVE, still-current captured
+    // scope; the row's VALUE comes from the ONE session-policy observation
+    // (checking/ready/unavailable/failed). A non-ready observation keeps the
+    // row visible with its truthful state — never an `ask` the authority did
+    // not state, and never a hidden gap the user cannot refresh.
+    const approvalLive = approvalScope !== undefined && runner.isSessionScopeCurrent(approvalScope)
+    const approvalObservation = approvalLive && approvalScope !== undefined
+      ? runner.policy.readSnapshot(approvalScope.sessionId)
       : undefined
+    const approvalReadReady = approvalObservation?.kind === 'ready' && approvalObservation.read.kind === 'ready'
+      ? approvalObservation.read
+      : undefined
+    // The narrowed ready approval side (the ternary chain cannot narrow a
+    // discriminated union member, so the fact is extracted once here).
+    let approvalSide: { readonly state: 'ready'; readonly effective: 'ask' | 'never'; readonly override?: 'ask' | 'never' } | undefined
+    if (approvalReadReady !== undefined && approvalReadReady.approval.state === 'ready') {
+      approvalSide = approvalReadReady.approval
+    }
+    const approvalSideUnavailable = approvalReadReady !== undefined && approvalReadReady.approval.state === 'unavailable'
+    // M6-1 F8: the SAME observation read also proves the independent SANDBOX
+    // fact; it is displayed as its own labeled fact beside the approval one
+    // (an effective sandbox mode is a policy fact, never an enforcement claim).
+    const sandboxSide = approvalReadReady?.sandbox
+    const sandboxFact = sandboxSide?.state === 'ready'
+      ? `Sandbox: ${sandboxSide.effective} (override: ${sandboxSide.override ?? 'none'})`
+      : 'Sandbox: unavailable on this Host'
+    const approvalSummary = approvalSide === undefined
+      ? approvalObservation === undefined || approvalObservation.kind === 'checking'
+        ? 'Checking…'
+        : approvalSideUnavailable
+          ? 'unavailable on this Host'
+          : approvalObservation.kind === 'failed'
+            ? 'read failed — press r to refresh'
+            : 'unavailable — press r to refresh'
+      : approvalSide.effective
+    const approvalOverrideLabel = approvalSide?.override === undefined ? 'none' : approvalSide.override
     const approvalRow: SettingsWorkspaceRow[] = !approvalLive ? [] : [{
       id: 'approval',
       category: 'agent',
       label: 'Approval policy (this session)',
-      summary: approvalOverride ?? 'not overridden',
-      ...approvalOverride === undefined ? {} : { value: approvalOverride },
-      scope: 'Current session only · runtime-only override',
-      freshness: 'runtime',
+      summary: approvalSummary,
+      ...approvalSide !== undefined ? { value: approvalSide.effective } : {},
+      scope: 'Current session · durable session policy event',
+      freshness: approvalSide !== undefined ? 'runtime' : 'unavailable',
       description: 'How tool approvals are handled in the session this workspace was opened on. '
-        + 'This is the official per-session approval override, applied at the next approval the session needs; '
-        + 'it is not a permission preset and it never changes the default for new sessions. '
-        + 'Persisted: not applicable — current session only.',
+        + 'This is the official per-session approval policy: a durable session policy event the Host replays, applied at the next approval the session needs. '
+        + 'It is not a permission preset, not the Host profile default, and it never changes the default for new sessions. '
+        + 'Source: Host session policy. It is not written to the TUI Settings document; the Host Session log persists it.',
       edit: {
         field: 'approval',
         primary: 'runtime',
-        options: APPROVAL_CANDIDATES.map(value => ({
+        // Only a proven ready Approval fact offers confirmable candidates; a
+        // checking/unavailable/failed row keeps its facts without a write.
+        options: approvalSide === undefined ? [] : APPROVAL_CANDIDATES.map(value => ({
           value,
           label: value,
           available: true,
-          current: approvalOverride === value,
+          current: approvalSide.effective === value,
         })),
-        // The primary Value IS the runtime override (or `not overridden`); the
-        // SEPARATE effect fact states what the next approval consumes, so an
-        // absent override never reads as a saved `ask`.
-        runtime: approvalOverride === undefined ? 'ask (consumer fallback; no session override)' : approvalOverride,
-        runtimeEffect: approvalOverride === undefined
-          ? 'next approval uses the consumer fallback ask (no session override)'
-          : `next approval uses ${approvalOverride} (session override)`,
-        persisted: 'not applicable — current session only',
+        runtime: approvalSide === undefined ? approvalSummary : `Effective: ${approvalSide.effective}`,
+        runtimeEffect: approvalSide === undefined
+          ? approvalSummary
+          : `Effective: ${approvalSide.effective} · Session override: ${approvalOverrideLabel} · ${sandboxFact}`,
+        persisted: 'Source: Host session policy · not written to the TUI Settings document — persisted by the Host Session log',
       },
     }]
     // The preset roster and the effective Host default are read ONCE for this
@@ -2995,66 +4176,25 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         persisted: defaultPermission ?? 'unknown',
       },
     }]
-    // DELEGATION. BOTH rows appear together, and only while the OFFICIAL
-    // section AND the model catalog are available (the existing availability
-    // contract): the allowlist is the setup dependency of the toggle.
-    const subagentAvailable = runner.config.subagentModelSelection.available() && runner.catalog.models.available()
-    // An UNREADABLE official section is not a value: the rows are withheld
-    // instead of being painted from a fabricated `off`/empty default (writing
-    // that back would erase the Host's stored routes).
-    const subagentSelection = subagentAvailable ? readSubagentSectionOrUndefined() : undefined
-    // The section's VALUES must be current for either row to claim them: a
-    // stale/unavailable backend keeps readable LAST-KNOWN values, which are
-    // reported as such and can never be confirmed into a write.
-    const subagentFreshness: SettingsWorkspaceFreshness = configReadiness === 'ready'
-      ? 'ready'
-      : configReadiness === 'stale' ? 'last-known' : 'unavailable'
-    const subagentWritable = subagentFreshness === 'ready'
-    const subagentRows: SettingsWorkspaceRow[] = subagentSelection === undefined ? [] : [{
-      // The specialist page reaches the ONE official section through the SAME
-      // serialized write queue as the toggle: this row deliberately has NO
-      // `edit` (a scalar candidate list would be a second writer).
-      id: 'subagent-model-allowlist',
-      category: 'agent',
-      label: 'Subagent allowed models',
-      summary: allowlistSummary(subagentSelection.allowedModels),
-      scope: 'Official subagent model-selection section',
-      freshness: subagentFreshness,
-      description: 'The child LLM routes the official subagent tool may pick from in a NEW session. '
-        + 'Manage opens the searchable official model directory in this same workspace; every toggle writes the '
-        + 'official settings section. Saved routes stay removable even when the current catalog does not list them. '
-        + 'A running Agent keeps its existing tool schema. Persisted: the official subagent-model-selection section.',
-      specialist: 'subagent-allowlist',
-      // Only a CURRENT section may open the picker: a stale mirror would let the
-      // user toggle routes that can never commit.
-      specialistAvailable: subagentWritable,
-    }, {
-      id: 'subagent-model-selection',
-      category: 'agent',
-      label: 'Subagent model selection',
-      summary: subagentSelection.enabled ? 'on' : 'off',
-      value: subagentSelection.enabled ? 'on' : 'off',
-      scope: 'Official subagent model-selection section',
-      freshness: subagentFreshness,
-      description: 'Whether a NEW session\'s subagent tool may pick a child provider/model from the allowed routes. '
-        + 'Changes new sessions only; the running session keeps its existing tool schema. '
-        + 'Enabling requires at least one allowed route; disabling keeps the saved routes. '
-        + 'Persisted: the official subagent-model-selection section.',
-      edit: {
-        field: 'subagent-model-selection',
-        primary: 'persisted',
-        // A non-current backend offers NO confirmable candidate: a write built
-        // from last-known values would overwrite whatever the Host changed while
-        // this Client was not current.
-        options: subagentWritable ? SUBAGENT_SELECTION_CANDIDATES.map(value => ({
-          value,
-          label: value,
-          available: true,
-          current: (subagentSelection.enabled ? 'on' : 'off') === value,
-        })) : [],
-        runtime: `${subagentSelection.allowedModels.length} allowed ${subagentSelection.allowedModels.length === 1 ? 'route' : 'routes'} · applies to new sessions`,
-        persisted: subagentSelection.enabled ? 'on' : 'off',
-      },
+    // Both official sections remain independently readable inside one page.
+    // A missing catalog or one unavailable namespace never hides the other.
+    const subagentLimits = runner.config.subagentLimits.read()
+    const subagentSelection = runner.config.subagentModelSelection.read()
+    const limitsSummary = subagentLimits.kind === 'ready'
+      ? `Limits: depth ${subagentLimits.effective.maxDepth}, parallelism ${subagentLimits.effective.maxActiveSubagents}`
+      : `Limits: ${subagentLimits.kind === 'unavailable' ? 'Unavailable' : 'Unreadable'}`
+    const selectionSummary = subagentSelection.kind === 'ready'
+      ? `Model selection: ${subagentSelection.effective.enabled ? 'On' : 'Off'} · ${allowlistSummary(subagentSelection.effective.allowedModels)}`
+      : `Model selection: ${subagentSelection.kind === 'unavailable' ? 'Unavailable' : 'Unreadable'}`
+    const subagentRows: SettingsWorkspaceRow[] = [{
+      id: 'subagent-settings', category: 'agent', label: 'Subagent settings',
+      summary: `${limitsSummary} · ${selectionSummary}`,
+      scope: 'Host profile · official settings',
+      freshness: configReadiness === 'ready' ? 'ready' : configReadiness === 'stale' ? 'last-known' : 'unavailable',
+      description: 'Stage subagent limits, model selection and allowed routes in one page, then Save. '
+        + 'The two official settings sections save independently. Limits affect later delegation; '
+        + 'model selection is sampled only by new top-level Sessions.',
+      specialist: 'subagent-settings',
     }]
     // EXECUTION POLICY. The RAW document value is the primary fact; the
     // consumer's bypass fallback is stated separately so a missing/invalid raw
@@ -3070,6 +4210,40 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     // C2-R5/C2-R6/C2-R7: Footer layout, Keyboard shortcuts and the Extensions
     // rows are same-lease pages and rows of THIS workspace; no row hands the
     // user off to a second settings editor.
+    // PR-5/MAC-09 v2: the ONE Tools navigation row into the Computer Use
+    // specialist. It carries NO `edit`: the page writes only through the
+    // official CUA access port, and the row is omitted when that port is not
+    // part of this composition (never painted as an inert control).
+    const computerUseRow: SettingsWorkspaceRow | undefined = runner.cuaAccess === undefined || runner.pluginManager === undefined
+      ? undefined
+      : {
+        id: 'computer-use',
+        category: 'tools',
+        label: COMPUTER_USE_PAGE_TITLE,
+        summary: COMPUTER_USE_ROW_SUMMARY,
+        scope: 'DSH Host · official Computer Use provider',
+        freshness: 'runtime',
+        description: 'Manage the official Computer Use provider: the bundle selection, the two independent macOS privileges (Accessibility and Screen Recording), the official helper identity, the PTC default/execution facts and the persisted application decisions. '
+          + 'Request/Open only ask the Host provider to show its guidance; only a fresh Host observation paints Allowed. Revoke removes one persisted application decision; disabling the bundle is managed in Plugins.',
+        specialist: 'computer-use',
+      }
+    const mcpServersRow: SettingsWorkspaceRow | undefined = runner.mcpServers === undefined ? undefined : {
+      // FR3: the ONE read-only/Probe/Restart MCP management row. It carries NO
+      // `edit`: this page writes no configuration (server CRUD is a later
+      // milestone), and its Enter/Manage opens the embedded page in THIS lease.
+      id: 'mcp-servers',
+      category: 'tools',
+      label: MCP_SERVERS_ROW_LABEL,
+      summary: MCP_SERVERS_ROW_SUMMARY,
+      scope: 'DSH Host MCP manager · running instance',
+      freshness: 'runtime',
+      description: 'Inspect the ONE Host MCP manager fleet, including plugin-registered servers and retained cleanup records. '
+        + 'Probe connects to one server and lists its tools without touching the live instance; Restart rebuilds one server from its current configuration. '
+        + 'Add, Edit, Enable/Disable, Delete and Reset-to-inherited write the official mcp-manager profile configuration through the Host settings compare-and-swap; '
+        + 'a saved configuration is not a connected server — the manager reconciles it afterwards. '
+        + 'Both act on the running Host only: this page shows no secret. Configuration source is shown as Unknown when the Host settings read is not current.',
+      specialist: 'mcp-servers',
+    }
     return {
       configReadiness,
       capturedAt: Date.now(),
@@ -3463,6 +4637,25 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           },
         },
         {
+          // FR5-B: the ONE Agent-loop numeric specialist entry. The page stages
+          // the official `agent-loop.maxParallelToolCalls` field; this row never
+          // writes it directly.
+          id: 'agent-loop',
+          category: 'agent',
+          label: 'Agent loop',
+          summary: agentLoopSettings.kind === 'ready'
+            ? `Parallel tool calls: ${agentLoopSettings.effective.maxParallelToolCalls}`
+            : `Parallel tool calls: ${agentLoopSettings.kind === 'unavailable' ? 'Unavailable' : 'Unreadable'}`,
+          scope: 'Host profile · effective official settings',
+          freshness: agentLoopSettings.kind === 'ready'
+            ? configReadiness === 'ready' ? 'ready' : 'last-known'
+            : agentLoopSettings.kind === 'unavailable' ? 'unavailable' : 'read-error',
+          description: 'Stage the official agent-loop parallel tool-call cap in one page, then Save. '
+            + 'The next Agent step reads the new cap; tool calls already dispatched are unchanged. '
+            + 'Reset sends the official field unset and shows the Host readback.',
+          specialist: 'agent-loop-settings',
+        },
+        {
           // The ONE built-in Visual tools switch: a Host-profile setting, not a
           // TUI preference. The row stays visible when the authority is
           // unavailable (the category exists), but `edit.options` is empty in
@@ -3478,6 +4671,87 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           edit: visualToolsEditOf(visualTools, configReadiness),
         },
         {
+          // FR5-B: the ONE Shell-execution numeric specialist entry. It edits
+          // the Host-served model-tool executor row (POSIX Bash or Windows
+          // PowerShell) — never the `!`/`!!` user-shell policy.
+          id: 'shell-execution',
+          category: 'tools',
+          label: 'Shell execution',
+          summary: shellExecutionSettings.kind === 'ready'
+            ? `Timeout ${shellExecutionSettings.effective.timeoutMs} ms · Output cap ${shellExecutionSettings.effective.maxOutputBytes} bytes · ${shellExecutionSettings.effective.executor === 'bash' ? 'POSIX Bash' : 'Windows PowerShell'}`
+            : `Active executor: ${shellExecutionSettings.kind === 'unavailable' ? 'Unavailable' : 'Unreadable'}`,
+          scope: 'DSH Host profile · Host-served model-tool shell executor',
+          freshness: shellExecutionSettings.kind === 'ready'
+            ? configReadiness === 'ready' ? 'ready' : 'last-known'
+            : shellExecutionSettings.kind === 'unavailable' ? 'unavailable' : 'read-error',
+          description: 'Stage the command timeout and per-stream output cap of the Host-served model-tool shell executor, then Save. '
+            + 'Both fields are one revision-checked Host mutation. New shell executions use them; a running subprocess keeps its current timeout. '
+            + 'The executor row is chosen by the Host, not this client. This is not the ! / !! user-shell sandbox policy.',
+          specialist: 'shell-execution-settings',
+        },
+        {
+          // M6-2A A5: the NEXT cold-launch backend selection. A Host profile
+          // setting, not the current process backend: saving it never switches
+          // the running TUI/Host. An explicit DSH_PI_TUI_BACKEND override is a
+          // separate, read-only launch fact reported in the Detail.
+          id: 'startup-backend',
+          category: 'general',
+          label: 'Backend',
+          summary: backendStartupSummaryOf(backendStartup),
+          scope: 'DSH Host profile · next cold launch',
+          freshness: backendStartupFreshness,
+          description: 'Which backend a new launch runs: Direct runs the in-process TUI; Daemon launches one '
+            + 'foreground Client against a local Host. Applies to the next launch only; the current TUI/Host is not changed. '
+            + 'An explicit DSH_PI_TUI_BACKEND environment value overrides this for that launch and is shown read-only.',
+          edit: backendStartupEditOf(backendStartup, configReadiness),
+        },
+        {
+          // M5-W PR-C: the NEXT-Host-launch Web preference. It is a Host profile
+          // setting, not the current Web state: saving it never enables or
+          // disables the running Host, and `/web` remains the immediate control.
+          // FR5-B moved the row to General (same id, same port) so the
+          // next-Split-Host-launch preferences live together.
+          id: 'web-autostart',
+          category: 'general',
+          label: 'Start Web automatically',
+          summary: webAutostartSummaryOf(webAutostart),
+          scope: 'DSH Host profile · next Split Host launch',
+          freshness: webAutostartFreshness,
+          description: 'Automatically serves the Web frontend when a new Split Host starts. '
+            + 'The current Host is not changed; use /web for immediate control. Browser opening remains manual.',
+          edit: webAutostartEditOf(webAutostart, configReadiness),
+        },
+        {
+          // PO-1B: the NEXT-Split-Host-start ACP preference. A persisted profile
+          // fact independent of the running listener; saving it never binds or
+          // tears down the current socket. FR5-B moved the row to General (same
+          // id, same port); the ACP Server runtime row stays in Tools.
+          id: 'acp-autostart',
+          category: 'general',
+          label: 'Start ACP automatically',
+          summary: acpAutostartSummaryOf(acpAutostart),
+          scope: 'DSH Host profile · next Split Host start',
+          freshness: acpAutostartFreshness,
+          description: 'Automatically binds the local ACP v1 Unix socket listener when a new Split Host starts. '
+            + 'Affects the next Split Host start; the current ACP listener is unchanged. Use the ACP Server row for immediate control.',
+          edit: acpAutostartEditOf(acpAutostart, configReadiness),
+        },
+        ...sessionLogUploadRowOf(sessionLogUpload, configReadiness),
+        {
+          // PO-1B: the local ACP listener RUNTIME row. Its value is the LIVE
+          // Host listener state read through the `acpAccess` port (async); the
+          // row never reports the persisted preference. On Direct it is a
+          // truthful Unavailable (Split Host only) and offers no candidate.
+          id: 'acp-runtime',
+          category: 'tools',
+          label: 'ACP Server',
+          summary: acpRuntimeSummaryOf(),
+          scope: 'DSH Host · running Split Host ACP listener',
+          freshness: acpRuntimeFreshnessOf(),
+          description: ACP_RUNTIME_DESCRIPTION,
+          edit: acpRuntimeEditOf(),
+        },
+        {
           // C2-R4: the ONE discoverable entry to the Web provider settings
           // page. It opens the embedded `WebSettingsPage` in THIS workspace's
           // lease/body (the same specialist mechanism the Agent allowlist row
@@ -3491,6 +4765,8 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           scope: 'Host Web provider settings',
           specialist: 'web-settings',
         },
+        ...(mcpServersRow === undefined ? [] : [mcpServersRow]),
+        ...(computerUseRow === undefined ? [] : [computerUseRow]),
         // C2-R6: the registry's live directory IS the row list. Every record is
         // projected in the Registry's own global order (order ASC, id ASC); the
         // command layer never groups or re-sorts, because the plugin GROUPS are
@@ -3498,6 +4774,10 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         // Without a live row there is no Extensions category at all (the panel
         // derives it from `extensionCount`), so no empty page can be painted.
         ...extensionRecords.map(record => {
+          // R8-E PR-4: mode decides the writer, never a row-id prefix or a
+          // user-supplied string. A persisted record reuses the exact same
+          // `ext-setting:<id>` row identity and the existing Choice/Confirm.
+          if (record.mode === 'persisted') return persistedExtensionRowOf(record)
           const id = `ext-setting:${record.id}` as const
           const choices = record.values
           return {

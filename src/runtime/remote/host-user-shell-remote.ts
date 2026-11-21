@@ -1,43 +1,79 @@
-/**
- * The Remote Host user-shell adapter (shell amendment, M3-4 PR3): the
- * truthful-unavailable deployment. At the frozen rc.2 target the only Host
- * user-shell Remote carrier (`dsh-api-terminal-controller`) is a retained
- * interactive PTY — screen-stream output, no deterministic per-command start,
- * no authoritative per-command exit status, no one-shot cancel, no sandbox
- * variant — so the carrier qualification concludes CARRIER_GAP (U11a/U11b,
- * docs/architecture/host-client.md "User `!` / `!!` shell under a wire
- * backend").
- *
- * This adapter therefore executes NOTHING: `availability.supported` is false
- * and every admission returns `unavailable` with the same carrier-gap
- * message. Zero Client spawn, zero Host `ctx.shell` escape, zero fake
- * success card, zero Session write.
- *
- * @module @xmoon76/dsh-pi-tui/runtime/remote/host-user-shell-remote
- */
-
-import type {
-  HostUserShellAdmission,
-  HostUserShellPort,
-  HostUserShellRequest,
+import { cancellationError } from '../process/tasks.ts'
+import {
+  HostUserShellOutcomeUnknownError,
+  HostUserShellSandboxRunnerError,
+  type HostUserShellOutcome,
+  type HostUserShellPort,
+  type HostUserShellRequest,
 } from '../host-user-shell-port.ts'
+import type { PiTuiHostUserShellNamespace } from './pi-tui-host-user-shell-contract.ts'
+import type { RemoteConnectionGenerationSource } from './session-reader-remote.ts'
 
-/** The one truthful message every Remote admission returns. */
-const CARRIER_GAP_MESSAGE =
-  'Host user-shell execution is unavailable in this Remote composition — nothing was executed'
-
-/** The Remote backend's Host user-shell port: truthful, inert, fail-closed. */
+/** Remote execution is one authenticated one-shot Host invocation; no raw
+ *  frame stream, acknowledgement window or replay exists on this path. */
 export class RemoteHostUserShellPort implements HostUserShellPort {
-  readonly availability = {
-    supported: false,
-    policies: [] as const,
-  } as const
+  readonly availability = { supported: true, policies: ['bypass', 'sandbox'] as const }
+  private readonly namespace: PiTuiHostUserShellNamespace
+  private readonly generation: RemoteConnectionGenerationSource
 
-  async execute(_request: HostUserShellRequest): Promise<HostUserShellAdmission> {
-    void _request
-    return {
-      kind: 'unavailable',
-      reason: { reason: 'carrier-gap', message: CARRIER_GAP_MESSAGE },
+  constructor(
+    namespace: PiTuiHostUserShellNamespace,
+    generation: RemoteConnectionGenerationSource,
+  ) {
+    this.namespace = namespace
+    this.generation = generation
+  }
+
+  async execute(request: HostUserShellRequest): Promise<HostUserShellOutcome> {
+    if (request.sessionId === '') throw new TypeError('HostUserShellPort requires a non-empty Session id')
+    request.signal.throwIfAborted()
+    const capturedGeneration = this.generation.getSnapshot()
+    if (capturedGeneration === undefined) {
+      return {
+        kind: 'unavailable',
+        reason: { reason: 'carrier-gap', message: 'Host user-shell execution is unavailable while disconnected — nothing was executed' },
+      }
     }
+
+    let call
+    try {
+      call = await this.namespace.run(request.sessionId, request.cwd, request.command, request.policy, request.signal)
+    } catch (error) {
+      if (request.signal.aborted) throw cancellationError('Host shell execution cancelled')
+      if (!Object.is(capturedGeneration, this.generation.getSnapshot())) {
+        throw new HostUserShellOutcomeUnknownError('Host shell execution belonged to a stale Connection generation')
+      }
+      throw new HostUserShellOutcomeUnknownError(
+        `Host shell execution could not be verified (${error instanceof Error ? error.message : 'wire failure'})`,
+      )
+    }
+    request.signal.throwIfAborted()
+    // The reply must belong to the generation that STARTED the run. A mux
+    // drop/reconnect during the unary call does not abort that call, so a
+    // late settled reply (typically the Host's transport-triggered `aborted`
+    // termination) would otherwise be accepted as authoritative. After the
+    // generation is replaced the terminal fact is lost: it is UNKNOWN.
+    if (!Object.is(capturedGeneration, this.generation.getSnapshot())) {
+      throw new HostUserShellOutcomeUnknownError('Host shell execution belonged to a stale Connection generation')
+    }
+    if (!call.ok) {
+      throw new HostUserShellOutcomeUnknownError(`Host shell execution could not be verified (${call.error.message})`)
+    }
+
+    const outcome = call.value
+    if (outcome.kind === 'refused') {
+      return {
+        kind: 'unavailable',
+        reason: {
+          reason: outcome.reason === 'policy-unavailable' ? 'policy-unavailable' : 'carrier-gap',
+          message: outcome.message,
+        },
+      }
+    }
+    if (outcome.kind === 'failed') {
+      if (outcome.phase === 'sandbox-runner') throw new HostUserShellSandboxRunnerError(outcome.message)
+      throw new HostUserShellOutcomeUnknownError(`Host shell infrastructure failed after start: ${outcome.message}`)
+    }
+    return { kind: 'settled', result: outcome.result }
   }
 }

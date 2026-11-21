@@ -38,7 +38,7 @@ import { TuiApp } from '../../src/tui-app.ts'
 import { applyRunnerWithRuntime } from '../../src/app/bootstrap.ts'
 import type { RemoteApplicationOverride } from '../../src/app/application-runtime.ts'
 import type { SessionOwnerRetirement } from '../../src/app/session/owner-access.ts'
-import { createRemoteApplicationRuntime } from '../../src/app/remote/runtime.ts'
+import { createRemoteApplicationRuntime } from '../support/m3-inprocess/application-runtime.ts'
 import { CatalogRefreshCoordinator } from '../../src/app/command/catalog-refresh.ts'
 import { liveTuiCountForTest } from '../../src/tui/process-slot.ts'
 import { waitFor } from '../support/remote-application-fixture.ts'
@@ -384,7 +384,8 @@ test('a throwing real generation unsubscribe cannot truncate the root teardown',
 
   await fixture.runnerFiberDispose()
 
-  assert.equal(generationUnsubscribes, 1, 'the real generation unsubscribe executed exactly once')
+  assert.equal(generationUnsubscribes, 2,
+    'the progress watch and command catalog each released their own official generation subscription once')
   assert.equal(coordinatorDisposals.length, 1,
     'the production catalog coordinator disposed exactly once despite the throwing unsubscribe')
   assert.ok(transport !== undefined, 'the transport observer was installed')

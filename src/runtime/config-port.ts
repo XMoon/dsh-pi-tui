@@ -29,6 +29,8 @@
 
 import type { FooterCommandConfig } from '../domain/footer/command-config.ts'
 import type { FooterCustomItemsParseResult } from '../domain/footer/custom-items.ts'
+import type { McpClassifiedServerEntry } from '../domain/mcp/server-config.ts'
+import type { WebProviderSelectionFacts } from '../domain/web-provider-settings.ts'
 
 /** The TUI settings document (theme/iconStyle/footer/footerLayout/
  * footerCustomItems/fullscreen/busyEnter/localShellSandbox/homeEndKeys/
@@ -99,6 +101,40 @@ export interface TuiSettingsDoc {
   wheelScrollLines: string
   keybindings?: unknown
 }
+
+/** The structural 0.1.7 SettingsForms surface the TUI preference writers use
+ * (the service resolves from the dsh installation; this is never a package
+ * dependency). Shared by the Direct adapter and the Host-owned migration so a
+ * non-Direct owner never imports the Direct adapter module. */
+export interface SettingsFormsLike {
+  describe(options?: { readonly redactSecrets?: boolean }): readonly TuiSettingsDescriptorLike[] | undefined
+  mutate(
+    ns: string,
+    ops: readonly TuiSettingsPathOp[],
+    expectedRevision?: number,
+  ): Promise<unknown>
+}
+
+/** The descriptor slice the TUI preference writers/trust reads consume. */
+export interface TuiSettingsDescriptorLike {
+  readonly ns: string
+  /** The form-projected EFFECTIVE value (volatile fields only). */
+  readonly value?: unknown
+  /** The form-projected USER profile override. */
+  readonly user?: unknown
+  readonly revision?: number
+}
+
+/** One path-addressed form edit (the 0.1.7 `SettingsPathOp` shape). */
+export type TuiSettingsPathOp =
+  | { readonly op: 'set'; readonly path: readonly string[]; readonly value: unknown }
+  | { readonly op: 'unset'; readonly path: readonly string[] }
+
+/** The canonical profile row id / Settings namespace for the durable TUI
+ * preferences (M6 PR-A). Every backend reads and writes this ONE row; the
+ * retired `tui-app` / `split-host-pi-tui-runtime` namespaces are migration
+ * sources only. */
+export const CANONICAL_TUI_SETTINGS_NS = 'pi-tui-preferences'
 
 /** The TUI settings document surface (get/replace — the same shape the
  * commands surface consumes; the runner wires the registered settings
@@ -354,15 +390,19 @@ export interface CredentialConfig {
   /** Clear one reference credential (/logout). */
   unsetReference(ref: string): Promise<void>
   /**
-   * Whether this backend can enumerate and delete stored credential RECORDS
-   * (plan §8.5). Direct: yes — the credentials service owns them. Remote
-   * rc.2: NO — the wire publishes no record read and no record delete, so
-   * `listRecords()` rejects and `deleteRecord()` fails closed.
+   * Whether this backend can enumerate and delete stored credential RECORDS.
    *
-   * The distinction is the point: a consumer must present "this backend
-   * cannot list stored records" instead of treating a rejection as an empty
-   * list, and a SUPPORTED backend whose read really failed must still surface
-   * that failure rather than being reported as a capability gap.
+   * The two key spaces are disjoint: the generated `credentials` Remote
+   * publishes only REFERENCE `describe/set/unset`, while a stored record is
+   * addressed by the official `<scope>/<id>` `CredentialKey`. M6-1 F7B adds the
+   * private `piTuiCredentialRecords` namespace for the record half, so Direct
+   * (the official store in process) and a Split backend that mounts that
+   * namespace both answer `true`.
+   *
+   * The distinction is the point: a consumer must present "this backend cannot
+   * list stored records" instead of treating a rejection as an empty list, and
+   * a SUPPORTED backend whose read really failed must still surface that
+   * failure rather than being reported as a capability gap.
    */
   recordsSupported(): boolean
   /** Delete one stored credential record (/logout; the authorization
@@ -425,6 +465,7 @@ export type AuthorizationFlowEvent =
   | { kind: 'prompt'; attemptId: string; promptId: string; prompt: AuthorizationPromptEvent }
   | { kind: 'prompt-withdrawn'; attemptId: string; promptId: string }
   | { kind: 'settled'; attemptId: string; status: 'authorized' | 'cancelled' | 'failed'; code?: string; message?: string }
+  | { kind: 'unconfirmed'; attemptId: string; reason: string }
 
 /** The authorization sub-domain: provider sign-in flows. The seam owns
  * the protocol/lifecycle; this port exposes the targets and an
@@ -436,6 +477,20 @@ export interface AuthorizationConfig {
   available(): boolean
   /** The registered flows as detached targets. */
   listTargets(): readonly AuthorizationFlowTarget[]
+  /**
+   * Re-read the roster from the authoritative Host (one bounded read, never a
+   * background poll). Direct reads the official in-process registry; Remote
+   * issues the private `piTuiAuthorization/list` call. A failed Remote read
+   * leaves the state `stale` (never an empty "ready" roster).
+   */
+  refreshTargets(): Promise<void>
+  /**
+   * How current {@link listTargets} is. `ready` = an authoritative read for the
+   * CURRENT Connection generation; `unavailable` = the Host has no
+   * authorization service (definite, not stale); `stale` = the roster could
+   * not be read for this generation (or was never read).
+   */
+  targetsState(): 'ready' | 'unavailable' | 'stale'
   /** Start one flow. The attempt's notices/prompts/settlement arrive on
    * the event subscription; `respond`/`cancel` answer it. */
   begin(request: {
@@ -454,8 +509,10 @@ export interface AuthorizationConfig {
 }
 
 /** The permission sub-domain: permission preset names, the persisted
- * default, preset application (/yolo), and the session's approval-policy
- * override. */
+ * default, and preset application (/yolo). The session's INDEPENDENT
+ * approval-policy/sandbox read and the approval write moved to
+ * `SessionPolicyPort` (M6-1 F8); this sub-domain carries no approval
+ * contract. */
 export interface PermissionConfig {
   /** The advertised preset names, in the preset table's declaration order. */
   presetNames(): readonly string[]
@@ -464,26 +521,6 @@ export interface PermissionConfig {
   defaultPreset(): string | undefined
   /** Persist the default preset for future sessions. */
   setDefaultPreset(name: string): Promise<void>
-  /**
-   * Whether this backend READS and WRITES the session's independent
-   * approval-policy override at all. Direct: yes (the official approval
-   * service). Remote rc.2: NO — no public Client read of the override and no
-   * synchronous policy carrier exist, so the UI must hide/disable the row.
-   *
-   * This is what keeps `undefined` from `approvalOverrideOf` unambiguous: on a
-   * backend where the capability is absent, "undefined" is UNAVAILABLE and
-   * must never be rendered as the consumer's own `ask` default (the current
-   * Remote composition's unsupported set).
-   */
-  approvalOverrideAvailable(): boolean
-  /** The session's own approval-policy override, resolved from the EXACT
-   * live Agent of `sessionId` (the official approval service's
-   * `overrideOf(session)` read — alpha.4; the configured default is
-   * deliberately NOT applied, an override-less session answers undefined
-   * and the consumer shows its own default). Degrades to undefined when
-   * the approval service is absent or the session has no live Agent — which
-   * is only meaningful while `approvalOverrideAvailable()` is true. */
-  approvalOverrideOf(sessionId: string): 'ask' | 'never' | undefined
   /** Apply one permission preset to a live session (/yolo applies
    * `danger-full-access` through the OFFICIAL command line so the switch
    * takes the exact host path — sandbox + approval writer + policy-change
@@ -517,23 +554,191 @@ export interface SubagentAllowedModelRoute {
   readonly model: string
 }
 
-/** The official subagent model-selection preference (the DSH
- * `subagent-model-selection-settings` settings namespace, whose values the
- * `subagent-model-selection` service owns Host-side). The TUI reads and writes
- * the OFFICIAL section through this sub-domain — it never maintains a
- * parallel TUI-owned subagent routing setting. Sampling is per NEW
- * session composition: a settings change never rewrites the tool schema
- * of an Agent that is already running. */
+/** A staged edit of one field in an official volatile Settings section. */
+export type FieldPatch<T> =
+  | { readonly kind: 'set'; readonly value: T }
+  | { readonly kind: 'reset' }
+
+/** Only semantic field names and values cross the application port. */
+export type SectionPatch<T extends object> = {
+  readonly [K in keyof T]?: FieldPatch<T[K]>
+}
+
+/** One current official Host Settings descriptor projected into typed facts. */
+export type SectionRead<T extends object> =
+  | {
+      readonly kind: 'ready'
+      readonly generation: object
+      readonly revision: number
+      readonly effective: T
+      readonly inherited: T
+      /** Effective-to-inherited difference; not USER patch key presence. */
+      readonly overridden: Readonly<Record<keyof T, boolean>>
+    }
+  | { readonly kind: 'unavailable' | 'unreadable'; readonly reason: string }
+
+/** The Settings RPC settlement before the required authoritative readback. */
+export type SectionMutationOutcome =
+  | { readonly kind: 'accepted' }
+  | { readonly kind: 'conflict'; readonly reason: string }
+  | { readonly kind: 'rejected'; readonly reason: string }
+  | { readonly kind: 'outcome-unconfirmed'; readonly reason: string }
+
+/** Each path is relative to the Config carrier's data field. */
+export type ExtensionConfigDataOp =
+  | { readonly op: 'set'; readonly path: readonly string[]; readonly value: unknown }
+  | { readonly op: 'unset'; readonly path: readonly string[] }
+
+/** One per-package extension-config read from the official Settings form. */
+export type ExtensionConfigRead =
+  | {
+      readonly kind: 'ready'
+      readonly packageName: string
+      /** Opaque, current Host/Connection identity; never serialized. */
+      readonly generation: object
+      readonly revision: number
+      /** These are exactly descriptor.value/base/user's .data projections. */
+      readonly effective: unknown
+      readonly inherited: unknown
+      readonly user: unknown
+      /** Own-field presence at descriptor.user.data, not value inequality. */
+      readonly userDataPresent: boolean
+    }
+  | { readonly kind: 'stale' | 'unavailable' | 'unreadable'; readonly reason: string }
+
+/**
+ * The per-package extension configuration sub-domain (R8-E PR-2).
+ *
+ * The ONLY business identity is the real npm package name from the official
+ * package resolution; the adapter derives the profile-owned Config row id from
+ * it. A read projects the row's `data` field from ONE authoritative Settings
+ * descriptor into detached JSON values. A write is ONE official
+ * revision-checked path mutation whose paths are relative to `data` and whose
+ * outcome is accepted only after a fresh authoritative read-back.
+ */
+export interface ExtensionConfigsConfig {
+  /** Read one package's current `data` projection, never a fabricated `{}`. */
+  read(packageName: string): ExtensionConfigRead
+  /** Direct resolves; Remote refreshes the EXISTING shared Settings mirror. */
+  refresh(): Promise<void>
+  /** ONE batch against the caller's captured current revision/generation. */
+  mutate(
+    packageName: string,
+    ops: readonly ExtensionConfigDataOp[],
+    expectedRevision: number,
+    pinnedGeneration: object,
+  ): Promise<SectionMutationOutcome>
+}
+
+/** Official DSH subagent limits, read from the volatile `subagent` section. */
+export interface SubagentLimits {
+  readonly maxDepth: number
+  readonly maxActiveSubagents: number
+}
+
+/** One typed section of the official Host configuration. */
+export interface SubagentLimitsConfig {
+  read(): SectionRead<SubagentLimits>
+  /** Direct already reads the Host; Remote refreshes the existing shared mirror. */
+  refresh(): Promise<void>
+  /** Dispatches one operation batch at the user's exact revision and generation. */
+  mutate(
+    patch: SectionPatch<SubagentLimits>,
+    expectedRevision: number,
+    generation: object,
+  ): Promise<SectionMutationOutcome>
+}
+
+export interface SubagentModelSelection {
+  readonly enabled: boolean
+  readonly allowedModels: readonly SubagentAllowedModelRoute[]
+}
+
+/** Official next-top-level-Session model-selection preference. Existing
+ * Sessions keep their sampled policy. */
 export interface SubagentModelSelectionConfig {
-  /** Whether the Host settings section is present (it registers when the
-   * deployment mounts the subagent-model-selection-settings service). */
-  available(): boolean
-  /** The current official preference (defaults: disabled, empty list). */
-  get(): { enabled: boolean; allowedModels: readonly SubagentAllowedModelRoute[] }
-  /** Persist the official section. Rejects with the official validation
-   * error when enabling without at least one route, or when the list
-   * repeats a provider+model pair. */
-  set(value: { enabled: boolean; allowedModels: readonly SubagentAllowedModelRoute[] }): Promise<void>
+  read(): SectionRead<SubagentModelSelection>
+  /** Direct already reads the Host; Remote refreshes the existing shared mirror. */
+  refresh(): Promise<void>
+  /** Dispatches one operation batch at the user's exact revision and generation. */
+  mutate(
+    patch: SectionPatch<SubagentModelSelection>,
+    expectedRevision: number,
+    generation: object,
+  ): Promise<SectionMutationOutcome>
+}
+
+/** Official `agent-loop.maxParallelToolCalls`: the per-step budget of
+ * concurrently executed tool calls. A volatile Host setting sampled by the
+ * next Agent step; already-dispatched tool calls are never rewritten. */
+export interface AgentLoopSettings {
+  readonly maxParallelToolCalls: number
+}
+
+/** The official Agent-loop scheduling budget (FR5-B). Reset is the official
+ * field `unset`; the next step's budget is whatever the Host then computes. */
+export interface AgentLoopSettingsConfig {
+  read(): SectionRead<AgentLoopSettings>
+  /** Direct already reads the Host; Remote refreshes the existing shared mirror. */
+  refresh(): Promise<void>
+  /** Dispatches one operation batch at the user's exact revision and generation. */
+  mutate(
+    patch: SectionPatch<AgentLoopSettings>,
+    expectedRevision: number,
+    generation: object,
+  ): Promise<SectionMutationOutcome>
+}
+
+/** The Host-observed identity of the ACTIVE model-tool shell executor row. It
+ * is never a Client-side choice: POSIX Hosts mount `bash-sandbox`, Windows
+ * Hosts mount `pwsh-sandbox`, and exactly one of them is current. */
+export type HostShellExecutor = 'bash' | 'pwsh'
+
+/** The two official numeric caps of the Host-served shell executor row. The
+ * executor is a Host observation for display/fencing, not an editable field. */
+export interface ShellExecutionSettings {
+  readonly executor: HostShellExecutor
+  readonly timeoutMs: number
+  readonly maxOutputBytes: number
+}
+
+/** The official model-tool shell execution caps (FR5-B). Both fields live in
+ * the SAME Host-served row and are dispatched as ONE revision-checked mutation.
+ * These are NOT the `!` / `!!` user-shell policy. */
+export interface ShellExecutionSettingsConfig {
+  read(): SectionRead<ShellExecutionSettings>
+  /** Direct already reads the Host; Remote refreshes the existing shared mirror. */
+  refresh(): Promise<void>
+  /**
+   * Dispatches one operation batch against the exact served row the caller
+   * read: the adapter refuses when the Host served namespace changed since.
+   */
+  mutate(
+    patch: SectionPatch<ShellExecutionSettings>,
+    expectedRevision: number,
+    generation: object,
+    expectedExecutor: HostShellExecutor,
+  ): Promise<SectionMutationOutcome>
+}
+
+/** Official `session-log-deepseek.enabled`: whether the official plugin
+ * contributes this session's log to DeepSeek API requests. */
+export interface SessionLogUpload {
+  readonly enabled: boolean
+}
+
+/** The official session-log upload switch (FR5-B). `false` is a real USER
+ * value; Reset is the official `unset` and may read back `true`. */
+export interface SessionLogUploadConfig {
+  read(): SectionRead<SessionLogUpload>
+  /** Direct already reads the Host; Remote refreshes the existing shared mirror. */
+  refresh(): Promise<void>
+  /** Dispatches one operation batch at the user's exact revision and generation. */
+  mutate(
+    patch: SectionPatch<SessionLogUpload>,
+    expectedRevision: number,
+    generation: object,
+  ): Promise<SectionMutationOutcome>
 }
 
 /** The saved agent-preset default sub-domain (`/preset default`): the
@@ -548,6 +753,16 @@ export interface PresetDefaultConfig {
   /** Persist the default preset for future sessions. */
   set(id: string): Promise<void>
 }
+
+/**
+ * The OFFICIAL billing mode of one DeepSeek Search/Fetch API capability
+ * (`web-deepseek-api.searchBilling` / `fetchBilling`, rc.2's closed enum). The
+ * default `auto` follows the credential the CURRENT conversation's DeepSeek
+ * route selects; `account` uses only the signed-in account and `api-key` only
+ * the API-key credential reference — the three are explicit, non-fallback
+ * choices.
+ */
+export type WebApiBilling = 'auto' | 'account' | 'api-key'
 
 /**
  * The OFFICIAL web provider selection and DeepSeek Search/Fetch API options
@@ -566,11 +781,38 @@ export interface WebProviderSettings {
   searchProvider: string | undefined
   /** `web.fetchProvider`, with the same absent-selection semantics. */
   fetchProvider: string | undefined
+  /** The SAME `web` descriptor's per-capability layering facts: the deployment
+   *  `baseId`, the USER own-field presence and its raw id. These are NOT
+   *  derivable from the effective ids above (`value === base` does not mean the
+   *  USER layer is empty), and they are what an official reset decision and its
+   *  stale guard read. */
+  providerSelection: {
+    readonly search: WebProviderSelectionFacts
+    readonly fetch: WebProviderSelectionFacts
+  }
   /** The `web-deepseek-api` API options (official defaults when unset). */
   api: {
-    baseURL: string
+    /** `searchBilling`: the Search API's official billing mode. */
+    searchBilling: WebApiBilling
+    /** `fetchBilling`: the Fetch API's official billing mode. */
+    fetchBilling: WebApiBilling
     count: number
     sendOriginalQuestion: boolean
+  }
+  /** The rc.2 YAML-only advanced Search/Fetch endpoint fields, as DETACHED
+   *  read-only facts: the client never writes them and never derives a request
+   *  route from them. A non-empty `search*` field overrides the Search billing
+   *  choice, a non-empty `fetch*` field the Fetch billing choice (the official
+   *  Host operation still owns the real routing). Legacy single-endpoint keys
+   *  (`baseURL`/`apiKeyEnv`/`apiKey`) are NOT rc.2 schema fields; when a Host
+   *  descriptor happens to project them, only their PRESENCE is reported —
+   *  never their values. */
+  advanced: {
+    searchBaseURL?: string
+    searchApiKeyEnv?: string
+    fetchBaseURL?: string
+    fetchApiKeyEnv?: string
+    legacyOverrideDetected?: boolean
   }
   /** Credential-presence facts from the official credential store (never the
    *  value): `configured` is the store's own answer, `source` its layer when
@@ -604,17 +846,27 @@ export interface WebProviderConfig {
   setSearchProvider(id: 'deepseek-official' | 'deepseek-search-api'): Promise<void>
   /** Pin the official fetch provider (`web.fetchProvider`). */
   setFetchProvider(id: 'http' | 'deepseek-fetch-api'): Promise<void>
+  /** Restore the deployment selection for Search: the ONE official `unset`
+   *  path op, which lets the `base` layer apply again. It carries NO id (an
+   *  automatic choice is not a provider id). A readable section with no USER
+   *  own-field is a no-op; an UNREADABLE USER layer is an error, never an
+   *  assumed absence. */
+  restoreSearchProvider(): Promise<void>
+  /** Restore the deployment selection for Fetch (the same official `unset`). */
+  restoreFetchProvider(): Promise<void>
   /** `web-deepseek-api.count`: an integer from 1 through 50 (the official rule). */
   setSearchApiCount(count: number): Promise<void>
   /** `web-deepseek-api.sendOriginalQuestion`: whether the next API search may
    *  send the triggering human question (the provider bounds it to 128
    *  characters). */
   setSendOriginalQuestion(enabled: boolean): Promise<void>
-  /** `web-deepseek-api.baseURL`: an absolute `https:` API base WITHOUT
-   *  credentials, query, fragment or a trailing `/search` / `/fetch` action
-   *  name. A custom endpoint receives the credential, so the human must confirm
-   *  it explicitly in the UI. */
-  setSearchApiBaseURL(url: string): Promise<void>
+  /** `web-deepseek-api.searchBilling`: one explicit official billing choice
+   *  for the Search API (`auto` is a persisted choice, never a reset of the
+   *  YAML-only overrides). */
+  setSearchBilling(mode: WebApiBilling): Promise<void>
+  /** `web-deepseek-api.fetchBilling`: the same explicit official billing
+   *  choice for the Fetch API. */
+  setFetchBilling(mode: WebApiBilling): Promise<void>
 }
 
 /** The effective state of the Host `pi-tui-visual-tools` row — the ONE
@@ -663,6 +915,147 @@ export interface VisualToolsConfig {
 }
 
 /**
+ * The profile-owned Web startup preference (`pi-tui-web-preferences.autoStart`):
+ * whether a NEW Split Host enables the official Web frontend while it boots.
+ *
+ * This is a CONFIGURATION fact, never the current Web state: the live
+ * `enabled/disabled/changing/unavailable` authority stays the Host's private
+ * `piTuiWebAccess` service, and saving this preference must never enable or
+ * disable a running Host. The preference applies to the next Host launch only.
+ */
+export interface WebStartupPreferenceState {
+  /** The effective `autoStart` value the next Host cold boot will apply. */
+  readonly autoStart: boolean
+  /** The namespace revision this state was read at; a Confirm submits it back
+   *  as the official `expectedRevision`, so an external write between the read
+   *  and the Confirm is a conflict instead of a silent last-write-wins. */
+  readonly revision: number
+  /** Whether the USER profile layer declares the value. `false` means the
+   *  effective value is the schema default — the only provenance the Host form
+   *  exposes — so the UI may mark it `[default]`; the default is never
+   *  re-derived here. */
+  readonly userOverridden: boolean
+}
+
+/**
+ * The profile-wide Web startup preference. The write is the official
+ * revision-checked settings mutation of the `pi-tui-web-preferences` entry. A
+ * resolved write is NOT a read-back: the caller must
+ * {@link WebStartupPreferenceConfig.read} again and only that read earns
+ * `Verified`.
+ */
+export interface WebStartupPreferenceConfig {
+  /** The current Host preference, or `undefined` when the profile section
+   *  cannot be read at all. Never a fabricated default. */
+  read(): WebStartupPreferenceState | undefined
+  /** Persist `autoStart` through the official settings write at the revision
+   *  the user's decision was read at. A stale revision is a refusal (the
+   *  official conflict), never a silent overwrite. */
+  setAutoStart(value: boolean, expectedRevision: number): Promise<void>
+}
+
+/** The public backend a cold launch runs: the in-process Direct TUI or the
+ *  foreground daemon Client. This is the SAME vocabulary the launcher's
+ *  `PublicBackend` uses, kept structural here so the port owns no startup
+ *  import. */
+export type PublicBackendValue = 'direct' | 'daemon'
+
+/**
+ * The profile-owned startup backend (`tui-startup.backend`): which backend a
+ * NEW cold launch runs. It is a CONFIGURATION fact, never the current process's
+ * backend — the running TUI/Host is fixed at launch and saving this preference
+ * never switches it.
+ *
+ * FAIL-CLOSED: a Profile value outside {@link PublicBackendValue} is NOT a
+ * read: `read()` returns `undefined` (unreadable) rather than silently mapping
+ * it to `direct`. An explicit `DSH_PI_TUI_BACKEND` override is a launch-time
+ * fact read separately by the UI; it never enters this state and never changes
+ * the persisted value.
+ */
+export interface BackendStartupPreferenceState {
+  /** The effective `backend` value the next cold launch will apply. */
+  readonly backend: PublicBackendValue
+  /** The namespace revision this state was read at; a Confirm submits it back
+   *  as the official `expectedRevision`, so an external write between the read
+   *  and the Confirm is a conflict instead of a silent last-write-wins. */
+  readonly revision: number
+  /** Whether the USER profile layer declares the value. `false` means the
+   *  effective value is the schema default — the only provenance the Host form
+   *  exposes — so the UI may mark it `[default]`; the default is never
+   *  re-derived here. */
+  readonly userOverridden: boolean
+}
+
+/**
+ * The profile-wide startup backend. The write is the official revision-checked
+ * settings mutation of the `tui-startup` entry's `backend` field. A resolved
+ * write is NOT a read-back: the caller must
+ * {@link BackendStartupPreferenceConfig.read} again and only that read earns
+ * `Verified`.
+ */
+export interface BackendStartupPreferenceConfig {
+  /** The current Host preference, or `undefined` when the profile section
+   *  cannot be read at all OR carries an invalid backend (fail-closed). Never a
+   *  fabricated default. */
+  read(): BackendStartupPreferenceState | undefined
+  /**
+   * A FRESH authoritative read for the exit-time dangerous whole-Host-stop
+   * gate. It must reflect the Host state AFTER the call, not merely the last
+   * observed snapshot: Direct reads the live in-process Host config authority;
+   * Remote forces a NEW official `settings.describe()` (never just a
+   * previously-started in-flight mirror refresh). The caller still checks
+   * `configReadiness() === 'ready'` afterwards for the generation/revision
+   * evidence — a stale/unready result is NOT a verified read and must never
+   * authorize the Host stop.
+   */
+  readFresh(): Promise<BackendStartupPreferenceState | undefined>
+  /** Persist `backend` through the official settings write at the revision the
+   *  user's decision was read at. A stale revision is a refusal (the official
+   *  conflict), never a silent overwrite. */
+  setBackend(value: PublicBackendValue, expectedRevision: number): Promise<void>
+}
+
+/**
+ * The profile-owned ACP startup preference (`pi-tui-acp-preferences.autoStart`):
+ * whether a NEW Split Host binds the local ACP v1 Unix socket listener while it
+ * boots.
+ *
+ * This is a CONFIGURATION fact, never the current listener state: the live
+ * `enabled/disabled/changing/unavailable` authority stays the Host's private
+ * `piTuiAcpAccess` service, and saving this preference must never enable or
+ * disable a running Host. The preference applies to the next Host launch only.
+ */
+export interface AcpStartupPreferenceState {
+  /** The effective `autoStart` value the next Host cold boot will apply. */
+  readonly autoStart: boolean
+  /** The namespace revision this state was read at; a Confirm submits it back
+   *  as the official `expectedRevision`, so an external write between the read
+   *  and the Confirm is a conflict instead of a silent last-write-wins. */
+  readonly revision: number
+  /** Whether the USER profile layer declares the value. `false` means the
+   *  effective value is the schema default, so the UI may mark it `[default]`;
+   *  the default is never re-derived here. */
+  readonly userOverridden: boolean
+}
+
+/**
+ * The profile-wide ACP startup preference. The write is the official
+ * revision-checked settings mutation of the `pi-tui-acp-preferences` entry. A
+ * resolved write is NOT a read-back: the caller must
+ * {@link AcpStartupPreferenceConfig.read} again and only that read earns
+ * `Verified`.
+ */
+export interface AcpStartupPreferenceConfig {
+  /** The current Host preference, or `undefined` when the profile section
+   *  cannot be read at all. Never a fabricated default. */
+  read(): AcpStartupPreferenceState | undefined
+  /** Persist `autoStart` through the official settings write at the revision
+   *  the user's decision was read at. A stale revision is a refusal (the
+   *  official conflict), never a silent overwrite. */
+  setAutoStart(value: boolean, expectedRevision: number): Promise<void>
+}
+
+/**
  * How current this backend's config reads are (M3-3B, plan §9.1).
  *
  * `ready` — the values below are authoritative for the live backend;
@@ -681,6 +1074,9 @@ export type ConfigReadiness = 'ready' | 'stale' | 'unavailable'
  * derives the Platform request headers from it, so the Client samples it per
  * request (never caches an old timezone offset across a DST change). */
 export interface AccountClientMetadata {
+  /** The installed DSH runtime version; the official Host Account service
+   * maps it to the Platform `x-client-version` header. Never the TUI bundle
+   * version. */
   readonly version: string
   /** Active UI language; the Host reduces it to the Platform wire locale. */
   readonly locale: string
@@ -714,6 +1110,31 @@ export interface AccountView {
   readonly links: { readonly usageUrl: string; readonly topUpUrl: string }
   readonly attempt: AccountSignInAttempt | null
 }
+
+declare const accountObservationLeaseBrand: unique symbol
+
+/** Opaque, process-local provenance for one Account snapshot. It is never part
+ *  of the generated Remote payload or persisted state. Direct validates it
+ *  against the installed Host Account service identity/epoch; Remote validates
+ *  it against the authenticated Connection generation/watch epoch. */
+export interface AccountObservationLease {
+  readonly [accountObservationLeaseBrand]: never
+}
+
+/** One detached Host AccountView plus the local authority that proves which
+ *  Host observation/generation produced it. */
+export interface AccountObservation {
+  readonly view: AccountView
+  readonly lease: AccountObservationLease
+}
+
+export type AccountWatchInvalidationReason = 'service-unavailable' | 'service-changed' | 'connection-changed' | 'watch-failed' | 'watch-ended'
+
+/** The logical Account watch's state transitions. A terminal invalidation
+ *  makes the previous snapshot last-known only; it is never a signed-out fact. */
+export type AccountWatchEvent =
+  | { readonly kind: 'current'; readonly observation: AccountObservation }
+  | { readonly kind: 'invalidated'; readonly reason: AccountWatchInvalidationReason }
 
 /** The Platform profile projection (contacts already masked by Platform). */
 export interface AccountProfile {
@@ -751,30 +1172,165 @@ export type AccountBalanceOutcome =
  * exposes a token, grant payload, PKCE value, Platform session or generic
  * account service object; every DTO is detached, and the callback origin is
  * the Host webserver's own bound loopback root (never a Client-supplied URL).
- *
- * `available()` is the account SERVICE fact. `getCallbackOrigin()` is the
- * separate browser-callback capability: `undefined` means the Host listener is
- * missing or not bound, and the UI must state that instead of starting a flow
- * that cannot complete.
+ * `available()` answers only whether the Account namespace/service exists;
+ * `isObservationCurrent()` validates the exact opaque local provenance carried
+ * with one complete Host snapshot. A known AccountView without a current lease
+ * is last-known presentation data, never authority for a mutation or risk read.
+ * `getCallbackOrigin()` is the separate browser-callback capability: undefined
+ * means the listener is missing or not bound.
  */
 export interface AccountConfig {
   available(): boolean
-  getState(): Promise<AccountView>
-  getProfile(client: AccountClientMetadata): Promise<AccountProfileOutcome>
-  getBalance(client: AccountClientMetadata): Promise<AccountBalanceOutcome>
-  /** Subscribe with a COMPLETE initial state; ending the signal never cancels
-   * an in-flight browser attempt. */
-  watch(signal: AbortSignal): AsyncIterable<AccountView>
+  isObservationCurrent(lease: AccountObservationLease): boolean
+  getState(): Promise<AccountObservation>
+  getProfile(client: AccountClientMetadata, lease: AccountObservationLease): Promise<AccountProfileOutcome>
+  getBalance(client: AccountClientMetadata, lease: AccountObservationLease): Promise<AccountBalanceOutcome>
+  /** Subscribe with a complete current initial state; invalidation is distinct
+   *  from signed-out and never cancels an in-flight browser attempt. */
+  watch(signal: AbortSignal): AsyncIterable<AccountWatchEvent>
   getCallbackOrigin(): string | undefined
   /** Start (or join) a browser attempt against the Host's own callback origin
-   * and the fixed `web` login source. */
-  startSignIn(client: AccountClientMetadata): Promise<AccountView>
-  cancelSignIn(id: string): Promise<AccountView>
-  signOut(client: AccountClientMetadata): Promise<AccountView>
+   *  and fixed `web` source, only for the exact current observation. */
+  startSignIn(client: AccountClientMetadata, lease: AccountObservationLease): Promise<AccountObservation>
+  cancelSignIn(id: string, lease: AccountObservationLease): Promise<AccountObservation>
+  signOut(client: AccountClientMetadata, lease: AccountObservationLease): Promise<AccountObservation>
   /** Whether a running Agent's latest bound request used the account provider
-   * (the official sign-out risk fact). Read-only: the Host's signed-out
-   * listener owns the actual cancellation. */
-  hasRunningAccountTasks(): boolean
+   *  for the exact Host observation (an asynchronous Host authority read). */
+  hasRunningAccountTasks(lease: AccountObservationLease): Promise<boolean>
+}
+
+/**
+ * The configured MCP server KEY SET as the official Host Settings expose it —
+ * the ONLY evidence of which manager entries are configuration-owned.
+ *
+ * `ready` carries the EFFECTIVE `servers` keys of the `mcp-manager` settings
+ * namespace for a current Host read (plus that namespace's revision when the
+ * Host exposes one). `stale` means a last-known read is on screen but is not
+ * current; `unavailable` means no authority could be read at all. A consumer
+ * MUST turn both non-`ready` states into "source unknown": it may never infer
+ * `plugin-owned` from a missing key set, and an empty `ready` list is a real
+ * "no configured servers" fact, not an unavailable one.
+ */
+export type McpServerSources =
+  | {
+      readonly kind: 'ready'
+      /** The effective configured `servers` keys (never registration names). */
+      readonly configuredNames: readonly string[]
+      /**
+       * Opaque identity of the Host generation this key set was read from. A
+       * consumer MUST compare it with the roster generation it wants to
+       * classify and treat a mismatch as `Unknown`: a key set from another
+       * Host authority is never combined with a roster.
+       */
+      readonly generation: object
+      /** The namespace revision the keys were read at, when exposed. */
+      readonly revision?: number
+    }
+  | { readonly kind: 'stale'; readonly reason: string }
+  | { readonly kind: 'unavailable'; readonly reason: string }
+
+/**
+ * The MCP configuration-source read. It answers ONLY "which manager names are
+ * held by the official `mcp-manager.servers` configuration right now"; it
+ * exposes no namespace, entry, transport, credential or secret. There is no
+ * write path (server CRUD belongs to a later milestone).
+ */
+export interface McpServerSourcesConfig {
+  /** The current verdict for THIS Host generation. */
+  read(): McpServerSources
+  /**
+   * Ask the backend for a fresh authoritative read before the next
+   * {@link read}. Direct is always current and resolves immediately; Remote
+   * drives the existing settings `describe()` refresh so a just-opened page
+   * never has to wait for an unrelated invalidation. A rejection is recorded by
+   * the backend's own readiness fact (the following `read()` reports
+   * `stale`/`unavailable`), never presented as a source verdict.
+   */
+  refresh(): Promise<void>
+}
+
+/**
+ * FR4 — the complete configured-server CONFIGURATION read of the official
+ * `mcp-manager` settings namespace, from ONE descriptor.
+ *
+ * `ready` carries the effective/base/user `servers` facts AND every entry's
+ * provenance classification (`user-added` / `inherited` / `overridden`),
+ * derived from the SAME descriptor read (never mixed with a manager roster or
+ * another generation's key set). `stale` is a last-known read that is not
+ * current; `unavailable` means no authority could be read at all. A consumer
+ * must turn both non-`ready` states into "no edit permission" — never into an
+ * empty configured list.
+ *
+ * The DTO carries NO resolved secret: sensitive values ride the official
+ * descriptor's redacted shape (or the stored `${credential:REF}` reference
+ * strings), and no namespace/path/loader fact crosses the port.
+ */
+export type McpServerConfiguration =
+  | {
+      readonly kind: 'ready'
+      /** Opaque identity of the Host generation this descriptor was read from
+       *  (the SAME identity the manager roster carries). */
+      readonly generation: object
+      /** The descriptor's revision — the CAS token every write must pin. */
+      readonly revision: number
+      /** The classified effective entries, in the descriptor's own key order. */
+      readonly entries: readonly McpClassifiedServerEntry[]
+    }
+  | { readonly kind: 'stale'; readonly reason: string }
+  | { readonly kind: 'unavailable'; readonly reason: string }
+
+/** Why one configuration write did not produce a saved, verified result. */
+export type McpConfigWriteFailure =
+  /** The official revision CAS refused the write (another editor changed the
+   *  namespace); the draft is NOT lost — the caller re-reads and re-confirms. */
+  | { readonly kind: 'conflict'; readonly reason: string }
+  /** A PROVEN refusal before or at the Host (not mounted, validation, no
+   *  permission): the write did not take effect. */
+  | { readonly kind: 'rejected'; readonly reason: string }
+  /** The write was DISPATCHED but its settlement can no longer be observed
+   *  (transport lost after dispatch). Never retried, never reported as saved
+   *  or refused. */
+  | { readonly kind: 'outcome-unconfirmed'; readonly reason: string }
+
+/** The settlement of ONE official `mcp-manager` settings mutation. */
+export type McpConfigWriteOutcome =
+  /** The write settled AND a fresh read-back confirmed the current authority. */
+  | { readonly kind: 'saved'; readonly revision: number }
+  | { readonly kind: 'failed'; readonly failure: McpConfigWriteFailure }
+
+/**
+ * FR4 — the configuration WRITE surface of the official `mcp-manager` settings
+ * namespace. This is the ONLY server CRUD path: every mutation is ONE official
+ * `SettingsForms.mutate('mcp-manager', ops, expectedRevision)` call carrying
+ * the revision the caller's decision was read at. There is no manager
+ * add/remove/update RPC, no Client-side spawn and no second persistence.
+ *
+ * A saved configuration is NOT a connected server: the manager's own watch
+ * reconciles instances afterwards, and status facts stay with the FR3 roster
+ * surface — this port reports only the config write settlement.
+ */
+export interface McpServerConfigurationConfig {
+  /** The current complete configuration verdict for THIS Host generation. */
+  read(): McpServerConfiguration
+  /**
+   * Ask the backend for a fresh authoritative read before the next
+   * {@link read} (the same refresh contract as `McpServerSourcesConfig`).
+   */
+  refresh(): Promise<void>
+  /**
+   * Dispatch EXACTLY ONE official revision-checked mutation. The ops are the
+   * domain's `SettingsPathOp[]` projection (path-scoped edits — never a
+   * whole-section rewrite); `expectedRevision` MUST be the revision the
+   * caller's decision was read at (a stale revision is the official
+   * `conflict`, never a silent overwrite); `pinnedGeneration` fences a Host
+   * replacement: a write whose captured generation is no longer current is
+   * refused before dispatch.
+   */
+  mutate(
+    ops: readonly { readonly op: 'set' | 'unset'; readonly path: readonly string[]; readonly value?: unknown }[],
+    expectedRevision: number,
+    pinnedGeneration: object,
+  ): Promise<McpConfigWriteOutcome>
 }
 
 /** The config assembly — one narrow sub-interface per config domain.
@@ -815,10 +1371,30 @@ export interface ConfigPort {
   readonly permissions: PermissionConfig
   /** The saved default agent preset. */
   readonly presetDefault: PresetDefaultConfig
-  /** The official subagent model-selection preference. */
+  /** The official volatile subagent depth/capacity settings. */
+  readonly subagentLimits: SubagentLimitsConfig
+  /** The official next-session subagent model-selection preference. */
   readonly subagentModelSelection: SubagentModelSelectionConfig
+  /** The official Agent-loop parallel-tool-call budget. */
+  readonly agentLoopSettings: AgentLoopSettingsConfig
+  /** The two numeric caps of the Host-served model-tool shell executor. */
+  readonly shellExecutionSettings: ShellExecutionSettingsConfig
+  /** The official DeepSeek session-log upload switch. */
+  readonly sessionLogUpload: SessionLogUploadConfig
   /** The official Web provider selection + Search/Fetch API options. */
   readonly web: WebProviderConfig
   /** The profile-wide built-in visual tools (Chart + SVG) availability switch. */
   readonly visualTools: VisualToolsConfig
+  /** The profile-owned Web startup preference for the NEXT Split Host launch. */
+  readonly webStartupPreference: WebStartupPreferenceConfig
+  /** The profile-owned startup backend for the NEXT cold launch. */
+  readonly backendStartupPreference: BackendStartupPreferenceConfig
+  /** The profile-owned ACP startup preference for the NEXT Split Host launch. */
+  readonly acpStartupPreference: AcpStartupPreferenceConfig
+  /** The per-package extension configuration (R8-E PR-2). */
+  readonly extensionConfigs: ExtensionConfigsConfig
+  /** The READ-ONLY MCP configuration-source keys (FR3). */
+  readonly mcpServerSources: McpServerSourcesConfig
+  /** The MCP server configuration read/write sub-domain (FR4). */
+  readonly mcpServerConfiguration: McpServerConfigurationConfig
 }

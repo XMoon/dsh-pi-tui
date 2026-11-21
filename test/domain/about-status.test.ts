@@ -322,7 +322,7 @@ test('the copy control guard applies to the sessionless and loading branches too
   }
 })
 
-test('C1 controls and C1-introduced sequences are dropped whole while ordinary suffixes survive', () => {
+test('controls and C1-introduced sequences are dropped whole while ordinary suffixes survive', () => {
   const cases: readonly [string, string][] = [
     ['title\u0084\u0085\u0088\u008d', 'title'],
     ['pre\u009d52;c;secret\u0007-post', 'pre-post'],
