@@ -221,6 +221,53 @@ test('status fails closed when the response is not no-store JSON', async (t) => 
   assert.equal(result.stdout, '')
 })
 
+for (const verb of ['status', 'url', 'open'] as const) {
+  test(`a live Host whose ${verb} read produces no response is WEB_CLI_UNAVAILABLE, never HOST_NOT_RUNNING`, async (t) => {
+    const fx = fixture(t)
+    const server = await startServer(t, { status: 0, body: '', drop: true })
+    const result = await run(fx, recordOf(fx.scope, server.origin), verb)
+    assert.equal(result.code, 4)
+    assert.equal(result.stdout, '')
+    assert.match(result.stderr, /^dsh-pi-tui web: WEB_CLI_UNAVAILABLE: /u)
+    assert.doesNotMatch(result.stderr, /HOST_NOT_RUNNING/u)
+  })
+}
+
+test('a read failure with a freshly dead Host is HOST_NOT_RUNNING', async (t) => {
+  const fx = fixture(t)
+  const server = await startServer(t, { status: 0, body: '', drop: true })
+  const record = recordOf(fx.scope, server.origin)
+  let inspections = 0
+  const result = await run(fx, record, 'status', {
+    deps: {
+      inspectProcess: () => {
+        inspections += 1
+        return inspections === 1 ? 'alive' : 'dead'
+      },
+    },
+  })
+  assert.equal(result.code, 3)
+  assert.equal(result.stdout, '')
+  assert.match(result.stderr, /^dsh-pi-tui web: HOST_NOT_RUNNING: /u)
+})
+
+test('a read failure with a replaced instance is HOST_IDENTITY_REFUSED', async (t) => {
+  const fx = fixture(t)
+  const server = await startServer(t, { status: 0, body: '', drop: true })
+  const record = recordOf(fx.scope, server.origin)
+  const replacement = recordOf(fx.scope, server.origin, { instanceId: OTHER_UUID })
+  let reads = 0
+  const result = await run(fx, record, 'status', {
+    current: () => {
+      reads += 1
+      return reads === 1 ? record : replacement
+    },
+  })
+  assert.equal(result.code, 3)
+  assert.equal(result.stdout, '')
+  assert.match(result.stderr, /^dsh-pi-tui web: HOST_IDENTITY_REFUSED: /u)
+})
+
 // ── Host discovery / authentication fail-closed ───────────────────────────
 
 test('a missing Host is HOST_NOT_RUNNING with the daemon start hint and zero requests', async (t) => {

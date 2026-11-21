@@ -127,6 +127,31 @@ function formatWebControlError(error: WebControlError): string {
   return `dsh-pi-tui web: ${error.code}: ${sanitizeReason(error.reason)}\n`
 }
 
+/**
+ * Classify a read request that produced no response. A live authenticated Host
+ * can be slow or briefly unreachable, so a missing response is never proof that
+ * it stopped: only a fresh same-scope record plus a dead process (or a removed
+ * record) may claim HOST_NOT_RUNNING. A replaced instance is an identity
+ * refusal; every unprovable case stays WEB_CLI_UNAVAILABLE.
+ */
+function readRequestFailure(verified: VerifiedLocalHost, scope: LocalScope, deps: LocalWebControlDeps): WebControlError {
+  try {
+    const readRecord = deps.readRecord ?? readLocalRecord
+    const inspect = deps.inspectProcess ?? inspectHostProcess
+    const current = readRecord(scope)
+    const alive = inspect(verified.record) === 'alive'
+    if (current === undefined || !alive) {
+      return new WebControlError('HOST_NOT_RUNNING', 'the Host for this Profile is no longer running')
+    }
+    if (!sameLocalInstanceRecord(current, verified.record)) {
+      return new WebControlError('HOST_IDENTITY_REFUSED', 'the Host identity changed while the request was in flight')
+    }
+  } catch {
+    // An unprovable death is not proof of death.
+  }
+  return new WebControlError('WEB_CLI_UNAVAILABLE', 'the authenticated Host did not answer the Web CLI request')
+}
+
 function platformOf(deps: LocalWebControlDeps): NodeJS.Platform {
   return deps.platform ?? process.platform
 }
@@ -395,7 +420,7 @@ export async function runLocalWebControl(
     switch (intent.verb) {
       case 'status': {
         const result = await callWebControl(verified, 'status', deps)
-        if (result.status === 0) throw new WebControlError('HOST_NOT_RUNNING', 'the authenticated Host stopped answering')
+        if (result.status === 0) throw readRequestFailure(verified, scope, deps)
         if (result.status === 401 || result.status === 403) {
           throw new WebControlError('HOST_AUTH_FAILED', 'the Host rejected the authenticated Web CLI request')
         }
@@ -433,7 +458,7 @@ export async function runLocalWebControl(
       case 'url':
       case 'open': {
         const result = await callWebControl(verified, 'url', deps)
-        if (result.status === 0) throw new WebControlError('HOST_NOT_RUNNING', 'the authenticated Host stopped answering')
+        if (result.status === 0) throw readRequestFailure(verified, scope, deps)
         if (result.status === 401 || result.status === 403) {
           throw new WebControlError('HOST_AUTH_FAILED', 'the Host rejected the authenticated Web CLI request')
         }

@@ -13,6 +13,7 @@
  */
 
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -111,15 +112,42 @@ function assertWebUrl(raw, record) {
   return url
 }
 
-/** Create a fake local opener that records its URL argument and exits zero. */
-function fakeOpener(installation, name) {
+/**
+ * Create a fake local opener that validates its URL argument against a
+ * SHA-256 digest and writes ONLY a non-secret MATCH/MISMATCH marker. The URL
+ * (and therefore its token) is never persisted to a fixture file.
+ */
+function fakeOpener(installation, name, expectedSha256) {
   const bin = join(installation.workDir, `web-cli-fake-bin-${String(process.pid)}`)
   const log = join(installation.workDir, `web-cli-opener-${String(process.pid)}.log`)
   mkdirSync(bin, { recursive: true, mode: 0o700 })
   const script = join(bin, name)
-  writeFileSync(script, `#!/bin/sh\nprintf '%s' "$1" > "$M6_WEB_OPEN_LOG"\nexit 0\n`, { mode: 0o755 })
+  writeFileSync(script, [
+    '#!/bin/sh',
+    'umask 077',
+    'if command -v sha256sum >/dev/null 2>&1; then',
+    '  digest=$(printf \'%s\' "$1" | sha256sum | awk \'{print $1}\')',
+    'else',
+    '  digest=$(printf \'%s\' "$1" | shasum -a 256 | awk \'{print $1}\')',
+    'fi',
+    'if [ "$digest" = "$M6_WEB_OPEN_EXPECT_SHA256" ]; then',
+    '  printf \'MATCH\\n\' > "$M6_WEB_OPEN_LOG"',
+    '  exit 0',
+    'fi',
+    'printf \'MISMATCH\\n\' > "$M6_WEB_OPEN_LOG"',
+    'exit 1',
+    '',
+  ].join('\n'), { mode: 0o755 })
   chmodSync(script, 0o755)
-  return { bin, log, env: { PATH: `${bin}:${installation.env.PATH ?? ''}`, M6_WEB_OPEN_LOG: log } }
+  return {
+    bin,
+    log,
+    env: {
+      PATH: `${bin}:${installation.env.PATH ?? ''}`,
+      M6_WEB_OPEN_LOG: log,
+      M6_WEB_OPEN_EXPECT_SHA256: expectedSha256,
+    },
+  }
 }
 
 /**
@@ -246,13 +274,18 @@ export async function runWebCliM6({ installation, dshHome, trace }) {
     assertExactLine(runCli(installation, ['web', 'status']), 'web=enabled', 'web status after cross-site POST')
 
     // ── E. web open uses the local opener only ───────────────────────────
+    // The fake opener compares the URL argument to a digest and records only
+    // MATCH/MISMATCH, so the authenticated token never reaches a fixture file.
     const openerName = process.platform === 'darwin' ? 'open' : 'xdg-open'
-    const opener = fakeOpener(installation, openerName)
+    const expectedUrlSha256 = createHash('sha256').update(urlLine.trim()).digest('hex')
+    const opener = fakeOpener(installation, openerName, expectedUrlSha256)
     const openResult = runCli(installation, ['web', 'open'], opener.env)
     outputs.push(`${openResult.stdout}${openResult.stderr}`)
     assertExactLine(openResult, 'browser=requested', 'web open')
     assert(existsSync(opener.log), 'web open never invoked the local OS opener')
-    assert(readFileSync(opener.log, 'utf8') === urlLine.trim(), 'the local opener received a different URL')
+    const openerMarker = readFileSync(opener.log, 'utf8')
+    assert(openerMarker === 'MATCH\n', `the local opener received a different URL (marker ${JSON.stringify(openerMarker)})`)
+    assert(!openerMarker.includes(token) && !openerMarker.includes('token='), 'the opener fixture persisted the URL token')
     assertExactLine(runCli(installation, ['web', 'status']), 'web=enabled', 'web status after open')
 
     // ── F. Disable: SPA withdrawn, Host and /connect unchanged ───────────
