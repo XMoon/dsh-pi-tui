@@ -585,8 +585,19 @@ export interface AutocompleteHandle {
   dispose(): void
 }
 
-/** One registered settings row (M5). */
-export interface TuiSettingContribution {
+/** One JSON scalar an author-declared persisted setting choice may write. */
+export type TuiPersistedScalar = string | number | boolean | null
+
+/** One author-declared mutation of a persisted extension setting. `set`
+ *  writes the scalar at `persisted.path`; `unset` removes the USER field at
+ *  that path so the inherited value applies. */
+export type TuiPersistedChoice =
+  | { readonly id: string; readonly label?: string; readonly op: 'set'; readonly value: TuiPersistedScalar }
+  | { readonly id: string; readonly label?: string; readonly op: 'unset' }
+
+/** One runtime-only settings row (M5): the live value lives in this Client
+ *  and the plugin's `onChange` is the only writer. */
+export interface TuiRuntimeSettingContribution {
   readonly id: string
   readonly label: string
   readonly description?: string
@@ -595,7 +606,34 @@ export interface TuiSettingContribution {
   /** Return false to keep the old value (rejection). */
   readonly onChange?: (value: string) => boolean | void | Promise<boolean | void>
   readonly order?: number
+  /** Persisted settings are a separate, explicit opt-in mode. */
+  readonly persisted?: never
 }
+
+/**
+ * One persisted settings row (R8-E PR-4): the author declares a JSON scalar
+ * path relative to the package's official Config `data` plus a closed choice
+ * list. The Host Profile Config remains the sole persistence authority; the
+ * Client never stores a second copy. `currentValue` is this Client's live
+ * runtime fact and is never read back from the Host value.
+ */
+export interface TuiPersistedSettingContribution {
+  readonly id: string
+  readonly label: string
+  readonly description?: string
+  readonly currentValue: string
+  readonly persisted: {
+    readonly path: readonly string[]
+    readonly choices: readonly TuiPersistedChoice[]
+  }
+  readonly values?: never
+  readonly onChange?: never
+  readonly order?: number
+}
+
+/** One registered settings row (M5). Runtime-only rows keep their original
+ *  shape; a persisted row is an explicit discriminated branch (PR-4). */
+export type TuiSettingContribution = TuiRuntimeSettingContribution | TuiPersistedSettingContribution
 
 /** A live handle on one settings row. */
 export interface TuiSettingHandle {
@@ -614,6 +652,13 @@ export interface TuiSettingsRegistrySnapshot {
     readonly values: readonly string[]
     readonly order: number
     readonly owner: string
+    /** `runtime` for the original mode, `persisted` for the PR-4 opt-in. */
+    readonly mode?: 'runtime' | 'persisted'
+    /** The frozen author-declared descriptor of a persisted row. */
+    readonly persisted?: {
+      readonly path: readonly string[]
+      readonly choices: readonly TuiPersistedChoice[]
+    }
   }[]
   readonly revision: number
 }
@@ -665,6 +710,11 @@ export interface TuiSettingsRegistryView {
     readonly values: readonly string[]
     readonly order: number
     readonly owner: string
+    readonly mode?: 'runtime' | 'persisted'
+    readonly persisted?: {
+      readonly path: readonly string[]
+      readonly choices: readonly TuiPersistedChoice[]
+    }
   }[]
   apply(id: string, value: string): Promise<boolean>
   snapshot(): TuiSettingsRegistrySnapshot
