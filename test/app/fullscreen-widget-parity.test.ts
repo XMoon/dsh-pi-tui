@@ -884,18 +884,24 @@ for (const [rows, widgetRows] of [[12, 2], [10, 0]] as const) {
     registerWidget(h.ledger, 'input.widget.below', 'b1', 'PRIORITY-BELOW-15')
     h.app.setFullscreen(true)
     await settle()
+    await h.vt.waitForRender()
+    const baselineRows = h.app.footerRenderRowsForTest()
+    const baselineLines = painted(h.vt)
+    const baselineEditor = editorBounds(baselineLines)
     h.vt.sendInput('\x04')
     await settle()
     await h.vt.waitForRender()
 
     const lines = painted(h.vt)
     const footerRows = h.app.footerRenderRowsForTest()
-    assert.equal(footerRows.length, 3, 'the rich footer keeps its full three-row demand')
+    assert.equal(footerRows.length, baselineRows.length,
+      `the exit hint must not change the footer height:\n${footerRows.map(strip).join('\n')}\nvs\n${baselineRows.map(strip).join('\n')}`)
     for (const row of footerRows.map(strip).map(text => text.trimEnd()).filter(text => text !== '')) {
       assert.ok(lines.some(line => line.includes(row)), `a footer row was clipped: ${JSON.stringify(row)}\n${lines.join('\n')}`)
     }
     assert.ok(strip(footerRows[footerRows.length - 1]!).includes('Press Ctrl+D again'),
       `the exit hint must survive as the last footer row:\n${footerRows.map(strip).join('\n')}`)
+    assert.deepEqual(editorBounds(lines), baselineEditor, 'the Editor frame must not move when the hint is armed')
     const paintedWidgets = rowsWith(lines, 'PRIORITY-ABOVE-15').length + rowsWith(lines, 'PRIORITY-BELOW-15').length
     assert.equal(paintedWidgets, widgetRows, `the widget zones must yield to the footer pressure:\n${lines.join('\n')}`)
     assert.equal(trailingZoneRows(h, lines), rowsWith(lines, 'PRIORITY-BELOW-15').length,

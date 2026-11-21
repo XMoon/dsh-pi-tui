@@ -733,7 +733,7 @@ anchor, without inventing a fourth meaning for `primary`.
   SAME Full Task Center as `/tasks`. The item's whole visible placement
   (configured prefix/suffix included) is the target. Inert: a dropped,
   compacted-away or truncated placement; separators and alignment gaps; the
-  Host instruction line; whole-footer command output; custom/extension items
+  Host instruction row; whole-footer command output; custom/extension items
   that merely spell the same words; a viewed child subject (its `model` names
   the child while `/model` writes the main Session); and the Regular/Main
   surface. The `tasks` `↓ view` hint keeps its separate Quick-admission
@@ -1017,7 +1017,7 @@ A new surface picks one and must justify any deviation.
 | **Overlay** (modal, non-fullscreen) | `Frame` box, single body, bottom hint | pickers |
 | **Blocking editor-seat sheet** | `Frame` box in the editor seat (replaces the draft, never disposes it), pinned title/danger + one scrollable request body + pinned decision bar; Fullscreen paints real pointer cells, Regular is keyboard-only | Approval |
 | **Pane** (embedded in the transcript/log) | header line + folded body, no action bar | tool cards, subagent cards, Thinking |
-| **Status bar** | one row of items + separators, READ-ONLY by default (a host-instruction line may be reserved above it — `footer/instruction.ts`). The one exception is the PiTui Fullscreen root footer: a fully visible, currently-owned first-party `model`/`tasks` placement is a navigation affordance (§7.1); separators, gaps, dropped/truncated items, the instruction, command/custom/extension items and Regular stay inert | footer |
+| **Status bar** | one row of items + separators, READ-ONLY by default. A transient Host instruction (`footer/instruction.ts`) overlays the last EXISTING physical row for its lifetime — the normal Footer height is unchanged; an otherwise row-less Footer with a positive budget paints only the one-line instruction safety exception, and a zero-grant Footer paints nothing. The one exception is the PiTui Fullscreen root footer: a fully visible, currently-owned first-party `model`/`tasks` placement is a navigation affordance (§7.1); separators, gaps, dropped/truncated items, the instruction, command/custom/extension items and Regular stay inert | footer |
 | **Accessory band** (pinned, on-demand) | zero rows hidden; when active: ONE top separator rule (the §6.2 exception) + identity row + ≤3 single-line navigation rows (tasks, then the optional Full action), painted UNDER the whole footer as the frame's last region | Task Quick |
 
 **Approval reading floor (PiTui).** The blocking editor-seat Approval sheet is a

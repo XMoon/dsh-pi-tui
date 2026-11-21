@@ -7153,7 +7153,21 @@ export class TuiApp {
     // did when it was registered first. (Unstable raw captures already ran
     // BEFORE this point and still see every chunk.)
     if (MOUSE_SEQUENCE.test(data) || (data.length === 6 && data.startsWith('\x1b[M'))) {
+      // A mouse report is fresh input and always disarms the exit
+      // confirmation (that authority is unchanged). When this press targets
+      // a live Footer hit, the disarm recomposes the Footer synchronously —
+      // rebase the pointer frame only if the SAME fully visible placement
+      // still occupies the SAME cell, so the click resolves against what the
+      // user actually pressed without weakening any stale-frame fence.
+      const mouse = mouseChunkKind(data)
+      const wasExitArmed = this.exitConfirmTrigger !== undefined || this.exitConfirmAt !== undefined
+      const footerFramesWereCurrent = this.footerPaintedProjection !== undefined
+        && this.footerPendingProjection !== undefined
+        && this.footerPendingProjection.revision === this.footerPaintedProjection.revision
       this.clearExitConfirmation()
+      if (wasExitArmed && footerFramesWereCurrent && mouse !== undefined && !mouse.release && mouse.button === 0) {
+        this.rebasePointerFrameAfterExitClear(mouse)
+      }
       return undefined
     }
     // FOCUS reports (CSI ? 1004 — ESC[I/ESC[O) are handled HOST-SIDE,
@@ -15674,6 +15688,51 @@ export class TuiApp {
     }
   }
 
+  /** Rebase the committed Footer pointer frame after a mouse press cleared
+   * the exit confirmation and synchronously recomposed the Footer. The
+   * screen has not repainted yet; a press may therefore resolve against the
+   * successor projection ONLY when the exact same fully visible placement
+   * occupies the exact same cells and the physical height is unchanged.
+   * Every other pending-revision case keeps the ordinary fail-closed fence. */
+  private rebasePointerFrameAfterExitClear(chunk: {
+    readonly x: number
+    readonly y: number
+  }): void {
+    const painted = this.footerPaintedProjection
+    const pending = this.footerPendingProjection
+    if (painted === undefined || pending === undefined) return
+    if (pending.revision === painted.revision) return
+    if (pending.subjectKind !== painted.subjectKind) return
+    const successorHeight = pending.projection.text === '' ? 0 : pending.projection.text.split('\n').length
+    if (successorHeight !== painted.height) return
+    const pressed = painted.hits.find(candidate => candidate.row === chunk.y
+      && chunk.x >= candidate.startCol && chunk.x < candidate.endCol)
+    if (pressed === undefined) return
+    const successorHits = pending.projection.hits.map(hit => ({ ...hit, row: painted.top + hit.row }))
+    const successor = successorHits.find(candidate =>
+      candidate.id === pressed.id
+      && candidate.placement === pressed.placement
+      && candidate.row === pressed.row
+      && candidate.startCol === pressed.startCol
+      && candidate.endCol === pressed.endCol)
+    if (successor === undefined) return
+    // Expose ONLY hits that were ALSO present in the painted frame at the
+    // exact same cells: the successor may contain a hit on the row the
+    // instruction covered, which was never painted and must stay unreachable
+    // until a real repaint publishes it.
+    this.footerPaintedProjection = {
+      ...painted,
+      revision: pending.revision,
+      subjectKind: pending.subjectKind,
+      hits: successorHits.filter(candidate => painted.hits.some(previous =>
+        previous.id === candidate.id
+        && previous.placement === candidate.placement
+        && previous.row === candidate.row
+        && previous.startCol === candidate.startCol
+        && previous.endCol === candidate.endCol)),
+    }
+  }
+
   /** PR3: the root Footer box half of a fullscreen press. Returns true when
    * the cell belongs to the painted footer: a complete first-party hit
    * starts the one-shot gesture, every other footer cell (separator, gap,
@@ -23818,8 +23877,8 @@ export class TuiApp {
       // widget-zone change must recompose the footer at the fresh surface
       // budget before the frame paints. A freshly shrunk viewport would
       // otherwise keep the old (taller) footer text and clip its own
-      // bottom rows — the appended Host instruction FIRST ("the
-      // instruction always survives" would break); a regular ->
+      // bottom rows (its last row included, where the Host instruction is
+      // painted); a regular ->
       // fullscreen switch at unchanged geometry would keep a budget
       // measured against chrome the fullscreen root doesn't mount. The
       // recompose runs AFTER the extension-host refresh below (widget
@@ -25525,8 +25584,8 @@ export class TuiApp {
    * layouts). */
   private customFooterLayout: FooterLayoutV1 | undefined
   /** M5: the command surface's sanitized rows (undefined = the native
-   * composer surface). The command owns the Status Surface; the Host
-   * instruction surface still merges on top. */
+   * composer surface). The command owns the Status Surface; a transient
+   * Host instruction replaces its last visible row. */
   private commandRows: string[] | undefined
 
   /** Set the footer density preset and repaint. Switching the preset
@@ -25611,7 +25670,8 @@ export class TuiApp {
 
   /** M5: set the command surface's sanitized rows (undefined restores the
    * native composer surface). The rows are already sanitized + capped by
-   * the runner; the Host instruction still merges on top. */
+   * the runner; a transient Host instruction replaces the last visible
+   * row. */
   setFooterCommandRows(rows: string[] | undefined): void {
     this.commandRows = rows
     this.renderFooter()
@@ -25686,8 +25746,9 @@ export class TuiApp {
    *  are read-only presentation geometry — business availability is checked
    *  again on release, never inferred from a painted badge. */
   private composeFooterProjection(width: number, taskBrowserAvailable: boolean): FooterPaintProjection {
-    // A pending leader sequence is an independent Host instruction, appended
-    // after the layout rows; it never replaces a Footer row.
+    // A pending leader sequence is a transient Host instruction: it
+    // replaces the last existing layout row for its lifetime, so the
+    // Footer height never changes.
     const leader = this.keybindings.leaderMachine()
     const instruction = resolveFooterInstruction({
       exitConfirmKeyLabel: this.exitConfirmTrigger?.label,
@@ -25696,9 +25757,9 @@ export class TuiApp {
     })
     if (this.commandRows !== undefined) {
       // M5: the command surface owns the Status Surface; the Host
-      // instruction still merges on top and reserves its own budget. Command
-      // rows never publish a first-party footer hit (even when their text
-      // mimics a badge).
+      // instruction replaces its last visible command row for the
+      // instruction's lifetime. Command rows never publish a first-party
+      // footer hit (even when their text mimics a badge).
       return {
         text: mergeCommandSurface(this.commandRows, instruction, width, this.footerPhysicalLineBudget()),
         hits: [],
@@ -25815,8 +25876,8 @@ export class TuiApp {
    *   rows are measured — on fullscreen the widget zones are pinned rows
    *   above the footer and are measured here too (PR-D);
    * - the command surface consumes the same effective total through
-   *   mergeCommandSurface (instruction reserves first, trusted rows keep
-   *   the remaining slots in order).
+   *   mergeCommandSurface (its visible rows are capped first, then the
+   *   Host instruction replaces the last one — no extra row).
    *
    * Floored at 0: when the pinned chrome alone already fills the
    * viewport the granted budget is ZERO and the footer renders nothing
