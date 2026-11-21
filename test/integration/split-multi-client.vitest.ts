@@ -159,6 +159,11 @@ test('the first real Question answer settles once while the loser late option ke
   await clientA.waitForVisibleText('[1] Proceed', 'A saw the question option')
   await clientB.waitForVisibleText('[1] Proceed', 'B saw the question option')
 
+  if (process.env.S0_PROBE_WORKER_KILL_POINT === 'two-clients-ready') {
+    await scene.report('worker-kill-point', { point: 'two-clients-ready' })
+    process.kill(process.pid, 'SIGKILL')
+  }
+
   if (process.env.S0_PROBE_FAIL_AFTER_TWO_CLIENTS === '1') {
     throw new Error('S0_INTENTIONAL_FAILURE: injected while both Clients hold the unanswered Question')
   }
