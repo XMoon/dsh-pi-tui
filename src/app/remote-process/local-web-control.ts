@@ -139,12 +139,14 @@ function readRequestFailure(verified: VerifiedLocalHost, scope: LocalScope, deps
     const readRecord = deps.readRecord ?? readLocalRecord
     const inspect = deps.inspectProcess ?? inspectHostProcess
     const current = readRecord(scope)
-    const alive = inspect(verified.record) === 'alive'
-    if (current === undefined || !alive) {
+    if (current === undefined) {
       return new WebControlError('HOST_NOT_RUNNING', 'the Host for this Profile is no longer running')
     }
     if (!sameLocalInstanceRecord(current, verified.record)) {
       return new WebControlError('HOST_IDENTITY_REFUSED', 'the Host identity changed while the request was in flight')
+    }
+    if (inspect(verified.record) === 'dead') {
+      return new WebControlError('HOST_NOT_RUNNING', 'the Host for this Profile is no longer running')
     }
   } catch {
     // An unprovable death is not proof of death.
