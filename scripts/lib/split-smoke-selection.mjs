@@ -457,7 +457,7 @@ const CASE_REGISTRY = Object.freeze([
   Object.freeze({
     suite: 'herdr',
     id: 'herdr.h2-session-publication',
-    title: 'a real Split Client reports the committed main Session to its Herdr Pane without a resume argv, keeps only the latest owner, and re-registers it after a real transport rollover',
+    title: 'a real Split Client reports the committed main Session to its Herdr Pane with the exact daemon resume argv, keeps only the latest owner, and re-registers it after a real transport rollover',
     run: runHerdrH2,
   }),
   Object.freeze({
