@@ -7161,8 +7161,11 @@ export class TuiApp {
       // user actually pressed without weakening any stale-frame fence.
       const mouse = mouseChunkKind(data)
       const wasExitArmed = this.exitConfirmTrigger !== undefined || this.exitConfirmAt !== undefined
+      const footerFramesWereCurrent = this.footerPaintedProjection !== undefined
+        && this.footerPendingProjection !== undefined
+        && this.footerPendingProjection.revision === this.footerPaintedProjection.revision
       this.clearExitConfirmation()
-      if (wasExitArmed && mouse !== undefined && !mouse.release && mouse.button === 0) {
+      if (wasExitArmed && footerFramesWereCurrent && mouse !== undefined && !mouse.release && mouse.button === 0) {
         this.rebasePointerFrameAfterExitClear(mouse)
       }
       return undefined
@@ -15705,18 +15708,28 @@ export class TuiApp {
     const pressed = painted.hits.find(candidate => candidate.row === chunk.y
       && chunk.x >= candidate.startCol && chunk.x < candidate.endCol)
     if (pressed === undefined) return
-    const successor = pending.projection.hits.find(candidate =>
+    const successorHits = pending.projection.hits.map(hit => ({ ...hit, row: painted.top + hit.row }))
+    const successor = successorHits.find(candidate =>
       candidate.id === pressed.id
       && candidate.placement === pressed.placement
-      && painted.top + candidate.row === pressed.row
+      && candidate.row === pressed.row
       && candidate.startCol === pressed.startCol
       && candidate.endCol === pressed.endCol)
     if (successor === undefined) return
+    // Expose ONLY hits that were ALSO present in the painted frame at the
+    // exact same cells: the successor may contain a hit on the row the
+    // instruction covered, which was never painted and must stay unreachable
+    // until a real repaint publishes it.
     this.footerPaintedProjection = {
       ...painted,
       revision: pending.revision,
       subjectKind: pending.subjectKind,
-      hits: pending.projection.hits.map(hit => ({ ...hit, row: painted.top + hit.row })),
+      hits: successorHits.filter(candidate => painted.hits.some(previous =>
+        previous.id === candidate.id
+        && previous.placement === candidate.placement
+        && previous.row === candidate.row
+        && previous.startCol === candidate.startCol
+        && previous.endCol === candidate.endCol)),
     }
   }
 

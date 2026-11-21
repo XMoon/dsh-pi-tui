@@ -793,6 +793,66 @@ test('an armed exit hint never rebases a stale footer press onto a changed compo
   }
 })
 
+test('an armed exit hint never exposes a successor hit on the covered row before repaint', async () => {
+  // The armed frame paints only the model row; the instruction covers the
+  // tasks row. The exit-clear successor contains a tasks hit there, but the
+  // user never saw it. A press on that cell before the repaint must stay
+  // inert until a real frame publishes it.
+  const h = await startHarness()
+  try {
+    h.app.setFooterLayout({
+      schemaVersion: 1,
+      rows: [
+        { left: [{ id: 'model' }], right: [] },
+        { left: [{ id: 'tasks' }], right: [] },
+      ],
+    } as FooterLayoutV1)
+    await h.vt.waitForRender()
+    await h.vt.waitForRender()
+    const model = cellOf(h.vt, '[deepseek/deepseek-v4-flash]')
+    const tasks = cellOf(h.vt, 'task')
+    assert.ok(model, `the model row must be painted:\n${screen(h.vt)}`)
+    assert.ok(tasks, `the tasks row must be painted before the arm:\n${screen(h.vt)}`)
+    h.vt.sendInput('\x04')
+    await h.vt.waitForRender()
+    assert.ok(screen(h.vt).includes('Press Ctrl+D again to exit'), 'the hint must be armed')
+    assert.ok(!screen(h.vt).includes('task'), 'the covered tasks row must not be painted')
+
+    // Trigger the pointer rebase on the visible model hit, then immediately
+    // press/release the covered tasks row before any repaint can publish it.
+    press(h.vt, model.x, model.row)
+    press(h.vt, tasks.x, tasks.row)
+    release(h.vt, tasks.x, tasks.row)
+    await h.vt.waitForRender()
+    await h.vt.waitForRender()
+    assert.ok(!screen(h.vt).includes('build the project'), 'the unpublished tasks hit must never open the browser')
+  } finally {
+    h.dispose()
+  }
+})
+
+test('an armed exit hint never rebases a pre-existing stale footer recompose', async () => {
+  // If the Footer was already recomposed after the armed frame was painted,
+  // the press must stay fenced even when the same hit keeps the same cells:
+  // only the successor produced BY this mouse's exit clear may be adopted.
+  const h = await startHarness()
+  try {
+    const model = cellOf(h.vt, '[deepseek/deepseek-v4-flash]')
+    assert.ok(model, `the model placement must be painted:\n${screen(h.vt)}`)
+    h.vt.sendInput('\x04')
+    await h.vt.waitForRender()
+    assert.ok(screen(h.vt).includes('Press Ctrl+D again to exit'), 'the hint must be armed')
+    h.bumpTaskCount() // same-length task badge change; model hit geometry unchanged
+    press(h.vt, model.x, model.row)
+    release(h.vt, model.x, model.row)
+    await h.vt.waitForRender()
+    await h.vt.waitForRender()
+    assert.equal(h.loads().length, 0, 'a pre-existing stale recompose must not be rebased into a click')
+  } finally {
+    h.dispose()
+  }
+})
+
 test('model footer hits are inert for a child subject, an unregistered /model and a separator', async () => {
   const child = await startHarness({ childSubject: true })
   try {
