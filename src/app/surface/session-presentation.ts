@@ -32,7 +32,8 @@
 import { compactionBracketFromLog, foldLiveMeasureEvent, measureEventKey, workingFromLog } from './compaction-presentation.ts'
 import type { ContextMeasureReason } from '../../domain/status/context-measurement.ts'
 import { foldGoal, goalTextOf } from '../../domain/status/derive-goal.ts'
-import { recallHistoryForSession, type ParsedHistoryRecord } from '../../client/history/store.ts'
+import { HISTORY_RECALL_LIMIT, type ParsedHistoryRecord } from '../../client/history/store.ts'
+import type { SessionRecallSeed } from '../../client/history/search.ts'
 import { hydrateSessionUi } from './session-ui-hydrate.ts'
 import { StatsFolder } from '../../domain/status/stats.ts'
 import { applyStreamingToolPreviewEvent, applyStreamingToolPreviewInput, clearStreamingToolPreviewsForStep, type StreamingToolPreview, type ToolSummaryKeys } from './streaming-tool-preparing.ts'
@@ -45,6 +46,7 @@ import type {
   PresentationWindowRefoldProof,
 } from '../../runtime/presentation-read-port.ts'
 import type { TodoItem } from '../../tui-app.ts'
+import { runDetached } from '../../runtime/process/tasks.ts'
 import type { SurfaceDisplaySeam } from './display-seam.ts'
 import type { RoutedSessionEvent, SurfaceMainPresentation, SurfaceRuntime } from './runtime.ts'
 
@@ -131,6 +133,9 @@ export interface SessionPresentationDeps<Event extends SessionPresentationEvent>
   readonly summaryKeys: ToolSummaryKeys
   /** True once the runner is disposing: no hydration may start. */
   readonly isCleanedUp: () => boolean
+  /** The runner lifecycle signal: teardown aborts any in-flight cold history
+   *  scan (the per-hydration controller covers session replacement). */
+  readonly lifecycleSignal?: AbortSignal
   /** F10 (round 4): re-derive the footer status from the CURRENT folds —
    *  the composition root's `refreshStatusCheap` (it owns the semantic
    *  derivation and the commit). The re-hydrate path calls it after
@@ -175,6 +180,22 @@ export interface SessionPresentationDeps<Event extends SessionPresentationEvent>
     readonly currentCwd: () => string
     readonly records: (cwd: string) => readonly ParsedHistoryRecord[]
     readonly setLastContent: (content: string | undefined) => void
+    /** The SAME Client-local history source's cold cross-cwd session recall
+     * reader (no content dedupe, all client history files). */
+    readonly readSessionRecall: (sessionId: string, signal?: AbortSignal) => Promise<SessionRecallSeed>
+  }
+  /**
+   * The exact ownership currentness fence for the asynchronous history read:
+   * the generation is captured BEFORE the await and re-checked after it. On
+   * the Remote branch the transport token (Connection generation + exact
+   * binding) is an additional identity that can roll over without a TUI owner
+   * commit.
+   */
+  readonly currentness: {
+    readonly captureGeneration: () => number
+    readonly isStillCurrent: (sessionId: string, generation: number) => boolean
+    readonly captureTransportToken?: (sessionId: string) => unknown
+    readonly isTransportTokenCurrent?: (sessionId: string, token: unknown) => boolean
   }
   /** Late-bound command catalog registration (A5b-3 owns it). */
   readonly commands: {
@@ -403,6 +424,11 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
   
   const callArgs = new Map<string, string>()
 
+  /** The ONE in-flight cold history scan of the current hydration. A session
+   *  replacement, a generation bump or teardown aborts it; its stale seed can
+   *  never reach the newer owner's recall kernel. */
+  let historyRecallController: AbortController | undefined
+
   /** The newest compaction boundary each session's LAST COMMITTED window showed.
    *  A reconcile compares against it to notice a lifecycle event the outage
    *  swallowed (including a bracket whose start AND end both landed off-window),
@@ -433,6 +459,8 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
   }
 
   const resetForGeneration = (): void => {
+    historyRecallController?.abort()
+    historyRecallController = undefined
     callArgs.clear()
     lastCommittedMeasureEvent.clear()
     liveMeasureBracket.clear()
@@ -502,6 +530,74 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
    * plus every switch await the coordinator refresh themselves.
    */
   
+  /** The exact identity a cold history read was started under. */
+  interface HydrationRecallFence {
+    readonly generation: number
+    readonly transportToken: unknown
+  }
+
+  /** A cold history seed paired with the identity it was read under. */
+  interface FencedSessionRecallSeed {
+    readonly seed: SessionRecallSeed
+    readonly fence: HydrationRecallFence
+    /** A global reader failure was replaced by the current-cwd fallback. */
+    readonly degraded?: boolean
+  }
+
+  /**
+   * Read the cold cross-cwd session recall seed under ONE exact ownership
+   * fence. The generation (and, on Remote, the transport token) is captured
+   * BEFORE the read; the caller re-validates the returned fence in the SAME
+   * synchronous stack as the recall commit. A global read failure is
+   * diagnosed and falls back to the SAME session's current-cwd records (still
+   * passed through the kernel's writeId normalization) — never to an empty
+   * history and never to an unfiltered cwd pool.
+   */
+  const readSessionRecallForHydration = async (
+    sessionId: string,
+    signal: AbortSignal,
+  ): Promise<FencedSessionRecallSeed | undefined> => {
+    const fence: HydrationRecallFence = {
+      generation: deps.currentness.captureGeneration(),
+      transportToken: deps.remote === undefined
+        ? undefined
+        : deps.currentness.captureTransportToken?.(sessionId),
+    }
+    try {
+      return { seed: await deps.history.readSessionRecall(sessionId, signal), fence }
+    } catch (error) {
+      if (isAbortError(error)) return undefined
+      deps.diag.warn('session recall read failed; falling back to the current cwd file', {
+        sessionId,
+        error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+      })
+      return { seed: currentCwdSessionRecallSeed(sessionId), fence, degraded: true }
+    }
+  }
+
+  /** Whether the captured cold-read identity is still the exact current owner
+   *  (and Remote transport). MUST be called synchronously just before the
+   *  recall commit — never before an await. */
+  const isHistoryRecallFenceCurrent = (sessionId: string, fence: HydrationRecallFence): boolean => {
+    if (deps.isCleanedUp()) return false
+    if (!deps.currentness.isStillCurrent(sessionId, fence.generation)) return false
+    if (fence.transportToken !== undefined
+      && deps.currentness.isTransportTokenCurrent?.(sessionId, fence.transportToken) === false) return false
+    return true
+  }
+
+  /** The current cwd file's session rows in the seed shape (the documented
+   *  fallback when the cross-cwd reader fails globally). */
+  const currentCwdSessionRecallSeed = (sessionId: string): SessionRecallSeed => {
+    const records = deps.history.records(deps.history.currentCwd())
+    const scoped = records.filter(record => record.sessionId === sessionId).slice(-HISTORY_RECALL_LIMIT)
+    const newestFirst = [...scoped].reverse()
+    return {
+      entries: newestFirst.map(record => record.content),
+      writeIds: newestFirst.map(record => record.writeId),
+    }
+  }
+
   /**
    * The shared cold-hydrate body both branches converge on (M3-4 PR2): fold
    * the events into the transcript/stats folders, replay the live baseline,
@@ -628,26 +724,51 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // the all-directory search): a legacy-only history file in this cwd
     // becomes recoverable immediately, even if it predates this process.
     if (input.cwd !== undefined && input.cwd !== '') deps.history.rememberCwd(input.cwd)
-    // The recall history is per-workspace AND per-session: REPLACE it
-    // with the live session's rows ONLY (the CWD file's rows filtered to
-    // this sessionId — session-scoped editor recall), so ↑/↓ in a live
-    // session never recalls another session's inputs from the same cwd.
-    // The CANONICAL last row stays the cwd file's actual last row (the
-    // persistence dedupe anchor stays cwd-scoped — docs/architecture/input-history.md);
-    // only the EDITOR's recall is the session projection.
+    // The current cwd file's ACTUAL last row remains the persistence dedupe
+    // anchor (the write policy stays cwd-scoped). It is deliberately NOT used
+    // as the cross-cwd recall seed: the session's rows may live in several
+    // cwd files, and its true newest rows are the async reader's job below.
     const historyCwd = deps.history.currentCwd()
     const historyRecords = deps.history.records(historyCwd)
     deps.history.setLastContent(historyRecords.at(-1)?.content)
-    // File order is oldest-first; TuiApp's recall API takes newest-first,
-    // so the session-filtered projection is reversed at the seed.
-    const sessionRecall = recallHistoryForSession(historyRecords, input.sessionId)
-    deps.surface.display.resetInputHistory([...sessionRecall].reverse(), input.sessionId)
     // Session identity commit (create/resume/switch): the title AND the
     // terminal-local cwd follow the NEW session.
     deps.status.refreshTerminalTitle()
     deps.status.refreshTerminalCwd()
     deps.status.updateWelcomeCard()
     deps.commands.register()
+    // Cold cross-cwd session recall: ONE detached read per hydration. The
+    // synchronous hydration (first frame, command registration, input
+    // acceptance) is never blocked on the history scan; the scope stays open
+    // and keeps its accepted inputs provisional until this read commits. A
+    // superseded read is dropped before it can touch the kernel.
+    historyRecallController?.abort()
+    historyRecallController = undefined
+    if (input.sessionId !== undefined) {
+      const sessionId = input.sessionId
+      const controller = new AbortController()
+      historyRecallController = controller
+      // Teardown (lifecycle abort) and owner replacement (controller.abort())
+      // both cancel the scan; the fence below rejects a result that survived
+      // an abort race.
+      const signal = deps.lifecycleSignal === undefined
+        ? controller.signal
+        : AbortSignal.any([controller.signal, deps.lifecycleSignal])
+      runDetached('session history recall', async () => {
+        const result = await readSessionRecallForHydration(sessionId, signal)
+        if (result === undefined || historyRecallController !== controller) return
+        // SAME synchronous stack as the commit: no await between this exact
+        // generation/transport re-check and the kernel reset.
+        if (!isHistoryRecallFenceCurrent(sessionId, result.fence)) return
+        if (result.degraded === true) {
+          deps.surface.display.notify(
+            'Input history recall could not read every directory; using the current directory.',
+            'error',
+          )
+        }
+        deps.surface.display.resetInputHistory(result.seed.entries, sessionId, result.seed.writeIds)
+      }, { diag: deps.diag, sessionId: () => sessionId })
+    }
   }
 
   const initLiveSession = async (agent: LiveSessionAgent<Event>): Promise<void> => {
@@ -944,4 +1065,9 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     noteLiveMeasureEvent,
     resetForGeneration,
   }
+}
+
+/** An aborted async read is a discarded read, never a failure to report. */
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError'
 }

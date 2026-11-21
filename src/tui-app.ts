@@ -5446,6 +5446,7 @@ export class TuiApp {
     // moving the cursor. Text edits invalidate the rendered snapshot; the next
     // Editor render republishes the exact layout boundary.
     this.editor.onVisualLineBoundaryChanged = (reason, onLastVisualLine) => {
+      this.editor.consumePointerBrowseExit(reason)
       if (reason === 'navigation' && onLastVisualLine === this.taskQuickPaintedBoundary) return
       this.taskQuickPaintedBoundary = onLastVisualLine
       this.quickHintCurrentEditorLayout = undefined
@@ -5572,7 +5573,13 @@ export class TuiApp {
       this.events.onSubmit(serialized, 'enter', scopeToken)
     }
     this.editor.onChange = () => {
-      // FIRST: the Host Editor `←←` first-Press latch dies with ANY document
+      // FIRST: exact browse lifecycle. A recalled-row setText is the ONLY
+      // mutation that keeps the host draft bookmark; every real edit,
+      // programmatic replacement, completion splice or submit/cancel clear
+      // exits the base editor's browse privately, so the bookmark must die
+      // there (text equality cannot stand in for state).
+      if (!this.editor.consumeHistoryRecallChange()) this.editor.clearHistoryBrowseDraft()
+      // The Host Editor `←←` first-Press latch dies with ANY document
       // mutation — typing, deletion, paste, Undo, history recall or a
       // programmatic restore — even when the text ends up identical (ABA).
       this.clearLeftWorkspaceArm()
@@ -8670,11 +8677,37 @@ export class TuiApp {
    *  only where the whole recall context was replaced (a scope publish or a
    *  hydration reseed) — never on a settlement, which must not touch the
    *  draft. */
-  private restoreEditorRecall(): void {
+  private restoreEditorRecall(restoreBrowseDraft: boolean): void {
+    // A cold hydration reseed may land while the user is browsing the
+    // provisional recall with their own non-empty draft. The base editor owns
+    // that draft bookmark privately (and clearHistory drops it), so take the
+    // host copy FIRST and restore it after the list replacement. A formal
+    // owner publication must always DROP it (never restore A's draft into B).
+    const browseDraft = this.editor.takeHistoryBrowseDraft()
+    if (!restoreBrowseDraft) {
+      // The take above cleared any bookmark; a publication never restores it.
+    }
     this.editor.clearHistory()
     const entries = this.historyRecall.snapshot()
     for (let index = entries.length - 1; index >= 0; index -= 1) {
       this.editor.addToHistory(entries[index]!)
+    }
+    if (restoreBrowseDraft && browseDraft !== undefined) {
+      // Lossless document restore: the raw draft may contain registry-bound
+      // large-paste markers. setText() would clear the editor's paste registry
+      // (turning `[paste #N …]` into literal text); setTextAndCursor() keeps
+      // surviving registry entries and leaves undo/transient state alone.
+      // setTextAndCursor deliberately fires no onChange, so publish the one
+      // host document-change notification through the REAL onChange channel:
+      // seat subscribers, widget budget, edit epoch and undo leases must see
+      // the visible draft change. A mode change already fires that onChange.
+      const previousMode = this.editor.getInputMode()
+      this.editor.setTextAndCursor(browseDraft.text, browseDraft.cursor)
+      if (browseDraft.mode === previousMode) {
+        this.editor.onChange?.(this.editor.getText())
+      } else {
+        this.editor.setInputMode(browseDraft.mode)
+      }
     }
   }
 
@@ -8713,12 +8746,13 @@ export class TuiApp {
    *   sessionless boot seed passes no owner: it only seeds the recall pool and
    *   leaves the scope open (boot is not a published Session).
    */
-  resetInputHistory(entries: readonly string[], owner?: string): void {
+  resetInputHistory(entries: readonly string[], owner?: string, writeIds?: readonly (string | undefined)[]): void {
     // The kernel is the ONLY recall state: reset it first, then mirror its
     // snapshot into the editor. Re-seeding through `seedInputHistory` here
-    // would feed the kernel twice.
-    this.historyRecall.reset(entries, owner)
-    this.restoreEditorRecall()
+    // would feed the kernel twice. The PREVIOUS snapshot is the browse's own
+    // entry list (needed to recognise/restore an active browse draft).
+    this.historyRecall.reset(entries, owner, writeIds)
+    this.restoreEditorRecall(true)
   }
 
   /**
@@ -8735,7 +8769,7 @@ export class TuiApp {
    */
   beginInputHistoryScope(owner: string | undefined): void {
     this.historyRecall.begin(owner)
-    this.restoreEditorRecall()
+    this.restoreEditorRecall(false)
   }
 
   /**

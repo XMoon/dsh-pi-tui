@@ -1963,9 +1963,23 @@ test('a formal scope commit, a draft clear and a hydration window each retire th
     assert.equal(m.rows().length, 0, `${label}: the next frame carries no list`)
   }
   await refusedAfter(() => { m.renderer.display.beginInputHistoryScope('owner-b') }, 'a published owner')
-  await refusedAfter(() => { m.renderer.display.resetInputHistory(['row'], 'owner-c') }, 'a reseeded scope')
   await refusedAfter(() => { m.renderer.display.beginSessionHydration() }, 'the hydration window')
   assert.equal(m.calls.cancels, 0, 'none of these seams became a cancel')
+})
+
+test('an asynchronous hydration recall reseed keeps the SAME owner completion list live', async (t) => {
+  const m = await mountSlashPane(t, { chrome: true })
+  await m.type('/mo')
+  await m.key(TAB)
+  await waitUntil('the candidate list painted', () => m.rows().length > 0)
+  const rows = m.rows()
+  // The cold cross-cwd seed lands AFTER hydration; it is a projection replace,
+  // not a scope publication, so the already-open NEW-owner list survives.
+  m.renderer.display.resetInputHistory(['reseeded row'], 'owner-c')
+  await m.click(rows[0]!)
+  assert.deepEqual(m.editor(), { text: '/model ', cursor: 7 },
+    'the surviving candidate still completes the command name')
+  assert.deepEqual(m.calls.submits, [], 'and never submits')
 })
 
 test('a composer control that takes the keys retires the hidden slash list', async (t) => {

@@ -55,6 +55,11 @@ export interface HistoryRecordV2 {
   cwd: string
   ts: number
   sessionId?: string
+  /** Optional per-append identity (new rows only): lets the open recall scope
+   *  recognise the exact rows its own writer already persisted. Never a
+   *  Session id, a cross-client order or a lock — older v2 rows simply omit
+   *  it. */
+  writeId?: string
 }
 
 /** One parsed history row, v1 or v2, with metadata normalized. */
@@ -67,6 +72,8 @@ export interface ParsedHistoryRecord {
    * fabricated). */
   ts: number | null
   sessionId?: string
+  /** Optional v2 per-append identity; absent for old v2 and v1 rows. */
+  writeId?: string
   version: 1 | 2
 }
 
@@ -130,6 +137,7 @@ export function parseHistoryRecordLine(line: string): ParsedHistoryRecord | null
     const ts = typeof row.ts === 'number' && Number.isFinite(row.ts) ? row.ts : null
     const record: ParsedHistoryRecord = { content: row.content, cwd, ts, version: 2 }
     if (typeof row.sessionId === 'string' && row.sessionId !== '') record.sessionId = row.sessionId
+    if (typeof row.writeId === 'string' && row.writeId !== '') record.writeId = row.writeId
     return record
   }
   // v1 (or unknown): legacy `{}`-only rows keep working.

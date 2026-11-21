@@ -263,3 +263,26 @@ test('session-scoped recall: the HISTORY_RECALL_LIMIT cap applies per session', 
   assert.equal(recalled[0], 's-a-15', 'the session recall caps at the NEWEST rows of that session')
   assert.equal(recalled.at(-1), `s-a-${HISTORY_RECALL_LIMIT + 14}`)
 })
+
+test('parseHistoryRecordLine keeps a v2 writeId only when it is a non-empty string', () => {
+  const records = parseHistoryRecords([
+    '{"v":2,"content":"a","cwd":"/a","ts":1,"writeId":"w-1"}',
+    '{"v":2,"content":"b","cwd":"/a","ts":2,"writeId":""}',
+    '{"v":2,"content":"c","cwd":"/a","ts":3,"writeId":42}',
+    '{"v":2,"content":"d","cwd":"/a","ts":4}',
+  ].join('\n'))
+  assert.equal(records[0]?.writeId, 'w-1')
+  assert.equal(records[1]?.writeId, undefined, 'an empty string degrades to undefined')
+  assert.equal(records[2]?.writeId, undefined, 'a non-string degrades to undefined')
+  assert.equal(records[3]?.writeId, undefined, 'old v2 rows stay readable without one')
+})
+
+test('appendHistoryRecord round-trips the optional writeId and leaves old rows untouched', (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  const file = historyFilePath(home, '/work/a')
+  appendHistoryRecord(file, { v: 2, content: 'with id', cwd: '/work/a', ts: 1, sessionId: 'ses_a', writeId: 'w-1' }, undefined)
+  appendHistoryRecord(file, { v: 2, content: 'without id', cwd: '/work/a', ts: 2, sessionId: 'ses_a' }, 'with id')
+  const records = loadHistoryRecords(file)
+  assert.deepEqual(records.map(record => record.writeId), ['w-1', undefined])
+})

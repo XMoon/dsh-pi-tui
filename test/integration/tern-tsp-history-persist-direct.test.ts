@@ -328,12 +328,12 @@ test('an input that really carries a staged attachment is delivered but persists
   }
 })
 
-test('the occurrence token is not a file-level fact: the row schema stays content/cwd/ts/sessionId', async (t) => {
-  // Pinned so this lane's boundary stays honest: the token rides only the
-  // settlement payload, which the JSONL never records. Nothing here can witness
-  // it, and the chain case in `test/app/tern-tsp-live-mount.test.ts` owns that
-  // half. If the schema ever gains an occurrence field, this is the case that
-  // must change — together with the claim above.
+test('the occurrence token is not a file-level fact: the row schema stays content/cwd/ts/sessionId/writeId', async (t) => {
+  // Pinned so this lane's boundary stays honest: the occurrence token rides only
+  // the settlement payload, which the JSONL never records. The v2 row carries
+  // only the optional per-append `writeId` (the recall provenance), never the
+  // occurrence token itself. If the schema ever gains an occurrence field, this
+  // is the case that must change — together with the claim above.
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, { deltas: ['ok'] })
   const recorder = fixture.recordPrompts(() => {})
@@ -344,8 +344,10 @@ test('the occurrence token is not a file-level fact: the row schema stays conten
     const dir = join(fixture.workRoot, 'user-history')
     const raw = readdirSync(dir).map(name => readFileSync(join(dir, name), 'utf8')).join('')
     const keys = Object.keys(JSON.parse(raw.trim().split('\n')[0]!) as Record<string, unknown>).sort()
-    assert.deepEqual(keys, ['content', 'cwd', 'sessionId', 'ts', 'v'],
-      'the persisted row carries no occurrence identity')
+    assert.deepEqual(keys, ['content', 'cwd', 'sessionId', 'ts', 'v', 'writeId'],
+      'the persisted row carries only the optional writeId provenance, never the occurrence token')
+    const row = JSON.parse(raw.trim().split('\n')[0]!) as { writeId?: unknown }
+    assert.equal(typeof row.writeId, 'string', 'the new row carries its own writeId')
   } finally {
     recorder.detach()
     // reason: fixture.settle() awaits ownership cleanup, not a timer (receiver-blind guard).

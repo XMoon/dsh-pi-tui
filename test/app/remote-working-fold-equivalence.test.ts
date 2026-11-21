@@ -159,7 +159,11 @@ function harness(): Harness {
       updateWelcomeCard: () => {}, scheduleInitialMeasurement: () => {},
       markContextDirty: () => {}, refreshContextMeasurement: () => {},
     },
-    history: { rememberCwd: () => {}, currentCwd: () => '/c', records: () => [], setLastContent: () => {} },
+    history: {
+      rememberCwd: () => {}, currentCwd: () => '/c', records: () => [], setLastContent: () => {},
+      readSessionRecall: async () => ({ entries: [], writeIds: [] }),
+    },
+    currentness: { captureGeneration: () => 0, isStillCurrent: () => true },
     commands: { register: () => {} },
     submission: { clearPending: () => {} },
     viewer: { resetAutoPop: () => {}, teardownForSessionSwap: () => {} },

@@ -1572,6 +1572,26 @@ test('the formal History-scope commits retire an open card and leave the compose
 
 // ── PR2/F1: the History Restore is a composer WRITE ─────────────────────────
 
+test('an asynchronous hydration recall reseed keeps the SAME owner History card, query and selection', async (t) => {
+  const h = await mountHistoryPane(t)
+  h.key(CTRL_R)
+  await h.painted(() => h.cardPainted(), 'the card opened')
+  h.key('needle')
+  await h.painted(() => h.queryField()?.text === 'needle', 'the query committed')
+  const beforeSelection = h.selected()
+  // The cold cross-cwd seed lands after hydration: it replaces the recall
+  // projection but the NEW owner's open search card must survive untouched.
+  h.renderer.display.resetInputHistory(['reseeded row'], 'ses_a')
+  // The seam itself is pure state; the next outer frame proves whether the
+  // seat was retired. It must not be.
+  h.renderer.display.commitDisplaySubject({}, {}, undefined)
+  await h.painted(() => h.cardPainted(), 'the same card is still painted after the reseed frame')
+  assert.equal(h.queryField()?.text, 'needle', 'the query is preserved')
+  assert.deepEqual(h.selected(), beforeSelection, 'the selection is preserved')
+  h.key(ESCAPE)
+  await h.painted(() => !h.cardPainted(), 'Esc still closes the live card')
+})
+
 test('PR2/F1: a held submission refuses the History Restore but keeps the card browsable', async (t) => {
   const h = await mountHistoryPane(t)
   h.composer().text

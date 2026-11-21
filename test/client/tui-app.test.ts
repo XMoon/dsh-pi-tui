@@ -31,7 +31,7 @@ import { createExitIntentFacts } from '../../src/app/bootstrap/exit-facts.ts'
 import { createExitIntentCoordinator } from '../../src/app/bootstrap/exit-intent.ts'
 import { pituiExitChoiceSeam } from '../../src/app/surface/exit-choice-pitui.ts'
 import type { LiveSessionScope, SessionScope } from '../../src/app/session/scope.ts'
-import { Text, stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
+import { Text, getKeybindings, stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { ExtensionLedger } from '../../src/extension/internal/ledger.ts'
 import { SurfaceHost } from '../../src/extension/internal/surface-host.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -39,6 +39,8 @@ import { APP_KEYBINDINGS } from '../../src/tui/keybindings/definitions.ts'
 import { buildOsc52Sequence, copyToClipboard, type CopyExecutor } from '../../src/client/clipboard/copy.ts'
 import { runOwned } from '../../src/runtime/process/tasks.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
+import { FileHistorySearchSource } from '../../src/client/history/search.ts'
+import { historyFilePath } from '../../src/client/history/store.ts'
 
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
@@ -2952,6 +2954,213 @@ async function submitThroughEditor(app: TuiApp, vt: VirtualTerminal, text: strin
   vt.sendInput('\r')
   await vt.waitForRender()
 }
+
+test('the cold cross-cwd session seed drives real PiTui ↑/↓ recall', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('pi-tui-app-cross-cwd-')
+  // The same Session in two cwd files; the OTHER cwd row is newer.
+  const other = historyFilePath(home, '/other-workspace')
+  await mkdir(join(home, 'user-history'), { recursive: true })
+  await writeFile(other, JSON.stringify({ v: 2, content: 'cross cwd newest', cwd: '/other-workspace', ts: 2_000, sessionId: 'ses_a', writeId: 'w1' }) + '\n', 'utf8')
+  const current = historyFilePath(home, '/current-workspace')
+  await writeFile(current, JSON.stringify({ v: 2, content: 'current cwd older', cwd: '/current-workspace', ts: 1_000, sessionId: 'ses_a' }) + '\n', 'utf8')
+  const seed = await new FileHistorySearchSource({ dshHome: home }).readSessionRecall('ses_a')
+  assert.deepEqual(seed.entries, ['cross cwd newest', 'current cwd older'])
+  const { vt, app, submitted } = startApp()
+  app.resetInputHistory(seed.entries, 'ses_a', seed.writeIds)
+  await vt.waitForRender()
+  app.setDraft('')
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'cross cwd newest', 'the first ↑ recalls the cross-cwd newest row')
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'current cwd older', 'the second ↑ walks to the older row')
+  vt.sendInput('\x1b[B')
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), '', 'leaving the browse restores the empty draft')
+  assert.deepEqual(submitted, [], 'browsing and restoring never submit')
+  app.stop()
+})
+
+test('an async recall reseed restores the PiTui draft abandoned to ↑ browse', async () => {
+  const { vt, app } = startApp()
+  app.resetInputHistory(['old row'])
+  app.setDraft('my draft')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[H') // Home: the first ↑ from column 0 enters the browse
+  await vt.waitForRender()
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'old row', 'the browse really replaced the draft with the recalled row')
+  // The cold cross-cwd seed lands while the browse is open: the user's own
+  // draft/caret must come back, not silently disappear with the bookmark.
+  app.resetInputHistory(['new row'])
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'my draft', 'the async reseed restores the abandoned draft')
+  assert.deepEqual(app.getInputHistory(), ['new row'], 'and commits the new projection')
+  app.stop()
+})
+
+test('a PiTui edit that happens to equal another history row is never overwritten by a reseed', async () => {
+  const { vt, app } = startApp()
+  app.resetInputHistory(['abc', 'abcd'])
+  app.setDraft('mine')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[H')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'abc', 'the browse replaced the draft with the newest row')
+  vt.sendInput('\x1b[F') // End: edit the recalled row itself
+  await vt.waitForRender()
+  vt.sendInput('d')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'abcd', 'the user now owns a real draft that happens to equal an older history row')
+  app.resetInputHistory(['new row'])
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'abcd', 'the cold seed keeps the REAL edited draft, never restores the stale bookmark')
+  app.stop()
+})
+
+test('a PiTui prompt draft survives a browse across a shell row and an async reseed', async () => {
+  const { vt, app } = startApp()
+  const editor = (app as unknown as { editor: { getInputMode(): string } }).editor
+  app.resetInputHistory(['!echo shell', 'plain row'])
+  app.setDraft('my prompt')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[H')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), '!echo shell', 'the shell row is recalled')
+  assert.equal(editor.getInputMode(), 'shell-context', 'the recalled row switched the real input mode')
+  app.resetInputHistory(['new row'])
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'my prompt', 'the original prompt draft is restored')
+  assert.equal(editor.getInputMode(), 'prompt', 'the original prompt mode is restored, not the shell row mode')
+  app.stop()
+})
+
+test('a PiTui edit after a recall in the same turn never leaves a restore bookmark', async () => {
+  const { vt, app } = startApp()
+  app.resetInputHistory(['abc'])
+  app.setDraft('mine')
+  await vt.waitForRender()
+  const editor = (app as unknown as {
+    editor: {
+      setCursor(cursor: { line: number; col: number }): void
+      handleInput(data: string): unknown
+    }
+  }).editor
+  editor.setCursor({ line: 0, col: 0 })
+  // The REAL StdinBuffer splits ONE raw stdin chunk into two synchronous
+  // editor input events: ↑ recalls `abc`, then `d` edits, same JS turn.
+  const { StdinBuffer } = await import('@xmoon76/pi-tui')
+  const buffer = new StdinBuffer({ timeout: 5, escapeTimeout: 5 })
+  buffer.on('data', sequence => editor.handleInput(sequence))
+  buffer.process('\x1b[Ad')
+  buffer.removeAllListeners()
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'dabc', 'the same-turn edit is the real draft')
+  app.resetInputHistory(['new row'])
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'dabc', 'the cold seed never restores a stale browse bookmark over it')
+  app.stop()
+})
+
+test('a pointer exit from PiTui history browse retires the bookmark', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  app.resetInputHistory(['row one'])
+  app.setDraft('my draft')
+  await vt.waitForRender()
+  const editor = (app as unknown as { editor: { getCursor(): { line: number; col: number } } }).editor
+  vt.sendInput('\x1b[H')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'row one', 'the browse row is active')
+  const beforeClick = editor.getCursor()
+  const viewport = vt.getViewport()
+  const row = viewport.findIndex(line => line.includes('row one'))
+  assert.ok(row >= 0, `the recalled row must be painted before the pointer probe:\n${viewport.join('\n')}`)
+  const column = viewport[row]!.indexOf('row one') + 3
+  const sendMouse = (kind: 'press' | 'release'): void => {
+    vt.sendInput(`\x1b[<0;${column + 1};${row + 1}${kind === 'press' ? 'M' : 'm'}`)
+  }
+  sendMouse('press')
+  await vt.waitForRender()
+  sendMouse('release')
+  await vt.waitForRender()
+  const afterClick = editor.getCursor()
+  assert.notDeepEqual(afterClick, beforeClick, 'the pointer really moved the caret and left browse')
+  app.resetInputHistory(['new row'])
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'row one', 'the clicked recalled row is not replaced by the pre-browse draft')
+  assert.deepEqual(editor.getCursor(), afterClick, 'the clicked caret survives the reseed')
+  app.stop()
+})
+
+test('a large-paste registry entry survives a PiTui browse reseed', async () => {
+  const { vt, app } = startApp()
+  app.resetInputHistory(['old row'])
+  const body = Array.from({ length: 40 }, (_, index) => `pasted line ${index}`).join('\n')
+  vt.sendInput(`before ${'\x1b[200~'}${body}${'\x1b[201~'} after`)
+  await vt.waitForRender()
+  const editor = (app as unknown as { editor: { getCursor(): { line: number; col: number } } }).editor
+  const document = app.seatTextForTest()
+  const expanded = app.getDraft()
+  assert.match(document, /\[paste #1 \+40 lines\]/, 'the raw document carries the registry marker')
+  assert.ok(expanded.includes('pasted line 39'), 'the production wire draft expands the payload')
+  assert.ok(!expanded.includes('[paste #'), 'the wire draft never carries registry-bound marker text')
+  vt.sendInput('\x1b[H')
+  await vt.waitForRender()
+  const cursorAtBrowse = editor.getCursor()
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  const holder = (app as unknown as { editorSeatHolder: { notifyChanged(): void } }).editorSeatHolder
+  const originalNotify = holder.notifyChanged.bind(holder)
+  let notifications = 0
+  holder.notifyChanged = () => { notifications += 1; originalNotify() }
+  app.resetInputHistory(['new row'])
+  await vt.waitForRender()
+  assert.ok(notifications > 0, 'the restored draft is published through the host onChange/seat notification channel')
+  assert.equal(app.seatTextForTest(), document, 'the marker document survives the browse reseed byte for byte')
+  assert.equal(app.getDraft(), expanded, 'the paste registry still resolves to the full payload')
+  assert.deepEqual(editor.getCursor(), cursorAtBrowse, 'the browse-entry caret survives the reseed')
+  app.stop()
+})
+
+test('a no-op history-next gesture never creates a PiTui browse bookmark', async () => {
+  const keybindings = getKeybindings()
+  const previousBindings = keybindings.getUserBindings()
+  keybindings.setUserBindings({ ...previousBindings, 'tui.editor.historyNext': 'ctrl+n' })
+  const { vt, app } = startApp()
+  try {
+    app.resetInputHistory(['old row'])
+    app.setDraft('my draft')
+    await vt.waitForRender()
+    const editor = (app as unknown as { editor: { getCursor(): { line: number; col: number } } }).editor
+    vt.sendInput('\x1b[H') // caret at the start
+    await vt.waitForRender()
+    vt.sendInput('\x0e') // configured history-next at the bottom: a real no-op
+    await vt.waitForRender()
+    vt.sendInput('\x1b[C') // move the caret without editing the text
+    await vt.waitForRender()
+    const beforeReseed = { text: app.getDraft(), cursor: editor.getCursor() }
+    assert.notDeepEqual(beforeReseed.cursor, { line: 0, col: 0 }, 'the caret really moved after the no-op browse gesture')
+    app.resetInputHistory(['new row'])
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), beforeReseed.text, 'the no-op gesture never replaces the current draft')
+    assert.deepEqual(editor.getCursor(), beforeReseed.cursor, 'the no-op gesture never restores a stale caret')
+  } finally {
+    app.stop()
+    keybindings.setUserBindings(previousBindings)
+  }
+})
 
 test('the recall scope reconciles written, skipped and pending occurrences in the append order', async () => {
   const { vt, app, submitted, settleAt } = startApp()

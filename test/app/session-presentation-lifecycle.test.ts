@@ -128,7 +128,11 @@ function harness(options: {
       updateWelcomeCard: () => {}, scheduleInitialMeasurement: (sessionId: string) => { initialMeasurements.push(sessionId) },
       markContextDirty: () => { contextDirty += 1 }, refreshContextMeasurement: (reason: string) => { contextRefreshes.push(reason) },
     },
-    history: { rememberCwd: () => {}, currentCwd: () => '/c', records: () => [], setLastContent: () => {} },
+    history: {
+      rememberCwd: () => {}, currentCwd: () => '/c', records: () => [], setLastContent: () => {},
+      readSessionRecall: async () => ({ entries: [], writeIds: [] }),
+    },
+    currentness: { captureGeneration: () => generation, isStillCurrent: () => true },
     commands: { register: () => {} },
     submission: { clearPending: () => {} },
     viewer: { resetAutoPop: () => {}, teardownForSessionSwap: () => {} },
@@ -741,4 +745,253 @@ test('a plan/mode event commits the bit AND re-derives the official plan project
     'the durable event bit is published immediately (the badge never waits)')
   assert.equal(refreshes, 1,
     'the official plan projection is re-read for the pending selection the event cannot carry')
+})
+
+/**
+ * A focused owner-level harness for the asynchronous history read fence: the
+ * REAL `createSessionPresentation` owner over a controllable `readSessionRecall`
+ * promise and exact currentness tokens. `mode` selects the Direct hydrate or
+ * the Remote (transport-token) hydrate.
+ */
+function historyFenceHarness(mode: 'direct' | 'remote') {
+  const resets: Array<{ entries: readonly string[]; owner?: string; writeIds?: readonly (string | undefined)[] }> = []
+  const reads: Array<{
+    resolve(seed: { entries: readonly string[]; writeIds: readonly (string | undefined)[] }): void
+    reject(error: unknown): void
+  }> = []
+  const readSignals: Array<AbortSignal | undefined> = []
+  const notifications: string[] = []
+  let fallbackRecords: import('../../src/client/history/store.ts').ParsedHistoryRecord[] = []
+  let generation = 0
+  let currentSessionId: string | undefined
+  let transportCurrent = true
+  const transportToken = { id: 1 }
+  let initialized = false
+  const noop = (): void => {}
+  const app = {
+    setBusy: noop, setWorking: noop, setPlanMode: noop, setSessionTitle: noop, setTodoSummary: noop,
+    clearLocalMessages: noop, clearNotify: noop, clearExitConfirmation: noop, setSearchResult: noop,
+    clearSessionOverrides: noop,
+  }
+  const surface = {
+    app,
+    openingJournal: createOpeningJournal<Record<string, unknown>>(),
+    display: displaySeamStub({
+      resetInputHistory: (entries, owner, writeIds) => resets.push({ entries: [...entries], owner, writeIds }),
+      notify: text => { notifications.push(text) },
+    }),
+    resetSearchPresentation: noop, resetTasks: noop, resetPendingPresentation: noop,
+    setTranscriptSearchCoverage: noop,
+    applyResumedCompaction: noop, repaint: noop, refreshPendingInput: noop,
+    refreshTasks: noop, refreshAgents: noop,
+  }
+  const diag: Diag = { info: noop, warn: noop, error: noop, debug: noop, dispose: noop } as unknown as Diag
+  const presentation = createSessionPresentation<SessionPresentationEvent>({
+    surface: surface as never,
+    diag,
+    summaryKeys: toolSummaryKeys,
+    isCleanedUp: () => false,
+    refreshStatusCheap: noop,
+    folds: { title: () => undefined },
+    direct: {
+      installModelSelection: noop,
+      assistantStreamBaselineFor: () => [],
+      planActive: () => false,
+      effectiveCwd: () => '/c',
+    },
+    status: {
+      setGoalText: noop, refresh: noop, refreshTerminalTitle: noop, refreshTerminalCwd: noop,
+      updateWelcomeCard: noop, scheduleInitialMeasurement: noop, markContextDirty: noop, refreshContextMeasurement: noop,
+    },
+    history: {
+      rememberCwd: noop,
+      currentCwd: () => '/c',
+      records: () => fallbackRecords,
+      setLastContent: noop,
+      readSessionRecall: (_sessionId, signal) => new Promise((resolve, reject) => {
+        // The fixture deliberately ignores abort (keeps the promise pending):
+        // the ownership fence must ALSO protect a reader that does not honour
+        // cancellation, exactly like a scan that completed just before abort.
+        readSignals.push(signal)
+        reads.push({ resolve, reject })
+      }),
+    },
+    currentness: {
+      captureGeneration: () => generation,
+      isStillCurrent: (sessionId, captured) => currentSessionId === sessionId && generation === captured,
+      ...(mode === 'remote'
+        ? {
+            captureTransportToken: () => transportToken,
+            isTransportTokenCurrent: () => transportCurrent,
+          }
+        : {}),
+    },
+    commands: { register: noop },
+    submission: { clearPending: noop },
+    viewer: { resetAutoPop: noop, teardownForSessionSwap: noop },
+    ...(mode === 'remote'
+      ? {
+          remote: {
+            read: async () => ({
+              sessionId: 's', durableEvents: [], liveInputs: [], revision: 1,
+              coverage: 'full' as const, hasMore: false, loadingOlder: false, openState: 'open' as const,
+            }),
+            running: () => false,
+            plan: () => ({ active: false, pending: false }),
+            facts: () => ({}),
+            captureGeneration: () => generation,
+            isStillCurrent: (sessionId: string, captured: number) => currentSessionId === sessionId && generation === captured,
+            captureTransportToken: () => transportToken,
+            isTransportTokenCurrent: () => transportCurrent,
+          },
+        }
+      : {}),
+  })
+  const agent = (id: string) => ({ session: { id, header: {}, snapshotEvents: () => [] } }) as never
+  return {
+    presentation,
+    resets,
+    reads,
+    readSignals,
+    notifications,
+    setFallbackRecords(records: import('../../src/client/history/store.ts').ParsedHistoryRecord[]): void {
+      fallbackRecords = records
+    },
+    init(id: string): Promise<unknown> {
+      if (initialized) presentation.resetForGeneration()
+      initialized = true
+      currentSessionId = id
+      generation += 1
+      return mode === 'direct' ? presentation.initLiveSession(agent(id)) : presentation.initLiveRemoteSession(id)
+    },
+    setTransportCurrent(value: boolean): void { transportCurrent = value },
+    /** Change the exact current owner WITHOUT the production generation reset
+     * (that reset aborts the controller); used to isolate the final fence. */
+    advanceOwner(sessionId: string): void {
+      currentSessionId = sessionId
+      generation += 1
+    },
+    bumpTo(sessionId: string): void {
+      currentSessionId = sessionId
+      generation += 1
+      presentation.resetForGeneration()
+    },
+  }
+}
+
+/** Let the detached cold-recall continuation run to its commit/discard. */
+async function flushDetached(): Promise<void> {
+  await new Promise(resolve => setImmediate(resolve))
+}
+
+test('an owner publication between the read settlement and the commit drops the Direct seed', async () => {
+  const h = historyFenceHarness('direct')
+  const hydrated = h.init('session-a')
+  await flushDetached()
+  assert.equal(h.reads.length, 1)
+  h.reads[0]!.resolve({ entries: ['late stale seed'], writeIds: [] })
+  // This microtask is queued AFTER the read's continuation but BEFORE the
+  // caller's post-await commit continuation: exactly the two-microtask gap.
+  queueMicrotask(() => h.advanceOwner('session-b'))
+  await hydrated
+  await flushDetached()
+  assert.equal(h.resets.some(reset => reset.entries.includes('late stale seed')), false,
+    'the final synchronous fence re-check rejects a seed whose owner changed before the commit')
+})
+
+test('a transport rollover between the read settlement and the commit drops the Remote seed', async () => {
+  const h = historyFenceHarness('remote')
+  const hydrated = h.init('s')
+  await flushDetached()
+  assert.equal(h.reads.length, 1)
+  h.reads[0]!.resolve({ entries: ['late transport seed'], writeIds: [] })
+  queueMicrotask(() => h.setTransportCurrent(false))
+  await hydrated
+  await flushDetached()
+  assert.equal(h.resets.some(reset => reset.entries.includes('late transport seed')), false,
+    'the final transport fence rejects the stale seed')
+})
+
+test('a session replacement aborts the in-flight cold history scan', async () => {
+  const h = historyFenceHarness('direct')
+  const hydrated = h.init('session-a')
+  await flushDetached()
+  assert.equal(h.readSignals.length, 1, 'the production hydrate handed the reader an AbortSignal')
+  h.bumpTo('session-b')
+  assert.equal(h.readSignals[0]?.aborted, true, 'the replaced owner aborted the old scan')
+  await hydrated
+  await flushDetached()
+})
+
+test('a stale Direct cold recall read never overwrites a newer same-id generation', async () => {
+  const h = historyFenceHarness('direct')
+  const first = h.init('session-a')
+  await flushDetached()
+  assert.equal(h.reads.length, 1, 'the first hydrate started its cold recall read')
+  const second = h.init('session-b')
+  await flushDetached()
+  assert.equal(h.reads.length, 2)
+  h.reads[1]!.resolve({ entries: ['b new seed'], writeIds: [] })
+  await second
+  await flushDetached()
+  assert.ok(h.resets.some(reset => reset.entries.includes('b new seed')), 'B committed its own seed')
+  const third = h.init('session-a')
+  await flushDetached()
+  assert.equal(h.reads.length, 3)
+  h.reads[2]!.resolve({ entries: ['a re-opened seed'], writeIds: [] })
+  await third
+  await flushDetached()
+  assert.ok(h.resets.some(reset => reset.entries.includes('a re-opened seed')), 'the reopened A committed')
+  const beforeStale = h.resets.length
+  // The ORIGINAL A read finally answers, captured under the retired generation.
+  h.reads[0]!.resolve({ entries: ['a STALE seed'], writeIds: [] })
+  await first
+  await flushDetached()
+  assert.equal(h.resets.length, beforeStale, 'the stale read commits no reset at all')
+  assert.equal(h.resets.some(reset => reset.entries.includes('a STALE seed')), false,
+    'the old generation seed never reaches the newer same-id Session')
+})
+
+test('a Remote transport rollover during the cold recall read drops the stale seed and a later hydrate recovers', async () => {
+  const h = historyFenceHarness('remote')
+  const first = h.init('s')
+  await flushDetached()
+  assert.equal(h.reads.length, 1)
+  h.setTransportCurrent(false)
+  h.reads[0]!.resolve({ entries: ['stale transport seed'], writeIds: [] })
+  await first
+  await flushDetached()
+  assert.equal(h.resets.some(reset => reset.entries.includes('stale transport seed')), false,
+    'a rolled-over transport never updates the renderer recall kernel')
+  h.setTransportCurrent(true)
+  const second = h.init('s')
+  await flushDetached()
+  assert.equal(h.reads.length, 2)
+  h.reads[1]!.resolve({ entries: ['recovered seed'], writeIds: [] })
+  await second
+  await flushDetached()
+  assert.ok(h.resets.some(reset => reset.entries.includes('recovered seed')),
+    'a subsequent current hydrate recovers the recall')
+})
+
+test('a global cold-read failure warns and falls back to the current cwd session rows', async () => {
+  const h = historyFenceHarness('direct')
+  h.setFallbackRecords([
+    { content: 'fallback older', cwd: '/c', ts: 1, sessionId: 'session-a', version: 2 },
+    { content: 'foreign row', cwd: '/c', ts: 2, sessionId: 'session-b', version: 2 },
+    { content: 'fallback newer', cwd: '/c', ts: 3, sessionId: 'session-a', version: 2, writeId: 'w-f' },
+  ])
+  const hydrated = h.init('session-a')
+  await Promise.resolve()
+  assert.equal(h.reads.length, 1)
+  h.reads[0]!.reject(new Error('user-history is unreadable'))
+  await hydrated
+  await flushDetached()
+  assert.deepEqual(h.resets.at(-1), {
+    entries: ['fallback newer', 'fallback older'],
+    owner: 'session-a',
+    writeIds: ['w-f', undefined],
+  }, 'the fallback is the SAME session filtered to the current cwd, newest first, writeIds aligned')
+  assert.ok(h.notifications.some(text => text.includes('could not read every directory')),
+    'the failure is stated, never silently presented as complete history')
 })

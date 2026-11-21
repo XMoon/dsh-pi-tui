@@ -22,7 +22,7 @@
  * @module @xmoon76/dsh-pi-tui/tui/interaction/tui-editor
  */
 
-import { decodePrintableKey, Editor, matchesKey, truncateToWidth, type AutocompleteProvider, type EditorTheme, type SelectListLayoutOptions, type TUI } from '@xmoon76/pi-tui'
+import { decodePrintableKey, Editor, matchesKey, truncateToWidth, type AutocompleteProvider, type EditorTheme, type SelectListLayoutOptions, type TUI, type TuiMouseEvent, type TuiMouseEventResult } from '@xmoon76/pi-tui'
 import { SelectedMarquee } from '../components/marquee.ts'
 import { color } from '../theme/runtime.ts'
 import { classifyFileCompletionContext } from '../file-completion/context.ts'
@@ -222,6 +222,33 @@ export class TuiEditor extends Editor {
   /** Whether a completion provider has been installed through this host
    *  override (the base field is private; the host only needs the fact). */
   private autocompleteProviderInstalled = false
+  /** The draft captured when the user entered ↑/↓ history browse. The base
+   *  editor owns the browse bookmark privately; this host copy survives a
+   *  history-list replacement (an async recall reseed) so the user's own
+   *  draft and caret are never lost. */
+  private historyBrowseDraft: {
+    readonly text: string
+    readonly cursor: { readonly line: number; readonly col: number }
+    readonly mode: EditorInputMode
+  } | undefined
+  /** Number of synchronously scheduled onChange calls that belong to the
+   *  CURRENT recall application (a mode change + the row setText). It is not a
+   *  time window: the next real edit in the same stdin chunk/JS turn must see
+   *  zero and invalidate the host bookmark. */
+  private historyRecallChangesRemaining = 0
+  /** A candidate captured by the vendored save hook. The fork calls the hook
+   *  even when `historyNext` has no next row (newIndex -2) and never enters
+   *  browse; only a successful `onRecall` below promotes this to the active
+   *  bookmark. A no-op leaves it pending and a reseed must ignore it. */
+  private pendingHistoryBrowseDraft: {
+    readonly text: string
+    readonly cursor: { readonly line: number; readonly col: number }
+    readonly mode: EditorInputMode
+  } | undefined
+  /** True only inside the fork's synchronous left-click handler. The fork
+   *  exits history browsing on a click without firing onChange; its own
+   *  "navigation" boundary notification is the post-exit proof we consume. */
+  private pointerClickInFlight = false
 
   constructor(tui: TUI, theme: EditorTheme, options: TuiEditorOptions = {}) {
     // paddingX: 2 reserves the left two cells for the mode prompt painted
@@ -246,21 +273,102 @@ export class TuiEditor extends Editor {
     // draft save/restore pair keeps the mode across ↑/↓ browsing (a draft
     // recalled as `!!pwd` must never come back as `❯ pwd`).
     this.onRecall = (entry) => {
+      // A real recall callback is the only proof that a save hook actually
+      // entered history browsing; promote its candidate before decoding.
+      if (this.pendingHistoryBrowseDraft !== undefined) {
+        this.historyBrowseDraft = this.pendingHistoryBrowseDraft
+        this.pendingHistoryBrowseDraft = undefined
+      }
       const { mode, text } = editorModeFromHistoryEntry(entry)
+      // The mode change (when it changes) and the row setText each fire ONE
+      // synchronous onChange. Count exactly those, then the next change is a
+      // real edit — no microtask/JS-turn window that could swallow input
+      // arriving later in the same stdin chunk.
+      this.historyRecallChangesRemaining = this.inputMode === mode ? 1 : 2
       this.setInputMode(mode)
       return text
     }
-    this.onHistoryDraftSave = () => this.inputMode
+    this.onHistoryDraftSave = () => {
+      // Pending candidate, not an active bookmark: `historyNext` at the
+      // bottom of the history calls this then returns with newIndex === -2.
+      this.pendingHistoryBrowseDraft = {
+        text: this.getText(),
+        cursor: this.getCursor(),
+        mode: this.inputMode,
+      }
+      return this.inputMode
+    }
     this.onHistoryDraftRestore = (state) => {
+      this.historyBrowseDraft = undefined
+      this.pendingHistoryBrowseDraft = undefined
+      this.historyRecallChangesRemaining = 0
       if (state === 'prompt' || state === 'shell-context' || state === 'shell-local') {
         this.setInputMode(state)
       }
     }
   }
 
+  /** The host boundary callback forwards "navigation" events here. A left
+   *  click on an editor row is the only navigation event produced inside
+   *  `handleMouse`; it exits browse without onChange, so the bookmark dies. */
+  consumePointerBrowseExit(reason: string): void {
+    if (reason === 'navigation' && this.pointerClickInFlight) this.clearHistoryBrowseDraft()
+  }
+
+  override handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (event.type === 'click' && event.button === 'left') this.pointerClickInFlight = true
+    try {
+      return super.handleMouse(event)
+    } finally {
+      this.pointerClickInFlight = false
+    }
+  }
+
+  override clearDraftAfterSubmit(): void {
+    super.clearDraftAfterSubmit()
+    this.clearHistoryBrowseDraft()
+  }
+
+  /** Consume ONE onChange caused by the current recall application. Returns
+   *  false for the first change after it (a real edit/programmatic mutation),
+   *  so the host can drop the browse bookmark immediately — including a key
+   *  delivered synchronously later in the SAME stdin chunk. */
+  consumeHistoryRecallChange(): boolean {
+    if (this.historyRecallChangesRemaining <= 0) return false
+    this.historyRecallChangesRemaining -= 1
+    return true
+  }
+
   /** The current input mode (read-only for the host). */
   getInputMode(): EditorInputMode {
     return this.inputMode
+  }
+
+  /**
+   * Take the draft/caret/mode captured by the ACTIVE ↑/↓ history browse and
+   * clear the local copy. Returns undefined when the editor is not browsing
+   * (a later edit exits the base editor's browse without firing the restore
+   * callback; the stale snapshot is then rejected by the caller's entry check).
+   * The caller replaces the history list and restores this snapshot itself, so
+   * an asynchronous recall reseed can never lose a non-empty draft.
+   */
+  takeHistoryBrowseDraft(): {
+    readonly text: string
+    readonly cursor: { readonly line: number; readonly col: number }
+    readonly mode: EditorInputMode
+  } | undefined {
+    const draft = this.historyBrowseDraft
+    this.historyBrowseDraft = undefined
+    this.pendingHistoryBrowseDraft = undefined
+    this.historyRecallChangesRemaining = 0
+    return draft
+  }
+
+  /** A real document mutation exits the base editor's browse; erase the host
+   *  bookmark so a later cold seed can never restore a stale draft. */
+  clearHistoryBrowseDraft(): void {
+    this.historyBrowseDraft = undefined
+    this.pendingHistoryBrowseDraft = undefined
   }
 
   /**

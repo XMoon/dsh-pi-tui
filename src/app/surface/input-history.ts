@@ -23,6 +23,7 @@
  * @module @xmoon76/dsh-pi-tui/app/surface/input-history
  */
 
+import { randomUUID } from 'node:crypto'
 import { dshHome, type Diag } from '../../runtime/process/diagnostics.ts'
 import { runDetached } from '../../runtime/process/tasks.ts'
 import { historyFilePath, loadHistoryFile, loadHistoryRecords, type ParsedHistoryRecord } from '../../client/history/store.ts'
@@ -154,19 +155,27 @@ export function createInputHistory(deps: InputHistoryDeps): InputHistory {
     const content = record.text.trim()
     // EVERY settled submission is reported, in append order: a policy skip
     // settles without a row, and its position among the appends is what places
-    // the occurrence in the recall.
-    const settle = (outcome: 'written' | 'skipped'): void => {
+    // the occurrence in the recall. Only a WRITTEN row carries the per-append
+    // `writeId` that lets the open recall scope recognise its own persisted
+    // row during the cold reseed.
+    const settle = (outcome: 'written' | 'skipped', writeId?: string): void => {
       deps.surface.display.settleScopeInput({
         ...(record.scopeToken === undefined ? {} : { token: record.scopeToken }),
         owner: record.sessionId,
         outcome,
         text: content,
+        ...(writeId === undefined ? {} : { writeId }),
       })
     }
     if (content === '' || content === lastHistoryContent || record.hasAttachments) {
       settle('skipped')
       return
     }
+    // Generated once in the append path (a policy skip never pays for an ID).
+    // The ID travels into the v2 row AND the written settlement, so the open
+    // scope can remove exactly this row from its disk seed without matching
+    // on text.
+    const writeId = randomUUID()
     const cwd = deps.sessionCwd()
     const file = historyFilePath(dshHome(process.env), cwd)
     runDetached('input history write', () => {
@@ -177,6 +186,7 @@ export function createInputHistory(deps: InputHistoryDeps): InputHistory {
         ts: record.timestamp,
         lastContent: lastHistoryContent,
         hasAttachments: record.hasAttachments,
+        writeId,
         file,
       })
       if (!written) return
@@ -184,7 +194,7 @@ export function createInputHistory(deps: InputHistoryDeps): InputHistory {
       // Settlement evidence for the editor-recall scope: this factory is
       // invoked SYNCHRONOUSLY and the append above is synchronous, so the row is
       // on disk as of this very stack and its position is this append's position.
-      settle('written')
+      settle('written', writeId)
     }, {
       diag: deps.diag,
       notify: (message) => {

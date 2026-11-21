@@ -449,6 +449,55 @@ test('the scope bridge is captured exactly ONCE per open and reused by every lat
   }
 })
 
+test('Session scope searches this session across cwd files; Restore never submits and Directory stays single-file', async (t) => {
+  const life = testLifecycle(t)
+  const h = await mountChain(life, 'ses_a')
+  try {
+    const home = process.env.DSH_HOME!
+    // Read ONLY the history card's own nodes: the Composer is visible above the
+    // card and legitimately keeps the restored draft text.
+    const cardTexts = (): string[] => wireNodes(h.pane)
+      .filter(node => String(node.p.role ?? '').startsWith('dsh.history.'))
+      .flatMap(node => typeof node.p.text === 'string' && node.p.text !== '' ? [node.p.text] : [])
+    // The SAME session also submitted from another working directory (its own
+    // FILE), together with a different session's row in that file.
+    const oldFile = historyFilePath(home, '/old-workspace')
+    mkdirSync(dirname(oldFile), { recursive: true })
+    writeFileSync(oldFile, [
+      JSON.stringify({ v: 2, content: 'cross cwd prompt from ses_a', cwd: '/old-workspace', ts: 1_700_000_000_900, sessionId: 'ses_a' }),
+      JSON.stringify({ v: 2, content: 'distractor from ses_b', cwd: '/old-workspace', ts: 1_700_000_000_950, sessionId: 'ses_b' }),
+    ].join('\n') + '\n', { mode: 0o600 })
+    h.key(CTRL_R)
+    await waitUntil('the card opened', () => h.cardPainted())
+    await waitUntil('all four session rows painted', () => cardTexts().some(text => text.startsWith('Results · 4 shown')))
+    assert.ok(cardTexts().some(text => text.includes('cross cwd prompt from ses_a')),
+      'the other cwd file of THIS session is in Session scope')
+    assert.ok(!cardTexts().some(text => text.includes('distractor from ses_b')),
+      'another session never leaks into Session scope')
+    h.key(ENTER)
+    await waitUntil('the exact cross-cwd row was restored', () => h.draft().text === 'cross cwd prompt from ses_a')
+    assert.equal(h.submits.length, 0, 'Restore is a draft write, never a submit')
+    // Reopen and Tab to Directory: only the open-time cwd file is eligible.
+    h.key(CTRL_R)
+    await waitUntil('the card reopened', () => h.cardPainted())
+    h.key(TAB)
+    await waitUntil('Directory round settled', () => {
+      const texts = cardTexts()
+      return texts.includes('Scope: Directory ⌄')
+        && texts.some(text => text.startsWith('Results · 3 shown'))
+        && !texts.some(text => text.includes('cross cwd prompt from ses_a'))
+    })
+    assert.ok(!cardTexts().some(text => text.includes('cross cwd prompt from ses_a')),
+      'Directory never scans the other cwd file')
+    h.key('\u001b')
+    await settle(ABSENCE_WINDOW_MS)
+    assert.equal(h.draft().text, 'cross cwd prompt from ses_a', 'Esc leaves the draft untouched')
+    assert.equal(h.submits.length, 0)
+  } finally {
+    await h.dispose()
+  }
+})
+
 // ── B. A publication during an in-flight read or copy refuses the late result ─
 
 test('an owner publication between the read and its settlement refuses the retired page', async (t) => {

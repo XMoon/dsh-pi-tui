@@ -567,14 +567,34 @@ export function createTspComposer(
       editEpoch += 1
     },
     invalidateRecallNavigation: () => {
-      // TSP I-B: a formal scope `begin`/`reset` retires THIS browse and only
-      // this browse. Pure state: the text and caret stay exactly as the mount
+      // TSP I-B: a formal scope `begin` retires THIS browse and only this
+      // browse. Pure state: the text and caret stay exactly as the mount
       // shows them, and the frame the caller commits anyway carries the right
       // content — a second repaint here would flicker the seat.
       historyIndex = -1
       historyDraft = undefined
       preferredGraphemeColumn = undefined
       editEpoch += 1
+    },
+    reseatRecallAfterReseed: () => {
+      // An ASYNC recall reseed of the SAME owner: the projection changed under
+      // an open browse. If the user was browsing, restore their own draft and
+      // caret (the browse's bookmark) in this same commit; never leave the
+      // recalled row as the document with the bookmark silently dropped. When
+      // the user was NOT browsing the document does not change, so the edit
+      // epoch stays put and an in-flight inline-attachment intake remains
+      // valid.
+      if (historyIndex >= 0 && historyDraft !== undefined) {
+        const bookmark = historyDraft
+        historyIndex = -1
+        historyDraft = undefined
+        preferredGraphemeColumn = undefined
+        replaceForRecall(bookmark.text, bookmark.cursor)
+        return
+      }
+      historyIndex = -1
+      historyDraft = undefined
+      preferredGraphemeColumn = undefined
     },
     registerPastedPathSpan: (span) => pasteRanges.add(span),
     hasLivePath: (id, path) => pasteRanges.live(id)?.expected === path,
@@ -815,6 +835,14 @@ export interface TspComposer {
    * the correct content.
    */
   invalidateRecallNavigation(): void
+  /**
+   * TSP I-B async reseed: reconcile the ↑/↓ browse with a REPLACED recall
+   * projection of the SAME owner. Restores the user's own draft/caret when a
+   * browse is active (the bookmark the editor would otherwise drop), and
+   * otherwise leaves the document and the edit revision untouched so a live
+   * inline-attachment intake is not falsely rejected.
+   */
+  reseatRecallAfterReseed(): void
   /**
    * Register the proven raw span of ONE completed bracketed paste. Returns
    * the lease id, or undefined when the current document does not hold those

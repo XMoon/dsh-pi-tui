@@ -4393,26 +4393,21 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // composer — the stale-settle sites skip the merge and notify instead.
       return false
     },
-    resetInputHistory(entries, owner) {
+    resetInputHistory(entries, owner, writeIds) {
       // TSP I-A: a real kernel commit, NOT the old no-op. This records the
       // reseed/reconcile into THIS mount's recall projection only: no render,
       // no draft/caret touch, no seat or Focus change, no second read of the
       // history file.
-      // TSP I-B: the composer's browse is retired with the projection it was
-      // indexing — BEFORE the kernel commit, so no recalled row of the
-      // outgoing owner can be walked back into the incoming one. Pure state:
-      // this seam still triggers no render and touches no draft.
+      // This is a PROJECTION replace, not a scope publication: `beginInputHistoryScope`
+      // (the owner publication seam) is what retires an outgoing owner's
+      // completion/search seats. Since the cold cross-cwd seed is committed
+      // ASYNCHRONOUSLY after hydration, the user may already have opened the
+      // NEW owner's search card or completion list; this reseed must not tear
+      // either down. Only the editor's positional recall browse is invalidated,
+      // because its indices point at the replaced projection. Pure state.
       if (disposed) return
-      composer.invalidateRecallNavigation()
-      // TSP I-C: the same formal scope commit rolls the completion seat: a
-      // candidate list (and an in-flight query) belongs to the scope its
-      // catalog was resolved under, so it is withdrawn here too. Pure state,
-      // no render, exactly as above.
-      completion.retire()
-      // TSP I-E: the same formal scope commit ends the search card: its captured
-      // Session scope is the OUTGOING owner by definition.
-      historySearch?.retire()
-      historyRecall.reset(entries, owner)
+      composer.reseatRecallAfterReseed()
+      historyRecall.reset(entries, owner, writeIds)
     },
     beginInputHistoryScope(owner) {
       // TSP I-A: the formal Session publication the application already owns.
