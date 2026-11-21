@@ -2580,7 +2580,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       return
     }
     const failure = terminalError ?? error
-    let primary = failure instanceof Error ? failure : new Error(String(failure))
+    const primary = isErrorValue(failure) ? failure : new Error(safeErrorMessage(failure))
     const cleanupErrors: unknown[] = []
     const timedOut = await disposeWithinDeadline(async () => {
       if (rootReleased) return
@@ -2599,19 +2599,19 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       try { await context?.fiber.dispose() } catch (cleanupError) { cleanupErrors.push(cleanupError) }
       rootReleased = true
     }, cleanupErrors)
-    for (const cleanupError of cleanupErrors) primary = mergeCause(primary, cleanupError)
-    const transportCleanupFailed = (error instanceof Error && (error as { cleanupFailed?: boolean }).cleanupFailed === true)
-      || cleanupErrors.some(cleanupError => cleanupError instanceof Error && (cleanupError as { cleanupFailed?: boolean }).cleanupFailed === true)
+    const filePrimary = clientFatalPrimaryWithCleanup(primary, cleanupErrors)
+    const transportCleanupFailed = (isErrorValue(error) && (error as { cleanupFailed?: boolean }).cleanupFailed === true)
+      || cleanupErrors.some(cleanupError => isErrorValue(cleanupError) && (cleanupError as { cleanupFailed?: boolean }).cleanupFailed === true)
     emit({
       m4a0: 'failure',
       processRole: 'client',
       phase: context === undefined ? 'startup' : 'after-context',
       pid: process.pid,
       ...traceTransportStatus(),
-      ...(failure instanceof LocalScopeError ? { code: failure.code } : {}),
-      error: primary.message,
-      ...(primary.stack === undefined ? {} : { stack: primary.stack }),
-      ...(primary.cause === undefined ? {} : { cause: primary.cause instanceof Error ? primary.cause.message : String(primary.cause) }),
+      ...(isLocalScopeErrorValue(failure) ? { code: failure.code } : {}),
+      error: filePrimary.message,
+      ...(filePrimary.stack === undefined ? {} : { stack: filePrimary.stack }),
+      ...(filePrimary.cause === undefined ? {} : { cause: isErrorValue(filePrimary.cause) ? filePrimary.cause.message : safeErrorMessage(filePrimary.cause) }),
     })
     // Surface mode owns the tty: EVERY startup failure gets ONE concise,
     // actionable human line on stderr (a handoff Client gets its own restore
@@ -2624,7 +2624,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       const phase: ClientFatalPhase = handle === undefined
         ? context === undefined ? 'pre-context' : 'client-assembly'
         : 'client-runtime'
-      process.stderr.write(`${reportSurfaceClientFatal(failure, options.profile, phase, expectedHostInstanceId !== undefined, process.env, primary)}\n`)
+      process.stderr.write(`${reportSurfaceClientFatal(failure, options.profile, phase, expectedHostInstanceId !== undefined, process.env, filePrimary)}\n`)
     }
     process.stdin.pause()
     if (cleanupErrors.length === 0 && !timedOut && !transportCleanupFailed) {

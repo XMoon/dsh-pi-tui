@@ -60,9 +60,6 @@ const MAX_FILE_BYTES = 32 * 1024
 const MAX_MESSAGE_BYTES = 2 * 1024
 const MAX_STACK_BYTES = 12 * 1024
 const MAX_CAUSE_DEPTH = 4
-/** AggregateError branches are siblings at the same depth, so the bound is
- *  per layer with a separate generous node ceiling. */
-const MAX_CAUSE_NODES = 16
 const MAX_NAME_BYTES = 128
 const ERROR_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/u
 /** Only the Node module-loader codes are Client dependency misses. */
@@ -178,20 +175,24 @@ function isAggregateErrorLike(value: unknown): boolean {
   }
 }
 
-/** The direct cause children of one layer: `.cause` plus `AggregateError.errors`. */
-function causeChildren(value: unknown): unknown[] {
-  const children: unknown[] = []
-  const cause = readField(value, 'cause')
-  if (cause !== undefined) children.push(cause)
-  if (isAggregateErrorLike(value)) {
-    const errors = readField(value, 'errors')
-    try {
-      if (Array.isArray(errors)) children.push(...errors)
-    } catch {
-      // A hostile errors accessor is not a serializable cause.
-    }
+/** The error branches of one AggregateError, without the wrapper itself. */
+function aggregateBranches(value: unknown): unknown[] {
+  const errors = readField(value, 'errors')
+  try {
+    return Array.isArray(errors) ? [...errors] : []
+  } catch {
+    return []
   }
-  return children
+}
+
+/** The direct cause branches of one ordinary error layer. */
+function causeBranches(value: unknown): unknown[] {
+  if (isAggregateErrorLike(value)) {
+    const branches = aggregateBranches(value)
+    if (branches.length > 0) return branches
+  }
+  const cause = readField(value, 'cause')
+  return cause === undefined ? [] : [cause]
 }
 
 /** Append one primary/cause layer to the fixed field list. */
@@ -210,29 +211,33 @@ function appendErrorFields(lines: string[], error: unknown, depth: number): void
 }
 
 /**
- * Append up to MAX_CAUSE_DEPTH cause layers. `AggregateError.errors` is part
- * of the visible chain because the cleanup merge (`mergeCause`) creates one
- * when a primary already carries a cause; ignoring it would hide both.
+ * Append at most MAX_CAUSE_DEPTH REAL causes. `AggregateError` wrappers are
+ * flattening devices: their branches occupy the same cause slots, so the
+ * cleanup merge can expose both sides without spending a slot on the wrapper.
  */
 function appendCauseChain(lines: string[], root: unknown): void {
   const seen = new Set<unknown>()
-  let nodes = 0
-  const visit = (value: unknown, depth: number): void => {
-    if (value === undefined || depth > MAX_CAUSE_DEPTH || nodes >= MAX_CAUSE_NODES) return
+  let count = 0
+  const visit = (value: unknown): void => {
+    if (value === undefined || count >= MAX_CAUSE_DEPTH) return
     if (seen.has(value)) {
-      lines.push(`cause[${nodes + 1}].name: <circular cause>`)
+      lines.push(`cause[${count + 1}].name: <circular cause>`)
       return
     }
     seen.add(value)
-    nodes += 1
-    appendErrorFields(lines, value, nodes)
-    if (depth === MAX_CAUSE_DEPTH || nodes >= MAX_CAUSE_NODES) return
-    for (const child of causeChildren(value)) {
-      if (nodes >= MAX_CAUSE_NODES) break
-      visit(child, depth + 1)
+    if (isAggregateErrorLike(value)) {
+      const branches = aggregateBranches(value)
+      if (branches.length > 0) {
+        for (const branch of branches) visit(branch)
+        return
+      }
     }
+    count += 1
+    appendErrorFields(lines, value, count)
+    if (count >= MAX_CAUSE_DEPTH) return
+    for (const child of causeBranches(value)) visit(child)
   }
-  for (const child of causeChildren(root)) visit(child, 1)
+  for (const child of causeBranches(root)) visit(child)
 }
 
 /** Bound the whole document to the frozen 32 KiB contract. */

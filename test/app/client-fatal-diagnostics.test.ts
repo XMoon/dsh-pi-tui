@@ -153,16 +153,22 @@ test('bounded causes, circular causes and hostile getters never throw or exceed 
   assert.doesNotThrow(() => clientFatalErrorDetails(hostile, 'client-assembly'))
 })
 
-test('AggregateError cleanup branches stay visible as bounded cause layers', () => {
+test('AggregateError cleanup branches are flattened into the four real cause slots', () => {
   const primary = new Error('primary')
   const first = new Error('first cleanup cause')
   const second = new Error('second cleanup cause')
   primary.cause = new AggregateError([first, second], 'cleanup aggregate')
   const preview = clientFatalErrorDetails(primary, 'client-runtime')
   assert.match(preview.text, /error\.message: primary/u)
-  assert.match(preview.text, /cause\[1\]\.message: cleanup aggregate/u)
-  assert.match(preview.text, /cause\[2\]\.message: first cleanup cause/u)
-  assert.match(preview.text, /cause\[3\]\.message: second cleanup cause/u)
+  assert.match(preview.text, /cause\[1\]\.message: first cleanup cause/u)
+  assert.match(preview.text, /cause\[2\]\.message: second cleanup cause/u)
+  assert.doesNotMatch(preview.text, /cause\[1\]\.message: cleanup aggregate/u)
+
+  const many = new AggregateError(Array.from({ length: 8 }, (_, index) => new Error(`branch-${String(index)}`)), 'many')
+  const capped = clientFatalErrorDetails(many, 'client-runtime')
+  assert.equal((capped.text.match(/cause\[\d+\]\.name:/gu) ?? []).length, 4)
+  assert.match(capped.text, /branch-3/u)
+  assert.doesNotMatch(capped.text, /branch-4/u)
 })
 
 test('a short write is retried to completion and a zero write is an IO failure', () => {
