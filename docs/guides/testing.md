@@ -399,9 +399,10 @@ registry fact, not a user API: every selected case — and a whole `--suite`,
 refused as a unit, never silently filtered — must support the current OS, and
 an unsupported selection fails closed as
 `INPUT_UNQUALIFIED` / `INPUT_PLATFORM_CASE_UNSUPPORTED` before the candidate is
-inspected, a work root exists or anything is installed. Nine audited shared
-cases are qualified on both Linux and macOS; every other case stays
-Linux-only until real native evidence exists. On macOS the no-selector form of
+inspected, a work root exists or anything is installed. Only the audited shared
+cases whose registry row lists `platforms=linux,darwin` are qualified on both
+Linux and macOS; every other case stays Linux-only until real native evidence
+exists. On macOS the no-selector form of
 `smoke:macos-split` is the legacy A/P/M/L parity scene, unchanged; a
 `--list`/`--case`/`--suite` selector on either entry point dispatches the ONE
 shared registry and the same selected runner, never a macOS copy of the cases

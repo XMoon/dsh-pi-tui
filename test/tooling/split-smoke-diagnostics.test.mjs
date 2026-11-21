@@ -50,7 +50,7 @@ import {
   SplitSmokeWaitError,
 } from '../../scripts/lib/split-smoke-diagnostics.mjs'
 import { waitForAcceptedHandoff, waitForReloadNotice, writeRequestedEvidence } from '../../scripts/split-process-upgrade-smoke.mjs'
-import { assertProfileClientPeers } from '../../scripts/lib/split-upgrade-support.mjs'
+import { assertProfileClientPeers, exitUpgradeClientKeepHost } from '../../scripts/lib/split-upgrade-support.mjs'
 import { waitForAnyReady, waitForSurfaceStatus } from '../../scripts/lib/split-smoke-processes.mjs'
 import { waitForHostSessionEvent } from '../../scripts/lib/split-smoke-sessions.mjs'
 import { waitForC1WorkEvent } from '../../scripts/lib/split-smoke-fixtures.mjs'
@@ -758,6 +758,224 @@ test('waitForAcceptedHandoff reports the actual refusal of the same action', asy
   ))
   assert.equal(ignored.code, 'PROCESS_IGNORED_RELOAD')
   assert.equal(ignored.observed, 'STOPPING')
+})
+
+// ── The Upgrade safe exit: only a confirmed safe default may send Enter ─────
+
+/** One exact-width rounded frame mirroring `Frame.render` row padding. */
+function exitChoiceFrame(rows, width = 64) {
+  const inner = width - 4
+  return [
+    `╭${'─'.repeat(width - 2)}╮`,
+    ...rows.map(row => `│ ${row.padEnd(inner)} │`),
+    `╰${'─'.repeat(width - 2)}╯`,
+  ]
+}
+
+/** The real painted Busy Choice rows (`ExitChoicePanel` inside its frame). */
+const BUSY_EXIT_FRAME = exitChoiceFrame([
+  'Disconnect from dsh-pi-tui',
+  '',
+  'The current session is still working.',
+  '',
+  '> Keep working and disconnect',
+  '  Stop current work and disconnect',
+  '  Stay in the TUI',
+  '',
+  '↑↓ Select · Enter Confirm · Esc Stay',
+])
+
+/** The real painted Unknown Choice rows: the other daemon safe default. */
+const UNKNOWN_EXIT_FRAME = exitChoiceFrame([
+  'Disconnect from dsh-pi-tui',
+  '',
+  "The current session's running state cannot be verified.",
+  '',
+  '> Disconnect without stopping',
+  '  Stay in the TUI',
+  '',
+  '↑↓ Select · Enter Confirm · Esc Stay',
+])
+
+/**
+ * A contract-shaped Exit Choice Client: exactly the four members the helper
+ * uses. `waitForExit` settles only after the helper sent its one Enter, so a
+ * blind PASS from a painted string alone is impossible.
+ */
+function fakeExitClient({ frames, exitsOnSlash = false, exit = { code: 0, signal: null }, exitError = undefined }) {
+  const sends = []
+  let entered = false
+  let exited = false
+  return {
+    role: 'surface-client',
+    sends,
+    get exited() {
+      return exited
+    },
+    send(data) {
+      sends.push(data)
+      if (data === '/exit\r' && exitsOnSlash) exited = true
+      if (data === '\r') {
+        entered = true
+        exited = true
+      }
+    },
+    async viewport() {
+      return typeof frames === 'function' ? frames() : frames
+    },
+    async waitForExit() {
+      if (!entered && !exitsOnSlash) {
+        throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
+          code: 'PROCESS_EXIT_TIMEOUT',
+          waitLabel: 'process exit',
+          processRole: 'surface-client',
+          elapsedMs: 0,
+        })
+      }
+      if (exitError !== undefined) throw exitError
+      return exit
+    },
+  }
+}
+
+test('exitUpgradeClientKeepHost takes a proven idle direct exit without any Enter', async () => {
+  const client = fakeExitClient({ frames: [], exitsOnSlash: true })
+  const exit = await exitUpgradeClientKeepHost(client, 'idle Client', SHORT_WAIT_MS)
+  assert.deepEqual(exit, { code: 0, signal: null })
+  assert.deepEqual(client.sends, ['/exit\r'], 'an immediate exit never sends an extra key')
+})
+
+test('exitUpgradeClientKeepHost confirms the painted Busy safe default exactly once', async () => {
+  const client = fakeExitClient({ frames: BUSY_EXIT_FRAME })
+  const exit = await exitUpgradeClientKeepHost(client, 'busy Client', SHORT_WAIT_MS)
+  assert.deepEqual(exit, { code: 0, signal: null })
+  assert.deepEqual(client.sends, ['/exit\r', '\r'], 'only the one safe default Enter follows /exit')
+})
+
+test('exitUpgradeClientKeepHost reads the focused row from a composited transcript frame', async () => {
+  // The overlay compositor keeps the transcript cells OUTSIDE the frame on the
+  // same terminal row, so the title and the focused option never start at col 0.
+  const composited = BUSY_EXIT_FRAME.map(line => `left transcript cells              ${line} right transcript cells`)
+  const client = fakeExitClient({ frames: composited })
+  const exit = await exitUpgradeClientKeepHost(client, 'composited Client', SHORT_WAIT_MS)
+  assert.deepEqual(exit, { code: 0, signal: null })
+  assert.deepEqual(client.sends, ['/exit\r', '\r'])
+})
+
+test('exitUpgradeClientKeepHost finds the exit choice below an unrelated rounded card', async () => {
+  // The C1 qualification card is a real 100-wide rounded box above the choice
+  // in the U07 reexec frame; only the daemon choice box may drive the action.
+  const card = exitChoiceFrame([
+    'dsh-pi-tui  dsh-0.2.2-rc.5 · tui-v0.5.7',
+    'model    c1-qualification/c1',
+    'preset   standard',
+    'session  session-00000000-0000-0000-0000-000000000000',
+  ], 100)
+  const client = fakeExitClient({ frames: [...card, ...BUSY_EXIT_FRAME] })
+  const exit = await exitUpgradeClientKeepHost(client, 'card above Client', SHORT_WAIT_MS)
+  assert.deepEqual(exit, { code: 0, signal: null })
+  assert.deepEqual(client.sends, ['/exit\r', '\r'])
+})
+
+test('exitUpgradeClientKeepHost ignores exit-choice-shaped transcript outside the real box', async () => {
+  // A transcript row may repeat the title or a focused-looking option. Only the
+  // complete rounded overlay frame may decide the choice.
+  const client = fakeExitClient({ frames: [
+    'Exit dsh-pi-tui',
+    '> Stop current work and disconnect',
+    ...BUSY_EXIT_FRAME,
+  ] })
+  const exit = await exitUpgradeClientKeepHost(client, 'transcript noise Client', SHORT_WAIT_MS)
+  assert.deepEqual(exit, { code: 0, signal: null })
+  assert.deepEqual(client.sends, ['/exit\r', '\r'], 'the real box still carries the one safe default')
+})
+
+test('exitUpgradeClientKeepHost confirms the painted Unknown safe default exactly once', async () => {
+  const client = fakeExitClient({ frames: UNKNOWN_EXIT_FRAME })
+  const exit = await exitUpgradeClientKeepHost(client, 'unknown Client', SHORT_WAIT_MS)
+  assert.deepEqual(exit, { code: 0, signal: null })
+  assert.deepEqual(client.sends, ['/exit\r', '\r'], 'only the one safe default Enter follows /exit')
+})
+
+test('exitUpgradeClientKeepHost refuses to confirm a destructive or foreign choice', async () => {
+  const stopFocused = exitChoiceFrame([
+    'Disconnect from dsh-pi-tui',
+    '',
+    'The current session is still working.',
+    '',
+    '  Keep working and disconnect',
+    '> Stop current work and disconnect',
+    '  Stay in the TUI',
+    '',
+    '↑↓ Select · Enter Confirm · Esc Stay',
+  ])
+  for (const [label, frames] of [
+    ['Stop focused', stopFocused],
+    ['daemon Host stop', exitChoiceFrame([
+      'Exit this daemon Client · Backend preference is now Direct',
+      '',
+      '> Leave daemon Host running and exit',
+    ])],
+    ['Direct family', exitChoiceFrame(['Exit dsh-pi-tui'])],
+  ]) {
+    const client = fakeExitClient({ frames })
+    const error = await rejection(() => exitUpgradeClientKeepHost(client, label, SHORT_WAIT_MS))
+    assert.equal(error.name, 'SplitSmokeAssertionError', `${label} must fail as a real assertion`)
+    assert.ok(error.message.includes(label), `${label} must name its case`)
+    assert.deepEqual(client.sends, ['/exit\r'], `${label} must never send Enter or an escape`)
+  }
+})
+
+test('exitUpgradeClientKeepHost waits out a non-actionable choice and sends no key', async () => {
+  for (const [label, frames] of [
+    ['title only', exitChoiceFrame(['Disconnect from dsh-pi-tui'])],
+    ['unfocused safe label', exitChoiceFrame([
+      'Disconnect from dsh-pi-tui',
+      '',
+      '  Keep working and disconnect',
+      '  Stop current work and disconnect',
+    ])],
+    ['title in box, focus in transcript', [
+      ...exitChoiceFrame(['Disconnect from dsh-pi-tui']),
+      '> Keep working and disconnect',
+    ]],
+    ['misleading transcript', ['Disconnect from dsh-pi-tui', '> Keep working and disconnect']],
+    ['ordinary transcript', ['cross-build-hold', '  the command was /exit']],
+  ]) {
+    const started = Date.now()
+    const client = fakeExitClient({ frames })
+    const error = await rejection(() => exitUpgradeClientKeepHost(client, label, 150))
+    assert.equal(error.name, 'SplitSmokeAssertionError', `${label} must fail as a real assertion`)
+    assert.ok(error.message.includes('CHOICE_NOT_ACTIONABLE'), `${label} must report the actionable choice gap`)
+    assert.ok(error.message.includes(label), `${label} must name its case`)
+    assert.ok(Date.now() - started < 5_000, `${label} must stay inside its own budget`)
+    assert.deepEqual(client.sends, ['/exit\r'], `${label} must never guess an Enter`)
+  }
+})
+
+test('exitUpgradeClientKeepHost never treats a non-zero, signalled or timed-out exit as PASS', async () => {
+  for (const [label, options] of [
+    ['non-zero', { frames: BUSY_EXIT_FRAME, exit: { code: 1, signal: null } }],
+    ['signalled', { frames: BUSY_EXIT_FRAME, exit: { code: 0, signal: 'SIGTERM' } }],
+    ['timeout', {
+      frames: BUSY_EXIT_FRAME,
+      exitError: new SplitSmokeWaitError('WAIT_TIMEOUT', {
+        code: 'PROCESS_EXIT_TIMEOUT',
+        waitLabel: 'process exit',
+        processRole: 'surface-client',
+        elapsedMs: 0,
+      }),
+    }],
+  ]) {
+    const client = fakeExitClient(options)
+    const error = await rejection(() => exitUpgradeClientKeepHost(client, label, SHORT_WAIT_MS))
+    assert.equal(error.name, 'SplitSmokeAssertionError', `${label} must not PASS`)
+    assert.ok(error.message.includes(label), `${label} must name its case`)
+    assert.deepEqual(client.sends, ['/exit\r', '\r'], `${label} still sends the one safe Enter`)
+    if (label === 'timeout') {
+      assert.equal(error.cause?.code, 'PROCESS_EXIT_TIMEOUT', 'the real wait cause must survive')
+    }
+  }
 })
 
 test('a real process wait failure reports no terminal or record payload', (t) => {

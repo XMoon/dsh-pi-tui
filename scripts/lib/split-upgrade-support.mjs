@@ -18,6 +18,8 @@ import { createRequire } from 'node:module'
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 
+import { sliceByColumn, visibleWidth } from '@xmoon76/pi-tui'
+
 import { run } from './dsh-smoke-harness.mjs'
 import {
   classifyHandoffRejection,
@@ -365,6 +367,140 @@ export async function waitForReloadNotice(client, expectedText, label, fromRecor
     if (Date.now() - started >= timeoutMs) throw fail('WAIT_TIMEOUT', 'NOTICE_WAIT_TIMEOUT')
     await sleep(50)
   }
+}
+
+/** The daemon Exit Choice family title (see `exitChoiceTitle`). */
+const DAEMON_EXIT_CHOICE_TITLE = 'Disconnect from dsh-pi-tui'
+/** The complete safe default row of each daemon Exit Choice family. */
+const DAEMON_BUSY_KEEP = 'Keep working and disconnect'
+const DAEMON_UNKNOWN_DISCONNECT = 'Disconnect without stopping'
+/** Every other exit family title is never the choice this helper may confirm. */
+const FOREIGN_EXIT_CHOICE_TITLES = Object.freeze([
+  'Exit this daemon Client · Backend preference is now Direct',
+  'Exit dsh-pi-tui',
+])
+/** Focused rows that are never the safe detach this helper may confirm. */
+const UNSAFE_EXIT_FOCUS = Object.freeze([
+  'Stop current work and disconnect',
+  'Stop current work and exit',
+  'Stop daemon Host and exit',
+  'Stay in the TUI',
+])
+
+/**
+ * One width-aligned `first … last` segment of a composited terminal row, or
+ * `undefined` when this row does not carry that segment.
+ *
+ * The overlay compositor keeps the transcript cells OUTSIDE the frame on the
+ * same terminal row, so a box-drawing glyph in the transcript can never be
+ * mistaken for the overlay's own border: the candidate must be exactly the
+ * frame's display width and start/end with its own border glyphs.
+ */
+function frameSegmentAt(line, width, first, last) {
+  for (let at = line.indexOf(first); at >= 0; at = line.indexOf(first, at + 1)) {
+    const segment = sliceByColumn(line, visibleWidth(line.slice(0, at)), width, true)
+    if (visibleWidth(segment) === width && segment.startsWith(first) && segment.endsWith(last)) return segment
+  }
+  return undefined
+}
+
+/**
+ * The content rows of EVERY complete rounded overlay frame on screen. The top
+ * border fixes each frame's exact cell width; every row between the matching
+ * top and bottom border is read as that SAME width-aligned segment, wherever
+ * the composited overlay starts. A screen may carry unrelated cards (the C1
+ * qualification card is one), so the caller selects the box by its own title
+ * instead of trusting the first rounded frame; an incomplete frame is ignored.
+ */
+function overlayFrames(frame) {
+  const boxes = []
+  for (let top = 0; top < frame.length; top += 1) {
+    const border = /╭─{8,}╮/u.exec(frame[top])
+    if (border === null) continue
+    const width = border[0].length
+    const rows = []
+    let bottom = -1
+    for (let index = top + 1; index < frame.length; index += 1) {
+      const line = frame[index]
+      if (frameSegmentAt(line, width, '╰', '╯') !== undefined) { bottom = index; break }
+      const segment = frameSegmentAt(line, width, '│', '│')
+      if (segment === undefined || !segment.startsWith('│ ') || !segment.endsWith(' │')) { rows.length = 0; break }
+      rows.push(segment.slice(2, segment.length - 2))
+    }
+    if (bottom >= 0) {
+      boxes.push(rows)
+      top = bottom
+    }
+  }
+  return boxes
+}
+
+/** The bounded last non-empty painted rows a failure report may carry. */
+function exitFrameTail(frame) {
+  return frame.map(line => line.replace(/\s+$/u, '')).filter(line => line !== '').slice(-16)
+}
+
+/**
+ * Exit a REAL Upgrade Client through the current daemon Exit Choice.
+ *
+ * A daemon `/exit` whose exact current Session is provably working opens the
+ * Busy Choice (`Keep working and disconnect` default); an unverifiable state
+ * opens the Unknown Choice (`Disconnect without stopping` default); a proven
+ * idle Session exits directly. The helper reads ONE complete painted frame per
+ * poll and sends exactly one Enter only when that frame carries BOTH the daemon
+ * choice title and the complete safe default as the focused row. A foreign
+ * family, a Stop/Stay focus, or no actionable safe choice fails with the label
+ * and the last painted rows; it never guesses, presses extra keys or touches
+ * the Host. The caller owns `client.dispose()` and every business assertion.
+ */
+export async function exitUpgradeClientKeepHost(client, label, timeoutMs = 120_000) {
+  const deadline = Date.now() + timeoutMs
+  const failure = (message, frame, cause) => {
+    const error = new SplitSmokeAssertionError(
+      `${label}: ${message}; last frame: ${JSON.stringify(exitFrameTail(frame))}`,
+    )
+    if (cause !== undefined) error.cause = cause
+    return error
+  }
+  let lastFrame = []
+  client.send('/exit\r')
+  let action
+  while (!client.exited) {
+    lastFrame = await client.viewport()
+    if (client.exited) break
+    const boxes = overlayFrames(lastFrame)
+    const foreign = FOREIGN_EXIT_CHOICE_TITLES.find(title =>
+      boxes.some(rows => rows.some(row => row.trim() === title)))
+    if (foreign !== undefined) throw failure(`unexpected exit choice family ${JSON.stringify(foreign)}`, lastFrame)
+    for (const rows of boxes) {
+      const focused = rows.filter(row => row.startsWith('> ')).map(row => row.slice(2).trim())
+      const unsafe = focused.find(row => UNSAFE_EXIT_FOCUS.includes(row))
+      if (unsafe !== undefined) throw failure(`unsafe exit choice focus ${JSON.stringify(unsafe)}`, lastFrame)
+      if (!rows.some(row => row.trim() === DAEMON_EXIT_CHOICE_TITLE)) continue
+      if (focused.includes(DAEMON_BUSY_KEEP)) { action = 'busy-keep'; break }
+      if (focused.includes(DAEMON_UNKNOWN_DISCONNECT)) { action = 'unknown-disconnect'; break }
+    }
+    if (action !== undefined) break
+    if (Date.now() >= deadline) {
+      throw failure(
+        `CHOICE_NOT_ACTIONABLE: the Client did not exit and no safe daemon choice became actionable within ${String(timeoutMs)}ms`,
+        lastFrame,
+      )
+    }
+    await sleep(50)
+  }
+  if (action !== undefined && !client.exited) client.send('\r')
+  const remainingMs = Math.max(1, deadline - Date.now())
+  let exit
+  try {
+    exit = await client.waitForExit(remainingMs)
+  } catch (error) {
+    throw failure('Client exit wait failed', lastFrame, error)
+  }
+  if (exit?.code !== 0 || exit?.signal !== null) {
+    throw failure(`Client exit was ${JSON.stringify(exit)}`, lastFrame)
+  }
+  return exit
 }
 
 /**

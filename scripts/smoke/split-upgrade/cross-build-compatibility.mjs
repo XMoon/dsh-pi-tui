@@ -35,6 +35,7 @@ import {
   alive,
   c1WorkHadRelease,
   createRequireFrom,
+  exitUpgradeClientKeepHost,
   fetchStatus,
   hostStatus,
   installSideBuild,
@@ -348,8 +349,7 @@ export async function runCrossBuildCompatibility(context) {
       assertNoSecret('replacement Client records', JSON.stringify(clientA.records), [oldToken, oldCookie])
       assertNoSecret('replacement Client terminal', clientA.raw, [oldToken, oldCookie])
       // The replacement Client is addressed through the SAME real terminal.
-      clientA.send('/exit\r')
-      const reexecExit = await clientA.waitForExit(120_000)
+      const reexecExit = await exitUpgradeClientKeepHost(clientA, 'U01/U07 reexec Client A', 120_000)
       assertEqual(reexecExit.code, 0, `the replacement Client exit was ${JSON.stringify(reexecExit)}`)
       assertEqual(reexecExit.signal, null)
       assert(await waitGone(c1Pid), 'the replacement Client process did not exit')
@@ -682,10 +682,8 @@ export async function runCrossBuildCompatibility(context) {
       assert(!c1WorkHadRelease(workRootPath), 'Host A Turn was released by the cross-build surface attach')
       assert(readFileSync(join(scopeDir, 'instance.json')).equals(registryBefore), 'cross-build surface mutated the old registry')
       assert(readFileSync(join(scopeDir, 'launch.json')).equals(launchBefore), 'cross-build surface mutated the old launch material')
-      const crossBuildSurfaceExit = await (async () => {
-        crossBuildSurface.send('/exit\r')
-        return await crossBuildSurface.waitForExit(60_000)
-      })()
+      const crossBuildSurfaceExit = await exitUpgradeClientKeepHost(
+        crossBuildSurface, 'U04 cross-build surface', 60_000)
       assert(crossBuildSurfaceExit.code === 0 && crossBuildSurfaceExit.signal === null,
         `cross-build surface exit was ${JSON.stringify(crossBuildSurfaceExit)}`)
       await crossBuildSurface.dispose()
@@ -782,7 +780,15 @@ export async function runCrossBuildCompatibility(context) {
       const clientB2 = new SurfaceEntryProcess(join(installedNewPackage, 'dist', 'local-client.mjs'), {
         ...base,
         workDir: workRoot,
-        env: { ...base.env, SPLIT_PROCESS_CLIENT_SESSION: sessionId },
+        env: {
+          ...base.env,
+          // Qualification-only: this Client cold-starts the new Host, and that
+          // Host's own JSONL entry records are the only authority for its stop
+          // intent. The default user Host log deliberately carries readable
+          // production lines instead of the qualification protocol.
+          DSH_PI_TUI_ENTRY_RECORDS: '1',
+          SPLIT_PROCESS_CLIENT_SESSION: sessionId,
+        },
       })
       clients.push(clientB2)
       const clientB2Ready = await clientB2.waitFor(record => record.m4a0 === 'ready', 'second new-build Client ready', 240_000)

@@ -27,6 +27,7 @@ import {
   assertProfileClientPeers,
   alive,
   c1WorkHadRelease,
+  exitUpgradeClientKeepHost,
   hostStatus,
   installSideBuild,
   killProcessGroup,
@@ -223,10 +224,8 @@ async function runReloadSourceIsolationRound(context) {
   assert(readFileSync(join(scopeDir, 'launch.json')).equals(launchBefore),
     'U09 the qualification handoff mutated the launch material')
 
-  const replacementExit = await (async () => {
-    client.send('/exit\r')
-    return await client.waitForExit(120_000)
-  })()
+  const replacementExit = await exitUpgradeClientKeepHost(
+    client, 'U09 reexec Client', 120_000)
   assertEqual(replacementExit.code, 0, `U09 replacement exit was ${JSON.stringify(replacementExit)}`)
   assert(await waitGone(replacementPid), 'U09 the replacement process did not exit')
   assert(await waitGone(clientPid), 'U09 the old qualification parent did not exit')
