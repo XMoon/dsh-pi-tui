@@ -7,88 +7,48 @@
 
 ## [Unreleased]
 
+### 安装与版本配对
+
+0.5.7 是尚未发布的候选，要求 **Node.js >=24.9.0**、**DSH >=0.2.2-rc.3**；精确验证目标为 **DSH 0.2.2-rc.5**，不支持 rc.2 及更早版本。正式发布后应成对安装：
+
+~~~sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.5
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.7
+dsh --profile pi-tui
+~~~
+
+历史稳定配对：**0.5.6** 使用 `@deepseek-ai/dsh@0.2.2-rc.1` / `@xmoon76/dsh-pi-tui@0.5.6`；**0.5.5** 使用 `@deepseek-ai/dsh@0.2.1-rc.5` / `@xmoon76/dsh-pi-tui@0.5.5`。完整配对参见[兼容性指南](docs/guides/dsh-compatibility.md)。
+
 ### 新增
 
-- **无需 TUI 的 `web` CLI 可在正在运行的 Daemon Host 上查询、启停官方 Web 前端并获取认证 URL。** `dsh --profile pi-tui web status|enable|disable|url|open` 不启动 Host、不打开 TUI/Client、不创建 Session，并始终操作当前 Profile 的同一个 Host Web 服务；`web url` 只在 stdout 输出一行官方认证 URL（应视为临时凭据），`web open` 只请求本机浏览器打开而不宣称页面已加载。Host 未运行时固定报 `HOST_NOT_RUNNING` 并提示 `daemon start`；旧 Host 缺少该入口时明确报 `WEB_CLI_UNAVAILABLE`，不会猜测状态或自动重启。
-- **Daemon 配置保存后的可选服务安装与退出时的整 Host 停止确认。** 在 `/settings → General → Backend` 把持久偏好从 `Direct` 保存为 `Daemon` 并得到 Verified 后，同一设置页会展示可选的 OS 服务安装说明与两个动作：`Not now`（默认，零管理操作）与一次显式的 `Install service`（对当前 Profile 执行唯一一次受认证的服务安装，不启动、不启用、不迁移正在运行的 Host）；不支持的平台如实显示不可安装。当一个正在运行的 Daemon Client 把偏好保存为 `Direct` 并验证成功后，退出时会多出一次危险操作确认：安全默认 `Leave daemon Host running and exit`（普通断开，不停 Host），或显式 `Stop daemon Host and exit`（在终端恢复后对该 Profile 执行唯一一次经认证的 `daemon stop`，会中断所有连接的 Client/Session/Job），或 `Stay in the TUI`（撤回本次退出）。普通退出与普通断开永远不会停止 Host；成功/失败均有真实后置证明与准确退出码。
-- **模型提示词统一携带 TUI 行为指导，Split 与 Direct 完全一致。** 每个普通 Session 的 Turn 现在会按"Turn 开始时正在查看该 Session 的 TUI 客户端"注入四段行为指导：进度更新节奏、回复风格、Git 署名与 Focus Mode；没有任何 TUI 查看者的 Turn 以及子会话（subagent）不注入这些段落，官方默认提示词不受影响。Focus 判定以 Turn 开始瞬间的在线查看者为准（任一在线查看者处于 Focus 即该 Turn 启用 Focus，并压制进度更新段落）；进行中的 Turn 不受中途 `/display` 切换或离开 Session 的影响，下一 Turn 重新判定，而进度/回复风格/Git 署名三个偏好的修改在下一步生效。Split 多客户端下各 Client 的显示模式互相独立：Focus 来自在线查看者的真实当前视图，而不是共享 Profile 的 `displayPreset`（该值只是启动偏好）；查看者退出后其投票立即失效。Git 署名的 `Assisted-By` 行会按实际 provider/model 插值。Client 在发起自己的新 Turn 前会先等待 Host 确认其当前视图；无法确认时本次发送被如实拒绝并保留可编辑草稿，绝不自动重试。仅 Web/ACP 的 Session 继续保持官方提示词。Split 链路的协议基线升级为 `dsh-pi-tui/local/2`（0.5.7 首次开放 Split 时的基线）：新 Client 与仍声明 `local/1` 的旧 Host 在连接阶段即被明确拒绝（`HOST_PROTOCOL_INCOMPATIBLE`，不触碰旧 Host 及其进行中的 Turn）；两个都支持 `local/2` 的不同版本构建之间保持跨版本互通。
-
-- **新增 `/acp` 快捷开关，可直接在 Split TUI 中查看并切换当前 Host 的本地 ACP Listener。** 输入 `/acp` 打开一个短菜单：无需已有 Session，也不会创建 Session/Agent、提交模型输入、打开浏览器或改变默认后端。菜单显示 Host 的实时状态，仅在 `disabled`/`enabled` 时提供一次显式的 Enable/Disable，随后按 Host 的权威回读重绘；`changing`、`unavailable` 或连接不可读时不提供写入，旧菜单无法写入新 Host。Direct 后端明确拒绝（仅 Split Client 可用）；持久 `Start ACP automatically` 仍只属于 `/settings → General`，只在下次 Host 启动生效，Headless 场景继续用 `daemon status` 查看 `acp` 与 `acp-socket`。
-
-- **SVG 支持静态描边样式与 `currentColor`。** SVG admission 白名单新增四个有确定渲染意义的静态属性:`stroke-dasharray`(1–32 个无单位非负数或 `none`)、`stroke-dashoffset`(单个有符号无单位数)、`stroke-miterlimit`(1–1000)与 `color`(固定色值);`fill`/`stroke`/`stop-color` 的**整值** `currentColor` 现在按文档内静态继承的 `color` 求值。相对单位、`<style>`/`<filter>`、外部引用、DOCTYPE、混合 token(如 `url(#g) currentColor`)与既有像素/字节预算全部维持原拒绝,原始 SVG 字节不重写。
-
-- **SVG Preview 可恢复失败支持一次显式 Retry。** 子进程超时、无法启动与非正常退出现在按类型分类;Preview 失败态在可恢复类别下显示 `r retry` 操作段,按 `r` 或点击画出的 Retry 段会精确重建当前 `(digest, 宽度)` 变体(单次按键恰好一个新请求,加载中按键被忽略,永不自动重试);超预算、无效输出、被拒绝与已淘汰变体保持不可重试。`Esc close` 行新增完整的鼠标点击 Close 段(仅此查看器)。
-
-- **图片/SVG 缩略图适配窄内容宽度。** 移除旧的 `<42` 列全禁用门槛:只要内容授权有实际像素宽度(>2 列)就按 `min(40, width-2)` 夹紧尝试真实绘制,3–41 列在 Kitty/SIXEL/iTerm2 许可下可显示像素;1–2 列仍不读字节、不发协议、不产生点击热区。信息行、折叠控制、View/Copy 动作与真实已画像素的点击范围语义不变,`>=42` 列的视觉与行数相对基线不退化。
-
-- **Direct iTerm2 支持图片与 SVG 全屏预览。** AltScreen 不再篡改 iTerm2 的全局图片能力;普通缩略图与图片/SVG Viewer 通过现有 OSC 1337 `Image` 路径显示真实像素,Source/Copy/Esc 与 resize 保持可用。iTerm2 缩略图像素正文不虚构点击热区,`PI_IMAGE_PROTOCOL=none`、multiplexer 与无真实 iTerm2 仍保持文本 fallback。
-
-- **PiTui Settings 新增只读的 `Tools → MCP servers` 管理页。** Host 现在始终拥有唯一一个官方 MCP 管理器（Direct 默认即有，Split Host 在 `/web` 开/关/再开之间保持同一实例），TUI 在该页按官方顺序列出所有托管 Server，并显示官方状态（`Connected`、`Waiting credentials` 等）与来源（`Configured` / `Plugin-owned` / `Retained/removed` / `Unknown`）；`configured` 不会再被当成“来自配置”。可对单个 Server 执行 Probe（连接并列出工具，与清理结果分开呈现）和 Restart（一次显式 `y` 确认、只派发一次、不自动重试、不乐观显示 Connected）；未知 transport 显示 `Not exposed`，来源不能证实时显示 `Unknown`。该页只读：不写任何配置、不显示密钥。入口在 `/settings → Tools → MCP servers`，支持宽/中/窄与 44×8 布局、键鼠操作。
-- **可选的后台（Daemon）TUI 启动入口。** 设置 `DSH_PI_TUI_BACKEND=daemon`，或在 `/settings → General → Backend` 选择 `Daemon`（官方 Profile 配置项 `tui-startup.backend`）后，`dsh --profile pi-tui` 会在本地 Linux 上连接一个本地 Host，并用一个独立的真实 Client 打开 TUI；默认仍是原有的 Direct 进程内 TUI。选择只在下次冷启动生效，写入不会热切换当前进程或重启 Host；`DSH_PI_TUI_BACKEND` 只覆盖本次启动、不会写回 Profile，非法取值（空串、`wire-local` 等）会非零退出并给出稳定原因，绝不静默回退 Direct。Linux 上可用同一 `daemon` 子命令显式管理 Host：`status/start/stop/restart/logs/install/uninstall` 只作用于当前 `--profile`。基础 Daemon 是独立本地进程，普通启动不查询、不安装 systemd；`daemon install` 才显式为该 Profile 创建并验证 systemd `--user` unit（不 start/enable，保留用户编辑的 unit 内容与 drop-in），`daemon uninstall` 只移除该 unit 且不停止独立 Host。`ActiveState=active` 不作为 Ready，命令不会自动重启或改写用户服务，停止/重启会中断正在进行的 Turn。不同 install build 之间不自动热替换：`start`/`install`/`uninstall` 都会按冲突拒绝其他 build 的 unit，用户需在换包前用拥有该 build 的安装显式 `daemon uninstall`（需要服务托管时换包后重新 `install`），回滚同理；该链路要求同一 DSH 运行时，不承诺跨 DSH 数据 schema 的原地降级。
-
-- **macOS 支持基础 Daemon 管理命令。** 在 macOS 上，`dsh --profile pi-tui daemon status/start/stop/restart/logs` 直接管理该 Profile 的 Host：`start` 复用已认证 Host 或通过现有公开启动链冷启动，`stop` 仅在重新认证并复核 Darwin 内核身份后停止 Host，`restart` 先确认旧实例退出再启动新实例，`logs` 按当前归属读取该 Profile 的 `host.log` 或 launchd 托管日志；`status` 完全只读。未安装 launchd plist 时如实报告 `manager=process`、`user-manager=not-checked`、`unit=none`。Linux 的 systemd 行为保持不变。
-
-- **macOS 支持显式的用户级 launchd 托管。** `daemon install` 现在为当前 Profile 在 `~/Library/LaunchAgents` 原子创建/验证一份 `gui/<uid>` 域的用户级 LaunchAgent plist，默认 `RunAtLoad=false`、`KeepAlive=false`：显式安装不等于登录自启或崩溃自动重启，也不会启动 Host；`daemon uninstall` 只移除该 plist，并且只在 job 确实由它加载时停止该 job。`daemon start` 通过该 launchd job 启动同一个前台 Host 入口（校验固定启动定义与触发项；注释/无害运行时编辑保留，改变启动行为的编辑被拒绝，绝不执行未知程序），`daemon stop`/`restart` 只对已验证的 job 生效并等待原 Host 内核身份结束。`status` 仅在 launchd 的真实进程与认证 Host 一致时报告 `manager=launchd`，`daemon logs` 分别标明读取的是 stdout 还是 stderr 的 launchd 日志；launchd job 卸载后（含 plist 已移除但保留 launchd 日志）不猜测来源，`logs` 返回 `LOG_SOURCE_UNAVAILABLE`，不把旧日志冒充当前记录；没有已认证 Host record 时运行中/启动中的 job 不会被 stop/restart/uninstall 猜测 bootout。未安装 plist 时仍使用原来的独立 Host，行为完全不变；Linux systemd 行为不变。
-
-- **无 Session 的 Split Client 也能补全 `!`/`!!` 命令。** 在 `/sessions` 选定 Host Workspace 后（不创建 Session），Shell 补全的命令名、变量、`git` 子命令和路径都来自该 Host Workspace 的 Host 环境，不会读客户端本机的 PATH 或目录；不同 Workspace 的候选互不串号，切回原 Workspace 后只提供当前选择的候选。未选定 Workspace 时不显示任何候选；Workspace 被移除或不可读时补全如实不可用，不会退回客户端文件。
-
-- **Split 端可以在 Settings 里单独修改当前 Session 的审批策略，并准确显示 Sandbox/Approval 状态。** Settings → Agent 的 `Approval policy (this session)` 现在按精确 Session 读取官方 `ask`/`never` 有效策略与独立的 Session override（无 override 时如实写 `none`），并可就地切换；写入经过官方 Session 策略事件持久化，只改 Approval，不会改动 Sandbox、permission preset、TUI 设置文档或新 Session 的默认值。状态栏/footer 的 preset、sandbox、approval 现在是三个独立事实，读不到时隐藏而不是补一个默认值；`Verified` 只在一次新的官方有效策略回读一致后出现，已等于当前值的 no-op 也会正确 Verified，结果无法确认时显示 `Outcome unconfirmed` 且不会自动重试。
-- **Herdr Pane 自动显示主 Agent 状态，并可在旧版 Herdr 中冷恢复 Direct Session。** 在 Herdr Pane 内运行 `dsh --profile pi-tui`（Direct 或内部 Split Client）时，会自动向当前 Pane 上报主 Agent 的 `idle` / `working` / `blocked`；`herdr agent list` 与 Pane UI 无需配置即可识别 `dsh-pi-tui`。状态取自 TUI 已有的 Agent 判定，不受 Terminal progress 设置影响，也不会把 `/login` 等仅属客户端的交互报成阻塞；退出或远端事实失效时撤销本 Pane 的注册。在旧版 Herdr TUI（>= 0.9.2）中，Direct 有已提交的规范完整主 Session ID 时会保存公开的 `dsh --profile <实际 profile> --session <ID>` 恢复命令，命名 session 重启后冷打开同一个持久 Session；没有可恢复的规范 Session、Profile 不满足 Herdr 参数规则或使用内部 Split Client 时不提供恢复命令，Split Client 仅上报 Session ID（旧版 Herdr 尚不能把第三方 source 的该字段持久识别为原生 Session）。`--session` 只冷读持久 Session，不恢复旧进程内存中的 Turn，也不绕过 SessionWriteLease；Herdr 自动恢复开关可禁用此行为。Herdr App/OSC 7501 不在此功能范围内；非 Herdr 环境不启动额外后台进程，Herdr 不可用不影响 TUI。
-
-- **Split 后端可以列出并清除本地存储的凭据记录。** 在 Settings → Models 的 Credential records 或 `/logout` 中，远程 TUI 现在会列出 Host 官方凭据存储里的每条记录（仅精确 key 与类型，不显示 token、grant payload 或 API-key 值），并可按该精确 key 清除；清除只代表本地遗忘，不会在服务商侧撤销授权，也不会切换当前模型或 Profile。删除结果无法确认时显示 `Outcome unconfirmed`，只允许重新读取当前 Host，不会自动重试或谎报成功；已不在记录中的 key 删除是官方 no-op。DeepSeek Account 的凭据记录不出现在通用列表中，其独立登出入口保持不变。
-
-- **Split 后端支持 Provider 原生登录。** 在 Settings → Models 或 `/login <route>` 中，远程 TUI 现在会读取 Host 已注册的 Provider 登录流，显示官方登录提示（URL/设备码），回答 text/secret/select 问题，并准确呈现授权成功、用户取消、失败或通信中断后的结果不明。secret 只经已认证链路单次上送；断线不会自动重试，也不会把未知结果说成失败或成功。DeepSeek Account 的登录语义保持不变。
-
-- **声明接受附件的 Host 斜杠命令可以携带普通 FILE。** Host 声明 `input.attachments` 的斜杠命令（Direct 与 Split 两种后端）现在会把已暂存的普通文件按官方 upload receipt 投递给命令 handler；只有命令执行成功才消费草稿，上传或预检失败会保留可编辑的草稿与附件，结果不确定时不会自动重试。
-
-- **PiTui `/model` 可以启停当前 Root Session 的 Agent Team。** `/model` 现在以 88×28 宽版打开：模型列表保留搜索与分组，列表下方独立显示当前模型的 Reasoning Effort 条带和 Agent Team 行。Tab 在模型列表与 Team 行之间切换，Team 行按 Enter/Space 启停，Effort 仍在模型上按 Enter 进入、←/→ 调整、再 Enter 提交。Team 与模型选择是两次独立写入，选模型不会顺带改 Team；只有在官方投影已记录过模型请求后才关闭 Team 时，才会先弹出独立确认页，确认页取消或 Esc 不写 Host。无 Session、子会话或投影不可读时 Team 行如实显示不可用，不会伪造 On/Off。
-
-- **PiTui `/tasks` 新增只读的 Work / Team 双页任务板。** `/tasks`（及 `/subagents` 别名）现在用 `Tab` / `Shift+Tab` 在原有的 `Work` 页与新增的 `Team` 页之间切换：`Work` 页保留原有子代理 / 任务 / 问题、打开、Stop 确认、刷新、Active/Tracked 与搜索；`Team` 页只读展示当前 Root Session 官方 Agent Team 投影的共享任务以及 Root 与子代理成员，可展开查看任务详情，但不提供任何建/改/认领/完成/停止或成员跳转，也没有新的 `/team` 命令。仅当当前 Session 确为 Root 时显示 Team 页（子会话与 Workflow 限定视图保持 Work-only）；Team 关闭（Off）页仍显示已列出的任务，官方 failure 与仍列出的有效任务并列显示；投影暂不可读（stale）时显示明确错误页，既不伪造空板也不缓存旧任务板。`Work` 页的 `f` 打开显式类型筛选列表（`All` 加当前任务真实拥有的类型），`Tab` 不再循环类型；两页各自保留独立的搜索草稿与选中。
-- **Goal Dock 用满终端宽度，不再截断到 24 字。** 状态行显示 `goal ●/‖/◌ <完整 Objective>`，按该行实际可见列宽折叠并用 `…` 省略：终端越宽看到的 Objective 越多，改宽会即时重算；`\r`/`\n`/Tab 与终端控制序列在显示前单行化或清洗，不会多出 Dock 行。官方保存的 objective 原文不变，编辑仍用 `/goal edit <objective>`。
-- **Plan review 变成审阅决策组件，正文留在 Transcript 的工具卡里。** 收到官方 `plan-review` Question 时，Composer 只显示 `Plan review · <标题>` 与固定三项 `View plan → Keep planning… → <官方批准标签> plan`；默认停在 `View plan`，绝不默认选中批准。Fullscreen 下 `View plan` 按官方 `intent.callId`（原生 `callId` 或 PTC 子调用的 `subCallId`）定位真实存在的 `exit_plan_mode` 工具卡，展开必要的祖先并滚动同一个 Transcript 视口；定位成功才进入阅读态（↑↓/PgUp/PgDn 滚动正文，Esc 回到决策，Enter 不提交），定位不成立时降级为官方 Question 自带的完整正文分页阅读，不假装“已定位”。`Keep planning…` 进入反馈输入（Esc 返回保留草稿），提交时保留官方选项标签并附加可选自定义文本；`Esc` 在决策列表上是官方 dismiss，`Ctrl+C` 仍是官方取消。普通 Question 的 Q1→Review→Submit 流程完全不变；Remote/Split 的 `exit_plan_mode` 卡片也从已记录参数还原同一份计划正文。
-- **Plan 模式在空 Composer 上给出状态提示。** 当前主会话处于 Plan 模式且草稿为空时，输入框占位提示为 `Plan mode · describe the task`；官方投影报告选择尚未生效时显示 `Plan requested · pending`，生效中但有待处理变更时显示 `Plan mode · change pending`，绝不把 pending 说成已生效。草稿有字、Shell 模式、子会话查看器或 Question 占用时都不显示，也不新增独立 chip 或开关。
-
-- **Web Search / Fetch 页面可以恢复部署层选择。** 两个 Provider 详情现在读取 Host 官方的 `value`/`base`/`user` 三层事实：部署层没有配置 provider 时提供可确认的 `Automatic` 行；部署层自己的值属于官方候选时，该候选标注 `deployment default`；部署层是自定义 provider 且用户层曾覆盖时，提供唯一的 `Use deployment default` 恢复入口。恢复只发送官方的 USER 层 `unset`（不写空串、`null`、`auto` 或部署值，也不改 profile YAML），结果由最新 Host 回读判定：有效值回到部署值才显示 `Verified`；当同一 `web` 段还有其它 USER 覆盖时，官方 Host 可能保留一个与部署值相同的显式 USER 值，页面会如实说明而不会谎称覆盖已删除。未固定 Search 时页面显示 Host 的 `Automatic` 路由；恢复不会改动其它 Web 字段、Billing 或凭据。
+- **本地 Daemon 首次开放（Linux/macOS）**：默认 Direct 保持不变，可选独立 Host + 可断开的 TUI Client；多个 TUI、官方 Web 和本地 ACP 可以访问同一 Host 的 Session/Agent。共享的是业务会话而非终端画面；权限和并发写入仍由 Host 管理，**并非公网 TCP 远程服务**。（#683、#728、#729、#740）
+- **Daemon 管理与可选服务托管**：`daemon status|start|stop|restart|logs|install|uninstall`，按 Profile 管理；Linux systemd user unit / macOS LaunchAgent 均需显式安装，普通 Daemon 启动不需要系统服务。认证 Host 身份、日志来源与跨 TUI 构建管理更加严格。（#697、#749、#786、#787）
+- **共享 Host 的官方 Web**：支持运行时开启/关闭 Web；新增无 TUI 的 `web status|enable|disable|url|open` 命令，操作已运行 Host，不创建 Session 或另启 Host。适配 rc.5 官方 Web 服务组合；认证 URL 包含敏感 Token。（#798、#807）
+- **本地 ACP v1 入口**：默认关闭的同用户 Unix socket；`/acp` 查看/切换实时监听，启动偏好独立保存；提供受限的 `initialize`、`session/new|resume|prompt|cancel|close` 和文本/资源链接/协商图片。一个 ACP 连接只持有一个 Session View，同一 Session 最多一个 ACP View，不限制 TUI View。（#682、#685、#691、#695、#701、#707、#710、#715、#766）
+- **Agent Team 与 Task Center**：Root Agent Team 选择、Work/Team 页、Subagent 层级展开、活跃 Job 优先与历史折叠；Plan Review、Goal Dock 与相关状态提示改进。（#686、#690、#708、#719、#801、#803、#806）
+- **MCP 与扩展插件管理**：Host MCP Servers 查看/探测/重启/配置、Client-local `./tui` 插件装载、每包独立配置及持久化 Settings，明确区分 Host 包与当前 Client 激活状态；Forge / Plugin Marketplace 仍未交付。（#696、#700、#785、#789、#796、#799）
+- **会话、工作区和附件**：Workspace-first Session Browser、`--session [id-or-query]`、`-c|--continue`、Host 目录浏览/补全、sessionless `@file`、Split 文件上传、Host Shell/命令附件收据。（#625、#630、#636、#641、#644、#647、#657、#662）
+- **转录与图像**：Full/Focus/Compact 展示、View/Full 搜索、TSP 原生卡片/Work Hub/Workflow、消息复制；SVG 静态描边、窄屏缩略图、显式重试与 Direct iTerm2 图片/SVG 预览。（#612、#622、#629、#645、#678、#699、#745）
 
 ### 变更
 
-- **退出与断开现在先看当前 Session 的真实状态，且不再暗示会停止 daemon Host。** `/exit`、`/quit`、裸 `exit`、默认退出键与 TSP 退出键统一进入同一个退出意图：当前 Session 明确空闲时 Direct 直接退出、daemon Client 直接断开；明确正在工作时弹出同页选择——daemon 默认 `Keep working and disconnect`（不发任何 Host 取消），也可 `Stop current work and disconnect` 或 `Stay`；Direct 默认 `Stay`，停止必须显式选择并由原有退出控制器完成。状态无法证明（Remote 缺少运行位、连接/绑定换代等）时只显示 `Disconnect without stopping` / `Exit and retire local Host` 与 `Stay`，绝不当作空闲。daemon 的 `Stop current work and disconnect` 只向弹窗捕获的那一个 Session 发送一次官方取消，并且只有同一 owner 的权威 Idle 证明之后才断开；取消回执、断线或 `unobservable` 都不会被说成已停止，界面显示 `Stop could not be confirmed. The daemon may still be working.` 且不会自动重试或自动断开。Choice 打开期间 `Esc` / `Ctrl+C` 只等于 `Stay`，出现真正的 Host Question/Approval 时本地 Choice 自动撤回。daemon Client 退出后终端恢复时打印真实 Profile/Session 的恢复命令与 `daemon status/logs/stop` 管理命令，不输出无法观察的 Host 状态或 PID；已验证停止时才额外打印 `Current work: stopped.`。Direct 仍只打印原有 resume 行。
-Choix 会随终端尺寸降级：极窄或极低的行数下只保留真正可读、可操作的 `Stay`（或单行 `Esc Stay`），被裁切的破坏性操作永远不会通过键盘或鼠标触达；全屏切换会重挂同一个 Choice，Host Question/Approval 出现时本地 Choice 会被撤回且不会自动恢复。
-当 `!`/`!!` 用户 Shell 仍在运行时，退出保留原有选项并追加提醒：离开会中止该 Shell，Agent idle 不代表 Shell 已结束；运行中 Shell 不会打印 `Current work: stopped.`。
-Daemon 退出后的恢复命令会保留临时的 `DSH_PI_TUI_BACKEND=daemon` 覆盖（Profile 仍可能是 Direct），并对 Profile/Session 参数做 shell 安全引用。
-- **默认 `Ctrl+C` 在忙碌时一次取消，空闲时同键两按退出。** 当前 Session 真实正在工作时，默认物理 `Ctrl+C` 立即走原有取消通路（不清草稿、不进入退出确认）；状态无法证明时拒绝武装退出并提示；空闲时才保留首次清空草稿 + 1.5 秒同键两按退出。`Ctrl+D` 有内容时仍是向前删除。用户把退出动作改绑到其他键、使用 Leader、或把取消动作改绑到 `Ctrl+C` 时，各自保持原有语义；TSP 绑定后的裸输入遵守同一规则（空闲 `Ctrl+C` 与空草稿 `Ctrl+D` 都需同键两按），绑定前的 `Ctrl+C` 仍是紧急退出。
-
-- **CLI 启动支持 `--session [id-or-query]` 与 `-c, --continue`。** 裸 `--session` 打开 Session Browser 的 Browse All；只有规范完整 ID 保留挂载前的直接恢复，其他非空值立即打开同一个 Browser，等官方列表到位后精确/唯一前缀匹配并走现有受保护 Resume，关键词、歧义或未命中只进入全局搜索。列表加载中 Browser 始终可输入、可 `Esc`；加载期间修改查询会取消原自动匹配。`-c, --continue` 只在 Host 已确认的 Workspace 内按官方成员关系与主 Session 列表的交集选择最近一条，且 baseline 与列表必须来自同一 Host/Connection generation；未确认 Workspace 或无历史时保持 sessionless 并提示一次，不猜测其他 Workspace，也不创建 Session。两个参数互斥。
-- **Session Browser 的当前会话行按 Enter 返回原会话。** PiTUI Session Workspace 与 TSP 原生 Browser 中，已列出且本帧绘制的当前 Session 行被 Enter/激活时关闭 Browser 并回到该会话本身：不发送 Resume、不切换 Session，Session、草稿、回合与 writer 均保持原样；其他 Session 仍走原有受保护的 Resume。PiTUI 底栏对当前行显示次要导航色的 `Return [Enter]`，其他行仍为 `Open [Enter]`；行单击仍只选中，TSP 原生 Footer Resume 对当前行保持禁用。
-- **`/resume` 优先完整 ID，仅唯一非空前缀自动恢复。** `/resume <id-or-prefix>` 先按完整 Session ID 精确匹配，其次仅当 `session-`/`session_`/短 ID 前缀唯一时才自动恢复；歧义、空前缀（如单独的 `session-`）与未命中都会在原 Browser 中以同一文本进入全局搜索，不再按列表顺序猜选，也不增加第二次列表读取。
-- **Shell 卡片随提交位置展示并保留 `!!` 历史。** `!`/`!!` 卡片不再追加到对话末尾，而是固定在用户提交时的对话位置；默认折叠为至多三行，运行中不显示输出，`Ctrl+O` 展开完整保留内容。已结算的 `!!` 卡片会保留到切换 Session、重启 TUI 或 `Alt+K`；`!` 写入 Session 成功后只移除自己的本地卡片，不再清空其他 Shell 历史；写入失败或结果不确定时保留卡片并标注 `not submitted` / `submission uncertain`，展开可查看原因。
-- **Web 搜索设置如实呈现 Host 的 Automatic 路由（适配 DSH 0.2.2-rc.5）。** 最低运行版本仍为 DSH `0.2.2-rc.3`，精确验证目标升为 `0.2.2-rc.5`。Host 未显式配置 Search/Fetch provider 时，Settings 入口与 Web Search / Fetch 页如实显示 `Automatic`——DeepSeek 模型的请求优先走 DeepSeek server-side search（无按次搜索费），其他模型与无模型请求优先 DeepSeek Search API（按次计费）；显式配置始终覆盖自动路由。早于 rc.5 的 Host 自动路由决策可能不同。该状态不再被误报为 `Unavailable`，也不再显示固定的 Search API 默认或给任何候选加 `[current]` 标记；入口描述与页面解释同步更新。在 Automatic 状态显式确认 DeepSeek Search API 或 DeepSeek server-side search 会发起一次真实官方写入，并经权威回读一致后才显示 Verified；`deepseek-official` 候选采用官方标签 DeepSeek server-side search，始终提交原始 provider ID。Search Billing 行仅在显式选择 DeepSeek Search API 时可写（与官方 Client 一致）：Automatic、server-side、自定义或 YAML override 状态下该行只读且零写入，已存的 Billing 配置保留、不删除不重置。模型拒答（内容安全拦截）的 token 统计照常按官方计费 usage 计入，不因错误中断丢失。本候选暂未提供「恢复 Automatic」的设置项。
+- **Client 退出不等于停止 Host**：Daemon 下 `/exit` / `/quit` 默认断开，忙碌时给出真实状态对应的选择；`Ctrl+C` 忙时取消，空闲遵循退出保护；停整个 Host 需要显式动作。（#775、#780）
+- **输入与历史**：草稿在 Host 接受提交后才被消费；compact 期间的合法 Queue 不再丢失。Current Session 输入历史可跨工作目录检索同一 Session，并保留正在编辑的草稿/光标。（#720、#732、#812）
+- **Host 权威统一**：Direct/Split 共享 TUI Profile 偏好，Remote Provider 登录、凭据、审批、工具卡和 Host 命令候选使用真实 Host 事实；TUI 每回合指导只对实际在线查看 Session 的 TUI 生效，不污染 Web/ACP 回合。（#659、#663、#667、#776、#781、#783、#810）
+- **Web/插件设置行为**：Web Search/Fetch 的 Automatic 与部署/用户层选择、官方 Web 设置保存和扩展持久设置沿用官方配置权威，不以 Client 局部缓存冒充已保存状态。（#767、#769、#772、#799）
 
 ### 修复
 
-- **Remote Client 的版本与 Account 身份现在来自真实 DSH 安装。** Split 独立 Client 的 Header、Welcome、状态栏与 Settings/About 现在显示当前安装的 DSH 版本（同时保留真实的 TUI bundle 版本），不再把 Client 入口路径或 TUI 版本误当成 DSH；Account 发往 Platform 的版本元数据一律使用真实 DSH 版本，无法证明时明确拒绝所有 Account 请求并解释原因。
-- **官方 Web 设置现在可以正常保存。** Web 组件不再由 Host-only 命令行覆盖声明，而是由安装包统一声明为默认关闭、由 `/web` 的运行开关按需启用；命令行覆盖只保留 Web 运行时静默、Office 输出目录和 Office 用户 Python 三项固定安全值，因此官方 Web 页面写入 Profile 时不会再被“已被覆盖”拒绝。
-- **Direct 与 Split 共用一份 TUI 偏好。** 主题、状态栏、通知、进度等 20 项偏好统一写入唯一的 `pi-tui-preferences` Profile 行；Direct、Split Host 与 Remote Client 读写同一份值。Host 启动时会把旧 `tui-app` / `split-host-pi-tui-runtime` 的 USER 值以及历史 `settings.yaml` 一次性迁移，来源冲突时明确报错并保持原文件不变，不猜测、不覆盖。
-- **Footer 配置器正文支持鼠标滚轮。** 滚轮只滚动最后绘制的 Footer 正文窗口，不会改变当前选择、Move Mode 的排序、Add 搜索/候选游标或任何草稿值；标题/预览/提示/唯一操作栏固定不动，文本编辑、删除确认与保存中状态对滚轮完全惰性。手动滚出的光标在下一次 Enter/空格/左/右等会修改隐藏选择的操作前会先恢复可见，键盘导航、Esc 与原有保存/退出语义保持不变；脏草稿的退出确认页 `Keep Editing` 现在也可用鼠标点击返回（原先仅键盘 Esc 有效）。
-- **Session Workspace 的浏览列表、搜索结果与只读 Peek 现在支持鼠标滚轮。** 滚轮只移动当前绘制的浏览选择或结果选择、滚动固定 Session 的 Peek 详情，不会展开 Folder、改变搜索文本或恢复/打开 Session；标题、状态、搜索输入、普通预览、操作栏与内嵌目录编辑器中的滚轮不导航，背景 Transcript 也不会滚动；打开/返回仍需显式 Enter 或点击。
-- **Fullscreen Queue 管理页的旧鼠标手势不再作用于新的排队消息，编辑草稿可以直接点击定位光标。** 浏览列表的滚轮只移动选择；在操作栏按下后，滚轮、键盘输入或选择变化都会让旧点击失效，不会误编辑或误删除另一条排队消息。编辑页点击已绘制的正文即可把光标放到对应位置（仍需显式保存），极窄宽度下只有完整绘制的按钮可点击，`Esc` 始终保留。
-- **`/deliverables` 的文件列表、Turn 列表和文本预览支持滚轮；长文件翻阅不会重复读取或误触发按钮，文本拖选复制照常。**
-- **Daemon Client 的 TUI 偏好设置可以保存并在冷启动后恢复。** 终端进度等设置现在通过 Host 设置文档保存并回读，显示模式和全屏切换也使用同一设置来源；不再只在当前 Client 临时生效。
+- **Daemon/macOS**：修正 Host/Client 身份、启动和传输竞态；同 Profile 新旧构建升级管理、Herdr Session 恢复、正确展示真实 DSH Runtime 版本。（#746、#771、#786、#787、#793、#794、#795、#800）
+- **Session/Command**：修正 `/new` 命令结算、sessionless 默认 Model/Effort、Remote cwd/Resume、Host 命令补全、跨工作目录历史。（#632、#664、#680、#692、#788、#810、#812）
+- **交互与输出**：修复搜索定位、文件补全、含 NUL 的 Shell 输出、多处鼠标/滚轮/返回操作、Question header 和临时 Footer 提示引起的 Composer 抖动。（#604、#609、#716、#742、#784、#802、#805、#809）
 
-- **Remote Shell 可以正确接收含 NUL 的命令输出。** `!`/`!!` 的有界 stdout/stderr 中包含 NUL 时，现在会保留真实结算结果，不再误报执行结果未知；`!` 可按原规则将结果提交到会话，`!!` 可在本地卡片中查看结果。
+### 升级和边界
 
-- **Fullscreen 的 Save Location 与 Web Search / Fetch 详情支持直接点击保存与确认。** `/export`、`/transcript` 的保存位置提示现在可直接点击完整的 `Save [Enter]`、`Cancel [Esc]`、建议可见时的 `Dismiss suggestions [Esc]`，以及撞名时的 `Yes [Y]` / `No [N]`，语义与原键盘一致：建议入口只收起建议、下一帧才显示 Cancel，No 返回目录编辑，Yes 只对本次已确认目标覆盖；旧按压、滚轮、改窗、异步刷新或已结算的提示不会再次提交。Web Search / Fetch 的详情把真正绘制的 `Confirm [Enter]` 作为唯一可点击确认入口，确认后按实际保存结果显示成功、未保存或结果未知；选项行点击只改草稿、不产生写入，候选不可见或当前不可写时不出现可点击确认。
-- **Fullscreen 的图片、任务与历史页面补齐鼠标查看、返回与关闭入口。** `/view-image` 的列表行、底栏 `View`/`Close` 与查看器的 `Back`/`Close` 可直接点击；Fullscreen Task Center 的 Work/Team `Close`、搜索 `Back` 与类型筛选 `Cancel` 可点击（Stop 确认与其余键盘提示保持原样）；Fullscreen History 底栏的 `Scope`/`Expand`/`Cancel` 可点击，并在窄屏 Use/Copy 按钮被整体降级时提供同语义的底栏后备。所有点击只作用于最后绘制且当前仍有效的完整片段，Regular/Main 仍不启用应用鼠标。
-- **Fullscreen `/model` 的操作栏支持直接点击。** 可点击进入 Effort、选择、返回、关闭及 Team 的重试/只读复查；Effort 候选仍只改草稿，目标未绘制、短行预算、旧按压或目录刷新退出当前模型时只保留安全退出，不会提交隐藏目标。
-
-- **PiTui 的 MCP servers 页补齐搜索与表单的纯鼠标路径，并拒绝跨事件的旧点击。** 列表上真正绘制的 `Search [/]` 可直接点击进入原有 `/` 搜索输入，搜索结果行可点击选中，`Done [Enter]` 完成搜索并返回列表，唯一的 `Cancel [Esc]` 仍只取消搜索。表单现在可用滚轮只移动当前字段焦点（不会再动到背后的服务器选择或隐藏的详情），当前聚焦的合法可删行会在底栏绘制完整的 `Remove [Backspace]`，点击即执行原 Backspace 的删除；继承 key、非可删行、输入中、确认中与保存中都不出现该入口。所有点击仍只作用于最后绘制且当前有效的完整片段：非零滚轮（即使到边界或正处模态）、输入查询、Host 管理器被同形替换或配置被重新读取后，之前按下的点击会在松手时失效，不会对新的 Host/配置完成 Probe、Restart、删除或保存；写入权威仍是唯一的官方 MCP 管理器与带版本校验的 SettingsForms 提交。
-- **TSP Focus 阅读模式下打开 Session Search 不再导致渲染器崩溃。** Focus 顶层的用户行与最终回答行现在与其他顶层行一样携带 presentation scope 前缀；替换来源或新 scope 后，旧 scope 的 `main.msg-N` 不会再与新 scope 的同名行冲突，Search 卡可正常打开、关闭并保留原 Composer 与草稿。
-
-- **在已打开的会话中执行 `/new` 不再丢失命令结算记录。** 旧会话会在新会话就绪后、命令执行器写回本次 `/new` 的完成记录时才被关闭，因此该记录能正常保存，不会再出现 `cannot append outside a SessionStore`；新会话的可见与可恢复行为不变。
-
-- **Remote 模式下无 Session 时 `/new` 可以创建会话。** 在 Host 已自动确认的 Workspace 上，Split/Remote Client 首次输入 `/new` 现在会创建并打开新 Session，不再误报“验证过的本地 Workspace 已变化”；只有本地目录等价性证明确实失效时才会拒绝并要求重新选择 Host Workspace。
-
-- **新建会话期间提交的命令不再丢失。** `/new` 还在创建新 Session 时输入的 `/preset status` 等命令会等新 Session 就绪后在新 Session 中执行，不再静默消失。
+- **更换 DSH Runtime 不是热升级**：先结束 Turn/Job、停止旧 Host、备份 Profile/Session 与资源，再使用支持的配对冷启动；不保证跨数据 Schema 原地降级。
+- **同 Runtime 更新 TUI 不自动更换 Host**：旧 Host 可继续运行；要采用新代码须显式 `daemon restart`，会中断在途工作。不会擅自重写用户定制的服务启动内容。
+- **ACP 不是全功能通用 API**：不提供 `session/list`、`session/load`、`session/set_config_option`、ACP 端 MCP 注册或专用文件/产物传输；共享会话不意味着无限制同时写入。
+- **本 Draft 仅整理合并功能**，不代表最终 Linux Split、macOS 或打包发布验证已经通过；日期和正式版本小节留待实际发版冻结时确定。
 
 ## [0.5.6] - 2026-11-08
 

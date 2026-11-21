@@ -52,7 +52,7 @@ export function dshInstallTarget(command) {
   return targets.length === 1 ? targets[0] : null
 }
 
-/** The installation-gate cross-check: `current.upgradeCommand` must install
+/** The version-matrix cross-check: `current.upgradeCommand` must install
  * exactly `current.upgradeDsh`. Returns an error string, or null when the pair is
  * consistent. */
 export function matrixUpgradeCommandError(matrix = COMPAT_MATRIX) {
