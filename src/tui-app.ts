@@ -7153,7 +7153,17 @@ export class TuiApp {
     // did when it was registered first. (Unstable raw captures already ran
     // BEFORE this point and still see every chunk.)
     if (MOUSE_SEQUENCE.test(data) || (data.length === 6 && data.startsWith('\x1b[M'))) {
-      this.clearExitConfirmation()
+      // A pointer request that belongs to a painted Footer navigation target
+      // must reach that target even while the exit confirmation is armed:
+      // clearing the confirmation here synchronously recomposes the Footer
+      // and advances the pending revision, which would consume the otherwise
+      // valid press before `beginFooterPress` can map it. Covered instruction
+      // rows publish no hit, so clicking them still clears and acts on
+      // nothing.
+      const mouse = mouseChunkKind(data)
+      if (mouse === undefined || !this.pointerBelongsToPaintedFooterNavigation(mouse)) {
+        this.clearExitConfirmation()
+      }
       return undefined
     }
     // FOCUS reports (CSI ? 1004 — ESC[I/ESC[O) are handled HOST-SIDE,
@@ -15672,6 +15682,33 @@ export class TuiApp {
       height: box.height,
       hits,
     }
+  }
+
+  /** Whether a mouse report belongs to a live Footer navigation target.
+   * Pressing a painted Model/Tasks hit (or releasing the gesture that began
+   * on one) is a real navigation interaction, not a stray click that should
+   * discard the exit confirmation before the pointer route can resolve it.
+   * The instruction row itself publishes no hit, so a click there still
+   * takes the ordinary fresh-input path. */
+  private pointerBelongsToPaintedFooterNavigation(chunk: {
+    readonly button: number
+    readonly release: boolean
+    readonly x: number
+    readonly y: number
+  }): boolean {
+    const painted = this.footerPaintedProjection
+    if (painted === undefined) return false
+    if (this.fullscreen !== painted.screen || this.activeScreen !== painted.screen) return false
+    if (this.terminal.columns !== painted.columns || this.terminal.rows !== painted.termRows) return false
+    if (chunk.release) {
+      const pressed = this.footerPressGesture
+      return pressed !== undefined
+        && chunk.y === pressed.row
+        && chunk.x >= pressed.startCol && chunk.x < pressed.endCol
+    }
+    if (chunk.button !== 0) return false
+    return painted.hits.some(hit => hit.row === chunk.y
+      && chunk.x >= hit.startCol && chunk.x < hit.endCol)
   }
 
   /** PR3: the root Footer box half of a fullscreen press. Returns true when

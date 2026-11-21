@@ -612,12 +612,12 @@ test('a footer model click travels the real surface→command→picker chain', a
   }
 })
 
-test('an armed exit hint removes the compact Footer hits and restores them after expiry', async () => {
+test('an armed exit hint removes the compact Footer hits and restores them after natural expiry', async () => {
   // The compact Footer is ONE physical row that carries both model and
   // tasks. The transient instruction replaces that row, so no hit may
   // survive there: a click while armed never opens the picker, a press
-  // begun before the arm cannot complete after it, and the same cell works
-  // again once the hint expires and the original row is repainted.
+  // begun before the arm cannot complete after it, and the untouched
+  // natural expiry restores the original row and its real click.
   const h = await startHarness({ jobs: [] })
   try {
     // A short status keeps the compact preset on ONE physical row, so the
@@ -640,9 +640,7 @@ test('an armed exit hint removes the compact Footer hits and restores them after
     const beforeRows = h.app.footerRenderRowsForTest()
     assert.equal(beforeRows.length, 1, `the compact Footer must stay one physical row:\n${beforeRows.join('\n')}`)
 
-    // A press begun before the arm must not complete after it. (A mouse
-    // report is fresh input and clears the confirmation window; the point
-    // here is that the stale footer gesture never opens the picker.)
+    // A press begun before the arm must not complete after it.
     press(h.vt, model.x, model.row)
     h.vt.sendInput('\x04')
     await h.vt.waitForRender()
@@ -650,7 +648,7 @@ test('an armed exit hint removes the compact Footer hits and restores them after
     await h.vt.waitForRender()
     assert.equal(h.loads().length, 0, 'a pre-arm press must not complete against the armed frame')
 
-    // Re-arm: while armed the compact row is gone and the saved cell is inert.
+    // Re-arm: the compact row is gone and the saved cell is inert.
     h.vt.sendInput('\x04')
     await h.vt.waitForRender()
     const armedScreen = screen(h.vt)
@@ -662,26 +660,30 @@ test('an armed exit hint removes the compact Footer hits and restores them after
     assert.equal(h.loads().length, 0, 'the covered model cell is inert while the hint is armed')
     assert.ok(!screen(h.vt).includes('Models'), 'no picker opens from the covered cell')
 
-    // Expiry/restore: the original row returns; the same cell opens the picker.
+    // Natural expiry WITHOUT any further mouse input: the original row
+    // returns and the same cell opens the real picker.
+    h.vt.sendInput('\x04')
+    await h.vt.waitForRender()
+    assert.ok(screen(h.vt).includes('Press Ctrl+D again to exit'), 'the hint must be re-armed for the natural-expiry probe')
     await waitFor(() => !screen(h.vt).includes('Press Ctrl+D again to exit'), h.vt)
     await h.vt.waitForRender()
     const restored = cellOf(h.vt, '[deepseek/deepseek-v4-flash]')
-    assert.ok(restored, `the compact model placement must return:\n${screen(h.vt)}`)
+    assert.ok(restored, `the compact model placement must return after natural expiry:\n${screen(h.vt)}`)
     click(h.vt, restored.x, restored.row)
     await h.vt.waitForRender()
     await h.vt.waitForRender()
     assert.equal(h.loads().length, 1, 'the restored model cell opens the real picker')
-    assert.ok(screen(h.vt).includes('Models'), 'the picker is open after expiry')
+    assert.ok(screen(h.vt).includes('Models'), 'the picker is open after natural expiry')
   } finally {
     h.dispose()
   }
 })
 
-test('an armed exit hint keeps earlier Footer rows painted with their hits', async () => {
+test('an armed exit hint leaves earlier Footer Model and Tasks targets clickable', async () => {
   // The default full Footer has the model/tasks hits on its FIRST row and
-  // the stats row last. The hint replaces only the stats row, so the
-  // earlier row stays painted and its projection hits stay in the live
-  // hit map; after expiry the real model click still opens the picker.
+  // the stats row last. The hint replaces only the stats row, so the earlier
+  // row stays painted with its hit map entries and REAL SGR clicks open the
+  // same production sinks while the hint is armed.
   const h = await startHarness()
   try {
     const model = cellOf(h.vt, '[deepseek/deepseek-v4-flash]')
@@ -689,10 +691,8 @@ test('an armed exit hint keeps earlier Footer rows painted with their hits', asy
     const beforeRows = h.app.footerRenderRowsForTest()
     h.vt.sendInput('\x04')
     await h.vt.waitForRender()
-    const armedRows = h.app.footerRenderRowsForTest()
-    assert.equal(armedRows.length, beforeRows.length, 'the footer height must not change')
+    assert.equal(h.app.footerRenderRowsForTest().length, beforeRows.length, 'the footer height must not change')
     assert.ok(screen(h.vt).includes('Press Ctrl+D again to exit'), 'the hint must be painted')
-    assert.ok(screen(h.vt).includes('[deepseek/deepseek-v4-flash]'), 'the earlier model row must stay painted')
     const painted = (h.app as unknown as {
       footerPaintedProjection?: { hits: readonly { id: string; row: number }[]; height: number; top: number }
     }).footerPaintedProjection
@@ -701,15 +701,41 @@ test('an armed exit hint keeps earlier Footer rows painted with their hits', asy
     const ids = painted.hits.filter(hit => hit.row !== instructionRow).map(hit => hit.id)
     assert.ok(ids.includes('model') && ids.includes('tasks'),
       `the earlier row must keep its model/tasks hits: ${JSON.stringify(ids)}`)
-    await waitFor(() => !screen(h.vt).includes('Press Ctrl+D again to exit'), h.vt)
+
+    // Model: a real press/release while armed opens the picker.
+    const stillModel = cellOf(h.vt, '[deepseek/deepseek-v4-flash]')
+    assert.ok(stillModel, `the model row must still be painted:\n${screen(h.vt)}`)
+    click(h.vt, stillModel.x, stillModel.row)
     await h.vt.waitForRender()
-    const restored = cellOf(h.vt, '[deepseek/deepseek-v4-flash]')
-    assert.ok(restored, `the model placement must remain after expiry:\n${screen(h.vt)}`)
-    click(h.vt, restored.x, restored.row)
+    await h.vt.waitForRender()
+    assert.equal(h.loads().length, 1, 'the model hit opens the real picker while the hint is armed')
+    assert.ok(screen(h.vt).includes('Models'), 'the real ModelPicker opened')
+    h.vt.sendInput('\x1b')
     await h.vt.waitForRender()
     await h.vt.waitForRender()
-    assert.equal(h.loads().length, 1, 'the model hit opens the real picker after expiry')
-    assert.ok(screen(h.vt).includes('Models'), 'the real picker opens')
+
+    // Tasks: re-arm and click the still-visible tasks badge. Clear any
+    // still-live confirmation from the picker journey first so Ctrl+D can
+    // never be mistaken for its second press.
+    h.app.clearExitConfirmation()
+    await h.vt.waitForRender()
+    h.vt.sendInput('\x04')
+    await h.vt.waitForRender()
+    assert.ok(screen(h.vt).includes('Press Ctrl+D again to exit'), 'the hint must be re-armed')
+    const taskCell = cellOf(h.vt, 'task')
+    assert.ok(taskCell, `the tasks placement must still be painted:\n${screen(h.vt)}`)
+    let browserOpened = 0
+    const original = h.app.openTaskBrowser.bind(h.app)
+    h.app.openTaskBrowser = ((items: unknown, onSelect: unknown, onClose: unknown, options2: unknown) => {
+      browserOpened += 1
+      return original(items as never, onSelect as never, onClose as never, options2 as never)
+    }) as typeof h.app.openTaskBrowser
+    click(h.vt, taskCell.x, taskCell.row)
+    await h.vt.waitForRender()
+    await h.vt.waitForRender()
+    assert.equal(browserOpened, 1, 'the tasks hit opens the Full Task Center while the hint is armed')
+    assert.ok(screen(h.vt).includes('build the project'), 'the real Task Browser painted its row')
+    assert.equal(h.app.taskQuickFocusedForTest(), false, 'the click never enters Task Quick')
   } finally {
     h.dispose()
   }
