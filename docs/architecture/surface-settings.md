@@ -80,8 +80,17 @@ specialist-page contract below).
   their registry semantics: a rejection records health only for the INVOKING
   owner and paints `Not saved`, while a superseded or unloaded registration is
   reported without a fabricated plugin refusal or rollback. Extension settings
-  are runtime-only: nothing here is written to the TUI settings document or a
-  Host profile.
+  have two explicit modes. The original runtime-only mode stays entirely
+  in-process: nothing is written to the TUI settings document or a Host
+  profile. A persisted row is an author-declared opt-in over that package's
+  official per-package Config carrier: the Detail states `Host profile ·
+  effective`, `Inherited`, `USER field`, `Differs from inherited` and
+  `Runtime in this Client` as separate facts; an unavailable or stale Host
+  authority is read-only with its reason; and one Confirm dispatches ONE Host
+  Config CAS write relative to `data`. A conflict paints
+  `Not saved · Host Config changed; refresh and review`; an unconfirmed
+  dispatch paints an unknown outcome and is never retried automatically. A
+  verified Host save is independent from this Client applying the new Config.
 
 - Every category shares ONE root row plan: header, optional metadata, at most
   one top rule, optional app notice, optional pane header, body, and the single

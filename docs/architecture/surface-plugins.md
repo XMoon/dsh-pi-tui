@@ -81,14 +81,24 @@ a bundle's flag is the profile SELECTION (`Selected in profile`), while a
 standalone Loader entry's flag is its effective enablement (`Effective enabled`,
 including disabled ancestor groups). `Fiber` stays the separate runtime fact in
 both cases, so a bundle the Host refuses with `unsupported-platform` is never
-presented as running and an entry is never mislabelled as a profile selection. That refusal blocks only the official catalog Install; it
-never locks the recoveries the Host still permits. A selected bundle can always
+presented as running and an entry is never mislabelled as a profile selection. That refusal blocks only the official catalog Install; itnever locks the recoveries the Host still permits. A selected bundle can always
 be disabled through the real `setBundleEnabled(name,false)` plus the
 authoritative reread — including while its files are missing or its platform is
 refused — and a profile-owned bundle's Remove is answered independently by the
 Host `removable`/`availability` facts, through its own destructive confirmation.
 The TUI never fabricates a platform decision, retries an indeterminate write, or
 reports a refusal as success.
+
+The same Detail keeps the CURRENT Client's `./tui` status as a third,
+independent fact: `Host package` (Installed / Not installed), `Host profile`
+(Selected / Not selected) and `This Client ./tui` (Active / Pending / Error /
+Reload required / Unavailable / Not opted in / Not selected), with a
+`Client reason` only when a real non-normal reason exists. A normal Host plugin
+with no PiTui opt-in is `Not opted in`, never a Host or Client error. A Client
+`Error`/`Reload required` never rewrites the Host selection, and a wide list
+may paint a secondary `Client:` signal that narrow widths drop; the Detail
+keeps both facts verbatim. The Client status is read from this Client's live
+Loader observation source, never from the Host snapshot or another Client.
 
 `BundleInfo.update` is the declared Host update SOURCE, never a TUI guess: only
 a non-self bundle whose value is `'registry'` offers `Check updates…` (before

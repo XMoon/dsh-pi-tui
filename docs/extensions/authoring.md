@@ -67,6 +67,37 @@ own `dsh.bundle.patch` and points that row at the trusted carrier subpath:
 - The row is a Host configuration carrier only: it performs no work, publishes
   no service and declares no TUI surface.
 
+### Persisted settings over that carrier
+
+A `./tui` entry can expose one or more author-declared settings over the same
+official `data` object, without shipping a second schema or its own settings
+service:
+
+```ts
+service.registerSetting({
+  id: 'example.limit',
+  label: 'Example limit',
+  currentValue: String(config.limit ?? 5), // this Client's live runtime fact
+  persisted: {
+    path: ['limit'], // relative to the package's Config `data`
+    choices: [
+      { id: 'five', op: 'set', value: 5 },
+      { id: 'ten', label: 'Ten', op: 'set', value: 10 },
+      { id: 'inherit', label: 'Use inherited', op: 'unset' },
+    ],
+  },
+})
+```
+
+Only JSON scalars (`string | number | boolean | null`) are allowed; the
+choices are a closed list, duplicate ids and an empty path are rejected at
+registration, and an `unset` choice carries no value. `values` and `onChange`
+cannot be combined with `persisted`. The Settings → Extensions row shows the
+Host profile's effective/inherited/USER facts and this Client's runtime value
+separately; saving is one official revision-checked Host mutation and is
+never written to the TUI settings document. The plugin must not put secrets,
+tokens or credentials in that Config `data`.
+
 ## Client-local `./tui` entry
 
 A package that also contributes TUI surfaces declares the opt-in in its

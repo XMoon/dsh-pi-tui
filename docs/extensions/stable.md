@@ -88,6 +88,21 @@ repository-private imports.
 | Managed overlay | `showOverlay(view, options)` | (always available) | v2 |
 | Editor replacement | `registerEditor(...)` | (always available) | v2 |
 
+**Settings rows.** `registerSetting()` keeps its original runtime-only shape:
+`values` names selectable strings and `onChange` receives the chosen value;
+`SettingsRegistry.applyDetailed` is its only writer and nothing is persisted.
+A row may instead declare the explicit `persisted` branch: a non-empty JSON
+scalar `path` relative to the package's official Config `data` plus a closed
+`choices` list whose entries are `{id, op:'set', value}` or `{id, op:'unset'}`.
+The two branches are mutually exclusive (`values`/`onChange` are rejected with
+`persisted`). A persisted row's `currentValue` remains this Client's live
+runtime fact, never the Host value. The Settings UI resolves the package
+through the current Client's exact Fiber → Loader entry → ACTIVE observation,
+reads `effective`/`inherited`/the USER leaf from the official per-package
+Config authority, and writes one revision/generation-checked mutation per
+explicit Confirm. A package-name field in the contribution is deliberately
+absent: the plugin does not choose its own Host namespace.
+
 **Stable widget layout.** `input.widget.above` /
 `input.widget.below` contributions are passive, display-only rows. The SAME
 registered contribution renders on both the regular document and the

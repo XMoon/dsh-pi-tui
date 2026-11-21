@@ -43,4 +43,20 @@ export function apply(ctx, config) {
       return { kind: 'success', text: 'r8-b' }
     },
   })
+  // R8-E PR-4: one author-declared persisted setting over package B's official
+  // Config data. Numeric choices exercise the JSON-scalar path.
+  service.registerSetting({
+    id: 'r8-b-limit',
+    label: 'R8 B limit',
+    description: 'Fixture B persisted numeric limit',
+    currentValue: '7',
+    persisted: {
+      path: ['limit'],
+      choices: [
+        { id: 'seven', op: 'set', value: 7 },
+        { id: 'eleven', op: 'set', value: 11 },
+        { id: 'inherit', label: 'Use inherited', op: 'unset' },
+      ],
+    },
+  })
 }

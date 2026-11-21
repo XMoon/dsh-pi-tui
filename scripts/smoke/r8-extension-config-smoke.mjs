@@ -58,6 +58,7 @@ import {
 import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { parse as parseYaml } from 'yaml'
 
 import {
   discoverClientExtension,
@@ -482,7 +483,7 @@ function shellQuote(value) {
  * binary inside a real tmux PTY; the assertion reads the painted Footer and a
  * real `/r8-a` slash-command execution recorded by the fixture itself.
  */
-async function runDirectTuiQualification({ env, stampDir, sentinel }) {
+async function runDirectTuiQualification({ env, runRoot, stampDir, sentinel }) {
   if (process.platform === 'win32') {
     notVerified('P3-03', 'real Direct TUI paints fixture A + B Footer contributions', 'the Direct TUI PTY lane is not supported on win32')
     notVerified('P3-04', 'real Direct TUI slash input executes the external package command', 'the Direct TUI PTY lane is not supported on win32')
@@ -521,6 +522,8 @@ async function runDirectTuiQualification({ env, stampDir, sentinel }) {
     check('P3-03', seen.has('R8-A-LIVE') && seen.has('R8-B-LIVE'),
       'the real Direct TUI paints both external Footer contributions',
       seen.size === 2 ? 'R8-A-LIVE + R8-B-LIVE painted' : `painted=${[...seen].join(',')} lastFrame=${JSON.stringify(frame.slice(-400))}`)
+    // P3-04: the slash input path runs BEFORE the Settings journey so the PR-4
+    // probe cannot perturb the already-proven composer phase.
     tmux(['send-keys', '-t', session, '-l', '/r8-a'])
     // Wait for the REAL painted composer to hold the text before Enter: an
     // input sent before the surface accepts it would be lost, not delayed.
@@ -546,6 +549,83 @@ async function runDirectTuiQualification({ env, stampDir, sentinel }) {
     check('P3-04', commandRecord !== undefined,
       'the real Direct TUI slash input executes the external package handler',
       commandRecord === undefined ? 'no fixture command-call record' : JSON.stringify({ event: commandRecord.event, package: commandRecord.package }))
+
+    // ── R8-E PR-4: real Settings → Extensions persisted-setting journey ─────
+    if (process.env.R8_PR4_DIRECT_PROBE !== '1') {
+      notVerified('P4-10', 'real Direct TUI edits A and B persisted settings through Settings → Extensions and survives a restart',
+        'the explicit R8_PR4_DIRECT_PROBE=1 qualification input was not supplied')
+    } else {
+      try {
+        const send = (...keys) => tmux(['send-keys', '-t', session, ...keys])
+        const waitForText = async (needles, timeout = 30_000) => {
+          const until = Date.now() + timeout
+          let last = ''
+          while (Date.now() < until) {
+            last = tmux(['capture-pane', '-t', session, '-p']).stdout ?? ''
+            if (needles.every(needle => last.includes(needle))) return last
+            await new Promise(resolve => setTimeout(resolve, 100))
+          }
+          throw new Error(`the real TUI never painted ${needles.join(' + ')}; last frame=${JSON.stringify(last.slice(-800))}`)
+        }
+        const profileDir = join(env.DSH_HOME, 'profiles', PROFILE)
+        const readUserPatch = () => {
+          const patch = parseYaml(readFileSync(join(profileDir, 'cordis.patch.yml'), 'utf8'))
+          const rows = Array.isArray(patch) ? patch : []
+          return {
+            a: rows.find(row => row?.id === extensionConfigRowId('@r8-pr1-fixture/a'))?.config?.data,
+            b: rows.find(row => row?.id === extensionConfigRowId('@r8-pr1-fixture/b'))?.config?.data,
+          }
+        }
+        const waitForPatch = async (predicate, label) => {
+          const until = Date.now() + 30_000
+          let last
+          while (Date.now() < until) {
+            last = readUserPatch()
+            if (predicate(last)) return last
+            await new Promise(resolve => setTimeout(resolve, 100))
+          }
+          throw new Error(`${label}: the official USER patch never reached the target value; last=${JSON.stringify(last)}`)
+        }
+        send('-l', '/settings')
+        await waitForText(['/settings'], 20_000)
+        send('Enter')
+        await waitForText(['Settings · Categories'], 30_000)
+        send('End')
+        await waitForText(['> Extensions'])
+        send('Enter')
+        await waitForText(['R8 A label'])
+        send('Enter') // Detail + native Choice
+        await waitForText(['Choose value', 'R8 A label'])
+        send('Down') // alpha -> omega
+        await waitForText(['> omega']) // the candidate repaint is a real frame
+        send('Enter')
+        await waitForPatch(patch => patch.a?.label === 'omega', 'A persisted label')
+        send('Escape') // back to the A Rows level
+        await waitForText(['Settings · Extensions [1/2]'])
+        send('Tab') // A group -> B group
+        await waitForText(['Settings · Extensions [2/2]', 'R8 B limit'])
+        send('Enter')
+        await waitForText(['Choose value', 'R8 B limit'])
+        send('Down') // seven -> eleven
+        await waitForText(['> eleven'])
+        send('Enter')
+        await waitForPatch(patch => patch.b?.limit === 11, 'B persisted limit')
+        const userPatch = readUserPatch()
+        const userPatchOk = userPatch.a?.label === 'omega' && userPatch.b?.limit === 11
+        const restart = runHost({ env, runRoot, stampDir, sentinel, label: 'pr4-restart' })
+        const boot = snapshotOf(restart, 'boot')
+        const aRead = boot === undefined ? undefined : describeRow(boot, extensionConfigRowId('@r8-pr1-fixture/a'))
+        const bRead = boot === undefined ? undefined : describeRow(boot, extensionConfigRowId('@r8-pr1-fixture/b'))
+        check('P4-10', userPatchOk
+          && aRead?.user?.data?.label === 'omega' && aRead?.value?.data?.label === 'omega'
+          && bRead?.user?.data?.limit === 11 && bRead?.value?.data?.limit === 11,
+        'real Direct TUI edits A and B persisted settings through Settings → Extensions and survives a restart',
+        JSON.stringify({ userPatchOk, aUser: aRead?.user, aValue: aRead?.value, bUser: bRead?.user, bValue: bRead?.value }))
+      } catch (error) {
+        gate('P4-10', 'FAIL', 'real Direct TUI edits A and B persisted settings through Settings → Extensions and survives a restart',
+          error instanceof Error ? error.message : String(error))
+      }
+    }
   } catch (error) {
     gate('P3-03', 'FAIL', 'the real Direct TUI paints both external Footer contributions', error instanceof Error ? error.message : String(error))
     notVerified('P3-04', 'the real Direct TUI slash input executes the external package handler', 'the Direct TUI did not reach the command phase')
@@ -1152,7 +1232,7 @@ async function main() {
     // PR-3 Direct product proof runs LAST: it uses the same isolated profile
     // (candidate + packed fixtures installed by the official CLI) and its own
     // sentinel, so it cannot perturb any preceding Host-boot audit.
-    await runDirectTuiQualification({ env, stampDir, sentinel })
+    await runDirectTuiQualification({ env, runRoot, stampDir, sentinel })
   } catch (error) {
     gate('INFRA', 'FAIL', 'the runner completes', error instanceof Error ? `${error.name}: ${error.message}` : String(error))
   } finally {

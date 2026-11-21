@@ -21,10 +21,12 @@ import { spawnSync } from 'node:child_process'
 import { cpSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { parse as parseYaml } from 'yaml'
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 import { installPlugin, runDsh } from '../../lib/dsh-smoke-harness.mjs'
 import { waitForC1WorkEvent } from '../../lib/split-smoke-fixtures.mjs'
 import { chunk } from '../../lib/split-smoke-processes.mjs'
+import { extensionConfigRowId } from '../../../src/domain/extension-config/row-id.ts'
 import { createC1Scene } from './c1-scene.mjs'
 
 const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
@@ -110,18 +112,62 @@ export async function runClientExtensionLoaderPr3(context) {
     host = startedHost.host
     const hostIdentity = await scene.hostIdentityFacts(host)
 
-    const startedA = await scene.startC1Client('R8-E client-loader Client A', {
+    const pr4Probe = process.env.R8_PR4_SPLIT_PROBE === '1'
+    const pr4Dir = join(workDir, 'pr4-probe')
+    if (pr4Probe) mkdirSync(pr4Dir, { recursive: true })
+    const pr4Env = (role) => pr4Probe ? {
+      SPLIT_PROCESS_CLIENT_PERSISTED_SETTING_PROBE: '1',
+      SPLIT_PROCESS_CLIENT_PERSISTED_SETTING_ROLE: role,
+      SPLIT_PROCESS_CLIENT_PERSISTED_SETTING_DIR: pr4Dir,
+      SPLIT_PROCESS_CLIENT_PERSISTED_SETTING_PACKAGES: JSON.stringify({ a: sourceNames.a, b: sourceNames.b }),
+    } : {}
+    const aEnv = {
       [SENTINEL_ENV]: sentinel,
       SPLIT_PROCESS_CLIENT_EXTENSION_LOADER_PROBE: '1',
       SPLIT_PROCESS_CLIENT_EXTENSION_LOADER_PACKAGES: JSON.stringify({ a: sourceNames.a, b: sourceNames.b }),
       SPLIT_PROCESS_CLIENT_HMR_PROBE: '1',
-    })
+      ...pr4Env('A'),
+    }
+    const bEnv = { [SENTINEL_ENV]: sentinel, ...pr4Env('B') }
+    let startedA
+    let startedB
+    if (pr4Probe) {
+      // Both probes coordinate through files; start both Clients together so
+      // neither waits for the other's startup.
+      ;[startedA, startedB] = await Promise.all([
+        scene.startC1Client('R8-E client-loader Client A', aEnv),
+        scene.startC1Client('R8-E client-loader Client B', bEnv),
+      ])
+    } else {
+      startedA = await scene.startC1Client('R8-E client-loader Client A', aEnv)
+      startedB = await scene.startC1Client('R8-E client-loader Client B', bEnv)
+    }
     clientA = startedA.client
-    const startedB = await scene.startC1Client('R8-E client-loader Client B', {
-      [SENTINEL_ENV]: sentinel,
-    })
     clientB = startedB.client
     assert(startedA.ready.pid !== startedB.ready.pid, 'the two surface Clients must be independent OS processes')
+
+    if (pr4Probe) {
+      const readProbe = (name) => readJson(join(pr4Dir, name))
+      const aProbe = readProbe('a-result.json')
+      const bProbe = readProbe('b-result.json')
+      assert(aProbe.writeA === 'accepted' && aProbe.aAfter?.effective?.label === 'omega',
+        `Client A must persist label=omega through its own Remote ConfigPort: ${JSON.stringify(aProbe)}`)
+      assert(bProbe.stale === 'conflict',
+        `Client B must see a stale revision conflict for the same field: ${JSON.stringify(bProbe)}`)
+      assert(bProbe.bWrite === 'accepted' && bProbe.bAfter?.effective?.limit === 11,
+        `Client B must refresh and persist its own limit=11: ${JSON.stringify(bProbe)}`)
+      assert(aProbe.observations?.[sourceNames.a] === 'active' && aProbe.observations?.[sourceNames.b] === 'active'
+        && bProbe.observations?.[sourceNames.a] === 'active' && bProbe.observations?.[sourceNames.b] === 'active',
+      `both Clients must observe their own ACTIVE entries: ${JSON.stringify({ a: aProbe.observations, b: bProbe.observations })}`)
+      const profilePatchPath = join(installation.env.DSH_HOME, 'profiles', PROFILE, 'cordis.patch.yml')
+      const patch = parseYaml(readFileSync(profilePatchPath, 'utf8'))
+      const rows = Array.isArray(patch) ? patch : []
+      assert(rows.find(row => row?.id === extensionConfigRowId(sourceNames.a))?.config?.data?.label === 'omega'
+        && rows.find(row => row?.id === extensionConfigRowId(sourceNames.b))?.config?.data?.limit === 11,
+      `the official USER patch must hold both independent fields: ${JSON.stringify(patch)}`)
+      await scene.assertHostIdentityKept(host, hostIdentity, 'R8-E PR4 two-Client Config journey')
+      trace('p4.11', { status: 'PASS', a: aProbe, b: bProbe })
+    }
 
     // P3-05/P3-06: the official Plugin Manager disables package A's trusted
     // Config row; the Client revision removes only A's entry and re-enabling

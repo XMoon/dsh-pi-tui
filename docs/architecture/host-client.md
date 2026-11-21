@@ -1065,6 +1065,17 @@ dispatched failure whose settlement cannot be observed is
 write counter or Client-side optimistic value, and no namespace, path or
 secret crosses the port.
 
+The same sub-domain backs the Stable persisted extension-setting branch. A
+plugin declares a JSON-scalar `path` and a closed choice list; the Settings
+workspace resolves the writable package only through the CURRENT Client's
+exact registration owner → live Loader entry → ACTIVE package observation. An
+author-supplied package name, a prefix guess or a Host-only registration is
+never accepted. A saved choice is ONE CAS mutation plus a fresh USER-leaf
+readback (`set` reads the target scalar; `unset` reads the leaf absent), and
+the independent Client apply step is triggered through the existing mount
+owner reconcile. Runtime-only settings keep their in-process registry writer
+and never touch this sub-domain.
+
 ### Client-local external `./tui` loading
 
 An opted-in npm package's `./tui` entry is loaded ONLY by the CURRENT Client,
@@ -1115,10 +1126,14 @@ through that Client's EXISTING official Cordis Loader. The semantic owner is
   surface revision; there is no polling, Gateway callback or cross-process
   callback, and a superseded revision never publishes a stale observation.
 
-The live Entry/Fiber and per-package `active`/`error`/`reload-required`
-observation is the only Client runtime status. Official Plugin Manager
-`enabled` is install/selection truth and is never re-labelled as Client
-ACTIVE.
+The live Entry/Fiber and per-package `pending`/`active`/`error`/
+`reload-required` observation is the only Client runtime status. `pending` is
+published only from a REAL Loader activation attempt; it is never inferred
+from the Host's `enabled` flag. The ONE observation source carries a semantic
+revision and an idempotent subscribe/unsubscribe lease; the Plugin Manager
+page reads it late-bound and a change repaints that page without re-running
+the Host inventory read. Official Plugin Manager `enabled` is
+install/selection truth and is never re-labelled as Client ACTIVE.
 
 ### MCP server management (ONE Host manager)
 
