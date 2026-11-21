@@ -105,6 +105,8 @@ interface WorkHubPanel {
   refreshError: string | undefined
   /** The one focused native action of the `actions` zone (local cursor only). */
   actionFocus: WorkHubAction
+  /** Whether the user explicitly moved the action focus (vs the default). */
+  actionFocusTouched: boolean
   readonly onSelect: (value: string) => 'close' | 'keep-open'
   readonly onClose: () => void
   readonly options: TaskBrowserPresentationOpen
@@ -389,6 +391,13 @@ function normalizeActionFocus(
   return 'close'
 }
 
+/** The initial action focus before the user has chosen one. */
+function defaultActionFocus(history: boolean, details: boolean): WorkHubAction {
+  if (details) return 'details'
+  if (history) return 'history'
+  return 'close'
+}
+
 /**
  * The ONE layer node: one native picker plus the optional Inspector child.
  *
@@ -595,17 +604,15 @@ export class TspWorkHub {
       refresh: options.loading ? 'loading' : 'ready',
       refreshError: undefined,
       actionFocus: 'close',
+      actionFocusTouched: false,
       onSelect,
       onClose,
       options,
     }
     panel.selected = chooseInitial(visibleRows(panel))
-    // The primary read action is the initial action-zone focus whenever this
-    // pane can really present the Reader; a history-only frame focuses its one
-    // real action; otherwise dismissal is the only one.
-    panel.actionFocus = this.detailsAdmissionOf() === 'available' && panel.selected !== undefined
-      ? 'details'
-      : historyJobs(panel).length > 0 ? 'history' : 'close'
+    // The initial action-zone focus is a DEFAULT, not a user choice: a
+    // loading -> ready commit may adopt it once the real rows arrive.
+    panel.actionFocus = defaultActionFocus(historyJobs(panel).length > 0, this.detailsAvailable(panel))
     this.panel = panel
     this.change(panel)
     return {
@@ -652,10 +659,15 @@ export class TspWorkHub {
 
   private change(panel: WorkHubPanel): void {
     if (this.panel !== panel || panel.retired) return
-    // A vanished action must not survive as a stored focus preference: the
-    // normalized value is committed with the frame, so a later reappearance
-    // never resurrects an action the user did not re-choose.
-    panel.actionFocus = normalizeActionFocus(panel.actionFocus, historyAvailable(panel), this.detailsAvailable(panel))
+    // An untouched focus is the CURRENT default and follows the real action
+    // set across loading -> ready. An explicit user choice is only normalized
+    // away when its own action disappears; a later reappearance never
+    // resurrects an action the user did not re-choose.
+    const history = historyAvailable(panel)
+    const details = this.detailsAvailable(panel)
+    panel.actionFocus = panel.actionFocusTouched
+      ? normalizeActionFocus(panel.actionFocus, history, details)
+      : defaultActionFocus(history, details)
     panel.revision += 1
     this.render()
   }
@@ -863,6 +875,7 @@ export class TspWorkHub {
         if (ring.length <= 1) return
         const current = ring.indexOf(this.focusedAction(panel))
         panel.actionFocus = ring[(current + intent.delta + ring.length) % ring.length]!
+        panel.actionFocusTouched = true
         this.change(panel)
         return
       }

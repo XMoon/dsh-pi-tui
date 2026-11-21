@@ -502,6 +502,35 @@ test('the action zone ring follows the real action list across Close, history an
   assert.deepEqual(h.selects, [], 'an action-zone Enter is the local disclosure, never a business select')
 })
 
+test('the initial loading→ready focus adopts the real default, while an explicit user focus is preserved', async (t) => {
+  const h = await mount(t)
+  const handle = h.open([], { loading: true })
+  await waitUntil('the loading Hub is mounted', () => pickerNode(h.pane, HUB) !== undefined)
+  assert.deepEqual(actionIds(h.pane), ['close'], 'a loading empty Hub has only Close')
+  handle.setItems([
+    row('job:j1', { label: 'build', status: 'running' }),
+    row('job:j2', { label: 'old lint', status: 'running' }),
+  ])
+  await waitUntil('the ready rows arrive', () => hubItems(h.pane).length === 2)
+  h.pane.key('\t')
+  await waitUntil('the untouched initial focus adopts Details', () => JSON.stringify(hubProps(h.pane).actions).includes('View details [Enter]'))
+  h.pane.key('\u001b[D')
+  await waitUntil('the user explicitly focuses Close', () => JSON.stringify(hubProps(h.pane).actions).includes('Close [Enter]'))
+  handle.setItems([
+    row('job:j1', { label: 'build', status: 'running' }),
+    row('job:j2', { label: 'old lint', status: 'running' }),
+    row('job:j3', { label: 'older deploy', status: 'failed', active: false }),
+  ])
+  await waitUntil('the explicit Close focus survives the refresh', () => JSON.stringify(hubProps(h.pane).actions).includes('Close [Enter]'))
+
+  const history = h.open([], { loading: true })
+  await waitUntil('the second loading Hub is mounted', () => pickerNode(h.pane, HUB) !== undefined)
+  history.setItems([row('job:j9', { label: 'old only', status: 'completed', active: false })])
+  await waitUntil('the history-only ready frame arrives', () => actionIds(h.pane).includes('jobs-history') && hubItems(h.pane).length === 0)
+  h.pane.key('\t')
+  await waitUntil('the untouched history-only focus adopts the disclosure', () => JSON.stringify(hubProps(h.pane).actions).includes('Show 1 jobs [Enter]'))
+})
+
 test('a vanished action focus never resurrects when the action returns', async (t) => {
   const h = await mount(t)
   const handle = h.open([
