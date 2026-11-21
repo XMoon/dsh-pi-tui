@@ -159,10 +159,7 @@ export async function runPromptSessionFocusTurnParity(context) {
 
     // A exits MID-TURN. The open Turn is already frozen: its LATER step keeps
     // Focus; B's NEXT Turn after turn/end is the ordinary non-Focus policy.
-    clientA.send('/exit\r')
-    const aExit = await clientA.waitForExit(60_000)
-    assert(aExit.code === 0 && aExit.signal === null, `PP Client A exit was ${JSON.stringify(aExit)}`)
-    await clientA.dispose()
+    await exitC1Client(clientA, 'PP A')
     assert(alive(hostBefore.hostPid), 'PP the Host died when Client A exited')
     await assertHostIdentityKept(host, hostBefore, 'PP Host after A exit')
     clientB.send('pp-b-after-a-exit-step\r')
@@ -199,10 +196,7 @@ export async function runPromptSessionFocusTurnParity(context) {
     // ---- Phase 3 (reconnect identity + Host survival): a FRESH authenticated
     // Peer re-opens X and becomes its only viewer. The retired Peer's record
     // never votes again; the new Peer's Focus view decides its own Turn.
-    clientB.send('/exit\r')
-    const bExit = await clientB.waitForExit(60_000)
-    assert(bExit.code === 0 && bExit.signal === null, `PP Client B exit was ${JSON.stringify(bExit)}`)
-    await clientB.dispose()
+    await exitC1Client(clientB, 'PP B')
     assert(alive(hostBefore.hostPid), 'PP the Host died when Client B exited')
     const { client: clientC, ready: cReady } = await startC1Client('PP C', {
       SPLIT_PROCESS_CLIENT_SESSION: sessionX,

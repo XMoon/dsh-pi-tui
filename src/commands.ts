@@ -1451,9 +1451,15 @@ export function registerTuiCommands(
    * its contribution and reported. Never a silent shadow, never a partial
    * list.
    * @param host - the host catalog rows for the current scope.
+   * @param reservedHostNames - genuine Host names retained as the last-good
+   *   reservation during a Remote target transition, even though their rows
+   *   are no longer displayed.
    * @throws when a contribution collides with a host name.
    */
-  const mergeContributions = (host: readonly SurfaceCommandSummary[]): readonly SurfaceCommandSummary[] => {
+  const mergeContributions = (
+    host: readonly SurfaceCommandSummary[],
+    reservedHostNames?: ReadonlySet<string>,
+  ): readonly SurfaceCommandSummary[] => {
     const bridge = runner.extensions?.commands
     if (bridge === undefined) return host
     const contributions = bridge.snapshot().entries
@@ -1478,7 +1484,13 @@ export function registerTuiCommands(
     const collisions: { identity: string; message: string }[] = []
     let firstCollision: Error | undefined
     for (const contribution of contributions) {
-      if (!byName.has(contribution.name)) continue
+      // A target-changing transition hides the previous target's Host rows but
+      // retains `hostOriginDescriptors` as its name reservation until the new
+      // snapshot installs. Extension rows are synthesized in this sibling
+      // pass, so the reservation must participate here too — otherwise an
+      // extension row is advertised for a name the live classifier still
+      // routes to Host, and the old collision health is falsely recovered.
+      if (!byName.has(contribution.name) && reservedHostNames?.has(contribution.name) !== true) continue
       const identity = contributionIdentity(contribution)
       colliding.add(identity)
       const collision = new Error(`command contribution /${contribution.name} collides with a host command`)
@@ -1562,13 +1574,18 @@ export function registerTuiCommands(
   const skillDisposers = new Map<string, () => void>()
   const installCompletions = (
     entries: readonly SurfaceCommandSummary[],
-    options: { display?: 'merged' | 'none'; claimsFrom?: readonly SurfaceCommandSummary[] } = {},
+    options: {
+      display?: 'merged' | 'none'
+      claimsFrom?: readonly SurfaceCommandSummary[]
+      reservedHostNames?: ReadonlySet<string>
+    } = {},
   ): void => {
     const sorted = [...entries].sort((left, right) => left.name < right.name ? -1 : 1)
     // PR4 §D3: the CLAIM set is the Host authority record. On the Remote
-    // branch the display list may be a Client-only merge (an ad-hoc
-    // re-synthesis), so the claims are built from the LAST AUTHORITATIVE Host
-    // catalog instead — a client-only refresh must never erase a Host claim.
+    // branch the display list is the installed Host catalog plus Client rows
+    // (an ad-hoc re-synthesis), so the claims are built from the LAST
+    // AUTHORITATIVE Host catalog instead — a Client-only refresh must never
+    // erase a Host claim.
     // The union of (a) the Host-authoritative catalog and (b) THIS surface's
     // own registrations (TUI built-ins + live skill wrappers). On Direct the
     // Host registry already carries (b), so the union is idempotent; on
@@ -1595,7 +1612,7 @@ export function registerTuiCommands(
     // stay live.
     const display = options.display === 'none'
       ? []
-      : [...mergeContributions(sorted)]
+      : [...mergeContributions(sorted, options.reservedHostNames)]
           .sort((left, right) => left.name < right.name ? -1 : 1)
     // M5: the plugin autocomplete chain (AutocompleteRegistry) is consulted
     // after the host's own provider returns null. The registry's suggest()
@@ -1738,6 +1755,16 @@ export function registerTuiCommands(
    * same-name Client definition never masquerades as Host origin.
    */
   let hostOriginDescriptors = new Map<string, { leadingInput: boolean; attachments: boolean }>()
+  /**
+   * Presentation eligibility of the installed Remote Host catalog for the
+   * CURRENT target. Never an authority for routing or dispatch: it only
+   * answers whether `authoritativeHostCatalog` describes the target the
+   * surface is displaying right now. A target-changing transition clears it
+   * (the retained Host claims are NOT display proof for the new target); a
+   * successful target snapshot restores it. Disconnect and same-target
+   * failures keep it, so the last-good display does not flash empty.
+   */
+  let remoteHostDisplayActive = false
   /** Derive the Host-origin map from a Host catalog view (§1C-3): the
    *  entries whose EFFECTIVE WINNER is one of THIS surface's own Direct
    *  compatibility mirrors (exact `definitionId` membership — the winner
@@ -1779,6 +1806,55 @@ export function registerTuiCommands(
     return [...byName.values()]
   }
   /**
+   * The Remote display synthesis: the installed authoritative Host catalog
+   * FIRST, then the Client rows whose names the Host does not own. Called ONLY
+   * on the Remote branch (`commands === undefined`); the Direct branch keeps
+   * its existing Host registration/compatibility-mirror composition.
+   *
+   * This answers DISPLAY only — never routing or dispatch. During a
+   * target-changing transition the retained Host catalog is still the last
+   * target's claim record, not proof that the new target offers it, so the
+   * Host rows are hidden and a same-named Client registration is withheld
+   * from the gap too (a bare Client twin must not look executable while the
+   * retained Host-origin gate still owns the name).
+   * @param clientRows - the Client registry/standing projection rows.
+   */
+  const mergeRemoteVisibleHostCommands = (
+    clientRows: readonly SurfaceCommandSummary[],
+  ): readonly SurfaceCommandSummary[] => {
+    const byName = new Map<string, SurfaceCommandSummary>()
+    if (remoteHostDisplayActive) {
+      for (const command of authoritativeHostCatalog) byName.set(command.name, command)
+    }
+    for (const command of clientRows) {
+      if (byName.has(command.name)) continue // genuine Host wins name + display metadata
+      if (!remoteHostDisplayActive && hostOriginDescriptors.has(command.name)) continue
+      byName.set(command.name, command)
+    }
+    return [...byName.values()]
+  }
+  /**
+   * The Remote transition's retained Host-name reservation, or undefined on
+   * Direct and while the installed Host catalog is display-active. The
+   * extension-contribution pass consumes this set so its sibling synthesis
+   * cannot advertise a row the Host still owns.
+   */
+  const remoteReservedHostNames = (): ReadonlySet<string> | undefined =>
+    commands === undefined && !remoteHostDisplayActive
+      ? new Set(hostOriginDescriptors.keys())
+      : undefined
+  /** The Remote-only completion options for one install: last-good claims
+   *  (when the caller owns them) plus the retained transition reservation. */
+  const remoteDisplayOptions = (
+    claimsFrom?: readonly SurfaceCommandSummary[],
+  ): { claimsFrom?: readonly SurfaceCommandSummary[]; reservedHostNames?: ReadonlySet<string> } => {
+    const reserved = remoteReservedHostNames()
+    return {
+      ...(claimsFrom === undefined ? {} : { claimsFrom }),
+      ...(reserved === undefined ? {} : { reservedHostNames: reserved }),
+    }
+  }
+  /**
    * Refresh completions from the registry: the LIVE agent's effective view
    * when one exists (global + its scoped shadows), else the global layer
    * overlaid with the saved scoped overrides (sessionless merge). The agent
@@ -1797,7 +1873,10 @@ export function registerTuiCommands(
    */
   const installCompletionsContained = (
     entries: readonly SurfaceCommandSummary[],
-    options: { claimsFrom?: readonly SurfaceCommandSummary[] } = {},
+    options: {
+      claimsFrom?: readonly SurfaceCommandSummary[]
+      reservedHostNames?: ReadonlySet<string>
+    } = {},
   ): void => {
     try {
       installCompletions(entries, options)
@@ -1847,8 +1926,9 @@ export function registerTuiCommands(
     //
     // PR4 §D3: the DISPLAY list and the CLAIM source are separate inputs.
     // The Direct live read IS the Host authority (refresh it); the Remote
-    // branch's view is a Client-side merge, so its claims keep coming from
-    // the last authoritative Host catalog the coordinator installed.
+    // branch's DISPLAY is the installed Host catalog plus the Client rows the
+    // Host does not own, while its claims keep coming from the last
+    // authoritative Host catalog the coordinator installed.
     if (runner.currentSessionId === undefined) {
       const entries = mergeGlobalAndSavedScoped()
       if (commands !== undefined) {
@@ -1870,9 +1950,10 @@ export function registerTuiCommands(
         authoritativeHostCatalog = entries
         deriveHostOriginDescriptors(hostView)
       }
-      installCompletionsContained(entries, commands === undefined
-        ? { claimsFrom: authoritativeHostCatalog }
-        : {})
+      installCompletionsContained(
+        commands === undefined ? mergeRemoteVisibleHostCommands(entries) : entries,
+        commands === undefined ? remoteDisplayOptions(authoritativeHostCatalog) : {},
+      )
       return
     }
     const scoped = runner.listScopedCommands()
@@ -1885,9 +1966,11 @@ export function registerTuiCommands(
     for (const definition of clientCommands.list()) {
       byName.set(definition.name, commandSummaryOf(definition))
     }
-    installCompletionsContained([...byName.values()], commands === undefined
-      ? { claimsFrom: authoritativeHostCatalog }
-      : {})
+    const clientRows = [...byName.values()]
+    installCompletionsContained(
+      commands === undefined ? mergeRemoteVisibleHostCommands(clientRows) : clientRows,
+      commands === undefined ? remoteDisplayOptions(authoritativeHostCatalog) : {},
+    )
   }
   // ── registry-change coalescing ─────────────────────────────────────────
   // `commands.register/dispose` fire `commands/change` SYNCHRONOUSLY per
@@ -2421,6 +2504,10 @@ export function registerTuiCommands(
     // Host-origin map derives with the same mirror subtraction (§1C-3).
     authoritativeHostCatalog = snapshot.commands
     deriveHostOriginDescriptors(snapshot.commands)
+    // The display-admission gate moves BEFORE the bulk commit: a synchronous
+    // reentrancy triggered by wrapper registration must already see this
+    // target's Host rows as displayable. Remote only — Direct never reads it.
+    if (commands === undefined) remoteHostDisplayActive = true
     const scopedNames = new Set(snapshot.scopedCommands.map(command => command.name))
     const skillsFailed = snapshot.issues.some(issue => issue.provider === 'skills')
     withCommandCommit(() => {
@@ -2434,26 +2521,34 @@ export function registerTuiCommands(
       savedScopedCommands = snapshot.scopedCommands
       // PR4 §D3: the claim source is branch-dependent. On DIRECT the merge
       // below reads the LIVE Host global layer (TUI registrations + every
-      // in-process Host command), which IS the authority. On REMOTE that
-      // merge is a Client-only view (no Host global layer exists there), so
-      // the claims come from THIS snapshot's command rows instead — a
-      // Client-only re-synthesis must never erase a Host claim.
+      // in-process Host command), which IS the authority. On REMOTE the
+      // DISPLAY is the installed Host catalog plus the Client rows the Host
+      // does not own (one helper), while the claims come from THIS snapshot's
+      // command rows — a Client-only re-synthesis must never erase a Host
+      // claim.
+      const clientRows = mergeGlobalAndSavedScoped()
       installCompletionsContained(
-        mergeGlobalAndSavedScoped(),
+        commands === undefined ? mergeRemoteVisibleHostCommands(clientRows) : clientRows,
         commands === undefined ? { claimsFrom: snapshot.commands } : {},
       )
     })
   }
   /**
-   * The revalidating transition (target/owner change): scoped previews clear
-   * so new inputs complete against the current global view only, and every
-   * old skill wrapper becomes a revalidating transition command whose
-   * handler re-fetches from the CURRENT live agent and re-checks the policy
-   * at execution time. The names survive so an already-submitted skill
-   * command can never become a plain model message mid-switch.
+   * The revalidating transition (target/owner change): scoped previews clear,
+   * the previous target's Remote Host display rows are withdrawn (its claims
+   * stay as last-good dispatch authority), and every old skill wrapper becomes
+   * a revalidating transition command whose handler re-fetches from the
+   * CURRENT live agent and re-checks the policy at execution time. The names
+   * survive so an already-submitted skill command can never become a plain
+   * model message mid-switch.
    */
   const enterCatalogTransition = (): void => {
     const names = [...skillDisposers.keys()]
+    // The old target's Host rows are NOT display authority for the new one.
+    // The authoritative catalog/claims stay (last-good dispatch authority),
+    // but the eligibility gate closes until the new target's snapshot
+    // installs. Remote only — Direct never reads this flag.
+    if (commands === undefined) remoteHostDisplayActive = false
     withCommandCommit(() => {
       for (const dispose of skillDisposers.values()) dispose()
       skillDisposers.clear()
@@ -2483,7 +2578,11 @@ export function registerTuiCommands(
           // Registration raced with another plugin; the picker still works.
         }
       }
-      installCompletionsContained(mergeGlobalAndSavedScoped())
+      const clientRows = mergeGlobalAndSavedScoped()
+      installCompletionsContained(
+        commands === undefined ? mergeRemoteVisibleHostCommands(clientRows) : clientRows,
+        commands === undefined ? remoteDisplayOptions() : {},
+      )
     })
   }
   /** Whether one command name is advertised by the CURRENT completion list

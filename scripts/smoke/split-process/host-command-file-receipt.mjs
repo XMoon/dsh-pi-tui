@@ -89,6 +89,46 @@ function proofOf(hostWorkRoot, predicate) {
   return readC1WorkEvents(hostWorkRoot).find(predicate)
 }
 
+/** The rows painted BELOW the composer box. The transcript is ABOVE the box,
+ *  so a candidate found here belongs only to the editor's live completion
+ *  dropdown, never to an old command name in history text. */
+function belowComposerRows(viewport) {
+  let bottom = -1
+  for (let index = 0; index < viewport.length; index += 1) {
+    if (/^─+$/u.test(viewport[index].trim())) bottom = index
+  }
+  return bottom === -1 ? [] : viewport.slice(bottom + 1)
+}
+
+/** Wait for ONE live slash-command completion offer in the real PiTui editor.
+ *  The query is retyped until the catalog install has landed (the first input
+ *  may race the live catalog refresh); every attempt asserts on the PAINTED
+ *  dropdown region, never on transcript text. */
+async function waitForCommandCompletion(client, query, needles, label, timeoutMs = 120_000) {
+  const deadline = Date.now() + timeoutMs
+  let lastFrame = ''
+  while (Date.now() < deadline) {
+    // Close any list, clear the draft through the real editor, then type the
+    // natural trigger. All waits below are on the composer/list state.
+    client.send('\x1b')
+    await sleep(100)
+    client.send('\x7f'.repeat(64))
+    await sleep(100)
+    const composer = await client.composerText()
+    if (composer !== undefined && composer.includes(query)) continue
+    client.send(query)
+    await sleep(200)
+    const viewport = await client.viewport()
+    lastFrame = viewport.join('\n')
+    const region = belowComposerRows(viewport).join('\n')
+    if (needles.every(needle => region.includes(needle))) return region
+    await sleep(150)
+  }
+  throw new SplitSmokeAssertionError(
+    `${label}: no live completion row painted ${JSON.stringify(needles)} below the composer\n${lastFrame}`,
+  )
+}
+
 /** Wait for the durable command lifecycle pair and the absence of a prompt row. */
 async function waitForCommandLifecycle(dshHome, sessionId, commandId, marker, label, timeoutMs = 60_000) {
   const deadline = Date.now() + timeoutMs
@@ -162,6 +202,45 @@ export async function runHostCommandFileReceipt(context) {
       120_000,
     )
     assert(statusA.sessionOpen === true, 'CFR Client A did not open the Host Session')
+
+    // ── Live Host command completion in the REAL PTY editor ─────────────────
+    // The test-only Host `/files` descriptor must reach the real PiTui
+    // completion dropdown with its Host description. The query is only TYPED:
+    // accepting/closing it must never invoke a Host command.
+    await waitForComposer(clientA, '❯', 'CFR live command completion composer')
+    const completionInvocationsBefore = readC1WorkEvents(hostWorkRoot)
+      .filter(event => event.kind === 'cfr-command-invocation').length
+    const completionRunsBefore = (hostSessionEvents(dshHome, sessionA) ?? [])
+      .filter(event => event.type === 'command/run').length
+    const completionRegion = await waitForCommandCompletion(
+      clientA,
+      '/fil',
+      ['files', 'C1 command FILE receipt proof'],
+      'CFR live Host /files completion',
+    )
+    // The PiTui SelectList paints the candidate NAME without the slash; the
+    // submitted token keeps its slash. Require the actual painted row shape,
+    // not a bare substring anywhere below the composer.
+    assert(/(?:^|\n)\s*→\s+files\b/u.test(completionRegion)
+      && completionRegion.includes('C1 command FILE receipt proof'),
+    `CFR the Host /files descriptor is not in the live completion region: ${JSON.stringify(completionRegion)}`)
+    // Escape closes only the completion list; backspace clears the typed query.
+    clientA.send('\x1b')
+    await sleep(120)
+    clientA.send('\x7f'.repeat(8))
+    await waitForComposerGone(clientA, '/fil', 'CFR completion query cleared')
+    assert((hostSessionEvents(dshHome, sessionA) ?? [])
+      .filter(event => event.type === 'command/run').length === completionRunsBefore,
+    'CFR typing/clearing a completion never produced a command/run row')
+    assert(readC1WorkEvents(hostWorkRoot)
+      .filter(event => event.kind === 'cfr-command-invocation').length === completionInvocationsBefore,
+    'CFR typing/clearing a completion never invoked the Host handler')
+    trace('cfr-live-host-command-completion', {
+      sessionId: sessionA,
+      rows: ['files', 'C1 command FILE receipt proof'],
+      executed: false,
+      commandRuns: 0,
+    })
 
     // ── Seg A: one real FILE through /attach → official command receipt ─────
     const markerA = 'CFR_CLIENT_A_FILE_20261111'

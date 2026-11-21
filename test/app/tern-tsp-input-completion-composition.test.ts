@@ -161,6 +161,8 @@ const CONTRIBUTION_NAME = 'deploy-report'
 interface PopupRow {
   readonly id: string
   readonly text: string
+  /** Every leaf text of the row (candidate text + its description/hint). */
+  readonly full: string
   readonly value: string
   readonly highlighted: boolean
 }
@@ -211,6 +213,7 @@ function popupRows(pane: TspPane): PopupRow[] {
     return {
       id: node.id,
       text,
+      full: label,
       value: name,
       highlighted: attrs?.['data-highlight'] === 'true',
     }
@@ -525,6 +528,10 @@ interface MountOptions {
    *  models an assembly with no TSP attachment plane (the command layer then
    *  installs nothing, exactly like an absent optional port). */
   readonly stagerSeam?: boolean
+  /** Remote-shaped catalog: the Client owns the TUI registrations and the Host
+   *  catalog arrives only through the coordinator's installSnapshot. This is a
+   *  fixture configuration, never a second production authority. */
+  readonly remoteCommandCatalog?: boolean
 }
 
 /** Every install the CURRENT mount's own ports received, in order. The
@@ -963,7 +970,9 @@ async function mountChain(
     cwd: home,
     sessionCwd: () => home,
     signal: new AbortController().signal,
-    commandRegistry: registry as never,
+    // Remote-shaped: the Host commands service is metadata-only there and the
+    // TUI never registers into it (the Client registry is the only owner).
+    commandRegistry: options.remoteCommandCatalog === true ? undefined : registry as never,
     clientCommands: createClientCommandRegistry(parseCommand),
     hostShellCompletion: undefined,
     imageStore: images,
@@ -1005,7 +1014,9 @@ async function mountChain(
   const commands = registerTuiCommands(
     runner,
     { skills: { skills: [...SKILL_ROWS], complete: true } },
-    { listGlobalCommands: () => listGlobalCommands(registry as never).map(commandSummaryOf) },
+    options.remoteCommandCatalog === true
+      ? {}
+      : { listGlobalCommands: () => listGlobalCommands(registry as never).map(commandSummaryOf) },
     undefined,
     undefined,
     {
@@ -1194,6 +1205,86 @@ test('a provenance-screened catalog keeps Host, skill and extension rows, drops 
     'the advertised Host claim survived the recommit')
   assert.equal(h.commands.hostOriginClaimOf({ name: 'settings' })?.claimed, true,
     'the genuine Host-origin claim survived the recommit')
+})
+
+test('a Remote-shaped Host catalog installs official Host rows in the TSP popup, keeps Host settings over the Client twin, and a stale A row cannot write into B', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('pi-tui-tsp-ic-remote-catalog-')
+  const h = await mountChain(life, home, { remoteCommandCatalog: true })
+  h.openSession(SESSION_ID)
+  const hostRowsA: readonly HostRow[] = [
+    { name: 'compact', description: 'Compact the conversation', input: { hint: '[instructions]' } },
+    { name: 'plan', description: 'Toggle plan mode' },
+    { name: 'settings', description: 'Host settings descriptor', definitionId: '@host/genuine/settings' },
+  ]
+  h.commands.installSnapshot(Object.freeze({
+    commands: Object.freeze(hostRowsA.map(row => Object.freeze({ ...row }))),
+    scopedCommands: Object.freeze([]),
+    skills: Object.freeze([]),
+    issues: Object.freeze([]),
+  }))
+  // The Host rows install as genuine Host-origin claims even though the
+  // mounted TSP renderer has no PiTui builtin UI for them.
+  assert.deepEqual(h.commands.hostOriginClaimOf({ name: 'compact' }), { claimed: true, attachments: false })
+  assert.deepEqual(h.commands.hostOriginClaimOf({ name: 'settings' }), { claimed: true, attachments: false })
+
+  await typeKeys(h, '/comp')
+  await waitUntil('the Host compact row painted', () => h.values().includes('compact'))
+  const compactRow = h.rows().find(row => row.value === 'compact')
+  assert.ok(compactRow, 'the Host /compact row is on the wire')
+  assert.match(compactRow.full, /Compact the conversation/u, 'the popup carries the Host description')
+  assert.match(compactRow.full, /\[instructions\]/u, 'the popup carries the Host argument hint')
+
+  await h.setDraft('')
+  await waitUntil('the composer is clear for /pla', () => h.editor().text === '')
+  await typeKeys(h, '/pla')
+  await waitUntil('the Host plan row painted', () => h.values().includes('plan'))
+  const planRow = h.rows().find(row => row.value === 'plan')
+  assert.ok(planRow, 'the Host /plan row is on the wire')
+  assert.match(planRow.full, /Toggle plan mode/u, 'the popup carries the Host plan description')
+
+  // Same-name Host settings must win the row over the Client TUI built-in.
+  await h.setDraft('')
+  await waitUntil('the composer is clear for /set', () => h.editor().text === '')
+  await typeKeys(h, '/set')
+  await waitUntil('the Host settings row painted', () => h.values().includes('settings'))
+  const settingsRow = h.rows().find(row => row.value === 'settings')
+  assert.ok(settingsRow, 'the same-name /settings row is on the wire')
+  assert.match(settingsRow.full, /Host settings descriptor/u, 'the Host descriptor wins the display row')
+  assert.doesNotMatch(settingsRow.full, /Open the TUI settings workspace/u, 'the Client built-in copy never paints for the Host name')
+
+  // Catalog A -> B through the SAME production commit point while the A popup
+  // is STILL OPEN and has NOT been accepted. The old frame's row identity is
+  // withdrawn by the new catalog revision; clicking that stale row writes
+  // nothing. (The Client /settings row legitimately returns under B, but it
+  // must be a NEW row identity.)
+  const staleRow = settingsRow
+  h.commands.installSnapshot(Object.freeze({
+    commands: Object.freeze([
+      Object.freeze({ name: 'compact', description: 'Compact the conversation', input: Object.freeze({ hint: '[instructions]' }) }),
+      Object.freeze({ name: 'plan', description: 'Toggle plan mode' }),
+      Object.freeze({ name: 'remote-extra', description: 'B-only Host row' }),
+    ]),
+    scopedCommands: Object.freeze([]),
+    skills: Object.freeze([]),
+    issues: Object.freeze([]),
+  }))
+  await waitUntil('the A popup row identity was withdrawn', () =>
+    h.rows().every(row => row.id !== staleRow.id))
+  await h.clickRow(staleRow)
+  assert.deepEqual(h.editor(), { text: '/set', cursor: 4 },
+    'the withdrawn A row cannot write into the B draft')
+  assert.equal(h.submits.length, 0, 'the stale click submitted nothing')
+
+  // The accept-only positive control runs on the NEW catalog: accepting a
+  // Host row edits the composer and never submits.
+  await h.setDraft('')
+  await waitUntil('the composer is clear for the B accept control', () => h.editor().text === '')
+  await typeKeys(h, '/comp')
+  await waitUntil('the B compact row painted', () => h.values().includes('compact'))
+  await h.press(ENTER)
+  await waitUntil('the accepted B Host row reached the composer', () => h.editor().text === '/compact ')
+  assert.equal(h.submits.length, 0, 'accepting a Host row never submits or executes it')
 })
 
 /**
