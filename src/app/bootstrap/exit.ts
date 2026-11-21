@@ -53,6 +53,13 @@ export function formatDaemonDetachHint(facts: {
    * only ever proves one Session Turn).
    */
   readonly hostStop?: { readonly confirmed: boolean; readonly detail?: string }
+  /**
+   * M6 compatible-cross-build UX: whether THIS Client authenticated a Host
+   * under the same protocol/DSH runtime but a different PiTui build. Only an
+   * ordinary detach may add the past-tense adoption note; a whole-Host Stop
+   * (confirmed or unconfirmed) never gets it.
+   */
+  readonly compatibleOtherBuild?: boolean
 }): string {
   const profile = shellQuote(facts.profile)
   const lines = [
@@ -69,6 +76,11 @@ export function formatDaemonDetachHint(facts: {
         : ['The daemon Host was not stopped by this action.']),
     ...(facts.workStopped ? ['Current work: stopped.'] : []),
   ]
+  if (facts.compatibleOtherBuild === true && facts.hostStop === undefined) {
+    lines.push(
+      `Note: This Client used a compatible Host with a different PiTui build. To adopt the installed Host build when work is idle: dsh --profile ${profile} daemon restart`,
+    )
+  }
   const sessionId = facts.sessionId.trim()
   if (sessionId !== '') {
     const backend = facts.backendOverride === true ? 'DSH_PI_TUI_BACKEND=daemon ' : ''

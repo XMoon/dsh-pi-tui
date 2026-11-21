@@ -130,6 +130,17 @@ applies the same rule to its bound raw keys (idle Ctrl+C and empty-draft Ctrl+D
 need the same-key second press), while its pre-bind Ctrl+C remains an emergency
 exit.
 
+**Compatible cross-build connection.** A Daemon/Split Client that authenticates
+a Host under the same protocol and DSH runtime but a different PiTui build
+prints ONE non-blocking `info` notice on its initial physical Surface mount
+(`Connected to a compatible Host with a different PiTui build. To use the
+installed Host build, run `daemon restart` when work is idle.`). Redraws,
+Session switches, reconnects and same-process HMR never repeat it; a new OS
+Client process may show it again. It never changes Host admission, restarts or
+stops the Host, and it never claims the Host is older. The cross-build admission
+facts are owned by [host-client.md](./host-client.md); this document owns only
+the presentation contract.
+
 **After the terminal restores.** A daemon Client exit prints the fixed
 `Disconnected from dsh-pi-tui (daemon client).` block with the REAL effective
 profile and Session (no Session line without a Session) plus `daemon status`,
@@ -137,8 +148,15 @@ profile and Session (no Session line without a Session) plus `daemon status`,
 Turn outcome it cannot observe. The resume command preserves a temporary
 `DSH_PI_TUI_BACKEND=daemon` override (the Profile may still be Direct) and
 shell-quotes the profile/session arguments so the hint is copy-paste safe. A verified Stop may add the one
-`Current work: stopped.` line. A Direct exit keeps only the existing resume
-line. Fatal/sudden termination never prints the detach block.
+`Current work: stopped.` line. A Client that used a compatible different-build
+Host adds one past-tense note in the same block, after the ordinary
+stop/current-work summary and before the Resume/Manage blocks: `Note: This
+Client used a compatible Host with a different PiTui build. To adopt the
+installed Host build when work is idle: dsh --profile <profile> daemon
+restart` (the real Profile is shell-quoted by the existing policy). A confirmed
+or unconfirmed whole-Host Stop never carries that adoption suggestion, and the
+note never commands an automatic restart. A Direct exit keeps only the existing
+resume line. Fatal/sudden termination never prints the detach block.
 
 ## Pending input and the queue plane
 

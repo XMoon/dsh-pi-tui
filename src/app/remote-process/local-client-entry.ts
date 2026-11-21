@@ -2158,6 +2158,16 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
           applyRunnerWithRuntime(pluginContext, input.config, input.override, {
             surfaceReady: () => bridge.markMounted(),
             surfaceFailed: error => bridge.fail(error),
+            // M6 compatible-cross-build UX: the two authenticated build
+            // identities of THIS Client process and the Host it connected to.
+            // `scope.buildId` is the RUNNING Client's fingerprint; the Host
+            // value comes from the completed `ensureLocalHost` authentication
+            // chain — never from the installed Profile or `instance.json`.
+            authenticatedBuilds: {
+              clientBuildId: scope.buildId,
+              hostBuildId: host.identity.buildId,
+              initialSurface: input.mountKind === 'initial',
+            },
             // M6 PR-C C3: the presence revision scope is the Client
             // CONNECTION root — it survives the qualification-only Surface
             // replacement (a fresh plugin fiber per revision would reset the
