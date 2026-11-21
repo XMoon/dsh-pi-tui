@@ -112,7 +112,6 @@ export function buildSpawnPlan(argv, { platform = process.platform, comspec = pr
 const SCRIPT_PATH = fileURLToPath(import.meta.url)
 
 function main() {
-  installDarwinKoffiTestAnchor()
   const command = process.argv.slice(2)
   if (command.length === 0) {
     console.error(usage)
@@ -135,6 +134,10 @@ function main() {
     detached: ownsGroup,
     env: { ...process.env, TMPDIR: root, TMP: root, TEMP: root },
   })
+  // Install the tool-only anchor only AFTER the child inherited its environment:
+  // a real DSH Direct child must keep its own argv identity and never receive
+  // the wrapper's test fixture anchor.
+  installDarwinKoffiTestAnchor()
 
   let childResult
   let resolveClosed

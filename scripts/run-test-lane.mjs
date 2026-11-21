@@ -270,7 +270,6 @@ export function orderWeightedProductFiles(files, total) {
  * on a Windows CreateProcessW command line. Node still owns native sharding.
  */
 async function runLaneChild(laneName, args) {
-  installDarwinKoffiTestAnchor()
   const lane = LANES[laneName]
   const discovered = resolveLane(TEST_ROOT, lane.patterns, lane.suffixes, lane.exclude ?? [])
   const shard = parseShard(args)
@@ -323,7 +322,6 @@ async function runLaneChild(laneName, args) {
 }
 
 function main() {
-  installDarwinKoffiTestAnchor()
   const laneName = process.argv[2]
   const args = process.argv.slice(3)
   if (laneName === undefined) {
@@ -355,6 +353,10 @@ function main() {
     detached: ownsGroup,
     env: { ...sanitizeTestEnvironment(process.env), TMPDIR: root, TMP: root, TEMP: root },
   })
+  // Install the tool-only anchor only AFTER the child inherited its environment:
+  // a real DSH Direct child must keep its own argv identity and never receive
+  // the wrapper's test fixture anchor.
+  installDarwinKoffiTestAnchor()
 
   let childResult
   let resolveClosed

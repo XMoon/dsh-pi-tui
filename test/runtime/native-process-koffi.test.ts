@@ -14,7 +14,7 @@
 
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import test, { type TestContext } from 'node:test'
@@ -167,12 +167,13 @@ test('a pnpm virtual-store DSH closure resolves through its .mise store', t => {
 
 test('the real Darwin bridge reads through the fixture anchor, never a polluted NODE_PATH', { skip: DARWIN_ONLY, timeout: 60_000 }, t => {
   const value = fixture(t, { wrapped: true })
-  const clean = runNativeRead({ SPLIT_PROCESS_DSH_ANCHOR: value.anchor, NODE_PATH: '' })
-  assert.equal(clean.status, 0, clean.stderr)
-  assert.equal(JSON.parse(clean.stdout).kind, 'alive')
   const cleanMarker = value.marker
   assert.ok(cleanMarker !== undefined, 'the wrapped fixture must expose its load marker')
   if (cleanMarker === undefined) return
+  assert.equal(existsSync(cleanMarker), false, 'the marker must not exist before the first load')
+  const clean = runNativeRead({ SPLIT_PROCESS_DSH_ANCHOR: value.anchor, NODE_PATH: '' })
+  assert.equal(clean.status, 0, clean.stderr)
+  assert.equal(JSON.parse(clean.stdout).kind, 'alive')
   assert.ok(existsSync(cleanMarker), 'the fixture Koffi wrapper must be the module that actually loaded')
 
   const badAnchor = runNativeRead({ SPLIT_PROCESS_DSH_ANCHOR: join(ROOT, 'package.json'), NODE_PATH: '' })
@@ -187,6 +188,7 @@ test('the real Darwin bridge reads through the fixture anchor, never a polluted 
     main: 'index.cjs',
   })}\n`)
   writeFileSync(join(polluted, 'node_modules', 'koffi', 'index.cjs'), "throw new Error('ambient koffi must not be loaded')\n")
+  rmSync(cleanMarker, { force: true })
   const withPollution = runNativeRead({
     SPLIT_PROCESS_DSH_ANCHOR: value.anchor,
     NODE_PATH: join(polluted, 'node_modules'),

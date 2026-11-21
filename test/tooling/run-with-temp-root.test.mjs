@@ -154,6 +154,22 @@ test('the runner passes the child exit code through and removes its root', async
   assert.deepEqual(readdirSync(isolatedTmp), [], 'a normal run must not leave a runner root behind')
 })
 
+test('the runner preserves a caller anchor for its child and never leaks its own tool fixture', (t) => {
+  const life = testLifecycle(t)
+  const isolatedTmp = life.tempDir('dsh-runner-anchor-')
+  const base = { ...process.env, TMPDIR: isolatedTmp, TMP: isolatedTmp, TEMP: isolatedTmp }
+  const external = { ...base, SPLIT_PROCESS_DSH_ANCHOR: '/caller/preserved/dsh/package.json' }
+  const preserved = run(['node', '-e', "process.stdout.write(process.env.SPLIT_PROCESS_DSH_ANCHOR ?? '')"], { env: external })
+  assert.equal(preserved.status, 0)
+  assert.equal(preserved.stdout, '/caller/preserved/dsh/package.json')
+
+  const withoutAnchor = { ...base }
+  delete withoutAnchor.SPLIT_PROCESS_DSH_ANCHOR
+  const clean = run(['node', '-e', "process.stdout.write(process.env.SPLIT_PROCESS_DSH_ANCHOR ?? '')"], { env: withoutAnchor })
+  assert.equal(clean.status, 0)
+  assert.equal(clean.stdout, '', 'the runner must not leak its own test fixture anchor into the child')
+})
+
 test('checkout-local TMPDIR and its symlink do not contaminate the command runner', (t) => {
   const life = testLifecycle(t)
   const checkout = realpathSync(fileURLToPath(new URL('../../', import.meta.url)))

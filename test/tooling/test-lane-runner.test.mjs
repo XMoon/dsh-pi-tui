@@ -221,6 +221,46 @@ test('worker uses one owned temp root for all temp variables', () => {
   assert.equal(existsSync(childTmp), false, 'the lane runner removes its external root after a successful run')
 })
 
+test('the lane runner does not leak its own tool anchor into test workers', (t) => {
+  const life = testLifecycle(t)
+  const fixture = life.tempDir('dsh-lane-anchor-env-')
+  const scripts = join(fixture, 'scripts')
+  const dshAnchor = copyLaneRunnerSources(scripts)
+  writeFileSync(join(scripts, 'test-lanes.mjs'), `export const LANES = {
+  probe: { description: 'anchor environment probe', patterns: ['probe/**'], suffixes: ['.test.mjs'] },
+}\n`)
+  const probe = join(fixture, 'test', 'probe')
+  mkdirSync(probe, { recursive: true })
+  writeFileSync(join(probe, 'anchor.test.mjs'), `
+import test from 'node:test'
+import { writeFileSync } from 'node:fs'
+test('records the inherited anchor', () => {
+  writeFileSync(process.env.PROBE_MARKER, process.env.SPLIT_PROCESS_DSH_ANCHOR ?? '')
+})
+`)
+  const marker = join(fixture, 'anchor.txt')
+  const cleanEnv = { ...process.env, PROBE_MARKER: marker, NODE_TEST_CONTEXT: undefined, DSH_TEST_KEEP_TMP: undefined }
+  delete cleanEnv.SPLIT_PROCESS_DSH_ANCHOR
+  const clean = spawnSync(process.execPath, [join(scripts, 'run-test-lane.mjs'), 'probe'], {
+    cwd: fixture,
+    encoding: 'utf8',
+    timeout: 30_000,
+    env: cleanEnv,
+  })
+  assert.equal(clean.status, 0, clean.stderr ?? clean.error?.message)
+  assert.equal(readFileSync(marker, 'utf8'), '', 'the lane runner must not leak its own tool fixture anchor')
+
+  const explicit = { ...cleanEnv, SPLIT_PROCESS_DSH_ANCHOR: dshAnchor }
+  const preserved = spawnSync(process.execPath, [join(scripts, 'run-test-lane.mjs'), 'probe'], {
+    cwd: fixture,
+    encoding: 'utf8',
+    timeout: 30_000,
+    env: explicit,
+  })
+  assert.equal(preserved.status, 0, preserved.stderr ?? preserved.error?.message)
+  assert.equal(readFileSync(marker, 'utf8'), dshAnchor, 'the lane runner must preserve a caller-supplied anchor')
+})
+
 const WINDOWS_COMMAND_LINE_LIMIT = 32_767
 
 test('the real lane starts above the Windows argv budget with complete shard and reporter evidence', (t) => {
