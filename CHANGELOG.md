@@ -17,7 +17,7 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.7
 dsh --profile pi-tui
 ~~~
 
-历史稳定配对：**0.5.6** 使用 `@deepseek-ai/dsh@0.2.2-rc.1` / `@xmoon76/dsh-pi-tui@0.5.6`；**0.5.5** 使用 `@deepseek-ai/dsh@0.2.1-rc.5` / `@xmoon76/dsh-pi-tui@0.5.5`。完整配对参见[兼容性指南](docs/guides/dsh-compatibility.md)。
+历史稳定配对：**0.5.6** 使用 `@deepseek-ai/dsh@0.2.2-rc.1` / `@xmoon76/dsh-pi-tui@0.5.6`；**0.5.5** 使用 `@deepseek-ai/dsh@0.2.1-rc.5` / `@xmoon76/dsh-pi-tui@0.5.5`。完整配对参见[兼容性指南](https://github.com/XMoon/dsh-pi-tui/blob/main/docs/guides/dsh-compatibility.md)。
 
 ### 新增
 

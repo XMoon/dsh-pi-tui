@@ -143,7 +143,7 @@ Also available: `web disable` / `web open`. The commands do **not** start a Host
 
 **ACP v1** is a default-off, same-user local Unix-socket interface. `/acp` in a Daemon TUI inspects/toggles the live listener; `/settings → General → Start ACP automatically` controls the next cold Host start. Headless clients can discover a positively verified `acp` status/socket via `daemon status`. ACP supports a bounded `initialize` / `session/new|resume|prompt|cancel|close` subset plus negotiated image input; it does not implement `session/list`, `session/load` or MCP Server configuration over ACP. One ACP connection has at most one Session View and each Session at most one ACP View, with no such restriction on TUI Views. An executable [ACP SDK example and connection procedure](docs/guides/daemon.md#local-acp-v1-sdk-client-example) is in the Daemon guide.
 
-When launched inside [Herdr](https://github.com/krisajenkins/herdr), the TUI can report Agent status and provide Profile-pinned recovery commands for durable Sessions where the Herdr Client supports them.
+When launched inside [Herdr](https://github.com/herdrdev/herdr), the TUI can report Agent status and provide Profile-pinned recovery commands for durable Sessions where the Herdr Client supports them.
 
 ## Settings, extensions and development
 

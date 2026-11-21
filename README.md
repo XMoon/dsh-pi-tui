@@ -143,7 +143,7 @@ dsh --profile pi-tui web status
 
 **ACP v1** 是默认关闭的、同机同用户 Unix Socket 接口。Daemon TUI 的 `/acp` 可以查看和切换当前 Listener；`/settings → General → Start ACP automatically` 控制下次 Host 冷启动。Headless 客户端可用 `daemon status` 查询已验证的 `acp` 状态与端点。ACP 支持有限的 `initialize`、`session/new|resume|prompt|cancel|close` 和协商后的图片输入；不支持 `session/list`、`session/load` 或通过 ACP 管理 MCP Server。一个连接只持有一个 Session View，同一 Session 最多一个 ACP View，而多个 TUI 仍可访问它。可运行的 [ACP SDK 例子与连接流程](docs/guides/daemon.md#local-acp-v1-sdk-client-example) 位于 Daemon 指南。
 
-在 [Herdr](https://github.com/krisajenkins/herdr) Pane 中运行时，TUI 可以上报 Agent 工作状态；对有持久 Session ID 的场景可提供经 Profile 约束的恢复命令，实际能力取决于 Herdr 客户端。
+在 [Herdr](https://github.com/herdrdev/herdr) Pane 中运行时，TUI 可以上报 Agent 工作状态；对有持久 Session ID 的场景可提供经 Profile 约束的恢复命令，实际能力取决于 Herdr 客户端。
 
 ## 设置、扩展与开发
 
