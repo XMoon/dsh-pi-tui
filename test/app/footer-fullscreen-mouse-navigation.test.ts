@@ -821,6 +821,13 @@ test('an armed exit hint never exposes a successor hit on the covered row before
     // Trigger the pointer rebase on the visible model hit, then immediately
     // press/release the covered tasks row before any repaint can publish it.
     press(h.vt, model.x, model.row)
+    const pointerFrame = (h.app as unknown as {
+      footerPaintedProjection?: { hits: readonly { id: string; row: number }[] }
+    }).footerPaintedProjection
+    assert.ok(pointerFrame !== undefined, 'the rebased pointer frame must exist')
+    assert.ok(pointerFrame.hits.some(hit => hit.id === 'model'), 'the visible model hit survives the rebase')
+    assert.ok(!pointerFrame.hits.some(hit => hit.id === 'tasks' && hit.row === tasks.row),
+      'the instruction-covered tasks hit must not be published before a real repaint')
     press(h.vt, tasks.x, tasks.row)
     release(h.vt, tasks.x, tasks.row)
     await h.vt.waitForRender()
