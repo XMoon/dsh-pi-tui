@@ -279,11 +279,10 @@ export async function runWebRuntimeToggle(context) {
   mkdirSync(workRoot, { recursive: true, mode: 0o700 })
   chmodSync(workRoot, 0o700)
   // The installed profile's own patch: the file a persisted toggle would
-  // have to write, and the one this lane proves byte-identical.
+  // have to write, and the one this lane proves byte-identical. Snapshot it
+  // AFTER the Host is ready: profile boot may legitimately migrate its own
+  // preferences row, but the live toggle must not touch it afterwards.
   const hostProfiles = { profilePath: join(dshHome, 'profiles', base.profile, 'cordis.patch.yml') }
-  const profilePatchBefore = existsSync(hostProfiles.profilePath)
-    ? readFileSync(hostProfiles.profilePath)
-    : undefined
   const promptEvidence = () => {
     const text = readFileSync(promptEvidencePath, 'utf8').trim()
     return text === '' ? [] : text.split('\n').map(line => JSON.parse(line))
@@ -309,6 +308,9 @@ export async function runWebRuntimeToggle(context) {
     })
     hosts.push(host)
     const ready = await host.waitFor(record => record.m4a0 === 'ready', 'PR-B default-off Host ready', 240_000)
+    const profilePatchBefore = existsSync(hostProfiles.profilePath)
+      ? readFileSync(hostProfiles.profilePath)
+      : undefined
     webScopeSuffix = ready.localHost.scopeId.slice(0, 40)
     const origin = ready.localHost.origin
     const launch = readJson(join(dshHome, 'run', 'dsh-pi-tui', ready.localHost.scopeId, 'launch.json'))
