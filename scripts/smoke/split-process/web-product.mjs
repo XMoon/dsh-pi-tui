@@ -358,6 +358,12 @@ export const runWebProductQualification = async context => {
 
   /** The durable events of one Session (empty before its first write). */
   const durableOf = sessionId => hostSessionEvents(dshHome, sessionId) ?? []
+  /** A real completed turn, never an interrupted/aborted settlement. */
+  const isCompletedTurn = event => event.type === 'turn/end' && event.data?.reason?.kind === 'completed'
+  /** A user-authored message carrying the exact marker text. */
+  const isAuthoredUser = (event, text) => event.type === 'user/message'
+    && event.data?.source?.kind === 'user'
+    && JSON.stringify(event).includes(text)
   /** One offline model request record per call (the fixture's model-facing sink). */
   const promptEvidence = () => {
     const text = readFileSync(context.installation.surfaceLlm.promptEvidencePath, 'utf8').trim()
@@ -365,7 +371,7 @@ export const runWebProductQualification = async context => {
   }
   const requestIdOf = event => event.data?.source?.rpcId ?? event.data?.rpcId ?? event.data?.requestId ?? event.data?.id
   const userEvents = (sessionId, text) => durableOf(sessionId)
-    .filter(event => event.type === 'user/message' && JSON.stringify(event).includes(text))
+    .filter(event => isAuthoredUser(event, text))
   /** Persist the redacted durable correlation events of one case Session. */
   const recordSession = (id, sessionId) => {
     const events = durableOf(sessionId)
@@ -513,7 +519,7 @@ export const runWebProductQualification = async context => {
   const tuiTurn = async (tui, sessionId, text, label) => {
     const boundary = durableOf(sessionId).length
     const committed = () => durableOf(sessionId).slice(boundary)
-      .some(event => event.type === 'user/message' && JSON.stringify(event).includes(text))
+      .some(event => isAuthoredUser(event, text))
     tui.send(`${text}\r`)
     await tui.waitForScreen(text, `${label} prompt painted`, 120_000)
     // A `/web` overlay close or a just-mounted `/new` session can swallow
@@ -532,9 +538,9 @@ export const runWebProductQualification = async context => {
       tui.send('\r')
     }
     await waitForHostSessionEventAfter(dshHome, sessionId, boundary,
-      event => event.type === 'user/message' && JSON.stringify(event).includes(text), `${label} user/message`, 180_000)
+      event => isAuthoredUser(event, text), `${label} user/message`, 180_000)
     await waitForHostSessionEventAfter(dshHome, sessionId, boundary,
-      event => event.type === 'turn/end', `${label} turn/end`, 180_000)
+      isCompletedTurn, `${label} turn/end`, 180_000)
     return boundary
   }
   /**
@@ -560,10 +566,10 @@ export const runWebProductQualification = async context => {
     tui.send(`${canonicalSessionMention(targetSessionId)} ${marker}\r`)
     await tui.waitForScreen(marker, `${label} prompt painted`, 120_000)
     await waitForHostSessionEventAfter(dshHome, sessionId, boundary,
-      event => event.type === 'user/message' && JSON.stringify(event).includes(marker),
+      event => isAuthoredUser(event, marker),
       `${label} user/message`, 180_000)
     await waitForHostSessionEventAfter(dshHome, sessionId, boundary,
-      event => event.type === 'turn/end', `${label} turn/end`, 180_000)
+      isCompletedTurn, `${label} turn/end`, 180_000)
     return boundary
   }
   /** One correlated `qualification-web-access` round trip. */
@@ -675,7 +681,6 @@ export const runWebProductQualification = async context => {
         }
         return readJson(stepPath)
       },
-      readStep: seq => readJson(join(coord, `browser-step-${seq}.json`)),
     }
     evidence.caseStart(caseId)
     let passed = false
@@ -768,7 +773,7 @@ export const runWebProductQualification = async context => {
       assert(resetStop.code === 0, 'PR-D the preference-reset Host did not stop normally')
     }
 
-    // ── Group A: WP-01/02/06/08/09/10 on ONE fast-answer Host ───────────
+    // ── Group A: WP-01/02/06/08/09 on ONE fast-answer Host ──────────────
     const groupA = await startHost('long-turn', 'wp01-group', { C1_HOLD_LONG_TURN: fastBarrier })
     assertSingleHostOwners(groupA.ready, 'WP-01 Host')
     const groupAIdentity = groupA.ready.localHost
@@ -841,10 +846,10 @@ export const runWebProductQualification = async context => {
       assertClientHostFacts(lastSurfaceStatus(groupTui)?.host, groupA.ready.localHost, 'WP-01 TUI vs Browser Host')
       const boundary = durableOf(browserSession.sessionId).length
       await waitForHostSessionEventAfter(dshHome, browserSession.sessionId, boundary,
-        event => event.type === 'user/message' && JSON.stringify(event).includes(`wp01-${productNonce}`),
+        event => isAuthoredUser(event, `wp01-${productNonce}`),
         'WP-01 Browser prompt committed', 180_000)
       await waitForHostSessionEventAfter(dshHome, browserSession.sessionId, boundary,
-        event => event.type === 'turn/end', 'WP-01 Browser turn settled', 180_000)
+        isCompletedTurn, 'WP-01 Browser turn settled', 180_000)
       const armed = await handle.waitFact('session-reference-armed', 'WP-01 session-reference armed', 240_000)
       const referenceEvidenceStart = promptEvidence().length
       handle.signal('session-reference-send')
@@ -958,11 +963,11 @@ export const runWebProductQualification = async context => {
       // The two prompts have the SAME text: bind the Browser's own host
       // occurrence and its completed turn before the TUI writes the second one.
       const browserSame = await waitForHostSessionEventAfter(dshHome, sessionB, sameTextBoundary,
-        event => event.type === 'user/message' && JSON.stringify(event).includes(sameText),
+        event => isAuthoredUser(event, sameText),
         'WP-02D Browser user/message durable', 120_000)
       const afterBrowserSameIndex = durableOf(sessionB).findIndex(event => event.seq === browserSame.seq) + 1
       await waitForHostSessionEventAfter(dshHome, sessionB, afterBrowserSameIndex,
-        event => event.type === 'turn/end' && event.seq > browserSame.seq,
+        event => isCompletedTurn(event) && event.seq > browserSame.seq,
         'WP-02D Browser turn/end durable', 120_000)
       await tuiTurn(groupTui, sessionB, sameText, 'WP-02D')
       const occurrences = userEvents(sessionB, sameText)
@@ -1021,11 +1026,11 @@ export const runWebProductQualification = async context => {
       handle.signal('tui-killed')
       await handle.waitFact('browser-wrote-after-tui-kill', 'WP-06 Browser write after the TUI SIGKILL', 300_000)
       const browserUser = await waitForHostSessionEventAfter(dshHome, sessionLife, browserBoundary,
-        event => event.type === 'user/message' && JSON.stringify(event).includes(lifeMarker),
+        event => isAuthoredUser(event, lifeMarker),
         'WP-06 Browser prompt after the TUI SIGKILL', 180_000)
       const afterBrowserUserIndex = durableOf(sessionLife).findIndex(event => event.seq === browserUser.seq) + 1
       await waitForHostSessionEventAfter(dshHome, sessionLife, afterBrowserUserIndex,
-        event => event.type === 'turn/end' && event.seq > browserUser.seq,
+        event => isCompletedTurn(event) && event.seq > browserUser.seq,
         'WP-06 Browser turn after the TUI SIGKILL', 180_000)
       const { tui: freshTui } = await startTui('WP-06 fresh TUI', { SPLIT_PROCESS_CLIENT_SESSION: sessionLife })
       await freshTui.waitForScreen(lifeSeed, 'WP-06 fresh TUI reads the durable seed', 180_000)
@@ -1113,7 +1118,6 @@ export const runWebProductQualification = async context => {
     // visible viewport. The latest marker was independently verified in the
     // Host log above.
     await tuiLocal.waitForScreen(`W-${productNonce}-tui-while-off`, 'WP-09 Client-local TUI reads the Session', 180_000)
-    const browserUploadMarker = `w-${productNonce}-browser-upload`
     let hostShellFact
     await browserCase('wp09-locality', {
       sessionId: sessionToggle,
@@ -1610,11 +1614,11 @@ export const runWebProductQualification = async context => {
         await handle.waitFact('browser-reconnected', 'WP-07 Browser reconnected after the Host SIGKILL', 300_000)
         await handle.waitFact('browser-wrote-after-reconnect', 'WP-07 Browser wrote after the reconnect', 300_000)
         const browserUser = await waitForHostSessionEventAfter(dshHome, sessionLife, browserBoundary,
-          event => event.type === 'user/message' && JSON.stringify(event).includes(hostMarker),
+          event => isAuthoredUser(event, hostMarker),
           'WP-07 Browser prompt after cold resume', 180_000)
         const afterBrowserUserIndex = durableOf(sessionLife).findIndex(event => event.seq === browserUser.seq) + 1
         await waitForHostSessionEventAfter(dshHome, sessionLife, afterBrowserUserIndex,
-          event => event.type === 'turn/end' && event.seq > browserUser.seq,
+          event => isCompletedTurn(event) && event.seq > browserUser.seq,
           'WP-07 Browser turn after cold resume', 180_000)
       })
       assert(userEvents(sessionLife, hostMarker).length === 1,
@@ -1775,15 +1779,21 @@ export const runWebProductQualification = async context => {
             assert(git(['add', '--all']).status === 0, 'WP-11 could not stage the initial work tree')
             const committed = git(['-c', 'user.name=WP11', '-c', 'user.email=wp11@example.invalid', 'commit', '--quiet', '-m', 'w5 baseline'])
             assert(committed.status === 0, `WP-11 could not create the initial commit: ${committed.stderr}`)
+            // Capture the durable index BEFORE releasing the Browser into its
+            // first prompt; the helper's boundary is a pre-action snapshot.
+            const firstBoundary = durableOf(wp11Session).length
             handle.signal('workspace-ready')
 
-            const firstBoundary = durableOf(wp11Session).length
             const changesEvent = await waitForHostSessionEventAfter(dshHome, wp11Session, firstBoundary,
               event => event.type === 'workspace/changes', 'WP-11 durable workspace/changes event', 300_000)
             assert(Number.isSafeInteger(changesEvent.data?.turn) && changesEvent.data.turn >= 1,
               `WP-11 the workspace/changes event carries no turn: ${JSON.stringify(changesEvent.data)}`)
             wp11Seq = changesEvent.seq
             wp11Turn = changesEvent.data.turn
+            const firstUserEvents = durableOf(wp11Session)
+              .filter(event => isAuthoredUser(event, `w5-changes-${changesNonce}`))
+            assert(firstUserEvents.length === 1,
+              `WP-11 the first write prompt produced ${String(firstUserEvents.length)} authored user messages, expected exactly 1`)
             const writeProof = readC1WorkEvents(wp11.workRoot)
               .filter(event => event.kind === 'web-changes-write-issued' && event.sessionId === wp11Session)
             assert(writeProof.length === 1,
@@ -1837,17 +1847,17 @@ export const runWebProductQualification = async context => {
             // own `turn/end` can satisfy a later nochange barrier.
             const afterChangesIndex = durableOf(wp11Session).findIndex(event => event.seq === changesEvent.seq) + 1
             const firstTurnEnd = await waitForHostSessionEventAfter(dshHome, wp11Session, afterChangesIndex,
-              event => event.type === 'turn/end' && event.seq > changesEvent.seq,
+              event => isCompletedTurn(event) && event.seq > changesEvent.seq,
               'WP-11 first-write turn/end', 180_000)
             const afterFirstTurnEndIndex = durableOf(wp11Session).findIndex(event => event.seq === firstTurnEnd.seq) + 1
             handle.signal('first-write-verified')
 
             await handle.waitFact('nochange-sent', 'WP-11 no-change prompt sent', 300_000)
             await waitForHostSessionEventAfter(dshHome, wp11Session, afterFirstTurnEndIndex,
-              event => event.type === 'turn/end' && event.seq > firstTurnEnd.seq,
+              event => isCompletedTurn(event) && event.seq > firstTurnEnd.seq,
               'WP-11 no-change turn/end', 180_000)
             const noChangeUserEvents = durableOf(wp11Session)
-              .filter(event => event.type === 'user/message' && JSON.stringify(event).includes(`w5-nochange-${changesNonce}`))
+              .filter(event => isAuthoredUser(event, `w5-nochange-${changesNonce}`))
             assert(noChangeUserEvents.length === 1,
               `WP-11 the no-change prompt produced ${String(noChangeUserEvents.length)} authored user messages, expected exactly 1`)
             assert(durableOf(wp11Session).filter(event => event.type === 'workspace/changes').length === 1,
@@ -1887,7 +1897,7 @@ export const runWebProductQualification = async context => {
             wp11Seq2 = secondEvent.seq
             wp11Turn2 = secondEvent.data.turn
             const secondUserEvents = durableOf(wp11Session)
-              .filter(event => event.type === 'user/message' && JSON.stringify(event).includes(`w5-changes2-${changesNonce}`))
+              .filter(event => isAuthoredUser(event, `w5-changes2-${changesNonce}`))
             assert(secondUserEvents.length === 1,
               `WP-11 the second write prompt produced ${String(secondUserEvents.length)} authored user messages, expected exactly 1`)
             const write2Proof = readC1WorkEvents(wp11.workRoot)
@@ -2040,7 +2050,7 @@ export const runWebProductQualification = async context => {
       hostPid: groupA.ready.pid,
       ternGui: 'NOT_VERIFIED: the real Tern GUI/TSP native gesture path is outside this Browser × Split product subset',
     })
-    return { status: 'PASS', browserSubset: 'PASS', verifiedCaseIds }
+    return { status: 'PASS', browserSubset: 'PASS', verifiedCaseIds, candidateSha256 }
   } finally {
     await cleanup()
   }
