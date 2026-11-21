@@ -647,6 +647,23 @@ async function promptAndWait(page, text, answerNeedle, timeoutMs = 240_000) {
 }
 
 /**
+ * Submit one prompt and wait until the SAME conversation contains at least
+ * `minCount` answer occurrences. This prevents a previously painted answer
+ * from satisfying a new prompt's wait.
+ */
+async function promptAndWaitCount(page, text, answerNeedle, minCount, timeoutMs = 240_000) {
+  await sendPrompt(page, text)
+  const deadline = Date.now() + timeoutMs
+  let observed = 0
+  while (Date.now() < deadline) {
+    observed = await conversationCount(page, text, answerNeedle)
+    if (observed >= minCount) return observed
+    await page.waitForTimeout(250)
+  }
+  throw new Error(`browser timed out waiting for ${String(minCount)} answer occurrence(s) of "${text.slice(0, 40)}"; observed ${String(observed)}`)
+}
+
+/**
  * Run one harmless command in the official Web terminal (a Host-owned PTY in
  * the Session workspace) and write two sentinel files on the HOST side. This
  * is the WP-09 Host-owned workspace shell/path action: the browser-local and
@@ -982,14 +999,20 @@ const cases = {
     const page = await login(context)
     await openSession(page, caseConfig.sessionId)
     const same = caseConfig.marker
-    await promptAndWait(page, same, caseConfig.expectedAnswer ?? 'long-turn answer')
+    await promptAndWaitCount(page, same, caseConfig.expectedAnswer ?? 'long-turn answer', 2)
     driverFact('turn-done', { marker: same })
     await waitSignal('tui-done')
-    await waitConversation(page, same, ['long-turn answer'], 240_000, 'the second same-text answer')
-    const bubbles = await conversationCount(page, same, same)
-    const answers = await conversationCount(page, same, 'long-turn answer')
+    const deadline = Date.now() + 240_000
+    let bubbles = 0
+    let answers = 0
+    while (Date.now() < deadline) {
+      bubbles = await conversationCount(page, same, same)
+      answers = await conversationCount(page, same, 'long-turn answer')
+      if (bubbles >= 2 && answers >= 3) break
+      await page.waitForTimeout(250)
+    }
     if (bubbles < 2) throw new Error(`the conversation shows ${String(bubbles)} same-text occurrences, expected two`)
-    if (answers < 2) throw new Error(`the conversation shows ${String(answers)} answers, expected two`)
+    if (answers < 3) throw new Error(`the conversation shows ${String(answers)} answers, expected three (WP02B + two same-text turns)`)
     await screenshot(page, 'same-text')
     step('same-text-not-deduplicated', true, { occurrences: bubbles, answers })
   },
@@ -1086,7 +1109,7 @@ const cases = {
     driverFact('ready', {})
     await waitSignal('tui-killed', 300_000)
     const marker = caseConfig.marker ?? `wp06-${nonce}`
-    await promptAndWait(page, marker, caseConfig.expectedAnswer ?? 'long-turn answer')
+    await promptAndWaitCount(page, marker, caseConfig.expectedAnswer ?? 'long-turn answer', 2)
     driverFact('browser-wrote-after-tui-kill', { marker })
     await waitSignal('fresh-tui-resumed', 300_000)
     await screenshot(page, 'tui-lifecycle')
@@ -1109,7 +1132,7 @@ const cases = {
       'the durable Session after the Host restart')
     driverFact('browser-reconnected', {})
     const marker = caseConfig.marker ?? `wp07-${nonce}`
-    await promptAndWait(fresh, marker, caseConfig.expectedAnswer ?? 'long-turn answer')
+    await promptAndWaitCount(fresh, marker, caseConfig.expectedAnswer ?? 'long-turn answer', 2)
     driverFact('browser-wrote-after-reconnect', { marker })
     await screenshot(fresh, 'host-lifecycle')
     step('host-sigkill-cold-resume', true, { marker })

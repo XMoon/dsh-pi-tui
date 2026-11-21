@@ -948,21 +948,22 @@ export const runWebProductQualification = async context => {
 
     // WP-02D: the SAME text from both Clients stays two independent Turns.
     const sameText = `S-${productNonce}-same`
+    const sameTextBoundary = durableOf(sessionB).length
     await browserCase('wp02d-same-text', {
       sessionId: sessionB,
       marker: sameText,
       expectedAnswer: 'long-turn answer',
     }, async handle => {
       await handle.waitFact('turn-done', 'WP-02D Browser same-text turn', 240_000)
-      // The two prompts have the SAME text: before the TUI writes its own,
-      // prove the Browser's occurrence and turn are already durable. The TUI
-      // boundary then cannot be satisfied by the Browser's late flush, which
-      // would otherwise hide a swallowed TUI Enter.
-      await waitForHostSessionEvent(dshHome, sessionB,
+      // The two prompts have the SAME text: bind the Browser's own host
+      // occurrence and its completed turn before the TUI writes the second one.
+      const browserSame = await waitForHostSessionEventAfter(dshHome, sessionB, sameTextBoundary,
         event => event.type === 'user/message' && JSON.stringify(event).includes(sameText),
         'WP-02D Browser user/message durable', 120_000)
-      await waitForHostSessionEvent(dshHome, sessionB,
-        event => event.type === 'turn/end', 'WP-02D Browser turn/end durable', 120_000)
+      const afterBrowserSameIndex = durableOf(sessionB).findIndex(event => event.seq === browserSame.seq) + 1
+      await waitForHostSessionEventAfter(dshHome, sessionB, afterBrowserSameIndex,
+        event => event.type === 'turn/end' && event.seq > browserSame.seq,
+        'WP-02D Browser turn/end durable', 120_000)
       await tuiTurn(groupTui, sessionB, sameText, 'WP-02D')
       const occurrences = userEvents(sessionB, sameText)
       assert(occurrences.length === 2, `WP-02D the Host committed ${String(occurrences.length)} same-text user messages, expected 2`)
@@ -1011,6 +1012,7 @@ export const runWebProductQualification = async context => {
       expectedAnswer: 'long-turn answer',
     }, async handle => {
       await handle.waitFact('ready', 'WP-06 Browser ready', 240_000)
+      const browserBoundary = durableOf(sessionLife).length
       const tuiPid = groupTui.records.filter(record => record.m4a0 === 'ready').at(-1)?.pid
       assert(Number.isInteger(tuiPid) && alive(tuiPid), 'WP-06 the TUI published no business PID')
       groupTui.signalBusiness('SIGKILL')
@@ -1018,11 +1020,13 @@ export const runWebProductQualification = async context => {
       await groupTui.dispose()
       handle.signal('tui-killed')
       await handle.waitFact('browser-wrote-after-tui-kill', 'WP-06 Browser write after the TUI SIGKILL', 300_000)
-      await waitForHostSessionEventAfter(dshHome, sessionLife, 0,
+      const browserUser = await waitForHostSessionEventAfter(dshHome, sessionLife, browserBoundary,
         event => event.type === 'user/message' && JSON.stringify(event).includes(lifeMarker),
         'WP-06 Browser prompt after the TUI SIGKILL', 180_000)
-      await waitForHostSessionEventAfter(dshHome, sessionLife, 0,
-        event => event.type === 'turn/end', 'WP-06 Browser turn after the TUI SIGKILL', 180_000)
+      const afterBrowserUserIndex = durableOf(sessionLife).findIndex(event => event.seq === browserUser.seq) + 1
+      await waitForHostSessionEventAfter(dshHome, sessionLife, afterBrowserUserIndex,
+        event => event.type === 'turn/end' && event.seq > browserUser.seq,
+        'WP-06 Browser turn after the TUI SIGKILL', 180_000)
       const { tui: freshTui } = await startTui('WP-06 fresh TUI', { SPLIT_PROCESS_CLIENT_SESSION: sessionLife })
       await freshTui.waitForScreen(lifeSeed, 'WP-06 fresh TUI reads the durable seed', 180_000)
       await freshTui.waitForScreen(lifeMarker, 'WP-06 fresh TUI reads the Browser write', 180_000)
@@ -1586,6 +1590,7 @@ export const runWebProductQualification = async context => {
         expectedAnswer: 'long-turn answer',
       }, async handle => {
         await handle.waitFact('ready', 'WP-07 Browser ready', 240_000)
+        const browserBoundary = durableOf(sessionLife).length
         const oldInstance = beforeKill.instanceId
         lifecycle.host.kill('SIGKILL')
         const killed = await lifecycle.host.waitForExit(60_000)
@@ -1604,11 +1609,13 @@ export const runWebProductQualification = async context => {
         handle.signal('new-host-ready')
         await handle.waitFact('browser-reconnected', 'WP-07 Browser reconnected after the Host SIGKILL', 300_000)
         await handle.waitFact('browser-wrote-after-reconnect', 'WP-07 Browser wrote after the reconnect', 300_000)
-        await waitForHostSessionEventAfter(dshHome, sessionLife, 0,
+        const browserUser = await waitForHostSessionEventAfter(dshHome, sessionLife, browserBoundary,
           event => event.type === 'user/message' && JSON.stringify(event).includes(hostMarker),
           'WP-07 Browser prompt after cold resume', 180_000)
-        await waitForHostSessionEventAfter(dshHome, sessionLife, 0,
-          event => event.type === 'turn/end', 'WP-07 Browser turn after cold resume', 180_000)
+        const afterBrowserUserIndex = durableOf(sessionLife).findIndex(event => event.seq === browserUser.seq) + 1
+        await waitForHostSessionEventAfter(dshHome, sessionLife, afterBrowserUserIndex,
+          event => event.type === 'turn/end' && event.seq > browserUser.seq,
+          'WP-07 Browser turn after cold resume', 180_000)
       })
       assert(userEvents(sessionLife, hostMarker).length === 1,
         'WP-07 the Browser Turn after cold resume was not committed once')
@@ -1828,15 +1835,21 @@ export const runWebProductQualification = async context => {
             // The first write turn must be fully settled before the driver is
             // allowed to send the no-change prompt. Otherwise the first turn's
             // own `turn/end` can satisfy a later nochange barrier.
-            const firstTurnEnd = await waitForHostSessionEventAfter(dshHome, wp11Session, changesEvent.seq,
+            const afterChangesIndex = durableOf(wp11Session).findIndex(event => event.seq === changesEvent.seq) + 1
+            const firstTurnEnd = await waitForHostSessionEventAfter(dshHome, wp11Session, afterChangesIndex,
               event => event.type === 'turn/end' && event.seq > changesEvent.seq,
               'WP-11 first-write turn/end', 180_000)
+            const afterFirstTurnEndIndex = durableOf(wp11Session).findIndex(event => event.seq === firstTurnEnd.seq) + 1
             handle.signal('first-write-verified')
 
             await handle.waitFact('nochange-sent', 'WP-11 no-change prompt sent', 300_000)
-            await waitForHostSessionEventAfter(dshHome, wp11Session, firstTurnEnd.seq,
+            await waitForHostSessionEventAfter(dshHome, wp11Session, afterFirstTurnEndIndex,
               event => event.type === 'turn/end' && event.seq > firstTurnEnd.seq,
               'WP-11 no-change turn/end', 180_000)
+            const noChangeUserEvents = durableOf(wp11Session)
+              .filter(event => event.type === 'user/message' && JSON.stringify(event).includes(`w5-nochange-${changesNonce}`))
+            assert(noChangeUserEvents.length === 1,
+              `WP-11 the no-change prompt produced ${String(noChangeUserEvents.length)} authored user messages, expected exactly 1`)
             assert(durableOf(wp11Session).filter(event => event.type === 'workspace/changes').length === 1,
               'WP-11 a no-change Turn appended a workspace/changes event')
             handle.signal('nochange-verified')
@@ -1873,6 +1886,10 @@ export const runWebProductQualification = async context => {
               'WP-11 post-re-enable workspace/changes event', 180_000)
             wp11Seq2 = secondEvent.seq
             wp11Turn2 = secondEvent.data.turn
+            const secondUserEvents = durableOf(wp11Session)
+              .filter(event => event.type === 'user/message' && JSON.stringify(event).includes(`w5-changes2-${changesNonce}`))
+            assert(secondUserEvents.length === 1,
+              `WP-11 the second write prompt produced ${String(secondUserEvents.length)} authored user messages, expected exactly 1`)
             const write2Proof = readC1WorkEvents(wp11.workRoot)
               .filter(event => event.kind === 'web-changes-write2-issued' && event.sessionId === wp11Session)
             assert(write2Proof.length === 1,
@@ -1915,8 +1932,12 @@ export const runWebProductQualification = async context => {
             const secondHostBytes = readFileSync(join(wp11Cwd, 'changed2.txt'))
             assert(secondHostBytes.toString('utf8') === `w5-change2-${changesNonce}\n`,
               'WP-11 the new Host file does not hold the second written content')
-            assert((await fetchStatus(summaryUrl, { headers: { cookie: index11.cookie } })).status === 404,
-              'WP-11 the pre-disable summary came back after the new Turn')
+            const staleAfterSecondSummary = await fetchStatus(summaryUrl, { headers: { cookie: index11.cookie } })
+            assert(staleAfterSecondSummary.status === 404,
+              `WP-11 the pre-disable summary came back after the new Turn (HTTP ${String(staleAfterSecondSummary.status)})`)
+            const staleAfterSecondDiff = await fetchStatus(diffUrl, { headers: { cookie: index11.cookie } })
+            assert(staleAfterSecondDiff.status === 404,
+              `WP-11 the pre-disable comparison came back after the new Turn (HTTP ${String(staleAfterSecondDiff.status)})`)
             handle.signal('second-write-verified')
 
             evidence.fact('wp11-host-changes', 'web-capabilities', {
@@ -1932,7 +1953,13 @@ export const runWebProductQualification = async context => {
               anonymousSummaryStatus: anonymous.status,
               webRows: { workspaceChanges: 'active', uiDeliverables: 'active' },
               noChange: { workspaceChanges: 1 },
-              toggle: { staleSummary404: staleOnSameHost.status, staleDiff404: staleDiffSameHost.status, secondChange: { turn: wp11Turn2, seq: wp11Seq2, files: ['changed2.txt'] } },
+              toggle: {
+                staleSummary404: staleOnSameHost.status,
+                staleDiff404: staleDiffSameHost.status,
+                afterSecondSummary404: staleAfterSecondSummary.status,
+                afterSecondDiff404: staleAfterSecondDiff.status,
+                secondChange: { turn: wp11Turn2, seq: wp11Seq2, files: ['changed2.txt'] },
+              },
             })
             recordSession('wp11-host-changes', wp11Session)
             await ptyFrames('wp11-host-changes', tuiW)
@@ -1961,29 +1988,28 @@ export const runWebProductQualification = async context => {
           assertToggle(await webAccess(wp11Peer, 'WP-11 restart', true), 'enabled', 'WP-11 restart webAccess')
           const restartFacts = await readHostWebIndex(wp11Next.ready.localHost.origin, launchOf(wp11Next.ready), 'WP-11 restart')
           assertWebIndexQualified(restartFacts, 'WP-11 restart', targetDshVersion)
-          const coordinates = new URLSearchParams({ sessionId: wp11Session, seq: String(wp11Seq) })
-          const staleSummary = await fetchStatus(`${wp11Next.ready.localHost.origin}/api/changes.summary?${coordinates}`,
-            { headers: { cookie: restartFacts.cookie } })
-          assert(staleSummary.status === 404,
-            `WP-11 a restarted Host served the old summary (HTTP ${String(staleSummary.status)})`)
-          const staleDiff = await fetchStatus(`${wp11Next.ready.localHost.origin}/api/changes.diff?${coordinates}&index=0`,
-            { headers: { cookie: restartFacts.cookie } })
-          assert(staleDiff.status === 404,
-            `WP-11 a restarted Host served the old comparison (HTTP ${String(staleDiff.status)})`)
-          for (const body of [staleSummary.body, staleDiff.body]) {
-            assert(!body.includes(`w5-change-${changesNonce}`),
-              'WP-11 a restarted Host replayed content it no longer owns')
+          const restartCoordinates = [
+            { label: 'first', query: new URLSearchParams({ sessionId: wp11Session, seq: String(wp11Seq) }), content: `w5-change-${changesNonce}` },
+            { label: 'second', query: new URLSearchParams({ sessionId: wp11Session, seq: String(wp11Seq2) }), content: `w5-change2-${changesNonce}` },
+          ]
+          const restartStatuses = {}
+          for (const { label, query, content } of restartCoordinates) {
+            const staleSummary = await fetchStatus(`${wp11Next.ready.localHost.origin}/api/changes.summary?${query}`,
+              { headers: { cookie: restartFacts.cookie } })
+            assert(staleSummary.status === 404,
+              `WP-11 a restarted Host served the old ${label} summary (HTTP ${String(staleSummary.status)})`)
+            const staleDiff = await fetchStatus(`${wp11Next.ready.localHost.origin}/api/changes.diff?${query}&index=0`,
+              { headers: { cookie: restartFacts.cookie } })
+            assert(staleDiff.status === 404,
+              `WP-11 a restarted Host served the old ${label} comparison (HTTP ${String(staleDiff.status)})`)
+            for (const body of [staleSummary.body, staleDiff.body]) {
+              assert(!body.includes(content),
+                `WP-11 a restarted Host replayed the old ${label} content it no longer owns`)
+            }
+            restartStatuses[label] = { summary: staleSummary.status, diff: staleDiff.status }
           }
-          evidence.fact('wp11-restart', 'stale-coordinates', {
-            summary: staleSummary.status,
-            diff: staleDiff.status,
-            replayRefused: true,
-          })
-          trace('t75-web-product-wp11-stale', {
-            summary: staleSummary.status,
-            diff: staleDiff.status,
-            replayRefused: true,
-          })
+          evidence.fact('wp11-restart', 'stale-coordinates', restartStatuses)
+          trace('t75-web-product-wp11-stale', restartStatuses)
         } finally {
           if (tuiW !== undefined && !tuiW.exited) { try { await tuiW.dispose() } catch { /* best effort */ } }
           if (wp11Peer !== undefined && !wp11Peer.exited) { try { await wp11Peer.shutdown() } catch { /* best effort */ } }
