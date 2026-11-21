@@ -146,9 +146,10 @@ dsh --profile pi-tui web status
 从源码开发：
 
 ~~~sh
-pnpm install
-pnpm build
-pnpm typecheck
+mise install --locked
+mise run setup
+mise run build
+mise run typecheck
 ~~~
 
 请先阅读 [AGENTS.md](AGENTS.md)、[开发指南](docs/guides/development.md) 与[文档索引](docs/README.md)；完整发布与验证步骤见 [Release checklist](docs/guides/releasing.md)。

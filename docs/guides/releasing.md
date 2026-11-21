@@ -243,7 +243,7 @@ package version, or installation guidance is incomplete; do not bypass it.
 The repository has ONE local release gate:
 
 ```sh
-pnpm verify:release
+mise run verify:release
 ```
 
 It runs the fork typecheck/tests, the benchmark typecheck, the tmux and
@@ -326,8 +326,12 @@ For CI-equivalent dependency resolution, especially after dependency changes,
 run the frozen install before the verification gate:
 
 ```sh
-pnpm install --frozen-lockfile
+mise install --locked
+mise run setup
 ```
+
+For an npm-mode worktree, `mise run setup` performs the frozen pnpm install.
+Source Mode requires the separate `source:bootstrap` procedure.
 
 After the gate, verify that the package and lockfile are correct:
 

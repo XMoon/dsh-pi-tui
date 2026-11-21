@@ -146,9 +146,10 @@ Public extensions have **Stable / Advanced / Unstable** tiers: see the [authorin
 For development:
 
 ~~~sh
-pnpm install
-pnpm build
-pnpm typecheck
+mise install --locked
+mise run setup
+mise run build
+mise run typecheck
 ~~~
 
 Read [AGENTS.md](AGENTS.md), the [development guide](docs/guides/development.md) and [documentation index](docs/README.md). The [release checklist](docs/guides/releasing.md) owns full release verification.
