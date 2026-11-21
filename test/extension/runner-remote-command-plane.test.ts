@@ -105,6 +105,8 @@ interface Fixture {
     setDraft(text: string): void
     submitDraft(request?: string): void
     getDraft(): string
+    isShowingAutocompleteForTest(): boolean
+    commandCompletionsForTest(): readonly { name: string; description: string; argumentHint?: string }[]
   }
   aggregate: Awaited<ReturnType<typeof createRemoteApplicationRuntime>>
   /** The raw stdout the client wrote (the OSC 52 clipboard leg rides it). */
@@ -144,6 +146,8 @@ async function mountRunner(
     /** Register one HOST command before the runner mounts. */
     readonly hostCommands?: ReadonlyArray<{
       readonly name: string
+      readonly description?: string
+      readonly input?: { readonly hint: string; readonly attachments?: boolean }
       readonly handler: () => { kind: 'success'; text?: string }
     }>
     readonly seed?: (append: (type: string, data: unknown, options?: { surfaceOp?: 'append' }) => void) => void
@@ -182,7 +186,12 @@ async function mountRunner(
     }
   }
   for (const command of options.hostCommands ?? []) {
-    host.ctx.commands.register({ name: command.name, description: `host ${command.name}`, handler: command.handler })
+    host.ctx.commands.register({
+      name: command.name,
+      description: command.description ?? `host ${command.name}`,
+      ...(command.input === undefined ? {} : { input: command.input }),
+      handler: command.handler,
+    })
   }
 
   // The REAL Host runner tuiStartup (unchanged: the runner row still reads
@@ -336,6 +345,32 @@ function submit(fixture: Fixture, text: string): void {
   const app = fixture.app()
   app.setDraft(text)
   app.submitDraft()
+}
+
+/** The rows painted BELOW the composer box: the editor's own completion
+ *  dropdown. The transcript is above the box, so a candidate found here cannot
+ *  be an accidental occurrence in history text. */
+function completionRowsBelowComposer(vt: VirtualTerminal): string[] {
+  const viewport = vt.getViewport()
+  let bottom = -1
+  for (let index = 0; index < viewport.length; index += 1) {
+    if (/^─+$/u.test(viewport[index]!.trim())) bottom = index
+  }
+  return bottom === -1 ? [] : viewport.slice(bottom + 1)
+}
+
+/** Type through the REAL terminal input path, one decoded key per event. */
+function typeInEditor(vt: VirtualTerminal, text: string): void {
+  for (const character of text) vt.sendInput(character)
+}
+
+/** Wait until the live editor dropdown paints `needle` below the composer. */
+async function waitForCompletionRow(fixture: Fixture, needle: string, label: string): Promise<void> {
+  await waitFor(label, () => {
+    const app = fixture.app()
+    return app.isShowingAutocompleteForTest()
+      && completionRowsBelowComposer(fixture.vt).join('\n').includes(needle)
+  }, 20_000)
 }
 
 interface RouteMarkdownInput {
@@ -844,7 +879,32 @@ test('Host command: executes EXACTLY ONCE through HostCommandPort', async (t) =>
   // Re-read the host catalog for the current session (the runner's refresh
   // installs the claims; the initial install is the startup prefetch).
   await settle(120)
-  submit(fixture, '/pr4host')
+  const app = fixture.app()
+  // Drive the REAL editor completion: type the prefix through the terminal,
+  // observe the live dropdown row, then accept it. The popup row itself proves
+  // the installed Host descriptor reached the user surface (never a separate
+  // readCommands answer).
+  typeInEditor(fixture.vt, '/pr4h')
+  await waitForCompletionRow(fixture, 'pr4host', 'the Host /pr4host candidate paints in the live editor')
+  const popup = completionRowsBelowComposer(fixture.vt).join('\n')
+  assert.match(popup, /host pr4host/u,
+    'the live popup carries the bound Host descriptor description, not only the name')
+  assert.equal(fixture.hostCommandRuns(mainId), 0,
+    'typing the host prefix never executes the Host command')
+  const beforeAccept = app.getDraft()
+  fixture.vt.sendInput('\t')
+  await waitFor('the completion acceptance edited only the draft', () => {
+    const draft = app.getDraft()
+    return draft !== beforeAccept && draft.trim() === '/pr4host'
+  }, 10_000)
+  assert.equal(fixture.hostCommandRuns(mainId), 0,
+    'accepting the candidate only edits the draft and never runs the Host command')
+  assert.equal(fixture.events(mainId).some(event => event.type === 'user/message'), false,
+    'the completion gesture never wrote a user/message prompt')
+
+  // The INDEPENDENT submit is the only gesture that reaches the Host executor.
+  app.setDraft('/pr4host')
+  app.submitDraft()
   await waitFor('the Host command entered its handler', () => calls === 1, 15_000)
   await waitFor('the official lifecycle rows landed', () => {
     const kinds = fixture.events(mainId).map(event => event.type)
@@ -864,6 +924,8 @@ test('the Remote command catalogue routes Host /sessions to its real Host sink',
     resumeSessionId: mainId,
     hostCommands: [{
       name: 'sessions',
+      description: 'Host session picker from the Remote catalog',
+      input: { hint: '<host query>' },
       handler: () => { calls += 1; return { kind: 'success', text: 'Remote Host /sessions ran' } },
     }],
   })
@@ -871,8 +933,17 @@ test('the Remote command catalogue routes Host /sessions to its real Host sink',
   const catalog = await fixture.aggregate.presentation.commandSource.readCommands(mainId)
   assert.ok(catalog?.some(command => command.name === 'sessions'),
     'the genuine Remote Host /sessions descriptor is in the authoritative command catalogue')
+  // The live popup shows the Host descriptor, never the TUI built-in's copy.
+  typeInEditor(fixture.vt, '/sess')
+  await waitForCompletionRow(fixture, 'sessions', 'the Host /sessions candidate paints in the live editor')
+  const popup = completionRowsBelowComposer(fixture.vt).join('\n')
+  assert.match(popup, /Host session picker from the Remote catalog/u,
+    'the same-name row carries the Host description')
+  assert.doesNotMatch(popup, /List, search, and switch persisted sessions/u,
+    'the TUI built-in description never paints for a Host-owned name')
   const runsBefore = fixture.hostCommandRuns(mainId)
-  submit(fixture, '/sessions')
+  fixture.app().setDraft('/sessions')
+  fixture.app().submitDraft()
   await waitFor('the genuine Remote Host /sessions handler', () => calls === 1, 15_000)
   await waitFor('the official Remote /sessions lifecycle rows', () => {
     const kinds = fixture.events(mainId).map(event => event.type)
@@ -902,6 +973,8 @@ test('collision (M3-6 PR1): the Host claim wins and the same-named CLIENT-CONTEX
     }],
   })
   await settle(120)
+  assert.deepEqual([...fixture.app().commandCompletionsForTest()], [],
+    'the Host/extension collision withdraws the whole displayed candidate set')
   submit(fixture, '/pr4collide')
   try {
     await waitFor('the Host command ran', () => hostCalls === 1, 15_000)
@@ -1011,7 +1084,20 @@ test('a REAL Host `/export` claim wins over the same-named TUI built-in', async 
   })()
   assert.equal(resolves, true,
     'the official dsh-session-log-export Host registration is in the authoritative catalog')
-  submit(fixture, '/export')
+  // The DISPLAY row and live popup carry the Host descriptor, never the
+  // same-named TUI built-in copy.
+  const displayedExport = fixture.app().commandCompletionsForTest().find(command => command.name === 'export')
+  assert.equal(displayedExport?.description, 'Download this Session log as a ZIP archive',
+    'the installed display row uses the Host /export description')
+  typeInEditor(fixture.vt, '/exp')
+  await waitForCompletionRow(fixture, 'export', 'the Host /export candidate paints in the live editor')
+  const popup = completionRowsBelowComposer(fixture.vt).join('\n')
+  assert.match(popup, /Download this Session log as a ZIP archive/u,
+    'the live popup carries the Host /export description')
+  assert.doesNotMatch(popup, /Export this session as a full archive/u,
+    'the TUI built-in /export description never paints for the Host-owned name')
+  fixture.app().setDraft('/export')
+  fixture.app().submitDraft()
   // The OFFICIAL executor's durable command/run row is the authority: the
   // Host claim owns the line (the Client /export CALLBACK never executes —
   // note the shared command settlement still triggers the TUI's own
@@ -1303,11 +1389,11 @@ test('stale catalog (M3-6 PR2): refresh A → Connection replacement → the old
   releaseRead?.()
 
   // The stale-read fence (AC3): the held generation-A snapshot cannot
-  // install. The claim-layer proof comes below (the retired name must NOT
-  // behave as an installed Host claim once B's catalog installs); the
-  // Client-only completion display is not a Host-claim witness (PR4 §D3)
-  // and the twins intentionally put both names in it, so no display
-  // assertion is meaningful here — the routing assertions carry the proof.
+  // install. The DISPLAY is now Host-first on Remote, so it is meaningful:
+  // after B's catalog installs, the display must carry B's genuine Host row
+  // and never the retired A row as a Host descriptor. The `stale-cmd` Client
+  // twin may legitimately remain as a Client-owned row after B; the routing
+  // assertions below distinguish that from a retained Host claim.
 
   // ── M3-6 PR2 DECISIVE PATH: the automatic reconnect refresh. NO /reload
   // is submitted after the reconnect; the CommandSurface's own generation

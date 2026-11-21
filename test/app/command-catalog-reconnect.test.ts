@@ -31,10 +31,12 @@ import { TuiApp } from '../../src/tui-app.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { sessionScopeFacts } from '../support/session-scope-facts.ts'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
+import { CommandBridge } from '../../src/extension/internal/command-bridge.ts'
 import { createCommandSurface } from '../../src/app/command/surface.ts'
 import type { RemoteCommandSourceFace } from '../../src/app/application-runtime.ts'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
 import type { TuiCommandRunner, TuiSettingsLike } from '../../src/commands.ts'
+import type { SurfaceCommandSummary } from '../../src/domain/catalog/surface.ts'
 import type { PermissionPresetApplyOutcome } from '../../src/runtime/config-port.ts'
 import { DirectCatalogPort } from '../../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
@@ -75,23 +77,29 @@ function controlledRemoteSource(options: {
   let unsubscribed = 0
   let listeners: Array<() => void> = []
   const reads: CatalogRead[] = []
-  /** One scripted read: a settled name list, a rejection, or a held gate the
-   * test releases with `releaseRead` (the stale-read scenarios). */
+  /** One scripted read: a settled row list, a rejection, or a held gate the
+   * test releases with `releaseRead` (the stale-read scenarios). A bare name
+   * is the minimal row (`description` = the name); a full summary keeps the
+   * official descriptor fields the display must preserve. */
+  type ScriptedRow = string | SurfaceCommandSummary
   type Scripted =
-    | { readonly kind: 'settle'; readonly names: readonly string[] }
+    | { readonly kind: 'settle'; readonly rows: readonly SurfaceCommandSummary[] }
     | { readonly kind: 'reject'; readonly error: Error }
-    | { readonly kind: 'hold'; readonly release: (names: readonly string[]) => void; readonly gate: Promise<readonly string[]> }
+    | { readonly kind: 'hold'; readonly release: (rows: readonly ScriptedRow[]) => void; readonly gate: Promise<readonly ScriptedRow[]> }
   let scripted: readonly Scripted[] = []
   let readOrdinal = 0
   const holds = new Map<number, Scripted & { kind: 'hold' }>()
+  const normalizeRows = (rows: readonly ScriptedRow[]): readonly SurfaceCommandSummary[] =>
+    rows.map(row => typeof row === 'string' ? Object.freeze({ name: row, description: row }) : row)
   const source: RemoteCommandSourceFace & {
     readonly tokens: { readonly a: GenerationToken; readonly b: GenerationToken; readonly c: GenerationToken }
     readonly reads: readonly CatalogRead[]
-    /** Script the NEXT reads (in order): a name list, an Error (rejection),
-     * or 'hold' (the read waits until the test releases it). */
-    script(next: ReadonlyArray<readonly string[] | Error | 'hold'>): void
-    /** Release one held read with the names it settles with. */
-    releaseRead(ordinal: number, names: readonly string[]): void
+    /** Script the NEXT reads (in order): a row list (bare names or full
+     * descriptors), an Error (rejection), or 'hold' (the read waits until the
+     * test releases it). */
+    script(next: ReadonlyArray<readonly ScriptedRow[] | Error | 'hold'>): void
+    /** Release one held read with the rows it settles with. */
+    releaseRead(ordinal: number, rows: readonly ScriptedRow[]): void
     replace(next: GenerationToken | undefined): void
     readonly unsubscribedCount: () => number
     readonly listenerCount: () => number
@@ -102,15 +110,15 @@ function controlledRemoteSource(options: {
       scripted = next.map(entry => {
         if (entry instanceof Error) return { kind: 'reject', error: entry } as Scripted
         if (entry === 'hold') {
-          let release: (names: readonly string[]) => void = () => {}
-          const gate = new Promise<readonly string[]>(resolve => { release = resolve })
+          let release: (rows: readonly ScriptedRow[]) => void = () => {}
+          const gate = new Promise<readonly ScriptedRow[]>(resolve => { release = resolve })
           return { kind: 'hold', release, gate } as Scripted
         }
-        return { kind: 'settle', names: entry } as Scripted
+        return { kind: 'settle', rows: normalizeRows(entry) } as Scripted
       })
       readOrdinal = 0
     },
-    releaseRead: (ordinal, names) => { holds.get(ordinal)?.release(names) },
+    releaseRead: (ordinal, rows) => { holds.get(ordinal)?.release(rows) },
     unsubscribedCount: () => unsubscribed,
     listenerCount: () => listeners.length,
     replace: (next) => {
@@ -124,8 +132,8 @@ function controlledRemoteSource(options: {
       const plan = scripted[ordinal]
       if (plan === undefined) return { commands: Object.freeze([]), skills: Object.freeze([]) } as never
       if (plan.kind === 'reject') throw plan.error
-      const names = plan.kind === 'hold' ? await plan.gate : plan.names
-      return { commands: Object.freeze(names.map(name => Object.freeze({ name, description: name }))), skills: Object.freeze([]) } as never
+      const rows = normalizeRows(plan.kind === 'hold' ? await plan.gate : plan.rows)
+      return { commands: Object.freeze(rows), skills: Object.freeze([]) } as never
     },
     readCommands: async (sessionId: string) => {
       reads.push({ sessionId })
@@ -134,8 +142,7 @@ function controlledRemoteSource(options: {
       const plan = scripted[ordinal]
       if (plan === undefined) return []
       if (plan.kind === 'reject') throw plan.error
-      const names = plan.kind === 'hold' ? await plan.gate : plan.names
-      return names.map(name => ({ name, description: name }))
+      return normalizeRows(plan.kind === 'hold' ? await plan.gate : plan.rows)
     },
     captureTransportToken: (sessionId: string): unknown => ({ generation: snapshot, binding: `binding:${sessionId}` }),
     isTransportTokenCurrent: (sessionId: string, token: unknown): boolean => {
@@ -214,12 +221,34 @@ function fakeRunnerDeps(options: {
   readonly notify?: (message: string, kind: 'info' | 'error' | undefined) => void
   /** The diagnostics sink (the retired-continuation assertions). */
   readonly diag?: import('../../src/runtime/process/diagnostics.ts').Diag
+  /** The bumped chat-session generation (the catalog target identity). */
+  readonly generation?: () => number
+  /** Client-context command contributions mounted before registration. */
+  readonly extensionCommands?: ReadonlyArray<{
+    readonly id: string
+    readonly name: string
+    readonly description?: string
+  }>
 }) {
   const ctx = new Context()
+  const generation = options.generation ?? (() => 0)
   const diag = options.diag ?? silentDiag
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   startedApps.add(app)
+  // Record the rows the ONE production installer receives. The wrapper is a
+  // one-to-one passthrough to the REAL TuiApp method (no second catalog and no
+  // candidate synthesis of its own).
+  const installedCompletions: Array<readonly { name: string; description: string; argumentHint?: string }[]> = []
+  const originalSetCommandCompletions = app.setCommandCompletions
+  app.setCommandCompletions = ((commands: Parameters<TuiApp['setCommandCompletions']>[0], ...rest: unknown[]) => {
+    installedCompletions.push(commands.map(command => ({
+      name: command.name,
+      description: command.description ?? '',
+      ...(command.argumentHint === undefined ? {} : { argumentHint: command.argumentHint }),
+    })))
+    ;(originalSetCommandCompletions as (...args: unknown[]) => void).call(app, commands, ...rest)
+  }) as TuiApp['setCommandCompletions']
   app.start()
   const tuiSettings: TuiSettingsLike = {
     get: () => ({ theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', history: {} }) as never,
@@ -231,6 +260,51 @@ function fakeRunnerDeps(options: {
       applyPermissionPreset: NonNullable<typeof options.applyPermissionPreset>
     }).applyPermissionPreset = options.applyPermissionPreset
   }
+  // Client-context extension contributions through the REAL CommandBridge.
+  // The health recorder mirrors the production extension-health ledger shape
+  // so a collision's fail-loud record and its recovery are observable.
+  const extensionHealth = new Map<string, {
+    extensionPoint: string
+    id: string
+    owner: string
+    state: 'failed'
+    lastError: string
+  }>()
+  const extensionBridge = options.extensionCommands === undefined ? undefined : new CommandBridge()
+  const extensionHandles = new Map<string, { dispose(): void }>()
+  for (const command of options.extensionCommands ?? []) {
+    const outcome = extensionBridge!.register({
+      id: command.id,
+      name: command.name,
+      description: command.description ?? `ext ${command.name}`,
+      sessionless: true,
+      handler: () => ({ kind: 'success' as const }),
+    }, 'test-owner')
+    assert.equal(outcome.kind, 'registered', `the extension command ${command.name} must register`)
+    if (outcome.kind === 'registered') {
+      // The extension host untracks a disposed fiber's health records as part
+      // of the same registration lifetime; the test keeps that production
+      // coupling so the recovered state is observable here.
+      extensionHandles.set(command.name, {
+        dispose: () => {
+          extensionHealth.delete(`command\u0000${command.id}\u0000test-owner`)
+          outcome.handle.dispose()
+        },
+      })
+    }
+  }
+  const recordExtensionError = (ref: { slot: string; id: string; owner: string }, error: unknown): void => {
+    extensionHealth.set(`${ref.slot}\u0000${ref.id}\u0000${ref.owner}`, {
+      extensionPoint: ref.slot,
+      id: ref.id,
+      owner: ref.owner,
+      state: 'failed',
+      lastError: error instanceof Error ? error.message : String(error),
+    })
+  }
+  const clearExtensionError = (ref: { slot: string; id: string; owner: string }): void => {
+    extensionHealth.delete(`${ref.slot}\u0000${ref.id}\u0000${ref.owner}`)
+  }
   const runner: TuiCommandRunner = {
     webAccess: unavailableWebAccess(),
     acpAccess: unavailableAcpAccess(),
@@ -240,7 +314,9 @@ function fakeRunnerDeps(options: {
     ctx,
     app,
     diag,
-    ...sessionScopeFacts(() => undefined, () => 0),
+    ...sessionScopeFacts(() => undefined, generation),
+    recordExtensionError,
+    clearExtensionError,
     sessionPolicy: unconfiguredSessionPolicyPort(),
     policy: unconfiguredPolicyObservation(),
     get currentSessionId() { return options.currentSessionId() },
@@ -320,10 +396,13 @@ function fakeRunnerDeps(options: {
     withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},
-    extensions: undefined,
+    extensions: extensionBridge === undefined ? undefined : {
+      commands: extensionBridge,
+      health: () => [...extensionHealth.values()],
+    } as never,
     exit: () => {},
   }
-  const scopeFacts = sessionScopeFacts(() => undefined, () => 0)
+  const scopeFacts = sessionScopeFacts(() => undefined, generation)
   const surface = createCommandSurface<ModelSelectionValue, string, never>({
     ctx,
     logError: () => {},
@@ -339,7 +418,7 @@ function fakeRunnerDeps(options: {
       isCurrent: scope => scopeFacts.isSessionScopeCurrent(scope as never),
     },
     ownership: {
-      generation: () => 0,
+      generation,
       currentSessionId: () => options.currentSessionId(),
     },
     transition: { pending: () => false, run: async (task) => task() },
@@ -450,9 +529,9 @@ function fakeRunnerDeps(options: {
       files: { pin: () => {}, unpin: () => {}, clearUnpinned: () => {}, attach: () => {} } as never,
     },
     extensions: {
-      current: () => undefined,
-      recordError: () => {},
-      clearError: () => {},
+      current: () => runner.extensions,
+      recordError: (ref, error) => recordExtensionError(ref, error),
+      clearError: (ref) => clearExtensionError(ref),
     },
     pluginManager: {
       page: () => undefined,
@@ -484,6 +563,14 @@ function fakeRunnerDeps(options: {
     surface,
     runner,
     app,
+    /** The rows most recently handed to `TuiApp.setCommandCompletions`. */
+    completions: () => installedCompletions.at(-1) ?? [],
+    /** How many times the production installer ran. */
+    completionInstallCount: () => installedCompletions.length,
+    /** The real CommandBridge handles of the mounted Client contributions. */
+    extensionHandles,
+    /** The recorded extension-health entries (failed collisions). */
+    extensionHealth: () => [...extensionHealth.values()],
     /** The facade `buildRunner` produced (the public TuiCommandRunner seam). */
     builtRunner: () => facade,
     /** The REAL current SessionScope the harness's scope authority captures. */
@@ -502,6 +589,211 @@ function fakeRunnerDeps(options: {
     },
   }
 }
+
+/* ── Remote Host display synthesis ─────────────────────────────────────── */
+
+test('a live Remote Host catalog is displayed beside Client commands with its own metadata', async () => {
+  const source = controlledRemoteSource({})
+  const harness = fakeRunnerDeps({
+    remoteSource: source,
+    currentSessionId: () => 'session-a',
+  })
+  try {
+    harness.register()
+    source.script([[
+      { name: 'compact', description: 'Compact the conversation', input: { hint: '[instructions]' } },
+      { name: 'plan', description: 'Toggle plan mode' },
+      { name: 'host-plugin', description: 'A Host plugin command', input: { hint: '<task>', attachments: true } },
+    ]])
+    await harness.surface.refreshLiveCatalogById('session-a')
+    const rows = harness.completions()
+    const byName = new Map(rows.map(row => [row.name, row]))
+    assert.deepEqual(byName.get('compact'), {
+      name: 'compact',
+      description: 'Compact the conversation',
+      argumentHint: '[instructions]',
+    }, 'the Host /compact row keeps the official Host description and hint')
+    assert.deepEqual(byName.get('plan'), {
+      name: 'plan',
+      description: 'Toggle plan mode',
+    }, 'the Host /plan row keeps the official Host description')
+    assert.deepEqual(byName.get('host-plugin'), {
+      name: 'host-plugin',
+      description: 'A Host plugin command',
+      argumentHint: '<task>',
+    }, 'a Host plugin row follows the same Host-first display rule')
+    assert.equal(byName.has('help'), true, 'the Client registration remains visible beside the Host rows')
+    assert.equal(new Set(rows.map(row => row.name)).size, rows.length, 'every displayed command name is unique')
+  } finally {
+    harness.dispose()
+  }
+})
+
+test('a Host descriptor keeps its name, description and argument hint over a same-named Client registration', async () => {
+  const source = controlledRemoteSource({})
+  const harness = fakeRunnerDeps({
+    remoteSource: source,
+    currentSessionId: () => 'session-a',
+  })
+  try {
+    harness.register()
+    source.script([[
+      { name: 'sessions', description: 'Host session picker', input: { hint: '<host query>', attachments: true } },
+      { name: 'export', description: 'Host export descriptor' },
+    ]])
+    await harness.surface.refreshLiveCatalogById('session-a')
+    const byName = new Map(harness.completions().map(row => [row.name, row]))
+    assert.deepEqual(byName.get('sessions'), {
+      name: 'sessions',
+      description: 'Host session picker',
+      argumentHint: '<host query>',
+    }, 'the Host /sessions descriptor wins the display row over the Client built-in')
+    assert.deepEqual(byName.get('export'), {
+      name: 'export',
+      description: 'Host export descriptor',
+    }, 'the Host /export descriptor wins the display row over the Client built-in')
+    assert.deepEqual(harness.surface.hostOriginClaimOf({ name: 'sessions' }),
+      { claimed: true, attachments: true },
+      'the Host-origin claim keeps the Host descriptor declaration')
+    assert.deepEqual(harness.surface.hostOriginClaimOf({ name: 'export' }),
+      { claimed: true, attachments: false },
+      'the Host-origin claim owns the Host name independently of the display list')
+    assert.equal(harness.runner.clientCommands.get('sessions') !== undefined, true,
+      'the Client registration still exists under the name; it is only not the display winner')
+  } finally {
+    harness.dispose()
+  }
+})
+
+test('a late extension refresh keeps Host rows, and a Host/extension collision withdraws the whole display until recovery', async () => {
+  const source = controlledRemoteSource({})
+  const harness = fakeRunnerDeps({
+    remoteSource: source,
+    currentSessionId: () => 'session-a',
+    extensionCommands: [{
+      id: 'ext-host-plugin',
+      name: 'host-plugin',
+      description: 'extension host-plugin',
+    }],
+  })
+  try {
+    harness.register()
+    source.script([[
+      { name: 'host-plugin', description: 'Host plugin row', input: { hint: '<task>' } },
+      { name: 'host-other', description: 'Another Host row' },
+    ]])
+    await harness.surface.refreshLiveCatalogById('session-a')
+    // The collision already fails the live snapshot synthesis: the display is
+    // withdrawn as ONE group while the Host claims remain the routing truth.
+    assert.deepEqual(harness.completions(), [], 'a Host/extension collision withdraws every displayed row')
+    assert.deepEqual(harness.surface.hostOriginClaimOf({ name: 'host-plugin' }),
+      { claimed: true, attachments: false },
+      'the Host claim survives the failed display synthesis')
+    assert.equal(harness.extensionHealth().length, 1, 'the collision is recorded in the extension health ledger')
+    assert.match(harness.extensionHealth()[0]!.lastError, /collides with a host command/u)
+
+    // A late, non-Host refresh (the extension disposal path) must not read the
+    // Host again and must restore the Host rows in exactly ONE commit.
+    const readsBefore = source.reads.length
+    const installsBefore = harness.completionInstallCount()
+    harness.extensionHandles.get('host-plugin')?.dispose()
+    harness.surface.refreshCompletions()
+    const byName = new Map(harness.completions().map(row => [row.name, row]))
+    assert.deepEqual(byName.get('host-plugin'), {
+      name: 'host-plugin',
+      description: 'Host plugin row',
+      argumentHint: '<task>',
+    }, 'the Host row and its metadata survive the late Client-only refresh')
+    assert.equal(byName.has('host-other'), true, 'every Host row returns together')
+    assert.equal(source.reads.length, readsBefore, 'the recovery refresh issues no Host read')
+    assert.equal(harness.completionInstallCount(), installsBefore + 1, 'the recovery is exactly ONE install commit')
+    assert.deepEqual(harness.extensionHealth(), [], 'the recovered collision leaves the failed health state')
+  } finally {
+    harness.dispose()
+  }
+})
+
+test('a target change withdraws the old Host rows immediately and installs only the new target catalog', async () => {
+  const source = controlledRemoteSource({})
+  let generation = 1
+  let currentSession: string | undefined = 'session-a'
+  const harness = fakeRunnerDeps({
+    remoteSource: source,
+    currentSessionId: () => currentSession,
+    generation: () => generation,
+  })
+  try {
+    harness.register()
+    const disposeTwin = harness.runner.clientCommands.register({
+      name: 'alpha-only',
+      description: 'Client twin of the old Host name',
+      handler: () => ({ kind: 'success' as const }),
+    })
+    source.script([[{ name: 'alpha-only', description: 'Target A Host row' }]])
+    await harness.surface.refreshLiveCatalogById('session-a')
+    assert.equal(new Map(harness.completions().map(row => [row.name, row])).get('alpha-only')?.description,
+      'Target A Host row',
+      'target A displays its Host row with the genuine metadata')
+
+    // A REAL target change: the chat-session generation bumps and the owner
+    // moves to B. The coordinator enters the transition SYNCHRONOUSLY before
+    // its read, so the old Host row (and its same-named Client twin) must be
+    // gone from the display in this same turn; the retained claims remain.
+    generation = 2
+    currentSession = 'session-b'
+    source.script(['hold'])
+    const pending = harness.surface.refreshLiveCatalogById('session-b')
+    assert.equal(harness.completions().some(row => row.name === 'alpha-only'), false,
+      'the previous target Host row is not repainted as a new-target candidate')
+    assert.deepEqual(harness.surface.hostOriginClaimOf({ name: 'alpha-only' }),
+      { claimed: true, attachments: false },
+      'the last-good Host claim is retained across the transition')
+
+    // B settles with its own catalog: only beta-only is displayed. The old
+    // Client twin is disposed first so this assertion observes the HOST row's
+    // retirement, not a legitimate Client fallback under the old name.
+    disposeTwin()
+    source.releaseRead(0, [{ name: 'beta-only', description: 'Target B Host row' }])
+    await pending
+    const after = new Map(harness.completions().map(row => [row.name, row]))
+    assert.deepEqual(after.get('beta-only'), {
+      name: 'beta-only',
+      description: 'Target B Host row',
+    }, 'target B installs its own Host row')
+    assert.equal(after.has('alpha-only'), false, 'the A-only Host row cannot survive the target change')
+  } finally {
+    source.releaseRead(0, [])
+    harness.dispose()
+  }
+})
+
+test('a sessionless Remote surface shows no Host command until the first real Session catalog installs', async () => {
+  const source = controlledRemoteSource({})
+  let currentSession: string | undefined
+  const harness = fakeRunnerDeps({
+    remoteSource: source,
+    currentSessionId: () => currentSession,
+  })
+  try {
+    harness.register()
+    assert.equal(harness.completions().some(row => row.name === 'compact' || row.name === 'plan'), false,
+      'the cold sessionless surface fabricates no effective Host command rows')
+    assert.equal(source.reads.length, 0, 'opening the sessionless surface issues no Host command read')
+
+    // The first REAL Session appears and its official catalog installs.
+    currentSession = 'session-first'
+    source.script([[
+      { name: 'compact', description: 'Compact from the Host' },
+      { name: 'plan', description: 'Plan from the Host' },
+    ]])
+    await harness.surface.refreshLiveCatalogById('session-first')
+    const names = harness.completions().map(row => row.name)
+    assert.ok(names.includes('compact') && names.includes('plan'),
+      `the first real Session makes the Host commands visible: ${names.join(', ')}`)
+  } finally {
+    harness.dispose()
+  }
+})
 
 /* ── CCR-1 ────────────────────────────────────────────────────────────── */
 
@@ -669,6 +961,8 @@ test('disconnect (A -> undefined) reads nothing, clears nothing, and keeps the H
     await harness.surface.refreshLiveCatalogById('session-a')
     assert.equal(harness.surface.hostOriginClaimOf({ name: 'host-a' })?.claimed, true,
       'the installed Host command claims the name before the disconnect')
+    assert.equal(new Map(harness.completions().map(row => [row.name, row])).get('host-a')?.description,
+      'host-a', 'the installed Host row is displayed')
 
     // A -> undefined: no read, no clear, no Client same-name takeover.
     const clientRegistry = harness.runner.clientCommands
@@ -685,6 +979,8 @@ test('disconnect (A -> undefined) reads nothing, clears nothing, and keeps the H
       'the last-good Host-origin claim survives the disconnect')
     assert.equal(harness.surface.hostCatalogResolves('host-a'), true,
       'the reserved Host name cannot be taken over by the Client twin while disconnected')
+    assert.equal(new Map(harness.completions().map(row => [row.name, row])).get('host-a')?.description,
+      'host-a', 'the last-good Host row stays displayed and never repaints the Client twin')
   } finally {
     harness.dispose()
   }
@@ -719,6 +1015,9 @@ test('a new defined generation B refreshes automatically without /reload and rep
       'the new B Host command is authoritative after the commit')
     assert.equal(harness.surface.hostCatalogResolves('host-a'), false,
       'the completion/claim state reflects B, not the A residue')
+    const display = new Map(harness.completions().map(row => [row.name, row]))
+    assert.equal(display.has('host-b'), true, 'the successful B display carries the new Host row')
+    assert.equal(display.has('host-a'), false, 'the display no longer carries the retired A Host row')
   } finally {
     harness.dispose()
   }
@@ -747,6 +1046,8 @@ test('a FAILED new-generation read keeps the last-good Host claims (no blank suc
       'the last-good Host command authority remains after the failed B read')
     assert.equal(harness.surface.hostCatalogResolves('host-a'), true,
       'no blank/empty catalog replaced the last-good Host truth')
+    assert.equal(new Map(harness.completions().map(row => [row.name, row])).get('host-a')?.description,
+      'host-a', 'the failed same-target refresh keeps the last-good Host display')
   } finally {
     harness.dispose()
   }
@@ -782,6 +1083,9 @@ test('generation C supersedes an in-flight B refresh through the existing coordi
       'the C snapshot is the installed current catalog')
     assert.equal(harness.surface.hostOriginClaimOf({ name: 'host-b' }), undefined,
       'the superseded B snapshot never installed')
+    const display = new Map(harness.completions().map(row => [row.name, row]))
+    assert.equal(display.has('host-c'), true, 'the display shows only the C snapshot after the race')
+    assert.equal(display.has('host-b'), false, 'the superseded B display never appears')
   } finally {
     source.releaseRead(0, [])
     harness.dispose()
