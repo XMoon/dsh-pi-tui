@@ -448,8 +448,20 @@ replaces the action's builtin default keys and adds its triggers;
 
 ## Diagnostics
 
-`/keybindings` shows the effective table (action, keys, scope, source)
-grouped by category; `/keybindings conflicts` lists only conflicts;
+`/keybindings` opens the ONE Keyboard shortcuts editor in the Settings workspace
+(the same page the `/settings` launcher mounts) in its `All` view;
+`/keybindings conflicts` takes the SAME typed deeplink into that same lease and
+page with the `Conflicts` view selected. The two view modes are transient UI
+filters: `Tab`/`Shift+Tab` or the painted mode spans switch them without writing
+settings, reloading, or touching the runtime keymap. The Conflicts view lists
+the editable built-in actions whose effective keys conflict as
+`N affected actions` (the EditorModel's conflict count) and separately states
+the Manager's `M runtime conflict records`; a plugin-only record is a read-only
+diagnostic with its complete key/action/scope/source in an in-page detail, never
+an editable pseudo-action. When the settings document cannot be read or the
+typed page cannot be opened, the command returns a real error carrying the
+cause plus the CURRENT runtime conflict records — it never falls back to a
+second overlay and never reports a fake conflict-free success.
 `/keybindings reload` re-reads the settings document (fail-soft: a
 throwing read keeps the last-known-good keymap and reports an error);
 `/keybindings reset` clears the user overrides THROUGH the settings
@@ -685,6 +697,17 @@ Context-gated composition affordances are labeled separately from ordinary
 configured bindings (for example, `Down (conditional)` for the task browser).
 
 `/settings` contains one `Keyboard shortcuts` launcher whose submenu uses the
-same controller and editor component. The diagnostic verbs
-`/keybindings conflicts`, `/keybindings reload`, and `/keybindings reset` stay
+same controller and editor component. The ordinary launcher and bare
+`/keybindings` open its `All` view; `/keybindings conflicts` opens the same page
+in its `Conflicts` view. The local mode bar reads
+`View: [All] · Conflicts (N affected actions)` or
+`View: All · [Conflicts (N affected actions)]`, where `N` is always the
+affected editable built-in Action count — never the runtime record count.
+Runtime conflict records are stated separately (`M runtime conflict records`);
+plugin-only records remain read-only and their full key/action/scope/source is
+available in the page's read-only detail. A mode switch preserves the search
+query and never writes the settings document or rebuilds the keymap. When the
+grant cannot fit the complete two-mode row, the bar degrades to a read-only
+statement of the active mode and `Tab`/pointer mode selection is unavailable.
+The diagnostic verbs `/keybindings reload` and `/keybindings reset` stay
 available for inspection and recovery; no settings watch callback is used.

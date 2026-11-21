@@ -22,6 +22,7 @@ import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
+import { visibleWidth } from '@xmoon76/pi-tui'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
 import { registerTuiCommands, type TuiCommandRunner } from '../../src/commands.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
@@ -52,7 +53,7 @@ function viewportText(vt: VirtualTerminal): string {
 interface Harness {
   readonly vt: VirtualTerminal
   readonly app: TuiApp
-  readonly invoke: (name: string) => unknown
+  readonly invoke: (name: string, rawInput?: string) => unknown
   /** C2-R5: the panel the bare `/keybindings` deeplink really mounted. */
   readonly deeplink: () => { readonly panel: KeybindingEditorPanel | undefined; readonly teardowns: number }
 }
@@ -155,10 +156,10 @@ function setup(options: { columns?: number; rows?: number } = {}): Harness {
     get: (target, property) => property in target ? target[property as string] : () => undefined,
   }) as unknown as TuiCommandRunner
   registerTuiCommandsWithDirectSeams(runner)
-  const invoke = (name: string): unknown => {
+  const invoke = (name: string, rawInput = ''): unknown => {
     const definition = defs.find(candidate => candidate.name === name)
     assert.ok(definition?.handler !== undefined, `${name} must be registered`)
-    return (definition.handler as (invocation: { rawInput: string }) => unknown)({ rawInput: '' })
+    return (definition.handler as (invocation: { rawInput: string }) => unknown)({ rawInput })
   }
   // Test instrumentation ONLY for the same-lease `/keybindings` page: observe
   // the panel the factory registers and count the ACTUAL teardown effect. The
@@ -215,6 +216,33 @@ test('bare /keybindings deeplinks into the ONE Settings lease and disposes its p
     await h.vt.waitForRender()
     view = viewportText(h.vt)
     assert.ok(!view.includes('Settings ·'), `${columns}x${rows}: only the whole Settings Esc exits the workspace:\n${view}`)
+    h.app.dispose()
+    startedApps.delete(h.app)
+  }
+})
+
+test('/keybindings conflicts keeps its mode row and ONE last-row bar across the frozen matrix', async () => {
+  for (const [columns, rows] of [[200, 50], [120, 40], [100, 40], [80, 24], [80, 10], [72, 24], [44, 20]] as const) {
+    const h = setup({ columns, rows })
+    h.invoke('keybindings', 'conflicts')
+    await h.vt.waitForRender()
+    let lines = viewportText(h.vt).split('\n')
+    assert.match(lines.join('\n'), /Settings · Input & Terminal · Keyboard shor/u,
+      `${columns}x${rows}: the conflicts deeplink owns the same Settings lease:\n${lines.join('\n')}`)
+    const filterLine = lines.find(line => line.includes('View: '))
+    assert.ok(filterLine !== undefined, `${columns}x${rows}: the mode row is painted:\n${lines.join('\n')}`)
+    assert.match(filterLine!, /Conflicts/u)
+    assert.match(lines[lines.length - 1]!, /(?:Back|Clear) \[Esc\]/u,
+      `${columns}x${rows}: the ONE physical Action Bar is the last row`)
+    assert.ok(lines.every(line => visibleWidth(line) <= columns),
+      `${columns}x${rows}: no frame line may exceed the terminal width:\n${lines.join('\n')}`)
+    // Tab is advertised with the complete mode row; it must switch without a write.
+    h.vt.sendInput('\t')
+    await h.vt.waitForRender()
+    lines = viewportText(h.vt).split('\n')
+    assert.match(lines.find(line => line.includes('View: '))!, /View: \[All\]/u,
+      `${columns}x${rows}: Tab switches to All:\n${lines.join('\n')}`)
+    assert.match(lines[lines.length - 1]!, /(?:Back|Clear) \[Esc\]/u)
     h.app.dispose()
     startedApps.delete(h.app)
   }

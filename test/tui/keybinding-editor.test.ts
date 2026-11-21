@@ -1249,11 +1249,11 @@ test('keybinding editor: degenerate grants keep the operation hint and only pain
     panel.setMaxRows(3)
     view = panel.render(88).map(plain)
     assert.deepEqual(view.length, 3)
-    assert.match(view[0]!, /^Search: /)
-    assert.match(view[1]!, /^Keymap: /, 'the keymap fact is the third-row survivor')
+    assert.match(view[0]!, /^View: \[All\] · Conflicts \(0 affected actions\)$/u, 'the mode row is the first-row survivor')
+    assert.match(view[1]!, /^Search: /, 'the search row is the second-row survivor')
     assert.match(view[2]!, /Back \[Esc\]/)
-    assert.ok(panel.handleMouse(mouse('press', 10, 0, 88, 30))?.handled, 'the painted search row must stay clickable')
-    assert.equal(panel.handleMouse(mouse('press', 10, 1, 88, 30)), undefined, 'the keymap fact row is inert')
+    assert.ok(panel.handleMouse(mouse('press', 7, 0, 88, 30))?.handled, 'the painted mode span must stay clickable')
+    assert.ok(panel.handleMouse(mouse('press', 10, 1, 88, 30))?.handled, 'the painted search row must stay clickable')
     assert.equal(panel.handleMouse(mouse('press', 10, 2, 88, 30)), undefined, 'the hint row is inert')
   } finally {
     manager.dispose()
@@ -1933,6 +1933,209 @@ test('the recorder publishes Cancel [Esc] for a real cancel, never for interrupt
   } finally {
     editor.dispose()
     interrupt.dispose()
+    manager.dispose()
+  }
+})
+
+// ── UX PR2: All / Conflicts view modes and readonly runtime records ────────
+
+function conflictPanel(options: { readonly initialFilter?: 'all' | 'conflicts' } = {}) {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings({
+    'app.input.submit': 'ctrl+shift+h',
+    'app.todo.toggle': 'ctrl+shift+h',
+  })
+  manager.setUserConfiguration(parsed)
+  const mutations: unknown[] = []
+  const panel = new KeybindingEditorPanel({
+    model: buildKeybindingEditorModel(manager, parsed),
+    initialFilter: options.initialFilter,
+    onClose: () => {},
+    runMutation: mutation => { mutations.push(mutation) },
+    maxRows: () => 30,
+  })
+  return { manager, panel, mutations }
+}
+
+test('keybinding editor: Tab switches All ↔ Conflicts without a write and preserves the query', () => {
+  const { manager, panel, mutations } = conflictPanel()
+  try {
+    let view = plain(panel.render(88).join('\n'))
+    assert.match(view, /View: \[All\] · Conflicts \(2 affected actions\)/u)
+    assert.match(view, /Leader key/u, 'All keeps the leader row')
+    panel.handleInput('\t')
+    view = plain(panel.render(88).join('\n'))
+    assert.match(view, /View: All · \[Conflicts \(2 affected actions\)\]/u)
+    assert.match(view, /Affected actions/u)
+    assert.match(view, /Submit draft/u)
+    assert.match(view, /Toggle todo/u)
+    assert.doesNotMatch(view, /Leader key/u, 'Conflicts never paints the leader configuration row')
+    assert.doesNotMatch(view, /Search full transcript history/u, 'unaffected actions are filtered out')
+
+    // The mode switch is presentation-only and keeps the ONE query.
+    panel.handleInput('todo')
+    panel.handleInput('\t')
+    view = plain(panel.render(88).join('\n'))
+    assert.match(view, /View: \[All\] · Conflicts \(2 affected actions\)/u)
+    assert.match(view, /Search: todo/u, 'the query survives a mode switch')
+    assert.deepEqual(mutations, [], 'no filter transition may ever write settings')
+  } finally {
+    panel.dispose()
+    manager.dispose()
+  }
+})
+
+test('keybinding editor: plugin-only runtime conflicts stay read-only and readable', () => {
+  const manager = new HostKeybindingManager()
+  manager.setPluginRules([
+    { id: 'plugin-a', action: 'submit-draft', key: 'ctrl+alt+x' },
+    { id: 'plugin-b', action: 'open-search', key: 'ctrl+alt+x' },
+  ])
+  const parsed = parseUserKeybindings(undefined)
+  manager.setUserConfiguration(parsed)
+  const mutations: unknown[] = []
+  const panel = new KeybindingEditorPanel({
+    model: buildKeybindingEditorModel(manager, parsed),
+    initialFilter: 'conflicts',
+    onClose: () => {},
+    runMutation: mutation => { mutations.push(mutation) },
+    maxRows: () => 30,
+  })
+  try {
+    let view = plain(panel.render(88).join('\n'))
+    assert.match(view, /View: All · \[Conflicts \(0 affected actions\)\]/u)
+    assert.match(view, /Other runtime conflicts · 1 runtime conflict records/u)
+    assert.match(view, /Key Ctrl\+Alt\+X · 2 actions/u)
+    panel.handleInput('\r') // the only selectable row is the readonly record
+    view = plain(panel.render(88).join('\n'))
+    assert.match(view, /Runtime conflict record/u)
+    assert.match(view, /Key: Ctrl\+Alt\+X/u)
+    assert.match(view, /submit-draft/u)
+    assert.match(view, /open-search/u)
+    assert.match(view, /Scope: global · Source: plugin/u)
+    panel.handleInput('r')
+    panel.handleInput('\r')
+    assert.deepEqual(mutations, [], 'the readonly record detail has no writer route')
+    panel.handleInput('\x1b')
+    view = plain(panel.render(88).join('\n'))
+    assert.match(view, /Other runtime conflicts/u, 'Esc returns to the filtered list')
+    assert.match(view, /View: All · \[Conflicts/u)
+  } finally {
+    panel.dispose()
+    manager.dispose()
+  }
+})
+
+test('keybinding editor: zero conflicts opens the empty Conflicts page and leaves All reachable', () => {
+  const { manager, panel } = makePanel(() => {})
+  try {
+    panel.handleInput('\t') // render first so the mode row is painted
+    const first = plain(panel.render(88).join('\n'))
+    assert.match(first, /View: \[All\]/u)
+    panel.handleInput('\t')
+    let view = plain(panel.render(88).join('\n'))
+    assert.match(view, /View: All · \[Conflicts \(0 affected actions\)\]/u)
+    assert.match(view, /No conflicts in the current keymap\./u)
+    assert.doesNotMatch(view, /Other runtime conflicts/u)
+    panel.handleInput('\t')
+    view = plain(panel.render(88).join('\n'))
+    assert.match(view, /View: \[All\]/u)
+    assert.match(view, /Leader key/u, 'All is reachable again')
+  } finally {
+    panel.dispose()
+    manager.dispose()
+  }
+})
+
+test('keybinding editor: mode spans are the only clickable cells and stale gestures are inert', () => {
+  const { manager, panel } = conflictPanel()
+  try {
+    let view = panel.render(88)
+    const plainView = view.map(plain)
+    const modeRow = plainView.findIndex(line => line.startsWith('View: '))
+    assert.ok(modeRow >= 0)
+    // `View: [All] · Conflicts (...)` — the All span is [6,11), the separator
+    // is inert, and the Conflicts span starts after ` · `.
+    assert.equal(panel.handleMouse(mouse('press', 11, modeRow, 88, 30)), undefined,
+      'the separator between the two spans is inert')
+    assert.ok(panel.handleMouse(mouse('press', 7, modeRow, 88, 30))?.handled)
+    assert.ok(panel.handleMouse(mouse('click', 7, modeRow, 88, 30))?.handled)
+    // No-op: already All. The click must not write anything.
+    panel.render(88)
+    assert.ok(panel.handleMouse(mouse('press', 15, modeRow, 88, 30))?.handled)
+    assert.ok(panel.handleMouse(mouse('click', 15, modeRow, 88, 30))?.handled)
+    let now = plain(panel.render(88).join('\n'))
+    assert.match(now, /View: All · \[Conflicts/u, 'a press + same-span release switches mode')
+    // A release on the OTHER span must not switch anything.
+    const conflictsModeRow = panel.render(88).map(plain).findIndex(line => line.startsWith('View: '))
+    assert.ok(panel.handleMouse(mouse('press', 7, conflictsModeRow, 88, 30))?.handled)
+    assert.equal(panel.handleMouse(mouse('click', 15, conflictsModeRow, 88, 30)), undefined,
+      'a different span on release is rejected')
+    now = plain(panel.render(88).join('\n'))
+    assert.match(now, /View: All · \[Conflicts/u)
+    // A query change between press and release makes the old gesture inert.
+    assert.ok(panel.handleMouse(mouse('press', 7, conflictsModeRow, 88, 30))?.handled)
+    panel.handleInput('q')
+    assert.equal(panel.handleMouse(mouse('click', 7, conflictsModeRow, 88, 30)), undefined,
+      'a query change under the gesture refuses the stale release')
+  } finally {
+    panel.dispose()
+    manager.dispose()
+  }
+})
+
+test('keybinding editor: a narrow/absent mode row makes Tab and spans inert', () => {
+  const { manager, panel } = conflictPanel()
+  try {
+    const narrow = plain(panel.render(20).join('\n'))
+    assert.match(narrow, /View: \[All\]/u, 'the narrow row states the active mode read-only')
+    panel.handleInput('\t')
+    assert.match(plain(panel.render(20).join('\n')), /View: \[All\]/u, 'Tab is inert without painted spans')
+    // The 2-row grant has no mode row at all; Tab must not switch a hidden mode.
+    panel.setMaxRows(2)
+    const two = plain(panel.render(88).join('\n'))
+    assert.match(two, /^Search: /mu)
+    panel.handleInput('\t')
+    assert.match(plain(panel.render(88).join('\n')), /^Search: /mu)
+  } finally {
+    panel.dispose()
+    manager.dispose()
+  }
+})
+
+test('action editor: a runtime record with a non-builtin counterpart is stated read-only', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings(undefined)
+  manager.setUserConfiguration(parsed)
+  const base = buildKeybindingEditorModel(manager, parsed)
+  // Display projection only: the current resolver priority table shadows a
+  // plugin rule below a builtin/user rule, so this record shape is not produced
+  // by the live manager today. The read-only projection must still never drop a
+  // non-builtin counterpart if one is present in the model.
+  const model = {
+    ...base,
+    runtimeConflictRecords: [{
+      key: 'ctrl+alt+x' as const,
+      actions: [
+        { action: 'app.input.submit', scope: 'editor' as const, source: 'user' as const, ruleId: 'builtin:user' },
+        { action: 'submit-draft', scope: 'global' as const, source: 'plugin' as const, ruleId: 'plugin:plugin-a' },
+      ],
+    }],
+  }
+  const row = model.rows.find(candidate => candidate.id === 'app.input.submit')!
+  const editor = new ActionEditorPanel({
+    model,
+    action: row,
+    runMutation: () => {},
+    onModelChange: () => {},
+    onBack: () => {},
+  })
+  try {
+    const view = plain(editor.render(88).join('\n'))
+    assert.match(view, /Related runtime conflicts/u)
+    assert.match(view, /Key Ctrl\+Alt\+X: app\.input\.submit \(editor, user\) vs submit-draft \(global, plugin\)/u)
+  } finally {
+    editor.dispose()
     manager.dispose()
   }
 })

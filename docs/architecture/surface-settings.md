@@ -406,9 +406,10 @@ specialist-page contract below).
   the user off to a second editor. The retired complete settings editor (and
   its Web rows, phase map and credential hand-off) no longer exists. The
   `SettingsList` component itself remains: independent commands (`/preset`,
-  `/keybindings conflicts`, plus `/web` / `/acp` on the Split backend) open it
+  plus `/web` / `/acp` on the Split backend) open it
   with their own row lists through `TuiApp.openSettings`, which is not a
-  Settings workspace path.
+  Settings workspace path. `/keybindings conflicts` is NOT one of them: it
+  enters the same Keyboard shortcuts specialist page in this workspace.
 - `Tools` holds the built-in `Visual tools` row (backed by the Host profile's
   `pi-tui-visual-tools.enabled` volatile Config, schema default On), the
   `Shell execution` specialist entry, the `ACP Server` runtime row, the
@@ -566,10 +567,15 @@ specialist-page contract below).
   SAME lease. `Appearance` carries the persist-first `Status line mode` row
   (`default`/`compact`/`custom`; a stored `command` is reported as
   `command (manual)` and is never a candidate) plus `Configure footer layout…`;
-  `Input & Terminal` carries `Keyboard shortcuts…`. `/footer`, `/statusline` and
-  bare `/keybindings` are TYPED DEEPLINKS: the command validates the exact
-  row/page pair, takes the Settings lease and mounts the page on the first real
-  body grant (never before the lease, never a fallback overlay). The page keeps
+  `Input & Terminal` carries `Keyboard shortcuts…`. `/footer`, `/statusline`,
+  bare `/keybindings` and `/keybindings conflicts` are TYPED DEEPLINKS: the
+  command validates the exact row/page pair, takes the Settings lease and
+  mounts the page on the first real body grant (never before the lease, never a
+  fallback overlay). Bare `/keybindings` opens the page's `All` view;
+  `/keybindings conflicts` opens the SAME page and lease in its transient
+  `Conflicts` view. A failure to read the settings document or mount the typed
+  page is a real command error that also carries the current runtime conflict
+  records; it never degrades to a second overlay. The page keeps
   its ONE existing authority — the Footer model/catalog/composer and its
   persist-first save transaction (queue-head USER raw merge, runtime apply only
   after the write), or the ONE `KeybindingEditorController` and its serialized

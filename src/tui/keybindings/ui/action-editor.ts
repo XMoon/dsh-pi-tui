@@ -14,7 +14,8 @@ import type {
   KeybindingEditorModel,
   KeybindingEditorRow,
 } from './model.ts'
-import { formatEditorBindings } from './model.ts'
+import { formatEditorBindings, isBuiltinKeybindingAction } from './model.ts'
+import type { KeybindingConflict } from '../types.ts'
 import type { KeybindingMutation, KeybindingMutationResult, KeybindingMutationRunner } from './controller.ts'
 import { KeyRecorder } from './recorder.ts'
 
@@ -92,6 +93,12 @@ function bindingLabel(binding: KeybindingEditorBinding): string {
 
 function isConditionalBinding(row: KeybindingEditorRow, binding: KeybindingEditorBinding): boolean {
   return row.conditional.some(candidate => candidate.kind === binding.kind && candidate.key === binding.key)
+}
+
+function runtimeRecordText(record: KeybindingConflict): string {
+  return record.actions
+    .map(action => `${action.action} (${action.scope}, ${action.source})`)
+    .join(' vs ')
 }
 
 function ordinaryBindings(row: KeybindingEditorRow, bindings: readonly KeybindingEditorBinding[]): KeybindingEditorBinding[] {
@@ -343,6 +350,18 @@ export class ActionEditorPanel implements Component {
     }
     if (this.row.diagnostics.length > 0) {
       for (const diagnostic of this.row.diagnostics.slice(0, 2)) lines.push(color.warning(truncateToWidth(diagnostic, safeWidth)))
+    }
+    // A runtime record that also names a non-builtin counterpart is stated
+    // read-only here: the Action stays the only editable object, and the
+    // plugin/unknown side is never impersonated as an Action.
+    const relatedRuntime = this.model.runtimeConflictRecords.filter(record =>
+      record.actions.some(action => action.action === this.row.id)
+      && record.actions.some(action => !isBuiltinKeybindingAction(action.action)))
+    if (relatedRuntime.length > 0) {
+      lines.push(color.textStrong('Related runtime conflicts'))
+      for (const record of relatedRuntime) {
+        lines.push(color.textDim(truncateToWidth(`Key ${formatKeyId(record.key)}: ${runtimeRecordText(record)}`, safeWidth)))
+      }
     }
     if (this.message !== undefined) lines.push(color.error(truncateToWidth(this.message, safeWidth)))
     if (this.pending) lines.push(color.accent('Saving…'))

@@ -27,6 +27,7 @@ import type { TuiSettingsLike } from '../../src/commands.ts'
 import { createDirectSettingsFixture, type DirectSettingsFixture } from '../support/direct-settings-fixture.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { DEFAULT_FOOTER_LAYOUT } from '../../src/domain/footer/presets.ts'
+import { parseUserKeybindings } from '../../src/tui/keybindings/config.ts'
 import { sessionScopeFacts } from '../support/session-scope-facts.ts'
 import { settingsDirectPageConfig } from '../support/settings-direct-page-stubs.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -80,9 +81,10 @@ function makeRunner(
   app: TuiApp,
   ctx: Context,
   commands: unknown,
-  settings: TuiSettingsLike,
+  settings: TuiSettingsLike | undefined,
   fixture: DirectSettingsFixture | undefined,
   rawUnavailable = false,
+  backendKind: 'direct' | 'remote' = 'direct',
 ): TuiCommandRunner {
   const base: Record<string, unknown> = {
     ctx,
@@ -186,7 +188,7 @@ function makeRunner(
         app.setFooterLayout(undefined)
       }
     },
-    backendKind: 'direct' as const,
+    backendKind,
     hostShellCompletion: { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) },
     forceContextMeasurementResult: () => ({ value: undefined, observation: 'unavailable' as const }),
     subscribeSessionScopeInvalidation: () => () => {},
@@ -202,9 +204,11 @@ function makeRunner(
 function setup(options: {
   readonly columns?: number
   readonly rows?: number
-  readonly settings?: TuiSettingsLike
+  /** `null` composes the absent settings-service branch. */
+  readonly settings?: TuiSettingsLike | null
   readonly fixture?: DirectSettingsFixture
   readonly rawUnavailable?: boolean
+  readonly backendKind?: 'direct' | 'remote'
 }): Harness {
   const ctx = new Context()
   const vt = new VirtualTerminal(options.columns ?? 120, options.rows ?? 40)
@@ -235,8 +239,16 @@ function setup(options: {
     mutate: async () => {},
   } as never)
   const fixture = options.fixture ?? createDirectSettingsFixture({ footer: 'default' })
-  const settings = options.settings ?? fixture.settings
-  registerTuiCommandsWithDirectSeams(makeRunner(app, ctx, commands.service, settings, fixture, options.rawUnavailable === true))
+  const settings = options.settings === null ? undefined : options.settings ?? fixture.settings
+  registerTuiCommandsWithDirectSeams(makeRunner(
+    app,
+    ctx,
+    commands.service,
+    settings,
+    fixture,
+    options.rawUnavailable === true,
+    options.backendKind ?? 'direct',
+  ))
   return {
     vt,
     app,
@@ -687,6 +699,133 @@ test('bare /keybindings deeplinks into the same lease; recording writes the USER
   h.app.stop()
 })
 
+test('/keybindings conflicts enters the SAME lease in its Conflicts view and repairs a real conflict', async () => {
+  const fixture = createDirectSettingsFixture({ footer: 'default' })
+  const h = setup({ fixture })
+  h.app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    'app.input.submit': 'ctrl+shift+h',
+    'app.todo.toggle': 'ctrl+shift+h',
+  }))
+  assert.equal(h.app.keybindingsManager().snapshot().conflicts.length, 1, 'precondition: one real runtime conflict record')
+  const result = await h.invoke('keybindings', 'conflicts')
+  assert.deepEqual(result, { kind: 'success' }, 'zero/non-zero conflicts both open the page')
+  await frames(h.vt)
+  assertOneSettingsChrome(h)
+  assert.match(h.view(), /Settings · Input & Terminal · Keyboard shortcuts…/u)
+  assert.match(h.view(), /View: All · \[Conflicts \(2 affected actions\)\]/u,
+    'the initial view is Conflicts and counts affected ACTIONS')
+  assert.match(h.view(), /Affected actions · 1 runtime conflict records/u,
+    'the runtime RECORD count is stated separately from the affected Action count')
+  assert.match(h.view(), /Submit draft/u)
+  assert.match(h.view(), /Toggle todo/u)
+  const lease = (h.app as unknown as { workspaceLease?: object }).workspaceLease
+  assert.ok(lease !== undefined, 'the conflicts deeplink took the real Settings lease')
+
+  // Tab is the SAME filter switch and writes nothing. Then Tab returns.
+  await press(h.vt, '\t')
+  assert.match(h.view(), /View: \[All\] · Conflicts \(2 affected actions\)/u)
+  assert.match(h.view(), /Leader key/u, 'All paints the ordinary editor content')
+  await press(h.vt, '\t')
+  assert.match(h.view(), /View: All · \[Conflicts \(2 affected actions\)\]/u)
+
+  // Repair through the ORIGINAL Action detail + controller + settings
+  // transaction; the page stays in Conflicts and drops the repaired action.
+  const callsBefore = fixture.calls.length
+  await press(h.vt, '\r') // Submit draft detail (the first affected action)
+  assert.match(h.view(), /Action ID: app\.input\.submit/u)
+  await press(h.vt, 'r') // reset this action's shortcut
+  await flushOwnedTurns()
+  await frames(h.vt, 2)
+  assert.equal(fixture.calls.length, callsBefore + 1, 'exactly ONE settings.replace through the existing controller')
+  assert.equal((fixture.document().keybindings as Record<string, unknown> | undefined)?.['app.input.submit'], undefined,
+    'the repaired action declaration is gone from the USER document')
+  assert.deepEqual(h.app.keybindingsManager().keysFor('app.input.submit'), ['enter'],
+    'the live keymap really returned to the builtin default')
+  assert.equal(h.app.keybindingsManager().snapshot().conflicts.length, 0, 'the runtime conflict is really gone')
+  await press(h.vt, '\x1b') // detail -> filtered list
+  assert.match(h.view(), /View: All · \[Conflicts \(0 affected actions\)\]/u)
+  assert.match(h.view(), /No conflicts in the current keymap\./u, 'the empty state states the CURRENT model')
+  assert.doesNotMatch(h.view(), /Action ID: app\.input\.submit/u)
+
+  // The same Settings lease still owns the screen; one Esc returns to Rows.
+  assert.equal((h.app as unknown as { workspaceLease?: object }).workspaceLease, lease,
+    'deeplink, filter switches and the repair never replaced the lease')
+  await press(h.vt, '\x1b')
+  assert.match(h.view(), /Settings · Input & Terminal · Rows/u)
+  assert.equal((h.app as unknown as { workspaceLease?: object }).workspaceLease, lease)
+  h.app.dispose()
+  startedApps.delete(h.app)
+})
+
+test('/keybindings conflicts keeps plugin-only runtime records readable without an editor route', async () => {
+  const h = setup({ fixture: createDirectSettingsFixture({ footer: 'default' }) })
+  h.app.keybindingsManager().setPluginRules([
+    { id: 'plugin-a', action: 'submit-draft', key: 'ctrl+alt+x' },
+    { id: 'plugin-b', action: 'open-search', key: 'ctrl+alt+x' },
+  ])
+  const result = await h.invoke('keybindings', 'conflicts')
+  assert.deepEqual(result, { kind: 'success' })
+  await frames(h.vt)
+  assert.match(h.view(), /View: All · \[Conflicts \(0 affected actions\)\]/u)
+  assert.match(h.view(), /Other runtime conflicts · 1 runtime conflict records/u)
+  assert.match(h.view(), /Key Ctrl\+Alt\+X · 2 actions/u)
+  await press(h.vt, '\r') // the only selectable row: the readonly record
+  assert.match(h.view(), /Runtime conflict record/u)
+  assert.match(h.view(), /submit-draft/u)
+  assert.match(h.view(), /open-search/u)
+  assert.match(h.view(), /Scope: global · Source: plugin/u)
+  const callsBefore = h.fixture!.calls.length
+  await press(h.vt, 'r')
+  await press(h.vt, '\r')
+  assert.equal(h.fixture!.calls.length, callsBefore, 'a readonly runtime record has no writer')
+  await press(h.vt, '\x1b')
+  assert.match(h.view(), /Other runtime conflicts/u, 'Esc returns to the filtered list, not out of Settings')
+  assert.match(h.view(), /Settings · Input & Terminal · Keyboard shortcuts…/u)
+  h.app.stop()
+})
+
+test('/keybindings conflicts degrades with the CURRENT runtime records when settings are absent', async () => {
+  const h = setup({ settings: null })
+  h.app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    'app.input.submit': 'ctrl+shift+h',
+    'app.todo.toggle': 'ctrl+shift+h',
+  }))
+  const result = await h.invoke('keybindings', 'conflicts') as { kind: string; text?: string }
+  assert.equal(result.kind, 'error', 'the editor really did not open')
+  assert.match(result.text ?? '', /^Could not open Keyboard shortcuts: the settings service is unavailable\. Runtime keybinding conflict records: 1\./u)
+  assert.match(result.text ?? '', /- Ctrl\+Shift\+H: app\.input\.submit \(editor, user\) vs app\.todo\.toggle \(global, user\)/u)
+  await frames(h.vt)
+  assert.doesNotMatch(h.view(), /Settings · /u, 'no second overlay or empty Settings screen is left behind')
+  h.app.stop()
+})
+
+test('/keybindings conflicts publishes exactly one targeted error on the card-less Remote route', async () => {
+  const h = setup({ settings: null, backendKind: 'remote' })
+  h.app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    'app.input.submit': 'ctrl+shift+h',
+    'app.todo.toggle': 'ctrl+shift+h',
+  }))
+  const notifications: Array<{ text: string; kind: string | undefined }> = []
+  const originalNotify = h.app.notify
+  h.app.notify = ((message: string, kind?: 'info' | 'error') => {
+    notifications.push({ text: message, kind })
+    originalNotify.call(h.app, message, kind)
+  }) as TuiApp['notify']
+  try {
+    const result = await h.invoke('keybindings', 'conflicts') as { kind: string; text?: string }
+    assert.equal(result.kind, 'error')
+    assert.equal(notifications.length, 1, 'the card-less route gets ONE visible notice, never a duplicate')
+    assert.equal(notifications[0]!.kind, 'error')
+    assert.match(notifications[0]!.text, /Runtime keybinding conflict records: 1\./u)
+    assert.match(notifications[0]!.text, /app\.input\.submit \(editor, user\)/u)
+    await frames(h.vt)
+    assert.doesNotMatch(h.view(), /Settings · /u)
+  } finally {
+    h.app.notify = originalNotify
+    h.app.stop()
+  }
+})
+
 test('a pending keybinding write owns the detail page until its result is painted', async () => {
   const fixture = createDirectSettingsFixture({ footer: 'default' })
   let releaseReplace!: () => void
@@ -929,6 +1068,42 @@ test('a page factory failure after the lease is a real command error, never a si
   assert.doesNotMatch(keyboard.view(), /Settings · /u, 'no Settings screen survives the failed keybinding deeplink')
   keyboard.app.dispose()
   startedApps.delete(keyboard.app)
+
+  const conflictsFixture = createDirectSettingsFixture({ footer: 'default' })
+  let conflictReads = 0
+  const flakyConflicts: TuiSettingsLike = {
+    get: () => {
+      conflictReads += 1
+      if (conflictReads >= 3) throw new Error('settings vanished before the conflicts page opened')
+      return conflictsFixture.settings.get()
+    },
+    replace: (doc) => conflictsFixture.settings.replace(doc),
+  }
+  const conflicts = setup({ settings: flakyConflicts, fixture: conflictsFixture })
+  conflicts.app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    'app.input.submit': 'ctrl+shift+h',
+    'app.todo.toggle': 'ctrl+shift+h',
+  }))
+  const notifications: string[] = []
+  const originalNotify = conflicts.app.notify
+  conflicts.app.notify = ((message: string, kind?: 'info' | 'error') => {
+    notifications.push(`${kind ?? 'info'}:${message}`)
+    originalNotify.call(conflicts.app, message, kind)
+  }) as TuiApp['notify']
+  try {
+    const conflictsResult = await conflicts.invoke('keybindings', 'conflicts') as { kind: string; text?: string }
+    assert.equal(conflictsResult.kind, 'error')
+    assert.match(conflictsResult.text ?? '', /^Could not open Keyboard shortcuts: the Keyboard shortcuts page could not be created: /u)
+    assert.match(conflictsResult.text ?? '', /Runtime keybinding conflict records: 1\./u)
+    assert.deepEqual(notifications, [],
+      'the conflicts page factory failure is reported by the command result, never by a generic duplicate notice')
+    await frames(conflicts.vt)
+    assert.doesNotMatch(conflicts.view(), /Settings · /u, 'no half-alive conflicts lease survives')
+  } finally {
+    conflicts.app.notify = originalNotify
+    conflicts.app.dispose()
+    startedApps.delete(conflicts.app)
+  }
 })
 
 test('a failed Footer write keeps the dirty page and never applies the runtime layout', async () => {
@@ -967,7 +1142,97 @@ test('a throwing settings document is a real command error, never a fake page or
   const keybindings = await h.invoke('keybindings') as { kind: string; text?: string }
   assert.equal(keybindings.kind, 'error')
   assert.match(keybindings.text ?? '', /could not open keyboard shortcuts/u)
+  const conflicts = await h.invoke('keybindings', 'conflicts') as { kind: string; text?: string }
+  assert.equal(conflicts.kind, 'error', 'the conflicts deeplink is an error, never a fake "no conflicts" success')
+  assert.match(conflicts.text ?? '', /^Could not open Keyboard shortcuts: the settings document could not be read: settings read exploded\./u)
+  assert.match(conflicts.text ?? '', /Runtime keybinding conflict records: 0\./u)
+  assert.match(conflicts.text ?? '', /No conflicts in the current runtime keymap; the Settings editor is unavailable\./u)
   await frames(h.vt)
   assert.equal(h.view(), before, 'no Settings screen was leased and no overlay was mounted')
   h.app.stop()
+})
+
+// ── UX PR2: real AltScreen pointer journeys through the Settings root ──────
+
+test('/keybindings conflicts: pointer mode span → Action detail → save → visible Back', async () => {
+  const fixture = createDirectSettingsFixture({ footer: 'default' })
+  const h = setup({ columns: 120, rows: 40, fixture })
+  h.app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    'app.input.submit': 'ctrl+shift+h',
+    'app.todo.toggle': 'ctrl+shift+h',
+  }))
+  await h.invoke('keybindings', 'conflicts')
+  await frames(h.vt)
+  const lines = (): string[] => h.vt.getViewport().map(stripTerminalSequences)
+  const click = async (column: number, row: number): Promise<void> => {
+    // SGR is 1-based; the panel receives the 0-based cell.
+    h.vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
+    await frames(h.vt)
+    h.vt.sendInput(`\x1b[<0;${column + 1};${row + 1}m`)
+    await frames(h.vt)
+  }
+  let view = lines()
+  let modeRow = view.findIndex(line => line.includes('View: '))
+  assert.ok(modeRow >= 0)
+  await click(view[modeRow]!.indexOf('Conflicts ('), modeRow)
+  view = lines()
+  assert.match(view[modeRow]!, /View: All · \[Conflicts \(2 affected actions\)\]/u,
+    `the real pointer press+release switched the mode:\n${view.join('\n')}`)
+
+  const actionRow = view.findIndex(line => line.includes('Submit draft'))
+  assert.ok(actionRow >= 0)
+  await click(view[actionRow]!.indexOf('Submit draft'), actionRow)
+  view = lines()
+  assert.match(view.join('\n'), /Action ID: app\.input\.submit/u, 'the Action detail opened from the painted row')
+
+  const bindingRow = view.findIndex(line => line.includes('(default)'))
+  assert.ok(bindingRow >= 0)
+  await click(view[bindingRow]!.indexOf('Enter'), bindingRow)
+  assert.match(lines().join('\n'), /Record shortcut/u, 'the painted binding row started the existing recorder')
+  // Recording a shortcut is the ONE documented keyboard-owned capture step.
+  h.vt.sendInput('\x18')
+  await flushOwnedTurns()
+  await frames(h.vt, 2)
+  view = lines()
+  assert.match(view.join('\n'), /Keyboard shortcut settings saved|Keyboard shortcut settings saved\./u)
+  assert.equal((h.fixture!.document().keybindings as Record<string, unknown> | undefined)?.['app.input.submit'], 'ctrl+x')
+
+  const backRow = view.length - 1
+  await click(view[backRow]!.indexOf('Back [Esc]'), backRow)
+  view = lines()
+  assert.match(view.join('\n'), /View: All · \[Conflicts/u, 'the visible Back returned to the filtered list')
+  await click(view[view.length - 1]!.indexOf('Back [Esc]'), view.length - 1)
+  assert.match(lines().join('\n'), /Settings · Input & Terminal · Rows/u, 'the second visible Back returned to Rows')
+  h.app.dispose()
+  startedApps.delete(h.app)
+})
+
+test('/keybindings conflicts: pointer-only readonly record detail → visible Back', async () => {
+  const h = setup({ columns: 120, rows: 40, fixture: createDirectSettingsFixture({ footer: 'default' }) })
+  h.app.keybindingsManager().setPluginRules([
+    { id: 'plugin-a', action: 'submit-draft', key: 'ctrl+alt+x' },
+    { id: 'plugin-b', action: 'open-search', key: 'ctrl+alt+x' },
+  ])
+  await h.invoke('keybindings', 'conflicts')
+  await frames(h.vt)
+  const lines = (): string[] => h.vt.getViewport().map(stripTerminalSequences)
+  const click = async (column: number, row: number): Promise<void> => {
+    h.vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
+    await frames(h.vt)
+    h.vt.sendInput(`\x1b[<0;${column + 1};${row + 1}m`)
+    await frames(h.vt)
+  }
+  let view = lines()
+  const recordRow = view.findIndex(line => line.includes('Key Ctrl+Alt+X · 2 actions'))
+  assert.ok(recordRow >= 0, `the readonly record row is painted:\n${view.join('\n')}`)
+  await click(view[recordRow]!.indexOf('Key Ctrl+Alt+X'), recordRow)
+  view = lines()
+  assert.match(view.join('\n'), /Runtime conflict record/u)
+  assert.match(view.join('\n'), /submit-draft/u)
+  await click(view[view.length - 1]!.indexOf('Back [Esc]'), view.length - 1)
+  view = lines()
+  assert.match(view.join('\n'), /Other runtime conflicts/u, 'the visible Back returned to the Conflicts list')
+  assert.match(view.join('\n'), /Settings · Input & Terminal · Keyboard shortcuts/u)
+  h.app.dispose()
+  startedApps.delete(h.app)
 })

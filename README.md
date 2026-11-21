@@ -139,7 +139,7 @@ dsh --profile pi-tui web status
 
 ## 设置、扩展与开发
 
-`/settings` 是统一的全屏设置入口；`/plugins`、`/footer`、`/keybindings` 是对应页面的快捷入口。Host 配置写入会经过官方回读确认；当前 Client 的插件 `./tui` 激活状态与 Host 包是否启用是不同事实。
+`/settings` 是统一的全屏设置入口；`/plugins`、`/footer`、`/keybindings` 是对应页面的快捷入口。`/keybindings conflicts` 直接进入同一个 Keyboard shortcuts 页面的 Conflicts 视图；设置文档不可读或该页面无法打开时，命令返回包含当前运行时冲突记录的错误。Host 配置写入会经过官方回读确认；当前 Client 的插件 `./tui` 激活状态与 Host 包是否启用是不同事实。
 
 扩展按 **Stable / Advanced / Unstable** 三层发布，详见 [扩展作者指南](docs/extensions/authoring.md)、[Stable API](docs/extensions/stable.md) 和 [兼容性分层](docs/extensions/tiers.md)。0.5.7 增加了 Client-local `./tui` 加载与按包持久设置，但**不代表 Forge 或 Plugin Marketplace 已交付**。
 

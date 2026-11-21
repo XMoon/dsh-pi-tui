@@ -11,7 +11,6 @@
  * @module @xmoon76/dsh-pi-tui/commands/settings
  */
 
-import type { SettingItem } from '@xmoon76/pi-tui'
 import { getKeybindings } from '@xmoon76/pi-tui'
 import type { CommandResult } from '@deepseek-ai/dsh-commands'
 import type { TuiApp } from '../../tui-app.ts'
@@ -28,7 +27,7 @@ import { parseUserKeybindings } from '../keybindings/config.ts'
 import { formatKeyId } from '../keybindings/hints.ts'
 import type { AppKeybindingId } from '../keybindings/types.ts'
 import { KeybindingEditorController } from '../keybindings/ui/controller.ts'
-import { KeybindingEditorPanel, KeybindingEditorUnavailablePanel } from '../keybindings/ui/list.ts'
+import { KeybindingEditorPanel, KeybindingEditorUnavailablePanel, type KeybindingEditorFilter } from '../keybindings/ui/list.ts'
 import { buildKeybindingEditorModel, type KeybindingEditorModel } from '../keybindings/ui/model.ts'
 import { parseFooterLayout, isFooterLayout } from '../../domain/footer/layout.ts'
 import { DEFAULT_FOOTER_LAYOUT } from '../../domain/footer/presets.ts'
@@ -1315,17 +1314,29 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     /** C2-R5: the typed professional page the first painted body mounts. It is
      *  valid ONLY with the exact `initialRowId` the panel's route table names. */
     readonly initialSpecialist?: import('../panels/settings-workspace-panel.ts').SettingsWorkspaceSpecialistRoute
+    /** PR2: the initial transient view of the Keyboard shortcuts page. It is a
+     *  command-local, per-open value captured by THIS closure; it is stripped
+     *  before the root intents are built (the Settings root/TuiApp API does not
+     *  know about it). */
+    readonly initialKeybindingsFilter?: KeybindingEditorFilter
   }
 
   const openSettingsWorkspaceWith = (spec: WorkspaceOpenSpec): import('../../tui-app.ts').SettingsWorkspaceHandle => {
+    const { initialKeybindingsFilter, ...workspaceSpec } = spec
     // C2-R5: a typed deeplink NEVER guesses its row. Validate the exact pair
     // BEFORE the screen lease is taken, so a mismatched request fails as a real
     // command error and leaves no Settings/overlay behind.
-    if (spec.initialSpecialist !== undefined) {
-      const requires = SETTINGS_SPECIALIST_ROUTE_ROW[spec.initialSpecialist]
-      if (spec.initialRowId !== requires) {
-        throw new Error(`the ${spec.initialSpecialist} deeplink requires the ${requires} row`)
+    if (workspaceSpec.initialSpecialist !== undefined) {
+      const requires = SETTINGS_SPECIALIST_ROUTE_ROW[workspaceSpec.initialSpecialist]
+      if (workspaceSpec.initialRowId !== requires) {
+        throw new Error(`the ${workspaceSpec.initialSpecialist} deeplink requires the ${requires} row`)
       }
+    }
+    // The transient Keyboard filter is valid ONLY on the one typed Keyboard
+    // specialist pair; any other command request fails closed.
+    if (initialKeybindingsFilter !== undefined
+      && (workspaceSpec.initialSpecialist !== 'keybindings' || workspaceSpec.initialRowId !== 'keyboard-shortcuts')) {
+      throw new Error('the keybindings conflicts view requires the keyboard-shortcuts keybindings deeplink')
     }
     const token = {}
     // C2-R3: ONE pinned session scope per workspace open. The approval row
@@ -1614,7 +1625,12 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         // the EXISTING editor over its ONE authority; the root mounts it in this
         // workspace's body and never opens a second overlay.
         createFooterConfiguratorPage: (done, onAuthoritativeChange) => createFooterWorkspacePage(done, onAuthoritativeChange),
-        createKeybindingsPage: (done, onAuthoritativeChange) => createKeybindingsWorkspacePage(done, onAuthoritativeChange),
+        createKeybindingsPage: (done, onAuthoritativeChange) => createKeybindingsWorkspacePage(
+          done,
+          onAuthoritativeChange,
+          initialKeybindingsFilter ?? 'all',
+          initialKeybindingsFilter !== 'conflicts',
+        ),
         // FR3: the ONE per-open MCP servers page. The controller holds only
         // this open's transient state; it starts its ONE watch only after the
         // real Settings lease is live (here), and the page's dispose retires it.
@@ -1680,7 +1696,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         aboutStatusSource,
         onAboutEnter: () => { aboutStatusSource().enter() },
         onAboutLeave: () => { aboutStatusSource().leave() },
-        ...spec,
+        ...workspaceSpec,
         onClose: (reason) => {
           // Retire the token FIRST: every late callback of this open becomes
           // inert before any physical switch is attempted.
@@ -1772,8 +1788,8 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     // row) is NOT an About entry: the page is not About, no read may start
     // behind it, and the panel's own onAboutEnter hook owns the real entry
     // when the user later navigates to About.
-    if (spec.initialCategory === undefined && spec.initialRowId === undefined
-      && spec.initialModelsView === undefined && spec.initialAccountView === undefined) {
+    if (workspaceSpec.initialCategory === undefined && workspaceSpec.initialRowId === undefined
+      && workspaceSpec.initialModelsView === undefined && workspaceSpec.initialAccountView === undefined) {
       aboutStatusSource().enter()
     }
     return handle
@@ -1886,6 +1902,8 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   const createKeybindingEditorPanel = (
     onClose: () => void,
     onModelChange: (model: KeybindingEditorModel) => void = () => {},
+    initialFilter: KeybindingEditorFilter = 'all',
+    notifyOnFailure = true,
   ): KeybindingEditorPanel | undefined => {
     const settings = runner.tuiSettings
     if (settings === undefined) return undefined
@@ -1901,6 +1919,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       let unregister = (): void => {}
       panel = new KeybindingEditorPanel({
         model,
+        initialFilter,
         onClose,
         onModelChange,
         onDispose: () => unregister(),
@@ -1918,7 +1937,11 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       unregister = app.trackKeybindingEditor(panel)
       return panel
     } catch (error) {
-      app.notify(`Could not open keyboard shortcuts: ${safeErrorMessage(error)}`, 'error')
+      // The conflicts deeplink owns its own degraded report (with the live
+      // runtime records); the ordinary entries keep this notification.
+      if (notifyOnFailure) {
+        app.notify(`Could not open keyboard shortcuts: ${safeErrorMessage(error)}`, 'error')
+      }
       return undefined
     }
   }
@@ -5011,8 +5034,10 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   function createKeybindingsWorkspacePage(
     done: () => void,
     onAuthoritativeChange: () => void,
+    initialFilter: KeybindingEditorFilter = 'all',
+    notifyOnFailure = true,
   ): import('../panels/settings-workspace-panel.ts').EmbeddedSpecialistPage | undefined {
-    return createKeybindingEditorPanel(done, () => { onAuthoritativeChange() })
+    return createKeybindingEditorPanel(done, () => { onAuthoritativeChange() }, initialFilter, notifyOnFailure)
   }
 
   const registerFooter = (): void => {
@@ -5114,6 +5139,71 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       },
     })
   }
+  /** The conflicts-only degraded receipt: the typed Settings page could not be
+   *  opened, so the message names the real cause AND the CURRENT runtime
+   *  conflict records (read fresh from the Manager — never the count cached
+   *  before the open attempt). It returns an error result even when the
+   *  runtime keymap is conflict-free: the editor really did not open. */
+  const reportConflictDegraded = (reason: string): CommandResult => {
+    const conflicts = app.keybindingsManager().snapshot().conflicts
+    const lines = [`Could not open Keyboard shortcuts: ${reason}. Runtime keybinding conflict records: ${conflicts.length}.`]
+    if (conflicts.length === 0) {
+      lines.push('No conflicts in the current runtime keymap; the Settings editor is unavailable.')
+    } else {
+      for (const conflict of conflicts) {
+        lines.push(`- ${formatKeyId(conflict.key)}: ${conflict.actions
+          .map(action => `${action.action} (${action.scope}, ${action.source})`)
+          .join(' vs ')}`)
+      }
+    }
+    const message = lines.join('\n')
+    // The card-less Remote PiTui client registry has no command card: this
+    // branch is the ONE owner of the visible error there. Direct keeps its
+    // existing command-result page as the visible owner.
+    if (runner.backendKind === 'remote') app.notify(message, 'error')
+    return { kind: 'error', text: message }
+  }
+
+  /** The ONE typed Keyboard shortcuts entry. Both the ordinary page and the
+   *  conflicts view take the SAME Settings lease and mount the SAME editor;
+   *  only the initial transient filter differs. The ordinary path keeps its
+   *  exact pre-PR2 failure texts. */
+  const openKeyboardShortcuts = async (initialFilter: KeybindingEditorFilter): Promise<CommandResult> => {
+    const settings = runner.tuiSettings
+    if (settings === undefined) {
+      return initialFilter === 'conflicts'
+        ? reportConflictDegraded('the settings service is unavailable')
+        : { kind: 'error', text: 'settings service unavailable' }
+    }
+    try {
+      settings.get()
+    } catch (error) {
+      return initialFilter === 'conflicts'
+        ? reportConflictDegraded(`the settings document could not be read: ${safeErrorMessage(error)}`)
+        : { kind: 'error', text: `could not open keyboard shortcuts: ${safeErrorMessage(error)}` }
+    }
+    let handle: import('../../tui-app.ts').SettingsWorkspaceHandle
+    try {
+      handle = openSettingsWorkspaceWith({
+        initialRowId: 'keyboard-shortcuts',
+        initialSpecialist: 'keybindings',
+        ...(initialFilter === 'conflicts' ? { initialKeybindingsFilter: 'conflicts' as const } : {}),
+      })
+    } catch (error) {
+      return initialFilter === 'conflicts'
+        ? reportConflictDegraded(`the Settings workspace could not be opened: ${safeErrorMessage(error)}`)
+        : { kind: 'error', text: `could not open the settings workspace: ${safeErrorMessage(error)}` }
+    }
+    const settlement = await handle.whenInitialSpecialistSettled()
+    if (!settlement.ok) {
+      handle.close()
+      return initialFilter === 'conflicts'
+        ? reportConflictDegraded(`the Keyboard shortcuts page could not be created: ${settlement.reason}`)
+        : { kind: 'error', text: `could not open keyboard shortcuts: ${settlement.reason}` }
+    }
+    return { kind: 'success' }
+  }
+
   const registerKeybindings = (): void => {
     registerOne({
       name: 'keybindings',
@@ -5123,21 +5213,11 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         const verb = invocation.rawInput.trim().split(/\s+/)[0]?.toLowerCase() ?? ''
         const keybindings = app.keybindingsManager()
         if (verb === 'conflicts') {
-          const conflicts = keybindings.snapshot().conflicts
-          if (conflicts.length === 0) {
-            app.notify('No keybinding conflicts.', 'info')
-            return { kind: 'success', text: 'No keybinding conflicts.' }
-          }
-          const rows: SettingItem[] = conflicts.flatMap(conflict => [{
-            id: `conflict-${conflict.key}`,
-            label: color.warning(formatKeyId(conflict.key)),
-            description: conflict.actions
-              .map(entry => `${entry.action} (${entry.scope}, ${entry.source})`)
-              .join('  vs  '),
-            currentValue: 'conflict',
-          }])
-          app.openSettings(rows, () => {}, () => {})
-          return { kind: 'success' }
+          // A typed same-lease deeplink into the EXISTING Keyboard shortcuts
+          // page, initially in its Conflicts view. Zero runtime conflict
+          // records still open the page (it may show an empty state); only a
+          // real failure to open the SAME page takes the degraded receipt.
+          return openKeyboardShortcuts('conflicts')
         }
         if (verb === 'reload') {
           const settings = runner.tuiSettings
@@ -5221,33 +5301,8 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         }
         // C2-R5: bare /keybindings is a TYPED DEEPLINK into the SAME full-screen
         // Settings keyboard shortcuts page. A missing/unreadable settings document
-        // is a real command error — no fake page and no legacy overlay. The
-        // controller is constructed ONLY by the page factory on the leased first
-        // paint; this preflight only proves the document is readable NOW, and the
-        // settlement below closes the workspace and reports a real error if the
-        // later authoritative read refuses.
-        const settings = runner.tuiSettings
-        if (settings === undefined) return { kind: 'error', text: 'settings service unavailable' }
-        try {
-          settings.get()
-        } catch (error) {
-          return { kind: 'error', text: `could not open keyboard shortcuts: ${safeErrorMessage(error)}` }
-        }
-        let handle: import('../../tui-app.ts').SettingsWorkspaceHandle
-        try {
-          handle = openSettingsWorkspaceWith({
-            initialRowId: 'keyboard-shortcuts',
-            initialSpecialist: 'keybindings',
-          })
-        } catch (error) {
-          return { kind: 'error', text: `could not open the settings workspace: ${safeErrorMessage(error)}` }
-        }
-        const settlement = await handle.whenInitialSpecialistSettled()
-        if (!settlement.ok) {
-          handle.close()
-          return { kind: 'error', text: `could not open keyboard shortcuts: ${settlement.reason}` }
-        }
-        return { kind: 'success' }
+        // is a real command error — no fake page and no legacy overlay.
+        return openKeyboardShortcuts('all')
       },
     })
   }

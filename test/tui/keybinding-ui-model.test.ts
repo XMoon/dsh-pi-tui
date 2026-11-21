@@ -170,3 +170,46 @@ test('the model lists question.toggleSelection as a fixed row with its Space def
     manager.dispose()
   }
 })
+
+test('plugin-only runtime conflicts are projected read-only without inflating the action count', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings(undefined)
+  manager.setPluginRules([
+    { id: 'plugin-a', action: 'submit-draft', key: 'ctrl+alt+x' },
+    { id: 'plugin-b', action: 'open-search', key: 'ctrl+alt+x' },
+  ])
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  try {
+    // Neither plugin action is one of the built-in editable definitions, so
+    // there is no affected Action row — yet the runtime record is real and
+    // must remain readable.
+    assert.equal(model.conflictCount, 0, 'conflictCount stays the affected builtin Action count')
+    assert.equal(model.rows.filter(row => row.conflict).length, 0)
+    assert.equal(model.runtimeConflictRecords.length, 1)
+    const record = model.runtimeConflictRecords[0]!
+    assert.equal(record.key, 'ctrl+alt+x')
+    assert.deepEqual(record.actions.map(action => action.action).sort(), ['open-search', 'submit-draft'])
+    assert.deepEqual(record.actions.map(action => action.source), ['plugin', 'plugin'])
+    assert.ok(!model.sections.some(section => section.rows.some(row => row.conflict)))
+  } finally {
+    manager.dispose()
+  }
+})
+
+test('plugin rules shadow below a builtin/user rule instead of mixing into conflict records', () => {
+  // The resolver priority table makes plugin rules (10) strictly lower than
+  // builtin (100) and user (200) rules, so a shared key is shadowed rather than
+  // a same-priority conflict. The projection must not invent a mixed record.
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings({ 'app.input.submit': 'ctrl+alt+x' })
+  manager.setPluginRules([{ id: 'plugin-a', action: 'submit-draft', key: 'ctrl+alt+x' }])
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  try {
+    assert.equal(model.conflictCount, 0)
+    assert.equal(model.runtimeConflictRecords.length, 0)
+  } finally {
+    manager.dispose()
+  }
+})
