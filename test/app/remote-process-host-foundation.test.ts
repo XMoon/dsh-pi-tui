@@ -201,10 +201,10 @@ function assertDirectoryBrowseComposition(
   }
 }
 
-/** The twelve Host execution rows whose lifetime must not depend on the
+/** The thirteen Host execution rows whose lifetime must not depend on the
  *  mutable `tuiStartup` provider: `webserver` / `workspace-files` /
  *  `workspace-controller` / `directory-picker` are the four existing rows
- *  overridden in place, the other eight are the Host-only inserted rows.
+ *  overridden in place, the other nine are the Host-only inserted rows.
  *  The rc.2 official `deepseek-account` owner is a BASE row (not an overlay
  *  row): the overlay must not mount a second account controller. */
 const HOST_EXECUTION_INJECT: ReadonlyArray<{ id: string; inject: readonly string[] }> = [
@@ -225,12 +225,13 @@ const HOST_EXECUTION_INJECT: ReadonlyArray<{ id: string; inject: readonly string
   },
   { id: 'split-host-settings-controller', inject: ['typert'] },
   { id: 'split-host-session-log-download', inject: ['commands', 'connection'] },
+  { id: 'split-host-cordis-inspect-providers', inject: ['cordisInspect', 'tools'] },
   { id: 'split-host-pi-tui-runtime', inject: ['typert', 'agents', 'fileReferences', 'workingDirectory', 'sessions', 'subprocess', 'workspaceRegistry', 'skills', 'agentPresets'] },
 ]
 
 /**
- * Pin the exact dependency set of the twelve Host execution rows. Shared by the
- * positive assertion and its negative control so the control proves THIS
+ * Pin the exact dependency set of the thirteen Host execution rows. Shared by
+ * the positive assertion and its negative control so the control proves THIS
  * assertion group rejects a reintroduced `tuiStartup`, not a private copy.
  */
 function assertHostExecutionInject(entries: readonly OverlayEntry[]): void {
@@ -268,6 +269,7 @@ const FOUNDATION_ROWS: ReadonlyArray<{ owner: string; id: string; name: string }
   { owner: 'sessionController', id: 'split-host-session-controller', name: '@deepseek-ai/dsh-api-session-controller' },
   { owner: 'settingsController', id: 'split-host-settings-controller', name: '@deepseek-ai/dsh-api-settings-controller' },
   { owner: 'sessionLogExport', id: 'split-host-session-log-download', name: '@deepseek-ai/dsh-session-log-export' },
+  { owner: 'cordisInspectProviders', id: 'split-host-cordis-inspect-providers', name: '@deepseek-ai/dsh-tool-cordis/host' },
   { owner: 'piTuiHostRuntime', id: 'split-host-pi-tui-runtime', name: '@xmoon76/dsh-pi-tui/host-runtime' },
 ]
 
@@ -314,9 +316,9 @@ test('the Host-only overlay declares the official Host service rows and only ENA
   for (const id of ['tui-app', 'pi-tui-extension-host', 'pi-tui-builtins']) {
     assert.equal(row(id).disabled, true, `${id} must stay disabled`)
   }
-  // The two B1 rows, six official service rows and the enable-only runtime row.
-  assert.equal(OVERLAY_ROWS.filter(candidate => candidate.id.startsWith('split-host-')).length, 9,
-    'the overlay must own the two B1 rows, six official Host service rows and the enable-only runtime row')
+  // The two B1 rows, seven official service rows and the enable-only runtime row.
+  assert.equal(OVERLAY_ROWS.filter(candidate => candidate.id.startsWith('split-host-')).length, 10,
+    'the overlay must own the two B1 rows, seven official Host service rows and the enable-only runtime row')
   for (const { id, name } of FOUNDATION_ROWS) {
     if (id === 'split-host-pi-tui-runtime') continue
     assert.equal(row(id).name, name)
@@ -340,7 +342,7 @@ test('the Host-only overlay declares the official Host service rows and only ENA
   assert.equal(OVERLAY_ROWS.some(candidate => /file-reference-host|terminal-progress-host/u.test(candidate.name ?? '')),
     false, 'the private features must not be independent Loader rows')
   assert.deepEqual(row('split-host-session-controller').config, { nativeOpen: false })
-  // The exact twelve-row dependency contract, including the four in-place overrides.
+  // The exact thirteen-row dependency contract, including the four in-place overrides.
   assertHostExecutionInject(OVERLAY_ENTRIES)
 })
 
@@ -451,7 +453,7 @@ test('the directory-browse composition rejects a second backend, a native choice
   )
 })
 
-test('the protected twelve-row dependency assertion rejects a reintroduced tuiStartup', () => {
+test('the protected thirteen-row dependency assertion rejects a reintroduced tuiStartup', () => {
   const reintroduced = OVERLAY_ENTRIES.map(entry => entry.insert === undefined ? entry : {
     ...entry,
     insert: entry.insert.map(candidate => candidate.id === 'split-host-turn-outline'
@@ -465,7 +467,7 @@ test('the protected twelve-row dependency assertion rejects a reintroduced tuiSt
   )
 })
 
-test('the protected twelve-row dependency assertion rejects a duplicated protected row', () => {
+test('the protected thirteen-row dependency assertion rejects a duplicated protected row', () => {
   const insertEntry = OVERLAY_ENTRIES.find(entry => entry.insert !== undefined)
   const insertRows = insertEntry?.insert
   assert.ok(insertRows !== undefined, 'the overlay must insert the Host execution rows')
@@ -503,9 +505,11 @@ const WEB_ROWS: ReadonlyArray<{ id: string; name: string }> = [
   { id: 'modules', name: '@deepseek-ai/dsh-client-modules' },
   { id: 'client-hmr', name: '@deepseek-ai/dsh-client-hmr' },
   { id: 'cordis-client-runner', name: '@deepseek-ai/dsh-cordis-client-runner' },
+  { id: 'open-in-app', name: '@deepseek-ai/dsh-host-open-in-app' },
   { id: 'ui-file-actions', name: '@deepseek-ai/dsh-client-ui-file-actions' },
   { id: 'ui-context-menu', name: '@deepseek-ai/dsh-client-ui-context-menu' },
   { id: 'ui-open-in-app', name: '@deepseek-ai/dsh-client-ui-open-in-app' },
+  { id: 'session-reference', name: '@deepseek-ai/dsh-session-reference' },
   { id: 'ui-settings-account', name: '@deepseek-ai/dsh-client-ui-settings-account' },
   { id: 'ui-account-notifications', name: '@deepseek-ai/dsh-client-ui-account-notifications' },
   { id: 'ui-theme', name: '@deepseek-ai/dsh-client-ui-theme' },
@@ -526,6 +530,7 @@ const WEB_ROWS: ReadonlyArray<{ id: string; name: string }> = [
   { id: 'ui-settings', name: '@deepseek-ai/dsh-client-ui-settings' },
   { id: 'ui-settings-general', name: '@deepseek-ai/dsh-client-ui-settings-general' },
   { id: 'ui-settings-models', name: '@deepseek-ai/dsh-client-ui-settings-models' },
+  { id: 'plugin-inventory', name: '@deepseek-ai/dsh-host-plugin-inventory' },
   { id: 'ui-plugin-manager', name: '@deepseek-ai/dsh-client-ui-plugin-manager' },
   { id: 'ui-settings-plugin-inventory', name: '@deepseek-ai/dsh-client-ui-settings-plugin-inventory' },
   { id: 'ui-conversation', name: '@deepseek-ai/dsh-client-ui-conversation' },
@@ -551,6 +556,7 @@ const WEB_ROWS: ReadonlyArray<{ id: string; name: string }> = [
   { id: 'ui-jobs', name: '@deepseek-ai/dsh-client-ui-jobs' },
   { id: 'ui-schedule', name: '@deepseek-ai/dsh-client-ui-schedule' },
   { id: 'ui-goal', name: '@deepseek-ai/dsh-client-ui-goal' },
+  { id: 'message-feedback', name: '@deepseek-ai/dsh-message-feedback' },
   { id: 'ui-message-feedback', name: '@deepseek-ai/dsh-client-ui-message-feedback' },
   { id: 'ui-model-selection', name: '@deepseek-ai/dsh-client-ui-model-selection' },
   { id: 'ui-permission', name: '@deepseek-ai/dsh-client-ui-permission-presets' },
@@ -647,8 +653,21 @@ const PR5_REQUIRED_WEB_ROWS: ReadonlyArray<{ readonly id: string; readonly name:
 ]
 
 /**
+ * The rc.5 Web-only Host providers this PR restores: each package must have
+ * exactly ONE row in the roster. Config values are validated by the runtime
+ * Loader composition (the official plugin schemas reject invalid values), not
+ * frozen as a generic per-row snapshot here.
+ */
+const RC5_WEB_HOST_PROVIDERS: ReadonlyArray<{ readonly id: string; readonly name: string }> = [
+  { id: 'message-feedback', name: '@deepseek-ai/dsh-message-feedback' },
+  { id: 'open-in-app', name: '@deepseek-ai/dsh-host-open-in-app' },
+  { id: 'session-reference', name: '@deepseek-ai/dsh-session-reference' },
+  { id: 'plugin-inventory', name: '@deepseek-ai/dsh-host-plugin-inventory' },
+]
+
+/**
  * Group 1 — the frozen Web roster: exact ids, exact packages, order, ONE row
- * per id and the three runtime values the plan fixes. Shared by the positive
+ * per id and the safety values this project fixes. Shared by the positive
  * assertion and its negative controls so each control proves THIS assertion
  * group rejects the mutation instead of a private copy.
  */
@@ -671,24 +690,29 @@ function assertWebRoster(
       continue
     }
     if (candidate.id === 'skill-office') {
-      // Official rc.2 non-desktop value: the user's Python, never a
+      // Official non-desktop value: the user's Python, never a
       // workspace-dependencies runtime this Host-only profile does not mount.
-      assert.equal(candidate.inject, undefined)
       assert.deepEqual(candidate.config, { pythonEnvironment: 'user' })
       continue
     }
     if (candidate.id === 'office-kit') {
-      // Official rc.2 macro: output stays under the Host's own DSH home.
-      assert.equal(candidate.inject, undefined)
+      // Official macro: output stays under the Host's own DSH home.
       assert.deepEqual(candidate.config, { outputDirectory: "dshHomePath('office-kit', 'outputs')" })
       continue
     }
-    assert.equal(candidate.inject, undefined, `the "${candidate.id}" Web row must not inject extra services`)
-    assert.equal(candidate.config, undefined, `the "${candidate.id}" Web row must not carry extra config`)
+    // Other official rows own their inject/config declaration shape. Do not
+    // freeze that shape with a generic `undefined` assertion: the official
+    // rc.5 modules may legitimately carry deployment config (message-feedback,
+    // open-in-app) and their schemas own validation.
   }
   const ids = web.map(candidate => candidate.id)
   assert.equal(new Set(ids).size, ids.length, 'a duplicated Web row would activate one package twice')
   for (const required of PR5_REQUIRED_WEB_ROWS) {
+    const owners = web.filter(candidate => candidate.name === required.name)
+    assert.equal(owners.length, 1, `exactly ONE Web row must load "${required.name}", found ${String(owners.length)}`)
+    assert.equal(owners[0].id, required.id, `"${required.name}" must be owned by the "${required.id}" row`)
+  }
+  for (const required of RC5_WEB_HOST_PROVIDERS) {
     const owners = web.filter(candidate => candidate.name === required.name)
     assert.equal(owners.length, 1, `exactly ONE Web row must load "${required.name}", found ${String(owners.length)}`)
     assert.equal(owners[0].id, required.id, `"${required.name}" must be owned by the "${required.id}" row`)
@@ -1132,6 +1156,11 @@ function hostContext(rows: FixtureRow[], overrides: Record<string, unknown> = {}
   const services = new Map<string, unknown>()
   for (const service of REMOTE_HOST_PREREQUISITE_SERVICES) services.set(service, {})
   services.set('connection', {})
+  // The official process-global inspect registry: the readiness audit reads its
+  // live provider directory, not the row name alone.
+  services.set('cordisInspect', {
+    list: () => ['Service', 'Event', 'Config', 'Tool'].map(id => ({ platform: 'host', id })),
+  })
   services.set('webServer', {
     host: '127.0.0.1',
     port: 4567,
@@ -1178,6 +1207,48 @@ function hostContext(rows: FixtureRow[], overrides: Record<string, unknown> = {}
     fiber: { uid: 1 },
   } as unknown as Context
 }
+
+test('the Host Cordis inspect registry must expose the four Host providers exactly once', () => {
+  const providerRow = FOUNDATION_ROWS.find(row => row.owner === 'cordisInspectProviders')
+  assert.ok(providerRow !== undefined, 'the inspect provider owner row must be part of the foundation rows')
+  // Positive control: the row is ACTIVE and the live registry publishes all
+  // four first-party Host providers exactly once.
+  const status = collectHostEntryStatus(hostContext(baselineRows()), { profile: 'pi-tui' })
+  assert.deepEqual(status.ownerEntries.cordisInspectProviders, ['split-host-cordis-inspect-providers'])
+  // A missing provider is not a degraded Ready.
+  assert.throws(
+    () => collectHostEntryStatus(hostContext(baselineRows(), {
+      cordisInspect: { list: () => ['Service', 'Event', 'Config'].map(id => ({ platform: 'host', id })) },
+    }), { profile: 'pi-tui' }),
+    /expected exactly one "Tool" Host Cordis inspect provider, found 0/u,
+  )
+  // A duplicated provider id is the official registry's own failure mode and
+  // must never be reported as Ready.
+  assert.throws(
+    () => collectHostEntryStatus(hostContext(baselineRows(), {
+      cordisInspect: {
+        list: () => [
+          { platform: 'host', id: 'Service' }, { platform: 'host', id: 'Event' },
+          { platform: 'host', id: 'Config' }, { platform: 'host', id: 'Tool' },
+          { platform: 'host', id: 'Tool' },
+        ],
+      },
+    }), { profile: 'pi-tui' }),
+    /expected exactly one "Tool" Host Cordis inspect provider, found 2/u,
+  )
+  // No registry at all is a Host composition failure, not a skipped check.
+  assert.throws(
+    () => collectHostEntryStatus(hostContext(baselineRows(), { cordisInspect: undefined }), { profile: 'pi-tui' }),
+    /official cordisInspect registry is not live/u,
+  )
+  // Client-plane providers do not satisfy the Host requirement.
+  assert.throws(
+    () => collectHostEntryStatus(hostContext(baselineRows(), {
+      cordisInspect: { list: () => ['Service', 'Event', 'Config', 'Tool'].map(id => ({ platform: 'client', id })) },
+    }), { profile: 'pi-tui' }),
+    /expected exactly one "Service" Host Cordis inspect provider, found 0/u,
+  )
+})
 
 test('the readiness audit passes only when every owner row and binding is real', () => {
   const status = collectHostEntryStatus(hostContext(baselineRows()), { profile: 'pi-tui' })
