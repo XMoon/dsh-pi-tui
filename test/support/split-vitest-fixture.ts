@@ -1,27 +1,21 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { fork, type ChildProcess } from 'node:child_process'
 import {
-  chmodSync,
   existsSync,
   mkdirSync,
   readdirSync,
   realpathSync,
-  rmSync,
   statSync,
-  writeFileSync,
 } from 'node:fs'
 import { isAbsolute, join, relative, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { createInterface } from 'node:readline'
 import { setTimeout as sleep } from 'node:timers/promises'
-import type { TestContext } from 'node:test'
 
 import { TuiTest, sessions as openTuiSessions } from '@microsoft/tui-test'
 import { test as base } from 'vitest'
 
-import { testLifecycle } from './temp-lifecycle.ts'
-
 const SUPPORT_DIR = fileURLToPath(new URL('.', import.meta.url))
 const REPO_ROOT = realpathSync(join(SUPPORT_DIR, '..', '..'))
+const SUPERVISOR_PATH = join(SUPPORT_DIR, 'split-host-supervisor.mjs')
 
 interface CandidateFacts {
   tarball: string
@@ -36,10 +30,18 @@ interface SplitInstallation {
   entries: { host: string; client: string }
   anchor: string
   base: { cwd: string; env: Record<string, string> }
+  scratch: string
 }
 
 interface C1WorkFixture {
   patchPath: string
+}
+
+interface SceneFacts {
+  workDir: string
+  candidate: CandidateFacts
+  installation: SplitInstallation
+  c1Work: C1WorkFixture
 }
 
 interface SessionEvent {
@@ -47,13 +49,7 @@ interface SessionEvent {
   data?: Record<string, any>
 }
 
-interface SplitSmokeProfileModule {
-  inspectSplitCandidate(explicitPath: string): CandidateFacts
-  createSplitSmokeProfile(options: { tarball: string; targetDshVersion: string; workDir: string }): SplitInstallation
-}
-
 interface SplitSmokeFixturesModule {
-  writeC1WorkFixture(profileDir: string, workDir: string): C1WorkFixture
   waitForC1WorkEvent(
     workRoot: string,
     predicate: (event: Record<string, any>) => boolean,
@@ -64,16 +60,7 @@ interface SplitSmokeFixturesModule {
 
 interface SplitSmokeSessionsModule {
   hostSessionEvents(dshHome: string, sessionId: string): SessionEvent[] | undefined
-  hostSessionHeader(dshHome: string, sessionId: string): SessionEvent | undefined
   hostUserTexts(events: SessionEvent[]): string[]
-  waitForHostSessionHeader(dshHome: string, sessionId: string, label: string, timeoutMs?: number): Promise<SessionEvent>
-  waitForHostSessionEvent(
-    dshHome: string,
-    sessionId: string,
-    predicate: (event: SessionEvent) => boolean,
-    label: string,
-    timeoutMs?: number,
-  ): Promise<SessionEvent>
   waitForHostSessionEventAfter(
     dshHome: string,
     sessionId: string,
@@ -88,23 +75,19 @@ async function loadModule<T>(relativePath: string): Promise<T> {
   return (await import(pathToFileURL(join(REPO_ROOT, relativePath)).href)) as T
 }
 
-const profileModule = await loadModule<SplitSmokeProfileModule>('scripts/lib/split-smoke-profile.mjs')
 const fixturesModule = await loadModule<SplitSmokeFixturesModule>('scripts/lib/split-smoke-fixtures.mjs')
 const sessionsModule = await loadModule<SplitSmokeSessionsModule>('scripts/lib/split-smoke-sessions.mjs')
 
-/** One live Host process owned by this test scene. */
+/** One Host identity owned by the Supervisor; the worker has no OS kill handle. */
 interface HostHandle {
-  readonly child: ChildProcessWithoutNullStreams
+  readonly hostId: string
   readonly ready: Record<string, any>
   readonly workRoot: string
-  readonly records: Record<string, any>[]
-  readonly stderr: { value: string }
   exited: boolean
   exitResult?: { code: number | null; signal: NodeJS.Signals | null }
-  shutdownRequested?: boolean
 }
 
-/** One live real-PTY Client owned by this test scene. */
+/** One live real-PTY Client owned by the test worker. */
 interface ClientHandle {
   readonly label: string
   readonly terminal: TuiTest
@@ -144,6 +127,7 @@ export interface SplitS0Scene {
     label: string,
     timeoutMs?: number,
   ): Promise<Record<string, any>>
+  report(event: string, detail?: Record<string, unknown>): Promise<void>
   dispose(): Promise<void>
 }
 
@@ -159,8 +143,14 @@ function requireAbsoluteDirectory(name: string): string {
   const raw = process.env[name]
   assert(typeof raw === 'string' && raw !== '' && isAbsolute(raw),
     `INPUT_UNQUALIFIED: ${name} must be an absolute path`)
-  const real = realpathSync(raw)
-  const stats = statSync(real)
+  let real: string
+  let stats
+  try {
+    real = realpathSync(raw)
+    stats = statSync(real)
+  } catch (error) {
+    throw new Error(`INPUT_UNQUALIFIED: ${name} is not a readable existing directory: ${asError(error).message}`)
+  }
   assert(stats.isDirectory(), `INPUT_UNQUALIFIED: ${name} is not a directory: ${real}`)
   if (typeof process.getuid === 'function') {
     assert(stats.uid === process.getuid(), `INPUT_UNQUALIFIED: ${name} is not owned by this user: ${real}`)
@@ -176,7 +166,12 @@ function requireCandidateTarball(): string {
   const raw = process.env.S0_CANDIDATE_TGZ
   assert(typeof raw === 'string' && raw !== '' && isAbsolute(raw),
     'INPUT_UNQUALIFIED: S0_CANDIDATE_TGZ must be an absolute path to the built candidate .tgz')
-  const real = realpathSync(raw)
+  let real: string
+  try {
+    real = realpathSync(raw)
+  } catch (error) {
+    throw new Error(`INPUT_UNQUALIFIED: S0_CANDIDATE_TGZ is not readable: ${asError(error).message}`)
+  }
   assert(statSync(real).isFile(), `INPUT_UNQUALIFIED: S0_CANDIDATE_TGZ is not a file: ${real}`)
   assert(real.endsWith('.tgz'), `INPUT_UNQUALIFIED: S0_CANDIDATE_TGZ must be a .tgz: ${real}`)
   return real
@@ -202,186 +197,194 @@ function listSessionIds(dshHome: string): string[] {
   return ids
 }
 
-async function waitForChildExit(
-  child: ChildProcessWithoutNullStreams,
-  timeoutMs: number,
-): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return { code: child.exitCode, signal: child.signalCode }
+interface PendingRequest {
+  resolve(value: unknown): void
+  reject(error: Error): void
+  timer: NodeJS.Timeout
+  onProgress?: (message: Record<string, any>) => void
+}
+
+/** Worker-side IPC client for the one detached Supervisor process. */
+class SupervisorClient {
+  readonly #child: ChildProcess
+  readonly #pending = new Map<string, PendingRequest>()
+  readonly #exitPromise: Promise<{ code: number | null; signal: NodeJS.Signals | null }>
+  #exitResult: { code: number | null; signal: NodeJS.Signals | null } | undefined
+  #sequence = 0
+
+  constructor() {
+    this.#child = fork(SUPERVISOR_PATH, [], {
+      detached: true,
+      execArgv: [],
+      stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+      env: process.env,
+    })
+    this.#child.unref()
+    this.#exitPromise = new Promise(resolve => {
+      this.#child.once('exit', (code, signal) => {
+        this.#exitResult = { code, signal }
+        for (const [requestId, pending] of this.#pending) {
+          clearTimeout(pending.timer)
+          pending.reject(new Error(`Supervisor exited before response to ${requestId}: ${JSON.stringify(this.#exitResult)}`))
+          this.#pending.delete(requestId)
+        }
+        resolve(this.#exitResult)
+      })
+    })
+    this.#child.on('message', (message: Record<string, any>) => {
+      if (message?.type === 'PROGRESS') {
+        const pending = this.#pending.get(String(message.requestId))
+        pending?.onProgress?.(message)
+        return
+      }
+      const requestId = typeof message?.requestId === 'string' ? message.requestId : undefined
+      if (requestId === undefined) return
+      const pending = this.#pending.get(requestId)
+      if (pending === undefined) return
+      clearTimeout(pending.timer)
+      this.#pending.delete(requestId)
+      if (message.type === 'ERROR') {
+        const error = new Error(String(message.message ?? 'Supervisor request failed'))
+        Object.assign(error, { code: message.code })
+        pending.reject(error)
+      } else {
+        pending.resolve(message.payload)
+      }
+    })
   }
-  return await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      child.off('close', onClose)
-      reject(new Error(`child ${String(child.pid)} did not exit within ${String(timeoutMs)}ms`))
-    }, timeoutMs)
-    const onClose = (code: number | null, signal: NodeJS.Signals | null): void => {
-      clearTimeout(timer)
-      resolve({ code, signal })
+
+  get pids(): { worker: number; supervisor: number | undefined } {
+    return { worker: process.pid, supervisor: this.#child.pid }
+  }
+
+  async request(
+    type: string,
+    payload: Record<string, unknown> = {},
+    options: { timeoutMs?: number; onProgress?: (message: Record<string, any>) => void } = {},
+  ): Promise<any> {
+    const requestId = `${type}-${String(++this.#sequence)}-${String(Date.now())}`
+    const timeoutMs = options.timeoutMs ?? 120_000
+    return await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.#pending.delete(requestId)
+        reject(new Error(`Supervisor request ${type} timed out after ${String(timeoutMs)}ms`))
+      }, timeoutMs)
+      this.#pending.set(requestId, { resolve, reject, timer, ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }) })
+      if (this.#exitResult !== undefined) {
+        clearTimeout(timer)
+        this.#pending.delete(requestId)
+        reject(new Error(`Supervisor already exited: ${JSON.stringify(this.#exitResult)}`))
+        return
+      }
+      try {
+        this.#child.send({ type, requestId, ...payload }, error => {
+          if (error !== undefined && error !== null) {
+            const pending = this.#pending.get(requestId)
+            if (pending === undefined) return
+            clearTimeout(pending.timer)
+            this.#pending.delete(requestId)
+            reject(error instanceof Error ? error : new Error(String(error)))
+          }
+        })
+      } catch (error) {
+        clearTimeout(timer)
+        this.#pending.delete(requestId)
+        reject(asError(error))
+      }
+    })
+  }
+
+  async waitExit(timeoutMs = 30_000): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
+    if (this.#exitResult !== undefined) return this.#exitResult
+    return await Promise.race([
+      this.#exitPromise,
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error(`Supervisor did not exit within ${String(timeoutMs)}ms`)), timeoutMs)
+      }),
+    ])
+  }
+
+  async close(): Promise<void> {
+    if (this.#exitResult !== undefined) return
+    try {
+      this.#child.disconnect()
+    } catch {
+      // A disconnected child may already be collecting its owned resources.
     }
-    child.once('close', onClose)
-  })
+    try {
+      await this.waitExit(15_000)
+    } catch {
+      try { this.#child.kill('SIGKILL') } catch { /* already gone */ }
+      await this.waitExit(3_000).catch(() => undefined)
+    }
+  }
 }
 
 class Scene implements SplitS0Scene {
   readonly workDir: string
   readonly installation: SplitInstallation
   readonly candidate: CandidateFacts
-  readonly #resourcePath: string
-  readonly #resources: {
-    workDir: string
-    startedAt: string
-    hosts: Record<string, any>[]
-    clients: Record<string, any>[]
-  }
-  readonly #c1WorkFixture: C1WorkFixture
+  readonly #c1Work: C1WorkFixture
+  readonly #supervisor: SupervisorClient
   readonly #hosts: HostHandle[] = []
   readonly #clients: ClientHandle[] = []
   #clientSequence = 0
 
-  constructor(
-    tmpBase: string,
-    workDir: string,
-    installation: SplitInstallation,
-    candidate: CandidateFacts,
-    c1WorkFixture: C1WorkFixture,
-  ) {
-    this.workDir = workDir
-    this.installation = installation
-    this.candidate = candidate
-    this.#c1WorkFixture = c1WorkFixture
-    const evidenceRoot = join(tmpBase, 's0-resources')
-    mkdirSync(evidenceRoot, { recursive: true, mode: 0o700 })
-    this.#resourcePath = join(evidenceRoot, `${workDir.split(sep).pop() ?? 'scene'}.json`)
-    this.#resources = { workDir, startedAt: new Date().toISOString(), hosts: [], clients: [] }
-    this.#writeResources()
-    mkdirSync(join(workDir, 'trace'), { recursive: true, mode: 0o700 })
-    mkdirSync(join(workDir, 'artifacts'), { recursive: true, mode: 0o700 })
-    mkdirSync(join(workDir, 'clients'), { recursive: true, mode: 0o700 })
+  constructor(facts: SceneFacts, supervisor: SupervisorClient) {
+    this.workDir = facts.workDir
+    this.installation = facts.installation
+    this.candidate = facts.candidate
+    this.#c1Work = facts.c1Work
+    this.#supervisor = supervisor
+    mkdirSync(join(this.workDir, 'trace'), { recursive: true, mode: 0o700 })
+    mkdirSync(join(this.workDir, 'artifacts'), { recursive: true, mode: 0o700 })
+    mkdirSync(join(this.workDir, 'clients'), { recursive: true, mode: 0o700 })
+  }
+
+  get supervisorPids(): { worker: number; supervisor: number | undefined } {
+    return this.#supervisor.pids
   }
 
   async startHost(scenario: string, extraEnv: Record<string, string> = {}): Promise<HostHandle> {
-    const workRoot = join(this.workDir, `c1-${scenario}`)
-    mkdirSync(workRoot, { recursive: true, mode: 0o700 })
-    chmodSync(workRoot, 0o700)
-    const env: Record<string, string> = {
-      ...this.installation.base.env,
-      SPLIT_PROCESS_EXTRA_PATCH: this.#c1WorkFixture.patchPath,
-      C1_SCENARIO: scenario,
-      C1_WORK_ROOT: workRoot,
-      DSH_PI_TUI_ENTRY_RECORDS: '1',
-      SPLIT_PROCESS_DSH_ANCHOR: this.installation.anchor,
-      SPLIT_PROCESS_PROFILE: 'pi-tui',
-      SPLIT_PROCESS_SCRATCH: join(this.workDir, `host-scratch-${scenario}`),
-      ...extraEnv,
-    }
-    mkdirSync(env.SPLIT_PROCESS_SCRATCH, { recursive: true, mode: 0o700 })
-    const child = spawn(process.execPath, [this.installation.entries.host], {
-      cwd: this.installation.base.cwd,
-      env,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      detached: true,
+    const payload = await this.#supervisor.request('START_HOST', { scenario, extraEnv }, {
+      timeoutMs: 180_000,
+      onProgress: message => {
+        if (message.event === 'HOST_SPAWNED' && process.env.S0_PROBE_WORKER_KILL_POINT === 'host-spawned-before-ack') {
+          process.kill(process.pid, 'SIGKILL')
+        }
+      },
     })
-    const records: Record<string, any>[] = []
-    const stderr = { value: '' }
-    createInterface({ input: child.stdout }).on('line', line => {
-      const trimmed = line.trim()
-      if (trimmed === '') return
-      try {
-        records.push(JSON.parse(trimmed) as Record<string, any>)
-      } catch {
-        stderr.value += `${trimmed}\n`
-      }
-    })
-    child.stderr.setEncoding('utf8')
-    child.stderr.on('data', chunk => { stderr.value += chunk })
     const host: HostHandle = {
-      child,
-      ready: {},
-      workRoot,
-      records,
-      stderr,
+      hostId: String(payload.hostId),
+      ready: payload.ready,
+      workRoot: String(payload.workRoot),
       exited: false,
     }
     this.#hosts.push(host)
-    this.#resources.hosts.push({
-      scenario,
-      businessPid: null,
-      childPid: child.pid ?? null,
-      workRoot,
-      startedAt: new Date().toISOString(),
-    })
-    this.#writeResources()
-    const exitPromise = waitForChildExit(child, 24 * 60 * 60_000).then(result => {
-      host.exited = true
-      host.exitResult = result
-      return result
-    }).catch(() => undefined)
-    void exitPromise
-    let ready: Record<string, any>
-    try {
-      ready = await this.#waitForHostRecord(host,
-        record => record.m4a0 === 'ready' || record.m4a0 === 'failure',
-        `${scenario} Host ready`, 180_000)
-    } catch (error) {
-      this.#killOwnedHost(host)
-      await waitForChildExit(child, 5_000).catch(() => undefined)
-      if (!host.exited) {
-        this.#killOwnedHost(host, 'SIGKILL')
-        await waitForChildExit(child, 2_000).catch(() => undefined)
-      }
-      throw error
-    }
-    if (ready.m4a0 === 'failure') {
-      this.#killOwnedHost(host)
-      await waitForChildExit(child, 5_000).catch(() => undefined)
-      if (!host.exited) {
-        this.#killOwnedHost(host, 'SIGKILL')
-        await waitForChildExit(child, 2_000).catch(() => undefined)
-      }
-      throw new Error(`${scenario} Host boot failed: ${JSON.stringify({
-        code: ready.code,
-        error: ready.error,
-        phase: ready.phase,
-      })} stderr=${JSON.stringify(stderr.value.slice(-2000))}`)
-    }
-    ;(host as { ready: Record<string, any> }).ready = ready
-    const resource = this.#resources.hosts.find(candidate => candidate.childPid === child.pid)
-    if (resource !== undefined) resource.businessPid = ready.pid ?? null
-    this.#writeResources()
     return host
   }
 
   async shutdownHost(host: HostHandle): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
-    if (host.shutdownRequested === true && host.exitResult !== undefined) return host.exitResult
-    host.shutdownRequested = true
-    if (!host.exited) {
-      host.child.stdin.write(`${JSON.stringify({ op: 'shutdown' })}\n`)
-      try {
-        const result = await waitForChildExit(host.child, 30_000)
-        host.exited = true
-        host.exitResult = result
-      } catch (error) {
-        this.#killOwnedHost(host)
-        await waitForChildExit(host.child, 2_000).catch(() => undefined)
-        if (!host.exited) this.#killOwnedHost(host, 'SIGKILL')
-        await waitForChildExit(host.child, 2_000).catch(() => undefined)
-        throw new Error(`Host ${String(host.child.pid)} did not settle its official shutdown: ${asError(error).message}`)
-      }
+    if (host.exited) {
+      const result = host.exitResult
+      assert(result !== undefined && result.code === 0 && result.signal === null,
+        `Host ${host.hostId} had already exited abnormally: ${JSON.stringify(result)}`)
+      return result
     }
-    const result = host.exitResult ?? { code: host.child.exitCode, signal: host.child.signalCode }
-    this.#writeResources()
-    assert(result.code === 0 && result.signal === null,
-      `Host ${String(host.child.pid)} shutdown was ${JSON.stringify(result)}`)
-    return result
+    const result = await this.#supervisor.request('STOP_HOST', { hostId: host.hostId }, { timeoutMs: 60_000 })
+    host.exited = true
+    host.exitResult = { code: result.code ?? null, signal: result.signal ?? null }
+    assert(host.exitResult.code === 0 && host.exitResult.signal === null,
+      `Host ${host.hostId} shutdown was ${JSON.stringify(host.exitResult)}`)
+    return host.exitResult
   }
 
   async hostStatus(host: HostHandle): Promise<Record<string, any>> {
-    assert(!host.exited, `Host ${String(host.child.pid)} is not alive`)
-    const requestId = `s0-status-${String(Date.now())}-${String(Math.random()).slice(2)}`
-    host.child.stdin.write(`${JSON.stringify({ op: 'status', requestId })}\n`)
-    return await this.#waitForHostRecord(host,
-      record => record.m4a0 === 'status' && record.requestId === requestId,
-      `Host status ${requestId}`, 30_000)
+    assert(!host.exited, `Host ${host.hostId} is not alive`)
+    return await this.#supervisor.request('HOST_STATUS', {
+      hostId: host.hostId,
+      hostRequestId: `status-${String(Date.now())}-${String(Math.random()).slice(2)}`,
+    }, { timeoutMs: 30_000 })
   }
 
   async startClient(label: string, options: { sessionId?: string } = {}): Promise<ClientHandle> {
@@ -440,15 +443,11 @@ class Scene implements SplitS0Scene {
       },
     }
     this.#clients.push(client)
-    this.#resources.clients.push({
-      label,
-      session: terminal.session,
-      shellPid: opened.shell_pid ?? null,
-      workDir: scratch,
-      startedAt: new Date().toISOString(),
-    })
-    this.#writeResources()
     try {
+      await this.#supervisor.request('REPORT', {
+        event: 'client-started',
+        detail: { label, session: terminal.session, shellPid: opened.shell_pid ?? null },
+      }, { timeoutMs: 10_000 })
       await this.#waitForPaintedFrame(terminal, `${label} painted its first frame`, 30_000)
     } catch (error) {
       await terminal.closeQuiet()
@@ -475,7 +474,6 @@ class Scene implements SplitS0Scene {
         assert(current.exited === 0, `${client.label} exit code was ${String(current.exited)}`)
         client.closed = true
         await client.terminal.closeQuiet()
-        this.#writeResources()
         assert(!(await openTuiSessions()).includes(client.terminal.session),
           `${client.label} left its native TUI session open after exit`)
         return
@@ -535,13 +533,12 @@ class Scene implements SplitS0Scene {
     return await fixturesModule.waitForC1WorkEvent(workRoot, predicate, label, timeoutMs)
   }
 
+  async report(event: string, detail: Record<string, unknown> = {}): Promise<void> {
+    await this.#supervisor.request('REPORT', { event, detail }, { timeoutMs: 10_000 })
+  }
+
   async dispose(): Promise<void> {
     const errors: Error[] = []
-    try {
-      this.#writeResources()
-    } catch (error) {
-      errors.push(new Error(`resource diagnostics could not be written: ${asError(error).message}`))
-    }
     for (const client of [...this.#clients].reverse()) {
       try {
         const state = await client.terminal.state().catch(() => undefined)
@@ -574,9 +571,8 @@ class Scene implements SplitS0Scene {
     }
     for (const host of [...this.#hosts].reverse()) {
       if (host.exited) {
-        const result = host.exitResult
-        if (result !== undefined && (result.code !== 0 || result.signal !== null)) {
-          errors.push(new Error(`Host ${String(host.child.pid)} exited unexpectedly: ${JSON.stringify(result)}`))
+        if (host.exitResult !== undefined && (host.exitResult.code !== 0 || host.exitResult.signal !== null)) {
+          errors.push(new Error(`Host ${host.hostId} exited unexpectedly: ${JSON.stringify(host.exitResult)}`))
         }
         continue
       }
@@ -590,30 +586,23 @@ class Scene implements SplitS0Scene {
     if (leftoverSessions.length > 0) {
       errors.push(new Error(`S0 left native TUI sessions open: ${JSON.stringify(leftoverSessions)}`))
     }
-    if (errors.length === 0) {
-      rmSync(this.workDir, { recursive: true, force: true })
+    const clientsClosed = errors.length === 0
+    try {
+      await this.#supervisor.request('FINALIZE', { clientsClosed }, { timeoutMs: 120_000 })
+    } catch (error) {
+      errors.push(new Error(`Supervisor FINALIZE failed: ${asError(error).message}`))
+    }
+    try {
+      const exit = await this.#supervisor.waitExit(30_000)
+      if (exit.code !== 0 || exit.signal !== null) {
+        errors.push(new Error(`Supervisor exited abnormally: ${JSON.stringify(exit)}`))
+      }
+    } catch (error) {
+      errors.push(asError(error))
     }
     if (errors.length > 0) {
       throw new AggregateError(errors, `S0 scene cleanup failed with ${String(errors.length)} error(s); evidence root: ${this.workDir}`)
     }
-  }
-
-  async #waitForHostRecord(
-    host: HostHandle,
-    predicate: (record: Record<string, any>) => boolean,
-    label: string,
-    timeoutMs: number,
-  ): Promise<Record<string, any>> {
-    const started = Date.now()
-    while (Date.now() - started < timeoutMs) {
-      const existing = host.records.find(predicate)
-      if (existing !== undefined) return existing
-      if (host.exited) {
-        throw new Error(`${label}: Host exited before the record; stderr=${JSON.stringify(host.stderr.value.slice(-2000))}`)
-      }
-      await sleep(20)
-    }
-    throw new Error(`${label}: timed out after ${String(timeoutMs)}ms; stderr=${JSON.stringify(host.stderr.value.slice(-2000))}`)
   }
 
   async #waitForPaintedFrame(terminal: TuiTest, label: string, timeoutMs: number): Promise<void> {
@@ -642,50 +631,17 @@ class Scene implements SplitS0Scene {
     const lastFrame = await terminal.text({ full }).catch(() => '')
     throw new Error(`${label}: the terminal never showed ${JSON.stringify(text)} within ${String(timeoutMs)}ms; last frame=${JSON.stringify(lastFrame.slice(-2000))}`)
   }
-
-  #killOwnedHost(host: HostHandle, signal: NodeJS.Signals = 'SIGTERM'): void {
-    try {
-      process.kill(-host.child.pid!, signal)
-    } catch {
-      try { host.child.kill(signal) } catch { /* already gone */ }
-    }
-  }
-
-  #writeResources(): void {
-    this.#resources.hosts = this.#resources.hosts.map(host => ({
-      ...host,
-      exited: this.#hosts.find(candidate => candidate.child.pid === host.childPid)?.exited ?? false,
-    }))
-    this.#resources.clients = this.#resources.clients.map(client => ({
-      ...client,
-      exited: this.#clients.find(candidate => candidate.label === client.label
-        && candidate.terminal.session === client.session)?.closed ?? false,
-    }))
-    const payload = JSON.stringify({ ...this.#resources, updatedAt: new Date().toISOString() }, null, 2) + '\n'
-    writeFileSync(this.#resourcePath, payload, { mode: 0o600 })
-  }
 }
 
 async function createScene(): Promise<Scene> {
   const tmpBase = requireAbsoluteDirectory('S0_TMP_BASE')
   const tarball = requireCandidateTarball()
-  // The repository temp-hygiene gate requires every test-owned temp root to
-  // come from the ONE lifecycle helper; this fixture owns its own deletion, so
-  // the helper is used only as the permitted creation seam.
-  const tempLife = testLifecycle({ after: () => {} } as unknown as TestContext)
-  const workDir = tempLife.tempDir('scene-', tmpBase)
-  chmodSync(workDir, 0o700)
+  const supervisor = new SupervisorClient()
   try {
-    const candidate = profileModule.inspectSplitCandidate(tarball)
-    const installation = profileModule.createSplitSmokeProfile({
-      tarball: candidate.tarball,
-      targetDshVersion: candidate.targetDshVersion,
-      workDir,
-    })
-    const c1WorkFixture = fixturesModule.writeC1WorkFixture(installation.profileDir, workDir)
-    return new Scene(tmpBase, workDir, installation, candidate, c1WorkFixture)
+    const facts = await supervisor.request('BOOTSTRAP', { tarball, tmpBase }, { timeoutMs: 600_000 }) as SceneFacts
+    return new Scene(facts, supervisor)
   } catch (error) {
-    rmSync(workDir, { recursive: true, force: true })
+    await supervisor.close()
     throw error
   }
 }
