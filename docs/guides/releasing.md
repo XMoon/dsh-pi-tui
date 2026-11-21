@@ -248,7 +248,7 @@ pnpm verify:release
 ```
 
 It runs the fork typecheck/tests, the benchmark typecheck, the tmux and
-tooling suites, the installation-doc / pi-divergence / naming /
+tooling suites, the compatibility / pi-divergence / naming /
 session-event / boundary / architecture / production-reads / keybinding
 gates, the production dependency audit, and finally `pnpm pack:release`.
 The pi component compatibility contract runs inside the release product

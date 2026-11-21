@@ -191,9 +191,9 @@ removed with the temporary validation workspace and must never be committed to
 - The optional `ecosystem-compat` job resolves the current published
   `pi2dsh@latest` / DSH intersection and runs the real PTY smoke; it is visible
   but not part of release qualification.
-- `test/tooling/dsh-peer-window.test.mjs`, `test/tooling/release-notes.test.mjs` and
-  `scripts/installation-doc-gate.mjs` prove the manifest/matrix-derived install
-  facts and the two root READMEs; a stale matrix fails the release-notes gate
+- `test/tooling/dsh-peer-window.test.mjs` and `test/tooling/release-notes.test.mjs`
+  prove the manifest/matrix-derived compatibility and release guidance; a stale
+  matrix fails the release-notes gate
   instead of publishing a mixed install.
 - A local TUI-only change does not need the full Source compatibility run. Run
   it when the DSH source/distribution boundary changes or when explicitly

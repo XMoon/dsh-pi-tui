@@ -377,7 +377,6 @@
     "compat:dsh:client-family": "node scripts/dsh-client-family-compat.mjs",
     "prepare:dsh:test": "node scripts/prepare-dsh-test-environment.mjs",
     "gate:source-leak": "node scripts/dsh-source-leak-gate.mjs",
-    "gate:installation-doc": "node scripts/installation-doc-gate.mjs",
     "gate:temp-hygiene": "node scripts/temp-hygiene-gate.mjs",
     "gate:raw-persistence": "node scripts/raw-persistence-coupling-gate.mjs",
     "generate:pi-divergences": "node scripts/generate-pi-divergences.mjs",

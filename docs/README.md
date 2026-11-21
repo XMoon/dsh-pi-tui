@@ -48,6 +48,7 @@ MANDATORY or BLOCKING.
 |---|---|---|
 | `README.md` | everyone | This policy and the complete documentation index |
 | `dsh-pi-tui.png` | readers of the root README | The published screenshot asset; not a contract document |
+| `dsh-pi-tui-shared-session.svg` | readers of the root README | An illustrative Direct vs multi-client Daemon diagram; not an architecture contract |
 
 ### `architecture/` — long-lived product and application contracts
 
