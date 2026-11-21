@@ -2261,6 +2261,32 @@ test('PR2: empty-with-history Work header publishes its tab hit', () => {
   panel.dispose()
 })
 
+test('PR2: keyboard navigation retires a pressed compact Header tab', () => {
+  const { panel } = makePanel([subagent()], {
+    enableSearch: false,
+    header: 'Tasks',
+    team: readyTeam([teamTask()]),
+    interactionCurrent: () => true,
+  })
+  panel.setMaxRows(3)
+  const frame = panel.render(44)
+  const header = frame.map(strip)[0]!
+  const col = header.indexOf('Team')
+  assert.ok(col >= 0, `the compact Team label must paint:\n${header}`)
+  assert.ok(panel.handleMouse(mouse('press', col, 0, 44, 3))?.handled)
+  // A keyboard navigation event between press and release retires the tab
+  // gesture even when the label remains at the same painted cells.
+  panel.handleInput(DOWN)
+  panel.render(44)
+  assert.equal(panel.handleMouse(mouse('click', col, 0, 44, 3)), undefined,
+    'a keyboard intervention retires the compact tab press')
+  assert.ok(panel.render(44).map(strip).join('\n').includes('[Work]'), 'the stale tab release changes no page')
+  // A fresh independent press still switches.
+  assert.equal(clickPanelText(panel, 'Team', 44, 3), true)
+  assert.ok(panel.render(44).map(strip).join('\n').includes('[Team]'), 'a fresh compact tab click still works')
+  panel.dispose()
+})
+
 test('PR2: a truncated compact header publishes no clipped tab target, and widening restores it', () => {
   const longHeader = `${'x'.repeat(36)}\u001b[31m任务\u001b[0m`
   const { panel } = makePanel([subagent()], {

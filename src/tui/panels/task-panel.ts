@@ -1365,6 +1365,7 @@ export class TaskBrowserPanel implements Component, Focusable {
   handleInput(data: string): void {
     this.mousePressedValue = undefined
     this.mousePressedAction = undefined
+    this.fr2Pressed = undefined
     this.jobHistoryPressed = undefined
     // B4-B: the modal Quick mode is retired — the on-demand Task Quick
     // accessory replaced it. This panel is the Full Task Center only, and
