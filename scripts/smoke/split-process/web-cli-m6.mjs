@@ -15,6 +15,8 @@
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { request as httpRequest } from 'node:http'
+import { request as httpsRequest } from 'node:https'
 import { join } from 'node:path'
 
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
@@ -89,14 +91,50 @@ function readLaunch(dshHome, instanceId) {
   return JSON.parse(readFileSync(path.launchPath, 'utf8'))
 }
 
-async function fetchStatus(url, init) {
-  try {
-    return await fetch(url, { redirect: 'manual', cache: 'no-store', ...init })
-  } catch (error) {
-    const cause = error !== null && typeof error === 'object' ? error.cause : undefined
-    const code = cause !== null && typeof cause === 'object' && typeof cause.code === 'string' ? cause.code : undefined
-    throw new SplitSmokeAssertionError(`HTTP request failed during the Web CLI case${code === undefined ? '' : ` (${code})`}`)
-  }
+/**
+ * One fresh-connection HTTP request for the smoke driver. Node fetch's pooled
+ * keep-alive socket can already be closed after an earlier authenticated or
+ * rejected response, so the token exchange and Web-shell reads deliberately use
+ * a non-pooled request. The URL and its token never enter an error message.
+ */
+function requestFresh(rawUrl, init = {}) {
+  return new Promise((resolve, reject) => {
+    let url
+    try {
+      url = new URL(rawUrl)
+    } catch {
+      reject(new SplitSmokeAssertionError('the Web CLI smoke driver received an invalid URL'))
+      return
+    }
+    const request = url.protocol === 'https:' ? httpsRequest : httpRequest
+    const req = request(url, {
+      method: init.method ?? 'GET',
+      headers: init.headers ?? {},
+      agent: false,
+    }, response => {
+      const chunks = []
+      response.on('data', chunk => { chunks.push(chunk) })
+      response.on('end', () => {
+        resolve({
+          status: response.statusCode ?? 0,
+          headers: {
+            get: name => {
+              const value = response.headers[name.toLowerCase()]
+              return Array.isArray(value) ? value.join(', ') : value ?? null
+            },
+            getSetCookie: () => Array.isArray(response.headers['set-cookie']) ? response.headers['set-cookie'] : [],
+          },
+          text: async () => Buffer.concat(chunks).toString('utf8'),
+        })
+      })
+    })
+    req.on('error', error => {
+      const code = error !== null && typeof error === 'object' && typeof error.code === 'string' ? error.code : undefined
+      reject(new SplitSmokeAssertionError(`HTTP request failed during the Web CLI case${code === undefined ? '' : ` (${code})`}`))
+    })
+    if (init.body !== undefined) req.write(init.body)
+    req.end()
+  })
 }
 
 function setCookiePair(response) {
@@ -223,10 +261,10 @@ export async function runWebCliM6({ installation, dshHome, trace }) {
     // official Connection admission BEFORE the route handler; the legal POST
     // would enable Web if the fence were broken, so the following status is a
     // real business-spy negative.
-    const anonymousGet = await fetchStatus(`${record.origin}/api/pi-tui.web-control`)
+    const anonymousGet = await requestFresh(`${record.origin}/api/pi-tui.web-control`)
     assert([401, 403].includes(anonymousGet.status), `anonymous GET was not refused: HTTP ${anonymousGet.status}`)
     await anonymousGet.body?.cancel()
-    const anonymousPost = await fetchStatus(`${record.origin}/api/pi-tui.web-control`, {
+    const anonymousPost = await requestFresh(`${record.origin}/api/pi-tui.web-control`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ schema: 1, instanceId, op: 'enable' }),
@@ -254,7 +292,7 @@ export async function runWebCliM6({ installation, dshHome, trace }) {
     assertWebUrl(urlLine.trim(), record)
     let exchange
     try {
-      exchange = await fetchStatus(urlLine.trim())
+      exchange = await requestFresh(urlLine.trim())
     } catch (error) {
       const status = statusFields(runCli(installation, ['daemon', 'status']))
       throw new SplitSmokeAssertionError(`${error instanceof Error ? error.message : 'Web token exchange failed'}; host=${status.host ?? 'unknown'} pid=${status.pid ?? 'none'}`)
@@ -263,7 +301,7 @@ export async function runWebCliM6({ installation, dshHome, trace }) {
     assert(/\bno-store\b/iu.test(exchange.headers.get('cache-control') ?? ''), 'the Web token exchange is not no-store')
     const browserCookie = setCookiePair(exchange)
     assert(browserCookie !== '', 'the official Web token exchange minted no Cookie')
-    const index = await fetchStatus(`${record.origin}/`, { headers: { cookie: browserCookie } })
+    const index = await requestFresh(`${record.origin}/`, { headers: { cookie: browserCookie } })
     const indexBody = await index.text()
     assert(index.status === 200, `the authenticated Web shell returned HTTP ${index.status}`)
     assert(indexBody.includes('__ModuleLoader__'), 'the authenticated Web shell carries no official module bootstrap')
@@ -271,7 +309,7 @@ export async function runWebCliM6({ installation, dshHome, trace }) {
 
     // A cross-site request carrying a real browser Cookie must still be refused
     // by the official Origin/Sec-Fetch fence and must not toggle Web.
-    const crossSite = await fetchStatus(`${record.origin}/api/pi-tui.web-control`, {
+    const crossSite = await requestFresh(`${record.origin}/api/pi-tui.web-control`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -305,14 +343,14 @@ export async function runWebCliM6({ installation, dshHome, trace }) {
     const afterDisable = statusFields(runCli(installation, ['daemon', 'status']))
     assert(afterDisable.host === 'ready' && afterDisable.pid === String(hostPid) && afterDisable.instance === instanceId.slice(0, 8),
       `Web disable changed the Host identity: ${JSON.stringify(afterDisable)}`)
-    const afterDisableRoot = await fetchStatus(`${record.origin}/`)
+    const afterDisableRoot = await requestFresh(`${record.origin}/`)
     assert(afterDisableRoot.status === 404, `the SPA root still answers after disable: HTTP ${afterDisableRoot.status}`)
     await afterDisableRoot.body?.cancel()
     // `/connect` remains the authenticated Host surface.
     const launch = readLaunch(dshHome, instanceId)
     const connectUrl = new URL(launch.connectUrl)
     connectUrl.searchParams.set('interactions', 'answer')
-    const connect = await fetchStatus(connectUrl)
+    const connect = await requestFresh(connectUrl.href)
     assert(connect.status === 302, `the official /connect surface stopped after Web disable: HTTP ${connect.status}`)
     await connect.body?.cancel()
     assertExactLine(runCli(installation, ['web', 'status']), 'web=disabled', 'web status after disable')
