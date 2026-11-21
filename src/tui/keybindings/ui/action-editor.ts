@@ -244,6 +244,8 @@ export class ActionEditorPanel implements Component {
    *  content columns). Cleared on every render start, so a sub-view that paints
    *  its own bar can never leave the previous frame's geometry clickable. */
   private paintedEscapeSpanValue: { readonly startCol: number; readonly endCol: number } | undefined
+  /** The delegated non-Esc Action Bar spans this page painted. */
+  private paintedBarSpansValue: readonly { readonly id: string; readonly startCol: number; readonly endCol: number }[] = []
 
   constructor(options: ActionEditorOptions) {
     this.model = options.model
@@ -275,6 +277,20 @@ export class ActionEditorPanel implements Component {
     return this.paintedEscapeSpanValue
   }
 
+  /** The delegated `c details` Action Bar span, in this page's columns. */
+  paintedBarSpans(): readonly { readonly id: string; readonly startCol: number; readonly endCol: number }[] {
+    return this.paintedBarSpansValue
+  }
+
+  /** Open the readonly conflict reader from the painted bar span. */
+  activateBarSpan(id: string): void {
+    if (id !== 'conflict-details') return
+    if (this.mode !== 'edit' || this.row.diagnostics.length === 0) return
+    this.mode = 'conflict-details'
+    this.conflictScroll = 0
+    this.requestRender()
+  }
+
   render(width: number): string[] {
     const safeWidth = Math.max(1, width)
     // The frame about to be returned carries the settlement result, so the
@@ -284,6 +300,7 @@ export class ActionEditorPanel implements Component {
     // either records its own geometry or (the recorder's raw-input states)
     // reports none.
     this.paintedEscapeSpanValue = undefined
+    this.paintedBarSpansValue = []
     if (this.recorder !== undefined) {
       const lines = this.recorder.render(safeWidth)
       this.paintedEscapeSpanValue = this.recorder.paintedEscapeSpan()
@@ -291,6 +308,22 @@ export class ActionEditorPanel implements Component {
     }
     if (this.mode === 'choose-binding') return this.renderBindingChoice(safeWidth)
     if (this.mode === 'conflict-details') return this.renderConflictDetails(safeWidth)
+    if (this.maxRows() === 1 && this.message !== undefined) {
+      // A one-row grant cannot paint both the bar and the settlement result;
+      // paint the result itself so the navigation lock is released only after
+      // the user could really see it.
+      this.hitMap = [{ kind: 'inert' }]
+      this.hasPainted = true
+      this.paintedBodyRows = 0
+      this.paintedSelection = false
+      this.paintedAdd = false
+      this.paintedChoice = false
+      this.selectableKeys = []
+      this.lastRenderWidth = Math.max(1, width)
+      this.paintedEscapeSpanValue = undefined
+      this.paintedBarSpansValue = []
+      return [color.error(truncateToWidth(this.message, safeWidth))]
+    }
 
     const lines: string[] = [
       color.textStrong(this.row.label),
@@ -399,6 +432,11 @@ export class ActionEditorPanel implements Component {
     const addOrdinal = this.selectableKeys.indexOf('add')
     this.paintedAdd = addOrdinal >= 0 && visibleOrdinals.has(addOrdinal)
     const bar = this.actionBar(editable.length, safeWidth)
+    const conflictLabel = 'c details'
+    const conflictStart = bar.text.indexOf(conflictLabel)
+    this.paintedBarSpansValue = conflictStart < 0
+      ? []
+      : [{ id: 'conflict-details', startCol: conflictStart, endCol: conflictStart + visibleWidth(conflictLabel) }]
     this.paintedEscapeSpanValue = bar.escape
     viewport.lines[viewport.lines.length - 1] = paintWholeBar(bar, safeWidth)
     this.hitMap = viewport.lines.map((_, row) => {
@@ -489,6 +527,10 @@ export class ActionEditorPanel implements Component {
       this.handleConflictDetailsInput(data)
       return
     }
+    if (this.mode === 'choose-binding') {
+      this.handleBindingChoice(data)
+      return
+    }
     if (commandKey(data, 'c') && this.row.diagnostics.length > 0) {
       this.mode = 'conflict-details'
       this.conflictScroll = 0
@@ -500,10 +542,6 @@ export class ActionEditorPanel implements Component {
         this.dispose()
         this.onBack()
       }
-      return
-    }
-    if (this.mode === 'choose-binding') {
-      this.handleBindingChoice(data)
       return
     }
     if (matchesKey(data, 'escape')) {
@@ -670,6 +708,7 @@ export class ActionEditorPanel implements Component {
   /** The read-only diagnostic reader: every wrapped conflict line is
    *  reachable with Up/Down/PgUp/PgDn and the only bar action is Back. */
   private renderConflictDetails(width: number): string[] {
+    this.paintedBarSpansValue = []
     const lines: string[] = [
       color.textStrong(`Conflict details · ${this.row.label}`),
       '',
@@ -741,6 +780,7 @@ export class ActionEditorPanel implements Component {
   }
 
   private renderBindingChoice(width: number): string[] {
+    this.paintedBarSpansValue = []
     const lines = [
       color.textStrong(`Add shortcut › ${this.row.label}`),
       '',

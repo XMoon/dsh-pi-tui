@@ -2289,3 +2289,70 @@ test('action editor: a failed write result stays painted on a short conflict det
     manager.dispose()
   }
 })
+
+test('action editor: c details is inert while choose-binding owns the keys', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings({
+    'app.input.submit': 'ctrl+shift+h',
+    'app.todo.toggle': 'ctrl+shift+h',
+  })
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const row = model.rows.find(candidate => candidate.id === 'app.input.submit')!
+  const editor = new ActionEditorPanel({
+    model,
+    action: row,
+    runMutation: () => {},
+    onModelChange: () => {},
+    onBack: () => {},
+    maxRows: () => 30,
+  })
+  try {
+    editor.render(60)
+    editor.handleInput('a') // choose-binding sub-view
+    const choice = plain(editor.render(60).join('\n'))
+    assert.match(choice, /Choose what to record/u)
+    editor.handleInput('c') // must stay in the choice view
+    const after = plain(editor.render(60).join('\n'))
+    assert.match(after, /Choose what to record/u)
+    assert.doesNotMatch(after, /Conflict details/u)
+  } finally {
+    editor.dispose()
+    manager.dispose()
+  }
+})
+
+test('action editor: a one-row grant paints the failed settlement before unlocking', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings({
+    'app.input.submit': 'ctrl+shift+h',
+    'app.todo.toggle': 'ctrl+shift+h',
+  })
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const row = model.rows.find(candidate => candidate.id === 'app.input.submit')!
+  let failWrite!: () => void
+  let rows = 30
+  const editor = new ActionEditorPanel({
+    model,
+    action: row,
+    runMutation: (_mutation, _onResult, onError) => { failWrite = () => onError(new Error('save failed')) },
+    onModelChange: () => {},
+    onBack: () => {},
+    maxRows: () => rows,
+  })
+  try {
+    editor.render(60)
+    editor.handleInput('r') // pending reset
+    assert.match(plain(editor.render(60).join('\n')), /Saving…/u)
+    rows = 1
+    editor.render(60)
+    failWrite()
+    const frame = plain(editor.render(60).join('\n'))
+    assert.match(frame, /save failed/u, 'the one-row frame paints the failure itself')
+    assert.doesNotMatch(frame, /Saving…/u)
+  } finally {
+    editor.dispose()
+    manager.dispose()
+  }
+})

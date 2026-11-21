@@ -1210,6 +1210,45 @@ test('/keybindings conflicts: pointer mode span → Action detail → save → v
   startedApps.delete(h.app)
 })
 
+test('/keybindings conflicts: pointer journey opens c details and returns through the visible Back', async () => {
+  const fixture = createDirectSettingsFixture({ footer: 'default' })
+  const h = setup({ columns: 120, rows: 40, fixture })
+  h.app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    'app.input.submit': 'ctrl+shift+h',
+    'app.todo.toggle': 'ctrl+shift+h',
+  }))
+  await h.invoke('keybindings', 'conflicts')
+  await frames(h.vt)
+  const lines = (): string[] => h.vt.getViewport().map(stripTerminalSequences)
+  const click = async (column: number, row: number): Promise<void> => {
+    h.vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
+    await frames(h.vt)
+    h.vt.sendInput(`\x1b[<0;${column + 1};${row + 1}m`)
+    await frames(h.vt)
+  }
+  let view = lines()
+  const actionRow = view.findIndex(line => line.includes('Submit draft'))
+  assert.ok(actionRow >= 0)
+  await click(view[actionRow]!.indexOf('Submit draft'), actionRow)
+  view = lines()
+  assert.match(view.join('\n'), /Action ID: app\.input\.submit/u)
+  const detailsRow = view.length - 1
+  const details = view[detailsRow]!.indexOf('c details')
+  assert.ok(details >= 0, `the Action Bar paints the c details span:\n${view.join('\n')}`)
+  await click(details, detailsRow)
+  view = lines()
+  assert.match(view.join('\n'), /Conflict details · Submit draft/u)
+  assert.match(view.join('\n'), /app\.todo\.toggle@user:ctrl\+shift\+h/u)
+  await click(view[view.length - 1]!.indexOf('Back [Esc]'), view.length - 1)
+  view = lines()
+  assert.match(view.join('\n'), /Action ID: app\.input\.submit/u, 'Back returns to the Action detail')
+  await click(view[view.length - 1]!.indexOf('Back [Esc]'), view.length - 1)
+  view = lines()
+  assert.match(view.join('\n'), /View: All · \[Conflicts/u, 'the second Back returns to the conflicts list')
+  h.app.dispose()
+  startedApps.delete(h.app)
+})
+
 test('/keybindings conflicts: pointer-only readonly record detail → visible Back', async () => {
   const h = setup({ columns: 120, rows: 40, fixture: createDirectSettingsFixture({ footer: 'default' }) })
   h.app.keybindingsManager().setPluginRules([

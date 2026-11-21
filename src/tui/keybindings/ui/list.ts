@@ -904,6 +904,16 @@ export class KeybindingEditorPanel implements Component, Focusable {
     return this.paintedEscapeSpanValue
   }
 
+  /** The Action detail's delegated non-Esc bar spans, when that sub-view is
+   *  mounted; the Settings root owns the physical row and forwards releases. */
+  paintedBarSpans(): readonly { readonly id: string; readonly startCol: number; readonly endCol: number }[] {
+    return this.actionEditor?.paintedBarSpans?.() ?? []
+  }
+
+  activateBarSpan(id: string): void {
+    this.actionEditor?.activateBarSpan?.(id)
+  }
+
   /** The page's own SEMANTIC identity for a pointer gesture: the sub-view
    *  (list / leader editor / action detail), the query stage and the pending
    *  leader write decide what its Esc really does. The Settings root stores it
