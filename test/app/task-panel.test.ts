@@ -2213,6 +2213,112 @@ test('B2: an invalidation revokes an armed Action Bar press until the next paint
   panel.dispose()
 })
 
+// ── PR2: compact header tabs and filter exit hit parity ─────────────────────
+
+test('PR2: compact Work/Team headers keep the complete painted tab labels clickable', () => {
+  const { panel } = makePanel([subagent()], {
+    enableSearch: false,
+    header: 'Tasks',
+    team: readyTeam([teamTask()]),
+    interactionCurrent: () => true,
+  })
+  panel.setMaxRows(3)
+  const work = panel.render(100).map(strip)
+  assert.ok(work[0]?.includes('[Work]') && work[0]?.includes('Team'), `the degraded Work header paints its tabs:\n${work.join('\n')}`)
+  assert.equal(clickPanelText(panel, 'Team', 100, 3), true)
+  assert.ok(panel.render(100).map(strip).join('\n').includes('[Team]'), 'the degraded Work Header Team label switches pages')
+  panel.setMaxRows(2)
+  const team = panel.render(44).map(strip)
+  assert.ok(team.length <= 2 && team[0]?.includes('[Team]') && team[0]?.includes('Work'),
+    `the Team slim branch still paints complete tabs:\n${team.join('\n')}`)
+  assert.equal(clickPanelText(panel, 'Work', 44, 2), true)
+  panel.setMaxRows(3)
+  assert.ok(panel.render(44).map(strip).join('\n').includes('[Work]'), 'the slim Team Header Work label switches back')
+  // The compact hit path shares the pending-Stop admission gate.
+  panel.handleInput('s')
+  const pending = panel.render(44)
+  assert.ok(pending.map(strip).join('\n').includes('Confirm stop'), `precondition — compact Stop pending:\n${pending.map(strip).join('\n')}`)
+  const pendingTeam = pending.map(strip).find(line => line.includes('Team'))!
+  const pendingCol = pendingTeam.indexOf('Team')
+  assert.equal(panel.handleMouse(mouse('press', pendingCol, 0, 44, 3)), undefined,
+    'a pending Stop refuses the compact mouse Tab press')
+  panel.handleMouse(mouse('click', pendingCol, 0, 44, 3))
+  assert.ok(panel.render(44).map(strip).join('\n').includes('[Work]'), 'a pending Stop forbids the compact mouse Tab')
+  panel.dispose()
+})
+
+test('PR2: empty-with-history Work header publishes its tab hit', () => {
+  const { panel } = makePanel([jobItem({ value: 'job:old', label: 'bash · old', status: 'completed', active: false, canStop: false })], {
+    header: 'Tasks',
+    team: readyTeam([teamTask()]),
+    interactionCurrent: () => true,
+  })
+  panel.setMaxRows(5)
+  const frame = panel.render(100).map(strip).join('\n')
+  assert.ok(frame.includes('[Work]') && frame.includes('Show 1 jobs'), `the empty-with-history Work header paints:\n${frame}`)
+  assert.equal(clickPanelText(panel, 'Team', 100, 5), true)
+  assert.ok(panel.render(100).map(strip).join('\n').includes('[Team]'), 'the same painted tab switches to Team')
+  panel.dispose()
+})
+
+test('PR2: a truncated compact header publishes no clipped tab target, and widening restores it', () => {
+  const longHeader = `${'x'.repeat(36)}\u001b[31m任务\u001b[0m`
+  const { panel } = makePanel([subagent()], {
+    enableSearch: false,
+    header: longHeader,
+    team: readyTeam([teamTask()]),
+    interactionCurrent: () => true,
+  })
+  panel.setMaxRows(3)
+  const clipped = panel.render(44).map(strip)
+  for (const line of clipped) assert.ok(visibleWidth(line) <= 44, `no clipped header line may exceed 44 cells: ${JSON.stringify(line)}`)
+  assert.ok(!clipped.join('\n').includes('Members'), 'precondition — Work page')
+  panel.handleMouse(mouse('press', 43, 0, 44, 3))
+  panel.handleMouse(mouse('click', 43, 0, 44, 3))
+  assert.ok(!panel.render(44).map(strip).join('\n').includes('[Team]'),
+    'a clipped tab tail is inert, not a hidden Team switch')
+  const wide = panel.render(200).map(strip)
+  const wideRow = wide.findIndex(line => line.includes('Team'))
+  const wideText = wide[wideRow]!
+  const wideCol = visibleWidth(wideText.slice(0, wideText.indexOf('Team')))
+  panel.handleMouse(mouse('press', wideCol, wideRow, 200, 3))
+  panel.handleMouse(mouse('click', wideCol, wideRow, 200, 3))
+  assert.ok(panel.render(200).map(strip).join('\n').includes('[Team]'),
+    'widening restores the complete tab target')
+  panel.dispose()
+})
+
+test('PR2: Fullscreen filter grants 3/2 paint a complete clickable Cancel; grant 1 paints no phantom exit', () => {
+  const { panel, closes } = makeExitPanel([typed(runningJob(), 'bash'), typed(subagent(), 'job')])
+  panel.handleInput('f')
+  panel.setMaxRows(3)
+  const three = panel.render(44).map(strip)
+  assert.equal(three.length, 3, `grant 3 paints exactly its three rows:\n${three.join('\n')}`)
+  assert.ok(three[0]!.includes('Type filter') && three[1]!.includes('All') && three[2]!.includes('Cancel [Esc]'),
+    `grant 3 keeps title + candidate + Action Bar:\n${three.join('\n')}`)
+  assert.equal(clickPanelText(panel, 'Cancel [Esc]', 44, 3), true)
+  assert.ok(!panel.render(44).map(strip).join('\n').includes('Type filter'), 'grant 3 Cancel closes only the filter list')
+  assert.equal(panel.getViewState().typeFilter, null, 'Cancel keeps the active type')
+  assert.equal(closes.length, 0)
+  panel.handleInput('f')
+  panel.setMaxRows(2)
+  const two = panel.render(44).map(strip)
+  assert.equal(two.length, 2, `grant 2 paints exactly its two rows:\n${two.join('\n')}`)
+  assert.ok(!two[0]!.includes('Type filter') && two[1]!.includes('Cancel [Esc]'),
+    `grant 2 drops the title but keeps candidate + Cancel:\n${two.join('\n')}`)
+  assert.equal(clickPanelText(panel, 'Cancel [Esc]', 44, 2), true)
+  assert.ok(!panel.render(44).map(strip).join('\n').includes('Type filter'), 'grant 2 Cancel closes only the filter list')
+  panel.handleInput('f')
+  panel.setMaxRows(1)
+  const one = panel.render(44).map(strip)
+  assert.equal(one.length, 1, `grant 1 paints exactly its one selected row:\n${one.join('\n')}`)
+  assert.ok(one[0]!.includes('All') && !one.join('\n').includes('Cancel') && !one.join('\n').includes('Esc'),
+    `grant 1 must publish no unpainted exit:\n${one.join('\n')}`)
+  assert.equal(clickPanelText(panel, 'All', 44, 1), true)
+  assert.ok(!panel.render(44).map(strip).join('\n').includes('Type filter'), 'the visible selected candidate still applies')
+  panel.dispose()
+})
+
 // ── PR-B B2: the Owner-approved Fullscreen exit whitelist ───────────────────
 
 /** A Full Task Center panel with a recording onCancel; `interactionCurrent`

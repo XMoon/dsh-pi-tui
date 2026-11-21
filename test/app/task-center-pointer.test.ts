@@ -121,12 +121,14 @@ function jobRosterSource(
 async function startTasks(
   descendants: readonly TaskSubagentEntry[] = [],
   sourceOverride?: TaskSurfaceSource,
+  columns = 100,
+  terminalRows = 30,
 ): Promise<{
   vt: VirtualTerminal
   app: TuiApp
   tasks: ReturnType<typeof createTaskRuntime>
 }> {
-  const vt = new VirtualTerminal(100, 30)
+  const vt = new VirtualTerminal(columns, terminalRows)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {})
   app.start()
   startedApps.add(app)
@@ -268,6 +270,34 @@ test('real Fullscreen job history: Show → history Job → Job Workspace → ba
   await clickText(vt, 'Close [Esc]')
   assert.ok(!vt.getViewport().join('\n').includes('[TRACKED]'), 'the painted Close span dismisses the browser')
   assert.deepEqual(observation.closes, ['job-3'], 'the Job observer is released exactly once')
+  app.stop()
+})
+
+test('real Fullscreen 80x10: the painted Work/Team Header labels switch pages in both directions', async () => {
+  const { vt, app } = await startTasks([], undefined, 80, 10)
+  const before = vt.getViewport().join('\n')
+  assert.ok(before.includes('[Work]') && before.includes('Team'),
+    `the short grant must paint both tabs before a pointer claim:\n${before}`)
+  await clickText(vt, 'Team')
+  const team = vt.getViewport().join('\n')
+  assert.ok(team.includes('[Team]'), `the painted Team label switches pages:\n${team}`)
+  await clickText(vt, 'Work')
+  const work = vt.getViewport().join('\n')
+  assert.ok(work.includes('[Work]'), `the painted Work label switches back:\n${work}`)
+  app.stop()
+})
+
+test('real Fullscreen 80x10: the painted filter Cancel closes the filter without closing the browser', async () => {
+  const { vt, app } = await startTasks([], undefined, 80, 10)
+  vt.sendInput('f')
+  await vt.waitForRender()
+  const filter = vt.getViewport().join('\n')
+  assert.ok(filter.includes('Type filter') && filter.includes('Cancel [Esc]'),
+    `the real short filter grant must paint the complete cancel span:\n${filter}`)
+  await clickText(vt, 'Cancel [Esc]')
+  const after = vt.getViewport().join('\n')
+  assert.ok(!after.includes('Type filter'), `the painted Cancel closes only the filter:\n${after}`)
+  assert.ok(after.includes('[Work]'), 'the Task Center remains open')
   app.stop()
 })
 

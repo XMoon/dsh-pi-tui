@@ -902,7 +902,10 @@ export class TaskBrowserPanel implements Component, Focusable {
   /** The `Tasks · [Work]  Team` tab bar plus the PAINTED column ranges of each
    *  tab label, so pointer hits target the real labels (not the whole row). */
   private tabSpans(active: 'work' | 'team'): { text: string; spans: readonly TabSpan[] } {
-    const title = this.options.header ?? 'Tasks'
+    // The title is caller/durable text and is painted through
+    // `sanitizedPhysicalLine`; measure the SAME sanitized projection so control
+    // bytes can never shift the logical label columns away from the cells.
+    const title = sanitizedPhysicalLine(this.options.header ?? 'Tasks')
     const workLabel = active === 'work' ? '[Work]' : 'Work'
     const teamLabel = active === 'team' ? '[Team]' : 'Team'
     const sep = ' · '
@@ -921,12 +924,22 @@ export class TaskBrowserPanel implements Component, Focusable {
     }
   }
 
-  private workTabHit(): TaskMouseHit {
-    return this.team !== undefined ? { kind: 'tab', spans: this.tabSpans('work').spans } : { kind: 'inert' }
-  }
-
-  private teamTabHit(): TaskMouseHit {
-    return { kind: 'tab', spans: this.tabSpans('team').spans }
+  /** Resolve the complete Work/Team labels in the header text that was really
+   *  painted. `fullHeaderPlain` is the sanitized, untruncated header and
+   *  `paintedHeaderPlain` is exactly what entered the frame; a clipped label
+   *  (including one covered by the final `…`) publishes no span. */
+  private tabHitForPaintedHeader(
+    active: 'work' | 'team',
+    fullHeaderPlain: string,
+    paintedHeaderPlain: string,
+  ): TaskMouseHit {
+    if (this.options.mouseActionsEnabled?.() !== true || this.team === undefined) return { kind: 'inert' }
+    const truncated = visibleWidth(paintedHeaderPlain) < visibleWidth(fullHeaderPlain)
+    const paintedLimit = truncated
+      ? Math.max(0, visibleWidth(paintedHeaderPlain) - 1)
+      : visibleWidth(paintedHeaderPlain)
+    const spans = this.tabSpans(active).spans.filter(span => span.endCol <= paintedLimit)
+    return spans.length === 0 ? { kind: 'inert' } : { kind: 'tab', spans }
   }
 
   private teamDetailLines(task: TeamBoardTask): string[] {
@@ -971,7 +984,9 @@ export class TaskBrowserPanel implements Component, Focusable {
     if (this.teamSelectedValue === undefined || !rows.some(row => row.value === this.teamSelectedValue)) {
       this.teamSelectedValue = rows[0]?.value
     }
-    const headerText = truncateToWidth(sanitizedPhysicalLine(this.teamHeaderLine()), safeWidth, '…')
+    const fullHeaderPlain = sanitizedPhysicalLine(this.teamHeaderLine())
+    const headerText = truncateToWidth(fullHeaderPlain, safeWidth, '…')
+    const headerHit = this.tabHitForPaintedHeader('team', fullHeaderPlain, headerText)
     const errorRaw = this.teamErrorLine()
     const errorText = errorRaw === undefined ? undefined : truncateToWidth(sanitizedPhysicalLine(errorRaw), safeWidth, '…')
     const searchLine = this.teamSearchMode ? this.teamSearchLine(safeWidth) : undefined
@@ -1009,7 +1024,7 @@ export class TaskBrowserPanel implements Component, Focusable {
     const build = (count: number, start: number): { lines: string[]; hits: TaskMouseHit[] } => {
       const out: string[] = []
       const outHits: TaskMouseHit[] = []
-      out.push(color.textStrong(headerText)); outHits.push(this.teamTabHit())
+      out.push(color.textStrong(headerText)); outHits.push(headerHit)
       if (searchLine !== undefined) {
         out.push(this.teamSearchMode && this.teamQuery() === '' ? color.textDim(searchLine) : searchLine)
         outHits.push({ kind: 'search' })
@@ -1090,7 +1105,7 @@ export class TaskBrowserPanel implements Component, Focusable {
       // Very short grant: keep header, search (if any), the selected main row
       // and the hint — never a decorative blank over the selected row/Esc.
       const slim: string[] = [color.textStrong(headerText)]
-      const slimHits: TaskMouseHit[] = [{ kind: 'inert' }]
+      const slimHits: TaskMouseHit[] = [headerHit]
       if (searchLine !== undefined) { slim.push(searchLine); slimHits.push({ kind: 'search' }) }
       const selected = rows[selectedIndex]
       if (selected !== undefined) {
@@ -1114,6 +1129,7 @@ export class TaskBrowserPanel implements Component, Focusable {
     const limit = Number.isFinite(this.maxRows) ? Math.max(1, Math.floor(this.maxRows)) : Number.POSITIVE_INFINITY
     const candidates = this.filterCandidates()
     this.filterSelected = Math.max(0, Math.min(candidates.length - 1, this.filterSelected))
+    const pointer = this.options.mouseActionsEnabled?.() === true
     const lines: string[] = []
     const hits: TaskMouseHit[] = []
     lines.push(color.textStrong(truncateToWidth('Type filter', safeWidth, '…'))); hits.push({ kind: 'inert' })
@@ -1134,49 +1150,69 @@ export class TaskBrowserPanel implements Component, Focusable {
       // width-truncate before it enters the line budget / hit map.
       const safeLabel = truncateToWidth(sanitizedPhysicalLine(label), Math.max(1, safeWidth - 2), '…')
       const selected = index === this.filterSelected
-      const pointer = selected ? color.primary('> ') : '  '
-      lines.push(`${pointer}${selected ? color.textStrong(safeLabel) : color.text(safeLabel)}`)
+      const pointerMark = selected ? color.primary('> ') : '  '
+      lines.push(`${pointerMark}${selected ? color.textStrong(safeLabel) : color.text(safeLabel)}`)
       hits.push({ kind: 'item', value: chosen === null ? 'filter:__ALL__' : `filter:type:${chosen}`, index })
     }
     if (candidates.length > budget) {
       lines.push(color.textMuted(`  ${this.filterSelected + 1}/${candidates.length}`)); hits.push({ kind: 'inert' })
     }
     lines.push(''); hits.push({ kind: 'inert' })
-    if (this.options.mouseActionsEnabled?.() === true) {
-      // S0 whitelist: the filter's OWN cancel span only. `Enter apply` and the
-      // candidate rows keep their existing routes.
-      const targets = new Map<number, {
-        action: TaskMouseAction
-        value: string
-        pendingValue: string | undefined
-        role: 'primary' | 'secondary'
-      }>([[2, { action: 'filter-cancel', value: '', pendingValue: undefined, role: 'secondary' }]])
-      const hint = this.paintActionBar(
+    // The normal and degraded FULLSCREEN paths share this ONE result: the same
+    // complete `Cancel [Esc]` span and `filter-cancel` action. The old
+    // `↑↓ · Enter · Esc` fallback tail is gone from Fullscreen; Regular/Main
+    // keeps its keyboard-only hint with no target.
+    const actionHint = pointer
+      ? this.paintActionBar(
         [
           { text: '↑↓ select', priority: 80 },
           { text: 'Enter apply', priority: 90 },
           { text: 'Cancel [Esc]', priority: 1000 },
         ],
         Math.max(0, safeWidth - 2),
-        targets,
+        new Map([[2, { action: 'filter-cancel' as const, value: '', pendingValue: undefined, role: 'secondary' as const }]]),
       )
-      lines.push(hint.line)
-      hits.push(hint.hit)
-    } else {
-      lines.push(color.textMuted(truncateToWidth('  ↑↓ select · Enter apply · Esc cancel', safeWidth, '…')))
-      hits.push({ kind: 'inert' })
-    }
+      : {
+          line: color.textMuted(truncateToWidth('  ↑↓ select · Enter apply · Esc cancel', safeWidth, '…')),
+          hit: { kind: 'inert' as const },
+        }
+    lines.push(actionHint.line)
+    hits.push(actionHint.hit)
     if (lines.length > limit) {
-      // Degrade to the title, the selected candidate and the hint.
       const chosen = candidates[this.filterSelected]
       const label = chosen === null ? 'All' : chosen ?? ''
       const safeLabel = truncateToWidth(sanitizedPhysicalLine(label), Math.max(1, safeWidth - 2), '…')
+      const candidateLine = `${color.primary('> ')}${color.textStrong(safeLabel)}`
+      const candidateHit: TaskMouseHit = {
+        kind: 'item',
+        value: chosen === null ? 'filter:__ALL__' : `filter:type:${chosen ?? ''}`,
+        index: this.filterSelected,
+      }
+      if (pointer) {
+        // Fullscreen budget ladder: >=3 keeps title + candidate + the complete
+        // Action Bar; exactly 2 keeps candidate + Cancel; 1 paints only the
+        // candidate and publishes no invisible exit.
+        const slim = limit >= 3
+          ? [
+              color.textStrong(truncateToWidth('Type filter', safeWidth, '…')),
+              candidateLine,
+              actionHint.line,
+            ].slice(0, limit)
+          : limit === 2 ? [candidateLine, actionHint.line] : [candidateLine]
+        const slimHits = limit >= 3
+          ? [{ kind: 'inert' as const }, candidateHit, actionHint.hit].slice(0, limit)
+          : limit === 2 ? [candidateHit, actionHint.hit] : [candidateHit]
+        this.hitMap = slimHits
+        return slim
+      }
+      // Regular/Main has no application pointer: preserve its keyboard-only
+      // fallback without inventing a button target.
       const slim = [
         color.textStrong(truncateToWidth('Type filter', safeWidth, '…')),
-        `${color.primary('> ')}${color.textStrong(safeLabel)}`,
+        candidateLine,
         color.textMuted(truncateToWidth('  ↑↓ · Enter · Esc', safeWidth, '…')),
       ]
-      const slimHits: TaskMouseHit[] = [{ kind: 'inert' }, { kind: 'item', value: chosen === null ? 'filter:__ALL__' : `filter:type:${chosen ?? ''}`, index: this.filterSelected }, { kind: 'inert' }]
+      const slimHits: TaskMouseHit[] = [{ kind: 'inert' }, candidateHit, { kind: 'inert' }]
       this.hitMap = slimHits.slice(0, limit)
       return slim.slice(0, limit)
     }
@@ -1960,8 +1996,12 @@ export class TaskBrowserPanel implements Component, Focusable {
     // run name and phase label), so it is projected to a single SAFE
     // physical row (escape/control bytes removed) before truncation — one
     // returned row is one physical row.
-    const headerText = this.options.header === undefined ? undefined
-      : truncateToWidth(sanitizedPhysicalLine(this.headerText()), safeWidth, '…')
+    const fullHeaderPlain = this.options.header === undefined ? undefined : sanitizedPhysicalLine(this.headerText())
+    const headerText = fullHeaderPlain === undefined ? undefined
+      : truncateToWidth(fullHeaderPlain, safeWidth, '…')
+    const headerHit = fullHeaderPlain === undefined || headerText === undefined
+      ? { kind: 'inert' as const }
+      : this.tabHitForPaintedHeader('work', fullHeaderPlain, headerText)
     const searchEmpty = this.getFilter() === ''
     const searchRowText = !searchOn ? '' : (() => {
       const searchLine = this.searchInput.render(Math.max(1, safeWidth - 2))[0] ?? ''
@@ -1971,7 +2011,7 @@ export class TaskBrowserPanel implements Component, Focusable {
     const historyControl = this.historyControl(safeWidth)
 
     if (headerText !== undefined) {
-      push(color.textStrong(headerText), this.workTabHit())
+      push(color.textStrong(headerText), headerHit)
     }
     if (historyControl !== undefined) {
       push(historyControl.line, historyControl.hit)
@@ -2021,6 +2061,7 @@ export class TaskBrowserPanel implements Component, Focusable {
         // reachable; no fake task row and no phantom group header.
         const result = this.renderEmptyWithHistory(
           headerText,
+          headerHit,
           historyControl,
           noMatchText,
           this.refreshError === undefined ? undefined : refreshErrorLine,
@@ -2151,6 +2192,7 @@ export class TaskBrowserPanel implements Component, Focusable {
       searchRowText,
       searchEmpty,
       headerText,
+      headerHit,
       rows.length > itemCount ? `  ${this.selected + 1}/${rows.length}` : undefined,
       limit,
       hintLine,
@@ -2177,6 +2219,7 @@ export class TaskBrowserPanel implements Component, Focusable {
     searchRowText: string,
     searchEmpty: boolean,
     headerText: string | undefined,
+    headerHit: TaskMouseHit,
     indicatorText: string | undefined,
     limit: number,
     hintLine: string,
@@ -2231,7 +2274,7 @@ export class TaskBrowserPanel implements Component, Focusable {
     const outHits: TaskMouseHit[] = []
     if (headerShown) {
       out.push(color.textStrong(headerText!))
-      outHits.push({ kind: 'inert' })
+      outHits.push(headerHit)
     }
     if (searchShown !== '') {
       out.push(searchShown)
@@ -2304,6 +2347,7 @@ export class TaskBrowserPanel implements Component, Focusable {
    *  header > blank; the result never keeps an orphan clickable hit. */
   private renderEmptyWithHistory(
     headerText: string | undefined,
+    headerHit: TaskMouseHit,
     historyControl: { line: string; hit: TaskMouseHit },
     message: string,
     refreshErrorLine: string | undefined,
@@ -2312,7 +2356,7 @@ export class TaskBrowserPanel implements Component, Focusable {
   ): { lines: string[]; hits: TaskMouseHit[] } {
     const entries: Array<{ line: string; hit: TaskMouseHit; priority: number }> = []
     if (headerText !== undefined) {
-      entries.push({ line: color.textStrong(headerText), hit: this.workTabHit(), priority: 10 })
+      entries.push({ line: color.textStrong(headerText), hit: headerHit, priority: 10 })
     }
     entries.push({ line: historyControl.line, hit: historyControl.hit, priority: 500 })
     entries.push({ line: color.textDim(message), hit: { kind: 'inert' }, priority: 100 })
