@@ -7,6 +7,8 @@
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-11-21
+
 ### 新增
 
 #### Daemon 模式（0.5.7 重大更新，Linux/macOS）
@@ -1785,7 +1787,8 @@ dsh --profile pi-tui
 - 全屏布局、Ctrl+F 搜索、主题系统。
 - 单包发布模型。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.6...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.7...HEAD
+[0.5.7]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.6...v0.5.7
 [0.5.6]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.5...v0.5.6
 [0.5.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.3...v0.5.4

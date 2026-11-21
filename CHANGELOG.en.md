@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-11-21
+
 ### Added
 
 #### Daemon mode (major 0.5.7 feature, Linux/macOS)
@@ -2248,7 +2250,8 @@ Users who must keep DSH `0.1.1-rc.2` should use `@xmoon76/dsh-pi-tui@0.3`.
 - Fullscreen layout, Ctrl+F transcript search, theme system.
 - Single-package release model.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.6...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.7...HEAD
+[0.5.7]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.6...v0.5.7
 [0.5.6]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.5...v0.5.6
 [0.5.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.3...v0.5.4
