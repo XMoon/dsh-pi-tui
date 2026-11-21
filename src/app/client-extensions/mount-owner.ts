@@ -33,13 +33,13 @@
 
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import { createRequire } from 'node:module'
-import type { Fiber } from '@deepseek-ai/cordis'
+import { symbols, type Fiber } from '@deepseek-ai/cordis'
 import type { Loader } from '@deepseek-ai/cordis-plugin-loader'
 import type { ExtensionConfigsConfig } from '../../runtime/config-port.ts'
 import type { PluginManagerSnapshot } from '../../runtime/plugin-manager-port.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { clientExtensionEntryId } from '../../domain/extension-config/client-entry.ts'
+import { markOwnedClientExtensionEntry, unmarkOwnedClientExtensionEntry } from '../../runtime/plugin-manager-ownership.ts'
 import {
   discoverCurrentClientExtensions,
   type CurrentClientExtension,
@@ -147,19 +147,53 @@ function sameJsonValue(left: unknown, right: unknown): boolean {
 }
 
 /**
- * Resolve the exact file bytes the Node ESM loader will import for
- * `specifier`. `undefined` means this Client cannot obtain a unique `file:`
- * URL (non-file resolution, an `import`-only export condition, or a package
- * without a readable file); the caller treats identity as unverified and
- * never guesses "same".
+ * Resolve the EXACT module URL the official Loader's ESM import uses. The
+ * official Loader exposes its own resolved Node module loader; this is the
+ * same resolver/parent URL the real import will use — never a `require`
+ * condition, never a second resolver.
  */
-function readCodeIdentity(specifier: string, parentURL: string): string | undefined {
+function resolveImportedModuleUrl(loader: Loader, specifier: string, parentURL: string): string | undefined {
+  const internal = loader.internal
+  if (internal === undefined) return undefined
   try {
-    const resolved = createRequire(parentURL).resolve(specifier)
-    return createHash('sha256').update(readFileSync(resolved)).digest('hex')
+    const result = internal.version === 'v2'
+      ? internal.resolveSync(parentURL, { specifier })
+      : internal.resolveSync(specifier, parentURL, {})
+    const url = (result as { readonly url?: unknown }).url
+    if (typeof url !== 'string' || !url.startsWith('file:')) return undefined
+    return url
   } catch {
     return undefined
   }
+}
+
+/** Hash the exact bytes of the module the Loader will import. */
+function readCodeIdentity(loader: Loader, specifier: string, parentURL: string): string | undefined {
+  const url = resolveImportedModuleUrl(loader, specifier, parentURL)
+  if (url === undefined) return undefined
+  try {
+    return createHash('sha256').update(readFileSync(new URL(url))).digest('hex')
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Process-lifetime identity memory per Loader: Node's ESM cache is
+ * process-scoped, so a same-PID surface revision must inherit the identity
+ * the previous revision actually imported. A fresh owner must never mistake a
+ * cached v1 module for a newly written v2 file.
+ */
+const PROCESS_KNOWN_CODE_IDENTITIES = new WeakMap<object, Map<string, string | undefined>>()
+
+function processKnownCodeIdentities(loader: Loader): Map<string, string | undefined> {
+  const key = (loader as unknown as Record<symbol, object | undefined>)[symbols.original] ?? loader
+  let known = PROCESS_KNOWN_CODE_IDENTITIES.get(key)
+  if (known === undefined) {
+    known = new Map()
+    PROCESS_KNOWN_CODE_IDENTITIES.set(key, known)
+  }
+  return known
 }
 
 /** Create the ONE Client-local mount owner. */
@@ -173,7 +207,7 @@ export function createClientExtensionMountOwner(
    * after a disable unloads its entry. Node's ESM cache never forgets a URL,
    * so a later re-enable must not claim newer file bytes it cannot load.
    */
-  const knownCodeIdentity = new Map<string, string | undefined>()
+  const knownCodeIdentity = processKnownCodeIdentities(loader)
   const observations = new Map<string, ClientExtensionObservation>()
   let reconcileTail: Promise<void> = Promise.resolve()
   let disposed = false
@@ -200,6 +234,7 @@ export function createClientExtensionMountOwner(
       fiber = undefined
     }
     loader.remove(entry.entryId)
+    unmarkOwnedClientExtensionEntry(loader, entry.entryId)
     if (fiber !== undefined) {
       await fiber.dispose()
       await fiber.await()
@@ -219,6 +254,7 @@ export function createClientExtensionMountOwner(
     }
     try {
       loader.remove(entryId)
+      unmarkOwnedClientExtensionEntry(loader, entryId)
     } catch {
       // A concurrently removed entry is already the desired terminal state.
     }
@@ -306,10 +342,28 @@ export function createClientExtensionMountOwner(
       const { packageName, tuiSpecifier, configRowId } = candidate
       const read = config.read(packageName)
       if (read.kind !== 'ready') {
+        // A previously ACTIVE entry must not keep rendering/running while the
+        // Host says its Config is no longer readable. Revoke the contributions
+        // through the official Loader first; only then report unavailable.
+        const previous = mounted.get(packageName)
+        if (previous !== undefined) {
+          try {
+            await unloadEntry(previous)
+            mounted.delete(packageName)
+          } catch (error) {
+            setObservation({ packageName, phase: 'error', entryId: previous.entryId, reason: 'cleanup failed after Config became unavailable' })
+            warn('client extension: cleanup failed after Config became unavailable', {
+              packageName,
+              entryId: previous.entryId,
+              error: error instanceof Error ? error.message : String(error),
+            })
+            continue
+          }
+        }
         setObservation({ packageName, phase: 'unavailable', reason: read.reason })
         continue
       }
-      const identity = readCodeIdentity(tuiSpecifier, parentURL)
+      const identity = readCodeIdentity(loader, tuiSpecifier, parentURL)
       const previous = mounted.get(packageName)
       if (previous !== undefined) {
         // A changed file cannot be reloaded in the same PID: Node's ESM cache
@@ -408,6 +462,7 @@ export function createClientExtensionMountOwner(
           name: tuiSpecifier,
           config: read.effective,
         })
+        markOwnedClientExtensionEntry(loader, entryId)
         if (!isCurrent(epoch)) {
           await discardCreatedEntry(entryId)
           return

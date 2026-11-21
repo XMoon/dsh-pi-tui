@@ -92,6 +92,7 @@ export async function runClientExtensionLoaderProbe(input: {
     const file = tuiFile(packages.a, input.pluginPackages, input.parentURL)
     const original = readFileSync(file, 'utf8')
     if (!original.includes('R8-A-LIVE')) throw new Error('client extension probe: fixture A footer marker is missing')
+    const keepBytes = process.env.SPLIT_PROCESS_CLIENT_EXTENSION_LOADER_KEEP_BYTES === '1'
     writeFileSync(file, original.replace('R8-A-LIVE', 'R8-A-NEW'))
     try {
       await input.ui.reconcileClientExtensions(await input.pluginManager.snapshot())
@@ -99,10 +100,12 @@ export async function runClientExtensionLoaderProbe(input: {
       afterBytesA = phaseOf(afterBytes, packages.a)
       afterBytesB = phaseOf(afterBytes, packages.b)
     } finally {
-      writeFileSync(file, original)
+      if (!keepBytes) writeFileSync(file, original)
     }
-    await input.ui.reconcileClientExtensions(await input.pluginManager.snapshot())
-    afterRestoreA = phaseOf(input.ui.clientExtensionObservation(), packages.a)
+    if (!keepBytes) {
+      await input.ui.reconcileClientExtensions(await input.pluginManager.snapshot())
+      afterRestoreA = phaseOf(input.ui.clientExtensionObservation(), packages.a)
+    }
   }
   return {
     op: 'client-extension-loader-probe',
@@ -117,5 +120,6 @@ export async function runClientExtensionLoaderProbe(input: {
     ...(afterBytesA === undefined ? {} : { afterBytesA }),
     ...(afterBytesB === undefined ? {} : { afterBytesB }),
     ...(afterRestoreA === undefined ? {} : { afterRestoreA }),
+    bytesKept: process.env.SPLIT_PROCESS_CLIENT_EXTENSION_LOADER_KEEP_BYTES === '1',
   }
 }

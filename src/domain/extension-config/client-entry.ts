@@ -32,9 +32,3 @@ export function clientExtensionEntryId(configRowId: string): string {
   }
   return `${CLIENT_EXTENSION_ENTRY_PREFIX}${suffix}`
 }
-
-/** Whether one Loader entry id is a Client-local ephemeral extension entry. */
-export function isClientExtensionEntryId(entryId: string): boolean {
-  if (!entryId.startsWith(CLIENT_EXTENSION_ENTRY_PREFIX)) return false
-  return HASH_SUFFIX.test(entryId.slice(CLIENT_EXTENSION_ENTRY_PREFIX.length))
-}

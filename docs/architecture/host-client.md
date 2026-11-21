@@ -1079,18 +1079,28 @@ through that Client's EXISTING official Cordis Loader. The semantic owner is
   resolver is never an authority.
 - `ConfigPort.extensionConfigs` supplies the package's effective `data` value
   verbatim. An unavailable/stale/unreadable read is an explicit Client-local
-  state; it never becomes `{}`, a stale value or an ACTIVE entry.
+  state; a previously mounted package is unloaded through the official Loader
+  with awaited Fiber cleanup, so it never becomes `{}`, a stale value or a
+  live ACTIVE entry.
 - The Loader entry id is `pi-tui-client-` + the validated 32-char
   `extensionConfigRowId` suffix. `loader.create()` returning is not activation:
   the entry's real Fiber must exist, settle and be ACTIVE.
+- Code identity is the SHA-256 of the exact module file the official Loader's
+  ESM resolver will import — never a `require`-condition path or a second
+  resolver. Identity memory is process-lifetime per Loader, so a same-PID
+  surface revision inherits the identity of the module v1 that Node's ESM
+  cache actually holds.
 - Unload captures the real Fiber, removes the entry from the Loader tree
   first, then awaits that Fiber's terminal disposal before the id may be
-  reused. A same-PID byte change is never re-imported; the old entry stays
-  active and the package becomes `reload-required`.
+  reused. A same-PID byte change is never re-imported; the old entry keeps
+  running and the package becomes `reload-required` until a new process
+  imports the new module.
 - Direct mounts these entries in its own Host-process Loader as ephemeral
   Client runtime entries — never as profile `cordis.patch.yml` rows. The Host
-  Plugin Manager projection excludes `pi-tui-client-*` entries: they are
-  Client runtime facts, not manageable profile plugins. A Split Client mounts
+  Plugin Manager projection excludes only the entries PROVEN owned by the
+  current Client mount owner: they are Client runtime facts, not manageable
+  profile plugins; a Host row that merely shares the naming shape stays
+  visible. A Split Client mounts
   them in its own Client Context/Loader; closing one Client releases only
   that Client's entries.
 - The Plugin Manager's committed-explicit-refresh callback drives an

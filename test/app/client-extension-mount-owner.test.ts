@@ -19,7 +19,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import test, { type TestContext } from 'node:test'
@@ -451,16 +451,13 @@ test('a dispose during an in-flight Config refresh publishes no entry and leaves
   assert.equal(Object.hasOwn(harness.loader.store, `pi-tui-client-${extensionConfigRowId(a.name).slice('pi-tui-extcfg-'.length)}`), false)
 })
 
-test('an unverifiable conditional ./tui export becomes reload-required instead of a false ACTIVE claim', async (t) => {
+test('a package whose resolved ./tui file cannot be read becomes reload-required instead of a false ACTIVE claim', async (t) => {
   const { life, root } = await packagePair(t)
   const conditional = writePackage(root, `${FIXTURE_ROOT}/conditional`, contributingTui('a'))
-  const manifestPath = join(conditional.dir, 'package.json')
-  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
-  manifest.exports = { './tui': { import: './dist/tui.mjs' } }
-  writeFileSync(manifestPath, `${JSON.stringify(manifest, undefined, 2)}\n`)
   const harness = await mountHarness(t, [conditional], { life, root, baseUrl: pathToFileURL(join(root, 'package.json')).href })
   await harness.owner.reconcile(snapshotOf([conditional]))
   assert.equal(harness.owner.observation().find(entry => entry.packageName === conditional.name)?.phase, 'active')
+  rmSync(join(conditional.dir, 'dist', 'tui.mjs'))
   await harness.owner.reconcile(snapshotOf([conditional]))
   const observed = harness.owner.observation().find(entry => entry.packageName === conditional.name)
   assert.equal(observed?.phase, 'reload-required')
@@ -479,4 +476,64 @@ test('a non-candidate observation disappears when its bundle is no longer select
   assert.equal(harness.owner.observation().find(entry => entry.packageName === plain.name)?.phase, 'not-opted-in')
   await harness.owner.reconcile(snapshotOf([plain], new Set([plain.name])))
   assert.deepEqual(harness.owner.observation(), [])
+})
+
+test('a dual import/require export hashes the ESM bytes, not the require fallback', async (t) => {
+  const { life, root } = await packagePair(t)
+  const dual = writePackage(root, `${FIXTURE_ROOT}/dual-export`, contributingTui('a'))
+  const manifestPath = join(dual.dir, 'package.json')
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+  manifest.exports = { './tui': { import: './dist/tui.mjs', require: './dist/tui.cjs' } }
+  writeFileSync(manifestPath, `${JSON.stringify(manifest, undefined, 2)}\n`)
+  writeFileSync(join(dual.dir, 'dist', 'tui.cjs'), `module.exports = { name: 'dual-export-cjs', apply() {} }\n`)
+  const harness = await mountHarness(t, [dual], { life, root, baseUrl: pathToFileURL(join(root, 'package.json')).href })
+  await harness.owner.reconcile(snapshotOf([dual]))
+  assert.equal(harness.owner.observation().find(entry => entry.packageName === dual.name)?.phase, 'active')
+  writeFileSync(join(dual.dir, 'dist', 'tui.mjs'), `${contributingTui('a')}\n// esm v2\n`)
+  await harness.owner.reconcile(snapshotOf([dual]))
+  assert.equal(harness.owner.observation().find(entry => entry.packageName === dual.name)?.phase, 'reload-required')
+})
+
+test('a same-PID replacement owner never mistakes cached v1 for newly written v2 bytes', async (t) => {
+  const { life, root, a } = await packagePair(t)
+  const harness = await mountHarness(t, [a], { life, root, baseUrl: pathToFileURL(join(root, 'package.json')).href })
+  await harness.owner.reconcile(snapshotOf([a]))
+  const firstEntry = harness.owner.observation().find(entry => entry.packageName === a.name)?.entryId
+  assert.ok(firstEntry !== undefined)
+  await harness.owner.dispose()
+  writeFileSync(join(a.dir, 'dist', 'tui.mjs'), `${contributingTui('a')}\n// v2 while the process keeps the v1 ESM module cached\n`)
+  const second = createClientExtensionMountOwner({
+    context: harness.context,
+    loader: harness.loader,
+    pluginPackages: fixtureLookup([a]),
+    config: harness.config,
+    parentURL: pathToFileURL(join(root, 'package.json')).href,
+  })
+  t.after(() => second.dispose().catch(() => {}))
+  await second.reconcile(snapshotOf([a]))
+  const observed = second.observation().find(entry => entry.packageName === a.name)
+  assert.equal(observed?.phase, 'reload-required')
+  assert.equal(Object.hasOwn(harness.loader.store, firstEntry), false)
+})
+
+test('a previously active package loses its Fiber when its Config becomes unavailable', async (t) => {
+  const { life, root, a, b } = await packagePair(t)
+  const harness = await mountHarness(t, [a, b], { life, root, baseUrl: pathToFileURL(join(root, 'package.json')).href })
+  await harness.owner.reconcile(snapshotOf([a, b]))
+  const aEntry = harness.owner.observation().find(entry => entry.packageName === a.name)?.entryId
+  assert.ok(aEntry !== undefined)
+  const aFiberUid = fiberOf(harness.loader, aEntry).uid
+  harness.config.values.delete(a.name)
+  await harness.owner.reconcile(snapshotOf([a, b]))
+  assert.equal(harness.owner.observation().find(entry => entry.packageName === a.name)?.phase, 'unavailable')
+  assert.equal(Object.hasOwn(harness.loader.store, aEntry), false)
+  assert.ok(!harness.serviceLedgerIds('chrome.footer.status').includes('a-footer'))
+  assert.equal(harness.commandHandler('r8-a'), undefined)
+  assert.ok(harness.serviceLedgerIds('chrome.footer.status').includes('b-footer'))
+  harness.config.values.set(a.name, { revision: 2, effective: { label: 'back' }, generation: { package: a.name } })
+  await harness.owner.reconcile(snapshotOf([a, b]))
+  const reEntry = harness.owner.observation().find(entry => entry.packageName === a.name)?.entryId
+  assert.ok(reEntry !== undefined)
+  assert.notEqual(fiberOf(harness.loader, reEntry).uid, aFiberUid)
+  assert.ok(harness.serviceLedgerIds('chrome.footer.status').includes('a-footer'))
 })

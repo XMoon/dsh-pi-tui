@@ -31,7 +31,6 @@ import type {
   PluginVersionList,
   RegistryAttempt,
 } from '@deepseek-ai/dsh-plugin-manager'
-import { isClientExtensionEntryId } from '../domain/extension-config/client-entry.ts'
 import type {
   PluginBundleFact,
   PluginBundleRowFact,
@@ -169,6 +168,8 @@ function detachExemptions(value: PluginExemptionsValue): readonly PluginExemptio
 export interface PluginManagerSnapshotInput {
   readonly bundles: readonly BundleInfo[]
   readonly plugins: readonly PluginInfo[]
+  /** Exact Loader entry ids the CURRENT Client mount owner created. */
+  readonly ownedClientEntryIds?: ReadonlySet<string>
   readonly registries: PluginRegistries
   readonly exemptions: PluginExemptionsValue
 }
@@ -178,11 +179,12 @@ export function detachPluginManagerSnapshot(input: PluginManagerSnapshotInput): 
   return Object.freeze({
     bundles: Object.freeze(input.bundles.map(detachBundle)),
     // A Direct process mounts opted-in `./tui` packages as ephemeral
-    // Client-local Loader entries. They are not profile plugin rows and are
-    // never addressable through the Host Plugin Manager; surfacing them here
-    // would put a Client runtime fact into the Host authority inventory.
-    plugins: Object.freeze(input.plugins
-      .filter(plugin => !isClientExtensionEntryId(String(plugin.entryId)))
+    // Client-local Loader entries. Only entries PROVEN owned by the current
+    // Client mount owner are excluded; a legitimate profile/Host row that
+    // merely reuses the naming shape stays visible and manageable.
+    plugins: Object.freeze((input.ownedClientEntryIds === undefined
+      ? input.plugins
+      : input.plugins.filter(plugin => !input.ownedClientEntryIds!.has(String(plugin.entryId))))
       .map(detachPlugin)),
     registries: detachRegistries(input.registries),
     exemptions: detachExemptions(input.exemptions),

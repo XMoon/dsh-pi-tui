@@ -1289,13 +1289,22 @@ test('update version eligibility is a pure Host-list narrowing, never an eligibi
   }) ?? '', /rejects DSH/u)
 })
 
-test('a Direct ephemeral Client ./tui entry never reaches the Host Plugin Manager inventory', () => {
+test('only entries proven owned by the Client mount owner leave the Host PM inventory', () => {
+  const ephemeral = 'pi-tui-client-d7fa9de1d5de190a92d683a273637c09'
+  const lookalike = 'pi-tui-client-ffffffffffffffffffffffffffffffff'
   const mapped = detachPluginManagerSnapshot({
     bundles: [],
     plugins: [
       {
-        entryId: 'pi-tui-client-d7fa9de1d5de190a92d683a273637c09',
+        entryId: ephemeral,
         moduleName: '@r8-pr1-fixture/a/tui',
+        enabled: true,
+        fiberPhase: 'active',
+        readOnlyReason: 'unaddressable',
+      },
+      {
+        entryId: lookalike,
+        moduleName: '@user/legitimate-host-row',
         enabled: true,
         fiberPhase: 'active',
         readOnlyReason: 'unaddressable',
@@ -1308,8 +1317,9 @@ test('a Direct ephemeral Client ./tui entry never reaches the Host Plugin Manage
         readOnlyReason: 'unaddressable',
       },
     ],
+    ownedClientEntryIds: new Set([ephemeral]),
     registries: { registry: null, fallbackRegistries: [], resolved: null },
     exemptions: { exemptions: {}, warnings: [] },
   } as never)
-  assert.deepEqual(mapped.plugins.map(plugin => plugin.entryId), ['ordinary-host-row'])
+  assert.deepEqual(mapped.plugins.map(plugin => plugin.entryId), [lookalike, 'ordinary-host-row'])
 })

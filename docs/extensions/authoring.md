@@ -92,15 +92,18 @@ CURRENT Client loads it through that Client's EXISTING official Loader:
   official Host Plugin Manager remains the only install/selection authority.
 - `config` is the Config row's effective `data` value verbatim — `null`,
   `false`, `0`, arrays and absent values are real values. A failed read is
-  reported as unavailable, never replaced by `{}`.
+  reported as unavailable, its live contributions are unloaded, and the value
+  is never replaced by `{}`.
 - The contributions (commands, Footer, settings, …) are owned by the real
   Loader entry's fiber, so disabling the bundle, unloading the surface or
   exiting the Client disposes them. The same bytes enabled again create a new
   fiber; no duplicate registration survives the old one.
-- Changed `./tui` bytes are never hot-imported in the same process. The old
-  code keeps running and the package reports `reload-required`; a Split Client
-  uses `/reload-client`, while Direct requires an explicit application
-  restart.
+- Code identity is taken from the exact ESM module file the official Loader
+  imports, not from a `require` condition, and the process remembers the
+  identity it actually imported across same-PID surface revisions. Changed
+  `./tui` bytes are never hot-imported in the same process: the old code
+  keeps running and the package reports `reload-required`; a Split Client uses
+  `/reload-client`, while Direct requires an explicit application restart.
 
 A malformed opt-in, missing `./tui` export, missing/wrong Config row, or a
 failed import/apply only costs that package's PiTui Client status. It never

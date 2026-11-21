@@ -24,6 +24,7 @@ import { fileURLToPath } from 'node:url'
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 import { installPlugin, runDsh } from '../../lib/dsh-smoke-harness.mjs'
 import { waitForC1WorkEvent } from '../../lib/split-smoke-fixtures.mjs'
+import { chunk } from '../../lib/split-smoke-processes.mjs'
 import { createC1Scene } from './c1-scene.mjs'
 
 const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
@@ -88,6 +89,7 @@ export async function runClientExtensionLoaderPr3(context) {
   let host
   let clientA
   let clientB
+  let reloadClient
   const installed = []
   try {
     const tarballs = Object.fromEntries(FIXTURES.map(name => [
@@ -187,6 +189,7 @@ export async function runClientExtensionLoaderPr3(context) {
         [SENTINEL_ENV]: sentinel,
         R8_EXTENSION_CLIENT_FAULT: fault,
       })
+      await faulted.client.waitForScreen('R8-B-LIVE', `R8-E client-loader B paint (${label} fault)`, 120_000)
       const frame = (await faulted.client.viewport()).join('\n')
       assert(!frame.includes('R8-A-LIVE') && frame.includes('R8-B-LIVE'),
         `A ${label} failure must leave A absent and B painted: ${JSON.stringify(frame.slice(-300))}`)
@@ -214,6 +217,37 @@ export async function runClientExtensionLoaderPr3(context) {
     assert(hmrReady.revision !== undefined && appliesAfterHmr > appliesBeforeHmr,
       `HMR must re-create the external entries on the new revision (applies ${String(appliesBeforeHmr)} -> ${String(appliesAfterHmr)})`)
 
+    // P3-11/RFL-001 root cause B: a dedicated real Client imports v1,
+    // replaces the on-disk ESM bytes with v2, then drives a REAL same-PID
+    // surface revision. Node's ESM cache still holds v1; the new revision must
+    // not import/apply A again (no phantom contribution) while B/Dual remain.
+    const changedHmrClient = await scene.startC1Client('R8-E client-loader changed-bytes HMR Client', {
+      [SENTINEL_ENV]: sentinel,
+      SPLIT_PROCESS_CLIENT_HMR_PROBE: '1',
+    })
+    const changedHmrPid = changedHmrClient.ready.pid
+    await changedHmrClient.client.waitForScreen('R8-A-LIVE', 'changed-HMR Client A footer', 120_000)
+    const changedHmrFixtureA = join(installation.profileDir, 'node_modules', sourceNames.a, 'dist', 'tui.mjs')
+    const changedHmrOriginalA = readFileSync(changedHmrFixtureA)
+    const aApplyBeforeChangedHmr = sentinelRecords(sentinel).filter(record => record.event === 'tui-apply'
+      && record.package === sourceNames.a && record.pid === changedHmrPid).length
+    try {
+      writeFileSync(changedHmrFixtureA, changedHmrOriginalA.toString('utf8').replace('R8-A-LIVE', 'R8-A-NEW'))
+      changedHmrClient.client.signalBusiness('SIGUSR2')
+      await changedHmrClient.client.waitFor(
+        record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-ready',
+        'changed-bytes HMR ready',
+        180_000,
+      )
+      const aApplyAfterChangedHmr = sentinelRecords(sentinel).filter(record => record.event === 'tui-apply'
+        && record.package === sourceNames.a && record.pid === changedHmrPid).length
+      assert(aApplyAfterChangedHmr === aApplyBeforeChangedHmr,
+        'same-PID changed-bytes HMR must not import/apply A into the new revision (no phantom contribution)')
+    } finally {
+      writeFileSync(changedHmrFixtureA, changedHmrOriginalA)
+    }
+    await scene.exitC1Client(changedHmrClient.client, 'R8-E client-loader changed-bytes HMR Client')
+
     // P3-13: one REAL Host accepted Turn is held by the scripted Host model;
     // Client A exits while that Turn is in flight and Client B must observe
     // its normal settlement afterwards. This is Host work, not a Client ACK.
@@ -238,6 +272,40 @@ export async function runClientExtensionLoaderPr3(context) {
     const hostAfter = await scene.hostIdentityFacts(host)
     assert(hostAfter.instanceId === hostIdentity.instanceId && hostAfter.hostPid === hostIdentity.hostPid,
       'Client A exit must not replace the Host process identity')
+
+    // P3-07 second half: the SAME installed package now carries changed
+    // `./tui` bytes. A NEW Client PID must load the new bytes through the real
+    // `/reload-client` reexec; the old running entry stays ACTIVE until then.
+    const fixtureA = join(installation.profileDir, 'node_modules', sourceNames.a, 'dist', 'tui.mjs')
+    const originalFixtureA = readFileSync(fixtureA)
+    const driftChunk = chunk(installation.profilePackage, 'client-bootstrap-')
+    const driftChunkBytes = readFileSync(driftChunk)
+    try {
+      const reloadStarted = await scene.startC1Client('R8-E client-loader reload Client', {
+        [SENTINEL_ENV]: sentinel,
+        SPLIT_PROCESS_CLIENT_EXTENSION_LOADER_PROBE: '1',
+        SPLIT_PROCESS_CLIENT_EXTENSION_LOADER_PACKAGES: JSON.stringify({ a: sourceNames.a, b: sourceNames.b }),
+        SPLIT_PROCESS_CLIENT_EXTENSION_LOADER_KEEP_BYTES: '1',
+      })
+      reloadClient = reloadStarted.client
+      const reloadProbe = reloadClient.records.find(record => record.op === 'client-extension-loader-probe')
+      assert(reloadProbe?.afterBytesA === 'reload-required' && reloadProbe?.bytesKept === true,
+        `the reload Client must observe reload-required before reexec: ${JSON.stringify(reloadProbe)}`)
+      writeFileSync(driftChunk, `${readFileSync(driftChunk, 'utf8')}\n// R8 PR-3 /reload-client qualification drift\n`)
+      const oldPid = reloadStarted.ready.pid
+      reloadClient.send('/reload-client\r')
+      const reloaded = await reloadClient.waitFor(record => record.m4a0 === 'ready' && record.pid !== oldPid,
+        'R8-E client-loader new-PID /reload-client', 180_000)
+      assert(reloaded.pid !== oldPid, 'the real /reload-client must produce a new Client business PID')
+      await reloadClient.waitForScreen('R8-A-NEW', 'the new Client PID loads changed ./tui bytes', 120_000)
+    } finally {
+      writeFileSync(fixtureA, originalFixtureA)
+      writeFileSync(driftChunk, driftChunkBytes)
+    }
+    if (reloadClient !== undefined) {
+      await scene.exitC1Client(reloadClient, 'R8-E client-loader reload Client')
+      reloadClient = undefined
+    }
 
     trace('r8epr3.client-loader', {
       hostPid: hostIdentity.hostPid,
@@ -266,6 +334,7 @@ export async function runClientExtensionLoaderPr3(context) {
       heldHostTurnSettled: true,
     }
   } finally {
+    try { if (reloadClient !== undefined) await scene.exitC1Client(reloadClient, 'R8-E client-loader reload Client') } catch { /* process backstop */ }
     try { if (clientA !== undefined) await scene.exitC1Client(clientA, 'R8-E client-loader Client A') } catch { /* process backstop */ }
     try { if (clientB !== undefined) await scene.exitC1Client(clientB, 'R8-E client-loader Client B') } catch { /* process backstop */ }
     try { if (host !== undefined) await scene.stopC1Host(host) } catch { /* process backstop */ }
