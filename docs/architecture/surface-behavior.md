@@ -379,6 +379,12 @@ Full:
 - Question attention is a separate non-work dataset with its own `?N` footer
   fact. Quick shows hidden actionable attention plus active work; Full shows all
   attention plus tracked work.
+- In the Full Task Center's Tracked Work view, the retained Subagent catalog
+  starts fully expanded at every depth. Explicit Left/Right tree disclosure
+  remains user-owned; a collapsed branch stays collapsed across row refreshes
+  and scope switches until explicitly expanded or the browser is recreated.
+  The Active view and the separate Quick accessory keep their existing
+  active-work membership policy; Jobs remain a separate flat group.
 - Stop is confirmed and capability-gated. In the Full Task Center's fullscreen
   Action Bar, the complete visible Stop span only enters the existing pending
   confirmation. The detail identifies the target once (`Stop <task label>?`);

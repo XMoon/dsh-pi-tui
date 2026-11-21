@@ -2790,9 +2790,9 @@ test('a Job View opened from Full returns to the exact Full state (type filter, 
   await vt.waitForRender()
   assert.equal(handle.getViewState!().typeFilter, 'subagent', 'the f list must set the type filter')
   // Establish non-default TREE DISCLOSURE on the selected parent row.
-  vt.sendInput('\x1b[C') // right arrow: expand
+  vt.sendInput('\x1b[D') // left arrow: collapse
   await vt.waitForRender()
-  assert.ok(handle.getViewState!().expandedIds.has('agent:parent'), 'right arrow must expand the parent')
+  assert.ok(handle.getViewState!().collapsedIds.has('agent:parent'), 'left arrow must collapse the parent')
   // Establish SEARCH state.
   vt.sendInput('/')
   for (const key of 'parent') vt.sendInput(key)
@@ -2801,7 +2801,7 @@ test('a Job View opened from Full returns to the exact Full state (type filter, 
   assert.equal(before.searchMode, true)
   assert.equal(before.searchQuery, 'parent')
   assert.equal(before.typeFilter, 'subagent')
-  assert.ok(before.expandedIds.has('agent:parent'))
+  assert.ok(before.collapsedIds.has('agent:parent'))
 
   vt.sendInput('\r') // Enter selects the matching parent row
   await vt.waitForRender()
@@ -2814,7 +2814,7 @@ test('a Job View opened from Full returns to the exact Full state (type filter, 
   assert.equal(after.searchMode, true, 'Full search mode must survive the Job View')
   assert.equal(after.searchQuery, 'parent', 'the Full search query must survive the Job View')
   assert.equal(after.typeFilter, 'subagent', 'the Full type filter must survive the Job View')
-  assert.ok(after.expandedIds.has('agent:parent'), 'the Full tree disclosure must survive the Job View')
+  assert.ok(after.collapsedIds.has('agent:parent'), 'the Full tree disclosure must survive the Job View')
   assert.equal(after.selectedId, 'agent:parent', 'the Full selection must survive the Job View')
   app.stop()
 })

@@ -360,6 +360,55 @@ test('treePrefix renders as a fixed connector region before the label', () => {
   assert.ok(view.includes('  ├─ subagent · nested'), `depth-2 connector missing:\n${view}`)
 })
 
+test('Full Tracked Subagent disclosure responds to Left/Right and survives live re-projection', () => {
+  const items: TaskPanelItem[] = [
+    { value: 'agent:parent', label: 'subagent · parent', status: 'inactive', group: 'subagents', source: 'subagent', type: 'subagent', active: false, depth: 1, hasChildren: true, suffix: 'continuable' },
+    { value: 'agent:old', label: 'subagent · old', status: 'inactive', group: 'subagents', source: 'subagent', type: 'subagent', active: false, parentId: 'agent:parent', depth: 2, hasChildren: true, suffix: 'continuable' },
+    { value: 'agent:leaf', label: 'subagent · leaf', status: 'inactive', group: 'subagents', source: 'subagent', type: 'subagent', active: false, parentId: 'agent:old', depth: 3, suffix: 'one-shot' },
+    { value: 'agent:live', label: 'subagent · live', status: 'running', group: 'subagents', source: 'subagent', type: 'subagent', active: true, parentId: 'agent:parent', depth: 2, suffix: 'one-shot' },
+    { value: 'job:build', label: 'bash · build', status: 'completed', group: 'jobs', source: 'job', type: 'bash' },
+  ]
+  const { panel } = makePanel(items, { maxVisible: 10 })
+  assert.deepEqual(panel.visibleItems().map(item => item.value),
+    ['agent:parent', 'agent:old', 'agent:leaf', 'agent:live', 'job:build'])
+  assert.equal(panel.getViewState().selectedId, 'agent:parent')
+  assert.equal(panel.visibleItems()[0]!.expanded, true)
+
+  panel.handleInput('\x1b[D')
+  assert.deepEqual(panel.visibleItems().map(item => item.value), ['agent:parent', 'job:build'])
+  assert.ok(panel.getViewState().collapsedIds.has('agent:parent'))
+
+  panel.handleInput('\x1b[C')
+  assert.deepEqual(panel.visibleItems().map(item => item.value),
+    ['agent:parent', 'agent:old', 'agent:leaf', 'agent:live', 'job:build'])
+  assert.ok(!panel.getViewState().collapsedIds.has('agent:parent'))
+
+  // Right on an already-expanded parent still enters its first direct child.
+  panel.handleInput('\x1b[C')
+  assert.equal(panel.getViewState().selectedId, 'agent:old')
+
+  // Return to the parent and leave it explicitly collapsed, then simulate a
+  // live row refresh: the user's disclosure survives and the selection stays
+  // valid on a real row identity.
+  panel.handleInput('\x1b[A')
+  assert.equal(panel.getViewState().selectedId, 'agent:parent')
+  panel.handleInput('\x1b[D')
+  panel.setItems(items.map(item => item.value === 'agent:leaf' ? { ...item, status: 'completed' } : item))
+  assert.deepEqual(panel.visibleItems().map(item => item.value), ['agent:parent', 'job:build'])
+  assert.deepEqual(panel.getViewState().collapsedIds, new Set(['agent:parent']))
+  assert.equal(panel.getViewState().scope, 'all')
+  assert.equal(panel.getViewState().selectedId, 'agent:parent')
+
+  // Active keeps its own membership rule; the explicit collapse still hides
+  // the active descendant. Switching back to Tracked keeps that collapse.
+  panel.handleInput('a')
+  assert.deepEqual(panel.visibleItems().map(item => item.value), ['agent:parent'])
+  assert.ok(!panel.visibleItems().some(item => item.value.startsWith('agent:old')))
+  panel.handleInput('a')
+  assert.deepEqual(panel.visibleItems().map(item => item.value), ['agent:parent', 'job:build'])
+  panel.dispose()
+})
+
 test('a USER-touched selection survives a later enrichment (no focus stealing)', () => {
   const { panel, rendered } = makePanel(
     [typed(runningJob(), 'bash'), typed(doneJob(), 'bash')],

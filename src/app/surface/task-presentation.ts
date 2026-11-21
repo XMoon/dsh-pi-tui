@@ -328,9 +328,9 @@ export function projectTaskItems(
     if (hasMatchingDescendant(item.value)) return true
     if (autoExpandRunning && hasActiveDescendant(item.value)) return true
     if (options.includeAttentionInActive === true && hasAttentionDescendant(item.value)) return true
-    // Settled branches start collapsed. Disclosure is presentation state, so
-    // the user can expand a historical branch without changing the catalog.
-    return false
+    // Tracked Work shows the retained Subagent tree by default. Explicit
+    // collapsedIds above still wins; Active and Quick keep their own scope.
+    return options.scope === 'all' && item.source === 'subagent'
   }
 
   const visible: TaskPanelItem[] = []
