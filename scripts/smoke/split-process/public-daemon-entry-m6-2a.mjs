@@ -760,6 +760,7 @@ async function runSceneAcceptance(installation, trace) {
     }
     let first
     let resumed
+    let replayed
     try {
       first = new RealDshScreen(installation, 'daemon', ['--session', seeded.sessionId], {}, 'tui-custom')
       await first.waitForAny(['hello stub scene', 'stub answer', seeded.shortId], 'A15 custom-profile session', 90_000)
@@ -821,7 +822,7 @@ async function runSceneAcceptance(installation, trace) {
       // install has `dsh` on PATH; only this replayed subprocess prepends the
       // isolated harness bin directory.
       const harnessBin = join(installation.harnessDir, 'node_modules', '.bin')
-      const replayed = new RealDshScreen(installation, undefined, [], { PATH: `${harnessBin}:${installation.env.PATH ?? ''}` }, 'pi-tui', resumeArgv)
+      replayed = new RealDshScreen(installation, undefined, [], { PATH: `${harnessBin}:${installation.env.PATH ?? ''}` }, 'pi-tui', resumeArgv)
       await replayed.waitForAny(['hello stub scene', 'stub answer', seeded.shortId], 'A16 daemon resume replay', 90_000)
       const hostsDuringReplay = hostPids(installation.dshHome)
       assert(hostsDuringReplay.length === 1 && hostsDuringReplay[0] === hostBefore,
@@ -850,6 +851,11 @@ async function runSceneAcceptance(installation, trace) {
         resumeArgv,
       })
     } finally {
+      // The replayed Client owns its own detached PTY wrapper. A failed A16
+      // assertion may leave it live; reap that wrapper before the Host teardown
+      // so a failed scene cannot hang on its stdio handles. On the success path
+      // its `/exit` already settled this wrapper.
+      if (replayed !== undefined && !replayed.exited) await replayed.dispose()
       if (resumed !== undefined) await resumed.dispose()
       else if (first !== undefined) await first.dispose()
       try { unlinkSync(aliasDir) } catch { /* absent */ }
