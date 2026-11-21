@@ -2688,7 +2688,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // records) instead of failing the submission before the handler runs.
     const needsBusyEnter = parsed === undefined
       || (parsed.name === 'skill' && (parsed.rawInput?.trim() ?? '') !== '')
-      || (!tuiLocalLine && !LOCAL_COMMANDS.has(parsed.name))
+      || !tuiLocalLine
     const delivery: SubmitDelivery = request === 'explicit-queue'
       ? 'queue'
       : resolveSubmitDelivery(parsed, deps.liveAgent()?.status === 'running', request, needsBusyEnter ? deps.tuiSettings?.get().busyEnter : undefined, tuiLocalLine)

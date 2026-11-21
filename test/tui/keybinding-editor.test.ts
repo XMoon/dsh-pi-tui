@@ -2193,3 +2193,32 @@ test('keybinding editor: a short-grant readonly record detail keeps every field 
     manager.dispose()
   }
 })
+
+test('action editor: a short conflict detail pins both real participants', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings({
+    'app.input.submit': 'ctrl+shift+h',
+    'app.todo.toggle': 'ctrl+shift+h',
+  })
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const row = model.rows.find(candidate => candidate.id === 'app.input.submit')!
+  const editor = new ActionEditorPanel({
+    model,
+    action: row,
+    runMutation: () => {},
+    onModelChange: () => {},
+    onBack: () => {},
+    maxRows: () => 6,
+  })
+  try {
+    const frame = plain(editor.render(60).join('\n'))
+    assert.match(frame, /keybinding conflict on Ctrl\+Shift\+H/u)
+    assert.match(frame, /app\.input\.submit@user:ctrl\+shift\+h \(editor, user\)/u)
+    assert.match(frame, /app\.todo\.toggle@user:ctrl\+shift\+h \(global, user\)/u,
+      'the counterpart is readable at a short grant, not hidden below the shortcut row')
+  } finally {
+    editor.dispose()
+    manager.dispose()
+  }
+})

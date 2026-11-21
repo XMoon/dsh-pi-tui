@@ -134,45 +134,62 @@ interface SelectableRow {
 }
 
 /** Keep the selected binding visible in a short terminal while retaining the
- * detail footer. The first/last visible content lines double as scroll
- * markers when they are not the selected line. */
+ * detail footer. An optional conflict-diagnostic prefix is PINNED above the
+ * scroll window: the counterpart must stay readable even when the grant is
+ * too short to show the whole detail. */
 function actionViewport(
   lines: readonly string[],
   selectedLineIndex: number | undefined,
   maxRows: number,
   selectableLineIndices: readonly number[] = [],
+  pinnedRange?: { readonly start: number; readonly count: number },
 ): { lines: string[]; selectableRows: SelectableRow[] } {
   const limit = Math.max(1, maxRows)
-  if (lines.length <= limit) {
+  const footer = lines[lines.length - 1]!
+  let content = lines.slice(0, -1)
+  let selected = selectedLineIndex
+  let selectableIndices = [...selectableLineIndices]
+  let pinned: string[] = []
+  if (pinnedRange !== undefined && pinnedRange.count > 0) {
+    pinned = content.slice(pinnedRange.start, pinnedRange.start + pinnedRange.count)
+    content = content.slice(0, pinnedRange.start).concat(content.slice(pinnedRange.start + pinnedRange.count))
+    const before = pinnedRange.start + pinnedRange.count
+    selectableIndices = selectableIndices.map(index => index >= before ? index - pinnedRange.count : index)
+    selected = selected === undefined ? undefined : (selected >= before ? selected - pinnedRange.count : selected)
+  }
+  const total = pinned.length + content.length + 1
+  if (total <= limit) {
     return {
-      lines: [...lines],
-      selectableRows: selectableLineIndices.map((row, ordinal) => ({ row, ordinal })),
+      lines: [...pinned, ...content, footer],
+      selectableRows: selectableIndices.map((row, ordinal) => ({ row: row + pinned.length, ordinal })),
     }
   }
-  const footer = lines[lines.length - 1]!
-  if (limit === 1) return { lines: [footer], selectableRows: [] }
-  const content = lines.slice(0, -1)
-  if (content.length === 0) return { lines: [footer], selectableRows: [] }
-  const windowSize = Math.max(1, limit - 1)
-  const selected = selectedLineIndex === undefined
+  if (limit - pinned.length - 1 < 1) {
+    return { lines: [...pinned.slice(0, Math.max(0, limit - 1)), footer], selectableRows: [] }
+  }
+  const windowSize = limit - pinned.length - 1
+  const chosen = selected === undefined
     ? Math.min(content.length - 1, Math.floor(windowSize / 2))
-    : Math.min(content.length - 1, Math.max(0, selectedLineIndex))
+    : Math.min(content.length - 1, Math.max(0, selected))
   const maxStart = Math.max(0, content.length - windowSize)
-  const start = Math.min(maxStart, Math.max(0, selected - Math.floor(windowSize / 2)))
+  const start = Math.min(maxStart, Math.max(0, chosen - Math.floor(windowSize / 2)))
   const end = Math.min(content.length, start + windowSize)
   const viewport = content.slice(start, end)
-  let selectableRows = selectableLineIndices
+  let selectableRows = selectableIndices
     .map((index, ordinal) => ({ row: index - start, ordinal }))
     .filter(entry => entry.row >= 0 && entry.row < viewport.length)
-  if (start > 0 && selected > start) {
+  if (start > 0 && chosen > start) {
     viewport[0] = color.textDim(`↑ ${start} more lines`)
     selectableRows = selectableRows.filter(entry => entry.row !== 0)
   }
-  if (end < content.length && selected < end - 1) {
+  if (end < content.length && chosen < end - 1) {
     viewport[viewport.length - 1] = color.textDim(`↓ ${content.length - end} more lines`)
     selectableRows = selectableRows.filter(entry => entry.row !== viewport.length - 1)
   }
-  return { lines: [...viewport, footer], selectableRows }
+  return {
+    lines: [...pinned, ...viewport, footer],
+    selectableRows: selectableRows.map(entry => ({ row: entry.row + pinned.length, ordinal: entry.ordinal })),
+  }
 }
 
 /** One physical row of the last painted panel frame (mouse hit-testing).
@@ -289,6 +306,16 @@ export class ActionEditorPanel implements Component {
     }
     if (this.row.reserved) lines.push(color.warning('This action is reserved and has no runtime implementation.'))
     if (this.row.fixed) lines.push(color.textDim('This action is fixed by the application and cannot be edited.'))
+    const diagnosticStart = lines.length
+    if (this.row.diagnostics.length > 0) {
+      // A conflict diagnostic names BOTH same-key participants. It is pinned
+      // above the scroll window so a short grant can still read the
+      // counterpart instead of hiding it below the selected shortcut.
+      for (const diagnostic of this.row.diagnostics.slice(0, 2)) {
+        for (const line of wrapTextWithAnsi(diagnostic, safeWidth)) lines.push(color.warning(line))
+      }
+    }
+    const diagnosticCount = lines.length - diagnosticStart
     lines.push('')
 
     const configured = this.row.customized ? this.row.configured : []
@@ -348,13 +375,6 @@ export class ActionEditorPanel implements Component {
     if (this.row.configurable && !sameBindingList(effectiveOrdinary, baselineOrdinary)) {
       lines.push(color.textDim(`Effective now: ${formatEditorBindings(effectiveOrdinary)}`))
     }
-    if (this.row.diagnostics.length > 0) {
-      // A conflict diagnostic names BOTH same-key participants. Wrap it at the
-      // pane width instead of truncating a counterpart away.
-      for (const diagnostic of this.row.diagnostics.slice(0, 2)) {
-        for (const line of wrapTextWithAnsi(diagnostic, safeWidth)) lines.push(color.warning(line))
-      }
-    }
     // A runtime record that also names a non-builtin counterpart is stated
     // read-only here: the Action stays the only editable object, and the
     // plugin/unknown side is never impersonated as an Action.
@@ -370,7 +390,13 @@ export class ActionEditorPanel implements Component {
     if (this.message !== undefined) lines.push(color.error(truncateToWidth(this.message, safeWidth)))
     if (this.pending) lines.push(color.accent('Saving…'))
     lines.push('')
-    const viewport = actionViewport(lines, selectableLineIndices[this.selectedIndex], this.maxRows(), selectableLineIndices)
+    const viewport = actionViewport(
+      lines,
+      selectableLineIndices[this.selectedIndex],
+      this.maxRows(),
+      selectableLineIndices,
+      diagnosticCount > 0 ? { start: diagnosticStart, count: diagnosticCount } : undefined,
+    )
     this.lastRenderWidth = safeWidth
     this.hasPainted = true
     const visibleOrdinals = new Set(viewport.selectableRows.map(row => row.ordinal))
