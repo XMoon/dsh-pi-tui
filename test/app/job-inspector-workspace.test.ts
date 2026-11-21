@@ -144,15 +144,21 @@ interface TaskHarness {
 
 /** Attach the REAL TaskRuntime owner to the real app (the production wiring:
  *  `mounted()` returns this app). */
-function attachTasks(app: TuiApp, options: { jobIds?: readonly string[] } = {}): TaskHarness {
+function attachTasks(app: TuiApp, options: { jobIds?: readonly string[]; jobStatuses?: readonly string[] } = {}): TaskHarness {
   const jobIds = [...(options.jobIds ?? [])]
-  const jobSnapshots = (): TaskBrowserJobInput[] => jobIds.map((id, index) => ({
-    id,
-    kind: 'bash',
-    label: `job ${id}`,
-    status: 'running',
-    startedAt: 1_000 + index,
-  }))
+  const jobStatuses = [...(options.jobStatuses ?? [])]
+  const jobSnapshots = (): TaskBrowserJobInput[] => jobIds.map((id, index) => {
+    const status = jobStatuses[index] ?? 'running'
+    const terminal = status !== 'running' && status !== 'stopping'
+    return {
+      id,
+      kind: 'bash',
+      label: `job ${id}`,
+      status,
+      startedAt: 1_000 + index,
+      ...(terminal ? { finishedAt: 2_000 + index } : {}),
+    }
+  })
   const observation = new JobObservationDouble()
   const subject = {} as SessionSubject
   let rosterReads = 0
@@ -658,6 +664,59 @@ test('selecting a Job in the real Task Browser opens the fullscreen Job workspac
   await vt.waitForRender()
   assert.deepEqual(harness.observation.forJob('job-a'), [1, 1], 'the parent close releases the child observer once')
   assert.equal(app.overlayGraphState().handles, 0)
+  app.stop()
+})
+
+test('an expanded terminal Job opens its workspace and returns to the SAME browser with query/type/selection intact', async () => {
+  const { vt, app } = startApp()
+  const harness = attachTasks(app, { jobIds: ['job-live', 'job-old'], jobStatuses: ['running', 'completed'] })
+  await flush()
+  harness.tasks.openTasksBrowser('full')
+  await vt.waitForRender()
+  assert.ok(view(vt).includes('Show 1 past jobs [J]'), `precondition — terminal history collapsed:\n${view(vt)}`)
+  assert.ok(!view(vt).includes('job job-old'))
+
+  vt.sendInput('j') // explicit history disclosure
+  await vt.waitForRender()
+  assert.ok(view(vt).includes('Hide 1 past jobs [J]'), `j expands the history:\n${view(vt)}`)
+  assert.ok(view(vt).includes('job job-old'))
+
+  vt.sendInput('f') // type list: All → bash
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B')
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.ok(view(vt).includes('[bash]'), `the type filter is applied:\n${view(vt)}`)
+
+  vt.sendInput('/')
+  for (const key of 'old') vt.sendInput(key)
+  await vt.waitForRender()
+  assert.equal(harness.lastBrowser()?.getViewState?.().selectedId, 'job:job-old', 'search selects the matching history Job')
+  vt.sendInput('\x1b') // exit search, keep the query
+  await vt.waitForRender()
+  vt.sendInput('\r') // open the selected terminal Job
+  await vt.waitForRender()
+  assert.match(view(vt), /Job · job-old · bash/, `the terminal Job opens its workspace:\n${view(vt)}`)
+
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  const back = harness.lastBrowser()!
+  const state = back.getViewState!()
+  assert.equal(state.searchQuery, 'old', 'the search query survives the viewer round trip')
+  assert.equal(state.typeFilter, 'bash', 'the type filter survives the viewer round trip')
+  assert.equal(state.selectedId, 'job:job-old', 'the selected terminal Job survives the viewer round trip')
+  assert.ok(view(vt).includes('Jobs / executions'), 'the SAME Full browser instance is restored')
+  assert.ok(view(vt).includes('[search: old]') && view(vt).includes('[bash]'), `search/type chrome is intact:\n${view(vt)}`)
+
+  // Clearing the query restores the expanded history chosen before the viewer.
+  vt.sendInput('/')
+  for (let index = 0; index < 'old'.length; index += 1) vt.sendInput('\x7f')
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.ok(view(vt).includes('Hide 1 past jobs [J]'), 'the manual history expansion survived the round trip')
+  assert.ok(view(vt).includes('job job-old'))
+  back.close()
+  await vt.waitForRender()
   app.stop()
 })
 

@@ -385,6 +385,19 @@ Full:
   and scope switches until explicitly expanded or the browser is recreated.
   The Active view and the separate Quick accessory keep their existing
   active-work membership policy; Jobs remain a separate flat group.
+- In that same Full Tracked Work view, only ACTIVE Jobs (`running` /
+  `stopping`) are shown by default. Retained terminal Jobs are collapsed behind
+  ONE chrome action row above the scrollable list: `Show N past jobs [J]` while
+  active Jobs exist, `Show N jobs [J]` when none do, and `Hide N past jobs [J]`
+  once opened, with ` · !N unreviewed` appended while the hidden candidates hold
+  unacknowledged failure attention. The manual disclosure is a panel-local
+  per-open choice (never settings/session state). A non-empty Work search still
+  matches the authoritative terminal Job records and temporarily reveals the
+  matching rows without changing the manual disclosure; Active scope, the
+  separate Quick accessory and a Workflow-scoped browser keep their own
+  membership. Job failure attention is acknowledged only when an attention Job
+  row actually enters the painted viewport — the control, header and `!N`
+  summary never acknowledge it.
 - Stop is confirmed and capability-gated. In the Full Task Center's fullscreen
   Action Bar, the complete visible Stop span only enters the existing pending
   confirmation. The detail identifies the target once (`Stop <task label>?`);
@@ -399,8 +412,11 @@ Full:
   confirmation and selects that row, but its matching release cannot open it;
   opening requires a second independent click. Stale row/capability, resized or
   reprojected action geometry and a retired Browser cannot consume an old action
-  release. Only the complete painted spans of the contracted exits are pointer
-  targets: `Close [Esc]` on Work/Team enters the browser's existing `onCancel`,
+  release. The complete painted Work history disclosure action label is the ONE
+  new Fullscreen Task pointer target besides the contracted exits below; its
+  informational `!N unreviewed` suffix, surrounding whitespace and the ordinary
+  Job group header stay inert. Beyond that history disclosure label, only the
+  complete painted spans of the contracted exits are pointer targets: `Close [Esc]` on Work/Team enters the browser's existing `onCancel`,
   `Back [Esc]` while Work/Team search is being edited exits that page's search
   mode (keeping the query and the browser), and `Cancel [Esc]` in the Work type
   filter closes only the filter list without changing the active type. The Stop

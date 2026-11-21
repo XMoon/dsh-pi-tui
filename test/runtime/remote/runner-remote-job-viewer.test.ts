@@ -533,8 +533,11 @@ test('the REAL Job viewer observes the Remote stream, updates live without consu
   fx.fixture.vt.sendInput('\x1b')
   await waitFor('Esc closed only the Job workspace', () => !jobWorkspacePainted(view()), 10_000)
   // The screen swap commits synchronously; wait for the repaint that reveals
-  // the restored browser (the workspace owns the old frame until then).
-  await waitFor('the restored browser frame painted', () => view().includes('bash · m3-5-pr3-build-one'), 10_000)
+  // the restored browser (the workspace owns the old frame until then). The
+  // settled Job is collapsed behind the default history disclosure: open it.
+  await waitFor('the restored browser frame painted', () => view().includes('Show 1 jobs'), 10_000)
+  fx.fixture.vt.sendInput('j')
+  await waitFor('the restored browser history painted', () => view().includes('bash · m3-5-pr3-build-one'), 10_000)
   assert.equal(app.overlayGraphState().handles, 1, 'the Task Browser survived the workspace round trip')
   const restored = view()
   assert.match(restored, /bash · m3-5-pr3-build-one/u, `the parent browser must be preserved:\n${restored}`)
@@ -576,6 +579,7 @@ test('a SECOND real Job stops through the Task-Center row confirmation (the SAME
   assert.equal(fx.hostKillCalls() - hostKillsBefore, 1,
     'exactly one Host kill admission must serve the row stop')
   assert.equal(fx.rosterStatus(control.id), 'running', 'the other Job must be untouched by the row stop')
+  fx.fixture.vt.sendInput('j') // the settled row is collapsed by default: open the history
   await waitFor('the Task-Center row rendered the converged status', () => view().includes('killed'), 10_000)
 
   // ── Negative control 11(b): opening the detail acquires the observer, Esc
@@ -598,6 +602,8 @@ test('a SECOND real Job stops through the Task-Center row confirmation (the SAME
   await waitFor('the Task Center closed', () => app.overlayGraphState().handles === 0, 10_000)
   submit(app, '/tasks')
   await waitFor('the Task Center re-opened', () => app.overlayGraphState().handles === 1, 10_000)
+  await waitFor('the re-opened Task Center rendered the default view', () => view().includes('jobs [J]'), 20_000)
+  fx.fixture.vt.sendInput('j') // terminal Job history is collapsed by default
   await waitFor('the re-opened Task Center rendered the rows', () => view().includes(JOB_TWO_LABEL), 20_000)
   assert.equal(fx.observeAcquires(), acquiresAtClose,
     'returning to /tasks must NOT create a second selected-Job observer')

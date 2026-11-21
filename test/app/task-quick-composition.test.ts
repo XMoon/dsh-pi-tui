@@ -1008,6 +1008,8 @@ test('painting, resizing and wheeling the passive window acknowledge NOTHING', a
     await h.vt.waitForRender()
     h.tasks.openTasksBrowser('full')
     await h.vt.waitForRender()
+    h.vt.sendInput('j') // terminal Jobs are collapsed by default: open the history
+    await h.vt.waitForRender()
     await flush(2)
     assert.ok(calls >= 1, `opening the modal browser on the failure row must acknowledge:\n${view(h.vt)}`)
   } finally {
@@ -1145,6 +1147,8 @@ test('after the modal acknowledges, the window still paints the REAL failed stat
   assert.ok(view(h.vt).includes('! 1 failed'), `the unacknowledged failure is footer attention:\n${view(h.vt)}`)
   assert.match(itemRows(h.vt)[0]!, /bash · deploy\s+‣ Failed$/)
   h.tasks.openTasksBrowser('full')
+  await h.vt.waitForRender()
+  h.vt.sendInput('j') // terminal Jobs are collapsed by default: open the history
   await h.vt.waitForRender()
   await flush(2)
   h.vt.sendInput('\x1b')
@@ -1413,4 +1417,40 @@ test('a display seam without Task Center support mounts no fake window', async (
   await h.vt.waitForRender()
   assert.equal(h.band().identity, -1, `no Task Center capability must mount no Quick window:\n${view(h.vt)}`)
   assert.ok(!view(h.vt).includes('Task Quick'))
+})
+
+test('the Full Task Center terminal-Job disclosure never leaks into the passive Quick window', async () => {
+  const h = startQuick({
+    roster: [
+      job('j1', 'build', 'running'),
+      job('j2', 'old lint', 'completed'),
+    ],
+  })
+  await flush()
+  await h.vt.waitForRender()
+  assert.equal(h.app.enterTaskQuick(), true, 'the production entry admits the live Quick projection')
+  await h.vt.waitForRender()
+  const before = h.band().items.join('\n')
+  assert.ok(before.includes('build'), `the running Job is painted; got:\n${before}`)
+  assert.ok(!before.includes('old lint'), `a terminal Job is never in the Quick active projection:\n${before}`)
+
+  // Open the Full browser, explicitly expand its terminal history, and close it.
+  h.tasks.openTasksBrowser('full')
+  await h.vt.waitForRender()
+  h.vt.sendInput('j')
+  await h.vt.waitForRender()
+  const full = h.vt.getViewport().join('\n')
+  assert.ok(full.includes('Hide 1 past jobs [J]') && full.includes('old lint'),
+    `the Full browser really expanded its own history:\n${full}`)
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+
+  // Quick re-projects from its OWN active policy: the Full disclosure is not a
+  // shared flag, so the resident window still paints exactly the active work.
+  assert.equal(h.app.enterTaskQuick(), true)
+  await h.vt.waitForRender()
+  const after = h.band().items.join('\n')
+  assert.ok(after.includes('build'))
+  assert.ok(!after.includes('old lint'), `the Quick window never inherits the Full history choice:\n${after}`)
+  h.app.stop()
 })
