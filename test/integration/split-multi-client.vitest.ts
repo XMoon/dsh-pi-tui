@@ -160,7 +160,11 @@ test('the first real Question answer settles once while the loser late option ke
   await clientB.waitForVisibleText('[1] Proceed', 'B saw the question option')
 
   if (process.env.S0_PROBE_WORKER_KILL_POINT === 'two-clients-ready') {
-    await scene.report('worker-kill-point', { point: 'two-clients-ready' })
+    const [clientAAlive, clientBAlive] = await Promise.all([clientA.isAlive(), clientB.isAlive()])
+    assert.equal(clientAAlive, true, 'Client A is not alive at the worker-kill point')
+    assert.equal(clientBAlive, true, 'Client B is not alive at the worker-kill point')
+    await scene.hostStatus(host)
+    await scene.report('worker-kill-point', { point: 'two-clients-ready', workerPid: process.pid })
     process.kill(process.pid, 'SIGKILL')
   }
 

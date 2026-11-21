@@ -296,24 +296,33 @@ class SupervisorClient {
 
   async waitExit(timeoutMs = 30_000): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
     if (this.#exitResult !== undefined) return this.#exitResult
-    return await Promise.race([
-      this.#exitPromise,
-      new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error(`Supervisor did not exit within ${String(timeoutMs)}ms`)), timeoutMs)
-      }),
-    ])
+    return await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error(`Supervisor did not exit within ${String(timeoutMs)}ms`))
+      }, timeoutMs)
+      this.#exitPromise.then(result => {
+        clearTimeout(timer)
+        resolve(result)
+      }, error => {
+        clearTimeout(timer)
+        reject(error)
+      })
+    })
   }
 
-  async close(): Promise<void> {
+  async close(options: { timeoutMs?: number; allowKill?: boolean } = {}): Promise<void> {
     if (this.#exitResult !== undefined) return
+    const timeoutMs = options.timeoutMs ?? 15_000
+    const allowKill = options.allowKill ?? true
     try {
       this.#child.disconnect()
     } catch {
       // A disconnected child may already be collecting its owned resources.
     }
     try {
-      await this.waitExit(15_000)
-    } catch {
+      await this.waitExit(timeoutMs)
+    } catch (error) {
+      if (!allowKill) throw error
       try { this.#child.kill('SIGKILL') } catch { /* already gone */ }
       await this.waitExit(3_000).catch(() => undefined)
     }
@@ -350,7 +359,9 @@ class Scene implements SplitS0Scene {
       timeoutMs: 180_000,
       onProgress: message => {
         if (message.event === 'HOST_SPAWNED' && process.env.S0_PROBE_WORKER_KILL_POINT === 'host-spawned-before-ack') {
-          process.kill(process.pid, 'SIGKILL')
+          // Leave one observation tick for the external probe to read the
+          // already-written host-spawned receipt before this worker dies.
+          setTimeout(() => process.kill(process.pid, 'SIGKILL'), 250)
         }
       },
     })
@@ -641,7 +652,12 @@ async function createScene(): Promise<Scene> {
     const facts = await supervisor.request('BOOTSTRAP', { tarball, tmpBase }, { timeoutMs: 600_000 }) as SceneFacts
     return new Scene(facts, supervisor)
   } catch (error) {
-    await supervisor.close()
+    try {
+      await supervisor.close({ timeoutMs: 300_000, allowKill: false })
+    } catch (closeError) {
+      throw new AggregateError([error, closeError],
+        'BOOTSTRAP failed and the Supervisor did not reach a bounded exit')
+    }
     throw error
   }
 }

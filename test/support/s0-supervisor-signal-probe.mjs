@@ -16,7 +16,7 @@
  * Required env: S0_TMP_BASE, S0_CANDIDATE_TGZ.
  */
 
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -100,6 +100,38 @@ function receipts(tmpBase, runId) {
     })
 }
 
+function groupAlive(pgid) {
+  if (!Number.isInteger(pgid) || pgid <= 0) return false
+  try {
+    process.kill(-pgid, 0)
+    return true
+  } catch (error) {
+    if (error?.code === 'ESRCH') return false
+    if (error?.code === 'EPERM') return true
+    throw error
+  }
+}
+
+function checkNoLingeringPaths(tmpBase, receipt) {
+  let commands
+  try {
+    commands = execFileSync('ps', ['-axo', 'command='], { encoding: 'utf8' })
+  } catch (error) {
+    fail(`could not inspect OS process commands: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  const needles = [tmpBase, receipt.sceneRoot].filter(value => typeof value === 'string' && value !== '')
+  const lingering = commands.split('\n').filter(line => {
+    const trimmed = line.trim()
+    if (trimmed === '') return false
+    if (trimmed.includes('s0-supervisor-signal-probe.mjs')) return false
+    if (trimmed.includes('S0_TMP_BASE') || trimmed.includes('S0_CANDIDATE_TGZ')) return false
+    return needles.some(needle => trimmed.includes(needle))
+  })
+  if (lingering.length > 0) {
+    fail(`process(es) still reference the run's private path: ${lingering.join(' | ')}`)
+  }
+}
+
 function latestReceipt(tmpBase, runId) {
   const all = receipts(tmpBase, runId)
   return all.length === 0 ? undefined : all.sort((left, right) => String(right.updatedAt ?? '').localeCompare(String(left.updatedAt ?? '')))[0]
@@ -110,10 +142,16 @@ function checkReceiptResources(receipt) {
   if (receipt.sceneRoot !== undefined && existsSync(receipt.sceneRoot)) {
     problems.push(`scene root still exists: ${receipt.sceneRoot}`)
   }
+  if (receipt.install?.inProgress === true) {
+    problems.push('install is still marked in progress')
+  }
   if (receipt.host !== undefined) {
     for (const pid of [receipt.host.pid, receipt.host.businessPid]) {
       if (pidAlive(pid)) problems.push(`Host PID still alive: ${String(pid)}`)
     }
+  }
+  if (receipt.host?.pgid !== undefined && groupAlive(receipt.host.pgid)) {
+    problems.push(`Host process group still alive: ${String(receipt.host.pgid)}`)
   }
   for (const client of receipt.clients ?? []) {
     if (pidAlive(client.shellPid)) problems.push(`Client shell PID still alive: ${String(client.shellPid)} (${String(client.label)})`)
@@ -171,21 +209,28 @@ const child = spawn(process.execPath, [
 
 let childExited = false
 try {
+  let deadline
   if (mode === 'bootstrap-main-sigterm') {
     await waitUntil(() => {
       const receipt = latestReceipt(tmpBase, runId)
-      return receipt?.phase === 'BOOTSTRAP_ROOT_CREATED' ? receipt : undefined
+      return (receipt?.notes ?? []).some(note => note.event === 'bootstrap-root-created')
+        && receipt?.install?.inProgress === true ? receipt : undefined
     }, 'BOOTSTRAP_ROOT_CREATED receipt', 60_000)
-    child.kill('SIGTERM')
+    if (child.kill('SIGTERM') === false) fail('could not signal the Vitest main process')
+    deadline = Date.now() + 240_000
   } else if (mode === 'worker-kill') {
     await waitUntil(() => {
       const receipt = latestReceipt(tmpBase, runId)
       if (at === 'host-spawned-before-ack') {
-        return receipt?.phase === 'HOST_SPAWNED' ? receipt : undefined
+        const hostSpawned = (receipt?.notes ?? []).some(note => note.event === 'host-spawned')
+          || receipt?.phase === 'HOST_SPAWNED'
+        return hostSpawned && pidAlive(receipt?.host?.pid) && groupAlive(receipt?.host?.pgid)
+          ? receipt : undefined
       }
       return (receipt?.notes ?? []).some(note => note.event === 'worker-kill-point'
         && note.detail?.point === 'two-clients-ready') ? receipt : undefined
     }, `${mode}/${at} receipt`, 180_000)
+    deadline = Date.now() + 30_000
   } else {
     const readyReceipt = await waitUntil(() => {
       const receipt = latestReceipt(tmpBase, runId)
@@ -194,22 +239,40 @@ try {
     assertLiveReceipt(readyReceipt)
     if (mode === 'foreground-group-sigint') {
       process.kill(-child.pid, 'SIGINT')
-    } else {
-      child.kill(signal)
+    } else if (child.kill(signal) === false) {
+      fail('could not signal the Vitest main process')
     }
+    deadline = Date.now() + 30_000
   }
 
-  const exit = await waitChildExit(child, mode === 'bootstrap-main-sigterm' ? 240_000 : 30_000)
+  const exit = await waitChildExit(child, Math.max(1, deadline - Date.now()))
   childExited = true
   if (exit.code === 0) fail(`Vitest unexpectedly exited 0 under ${mode}`)
   const receipt = await waitUntil(() => {
     const current = latestReceipt(tmpBase, runId)
     return current?.phase === 'ABORTED_CLEAN' ? current : undefined
-  }, 'Supervisor ABORTED_CLEAN', mode === 'bootstrap-main-sigterm' ? 240_000 : 30_000)
-  await sleep(300)
+  }, 'Supervisor ABORTED_CLEAN', Math.max(1, deadline - Date.now()))
+  await sleep(Math.min(300, Math.max(1, deadline - Date.now())))
   const problems = checkReceiptResources(receipt)
   if (problems.length > 0) fail(problems.join('; '))
+  checkNoLingeringPaths(tmpBase, receipt)
+  if (Date.now() > deadline) fail('probe exceeded its single fixed post-trigger deadline')
   if (!pidAlive(sentinel.pid)) fail(`external sentinel PID ${String(sentinel.pid)} died; the probe touched an unrelated process`)
+  console.log(`S0_SIGNAL_PROBE_FACTS ${JSON.stringify({
+    mode,
+    at,
+    signal: mode === 'main-signal' ? signal : undefined,
+    runId,
+    vitestPid: child.pid,
+    workerPid: (receipt.notes ?? []).find(note => note.event === 'worker-kill-point')?.detail?.workerPid,
+    vitestExit: exit,
+    supervisorPid: receipt.supervisor?.pid,
+    supervisorPhase: receipt.phase,
+    hostPid: receipt.host?.businessPid ?? receipt.host?.pid,
+    clientPids: (receipt.clients ?? []).map(client => client.shellPid),
+    sceneRoot: receipt.sceneRoot,
+    sentinelPid: sentinel.pid,
+  })}`)
   console.log(`S0_SIGNAL_PROBE_PASS mode=${mode}${at === undefined ? '' : ` at=${at}`}${mode === 'main-signal' ? ` signal=${signal}` : ''} vitest_exit=${JSON.stringify(exit)} supervisor_phase=${receipt.phase}`)
 } finally {
   if (!childExited && child.exitCode === null && child.signalCode === null) {
