@@ -510,6 +510,50 @@ test('a retained-Job reading returns to the SAME expanded history and a pre-Read
     'no successor Reader is opened for a removed history target')
 })
 
+// ── F-01: a transient Reader/front-seat admission must not rewrite focus ────
+
+test('an explicit Details focus survives a Reader-time setItems/setRefreshState and Enter reopens Details', async (t) => {
+  const h = await mount(t)
+  const exercise = async (items: readonly TaskPanelItem[], label: string): Promise<void> => {
+    const handle = h.open(items)
+    await waitUntil(`${label}: the active Job is selected`, () => pickerProps(h.pane, HUB).selected === 'job:j1')
+    h.pane.key('\t')
+    await waitUntil(`${label}: Tab reaches the primary Details action`,
+      () => JSON.stringify(pickerProps(h.pane, HUB).actions).includes('View details [Enter]'))
+    // Make Details an EXPLICIT preference: left to the history/Close ring entry
+    // and right back to Details (the ring is action-count dependent).
+    h.pane.key('\u001b[D')
+    h.pane.key('\u001b[C')
+    await waitUntil(`${label}: Details is explicitly focused`,
+      () => JSON.stringify(pickerProps(h.pane, HUB).actions).includes('View details [Enter]'))
+
+    const reader = await enterReader(h)
+    // A REAL TaskRuntime refresh/state tick lands while the Reader is frontmost.
+    handle.setItems(items)
+    handle.setRefreshState('ready')
+    await new Promise(resolve => setTimeout(resolve, 150)) // reason: bounded observation window; the Reader must stay open
+    assert.ok(h.readerId() === reader, `${label}: the background update never closes the Reader`)
+    h.pane.key('\u001b')
+    await waitUntil(`${label}: the Reader closes`, () => h.pane.closedSurfaceIds().includes(reader))
+    await waitUntil(`${label}: the explicit Details focus returns`, () =>
+      pickerProps(h.pane, HUB).selected === 'job:j1'
+      && JSON.stringify(pickerProps(h.pane, HUB).actions).includes('View details [Enter]'))
+
+    // Enter must run Details again, not the history toggle or Close.
+    const reopened = await enterReader(h)
+    assert.ok(reopened !== reader, `${label}: Enter reopened a NEW Details Reader`)
+    assert.ok(readerTexts(h, reopened).includes('Job · running'), `${label}: the reopened document is the selected Job`)
+    h.pane.key('\u001b')
+    await waitUntil(`${label}: the reopened Reader closes`, () => h.pane.closedSurfaceIds().includes(reopened))
+  }
+
+  await exercise([
+    row('job:j1', { label: 'build', status: 'running' }),
+    row('job:j2', { label: 'old lint', status: 'completed', active: false }),
+  ], 'with retained history')
+  await exercise([row('job:j1', { label: 'build', status: 'running' })], 'without retained history')
+})
+
 // ── R16: a modal preempts the Reader and never accepts a hidden answer ──────
 
 test('an official approval preempts the Reader synchronously, refuses hidden answers, then answers once', async (t) => {

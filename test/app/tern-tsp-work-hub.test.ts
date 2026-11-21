@@ -456,11 +456,8 @@ test('plain j is always query text, and the search reaches a retained failed Job
   await waitUntil('the query is cleared', () => hubProps(h.pane).query === '')
   assert.deepEqual(hubItems(h.pane).map(item => item.id), ['job:j1'],
     'clearing the query restores the manual collapsed view')
-  assert.equal(hubProps(h.pane).selected ?? undefined, undefined,
-    'a selection that only existed under the query is cleared rather than kept as a hidden target')
-  assert.deepEqual(actionIds(h.pane), ['close', 'jobs-history'])
-  h.pane.key('\u001b[B')
-  await waitUntil('the user can select the real visible row again', () => hubProps(h.pane).selected === 'job:j1')
+  assert.equal(hubProps(h.pane).selected, 'job:j1',
+    'clearing the query falls back to the initial visible-row policy, never the hidden Job id')
   assert.deepEqual(actionIds(h.pane), ['close', 'jobs-history', 'details'])
 })
 

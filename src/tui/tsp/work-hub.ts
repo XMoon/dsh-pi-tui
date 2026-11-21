@@ -666,8 +666,18 @@ export class TspWorkHub {
     // away when its own action disappears; a later reappearance never
     // resurrects an action the user did not re-choose.
     const history = historyAvailable(panel)
-    const details = this.detailsAvailable(panel)
-    if (panel.actionFocus !== undefined) panel.actionFocus = normalizeActionFocus(panel.actionFocus, history, details)
+    // A `busy` Details admission is the frontmost Reader/Modal seat, not a
+    // durable disappearance of the action. Keep an explicit Details preference
+    // while its selected row still exists; paint/activation-time admission
+    // still refuses it while that seat holds the surface. Only a genuinely
+    // missing row, query/candidate loss or pane capability loss normalizes the
+    // stored preference.
+    const detailsActionExists = panel.actionFocus === 'details'
+      ? this.resolveDetails(panel.serial, panel.selected) !== undefined
+      : this.detailsAvailable(panel)
+    if (panel.actionFocus !== undefined) {
+      panel.actionFocus = normalizeActionFocus(panel.actionFocus, history, detailsActionExists)
+    }
     panel.revision += 1
     this.render()
   }
@@ -866,7 +876,8 @@ export class TspWorkHub {
         panel.query = intent.query
         panel.cursor = intent.cursor
         panel.zone = 'list'
-        panel.selected = normalizeSelection(panel.selected, oldVisible, visibleRows(panel))
+        const newVisible = visibleRows(panel)
+        panel.selected = normalizeSelection(panel.selected, oldVisible, newVisible) ?? chooseInitial(newVisible)
         this.change(panel)
         return
       }
