@@ -180,7 +180,8 @@ export class AccountWorkspacePage implements Component {
     if (this.disposed || this.watcherStarted) return false
     if (!this.source.available()) {
       this.observationLease = undefined
-      this.stateFailure = 'the Host Account service is unavailable on this connection'
+      this.stateFailure = this.source.unavailableReason?.()
+        ?? 'the Host Account service is unavailable on this connection'
       this.initializing = false
       return false
     }
@@ -792,13 +793,19 @@ export class AccountWorkspacePage implements Component {
     this.rowOrder.length = 0
     this.copyValue = undefined
     if (this.stateFailure !== undefined && this.view === undefined) {
+      // The missing-DSH-version reason is Client-local: never claim the Host
+      // Account service is absent when only the Client runtime identity is
+      // unavailable.
+      const clientRuntimeUnavailable = this.source.unavailableReason?.() !== undefined
       return {
         content: [
           color.textStrong('DeepSeek Account'),
           '',
           color.error(this.stateFailure),
           '',
-          color.textDim('The Host account service and its browser callback listener are required for sign-in.'),
+          color.textDim(clientRuntimeUnavailable
+            ? 'Account actions stay disabled until this Client can prove its installed DSH runtime version.'
+            : 'The Host account service and its browser callback listener are required for sign-in.'),
         ],
         actions: [
           { id: 'account:refresh', label: 'Refresh', enabled: this.source.available() },

@@ -684,15 +684,19 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     }
   }
 
-  /** M0: the host section (dsh + bundle versions). tuiVersion is the
-   * BUNDLE's own version (bundleVersion), never the dsh version — the
-   * welcome-card helper prefers dsh for display, which would show the
-   * harness version under `version(format=tui)` (review finding). */
+  /** M0: the host section (dsh + bundle versions). `dshVersion` is the
+   * CURRENT Client's installed DSH runtime identity (Direct argv or Split
+   * install anchor), read once here; `tuiVersion` is the BUNDLE's own version
+   * (bundleVersion), never the DSH version. The field name is the historical
+   * status schema; it is not the Remote Host record's identity. */
   
-  const deriveHostStatus = (): HostStatus => ({
-    ...dshVersion() === undefined ? {} : { dshVersion: dshVersion() },
-    tuiVersion: bundleVersion(),
-  })
+  const deriveHostStatus = (): HostStatus => {
+    const installedDsh = dshVersion()
+    return {
+      ...installedDsh === undefined ? {} : { dshVersion: installedDsh },
+      tuiVersion: bundleVersion(),
+    }
+  }
 
   // PR D2: the session-bound context-measurement cache. The coordinator
   // owns the value/dirty/session identity; the runner owns the event

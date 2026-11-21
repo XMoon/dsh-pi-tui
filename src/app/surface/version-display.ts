@@ -1,7 +1,9 @@
 /**
- * The welcome card's combined version line: the installed dsh version plus the
- * bundle's own version (header-badge parity — `dsh-0.2.0-rc.2 · tui-v0.5.1`).
- * Without a resolvable dsh launcher it degrades to the bundle version alone.
+ * The welcome card's combined version line: the current Client's installed DSH
+ * runtime version plus the bundle's own version (header-badge parity —
+ * `dsh-0.2.0-rc.2 · tui-v0.5.1`). The SAME Client DSH identity serves Direct
+ * (CLI manifest) and Split (official install anchor); without it the line
+ * degrades to the bundle version alone.
  *
  * Application presentation ownership: it composes the Client-local launcher
  * reads (`client/launcher/version.ts`) into the user-facing string; the reads

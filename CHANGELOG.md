@@ -66,6 +66,7 @@ Daemon 退出后的恢复命令会保留临时的 `DSH_PI_TUI_BACKEND=daemon` �
 
 ### 修复
 
+- **Remote Client 的版本与 Account 身份现在来自真实 DSH 安装。** Split 独立 Client 的 Header、Welcome、状态栏与 Settings/About 现在显示当前安装的 DSH 版本（同时保留真实的 TUI bundle 版本），不再把 Client 入口路径或 TUI 版本误当成 DSH；Account 发往 Platform 的版本元数据一律使用真实 DSH 版本，无法证明时明确拒绝所有 Account 请求并解释原因。
 - **官方 Web 设置现在可以正常保存。** Web 组件不再由 Host-only 命令行覆盖声明，而是由安装包统一声明为默认关闭、由 `/web` 的运行开关按需启用；命令行覆盖只保留 Web 运行时静默、Office 输出目录和 Office 用户 Python 三项固定安全值，因此官方 Web 页面写入 Profile 时不会再被“已被覆盖”拒绝。
 - **Direct 与 Split 共用一份 TUI 偏好。** 主题、状态栏、通知、进度等 20 项偏好统一写入唯一的 `pi-tui-preferences` Profile 行；Direct、Split Host 与 Remote Client 读写同一份值。Host 启动时会把旧 `tui-app` / `split-host-pi-tui-runtime` 的 USER 值以及历史 `settings.yaml` 一次性迁移，来源冲突时明确报错并保持原文件不变，不猜测、不覆盖。
 - **Footer 配置器正文支持鼠标滚轮。** 滚轮只滚动最后绘制的 Footer 正文窗口，不会改变当前选择、Move Mode 的排序、Add 搜索/候选游标或任何草稿值；标题/预览/提示/唯一操作栏固定不动，文本编辑、删除确认与保存中状态对滚轮完全惰性。手动滚出的光标在下一次 Enter/空格/左/右等会修改隐藏选择的操作前会先恢复可见，键盘导航、Esc 与原有保存/退出语义保持不变；脏草稿的退出确认页 `Keep Editing` 现在也可用鼠标点击返回（原先仅键盘 Esc 有效）。

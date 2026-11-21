@@ -58,7 +58,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
@@ -70,6 +70,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import * as toolTodo from '@deepseek-ai/dsh-tool-todo'
 import { Config as TuiConfigSchema } from '../../src/index.ts'
+import { bundleVersion } from '../../src/client/launcher/version.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { applyRunnerWithRuntime } from '../../src/app/bootstrap.ts'
 import type { LaunchWorkspaceVerdict } from '../../src/app/remote-process/local-workspace-equivalence.ts'
@@ -3127,6 +3128,89 @@ function aboutCwdPaintedValue(rows: readonly string[]): { readonly value: string
     && /^[A-Za-z]/.test(nextRow.slice(contentX + 2))
   return { value, complete }
 }
+
+// ── M6 Client identity: the Remote runner's ONE DSH version source ────────
+test('Remote runner: the injected DSH install anchor is the version for Welcome/header/footer/About and stays stable after a Session opens', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('remote-runner-dsh-anchor-')
+  const anchor = join(root, 'package.json')
+  writeFileSync(anchor, JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.2-anchor-b' }))
+  const previousMode = process.env.SPLIT_PROCESS_CLIENT_MODE
+  const previousAnchor = process.env.SPLIT_PROCESS_DSH_ANCHOR
+  life.defer(() => {
+    if (previousMode === undefined) delete process.env.SPLIT_PROCESS_CLIENT_MODE
+    else process.env.SPLIT_PROCESS_CLIENT_MODE = previousMode
+    if (previousAnchor === undefined) delete process.env.SPLIT_PROCESS_DSH_ANCHOR
+    else process.env.SPLIT_PROCESS_DSH_ANCHOR = previousAnchor
+  })
+  process.env.SPLIT_PROCESS_CLIENT_MODE = 'surface'
+  process.env.SPLIT_PROCESS_DSH_ANCHOR = anchor
+
+  const fixture = await mountRemoteRunner(life, { presetId: 'm3-4-pr2-preset' })
+  const expectedDsh = '0.2.2-anchor-b'
+  const expectedTui = bundleVersion()
+  assert.notEqual(expectedDsh, expectedTui, 'the test pins deliberately different DSH and TUI versions')
+  const viewport = (): string => fixture.vt.getViewport().join('\n')
+  const app = fixture.runnerApp() as unknown as {
+    setFooterLayout(layout: unknown): void
+    footerRenderRowsForTest(): readonly string[]
+    headerRenderRowsForTest(): readonly string[]
+    setDraft(text: string): void
+    submitDraft(): void
+  }
+  await waitFor('the Remote Welcome paints the injected DSH and true TUI versions', () =>
+    viewport().includes(`dsh-${expectedDsh} · tui-v${expectedTui}`), 20_000)
+  assert.ok(app.headerRenderRowsForTest().join('\n').includes(`dsh-${expectedDsh} · tui-v${expectedTui}`),
+    'the real header badge reads the same Client DSH identity')
+
+  // The footer's three formats read StatusSnapshot.host.{dshVersion,tuiVersion}.
+  app.setFooterLayout({
+    schemaVersion: 1,
+    rows: [{
+      left: [
+        { id: 'version', format: 'tui' },
+        { id: 'version', format: 'dsh' },
+        { id: 'version', format: 'both' },
+      ],
+      right: [],
+    }],
+  })
+  await waitFor('the footer version formats read the same status facts', () => {
+    const footer = app.footerRenderRowsForTest().join(' ')
+    return footer.includes(`v${expectedTui}`)
+      && footer.includes(`dsh-${expectedDsh}`)
+      && footer.includes(`dsh-${expectedDsh}/tui-${expectedTui}`)
+  }, 20_000)
+
+  const execute = (line: string): void => {
+    app.setDraft(line)
+    app.submitDraft()
+  }
+  // Open a Session: the version is the Client process's install identity, so
+  // it must not change with Session ownership.
+  const before = (await fixture.aggregate.selected.backend.sessionReader.list(undefined)) ?? []
+  const beforeIds = new Set(before.map(row => String(row.id)))
+  execute('/new')
+  const deadline = Date.now() + 20_000
+  for (;;) {
+    const rows = (await fixture.aggregate.selected.backend.sessionReader.list(undefined)) ?? []
+    if (rows.some(row => !beforeIds.has(String(row.id)))) break
+    if (Date.now() > deadline) throw new Error('timed out waiting for /new to create a Host Session')
+    await new Promise<void>(resolve => setTimeout(resolve, 20))
+  }
+  await waitFor('the header still reports the same DSH identity after a Session opens', () =>
+    app.headerRenderRowsForTest().join('\n').includes(`dsh-${expectedDsh} · tui-v${expectedTui}`), 20_000)
+
+  // About reads the SAME Client version facts through the real Settings
+  // command factory (`aboutVersionFacts`) and AboutStatusController.
+  execute('/settings')
+  await waitFor('the About runtime facts paint the injected DSH version', () => {
+    const frame = viewport()
+    return frame.includes('DSH') && frame.includes(expectedDsh)
+  }, 20_000)
+  assert.equal(viewport().includes('Unknown'), false,
+    'a proven install anchor never paints Unknown/0.0.0 in the Remote version surfaces')
+})
 
 // ── C3 (Phase 3C): the PRODUCTION-RUNNER Remote source→sink proof ─────────
 //

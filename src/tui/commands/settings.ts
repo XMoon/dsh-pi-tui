@@ -78,7 +78,7 @@ import { AccountWorkspacePage, type AccountInitialView } from '../panels/account
 import { CredentialWorkflow, type AuthDestination } from '../../app/command/credential-workflow.ts'
 import { AccountWorkflow } from '../../app/command/account-workflow.ts'
 import { AboutStatusController } from '../../app/command/about-status.ts'
-import { bundleVersion, dshVersion, packageVersion } from '../../client/launcher/version.ts'
+import { bundleVersion, dshVersion } from '../../client/launcher/version.ts'
 import { openExternalUrl } from '../../client/url/open.ts'
 import type {
   SettingsWorkspaceCategoryId,
@@ -284,7 +284,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   const accountWorkflowOf = (): AccountWorkflow => {
     accountWorkflowInstance ??= new AccountWorkflow({
       account: runner.config.account,
-      version: packageVersion(),
+      version: dshVersion(),
       openUrl: (url: string) => openExternalUrl(url),
       copy: copyText,
       run: (label: string, task: () => Promise<void>) => { detach(label, task, { notify: false }) },

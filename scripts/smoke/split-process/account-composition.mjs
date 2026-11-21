@@ -235,6 +235,8 @@ export async function runF2AccountComposition(context) {
     runningRequestClosed: false,
   }
   const requests = []
+  /** The Platform `x-client-version` header for every mock request path. */
+  const clientVersions = []
   const mockFailures = []
   let mockServer
   let host
@@ -243,6 +245,14 @@ export async function runF2AccountComposition(context) {
   const clients = []
   const credentialsPath = join(dshHome, '.credentials.yaml')
   const apiKeySentinel = 'm6-f2-isolated-api-key'
+  const expectedTuiVersion = installation.manifest.version
+  const expectedDshVersion = context.targetDshVersion
+  assert(typeof expectedTuiVersion === 'string' && expectedTuiVersion !== '',
+    'the packed candidate manifest must carry its TUI bundle version')
+  assert(typeof expectedDshVersion === 'string' && expectedDshVersion !== '',
+    'the split smoke context must carry the exact installed DSH version')
+  assert(expectedTuiVersion !== expectedDshVersion,
+    'the version proof is invalid when the TUI bundle and DSH runtime versions coincide')
 
   try {
     mockServer = createServer((request, response) => {
@@ -252,6 +262,11 @@ export async function runF2AccountComposition(context) {
         const bodyText = Buffer.concat(chunks).toString('utf8')
         const url = new URL(request.url ?? '/', 'http://127.0.0.1')
         requests.push(`${request.method ?? 'GET'} ${url.pathname}`)
+        const headerVersion = request.headers['x-client-version']
+        clientVersions.push({
+          path: url.pathname,
+          version: Array.isArray(headerVersion) ? headerVersion[0] : headerVersion,
+        })
         const origin = `http://127.0.0.1:${mockServer.address().port}`
 
         if (request.method === 'POST' && url.pathname === '/auth-api/v0/dsh/auth_init') {
@@ -465,6 +480,10 @@ export async function runF2AccountComposition(context) {
       clients.push(client)
       const ready = await client.waitFor(record => record.m4a0 === 'ready', `${label} surface Client ready`, 180_000)
       assertClientHostFacts(ready.host, hostReady.localHost, `${label} Client authenticated Host`)
+      // Before the first /new or sign-in, the real Client PTY must paint the
+      // injected installed DSH version beside the true TUI bundle version.
+      await client.waitForScreen(`dsh-${expectedDshVersion} · tui-v${expectedTuiVersion}`,
+        `${label} surface Client painted the injected DSH and true TUI versions`, 60_000)
       await submitOnRealEditor(client, '/new', `${label} first Host Session`)
       await waitForSurfaceStatus(client,
         record => record.sessionOpen === true && typeof record.openSessionId === 'string',
@@ -956,6 +975,22 @@ export async function runF2AccountComposition(context) {
     await waitForCondition(() => auth.cancelValid,
       'F2 official auth_cancel matched the active attempt id and PKCE verifier', 30_000)
     assert(mockFailures.length === 0, 'the isolated Platform mock rejected an owned request assertion')
+    // The official Host Account service maps AccountClientMetadata.version to
+    // the Platform `x-client-version` header. Every metadata-bearing endpoint
+    // class must carry the EXACT installed DSH version and never the TUI one.
+    for (const [path, label] of [
+      ['/auth-api/v0/dsh/auth_init', 'auth_init'],
+      ['/auth-api/v0/users/current', 'profile'],
+      ['/api/v0/users/get_user_summary', 'balance'],
+      ['/auth-api/v0/users/logout', 'logout'],
+    ]) {
+      const versions = clientVersions.filter(entry => entry.path === path).map(entry => entry.version)
+      assert(versions.length >= 1, `the F2 Account ${label} endpoint never reached the Platform mock`)
+      assert(versions.every(version => version === expectedDshVersion),
+        `the F2 Account ${label} request carried x-client-version=${JSON.stringify(versions)}, expected ${expectedDshVersion}`)
+      assert(versions.every(version => version !== expectedTuiVersion),
+        `the F2 Account ${label} request must never carry the TUI bundle version`)
+    }
     assert(requests.filter(path => path === 'POST /auth-api/v0/dsh/auth_init').length === 4,
       'the four explicit Sign-in actions must each dispatch once; failed code is never replayed')
     assert(requests.filter(path => path === 'POST /auth-api/v0/dsh/auth_cancel').length === 1,
@@ -1027,6 +1062,9 @@ export async function runF2AccountComposition(context) {
       signOut: 'complete-once',
       apiKeyPreserved: true,
       tokenTelemetry: 'absent',
+      clientDshVersion: expectedDshVersion,
+      clientTuiVersion: expectedTuiVersion,
+      xClientVersion: 'PASS',
       platformRequests: requests.slice(),
     })
     return {

@@ -473,6 +473,14 @@ first Split-mode opening; `local/1` pairs are refused at
 connect with `HOST_PROTOCOL_INCOMPATIBLE`, and a refusal never stops, replaces
 or mutates the live Host or its running Turns.
 
+The Client's DSH runtime identity is the DSH installation that owns the CLI in
+Direct, or the official Profile launcher's install anchor in a Split surface
+Client. Every Client UI version fact, boot diagnostic and Account metadata value
+reads that ONE Client-local source. The authenticated Host record's
+`dshVersion`/`bundleVersion` are Host identity and compatibility evidence only,
+never a substitute for the Client's own installed runtime version; the TUI
+bundle version is always this package's own manifest version.
+
 A v2 peer guarantees the required official Session, Turn, Job, Question and
 Approval semantics plus this package's current required private Remotes (file
 references, terminal progress and session-view presence — the last one feeds
@@ -1715,7 +1723,10 @@ watch invalidation immediately revokes the affected observation; invalidation is
 not a `signed-out` fact. A token, grant payload, PKCE value, `PlatformSession` or
 generic Host service object never crosses the port. `AccountClientMetadata`
 (`version`, `locale`, `timezoneOffsetSeconds`) is sampled per Platform request;
-the offset is never cached across a DST change.
+the offset is never cached across a DST change. `version` is the installed DSH
+runtime version, which the official Host Account service maps to the Platform
+`x-client-version` header; it is never the TUI bundle version, and an
+unprovable version fails closed before any metadata-bearing Account request.
 
 The base profile mounts the official `@deepseek-ai/dsh-host-webserver` row with
 stable id `webserver`, `host: 127.0.0.1`, and `port: 0`; the Direct runner injects

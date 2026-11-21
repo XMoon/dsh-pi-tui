@@ -5,7 +5,7 @@
  * refresh. */
 
 import assert from 'node:assert/strict'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
@@ -13,6 +13,7 @@ import { createToolResultMessage, MessageId, type ToolCallId } from '@deepseek-a
 import type {} from '@deepseek-ai/dsh-subagent'
 import { SESSION_FORMAT_VERSION, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { Config as TuiConfigSchema } from '../../src/index.ts'
+import { bundleVersion } from '../../src/client/launcher/version.ts'
 import { initialWorkspaceIntentFromEnvironment } from '../../src/app/bootstrap.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import type { StreamingToolPreview } from '../../src/app/surface/streaming-tool-preparing.ts'
@@ -163,6 +164,53 @@ test('a settings-less Direct bootstrap refuses an un-migrated legacy preset defa
   } finally {
     await disposeContext(ctx)
   }
+})
+
+test('the Direct boot diagnostics separate DSH, bundle and the LOCAL Cordis services', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('direct-boot-diagnostics-')
+  const patchPath = join(home, 'cordis.patch.yml')
+  writeFileSync(patchPath, '[]\n')
+  const logPath = join(home, 'tui.log')
+  const dshRoot = join(home, 'node_modules', '@deepseek-ai', 'dsh')
+  mkdirSync(join(dshRoot, 'bin'), { recursive: true })
+  writeFileSync(join(dshRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.2-boot-b' }))
+  const bin = join(dshRoot, 'bin', 'dsh')
+  writeFileSync(bin, '')
+  const previousArgv = process.argv[1]
+  const previousLog = process.env.DSH_PI_TUI_LOG
+  const previousLevel = process.env.DSH_PI_TUI_LOG_LEVEL
+  process.argv[1] = bin
+  process.env.DSH_PI_TUI_LOG = logPath
+  process.env.DSH_PI_TUI_LOG_LEVEL = 'info'
+  life.defer(() => {
+    process.argv[1] = previousArgv
+    if (previousLog === undefined) delete process.env.DSH_PI_TUI_LOG
+    else process.env.DSH_PI_TUI_LOG = previousLog
+    if (previousLevel === undefined) delete process.env.DSH_PI_TUI_LOG_LEVEL
+    else process.env.DSH_PI_TUI_LOG_LEVEL = previousLevel
+  })
+  const ctx = new Context()
+  ctx.provide('profileContext', { home, patchPath })
+  const vt = new VirtualTerminal(100, 30)
+  life.defer(installVirtualProcessTerminal(vt))
+  const harness = makeHarness(home)
+  try {
+    await mountRunner(ctx, home, harness, {}, {})
+    await settle()
+  } finally {
+    await disposeContext(ctx)
+  }
+  const bootLine = readFileSync(logPath, 'utf8').split('\n').find(line => line.includes(' INFO boot '))
+  assert.ok(bootLine !== undefined, 'the boot diagnostics line must be written')
+  assert.match(bootLine, /dsh=0\.2\.2-boot-b/u,
+    'boot.dsh is the Direct CLI manifest version')
+  assert.ok(bootLine.includes(`bundle=${bundleVersion()}`),
+    'boot.bundle is the TUI bundle version, never the DSH version')
+  assert.match(bootLine, /localCordisServices=[^\s]*sessionPersistence/u,
+    'the diagnostic names the local Cordis services this process observed')
+  assert.doesNotMatch(bootLine, /\sservices=/u,
+    'the old ambiguous services key is gone')
 })
 
 test('the real runner hydrates resume, deferred create, and switch exactly once each', async (t) => {

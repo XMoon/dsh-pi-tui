@@ -39,11 +39,12 @@ export function apply(ctx: Context): void {
   const service = ctx.get(PI_TUI_EXTENSIONS_SERVICE) as PiTuiExtensionService | undefined
   if (service === undefined) return
 
-  // Version header badge: the installed dsh version first, then the bundle
-  // version prefixed `tui-` — `[dsh-0.1.2-alpha.2 · tui-v0.4.0-alpha.1]` (read live
-  // from the launcher + the installed package.json — never hardcode either
-  // version here). Without a resolvable dsh launcher the badge degrades to
-  // the bundle version alone.
+  // Version header badge: the current Client's installed DSH runtime version
+  // first, then the bundle version prefixed `tui-` —
+  // `[dsh-0.1.2-alpha.2 · tui-v0.4.0-alpha.1]` (read live from the Client-local
+  // install identity + the installed package.json — never hardcode either
+  // version here). Without a resolvable DSH runtime identity the badge
+  // degrades to the bundle version alone.
   const installedDsh = dshVersion()
   service.register<HeaderBadge>('chrome.header.badge', {
     id: 'builtin-version',
