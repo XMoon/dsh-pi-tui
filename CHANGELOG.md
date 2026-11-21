@@ -9,8 +9,22 @@
 
 ### 新增
 
-- **Daemon 模式（Linux/macOS）**：除默认 Direct 模式外，可运行独立 Host。关闭或断开 TUI 不会终止 Host 中的 Agent 工作；多个 TUI、官方 Web 和本地 ACP 客户端可连接同一个 Host，查看同一 Session。
-- **Daemon 与多端管理**：新增按 Profile 管理的 `daemon status/start/stop/restart/logs`，可选安装 Linux systemd 用户服务或 macOS LaunchAgent；新增无 TUI 的 `web status/enable/disable/url/open`，直接管理运行中的 Host。`/acp` 可开启或关闭本地 ACP 接口，供兼容客户端接入。
+#### Daemon 模式（0.5.7 重大更新，Linux/macOS）
+
+- **独立 Host、可断开的 TUI**：默认 Direct 模式不变；切换到 Daemon 后，Host 独立运行，退出当前终端不再结束 Agent 工作。
+- **多客户端共享 Session**：同一 Profile 下，多个 TUI、官方 Web 和本地 ACP 客户端可以连接同一 Host，访问同一 Agent Session，不必为每个界面重复开启会话。
+- **启用方式**：只想体验一次，可直接运行：
+
+  ```sh
+  DSH_PI_TUI_BACKEND=daemon dsh --profile pi-tui
+  ```
+
+  也可在 `/settings → General → Backend` 选择 `Daemon` 并保存，下次启动生效；环境变量只覆盖本次启动。
+- **Host 生命周期管理**：通过 `dsh --profile pi-tui daemon status|start|stop|restart|logs` 查看和管理 Host；可选使用 `daemon install|uninstall` 安装/移除 Linux systemd 用户服务或 macOS LaunchAgent，普通 Daemon 运行不依赖系统服务。
+- **Web 与 ACP 接入**：`dsh --profile pi-tui web status|enable|disable|url|open` 可在不打开 TUI 的情况下管理运行中的官方 Web；`/acp` 可按需开启/关闭本地 ACP v1 接口，供兼容客户端接入。
+- **退出与更新**：Daemon 下 `/exit`、`/quit` 默认只断开当前 Client，任务进行中可选择保留工作或停止工作；停止整个 Host 使用 `daemon stop`。更新 TUI 后，使用 `daemon restart` 让运行中的 Host 切换到新版本。
+
+#### 其他新增
 - **Agent Team 模式**：`/model` 增加独立的 Agent Team 开关，并将模型、Reasoning Effort 和 Team 设置分区展示；关闭已有活动记录的 Team 时提供确认。
 - **Work / Team 任务中心**：`/tasks` 增加 Work、Team 双页面。Work 展示当前任务与执行情况；Root Session 的 Team 页面可查看团队任务和成员。支持页面切换、搜索及任务类型筛选；Team 页面以查看为主。
 - **更清晰的 Subagent 和 Job 展示**：已跟踪的 Subagent 树默认逐层展开，仍可手动折叠；运行中的 Job 优先显示，已结束的 Job 收入可展开的历史（完整任务中心按 `j`，TSP Work Hub 按 `Alt+J`），减少长历史对当前工作的干扰。
@@ -23,7 +37,7 @@
 
 ### 改进
 
-- **退出操作更符合 Daemon 语义**：`/exit`、`/quit` 在 Daemon 下默认断开当前 Client，而非关闭 Host；任务进行中提供保留工作或停止工作的明确选择。忙碌时的 `Ctrl+C` 优先取消当前工作。
+- **取消操作**：忙碌时的 `Ctrl+C` 优先取消当前工作，避免误退出。
 - **Plan、Goal 与任务反馈**：Plan Review 可以直接跳转查看对应计划内容后再决策；Goal Dock 会随终端宽度展示目标；任务、Subagent 和工具执行状态更容易在转录中定位。
 - **发送与交互体验**：输入草稿在 Host 接受后才清除；Compact 期间可以正常排队。完善全屏任务、历史、图片、设置和 Question 面板的鼠标点击、滚轮及返回操作。
 - **Direct/Daemon 功能一致性**：改进 Remote 端的 Provider/账号信息、授权状态、Web 设置、Host 命令补全、Session 恢复以及不同工作目录下的操作体验。

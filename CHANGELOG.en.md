@@ -9,8 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Daemon mode (Linux/macOS).** Direct remains the default. An independent Host keeps Agent work alive when a TUI disconnects; multiple TUIs, the official Web frontend and local ACP clients can connect to the same Host and view the same Session.
-- **Daemon and frontend controls.** Profile-scoped `daemon status/start/stop/restart/logs`, with optional Linux systemd user-service or macOS LaunchAgent installation. Headless `web status/enable/disable/url/open` manages the running Host; `/acp` controls an optional local ACP listener for compatible clients.
+#### Daemon mode (major 0.5.7 feature, Linux/macOS)
+
+- **Independent Host, detachable TUI.** Direct remains the default. Daemon runs the Host independently so disconnecting a terminal does not end ongoing Agent work.
+- **Shared Sessions across clients.** Multiple TUIs, the official Web frontend and local ACP clients can connect to one Host under the same Profile and access the same Agent Session.
+- **How to enable it.** For a one-time Daemon launch, run:
+
+  ```sh
+  DSH_PI_TUI_BACKEND=daemon dsh --profile pi-tui
+  ```
+
+  Or choose `Daemon` in `/settings → General → Backend` and save; it takes effect on the next launch. The environment variable overrides only the current launch.
+- **Host management.** Use `dsh --profile pi-tui daemon status|start|stop|restart|logs` to inspect and manage the Host. Optional `daemon install|uninstall` manages a Linux systemd user service or macOS LaunchAgent; a system service is not required.
+- **Web and ACP access.** `dsh --profile pi-tui web status|enable|disable|url|open` controls the running official Web frontend without starting a TUI. `/acp` enables or disables the optional local ACP v1 listener for compatible clients.
+- **Exit and updates.** In Daemon mode, `/exit` and `/quit` detach the current Client by default, with keep-working or stop choices when work is active. Use `daemon stop` to stop the Host; after a TUI update, `daemon restart` adopts the new Host build.
+
+#### Other additions
 - **Agent Team mode.** `/model` now displays an independent Agent Team toggle alongside separate model and Reasoning Effort controls, with confirmation before disabling a Team with recorded activity.
 - **Work / Team Task Center.** `/tasks` gains Work and Team pages. Work shows current tasks and activity; the Root Session's Team page shows shared Team tasks and members. Each page supports navigation and search, with a type filter in Work. The Team page is read-only.
 - **Clearer Subagent and Job lists.** Tracked Subagent trees expand by default at every level and can still be collapsed manually. Active Jobs remain in view while completed history stays behind a Show/Hide action (`j` in the fullscreen Task Center, `Alt+J` in the TSP Work Hub).
@@ -23,7 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Exit behavior matches Daemon semantics.** `/exit` and `/quit` disconnect the current Daemon Client by default instead of stopping the Host. Active work prompts for a clear keep-working or stop choice; busy `Ctrl+C` cancels the current work.
+- **Cancellation.** Busy `Ctrl+C` cancels the current work instead of exiting unexpectedly.
 - **Plan, Goal and task feedback.** Plan Review can open the relevant plan content before deciding; Goal Dock adapts to terminal width; Task, Subagent and tool status is easier to locate in the transcript.
 - **Submission and interaction.** Drafts clear only after the Host accepts them, and input can be queued during Compact. Fullscreen Tasks, History, Images, Settings and Questions have more complete mouse, wheel and back-navigation controls.
 - **Direct/Daemon parity.** Better Remote Provider and account status, approvals, Web settings, Host command completion, Session resume and working-directory behavior.
