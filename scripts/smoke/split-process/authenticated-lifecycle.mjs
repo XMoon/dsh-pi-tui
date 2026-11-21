@@ -1275,7 +1275,11 @@ export async function runAuthenticatedLifecycle(context) {
       restoreFile(registryPath, registrySaved)
       restoreFile(launchPath, launchSaved)
     }
-    const protocolIncompatibleRegistry = { ...registry, protocol: 'dsh-pi-tui/local/2' }
+    // `dsh-pi-tui/local/1` is the retired protocol baseline; the current
+    // product protocol is `dsh-pi-tui/local/2`, so this pair is genuinely
+    // incompatible (using local/2 here made the negative wait for a refusal
+    // that can no longer happen).
+    const protocolIncompatibleRegistry = { ...registry, protocol: 'dsh-pi-tui/local/1' }
     writeRawPrivate(registryPath, protocolIncompatibleRegistry)
     writeRawPrivate(launchPath, launch)
     const protocolIncompatibleRegistryBytes = readFileSync(registryPath)

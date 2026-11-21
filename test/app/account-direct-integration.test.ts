@@ -45,17 +45,23 @@ interface PlatformFixture {
   readonly origin: string
   readonly state: { readonly value: string | undefined }
   readonly requests: string[]
+  /** `x-client-version` per request path: the official Host header assembly
+   * must forward the Client's AccountClientMetadata.version unchanged. */
+  readonly clientVersions: { readonly path: string; readonly version: string | undefined }[]
 }
 
 async function startPlatform(): Promise<PlatformFixture> {
   const state: { value: string | undefined } = { value: undefined }
   const requests: string[] = []
+  const clientVersions: { path: string; version: string | undefined }[] = []
   const server = createServer((request, response) => {
     let body = ''
     request.on('data', chunk => { body += String(chunk) })
     request.on('end', () => {
       const url = new URL(request.url ?? '/', 'http://127.0.0.1')
       requests.push(`${request.method ?? 'GET'} ${url.pathname}`)
+      const headerValue = request.headers['x-client-version']
+      clientVersions.push({ path: url.pathname, version: Array.isArray(headerValue) ? headerValue[0] : headerValue })
       const port = (server.address() as AddressInfo).port
       const origin = `http://127.0.0.1:${port}`
       if (request.method === 'POST' && url.pathname === '/auth-api/v0/dsh/auth_init') {
@@ -108,7 +114,7 @@ async function startPlatform(): Promise<PlatformFixture> {
   })
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
   const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
-  return { server, origin, state, requests }
+  return { server, origin, state, requests, clientVersions }
 }
 
 async function waitFor<T>(probe: () => Promise<T | undefined>, timeoutMs = 3000): Promise<T> {
@@ -156,7 +162,7 @@ test('REAL DeepSeekAccount + official WebServer callback: state, PKCE, grant, pr
     assert.deepEqual(resolveLoginDestination('deepseek-account', [], targets), { kind: 'account', view: 'page' })
     assert.equal(genericAuthorizationTargets(targets).length, 0, 'the account flow is never offered as a provider-native sign-in')
     assert.equal(adapter.getCallbackOrigin(), callbackOrigin)
-    const metadata = { version: '0.5.3', locale: 'en-US', timezoneOffsetSeconds: 0 }
+    const metadata = { version: '0.2.2-rc.5', locale: 'en-US', timezoneOffsetSeconds: 0 }
     const initial = await adapter.getState()
     assert.equal(initial.view.status, 'signed-out')
     assert.equal(adapter.isObservationCurrent(initial.lease), true)
@@ -243,6 +249,23 @@ test('REAL DeepSeekAccount + official WebServer callback: state, PKCE, grant, pr
     assert.equal(cancelled.view.attempt?.phase, 'cancelled')
     assert.notEqual(firstAttempt.view.attempt?.id, undefined)
     assert.notEqual(secondAttempt.view.attempt?.id, undefined)
+
+    // The OFFICIAL Host Account service assembled the Platform request headers
+    // from the Client metadata it received: every Platform request this case
+    // really exercised carried the installed DSH version, never the TUI one.
+    // (The packed smoke owns the four-endpoint coverage.)
+    const exercised = platform.clientVersions.filter(entry =>
+      entry.path.startsWith('/auth-api/') || entry.path.startsWith('/api/'))
+    assert.ok(exercised.length >= 2,
+      `the official Host must have issued metadata-bearing Platform requests; saw ${JSON.stringify(platform.clientVersions)}`)
+    for (const entry of exercised) {
+      assert.equal(entry.version, metadata.version,
+        `the official Host must forward x-client-version=${metadata.version} on ${entry.path}; saw ${JSON.stringify(platform.clientVersions)}`)
+    }
+    assert.ok(exercised.some(entry => entry.path === '/auth-api/v0/dsh/auth_init'),
+      'the browser sign-in must reach the official Platform auth_init')
+    assert.ok(exercised.some(entry => entry.path === '/auth-api/v0/users/logout'),
+      'sign-out must reach the official Platform logout')
 
     // The webserver listener remains alive after sign-out and page closure.
     const after = await fetch(`${callbackOrigin}/oauth/callback?code=x&state=y`)

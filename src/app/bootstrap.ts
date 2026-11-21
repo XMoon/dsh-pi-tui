@@ -175,7 +175,7 @@ import { subagentJobTranscriptId, taskRowSelectionDisposition, subagentJobViewHi
 import { queueTextOf } from '../app/surface/pending-presentation.ts'
 import { HostKeybindingManager } from '../tui/keybindings/manager.ts'
 import { parseUserKeybindings } from '../tui/keybindings/config.ts'
-import { bundleVersion, packageVersion } from '../client/launcher/version.ts'
+import { bundleVersion } from '../client/launcher/version.ts'
 import { resumeCommand } from '../client/launcher/profile.ts'
 import { hostRunningProfile, type ProfileContextReadLike } from './bootstrap/profile.ts'
 
@@ -1687,16 +1687,17 @@ export function applyRunnerWithRuntime(
     diag.info('boot', {
       pid: process.pid,
       dsh: dshVersion() ?? 'unknown',
-      bundle: packageVersion(),
+      bundle: bundleVersion(),
       cwd: process.cwd(),
       session: startupResumeSessionId ?? (sessionLaunch === undefined ? '(deferred)' : `(launch:${sessionLaunch.kind})`),
       preset: launchPreset ?? 'default',
-      // Host capability check (plan stage K): the services the TUI surface
-      // consumes. Each one degrades locally when absent (presets → default
-      // composition, commands → plain
-      // messages, shell → spawn fallback), so this line is diagnostic, not
-      // a mount gate — the TUI never fails to mount without explanation.
-      services: [
+      // The LOCAL Cordis services this OS process actually observes. Each one
+      // degrades locally when absent (presets → default composition, commands
+      // → plain messages, shell → spawn fallback), so this line is diagnostic,
+      // not a mount gate — the TUI never fails to mount without explanation.
+      // This is NOT a roster of Remote Host capabilities: a Split Client's own
+      // Context sees only its Client-local domains.
+      localCordisServices: [
         'sessionPersistence', 'agents', 'commands', 'tools', 'shell', 'llm',
         'settings', 'skills', 'userQuestions', 'approval', 'permissionPresets',
       ].filter(name => ctx.get(name as never) !== undefined).join(','),

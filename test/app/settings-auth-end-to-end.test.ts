@@ -12,7 +12,10 @@
  */
 
 import assert from 'node:assert/strict'
-import { afterEach, test } from 'node:test'
+import { after, afterEach, test } from 'node:test'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
@@ -23,7 +26,9 @@ import { TuiApp, type OwnedRunner, type TuiAppEvents } from '../../src/tui-app.t
 import type { AccountObservation, AccountObservationLease, AccountView, AuthorizationFlowTarget, CredentialProviderOption } from '../../src/runtime/config-port.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { waitForFrame } from '../support/frame-wait.ts'
+import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import { bundleVersion } from '../../src/client/launcher/version.ts'
 
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
@@ -31,6 +36,22 @@ afterEach(() => {
     startedApps.delete(app)
     try { if (!app.isDisposed()) app.dispose() } catch {}
   }
+})
+
+// This suite drives a REAL installed-Client Account page. Its default Client
+// identity is a Split-surface install anchor with an explicit DSH version, so
+// the production Account workflow has a provable version to report; the
+// dedicated identity test below overrides it with Direct/Split fixtures.
+const TEST_DSH_ANCHOR = fileURLToPath(new URL('../fixtures/dsh-runtime-identity/package.json', import.meta.url))
+const previousTestDshMode = process.env.SPLIT_PROCESS_CLIENT_MODE
+const previousTestDshAnchor = process.env.SPLIT_PROCESS_DSH_ANCHOR
+process.env.SPLIT_PROCESS_CLIENT_MODE = 'surface'
+process.env.SPLIT_PROCESS_DSH_ANCHOR = TEST_DSH_ANCHOR
+after(() => {
+  if (previousTestDshMode === undefined) delete process.env.SPLIT_PROCESS_CLIENT_MODE
+  else process.env.SPLIT_PROCESS_CLIENT_MODE = previousTestDshMode
+  if (previousTestDshAnchor === undefined) delete process.env.SPLIT_PROCESS_DSH_ANCHOR
+  else process.env.SPLIT_PROCESS_DSH_ANCHOR = previousTestDshAnchor
 })
 
 const OPTIONS: readonly CredentialProviderOption[] = [
@@ -70,6 +91,9 @@ interface Harness {
   readonly setRecordRows: (rows: readonly { key: string; label: string; kind: 'grant' }[]) => void
   readonly view: () => string
   readonly rows: () => string[]
+  /** Every metadata-bearing Account request and the Client DSH version it
+   * carried at the semantic-port boundary. */
+  readonly accountMetadata: readonly { readonly method: string; readonly version: string }[]
   /** The exact secrets the UI handed to the official store (fixture-only). */
   readonly writtenSecrets: readonly { ref: string; secret: string }[]
   /** Seed the fake official store's configured state for one reference. */
@@ -106,6 +130,7 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
     return { view, lease }
   }
   const calls: string[] = []
+  const accountMetadata: { method: string; version: string }[] = []
   /** The references the fake official store really reports as configured. */
   const configuredRefs = new Set(['DEEPSEEK_API_KEY', 'ACME_API_KEY', 'ANTHROPIC_API_KEY'])
   /** The exact secret the UI handed to setReference (fixture-only; never painted). */
@@ -311,10 +336,17 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
             currentAccountLeases.delete(lease)
           }
         },
-        getProfile: async (_lease: AccountObservationLease) => null,
-        getBalance: async (_lease: AccountObservationLease) => null,
+        getProfile: async (client: { version: string }, _lease: AccountObservationLease) => {
+          accountMetadata.push({ method: 'getProfile', version: client.version })
+          return null
+        },
+        getBalance: async (client: { version: string }, _lease: AccountObservationLease) => {
+          accountMetadata.push({ method: 'getBalance', version: client.version })
+          return null
+        },
         getCallbackOrigin: () => 'http://127.0.0.1:43121',
-        startSignIn: async (_client: unknown, lease: AccountObservationLease) => {
+        startSignIn: async (client: { version: string }, lease: AccountObservationLease) => {
+          accountMetadata.push({ method: 'startSignIn', version: client.version })
           calls.push('startSignIn')
           const gate = signInGate
           signInGate = undefined
@@ -322,7 +354,8 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
           return accountObservation(accountState.view, lease)
         },
         cancelSignIn: async (_id: string, lease: AccountObservationLease) => accountObservation(accountState.view, lease),
-        signOut: async (_client: unknown, lease: AccountObservationLease) => {
+        signOut: async (client: { version: string }, lease: AccountObservationLease) => {
+          accountMetadata.push({ method: 'signOut', version: client.version })
           calls.push('signOut')
           return accountObservation(accountState.view, lease)
         },
@@ -364,6 +397,7 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
       return () => { releaseSetReference?.() }
     },
     rows,
+    accountMetadata,
     writtenSecrets,
     setConfigured: (ref: string, configured: boolean) => {
       if (configured) configuredRefs.add(ref)
@@ -990,6 +1024,57 @@ test('a pending Host mutation owns the page: the rail click cannot take the keyb
     for (let index = 0; index < 20; index += 1) await new Promise<void>(resolve => setImmediate(resolve))
     h.close()
   }
+})
+
+test('the real Settings Account factory injects the installed DSH identity into Account metadata (Direct and Split)', async (t) => {
+  const life = testLifecycle(t)
+  const previousMode = process.env.SPLIT_PROCESS_CLIENT_MODE
+  const previousAnchor = process.env.SPLIT_PROCESS_DSH_ANCHOR
+  const previousArgv = process.argv[1]
+  life.defer(() => {
+    if (previousMode === undefined) delete process.env.SPLIT_PROCESS_CLIENT_MODE
+    else process.env.SPLIT_PROCESS_CLIENT_MODE = previousMode
+    if (previousAnchor === undefined) delete process.env.SPLIT_PROCESS_DSH_ANCHOR
+    else process.env.SPLIT_PROCESS_DSH_ANCHOR = previousAnchor
+    process.argv[1] = previousArgv
+  })
+  const exercise = async (expectedVersion: string): Promise<void> => {
+    const h = open()
+    await h.vt.waitForRender()
+    ;(h as unknown as { invoke(line: string): unknown }).invoke('/login deepseek-account')
+    await waitForFrame(h.view, frame => /Settings · Account/u.test(frame)
+      && /Signed out \/ no stored credential/u.test(frame) && /Sign in/u.test(frame),
+    () => h.vt.waitForRender(), 'the Account page must settle on its signed-out Host snapshot')
+    await key(h, '\r')
+    await waitForCall(h, call => call === 'startSignIn', `Account sign-in (${expectedVersion})`)
+    assert.deepEqual(h.accountMetadata.at(-1), { method: 'startSignIn', version: expectedVersion },
+      'the semantic Account port receives the installed DSH version')
+    h.close()
+  }
+
+  // Direct launch identity: the DSH CLI manifest through argv.
+  const directRoot = life.tempDir('settings-account-dsh-direct-')
+  const directDsh = join(directRoot, 'node_modules', '@deepseek-ai', 'dsh')
+  mkdirSync(join(directDsh, 'bin'), { recursive: true })
+  writeFileSync(join(directDsh, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.2-direct-b' }))
+  const directBin = join(directDsh, 'bin', 'dsh')
+  writeFileSync(directBin, '')
+  delete process.env.SPLIT_PROCESS_CLIENT_MODE
+  delete process.env.SPLIT_PROCESS_DSH_ANCHOR
+  process.argv[1] = directBin
+  assert.notEqual('0.2.2-direct-b', bundleVersion(), 'the DSH value deliberately differs from the TUI bundle version')
+  await exercise('0.2.2-direct-b')
+
+  // Split surface launch identity: the official install anchor; argv stays at
+  // the test runner and is never a fallback for this process.
+  const splitRoot = life.tempDir('settings-account-dsh-split-')
+  const anchor = join(splitRoot, 'package.json')
+  writeFileSync(anchor, JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.2-split-c' }))
+  process.env.SPLIT_PROCESS_CLIENT_MODE = 'surface'
+  process.env.SPLIT_PROCESS_DSH_ANCHOR = anchor
+  process.argv[1] = new URL(import.meta.url).pathname
+  assert.notEqual('0.2.2-split-c', bundleVersion(), 'the DSH value deliberately differs from the TUI bundle version')
+  await exercise('0.2.2-split-c')
 })
 
 test('a pending Account operation keeps the keyboard: the painted Back action does not leave the page', async () => {

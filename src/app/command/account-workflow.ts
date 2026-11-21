@@ -32,10 +32,18 @@ export type AccountQueryOutcome<T> =
   | { readonly status: 'signed-out' }
   | { readonly status: 'superseded' }
 
+/** The fixed, safe refusal shown when this Client cannot prove its installed
+ * DSH runtime version. Account metadata must never be synthesized from the
+ * TUI bundle version or a dev pin, so no Account request may be dispatched. */
+export const ACCOUNT_DSH_VERSION_UNAVAILABLE_REASON = 'The installed DSH version is unavailable; Account requests are disabled.'
+
 /** The page-facing source. All methods are intent-level; the Host objects and
  * DTO construction stay in the workflow. */
 export interface AccountWorkspaceSource {
   available(): boolean
+  /** A source-specific unavailable reason when it is known to be more precise
+   * than the Host Account service being absent (Settings-internal only). */
+  unavailableReason?(): string | undefined
   callbackOrigin(): string | undefined
   isObservationCurrent(lease: AccountObservationLease): boolean
   watch(signal: AbortSignal): AsyncIterable<AccountWatchEvent>
@@ -57,8 +65,8 @@ export interface AccountWorkspaceSource {
  * effects and the Client identity source. */
 export interface AccountWorkflowDeps {
   readonly account: AccountConfig
-  /** The TUI package version reported to Platform for this client. */
-  readonly version: string
+  /** The installed DSH runtime version carried in Platform `x-client-version`. */
+  readonly version: string | undefined
   readonly openUrl: (url: string) => void
   readonly copy: (text: string) => void
   /** Run one page-owned async operation through the app's ownership entry. */
@@ -86,7 +94,27 @@ export class AccountWorkflow implements AccountWorkspaceSource {
   }
 
   available(): boolean {
-    return this.deps.account.available()
+    return this.deps.version !== undefined
+      && this.deps.version !== ''
+      && this.deps.account.available()
+  }
+
+  unavailableReason(): string | undefined {
+    return this.deps.version === undefined || this.deps.version === ''
+      ? ACCOUNT_DSH_VERSION_UNAVAILABLE_REASON
+      : undefined
+  }
+
+  /** The ONE request-metadata guard shared by every metadata-bearing Account
+   * RPC. The installed DSH version is mandatory; when it is unavailable the
+   * request throws before any Account Port call and never fabricates a
+   * version from the TUI bundle or a manifest pin. */
+  private metadata(): AccountClientMetadata {
+    const version = this.deps.version
+    if (version === undefined || version === '') {
+      throw new Error(ACCOUNT_DSH_VERSION_UNAVAILABLE_REASON)
+    }
+    return accountClientMetadata(version)
   }
 
   callbackOrigin(): string | undefined {
@@ -104,7 +132,7 @@ export class AccountWorkflow implements AccountWorkspaceSource {
   async getProfile(lease: AccountObservationLease): Promise<AccountQueryOutcome<AccountProfile>> {
     let outcome: AccountProfileOutcome
     try {
-      outcome = await this.deps.account.getProfile(accountClientMetadata(this.deps.version), lease)
+      outcome = await this.deps.account.getProfile(this.metadata(), lease)
     } catch (error) {
       if (error instanceof SupersededReadError) return { status: 'superseded' }
       return { status: 'failed', reason: safeErrorMessage(error) }
@@ -117,7 +145,7 @@ export class AccountWorkflow implements AccountWorkspaceSource {
   async getBalance(lease: AccountObservationLease): Promise<AccountQueryOutcome<{ readonly value: readonly AccountWallet[]; readonly bonusWallets: readonly AccountWallet[] }>> {
     let outcome: AccountBalanceOutcome
     try {
-      outcome = await this.deps.account.getBalance(accountClientMetadata(this.deps.version), lease)
+      outcome = await this.deps.account.getBalance(this.metadata(), lease)
     } catch (error) {
       if (error instanceof SupersededReadError) return { status: 'superseded' }
       return { status: 'failed', reason: safeErrorMessage(error) }
@@ -128,7 +156,7 @@ export class AccountWorkflow implements AccountWorkspaceSource {
   }
 
   startSignIn(lease: AccountObservationLease): Promise<AccountObservation> {
-    return this.deps.account.startSignIn(accountClientMetadata(this.deps.version), lease)
+    return this.deps.account.startSignIn(this.metadata(), lease)
   }
 
   cancelSignIn(id: string, lease: AccountObservationLease): Promise<AccountObservation> {
@@ -136,7 +164,7 @@ export class AccountWorkflow implements AccountWorkspaceSource {
   }
 
   signOut(lease: AccountObservationLease): Promise<AccountObservation> {
-    return this.deps.account.signOut(accountClientMetadata(this.deps.version), lease)
+    return this.deps.account.signOut(this.metadata(), lease)
   }
 
   hasRunningAccountTasks(lease: AccountObservationLease): Promise<boolean> {

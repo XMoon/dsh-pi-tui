@@ -18,7 +18,7 @@ import { currentPalette, setTheme } from '../../src/tui/theme/runtime.ts'
 import { darkColors, lightColors } from '../../src/domain/display/theme.ts'
 import { AccountWorkspacePage, type AccountInitialView } from '../../src/tui/panels/account-workspace-page.ts'
 import type { AccountWorkspaceSource, AccountQueryOutcome } from '../../src/app/command/account-workflow.ts'
-import { accountClientMetadata, AccountWorkflow } from '../../src/app/command/account-workflow.ts'
+import { ACCOUNT_DSH_VERSION_UNAVAILABLE_REASON, accountClientMetadata, AccountWorkflow } from '../../src/app/command/account-workflow.ts'
 import type { AccountObservation, AccountObservationLease, AccountProfile, AccountView, AccountWallet, AccountWatchEvent } from '../../src/runtime/config-port.ts'
 import { SupersededReadError } from '../../src/runtime/read-error.ts'
 
@@ -180,10 +180,94 @@ function open(initial: AccountInitialView = { view: 'page' }): { page: AccountWo
 }
 
 test('the account metadata samples the live timezone offset and the UI locale', () => {
-  const metadata = accountClientMetadata('0.5.3')
-  assert.equal(metadata.version, '0.5.3')
+  const metadata = accountClientMetadata('0.2.2-rc.5')
+  assert.equal(metadata.version, '0.2.2-rc.5')
   assert.equal(metadata.timezoneOffsetSeconds, -new Date().getTimezoneOffset() * 60)
   assert.equal(metadata.locale.length > 0, true)
+})
+
+test('every metadata-bearing Account request carries the installed DSH version, and no request dispatches without it', async () => {
+  const lease = {} as AccountObservationLease
+  const observation: AccountObservation = { view: signedOut(), lease }
+  const metadataCalls: { readonly method: string; readonly version: string; readonly locale: string; readonly offset: number }[] = []
+  const account = {
+    available: () => true,
+    isObservationCurrent: (_lease: AccountObservationLease) => true,
+    getState: async () => observation,
+    watch: async function* (_signal: AbortSignal) { yield { kind: 'current' as const, observation } },
+    getCallbackOrigin: () => 'http://127.0.0.1:43121',
+    getProfile: async (client: { version: string; locale: string; timezoneOffsetSeconds: number }, _lease: AccountObservationLease) => {
+      metadataCalls.push({ method: 'getProfile', version: client.version, locale: client.locale, offset: client.timezoneOffsetSeconds })
+      return { status: 'ready' as const, value: { id: 'acct-1', name: 'Moon', contact: null } }
+    },
+    getBalance: async (client: { version: string; locale: string; timezoneOffsetSeconds: number }, _lease: AccountObservationLease) => {
+      metadataCalls.push({ method: 'getBalance', version: client.version, locale: client.locale, offset: client.timezoneOffsetSeconds })
+      return { status: 'ready' as const, value: [], bonusWallets: [] }
+    },
+    startSignIn: async (client: { version: string }, _lease: AccountObservationLease) => {
+      metadataCalls.push({ method: 'startSignIn', version: client.version, locale: '', offset: 0 })
+      return observation
+    },
+    cancelSignIn: async (_id: string, _lease: AccountObservationLease) => observation,
+    signOut: async (client: { version: string }, _lease: AccountObservationLease) => {
+      metadataCalls.push({ method: 'signOut', version: client.version, locale: '', offset: 0 })
+      return observation
+    },
+    hasRunningAccountTasks: async (_lease: AccountObservationLease) => false,
+  }
+  const deps = {
+    account,
+    version: '0.2.2-rc.5' as string | undefined,
+    openUrl: () => {},
+    copy: () => {},
+    run: (_label: string, task: () => Promise<void>) => { void task() },
+    diag: { warn: () => {} },
+  }
+  const workflow = new AccountWorkflow(deps)
+  assert.equal(workflow.available(), true)
+  assert.equal(workflow.unavailableReason(), undefined)
+  await workflow.getProfile(lease)
+  await workflow.getBalance(lease)
+  await workflow.startSignIn(lease)
+  await workflow.signOut(lease)
+  assert.deepEqual(metadataCalls.map(call => [call.method, call.version]), [
+    ['getProfile', '0.2.2-rc.5'],
+    ['getBalance', '0.2.2-rc.5'],
+    ['startSignIn', '0.2.2-rc.5'],
+    ['signOut', '0.2.2-rc.5'],
+  ])
+  assert.equal(metadataCalls[0]!.locale.length > 0, true, 'locale is sampled per request')
+  assert.equal(metadataCalls[0]!.offset, -new Date().getTimezoneOffset() * 60)
+
+  // The negative control: without a proven installed DSH version the workflow
+  // is unavailable, every read/mutation refuses BEFORE the Account port, and
+  // the page states the Client runtime gap instead of blaming the Host.
+  const noVersionCalls: string[] = []
+  const noVersionAccount = {
+    ...account,
+    getProfile: async () => { noVersionCalls.push('getProfile'); return null },
+    getBalance: async () => { noVersionCalls.push('getBalance'); return null },
+    startSignIn: async () => { noVersionCalls.push('startSignIn'); return observation },
+    signOut: async () => { noVersionCalls.push('signOut'); return observation },
+  }
+  const noVersion = new AccountWorkflow({ ...deps, account: noVersionAccount, version: undefined })
+  assert.equal(noVersion.available(), false)
+  assert.equal(noVersion.unavailableReason(), ACCOUNT_DSH_VERSION_UNAVAILABLE_REASON)
+  assert.deepEqual(await noVersion.getProfile(lease),
+    { status: 'failed', reason: ACCOUNT_DSH_VERSION_UNAVAILABLE_REASON })
+  assert.deepEqual(await noVersion.getBalance(lease),
+    { status: 'failed', reason: ACCOUNT_DSH_VERSION_UNAVAILABLE_REASON })
+  assert.throws(() => noVersion.startSignIn(lease), new RegExp(ACCOUNT_DSH_VERSION_UNAVAILABLE_REASON, 'u'))
+  assert.throws(() => noVersion.signOut(lease), new RegExp(ACCOUNT_DSH_VERSION_UNAVAILABLE_REASON, 'u'))
+  assert.deepEqual(noVersionCalls, [], 'zero Account Port dispatches without the installed DSH version')
+
+  const page = new AccountWorkspacePage(noVersion, () => {}, { view: 'page' })
+  page.setBodyHeight(26)
+  await flush()
+  assert.match(text(page), /installed DSH version is unavailable; Account requests are disabled/u)
+  assert.doesNotMatch(text(page), /Host Account service is unavailable/u,
+    'a missing Client runtime identity is never reported as a missing Host service')
+  page.dispose()
 })
 
 test('superseded Host profile and balance reads do not become current UI failures', async () => {

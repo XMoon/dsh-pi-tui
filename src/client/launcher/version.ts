@@ -1,41 +1,66 @@
 /**
- * The Client-local launcher/version reads: the installed dsh (DeepSeek
- * Harness CLI) version, resolved from the launcher's real path — `process.argv[1]`
- * is the `dsh` bin, whose realpath walks up to the `@deepseek-ai/dsh/package.json`
- * that owns it — plus the bundle's OWN version reads (`bundleVersion`,
- * `packageVersion`). The header and the welcome card show the harness the TUI
- * runs on, not this bundle's own patch level; `dshVersion` is undefined when
- * the launcher path is unreadable. The combined welcome-card display line lives
- * in the application presentation owner (`app/surface/version-display.ts`).
+ * The Client-local launcher/version reads: the installed DSH (DeepSeek
+ * Harness) runtime version and the bundle's OWN version. The header, welcome
+ * card, status footer and About page show the harness this Client runs on, not
+ * this bundle's own patch level; `dshVersion` is undefined when the installed
+ * runtime identity is unreadable.
  *
- * This is Client-local platform IO: it reads the local process argv and the
- * locally installed package manifests. The zero-dependency startup island keeps
- * its own private comparator and never imports this module.
+ * Direct: `process.argv[1]` is the `dsh` bin, whose realpath walks up to the
+ * `@deepseek-ai/dsh/package.json` that owns it. Split surface Client: argv[1]
+ * is `dist/local-client.mjs`, so the version comes ONLY from the official
+ * Profile launcher's `SPLIT_PROCESS_DSH_ANCHOR` manifest — never from argv or
+ * this bundle's manifest.
+ *
+ * This is Client-local platform IO: it reads the local process environment and
+ * installed package manifests. The zero-dependency startup island keeps its
+ * own private comparator and never imports this module.
  * @module @xmoon76/dsh-pi-tui/client/launcher/version
  */
 
 import { readFileSync, realpathSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
-/** @returns the installed dsh version string, or undefined. */
+/** Read one JSON object manifest; an unreadable path, malformed JSON or a
+ * non-object root is unavailable. */
+function readManifestObject(path: string): Record<string, unknown> | undefined {
+  try {
+    const manifest: unknown = JSON.parse(readFileSync(realpathSync(path), 'utf8'))
+    if (manifest === null || typeof manifest !== 'object' || Array.isArray(manifest)) return undefined
+    return manifest as Record<string, unknown>
+  } catch {
+    return undefined
+  }
+}
+
+/** @returns the installed dsh runtime version string, or undefined. */
 export function dshVersion(): string | undefined {
+  // The real Split surface Client is the ONLY branch whose argv[1] is not a
+  // DSH launcher. Its ONE trusted source is the install anchor the official
+  // Profile launcher placed in this process's environment; no argv or bundle
+  // fallback is allowed when that anchor is absent or invalid.
+  if (process.env.SPLIT_PROCESS_CLIENT_MODE === 'surface') {
+    const anchor = process.env.SPLIT_PROCESS_DSH_ANCHOR
+    if (anchor === undefined || anchor === '') return undefined
+    const manifest = readManifestObject(anchor)
+    return manifest?.name === '@deepseek-ai/dsh'
+      && typeof manifest.version === 'string'
+      && manifest.version !== ''
+      ? manifest.version
+      : undefined
+  }
   const bin = process.argv[1]
   if (bin === undefined) return undefined
   try {
     let dir = dirname(realpathSync(bin))
     for (let depth = 0; depth < 8; depth += 1) {
-      try {
-        const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as { name?: string; version?: string }
-        if (pkg.name === '@deepseek-ai/dsh' && typeof pkg.version === 'string') return pkg.version
-      } catch {
-        // Not a manifest directory; keep walking up.
-      }
+      const pkg = readManifestObject(join(dir, 'package.json'))
+      if (pkg?.name === '@deepseek-ai/dsh' && typeof pkg.version === 'string') return pkg.version
       const parent = dirname(dir)
       if (parent === dir) return undefined
       dir = parent
     }
   } catch {
-    // Unreadable launcher path: fall back to the bundle version.
+    // Unreadable launcher path: unavailable.
   }
   return undefined
 }
@@ -51,12 +76,8 @@ export function dshVersion(): string | undefined {
 function ownBundleVersion(): string | undefined {
   let dir = import.meta.dirname
   for (let depth = 0; depth < 8; depth += 1) {
-    try {
-      const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as { name?: string; version?: string }
-      if (pkg.name === '@xmoon76/dsh-pi-tui' && typeof pkg.version === 'string') return pkg.version
-    } catch {
-      // Not a manifest directory; keep walking up.
-    }
+    const pkg = readManifestObject(join(dir, 'package.json'))
+    if (pkg?.name === '@xmoon76/dsh-pi-tui' && typeof pkg.version === 'string') return pkg.version
     const parent = dirname(dir)
     if (parent === dir) return undefined
     dir = parent
@@ -65,24 +86,10 @@ function ownBundleVersion(): string | undefined {
 }
 
 /**
- * The bundle's own version, read from package.json at runtime so the welcome
- * card never drifts from the shipped version. The DISPLAYED version prefers
- * the installed dsh version (`dshVersion` — shared with the header badge),
- * falling back to this one.
- * @returns the version string, or a fallback when the file is unreadable.
- */
-export function packageVersion(): string {
-  return dshVersion() ?? ownBundleVersion() ?? '0.0.0'
-}
-
-/**
  * The BUNDLE's OWN version (`@xmoon76/dsh-pi-tui`'s package.json),
- * INDEPENDENT of the installed dsh version. The status snapshot's
- * host.tuiVersion and the footer's `version(format=tui)` item must report
- * the TUI's own patch level — the welcome-card helper above deliberately
- * prefers the dsh version for display, so reusing it made `tui` show the
- * harness version (and `both` show the dsh version twice) inside a real
- * dsh installation (the review's P2).
+ * INDEPENDENT of the installed dsh version. This is the ONE TUI bundle version
+ * semantic consumed by the header/welcome card, About, `boot.bundle` and the
+ * extension host's own version.
  * @returns the bundle version string, or a fallback when the file is unreadable.
  */
 export function bundleVersion(): string {

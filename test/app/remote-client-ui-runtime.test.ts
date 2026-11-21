@@ -32,14 +32,17 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { Context, symbols, type Fiber } from '@deepseek-ai/cordis'
 import { PI_TUI_EXTENSIONS_SERVICE } from '../../src/extensions.ts'
 import { TUI_STARTUP_SERVICE, type TuiStartupValues } from '../../src/startup.ts'
 import { createRemoteClientUiRuntime } from '../../src/app/remote/client-ui-runtime.ts'
+import { bundleVersion } from '../../src/client/launcher/version.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 
 interface LedgerView {
-  snapshot(slot: string): { records: Array<{ id: string }> }
+  snapshot(slot: string): { records: Array<{ id: string; value?: unknown }> }
 }
 
 interface LedgeredService {
@@ -122,6 +125,47 @@ test('C. the first-party builtins register on the Client service', async (t) => 
     `the builtin version badge registered on the Client service: ${JSON.stringify(badgeIds)}`)
   assert.ok(dockIds.includes('builtin-todo-summary'),
     `the builtin todo dock item registered on the Client service: ${JSON.stringify(dockIds)}`)
+})
+
+/** The exact painted header text of the builtin version badge. */
+function headerBadgeText(context: Context): string | undefined {
+  const record = serviceLedger(context)?.snapshot('chrome.header.badge').records
+    .find(candidate => candidate.id === 'builtin-version')
+  return (record?.value as { readonly text?: string } | undefined)?.text
+}
+
+test('F. the Client builtins read the injected DSH install anchor and degrade to TUI-only without it', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('remote-client-ui-dsh-anchor-')
+  mkdirSync(root, { recursive: true })
+  const anchor = join(root, 'package.json')
+  writeFileSync(anchor, JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.2-anchor-b' }))
+  const previousMode = process.env.SPLIT_PROCESS_CLIENT_MODE
+  const previousAnchor = process.env.SPLIT_PROCESS_DSH_ANCHOR
+  life.defer(() => {
+    if (previousMode === undefined) delete process.env.SPLIT_PROCESS_CLIENT_MODE
+    else process.env.SPLIT_PROCESS_CLIENT_MODE = previousMode
+    if (previousAnchor === undefined) delete process.env.SPLIT_PROCESS_DSH_ANCHOR
+    else process.env.SPLIT_PROCESS_DSH_ANCHOR = previousAnchor
+  })
+  process.env.SPLIT_PROCESS_CLIENT_MODE = 'surface'
+  process.env.SPLIT_PROCESS_DSH_ANCHOR = anchor
+
+  const withAnchorContext = new Context()
+  life.defer(() => withAnchorContext.fiber.dispose())
+  const withAnchor = await createRemoteClientUiRuntime({ context: withAnchorContext, startup: {} })
+  life.defer(() => withAnchor.dispose().catch(() => {}))
+  assert.equal(headerBadgeText(withAnchorContext),
+    `dsh-0.2.2-anchor-b · tui-v${bundleVersion()}`,
+    'the real Client builtins ledger paints the INJECTED DSH runtime version beside the true TUI version')
+
+  delete process.env.SPLIT_PROCESS_DSH_ANCHOR
+  const noAnchorContext = new Context()
+  life.defer(() => noAnchorContext.fiber.dispose())
+  const noAnchor = await createRemoteClientUiRuntime({ context: noAnchorContext, startup: {} })
+  life.defer(() => noAnchor.dispose().catch(() => {}))
+  assert.equal(headerBadgeText(noAnchorContext), `tui-v${bundleVersion()}`,
+    'without an install anchor the surface Client paints the TUI-only badge and never fabricates a DSH version')
 })
 
 test('D. subtree dispose removes both services exactly and is idempotent', async (t) => {

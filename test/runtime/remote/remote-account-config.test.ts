@@ -206,7 +206,7 @@ function makePort(options: {
   }
 }
 
-const metadata = { version: '0.5.6', locale: 'zh-HK', timezoneOffsetSeconds: 28_800 }
+const metadata = { version: '0.2.2-rc.5', locale: 'zh-HK', timezoneOffsetSeconds: 28_800 }
 
 test('the Remote Account adapter detaches only safe state, profile, and balance facts', async t => {
   const harness = makePort()

@@ -1074,6 +1074,9 @@ export type ConfigReadiness = 'ready' | 'stale' | 'unavailable'
  * derives the Platform request headers from it, so the Client samples it per
  * request (never caches an old timezone offset across a DST change). */
 export interface AccountClientMetadata {
+  /** The installed DSH runtime version; the official Host Account service
+   * maps it to the Platform `x-client-version` header. Never the TUI bundle
+   * version. */
   readonly version: string
   /** Active UI language; the Host reduces it to the Platform wire locale. */
   readonly locale: string
