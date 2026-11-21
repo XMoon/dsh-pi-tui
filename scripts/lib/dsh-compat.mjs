@@ -2,8 +2,7 @@
 /**
  * The shared reader and fallback rule for the DSH/TUI compatibility matrix
  * (`src/dsh-compat-matrix.json`) — the single source also inlined into
- * `src/startup.ts`. Release tooling, the installation-doc gate and the
- * release-notes tests all read the matrix through this module so a new
+ * `src/startup.ts`. Release tooling and the release-notes tests all read the matrix through this module so a new
  * release updates the JSON once instead of every hand-written expectation.
  *
  * @module dsh-compat

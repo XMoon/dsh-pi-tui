@@ -158,8 +158,7 @@ release date `YYYY-MM-DD`:
    promotion path it is usually already reserved in Phase A, so this step is
    a consistency confirmation, not a fresh edit.
 2. Update `src/dsh-compat-matrix.json`, the single source for the DSH/TUI
-   pairing shared by `src/startup.ts`, the release tooling and the
-   installation-doc gate. When the shipped DSH target changes, update `current`
+   pairing shared by `src/startup.ts` and the release tooling. When the shipped DSH target changes, update `current`
    (`since`, `requires`, `upgradeDsh`, `upgradeCommand`, `guidance`) and append
    or adjust the `matrix` row for the new DSH line (`dshFrom`, `tui`, and the
    covered `versions`); a row without `tui` means no released TUI supports that
