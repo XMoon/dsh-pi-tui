@@ -22,7 +22,12 @@ import {
 } from '../../../src/runtime/remote/config-remote.ts'
 import type { RemoteConnectionGeneration } from '../../../src/runtime/remote/session-reader-remote.ts'
 import { extensionConfigRowId } from '../../../src/domain/extension-config/row-id.ts'
-import type { ExtensionConfigRead } from '../../../src/runtime/config-port.ts'
+import type { ExtensionConfigRead, ExtensionConfigsConfig } from '../../../src/runtime/config-port.ts'
+import {
+  commitPersistedSetting,
+  readPersistedSetting,
+  type PersistedSettingRecord,
+} from '../../../src/app/client-extensions/persisted-setting.ts'
 
 const A = '@r8-pr1-fixture/a'
 const B = '@r8-pr1-fixture/b'
@@ -63,12 +68,6 @@ function deletePath(root: Record<string, unknown>, path: readonly string[]): voi
   Reflect.deleteProperty(node, path[path.length - 1]!)
 }
 
-function valueAt(root: unknown, path: readonly string[]): unknown {
-  let node: unknown = root
-  for (const key of path) node = plainRecord(node)?.[key]
-  return node
-}
-
 function merge(base: unknown, user: unknown): unknown {
   const baseRecord = plainRecord(base)
   const userRecord = plainRecord(user)
@@ -89,9 +88,9 @@ function applyOps(descriptor: Descriptor, ops: readonly { op: 'set' | 'unset'; p
     if (op.op === 'set') {
       setPath(user, op.path, op.value)
     } else {
-      const inherited = valueAt(base, op.path)
-      if (inherited === undefined) deletePath(user, op.path)
-      else setPath(user, op.path, inherited)
+      // An official unset removes the USER leaf; the inherited base value
+      // remains visible through `value = merge(base, user)`.
+      deletePath(user, op.path)
     }
   }
   descriptor.user = isDeepStrictEqual(user, base) ? {} : user
@@ -128,6 +127,7 @@ interface AdapterUnderTest {
   read(packageName: string): ExtensionConfigRead
   mutate(packageName: string, ops: readonly { op: 'set' | 'unset'; path: readonly string[]; value?: unknown }[], revision: number, generation: object): Promise<string>
   advanceHostRevision(packageName: string): void
+  readonly config: ExtensionConfigsConfig
 }
 
 function directAdapter(): AdapterUnderTest {
@@ -155,6 +155,7 @@ function directAdapter(): AdapterUnderTest {
       const descriptor = descriptors.find(item => item.ns === extensionConfigRowId(packageName))!
       descriptor.revision = (descriptor.revision ?? 0) + 1
     },
+    config,
   }
 }
 
@@ -206,6 +207,7 @@ function remoteAdapter(): AdapterUnderTest {
       const descriptor = namespaces.find(item => item.ns === extensionConfigRowId(packageName))!
       descriptor.revision = (descriptor.revision ?? 0) + 1
     },
+    config: port.extensionConfigs,
   }
 }
 
@@ -263,4 +265,79 @@ test('Direct and Remote produce the same semantic read/write/conflict results', 
   const directLog = await runSemanticCases(directAdapter())
   const remoteLog = await runSemanticCases(remoteAdapter())
   assert.deepEqual(remoteLog, directLog)
+})
+
+test('persisted-setting adapter writes and resets ONE package USER field through the real Direct ConfigPort', async () => {
+  const host = directAdapter()
+  await host.prime()
+  const recordA: PersistedSettingRecord = {
+    id: 'r8-a-label',
+    owner: '10:fixture-a',
+    registrationToken: 1,
+    mode: 'persisted',
+    currentValue: 'alpha',
+    persisted: {
+      path: ['label'],
+      choices: [
+        { id: 'alpha', op: 'set', value: 'alpha' },
+        { id: 'omega', op: 'set', value: 'omega' },
+        { id: 'inherit', op: 'unset' },
+      ],
+    },
+  }
+  const recordB: PersistedSettingRecord = {
+    id: 'r8-b-limit',
+    owner: '11:fixture-b',
+    registrationToken: 2,
+    mode: 'persisted',
+    currentValue: '7',
+    persisted: {
+      path: ['limit'],
+      choices: [
+        { id: 'seven', op: 'set', value: 7 },
+        { id: 'eleven', op: 'set', value: 11 },
+        { id: 'inherit', op: 'unset' },
+      ],
+    },
+  }
+  const ownerA = { packageName: A, entryId: 'entry-a', registrationToken: 1 }
+  const ownerB = { packageName: B, entryId: 'entry-b', registrationToken: 2 }
+  const openedA = readPersistedSetting(recordA, A, host.config)
+  assert.equal(openedA.mode, 'ready')
+  if (openedA.mode !== 'ready') return
+  assert.equal(openedA.effective, 'alpha')
+  assert.equal(openedA.userFieldPresent, false)
+  const saved = await commitPersistedSetting(recordA, ownerA, 'omega', host.config, openedA.revision, openedA.generation)
+  assert.deepEqual(saved, { outcome: 'verified' })
+  const afterA = readPersistedSetting(recordA, A, host.config)
+  assert.equal(afterA.mode, 'ready')
+  if (afterA.mode !== 'ready') return
+  assert.equal(afterA.effective, 'omega')
+  assert.equal(afterA.userFieldPresent, true)
+  // Writing A never changes B's own USER field or effective value.
+  const afterB = readPersistedSetting(recordB, B, host.config)
+  assert.equal(afterB.mode, 'ready')
+  if (afterB.mode !== 'ready') return
+  assert.equal(afterB.effective, 7)
+  assert.equal(afterB.userFieldPresent, false)
+  // Reset unsets exactly A's leaf and exposes the inherited value again.
+  const reset = await commitPersistedSetting(recordA, ownerA, 'inherit', host.config, afterA.revision, afterA.generation)
+  assert.deepEqual(reset, { outcome: 'verified' })
+  const afterReset = readPersistedSetting(recordA, A, host.config)
+  assert.equal(afterReset.mode, 'ready')
+  if (afterReset.mode !== 'ready') return
+  assert.equal(afterReset.userFieldPresent, false)
+  assert.equal(afterReset.effective, 'alpha')
+  // The stale pre-save revision is a definite conflict, never an overwrite.
+  const stale = await commitPersistedSetting(recordA, ownerA, 'omega', host.config, openedA.revision, openedA.generation)
+  assert.equal(stale.outcome, 'not-saved')
+  assert.match(stale.reason ?? '', /Host Config changed/u)
+  // B can still be written independently.
+  const openedB = readPersistedSetting(recordB, B, host.config)
+  assert.equal(openedB.mode, 'ready')
+  if (openedB.mode !== 'ready') return
+  assert.deepEqual(
+    await commitPersistedSetting(recordB, ownerB, 'eleven', host.config, openedB.revision, openedB.generation),
+    { outcome: 'verified' },
+  )
 })

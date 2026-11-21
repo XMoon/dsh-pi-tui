@@ -987,6 +987,17 @@ export interface TuiCommandRunner {  ctx: Context
      * states + lastError across EVERY registry incl. renderers/editors).
      * Undefined without the extension service. */
     readonly health: (() => readonly import('./extension/public-types.ts').ContributionHealth[]) | undefined
+    /** R8-E PR-4: the live owner→Loader-entry-id projection of THIS Client's
+     * extension service (the persisted-setting admission requires the exact
+     * fiber owner, never an author-supplied package name). */
+    readonly ownerEntryIds?: () => ReadonlyMap<string, string>
+    /** R8-E PR-4: the CURRENT Client's real per-package Loader observations.
+     *  Read-only; never a Host inventory and never another Client's state. */
+    readonly clientObservations?: () => readonly import('./app/client-extensions/mount-owner.ts').ClientExtensionObservation[]
+    /** R8-E PR-4: request the existing mount-owner reconcile against ONE
+     *  fresh official Host Plugin Manager snapshot (after a verified Host
+     *  Config save). Never a second inventory and never a Host write. */
+    readonly refreshClientExtensions?: () => void
   } | undefined
 }
 

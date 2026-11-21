@@ -48,7 +48,7 @@ import { createDirectSettingsFixture } from '../support/direct-settings-fixture.
 import { parseUserKeybindings } from '../../src/tui/keybindings/config.ts'
 import { waitForFrame } from '../support/frame-wait.ts'
 import { themePickerRows } from '../../src/app/surface/theme-selection.ts'
-import type { CredentialProviderOption, TuiSettingsDoc, VisualToolsState, WebStartupPreferenceState, BackendStartupPreferenceState, PublicBackendValue } from '../../src/runtime/config-port.ts'
+import type { CredentialProviderOption, ExtensionConfigsConfig, TuiSettingsDoc, VisualToolsState, WebStartupPreferenceState, BackendStartupPreferenceState, PublicBackendValue } from '../../src/runtime/config-port.ts'
 import { serializeTuiSettingsMutation } from '../../src/runtime/config-port.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -107,6 +107,11 @@ interface HarnessOptions {
    *  drives the production `/settings` handler, or supplies the same instance
    *  the extension service owns. */
   settingsRegistry?: SettingsRegistry
+  /** R8-E PR-4: exact owner→Loader-entry mapping + current Client phases. */
+  ownerEntryIds?: Map<string, string>
+  clientObservations?: readonly { packageName: string; phase: string; entryId?: string; configRevision?: number }[]
+  /** R8-E PR-4: the Host per-package Config authority the persisted rows read. */
+  extensionConfigs?: ExtensionConfigsConfig
   /** The live clipboard strategy; a promise lets a case hold the settlement. */
   copySelection?: (text: string) => Promise<boolean>
   /** Real provider options the Models page reads. Supplying them enables the
@@ -902,7 +907,13 @@ function setup(options: HarnessOptions = {}): Harness {
     // every snapshot; the registry here is the real in-process owner.
     extensions: options.themes === undefined && options.settingsRegistry === undefined
       ? undefined
-      : { themes: options.themes ?? new ThemeRegistry(), settings: options.settingsRegistry ?? new SettingsRegistry() },
+      : {
+          themes: options.themes ?? new ThemeRegistry(),
+          settings: options.settingsRegistry ?? new SettingsRegistry(),
+          ...(options.ownerEntryIds === undefined ? {} : { ownerEntryIds: () => options.ownerEntryIds! }),
+          ...(options.clientObservations === undefined ? {} : { clientObservations: () => options.clientObservations! }),
+          ...(options.extensionConfigs === undefined ? {} : { refreshClientExtensions: () => {} }),
+        },
     createPluginManagerPage: (onYieldNavigation: () => void) => {
       if (options.pluginPage !== true) return undefined
       pluginPages += 1
@@ -911,6 +922,7 @@ function setup(options: HarnessOptions = {}): Harness {
       return page
     },
     config: {
+      ...(options.extensionConfigs === undefined ? {} : { extensionConfigs: options.extensionConfigs }),
       configReadiness: () => readiness,
       visualTools: {
         read: () => visualState,
@@ -10132,6 +10144,118 @@ test('the FR5-B numeric pages stay complete and Exit/Save-reachable across the f
     await settle(h)
     assert.match(h.view(), /Settings · Agent · Agent loop/u, `custom/${iconStyle}: the page chrome stays`)
     assert.match(h.rowsPlain().at(-1) ?? '', /Back \[Esc\]/u)
+    h.dispose()
+  }
+})
+
+test('AltScreen pointer journey edits and resets a persisted extension setting (PR-4)', async () => {
+  const registry = new SettingsRegistry(() => {})
+  const ownerEntryIds = new Map<string, string>()
+  const values = new Map<string, { revision: number; generation: object; effective: Record<string, unknown>; inherited: Record<string, unknown>; user: Record<string, unknown> }>()
+  const mutations: { packageName: string; ops: readonly { op: 'set' | 'unset'; path: readonly string[]; value?: unknown }[] }[] = []
+  const extensionConfig: ExtensionConfigsConfig = {
+    read(packageName) {
+      const value = values.get(packageName)
+      if (value === undefined) return { kind: 'unavailable', reason: 'row not mounted' }
+      return {
+        kind: 'ready',
+        packageName,
+        generation: value.generation,
+        revision: value.revision,
+        effective: structuredClone(value.effective),
+        inherited: structuredClone(value.inherited),
+        user: structuredClone(value.user),
+        userDataPresent: Object.keys(value.user).length > 0,
+      }
+    },
+    async refresh() {},
+    async mutate(packageName, ops, revision) {
+      const value = values.get(packageName)
+      if (value === undefined) return { kind: 'rejected', reason: 'row not mounted' }
+      if (value.revision !== revision) return { kind: 'conflict', reason: 'revision changed' }
+      mutations.push({ packageName, ops })
+      const user = structuredClone(value.user)
+      const op = ops[0]!
+      if (op.op === 'set') user[op.path[0]!] = op.value
+      else delete user[op.path[0]!]
+      value.user = user
+      value.effective = { ...value.inherited, ...user }
+      value.revision += 1
+      return { kind: 'accepted' }
+    },
+  }
+  const h = setup({
+    columns: 100,
+    rows: 40,
+    settingsRegistry: registry,
+    ownerEntryIds,
+    clientObservations: [{ packageName: '@r8-pr1-fixture/a', phase: 'active', entryId: 'entry-a' }],
+    extensionConfigs: extensionConfig,
+  })
+  const handle = registry.register({
+    id: 'r8-a-label',
+    label: 'R8 A label',
+    description: 'Fixture A persisted label',
+    currentValue: 'alpha',
+    persisted: {
+      path: ['label'],
+      choices: [
+        { id: 'alpha', op: 'set', value: 'alpha' },
+        { id: 'omega', label: 'Omega', op: 'set', value: 'omega' },
+        { id: 'inherit', label: 'Use inherited', op: 'unset' },
+      ],
+    },
+  }, 'acme-a')
+  ownerEntryIds.set('acme-a', 'entry-a')
+  values.set('@r8-pr1-fixture/a', {
+    revision: 4,
+    generation: { host: 1 },
+    effective: { label: 'alpha' },
+    inherited: { label: 'alpha' },
+    user: { label: 'alpha' },
+  })
+  try {
+    await h.openHome()
+    await key(h, '\u001b[F')
+    await key(h, '\r')
+    assert.match(h.view(), /Host profile · effective: alpha/u)
+    // Pointer-only positive path: Row -> Detail -> Choice -> candidate -> Confirm.
+    const valueRow = rowOf(h, 'Value')
+    press(h, valueRow, cellIndexOf(h, valueRow, 'Value'))
+    release(h, valueRow, cellIndexOf(h, valueRow, 'Value'))
+    await settle(h)
+    assert.match(h.view(), /Choose value/u)
+    const omegaRow = rowOf(h, 'omega (Omega)')
+    press(h, omegaRow, cellIndexOf(h, omegaRow, 'omega (Omega)'))
+    release(h, omegaRow, cellIndexOf(h, omegaRow, 'omega (Omega)'))
+    await settle(h)
+    const confirmRow = rowOf(h, 'Confirm')
+    press(h, confirmRow, cellIndexOf(h, confirmRow, 'Confirm'))
+    release(h, confirmRow, cellIndexOf(h, confirmRow, 'Confirm'))
+    await settle(h)
+    assert.equal(mutations.length, 1, 'the pointer Confirm dispatched ONE CAS write')
+    assert.deepEqual(mutations[0]?.ops, [{ op: 'set', path: ['label'], value: 'omega' }])
+    assert.equal(values.get('@r8-pr1-fixture/a')?.effective.label, 'omega')
+    assert.match(h.view(), /Verified/u)
+    // Pointer-only Reset: the painted Change button re-enters the SAME Choice.
+    const changeRow = rowOf(h, 'Change…')
+    press(h, changeRow, cellIndexOf(h, changeRow, 'Change…'))
+    release(h, changeRow, cellIndexOf(h, changeRow, 'Change…'))
+    await settle(h)
+    const inheritRow = rowOf(h, 'inherit (Use inherited)')
+    press(h, inheritRow, cellIndexOf(h, inheritRow, 'inherit (Use inherited)'))
+    release(h, inheritRow, cellIndexOf(h, inheritRow, 'inherit (Use inherited)'))
+    await settle(h)
+    const confirmRow2 = rowOf(h, 'Confirm')
+    press(h, confirmRow2, cellIndexOf(h, confirmRow2, 'Confirm'))
+    release(h, confirmRow2, cellIndexOf(h, confirmRow2, 'Confirm'))
+    await settle(h)
+    assert.equal(mutations.length, 2, 'Reset dispatched ONE official unset')
+    assert.deepEqual(mutations[1]?.ops, [{ op: 'unset', path: ['label'] }])
+    assert.equal(values.get('@r8-pr1-fixture/a')?.effective.label, 'alpha')
+    assert.equal(h.replacements(), 0, 'no TUI settings document write ever happens')
+  } finally {
+    handle.dispose()
     h.dispose()
   }
 })
