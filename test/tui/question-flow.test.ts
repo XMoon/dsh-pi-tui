@@ -3211,3 +3211,250 @@ test('the fallback respects the seat budget with BOTH trailing rows (hint and ma
       `Esc returns to the decision list at budget ${budget}`)
   }
 })
+
+// ── Top stage tabs: direct pointer navigation (Fullscreen only) ──────────
+
+/** The painted stage-strip row (tabs always start at the content's first
+ *  non-status row). */
+function tabRowIndex(lines: readonly string[]): number {
+  return lines.findIndex(line => /^…  |^[✓○] Q\d+/.test(line)
+    && (line.includes('Review') || line.includes('…')))
+}
+
+/** Click one complete painted tab label by its visible text. */
+function clickTab(f: QuestionFlow, label: string, width = 100): void {
+  const lines = render(f, width)
+  const row = tabRowIndex(lines)
+  assert.ok(row >= 0, `tab row missing:\n${lines.join('\n')}`)
+  const x = lines[row]!.indexOf(label)
+  assert.ok(x >= 0, `tab '${label}' missing from:\n${lines[row]}`)
+  const gesture = f.beginMousePress(row, x)
+  assert.ok(gesture !== undefined, `tab '${label}' must record a press gesture`)
+  assert.equal(gesture.hitKind, 'tab', `tab '${label}' must be a tab target`)
+  f.completeMouseClick(gesture, row, x)
+}
+
+test('clicking any painted question tab jumps directly without skipping or submitting', () => {
+  let doneCalls = 0
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'FIRST?', options: [{ label: 'A' }] },
+    { id: 'q2', question: 'SECOND?', options: [{ label: 'B' }] },
+    { id: 'q3', question: 'THIRD?', options: [{ label: 'C' }] },
+  ], () => { doneCalls += 1 }, () => {})
+  f.setMaxRows(24)
+  f.setMouseActionsEnabled(true)
+  clickTab(f, 'Q2')
+  assert.equal(f.draftSnapshot().tab, 1, 'Q2 must be the current page')
+  assert.ok(render(f, 100).some(line => line.includes('SECOND?')), 'Q2 content must paint')
+  clickTab(f, 'Q3')
+  assert.equal(f.draftSnapshot().tab, 2, 'Q3 must be reachable directly from Q2')
+  clickTab(f, 'Q1')
+  assert.equal(f.draftSnapshot().tab, 0, 'Q1 must be reachable directly from Q3')
+  assert.deepEqual(f.draftSnapshot().answers.map(answer => answer.skipped), [false, false, false],
+    'direct navigation must never mark skipped')
+  assert.equal(doneCalls, 0, 'tab navigation must never submit')
+})
+
+test('clicking Review shows the summary without answering; Q tabs return and Submit is the only commit', () => {
+  let doneCalls = 0
+  let submitted: unknown
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'FIRST?', options: [{ label: 'A' }, { label: 'B' }] },
+    { id: 'q2', question: 'SECOND?', options: [{ label: 'C' }] },
+  ], (answers) => { doneCalls += 1; submitted = answers }, () => {})
+  f.setMaxRows(24)
+  f.setMouseActionsEnabled(true)
+  clickTab(f, 'Review')
+  assert.equal(f.draftSnapshot().tab, 2, 'Review is the last stage index')
+  assert.ok(render(f, 100).some(line => line.includes('Review your answer before submit')),
+    'Review must paint its summary')
+  assert.deepEqual(f.draftSnapshot().answers.map(answer => answer.skipped), [false, false],
+    'entering Review must not mark unanswered questions skipped')
+  clickTab(f, 'Q1')
+  assert.ok(render(f, 100).some(line => line.includes('FIRST?')), 'Q1 must be editable again')
+  clickTab(f, 'Review')
+  clickAction(f, 'Submit')
+  assert.equal(doneCalls, 1, 'only the bottom Submit commits')
+  assert.ok(Array.isArray(submitted) && submitted.length === 2, 'Submit sends the full answer batch')
+})
+
+test('clicking the already-current tab is a no-op and keeps the option cursor', () => {
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'FIRST?', options: [{ label: 'A' }, { label: 'B' }] },
+  ], () => {}, () => {})
+  f.setMaxRows(24)
+  f.setMouseActionsEnabled(true)
+  f.handleInput('\x1b[B') // cursor B
+  clickTab(f, 'Q1')
+  f.handleInput('\r') // single-select adopts the highlighted row
+  assert.deepEqual(f.draftSnapshot().answers[0]?.selected, ['B'],
+    'a same-tab click must not reset the selection cursor')
+})
+
+test('the stage strip hit map follows a status row above it', () => {
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'FIRST?', options: [{ label: 'A' }] },
+    { id: 'q2', question: 'SECOND?', options: [{ label: 'B' }] },
+  ], () => {}, () => {})
+  f.setMaxRows(24)
+  f.setMouseActionsEnabled(true)
+  f.setStatus({ text: 'Waiting for the response…' })
+  const lines = render(f, 100)
+  const row = tabRowIndex(lines)
+  assert.ok(row > 0, `the status row must shift the tabs down:\n${lines.join('\n')}`)
+  assert.ok(lines[row]!.includes('Q1'), 'the tab row is still located')
+  clickTab(f, 'Q2')
+  assert.equal(f.draftSnapshot().tab, 1, 'the shifted row still navigates')
+})
+
+test('gap cells and overflow ellipses are inert, never tab targets', () => {
+  const two = new QuestionFlow([
+    { id: 'q1', question: 'FIRST?', options: [{ label: 'A' }] },
+    { id: 'q2', question: 'SECOND?', options: [{ label: 'B' }] },
+  ], () => {}, () => {})
+  two.setMaxRows(24)
+  two.setMouseActionsEnabled(true)
+  const lines = render(two, 100)
+  const row = tabRowIndex(lines)
+  const q1End = lines[row]!.indexOf('Q1') + 2
+  const gesture = two.beginMousePress(row, q1End)
+  assert.ok(gesture !== undefined, 'a gap press still records an inert gesture')
+  assert.equal(gesture.hitKind, 'inert', 'the separator between tabs is inert chrome')
+  two.completeMouseClick(gesture, row, q1End)
+  assert.equal(two.draftSnapshot().tab, 0, 'a gap click must not navigate')
+
+  const many = new QuestionFlow(Array.from({ length: 12 }, (_, index) => ({
+    id: `q${index + 1}`, question: `QUESTION ${index + 1}?`, options: [{ label: `O${index + 1}` }],
+  })), () => {}, () => {})
+  many.setMaxRows(24)
+  many.setMouseActionsEnabled(true)
+  const overflow = render(many, 44)
+  const overflowRow = tabRowIndex(overflow)
+  const ellipsis = overflow[overflowRow]!.indexOf('…')
+  assert.ok(ellipsis >= 0, `the overflow marker must paint:\n${overflow[overflowRow]}`)
+  const ellipsisGesture = many.beginMousePress(overflowRow, ellipsis)
+  assert.ok(ellipsisGesture !== undefined)
+  assert.equal(ellipsisGesture.hitKind, 'inert', 'the overflow ellipsis is inert chrome')
+  many.completeMouseClick(ellipsisGesture, overflowRow, ellipsis)
+  assert.equal(many.draftSnapshot().tab, 0, 'the ellipsis must never navigate')
+})
+
+test('overflow keeps the current page and Review visible, with complete-label hits only', () => {
+  const many = new QuestionFlow(Array.from({ length: 12 }, (_, index) => ({
+    id: `q${index + 1}`, question: `QUESTION ${index + 1}?`, options: [{ label: `O${index + 1}` }],
+  })), () => {}, () => {})
+  many.setMaxRows(24)
+  many.setMouseActionsEnabled(true)
+  const lines = render(many, 44)
+  const row = tabRowIndex(lines)
+  const painted = lines[row]!
+  assert.ok(painted.includes('Q1') && painted.includes('Review'),
+    `the current page and Review must be visible:\n${painted}`)
+  assert.ok(!painted.includes('Q12'), 'omitted question tabs must not paint')
+  const hits = (many as unknown as {
+    paintedTabHits: Array<{ targetTab: number; startCol: number; endCol: number }>
+  }).paintedTabHits
+  assert.ok(hits.some(hit => hit.targetTab === 12), 'Review must be a hit target')
+  for (const hit of hits) {
+    const label = painted.slice(hit.startCol, hit.endCol)
+    assert.match(label, /^[✓○] (Q\d+|Review)$/u,
+      `a hit must cover one complete painted tab label, saw ${JSON.stringify(label)}`)
+    assert.ok(hit.endCol <= visibleWidth(painted), 'a hit may never exceed the painted width')
+  }
+  clickTab(many, 'Q5')
+  assert.equal(many.draftSnapshot().tab, 4, 'a visible overflow-window tab is clickable')
+  clickTab(many, 'Review')
+  assert.equal(many.draftSnapshot().tab, 12, 'Review stays directly reachable')
+})
+
+test('very narrow terminals keep the current tab before Review and never expose a partial hit', () => {
+  const many = new QuestionFlow(Array.from({ length: 12 }, (_, index) => ({
+    id: `q${index + 1}`, question: `QUESTION ${index + 1}?`, options: [{ label: `O${index + 1}` }],
+  })), () => {}, () => {})
+  many.setMaxRows(24)
+  many.setMouseActionsEnabled(true)
+  const lines = render(many, 12)
+  const row = tabRowIndex(lines)
+  assert.ok(lines[row]!.includes('Q1'), `the current tab must survive first:\n${lines[row]}`)
+  assert.ok(!lines[row]!.includes('Review'), 'Review drops before the current tab')
+  const hits = (many as unknown as {
+    paintedTabHits: Array<{ targetTab: number; startCol: number; endCol: number }>
+  }).paintedTabHits
+  assert.deepEqual(hits.map(hit => hit.targetTab), [0], 'only the complete current tab is a target')
+  assert.ok(hits[0]!.endCol <= 12, 'the hit never exceeds the available width')
+
+  const tiny = render(many, 3)
+  assert.ok(tiny.some(line => line.trim() !== ''), 'a heavily clipped strip still paints')
+  const tinyHits = (many as unknown as { paintedTabHits: unknown[] }).paintedTabHits
+  assert.equal(tinyHits.length, 0, 'a clipped tab paints no hit')
+})
+
+test('a tab press cannot complete on another target, a resize, or a repainted status row', () => {
+  const make = (): QuestionFlow => {
+    const f = new QuestionFlow([
+      { id: 'q1', question: 'FIRST?', options: [{ label: 'A' }] },
+      { id: 'q2', question: 'SECOND?', options: [{ label: 'B' }] },
+      { id: 'q3', question: 'THIRD?', options: [{ label: 'C' }] },
+    ], () => {}, () => {})
+    f.setMaxRows(24)
+    f.setMouseActionsEnabled(true)
+    return f
+  }
+  // Cross-target release.
+  const cross = make()
+  let lines = render(cross, 100)
+  let row = tabRowIndex(lines)
+  let x = lines[row]!.indexOf('Q2')
+  const q3x = lines[row]!.indexOf('Q3')
+  const gesture = cross.beginMousePress(row, x)
+  assert.ok(gesture !== undefined)
+  cross.completeMouseClick(gesture, row, q3x)
+  assert.equal(cross.draftSnapshot().tab, 0, 'a release on another tab must not navigate')
+  // Resize between press and release.
+  const resized = make()
+  lines = render(resized, 100)
+  row = tabRowIndex(lines)
+  x = lines[row]!.indexOf('Q2')
+  const resizePress = resized.beginMousePress(row, x)
+  assert.ok(resizePress !== undefined)
+  render(resized, 72)
+  resized.completeMouseClick(resizePress, row, x)
+  assert.equal(resized.draftSnapshot().tab, 0, 'a width change must invalidate the tab press')
+})
+
+test('PlanReview and Regular rendering expose no stage-tab pointer targets', () => {
+  const plan = new QuestionFlow([{
+    id: 'plan-review',
+    question: 'Approve the plan?',
+    detail: '# Plan\nDo the thing.',
+    options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    intent: { kind: 'plan-review', approve: 'Approve' },
+  }], () => {}, () => {})
+  plan.setMaxRows(24)
+  plan.setMouseActionsEnabled(true)
+  plan.render(100)
+  assert.equal((plan as unknown as { paintedTabHits: unknown[] }).paintedTabHits.length, 0,
+    'the plan-review branch paints no generic stage tabs')
+  const regular = makeFlow([
+    { id: 'q1', question: 'FIRST?', options: [{ label: 'A' }] },
+    { id: 'q2', question: 'SECOND?', options: [{ label: 'B' }] },
+  ], 24)
+  regular.render(100)
+  assert.equal((regular as unknown as { paintedTabHits: unknown[] }).paintedTabHits.length, 0,
+    'Regular has no application pointer targets')
+})
+
+test('an optionless edit keeps its live text when a tab click changes pages', () => {
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Type here?', options: [] },
+    { id: 'q2', question: 'SECOND?', options: [{ label: 'B' }] },
+  ], () => {}, () => {})
+  f.setMaxRows(24)
+  f.setMouseActionsEnabled(true)
+  f.handleInput('abc')
+  clickTab(f, 'Q2')
+  assert.equal(f.draftSnapshot().tab, 1, 'the tab click changes pages')
+  assert.equal(f.draftSnapshot().answers[0]?.custom, 'abc', 'the live Q1 draft is preserved')
+  clickTab(f, 'Q1')
+  assert.ok(render(f, 100).some(line => line.includes('abc')), 'returning reseeds the Q1 input text')
+})
