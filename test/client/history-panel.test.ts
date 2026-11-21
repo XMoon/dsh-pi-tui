@@ -1644,12 +1644,14 @@ test('scope-tabs: a wide session header publishes all three complete labels and 
     rows => rows.some(line => line.includes('[All Directories]')),
     'the directly selected all-directory scope',
   ))
+  // reason: let the 1ms debounce enqueue the direct scope search before reading requests.
   await settle()
   assert.ok(all.some(line => line.includes('Scope: all')), `the metadata names the requested scope:\n${all.join('\n')}`)
   assert.equal(source.requests.at(-1)?.scope, 'all')
   // The same active label is a strict no-op: no new search request.
   const requests = source.requests.length
   assert.equal(clickHeader('[All Directories]'), true)
+  // reason: give any erroneous no-op search its full 1ms debounce window.
   await settle()
   assert.equal(source.requests.length, requests, 'clicking the current scope never starts another search')
   panel.dispose()
@@ -1688,12 +1690,14 @@ test('scope-tabs: a narrow sessionless header keeps Directory/All, preserves the
   }
   assert.equal(click('All'), true)
   await renderUntil(panel, 44, rows => rows.some(line => line.includes('[All]')), 'the selected All scope')
+  // reason: let the 1ms debounce enqueue the direct scope search before reading requests.
   await settle()
   assert.equal(source.requests.at(-1)?.scope, 'all')
   assert.equal(source.requests.at(-1)?.query, 'alp', 'the query survives a direct scope jump')
   // The active label is a strict no-op.
   const afterJump = source.requests.length
   assert.equal(click('[All]'), true)
+  // reason: give any erroneous no-op search its full 1ms debounce window.
   await settle()
   assert.equal(source.requests.length, afterJump, 'a same-scope click starts no search')
   // Title/blank/F2 are inert at a comfortable width.
@@ -1733,6 +1737,7 @@ test('scope-tabs: a scope press is invalidated by intervening keyboard state and
   })
   panel.start()
   panel.handleInput('a')
+  // reason: let the 1ms debounce enqueue the typed-query search before pressing the header.
   await settle()
   assert.ok(source.pending.length >= 2, `the query request must be pending:\n${source.requests.map(request => request.query).join(',')}`)
   const frame = plain(panel.render(100))
@@ -1742,6 +1747,7 @@ test('scope-tabs: a scope press is invalidated by intervening keyboard state and
   assert.ok(panel.handleMouse(historyPointer('press', allCol, headerRow, 100, height)) !== undefined)
   // Keyboard input between press and release retires the header gesture.
   panel.handleInput('\t')
+  // reason: let the keyboard scope change enqueue its 1ms debounce search.
   await settle()
   assert.equal(panel.handleMouse(historyPointer('click', allCol, headerRow, 100, height)), undefined,
     'a keyboard scope change retires the pressed Scope target')
