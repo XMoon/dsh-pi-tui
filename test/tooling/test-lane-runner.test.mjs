@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep, win32 } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
@@ -17,6 +17,7 @@ import { orderWeightedProductFiles, parseConcurrency, sanitizeTestEnvironment } 
 import { resolveLane } from '../../scripts/test-discovery.mjs'
 import { LANES } from '../../scripts/test-lanes.mjs'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
+import { copyKoffiPackage } from '../support/darwin-koffi-fixture.ts'
 import {
   isExecuting, killStillExecuting, readPidRecords, startTimeOf, waitForNoExecuting,
 } from '../support/pid-records.ts'
@@ -155,12 +156,24 @@ function copyLaneRunnerSources(scripts) {
   for (const name of ['identity.ts', 'darwin.ts']) {
     writeFileSync(join(nativeProcess, name), readFileSync(join(ROOT, 'src', 'runtime', 'native-process', name)))
   }
-  // The identity seam imports node-koffi LAZILY; the sanitized lane child has
-  // no NODE_PATH, so the copied repository must resolve the REAL devDependency
-  // itself (a koffi resolved from an ambient global path could be another
-  // version entirely). The symlink keeps the fixture hermetic.
+  // The identity seam resolves node-koffi through the installed DSH anchor.
+  // A copied fixture repository is not a DSH installation, so give it an
+  // explicit test-owned anchor (the same package names and dependency edge the
+  // real installation has). The sanitized lane child has no NODE_PATH, and the
+  // copied package keeps the fixture hermetic.
+  writeFileSync(join(fixtureRoot, 'package.json'), `${JSON.stringify({
+    name: '@deepseek-ai/dsh',
+    version: '0.2.2-rc.5',
+  })}\n`)
+  const subprocessDir = join(fixtureRoot, 'node_modules', '@deepseek-ai', 'dsh-subprocess-local')
+  mkdirSync(subprocessDir, { recursive: true })
+  writeFileSync(join(subprocessDir, 'package.json'), `${JSON.stringify({
+    name: '@deepseek-ai/dsh-subprocess-local',
+    version: '0.2.2-rc.5',
+    dependencies: { koffi: '3.1.1' },
+  })}\n`)
   mkdirSync(join(fixtureRoot, 'node_modules'), { recursive: true })
-  symlinkSync(join(ROOT, 'node_modules', 'koffi'), join(fixtureRoot, 'node_modules', 'koffi'), 'dir')
+  copyKoffiPackage(join(fixtureRoot, 'node_modules'))
 }
 
 

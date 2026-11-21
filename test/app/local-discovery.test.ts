@@ -18,9 +18,10 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync,
 import { dirname, join } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import test, { type TestContext } from 'node:test'
+import test, { before, type TestContext } from 'node:test'
 import type { AddressInfo } from 'node:net'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
+import { installDarwinKoffiFixture } from '../support/darwin-koffi-fixture.ts'
 import {
   bindProcessSeat,
   bindProfileKernelSeat,
@@ -71,6 +72,12 @@ import {
 import { observeAuthenticatedLocalAcpStatus } from '../../src/app/remote-process/local-acp-status.ts'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
+
+// The real Darwin identity is verified through the same explicit DSH anchor
+// seam the Split launcher uses; never through an ambient module path.
+before(t => {
+  installDarwinKoffiFixture(t as TestContext)
+})
 
 /** Facts whose owner is the Linux /proc + abstract-socket implementation. */
 const LINUX_ONLY = Object.freeze({

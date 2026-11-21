@@ -3,11 +3,13 @@
  * The build-script decision every ISOLATED qualification profile needs before
  * it can install this package.
  *
- * `koffi` is the ONE native runtime dependency (Darwin kernel identity through
- * libproc). It declares an `install` script, and pnpm 12 turns an UNDECIDED
- * dependency build script into a hard `ERR_PNPM_IGNORED_BUILDS` failure — the
- * same policy the repository root already decides explicitly with
- * `allowBuilds.koffi: false` in `pnpm-workspace.yaml`.
+ * `koffi` is the native dependency owned by the DSH subprocess provider
+ * (Darwin kernel identity through libproc). A qualification profile may see it
+ * through the DSH installation closure. It declares an `install` script, and
+ * pnpm 12 turns an UNDECIDED dependency build script into a hard
+ * `ERR_PNPM_IGNORED_BUILDS` failure — the same policy the repository root
+ * already decides explicitly with `allowBuilds.koffi: false` in
+ * `pnpm-workspace.yaml`.
  *
  * DENIED is the correct decision: node-koffi ships prebuilt platform binaries
  * as optional dependencies (`@koromix/koffi-darwin-arm64`, ...), and the build

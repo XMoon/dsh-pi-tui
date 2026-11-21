@@ -19,9 +19,10 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { join } from 'node:path'
-import test from 'node:test'
+import test, { before, type TestContext } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
+import { installDarwinKoffiFixture } from '../support/darwin-koffi-fixture.ts'
 import {
   listKernelGroupMembers,
   readKernelProcess,
@@ -32,6 +33,12 @@ import {
 
 const DARWIN_ONLY = process.platform !== 'darwin' ? 'Darwin kernel process identity requires macOS' : false
 const DUMP_SOURCE = fileURLToPath(new URL('../fixtures/darwin-identity/pid_identity_dump.c', import.meta.url))
+
+// The real libproc bridge resolves Koffi through the installed DSH anchor.
+// A top-level hook installs an explicit fixture anchor before any test reads.
+before(t => {
+  installDarwinKoffiFixture(t as TestContext)
+})
 
 /** Poll `check` until it returns a non-undefined value or the deadline expires. */
 async function waitUntil<T>(check: () => T | undefined, deadlineMs: number, label: string): Promise<T> {
