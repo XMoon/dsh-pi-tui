@@ -266,9 +266,13 @@ Compact:  User · Work(A)      · Assistant A · Work(B)      · Notice · Work(
   `agent-message`/`relay`, `subagent-settled`/`notice`,
   `repeat-tool-reminder`/`notice` or image-bearing `ptc-mode` row with the
   durable same-turn `next-step` claim flag
-  is carried by the same-turn Work instead of splitting it. A mixed
-  `instructions`/`catalog` + `snapshot` cluster, an unqualified/foreign
-  `notice`/`relay`, `recall` and every unknown form remain boundaries. The
+  is carried by the same-turn Work instead of splitting it. A
+  `ptc-mode` row that declares a form never qualifies as a Snapshot through
+  either the singleton or the snapshot-only-cluster route (the real PTC
+  producer omits `form`); it stays an independent Context while its structured
+  media still renders. A mixed `instructions`/`catalog` + `snapshot` cluster,
+  an unqualified/foreign `notice`/`relay`, `recall` and every unknown form
+  remain boundaries. The
   carried Context keeps its own row/cluster disclosure inside the expanded
   Work; a collapsed Work shows neither its header nor its body. Context never
   contributes an Action, ActionStats entry or wall-clock timing to the span.

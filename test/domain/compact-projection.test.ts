@@ -1580,6 +1580,69 @@ test('an unknown or non-string declared PTC form stays an independent Context ev
   }
 })
 
+test('a declared-form PTC Context cannot borrow either Snapshot carriage route', () => {
+  const makeMessage = (id: string, form: string) => ({
+    id: MessageId(id), role: 'user',
+    content: [{ type: 'image', attachment: PTC_IMAGE_ATTACHMENT }],
+    source: { kind: 'ptc-mode', form },
+  })
+  for (const claimed of [false, true]) {
+    const message = makeMessage(`snapshot-ptc-${claimed}`, 'snapshot')
+    const events: SessionEvent[] = [
+      eventAt('turn/start', { turn: 0 }, 1000, 0),
+      toolCallEvent(0, `snapshot-ptc-${claimed}-a`, 1),
+      toolResultEvent(0, `snapshot-ptc-${claimed}-a`, 2),
+    ]
+    if (claimed) {
+      events.push(
+        eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [message] }, 1003, 3),
+        eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 1003.1, 4),
+      )
+    }
+    events.push(
+      eventAt('user/message', message, 1003.2, 5),
+      toolCallEvent(0, `snapshot-ptc-${claimed}-b`, 6),
+      toolResultEvent(0, `snapshot-ptc-${claimed}-b`, 7),
+    )
+    const folder = new TranscriptFolder()
+    apply(folder, events)
+    const row = folder.messages().find(candidate => candidate.kind === 'system')
+    assert.ok(row !== undefined && row.kind === 'system', `claimed=${claimed}`)
+    assert.equal(row.contextPresentation?.form, 'snapshot')
+    assert.equal(row.contextPresentation?.formDeclared, true)
+    assert.equal(row.contextPresentation?.sameTurnNextStep, undefined,
+      `claimed=${claimed}: the PTC no-form gate rejects the snapshot form`)
+    assert.deepEqual(projectTranscriptStructure(folder.messages()).map(block => block.kind),
+      ['work', 'message', 'work'], `claimed=${claimed}: the forged snapshot cannot be carried`)
+    assert.deepEqual(kindsOf(projectCompact(folder.messages(), noOptions)),
+      ['work', 'system', 'work'], `claimed=${claimed}: Compact keeps the Context standalone`)
+    const focus = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
+    assert.ok(focus.some(block => block.kind === 'message' && block.message === row),
+      `claimed=${claimed}: collapsed Focus keeps the independent Context visible`)
+  }
+
+  // An adjacent pair would otherwise become a snapshot-only ambient cluster
+  // and ride into Work through the second (cluster) route.
+  const clusterFolder = new TranscriptFolder()
+  const first = makeMessage('snapshot-cluster-a', 'snapshot')
+  const second = makeMessage('snapshot-cluster-b', 'snapshot')
+  apply(clusterFolder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    toolCallEvent(0, 'snapshot-cluster-a', 1),
+    toolResultEvent(0, 'snapshot-cluster-a', 2),
+    eventAt('user/message', first, 1003, 3),
+    eventAt('user/message', second, 1004, 4),
+    toolCallEvent(0, 'snapshot-cluster-b', 5),
+    toolResultEvent(0, 'snapshot-cluster-b', 6),
+  ])
+  const clusterStructure = projectTranscriptStructure(clusterFolder.messages())
+  assert.deepEqual(clusterStructure.map(block => block.kind), ['work', 'context-cluster', 'work'],
+    'two forged snapshot rows stay an independent cluster, never a Work part')
+  const clusterBlock = clusterStructure[1]
+  assert.ok(clusterBlock?.kind === 'context-cluster' && clusterBlock.cluster.members.length === 2)
+  assert.deepEqual(kindsOf(projectCompact(clusterFolder.messages(), noOptions)), ['work', 'context-cluster', 'work'])
+})
+
 test('a proven PTC image Context without a real Process fails open and a later steer keeps it a boundary', () => {
   const folder = new TranscriptFolder()
   apply(folder, [

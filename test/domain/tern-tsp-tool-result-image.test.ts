@@ -770,36 +770,38 @@ test('two PTC context rows naming the same attachment keep two independent occur
 
 
 test('a form-bearing PTC Context keeps its ordered structured media in TSP', () => {
-  const message = ptcContextRow([
-    textBlock('foreign before'),
-    imageBlock(),
-    textBlock('foreign after'),
-  ], 1, {
-    sourceKind: 'ptc-mode',
-    form: 'notice',
-    formDeclared: true,
-    summary: 'foreign producer',
-    role: 'inject',
-  })
-  const cards = cardsOf([message], new Map([['att-shot-1', { state: 'ready', blobId: 'f'.repeat(64) }]]))
-  const card = cards.find(candidate => String(candidate.props.head).includes('ptc-mode'))
-  assert.ok(card !== undefined)
-  const rows = card.children.map(child => ({
-    kind: child.kind,
-    key: String(child.props.key),
-    ...(typeof child.props.text === 'string' ? { text: child.props.text } : {}),
-    ...(typeof child.props.blob === 'string' ? { blob: child.props.blob } : {}),
-  }))
-  assert.deepEqual(rows.map(row => row.key), [
-    'kind',
-    'body-b0-text',
-    'body-b1-info',
-    'body-b1-image',
-    'body-b2-text',
-  ])
-  assert.equal(rows[1]?.text, 'foreign before')
-  assert.equal(rows[4]?.text, 'foreign after')
-  assert.equal(rows[3]?.blob, 'f'.repeat(64))
-  assert.equal(rows.some(row => row.key === 'body'), false,
-    'the flat Context text is never painted beside the structured blocks')
+  for (const form of ['notice', 'snapshot'] as const) {
+    const message = ptcContextRow([
+      textBlock('foreign before'),
+      imageBlock(),
+      textBlock('foreign after'),
+    ], 1, {
+      sourceKind: 'ptc-mode',
+      form,
+      formDeclared: true,
+      summary: 'foreign producer',
+      role: 'inject',
+    })
+    const cards = cardsOf([message], new Map([['att-shot-1', { state: 'ready', blobId: 'f'.repeat(64) }]]))
+    const card = cards.find(candidate => String(candidate.props.head).includes('ptc-mode'))
+    assert.ok(card !== undefined, form)
+    const rows = card.children.map(child => ({
+      kind: child.kind,
+      key: String(child.props.key),
+      ...(typeof child.props.text === 'string' ? { text: child.props.text } : {}),
+      ...(typeof child.props.blob === 'string' ? { blob: child.props.blob } : {}),
+    }))
+    assert.deepEqual(rows.map(row => row.key), [
+      'kind',
+      'body-b0-text',
+      'body-b1-info',
+      'body-b1-image',
+      'body-b2-text',
+    ], form)
+    assert.equal(rows[1]?.text, 'foreign before', form)
+    assert.equal(rows[4]?.text, 'foreign after', form)
+    assert.equal(rows[3]?.blob, 'f'.repeat(64), form)
+    assert.equal(rows.some(row => row.key === 'body'), false,
+      `${form}: the flat Context text is never painted beside the structured blocks`)
+  }
 })

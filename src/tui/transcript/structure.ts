@@ -98,11 +98,18 @@ export function isTranscriptWorkMember(message: TranscriptMessage): message is T
 }
 
 /** Whether one row is a producer-declared Snapshot Context row (the ONE
- * ambient form whose disclosure follows the surrounding Work/Thought). */
+ * ambient form whose disclosure follows the surrounding Work/Thought).
+ *
+ * A `ptc-mode` row that declares ANY form is malformed/foreign (the real PTC
+ * producer omits `form`): it must never borrow the Snapshot carriage through a
+ * forged/legacy `form:'snapshot'`. The structured-media predicate remains
+ * form-neutral, so such rows still render their original blocks standalone. */
 export function isSnapshotContext(
   message: TranscriptMessage,
 ): message is Extract<TranscriptMessage, { kind: 'system' }> & { context: true } {
-  return isSurfacedContext(message) && contextFormOf(message) === 'snapshot'
+  if (!isSurfacedContext(message) || contextFormOf(message) !== 'snapshot') return false
+  const presentation = message.contextPresentation
+  return !(presentation?.sourceKind === 'ptc-mode' && presentation.formDeclared === true)
 }
 
 /** Per-cluster memo of {@link isSnapshotOnlyCluster}: cluster wrappers are
