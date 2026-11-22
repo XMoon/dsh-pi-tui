@@ -143,8 +143,8 @@ export function busyAfterTurnBoundary(eventType: 'turn/start' | 'turn/end', comp
  * through this classification — the single source of truth for the
  * status/measurement split. `compaction/end` is classified 'measure' but
  * the firehose deliberately SKIPS it here: a matched compaction settle
- * re-measures through the fold-outcome path (settleCompactionSurface), so
- * a STALE compaction/end can never trigger a measurement. */
+ * re-measures through the router's aggregated settle path, so a STALE
+ * compaction/end can never trigger a measurement. */
 export function contextRefreshKind(eventType: string): 'measure' | 'cheap' {
   switch (eventType) {
     case 'step/start':
