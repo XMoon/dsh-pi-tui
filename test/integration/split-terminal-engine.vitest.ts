@@ -1,33 +1,95 @@
 import assert from 'node:assert/strict'
-import { mkdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { mkdirSync, realpathSync, rmSync, statSync } from 'node:fs'
+import { isAbsolute, join } from 'node:path'
 
 import { expect, test } from 'vitest'
 import { TuiTest as Terminal } from '@microsoft/tui-test'
+
+import { createTestTempDir } from '../support/temp-lifecycle.ts'
 
 /**
  * Bottom-up engine probe: prove the native terminal backend can start a real
  * PTY, paint a frame, deliver a real Enter, and report a clean exit before any
  * Split business scenario relies on it.
  *
- * This is deliberately independent of the packaged candidate and the SPLIT
+ * This is deliberately independent of the packaged candidate and the split
  * fixture; it validates only the terminal engine on this OS.
  */
+function requireSplitVitestTmpBase(): string {
+  const raw = process.env.SPLIT_VITEST_TMP_BASE
+  if (typeof raw !== 'string' || raw === '' || !isAbsolute(raw)) {
+    throw new Error('SPLIT_VITEST_TMP_BASE must be an absolute path')
+  }
+  const real = realpathSync(raw)
+  const stats = statSync(real)
+  if (!stats.isDirectory()) throw new Error(`SPLIT_VITEST_TMP_BASE is not a directory: ${real}`)
+  if (typeof process.getuid === 'function' && stats.uid !== process.getuid()) {
+    throw new Error(`SPLIT_VITEST_TMP_BASE is not owned by this user: ${real}`)
+  }
+  if ((stats.mode & 0o777) !== 0o700) throw new Error(`SPLIT_VITEST_TMP_BASE must have mode 0700: ${real}`)
+  return real
+}
+
 function prepareEngineRoot(): string {
-  const root = join(process.cwd(), 'temp', 'split-terminal-engine')
-  mkdirSync(join(root, 'trace'), { recursive: true })
-  mkdirSync(join(root, 'artifacts'), { recursive: true })
+  const root = createTestTempDir('split-terminal-engine-', requireSplitVitestTmpBase())
+  try {
+    mkdirSync(join(root, 'trace'), { recursive: true })
+    mkdirSync(join(root, 'artifacts'), { recursive: true })
+  } catch (error) {
+    rmSync(root, { recursive: true, force: true })
+    throw error
+  }
   return root
 }
 
-test('the xtermjs engine paints a real PTY frame, accepts Enter, and reports a clean exit', async () => {
+async function runEngineTest(
+  terminalName: string,
+  body: (terminal: Terminal, engineRoot: string) => Promise<void>,
+): Promise<void> {
   const engineRoot = prepareEngineRoot()
-  const terminal = Terminal.ephemeral('split-terminal-engine', {
-    backend: 'xtermjs',
-    trace: { mode: 'on-failure', directory: join(engineRoot, 'trace') },
-    artifacts: { dir: join(engineRoot, 'artifacts'), onFailure: 'text' },
-  })
+  let terminal: Terminal
   try {
+    terminal = Terminal.ephemeral(terminalName, {
+      backend: 'xtermjs',
+      trace: { mode: 'on-failure', directory: join(engineRoot, 'trace') },
+      artifacts: { dir: join(engineRoot, 'artifacts'), onFailure: 'text' },
+    })
+  } catch (error) {
+    rmSync(engineRoot, { recursive: true, force: true })
+    throw error
+  }
+
+  let failure: unknown
+  try {
+    await body(terminal, engineRoot)
+  } catch (error) {
+    failure = error
+  }
+
+  let closeFailure: unknown
+  try {
+    await terminal.closeQuiet()
+  } catch (error) {
+    closeFailure = error
+  }
+
+  if (failure !== undefined || closeFailure !== undefined) {
+    process.stderr.write(`[split-terminal-engine] retained failure diagnostics: ${engineRoot}\n`)
+    if (failure !== undefined && closeFailure !== undefined) {
+      throw new AggregateError([failure, closeFailure], 'split terminal engine test and terminal close both failed')
+    }
+    throw failure ?? closeFailure
+  }
+
+  if (process.env.DSH_TEST_KEEP_TMP === '1') {
+    process.stderr.write(`[split-terminal-engine] keeping ${engineRoot} (DSH_TEST_KEEP_TMP=1)\n`)
+  } else {
+    rmSync(engineRoot, { recursive: true, force: true })
+  }
+}
+
+test('the xtermjs engine paints a real PTY frame, accepts Enter, and reports a clean exit', async () => {
+  await runEngineTest('split-terminal-engine', async terminal => {
     const program = [
       "process.stdout.write('SPLIT_ENGINE_READY\\n')",
       "process.stdin.setEncoding('utf8')",
@@ -47,19 +109,11 @@ test('the xtermjs engine paints a real PTY frame, accepts Enter, and reports a c
     // For a `run()` session the native state carries the child's exit status;
     // getExitCode() only tracks shell-command execution.
     expect((await terminal.state()).exited).toBe(0)
-  } finally {
-    await terminal.closeQuiet()
-  }
+  })
 })
 
 test('a missing terminal locator rejects with a diagnosable expectation error', async () => {
-  const engineRoot = prepareEngineRoot()
-  const terminal = Terminal.ephemeral('split-terminal-engine-negative', {
-    backend: 'xtermjs',
-    trace: { mode: 'on-failure', directory: join(engineRoot, 'trace') },
-    artifacts: { dir: join(engineRoot, 'artifacts'), onFailure: 'text' },
-  })
-  try {
+  await runEngineTest('split-terminal-engine-negative', async terminal => {
     await terminal.run(process.execPath, ['-e', [
       "process.stdout.write('SPLIT_ENGINE_NEGATIVE_READY\\n')",
       'setInterval(() => {}, 1000)',
@@ -77,7 +131,5 @@ test('a missing terminal locator rejects with a diagnosable expectation error', 
         return true
       },
     )
-  } finally {
-    await terminal.closeQuiet()
-  }
+  })
 })
