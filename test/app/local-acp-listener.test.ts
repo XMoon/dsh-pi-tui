@@ -35,6 +35,7 @@ import {
 } from '../../src/app/remote-process/local-acp-listener.ts'
 import {
   AcpSessionViewRegistry,
+  type AcpCreateSessionOutcome,
   type AcpImageLimits,
   type AcpPromptFactListener,
   type AcpSessionPromptRequest,
@@ -1252,11 +1253,13 @@ test('a Host Session View advertises resume/close and serves new/close over the 
     assert.equal(typeof created.result?.sessionId, 'string')
     const sessionId = created.result?.sessionId as string
 
-    // A second new while attached is refused as busy (no second Host create).
+    // ONE physical connection can attach a second Session View. The second
+    // session has its own Host Session id and cannot be a duplicate of A.
     client.send({ jsonrpc: '2.0', id: 4, method: 'session/new', params: { cwd: '/host/proj', mcpServers: [] } })
-    const busy = (await client.next()) as { error?: { code: number; data?: { code?: string } } }
-    assert.equal(busy.error?.code, -32602)
-    assert.equal(busy.error?.data?.code, 'LOCAL_ACP_VIEW_BUSY')
+    const createdB = (await client.next()) as { result?: { sessionId?: string } }
+    assert.equal(typeof createdB.result?.sessionId, 'string')
+    const sessionB = createdB.result?.sessionId as string
+    assert.notEqual(sessionB, sessionId)
 
     client.send({ jsonrpc: '2.0', id: 5, method: 'session/close', params: { sessionId } })
     const closed = (await client.next()) as { result?: unknown }
@@ -1264,14 +1267,48 @@ test('a Host Session View advertises resume/close and serves new/close over the 
     client.send({ jsonrpc: '2.0', id: 6, method: 'session/close', params: { sessionId } })
     const again = (await client.next()) as { result?: unknown }
     assert.deepEqual(again.result, {}, 'a repeated close on the same connection is idempotent')
+    client.send({ jsonrpc: '2.0', id: 7, method: 'session/close', params: { sessionId: 'unknown-session' } })
+    assert.deepEqual(((await client.next()) as { result?: unknown }).result, {},
+      'an unknown Session close is an idempotent empty result')
 
-    // A prompt on a connection that holds NO View for that Session is refused
-    // with the View's own stable code and never reaches the Host.
-    client.send({ jsonrpc: '2.0', id: 7, method: 'session/prompt', params: { sessionId, prompt: [{ type: 'text', text: 'hi' }] } })
+    // A prompt on the closed A View is refused with the View's stable code and
+    // never reaches the Host; the active B View remains a separate claim.
+    client.send({ jsonrpc: '2.0', id: 8, method: 'session/prompt', params: { sessionId, prompt: [{ type: 'text', text: 'hi' }] } })
     const prompt = (await client.next()) as { error?: { code: number; data?: { code?: string } } }
     assert.equal(prompt.error?.code, -32602)
     assert.equal(prompt.error?.data?.code, 'LOCAL_ACP_VIEW_NOT_OWNED')
     assert.equal(fake.prompts.length, 0, 'an unattached prompt never reaches the Host')
+    client.send({ jsonrpc: '2.0', id: 9, method: 'session/prompt', params: { sessionId: sessionB, prompt: [{ type: 'text', text: 'B remains active' }] } })
+    const promptB = await waitForFact(() => fake.prompts[0], 'the B prompt')
+    assert.equal(promptB.sessionId, sessionB)
+    const facts = fake.facts()
+    const agentB = fake.agentOf(sessionB)
+    assert.ok(facts !== undefined && agentB !== undefined)
+    const messageB = { id: 'm-b', source: { kind: 'user', rpcId: promptB.requestId } }
+    facts.onInboxInserted(agentB, messageB)
+    fake.turnFence.openTurnStartSeq = 20
+    fake.turnFence.lastTurn = 2
+    facts.onInboxClaimed(agentB, messageB, 2)
+    facts.onSessionEvent(agentB.session, {
+      type: 'assistant/message',
+      data: { turn: 2, message: { id: 'm-b', content: [{ type: 'text', text: 'B answer' }] } },
+    })
+    facts.onSessionEvent(agentB.session, { type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } })
+    let answerB: { id?: number; result?: { stopReason?: string } } | undefined
+    for (;;) {
+      const message = (await client.next()) as { id?: number; result?: { stopReason?: string } }
+      if (message.id === 9) { answerB = message; break }
+    }
+    assert.equal(answerB.result?.stopReason, 'end_turn')
+
+    // The SAME physical connection cannot allocate a second View for a Session
+    // it already owns; the refusal is connection-local and happens before any
+    // Host resolve/create.
+    client.send({ jsonrpc: '2.0', id: 10, method: 'session/resume', params: { sessionId: sessionB, cwd: '/host/proj' } })
+    const duplicate = (await client.next()) as { id?: number; error?: { code: number; data?: { code?: string } } }
+    assert.equal(duplicate.id, 10)
+    assert.equal(duplicate.error?.code, -32602)
+    assert.equal(duplicate.error?.data?.code, 'LOCAL_ACP_VIEW_BUSY')
   } finally {
     client.close()
   }
@@ -1318,6 +1355,432 @@ test('a second ACP connection cannot attach an already-held Session; invalid req
   } finally {
     a.close()
     b.close()
+  }
+})
+
+test('one ACP socket routes concurrent prompts and close to their exact Session', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess()
+  fake.seed('session-shared-a', '/host/a')
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-shared-a', cwd: '/host/a' } })
+    assert.deepEqual(((await client.next()) as { result?: unknown }).result, {})
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/new', params: { cwd: '/host/b', mcpServers: [] } })
+    const createdB = (await client.next()) as { result?: { sessionId?: string } }
+    const sessionB = createdB.result?.sessionId as string
+    assert.equal(typeof sessionB, 'string')
+
+    client.send({ jsonrpc: '2.0', id: 4, method: 'session/prompt', params: { sessionId: 'session-shared-a', prompt: [{ type: 'text', text: 'A' }] } })
+    client.send({ jsonrpc: '2.0', id: 5, method: 'session/prompt', params: { sessionId: sessionB, prompt: [{ type: 'text', text: 'B' }] } })
+    await waitForFact(() => fake.prompts.length === 2 ? true : undefined, 'both A and B prompts')
+    const promptA = fake.prompts.find(request => request.sessionId === 'session-shared-a')
+    const promptB = fake.prompts.find(request => request.sessionId === sessionB)
+    assert.ok(promptA !== undefined && promptB !== undefined)
+    const facts = fake.facts()
+    const agentA = fake.agentOf('session-shared-a')
+    const agentB = fake.agentOf(sessionB)
+    assert.ok(facts !== undefined && agentA !== undefined && agentB !== undefined)
+
+    const messageA = { id: 'm-a', source: { kind: 'user', rpcId: promptA.requestId } }
+    const messageB = { id: 'm-b', source: { kind: 'user', rpcId: promptB.requestId } }
+    facts.onInboxInserted(agentA, messageA)
+    facts.onInboxInserted(agentB, messageB)
+    fake.turnFence.openTurnStartSeq = 10
+    fake.turnFence.lastTurn = 11
+    facts.onInboxClaimed(agentA, messageA, 11)
+    facts.onInboxClaimed(agentB, messageB, 12)
+
+    // B settles independently first; only B's sessionId is on its notifications.
+    facts.onSessionEvent(agentB.session, {
+      type: 'assistant/message',
+      data: { turn: 12, message: { id: 'm-b', content: [{ type: 'text', text: 'answer B' }] } },
+    })
+    facts.onSessionEvent(agentB.session, { type: 'turn/end', data: { turn: 12, reason: { kind: 'completed' } } })
+    let responseB: { id?: number; result?: { stopReason?: string } } | undefined
+    let updateB: { params?: { sessionId?: string } } | undefined
+    for (;;) {
+      const message = (await client.next()) as { id?: number; method?: string; params?: { sessionId?: string }; result?: { stopReason?: string } }
+      if (message.method === 'session/update') { updateB = message; continue }
+      if (message.id === 5) { responseB = message; break }
+    }
+    assert.equal(updateB?.params?.sessionId, sessionB)
+    assert.equal(responseB.result?.stopReason, 'end_turn')
+
+    // A still settles on its own facts and never receives B's response or update.
+    facts.onSessionEvent(agentA.session, {
+      type: 'assistant/message',
+      data: { turn: 11, message: { id: 'm-a', content: [{ type: 'text', text: 'answer A' }] } },
+    })
+    facts.onSessionEvent(agentA.session, { type: 'turn/end', data: { turn: 11, reason: { kind: 'completed' } } })
+    let responseA: { id?: number; result?: { stopReason?: string } } | undefined
+    let updateA: { params?: { sessionId?: string } } | undefined
+    for (;;) {
+      const message = (await client.next()) as { id?: number; method?: string; params?: { sessionId?: string }; result?: { stopReason?: string } }
+      if (message.method === 'session/update') { updateA = message; continue }
+      if (message.id === 4) { responseA = message; break }
+    }
+    assert.equal(updateA?.params?.sessionId, 'session-shared-a')
+    assert.equal(responseA.result?.stopReason, 'end_turn')
+
+    // Closing A leaves B attached for another full turn.
+    client.send({ jsonrpc: '2.0', id: 6, method: 'session/close', params: { sessionId: 'session-shared-a' } })
+    assert.deepEqual(((await client.next()) as { result?: unknown }).result, {})
+    client.send({ jsonrpc: '2.0', id: 7, method: 'session/prompt', params: { sessionId: sessionB, prompt: [{ type: 'text', text: 'B again' }] } })
+    const promptBAgain = await waitForFact(() => fake.prompts[2], 'the second B prompt')
+    const messageBAgain = { id: 'm-b-2', source: { kind: 'user', rpcId: promptBAgain.requestId } }
+    facts.onInboxInserted(agentB, messageBAgain)
+    fake.turnFence.lastTurn = 13
+    facts.onInboxClaimed(agentB, messageBAgain, 13)
+    facts.onSessionEvent(agentB.session, {
+      type: 'assistant/message',
+      data: { turn: 13, message: { id: 'm-b-2', content: [{ type: 'text', text: 'B again answer' }] } },
+    })
+    facts.onSessionEvent(agentB.session, { type: 'turn/end', data: { turn: 13, reason: { kind: 'completed' } } })
+    for (;;) {
+      const message = (await client.next()) as { id?: number; result?: { stopReason?: string } }
+      if (message.id === 7) {
+        assert.equal(message.result?.stopReason, 'end_turn')
+        break
+      }
+    }
+    client.send({ jsonrpc: '2.0', id: 8, method: 'session/prompt', params: { sessionId: 'session-shared-a', prompt: [{ type: 'text', text: 'closed A' }] } })
+    assert.equal(((await client.next()) as { error?: { data?: { code?: string } } }).error?.data?.code, 'LOCAL_ACP_VIEW_NOT_OWNED')
+    client.send({ jsonrpc: '2.0', id: 9, method: 'session/close', params: { sessionId: sessionB } })
+    assert.deepEqual(((await client.next()) as { result?: unknown }).result, {})
+  } finally {
+    client.close()
+  }
+})
+
+test('one ACP socket admits a second new while the first is still awaiting Host create', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess()
+  fake.seed('session-first', '/host/first')
+  fake.seed('session-second', '/host/second')
+  const firstGate = Promise.withResolvers<AcpCreateSessionOutcome>()
+  let createCalls = 0
+  fake.access.createSession = async () => {
+    createCalls += 1
+    return createCalls === 1 ? await firstGate.promise : { kind: 'created', sessionId: 'session-second' }
+  }
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: '/host/first', mcpServers: [] } })
+    await waitForFact(() => createCalls === 1 ? true : undefined, 'the first Host create')
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/new', params: { cwd: '/host/second', mcpServers: [] } })
+    let second: { id?: number; result?: { sessionId?: string } } | undefined
+    for (;;) {
+      const message = (await client.next()) as { id?: number; result?: { sessionId?: string } }
+      if (message.id === 3) { second = message; break }
+    }
+    assert.equal(second.result?.sessionId, 'session-second', 'B must attach while A is still awaiting Host create')
+    firstGate.resolve({ kind: 'created', sessionId: 'session-first' })
+    let first: { id?: number; result?: { sessionId?: string }; error?: unknown } | undefined
+    for (;;) {
+      const message = (await client.next()) as { id?: number; result?: { sessionId?: string }; error?: unknown }
+      if (message.id === 2) { first = message; break }
+    }
+    assert.equal(first.result?.sessionId, 'session-first')
+    assert.equal(first.error, undefined)
+  } finally {
+    client.close()
+  }
+})
+
+test('one ACP socket scopes cancel to the addressed Session only', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess()
+  fake.seed('session-cancel-a', '/host/a')
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-cancel-a', cwd: '/host/a' } })
+    assert.deepEqual(((await client.next()) as { result?: unknown }).result, {})
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/new', params: { cwd: '/host/b', mcpServers: [] } })
+    const sessionB = ((await client.next()) as { result?: { sessionId?: string } }).result?.sessionId as string
+    client.send({ jsonrpc: '2.0', id: 4, method: 'session/prompt', params: { sessionId: 'session-cancel-a', prompt: [{ type: 'text', text: 'A' }] } })
+    client.send({ jsonrpc: '2.0', id: 5, method: 'session/prompt', params: { sessionId: sessionB, prompt: [{ type: 'text', text: 'B' }] } })
+    await waitForFact(() => fake.prompts.length === 2 ? true : undefined, 'both cancel prompts')
+    const promptA = fake.prompts.find(request => request.sessionId === 'session-cancel-a')
+    const promptB = fake.prompts.find(request => request.sessionId === sessionB)
+    assert.ok(promptA !== undefined && promptB !== undefined)
+    const facts = fake.facts()
+    const agentA = fake.agentOf('session-cancel-a')
+    const agentB = fake.agentOf(sessionB)
+    assert.ok(facts !== undefined && agentA !== undefined && agentB !== undefined)
+    const messageA = { id: 'm-cancel-a', source: { kind: 'user', rpcId: promptA.requestId } }
+    const messageB = { id: 'm-cancel-b', source: { kind: 'user', rpcId: promptB.requestId } }
+    facts.onInboxInserted(agentA, messageA)
+    facts.onInboxInserted(agentB, messageB)
+    fake.pendingInbox.add(messageA.id)
+    fake.pendingInbox.add(messageB.id)
+
+    client.send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: sessionB } })
+    let responseB: { id?: number; result?: { stopReason?: string } } | undefined
+    for (;;) {
+      const message = (await client.next()) as { id?: number; result?: { stopReason?: string } }
+      if (message.id === 5) { responseB = message; break }
+    }
+    assert.equal(responseB.result?.stopReason, 'cancelled')
+    assert.deepEqual(fake.removedMessageIds, ['m-cancel-b'])
+    assert.equal(fake.pendingInbox.has('m-cancel-a'), true, 'A remains pending')
+    client.send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: 'session-cancel-a' } })
+    for (;;) {
+      const message = (await client.next()) as { id?: number; result?: { stopReason?: string } }
+      if (message.id === 4) {
+        assert.equal(message.result?.stopReason, 'cancelled')
+        break
+      }
+    }
+    assert.deepEqual(fake.removedMessageIds, ['m-cancel-b', 'm-cancel-a'])
+  } finally {
+    client.close()
+  }
+})
+
+test('a single socket bounds live View slots at eight and reuses a released slot', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess()
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    const sessionIds: string[] = []
+    for (let index = 0; index < 8; index += 1) {
+      client.send({ jsonrpc: '2.0', id: 10 + index, method: 'session/new', params: { cwd: `/host/${String(index)}`, mcpServers: [] } })
+      const created = (await client.next()) as { result?: { sessionId?: string } }
+      assert.equal(typeof created.result?.sessionId, 'string')
+      sessionIds.push(created.result?.sessionId as string)
+    }
+    assert.equal(new Set(sessionIds).size, 8, 'all eight Session Views are distinct')
+    assert.equal(fake.agentOf('session-9'), undefined, 'the ninth Host Session was never created')
+    client.send({ jsonrpc: '2.0', id: 20, method: 'session/new', params: { cwd: '/host/ninth', mcpServers: [] } })
+    const ninth = (await client.next()) as { error?: { code: number; data?: { code?: string } } }
+    assert.equal(ninth.error?.code, -32602)
+    assert.equal(ninth.error?.data?.code, 'LOCAL_ACP_VIEW_BUSY')
+    assert.equal(fake.agentOf('session-9'), undefined, 'the capacity refusal precedes Host create')
+
+    client.send({ jsonrpc: '2.0', id: 21, method: 'session/close', params: { sessionId: sessionIds[0] } })
+    assert.deepEqual(((await client.next()) as { result?: unknown }).result, {})
+    client.send({ jsonrpc: '2.0', id: 22, method: 'session/new', params: { cwd: '/host/reused', mcpServers: [] } })
+    const reused = (await client.next()) as { result?: { sessionId?: string } }
+    assert.equal(reused.result?.sessionId, 'session-9', 'a settled close frees its slot for the ninth View')
+    assert.notEqual(reused.result?.sessionId, sessionIds[0])
+  } finally {
+    client.close()
+  }
+})
+
+test('eight open prompt flights keep legal close and ninth-View rejection reachable on one socket', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess()
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    const sessionIds: string[] = []
+    for (let index = 0; index < 8; index += 1) {
+      client.send({ jsonrpc: '2.0', id: 10 + index, method: 'session/new', params: { cwd: `/host/pending-${String(index)}`, mcpServers: [] } })
+      const created = (await client.next()) as { result?: { sessionId?: string } }
+      assert.equal(typeof created.result?.sessionId, 'string')
+      sessionIds.push(created.result?.sessionId as string)
+    }
+    for (let index = 0; index < 8; index += 1) {
+      client.send({
+        jsonrpc: '2.0', id: 30 + index, method: 'session/prompt',
+        params: { sessionId: sessionIds[index], prompt: [{ type: 'text', text: `open flight ${String(index)}` }] },
+      })
+    }
+    await waitForFact(() => fake.prompts.length === 8 ? true : undefined, 'eight held prompt admissions', 10_000)
+
+    // The ninth View is a connection-local capacity refusal, not a global
+    // pending-request flood that destroys the socket.
+    client.send({ jsonrpc: '2.0', id: 50, method: 'session/new', params: { cwd: '/host/ninth', mcpServers: [] } })
+    const ninth = (await client.next()) as { id?: number; error?: { code: number; data?: { code?: string } } }
+    assert.equal(ninth.id, 50)
+    assert.equal(ninth.error?.code, -32602)
+    assert.equal(ninth.error?.data?.code, 'LOCAL_ACP_VIEW_BUSY')
+
+    // A legal close remains reachable while all eight prompt handlers are
+    // still open; A has one real pending message that the fake Host removes.
+    const facts = fake.facts()
+    const agentA = fake.agentOf(sessionIds[0])
+    const requestA = fake.prompts.find(request => request.sessionId === sessionIds[0])
+    assert.ok(facts !== undefined && agentA !== undefined && requestA !== undefined)
+    facts.onInboxInserted(agentA, { id: 'm-held-a', source: { kind: 'user', rpcId: requestA.requestId } })
+    client.send({ jsonrpc: '2.0', id: 60, method: 'session/close', params: { sessionId: sessionIds[0] } })
+    let closed: { id?: number; result?: unknown; error?: { data?: { code?: string } } } | undefined
+    for (;;) {
+      const message = (await client.next(10_000)) as typeof closed
+      if (message?.id === 60) { closed = message; break }
+    }
+    assert.deepEqual(closed.result, {}, `the owned close must settle without a sibling teardown: ${JSON.stringify(closed.error)}`)
+
+    // The socket and the remaining seven Views still work: a new slot can be
+    // admitted after A's terminal close, while the B..H prompt handlers stay open.
+    client.send({ jsonrpc: '2.0', id: 61, method: 'session/new', params: { cwd: '/host/after-close', mcpServers: [] } })
+    const afterClose = (await client.next()) as { id?: number; result?: { sessionId?: string } }
+    assert.equal(afterClose.id, 61)
+    assert.equal(typeof afterClose.result?.sessionId, 'string')
+  } finally {
+    client.close()
+  }
+})
+
+test('four slow lifecycle controls cannot make a legal close destroy the socket', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess()
+  fake.seed('session-close-a', '/host/close-a')
+  for (let index = 0; index < 4; index += 1) fake.seed(`held-${String(index)}`, `/host/held-${String(index)}`)
+  const gates = Array.from({ length: 4 }, () => Promise.withResolvers<void>())
+  let createIndex = 0
+  fake.access.createSession = async () => {
+    const index = createIndex
+    createIndex += 1
+    await gates[index]?.promise
+    return { kind: 'created' as const, sessionId: `held-${String(index)}` }
+  }
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-close-a', cwd: '/host/close-a' } })
+    assert.deepEqual(((await client.next()) as { result?: unknown }).result, {})
+    for (let index = 0; index < 4; index += 1) {
+      client.send({ jsonrpc: '2.0', id: 10 + index, method: 'session/new', params: { cwd: `/host/held-${String(index)}`, mcpServers: [] } })
+    }
+    await waitForFact(() => createIndex === 4 ? true : undefined, 'four held Host creates', 10_000)
+    client.send({ jsonrpc: '2.0', id: 30, method: 'session/new', params: { cwd: '/host/overload', mcpServers: [] } })
+    const overload = (await client.next()) as { id?: number; error?: { data?: { code?: string } } }
+    assert.equal(overload.id, 30)
+    assert.equal(overload.error?.data?.code, 'LOCAL_ACP_TOO_MANY_PENDING_REQUESTS')
+    assert.equal(createIndex, 4, 'the overload must not reach Host create')
+    client.send({ jsonrpc: '2.0', id: 20, method: 'session/close', params: { sessionId: 'session-close-a' } })
+    const closed = (await client.next()) as { id?: number; result?: unknown; error?: { data?: { code?: string } } }
+    assert.equal(closed.id, 20)
+    assert.deepEqual(closed.result, {}, `a legal close must not be blocked by four lifecycle controls: ${JSON.stringify(closed.error)}`)
+    client.send({ jsonrpc: '2.0', id: 21, method: 'session/close', params: { sessionId: 'unknown-close' } })
+    const unknown = (await client.next()) as { id?: number; result?: unknown; error?: unknown }
+    assert.equal(unknown.id, 21)
+    assert.deepEqual(unknown.result, {}, 'the physical socket remains alive after the held-control close')
+    for (const gate of gates) gate.resolve()
+    const created = new Map<number, string>()
+    for (let remaining = 4; remaining > 0;) {
+      const message = (await client.next()) as { id?: number; result?: { sessionId?: string }; error?: unknown }
+      if (message.id === undefined) continue
+      if (message.id >= 10 && message.id <= 13) {
+        assert.equal(typeof message.result?.sessionId, 'string')
+        created.set(message.id, message.result?.sessionId as string)
+        remaining -= 1
+      }
+    }
+    assert.deepEqual([...created.values()].sort(), ['held-0', 'held-1', 'held-2', 'held-3'])
+  } finally {
+    client.close()
+  }
+})
+
+test('Off releases every View slot on the shared registry and a new bind can resume them', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess()
+  fake.seed('session-off-a', '/host/a')
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  const listenerA = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access, views: registry })
+  const clientA = await RawClient.open(listenerA.socketPath)
+  initialize(clientA, 1)
+  await clientA.next()
+  clientA.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-off-a', cwd: '/host/a' } })
+  assert.deepEqual(((await clientA.next()) as { result?: unknown }).result, {})
+  clientA.send({ jsonrpc: '2.0', id: 3, method: 'session/new', params: { cwd: '/host/b', mcpServers: [] } })
+  const sessionB = ((await clientA.next()) as { result?: { sessionId?: string } }).result?.sessionId as string
+  assert.equal(registry.claimCount(), 2)
+  await listenerA.close()
+  await waitForFact(() => registry.claimCount() === 0 ? true : undefined, 'all Off View claims released')
+  assert.equal(registry.hasClaim('session-off-a'), false)
+  assert.equal(registry.hasClaim(sessionB), false)
+
+  const listenerB = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access, views: registry })
+  try {
+    const clientB = await RawClient.open(listenerB.socketPath)
+    try {
+      initialize(clientB, 1)
+      await clientB.next()
+      clientB.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-off-a', cwd: '/host/a' } })
+      assert.deepEqual(((await clientB.next()) as { result?: unknown }).result, {})
+      assert.equal(registry.claimCount(), 1, 'the old registry accepts a fresh View after Off -> On')
+    } finally {
+      clientB.close()
+    }
+  } finally {
+    await listenerB.close()
+    registry.disposeFacts()
+    clientA.close()
+  }
+})
+
+test('an Agent disposal releases only its own View and leaves the sibling Session working', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess()
+  fake.seed('session-dispose-a', '/host/a')
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access, views: registry })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-dispose-a', cwd: '/host/a' } })
+    assert.deepEqual(((await client.next()) as { result?: unknown }).result, {})
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/new', params: { cwd: '/host/b', mcpServers: [] } })
+    const sessionB = ((await client.next()) as { result?: { sessionId?: string } }).result?.sessionId as string
+    const facts = fake.facts()
+    const agentA = fake.agentOf('session-dispose-a')
+    const agentB = fake.agentOf(sessionB)
+    assert.ok(facts !== undefined && agentA !== undefined && agentB !== undefined)
+    assert.equal(registry.claimCount(), 2)
+    facts.onAgentDisposed(agentA)
+    assert.equal(registry.hasClaim('session-dispose-a'), false, 'the disposed A claim is released')
+    assert.equal(registry.hasClaim(sessionB), true, 'the sibling B claim survives')
+    assert.equal(registry.claimCount(), 1)
+
+    client.send({ jsonrpc: '2.0', id: 4, method: 'session/prompt', params: { sessionId: sessionB, prompt: [{ type: 'text', text: 'B after A disposal' }] } })
+    const request = await waitForFact(() => fake.prompts[0], 'B after A disposal prompt')
+    const message = { id: 'm-after-a', source: { kind: 'user', rpcId: request.requestId } }
+    facts.onInboxInserted(agentB, message)
+    facts.onInboxClaimed(agentB, message, 1)
+    facts.onSessionEvent(agentB.session, {
+      type: 'assistant/message',
+      data: { turn: 1, message: { id: 'm-after-a', content: [{ type: 'text', text: 'B survives' }] } },
+    })
+    facts.onSessionEvent(agentB.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    for (;;) {
+      const response = (await client.next()) as { id?: number; result?: { stopReason?: string } }
+      if (response.id === 4) {
+        assert.equal(response.result?.stopReason, 'end_turn')
+        break
+      }
+    }
+  } finally {
+    registry.disposeFacts()
+    client.close()
   }
 })
 
@@ -1729,6 +2192,79 @@ test('an approval of the ACP-owned turn arrives as a REVERSE session/request_per
   }
 })
 
+test('permission requests on one socket stay on their exact Session', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess()
+  fake.seed('session-permission-a', '/host/a')
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-permission-a', cwd: '/host/a' } })
+    assert.deepEqual(((await client.next()) as { result?: unknown }).result, {})
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/new', params: { cwd: '/host/b', mcpServers: [] } })
+    const sessionB = ((await client.next()) as { result?: { sessionId?: string } }).result?.sessionId as string
+    client.send({ jsonrpc: '2.0', id: 4, method: 'session/prompt', params: { sessionId: 'session-permission-a', prompt: [{ type: 'text', text: 'A asks' }] } })
+    client.send({ jsonrpc: '2.0', id: 5, method: 'session/prompt', params: { sessionId: sessionB, prompt: [{ type: 'text', text: 'B asks' }] } })
+    await waitForFact(() => fake.prompts.length === 2 ? true : undefined, 'both permission prompts')
+    const requestA = fake.prompts.find(request => request.sessionId === 'session-permission-a')
+    const requestB = fake.prompts.find(request => request.sessionId === sessionB)
+    assert.ok(requestA !== undefined && requestB !== undefined)
+    const facts = fake.facts()
+    const agentA = fake.agentOf('session-permission-a')
+    const agentB = fake.agentOf(sessionB)
+    assert.ok(facts !== undefined && agentA !== undefined && agentB !== undefined)
+    const messageA = { id: 'm-permission-a', source: { kind: 'user', rpcId: requestA.requestId } }
+    const messageB = { id: 'm-permission-b', source: { kind: 'user', rpcId: requestB.requestId } }
+    facts.onInboxInserted(agentA, messageA)
+    facts.onInboxInserted(agentB, messageB)
+    facts.onInboxClaimed(agentA, messageA, 1)
+    facts.onInboxClaimed(agentB, messageB, 2)
+
+    fake.turnFence.openTurnStartSeq = 31
+    fake.turnFence.lastTurn = 1
+    const decidedA = facts.onApprovalRequest({ agent: agentA, toolName: 'bash', callId: 'call-permission-a' }, async () => 'unavailable')
+    const reverseA = (await client.next()) as { id?: number; method?: string; params?: { sessionId?: string; toolCall?: { toolCallId?: string } } }
+    assert.equal(reverseA.method, 'session/request_permission')
+    assert.equal(reverseA.params?.sessionId, 'session-permission-a')
+    assert.equal(reverseA.params?.toolCall?.toolCallId, 'call-permission-a')
+    client.send({ jsonrpc: '2.0', id: reverseA.id, result: { outcome: { outcome: 'selected', optionId: 'allow-once' } } })
+    assert.equal(await decidedA, 'allowed-once')
+
+    fake.turnFence.openTurnStartSeq = 32
+    fake.turnFence.lastTurn = 2
+    const decidedB = facts.onApprovalRequest({ agent: agentB, toolName: 'bash', callId: 'call-permission-b' }, async () => 'unavailable')
+    const reverseB = (await client.next()) as { id?: number; method?: string; params?: { sessionId?: string; toolCall?: { toolCallId?: string } } }
+    assert.equal(reverseB.method, 'session/request_permission')
+    assert.equal(reverseB.params?.sessionId, sessionB)
+    assert.equal(reverseB.params?.toolCall?.toolCallId, 'call-permission-b')
+    client.send({ jsonrpc: '2.0', id: reverseB.id, result: { outcome: { outcome: 'selected', optionId: 'reject-once' } } })
+    assert.equal(await decidedB, 'rejected')
+
+    facts.onSessionEvent(agentA.session, {
+      type: 'assistant/message', data: { turn: 1, message: { id: 'm-permission-a', content: [{ type: 'text', text: 'A answer' }] } },
+    })
+    facts.onSessionEvent(agentA.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    facts.onSessionEvent(agentB.session, {
+      type: 'assistant/message', data: { turn: 2, message: { id: 'm-permission-b', content: [{ type: 'text', text: 'B answer' }] } },
+    })
+    facts.onSessionEvent(agentB.session, { type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } })
+    const responses = new Map<number, { result?: { stopReason?: string } }>()
+    for (let remaining = 2; remaining > 0;) {
+      const message = (await client.next()) as { id?: number; method?: string; result?: { stopReason?: string } }
+      if (message.method === 'session/update' || message.id === undefined) continue
+      responses.set(message.id, message)
+      remaining -= 1
+    }
+    assert.equal(responses.get(4)?.result?.stopReason, 'end_turn')
+    assert.equal(responses.get(5)?.result?.stopReason, 'end_turn')
+  } finally {
+    client.close()
+  }
+})
+
 test('a TUI-owned approval never reaches the ACP connection and a second Session stays isolated', async t => {
   const { scope } = newScope(t)
   const fake = makeFakeAccess()
@@ -2060,6 +2596,60 @@ test('a same-id edit stays pending over UDS, true removal settles, and a later b
     assert.deepEqual(((await client.next()) as { result?: unknown }).result, {})
     client.send({ jsonrpc: '2.0', id: 8, method: 'session/resume', params: { sessionId: agent.id, cwd: '/host/proj' } })
     assert.deepEqual(((await client.next()) as { result?: unknown }).result, {}, 'real terminal settlement permits reattach')
+  } finally {
+    client.close()
+  }
+})
+
+test('an unconfirmed A close stays fail-closed while B continues on the same socket', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess()
+  fake.seed('session-unconfirmed-a', '/host/a')
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-unconfirmed-a', cwd: '/host/a' } })
+    assert.deepEqual(((await client.next()) as { result?: unknown }).result, {})
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/new', params: { cwd: '/host/b', mcpServers: [] } })
+    const sessionB = ((await client.next()) as { result?: { sessionId?: string } }).result?.sessionId as string
+    client.send({ jsonrpc: '2.0', id: 4, method: 'session/prompt', params: { sessionId: 'session-unconfirmed-a', prompt: [{ type: 'text', text: 'A queued' }] } })
+    const requestA = await waitForFact(() => fake.prompts[0], 'the unconfirmed A prompt')
+    const facts = fake.facts()
+    const agentA = fake.agentOf('session-unconfirmed-a')
+    const agentB = fake.agentOf(sessionB)
+    assert.ok(facts !== undefined && agentA !== undefined && agentB !== undefined)
+    facts.onInboxInserted(agentA, { id: 'm-unconfirmed-a', source: { kind: 'user', rpcId: requestA.requestId } })
+    fake.staleCancel.value = true
+    client.send({ jsonrpc: '2.0', id: 5, method: 'session/close', params: { sessionId: 'session-unconfirmed-a' } })
+    assert.equal(((await client.next()) as { error?: { data?: { code?: string } } }).error?.data?.code,
+      'LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED')
+    client.send({ jsonrpc: '2.0', id: 6, method: 'session/prompt', params: { sessionId: sessionB, prompt: [{ type: 'text', text: 'B still works' }] } })
+    const requestB = await waitForFact(() => fake.prompts[1], 'the B prompt after A close')
+    const messageB = { id: 'm-unconfirmed-b', source: { kind: 'user', rpcId: requestB.requestId } }
+    facts.onInboxInserted(agentB, messageB)
+    facts.onInboxClaimed(agentB, messageB, 1)
+    facts.onSessionEvent(agentB.session, {
+      type: 'assistant/message',
+      data: { turn: 1, message: { id: 'm-unconfirmed-b', content: [{ type: 'text', text: 'B settled' }] } },
+    })
+    facts.onSessionEvent(agentB.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    for (;;) {
+      const response = (await client.next()) as { id?: number; result?: { stopReason?: string } }
+      if (response.id === 6) {
+        assert.equal(response.result?.stopReason, 'end_turn')
+        break
+      }
+    }
+    client.send({ jsonrpc: '2.0', id: 7, method: 'session/close', params: { sessionId: 'session-unconfirmed-a' } })
+    assert.equal(((await client.next()) as { error?: { data?: { code?: string } } }).error?.data?.code,
+      'LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED', 'a repeat A close must not fabricate success while B is active')
+    facts.onAgentDisposed(agentA)
+    client.send({ jsonrpc: '2.0', id: 8, method: 'session/close', params: { sessionId: 'session-unconfirmed-a' } })
+    assert.deepEqual(((await client.next()) as { result?: unknown }).result, {},
+      'the exact Agent disposal is a real terminal fact')
   } finally {
     client.close()
   }
@@ -2852,6 +3442,63 @@ test('ACP v1 config options are served over the real socket for new/resume/set_c
     const closed = (await client.next()) as { error?: { code: number; data?: { code?: string } } }
     assert.equal(closed.error?.code, -32602)
     assert.equal(closed.error?.data?.code, 'LOCAL_ACP_VIEW_NOT_OWNED')
+  } finally {
+    client.close()
+  }
+})
+
+test('model options and config updates stay scoped to their Session on one socket', async t => {
+  const { scope } = newScope(t)
+  const optionsA = configOptionsFor('["p1","a"]')
+  const optionsB = configOptionsFor('["p1","b"]')
+  const selected: Array<{ readonly agent: string; readonly value: string }> = []
+  const fake = makeFakeAccess({
+    modelOptions: async agent => (agent.id === 'session-model-a' ? optionsA : optionsB),
+    selectModelOnly: async (agent, _session, request) => {
+      selected.push({ agent: String(agent.id), value: String(request.value) })
+      return agent.id === 'session-model-a' ? optionsB : optionsA
+    },
+  })
+  fake.seed('session-model-a', '/host/a')
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-model-a', cwd: '/host/a' } })
+    const resumedA = (await client.next()) as { result?: { configOptions?: SessionConfigOption[] } }
+    assert.deepEqual(resumedA.result?.configOptions, optionsA)
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/new', params: { cwd: '/host/b', mcpServers: [] } })
+    const createdB = (await client.next()) as { result?: { sessionId?: string; configOptions?: SessionConfigOption[] } }
+    const sessionB = createdB.result?.sessionId as string
+    assert.deepEqual(createdB.result?.configOptions, optionsB)
+
+    client.send({ jsonrpc: '2.0', id: 4, method: 'session/set_config_option', params: { sessionId: 'session-model-a', configId: 'model', value: '["p1","a2"]' } })
+    const selectedA = (await client.next()) as { id?: number; result?: { configOptions?: SessionConfigOption[] } }
+    assert.equal(selectedA.id, 4)
+    assert.deepEqual(selectedA.result?.configOptions, optionsB)
+    client.send({ jsonrpc: '2.0', id: 5, method: 'session/set_config_option', params: { sessionId: sessionB, configId: 'model', value: '["p1","b2"]' } })
+    const selectedB = (await client.next()) as { id?: number; result?: { configOptions?: SessionConfigOption[] } }
+    assert.equal(selectedB.id, 5)
+    assert.deepEqual(selectedB.result?.configOptions, optionsA)
+    assert.deepEqual(selected, [
+      { agent: 'session-model-a', value: '["p1","a2"]' },
+      { agent: sessionB, value: '["p1","b2"]' },
+    ])
+
+    const facts = fake.facts()
+    const agentA = fake.agentOf('session-model-a')
+    const agentB = fake.agentOf(sessionB)
+    assert.ok(facts !== undefined && agentA !== undefined && agentB !== undefined)
+    facts.onSessionEvent(agentA.session, { type: 'model/selection', data: { provider: 'p1', model: 'a2' } })
+    const notificationA = (await client.next()) as { method?: string; params?: { sessionId?: string; update?: { sessionUpdate?: string; configOptions?: SessionConfigOption[] } } }
+    assert.equal(notificationA.params?.sessionId, 'session-model-a')
+    assert.deepEqual(notificationA.params?.update?.configOptions, optionsA)
+    facts.onSessionEvent(agentB.session, { type: 'model/selection', data: { provider: 'p1', model: 'b2' } })
+    const notificationB = (await client.next()) as { method?: string; params?: { sessionId?: string; update?: { configOptions?: SessionConfigOption[] } } }
+    assert.equal(notificationB.params?.sessionId, sessionB)
+    assert.deepEqual(notificationB.params?.update?.configOptions, optionsB)
   } finally {
     client.close()
   }

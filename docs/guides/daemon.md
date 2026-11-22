@@ -248,16 +248,25 @@ try {
   const mcpServers = process.env.ACP_MCP_COMMAND === undefined
     ? []
     : [{ name: 'local-tools', command: process.env.ACP_MCP_COMMAND, args: [], env: [] }]
-  const { sessionId } = await connection.agent.request(acp.methods.agent.session.new, {
+  const first = await connection.agent.request(acp.methods.agent.session.new, {
     cwd: process.cwd(), mcpServers,
   })
   try {
-    const result = await connection.agent.request(acp.methods.agent.session.prompt, {
-      sessionId, prompt: [{ type: 'text', text: 'Hello' }],
+    const second = await connection.agent.request(acp.methods.agent.session.new, {
+      cwd: process.cwd(), mcpServers,
     })
-    console.log('stopReason:', result.stopReason)
+    try {
+      for (const [name, sessionId] of [['first', first.sessionId], ['second', second.sessionId]]) {
+        const result = await connection.agent.request(acp.methods.agent.session.prompt, {
+          sessionId, prompt: [{ type: 'text', text: `Hello from ${name}` }],
+        })
+        console.log(`${name} stopReason:`, result.stopReason)
+      }
+    } finally {
+      await connection.agent.request(acp.methods.agent.session.close, { sessionId: second.sessionId })
+    }
   } finally {
-    await connection.agent.request(acp.methods.agent.session.close, { sessionId })
+    await connection.agent.request(acp.methods.agent.session.close, { sessionId: first.sessionId })
   }
 } finally {
   connection.close()
@@ -265,4 +274,4 @@ try {
 }
 ```
 
-To borrow an existing Session, use `session.resume({ sessionId, cwd, mcpServers })` instead of `session.new`; a resume always uses the Session's original Host cwd for any MCP child, and a different request cwd only produces a redacted diagnostic. An ACP connection may borrow one Session View, and an individual Session permits only one ACP View at a time; concurrent TUI views are unaffected. `session.close` detaches its view without deleting the shared Host Session. When a TUI turn is still using an MCP tool, the close returns `{}` after detaching only the ACP View: the Agent, Session and MCP child remain alive until their real Host terminal facts settle, then the Host retires the exact MCP lease. A second ACP View cannot attach that Session while an unconfirmed cleanup keeps the lease fenced. The Host's live ACP status and the next-launch auto-start preference are separate controls.
+To borrow an existing Session, use `session.resume({ sessionId, cwd, mcpServers })` instead of `session.new`; a resume always uses the Session's original Host cwd for any MCP child, and a different request cwd only produces a redacted diagnostic. One ACP connection may borrow up to eight Session Views, while an individual Session permits only one ACP View at a time; concurrent TUI views are unaffected. `session.close` detaches its exact view without deleting the shared Host Session, and closing an unknown or inactive Session is an idempotent success with no Host side effect. When a TUI turn is still using an MCP tool, the close returns `{}` after detaching only the ACP View: the Agent, Session and MCP child remain alive until their real Host terminal facts settle, then the Host retires the exact MCP lease. A second ACP View cannot attach that Session while an unconfirmed cleanup keeps the lease fenced. The Host's live ACP status and the next-launch auto-start preference are separate controls.

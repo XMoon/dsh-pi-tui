@@ -404,8 +404,40 @@ test('session/close is idempotent on one connection and never clears another con
   assert.equal(registry.phaseOf(a), 'idle')
   assert.equal(registry.hasClaim('S5'), true, 'another connection claim is untouched')
   assert.equal(registry.claimCount(), 1)
-  // A connection closing a Session it never held is refused.
-  await assert.rejects(registry.closeSession(a, access, 'S5'), isViewError('LOCAL_ACP_VIEW_NOT_OWNED'))
+  // A close of a foreign, unknown or inactive Session is a side-effect-free
+  // success and never touches the real owner's claim.
+  const phaseB = registry.phaseOf(b)
+  assert.deepEqual(await registry.closeSession(a, access, 'S5'), {})
+  assert.equal(registry.hasClaim('S5'), true, 'the foreign claim survives the idempotent close')
+  assert.equal(registry.phaseOf(b), phaseB, 'the foreign connection phase is untouched')
+  assert.deepEqual(await registry.closeSession(a, access, 'unknown-session'), {})
+  assert.equal(registry.claimCount(), 1)
+
+  // Closing A again after the SAME connection attaches B remains an inert `{}`
+  // and cannot release or mutate B's exact claim.
+  access.seed(makeAgent('S6', '/w'))
+  await registry.resumeSession(a, access, { sessionId: 'S6', cwd: '/w' })
+  const claimB = registry.ownsClaim(a, 'S6')
+  assert.equal(claimB, true)
+  assert.deepEqual(await registry.closeSession(a, access, 'S4'), {})
+  assert.equal(registry.ownsClaim(a, 'S6'), claimB, 'the active B claim is unchanged')
+  assert.equal(registry.phaseOf(a), 'attached', 'the active B View remains attached')
+  assert.equal(registry.claimCount(), 2, 'B and the other connection claim both survive')
+})
+
+test('ownership readback is exact to the connection and includes retained fences', async () => {
+  const access = new FakeAccess()
+  access.seed(makeAgent('S-owned', '/w'))
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  const a = registry.createConnection()
+  const b = registry.createConnection()
+  await registry.resumeSession(a, access, { sessionId: 'S-owned', cwd: '/w' })
+
+  assert.equal(registry.ownsClaim(a, 'S-owned'), true)
+  assert.equal(registry.ownsClaim(b, 'S-owned'), false)
+  assert.equal(registry.ownsClaim(a, 'S-unknown'), false)
+  assert.equal(registry.hasClaimOwnedBy(a), true)
+  assert.equal(registry.hasClaimOwnedBy(b), false)
 })
 
 test('releasing a connection frees only its claims and marks it closed', async () => {
@@ -3776,6 +3808,19 @@ test('an unconfirmed MCP retirement is retried on a later real terminal instead 
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(attempts, 2)
   assert.equal(registry.claimCount(), 0)
+})
+
+test('an Agent disposal releases an attached claim with no other obligation', async () => {
+  const access = new FakeAccess()
+  const agent = makeAgent('agent-disposed-plain', '/work/plain')
+  access.seed(agent)
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  const conn = registry.createConnection()
+  await registry.resumeSession(conn, access, { sessionId: 'agent-disposed-plain', cwd: '/work/plain' })
+  assert.equal(registry.phaseOf(conn), 'attached')
+  registry.onAgentDisposed(agent)
+  assert.equal(registry.claimCount(), 0, 'the disposed exact Agent claim must not fence the Session')
+  assert.equal(registry.phaseOf(conn), 'idle', 'only the disposed View slot becomes idle')
 })
 
 test('an Agent disposal releases an attached claim after its MCP lease retires', async () => {

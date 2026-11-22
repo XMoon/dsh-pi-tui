@@ -358,10 +358,12 @@ const B1_FAIL_MARKER = 'B1_FAIL_A'
 const B1_PLAIN_MARKER = 'B1_PLAIN_A'
 const B1_ECHO_B_MARKER = 'B1_ECHO_B'
 const B1_HOLD_B_MARKER = 'B1_HOLD_B'
+const B1_APPROVAL_A_MARKER = 'B1_APPROVAL_A'
+const B1_APPROVAL_B_MARKER = 'B1_APPROVAL_B'
 const B1_ECHO_TOOL = 'mcp__b1scope__echo'
 const B1_HOLD_TOOL = 'mcp__b1scope__hold'
 const B1_FAIL_TOOL = 'mcp__b1scope__fail'
-const B1_PROMPT_PATTERN = /\b(B1_(?:ECHO|HOLD|FAIL|PLAIN)_[AB])\b(?:\s+([A-Za-z0-9_-]+))?/u
+const B1_PROMPT_PATTERN = /\b(B1_(?:ECHO|HOLD|FAIL|PLAIN|APPROVAL)_[AB])\b(?:\s+([A-Za-z0-9_-]+))?/u
 
 /** The newest authored B1 prompt marker and its optional nonce. */
 function b1PromptOf(messages) {
@@ -2016,6 +2018,32 @@ class C1Model extends LlmAdapter {
         hasFailTool: toolNames.includes(B1_FAIL_TOOL),
         afterTool,
       })
+      if ((prompt.marker === B1_APPROVAL_A_MARKER || prompt.marker === B1_APPROVAL_B_MARKER) && !afterTool) {
+        const approvalKey = `b1-approval:${sessionId}`
+        if (!this.toolIssued.has(approvalKey)) {
+          this.toolIssued.add(approvalKey)
+          const marker = join(this.root, `b1-approval-${sessionId}.marker`)
+          const command = `printf 'b1-approval' > ${shellQuote(marker)}`
+          yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+          yield {
+            type: 'block-end',
+            index: 0,
+            block: {
+              type: 'tool-call',
+              id: `b1-approval-${sessionId}`,
+              name: 'bash',
+              arguments: JSON.stringify({
+                command,
+                description: 'Create the harmless B2 permission marker',
+                sandbox_permissions: 'danger-full-access',
+                justification: 'Qualification verifies exact ACP permission routing on an isolated harmless command.',
+              }),
+            },
+          }
+          yield { type: 'finish', reason: { kind: 'tool-calls' } }
+          return
+        }
+      }
       if (prompt.marker === B1_PLAIN_MARKER) {
         yield { type: 'block-start', index: 0, blockType: 'text' }
         yield { type: 'text-delta', index: 0, text: `b1 plain settled ${prompt.nonce ?? ''} ${token}` }

@@ -55,6 +55,8 @@ import {
 
 /** The ACP agent identity this front door advertises (never a copied brand). */
 const AGENT_NAME = 'dsh-pi-tui'
+/** JSON-RPC invalid-params code used by connection-local View admission refusals. */
+const JSONRPC_INVALID_PARAMS = -32602
 
 /** One input line (a single NDJSON frame) may not exceed one mebibyte. */
 const MAX_INPUT_FRAME_BYTES = 1024 * 1024
@@ -64,8 +66,29 @@ const MAX_INPUT_FRAME_BYTES = 1024 * 1024
  * the bounded ReadableStream. All three are summed in bytes against this cap.
  */
 const MAX_INPUT_UNCONSUMED_BYTES = 2 * 1024 * 1024
-/** At most this many requests may be dispatched concurrently on ONE connection. */
+/** At most this many prompt/ordinary requests may be dispatched concurrently on ONE connection. */
 const MAX_PENDING_REQUESTS = 8
+/**
+ * Session lifecycle controls have their own bounded headroom. They must stay
+ * reachable while all eight View prompt flights are open: otherwise a legal
+ * `session/close` (or a ninth-View capacity rejection) would be misclassified
+ * as a connection-wide flood.
+ */
+const MAX_PENDING_CONTROL_REQUESTS = 4
+/**
+ * At most this many Session Views may be active, attaching or retained by a
+ * terminal fence on ONE physical ACP connection. This is this product's own
+ * capacity policy, not an ACP v1 limit.
+ */
+const MAX_ACP_VIEWS_PER_CONNECTION = 8
+/**
+ * `session/close` is terminal work, not an ordinary lifecycle control: a
+ * close must remain reachable while the new/resume/config lane is occupied by
+ * legitimate Host awaits. At most one close per View is useful; the bound is
+ * the number of View slots, and an excess close is refused without destroying
+ * unrelated Views.
+ */
+const MAX_PENDING_CLOSE_REQUESTS = MAX_ACP_VIEWS_PER_CONNECTION
 /** Bytes reserved per image block for JSON metadata around its encoded data. */
 const IMAGE_METADATA_BYTES = 65_536
 /** Bytes reserved for the JSON-RPC envelope and its trailing newline. */
@@ -293,6 +316,8 @@ export function parseAcpMaxConnections(raw: string | undefined): number {
 interface ConnectionState {
   initialized: boolean
   pendingRequests: number
+  pendingControlRequests: number
+  pendingCloseRequests: number
   closed: boolean
   /** Whether THIS connection negotiated inline image prompts during its initialize. */
   imageEnabled: boolean
@@ -305,8 +330,12 @@ interface ConnectionState {
    * or narrows it, because output images are committed content, not prompts.
    */
   maxOutputFrameBytes: number
-  /** The connection-scoped Session View state; present only when Session View is installed. */
-  view?: ConnectionViewState
+  /**
+   * The bounded per-connection Session View roster; present only when Session
+   * View is installed. Each slot is routing/teardown state only — the one
+   * Registry claim remains the business authority for its Session.
+   */
+  views?: Set<ConnectionViewState>
 }
 
 /** The listener's accept-time facts shared by the connection factories. */
@@ -589,27 +618,99 @@ function createBoundedOutput(
   }, new ByteLengthQueuingStrategy({ highWaterMark: MAX_OUTPUT_BUFFER_BYTES }))
 }
 
+/** Drop routing-only slots that hold neither an operation nor a Host claim. */
+function pruneIdleViewSlots(slots: Set<ConnectionViewState>, views: AcpSessionViewRegistry): void {
+  for (const candidate of slots) {
+    if (candidate.phase === 'idle' && !views.hasClaimOwnedBy(candidate)) slots.delete(candidate)
+  }
+}
+
+/** Reserve ONE bounded connection-local View slot BEFORE the first Host await. */
+function createSessionViewSlot(
+  slots: Set<ConnectionViewState>,
+  views: AcpSessionViewRegistry,
+): ConnectionViewState {
+  pruneIdleViewSlots(slots, views)
+  if (slots.size >= MAX_ACP_VIEWS_PER_CONNECTION) {
+    throw new LocalAcpViewError(
+      'LOCAL_ACP_VIEW_BUSY',
+      'this ACP connection holds the maximum number of Session Views',
+      JSONRPC_INVALID_PARAMS,
+    )
+  }
+  const view = views.createConnection()
+  slots.add(view)
+  return view
+}
+
+/** Find the exact connection-local slot that owns one Session claim. */
+function routeOwnedView(
+  slots: Set<ConnectionViewState>,
+  views: AcpSessionViewRegistry,
+  sessionId: string,
+): ConnectionViewState | undefined {
+  for (const candidate of slots) {
+    if (views.ownsClaim(candidate, sessionId)) return candidate
+  }
+  return undefined
+}
+
+/** Release a handler's slot only when no attach operation or Host claim remains. */
+function releaseIdleViewSlot(
+  slots: Set<ConnectionViewState>,
+  views: AcpSessionViewRegistry,
+  view: ConnectionViewState,
+): void {
+  if (view.phase === 'idle' && !views.hasClaimOwnedBy(view)) slots.delete(view)
+}
+
 /** Build the per-connection ACP agent app whose handlers own only connection-local state. */
 function buildAgentApp(
   state: ConnectionState,
-  view: ConnectionViewState | undefined,
   context: ListenerContext,
   fail: (code: string) => void,
 ) {
   const app = agent({ name: AGENT_NAME })
   let initializeComplete = false
 
-  const beginRequest = (): void => {
-    state.pendingRequests += 1
-    if (state.pendingRequests > MAX_PENDING_REQUESTS) {
-      state.pendingRequests -= 1
-      fail('LOCAL_ACP_TOO_MANY_PENDING_REQUESTS')
-      throw new RequestError(
-        -32044,
-        'too many outstanding ACP requests on this connection',
-        { code: 'LOCAL_ACP_TOO_MANY_PENDING_REQUESTS' },
-      )
-    }
+  type RequestAdmission = 'ordinary' | 'control' | 'close'
+  const beginRequest = (mode: RequestAdmission = 'ordinary'): void => {
+    const count = mode === 'close'
+      ? state.pendingCloseRequests
+      : mode === 'control'
+        ? state.pendingControlRequests
+        : state.pendingRequests
+    const limit = mode === 'close'
+      ? MAX_PENDING_CLOSE_REQUESTS
+      : mode === 'control'
+        ? MAX_PENDING_CONTROL_REQUESTS
+        : MAX_PENDING_REQUESTS
+    if (mode === 'close') state.pendingCloseRequests += 1
+    else if (mode === 'control') state.pendingControlRequests += 1
+    else state.pendingRequests += 1
+    if (count + 1 <= limit) return
+    // A control/close refusal is per-request backpressure. It must not destroy
+    // the socket or unrelated Views; only the ordinary prompt/input lane keeps
+    // the connection-wide abuse fail-closed.
+    if (mode === 'close') state.pendingCloseRequests -= 1
+    else if (mode === 'control') state.pendingControlRequests -= 1
+    else state.pendingRequests -= 1
+    if (mode === 'ordinary') fail('LOCAL_ACP_TOO_MANY_PENDING_REQUESTS')
+    throw new RequestError(
+      -32044,
+      mode === 'close'
+        ? 'too many outstanding ACP close requests on this connection'
+        : mode === 'control'
+          ? 'too many outstanding ACP control requests on this connection'
+          : 'too many outstanding ACP requests on this connection',
+      { code: 'LOCAL_ACP_TOO_MANY_PENDING_REQUESTS' },
+    )
+  }
+
+  const endRequest = (mode: RequestAdmission = 'ordinary'): void => {
+    if (mode === 'close') state.pendingCloseRequests -= 1
+    else if (mode === 'control') state.pendingControlRequests -= 1
+    else state.pendingRequests -= 1
   }
 
   app.onRequest(methods.agent.initialize, async request => {
@@ -635,7 +736,7 @@ function buildAgentApp(
       // exact default route and attachment store decide it, and the connection
       // keeps this frozen result for every later session/prompt.
       state.initialized = true
-      if (context.sessionAccess !== undefined && state.view !== undefined) {
+      if (context.sessionAccess !== undefined && state.views !== undefined) {
         const imageEnabled = await context.sessionAccess.supportsImagePrompts()
         const bounds = imageEnabled ? deriveImageInputBounds(context.sessionAccess.imageLimits()) : undefined
         if (bounds !== undefined) {
@@ -659,16 +760,16 @@ function buildAgentApp(
         authMethods: [],
       }
     } finally {
-      state.pendingRequests -= 1
+      endRequest()
     }
   })
 
   const rejectSessionOperation = (_request: { params: unknown }): never => {
-    beginRequest()
+    beginRequest('control')
     try {
       rejectSessionNotReady()
     } finally {
-      state.pendingRequests -= 1
+      endRequest('control')
     }
   }
   // Register with a permissive params parser for the STILL-UNSUPPORTED methods:
@@ -679,7 +780,8 @@ function buildAgentApp(
 
   const access = context.sessionAccess
   const views = context.views
-  if (access !== undefined && views !== undefined && view !== undefined) {
+  const slots = state.views
+  if (access !== undefined && views !== undefined && slots !== undefined) {
     // PO-2 shared Session View: the three lifecycle methods are decoded with the
     // SDK's STANDARD schema (typed params), and any View rejection is mapped
     // onto a JSON-RPC RequestError that keeps the stable data code.
@@ -696,14 +798,22 @@ function buildAgentApp(
       error instanceof LocalAcpViewError
         ? new RequestError(error.rpcCode, error.message, { ...error.data, code: error.code })
         : error
+    const notOwned = (): LocalAcpViewError => new LocalAcpViewError(
+      'LOCAL_ACP_VIEW_NOT_OWNED',
+      'this ACP connection holds no view for that session',
+      JSONRPC_INVALID_PARAMS,
+    )
     /**
-     * Read the optional config options of an already-attached View. ONLY a real
-     * model-catalog unavailability may omit the optional display; a stale,
-     * closed or foreign View identity is a lifecycle failure and must propagate
-     * through the normal JSON-RPC error boundary instead of falsely confirming
-     * an attachment that no longer exists.
+     * Read the optional config options of the EXACT View just attached by this
+     * new/resume call. ONLY a real model-catalog unavailability may omit the
+     * optional display; a stale, closed or foreign View identity is a lifecycle
+     * failure and must propagate through the normal JSON-RPC error boundary
+     * instead of falsely confirming an attachment that no longer exists.
      */
-    const readConfigOptionsOrLog = async (sessionId: string): Promise<SessionConfigOption[] | undefined> => {
+    const readConfigOptionsOrLog = async (
+      sessionId: string,
+      view: ConnectionViewState,
+    ): Promise<SessionConfigOption[] | undefined> => {
       try {
         return await views.modelOptions(view, access, sessionId)
       } catch (error) {
@@ -729,50 +839,77 @@ function buildAgentApp(
         })
       }
     app.onRequest(methods.agent.session.new, async ({ params, client, signal }) => {
-      beginRequest()
+      beginRequest('control')
+      let view: ConnectionViewState | undefined
       try {
         requireInitialized()
+        view = createSessionViewSlot(slots, views)
         const result = await views.newSession(view, access, params, configNotifierFor(client), signal)
-        const configOptions = await readConfigOptionsOrLog(result.sessionId)
+        const configOptions = await readConfigOptionsOrLog(result.sessionId, view)
         return { ...result, ...(configOptions === undefined ? {} : { configOptions }) }
       } catch (error) {
         throw asRequestError(error)
       } finally {
-        state.pendingRequests -= 1
+        if (view !== undefined) releaseIdleViewSlot(slots, views, view)
+        endRequest('control')
       }
     })
     app.onRequest(methods.agent.session.resume, async ({ params, client, signal }) => {
-      beginRequest()
+      beginRequest('control')
+      let view: ConnectionViewState | undefined
       try {
         requireInitialized()
+        // The same physical connection may already hold this Session in an
+        // attaching, attached or fenced slot; do not allocate a second slot.
+        if (routeOwnedView(slots, views, params.sessionId) !== undefined) {
+          throw new LocalAcpViewError(
+            'LOCAL_ACP_VIEW_BUSY',
+            'this ACP connection already holds a view for that session',
+            JSONRPC_INVALID_PARAMS,
+          )
+        }
+        view = createSessionViewSlot(slots, views)
         const result = await views.resumeSession(view, access, params, configNotifierFor(client), signal)
-        const configOptions = await readConfigOptionsOrLog(params.sessionId)
+        const configOptions = await readConfigOptionsOrLog(params.sessionId, view)
         return { ...result, ...(configOptions === undefined ? {} : { configOptions }) }
       } catch (error) {
         throw asRequestError(error)
       } finally {
-        state.pendingRequests -= 1
+        if (view !== undefined) releaseIdleViewSlot(slots, views, view)
+        endRequest('control')
       }
     })
     app.onRequest(methods.agent.session.close, async ({ params }) => {
-      beginRequest()
+      beginRequest('close')
       try {
         requireInitialized()
-        return await views.closeSession(view, access, params.sessionId)
+        const view = routeOwnedView(slots, views, params.sessionId)
+        // Unknown, inactive or foreign Session: the standard idempotent `{}`
+        // without any Host operation.
+        if (view === undefined) return {}
+        try {
+          return await views.closeSession(view, access, params.sessionId)
+        } finally {
+          // Only this exact slot can become reclaimable; another Session's View
+          // is never observed or mutated.
+          releaseIdleViewSlot(slots, views, view)
+        }
       } catch (error) {
         throw asRequestError(error)
       } finally {
-        state.pendingRequests -= 1
+        endRequest('close')
       }
     })
     // PO-3B: ONE text prompt per attached View. The request's own SDK context
     // supplies the abort lifecycle and the ONLY notification + reverse-request
-    // sinks — this connection's client. Nothing here captures a mutable
-    // connection or invents a second sender.
+    // sinks — this connection's client. Routing selects the exact claiming slot;
+    // no last-active Session or mutable connection-wide view exists.
     app.onRequest(methods.agent.session.prompt, async ({ params, signal, client }) => {
       beginRequest()
       try {
         requireInitialized()
+        const view = routeOwnedView(slots, views, params.sessionId)
+        if (view === undefined) throw notOwned()
         return await views.promptSession(view, access, params, signal, state.imageEnabled, async update => {
           await client.notify(methods.client.session.update, { sessionId: params.sessionId, update })
         }, async (permissionParams, options) => {
@@ -792,15 +929,17 @@ function buildAgentApp(
     // request against the pinned v1 schema); the View applies the exact-claim,
     // View-idle and Agent-idle admission before any Session write.
     app.onRequest(methods.agent.session.setConfigOption, async ({ params, signal }) => {
-      beginRequest()
+      beginRequest('control')
       try {
         requireInitialized()
+        const view = routeOwnedView(slots, views, params.sessionId)
+        if (view === undefined) throw notOwned()
         const configOptions = await views.setModelOption(view, access, params, signal)
         return { configOptions }
       } catch (error) {
         throw asRequestError(error)
       } finally {
-        state.pendingRequests -= 1
+        endRequest('control')
       }
     })
   } else {
@@ -815,9 +954,9 @@ function buildAgentApp(
   // `session/list` remains genuinely unimplemented regardless of the View.
   app.onRequest(methods.agent.session.list, acceptAnyParams, rejectSessionOperation)
 
-  if (access !== undefined && views !== undefined && view !== undefined) {
+  if (access !== undefined && views !== undefined && slots !== undefined) {
     // A `session/cancel` notification carries no response. PO-3B scopes it to
-    // THIS connection's own unsettled View flight only: an idle View (or a
+    // the exact connection-local View that owns the Session: an idle View (or a
     // Session this connection does not hold) is a no-op that never touches a
     // Host Agent; a queued/running flight is addressed through the same scoped
     // cancellation the close path uses, and the request settles on the real
@@ -825,7 +964,8 @@ function buildAgentApp(
     app.onNotification(methods.agent.session.cancel, ({ params }) => {
       if (!state.initialized) return
       if (typeof params?.sessionId !== 'string' || params.sessionId === '') return
-      views.cancelSession(view, access, params.sessionId)
+      const view = routeOwnedView(slots, views, params.sessionId)
+      if (view !== undefined) views.cancelSession(view, access, params.sessionId)
     })
   } else {
     // No Host Session View installed: a cancel notification stays a no-op.
@@ -837,15 +977,17 @@ function buildAgentApp(
 
 /** Wire one accepted socket to its own SDK connection; only this connection is affected by a fault. */
 function serveConnection(socket: Socket, context: ListenerContext): void {
-  const view = context.views?.createConnection()
+  const viewRoster = context.views === undefined ? undefined : new Set<ConnectionViewState>()
   const state: ConnectionState = {
     initialized: false,
     pendingRequests: 0,
+    pendingControlRequests: 0,
+    pendingCloseRequests: 0,
     closed: false,
     imageEnabled: false,
     inputBounds: TEXT_ONLY_BOUNDS,
     maxOutputFrameBytes: deriveImageOutputBounds(context.sessionAccess?.imageLimits()) ?? MAX_OUTPUT_FRAME_BYTES,
-    ...(view === undefined ? {} : { view }),
+    ...(viewRoster === undefined ? {} : { views: viewRoster }),
   }
   context.connectionStates.set(socket, state)
 
@@ -864,11 +1006,16 @@ function serveConnection(socket: Socket, context: ListenerContext): void {
     tornDown = true
     state.closed = true
     // BOTH `session/close` and a physical socket end/error/destroy (or Host Off)
-    // release through the SAME idempotent View path. PO-3B: a claim with an
-    // open flight keeps its scoped cancellation running (late insertions
-    // included) and is released only by its proven settlement; no Host
-    // Agent/Session is disposed or flushed.
-    if (view !== undefined) context.views?.releaseConnection(view, context.sessionAccess)
+    // release through the SAME idempotent View path, once per view slot. A
+    // claim with an open flight keeps its scoped cancellation running (late
+    // insertions included) and is released only by its proven settlement; no
+    // Host Agent/Session is disposed or flushed. The snapshot is required
+    // because releaseConnection may retire claims for every slot.
+    if (viewRoster !== undefined) {
+      const snapshot = [...viewRoster]
+      for (const view of snapshot) context.views?.releaseConnection(view, context.sessionAccess)
+      viewRoster.clear()
+    }
     try {
       connection?.close()
     } catch {
@@ -891,7 +1038,7 @@ function serveConnection(socket: Socket, context: ListenerContext): void {
 
   const input = createBoundedInput(socket, state, fail)
   const output = createBoundedOutput(socket, fail, state.maxOutputFrameBytes)
-  const app = buildAgentApp(state, view, context, fail)
+  const app = buildAgentApp(state, context, fail)
   const stream = ndJsonStream(output, input)
   connection = app.connect(stream)
   const connected = connection

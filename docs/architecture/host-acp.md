@@ -131,9 +131,12 @@ profile's independent `autoStart` preference enables it (see below).
   CLIENT-to-Agent prompt images only: committed assistant/tool OUTPUT images come
   from the durable Session content and are never filtered by it. The View is a
   BORROW of the Host's own Agent and Session, never a second owner:
-  - One ACP connection may borrow **at most one** Host Session (one View), and
-    one Host Session carries **at most one** ACP View at a time, while any
-    number of human Split TUI Clients may still reference the same Session.
+  - One physical ACP connection may borrow **up to eight** Host Sessions (one
+    View per Session), and one Host Session carries **at most one** ACP View at
+    a time across all connections, while any number of human Split TUI Clients
+    may still reference the same Session. The eight-slot bound is this
+    product's connection-local capacity policy, not an ACP v1 limit; a ninth
+    `session/new|resume` is refused before any Host Session is created.
   - `session/new` treats the request `cwd` as a proposal only: the Host
     Workspace Controller validates/realpaths it into a `workspaceId`, the Host
     Session Controller creates ONE Session in that Workspace, and the official
@@ -337,16 +340,20 @@ profile's independent `autoStart` preference enables it (see below).
     the claim. `close {}` never claims that a child process was killed at that
     instant; an unconfirmed terminal keeps the fence and refuses a second View
     on that Session instead of failing open.
-  - `session/close` detaches ONLY this connection's View/reservation: it never
-    disposes, flushes or resumes the Agent/Session, so a TUI referencing the
-    same Session keeps working and a later connection may resume again. With an
-    open prompt flight it first performs the scoped cancellation below and
-    settles before detaching; a repeated close on the same connection is
-    idempotent.
+  - `session/close` detaches ONLY this connection's exact View/reservation: it
+    never disposes, flushes or resumes the Agent/Session, so a TUI referencing
+    the same Session keeps working and a later connection may resume again.
+    An unknown, inactive or foreign Session close is the standard empty `{}`
+    with no Host side effect. With an open prompt flight, an owned close first
+    performs the scoped cancellation below and settles before detaching; a
+    repeated close on the same owned View is idempotent. A close that cannot
+    prove its owned unsettled obligation's terminal remains fail-closed and is
+    never reported as a successful detach.
   - A physical socket end/error/destroy, runtime Off or Host shutdown retires
     the network connection immediately and drives the scoped-cancellation
-    contract below. Pending admission retains the request identity, claim and
-    fact observer so a late insertion is still cancelled exactly. The claim is
+    contract below for EVERY View slot on that socket, never only a last-used
+    Session. Pending admission retains the request identity, claim and fact
+    observer so a late insertion is still cancelled exactly. A claim is
     released only after proven Host settlement, or after classified admission
     on the exact Host identity proves there was no inserted message. The
     Session, Agent and writer keep their Host authority; a pending
