@@ -248,9 +248,16 @@ function frameText(tern: ScriptedTern): string {
   return pieces.join('\n')
 }
 
-/** The image nodes of the pane's CURRENT tree (op-folded, retired nodes removed). */
-function currentImageNodes(tern: ScriptedTern): { id: string; blob?: string }[] {
-  const live = new Map<string, { id: string; kind: string; props: Record<string, unknown>; children: string[] }>()
+interface LiveNode {
+  readonly id: string
+  readonly kind: string
+  readonly props: Record<string, unknown>
+  readonly children: string[]
+}
+
+/** The pane's CURRENT tree (op-folded, retired nodes removed). */
+function currentNodes(tern: ScriptedTern): LiveNode[] {
+  const live = new Map<string, LiveNode>()
   const insert = (node: { id?: string; k?: string; p?: Record<string, unknown>; c?: readonly unknown[] }, parentId?: string): void => {
     if (typeof node.id !== 'string') return
     live.set(node.id, { id: node.id, kind: node.k ?? '', props: { ...(node.p ?? {}) }, children: [] })
@@ -279,6 +286,11 @@ function currentImageNodes(tern: ScriptedTern): { id: string; blob?: string }[] 
     }
   }
   return [...live.values()]
+}
+
+/** The image nodes of the pane's CURRENT tree. */
+function currentImageNodes(tern: ScriptedTern): { id: string; blob?: string }[] {
+  return currentNodes(tern)
     .filter(node => node.kind === 'image')
     .map(node => ({ id: node.id, ...(typeof node.props.blob === 'string' ? { blob: node.props.blob } : {}) }))
 }
@@ -338,6 +350,82 @@ test('switching the display subject retires the old PTC Context image and its su
     commit(harness.renderer, new TranscriptFolder(), {})
     await until('the retired subject tree', () => currentImageNodes(harness.tern).length === 0)
     assert.equal(harness.reads.length, 2, 'a retired subject starts no further read')
+    assert.deepEqual(harness.fatalErrors, [])
+  } finally {
+    await harness.dispose()
+  }
+})
+
+/** A compact-visible Work: Process A → claimed PTC image Context → Process B. */
+function ptcWorkFolder(): TranscriptFolder {
+  const contextMessage = {
+    id: MessageId('ptc-work-context-message'),
+    role: 'user',
+    content: [
+      { type: 'text', text: 'nested result' },
+      { type: 'image', attachment: ATTACHMENT },
+    ],
+    source: { kind: 'ptc-mode' },
+  }
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 1 }, 0),
+    event('tool/call', { turn: 1, step: 0, callId: 'ptc-work-c1', name: 'read', arguments: '{}' }, 1),
+    event('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('ptc-work-r1'), role: 'tool', toolCallId: 'ptc-work-c1',
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: 'ptc-work-c1' },
+      },
+    }, 2),
+    event('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [contextMessage] }, 3),
+    event('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 4),
+    event('user/message', contextMessage, 5),
+    event('tool/call', { turn: 1, step: 1, callId: 'ptc-work-c2', name: 'bash', arguments: '{}' }, 6),
+    event('tool/result', {
+      turn: 1, step: 1,
+      message: {
+        id: MessageId('ptc-work-r2'), role: 'tool', toolCallId: 'ptc-work-c2',
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: 'ptc-work-c2' },
+      },
+    }, 7),
+    event('assistant/message', {
+      turn: 1, step: 2,
+      message: { id: MessageId('ptc-work-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 8),
+    event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 9),
+  ])
+  return folder
+}
+
+test('a collapsed Work never reads its carried PTC Context image; expanding the exact Work does', async () => {
+  const harness = await mountHarness({ displayState: { preset: 'compact' } })
+  const toggle = (id: string, collapsed: boolean): void => {
+    const frame = harness.tern.framesSeen.at(-1)
+    assert.ok(frame !== undefined)
+    harness.tern.input.type(`\u001b_tsp;e;${JSON.stringify({ ev: 'toggle', sf: frame.sf, id, collapsed })}\u001b\\`)
+  }
+  try {
+    harness.renderer.bindInput({
+      exit() {}, cancel() {}, submit() {}, steer() {}, pasteMedia() {}, pastedPath: () => {},
+      admitPastedPathDelivery: () => true, shouldRememberInput: () => true, noteUserInput() {},
+      listContinuedQuestions: () => [], reopenContinuedQuestion: () => false,
+      openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true, openTasksBrowserUi() {}, tasksBrowserUiAvailable: () => true,
+    })
+    commit(harness.renderer, ptcWorkFolder(), {})
+    await until('the collapsed Work section', () => currentNodes(harness.tern).some(node => node.kind === 'section' && node.id.includes('-work-')))
+    assert.equal(harness.reads.length, 0, 'a collapsed Work starts no hidden PTC Context read')
+    assert.deepEqual(harness.tern.blobIdsSeen, [])
+
+    const work = currentNodes(harness.tern).find(node => node.kind === 'section' && node.id.includes('-work-'))!
+    assert.equal(work.props['collapsed'], true, 'fixture: the Work starts collapsed')
+    toggle(work.id, false)
+    await until('the exact Work to open', () => currentNodes(harness.tern).find(node => node.id === work.id)?.props['collapsed'] === false)
+    await until('the PTC Context image read after expanding', () => harness.reads.length === 1)
+    await until('the PTC Context image node after expanding', () => currentImageNodes(harness.tern).length === 1)
+    assert.equal(harness.reads[0]?.id, 'ptc-att-1')
+    assert.equal(harness.tern.blobIdsSeen.length, 1)
+    assert.match(frameText(harness.tern), /\[IMAGE\] nested-shot\.png/)
     assert.deepEqual(harness.fatalErrors, [])
   } finally {
     await harness.dispose()

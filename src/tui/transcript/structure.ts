@@ -17,11 +17,12 @@
  *
  * A Work span may CARRY a foldable Context row as a structural part without
  * making it Process: the row keeps its Context semantics, its source bytes and
- * its own disclosure, but no longer splits one turn's Activity/Thought. Five
+ * its own disclosure, but no longer splits one turn's Activity/Thought. Six
  * narrow forms qualify: a `form:'snapshot'` singleton / snapshot-only raw
  * cluster, a `tool-jobs` Notice, an `agent-message` relay, a
- * `subagent-settled` Notice and a `repeat-tool-reminder` Notice, each of the
- * last four with durable same-turn `next-step` delivery evidence. A mixed
+ * `subagent-settled` Notice, a `repeat-tool-reminder` Notice and an
+ * image-bearing `ptc-mode` Context, each of the last five with durable
+ * same-turn `next-step` delivery evidence. A mixed
  * `instructions`/`catalog`/`snapshot` cluster and every other Notice/relay form
  * stay independent Context boundaries.
  *
@@ -33,7 +34,7 @@
  */
 
 import { clusterAdjacentAmbientContext, type ContextCluster } from './context-structure.ts'
-import { contextFormOf } from '../../domain/transcript/context-semantics.ts'
+import { contextFormOf, isPtcImageContext } from '../../domain/transcript/context-semantics.ts'
 import { classifyTranscriptMessage, isPostTurnReplayEvidence, isSurfacedContext, isSurfacedInteractionTool } from '../../domain/transcript/semantics.ts'
 import type { TranscriptMessage } from '../../domain/transcript/types.ts'
 
@@ -242,12 +243,30 @@ export function isWorkingRepeatToolReminderNotice(
 }
 
 /**
+ * Whether one row is a same-turn delivered image-bearing PTC Context with
+ * durable next-step delivery evidence.
+ *
+ * Two INDEPENDENT facts are required: the structured media question answered
+ * by {@link isPtcImageContext} (surfaced Context + `ptc-mode` + a real image
+ * block) and the fold's presentation-only `sameTurnNextStep` flag derived
+ * from the durable `agent/inbox/spliced` insert/claim identity chain. The
+ * producer has no form, so no form is required or invented; a text-only
+ * ptc-mode Spill/Reset Context, a foreign image Context, a cross-turn claim
+ * and a missing claim all fail open as independent Context boundaries.
+ */
+export function isWorkingPtcImageContext(
+  message: TranscriptMessage,
+): message is Extract<TranscriptMessage, { kind: 'system' }> & { context: true; content: readonly import('@deepseek-ai/dsh-llm').ContentBlock[] } {
+  return isPtcImageContext(message) && message.contextPresentation?.sameTurnNextStep === true
+}
+
+/**
  * The complete narrow display-layer eligibility: may this Context row be
  * carried by the same-turn Work/Thought instead of ending it? Only a foldable
  * Snapshot, a proven Working `tool-jobs` Notice, a proven same-turn Agent
- * relay, a proven same-turn subagent settlement Notice or a proven same-turn
- * repeat-tool-reminder Notice qualifies; every other surfaced Context remains
- * a boundary.
+ * relay, a proven same-turn subagent settlement Notice, a proven same-turn
+ * repeat-tool-reminder Notice or a proven same-turn image-bearing PTC Context
+ * qualifies; every other surfaced Context remains a boundary.
  */
 export function isFoldableWorkContext(
   message: TranscriptMessage,
@@ -258,6 +277,7 @@ export function isFoldableWorkContext(
     || isWorkingAgentRelay(message)
     || isWorkingSubagentSettledNotice(message)
     || isWorkingRepeatToolReminderNotice(message)
+    || isWorkingPtcImageContext(message)
 }
 
 /**

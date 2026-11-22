@@ -2568,6 +2568,85 @@ test('search reveals a repeat-tool-reminder folded inside a Focus Thought and di
   app.stop()
 })
 
+// --- A folded same-turn PTC image Context is searchable through its Work owner ---
+
+function foldedPtcImageFolder(): { folder: TranscriptFolder; context: TranscriptMessage } {
+  const ptcMessage = {
+    id: MessageId('search-folded-ptc-image'), role: 'user',
+    content: [
+      { type: 'text', text: 'FOLDED_PTC_IMAGE_PAYLOAD with the needle inside' },
+      {
+        type: 'image',
+        attachment: {
+          attachmentId: 'search-ptc-att-1', mediaType: 'image/png', bytes: 1024,
+          width: 320, height: 200, name: 'nested.png',
+        },
+      },
+    ],
+    source: { kind: 'ptc-mode' },
+  }
+  const folder = new TranscriptFolder()
+  folder.apply([
+    relayEvent('turn/start', { turn: 0 }, 0),
+    relayEvent('tool/call', { turn: 0, step: 0, callId: ToolCallId('search-ptc-c1'), name: 'read', arguments: '{}' }, 1),
+    relayEvent('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('search-ptc-r1'), role: 'tool', toolCallId: ToolCallId('search-ptc-c1'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('search-ptc-c1') },
+      },
+    }, 2),
+    relayEvent('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [ptcMessage] }, 3),
+    relayEvent('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 4),
+    relayEvent('user/message', ptcMessage, 5),
+    relayEvent('tool/call', { turn: 0, step: 1, callId: ToolCallId('search-ptc-c2'), name: 'bash', arguments: '{}' }, 6),
+    relayEvent('tool/result', {
+      turn: 0, step: 1,
+      message: {
+        id: MessageId('search-ptc-r2'), role: 'tool', toolCallId: ToolCallId('search-ptc-c2'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('search-ptc-c2') },
+      },
+    }, 7),
+    relayEvent('assistant/message', {
+      turn: 0, step: 2,
+      message: { id: MessageId('search-ptc-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 8),
+    relayEvent('turn/end', { turn: 0, reason: { kind: 'completed' } }, 9),
+  ])
+  const context = folder.messages().find(message => message.kind === 'system' && message.text.includes('FOLDED_PTC_IMAGE_PAYLOAD'))
+  assert.ok(context !== undefined && context.kind === 'system')
+  assert.equal(context.contextPresentation?.sameTurnNextStep, true, 'fixture: the PTC image Context is a proven Work member')
+  return { folder, context }
+}
+
+test('search reveals a folded same-turn PTC image Context through its Work owner and dismissal restores the fold', async () => {
+  const { folder, context } = foldedPtcImageFolder()
+  const { vt, app } = startCompactApp()
+  const view = (): string => vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  assert.ok(!view().includes('FOLDED_PTC_IMAGE_PAYLOAD'),
+    `precondition: the Work folds the PTC image Context while collapsed:\n${view()}`)
+
+  app.setTranscriptSearchTarget({
+    query: 'FOLDED_PTC_IMAGE_PAYLOAD',
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: context,
+  })
+  assert.equal(app.transcriptSearchPresentationForTest()?.revealGranted, true,
+    'the folded PTC image Context resolves a Work reveal')
+  app.scrollToSearchTarget()
+  await vt.waitForRender()
+  assert.ok(view().includes('FOLDED_PTC_IMAGE_PAYLOAD'),
+    `the reveal opens the owning Work and locates the Context body:\n${view()}`)
+
+  app.finishTranscriptSearchPresentation(new Set())
+  await vt.waitForRender()
+  assert.ok(!view().includes('FOLDED_PTC_IMAGE_PAYLOAD'),
+    `dismissal restores the folded Work:\n${view()}`)
+  app.stop()
+})
+
 // ── PR-B: plain-text source-to-cell proof at real widths ───────────────────
 
 /** Every viewport cell where a visible `needle` starts and carries the strong

@@ -906,3 +906,83 @@ test('a proven same-turn repeat-tool-reminder is ONE canonical Work member acros
   assert.deepEqual(projectTranscriptStructure(unqualified.messages()).map(block => block.kind),
     ['work', 'message', 'work'], 'an unqualified reminder still splits the Work')
 })
+
+// --- A proven PTC image Context keeps one canonical Work owner --------------
+
+test('a proven same-turn PTC image Context is ONE canonical Work member across Compact, Focus and Full', () => {
+  const ptcMessage = {
+    id: MessageId('converge-ptc-image'), role: 'user',
+    content: [
+      { type: 'text', text: 'CONVERGE_PTC_IMAGE' },
+      { type: 'image', attachment: { attachmentId: 'converge-ptc-att', mediaType: 'image/png', bytes: 2048, width: 8, height: 8, name: 'nested.png' } },
+    ],
+    source: { kind: 'ptc-mode' },
+  }
+  const event = (type: string, data: Record<string, unknown>, seq: number): SessionEvent =>
+    ({ type, seq: seq + 1, time: 1_700_000_000_000 + seq, data }) as SessionEvent
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: 'converge-ptc-c1', name: 'read', arguments: '{}' }, 1),
+    event('tool/result', {
+      turn: 0, step: 0,
+      message: { id: MessageId('converge-ptc-r1'), role: 'tool', toolCallId: 'converge-ptc-c1', content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: 'converge-ptc-c1' } },
+    }, 2),
+    event('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [ptcMessage] }, 3),
+    event('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 4),
+    event('user/message', ptcMessage, 5),
+    event('tool/call', { turn: 0, step: 1, callId: 'converge-ptc-c2', name: 'bash', arguments: '{}' }, 6),
+    event('tool/result', {
+      turn: 0, step: 1,
+      message: { id: MessageId('converge-ptc-r2'), role: 'tool', toolCallId: 'converge-ptc-c2', content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: 'converge-ptc-c2' } },
+    }, 7),
+    event('assistant/message', {
+      turn: 0, step: 2,
+      message: { id: MessageId('converge-ptc-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 8),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 9),
+  ])
+  const messages = folder.messages()
+  const context = messages.find(message => message.kind === 'system')
+  assert.ok(context !== undefined && context.kind === 'system')
+  assert.equal(context.contextPresentation?.sameTurnNextStep, true, 'fixture: durable same-turn claim')
+
+  const structure = projectTranscriptStructure(messages)
+  const spans = workSpansOf(structure)
+  assert.equal(spans.length, 1, 'Process -> PTC image Context -> Process is one canonical Work')
+  assert.equal(spans[0]!.members.includes(context), true)
+
+  const compactSpans = projectCompact(messages, {
+    expandedWorkOwners: new Set(), expandedClusters: new Set(), forcedExpanded: new Set(),
+  }).flatMap(block => block.kind === 'work' ? [block.span] : [])
+  assertSameSpans(compactSpans, spans)
+  const activities = folder.turnActivities()
+  const focusWork = projectFocus(messages, activities, new Set([0]), true)
+    .flatMap(block => block.kind === 'work' ? [block.span] : [])
+  assert.deepEqual(focusWork, spans, 'expanded Focus materializes the same canonical span identity')
+  const flattened = flattenStructure(structure)
+  assert.equal(flattened.length, messages.length)
+  for (let index = 0; index < messages.length; index += 1) {
+    assert.equal(flattened[index], messages[index], `Full row ${index} keeps its exact identity and position`)
+  }
+
+  // Negative control: the SAME image Context without the durable claim splits
+  // the Work in every projection because it never becomes a foldable row.
+  const unqualified = new TranscriptFolder()
+  unqualified.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: 'converge-unqualified-ptc-c1', name: 'read', arguments: '{}' }, 1),
+    event('tool/result', {
+      turn: 0, step: 0,
+      message: { id: MessageId('converge-unqualified-ptc-r1'), role: 'tool', toolCallId: 'converge-unqualified-ptc-c1', content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: 'converge-unqualified-ptc-c1' } },
+    }, 2),
+    event('user/message', ptcMessage, 3),
+    event('tool/call', { turn: 0, step: 1, callId: 'converge-unqualified-ptc-c2', name: 'bash', arguments: '{}' }, 4),
+    event('tool/result', {
+      turn: 0, step: 1,
+      message: { id: MessageId('converge-unqualified-ptc-r2'), role: 'tool', toolCallId: 'converge-unqualified-ptc-c2', content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: 'converge-unqualified-ptc-c2' } },
+    }, 5),
+  ])
+  assert.deepEqual(projectTranscriptStructure(unqualified.messages()).map(block => block.kind),
+    ['work', 'message', 'work'], 'an unclaimed PTC image Context is a real boundary')
+})

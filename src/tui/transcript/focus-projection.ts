@@ -36,6 +36,7 @@ import { clusterAdjacentAmbientContext, isNoticeContext, type ContextCluster } f
 import {
   isFoldableWorkContext,
   isWorkingAgentRelay,
+  isWorkingPtcImageContext,
   isWorkingRepeatToolReminderNotice,
   isWorkingSubagentSettledNotice,
   projectTranscriptStructure,
@@ -564,13 +565,13 @@ function collapsedFocusRowDisposition(
   if (foldableSnapshots.thoughtOwned
     && index >= leadBoundary
     && isFoldableWorkContext(message, foldableSnapshots.clusterByMember)
-    // A claimed Agent relay, subagent settlement Notice or repeat-tool
-    // reminder additionally needs its REAL Work (Process) owner: an
-    // activity-only turn has no Process for the Context to be recovered
-    // through, so hiding it there would lose the original Context (and the
-    // child's reported result / reminder body).
+    // A claimed Agent relay, subagent settlement Notice, repeat-tool
+    // reminder or image-bearing PTC Context additionally needs its REAL Work
+    // (Process) owner: an activity-only turn has no Process for the Context to
+    // be recovered through, so hiding it there would lose the original
+    // Context (and the child's reported result / reminder body / image).
     && (!(isWorkingAgentRelay(message) || isWorkingSubagentSettledNotice(message)
-      || isWorkingRepeatToolReminderNotice(message))
+      || isWorkingRepeatToolReminderNotice(message) || isWorkingPtcImageContext(message))
       || foldableSnapshots.workByMember.has(message))) return 'hidden'
   if (index >= leadBoundary && isNoticeContext(message)) return 'post-thought'
   return 'pre-thought'

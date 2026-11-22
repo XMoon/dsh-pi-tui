@@ -20,7 +20,7 @@ import {
 } from '../../src/tui/transcript/context-structure.ts'
 import { contextPresentation, isTranscriptContextForm } from '../../src/domain/transcript/context-semantics.ts'
 import { projectCompact } from '../../src/tui/transcript/compact-projection.ts'
-import { clusterByMemberOf, isWorkingAgentRelay, isWorkingRepeatToolReminderNotice, isWorkingSubagentSettledNotice, isWorkingToolJobsNotice, projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
+import { clusterByMemberOf, isWorkingAgentRelay, isWorkingPtcImageContext, isWorkingRepeatToolReminderNotice, isWorkingSubagentSettledNotice, isWorkingToolJobsNotice, projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
 import { formatWorkHeaderLine, compactWorkBody, CompactWorkComponent } from '../../src/tui/components/transcript/compact-work.ts'
 import { summarizeWorkSpan } from '../../src/tui/transcript/work-summary.ts'
 import { compactActionPresentation } from '../../src/tui/components/transcript/compact-process-preview.ts'
@@ -1342,6 +1342,213 @@ test('a proven reminder without a real Process fails open and never mints an Act
 })
 
 
+// --- Working same-turn image-bearing PTC Context follows the same Work ------
+
+const PTC_IMAGE_ATTACHMENT = {
+  attachmentId: 'ptc-compact-att-1',
+  mediaType: 'image/png',
+  bytes: 2048,
+  width: 640,
+  height: 360,
+  name: 'nested.png',
+}
+
+/** One durable Working PTC image delivery: next-step insert → same-turn
+ * claim → the folded `user/message` carrying the producer's structured
+ * image blocks. */
+function workingPtcImageContextEvents(id: string, blocks: readonly unknown[], time: number, seq: number): SessionEvent[] {
+  const message = {
+    id: MessageId(id), role: 'user',
+    content: blocks,
+    source: { kind: 'ptc-mode' },
+  }
+  return [
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [message] }, time, seq),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, time + 0.1, seq + 1),
+    eventAt('user/message', message, time + 0.2, seq + 2),
+  ]
+}
+
+test('a proven same-turn image-bearing PTC Context is carried by the same Work', () => {
+  const events: SessionEvent[] = [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    toolCallEvent(0, 'ptc-work-a', 1),
+    toolResultEvent(0, 'ptc-work-a', 2),
+    ...workingPtcImageContextEvents('working-ptc-image', [
+      { type: 'text', text: 'nested before ' },
+      { type: 'image', attachment: PTC_IMAGE_ATTACHMENT },
+      { type: 'text', text: ' nested after' },
+    ], 1003, 3),
+    toolCallEvent(0, 'ptc-work-b', 6),
+    toolResultEvent(0, 'ptc-work-b', 7),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('ptc-work-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1008, 8),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1009, 9),
+  ]
+  const folder = new TranscriptFolder()
+  apply(folder, events)
+  const messages = folder.messages()
+  const context = messages.find(message => message.kind === 'system' && message.contextPresentation?.sourceKind === 'ptc-mode')
+  assert.ok(context !== undefined && context.kind === 'system')
+  assert.equal(context.contextPresentation?.sameTurnNextStep, true,
+    'the fold records the durable same-turn next-step provenance')
+  assert.equal(isWorkingPtcImageContext(context), true)
+  assert.deepEqual(context.content?.map(block => block.type), ['text', 'image', 'text'])
+  assert.equal(context.content?.[1]?.type === 'image' && context.content[1].attachment.attachmentId, 'ptc-compact-att-1')
+  const structure = projectTranscriptStructure(messages)
+  assert.deepEqual(structure.map(block => block.kind), ['work', 'message'])
+  const span = onlySpan(structure)
+  assert.deepEqual(span.members, [messages[0], context, messages[2]],
+    'Process A -> qualified PTC image Context -> Process B is ONE Work in raw order')
+  assert.equal(summarizeWorkSpan(span).actionStats.total, 2, 'the Context adds no Action')
+  assert.deepEqual(kindsOf(projectCompact(messages, noOptions)), ['work', 'assistant'],
+    'collapsed Compact hides the carried image Context under the Work header')
+  const expanded = projectCompact(messages, {
+    expandedWorkOwners: new Set([span.owner]), expandedClusters: new Set(), forcedExpanded: new Set(),
+  })
+  assert.deepEqual(kindsOf(expanded), ['work', 'tool', 'system', 'tool', 'assistant'],
+    'expanding the Work restores every raw member exactly once in raw order')
+  assert.equal(expanded.filter(block => block.kind === 'message' && block.message === context).length, 1)
+  // Full keeps the exact raw chronology (carriage never moves the Context).
+  const fullRows = structure.flatMap(block => block.kind === 'work' ? [...block.span.members]
+    : block.kind === 'message' ? [block.message] : [...block.cluster.members])
+  assert.deepEqual(fullRows, messages, 'Full flat Work order equals the raw window')
+  // Cold replay folds the SAME durable log to the same provenance.
+  const cold = new TranscriptFolder()
+  cold.hydrate(events)
+  const coldContext = cold.messages().find(message => message.kind === 'system')
+  assert.ok(coldContext !== undefined && coldContext.kind === 'system')
+  assert.equal(coldContext.contextPresentation?.sameTurnNextStep, true, 'rehydrate keeps the claim provenance')
+  assert.deepEqual(projectTranscriptStructure(cold.messages()).map(block => block.kind), ['work', 'message'])
+})
+
+test('a PTC image Context never qualifies without the exact same-turn claim and image content', () => {
+  // No splice/claim chain: the same PTC image Context splits the Work.
+  const missing = new TranscriptFolder()
+  apply(missing, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    toolCallEvent(0, 'ptc-missing-a', 1),
+    toolResultEvent(0, 'ptc-missing-a', 2),
+    eventAt('user/message', {
+      id: MessageId('missing-ptc-image'), role: 'user',
+      content: [{ type: 'text', text: 'nested result' }, { type: 'image', attachment: PTC_IMAGE_ATTACHMENT }],
+      source: { kind: 'ptc-mode' },
+    }, 1003, 3),
+    toolCallEvent(0, 'ptc-missing-b', 4),
+    toolResultEvent(0, 'ptc-missing-b', 5),
+  ])
+  const missingContext = missing.messages().find(message => message.kind === 'system')
+  assert.ok(missingContext !== undefined && missingContext.kind === 'system')
+  assert.equal(missingContext.contextPresentation?.sameTurnNextStep, undefined)
+  assert.deepEqual(projectTranscriptStructure(missing.messages()).map(block => block.kind),
+    ['work', 'message', 'work'], 'an unclaimed PTC image Context still splits the Work')
+
+  // Same source, text-only: the structured image fact is required.
+  const textOnly = new TranscriptFolder()
+  const textMessage = {
+    id: MessageId('ptc-text-only'), role: 'user',
+    content: [{ type: 'text', text: 'Program environment reset; retained variables cleared.' }],
+    source: { kind: 'ptc-mode' },
+  }
+  apply(textOnly, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    toolCallEvent(0, 'ptc-text-a', 1),
+    toolResultEvent(0, 'ptc-text-a', 2),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [textMessage] }, 1003, 3),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 1003.1, 4),
+    eventAt('user/message', textMessage, 1003.2, 5),
+    toolCallEvent(0, 'ptc-text-b', 6),
+    toolResultEvent(0, 'ptc-text-b', 7),
+  ])
+  const textRow = textOnly.messages().find(message => message.kind === 'system')
+  assert.ok(textRow !== undefined && textRow.kind === 'system')
+  assert.equal(textRow.contextPresentation?.sameTurnNextStep, undefined,
+    'text-only PTC (Spill/Reset) never carries the Working flag')
+  assert.deepEqual(projectTranscriptStructure(textOnly.messages()).map(block => block.kind),
+    ['work', 'message', 'work'], 'the PTC reset stays independent even through a claim')
+
+  // Cross-turn claim: inserted during turn 1, claimed in turn 2.
+  const crossMessage = {
+    id: MessageId('cross-ptc-image'), role: 'user',
+    content: [{ type: 'image', attachment: PTC_IMAGE_ATTACHMENT }],
+    source: { kind: 'ptc-mode' },
+  }
+  const cross = new TranscriptFolder()
+  apply(cross, [
+    eventAt('turn/start', { turn: 1 }, 1000, 0),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [crossMessage] }, 1001, 1),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, 1002, 2),
+    eventAt('turn/start', { turn: 2 }, 2000, 3),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 2001, 4),
+    eventAt('user/message', crossMessage, 2002, 5),
+    toolCallEvent(2, 'cross-ptc-a', 6),
+    toolResultEvent(2, 'cross-ptc-a', 7),
+  ])
+  const crossRow = cross.messages().find(message => message.kind === 'system')
+  assert.ok(crossRow !== undefined && crossRow.kind === 'system')
+  assert.equal(crossRow.contextPresentation?.sameTurnNextStep, undefined,
+    'a claim carried across turns is not a same-turn Working delivery')
+
+  // A foreign image context through the same claim is never the PTC source.
+  const foreignMessage = {
+    id: MessageId('foreign-image-context'), role: 'user',
+    content: [{ type: 'image', attachment: PTC_IMAGE_ATTACHMENT }],
+    source: { kind: 'plugin', form: 'notice', plugin: 'foreign' },
+  }
+  const foreign = new TranscriptFolder()
+  apply(foreign, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    toolCallEvent(0, 'foreign-image-a', 1),
+    toolResultEvent(0, 'foreign-image-a', 2),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [foreignMessage] }, 1003, 3),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 1003.1, 4),
+    eventAt('user/message', foreignMessage, 1003.2, 5),
+    toolCallEvent(0, 'foreign-image-b', 6),
+    toolResultEvent(0, 'foreign-image-b', 7),
+  ])
+  const foreignRow = foreign.messages().find(message => message.kind === 'system')
+  assert.ok(foreignRow !== undefined && foreignRow.kind === 'system')
+  assert.equal(foreignRow.contextPresentation?.sameTurnNextStep, undefined,
+    'only the ptc-mode producer may qualify by image content')
+})
+
+test('a proven PTC image Context without a real Process fails open and a later steer keeps it a boundary', () => {
+  const folder = new TranscriptFolder()
+  apply(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    ...workingPtcImageContextEvents('ptc-no-process', [{ type: 'image', attachment: PTC_IMAGE_ATTACHMENT }], 1001, 1),
+    eventAt('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('ptc-no-process-final'), role: 'assistant', content: [{ type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1005, 4),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1006, 5),
+  ])
+  const messages = folder.messages()
+  const context = messages.find(message => message.kind === 'system')
+  assert.ok(context !== undefined && context.kind === 'system')
+  assert.equal(context.contextPresentation?.sameTurnNextStep, true)
+  assert.deepEqual(projectTranscriptStructure(messages).map(block => block.kind), ['message', 'message'],
+    'Context + Conversation without Process stays a flat sequence')
+  assert.deepEqual(kindsOf(projectCompact(messages, noOptions)), ['system', 'assistant'],
+    'fail-open: the image Context card is visible and no empty Work is minted')
+
+  // A later human steer is a hard boundary: the carried Context stays in the
+  // earlier Work and never bridges the steer.
+  const steerRow = user(0, 'steer')
+  const contextRow: TranscriptMessage = {
+    kind: 'system', turn: 0, text: 'PTC_IMAGE_BODY', context: true,
+    content: [{ type: 'image', attachment: PTC_IMAGE_ATTACHMENT }] as never,
+    contextPresentation: { sourceKind: 'ptc-mode', role: 'inject', sameTurnNextStep: true },
+  }
+  const steered = projectTranscriptStructure([thinking(0), tool(0), contextRow, steerRow, tool(0)])
+  assert.deepEqual(steered.map(block => block.kind), ['work', 'message', 'work'],
+    'a same-turn steer is never crossed by a carried PTC image Context')
+  const firstWork = steered[0]
+  assert.ok(firstWork?.kind === 'work' && firstWork.span.members.includes(contextRow),
+    'the carried PTC image Context stays inside the earlier Work')
+})
 // --- Working same-turn subagent settlement Notice follows the same Work -----
 
 /** One durable Working subagent settlement delivery: next-step insert →
