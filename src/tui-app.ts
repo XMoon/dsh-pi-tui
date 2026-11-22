@@ -4286,6 +4286,14 @@ export class TuiApp {
   private modelPickerOverlay: OverlayHandle | undefined
   /** The live responsive frame of the /model picker. */
   private modelPickerFrame: ResponsiveOverlayFrame | undefined
+  /** The `/preset` picker component while one is open: its OWN root-owned
+   *  remountable slot (never shared with `/model`). Retained across a
+   *  fullscreen screen swap so the same panel keeps its query/page/selection. */
+  private presetPickerComponent: (Component & RowBudgetAware) | undefined
+  /** The live overlay handle of the `/preset` picker (hide() closes it). */
+  private presetPickerOverlay: OverlayHandle | undefined
+  /** The live responsive frame of the `/preset` picker. */
+  private presetPickerFrame: ResponsiveOverlayFrame | undefined
   /** The independent Team-disable confirmation seat (a logical Root seat of
    *  its own: it outlives the /model overlay and owns its write admission). */
   private teamConfirmationOverlay: {
@@ -6693,6 +6701,12 @@ export class TuiApp {
     this.modelPickerComponent = undefined
     this.modelPickerOverlay = undefined
     this.modelPickerFrame = undefined
+    // The `/preset` slot is a SEPARATE retained root overlay: pre-retire it so
+    // no late read/write callback can repaint or focus a dying surface.
+    const presetPickerComponent = this.presetPickerComponent
+    this.presetPickerComponent = undefined
+    this.presetPickerOverlay = undefined
+    this.presetPickerFrame = undefined
     // Phase 3A / PR-B: pre-retire the optional seat tenant BEFORE any modal
     // settlement below can run its restore path — the identity is dropped and
     // the latch is committed here, the caller's cleanup rides the SAME
@@ -6786,7 +6800,8 @@ export class TuiApp {
       () => { this.unstableMountLeases.clear() },
       () => { this.unstableMountAdapters.clear() },
       // Every lease close drops its own remount callback; drop any straggler
-      // (history / model picker) so no disposed surface keeps a callback.
+      // (history / model picker / preset picker) so no disposed surface keeps a
+      // callback.
       () => { this.overlayRemounts.clear() },
       // Phase 4: settle every still-open imperative broker promise (select/
       // custom) — the picker/overlay dies with the surface; the promises
@@ -6827,6 +6842,9 @@ export class TuiApp {
       // The /model picker component dies with the surface too: a remountable
       // overlay opts out of disposeOnHide, so final teardown owns it explicitly.
       () => modelPickerComponent?.dispose?.(),
+      // The `/preset` picker owns its local row budget/reader too: release the
+      // retained component exactly once (its slot was pre-retired above).
+      () => presetPickerComponent?.dispose?.(),
       () => { this.status = { model: '', cwd: '', branch: '', turns: 0, steps: 0 } },
       // Detach the extension surface host: its subscriptions and capability
       // set die with the surface (M2 stale-generation contract).
@@ -27820,6 +27838,93 @@ export class TuiApp {
     this.modelPickerOverlay = undefined
     this.modelPickerFrame = undefined
     this.modelPickerComponent = undefined
+    if (overlay !== undefined) this.overlayRemounts.delete(overlay)
+    overlay?.hide()
+    component?.dispose?.()
+  }
+
+  /**
+   * Mount the `/preset` picker as a root-owned responsive capturing overlay.
+   * This is the panel's OWN slot beside `/model`: the host owns the responsive
+   * frame, the row-budget grant and the OverlayBroker registration/ownership;
+   * the component owns every local page/zone/scroll state and all business
+   * authority stays in the command.
+   *
+   * ONE logical overlay: mounting a new picker SUPERSEDES the previous one, and
+   * the returned closer is IDENTITY-SAFE — a stale adapter/async callback that
+   * still holds the old closer can never retire a later panel. A mount that
+   * throws releases the slot and the component before rethrowing, so the
+   * command can report a real error instead of leaving a ghost overlay.
+   */
+  openPresetPicker(component: Component & RowBudgetAware): () => void {
+    if (this.disposed) {
+      component.dispose?.()
+      return () => {}
+    }
+    if (this.presetPickerComponent !== undefined) this.closePresetPicker()
+    this.presetPickerComponent = component
+    try {
+      this.mountPresetPickerOverlay(component)
+    } catch (error) {
+      this.presetPickerComponent = undefined
+      this.presetPickerOverlay = undefined
+      this.presetPickerFrame = undefined
+      component.dispose?.()
+      throw error
+    }
+    return () => {
+      if (this.presetPickerComponent !== component) return
+      this.closePresetPicker()
+    }
+  }
+
+  /** Mount the `/preset` picker frame around its (retained) component. The
+   *  overlay is REMOUNTABLE: a fullscreen screen swap rebinds it without
+   *  disposing the component, so the query/page/selection/reading position are
+   *  preserved while the PHYSICAL frame is recreated at the live geometry. */
+  private mountPresetPickerOverlay(component: Component & RowBudgetAware): void {
+    const frame = this.createPresetPickerFrame(component)
+    this.presetPickerFrame = frame
+    const handle = this.showOverlayOnHost(
+      frame,
+      { width: 88, maxHeight: 28 },
+      {
+        remountable: true,
+        remount: (logical) => {
+          if (this.presetPickerComponent !== component) return
+          const next = this.createPresetPickerFrame(component)
+          this.presetPickerFrame = next
+          this.rebindOverlayRaw(logical, next, { width: 88, maxHeight: 28 })
+        },
+      },
+    )
+    this.presetPickerOverlay = handle
+  }
+
+  private createPresetPickerFrame(component: Component & RowBudgetAware): ResponsiveOverlayFrame {
+    // The design-language wide overlay step (long values/badges/detail column):
+    // min(terminal, 88×28), with the panel's own row-budget ladder below it.
+    const configuredWidth = 88
+    const configuredMaxHeight = 28
+    const geometryOf = (): ResponsiveOverlayGeometry => {
+      const width = Math.max(1, Math.min(this.terminal.columns, configuredWidth))
+      const maxHeight = Math.max(1, Math.min(this.terminal.rows, configuredMaxHeight))
+      return { width, maxHeight, key: `${this.terminal.columns}:${this.terminal.rows}:${width}:${maxHeight}` }
+    }
+    return new ResponsiveOverlayFrame(component, geometryOf, geometry => {
+      component.setMaxRows?.(Math.max(1, geometry.maxHeight - 2))
+    })
+  }
+
+  /** Close the `/preset` picker for good: clear the slot and its remount
+   *  registration FIRST (a synchronous hide/teardown callback must already see
+   *  no owner), then hide the overlay and dispose the retained component once. */
+  private closePresetPicker(): void {
+    const overlay = this.presetPickerOverlay
+    const component = this.presetPickerComponent
+    this.presetPickerOverlay = undefined
+    this.presetPickerFrame = undefined
+    this.presetPickerComponent = undefined
     if (overlay !== undefined) this.overlayRemounts.delete(overlay)
     overlay?.hide()
     component?.dispose?.()

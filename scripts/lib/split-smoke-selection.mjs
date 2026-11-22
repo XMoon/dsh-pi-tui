@@ -42,6 +42,7 @@ import { runOfficialWebComposition } from '../smoke/split-process/official-web-c
 import { runPtySessionWriteRecovery } from '../smoke/split-process/pty-session-write-recovery.mjs'
 import { runSessionlessHostFileF5B } from '../smoke/split-process/sessionless-host-file-f5b.mjs'
 import { runSessionlessDefaultModel } from '../smoke/split-process/sessionless-default-model.mjs'
+import { runSessionlessDefaultPreset } from '../smoke/split-process/sessionless-default-preset.mjs'
 import { runRemoteGitBranchLocality } from '../smoke/split-process/remote-git-branch-locality.mjs'
 import { runSharedSessionInteractions } from '../smoke/split-process/shared-session-interactions.mjs'
 import { runPromptSessionFocusTurnParity } from '../smoke/split-process/prompt-session-focus-turn-parity.mjs'
@@ -210,6 +211,13 @@ const CASE_REGISTRY = Object.freeze([
     id: 'surface.sessionless-default-model',
     title: 'a real sessionless /model Save default persists the Host default, survives an independent Host restart and becomes the next Session fallback — with two Clients saving in real receive order',
     run: runSessionlessDefaultModel,
+  }),
+  Object.freeze({
+    suite: 'surface',
+    id: 'surface.sessionless-default-preset',
+    title: 'a real sessionless /preset reads the Host Catalog and stages the pending preset / persists the future default through the TWO explicit actions, survives an independent Host restart and creates no Session',
+    platforms: LINUX_DARWIN,
+    run: runSessionlessDefaultPreset,
   }),
   Object.freeze({
     suite: 'surface',

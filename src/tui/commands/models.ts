@@ -27,6 +27,7 @@ import type {
 import type {
   PresetApplyOutcome,
   PresetDefaultOutcome,
+  PresetPickerHandle,
   PresetPresentation,
 } from '../../app/command/preset-presentation.ts'
 import { pituiModelPresentation } from '../pickers/model-presentation-pitui.ts'
@@ -156,6 +157,11 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
   // It is DISTINCT from `presetOperationToken` (which owns the WRITE): the
   // surface token decides which picker is allowed to hydrate/repaint/close.
   let presetSurfaceToken = 0
+  // The ONE mounted `/preset` panel handle of this registration lifetime. It
+  // records the presentation slot only — never a second read/write owner — so
+  // a newer invocation (typed included) can retire the previous panel while an
+  // already-admitted write keeps settling through its own operation token.
+  let activePresetPicker: PresetPickerHandle | undefined
 
   /** The shared `/model` body: ONE handler closure per registration lifetime,
    *  serving the registered command, the command-only UI entry (`openModel`)
@@ -680,6 +686,14 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
         // already-admitted Host write still settles through its own owner. The
         // bare `/preset` below reuses this one token for its whole panel life.
         const surfaceToken = ++presetSurfaceToken
+        // A newer invocation owns the surface: retire the PREVIOUS panel (a
+        // typed verb included) BEFORE any read/write of this one. The token is
+        // re-proven afterwards because `close()` can synchronously run a
+        // callback that starts yet another invocation.
+        const previousPicker = activePresetPicker
+        activePresetPicker = undefined
+        if (previousPicker !== undefined && !previousPicker.isDisposed()) previousPicker.close()
+        if (surfaceToken !== presetSurfaceToken) return { kind: 'success' }
         /**
          * A notice is owned by BOTH markers: the operation token fences the
          * WRITE's settlement (inside `applyPresetSelection`) and this fences the
@@ -938,13 +952,11 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
           notifyOwned(message, 'error')
           return { kind: 'error', text: message }
         }
-        // The surface token was taken at the top of this invocation. The NATIVE
-        // picker mounts its loading panel IMMEDIATELY and runs the roster read as
-        // owned background work, so the user gets instant feedback and may type a
-        // query while it loads. The PiTui adapter keeps its ORIGINAL settlement:
-        // the read is awaited inside this handler, so its own success text, its
-        // thrown read failure and the command path's draft disposition are
-        // unchanged.
+        // The surface token was taken at the top of this invocation. BOTH
+        // presentations mount their surface in the LOADING state IMMEDIATELY
+        // and run the roster read as owned background work through the ONE
+        // `loadOnce` owner below, so the user gets instant feedback and may
+        // type a query while it loads.
         // The write subject is captured BEFORE the first read and is fixed for
         // the panel's whole life: the read never re-derives the subject from a
         // later, possibly different Session.
@@ -954,19 +966,35 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
         // is refused, and a settled response can only belong to the latest
         // token+scope read.
         let reading = false
-        const picker = presentation.open({
-          subject,
-          isCurrent: () => surfaceToken === presetSurfaceToken && pickerOwnerCurrent(),
-          retry: () => loadOnce(),
-          apply: (id) => pickPreset(id, pickerScope),
-          setDefault: (id) => savePresetDefault(id),
-          // The owned-task entry for the semantic writes: runOwned with the
-          // runner's diag pre-attached (AGENTS.md — never a bare void).
-          runOwned: <T>(label: string, task: () => T | Promise<T>, options: Omit<OwnedTaskOptions<T>, 'diag' | 'sessionId'>) => {
-            runOwned(label, task, { ...options, diag: runner.diag, sessionId: () => runner.currentSessionId })
-          },
-        })
-        const closer = () => { if (surfaceToken === presetSurfaceToken) picker.close() }
+        /**
+         * Open the ONE presentation surface. A synchronous mount failure is a
+         * REAL command error (never a success without an overlay): the adapter
+         * has already released its half-mounted panel, and this invocation owns
+         * no picker slot.
+         */
+        let picker: PresetPickerHandle
+        try {
+          picker = presentation.open({
+            subject,
+            isCurrent: () => surfaceToken === presetSurfaceToken && pickerOwnerCurrent(),
+            retry: () => loadOnce(),
+            apply: (id) => pickPreset(id, pickerScope),
+            setDefault: (id) => savePresetDefault(id),
+            // The owned-task entry for the semantic writes: runOwned with the
+            // runner's diag pre-attached (AGENTS.md — never a bare void).
+            runOwned: <T>(label: string, task: () => T | Promise<T>, options: Omit<OwnedTaskOptions<T>, 'diag' | 'sessionId'>) => {
+              runOwned(label, task, { ...options, diag: runner.diag, sessionId: () => runner.currentSessionId })
+            },
+          })
+        } catch (error) {
+          if (surfaceToken === presetSurfaceToken) activePresetPicker = undefined
+          return { kind: 'error', text: `preset picker failed to open: ${presetErrorText(error)}` }
+        }
+        activePresetPicker = picker
+        const closer = () => {
+          if (activePresetPicker === picker) activePresetPicker = undefined
+          if (surfaceToken === presetSurfaceToken) picker.close()
+        }
         /**
          * The picker's explicit `Set as default for new sessions` row: the SAME writer the
          * typed `/preset default <id>` verb calls. The settings write raises
@@ -1022,6 +1050,7 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
             onCancel: () => {
               reading = false
               if (surfaceToken === presetSurfaceToken && !picker.isDisposed()) closer()
+              else if (activePresetPicker === picker) activePresetPicker = undefined
             },
             onResult: (read) => {
               reading = false
@@ -1033,7 +1062,10 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
                 if (!picker.isDisposed()) closer()
                 return
               }
-              if (picker.isDisposed()) return
+              if (picker.isDisposed()) {
+                if (activePresetPicker === picker) activePresetPicker = undefined
+                return
+              }
               // Re-read the live facts AFTER the awaits: never mark a stale
               // `current`, a stale pending or a stale default. The SUBJECT is
               // the one captured at open — the fence above proved it did not
@@ -1054,56 +1086,22 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
                 if (!picker.isDisposed()) closer()
                 return
               }
-              if (picker.isDisposed()) return
+              if (picker.isDisposed()) {
+                if (activePresetPicker === picker) activePresetPicker = undefined
+                return
+              }
               picker.setLoadError(safeErrorMessage(error))
             },
           })
         }
-        if (native !== undefined) {
-          // The native TSP path: the panel is already mounted in its loading
-          // state and the ONE read owner hydrates it in the background.
-          loadOnce()
-          return { kind: 'success' }
-        }
-        // ── the PiTui path: the ORIGINAL command settlement ──
-        // The same read owner (`presets.roster` under the captured scope and
-        // signal) is awaited here, so the handler keeps its own result: the
-        // frozen empty-roster text, and a real read failure rethrown to the
-        // command path (which owns the failure notice and the draft restore).
-        try {
-          const roster = await presets.roster(runner.signal)
-          if (!pickerOwnerCurrent()) {
-            picker.close()
-            return { kind: 'success' }
-          }
-          if (roster.presets.length === 0) {
-            picker.close()
-            return { kind: 'success', text: 'no agent presets configured' }
-          }
-          const defaultId = roster.defaultId ?? await displayedDefault()
-          // Re-check AFTER the displayedDefault await too: a Session switch during
-          // it must not mix the old roster/default with the new Session's state.
-          if (!pickerOwnerCurrent()) {
-            picker.close()
-            return { kind: 'success' }
-          }
-          picker.setRoster({
-            roster,
-            currentId: subject.sessionless ? undefined : runner.currentPreset(),
-            pendingId: subject.sessionless ? runner.pendingPreset : undefined,
-            defaultId,
-            canSetDefault: runner.config.presetDefault.available(),
-          })
-          return { kind: 'success' }
-        } catch (error) {
-          picker.close()
-          // A superseded/aborted read no longer owns the surface: stay silent
-          // instead of surfacing a stale roster failure (v2 §0.2.3/§0.3.1).
-          if (error instanceof SupersededReadError || !pickerOwnerCurrent() || runner.signal.aborted) {
-            return { kind: 'success' }
-          }
-          throw error
-        }
+        // BOTH presentations mount their surface in the LOADING state
+        // immediately and hydrate through the SAME single read owner: the
+        // native TSP panel and the PiTui Catalog both consume
+        // `setLoading`/`setRoster`/`setLoadError`. There is no second awaited
+        // roster read and no command-level empty/error text anymore — the
+        // retired PiTui-only branch was the duplicate read owner.
+        loadOnce()
+        return { kind: 'success' }
       },
     })
   }

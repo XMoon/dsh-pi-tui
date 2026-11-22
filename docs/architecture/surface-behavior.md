@@ -512,6 +512,52 @@ The current, sole owning contract for this behavior is
 [Session Workspace behavior](./surface-session.md). This heading retains existing entry links; do not
 maintain a second copy of the behavior here.
 
+## Agent preset picker (`/preset`)
+
+The PiTui bare `/preset` is ONE root-owned capturing overlay with TWO pages: a
+Catalog (the only writer is its explicit Action Bar) and a strictly read-only
+Details reader. The product rules — Catalog/Details content, the committed state
+vocabulary and the explicit write scope — are owned by
+[TSP preset selection](../tsp/preset-selection.md); this section records only the
+PiTui presentation contract.
+
+- **Authority.** `src/tui/commands/models.ts` owns the one roster read and the
+  `Use`/`Set default` writers; the panel holds only local page/zone/scroll state.
+  `Use next` (sessionless) stages `runner.pendingPreset` and creates no Session;
+  `Use session` (a still-blank live Session) commits through the Host transition
+  gate and its `agent-preset/selected` authority; `Set default` writes the Config
+  owner for future Sessions only and never rewrites the current or pending
+  preset. A started Session keeps the existing bare `/preset` refusal with no
+  selectable UI. The typed `/preset status`, `/preset default [<id>]` and
+  `/preset <id>` verbs keep their existing command results and writers and never
+  open this overlay.
+- **Catalog.** Built-in then Custom groups, name/id/description search, complete
+  `name (id)` labels and atomic `[current]` / `[next session]` / `[default]` /
+  `[draft]` / `[unavailable]` chips. The ONE bottom Action Bar carries
+  `Use next` or `Use session`, `Set default`, and `Close [Esc]` (`Esc` last); a
+  disabled write keeps its real reason in the status row (PiTui paints no
+  tooltip). Browsing, searching and opening Details never write; the FIRST
+  pointer click on a different row only selects, and activation requires the row
+  already selected (keyboard `Enter` or a second click).
+- **Details** is ONE read-only scrolled Markdown body: complete Name/ID/Type/
+  Scope, the committed relationships, a broken row's failure reason, the
+  complete description and — for a shipped preset only — the official Mode guide
+  inline. `Esc` or the painted `Back [Esc]` returns to the Catalog with the
+  query, selection and list window intact; the page paints no business action.
+- **Loading / Error / Retry.** The overlay mounts immediately in Loading and the
+  command's single read owner hydrates it in place. A failed read paints the real
+  reason with `Retry` + `Close`, and Retry re-enters Loading through that same
+  owner (one read in flight). An empty roster is the readable
+  `No agent presets configured.` state — never a silent first-row fallback.
+- **Lifecycle.** Every `/preset` invocation retires the previous panel; the one
+  logical overlay is remounted across a fullscreen switch/resize without losing
+  local state. A late read or settlement that no longer owns the surface commits
+  no frame and never reopens a closed panel. `Close`/`Esc` dismiss the panel but
+  never cancel an admitted Host/Config write; rejected/locked writes keep the
+  ready Catalog with the real reason, an indeterminate write dismisses without
+  an implicit retry, and a raising default write is reported UNCONFIRMED — never
+  as a proven rollback.
+
 ## Web frontend control (`/web`)
 
 `/web` is ONE local, sessionless Client command that controls the Split Host's

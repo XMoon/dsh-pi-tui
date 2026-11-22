@@ -77,6 +77,7 @@ You can also save `Daemon` under `/settings → General → Backend` for the **n
 - **Agent and tools:** streamed Markdown, Thinking / Tool / Context disclosure, approvals and Questions, model/reasoning-effort selection, Plan, Goal and Todo.
 - **Sessions and workspaces:** `/sessions`, `/new`, `/resume`, `/fork`, `/rewind`, `--session` and `--continue`; browse by workspace and preview before resuming.
 - **Team / Subagent / Job:** toggle Root Agent Team in `/model`; `/tasks` displays Work/Team, nested Subagents and Jobs. Subagents are expanded by default; retained Job history is optionally disclosed.
+- **Presets:** bare `/preset` opens a two-page Catalog + Details surface — search, Built-in/Custom groups and state chips; browsing and reading Details never write. Only the explicit bottom actions `Use next` / `Use session` and `Set default` apply a preset or save the new-session default. `/preset status`, `/preset default [<id>]` and `/preset <id>` remain available.
 - **Input and shell:** `@file` completion, image and file attachments, `Ctrl+V` image paste, `!` / `!!` Host Shell, external editor, customizable Footer.
 - **Reading and search:** `/display` Full / Focus / Compact, Transcript View / Full search, folding, `Ctrl+R` prompt history. Current Session recall spans working-directory changes.
 - **Settings and plugins:** Provider authorization/credentials, approvals, MCP management, Web Search/Fetch, Plugin Manager, dynamic Extension Settings and Client-local `./tui` plugin loading.
@@ -89,6 +90,7 @@ You can also save `Daemon` under `/settings → General → Backend` for the **n
 |---|---|
 | `/sessions` · `/resume` · `/new` | Find or start sessions |
 | `/model` · `/tasks` · `/plan` · `/goal` | Models, jobs and Agent modes |
+| `/preset` | Browse/apply a session preset or save the new-session default |
 | `/settings` · `/plugins` · `/keybindings` | Configuration and extensions |
 | `/display` · `/export` · `/deliverables` | Reading and exporting |
 | `Ctrl+F` · `Ctrl+Shift+F` | Rendered-view / available Session-history search |
