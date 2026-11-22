@@ -59,6 +59,13 @@ provenance, not an ownership requirement. `status` reports
 `compatibility=other-build` when the observed build differs from the installed
 profile.
 
+`daemon logs` selects Host-process output only. A Split Client surface that
+fails reports its own controlled line in the terminal and writes a private
+incident file at `$DSH_HOME/logs/pi-tui-client/startup-*.log` (`DSH_HOME`
+defaults to `~/.dsh`; `DSH_PI_TUI_LOG=off` suppresses the file). `daemon logs`
+is not a Client log entry. The incident file contains the real stack and
+private local details; review it before sharing.
+
 ## Control the official Web frontend from the CLI
 
 A running daemon Host can serve the official Web frontend. The headless CLI

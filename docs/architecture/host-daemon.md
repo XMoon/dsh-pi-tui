@@ -383,11 +383,16 @@ state authority and the only mutation writer.
   `FragmentPath`/plist source, a mismatched `MainPID`/PID and an
   independent Host without a fresh authenticated identity remain refusals.
   A restart still stops the old instance and proves a new authenticated Ready
-  instance; a failed recovery reports the real failure. An ordinary surface
-  startup failure prints the controlled code, states that the Host was not
-  stopped, and points at `daemon status`, `daemon logs` and an explicitly
-  user-chosen `daemon restart` for the ACTIVE profile; it never tells the user
-  to signal a PID and never promises that recovery will succeed. A
+  instance; a failed recovery reports the real failure. A live-Host typed
+  refusal (`LocalScopeError` protocol/DSH/authentication class) prints the
+  controlled code, states that the Host was not stopped, and points at `daemon
+  status`, `daemon logs` and an explicitly user-chosen `daemon restart` for the
+  ACTIVE profile; it never tells the user to signal a PID and never promises
+  that recovery will succeed. A Client-local startup failure — for example a
+  missing Client dependency — is a different owner: the terminal names the
+  controlled Client classification and the private
+  `$DSH_HOME/logs/pi-tui-client/startup-*.log` incident file, is not available
+  from `daemon logs`, and does not suggest a Host restart. A
   Client-handoff/reexec failure keeps its dedicated expected-Host restore line
   instead: the Host was not stopped or replaced, and the user starts a
   compatible Client manually, because restarting the Host is not the recovery

@@ -198,6 +198,19 @@ test('a nonzero child exit maps to that code', () => {
   assert.deepEqual(exitCodes, [3])
 })
 
+test('a child that wrote its own fatal diagnostic settles exit 1 once without a guessed second reason', () => {
+  const { spawnImpl, children } = fakeSpawn()
+  const exitCodes: number[] = []
+  const fatalLines: string[] = []
+  const c = coordinator(children, exitCodes, spawnImpl, { reportFatal: (line: string) => { fatalLines.push(line) } })
+  c.start()
+  // The real Client already wrote its private diagnostics file and printed its
+  // one terminal line; the parent only maps the real exit code.
+  children[0].finish(1)
+  assert.deepEqual(exitCodes, [1], 'the one-shot appExit settles exactly once')
+  assert.equal(fatalLines.length, 0, 'the parent must not invent a second reason from exit 1')
+})
+
 test('a spawn throw fails closed with exit 1 and one sanitized fatal line', () => {
   const exitCodes: number[] = []
   const fatalLines: string[] = []
