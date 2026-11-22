@@ -60,7 +60,10 @@ let readJson
 let productionBuildId
 let installedPayloadHash
 let readProcessStarttime
+let safeIdentity
+let assertIdentityKept
 let EXPECTED_PACKAGE_NAME
+let hostStatusSequence = 0
 
 // Register every parent-death / message / signal handler before loading the
 // heavy profile and fixture modules. A fork can deliver `disconnect` while the
@@ -134,6 +137,8 @@ const modulesReady = Promise.all([
   productionBuildId = upgradeSupport.productionBuildId
   installedPayloadHash = upgradeSupport.installedPayloadHash
   readProcessStarttime = upgradeSupport.readProcessStarttime
+  safeIdentity = upgradeSupport.safeIdentity
+  assertIdentityKept = upgradeSupport.assertIdentityKept
   EXPECTED_PACKAGE_NAME = upgradeSupport.EXPECTED_PACKAGE_NAME
   installPlugin = smokeHarness.installPlugin
   readJson = smokeHarness.readJson
@@ -305,6 +310,18 @@ function killOwnedHost(handle, signal) {
 
 function hostPgid(handle) {
   return handle?.pgid ?? handle?.child?.pid
+}
+
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    if (error?.code === 'ESRCH') return false
+    if (error?.code === 'EPERM') return true
+    throw error
+  }
 }
 
 function processGroupAlive(pgid) {
@@ -815,14 +832,29 @@ async function handleUpgradeInstallNewProfileForReload() {
     throw new Error('UPGRADE_INSTALL_NEW_PROFILE_FOR_RELOAD: the side-old payload changed')
   }
   const hostPidBefore = activeHost.child.pid
-  const instanceIdBefore = activeHost.ready?.localHost?.instanceId
+  const pgidBefore = hostPgid(activeHost)
+  if (!pidAlive(hostPidBefore) || !processGroupAlive(pgidBefore)) {
+    throw new Error('UPGRADE_INSTALL_NEW_PROFILE_FOR_RELOAD: the active Host is not alive before the profile update')
+  }
+  const statusBefore = await queryHostStatus(activeHost)
+  const identityBefore = safeIdentity(statusBefore.localHost)
   const facts = await installProfilePackage(scene.pair.new.path)
+  if (process.env.SPLIT_VITEST_UPGRADE_HOST_EXIT_AFTER_PROFILE_INSTALL === '1') {
+    // Test-harness negative control for the fresh-liveness contract: the
+    // install succeeded, but the owned Host disappears before the post-install
+    // status check. This must be observed as a failure, never papered over by
+    // the cached ready record.
+    await terminateHost(activeHost, 'injected-host-exit-during-profile-install')
+  }
+  if (activeHost.exited || activeHost.child.exitCode !== null || activeHost.child.signalCode !== null
+    || !pidAlive(hostPidBefore) || !processGroupAlive(pgidBefore)) {
+    throw new Error('UPGRADE_INSTALL_NEW_PROFILE_FOR_RELOAD: the active Host exited during the profile update')
+  }
+  const statusAfter = await queryHostStatus(activeHost)
+  assertIdentityKept(safeIdentity(statusAfter.localHost), identityBefore, 'UPGRADE_INSTALL_NEW_PROFILE_FOR_RELOAD')
   const sideOldHashAfter = installedPayloadHash(scene.sideOld.packageRoot)
   if (sideOldHashAfter !== sideOldHashBefore) {
     throw new Error('UPGRADE_INSTALL_NEW_PROFILE_FOR_RELOAD: the official install modified the live side-old payload')
-  }
-  if (!activeHost.exited && (activeHost.child.pid !== hostPidBefore || activeHost.ready?.localHost?.instanceId !== instanceIdBefore)) {
-    throw new Error('UPGRADE_INSTALL_NEW_PROFILE_FOR_RELOAD: the running Host identity changed')
   }
   scene.profileInstall = facts
   writeReceipt({ profile: { ...(receipt.profile ?? {}), newForReload: facts }, phase: 'NEW_PROFILE_INSTALLED_FOR_RELOAD' })
@@ -1022,15 +1054,28 @@ async function handleStartHost(message) {
   }
 }
 
+async function queryHostStatus(handle) {
+  if (handle === undefined || handle.exited || handle.child.exitCode !== null || handle.child.signalCode !== null) {
+    throw new Error('HOST_STATUS: Host already exited')
+  }
+  if (!pidAlive(handle.child.pid) || !processGroupAlive(hostPgid(handle))) {
+    throw new Error('HOST_STATUS: Host OS process or process group is not alive')
+  }
+  const hostRequestId = `supervisor-host-status-${String(++hostStatusSequence)}`
+  handle.child.stdin.write(`${JSON.stringify({ op: 'status', requestId: hostRequestId })}\n`)
+  const status = await waitForHostRecord(handle,
+    record => record.m4a0 === 'status' && record.requestId === hostRequestId,
+    `Host status ${hostRequestId}`, 30_000)
+  if (status.localHost === undefined || status.localHost === null) {
+    throw new Error('HOST_STATUS: the official status response carries no localHost identity')
+  }
+  return status
+}
+
 async function handleHostStatus(message) {
   const handle = activeHost
   if (handle === undefined || handle.hostId !== message.hostId) throw new Error('HOST_STATUS: unknown hostId')
-  if (handle.exited) throw new Error('HOST_STATUS: Host already exited')
-  const hostRequestId = String(message.hostRequestId)
-  handle.child.stdin.write(`${JSON.stringify({ op: 'status', requestId: hostRequestId })}\n`)
-  return await waitForHostRecord(handle,
-    record => record.m4a0 === 'status' && record.requestId === hostRequestId,
-    `Host status ${hostRequestId}`, 30_000)
+  return await queryHostStatus(handle)
 }
 
 async function handleFinalize(message) {
@@ -1062,6 +1107,14 @@ async function handleFinalize(message) {
     writeReceipt({ phase: 'NOT_QUIESCED', errorName: 'FINALIZE_CLIENTS_NOT_CLOSED' })
     throw new Error('FINALIZE: worker did not confirm Clients closed')
   }
+  for (const client of receipt.clients ?? []) {
+    for (const pid of client.businessPids ?? []) {
+      if (pidAlive(pid)) {
+        writeReceipt({ phase: 'NOT_QUIESCED', errorName: 'FINALIZE_CLIENT_BUSINESS_PID_ALIVE', client: client.label, pid })
+        throw new Error(`FINALIZE: business Client PID ${String(pid)} is still alive (${String(client.label)})`)
+      }
+    }
+  }
   if (hostStopError !== undefined) throw hostStopError
   for (const handle of hosts) {
     if (handle.exitResult?.code !== 0 || handle.exitResult?.signal !== null) {
@@ -1078,10 +1131,16 @@ async function handleFinalize(message) {
 async function handleReport(message) {
   const detail = message.detail === undefined ? undefined : message.detail
   if (message.event === 'client-started' && detail !== undefined) {
+    const businessPids = Array.isArray(detail.businessPids)
+      ? detail.businessPids.filter(pid => Number.isInteger(pid) && pid > 0)
+      : []
     receipt.clients = [...(receipt.clients ?? []), {
       label: detail.label,
       session: detail.session,
       shellPid: detail.shellPid ?? null,
+      recordFile: typeof detail.recordFile === 'string' ? detail.recordFile : undefined,
+      businessPids,
+      businessPid: businessPids.at(-1) ?? null,
       startedAt: now(),
     }]
     writeReceipt({})

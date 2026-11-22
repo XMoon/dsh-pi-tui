@@ -23,6 +23,7 @@ const SCENARIOS = new Set([
   'upgrade-worker-kill:between-host-generations',
   'upgrade-worker-kill:new-host-spawned-before-ack',
   'upgrade-worker-kill:side-build-install',
+  'upgrade-live-host-exit',
 ])
 
 function arg(name) {
@@ -45,9 +46,19 @@ async function holdForExternalKill(label) {
   })
 }
 
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
 async function closeClientAndVerify(scene, client) {
-  const pid = await client.businessPid()
-  if (!Number.isInteger(pid) || pid <= 0) throw new Error(`${client.label}: no real business PID in the official record`)
+  const businessPids = client.businessPids()
+  if (businessPids.length === 0) throw new Error(`${client.label}: no real business PID in the official record`)
   const records = client.readRecords()
   if (!records.some(record => record.m4a0 === 'client-started')) {
     throw new Error(`${client.label}: the official record sink has no client-started event`)
@@ -57,6 +68,9 @@ async function closeClientAndVerify(scene, client) {
   await client.close()
   const after = await client.terminal.state().catch(() => undefined)
   if (after !== undefined && after.exited === null) throw new Error(`${client.label}: terminal is still alive after close`)
+  for (const pid of businessPids) {
+    if (pidAlive(pid)) throw new Error(`${client.label}: business Client PID ${String(pid)} survived close`)
+  }
 }
 
 async function runSequentialHosts(scene) {
@@ -127,8 +141,9 @@ async function runLiveProfileRefusal(scene) {
 
 async function main() {
   const scenario = requireScenario()
-  const scene = await createUpgradeScene()
+  let scene
   try {
+    scene = await createUpgradeScene()
     switch (scenario) {
       case 'upgrade-sequential-hosts':
         await runSequentialHosts(scene)
@@ -161,21 +176,45 @@ async function main() {
       }
       case 'upgrade-worker-kill:side-build-install': {
         await scene.installOldProfile()
+        // The external probe watches the Supervisor's CURRENT install.inProgress
+        // state and SIGKILLs this worker while pnpm is still installing. A
+        // completed install is a truthful probe failure: there is no post-hoc
+        // kill point.
         await scene.installNewSideBySide()
-        await scene.report('worker-kill-point', { point: 'side-build-install', workerPid: process.pid })
-        await holdForExternalKill('side-build-install')
+        throw new Error('side-build-install: the install completed before the external SIGKILL')
+      }
+      case 'upgrade-live-host-exit': {
+        await scene.installOldProfile()
+        await scene.installOldSideBySide()
+        await scene.installNewSideBySide()
+        const host = await scene.startHost({ source: 'side-old', scenario: 'long-turn' })
+        await scene.installNewProfileForReload().then(
+          () => { throw new Error('live-host-exit: the Host disappearance was not detected') },
+          error => {
+            const message = String(error?.message ?? error)
+            if (!message.includes('Host exited during the profile update')) throw error
+            console.log(`UPGRADE_PROBE_WORKER_FACTS ${JSON.stringify({
+              scenario: 'upgrade-live-host-exit',
+              detected: 'Host exited during the profile update',
+              hostPid: host.ready?.pid,
+            })}`)
+          },
+        )
         return
       }
       default:
         throw new Error(`unhandled scenario ${scenario}`)
     }
   } finally {
-    // A killed worker never reaches this; a normal path finalizes explicitly.
-    // This fallback only keeps an unexpected non-kill failure from leaking.
-    if (scenario.startsWith('upgrade-worker-kill:')) {
-      await scene.dispose().catch(error => {
+    // A killed worker never reaches this. Every normal or thrown path must
+    // dispose its Supervisor and any native Client; never swallow that failure.
+    if (scene !== undefined) {
+      try {
+        await scene.dispose()
+      } catch (error) {
         console.error(`UPGRADE_PROBE_WORKER_DISPOSE_FAILED ${scenario}: ${error instanceof Error ? error.message : String(error)}`)
-      })
+        process.exitCode = 1
+      }
     }
   }
 }

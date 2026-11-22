@@ -32,7 +32,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 
 const PILOT_MODES = ['main-signal', 'foreground-group-sigint', 'worker-kill', 'bootstrap-main-sigterm']
 const UPGRADE_ATS = ['old-host-ready', 'between-host-generations', 'new-host-spawned-before-ack', 'side-build-install']
-const UPGRADE_MODES = ['upgrade-sequential-hosts', 'upgrade-live-profile-refusal', 'upgrade-worker-kill']
+const UPGRADE_MODES = ['upgrade-sequential-hosts', 'upgrade-live-profile-refusal', 'upgrade-live-host-exit', 'upgrade-worker-kill']
 
 function arg(name) {
   const index = process.argv.indexOf(name)
@@ -223,6 +223,9 @@ function checkReceiptResources(receipt) {
   }
   for (const client of receipt.clients ?? []) {
     if (pidAlive(client.shellPid)) problems.push(`Client shell PID still alive: ${String(client.shellPid)} (${String(client.label)})`)
+    for (const pid of client.businessPids ?? []) {
+      if (pidAlive(pid)) problems.push(`Client business PID still alive: ${String(pid)} (${String(client.label)})`)
+    }
   }
   if (pidAlive(receipt.supervisor?.pid)) problems.push(`Supervisor PID still alive: ${String(receipt.supervisor.pid)}`)
   return problems
@@ -250,6 +253,9 @@ function checkUpgradeReceiptResources(receipt, options = {}) {
   }
   for (const client of receipt.clients ?? []) {
     if (pidAlive(client.shellPid)) problems.push(`Client shell PID still alive: ${String(client.shellPid)} (${String(client.label)})`)
+    for (const pid of client.businessPids ?? []) {
+      if (pidAlive(pid)) problems.push(`Client business PID still alive: ${String(pid)} (${String(client.label)})`)
+    }
   }
   if (pidAlive(receipt.supervisor?.pid)) problems.push(`Supervisor PID still alive: ${String(receipt.supervisor.pid)}`)
   return problems
@@ -312,6 +318,9 @@ if (mode === 'worker-kill') env.SPLIT_VITEST_WORKER_KILL_POINT = at
 if (mode === 'upgrade-worker-kill' && at === 'new-host-spawned-before-ack') {
   env.SPLIT_VITEST_UPGRADE_KILL_POINT = 'new-host-spawned-before-ack'
 }
+if (mode === 'upgrade-live-host-exit') {
+  env.SPLIT_VITEST_UPGRADE_HOST_EXIT_AFTER_PROFILE_INSTALL = '1'
+}
 
 const sentinel = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
   detached: true,
@@ -361,6 +370,35 @@ let killedWorkerPid
 try {
   let deadline
   if (upgradeMode) {
+    if (mode === 'upgrade-live-host-exit') {
+      const exit = await waitChildExit(child, 600_000)
+      childExited = true
+      if (exit.code !== 0 || exit.signal !== null) fail(`upgrade-live-host-exit worker exited abnormally: ${JSON.stringify(exit)}`)
+      const terminalReceipt = await waitUntil(() => {
+        const current = latestUpgradeReceipt(tmpBase, runId)
+        return current?.phase === 'ABORTED_CLEAN' ? current : undefined
+      }, 'upgrade-live-host-exit ABORTED_CLEAN', 60_000)
+      verifyUpgradePair(terminalReceipt, oldTgz, newTgz)
+      if (!Array.isArray(terminalReceipt.hosts) || terminalReceipt.hosts.length !== 1) {
+        fail(`upgrade-live-host-exit: expected one Host generation, got ${String(terminalReceipt.hosts?.length)}`)
+      }
+      const problems = checkUpgradeReceiptResources(terminalReceipt)
+      if (problems.length > 0) fail(problems.join('; '))
+      checkNoLingeringPaths(tmpBase, terminalReceipt)
+      if (!pidAlive(sentinel.pid)) fail(`external sentinel PID ${String(sentinel.pid)} died; the probe touched an unrelated process`)
+      console.log(`SPLIT_SUPERVISOR_SIGNAL_PROBE_FACTS ${JSON.stringify({
+        mode,
+        runId,
+        workerPid: terminalReceipt.worker.pid,
+        supervisorPid: terminalReceipt.supervisor?.pid,
+        supervisorPhase: terminalReceipt.phase,
+        hosts: terminalReceipt.hosts,
+        sceneRoot: terminalReceipt.sceneRoot,
+        sentinelPid: sentinel.pid,
+      })}`)
+      console.log(`SPLIT_SUPERVISOR_SIGNAL_PROBE_PASS mode=${mode} supervisor_phase=${terminalReceipt.phase} host_exit=${JSON.stringify(terminalReceipt.hosts[0].exitSignal)}`)
+      return
+    }
     if (mode === 'upgrade-sequential-hosts' || mode === 'upgrade-live-profile-refusal') {
       const finalReceipt = await waitUntil(() => {
         const current = latestUpgradeReceipt(tmpBase, runId)
@@ -409,8 +447,11 @@ try {
     if (barrierPoint === 'side-build-install') {
       await waitUntil(() => {
         const current = latestUpgradeReceipt(tmpBase, runId)
-        return (current?.notes ?? []).some(note => note.event === 'new-side-install-started') ? current : undefined
-      }, 'new side-build install started', 300_000)
+        // This is CURRENT state, not a past event: cleanup cannot start while
+        // installInProgress is still true and completedAt is absent.
+        return current?.install?.inProgress === true && current?.install?.completedAt === undefined
+          ? current : undefined
+      }, 'new side-build install currently in progress', 300_000)
     } else if (barrierPoint === 'new-host-spawned-before-ack') {
       await waitUntil(() => {
         const current = latestUpgradeReceipt(tmpBase, runId)
@@ -446,12 +487,10 @@ try {
       return current
     }, 'Supervisor ABORTED_CLEAN/NOT_QUIESCED', Math.max(1, deadline - Date.now()))
     await sleep(Math.min(300, Math.max(1, deadline - Date.now())))
-    const allowRemainingRoot = terminalReceipt.phase === 'NOT_QUIESCED' && barrierPoint === 'side-build-install'
-    if (terminalReceipt.phase === 'NOT_QUIESCED' && !allowRemainingRoot) {
-      fail(`upgrade worker kill ended NOT_QUIESCED: ${String(terminalReceipt.errorName)}`)
+    if (terminalReceipt.phase !== 'ABORTED_CLEAN') {
+      fail(`upgrade worker kill ended ${String(terminalReceipt.phase)}: ${String(terminalReceipt.errorName)}`)
     }
     const problems = checkUpgradeReceiptResources(terminalReceipt, {
-      allowRemainingRoot,
       allowNoHosts: barrierPoint === 'side-build-install',
     })
     if (problems.length > 0) fail(problems.join('; '))

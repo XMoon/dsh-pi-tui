@@ -106,6 +106,7 @@ export interface UpgradeClientHandle {
     timeoutMs?: number,
   ): Promise<Record<string, any>>
   businessPid(): Promise<number | undefined>
+  businessPids(): number[]
   press(...keys: string[]): Promise<void>
   submit(text: string): Promise<void>
   type(text: string): Promise<void>
@@ -197,15 +198,19 @@ class UpgradeClient implements UpgradeClientHandle {
     throw new Error(`${label}: no matching official client record within ${String(timeoutMs)}ms`)
   }
 
-  async businessPid(): Promise<number | undefined> {
-    const records = this.readRecords()
-    for (let index = records.length - 1; index >= 0; index -= 1) {
-      const record = records[index]
+  businessPids(): number[] {
+    const pids = new Set<number>()
+    for (const record of this.readRecords()) {
       if (record?.m4a0 === 'ready' || record?.m4a0 === 'client-started') {
-        if (Number.isInteger(record.pid) && record.pid > 0) return record.pid
+        if (Number.isInteger(record.pid) && record.pid > 0) pids.add(record.pid)
       }
     }
-    return undefined
+    return [...pids]
+  }
+
+  async businessPid(): Promise<number | undefined> {
+    const pids = this.businessPids()
+    return pids.at(-1)
   }
 
   async press(...keys: string[]): Promise<void> {
@@ -232,43 +237,53 @@ class UpgradeClient implements UpgradeClientHandle {
   async close(): Promise<void> {
     if (this.closed) return
     const errors: Error[] = []
-    const state = await this.terminal.state().catch(() => undefined)
-    if (state !== undefined && state.exited !== null) {
-      if (state.exited !== 0) errors.push(new Error(`${this.label} was already exited with code ${String(state.exited)}`))
-      this.closed = true
-      await this.terminal.closeQuiet().catch(error => errors.push(asError(error)))
-      if (errors.length > 0) throw new AggregateError(errors, `${this.label} close failed`)
-      return
-    }
     try {
-      await this.terminal.submit('/exit')
-      const deadline = Date.now() + 60_000
-      let choiceTaken = false
-      while (Date.now() < deadline) {
-        const current = await this.terminal.state().catch(() => undefined)
-        if (current !== undefined && current.exited !== null) {
-          if (current.exited !== 0) errors.push(new Error(`${this.label} exit code was ${String(current.exited)}`))
-          this.closed = true
-          await this.terminal.closeQuiet().catch(error => errors.push(asError(error)))
-          break
-        }
-        if (!choiceTaken) {
-          const frame = await this.terminal.text().catch(() => '')
-          if (frame.includes('Disconnect from dsh-pi-tui')) {
-            await this.#waitForText('Keep working and disconnect', `${this.label} busy exit choice`, 15_000, false)
-            await this.terminal.press('Enter')
-            choiceTaken = true
+      const state = await this.terminal.state().catch(() => undefined)
+      if (state !== undefined && state.exited !== null) {
+        if (state.exited !== 0) errors.push(new Error(`${this.label} was already exited with code ${String(state.exited)}`))
+      } else {
+        await this.terminal.submit('/exit')
+        const deadline = Date.now() + 60_000
+        let choiceTaken = false
+        let exited = false
+        while (Date.now() < deadline) {
+          const current = await this.terminal.state().catch(() => undefined)
+          if (current !== undefined && current.exited !== null) {
+            if (current.exited !== 0) errors.push(new Error(`${this.label} exit code was ${String(current.exited)}`))
+            exited = true
+            break
           }
+          if (!choiceTaken) {
+            const frame = await this.terminal.text().catch(() => '')
+            if (frame.includes('Disconnect from dsh-pi-tui')) {
+              await this.#waitForText('Keep working and disconnect', `${this.label} busy exit choice`, 15_000, false)
+              await this.terminal.press('Enter')
+              choiceTaken = true
+            }
+          }
+          await sleep(100)
         }
-        await sleep(100)
+        if (!exited) errors.push(new Error(`${this.label} did not exit after /exit`))
       }
-      if (!this.closed) errors.push(new Error(`${this.label} did not exit after /exit`))
     } catch (error) {
       errors.push(asError(error))
-    }
-    const openSessions = new Set(await openTuiSessions())
-    if (openSessions.has(this.sessionId)) {
-      errors.push(new Error(`${this.label} left its native TUI session open after close`))
+    } finally {
+      this.closed = true
+      // Native terminal teardown is unconditional: a failed /exit or a
+      // thrown busy-choice wait must never strand the real PTY session.
+      try {
+        await this.terminal.closeQuiet()
+      } catch (error) {
+        errors.push(asError(error))
+      }
+      try {
+        const openSessions = new Set(await openTuiSessions())
+        if (openSessions.has(this.sessionId)) {
+          errors.push(new Error(`${this.label} left its native TUI session open after close`))
+        }
+      } catch (error) {
+        errors.push(asError(error))
+      }
     }
     if (errors.length > 0) throw new AggregateError(errors, `${this.label} close failed`)
   }
@@ -413,6 +428,7 @@ class Scene implements UpgradeScene {
     })
     const client = new UpgradeClient(options.label, terminal, recordFile)
     this.#ownedTuiSessions.add(terminal.session)
+    this.#clients.set(options.label, client)
     const env: Record<string, string> = {
       ...this.installation.base.env,
       SPLIT_PROCESS_DSH_ANCHOR: this.installation.anchor,
@@ -431,16 +447,28 @@ class Scene implements UpgradeScene {
         waitReady: false,
         env,
       })
+      await client.waitForRecord(record => record.m4a0 === 'ready', `${options.label} official ready record`, 120_000)
+      const businessPids = client.businessPids()
+      assert(businessPids.length > 0, `${options.label}: the official record sink carried no business PID`)
       await this.#supervisor.request('REPORT', {
         event: 'client-started',
-        detail: { label: options.label, session: terminal.session, shellPid: opened.shell_pid ?? null },
+        detail: {
+          label: options.label,
+          session: terminal.session,
+          shellPid: opened.shell_pid ?? null,
+          recordFile,
+          businessPids,
+        },
       }, { timeoutMs: 10_000 })
       await this.#waitForPaintedFrame(client, `${options.label} painted its first frame`, 30_000)
     } catch (error) {
-      await terminal.closeQuiet().catch(() => undefined)
+      try {
+        await client.close()
+      } catch (closeError) {
+        throw new AggregateError([error, closeError], `${options.label} start failed and its Client cleanup failed`)
+      }
       throw error
     }
-    this.#clients.set(options.label, client)
     return client
   }
 

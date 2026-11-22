@@ -6,8 +6,10 @@ import { defineConfig } from 'vitest/config'
  * The config is the ONE project-selection authority for the split-process
  * Pilot and the split-upgrade suite. Every project carries its own explicit
  * include, worker count and isolation settings; the root deliberately has no
- * wildcard include, so a missing/unknown `--project` can never broaden
- * discovery to another project or to the opt-in native suites.
+ * wildcard include. The package.json entry scripts always pass an explicit
+ * `--project`; invoking Vitest without `--project` is not a repository entry
+ * point and runs every configured project, including opt-in native projects
+ * once their files exist.
  *
  * This config exists for split-process Vitest E2E coverage; it does not
  * replace the repository's node:test lanes or add itself to any release gate.
