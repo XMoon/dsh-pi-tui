@@ -213,9 +213,10 @@ test('the real Darwin bridge reads through the fixture anchor, never a polluted 
   assert.ok(existsSync(cleanMarker), 'the fixture Koffi wrapper must still be the loaded module under pollution')
 })
 
-test('a Direct launcher entry supplies the DSH anchor through argv', { skip: DARWIN_ONLY, timeout: 60_000 }, t => {
-  const value = fixture(t)
-  const entry = join(value.root, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+test('a Direct launcher entry wins over an inherited Split anchor', { skip: DARWIN_ONLY, timeout: 60_000 }, t => {
+  const inherited = fixture(t, { wrapped: true })
+  const direct = fixture(t, { wrapped: true })
+  const entry = join(direct.root, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
   mkdirSync(dirname(entry), { recursive: true })
   const scopeModule = pathToFileURL(join(ROOT, 'src', 'app', 'remote-process', 'local-scope.ts')).href
   writeFileSync(entry, `import { readProcessStartDiagnostic } from ${JSON.stringify(scopeModule)}; process.stdout.write(JSON.stringify({ value: readProcessStartDiagnostic() }))\n`)
@@ -223,7 +224,7 @@ test('a Direct launcher entry supplies the DSH anchor through argv', { skip: DAR
     cwd: ROOT,
     encoding: 'utf8',
     timeout: 30_000,
-    env: { ...process.env, SPLIT_PROCESS_DSH_ANCHOR: '', NODE_PATH: '' },
+    env: { ...process.env, SPLIT_PROCESS_DSH_ANCHOR: inherited.anchor, NODE_PATH: '' },
   })
   assert.equal(result.status, 0, result.stderr)
   const observed = JSON.parse(result.stdout) as { value?: string }
@@ -231,4 +232,6 @@ test('a Direct launcher entry supplies the DSH anchor through argv', { skip: DAR
   assert.equal(typeof diagnostic, 'string')
   if (typeof diagnostic !== 'string') return
   assert.match(diagnostic, /^[0-9A-F-]{36}:\d+:\d+\.\d+$/u)
+  assert.ok(direct.marker !== undefined && existsSync(direct.marker), 'the Direct installation Koffi must be the loaded module')
+  assert.ok(inherited.marker === undefined || !existsSync(inherited.marker), 'the inherited Split anchor Koffi must never load')
 })

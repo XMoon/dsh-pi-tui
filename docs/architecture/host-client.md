@@ -302,8 +302,10 @@ the kernel seat where one is required.
   kernel identity bridge lazily loads Koffi from the current running DSH
   installation: the verified DSH anchor resolves
   `@deepseek-ai/dsh-subprocess-local` and that package's own declared `koffi`
-  dependency. Koffi is not a production dependency or independently versioned
-  runtime of this bundle. The bridge must not hard-code a Koffi version, select
+  dependency. A Direct CLI's own `argv[1]` installation identity takes
+  precedence over any inherited Split anchor; the environment anchor is used
+  only by the Split Host/Client entries themselves. Koffi is not a production
+  dependency or independently versioned runtime of this bundle. The bridge must not hard-code a Koffi version, select
   by version number, or fall back to the TUI package, a Profile, a global module
   path or an accidental hoist. The loaded `koffi` package's actual API/ABI is the
   compatibility authority; an unavailable or incompatible addon remains

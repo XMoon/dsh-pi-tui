@@ -132,30 +132,33 @@ function installedDshManifest(path: string): string | undefined {
 /**
  * The installed `@deepseek-ai/dsh/package.json` this process runs on.
  *
- * Split Host/Client entry points already verified the installation anchor and
- * exported it as SPLIT_PROCESS_DSH_ANCHOR. A Direct process derives the same
- * installed identity from its real launcher entry (`process.argv[1]`), following
- * the installed-DSH evidence rule in `src/startup.ts`. No NODE_PATH, profile
- * node_modules or source tree is consulted.
+ * A real Direct launcher entry (`process.argv[1]`) identifies its own installed
+ * DSH package and always wins over an inherited environment anchor: a shell or
+ * tool child of a Split Host inherits SPLIT_PROCESS_DSH_ANCHOR, but a Direct
+ * `dsh` CLI started from it must use the installation executing that CLI.
+ * Only a Split Host/Client entry, whose argv[1] is the product's own
+ * local-host/local-client script, falls back to the launcher-verified
+ * SPLIT_PROCESS_DSH_ANCHOR. No NODE_PATH, profile node_modules or source tree
+ * is consulted.
  */
 function installedDshAnchor(): string | undefined {
-  const provided = process.env.SPLIT_PROCESS_DSH_ANCHOR
-  if (provided !== undefined && provided !== '') return installedDshManifest(provided)
   const entry = process.argv[1]
-  if (entry === undefined) return undefined
-  try {
-    let dir = dirname(realpathSync(entry))
-    for (let depth = 0; depth < 8; depth += 1) {
-      const anchor = installedDshManifest(join(dir, 'package.json'))
-      if (anchor !== undefined) return anchor
-      const parent = dirname(dir)
-      if (parent === dir) return undefined
-      dir = parent
+  if (entry !== undefined) {
+    try {
+      let dir = dirname(realpathSync(entry))
+      for (let depth = 0; depth < 8; depth += 1) {
+        const anchor = installedDshManifest(join(dir, 'package.json'))
+        if (anchor !== undefined) return anchor
+        const parent = dirname(dir)
+        if (parent === dir) break
+        dir = parent
+      }
+    } catch {
+      // Unreadable launcher path: try the Split launcher anchor next.
     }
-  } catch {
-    // Unreadable launcher path: unavailable.
   }
-  return undefined
+  const provided = process.env.SPLIT_PROCESS_DSH_ANCHOR
+  return provided !== undefined && provided !== '' ? installedDshManifest(provided) : undefined
 }
 
 /** The nearest `node_modules` directory above a package directory. */
