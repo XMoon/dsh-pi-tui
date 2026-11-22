@@ -1023,3 +1023,165 @@ test('an unsafe sidecar keeps the index closed until a later write proves it saf
     await ctx.fiber.dispose()
   }
 })
+
+test('an equal-header equal-count official revision change replaces the derived occurrences', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-revision-repair-')
+  const source = mutableSource('/repo/revision-repair')
+  const { deps } = mutableDeps(source)
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const verify = () => (service as unknown as { verifySources(): Promise<void> }).verifySources()
+  try {
+    await waitDirectReady(service)
+    const before = await service.search({ scope: 'all', query: 'mutable first', limit: 25 }, new AbortController().signal)
+    assert.equal(before.kind, 'ready')
+    if (before.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(before.items.length, 1)
+
+    // Same header, same seq/type/time/count; ONLY the official bodies and the
+    // persistence revision changed (a repaired/replaced durable log).
+    source.events = [
+      {
+        type: 'agent/inbox/spliced',
+        seq: 0,
+        time: 1000,
+        data: {
+          target: 'next-turn',
+          start: 0,
+          inserted: [{
+            id: 'msg-1',
+            role: 'user',
+            content: [{ type: 'text', text: 'repaired first body' }],
+            source: { kind: 'user', rpcId: 'rpc-1' },
+          }],
+        },
+      },
+      source.events[1]!,
+      {
+        type: 'agent/inbox/spliced',
+        seq: 2,
+        time: 1002,
+        data: {
+          target: 'next-turn',
+          start: 1,
+          inserted: [{
+            id: 'msg-2',
+            role: 'user',
+            content: [{ type: 'text', text: 'repaired second body' }],
+            source: { kind: 'user', rpcId: 'rpc-2' },
+          }],
+        },
+      },
+    ]
+    source.revision += 1
+    await verify()
+    await waitDirectReady(service)
+
+    const oldText = await service.search({ scope: 'all', query: 'mutable first', limit: 25 }, new AbortController().signal)
+    const newText = await service.search({ scope: 'all', query: 'repaired first', limit: 25 }, new AbortController().signal)
+    assert.equal(oldText.kind, 'ready', JSON.stringify(oldText))
+    assert.equal(newText.kind, 'ready', JSON.stringify(newText))
+    if (oldText.kind !== 'ready' || newText.kind !== 'ready') throw new Error('expected ready')
+    assert.deepEqual(oldText.items, [], 'the stale derived body must disappear')
+    assert.equal(newText.items.length, 1, 'the repaired official body must become searchable')
+    assert.equal(newText.items[0]?.contentSha256, createHash('sha256').update('repaired first body', 'utf8').digest('hex'))
+  } finally {
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('a synchronous official burst coalesces into ONE drain and loses nothing', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-burst-')
+  const source = mutableSource('/repo/burst')
+  const { deps } = mutableDeps(source)
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const deliver = (event: unknown) => (service as unknown as {
+    observeLiveEvent(session: unknown, event: unknown): void
+  }).observeLiveEvent(liveSessionOf(source), event)
+  try {
+    await waitDirectReady(service)
+    const schedulesBefore = (service as unknown as { drainSchedules: number }).drainSchedules
+    // ONE synchronous burst (200 official events) publishes before any microtask
+    // drains; the queue must coalesce to a single drain task.
+    for (let index = 0; index < 200; index += 1) {
+      const seq = source.events.length
+      const event = {
+        type: 'agent/inbox/spliced' as const,
+        seq,
+        time: 10_000 + index,
+        data: {
+          target: 'next-turn',
+          start: index,
+          inserted: [{
+            id: `burst-msg-${String(index)}`,
+            role: 'user',
+            content: [{ type: 'text', text: `burst-text-${String(index)}` }],
+            source: { kind: 'user', rpcId: `rpc-burst-${String(index)}` },
+          }],
+        },
+      }
+      source.events.push(event)
+      source.revision += 1
+      deliver(event)
+    }
+    const schedulesAfter = (service as unknown as { drainSchedules: number }).drainSchedules
+    assert.equal(schedulesAfter - schedulesBefore, 1,
+      `a synchronous burst must enqueue ONE drain, observed ${String(schedulesAfter - schedulesBefore)}`)
+    await waitDirectReady(service)
+    const first = await service.search({ scope: 'all', query: 'burst-text-0', limit: 25 }, new AbortController().signal)
+    const last = await service.search({ scope: 'all', query: 'burst-text-199', limit: 25 }, new AbortController().signal)
+    const page = await service.search({ scope: 'all', query: 'burst-text-', limit: 25 }, new AbortController().signal)
+    assert.equal(first.kind, 'ready')
+    assert.equal(last.kind, 'ready')
+    assert.equal(page.kind, 'ready')
+    if (first.kind !== 'ready' || last.kind !== 'ready' || page.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(first.items.length, 1, 'the first burst row was lost')
+    assert.equal(last.items.length, 1, 'the last burst row was lost')
+    assert.equal(page.items.length, 25)
+    assert.notEqual(page.nextCursor, null, 'the burst page must have a continuation')
+  } finally {
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('deleting a derived Session invalidates its keyset cursor', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-delete-cursor-')
+  const source = mutableSource('/repo/delete-cursor')
+  const { deps } = mutableDeps(source)
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const verify = () => (service as unknown as { verifySources(): Promise<void> }).verifySources()
+  try {
+    await waitDirectReady(service)
+    const firstPage = await service.search({ scope: 'session', sessionId: 'mutable-session', query: 'mutable', limit: 1 }, new AbortController().signal)
+    assert.equal(firstPage.kind, 'ready', JSON.stringify(firstPage))
+    if (firstPage.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(firstPage.items.length, 1)
+    assert.equal(typeof firstPage.nextCursor, 'string')
+
+    source.present = false
+    source.revision += 1
+    await verify()
+    await waitDirectReady(service)
+
+    const reused = await service.search({
+      scope: 'session',
+      sessionId: 'mutable-session',
+      query: 'mutable',
+      limit: 1,
+      cursor: firstPage.nextCursor!,
+    }, new AbortController().signal)
+    assert.equal(reused.kind, 'stale', `a pre-deletion cursor must be stale: ${JSON.stringify(reused)}`)
+    if (reused.kind !== 'stale') throw new Error('expected stale')
+    assert.equal(reused.reason, 'cursor-stale')
+  } finally {
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})

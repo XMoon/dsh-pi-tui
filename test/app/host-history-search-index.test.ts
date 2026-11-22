@@ -470,3 +470,53 @@ test('a fresh index materializes only private sidecars and refuses dangling syml
     )
   }
 })
+
+test('search returns only the stored bounded preview and never a full body', (t) => {
+  const index = HistorySearchIndex.open({ profileDir: profileDir(t) })
+  try {
+    const big = `${'a'.repeat(20_000)}😀tail`
+    seed(index, 's-big', [
+      occurrence('m0', big, 5000, '/repo/big', 0),
+      occurrence('m1', `${big} one`, 4000, '/repo/big', 1),
+      occurrence('m2', `${big} two`, 3000, '/repo/big', 2),
+    ])
+    const page = index.search({ scope: 'all', query: '', limit: 25 })
+    assert.equal(page.rows.length, 3)
+    for (const row of page.rows) {
+      assert.equal(Object.hasOwn(row, 'content'), false,
+        'a search row must not carry the full body')
+      assert.ok(row.preview.length <= 4096, `preview length ${String(row.preview.length)} exceeds the bound`)
+      assert.equal(row.contentLength >= 20_000, true)
+    }
+    // The exact body stays available only through the readText occurrence path.
+    const full = index.occurrence('s-big', 'm0')
+    assert.equal(full?.content, big)
+    assert.equal(full?.preview.length, 4096)
+    assert.equal(full?.contentLength, big.length)
+  } finally {
+    index.close()
+  }
+})
+
+test('a same-application older derived schema is quarantined and rebuilt', (t) => {
+  const dir = profileDir(t)
+  const first = HistorySearchIndex.open({ profileDir: dir })
+  seed(first, 's1', [occurrence('m1', 'old schema row', 1000, '/repo/a')])
+  first.close()
+
+  const dbPath = rejoinedDbPath(dir)
+  const db = new DatabaseSync(dbPath)
+  db.exec('PRAGMA user_version = 1')
+  db.close()
+  chmodSync(dbPath, 0o600)
+
+  const reopened = HistorySearchIndex.open({ profileDir: dir })
+  try {
+    assert.equal(reopened.sessionCount(), 0, 'the disposable index must be rebuilt from scratch')
+    const names = readdirSync(join(dir, '.dsh-pi-tui', 'history-search'))
+    assert.ok(names.some(name => name.startsWith('v1.sqlite.quarantine-')),
+      'the older own schema bytes must be preserved under quarantine')
+  } finally {
+    reopened.close()
+  }
+})

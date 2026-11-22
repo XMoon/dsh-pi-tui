@@ -21,12 +21,17 @@ import { createHash } from 'node:crypto'
 import { chmodSync, lstatSync, mkdirSync, realpathSync, renameSync, statSync, type Stats } from 'node:fs'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { historySearchPreview } from '../../../runtime/remote/pi-tui-history-search-contract.ts'
 
 /** Fixed SQLite `application_id` (`PITH`). */
 export const HISTORY_SEARCH_SQLITE_APPLICATION_ID = 0x50495448
 
-/** Fixed schema version of the derived index. */
-export const HISTORY_SEARCH_SQLITE_USER_VERSION = 1
+/**
+ * Fixed schema version of the derived index. v2 adds the bounded preview and
+ * exact UTF-16 length columns so search never materializes full bodies; a v1
+ * own file is quarantined and rebuilt because the projection is disposable.
+ */
+export const HISTORY_SEARCH_SQLITE_USER_VERSION = 2
 
 const DATABASE_FILE = 'v1.sqlite'
 const PRIVATE_DIRECTORY = '.dsh-pi-tui'
@@ -54,6 +59,8 @@ CREATE TABLE history_occurrences (
   effective_cwd TEXT,
   content TEXT NOT NULL,
   normalized_content TEXT NOT NULL,
+  preview TEXT NOT NULL,
+  content_length INTEGER NOT NULL CHECK(content_length >= 0),
   content_sha256 TEXT NOT NULL,
   has_non_text INTEGER NOT NULL CHECK(has_non_text IN (0,1)),
   UNIQUE(session_id,message_id)
@@ -78,7 +85,7 @@ const SESSION_COLUMNS = [
 ] as const
 const OCCURRENCE_COLUMNS = [
   'row_id', 'session_id', 'message_id', 'first_seq', 'accepted_ms', 'effective_cwd',
-  'content', 'normalized_content', 'content_sha256', 'has_non_text',
+  'content', 'normalized_content', 'preview', 'content_length', 'content_sha256', 'has_non_text',
 ] as const
 
 /** The index path cannot be opened or is not safe to use; the Host stays up. */
@@ -137,13 +144,32 @@ export interface HistoryOccurrenceRow {
   readonly acceptedAt: number
   readonly effectiveCwd: string | null
   readonly content: string
+  readonly preview: string
+  readonly contentLength: number
+  readonly contentSha256: string
+  readonly hasNonText: boolean
+}
+
+/**
+ * One bounded search row. It deliberately carries NO full content: the preview
+ * is a stored bounded prefix and full bodies are only read by `occurrence()`
+ * for the exact-text chunk path.
+ */
+export interface HistorySearchRow {
+  readonly sessionId: string
+  readonly messageId: string
+  readonly firstEventSeq: number
+  readonly acceptedAt: number
+  readonly effectiveCwd: string | null
+  readonly preview: string
+  readonly contentLength: number
   readonly contentSha256: string
   readonly hasNonText: boolean
 }
 
 /** One keyset search page. */
 export interface HistoryIndexSearchPage {
-  readonly rows: readonly HistoryOccurrenceRow[]
+  readonly rows: readonly HistorySearchRow[]
   readonly hasMore: boolean
 }
 
@@ -286,6 +312,20 @@ interface RawOccurrenceRow {
   readonly accepted_ms: number
   readonly effective_cwd: string | null
   readonly content: string
+  readonly preview: string
+  readonly content_length: number
+  readonly content_sha256: string
+  readonly has_non_text: number
+}
+
+interface RawSearchRow {
+  readonly session_id: string
+  readonly message_id: string
+  readonly first_seq: number
+  readonly accepted_ms: number
+  readonly effective_cwd: string | null
+  readonly preview: string
+  readonly content_length: number
   readonly content_sha256: string
   readonly has_non_text: number
 }
@@ -313,6 +353,22 @@ function occurrenceOfRaw(row: RawOccurrenceRow): HistoryOccurrenceRow {
     acceptedAt: row.accepted_ms,
     effectiveCwd: row.effective_cwd,
     content: row.content,
+    preview: row.preview,
+    contentLength: row.content_length,
+    contentSha256: row.content_sha256,
+    hasNonText: row.has_non_text === 1,
+  }
+}
+
+function searchRowOfRaw(row: RawSearchRow): HistorySearchRow {
+  return {
+    sessionId: row.session_id,
+    messageId: row.message_id,
+    firstEventSeq: row.first_seq,
+    acceptedAt: row.accepted_ms,
+    effectiveCwd: row.effective_cwd,
+    preview: row.preview,
+    contentLength: row.content_length,
     contentSha256: row.content_sha256,
     hasNonText: row.has_non_text === 1,
   }
@@ -333,7 +389,7 @@ function tableColumns(db: DatabaseSync, table: string): string[] {
   return rows.map(row => row.name)
 }
 
-type SchemaState = 'fresh' | 'ok' | 'foreign' | 'corrupt'
+type SchemaState = 'fresh' | 'ok' | 'foreign' | 'corrupt' | 'stale-own'
 
 function inspectSchema(db: DatabaseSync): SchemaState {
   const applicationId = (db.prepare('PRAGMA application_id').get() as { application_id: number }).application_id
@@ -344,8 +400,12 @@ function inspectSchema(db: DatabaseSync): SchemaState {
     if (applicationId === 0 && userVersion === 0) return 'fresh'
     return 'foreign'
   }
-  if (applicationId !== HISTORY_SEARCH_SQLITE_APPLICATION_ID || userVersion !== HISTORY_SEARCH_SQLITE_USER_VERSION) {
-    return 'foreign'
+  if (applicationId !== HISTORY_SEARCH_SQLITE_APPLICATION_ID) return 'foreign'
+  if (userVersion !== HISTORY_SEARCH_SQLITE_USER_VERSION) {
+    // Same application, different derived-schema generation: this is our own
+    // disposable index, never a foreign database. It is quarantined and
+    // rebuilt from the official log.
+    return 'stale-own'
   }
   if (names.tables.length !== EXPECTED_TABLES.length || names.indexes.length !== EXPECTED_INDEXES.length) return 'corrupt'
   for (const table of EXPECTED_TABLES) {
@@ -441,7 +501,9 @@ export class HistorySearchIndex {
           'the derived history index path holds an existing database without the application identity',
         )
       }
-      if (state === 'corrupt') {
+      if (state === 'corrupt' || state === 'stale-own') {
+        // Our own disposable projection with a corrupt/older schema: preserve
+        // the bytes under a quarantine name and rebuild from the official log.
         quarantineDatabaseFile(dbPath)
         created = true
       }
@@ -479,7 +541,7 @@ export class HistorySearchIndex {
           'the derived history index path holds an existing database without the application identity',
         )
       }
-      if (schema === 'corrupt' || (created && schema !== 'fresh')) {
+      if (schema === 'stale-own' || schema === 'corrupt' || (created && schema !== 'fresh')) {
         db.close()
         quarantineDatabaseFile(dbPath)
         return HistorySearchIndex.open({ profileDir: realProfile, ...(options.signal === undefined ? {} : { signal: options.signal }) })
@@ -641,8 +703,8 @@ export class HistorySearchIndex {
       const insertOccurrence = this.db.prepare(
         `INSERT OR IGNORE INTO history_occurrences (
           session_id, message_id, first_seq, accepted_ms, effective_cwd,
-          content, normalized_content, content_sha256, has_non_text
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          content, normalized_content, preview, content_length, content_sha256, has_non_text
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       for (const occurrence of input.occurrences) {
         insertOccurrence.run(
@@ -653,6 +715,8 @@ export class HistorySearchIndex {
           occurrence.effectiveCwd,
           occurrence.content,
           occurrence.content.toLowerCase(),
+          historySearchPreview(occurrence.content),
+          occurrence.content.length,
           contentSha256(occurrence.content),
           occurrence.hasNonText ? 1 : 0,
         )
@@ -728,15 +792,19 @@ export class HistorySearchIndex {
       }
     }
     const where = conditions.length === 0 ? '' : `WHERE ${conditions.join(' AND ')}`
+    // This projection NEVER selects `content`: a page only needs the stored
+    // bounded preview, the exact UTF-16 length and the immutable hash. Full
+    // bodies stay behind occurrence()/readText.
     const rows = this.db.prepare(
-      `SELECT session_id, message_id, first_seq, accepted_ms, effective_cwd, content, content_sha256, has_non_text
+      `SELECT session_id, message_id, first_seq, accepted_ms, effective_cwd,
+              preview, content_length, content_sha256, has_non_text
        FROM history_occurrences
        ${where}
        ORDER BY accepted_ms DESC, session_id ASC, first_seq DESC, message_id ASC
        LIMIT ?`,
-    ).all(...parameters, request.limit + 1) as unknown as RawOccurrenceRow[]
+    ).all(...parameters, request.limit + 1) as unknown as RawSearchRow[]
     return {
-      rows: rows.slice(0, request.limit).map(occurrenceOfRaw),
+      rows: rows.slice(0, request.limit).map(searchRowOfRaw),
       hasMore: rows.length > request.limit,
     }
   }
@@ -744,7 +812,8 @@ export class HistorySearchIndex {
   occurrence(sessionId: string, messageId: string): HistoryOccurrenceRow | undefined {
     this.assertOpen()
     const row = this.db.prepare(
-      `SELECT session_id, message_id, first_seq, accepted_ms, effective_cwd, content, content_sha256, has_non_text
+      `SELECT session_id, message_id, first_seq, accepted_ms, effective_cwd,
+              content, preview, content_length, content_sha256, has_non_text
        FROM history_occurrences WHERE session_id = ? AND message_id = ?`,
     ).get(sessionId, messageId) as unknown as RawOccurrenceRow | undefined
     return row === undefined ? undefined : occurrenceOfRaw(row)

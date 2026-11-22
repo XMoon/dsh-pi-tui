@@ -42,7 +42,6 @@ import {
   decodeHistorySearchCursor,
   encodeHistorySearchCursor,
   historyReadTextChunk,
-  historySearchPreview,
   parseHistoryReadTextRequest,
   parseHistorySearchRequest,
   type HistoryReadTextResponse,
@@ -283,6 +282,10 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
   private verificationTimer: ReturnType<typeof setTimeout> | undefined
   /** Count of bounded-buffer overflows (internal lifecycle evidence). */
   private bufferOverflows = 0
+  /** A drain is queued; subsequent live events coalesce into it. */
+  private drainScheduled = false
+  /** Number of drain tasks actually enqueued (internal lifecycle evidence). */
+  private drainSchedules = 0
   /** Sticky index-failure latch: only a later successful write clears it. */
   private indexFaulted = false
   /** Last fully replayed persistence revision per Session (same-instance only). */
@@ -386,8 +389,8 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         firstEventSeq: row.firstEventSeq,
         acceptedAt: row.acceptedAt,
         effectiveCwd: row.effectiveCwd,
-        preview: historySearchPreview(row.content),
-        contentLength: row.content.length,
+        preview: row.preview,
+        contentLength: row.contentLength,
         contentSha256: row.contentSha256,
         hasNonText: row.hasNonText,
       })),
@@ -599,7 +602,16 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
   }
 
   private enqueueDrain(): void {
+    // A synchronous official batch may publish thousands of events before any
+    // microtask runs. ONE queued drain reads the bounded pending map when it
+    // starts; events that arrive while a drain is ACTIVE schedule the next
+    // drain (the flag is already reset by then), so no event is stranded and
+    // the Promise queue stays O(1) instead of O(events).
+    if (this.drainScheduled) return
+    this.drainScheduled = true
+    this.drainSchedules += 1
     this.enqueueWrite(async () => {
+      this.drainScheduled = false
       await this.drainPending()
     })
   }
@@ -871,6 +883,11 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         header: record.header,
         live: record.live === true || existing?.live === true,
         ...(existing?.eventCount === undefined ? {} : { eventCount: existing.eventCount }),
+        // sessionQuery.listSessions() has no persistence revision; the
+        // persistence snapshot's revision must survive the union, otherwise the
+        // equal-header/equal-count content-change check below loses its ONLY
+        // authoritative unchanged fact.
+        ...(existing?.revision === undefined ? {} : { revision: existing.revision }),
       })
     }
     return union
@@ -1087,6 +1104,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     const signal = this.lifecycle.signal
     const official = await this.enumerateOfficialSessions(persistence, query, signal)
     const removed = this.index.deleteSessionsExcept(new Set(official.keys()))
+    if (removed.length > 0) this.revision += 1
     for (const sessionId of removed) this.verifiedRevisions.delete(sessionId)
     for (const [sessionId, record] of official) {
       signal.throwIfAborted()
@@ -1146,7 +1164,9 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     const tracked = this.verifiedRevisions.get(sessionId)
     if (tracked === undefined) return false
     if (tracked.identity !== persistence.identity) return false
-    if (record.revision === undefined) return tracked.revision === undefined
+    // Without a revision on BOTH sides there is no authoritative "unchanged"
+    // fact: re-read the official source instead of trusting an absent token.
+    if (record.revision === undefined || tracked.revision === undefined) return false
     return tracked.revision === record.revision
   }
 
