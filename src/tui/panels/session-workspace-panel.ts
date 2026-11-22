@@ -2325,7 +2325,7 @@ export class SessionWorkspacePanel implements Component {
       } else {
         emptyText = 'Type to search sessions and messages'
       }
-      lines.push(fit(truncateToWidth(sanitizedPhysicalLine(emptyText), width, '…', false), width))
+      lines.push(fit(truncateToWidth(color.textDim(sanitizedPhysicalLine(emptyText)), width, '…', false), width))
       return { lines: lines.slice(0, budget), regions }
     }
     // The wheel viewport is the real RESULT list: the Search Input and status
