@@ -279,10 +279,17 @@ export class ActionEditorPanel implements Component {
   /** Open the readonly conflict reader from the painted bar span. */
   activateBarSpan(id: string): void {
     if (id !== 'conflict-details') return
-    if (this.mode !== 'edit' || this.row.diagnostics.length === 0) return
+    if (this.mode !== 'edit' || this.conflictDiagnostics().length === 0) return
     this.mode = 'conflict-details'
     this.conflictScroll = 0
     this.requestRender()
+  }
+
+  /** Only a genuinely conflicted row may enter the Conflict details reader;
+   *  ordinary disabled/ambiguous diagnostics keep their inline presentation. */
+  private conflictDiagnostics(): readonly string[] {
+    if (!this.row.conflict) return []
+    return this.row.diagnostics.filter(message => message.includes('conflict') || message.includes('ambiguous'))
   }
 
   render(width: number): string[] {
@@ -319,7 +326,8 @@ export class ActionEditorPanel implements Component {
       const escapeWidth = visibleWidth(escape)
       if (safeWidth < escapeWidth) {
         this.paintedEscapeSpanValue = undefined
-        return [color.error(truncateToWidth(this.message, safeWidth))]
+        const painted = this.messageKind === 'success' ? color.success(this.message) : color.error(this.message)
+        return [truncateToWidth(painted, safeWidth)]
       }
       if (safeWidth < escapeWidth + 3) {
         // Whole-segment degradation: keep the complete exit affordance and a
@@ -336,7 +344,8 @@ export class ActionEditorPanel implements Component {
       const message = truncateToWidth(this.message, safeWidth - escapeWidth - 3)
       const startCol = visibleWidth(message) + 3
       this.paintedEscapeSpanValue = { startCol, endCol: startCol + escapeWidth }
-      return [truncateToWidth(`${color.error(message)}${color.textDim(' · ')}${paintActionSpan(escape, 'secondary')}`, safeWidth)]
+      const paintedMessage = this.messageKind === 'success' ? color.success(message) : color.error(message)
+      return [truncateToWidth(`${paintedMessage}${color.textDim(' · ')}${paintActionSpan(escape, 'secondary')}`, safeWidth)]
     }
 
     const lines: string[] = [
@@ -414,6 +423,14 @@ export class ActionEditorPanel implements Component {
     if (this.row.configurable && !sameBindingList(effectiveOrdinary, baselineOrdinary)) {
       lines.push(color.textDim(`Effective now: ${formatEditorBindings(effectiveOrdinary)}`))
     }
+    if (this.row.diagnostics.length > 0) {
+      // Pre-existing Action diagnostics (disabled configuration, leader
+      // ambiguity, etc.) remain visible inline; only a real conflict gets the
+      // separate Conflict details reader.
+      for (const diagnostic of this.row.diagnostics.slice(0, 2)) {
+        lines.push(color.warning(truncateToWidth(diagnostic, safeWidth)))
+      }
+    }
     const messageStart = lines.length
     if (this.message !== undefined) lines.push(color.error(truncateToWidth(this.message, safeWidth)))
     const messageCount = lines.length - messageStart
@@ -455,7 +472,7 @@ export class ActionEditorPanel implements Component {
   private actionBar(editableLength: number, width: number): BarWording {
     // A write in flight freezes input: facts only, no Esc affordance.
     if (this.pending) return plainWording('Saving… · one write at a time')
-    const conflicts = this.row.diagnostics.length > 0 ? 'c details' : undefined
+    const conflicts = this.conflictDiagnostics().length > 0 ? 'c details' : undefined
     // The bar-only and read-only states keep only the real Esc (plus the
     // read-only conflict-details entry when present): Back returns to the
     // bindings list, so the affordance names that exact effect.
@@ -533,7 +550,7 @@ export class ActionEditorPanel implements Component {
       this.handleBindingChoice(data)
       return
     }
-    if (commandKey(data, 'c') && this.row.diagnostics.length > 0) {
+    if (commandKey(data, 'c') && this.conflictDiagnostics().length > 0) {
       this.mode = 'conflict-details'
       this.conflictScroll = 0
       this.requestRender()
@@ -715,7 +732,7 @@ export class ActionEditorPanel implements Component {
       color.textStrong(`Conflict details · ${this.row.label}`),
       '',
     ]
-    for (const diagnostic of this.row.diagnostics) {
+    for (const diagnostic of this.conflictDiagnostics()) {
       for (const line of wrapTextWithAnsi(diagnostic, width)) lines.push(color.warning(line))
     }
     const bar = escapeWording('', 'Back')
@@ -774,7 +791,7 @@ export class ActionEditorPanel implements Component {
   }
 
   private scrollConflictDetails(delta: number): void {
-    const lines = 2 + this.row.diagnostics.reduce((total, diagnostic) => total + wrapTextWithAnsi(diagnostic, this.lastRenderWidth || 1).length, 0)
+    const lines = 2 + this.conflictDiagnostics().reduce((total, diagnostic) => total + wrapTextWithAnsi(diagnostic, this.lastRenderWidth || 1).length, 0)
     const bodyLimit = Math.max(1, this.maxRows() - 1)
     const maxStart = Math.max(0, lines - bodyLimit)
     this.conflictScroll = Math.min(maxStart, Math.max(0, this.conflictScroll + delta))

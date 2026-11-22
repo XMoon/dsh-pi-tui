@@ -11,6 +11,7 @@ import { KeyRecorder } from '../../src/tui/keybindings/ui/recorder.ts'
 import type { KeybindingMutationResult } from '../../src/tui/keybindings/ui/controller.ts'
 import { buildKeybindingEditorModel } from '../../src/tui/keybindings/ui/model.ts'
 import { CURSOR_MARKER, stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
+import { color } from '../../src/tui/theme/runtime.ts'
 import { mountEmbeddedPage } from '../support/embedded-page-harness.ts'
 
 
@@ -2242,6 +2243,39 @@ test('action editor: a one-row grant paints the failed settlement before unlocki
     ;(editor as unknown as { message: string; messageKind: 'success' | 'error' }).messageKind = 'success'
     assert.match(plain(editor.render(12).join('\n')), /✓ Back \[Esc\]/u,
       'a twelve-column success frame never claims a failure')
+    assert.ok(editor.render(60).join('\n').includes(color.success('Keyboard shortcut settings saved.')),
+      'a wide one-row success is painted in success ink, not error ink')
+  } finally {
+    editor.dispose()
+    manager.dispose()
+  }
+})
+
+test('action editor: a disabled Action keeps its ordinary diagnostic inline, never as Conflict details', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings({ 'app.todo.toggle': false })
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const row = model.rows.find(candidate => candidate.id === 'app.todo.toggle')!
+  assert.equal(row.conflict, false)
+  assert.equal(manager.snapshot().conflicts.length, 0)
+  assert.ok(row.diagnostics.some(message => message.includes('disabled by user config')))
+  const editor = new ActionEditorPanel({
+    model,
+    action: row,
+    runMutation: () => {},
+    onModelChange: () => {},
+    onBack: () => {},
+    maxRows: () => 30,
+  })
+  try {
+    const frame = plain(editor.render(88).join('\n'))
+    assert.match(frame, /disabled by user config/u, 'the pre-existing inline diagnostic stays readable')
+    assert.doesNotMatch(frame, /c details/u, 'a non-conflict row must not advertise a conflict reader')
+    editor.handleInput('c')
+    const after = plain(editor.render(88).join('\n'))
+    assert.doesNotMatch(after, /Conflict details/u, 'c must not open a conflict reader for a non-conflict row')
+    assert.match(after, /Action ID: app\.todo\.toggle/u)
   } finally {
     editor.dispose()
     manager.dispose()
