@@ -272,7 +272,6 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
   private readonly listenerDisposers: Array<() => void> = []
   private state: IndexState = { kind: 'loading' }
   private index: HistorySearchIndex | undefined
-  private revision = 0
   private disposed = false
   private disposal: Promise<void> | undefined
   private warmupSettled: Promise<void> = Promise.resolve()
@@ -422,6 +421,11 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
   }
 
   /** Abort owned work, remove listeners, wait for the serial queue, close the DB. */
+  /** Cursor generation: exactly the index's committed content revision. */
+  private get revision(): number {
+    return this.index?.revision ?? 0
+  }
+
   dispose(): Promise<void> {
     if (this.disposal !== undefined) return this.disposal
     this.disposed = true
@@ -794,7 +798,6 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       uncertainSourcesDelta: delta.unknownSourceCount + delta.invalidCwdCount,
       occurrences,
     })
-    this.revision += 1
     // A successful commit proves the private file set is usable again.
     this.indexFaulted = false
     return { effectiveCwd, lastEventHash }
@@ -841,6 +844,10 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     index.deleteSessionsExcept(new Set(official.keys()))
     for (const [sessionId, record] of official) {
       signal.throwIfAborted()
+      // A checkpoint read from disk belongs to a PREVIOUS process. Its revision
+      // is not comparable here and a tail hash alone cannot prove the prefix,
+      // so cold start always rebuilds from the official source.
+      if (index.checkpointOf(sessionId) !== undefined) index.resetSession(sessionId)
       await this.replayOfficialSession(sessionId, record, persistence, query)
       this.rememberVerifiedRevision(sessionId, record, persistence)
       this.drainPendingSession(sessionId)
@@ -1104,7 +1111,6 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     const signal = this.lifecycle.signal
     const official = await this.enumerateOfficialSessions(persistence, query, signal)
     const removed = this.index.deleteSessionsExcept(new Set(official.keys()))
-    if (removed.length > 0) this.revision += 1
     for (const sessionId of removed) this.verifiedRevisions.delete(sessionId)
     for (const [sessionId, record] of official) {
       signal.throwIfAborted()
@@ -1134,6 +1140,13 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         const unchanged = this.revisionUnchanged(sessionId, record, persistence)
         const extended = record.eventCount !== undefined && record.eventCount > checkpoint.nextSeq
         if (!unchanged || extended) {
+          if (!unchanged) {
+            // A changed or absent same-instance revision is NOT proof that the
+            // old prefix survived a middle-of-log repair, even when the tail
+            // event hash still matches. Rebuild this Session from official
+            // events instead of trusting the stored checkpoint.
+            this.index.resetSession(sessionId)
+          }
           await this.replayOfficialSession(sessionId, record, persistence, query)
           this.rememberVerifiedRevision(sessionId, record, persistence)
           continue
@@ -1214,10 +1227,46 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       this.state = { kind: 'incomplete', reason: 'reconciling' }
       return
     }
-    if (snapshot.eventCount === undefined || snapshot.eventCount >= checkpoint.nextSeq) {
-      this.index.markSession({ sessionId, sourceState: 'persisted', dirty: false })
-      this.refreshCompleteness()
+    // rc.5 JSONL `list()` does not always provide eventCount, so an absent
+    // count is NOT proof that the live rows are durable. Open the official
+    // source and prove the exact prefix this checkpoint claims before it may
+    // become `persisted`: same header, same fork cut, and the same tail event.
+    let durable = false
+    try {
+      const handle = await persistence.open(sessionId, 'read', { signal })
+      try {
+        const headerMatches = sessionHeaderHash(handle.header) === checkpoint.headerHash
+        const cutMatches = Number(handle.inheritedEventCount) === checkpoint.inheritedCut
+        if (headerMatches && cutMatches) {
+          if (checkpoint.nextSeq === 0) {
+            durable = true
+          } else {
+            const tail = await handle.read(checkpoint.nextSeq - 1, 1, { signal })
+            const event = tail.events[0]
+            durable = event !== undefined
+              && event.seq === checkpoint.nextSeq - 1
+              && sessionEventHash(event) === checkpoint.lastEventHash
+          }
+        }
+      } finally {
+        await handle.close()
+      }
+    } catch (error) {
+      if (this.lifecycle.signal.aborted || this.disposed) return
+      this.diag.warn('history search disposed-session proof failed', {
+        category: error instanceof Error ? error.name : 'unknown',
+      })
+      this.index.markSession({ sessionId, dirty: true })
+      this.state = { kind: 'incomplete', reason: 'source-read-failed' }
+      return
     }
+    if (!durable) {
+      this.index.markSession({ sessionId, dirty: true })
+      this.state = { kind: 'incomplete', reason: 'reconciling' }
+      return
+    }
+    this.index.markSession({ sessionId, sourceState: 'persisted', dirty: false })
+    this.refreshCompleteness()
   }
 
   private refreshCompleteness(): void {

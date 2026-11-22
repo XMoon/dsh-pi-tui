@@ -27,11 +27,11 @@ import { historySearchPreview } from '../../../runtime/remote/pi-tui-history-sea
 export const HISTORY_SEARCH_SQLITE_APPLICATION_ID = 0x50495448
 
 /**
- * Fixed schema version of the derived index. v2 adds the bounded preview and
- * exact UTF-16 length columns so search never materializes full bodies; a v1
- * own file is quarantined and rebuilt because the projection is disposable.
+ * Fixed schema version of the derived index. The pre-release product v1
+ * already owns the bounded preview / exact UTF-16 length columns; there is no
+ * second generation to read or migrate.
  */
-export const HISTORY_SEARCH_SQLITE_USER_VERSION = 2
+export const HISTORY_SEARCH_SQLITE_USER_VERSION = 1
 
 const DATABASE_FILE = 'v1.sqlite'
 const PRIVATE_DIRECTORY = '.dsh-pi-tui'
@@ -389,7 +389,7 @@ function tableColumns(db: DatabaseSync, table: string): string[] {
   return rows.map(row => row.name)
 }
 
-type SchemaState = 'fresh' | 'ok' | 'foreign' | 'corrupt' | 'stale-own'
+type SchemaState = 'fresh' | 'ok' | 'foreign' | 'corrupt'
 
 function inspectSchema(db: DatabaseSync): SchemaState {
   const applicationId = (db.prepare('PRAGMA application_id').get() as { application_id: number }).application_id
@@ -400,12 +400,8 @@ function inspectSchema(db: DatabaseSync): SchemaState {
     if (applicationId === 0 && userVersion === 0) return 'fresh'
     return 'foreign'
   }
-  if (applicationId !== HISTORY_SEARCH_SQLITE_APPLICATION_ID) return 'foreign'
-  if (userVersion !== HISTORY_SEARCH_SQLITE_USER_VERSION) {
-    // Same application, different derived-schema generation: this is our own
-    // disposable index, never a foreign database. It is quarantined and
-    // rebuilt from the official log.
-    return 'stale-own'
+  if (applicationId !== HISTORY_SEARCH_SQLITE_APPLICATION_ID || userVersion !== HISTORY_SEARCH_SQLITE_USER_VERSION) {
+    return 'foreign'
   }
   if (names.tables.length !== EXPECTED_TABLES.length || names.indexes.length !== EXPECTED_INDEXES.length) return 'corrupt'
   for (const table of EXPECTED_TABLES) {
@@ -448,10 +444,22 @@ export class HistorySearchIndex {
   readonly path: string
   private readonly db: DatabaseSync
   private closed = false
+  /** Content generation owned by the ONE index mutation boundary. */
+  private contentRevision = 0
 
   private constructor(path: string, db: DatabaseSync) {
     this.path = path
     this.db = db
+  }
+
+  /**
+   * Monotonic content generation. It advances only when committed occurrence
+   * content changes (insert/reset/delete), never for checkpoint-only or
+   * completeness-marker writes, so keyset cursors invalidate exactly when the
+   * result set/order can change.
+   */
+  get revision(): number {
+    return this.contentRevision
   }
 
   /**
@@ -501,9 +509,10 @@ export class HistorySearchIndex {
           'the derived history index path holds an existing database without the application identity',
         )
       }
-      if (state === 'corrupt' || state === 'stale-own') {
-        // Our own disposable projection with a corrupt/older schema: preserve
-        // the bytes under a quarantine name and rebuild from the official log.
+      if (state === 'corrupt') {
+        // Our own disposable projection with a corrupt/older schema (including
+        // a pre-release file missing the new columns): preserve the bytes under
+        // a quarantine name and rebuild from the official log.
         quarantineDatabaseFile(dbPath)
         created = true
       }
@@ -541,7 +550,7 @@ export class HistorySearchIndex {
           'the derived history index path holds an existing database without the application identity',
         )
       }
-      if (schema === 'stale-own' || schema === 'corrupt' || (created && schema !== 'fresh')) {
+      if (schema === 'corrupt' || (created && schema !== 'fresh')) {
         db.close()
         quarantineDatabaseFile(dbPath)
         return HistorySearchIndex.open({ profileDir: realProfile, ...(options.signal === undefined ? {} : { signal: options.signal }) })
@@ -623,10 +632,12 @@ export class HistorySearchIndex {
   }
 
   deleteSession(sessionId: string): void {
+    let removedOccurrences = 0
     this.transaction(() => {
-      this.db.prepare('DELETE FROM history_occurrences WHERE session_id = ?').run(sessionId)
+      removedOccurrences += Number(this.db.prepare('DELETE FROM history_occurrences WHERE session_id = ?').run(sessionId).changes)
       this.db.prepare('DELETE FROM history_sessions WHERE session_id = ?').run(sessionId)
     })
+    if (removedOccurrences > 0) this.contentRevision += 1
   }
 
   /** Delete every derived Session not present in the authoritative set. */
@@ -654,6 +665,7 @@ export class HistorySearchIndex {
     if (!Number.isSafeInteger(input.nextSeq) || input.nextSeq < input.baseNextSeq) {
       throw new Error('history search index: nextSeq must be a non-negative safe integer >= baseNextSeq')
     }
+    let insertedOccurrences = 0
     // Fail the batch BEFORE it commits when a sidecar is already unsafe. The
     // post-commit re-check below remains a second window; a Host that observes
     // either failure keeps the index closed until a later write proves safety.
@@ -707,7 +719,7 @@ export class HistorySearchIndex {
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       for (const occurrence of input.occurrences) {
-        insertOccurrence.run(
+        insertedOccurrences += Number(insertOccurrence.run(
           input.sessionId,
           occurrence.messageId,
           occurrence.firstEventSeq,
@@ -719,9 +731,10 @@ export class HistorySearchIndex {
           occurrence.content.length,
           contentSha256(occurrence.content),
           occurrence.hasNonText ? 1 : 0,
-        )
+        ).changes)
       }
     })
+    if (insertedOccurrences > 0) this.contentRevision += 1
     // SQLite materializes -wal/-shm on the first write. They inherit the main
     // file's mode, but the policy is proven here, not assumed: an unsafe sidecar
     // fails the batch (and therefore the authoritative answer) closed.

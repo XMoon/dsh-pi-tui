@@ -551,6 +551,12 @@ interface MutableOfficialSource {
   revision: number
   /** Advertised durable count when it deliberately disagrees with `events`. */
   eventCount?: number
+  /** rc.5 JSONL shape: `list()` provides no eventCount at all. */
+  omitEventCount?: boolean
+  /** The official read is only durable through this many events. */
+  durableEventCount?: number
+  /** The official sessionQuery reports this Session as live. */
+  live?: boolean
 }
 
 function mutableSource(headerCwd: string): MutableOfficialSource {
@@ -585,7 +591,7 @@ function mutableDeps(source: MutableOfficialSource): {
       if (!source.present) return []
       return [{
         header: source.header,
-        eventCount: source.eventCount ?? source.events.length,
+        ...(source.omitEventCount === true ? {} : { eventCount: source.eventCount ?? source.events.length }),
         revision: source.revision,
       }]
     },
@@ -594,7 +600,8 @@ function mutableDeps(source: MutableOfficialSource): {
         header: source.header,
         inheritedEventCount: 0,
         async read(offset = 0, length = Number.MAX_SAFE_INTEGER) {
-          return { events: source.events.slice(offset, offset + length) }
+          const durable = source.durableEventCount ?? source.events.length
+          return { events: source.events.slice(offset, Math.min(offset + length, durable)) }
         },
         async close() {},
       }
@@ -602,7 +609,7 @@ function mutableDeps(source: MutableOfficialSource): {
   }
   const query: HistorySearchQueryLike = {
     async listSessions() {
-      return source.present ? [{ header: source.header, live: false, persisted: true }] : []
+      return source.present ? [{ header: source.header, live: source.live === true, persisted: true }] : []
     },
     async observeSession() {
       return {
@@ -1024,7 +1031,7 @@ test('an unsafe sidecar keeps the index closed until a later write proves it saf
   }
 })
 
-test('an equal-header equal-count official revision change replaces the derived occurrences', async (t) => {
+test('a middle-body revision change rebuilds instead of trusting the unchanged tail', async (t) => {
   const life = testLifecycle(t)
   const profileDir = life.tempDir('dsh-history-search-revision-repair-')
   const source = mutableSource('/repo/revision-repair')
@@ -1039,8 +1046,9 @@ test('an equal-header equal-count official revision change replaces the derived 
     if (before.kind !== 'ready') throw new Error('expected ready')
     assert.equal(before.items.length, 1)
 
-    // Same header, same seq/type/time/count; ONLY the official bodies and the
-    // persistence revision changed (a repaired/replaced durable log).
+    // Same header, same seq/type/time/count; ONLY the FIRST accepted body and
+    // the persistence revision changed. The LAST event is byte-identical, so a
+    // replay that trusts the tail hash alone would keep the stale old body.
     source.events = [
       {
         type: 'agent/inbox/spliced',
@@ -1058,21 +1066,7 @@ test('an equal-header equal-count official revision change replaces the derived 
         },
       },
       source.events[1]!,
-      {
-        type: 'agent/inbox/spliced',
-        seq: 2,
-        time: 1002,
-        data: {
-          target: 'next-turn',
-          start: 1,
-          inserted: [{
-            id: 'msg-2',
-            role: 'user',
-            content: [{ type: 'text', text: 'repaired second body' }],
-            source: { kind: 'user', rpcId: 'rpc-2' },
-          }],
-        },
-      },
+      source.events[2]!,
     ]
     source.revision += 1
     await verify()
@@ -1178,6 +1172,91 @@ test('deleting a derived Session invalidates its keyset cursor', async (t) => {
       cursor: firstPage.nextCursor!,
     }, new AbortController().signal)
     assert.equal(reused.kind, 'stale', `a pre-deletion cursor must be stale: ${JSON.stringify(reused)}`)
+    if (reused.kind !== 'stale') throw new Error('expected stale')
+    assert.equal(reused.reason, 'cursor-stale')
+  } finally {
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('a disposed Session without eventCount is not marked persisted without a durable prefix', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-disposed-prefix-')
+  const source = mutableSource('/repo/disposed-prefix')
+  source.live = true
+  const { deps } = mutableDeps(source)
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const checkpoint = () => (service as unknown as {
+    index: { checkpointOf(sessionId: string): { sourceState: string; dirty: boolean } | undefined }
+  }).index.checkpointOf('mutable-session')
+  const disposeSession = (id: string) => (service as unknown as {
+    observeDisposedSession(session: unknown): void
+  }).observeDisposedSession({ id })
+  try {
+    await waitDirectReady(service)
+    assert.equal(checkpoint()?.sourceState, 'live')
+
+    // rc.5 JSONL: no eventCount, and the official read is durable only through
+    // the FIRST event while the live checkpoint already claims three. The
+    // absent count must not be read as proof that the live rows are durable.
+    source.omitEventCount = true
+    source.durableEventCount = 1
+    source.revision += 1
+    disposeSession('mutable-session')
+
+    let answer: HistorySearchResponse | undefined
+    const started = Date.now()
+    while (Date.now() - started < 5_000) {
+      answer = await service.search({ scope: 'all', query: 'mutable first', limit: 25 }, new AbortController().signal)
+      if (answer.kind === 'incomplete') break
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.equal(answer?.kind, 'incomplete', JSON.stringify(answer))
+    assert.equal(checkpoint()?.sourceState, 'live', 'the unproven rows must never be called persisted')
+    assert.equal(checkpoint()?.dirty, true, 'the prefix proof failure must be retried')
+  } finally {
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('rebuilding a Session to zero events invalidates the previous cursor', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-empty-rebuild-')
+  const source = mutableSource('/repo/empty-rebuild')
+  const { deps } = mutableDeps(source)
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const verify = () => (service as unknown as { verifySources(): Promise<void> }).verifySources()
+  try {
+    await waitDirectReady(service)
+    const page = await service.search({
+      scope: 'session',
+      sessionId: 'mutable-session',
+      query: 'mutable',
+      limit: 1,
+    }, new AbortController().signal)
+    assert.equal(page.kind, 'ready', JSON.stringify(page))
+    if (page.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(typeof page.nextCursor, 'string')
+
+    // The Session still exists officially but its event log is rebuilt empty:
+    // a reset/rebuild that inserts no rows must still advance the generation.
+    source.events = []
+    source.revision += 1
+    await verify()
+    await waitDirectReady(service)
+
+    const reused = await service.search({
+      scope: 'session',
+      sessionId: 'mutable-session',
+      query: 'mutable',
+      limit: 1,
+      cursor: page.nextCursor!,
+    }, new AbortController().signal)
+    assert.equal(reused.kind, 'stale', `an empty rebuild must invalidate the old cursor: ${JSON.stringify(reused)}`)
     if (reused.kind !== 'stale') throw new Error('expected stale')
     assert.equal(reused.reason, 'cursor-stale')
   } finally {

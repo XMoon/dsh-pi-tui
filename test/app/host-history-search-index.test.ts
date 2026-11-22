@@ -77,8 +77,11 @@ test('a fresh index owns a private 0700 directory, 0600 file and its fixed schem
     try {
       assert.equal((db.prepare('PRAGMA application_id').get() as { application_id: number }).application_id,
         HISTORY_SEARCH_SQLITE_APPLICATION_ID)
-      assert.equal((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version,
-        HISTORY_SEARCH_SQLITE_USER_VERSION)
+      assert.equal((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 1)
+      const columns = (db.prepare('PRAGMA table_info(history_occurrences)').all() as Array<{ name: string }>)
+        .map(column => column.name)
+      assert.ok(columns.includes('preview'), 'the pre-release v1 schema owns the bounded preview column')
+      assert.ok(columns.includes('content_length'), 'the pre-release v1 schema owns the exact UTF-16 length column')
     } finally {
       db.close()
     }
@@ -495,28 +498,5 @@ test('search returns only the stored bounded preview and never a full body', (t)
     assert.equal(full?.contentLength, big.length)
   } finally {
     index.close()
-  }
-})
-
-test('a same-application older derived schema is quarantined and rebuilt', (t) => {
-  const dir = profileDir(t)
-  const first = HistorySearchIndex.open({ profileDir: dir })
-  seed(first, 's1', [occurrence('m1', 'old schema row', 1000, '/repo/a')])
-  first.close()
-
-  const dbPath = rejoinedDbPath(dir)
-  const db = new DatabaseSync(dbPath)
-  db.exec('PRAGMA user_version = 1')
-  db.close()
-  chmodSync(dbPath, 0o600)
-
-  const reopened = HistorySearchIndex.open({ profileDir: dir })
-  try {
-    assert.equal(reopened.sessionCount(), 0, 'the disposable index must be rebuilt from scratch')
-    const names = readdirSync(join(dir, '.dsh-pi-tui', 'history-search'))
-    assert.ok(names.some(name => name.startsWith('v1.sqlite.quarantine-')),
-      'the older own schema bytes must be preserved under quarantine')
-  } finally {
-    reopened.close()
   }
 })
