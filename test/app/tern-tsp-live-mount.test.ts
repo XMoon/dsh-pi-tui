@@ -5321,3 +5321,63 @@ test('R13 L4-F: an adopted nested Preparing repaints through the journal on a st
     await harness.session.close()
   }
 })
+
+// ── C3: the Loading frame retires the previous subject's legacy dock facts ──
+
+test('C3: beginSessionHydration clears the retired title/todo/compaction facts before the Loading frame', async () => {
+  const harness = await mountTspHarness()
+  try {
+    // Owner A commits every legacy dock fact.
+    harness.surface.display.commitStatusFacts({
+      sessionTitle: 'OWNER_A_TITLE',
+      todos: [{ content: 'a todo', status: 'pending' }],
+      compactionPhase: 'summarizing',
+    })
+    await settle()
+    const before = mountedNodes(harness).map(nodeText).join('\n')
+    assert.ok(before.includes('OWNER_A_TITLE'), 'owner A title is on the wire')
+    assert.ok(before.includes('todos 0/1'), 'owner A todo summary is on the wire')
+    assert.ok(before.includes('compacting (summarizing)'), 'owner A compaction label is on the wire')
+
+    // The generation bump opens the hydration window: the CURRENT frame is the
+    // explicit Loading state and carries no retired fact.
+    harness.surface.display.beginSessionHydration()
+    await settle()
+    const loading = mountedNodes(harness).map(nodeText).join('\n')
+    assert.ok(loading.includes('Loading session'), 'the current frame is the Loading state')
+    assert.ok(!loading.includes('OWNER_A_TITLE'), 'the retired title is absent from the Loading frame')
+    assert.ok(!loading.includes('todos 0/1'), 'the retired todo summary is absent from the Loading frame')
+    assert.ok(!loading.includes('compacting (summarizing)'), 'the retired compaction label is absent from the Loading frame')
+
+    // Owner B's own commit repopulates every fact, and the hydrate-tail reset
+    // is a same-subject clear: it must NOT drop B's values.
+    harness.surface.display.commitStatusFacts({
+      sessionTitle: 'OWNER_B_TITLE',
+      todos: [{ content: 'b done', status: 'completed' }],
+      compactionPhase: 'applying',
+    })
+    await settle()
+    const afterB = mountedNodes(harness).map(nodeText).join('\n')
+    assert.ok(afterB.includes('OWNER_B_TITLE'), 'owner B title is visible')
+    assert.ok(afterB.includes('todos 1/1'), 'owner B todo summary is visible')
+    assert.ok(afterB.includes('compacting (applying)'), 'owner B compaction label is visible')
+    harness.surface.display.resetSessionFacts()
+    await settle()
+    const kept = mountedNodes(harness).map(nodeText).join('\n')
+    assert.ok(kept.includes('OWNER_B_TITLE') && kept.includes('todos 1/1') && kept.includes('compacting (applying)'),
+      'the hydrate-tail reset keeps the NEW subject facts')
+
+    // A repeated Begin never resurrects either owner's facts.
+    harness.surface.display.beginSessionHydration()
+    await settle()
+    const second = mountedNodes(harness).map(nodeText).join('\n')
+    assert.ok(second.includes('Loading session'), 'the repeated bump is Loading again')
+    assert.ok(!second.includes('OWNER_A_TITLE') && !second.includes('OWNER_B_TITLE'),
+      'no retired title survives a repeated hydration window')
+    assert.ok(!second.includes('todos 1/1') && !second.includes('compacting (applying)'),
+      'no retired todo/compaction fact survives a repeated hydration window')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
