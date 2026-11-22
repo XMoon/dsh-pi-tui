@@ -375,6 +375,7 @@ export async function runAcpPo2SessionView(context) {
     const started = await startC1Host('long-turn', 'po2 A host', {
       C1_HOLD_LONG_TURN: longTurnBarrier,
       C1_EXTRA_MODEL: MODEL_B,
+      C1_MODEL_S1_ROUTE: MODEL_B,
       DSH_PI_TUI_ACP_MAX_CONNECTIONS: '16',
     })
     host = started.host
@@ -558,6 +559,7 @@ export async function runAcpPo2SessionView(context) {
     const restarted = await startC1Host('long-turn', 'po2 cold host', {
       C1_HOLD_LONG_TURN: longTurnBarrier,
       C1_EXTRA_MODEL: MODEL_B,
+      C1_MODEL_S1_ROUTE: MODEL_B,
       DSH_PI_TUI_ACP_MAX_CONNECTIONS: '16',
     })
     host = restarted.host
@@ -686,20 +688,10 @@ export async function runAcpPo2SessionView(context) {
       `Model-S1: Session C must run on the Profile default A (got ${JSON.stringify(cTurnHeader?.data?.header?.config ?? null)})`)
     await exitC1Client(tuiC, 'Model-S1 tuiC')
 
-    // A real TUI `/model` change on Session A must reach the attached ACP View
-    // as one full `config_option_update`.
-    await selectModelInTui(tuiModelA, MODEL_A, 'Model-S1 TUI model change A')
-    const configUpdate = (await connModelResume.nextNotification(30_000))
-    assert(configUpdate?.method === 'session/update', 'Model-S1: the ACP connection must receive a config notification')
-    assert(configUpdate?.params?.sessionId === sessionA, 'Model-S1: the config notification must be for Session A')
-    assert(configUpdate?.params?.update?.sessionUpdate === 'config_option_update',
-      'Model-S1: the notification must be config_option_update')
-    assert(modelConfigOption(configUpdate.params.update.configOptions).currentValue === modelValue(MODEL_A),
-      'Model-S1: the TUI change must be reflected as A')
-
     // While a REAL TUI turn owns the Agent, an ACP model write must fail BUSY
-    // without cancelling the turn. The long-turn barrier is removed for this
-    // one prompt and recreated to release it.
+    // without cancelling the turn. This runs while the current session route is
+    // still MODEL_B, so the fixture's Model-S1-only context capacity covers the
+    // real turn; the later TUI route change to MODEL_A has no turn.
     unlinkSync(longTurnBarrier)
     const beforeBusyTurn = (hostSessionEvents(dshHome, sessionA) ?? []).length
     tuiModelA.send('model-s1 held busy turn\r')
@@ -723,6 +715,17 @@ export async function runAcpPo2SessionView(context) {
     const busyTurnEvents = hostSessionEvents(dshHome, sessionA) ?? []
     assert(hostAssistantHasText(busyTurnEvents.slice(beforeBusyTurn), 'long-turn answer'),
       'Model-S1: the held TUI turn must complete with its real answer')
+
+    // A real TUI `/model` change on Session A must reach the attached ACP View
+    // as one full `config_option_update`.
+    await selectModelInTui(tuiModelA, MODEL_A, 'Model-S1 TUI model change A')
+    const configUpdate = (await connModelResume.nextNotification(30_000))
+    assert(configUpdate?.method === 'session/update', 'Model-S1: the ACP connection must receive a config notification')
+    assert(configUpdate?.params?.sessionId === sessionA, 'Model-S1: the config notification must be for Session A')
+    assert(configUpdate?.params?.update?.sessionUpdate === 'config_option_update',
+      'Model-S1: the notification must be config_option_update')
+    assert(modelConfigOption(configUpdate.params.update.configOptions).currentValue === modelValue(MODEL_A),
+      'Model-S1: the TUI change must be reflected as A')
     tuiModelA.send('\x15')
     await exitC1Client(tuiModelA, 'Model-S1 tuiA')
     connModelResume.close()
