@@ -1,4 +1,3 @@
-import { fork, type ChildProcess } from 'node:child_process'
 import {
   existsSync,
   mkdirSync,
@@ -13,9 +12,10 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { TuiTest, sessions as openTuiSessions } from '@microsoft/tui-test'
 import { test as base } from 'vitest'
 
+import { SupervisorClient } from './split-supervisor-client.ts'
+
 const SUPPORT_DIR = fileURLToPath(new URL('.', import.meta.url))
 const REPO_ROOT = realpathSync(join(SUPPORT_DIR, '..', '..'))
-const SUPERVISOR_PATH = join(SUPPORT_DIR, 'split-host-supervisor.mjs')
 
 interface CandidateFacts {
   tarball: string
@@ -197,138 +197,6 @@ function listSessionIds(dshHome: string): string[] {
   return ids
 }
 
-interface PendingRequest {
-  resolve(value: unknown): void
-  reject(error: Error): void
-  timer: NodeJS.Timeout
-  onProgress?: (message: Record<string, any>) => void
-}
-
-/** Worker-side IPC client for the one detached Supervisor process. */
-class SupervisorClient {
-  readonly #child: ChildProcess
-  readonly #pending = new Map<string, PendingRequest>()
-  readonly #exitPromise: Promise<{ code: number | null; signal: NodeJS.Signals | null }>
-  #exitResult: { code: number | null; signal: NodeJS.Signals | null } | undefined
-  #sequence = 0
-
-  constructor() {
-    this.#child = fork(SUPERVISOR_PATH, [], {
-      detached: true,
-      execArgv: [],
-      stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
-      env: process.env,
-    })
-    this.#child.unref()
-    this.#exitPromise = new Promise(resolve => {
-      this.#child.once('exit', (code, signal) => {
-        this.#exitResult = { code, signal }
-        for (const [requestId, pending] of this.#pending) {
-          clearTimeout(pending.timer)
-          pending.reject(new Error(`Supervisor exited before response to ${requestId}: ${JSON.stringify(this.#exitResult)}`))
-          this.#pending.delete(requestId)
-        }
-        resolve(this.#exitResult)
-      })
-    })
-    this.#child.on('message', (message: Record<string, any>) => {
-      if (message?.type === 'PROGRESS') {
-        const pending = this.#pending.get(String(message.requestId))
-        pending?.onProgress?.(message)
-        return
-      }
-      const requestId = typeof message?.requestId === 'string' ? message.requestId : undefined
-      if (requestId === undefined) return
-      const pending = this.#pending.get(requestId)
-      if (pending === undefined) return
-      clearTimeout(pending.timer)
-      this.#pending.delete(requestId)
-      if (message.type === 'ERROR') {
-        const error = new Error(String(message.message ?? 'Supervisor request failed'))
-        Object.assign(error, { code: message.code })
-        pending.reject(error)
-      } else {
-        pending.resolve(message.payload)
-      }
-    })
-  }
-
-  get pids(): { worker: number; supervisor: number | undefined } {
-    return { worker: process.pid, supervisor: this.#child.pid }
-  }
-
-  async request(
-    type: string,
-    payload: Record<string, unknown> = {},
-    options: { timeoutMs?: number; onProgress?: (message: Record<string, any>) => void } = {},
-  ): Promise<any> {
-    const requestId = `${type}-${String(++this.#sequence)}-${String(Date.now())}`
-    const timeoutMs = options.timeoutMs ?? 120_000
-    return await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.#pending.delete(requestId)
-        reject(new Error(`Supervisor request ${type} timed out after ${String(timeoutMs)}ms`))
-      }, timeoutMs)
-      this.#pending.set(requestId, { resolve, reject, timer, ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }) })
-      if (this.#exitResult !== undefined) {
-        clearTimeout(timer)
-        this.#pending.delete(requestId)
-        reject(new Error(`Supervisor already exited: ${JSON.stringify(this.#exitResult)}`))
-        return
-      }
-      try {
-        this.#child.send({ type, requestId, ...payload }, error => {
-          if (error !== undefined && error !== null) {
-            const pending = this.#pending.get(requestId)
-            if (pending === undefined) return
-            clearTimeout(pending.timer)
-            this.#pending.delete(requestId)
-            reject(error instanceof Error ? error : new Error(String(error)))
-          }
-        })
-      } catch (error) {
-        clearTimeout(timer)
-        this.#pending.delete(requestId)
-        reject(asError(error))
-      }
-    })
-  }
-
-  async waitExit(timeoutMs = 30_000): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
-    if (this.#exitResult !== undefined) return this.#exitResult
-    return await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        reject(new Error(`Supervisor did not exit within ${String(timeoutMs)}ms`))
-      }, timeoutMs)
-      this.#exitPromise.then(result => {
-        clearTimeout(timer)
-        resolve(result)
-      }, error => {
-        clearTimeout(timer)
-        reject(error)
-      })
-    })
-  }
-
-  async close(options: { timeoutMs?: number; allowKill?: boolean } = {}): Promise<void> {
-    if (this.#exitResult !== undefined) return
-    const timeoutMs = options.timeoutMs ?? 15_000
-    const allowKill = options.allowKill ?? true
-    try {
-      this.#child.disconnect()
-    } catch {
-      // A disconnected child may already be collecting its owned resources.
-    }
-    try {
-      await this.waitExit(timeoutMs)
-    } catch (error) {
-      if (!allowKill) throw error
-      try { this.#child.kill('SIGKILL') } catch { /* already gone */ }
-      await this.waitExit(3_000).catch(() => undefined)
-    }
-  }
-}
-
 class Scene implements SplitVitestScene {
   readonly workDir: string
   readonly installation: SplitInstallation
@@ -337,6 +205,7 @@ class Scene implements SplitVitestScene {
   readonly #supervisor: SupervisorClient
   readonly #hosts: HostHandle[] = []
   readonly #clients: ClientHandle[] = []
+  readonly #ownedTuiSessions = new Set<string>()
   #clientSequence = 0
 
   constructor(facts: SceneFacts, supervisor: SupervisorClient) {
@@ -398,6 +267,7 @@ class Scene implements SplitVitestScene {
       trace: { mode: 'on-failure', directory: join(this.workDir, 'trace') },
       artifacts: { dir: join(this.workDir, 'artifacts'), onFailure: 'text' },
     })
+    this.#ownedTuiSessions.add(terminal.session)
     const env: Record<string, string> = {
       ...this.installation.base.env,
       SPLIT_PROCESS_DSH_ANCHOR: this.installation.anchor,
@@ -584,7 +454,10 @@ class Scene implements SplitVitestScene {
         errors.push(asError(error))
       }
     }
-    const leftoverSessions = (await openTuiSessions()).filter((session: string) => session.startsWith('split-vitest-'))
+    // Audit ONLY the exact native TUI sessions this Scene created. A prefix
+    // scan would treat another Worker's live Scene as this Scene's leak.
+    const openSessions = new Set(await openTuiSessions())
+    const leftoverSessions = [...this.#ownedTuiSessions].filter(session => openSessions.has(session))
     if (leftoverSessions.length > 0) {
       errors.push(new Error(`split-process Vitest left native TUI sessions open: ${JSON.stringify(leftoverSessions)}`))
     }
