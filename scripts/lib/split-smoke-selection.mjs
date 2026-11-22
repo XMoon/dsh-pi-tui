@@ -636,6 +636,7 @@ const CASE_REGISTRY = Object.freeze([
     defaultLane: false,
     id: 'acp.scoped-mcp-b1',
     title: 'a standard ACP session/new|resume.mcpServers request mounts the official Agent-scoped MCP client, a real model turn executes its stdio tool, another Agent never sees it, and Close/EOF/Off retire the exact lease only after the live Host terminal settles',
+    platforms: LINUX_DARWIN,
     run: runAcpScopedMcpB1,
   }),
 ])

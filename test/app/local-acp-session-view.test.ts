@@ -843,7 +843,7 @@ test('the production Host access classifier maps official errors to the right cr
 })
 
 /** One attached prompt View over a fake Host access driven by REAL intermediate facts. */
-function promptView(sessionId = 'P1'): {
+function promptView(sessionId = 'P1', options: { readonly mcp?: boolean } = {}): {
   access: FakeAccess
   agent: AgentLike
   registry: AcpSessionViewRegistry
@@ -861,6 +861,10 @@ function promptView(sessionId = 'P1'): {
   const access = new FakeAccess()
   const agent = makeAgent(sessionId, '/w')
   access.seed(agent)
+  const mcpServers = options.mcp === true
+    ? [{ name: 's1', command: '/bin/true', args: [], env: [] }]
+    : []
+  if (options.mcp === true) access.mountScopedMcpImpl = async (_agent, session) => makeScopedLease(agent, session)
   const registry = new AcpSessionViewRegistry(QUIET_DIAG)
   registry.bindAccess(access)
   const conn = registry.createConnection()
@@ -881,7 +885,7 @@ function promptView(sessionId = 'P1'): {
     notifications,
     permissionRequests,
     message,
-    attach: async () => { await registry.resumeSession(conn, access, { sessionId, cwd: '/w' }) },
+    attach: async () => { await registry.resumeSession(conn, access, { sessionId, cwd: '/w', ...(mcpServers.length === 0 ? {} : { mcpServers }) }) },
     start: (text = 'hello', signal = new AbortController().signal, prompt = [{ type: 'text', text }], imageEnabled = false) =>
       registry.promptSession(conn, access, { sessionId, prompt }, signal, imageEnabled, sendUpdate, (params, options) =>
         new Promise((resolveAsk, rejectAsk) => {
@@ -1285,6 +1289,26 @@ test('a close with a RUNNING owned flight cancels the exact turn, drains, detach
   assert.deepEqual(await closingAgain, {}, 'a repeated close awaits the same settlement')
   assert.equal(view.registry.hasClaim('P1'), false)
   assert.equal(view.registry.phaseOf(view.conn), 'idle')
+})
+
+test('a close with a RUNNING owned flight retires its exact MCP lease after the real turn terminal', async () => {
+  const view = promptView('P1', { mcp: true })
+  await view.attach()
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-mcp-close')
+  view.claim('m-mcp-close', 2, request.requestId)
+  view.access.pendingInbox.delete('m-mcp-close')
+  view.access.turnFence = { openTurnStartSeq: 100, lastTurn: 2 }
+  view.access.agentStatus = 'running'
+  const closing = view.registry.closeSession(view.conn, view.access, 'P1')
+  assert.equal(view.access.retireScopedMcpCalls.length, 0, 'the MCP lease must not retire before the prompt terminal')
+  view.commit('turn/end', { turn: 2, reason: { kind: 'aborted', reason: { kind: 'user' } } })
+  assert.deepEqual(await attempt, { stopReason: 'cancelled' })
+  assert.deepEqual(await closing, {})
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(view.access.retireScopedMcpCalls.length, 1)
+  assert.equal(view.registry.hasClaim('P1'), false)
 })
 
 test('a physical disconnect with a QUEUED flight removes the exact pending message before releasing the claim', async () => {
