@@ -23,7 +23,7 @@ import { copyKoffiPackage } from '../support/darwin-koffi-fixture.ts'
 import { resolveDshKoffi } from '../../src/runtime/native-process/darwin.ts'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
-const DARWIN_ONLY = process.platform !== 'darwin' ? 'the real Darwin bridge requires macOS' : false
+const DARWIN_ONLY = process.platform !== 'darwin' ? 'Darwin kernel process identity requires macOS' : false
 
 interface Fixture {
   readonly root: string
