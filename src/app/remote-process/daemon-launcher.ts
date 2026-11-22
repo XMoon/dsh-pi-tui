@@ -25,10 +25,19 @@ import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import { installedPackageRootFromEntry, readInstalledDshVersion } from './local-scope.ts'
-import type { AcpStdioTarget } from './local-daemon-control.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { createEntryDiag } from './entry-control.ts'
 import type { TuiAcpStdioStartup, TuiDaemonClientStartup, TuiDaemonControlStartup, TuiDaemonStartupValues, TuiWebControlStartup } from '../../startup.ts'
+
+/**
+ * The read-only ACP stdio launch target, structurally identical to the
+ * `local-daemon-control` DTO. It is declared here so the public
+ * `daemon-launcher.d.mts` stays free of internal module paths while the real
+ * producer remains `readAcpStdioTarget`.
+ */
+type AcpStdioTarget =
+  | { readonly kind: 'ready'; readonly socketPath: string; readonly instanceId: string }
+  | { readonly kind: 'host-unavailable' | 'acp-disabled' | 'acp-unavailable' }
 
 /** Stable Loader row id / Cordis plugin name. */
 export const name = 'pi-tui-daemon-launcher'

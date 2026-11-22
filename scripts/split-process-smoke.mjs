@@ -330,7 +330,8 @@ async function main(explicitPath) {
       // diagnostics collector; the runner adds the enclosing case scope.
       runStep: (name, operation) => diagnostics.runStep(name, operation),
       // Backstop only: the case kills its own detached processes first.
-      trackDetachedPid: (pid, starttime) => trackedProcesses.set(pid, starttime),
+      trackDetachedPid: (pid, identity) => trackedProcesses.set(pid, identity),
+      untrackDetachedPid: pid => trackedProcesses.delete(pid),
       // The case id a boundary report names (the full lane sets it per scene).
       currentCaseId: undefined,
       /** @see emitBoundaryNotVerified */
@@ -1102,7 +1103,8 @@ async function runSelectedCases(selection) {
       // Same lifecycle owner as the full lane: one collector, nested scopes.
       runStep: (name, operation) => diagnostics.runStep(name, operation),
       // Backstop only: the case kills its own detached processes first.
-      trackDetachedPid: (pid, starttime) => trackedProcesses.set(pid, starttime),
+      trackDetachedPid: (pid, identity) => trackedProcesses.set(pid, identity),
+      untrackDetachedPid: pid => trackedProcesses.delete(pid),
       // The current selected case id + the shared boundary reporter: a selected
       // case must be able to publish the same NOT_VERIFIED line as a full-lane
       // scene, and the line has to name the case it belongs to.

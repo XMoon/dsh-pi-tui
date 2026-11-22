@@ -30,6 +30,7 @@ import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 import { waitForC1WorkEvent } from '../../lib/split-smoke-fixtures.mjs'
 import { hostAssistantHasText, hostSessionEvents, waitForHostSessionEventAfter, waitForHostSessionHeader } from '../../lib/split-smoke-sessions.mjs'
 import { waitForCondition } from '../../lib/split-smoke-processes.mjs'
+import { readKernelProcess, sameKernelProcess } from '../../../src/runtime/native-process/identity.ts'
 import { createC1Scene } from './c1-scene.mjs'
 import { createSplitSmokeProfile } from '../../lib/split-smoke-profile.mjs'
 
@@ -92,10 +93,15 @@ class CliProcess {
       const timer = setTimeout(() => resolveExit({ code: null, signal: null, timedOut: true }), options.timeoutMs ?? 60_000)
       this.child.once('close', (code, signal) => {
         clearTimeout(timer)
+        context.untrackDetachedPid?.(this.child.pid)
         resolveExit({ code, signal })
       })
     })
-    if (Number.isInteger(this.child.pid)) context.trackDetachedPid?.(this.child.pid)
+    if (Number.isInteger(this.child.pid)) {
+      const observation = readKernelProcess(this.child.pid)
+      this.identity = observation.kind === 'alive' ? observation.identity : undefined
+      if (this.identity !== undefined) context.trackDetachedPid?.(this.child.pid, this.identity)
+    }
   }
 
   rawStdout() {
@@ -173,7 +179,10 @@ class CliProcess {
   }
 
   kill(signal = 'SIGTERM') {
-    try { process.kill(-this.child.pid, signal) } catch { try { this.child.kill(signal) } catch { /* gone */ } }
+    if (this.identity === undefined) return
+    const observed = readKernelProcess(this.child.pid)
+    if (observed.kind !== 'alive' || sameKernelProcess(this.identity, observed) !== 'same') return
+    try { process.kill(-this.child.pid, signal) } catch { /* group already gone */ }
   }
 }
 
@@ -182,13 +191,19 @@ async function runPublicCli(context, args, envOverrides = {}, timeoutMs = 30_000
   const command = new CliProcess(context, ['--profile', 'pi-tui', ...args], envOverrides)
   command.tap.resume()
   try { command.child.stdin.end() } catch { /* already ended */ }
-  const exit = await Promise.race([
-    command.waitExit(),
-    new Promise((_resolve, reject) => setTimeout(() => reject(new Error(`timeout: ${args.join(' ')}`)), timeoutMs)),
-  ]).finally(() => {
+  let timer
+  try {
+    const exit = await Promise.race([
+      command.waitExit(),
+      new Promise((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`timeout: ${args.join(' ')}`)), timeoutMs)
+      }),
+    ])
+    return { ...exit, stdout: command.rawStdout(), stderr: command.stderr }
+  } finally {
+    clearTimeout(timer)
     if (command.child.exitCode === null && command.child.signalCode === null) command.kill('SIGKILL')
-  })
-  return { ...exit, stdout: command.rawStdout(), stderr: command.stderr }
+  }
 }
 
 /** The live adapter process command lines for this exact installed package. */

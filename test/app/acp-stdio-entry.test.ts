@@ -193,7 +193,7 @@ test('a long Linux logical path connects through the scope fd short alias', { sk
   let longDir = join(dir, 'long')
   while (Buffer.byteLength(join(longDir, 'acp.sock'), 'utf8') + 1 <= 200) {
     longDir = join(longDir, 'segment')
-    mkdirSync(longDir, { mode: 0o700 })
+    mkdirSync(longDir, { recursive: true, mode: 0o700 })
   }
   const dirFd = openSync(longDir, 'r')
   const server = createServer(socket => { socket.on('data', chunk => socket.write(chunk)) })
