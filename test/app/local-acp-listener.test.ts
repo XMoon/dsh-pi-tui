@@ -1585,6 +1585,64 @@ test('a single socket bounds live View slots at eight and reuses a released slot
   }
 })
 
+test('eight open prompt flights keep legal close and ninth-View rejection reachable on one socket', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess()
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    const sessionIds: string[] = []
+    for (let index = 0; index < 8; index += 1) {
+      client.send({ jsonrpc: '2.0', id: 10 + index, method: 'session/new', params: { cwd: `/host/pending-${String(index)}`, mcpServers: [] } })
+      const created = (await client.next()) as { result?: { sessionId?: string } }
+      assert.equal(typeof created.result?.sessionId, 'string')
+      sessionIds.push(created.result?.sessionId as string)
+    }
+    for (let index = 0; index < 8; index += 1) {
+      client.send({
+        jsonrpc: '2.0', id: 30 + index, method: 'session/prompt',
+        params: { sessionId: sessionIds[index], prompt: [{ type: 'text', text: `open flight ${String(index)}` }] },
+      })
+    }
+    await waitForFact(() => fake.prompts.length === 8 ? true : undefined, 'eight held prompt admissions', 10_000)
+
+    // The ninth View is a connection-local capacity refusal, not a global
+    // pending-request flood that destroys the socket.
+    client.send({ jsonrpc: '2.0', id: 50, method: 'session/new', params: { cwd: '/host/ninth', mcpServers: [] } })
+    const ninth = (await client.next()) as { id?: number; error?: { code: number; data?: { code?: string } } }
+    assert.equal(ninth.id, 50)
+    assert.equal(ninth.error?.code, -32602)
+    assert.equal(ninth.error?.data?.code, 'LOCAL_ACP_VIEW_BUSY')
+
+    // A legal close remains reachable while all eight prompt handlers are
+    // still open; A has one real pending message that the fake Host removes.
+    const facts = fake.facts()
+    const agentA = fake.agentOf(sessionIds[0])
+    const requestA = fake.prompts.find(request => request.sessionId === sessionIds[0])
+    assert.ok(facts !== undefined && agentA !== undefined && requestA !== undefined)
+    facts.onInboxInserted(agentA, { id: 'm-held-a', source: { kind: 'user', rpcId: requestA.requestId } })
+    client.send({ jsonrpc: '2.0', id: 60, method: 'session/close', params: { sessionId: sessionIds[0] } })
+    let closed: { id?: number; result?: unknown; error?: { data?: { code?: string } } } | undefined
+    for (;;) {
+      const message = (await client.next(10_000)) as typeof closed
+      if (message?.id === 60) { closed = message; break }
+    }
+    assert.deepEqual(closed.result, {}, `the owned close must settle without a sibling teardown: ${JSON.stringify(closed.error)}`)
+
+    // The socket and the remaining seven Views still work: a new slot can be
+    // admitted after A's terminal close, while the B..H prompt handlers stay open.
+    client.send({ jsonrpc: '2.0', id: 61, method: 'session/new', params: { cwd: '/host/after-close', mcpServers: [] } })
+    const afterClose = (await client.next()) as { id?: number; result?: { sessionId?: string } }
+    assert.equal(afterClose.id, 61)
+    assert.equal(typeof afterClose.result?.sessionId, 'string')
+  } finally {
+    client.close()
+  }
+})
+
 test('Off releases every View slot on the shared registry and a new bind can resume them', async t => {
   const { scope } = newScope(t)
   const fake = makeFakeAccess()

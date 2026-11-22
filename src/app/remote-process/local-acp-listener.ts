@@ -66,8 +66,15 @@ const MAX_INPUT_FRAME_BYTES = 1024 * 1024
  * the bounded ReadableStream. All three are summed in bytes against this cap.
  */
 const MAX_INPUT_UNCONSUMED_BYTES = 2 * 1024 * 1024
-/** At most this many requests may be dispatched concurrently on ONE connection. */
+/** At most this many prompt/ordinary requests may be dispatched concurrently on ONE connection. */
 const MAX_PENDING_REQUESTS = 8
+/**
+ * Session lifecycle controls have their own bounded headroom. They must stay
+ * reachable while all eight View prompt flights are open: otherwise a legal
+ * `session/close` (or a ninth-View capacity rejection) would be misclassified
+ * as a connection-wide flood.
+ */
+const MAX_PENDING_CONTROL_REQUESTS = 4
 /**
  * At most this many Session Views may be active, attaching or retained by a
  * terminal fence on ONE physical ACP connection. This is this product's own
@@ -301,6 +308,7 @@ export function parseAcpMaxConnections(raw: string | undefined): number {
 interface ConnectionState {
   initialized: boolean
   pendingRequests: number
+  pendingControlRequests: number
   closed: boolean
   /** Whether THIS connection negotiated inline image prompts during its initialize. */
   imageEnabled: boolean
@@ -656,7 +664,20 @@ function buildAgentApp(
   const app = agent({ name: AGENT_NAME })
   let initializeComplete = false
 
-  const beginRequest = (): void => {
+  const beginRequest = (control = false): void => {
+    if (control) {
+      state.pendingControlRequests += 1
+      if (state.pendingControlRequests > MAX_PENDING_CONTROL_REQUESTS) {
+        state.pendingControlRequests -= 1
+        fail('LOCAL_ACP_TOO_MANY_PENDING_REQUESTS')
+        throw new RequestError(
+          -32044,
+          'too many outstanding ACP control requests on this connection',
+          { code: 'LOCAL_ACP_TOO_MANY_PENDING_REQUESTS' },
+        )
+      }
+      return
+    }
     state.pendingRequests += 1
     if (state.pendingRequests > MAX_PENDING_REQUESTS) {
       state.pendingRequests -= 1
@@ -667,6 +688,11 @@ function buildAgentApp(
         { code: 'LOCAL_ACP_TOO_MANY_PENDING_REQUESTS' },
       )
     }
+  }
+
+  const endRequest = (control = false): void => {
+    if (control) state.pendingControlRequests -= 1
+    else state.pendingRequests -= 1
   }
 
   app.onRequest(methods.agent.initialize, async request => {
@@ -716,16 +742,16 @@ function buildAgentApp(
         authMethods: [],
       }
     } finally {
-      state.pendingRequests -= 1
+      endRequest()
     }
   })
 
   const rejectSessionOperation = (_request: { params: unknown }): never => {
-    beginRequest()
+    beginRequest(true)
     try {
       rejectSessionNotReady()
     } finally {
-      state.pendingRequests -= 1
+      endRequest(true)
     }
   }
   // Register with a permissive params parser for the STILL-UNSUPPORTED methods:
@@ -795,7 +821,7 @@ function buildAgentApp(
         })
       }
     app.onRequest(methods.agent.session.new, async ({ params, client, signal }) => {
-      beginRequest()
+      beginRequest(true)
       let view: ConnectionViewState | undefined
       try {
         requireInitialized()
@@ -807,11 +833,11 @@ function buildAgentApp(
         throw asRequestError(error)
       } finally {
         if (view !== undefined) releaseIdleViewSlot(slots, views, view)
-        state.pendingRequests -= 1
+        endRequest(true)
       }
     })
     app.onRequest(methods.agent.session.resume, async ({ params, client, signal }) => {
-      beginRequest()
+      beginRequest(true)
       let view: ConnectionViewState | undefined
       try {
         requireInitialized()
@@ -832,11 +858,11 @@ function buildAgentApp(
         throw asRequestError(error)
       } finally {
         if (view !== undefined) releaseIdleViewSlot(slots, views, view)
-        state.pendingRequests -= 1
+        endRequest(true)
       }
     })
     app.onRequest(methods.agent.session.close, async ({ params }) => {
-      beginRequest()
+      beginRequest(true)
       try {
         requireInitialized()
         const view = routeOwnedView(slots, views, params.sessionId)
@@ -853,7 +879,7 @@ function buildAgentApp(
       } catch (error) {
         throw asRequestError(error)
       } finally {
-        state.pendingRequests -= 1
+        endRequest(true)
       }
     })
     // PO-3B: ONE text prompt per attached View. The request's own SDK context
@@ -885,7 +911,7 @@ function buildAgentApp(
     // request against the pinned v1 schema); the View applies the exact-claim,
     // View-idle and Agent-idle admission before any Session write.
     app.onRequest(methods.agent.session.setConfigOption, async ({ params, signal }) => {
-      beginRequest()
+      beginRequest(true)
       try {
         requireInitialized()
         const view = routeOwnedView(slots, views, params.sessionId)
@@ -895,7 +921,7 @@ function buildAgentApp(
       } catch (error) {
         throw asRequestError(error)
       } finally {
-        state.pendingRequests -= 1
+        endRequest(true)
       }
     })
   } else {
@@ -937,6 +963,7 @@ function serveConnection(socket: Socket, context: ListenerContext): void {
   const state: ConnectionState = {
     initialized: false,
     pendingRequests: 0,
+    pendingControlRequests: 0,
     closed: false,
     imageEnabled: false,
     inputBounds: TEXT_ONLY_BOUNDS,

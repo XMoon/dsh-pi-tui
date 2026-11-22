@@ -90,6 +90,15 @@ function toolResultCallIdOf(event) {
   return String(eventData(event).message?.toolCallId ?? '')
 }
 
+/** Extract the text of one SDK session/update notification (assistant chunks only). */
+function updateText(params) {
+  const content = params?.update?.content
+  if (Array.isArray(content)) {
+    return content.map(part => (part?.type === 'text' && typeof part.text === 'string' ? part.text : '')).join('\n')
+  }
+  return content?.type === 'text' && typeof content.text === 'string' ? content.text : ''
+}
+
 function readProof(path) {
   if (!existsSync(path)) return []
   return readFileSync(path, 'utf8').split('\n').filter(Boolean).flatMap(line => {
@@ -348,8 +357,10 @@ export async function runAcpMultiSessionB2(context) {
 
     const updatesA = []
     const updatesB = []
+    const allUpdates = []
     const permissionRequests = []
     const acpMain = await openAcp('B2-01', params => {
+      allUpdates.push(params)
       if (params?.sessionId === sessionA) updatesA.push(params)
       else if (params?.sessionId === sessionB) updatesB.push(params)
     }, async params => {
@@ -387,6 +398,14 @@ export async function runAcpMultiSessionB2(context) {
     assert(probeA.sessionId === sessionA && probeB.sessionId === sessionB, 'B2-02: distinct exact Host Sessions')
     assert(typeof probeA.agentId === 'string' && typeof probeB.agentId === 'string' && probeA.agentId !== probeB.agentId,
       `B2-02: each Session must own a distinct exact Agent: ${JSON.stringify({ A: probeA.agentId, B: probeB.agentId })}`)
+    const expectedNonceDigest = digestOf(runNonce).slice(0, 16)
+    const serverStarts = readProof(proofPath).filter(line => line.kind === 'server-start'
+      && line.tag === 'b1scope' && line.nonceDigest === expectedNonceDigest)
+    assert(serverStarts.length >= 1, `B2-09: expected a run-owned MCP server-start proof: ${JSON.stringify(readProof(proofPath))}`)
+    for (const line of serverStarts) {
+      assert(Number.isInteger(line.pid) && line.pid > 0, `B2-09: malformed MCP server PID: ${JSON.stringify(line)}`)
+      serverPids.add(line.pid)
+    }
 
     // B2-08: the second Session owns its model selection independently. The
     // official Host commits B's config write and emits the full standard update
@@ -479,8 +498,16 @@ export async function runAcpMultiSessionB2(context) {
     assert(hostAssistantHasText(eventsB, 'B1_ECHO_B settled'), 'B2-03: B assistant output missing')
     assert(modelRecords(sessionA, 'B1_ECHO_A').some(record => record.hasEchoTool === true), 'B2-09: A model step must see its scoped MCP tool')
     assert(modelRecords(sessionB, 'B1_ECHO_B').every(record => record.hasEchoTool === false), 'B2-09: B model step must not see A tool')
+    const foreignUpdates = allUpdates.filter(update => update?.sessionId !== sessionA && update?.sessionId !== sessionB)
+    assert(foreignUpdates.length === 0, `B2-03: foreign Session updates: ${JSON.stringify(foreignUpdates)}`)
     assertOnlySession(readUpdates(updatesA), sessionA, 'B2-03 A updates')
     assertOnlySession(readUpdates(updatesB), sessionB, 'B2-03 B updates')
+    const assistantUpdatesA = updatesA.filter(update => update.update?.sessionUpdate === 'agent_message_chunk')
+    const assistantUpdatesB = updatesB.filter(update => update.update?.sessionUpdate === 'agent_message_chunk')
+    assert(assistantUpdatesA.length >= 1 && assistantUpdatesA.some(update => updateText(update).includes('B1_ECHO_A settled')),
+      `B2-03: A must receive its committed assistant update: ${JSON.stringify(assistantUpdatesA)}`)
+    assert(assistantUpdatesB.length >= 1 && assistantUpdatesB.some(update => updateText(update).includes('B1_ECHO_B settled')),
+      `B2-03: B must receive its committed assistant update: ${JSON.stringify(assistantUpdatesB)}`)
     await assertSameHost(hostIdentity, 'B2-03 Host after two prompts')
 
     // B2-07: each Session's own reverse permission request carries its exact
@@ -551,28 +578,31 @@ export async function runAcpMultiSessionB2(context) {
     await waitForTurnEnd(sessionA, beforeTuiAfterCancel, 'B2-06 TUI A turn/end')
     assert(hostAssistantHasText(eventsOf(sessionA).slice(beforeTuiAfterCancel), 'b1 plain settled'), 'B2-06: TUI A must continue after B cancel')
 
-    // B2-10: Off releases the remaining B view; On reuses the SAME registry and
-    // admits a fresh view for B (A is detached and may be resumed anew).
+    // B2-10: keep A and B both attached at Off. The production teardown must
+    // release BOTH slots; after On, both exact Sessions must be reborrowable.
+    const resumedAForOff = await resumeWhenAttachable(acpMain.client, { sessionId: sessionA, cwd: hostCwd })
+    assert(resumedAForOff?.sessionId === undefined || resumedAForOff.sessionId === sessionA,
+      `B2-10: A must be attached before Off: ${JSON.stringify(resumedAForOff)}`)
     const disabled = await acpAccess(peer, 'B2-10 disable ACP', false)
     assert(disabled.ok === true && disabled.status?.state === 'disabled', `B2-10: ACP must disable: ${JSON.stringify(disabled)}`)
     await acpMain.client.close().catch(() => {})
     const enabledAgain = await acpAccess(peer, 'B2-10 re-enable ACP', true)
     assert(enabledAgain.ok === true && enabledAgain.status?.state === 'enabled', `B2-10: ACP must re-enable: ${JSON.stringify(enabledAgain)}`)
     const acpOn = await openAcp('B2-10')
-    const resumedB = await resumeWhenAttachable(acpOn.client, { sessionId: sessionB, cwd: hostCwd })
-    assert(resumedB?.sessionId === undefined || resumedB.sessionId === sessionB, `B2-10: B must resume after Off/On: ${JSON.stringify(resumedB)}`)
-    await acpOn.client.request(acp.methods.agent.session.close, { sessionId: sessionB })
+    const resumedAOnOff = await resumeWhenAttachable(acpOn.client, { sessionId: sessionA, cwd: hostCwd })
+    const resumedBOnOff = await resumeWhenAttachable(acpOn.client, { sessionId: sessionB, cwd: hostCwd })
+    assert(resumedAOnOff?.sessionId === undefined || resumedAOnOff.sessionId === sessionA, `B2-10: A must resume after Off/On: ${JSON.stringify(resumedAOnOff)}`)
+    assert(resumedBOnOff?.sessionId === undefined || resumedBOnOff.sessionId === sessionB, `B2-10: B must resume after Off/On: ${JSON.stringify(resumedBOnOff)}`)
 
     // B2-13: another connection must still respect the one-ACP-View rule.
     const acpOther = await openAcp('B2-13')
-    const resumedAOnOn = await resumeWhenAttachable(acpOn.client, { sessionId: sessionA, cwd: hostCwd })
-    assert(resumedAOnOn?.sessionId === undefined || resumedAOnOn.sessionId === sessionA, 'B2-13: A must be attachable after A close')
     await expectRequestError(
       acpOther.client.request(acp.methods.agent.session.resume, { sessionId: sessionA, cwd: hostCwd }),
       'LOCAL_ACP_VIEW_ALREADY_ATTACHED',
       'B2-13 second connection A',
     )
     await acpOn.client.request(acp.methods.agent.session.close, { sessionId: sessionA })
+    await acpOn.client.request(acp.methods.agent.session.close, { sessionId: sessionB })
     await closeAcp(acpOther.client)
     await closeAcp(acpOn.client)
 
@@ -589,9 +619,14 @@ export async function runAcpMultiSessionB2(context) {
     await scene.awaitSceneSeatFree()
     assert(!existsSync(acpEndpoint.path), 'B2 final: the ACP socket must be gone after shutdown')
     const proofFinal = readProof(proofPath)
-    for (const pid of serverPids) assert(!alivePid(pid), `B2 final: MCP child ${String(pid)} must not survive`)
-    const childPids = proofFinal.filter(line => line.kind === 'server-start' && line.tag === 'b1scope').map(line => line.pid)
-    for (const pid of childPids) {
+    assert(serverPids.size >= 1, 'B2 final: the MCP server PID proof must be nonempty')
+    const finalServerStarts = proofFinal.filter(line => line.kind === 'server-start'
+      && line.tag === 'b1scope' && line.nonceDigest === expectedNonceDigest)
+    assert(finalServerStarts.length === serverStarts.length, 'B2 final: the MCP server proof set changed unexpectedly')
+    for (const line of finalServerStarts) {
+      assert(serverPids.has(line.pid), `B2 final: untracked MCP child PID ${JSON.stringify(line)}`)
+    }
+    for (const pid of serverPids) {
       assert(await waitForGone(pid), `B2 final: MCP child ${String(pid)} must not survive`)
     }
     const evidence = {
@@ -608,7 +643,7 @@ export async function runAcpMultiSessionB2(context) {
       permissions: { requests: permissionRequests.length, a: 'allowed-once', b: 'rejected', scoped: true },
       close: { a: '{}', repeatedA: '{}', unknown: '{}', bAfterA: plainB.stopReason },
       cancel: { b: cancelledB.stopReason, tuiA: 'end_turn' },
-      mcp: { aTool: ECHO_TOOL, aResult: true, bUnknownTool: true, childPids },
+      mcp: { aTool: ECHO_TOOL, aResult: true, bUnknownTool: true, childPids: [...serverPids] },
       offOn: { reusedRegistry: true, restoredSessionB: true },
       quiesced: true,
       verdict: 'PASS',
