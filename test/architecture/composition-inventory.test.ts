@@ -431,6 +431,13 @@ const REMOTE_BRANCH_SUBSCRIPTIONS: ReadonlyArray<readonly [string, string]> = [
   ['agent/created', 'src/app/host/features/agent-prompt.ts'],
   ['agent/disposed', 'src/app/host/features/agent-prompt.ts'],
   ['session/event', 'src/app/host/features/agent-prompt.ts'],
+  // The private Host accepted-input history search observes the official
+  // durable lifecycle planes ONCE: the event stream fills its bounded live
+  // buffer, `session/created` registers a new live id and `session/disposed`
+  // schedules the durability re-verification of already accepted rows.
+  ['session/event', 'src/app/host/features/history-search.ts'],
+  ['session/created', 'src/app/host/features/history-search.ts'],
+  ['session/disposed', 'src/app/host/features/history-search.ts'],
 ]
 
 /** Dynamic (non-literal event) `ctx.on` bridges: the Direct config port only. */

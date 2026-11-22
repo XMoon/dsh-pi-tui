@@ -47,6 +47,7 @@ import { runSharedSessionInteractions } from '../smoke/split-process/shared-sess
 import { runPromptSessionFocusTurnParity } from '../smoke/split-process/prompt-session-focus-turn-parity.mjs'
 import { runHostRuntimeDisabled } from '../smoke/split-process/host-runtime-disabled.mjs'
 import { runHostUserShellF1 } from '../smoke/split-process/host-user-shell-f1.mjs'
+import { runHostHistorySearch } from '../smoke/split-process/host-history-search.mjs'
 import { runSessionlessShellCompletionG14 } from '../smoke/split-process/sessionless-shell-completion-g14.mjs'
 import { runGenericFileUploadF4 } from '../smoke/split-process/generic-file-upload-f4.mjs'
 import { runHostCommandFileReceipt } from '../smoke/split-process/host-command-file-receipt.mjs'
@@ -163,6 +164,14 @@ const CASE_REGISTRY = Object.freeze([
     id: 'surface.host-user-shell-f1',
     title: 'real installed Host Shell and Host completion use Host environment, bound output and exact Session writes',
     run: runHostUserShellF1,
+  }),
+  Object.freeze({
+    suite: 'surface',
+    id: 'surface.host-history-search-pr1',
+    title: 'a real Split Client searches and recovers the exact accepted input another Client submitted through the private Host accepted-history index, including keyset pages, stale cursors, fork inheritance, event-time cwd, queue mutation stability and a clean restart replay',
+    platforms: LINUX_DARWIN,
+    defaultLane: false,
+    run: runHostHistorySearch,
   }),
   Object.freeze({
     suite: 'surface',

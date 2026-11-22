@@ -29,6 +29,7 @@ import { PI_TUI_AUTHORIZATION_NAMESPACE } from '../../src/runtime/remote/pi-tui-
 import { PI_TUI_CREDENTIAL_RECORDS_NAMESPACE } from '../../src/runtime/remote/pi-tui-credential-records-contract.ts'
 import { PI_TUI_DEFAULT_MODEL_NAMESPACE } from '../../src/runtime/remote/pi-tui-default-model-contract.ts'
 import { PI_TUI_PROMPT_PRESENCE_NAMESPACE } from '../../src/runtime/remote/pi-tui-prompt-presence-contract.ts'
+import { PI_TUI_HISTORY_SEARCH_NAMESPACE } from '../../src/runtime/remote/pi-tui-history-search-contract.ts'
 import type { PiTuiTerminalProgressFrame } from '../../src/runtime/remote/pi-tui-terminal-progress-contract.ts'
 
 /** Cordis `FiberState.ACTIVE` (const enum: no runtime value). */
@@ -136,6 +137,15 @@ test('one contribution registers every private service and publishes readiness l
     '@xmoon76/dsh-pi-tui#piTuiPromptPresence/syncView')
   // The wire has EXACTLY ONE method: the voter roster is never a Client query.
   assert.equal(ctx.typert.local.get('piTuiPromptPresence/snapshotVoters'), undefined)
+  // The accepted-input history search row: mounted as ONE child fiber with its
+  // two exact private endpoints; the official persistence/query services are
+  // resolved per call, so this Context (which has neither) still mounts it.
+  assert.equal(bindingOf(ctx, PI_TUI_HISTORY_SEARCH_NAMESPACE).serviceKey, PI_TUI_HISTORY_SEARCH_NAMESPACE)
+  assert.equal(bindingOf(ctx, PI_TUI_HISTORY_SEARCH_NAMESPACE).namespace, PI_TUI_HISTORY_SEARCH_NAMESPACE)
+  assert.equal(ctx.typert.local.get('piTuiHistorySearch/search')?.id,
+    '@xmoon76/dsh-pi-tui#piTuiHistorySearch/search')
+  assert.equal(ctx.typert.local.get('piTuiHistorySearch/readText')?.id,
+    '@xmoon76/dsh-pi-tui#piTuiHistorySearch/readText')
   // Every private endpoint is registered by the ONE package contribution.
   assert.equal(
     ctx.typert.local.get('piTuiFileReferences/list')?.id,
@@ -194,6 +204,7 @@ test('disposing the ONE built-in fiber withdraws every service, the contribution
   assert.equal(ctx.reflect.get('piTuiAuthorization'), undefined)
   assert.equal(ctx.reflect.get(PI_TUI_CREDENTIAL_RECORDS_NAMESPACE), undefined)
   assert.equal(ctx.reflect.get(PI_TUI_DEFAULT_MODEL_NAMESPACE), undefined)
+  assert.equal(ctx.reflect.get(PI_TUI_HISTORY_SEARCH_NAMESPACE), undefined)
   assert.equal(ctx.reflect.get(piTuiHostRuntime.PI_TUI_HOST_READY_SERVICE), undefined)
   assert.equal(ctx.typert.local.get('piTuiFileReferences/list'), undefined)
   assert.equal(ctx.typert.local.get('piTuiTerminalProgress/watch'), undefined)
@@ -211,6 +222,8 @@ test('disposing the ONE built-in fiber withdraws every service, the contribution
   assert.equal(ctx.typert.local.get('piTuiCredentialRecords/list'), undefined)
   assert.equal(ctx.typert.local.get('piTuiCredentialRecords/delete'), undefined)
   assert.equal(ctx.typert.local.get('piTuiDefaultModel/saveSelection'), undefined)
+  assert.equal(ctx.typert.local.get('piTuiHistorySearch/search'), undefined)
+  assert.equal(ctx.typert.local.get('piTuiHistorySearch/readText'), undefined)
   await ctx.fiber.dispose()
 })
 
