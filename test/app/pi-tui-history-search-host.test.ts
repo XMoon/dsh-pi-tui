@@ -1297,3 +1297,41 @@ test('rebuilding a Session to zero events invalidates the previous cursor', asyn
     await ctx.fiber.dispose()
   }
 })
+
+test('a disposal during the disposed-session prefix proof never mutates the closed index', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-proof-abort-')
+  const source = mutableSource('/repo/proof-abort')
+  source.live = true
+  const { deps } = mutableDeps(source)
+  let proofStarted!: () => void
+  const started = new Promise<void>(resolve => { proofStarted = resolve })
+  let releaseProof!: () => void
+  const gate = new Promise<void>(resolve => { releaseProof = resolve })
+  const persistence = deps.sessionPersistence()
+  assert.ok(persistence !== undefined)
+  const blockedPersistence = {
+    ...persistence,
+    async open(sessionId: string, mode: 'read', options?: { readonly signal?: AbortSignal }) {
+      proofStarted()
+      await gate
+      options?.signal?.throwIfAborted()
+      return persistence.open(sessionId, mode, options)
+    },
+  }
+  const ctx = new Context()
+  const service = directService(ctx, { ...deps, sessionPersistence: () => blockedPersistence }, profileDir)
+  const proof = () => (service as unknown as {
+    verifySessionAgainstPersistence(sessionId: string): Promise<void>
+  }).verifySessionAgainstPersistence('mutable-session')
+  try {
+    await waitDirectReady(service)
+    const pending = proof()
+    await started
+    await service.dispose()
+    releaseProof()
+    await assert.rejects(pending, (error: unknown) => (error as Error).name === 'AbortError')
+  } finally {
+    await ctx.fiber.dispose()
+  }
+})

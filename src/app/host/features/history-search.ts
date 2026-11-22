@@ -1250,7 +1250,8 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     let handle: HistorySearchReadHandleLike
     try {
       handle = await persistence.open(sessionId, 'read', { signal })
-    } catch {
+    } catch (error) {
+      if (this.disposed || this.lifecycle.signal.aborted) throw error
       return 'unreadable'
     }
     try {
@@ -1268,7 +1269,8 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         return 'rollback'
       }
       return 'proven'
-    } catch {
+    } catch (error) {
+      if (this.disposed || this.lifecycle.signal.aborted) throw error
       return 'unreadable'
     } finally {
       await handle.close()
