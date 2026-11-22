@@ -214,12 +214,16 @@ export function normalizeHistoryCwd(cwd: string | null | undefined): string | nu
   return normalize(cwd)
 }
 
-/** Approximate one event's text weight for the bounded live buffer. */
+/** Byte weight of one live event, counting REAL UTF-8 bytes. */
 function approximateEventBytes(event: HostAdmissionEventLike): number {
   try {
-    return JSON.stringify(event).length
+    return Buffer.byteLength(JSON.stringify(event), 'utf8')
   } catch {
-    return 0
+    // An official Session event is JSON by contract; a value that cannot be
+    // serialized breaks the bound itself. Charge the whole text budget so the
+    // overflow path reconciles from the official source instead of silently
+    // caching an unmeasurable payload.
+    return HISTORY_SEARCH_MAX_PENDING_BYTES + 1
   }
 }
 
@@ -232,12 +236,22 @@ function eventOf(value: unknown): HistorySearchEventLike | undefined {
   return { type: record.type, seq: record.seq, time: record.time, data: record.data }
 }
 
-function eventsOf(value: unknown): HistorySearchEventLike[] {
-  if (!Array.isArray(value)) return []
+/**
+ * Convert one OFFICIAL event batch structurally. A malformed element is a
+ * source-contract breach: dropping it would advance the derived checkpoint past
+ * an unobserved seq, so the batch fails closed instead.
+ */
+function eventsOf(value: unknown, sessionId: string): HistorySearchEventLike[] {
+  if (!Array.isArray(value)) {
+    throw new HistorySearchConflictError(sessionId, 'the official event batch is not an array')
+  }
   const events: HistorySearchEventLike[] = []
   for (const candidate of value) {
     const event = eventOf(candidate)
-    if (event !== undefined) events.push(event)
+    if (event === undefined) {
+      throw new HistorySearchConflictError(sessionId, 'the official event batch contains a malformed event')
+    }
+    events.push(event)
   }
   return events
 }
@@ -267,6 +281,8 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
   private pendingEventCount = 0
   private pendingBytes = 0
   private verificationTimer: ReturnType<typeof setTimeout> | undefined
+  /** Count of bounded-buffer overflows (internal lifecycle evidence). */
+  private bufferOverflows = 0
   /** Last fully replayed persistence revision per Session (same-instance only). */
   private readonly verifiedRevisions = new Map<string, { readonly identity: symbol | undefined; readonly revision: unknown }>()
 
@@ -447,9 +463,17 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     if (this.state.kind === 'unavailable') return
     const record = session as { readonly id?: unknown; readonly header?: { readonly cwd?: string }; readonly inheritedEventCount?: number }
     if (record.id === undefined) return
-    const parsed = eventOf(event)
-    if (parsed === undefined) return
     const sessionId = String(record.id)
+    const parsed = eventOf(event)
+    if (parsed === undefined) {
+      // A committed live event that violates the structural contract cannot be
+      // folded and must not be skipped: report the source as uncertain and
+      // rebuild this Session from the official source.
+      this.state = { kind: 'incomplete', reason: 'source-uncertain' }
+      this.diag.warn('history search observed a malformed live event', { category: 'source-uncertain' })
+      this.enqueueRebuild(sessionId)
+      return
+    }
     this.rememberLiveSession(session)
     const known = this.liveSessions.get(sessionId)
     const inherited = typeof record.inheritedEventCount === 'number' && Number.isSafeInteger(record.inheritedEventCount)
@@ -468,7 +492,18 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       this.pendingEventCount += 1
       this.pendingBytes += bytes
     } else {
-      if (existing.events.some(candidate => candidate.seq === parsed.seq)) return
+      const duplicate = existing.events.find(candidate => candidate.seq === parsed.seq)
+      if (duplicate !== undefined) {
+        if (sessionEventHash(duplicate) === sessionEventHash(parsed)) return
+        // Same sequence, different body: the buffered fact is no longer
+        // trustworthy. Discard this Session's batch and rebuild it from the
+        // official source instead of silently keeping either body.
+        this.discardPendingSession(sessionId)
+        this.state = { kind: 'incomplete', reason: 'reconciling' }
+        this.diag.warn('history search observed a conflicting live sequence', { category: 'reconciling' })
+        this.enqueueRebuild(sessionId)
+        return
+      }
       existing.events.push(parsed)
       existing.bytes += bytes
       this.pendingEventCount += 1
@@ -479,6 +514,28 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       return
     }
     this.enqueueDrain()
+  }
+
+  /** Drop one buffered Session batch and keep the byte/event counters exact. */
+  private discardPendingSession(sessionId: string): void {
+    const pending = this.pending.get(sessionId)
+    if (pending === undefined) return
+    this.pending.delete(sessionId)
+    this.pendingEventCount -= pending.events.length
+    this.pendingBytes -= pending.bytes
+  }
+
+  /** Re-read one Session from the official source on the serial writer. */
+  private enqueueRebuild(sessionId: string): void {
+    this.enqueueWrite(async () => {
+      const query = this.deps.sessionQuery()
+      if (query === undefined) {
+        this.state = { kind: 'unavailable', reason: 'service-missing' }
+        return
+      }
+      await this.rebuildSession(sessionId, query)
+      this.refreshCompleteness()
+    })
   }
 
   private observeDisposedSession(session: unknown): void {
@@ -495,6 +552,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
   }
 
   private handleOverflow(): void {
+    this.bufferOverflows += 1
     const affected = [...this.pending.keys()]
     this.pending.clear()
     this.pendingEventCount = 0
@@ -670,6 +728,20 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     readonly events: readonly HostAdmissionEventLike[]
   }): { readonly effectiveCwd: string | null; readonly lastEventHash: string | null } {
     const index = this.requireIndex()
+    // ONE shared monotonic contract for every replay path: the batch must be
+    // the exact contiguous official sequence starting at the committed
+    // checkpoint. A gap, duplicate or reordered element is a source breach and
+    // must never advance the derived checkpoint past an unobserved seq.
+    let expectedSeq = input.baseNextSeq
+    for (const event of input.events) {
+      if (event.seq !== expectedSeq) {
+        throw new HistorySearchConflictError(
+          input.sessionId,
+          `expected seq ${String(expectedSeq)} but observed ${String(event.seq)}`,
+        )
+      }
+      expectedSeq += 1
+    }
     const initialCwd = input.effectiveCwd ?? input.headerCwd
     const fold = new HostAdmissionFold({
       sessionId: input.sessionId,
@@ -690,7 +762,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     }))
     const effectiveCwd = normalizeHistoryCwd(fold.currentCwd)
     const lastEventHash = lastEvent === undefined ? null : sessionEventHash(lastEvent)
-    const nextSeq = input.events.length === 0 ? input.baseNextSeq : input.events[input.events.length - 1]!.seq + 1
+    const nextSeq = expectedSeq
     index.commitBatch({
       sessionId: input.sessionId,
       headerHash: input.headerHash,
@@ -814,7 +886,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       const observation = await query.observeSession(sessionId, { projectionMode: 'none', signal })
       try {
         const inherited = Number(observation.inheritedEventCount)
-        const events = eventsOf(observation.events)
+        const events = eventsOf(observation.events, sessionId)
         await this.replayEventList(sessionId, observation.header, inherited, events, checkpoint, 'live')
       } finally {
         observation[Symbol.dispose]()
@@ -823,7 +895,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     }
     const handle = await persistence.open(sessionId, 'read', { signal })
     try {
-      await this.replayHandle(sessionId, handle, checkpoint)
+      await this.replayHandle(sessionId, handle, checkpoint, record.eventCount)
     } finally {
       await handle.close()
     }
@@ -833,6 +905,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     sessionId: string,
     handle: HistorySearchReadHandleLike,
     checkpoint: HistorySessionCheckpointRow | undefined,
+    expectedEventCount: number | undefined,
   ): Promise<void> {
     const signal = this.lifecycle.signal
     const headerHash = sessionHeaderHash(handle.header)
@@ -860,7 +933,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     for (;;) {
       signal.throwIfAborted()
       const slice = await handle.read(nextSeq, HISTORY_SEARCH_READ_BATCH, { signal })
-      const events = eventsOf(slice.events)
+      const events = eventsOf(slice.events, sessionId)
       if (events.length === 0) break
       const result = this.writeBatch({
         sessionId,
@@ -877,6 +950,14 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       lastEventHash = result.lastEventHash
       if (events.length < HISTORY_SEARCH_READ_BATCH) break
       await yieldEventLoop()
+    }
+    // A read that ends before the advertised durable count is a truncated
+    // official tail, never a complete projection.
+    if (expectedEventCount !== undefined && nextSeq !== expectedEventCount) {
+      throw new HistorySearchConflictError(
+        sessionId,
+        `the official log ended at ${String(nextSeq)} before its advertised count ${String(expectedEventCount)}`,
+      )
     }
   }
 
@@ -928,6 +1009,13 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       if (slice.length < HISTORY_SEARCH_READ_BATCH) break
       await yieldEventLoop()
     }
+    // A contiguous log starting at seq 0 must end exactly at its length.
+    if (nextSeq !== events.length) {
+      throw new HistorySearchConflictError(
+        sessionId,
+        `the official observation ended at ${String(nextSeq)} for ${String(events.length)} events`,
+      )
+    }
   }
 
   /** Rebuild one Session from a complete official observation (live preferred). */
@@ -936,7 +1024,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     const observation = await query.observeSession(sessionId, { projectionMode: 'none', signal })
     try {
       const inherited = Number(observation.inheritedEventCount)
-      const events = eventsOf(observation.events)
+      const events = eventsOf(observation.events, sessionId)
       this.index?.resetSession(sessionId)
       await this.replayEventList(sessionId, observation.header, inherited, events, undefined, 'live')
     } finally {

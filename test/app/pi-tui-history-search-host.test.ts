@@ -547,8 +547,10 @@ test('dispose aborts the owned bootstrap, withdraws listeners and closes the dat
 interface MutableOfficialSource {
   present: boolean
   header: { readonly id: unknown; readonly cwd?: string }
-  events: readonly { type: string; seq: number; time: number; data: unknown }[]
+  events: { type: string; seq: number; time: number; data: unknown }[]
   revision: number
+  /** Advertised durable count when it deliberately disagrees with `events`. */
+  eventCount?: number
 }
 
 function mutableSource(headerCwd: string): MutableOfficialSource {
@@ -581,7 +583,11 @@ function mutableDeps(source: MutableOfficialSource): {
     identity: Symbol('mutable-persistence'),
     async list() {
       if (!source.present) return []
-      return [{ header: source.header, eventCount: source.events.length, revision: source.revision }]
+      return [{
+        header: source.header,
+        eventCount: source.eventCount ?? source.events.length,
+        revision: source.revision,
+      }]
     },
     async open() {
       return {
@@ -732,6 +738,208 @@ test('a disposed Session keeps its rows until the durable source proves them', a
       await new Promise(resolve => setTimeout(resolve, 10))
     }
     assert.equal(uncertain?.kind, 'incomplete', JSON.stringify(uncertain))
+  } finally {
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+async function waitDirectSettled(
+  service: PiTuiHistorySearchHostService,
+  timeoutMs = 15_000,
+): Promise<HistorySearchResponse> {
+  const started = Date.now()
+  for (;;) {
+    const answer = await service.search({ scope: 'all', query: '', limit: 1 }, new AbortController().signal)
+    if (answer.kind !== 'loading') return answer
+    if (Date.now() - started > timeoutMs) throw new Error('direct index settle timeout')
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+}
+
+function liveSessionOf(source: MutableOfficialSource): { id: unknown; header: { cwd?: string }; inheritedEventCount: number } {
+  return { id: source.header.id, header: source.header, inheritedEventCount: 0 }
+}
+
+test('a gapped, malformed or tail-truncated official batch is incomplete, never a silent success', async (t) => {
+  const scenarios: ReadonlyArray<{
+    readonly name: string
+    readonly mutate: (source: MutableOfficialSource) => void
+  }> = [
+    {
+      name: 'sequence gap',
+      mutate: (source) => {
+        source.events = [source.events[0]!, source.events[2]!]
+      },
+    },
+    {
+      name: 'advertised tail truncation',
+      mutate: (source) => {
+        source.events = [source.events[0]!, source.events[1]!]
+        source.eventCount = 3
+      },
+    },
+    {
+      name: 'malformed event',
+      mutate: (source) => {
+        source.events = [source.events[0]!, { type: 'user/message', seq: 1, time: Number.NaN, data: {} }]
+      },
+    },
+  ]
+  for (const scenario of scenarios) {
+    const life = testLifecycle(t)
+    const profileDir = life.tempDir('dsh-history-search-broken-')
+    const source = mutableSource(`/repo/${scenario.name.replaceAll(' ', '-')}`)
+    scenario.mutate(source)
+    const { deps } = mutableDeps(source)
+    const ctx = new Context()
+    const service = directService(ctx, deps, profileDir)
+    try {
+      const answer = await waitDirectSettled(service)
+      assert.equal(answer.kind, 'incomplete', `${scenario.name}: ${JSON.stringify(answer)}`)
+      if (answer.kind !== 'incomplete') throw new Error('expected incomplete')
+      assert.ok(answer.reason === 'source-read-failed' || answer.reason === 'reconciling',
+        `${scenario.name}: unexpected reason ${answer.reason}`)
+    } finally {
+      await service.dispose()
+      await ctx.fiber.dispose()
+    }
+  }
+})
+
+test('a conflicting duplicate live sequence discards the buffer and rebuilds from the official source', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-live-conflict-')
+  const source = mutableSource('/repo/live-conflict')
+  const { deps } = mutableDeps(source)
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const deliver = (event: unknown) => (service as unknown as {
+    observeLiveEvent(session: unknown, event: unknown): void
+  }).observeLiveEvent(liveSessionOf(source), event)
+  try {
+    await waitDirectReady(service)
+    const official = source.events[0]!
+    // The first delivery is the real official event; the second reuses its seq
+    // with a DIFFERENT body (a re-delivery / replaced Session conflict).
+    deliver(official)
+    deliver({
+      type: 'user/message',
+      seq: official.seq,
+      time: 9999,
+      data: {
+        id: 'msg-1',
+        role: 'user',
+        content: [{ type: 'text', text: 'conflict body must never be indexed' }],
+        source: { kind: 'user', rpcId: 'rpc-1' },
+      },
+    })
+    await waitDirectReady(service)
+    const original = await service.search({ scope: 'all', query: 'mutable first', limit: 25 }, new AbortController().signal)
+    const conflict = await service.search({ scope: 'all', query: 'conflict body', limit: 25 }, new AbortController().signal)
+    assert.equal(original.kind, 'ready', JSON.stringify(original))
+    assert.equal(conflict.kind, 'ready', JSON.stringify(conflict))
+    if (original.kind !== 'ready' || conflict.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(original.items.length, 1)
+    assert.equal(original.items[0]?.acceptedAt, 1000, 'the official first acceptance must win')
+    assert.deepEqual(conflict.items, [])
+  } finally {
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('the live buffer counts real UTF-8 bytes and reconciles without losing entries', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-utf8-bound-')
+  const source: MutableOfficialSource = {
+    present: true,
+    header: { id: 'big-session', cwd: '/repo/big' },
+    events: [],
+    revision: 1,
+  }
+  const bigEvent = (index: number) => ({
+    type: 'agent/inbox/spliced',
+    seq: index,
+    time: 1000 + index,
+    data: {
+      target: 'next-turn',
+      start: index,
+      inserted: [{
+        id: `big-msg-${String(index)}`,
+        role: 'user',
+        content: [{ type: 'text', text: `${'中'.repeat(3_000_000)} big-live-${String(index)}` }],
+        source: { kind: 'user', rpcId: `rpc-big-${String(index)}` },
+      }],
+    },
+  })
+  source.events.push(bigEvent(0), bigEvent(1))
+  const { deps } = mutableDeps(source)
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const deliver = (event: unknown) => (service as unknown as {
+    observeLiveEvent(session: unknown, event: unknown): void
+  }).observeLiveEvent(liveSessionOf(source), event)
+  try {
+    await waitDirectReady(service, 60_000)
+    // 2 x ~9 MiB UTF-8: the real byte budget MUST overflow, while a UTF-16
+    // unit count (~6M) would not.
+    source.events.push(bigEvent(2), bigEvent(3))
+    source.revision += 1
+    deliver(bigEvent(2))
+    deliver(bigEvent(3))
+    assert.ok((service as unknown as { bufferOverflows: number }).bufferOverflows >= 1,
+      'the UTF-8 byte budget must trip the bounded buffer')
+    await waitDirectReady(service, 60_000)
+    const newest = await service.search({ scope: 'session', sessionId: 'big-session', query: 'big-live-3', limit: 25 }, new AbortController().signal)
+    const first = await service.search({ scope: 'session', sessionId: 'big-session', query: 'big-live-0', limit: 25 }, new AbortController().signal)
+    assert.equal(newest.kind, 'ready', JSON.stringify(newest))
+    assert.equal(first.kind, 'ready', JSON.stringify(first))
+    if (newest.kind !== 'ready' || first.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(newest.items.length, 1, 'the overflow reconcile dropped the triggering row')
+    assert.equal(first.items.length, 1, 'the overflow reconcile dropped an earlier row')
+    assert.ok(newest.items[0]!.contentLength > 3_000_000)
+  } finally {
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('a failed index write answers incomplete instead of a silent success', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-write-failure-')
+  const source = mutableSource('/repo/write-failure')
+  const { deps } = mutableDeps(source)
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const deliver = (event: unknown) => (service as unknown as {
+    observeLiveEvent(session: unknown, event: unknown): void
+  }).observeLiveEvent(liveSessionOf(source), event)
+  try {
+    await waitDirectReady(service)
+    // Simulate an unavailable writer (the same observable class as a full
+    // disk): the next serial write fails, never a fabricated ready page.
+    ;(service as unknown as { index: { close(): void } }).index.close()
+    const nextEvent = {
+      type: 'agent/inbox/spliced' as const,
+      seq: 3,
+      time: 4000,
+      data: {
+        target: 'next-turn',
+        start: 2,
+        inserted: [{
+          id: 'msg-4',
+          role: 'user',
+          content: [{ type: 'text', text: 'write must fail' }],
+          source: { kind: 'user', rpcId: 'rpc-4' },
+        }],
+      },
+    }
+    source.events.push(nextEvent)
+    source.revision += 1
+    deliver(nextEvent)
+    const answer = await waitDirectSettled(service)
+    assert.equal(answer.kind, 'incomplete', JSON.stringify(answer))
   } finally {
     await service.dispose()
     await ctx.fiber.dispose()

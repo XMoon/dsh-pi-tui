@@ -226,6 +226,32 @@ function assertPrivateDatabaseFile(path: string): void {
   }
 }
 
+/**
+ * SQLite's WAL sidecars are part of the private file set. An existing sidecar
+ * must be a regular, current-UID, 0600 file: SQLite reads and writes it under
+ * the same exemption assumptions as the main database, so a symlinked or
+ * group-readable sidecar is a refusal, never a chmod repair.
+ */
+function assertPrivateSidecars(dbPath: string): void {
+  for (const suffix of ['-wal', '-shm'] as const) {
+    const path = `${dbPath}${suffix}`
+    if (!existsSync(path)) continue
+    const link = lstatSync(path)
+    if (link.isSymbolicLink()) {
+      throw new HistorySearchIndexUnavailableError(`the derived index ${suffix} file is a symbolic link`)
+    }
+    if (!link.isFile()) {
+      throw new HistorySearchIndexUnavailableError(`the derived index ${suffix} path is not a regular file`)
+    }
+    if (link.uid !== process.getuid?.()) {
+      throw new HistorySearchIndexUnavailableError(`the derived index ${suffix} file is not owned by the current user`)
+    }
+    if ((link.mode & 0o077) !== 0) {
+      throw new HistorySearchIndexUnavailableError(`the derived index ${suffix} file is not private`)
+    }
+  }
+}
+
 interface RawSessionRow {
   readonly session_id: string
   readonly header_cwd: string | null
@@ -373,6 +399,7 @@ export class HistorySearchIndex {
     const dbPath = join(historyDir, DATABASE_FILE)
     let created = !existsSync(dbPath)
     if (!created) assertPrivateDatabaseFile(dbPath)
+    assertPrivateSidecars(dbPath)
 
     // Inspect an existing file READ-ONLY first: a foreign database must be
     // refused without any write (no journal-mode flag, no schema change).
@@ -391,6 +418,14 @@ export class HistorySearchIndex {
       }
       if (state === 'foreign') {
         throw new HistorySearchIndexUnavailableError('the derived history index path holds a foreign database')
+      }
+      // An EXISTING empty database carries no PITH identity. Adopting it would
+      // rewrite a pre-existing non-application database in place, so it is
+      // refused untouched; only a file THIS open created may be initialized.
+      if (state === 'fresh') {
+        throw new HistorySearchIndexUnavailableError(
+          'the derived history index path holds an existing database without the application identity',
+        )
       }
       if (state === 'corrupt') {
         quarantineDatabaseFile(dbPath)
@@ -419,6 +454,12 @@ export class HistorySearchIndex {
       if (schema === 'foreign') {
         db.close()
         throw new HistorySearchIndexUnavailableError('the derived history index path holds a foreign database')
+      }
+      if (schema === 'fresh' && !created) {
+        db.close()
+        throw new HistorySearchIndexUnavailableError(
+          'the derived history index path holds an existing database without the application identity',
+        )
       }
       if (schema === 'corrupt' || (created && schema !== 'fresh')) {
         db.close()

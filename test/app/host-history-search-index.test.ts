@@ -394,3 +394,46 @@ test('an incremental checkpoint survives close/reopen and a renamed-away file is
 function rejoinedDbPath(profileDirPath: string): string {
   return join(profileDirPath, '.dsh-pi-tui', 'history-search', 'v1.sqlite')
 }
+test('an existing empty SQLite database is refused without being rewritten', (t) => {
+  const dir = profileDir(t)
+  const historyDir = join(dir, '.dsh-pi-tui', 'history-search')
+  mkdirSync(historyDir, { recursive: true, mode: 0o700 })
+  chmodSync(join(dir, '.dsh-pi-tui'), 0o700)
+  chmodSync(historyDir, 0o700)
+  const dbPath = join(historyDir, 'v1.sqlite')
+  const empty = new DatabaseSync(dbPath)
+  empty.close()
+  chmodSync(dbPath, 0o600)
+  const before = readFileSync(dbPath)
+  assert.throws(
+    () => HistorySearchIndex.open({ profileDir: dir }),
+    (error: unknown) => error instanceof HistorySearchIndexUnavailableError,
+  )
+  assert.deepEqual(readFileSync(dbPath), before,
+    'an existing database without the application identity must stay byte-identical')
+})
+
+test('unsafe WAL or SHM sidecars refuse the derived index', (t) => {
+  const dir = profileDir(t)
+  const first = HistorySearchIndex.open({ profileDir: dir })
+  first.close()
+  const historyDir = join(dir, '.dsh-pi-tui', 'history-search')
+  const dbPath = join(historyDir, 'v1.sqlite')
+  const target = join(dir, 'foreign-sidecar')
+  writeFileSync(target, '', { mode: 0o600 })
+  symlinkSync(target, `${dbPath}-wal`)
+  assert.throws(
+    () => HistorySearchIndex.open({ profileDir: dir }),
+    (error: unknown) => error instanceof HistorySearchIndexUnavailableError,
+  )
+
+  const second = profileDir(t)
+  const secondIndex = HistorySearchIndex.open({ profileDir: second })
+  secondIndex.close()
+  const secondDir = join(second, '.dsh-pi-tui', 'history-search')
+  writeFileSync(join(secondDir, 'v1.sqlite-shm'), '', { mode: 0o644 })
+  assert.throws(
+    () => HistorySearchIndex.open({ profileDir: second }),
+    (error: unknown) => error instanceof HistorySearchIndexUnavailableError,
+  )
+})

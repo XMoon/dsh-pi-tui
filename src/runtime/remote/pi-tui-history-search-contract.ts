@@ -297,6 +297,10 @@ export function parseHistorySearchResponse(value: unknown): HistorySearchRespons
     if (record.nextCursor !== null && typeof record.nextCursor !== 'string') {
       throw new TypeError(`${ANSWER_LABEL}: nextCursor must be a string or null`)
     }
+    if (typeof record.nextCursor === 'string'
+      && Buffer.byteLength(record.nextCursor, 'utf8') > HISTORY_SEARCH_CURSOR_MAX_BYTES) {
+      throw new TypeError(`${ANSWER_LABEL}: nextCursor exceeds ${HISTORY_SEARCH_CURSOR_MAX_BYTES} bytes`)
+    }
     return {
       kind: 'ready',
       generation: nonEmptyString(record.generation, `${ANSWER_LABEL} generation`),
@@ -338,6 +342,12 @@ export function parseHistoryReadTextResponse(value: unknown): HistoryReadTextRes
   if (record.kind === 'ready') {
     exactKeys(record, ['kind', 'chunk', 'nextOffset', 'contentLength'], READ_ANSWER_LABEL)
     if (typeof record.chunk !== 'string') throw new TypeError(`${READ_ANSWER_LABEL}: chunk must be a string`)
+    // The producer may exceed the requested limit by ONE UTF-16 unit only when
+    // the requested cut would split a surrogate pair; a larger frame is a
+    // contract violation, never a legitimate chunk.
+    if (record.chunk.length > HISTORY_SEARCH_READ_TEXT_LIMIT_MAX + 1) {
+      throw new TypeError(`${READ_ANSWER_LABEL}: chunk exceeds ${HISTORY_SEARCH_READ_TEXT_LIMIT_MAX + 1} UTF-16 code units`)
+    }
     if (record.nextOffset !== null) nonNegativeInteger(record.nextOffset, `${READ_ANSWER_LABEL} nextOffset`)
     return {
       kind: 'ready',
