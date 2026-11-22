@@ -154,11 +154,25 @@ profile's independent `autoStart` preference enables it (see below).
   the one official shutdown quiesces and closes the controller before it runs.
   A SIGKILL leaves a stale inode for the next seat winner's safe reclaim.
 - **ACP v1 handshake and a connection-scoped shared Session View.** The
-  listener answers the ACP v1 `initialize` (protocol version 1, `agentInfo.name`
-  `dsh-pi-tui`, `agentInfo.version` the installed `@xmoon76/dsh-pi-tui` bundle
-  version — never the DSH engine version). When the Host installs the shared
-  Session View it advertises `sessionCapabilities: { resume: {}, close: {} }`
-  and never `loadSession`, `session/list` or MCP capability. It does NOT
+  listener supports ACP v1 only. It answers every valid integer
+  `initialize.protocolVersion` — including a client that requests a higher
+  version — with `protocolVersion: 1`; the client decides whether v1 is
+  acceptable or disconnects. A second `initialize` on the same connection is
+  rejected. A request to a registered Session handler before the handshake
+  completes is JSON-RPC `-32600 Invalid Request` (the stable
+  `LOCAL_ACP_SESSION_NOT_READY` / `LOCAL_ACP_VIEW_NOT_INITIALIZED` data code is
+  retained for diagnosis); after the handshake, unsupported Session operations
+  keep their existing `LOCAL_ACP_SESSION_NOT_READY` business classification.
+  The response names `agentInfo.name` `dsh-pi-tui` and `agentInfo.version` the
+  installed `@xmoon76/dsh-pi-tui` bundle version — never the DSH engine version.
+  `authMethods` stays empty and `loadSession` is always `false`. When the Host
+  installs the shared Session View it advertises exactly
+  `sessionCapabilities: { resume: {}, close: {} }`; it does not advertise
+  `session/list`, `load`, `delete`, `fork`, `additionalDirectories` or
+  `options`. It also does not expose client `fs`/`terminal` capabilities or
+  issue those reverse requests. MCP capability is explicit:
+  `mcpCapabilities: { http: false, sse: false }`; standard stdio MCP servers are
+  `session/new`/`session/resume` inputs, not an HTTP/SSE capability. It does NOT
   advertise the optional `sessionCapabilities.options` capability: the standard
   config-option response/notification fields below are ordinary ACP v1 fields
   and do not require that negotiation.

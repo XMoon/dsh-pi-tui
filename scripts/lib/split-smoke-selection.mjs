@@ -92,6 +92,7 @@ import { runAcpSdkContentInteroperability } from '../smoke/split-process/acp-sdk
 import { runAcpScopedMcpB0 } from '../smoke/split-process/acp-scoped-mcp-b0.mjs'
 import { runAcpScopedMcpB1 } from '../smoke/split-process/acp-scoped-mcp-b1.mjs'
 import { runAcpMultiSessionB2 } from '../smoke/split-process/acp-multi-session-b2.mjs'
+import { runAcpV1ConformanceB3 } from '../smoke/split-process/acp-v1-conformance-b3.mjs'
 import {
   runDaemonControlConcurrentControls,
   runDaemonControlInflightStop,
@@ -656,6 +657,14 @@ const CASE_REGISTRY = Object.freeze([
     title: 'one official ACP SDK connection concurrently borrows a TUI Session and creates another, routes prompts/cancel/close/MCP per Session and survives Off/On with the one Host',
     platforms: LINUX_DARWIN,
     run: runAcpMultiSessionB2,
+  }),
+  Object.freeze({
+    suite: 'acp',
+    defaultLane: false,
+    id: 'acp.v1-conformance-b3',
+    title: 'an installed Host negotiates the ACP v1 entry, advertises only real Session capabilities, serves a standard prompt and refuses unadvertised methods without Host side effects',
+    platforms: LINUX_DARWIN,
+    run: runAcpV1ConformanceB3,
   }),
 ])
 
