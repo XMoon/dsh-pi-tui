@@ -191,7 +191,7 @@ test('a rejected pair creates no Scene root or install transaction', t => {
   const life = testLifecycle(t)
   const tmpBase = life.tempDir('split-upgrade-pair-base-')
   const root = life.tempDir('split-upgrade-pair-')
-  const { oldPath, newPath } = validPair(root, { newVersion: '0.5.7' })
+  const { oldPath, newPath } = validPair(root, { newVersion: '0.5.7', newExtra: { description: 'different bytes' } })
   expectInputError(() => inspectSplitUpgradePair(oldPath, newPath), 'INPUT_PAIR_SAME_VERSION')
   assert.deepEqual(readdirSync(tmpBase), [], 'a rejected pairing must create no Scene root')
 })
