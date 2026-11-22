@@ -11,6 +11,7 @@ import { KeyRecorder } from '../../src/tui/keybindings/ui/recorder.ts'
 import type { KeybindingMutationResult } from '../../src/tui/keybindings/ui/controller.ts'
 import { buildKeybindingEditorModel } from '../../src/tui/keybindings/ui/model.ts'
 import { CURSOR_MARKER, stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
+import { color } from '../../src/tui/theme/runtime.ts'
 import { mountEmbeddedPage } from '../support/embedded-page-harness.ts'
 
 
@@ -1249,11 +1250,11 @@ test('keybinding editor: degenerate grants keep the operation hint and only pain
     panel.setMaxRows(3)
     view = panel.render(88).map(plain)
     assert.deepEqual(view.length, 3)
-    assert.match(view[0]!, /^Search: /)
-    assert.match(view[1]!, /^Keymap: /, 'the keymap fact is the third-row survivor')
+    assert.match(view[0]!, /^View: \[All\] · Conflicts \(0 affected actions\)$/u, 'the mode row is the first-row survivor')
+    assert.match(view[1]!, /^Search: /, 'the search row is the second-row survivor')
     assert.match(view[2]!, /Back \[Esc\]/)
-    assert.ok(panel.handleMouse(mouse('press', 10, 0, 88, 30))?.handled, 'the painted search row must stay clickable')
-    assert.equal(panel.handleMouse(mouse('press', 10, 1, 88, 30)), undefined, 'the keymap fact row is inert')
+    assert.ok(panel.handleMouse(mouse('press', 7, 0, 88, 30))?.handled, 'the painted mode span must stay clickable')
+    assert.ok(panel.handleMouse(mouse('press', 10, 1, 88, 30))?.handled, 'the painted search row must stay clickable')
     assert.equal(panel.handleMouse(mouse('press', 10, 2, 88, 30)), undefined, 'the hint row is inert')
   } finally {
     manager.dispose()
@@ -1933,6 +1934,350 @@ test('the recorder publishes Cancel [Esc] for a real cancel, never for interrupt
   } finally {
     editor.dispose()
     interrupt.dispose()
+    manager.dispose()
+  }
+})
+
+// ── UX PR2: All / Conflicts view modes ───────────────────────────────────
+
+function conflictPanel(options: { readonly initialFilter?: 'all' | 'conflicts' } = {}) {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings({
+    'app.input.submit': 'ctrl+shift+h',
+    'app.todo.toggle': 'ctrl+shift+h',
+  })
+  manager.setUserConfiguration(parsed)
+  const mutations: unknown[] = []
+  const panel = new KeybindingEditorPanel({
+    model: buildKeybindingEditorModel(manager, parsed),
+    initialFilter: options.initialFilter,
+    onClose: () => {},
+    runMutation: mutation => { mutations.push(mutation) },
+    maxRows: () => 30,
+  })
+  return { manager, panel, mutations }
+}
+
+test('keybinding editor: Tab switches All ↔ Conflicts without a write and preserves the query', () => {
+  const { manager, panel, mutations } = conflictPanel()
+  try {
+    let view = plain(panel.render(88).join('\n'))
+    assert.match(view, /View: \[All\] · Conflicts \(2 affected actions\)/u)
+    assert.match(view, /Leader key/u, 'All keeps the leader row')
+    panel.handleInput('\t')
+    view = plain(panel.render(88).join('\n'))
+    assert.match(view, /View: All · \[Conflicts \(2 affected actions\)\]/u)
+    assert.match(view, /Affected actions/u)
+    assert.match(view, /Submit draft/u)
+    assert.match(view, /Toggle todo/u)
+    assert.doesNotMatch(view, /Leader key/u, 'Conflicts never paints the leader configuration row')
+    assert.doesNotMatch(view, /Search full transcript history/u, 'unaffected actions are filtered out')
+
+    // The mode switch is presentation-only and keeps the ONE query.
+    panel.handleInput('todo')
+    panel.handleInput('\t')
+    view = plain(panel.render(88).join('\n'))
+    assert.match(view, /View: \[All\] · Conflicts \(2 affected actions\)/u)
+    assert.match(view, /Search: todo/u, 'the query survives a mode switch')
+    assert.deepEqual(mutations, [], 'no filter transition may ever write settings')
+  } finally {
+    panel.dispose()
+    manager.dispose()
+  }
+})
+
+test('keybinding editor: zero conflicts opens the empty Conflicts page and leaves All reachable', () => {
+  const { manager, panel } = makePanel(() => {})
+  try {
+    panel.handleInput('\t') // render first so the mode row is painted
+    const first = plain(panel.render(88).join('\n'))
+    assert.match(first, /View: \[All\]/u)
+    panel.handleInput('\t')
+    let view = plain(panel.render(88).join('\n'))
+    assert.match(view, /View: All · \[Conflicts \(0 affected actions\)\]/u)
+    assert.match(view, /No conflicts in the current keymap\./u)
+    panel.handleInput('\t')
+    view = plain(panel.render(88).join('\n'))
+    assert.match(view, /View: \[All\]/u)
+    assert.match(view, /Leader key/u, 'All is reachable again')
+  } finally {
+    panel.dispose()
+    manager.dispose()
+  }
+})
+
+test('keybinding editor: mode spans are the only clickable cells and stale gestures are inert', () => {
+  const { manager, panel } = conflictPanel()
+  try {
+    let view = panel.render(88)
+    const plainView = view.map(plain)
+    const modeRow = plainView.findIndex(line => line.startsWith('View: '))
+    assert.ok(modeRow >= 0)
+    // `View: [All] · Conflicts (...)` — the All span is [6,11), the separator
+    // is inert, and the Conflicts span starts after ` · `.
+    assert.equal(panel.handleMouse(mouse('press', 11, modeRow, 88, 30)), undefined,
+      'the separator between the two spans is inert')
+    assert.ok(panel.handleMouse(mouse('press', 7, modeRow, 88, 30))?.handled)
+    assert.ok(panel.handleMouse(mouse('click', 7, modeRow, 88, 30))?.handled)
+    // No-op: already All. The click must not write anything.
+    panel.render(88)
+    assert.ok(panel.handleMouse(mouse('press', 15, modeRow, 88, 30))?.handled)
+    assert.ok(panel.handleMouse(mouse('click', 15, modeRow, 88, 30))?.handled)
+    let now = plain(panel.render(88).join('\n'))
+    assert.match(now, /View: All · \[Conflicts/u, 'a press + same-span release switches mode')
+    // A release on the OTHER span must not switch anything.
+    const conflictsModeRow = panel.render(88).map(plain).findIndex(line => line.startsWith('View: '))
+    assert.ok(panel.handleMouse(mouse('press', 7, conflictsModeRow, 88, 30))?.handled)
+    assert.equal(panel.handleMouse(mouse('click', 15, conflictsModeRow, 88, 30)), undefined,
+      'a different span on release is rejected')
+    now = plain(panel.render(88).join('\n'))
+    assert.match(now, /View: All · \[Conflicts/u)
+    // A query change between press and release makes the old gesture inert.
+    assert.ok(panel.handleMouse(mouse('press', 7, conflictsModeRow, 88, 30))?.handled)
+    panel.handleInput('q')
+    assert.equal(panel.handleMouse(mouse('click', 7, conflictsModeRow, 88, 30)), undefined,
+      'an empty → non-empty query change under the gesture refuses the stale release')
+    // Non-empty → non-empty is a REAL query change too: the identity must not
+    // collapse every non-empty query into one state.
+    panel.render(88)
+    assert.ok(panel.handleMouse(mouse('press', 7, conflictsModeRow, 88, 30))?.handled)
+    panel.handleInput('r')
+    assert.equal(panel.handleMouse(mouse('click', 7, conflictsModeRow, 88, 30)), undefined,
+      'a non-empty → non-empty query change refuses the stale release')
+  } finally {
+    panel.dispose()
+    manager.dispose()
+  }
+})
+
+test('keybinding editor: a narrow/absent mode row makes Tab and spans inert', () => {
+  const { manager, panel } = conflictPanel()
+  try {
+    const narrow = plain(panel.render(20).join('\n'))
+    assert.match(narrow, /View: \[All\]/u, 'the narrow row states the active mode read-only')
+    panel.handleInput('\t')
+    assert.match(plain(panel.render(20).join('\n')), /View: \[All\]/u, 'Tab is inert without painted spans')
+    // The 2-row grant has no mode row at all; Tab must not switch a hidden mode,
+    // even when the PREVIOUS frame was a fully painted mode row.
+    panel.setMaxRows(30)
+    panel.render(88)
+    panel.setMaxRows(2)
+    const two = plain(panel.render(88).join('\n'))
+    assert.match(two, /^Search: /mu)
+    assert.doesNotMatch(two, /Tab view/u, 'the two-row bar must not advertise the hidden mode switch')
+    panel.handleInput('\t')
+    assert.match(plain(panel.render(88).join('\n')), /^Search: /mu)
+  } finally {
+    panel.dispose()
+    manager.dispose()
+  }
+})
+
+test('action editor: a short conflict detail reaches both real participants through c details', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings({
+    'app.input.submit': 'ctrl+shift+h',
+    'app.todo.toggle': 'ctrl+shift+h',
+  })
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const row = model.rows.find(candidate => candidate.id === 'app.input.submit')!
+  const editor = new ActionEditorPanel({
+    model,
+    action: row,
+    runMutation: () => {},
+    onModelChange: () => {},
+    onBack: () => {},
+    maxRows: () => 6,
+  })
+  try {
+    const editFrame = plain(editor.render(60).join('\n'))
+    assert.match(editFrame, /c details/u, 'the short detail bar advertises the read-only conflict reader')
+    editor.handleInput('c')
+    const frame = plain(editor.render(60).join('\n'))
+    assert.match(frame, /keybinding conflict on Ctrl\+Shift\+H/u)
+    assert.match(frame, /app\.input\.submit@user:ctrl\+shift\+h \(editor, user\)/u)
+    assert.match(frame, /app\.todo\.toggle@user:ctrl\+shift\+h \(global, user\)/u,
+      'the counterpart is readable at a short grant, not hidden below the shortcut row')
+  } finally {
+    editor.dispose()
+    manager.dispose()
+  }
+})
+
+test('action editor: a long conflict diagnostic is scrollable in the read-only reader', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings({
+    'app.input.submit': 'ctrl+shift+h',
+    'app.todo.toggle': 'ctrl+shift+h',
+  })
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const row = model.rows.find(candidate => candidate.id === 'app.input.submit')!
+  const editor = new ActionEditorPanel({
+    model,
+    action: row,
+    runMutation: () => {},
+    onModelChange: () => {},
+    onBack: () => {},
+    maxRows: () => 4,
+  })
+  try {
+    editor.render(36)
+    editor.handleInput('c')
+    const frames: string[] = []
+    for (let step = 0; step < 12; step += 1) {
+      frames.push(plain(editor.render(36).join('\n')))
+      editor.handleInput('\x1b[6~')
+    }
+    const bodies = frames.map(frame => frame.split('\n').slice(0, -1).join('')).join('\n')
+    assert.match(bodies, /app\.input\.submit@user:ctrl\+shift\+h\s*\(editor, user\)/u)
+    assert.match(bodies, /app\.todo\.toggle@user:ctrl\+shift\+h\s*\(global, user\)/u)
+    for (const frame of frames) assert.match(frame.split('\n').at(-1)!, /Back \[Esc\]/u)
+  } finally {
+    editor.dispose()
+    manager.dispose()
+  }
+})
+
+test('action editor: a failed write result stays painted on a short conflict detail', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings({
+    'app.input.submit': 'ctrl+shift+h',
+    'app.todo.toggle': 'ctrl+shift+h',
+  })
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const row = model.rows.find(candidate => candidate.id === 'app.input.submit')!
+  const editor = new ActionEditorPanel({
+    model,
+    action: row,
+    runMutation: (_mutation, _onResult, onError) => onError(new Error('save failed')),
+    onModelChange: () => {},
+    onBack: () => {},
+    maxRows: () => 5,
+  })
+  try {
+    editor.render(60)
+    editor.handleInput('r')
+    const frame = plain(editor.render(60).join('\n'))
+    assert.match(frame, /save failed/u, 'the failed result is visible even below a short grant')
+    assert.match(frame, /Back \[Esc\]/u)
+  } finally {
+    editor.dispose()
+    manager.dispose()
+  }
+})
+
+test('action editor: c details is inert while choose-binding owns the keys', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings({
+    'app.input.submit': 'ctrl+shift+h',
+    'app.todo.toggle': 'ctrl+shift+h',
+  })
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const row = model.rows.find(candidate => candidate.id === 'app.input.submit')!
+  const editor = new ActionEditorPanel({
+    model,
+    action: row,
+    runMutation: () => {},
+    onModelChange: () => {},
+    onBack: () => {},
+    maxRows: () => 30,
+  })
+  try {
+    editor.render(60)
+    editor.handleInput('a') // choose-binding sub-view
+    const choice = plain(editor.render(60).join('\n'))
+    assert.match(choice, /Choose what to record/u)
+    editor.handleInput('c') // must stay in the choice view
+    const after = plain(editor.render(60).join('\n'))
+    assert.match(after, /Choose what to record/u)
+    assert.doesNotMatch(after, /Conflict details/u)
+  } finally {
+    editor.dispose()
+    manager.dispose()
+  }
+})
+
+test('action editor: a one-row grant paints the failed settlement before unlocking', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings({
+    'app.input.submit': 'ctrl+shift+h',
+    'app.todo.toggle': 'ctrl+shift+h',
+  })
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const row = model.rows.find(candidate => candidate.id === 'app.input.submit')!
+  let failWrite!: () => void
+  let rows = 30
+  const editor = new ActionEditorPanel({
+    model,
+    action: row,
+    runMutation: (_mutation, _onResult, onError) => { failWrite = () => onError(new Error('save failed')) },
+    onModelChange: () => {},
+    onBack: () => {},
+    maxRows: () => rows,
+  })
+  try {
+    editor.render(60)
+    editor.handleInput('r') // pending reset
+    assert.match(plain(editor.render(60).join('\n')), /Saving…/u)
+    rows = 1
+    editor.render(60)
+    failWrite()
+    const frame = plain(editor.render(60).join('\n'))
+    assert.match(frame, /save failed/u, 'the one-row frame paints the failure itself')
+    assert.match(frame, /Back \[Esc\]/u, 'the one-row frame still exposes its ONE exit affordance')
+    assert.ok(editor.paintedEscapeSpan() !== undefined, 'the visible Back span is a real pointer target')
+    assert.doesNotMatch(frame, /Saving…/u)
+    for (const narrow of [10, 11]) {
+      const narrowFrame = plain(editor.render(narrow).join('\n'))
+      assert.match(narrowFrame, /Back \[Esc\]/u, `the full exit segment survives a ${narrow}-column one-row grant`)
+      assert.ok(editor.paintedEscapeSpan() !== undefined, `the ${narrow}-column Back span is a real pointer target`)
+    }
+    const marker = plain(editor.render(12).join('\n'))
+    assert.match(marker, /! Back \[Esc\]/u, 'a twelve-column failure frame distinguishes the failure beside the exit')
+    ;(editor as unknown as { message: string; messageKind: 'success' | 'error' }).message = 'Keyboard shortcut settings saved.'
+    ;(editor as unknown as { message: string; messageKind: 'success' | 'error' }).messageKind = 'success'
+    assert.match(plain(editor.render(12).join('\n')), /✓ Back \[Esc\]/u,
+      'a twelve-column success frame never claims a failure')
+    assert.ok(editor.render(60).join('\n').includes(color.success('Keyboard shortcut settings saved.')),
+      'a wide one-row success is painted in success ink, not error ink')
+  } finally {
+    editor.dispose()
+    manager.dispose()
+  }
+})
+
+test('action editor: a disabled Action keeps its ordinary diagnostic inline, never as Conflict details', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings({ 'app.todo.toggle': false })
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const row = model.rows.find(candidate => candidate.id === 'app.todo.toggle')!
+  assert.equal(row.conflict, false)
+  assert.equal(manager.snapshot().conflicts.length, 0)
+  assert.ok(row.diagnostics.some(message => message.includes('disabled by user config')))
+  const editor = new ActionEditorPanel({
+    model,
+    action: row,
+    runMutation: () => {},
+    onModelChange: () => {},
+    onBack: () => {},
+    maxRows: () => 30,
+  })
+  try {
+    const frame = plain(editor.render(88).join('\n'))
+    assert.match(frame, /disabled by user config/u, 'the pre-existing inline diagnostic stays readable')
+    assert.doesNotMatch(frame, /c details/u, 'a non-conflict row must not advertise a conflict reader')
+    editor.handleInput('c')
+    const after = plain(editor.render(88).join('\n'))
+    assert.doesNotMatch(after, /Conflict details/u, 'c must not open a conflict reader for a non-conflict row')
+    assert.match(after, /Action ID: app\.todo\.toggle/u)
+  } finally {
+    editor.dispose()
     manager.dispose()
   }
 })

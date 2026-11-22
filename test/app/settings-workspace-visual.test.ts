@@ -45,7 +45,6 @@ import { SettingsRegistry } from '../../src/extension/internal/settings-registry
 import { apply as applyExtensionHost, PI_TUI_EXTENSIONS_SERVICE } from '../../src/extensions.ts'
 import { TUI_STARTUP_SERVICE } from '../../src/startup.ts'
 import { createDirectSettingsFixture } from '../support/direct-settings-fixture.ts'
-import { parseUserKeybindings } from '../../src/tui/keybindings/config.ts'
 import { waitForFrame } from '../support/frame-wait.ts'
 import { themePickerRows } from '../../src/app/surface/theme-selection.ts'
 import type { CredentialProviderOption, ExtensionConfigsConfig, TuiSettingsDoc, VisualToolsState, WebStartupPreferenceState, BackendStartupPreferenceState, PublicBackendValue } from '../../src/runtime/config-port.ts'
@@ -9816,38 +9815,7 @@ test('the real /settings route edits rows, choices and pages without ever callin
   h.dispose()
 })
 
-// Regression: C2-R7 acceptance R7-13 (the independent SettingsList consumers).
-test('/keybindings conflicts still paints its conflicts in the independent SettingsList', async () => {
-  // The conflicts command is the ONE independent `app.openSettings` consumer
-  // that the R7 retirement could plausibly break, because the same command
-  // module lost the legacy editor. A REAL conflict is installed on THIS app's
-  // live keymap, so the command takes its own `conflicts.length > 0` branch.
-  const h = setup({ columns: 140, rows: 40 })
-  h.app.keybindingsManager().setUserConfiguration(
-    parseUserKeybindings({ 'app.input.submit': 'ctrl+shift+h', 'app.todo.toggle': 'ctrl+shift+h' }),
-  )
-  const conflicts = h.app.keybindingsManager().snapshot().conflicts
-  assert.ok(conflicts.length > 0, `precondition: the live keymap really has a conflict:\n${JSON.stringify(conflicts)}`)
-  h.invoke('keybindings', 'conflicts')
-  await settle(h)
-  assert.equal(h.app.overlayGraphState().handles, 1, 'the independent SettingsList really mounted as its own overlay')
-  const frame = h.view()
-  assert.match(frame, /Ctrl\+Shift\+H\s+conflict/u, `the conflict row names the shared chord:\n${frame}`)
-  // The row's description wraps at the overlay width, so the two action names
-  // are read separately from the ONE description block between the chord row
-  // and the list's own hint line.
-  const description = frame
-    .slice(frame.indexOf('conflict'), frame.indexOf('Type to search'))
-    // The overlay's box-drawing cells are not content: drop them before the
-    // wrapped description is collapsed into ONE sentence.
-    .replace(/[\u2500\u2502\u256d\u256e\u2570\u256f]/gu, ' ')
-    .replace(/\s+/gu, ' ')
-  assert.match(description, /app\.input\.submit \(editor, user\)/u, `the first conflicting action is named:\n${frame}`)
-  assert.match(description, / vs /u, 'the row states the conflict, not just two actions')
-  assert.match(description, /app\.todo\.toggle \(global, user\)/u, `the second conflicting action is named:\n${frame}`)
-  assert.ok(!frame.includes('Settings · Categories'), 'the independent list is NOT the Settings workspace')
-  h.dispose()
-})
+
 
 // ── M5-W PR-C: the next-Host-launch Web preference (`web-autostart`) ────────
 //

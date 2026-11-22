@@ -139,7 +139,7 @@ When launched inside [Herdr](https://github.com/herdrdev/herdr), the TUI can rep
 
 ## Settings, extensions and development
 
-`/settings` is the shared fullscreen Settings workspace; `/plugins`, `/footer` and `/keybindings` open its relevant pages. Host configuration writes use official authoritative readback; a package enabled in the Host is not necessarily an ACTIVE `./tui` extension in the current Client.
+`/settings` is the shared fullscreen Settings workspace; `/plugins`, `/footer` and `/keybindings` open its relevant pages. `/keybindings conflicts` opens the same Keyboard shortcuts page directly in its Conflicts view; when the settings document cannot be read or that page cannot open, the command returns an error carrying the current conflict diagnostics. Host configuration writes use official authoritative readback; a package enabled in the Host is not necessarily an ACTIVE `./tui` extension in the current Client.
 
 Public extensions have **Stable / Advanced / Unstable** tiers: see the [authoring guide](docs/extensions/authoring.md), [Stable API](docs/extensions/stable.md) and [tier contract](docs/extensions/tiers.md). Version 0.5.7 adds Client-local `./tui` loading and per-package persisted settings, but **does not deliver Forge or a Plugin Marketplace**.
 
