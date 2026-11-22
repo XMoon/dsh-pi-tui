@@ -515,12 +515,20 @@ export async function runAcpStdioA1(context) {
     const largeResponse = await largePromptRequest.promise
     assert(largeResponse?.result?.stopReason === 'end_turn',
       `A1-05: the large prompt must complete end_turn (got ${JSON.stringify(largeResponse)})`)
+    const pressurePayloads = [0, 1].map(index => `a1-pressure-${String(index)}-${'x'.repeat(64 * 1024)}`)
+    const pressureText = pressure.rawLines.slice(largeUpdatesBefore).join('\n')
+    for (const payload of pressurePayloads) {
+      assert(pressureText.includes(payload),
+        'A1-05: every full 64 KiB block payload must survive the paused/resumed stdout path')
+    }
     const largeUpdates = pressure.rawLines.slice(largeUpdatesBefore)
       .map(line => { try { return JSON.parse(line) } catch { return undefined } })
       .filter(message => message?.method === acp.methods.client.session.update
         && message.params?.sessionId === sessionA)
       .length
     assert(largeUpdates >= 2, `A1-05: the Host must emit its complete committed update set (got ${String(largeUpdates)})`)
+    const pressurePayloadSha256 = sha256(Buffer.from(pressurePayloads.join('')))
+    const pressurePayloadBytes = Buffer.byteLength(pressurePayloads.join(''), 'utf8')
     await pressure.rawRequest('session/close', { sessionId: sessionA })
     const pressureExit = await pressure.close()
     assert(pressureExit.code === 0, `A1-05: the normal Client EOF must exit 0 (got ${JSON.stringify(pressureExit)})`)
@@ -570,6 +578,39 @@ export async function runAcpStdioA1(context) {
     assertAccess(await acpAccess(peer, 'A1-06 stale cleanup off', false), 'disabled', 'A1-06 stale cleanup off')
     assertAccess(await acpAccess(peer, 'A1-06 stale cleanup on', true), 'enabled', 'A1-06 stale cleanup on')
     await waitForSocket(socketPath, 'A1-06 stale cleanup socket')
+
+    // A1-06 changing state: a REAL foreign Profile Host is held inside an
+    // accepted ACP setEnabled mutation by the production qualification barrier.
+    // Its authenticated status is therefore `changing`; the public command must
+    // reject it before spawning an Adapter and emit zero stdout.
+    const changingBarrier = join(workDir, `a1-changing-${String(process.pid)}.release`)
+    const changingHost = new context.EntryProcess('host', noHostProfile.entries.host, {
+      ...noHostProfile.base,
+      env: {
+        ...noHostProfile.base.env,
+        SPLIT_PROCESS_HOST_ACP_MUTATION_BARRIER: changingBarrier,
+      },
+    })
+    extraHosts.push(changingHost)
+    const changingReady = await changingHost.waitFor(record => record.m4a0 === 'ready', 'A1-06 changing Host ready', 180_000)
+    assert(changingReady.m4a0 === 'ready', 'A1-06: the changing-profile Host must become ready')
+    const changingPeer = new context.EntryProcess('peer', noHostProfile.entries.client, {
+      ...noHostProfile.base,
+      env: { ...noHostProfile.base.env, SPLIT_PROCESS_CLIENT_MODE: 'peer' },
+    })
+    peers.push(changingPeer)
+    await changingPeer.waitFor(record => record.m4a0 === 'ready', 'A1-06 changing peer ready', 180_000)
+    changingPeer.send({
+      op: 'qualification-acp-access',
+      requestId: `a1-changing-${String(process.pid)}`,
+      acpEnabled: true,
+    })
+    await changingHost.waitFor(record => record.op === 'acp-mutation-start', 'A1-06 changing mutation start', 60_000)
+    const changing = await readCommands(['acp', 'stdio'], { ...noHostProfile.base.env }, 3, /ACP_STDIO_LISTENER_UNAVAILABLE/u)
+    assert(changing.stdout.length === 0, 'A1-06: changing state must produce zero stdout bytes')
+    writeFileSync(changingBarrier, 'release\n', { mode: 0o600 })
+    await changingPeer.waitFor(record => record.op === 'acp-access' && record.requestId === `a1-changing-${String(process.pid)}`,
+      'A1-06 changing mutation completion', 120_000)
 
     // A1-07: runtime ACP Off disconnects the stdio Adapter; the Host, TUI and
     // protected rows survive. A fresh command connects again after re-enable.
@@ -683,6 +724,8 @@ export async function runAcpStdioA1(context) {
       stdoutBytes: raw.length,
       stdoutFrames: protocol.frames,
       stdoutSha256: sha256(raw),
+      pressurePayloadBytes,
+      pressurePayloadSha256,
       adapterProcessCount: adapterProcesses(context).length,
       adapterProcessCountDuring: adapterCountDuring,
       updates: command.updates.length,
@@ -711,6 +754,7 @@ export async function runAcpStdioA1(context) {
       largePayloadDrained: true,
       outputBackpressureObserved: true,
       staleSocketFailClosed: true,
+      changingStateClassified: true,
       hostMissingDisabledForeignAndMissingEntryFailClosed: true,
       runtimeOffDisconnectsOnlyAdapter: true,
       hostRestartObserved: true,

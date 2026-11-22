@@ -1050,13 +1050,14 @@ test('the trusted-profile ACP stdio case is selectable-only, dual-platform and r
     largePayloadDrained: true,
     outputBackpressureObserved: true,
     staleSocketFailClosed: true,
+    changingStateClassified: true,
     hostMissingDisabledForeignAndMissingEntryFailClosed: true,
     runtimeOffDisconnectsOnlyAdapter: true,
     hostRestartObserved: true,
     commandFamilyStable: true,
     hostTuiKept: true,
     quiesced: true,
-    evidence: { candidateSha256: 'a'.repeat(64), stdoutSha256: 'b'.repeat(64), stdoutFrames: 1 },
+    evidence: { candidateSha256: 'a'.repeat(64), stdoutSha256: 'b'.repeat(64), stdoutFrames: 1, pressurePayloadBytes: 131072, pressurePayloadSha256: 'c'.repeat(64) },
   }
   assert.equal(assertSelectedVerdict('acp.stdio-bridge-a1', complete), undefined)
   const missing = { ...complete }

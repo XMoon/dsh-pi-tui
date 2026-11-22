@@ -620,6 +620,7 @@ export function assertSelectedVerdict(caseId, result) {
       && result?.largePayloadDrained === true
       && result?.outputBackpressureObserved === true
       && result?.staleSocketFailClosed === true
+      && result?.changingStateClassified === true
       && result?.hostMissingDisabledForeignAndMissingEntryFailClosed === true
       && result?.runtimeOffDisconnectsOnlyAdapter === true
       && result?.hostRestartObserved === true
@@ -630,6 +631,10 @@ export function assertSelectedVerdict(caseId, result) {
       && /^[0-9a-f]{64}$/u.test(result.evidence.candidateSha256)
       && typeof result?.evidence?.stdoutSha256 === 'string'
       && /^[0-9a-f]{64}$/u.test(result.evidence.stdoutSha256)
+      && Number.isInteger(result?.evidence?.pressurePayloadBytes)
+      && result.evidence.pressurePayloadBytes > 0
+      && typeof result?.evidence?.pressurePayloadSha256 === 'string'
+      && /^[0-9a-f]{64}$/u.test(result.evidence.pressurePayloadSha256)
       && Number.isInteger(result?.evidence?.stdoutFrames)
       && result.evidence.stdoutFrames > 0,
     `selected ${caseId}: the trusted-profile ACP stdio verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)
