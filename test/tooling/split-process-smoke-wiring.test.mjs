@@ -532,6 +532,9 @@ test('every registry entry declares a conservative platform list and the audited
     // command, the same per-platform scope/identity APIs and the shared ACP
     // SDK against a real Host; both platform arms are required by its plan.
     'acp.stdio-bridge-a1',
+    // G-ACP1B/B3 adds only the packaged Host's v1 entry/capability conformance
+    // over the same shared Split harness and platform-specific ACP endpoint.
+    'acp.v1-conformance-b3',
   ]
   const cases = listSelectableCases()
   for (const entry of cases) {
@@ -1611,6 +1614,36 @@ test('the same-connection multi-Session case is registered once as selectable-on
     'the default lane must not run the B2 multi-Session case')
   assert.deepEqual(resolveSelection({ mode: 'case', id: caseId }, 'linux').cases, [entry])
   assert.deepEqual(resolveSelection({ mode: 'case', id: caseId }, 'darwin').cases, [entry])
+})
+
+test('the B3 packaged capability case is registered once as selectable-only after B2 on both qualified platforms', () => {
+  const caseId = 'acp.v1-conformance-b3'
+  const registered = listSelectableCases().filter(entry => entry.id === caseId)
+  assert.equal(registered.length, 1, 'the B3 capability case must be registered exactly once')
+  const [entry] = registered
+  assert.equal(entry.suite, 'acp')
+  assert.equal(entry.defaultLane, false)
+  assert.equal(typeof entry.run, 'function')
+  assert.equal(typeof entry.title, 'string')
+  assert.ok(entry.title.length > 0)
+  assert.ok(!entry.title.includes('0.5.8') && !entry.title.includes('2026'),
+    'the case title must stay a durable capability title, not a version/date')
+  assert.deepEqual(entry.platforms, ['linux', 'darwin'])
+  const b2 = listSelectableCases().find(item => item.id === 'acp.multi-session-b2')
+  assert.ok(b2 !== undefined)
+  assert.ok(listSelectableCases().indexOf(entry) > listSelectableCases().indexOf(b2),
+    'the B3 case must be appended after the existing ACP B0/B1/B2 cases')
+  assert.notEqual(entry.run, b2.run, 'B3 must own its real packaged runner')
+  assert.equal(listDefaultLaneCases().some(item => item.id === caseId), false,
+    'the default lane must not run the B3 capability case')
+  assert.deepEqual(resolveSelection({ mode: 'case', id: caseId }, 'linux').cases, [entry])
+  assert.deepEqual(resolveSelection({ mode: 'case', id: caseId }, 'darwin').cases, [entry])
+  assert.throws(
+    () => resolveSelection({ mode: 'case', id: caseId }, 'sunos'),
+    error => error.code === 'INPUT_PLATFORM_CASE_UNSUPPORTED'
+      && new RegExp(caseId.replaceAll('.', '\\.'), 'u').test(error.message),
+    'an unqualified platform must be refused before candidate inspection',
+  )
 })
 
 test('a selected result names the selectable scope AND the platform it qualified', () => {
