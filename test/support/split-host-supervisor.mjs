@@ -22,7 +22,7 @@
  */
 
 import { spawn, execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, relative, sep } from 'node:path'
 import { createInterface } from 'node:readline'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -32,6 +32,8 @@ const HOST_READY_TIMEOUT_MS = 180_000
 const HOST_SHUTDOWN_GRACE_MS = 30_000
 const TERM_GRACE_MS = 3_000
 const KILL_GRACE_MS = 3_000
+const QUALIFICATION_PROOF_TIMEOUT_MS = 180_000
+const QUALIFICATION_SHUTDOWN_GRACE_MS = 30_000
 const RUN_ID = process.env.SPLIT_VITEST_RUN_ID ?? `supervisor-${String(process.pid)}-${String(Date.now())}`
 
 let scene
@@ -39,6 +41,11 @@ let scene
 let activeHost
 /** Every Host generation this scene ever created, in creation order. */
 const hosts = []
+/** The ONE in-flight one-shot qualification Client, or undefined. */
+let activeQualificationClient
+/** Every self-owned one-shot qualification Client, in creation order. */
+const qualificationClients = []
+let qualificationClientSequence = 0
 let receiptPath
 let receipt
 let installInProgress = false
@@ -63,6 +70,7 @@ let installedPayloadHash
 let readProcessStarttime
 let safeIdentity
 let assertIdentityKept
+let seatIsFree
 let EXPECTED_PACKAGE_NAME
 let hostStatusSequence = 0
 
@@ -140,6 +148,7 @@ const modulesReady = Promise.all([
   readProcessStarttime = upgradeSupport.readProcessStarttime
   safeIdentity = upgradeSupport.safeIdentity
   assertIdentityKept = upgradeSupport.assertIdentityKept
+  seatIsFree = upgradeSupport.seatIsFree
   EXPECTED_PACKAGE_NAME = upgradeSupport.EXPECTED_PACKAGE_NAME
   installPlugin = smokeHarness.installPlugin
   runDsh = smokeHarness.runDsh
@@ -233,6 +242,7 @@ function initReceipt(tmpBase, worker, extra = {}) {
     host: undefined,
     hosts: [],
     clients: [],
+    qualificationClients: [],
     notes: [],
     startedAt: SUPERVISOR_STARTED_AT,
     updatedAt: now(),
@@ -408,6 +418,94 @@ function syncHostReceipt() {
   writeReceipt(update)
 }
 
+function publicQualificationClientFacts(handle) {
+  return {
+    pid: handle.child.pid ?? null,
+    pgid: hostPgid(handle),
+    starttime: handle.starttime,
+    scratch: handle.scratch,
+    startedAt: handle.startedAt,
+    closedAt: handle.closedAt,
+    exitCode: handle.exitResult?.code ?? null,
+    exitSignal: handle.exitResult?.signal ?? null,
+    exited: handle.exited,
+  }
+}
+
+function syncQualificationClientReceipt() {
+  writeReceipt({ qualificationClients: qualificationClients.map(publicQualificationClientFacts) })
+}
+
+/** Bounded TERM -> KILL reclaim of the ONE Supervisor-owned qualification Client. */
+async function terminateQualificationClient(reason) {
+  const handle = activeQualificationClient
+  if (handle === undefined) return
+  if (!handle.exited) {
+    killOwnedHost(handle, 'SIGTERM')
+    try {
+      await waitForChildClose(handle.child, TERM_GRACE_MS)
+    } catch {
+      killOwnedHost(handle, 'SIGKILL')
+      try {
+        await waitForChildClose(handle.child, KILL_GRACE_MS)
+      } catch (error) {
+        throw new Error(`qualification Client ${String(handle.child.pid)} did not exit after ${reason}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    handle.exited = true
+    handle.exitResult = { code: handle.child.exitCode, signal: handle.child.signalCode }
+    handle.closedAt = now()
+  }
+  await assertHostGroupGone(handle, `qualification Client ${reason}`)
+  syncQualificationClientReceipt()
+  activeQualificationClient = undefined
+}
+
+/** The Darwin qualification-Client seat is an O_EXLOCK file inside the scope. */
+async function assertClientSeatFree(installation, scopeId, reason) {
+  if (process.platform === 'linux') {
+    const free = await seatIsFree(`\0dsh-pi-tui-c-${scopeId.slice(0, 40)}`)
+    if (!free) throw new Error(`${reason}: the qualification Client seat is still held`)
+    return
+  }
+  if (process.platform === 'darwin') {
+    // O_RDWR|O_EXLOCK|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC; Node omits O_EXLOCK from
+    // fs.constants, so the Darwin ABI numbers are named explicitly. No O_CREAT.
+    const flags = 2 | 32 | 4 | 256 | 16777216
+    const path = join(installation.dshHome, 'run', 'dsh-pi-tui', scopeId, `seat-qualification-client-${scopeId}.lock`)
+    const started = Date.now()
+    for (;;) {
+      try {
+        closeSync(openSync(path, flags, 0o600))
+        return
+      } catch (error) {
+        if (error?.code === 'ENOENT') return
+        if (error?.code !== 'EAGAIN' && error?.code !== 'EWOULDBLOCK') throw error
+        if (Date.now() - started > 15_000) throw new Error(`${reason}: the qualification Client seat is still held`)
+        await sleep(50)
+      }
+    }
+  }
+  throw new Error(`${reason}: no qualification Client seat probe is implemented for ${process.platform}`)
+}
+
+/** Await ONE official qualification record; a failure record fails immediately. */
+async function waitForQualificationRecord(handle, predicate, label, timeoutMs) {
+  const started = Date.now()
+  for (;;) {
+    const record = handle.records.find(predicate)
+    if (record !== undefined) return record
+    const failure = handle.records.find(value => value?.m4a0 === 'failure' || value?.m4a0 === 'control-failure' || value?.m4a0 === 'control-error')
+    if (failure !== undefined) {
+      throw new Error(`${label}: the qualification Client reported ${String(failure.m4a0)}${failure.code === undefined ? '' : ` [${String(failure.code)}]`}: ${String(failure.error ?? failure.op ?? '')}`)
+    }
+    if (handle.spawnError !== undefined) throw new Error(`${label}: qualification Client spawn failed (${boundedError(handle.spawnError)})`)
+    if (handle.exited) throw new Error(`${label}: qualification Client exited before the record`)
+    if (Date.now() - started >= timeoutMs) throw new Error(`${label}: timed out after ${String(timeoutMs)}ms`)
+    await sleep(20)
+  }
+}
+
 async function terminateHost(handle, reason) {
   if (handle === undefined) return { code: null, signal: null, alreadyGone: true }
   if (handle.exited) {
@@ -559,6 +657,9 @@ async function cleanup(reason) {
       notes: [...(receipt?.notes ?? []), { event: 'cleanup-started', detail: { reason }, at: now() }],
     })
     try {
+      // The one-shot qualification Client is a Supervisor-owned process group:
+      // reclaim it BEFORE the Host generations and before the scene root.
+      await terminateQualificationClient(reason)
       for (const handle of [...hosts].reverse()) {
         if (handle.exited) await assertHostGroupGone(handle, reason)
         else await terminateHost(handle, reason)
@@ -1238,8 +1339,197 @@ async function handleUpgradeRemoveProfileForReloadRefusal(message) {
   return { removed: true, profilePackageRoot, hostStatus: statusAfter }
 }
 
+async function handleUpgradeProbeSideNewClientHostFoundation(message) {
+  if (scene?.kind !== 'upgrade') throw new Error('UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION: no upgrade scene')
+  if (activeQualificationClient !== undefined) {
+    throw new Error('UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION: a qualification Client is already in progress')
+  }
+  const host = activeHost
+  if (host === undefined || host.hostId !== message.hostId) {
+    throw new Error('UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION: unknown hostId')
+  }
+  if (host.exited || host.child.exitCode !== null || host.child.signalCode !== null
+    || !pidAlive(host.child.pid) || !processGroupAlive(hostPgid(host))) {
+    throw new Error('UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION: the active Host is not alive')
+  }
+  const sideNew = scene.sideNew
+  if (sideNew === undefined) {
+    throw new Error('UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION: side-new has not been installed')
+  }
+  if (installedPayloadHash(sideNew.packageRoot) !== sideNew.payloadHash) {
+    throw new Error('UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION: the side-new payload changed after its installation')
+  }
+  if (productionBuildId(sideNew.packageRoot, scene.pair.targetDshVersion) !== sideNew.buildId) {
+    throw new Error('UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION: the side-new build identity changed')
+  }
+  const entry = realpathSync(sideNew.entries.client)
+  const entryRelative = relative(sideNew.packageRoot, entry)
+  if (entryRelative === '' || entryRelative === '..' || entryRelative.startsWith(`..${sep}`)) {
+    throw new Error('UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION: the Client entry is outside the installed side-new package')
+  }
+  // The ONE premise of this proof: a NEW Client build against an OLD Host build.
+  if (host.buildId === sideNew.buildId) {
+    throw new Error('UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION: the active Host already runs the installed side-new build')
+  }
+  const statusBefore = await queryHostStatus(host)
+  const identityBefore = safeIdentity(statusBefore.localHost)
+  if (identityBefore.hostPid !== host.child.pid) {
+    throw new Error('UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION: the Host identity does not name the Supervisor-owned process')
+  }
+
+  const sequence = ++qualificationClientSequence
+  const clientDir = join(scene.workDir, `qualification-client-${String(sequence)}`)
+  mkdirSync(clientDir, { recursive: true, mode: 0o700 })
+  const scratch = join(clientDir, 'scratch')
+  mkdirSync(scratch, { recursive: true, mode: 0o700 })
+  const child = spawn(process.execPath, [entry], {
+    cwd: scene.installation.base.cwd,
+    env: {
+      ...scene.installation.base.env,
+      DSH_PI_TUI_ENTRY_RECORDS: '1',
+      SPLIT_PROCESS_CLIENT_MODE: 'qualification',
+      SPLIT_PROCESS_DSH_ANCHOR: scene.installation.anchor,
+      SPLIT_PROCESS_PROFILE: 'pi-tui',
+      SPLIT_PROCESS_SCRATCH: scratch,
+    },
+    stdio: ['pipe', 'pipe', 'pipe'],
+    detached: true,
+  })
+  // Register the self-owned one-shot process at the synchronous spawn boundary,
+  // before any await or external event: a Worker SIGKILL must never leave it
+  // unowned.
+  const handle = {
+    child,
+    pgid: child.pid ?? null,
+    scratch,
+    startedAt: now(),
+    starttime: readHostStarttime(child.pid),
+    records: [],
+    spawnError: undefined,
+    exited: false,
+    exitResult: undefined,
+    closedAt: undefined,
+  }
+  qualificationClients.push(handle)
+  activeQualificationClient = handle
+  child.once('error', error => { handle.spawnError = error })
+  createInterface({ input: child.stdout }).on('line', line => {
+    const trimmed = line.trim()
+    if (trimmed === '') return
+    try {
+      handle.records.push(JSON.parse(trimmed))
+    } catch {
+      // Non-protocol bytes are not records; they never become evidence.
+    }
+  })
+  child.stderr.setEncoding('utf8')
+  child.stderr.on('data', () => { /* never carried into the receipt or proof */ })
+  child.once('close', (code, signal) => {
+    handle.exited = true
+    handle.exitResult = { code, signal }
+    handle.closedAt = now()
+    syncQualificationClientReceipt()
+  })
+  appendNote('qualification-client-active', {
+    pid: child.pid ?? null,
+    pgid: handle.pgid,
+    starttime: handle.starttime,
+    hostId: host.hostId,
+    hostBuildId: host.buildId,
+    clientBuildId: sideNew.buildId,
+  })
+  syncQualificationClientReceipt()
+  writeReceipt({ phase: 'QUALIFICATION_CLIENT_ACTIVE' })
+  if (process.env.SPLIT_VITEST_UPGRADE_KILL_POINT === 'qualification-client-active') {
+    await waitForWorkerKillBarrier()
+    throw new Error('UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION: worker was killed at the qualification-client-active barrier')
+  }
+
+  const requestId = `qualification-host-foundation-${String(sequence)}`
+  try {
+    child.stdin.write(`${JSON.stringify({ op: 'qualification-host-foundation', requestId })}\n`)
+    const proof = await waitForQualificationRecord(
+      handle,
+      record => record?.m4b2hf === 'host-rpc-proof' && record.requestId === requestId,
+      'UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION proof',
+      QUALIFICATION_PROOF_TIMEOUT_MS,
+    )
+    if (proof.clientPid !== child.pid) {
+      throw new Error(`UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION: the proof names Client PID ${String(proof.clientPid)}, not ${String(child.pid)}`)
+    }
+    if (proof.hostPid !== identityBefore.hostPid) {
+      throw new Error(`UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION: the proof names Host PID ${String(proof.hostPid)}, not ${String(identityBefore.hostPid)}`)
+    }
+    if (proof.hostInstanceId !== identityBefore.instanceId) {
+      throw new Error('UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION: the proof names another Host instance')
+    }
+    for (const field of ['officialSessionList', 'privateFileRpc', 'terminalSnapshot', 'cleaned']) {
+      if (proof[field] !== true) {
+        throw new Error(`UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION: the proof field ${field} is not true`)
+      }
+    }
+    child.stdin.write(`${JSON.stringify({ op: 'shutdown' })}\n`)
+    const exit = await waitForChildClose(child, QUALIFICATION_SHUTDOWN_GRACE_MS)
+    handle.exited = true
+    handle.exitResult = exit
+    handle.closedAt = now()
+    if (exit.code !== 0 || exit.signal !== null) {
+      throw new Error(`UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION: the qualification Client exit was ${JSON.stringify(exit)}`)
+    }
+    await assertHostGroupGone(handle, 'UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION')
+    await assertClientSeatFree(scene.installation, String(identityBefore.scopeId), 'UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION')
+    const statusAfter = await queryHostStatus(host)
+    assertIdentityKept(safeIdentity(statusAfter.localHost), identityBefore, 'UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION')
+    if (!pidAlive(host.child.pid) || !processGroupAlive(hostPgid(host))) {
+      throw new Error('UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION: the old Host is no longer alive after the proof')
+    }
+    activeQualificationClient = undefined
+    syncQualificationClientReceipt()
+    appendNote('qualification-client-proof', {
+      clientPid: proof.clientPid,
+      hostPid: proof.hostPid,
+      hostInstanceId: proof.hostInstanceId,
+      exitCode: exit.code,
+    })
+    writeReceipt({ phase: 'QUALIFICATION_CLIENT_PROOF' })
+    return {
+      clientPid: proof.clientPid,
+      hostPid: proof.hostPid,
+      hostInstanceId: proof.hostInstanceId,
+      officialSessionList: true,
+      privateFileRpc: true,
+      terminalSnapshot: true,
+      cleaned: true,
+      exitCode: 0,
+    }
+  } catch (error) {
+    try {
+      await terminateQualificationClient('qualification proof failed')
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError],
+        'UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION failed and its qualification Client cleanup also failed')
+    }
+    throw error
+  }
+}
+
 async function handleFinalize(message) {
   let hostStopError
+  // The one-shot qualification Client must already be gone on the normal path;
+  // a still-live one is reclaimed so FINALIZE never leaks, then fails closed.
+  if (activeQualificationClient !== undefined) {
+    try {
+      await terminateQualificationClient('FINALIZE')
+    } catch (error) {
+      hostStopError = hostStopError ?? error
+    }
+  }
+  for (const handle of qualificationClients) {
+    if (handle.exitResult?.code !== 0 || handle.exitResult?.signal !== null) {
+      hostStopError = hostStopError ?? new Error(
+        `FINALIZE: qualification Client PID ${String(handle.child.pid)} did not exit normally: ${JSON.stringify(handle.exitResult ?? null)}`)
+    }
+  }
   // A failed native Client close must not prevent the final Host reclaim.
   if (activeHost !== undefined) {
     try {
@@ -1394,6 +1684,11 @@ async function dispatch(message) {
       }
       case 'UPGRADE_REMOVE_PROFILE_FOR_RELOAD_REFUSAL': {
         const payload = await handleUpgradeRemoveProfileForReloadRefusal(message)
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION': {
+        const payload = await handleUpgradeProbeSideNewClientHostFoundation(message)
         if (requestId !== undefined) reply(requestId, payload)
         break
       }

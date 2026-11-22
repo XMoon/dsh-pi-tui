@@ -102,6 +102,8 @@ export interface UpgradeClientHandle {
   readonly recordFile: string
   readonly terminal: TuiTest
   readonly qualificationProbe?: boolean
+  /** The Scene-owned side-new target this Client was started with before it existed. */
+  readonly plannedSideNewReexecTarget?: string
   closed?: boolean
   readRecords(): Record<string, any>[]
   waitForRecord(
@@ -116,7 +118,30 @@ export interface UpgradeClientHandle {
   type(text: string): Promise<void>
   text(full?: boolean): Promise<string>
   isAlive(): Promise<boolean>
+  /**
+   * Wait for the real tui-test shell exit fact of this Client. A JSONL record
+   * never substitutes for the native process outcome.
+   */
+  waitForExit(timeoutMs?: number): Promise<{ code: number | null; signal: string | null }>
+  /**
+   * Reclaim a Client whose nonzero exit was itself the assertion: only a
+   * Client started with `startupExpectation: 'expected-failure'` or with a
+   * replacement-child fault may call it.
+   */
+  closeExpectedFailure(expectedCode: number): Promise<void>
   close(): Promise<void>
+}
+
+/** The qualification-only proof a real new-build Client process produced. */
+export interface SideNewClientHostFoundationProof {
+  readonly clientPid: number
+  readonly hostPid: number
+  readonly hostInstanceId: string
+  readonly officialSessionList: true
+  readonly privateFileRpc: true
+  readonly terminalSnapshot: true
+  readonly cleaned: true
+  readonly exitCode: 0
 }
 
 export interface UpgradeScene {
@@ -134,9 +159,29 @@ export interface UpgradeScene {
     label: string
     sessionId?: string
     reexecTargetPackageRoot?: string
+    /**
+     * Reserve the Scene-owned side-new reexec target for an old Client that
+     * starts BEFORE the side-by-side install exists. The target is written into
+     * the Client environment only; nothing is created or installed here.
+     */
+    plannedSideNewReexecTarget?: true
+    /** Inject the existing replacement-child bootstrap fault into the child only. */
+    reexecChildFailure?: 'client-bootstrap'
+    /** The official Host instance this Client must authenticate. */
+    expectedHostInstanceId?: string
+    /**
+     * `expected-failure` registers the real Client process and returns without
+     * waiting for ready: the negative control owns the nonzero outcome.
+     */
+    startupExpectation?: 'ready' | 'expected-failure'
   }): Promise<UpgradeClientHandle>
   installNewProfileForReload(): Promise<InstalledPackageFacts>
   activateNewProfileAfterOldStopped(): Promise<InstalledPackageFacts>
+  /**
+   * Run ONE real new-build qualification Client process against the live old
+   * Host generation. The Supervisor owns the subprocess and its cleanup.
+   */
+  probeSideNewClientHostFoundation(host: OpaqueHostHandle): Promise<SideNewClientHostFoundationProof>
   /** Read the live official Host identity from the Supervisor-owned generation. */
   hostStatus(host: OpaqueHostHandle): Promise<Record<string, any>>
   /** Ask the Supervisor that owns this Host generation to release its C1 barrier. */
@@ -194,20 +239,55 @@ function messageText(message: Record<string, any> | undefined): string {
     .join('')
 }
 
+/** The product's Host instance UUID shape; an invalid expectation must not start. */
+const HOST_INSTANCE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
+
+/**
+ * The exact package path `installSideBuild()` materializes for the side-new
+ * install. A pre-install old Client receives this Scene-owned path as its
+ * qualification target; the Scene never creates it early.
+ */
+function reservedSideNewTarget(workRoot: string): string {
+  return join(workRoot, 'side-new', 'node_modules', '@xmoon76', 'dsh-pi-tui')
+}
+
+function reexecTargetPresent(env: Record<string, string>): boolean {
+  return typeof env.SPLIT_PROCESS_CLIENT_REEXEC_TARGET_PACKAGE_ROOT === 'string'
+}
+
+interface UpgradeClientOptions {
+  readonly qualificationProbe: boolean
+  readonly plannedSideNewReexecTarget?: string
+  /** The Client was started to observe a deterministic nonzero startup. */
+  readonly expectedFailure: boolean
+  /** The Client carries the replacement-child bootstrap fault. */
+  readonly replacementChildFault: boolean
+  /** Merge this Client's official JSONL business-PID ledger into the Supervisor. */
+  readonly refreshBusinessPids: () => Promise<void>
+}
+
 class UpgradeClient implements UpgradeClientHandle {
   readonly label: string
   readonly sessionId: string
   readonly recordFile: string
   readonly terminal: TuiTest
   readonly qualificationProbe: boolean
+  readonly plannedSideNewReexecTarget: string | undefined
   closed = false
+  readonly #expectedFailure: boolean
+  readonly #replacementChildFault: boolean
+  readonly #refreshBusinessPids: () => Promise<void>
 
-  constructor(label: string, terminal: TuiTest, recordFile: string, qualificationProbe: boolean) {
+  constructor(label: string, terminal: TuiTest, recordFile: string, options: UpgradeClientOptions) {
     this.label = label
     this.terminal = terminal
     this.sessionId = terminal.session
     this.recordFile = recordFile
-    this.qualificationProbe = qualificationProbe
+    this.qualificationProbe = options.qualificationProbe
+    this.plannedSideNewReexecTarget = options.plannedSideNewReexecTarget
+    this.#expectedFailure = options.expectedFailure
+    this.#replacementChildFault = options.replacementChildFault
+    this.#refreshBusinessPids = options.refreshBusinessPids
   }
 
   readRecords(): Record<string, any>[] {
@@ -311,24 +391,64 @@ class UpgradeClient implements UpgradeClientHandle {
     } catch (error) {
       errors.push(asError(error))
     } finally {
-      this.closed = true
-      // Native terminal teardown is unconditional: a failed /exit or a
-      // thrown busy-choice wait must never strand the real PTY session.
-      try {
-        await this.terminal.closeQuiet()
-      } catch (error) {
-        errors.push(asError(error))
-      }
-      try {
-        const openSessions = new Set(await openTuiSessions())
-        if (openSessions.has(this.sessionId)) {
-          errors.push(new Error(`${this.label} left its native TUI session open after close`))
-        }
-      } catch (error) {
-        errors.push(asError(error))
-      }
+      await this.#teardownNative(errors)
     }
     if (errors.length > 0) throw new AggregateError(errors, `${this.label} close failed`)
+  }
+
+  async waitForExit(timeoutMs = 120_000): Promise<{ code: number | null; signal: string | null }> {
+    const started = Date.now()
+    while (Date.now() - started < timeoutMs) {
+      const state = await this.terminal.state().catch(() => undefined)
+      if (state !== undefined && state.exited !== null) {
+        return { code: state.exited, signal: state.exit_signal ?? null }
+      }
+      await sleep(50)
+    }
+    throw new Error(`${this.label}: the real tui-test shell did not exit within ${String(timeoutMs)}ms`)
+  }
+
+  async closeExpectedFailure(expectedCode: number): Promise<void> {
+    assert(Number.isInteger(expectedCode) && expectedCode !== 0,
+      `closeExpectedFailure: ${this.label} requires a nonzero expected exit code`)
+    assert(this.#expectedFailure || this.#replacementChildFault,
+      `closeExpectedFailure: ${this.label} was not started with an expected-failure expectation or a replacement-child fault`)
+    assert(!this.closed, `closeExpectedFailure: ${this.label} is already closed`)
+    const errors: Error[] = []
+    try {
+      const exit = await this.waitForExit()
+      if (exit.code !== expectedCode || exit.signal !== null) {
+        errors.push(new Error(`${this.label} exited ${JSON.stringify(exit)}; expected code ${String(expectedCode)} with no signal`))
+      }
+    } catch (error) {
+      errors.push(asError(error))
+    }
+    await this.#teardownNative(errors)
+    try {
+      await this.#refreshBusinessPids()
+    } catch (error) {
+      errors.push(asError(error))
+    }
+    if (errors.length > 0) throw new AggregateError(errors, `${this.label} expected-failure reclaim failed`)
+  }
+
+  async #teardownNative(errors: Error[]): Promise<void> {
+    this.closed = true
+    // Native terminal teardown is unconditional: a failed exit wait or a
+    // thrown busy-choice wait must never strand the real PTY session.
+    try {
+      await this.terminal.closeQuiet()
+    } catch (error) {
+      errors.push(asError(error))
+    }
+    try {
+      const openSessions = new Set(await openTuiSessions())
+      if (openSessions.has(this.sessionId)) {
+        errors.push(new Error(`${this.label} left its native TUI session open after close`))
+      }
+    } catch (error) {
+      errors.push(asError(error))
+    }
   }
 
   async #waitForText(text: string, label: string, timeoutMs: number, full: boolean): Promise<void> {
@@ -386,6 +506,12 @@ class Scene implements UpgradeScene {
   async installNewSideBySide(): Promise<InstalledPackageFacts> {
     const facts = await this.#supervisor.request('UPGRADE_INSTALL_SIDE_NEW', {}, { timeoutMs: 600_000 })
     this.#sideNew = facts
+    // A Client may already hold the reserved reexec target. Once the real
+    // side-by-side install exists, that exact Scene-owned path must resolve to
+    // the installed new package; a wrong target must fail before any SIGUSR2.
+    for (const client of this.#clients.values()) {
+      if (client.plannedSideNewReexecTarget !== undefined) this.#assertPlannedSideNewTarget(client)
+    }
     return facts
   }
 
@@ -433,6 +559,10 @@ class Scene implements UpgradeScene {
     label: string
     sessionId?: string
     reexecTargetPackageRoot?: string
+    plannedSideNewReexecTarget?: true
+    reexecChildFailure?: 'client-bootstrap'
+    expectedHostInstanceId?: string
+    startupExpectation?: 'ready' | 'expected-failure'
   }): Promise<UpgradeClientHandle> {
     let entry: string
     if (options.source === 'profile') {
@@ -444,8 +574,22 @@ class Scene implements UpgradeScene {
       assert(this.#sideNew !== undefined, 'startClient: side-new has not been installed')
       entry = this.#sideNew.entries.client
     }
+    const startupExpectation = options.startupExpectation ?? 'ready'
+    assert(startupExpectation === 'ready' || startupExpectation === 'expected-failure',
+      `startClient: unsupported startupExpectation ${String(options.startupExpectation)}`)
+    let reservedTarget: string | undefined
     let reexecEnv: Record<string, string> = {}
-    if (options.reexecTargetPackageRoot !== undefined) {
+    if (options.plannedSideNewReexecTarget === true) {
+      assert(options.reexecTargetPackageRoot === undefined,
+        'startClient: plannedSideNewReexecTarget and reexecTargetPackageRoot are mutually exclusive')
+      assert(options.source === 'profile' || options.source === 'side-old',
+        'startClient: plannedSideNewReexecTarget only applies to a profile or side-old Client')
+      reservedTarget = reservedSideNewTarget(this.workRoot)
+      reexecEnv = {
+        SPLIT_PROCESS_CLIENT_REEXEC_PROBE: '1',
+        SPLIT_PROCESS_CLIENT_REEXEC_TARGET_PACKAGE_ROOT: reservedTarget,
+      }
+    } else if (options.reexecTargetPackageRoot !== undefined) {
       assert(this.#sideNew !== undefined, 'startClient: a reexec target requires the side-new installation')
       const target = realpathSync(options.reexecTargetPackageRoot)
       const relativeTarget = relative(this.#sideNew.packageRoot, target)
@@ -457,6 +601,25 @@ class Scene implements UpgradeScene {
         SPLIT_PROCESS_CLIENT_REEXEC_PROBE: '1',
         SPLIT_PROCESS_CLIENT_REEXEC_TARGET_PACKAGE_ROOT: target,
       }
+    }
+    if (options.reexecChildFailure !== undefined) {
+      assert(options.reexecChildFailure === 'client-bootstrap',
+        `startClient: unsupported reexecChildFailure ${String(options.reexecChildFailure)}`)
+      assert(reexecTargetPresent(reexecEnv),
+        'startClient: reexecChildFailure requires a managed reexec target')
+      reexecEnv = { ...reexecEnv, SPLIT_PROCESS_CLIENT_REEXEC_CHILD_FAILURE: options.reexecChildFailure }
+    }
+    let expectationEnv: Record<string, string> = {}
+    if (options.expectedHostInstanceId !== undefined) {
+      assert(HOST_INSTANCE_ID_PATTERN.test(options.expectedHostInstanceId),
+        'startClient: expectedHostInstanceId must be a Host instance UUID')
+      assert(!reexecTargetPresent(reexecEnv),
+        'startClient: expectedHostInstanceId cannot combine with the reexec qualification probe')
+      expectationEnv = { SPLIT_PROCESS_CLIENT_EXPECTED_INSTANCE_ID: options.expectedHostInstanceId }
+    }
+    if (startupExpectation === 'expected-failure') {
+      assert(options.expectedHostInstanceId !== undefined,
+        'startClient: startupExpectation expected-failure requires expectedHostInstanceId')
     }
     const sequence = ++this.#clientSequence
     const clientDir = join(this.workRoot, 'clients', `${options.label}-${String(sequence)}`)
@@ -470,7 +633,13 @@ class Scene implements UpgradeScene {
       trace: { mode: 'on-failure', directory: join(this.workRoot, 'trace') },
       artifacts: { dir: join(this.workRoot, 'artifacts'), onFailure: 'text' },
     })
-    const client = new UpgradeClient(options.label, terminal, recordFile, options.reexecTargetPackageRoot !== undefined)
+    const client: UpgradeClient = new UpgradeClient(options.label, terminal, recordFile, {
+      qualificationProbe: reexecTargetPresent(reexecEnv),
+      ...(reservedTarget === undefined ? {} : { plannedSideNewReexecTarget: reservedTarget }),
+      expectedFailure: startupExpectation === 'expected-failure',
+      replacementChildFault: options.reexecChildFailure !== undefined,
+      refreshBusinessPids: () => this.refreshClientBusinessPids(client),
+    })
     this.#ownedTuiSessions.add(terminal.session)
     this.#clients.set(options.label, client)
     const env: Record<string, string> = {
@@ -482,6 +651,7 @@ class Scene implements UpgradeScene {
       SPLIT_PROCESS_CLIENT_RECORD_FILE: recordFile,
       ...(options.sessionId === undefined ? {} : { SPLIT_PROCESS_CLIENT_SESSION: options.sessionId }),
       ...reexecEnv,
+      ...expectationEnv,
     }
     try {
       const opened = await terminal.run(process.execPath, [entry], {
@@ -491,12 +661,17 @@ class Scene implements UpgradeScene {
         waitReady: false,
         env,
       })
-      await client.waitForRecord(record => record.m4a0 === 'ready', `${options.label} official ready record`, 120_000)
-      // U0 records the initial Client lifetime. A reexec/U1 driver must re-read
-      // and report replacement business PIDs after its handoff; this snapshot
-      // alone is not future-reexec coverage.
-      const businessPids = client.businessPids()
-      assert(businessPids.length > 0, `${options.label}: the official record sink carried no business PID`)
+      // Register the real Client process BEFORE any ready/failure outcome: a
+      // fast nonzero exit must never escape the IPC-disconnect cleanup. The
+      // initial lifetime is not future-reexec coverage; a reexec driver
+      // reports the replacement PIDs itself.
+      const started = await client.waitForRecord(
+        record => record.m4a0 === 'client-started',
+        `${options.label} official client-started record`,
+        60_000,
+      )
+      assert(Number.isInteger(started.pid) && started.pid > 0,
+        `${options.label}: the official client-started record carries no real business PID`)
       await this.#supervisor.request('REPORT', {
         event: 'client-started',
         detail: {
@@ -504,9 +679,11 @@ class Scene implements UpgradeScene {
           session: terminal.session,
           shellPid: opened.shell_pid ?? null,
           recordFile,
-          businessPids,
+          businessPids: [started.pid],
         },
       }, { timeoutMs: 10_000 })
+      if (startupExpectation === 'expected-failure') return client
+      await client.waitForRecord(record => record.m4a0 === 'ready', `${options.label} official ready record`, 120_000)
       await this.#waitForPaintedFrame(client, `${options.label} painted its first frame`, 30_000)
     } catch (error) {
       try {
@@ -546,6 +723,7 @@ class Scene implements UpgradeScene {
     assert(this.#clients.get(client.label) === client, `signalClientForQualification: ${client.label} is not this Scene's Client`)
     assert(client.qualificationProbe, `signalClientForQualification: ${client.label} was not started with the reexec qualification probe`)
     assert(!client.closed, `signalClientForQualification: ${client.label} is already closed`)
+    if (client.plannedSideNewReexecTarget !== undefined) this.#assertPlannedSideNewTarget(client)
     const pids = client.businessPids()
     assert(pids.length === 1, `signalClientForQualification: ${client.label} has ${String(pids.length)} business PIDs; expected exactly one initial PID`)
     const pid = pids[0]!
@@ -560,6 +738,26 @@ class Scene implements UpgradeScene {
       session: client.sessionId,
     })
     return pid
+  }
+
+  async probeSideNewClientHostFoundation(host: OpaqueHostHandle): Promise<SideNewClientHostFoundationProof> {
+    this.#assertHost(host)
+    assert(this.#sideNew !== undefined, 'probeSideNewClientHostFoundation: side-new has not been installed')
+    const proof = await this.#supervisor.request(
+      'UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION',
+      { hostId: host.hostId },
+      { timeoutMs: 240_000 },
+    ) as SideNewClientHostFoundationProof
+    assert(Number.isInteger(proof.clientPid) && proof.clientPid > 0,
+      'probeSideNewClientHostFoundation: the proof carries no real Client PID')
+    assert(Number.isInteger(proof.hostPid) && proof.hostPid > 0,
+      'probeSideNewClientHostFoundation: the proof carries no real Host PID')
+    assert(typeof proof.hostInstanceId === 'string' && proof.hostInstanceId !== '',
+      'probeSideNewClientHostFoundation: the proof carries no Host instance id')
+    assert(proof.officialSessionList === true && proof.privateFileRpc === true
+      && proof.terminalSnapshot === true && proof.cleaned === true && proof.exitCode === 0,
+      'probeSideNewClientHostFoundation: the official/private RPC proof is incomplete')
+    return proof
   }
 
   async refreshClientBusinessPids(client?: UpgradeClientHandle): Promise<void> {
@@ -585,6 +783,18 @@ class Scene implements UpgradeScene {
   #assertHost(host: OpaqueHostHandle): void {
     assert(this.#hosts.includes(host), `Host ${host.hostId} is not owned by this Scene`)
     assert(!host.exited, `Host ${host.hostId} is not alive`)
+  }
+
+  #assertPlannedSideNewTarget(client: UpgradeClientHandle): void {
+    const facts = this.#sideNew
+    assert(facts !== undefined,
+      `signalClientForQualification: ${client.label} needs the side-new installation before its qualification target can be used`)
+    const target = client.plannedSideNewReexecTarget
+    assert(target !== undefined, `signalClientForQualification: ${client.label} has no planned side-new target`)
+    assert(existsSync(target), `signalClientForQualification: the reserved side-new target is not installed: ${target}`)
+    const resolved = realpathSync(target)
+    assert(resolved === facts.packageRoot,
+      `signalClientForQualification: the reserved side-new target resolves to ${resolved}, not the installed ${facts.packageRoot}`)
   }
 
   async finish(): Promise<void> {

@@ -33,7 +33,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { isBootstrapInstallInProgress, isSideNewInstallInProgress } from './split-upgrade-install-state.mjs'
 
 const PILOT_MODES = ['main-signal', 'foreground-group-sigint', 'worker-kill', 'bootstrap-main-sigterm']
-const UPGRADE_ATS = ['old-host-ready', 'between-host-generations', 'new-host-spawned-before-ack', 'side-build-install', 'bootstrap-install', 'reload-child-active', 'reload-child-started-before-report']
+const UPGRADE_ATS = ['old-host-ready', 'between-host-generations', 'new-host-spawned-before-ack', 'side-build-install', 'bootstrap-install', 'reload-child-active', 'reload-child-started-before-report', 'qualification-client-active']
 const UPGRADE_MODES = ['upgrade-sequential-hosts', 'upgrade-live-profile-refusal', 'upgrade-live-host-exit', 'upgrade-worker-kill']
 
 function arg(name) {
@@ -261,6 +261,12 @@ function checkUpgradeReceiptResources(receipt, options = {}) {
       if (pidAlive(pid)) problems.push(`Client business PID still alive: ${String(pid)} (${String(client.label)})`)
     }
   }
+  for (const qualification of receipt.qualificationClients ?? []) {
+    if (pidAlive(qualification.pid)) problems.push(`qualification Client PID still alive: ${String(qualification.pid)}`)
+    if (qualification.pgid !== undefined && groupAlive(qualification.pgid)) {
+      problems.push(`qualification Client process group still alive: ${String(qualification.pgid)}`)
+    }
+  }
   if (pidAlive(receipt.supervisor?.pid)) problems.push(`Supervisor PID still alive: ${String(receipt.supervisor.pid)}`)
   return problems
 }
@@ -319,8 +325,8 @@ const env = {
     : { SPLIT_VITEST_CANDIDATE_TGZ: candidate }),
 }
 if (mode === 'worker-kill') env.SPLIT_VITEST_WORKER_KILL_POINT = at
-if (mode === 'upgrade-worker-kill' && at === 'new-host-spawned-before-ack') {
-  env.SPLIT_VITEST_UPGRADE_KILL_POINT = 'new-host-spawned-before-ack'
+if (mode === 'upgrade-worker-kill' && (at === 'new-host-spawned-before-ack' || at === 'qualification-client-active')) {
+  env.SPLIT_VITEST_UPGRADE_KILL_POINT = at
 }
 if (mode === 'upgrade-live-host-exit') {
   env.SPLIT_VITEST_UPGRADE_HOST_EXIT_AFTER_PROFILE_INSTALL = '1'
@@ -339,7 +345,8 @@ let siblingChild
 let siblingRunId
 let siblingStopFile
 if (upgradeMode) {
-  if (mode === 'upgrade-worker-kill' && (at === 'reload-child-active' || at === 'reload-child-started-before-report')) {
+  if (mode === 'upgrade-worker-kill' && (at === 'reload-child-active' || at === 'reload-child-started-before-report'
+    || at === 'qualification-client-active')) {
     siblingRunId = `${runId}-sibling`
     siblingStopFile = join(tmpBase, `split-upgrade-sibling-stop-${String(process.pid)}.flag`)
     siblingChild = spawn(process.execPath, [
@@ -513,6 +520,17 @@ try {
         const pids = client?.businessPids ?? []
         return pids.length >= 2 && pids.every(pid => pidAlive(pid)) ? current : undefined
       }, `reload replacement child at ${barrierPoint}`, 600_000)
+    } else if (barrierPoint === 'qualification-client-active') {
+      await waitUntil(() => {
+        const current = latestUpgradeReceipt(tmpBase, runId)
+        const ledger = Array.isArray(current?.qualificationClients) ? current.qualificationClients : []
+        const qualification = ledger.at(-1)
+        if (qualification === undefined || qualification.exited === true
+          || !pidAlive(qualification.pid) || !groupAlive(qualification.pgid)) {
+          return undefined
+        }
+        return pidAlive(current?.host?.pid) && groupAlive(current?.host?.pgid) ? current : undefined
+      }, 'one-shot qualification Client active', 600_000)
     } else if (barrierPoint === 'old-host-ready') {
       await waitUntil(() => {
         const current = latestUpgradeReceipt(tmpBase, runId)
