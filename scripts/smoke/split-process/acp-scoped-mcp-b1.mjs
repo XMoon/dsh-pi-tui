@@ -16,7 +16,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { connect } from 'node:net'
 import { join } from 'node:path'
 import { Readable, Writable } from 'node:stream'
@@ -192,6 +192,7 @@ export async function runAcpScopedMcpB1(context) {
   const proofPath = join(b1WorkRoot, 'scoped-mcp-server.jsonl')
   const holdArm = join(b1WorkRoot, 'b1-hold-arm')
   const holdRelease = join(b1WorkRoot, 'b1-hold-release')
+  const longTurnRelease = join(b1WorkRoot, 'b1-long-turn-release')
   const runNonce = `b1-run-${digestOf(`${process.pid}-${Date.now()}`).slice(0, 16)}`
   const workspace = join(workDir, 'b1-workspace')
   mkdirSync(workspace, { recursive: true, mode: 0o700 })
@@ -331,6 +332,7 @@ export async function runAcpScopedMcpB1(context) {
   try {
     const started = await scene.startC1Host('acp-scoped-mcp-b1', 'b1 host', {
       C1_B1_CONTROL: controlPath,
+      C1_HOLD_LONG_TURN: longTurnRelease,
       DSH_PI_TUI_ACP_MAX_CONNECTIONS: '16',
     }, b1WorkRoot)
     host = started.host
@@ -437,6 +439,27 @@ export async function runAcpScopedMcpB1(context) {
     assert(countServerCalls(readProof(proofPath), 'b1scope') === serverCallsBeforeB, 'Q05: B must never reach A\'s MCP child')
     assert(modelRecords(sessionB, 'B1_ECHO_B').every(record => record.hasEchoTool === false), 'Q05: B model step must not see the scoped tool')
 
+    // ── B1-10: a real running TUI Session B makes a new ACP MCP resume fail
+    //     BUSY without queuing a second start; after the real turn ends the
+    //     same resume succeeds.
+    const beforeLongB = eventsOf(sessionB).length
+    await sendTuiPrompt(tuiB, `B1_HOLD_B ${digestOf(`long-${runNonce}`).slice(0, 16)}`, 'Q05b tui B long')
+    const longHeld = await waitForC1WorkEvent(b1WorkRoot, event => event.kind === 'b1-long-turn-held' && event.sessionId === sessionB,
+      'Q05b B long turn held', 60_000)
+    assert(longHeld !== undefined, 'Q05b: the real TUI B turn must be held')
+    const acpBusy = await openAcp('Q05b')
+    await expectRequestError(
+      acpBusy.client.request(acp.methods.agent.session.resume, { sessionId: sessionB, cwd: hostCwd, mcpServers: [mcpDeclaration()] }),
+      'LOCAL_ACP_MCP_AGENT_BUSY',
+      'Q05b busy MCP resume',
+    )
+    writeFileSync(longTurnRelease, 'released\n', { mode: 0o600 })
+    await waitForTurnEnd(sessionB, beforeLongB, 'Q05b B long turn/end')
+    const retryBusy = await acpBusy.client.request(acp.methods.agent.session.resume, { sessionId: sessionB, cwd: hostCwd, mcpServers: [mcpDeclaration()] })
+    assert(retryBusy?.sessionId === undefined || retryBusy.sessionId === sessionB, `Q05b: retry resume must succeed: ${JSON.stringify(retryBusy)}`)
+    await acpBusy.client.request(acp.methods.agent.session.close, { sessionId: sessionB })
+    await closeAcp(acpBusy.client)
+
     // ── B1-04: a real global tool with the same public name makes the next
     //     standard MCP admission fail closed; the global tool keeps working.
     await acpNew.request(acp.methods.agent.session.close, { sessionId: sessionA })
@@ -513,13 +536,32 @@ export async function runAcpScopedMcpB1(context) {
     const recover = await acpInvalid.client.request(acp.methods.agent.session.resume, { sessionId: createdButFailed, cwd: hostCwd })
     assert(recover?.sessionId === undefined || recover.sessionId === createdButFailed, 'Q07: the created Session must remain resumable')
 
+    // ── B1-07: a Close while an ACP-owned prompt is still running cancels the
+    //     exact Host turn and only then retires the same MCP lease.
+    await acpInvalid.client.request(acp.methods.agent.session.close, { sessionId: createdButFailed })
+    await closeAcp(acpInvalid.client)
+    rmSync(holdArm, { force: true })
+    rmSync(holdRelease, { force: true })
+    const acpHold7 = await openAcp('Q07b')
+    await acpHold7.client.request(acp.methods.agent.session.resume, { sessionId: sessionA, cwd: hostCwd, mcpServers: [mcpDeclaration()] })
+    const promptHold7 = acpHold7.client.request(acp.methods.agent.session.prompt, {
+      sessionId: sessionA, prompt: [{ type: 'text', text: `B1_HOLD_A ${digestOf(`close-${runNonce}`).slice(0, 16)}` }],
+    })
+    await waitForProof(line => line.kind === 'hold-received' && line.tag === 'b1scope', proofPath, 'Q07b MCP hold received')
+    const close7 = acpHold7.client.request(acp.methods.agent.session.close, { sessionId: sessionA })
+    writeFileSync(holdRelease, 'released\n', { mode: 0o600 })
+    await promptHold7.catch(() => {})
+    assert(JSON.stringify(await close7) === '{}', 'Q07b: close must detach with a real terminal')
+    await waitToolAbsent(sessionA, 'Q07b after ACP prompt close')
+    await closeAcp(acpHold7.client)
+
     // ── B1-08: a TUI tool using the same MCP lease stays alive across an ACP
     //     close; the View detaches, then retires automatically at the real
     //     tool/result + turn/end terminal.
-    await acpInvalid.client.request(acp.methods.agent.session.close, { sessionId: createdButFailed })
-    await closeAcp(acpInvalid.client)
     const acpTuiHold = await openAcp('Q08')
     await acpTuiHold.client.request(acp.methods.agent.session.resume, { sessionId: sessionA, cwd: hostCwd, mcpServers: [mcpDeclaration()] })
+    rmSync(holdArm, { force: true })
+    rmSync(holdRelease, { force: true })
     writeFileSync(holdArm, 'armed\n', { mode: 0o600 })
     const beforeHold = eventsOf(sessionA).length
     await sendTuiPrompt(tuiA, `B1_HOLD_A ${digestOf(`hold-${runNonce}`).slice(0, 16)}`, 'Q08 tui A hold')

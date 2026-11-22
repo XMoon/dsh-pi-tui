@@ -357,6 +357,7 @@ const B1_HOLD_MARKER = 'B1_HOLD_A'
 const B1_FAIL_MARKER = 'B1_FAIL_A'
 const B1_PLAIN_MARKER = 'B1_PLAIN_A'
 const B1_ECHO_B_MARKER = 'B1_ECHO_B'
+const B1_HOLD_B_MARKER = 'B1_HOLD_B'
 const B1_ECHO_TOOL = 'mcp__b1scope__echo'
 const B1_HOLD_TOOL = 'mcp__b1scope__hold'
 const B1_FAIL_TOOL = 'mcp__b1scope__fail'
@@ -2019,6 +2020,16 @@ class C1Model extends LlmAdapter {
         yield { type: 'block-start', index: 0, blockType: 'text' }
         yield { type: 'text-delta', index: 0, text: `b1 plain settled ${prompt.nonce ?? ''} ${token}` }
         yield { type: 'block-end', index: 0, block: { type: 'text', text: `b1 plain settled ${prompt.nonce ?? ''} ${token}` } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      if (prompt.marker === B1_HOLD_B_MARKER) {
+        this.record('b1-long-turn-held', { sessionId, nonce: prompt.nonce, agentStatus: this.agentStatusOf(sessionId) })
+        await waitForBarrier(process.env.C1_HOLD_LONG_TURN, signal)
+        this.record('b1-long-turn-released', { sessionId, nonce: prompt.nonce })
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: `b1 long settled ${prompt.nonce ?? ''} ${token}` }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: `b1 long settled ${prompt.nonce ?? ''} ${token}` } }
         yield { type: 'finish', reason: { kind: 'stop' } }
         return
       }
