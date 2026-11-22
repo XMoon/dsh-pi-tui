@@ -23,6 +23,7 @@ const SCENARIOS = new Set([
   'upgrade-worker-kill:between-host-generations',
   'upgrade-worker-kill:new-host-spawned-before-ack',
   'upgrade-worker-kill:side-build-install',
+  'upgrade-worker-kill:bootstrap-install',
   'upgrade-live-host-exit',
 ])
 

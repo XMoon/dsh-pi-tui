@@ -16,6 +16,8 @@
 import { lstatSync, realpathSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
 
+import semver from 'semver'
+
 import { readCandidatePackageData, sha256 } from '../../scripts/lib/dsh-smoke-harness.mjs'
 import { npmDshVersion } from '../../scripts/lib/dsh-distribution.mjs'
 import {
@@ -29,7 +31,6 @@ export const OLD_TARBALL_ENV = 'SPLIT_VITEST_UPGRADE_OLD_TGZ'
 export const NEW_TARBALL_ENV = 'SPLIT_VITEST_UPGRADE_NEW_TGZ'
 
 export const UPGRADE_PAIR_POLICIES = Object.freeze(['default', 'native'])
-const SEMVER = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$/u
 
 function inputError(code, message, facts = {}, cause) {
   const error = new SplitSmokeInputError(code, `INPUT_UNQUALIFIED: ${code} (INVALID_TEST_PAIRING, not a product regression): ${message}`, facts)
@@ -91,7 +92,7 @@ function readManifest(realPath, role, targetDshVersion) {
       artifact: smokeArtifactIdentity(role, manifest, undefined),
     })
   }
-  if (typeof manifest.version !== 'string' || !SEMVER.test(manifest.version)) {
+  if (typeof manifest.version !== 'string' || semver.valid(manifest.version) === null) {
     throw inputError('INPUT_PACKAGE_VERSION_INVALID', `the ${role} tarball declares no valid SemVer version`, {
       role,
       targetDshVersion,

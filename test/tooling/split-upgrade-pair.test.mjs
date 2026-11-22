@@ -23,6 +23,7 @@ import {
   readSplitUpgradePairEnvironment,
   UPGRADE_PACKAGE_NAME,
 } from '../support/split-upgrade-pair.mjs'
+import { isBootstrapInstallInProgress, isSideNewInstallInProgress } from '../support/split-upgrade-install-state.mjs'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 
 const TARGET_PIN = npmDshVersion()
@@ -184,6 +185,38 @@ test('the environment inputs are required and never discovered implicitly', () =
   } finally {
     if (old !== undefined) process.env[OLD_TARBALL_ENV] = old
     if (updated !== undefined) process.env[NEW_TARBALL_ENV] = updated
+  }
+})
+
+test('the side-build kill selector rejects an old-bootstrap-only install', () => {
+  const bootstrap = {
+    phase: 'UPGRADE_BOOTSTRAP_ROOT_CREATED',
+    install: { inProgress: true, completedAt: undefined },
+  }
+  const oldSide = {
+    phase: 'SIDE_OLD_INSTALL_STARTED',
+    install: { inProgress: true, completedAt: undefined },
+  }
+  const newSide = {
+    phase: 'SIDE_NEW_INSTALL_STARTED',
+    install: { inProgress: true, completedAt: undefined },
+  }
+  assert.equal(isBootstrapInstallInProgress(bootstrap), true)
+  assert.equal(isSideNewInstallInProgress(bootstrap), false,
+    'the old bootstrap install must never satisfy the side-build kill selector')
+  assert.equal(isSideNewInstallInProgress(oldSide), false,
+    'the old side install must never satisfy the side-build kill selector')
+  assert.equal(isSideNewInstallInProgress(newSide), true)
+  assert.equal(isSideNewInstallInProgress({ ...newSide, install: { ...newSide.install, completedAt: 'done' } }), false)
+})
+
+test('malformed SemVer prereleases are refused by the real validator', t => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('split-upgrade-pair-')
+  const good = syntheticTarball(root, 'semver-good', manifestOf('0.5.8', TARGET_PIN))
+  for (const version of ['0.5.7-alpha..1', '0.5.7-01', '0.5.7-', '0.5.7+bad..meta']) {
+    const bad = syntheticTarball(root, `semver-bad-${version.replaceAll('.', '-')}`, manifestOf(version, TARGET_PIN))
+    expectInputError(() => inspectSplitUpgradePair(bad, good), 'INPUT_PACKAGE_VERSION_INVALID')
   }
 })
 

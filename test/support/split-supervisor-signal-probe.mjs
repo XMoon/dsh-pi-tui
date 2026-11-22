@@ -30,8 +30,10 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
+import { isBootstrapInstallInProgress, isSideNewInstallInProgress } from './split-upgrade-install-state.mjs'
+
 const PILOT_MODES = ['main-signal', 'foreground-group-sigint', 'worker-kill', 'bootstrap-main-sigterm']
-const UPGRADE_ATS = ['old-host-ready', 'between-host-generations', 'new-host-spawned-before-ack', 'side-build-install']
+const UPGRADE_ATS = ['old-host-ready', 'between-host-generations', 'new-host-spawned-before-ack', 'side-build-install', 'bootstrap-install']
 const UPGRADE_MODES = ['upgrade-sequential-hosts', 'upgrade-live-profile-refusal', 'upgrade-live-host-exit', 'upgrade-worker-kill']
 
 function arg(name) {
@@ -449,11 +451,15 @@ try {
     if (barrierPoint === 'side-build-install') {
       await waitUntil(() => {
         const current = latestUpgradeReceipt(tmpBase, runId)
-        // This is CURRENT state, not a past event: cleanup cannot start while
-        // installInProgress is still true and completedAt is absent.
-        return current?.install?.inProgress === true && current?.install?.completedAt === undefined
-          ? current : undefined
+        // Bind to the authoritative NEW side operation, not merely any current
+        // install flag: the old bootstrap writes the same boolean earlier.
+        return isSideNewInstallInProgress(current) ? current : undefined
       }, 'new side-build install currently in progress', 300_000)
+    } else if (barrierPoint === 'bootstrap-install') {
+      await waitUntil(() => {
+        const current = latestUpgradeReceipt(tmpBase, runId)
+        return isBootstrapInstallInProgress(current) ? current : undefined
+      }, 'old bootstrap install currently in progress', 300_000)
     } else if (barrierPoint === 'new-host-spawned-before-ack') {
       await waitUntil(() => {
         const current = latestUpgradeReceipt(tmpBase, runId)
@@ -474,11 +480,14 @@ try {
       }, 'between Host generations barrier', 600_000)
     }
     const receipt = latestUpgradeReceipt(tmpBase, runId)
+    if (barrierPoint === 'bootstrap-install' && isSideNewInstallInProgress(receipt)) {
+      fail('old-bootstrap-only kill incorrectly satisfied the side-new install selector')
+    }
     killedWorkerPid = upgradeWorkerKillTarget(receipt, barrierPoint)
     if (process.kill(killedWorkerPid, 'SIGKILL') === false) {
       fail(`could not SIGKILL verified upgrade worker PID ${String(killedWorkerPid)}`)
     }
-    deadline = Date.now() + (barrierPoint === 'side-build-install' ? 240_000 : 60_000)
+    deadline = Date.now() + (barrierPoint === 'side-build-install' || barrierPoint === 'bootstrap-install' ? 240_000 : 60_000)
     const exit = await waitChildExit(child, Math.max(1, deadline - Date.now()))
     childExited = true
     if (exit.code === 0 && exit.signal === null) fail(`upgrade worker unexpectedly exited 0 under ${mode}/${String(at)}`)
@@ -493,7 +502,7 @@ try {
       fail(`upgrade worker kill ended ${String(terminalReceipt.phase)}: ${String(terminalReceipt.errorName)}`)
     }
     const problems = checkUpgradeReceiptResources(terminalReceipt, {
-      allowNoHosts: barrierPoint === 'side-build-install',
+      allowNoHosts: barrierPoint === 'side-build-install' || barrierPoint === 'bootstrap-install',
     })
     if (problems.length > 0) fail(problems.join('; '))
     if (Date.now() > deadline) fail('probe exceeded its single fixed post-trigger deadline')

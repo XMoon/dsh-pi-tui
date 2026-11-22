@@ -448,6 +448,9 @@ class Scene implements UpgradeScene {
         env,
       })
       await client.waitForRecord(record => record.m4a0 === 'ready', `${options.label} official ready record`, 120_000)
+      // U0 records the initial Client lifetime. A reexec/U1 driver must re-read
+      // and report replacement business PIDs after its handoff; this snapshot
+      // alone is not future-reexec coverage.
       const businessPids = client.businessPids()
       assert(businessPids.length > 0, `${options.label}: the official record sink carried no business PID`)
       await this.#supervisor.request('REPORT', {
