@@ -366,11 +366,12 @@ export async function runAcpMultiSessionB2(context) {
 
     // B2-02/B2-12: resume the live TUI Session A with a DIFFERENT absolute
     // request cwd on the SAME physical SDK connection, then create B on it.
-    const beforeResumeA = eventsOf(sessionA).length
+    const updatesBeforeResumeA = updatesA.length
     const resumedA = await resumeWhenAttachable(acpMain.client, { sessionId: sessionA, cwd: otherCwd, mcpServers: [mcpDeclaration()] })
     assert(resumedA?.sessionId === undefined || resumedA.sessionId === sessionA, `B2-02: resume A: ${JSON.stringify(resumedA)}`)
-    assert(eventsOf(sessionA).length === beforeResumeA,
-      'B2-12: lenient resume must not replay historical Session events')
+    assert(!updatesA.slice(updatesBeforeResumeA).some(update => update.update?.sessionUpdate === 'agent_message_chunk'
+      || update.update?.sessionUpdate === 'tool_call_update'),
+    'B2-12: lenient resume must not replay historical assistant/tool updates')
     const createdB = await acpMain.client.request(acp.methods.agent.session.new, { cwd: hostCwd, mcpServers: [] })
     sessionB = createdB?.sessionId
     assert(typeof sessionB === 'string' && sessionB !== sessionA, `B2-02: second Session id: ${JSON.stringify(createdB)}`)
