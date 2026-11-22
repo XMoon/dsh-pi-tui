@@ -389,9 +389,15 @@ export async function runMcpServersFr3(context) {
     await openMcpPage(client, 'FR3')
     await waitForScreenText(client, SERVER_NAME, 'FR3 configured stdio server row')
     await waitForScreenText(client, 'fr3-http', 'FR3 configured HTTP server row')
-    await waitForScreenText(client, 'Connected', 'FR3 live connection')
+    // Connection state may arrive before the independent Settings key-set verdict.
+    // Wait for BOTH facts on the configured fixture's own row.
+    await waitForScreenPattern(
+      client,
+      /^[^\r\n]*\bfr3-fixture\b[ \t]+Connected[ \t]+Configured(?:[ \t]|$)/mu,
+      'FR3 configured stdio source verdict',
+    )
+    trace('fr3.source-confirmed', { name: SERVER_NAME, source: 'Configured' })
     const listFrame = (await client.viewport()).join('\n')
-    assert(/Configured/u.test(listFrame), `FR3: the configured server must show Source Configured:\n${listFrame}`)
     // A single failed server never hides the other managed servers.
     assert(/fr3-fail/u.test(listFrame) && /fr3-disabled/u.test(listFrame),
       `FR3: the failing/disabled servers must stay listed beside the healthy ones:\n${listFrame}`)
