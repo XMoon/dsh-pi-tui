@@ -353,6 +353,12 @@ function main() {
     const expectedDshEngine = `>=${COMPAT_MATRIX.matrix.at(-1).dshFrom}`
     check('published manifest restates the matrix floor as engines.dsh',
       pkg.engines?.dsh === expectedDshEngine, `engines.dsh=${String(pkg.engines?.dsh)}`)
+    const storeClosure = ['@deepseek-ai/dsh-client-store', 'zustand', 'immer']
+    check('published manifest does not declare the Store closure as runtime dependencies',
+      storeClosure.every(name => pkg.dependencies?.[name] === undefined)
+        && pkg.peerDependencies?.['@deepseek-ai/dsh-client-store'] === undefined,
+      `dependencies=${JSON.stringify(Object.fromEntries(storeClosure.map(name => [name, pkg.dependencies?.[name]])))}`
+        + ` storePeer=${String(pkg.peerDependencies?.['@deepseek-ai/dsh-client-store'])}`)
     const sourceDistribution = cli.dshDistribution === undefined
       ? undefined
       : loadDshDistribution({ mode: 'source', manifest: cli.dshDistribution, packageJson: pkg })
@@ -364,6 +370,53 @@ function main() {
     const files = walkFiles(extracted)
     const has = (path) => files.includes(path)
     check('exports entry dist/extension/advanced.mjs', has('dist/extension/advanced.mjs'))
+    const fixture = process.env.TARBALL_SMOKE_FIXTURE === '1'
+    if (fixture) {
+      checks.push('skip published entry and Client Store checks — explicit synthetic fixture')
+    } else {
+      check('published bundle carries the internal Host/Client process entries',
+        has('dist/local-client.mjs') && has('dist/local-host.mjs'),
+        `local-client=${String(has('dist/local-client.mjs'))} local-host=${String(has('dist/local-host.mjs'))}`)
+      // The Client platform Store closure must be REAL build output, not a
+      // manifest promise: one reachable Client chunk carries the official Store
+      // implementation and no dist module keeps a runtime external import of the
+      // three packages. Everything else DSH stays external.
+      const distMjs = files.filter(name => name.startsWith('dist/') && name.endsWith('.mjs'))
+      const specifiersOf = text => [...text.matchAll(/(?:from\s*["']([^"']+)["']|import\(\s*["']([^"']+)["']\s*\)|import\s*["']([^"']+)["']|require\(\s*["']([^"']+)["']\s*\))/gu)]
+        .map(match => match[1] ?? match[2] ?? match[3] ?? match[4])
+      const storeClosureNames = ['@deepseek-ai/dsh-client-store', 'zustand', 'immer']
+      const externalStoreImports = []
+      const storeChunks = []
+      let externalDshImports = 0
+      let externalCordisImports = 0
+      for (const name of distMjs) {
+        const text = readFileSync(join(extracted, name), 'utf8')
+        const specifiers = specifiersOf(text)
+        for (const specifier of specifiers) {
+          if (storeClosureNames.some(packageName => specifier === packageName || specifier.startsWith(`${packageName}/`))) {
+            externalStoreImports.push(`${name}: ${specifier}`)
+          }
+          if (/^@deepseek-ai\/dsh-/u.test(specifier)) externalDshImports += 1
+          if (specifier === '@deepseek-ai/cordis') externalCordisImports += 1
+        }
+        if (text.includes('createSnapshotStore') && text.includes('defineStore')) storeChunks.push(name)
+      }
+      check('the Client platform Store is bundled in exactly one Client chunk',
+        storeChunks.length === 1, storeChunks.join(', '))
+      check('no dist module keeps a runtime external Store/Zustand/Immer import',
+        externalStoreImports.length === 0, externalStoreImports.slice(0, 8).join(', '))
+      check('other DSH runtime packages remain external',
+        externalDshImports > 0 && externalCordisImports > 0,
+        `dsh=${String(externalDshImports)} cordis=${String(externalCordisImports)}`)
+      const clientEntryPath = join(extracted, 'dist', 'local-client.mjs')
+      if (existsSync(clientEntryPath)) {
+        const clientEntryText = readFileSync(clientEntryPath, 'utf8')
+        check('the Client entry reaches the bundled Store chunk',
+          storeChunks.length === 1 && clientEntryText.includes(`./${basename(storeChunks[0])}`), storeChunks[0] ?? '(none)')
+      } else {
+        checks.push('skip Client-entry Store reachability — synthetic fixture has no dist/local-client.mjs')
+      }
+    }
     check('exports entry dist/extension/unstable.mjs', has('dist/extension/unstable.mjs'))
     check('types dist/extension/advanced.d.mts', has('dist/extension/advanced.d.mts'))
     check('types dist/extension/unstable.d.mts', has('dist/extension/unstable.d.mts'))

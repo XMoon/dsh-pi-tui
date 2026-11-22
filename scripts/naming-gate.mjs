@@ -140,12 +140,27 @@ for (const file of srcFiles) {
 }
 const peers = new Set(Object.keys(rootPkg.peerDependencies ?? {}))
 for (const imported of [...srcImports].sort()) {
+  if (imported === '@deepseek-ai/dsh-client-store') {
+    // The Client platform Store is the Owner-approved NARROW exception: it is
+    // an exact development build input bundled into the Client Shell, never a
+    // runtime dependency, peer or user-install prerequisite. Every other
+    // @deepseek-ai import must still have a Harness peer.
+    const bundled = rootPkg.dependencies?.[imported] === undefined
+      && rootPkg.devDependencies?.[imported] === '0.2.2-rc.5'
+      && tsdown.includes("'@deepseek-ai/dsh-client-store'")
+    check('Client platform Store is an exact bundled build input, not a peer', bundled,
+      `dependencies=${String(rootPkg.dependencies?.[imported])} dev=${String(rootPkg.devDependencies?.[imported])} peer=${String(peers.has(imported))}`)
+    continue
+  }
   check(`peer declared for src import ${imported}`, peers.has(imported), peers.has(imported) ? '' : 'missing from peerDependencies')
 }
 for (const peer of [...peers].sort()) {
   if (!peer.startsWith('@deepseek-ai/')) continue // chalk etc. are regular deps
   check(`peer ${peer} is imported by src/`, srcImports.has(peer), srcImports.has(peer) ? '' : 'no import in src/ (dead peer)')
 }
+// The bundled Store must never leak back into the runtime dependency graph.
+check('bundled Client Store is not a runtime dependency', rootPkg.dependencies?.['@deepseek-ai/dsh-client-store'] === undefined,
+  String(rootPkg.dependencies?.['@deepseek-ai/dsh-client-store']))
 
 // 9. The M0–M11 pluginization contract survives the root-package migration:
 //    the public SDK subpaths and their tsdown entries must all stay present.

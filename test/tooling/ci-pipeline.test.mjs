@@ -50,10 +50,12 @@ function phasesAt(result, { mode = 'npm', ref = PR_REF, extra = {} } = {}) {
       ? [
           { name: 'prepare-dsh-source', result: 'skipped' },
           { name: 'client-family-compat', result: 'success' },
+          { name: 'fresh-profile', result: 'success' },
         ]
       : [
           { name: 'prepare-dsh-source', result: 'success' },
           { name: 'client-family-compat', result: 'skipped' },
+          { name: 'fresh-profile', result: 'skipped' },
         ]),
     { name: SPLIT_PROCESS_PHASE, result: expectedSplitProcessStatus(mode, ref) },
     ...Object.entries(extra).map(([name, value]) => ({ name, result: value })),
@@ -623,6 +625,64 @@ test('the qualified job uploads the artifact the publish path reads', () => {
   assert.equal((jobs.qualified.steps ?? []).some(step => typeof step.run === 'string' && /pnpm (pack|build)\b/u.test(step.run)), false)
 })
 
+test('the fresh-profile job is the npm-mode dual-platform DSH matrix gate', () => {
+  const jobs = workflow().jobs
+  const job = jobs['fresh-profile']
+  assert.ok(job, 'the fresh-profile job must exist in ci.yml')
+  assert.deepEqual(job.strategy.matrix.include, [
+    { os: 'ubuntu-24.04', dsh: '0.2.2-rc.3' },
+    { os: 'ubuntu-24.04', dsh: '0.2.2-rc.4' },
+    { os: 'ubuntu-24.04', dsh: '0.2.2-rc.5' },
+    { os: 'macos-15', dsh: '0.2.2-rc.5' },
+  ], 'the Fresh gate must run Linux rc.3/rc.4/rc.5 and native macOS rc.5')
+  assert.equal(job['continue-on-error'], undefined,
+    'a cancelled/failed Fresh platform can never be treated as green')
+  assert.match(job.if, /needs\.dsh-context\.result == 'success'/u)
+  assert.match(job.if, /needs\.candidate\.result == 'success'/u)
+  assert.match(job.if, /needs\.dsh-context\.outputs\.mode == 'npm'/u,
+    'the npm-only gate must state its mode; Source Mode is an explicit skipped case')
+  const download = job.steps.find(step => step.uses === 'actions/download-artifact@v8' && step.with?.path === 'candidate')
+  assert.equal(download?.with?.name, 'dsh-pi-tui-candidate',
+    'the Fresh gate must install the raw CI candidate artifact')
+  const run = job.steps.find(step => typeof step.run === 'string' && step.run.includes('pnpm smoke:fresh-profile'))
+  assert.ok(run, 'the job must run the fresh-profile smoke against the candidate')
+  assert.match(run.run, /pnpm smoke:fresh-profile -- "\$CANDIDATE" --dsh "\$DSH_TARGET"/u)
+  const prove = job.steps.find(step => typeof step.name === 'string' && step.name.startsWith('Resolve and prove the candidate'))
+  assert.match(prove.run, /needs\.candidate\.outputs\.sha256/u)
+  assert.match(prove.run, /needs\.candidate\.outputs\.tarball/u)
+  assert.match(prove.run, /echo "CANDIDATE=\$GITHUB_WORKSPACE\/\$\{TARBALLS\[0\]\}"/u,
+    'the Fresh gate receives an absolute candidate path, never a cwd-relative artifact path')
+  const reprove = job.steps.find(step => typeof step.name === 'string' && step.name.startsWith('Re-prove the candidate'))
+  assert.match(reprove.run, /createHash\('sha256'\)/u, 'the candidate bytes must be re-proved after the gate')
+  const failureUpload = job.steps.find(step => step.uses === 'actions/upload-artifact@v7')
+  assert.equal(failureUpload.if, 'failure()')
+  assert.equal(failureUpload.with.name, 'fresh-profile-failure-${{ matrix.os }}-${{ matrix.dsh }}')
+  const qualifiedNeeds = needsOf(jobs.qualified)
+  assert.ok(qualifiedNeeds.includes('fresh-profile'), 'qualified must wait for the fresh-profile gate')
+  const qualifiedVerdict = jobs.qualified.steps.find(step => typeof step.run === 'string' && step.run.includes('ci-verdict.mjs qualify'))
+  assert.match(qualifiedVerdict.run, /--phase "fresh-profile=\$\{\{ needs\['fresh-profile'\]\.result \}\}"/u)
+  const summaryVerdict = jobs.summary.steps.find(step => typeof step.run === 'string' && step.run.includes('ci-verdict.mjs summary'))
+  assert.match(summaryVerdict.run, /--phase "fresh-profile=\$\{\{ needs\['fresh-profile'\]\.result \}\}"/u)
+  assert.ok(needsOf(jobs.publish).includes('fresh-profile'), 'publish must explicitly depend on fresh-profile')
+  assert.match(jobs.publish.if, /needs\.fresh-profile\.result == 'success'/u,
+    'publish must fail closed when the fresh-profile gate failed or was skipped')
+})
+
+test('the fresh-profile phase is fail-closed for every npm result except success', () => {
+  const at = result => phasesAt('success').map(phase => phase.name === 'fresh-profile' ? { ...phase, result } : phase)
+  for (const result of ['failure', 'cancelled', 'skipped', 'absent']) {
+    const phases = result === 'absent'
+      ? phasesAt('success').filter(phase => phase.name !== 'fresh-profile')
+      : at(result)
+    const decision = verdict({ role: 'qualify', mode: 'npm', ref: PR_REF, phases })
+    assert.equal(decision.ok, false, `npm fresh-profile ${result} must not qualify`)
+    assert.match(decision.failures.join('\n'), /fresh-profile/u)
+  }
+  const source = verdict({ role: 'qualify', mode: 'source', ref: PR_REF, phases: phasesAt('success', { mode: 'source' }) })
+  assert.equal(source.ok, true, 'Source Mode skips the npm-only fresh gate')
+  assert.equal(MODE_STATUS.source['fresh-profile'], 'skipped')
+})
+
 test('the shard job passes BOTH the partition and the resolved concurrency', () => {
   const job = workflow().jobs['product-shard']
   const run = job.steps.find(step => typeof step.run === 'string' && step.run.includes('run-test-lane.mjs')).run
@@ -676,10 +736,12 @@ test('the mode-dependent jobs stay in the qualification verdict with their EXACT
   assert.deepEqual(MODE_STATUS.npm, {
     'prepare-dsh-source': 'skipped',
     'client-family-compat': 'success',
+    'fresh-profile': 'success',
   })
   assert.deepEqual(MODE_STATUS.source, {
     'prepare-dsh-source': 'success',
     'client-family-compat': 'skipped',
+    'fresh-profile': 'skipped',
   })
   assert.equal(expectedSplitProcessStatus('npm', RELEASE_REF), 'success')
   assert.equal(expectedSplitProcessStatus('npm', PR_REF), 'skipped')

@@ -191,19 +191,6 @@ export async function runCrossBuildCompatibility(context) {
       assert(alive(hostAReady.pid), 'Host A died before the side-by-side new install')
       assert(!c1WorkHadRelease(workRootPath), 'Host A Turn was released before the side-by-side new install')
       const sideBuildPackage = installSideBuild(sideBuildDir, newArtifact.path, env, targetDshVersion)
-      for (const [name, version] of [
-        ['@deepseek-ai/dsh-client-store', targetDshVersion],
-        ['zustand', '4.5.7'],
-        ['immer', '10.2.0'],
-      ]) {
-        const peerDir = realpathSync(join(sideBuildDir, 'node_modules', name))
-        assert(readJson(join(peerDir, 'package.json')).version === version,
-          `the side-by-side build installed a different ${name} version`)
-        const resolvedPeer = realpathSync(createRequireFrom(join(sideBuildDir, 'package.json')).resolve(name))
-        const peerRelative = relative(peerDir, resolvedPeer)
-        assert(peerRelative !== '' && peerRelative !== '..' && !peerRelative.startsWith(`..${sep}`),
-          `the side-by-side ${name} resolves outside its own package: ${resolvedPeer}`)
-      }
       const newBuildId = productionBuildId(sideBuildPackage, targetDshVersion)
       assert(newBuildId !== oldBuildId, 'the two packaged builds produced the same production buildId')
       assert(productionBuildId(oldProfilePackage, targetDshVersion) === oldBuildId,

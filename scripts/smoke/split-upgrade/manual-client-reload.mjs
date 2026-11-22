@@ -171,7 +171,7 @@ async function runUserCommandReloadRound(context) {
   // own real installation lives side-by-side (the SAME old artifact through an
   // official pnpm transaction — never a hand-written payload and never the
   // qualification target override).
-  const sideOldPackage = installSideBuild(join(dshHome, 'profiles', 'u08-side-old'), oldArtifact.path, env, targetDshVersion)
+  const sideOldPackage = installSideBuild(join(dshHome, 'profiles', 'u08-side-old'), oldArtifact.path, env, targetDshVersion, { legacyClientPeers: true })
   assertEqual(productionBuildId(sideOldPackage, targetDshVersion), oldBuildId,
     'U08 the side-by-side old installation produced another buildId')
 

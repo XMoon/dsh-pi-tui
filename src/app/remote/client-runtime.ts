@@ -102,7 +102,10 @@ const EXPECTED_REGISTRATION_IDS: readonly ClientBundleId[] = OFFICIAL_CLIENT_BUN
  * package graph. `@deepseek-ai/cordis` is imported directly by this module and
  * therefore already resolves normally.
  */
-const CLIENT_PLATFORM_MODULES: Readonly<Record<string, unknown>> = {
+/** The ONE platform static module table the official `/client` bundle loader
+ * receives. Exported only as a module-internal seam (never a package export)
+ * so the L5 contract test can prove every factory sees the same namespace. */
+export const CLIENT_PLATFORM_MODULES: Readonly<Record<string, unknown>> = {
   '@deepseek-ai/dsh-client-store': clientStore,
 }
 

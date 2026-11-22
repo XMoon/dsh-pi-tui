@@ -257,11 +257,13 @@ twice.
 
 `pack:release` is an explicit local ORCHESTRATOR, not a lifecycle hook:
 `clean` -> `clean:fork` -> `build` -> `typecheck:bundle` -> `test:product`
--> `pack:artifact` -> `smoke:release`. `pack:artifact` is the one physical
-pack entry and is strictly `pnpm pack --config.ignore-scripts=true`: it
-never builds, tests or runs smokes. `smoke:release` runs the eight
-packed-artifact smokes against that exact tarball. Do not treat source tests
-alone as sufficient.
+-> `pack:artifact` -> `smoke:release` -> `smoke:fresh-profile`.
+`pack:artifact` is the one physical pack entry and is strictly
+`pnpm pack --config.ignore-scripts=true`: it never builds, tests or runs
+smokes. `smoke:release` runs the eight packed-artifact smokes against that
+exact tarball, and `smoke:fresh-profile` then reuses the SAME tarball for the
+single-package fresh-install gate. Do not treat source tests alone as
+sufficient.
 
 For everyday pre-push work, run `mise run check` instead. It builds the
 vendored fork, runs the typechecks and tooling suite, and executes the shared
@@ -282,14 +284,20 @@ through one `pnpm pack` invocation: one build, one bundle typecheck, N
 product-test shards joined by a coverage proof, and a lifecycle-free
 `pnpm pack:artifact` candidate whose bytes are qualified by the eight
 public-package smokes (`pnpm smoke:release`) plus the source-leak gate and
-the startup handshake. There is no second pack route and no
-content-equivalence proof: the candidate's identity is its SHA-256,
-re-proved at every consumer. `scripts/ci-verdict.mjs` is the final gate:
-every required job must be exactly `success`, the mode-dependent jobs must
-show the status their mode requires, and the split-process job must be exactly
-`success` on npm release-tag pushes, exactly `success` on an explicitly opted-in
-npm `workflow_dispatch` on any `refs/heads/...` branch, and exactly `skipped`
-on ordinary PR/branch runs and Source Mode. The Linux split-process smoke is
+the startup handshake. The `fresh-profile` job installs the same candidate
+ONCE into a brand-new isolated Profile across the qualified DSH/platform
+matrix owned by the workflow and runner; each row proves the single-package
+Direct and Daemon surfaces and re-proves the candidate SHA after the gate.
+There is no
+second pack route and no content-equivalence proof: the candidate's identity
+is its SHA-256, re-proved at every consumer. `scripts/ci-verdict.mjs` is the
+final gate: every required job must be exactly `success`, the mode-dependent
+jobs must show the status their mode requires (`fresh-profile` is `success`
+on every npm run and only legitimately `skipped` in Source Mode), and the
+split-process job must be exactly `success` on npm release-tag pushes, exactly
+`success` on an explicitly opted-in npm `workflow_dispatch` on any
+`refs/heads/...` branch, and exactly `skipped` on ordinary PR/branch runs and
+Source Mode. The Linux split-process smoke is
 required for tag publication. To exercise that exact lane against a branch's
 current candidate before tagging, use GitHub Actions **Run workflow** on that
 npm-mode remote branch and enable `Run full Host/Client Split qualification on
@@ -394,17 +402,21 @@ The push has no local hook; creating a release tag starts
 3. the candidate tarball is packed from the verified build without the package
    lifecycle, then qualified by the eight public-package smokes, the
    source-leak gate and the startup handshake;
-4. `qualified` joins every required job — with the mode-dependent jobs checked
-   for their exact status, and the release-tag-only split-process proof
-   required to be `success` in npm mode — re-proves the candidate's SHA-256
-   and uploads that same artifact as the only publishable one;
-5. release metadata extracts the bilingual changelog body and checks parsed
+4. the `fresh-profile` job installs the same candidate ONCE into a brand-new
+   isolated Profile across the qualified DSH/platform matrix, proving the
+   single-package Direct/Daemon surfaces and re-proving the SHA;
+5. `qualified` joins every required job — with the mode-dependent jobs checked
+   for their exact status (including `fresh-profile`), and the
+   release-tag-only split-process proof required to be `success` in npm mode —
+   re-proves the candidate's SHA-256 and uploads that same artifact as the
+   only publishable one;
+6. release metadata extracts the bilingual changelog body and checks parsed
    tag version/date parity;
-6. `publish` downloads the exact tested tarball (the qualified artifact, never
+7. `publish` downloads the exact tested tarball (the qualified artifact, never
    the provisional one), verifies its embedded version against the parsed
    release version, and runs `npm publish` with the selected npm dist-tag via
    OIDC;
-7. `release` runs only after publish succeeds, then creates or updates the
+8. `release` runs only after publish succeeds, then creates or updates the
    GitHub Release with the correct prerelease state and uploads the tarball plus
    its SHA-256 file.
 

@@ -66,6 +66,7 @@ import type { JobObservedSnapshot } from '../../../src/runtime/job-observation-p
 import {
   disposeRemoteContributions,
   createScopedClientModuleLoader,
+  CLIENT_PLATFORM_MODULES,
   installScopedModuleLoaderShim,
   loadOfficialClientModulesOnce,
   OFFICIAL_CLIENT_BUNDLES,
@@ -486,6 +487,37 @@ test('B. the scoped loader capture is exact, single-flight, and restores the pro
       'a pre-existing window property with value undefined must be restored exactly')
     delete scope.window
   }
+})
+
+test('B2. every official Client factory sees the SAME bundled Store namespace', () => {
+  const store = CLIENT_PLATFORM_MODULES['@deepseek-ai/dsh-client-store']
+  assert.ok(store !== null && typeof store === 'object', 'the platform table must carry the Store namespace')
+  assert.deepEqual(Object.keys(CLIENT_PLATFORM_MODULES), ['@deepseek-ai/dsh-client-store'],
+    'the platform table must contain exactly the Store static module')
+  assert.equal(Object.hasOwn(CLIENT_PLATFORM_MODULES, '@deepseek-ai/cordis'), false,
+    'Cordis must stay a DSH Runtime import, never a platform static module')
+  const seen: unknown[] = []
+  const makeLoader = () => createScopedClientModuleLoader(
+    ['@deepseek-ai/dsh-typert-registry'],
+    specifier => {
+      assert.equal(specifier, '@deepseek-ai/dsh-client-store')
+      return CLIENT_PLATFORM_MODULES[specifier]
+    },
+  )
+  for (const index of [0, 1]) {
+    const loader = makeLoader()
+    loader.load({
+      id: '@deepseek-ai/dsh-typert-registry',
+      factory: requireModule => {
+        seen.push(requireModule('@deepseek-ai/dsh-client-store'))
+        return { apply: () => {}, inject: [] }
+      },
+    })
+    assert.equal(loader.registeredIds().length, 1, `loader ${index} did not capture exactly one factory`)
+  }
+  assert.equal(seen.length, 2, 'two independent official factories must each receive the platform store')
+  assert.ok(Object.is(seen[0], store) && Object.is(seen[1], store),
+    'every official factory must receive the ONE static Store namespace object')
 })
 
 // ---------------------------------------------------------------------------

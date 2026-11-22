@@ -243,19 +243,54 @@ export async function fetchStatus(url, options = {}) {
   return { status: response.status, setCookie: response.headers.get('set-cookie') ?? '' }
 }
 
-export function installSideBuild(dir, tarball, env, targetDshVersion) {
+/**
+ * Assert a NEW 0.5.8 side build carries its Client platform Store closure
+ * inside the packed Client chunk: no runtime dependencies/peers for the three
+ * packages and no external Store/Zustand/Immer import in dist.
+ */
+export function assertBundledClientClosure(packageRoot, label) {
+  const manifest = readJson(join(packageRoot, 'package.json'))
+  for (const name of ['@deepseek-ai/dsh-client-store', 'zustand', 'immer']) {
+    assert(manifest.dependencies?.[name] === undefined,
+      `${label}: the new build declares runtime dependency ${name}`)
+    assert(manifest.peerDependencies?.[name] === undefined,
+      `${label}: the new build declares runtime peer ${name}`)
+  }
+  const distDir = join(packageRoot, 'dist')
+  let storeChunk
+  for (const file of readdirSync(distDir).filter(name => name.endsWith('.mjs'))) {
+    const text = readFileSync(join(distDir, file), 'utf8')
+    if (text.includes('createSnapshotStore') && text.includes('defineStore')) {
+      assert(storeChunk === undefined, `${label}: the Store implementation is split across chunks ${storeChunk}, ${file}`)
+      storeChunk = file
+    }
+    const external = [...text.matchAll(/(?:from\s*["']([^"']+)["']|import\(\s*["']([^"']+)["']\s*\)|import\s*["']([^"']+)["']|require\(\s*["']([^"']+)["']\s*\))/gu)]
+      .map(match => match[1] ?? match[2] ?? match[3] ?? match[4])
+      .filter(specifier => ['@deepseek-ai/dsh-client-store', 'zustand', 'immer'].some(name => specifier === name || specifier.startsWith(`${name}/`)))
+    assert(external.length === 0, `${label}: ${file} still imports the Store closure externally: ${external.join(', ')}`)
+  }
+  assert(storeChunk !== undefined, `${label}: no packed Client chunk carries the bundled Store`)
+  return { storeChunk }
+}
+
+export function installSideBuild(dir, tarball, env, targetDshVersion, { legacyClientPeers = false } = {}) {
   mkdirSync(dir, { recursive: true })
   writeFileSync(join(dir, '.npmrc'), 'registry=https://registry.npmjs.org\n', { mode: 0o600 })
+  const dependencies = {
+    [EXPECTED_PACKAGE_NAME]: `file:${tarball}`,
+    ...(legacyClientPeers
+      ? {
+          '@deepseek-ai/dsh-client-store': targetDshVersion,
+          zustand: '4.5.7',
+          immer: '10.2.0',
+        }
+      : {}),
+  }
   writeFileSync(join(dir, 'package.json'), JSON.stringify({
     name: 'split-upgrade-side-build',
     private: true,
     version: '1.0.0',
-    dependencies: {
-      [EXPECTED_PACKAGE_NAME]: `file:${tarball}`,
-      '@deepseek-ai/dsh-client-store': targetDshVersion,
-      zustand: '4.5.7',
-      immer: '10.2.0',
-    },
+    dependencies,
   }, null, 2) + '\n', 'utf8')
   const result = run('pnpm', [
     'install',
@@ -272,6 +307,7 @@ export function installSideBuild(dir, tarball, env, targetDshVersion) {
   if (!existsSync(join(packageRoot, 'dist', 'local-client.mjs'))) {
     throw new Error('the side-by-side new-build install has no local Client entry')
   }
+  if (!legacyClientPeers) assertBundledClientClosure(packageRoot, 'side-by-side new build')
   return packageRoot
 }
 

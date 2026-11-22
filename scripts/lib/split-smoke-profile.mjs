@@ -71,8 +71,21 @@ export function inspectSplitCandidate(explicitPath) {
 /**
  * Install the ONE isolated profile both entry modes run. The caller creates
  * `workDir` (and therefore owns `KEEP`/cleanup); this function only fills it.
+ *
+ * `clientPlatformProvisioning` is a TEST-HARNESS mode, not a product option:
+ *   - `legacy-preseed` (default): the historical Split lanes install the three
+ *     Client platform packages into the profile before the candidate. Their
+ *     green result proves the Host/Client lifecycle only, never a single-package
+ *     user install.
+ *   - `bundled`: the new Fresh gate installs ONLY the candidate tarball; the
+ *     Client Store/Zustand/Immer closure is embedded in the candidate's Client
+ *     chunk. No three packages may appear in the profile manifest or
+ *     node_modules.
  */
-export function createSplitSmokeProfile({ tarball, targetDshVersion, workDir }) {
+export function createSplitSmokeProfile({ tarball, targetDshVersion, workDir, clientPlatformProvisioning = 'legacy-preseed', seedBuildPolicy = true }) {
+  if (clientPlatformProvisioning !== 'legacy-preseed' && clientPlatformProvisioning !== 'bundled') {
+    throw new SplitSmokeAssertionError(`unknown clientPlatformProvisioning mode: ${String(clientPlatformProvisioning)}`)
+  }
   const distribution = loadDshDistribution({ mode: 'npm', version: targetDshVersion })
   const home = join(workDir, 'home')
   const dshHome = join(workDir, 'dsh-home')
@@ -111,23 +124,37 @@ export function createSplitSmokeProfile({ tarball, targetDshVersion, workDir }) 
     ['zustand', '4.5.7'],
     ['immer', '10.2.0'],
   ]
-  installPlugin(dsh, `@deepseek-ai/dsh-client-store@${targetDshVersion}`, harnessDir, env, false)
-  installPlugin(dsh, 'zustand@4.5.7', harnessDir, env, false)
-  installPlugin(dsh, 'immer@10.2.0', harnessDir, env, false)
-  installPlugin(dsh, tarball, harnessDir, env, false)
+  if (clientPlatformProvisioning === 'legacy-preseed') {
+    installPlugin(dsh, `@deepseek-ai/dsh-client-store@${targetDshVersion}`, harnessDir, env, false)
+    installPlugin(dsh, 'zustand@4.5.7', harnessDir, env, false)
+    installPlugin(dsh, 'immer@10.2.0', harnessDir, env, false)
+  }
+  installPlugin(dsh, tarball, harnessDir, env, false, { seedBuildPolicy })
   const profileManifest = readJson(join(profileDir, 'package.json'))
-  for (const [name, version] of clientPeers) {
-    assert(profileManifest.dependencies?.[name] === version,
-      `the active profile does not declare the exact Client peer ${name}@${version}`)
-    assert(!(profileManifest.dsh?.profile?.bundles ?? []).includes(name),
-      `the plain Client peer ${name} must not become a profile bundle`)
-    const peerDir = realpathSync(join(profileDir, 'node_modules', name))
-    assert(readJson(join(peerDir, 'package.json')).version === version,
-      `the active profile installed a different ${name} version`)
-    const resolvedPeer = realpathSync(createRequire(join(profileDir, 'package.json')).resolve(name))
-    const peerRelative = relative(peerDir, resolvedPeer)
-    assert(peerRelative !== '' && peerRelative !== '..' && !peerRelative.startsWith(`..${sep}`),
-      `the active profile ${name} resolves outside its own package: ${resolvedPeer}`)
+  if (clientPlatformProvisioning === 'legacy-preseed') {
+    for (const [name, version] of clientPeers) {
+      assert(profileManifest.dependencies?.[name] === version,
+        `the active profile does not declare the exact Client peer ${name}@${version}`)
+      assert(!(profileManifest.dsh?.profile?.bundles ?? []).includes(name),
+        `the plain Client peer ${name} must not become a profile bundle`)
+      const peerDir = realpathSync(join(profileDir, 'node_modules', name))
+      assert(readJson(join(peerDir, 'package.json')).version === version,
+        `the active profile installed a different ${name} version`)
+      const resolvedPeer = realpathSync(createRequire(join(profileDir, 'package.json')).resolve(name))
+      const peerRelative = relative(peerDir, resolvedPeer)
+      assert(peerRelative !== '' && peerRelative !== '..' && !peerRelative.startsWith(`..${sep}`),
+        `the active profile ${name} resolves outside its own package: ${resolvedPeer}`)
+    }
+  } else {
+    const dependencies = profileManifest.dependencies ?? {}
+    for (const [name] of clientPeers) {
+      assert(!Object.hasOwn(dependencies, name),
+        `the bundled profile must not declare ${name} at its root`)
+      assert(!existsSync(join(profileDir, 'node_modules', ...name.split('/'))),
+        `the bundled profile must not install ${name}`)
+    }
+    assert(Object.keys(dependencies).every(name => name === '@xmoon76/dsh-pi-tui'),
+      `the bundled profile installed unexpected root dependencies: ${JSON.stringify(Object.keys(dependencies))}`)
   }
   assert((profileManifest.dsh?.profile?.bundles ?? []).includes('@xmoon76/dsh-pi-tui'),
     'the candidate bundle row disappeared from the active profile')
@@ -169,7 +196,9 @@ export function createSplitSmokeProfile({ tarball, targetDshVersion, workDir }) 
     anchor,
     base,
     surfaceLlm,
-    clientPeers,
+    clientPeers: clientPlatformProvisioning === 'legacy-preseed' ? clientPeers : [],
+    clientPlatformProvisioning,
+    buildPolicyPreseeded: seedBuildPolicy !== false,
     dshInvocation: dsh,
   }
 }
