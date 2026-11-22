@@ -400,9 +400,17 @@ export class AcpSessionModelService {
    */
   async readOptions(expectedAgent: AcpModelAgent, expectedSession: object): Promise<SessionConfigOption[]> {
     this.assertExact(expectedAgent, expectedSession)
-    const catalog = await this.readCatalog()
-    this.assertExact(expectedAgent, expectedSession)
-    return projectModelState(catalog, copySelection(expectedAgent.model.current())).options
+    try {
+      const catalog = await this.readCatalog()
+      this.assertExact(expectedAgent, expectedSession)
+      return projectModelState(catalog, copySelection(expectedAgent.model.current())).options
+    } catch (error) {
+      // A rejection is not allowed to outrun the exact identity fence: a
+      // catalog failure after a replaced Agent/Session must stay STALE, never
+      // become a tolerable optional-catalog omission for a new View.
+      this.assertExact(expectedAgent, expectedSession)
+      throw error
+    }
   }
 
   /**

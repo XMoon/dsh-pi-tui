@@ -2833,3 +2833,50 @@ test('a concurrent close during resume config read propagates STALE instead of a
     client.close()
   }
 })
+
+test('a rejected optional catalog read after concurrent close propagates STALE, never a false attach', async t => {
+  const { scope } = newScope(t)
+  let catalogStarted!: () => void
+  const started = new Promise<void>(resolveStarted => { catalogStarted = resolveStarted })
+  let releaseCatalog!: () => void
+  const catalogGate = new Promise<void>(resolveCatalog => { releaseCatalog = resolveCatalog })
+  let reads = 0
+  const fake = makeFakeAccess({
+    modelOptions: async () => {
+      reads += 1
+      if (reads === 1) {
+        catalogStarted()
+        await catalogGate
+        throw new AcpModelError('LOCAL_ACP_MODEL_UNAVAILABLE', 'catalog unavailable', -32042)
+      }
+      return configOptionsFor('["p1","a"]')
+    },
+  })
+  fake.seed('session-reject-race', '/host/proj')
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-reject-race', cwd: '/host/proj' } })
+    await started
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/close', params: { sessionId: 'session-reject-race' } })
+    const closed = (await client.next()) as { id?: number; result?: unknown }
+    assert.equal(closed.id, 3)
+    assert.deepEqual(closed.result, {})
+    releaseCatalog()
+    const stale = (await client.next()) as { id?: number; error?: { code: number; data?: { code?: string } } }
+    assert.equal(stale.id, 2)
+    assert.equal(stale.error?.code, -32042)
+    assert.equal(stale.error?.data?.code, 'LOCAL_ACP_MODEL_STALE',
+      'a stale original View must win over the optional catalog-unavailable fallback')
+
+    client.send({ jsonrpc: '2.0', id: 4, method: 'session/resume', params: { sessionId: 'session-reject-race', cwd: '/host/proj' } })
+    const resumed = (await client.next()) as { id?: number; result?: { configOptions?: SessionConfigOption[] } }
+    assert.equal(resumed.id, 4)
+    assert.deepEqual(resumed.result?.configOptions, configOptionsFor('["p1","a"]'))
+  } finally {
+    client.close()
+  }
+})

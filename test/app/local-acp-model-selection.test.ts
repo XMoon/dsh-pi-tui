@@ -590,6 +590,21 @@ test('selecting the same model keeps its explicit effort; an identical effort is
   assert.equal(host.defaultSaveCalls, 0)
 })
 
+test('a catalog rejection after Agent replacement is STALE, never an optional catalog miss', async () => {
+  const { host, agent } = baseHost({ provider: 'p1', model: 'a' })
+  const service = new AcpSessionModelService(host)
+  const session = host.sessions.get('S1') as object
+  const gate = deferred<void>()
+  host.catalogGate = gate
+  host.catalogError = new Error('catalog exploded')
+  const read = service.readOptions(agent, session)
+  await Promise.resolve()
+  const replacement = new FakeAgent('S1', { provider: 'p1', model: 'a' })
+  host.seed(replacement)
+  gate.resolve()
+  await assert.rejects(read, isModelError('LOCAL_ACP_MODEL_STALE'))
+})
+
 test('a missing catalog or missing exact identity is a classified rejection', async () => {
   const { host, agent } = baseHost({ provider: 'p1', model: 'a' })
   const service = new AcpSessionModelService(host)

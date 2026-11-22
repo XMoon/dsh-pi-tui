@@ -71,7 +71,7 @@ async function waitForScreenGone(client, text, label, timeoutMs = 120_000) {
 }
 
 /** Choose one model for the CURRENT live Session through the real `/model` panel. */
-async function selectModelInTui(client, modelId, label, filteredOutText) {
+async function selectModelInTui(client, modelId, label) {
   client.send('\x15')
   await sleep(150)
   client.send('/model\r')
@@ -81,11 +81,15 @@ async function selectModelInTui(client, modelId, label, filteredOutText) {
     return frame.includes('Models') && !frame.includes('Loading models')
   }, `${label} model directory`, 120_000)
   client.send(modelId)
+  // The picker marks the selected row with `> `. Wait for the exact target row
+  // to carry that marker, not merely for its text to appear somewhere (the
+  // other model id may contain this id as a prefix).
+  const escaped = modelId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const selectedRow = new RegExp(`^>\\s+${escaped}(?![\\w-])`, 'u')
   await waitForCondition(async () => {
-    const frame = (await client.viewport()).join('\n')
-    return frame.includes('Models') && !frame.includes(filteredOutText)
-  }, `${label} model filter`, 120_000)
-  await waitForScreenText(client, modelId, `${label} filtered model`)
+    const frame = await client.viewport()
+    return frame.some(line => selectedRow.test(line.trimStart()))
+  }, `${label} selected model`, 120_000)
   client.send('\r')
   await waitForScreenGone(client, 'Models', `${label} picker commit`)
 }
@@ -684,7 +688,7 @@ export async function runAcpPo2SessionView(context) {
 
     // A real TUI `/model` change on Session A must reach the attached ACP View
     // as one full `config_option_update`.
-    await selectModelInTui(tuiModelA, MODEL_A, 'Model-S1 TUI model change A', MODEL_B)
+    await selectModelInTui(tuiModelA, MODEL_A, 'Model-S1 TUI model change A')
     const configUpdate = (await connModelResume.nextNotification(30_000))
     assert(configUpdate?.method === 'session/update', 'Model-S1: the ACP connection must receive a config notification')
     assert(configUpdate?.params?.sessionId === sessionA, 'Model-S1: the config notification must be for Session A')

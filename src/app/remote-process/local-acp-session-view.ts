@@ -851,9 +851,17 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     const claim = this.attachedClaim(state, sessionId)
     const agent = claim.exactAgent as LiveAgentViewIdentity
     const session = claim.exactSession as object
-    const options = await this.callModelAccess(() => access.modelOptions(agent, session))
-    if (!this.isStillAttached(state, claim, agent, session)) throw staleModelSelection()
-    return options
+    try {
+      const options = await this.callModelAccess(() => access.modelOptions(agent, session))
+      if (!this.isStillAttached(state, claim, agent, session)) throw staleModelSelection()
+      return options
+    } catch (error) {
+      // Both a catalog success and a catalog rejection are fenced against the
+      // ORIGINAL claim. A detached/replaced View must never turn a catalog
+      // failure into a successful optional-display omission.
+      if (!this.isStillAttached(state, claim, agent, session)) throw staleModelSelection()
+      throw error
+    }
   }
 
   /**
