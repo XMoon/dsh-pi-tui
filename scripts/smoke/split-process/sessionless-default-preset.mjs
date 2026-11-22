@@ -13,14 +13,16 @@
  *   Client (after an independent Host restart) reads the new `[default]` back
  *   from the Host roster — no Client-local value and no Session creation.
  *
- * The read-failure class of the plan is covered by the headless real-owner
- * suite (`test/app/preset-pitui-presentation.test.ts`); this lane proves the
- * real wire catalog and both explicit writes.
+ * It also injects a REAL roster-read transport fault
+ * (`SPLIT_PROCESS_CLIENT_FAIL_PRESET_ROSTER`, a pre-dispatch failure on the real
+ * `agentPresets/list` wire call), proves the in-panel Error with the real reason,
+ * then removes the marker and proves Retry re-enters the SAME read owner and
+ * recovers to the Catalog. No fake RPC and no Host service substitution.
  *
  * @module split-process/sessionless-default-preset
  */
 
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
@@ -36,6 +38,22 @@ function assert(condition, message) {
 const USE_PRESET = 'ptc'
 /** The filtered preset the explicit `Set default` persists for new Sessions. */
 const DEFAULT_PRESET = 'minimal'
+
+/** Open the bare `/preset` and wait for the REAL roster-read failure frame. */
+async function openPresetPanelExpectingError(client, label) {
+  await closeCatalog(client, `${label} previous Catalog`)
+  await client.waitForScreen('❯', `${label} composer seat`, 60_000)
+  client.send('\x15')
+  await sleep(300)
+  client.send('/preset\r')
+  await waitForScreenText(client, 'Preset catalog unavailable', `${label} Catalog error`, 120_000)
+  await waitForScreenText(client, 'Retry', `${label} Retry action`, 60_000)
+  await waitForScreenText(client, 'Close [Esc]', `${label} Close action`, 60_000)
+  const flat = (await frameText(client)).replace(/\s+/gu, ' ')
+  if (!/agentPresets\/list|roster read/iu.test(flat)) {
+    throw new SplitSmokeAssertionError(`${label}: the real read failure reason is missing: ${JSON.stringify(flat.slice(-400))}`)
+  }
+}
 
 async function frameText(client) {
   return (await client.viewport()).join('\n')
@@ -161,7 +179,10 @@ export async function runSessionlessDefaultPreset(context) {
   const unique = `${String(process.pid)}-${Date.now().toString(36)}`
   const homeA = join(workDir, `ux-pr3-home-a-${unique}`)
   const homeB = join(workDir, `ux-pr3-home-b-${unique}`)
-  for (const home of [homeA, homeB]) mkdirSync(home, { recursive: true, mode: 0o700 })
+  const homeC = join(workDir, `ux-pr3-home-c-${unique}`)
+  const faultDir = join(workDir, `ux-pr3-preset-fault-${unique}`)
+  for (const home of [homeA, homeB, homeC]) mkdirSync(home, { recursive: true, mode: 0o700 })
+  mkdirSync(faultDir, { recursive: true, mode: 0o700 })
 
   try {
     const { host, ready } = await startC1Host('unowned-job', 'UX-PR3')
@@ -194,6 +215,38 @@ export async function runSessionlessDefaultPreset(context) {
       record => record.sessionOpen === false, 'UX-PR3 Set default stays sessionless', 60_000)
     assert(afterDefault.sessionOpen === false, 'UX-PR3 Set default created a Session')
     await assertPresetChip(a, DEFAULT_PRESET, '[default]', 'UX-PR3 Host default readback')
+
+    // ── P-05: a REAL roster-read wire fault → Error + Retry recovery ────────
+    const { client: c, ready: cReady } = await startC1Client('UX-PR3 client C (roster fault)', {
+      HOME: homeC,
+      SPLIT_PROCESS_CLIENT_FAIL_PRESET_ROSTER: faultDir,
+    }, { cwd: workDir })
+    assert(cReady.sessionOpen === false, 'UX-PR3 client C is not sessionless')
+    writeFileSync(join(faultDir, 'fail'), '1', { mode: 0o600 })
+    await openPresetPanelExpectingError(c, 'UX-PR3 roster read failure')
+    const afterFailure = await waitForSurfaceStatus(c,
+      record => record.sessionOpen === false, 'UX-PR3 read failure stays sessionless', 60_000)
+    assert(afterFailure.sessionOpen === false, 'UX-PR3 the failed read created a Session')
+    // Remove the fault and Retry through the visible footer: the SAME read
+    // owner re-reads the Host roster and hydrates the panel in place.
+    rmSync(join(faultDir, 'fail'), { force: true })
+    c.send('\t')
+    await sleep(200)
+    c.send('\r')
+    await waitForCondition(async () => {
+      const frame = await frameText(c)
+      return frame.includes('Standard mode (standard)') && !frame.includes('Loading agent presets')
+    }, 'UX-PR3 Retry hydrated the Catalog', 120_000).catch(async (error) => {
+      const frame = await c.viewport()
+      throw new SplitSmokeAssertionError(`UX-PR3 Retry recovery: ${JSON.stringify({ frame: frame.slice(-16) })}`, { cause: error })
+    })
+    assert(!(await frameText(c)).includes('Preset catalog unavailable'), 'UX-PR3 the error must be replaced by the Catalog')
+    const afterRetry = await waitForSurfaceStatus(c,
+      record => record.sessionOpen === false, 'UX-PR3 Retry stays sessionless', 60_000)
+    assert(afterRetry.sessionOpen === false, 'UX-PR3 the retried read created a Session')
+    await closeCatalog(c, 'UX-PR3 roster-retry Catalog')
+    await exitC1Client(c, 'UX-PR3 client C')
+
     await exitC1Client(a, 'UX-PR3 client A')
 
     // ── P-04: the persisted default survives an INDEPENDENT Host restart ────
@@ -212,6 +265,8 @@ export async function runSessionlessDefaultPreset(context) {
       setDefault: DEFAULT_PRESET,
       sessionCreated: false,
       hostRestartPersisted: true,
+      readFailureInjected: 'SPLIT_PROCESS_CLIENT_FAIL_PRESET_ROSTER',
+      readFailureRecoveredByRetry: true,
     })
     return { status: 'PASS' }
   } finally {

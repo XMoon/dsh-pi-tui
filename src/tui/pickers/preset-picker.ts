@@ -28,6 +28,7 @@ import {
   matchesKey,
   truncateToWidth,
   visibleWidth,
+  wrapTextWithAnsi,
   type Component,
   type Focusable,
   type RowBudgetAware,
@@ -314,11 +315,11 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
     this.notice = detail
     this.noticeIsError = true
     if (this.roster === undefined) {
-      // First load failed: the failure takes the empty body's one statement,
-      // with only the failure WORD in `error` ink.
-      const failure = color.error('Preset catalog unavailable')
+      // First load failed: the empty body names the failure, and the COMPLETE
+      // reason is painted (wrapped) in the status rows above the bar — a
+      // single truncated body cell is not a readable error.
       this.picker.setItems([])
-      this.picker.setNoMatchText(detail === '' ? `  ${failure}` : `  ${failure}: ${detail}`)
+      this.picker.setNoMatchText(`  ${color.error('Preset catalog unavailable')}`)
     }
     this.deps.requestRender()
   }
@@ -877,6 +878,11 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
     if (!this.ensureCurrent()) return undefined
     const frame = this.lastFrame
     if (frame === undefined || event.width !== frame.width) return undefined
+    // ANY real wheel on the surface revokes an outstanding pointer gesture
+    // (footer/back press, browse press), wherever it lands: list chrome, the
+    // status row, the bar itself or the reader. A wheel that moved the content
+    // must never let a later release run a previously pressed action.
+    if (event.type === 'wheel' && (event.wheelDelta ?? 0) !== 0) this.invalidateGestures()
     const pressed = this.pressed
     if (event.type === 'click' || (event.type === 'press' && event.button === 'left')) this.pressed = undefined
 
@@ -1080,14 +1086,20 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
       return [bar.line]
     }
     const status = this.catalogStatus()
-    const statusRows = status !== undefined && budget >= 3 ? 1 : 0
+    // The status area is ONE compacts line for a hint, but a READ failure keeps
+    // its COMPLETE reason: it wraps into as many rows as the grant can spare
+    // (always leaving the real exit bar and at least one list row).
+    const statusText = status === undefined ? [] : wrapTextWithAnsi(`  ${sanitizedPhysicalLine(status.text)}`, width)
+    const statusLimit = budget === Number.POSITIVE_INFINITY ? statusText.length : Math.max(0, budget - 2)
+    const statusLines = status === undefined || statusLimit === 0
+      ? []
+      : (status.error ? statusText.slice(0, statusLimit) : statusText.slice(0, 1)).map(line => this.paintStatusLine(line, status.error))
     const listRows = budget === Number.POSITIVE_INFINITY
       ? Number.POSITIVE_INFINITY
-      : Math.max(1, budget - 1 - statusRows)
+      : Math.max(1, budget - 1 - statusLines.length)
     this.picker.setMaxRows(listRows)
     const list = this.picker.render(width)
-    const lines = [...list]
-    if (status !== undefined && statusRows === 1) lines.push(this.paintStatus(status, width))
+    const lines = [...list, ...statusLines]
     lines.push(bar.line)
     this.lastFrame = {
       width,
@@ -1118,7 +1130,7 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
       return this.roster === undefined ? undefined : { text: 'Loading agent presets…', error: false }
     }
     if (this.phase === 'error') {
-      return this.roster === undefined ? undefined : { text: this.notice, error: true }
+      return { text: this.notice === '' ? 'Preset catalog unavailable' : this.notice, error: true }
     }
     if (this.notice !== '') return { text: this.notice, error: this.noticeIsError }
     const availability = this.writeAvailability()
@@ -1126,9 +1138,8 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
     return reason === undefined ? undefined : { text: reason, error: false }
   }
 
-  private paintStatus(status: { text: string; error: boolean }, width: number): string {
-    const text = truncateToWidth(`  ${sanitizedPhysicalLine(status.text)}`, width, '')
-    return status.error ? color.textDim(text.slice(0, 2)) + color.error(text.slice(2)) : color.textDim(text)
+  private paintStatusLine(line: string, error: boolean): string {
+    return error ? color.error(line) : color.textDim(line)
   }
 
   private renderBar(width: number): { line: string; hits: readonly BarHit[]; fitted: readonly PresetActionId[]; painted: readonly PresetActionId[] } {

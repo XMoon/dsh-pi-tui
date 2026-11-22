@@ -218,8 +218,9 @@ test('a failed read paints the exact error in the panel and Retry re-enters load
   h.error('connection refused: roster unavailable')
   await h.vt.waitForRender()
   const view = viewOf(h.vt)
+  const flat = view.replace(/\n/g, ' ')
   assert.ok(view.includes('Preset catalog unavailable'), `the failure must name itself:\n${view}`)
-  assert.ok(view.includes('connection refused: roster unavailable'), `the real read reason must be visible:\n${view}`)
+  assert.ok(flat.includes('connection refused: roster unavailable'), `the real read reason must be visible:\n${view}`)
   assert.ok(view.includes('Retry'), `a failed read offers Retry:\n${view}`)
   assert.ok(!view.includes('Use next') && !view.includes('Set default'), 'writes are refused after a failed read')
   // Tab reaches the footer and Enter runs the focused Retry (the loading frame
@@ -970,4 +971,36 @@ test('the official Mode guide renders its sub-headings without literal ### marke
   assert.ok(viewOf(h.vt).includes('How to use'), viewOf(h.vt))
   assert.ok(!viewOf(h.vt).includes('###'), viewOf(h.vt))
   h.app.stop()
+})
+
+test('a wheel anywhere on the Catalog revokes an outstanding footer press', async () => {
+  const h = await openPanel({ fullscreen: true, hydrate: roster({ defaultId: 'standard' }) })
+  const useRow = rowOf(h.vt, 'Use next')
+  const useCol = cellIndexOf(h.vt, useRow, 'Use next') + 2
+  sgrPress(h.vt, useCol, useRow)
+  // The wheel lands on the group header row (neither an item nor the footer).
+  const headerRow = rowOf(h.vt, 'Built-in · 4')
+  h.vt.sendInput(`\x1b[<65;${Math.max(1, cellIndexOf(h.vt, headerRow, 'Built-in') + 2)};${headerRow + 1}M`)
+  await h.vt.waitForRender()
+  sgrRelease(h.vt, useCol, useRow)
+  await h.vt.waitForRender()
+  assert.deepEqual(h.applied, [], 'a wheel between press and release must revoke the action')
+  assert.equal(h.closes(), 0, 'the revoked release must not close either')
+  assert.ok(viewOf(h.vt).includes('Agent presets'), 'the panel stays ready')
+  h.app.stop()
+})
+
+test('a long read failure keeps its COMPLETE reason readable above the bar', async () => {
+  const h = await openPanel({ hydrate: false, width: 80, rows: 24 })
+  const reason = 'gateway rejected the roster read: connection reset by peer while the Host composed the standing preset catalog; retry after the Host settles'
+  h.error(reason)
+  await h.vt.waitForRender()
+  const flat = viewOf(h.vt).replace(/\n/g, ' ').replace(/\s+/g, ' ')
+  assert.ok(flat.includes('gateway rejected the roster read'), `the reason head must be readable:\n${viewOf(h.vt)}`)
+  assert.ok(flat.includes('retry after the Host settles'), `the reason tail must be readable (no row truncation):\n${viewOf(h.vt)}`)
+  assert.ok(viewOf(h.vt).includes('Retry') && viewOf(h.vt).includes('Close [Esc]'),
+    `the recovery bar must survive the wrapped reason:\n${viewOf(h.vt)}`)
+  const bottom = linesOf(h.vt).findIndex(line => line.includes('╰'))
+  assert.ok(linesOf(h.vt)[bottom - 1]?.includes('Retry'), `the bar stays the last content row:\n${viewOf(h.vt)}`)
+  h.app.dispose()
 })
