@@ -35,6 +35,7 @@ let finalized = false
 let preserveRoot = false
 let disconnected = false
 let queue = Promise.resolve()
+let workerKillBarrierResolve
 let inspectSplitCandidate
 let createSplitSmokeProfile
 let writeC1WorkFixture
@@ -52,6 +53,11 @@ process.on('message', message => {
 
 process.on('disconnect', () => {
   disconnected = true
+  if (workerKillBarrierResolve !== undefined) {
+    const resolve = workerKillBarrierResolve
+    workerKillBarrierResolve = undefined
+    resolve()
+  }
   if (finalized) {
     process.exit(0)
     return
@@ -128,6 +134,19 @@ function now() {
   return new Date().toISOString()
 }
 
+async function waitForWorkerKillBarrier() {
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      workerKillBarrierResolve = undefined
+      reject(new Error('START_HOST: worker-kill barrier timed out'))
+    }, 120_000)
+    workerKillBarrierResolve = () => {
+      clearTimeout(timer)
+      resolve()
+    }
+  })
+}
+
 function boundedError(error) {
   const name = error instanceof Error ? error.name : 'Error'
   const code = error !== null && typeof error === 'object' && 'code' in error ? String(error.code) : undefined
@@ -159,13 +178,14 @@ function writeReceipt(update) {
   writeFileSync(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600 })
 }
 
-function initReceipt(tmpBase) {
+function initReceipt(tmpBase, worker) {
   const root = evidenceRoot(tmpBase)
   receiptPath = join(root, `${RUN_ID}.json`)
   receipt = {
     schemaVersion: 1,
     runId: RUN_ID,
     supervisor: { pid: process.pid, pgrp: getPgrp() ?? process.pid, startedAt: SUPERVISOR_STARTED_AT },
+    worker: { pid: worker.pid, ppid: worker.ppid },
     phase: 'STARTED',
     sceneRoot: undefined,
     candidate: undefined,
@@ -392,9 +412,13 @@ function publicInstallation(installation) {
 async function handleBootstrap(message) {
   await modulesReady
   if (scene !== undefined) throw new Error('BOOTSTRAP: scene already exists')
+  if (!Number.isInteger(message.workerPid) || message.workerPid <= 0
+    || !Number.isInteger(message.workerPpid) || message.workerPpid <= 0) {
+    throw new Error('INPUT_UNQUALIFIED: BOOTSTRAP requires real workerPid and workerPpid')
+  }
   installInProgress = true
   const tmpBase = validateTmpBase(message.tmpBase)
-  initReceipt(tmpBase)
+  initReceipt(tmpBase, { pid: message.workerPid, ppid: message.workerPpid })
   let root
   let candidate
   let installation
@@ -514,9 +538,20 @@ async function handleStartHost(message) {
     host.exitResult = { code, signal }
     writeReceipt({ host: { ...host.publicFacts, exitCode: code, exitSignal: signal } })
   })
-  appendNote('host-spawned', { hostId, pid: child.pid ?? null, workRoot })
+  appendNote('host-spawned', { hostId, pid: child.pid ?? null, workerPid: receipt.worker?.pid, workRoot })
   writeReceipt({ phase: 'HOST_SPAWNED', host: host.publicFacts })
   progress(message.requestId, 'HOST_SPAWNED', { hostId, pid: child.pid ?? null, workRoot })
+  if (process.env.SPLIT_VITEST_WORKER_KILL_POINT === 'host-spawned-before-ack') {
+    appendNote('host-spawned-before-ack-barrier', {
+      hostId,
+      hostPid: child.pid ?? null,
+      workerPid: receipt.worker?.pid,
+      workerPpid: receipt.worker?.ppid,
+    })
+    writeReceipt({ phase: 'HOST_SPAWNED_BEFORE_ACK', host: host.publicFacts })
+    await waitForWorkerKillBarrier()
+    throw new Error('START_HOST: worker was killed at the host-spawned-before-ack barrier')
+  }
 
   let ready
   try {

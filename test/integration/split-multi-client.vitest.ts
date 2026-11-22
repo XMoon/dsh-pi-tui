@@ -165,7 +165,9 @@ test('the first real Question answer settles once while the loser late option ke
     assert.equal(clientBAlive, true, 'Client B is not alive at the worker-kill point')
     await scene.hostStatus(host)
     await scene.report('worker-kill-point', { point: 'two-clients-ready', workerPid: process.pid })
-    process.kill(process.pid, 'SIGKILL')
+    await new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error('SPLIT_VITEST worker-kill barrier timed out')), 120_000)
+    })
   }
 
   if (process.env.SPLIT_VITEST_FAIL_AFTER_TWO_CLIENTS === '1') {

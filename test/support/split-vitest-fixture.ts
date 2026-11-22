@@ -355,16 +355,7 @@ class Scene implements SplitVitestScene {
   }
 
   async startHost(scenario: string, extraEnv: Record<string, string> = {}): Promise<HostHandle> {
-    const payload = await this.#supervisor.request('START_HOST', { scenario, extraEnv }, {
-      timeoutMs: 180_000,
-      onProgress: message => {
-        if (message.event === 'HOST_SPAWNED' && process.env.SPLIT_VITEST_WORKER_KILL_POINT === 'host-spawned-before-ack') {
-          // Leave one observation tick for the external probe to read the
-          // already-written host-spawned receipt before this worker dies.
-          setTimeout(() => process.kill(process.pid, 'SIGKILL'), 250)
-        }
-      },
-    })
+    const payload = await this.#supervisor.request('START_HOST', { scenario, extraEnv }, { timeoutMs: 180_000 })
     const host: HostHandle = {
       hostId: String(payload.hostId),
       ready: payload.ready,
@@ -649,7 +640,7 @@ async function createScene(): Promise<Scene> {
   const tarball = requireCandidateTarball()
   const supervisor = new SupervisorClient()
   try {
-    const facts = await supervisor.request('BOOTSTRAP', { tarball, tmpBase }, { timeoutMs: 600_000 }) as SceneFacts
+    const facts = await supervisor.request('BOOTSTRAP', { tarball, tmpBase, workerPid: process.pid, workerPpid: process.ppid }, { timeoutMs: 600_000 }) as SceneFacts
     return new Scene(facts, supervisor)
   } catch (error) {
     try {

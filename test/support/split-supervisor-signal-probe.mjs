@@ -68,6 +68,30 @@ function assertLiveReceipt(receipt) {
   if (problems.length > 0) fail(problems.join('; '))
 }
 
+function workerKillTarget(receipt, at, vitestPid) {
+  const worker = receipt?.worker
+  const workerPid = Number(worker?.pid)
+  const workerPpid = Number(worker?.ppid)
+  if (!Number.isInteger(workerPid) || workerPid <= 0
+    || !Number.isInteger(workerPpid) || workerPpid <= 0) {
+    fail(`worker-kill receipt did not carry a valid worker identity for ${String(at)}`)
+  }
+  if (!Number.isInteger(vitestPid) || workerPpid !== vitestPid) {
+    fail(`worker PPID ${String(workerPpid)} does not match the probe-owned Vitest PID ${String(vitestPid)}`)
+  }
+  if (!pidAlive(workerPid)) fail(`worker PID ${String(workerPid)} is not alive before the probe SIGKILL`)
+  return workerPid
+}
+
+async function waitForPidGone(pid, timeoutMs) {
+  const started = Date.now()
+  while (Date.now() - started < timeoutMs) {
+    if (!pidAlive(pid)) return
+    await sleep(50)
+  }
+  fail(`SIGKILL target PID ${String(pid)} is still alive`)
+}
+
 async function waitChildExit(child, timeoutMs) {
   if (child.exitCode !== null || child.signalCode !== null) {
     return { code: child.exitCode, signal: child.signalCode }
@@ -208,6 +232,7 @@ const child = spawn(process.execPath, [
 })
 
 let childExited = false
+let killedWorkerPid
 try {
   let deadline
   if (mode === 'bootstrap-main-sigterm') {
@@ -219,17 +244,20 @@ try {
     if (child.kill('SIGTERM') === false) fail('could not signal the Vitest main process')
     deadline = Date.now() + 240_000
   } else if (mode === 'worker-kill') {
-    await waitUntil(() => {
-      const receipt = latestReceipt(tmpBase, runId)
+    const receipt = await waitUntil(() => {
+      const current = latestReceipt(tmpBase, runId)
       if (at === 'host-spawned-before-ack') {
-        const hostSpawned = (receipt?.notes ?? []).some(note => note.event === 'host-spawned')
-          || receipt?.phase === 'HOST_SPAWNED'
-        return hostSpawned && pidAlive(receipt?.host?.pid) && groupAlive(receipt?.host?.pgid)
-          ? receipt : undefined
+        const barrierHit = (current?.notes ?? []).some(note => note.event === 'host-spawned-before-ack-barrier')
+        return barrierHit && pidAlive(current?.host?.pid) && groupAlive(current?.host?.pgid)
+          ? current : undefined
       }
-      return (receipt?.notes ?? []).some(note => note.event === 'worker-kill-point'
-        && note.detail?.point === 'two-clients-ready') ? receipt : undefined
+      return (current?.notes ?? []).some(note => note.event === 'worker-kill-point'
+        && note.detail?.point === 'two-clients-ready') ? current : undefined
     }, `${mode}/${at} receipt`, 180_000)
+    killedWorkerPid = workerKillTarget(receipt, at, child.pid)
+    if (process.kill(killedWorkerPid, 'SIGKILL') === false) {
+      fail(`could not SIGKILL verified worker PID ${String(killedWorkerPid)}`)
+    }
     deadline = Date.now() + 30_000
   } else {
     const readyReceipt = await waitUntil(() => {
@@ -248,6 +276,9 @@ try {
   const exit = await waitChildExit(child, Math.max(1, deadline - Date.now()))
   childExited = true
   if (exit.code === 0) fail(`Vitest unexpectedly exited 0 under ${mode}`)
+  if (killedWorkerPid !== undefined) {
+    await waitForPidGone(killedWorkerPid, Math.max(1, deadline - Date.now()))
+  }
   const receipt = await waitUntil(() => {
     const current = latestReceipt(tmpBase, runId)
     return current?.phase === 'ABORTED_CLEAN' ? current : undefined
@@ -264,7 +295,7 @@ try {
     signal: mode === 'main-signal' ? signal : undefined,
     runId,
     vitestPid: child.pid,
-    workerPid: (receipt.notes ?? []).find(note => note.event === 'worker-kill-point')?.detail?.workerPid,
+    workerPid: killedWorkerPid,
     vitestExit: exit,
     supervisorPid: receipt.supervisor?.pid,
     supervisorPhase: receipt.phase,
