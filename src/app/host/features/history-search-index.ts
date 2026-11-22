@@ -592,6 +592,10 @@ export class HistorySearchIndex {
     if (!Number.isSafeInteger(input.nextSeq) || input.nextSeq < input.baseNextSeq) {
       throw new Error('history search index: nextSeq must be a non-negative safe integer >= baseNextSeq')
     }
+    // Fail the batch BEFORE it commits when a sidecar is already unsafe. The
+    // post-commit re-check below remains a second window; a Host that observes
+    // either failure keeps the index closed until a later write proves safety.
+    assertPrivateSidecars(this.path)
     this.transaction(() => {
       const existing = this.db.prepare('SELECT * FROM history_sessions WHERE session_id = ?')
         .get(input.sessionId) as unknown as RawSessionRow | undefined

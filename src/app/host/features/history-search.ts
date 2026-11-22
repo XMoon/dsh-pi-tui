@@ -283,6 +283,8 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
   private verificationTimer: ReturnType<typeof setTimeout> | undefined
   /** Count of bounded-buffer overflows (internal lifecycle evidence). */
   private bufferOverflows = 0
+  /** Sticky index-failure latch: only a later successful write clears it. */
+  private indexFaulted = false
   /** Last fully replayed persistence revision per Session (same-instance only). */
   private readonly verifiedRevisions = new Map<string, { readonly identity: symbol | undefined; readonly revision: unknown }>()
 
@@ -586,6 +588,10 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     this.writeTail = run.catch(error => {
       if (this.lifecycle.signal.aborted || this.disposed) return
       this.diag.warn('history search index write failed', { category: error instanceof Error ? error.name : 'unknown' })
+      // Keep the index CLOSED until a later successful write proves it safe
+      // again: a refresh that only re-reads must not promote an unsafe derived
+      // store (for example a tampered sidecar) back to `ready`.
+      this.indexFaulted = true
       if (this.state.kind !== 'unavailable') {
         this.state = { kind: 'incomplete', reason: 'source-read-failed' }
       }
@@ -777,6 +783,8 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       occurrences,
     })
     this.revision += 1
+    // A successful commit proves the private file set is usable again.
+    this.indexFaulted = false
     return { effectiveCwd, lastEventHash }
   }
 
@@ -1194,6 +1202,10 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
 
   private refreshCompleteness(): void {
     if (this.disposed || this.index === undefined) return
+    if (this.indexFaulted) {
+      this.state = { kind: 'incomplete', reason: 'source-read-failed' }
+      return
+    }
     const checkpoints = this.index.listSessions()
     if (checkpoints.some(checkpoint => checkpoint.dirty)) {
       this.state = { kind: 'incomplete', reason: 'reconciling' }

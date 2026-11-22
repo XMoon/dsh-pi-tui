@@ -18,7 +18,7 @@
 
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdirSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
@@ -940,6 +940,84 @@ test('a failed index write answers incomplete instead of a silent success', asyn
     deliver(nextEvent)
     const answer = await waitDirectSettled(service)
     assert.equal(answer.kind, 'incomplete', JSON.stringify(answer))
+  } finally {
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('an unsafe sidecar keeps the index closed until a later write proves it safe', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-sidecar-fault-')
+  const source = mutableSource('/repo/sidecar-fault')
+  const { deps } = mutableDeps(source)
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const deliver = (event: unknown) => (service as unknown as {
+    observeLiveEvent(session: unknown, event: unknown): void
+  }).observeLiveEvent(liveSessionOf(source), event)
+  const dbPath = join(profileDir, '.dsh-pi-tui', 'history-search', 'v1.sqlite')
+  const walPath = `${dbPath}-wal`
+  try {
+    await waitDirectReady(service)
+    assert.ok(existsSync(walPath), 'the open WAL must exist so its mode can be tampered')
+    chmodSync(walPath, 0o644)
+
+    const tamperedEvent = {
+      type: 'agent/inbox/spliced' as const,
+      seq: 3,
+      time: 4000,
+      data: {
+        target: 'next-turn',
+        start: 2,
+        inserted: [{
+          id: 'msg-4',
+          role: 'user',
+          content: [{ type: 'text', text: 'must fail on the unsafe sidecar' }],
+          source: { kind: 'user', rpcId: 'rpc-4' },
+        }],
+      },
+    }
+    source.events.push(tamperedEvent)
+    source.revision += 1
+    deliver(tamperedEvent)
+    const faulted = await waitDirectSettled(service)
+    assert.equal(faulted.kind, 'incomplete', JSON.stringify(faulted))
+
+    // A read-only verification pass must NOT promote the unsafe store back to
+    // ready; every write it attempts hits the same private-file refusal.
+    await assert.rejects(
+      (service as unknown as { verifySources(): Promise<void> }).verifySources(),
+      (error: unknown) => error instanceof Error && /sidecar|private/u.test(error.message),
+    )
+    const stillClosed = await service.search({ scope: 'all', query: 'mutable first', limit: 25 }, new AbortController().signal)
+    assert.equal(stillClosed.kind, 'incomplete', JSON.stringify(stillClosed))
+
+    // Restoring the private mode lets a later successful write prove safety.
+    chmodSync(walPath, 0o600)
+    const recoveryEvent = {
+      type: 'agent/inbox/spliced' as const,
+      seq: 4,
+      time: 5000,
+      data: {
+        target: 'next-turn',
+        start: 3,
+        inserted: [{
+          id: 'msg-5',
+          role: 'user',
+          content: [{ type: 'text', text: 'recovered sidecar write' }],
+          source: { kind: 'user', rpcId: 'rpc-5' },
+        }],
+      },
+    }
+    source.events.push(recoveryEvent)
+    source.revision += 1
+    deliver(recoveryEvent)
+    await waitDirectReady(service)
+    const recovered = await service.search({ scope: 'all', query: 'recovered sidecar', limit: 25 }, new AbortController().signal)
+    assert.equal(recovered.kind, 'ready', JSON.stringify(recovered))
+    if (recovered.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(recovered.items.length, 1)
   } finally {
     await service.dispose()
     await ctx.fiber.dispose()
