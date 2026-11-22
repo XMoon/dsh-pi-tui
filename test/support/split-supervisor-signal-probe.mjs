@@ -30,7 +30,6 @@ import { execFileSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { closeSync, existsSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
-import { userInfo } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
@@ -181,8 +180,8 @@ function groupAlive(pgid) {
 }
 
 /** Whether the kernel Host seat of one scope is free (Linux abstract / Darwin O_EXLOCK). */
-async function hostSeatFree(scopeId) {
-  if (process.platform === 'linux') {
+async function hostSeatFree(seat) {
+  if (seat?.kind === 'linux-abstract') {
     return await new Promise((resolve, reject) => {
       const server = createServer()
       let settled = false
@@ -195,21 +194,20 @@ async function hostSeatFree(scopeId) {
         }
         reject(error)
       })
-      server.listen(`\0dsh-pi-tui-h-${scopeId.slice(0, 40)}`, () => {
+      server.listen(seat.name, () => {
         if (settled) return
         settled = true
         server.close(() => resolve(true))
       })
     })
   }
-  if (process.platform === 'darwin') {
+  if (seat?.kind === 'darwin-file' && typeof seat.path === 'string' && seat.path !== '') {
     // O_RDWR|O_EXLOCK|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC, no O_CREAT.
     const flags = 2 | 32 | 4 | 256 | 16777216
-    const seatPath = join(userInfo().homedir, '.dsh-pi-tui', 'run', scopeId, `seat-host-${scopeId}.lock`)
     const started = Date.now()
     for (;;) {
       try {
-        closeSync(openSync(seatPath, flags, 0o600))
+        closeSync(openSync(seat.path, flags, 0o600))
         return true
       } catch (error) {
         if (error?.code === 'ENOENT') return true
@@ -219,7 +217,7 @@ async function hostSeatFree(scopeId) {
       }
     }
   }
-  fail(`no Host seat probe is implemented for ${process.platform}`)
+  fail(`unsupported Host seat descriptor: ${JSON.stringify(seat ?? null)}`)
   return false
 }
 
@@ -385,8 +383,11 @@ if (mode === 'upgrade-worker-kill' && (at === 'new-host-spawned-before-ack' || a
 if (mode === 'upgrade-live-host-exit') {
   env.SPLIT_VITEST_UPGRADE_HOST_EXIT_AFTER_PROFILE_INSTALL = '1'
 }
+let seatCheckReleaseFile
 if (mode === 'upgrade-qualification-host-death') {
+  seatCheckReleaseFile = join(tmpBase, `split-upgrade-seat-check-${String(process.pid)}.flag`)
   env.SPLIT_VITEST_UPGRADE_QUALIFICATION_HOST_DEATH = '1'
+  env.SPLIT_VITEST_UPGRADE_SEAT_CHECK_RELEASE = seatCheckReleaseFile
 }
 
 const sentinel = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
@@ -478,6 +479,24 @@ try {
       // qualification Client's ensureLocalHost(). The operation must refuse and
       // the Supervisor must reclaim the detached Host that fallback started,
       // with a strict terminal proof (no live Host/Client/group/seat/root).
+      //
+      // Positive control for the seat proof itself: while the real Host is
+      // still alive it must hold the authoritative kernel Host seat, so the
+      // same probe used for the terminal proof must report it as NOT free.
+      // Only after that check does the injected-death window start.
+      const liveReceipt = await waitUntil(() => {
+        const current = latestUpgradeReceipt(tmpBase, runId)
+        const live = (current?.hosts ?? []).find(host => host.exited !== true
+          && typeof host.scopeId === 'string' && host.scopeId !== '')
+        return live === undefined ? undefined : current
+      }, 'live Host generation with a scope id', 300_000)
+      const liveHost = (liveReceipt.hosts ?? []).find(host => host.exited !== true
+        && typeof host.scopeId === 'string' && host.scopeId !== '')
+      if (liveHost === undefined) fail('upgrade-qualification-host-death: no live Host identity for the seat control')
+      if (await hostSeatFree(liveHost.seat)) {
+        fail('upgrade-qualification-host-death: the Host seat probe reports free while the Host is live; it is not discriminating')
+      }
+      writeFileSync(seatCheckReleaseFile, 'checked\n', { mode: 0o600 })
       const exit = await waitChildExit(child, 900_000)
       childExited = true
       if (exit.code !== 0 || exit.signal !== null) {
@@ -503,11 +522,11 @@ try {
       if (fallbacks.length === 0) {
         fail('upgrade-qualification-host-death: the injected Host death did not exercise the discovery fallback')
       }
-      const scopeId = terminalReceipt.hosts[0].scopeId
-      if (typeof scopeId !== 'string' || scopeId === '') {
-        fail('upgrade-qualification-host-death: the terminal receipt carries no Host scope id')
+      const seat = terminalReceipt.hosts[0].seat
+      if (seat === null || seat === undefined) {
+        fail('upgrade-qualification-host-death: the terminal receipt carries no Host seat descriptor')
       }
-      if (!(await hostSeatFree(scopeId))) {
+      if (!(await hostSeatFree(seat))) {
         fail('upgrade-qualification-host-death: the Host seat is still held after cleanup')
       }
       const problems = checkUpgradeReceiptResources(terminalReceipt)
@@ -816,6 +835,9 @@ try {
   }
   if (siblingStopFile !== undefined) {
     try { unlinkSync(siblingStopFile) } catch { /* not created */ }
+  }
+  if (seatCheckReleaseFile !== undefined) {
+    try { unlinkSync(seatCheckReleaseFile) } catch { /* not created */ }
   }
   try { process.kill(-sentinel.pid, 'SIGKILL') } catch {
     try { sentinel.kill('SIGKILL') } catch { /* already gone */ }

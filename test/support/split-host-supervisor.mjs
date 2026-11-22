@@ -390,7 +390,23 @@ function readHostStarttime(pid) {
   return undefined
 }
 
+/**
+ * The authoritative kernel Host seat identity for one scope. Linux uses the
+ * abstract-socket name; Darwin uses the account-home O_EXLOCK file owned by
+ * `darwinHostProfileSeatDir` (NOT the DSH-home scope directory, which owns the
+ * qualification-Client seat). The receipt carries this descriptor so the
+ * external probe checks the exact same seat the Supervisor does.
+ */
+function hostSeatDescriptor(scopeId) {
+  if (process.platform === 'linux') return { kind: 'linux-abstract', name: `\0dsh-pi-tui-h-${scopeId.slice(0, 40)}` }
+  if (process.platform === 'darwin') {
+    return { kind: 'darwin-file', path: join(userInfo().homedir, '.dsh-pi-tui', 'run', scopeId, `seat-host-${scopeId}.lock`) }
+  }
+  throw new Error(`no Host seat descriptor is implemented for ${process.platform}`)
+}
+
 function publicHostFacts(handle) {
+  const scopeId = handle.ready?.localHost?.scopeId
   return {
     id: handle.hostId,
     hostId: handle.hostId,
@@ -399,7 +415,8 @@ function publicHostFacts(handle) {
     pid: handle.child.pid ?? null,
     pgid: hostPgid(handle),
     businessPid: handle.businessPid ?? null,
-    scopeId: handle.ready?.localHost?.scopeId ?? null,
+    scopeId: scopeId ?? null,
+    seat: typeof scopeId === 'string' && scopeId !== '' ? hostSeatDescriptor(scopeId) : null,
     buildId: handle.buildId,
     entryRealpath: handle.entryRealpath,
     workRoot: handle.workRoot,
@@ -730,29 +747,26 @@ async function assertSceneHostSeatFree(reason) {
   if (hosts.some(handle => !handle.exited)) return
   const scopeId = latestHostScopeId()
   if (scopeId === undefined) throw new Error(`${reason}: no Host scope id is available to audit the Host seat`)
-  if (process.platform === 'linux') {
-    const free = await seatIsFree(`\0dsh-pi-tui-h-${scopeId.slice(0, 40)}`)
+  const seat = hostSeatDescriptor(scopeId)
+  if (seat.kind === 'linux-abstract') {
+    const free = await seatIsFree(seat.name)
     if (!free) throw new Error(`${reason}: the Host seat is still held after every Host generation exited`)
     return
   }
-  if (process.platform === 'darwin') {
-    // O_RDWR|O_EXLOCK|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC, no O_CREAT.
-    const flags = 2 | 32 | 4 | 256 | 16777216
-    const seatPath = join(userInfo().homedir, '.dsh-pi-tui', 'run', scopeId, `seat-host-${scopeId}.lock`)
-    const started = Date.now()
-    for (;;) {
-      try {
-        closeSync(openSync(seatPath, flags, 0o600))
-        return
-      } catch (error) {
-        if (error?.code === 'ENOENT') return
-        if (error?.code !== 'EAGAIN' && error?.code !== 'EWOULDBLOCK') throw error
-        if (Date.now() - started > 15_000) throw new Error(`${reason}: the Host seat is still held after every Host generation exited`)
-        await sleep(50)
-      }
+  // Darwin: O_RDWR|O_EXLOCK|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC, no O_CREAT.
+  const flags = 2 | 32 | 4 | 256 | 16777216
+  const started = Date.now()
+  for (;;) {
+    try {
+      closeSync(openSync(seat.path, flags, 0o600))
+      return
+    } catch (error) {
+      if (error?.code === 'ENOENT') return
+      if (error?.code !== 'EAGAIN' && error?.code !== 'EWOULDBLOCK') throw error
+      if (Date.now() - started > 15_000) throw new Error(`${reason}: the Host seat is still held after every Host generation exited`)
+      await sleep(50)
     }
   }
-  throw new Error(`${reason}: no Host seat probe is implemented for ${process.platform}`)
 }
 
 /** Test-only fault injection: simulate an abrupt old-Host crash in one window. */

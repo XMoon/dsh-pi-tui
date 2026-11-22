@@ -347,6 +347,18 @@ async function main() {
         await scene.installOldProfile()
         await scene.installNewSideBySide()
         const host = await scene.startHost({ source: 'profile', scenario: 'long-turn' })
+        // The external probe must first observe this live Host holding the
+        // authoritative kernel Host seat; only then may the injected-death
+        // window start. A file handshake keeps that ordering deterministic.
+        const releaseFile = process.env.SPLIT_VITEST_UPGRADE_SEAT_CHECK_RELEASE
+        if (typeof releaseFile !== 'string' || releaseFile === '') {
+          throw new Error('qualification-host-death: SPLIT_VITEST_UPGRADE_SEAT_CHECK_RELEASE must be set')
+        }
+        const seatDeadline = Date.now() + 120_000
+        while (!existsSync(releaseFile)) {
+          if (Date.now() > seatDeadline) throw new Error('qualification-host-death: the external seat probe never released the window')
+          await new Promise(resolve => setTimeout(resolve, 50))
+        }
         let refusal
         try {
           await scene.probeSideNewClientHostFoundation(host)
