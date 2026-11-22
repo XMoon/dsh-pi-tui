@@ -1,19 +1,28 @@
 /**
  * Split-process parent-death supervisor.
  *
- * This process is the ONE lifecycle owner for the split-process scene root, the isolated
- * profile installation, and the real Split Host. The Vitest worker owns only
- * the tui-test Clients and business assertions; it never receives a Host
- * ChildProcess handle and never kills a Host by PID/PGID.
+ * This process is the ONE lifecycle owner for a split-process scene root, its
+ * isolated profile installation, the side-by-side upgrade payloads and every
+ * real Split Host generation. A Vitest worker owns only the tui-test Clients
+ * and business assertions; it never receives a Host ChildProcess handle and
+ * never kills a Host by PID/PGID.
  *
- * The process is forked with `detached: true` and an IPC channel. The Vitest
- * main process can be killed (including SIGKILL of a worker); while this
- * supervisor survives, Node's IPC `disconnect` event triggers the ONE
- * bounded cleanup path (`TERM -> KILL`, then the owned scene root removal).
+ * The process is forked with `detached: true` and an IPC channel. The worker
+ * can be killed (including SIGKILL); while this supervisor survives, Node's IPC
+ * `disconnect` event triggers the ONE bounded cleanup path (TERM -> KILL, then
+ * the owned scene root removal).
+ *
+ * Two scene kinds share this ONE supervisor wire:
+ *   - `pilot`: the existing BOOTSTRAP/START_HOST/STOP_HOST behaviour with its
+ *     one-Host-per-scene restriction unchanged.
+ *   - `upgrade`: BOOTSTRAP_UPGRADE installs the old profile and owns sequential
+ *     Host generations. At most ONE Host is active; a next generation may be
+ *     created only after the previous generation's official stop and whole
+ *     process-group disappearance are proven.
  */
 
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, relative, sep } from 'node:path'
 import { createInterface } from 'node:readline'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -25,10 +34,13 @@ const TERM_GRACE_MS = 3_000
 const KILL_GRACE_MS = 3_000
 const RUN_ID = process.env.SPLIT_VITEST_RUN_ID ?? `supervisor-${String(process.pid)}-${String(Date.now())}`
 
-let scene = undefined
-let host = undefined
+let scene
+/** The single live Host generation, or undefined when none is active. */
+let activeHost
+/** Every Host generation this scene ever created, in creation order. */
+const hosts = []
 let receiptPath
-let receipt = undefined
+let receipt
 let installInProgress = false
 let cleanupPromise
 let finalized = false
@@ -40,6 +52,18 @@ let inspectSplitCandidate
 let createSplitSmokeProfile
 let writeC1WorkFixture
 let createTestTempDir
+let inspectSplitUpgradePair
+let assertSplitUpgradePairStillQualified
+let installSideBuild
+let installPlugin
+let readJson
+let productionBuildId
+let installedPayloadHash
+let readProcessStarttime
+let safeIdentity
+let assertIdentityKept
+let EXPECTED_PACKAGE_NAME
+let hostStatusSequence = 0
 
 // Register every parent-death / message / signal handler before loading the
 // heavy profile and fixture modules. A fork can deliver `disconnect` while the
@@ -99,11 +123,25 @@ const modulesReady = Promise.all([
   import('../../scripts/lib/split-smoke-profile.mjs'),
   import('../../scripts/lib/split-smoke-fixtures.mjs'),
   import('./temp-lifecycle.ts'),
-]).then(([profile, fixtures, tempLifecycle]) => {
+  import('./split-upgrade-pair.mjs'),
+  import('../../scripts/lib/split-upgrade-support.mjs'),
+  import('../../scripts/lib/dsh-smoke-harness.mjs'),
+]).then(([profile, fixtures, tempLifecycle, pair, upgradeSupport, smokeHarness]) => {
   inspectSplitCandidate = profile.inspectSplitCandidate
   createSplitSmokeProfile = profile.createSplitSmokeProfile
   writeC1WorkFixture = fixtures.writeC1WorkFixture
   createTestTempDir = tempLifecycle.createTestTempDir
+  inspectSplitUpgradePair = pair.inspectSplitUpgradePair
+  assertSplitUpgradePairStillQualified = pair.assertSplitUpgradePairStillQualified
+  installSideBuild = upgradeSupport.installSideBuild
+  productionBuildId = upgradeSupport.productionBuildId
+  installedPayloadHash = upgradeSupport.installedPayloadHash
+  readProcessStarttime = upgradeSupport.readProcessStarttime
+  safeIdentity = upgradeSupport.safeIdentity
+  assertIdentityKept = upgradeSupport.assertIdentityKept
+  EXPECTED_PACKAGE_NAME = upgradeSupport.EXPECTED_PACKAGE_NAME
+  installPlugin = smokeHarness.installPlugin
+  readJson = smokeHarness.readJson
 })
 
 function validateTmpBase(raw) {
@@ -122,10 +160,10 @@ function validateTmpBase(raw) {
   if (typeof process.getuid === 'function' && stats.uid !== process.getuid()) {
     throw new Error(`INPUT_UNQUALIFIED: SPLIT_VITEST_TMP_BASE is not owned by this user: ${real}`)
   }
-  if ((stats.mode & 0o777) !== 0o700) throw new Error(`INPUT_UNQUALIFIED: SPLIT_VITEST_TMP_BASE must have mode 0700: ${real}`)
+  if ((stats.mode & 0o777) !== 0o700) throw new Error('INPUT_UNQUALIFIED: SPLIT_VITEST_TMP_BASE must have mode 0700')
   const rel = relative(process.cwd(), real)
   if (rel !== '..' && !rel.startsWith(`..${sep}`)) {
-    throw new Error(`INPUT_UNQUALIFIED: SPLIT_VITEST_TMP_BASE must be outside the checkout: ${real}`)
+    throw new Error('INPUT_UNQUALIFIED: SPLIT_VITEST_TMP_BASE must be outside the checkout')
   }
   return real
 }
@@ -178,7 +216,7 @@ function writeReceipt(update) {
   writeFileSync(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600 })
 }
 
-function initReceipt(tmpBase, worker) {
+function initReceipt(tmpBase, worker, extra = {}) {
   const root = evidenceRoot(tmpBase)
   receiptPath = join(root, `${RUN_ID}.json`)
   receipt = {
@@ -191,10 +229,12 @@ function initReceipt(tmpBase, worker) {
     candidate: undefined,
     install: { inProgress: false, completed: false, startedAt: undefined, completedAt: undefined },
     host: undefined,
+    hosts: [],
     clients: [],
     notes: [],
     startedAt: SUPERVISOR_STARTED_AT,
     updatedAt: now(),
+    ...extra,
   }
   writeReceipt({})
 }
@@ -256,20 +296,32 @@ async function waitForHostRecord(target, predicate, label, timeoutMs) {
   throw new Error(`${label}: timed out after ${String(timeoutMs)}ms`)
 }
 
-function killOwnedHost(signal) {
-  if (host === undefined || host.exited) return
+function killOwnedHost(handle, signal) {
+  if (handle === undefined || handle.exited) return
   try {
     // This is the ChildProcess handle this supervisor itself created. The
     // detached child is the process-group leader, so the negative PGID names
-    // only this run's process group.
-    process.kill(-host.child.pid, signal)
+    // only this generation's process group.
+    process.kill(-handle.child.pid, signal)
   } catch {
-    try { host.child.kill(signal) } catch { /* already gone */ }
+    try { handle.child.kill(signal) } catch { /* already gone */ }
   }
 }
 
-function hostPgid() {
-  return host?.publicFacts?.pgid ?? host?.child?.pid
+function hostPgid(handle) {
+  return handle?.pgid ?? handle?.child?.pid
+}
+
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    if (error?.code === 'ESRCH') return false
+    if (error?.code === 'EPERM') return true
+    throw error
+  }
 }
 
 function processGroupAlive(pgid) {
@@ -292,65 +344,110 @@ async function waitForGroupGone(pgid, timeoutMs) {
   }
 }
 
-async function assertHostGroupGone(reason) {
-  const pgid = hostPgid()
+async function assertHostGroupGone(handle, reason) {
+  const pgid = hostPgid(handle)
   if (!processGroupAlive(pgid)) return
   // The original ChildProcess and its detached PGID are still the identity we
   // created. Give the group a bounded chance to disappear, then fail closed:
-  // a live descendant means the scene cannot be called quiesced.
+  // a live descendant means the generation cannot be called quiesced.
   await waitForGroupGone(pgid, 3_000)
   if (processGroupAlive(pgid)) {
     throw new Error(`${reason}: Host process group ${String(pgid)} still has live members`)
   }
 }
 
-async function terminateHost(reason) {
-  if (host === undefined) return { code: null, signal: null, alreadyGone: true }
-  if (host.exited) {
-    await assertHostGroupGone(reason)
-    return host.exitResult ?? { code: host.child.exitCode, signal: host.child.signalCode }
-  }
-  killOwnedHost('SIGTERM')
+function readHostStarttime(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return undefined
   try {
-    await waitForChildClose(host.child, TERM_GRACE_MS)
+    return readProcessStarttime(pid)
   } catch {
-    killOwnedHost('SIGKILL')
-    try {
-      await waitForChildClose(host.child, KILL_GRACE_MS)
-    } catch (error) {
-      throw new Error(`Host ${String(host.child.pid)} did not exit after ${reason}: ${error instanceof Error ? error.message : String(error)}`)
-    }
+    return undefined
   }
-  host.exited = true
-  host.exitResult = { code: host.child.exitCode, signal: host.child.signalCode }
-  await assertHostGroupGone(reason)
-  writeReceipt({ host: { ...host.publicFacts, exitCode: host.exitResult.code, exitSignal: host.exitResult.signal } })
-  return host.exitResult
 }
 
-async function officialStopHost() {
-  if (host === undefined) throw new Error('STOP_HOST: no Host exists in this scene')
-  if (host.exited) {
-    await assertHostGroupGone('STOP_HOST')
-    const result = host.exitResult ?? { code: host.child.exitCode, signal: host.child.signalCode }
+function publicHostFacts(handle) {
+  return {
+    id: handle.hostId,
+    hostId: handle.hostId,
+    generation: handle.generation,
+    source: handle.source,
+    pid: handle.child.pid ?? null,
+    pgid: hostPgid(handle),
+    businessPid: handle.businessPid ?? null,
+    buildId: handle.buildId,
+    entryRealpath: handle.entryRealpath,
+    workRoot: handle.workRoot,
+    startedAt: handle.startedAt,
+    starttime: handle.starttime,
+    closedAt: handle.closedAt,
+    exitCode: handle.exitResult?.code ?? null,
+    exitSignal: handle.exitResult?.signal ?? null,
+    exited: handle.exited,
+  }
+}
+
+function hostLedger() {
+  return hosts.map(publicHostFacts)
+}
+
+function syncHostReceipt() {
+  const update = { hosts: hostLedger() }
+  const latest = hosts[hosts.length - 1]
+  if (latest !== undefined) update.host = publicHostFacts(latest)
+  writeReceipt(update)
+}
+
+async function terminateHost(handle, reason) {
+  if (handle === undefined) return { code: null, signal: null, alreadyGone: true }
+  if (handle.exited) {
+    await assertHostGroupGone(handle, reason)
+    return handle.exitResult ?? { code: handle.child.exitCode, signal: handle.child.signalCode }
+  }
+  killOwnedHost(handle, 'SIGTERM')
+  try {
+    await waitForChildClose(handle.child, TERM_GRACE_MS)
+  } catch {
+    killOwnedHost(handle, 'SIGKILL')
+    try {
+      await waitForChildClose(handle.child, KILL_GRACE_MS)
+    } catch (error) {
+      throw new Error(`Host ${String(handle.child.pid)} did not exit after ${reason}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  handle.exited = true
+  handle.exitResult = { code: handle.child.exitCode, signal: handle.child.signalCode }
+  handle.closedAt = now()
+  await assertHostGroupGone(handle, reason)
+  syncHostReceipt()
+  return handle.exitResult
+}
+
+async function officialStopHost(handle = activeHost) {
+  if (handle === undefined) throw new Error('STOP_HOST: no Host exists in this scene')
+  if (handle.exited) {
+    await assertHostGroupGone(handle, 'STOP_HOST')
+    const result = handle.exitResult ?? { code: handle.child.exitCode, signal: handle.child.signalCode }
     if (result.code !== 0 || result.signal !== null) {
       throw new Error(`STOP_HOST: Host had already exited abnormally: ${JSON.stringify(result)}`)
     }
     return result
   }
   try {
-    host.child.stdin.write(`${JSON.stringify({ op: 'shutdown' })}\n`)
-    const result = await waitForChildClose(host.child, HOST_SHUTDOWN_GRACE_MS)
-    host.exited = true
-    host.exitResult = result
-    await assertHostGroupGone('STOP_HOST')
-    writeReceipt({ host: { ...host.publicFacts, exitCode: result.code, exitSignal: result.signal } })
+    handle.child.stdin.write(`${JSON.stringify({ op: 'shutdown' })}\n`)
+    const result = await waitForChildClose(handle.child, HOST_SHUTDOWN_GRACE_MS)
+    handle.exited = true
+    handle.exitResult = result
+    handle.closedAt = now()
+    await assertHostGroupGone(handle, 'STOP_HOST')
+    if (activeHost === handle) activeHost = undefined
+    syncHostReceipt()
     if (result.code !== 0 || result.signal !== null) {
       throw new Error(`STOP_HOST: official shutdown was abnormal: ${JSON.stringify(result)}`)
     }
     return result
   } catch (error) {
-    await terminateHost('STOP_HOST timeout').catch(() => undefined)
+    await terminateHost(handle, 'STOP_HOST timeout').catch(() => undefined)
+    if (activeHost === handle) activeHost = undefined
     throw error
   }
 }
@@ -367,32 +464,38 @@ async function cleanup(reason) {
   if (cleanupPromise !== undefined) return await cleanupPromise
   cleanupPromise = (async () => {
     let clean = true
-    let errorMessage
     writeReceipt({
       phase: 'CLEANUP_STARTED',
       notes: [...(receipt?.notes ?? []), { event: 'cleanup-started', detail: { reason }, at: now() }],
     })
     try {
-      if (host !== undefined) {
-        if (host.exited) await assertHostGroupGone(reason)
-        else await terminateHost(reason)
+      for (const handle of [...hosts].reverse()) {
+        if (handle.exited) await assertHostGroupGone(handle, reason)
+        else await terminateHost(handle, reason)
       }
+      activeHost = undefined
       if (scene !== undefined) {
         // Only the supervisor owns the scene root. A worker crash may leave a
         // tui-test Client behind; that fact is checked by the external probe,
         // never assumed from the Supervisor receipt.
         await cleanupSceneRoot(reason)
       }
+      installInProgress = false
       writeReceipt({
         phase: clean ? 'ABORTED_CLEAN' : 'NOT_QUIESCED',
-        cleanup: { reason, completedAt: now(), hostExited: host === undefined ? undefined : host.exited },
+        cleanup: {
+          reason,
+          completedAt: now(),
+          hostsExited: hosts.every(handle => handle.exited),
+          sceneRootRemoved: scene === undefined ? undefined : !existsSync(scene.workDir),
+        },
+        install: { ...(receipt?.install ?? {}), inProgress: false },
       })
     } catch (error) {
       clean = false
-      errorMessage = error instanceof Error ? error.message : String(error)
       writeReceipt({ phase: 'NOT_QUIESCED', cleanup: { reason, errorName: boundedError(error), completedAt: now() } })
     }
-    return { clean, errorMessage }
+    return { clean }
   })()
   return await cleanupPromise
 }
@@ -409,6 +512,93 @@ function publicInstallation(installation) {
   }
 }
 
+function installedPackageFacts(packageRoot, expectedVersion, targetDshVersion, label) {
+  const root = realpathSync(packageRoot)
+  const manifest = readJson(join(root, 'package.json'), `${label} package.json`)
+  if (manifest.name !== EXPECTED_PACKAGE_NAME) {
+    throw new Error(`${label}: installed package name is ${String(manifest.name)}`)
+  }
+  if (expectedVersion !== undefined && manifest.version !== expectedVersion) {
+    throw new Error(`${label}: installed package version ${String(manifest.version)} != expected ${expectedVersion}`)
+  }
+  const hostEntry = realpathSync(join(root, 'dist', 'local-host.mjs'))
+  const clientEntry = realpathSync(join(root, 'dist', 'local-client.mjs'))
+  return {
+    packageRoot: root,
+    version: manifest.version,
+    buildId: productionBuildId(root, targetDshVersion),
+    payloadHash: installedPayloadHash(root),
+    entries: { host: hostEntry, client: clientEntry },
+  }
+}
+
+function assertPairReceipt(pair, expectedPairSha) {
+  if (expectedPairSha === null || typeof expectedPairSha !== 'object') {
+    throw new Error('INPUT_UNQUALIFIED: BOOTSTRAP_UPGRADE requires expectedPairSha')
+  }
+  if (expectedPairSha.old !== pair.old.sha256 || expectedPairSha.new !== pair.new.sha256) {
+    throw new Error('INPUT_UNQUALIFIED: INPUT_PAIR_CHANGED (INVALID_TEST_PAIRING, not a product regression): '
+      + 'the Supervisor re-read different old/new package bytes than the Worker preflight')
+  }
+}
+
+/**
+ * A side-by-side package runs as a REAL installed package, but its declared
+ * `@deepseek-ai/*` peers belong to the ONE isolated DSH runtime anchored by the
+ * harness. Link only those peer packages into the side directory; the side
+ * payload itself is never copied or rewritten. This is the same peer closure the
+ * official profile runner supplies to the active profile install.
+ */
+function linkSideBuildRuntimePeers(sideDir, installation, packageRoot) {
+  const targetDir = join(sideDir, 'node_modules', '@deepseek-ai')
+  mkdirSync(targetDir, { recursive: true })
+  // The isolated harness's hidden pnpm hoist carries the exact DSH family the
+  // anchor install resolved. Link exactly the peer packages this side payload
+  // declares; the payload itself and its dependency closure are untouched.
+  const hoistDir = join(installation.harnessDir, 'node_modules', '.pnpm', 'node_modules', '@deepseek-ai')
+  if (!existsSync(hoistDir)) {
+    throw new Error(`the isolated DSH harness has no @deepseek-ai family closure at ${hoistDir}`)
+  }
+  const manifest = readJson(join(packageRoot, 'package.json'), 'side package.json')
+  const names = Object.keys(manifest.peerDependencies ?? {}).filter(name => name.startsWith('@deepseek-ai/'))
+  for (const name of names) {
+    const linkPath = join(targetDir, name.slice('@deepseek-ai/'.length))
+    if (existsSync(linkPath)) continue
+    const source = join(hoistDir, name.slice('@deepseek-ai/'.length))
+    if (!existsSync(source)) {
+      throw new Error(`the isolated DSH harness does not carry the declared peer ${name}`)
+    }
+    symlinkSync(realpathSync(source), linkPath, 'dir')
+  }
+}
+
+async function installProfilePackage(tarball) {
+  const before = existsSync(scene.installation.profilePackage)
+    ? installedPayloadHash(realpathSync(scene.installation.profilePackage))
+    : undefined
+  installInProgress = true
+  writeReceipt({ install: { inProgress: true, completed: false, startedAt: now(), completedAt: undefined } })
+  try {
+    installPlugin(scene.installation.dshInvocation, tarball, scene.installation.harnessDir, scene.installation.env, false)
+    const facts = installedPackageFacts(
+      join(scene.installation.profileDir, 'node_modules', '@xmoon76', 'dsh-pi-tui'),
+      undefined,
+      scene.pair.targetDshVersion,
+      'active profile',
+    )
+    if (before !== undefined && before === facts.payloadHash) {
+      throw new Error('the active profile package payload did not change after the official install')
+    }
+    installInProgress = false
+    writeReceipt({ install: { inProgress: false, completed: true, startedAt: receipt.install?.startedAt, completedAt: now() } })
+    return facts
+  } catch (error) {
+    installInProgress = false
+    writeReceipt({ install: { inProgress: false, completed: false, failedAt: now() } })
+    throw error
+  }
+}
+
 async function handleBootstrap(message) {
   await modulesReady
   if (scene !== undefined) throw new Error('BOOTSTRAP: scene already exists')
@@ -418,7 +608,7 @@ async function handleBootstrap(message) {
   }
   installInProgress = true
   const tmpBase = validateTmpBase(message.tmpBase)
-  initReceipt(tmpBase, { pid: message.workerPid, ppid: message.workerPpid })
+  initReceipt(tmpBase, { pid: message.workerPid, ppid: message.workerPpid }, { kind: 'pilot' })
   let root
   let candidate
   let installation
@@ -428,7 +618,7 @@ async function handleBootstrap(message) {
     root = createTestTempDir('scene-', tmpBase)
     // Register the root before install so a later disconnect still owns and
     // retries removal even if installation fails half-way.
-    scene = { workDir: root }
+    scene = { kind: 'pilot', workDir: root }
     appendNote('bootstrap-root-created', { sceneRoot: root })
     writeReceipt({ phase: 'BOOTSTRAP_ROOT_CREATED', sceneRoot: root, install: { inProgress: true, completed: false, startedAt: now(), completedAt: undefined } })
     installation = createSplitSmokeProfile({
@@ -437,7 +627,7 @@ async function handleBootstrap(message) {
       workDir: root,
     })
     c1Work = writeC1WorkFixture(installation.profileDir, root)
-    scene = { workDir: root, installation, candidate, c1Work }
+    scene = { kind: 'pilot', workDir: root, installation, candidate, c1Work }
   } catch (error) {
     installInProgress = false
     let cleanupError
@@ -479,10 +669,257 @@ async function handleBootstrap(message) {
   }
 }
 
+async function handleBootstrapUpgrade(message) {
+  await modulesReady
+  if (scene !== undefined) throw new Error('BOOTSTRAP_UPGRADE: scene already exists')
+  if (!Number.isInteger(message.workerPid) || message.workerPid <= 0
+    || !Number.isInteger(message.workerPpid) || message.workerPpid <= 0) {
+    throw new Error('INPUT_UNQUALIFIED: BOOTSTRAP_UPGRADE requires real workerPid and workerPpid')
+  }
+  if (typeof message.sceneId !== 'string' || message.sceneId === '') {
+    throw new Error('INPUT_UNQUALIFIED: BOOTSTRAP_UPGRADE requires a sceneId')
+  }
+  installInProgress = true
+  const tmpBase = validateTmpBase(message.tmpBase)
+  initReceipt(tmpBase, { pid: message.workerPid, ppid: message.workerPpid }, {
+    kind: 'upgrade',
+    sceneId: message.sceneId,
+    parentRunId: typeof message.parentRunId === 'string' && message.parentRunId !== '' ? message.parentRunId : undefined,
+  })
+  let root
+  let pair
+  let installation
+  let c1Work
+  let oldProfile
+  try {
+    pair = inspectSplitUpgradePair(message.oldTgz, message.newTgz, { policy: 'default' })
+    assertPairReceipt(pair, message.expectedPairSha)
+    root = createTestTempDir('upgrade-scene-', tmpBase)
+    scene = { kind: 'upgrade', workDir: root, pair, sideOld: undefined, sideNew: undefined, profileInstall: undefined }
+    appendNote('bootstrap-root-created', { sceneRoot: root })
+    writeReceipt({
+      phase: 'UPGRADE_BOOTSTRAP_ROOT_CREATED',
+      sceneRoot: root,
+      pair: {
+        old: { path: pair.old.path, version: pair.old.version, sha256: pair.old.sha256, manifestPin: pair.old.manifestPin },
+        new: { path: pair.new.path, version: pair.new.version, sha256: pair.new.sha256, manifestPin: pair.new.manifestPin },
+        targetDshVersion: pair.targetDshVersion,
+        policy: pair.policy,
+      },
+      install: { inProgress: true, completed: false, startedAt: now(), completedAt: undefined },
+    })
+    installation = createSplitSmokeProfile({
+      tarball: pair.old.path,
+      targetDshVersion: pair.targetDshVersion,
+      workDir: root,
+      clientPlatformProvisioning: 'legacy-preseed',
+    })
+    c1Work = writeC1WorkFixture(installation.profileDir, root)
+    oldProfile = installedPackageFacts(installation.profilePackage, pair.old.version, pair.targetDshVersion, 'old profile')
+    scene = { kind: 'upgrade', workDir: root, pair, installation, c1Work, sideOld: undefined, sideNew: undefined, profileInstall: oldProfile }
+  } catch (error) {
+    installInProgress = false
+    let cleanupError
+    if (root !== undefined) {
+      try {
+        rmSync(root, { recursive: true, force: true })
+        scene = undefined
+      } catch (removeError) {
+        cleanupError = boundedError(removeError)
+      }
+    }
+    writeReceipt({
+      phase: 'NOT_QUIESCED',
+      errorName: boundedError(error),
+      cleanupError,
+      install: { inProgress: false, completed: false, failedAt: now() },
+    })
+    throw error
+  }
+  installInProgress = false
+  writeReceipt({
+    phase: 'INSTALL_COMPLETE',
+    install: { inProgress: false, completed: true, startedAt: receipt.install?.startedAt, completedAt: now() },
+    profile: { old: oldProfile },
+  })
+  if (disconnected || process.connected !== true) {
+    await cleanup('worker-disconnected-during-bootstrap')
+    return undefined
+  }
+  writeReceipt({
+    phase: 'SCENE_READY',
+    profile: { old: oldProfile },
+  })
+  return {
+    workDir: root,
+    pair,
+    installation: publicInstallation(installation),
+    c1Work: { patchPath: c1Work.patchPath },
+    oldProfile,
+  }
+}
+
+async function handleUpgradeOldProfile() {
+  if (scene?.kind !== 'upgrade') throw new Error('UPGRADE_INSTALL_OLD_PROFILE: no upgrade scene')
+  // BOOTSTRAP already performed the one real old-profile install; this is the
+  // idempotent read-only result method, never a second pnpm transaction.
+  const facts = installedPackageFacts(scene.installation.profilePackage, scene.pair.old.version, scene.pair.targetDshVersion, 'old profile')
+  scene.profileInstall = facts
+  writeReceipt({ profile: { ...(receipt.profile ?? {}), old: facts } })
+  return facts
+}
+
+async function handleUpgradeInstallSide(message, role) {
+  if (scene?.kind !== 'upgrade') throw new Error('UPGRADE_INSTALL_SIDE: no upgrade scene')
+  if (role !== 'old' && role !== 'new') throw new Error(`UPGRADE_INSTALL_SIDE: unknown role ${String(role)}`)
+  assertSplitUpgradePairStillQualified(scene.pair)
+  const dir = join(scene.workDir, role === 'old' ? 'side-old' : 'side-new')
+  installInProgress = true
+  writeReceipt({
+    phase: role === 'old' ? 'SIDE_OLD_INSTALL_STARTED' : 'SIDE_NEW_INSTALL_STARTED',
+    notes: [...(receipt?.notes ?? []), { event: `${role}-side-install-started`, detail: { dir }, at: now() }],
+    install: { inProgress: true, completed: false, startedAt: now(), completedAt: undefined },
+  })
+  let facts
+  try {
+    const packageRoot = installSideBuild(
+      dir,
+      scene.pair[role].path,
+      scene.installation.env,
+      scene.pair.targetDshVersion,
+      { legacyClientPeers: role === 'old' },
+    )
+    facts = installedPackageFacts(packageRoot, scene.pair[role].version, scene.pair.targetDshVersion, `side-${role}`)
+    linkSideBuildRuntimePeers(dir, scene.installation, packageRoot)
+    if (role === 'old') scene.sideOld = facts
+    else {
+      if (scene.sideOld !== undefined && scene.sideOld.version === facts.version && scene.sideOld.buildId === facts.buildId) {
+        throw new Error('INPUT_UNQUALIFIED: INPUT_PAIR_BUILD_ID_EQUAL (INVALID_TEST_PAIRING, not a product regression): '
+          + 'the same-SemVer native pair produced identical production build ids')
+      }
+      scene.sideNew = facts
+    }
+    installInProgress = false
+    writeReceipt({
+      install: { inProgress: false, completed: true, startedAt: receipt.install?.startedAt, completedAt: now() },
+      sideBuilds: {
+        ...(receipt.sideBuilds ?? {}),
+        [role]: { packageRoot: facts.packageRoot, version: facts.version, buildId: facts.buildId, payloadHash: facts.payloadHash },
+      },
+      phase: role === 'old' ? 'SIDE_OLD_INSTALLED' : 'SIDE_NEW_INSTALLED',
+    })
+    return facts
+  } catch (error) {
+    installInProgress = false
+    writeReceipt({ install: { inProgress: false, completed: false, failedAt: now() }, phase: 'NOT_QUIESCED', errorName: boundedError(error) })
+    throw error
+  }
+}
+
+async function handleUpgradeInstallNewProfileForReload() {
+  if (scene?.kind !== 'upgrade') throw new Error('UPGRADE_INSTALL_NEW_PROFILE_FOR_RELOAD: no upgrade scene')
+  if (activeHost === undefined) throw new Error('UPGRADE_INSTALL_NEW_PROFILE_FOR_RELOAD: no active Host')
+  if (activeHost.source !== 'side-old' || scene.sideOld === undefined) {
+    throw new Error('UPGRADE_INSTALL_NEW_PROFILE_FOR_RELOAD: the active Host must run from the side-old package root')
+  }
+  const sideOldRelative = relative(scene.sideOld.packageRoot, activeHost.entryRealpath)
+  if (sideOldRelative === '' || sideOldRelative === '..' || sideOldRelative.startsWith(`..${sep}`)) {
+    throw new Error('UPGRADE_INSTALL_NEW_PROFILE_FOR_RELOAD: the active Host entry is outside the side-old package')
+  }
+  assertSplitUpgradePairStillQualified(scene.pair)
+  const sideOldHashBefore = installedPayloadHash(scene.sideOld.packageRoot)
+  if (sideOldHashBefore !== scene.sideOld.payloadHash) {
+    throw new Error('UPGRADE_INSTALL_NEW_PROFILE_FOR_RELOAD: the side-old payload changed')
+  }
+  const hostPidBefore = activeHost.child.pid
+  const pgidBefore = hostPgid(activeHost)
+  if (!pidAlive(hostPidBefore) || !processGroupAlive(pgidBefore)) {
+    throw new Error('UPGRADE_INSTALL_NEW_PROFILE_FOR_RELOAD: the active Host is not alive before the profile update')
+  }
+  const statusBefore = await queryHostStatus(activeHost)
+  const identityBefore = safeIdentity(statusBefore.localHost)
+  const facts = await installProfilePackage(scene.pair.new.path)
+  if (process.env.SPLIT_VITEST_UPGRADE_HOST_EXIT_AFTER_PROFILE_INSTALL === '1') {
+    // Test-harness negative control for the fresh-liveness contract: the
+    // install succeeded, but the owned Host disappears before the post-install
+    // status check. This must be observed as a failure, never papered over by
+    // the cached ready record.
+    await terminateHost(activeHost, 'injected-host-exit-during-profile-install')
+  }
+  if (activeHost.exited || activeHost.child.exitCode !== null || activeHost.child.signalCode !== null
+    || !pidAlive(hostPidBefore) || !processGroupAlive(pgidBefore)) {
+    throw new Error('UPGRADE_INSTALL_NEW_PROFILE_FOR_RELOAD: the active Host exited during the profile update')
+  }
+  const statusAfter = await queryHostStatus(activeHost)
+  assertIdentityKept(safeIdentity(statusAfter.localHost), identityBefore, 'UPGRADE_INSTALL_NEW_PROFILE_FOR_RELOAD')
+  const sideOldHashAfter = installedPayloadHash(scene.sideOld.packageRoot)
+  if (sideOldHashAfter !== sideOldHashBefore) {
+    throw new Error('UPGRADE_INSTALL_NEW_PROFILE_FOR_RELOAD: the official install modified the live side-old payload')
+  }
+  scene.profileInstall = facts
+  writeReceipt({ profile: { ...(receipt.profile ?? {}), newForReload: facts }, phase: 'NEW_PROFILE_INSTALLED_FOR_RELOAD' })
+  return facts
+}
+
+async function handleUpgradeActivateNewProfileAfterStop() {
+  if (scene?.kind !== 'upgrade') throw new Error('UPGRADE_ACTIVATE_NEW_PROFILE_AFTER_STOP: no upgrade scene')
+  if (activeHost !== undefined) throw new Error('UPGRADE_ACTIVATE_NEW_PROFILE_AFTER_STOP: a Host is still active')
+  const first = hosts[0]
+  if (first === undefined || first.generation !== 1) {
+    throw new Error('UPGRADE_ACTIVATE_NEW_PROFILE_AFTER_STOP: no old Profile Host generation was recorded')
+  }
+  if (!first.exited || first.exitResult?.code !== 0 || first.exitResult?.signal !== null) {
+    throw new Error('UPGRADE_ACTIVATE_NEW_PROFILE_AFTER_STOP: the old Host was not officially stopped')
+  }
+  for (const handle of hosts) await assertHostGroupGone(handle, 'UPGRADE_ACTIVATE_NEW_PROFILE_AFTER_STOP')
+  assertSplitUpgradePairStillQualified(scene.pair)
+  const facts = await installProfilePackage(scene.pair.new.path)
+  scene.profileInstall = facts
+  writeReceipt({ profile: { ...(receipt.profile ?? {}), new: facts }, phase: 'NEW_PROFILE_ACTIVATED' })
+  return facts
+}
+
 async function handleStartHost(message) {
   if (scene === undefined) throw new Error('START_HOST: no scene')
-  if (host !== undefined) throw new Error('START_HOST: one Host per scene is supported')
-  const workRoot = join(scene.workDir, `c1-${message.scenario}`)
+  if (activeHost !== undefined) throw new Error('START_HOST: one active Host per scene is supported')
+  if (scene.kind === 'pilot' && hosts.length > 0) throw new Error('START_HOST: one Host per scene is supported')
+
+  let source = 'profile'
+  let entry
+  let entryRealpath
+  let buildId
+  let expectedVersion
+  if (scene.kind === 'upgrade') {
+    source = message.source ?? 'profile'
+    if (source !== 'profile' && source !== 'side-old') {
+      throw new Error(`START_HOST: U0 only starts profile or side-old Hosts, got ${String(source)}`)
+    }
+    if (source === 'side-old') {
+      if (scene.sideOld === undefined) throw new Error('START_HOST: side-old has not been installed')
+      if (installedPayloadHash(scene.sideOld.packageRoot) !== scene.sideOld.payloadHash) {
+        throw new Error('START_HOST: the side-old payload changed after its installation')
+      }
+      expectedVersion = scene.pair.old.version
+      entry = scene.sideOld.entries.host
+      buildId = scene.sideOld.buildId
+    } else {
+      const packageRoot = realpathSync(scene.installation.profilePackage)
+      const expected = scene.profileInstall
+      if (expected === undefined) throw new Error('START_HOST: the active profile install facts are missing')
+      if (installedPayloadHash(packageRoot) !== expected.payloadHash) {
+        throw new Error('START_HOST: the active profile payload changed after its installation')
+      }
+      expectedVersion = expected.version
+      entry = realpathSync(join(packageRoot, 'dist', 'local-host.mjs'))
+      buildId = productionBuildId(packageRoot, scene.pair.targetDshVersion)
+    }
+    entryRealpath = realpathSync(entry)
+  } else {
+    entry = scene.installation.entries.host
+    entryRealpath = realpathSync(entry)
+  }
+
+  const workRoot = join(scene.workDir, `c1-${message.scenario}-${String(hosts.length + 1)}`)
   mkdirSync(workRoot, { recursive: true, mode: 0o700 })
   const env = {
     ...scene.installation.base.env,
@@ -492,11 +929,11 @@ async function handleStartHost(message) {
     DSH_PI_TUI_ENTRY_RECORDS: '1',
     SPLIT_PROCESS_DSH_ANCHOR: scene.installation.anchor,
     SPLIT_PROCESS_PROFILE: 'pi-tui',
-    SPLIT_PROCESS_SCRATCH: join(scene.workDir, `host-scratch-${message.scenario}`),
+    SPLIT_PROCESS_SCRATCH: join(scene.workDir, `host-scratch-${message.scenario}-${String(hosts.length + 1)}`),
     ...(message.extraEnv ?? {}),
   }
   mkdirSync(env.SPLIT_PROCESS_SCRATCH, { recursive: true, mode: 0o700 })
-  const child = spawn(process.execPath, [scene.installation.entries.host], {
+  const child = spawn(process.execPath, [entryRealpath], {
     cwd: scene.installation.base.cwd,
     env,
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -515,102 +952,174 @@ async function handleStartHost(message) {
   })
   child.stderr.setEncoding('utf8')
   child.stderr.on('data', chunk => { stderr += chunk })
-  const hostId = `host-${String(child.pid)}-${String(Date.now())}`
-  let spawnError
-  child.once('error', error => {
-    spawnError = error
-    if (host !== undefined) host.spawnError = error
-    writeReceipt({ phase: 'HOST_SPAWN_ERROR', errorName: boundedError(error) })
-  })
-  host = {
-    id: hostId,
+  const generation = hosts.length + 1
+  const hostId = `host-${String(generation)}-${String(child.pid)}-${String(Date.now())}`
+  const handle = {
+    hostId,
+    generation,
+    source,
     child,
     records,
     workRoot,
+    entryRealpath,
+    buildId,
+    expectedVersion,
+    ready: undefined,
+    businessPid: null,
+    startedAt: now(),
+    starttime: readHostStarttime(child.pid),
+    closedAt: undefined,
     exited: false,
     exitResult: undefined,
-    spawnError,
-    publicFacts: { id: hostId, pid: child.pid ?? null, pgid: child.pid ?? null, workRoot },
+    spawnError: undefined,
+    pgid: child.pid ?? null,
   }
-  child.once('close', (code, signal) => {
-    if (host === undefined) return
-    host.exited = true
-    host.exitResult = { code, signal }
-    writeReceipt({ host: { ...host.publicFacts, exitCode: code, exitSignal: signal } })
+  activeHost = handle
+  hosts.push(handle)
+  // Every handler closes over its OWN generation object. A later generation
+  // must never receive an earlier child's close/error event.
+  child.once('error', error => {
+    handle.spawnError = error
+    writeReceipt({ phase: 'HOST_SPAWN_ERROR', errorName: boundedError(error), hostId, generation })
   })
-  appendNote('host-spawned', { hostId, pid: child.pid ?? null, workerPid: receipt.worker?.pid, workRoot })
-  writeReceipt({ phase: 'HOST_SPAWNED', host: host.publicFacts })
-  progress(message.requestId, 'HOST_SPAWNED', { hostId, pid: child.pid ?? null, workRoot })
-  if (process.env.SPLIT_VITEST_WORKER_KILL_POINT === 'host-spawned-before-ack') {
+  child.once('close', (code, signal) => {
+    handle.exited = true
+    handle.exitResult = { code, signal }
+    handle.closedAt = now()
+    syncHostReceipt()
+  })
+  appendNote('host-spawned', {
+    hostId,
+    generation,
+    source,
+    pid: child.pid ?? null,
+    workerPid: receipt.worker?.pid,
+    workRoot,
+  })
+  syncHostReceipt()
+  writeReceipt({ phase: 'HOST_SPAWNED' })
+  progress(message.requestId, 'HOST_SPAWNED', { hostId, generation, pid: child.pid ?? null, workRoot })
+  if (process.env.SPLIT_VITEST_WORKER_KILL_POINT === 'host-spawned-before-ack'
+    || (process.env.SPLIT_VITEST_UPGRADE_KILL_POINT === 'new-host-spawned-before-ack' && generation === 2)) {
     appendNote('host-spawned-before-ack-barrier', {
       hostId,
+      generation,
       hostPid: child.pid ?? null,
       workerPid: receipt.worker?.pid,
       workerPpid: receipt.worker?.ppid,
     })
-    writeReceipt({ phase: 'HOST_SPAWNED_BEFORE_ACK', host: host.publicFacts })
+    writeReceipt({ phase: 'HOST_SPAWNED_BEFORE_ACK' })
     await waitForWorkerKillBarrier()
     throw new Error('START_HOST: worker was killed at the host-spawned-before-ack barrier')
   }
 
   let ready
   try {
-    ready = await waitForHostRecord(host, record => record.m4a0 === 'ready' || record.m4a0 === 'failure',
+    ready = await waitForHostRecord(handle, record => record.m4a0 === 'ready' || record.m4a0 === 'failure',
       `${message.scenario} Host ready`, HOST_READY_TIMEOUT_MS)
   } catch (error) {
-    if (host.spawnError !== undefined) {
-      host.exited = true
-      host.exitResult = { code: null, signal: null }
+    if (handle.spawnError !== undefined) {
+      handle.exited = true
+      handle.exitResult = { code: null, signal: null }
+      handle.closedAt = now()
     } else {
-      await terminateHost('START_HOST wait failed').catch(() => undefined)
+      await terminateHost(handle, 'START_HOST wait failed').catch(() => undefined)
     }
     throw error
   }
   if (ready.m4a0 === 'failure') {
-    await terminateHost('Host reported startup failure').catch(() => undefined)
+    await terminateHost(handle, 'Host reported startup failure').catch(() => undefined)
     throw new Error(`${message.scenario} Host boot failed: ${JSON.stringify({
       code: ready.code,
       error: ready.error,
       phase: ready.phase,
     })}${stderr === '' ? '' : ' (Host stderr present)'}`)
   }
-  host.publicFacts = { ...host.publicFacts, businessPid: ready.pid ?? null }
-  writeReceipt({ phase: 'HOST_READY', host: host.publicFacts })
-  return { hostId, ready, workRoot }
+  if (scene.kind === 'upgrade' && ready.localHost?.buildId !== handle.buildId) {
+    await terminateHost(handle, 'Host build identity mismatch').catch(() => undefined)
+    throw new Error(`START_HOST: Host published buildId ${String(ready.localHost?.buildId)} but the installed ${source} package is ${String(handle.buildId)}`)
+  }
+  handle.ready = ready
+  handle.businessPid = ready.pid ?? null
+  syncHostReceipt()
+  writeReceipt({ phase: 'HOST_READY' })
+  return {
+    hostId,
+    generation,
+    ready,
+    workRoot,
+    source,
+    buildId: handle.buildId,
+    entryRealpath: handle.entryRealpath,
+  }
+}
+
+async function queryHostStatus(handle) {
+  if (handle === undefined || handle.exited || handle.child.exitCode !== null || handle.child.signalCode !== null) {
+    throw new Error('HOST_STATUS: Host already exited')
+  }
+  if (!pidAlive(handle.child.pid) || !processGroupAlive(hostPgid(handle))) {
+    throw new Error('HOST_STATUS: Host OS process or process group is not alive')
+  }
+  const hostRequestId = `supervisor-host-status-${String(++hostStatusSequence)}`
+  handle.child.stdin.write(`${JSON.stringify({ op: 'status', requestId: hostRequestId })}\n`)
+  const status = await waitForHostRecord(handle,
+    record => record.m4a0 === 'status' && record.requestId === hostRequestId,
+    `Host status ${hostRequestId}`, 30_000)
+  if (status.localHost === undefined || status.localHost === null) {
+    throw new Error('HOST_STATUS: the official status response carries no localHost identity')
+  }
+  return status
 }
 
 async function handleHostStatus(message) {
-  if (host === undefined || host.id !== message.hostId) throw new Error('HOST_STATUS: unknown hostId')
-  if (host.exited) throw new Error('HOST_STATUS: Host already exited')
-  const hostRequestId = String(message.hostRequestId)
-  host.child.stdin.write(`${JSON.stringify({ op: 'status', requestId: hostRequestId })}\n`)
-  return await waitForHostRecord(host,
-    record => record.m4a0 === 'status' && record.requestId === hostRequestId,
-    `Host status ${hostRequestId}`, 30_000)
+  const handle = activeHost
+  if (handle === undefined || handle.hostId !== message.hostId) throw new Error('HOST_STATUS: unknown hostId')
+  return await queryHostStatus(handle)
 }
 
 async function handleFinalize(message) {
   let hostStopError
   // A failed native Client close must not prevent the final Host reclaim.
-  if (host !== undefined) {
+  if (activeHost !== undefined) {
     try {
-      if (host.exited) {
-        await assertHostGroupGone('FINALIZE')
-        if (host.exitResult === undefined) throw new Error('FINALIZE: Host has no real exit record')
-      } else {
-        await officialStopHost()
-      }
+      await officialStopHost(activeHost)
     } catch (error) {
       hostStopError = error
+    }
+  }
+  for (const handle of hosts) {
+    if (!handle.exited) {
+      try {
+        await terminateHost(handle, 'FINALIZE')
+      } catch (error) {
+        hostStopError = hostStopError ?? error
+      }
+    } else {
+      try {
+        await assertHostGroupGone(handle, 'FINALIZE')
+      } catch (error) {
+        hostStopError = hostStopError ?? error
+      }
     }
   }
   if (message.clientsClosed !== true) {
     writeReceipt({ phase: 'NOT_QUIESCED', errorName: 'FINALIZE_CLIENTS_NOT_CLOSED' })
     throw new Error('FINALIZE: worker did not confirm Clients closed')
   }
+  for (const client of receipt.clients ?? []) {
+    for (const pid of client.businessPids ?? []) {
+      if (pidAlive(pid)) {
+        writeReceipt({ phase: 'NOT_QUIESCED', errorName: 'FINALIZE_CLIENT_BUSINESS_PID_ALIVE', client: client.label, pid })
+        throw new Error(`FINALIZE: business Client PID ${String(pid)} is still alive (${String(client.label)})`)
+      }
+    }
+  }
   if (hostStopError !== undefined) throw hostStopError
-  if (host !== undefined && (host.exitResult?.code !== 0 || host.exitResult?.signal !== null)) {
-    throw new Error(`FINALIZE: Host did not exit normally: ${JSON.stringify(host.exitResult)}`)
+  for (const handle of hosts) {
+    if (handle.exitResult?.code !== 0 || handle.exitResult?.signal !== null) {
+      throw new Error(`FINALIZE: Host generation ${String(handle.generation)} did not exit normally: ${JSON.stringify(handle.exitResult)}`)
+    }
   }
   if (scene !== undefined) {
     await cleanupSceneRoot('FINALIZE')
@@ -622,10 +1131,16 @@ async function handleFinalize(message) {
 async function handleReport(message) {
   const detail = message.detail === undefined ? undefined : message.detail
   if (message.event === 'client-started' && detail !== undefined) {
+    const businessPids = Array.isArray(detail.businessPids)
+      ? detail.businessPids.filter(pid => Number.isInteger(pid) && pid > 0)
+      : []
     receipt.clients = [...(receipt.clients ?? []), {
       label: detail.label,
       session: detail.session,
       shellPid: detail.shellPid ?? null,
+      recordFile: typeof detail.recordFile === 'string' ? detail.recordFile : undefined,
+      businessPids,
+      businessPid: businessPids.at(-1) ?? null,
       startedAt: now(),
     }]
     writeReceipt({})
@@ -645,6 +1160,36 @@ async function dispatch(message) {
         if (payload !== undefined && requestId !== undefined) reply(requestId, payload)
         break
       }
+      case 'BOOTSTRAP_UPGRADE': {
+        const payload = await handleBootstrapUpgrade(message)
+        if (payload !== undefined && requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'UPGRADE_INSTALL_OLD_PROFILE': {
+        const payload = await handleUpgradeOldProfile()
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'UPGRADE_INSTALL_SIDE_OLD': {
+        const payload = await handleUpgradeInstallSide(message, 'old')
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'UPGRADE_INSTALL_SIDE_NEW': {
+        const payload = await handleUpgradeInstallSide(message, 'new')
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'UPGRADE_INSTALL_NEW_PROFILE_FOR_RELOAD': {
+        const payload = await handleUpgradeInstallNewProfileForReload()
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'UPGRADE_ACTIVATE_NEW_PROFILE_AFTER_STOP': {
+        const payload = await handleUpgradeActivateNewProfileAfterStop()
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
       case 'START_HOST': {
         const payload = await handleStartHost(message)
         if (requestId !== undefined) reply(requestId, payload)
@@ -656,9 +1201,10 @@ async function dispatch(message) {
         break
       }
       case 'STOP_HOST': {
-        if (host === undefined || host.id !== message.hostId) throw new Error('STOP_HOST: unknown hostId')
-        const result = await officialStopHost()
-        if (requestId !== undefined) reply(requestId, { code: result.code, signal: result.signal })
+        if (activeHost === undefined || activeHost.hostId !== message.hostId) throw new Error('STOP_HOST: unknown hostId')
+        const stopped = activeHost
+        const result = await officialStopHost(stopped)
+        if (requestId !== undefined) reply(requestId, { code: result.code, signal: result.signal, generation: stopped.generation })
         break
       }
       case 'FINALIZE': {

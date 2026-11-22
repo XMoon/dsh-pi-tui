@@ -634,13 +634,26 @@ Linux CI lane. Its L0 input/opt-in guard is
 
 ### Split-process Vitest E2E
 
-`mise exec -- pnpm test:split:vitest` runs the opt-in split-process E2E files under
-`test/integration/*.vitest.ts` through Vitest and the real tui-test terminal
-backend. It is deliberately not part of `mise run test`, `mise run check`, or the
-release gate. It requires `SPLIT_VITEST_TMP_BASE` (a private 0700 directory outside
-this checkout) and `SPLIT_VITEST_CANDIDATE_TGZ` (the exact built candidate tarball).
+`mise exec -- pnpm test:split:vitest` runs the opt-in split-process Pilot E2E files
+through the `split-process` Vitest project and the real tui-test terminal backend.
+It is deliberately not part of `mise run test`, `mise run check`, or the release
+gate. It requires `SPLIT_VITEST_TMP_BASE` (a private 0700 directory outside this
+checkout) and `SPLIT_VITEST_CANDIDATE_TGZ` (the exact built candidate tarball).
 The accompanying Supervisor probe is run separately with an explicit mode, for
 example `mise exec -- node test/support/split-supervisor-signal-probe.mjs --mode main-signal --signal SIGTERM`.
+
+`mise exec -- pnpm test:split:upgrade` selects only the `split-upgrade` project.
+It requires `SPLIT_VITEST_TMP_BASE` plus two absolute, single-hard-link `.tgz`
+artifacts from genuinely different builds: `SPLIT_VITEST_UPGRADE_OLD_TGZ` and
+`SPLIT_VITEST_UPGRADE_NEW_TGZ`. Both packages must name
+`@xmoon76/dsh-pi-tui`, declare a readable SemVer version and the same exact
+`@deepseek-ai/dsh-agent` development pin as this checkout; the default project
+requires different package versions and different SHA256 digests. The pair is
+qualified before any scene root, profile install or Host exists, and an invalid
+pairing fails as `INPUT_UNQUALIFIED`, not as a product regression. The two native
+projects (`test:split:upgrade:systemd`, `test:split:upgrade:launchd`) are explicit
+opt-in entries only: no default command selects them. An empty project run exits non-zero with no tests; that empty result is a
+truthful `NOT_READY`, never an Upgrade PASS.
 
 ### Isolated single-file and probe runs
 
