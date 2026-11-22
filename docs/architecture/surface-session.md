@@ -59,17 +59,24 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   ordinary history; every other Workspace starts as its Folder row only.
   Explicit manual collapse hides EVERY
   child row, active and current ones included, and leaves the Folder row with
-  its trustworthy counts; `Enter`/`Right` restores the automatic view, `Left`
-  collapses again. An expanded non-current Workspace starts at five ordinary
-  rows (the current or a Host-confirmed next-create destination at eight), and
-  `Show more` adds five more; the operation disappears when history is
-  exhausted. Folder, Session and Show more are separate typed targets, not
-  PickerGroup headers.
-- **PiTUI spends spare list rows on ordinary history, up to a per-group cap.**
-  In the ORDINARY Browse list the panel raises the watermark of ALREADY EXPANDED
-  groups by ONE ordinary row per step while this frame's actual list budget (the
-  pane height the layout gave the list, less the status rows the list itself
-  paints) still has spare rows, up to twenty ordinary rows per group. The
+  its trustworthy right-aligned `N Needs`/`M Working` counts; a non-zero count
+  stays whole on a narrow row while zero counts yield first. `Enter`/`Right`
+  restores the automatic view, `Left` collapses again. An expanded non-current
+  Workspace starts at five ordinary rows (the current or a Host-confirmed
+  next-create destination at eight). The shared projection and TSP native keep
+  that five-row manual step; this PiTUI panel's own `Show more` reveals ONE
+  honestly painted list page from its current watermark (at least five rows) and
+  selects the first newly revealed ordinary history row. The operation
+  disappears when history is exhausted. Folder, Session and Show more are
+  separate typed targets, not PickerGroup headers.
+- **PiTUI fills spare list rows with ordinary history until the viewport or the
+  real roster is exhausted.** In the ORDINARY Browse list the panel raises the
+  watermark of ALREADY EXPANDED groups by ONE ordinary row per step while this
+  frame's actual list budget (the pane height the layout gave the list, less the
+  status rows the list itself paints) still has spare rows. There is no fixed
+  per-group cap: growth stops only at the real roster's ordinary-history count
+  or when the fully re-projected final row list no longer fits `listCapacity`;
+  the watermark map is committed only after that projection proves the fit. The
   Sessionless `Choose workspace` chooser never grows: it selects an existing
   Workspace, so its spare height stays free instead of filling with unrelated
   Session rows.
@@ -77,14 +84,13 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   official order, so one large Workspace cannot starve its siblings. A collapsed
   Folder is never expanded to use the space, and a frame whose base tree already
   overflows its budget never grows. Needs/Working rows, the current Session and
-  the selected Session stay visible outside that ordinary cap, and a Session the
-  shared projection already forces visible costs no extra row. The watermark
-  never decreases inside one open: shrinking the terminal only changes the
-  viewport/scroll, and re-rendering the same size and facts does not grow it
-  again. `Show more` adds five rows from the CURRENT value and may cross twenty;
-  the next open recomputes from the shared defaults. The growth is PiTUI-only and
-  per open: the shared projection, TSP Native and every persisted source keep the
-  eight/zero defaults.
+  the selected Session stay visible outside the ordinary watermark, and a
+  Session the shared projection already forces visible costs no extra row. The
+  watermark never decreases inside one open: shrinking the terminal only changes
+  the viewport/scroll, and re-rendering the same size and facts does not grow it
+  again. The next open recomputes from the shared defaults. The growth is
+  PiTUI-only and per open: the shared projection, TSP Native and every persisted
+  source keep the eight/zero defaults.
 - **The PiTUI tree has explicit inline action rows.** A real Host registration
   capability paints ONE root `Add directory` row above the official folders; an
   expanded REAL official Workspace paints `+ New session` as its first child
@@ -117,9 +123,18 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   keeps the tree's leftmost two cells, while a Session's `●` current bullet,
   its identity and its metadata start two cells further right; the bullet
   therefore follows the same indent instead of staying in the root column. The
-  Folder row, its disclosure, `+ New session`, `Add directory` and `Show more`
+  folder row, its disclosure, `+ New session`, `Add directory` and `Show more`
   keep their own relative indent, and the flat search-result list keeps its old,
-  unindented geometry.
+  unindented geometry. A Session row reserves its right-hand key-fact group
+  before secondary facts: `‣ Needs attention` (with a whole `Working` secondary
+  segment when it fits), `‣ Working`, or the neutral `‣ Pending unverified` for a
+  pending candidate without this Client's answerability. Ordinary history
+  carries no status marker, and age/cwd stay inline secondary facts. The status
+  group uses the existing warning/primary/textDim role inks and is never cut
+  mid-word: on a narrow row the Working secondary segment is dropped whole
+  first, then age and cwd, while the stable short Session id and a recognisable
+  title prefix stay. See [design-language.md](./design-language.md) for the
+  role inks and the one `‣` marker.
 - **A sessionless destination is not a Current Session.** A Host-verified
   next-create Workspace is ordered first and painted `Next` with the same
   eight-row base history watermark; it never renders as `Current`, because Current
@@ -244,7 +259,10 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   `pending` and `attentionSourceState` retain provenance. Unknown/unavailable/
   denied facts remain complete in Peek/Details; compact rows hide them rather
   than printing them once per Session. A Working row paints `Working`, while
-  only confirmed answerability paints `Needs attention`.
+  only confirmed answerability paints `Needs attention`. A newer roster revision
+  waiting for its Activity sample paints NO transient placeholder row: the list
+  keeps its existing rows and physical height. A real
+  `Activity unavailable: ...` failure remains a status line.
 - **Answerability is a gate, not a classification.** Only a pending candidate
   this Client can really answer may enter `Needs attention`: a live forwarded
   Question/Approval invocation held by the Client-root delivery owner
