@@ -1117,10 +1117,18 @@ class C1Model extends LlmAdapter {
 
   async resolveModel(provider, model) {
     const po4a = this.scenario === 'acp-po4a' && process.env.C1_PO4A_IMAGE_CAPABLE === '1'
+    // Model-S1's second offline route must be switchable by a real TUI turn:
+    // the official compaction pressure check needs context capacity on the
+    // target route. Keep this qualification-only (C1_EXTRA_MODEL is set only
+    // by the ACP Model-S1 smoke host) so no other C1 scenario changes.
+    const modelSwitchContext = typeof process.env.C1_EXTRA_MODEL === 'string' && process.env.C1_EXTRA_MODEL !== ''
+      ? { context: { contextWindow: 200_000 } }
+      : {}
     return {
       provider,
       id: model,
       name: model,
+      ...modelSwitchContext,
       ...(po4a && model === 'c1' ? { inputModalities: ['text', 'image'] } : {}),
       ...(po4a && model === 'c1-text-only' ? { inputModalities: ['text'] } : {}),
     }
