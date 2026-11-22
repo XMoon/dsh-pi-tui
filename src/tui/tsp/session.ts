@@ -127,6 +127,7 @@ import { FocusTimingStore } from '../transcript/focus-timing.ts'
 import type { DisplayState } from '../../domain/display/preset.ts'
 import type { ToolPresenter } from '../transcript/tool-presentation.ts'
 import type { TranscriptMessage, TranscriptToolMessage, TurnActivity } from '../../domain/transcript/types.ts'
+import { isPtcImageContext } from '../../domain/transcript/context-semantics.ts'
 import { isSurfacedInteractionTool } from '../../domain/transcript/semantics.ts'
 import type { TranscriptWindowState } from '../../domain/transcript/window.ts'
 import type { TodoItem, TranscriptSearchPresentation } from '../../tui-app.ts'
@@ -2366,6 +2367,13 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           return
         }
         if (message.content !== undefined) pushBodyImages(message.content)
+        return
+      }
+      if (message.kind === 'system') {
+        // PTC image-bearing injected Context is a media-carrying row exactly
+        // like the three message roles; a text-only Context carries no
+        // content and is never read.
+        if (isPtcImageContext(message)) pushBodyImages(message.content)
         return
       }
       if (message.kind !== 'tool') return

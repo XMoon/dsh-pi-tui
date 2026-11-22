@@ -213,6 +213,15 @@ export type TranscriptMessage =
     context?: true
     origin?: TranscriptSystemOrigin
     /**
+     * Presentation-only structured content of an injected Context row, when
+     * the producer's message really carried non-text blocks (currently the
+     * image-bearing `ptc-mode` Context). This is the SAME durable
+     * `event.data.content` array projected for display — never a new Session,
+     * Host or wire field; the flat `text` remains the search/preview
+     * projection and is not rewritten. Absent for every text-only Context.
+     */
+    content?: readonly ContentBlock[]
+    /**
      * Presentation-only provenance for an injected Context row: the
      * producer-declared form, the raw source kind and a relay/notice
      * sender. Never part of the semantic class — `context` stays the

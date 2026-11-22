@@ -5163,6 +5163,16 @@ export class TranscriptFolder {
             // context (never orchestration like llm/retry or max-tokens),
             // so Focus may treat it as turn foundation.
             context: true as const,
+            // Structured media projection: a PTC-context delivery whose
+            // producer content really carries image blocks keeps the ORIGINAL
+            // ordered block array for display. This is the same durable
+            // `user/message` content, never a rewrite: the flat `text` above
+            // stays the search/preview projection and text-only Context keeps
+            // no content at all. Whether the row may be carried by Work is a
+            // separate presentation question decided below.
+            ...sourcePresentation.sourceKind === 'ptc-mode' && blocks.some(block => block.type === 'image')
+              ? { content: blocks }
+              : {},
             // Presentation-only provenance (form/kind/sender) for the
             // form-aware Context roles Compact and Focus present. The
             // semantic marker above stays the surfaced authority. The narrow

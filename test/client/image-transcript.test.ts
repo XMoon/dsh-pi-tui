@@ -310,3 +310,147 @@ test('a JPEG/WebP message keeps its ORIGINAL refs, block order and model-facing 
   assert.equal(images[1]?.type === 'image' && images[1].attachment.name, 'graphic.webp')
   assert.equal(message.text, 'compare 🖼️ photo.jpg with 🖼️ graphic.webp')
 })
+
+// ── PTC image-bearing injected Context ─────────────────────────────────────
+
+/** One real PTC Context delivery: `user/message` with producer source
+ * `ptc-mode` and the nested sub-call's image-bearing content blocks. */
+function ptcContextEvent(blocks: readonly unknown[], id = 'ptc-context-1'): never {
+  return {
+    type: 'user/message', seq: 1, time: 1,
+    data: { id, role: 'user', content: blocks, source: { kind: 'ptc-mode' } },
+  } as never
+}
+
+const IMAGE_REF_2: ImageAttachmentRefLike = {
+  attachmentId: 'att-img-2',
+  mediaType: 'image/png',
+  bytes: 8,
+  width: 320,
+  height: 200,
+  name: 'second.png',
+}
+
+test('a PTC context keeps its ordered text/image/text content and flat marker', () => {
+  const blocks = [
+    { type: 'text', text: 'before ' },
+    { type: 'image', attachment: IMAGE_REF },
+    { type: 'text', text: ' after' },
+  ] as unknown as ContentBlock[]
+  const folder = new TranscriptFolder()
+  folder.apply([ptcContextEvent(blocks)])
+  const messages = folder.messages()
+  assert.equal(messages.length, 1)
+  const message = messages[0]!
+  assert.equal(message.kind, 'system')
+  if (message.kind !== 'system') return
+  assert.equal(message.context, true)
+  assert.equal(message.contextPresentation?.sourceKind, 'ptc-mode')
+  assert.equal(message.content, blocks, 'the fold keeps the ORIGINAL ordered block array')
+  assert.deepEqual(message.content?.map(block => block.type), ['text', 'image', 'text'])
+  assert.equal(message.text, 'before 🖼️ shot.png after', 'the flat text keeps its original marker')
+})
+
+test('an image-only or multi-image PTC context folds completely (never dropped)', () => {
+  const imageOnly = [{ type: 'image', attachment: IMAGE_REF }] as unknown as ContentBlock[]
+  const single = new TranscriptFolder()
+  single.apply([ptcContextEvent(imageOnly)])
+  const singleMessage = single.messages()[0]!
+  assert.equal(singleMessage.kind, 'system')
+  if (singleMessage.kind !== 'system') return
+  assert.equal(singleMessage.text, '🖼️ shot.png')
+  assert.equal(singleMessage.content?.length, 1)
+
+  const twoImages = [
+    { type: 'image', attachment: IMAGE_REF },
+    { type: 'text', text: 'between' },
+    { type: 'image', attachment: IMAGE_REF_2 },
+  ] as unknown as ContentBlock[]
+  const multi = new TranscriptFolder()
+  multi.apply([ptcContextEvent(twoImages)])
+  const multiMessage = multi.messages()[0]!
+  assert.equal(multiMessage.kind, 'system')
+  if (multiMessage.kind !== 'system') return
+  assert.deepEqual(multiMessage.content?.map(block => block.type), ['image', 'text', 'image'])
+  assert.equal(multiMessage.text, '🖼️ shot.png between 🖼️ second.png')
+  assert.equal(multiMessage.content?.[2]?.type === 'image' && multiMessage.content[2].attachment.attachmentId, 'att-img-2')
+})
+
+test('a text-only PTC context and every non-PTC Context keep no structured content', () => {
+  const textOnly = new TranscriptFolder()
+  textOnly.apply([{
+    type: 'user/message', seq: 1, time: 1,
+    data: { id: 'ptc-text', role: 'user', content: [{ type: 'text', text: 'plain spill body' }], source: { kind: 'ptc-mode' } },
+  } as never])
+  const spill = textOnly.messages()[0]!
+  assert.equal(spill.kind, 'system')
+  if (spill.kind === 'system') assert.equal(spill.content, undefined)
+
+  const foreign = new TranscriptFolder()
+  foreign.apply([{
+    type: 'user/message', seq: 1, time: 1,
+    data: {
+      id: 'foreign-image-context', role: 'user',
+      content: [{ type: 'image', attachment: IMAGE_REF }],
+      source: { kind: 'plugin', form: 'notice', plugin: 'foreign' },
+    },
+  } as never])
+  const foreignRow = foreign.messages()[0]!
+  assert.equal(foreignRow.kind, 'system')
+  if (foreignRow.kind === 'system') assert.equal(foreignRow.content, undefined,
+    'only the ptc-mode producer gets the structured image projection')
+})
+
+test('an expanded PTC context renders its image inside the row and is a mounted occurrence', async () => {
+  const { vt, app } = startAppWithLoader()
+  const folder = new TranscriptFolder()
+  folder.apply([ptcContextEvent([
+    { type: 'text', text: 'before ' },
+    { type: 'image', attachment: IMAGE_REF },
+    { type: 'text', text: ' after' },
+  ])])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Context injection ptc-mode'), `the generic Context header is painted:\n${view}`)
+  assert.ok(!view.includes('800×600'), 'the collapsed row starts no image body/mount')
+  vt.sendInput('\x0f') // ctrl+o expands the recent transcript folds
+  await vt.waitForRender()
+  await new Promise(resolve => setTimeout(resolve, 30))
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('🖼️ shot.png'), `the image body is mounted after expanding:\n${view}`)
+  assert.ok(view.includes('800×600'), `the image info line is painted:\n${view}`)
+  assert.ok(view.includes('before') && view.includes('after'), 'the ordered text blocks stay around the image')
+  const internals = app as unknown as {
+    mountedImageOccurrences(): { imageIndex: number; ref: { name?: string } }[]
+  }
+  const occurrences = internals.mountedImageOccurrences()
+  assert.ok(occurrences.some(occurrence => occurrence.imageIndex === 0 && occurrence.ref.name === 'shot.png'),
+    `the expanded Context image is a real source-ordinal occurrence:\n${occurrences.map(o => `${o.imageIndex}:${o.ref.name}`).join(', ')}`)
+  app.stop()
+})
+
+test('a loader-less PTC context paints the marker and records a metadata-only occurrence', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  folder.apply([ptcContextEvent([{ type: 'image', attachment: IMAGE_REF }])])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Context injection ptc-mode'), `the generic Context header is painted:\n${view}`)
+  assert.ok(view.includes('🖼️ shot.png'), `the loader-less image keeps its readable marker:\n${view}`)
+  const internals = app as unknown as {
+    mountedImageOccurrences(): { imageIndex: number; ref: { name?: string } }[]
+  }
+  const occurrences = internals.mountedImageOccurrences()
+  assert.equal(occurrences.length, 1, 'the loader-less image is still a viewer candidate')
+  assert.equal(occurrences[0]?.imageIndex, 0)
+  assert.equal(occurrences[0]?.ref.name, 'shot.png')
+  app.stop()
+})

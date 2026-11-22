@@ -26,7 +26,7 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { DisplayPreset } from '../../domain/display/preset.ts'
 import type { SettledQuestionAnswersLookup } from '../../app/surface/interaction-presenter.ts'
 import type { StreamingToolPreview } from '../../app/surface/streaming-tool-preparing.ts'
-import { contextFormOf } from '../../domain/transcript/context-semantics.ts'
+import { contextFormOf, isPtcImageContext } from '../../domain/transcript/context-semantics.ts'
 import { eligibleFinalAssistant } from '../../domain/transcript/final-assistant.ts'
 import { displayFailureText } from '../../domain/transcript/failure.ts'
 import {
@@ -1159,24 +1159,39 @@ function toolNode(message: Extract<TranscriptMessage, { kind: 'tool' }>, key: st
 }
 
 /**
- * The safe body of one injected Context row through the existing
- * `systemContextBody` helper (never a raw `<system-reminder>` XML envelope);
- * a body that is not an envelope at all is shown verbatim.
+ * The safe body of one injected Context row.
+ *
+ * An image-bearing `ptc-mode` Context renders its ORIGINAL structured content
+ * through the same ordered body path User/Assistant messages use: text blocks
+ * stay text and each image block becomes its identity line plus (when the pane
+ * negotiated native images) the shared `ui.image` node. The flat text is not
+ * painted beside it — it carries the same markers and would duplicate them.
+ * Every other Context keeps the existing `systemContextBody` XML-envelope
+ * treatment (never a raw `<system-reminder>` frame), with a body that is not an
+ * envelope shown verbatim.
  */
-function contextBodyNodes(message: Extract<TranscriptMessage, { kind: 'system' }>): Node[] {
+function contextBodyNodes(
+  message: Extract<TranscriptMessage, { kind: 'system' }>,
+  options: TranscriptViewOptions,
+): Node[] {
+  if (isPtcImageContext(message)) return bodyContentNodes(message.content, options)
   const body = systemContextBody(message.text)
   if (body === undefined) return [ui.md({ key: 'body', text: sanitizeDisplayText(message.text) })]
   if (body.length === 0) return []
   return [ui.code({ key: 'body', text: sanitizeDisplayText(body.join('\n')) })]
 }
 
-function contextMemberNode(message: Extract<TranscriptMessage, { kind: 'system' }>, key: string): Node {
+function contextMemberNode(
+  message: Extract<TranscriptMessage, { kind: 'system' }>,
+  key: string,
+  options: TranscriptViewOptions,
+): Node {
   const kind = contextPresentationKind(message)
   const head = sanitizedPhysicalLine(message.label ?? contextFormOf(message) ?? 'Context')
   return ui.card(
     { key, head },
     ui.badge({ key: 'kind', text: kind ?? 'generic' }),
-    ...contextBodyNodes(message),
+    ...contextBodyNodes(message, options),
   )
 }
 
@@ -1194,7 +1209,7 @@ function contextClusterMemberNode(
     return ui.col(
       { key, gap: 'sm' },
       ui.text({ key: 'identity', text: head, wrap: 'none' }),
-      ...contextBodyNodes(message),
+      ...contextBodyNodes(message, options),
     )
   }
   // The member keeps its canonical message key: the Cluster owner never stands
@@ -1203,7 +1218,7 @@ function contextClusterMemberNode(
   const expanded = disclosure.expandedContextRowOwners.has(message)
   return ui.section(
     { key, head, collapsible: true, collapsed: !expanded },
-    ...(expanded ? contextBodyNodes(message) : []),
+    ...(expanded ? contextBodyNodes(message, options) : []),
   )
 }
 
@@ -1280,7 +1295,7 @@ function relayContextRowNode(
   if (!allowDisclosure || disclosure === undefined || !canCollapseContextRow(message)) {
     // No operable owner (legacy/covered projection) -> directly readable body,
     // never a dead chevron.
-    return ui.card({ key, head: title }, ...contextBodyNodes(message))
+    return ui.card({ key, head: title }, ...contextBodyNodes(message, options))
   }
   const expanded = disclosure.expandedContextRowOwners.has(message)
   const preview = relayHeadPreview(sanitizeDisplayText(message.text))
@@ -1300,7 +1315,7 @@ function relayContextRowNode(
       collapsible: true,
       collapsed: !expanded,
     },
-    ...(expanded ? contextBodyNodes(message) : []),
+    ...(expanded ? contextBodyNodes(message, options) : []),
   )
 }
 
@@ -1316,7 +1331,7 @@ function contextRowNode(
     return relayContextRowNode(message, key, options, allowDisclosure)
   }
   if (message.context !== true || !allowDisclosure || disclosure === undefined || !canCollapseContextRow(message)) {
-    return contextMemberNode(message, key)
+    return contextMemberNode(message, key, options)
   }
   const expanded = disclosure.expandedContextRowOwners.has(message)
   if (kind === 'notice') {
@@ -1338,7 +1353,7 @@ function contextRowNode(
         collapsible: true,
         collapsed: !expanded,
       },
-      ...(expanded ? contextBodyNodes(message) : []),
+      ...(expanded ? contextBodyNodes(message, options) : []),
     )
   }
   const identity = kind === 'recall'
@@ -1348,7 +1363,7 @@ function contextRowNode(
     : message.label ?? contextFormOf(message) ?? 'Context'
   return ui.section(
     { key, head: sanitizedPhysicalLine(identity), collapsible: true, collapsed: !expanded },
-    ...(expanded ? contextBodyNodes(message) : []),
+    ...(expanded ? contextBodyNodes(message, options) : []),
   )
 }
 
@@ -2098,6 +2113,10 @@ function imageRefIdsOf(message: TranscriptMessage): readonly string[] {
         if (display.kind === 'content') pushBlocks([display.block])
       }
     } else if (message.content !== undefined) pushBlocks(message.content)
+  } else if (message.kind === 'system') {
+    // Only an image-bearing PTC Context carries structured content; a
+    // text-only Context has none and therefore contributes no image refs.
+    pushBlocks(message.content)
   } else if (message.kind === 'tool') visitRow(message)
   imageRefIdsCache.set(message, { display, assistant, subtree, ids })
   return ids
@@ -2245,6 +2264,10 @@ function messageStampOf(
       break
     case 'system':
       parts.push(disclosureTokenOf(message, key, options))
+      // An image-bearing PTC Context repaints in place when its attachment
+      // load state changes; text-only Context has no image refs and the token
+      // stays empty, so unrelated Context nodes keep their identity.
+      parts.push(imageTokensOf(message, options))
       break
     case 'command':
     case 'compaction':
