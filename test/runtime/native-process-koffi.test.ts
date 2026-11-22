@@ -142,6 +142,14 @@ test('the owner version string is not a runtime Koffi version gate', t => {
   assert.equal(koffiPackageName(resolveDshKoffi(value.anchor)), 'koffi')
 })
 
+test('a changed owner Koffi version string does not block the real bridge', { skip: DARWIN_ONLY, timeout: 60_000 }, t => {
+  const value = fixture(t, { wrapped: true, declaredVersion: '^999.0.0' })
+  const read = runNativeRead({ SPLIT_PROCESS_DSH_ANCHOR: value.anchor, NODE_PATH: '' })
+  assert.equal(read.status, 0, read.stderr)
+  assert.equal(JSON.parse(read.stdout).kind, 'alive')
+  assert.ok(value.marker !== undefined && existsSync(value.marker), 'the fixture wrapper must have loaded')
+})
+
 test('a non-DSH anchor cannot borrow Koffi from an ancestor node_modules', t => {
   // The TUI's own manifest is NOT a DSH installation, but this checkout does
   // have `@deepseek-ai/dsh-subprocess-local` in its devDependency tree. The
