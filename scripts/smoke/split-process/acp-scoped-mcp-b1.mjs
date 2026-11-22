@@ -319,6 +319,19 @@ export async function runAcpScopedMcpB1(context) {
   const closeAcp = async client => {
     await client.close().catch(() => {})
   }
+  const resumeWhenAttachable = async (handle, params, label = 'resume') => {
+    const client = handle.client ?? handle
+    const started = Date.now()
+    for (;;) {
+      try {
+        return await client.request(acp.methods.agent.session.resume, params)
+      } catch (error) {
+        if (error?.data?.code !== 'LOCAL_ACP_VIEW_ALREADY_ATTACHED') throw error
+        if (Date.now() - started > 30_000) throw error
+        await sleep(50)
+      }
+    }
+  }
   const waitToolAbsent = async (sessionId, label, timeoutMs = 60_000) => {
     const started = Date.now()
     while (Date.now() - started < timeoutMs) {
@@ -404,7 +417,7 @@ export async function runAcpScopedMcpB1(context) {
     //     the MCP child still starts in the original Session cwd and the TUI
     //     keeps working on the same Agent.
     await acpNew.request(acp.methods.agent.session.close, { sessionId: sessionNew })
-    const resumeA = await acpNew.request(acp.methods.agent.session.resume, {
+    const resumeA = await resumeWhenAttachable(acpNew, {
       sessionId: sessionA, cwd: otherCwd, mcpServers: [mcpDeclaration()],
     })
     assert(resumeA?.sessionId === undefined || resumeA.sessionId === sessionA, `Q04: resume A: ${JSON.stringify(resumeA)}`)
@@ -449,13 +462,13 @@ export async function runAcpScopedMcpB1(context) {
     assert(longHeld !== undefined, 'Q05b: the real TUI B turn must be held')
     const acpBusy = await openAcp('Q05b')
     await expectRequestError(
-      acpBusy.client.request(acp.methods.agent.session.resume, { sessionId: sessionB, cwd: hostCwd, mcpServers: [mcpDeclaration()] }),
+      resumeWhenAttachable(acpBusy, { sessionId: sessionB, cwd: hostCwd, mcpServers: [mcpDeclaration()] }),
       'LOCAL_ACP_MCP_AGENT_BUSY',
       'Q05b busy MCP resume',
     )
     writeFileSync(longTurnRelease, 'released\n', { mode: 0o600 })
     await waitForTurnEnd(sessionB, beforeLongB, 'Q05b B long turn/end')
-    const retryBusy = await acpBusy.client.request(acp.methods.agent.session.resume, { sessionId: sessionB, cwd: hostCwd, mcpServers: [mcpDeclaration()] })
+    const retryBusy = await resumeWhenAttachable(acpBusy, { sessionId: sessionB, cwd: hostCwd, mcpServers: [mcpDeclaration()] })
     assert(retryBusy?.sessionId === undefined || retryBusy.sessionId === sessionB, `Q05b: retry resume must succeed: ${JSON.stringify(retryBusy)}`)
     await acpBusy.client.request(acp.methods.agent.session.close, { sessionId: sessionB })
     await waitToolAbsent(sessionB, 'Q05b after close')
@@ -534,7 +547,7 @@ export async function runAcpScopedMcpB1(context) {
     assert(await waitForGone(bootFail.pid), 'Q07: the failed MCP child must exit')
     const firstPartial = readProof(proofPath).find(line => line.kind === 'server-start' && line.tag === 'b1scope')
     if (firstPartial !== undefined) assert(await waitForGone(firstPartial.pid), 'Q07: the earlier MCP child must be rolled back')
-    const recover = await acpInvalid.client.request(acp.methods.agent.session.resume, { sessionId: createdButFailed, cwd: hostCwd })
+    const recover = await resumeWhenAttachable(acpInvalid, { sessionId: createdButFailed, cwd: hostCwd })
     assert(recover?.sessionId === undefined || recover.sessionId === createdButFailed, 'Q07: the created Session must remain resumable')
 
     // ── B1-07: a Close while an ACP-owned prompt is still running cancels the
@@ -544,7 +557,7 @@ export async function runAcpScopedMcpB1(context) {
     rmSync(holdArm, { force: true })
     rmSync(holdRelease, { force: true })
     const acpHold7 = await openAcp('Q07b')
-    await acpHold7.client.request(acp.methods.agent.session.resume, { sessionId: sessionA, cwd: hostCwd, mcpServers: [mcpDeclaration()] })
+    await resumeWhenAttachable(acpHold7, { sessionId: sessionA, cwd: hostCwd, mcpServers: [mcpDeclaration()] })
     const promptHold7 = acpHold7.client.request(acp.methods.agent.session.prompt, {
       sessionId: sessionA, prompt: [{ type: 'text', text: `B1_HOLD_A ${digestOf(`close-${runNonce}`).slice(0, 16)}` }],
     })
@@ -560,12 +573,15 @@ export async function runAcpScopedMcpB1(context) {
     //     when its ACP connection disappears, and the original TUI Agent
     //     remains usable instead of being held in maintenance.
     const acpHang = await openAcp('Q07c')
-    const hangingResume = acpHang.client.request(acp.methods.agent.session.resume, {
+    const hangingResume = resumeWhenAttachable(acpHang, {
       sessionId: sessionA, cwd: hostCwd, mcpServers: [mcpDeclaration('b1hang', { B0_HANG_STARTUP: '1' }, 'b1hang')],
     }).catch(() => {})
-    await waitForProof(line => line.kind === 'startup-hang' && line.tag === 'b1hang', proofPath, 'Q07c startup hang')
-    const hangStart = readProof(proofPath).filter(line => line.kind === 'startup-hang' && line.tag === 'b1hang').at(-1)
-    assert(hangStart !== undefined && typeof hangStart.pid === 'number' && alivePid(hangStart.pid), 'Q07c: the nonresponsive MCP child must be alive before disconnect')
+    const hangStart = await waitForProof(
+      line => line.kind === 'startup-hang' && line.tag === 'b1hang' && typeof line.pid === 'number' && alivePid(line.pid),
+      proofPath,
+      'Q07c live startup hang',
+    )
+    assert(alivePid(hangStart.pid), 'Q07c: the nonresponsive MCP child must be alive before disconnect')
     await acpHang.client.close()
     await hangingResume.catch(() => {})
     assert(await waitForGone(hangStart.pid), 'Q07c: disconnect must dispose the pending MCP child')
@@ -574,7 +590,7 @@ export async function runAcpScopedMcpB1(context) {
     const retryStarted = Date.now()
     for (;;) {
       try {
-        await acpAfterHang.client.request(acp.methods.agent.session.resume, { sessionId: sessionA, cwd: hostCwd })
+        await resumeWhenAttachable(acpAfterHang, { sessionId: sessionA, cwd: hostCwd })
         break
       } catch (error) {
         if (error?.data?.code !== 'LOCAL_ACP_VIEW_ALREADY_ATTACHED') throw error
@@ -589,7 +605,7 @@ export async function runAcpScopedMcpB1(context) {
     //     close; the View detaches, then retires automatically at the real
     //     tool/result + turn/end terminal.
     const acpTuiHold = await openAcp('Q08')
-    await acpTuiHold.client.request(acp.methods.agent.session.resume, { sessionId: sessionA, cwd: hostCwd, mcpServers: [mcpDeclaration()] })
+    await resumeWhenAttachable(acpTuiHold, { sessionId: sessionA, cwd: hostCwd, mcpServers: [mcpDeclaration()] })
     rmSync(holdArm, { force: true })
     rmSync(holdRelease, { force: true })
     writeFileSync(holdArm, 'armed\n', { mode: 0o600 })
@@ -614,7 +630,7 @@ export async function runAcpScopedMcpB1(context) {
     // ── B1-09: a physical EOF retires a live lease; Listener Off/On keeps the
     //     registry and admits exactly the next View.
     const acpEof = await openAcp('Q09')
-    await acpEof.client.request(acp.methods.agent.session.resume, { sessionId: sessionB, cwd: hostCwd, mcpServers: [mcpDeclaration()] })
+    await resumeWhenAttachable(acpEof, { sessionId: sessionB, cwd: hostCwd, mcpServers: [mcpDeclaration()] })
     const eofServer = [...readProof(proofPath)].reverse().find(line => line.kind === 'server-start' && line.tag === 'b1scope')
     assert(eofServer !== undefined && alivePid(eofServer.pid), 'Q09: EOF lease child must be alive before disconnect')
     await acpEof.client.close()
@@ -622,7 +638,7 @@ export async function runAcpScopedMcpB1(context) {
     await waitToolAbsent(sessionB, 'Q09 after EOF')
 
     const acpOff = await openAcp('Q09 off')
-    await acpOff.client.request(acp.methods.agent.session.resume, { sessionId: sessionB, cwd: hostCwd, mcpServers: [mcpDeclaration()] })
+    await resumeWhenAttachable(acpOff, { sessionId: sessionB, cwd: hostCwd, mcpServers: [mcpDeclaration()] })
     const offServer = [...readProof(proofPath)].reverse().find(line => line.kind === 'server-start' && line.tag === 'b1scope')
     assert(offServer !== undefined && alivePid(offServer.pid), 'Q09: Off lease child must be alive')
     const disabled = await acpAccess(peer, 'Q09 disable ACP', false)
@@ -631,7 +647,7 @@ export async function runAcpScopedMcpB1(context) {
     const enabledAgain = await acpAccess(peer, 'Q09 re-enable ACP', true)
     assert(enabledAgain.ok === true && enabledAgain.status?.state === 'enabled', `Q09: ACP must re-enable: ${JSON.stringify(enabledAgain)}`)
     const acpOn = await openAcp('Q09 on')
-    await acpOn.client.request(acp.methods.agent.session.resume, { sessionId: sessionB, cwd: hostCwd, mcpServers: [mcpDeclaration()] })
+    await resumeWhenAttachable(acpOn, { sessionId: sessionB, cwd: hostCwd, mcpServers: [mcpDeclaration()] })
     await acpOn.client.request(acp.methods.agent.session.close, { sessionId: sessionB })
     await closeAcp(acpOn.client)
     await closeAcp(acpOff.client)

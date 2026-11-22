@@ -453,7 +453,7 @@ async function awaitFiberActivation(fiber: Fiber, signal: AbortSignal | undefine
   const abort = new Promise<never>((_resolve, reject) => {
     const onAbort = (): void => {
       aborted = true
-      void fiber.dispose().then(
+      fiber.dispose().then(
         () => { reject(staleLease()) },
         () => { reject(staleLease()) },
       )
