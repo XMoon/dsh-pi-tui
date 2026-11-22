@@ -241,6 +241,16 @@ function isObjectResult(message) {
     && Object.keys(message.result).length === 0
 }
 
+/** A session/resume success may carry the optional `configOptions` payload. */
+function isAttachResult(message) {
+  if (message === undefined || message.error !== undefined) return false
+  const result = message.result
+  if (result === undefined || typeof result !== 'object' || result === null) return false
+  const keys = Object.keys(result)
+  if (keys.some(key => key !== 'configOptions')) return false
+  return result.configOptions === undefined || Array.isArray(result.configOptions)
+}
+
 /**
  * Run the PO-2 shared Session View real split-process qualification.
  * Every returned boolean is a fact gathered from a REAL process/socket.
@@ -329,7 +339,7 @@ export async function runAcpPo2SessionView(context) {
       const init = await client.initialize(1)
       assert(init?.result?.protocolVersion === 1, `${label}: initialize failed`)
       const result = await sendRequest(client, 2, 'session/resume', { sessionId, cwd })
-      if (isObjectResult(result)) return { client, result }
+      if (isAttachResult(result)) return { client, result }
       last = result
       client.close()
       await client.closed
@@ -426,7 +436,7 @@ export async function runAcpPo2SessionView(context) {
     const identityBeforeC = await identityFacts()
     const rowsBeforeC = await hostRowFiberUids(host)
     const resumeC = await sendRequest(conn1, 2, 'session/resume', { sessionId: sessionA, cwd: hostCwd })
-    assert(isObjectResult(resumeC), `C: session/resume(A) must return {} (got ${JSON.stringify(resumeC?.error ?? resumeC?.result)})`)
+    assert(isAttachResult(resumeC), `C: session/resume(A) must return an attach result (got ${JSON.stringify(resumeC?.error ?? resumeC?.result)})`)
     assert((tuiA.records.filter(record => record.m4b2s === 'surface-status').at(-1))?.openSessionId === sessionA,
       'C: the real TUI lost its reference to Session A after the ACP resume')
     await assertSameHost(identityBeforeC, 'C Host after ACP resume')
@@ -474,7 +484,7 @@ export async function runAcpPo2SessionView(context) {
 
     const { client: conn3 } = await openInitialized(scopeDir, 'E third connection')
     const resumeE = await sendRequest(conn3, 2, 'session/resume', { sessionId: sessionA, cwd: hostCwd })
-    assert(isObjectResult(resumeE), `E: a new connection must resume A again (got ${JSON.stringify(resumeE?.error ?? resumeE?.result)})`)
+    assert(isAttachResult(resumeE), `E: a new connection must resume A again (got ${JSON.stringify(resumeE?.error ?? resumeE?.result)})`)
 
     // ── F) `session/new` creates ONE real Host Workspace + Session B; the
     //      Workspace membership is proven by a REAL TUI opening B; close(B) is
@@ -505,7 +515,7 @@ export async function runAcpPo2SessionView(context) {
     await connNew.closed
     const { client: connResumeB } = await openInitialized(scopeDir, 'F resume B connection')
     const resumeB = await sendRequest(connResumeB, 2, 'session/resume', { sessionId: sessionB, cwd: hostCwdNew })
-    assert(isObjectResult(resumeB),
+    assert(isAttachResult(resumeB),
       `F: B must stay resumable after close (got ${JSON.stringify(resumeB?.error ?? resumeB?.result)})`)
 
     // ── G) Destroying the ACP socket connection releases only its View; a later
@@ -528,7 +538,7 @@ export async function runAcpPo2SessionView(context) {
     await waitUntil(() => exists(socketPath), 'H: acp.sock to re-bind after runtime On')
     const { client: conn5 } = await openInitialized(scopeDir, 'H re-enabled connection')
     const resumeH = await sendRequest(conn5, 2, 'session/resume', { sessionId: sessionA, cwd: hostCwd })
-    assert(isObjectResult(resumeH),
+    assert(isAttachResult(resumeH),
       `H: a new connection must resume A after re-bind (got ${JSON.stringify(resumeH?.error ?? resumeH?.result)})`)
     await assertSameHost(identityBeforeC, 'H Host after re-bind')
 
@@ -557,7 +567,7 @@ export async function runAcpPo2SessionView(context) {
 
     const { client: connColdA } = await openInitialized(scopeDir, 'H2 cold resume A')
     const coldResumeA = await sendRequest(connColdA, 2, 'session/resume', { sessionId: sessionA, cwd: hostCwd })
-    assert(isObjectResult(coldResumeA),
+    assert(isAttachResult(coldResumeA),
       `H2: a cold Host must resume Session A (got ${JSON.stringify(coldResumeA?.error ?? coldResumeA?.result)})`)
     const coldEvents = hostSessionEvents(dshHome, sessionA) ?? []
     assert(hostAssistantHasText(coldEvents, expectedAnswer),
@@ -567,7 +577,7 @@ export async function runAcpPo2SessionView(context) {
 
     const { client: connColdB } = await openInitialized(scopeDir, 'H2 cold resume B')
     const coldResumeB = await sendRequest(connColdB, 2, 'session/resume', { sessionId: sessionB, cwd: hostCwdNew })
-    assert(isObjectResult(coldResumeB),
+    assert(isAttachResult(coldResumeB),
       `H2: a cold Host must resume Session B (got ${JSON.stringify(coldResumeB?.error ?? coldResumeB?.result)})`)
     connColdB.close()
     await connColdB.closed
@@ -591,8 +601,8 @@ export async function runAcpPo2SessionView(context) {
 
     const { client: connModel } = await openInitialized(scopeDir, 'Model-S1 resume A')
     const resumeModel = await sendRequest(connModel, 2, 'session/resume', { sessionId: sessionA, cwd: hostCwd })
-    assert(isObjectResult(resumeModel),
-      `Model-S1: session/resume(A) must return {} (got ${JSON.stringify(resumeModel?.error ?? resumeModel?.result)})`)
+    assert(isAttachResult(resumeModel),
+      `Model-S1: session/resume(A) must return an attach result (got ${JSON.stringify(resumeModel?.error ?? resumeModel?.result)})`)
     const initialModelOption = modelConfigOption(resumeModel.result?.configOptions)
     assert(initialModelOption.currentValue === modelValue(MODEL_A),
       `Model-S1: current model must be the Session route A (got ${String(initialModelOption.currentValue)})`)
@@ -640,7 +650,7 @@ export async function runAcpPo2SessionView(context) {
     await connModel.closed
     const { client: connModelResume } = await openInitialized(scopeDir, 'Model-S1 repeat resume A')
     const repeated = await sendRequest(connModelResume, 2, 'session/resume', { sessionId: sessionA, cwd: hostCwd })
-    assert(isObjectResult(repeated), 'Model-S1: second resume must attach')
+    assert(isAttachResult(repeated), 'Model-S1: second resume must attach')
     assert(modelConfigOption(repeated.result?.configOptions).currentValue === modelValue(MODEL_B),
       'Model-S1: a new resume must read B from the durable Session, not the Profile default')
 
