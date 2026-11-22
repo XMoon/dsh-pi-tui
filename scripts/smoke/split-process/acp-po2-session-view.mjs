@@ -71,7 +71,7 @@ async function waitForScreenGone(client, text, label, timeoutMs = 120_000) {
 }
 
 /** Choose one model for the CURRENT live Session through the real `/model` panel. */
-async function selectModelInTui(client, modelId, label) {
+async function selectModelInTui(client, modelId, label, effortConfirm = false) {
   client.send('\x15')
   await sleep(150)
   client.send('/model\r')
@@ -91,6 +91,10 @@ async function selectModelInTui(client, modelId, label) {
     return frame.some(line => selectedRow.test(line))
   }, `${label} selected model`, 120_000)
   client.send('\r')
+  if (effortConfirm) {
+    await waitForScreenText(client, 'Reasoning Effort', `${label} effort strip`)
+    client.send('\r')
+  }
   await waitForScreenGone(client, 'Models', `${label} picker commit`)
 }
 
@@ -761,7 +765,7 @@ export async function runAcpPo2SessionView(context) {
 
     // A real TUI `/model` change on Session A must reach the attached ACP View
     // as one full `config_option_update`.
-    await selectModelInTui(tuiModelA, MODEL_B, 'Model-S1 TUI model change B')
+    await selectModelInTui(tuiModelA, MODEL_B, 'Model-S1 TUI model change B', true)
     const configUpdate = (await connModelResume.nextNotification(30_000))
     assert(configUpdate?.method === 'session/update', 'Model-S1: the ACP connection must receive a config notification')
     assert(configUpdate?.params?.sessionId === sessionA, 'Model-S1: the config notification must be for Session A')
