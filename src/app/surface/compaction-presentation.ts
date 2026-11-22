@@ -97,8 +97,13 @@ export function foldCompactionEvent(
  * export would inline the whole surface (and its internal registry/
  * presentation dependencies) into the published declaration bundle. The
  * settle contract needs the three phase/busy/working setters; PR3-A keeps
- * this PUBLIC shape unchanged (it is re-exported from the package entry)
- * and adapts it internally onto the display seam's aggregated commit. */
+ * this PUBLIC shape unchanged (it is re-exported from the package entry).
+ * These three setters are the LEGACY PUBLIC call contract (external callers
+ * and the structural third-party tests); production routing no longer calls
+ * them one by one — it commits the same three facts through the display
+ * seam's aggregated `commitStatusFacts`, so one lifecycle event has exactly
+ * ONE machine snapshot. Do not "unify" this helper by deleting or re-signing
+ * it. */
 export interface CompactionSettleSurface {
   setCompactionPhase(phase: 'idle'): void
   setBusy(busy: boolean): void
@@ -109,8 +114,10 @@ export interface CompactionSettleSurface {
  * hand the working row back to the turn state, and re-measure the session
  * surface so the footer context reflects the compacted log IMMEDIATELY —
  * the next step/start or turn/end would otherwise delay the refresh.
- * Exported as a seam so the settle contract is testable without a full
- * runner driver (the firehose closure is not). */
+ * Exported as a PUBLIC compatibility seam so the historical settle contract
+ * stays testable/callable by third parties without a full runner driver (the
+ * firehose closure is not). Production `event-routing` settles through ONE
+ * aggregated display commit instead of these three setters. */
 export function settleCompactionSurface(
   app: CompactionSettleSurface,
   refreshStatus: () => void,
@@ -136,8 +143,8 @@ export function busyAfterTurnBoundary(eventType: 'turn/start' | 'turn/end', comp
  * through this classification — the single source of truth for the
  * status/measurement split. `compaction/end` is classified 'measure' but
  * the firehose deliberately SKIPS it here: a matched compaction settle
- * re-measures through the fold-outcome path (settleCompactionSurface), so
- * a STALE compaction/end can never trigger a measurement. */
+ * re-measures through the router's aggregated settle path, so a STALE
+ * compaction/end can never trigger a measurement. */
 export function contextRefreshKind(eventType: string): 'measure' | 'cheap' {
   switch (eventType) {
     case 'step/start':

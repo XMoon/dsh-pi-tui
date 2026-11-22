@@ -23,6 +23,10 @@ import {
   type CompactionFold,
 } from '../../src/index.ts'
 import { indeterminateProgressFrames } from '../../src/tui/components/indeterminate-progress.ts'
+import { createEventRouting, type SurfaceEventRoutingSource } from '../../src/app/surface/event-routing.ts'
+import { createOpeningJournal } from '../../src/app/surface/opening-journal.ts'
+import type { DisplayStatusFacts } from '../../src/app/surface/display-seam.ts'
+import { displaySeamStub } from '../support/display-seam-stub.ts'
 import { TranscriptFolder } from '../../src/transcript.ts'
 import { TuiApp, type CompactionPhase } from '../../src/tui-app.ts'
 import { WorkingIndicator } from '../../src/tui/components/working-indicator.ts'
@@ -599,4 +603,180 @@ test('the real session/event routing drives the mounted compaction phases (plan 
 
   assert.deepEqual(phases, ['summarizing', 'applying', 'idle'],
     'the Tui must receive exactly one application-owned phase per routed stage')
+})
+
+// ── The routing's atomic activity settlement (C2) ───────────────────────────
+
+/** The REAL application event router over a minimal recording surface/source:
+ *  every `commitStatusFacts` call the router makes is one MACHINE SNAPSHOT. */
+function routingProbe(options: { readonly working?: boolean } = {}) {
+  const commits: DisplayStatusFacts[] = []
+  const notices: Array<{ text: string; kind: string }> = []
+  const measures: string[] = []
+  let dirty = 0
+  let workingNow = options.working ?? false
+  const source: SurfaceEventRoutingSource<{ type: string; data: unknown }> = {
+    isCleanedUp: () => false,
+    isAttachedSession: () => true,
+    currentSessionId: () => 's',
+    hasLiveAgent: () => true,
+    completionOwnerId: () => undefined,
+    observeMainEvent: () => ({ refreshAgents: false }),
+    appendOpeningViewerEvent: () => false,
+    main: () => ({
+      folder: { apply: () => {} },
+      stats: { apply: () => {} },
+      window: {} as never,
+      previews: new Map(),
+      applyToolPreview: () => {},
+      refreshRecentPerformanceAvailability: () => {},
+    }),
+    viewedChildId: () => undefined,
+    viewedChild: () => { throw new Error('no viewer in this probe') },
+    mainFolder: () => { throw new Error('no folder in this probe') },
+    viewedChildFolder: () => { throw new Error('no folder in this probe') },
+    pendingSubjectId: () => undefined,
+    pendingSnapshot: () => undefined,
+    submissionEchoes: () => undefined,
+    queueTextOf: () => '',
+    exitView: () => {},
+    refreshStatusCheap: () => {},
+    refreshStatusAndWelcome: () => {},
+    refreshWorkspaceFacts: () => {},
+    applyGoalChange: () => {},
+    sessionTitleOf: () => undefined,
+    extendLoadedHistory: () => false,
+    settleLocalSubmitAck: () => {},
+    markSubmitLatency: () => {},
+    observeDurableSubmission: () => {},
+    observeDirectPendingSubmissionEvent: () => false,
+    markContextDirty: () => { dirty += 1 },
+    refreshContextMeasurement: reason => { measures.push(reason) },
+    currentWorkingFromLog: () => workingNow,
+    flushTurn: () => {},
+    registeredAgentIs: () => false,
+    isCurrentOwnerAgent: () => false,
+    viewedChildAgent: () => undefined,
+    setViewedChildAgent: () => {},
+    setViewedQueueAgent: () => {},
+    agentForSession: () => undefined,
+    applyViewedChildAssistantInput: () => { throw new Error('no viewer in this probe') },
+    applyMainAssistantInput: () => {},
+  }
+  const routing = createEventRouting<{ type: string; data: unknown }>({
+    source: () => source,
+    mounted: () => displaySeamStub({
+      commitStatusFacts: facts => { commits.push(facts) },
+      notify: (text, kind) => { notices.push({ text, kind: kind ?? 'info' }) },
+    }),
+    openingJournal: createOpeningJournal(),
+    reconcileQuestions: () => {},
+    refreshAgents: () => {},
+    refreshAgentRuntimeOnly: () => {},
+    hasTaskChild: () => false,
+    feedCompletionStatus: () => {},
+    setMainAgentProgress: () => {},
+    observeMainTurnStart: () => {},
+    observeMainTurnEnd: () => {},
+    mainProgressAuthority: 'local-events',
+    refreshPendingInput: () => {},
+    schedulePaint: () => {},
+    paintNow: () => {},
+  })
+  const route = (type: string, data: Record<string, unknown> = {}): void => {
+    routing.routeSessionEvent({ id: 's' }, { type, data })
+  }
+  return {
+    routing,
+    route,
+    commits,
+    notices,
+    measures,
+    dirty: () => dirty,
+    setWorking: (value: boolean) => { workingNow = value },
+    reset() {
+      commits.length = 0
+      notices.length = 0
+      measures.length = 0
+      dirty = 0
+    },
+  }
+}
+
+test('C2: a matched compaction end commits the ONE activity triple exactly once', () => {
+  const probe = routingProbe({ working: true })
+  probe.route('compaction/start', { compactionId: 'c1' })
+  probe.route('compaction/summary', { compactionId: 'c1' })
+  probe.reset()
+  probe.route('compaction/end', { compactionId: 'c1' })
+  assert.deepEqual(probe.commits, [{ compactionPhase: 'idle', busy: true, working: true }],
+    'the phase/busy/working facts of the settle form ONE machine snapshot')
+  assert.deepEqual(probe.measures, ['compaction-end'], 'the context re-measure follows the commit, once')
+  assert.equal(probe.dirty(), 1, 'the context is marked dirty exactly once')
+  assert.deepEqual(probe.notices, [{ text: 'Context compacted', kind: 'info' }])
+})
+
+test('C2: an idle-log matched compaction end commits idle/false in one snapshot', () => {
+  const probe = routingProbe({ working: false })
+  probe.route('compaction/start', { compactionId: 'c1' })
+  probe.reset()
+  probe.route('compaction/end', { compactionId: 'c1' })
+  assert.deepEqual(probe.commits, [{ compactionPhase: 'idle', busy: false, working: false }])
+})
+
+test('C2: turn/end commits working/busy as ONE snapshot (no intermediate idle/busy=true)', () => {
+  const probe = routingProbe()
+  probe.route('turn/start', { turn: 1 })
+  probe.reset()
+  probe.route('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.deepEqual(probe.commits, [{ working: false, busy: false }],
+    'a turn end has exactly one activity commit')
+  assert.deepEqual(probe.measures, ['turn-end'], 'the turn-end measure stays once')
+})
+
+test('C2: a turn/end inside an active compaction keeps busy in the SAME snapshot', () => {
+  const probe = routingProbe()
+  probe.route('turn/start', { turn: 1 })
+  probe.route('compaction/start', { compactionId: 'c1' })
+  probe.reset()
+  probe.route('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.deepEqual(probe.commits, [{ working: false, busy: true }],
+    'the busy cancel stays armed without a separate phase commit')
+})
+
+test('C2 negative control: unmatched/idless/repeated ends settle, measure and notify nothing', () => {
+  const probe = routingProbe({ working: true })
+  probe.route('compaction/start', { compactionId: 'c1' })
+  probe.route('compaction/end', { compactionId: 'c1' })
+  probe.reset()
+  probe.route('compaction/end', { compactionId: 'foreign' })
+  probe.route('compaction/end', {})
+  probe.route('compaction/end', { compactionId: 'c1' })
+  assert.deepEqual(probe.commits, [], 'a stale end must not touch the activity facts')
+  assert.deepEqual(probe.measures, [], 'a stale end must not re-measure the context')
+  assert.equal(probe.dirty(), 0)
+  assert.deepEqual(probe.notices, [], 'a stale end must not notify')
+})
+
+test('C2: a matched ERROR end still settles once and keeps the Host failure visible', () => {
+  const probe = routingProbe({ working: false })
+  probe.route('compaction/start', { compactionId: 'c1' })
+  probe.reset()
+  probe.route('compaction/end', { compactionId: 'c1', error: 'llm failed' })
+  assert.deepEqual(probe.commits, [{ compactionPhase: 'idle', busy: false, working: false }])
+  assert.deepEqual(probe.notices, [{ text: 'Compaction failed: llm failed', kind: 'error' }])
+})
+
+test('C2: the resumed bracket publishes phase/baseline in ONE snapshot', () => {
+  const probe = routingProbe()
+  probe.routing.applyResumedCompaction('c1', true, 'applying', false)
+  assert.deepEqual(probe.commits, [{ compactionPhase: 'applying', working: true, busy: true }],
+    'an active bracket keeps the existing resume working/busy contract in one commit')
+  probe.reset()
+  probe.routing.applyResumedCompaction(undefined, false, 'idle', true)
+  assert.deepEqual(probe.commits, [{ compactionPhase: 'idle', working: true, busy: true }],
+    'the baseline working fact rides the same settle commit')
+  probe.reset()
+  probe.routing.applyResumedCompaction(undefined, false, 'idle', false)
+  assert.deepEqual(probe.commits, [{ compactionPhase: 'idle', working: false, busy: false }])
 })

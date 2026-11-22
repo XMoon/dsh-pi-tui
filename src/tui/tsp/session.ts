@@ -4356,6 +4356,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // transcript — the Loading frame shows NO native status row, so an old
       // permission/cwd/usage fact can never sit beside the incoming subject.
       presentedStatus = undefined
+      // The outgoing subject's LEGACY Dock facts retire with it: the Loading
+      // frame must not paint the previous Session's title, todo summary or
+      // compaction label. They are renderer-local projections of the retired
+      // owner; the incoming subject's own `commitStatusFacts` re-populates
+      // them, and the hydrate-tail `resetSessionFacts()` (a same-subject
+      // clear) keeps those new values.
+      statusFacts.sessionTitle = undefined
+      statusFacts.todos = undefined
+      statusFacts.compactionPhase = undefined
       // PR-C (external review r3): the outgoing subject's busy lifetime dies
       // with it — the incoming subject's first busy edge mints a fresh Stop
       // identity even though the serial is renderer-local.

@@ -36,7 +36,6 @@ import {
   busyAfterTurnBoundary,
   contextRefreshKind,
   foldCompactionEvent,
-  settleCompactionSurface,
 } from './compaction-presentation.ts'
 import type { OpeningJournal } from './opening-journal.ts'
 import type { AgentLifecycleStatus } from './notification-runtime.ts'
@@ -311,7 +310,12 @@ export interface EventRoutingRuntime<Event extends RoutedSessionEvent> {
   /** The neutral live-input routing (main target vs the mounted viewed child). */
   applyAssistantInput(input: AssistantLiveInput): void
   /** The resumed-compaction routing (a startup/resume fact, not a session event). */
-  applyResumedCompaction(id: string | undefined, active: boolean, phase?: CompactionPhase): void
+  applyResumedCompaction(
+    id: string | undefined,
+    active: boolean,
+    phase: CompactionPhase | undefined,
+    baselineWorking: boolean,
+  ): void
 }
 
 /**
@@ -592,19 +596,25 @@ export function createEventRouting<Event extends RoutedSessionEvent>(
       // turn/end. The working row hands back to the turn state: a
       // turn-enclosed compaction keeps the turn animation, a standalone
       // one clears.
+      // ONE aggregated commit: the three activity facts of this single
+      // lifecycle event form ONE machine snapshot, so a synchronous store
+      // subscriber (or the TSP painter) can never observe an intermediate
+      // combination such as `phase=idle,busy=true`. The public
+      // `settleCompactionSurface` helper keeps its historical three-setter
+      // contract for external callers; the production routing settles
+      // through this atomic seam instead.
+      const workingNow = source.currentWorkingFromLog()
+      options.mounted().commitStatusFacts({
+        compactionPhase: 'idle',
+        busy: workingNow,
+        working: workingNow,
+      })
       // Compaction rewrites the model-visible surface: re-measure NOW
       // (the footer would otherwise show stale pressure until the next
-      // step/start or turn/end).
-      // PR3-A: the PUBLIC settle contract keeps its three setters; the seam
-      // side adapts onto it (one aggregated commit).
-      settleCompactionSurface({
-        setCompactionPhase: phase => options.mounted().commitStatusFacts({ compactionPhase: phase }),
-        setBusy: busy => options.mounted().commitStatusFacts({ busy }),
-        setWorking: working => options.mounted().commitStatusFacts({ working }),
-      }, () => {
-        source.markContextDirty()
-        source.refreshContextMeasurement('compaction-end')
-      }, source.currentWorkingFromLog())
+      // step/start or turn/end). Order: publish the settled facts FIRST,
+      // then measure, then notify below.
+      source.markContextDirty()
+      source.refreshContextMeasurement('compaction-end')
     }
     if (compacted.notify !== undefined) options.mounted().notify(compacted.notify.text, compacted.notify.kind)
     // PR D2: route the context re-measure decision through the single
@@ -626,7 +636,14 @@ export function createEventRouting<Event extends RoutedSessionEvent>(
       source.markSubmitLatency(ownerSessionId, 'turn.start')
       options.mounted().commitStatusFacts({ working: true, busy: true })
     } else if (event.type === 'turn/end') {
-      options.mounted().commitStatusFacts({ working: false })
+      // ONE aggregated commit: the turn-boundary working/busy pair is ONE
+      // machine snapshot. A turn end must not clear the busy flag while a
+      // compaction is still in flight (an interrupted turn can close before
+      // its compaction settles) — the single-Esc cancel stays armed.
+      options.mounted().commitStatusFacts({
+        working: false,
+        busy: busyAfterTurnBoundary('turn/end', compactingId !== undefined),
+      })
       // NOTE: the submit-latency timeline is deliberately NOT reset on
       // turn/end — a submission accepted while this turn was running
       // (busy/queue) is processed by the NEXT turn, and resetting here
@@ -634,10 +651,6 @@ export function createEventRouting<Event extends RoutedSessionEvent>(
       // measure. The baseline ends only on: the next accept (rebase),
       // the assistant.first auto-complete, a terminal non-delivery exit
       // (token-scoped settle) or a session switch.
-      // A turn end must not clear the busy flag while a compaction is
-      // still in flight (an interrupted turn can close before its
-      // compaction settles) — the single-Esc cancel stays armed.
-      options.mounted().commitStatusFacts({ busy: busyAfterTurnBoundary('turn/end', compactingId !== undefined) })
       options.paintNow()
       // Persist each completed turn so a crash loses at most the live
       // turn. Detached: a flush rejection must never surface as an
@@ -766,13 +779,26 @@ export function createEventRouting<Event extends RoutedSessionEvent>(
     options.schedulePaint()
   }
 
-  const applyResumedCompaction = (id: string | undefined, active: boolean, phase?: CompactionPhase): void => {
+  const applyResumedCompaction = (
+    id: string | undefined,
+    active: boolean,
+    phase: CompactionPhase | undefined,
+    baselineWorking: boolean,
+  ): void => {
     compactingId = id
-    // The caller may rebuild the EXACT phase from the window (a bracket whose
-    // summary already landed resumes as 'applying'); without it an active
-    // bracket defaults to 'summarizing'.
-    options.mounted().commitStatusFacts({ compactionPhase: active ? (phase ?? 'summarizing') : 'idle' })
-    if (active) options.mounted().commitStatusFacts({ busy: true, working: true })
+    // ONE aggregated commit: the resumed bracket's phase AND the working/busy
+    // baseline form ONE machine snapshot. The caller may rebuild the EXACT
+    // phase from the window (a bracket whose summary already landed resumes as
+    // 'applying'); without it an active bracket defaults to 'summarizing'.
+    // `baselineWorking` comes only from the hydrate/re-fold window fold or the
+    // official `running` fallback — never the statusline, an old activity row
+    // or the Session list text. An active compaction keeps the existing
+    // resume presentation contract: working/busy stay true.
+    options.mounted().commitStatusFacts({
+      compactionPhase: active ? (phase ?? 'summarizing') : 'idle',
+      working: active || baselineWorking,
+      busy: active || baselineWorking,
+    })
   }
 
   return {

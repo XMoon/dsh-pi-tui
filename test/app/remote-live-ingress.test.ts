@@ -901,3 +901,22 @@ test('a projection change reaches the sink with its real changed keys, coalesced
     'a replaced binding detaches the projection subscription too')
   handle.dispose()
 })
+
+test('the bootstrap live sink advances the working fold BEFORE routing the same event (source lock)', async () => {
+  // The composition root's `onDurableEvent` is the ONE production join between
+  // the ingress and the surface: the discardable Turn fold must be updated in
+  // the SAME synchronous event turn, before the router's matched compaction
+  // settle reads it. A behavior-level proof cannot import bootstrap.ts, so this
+  // lock guards the wiring order the lifecycle fixture reproduces.
+  const { readFileSync } = await import('node:fs')
+  const bootstrap = readFileSync(new URL('../../src/app/bootstrap.ts', import.meta.url), 'utf8')
+  const start = bootstrap.indexOf('onDurableEvent: (id, event) => {')
+  assert.ok(start >= 0, 'the live-ingress durable sink exists')
+  const sink = bootstrap.slice(start, start + 900)
+  const observe = sink.indexOf('observeWorkingTurnBoundary(id, event)')
+  const route = sink.indexOf('surface.routeSessionEvent({ id }, event as SessionEvent)')
+  const note = sink.indexOf('presentation.noteLiveMeasureEvent(id, event as')
+  assert.ok(observe >= 0, 'the sink advances the working fold')
+  assert.ok(route > observe, 'the fold advances BEFORE the router handles the same event')
+  assert.ok(note > route, 'the measure boundary is recorded after routing')
+})

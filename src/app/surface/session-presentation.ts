@@ -666,7 +666,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
       eventCount: events.length,
       elapsedMs: Number(hydrated.scanTimings.statsMs.toFixed(3)),
     })
-    deps.surface.display.commitStatusFacts({ ...planFacts(input.planActive), working: input.working, busy: input.working })
+    deps.surface.display.commitStatusFacts(planFacts(input.planActive))
     if (input.facts !== undefined) {
       // REMOTE: the official projections ARE the current-value authority. An
       // unavailable one is OMITTED — the bounded window never stands in for a
@@ -691,8 +691,9 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // then re-arm only the newest live bracket, matching the log fold.
     const resumedCompaction = timedBootstrapScan(deps.diag, 'compaction', events.length, () => compactionBracketFromLog(events))
     // A4-7: the `compactingId` routing state and the phase/busy/working
-    // presentation are surface-owned (plan §16).
-    deps.surface.applyResumedCompaction(resumedCompaction.id, resumedCompaction.active, resumedCompaction.phase)
+    // presentation are surface-owned (plan §16). The baseline working fact is
+    // published in the SAME atomic commit as the resumed phase.
+    deps.surface.applyResumedCompaction(resumedCompaction.id, resumedCompaction.active, resumedCompaction.phase, input.working)
     // The routing's bracket is now this window's: the LIVE tracker must agree,
     // or a later live `compaction/end` for that restored bracket would be folded
     // as stale and fail to advance the baseline (making the next reconcile
@@ -977,13 +978,13 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // Re-derive the status from the NEW fold in the same step; the cheap
     // refresh's own fences own the session/binding rules. (The measured
     // performance values are the Host projection's and are unaffected.)
-    // The cold hydrate's order: publish the plan projection and the
-    // working/busy BASELINE first, then let an ACTIVE compaction override them.
-    // `applyResumedCompaction(false)` clears only the compaction phase, so
-    // without this commit a stale working/busy would stay on screen after an
-    // outage-spanning compaction/turn end.
-    deps.surface.display.commitStatusFacts({ ...planFacts(planActive), working, busy: working })
-    deps.surface.applyResumedCompaction(resumedCompaction.id, resumedCompaction.active, resumedCompaction.phase)
+    // The plan projection is a SEPARATE fact; the working/busy baseline and
+    // the resumed bracket are committed together by the ONE
+    // `applyResumedCompaction` call below. Inactive still publishes the
+    // baseline (with the idle phase), so a stale working/busy can never stay
+    // on screen after an outage-spanning compaction/turn end.
+    deps.surface.display.commitStatusFacts(planFacts(planActive))
+    deps.surface.applyResumedCompaction(resumedCompaction.id, resumedCompaction.active, resumedCompaction.phase, working)
     // Same parity as the cold hydrate: the routing's bracket is this window's
     // now, so the LIVE tracker must agree — otherwise a later matched live end
     // would fold as stale and the next reconcile would measure it again.

@@ -1718,6 +1718,7 @@ export function applyRunnerWithRuntime(
       currentPreset,
       sessionBlank,
       currentWorkingFromLog,
+      observeWorkingTurnBoundary,
       seedWorkingFold,
       invalidateWorkingFold,
     } = createSessionStartupHelpers({
@@ -2368,6 +2369,10 @@ export function applyRunnerWithRuntime(
       })
       remoteIngressHandle = remoteSources.liveIngress.subscribe(sessionId, {
         onDurableEvent: (id, event) => {
+          // The discardable working fold advances FIRST: the SAME event's
+          // matched compaction settle (inside routeSessionEvent) must observe
+          // the live turn boundary synchronously, not a stale hydrate value.
+          observeWorkingTurnBoundary(id, event)
           surface.routeSessionEvent({ id }, event as SessionEvent)
           // The live routing just handled (and measured) this event: record the
           // measure boundary so a later window reconcile never re-measures one

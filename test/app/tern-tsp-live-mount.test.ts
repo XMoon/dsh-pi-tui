@@ -5321,3 +5321,71 @@ test('R13 L4-F: an adopted nested Preparing repaints through the journal on a st
     await harness.session.close()
   }
 })
+
+// ── C3: the Loading frame retires the previous subject's legacy dock facts ──
+
+test('C3: beginSessionHydration clears the retired title/todo/compaction facts before the Loading frame', async () => {
+  const harness = await mountTspHarness()
+  try {
+    // The CURRENT live node set (flat): a top-level node's `c` snapshot still
+    // carries children the wire deleted later, so a tree walk would resurrect
+    // retired lines. The flat folded set is the committed visible truth.
+    const liveText = (): string => wireNodes(harness.tern.pane)
+      .map(node => typeof node.p.text === 'string' ? node.p.text : '')
+      .join('\n')
+
+    // Owner A commits every legacy dock fact.
+    harness.surface.display.commitStatusFacts({
+      sessionTitle: 'OWNER_A_TITLE',
+      todos: [{ content: 'a todo', status: 'pending' }],
+      compactionPhase: 'summarizing',
+    })
+    await awaitWireFact(() => liveText().includes('OWNER_A_TITLE'), 'owner A title on the committed frame')
+    const before = liveText()
+    assert.ok(before.includes('OWNER_A_TITLE'), 'owner A title is on the wire')
+    assert.ok(before.includes('todos 0/1'), 'owner A todo summary is on the wire')
+    assert.ok(before.includes('compacting (summarizing)'), 'owner A compaction label is on the wire')
+
+    // The generation bump opens the hydration window: the CURRENT frame is the
+    // explicit Loading state and carries no retired fact.
+    harness.surface.display.beginSessionHydration()
+    await awaitWireFact(() => liveText().includes('Loading session'), 'the Loading frame after the generation bump')
+    const loading = liveText()
+    assert.ok(!loading.includes('OWNER_A_TITLE'), 'the retired title is absent from the Loading frame')
+    assert.ok(!loading.includes('todos 0/1'), 'the retired todo summary is absent from the Loading frame')
+    assert.ok(!loading.includes('compacting (summarizing)'), 'the retired compaction label is absent from the Loading frame')
+
+    // Owner B's own commit repopulates every fact, and the hydrate-tail reset
+    // is a same-subject clear: it must NOT drop B's values.
+    harness.surface.display.commitStatusFacts({
+      sessionTitle: 'OWNER_B_TITLE',
+      todos: [{ content: 'b done', status: 'completed' }],
+      compactionPhase: 'applying',
+    })
+    await awaitWireFact(() => liveText().includes('OWNER_B_TITLE'), 'owner B title on the committed frame')
+    const afterB = liveText()
+    assert.ok(afterB.includes('OWNER_B_TITLE'), 'owner B title is visible')
+    assert.ok(afterB.includes('todos 1/1'), 'owner B todo summary is visible')
+    assert.ok(afterB.includes('compacting (applying)'), 'owner B compaction label is visible')
+    harness.surface.display.resetSessionFacts()
+    await awaitWireFact(() => liveText().includes('OWNER_B_TITLE'), 'the hydrate-tail reset frame')
+    const kept = liveText()
+    assert.ok(kept.includes('OWNER_B_TITLE') && kept.includes('todos 1/1') && kept.includes('compacting (applying)'),
+      'the hydrate-tail reset keeps the NEW subject facts')
+
+    // A repeated Begin never resurrects either owner's facts. The Loading row
+    // from the FIRST window is still mounted here, so the authoritative wait is
+    // the retirement of B's facts, not the (already-present) Loading row.
+    harness.surface.display.beginSessionHydration()
+    await awaitWireFact(() => !liveText().includes('OWNER_B_TITLE'), 'the repeated Loading frame retires the B facts')
+    const second = liveText()
+    assert.ok(second.includes('Loading session'), 'the repeated window is Loading again')
+    assert.ok(!second.includes('OWNER_A_TITLE') && !second.includes('OWNER_B_TITLE'),
+      'no retired title survives a repeated hydration window')
+    assert.ok(!second.includes('todos 1/1') && !second.includes('compacting (applying)'),
+      'no retired todo/compaction fact survives a repeated hydration window')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
