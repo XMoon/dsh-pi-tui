@@ -84,7 +84,16 @@ let hostStatusSequence = 0
 // module graph is still evaluating; an event registered after that point is not
 // replayed. The implementation modules are loaded immediately below this block.
 process.on('message', message => {
-  queue = queue.then(() => dispatch(message)).catch(error => {
+  queue = queue.then(() => {
+    // After the lifecycle closed, pending messages are dropped, never run:
+    // a queued request must not recreate a directory or a process while
+    // cleanup owns the Scene.
+    if (lifecycleClosed) return undefined
+    return dispatch(message)
+  }).catch(error => {
+    // A late message racing the close is an expected drop, not a quiescence
+    // failure; never overwrite the terminal receipt with NOT_QUIESCED for it.
+    if (lifecycleClosed) return
     writeReceipt({ phase: 'NOT_QUIESCED', errorName: boundedError(error) })
   })
 })
