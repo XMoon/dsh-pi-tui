@@ -157,12 +157,12 @@ const WIDE_MIN_COLUMNS = 112
 const WIDE_MIN_ROWS = 12
 /** The smallest left column of the two-column layout. */
 const WIDE_LEFT_MIN_CELLS = 44
-/** The automatic ordinary-history ceiling of ONE expanded group. It bounds the
- *  per-open growth only; a user's `Show more` may cross it deliberately. */
-const AUTO_HISTORY_CAP = 20
 /** The two plain cells that make a Session a CHILD of its Folder row. `> ` stays
  *  in the fixed tree gutter, so the bullet and the identity move together. */
 const SESSION_TREE_INDENT = 2
+/** The title cells a Folder or tagged Session row keeps before a secondary fact
+ *  or a right-aligned status/count group may take the rest of the row. */
+const MIN_TITLE_CELLS = 8
 const GROUP_LABEL: Record<SessionWorkspacePriority, string> = {
   needs: 'Needs attention',
   working: 'Working',
@@ -1373,14 +1373,34 @@ export class SessionWorkspacePanel implements Component {
     const wasExpanded = folder?.kind === 'folder' && folder.expanded
     this.workspaceExpanded.set(workspaceId, true)
     if (!wasExpanded) {
+      // Not reachable from the painted tree (Show more only exists on an
+      // expanded Folder), but keep the historical one-shot expansion semantics
+      // for a direct caller: reveal the shared manual five and stay on More.
       this.workspaceHistoryLimit.set(workspaceId, 5)
-    } else {
-      const view = this.view()
-      this.workspaceHistoryLimit.set(workspaceId, this.effectiveHistoryLimit(view, workspaceId) + 5)
+      this.selectedBrowseRowId = `more:${workspaceId}`
+      this.ensureSelection()
+      this.host.requestRender()
+      return
     }
-    // Keep the cursor on the reveal target; only an exhausted watermark that
-    // really disappeared re-anchors on its parent Folder.
-    this.selectedBrowseRowId = `more:${workspaceId}`
+    const view = this.view()
+    const orderedRecentIds = view.groups
+      .find(group => group.workspaceId === workspaceId)?.ids
+      .filter(id => view.rowsById.get(id)?.priority === 'recent') ?? []
+    const old = this.effectiveHistoryLimit(view, workspaceId)
+    const batch = Math.max(5, this.lastPaintedListRows)
+    const target = Math.min(orderedRecentIds.length, old + batch)
+    const oldTreeIds = new Set(this.treeRows(view).map(row => row.id))
+    this.workspaceHistoryLimit.set(workspaceId, target)
+    // `Show more` reveals a whole painted list page. Put the typed cursor on the
+    // FIRST Session this activation really added: a row the old tree already
+    // forced visible (Current/selected) is not a new reveal.
+    const newlyPainted = orderedRecentIds.slice(old, target)
+      .find(id => !oldTreeIds.has(`session:${id}`))
+    this.selectedBrowseRowId = newlyPainted === undefined
+      ? (target < orderedRecentIds.length ? `more:${workspaceId}` : `workspace:${workspaceId}`)
+      : `session:${newlyPainted}`
+    // Keep the old scroll anchor: the NEXT render rebases it to make the new
+    // selection visible instead of jumping to the end of the list.
     this.ensureSelection()
     this.host.requestRender()
   }
@@ -1881,10 +1901,12 @@ export class SessionWorkspacePanel implements Component {
     const recentIds = new Map<string, readonly string[]>()
     for (const group of view.groups) {
       if (!expanded.has(group.workspaceId)) continue
-      // A group already at the automatic cap can never grow again in this open:
-      // skip its roster filter so a saturated tall frame stays a cheap render.
-      if (this.effectiveHistoryLimit(view, group.workspaceId) >= AUTO_HISTORY_CAP) continue
-      recentIds.set(group.workspaceId, group.ids.filter(id => view.rowsById.get(id)?.priority === 'recent'))
+      // Only an already drained watermark skips the roster filter; the real
+      // recent count is the ONE growth ceiling, never a fixed automatic cap.
+      const ids = group.ids.filter(id => view.rowsById.get(id)?.priority === 'recent')
+      if (this.effectiveHistoryLimit(view, group.workspaceId) < ids.length) {
+        recentIds.set(group.workspaceId, ids)
+      }
     }
     // Current then Next (deduped); every other expanded Folder keeps the
     // official group order.
@@ -1903,7 +1925,7 @@ export class SessionWorkspacePanel implements Component {
       const ids = recentIds.get(workspaceId)
       if (ids === undefined) return false
       const limit = trial.get(workspaceId) ?? this.effectiveHistoryLimit(view, workspaceId)
-      if (limit >= AUTO_HISTORY_CAP || limit >= ids.length) return false
+      if (limit >= ids.length) return false
       const forced = ids[limit] === this.options.currentSessionId || ids[limit] === selectedSessionId
       const removesMore = limit + 1 === ids.length
       const delta = (forced ? 0 : 1) - (removesMore ? 1 : 0)
@@ -2046,11 +2068,42 @@ export class SessionWorkspacePanel implements Component {
     }
     if (entry.kind === 'folder') {
       const disclosure = entry.expanded ? color.textDim('▾ ') : color.textDim('▸ ')
-      const suffix = `${entry.current ? ' · Current' : entry.next ? ' · Next' : ''}${entry.needs + entry.working > 0
-        ? ` · ${entry.needs} Needs · ${entry.working} Working`
-        : ''}`
       const label = sanitizedPhysicalLine(`${entry.title} · ${entry.total}`)
-      lines.push(fit(`${marker}${disclosure}${selected ? color.textStrong(label) : color.text(label)}${color.textMuted(suffix)}`, width))
+      const suffix = entry.current ? ' · Current' : entry.next ? ' · Next' : ''
+      // Trustworthy Needs/Working counts are an independent right-hand fact
+      // group, so a long title can never hide a non-zero count. Zero counts are
+      // not facts worth displacing the Folder identity: a healthy 0/0 Folder
+      // omits the whole group, and a mixed positive/zero row drops the zero
+      // segment before the otherwise-fitting label is truncated.
+      const countParts: ReadonlyArray<{ readonly text: string; readonly paint: (text: string) => string; readonly nonzero: boolean }> = [
+        { text: `${entry.needs} Needs`, paint: entry.needs > 0 ? color.warning : color.textMuted, nonzero: entry.needs > 0 },
+        { text: `${entry.working} Working`, paint: entry.working > 0 ? color.primary : color.textMuted, nonzero: entry.working > 0 },
+      ]
+      const paintCounts = (parts: readonly typeof countParts[number][]): string =>
+        parts.map(part => part.paint(part.text)).join(color.textMuted(' · '))
+      const bothCounts = paintCounts(countParts)
+      const nonzeroCounts = paintCounts(countParts.filter(part => part.nonzero))
+      const available = Math.max(1, width - 4)
+      const identity = `${label}${suffix}`
+      // Show the zero-bearing pair only when the complete identity still fits;
+      // otherwise a non-zero-only group wins before the label loses its tail.
+      const counts = nonzeroCounts === ''
+        ? ''
+        : visibleWidth(bothCounts) + 2 + visibleWidth(identity) <= available
+          ? bothCounts
+          : nonzeroCounts
+      const identityBudget = Math.max(0, available - (counts === '' ? 0 : visibleWidth(counts) + 2))
+      // Current/Next is a Folder identity fact: reserve it whole before the
+      // mutable title/total tail yields on a narrow row.
+      const suffixWidth = visibleWidth(suffix)
+      const suffixText = suffixWidth <= identityBudget ? color.textMuted(suffix) : ''
+      const labelBudget = Math.max(0, identityBudget - visibleWidth(suffixText))
+      const paintedLabel = truncateToWidth(label, labelBudget, '…', false)
+      const paintedIdentity = `${selected ? color.textStrong(paintedLabel) : color.text(paintedLabel)}${suffixText}`
+      lines.push(fit(
+        `${marker}${disclosure}${padColumn(paintedIdentity, identityBudget)}${counts === '' ? '' : `  ${counts}`}`,
+        width,
+      ))
       // The disclosure owns its two cells; a click on the label only selects.
       if (width > 2) regions.push({ kind: 'folder-toggle', id: entry.workspaceId, xStart: 2, xEnd: Math.min(width - 1, 3), line })
       regions.push({ kind: 'tree-row', id: entry.id, xStart: 0, xEnd: Math.max(0, width - 1), line })
@@ -2445,30 +2498,85 @@ export class SessionWorkspacePanel implements Component {
     }
   }
 
+  /** The compact row's fixed status group. `workspaceRowStatusLabel` stays the
+   *  ONE wording authority; only the verbose `Pending · not actionable here`
+   *  phrase is shortened here, and Peek keeps the original detail. */
+  private browseStatusParts(fact: SessionWorkspaceRowFact): { readonly primary: string; readonly secondary?: string } | undefined {
+    const label = this.statusLabel(fact)
+    if (label === '') return undefined
+    if (label === 'Pending · not actionable here') {
+      return { primary: color.textDim('‣ Pending unverified') }
+    }
+    const [primaryWord = '', secondaryWord] = label.split(' · ')
+    if (fact.priority === 'needs') {
+      return {
+        primary: color.warning(`‣ ${primaryWord}`),
+        ...(secondaryWord === undefined ? {} : { secondary: color.primary(secondaryWord) }),
+      }
+    }
+    return { primary: color.primary(`‣ ${label}`) }
+  }
+
   private browseRowLine(row: SessionBrowserRow, fact: SessionWorkspaceRowFact, selected: boolean, width: number): string {
     const current = row.id === this.options.currentSessionId
     const marker = selected ? color.primary('> ') : '  '
     const currentMark = current ? color.success('● ') : ''
     const shortId = sanitizedPhysicalLine(shortSessionId(row.id))
     const title = row.title === undefined ? undefined : sanitizedPhysicalLine(row.title)
-    const status = this.statusLabel(fact)
-    const paintedStatus = fact.priority === 'needs' || fact.pending === 'unverified'
-      ? color.textStrong(status)
-      : color.textMuted(status)
-    const meta = [
-      status === '' ? undefined : paintedStatus,
-      color.textMuted(formatSessionAge(row.updatedAt)),
-      color.textDim(workspaceKey(row.cwd)),
-    ].filter((part): part is string => part !== undefined).join(color.textMuted(' · '))
     // A Session is painted as a CHILD of its Folder: the fixed `> ` gutter stays
-    // in the tree root column while the bullet, the identity and the meta all
-    // start two cells further right. The row's own columns shrink by exactly
-    // that indentation, so the metadata still cannot overflow the pane.
-    const columns = rowColumns(identityWidth(shortId, title), Math.max(1, width - SESSION_TREE_INDENT))
-    const label = truncateToWidth(identityText(shortId, title, selected), columns.identity, '…', false)
-    const secondary = columns.meta > 0 ? truncateToWidth(meta, columns.meta, '…', false) : ''
+    // in the tree root column while the bullet, the identity and the status all
+    // start two cells further right.
+    const status = this.browseStatusParts(fact)
+    if (status === undefined) {
+      const meta = [
+        color.textMuted(formatSessionAge(row.updatedAt)),
+        color.textDim(workspaceKey(row.cwd)),
+      ].join(color.textMuted(' · '))
+      const columns = rowColumns(identityWidth(shortId, title), Math.max(1, width - SESSION_TREE_INDENT))
+      const label = truncateToWidth(identityText(shortId, title, selected), columns.identity, '…', false)
+      const secondary = columns.meta > 0 ? truncateToWidth(meta, columns.meta, '…', false) : ''
+      return fit(
+        `${marker}${' '.repeat(SESSION_TREE_INDENT)}${currentMark}${padColumn(label, columns.identity)}${secondary === '' ? '' : `  ${secondary}`}`,
+        width,
+      )
+    }
+    // The status group is reserved WHOLE at the right edge before the identity
+    // is laid out: full key state > short id > title prefix > age > cwd. The
+    // `Working` secondary segment is dropped whole first on a narrow row.
+    const primaryWidth = visibleWidth(status.primary)
+    // The assembled status group joins its secondary word with the real
+    // three-cell ` · ` separator, not a two-cell guess.
+    const secondaryWidth = status.secondary === undefined ? 0 : 3 + visibleWidth(status.secondary)
+    const fixed = 2 + SESSION_TREE_INDENT + (current ? 2 : 0)
+    const contentWidth = Math.max(1, width - fixed)
+    const idWidth = visibleWidth(shortId)
+    const minimumIdentity = idWidth + 2 + Math.min(visibleWidth(title ?? ''), MIN_TITLE_CELLS)
+    const useSecondary = status.secondary !== undefined
+      && primaryWidth + secondaryWidth + 2 + minimumIdentity <= contentWidth
+    const statusText = useSecondary
+      ? `${status.primary}${color.textMuted(' · ')}${status.secondary}`
+      : status.primary
+    const identityBudget = Math.max(0, contentWidth - visibleWidth(statusText) - 2)
+    const identity = identityText(shortId, title, selected)
+    let left = truncateToWidth(identity, identityBudget, '…', false)
+    // Age/cwd are inline secondary facts (no status marker). Each whole fact is
+    // added only when the complete identity already fits and the row still has
+    // room for it; the title never shrinks to make room for them.
+    if (visibleWidth(identity) <= identityBudget) {
+      const facts = [
+        color.textMuted(formatSessionAge(row.updatedAt)),
+        color.textDim(workspaceKey(row.cwd)),
+      ]
+      let room = identityBudget - visibleWidth(identity)
+      for (const factText of facts) {
+        const cost = 3 + visibleWidth(factText)
+        if (cost > room) continue
+        left = `${left}${color.textMuted(' · ')}${factText}`
+        room -= cost
+      }
+    }
     return fit(
-      `${marker}${' '.repeat(SESSION_TREE_INDENT)}${currentMark}${padColumn(label, columns.identity)}${secondary === '' ? '' : `  ${secondary}`}`,
+      `${marker}${' '.repeat(SESSION_TREE_INDENT)}${currentMark}${padColumn(left, identityBudget)}  ${statusText}`,
       width,
     )
   }
@@ -2543,12 +2651,6 @@ export class SessionWorkspacePanel implements Component {
     }
     if (snapshot.projectionError !== undefined) {
       push(sessionBrowserErrorNotice('projection', snapshot.projectionError))
-    }
-    // The transient freshness fact paints LAST among the panel's own statuses:
-    // a short frame must never spend its budget on "still reading" while a real
-    // error line goes unpainted.
-    if (this.activityError === undefined && snapshot.listRevision > this.activitySampleRevision) {
-      push('Reading session activity…')
     }
     // The app's ONE transient notice (a failed/indeterminate interactive switch,
     // a clipboard or settings notice). It is painted LAST and only when the

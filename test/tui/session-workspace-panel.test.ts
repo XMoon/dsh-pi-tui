@@ -29,6 +29,7 @@ import type { DirectoryEntry, DirectoryListing } from '@deepseek-ai/dsh-host-dir
 import type { HostDirectoryBrowseOutcome } from '../../src/runtime/host-directory-browse-port.ts'
 import { SupersededReadError } from '../../src/runtime/read-error.ts'
 import { sessionBrowserErrorNotice, shortSessionId } from '../../src/tui/pickers/sessions.ts'
+import { color } from '../../src/tui/theme/runtime.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
@@ -173,7 +174,7 @@ test('the same PiTui Browser path mode preserves rejected input and returns on H
   assert.equal(h.closes, 1, 'successful Welcome directory selection returns to Welcome')
   assert.equal(h.app.isFullscreen(), false)
 })
-test('folder pointer collapses default-expanded active rows and Show more pointer expands five history rows', async () => {
+test('folder pointer collapses default-expanded active rows and Show more pointer reveals one page', async () => {
   const history = Array.from({ length: 30 }, (_, index) => row(`session-panel-history-${index}`, 900 - index, { title: `History ${index}` }))
   const h = harness({ columns: 100, rows: 34 })
   h.handle.setSnapshot(snapshot({ rows: [row(CURRENT, 3_000, { title: 'Current session' }), row('session-panel-active', 2_000, { title: 'Active row' }), ...history] }))
@@ -199,16 +200,16 @@ test('folder pointer collapses default-expanded active rows and Show more pointe
   await h.paint()
   const opened = h.view()
   assert.ok(opened.includes('Active row'), `Enter explicitly reopens the collapsed Folder:\n${opened}`)
-  assert.ok(opened.includes('History 19'), `reopening restores the watermark this open had already grown:\n${opened}`)
-  assert.ok(!opened.includes('History 20'), `the restored watermark stays bounded:\n${opened}`)
+  assert.ok(opened.includes('History 24'), `reopening restores the watermark this open had already grown:\n${opened}`)
+  assert.ok(!opened.includes('History 25'), `the restored watermark stays bounded by the real viewport:\n${opened}`)
   frame = panelFrame(h)
   const moreLine = lineIndexOf(frame, 'Show more sessions')
   await clickCell(h, 3, moreLine)
   const view = h.view()
-  assert.ok(view.includes('History 24'), `Show more advances the per-Workspace watermark by five:\n${view}`)
-  assert.ok(!view.includes('History 25'), `the reveal is bounded to the next five rows:\n${view}`)
+  assert.ok(/^> .*History 25/m.test(view), `the first newly revealed history row is selected:\n${view}`)
+  assert.ok(!view.includes('Show more sessions'), `one pointer page exhausts the remaining five rows:\n${view}`)
   assert.ok(view.includes('Active row'), 'the folder keeps its active row after the reveal')
-  assert.ok(/^> .*Show more sessions/m.test(view), 'the cursor stays on the reveal target')
+  assert.deepEqual(h.resumes, [], 'Show more never resumes a Session')
 })
 
 test('the sessionless Folder New session action uses the shared command callback', async () => {
@@ -545,26 +546,26 @@ test('a short frame scrolls the Workspace tree so the selected Session stays pai
   await h.paint()
   // Walk past the first painted page. The tree must scroll with the cursor:
   // a selected row that is not painted can never be opened.
-  for (let step = 0; step < 5; step += 1) {
+  for (let step = 0; step < 7; step += 1) {
     h.vt.sendInput('\x1b[B')
     await h.paint()
   }
   const view = h.view()
-  assert.ok(view.includes('History 4'), `the selected row scrolls into the painted window:\n${view}`)
+  assert.ok(view.includes('History 6'), `the selected row scrolls into the painted window:\n${view}`)
   assert.ok(!view.includes('Current session'), `the window moved off the first page:\n${view}`)
   h.vt.sendInput('\r')
   await h.paint()
-  assert.deepEqual(h.resumes, ['session-tree-scroll-4'], 'the scrolled-to row is a real painted activation target')
+  assert.deepEqual(h.resumes, ['session-tree-scroll-6'], 'the scrolled-to row is a real painted activation target')
 })
 
 test('a row the current frame never painted can never be opened, and resizing re-validates it', async () => {
-  // 80×3 paints only the header/subheader/action bar: no Session row exists.
-  const h = harness({ columns: 80, rows: 3 })
+  // 80×2 paints only the header and the action bar: no Session row exists.
+  const h = harness({ columns: 80, rows: 2 })
   h.handle.setSnapshot(snapshot({
     rows: [row(CURRENT, 3_000, { title: 'Current session' }), row(OTHER, 2_000, { title: 'Other session' })],
   }))
   await h.paint()
-  assert.ok(!h.view().includes('Other session'), 'no row is painted at 3 rows')
+  assert.ok(!h.view().includes('Other session'), 'no row is painted at 2 rows')
   h.vt.sendInput('\x1b[B') // select the non-current row logically
   await h.paint()
   h.vt.sendInput('\r')
@@ -582,7 +583,7 @@ test('a row the current frame never painted can never be opened, and resizing re
 })
 
 test('status rows that squeeze the whole list out also withhold activation', async () => {
-  const h = harness({ columns: 80, rows: 8 })
+  const h = harness({ columns: 80, rows: 6 })
   h.handle.setSnapshot(snapshot({
     rows: [row(CURRENT, 3_000, { title: 'Current session' }), row(OTHER, 2_000, { title: 'Other session' })],
     projectionError: 'projection failed',
@@ -930,8 +931,8 @@ function eligibility(sessionId: string, kind: 'question' | 'approval' = 'questio
 }
 
 /** Publish the accepted EMPTY Activity sample of the current roster revision.
- *  The wheel tests target the painted body rows, so the transient "Reading
- *  session activity…" row must not sit above them. */
+ *  The wheel tests target the painted body rows, so no status row may sit
+ *  above them. */
 function settleActivity(h: Harness): void {
   h.handle.setActivityFacts({ listRevision: 1, facts: [], answerEligibility: [] })
 }
@@ -1093,8 +1094,8 @@ test('a folder keeps Needs, Working and Recent priority in its Session rows', as
   const frame = panelFrame(h)
   const view = frame.join('\n')
   assert.ok(view.includes('Project · 33'), `official Workspace membership is the outer group:\n${view}`)
-  assert.ok(view.includes('Needs row  Needs attention · Working'), `proved Needs stays in its folder and may also be Working:\n${view}`)
-  assert.ok(view.includes('Working row  Working'), `proved running row stays inside the Workspace:\n${view}`)
+  assert.match(view, /Needs row.*‣ Needs attention · Working/, `proved Needs stays in its folder and may also be Working:\n${view}`)
+  assert.match(view, /Working row.*‣ Working/, `proved running row stays inside the Workspace:\n${view}`)
   const needsLine = lineIndexOf(frame, 'Needs row')
   const workingLine = lineIndexOf(frame, 'Working row')
   const recentLine = lineIndexOf(frame, 'Recent 0')
@@ -1313,7 +1314,7 @@ test('an Activity sample applies immediately, including a revocation, and never 
   })
   await h.paint()
   const proved = h.view()
-  assert.ok(proved.includes('Other session  Needs attention'), `the proved need is painted at once:\n${proved}`)
+  assert.match(proved, /Other session.*‣ Needs attention/, `the proved need is painted at once:\n${proved}`)
   assert.ok(/^> .*Other session/m.test(proved), 'the cursor never jumps on an activity update')
   // A revocation is the same class of fact: it disappears in the SAME frame,
   // never behind a delayed group order.
@@ -1427,7 +1428,7 @@ test('compact Working rows omit unknown pending spam while Peek preserves the so
   })
   await h.paint()
   const view = h.view()
-  assert.equal(view.split('Working · ').length - 1, 3, `all three running rows retain the Working summary:\n${view}`)
+  assert.equal(view.split('‣ Working').length - 1, 3, `all three running rows retain the Working summary:\n${view}`)
   assert.ok(!view.includes('Pending denied') && !view.includes('Pending unknown') && !view.includes('Pending unavailable'),
     `compact rows do not repeat unknown/unanswerable pending state:\n${view}`)
   h.vt.sendInput('\x1b[B')
@@ -1655,7 +1656,7 @@ test('root Add, official first-child New, synthetic exclusion and explicit mouse
   await h.paint()
 })
 
-test('Show more advances by five without resetting the tree to the top', async () => {
+test('Show more reveals one painted page and selects the first new history row', async () => {
   const history = Array.from({ length: 20 }, (_, index) => row(`session-more-${index}`, 900 - index, { title: `History ${index}` }))
   // A 14-row frame leaves the default-expanded Beta at its five manual rows and
   // keeps its Show-more row inside the real list budget.
@@ -1667,7 +1668,7 @@ test('Show more advances by five without resetting the tree to the top', async (
   ] })
   await h.paint()
   // Beta is not current: Tab jumps to it, Right expands it with five ordinary
-  // history rows, then six Down presses reach the Show-more watermark.
+  // history rows, then seven Down presses reach the Show-more watermark.
   h.vt.sendInput('\t')
   await h.paint()
   h.vt.sendInput('\x1b[C')
@@ -1682,9 +1683,10 @@ test('Show more advances by five without resetting the tree to the top', async (
   h.vt.sendInput('\r')
   await h.paint()
   const after = h.view()
-  assert.ok(after.includes('History 9'), `Show more reveals five ordinary rows:\n${after}`)
-  assert.ok(!after.includes('History 10'), 'the reveal is bounded to the next five rows')
-  assert.ok(/^> .*Show more sessions/m.test(after), 'the cursor stays on the reveal target instead of jumping to the top')
+  assert.ok(after.includes('History 6'), `Show more reveals the whole painted page from the current watermark:\n${after}`)
+  assert.ok(/^> .*History 6/m.test(after), 'the cursor lands on the first newly revealed history row')
+  assert.ok(!after.includes('History 16'), 'the reveal is bounded by the painted page size')
+  assert.ok(!after.includes('Show more sessions'), 'the page exhausted the remaining history')
 })
 
 test('the Sessionless chooser chooses an existing Folder without creating a Session', async () => {
@@ -3925,12 +3927,12 @@ test('M04: a Folder gesture is dropped when the frame changes between press and 
   h.vt.sendInput(`\x1b[<0;7;${line + 1}m`)
   await h.paint()
   assert.ok(h.view().includes('Other title'), 'the stale release must not toggle the re-painted Folder')
-  await clickCell(h, 7, folderLineIndexOf(panelFrame(h), 'Beta'))
+  await clickCell(h, 2, folderLineIndexOf(panelFrame(h), 'Beta'))
   assert.ok(!h.view().includes('Other title'), 'a fresh press/release on the new frame acts exactly once')
   assert.deepEqual(h.resumes, [], 'no gesture resumed a Session')
 })
 
-test('H01: the real list height drives ordinary history up to the automatic cap', async () => {
+test('H01: the real list height fills ordinary history until the roster or viewport is exhausted', async () => {
   const history = Array.from({ length: 30 }, (_, index) => row(`session-h01-${index}`, 900 - index, { title: `H01 ${index}` }))
   const counts: number[] = []
   for (const rows of [24, 40, 60] as const) {
@@ -3944,18 +3946,21 @@ test('H01: the real list height drives ordinary history up to the automatic cap'
     const view = frame.join('\n')
     const visible = frame.filter(line => /H01 \d+/.test(line)).length
     counts.push(visible)
-    assert.ok(visible > 0 && visible <= 20, `${rows} rows: ordinary history stays within the automatic cap:\n${view}`)
+    assert.ok(visible > 0 && visible <= 30, `${rows} rows: ordinary history never exceeds the real roster:\n${view}`)
     assert.ok(frame[frame.length - 1]!.includes('Close [Esc]'), `${rows} rows: the Footer keeps its last physical row`)
     const more = frame.find(line => line.includes('Show more sessions'))
-    assert.ok(more !== undefined, `${rows} rows: the remaining history stays behind Show more:\n${view}`)
-    const remaining = Number(/· (\d+) remaining/.exec(more)?.[1])
-    assert.equal(remaining, 30 - visible, `${rows} rows: the remaining count matches the painted watermark`)
+    if (more === undefined) {
+      assert.equal(visible, 30, `${rows} rows: a missing Show more means the whole roster is painted:\n${view}`)
+    } else {
+      const remaining = Number(/· (\d+) remaining/.exec(more)?.[1])
+      assert.equal(remaining, 30 - visible, `${rows} rows: the remaining count matches the painted watermark`)
+    }
     h.dispose()
   }
   assert.ok(counts[1]! >= counts[0]!, `a taller list never shows less ordinary history: ${counts.join(', ')}`)
-  assert.ok(counts[2]! <= 20)
-  assert.equal(counts[2], 19,
-    `a tall frame reaches the automatic 20-row watermark, one of whose rows is the current Session: ${counts.join(', ')}`)
+  assert.ok(counts[2]! >= counts[1]!, `a taller list never shows less ordinary history: ${counts.join(', ')}`)
+  assert.ok(counts[1]! > 20, `40 rows reveal more than the retired 20-row cap: ${counts.join(', ')}`)
+  assert.equal(counts[2], 30, `60 rows exhaust the 30-row roster instead of leaving a fixed-cap gap: ${counts.join(', ')}`)
 })
 
 test('H02: resizing never rewinds a watermark and never moves the typed selection', async () => {
@@ -3977,6 +3982,7 @@ test('H02: resizing never rewinds a watermark and never moves the typed selectio
   await h.paint()
   const at40 = count()
   assert.ok(at40 >= at24, `growing the terminal adds ordinary history, never removes it: ${at24} -> ${at40}`)
+  assert.ok(at40 > 20, `a taller frame fills past the retired 20-row cap: ${at24} -> ${at40}`)
   assert.ok(/^> .*H02 9/m.test(h.view()), 'the selection keeps its own row id across the resize')
   h.vt.resize(100, 10)
   await h.paint()
@@ -3985,7 +3991,6 @@ test('H02: resizing never rewinds a watermark and never moves the typed selectio
   h.vt.resize(100, 40)
   await h.paint()
   assert.equal(count(), at40, 'returning to the same size never grows the watermark again')
-  assert.ok(count() <= 20)
   assert.ok(/^> .*H02 9/m.test(h.view()), 'the cursor never jumped back to the top')
   // A real press repaints the SAME content: the frame revision must survive it,
   // so the release still selects another painted row. A hidden re-allocation on
@@ -4023,11 +4028,14 @@ test('H02B: a growth that exhausts the selected Show more row keeps a painted cu
   h.app.dispose()
   started.delete(h.app)
 
-  // The same orphaning cannot happen through a status row that stops painting:
-  // one row of budget appears, the growth exhausts the selected Show more row.
+  // A REAL Host status line is the budget control: removing it frees the row
+  // that lets automatic growth finish the remaining history, so the selected
+  // Show-more row disappears and the cursor must re-anchor on its Folder. No
+  // transient Activity freshness row exists in either frame.
   const settledHistory = Array.from({ length: 14 }, (_, index) => row(`session-h02c-${index}`, 900 - index, { title: `H02C ${index}` }))
+  const settledRows = [row(CURRENT, 3_000, { title: 'H02C current' }), ...settledHistory]
   const status = harness({ columns: 100, rows: 20 })
-  status.handle.setSnapshot(snapshot({ rows: [row(CURRENT, 3_000, { title: 'H02C current' }), ...settledHistory] }))
+  status.handle.setSnapshot(snapshot({ rows: settledRows, refreshError: 'host roster refresh failed' }))
   status.handle.updateWorkspaces({ type: 'baseline', items: [
     { workspaceId: 'ws-s', path: '/ws/s', title: 'Status', sessionIds: [CURRENT, ...settledHistory.map(item => item.id)] },
   ] })
@@ -4035,19 +4043,21 @@ test('H02B: a growth that exhausts the selected Show more row keeps a painted cu
   status.vt.sendInput('\x1b[F')
   await status.paint()
   assert.ok(/^> .*Show more sessions/m.test(status.view()), `the cursor sits on the Show-more row:\n${status.view()}`)
-  status.handle.setActivityFacts({
-    listRevision: 1,
-    facts: [
-      fact(CURRENT, { running: false, attention: 'none', attentionSourceState: 'known' }),
-      ...settledHistory.map(item => fact(item.id, { running: false, attention: 'none', attentionSourceState: 'known' })),
-    ],
-    answerEligibility: [],
-  })
+  assert.ok(status.view().includes('session list refresh failed: host roster refresh failed'),
+    `the real Host status line is painted:\n${status.view()}`)
+  // The real status line disappears with the next settled snapshot: one body
+  // row returns and automatic growth exhausts the remaining one row of history.
+  status.handle.setSnapshot(snapshot({ rows: settledRows }))
   await status.paint()
   const settled = status.view()
-  assert.ok(!settled.includes('Show more sessions'), `the settled sample frees a row and exhausts the history:\n${settled}`)
+  assert.ok(!settled.includes('Show more sessions'), `the freed row lets growth exhaust the remaining history:\n${settled}`)
   assert.ok(/^> .*Status/m.test(settled), `the cursor re-anchored on the parent Folder:\n${settled}`)
   assert.ok(panelFrame(status).at(-1)!.includes('Collapse [Enter]'), 'the Footer advertises the painted row')
+  // Re-adding the real status line never resurrects a transient Activity row.
+  status.handle.setSnapshot(snapshot({ rows: settledRows, refreshError: 'host roster refresh failed' }))
+  await status.paint()
+  assert.ok(status.view().includes('session list refresh failed: host roster refresh failed'))
+  assert.ok(!status.view().includes('Reading session activity…'), 'no status transition paints the retired transient row')
 })
 
 test('H03: spare rows fill the priority Workspace first and then the other expanded ones', async () => {
@@ -4097,16 +4107,18 @@ test('H03: spare rows fill the priority Workspace first and then the other expan
   h.vt.resize(100, 60)
   await h.paint()
   const roomy = h.view()
-  assert.ok(roomy.includes('A history 18'), `the priority Workspace grows up to the automatic cap:\n${roomy}`)
-  assert.ok(!roomy.includes('A history 19'), `and stops there instead of revealing the whole history:\n${roomy}`)
-  assert.ok(roomy.includes('B history 9'), `the other expanded Workspace then receives the spare rows:\n${roomy}`)
+  assert.ok(roomy.includes('A history 44'), `the priority Workspace fills the whole viewport with its real history:\n${roomy}`)
+  assert.ok(!roomy.includes('A history 45'), 'the reveal stops at the real roster')
+  assert.ok(roomy.includes('B history 1'), `the other expanded Workspace receives the remaining spare rows:\n${roomy}`)
+  assert.ok(!roomy.includes('B history 2'), 'the sibling never over-allocates past the real budget')
+  assert.ok(roomy.includes('Show more sessions · 8 remaining'), `the remaining count is the real unwatermarked roster:\n${roomy}`)
   assert.ok(roomy.includes('B need') && roomy.includes('B working'), 'the active priority rows stay painted')
   assert.ok(roomy.includes('+ New session'), 'the expanded official Folders keep their New row')
   assert.ok(!roomy.includes('C history'), 'the allocation never expands a collapsed Folder')
   assert.ok(/[▸▾] Gamma/.test(roomy), 'the collapsed Folder row itself stays in the complete tree')
 })
 
-test('H04: manual collapse, Show more beyond the cap and a later shrink keep the per-open watermark', async () => {
+test('H04: Show more reveals one painted page from the current watermark and keeps it across collapse and resize', async () => {
   const history = Array.from({ length: 45 }, (_, index) => row(`session-h04-${index}`, 900 - index, { title: `H04 ${index}` }))
   const other = Array.from({ length: 10 }, (_, index) => row(`session-h04-other-${index}`, 800 - index, { title: `Other ${index}` }))
   const h = harness({ columns: 100, rows: 40 })
@@ -4118,11 +4130,18 @@ test('H04: manual collapse, Show more beyond the cap and a later shrink keep the
   await h.paint()
   const count = (): number => panelFrame(h).filter(line => /H04 \d+/.test(line)).length
   const automatic = count()
-  assert.ok(automatic <= 20, `the automatic watermark stays capped: ${automatic}`)
+  assert.ok(automatic > 20 && automatic < 45, `the automatic watermark fills the real viewport, not a fixed cap: ${automatic}`)
+  const firstMore = panelFrame(h).find(line => line.includes('Show more sessions'))
+  assert.ok(firstMore !== undefined, `the remaining history stays behind Show more:\n${h.view()}`)
+  const remaining = Number(/· (\d+) remaining/.exec(firstMore)?.[1])
   await clickCell(h, 8, lineIndexOf(panelFrame(h), 'Show more sessions'))
   const grown = count()
-  assert.ok(grown > automatic, `Show more adds five more rows beyond the automatic watermark: ${automatic} -> ${grown}`)
-  assert.ok(grown <= automatic + 5, `Show more advances exactly one batch: ${automatic} -> ${grown}`)
+  assert.ok(grown > automatic, `Show more reveals the next painted page: ${automatic} -> ${grown}`)
+  assert.ok(grown <= 45, `the reveal is bounded by the real roster: ${automatic} -> ${grown}`)
+  assert.ok(/^> .*H04 \d+/m.test(h.view()), `the cursor lands on the first new history row:\n${h.view()}`)
+  const selected = /^> .*H04 (\d+)/m.exec(h.view())?.[1]
+  assert.equal(Number(selected), automatic,
+    `the first row beyond the old watermark is the one newly selected (was ${remaining} remaining)`)
   h.vt.sendInput('\x1b[H')
   await h.paint()
   h.vt.sendInput('\r')
@@ -4139,6 +4158,274 @@ test('H04: manual collapse, Show more beyond the cap and a later shrink keep the
   await h.paint()
   assert.equal(count(), grown, 'resizing never rewinds the watermark')
   assert.ok(!h.view().includes('Other 0'), 'the allocation never opened the collapsed Folder')
+})
+
+test('H04B: two consecutive Show more pages each select their own first new row without resuming', async () => {
+  const history = Array.from({ length: 60 }, (_, index) => row(`session-h04b-${index}`, 900 - index, { title: `H04B ${index}` }))
+  const h = harness({ columns: 100, rows: 24 })
+  h.handle.setSnapshot(snapshot({ rows: [row(CURRENT, 3_000, { title: 'H04B current' }), ...history] }))
+  h.handle.updateWorkspaces({ type: 'baseline', items: [
+    { workspaceId: 'ws-a', path: '/ws', title: 'Alpha', sessionIds: [CURRENT, ...history.map(item => item.id)] },
+  ] })
+  await h.paint()
+  const selectedIndex = (): number => {
+    const match = /^> .*H04B (\d+)/m.exec(h.view())
+    assert.ok(match !== null, `a newly revealed history row is selected:\n${h.view()}`)
+    return Number(match[1])
+  }
+  h.vt.sendInput('\x1b[F')
+  await h.paint()
+  await clickCell(h, 8, lineIndexOf(panelFrame(h), 'Show more sessions'))
+  const first = selectedIndex()
+  h.vt.sendInput('\x1b[F')
+  await h.paint()
+  await clickCell(h, 12, lineIndexOf(panelFrame(h), 'Show more sessions'))
+  const second = selectedIndex()
+  assert.ok(second > first, `each page lands on its own first new history row: ${first} -> ${second}`)
+  assert.deepEqual(h.resumes, [], 'Show more never resumes or opens a Session')
+  assert.equal(h.closes, 0, 'Show more never closes the Browser')
+  h.dispose()
+})
+
+test('Needs attention and Working stay complete right-aligned status groups across widths', async () => {
+  const longCjkTitle = '修复流水线'.repeat(20)
+  const h = harness({ columns: 44, rows: 24 })
+  h.handle.setSnapshot(snapshot({ rows: [
+    row(CURRENT, 3_000, { title: 'Current session' }),
+    row('session-status-needs', 2_500, { title: longCjkTitle }),
+    row('session-status-working', 2_000, { title: 'Working title' }),
+    row('session-status-pending', 1_500, { title: 'Pending title' }),
+  ] }))
+  h.handle.updateWorkspaces({ type: 'baseline', items: [
+    { workspaceId: 'ws-status', path: '/ws/status', title: 'Status', sessionIds: [CURRENT, 'session-status-needs', 'session-status-working', 'session-status-pending'] },
+  ] })
+  h.handle.setActivityFacts({
+    listRevision: 1,
+    facts: [
+      fact(CURRENT, { running: false, attention: 'none', attentionSourceState: 'known' }),
+      questionFact('session-status-needs', { running: true }),
+      fact('session-status-working', { running: true, attention: 'none', attentionSourceState: 'known' }),
+      questionFact('session-status-pending'),
+    ],
+    answerEligibility: [eligibility('session-status-needs')],
+  })
+  for (const width of [44, 72, 80, 120, 200] as const) {
+    h.vt.resize(width, 24)
+    await h.paint()
+    const frame = panelFrame(h)
+    const needsLine = frame.find(line => line.includes('status-n'))
+    assert.ok(needsLine !== undefined, `${width} columns: the Needs row is painted:\n${frame.join('\n')}`)
+    assert.ok(needsLine.includes('‣ Needs attention'), `${width} columns: the primary status word is complete:\n${needsLine}`)
+    assert.equal((needsLine.match(/‣/g) ?? []).length, 1, `${width} columns: one status group uses one marker:\n${needsLine}`)
+    assert.ok(needsLine.includes('status-n'), `${width} columns: the stable short id survives the status:\n${needsLine}`)
+    assert.ok(needsLine.includes('修复流水'), `${width} columns: a recognisable CJK title prefix survives:\n${needsLine}`)
+    assert.equal(needsLine.includes('Working'), width >= 72,
+      `${width} columns: Working is kept whole when it fits and dropped whole when it does not:\n${needsLine}`)
+    const workingLine = frame.find(line => line.includes('status-w'))
+    assert.ok(workingLine?.includes('‣ Working'), `${width} columns: the Working group is complete:\n${workingLine}`)
+    const pendingLine = frame.find(line => line.includes('status-p'))
+    assert.ok(pendingLine?.includes('‣ Pending unverified'), `${width} columns: pending is neutral and never Needs:\n${pendingLine}`)
+    assert.ok(!frame.join('\n').includes('Needs attent…'), `${width} columns: a status word is never truncated mid-word`)
+    for (const painted of h.vt.getViewport()) {
+      assert.ok(visibleWidth(painted) <= width, `${width} columns: a painted row overflows: ${JSON.stringify(painted)}`)
+    }
+  }
+  const raw = h.raw()
+  assert.ok(raw.includes(color.warning('‣ Needs attention')), 'the Needs group carries the warning token')
+  assert.ok(raw.includes(color.primary('‣ Working')), 'the Working group carries the primary token')
+  assert.ok(raw.includes(color.textDim('‣ Pending unverified')), 'Pending unverified is neutral, not Needs ink')
+})
+
+test('a 50/52-column CJK row drops the optional Working segment before the title prefix', async () => {
+  const longCjkTitle = '修复流水线需要输入的问题非常长的标题用于验证截断不会吃掉状态词'
+  const make = (columns: number, currentSessionId: string): Harness => {
+    const h = harness({ columns, rows: 24, currentSessionId })
+    h.handle.setSnapshot(snapshot({ rows: [
+      row(CURRENT, 3_000, { title: 'Current session' }),
+      row('session-status-needs', 2_500, { title: longCjkTitle }),
+    ] }))
+    h.handle.updateWorkspaces({ type: 'baseline', items: [
+      { workspaceId: 'ws-status', path: '/ws/status', title: 'Status', sessionIds: [CURRENT, 'session-status-needs'] },
+    ] })
+    h.handle.setActivityFacts({
+      listRevision: 1,
+      facts: [
+        fact(CURRENT, { running: false, attention: 'none', attentionSourceState: 'known' }),
+        questionFact('session-status-needs', { running: true }),
+      ],
+      answerEligibility: [eligibility('session-status-needs')],
+    })
+    return h
+  }
+  // 50 columns, non-current: the old two-cell admission counted 46 and kept
+  // Working; the real ' · ' separator needs 47, so the optional word must yield
+  // and the reserved 8-cell title prefix must survive.
+  const nonCurrent = make(50, CURRENT)
+  await nonCurrent.paint()
+  let needsLine = panelFrame(nonCurrent).find(line => line.includes('status-n'))
+  assert.ok(needsLine !== undefined, `the non-current Needs row is painted:\n${nonCurrent.view()}`)
+  assert.ok(needsLine.includes('‣ Needs attention'), `the primary status stays complete:\n${needsLine}`)
+  assert.ok(!needsLine.includes('Working'), `the optional Working segment yields at its real separator width:\n${needsLine}`)
+  assert.ok(needsLine.includes('修复流水'), `the reserved CJK title prefix survives:\n${needsLine}`)
+  nonCurrent.dispose()
+
+  // 52 columns, current: the 2-cell bullet makes the same admission boundary;
+  // the complete Needs status and 8-cell title prefix must still win.
+  const current = make(52, 'session-status-needs')
+  await current.paint()
+  needsLine = panelFrame(current).find(line => line.includes('status-n'))
+  assert.ok(needsLine !== undefined, `the current Needs row is painted:\n${current.view()}`)
+  assert.match(needsLine, /^> .*‣ Needs attention/m, `the current primary status stays complete:\n${needsLine}`)
+  assert.ok(!needsLine.includes('Working'), `the current bullet does not buy the optional Working segment:\n${needsLine}`)
+  assert.ok(needsLine.includes('修复流水'), `the CJK title prefix survives beside the current bullet:\n${needsLine}`)
+  current.dispose()
+})
+
+test('a collapsed Folder keeps complete Needs/Working counts that follow same-frame reclassification', async () => {
+  const h = harness({ columns: 80, rows: 24 })
+  const rows = [
+    row(CURRENT, 3_000, { title: 'Current session' }),
+    row('session-folder-needs', 2_500, { title: 'Needs title' }),
+    row('session-folder-working', 2_000, { title: 'Working title' }),
+    row('session-folder-history', 1_000, { title: 'History title' }),
+  ]
+  h.handle.setSnapshot(snapshot({ rows }))
+  h.handle.updateWorkspaces({ type: 'baseline', items: [
+    { workspaceId: 'ws-a', path: '/ws/a', title: 'Alpha', sessionIds: [CURRENT] },
+    { workspaceId: 'ws-b', path: '/ws/b', title: 'Beta', sessionIds: ['session-folder-needs', 'session-folder-working', 'session-folder-history'] },
+  ] })
+  h.handle.setActivityFacts({
+    listRevision: 1,
+    facts: [
+      fact(CURRENT, { running: false, attention: 'none', attentionSourceState: 'known' }),
+      questionFact('session-folder-needs'),
+      fact('session-folder-working', { running: true, attention: 'none', attentionSourceState: 'known' }),
+      fact('session-folder-history', { running: false, attention: 'none', attentionSourceState: 'known' }),
+    ],
+    answerEligibility: [eligibility('session-folder-needs')],
+  })
+  await h.paint()
+  await clickCell(h, 2, folderLineIndexOf(panelFrame(h), 'Beta'))
+  let betaLine = panelFrame(h)[folderLineIndexOf(panelFrame(h), 'Beta')]!
+  assert.ok(betaLine.includes('1 Needs') && betaLine.includes('1 Working'),
+    `a collapsed Folder keeps both trustworthy counts whole:\n${betaLine}`)
+  assert.ok(!h.view().includes('Needs title'), 'the manual collapse hides every child')
+  // The counts are part of the row's one click target, not a separate button.
+  await clickCell(h, betaLine.indexOf('1 Working'), folderLineIndexOf(panelFrame(h), 'Beta'))
+  assert.ok(h.view().includes('Needs title'), `a click on the count area runs the one Folder toggle:\n${h.view()}`)
+  await clickCell(h, 2, folderLineIndexOf(panelFrame(h), 'Beta'))
+  // The same official facts reclassify this roster revision: Needs is revoked.
+  h.handle.setSnapshot(snapshot({ rows, listRevision: 2 }))
+  h.handle.setActivityFacts({
+    listRevision: 2,
+    facts: [
+      fact(CURRENT, { running: false, attention: 'none', attentionSourceState: 'known' }),
+      fact('session-folder-needs', { running: false, attention: 'none', attentionSourceState: 'known' }),
+      fact('session-folder-working', { running: true, attention: 'none', attentionSourceState: 'known' }),
+      fact('session-folder-history', { running: false, attention: 'none', attentionSourceState: 'known' }),
+    ],
+    answerEligibility: [],
+  })
+  await h.paint()
+  betaLine = panelFrame(h)[folderLineIndexOf(panelFrame(h), 'Beta')]!
+  assert.ok(betaLine.includes('0 Needs') && betaLine.includes('1 Working'),
+    `the collapsed Folder repaints the trustworthy counts in the same frame:\n${betaLine}`)
+  assert.ok(!betaLine.includes('1 Needs'), 'a revoked Need never lingers in the Folder summary')
+  assert.ok(!h.view().includes('Needs title'), 'the reclassification never expands a manually collapsed Folder')
+})
+
+test('a 44-column Folder drops zero counts before the Workspace identity', async () => {
+  const h = harness({ columns: 44, rows: 24 })
+  h.handle.setSnapshot(snapshot({ rows: [
+    row(CURRENT, 3_000, { title: 'Current session' }),
+    row('session-folder-needs2', 2_500, { title: 'Needs child' }),
+  ] }))
+  h.handle.updateWorkspaces({ type: 'baseline', items: [
+    { workspaceId: 'ws-alpha', path: '/ws/alpha', title: 'team-accounts-service', sessionIds: [CURRENT] },
+    { workspaceId: 'ws-beta', path: '/ws/beta', title: 'incident-response-service', sessionIds: ['session-folder-needs2'] },
+  ] })
+  h.handle.setActivityFacts({
+    listRevision: 1,
+    facts: [
+      fact(CURRENT, { running: false, attention: 'none', attentionSourceState: 'known' }),
+      questionFact('session-folder-needs2'),
+    ],
+    answerEligibility: [eligibility('session-folder-needs2')],
+  })
+  await h.paint()
+  let frame = panelFrame(h)
+  let alphaLine = frame[folderLineIndexOf(frame, 'team-accounts-service')]!
+  assert.ok(alphaLine.includes('team-accounts-service'),
+    `the healthy Folder keeps its complete identity instead of zero-count chrome:\n${alphaLine}`)
+  assert.ok(alphaLine.includes('Current'), `the Current identity survives:\n${alphaLine}`)
+  assert.ok(!alphaLine.includes('Needs') && !alphaLine.includes('Working'),
+    `a 0/0 Folder paints no dead count group:\n${alphaLine}`)
+  let betaLine = frame[folderLineIndexOf(frame, 'incident-response-service')]!
+  assert.ok(betaLine.includes('incident-response-service'),
+    `the mixed-positive Folder keeps its identity while expanded:\n${betaLine}`)
+  assert.ok(betaLine.includes('1 Needs'), `the non-zero Needs word stays whole:\n${betaLine}`)
+  assert.ok(!betaLine.includes('0 Working'), `the zero Working segment yields before the label:\n${betaLine}`)
+  // A manual collapse keeps the same truthful count group and identity.
+  await clickCell(h, 2, folderLineIndexOf(panelFrame(h), 'incident-response-service'))
+  assert.ok(!h.view().includes('Needs child'), 'the manual collapse hides the child row')
+  betaLine = panelFrame(h)[folderLineIndexOf(panelFrame(h), 'incident-response-service')]!
+  assert.ok(betaLine.includes('incident-response-service') && betaLine.includes('1 Needs') && !betaLine.includes('0 Working'),
+    `the collapsed Folder keeps its identity and non-zero count right-aligned:\n${betaLine}`)
+})
+
+test('roster and Activity refreshes add no transient layout row and keep the painted selection', async () => {
+  const history = Array.from({ length: 24 }, (_, index) => row(`session-activity-${index}`, 900 - index, { title: `Activity ${index}` }))
+  const rows = [row(CURRENT, 3_000, { title: 'Current session' }), ...history]
+  const h = harness({ columns: 100, rows: 40 })
+  h.handle.setSnapshot(snapshot({ rows }))
+  h.handle.updateWorkspaces({ type: 'baseline', items: [
+    { workspaceId: 'ws-a', path: '/ws', title: 'Alpha', sessionIds: [CURRENT, ...history.map(item => item.id)] },
+  ] })
+  const knownFacts = [
+    fact(CURRENT, { running: false, attention: 'none', attentionSourceState: 'known' }),
+    ...history.map(item => fact(item.id, { running: false, attention: 'none', attentionSourceState: 'known' })),
+  ]
+  h.handle.setActivityFacts({ listRevision: 1, facts: knownFacts, answerEligibility: [] })
+  await h.paint()
+  const firstY = lineIndexOf(panelFrame(h), 'Activity 0')
+  // Revision 2 is accepted before its Activity sample: the known facts may be
+  // Unknown for one frame, but that is not a new layout row.
+  h.handle.setSnapshot(snapshot({ rows, listRevision: 2 }))
+  await h.paint()
+  const sampled = h.view()
+  assert.ok(!sampled.includes('Reading session activity…'), `the sampling interval paints no transient row:\n${sampled}`)
+  assert.equal(lineIndexOf(panelFrame(h), 'Activity 0'), firstY, 'the list does not shift while Activity is re-sampled')
+  assert.ok(/^> .*Current session/m.test(sampled), 'the typed selection keeps its Session id')
+  h.handle.setActivityFacts({ listRevision: 2, facts: knownFacts, answerEligibility: [] })
+  await h.paint()
+  assert.ok(!h.view().includes('Reading session activity…'), 'the settled sample removes no row because none was added')
+  assert.equal(lineIndexOf(panelFrame(h), 'Activity 0'), firstY, 'the settled sample keeps the same physical list origin')
+  // A real failure is a real status line, not the retired transient row.
+  h.handle.setSnapshot(snapshot({ rows, listRevision: 3 }))
+  h.handle.activityUnavailable('scan failed')
+  await h.paint()
+  const failed = h.view()
+  assert.ok(failed.includes('Activity unavailable: scan failed'), `a real Activity failure stays visible:\n${failed}`)
+  assert.ok(!failed.includes('Reading session activity…'), 'the failure path never paints the transient row')
+  // A real classification change may reorder rows, but the cursor keeps its id.
+  h.handle.setSnapshot(snapshot({ rows, listRevision: 4 }))
+  h.handle.setActivityFacts({
+    listRevision: 4,
+    facts: [
+      fact(CURRENT, { running: false, attention: 'none', attentionSourceState: 'known' }),
+      ...history.map((item, index) => fact(item.id, {
+        running: index === 0,
+        attention: 'none',
+        attentionSourceState: 'known',
+      })),
+    ],
+    answerEligibility: [],
+  })
+  await h.paint()
+  const changed = h.view()
+  assert.match(changed, /Activity 0.*‣ Working/, `a real running fact updates the row in the same frame:\n${changed}`)
+  assert.ok(/^> .*Current session/m.test(changed), 'the cursor never jumps to another Session on an Activity change')
+  assert.ok(!changed.includes('Reading session activity…'), 'no Activity path paints the transient row')
 })
 
 test('H07: the Sessionless Choose workspace chooser never grows the history watermark', async () => {
@@ -4202,15 +4489,16 @@ test('H07: the Sessionless Choose workspace chooser never grows the history wate
   await browse.paint()
   const grown = browse.view().split('\n').map(line => line.slice(0, 66))
   const count = grown.filter(line => /H07 history \d+/.test(line)).length
-  assert.ok(count > 1, `ordinary Browse at the same size still spends its spare rows on history:\n${grown.join('\n')}`)
-  assert.ok(count <= 20)
+  assert.ok(count > 20, `ordinary Browse at the same size fills its real viewport instead of stopping at 20:\n${grown.join('\n')}`)
+  assert.ok(count <= 34, 'the positive control never exceeds the real roster')
 })
 
 test('H08: the wide two-column list spends its own pane budget on history', async () => {
   const history = Array.from({ length: 30 }, (_, index) => row(`session-h08-${index}`, 900 - index, { title: `H08 ${index}` }))
-  // 120x24 is the wide layout. Its global status line is charged by renderBody
-  // BEFORE renderListPane, so the list must charge it exactly once: 20 body rows
-  // - 1 head status = 19 list rows, i.e. a 17-row watermark (current + 16).
+  // 120x24 is the wide layout. Its global status lines are charged by renderBody
+  // BEFORE renderListPane (none during a settled frame), so the list must charge
+  // them exactly once: 20 body rows - 0 head status = 20 list rows, i.e. a
+  // 17-row watermark (current row is forced visible and costs no extra row).
   const h = harness({ columns: 120, rows: 24 })
   h.handle.setSnapshot(snapshot({ rows: [row(CURRENT, 3_000, { title: 'H08 current' }), ...history] }))
   h.handle.updateWorkspaces({ type: 'baseline', items: [
@@ -4221,18 +4509,18 @@ test('H08: the wide two-column list spends its own pane budget on history', asyn
   assert.ok(frame.join('\n').includes('Workspace: Alpha (ws-a)'),
     `the wide layout paints the read-only preview:\n${frame.join('\n')}`)
   let visible = frame.map(line => line.slice(0, 66)).filter(line => /H08 \d+/.test(line)).length
-  assert.equal(visible, 16,
-    `the wide pane budget grows to exactly 17 ordinary rows (16 history + current):\n${frame.join('\n')}`)
-  assert.ok(frame.map(line => line.slice(0, 66)).some(line => line.includes('Show more sessions · 14 remaining')),
+  assert.equal(visible, 17,
+    `the wide pane budget grows to exactly 17 ordinary rows:\n${frame.join('\n')}`)
+  assert.ok(frame.map(line => line.slice(0, 66)).some(line => line.includes('Show more sessions · 13 remaining')),
     'the remaining count matches the wide watermark')
   h.vt.resize(160, 60)
   await h.paint()
   frame = panelFrame(h)
   visible = frame.map(line => line.slice(0, 88)).filter(line => /H08 \d+/.test(line)).length
-  assert.equal(visible, 19,
-    `160x60 reaches the automatic 20-row watermark:\n${frame.join('\n')}`)
-  assert.ok(frame.map(line => line.slice(0, 88)).some(line => line.includes('Show more sessions · 11 remaining')),
-    'the remaining count matches the tall wide watermark')
+  assert.equal(visible, 30,
+    `160x60 paints the whole 30-row roster:\n${frame.join('\n')}`)
+  assert.ok(!frame.map(line => line.slice(0, 88)).some(line => line.includes('Show more sessions')),
+    'an exhausted roster removes Show more')
 })
 
 test('H05: search, Peek, the Host editor and tiny frames never move the Browse watermark', async () => {
@@ -4404,8 +4692,10 @@ test('F2/W02: a 44x20 long list keeps the wheel-selected typed row painted and n
   const moreRow = lineIndexOf(panelFrame(more), 'Show more sessions')
   const remaining = Number(/· (\d+) remaining/.exec(panelFrame(more)[moreRow]!)?.[1])
   const visibleMore = panelFrame(more).filter(line => /More \d+/.test(line)).length
-  for (let step = 0; step < 20; step += 1) await wheelCell(more, 5, moreRow, 'down')
+  more.vt.sendInput('\x1b[F')
+  await more.paint()
   assert.ok(/^> .*Show more sessions/m.test(more.view()), `the wheel selects the painted Show more row:\n${more.view()}`)
+  await wheelCell(more, 5, moreRow, 'down')
   const afterMore = panelFrame(more)[lineIndexOf(panelFrame(more), 'Show more sessions')]!
   assert.equal(Number(/· (\d+) remaining/.exec(afterMore)?.[1]), remaining,
     'a wheel over Show more never invokes the reveal or changes the watermark')
@@ -4413,9 +4703,9 @@ test('F2/W02: a 44x20 long list keeps the wheel-selected typed row painted and n
     'the wheel reveals no hidden history')
   more.vt.sendInput('\r')
   await more.paint()
-  const revealed = panelFrame(more)[lineIndexOf(panelFrame(more), 'Show more sessions')]!
-  assert.equal(Number(/· (\d+) remaining/.exec(revealed)?.[1]), remaining - 5,
-    `Enter still reveals the next five history rows:\n${more.view()}`)
+  const revealed = more.view()
+  assert.ok(!revealed.includes('Show more sessions'), `Enter reveals the whole painted page and exhausts the roster:\n${revealed}`)
+  assert.ok(/^> .*More 17/m.test(revealed), `Enter selects the first newly revealed history row:\n${revealed}`)
   more.dispose()
 })
 
