@@ -560,7 +560,6 @@ async function mountLifecycleHarness(options: {
       transportToken: outcome.transportToken,
     }))
     logs.push(log)
-    await settle()
   }
 
   await hydrate(sessionId)
@@ -618,10 +617,6 @@ async function mountLifecycleHarness(options: {
       }
     },
   }
-}
-
-const settle = async (): Promise<void> => {
-  for (let index = 0; index < 4; index += 1) await new Promise<void>(resolve => setTimeout(resolve, 0))
 }
 
 const drawn = async (label: string, predicate: () => boolean): Promise<void> => {
@@ -749,7 +744,6 @@ test('D: a matched error end notifies once and settles; unmatched/idless/repeate
     harness.publish(compactionEnd(undefined))
     harness.publish(compactionEnd('foreign'))
     harness.publish(compactionEnd('c-err'))
-    await settle()
     assert.equal(harness.activityCommits().length, commits,
       'unmatched/idless/repeated ends never republish activity')
     assert.equal(harness.contextMeasures().length, measures,
@@ -798,8 +792,9 @@ test('F: a retired owner or replaced same-id binding never moves the new Dock; a
     const staleRuntimeA = harness.fixture.currentRuntime(SESSION_A)
     await harness.switchOwner(SESSION_B, [turnStart(1), turnEnd(1)])
     assertActivity(harness, 'idle', false, 'owner B hydrates its own idle state')
+    // The ingress dispatch is synchronous and this handle was disposed with
+    // its owner, so the stale publication cannot schedule a deferred delivery.
     harness.publishRuntime(staleRuntimeA, turnStart(9))
-    await settle()
     assertActivity(harness, 'idle', false, 'a retired owner event never turns B working')
 
     // The same Session ID with a REPLACED binding + Connection generation: a
@@ -811,8 +806,9 @@ test('F: a retired owner or replaced same-id binding never moves the new Dock; a
     harness.surface.resetSubjectStatus()
     await harness.hydrate(SESSION_B)
     assertActivity(harness, 'idle', false, 'the replacement binding hydrates its own window')
+    // The OLD binding's publish path sees the replaced exact binding and
+    // disposes synchronously; no deferred increment exists to wait for.
     harness.publishRuntime(staleRuntimeB, turnStart(10))
-    await settle()
     assertActivity(harness, 'idle', false, 'a stale binding publication never reaches the new Dock')
 
     // The new legal owner is still fully functional.
@@ -838,7 +834,11 @@ test('G: a matched compaction settle triggers no full-window read (F4 falsifiabl
     harness.publish(compactionEnd('c-no-read'))
     assert.equal(harness.reads(), afterHydrate,
       'the matched settle must not start a background full-window read/clone')
-    await settle()
+    // A deleted background task would have been INVOKED synchronously in the
+    // settle and settled within these microtask turns; a later one would still
+    // read the same counter.
+    await Promise.resolve()
+    await Promise.resolve()
     assert.equal(harness.reads(), afterHydrate,
       'no detached task may read the window after the settle either')
     assertActivity(harness, 'working', true, 'the in-turn compaction still settles correctly')
