@@ -47,6 +47,9 @@ export interface PreferencesPlaneOptions {
   /** A command-line/home overlay applied ABOVE the profile (official
    * ConfigEditor override refusal). */
   readonly overlay?: readonly Record<string, unknown>[]
+  /** Test-only barrier: install a ConfigEditor interceptor before the official
+   * Settings service starts its one-shot legacy import. */
+  readonly beforeSettingsStart?: (ctx: Context) => void
 }
 
 export interface PreferencesPlane {
@@ -157,7 +160,6 @@ export async function mountPreferencesSettingsPlane(
     telemetryDisabledEnv: undefined,
   } as never)
   await ctx.plugin(ConfigEditor)
-  await ctx.plugin(SettingsForms)
   const profile = loadProfileDirectory('dsh', plane.profileDir, anchor)
   await mountRootInclude(
     ctx,
@@ -166,6 +168,12 @@ export async function mountPreferencesSettingsPlane(
     pathToFileURL(anchor).href,
     'dsh',
   )
+  await ctx.loader.await()
+  // Settings starts its one-shot importer from loader.await(). Mount it only
+  // after the fixture's entries exist: otherwise an empty task set can let it
+  // attempt the import before the destination Settings rows are active.
+  options.beforeSettingsStart?.(ctx)
+  await ctx.plugin(SettingsForms)
   await ctx.loader.await()
   return {
     ...plane,
