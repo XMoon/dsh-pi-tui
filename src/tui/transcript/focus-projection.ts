@@ -9,9 +9,10 @@
  * process rows (a committed pre-steer answer is the explicit exception) and
  * expanded turns restore raw chronology with the final assistant held back.
  * A foldable Context row (producer-declared Snapshot, a `tool-jobs` Notice, an
- * `agent-message` relay, a `subagent-settled` Notice or a
- * `repeat-tool-reminder` Notice with durable same-turn next-step evidence)
- * follows the same rule unless it shares a raw-adjacent
+ * `agent-message` relay, a `subagent-settled` Notice, a
+ * `repeat-tool-reminder` Notice or an image-bearing `ptc-mode` Context with
+ * durable same-turn next-step evidence) follows the same rule unless it shares
+ * a raw-adjacent
  * cluster with `instructions`/`catalog`: it joins the Thought instead of
  * becoming turn foundation, while a mixed ambient cluster keeps its indivisible
  * foundation position.
@@ -535,8 +536,9 @@ function isFocusPersistentInputRow(message: TranscriptMessage): boolean {
 type CollapsedFocusRowDisposition = 'pre-thought' | 'post-thought' | 'hidden'
 
 /** The foldable Context rows (Snapshot / proven Working tool-jobs Notice,
- * Agent relay, subagent settlement Notice or repeat-tool-reminder Notice) a
- * collapsed Thought may carry instead of surfacing as turn foundation.
+ * Agent relay, subagent settlement Notice, repeat-tool-reminder Notice or
+ * image-bearing PTC Context) a collapsed Thought may carry instead of
+ * surfacing as turn foundation.
  * `thoughtOwned` is false where no Thought block will be emitted (a truncated
  * window without an activity) — the rows then fail open instead of disappearing.
  * `workByMember` is the same group's canonical Work membership, used by the
@@ -544,9 +546,10 @@ type CollapsedFocusRowDisposition = 'pre-thought' | 'post-thought' | 'hidden'
  * owns it, so an activity-only turn (no Process at all) fails open. Snapshot
  * and Working tool-jobs Notice keep their established activity-owner rule; a
  * settled subagent Notice follows the Agent-relay rule because its body is the
- * recoverable child result and must never be lost, and a repeat-tool reminder
+ * recoverable child result and must never be lost, a repeat-tool reminder
  * follows that same rule because its payload is the only account of why the
- * same call was repeated.
+ * same call was repeated, and an image-bearing PTC Context follows it because
+ * its media/content is otherwise unreachable when the Thought is collapsed.
  * The Thought-lead boundary decides WHICH rows are foundation; anything at or
  * after it is Thought content. */
 interface CollapsedFoldableSnapshotScope {

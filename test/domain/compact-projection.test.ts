@@ -1491,6 +1491,35 @@ test('a PTC image Context never qualifies without the exact same-turn claim and 
   assert.equal(crossRow.contextPresentation?.sameTurnNextStep, undefined,
     'a claim carried across turns is not a same-turn Working delivery')
 
+  // A ptc-mode row that DECLARES a form is a malformed/foreign source: the
+  // real producer has no form, so carriage must fail open even with an image
+  // block and a durable same-turn claim.
+  const formedMessage = {
+    id: MessageId('formed-ptc-image'), role: 'user',
+    content: [{ type: 'image', attachment: PTC_IMAGE_ATTACHMENT }],
+    source: { kind: 'ptc-mode', form: 'notice' },
+  }
+  const formed = new TranscriptFolder()
+  apply(formed, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    toolCallEvent(0, 'formed-ptc-a', 1),
+    toolResultEvent(0, 'formed-ptc-a', 2),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [formedMessage] }, 1003, 3),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 1003.1, 4),
+    eventAt('user/message', formedMessage, 1003.2, 5),
+    toolCallEvent(0, 'formed-ptc-b', 6),
+    toolResultEvent(0, 'formed-ptc-b', 7),
+  ])
+  const formedRow = formed.messages().find(message => message.kind === 'system')
+  assert.ok(formedRow !== undefined && formedRow.kind === 'system')
+  assert.equal(formedRow.contextPresentation?.form, 'notice')
+  assert.equal(formedRow.contextPresentation?.sameTurnNextStep, undefined,
+    'a declared form on the formless ptc producer fails open')
+  assert.equal(isWorkingPtcImageContext(formedRow), false)
+  assert.equal(formedRow.content !== undefined, true, 'the media projection itself is form-neutral')
+  assert.deepEqual(projectTranscriptStructure(formed.messages()).map(block => block.kind),
+    ['work', 'message', 'work'], 'the malformed ptc row stays an independent Context boundary')
+
   // A foreign image context through the same claim is never the PTC source.
   const foreignMessage = {
     id: MessageId('foreign-image-context'), role: 'user',

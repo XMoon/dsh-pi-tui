@@ -5119,7 +5119,9 @@ export class TranscriptFolder {
           || (sourcePresentation.sourceKind === 'agent-message' && sourcePresentation.form === 'relay')
           || (sourcePresentation.sourceKind === 'subagent-settled' && sourcePresentation.form === 'notice')
           || (sourcePresentation.sourceKind === 'repeat-tool-reminder' && sourcePresentation.form === 'notice')
-          || (sourcePresentation.sourceKind === 'ptc-mode' && blocks.some(block => block.type === 'image'))
+          || (sourcePresentation.sourceKind === 'ptc-mode'
+            && sourcePresentation.form === undefined
+            && blocks.some(block => block.type === 'image'))
         )
         if (sourcePresentation.sourceKind === 'user') {
           if (!userBlocksVisibleNow(blocks)) break

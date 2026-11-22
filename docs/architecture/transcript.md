@@ -502,8 +502,9 @@ narrow exception, never a generic notice/relay/context rule:
   source/form pair (`tool-jobs`/`notice`, `agent-message`/`relay`,
   `subagent-settled`/`notice` or `repeat-tool-reminder`/`notice`) or the
   structured `ptc-mode` + at least one real `image` ContentBlock fact
-  (`isPtcImageContext`; never a `form` — the producer has none and none is
-  invented), + the fold's presentation-only
+  (`isPtcImageContext`) + NO declared `form` (the producer has none; a
+  `ptc-mode` row that declares any form is a malformed/foreign source and
+  fails open, and none is invented) + the fold's presentation-only
   `contextPresentation.sameTurnNextStep` flag. That flag is derived by the
   `TranscriptFolder` from the durable `agent/inbox/spliced` insert/claim
   identity chain (the same message id inserted into `next-step`, claimed, then
@@ -512,10 +513,11 @@ narrow exception, never a generic notice/relay/context rule:
   adjacency.
 - A `next-turn` idle wakeup, a next-step message claimed in a DIFFERENT turn,
   a foreign/legacy log, a missing claim, a crossed source/form pair, a
-  text-only `ptc-mode` Spill/Reset Context, a non-`ptc-mode` image Context, or
-  any other producer (recall, unknown and future producers) keeps the existing
-  independent Context behavior: the delivery explains why the agent was woken
-  and must stay visible.
+  text-only `ptc-mode` Spill/Reset Context, a `ptc-mode` image Context that
+  declares a form, a non-`ptc-mode` image Context, or any other producer
+  (recall, unknown and future producers) keeps the existing independent
+  Context behavior: the delivery explains why the agent was woken and must
+  stay visible.
 - The qualified row is carried by the same-turn Work exactly like a Snapshot
   singleton (it can appear at the start, middle or end; it never joins
   `ContextCluster`, which still accepts only raw-adjacent ambient rows). A Work

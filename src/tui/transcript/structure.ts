@@ -250,14 +250,19 @@ export function isWorkingRepeatToolReminderNotice(
  * by {@link isPtcImageContext} (surfaced Context + `ptc-mode` + a real image
  * block) and the fold's presentation-only `sameTurnNextStep` flag derived
  * from the durable `agent/inbox/spliced` insert/claim identity chain. The
- * producer has no form, so no form is required or invented; a text-only
+ * producer has no form, so no form is required or invented; a source that
+ * DECLARES a form is foreign/malformed and fails open, as do a text-only
  * ptc-mode Spill/Reset Context, a foreign image Context, a cross-turn claim
- * and a missing claim all fail open as independent Context boundaries.
+ * and a missing claim.
  */
 export function isWorkingPtcImageContext(
   message: TranscriptMessage,
 ): message is Extract<TranscriptMessage, { kind: 'system' }> & { context: true; content: readonly import('@deepseek-ai/dsh-llm').ContentBlock[] } {
-  return isPtcImageContext(message) && message.contextPresentation?.sameTurnNextStep === true
+  if (!isPtcImageContext(message)) return false
+  const presentation = message.contextPresentation
+  return presentation !== undefined
+    && presentation.form === undefined
+    && presentation.sameTurnNextStep === true
 }
 
 /**
