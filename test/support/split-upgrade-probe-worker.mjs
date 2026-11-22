@@ -38,6 +38,7 @@ const SCENARIOS = new Set([
   'upgrade-worker-kill:qualification-client-active',
   'upgrade-sibling-live',
   'upgrade-live-host-exit',
+  'upgrade-qualification-host-death',
 ])
 
 function arg(name) {
@@ -336,6 +337,30 @@ async function main() {
         // kill point.
         await scene.installNewSideBySide()
         throw new Error('side-build-install: the install completed before the external SIGKILL')
+      }
+      case 'upgrade-qualification-host-death': {
+        // The Supervisor injects an abrupt old-Host crash AFTER its status
+        // proof and BEFORE the qualification Client's ensureLocalHost(). The
+        // real production discovery fallback then starts a detached Host; the
+        // operation must refuse and the Supervisor must reclaim that Host
+        // before any terminal quiescence claim.
+        await scene.installOldProfile()
+        await scene.installNewSideBySide()
+        const host = await scene.startHost({ source: 'profile', scenario: 'long-turn' })
+        let refusal
+        try {
+          await scene.probeSideNewClientHostFoundation(host)
+        } catch (error) {
+          refusal = error instanceof Error ? error.message : String(error)
+        }
+        if (refusal === undefined) throw new Error('qualification-host-death: the proof unexpectedly succeeded')
+        console.log(`UPGRADE_PROBE_WORKER_FACTS ${JSON.stringify({
+          scenario: 'upgrade-qualification-host-death',
+          refused: true,
+          hostPid: host.ready?.pid,
+          injectedDeath: true,
+        })}`)
+        return
       }
       case 'upgrade-live-host-exit': {
         await scene.installOldProfile()

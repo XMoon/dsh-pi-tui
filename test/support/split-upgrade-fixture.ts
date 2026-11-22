@@ -676,6 +676,7 @@ class Scene implements UpgradeScene {
           session: terminal.session,
           shellPid: opened.shell_pid ?? null,
           recordFile,
+          scratch,
           businessPids: [started.pid],
         },
       }, { timeoutMs: 10_000 })

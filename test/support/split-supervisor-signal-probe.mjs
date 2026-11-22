@@ -17,7 +17,9 @@
  * Modes (Upgrade U0):
  *   --mode upgrade-sequential-hosts
  *   --mode upgrade-live-profile-refusal
- *   --mode upgrade-worker-kill --at old-host-ready|between-host-generations|new-host-spawned-before-ack|side-build-install
+ *   --mode upgrade-live-host-exit
+ *   --mode upgrade-qualification-host-death
+ *   --mode upgrade-worker-kill --at old-host-ready|between-host-generations|new-host-spawned-before-ack|side-build-install|bootstrap-install|reload-child-active|reload-child-started-before-report|qualification-client-active
  *
  * Required env:
  *   Pilot: SPLIT_VITEST_TMP_BASE + SPLIT_VITEST_CANDIDATE_TGZ
@@ -26,7 +28,9 @@
 
 import { execFileSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:net'
+import { userInfo } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
@@ -34,7 +38,7 @@ import { isBootstrapInstallInProgress, isSideNewInstallInProgress } from './spli
 
 const PILOT_MODES = ['main-signal', 'foreground-group-sigint', 'worker-kill', 'bootstrap-main-sigterm']
 const UPGRADE_ATS = ['old-host-ready', 'between-host-generations', 'new-host-spawned-before-ack', 'side-build-install', 'bootstrap-install', 'reload-child-active', 'reload-child-started-before-report', 'qualification-client-active']
-const UPGRADE_MODES = ['upgrade-sequential-hosts', 'upgrade-live-profile-refusal', 'upgrade-live-host-exit', 'upgrade-worker-kill']
+const UPGRADE_MODES = ['upgrade-sequential-hosts', 'upgrade-live-profile-refusal', 'upgrade-live-host-exit', 'upgrade-qualification-host-death', 'upgrade-worker-kill']
 
 function arg(name) {
   const index = process.argv.indexOf(name)
@@ -176,6 +180,49 @@ function groupAlive(pgid) {
   }
 }
 
+/** Whether the kernel Host seat of one scope is free (Linux abstract / Darwin O_EXLOCK). */
+async function hostSeatFree(scopeId) {
+  if (process.platform === 'linux') {
+    return await new Promise((resolve, reject) => {
+      const server = createServer()
+      let settled = false
+      server.once('error', error => {
+        if (settled) return
+        settled = true
+        if (error?.code === 'EADDRINUSE') {
+          resolve(false)
+          return
+        }
+        reject(error)
+      })
+      server.listen(`\0dsh-pi-tui-h-${scopeId.slice(0, 40)}`, () => {
+        if (settled) return
+        settled = true
+        server.close(() => resolve(true))
+      })
+    })
+  }
+  if (process.platform === 'darwin') {
+    // O_RDWR|O_EXLOCK|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC, no O_CREAT.
+    const flags = 2 | 32 | 4 | 256 | 16777216
+    const seatPath = join(userInfo().homedir, '.dsh-pi-tui', 'run', scopeId, `seat-host-${scopeId}.lock`)
+    const started = Date.now()
+    for (;;) {
+      try {
+        closeSync(openSync(seatPath, flags, 0o600))
+        return true
+      } catch (error) {
+        if (error?.code === 'ENOENT') return true
+        if (error?.code !== 'EAGAIN' && error?.code !== 'EWOULDBLOCK') throw error
+        if (Date.now() - started > 15_000) return false
+        await sleep(50)
+      }
+    }
+  }
+  fail(`no Host seat probe is implemented for ${process.platform}`)
+  return false
+}
+
 function checkNoLingeringPaths(receipt) {
   let commands
   try {
@@ -267,6 +314,13 @@ function checkUpgradeReceiptResources(receipt, options = {}) {
       problems.push(`qualification Client process group still alive: ${String(qualification.pgid)}`)
     }
   }
+  for (const fallback of receipt.fallbackHosts ?? []) {
+    if (fallback.reclaimed !== true) problems.push(`fallback Host PID ${String(fallback.pid)} was not reclaimed`)
+    if (pidAlive(fallback.pid)) problems.push(`fallback Host PID still alive: ${String(fallback.pid)}`)
+    if (fallback.pgid !== undefined && groupAlive(fallback.pgid)) {
+      problems.push(`fallback Host process group still alive: ${String(fallback.pgid)}`)
+    }
+  }
   if (pidAlive(receipt.supervisor?.pid)) problems.push(`Supervisor PID still alive: ${String(receipt.supervisor.pid)}`)
   return problems
 }
@@ -330,6 +384,9 @@ if (mode === 'upgrade-worker-kill' && (at === 'new-host-spawned-before-ack' || a
 }
 if (mode === 'upgrade-live-host-exit') {
   env.SPLIT_VITEST_UPGRADE_HOST_EXIT_AFTER_PROFILE_INSTALL = '1'
+}
+if (mode === 'upgrade-qualification-host-death') {
+  env.SPLIT_VITEST_UPGRADE_QUALIFICATION_HOST_DEATH = '1'
 }
 
 const sentinel = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
@@ -415,6 +472,64 @@ try {
     }, 'live sibling Upgrade Scene', 600_000)
   }
   if (upgradeMode) {
+    if (mode === 'upgrade-qualification-host-death') {
+      // Controlled negative for the discovery-fallback window: old Host A dies
+      // after the Supervisor's status-before proof and before the real
+      // qualification Client's ensureLocalHost(). The operation must refuse and
+      // the Supervisor must reclaim the detached Host that fallback started,
+      // with a strict terminal proof (no live Host/Client/group/seat/root).
+      const exit = await waitChildExit(child, 900_000)
+      childExited = true
+      if (exit.code !== 0 || exit.signal !== null) {
+        fail(`upgrade-qualification-host-death worker exited abnormally: ${JSON.stringify(exit)}`)
+      }
+      const terminalReceipt = await waitUntil(() => {
+        const current = latestUpgradeReceipt(tmpBase, runId)
+        return current?.phase === 'ABORTED_CLEAN' ? current : undefined
+      }, 'upgrade-qualification-host-death ABORTED_CLEAN', 120_000)
+      verifyUpgradePair(terminalReceipt, oldTgz, newTgz)
+      if (!Array.isArray(terminalReceipt.hosts) || terminalReceipt.hosts.length !== 1) {
+        fail(`upgrade-qualification-host-death: expected one Host generation, got ${String(terminalReceipt.hosts?.length)}`)
+      }
+      const injected = (terminalReceipt.notes ?? []).some(note => note.event === 'qualification-host-death-injected')
+      if (!injected) fail('upgrade-qualification-host-death: the receipt carries no injected Host-death note')
+      if (terminalReceipt.hosts[0].exitSignal !== 'SIGKILL') {
+        fail(`upgrade-qualification-host-death: the injected Host did not die by SIGKILL: ${JSON.stringify(terminalReceipt.hosts[0].exitSignal)}`)
+      }
+      if ((terminalReceipt.qualificationClients ?? []).some(entry => entry.exited !== true)) {
+        fail('upgrade-qualification-host-death: a qualification Client did not exit')
+      }
+      const fallbacks = terminalReceipt.fallbackHosts ?? []
+      if (fallbacks.length === 0) {
+        fail('upgrade-qualification-host-death: the injected Host death did not exercise the discovery fallback')
+      }
+      const scopeId = terminalReceipt.hosts[0].scopeId
+      if (typeof scopeId !== 'string' || scopeId === '') {
+        fail('upgrade-qualification-host-death: the terminal receipt carries no Host scope id')
+      }
+      if (!(await hostSeatFree(scopeId))) {
+        fail('upgrade-qualification-host-death: the Host seat is still held after cleanup')
+      }
+      const problems = checkUpgradeReceiptResources(terminalReceipt)
+      if (problems.length > 0) fail(problems.join('; '))
+      checkNoLingeringPaths(terminalReceipt)
+      if (!pidAlive(sentinel.pid)) fail(`external sentinel PID ${String(sentinel.pid)} died; the probe touched an unrelated process`)
+      console.log(`SPLIT_SUPERVISOR_SIGNAL_PROBE_FACTS ${JSON.stringify({
+        mode,
+        runId,
+        workerPid: terminalReceipt.worker.pid,
+        supervisorPid: terminalReceipt.supervisor?.pid,
+        supervisorPhase: terminalReceipt.phase,
+        hosts: terminalReceipt.hosts,
+        qualificationClients: terminalReceipt.qualificationClients,
+        fallbackHosts: fallbacks,
+        hostSeatFree: true,
+        sceneRoot: terminalReceipt.sceneRoot,
+        sentinelPid: sentinel.pid,
+      })}`)
+      console.log(`SPLIT_SUPERVISOR_SIGNAL_PROBE_PASS mode=${mode} supervisor_phase=${terminalReceipt.phase} fallback_hosts=${String(fallbacks.length)}`)
+      return
+    }
     if (mode === 'upgrade-live-host-exit') {
       const exit = await waitChildExit(child, 600_000)
       childExited = true

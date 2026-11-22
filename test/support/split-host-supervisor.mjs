@@ -22,7 +22,8 @@
  */
 
 import { spawn, execFileSync } from 'node:child_process'
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { userInfo } from 'node:os'
 import { isAbsolute, join, relative, sep } from 'node:path'
 import { createInterface } from 'node:readline'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -45,6 +46,8 @@ const hosts = []
 let activeQualificationClient
 /** Every self-owned one-shot qualification Client, in creation order. */
 const qualificationClients = []
+/** Detached Hosts a Scene Client's discovery fallback started, reclaimed by this Supervisor. */
+const fallbackHosts = []
 let qualificationClientSequence = 0
 let receiptPath
 let receipt
@@ -243,6 +246,7 @@ function initReceipt(tmpBase, worker, extra = {}) {
     hosts: [],
     clients: [],
     qualificationClients: [],
+    fallbackHosts: [],
     notes: [],
     startedAt: SUPERVISOR_STARTED_AT,
     updatedAt: now(),
@@ -395,6 +399,7 @@ function publicHostFacts(handle) {
     pid: handle.child.pid ?? null,
     pgid: hostPgid(handle),
     businessPid: handle.businessPid ?? null,
+    scopeId: handle.ready?.localHost?.scopeId ?? null,
     buildId: handle.buildId,
     entryRealpath: handle.entryRealpath,
     workRoot: handle.workRoot,
@@ -461,6 +466,10 @@ async function terminateQualificationClient(reason) {
   await assertHostGroupGone(handle, `qualification Client ${reason}`)
   syncQualificationClientReceipt()
   activeQualificationClient = undefined
+  // The qualification Client's own production discovery can spawn a detached
+  // Host candidate when the old Host died in the window. It must be reclaimed
+  // by this Supervisor before any terminal quiescence claim.
+  await reclaimClientFallbackHosts(`qualification Client ${String(handle.child.pid)} ${reason}`)
 }
 
 /** The Darwin qualification-Client seat is an O_EXLOCK file inside the scope. */
@@ -506,6 +515,261 @@ async function waitForQualificationRecord(handle, predicate, label, timeoutMs) {
     if (Date.now() - started >= timeoutMs) throw new Error(`${label}: timed out after ${String(timeoutMs)}ms`)
     await sleep(20)
   }
+}
+
+/** The whole command line of one live process, or undefined when unreadable. */
+function processCommandLine(pid) {
+  if (process.platform === 'linux') {
+    try {
+      return readFileSync(`/proc/${String(pid)}/cmdline`, 'utf8').split('\0').join(' ').trim()
+    } catch {
+      return undefined
+    }
+  }
+  try {
+    return execFileSync('ps', ['-ww', '-o', 'command=', '-p', String(pid)], { encoding: 'utf8' }).trim()
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Whether one live process carries exactly `entry` in its environment.
+ * `undefined` means the environment could not be read (never a false negative).
+ */
+function processEnvironmentContains(pid, entry) {
+  if (process.platform === 'linux') {
+    let raw
+    try {
+      raw = readFileSync(`/proc/${String(pid)}/environ`, 'utf8')
+    } catch {
+      return undefined
+    }
+    return raw.split('\0').includes(entry)
+  }
+  let raw
+  try {
+    raw = execFileSync('ps', ['eww', '-p', String(pid), '-o', 'command='], { encoding: 'utf8' })
+  } catch {
+    return undefined
+  }
+  return raw.split(/\s+/u).includes(entry)
+}
+
+/**
+ * Every `local-host.mjs` process whose entry lives under THIS Scene root. The
+ * product's qualification/legacy discovery fallback spawns such a Host
+ * detached; it is not a ChildProcess this Supervisor created, so it can only be
+ * found by its real command line and the Client scratch it inherited.
+ */
+function sceneLocalHostCandidates() {
+  if (scene === undefined) return []
+  const pids = []
+  if (process.platform === 'linux') {
+    let entries
+    try {
+      entries = readdirSync('/proc')
+    } catch (error) {
+      throw new Error(`the local Host fallback audit cannot enumerate /proc: ${boundedError(error)}`)
+    }
+    for (const name of entries) {
+      if (!/^\d+$/u.test(name)) continue
+      const pid = Number(name)
+      if (pid === process.pid) continue
+      const command = processCommandLine(pid)
+      if (command === undefined) continue
+      if (!command.includes('local-host.mjs') || !command.includes(scene.workDir)) continue
+      pids.push(pid)
+    }
+    return pids
+  }
+  let listing
+  try {
+    listing = execFileSync('ps', ['-axww', '-o', 'pid=,command='], { encoding: 'utf8' })
+  } catch (error) {
+    throw new Error(`the local Host fallback audit cannot enumerate processes: ${boundedError(error)}`)
+  }
+  for (const line of listing.split('\n')) {
+    const match = /^\s*(\d+)\s+(.*)$/u.exec(line)
+    if (match === null) continue
+    const pid = Number(match[1])
+    if (pid === process.pid) continue
+    const command = match[2]
+    if (!command.includes('local-host.mjs') || !command.includes(scene.workDir)) continue
+    pids.push(pid)
+  }
+  return pids
+}
+
+function isKnownHostEntryProcess(pid) {
+  return hosts.some(handle => handle.child.pid === pid)
+}
+
+function clientScratchOrigins() {
+  const origins = new Map()
+  for (const client of receipt?.clients ?? []) {
+    if (typeof client.scratch === 'string' && client.scratch !== '') origins.set(client.scratch, `surface-client:${String(client.label)}`)
+  }
+  for (const qualification of qualificationClients) {
+    origins.set(qualification.scratch, `qualification-client:${String(qualification.child.pid)}`)
+  }
+  return origins
+}
+
+function syncFallbackHostsReceipt() {
+  writeReceipt({ fallbackHosts })
+}
+
+/** Reclaim ONE detached discovery-fallback Host by its real kernel identities. */
+async function reclaimFallbackHost(pid, origin, scratch, reason) {
+  const command = processCommandLine(pid)
+  if (command === undefined || !command.includes('local-host.mjs')) {
+    throw new Error(`${reason}: the fallback Host candidate ${String(pid)} is no longer a Host entry process`)
+  }
+  const starttime = readHostStarttime(pid)
+  if (starttime === undefined) {
+    throw new Error(`${reason}: the fallback Host candidate ${String(pid)} has no readable OS starttime`)
+  }
+  const record = {
+    pid,
+    pgid: pid,
+    starttime,
+    origin,
+    scratch,
+    detectedAt: now(),
+    reclaimed: false,
+    exitObserved: undefined,
+  }
+  // A detached Host candidate is its own process-group leader.
+  try {
+    process.kill(-pid, 'SIGTERM')
+  } catch {
+    try { process.kill(pid, 'SIGTERM') } catch { /* already gone */ }
+  }
+  await waitForGroupGone(pid, TERM_GRACE_MS)
+  if (processGroupAlive(pid)) {
+    try {
+      process.kill(-pid, 'SIGKILL')
+    } catch {
+      try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ }
+    }
+    await waitForGroupGone(pid, KILL_GRACE_MS)
+  }
+  if (processGroupAlive(pid) || pidAlive(pid)) {
+    throw new Error(`${reason}: the fallback Host ${String(pid)} is still alive after TERM/KILL`)
+  }
+  const currentStarttime = readHostStarttime(pid)
+  if (currentStarttime !== undefined && currentStarttime !== starttime) {
+    throw new Error(`${reason}: the fallback Host PID ${String(pid)} was reused by another process during reclaim`)
+  }
+  record.reclaimed = true
+  record.exitObserved = 'group-gone'
+  fallbackHosts.push(record)
+  syncFallbackHostsReceipt()
+  appendNote('fallback-host-reclaimed', { pid, pgid: pid, starttime, origin, scratch })
+  return record
+}
+
+/**
+ * Detect and reclaim every detached Host a Scene Client's discovery fallback
+ * started. A Host under this Scene root that cannot be attributed to a
+ * registered Client is unknown ownership: fail closed, never report clean.
+ */
+async function reclaimClientFallbackHosts(reason) {
+  if (scene?.kind !== 'upgrade') return []
+  const reclaimed = []
+  const pass = async () => {
+    const origins = clientScratchOrigins()
+    for (const pid of sceneLocalHostCandidates()) {
+      if (isKnownHostEntryProcess(pid)) continue
+      let matched
+      for (const [scratch, origin] of origins) {
+        const present = processEnvironmentContains(pid, `SPLIT_PROCESS_SCRATCH=${scratch}`)
+        if (present === undefined) {
+          throw new Error(`${reason}: the environment of local Host process ${String(pid)} cannot be read; its ownership is unknown`)
+        }
+        if (present) {
+          matched = { scratch, origin }
+          break
+        }
+      }
+      if (matched === undefined) {
+        throw new Error(`${reason}: local Host process ${String(pid)} under the Scene root is not attributable to any registered Client`)
+      }
+      reclaimed.push(await reclaimFallbackHost(pid, matched.origin, matched.scratch, reason))
+    }
+  }
+  await pass()
+  // A detached spawn forks BEFORE it execs the Host entry, so one settling
+  // window plus a second pass closes the fork->exec observation race. This is
+  // not a readiness sleep: a still-live or unattributable Host always fails.
+  await sleep(250)
+  const second = sceneLocalHostCandidates().filter(pid => !isKnownHostEntryProcess(pid))
+  if (second.length > 0) await pass()
+  const remaining = sceneLocalHostCandidates().filter(pid => !isKnownHostEntryProcess(pid))
+  if (remaining.length > 0) {
+    throw new Error(`${reason}: local Host process(es) ${JSON.stringify(remaining)} are still present after the fallback reclaim`)
+  }
+  return reclaimed
+}
+
+function latestHostScopeId() {
+  for (let index = hosts.length - 1; index >= 0; index -= 1) {
+    const scopeId = hosts[index].ready?.localHost?.scopeId
+    if (typeof scopeId === 'string' && scopeId !== '') return scopeId
+  }
+  return undefined
+}
+
+/**
+ * The kernel Host seat must be free once every Supervisor-owned generation
+ * exited. A still-live fallback Host would hold it; this is the terminal proof.
+ */
+async function assertSceneHostSeatFree(reason) {
+  if (hosts.length === 0) return
+  if (hosts.some(handle => !handle.exited)) return
+  const scopeId = latestHostScopeId()
+  if (scopeId === undefined) throw new Error(`${reason}: no Host scope id is available to audit the Host seat`)
+  if (process.platform === 'linux') {
+    const free = await seatIsFree(`\0dsh-pi-tui-h-${scopeId.slice(0, 40)}`)
+    if (!free) throw new Error(`${reason}: the Host seat is still held after every Host generation exited`)
+    return
+  }
+  if (process.platform === 'darwin') {
+    // O_RDWR|O_EXLOCK|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC, no O_CREAT.
+    const flags = 2 | 32 | 4 | 256 | 16777216
+    const seatPath = join(userInfo().homedir, '.dsh-pi-tui', 'run', scopeId, `seat-host-${scopeId}.lock`)
+    const started = Date.now()
+    for (;;) {
+      try {
+        closeSync(openSync(seatPath, flags, 0o600))
+        return
+      } catch (error) {
+        if (error?.code === 'ENOENT') return
+        if (error?.code !== 'EAGAIN' && error?.code !== 'EWOULDBLOCK') throw error
+        if (Date.now() - started > 15_000) throw new Error(`${reason}: the Host seat is still held after every Host generation exited`)
+        await sleep(50)
+      }
+    }
+  }
+  throw new Error(`${reason}: no Host seat probe is implemented for ${process.platform}`)
+}
+
+/** Test-only fault injection: simulate an abrupt old-Host crash in one window. */
+async function crashHost(handle, reason) {
+  if (handle.exited) return
+  killOwnedHost(handle, 'SIGKILL')
+  try {
+    await waitForChildClose(handle.child, KILL_GRACE_MS)
+  } catch (error) {
+    throw new Error(`Host ${String(handle.child.pid)} did not die after ${reason}: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  handle.exited = true
+  handle.exitResult = { code: handle.child.exitCode, signal: handle.child.signalCode }
+  handle.closedAt = now()
+  await assertHostGroupGone(handle, reason)
+  if (activeHost === handle) activeHost = undefined
+  syncHostReceipt()
 }
 
 async function terminateHost(handle, reason) {
@@ -578,6 +842,19 @@ function assertOwnedRecordFile(recordFile, label) {
   const rel = relative(scene.workDir, real)
   if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`)) {
     throw new Error(`${label}: the recordFile is outside the Scene root: ${real}`)
+  }
+  return real
+}
+
+/** Validate one Client scratch directory the Supervisor may later audit. */
+function assertOwnedSceneDirectory(directory, label) {
+  if (typeof directory !== 'string' || directory === '') {
+    throw new Error(`${label}: the Client receipt carries no scratch directory`)
+  }
+  const real = realpathSync(directory)
+  const rel = relative(scene.workDir, real)
+  if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`)) {
+    throw new Error(`${label}: the scratch directory is outside the Scene root: ${real}`)
   }
   return real
 }
@@ -662,6 +939,10 @@ async function cleanup(reason) {
       // The one-shot qualification Client is a Supervisor-owned process group:
       // reclaim it BEFORE the Host generations and before the scene root.
       await terminateQualificationClient(reason)
+      // A Scene Client's production discovery fallback can start a detached
+      // Host this Supervisor never created. Audit and reclaim it before any
+      // terminal quiescence claim or root removal.
+      await reclaimClientFallbackHosts(`cleanup:${reason}:client`)
       for (const handle of [...hosts].reverse()) {
         if (handle.exited) await assertHostGroupGone(handle, reason)
         else await terminateHost(handle, reason)
@@ -673,6 +954,8 @@ async function cleanup(reason) {
         // the root is removed so a live replacement child can never be hidden
         // by the Supervisor's own cleanup.
         auditClientLedger(`cleanup:${reason}`)
+        await reclaimClientFallbackHosts(`cleanup:${reason}:post-host`)
+        await assertSceneHostSeatFree(`cleanup:${reason}`)
         await cleanupSceneRoot(reason)
       }
       installInProgress = false
@@ -1382,6 +1665,19 @@ async function handleUpgradeProbeSideNewClientHostFoundation(message) {
   if (identityBefore.hostPid !== host.child.pid) {
     throw new Error('UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION: the Host identity does not name the Supervisor-owned process')
   }
+  if (process.env.SPLIT_VITEST_UPGRADE_QUALIFICATION_HOST_DEATH === '1') {
+    // Controlled negative control for the reported window: the old Host A
+    // crashes AFTER the Supervisor's status-before proof and BEFORE the
+    // qualification Client's own ensureLocalHost() discovery runs.
+    await crashHost(host, 'injected Host death before qualification discovery')
+    appendNote('qualification-host-death-injected', {
+      hostId: host.hostId,
+      generation: host.generation,
+      pid: host.child.pid ?? null,
+      starttime: host.starttime,
+    })
+    writeReceipt({ phase: 'QUALIFICATION_HOST_DEATH_INJECTED' })
+  }
 
   const sequence = ++qualificationClientSequence
   const clientDir = join(scene.workDir, `qualification-client-${String(sequence)}`)
@@ -1487,6 +1783,10 @@ async function handleUpgradeProbeSideNewClientHostFoundation(message) {
     }
     await assertHostGroupGone(handle, 'UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION')
     await assertClientSeatFree(scene.installation, String(identityBefore.scopeId), 'UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION')
+    const fallback = await reclaimClientFallbackHosts('UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION proof')
+    if (fallback.length > 0) {
+      throw new Error(`UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION: the qualification Client started ${String(fallback.length)} unattributed Host(s); the proof is not trustworthy`)
+    }
     const statusAfter = await queryHostStatus(host)
     assertIdentityKept(safeIdentity(statusAfter.localHost), identityBefore, 'UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION')
     if (!pidAlive(host.child.pid) || !processGroupAlive(hostPgid(host))) {
@@ -1573,6 +1873,8 @@ async function handleFinalize(message) {
       throw new Error(`FINALIZE: Host generation ${String(handle.generation)} did not exit normally: ${JSON.stringify(handle.exitResult)}`)
     }
   }
+  await reclaimClientFallbackHosts('FINALIZE')
+  await assertSceneHostSeatFree('FINALIZE')
   if (scene !== undefined) {
     await cleanupSceneRoot('FINALIZE')
   }
@@ -1597,6 +1899,9 @@ async function handleReport(message) {
       session: detail.session,
       shellPid: detail.shellPid ?? null,
       recordFile,
+      ...(scene?.kind === 'upgrade'
+        ? { scratch: assertOwnedSceneDirectory(detail.scratch, 'REPORT client-started') }
+        : {}),
       businessPids,
       ...(scene?.kind === 'upgrade'
         ? { businessPidFacts: businessPids.map(pid => ({ pid, starttime: readHostStarttimeOrUndefined(pid) })) }
