@@ -784,6 +784,13 @@ test('an empty search paints one truthful inert placeholder for every stage', as
     await h.paint()
     return h.view()
   }
+  const assertSingleEmptyRow = (painted: string, text: string): void => {
+    assert.equal(painted.split('\n').filter(line => line.includes(text)).length, 1,
+      `exactly one ${JSON.stringify(text)} row is painted:\n${painted}`)
+    const frame = panelFrame(h)
+    assert.equal(lineIndexOf(frame, text), lineIndexOf(frame, 'Search: needle') + 1,
+      `the single ${JSON.stringify(text)} row owns the first empty result row without shifting the body`)
+  }
 
   let view = await setEmpty({ searchState: 'loading' })
   assert.ok(view.includes('Searching message content…'), `a pending content search never claims zero:\n${view}`)
@@ -805,15 +812,19 @@ test('an empty search paints one truthful inert placeholder for every stage', as
   assert.ok(view.includes('Search failed: fts boom'), 'the real error reason keeps its own row')
 
   view = await setEmpty({ listState: 'loading', searchResults: [] })
-  assert.ok(view.includes('Loading sessions…'), `a loading roster never claims a completed search:\n${view}`)
+  assertSingleEmptyRow(view, 'Loading sessions…')
   assert.ok(!view.includes('No matching sessions'), 'a loading roster never claims zero Sessions')
+  assert.ok(!view.includes('session persistence unavailable'), 'a loading roster is not also called unavailable')
 
   view = await setEmpty({ listState: 'unavailable', searchResults: [] })
-  assert.ok(view.includes('Session list unavailable'), `an unavailable roster is stated as such:\n${view}`)
+  assertSingleEmptyRow(view, 'Session list unavailable')
   assert.ok(!view.includes('No matching sessions'), 'an unavailable roster never claims zero matches')
+  assert.ok(!view.includes('session persistence unavailable'), 'the roster fact is stated once in Search')
 
   view = await setEmpty({ listState: 'empty', rows: [], searchResults: [] })
-  assert.ok(view.includes('No readable sessions'), `an empty roster states the readable-session fact:\n${view}`)
+  assertSingleEmptyRow(view, 'No readable sessions')
+  assert.ok(!view.includes('No matching sessions'), 'an empty roster never claims a completed query')
+
 
   h.dispose()
   const idle = harness({ columns: 80, rows: 24, initialMode: 'search' })

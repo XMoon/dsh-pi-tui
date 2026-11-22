@@ -2738,12 +2738,16 @@ export class SessionWorkspacePanel implements Component {
     if (this.newSessionPending !== undefined) push('Starting session…')
     if (this.statusMessage !== undefined) push(this.statusMessage)
     if (snapshot.listState === 'error') {
+      // A real roster failure keeps its diagnostic reason even in Search; the
+      // search pane states the one non-interactive "session list unavailable"
+      // fact. Routine loading/unavailable/empty are owned by the Search empty
+      // state below, so they are never duplicated as a second status row.
       push(`session listing failed: ${sanitizedPhysicalLine(snapshot.listError ?? 'unknown error')}`, 'error')
-    } else if (snapshot.listState === 'unavailable') {
+    } else if (!this.searchMode && snapshot.listState === 'unavailable') {
       push('session persistence unavailable')
-    } else if (snapshot.listState === 'empty') {
+    } else if (!this.searchMode && snapshot.listState === 'empty') {
       push('No readable sessions')
-    } else if (snapshot.listState === 'loading') {
+    } else if (!this.searchMode && snapshot.listState === 'loading') {
       push('Loading sessions…')
     }
     if (snapshot.refreshError !== undefined) {
