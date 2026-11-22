@@ -85,10 +85,10 @@ async function selectModelInTui(client, modelId, label) {
   // to carry that marker, not merely for its text to appear somewhere (the
   // other model id may contain this id as a prefix).
   const escaped = modelId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const selectedRow = new RegExp(`^>\\s+${escaped}(?![\\w-])`, 'u')
+  const selectedRow = new RegExp(`(?:^|\\s)>\\s+${escaped}(?![\\w-])`, 'u')
   await waitForCondition(async () => {
     const frame = await client.viewport()
-    return frame.some(line => selectedRow.test(line.trimStart()))
+    return frame.some(line => selectedRow.test(line))
   }, `${label} selected model`, 120_000)
   client.send('\r')
   await waitForScreenGone(client, 'Models', `${label} picker commit`)
