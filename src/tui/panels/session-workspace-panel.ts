@@ -2537,7 +2537,9 @@ export class SessionWorkspacePanel implements Component {
     // is laid out: full key state > short id > title prefix > age > cwd. The
     // `Working` secondary segment is dropped whole first on a narrow row.
     const primaryWidth = visibleWidth(status.primary)
-    const secondaryWidth = status.secondary === undefined ? 0 : 2 + visibleWidth(status.secondary)
+    // The assembled status group joins its secondary word with the real
+    // three-cell ` · ` separator, not a two-cell guess.
+    const secondaryWidth = status.secondary === undefined ? 0 : 3 + visibleWidth(status.secondary)
     const fixed = 2 + SESSION_TREE_INDENT + (current ? 2 : 0)
     const contentWidth = Math.max(1, width - fixed)
     const idWidth = visibleWidth(shortId)

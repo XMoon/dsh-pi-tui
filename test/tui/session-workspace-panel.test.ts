@@ -4236,6 +4236,51 @@ test('Needs attention and Working stay complete right-aligned status groups acro
   assert.ok(raw.includes(color.textDim('‣ Pending unverified')), 'Pending unverified is neutral, not Needs ink')
 })
 
+test('a 50/52-column CJK row drops the optional Working segment before the title prefix', async () => {
+  const longCjkTitle = '修复流水线需要输入的问题非常长的标题用于验证截断不会吃掉状态词'
+  const make = (columns: number, currentSessionId: string): Harness => {
+    const h = harness({ columns, rows: 24, currentSessionId })
+    h.handle.setSnapshot(snapshot({ rows: [
+      row(CURRENT, 3_000, { title: 'Current session' }),
+      row('session-status-needs', 2_500, { title: longCjkTitle }),
+    ] }))
+    h.handle.updateWorkspaces({ type: 'baseline', items: [
+      { workspaceId: 'ws-status', path: '/ws/status', title: 'Status', sessionIds: [CURRENT, 'session-status-needs'] },
+    ] })
+    h.handle.setActivityFacts({
+      listRevision: 1,
+      facts: [
+        fact(CURRENT, { running: false, attention: 'none', attentionSourceState: 'known' }),
+        questionFact('session-status-needs', { running: true }),
+      ],
+      answerEligibility: [eligibility('session-status-needs')],
+    })
+    return h
+  }
+  // 50 columns, non-current: the old two-cell admission counted 46 and kept
+  // Working; the real ' · ' separator needs 47, so the optional word must yield
+  // and the reserved 8-cell title prefix must survive.
+  const nonCurrent = make(50, CURRENT)
+  await nonCurrent.paint()
+  let needsLine = panelFrame(nonCurrent).find(line => line.includes('status-n'))
+  assert.ok(needsLine !== undefined, `the non-current Needs row is painted:\n${nonCurrent.view()}`)
+  assert.ok(needsLine.includes('‣ Needs attention'), `the primary status stays complete:\n${needsLine}`)
+  assert.ok(!needsLine.includes('Working'), `the optional Working segment yields at its real separator width:\n${needsLine}`)
+  assert.ok(needsLine.includes('修复流水'), `the reserved CJK title prefix survives:\n${needsLine}`)
+  nonCurrent.dispose()
+
+  // 52 columns, current: the 2-cell bullet makes the same admission boundary;
+  // the complete Needs status and 8-cell title prefix must still win.
+  const current = make(52, 'session-status-needs')
+  await current.paint()
+  needsLine = panelFrame(current).find(line => line.includes('status-n'))
+  assert.ok(needsLine !== undefined, `the current Needs row is painted:\n${current.view()}`)
+  assert.match(needsLine, /^> .*‣ Needs attention/m, `the current primary status stays complete:\n${needsLine}`)
+  assert.ok(!needsLine.includes('Working'), `the current bullet does not buy the optional Working segment:\n${needsLine}`)
+  assert.ok(needsLine.includes('修复流水'), `the CJK title prefix survives beside the current bullet:\n${needsLine}`)
+  current.dispose()
+})
+
 test('a collapsed Folder keeps complete Needs/Working counts that follow same-frame reclassification', async () => {
   const h = harness({ columns: 80, rows: 24 })
   const rows = [
