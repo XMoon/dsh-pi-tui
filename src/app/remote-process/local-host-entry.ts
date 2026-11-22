@@ -92,6 +92,12 @@ import {
   type LiveAgentViewIdentity,
 } from './local-acp-session-view.ts'
 import type { AcpAccessStatus } from '../../runtime/acp-access-port.ts'
+import {
+  AcpSessionModelService,
+  type AcpModelAgent,
+  type AcpModelCatalog,
+  type AcpModelSelection,
+} from './local-acp-model-selection.ts'
 
 /** The three Web roster rows whose official non-desktop values must stay fixed
  * at the Host-only layer, read from the ONE production roster
@@ -519,6 +525,9 @@ interface AttachmentServiceLike {
 
 interface LlmServiceLike {
   resolveModelInfo(provider: string, model: string): Promise<{ readonly inputModalities?: readonly string[] }>
+  listProviders(): readonly { readonly id: string; readonly name: string }[]
+  listModels(providerId: string): Promise<readonly { readonly id: string; readonly name: string }[]>
+  resolveCallConfig(selection: AcpModelSelection, signal?: AbortSignal): Promise<AcpModelSelection>
 }
 
 interface DefaultModelServiceLike {
@@ -556,6 +565,8 @@ interface SessionControllerLike {
   >
   /** The official Remote prompt surface; `signal` gates admission only. */
   prompt(request: AcpSessionPromptRequest, signal: AbortSignal): Promise<{ readonly accepted: true }>
+  /** The official Host provider-grouped model catalog (with reasoning metadata). */
+  modelCatalog(): Promise<AcpModelCatalog>
 }
 interface AgentRegistryLike {
   get(id: string): LiveAgentViewIdentity | undefined
@@ -615,11 +626,31 @@ export function createHostAcpSessionAccess(context: import('@deepseek-ai/cordis'
     || sessionController === undefined
     || agents === undefined
     || sessions === undefined
+    || llm === undefined
   ) {
     throw new Error(
-      'local host entry: the Host ACP Session View requires the live workspaceController, sessionController, agents and sessions services',
+      'local host entry: the Host ACP Session View requires the live workspaceController, sessionController, agents, sessions and llm services',
     )
   }
+  const modelCatalog = (sessionController as { readonly modelCatalog?: unknown }).modelCatalog
+  if (typeof modelCatalog !== 'function') {
+    throw new Error('local host entry: the Host ACP Session View requires the official sessionController.modelCatalog service')
+  }
+  const modelService = new AcpSessionModelService({
+    modelCatalog: async () => await sessionController.modelCatalog(),
+    listProviders: () => llm.listProviders(),
+    listModels: async providerId => await llm.listModels(providerId),
+    resolveCallConfig: async (selection, signal) => {
+      const resolved = await llm.resolveCallConfig(selection, signal)
+      return {
+        provider: resolved.provider,
+        model: resolved.model,
+        ...(resolved.reasoningEffort === undefined ? {} : { reasoningEffort: resolved.reasoningEffort }),
+      }
+    },
+    currentAgent: sessionId => agents.get(sessionId) as unknown as AcpModelAgent | undefined,
+    currentSession: sessionId => sessions.get(sessionId),
+  })
   return {
     async createWorkspace(path: string): Promise<AcpCreateWorkspaceOutcome> {
       try {
@@ -662,6 +693,11 @@ export function createHostAcpSessionAccess(context: import('@deepseek-ai/cordis'
     resolveAgent: sessionId => sessionController.resolveAgent(sessionId),
     currentAgent: sessionId => agents.get(sessionId),
     currentSession: sessionId => sessions.get(sessionId),
+    // Session-only model capability: this narrow pair is the ONLY model write
+    // surface the ACP View can reach. It never exposes the profile default.
+    modelOptions: async (agent, session) => await modelService.readOptions(agent as unknown as AcpModelAgent, session),
+    selectModelOnly: async (agent, session, request, signal, stillCurrent) =>
+      await modelService.selectSessionOnly(agent as unknown as AcpModelAgent, session, request, signal, stillCurrent),
     imageLimits: () => attachments?.imageLimits,
     // The ONE official Host Attachment Store reads and verifies the committed
     // image; the View never sees a Host path, a second store or an unverified
