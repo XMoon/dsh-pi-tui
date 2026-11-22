@@ -280,7 +280,7 @@ test('a same-id Loader row with a non-canonical package identity is refused befo
     'a wrong-package row must never receive the canonical migration write')
 })
 
-test('the official settings importer and the Host migration interleave without losing or overwriting the legacy values', async t => {
+test('the official settings importer and the Host migration interleave without losing or overwriting the legacy values', { timeout: 20_000 }, async t => {
   const life = testLifecycle(t)
   const root = life.tempDir('prefs-importer-race-')
   // The retired document is present BEFORE the real SettingsForms service is
@@ -295,38 +295,56 @@ test('the official settings importer and the Host migration interleave without l
     '  welcomeNoticeVersion: legacy-ack',
     '',
   ].join('\n'))
-  const plane = await bootPlane(life, root, { resetUserDocument: true, importableSettings: true })
-  const realForms = settingsOf(plane.ctx)
-  const realEditor = (plane.ctx as unknown as { configEditor: ProfileConfigEditorLike }).configEditor
+  let importerAtEditorResolve!: () => void
+  const importerAtEditor = new Promise<void>(resolve => { importerAtEditorResolve = resolve })
+  let allowImporter!: () => void
+  const canonicalAtEditor = new Promise<void>(resolve => { allowImporter = resolve })
+  let importerSettledResolve!: () => void
+  const importerSettled = new Promise<void>(resolve => { importerSettledResolve = resolve })
   let canonicalEditControlReached = false
-  // Intercept the PRODUCTION write entry (ConfigEditor.edit), not a test-only
-  // form helper. The wait happens BEFORE the official profile lock, so the
-  // importer can commit; after that the real edit runs unchanged and its
-  // callback re-reads the raw sources under the lock.
-  const editor = {
-    entries: () => realEditor.entries(),
-    edit: async (...args: Parameters<ProfileConfigEditorLike['edit']>) => {
-      if (args[0].options.id === ROW_ID && !canonicalEditControlReached) {
-        canonicalEditControlReached = true
-        const deadline = Date.now() + 10_000
-        let imported = false
-        while (Date.now() < deadline) {
-          const row = descriptorByNs(plane.ctx, 'ui-settings-general')
-          if ((row?.user as { welcomeNoticeVersion?: string } | undefined)?.welcomeNoticeVersion === 'legacy-ack') {
-            imported = true
-            break
+  const plane = await bootPlane(life, root, {
+    resetUserDocument: true,
+    importableSettings: true,
+    beforeSettingsStart: ctx => {
+      const configEditor = (ctx as unknown as { configEditor: ProfileConfigEditorLike }).configEditor
+      const officialEdit = configEditor.edit.bind(configEditor)
+      // Hold the OFFICIAL importer's edit until the migration reaches its
+      // canonical write. This proves the interleave, not just the final file.
+      configEditor.edit = async (entry, change) => {
+        if (entry.options.id === 'ui-settings-general') {
+          importerAtEditorResolve()
+          await canonicalAtEditor
+          try {
+            return await officialEdit(entry, change)
+          } finally {
+            importerSettledResolve()
           }
-          await new Promise(resolve => setTimeout(resolve, 10))
         }
-        assert.equal(imported, true, 'the official importer never committed its own settings.yaml section')
+        if (entry.options.id === ROW_ID) {
+          canonicalEditControlReached = true
+          allowImporter()
+          await importerSettled
+          assert.equal(
+            (descriptorByNs(ctx, 'ui-settings-general')?.user as { welcomeNoticeVersion?: string } | undefined)?.welcomeNoticeVersion,
+            'legacy-ack', 'the official importer must commit before the canonical edit enters the profile lock',
+          )
+        }
+        return officialEdit(entry, change)
       }
-      return realEditor.edit(...args)
     },
-  }
+  })
+  // Always release a held importer on test failure/timeout before disposing
+  // the fixture; it must not retain a pending official write across tests.
+  t.after(() => allowImporter())
+  await importerAtEditor
+  assert.equal(
+    (descriptorByNs(plane.ctx, 'ui-settings-general')?.user as { welcomeNoticeVersion?: string } | undefined)?.welcomeNoticeVersion,
+    undefined, 'the official importer has reached ConfigEditor but is still held before its write',
+  )
   const report = await migrateProfileTuiPreferences({
     patchPath: plane.patchPath,
-    configEditor: editor as unknown as ProfileConfigEditorLike,
-    forms: realForms,
+    configEditor: (plane.ctx as unknown as { configEditor: ProfileConfigEditorLike }).configEditor,
+    forms: settingsOf(plane.ctx),
     home: root,
     resolvePreset: async () => {},
     diag: { warn: () => {}, info: () => {} },
