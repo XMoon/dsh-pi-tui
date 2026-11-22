@@ -82,7 +82,7 @@ export function inspectSplitCandidate(explicitPath) {
  *     chunk. No three packages may appear in the profile manifest or
  *     node_modules.
  */
-export function createSplitSmokeProfile({ tarball, targetDshVersion, workDir, clientPlatformProvisioning = 'legacy-preseed' }) {
+export function createSplitSmokeProfile({ tarball, targetDshVersion, workDir, clientPlatformProvisioning = 'legacy-preseed', seedBuildPolicy = true }) {
   if (clientPlatformProvisioning !== 'legacy-preseed' && clientPlatformProvisioning !== 'bundled') {
     throw new SplitSmokeAssertionError(`unknown clientPlatformProvisioning mode: ${String(clientPlatformProvisioning)}`)
   }
@@ -129,7 +129,7 @@ export function createSplitSmokeProfile({ tarball, targetDshVersion, workDir, cl
     installPlugin(dsh, 'zustand@4.5.7', harnessDir, env, false)
     installPlugin(dsh, 'immer@10.2.0', harnessDir, env, false)
   }
-  installPlugin(dsh, tarball, harnessDir, env, false)
+  installPlugin(dsh, tarball, harnessDir, env, false, { seedBuildPolicy })
   const profileManifest = readJson(join(profileDir, 'package.json'))
   if (clientPlatformProvisioning === 'legacy-preseed') {
     for (const [name, version] of clientPeers) {
@@ -198,6 +198,7 @@ export function createSplitSmokeProfile({ tarball, targetDshVersion, workDir, cl
     surfaceLlm,
     clientPeers: clientPlatformProvisioning === 'legacy-preseed' ? clientPeers : [],
     clientPlatformProvisioning,
+    buildPolicyPreseeded: seedBuildPolicy !== false,
     dshInvocation: dsh,
   }
 }

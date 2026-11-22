@@ -17,10 +17,11 @@
  * evidence for the official Client Domains readiness; the public painted
  * frames and process lifecycle remain the user-visible authority.
  *
- * PR1 qualification mode: the isolated test-owned Profile records
- * `allowBuilds.koffi: false` before the first install (the same explicit
- * decision the repository root records). The report says
- * `controlledKoffi: "YES"`; PR2 owns the pristine no-preset release gate.
+ * F0 is the pristine release gate: `installPlugin()` is called with
+ * `seedBuildPolicy: false`, so the isolated Profile is not given
+ * `allowBuilds.koffi` by the harness. The report says `controlledKoffi: "NO"`
+ * and `pristine: true` for that scenario. F1/F2 historical upgrades may retain
+ * an old Profile's existing policy.
  *
  * Usage:
  *   node scripts/fresh-profile-install-smoke.mjs <absolute-candidate.tgz> [--dsh <0.2.2-rc.X>]
@@ -35,6 +36,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpath
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { parse as parseYaml } from 'yaml'
 
 import {
   dshInvocation,
@@ -374,7 +376,7 @@ export function assertBundledClientChunk(profilePackage) {
   return { storeChunk, files: files.length }
 }
 
-function assertProfileRoot(profileDir, expectedDependencies = [EXPECTED_NAME]) {
+function assertProfileRoot(profileDir, expectedDependencies = [EXPECTED_NAME], { requirePristine = false } = {}) {
   const manifest = readJson(join(profileDir, 'package.json'), 'profile package.json')
   const dependencies = Object.keys(manifest.dependencies ?? {}).sort()
   const expected = [...expectedDependencies].sort()
@@ -387,7 +389,15 @@ function assertProfileRoot(profileDir, expectedDependencies = [EXPECTED_NAME]) {
   }
   const bundles = manifest.dsh?.profile?.bundles ?? []
   assert(bundles.includes(EXPECTED_NAME), 'the TUI bundle row is missing from the fresh profile', 'PROFILE_MANIFEST_INVALID')
-  return { dependencies, bundles }
+  const workspacePath = join(profileDir, 'pnpm-workspace.yaml')
+  const workspace = existsSync(workspacePath) ? (parseYaml(readFileSync(workspacePath, 'utf8')) ?? {}) : {}
+  const allowBuilds = workspace.allowBuilds !== null && typeof workspace.allowBuilds === 'object' && !Array.isArray(workspace.allowBuilds)
+    ? workspace.allowBuilds
+    : {}
+  const hasKoffiDecision = Object.hasOwn(allowBuilds, 'koffi')
+  assert(!requirePristine || !hasKoffiDecision,
+    'the fresh profile has a pre-seeded allowBuilds.koffi decision', 'PROFILE_MANIFEST_INVALID')
+  return { dependencies, bundles, hasKoffiDecision }
 }
 
 async function internalDomainEvidence({ workDir, profileDir, harnessDir, profilePackage, env }) {
@@ -575,12 +585,14 @@ async function runScenario({ candidate, dshTarget, workDir }) {
     targetDshVersion: dshTarget,
     workDir,
     clientPlatformProvisioning: 'bundled',
+    seedBuildPolicy: false,
   })
+  assert(profile.buildPolicyPreseeded === false, 'F0 unexpectedly pre-seeded the build policy')
   assertInstalledDshFamily(profile.harnessDir, dshTarget)
   assertOrdinaryDependencies(profile.profilePackage)
-  const profileRoot = assertProfileRoot(profile.profileDir)
+  const profileRoot = assertProfileRoot(profile.profileDir, [EXPECTED_NAME], { requirePristine: true })
   const bundled = assertBundledClientChunk(profile.profilePackage)
-  return runLiveEvidence({ profile, profileRoot, bundled, workDir })
+  return { buildPolicyPreseeded: profile.buildPolicyPreseeded, ...(await runLiveEvidence({ profile, profileRoot, bundled, workDir })) }
 }
 
 /**
@@ -635,7 +647,8 @@ async function main() {
     gate: 'fresh-profile-install',
     qualification: oldCandidate === undefined ? 'FRESH_BUNDLED_PASS' : 'FRESH_BUNDLED_PASS_WITH_UPGRADE',
     status: 'RUNNING',
-    controlledKoffi: 'YES',
+    controlledKoffi: 'UNKNOWN',
+    pristine: false,
     candidate: { path: candidate.path, sha256: candidate.sha256, name: candidate.manifest.name, version: candidate.manifest.version },
     dshTarget: cli.dshTarget,
     node: process.versions.node,
@@ -643,6 +656,8 @@ async function main() {
   }
   try {
     report.scenarios.F0 = await runScenario({ candidate, dshTarget: cli.dshTarget, workDir: join(workRoot, 'F0') })
+    report.controlledKoffi = report.scenarios.F0.buildPolicyPreseeded ? 'YES' : 'NO'
+    report.pristine = report.scenarios.F0.buildPolicyPreseeded === false
     if (oldCandidate !== undefined) {
       report.scenarios.F1 = await runUpgradeScenario({ oldCandidate, candidate, workDir: join(workRoot, 'F1'), withOldPeers: false })
       report.scenarios.F2 = await runUpgradeScenario({ oldCandidate, candidate, workDir: join(workRoot, 'F2'), withOldPeers: true })

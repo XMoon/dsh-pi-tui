@@ -379,10 +379,14 @@ export function runDsh(invocation, args, cwd, env, timeout = SUBPROCESS_TIMEOUTS
   return run(invocation[0], [...invocation.slice(1), ...args], { cwd, env, timeout })
 }
 
-export function installPlugin(invocation, spec, cwd, env, retry) {
+export function installPlugin(invocation, spec, cwd, env, retry, options = {}) {
   // pnpm 12 fails an UNDECIDED dependency build script; the isolated profile
   // records this repository's explicit decision before its first install.
-  if (typeof env.DSH_HOME === 'string' && env.DSH_HOME !== '') seedProfileBuildPolicy(env.DSH_HOME, 'pi-tui')
+  // The pristine release gate opts out explicitly; every existing smoke keeps
+  // the historical seeded behavior by default.
+  if (options.seedBuildPolicy !== false && typeof env.DSH_HOME === 'string' && env.DSH_HOME !== '') {
+    seedProfileBuildPolicy(env.DSH_HOME, 'pi-tui')
+  }
   const args = ['plugin', '--profile', 'pi-tui', 'add', spec]
   const attempts = retry ? 2 : 1
   let result

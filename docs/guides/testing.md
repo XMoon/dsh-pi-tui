@@ -466,10 +466,11 @@ Passing an earlier published tarball with `--upgrade-old <path>` additionally
 runs the historical upgrade paths against the same candidate; this is
 qualification evidence, not a per-CI network download. The script and CI own
 the accepted `--dsh` target matrix and the platform rows; docs do not duplicate
-that live inventory. The gate reports whether the isolated test-owned profile
-presets the Koffi build policy: that controlled qualification condition is
-not a pristine user first install. `pack:release` runs this gate against the
-same single packed tarball after the eight public-package smokes.
+that live inventory. F0 is the pristine release gate and does not pre-seed
+`allowBuilds.koffi`; the report says `controlledKoffi: "NO"` and `pristine:
+true`. Historical F1/F2 upgrades may retain an old Profile's existing policy.
+`pack:release` runs this gate against the same single packed tarball after the
+eight public-package smokes.
 
 The Upgrade lane has its own strict selector over two genuinely different
 packaged builds pinned to the same exact DSH runtime (internal qualification
