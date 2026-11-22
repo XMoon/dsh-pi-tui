@@ -1795,3 +1795,73 @@ test('pointer B1: a real wheel between a list row press and release never opens 
   app.setFullscreen(false)
   app.stop()
 })
+
+// ── PTC image-bearing injected Context occurrence contract ─────────────────
+
+test('a PTC Context image is a picker occurrence only while its row is expanded', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const { vt, app } = startApp()
+  const folder = new TranscriptFolder()
+  folder.apply([{
+    type: 'user/message', seq: 1, time: 1,
+    data: {
+      id: 'ptc-viewer-context', role: 'user',
+      content: [
+        { type: 'text', text: 'nested result' },
+        { type: 'image', attachment: IMAGE_REF },
+      ],
+      source: { kind: 'ptc-mode' },
+    },
+  } as never])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  const internals = app as unknown as {
+    mountedImageOccurrences(): { imageIndex: number; ref: { name?: string } }[]
+  }
+  assert.equal(internals.mountedImageOccurrences().length, 0,
+    'a folded Context row mounts no image and is not a picker occurrence')
+
+  vt.sendInput('\x0f')
+  const expanded = await viewport(vt)
+  assert.ok(expanded.includes('🖼️ shot.png'), `the expanded Context image is mounted:\n${expanded}`)
+  const occurrences = internals.mountedImageOccurrences()
+  assert.equal(occurrences.length, 1)
+  assert.equal(occurrences[0]?.imageIndex, 0, 'the source ordinal is the ContentBlock index')
+  app.openTranscriptImagePicker()
+  const listView = await viewport(vt)
+  assert.ok(listView.includes('shot.png'), `the /view-image picker lists the Context image:\n${listView}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('switching the display subject retires old PTC Context occurrences', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const { vt, app } = startApp()
+  const folder = new TranscriptFolder()
+  folder.apply([{
+    type: 'user/message', seq: 1, time: 1,
+    data: {
+      id: 'ptc-viewer-subject-a', role: 'user',
+      content: [{ type: 'image', attachment: IMAGE_REF }],
+      source: { kind: 'ptc-mode' },
+    },
+  } as never])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  vt.sendInput('\x0f')
+  await viewport(vt)
+  const internals = app as unknown as {
+    mountedImageOccurrences(): { ref: { name?: string } }[]
+  }
+  assert.equal(internals.mountedImageOccurrences().length, 1)
+
+  // A new display subject with no image must retire the old occurrence set:
+  // a stale picker entry or a stale viewer scope would be a cross-session leak.
+  app.setTranscript([])
+  await vt.waitForRender()
+  assert.equal(internals.mountedImageOccurrences().length, 0,
+    'the retired subject leaves no mounted Context image occurrence')
+  app.stop()
+})

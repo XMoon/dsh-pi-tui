@@ -48,6 +48,14 @@ export type TranscriptContextForm =
 export interface TranscriptContextPresentation {
   /** The producer-declared form; undefined for unknown/legacy producers. */
   readonly form?: TranscriptContextForm
+  /**
+   * True when the logged source CONTAINED a `form` member, even when its value
+   * was unknown or non-string. `form` stays the recognized semantic value only;
+   * this presence fact lets a consumer distinguish "the producer omitted
+   * form" from "the producer declared something this version does not
+   * understand" without retaining raw foreign values. Presentation-only.
+   */
+  readonly formDeclared?: true
   /** The raw source `kind` (who produced it), when readable. */
   readonly sourceKind?: string
   /** The sending session for relay/notice forms, when present. */
@@ -57,12 +65,13 @@ export interface TranscriptContextPresentation {
   /**
    * Durable delivery provenance: this injected row entered the agent inbox as
    * a `next-step` item during the SAME turn it materialized in (derived by the
-   * fold from the `agent/inbox/spliced` insert/claim identity chain). Only the
-   * three exact Working-delivery pairs may carry it — a producer-declared
-   * `tool-jobs` / `notice`, `agent-message` / `relay` or `subagent-settled` /
-   * `notice` row; every other
-   * source and every missing/foreign claim stays absent and therefore fails
-   * open (independent Context). Presentation-only — never a Session fact.
+   * fold from the `agent/inbox/spliced` insert/claim identity chain). The
+   * exact source/form pairs are `tool-jobs`/`notice`, `agent-message`/`relay`,
+   * `subagent-settled`/`notice` and `repeat-tool-reminder`/`notice`; an
+   * image-bearing `ptc-mode` row qualifies by its structured image content
+   * instead (that producer has no form). Every other source and every
+   * missing/foreign claim stays absent and therefore fails open (independent
+   * Context). Presentation-only — never a Session fact.
    */
   readonly sameTurnNextStep?: true
 }
@@ -212,6 +221,15 @@ export type TranscriptMessage =
     icon?: IconSemantic
     context?: true
     origin?: TranscriptSystemOrigin
+    /**
+     * Presentation-only structured content of an injected Context row, when
+     * the producer's message really carried non-text blocks (currently the
+     * image-bearing `ptc-mode` Context). This is the SAME durable
+     * `event.data.content` array projected for display — never a new Session,
+     * Host or wire field; the flat `text` remains the search/preview
+     * projection and is not rewritten. Absent for every text-only Context.
+     */
+    content?: readonly ContentBlock[]
     /**
      * Presentation-only provenance for an injected Context row: the
      * producer-declared form, the raw source kind and a relay/notice

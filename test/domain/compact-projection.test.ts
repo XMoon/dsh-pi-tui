@@ -20,7 +20,8 @@ import {
 } from '../../src/tui/transcript/context-structure.ts'
 import { contextPresentation, isTranscriptContextForm } from '../../src/domain/transcript/context-semantics.ts'
 import { projectCompact } from '../../src/tui/transcript/compact-projection.ts'
-import { clusterByMemberOf, isWorkingAgentRelay, isWorkingSubagentSettledNotice, isWorkingToolJobsNotice, projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
+import { projectFocus } from '../../src/tui/transcript/focus-projection.ts'
+import { clusterByMemberOf, isWorkingAgentRelay, isWorkingPtcImageContext, isWorkingRepeatToolReminderNotice, isWorkingSubagentSettledNotice, isWorkingToolJobsNotice, projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
 import { formatWorkHeaderLine, compactWorkBody, CompactWorkComponent } from '../../src/tui/components/transcript/compact-work.ts'
 import { summarizeWorkSpan } from '../../src/tui/transcript/work-summary.ts'
 import { compactActionPresentation } from '../../src/tui/components/transcript/compact-process-preview.ts'
@@ -95,31 +96,31 @@ function kindsOf(blocks: ReturnType<typeof projectCompact>): string[] {
 
 test('contextPresentation records the producer-declared form, kind and sender', () => {
   assert.deepEqual(contextPresentation({ kind: 'agent-instructions', form: 'instructions', changes: [{ path: 'AGENTS.md' }] }), {
-    form: 'instructions', sourceKind: 'agent-instructions', role: 'inject',
+    form: 'instructions', formDeclared: true, sourceKind: 'agent-instructions', role: 'inject',
   })
   assert.deepEqual(contextPresentation({ kind: 'skill-invocation', form: 'catalog', name: 'review-fix-loop' }), {
-    form: 'catalog', sourceKind: 'skill-invocation', role: 'inject',
+    form: 'catalog', formDeclared: true, sourceKind: 'skill-invocation', role: 'inject',
   })
   assert.deepEqual(contextPresentation({ kind: 'plugin', form: 'snapshot', plugin: 'runtime-context' }), {
-    form: 'snapshot', sourceKind: 'plugin', role: 'inject',
+    form: 'snapshot', formDeclared: true, sourceKind: 'plugin', role: 'inject',
   })
   assert.deepEqual(contextPresentation({ kind: 'subagent-settled', form: 'notice', summary: 'child settled', senderSessionId: 'child-1' }), {
-    form: 'notice', sourceKind: 'subagent-settled', senderSessionId: 'child-1', role: 'inject',
+    form: 'notice', formDeclared: true, sourceKind: 'subagent-settled', senderSessionId: 'child-1', role: 'inject',
   })
   assert.deepEqual(contextPresentation({ kind: 'agent-message', form: 'relay', senderSessionId: 'child-2' }), {
-    form: 'relay', sourceKind: 'agent-message', senderSessionId: 'child-2', role: 'inject',
+    form: 'relay', formDeclared: true, sourceKind: 'agent-message', senderSessionId: 'child-2', role: 'inject',
   })
   assert.deepEqual(contextPresentation({ kind: 'session-reference', form: 'recall', references: [{ label: 'prior work' }] }), {
-    form: 'recall', sourceKind: 'session-reference', role: 'recall',
+    form: 'recall', formDeclared: true, sourceKind: 'session-reference', role: 'recall',
   })
 })
 
-test('unknown, missing and future forms fail open with no declared form', () => {
+test('unknown, missing and future forms fail open without a semantic form', () => {
   assert.deepEqual(contextPresentation({ kind: 'plugin', plugin: 'legacy-injector' }), {
     sourceKind: 'plugin', role: 'inject',
   })
   assert.deepEqual(contextPresentation({ kind: 'plugin', form: 'future-form', plugin: 'p' }), {
-    sourceKind: 'plugin', role: 'inject',
+    formDeclared: true, sourceKind: 'plugin', role: 'inject',
   })
   assert.deepEqual(contextPresentation(undefined), { role: 'inject' })
   assert.equal(isTranscriptContextForm('future-form'), false)
@@ -129,7 +130,7 @@ test('unknown, missing and future forms fail open with no declared form', () => 
 test('the fold retains form-aware provenance on real injected sources', () => {
   const instructions = foldContext({ kind: 'agent-instructions', form: 'instructions', changes: [{ path: 'AGENTS.md' }] })
   assert.deepEqual(instructions.kind === 'system' ? instructions.contextPresentation : undefined, {
-    form: 'instructions', sourceKind: 'agent-instructions', role: 'inject',
+    form: 'instructions', formDeclared: true, sourceKind: 'agent-instructions', role: 'inject',
   })
   assert.equal(instructions.kind === 'system' ? instructions.label : undefined, 'AGENTS.md')
 
@@ -1187,7 +1188,496 @@ test('a next-turn wakeup relay stays independently visible in Compact', () => {
     'the wakeup relay is a standalone visible Context before the Work')
 })
 
+// --- Working same-turn repeat-tool-reminder Notice follows the same Work ----
 
+/** One durable Working repeat-tool-reminder delivery: next-step insert →
+ * same-turn claim → the folded `user/message` (the id is preserved). */
+function workingRepeatToolReminderEvents(id: string, text: string, time: number, seq: number): SessionEvent[] {
+  const message = {
+    id: MessageId(id), role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'repeat-tool-reminder', form: 'notice', summary: 'read × 4' },
+  }
+  return [
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [message] }, time, seq),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, time + 0.1, seq + 1),
+    eventAt('user/message', message, time + 0.2, seq + 2),
+  ]
+}
+
+test('a proven same-turn repeat-tool-reminder is carried by the same Work on the real fold', () => {
+  const events: SessionEvent[] = [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    toolCallEvent(0, 'reminder-a', 1),
+    toolResultEvent(0, 'reminder-a', 2),
+    ...workingRepeatToolReminderEvents('working-reminder', 'REMINDER_BODY', 1003, 3),
+    toolCallEvent(0, 'reminder-b', 6),
+    toolResultEvent(0, 'reminder-b', 7),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('reminder-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1008, 8),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1009, 9),
+  ]
+  const folder = new TranscriptFolder()
+  apply(folder, events)
+  const messages = folder.messages()
+  const reminder = messages.find(message => message.kind === 'system' && message.contextPresentation?.sourceKind === 'repeat-tool-reminder')
+  assert.ok(reminder !== undefined && reminder.kind === 'system')
+  assert.equal(reminder.contextPresentation?.form, 'notice')
+  assert.equal(reminder.contextPresentation?.sameTurnNextStep, true,
+    'the fold records the durable same-turn next-step provenance')
+  assert.equal(isWorkingRepeatToolReminderNotice(reminder), true)
+  assert.equal(reminder.text, 'REMINDER_BODY', 'the producer body is untouched')
+  const structure = projectTranscriptStructure(messages)
+  assert.deepEqual(structure.map(block => block.kind), ['work', 'message'])
+  const span = onlySpan(structure)
+  assert.deepEqual(span.members, [messages[0], reminder, messages[2]],
+    'Process A -> qualified reminder -> Process B is ONE Work in raw order')
+  assert.equal(summarizeWorkSpan(span).actionStats.total, 2, 'the reminder adds no Action')
+  assert.deepEqual(kindsOf(projectCompact(messages, noOptions)), ['work', 'assistant'],
+    'collapsed Compact hides the carried reminder under the Work header')
+  const expanded = projectCompact(messages, {
+    expandedWorkOwners: new Set([span.owner]), expandedClusters: new Set(), forcedExpanded: new Set(),
+  })
+  assert.deepEqual(kindsOf(expanded), ['work', 'tool', 'system', 'tool', 'assistant'],
+    'expanding the Work restores every raw member exactly once in raw order')
+  assert.equal(expanded.filter(block => block.kind === 'message' && block.message === reminder).length, 1)
+  // Full keeps the exact raw chronology: the carried row never moves.
+  const fullRows = structure.flatMap(block => block.kind === 'work' ? [...block.span.members]
+    : block.kind === 'message' ? [block.message] : [...block.cluster.members])
+  assert.deepEqual(fullRows, messages, 'Full flat Work order equals the raw window')
+  // Cold replay folds the SAME durable log to the same provenance.
+  const cold = new TranscriptFolder()
+  cold.hydrate(events)
+  const coldReminder = cold.messages().find(message => message.kind === 'system')
+  assert.ok(coldReminder !== undefined && coldReminder.kind === 'system')
+  assert.equal(coldReminder.contextPresentation?.sameTurnNextStep, true, 'rehydrate keeps the claim provenance')
+  assert.deepEqual(projectTranscriptStructure(cold.messages()).map(block => block.kind), ['work', 'message'])
+})
+
+test('a repeat-tool-reminder only qualifies through the exact same-turn source/form chain', () => {
+  // No splice/claim chain: the same producer shape stays an independent boundary.
+  const missing = new TranscriptFolder()
+  apply(missing, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    toolCallEvent(0, 'reminder-missing-a', 1),
+    toolResultEvent(0, 'reminder-missing-a', 2),
+    eventAt('user/message', {
+      id: MessageId('missing-reminder'), role: 'user',
+      content: [{ type: 'text', text: 'MISSING_REMINDER' }],
+      source: { kind: 'repeat-tool-reminder', form: 'notice', summary: 'read × 4' },
+    }, 1003, 3),
+    toolCallEvent(0, 'reminder-missing-b', 4),
+    toolResultEvent(0, 'reminder-missing-b', 5),
+  ])
+  const missingReminder = missing.messages().find(message => message.kind === 'system')
+  assert.ok(missingReminder !== undefined && missingReminder.kind === 'system')
+  assert.equal(missingReminder.contextPresentation?.sameTurnNextStep, undefined)
+  assert.equal(isWorkingRepeatToolReminderNotice(missingReminder), false)
+  assert.deepEqual(projectTranscriptStructure(missing.messages()).map(block => block.kind),
+    ['work', 'message', 'work'], 'an unqualified reminder still splits the Work')
+
+  // Same source, wrong form: never the Working pair.
+  const wrongFormMessage = {
+    id: MessageId('wrong-form-reminder'), role: 'user',
+    content: [{ type: 'text', text: 'WRONG_FORM_REMINDER' }],
+    source: { kind: 'repeat-tool-reminder', form: 'relay' },
+  }
+  const wrongForm = new TranscriptFolder()
+  apply(wrongForm, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [wrongFormMessage] }, 1001, 1),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 1002, 2),
+    eventAt('user/message', wrongFormMessage, 1003, 3),
+    toolCallEvent(0, 'wrong-form-reminder-a', 4),
+    toolResultEvent(0, 'wrong-form-reminder-a', 5),
+  ])
+  const wrongFormReminder = wrongForm.messages().find(message => message.kind === 'system')
+  assert.ok(wrongFormReminder !== undefined && wrongFormReminder.kind === 'system')
+  assert.equal(wrongFormReminder.contextPresentation?.sameTurnNextStep, undefined,
+    'the durable claim is not enough: the exact source/form pair decides')
+
+  // Cross-turn claim: inserted during turn 1, claimed in turn 2.
+  const crossMessage = {
+    id: MessageId('cross-reminder'), role: 'user',
+    content: [{ type: 'text', text: 'CROSS_REMINDER' }],
+    source: { kind: 'repeat-tool-reminder', form: 'notice' },
+  }
+  const cross = new TranscriptFolder()
+  apply(cross, [
+    eventAt('turn/start', { turn: 1 }, 1000, 0),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [crossMessage] }, 1001, 1),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, 1002, 2),
+    eventAt('turn/start', { turn: 2 }, 2000, 3),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 2001, 4),
+    eventAt('user/message', crossMessage, 2002, 5),
+    toolCallEvent(2, 'cross-reminder-a', 6),
+    toolResultEvent(2, 'cross-reminder-a', 7),
+  ])
+  const crossReminder = cross.messages().find(message => message.kind === 'system')
+  assert.ok(crossReminder !== undefined && crossReminder.kind === 'system')
+  assert.equal(crossReminder.contextPresentation?.sameTurnNextStep, undefined,
+    'a claim carried across turns is not a same-turn Working delivery')
+})
+
+test('a proven reminder without a real Process fails open and never mints an Activity', () => {
+  const folder = new TranscriptFolder()
+  apply(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    ...workingRepeatToolReminderEvents('reminder-no-process', 'NO_PROCESS_REMINDER', 1001, 1),
+    eventAt('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('reminder-no-process-final'), role: 'assistant', content: [{ type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1005, 4),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1006, 5),
+  ])
+  const messages = folder.messages()
+  const reminder = messages.find(message => message.kind === 'system')
+  assert.ok(reminder !== undefined && reminder.kind === 'system')
+  assert.equal(reminder.contextPresentation?.sameTurnNextStep, true)
+  assert.deepEqual(projectTranscriptStructure(messages).map(block => block.kind), ['message', 'message'],
+    'Context + Conversation without Process stays a flat sequence')
+  assert.deepEqual(kindsOf(projectCompact(messages, noOptions)), ['system', 'assistant'],
+    'fail-open: the reminder card is visible and no empty Work is minted')
+})
+
+
+// --- Working same-turn image-bearing PTC Context follows the same Work ------
+
+const PTC_IMAGE_ATTACHMENT = {
+  attachmentId: 'ptc-compact-att-1',
+  mediaType: 'image/png',
+  bytes: 2048,
+  width: 640,
+  height: 360,
+  name: 'nested.png',
+}
+
+/** One durable Working PTC image delivery: next-step insert → same-turn
+ * claim → the folded `user/message` carrying the producer's structured
+ * image blocks. */
+function workingPtcImageContextEvents(id: string, blocks: readonly unknown[], time: number, seq: number): SessionEvent[] {
+  const message = {
+    id: MessageId(id), role: 'user',
+    content: blocks,
+    source: { kind: 'ptc-mode' },
+  }
+  return [
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [message] }, time, seq),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, time + 0.1, seq + 1),
+    eventAt('user/message', message, time + 0.2, seq + 2),
+  ]
+}
+
+test('a proven same-turn image-bearing PTC Context is carried by the same Work', () => {
+  const events: SessionEvent[] = [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    toolCallEvent(0, 'ptc-work-a', 1),
+    toolResultEvent(0, 'ptc-work-a', 2),
+    ...workingPtcImageContextEvents('working-ptc-image', [
+      { type: 'text', text: 'nested before ' },
+      { type: 'image', attachment: PTC_IMAGE_ATTACHMENT },
+      { type: 'text', text: ' nested after' },
+    ], 1003, 3),
+    toolCallEvent(0, 'ptc-work-b', 6),
+    toolResultEvent(0, 'ptc-work-b', 7),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('ptc-work-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1008, 8),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1009, 9),
+  ]
+  const folder = new TranscriptFolder()
+  apply(folder, events)
+  const messages = folder.messages()
+  const context = messages.find(message => message.kind === 'system' && message.contextPresentation?.sourceKind === 'ptc-mode')
+  assert.ok(context !== undefined && context.kind === 'system')
+  assert.equal(context.contextPresentation?.sameTurnNextStep, true,
+    'the fold records the durable same-turn next-step provenance')
+  assert.equal(isWorkingPtcImageContext(context), true)
+  assert.deepEqual(context.content?.map(block => block.type), ['text', 'image', 'text'])
+  assert.equal(context.content?.[1]?.type === 'image' && context.content[1].attachment.attachmentId, 'ptc-compact-att-1')
+  const structure = projectTranscriptStructure(messages)
+  assert.deepEqual(structure.map(block => block.kind), ['work', 'message'])
+  const span = onlySpan(structure)
+  assert.deepEqual(span.members, [messages[0], context, messages[2]],
+    'Process A -> qualified PTC image Context -> Process B is ONE Work in raw order')
+  assert.equal(summarizeWorkSpan(span).actionStats.total, 2, 'the Context adds no Action')
+  assert.deepEqual(kindsOf(projectCompact(messages, noOptions)), ['work', 'assistant'],
+    'collapsed Compact hides the carried image Context under the Work header')
+  const expanded = projectCompact(messages, {
+    expandedWorkOwners: new Set([span.owner]), expandedClusters: new Set(), forcedExpanded: new Set(),
+  })
+  assert.deepEqual(kindsOf(expanded), ['work', 'tool', 'system', 'tool', 'assistant'],
+    'expanding the Work restores every raw member exactly once in raw order')
+  assert.equal(expanded.filter(block => block.kind === 'message' && block.message === context).length, 1)
+  // Full keeps the exact raw chronology (carriage never moves the Context).
+  const fullRows = structure.flatMap(block => block.kind === 'work' ? [...block.span.members]
+    : block.kind === 'message' ? [block.message] : [...block.cluster.members])
+  assert.deepEqual(fullRows, messages, 'Full flat Work order equals the raw window')
+  // Cold replay folds the SAME durable log to the same provenance.
+  const cold = new TranscriptFolder()
+  cold.hydrate(events)
+  const coldContext = cold.messages().find(message => message.kind === 'system')
+  assert.ok(coldContext !== undefined && coldContext.kind === 'system')
+  assert.equal(coldContext.contextPresentation?.sameTurnNextStep, true, 'rehydrate keeps the claim provenance')
+  assert.deepEqual(projectTranscriptStructure(cold.messages()).map(block => block.kind), ['work', 'message'])
+})
+
+test('a PTC image Context never qualifies without the exact same-turn claim and image content', () => {
+  // No splice/claim chain: the same PTC image Context splits the Work.
+  const missing = new TranscriptFolder()
+  apply(missing, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    toolCallEvent(0, 'ptc-missing-a', 1),
+    toolResultEvent(0, 'ptc-missing-a', 2),
+    eventAt('user/message', {
+      id: MessageId('missing-ptc-image'), role: 'user',
+      content: [{ type: 'text', text: 'nested result' }, { type: 'image', attachment: PTC_IMAGE_ATTACHMENT }],
+      source: { kind: 'ptc-mode' },
+    }, 1003, 3),
+    toolCallEvent(0, 'ptc-missing-b', 4),
+    toolResultEvent(0, 'ptc-missing-b', 5),
+  ])
+  const missingContext = missing.messages().find(message => message.kind === 'system')
+  assert.ok(missingContext !== undefined && missingContext.kind === 'system')
+  assert.equal(missingContext.contextPresentation?.sameTurnNextStep, undefined)
+  assert.deepEqual(projectTranscriptStructure(missing.messages()).map(block => block.kind),
+    ['work', 'message', 'work'], 'an unclaimed PTC image Context still splits the Work')
+
+  // Same source, text-only: the structured image fact is required.
+  const textOnly = new TranscriptFolder()
+  const textMessage = {
+    id: MessageId('ptc-text-only'), role: 'user',
+    content: [{ type: 'text', text: 'Program environment reset; retained variables cleared.' }],
+    source: { kind: 'ptc-mode' },
+  }
+  apply(textOnly, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    toolCallEvent(0, 'ptc-text-a', 1),
+    toolResultEvent(0, 'ptc-text-a', 2),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [textMessage] }, 1003, 3),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 1003.1, 4),
+    eventAt('user/message', textMessage, 1003.2, 5),
+    toolCallEvent(0, 'ptc-text-b', 6),
+    toolResultEvent(0, 'ptc-text-b', 7),
+  ])
+  const textRow = textOnly.messages().find(message => message.kind === 'system')
+  assert.ok(textRow !== undefined && textRow.kind === 'system')
+  assert.equal(textRow.contextPresentation?.sameTurnNextStep, undefined,
+    'text-only PTC (Spill/Reset) never carries the Working flag')
+  assert.deepEqual(projectTranscriptStructure(textOnly.messages()).map(block => block.kind),
+    ['work', 'message', 'work'], 'the PTC reset stays independent even through a claim')
+
+  // Cross-turn claim: inserted during turn 1, claimed in turn 2.
+  const crossMessage = {
+    id: MessageId('cross-ptc-image'), role: 'user',
+    content: [{ type: 'image', attachment: PTC_IMAGE_ATTACHMENT }],
+    source: { kind: 'ptc-mode' },
+  }
+  const cross = new TranscriptFolder()
+  apply(cross, [
+    eventAt('turn/start', { turn: 1 }, 1000, 0),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [crossMessage] }, 1001, 1),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, 1002, 2),
+    eventAt('turn/start', { turn: 2 }, 2000, 3),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 2001, 4),
+    eventAt('user/message', crossMessage, 2002, 5),
+    toolCallEvent(2, 'cross-ptc-a', 6),
+    toolResultEvent(2, 'cross-ptc-a', 7),
+  ])
+  const crossRow = cross.messages().find(message => message.kind === 'system')
+  assert.ok(crossRow !== undefined && crossRow.kind === 'system')
+  assert.equal(crossRow.contextPresentation?.sameTurnNextStep, undefined,
+    'a claim carried across turns is not a same-turn Working delivery')
+
+  // A ptc-mode row that DECLARES a form is a malformed/foreign source: the
+  // real producer has no form, so carriage must fail open even with an image
+  // block and a durable same-turn claim.
+  const formedMessage = {
+    id: MessageId('formed-ptc-image'), role: 'user',
+    content: [{ type: 'image', attachment: PTC_IMAGE_ATTACHMENT }],
+    source: { kind: 'ptc-mode', form: 'notice' },
+  }
+  const formed = new TranscriptFolder()
+  apply(formed, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    toolCallEvent(0, 'formed-ptc-a', 1),
+    toolResultEvent(0, 'formed-ptc-a', 2),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [formedMessage] }, 1003, 3),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 1003.1, 4),
+    eventAt('user/message', formedMessage, 1003.2, 5),
+    toolCallEvent(0, 'formed-ptc-b', 6),
+    toolResultEvent(0, 'formed-ptc-b', 7),
+  ])
+  const formedRow = formed.messages().find(message => message.kind === 'system')
+  assert.ok(formedRow !== undefined && formedRow.kind === 'system')
+  assert.equal(formedRow.contextPresentation?.form, 'notice')
+  assert.equal(formedRow.contextPresentation?.sameTurnNextStep, undefined,
+    'a declared form on the formless ptc producer fails open')
+  assert.equal(isWorkingPtcImageContext(formedRow), false)
+  assert.equal(formedRow.content !== undefined, true, 'the media projection itself is form-neutral')
+  assert.deepEqual(projectTranscriptStructure(formed.messages()).map(block => block.kind),
+    ['work', 'message', 'work'], 'the malformed ptc row stays an independent Context boundary')
+
+  // A foreign image context through the same claim is never the PTC source.
+  const foreignMessage = {
+    id: MessageId('foreign-image-context'), role: 'user',
+    content: [{ type: 'image', attachment: PTC_IMAGE_ATTACHMENT }],
+    source: { kind: 'plugin', form: 'notice', plugin: 'foreign' },
+  }
+  const foreign = new TranscriptFolder()
+  apply(foreign, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    toolCallEvent(0, 'foreign-image-a', 1),
+    toolResultEvent(0, 'foreign-image-a', 2),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [foreignMessage] }, 1003, 3),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 1003.1, 4),
+    eventAt('user/message', foreignMessage, 1003.2, 5),
+    toolCallEvent(0, 'foreign-image-b', 6),
+    toolResultEvent(0, 'foreign-image-b', 7),
+  ])
+  const foreignRow = foreign.messages().find(message => message.kind === 'system')
+  assert.ok(foreignRow !== undefined && foreignRow.kind === 'system')
+  assert.equal(foreignRow.contextPresentation?.sameTurnNextStep, undefined,
+    'only the ptc-mode producer may qualify by image content')
+})
+
+test('an unknown or non-string declared PTC form stays an independent Context even with image and claim', () => {
+  for (const [label, form] of [['unknown', 'future-custom'], ['non-string', 42]] as const) {
+    const message = {
+      id: MessageId(`declared-${label}-ptc-image`), role: 'user',
+      content: [{ type: 'image', attachment: PTC_IMAGE_ATTACHMENT }],
+      source: { kind: 'ptc-mode', form },
+    }
+    const folder = new TranscriptFolder()
+    apply(folder, [
+      eventAt('turn/start', { turn: 0 }, 1000, 0),
+      toolCallEvent(0, `declared-${label}-a`, 1),
+      toolResultEvent(0, `declared-${label}-a`, 2),
+      eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [message] }, 1003, 3),
+      eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 1003.1, 4),
+      eventAt('user/message', message, 1003.2, 5),
+      toolCallEvent(0, `declared-${label}-b`, 6),
+      toolResultEvent(0, `declared-${label}-b`, 7),
+    ])
+    const row = folder.messages().find(candidate => candidate.kind === 'system')
+    assert.ok(row !== undefined && row.kind === 'system', label)
+    assert.equal(row.contextPresentation?.form, undefined, `${label}: no semantic form is invented`)
+    assert.equal(row.contextPresentation?.formDeclared, true, `${label}: the raw declaration is retained`)
+    assert.equal(row.contextPresentation?.sameTurnNextStep, undefined,
+      `${label}: a declared form fails the formless-PTC carriage contract`)
+    assert.equal(isWorkingPtcImageContext(row), false, label)
+    assert.equal(row.content !== undefined, true, `${label}: structured media projection survives independently`)
+    assert.deepEqual(projectTranscriptStructure(folder.messages()).map(block => block.kind),
+      ['work', 'message', 'work'], `${label}: the malformed PTC row remains a boundary`)
+    const compact = projectCompact(folder.messages(), noOptions)
+    assert.deepEqual(kindsOf(compact), ['work', 'system', 'work'], `${label}: Compact keeps the Context standalone`)
+    const focus = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
+    assert.ok(focus.some(block => block.kind === 'message' && block.message === row),
+      `${label}: collapsed Focus keeps the independent Context visible`)
+  }
+})
+
+test('a declared-form PTC Context cannot borrow either Snapshot carriage route', () => {
+  const makeMessage = (id: string, form: string) => ({
+    id: MessageId(id), role: 'user',
+    content: [{ type: 'image', attachment: PTC_IMAGE_ATTACHMENT }],
+    source: { kind: 'ptc-mode', form },
+  })
+  for (const claimed of [false, true]) {
+    const message = makeMessage(`snapshot-ptc-${claimed}`, 'snapshot')
+    const events: SessionEvent[] = [
+      eventAt('turn/start', { turn: 0 }, 1000, 0),
+      toolCallEvent(0, `snapshot-ptc-${claimed}-a`, 1),
+      toolResultEvent(0, `snapshot-ptc-${claimed}-a`, 2),
+    ]
+    if (claimed) {
+      events.push(
+        eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [message] }, 1003, 3),
+        eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 1003.1, 4),
+      )
+    }
+    events.push(
+      eventAt('user/message', message, 1003.2, 5),
+      toolCallEvent(0, `snapshot-ptc-${claimed}-b`, 6),
+      toolResultEvent(0, `snapshot-ptc-${claimed}-b`, 7),
+    )
+    const folder = new TranscriptFolder()
+    apply(folder, events)
+    const row = folder.messages().find(candidate => candidate.kind === 'system')
+    assert.ok(row !== undefined && row.kind === 'system', `claimed=${claimed}`)
+    assert.equal(row.contextPresentation?.form, 'snapshot')
+    assert.equal(row.contextPresentation?.formDeclared, true)
+    assert.equal(row.contextPresentation?.sameTurnNextStep, undefined,
+      `claimed=${claimed}: the PTC no-form gate rejects the snapshot form`)
+    assert.deepEqual(projectTranscriptStructure(folder.messages()).map(block => block.kind),
+      ['work', 'message', 'work'], `claimed=${claimed}: the forged snapshot cannot be carried`)
+    assert.deepEqual(kindsOf(projectCompact(folder.messages(), noOptions)),
+      ['work', 'system', 'work'], `claimed=${claimed}: Compact keeps the Context standalone`)
+    const focus = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
+    assert.ok(focus.some(block => block.kind === 'message' && block.message === row),
+      `claimed=${claimed}: collapsed Focus keeps the independent Context visible`)
+  }
+
+  // An adjacent pair would otherwise become a snapshot-only ambient cluster
+  // and ride into Work through the second (cluster) route.
+  const clusterFolder = new TranscriptFolder()
+  const first = makeMessage('snapshot-cluster-a', 'snapshot')
+  const second = makeMessage('snapshot-cluster-b', 'snapshot')
+  apply(clusterFolder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    toolCallEvent(0, 'snapshot-cluster-a', 1),
+    toolResultEvent(0, 'snapshot-cluster-a', 2),
+    eventAt('user/message', first, 1003, 3),
+    eventAt('user/message', second, 1004, 4),
+    toolCallEvent(0, 'snapshot-cluster-b', 5),
+    toolResultEvent(0, 'snapshot-cluster-b', 6),
+  ])
+  const clusterStructure = projectTranscriptStructure(clusterFolder.messages())
+  assert.deepEqual(clusterStructure.map(block => block.kind), ['work', 'context-cluster', 'work'],
+    'two forged snapshot rows stay an independent cluster, never a Work part')
+  const clusterBlock = clusterStructure[1]
+  assert.ok(clusterBlock?.kind === 'context-cluster' && clusterBlock.cluster.members.length === 2)
+  assert.deepEqual(kindsOf(projectCompact(clusterFolder.messages(), noOptions)), ['work', 'context-cluster', 'work'])
+})
+
+test('a proven PTC image Context without a real Process fails open and a later steer keeps it a boundary', () => {
+  const folder = new TranscriptFolder()
+  apply(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    ...workingPtcImageContextEvents('ptc-no-process', [{ type: 'image', attachment: PTC_IMAGE_ATTACHMENT }], 1001, 1),
+    eventAt('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('ptc-no-process-final'), role: 'assistant', content: [{ type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1005, 4),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1006, 5),
+  ])
+  const messages = folder.messages()
+  const context = messages.find(message => message.kind === 'system')
+  assert.ok(context !== undefined && context.kind === 'system')
+  assert.equal(context.contextPresentation?.sameTurnNextStep, true)
+  assert.deepEqual(projectTranscriptStructure(messages).map(block => block.kind), ['message', 'message'],
+    'Context + Conversation without Process stays a flat sequence')
+  assert.deepEqual(kindsOf(projectCompact(messages, noOptions)), ['system', 'assistant'],
+    'fail-open: the image Context card is visible and no empty Work is minted')
+
+  // A later human steer is a hard boundary: the carried Context stays in the
+  // earlier Work and never bridges the steer.
+  const steerRow = user(0, 'steer')
+  const contextRow: TranscriptMessage = {
+    kind: 'system', turn: 0, text: 'PTC_IMAGE_BODY', context: true,
+    content: [{ type: 'image', attachment: PTC_IMAGE_ATTACHMENT }] as never,
+    contextPresentation: { sourceKind: 'ptc-mode', role: 'inject', sameTurnNextStep: true },
+  }
+  const steered = projectTranscriptStructure([thinking(0), tool(0), contextRow, steerRow, tool(0)])
+  assert.deepEqual(steered.map(block => block.kind), ['work', 'message', 'work'],
+    'a same-turn steer is never crossed by a carried PTC image Context')
+  const firstWork = steered[0]
+  assert.ok(firstWork?.kind === 'work' && firstWork.span.members.includes(contextRow),
+    'the carried PTC image Context stays inside the earlier Work')
+})
 // --- Working same-turn subagent settlement Notice follows the same Work -----
 
 /** One durable Working subagent settlement delivery: next-step insert →

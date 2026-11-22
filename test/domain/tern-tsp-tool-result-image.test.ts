@@ -665,3 +665,143 @@ test('a repeated token yields two chips with distinct keys over the same bytes',
   assert.deepEqual(chipsOf(row).map(chip => chip.props.key), ['draft-chip-1-0', 'draft-chip-1-1'],
     'the same draft id under two ranks is two occurrences, never one attachment')
 })
+
+// ── PTC image-bearing injected Context ─────────────────────────────────────
+
+function ptcContextRow(
+  blocks: readonly ContentBlock[],
+  turn = 1,
+  presentation: Record<string, unknown> = { sourceKind: 'ptc-mode', role: 'inject' },
+): TranscriptMessage {
+  return {
+    kind: 'system',
+    turn,
+    text: textOf(blocks),
+    label: 'ptc-mode',
+    context: true,
+    content: blocks,
+    contextPresentation: presentation as never,
+  }
+}
+
+interface FlatNode {
+  readonly kind: string
+  readonly props: Record<string, unknown>
+  readonly children: readonly FlatNode[]
+}
+
+function cardsOf(messages: readonly TranscriptMessage[], states?: ReadonlyMap<string, ToolImageState>): FlatNode[] {
+  const view = transcriptView(projectTranscriptStructure(messages), new TranscriptNodeKeys(), {
+    ...(states === undefined ? {} : { imageStates: states }),
+  }) as unknown as FlatNode
+  const cards: FlatNode[] = []
+  const walk = (node: FlatNode): void => {
+    if (node.kind === 'card') cards.push(node)
+    for (const child of node.children) walk(child)
+  }
+  walk(view)
+  return cards
+}
+
+test('a PTC context renders text,image,text in order and never repeats the flat text', () => {
+  const message = ptcContextRow([
+    textBlock('nested before'),
+    imageBlock(),
+    textBlock('nested after'),
+  ])
+  const cards = cardsOf([message], new Map([['att-shot-1', { state: 'ready', blobId: 'c'.repeat(64) }]]))
+  const card = cards.find(candidate => String(candidate.props.head).includes('ptc-mode'))
+  assert.ok(card !== undefined, 'the Context card is rendered')
+  const rows = card.children.map(child => ({
+    kind: child.kind,
+    key: String(child.props.key),
+    ...(typeof child.props.text === 'string' ? { text: child.props.text } : {}),
+    ...(typeof child.props.blob === 'string' ? { blob: child.props.blob } : {}),
+  }))
+  assert.deepEqual(rows.map(row => row.key), [
+    'kind',
+    'body-b0-text',
+    'body-b1-info',
+    'body-b1-image',
+    'body-b2-text',
+  ])
+  assert.equal(rows[1]?.text, 'nested before')
+  assert.equal(rows[4]?.text, 'nested after')
+  assert.equal(rows[2]?.text, '[IMAGE] shot.png · 640×360 · 3.8 KiB')
+  assert.equal(rows[3]?.blob, 'c'.repeat(64))
+  assert.equal(rows.some(row => row.key === 'body'), false,
+    'the flat Context body is never painted beside the structured blocks')
+})
+
+test('a PTC context with a missing or unsupported image state degrades to a readable identity line', () => {
+  const message = ptcContextRow([imageBlock()])
+  const missing = cardsOf([message])
+  const missingCard = missing.find(candidate => String(candidate.props.head).includes('ptc-mode'))
+  assert.ok(missingCard !== undefined)
+  const missingRows = rowsOf(missingCard as never)
+  assert.deepEqual(missingRows.map(row => row.key), ['kind', 'body-b0-info'],
+    'no image node is fabricated without a prepared state')
+  assert.match(missingRows[1]?.text ?? '', /Native image display unavailable/)
+
+  const unsupported = cardsOf([message], new Map([['att-shot-1', { state: 'unsupported' }]]))
+  const unsupportedCard = unsupported.find(candidate => String(candidate.props.head).includes('ptc-mode'))
+  assert.ok(unsupportedCard !== undefined)
+  const unsupportedRows = rowsOf(unsupportedCard as never)
+  assert.deepEqual(unsupportedRows.map(row => row.key), ['kind', 'body-b0-info'])
+  assert.match(unsupportedRows[1]?.text ?? '', /Native image display unavailable/)
+})
+
+test('two PTC context rows naming the same attachment keep two independent occurrences', () => {
+  const first = ptcContextRow([imageBlock()])
+  const second = ptcContextRow([imageBlock()], 2)
+  const states = new Map([['att-shot-1', { state: 'ready', blobId: 'd'.repeat(64) } as const]])
+  const cards = cardsOf([first, second], states).filter(card => String(card.props.head).includes('ptc-mode'))
+  assert.equal(cards.length, 2)
+  for (const card of cards) {
+    const image = card.children.find(child => child.kind === 'image')
+    assert.ok(image !== undefined, 'each Context occurrence paints its own image node')
+    assert.equal(image.props.blob, 'd'.repeat(64))
+  }
+  assert.notEqual(cards[0]!.props.key, cards[1]!.props.key,
+    'the two occurrences live under distinct message/card identities')
+  assert.equal(cards[0]!.children.filter(child => child.kind === 'image').length, 1)
+  assert.equal(cards[1]!.children.filter(child => child.kind === 'image').length, 1)
+})
+
+
+test('a form-bearing PTC Context keeps its ordered structured media in TSP', () => {
+  for (const form of ['notice', 'snapshot'] as const) {
+    const message = ptcContextRow([
+      textBlock('foreign before'),
+      imageBlock(),
+      textBlock('foreign after'),
+    ], 1, {
+      sourceKind: 'ptc-mode',
+      form,
+      formDeclared: true,
+      summary: 'foreign producer',
+      role: 'inject',
+    })
+    const cards = cardsOf([message], new Map([['att-shot-1', { state: 'ready', blobId: 'f'.repeat(64) }]]))
+    const card = cards.find(candidate => String(candidate.props.head).includes('ptc-mode'))
+    assert.ok(card !== undefined, form)
+    const rows = card.children.map(child => ({
+      kind: child.kind,
+      key: String(child.props.key),
+      ...(typeof child.props.text === 'string' ? { text: child.props.text } : {}),
+      ...(typeof child.props.blob === 'string' ? { blob: child.props.blob } : {}),
+    }))
+    assert.deepEqual(rows.map(row => row.key), [
+      'kind',
+      'body-b0-text',
+      'body-b1-info',
+      'body-b1-image',
+      'body-b2-text',
+    ], form)
+    assert.equal(rows[1]?.text, 'foreign before', form)
+    assert.equal(rows[4]?.text, 'foreign after', form)
+    assert.equal(rows[3]?.blob, 'f'.repeat(64), form)
+    assert.equal(rows.some(row => row.key === 'body'), false,
+      `${form}: the flat Context text is never painted beside the structured blocks`)
+  }
+})

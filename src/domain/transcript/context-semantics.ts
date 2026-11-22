@@ -23,6 +23,7 @@
  */
 
 import { type IconSemantic } from '../display/icons.ts'
+import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { isSurfacedContext } from './semantics.ts'
 import type {
   ContextProvenance,
@@ -109,7 +110,9 @@ export function isTranscriptContextForm(value: unknown): value is TranscriptCont
  * relay/notice sender, and the inject/recall role. This is the SINGLE
  * parser of raw context sources; the fold and every projection consume its
  * result. An absent/unknown form stays undefined — the caller must present
- * the row as standalone generic Context.
+ * the row as standalone generic Context. `formDeclared` preserves the raw
+ * PRESENCE of the member (even an unknown or non-string value) so eligibility
+ * can distinguish "no form declared" from "declared but not understood".
  * @param source - the logged user/message source, exactly as recorded.
  */
 export function contextPresentation(source: unknown): TranscriptContextPresentation {
@@ -118,9 +121,11 @@ export function contextPresentation(source: unknown): TranscriptContextPresentat
   if (record === null) return { role }
   const kind = readString(record, 'kind')
   const form = record['form']
+  const formDeclared = Object.hasOwn(record, 'form')
   const senderSessionId = readString(record, 'senderSessionId')
   return {
     ...isTranscriptContextForm(form) ? { form } : {},
+    ...formDeclared ? { formDeclared: true as const } : {},
     ...kind === null ? {} : { sourceKind: kind },
     ...senderSessionId === null ? {} : { senderSessionId },
     role,
@@ -144,6 +149,25 @@ export function contextFormOf(message: TranscriptMessage): TranscriptContextForm
 export function isAmbientContext(message: TranscriptMessage): message is Extract<TranscriptMessage, { kind: 'system' }> & { context: true } {
   const form = contextFormOf(message)
   return isSurfacedContext(message) && form !== undefined && AMBIENT_CONTEXT_FORMS.includes(form)
+}
+
+/**
+ * Whether one row is an image-bearing `ptc-mode` injected Context row.
+ *
+ * This is a STRUCTURED MEDIA question only: surfaced Context + the exact
+ * producer source kind `ptc-mode` + at least one real `image` ContentBlock.
+ * It deliberately says nothing about same-turn delivery/carriage (that is the
+ * separate `sameTurnNextStep` presentation flag), nothing about producer
+ * intent subtypes (none exist yet) and never parses the flat text. The
+ * producer's text-only Spill Context and its environment-reset Context are
+ * therefore never image-bearing rows.
+ */
+export function isPtcImageContext(
+  message: TranscriptMessage,
+): message is Extract<TranscriptMessage, { kind: 'system' }> & { context: true; content: readonly ContentBlock[] } {
+  if (!isSurfacedContext(message)) return false
+  if (message.contextPresentation?.sourceKind !== 'ptc-mode') return false
+  return message.content !== undefined && message.content.some(block => block.type === 'image')
 }
 
 /**

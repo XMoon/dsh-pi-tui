@@ -112,6 +112,7 @@ const states = new Map<string, ToolImageState>([
   ['att-user', { state: 'ready', blobId: blobIds[0]! }],
   ['att-assistant', { state: 'ready', blobId: blobIds[1]! }],
   ['att-tool', { state: 'ready', blobId: blobIds[2]! }],
+  ['att-context', { state: 'ready', blobId: blobIds[0]! }],
 ])
 
 const attachment = (id: string, name: string): Record<string, unknown> => ({
@@ -144,6 +145,22 @@ const assistantRow = {
     { type: 'image', attachment: attachment('att-assistant', 'diagram.png') },
     { type: 'text', text: 'Here is the diagram.' },
   ],
+} as unknown as TranscriptMessage
+
+/** The image-bearing PTC injected Context (the production `ptc-mode`
+ * shape): text → image → text in the producer's own block order. */
+const ptcContextRow = {
+  kind: 'system',
+  turn: 1,
+  text: 'nested before 🖼️ context-shot.png nested after',
+  label: 'ptc-mode',
+  context: true,
+  content: [
+    { type: 'text', text: 'nested before' },
+    { type: 'image', attachment: attachment('att-context', 'context-shot.png') },
+    { type: 'text', text: 'nested after' },
+  ],
+  contextPresentation: { sourceKind: 'ptc-mode', role: 'inject' },
 } as unknown as TranscriptMessage
 
 /** The Tool result (the PR3 shape, unchanged by PR4). */
@@ -187,7 +204,7 @@ function previewLimit(): number {
 }
 
 function render(): void {
-  const main = transcriptView(projectTranscriptStructure([userRow, assistantRow, toolRow]), new TranscriptNodeKeys(), {
+  const main = transcriptView(projectTranscriptStructure([userRow, assistantRow, toolRow, ptcContextRow]), new TranscriptNodeKeys(), {
     imageStates: states,
   })
   // The dock mirrors the production dock's order: the draft rows sit directly

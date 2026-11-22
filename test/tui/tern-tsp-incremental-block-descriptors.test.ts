@@ -26,6 +26,7 @@ import type { TranscriptMessage } from '../../src/domain/transcript/types.ts'
 import type { StreamingToolPreview } from '../../src/app/surface/streaming-tool-preparing.ts'
 import { projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
 import {
+  PENDING_IMAGE_BLOB_ID,
   TranscriptNodeKeys,
   describeTranscriptMainBlocksForPreset,
   transcriptViewForPreset,
@@ -904,4 +905,62 @@ test('R13 D5: an adopted nested Preparing carries the root through its OWN stamp
   assert.ok(collapsedB !== undefined && collapsedC !== undefined, 'the root-level Preparing rides the Focus root')
   assert.notDeepEqual(collapsedC.stamp, collapsedB.stamp,
     'Focus: the root Preparing part invalidates the COLLAPSED root stamp')
+})
+
+test('a PTC Context image load state changes only that Context block stamp', () => {
+  const folder = apply([
+    ev('turn/start', { turn: 1 }, 0),
+    userMessage(1, 'user-1', 'run the program'),
+    ev('user/message', {
+      id: MessageId('ptc-image-context'),
+      role: 'user',
+      content: [
+        { type: 'text', text: 'nested result' },
+        {
+          type: 'image',
+          attachment: {
+            attachmentId: 'ptc-att-1', mediaType: 'image/png', bytes: 2048, width: 8, height: 8,
+            name: 'nested.png', source: { kind: 'inline' },
+          },
+        },
+      ],
+      source: { kind: 'ptc-mode' },
+    }, 2),
+    assistantMessage(3, 'a-1', 'done', 1),
+    ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 4),
+  ])
+  const messages = folder.messages()
+  const loading = new Map<string, { readonly state: 'loading' }>([['ptc-att-1', { state: 'loading' }]])
+  const ready = new Map([['ptc-att-1', { state: 'ready', blobId: 'e'.repeat(64) } as const]])
+  // Both states must equal the full-view oracle in every preset that can
+  // materialize the Context row.
+  for (const state of [loading, ready]) {
+    assertLazyEqualsFull(messages, { preset: 'full', scopePrefix: 's1-', window: LATEST_WINDOW, imageStates: state })
+  }
+  const descriptorsLoading = describeTranscriptMainBlocksForPreset(messages, new TranscriptNodeKeys(), {
+    preset: 'full', scopePrefix: 's1-', window: LATEST_WINDOW, imageStates: loading,
+  })
+  const descriptorsReady = describeTranscriptMainBlocksForPreset(messages, new TranscriptNodeKeys(), {
+    preset: 'full', scopePrefix: 's1-', window: LATEST_WINDOW, imageStates: ready,
+  })
+  assert.deepEqual(descriptorsLoading.map(descriptor => descriptor.key), descriptorsReady.map(descriptor => descriptor.key))
+  assert.equal(descriptorsLoading.length, descriptorsReady.length)
+  const changed = descriptorsLoading.filter((descriptor, index) =>
+    JSON.stringify(descriptor.stamp) !== JSON.stringify(descriptorsReady[index]!.stamp))
+  assert.equal(changed.length, 1, 'exactly the PTC Context block becomes dirty on image load')
+  const contextIndex = messages.findIndex(message => message.kind === 'system')
+  assert.equal(changed[0]?.key, descriptorsLoading[contextIndex]?.key,
+    'the changed block is the PTC Context row, not an unrelated node')
+  const readyContext = descriptorsReady[contextIndex]!
+  const readyNode = readyContext.materialize() as never as {
+    readonly children: readonly { readonly kind: string; readonly props: Record<string, unknown> }[]
+  }
+  const imageBlob = (node: { readonly children: readonly { readonly kind: string; readonly props: Record<string, unknown> }[] }): unknown =>
+    node.children.find(child => child.kind === 'image')?.props.blob
+  assert.equal(imageBlob(readyNode), 'e'.repeat(64), 'the ready block materializes its native image in place')
+  const loadingNode = descriptorsLoading[contextIndex]!.materialize() as never as {
+    readonly children: readonly { readonly kind: string; readonly props: Record<string, unknown> }[]
+  }
+  assert.equal(imageBlob(loadingNode), PENDING_IMAGE_BLOB_ID,
+    'the loading state keeps the pending placeholder, never the ready blob')
 })

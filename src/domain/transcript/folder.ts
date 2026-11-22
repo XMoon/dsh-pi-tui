@@ -5100,15 +5100,17 @@ export class TranscriptFolder {
         const sourcePresentation = contextPresentation(event.data.source)
         // Narrow Working delivery provenance: a Context row claimed from the
         // SAME turn's next-step inbox is the one delivery the presentation may
-        // carry with that turn's Work, and only for the three exact Working
-        // pairs — a tool-jobs Notice, an Agent relay or a subagent settlement
-        // Notice. It is derived ONLY from the durable insert/claim identity
-        // chain above (no Agent.status sampling, no summary/wording
-        // inference); next-turn wakeups, foreign/legacy logs, crossed
-        // source/form pairs and every other producer stay absent and therefore
-        // fail open as independent Context. The settlement body stays an
-        // opaque producer payload: this branch never parses or synthesizes a
-        // stop reason.
+        // carry with that turn's Work. The exact source/form pairs are a
+        // tool-jobs Notice, an Agent relay, a subagent settlement Notice and a
+        // repeat-tool-reminder Notice; the image-bearing `ptc-mode` source
+        // qualifies by its structured image content instead (that producer has
+        // no form and none may be invented). It is derived ONLY from the
+        // durable insert/claim identity chain above (no Agent.status sampling,
+        // no summary/wording inference); next-turn wakeups, foreign/legacy
+        // logs, crossed source/form pairs, text-only ptc-mode Context and every
+        // other producer stay absent and therefore fail open as independent
+        // Context. The settlement body stays an opaque producer payload: this
+        // branch never parses or synthesizes a stop reason.
         const claimedInThisTurn = wasClaimedFromNextStep === true
           && claimedIdentity !== undefined
           && claimedIdentity.insertionTurn === this.currentTurn
@@ -5116,6 +5118,11 @@ export class TranscriptFolder {
           (sourcePresentation.sourceKind === 'tool-jobs' && sourcePresentation.form === 'notice')
           || (sourcePresentation.sourceKind === 'agent-message' && sourcePresentation.form === 'relay')
           || (sourcePresentation.sourceKind === 'subagent-settled' && sourcePresentation.form === 'notice')
+          || (sourcePresentation.sourceKind === 'repeat-tool-reminder' && sourcePresentation.form === 'notice')
+          || (sourcePresentation.sourceKind === 'ptc-mode'
+            && sourcePresentation.form === undefined
+            && sourcePresentation.formDeclared !== true
+            && blocks.some(block => block.type === 'image'))
         )
         if (sourcePresentation.sourceKind === 'user') {
           if (!userBlocksVisibleNow(blocks)) break
@@ -5162,6 +5169,16 @@ export class TranscriptFolder {
             // context (never orchestration like llm/retry or max-tokens),
             // so Focus may treat it as turn foundation.
             context: true as const,
+            // Structured media projection: a PTC-context delivery whose
+            // producer content really carries image blocks keeps the ORIGINAL
+            // ordered block array for display. This is the same durable
+            // `user/message` content, never a rewrite: the flat `text` above
+            // stays the search/preview projection and text-only Context keeps
+            // no content at all. Whether the row may be carried by Work is a
+            // separate presentation question decided below.
+            ...sourcePresentation.sourceKind === 'ptc-mode' && blocks.some(block => block.type === 'image')
+              ? { content: blocks }
+              : {},
             // Presentation-only provenance (form/kind/sender) for the
             // form-aware Context roles Compact and Focus present. The
             // semantic marker above stays the surfaced authority. The narrow

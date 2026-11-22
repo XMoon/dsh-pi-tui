@@ -53,6 +53,15 @@ export default async function (h) {
     h.texts(wide).join(' | '))
   h.check('the TOOL result identity line is painted', paints(wide, '[IMAGE] shot.png'),
     h.texts(wide).join(' | '))
+  h.check('the PTC CONTEXT identity line is painted', paints(wide, '[IMAGE] context-shot.png'),
+    h.texts(wide).join(' | '))
+  const ptcIdentity = wide.nodes.find(node => String(node.text ?? '').includes('[IMAGE] context-shot.png'))
+  h.check('the PTC Context identity line is NOT clipped by any ancestor',
+    ptcIdentity !== undefined && containedXY(wide.chains, ptcIdentity),
+    ptcIdentity === undefined ? 'missing identity node' : `box=${JSON.stringify(rect(ptcIdentity))}`)
+  const ptcTextCount = wide.nodes.filter(node => String(node.text ?? '').includes('nested before')).length
+  h.check('the PTC Context body is painted block-wise once (no flat-text duplicate)',
+    ptcTextCount === 1 && paints(wide, 'nested after'), `nested-before nodes=${ptcTextCount}`)
   h.check('the text blocks around the USER image are painted',
     paints(wide, 'Please inspect these screenshots.') && paints(wide, 'The second one shows the failing area.'),
     h.texts(wide).join(' | '))
@@ -64,8 +73,8 @@ export default async function (h) {
   h.check('each wide-band chip carries its compact caption',
     paints(wide, '#1 · 320×180') && paints(wide, '#2 · 320×180'),
     h.texts(wide).join(' | '))
-  h.check('the client drew the transcript images AND the two wide-band draft previews',
-    wideImages.length >= 5, JSON.stringify(wideImages.map(node => rect(node))))
+  h.check('the client drew the four transcript images AND the two wide-band draft previews',
+    wideImages.length >= 6, JSON.stringify(wideImages.map(node => rect(node))))
   h.measure('image boxes (900x760)', JSON.stringify(wideImages.map(node => rect(node))))
 
   // ── The CONTROLLED EDITOR must stay present, contained and typable ──
@@ -93,8 +102,8 @@ export default async function (h) {
   await h.resize(700, 760)
   const medium = h.snapshot()
   const mediumImages = imagesOf(medium)
-  h.check('the medium band still paints the three transcript images plus ONE draft preview',
-    mediumImages.length >= 4, JSON.stringify(mediumImages.map(node => rect(node))))
+  h.check('the medium band still paints the four transcript images plus ONE draft preview',
+    mediumImages.length >= 5, JSON.stringify(mediumImages.map(node => rect(node))))
   h.check('the medium-band status still reports the full draft count', paints(medium, 'Draft 3 · '),
     h.texts(medium).join(' | '))
   const mediumComposer = composerOf(medium)

@@ -307,6 +307,7 @@ import { createInstalledAutocompleteProvider } from './tui/interaction/autocompl
 import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, textWithAttachmentMarkers, transcriptSearchMatchKey, transcriptSearchSourceKey, type AssistantDisplayBlock, subCallDisplayStatus, type PresentedFilePresentation, type TranscriptMessage, type TranscriptSearchMatch, type TurnActivity, type WorkflowMemberView, type WorkflowRunStatus, workflowPhaseKey, workflowReadablePhase } from './transcript.ts'
 import type { UserShellPresentationPlacement, UserShellSubmissionState } from './app/submission/user-shell.ts'
 import { eligibleFinalAssistant } from './domain/transcript/final-assistant.ts'
+import { isPtcImageContext } from './domain/transcript/context-semantics.ts'
 import { classifyTranscriptMessage, isSurfacedInteractionTool, isSurfacedContext } from './domain/transcript/semantics.ts'
 import {
   SearchHighlightComponent,
@@ -21414,7 +21415,9 @@ export class TuiApp {
       case 'thinking':
       case 'system':
         entry.text = message.text
-        entry.content = message.kind === 'user' || message.kind === 'assistant' ? message.content : undefined
+        entry.content = message.kind === 'user' || message.kind === 'assistant' || message.kind === 'system'
+          ? message.content
+          : undefined
         entry.displayBlocks = message.kind === 'assistant' ? message.displayBlocks : undefined
         entry.presentationRevision = message.kind === 'assistant' ? assistantPresentationRevision(message) : undefined
         entry.visualPresentationRevision = message.kind === 'assistant' ? assistantVisualPresentationRevision(message) : undefined
@@ -21478,7 +21481,11 @@ export class TuiApp {
       case 'thinking':
         return entry.text !== message.text || entry.running !== message.running
       case 'system':
+        // `content` is the image-bearing PTC Context's structured display
+        // projection: a new row (or a replaced content array) must rebuild it
+        // so stale thumbnails/occurrences never survive a source change.
         return entry.text !== message.text || entry.label !== message.label || entry.summary !== message.summary
+          || entry.content !== message.content
           || entry.senderDisplayName !== this.contextSenderDisplayNameOf(message)
       case 'tool':
         return entry.status !== message.status || entry.args !== message.args
@@ -21973,9 +21980,12 @@ export class TuiApp {
     if (message.kind === 'system') {
       // Form-aware surfaced Context: a known notice/relay/recall form owns a
       // standalone presentation (producer summary, Agent message, Session
-      // recall). Every other injected row — and every non-context system row —
-      // keeps the existing Context-injection / section-marker presentation.
-      if (isSurfacedContext(message)) {
+      // recall). An image-bearing PTC row is the exception: a foreign declared
+      // form must still keep its ordered structured media on the generic
+      // Context path (the specialized rows paint flat text only), and the
+      // malformed/form-bearing row stays independent because carriage already
+      // requires a genuinely absent form.
+      if (isSurfacedContext(message) && !isPtcImageContext(message)) {
         const kind = contextPresentationKind(message)
         const rowOptions = {
           message,
@@ -22011,20 +22021,35 @@ export class TuiApp {
         const label = sanitizedPhysicalLine(message.label)
         if (expanded) {
           row.addChild(new Text(color.textMuted(`${icon}Context injection ${label}`), 0, 0))
-          // Injected content stays dimmed like tool-card bodies: context is
-          // never mistaken for the assistant's actual output. XML-framed
-          // envelopes (the skill loader's `<skill_content>` body, the skill
-          // catalog and workspace instructions' `<system-reminder>` frame)
-          // render their parsed content line by line — never the raw tags
-          // (the same no-XML rule as the read/write/skill tool cards); a
-          // malformed skill envelope renders no body at all. Plain context
-          // text keeps the raw-body behavior.
-          const body = systemContextBody(message.text)
-          if (body === undefined) {
-            row.addChild(new Text(color.textDim(sanitizeDisplayText(message.text)), 0, 0))
+          if (isPtcImageContext(message)) {
+            // The producer's structured content is the ONE display authority
+            // for an image-bearing PTC Context: text and images render in
+            // their original order, the flat text (which carries the same
+            // markers) is never painted beside it, and each image keeps its
+            // real source-occurrence ordinal for the existing /view-image
+            // path. Loader-less hosts record a metadata-only occurrence and
+            // paint the attachment marker without starting a read.
+            row.addChild(this.renderBlockSequence(
+              message.content,
+              text => new Text(color.textDim(sanitizeDisplayText(text)), 0, 0),
+              message,
+            ))
           } else {
-            for (const line of body) {
-              row.addChild(new Text(color.textDim(sanitizeDisplayText(line)), 0, 0))
+            // Injected content stays dimmed like tool-card bodies: context is
+            // never mistaken for the assistant's actual output. XML-framed
+            // envelopes (the skill loader's `<skill_content>` body, the skill
+            // catalog and workspace instructions' `<system-reminder>` frame)
+            // render their parsed content line by line — never the raw tags
+            // (the same no-XML rule as the read/write/skill tool cards); a
+            // malformed skill envelope renders no body at all. Plain context
+            // text keeps the raw-body behavior.
+            const body = systemContextBody(message.text)
+            if (body === undefined) {
+              row.addChild(new Text(color.textDim(sanitizeDisplayText(message.text)), 0, 0))
+            } else {
+              for (const line of body) {
+                row.addChild(new Text(color.textDim(sanitizeDisplayText(line)), 0, 0))
+              }
             }
           }
         } else {

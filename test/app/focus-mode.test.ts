@@ -5582,3 +5582,224 @@ test('a claimed relay separated from an earlier Process by a hard boundary fails
   assert.equal(expanded.filter(block => block.kind === 'message' && block.message === relay).length, 1,
     'expanded Focus restores the relay exactly once in raw order')
 })
+
+// ── Working repeat-tool-reminder Notice follows the Thought ───────────────
+
+/** One durable Working repeat-tool-reminder delivery: next-step insert →
+ * same-turn claim → folded `user/message` (id preserved). */
+function workingRepeatReminderEvents(id: string, text: string, time: number, seq: number): SessionEvent[] {
+  const message = {
+    id: MessageId(id), role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'repeat-tool-reminder', form: 'notice', summary: 'read × 4' },
+  }
+  return [
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [message] }, time, seq),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, time + 0.1, seq + 1),
+    eventAt('user/message', message, time + 0.2, seq + 2),
+  ]
+}
+
+test('a proven Working repeat-tool-reminder follows the collapsed Thought and restores once when expanded', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 6300, 0),
+    eventAt('user/message', {
+      id: MessageId('reminder-prompt'), role: 'user',
+      content: [{ type: 'text', text: 'go' }],
+      source: { kind: 'user' },
+    }, 6301, 1),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'first' } }, 6302, 2),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('reminder-c1'), name: 'read', arguments: '{}' }, 6303, 3),
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('reminder-r1'), role: 'tool', toolCallId: ToolCallId('reminder-c1'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('reminder-c1') },
+      },
+    }, 6304, 4),
+    ...workingRepeatReminderEvents('working-reminder-focus', 'WORKING_REMINDER body', 6305, 5),
+    eventAt('tool/call', { turn: 0, step: 1, callId: ToolCallId('reminder-c2'), name: 'bash', arguments: '{}' }, 6308, 8),
+    eventAt('tool/result', {
+      turn: 0, step: 1,
+      message: {
+        id: MessageId('reminder-r2'), role: 'tool', toolCallId: ToolCallId('reminder-c2'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('reminder-c2') },
+      },
+    }, 6309, 9),
+    eventAt('assistant/message', {
+      turn: 0, step: 2,
+      message: { id: MessageId('reminder-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 6310, 10),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 6311, 11),
+  ])
+  const messages = folder.messages()
+  const reminder = messages.find(message => message.kind === 'system' && message.text === 'WORKING_REMINDER body')
+  assert.ok(reminder !== undefined && reminder.kind === 'system')
+  assert.equal(reminder.contextPresentation?.sameTurnNextStep, true, 'fixture: durable Working provenance')
+  const collapsed = projectTools(messages, folder.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(collapsed), ['user', 'activity', 'assistant'])
+  assert.ok(!collapsed.some(block => block.kind === 'message' && block.message === reminder),
+    'the Working reminder is not a persistent row outside the Thought')
+  const expanded = projectTools(messages, folder.turnActivities(), new Set([0]))
+  assert.equal(expanded.filter(block => block.kind === 'message' && block.message === reminder).length, 1,
+    'expanded Focus restores the reminder exactly once in raw order')
+  const reminderIndex = expanded.findIndex(block => block.kind === 'message' && block.message === reminder)
+  assert.ok(reminderIndex > 0 && reminderIndex < expanded.length - 1,
+    'the reminder keeps its chronology between the two Process rows')
+})
+
+test('an unqualified repeat-tool-reminder stays a visible post-Thought row', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 6400, 0),
+    eventAt('user/message', {
+      id: MessageId('unqualified-reminder-prompt'), role: 'user',
+      content: [{ type: 'text', text: 'go' }],
+      source: { kind: 'user' },
+    }, 6401, 1),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'first' } }, 6402, 2),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('unqualified-reminder-c1'), name: 'read', arguments: '{}' }, 6403, 3),
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('unqualified-reminder-r1'), role: 'tool', toolCallId: ToolCallId('unqualified-reminder-c1'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('unqualified-reminder-c1') },
+      },
+    }, 6404, 4),
+    eventAt('user/message', {
+      id: MessageId('unqualified-reminder'), role: 'user',
+      content: [{ type: 'text', text: 'UNQUALIFIED_REMINDER body' }],
+      source: { kind: 'repeat-tool-reminder', form: 'notice', summary: 'read × 4' },
+    }, 6405, 5),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('unqualified-reminder-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 6406, 6),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 6407, 7),
+  ])
+  const messages = folder.messages()
+  const reminder = messages.find(message => message.kind === 'system')
+  assert.ok(reminder !== undefined && reminder.kind === 'system')
+  assert.equal(reminder.contextPresentation?.sameTurnNextStep, undefined)
+  const collapsed = projectTools(messages, folder.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(collapsed), ['user', 'activity', 'system', 'assistant'],
+    'an unqualified mid-turn reminder stays visible AFTER the Thought')
+  const reminderIndex = collapsed.findIndex(block => block.kind === 'message' && block.message === reminder)
+  const thoughtIndex = collapsed.findIndex(block => block.kind === 'activity')
+  assert.ok(reminderIndex > thoughtIndex, 'the unqualified reminder is visible process feedback')
+})
+
+// ── Working image-bearing PTC Context follows the Thought ─────────────────
+
+const FOCUS_PTC_ATTACHMENT = {
+  attachmentId: 'focus-ptc-att-1',
+  mediaType: 'image/png',
+  bytes: 2048,
+  width: 640,
+  height: 360,
+  name: 'nested.png',
+}
+
+function workingPtcImageEvents(id: string, blocks: readonly unknown[], time: number, seq: number): SessionEvent[] {
+  const message = {
+    id: MessageId(id), role: 'user',
+    content: blocks,
+    source: { kind: 'ptc-mode' },
+  }
+  return [
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [message] }, time, seq),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, time + 0.1, seq + 1),
+    eventAt('user/message', message, time + 0.2, seq + 2),
+  ]
+}
+
+test('a proven Working PTC image Context follows the collapsed Thought and restores once when expanded', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 6500, 0),
+    eventAt('user/message', {
+      id: MessageId('ptc-image-prompt'), role: 'user',
+      content: [{ type: 'text', text: 'go' }],
+      source: { kind: 'user' },
+    }, 6501, 1),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'first' } }, 6502, 2),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('ptc-image-c1'), name: 'read', arguments: '{}' }, 6503, 3),
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('ptc-image-r1'), role: 'tool', toolCallId: ToolCallId('ptc-image-c1'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('ptc-image-c1') },
+      },
+    }, 6504, 4),
+    ...workingPtcImageEvents('working-ptc-image-focus', [
+      { type: 'text', text: 'nested before ' },
+      { type: 'image', attachment: FOCUS_PTC_ATTACHMENT },
+    ], 6505, 5),
+    eventAt('tool/call', { turn: 0, step: 1, callId: ToolCallId('ptc-image-c2'), name: 'bash', arguments: '{}' }, 6509, 9),
+    eventAt('tool/result', {
+      turn: 0, step: 1,
+      message: {
+        id: MessageId('ptc-image-r2'), role: 'tool', toolCallId: ToolCallId('ptc-image-c2'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('ptc-image-c2') },
+      },
+    }, 6510, 10),
+    eventAt('assistant/message', {
+      turn: 0, step: 2,
+      message: { id: MessageId('ptc-image-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 6511, 11),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 6512, 12),
+  ])
+  const messages = folder.messages()
+  const context = messages.find(message => message.kind === 'system' && message.contextPresentation?.sourceKind === 'ptc-mode')
+  assert.ok(context !== undefined && context.kind === 'system')
+  assert.equal(context.contextPresentation?.sameTurnNextStep, true, 'fixture: durable Working provenance')
+  const collapsed = projectTools(messages, folder.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(collapsed), ['user', 'activity', 'assistant'])
+  assert.ok(!collapsed.some(block => block.kind === 'message' && block.message === context),
+    'the Working PTC image Context is not a persistent row outside the Thought')
+  const expanded = projectTools(messages, folder.turnActivities(), new Set([0]))
+  assert.equal(expanded.filter(block => block.kind === 'message' && block.message === context).length, 1,
+    'expanded Focus restores the image Context exactly once in raw order')
+  const contextIndex = expanded.findIndex(block => block.kind === 'message' && block.message === context)
+  assert.ok(contextIndex > 0 && contextIndex < expanded.length - 1,
+    'the image Context keeps its chronology between the two Process rows')
+})
+
+test('an unclaimed PTC image Context stays a visible persistent row in collapsed Focus', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 6600, 0),
+    eventAt('user/message', {
+      id: MessageId('unclaimed-ptc-prompt'), role: 'user',
+      content: [{ type: 'text', text: 'go' }],
+      source: { kind: 'user' },
+    }, 6601, 1),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'first' } }, 6602, 2),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('unclaimed-ptc-c1'), name: 'read', arguments: '{}' }, 6603, 3),
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('unclaimed-ptc-r1'), role: 'tool', toolCallId: ToolCallId('unclaimed-ptc-c1'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('unclaimed-ptc-c1') },
+      },
+    }, 6604, 4),
+    eventAt('user/message', {
+      id: MessageId('unclaimed-ptc-image'), role: 'user',
+      content: [{ type: 'image', attachment: FOCUS_PTC_ATTACHMENT }],
+      source: { kind: 'ptc-mode' },
+    }, 6605, 5),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('unclaimed-ptc-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 6606, 6),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 6607, 7),
+  ])
+  const messages = folder.messages()
+  const context = messages.find(message => message.kind === 'system')
+  assert.ok(context !== undefined && context.kind === 'system')
+  assert.equal(context.contextPresentation?.sameTurnNextStep, undefined)
+  const collapsed = projectTools(messages, folder.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(collapsed), ['user', 'system', 'activity', 'assistant'],
+    'an unclaimed PTC image Context stays visible before the Thought')
+})

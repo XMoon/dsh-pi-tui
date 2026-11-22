@@ -17,11 +17,12 @@
  *
  * A Work span may CARRY a foldable Context row as a structural part without
  * making it Process: the row keeps its Context semantics, its source bytes and
- * its own disclosure, but no longer splits one turn's Activity/Thought. Four
+ * its own disclosure, but no longer splits one turn's Activity/Thought. Six
  * narrow forms qualify: a `form:'snapshot'` singleton / snapshot-only raw
- * cluster, a `tool-jobs` Notice, an `agent-message` relay and a
- * `subagent-settled` Notice, each of the last three with durable same-turn
- * `next-step` delivery evidence. A mixed
+ * cluster, a `tool-jobs` Notice, an `agent-message` relay, a
+ * `subagent-settled` Notice, a `repeat-tool-reminder` Notice and an
+ * image-bearing `ptc-mode` Context, each of the last five with durable
+ * same-turn `next-step` delivery evidence. A mixed
  * `instructions`/`catalog`/`snapshot` cluster and every other Notice/relay form
  * stay independent Context boundaries.
  *
@@ -33,7 +34,7 @@
  */
 
 import { clusterAdjacentAmbientContext, type ContextCluster } from './context-structure.ts'
-import { contextFormOf } from '../../domain/transcript/context-semantics.ts'
+import { contextFormOf, isPtcImageContext } from '../../domain/transcript/context-semantics.ts'
 import { classifyTranscriptMessage, isPostTurnReplayEvidence, isSurfacedContext, isSurfacedInteractionTool } from '../../domain/transcript/semantics.ts'
 import type { TranscriptMessage } from '../../domain/transcript/types.ts'
 
@@ -97,11 +98,18 @@ export function isTranscriptWorkMember(message: TranscriptMessage): message is T
 }
 
 /** Whether one row is a producer-declared Snapshot Context row (the ONE
- * ambient form whose disclosure follows the surrounding Work/Thought). */
+ * ambient form whose disclosure follows the surrounding Work/Thought).
+ *
+ * A `ptc-mode` row that declares ANY form is malformed/foreign (the real PTC
+ * producer omits `form`): it must never borrow the Snapshot carriage through a
+ * forged/legacy `form:'snapshot'`. The structured-media predicate remains
+ * form-neutral, so such rows still render their original blocks standalone. */
 export function isSnapshotContext(
   message: TranscriptMessage,
 ): message is Extract<TranscriptMessage, { kind: 'system' }> & { context: true } {
-  return isSurfacedContext(message) && contextFormOf(message) === 'snapshot'
+  if (!isSurfacedContext(message) || contextFormOf(message) !== 'snapshot') return false
+  const presentation = message.contextPresentation
+  return !(presentation?.sourceKind === 'ptc-mode' && presentation.formDeclared === true)
 }
 
 /** Per-cluster memo of {@link isSnapshotOnlyCluster}: cluster wrappers are
@@ -216,11 +224,62 @@ export function isWorkingSubagentSettledNotice(
 }
 
 /**
+ * Whether one row is a same-turn delivered repeat-tool-reminder Notice
+ * (`repeat-tool-reminder` + `notice`) with durable next-step delivery
+ * evidence.
+ *
+ * This is the narrow sibling of {@link isWorkingToolJobsNotice}: the
+ * producer-declared `sourceKind === 'repeat-tool-reminder'` AND
+ * `form === 'notice'` are both required, plus the fold's presentation-only
+ * `sameTurnNextStep` flag derived from the durable `agent/inbox/spliced`
+ * insert/claim identity chain. The reminder's text (gentle or detailed) and
+ * its `tool × count` summary are deliberately NOT inspected: wording is never
+ * an identity. A `next-turn` wakeup, a foreign/legacy log, a crossed
+ * source/form pair or a missing claim carries no flag and therefore stays an
+ * independent Context boundary.
+ */
+export function isWorkingRepeatToolReminderNotice(
+  message: TranscriptMessage,
+): message is Extract<TranscriptMessage, { kind: 'system' }> & { context: true } {
+  if (!isSurfacedContext(message)) return false
+  const presentation = message.contextPresentation
+  return presentation !== undefined
+    && presentation.sameTurnNextStep === true
+    && presentation.form === 'notice'
+    && presentation.sourceKind === 'repeat-tool-reminder'
+}
+
+/**
+ * Whether one row is a same-turn delivered image-bearing PTC Context with
+ * durable next-step delivery evidence.
+ *
+ * Two INDEPENDENT facts are required: the structured media question answered
+ * by {@link isPtcImageContext} (surfaced Context + `ptc-mode` + a real image
+ * block) and the fold's presentation-only `sameTurnNextStep` flag derived
+ * from the durable `agent/inbox/spliced` insert/claim identity chain. The
+ * producer has no form, so no form is required or invented; a source that
+ * DECLARES a form is foreign/malformed and fails open, as do a text-only
+ * ptc-mode Spill/Reset Context, a foreign image Context, a cross-turn claim
+ * and a missing claim.
+ */
+export function isWorkingPtcImageContext(
+  message: TranscriptMessage,
+): message is Extract<TranscriptMessage, { kind: 'system' }> & { context: true; content: readonly import('@deepseek-ai/dsh-llm').ContentBlock[] } {
+  if (!isPtcImageContext(message)) return false
+  const presentation = message.contextPresentation
+  return presentation !== undefined
+    && presentation.form === undefined
+    && presentation.formDeclared !== true
+    && presentation.sameTurnNextStep === true
+}
+
+/**
  * The complete narrow display-layer eligibility: may this Context row be
  * carried by the same-turn Work/Thought instead of ending it? Only a foldable
  * Snapshot, a proven Working `tool-jobs` Notice, a proven same-turn Agent
- * relay or a proven same-turn subagent settlement Notice qualifies; every
- * other surfaced Context remains a boundary.
+ * relay, a proven same-turn subagent settlement Notice, a proven same-turn
+ * repeat-tool-reminder Notice or a proven same-turn image-bearing PTC Context
+ * qualifies; every other surfaced Context remains a boundary.
  */
 export function isFoldableWorkContext(
   message: TranscriptMessage,
@@ -230,6 +289,8 @@ export function isFoldableWorkContext(
     || isWorkingToolJobsNotice(message)
     || isWorkingAgentRelay(message)
     || isWorkingSubagentSettledNotice(message)
+    || isWorkingRepeatToolReminderNotice(message)
+    || isWorkingPtcImageContext(message)
 }
 
 /**

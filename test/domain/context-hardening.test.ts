@@ -134,6 +134,23 @@ test('unknown, empty and future forms fail open to generic standalone Context', 
   assert.equal(clusterAdjacentAmbientContext([a, b]).clusters.length, 0, 'future forms never cluster')
 })
 
+test('a declared-but-unknown or non-string form preserves its raw presence', () => {
+  for (const [name, source] of [
+    ['unknown string', { kind: 'ptc-mode', form: 'future-custom' }],
+    ['non-string', { kind: 'ptc-mode', form: 42 }],
+  ] as const) {
+    const presentation = contextPresentation(source)
+    assert.equal(presentation.form, undefined, `${name}: not coerced into a known form`)
+    assert.equal(presentation.formDeclared, true, `${name}: raw presence is retained`)
+  }
+  const absent = contextPresentation({ kind: 'ptc-mode' })
+  assert.equal(absent.form, undefined)
+  assert.equal(absent.formDeclared, undefined, 'an omitted form is distinguishable from a declared unknown form')
+  const known = contextPresentation({ kind: 'ptc-mode', form: 'notice' })
+  assert.equal(known.form, 'notice')
+  assert.equal(known.formDeclared, true)
+})
+
 // --- 4.2 legacy recall fallback -------------------------------------------
 
 test('a legacy session-reference stays recall with a missing, matching or unknown form', () => {
@@ -333,13 +350,16 @@ function foldClaimedSource(source: unknown, text: string): TranscriptMessage | u
   return folder.messages().find(candidate => candidate.kind === 'system' && candidate.context === true)
 }
 
-test('the Working-delivery claim qualifies only the three exact source pairs', () => {
+test('the Working-delivery claim qualifies only the four exact source pairs', () => {
   const cases: ReadonlyArray<readonly [string, unknown, boolean]> = [
     ['tool-jobs notice', { kind: 'tool-jobs', form: 'notice', summary: 'job completed' }, true],
     ['agent-message relay', { kind: 'agent-message', form: 'relay', senderSessionId: 'child-1' }, true],
     ['subagent-settled notice', { kind: 'subagent-settled', form: 'notice', summary: 'settled', senderSessionId: 'child-1' }, true],
+    ['repeat-tool-reminder notice', { kind: 'repeat-tool-reminder', form: 'notice', summary: 'read × 4' }, true],
     ['agent-message notice', { kind: 'agent-message', form: 'notice', senderSessionId: 'child-1' }, false],
     ['subagent-settled relay', { kind: 'subagent-settled', form: 'relay', summary: 'settled', senderSessionId: 'child-1' }, false],
+    ['repeat-tool-reminder relay', { kind: 'repeat-tool-reminder', form: 'relay' }, false],
+    ['repeat-tool-reminder without form', { kind: 'repeat-tool-reminder' }, false],
     ['plugin notice', { kind: 'plugin', form: 'notice', plugin: 'foreign' }, false],
     ['plugin relay', { kind: 'plugin', form: 'relay', plugin: 'foreign' }, false],
     ['tool-jobs relay', { kind: 'tool-jobs', form: 'relay' }, false],
@@ -352,4 +372,36 @@ test('the Working-delivery claim qualifies only the three exact source pairs', (
       `${label}: the durable claim is not enough — the source/form pair decides`)
     assert.equal(row.text, `${label} body`, `${label}: the payload is untouched`)
   }
+})
+
+test('a repeat-tool-reminder without a same-turn claim never carries the flag', () => {
+  // No `agent/inbox/spliced` chain at all: the same producer shape stays plain.
+  const plain = new TranscriptFolder()
+  plain.apply([eventAt('turn/start', { turn: 0 }, 1000, 0)])
+  plain.apply([eventAt('user/message', {
+    id: MessageId('plain-reminder'), role: 'user',
+    content: [{ type: 'text', text: 'plain reminder body' }],
+    source: { kind: 'repeat-tool-reminder', form: 'notice', summary: 'read × 4' },
+  }, 1001, 1)])
+  const plainRow = plain.messages().find(message => message.kind === 'system')
+  assert.ok(plainRow !== undefined && plainRow.kind === 'system')
+  assert.equal(plainRow.contextPresentation?.sameTurnNextStep, undefined, 'no claim means no flag')
+
+  // A next-step identity inserted in turn 1 but claimed in turn 2 is cross-turn.
+  const crossMessage = {
+    id: MessageId('cross-reminder'), role: 'user',
+    content: [{ type: 'text', text: 'cross reminder body' }],
+    source: { kind: 'repeat-tool-reminder', form: 'notice', summary: 'read × 4' },
+  }
+  const cross = new TranscriptFolder()
+  cross.apply([eventAt('turn/start', { turn: 1 }, 1000, 0)])
+  cross.apply([eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [crossMessage] }, 1001, 1)])
+  cross.apply([eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, 1002, 2)])
+  cross.apply([eventAt('turn/start', { turn: 2 }, 2000, 3)])
+  cross.apply([eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 2001, 4)])
+  cross.apply([eventAt('user/message', crossMessage, 2002, 5)])
+  const crossRow = cross.messages().find(message => message.kind === 'system')
+  assert.ok(crossRow !== undefined && crossRow.kind === 'system')
+  assert.equal(crossRow.contextPresentation?.sameTurnNextStep, undefined,
+    'a claim carried across turns is not a same-turn Working delivery')
 })
