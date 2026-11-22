@@ -56,6 +56,8 @@ let cleanupPromise
 let finalized = false
 let preserveRoot = false
 let disconnected = false
+/** Once closed, no dispatch or spawn may create a new process. */
+let lifecycleClosed = false
 let queue = Promise.resolve()
 let workerKillBarrierResolve
 let inspectSplitCandidate
@@ -89,6 +91,7 @@ process.on('message', message => {
 
 process.on('disconnect', () => {
   disconnected = true
+  lifecycleClosed = true
   if (workerKillBarrierResolve !== undefined) {
     const resolve = workerKillBarrierResolve
     workerKillBarrierResolve = undefined
@@ -102,9 +105,10 @@ process.on('disconnect', () => {
     process.exit(1)
     return
   }
-  void cleanup('worker-ipc-disconnect').then(result => {
-    process.exit(result.clean ? 0 : 1)
-  })
+  void closeLifecycle('worker-ipc-disconnect').then(
+    result => { process.exit(result.clean ? 0 : 1) },
+    () => { process.exit(1) },
+  )
 })
 
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
@@ -113,9 +117,10 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
       process.exit(1)
       return
     }
-    void cleanup(`supervisor-${signal}`).then(result => {
-      process.exit(result.clean ? 0 : 1)
-    })
+    void closeLifecycle(`supervisor-${signal}`).then(
+      result => { process.exit(result.clean ? 0 : 1) },
+      () => { process.exit(1) },
+    )
   })
 }
 
@@ -125,7 +130,7 @@ process.on('uncaughtException', error => {
     process.exit(1)
     return
   }
-  void cleanup('uncaught-exception').then(() => process.exit(1), () => process.exit(1))
+  void closeLifecycle('uncaught-exception').then(() => process.exit(1), () => process.exit(1))
 })
 
 // Keep the IPC channel and message loop alive until FINALIZE or disconnect.
@@ -464,6 +469,12 @@ function syncQualificationClientReceipt() {
 async function terminateQualificationClient(reason) {
   const handle = activeQualificationClient
   if (handle === undefined) return
+  if (handle.termination !== undefined) return await handle.termination
+  handle.termination = terminateQualificationClientHandle(handle, reason)
+  return await handle.termination
+}
+
+async function terminateQualificationClientHandle(handle, reason) {
   if (!handle.exited) {
     killOwnedHost(handle, 'SIGTERM')
     try {
@@ -948,7 +959,27 @@ function auditClientLedger(reason) {
   }
 }
 
+/** The ONE lifecycle gate: once closing, no new process may start. */
+function assertLifecycleOpen(label) {
+  if (lifecycleClosed || disconnected) {
+    throw new Error(`${label}: the Supervisor lifecycle is closing; no new process may start`)
+  }
+}
+
+/**
+ * Close the ONE Supervisor lifecycle, drain the in-flight request chain with a
+ * bounded wait, then reclaim every owned resource. A request that is still
+ * pending after the bound cannot create anything: every spawn re-checks
+ * `assertLifecycleOpen` synchronously before it runs.
+ */
+async function closeLifecycle(reason) {
+  lifecycleClosed = true
+  await Promise.race([queue.catch(() => undefined), sleep(5_000)])
+  return await cleanup(reason)
+}
+
 async function cleanup(reason) {
+  lifecycleClosed = true
   if (finalized) return { clean: true }
   if (cleanupPromise !== undefined) return await cleanupPromise
   cleanupPromise = (async () => {
@@ -1436,6 +1467,9 @@ async function handleStartHost(message) {
     ...(message.extraEnv ?? {}),
   }
   mkdirSync(env.SPLIT_PROCESS_SCRATCH, { recursive: true, mode: 0o700 })
+  // Same lifecycle gate as the qualification Client: a queued/in-flight
+  // START_HOST must never create a detached Host after cleanup took over.
+  assertLifecycleOpen('START_HOST')
   const child = spawn(process.execPath, [entryRealpath], {
     cwd: scene.installation.base.cwd,
     env,
@@ -1682,10 +1716,34 @@ async function handleUpgradeProbeSideNewClientHostFoundation(message) {
   if (host.buildId === sideNew.buildId) {
     throw new Error('UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION: the active Host already runs the installed side-new build')
   }
+  assertLifecycleOpen('UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION')
+  appendNote('qualification-status-issued', {
+    hostId: host.hostId,
+    generation: host.generation,
+    pid: host.child.pid ?? null,
+  })
   const statusBefore = await queryHostStatus(host)
+  // The status await is a lifecycle TOCTOU point: a Worker disconnect can take
+  // over cleanup while this handler is suspended. Never continue a spawn after
+  // the lifecycle closed.
+  assertLifecycleOpen('UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION after status')
   const identityBefore = safeIdentity(statusBefore.localHost)
   if (identityBefore.hostPid !== host.child.pid) {
     throw new Error('UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION: the Host identity does not name the Supervisor-owned process')
+  }
+  if (process.env.SPLIT_VITEST_UPGRADE_KILL_POINT === 'qualification-pre-spawn') {
+    // Deterministic barrier for the pre-registration window: the Host status
+    // was already received and no qualification Client exists yet.
+    appendNote('qualification-pre-spawn-hold', {
+      hostId: host.hostId,
+      generation: host.generation,
+      pid: host.child.pid ?? null,
+      statusRecordReceived: true,
+    })
+    writeReceipt({ phase: 'QUALIFICATION_PRE_SPAWN_HOLD' })
+    await waitForWorkerKillBarrier()
+    assertLifecycleOpen('UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION after the pre-spawn barrier')
+    throw new Error('UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION: the worker died before the qualification Client was created')
   }
   if (process.env.SPLIT_VITEST_UPGRADE_QUALIFICATION_HOST_DEATH === '1') {
     // Controlled negative control for the reported window: the old Host A
@@ -1701,6 +1759,9 @@ async function handleUpgradeProbeSideNewClientHostFoundation(message) {
     writeReceipt({ phase: 'QUALIFICATION_HOST_DEATH_INJECTED' })
   }
 
+  // Last synchronous gate before the only spawn in this handler: no await may
+  // interleave between this check and the registration below.
+  assertLifecycleOpen('UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION before spawn')
   const sequence = ++qualificationClientSequence
   const clientDir = join(scene.workDir, `qualification-client-${String(sequence)}`)
   mkdirSync(clientDir, { recursive: true, mode: 0o700 })
@@ -1735,6 +1796,7 @@ async function handleUpgradeProbeSideNewClientHostFoundation(message) {
     exited: false,
     exitResult: undefined,
     closedAt: undefined,
+    termination: undefined,
   }
   qualificationClients.push(handle)
   activeQualificationClient = handle
@@ -1964,6 +2026,7 @@ function readHostStarttimeOrUndefined(pid) {
 }
 
 async function dispatch(message) {
+  if (lifecycleClosed) throw new Error('the Supervisor lifecycle is closed; no request may run')
   if (message === null || typeof message !== 'object' || typeof message.type !== 'string') return
   const requestId = typeof message.requestId === 'string' ? message.requestId : undefined
   try {

@@ -36,6 +36,7 @@ const SCENARIOS = new Set([
   'upgrade-worker-kill:reload-child-active',
   'upgrade-worker-kill:reload-child-started-before-report',
   'upgrade-worker-kill:qualification-client-active',
+  'upgrade-worker-kill:qualification-pre-spawn',
   'upgrade-sibling-live',
   'upgrade-live-host-exit',
   'upgrade-qualification-host-death',
@@ -303,6 +304,22 @@ async function main() {
       case 'upgrade-worker-kill:reload-child-started-before-report':
         await runReloadChildActive(scene, 'reload-child-started-before-report')
         return
+      case 'upgrade-worker-kill:qualification-pre-spawn': {
+        await scene.installOldProfile()
+        await scene.installNewSideBySide()
+        const host = await scene.startHost({ source: 'profile', scenario: 'long-turn' })
+        await scene.report('worker-kill-point', {
+          point: 'qualification-pre-spawn',
+          workerPid: process.pid,
+          hostPid: host.ready?.pid,
+          hostPgid: host.pgid,
+        })
+        // The Supervisor receives the Host status, then holds the barrier while
+        // no qualification Client exists. The external probe kills this worker
+        // in that window; the Supervisor cleanup must create nothing afterwards.
+        await scene.probeSideNewClientHostFoundation(host)
+        throw new Error('qualification-pre-spawn: the Supervisor never held the pre-spawn barrier')
+      }
       case 'upgrade-worker-kill:qualification-client-active':
         await runQualificationClientActive(scene)
         return
