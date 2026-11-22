@@ -118,6 +118,9 @@ const VALID_SERVER_NAME = /^[A-Za-z0-9_-]{1,32}$/u
 /** The explicit per-Session capacity policy of this phase. */
 export const MAX_ACP_MCP_SERVERS = 4
 
+/** Explicit bounded budget for one MCP transport startup plus initial tool sync. */
+export const ACP_MCP_STARTUP_TIMEOUT_MS = 20_000
+
 /**
  * The fixed official MCP resource-tool names. A first server in one Agent
  * scope also activates these three shared read-only tools through the
@@ -315,6 +318,8 @@ export async function mountAcpScopedMcp(input: {
   readonly servers: readonly unknown[]
   readonly tools: AcpScopedMcpToolAuthority
   readonly stillCurrent: () => AcpScopedMcpCurrentness
+  /** Request/connection cancellation for a pending startup. */
+  readonly signal?: AbortSignal
 }): Promise<AcpScopedMcpLease> {
   const { agent, session, tools, stillCurrent } = input
   const declarations = parseAcpMcpServers(input.servers)
@@ -336,83 +341,134 @@ export async function mountAcpScopedMcp(input: {
   const serverNames = declarations.map(declaration => declaration.serverName)
   const mounted: Fiber[] = []
   const observedToolNames: string[] = []
+  const requestAborted = (): boolean => input.signal?.aborted === true
   let jobEntered = false
   try {
     return await agent.runMaintenance(async signal => {
       jobEntered = true
-      if (signal.aborted) throw staleLease()
-      if (stillCurrent() !== 'current') throw staleLease()
-      const beforeAgent = definitionsOf(tools, agent)
-      const beforeGlobalNames = new Set(definitionsOf(tools).keys())
-      const previousNames = new Set(beforeAgent.keys())
-      for (const declaration of declarations) {
+      try {
         if (signal.aborted) throw staleLease()
+        if (requestAborted()) throw staleLease()
         if (stillCurrent() !== 'current') throw staleLease()
-        let fiber: Fiber
-        try {
-          const config = mcp.Config({
-            transport: 'stdio',
-            serverName: declaration.serverName,
-            command: declaration.command,
-            args: [...declaration.args],
-            env: declaration.env as Record<string, string>,
-            cwd,
-            failOnStartupError: true,
-            expandTemplates: false,
-            reconnect: { enabled: false, initialDelayMs: 500, maxDelayMs: 500, maxAttempts: 1 },
-          })
-          fiber = agent.ctx.plugin(mcp, config)
-        } catch {
-          throw startFailed()
-        }
-        mounted.push(fiber)
-        try {
-          await fiber.await()
-        } catch {
-          throw startFailed()
-        }
-        const status = mcp.connectionStatusOf(fiber)?.current()
-        if (status?.state !== 'connected') throw startFailed()
-        if (signal.aborted || stillCurrent() !== 'current') throw staleLease()
-        const after = definitionsOf(tools, agent)
-        const changed: string[] = []
-        for (const [name, definition] of after) {
-          if (previousNames.has(name) && beforeAgent.get(name) === definition) continue
-          changed.push(name)
-        }
-        const removed = [...previousNames].filter(name => !after.has(name))
-        const newResourceTools = changed.filter(name => MCP_RESOURCE_TOOL_NAMES.has(name))
-        if (removed.length > 0 || changed.length !== status.toolCount + newResourceTools.length) {
-          // The official ToolService exposes visible definitions but no
-          // per-registration owner; an exact count/name diff plus the fixed
-          // official MCP resource-tool set is the only real-metadata proof
-          // available in this release. Any unprovable concurrent change fails
-          // closed instead of guessing ownership.
-          throw startFailed()
-        }
-        for (const name of changed) {
-          if (beforeGlobalNames.has(name) || beforeAgent.has(name) || observedToolNames.includes(name)) {
-            throw new AcpScopedMcpError('NAME_CONFLICT', 'an MCP tool name collides with an existing visible tool')
+        const beforeAgent = definitionsOf(tools, agent)
+        const beforeGlobalNames = new Set(definitionsOf(tools).keys())
+        const previousNames = new Set(beforeAgent.keys())
+        for (const declaration of declarations) {
+          if (signal.aborted || requestAborted()) throw staleLease()
+          if (stillCurrent() !== 'current') throw staleLease()
+          let fiber: Fiber
+          try {
+            const config = mcp.Config({
+              transport: 'stdio',
+              serverName: declaration.serverName,
+              command: declaration.command,
+              args: [...declaration.args],
+              env: declaration.env as Record<string, string>,
+              cwd,
+              startupTimeoutMs: ACP_MCP_STARTUP_TIMEOUT_MS,
+              failOnStartupError: true,
+              expandTemplates: false,
+              reconnect: { enabled: false, initialDelayMs: 500, maxDelayMs: 500, maxAttempts: 1 },
+            })
+            fiber = agent.ctx.plugin(mcp, config)
+          } catch {
+            throw startFailed()
           }
+          mounted.push(fiber)
+          try {
+            await awaitFiberActivation(fiber, input.signal)
+          } catch (error) {
+            if (error instanceof AcpScopedMcpError) throw error
+            if (requestAborted()) throw staleLease()
+            throw startFailed()
+          }
+          const status = mcp.connectionStatusOf(fiber)?.current()
+          if (status?.state !== 'connected') throw startFailed()
+          if (signal.aborted || requestAborted() || stillCurrent() !== 'current') throw staleLease()
+          const after = definitionsOf(tools, agent)
+          const changed: string[] = []
+          for (const [name, definition] of after) {
+            if (previousNames.has(name) && beforeAgent.get(name) === definition) continue
+            changed.push(name)
+          }
+          const removed = [...previousNames].filter(name => !after.has(name))
+          const newResourceTools = changed.filter(name => MCP_RESOURCE_TOOL_NAMES.has(name))
+          if (removed.length > 0 || changed.length !== status.toolCount + newResourceTools.length) {
+            // The official ToolService exposes visible definitions but no
+            // per-registration owner; an exact count/name diff plus the fixed
+            // official MCP resource-tool set is the only real-metadata proof
+            // available in this release. Any unprovable concurrent change fails
+            // closed instead of guessing ownership.
+            throw startFailed()
+          }
+          for (const name of changed) {
+            if (beforeGlobalNames.has(name) || beforeAgent.has(name) || observedToolNames.includes(name)) {
+              throw new AcpScopedMcpError('NAME_CONFLICT', 'an MCP tool name collides with an existing visible tool')
+            }
+          }
+          observedToolNames.push(...changed)
+          for (const name of changed) previousNames.add(name)
+          for (const [name, definition] of after) beforeAgent.set(name, definition)
         }
-        observedToolNames.push(...changed)
-        for (const name of changed) previousNames.add(name)
-        for (const [name, definition] of after) beforeAgent.set(name, definition)
+        if (signal.aborted || requestAborted() || stillCurrent() !== 'current') throw staleLease()
+        return createLease(agent, session, serverNames, [...mounted], [...observedToolNames], tools)
+      } catch (error) {
+        // Roll back INSIDE the same true idle-maintenance window: the
+        // ReactLoopAgent releases maintenance (and may wake queued TUI work)
+        // before its caller sees the rejection, so any Fiber disposal outside
+        // this callback would expose a rejected server's tools to a live turn.
+        if (mounted.length === 0) {
+          if (error instanceof AcpScopedMcpError) throw error
+          throw startFailed()
+        }
+        const failedLease = createLease(agent, session, serverNames, [...mounted], [...observedToolNames], tools)
+        return await rollbackFibers(mcp, failedLease, error)
       }
-      if (signal.aborted || stillCurrent() !== 'current') throw staleLease()
-      return createLease(agent, session, serverNames, [...mounted], [...observedToolNames], tools)
     })
   } catch (error) {
     if (!jobEntered) {
       if (error instanceof AcpScopedMcpError) throw error
       throw new AcpScopedMcpError('AGENT_BUSY', 'the session agent is busy')
     }
-    if (mounted.length === 0) {
-      if (error instanceof AcpScopedMcpError) throw error
-      throw startFailed()
+    // Every failure that owns a Fiber is already classified and rolled back
+    // inside the maintenance window. The remaining errors are the classified
+    // admission/cleanup result itself.
+    if (error instanceof AcpScopedMcpError) throw error
+    throw startFailed()
+  }
+}
+
+/** Await one Fiber activation, interrupting the pending startup on request abort. */
+async function awaitFiberActivation(fiber: Fiber, signal: AbortSignal | undefined): Promise<void> {
+  if (signal === undefined) {
+    await fiber.await()
+    return
+  }
+  if (signal.aborted) {
+    await fiber.dispose().catch(() => {})
+    throw staleLease()
+  }
+  let aborted = false
+  let removeAbort = (): void => {}
+  const abort = new Promise<never>((_resolve, reject) => {
+    const onAbort = (): void => {
+      aborted = true
+      void fiber.dispose().then(
+        () => { reject(staleLease()) },
+        () => { reject(staleLease()) },
+      )
     }
-    const lease = createLease(agent, session, serverNames, mounted, observedToolNames, tools)
-    return await rollbackFibers(mcp, lease, error)
+    signal.addEventListener('abort', onAbort, { once: true })
+    removeAbort = () => signal.removeEventListener('abort', onAbort)
+  })
+  try {
+    await Promise.race([fiber.await(), abort])
+  } catch (error) {
+    if (aborted || signal.aborted) throw staleLease()
+    throw error
+  } finally {
+    removeAbort()
+    if (aborted) await fiber.dispose().catch(() => {})
   }
 }
 

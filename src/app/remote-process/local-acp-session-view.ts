@@ -177,6 +177,7 @@ export interface HostAcpSessionAccess {
     session: object,
     servers: readonly unknown[],
     stillCurrent: () => AcpScopedMcpCurrentness,
+    signal?: AbortSignal,
   ): Promise<AcpScopedMcpLease | undefined>
   /** Request the ONE singleflight retirement of an exact scoped MCP lease. */
   requestRetireScopedMcp(lease: AcpScopedMcpLease): Promise<void>
@@ -529,6 +530,8 @@ interface ViewClaim {
   detachedWithFence?: boolean
   /** Set synchronously while an async MCP admission crosses this claim. */
   mcpMountPending?: boolean
+  /** Cancels a pending MCP Fiber startup on Close/EOF/Off/Agent disposal. */
+  mcpMountAbort?: AbortController
   /** The ONE exact Agent-scoped MCP lease this claim owns. */
   mcpLease?: AcpScopedMcpLease
   /** Close/EOF/Off committed the retirement intent for `mcpLease`. */
@@ -1128,14 +1131,23 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     signal: AbortSignal | undefined,
   ): Promise<void> {
     claim.mcpMountPending = true
+    const mountAbort = new AbortController()
+    claim.mcpMountAbort = mountAbort
+    const forwardAbort = (): void => { mountAbort.abort() }
+    if (signal !== undefined) {
+      if (signal.aborted) mountAbort.abort()
+      else signal.addEventListener('abort', forwardAbort, { once: true })
+    }
     let lease: AcpScopedMcpLease | undefined
     try {
       lease = await access.mountScopedMcp(agent, agent.session, servers, () => {
-        if (signal?.aborted === true) return 'stale'
+        if (signal?.aborted === true || mountAbort.signal.aborted) return 'stale'
         return this.isMcpAdmissionCurrent(state, op, claim, agent) ? 'current' : 'stale'
-      })
+      }, mountAbort.signal)
     } catch (error) {
       claim.mcpMountPending = false
+      claim.mcpMountAbort = undefined
+      signal?.removeEventListener('abort', forwardAbort)
       if (error instanceof AcpScopedMcpError) {
         if (error.lease !== undefined) {
           claim.mcpLease = error.lease
@@ -1152,6 +1164,8 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       )
     }
     claim.mcpMountPending = false
+    claim.mcpMountAbort = undefined
+    signal?.removeEventListener('abort', forwardAbort)
     if (lease === undefined) {
       throw new LocalAcpViewError(
         'LOCAL_ACP_MCP_START_FAILED',
@@ -1234,6 +1248,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     // late mount result must retire its own lease instead of attaching.
     if (claim.mcpMountPending === true) {
       claim.mcpRetireRequested = true
+      claim.mcpMountAbort?.abort()
       claim.detachedWithFence = true
       state.phase = 'idle'
       state.lastClosedSessionId = sessionId
@@ -2012,6 +2027,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       // View is detached by the disposal and must release its claim once that
       // exact lease is retired, so a later resume can attach the live Session
       // instead of being blocked by a dead Agent's reservation.
+      claim.mcpMountAbort?.abort()
       if (claim.mcpLease !== undefined) {
         claim.detachedWithFence = true
         if (this.access !== undefined) this.requestMcpRetire(claim, this.access)
@@ -2179,6 +2195,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       // and retires its exact lease.
       if (claim.mcpMountPending === true) {
         claim.mcpRetireRequested = true
+        claim.mcpMountAbort?.abort()
         claim.detachedWithFence = true
         continue
       }

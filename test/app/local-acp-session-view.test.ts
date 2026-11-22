@@ -123,6 +123,7 @@ class FakeAccess implements HostAcpSessionAccess {
     session: object,
     servers: readonly unknown[],
     stillCurrent: () => AcpScopedMcpCurrentness,
+    signal?: AbortSignal,
   ) => Promise<AcpScopedMcpLease | undefined> = async () => {
     throw new Error('mountScopedMcp is not configured for this test')
   }
@@ -163,9 +164,10 @@ class FakeAccess implements HostAcpSessionAccess {
     session: object,
     servers: readonly unknown[],
     stillCurrent: () => AcpScopedMcpCurrentness,
+    signal?: AbortSignal,
   ): Promise<AcpScopedMcpLease | undefined> {
     this.mountScopedMcpCalls.push({ sessionId: agent.id, servers })
-    return await this.mountScopedMcpImpl(agent, session, servers, stillCurrent)
+    return await this.mountScopedMcpImpl(agent, session, servers, stillCurrent, signal)
   }
 
   async requestRetireScopedMcp(lease: AcpScopedMcpLease): Promise<void> {

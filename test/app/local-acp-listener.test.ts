@@ -1069,6 +1069,7 @@ function makeFakeAccess(options: {
     session: object,
     servers: readonly unknown[],
     stillCurrent: () => AcpScopedMcpCurrentness,
+    signal?: AbortSignal,
   ) => Promise<AcpScopedMcpLease | undefined>
   readonly requestRetireScopedMcp?: (lease: AcpScopedMcpLease) => Promise<void>
 } = {}): {
@@ -1119,10 +1120,10 @@ function makeFakeAccess(options: {
       currentSession(sessionId: string) {
         return agents.get(sessionId)?.session
       },
-      async mountScopedMcp(agent: LiveAgentViewIdentity, session: object, servers: readonly unknown[], stillCurrent: () => AcpScopedMcpCurrentness) {
+      async mountScopedMcp(agent: LiveAgentViewIdentity, session: object, servers: readonly unknown[], stillCurrent: () => AcpScopedMcpCurrentness, signal?: AbortSignal) {
         return options.mountScopedMcp === undefined
           ? undefined
-          : await options.mountScopedMcp(agent, session, servers, stillCurrent)
+          : await options.mountScopedMcp(agent, session, servers, stillCurrent, signal)
       },
       async requestRetireScopedMcp(lease: AcpScopedMcpLease) {
         if (options.requestRetireScopedMcp !== undefined) await options.requestRetireScopedMcp(lease)

@@ -51,6 +51,8 @@ class TestAgent implements AcpScopedMcpAgent {
   readonly id: string
   readonly session: { id: string; header: { cwd: string } }
   status: 'idle' | 'running' = 'idle'
+  /** Test hook running while the maintenance phase still owns the Agent. */
+  onMaintenanceExit: ((toolNames: string[]) => void) | undefined
   readonly ctx: Context
   private readonly scope: ReturnType<typeof createScope>
   private maintenanceActive = false
@@ -79,6 +81,7 @@ class TestAgent implements AcpScopedMcpAgent {
     try {
       return await task(controller.signal)
     } finally {
+      this.onMaintenanceExit?.(this.ctx.tools.definitions(this).map(definition => definition.name))
       this.maintenanceActive = false
       this.flushIdle()
     }
@@ -111,6 +114,7 @@ function serverDeclaration(options: {
   proof: string
   tag: string
   bootFail?: boolean
+  hangStartup?: boolean
 }): Record<string, unknown> {
   return {
     name: options.name ?? 'b0scope',
@@ -120,6 +124,7 @@ function serverDeclaration(options: {
       { name: 'B0_FIXTURE_PROOF', value: options.proof },
       { name: 'B0_SERVER_TAG', value: options.tag },
       ...(options.bootFail === true ? [{ name: 'B0_BOOT_FAIL', value: '1' }] : []),
+      ...(options.hangStartup === true ? [{ name: 'B0_HANG_STARTUP', value: '1' }] : []),
     ],
   }
 }
@@ -137,6 +142,21 @@ function readProof(path: string): Array<Record<string, unknown>> {
 
 function toolsOf(agent: TestAgent): string[] {
   return agent.ctx.tools.definitions(agent).map(definition => definition.name)
+}
+
+async function waitForProofLine(
+  proof: string,
+  predicate: (line: Record<string, unknown>) => boolean,
+  label: string,
+  timeoutMs = 30_000,
+): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const line = readProof(proof).find(predicate)
+    if (line !== undefined) return line
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+  throw new Error(`timed out waiting for ${label}`)
 }
 
 function namesOfProof(proof: string, kind: string): number[] {
@@ -283,6 +303,8 @@ test('an existing global tool name makes the mount fail closed and leaves the pr
     output: { schema: { type: 'string' }, render: () => [{ type: 'text', text: 'GLOBAL' }] },
     async execute() { return 'GLOBAL' },
   }))
+  let toolsAtMaintenanceExit: string[] = []
+  agent.onMaintenanceExit = names => { toolsAtMaintenanceExit = names }
   const before = toolsOf(agent)
   await assert.rejects(
     mountAcpScopedMcp({
@@ -295,6 +317,8 @@ test('an existing global tool name makes the mount fail closed and leaves the pr
     (error: unknown) => error instanceof AcpScopedMcpError && error.code === 'NAME_CONFLICT',
   )
   assert.deepEqual(toolsOf(agent), before)
+  assert.deepEqual([...toolsAtMaintenanceExit].sort(), [...before].sort(),
+    'a collision rollback must be complete before the maintenance phase releases the Agent')
   // The child really started before the collision was proven; rollback must
   // still terminate it.
   const child = requirePid(namesOfProof(proof, 'server-start').at(-1))
@@ -304,6 +328,8 @@ test('an existing global tool name makes the mount fail closed and leaves the pr
 test('a partially mounted request disposes every earlier server in reverse order and reports START_FAILED', async t => {
   const { agent, temp } = setup(t)
   const proof = `${temp.tempDir('local-acp-mcp-partial-')}/proof.jsonl`
+  let toolsAtMaintenanceExit: string[] = []
+  agent.onMaintenanceExit = names => { toolsAtMaintenanceExit = names }
   await assert.rejects(
     mountAcpScopedMcp({
       agent,
@@ -318,6 +344,8 @@ test('a partially mounted request disposes every earlier server in reverse order
     (error: unknown) => error instanceof AcpScopedMcpError && error.code === 'START_FAILED',
   )
   assert.equal(toolsOf(agent).some(name => name.startsWith('mcp__')), false)
+  assert.equal(toolsAtMaintenanceExit.some(name => name.startsWith('mcp__')), false,
+    'every rejected server tool must be disposed before the maintenance phase can release the Agent')
   const firstChild = requirePid(namesOfProof(proof, 'server-start').at(-1))
   assert.equal(await waitForGone(firstChild), true)
   const bootFail = requirePid(namesOfProof(proof, 'server-boot-fail').at(-1))
@@ -339,4 +367,36 @@ test('a stale View admission spawns no MCP child and leaves no tool', async t =>
   )
   assert.equal(existsSync(proof), false)
   assert.equal(toolsOf(agent).some(name => name.startsWith('mcp__')), false)
+})
+
+test('an aborted pending MCP startup disposes the Fiber before maintenance releases the Agent', async t => {
+  const { agent, temp } = setup(t)
+  const proof = `${temp.tempDir('local-acp-mcp-abort-')}/proof.jsonl`
+  const controller = new AbortController()
+  const mounting = mountAcpScopedMcp({
+    agent,
+    session: agent.session,
+    servers: [serverDeclaration({ proof, tag: 'b0hang', hangStartup: true })],
+    tools: agent.ctx.tools,
+    stillCurrent: () => controller.signal.aborted ? 'stale' : 'current',
+    signal: controller.signal,
+  })
+  await waitForProofLine(proof, line => line.kind === 'startup-hang', 'aborted pending startup')
+  controller.abort()
+  await assert.rejects(mounting, (error: unknown) => error instanceof AcpScopedMcpError && error.code === 'STALE')
+  assert.equal(toolsOf(agent).some(name => name.startsWith('mcp__')), false)
+  const child = requirePid(namesOfProof(proof, 'server-start').at(-1))
+  assert.equal(await waitForGone(child), true)
+  assert.equal(agent.status, 'idle', 'the maintenance phase must be released after abort')
+
+  // The same Agent must accept a normal server after the aborted attempt.
+  const retryProof = `${temp.tempDir('local-acp-mcp-abort-retry-')}/proof.jsonl`
+  const lease = await mountAcpScopedMcp({
+    agent,
+    session: agent.session,
+    servers: [serverDeclaration({ proof: retryProof, tag: 'b0scope' })],
+    tools: agent.ctx.tools,
+    stillCurrent: () => 'current',
+  })
+  await retireAcpScopedMcp(lease)
 })

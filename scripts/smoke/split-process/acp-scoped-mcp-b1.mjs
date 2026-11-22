@@ -163,9 +163,9 @@ async function openSdkClient(endpoint) {
       return await deadline(connection.agent.request(method, params), `ACP ${method}`)
     },
     async close() {
-      connection.close()
+      try { await connection.close() } catch { /* already closed by the peer */ }
       socket.destroy()
-      await deadline(Promise.all([connection.closed, socketClosed]), 'ACP connection close', 30_000)
+      await deadline(Promise.allSettled([connection.closed, socketClosed]), 'ACP connection close', 30_000).catch(() => {})
     },
   }
 }
@@ -458,6 +458,7 @@ export async function runAcpScopedMcpB1(context) {
     const retryBusy = await acpBusy.client.request(acp.methods.agent.session.resume, { sessionId: sessionB, cwd: hostCwd, mcpServers: [mcpDeclaration()] })
     assert(retryBusy?.sessionId === undefined || retryBusy.sessionId === sessionB, `Q05b: retry resume must succeed: ${JSON.stringify(retryBusy)}`)
     await acpBusy.client.request(acp.methods.agent.session.close, { sessionId: sessionB })
+    await waitToolAbsent(sessionB, 'Q05b after close')
     await closeAcp(acpBusy.client)
 
     // ── B1-04: a real global tool with the same public name makes the next
@@ -554,6 +555,35 @@ export async function runAcpScopedMcpB1(context) {
     assert(JSON.stringify(await close7) === '{}', 'Q07b: close must detach with a real terminal')
     await waitToolAbsent(sessionA, 'Q07b after ACP prompt close')
     await closeAcp(acpHold7.client)
+
+    // ── B1-13 bounded startup: a real nonresponsive stdio child is disposed
+    //     when its ACP connection disappears, and the original TUI Agent
+    //     remains usable instead of being held in maintenance.
+    const acpHang = await openAcp('Q07c')
+    const hangingResume = acpHang.client.request(acp.methods.agent.session.resume, {
+      sessionId: sessionA, cwd: hostCwd, mcpServers: [mcpDeclaration('b1hang', { B0_HANG_STARTUP: '1' }, 'b1hang')],
+    }).catch(() => {})
+    await waitForProof(line => line.kind === 'startup-hang' && line.tag === 'b1hang', proofPath, 'Q07c startup hang')
+    const hangStart = readProof(proofPath).filter(line => line.kind === 'startup-hang' && line.tag === 'b1hang').at(-1)
+    assert(hangStart !== undefined && typeof hangStart.pid === 'number' && alivePid(hangStart.pid), 'Q07c: the nonresponsive MCP child must be alive before disconnect')
+    await acpHang.client.close()
+    await hangingResume.catch(() => {})
+    assert(await waitForGone(hangStart.pid), 'Q07c: disconnect must dispose the pending MCP child')
+    await waitToolAbsent(sessionA, 'Q07c after aborted startup')
+    const acpAfterHang = await openAcp('Q07c retry')
+    const retryStarted = Date.now()
+    for (;;) {
+      try {
+        await acpAfterHang.client.request(acp.methods.agent.session.resume, { sessionId: sessionA, cwd: hostCwd })
+        break
+      } catch (error) {
+        if (error?.data?.code !== 'LOCAL_ACP_VIEW_ALREADY_ATTACHED') throw error
+        if (Date.now() - retryStarted > 30_000) throw error
+        await sleep(50)
+      }
+    }
+    await acpAfterHang.client.request(acp.methods.agent.session.close, { sessionId: sessionA })
+    await closeAcp(acpAfterHang.client)
 
     // ── B1-08: a TUI tool using the same MCP lease stays alive across an ACP
     //     close; the View detaches, then retires automatically at the real
@@ -660,7 +690,9 @@ export async function runAcpScopedMcpB1(context) {
     }
   } finally {
     try { writeFileSync(holdRelease, 'released\n', { mode: 0o600 }) } catch { /* best effort */ }
-    for (const client of acpClients) await client.close().catch(() => {})
+    for (const client of acpClients) {
+      try { await client.close() } catch { /* already gone */ }
+    }
     for (const process of peers) {
       if (process.exited) continue
       try { await process.shutdown() } catch { /* runner backstop */ }

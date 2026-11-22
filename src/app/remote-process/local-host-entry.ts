@@ -705,7 +705,7 @@ export function createHostAcpSessionAccess(context: import('@deepseek-ai/cordis'
     resolveAgent: sessionId => sessionController.resolveAgent(sessionId),
     currentAgent: sessionId => agents.get(sessionId),
     currentSession: sessionId => sessions.get(sessionId),
-    mountScopedMcp: async (agent, session, servers, stillCurrent) => {
+    mountScopedMcp: async (agent, session, servers, stillCurrent, signal) => {
       // The exact Host identities are re-verified synchronously before the
       // Agent-scoped maintenance window can mount any child process.
       const liveAgent = agents.get(agent.id)
@@ -722,6 +722,7 @@ export function createHostAcpSessionAccess(context: import('@deepseek-ai/cordis'
         servers,
         tools: authority,
         stillCurrent,
+        signal,
       })
     },
     requestRetireScopedMcp: async lease => await retireAcpScopedMcp(lease),
