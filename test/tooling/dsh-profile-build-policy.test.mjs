@@ -1,8 +1,9 @@
 /**
  * The isolated-profile build-script policy.
  *
- * `koffi` is this package's one native runtime dependency. pnpm 12 hard-fails
- * an UNDECIDED dependency build script (`ERR_PNPM_IGNORED_BUILDS`), so every
+ * `koffi` is the native dependency owned by the DSH subprocess provider and
+ * may appear through the DSH installation closure. pnpm 12 hard-fails an
+ * UNDECIDED dependency build script (`ERR_PNPM_IGNORED_BUILDS`), so every
  * isolated qualification profile must record the SAME explicit decision the
  * repository root already makes: deny the build script, use the prebuilt
  * platform binaries. The seed must never override a decision the profile owner

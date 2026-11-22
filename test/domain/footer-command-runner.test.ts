@@ -7,18 +7,22 @@
 
 import assert from 'node:assert/strict'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
-import { afterEach, test } from 'node:test'
+import { afterEach, before, test, type TestContext } from 'node:test'
 import { readFileSync } from 'node:fs'
 import { getEventListeners } from 'node:events'
 import { join } from 'node:path'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { FooterCommandRunner, KILL_GRACE_MS, type KernelIdentitySource } from '../../src/tui/footer/command-runner.ts'
 import { listKernelGroupMembers, readKernelProcess, sameKernelProcess, type KernelObservation } from '../../src/runtime/native-process/identity.ts'
+import { installDarwinKoffiFixture } from '../support/darwin-koffi-fixture.ts'
 import type { FooterCommandConfig } from '../../src/domain/footer/command-config.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { emptyStatusSnapshot } from '../../src/domain/status/types.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
+before(t => {
+  installDarwinKoffiFixture(t as TestContext)
+})
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork

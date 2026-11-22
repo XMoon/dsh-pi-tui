@@ -43,6 +43,13 @@ test('the root package has ONE lifecycle-free pack entry and no implicit hooks',
   assert.equal(scripts['smoke:release'], 'node scripts/qualify-tarball.mjs')
 })
 
+test('the published dependency graph owns no Koffi copy', () => {
+  assert.equal(PACKAGE.dependencies.koffi, undefined, 'TUI production dependencies must not carry koffi')
+  assert.equal(PACKAGE.optionalDependencies?.koffi, undefined, 'koffi must not be an optional production dependency')
+  assert.equal(PACKAGE.peerDependencies.koffi, undefined, 'koffi must not be pushed to the Profile as a peer')
+  assert.equal(PACKAGE.devDependencies.koffi, '3.1.1', 'the dev/test copy must stay on the DSH-owned 3.1.1 line')
+})
+
 test('pack:release is the explicit full order and never delegates to a second builder', () => {
   assertOrder(PACKAGE.scripts['pack:release'], [
     'pnpm clean',
