@@ -50,6 +50,13 @@ function assert(condition, message) {
   if (!condition) throw new SplitSmokeAssertionError(message)
 }
 
+/** The plain text of one durable/inbox message (bounded, never a payload dump). */
+function textOf(message) {
+  return (message?.content ?? [])
+    .map(part => (part?.type === 'text' && typeof part.text === 'string' ? part.text : ''))
+    .join('')
+}
+
 /** Parse the recorded model-request prompt facts (one JSON row per request). */
 function readRows(path) {
   const text = readFileSync(path, 'utf8').trim()
@@ -85,6 +92,11 @@ export async function runPromptSessionFocusTurnParity(context) {
   }
   const assertRow = (row, expected, label) => {
     for (const [key, value] of Object.entries(expected)) {
+      if (key === 'userText') {
+        assert(typeof row.userText === 'string' && row.userText.includes(value),
+          `${label}: prompt fact userText was ${JSON.stringify(row.userText)}, expected to include ${JSON.stringify(value)}`)
+        continue
+      }
       assert(row[key] === value,
         `${label}: prompt fact ${key} was ${JSON.stringify(row[key])}, expected ${JSON.stringify(value)}`)
     }
@@ -129,9 +141,30 @@ export async function runPromptSessionFocusTurnParity(context) {
 
     // B queues its own message while the Turn runs, then steers the queued
     // occurrence into the running Turn (the official empty-draft Ctrl+S).
+    const firstQueueStart = (hostSessionEvents(dshHome, sessionX) ?? []).length
     clientB.send('pp-b-queued\r')
     await clientB.waitForScreen('pp-b-queued', 'PP B queued message painted', 120_000)
+    const firstQueuedEvent = await waitForHostSessionEventAfter(dshHome, sessionX, firstQueueStart,
+      event => event.type === 'agent/inbox/spliced'
+        && event.data?.target === 'next-turn'
+        && (event.data.inserted ?? []).some(message => textOf(message) === 'pp-b-queued'),
+      'PP B queued the first steered occurrence', 120_000)
+    const firstQueuedItem = (firstQueuedEvent.data.inserted ?? []).find(message => textOf(message) === 'pp-b-queued')
+    assert(typeof firstQueuedItem?.id === 'string' && firstQueuedItem.id !== '',
+      'PP the first queued occurrence carries no Host identity')
+    const firstSteerStart = (hostSessionEvents(dshHome, sessionX) ?? []).length
     clientB.send('\x13')
+    await waitForHostSessionEventAfter(dshHome, sessionX, firstSteerStart,
+      event => event.type === 'agent/inbox/spliced'
+        && event.data?.target === 'next-turn'
+        && event.data?.removedCount === 1
+        && (event.data.inserted ?? []).length === 0,
+      'PP Ctrl+S removed the first queued occurrence', 120_000)
+    await waitForHostSessionEventAfter(dshHome, sessionX, firstSteerStart,
+      event => event.type === 'agent/inbox/spliced'
+        && event.data?.target === 'next-step'
+        && (event.data.inserted ?? []).some(message => message?.id === firstQueuedItem.id),
+      'PP Ctrl+S steered the first Host occurrence identity', 120_000)
 
     // The FIRST model request of the held Turn: A is a Focus viewer and B is
     // Full — any current Focus viewer wins (the shared-Profile and

@@ -312,6 +312,8 @@ function recordPromptFacts(options) {
     .filter(message => message?.role === 'system')
     .map(message => message.content)]
     .map(textOf).join('\\n')
+  const userText = [...(options.messages ?? [])].reverse()
+    .find(message => message?.role === 'user')?.content
   const allText = [options.system, ...(options.messages ?? [])
     .map(message => message.content)]
     .map(textOf).join('\\n')
@@ -330,6 +332,7 @@ function recordPromptFacts(options) {
     // M6 PR-C C4: the model-facing TUI prompt-section facts (the parity sink).
     focusSection: systemText.includes('# Focus mode'),
     progressSection: systemText.includes('# Progress updates:'),
+    userText: textOf(userText).slice(-400),
     responseSection: systemText.includes('# Response style:'),
     gitSection: systemText.includes('# Git attribution'),
   }) + '\n', { mode: 0o600 })
