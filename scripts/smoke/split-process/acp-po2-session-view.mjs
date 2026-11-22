@@ -20,12 +20,12 @@
  */
 
 import { createRequire } from 'node:module'
-import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs'
 import { connect } from 'node:net'
 import { dirname, join } from 'node:path'
 
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
-import { seatFree, waitForSurfaceStatus } from '../../lib/split-smoke-processes.mjs'
+import { seatFree, waitForCondition, waitForSurfaceStatus } from '../../lib/split-smoke-processes.mjs'
 import {
   hostAssistantHasText,
   hostSessionEvents,
@@ -44,12 +44,66 @@ function sleep(ms) {
   return new Promise(resolveSleep => setTimeout(resolveSleep, ms))
 }
 
+/** The C1 offline fixture provider and its two advertised routes. */
+const MODEL_PROVIDER = 'c1-qualification'
+const MODEL_A = 'c1'
+const MODEL_B = 'c1-model-b'
+
+/** The opaque ACP model select value of one exact route. */
+function modelValue(modelId) {
+  return JSON.stringify([MODEL_PROVIDER, modelId])
+}
+
+async function waitForScreenText(client, text, label, timeoutMs = 120_000) {
+  try {
+    await waitForCondition(async () => (await client.viewport()).join('\n').includes(text), label, timeoutMs)
+  } catch (error) {
+    throw new SplitSmokeAssertionError(`${label}: the ${JSON.stringify(text)} surface never appeared`, { cause: error })
+  }
+}
+
+async function waitForScreenGone(client, text, label, timeoutMs = 120_000) {
+  try {
+    await waitForCondition(async () => !(await client.viewport()).join('\n').includes(text), label, timeoutMs)
+  } catch (error) {
+    throw new SplitSmokeAssertionError(`${label}: the ${JSON.stringify(text)} surface never closed`, { cause: error })
+  }
+}
+
+/** Choose one model for the CURRENT live Session through the real `/model` panel. */
+async function selectModelInTui(client, modelId, label, filteredOutText) {
+  client.send('\x15')
+  await sleep(150)
+  client.send('/model\r')
+  await waitForScreenText(client, 'Models', `${label} model panel`)
+  await waitForCondition(async () => {
+    const frame = (await client.viewport()).join('\n')
+    return frame.includes('Models') && !frame.includes('Loading models')
+  }, `${label} model directory`, 120_000)
+  client.send(modelId)
+  await waitForCondition(async () => {
+    const frame = (await client.viewport()).join('\n')
+    return frame.includes('Models') && !frame.includes(filteredOutText)
+  }, `${label} model filter`, 120_000)
+  await waitForScreenText(client, modelId, `${label} filtered model`)
+  client.send('\r')
+  await waitForScreenGone(client, 'Models', `${label} picker commit`)
+}
+
+/** The current `model` config option of one ACP configOptions array. */
+function modelConfigOption(configOptions) {
+  const option = configOptions?.find(candidate => candidate.id === 'model')
+  assert(option !== undefined, 'the ACP response must carry the standard model config option')
+  return option
+}
+
 /** One raw NDJSON JSON-RPC client over a real UDS connection. */
 class AcpRawClient {
   constructor(socket) {
     this.socket = socket
     this.buffer = ''
     this.queue = []
+    this.notifications = []
     this.waiter = undefined
     socket.setEncoding('utf8')
     socket.on('data', chunk => {
@@ -103,6 +157,22 @@ class AcpRawClient {
     return await this.next()
   }
 
+  /** Send one request and return ITS response, retaining interleaved notifications in order. */
+  async request(id, method, params, timeoutMs = 30_000) {
+    this.send({ jsonrpc: '2.0', id, method, params })
+    for (;;) {
+      const message = await this.next(timeoutMs)
+      if (message?.id === id) return message
+      this.notifications.push(message)
+    }
+  }
+
+  /** The next notification already retained by a request, or a fresh inbound message. */
+  nextNotification(timeoutMs = 30_000) {
+    if (this.notifications.length > 0) return Promise.resolve(this.notifications.shift())
+    return this.next(timeoutMs)
+  }
+
   close() {
     this.socket.destroy()
   }
@@ -144,8 +214,7 @@ async function openAcpClient(scopeDir) {
 }
 
 function sendRequest(client, id, method, params) {
-  client.send({ jsonrpc: '2.0', id, method, params })
-  return client.next(30_000)
+  return client.request(id, method, params)
 }
 
 async function waitUntil(predicate, label, timeoutMs = 20_000) {
@@ -291,6 +360,7 @@ export async function runAcpPo2SessionView(context) {
     writeFileSync(longTurnBarrier, 'release\n', { mode: 0o600 })
     const started = await startC1Host('long-turn', 'po2 A host', {
       C1_HOLD_LONG_TURN: longTurnBarrier,
+      C1_EXTRA_MODEL: MODEL_B,
       DSH_PI_TUI_ACP_MAX_CONNECTIONS: '16',
     })
     host = started.host
@@ -473,6 +543,7 @@ export async function runAcpPo2SessionView(context) {
     await awaitSceneSeatFree()
     const restarted = await startC1Host('long-turn', 'po2 cold host', {
       C1_HOLD_LONG_TURN: longTurnBarrier,
+      C1_EXTRA_MODEL: MODEL_B,
       DSH_PI_TUI_ACP_MAX_CONNECTIONS: '16',
     })
     host = restarted.host
@@ -508,6 +579,140 @@ export async function runAcpPo2SessionView(context) {
       'H2: a real TUI opened persisted Session A on the cold Host')
     await exitC1Client(tuiColdA, 'H2 cold tuiA')
     await assertSameHost(identityCold, 'H2 cold Host identity')
+
+    // ── Model-S1) ACP-only Session model configuration over the SAME cold Host.
+    //    The C1 fixture advertises its base route `c1` plus the extra
+    //    `c1-model-b`; the real Profile default remains `c1`.
+    const { client: tuiModelA } = await startC1Client('po2 Model-S1 tuiA', { SPLIT_PROCESS_CLIENT_SESSION: sessionA })
+    if (Number.isInteger(tuiModelA.child?.pid)) tuiPids.push({ role: 'tui-model-A', pid: tuiModelA.child.pid })
+    await waitForSurfaceStatus(tuiModelA, record => record.sessionOpen === true
+      && record.openSessionId === sessionA && record.surfaceMounted === true && record.transport === 'connected',
+      'Model-S1: a real TUI opened Session A')
+
+    const { client: connModel } = await openInitialized(scopeDir, 'Model-S1 resume A')
+    const resumeModel = await sendRequest(connModel, 2, 'session/resume', { sessionId: sessionA, cwd: hostCwd })
+    assert(isObjectResult(resumeModel),
+      `Model-S1: session/resume(A) must return {} (got ${JSON.stringify(resumeModel?.error ?? resumeModel?.result)})`)
+    const initialModelOption = modelConfigOption(resumeModel.result?.configOptions)
+    assert(initialModelOption.currentValue === modelValue(MODEL_A),
+      `Model-S1: current model must be the Session route A (got ${String(initialModelOption.currentValue)})`)
+    const initialModels = (initialModelOption.options ?? []).flatMap(group => group.options ?? [])
+    assert(initialModels.some(option => option.value === modelValue(MODEL_B)),
+      'Model-S1: the catalog must advertise the extra fixture route B')
+
+    // The standard SDK v1 set request writes only the Session selection; the
+    // durable `model/selection` record is the Session commit fact.
+    const beforeModelSet = (hostSessionEvents(dshHome, sessionA) ?? []).length
+    const setB = await sendRequest(connModel, 3, 'session/set_config_option', {
+      sessionId: sessionA, configId: 'model', value: modelValue(MODEL_B),
+    })
+    assert(setB?.error === undefined,
+      `Model-S1: set_config_option(model B) failed: ${JSON.stringify(setB?.error ?? setB?.result)}`)
+    assert(modelConfigOption(setB.result?.configOptions).currentValue === modelValue(MODEL_B),
+      'Model-S1: the success response must carry the complete new option state')
+    // The committed model/selection event is also delivered as the standard
+    // full-option update on this same attached View.
+    const selfUpdate = await connModel.nextNotification(30_000)
+    assert(selfUpdate?.method === 'session/update'
+      && selfUpdate?.params?.update?.sessionUpdate === 'config_option_update',
+      'Model-S1: the committed ACP write must produce the standard config update')
+    assert(modelConfigOption(selfUpdate.params.update.configOptions).currentValue === modelValue(MODEL_B),
+      'Model-S1: the self config update must carry B')
+    await waitForHostSessionEventAfter(dshHome, sessionA, beforeModelSet,
+      event => event.type === 'model/selection' && event.data?.provider === MODEL_PROVIDER && event.data?.model === MODEL_B,
+      'Model-S1: durable model/selection B')
+
+    // A real TUI turn on the SAME Session must route to B (durable header).
+    const beforeModelTurn = (hostSessionEvents(dshHome, sessionA) ?? []).length
+    tuiModelA.send('model-s1 turn on model B\r')
+    await waitForHostSessionEventAfter(dshHome, sessionA, beforeModelTurn, event => event.type === 'turn/end',
+      'Model-S1: TUI turn/end on B', 120_000)
+    const modelTurnEvents = hostSessionEvents(dshHome, sessionA) ?? []
+    const modelTurnHeader = modelTurnEvents.slice(beforeModelTurn).find(event => event.type === 'request/header')
+    assert(modelTurnHeader?.data?.header?.config?.provider === MODEL_PROVIDER
+      && modelTurnHeader?.data?.header?.config?.model === MODEL_B,
+      `Model-S1: the real TUI turn must route to B (got ${JSON.stringify(modelTurnHeader?.data?.header?.config ?? null)})`)
+
+    // A repeated resume on a NEW connection reads the same durable Session value.
+    const closeModel = await sendRequest(connModel, 4, 'session/close', { sessionId: sessionA })
+    assert(isObjectResult(closeModel), 'Model-S1: closing the ACP View must return {}')
+    connModel.close()
+    await connModel.closed
+    const { client: connModelResume } = await openInitialized(scopeDir, 'Model-S1 repeat resume A')
+    const repeated = await sendRequest(connModelResume, 2, 'session/resume', { sessionId: sessionA, cwd: hostCwd })
+    assert(isObjectResult(repeated), 'Model-S1: second resume must attach')
+    assert(modelConfigOption(repeated.result?.configOptions).currentValue === modelValue(MODEL_B),
+      'Model-S1: a new resume must read B from the durable Session, not the Profile default')
+
+    // A brand-new Session C must still be created from the untouched Profile
+    // default A; it also runs one real TUI turn so the route is durable.
+    const { client: connC } = await openInitialized(scopeDir, 'Model-S1 new Session C')
+    const createdC = await sendRequest(connC, 2, 'session/new', { cwd: hostCwdNew, mcpServers: [] })
+    assert(createdC?.error === undefined && typeof createdC?.result?.sessionId === 'string',
+      `Model-S1: session/new C failed: ${JSON.stringify(createdC?.error ?? createdC?.result)}`)
+    const sessionC = createdC.result.sessionId
+    assert(sessionC !== sessionA && sessionC !== sessionB, 'Model-S1: Session C must be distinct')
+    assert(modelConfigOption(createdC.result?.configOptions).currentValue === modelValue(MODEL_A),
+      'Model-S1: Session C must start from the original Profile default A')
+    connC.close()
+    await connC.closed
+
+    const { client: tuiC } = await startC1Client('po2 Model-S1 tuiC', { SPLIT_PROCESS_CLIENT_SESSION: sessionC })
+    if (Number.isInteger(tuiC.child?.pid)) tuiPids.push({ role: 'tui-model-C', pid: tuiC.child.pid })
+    await waitForSurfaceStatus(tuiC, record => record.sessionOpen === true
+      && record.openSessionId === sessionC && record.surfaceMounted === true && record.transport === 'connected',
+      'Model-S1: a real TUI opened Session C')
+    const beforeCTurn = (hostSessionEvents(dshHome, sessionC) ?? []).length
+    tuiC.send('model-s1 default A turn\r')
+    await waitForHostSessionEventAfter(dshHome, sessionC, beforeCTurn, event => event.type === 'turn/end',
+      'Model-S1: TUI turn/end on C', 120_000)
+    const cTurnEvents = hostSessionEvents(dshHome, sessionC) ?? []
+    const cTurnHeader = cTurnEvents.slice(beforeCTurn).find(event => event.type === 'request/header')
+    assert(cTurnHeader?.data?.header?.config?.model === MODEL_A,
+      `Model-S1: Session C must run on the Profile default A (got ${JSON.stringify(cTurnHeader?.data?.header?.config ?? null)})`)
+    await exitC1Client(tuiC, 'Model-S1 tuiC')
+
+    // A real TUI `/model` change on Session A must reach the attached ACP View
+    // as one full `config_option_update`.
+    await selectModelInTui(tuiModelA, MODEL_A, 'Model-S1 TUI model change A', MODEL_B)
+    const configUpdate = (await connModelResume.nextNotification(30_000))
+    assert(configUpdate?.method === 'session/update', 'Model-S1: the ACP connection must receive a config notification')
+    assert(configUpdate?.params?.sessionId === sessionA, 'Model-S1: the config notification must be for Session A')
+    assert(configUpdate?.params?.update?.sessionUpdate === 'config_option_update',
+      'Model-S1: the notification must be config_option_update')
+    assert(modelConfigOption(configUpdate.params.update.configOptions).currentValue === modelValue(MODEL_A),
+      'Model-S1: the TUI change must be reflected as A')
+
+    // While a REAL TUI turn owns the Agent, an ACP model write must fail BUSY
+    // without cancelling the turn. The long-turn barrier is removed for this
+    // one prompt and recreated to release it.
+    unlinkSync(longTurnBarrier)
+    const beforeBusyTurn = (hostSessionEvents(dshHome, sessionA) ?? []).length
+    tuiModelA.send('model-s1 held busy turn\r')
+    await waitForHostSessionEventAfter(dshHome, sessionA, beforeBusyTurn,
+      event => event.type === 'user/message' && JSON.stringify(event).includes('model-s1 held busy turn'),
+      'Model-S1: the held TUI prompt is durable')
+    const beforeBusySet = (hostSessionEvents(dshHome, sessionA) ?? []).length
+    const busySet = await sendRequest(connModelResume, 30, 'session/set_config_option', {
+      sessionId: sessionA, configId: 'model', value: modelValue(MODEL_B),
+    })
+    assert(busySet?.error?.code === -32046,
+      `Model-S1: an active Agent must reject with -32046 (got ${JSON.stringify(busySet?.error ?? busySet?.result)})`)
+    assert(busySet?.error?.data?.code === 'LOCAL_ACP_MODEL_AGENT_BUSY',
+      `Model-S1: the busy rejection must name LOCAL_ACP_MODEL_AGENT_BUSY (got ${JSON.stringify(busySet?.error?.data)})`)
+    const busyEvents = hostSessionEvents(dshHome, sessionA) ?? []
+    assert(busyEvents.slice(beforeBusySet).every(event => event.type !== 'model/selection'),
+      'Model-S1: the busy rejection must not append a model/selection event')
+    writeFileSync(longTurnBarrier, 'release\n', { mode: 0o600 })
+    await waitForHostSessionEventAfter(dshHome, sessionA, beforeBusyTurn, event => event.type === 'turn/end',
+      'Model-S1: the held turn must complete after release', 120_000)
+    const busyTurnEvents = hostSessionEvents(dshHome, sessionA) ?? []
+    assert(hostAssistantHasText(busyTurnEvents.slice(beforeBusyTurn), 'long-turn answer'),
+      'Model-S1: the held TUI turn must complete with its real answer')
+    tuiModelA.send('\x15')
+    await exitC1Client(tuiModelA, 'Model-S1 tuiA')
+    connModelResume.close()
+    await connModelResume.closed
 
     // ── I-M) Every negative is isolated on its own connection.
     // I) uninitialized session/resume.

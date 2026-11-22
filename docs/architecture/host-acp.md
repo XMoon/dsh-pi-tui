@@ -117,7 +117,10 @@ profile's independent `autoStart` preference enables it (see below).
   `dsh-pi-tui`, `agentInfo.version` the installed `@xmoon76/dsh-pi-tui` bundle
   version — never the DSH engine version). When the Host installs the shared
   Session View it advertises `sessionCapabilities: { resume: {}, close: {} }`
-  and never `loadSession`, `session/list`, config options or MCP capability.
+  and never `loadSession`, `session/list` or MCP capability. It does NOT
+  advertise the optional `sessionCapabilities.options` capability: the standard
+  config-option response/notification fields below are ordinary ACP v1 fields
+  and do not require that negotiation.
   Inline image PROMPT capability is advertised only on that connection when the
   Host's boot-frozen Attachment Store and exact configured default model route
   explicitly declare image support; unknown services, route metadata or
@@ -257,6 +260,32 @@ profile's independent `autoStart` preference enables it (see below).
       socket close/error ends that drain wait immediately and keeps its real
       errno as the diagnostic. Every one of these affects ONLY that connection
       and never the Host, an Agent, a Session or a sibling connection.
+  - **Session-only model configuration (ACP v1 subset).** An attached View
+    exposes exactly two standard select options: `model` (`category:'model'`,
+    value `JSON.stringify([providerId, modelId])`) and, only when the exact
+    attached model declares non-empty official reasoning metadata,
+    `thought_level` (`category:'thought_level'`, value
+    `JSON.stringify(['default'])` or `JSON.stringify(['effort', effortId])`).
+    Candidates come from the live Host `sessionController.modelCatalog()`
+    provider groups and the current value comes from the exact attached
+    Agent's `model.current()`, never from a client value, the catalog default
+    or a TUI projection. A current route or explicit effort that the live
+    catalog no longer advertises is presented as a non-submittable
+    `Current (unavailable)` placeholder so the selector still shows the truth.
+    `session/new` and `session/resume` may include the complete optional
+    `configOptions` after the View attached; a catalog read failure omits only
+    that optional display and keeps the committed Session/View success, logging
+    one fixed `LOCAL_ACP_MODEL_CATALOG_UNAVAILABLE` code. `session/set_config_option`
+    is admitted only on the exact current View claim with no unsettled prompt
+    flight, and only when the exact Agent's true idle phase can be taken through
+    the official `runMaintenance`; all catalog and LLM-capability reads happen
+    before that maintenance window. The write is ONLY the official Session
+    `model/selection` through `AgentModel.select`; it never saves or changes the
+    profile default, and the TUI's own `/model` / `Save as Default` behavior is
+    untouched. A committed `model/selection` from any client produces one full
+    `config_option_update` on the current View's connection only; a closed,
+    detached or replaced View receives none. There is no general `mode`/`config`
+    namespace and no client-supplied setup options.
   - `session/close` detaches ONLY this connection's View/reservation: it never
     disposes, flushes or resumes the Agent/Session, so a TUI referencing the
     same Session keeps working and a later connection may resume again. With an
@@ -271,9 +300,8 @@ profile's independent `autoStart` preference enables it (see below).
     on the exact Host identity proves there was no inserted message. The
     Session, Agent and writer keep their Host authority; a pending
     create/resume whose connection closed never publishes an attached View.
-  - `session/list`, `session/set_config_option`, MCP prompts and ACP
-    file/artifact transfer are NOT provided by this View and fail closed with
-    their stable `LOCAL_ACP_*` code.
+  - `session/list`, MCP prompts and ACP file/artifact transfer are NOT provided
+    by this View and fail closed with their stable `LOCAL_ACP_*` code.
   - **Scoped cancellation (PO-3B).** `session/cancel` addresses ONLY this
     connection's own unsettled prompt flight, decided from authoritative Host
     facts — never an Agent-global cancel, a status/timing guess or an
