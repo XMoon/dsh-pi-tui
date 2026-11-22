@@ -29497,6 +29497,11 @@ export class TuiApp {
     this.renderFooter()
     this.working.refresh()
     this.editor.invalidate()
+    // A leased workspace can own its own ANSI-baked components (notably the
+    // Session Reader's Markdown). Its invalidate() is the existing per-open
+    // seam; without it a palette switch repaints chrome but leaves the body in
+    // the previous palette.
+    this.workspaceLease?.panel.invalidate?.()
     // The open Settings workspace projects the runtime fact from a PULL snapshot: a
     // palette change must reach it at the moment it happens, not at the next explicit
     // refresh (`R`) or settlement.

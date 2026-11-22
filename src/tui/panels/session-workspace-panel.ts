@@ -182,6 +182,12 @@ const SESSION_READER_MAX_SOURCE_CODE_UNITS = 4_194_304
 /** One Reader's rendered physical-row budget at the current width. A larger
  *  document is a truthful `too-large` result, never a truncated transcript. */
 const SESSION_READER_MAX_RENDERED_ROWS = 100_000
+/** The retained UI diagnostic is a bounded summary; the full safe reason is
+ *  already emitted by the command bridge's diagnostics channel. */
+const SESSION_READER_MAX_ERROR_CODE_UNITS = 4_096
+/** Error bodies are summarized to at most two body widths before wrapping, so
+ *  a hostile 500 response never creates thousands of invisible styled rows. */
+const SESSION_READER_ERROR_SUMMARY_LINES = 2
 
 /** ONE explicit Reader state object. Its identity is the only async currentness
  *  token for the one official Markdown read it starts. */
@@ -706,6 +712,11 @@ export class SessionWorkspacePanel implements Component {
   }
 
   invalidate(): void {
+    // A live palette switch changes the Markdown theme's concrete SGR, while
+    // Markdown.render caches its already-styled lines by source+width. Drop
+    // that cache before the theme-driven repaint; a bare render is not enough.
+    const reader = this.reader
+    if (reader?.state.kind === 'ready') reader.state.document.invalidate()
     this.searchInput.invalidate()
   }
 
@@ -1040,7 +1051,13 @@ export class SessionWorkspacePanel implements Component {
   private failReader(reader: SessionTranscriptReader, error: unknown): void {
     if (!this.readerCurrent(reader)) return
     if (isCancellation(error)) return
-    reader.state = { kind: 'error', message: sanitizedPhysicalLine(safeErrorMessage(error)) }
+    const message = sanitizedPhysicalLine(safeErrorMessage(error))
+    reader.state = {
+      kind: 'error',
+      message: message.length <= SESSION_READER_MAX_ERROR_CODE_UNITS
+        ? message
+        : `${message.slice(0, SESSION_READER_MAX_ERROR_CODE_UNITS)}…`,
+    }
     this.host.requestRender()
   }
 
@@ -2662,8 +2679,18 @@ export class SessionWorkspacePanel implements Component {
             ? wrap('Open the Session explicitly before using /transcript to save it.', color.textMuted)
             : []),
         ].slice(0, budget)
-      case 'error':
-        return wrap(`Transcript read failed: ${state.message}`, color.error).slice(0, budget)
+      case 'error': {
+        // Bound the projected summary BEFORE wrapping. A non-official HTTP 500
+        // can carry a very long body; wrapping it in full would mint thousands
+        // of invisible styled rows only to slice them away.
+        const summary = truncateToWidth(
+          `Transcript read failed: ${state.message}`,
+          Math.max(1, width * SESSION_READER_ERROR_SUMMARY_LINES),
+          '…',
+          false,
+        )
+        return wrapTextWithAnsi(summary, Math.max(1, width)).map(color.error).slice(0, budget)
+      }
     }
   }
 

@@ -30,7 +30,7 @@ import type { HostDirectoryBrowseOutcome } from '../../src/runtime/host-director
 import type { SessionMarkdownReadResult } from '../../src/runtime/session-markdown-port.ts'
 import { SupersededReadError } from '../../src/runtime/read-error.ts'
 import { sessionBrowserErrorNotice, shortSessionId } from '../../src/tui/pickers/sessions.ts'
-import { color } from '../../src/tui/theme/runtime.ts'
+import { color, currentPalette } from '../../src/tui/theme/runtime.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
@@ -1360,6 +1360,58 @@ test('selection and Preview never read; Space starts one loading read and then s
   assert.ok(h.view().includes('Up/Down move'), 'Esc returns to the list')
 })
 
+test('a live palette switch re-bakes the ready Reader Markdown ANSI', async () => {
+  const h = harness({
+    columns: 120,
+    rows: 30,
+    readMarkdown: async () => ({ kind: 'ready', markdown: '# Themed heading\n\nBody [link](https://example.com)\n' }),
+  })
+  h.handle.setSnapshot(snapshot())
+  await h.paint()
+  h.vt.sendInput('\x1b[B')
+  await h.paint()
+  h.vt.sendInput(' ')
+  await h.paint()
+  const rgb = (hex: string): number => Number.parseInt(hex.slice(1), 16)
+  const points = (): { heading: { row: number; col: number }; link: { row: number; col: number } } => {
+    const frame = panelFrame(h)
+    const headingRow = lineIndexOf(frame, 'Themed heading')
+    const linkRow = lineIndexOf(frame, 'link')
+    return {
+      heading: { row: headingRow, col: frame[headingRow]!.indexOf('Themed heading') },
+      link: { row: linkRow, col: frame[linkRow]!.indexOf('link') },
+    }
+  }
+  try {
+    let point = points()
+    const darkHeading = h.vt.getCellFgRgb(point.heading.row, point.heading.col)
+    const darkLink = h.vt.getCellFgRgb(point.link.row, point.link.col)
+    assert.equal(darkHeading, rgb(currentPalette.textStrong), 'the dark heading uses textStrong')
+    assert.equal(darkLink, rgb(currentPalette.primary), 'the dark link uses primary')
+    const wording = h.view()
+
+    h.app.applyTheme('light')
+    await h.paint()
+    point = points()
+    const lightHeading = h.vt.getCellFgRgb(point.heading.row, point.heading.col)
+    const lightLink = h.vt.getCellFgRgb(point.link.row, point.link.col)
+    assert.equal(h.view(), wording, 'a palette switch changes ANSI, never the Markdown wording or layout')
+    assert.equal(lightHeading, rgb(currentPalette.textStrong), 'the ready heading is re-baked in the LIGHT palette')
+    assert.equal(lightLink, rgb(currentPalette.primary), 'the ready link is re-baked in the LIGHT palette')
+    assert.notEqual(lightHeading, darkHeading, 'the heading really changed colour')
+    assert.notEqual(lightLink, darkLink, 'the link really changed colour')
+
+    h.app.applyTheme('dark')
+    await h.paint()
+    point = points()
+    assert.equal(h.vt.getCellFgRgb(point.heading.row, point.heading.col), darkHeading,
+      'switching back re-bakes the SAME Markdown component in the original palette')
+  } finally {
+    h.app.applyTheme('dark')
+    h.dispose()
+  }
+})
+
 test('none, unavailable and a real rejection are distinct, inert states with a real Back', async () => {
   const scenarios = [
     {
@@ -1397,6 +1449,27 @@ test('none, unavailable and a real rejection are distinct, inert states with a r
     assert.deepEqual(h.resumes, [], `${scenario.name} never resumes`)
     h.dispose()
   }
+})
+
+test('a hostile long Reader error is bounded before wrapping and still exposes Back', async () => {
+  const body = `${'remote 500 body '.repeat(20_000)}TAIL-MUST-NOT-PAINT`
+  const h = harness({
+    columns: 44,
+    rows: 20,
+    readMarkdown: async () => { throw new Error(body) },
+  })
+  h.handle.setSnapshot(snapshot())
+  await h.paint()
+  h.vt.sendInput('\x1b[B')
+  await h.paint()
+  h.vt.sendInput(' ')
+  await h.paint()
+  const view = h.view()
+  assert.ok(view.includes('Transcript read failed:'), `the real error prefix survives the summary bound:\n${view}`)
+  assert.ok(view.includes('…'), `the bounded summary marks its truncation:\n${view}`)
+  assert.ok(!view.includes('TAIL-MUST-NOT-PAINT'), 'the unbounded tail is never painted')
+  assert.ok(view.includes('Back [Esc]'), 'the bounded failure keeps the real Back')
+  h.dispose()
 })
 
 test('a late Reader result after close is inert and the captured signal is aborted', async () => {

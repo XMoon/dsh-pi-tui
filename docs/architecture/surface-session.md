@@ -338,7 +338,13 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   refuses a source above 4,194,304 UTF-16 code units or a render above 100,000
   physical rows as `too-large` without painting a truncated prefix. It carries
   no Agent, Question/Approval form, Session `open`/`retain`, writer, Resume or
-  Return action; `Enter` is inert. `Esc`, `Space` or the ONE painted
+  Return action; `Enter` is inert. A real rejection retains a bounded UI summary
+  (at most two body widths and 4,096 code units before wrapping) while the full
+  safe diagnostic stays in the command bridge's diagnostics channel. A live
+  light/dark or custom-palette switch invalidates the ONE ready Markdown
+  projection through the leased workspace's `invalidate()` seam before repaint,
+  so the body's baked ANSI follows the new palette; a bare render request is not
+  sufficient. `Esc`, `Space` or the ONE painted
   `Back [Esc]` closes only the Reader and restores the previous Browse/Search
   Results focus, typed Session id, Workspace expansion, search query, result
   scroll and Browse scroll anchor. A roster/search refresh that removes the
