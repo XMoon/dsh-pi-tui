@@ -69,6 +69,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
         ...sessionScopeFacts(() => state.agent, () => 1),
         get currentSessionId() { return state.agent?.session.id },
     sessionPolicy: unconfiguredSessionPolicyPort(),
+    sessionMarkdown: { read: async () => ({ kind: 'unavailable' }) },
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
     defaultSelection: () => undefined,

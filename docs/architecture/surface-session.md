@@ -256,8 +256,8 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   one sample from `SessionWorkspaceFactsPort.readActivity` over the read owner's
   roster. Activity generation and eligibility updates are separate from
   Workspace membership revision, and stale roster results are inert. `running`,
-  `pending` and `attentionSourceState` retain provenance. Unknown/unavailable/
-  denied facts remain complete in Peek/Details; compact rows hide them rather
+  `pending` and `attentionSourceState` retain provenance. Unknown, unavailable
+  and denied facts remain complete Activity facts; compact rows hide them rather
   than printing them once per Session. A Working row paints `Working`, while
   only confirmed answerability paints `Needs attention`. A newer roster revision
   waiting for its Activity sample paints NO transient placeholder row: the list
@@ -309,7 +309,7 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   lines. Excerpts are display-only: selecting a result never reads, opens,
   retains or writes a Session.
 - **Current row Enter returns.** A listed, painted Current Session row's `Enter`
-  (Browse, the Search-results second `Enter`, or Peek `Enter`) closes the Browser
+  (Browse or the Search-results second `Enter`) closes the Browser
   and returns to the Session that opened it: no Resume intent and no Session
   switch, with the Session id, draft, turn and writer untouched. Every other
   Session row keeps the guarded Resume. The action bar names the real verb —
@@ -317,23 +317,41 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   otherwise — and the Current branch is decided only after the same listed and
   painted admission a Resume needs. A Session row click still only selects;
   returning requires the physical bar segment or `Enter`.
-- **`Space` is a read-only Peek.** It opens a plain-text detail of the selected
-  painted Session row (full Session id, identity, official Workspace
-  membership, `Created in` = the immutable Session header cwd, preset, updated,
-  running, pending, source) and nothing else:
-  `Created in` is the Session's creation directory; it is neither the Session's
-  current working directory nor a Workspace membership identity.
-  The Peek carries no Agent, no Question/Approval form, no Session
-  `open`/`retain`, no writer and
-  no Host call. Folder, New, Add and Show more rows have no Peek and never
-  inherit the last Session. `Esc` returns to the previous focus with the same
-  selection, query and scroll; `Enter` activates the PINNED Session — returning
-  when it is Current, otherwise an open that still has to pass the read owner's
-  eligibility/currentness before any switch. The Peek is
-  pinned to ITS Session id: if a roster/search refresh no longer lists that
-  Session, the Peek exits to its previous focus and the list re-anchors on a
-  listed row — it never silently
-  shows, or switches to, a different Session.
+- **`Space` opens the read-only committed Transcript Reader.** It targets only
+  the selected Session row the LAST frame painted in Browse or Search Results
+  (never a Folder, New, Add, Show more, empty state or a row only the logical
+  roster contains) and starts exactly ONE
+  `SessionMarkdownPort.read(fullSessionId, AbortSignal)` for that typed id. The
+  Reader occupies the whole body width in every layout: it closes the Browse
+  column, right Preview, Search editor and `/ Search` target and paints
+  `Transcript · <short Session id> · Committed · Read-only` as its fixed context;
+  a narrow frame drops whole trailing facts (`Committed`, then `Read-only`)
+  before slicing a word. `loading`, `ready`, `none`, `unavailable`, a real rejection and the UI-only
+  `too-large` state are distinct; none is presented as an empty transcript and a
+  failed/none/unavailable read never retries automatically. Ready content is the
+  official complete committed Markdown, display-projected through
+  `sanitizeDisplayText` and rendered by the existing `Markdown` with the current
+  terminal width. Up/Down scroll one physical row, PgUp/PgDn use the real painted
+  body height minus one, Home/End move to the boundaries, and the wheel scrolls
+  only the painted Reader body with the fork's already-computed delta; no wheel
+  is applied twice. The Reader retains at most one Markdown projection and
+  refuses a source above 4,194,304 UTF-16 code units or a render above 100,000
+  physical rows as `too-large` without painting a truncated prefix. It carries
+  no Agent, Question/Approval form, Session `open`/`retain`, writer, Resume or
+  Return action; `Enter` is inert. A real rejection retains a bounded UI summary
+  (at most two body widths and 4,096 code units before wrapping) while the full
+  safe diagnostic stays in the command bridge's diagnostics channel. A live
+  light/dark or custom-palette switch invalidates the ONE ready Markdown
+  projection through the leased workspace's `invalidate()` seam before repaint,
+  so the body's baked ANSI follows the new palette; a bare render request is not
+  sufficient. `Esc`, `Space` or the ONE painted
+  `Back [Esc]` closes only the Reader and restores the previous Browse/Search
+  Results focus, typed Session id, Workspace expansion, search query, result
+  scroll and Browse scroll anchor. A roster/search refresh that removes the
+  pinned id aborts the one read and exits to that focus; close, dispose and lease
+  pre-emption abort and release the document, and every late result is fenced by
+  the Reader object identity and its exact Session id. There is no background
+  prefetch, periodic read, global transcript cache or second read source.
 - **Header, Preview and navigation.** The header is ONE row: `Sessions · <listed
   count>` (or `Choose workspace` in the chooser) with the real `/ Search` target
   on the right. It never repeats the Current Session id or an `All workspaces`
@@ -345,8 +363,10 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   read-only Preview follows the typed node (Folder facts, New, Add, Show more or
   the Session detail) and the action bar advertises only the selected row's real
   `Enter` verb. From `112x12` the frame is two columns: the list keeps at least
-  44 cells, a two-cell gap, and the rest is the read-only preview/Peek; below
-  that it is one column. Frame-level facts (search editor, status and Host error
+  44 cells, a two-cell gap, and the rest is the read-only preview; below that it
+  is one column. The Reader is the exception: in every layout it takes the whole
+  body width and paints no Browse column or right preview. Frame-level facts
+  (search editor, status and Host error
   lines) span the full width; the Esc action bar is always the last physical
   row, and a short frame withholds activation instead of opening a row it did
   not paint. The inline Add editor consumes the keyboard while it is open; Tab
@@ -366,14 +386,14 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   Resume is the guarded `Enter` verb and the Current row's `Enter` is its Return.
   The ONE physical Action Bar is
   pointer-capable for its complete painted `Verb [Key]` segments only
-  (`Return [Enter]`, `Open [Enter]`, `Peek [Space]`, `Close [Esc]`, `Back [Esc]`,
+  (`Return [Enter]`, `Open [Enter]`, `Read [Space]`, `Close [Esc]`, `Back [Esc]`,
   `Results [Enter]`, `Verify [Enter]`, `Cancel [Esc]`, and the selected row's
   real Enter verb); each runs the existing method (`resumeSelected`,
-  `openPeek`, `handleEscape`, `handleSearchInput`, `handleDirectorySubmit`,
+  `openReader`, `handleEscape`, `handleSearchInput`, `handleDirectorySubmit`,
   `handleDirectoryCancel`, `activateSelectedBrowseRow`) and never starts a
-  second navigation state machine. The Peek pane paints NO local action line:
-  the global bar is the only navigation row, and its `Open [Enter]`/`Return
-  [Enter]` is the one explicit activation. A press records the LIVE terminal grant beside the frame
+  second navigation state machine. The Reader pane paints NO local action line:
+  the global bar is its only navigation row, and `Back [Esc]` is the only
+  Reader action; the Reader never paints `Open [Enter]` or `Return [Enter]`. A press records the LIVE terminal grant beside the frame
   revision, so a resize that has not repainted yet also drops the gesture. A
   same-row double click on the same word stays the terminal's word-selection
   gesture, so one fast double click toggles a Folder at most once.
@@ -381,13 +401,13 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   the ordinary Browse typed selection over the painted list viewport (painted
   rows and their trailing blank), the Search result selection over the real
   painted result rows (a wheel there moves focus from the Search editor to that
-  result list), and the pinned Peek detail over its actual body lines.
+  result list), and the Reader body over its actual painted Markdown rows.
   It uses the fork's already-computed signed line count — the Wheel Lines
   setting and the Alt acceleration are never applied a second time — and only
   acts on zones derived from the LAST painted frame and its live terminal
-  grant. Header, status, the Search Input, the column gap, the ordinary
-  read-only Preview, the Action Bar and the inline Host-directory editor are
-  inert; a wheel never activates, resumes, queries, expands or writes. The
+  grant. Header, Reader context, status, the Search Input, the column gap, the
+  ordinary read-only Preview, the Action Bar and the inline Host-directory
+  editor are inert; a wheel never activates, resumes, queries, expands or writes. The
   leased root consumes every wheel, so an inert wheel never scrolls the
   background Transcript; a real navigation hit retires an old press while an
   inert wheel leaves a legal press intact.
@@ -406,8 +426,10 @@ visible tree), `buildSessionWorkspaceView` (the ONE pure classifier),
 `SessionBrowserReadOwner`, `SessionWorkspaceFactsPort` and the Client-root
 forwarded-answer eligibility view; sink: the leased fullscreen screen.
 
-Must-not: add a second Session roster, a second Activity reader, a Host pending
-store, a Workspace registry or a persisted Workspace table, re-filter Host
-search results, infer membership from a cwd, treat `attention` as answer
-authority, expose an answer form in Peek, give a row a hit region the frame did
-not paint, or treat an accepted Resume intent as a committed switch.
+Must-not: add a second Session roster, a second Activity or Session-Markdown
+reader, a Host pending store, a Workspace registry or a persisted Workspace
+table, re-filter Host search results, infer membership from a cwd, treat
+`attention` as answer authority, expose an answer form in the Reader, give a row
+a hit region the frame did not paint, read or prefetch a transcript before the
+explicit Space/Read gesture, retain the Markdown after the Reader closes, or
+treat an accepted Resume intent as a committed switch.

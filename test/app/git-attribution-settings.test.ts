@@ -128,6 +128,7 @@ function setupSettings(options: { gitAttribution?: string; failWrite?: boolean }
     get defaultIntentOutcome() { return undefined },
     ...sessionScopeFacts(() => undefined, () => 0),
     sessionPolicy: unconfiguredSessionPolicyPort(),
+    sessionMarkdown: { read: async () => ({ kind: 'unavailable' }) },
     policy: unconfiguredPolicyObservation(),
     currentSessionId: undefined,
     ensureSession: async () => {},

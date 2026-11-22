@@ -67,6 +67,7 @@ import type { OperationOwnership } from './runtime/write-outcome.ts'
 import { SupersededReadError } from './runtime/read-error.ts'
 import type { SessionStatsFacts } from './domain/status/stats.ts'
 import type { SessionReader } from './runtime/session-reader-port.ts'
+import type { SessionMarkdownPort } from './runtime/session-markdown-port.ts'
 import type { SessionWriter } from './runtime/session-writer-port.ts'
 import type { SessionWorkspaceFactsPort } from './runtime/session-workspace-facts-port.ts'
 import type { HostDirectoryBrowsePort } from './runtime/host-directory-browse-port.ts'
@@ -440,6 +441,13 @@ export interface TuiCommandRunner {  ctx: Context
    * the title batches, the context measurement and the export read go
    * through the port, never ctx directly. */
   readonly sessionReader: SessionReader
+  /**
+   * The official committed-Session Markdown READ port (Session Workspace PR2).
+   * The PiTUI Session Workspace Reader is its second read-only consumer; the
+   * `/transcript` artifact save remains the first. It never writes output,
+   * retains a Session or acquires a writer.
+   */
+  readonly sessionMarkdown: SessionMarkdownPort
   /** The official Host Workspace facts READ port (M5-U-A), internal to the
    *  command runner. The PiTUI Session Workspace is its only consumer: it
    *  follows Workspace membership per open and never writes a Workspace,

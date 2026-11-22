@@ -310,6 +310,7 @@ function setup(
     get defaultIntentOutcome() { return undefined },
     ...scopeFacts,
     sessionPolicy: unconfiguredSessionPolicyPort(),
+    sessionMarkdown: { read: async () => ({ kind: 'unavailable' }) },
     policy: unconfiguredPolicyObservation(),
     currentSessionId: undefined,
     ensureSession: async () => {},

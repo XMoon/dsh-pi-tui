@@ -181,6 +181,7 @@ function stubRunner(
     diag,
     ...sessionScopeFacts(() => state.agent, () => state.generation),
     sessionPolicy: unconfiguredSessionPolicyPort(),
+    sessionMarkdown: { read: async () => ({ kind: 'unavailable' }) },
     policy: unconfiguredPolicyObservation(),
     get currentSessionId() { return state.agent?.session.id },
     ensureSession: async () => {},

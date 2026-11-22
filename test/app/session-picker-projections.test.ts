@@ -131,6 +131,7 @@ test('the workspace projection loader covers EVERY main row beyond the legacy wi
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
         ...sessionScopeFacts(() => state.agent, () => 1),
         sessionPolicy: unconfiguredSessionPolicyPort(),
+        sessionMarkdown: { read: async () => ({ kind: 'unavailable' }) },
         policy: unconfiguredPolicyObservation(),
         get currentSessionId() { return state.agent?.session.id },
     ensureSession: async () => {},

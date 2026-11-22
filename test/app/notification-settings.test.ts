@@ -139,6 +139,7 @@ function setupSettings(options: { notificationMode?: string; notificationMethod?
     get defaultIntentOutcome() { return undefined },
     ...sessionScopeFacts(() => undefined, () => 0),
     sessionPolicy: unconfiguredSessionPolicyPort(),
+    sessionMarkdown: { read: async () => ({ kind: 'unavailable' }) },
     policy: unconfiguredPolicyObservation(),
     currentSessionId: undefined,
     ensureSession: async () => {},

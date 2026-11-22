@@ -318,6 +318,7 @@ function fakeRunnerDeps(options: {
     recordExtensionError,
     clearExtensionError,
     sessionPolicy: unconfiguredSessionPolicyPort(),
+    sessionMarkdown: { read: async () => ({ kind: 'unavailable' }) },
     policy: unconfiguredPolicyObservation(),
     get currentSessionId() { return options.currentSessionId() },
     ensureSession: async () => {},
@@ -473,6 +474,7 @@ function fakeRunnerDeps(options: {
     backend: {
       kind: options.remoteSource === undefined ? 'direct' : 'remote',
       sessionReader: runner.sessionReader,
+      sessionMarkdown: runner.sessionMarkdown,
       sessionWorkspaceFacts: runner.sessionWorkspaceFacts,
       hostDirectoryBrowse: runner.hostDirectoryBrowse,
       sessionPolicy: runner.sessionPolicy,

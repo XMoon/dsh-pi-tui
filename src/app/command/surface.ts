@@ -298,6 +298,9 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   readonly backend: {
     readonly kind: BackendKind
     readonly sessionReader: TuiCommandRunner['sessionReader']
+    /** Session Workspace PR2: the SAME official committed-Markdown read port
+     *  `/transcript` uses, forwarded unchanged for the read-only Reader. */
+    readonly sessionMarkdown: TuiCommandRunner['sessionMarkdown']
     /** M5-U-C: the official Host Workspace facts port, forwarded unchanged to
      *  the internal command runner. This facade never caches, wraps or
      *  re-derives it; the PiTUI Session Workspace is its only consumer. */
@@ -1587,6 +1590,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // the title batches, the context measurement and the export read go
       // through the port, never ctx directly.
       sessionReader: deps.backend.sessionReader,
+      sessionMarkdown: deps.backend.sessionMarkdown,
       sessionWorkspaceFacts: deps.backend.sessionWorkspaceFacts,
       hostDirectoryBrowse: deps.backend.hostDirectoryBrowse,
       // M6-1 F8: the exact-Session policy port (read + write), forwarded

@@ -106,6 +106,7 @@ function setup(options: { cwd?: string; sessionCwd?: string; signal?: AbortSigna
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
     ...sessionScopeFacts(() => undefined, () => 0),
     sessionPolicy: unconfiguredSessionPolicyPort(),
+    sessionMarkdown: { read: async () => ({ kind: 'unavailable' }) },
     policy: unconfiguredPolicyObservation(),
     currentSessionId: undefined,
     ensureSession: async () => {},
@@ -548,6 +549,7 @@ function mountedHarness(options: {
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
     ...scopeFacts,
     sessionPolicy: unconfiguredSessionPolicyPort(),
+    sessionMarkdown: { read: async () => ({ kind: 'unavailable' }) },
     policy: unconfiguredPolicyObservation(),
     // The recorder wraps the REAL scope authority: the intake's post-read
     // fence still decides exactly as production does, and its occurrence is

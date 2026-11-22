@@ -193,6 +193,7 @@ import type {
   SessionBrowserSubject,
 } from './app/command/session-browser-presentation.ts'
 import type { WorkspaceFactsFrame } from './runtime/session-workspace-facts-port.ts'
+import type { SessionMarkdownReadResult } from './runtime/session-markdown-port.ts'
 import type { ScheduleIntent, ScheduleWorkspaceSnapshot } from './app/schedule/presentation.ts'
 import type { TaskPanelItem } from './app/surface/task-presentation.ts'
 import type { JobInspectorState, TaskBrowserViewState } from './app/surface/task-runtime.ts'
@@ -2154,6 +2155,11 @@ export interface SessionWorkspaceOpenOptions {
   readonly subject: SessionBrowserSubject
   readonly onQueryChange: (raw: string) => void
   readonly onResume: (sessionId: string) => void
+  /** Session Workspace PR2: ONE explicit full Session-id Markdown read for the
+   *  local Reader. The command bridge composes the open, reader and runner
+   *  cancellation signals; this lease only forwards it while THIS record owns
+   *  the physical screen. */
+  readonly readMarkdown: (sessionId: string, signal: AbortSignal) => Promise<SessionMarkdownReadResult>
   readonly onUseDirectory?: (workspaceId: string, canonicalPath: string) => void
   readonly onNewSession?: (workspaceId: string, settle?: (outcome: import('./app/command/session-browser-presentation.ts').SessionBrowserNewSessionSettlement) => void) => void
   readonly onAddDirectory?: (path: string, settle: (outcome: import('./app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void) => void
@@ -2181,7 +2187,7 @@ export interface SessionWorkspaceHandle {
    *  revision it belongs to, plus the Client-root forwarded-answer eligibility
    *  read view. A stale/closed lease is inert. */
   setActivityFacts(facts: SessionWorkspaceActivityFacts): void
-  /** M5-U-D: ONE failed Activity sample. Nonfatal: the roster, search and Peek
+  /** M5-U-D: ONE failed Activity sample. Nonfatal: the roster, search and Reader
    *  stay usable and every activity fact becomes Unknown. */
   activityUnavailable(message: string): void
   close(): void
@@ -28414,6 +28420,12 @@ export class TuiApp {
       onResume: (sessionId) => {
         if (this.workspaceLease === record) options.onResume(sessionId)
       },
+      readMarkdown: (sessionId, signal) => {
+        if (this.disposed || record === undefined || this.workspaceLease !== record) {
+          return Promise.reject(new Error('the Session Workspace lease is no longer current'))
+        }
+        return options.readMarkdown(sessionId, signal)
+      },
       onClose: () => {
         record.close()
       },
@@ -29510,6 +29522,11 @@ export class TuiApp {
     this.renderFooter()
     this.working.refresh()
     this.editor.invalidate()
+    // A leased workspace can own its own ANSI-baked components (notably the
+    // Session Reader's Markdown). Its invalidate() is the existing per-open
+    // seam; without it a palette switch repaints chrome but leaves the body in
+    // the previous palette.
+    this.workspaceLease?.panel.invalidate?.()
     // The open Settings workspace projects the runtime fact from a PULL snapshot: a
     // palette change must reach it at the moment it happens, not at the next explicit
     // refresh (`R`) or settlement.

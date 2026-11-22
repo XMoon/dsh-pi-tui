@@ -115,6 +115,7 @@ function stubRunner(
     diag,
     ...sessionScopeFacts(() => state.agent, () => options.generation?.() ?? 1, catalog.skills),
     sessionPolicy: unconfiguredSessionPolicyPort(),
+    sessionMarkdown: { read: async () => ({ kind: 'unavailable' }) },
     policy: unconfiguredPolicyObservation(),
     // The scoped collision baseline must read the FAKE registry (which
     // reflects registrations in its global view), exactly like the real
