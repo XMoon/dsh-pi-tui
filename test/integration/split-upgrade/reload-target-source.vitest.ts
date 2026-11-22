@@ -7,6 +7,7 @@ import {
   RELOAD_NOTICE,
   assertHostArtifactsKept,
   assertNoHandoffRequested,
+  assertReexecRecordOrder,
   beginParallelAudit,
   c1WorkHadRelease,
   hostArtifacts,
@@ -108,6 +109,8 @@ test('one Client PID resolves the manual command from the Profile and the qualif
       assert.equal(closed.surfaceMounted, false, 'the qualification Client still reported its old surface mounted')
 
       const replacement = await waitForReplacement(client, oldPid, 'qualification replacement')
+      assert.equal(assertReexecRecordOrder(client, oldPid, boundary, 'qualification ordered reexec'), replacement.pid,
+        'the ordered record ledger names another replacement PID')
       assert.notEqual(replacement.pid, oldPid, 'the qualification replacement reused the old business PID')
       assert.equal(replacement.hostAuthenticated.host?.instanceId, hostIdentity.instanceId,
         'the qualification replacement authenticated another Host instance')

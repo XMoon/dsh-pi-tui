@@ -279,6 +279,39 @@ export async function waitForClientClosed(
   )
 }
 
+/**
+ * Assert the ONE official recordFile order for this reexec: the accepted
+ * request, the old Client's complete release, then the replacement's start and
+ * restoration. Equal final identities are not enough: a new Client started
+ * before the old owner released would still be a double-owner regression.
+ */
+export function assertReexecRecordOrder(
+  client: UpgradeClientHandle,
+  oldPid: number,
+  fromIndex: number,
+  label: string,
+): number {
+  const records = client.readRecords().slice(fromIndex)
+  const requested = records.findIndex(record => record.m4r === 'handoff-requested' && record.pid === oldPid)
+  const closed = records.findIndex(record => record.m4b2s === 'client-closed' && record.pid === oldPid)
+  const starts = records
+    .map((record, index) => ({ record, index }))
+    .filter(({ record }) => record.m4a0 === 'client-started' && Number.isInteger(record.pid) && record.pid !== oldPid)
+  assert(starts.length === 1, `${label}: expected exactly one replacement client-started, got ${String(starts.length)}`)
+  const started = starts[0]!
+  const newPid = started.record.pid as number
+  const authenticated = records.findIndex(record => record.m4a0 === 'host-authenticated' && record.pid === newPid)
+  const restored = records.findIndex(record => record.m4r === 'handoff-restored' && record.pid === newPid)
+  const ready = records.findIndex(record => record.m4a0 === 'ready' && record.pid === newPid)
+  assert(requested >= 0, `${label}: no current handoff-requested record`)
+  assert(closed > requested, `${label}: the old Client did not release after this request`)
+  assert(started.index > closed, `${label}: the replacement Client started before the old Client released (${String(started.index)} <= ${String(closed)})`)
+  assert(authenticated > started.index, `${label}: replacement authentication preceded its start`)
+  assert(restored > authenticated, `${label}: replacement restoration preceded its authentication`)
+  assert(ready > restored, `${label}: replacement ready preceded its restoration`)
+  return newPid
+}
+
 export async function waitForReplacement(
   client: UpgradeClientHandle,
   oldPid: number,

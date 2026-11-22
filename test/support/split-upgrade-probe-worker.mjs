@@ -34,6 +34,7 @@ const SCENARIOS = new Set([
   'upgrade-worker-kill:side-build-install',
   'upgrade-worker-kill:bootstrap-install',
   'upgrade-worker-kill:reload-child-active',
+  'upgrade-worker-kill:reload-child-started-before-report',
   'upgrade-sibling-live',
   'upgrade-live-host-exit',
 ])
@@ -151,7 +152,8 @@ async function runLiveProfileRefusal(scene) {
   })}`)
 }
 
-async function runReloadChildActive(scene) {
+async function runReloadChildActive(scene, point = 'reload-child-active') {
+  const beforeReport = point === 'reload-child-started-before-report'
   await scene.installOldProfile()
   await scene.installOldSideBySide()
   await scene.installNewSideBySide()
@@ -169,7 +171,31 @@ async function runReloadChildActive(scene) {
   const newProfile = await scene.installNewProfileForReload()
   const boundary = recordIndex(client)
   await client.submit('/reload-client')
-  await waitForAcceptedHandoff(client, oldPid, 'reload-child-active: production reload', boundary)
+  await waitForAcceptedHandoff(client, oldPid, `${point}: production reload`, boundary)
+  if (beforeReport) {
+    const started = await client.waitForRecord(
+      record => record.m4a0 === 'client-started' && record.pid !== oldPid,
+      `${point}: replacement client-started before PID REPORT`,
+      180_000,
+    )
+    const replacementPid = started.pid
+    if (!Number.isInteger(replacementPid) || replacementPid === oldPid || !pidAlive(replacementPid)) {
+      throw new Error(`${point}: the replacement has no live non-parent business PID`)
+    }
+    await scene.report('worker-kill-point', {
+      point,
+      workerPid: process.pid,
+      oldPid,
+      replacementPid,
+      businessPids: client.businessPids(),
+      sessionId,
+      newBuildId: newProfile.buildId,
+      hostPid: host.ready?.pid,
+      hostPgid: host.pgid,
+    })
+    await holdForExternalKill(point)
+    return
+  }
   await waitForClientClosed(client, oldPid, 'reload-child-active: old Client closed')
   const replacement = await waitForReplacement(client, oldPid, 'reload-child-active')
   if (replacement.pid === oldPid) throw new Error('reload-child-active: the replacement reused the old PID')
@@ -251,6 +277,9 @@ async function main() {
         return
       case 'upgrade-worker-kill:reload-child-active':
         await runReloadChildActive(scene)
+        return
+      case 'upgrade-worker-kill:reload-child-started-before-report':
+        await runReloadChildActive(scene, 'reload-child-started-before-report')
         return
       case 'upgrade-worker-kill:old-host-ready': {
         await scene.installOldProfile()

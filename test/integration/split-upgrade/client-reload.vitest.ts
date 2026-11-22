@@ -9,6 +9,7 @@ import {
   assertHostArtifactsKept,
   assertNoHandoffRequested,
   assertPeerSurfaceKept,
+  assertReexecRecordOrder,
   beginParallelAudit,
   c1WorkHadRelease,
   hostArtifacts,
@@ -156,6 +157,8 @@ test('the production /reload-client command keeps the peer Session and held Turn
       assert.equal(closed.surfaceMounted, false, 'Client A2 still reported its old surface mounted')
 
       const replacement = await waitForReplacement(clientA2, a2Pid, 'Client A2 replacement')
+      assert.equal(assertReexecRecordOrder(clientA2, a2Pid, boundary, 'Client A2 ordered reexec'), replacement.pid,
+        'the ordered record ledger names another replacement PID')
       assert.notEqual(replacement.pid, a2Pid, 'the replacement reused the old business PID')
       assert.equal(replacement.hostAuthenticated.host?.instanceId, hostIdentity.instanceId,
         'the replacement authenticated another Host instance')

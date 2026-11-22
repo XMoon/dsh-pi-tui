@@ -519,15 +519,28 @@ function auditClientLedger(reason) {
     const reported = new Set(Array.isArray(client.businessPids) ? client.businessPids : [])
     const facts = new Map((client.businessPidFacts ?? []).map(value => [value.pid, value.starttime]))
     for (const pid of ledger.pids) {
-      if (!reported.has(pid)) problems.push(`${String(client.label)}: business PID ${String(pid)} exists only in the official record file`)
+      // The worker may be SIGKILLed after the official JSONL records a
+      // replacement Client but before its PID REPORT reaches this Supervisor.
+      // A dead ledger PID is proven gone; only a LIVE PID whose reported OS
+      // starttime still matches is an unresolved owner. A live PID reused by
+      // an unrelated process (different starttime) is not this Scene's.
       if (!pidAlive(pid)) continue
-      const expectedStarttime = facts.get(pid)
-      const actualStarttime = readHostStarttime(pid)
-      if (expectedStarttime === undefined || actualStarttime !== expectedStarttime) {
-        problems.push(`${String(client.label)}: live business PID ${String(pid)} has no matching reported OS starttime`)
-      } else {
-        problems.push(`${String(client.label)}: business PID ${String(pid)} is still alive`)
+      if (!reported.has(pid)) {
+        problems.push(`${String(client.label)}: live unreported business PID ${String(pid)} cannot be proven dead or foreign`)
+        continue
       }
+      const expectedStarttime = facts.get(pid)
+      if (expectedStarttime === undefined) {
+        problems.push(`${String(client.label)}: live business PID ${String(pid)} has no reported OS starttime`)
+        continue
+      }
+      const actualStarttime = readHostStarttime(pid)
+      if (actualStarttime === undefined) {
+        problems.push(`${String(client.label)}: live business PID ${String(pid)} has no readable OS starttime`)
+        continue
+      }
+      if (actualStarttime !== expectedStarttime) continue
+      problems.push(`${String(client.label)}: business PID ${String(pid)} is still alive`)
     }
     if (pidAlive(client.shellPid)) problems.push(`${String(client.label)}: tui-test shell PID ${String(client.shellPid)} is still alive`)
   }

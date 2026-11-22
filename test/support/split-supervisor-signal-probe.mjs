@@ -33,7 +33,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { isBootstrapInstallInProgress, isSideNewInstallInProgress } from './split-upgrade-install-state.mjs'
 
 const PILOT_MODES = ['main-signal', 'foreground-group-sigint', 'worker-kill', 'bootstrap-main-sigterm']
-const UPGRADE_ATS = ['old-host-ready', 'between-host-generations', 'new-host-spawned-before-ack', 'side-build-install', 'bootstrap-install', 'reload-child-active']
+const UPGRADE_ATS = ['old-host-ready', 'between-host-generations', 'new-host-spawned-before-ack', 'side-build-install', 'bootstrap-install', 'reload-child-active', 'reload-child-started-before-report']
 const UPGRADE_MODES = ['upgrade-sequential-hosts', 'upgrade-live-profile-refusal', 'upgrade-live-host-exit', 'upgrade-worker-kill']
 
 function arg(name) {
@@ -339,7 +339,7 @@ let siblingChild
 let siblingRunId
 let siblingStopFile
 if (upgradeMode) {
-  if (mode === 'upgrade-worker-kill' && at === 'reload-child-active') {
+  if (mode === 'upgrade-worker-kill' && (at === 'reload-child-active' || at === 'reload-child-started-before-report')) {
     siblingRunId = `${runId}-sibling`
     siblingStopFile = join(tmpBase, `split-upgrade-sibling-stop-${String(process.pid)}.flag`)
     siblingChild = spawn(process.execPath, [
@@ -500,17 +500,19 @@ try {
         const barrierHit = (current?.notes ?? []).some(note => note.event === 'host-spawned-before-ack-barrier' && note.detail?.generation === 2)
         return barrierHit ? current : undefined
       }, 'second Host spawned before ACK', 600_000)
-    } else if (barrierPoint === 'reload-child-active') {
+    } else if (barrierPoint === 'reload-child-active' || barrierPoint === 'reload-child-started-before-report') {
       await waitUntil(() => {
         const current = latestUpgradeReceipt(tmpBase, runId)
-        const hit = (current?.notes ?? []).some(note => note.event === 'worker-kill-point'
-          && note.detail?.point === 'reload-child-active')
+        const note = (current?.notes ?? []).find(value => value.event === 'worker-kill-point'
+          && value.detail?.point === barrierPoint)
+        if (note === undefined || !pidAlive(current?.host?.pid) || !groupAlive(current?.host?.pgid)) return undefined
+        if (barrierPoint === 'reload-child-started-before-report') {
+          return pidAlive(note.detail?.oldPid) && pidAlive(note.detail?.replacementPid) ? current : undefined
+        }
         const client = (current?.clients ?? []).find(value => value.label === 'reload-child-active-client')
         const pids = client?.businessPids ?? []
-        return hit && pidAlive(current?.host?.pid) && groupAlive(current?.host?.pgid)
-          && pids.length >= 2 && pids.every(pid => pidAlive(pid))
-          ? current : undefined
-      }, 'reload replacement child active', 600_000)
+        return pids.length >= 2 && pids.every(pid => pidAlive(pid)) ? current : undefined
+      }, `reload replacement child at ${barrierPoint}`, 600_000)
     } else if (barrierPoint === 'old-host-ready') {
       await waitUntil(() => {
         const current = latestUpgradeReceipt(tmpBase, runId)
