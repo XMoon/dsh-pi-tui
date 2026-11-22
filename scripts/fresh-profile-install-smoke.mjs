@@ -23,6 +23,20 @@
  * and `pristine: true` for that scenario. F1/F2 historical upgrades may retain
  * an old Profile's existing policy.
  *
+ * F0 also qualifies the PUBLIC trusted-profile ACP stdio entry against THIS
+ * single-package install: the installed `dist/acp-stdio.mjs` artifact and
+ * `acp --help` grammar, the stable no-Host fail-closed code, the ready Host's
+ * default-off listener, an explicit Host access enable through the SAME
+ * authenticated peer the `/acp` command uses, and the official ACP SDK
+ * `initialize` over a real OS child's stdio. Every captured stdout byte must be
+ * JSON-RPC NDJSON, and the client's exit must be a NATURAL OS close with code 0:
+ * a child that has to be reclaimed by the owned process group fails the gate
+ * even when that emergency cleanup succeeds. The controlled
+ * `FRESH_PROFILE_FAILPOINT=acp-stdio-hold-open` run withholds the client close
+ * to prove that negative branch can never produce a PASS. The
+ * Session/Turn/approval matrix is NOT here: the packed
+ * `acp.stdio-bridge-a1` Split case owns it.
+ *
  * Usage:
  *   node scripts/fresh-profile-install-smoke.mjs <absolute-candidate.tgz> [--dsh <0.2.2-rc.X>]
  *   pnpm smoke:fresh-profile -- [candidate.tgz] [--dsh <0.2.2-rc.X>]
@@ -30,12 +44,15 @@
  * @module @xmoon76/dsh-pi-tui/scripts/fresh-profile-install-smoke
  */
 
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { Readable, Transform, Writable } from 'node:stream'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import * as acp from '@agentclientprotocol/sdk'
 import { parse as parseYaml } from 'yaml'
 
 import {
@@ -52,15 +69,28 @@ import {
 import { assertInstalledDshFamily, PACKAGE_ROOT } from './lib/dsh-distribution.mjs'
 import { createSplitSmokeProfile } from './lib/split-smoke-profile.mjs'
 import { createSplitProcessScope, readStartIdentity } from './lib/split-smoke-processes.mjs'
+import { groupStillAlive, stopOwnedGroup } from './lib/owned-process-group.mjs'
 import { selectCandidate } from './qualify-tarball.mjs'
 
 const EXPECTED_NAME = '@xmoon76/dsh-pi-tui'
 const DEFAULT_DSH_TARGET = '0.2.2-rc.5'
 const SUPPORTED_DSH_TARGETS = new Set(['0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5'])
 const STORE_PACKAGES = ['@deepseek-ai/dsh-client-store', 'zustand', 'immer']
+/** The internal ACP stdio Adapter entry the installed candidate must carry. */
+const ACP_STDIO_ENTRY = join('dist', 'acp-stdio.mjs')
+/** The stable public fail-closed codes of the trusted-profile stdio command. */
+const ACP_HOST_NOT_READY = 'ACP_STDIO_HOST_NOT_READY'
+const ACP_LISTENER_DISABLED = 'ACP_STDIO_LISTENER_DISABLED'
 const KEEP = process.env.FRESH_PROFILE_KEEP === '1'
 const REPORT_PATH = process.env.FRESH_PROFILE_REPORT
 const FAILPOINT = process.env.FRESH_PROFILE_FAILPOINT ?? ''
+/**
+ * The CONTROLLED negative of the ACP stdio exit classification: withhold the
+ * client close so the public child never receives EOF. The gate must then FAIL
+ * as a non-natural exit even though the owned group is cleaned up — a
+ * successful emergency cleanup is resource reclamation, never transport proof.
+ */
+const ACP_STDIO_HOLD_OPEN_FAILPOINT = 'acp-stdio-hold-open'
 
 export class FreshProfileGateError extends Error {
   constructor(code, message, details = {}) {
@@ -470,6 +500,54 @@ export function assertSingleHost(facts, expectedIdentity, label, identityOf = pr
   return current
 }
 
+/** Every live OS process running THIS installed profile's ACP stdio Adapter. */
+function liveAdapterProcesses(profilePackage) {
+  const expected = join(realpathSync(profilePackage), ACP_STDIO_ENTRY)
+  const ps = spawnSync('ps', ['-A', '-o', 'pid=,command='], { encoding: 'utf8' })
+  if (ps.status !== 0) fail('A2_QUISCENCE_UNPROVEN', `the process table could not be read: ${resultText(ps)}`)
+  return ps.stdout.split('\n').filter(line => line.includes(expected))
+}
+
+/**
+ * Validate the COMPLETE captured stdout as newline-delimited JSON-RPC 2.0:
+ * one terminated line per frame, no banner/help/log bytes around them, and no
+ * lossy UTF-8 decoding. The frame count and byte length are recorded, never
+ * pinned.
+ */
+function protocolStdout(raw) {
+  if (raw.length === 0) return { valid: false, frames: 0 }
+  let text
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(raw)
+  } catch {
+    return { valid: false, frames: 0 }
+  }
+  if (!text.endsWith('\n')) return { valid: false, frames: 0 }
+  let frames = 0
+  for (const line of text.slice(0, -1).split('\n')) {
+    let value
+    try {
+      value = JSON.parse(line)
+    } catch {
+      return { valid: false, frames }
+    }
+    if (value === null || typeof value !== 'object' || Array.isArray(value) || value.jsonrpc !== '2.0') {
+      return { valid: false, frames }
+    }
+    frames += 1
+  }
+  return { valid: frames > 0, frames }
+}
+
+/** Await one owned child's real OS close with a bounded timer that is cleared. */
+function awaitChildClose(exit, timeoutMs) {
+  let timer
+  const deadline = new Promise((resolveDeadline) => {
+    timer = setTimeout(() => resolveDeadline({ code: null, signal: null, timedOut: true }), timeoutMs)
+  })
+  return Promise.race([exit, deadline]).finally(() => clearTimeout(timer))
+}
+
 async function quiesceDaemon({ dsh, profile, daemon }) {
   try { daemon?.tmux.stop() } catch { /* already gone */ }
   try {
@@ -506,7 +584,7 @@ function daemonStatus(dsh, profileDir, env) {
   return { status: result.status, fields }
 }
 
-async function runLiveEvidence({ profile, profileRoot, bundled, workDir }) {
+async function runLiveEvidence({ profile, profileRoot, bundled, workDir, candidate, acpStdio }) {
   const dsh = dshInvocation(profile.harnessDir)
   const direct = await runPaintedSurface({
     workDir,
@@ -540,6 +618,224 @@ async function runLiveEvidence({ profile, profileRoot, bundled, workDir }) {
     const hostIdentity = assertSingleHost(beforeExit, undefined, 'before Client exit')
     assert(beforeExit.client.length === 1, `expected one Daemon Client process, saw ${beforeExit.client.length}`, 'DAEMON_CLIENT_FAILURE')
     failpoint('after-daemon-start')
+    if (acpStdio !== undefined) {
+      // A2: the pristine-profile public ACP stdio qualification. It proves the
+      // public command against THIS Host/TUI; the Session/Turn matrix stays
+      // with the inherited packed `acp.stdio-bridge-a1` case.
+      const tuiClientPid = beforeExit.client[0].pid
+      const acpScope = createSplitProcessScope()
+      const acpRequestId = `fresh-a2-acp-access-${String(process.pid)}-${Date.now().toString(36)}`
+      let acpPeer
+      let listenerSubmitted = false
+      let acpError
+      try {
+        // A2-LISTENER-OFF: a fresh Host is READY with ACP off, and the public
+        // command must fail closed without enabling anything or replacing Host.
+        const offStatus = daemonStatus(dsh, profile.profileDir, profile.env)
+        assert(offStatus.status === 0 && offStatus.fields.host === 'ready',
+          `daemon status did not report a ready Host before the ACP checks: ${JSON.stringify(offStatus.fields)}`, 'DAEMON_HOST_FAILURE')
+        assert(offStatus.fields.acp === 'disabled',
+          `a fresh profile must start with acp=disabled, saw ${JSON.stringify(offStatus.fields)}`, 'A2_IDENTITY_MISMATCH')
+        assert(offStatus.fields['acp-socket'] === undefined,
+          'the default-off Host already advertises an ACP socket', 'A2_IDENTITY_MISMATCH')
+        const offCommand = runDsh(dsh, ['--profile', 'pi-tui', 'acp', 'stdio'], profile.profileDir, profile.env)
+        assert(offCommand.status === 3,
+          `dsh --profile pi-tui acp stdio with the default-off listener exited ${String(offCommand.status)}, expected 3: ${redact(resultText(offCommand))}`,
+          'A2_PUBLIC_LISTENER_OFF_NOT_FAIL_CLOSED')
+        assert((offCommand.stdout ?? '') === '',
+          `the default-off acp stdio command wrote ${String(Buffer.byteLength(offCommand.stdout ?? ''))} stdout bytes`, 'A2_STDOUT_NON_PROTOCOL')
+        assert((offCommand.stderr ?? '').includes(ACP_LISTENER_DISABLED),
+          `the default-off acp stdio stderr lacks ${ACP_LISTENER_DISABLED}: ${redact(offCommand.stderr ?? '')}`,
+          'A2_PUBLIC_LISTENER_OFF_NOT_FAIL_CLOSED')
+        assertSingleHost(processFacts(profile.profileDir, profile.dshHome), hostIdentity, 'after the default-off stdio command')
+        assert(daemon.tmux.hasSession(), 'the default-off acp stdio command exited the running TUI')
+        acpStdio.listenerOff = {
+          acp: offStatus.fields.acp,
+          socketPresent: false,
+          exitCode: offCommand.status,
+          stdoutBytes: Buffer.byteLength(offCommand.stdout ?? ''),
+          stderrCode: ACP_LISTENER_DISABLED,
+          hostIdentityPreserved: true,
+        }
+        // A2-EXPLICIT-ON: the SAME authenticated Host access the `/acp` command
+        // uses. The Peer is test setup only and never answers ACP itself.
+        acpPeer = new acpScope.EntryProcess('peer', profile.entries.client, {
+          ...profile.base,
+          env: { ...profile.env, SPLIT_PROCESS_CLIENT_MODE: 'peer' },
+        })
+        await acpPeer.waitFor(record => record.m4a0 === 'ready', 'pristine-profile ACP access peer ready', 180_000)
+        acpPeer.send({ op: 'qualification-acp-access', requestId: acpRequestId, acpEnabled: true })
+        const enabled = await acpPeer.waitFor(record => record.op === 'acp-access' && record.requestId === acpRequestId,
+          'pristine-profile ACP access enable', 120_000)
+        assert(enabled.ok === true, `the Host refused the explicit ACP enable: ${String(enabled.errorCode ?? 'unknown')}`, 'A2_IDENTITY_MISMATCH')
+        assert(enabled.status?.state === 'enabled',
+          `the Host ACP listener is ${JSON.stringify(enabled.status?.state)}, expected enabled`, 'A2_IDENTITY_MISMATCH')
+        listenerSubmitted = true
+        const onStatus = daemonStatus(dsh, profile.profileDir, profile.env)
+        assert(onStatus.status === 0 && onStatus.fields.host === 'ready' && onStatus.fields.acp === 'enabled',
+          `the public daemon status did not confirm the explicitly enabled listener: ${JSON.stringify(onStatus.fields)}`, 'A2_IDENTITY_MISMATCH')
+        assert(typeof onStatus.fields['acp-socket'] === 'string' && onStatus.fields['acp-socket'] !== '',
+          'the enabled listener advertises no public ACP socket', 'A2_IDENTITY_MISMATCH')
+        assertSingleHost(processFacts(profile.profileDir, profile.dshHome), hostIdentity, 'after the ACP enable')
+        // A2-STDIO-INIT: the official SDK over the REAL public process.
+        const command = spawn(profile.dshInvocation[0], [profile.dshInvocation[1], '--profile', 'pi-tui', 'acp', 'stdio'], {
+          cwd: profile.profileDir,
+          env: profile.env,
+          stdio: ['pipe', 'pipe', 'pipe'],
+          detached: true,
+        })
+        const rawChunks = []
+        let stderrBytes = 0
+        const tap = new Transform({
+          transform: (chunk, _encoding, callback) => {
+            rawChunks.push(Buffer.from(chunk))
+            callback(null, chunk)
+          },
+        })
+        command.stdout.pipe(tap)
+        command.stderr.on('data', (chunk) => { stderrBytes += chunk.length })
+        const exit = new Promise((resolveExit) => {
+          command.once('close', (code, signal) => resolveExit({ code, signal, timedOut: false }))
+        })
+        let connection
+        let acpInitialized
+        let acpExitCode
+        let liveAdapterCount
+        let transportFailure
+        try {
+          connection = acp.client({ name: 'fresh-profile-a2-qualification' })
+            .connect(acp.ndJsonStream(Writable.toWeb(command.stdin), Readable.toWeb(tap)))
+          let initTimer
+          acpInitialized = await Promise.race([
+            connection.agent.request(acp.methods.agent.initialize, {
+              protocolVersion: acp.PROTOCOL_VERSION,
+              clientCapabilities: {},
+            }),
+            new Promise((_resolve, rejectWait) => {
+              initTimer = setTimeout(() => rejectWait(new Error('the public ACP stdio initialize did not answer')), 60_000)
+            }),
+          ]).finally(() => clearTimeout(initTimer))
+          assert(acpInitialized?.protocolVersion === 1,
+            `the Host did not answer ACP v1: ${JSON.stringify(acpInitialized)}`, 'A2_STDIO_PROTOCOL_FAILURE')
+          assert(acpInitialized?.agentInfo?.name === 'dsh-pi-tui',
+            `agentInfo.name is ${JSON.stringify(acpInitialized?.agentInfo?.name)}, expected dsh-pi-tui`, 'A2_IDENTITY_MISMATCH')
+          assert(acpInitialized?.agentInfo?.version === candidate.manifest.version,
+            `agentInfo.version is ${JSON.stringify(acpInitialized?.agentInfo?.version)}, expected the installed candidate ${candidate.manifest.version}`,
+            'A2_EVIDENCE_MISMATCH')
+          // Positive control for the installed entry: the public command really
+          // runs THIS profile's adapter, so the post-exit absence probe below
+          // discriminates instead of passing vacuously.
+          liveAdapterCount = liveAdapterProcesses(profile.profilePackage).length
+          assert(liveAdapterCount === 1,
+            `the public acp stdio command must own exactly one live installed adapter, saw ${String(liveAdapterCount)}`,
+            'A2_QUISCENCE_UNPROVEN')
+          const paintedDuring = daemon.tmux.capturePane()
+          assert(/[╭╮╰╯]/u.test(paintedDuring) && /type a message|New session|DeepSeek/u.test(paintedDuring),
+            'the TUI frame was no longer painted while the ACP client was attached', 'A2_COEXIST_FAILURE')
+        } catch (error) {
+          transportFailure = error
+        } finally {
+          // The hold-open failpoint withholds the client close on purpose, so
+          // the CONTROLLED negative proves the timeout branch below can never
+          // produce a PASS. A normal run always closes the SDK connection and
+          // the child's stdin, then waits for the REAL OS close.
+          if (FAILPOINT !== ACP_STDIO_HOLD_OPEN_FAILPOINT) {
+            try { connection?.close() } catch { /* already closed */ }
+            try { command.stdin.end() } catch { /* already ended */ }
+          }
+          const closed = await awaitChildClose(exit, 60_000)
+          let exitFailure
+          if (closed.timedOut) {
+            // Emergency reclamation is NOT transport success: a child that
+            // never exited naturally fails this qualification even when the
+            // owned group is provably stopped.
+            const stopped = await stopOwnedGroup(command, 'SIGTERM')
+            const quiesced = stopped && !groupStillAlive(command)
+            exitFailure = new FreshProfileGateError(quiesced ? 'ACP_STDIO_EXIT_TIMEOUT' : 'A2_QUISCENCE_UNPROVEN',
+              `the public acp stdio child did not exit naturally after its client closed (emergency owned-group cleanup ${quiesced ? 'succeeded' : 'unproven'}; reclamation is not transport success)`)
+          } else if (closed.code !== 0) {
+            exitFailure = new FreshProfileGateError('ACP_STDIO_EXIT_NONZERO',
+              `the public acp stdio command exited ${String(closed.code)} (${String(closed.signal)})`)
+          } else if (groupStillAlive(command)) {
+            exitFailure = new FreshProfileGateError('A2_QUISCENCE_UNPROVEN',
+              'the public ACP stdio process group still has a live member after its close')
+          } else {
+            // Only a natural, observed OS close code is ever recorded as the
+            // successful transport exit.
+            acpExitCode = closed.code
+          }
+          transportFailure ??= exitFailure
+        }
+        if (transportFailure !== undefined) throw transportFailure
+        assert(acpExitCode === 0,
+          `the public acp stdio command must exit naturally with code 0, saw ${String(acpExitCode)}`, 'ACP_STDIO_EXIT_NONZERO')
+        const raw = Buffer.concat(rawChunks)
+        const frames = protocolStdout(raw)
+        assert(frames.valid,
+          `the public acp stdio stdout is not complete NDJSON JSON-RPC: ${redact(raw.toString('utf8').slice(0, 400))}`, 'A2_STDOUT_NON_PROTOCOL')
+        const afterFacts = processFacts(profile.profileDir, profile.dshHome)
+        assertSingleHost(afterFacts, hostIdentity, 'after the ACP stdio client exit')
+        assert(afterFacts.client.some(entry => entry.pid === tuiClientPid),
+          'the ACP stdio client exit stopped the running TUI Client', 'A2_COEXIST_FAILURE')
+        const afterExitStatus = daemonStatus(dsh, profile.profileDir, profile.env)
+        assert(afterExitStatus.status === 0 && afterExitStatus.fields.host === 'ready',
+          `the Host was not ready after the ACP client exit: ${JSON.stringify(afterExitStatus.fields)}`, 'A2_COEXIST_FAILURE')
+        assert(liveAdapterProcesses(profile.profilePackage).length === 0, 'an ACP stdio adapter outlived its client', 'A2_QUISCENCE_UNPROVEN')
+        acpStdio.explicitEnable = { state: 'enabled', publicAcp: onStatus.fields.acp, socketPresent: true }
+        acpStdio.initialize = {
+          protocolVersion: acpInitialized.protocolVersion,
+          agentName: acpInitialized.agentInfo.name,
+          agentVersion: acpInitialized.agentInfo.version,
+        }
+        acpStdio.stdout = { bytes: raw.length, frames: frames.frames, sha256: createHash('sha256').update(raw).digest('hex') }
+        acpStdio.exitCode = acpExitCode
+        acpStdio.stderrBytes = stderrBytes
+        acpStdio.liveAdapters = liveAdapterCount
+        acpStdio.adapterQuiesced = true
+        acpStdio.hostIdentity = hostIdentity
+        acpStdio.hostReadyAfterExit = afterExitStatus.fields.host === 'ready'
+        acpStdio.tuiSurvived = true
+        // The success REPORT itself must carry the observed natural exit: an
+        // emergency cleanup or a synthetic constant can never satisfy this.
+        assert(acpStdio.exitCode === 0,
+          'the A2 success report must record the observed natural child exit code 0', 'ACP_STDIO_EXIT_NONZERO')
+      } catch (error) {
+        acpError = error
+      } finally {
+        if (listenerSubmitted) {
+          try {
+            const disableId = `${acpRequestId}-disable`
+            acpPeer.send({ op: 'qualification-acp-access', requestId: disableId, acpEnabled: false })
+            const disabled = await acpPeer.waitFor(record => record.op === 'acp-access' && record.requestId === disableId,
+              'pristine-profile ACP access disable', 120_000)
+            assert(disabled.ok === true,
+              `the Host refused to restore the default-off listener: ${String(disabled.errorCode ?? 'unknown')}`, 'A2_QUISCENCE_UNPROVEN')
+            assert(disabled.status?.state === 'disabled',
+              `the Host ACP listener is ${JSON.stringify(disabled.status?.state)} after the restore, expected disabled`, 'A2_QUISCENCE_UNPROVEN')
+            const restored = daemonStatus(dsh, profile.profileDir, profile.env)
+            assert(restored.status === 0 && restored.fields.host === 'ready'
+              && restored.fields.acp === 'disabled' && restored.fields['acp-socket'] === undefined,
+              `the public daemon status did not return to the default-off listener: ${JSON.stringify(restored.fields)}`, 'A2_QUISCENCE_UNPROVEN')
+            acpStdio.listenerRestoredOff = true
+          } catch (error) {
+            acpError ??= error
+          }
+        }
+        try {
+          if (acpPeer !== undefined) await acpPeer.shutdown()
+        } catch (error) {
+          acpError ??= error
+        }
+        if (acpScope.darwinScope !== undefined && process.platform === 'darwin') {
+          try { await acpScope.darwinScope.stopServer() } catch { /* best effort */ }
+        }
+      }
+      if (acpError !== undefined) throw acpError
+      const settled = processFacts(profile.profileDir, profile.dshHome)
+      assert(settled.client.length === 1 && settled.client[0].pid === tuiClientPid,
+        `the ACP qualification left an extra Client process: ${JSON.stringify(settled.client.map(entry => entry.pid))}`, 'A2_QUISCENCE_UNPROVEN')
+      acpStdio.peerQuiesced = true
+    }
     await finishPaintedSurface({ ...daemon, label: 'daemon' })
     await waitFor(() => processFacts(profile.profileDir, profile.dshHome).client.length === 0, 'public Daemon Client exit', 90_000)
     assertSingleHost(processFacts(profile.profileDir, profile.dshHome), hostIdentity, 'after Client exit')
@@ -572,6 +868,7 @@ async function runLiveEvidence({ profile, profileRoot, bundled, workDir }) {
         stopCommandStatus: stop.status,
         ...domains,
       },
+      ...(acpStdio === undefined ? {} : { acpStdio }),
     }
   } finally {
     if (!normalCompletion) await quiesceDaemon({ dsh, profile, daemon })
@@ -592,7 +889,51 @@ async function runScenario({ candidate, dshTarget, workDir }) {
   assertOrdinaryDependencies(profile.profilePackage)
   const profileRoot = assertProfileRoot(profile.profileDir, [EXPECTED_NAME], { requirePristine: true })
   const bundled = assertBundledClientChunk(profile.profilePackage)
-  return { buildPolicyPreseeded: profile.buildPolicyPreseeded, ...(await runLiveEvidence({ profile, profileRoot, bundled, workDir })) }
+  // A2-PUBLIC-NO-HOST: before this run ever starts a Host, the pristine install
+  // must expose the public `acp stdio` grammar and fail closed with the stable
+  // missing-Host code, without creating or enabling anything.
+  const installedAcpEntry = join(profile.profilePackage, ACP_STDIO_ENTRY)
+  assert(existsSync(installedAcpEntry) && statSync(installedAcpEntry).isFile(),
+    `the installed candidate carries no regular ACP stdio adapter: ${installedAcpEntry}`, 'PROFILE_ACP_ENTRY_INVALID')
+  assert(profile.manifest.bin === undefined, 'the installed candidate must not add a package bin', 'PROFILE_ACP_ENTRY_INVALID')
+  assert(!Object.keys(profile.manifest.exports ?? {}).includes('./acp-stdio'),
+    'the internal ACP stdio adapter must not become a public export', 'PROFILE_ACP_ENTRY_INVALID')
+  const acpHelp = runDsh(profile.dshInvocation, ['--profile', 'pi-tui', 'acp', '--help'], profile.profileDir, profile.env)
+  assert(acpHelp.status === 0,
+    `dsh --profile pi-tui acp --help exited ${String(acpHelp.status)}: ${redact(resultText(acpHelp))}`, 'PUBLIC_ACP_ENTRY_INVALID')
+  assert((acpHelp.stdout ?? '').includes('stdio'),
+    'the public acp --help does not list the stdio command', 'PUBLIC_ACP_ENTRY_INVALID')
+  const acpNoHost = runDsh(profile.dshInvocation, ['--profile', 'pi-tui', 'acp', 'stdio'], profile.profileDir, profile.env)
+  assert(acpNoHost.status === 3,
+    `dsh --profile pi-tui acp stdio without a Host exited ${String(acpNoHost.status)}, expected 3: ${redact(resultText(acpNoHost))}`,
+    'A2_PUBLIC_NO_HOST_NOT_FAIL_CLOSED')
+  assert((acpNoHost.stdout ?? '') === '',
+    `the no-Host acp stdio command wrote ${String(Buffer.byteLength(acpNoHost.stdout ?? ''))} stdout bytes`, 'A2_STDOUT_NON_PROTOCOL')
+  assert((acpNoHost.stderr ?? '').includes(ACP_HOST_NOT_READY),
+    `the no-Host acp stdio stderr lacks ${ACP_HOST_NOT_READY}: ${redact(acpNoHost.stderr ?? '')}`, 'A2_PUBLIC_NO_HOST_NOT_FAIL_CLOSED')
+  const noHostFacts = processFacts(profile.profileDir, profile.dshHome)
+  assert(noHostFacts.host.length === 0 && noHostFacts.client.length === 0,
+    `the no-Host acp stdio command left processes behind: ${JSON.stringify({ hosts: noHostFacts.host.length, clients: noHostFacts.client.length })}`,
+    'DAEMON_HOST_IDENTITY_FAILURE')
+  const noHostAdapters = liveAdapterProcesses(profile.profilePackage)
+  assert(noHostAdapters.length === 0,
+    'the no-Host acp stdio command left an ACP stdio adapter process', 'A2_QUISCENCE_UNPROVEN')
+  const acpStdio = {
+    noHost: {
+      installedEntry: ACP_STDIO_ENTRY,
+      helpExitCode: acpHelp.status,
+      exitCode: acpNoHost.status,
+      stdoutBytes: Buffer.byteLength(acpNoHost.stdout ?? ''),
+      stderrCode: ACP_HOST_NOT_READY,
+      liveHosts: noHostFacts.host.length,
+      liveClients: noHostFacts.client.length,
+      liveAdapters: noHostAdapters.length,
+    },
+  }
+  return {
+    buildPolicyPreseeded: profile.buildPolicyPreseeded,
+    ...(await runLiveEvidence({ profile, profileRoot, bundled, workDir, candidate, acpStdio })),
+  }
 }
 
 /**
