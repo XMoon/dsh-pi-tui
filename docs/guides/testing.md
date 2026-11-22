@@ -460,7 +460,26 @@ brand-new isolated Profile that installs the candidate ONCE with
   survives the Client exit and is then explicitly stopped;
 - the Client process resolves no Store closure from the Profile or the source
   checkout, and every official Client factory receives the same platform Store
-  namespace object.
+  namespace object;
+- the installed `dist/acp-stdio.mjs` entry is a regular file while the manifest
+  carries no package `bin` and no public `./acp-stdio` export;
+  `dsh --profile pi-tui acp --help` succeeds and lists `stdio`; and the PUBLIC
+  `dsh --profile pi-tui acp stdio` command fails closed with the stable
+  missing-Host code (exit 3, empty stdout) before this run owns any Host, fails
+  closed with the stable default-off listener code while a ready Host's TUI is
+  still mounted, and — only after the SAME authenticated Host access that
+  `/acp` uses explicitly enables the listener — drives the official ACP SDK
+  `initialize` over a real OS child of that public command. Every captured
+  stdout byte must be JSON-RPC NDJSON, the child's exit must quiesce its own
+  process group, the Host/TUI identities must survive, and the listener returns
+  to disabled afterwards.
+
+The ACP SDK client is a test-only consumer here: this lane does not create a
+Turn and does not prove the Session/Turn/approval business matrix. The packed
+`acp.stdio-bridge-a1` Split selected case owns that matrix and runs against the
+same candidate; the Fresh lane owns the single-package distribution entry, its
+default-off/missing-Host fail-closed boundaries and its coexistence with the
+running Host.
 
 Passing an earlier published tarball with `--upgrade-old <path>` additionally
 runs the historical upgrade paths against the same candidate; this is

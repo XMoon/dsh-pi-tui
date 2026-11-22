@@ -135,7 +135,20 @@ dsh --profile pi-tui web status
 
 Also available: `web disable` / `web open`. The commands do **not** start a Host or create a Session. The `web url` output contains an authentication token: handle it as a secret. The official Web page lets users select sessions held by that Host.
 
-**ACP v1** is a default-off, same-user local Unix-socket interface. `/acp` in a Daemon TUI inspects/toggles the live listener; `/settings → General → Start ACP automatically` controls the next cold Host start. Headless clients can discover a positively verified `acp` status/socket via `daemon status`. ACP supports a bounded `initialize` / `session/new|resume|prompt|cancel|close` subset plus negotiated image input; it does not implement `session/list`, `session/load` or MCP Server configuration over ACP. One ACP connection has at most one Session View and each Session at most one ACP View, with no such restriction on TUI Views. An executable [ACP SDK example and connection procedure](docs/guides/daemon.md#local-acp-v1-sdk-client-example) is in the Daemon guide.
+**ACP v1** is a default-off, same-user local interface. An external ACP client joins through the current Profile's public `dsh --profile pi-tui acp stdio` command: it relays that client's stdio to the existing Host's local ACP listener. It creates **no** second Host, Agent, Session or Writer and never starts the Host or enables the listener by itself. It is the stdio command you configure in an ACP client, not a command whose interactive terminal is expected to show a TUI.
+
+Preparation: start and confirm the Host, then switch the listener to **Enabled** from a connected Daemon TUI with `/acp` (`/settings → General → Start ACP automatically` only controls the next cold Host start), confirm `acp=enabled` with `daemon status`, and only then put the command into the external ACP client's stdio command configuration:
+
+~~~sh
+dsh --profile pi-tui daemon start
+dsh --profile pi-tui daemon status        # host=ready, acp=enabled
+# In the external ACP client's stdio command configuration:
+dsh --profile pi-tui acp stdio
+~~~
+
+The trusted default Profile keeps that command's stdout to ACP protocol bytes; a third-party plugin that writes stdout during early startup can still pollute it (an accepted deployment constraint). Local ACP supports `initialize`, `session/new|resume|prompt|cancel|close`, capability-negotiated images, and **Agent-scoped stdio** MCP servers declared by the client in `session/new|resume` (at most 4 per Session). One ACP connection may hold **up to eight** Session Views; a Host Session is held by at most one ACP connection at a time, with no such limit on TUI Views. It provides **no** Host-wide MCP server management and does not support HTTP/SSE, `session/list`, `session/load` or unproven file transfer. This remains **Limited ACP v1**, not a full ACP v1. See [the external ACP client section of the Daemon guide](docs/guides/daemon.md#external-acp-client-over-stdio); the direct SDK connection example remains advanced usage in the [ACP v1 SDK example](docs/guides/daemon.md#local-acp-v1-sdk-client-example).
+
+> **Release boundary:** `acp stdio` belongs to the current `main` A1/A2 candidate implementation. The published **v0.5.8** release files do **not** contain this new entry, so the “0.5.8 installation” section above is not an installation guarantee for that command. Shipping it to npm `@latest` needs an independent future release; verify the version you actually installed with `dsh --profile pi-tui acp --help`.
 
 When launched inside [Herdr](https://github.com/herdrdev/herdr), the TUI can report Agent status and provide Profile-pinned recovery commands for durable Sessions where the Herdr Client supports them.
 
