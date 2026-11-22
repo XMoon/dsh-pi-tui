@@ -29,10 +29,13 @@
  * default-off listener, an explicit Host access enable through the SAME
  * authenticated peer the `/acp` command uses, and the official ACP SDK
  * `initialize` over a real OS child's stdio. Every captured stdout byte must be
- * JSON-RPC NDJSON, and the client's exit must quiesce its own process group
- * while the Host/TUI identities survive and the listener returns to off. The
- * Session/Turn/approval matrix is NOT here: the packed `acp.stdio-bridge-a1`
- * Split case owns it.
+ * JSON-RPC NDJSON, and the client's exit must be a NATURAL OS close with code 0:
+ * a child that has to be reclaimed by the owned process group fails the gate
+ * even when that emergency cleanup succeeds. The controlled
+ * `FRESH_PROFILE_FAILPOINT=acp-stdio-hold-open` run withholds the client close
+ * to prove that negative branch can never produce a PASS. The
+ * Session/Turn/approval matrix is NOT here: the packed
+ * `acp.stdio-bridge-a1` Split case owns it.
  *
  * Usage:
  *   node scripts/fresh-profile-install-smoke.mjs <absolute-candidate.tgz> [--dsh <0.2.2-rc.X>]
@@ -81,6 +84,13 @@ const ACP_LISTENER_DISABLED = 'ACP_STDIO_LISTENER_DISABLED'
 const KEEP = process.env.FRESH_PROFILE_KEEP === '1'
 const REPORT_PATH = process.env.FRESH_PROFILE_REPORT
 const FAILPOINT = process.env.FRESH_PROFILE_FAILPOINT ?? ''
+/**
+ * The CONTROLLED negative of the ACP stdio exit classification: withhold the
+ * client close so the public child never receives EOF. The gate must then FAIL
+ * as a non-natural exit even though the owned group is cleaned up — a
+ * successful emergency cleanup is resource reclamation, never transport proof.
+ */
+const ACP_STDIO_HOLD_OPEN_FAILPOINT = 'acp-stdio-hold-open'
 
 export class FreshProfileGateError extends Error {
   constructor(code, message, details = {}) {
@@ -691,6 +701,7 @@ async function runLiveEvidence({ profile, profileRoot, bundled, workDir, candida
         let acpInitialized
         let acpExitCode
         let liveAdapterCount
+        let transportFailure
         try {
           connection = acp.client({ name: 'fresh-profile-a2-qualification' })
             .connect(acp.ndJsonStream(Writable.toWeb(command.stdin), Readable.toWeb(tap)))
@@ -721,20 +732,43 @@ async function runLiveEvidence({ profile, profileRoot, bundled, workDir, candida
           const paintedDuring = daemon.tmux.capturePane()
           assert(/[╭╮╰╯]/u.test(paintedDuring) && /type a message|New session|DeepSeek/u.test(paintedDuring),
             'the TUI frame was no longer painted while the ACP client was attached', 'A2_COEXIST_FAILURE')
+        } catch (error) {
+          transportFailure = error
         } finally {
-          try { connection?.close() } catch { /* already closed */ }
-          try { command.stdin.end() } catch { /* already ended */ }
+          // The hold-open failpoint withholds the client close on purpose, so
+          // the CONTROLLED negative proves the timeout branch below can never
+          // produce a PASS. A normal run always closes the SDK connection and
+          // the child's stdin, then waits for the REAL OS close.
+          if (FAILPOINT !== ACP_STDIO_HOLD_OPEN_FAILPOINT) {
+            try { connection?.close() } catch { /* already closed */ }
+            try { command.stdin.end() } catch { /* already ended */ }
+          }
           const closed = await awaitChildClose(exit, 60_000)
+          let exitFailure
           if (closed.timedOut) {
+            // Emergency reclamation is NOT transport success: a child that
+            // never exited naturally fails this qualification even when the
+            // owned group is provably stopped.
             const stopped = await stopOwnedGroup(command, 'SIGTERM')
-            assert(stopped, 'the public ACP stdio process group did not quiesce after the client closed', 'A2_QUISCENCE_UNPROVEN')
+            const quiesced = stopped && !groupStillAlive(command)
+            exitFailure = new FreshProfileGateError(quiesced ? 'ACP_STDIO_EXIT_TIMEOUT' : 'A2_QUISCENCE_UNPROVEN',
+              `the public acp stdio child did not exit naturally after its client closed (emergency owned-group cleanup ${quiesced ? 'succeeded' : 'unproven'}; reclamation is not transport success)`)
+          } else if (closed.code !== 0) {
+            exitFailure = new FreshProfileGateError('ACP_STDIO_EXIT_NONZERO',
+              `the public acp stdio command exited ${String(closed.code)} (${String(closed.signal)})`)
+          } else if (groupStillAlive(command)) {
+            exitFailure = new FreshProfileGateError('A2_QUISCENCE_UNPROVEN',
+              'the public ACP stdio process group still has a live member after its close')
           } else {
-            assert(closed.code === 0,
-              `the public acp stdio command exited ${String(closed.code)} (${String(closed.signal)})`, 'A2_STDIO_PROTOCOL_FAILURE')
+            // Only a natural, observed OS close code is ever recorded as the
+            // successful transport exit.
             acpExitCode = closed.code
           }
-          assert(!groupStillAlive(command), 'the public ACP stdio process group still has a live member after its close', 'A2_QUISCENCE_UNPROVEN')
+          transportFailure ??= exitFailure
         }
+        if (transportFailure !== undefined) throw transportFailure
+        assert(acpExitCode === 0,
+          `the public acp stdio command must exit naturally with code 0, saw ${String(acpExitCode)}`, 'ACP_STDIO_EXIT_NONZERO')
         const raw = Buffer.concat(rawChunks)
         const frames = protocolStdout(raw)
         assert(frames.valid,
@@ -761,6 +795,10 @@ async function runLiveEvidence({ profile, profileRoot, bundled, workDir, candida
         acpStdio.hostIdentity = hostIdentity
         acpStdio.hostReadyAfterExit = afterExitStatus.fields.host === 'ready'
         acpStdio.tuiSurvived = true
+        // The success REPORT itself must carry the observed natural exit: an
+        // emergency cleanup or a synthetic constant can never satisfy this.
+        assert(acpStdio.exitCode === 0,
+          'the A2 success report must record the observed natural child exit code 0', 'ACP_STDIO_EXIT_NONZERO')
       } catch (error) {
         acpError = error
       } finally {

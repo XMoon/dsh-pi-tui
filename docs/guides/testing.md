@@ -470,9 +470,11 @@ brand-new isolated Profile that installs the candidate ONCE with
   still mounted, and — only after the SAME authenticated Host access that
   `/acp` uses explicitly enables the listener — drives the official ACP SDK
   `initialize` over a real OS child of that public command. Every captured
-  stdout byte must be JSON-RPC NDJSON, the child's exit must quiesce its own
-  process group, the Host/TUI identities must survive, and the listener returns
-  to disabled afterwards.
+  stdout byte must be JSON-RPC NDJSON, the child must exit through a natural OS
+  close with code 0, the Host/TUI identities must survive, and the listener
+  returns to disabled afterwards. A child that does not exit naturally within
+  the bounded window FAILS the gate even when the emergency owned-group cleanup
+  succeeds: successful reclamation is resource proof, never transport proof.
 
 The ACP SDK client is a test-only consumer here: this lane does not create a
 Turn and does not prove the Session/Turn/approval business matrix. The packed
