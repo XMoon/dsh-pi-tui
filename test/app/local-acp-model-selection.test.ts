@@ -19,6 +19,7 @@ import {
   AcpSessionModelService,
   type AcpModelAgent,
   type AcpModelCatalog,
+  type AcpModelCurrentness,
   type AcpModelHost,
   type AcpModelOptionRequest,
   type AcpModelSelection,
@@ -61,6 +62,8 @@ class FakeAgent implements AcpModelAgent {
   maintenanceCalls = 0
   maintenanceActive = false
   maintenanceSignal: AbortSignal | undefined
+  /** A test-only hook executing synchronously as the maintenance phase is claimed. */
+  beforeMaintenance: (() => void) | undefined
   private selection: AcpModelSelection | undefined
 
   constructor(id: string, selection?: AcpModelSelection) {
@@ -100,6 +103,7 @@ class FakeAgent implements AcpModelAgent {
     this.maintenanceActive = true
     const controller = new AbortController()
     this.maintenanceSignal = controller.signal
+    this.beforeMaintenance?.()
     return (async () => {
       try {
         return await task(controller.signal)
@@ -216,7 +220,7 @@ function effortError(): Error {
 }
 
 const OK_SIGNAL = new AbortController().signal
-const ALWAYS_CURRENT = (): boolean => true
+const ALWAYS_CURRENT = (): AcpModelCurrentness => 'current'
 
 function request(configId: string, value: unknown): AcpModelOptionRequest {
   return { configId, value }
@@ -455,7 +459,7 @@ test('a View claim lost while the catalog is awaited is stale', async () => {
     session,
     request('model', modelValue('p1', 'b')),
     OK_SIGNAL,
-    () => false,
+    () => 'stale',
   )
   await Promise.resolve()
   gate.resolve()
@@ -530,6 +534,31 @@ test('the LLM capability validation rejects an effort the live adapter refuses',
     isModelError('LOCAL_ACP_MODEL_INVALID_OPTION'),
   )
   assert.equal(agent.appends.length, 0)
+})
+
+test('a prompt flight admitted during validation rejects VIEW_BUSY at the last maintenance gate', async () => {
+  const { host, agent } = baseHost({ provider: 'p1', model: 'a' })
+  const service = new AcpSessionModelService(host)
+  const session = host.sessions.get('S1') as object
+  let currentness: AcpModelCurrentness = 'current'
+  // The real View closure flips to `view-busy` when `session/prompt` installs
+  // `claim.inflight` during the catalog await. Flip it exactly when the
+  // maintenance phase is claimed to prove the LAST synchronous pre-append gate.
+  agent.beforeMaintenance = () => { currentness = 'view-busy' }
+
+  await assert.rejects(
+    service.selectSessionOnly(
+      agent,
+      session,
+      request('model', modelValue('p1', 'b')),
+      OK_SIGNAL,
+      () => currentness,
+    ),
+    isModelError('LOCAL_ACP_MODEL_VIEW_BUSY'),
+  )
+  assert.equal(agent.appends.length, 0, 'the in-flight prompt must not receive a model mutation')
+  assert.equal(agent.maintenanceCalls, 1, 'the busy decision happens inside the claimed maintenance gate')
+  assert.equal(host.defaultSaveCalls, 0)
 })
 
 test('selecting the same model keeps its explicit effort; an identical effort is a no-op', async () => {

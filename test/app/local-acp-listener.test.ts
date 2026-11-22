@@ -43,7 +43,7 @@ import {
   type HostAcpSessionAccess,
   type LiveAgentViewIdentity,
 } from '../../src/app/remote-process/local-acp-session-view.ts'
-import type { AcpModelOptionRequest } from '../../src/app/remote-process/local-acp-model-selection.ts'
+import type { AcpModelCurrentness, AcpModelOptionRequest } from '../../src/app/remote-process/local-acp-model-selection.ts'
 import { AcpModelError } from '../../src/app/remote-process/local-acp-model-selection.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 
@@ -1061,7 +1061,7 @@ function makeFakeAccess(options: {
     session: object,
     request: AcpModelOptionRequest,
     signal: AbortSignal,
-    stillCurrent: () => boolean,
+    stillCurrent: () => AcpModelCurrentness,
   ) => Promise<SessionConfigOption[]>
 } = {}): {
   access: HostAcpSessionAccess
@@ -1133,7 +1133,7 @@ function makeFakeAccess(options: {
         session: object,
         request: AcpModelOptionRequest,
         signal: AbortSignal,
-        stillCurrent: () => boolean,
+        stillCurrent: () => AcpModelCurrentness,
       ) {
         modelSelections.push(request)
         return options.selectModelOnly === undefined
@@ -2782,6 +2782,53 @@ test('ACP v1 config options are served over the real socket for new/resume/set_c
     const closed = (await client.next()) as { error?: { code: number; data?: { code?: string } } }
     assert.equal(closed.error?.code, -32602)
     assert.equal(closed.error?.data?.code, 'LOCAL_ACP_VIEW_NOT_OWNED')
+  } finally {
+    client.close()
+  }
+})
+
+test('a concurrent close during resume config read propagates STALE instead of a false success', async t => {
+  const { scope } = newScope(t)
+  let catalogStarted!: () => void
+  const started = new Promise<void>(resolveStarted => { catalogStarted = resolveStarted })
+  let releaseCatalog!: () => void
+  const catalogGate = new Promise<void>(resolveCatalog => { releaseCatalog = resolveCatalog })
+  let reads = 0
+  const fake = makeFakeAccess({
+    modelOptions: async () => {
+      reads += 1
+      if (reads === 1) {
+        catalogStarted()
+        await catalogGate
+      }
+      return configOptionsFor('["p1","a"]')
+    },
+  })
+  fake.seed('session-close-race', '/host/proj')
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-close-race', cwd: '/host/proj' } })
+    await started
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/close', params: { sessionId: 'session-close-race' } })
+    const closed = (await client.next()) as { id?: number; result?: unknown }
+    assert.equal(closed.id, 3)
+    assert.deepEqual(closed.result, {})
+    releaseCatalog()
+    const stale = (await client.next()) as { id?: number; error?: { code: number; data?: { code?: string } } }
+    assert.equal(stale.id, 2)
+    assert.equal(stale.error?.code, -32042)
+    assert.equal(stale.error?.data?.code, 'LOCAL_ACP_MODEL_STALE',
+      'the old resume must not report a successful attachment after its View closed')
+
+    // The same connection may attach a NEW View; it reads the catalog cleanly.
+    client.send({ jsonrpc: '2.0', id: 4, method: 'session/resume', params: { sessionId: 'session-close-race', cwd: '/host/proj' } })
+    const resumed = (await client.next()) as { id?: number; result?: { configOptions?: SessionConfigOption[] } }
+    assert.equal(resumed.id, 4)
+    assert.deepEqual(resumed.result?.configOptions, configOptionsFor('["p1","a"]'))
   } finally {
     client.close()
   }

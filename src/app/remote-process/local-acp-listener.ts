@@ -697,14 +697,19 @@ function buildAgentApp(
         ? new RequestError(error.rpcCode, error.message, { ...error.data, code: error.code })
         : error
     /**
-     * Read the optional config options of an already-attached View. A failed
-     * read never changes the committed Session/View success: the response omits
-     * the optional `configOptions` and the Host logs one fixed safe code.
+     * Read the optional config options of an already-attached View. ONLY a real
+     * model-catalog unavailability may omit the optional display; a stale,
+     * closed or foreign View identity is a lifecycle failure and must propagate
+     * through the normal JSON-RPC error boundary instead of falsely confirming
+     * an attachment that no longer exists.
      */
     const readConfigOptionsOrLog = async (sessionId: string): Promise<SessionConfigOption[] | undefined> => {
       try {
         return await views.modelOptions(view, access, sessionId)
       } catch (error) {
+        if (error instanceof LocalAcpViewError && error.code !== 'LOCAL_ACP_MODEL_UNAVAILABLE') {
+          throw error
+        }
         context.diag.warn('local-acp.model-catalog-unavailable', {
           code: 'LOCAL_ACP_MODEL_CATALOG_UNAVAILABLE',
           reason: error instanceof LocalAcpViewError ? error.code : 'LOCAL_ACP_MODEL_UNAVAILABLE',

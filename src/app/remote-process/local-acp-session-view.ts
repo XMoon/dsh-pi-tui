@@ -62,6 +62,7 @@ import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { observeSettled, runDetached } from '../../runtime/process/tasks.ts'
 import {
   AcpModelError,
+  type AcpModelCurrentness,
   type AcpModelErrorCode,
   type AcpModelOptionRequest,
 } from './local-acp-model-selection.ts'
@@ -172,7 +173,7 @@ export interface HostAcpSessionAccess {
     session: object,
     request: AcpModelOptionRequest,
     signal: AbortSignal,
-    stillCurrent: () => boolean,
+    stillCurrent: () => AcpModelCurrentness,
   ): Promise<SessionConfigOption[]>
 }
 
@@ -877,7 +878,11 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     }
     const agent = claim.exactAgent as LiveAgentViewIdentity
     const session = claim.exactSession as object
-    const stillCurrent = (): boolean => this.isStillAttached(state, claim, agent, session)
+    const stillCurrent = (): AcpModelCurrentness => {
+      if (!this.isStillAttached(state, claim, agent, session)) return 'stale'
+      if (claim.inflight !== undefined || claim.unclaimedHostObligation !== undefined) return 'view-busy'
+      return 'current'
+    }
     const options = await this.callModelAccess(() => access.selectModelOnly(
       agent,
       session,
@@ -889,7 +894,15 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       signal,
       stillCurrent,
     ))
-    if (!stillCurrent()) throw staleModelSelection()
+    const currentness = stillCurrent()
+    if (currentness === 'view-busy') {
+      throw new LocalAcpViewError(
+        'LOCAL_ACP_MODEL_VIEW_BUSY',
+        'a prompt is already in flight for this session view',
+        -32046,
+      )
+    }
+    if (currentness !== 'current') throw staleModelSelection()
     return options
   }
 

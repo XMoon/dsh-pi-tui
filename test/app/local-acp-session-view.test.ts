@@ -30,7 +30,7 @@ import {
   type HostAcpSessionAccess,
   type LiveAgentViewIdentity,
 } from '../../src/app/remote-process/local-acp-session-view.ts'
-import type { AcpModelOptionRequest } from '../../src/app/remote-process/local-acp-model-selection.ts'
+import { AcpModelError, type AcpModelCurrentness, type AcpModelOptionRequest } from '../../src/app/remote-process/local-acp-model-selection.ts'
 import { createHostAcpSessionAccess } from '../../src/app/remote-process/local-host-entry.ts'
 
 const QUIET_DIAG: Diag = {
@@ -206,6 +206,8 @@ class FakeAccess implements HostAcpSessionAccess {
     agent: LiveAgentViewIdentity,
     session: object,
     request: AcpModelOptionRequest,
+    signal: AbortSignal,
+    stillCurrent: () => AcpModelCurrentness,
   ) => Promise<SessionConfigOption[]> = async () => []
 
   async modelOptions(agent: LiveAgentViewIdentity, session: object): Promise<SessionConfigOption[]> {
@@ -217,11 +219,11 @@ class FakeAccess implements HostAcpSessionAccess {
     agent: LiveAgentViewIdentity,
     session: object,
     request: AcpModelOptionRequest,
-    _signal: AbortSignal,
-    _stillCurrent: () => boolean,
+    signal: AbortSignal,
+    stillCurrent: () => AcpModelCurrentness,
   ): Promise<SessionConfigOption[]> {
     this.selectModelCalls.push({ agent, session, request })
-    return await this.selectModelImpl(agent, session, request)
+    return await this.selectModelImpl(agent, session, request, signal, stillCurrent)
   }
 
   observePromptFacts(_listener: AcpPromptFactListener): () => void {
@@ -3407,6 +3409,39 @@ test('a model change is refused as VIEW_BUSY while this View owns an unsettled p
   view.insert(request.requestId, 'm-busy')
   view.claim('m-busy', 1, request.requestId)
   view.commit('assistant/message', assistantData(1, 'm-busy', [{ type: 'text', text: 'ok' }]))
+  view.commit('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.deepEqual(await attempt, { stopReason: 'end_turn' })
+})
+
+test('a prompt admitted while model validation is pending is rejected at the last View busy gate', async () => {
+  const view = promptView('S-model-race')
+  await view.attach()
+  const gate = deferred<void>()
+  let observed: AcpModelCurrentness | undefined
+  view.access.selectModelImpl = async (_agent, _session, _request, _signal, stillCurrent) => {
+    await gate.promise
+    observed = stillCurrent()
+    if (observed !== 'view-busy') throw new AcpModelError('LOCAL_ACP_MODEL_STALE', 'stale', -32042)
+    throw new AcpModelError('LOCAL_ACP_MODEL_VIEW_BUSY', 'view busy', -32046)
+  }
+  const selection = view.registry.setModelOption(
+    view.conn,
+    view.access,
+    { sessionId: 'S-model-race', configId: 'model', value: '["p1","b"]' },
+    new AbortController().signal,
+  )
+  // The prompt is admitted while the model service is still validating; this
+  // is the exact interleaving that must not append a Session model selection.
+  const attempt = view.start('race prompt')
+  const request = view.access.promptCalls[0]!
+  gate.resolve()
+  await assert.rejects(selection, isViewError('LOCAL_ACP_MODEL_VIEW_BUSY'))
+  assert.equal(observed, 'view-busy')
+  assert.equal(view.access.selectModelCalls.length, 1)
+  // Settle the prompt through its real facts; the View stays usable.
+  view.insert(request.requestId, 'm-race')
+  view.claim('m-race', 1, request.requestId)
+  view.commit('assistant/message', assistantData(1, 'm-race', [{ type: 'text', text: 'ok' }]))
   view.commit('turn/end', { turn: 1, reason: { kind: 'completed' } })
   assert.deepEqual(await attempt, { stopReason: 'end_turn' })
 })

@@ -273,9 +273,12 @@ profile's independent `autoStart` preference enables it (see below).
     catalog no longer advertises is presented as a non-submittable
     `Current (unavailable)` placeholder so the selector still shows the truth.
     `session/new` and `session/resume` may include the complete optional
-    `configOptions` after the View attached; a catalog read failure omits only
-    that optional display and keeps the committed Session/View success, logging
-    one fixed `LOCAL_ACP_MODEL_CATALOG_UNAVAILABLE` code. `session/set_config_option`
+    `configOptions` after the View attached; a genuine model-catalog
+    unavailability omits only that optional display and keeps the committed
+    Session/View success, logging one fixed
+    `LOCAL_ACP_MODEL_CATALOG_UNAVAILABLE` code. A stale, closed or foreign View
+    identity during that read is a lifecycle failure and propagates instead of
+    falsely confirming an attachment. `session/set_config_option`
     is admitted only on the exact current View claim with no unsettled prompt
     flight, and only when the exact Agent's true idle phase can be taken through
     the official `runMaintenance`; all catalog and LLM-capability reads happen

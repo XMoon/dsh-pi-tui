@@ -136,13 +136,20 @@ export interface AcpModelHost {
   currentSession(sessionId: string): object | undefined
 }
 
-/** One validated ACP `session/set_config_option` selection request. */
+/** One ACP `session/set_config_option` selection request. */
 export interface AcpModelOptionRequest {
   readonly configId: string
   /** The SDK's optional `type:'boolean'` discriminator (always rejected here). */
   readonly type?: string
   readonly value: unknown
 }
+
+/**
+ * The exact attached-View admission result for one model write:
+ * `view-busy` means this View already owns an unsettled prompt obligation;
+ * `stale` means the original claim/Agent/Session identity is gone.
+ */
+export type AcpModelCurrentness = 'current' | 'view-busy' | 'stale'
 
 const MODEL_CONFIG_ID = 'model'
 const THOUGHT_LEVEL_CONFIG_ID = 'thought_level'
@@ -187,6 +194,14 @@ function modelUnavailable(message: string): AcpModelError {
 
 function agentBusy(): AcpModelError {
   return new AcpModelError('LOCAL_ACP_MODEL_AGENT_BUSY', 'the session agent is busy', JSONRPC_MODEL_BUSY)
+}
+
+function viewBusy(): AcpModelError {
+  return new AcpModelError(
+    'LOCAL_ACP_MODEL_VIEW_BUSY',
+    'a prompt is already in flight for this session view',
+    JSONRPC_MODEL_BUSY,
+  )
 }
 
 function staleSelection(): AcpModelError {
@@ -403,7 +418,7 @@ export class AcpSessionModelService {
     expectedSession: object,
     request: AcpModelOptionRequest,
     signal: AbortSignal,
-    stillCurrent: () => boolean,
+    stillCurrent: () => AcpModelCurrentness,
   ): Promise<SessionConfigOption[]> {
     this.validateRequestShape(request)
     this.assertCurrent(expectedAgent, expectedSession, signal, stillCurrent)
@@ -489,9 +504,12 @@ export class AcpSessionModelService {
     expectedAgent: AcpModelAgent,
     expectedSession: object,
     signal: AbortSignal,
-    stillCurrent: () => boolean,
+    stillCurrent: () => AcpModelCurrentness,
   ): void {
-    if (signal.aborted || !stillCurrent()) throw staleSelection()
+    if (signal.aborted) throw staleSelection()
+    const currentness = stillCurrent()
+    if (currentness === 'view-busy') throw viewBusy()
+    if (currentness !== 'current') throw staleSelection()
     this.assertExact(expectedAgent, expectedSession)
   }
 
@@ -569,14 +587,16 @@ export class AcpSessionModelService {
     intended: AcpModelSelection,
     baseline: AcpModelSelection | undefined,
     signal: AbortSignal,
-    stillCurrent: () => boolean,
+    stillCurrent: () => AcpModelCurrentness,
   ): Promise<AcpModelSelection> {
     const sessionId = expectedAgent.id
     let maintenance: Promise<AcpModelSelection>
     try {
       maintenance = expectedAgent.runMaintenance(async maintenanceSignal => {
         if (signal.aborted || maintenanceSignal.aborted) throw staleSelection()
-        if (!stillCurrent()) throw staleSelection()
+        const currentness = stillCurrent()
+        if (currentness === 'view-busy') throw viewBusy()
+        if (currentness !== 'current') throw staleSelection()
         if (this.host.currentAgent(sessionId) !== expectedAgent || this.host.currentSession(sessionId) !== expectedSession) {
           throw staleSelection()
         }
