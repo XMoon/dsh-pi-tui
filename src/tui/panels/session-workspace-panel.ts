@@ -2071,8 +2071,10 @@ export class SessionWorkspacePanel implements Component {
       const label = sanitizedPhysicalLine(`${entry.title} · ${entry.total}`)
       const suffix = entry.current ? ' · Current' : entry.next ? ' · Next' : ''
       // Trustworthy Needs/Working counts are an independent right-hand fact
-      // group, so a long title can never hide them. Zero counts are dropped
-      // first on a narrow row; non-zero counts stay whole.
+      // group, so a long title can never hide a non-zero count. Zero counts are
+      // not facts worth displacing the Folder identity: a healthy 0/0 Folder
+      // omits the whole group, and a mixed positive/zero row drops the zero
+      // segment before the otherwise-fitting label is truncated.
       const countParts: ReadonlyArray<{ readonly text: string; readonly paint: (text: string) => string; readonly nonzero: boolean }> = [
         { text: `${entry.needs} Needs`, paint: entry.needs > 0 ? color.warning : color.textMuted, nonzero: entry.needs > 0 },
         { text: `${entry.working} Working`, paint: entry.working > 0 ? color.primary : color.textMuted, nonzero: entry.working > 0 },
@@ -2082,9 +2084,14 @@ export class SessionWorkspacePanel implements Component {
       const bothCounts = paintCounts(countParts)
       const nonzeroCounts = paintCounts(countParts.filter(part => part.nonzero))
       const available = Math.max(1, width - 4)
-      const counts = bothCounts !== '' && visibleWidth(bothCounts) + 2 + MIN_TITLE_CELLS <= available
-        ? bothCounts
-        : nonzeroCounts
+      const identity = `${label}${suffix}`
+      // Show the zero-bearing pair only when the complete identity still fits;
+      // otherwise a non-zero-only group wins before the label loses its tail.
+      const counts = nonzeroCounts === ''
+        ? ''
+        : visibleWidth(bothCounts) + 2 + visibleWidth(identity) <= available
+          ? bothCounts
+          : nonzeroCounts
       const identityBudget = Math.max(0, available - (counts === '' ? 0 : visibleWidth(counts) + 2))
       // Current/Next is a Folder identity fact: reserve it whole before the
       // mutable title/total tail yields on a narrow row.

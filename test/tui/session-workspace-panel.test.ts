@@ -4334,6 +4334,45 @@ test('a collapsed Folder keeps complete Needs/Working counts that follow same-fr
   assert.ok(!h.view().includes('Needs title'), 'the reclassification never expands a manually collapsed Folder')
 })
 
+test('a 44-column Folder drops zero counts before the Workspace identity', async () => {
+  const h = harness({ columns: 44, rows: 24 })
+  h.handle.setSnapshot(snapshot({ rows: [
+    row(CURRENT, 3_000, { title: 'Current session' }),
+    row('session-folder-needs2', 2_500, { title: 'Needs child' }),
+  ] }))
+  h.handle.updateWorkspaces({ type: 'baseline', items: [
+    { workspaceId: 'ws-alpha', path: '/ws/alpha', title: 'team-accounts-service', sessionIds: [CURRENT] },
+    { workspaceId: 'ws-beta', path: '/ws/beta', title: 'incident-response-service', sessionIds: ['session-folder-needs2'] },
+  ] })
+  h.handle.setActivityFacts({
+    listRevision: 1,
+    facts: [
+      fact(CURRENT, { running: false, attention: 'none', attentionSourceState: 'known' }),
+      questionFact('session-folder-needs2'),
+    ],
+    answerEligibility: [eligibility('session-folder-needs2')],
+  })
+  await h.paint()
+  let frame = panelFrame(h)
+  let alphaLine = frame[folderLineIndexOf(frame, 'team-accounts-service')]!
+  assert.ok(alphaLine.includes('team-accounts-service'),
+    `the healthy Folder keeps its complete identity instead of zero-count chrome:\n${alphaLine}`)
+  assert.ok(alphaLine.includes('Current'), `the Current identity survives:\n${alphaLine}`)
+  assert.ok(!alphaLine.includes('Needs') && !alphaLine.includes('Working'),
+    `a 0/0 Folder paints no dead count group:\n${alphaLine}`)
+  let betaLine = frame[folderLineIndexOf(frame, 'incident-response-service')]!
+  assert.ok(betaLine.includes('incident-response-service'),
+    `the mixed-positive Folder keeps its identity while expanded:\n${betaLine}`)
+  assert.ok(betaLine.includes('1 Needs'), `the non-zero Needs word stays whole:\n${betaLine}`)
+  assert.ok(!betaLine.includes('0 Working'), `the zero Working segment yields before the label:\n${betaLine}`)
+  // A manual collapse keeps the same truthful count group and identity.
+  await clickCell(h, 2, folderLineIndexOf(panelFrame(h), 'incident-response-service'))
+  assert.ok(!h.view().includes('Needs child'), 'the manual collapse hides the child row')
+  betaLine = panelFrame(h)[folderLineIndexOf(panelFrame(h), 'incident-response-service')]!
+  assert.ok(betaLine.includes('incident-response-service') && betaLine.includes('1 Needs') && !betaLine.includes('0 Working'),
+    `the collapsed Folder keeps its identity and non-zero count right-aligned:\n${betaLine}`)
+})
+
 test('roster and Activity refreshes add no transient layout row and keep the painted selection', async () => {
   const history = Array.from({ length: 24 }, (_, index) => row(`session-activity-${index}`, 900 - index, { title: `Activity ${index}` }))
   const rows = [row(CURRENT, 3_000, { title: 'Current session' }), ...history]
