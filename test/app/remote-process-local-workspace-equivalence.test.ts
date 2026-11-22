@@ -17,7 +17,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import test, { before, type TestContext } from 'node:test'
 import { mkdirSync, realpathSync, renameSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
@@ -38,6 +38,11 @@ import {
   type LocalInstanceRecord,
 } from '../../src/app/remote-process/local-discovery.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
+import { installDarwinKoffiFixture } from '../support/darwin-koffi-fixture.ts'
+
+before(t => {
+  installDarwinKoffiFixture(t as TestContext)
+})
 
 const LINUX_ONLY = { skip: process.platform !== 'linux' ? 'the Linux classifier reads the real /proc root view' : false }
 const DARWIN_ONLY = { skip: process.platform !== 'darwin' ? 'the macOS classifier requires the real libproc identity' : false }

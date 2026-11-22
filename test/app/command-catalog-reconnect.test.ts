@@ -622,7 +622,7 @@ test('a live Remote Host catalog is displayed beside Client commands with its ow
       description: 'A Host plugin command',
       argumentHint: '<task>',
     }, 'a Host plugin row follows the same Host-first display rule')
-    assert.equal(byName.has('help'), true, 'the Client registration remains visible beside the Host rows')
+    assert.equal(byName.has('settings'), true, 'the Client registration remains visible beside the Host rows')
     assert.equal(new Set(rows.map(row => row.name)).size, rows.length, 'every displayed command name is unique')
   } finally {
     harness.dispose()

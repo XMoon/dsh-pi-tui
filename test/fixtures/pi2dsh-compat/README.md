@@ -6,7 +6,7 @@ or any pi2dsh private module.
 
 The fixture uses only the Pi extension ABI supplied to its factory:
 
-- `registerCommand()` deliberately registers the native `/help` name; pi2dsh must expose it as `/pi-help` so the host-owned `/help` remains reachable.
+- `registerCommand()` deliberately registers the native `help` name; pi2dsh must expose it as `/pi-help` (the TUI no longer owns a builtin `/help`).
 - `ctx.ui.setStatus()` exercises the status bridge.
 - `ctx.ui.custom()` opens a component with `render(width)`, `handleInput(data)`,
   and `dispose()`.

@@ -28,7 +28,7 @@ export interface ActionEditorOptions {
   readonly maxRows?: () => number
 }
 
-type ActionEditorMode = 'edit' | 'choose-binding'
+type ActionEditorMode = 'edit' | 'choose-binding' | 'conflict-details'
 
 /** One whole Action Bar wording and, when its LAST segment is the real
  *  `Verb [Esc]` affordance, the UNPAINTED geometry of exactly that segment. */
@@ -127,45 +127,62 @@ interface SelectableRow {
 }
 
 /** Keep the selected binding visible in a short terminal while retaining the
- * detail footer. The first/last visible content lines double as scroll
- * markers when they are not the selected line. */
+ * detail footer. An optional conflict-diagnostic prefix is PINNED above the
+ * scroll window: the counterpart must stay readable even when the grant is
+ * too short to show the whole detail. */
 function actionViewport(
   lines: readonly string[],
   selectedLineIndex: number | undefined,
   maxRows: number,
   selectableLineIndices: readonly number[] = [],
+  pinnedRange?: { readonly start: number; readonly count: number },
 ): { lines: string[]; selectableRows: SelectableRow[] } {
   const limit = Math.max(1, maxRows)
-  if (lines.length <= limit) {
+  const footer = lines[lines.length - 1]!
+  let content = lines.slice(0, -1)
+  let selected = selectedLineIndex
+  let selectableIndices = [...selectableLineIndices]
+  let pinned: string[] = []
+  if (pinnedRange !== undefined && pinnedRange.count > 0) {
+    pinned = content.slice(pinnedRange.start, pinnedRange.start + pinnedRange.count)
+    content = content.slice(0, pinnedRange.start).concat(content.slice(pinnedRange.start + pinnedRange.count))
+    const before = pinnedRange.start + pinnedRange.count
+    selectableIndices = selectableIndices.map(index => index >= before ? index - pinnedRange.count : index)
+    selected = selected === undefined ? undefined : (selected >= before ? selected - pinnedRange.count : selected)
+  }
+  const total = pinned.length + content.length + 1
+  if (total <= limit) {
     return {
-      lines: [...lines],
-      selectableRows: selectableLineIndices.map((row, ordinal) => ({ row, ordinal })),
+      lines: [...pinned, ...content, footer],
+      selectableRows: selectableIndices.map((row, ordinal) => ({ row: row + pinned.length, ordinal })),
     }
   }
-  const footer = lines[lines.length - 1]!
-  if (limit === 1) return { lines: [footer], selectableRows: [] }
-  const content = lines.slice(0, -1)
-  if (content.length === 0) return { lines: [footer], selectableRows: [] }
-  const windowSize = Math.max(1, limit - 1)
-  const selected = selectedLineIndex === undefined
+  if (limit - pinned.length - 1 < 1) {
+    return { lines: [...pinned.slice(0, Math.max(0, limit - 1)), footer], selectableRows: [] }
+  }
+  const windowSize = limit - pinned.length - 1
+  const chosen = selected === undefined
     ? Math.min(content.length - 1, Math.floor(windowSize / 2))
-    : Math.min(content.length - 1, Math.max(0, selectedLineIndex))
+    : Math.min(content.length - 1, Math.max(0, selected))
   const maxStart = Math.max(0, content.length - windowSize)
-  const start = Math.min(maxStart, Math.max(0, selected - Math.floor(windowSize / 2)))
+  const start = Math.min(maxStart, Math.max(0, chosen - Math.floor(windowSize / 2)))
   const end = Math.min(content.length, start + windowSize)
   const viewport = content.slice(start, end)
-  let selectableRows = selectableLineIndices
+  let selectableRows = selectableIndices
     .map((index, ordinal) => ({ row: index - start, ordinal }))
     .filter(entry => entry.row >= 0 && entry.row < viewport.length)
-  if (start > 0 && selected > start) {
+  if (start > 0 && chosen > start) {
     viewport[0] = color.textDim(`↑ ${start} more lines`)
     selectableRows = selectableRows.filter(entry => entry.row !== 0)
   }
-  if (end < content.length && selected < end - 1) {
+  if (end < content.length && chosen < end - 1) {
     viewport[viewport.length - 1] = color.textDim(`↓ ${content.length - end} more lines`)
     selectableRows = selectableRows.filter(entry => entry.row !== viewport.length - 1)
   }
-  return { lines: [...viewport, footer], selectableRows }
+  return {
+    lines: [...pinned, ...viewport, footer],
+    selectableRows: selectableRows.map(entry => ({ row: entry.row + pinned.length, ordinal: entry.ordinal })),
+  }
 }
 
 /** One physical row of the last painted panel frame (mouse hit-testing).
@@ -186,6 +203,7 @@ export class ActionEditorPanel implements Component {
   private readonly maxRows: () => number
   private mode: ActionEditorMode = 'edit'
   private selectedIndex = 0
+  private conflictScroll = 0
   private recorder: KeyRecorder | undefined
   private pending = false
   /** A settlement whose result has NOT been painted yet. The page keeps the
@@ -195,6 +213,7 @@ export class ActionEditorPanel implements Component {
   private mutationGeneration = 0
   private disposed = false
   private message: string | undefined
+  private messageKind: 'success' | 'error' | undefined
   /** Physical row → hit entry from the LAST render (mouse parity). */
   private hitMap: ActionEditorMouseHit[] = []
   /** The pressed binding identity (mouse parity): a click may only act on
@@ -219,6 +238,8 @@ export class ActionEditorPanel implements Component {
    *  content columns). Cleared on every render start, so a sub-view that paints
    *  its own bar can never leave the previous frame's geometry clickable. */
   private paintedEscapeSpanValue: { readonly startCol: number; readonly endCol: number } | undefined
+  /** The delegated non-Esc Action Bar spans this page painted. */
+  private paintedBarSpansValue: readonly { readonly id: string; readonly startCol: number; readonly endCol: number }[] = []
 
   constructor(options: ActionEditorOptions) {
     this.model = options.model
@@ -250,6 +271,27 @@ export class ActionEditorPanel implements Component {
     return this.paintedEscapeSpanValue
   }
 
+  /** The delegated `c details` Action Bar span, in this page's columns. */
+  paintedBarSpans(): readonly { readonly id: string; readonly startCol: number; readonly endCol: number }[] {
+    return this.paintedBarSpansValue
+  }
+
+  /** Open the readonly conflict reader from the painted bar span. */
+  activateBarSpan(id: string): void {
+    if (id !== 'conflict-details') return
+    if (this.mode !== 'edit' || this.conflictDiagnostics().length === 0) return
+    this.mode = 'conflict-details'
+    this.conflictScroll = 0
+    this.requestRender()
+  }
+
+  /** Only a genuinely conflicted row may enter the Conflict details reader;
+   *  ordinary disabled/ambiguous diagnostics keep their inline presentation. */
+  private conflictDiagnostics(): readonly string[] {
+    if (!this.row.conflict) return []
+    return this.row.diagnostics.filter(message => message.includes('conflict') || message.includes('ambiguous'))
+  }
+
   render(width: number): string[] {
     const safeWidth = Math.max(1, width)
     // The frame about to be returned carries the settlement result, so the
@@ -259,12 +301,52 @@ export class ActionEditorPanel implements Component {
     // either records its own geometry or (the recorder's raw-input states)
     // reports none.
     this.paintedEscapeSpanValue = undefined
+    this.paintedBarSpansValue = []
     if (this.recorder !== undefined) {
       const lines = this.recorder.render(safeWidth)
       this.paintedEscapeSpanValue = this.recorder.paintedEscapeSpan()
       return lines
     }
     if (this.mode === 'choose-binding') return this.renderBindingChoice(safeWidth)
+    if (this.mode === 'conflict-details') return this.renderConflictDetails(safeWidth)
+    if (this.maxRows() === 1 && this.message !== undefined) {
+      // A one-row grant cannot paint a separate bar; keep the settlement
+      // result and the SAME exit affordance in that ONE row, so the user can
+      // really read the result and still leave (keyboard or pointer).
+      this.hitMap = [{ kind: 'inert' }]
+      this.hasPainted = true
+      this.paintedBodyRows = 0
+      this.paintedSelection = false
+      this.paintedAdd = false
+      this.paintedChoice = false
+      this.selectableKeys = []
+      this.lastRenderWidth = Math.max(1, width)
+      this.paintedBarSpansValue = []
+      const escape = 'Back [Esc]'
+      const escapeWidth = visibleWidth(escape)
+      if (safeWidth < escapeWidth) {
+        this.paintedEscapeSpanValue = undefined
+        const painted = this.messageKind === 'success' ? color.success(this.message) : color.error(this.message)
+        return [truncateToWidth(painted, safeWidth)]
+      }
+      if (safeWidth < escapeWidth + 3) {
+        // Whole-segment degradation: keep the complete exit affordance and a
+        // one-cell failure marker when there is room, never a half token.
+        const marker = safeWidth >= escapeWidth + 2 && this.messageKind === 'success'
+        ? '✓ '
+        : safeWidth >= escapeWidth + 2
+          ? '! '
+          : ''
+        const startCol = visibleWidth(marker)
+        this.paintedEscapeSpanValue = { startCol, endCol: startCol + escapeWidth }
+        return [truncateToWidth(`${marker === '' ? '' : (this.messageKind === 'success' ? color.success(marker) : color.error(marker))}${paintActionSpan(escape, 'secondary')}`, safeWidth)]
+      }
+      const message = truncateToWidth(this.message, safeWidth - escapeWidth - 3)
+      const startCol = visibleWidth(message) + 3
+      this.paintedEscapeSpanValue = { startCol, endCol: startCol + escapeWidth }
+      const paintedMessage = this.messageKind === 'success' ? color.success(message) : color.error(message)
+      return [truncateToWidth(`${paintedMessage}${color.textDim(' · ')}${paintActionSpan(escape, 'secondary')}`, safeWidth)]
+    }
 
     const lines: string[] = [
       color.textStrong(this.row.label),
@@ -342,12 +424,25 @@ export class ActionEditorPanel implements Component {
       lines.push(color.textDim(`Effective now: ${formatEditorBindings(effectiveOrdinary)}`))
     }
     if (this.row.diagnostics.length > 0) {
-      for (const diagnostic of this.row.diagnostics.slice(0, 2)) lines.push(color.warning(truncateToWidth(diagnostic, safeWidth)))
+      // Pre-existing Action diagnostics (disabled configuration, leader
+      // ambiguity, etc.) remain visible inline; only a real conflict gets the
+      // separate Conflict details reader.
+      for (const diagnostic of this.row.diagnostics.slice(0, 2)) {
+        lines.push(color.warning(truncateToWidth(diagnostic, safeWidth)))
+      }
     }
+    const messageStart = lines.length
     if (this.message !== undefined) lines.push(color.error(truncateToWidth(this.message, safeWidth)))
+    const messageCount = lines.length - messageStart
     if (this.pending) lines.push(color.accent('Saving…'))
     lines.push('')
-    const viewport = actionViewport(lines, selectableLineIndices[this.selectedIndex], this.maxRows(), selectableLineIndices)
+    const viewport = actionViewport(
+      lines,
+      selectableLineIndices[this.selectedIndex],
+      this.maxRows(),
+      selectableLineIndices,
+      messageCount > 0 ? { start: messageStart, count: messageCount } : undefined,
+    )
     this.lastRenderWidth = safeWidth
     this.hasPainted = true
     const visibleOrdinals = new Set(viewport.selectableRows.map(row => row.ordinal))
@@ -356,6 +451,11 @@ export class ActionEditorPanel implements Component {
     const addOrdinal = this.selectableKeys.indexOf('add')
     this.paintedAdd = addOrdinal >= 0 && visibleOrdinals.has(addOrdinal)
     const bar = this.actionBar(editable.length, safeWidth)
+    const conflictLabel = 'c details'
+    const conflictStart = bar.text.indexOf(conflictLabel)
+    this.paintedBarSpansValue = conflictStart < 0
+      ? []
+      : [{ id: 'conflict-details', startCol: conflictStart, endCol: conflictStart + visibleWidth(conflictLabel) }]
     this.paintedEscapeSpanValue = bar.escape
     viewport.lines[viewport.lines.length - 1] = paintWholeBar(bar, safeWidth)
     this.hitMap = viewport.lines.map((_, row) => {
@@ -372,11 +472,13 @@ export class ActionEditorPanel implements Component {
   private actionBar(editableLength: number, width: number): BarWording {
     // A write in flight freezes input: facts only, no Esc affordance.
     if (this.pending) return plainWording('Saving… · one write at a time')
-    // The bar-only and read-only states keep only the real Esc: Back returns to
-    // the bindings list, so the affordance names that exact effect.
+    const conflicts = this.conflictDiagnostics().length > 0 ? 'c details' : undefined
+    // The bar-only and read-only states keep only the real Esc (plus the
+    // read-only conflict-details entry when present): Back returns to the
+    // bindings list, so the affordance names that exact effect.
     if (this.paintedBodyRows === 0) return escapeWording('', 'Back')
-    if (this.row.fixed || this.row.reserved || this.row.safeMode) return escapeWording('', 'Back')
-    if (!this.row.configurable) return escapeWording('', 'Back')
+    if (this.row.fixed || this.row.reserved || this.row.safeMode) return escapeWording(conflicts ?? '', 'Back')
+    if (!this.row.configurable) return escapeWording(conflicts ?? '', 'Back')
     const selectedBinding = this.selectedIndex < editableLength
     const enter = selectedBinding
       ? this.paintedSelection ? 'Enter edit' : undefined
@@ -390,12 +492,13 @@ export class ActionEditorPanel implements Component {
     const variant = (parts: Array<string | undefined>): BarWording =>
       escapeWording(parts.filter((part): part is string => part !== undefined).join(' · '), 'Back')
     return pickWording([
-      variant([primary, add, remove, 'r reset', 'd disable']),
-      variant([primary, add, 'r reset', 'd disable']),
-      variant([primary, add, 'r reset']),
-      variant([primary, add]),
+      variant([primary, conflicts, add, remove, 'r reset', 'd disable']),
+      variant([primary, conflicts, add, 'r reset', 'd disable']),
+      variant([primary, conflicts, add, 'r reset']),
+      variant([primary, conflicts, add]),
+      variant([primary, conflicts]),
       variant([primary]),
-      escapeWording('r reset · d disable', 'Back'),
+      escapeWording(conflicts ?? 'r reset · d disable', 'Back'),
       escapeWording('', 'Back'),
     ], width, 'Esc back')
   }
@@ -439,15 +542,25 @@ export class ActionEditorPanel implements Component {
     // cleared the message or changed the sub-view would make that frame skip the
     // result entirely. Both windows end at the frame that composes the outcome.
     if (this.pending || this.settlementAwaitingPaint) return
+    if (this.mode === 'conflict-details') {
+      this.handleConflictDetailsInput(data)
+      return
+    }
+    if (this.mode === 'choose-binding') {
+      this.handleBindingChoice(data)
+      return
+    }
+    if (commandKey(data, 'c') && this.conflictDiagnostics().length > 0) {
+      this.mode = 'conflict-details'
+      this.conflictScroll = 0
+      this.requestRender()
+      return
+    }
     if (this.row.safeMode) {
       if (matchesKey(data, 'escape')) {
         this.dispose()
         this.onBack()
       }
-      return
-    }
-    if (this.mode === 'choose-binding') {
-      this.handleBindingChoice(data)
       return
     }
     if (matchesKey(data, 'escape')) {
@@ -536,6 +649,13 @@ export class ActionEditorPanel implements Component {
     // surface is frozen (mirror the keyboard guard) — wheel/press/click must not
     // move the selection, start a recorder or leave before the result paints.
     if (this.pending || this.settlementAwaitingPaint) return undefined
+    if (this.mode === 'conflict-details') {
+      if (event.type === 'wheel' && event.wheelDelta) {
+        this.scrollConflictDetails(event.wheelDelta < 0 ? -1 : 1)
+        return { handled: true, render: true }
+      }
+      return undefined
+    }
     const hit = this.hitMap[event.y]
     if (!hit || hit.kind === 'inert') return undefined
 
@@ -604,7 +724,82 @@ export class ActionEditorPanel implements Component {
     return { handled: true }
   }
 
+  /** The read-only diagnostic reader: every wrapped conflict line is
+   *  reachable with Up/Down/PgUp/PgDn and the only bar action is Back. */
+  private renderConflictDetails(width: number): string[] {
+    this.paintedBarSpansValue = []
+    const lines: string[] = [
+      color.textStrong(`Conflict details · ${this.row.label}`),
+      '',
+    ]
+    for (const diagnostic of this.conflictDiagnostics()) {
+      for (const line of wrapTextWithAnsi(diagnostic, width)) lines.push(color.warning(line))
+    }
+    const bar = escapeWording('', 'Back')
+    const limit = Math.max(1, this.maxRows())
+    if (limit === 1) {
+      this.hitMap = []
+      this.hasPainted = true
+      this.paintedBodyRows = 0
+      this.paintedSelection = false
+      this.paintedAdd = false
+      this.paintedChoice = false
+      this.selectableKeys = []
+      this.lastRenderWidth = Math.max(1, width)
+      this.paintedEscapeSpanValue = bar.escape
+      return [paintBarWording(bar)]
+    }
+    const bodyLimit = limit - 1
+    const maxStart = Math.max(0, lines.length - bodyLimit)
+    this.conflictScroll = Math.min(Math.max(0, this.conflictScroll), maxStart)
+    const body = lines.slice(this.conflictScroll, this.conflictScroll + bodyLimit)
+    const rendered = [...body, paintBarWording(bar)]
+    this.hitMap = rendered.map(() => ({ kind: 'inert' as const }))
+    this.hasPainted = true
+    this.paintedBodyRows = body.length
+    this.paintedSelection = false
+    this.paintedAdd = false
+    this.paintedChoice = false
+    this.selectableKeys = []
+    this.lastRenderWidth = Math.max(1, width)
+    this.paintedEscapeSpanValue = bar.escape
+    return rendered.map(line => truncateToWidth(line, Math.max(1, width)))
+  }
+
+  private handleConflictDetailsInput(data: string): void {
+    if (matchesKey(data, 'escape')) {
+      this.mode = 'edit'
+      this.conflictScroll = 0
+      this.requestRender()
+      return
+    }
+    if (matchesKey(data, 'up')) {
+      this.scrollConflictDetails(-1)
+      return
+    }
+    if (matchesKey(data, 'down')) {
+      this.scrollConflictDetails(1)
+      return
+    }
+    if (matchesKey(data, 'pageUp')) {
+      this.scrollConflictDetails(-Math.max(1, this.maxRows() - 1))
+      return
+    }
+    if (matchesKey(data, 'pageDown')) {
+      this.scrollConflictDetails(Math.max(1, this.maxRows() - 1))
+    }
+  }
+
+  private scrollConflictDetails(delta: number): void {
+    const lines = 2 + this.conflictDiagnostics().reduce((total, diagnostic) => total + wrapTextWithAnsi(diagnostic, this.lastRenderWidth || 1).length, 0)
+    const bodyLimit = Math.max(1, this.maxRows() - 1)
+    const maxStart = Math.max(0, lines - bodyLimit)
+    this.conflictScroll = Math.min(maxStart, Math.max(0, this.conflictScroll + delta))
+    this.requestRender()
+  }
+
   private renderBindingChoice(width: number): string[] {
+    this.paintedBarSpansValue = []
     const lines = [
       color.textStrong(`Add shortcut › ${this.row.label}`),
       '',
@@ -709,6 +904,7 @@ export class ActionEditorPanel implements Component {
     const generation = ++this.mutationGeneration
     this.pending = true
     this.message = undefined
+    this.messageKind = undefined
     this.requestRender()
     try {
       this.runMutation(
@@ -727,6 +923,7 @@ export class ActionEditorPanel implements Component {
     this.settlementAwaitingPaint = true
     if (result.kind !== 'applied') {
       this.message = result.message
+      this.messageKind = 'error'
       this.requestRender()
       return
     }
@@ -736,6 +933,7 @@ export class ActionEditorPanel implements Component {
     const editableCount = this.row.customized ? this.row.configured.length : this.row.editableDefaults.length
     this.selectedIndex = Math.min(this.selectedIndex, editableCount)
     this.message = result.message
+    this.messageKind = 'success'
     this.onModelChange(result.model)
     this.requestRender()
   }
@@ -745,6 +943,7 @@ export class ActionEditorPanel implements Component {
     this.pending = false
     this.settlementAwaitingPaint = true
     this.message = error instanceof Error ? error.message : 'Could not save keyboard shortcuts.'
+    this.messageKind = 'error'
     this.requestRender()
   }
 }

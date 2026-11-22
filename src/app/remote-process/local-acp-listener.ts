@@ -38,6 +38,8 @@ import {
   PROTOCOL_VERSION,
   RequestError,
   type AgentConnection,
+  type AgentContext,
+  type SessionConfigOption,
 } from '@agentclientprotocol/sdk'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { type LocalScope } from './local-scope.ts'
@@ -45,6 +47,7 @@ import { runDetached } from '../../runtime/process/tasks.ts'
 import {
   AcpSessionViewRegistry,
   LocalAcpViewError,
+  type AcpConfigOptionsNotifier,
   type AcpImageLimits,
   type ConnectionViewState,
   type HostAcpSessionAccess,
@@ -693,22 +696,58 @@ function buildAgentApp(
       error instanceof LocalAcpViewError
         ? new RequestError(error.rpcCode, error.message, { ...error.data, code: error.code })
         : error
-    app.onRequest(methods.agent.session.new, async ({ params }) => {
+    /**
+     * Read the optional config options of an already-attached View. ONLY a real
+     * model-catalog unavailability may omit the optional display; a stale,
+     * closed or foreign View identity is a lifecycle failure and must propagate
+     * through the normal JSON-RPC error boundary instead of falsely confirming
+     * an attachment that no longer exists.
+     */
+    const readConfigOptionsOrLog = async (sessionId: string): Promise<SessionConfigOption[] | undefined> => {
+      try {
+        return await views.modelOptions(view, access, sessionId)
+      } catch (error) {
+        // Only the exact typed catalog-unavailable class may take the optional
+        // display fallback. Unexpected Host/projection errors must fail through
+        // the normal JSON-RPC boundary instead of becoming a false success.
+        if (!(error instanceof LocalAcpViewError && error.code === 'LOCAL_ACP_MODEL_UNAVAILABLE')) {
+          throw error
+        }
+        context.diag.warn('local-acp.model-catalog-unavailable', {
+          code: 'LOCAL_ACP_MODEL_CATALOG_UNAVAILABLE',
+          reason: error.code,
+        })
+        return undefined
+      }
+    }
+    /** The transient notification sink of ONE connection's attached View. */
+    const configNotifierFor = (client: AgentContext): AcpConfigOptionsNotifier =>
+      async (sessionId, configOptions) => {
+        await client.notify(methods.client.session.update, {
+          sessionId,
+          update: { sessionUpdate: 'config_option_update', configOptions: [...configOptions] },
+        })
+      }
+    app.onRequest(methods.agent.session.new, async ({ params, client }) => {
       beginRequest()
       try {
         requireInitialized()
-        return await views.newSession(view, access, params)
+        const result = await views.newSession(view, access, params, configNotifierFor(client))
+        const configOptions = await readConfigOptionsOrLog(result.sessionId)
+        return { ...result, ...(configOptions === undefined ? {} : { configOptions }) }
       } catch (error) {
         throw asRequestError(error)
       } finally {
         state.pendingRequests -= 1
       }
     })
-    app.onRequest(methods.agent.session.resume, async ({ params }) => {
+    app.onRequest(methods.agent.session.resume, async ({ params, client }) => {
       beginRequest()
       try {
         requireInitialized()
-        return await views.resumeSession(view, access, params)
+        const result = await views.resumeSession(view, access, params, configNotifierFor(client))
+        const configOptions = await readConfigOptionsOrLog(params.sessionId)
+        return { ...result, ...(configOptions === undefined ? {} : { configOptions }) }
       } catch (error) {
         throw asRequestError(error)
       } finally {
@@ -749,6 +788,21 @@ function buildAgentApp(
         state.pendingRequests -= 1
       }
     })
+    // Host Session model subset: standard typed handler (the SDK parses the
+    // request against the pinned v1 schema); the View applies the exact-claim,
+    // View-idle and Agent-idle admission before any Session write.
+    app.onRequest(methods.agent.session.setConfigOption, async ({ params, signal }) => {
+      beginRequest()
+      try {
+        requireInitialized()
+        const configOptions = await views.setModelOption(view, access, params, signal)
+        return { configOptions }
+      } catch (error) {
+        throw asRequestError(error)
+      } finally {
+        state.pendingRequests -= 1
+      }
+    })
   } else {
     // No real Host Session View installed (raw socket contracts): the lifecycle
     // methods stay fail-closed exactly like PO-1.
@@ -756,11 +810,10 @@ function buildAgentApp(
     app.onRequest(methods.agent.session.resume, acceptAnyParams, rejectSessionOperation)
     app.onRequest(methods.agent.session.close, acceptAnyParams, rejectSessionOperation)
     app.onRequest(methods.agent.session.prompt, acceptAnyParams, rejectSessionOperation)
+    app.onRequest(methods.agent.session.setConfigOption, acceptAnyParams, rejectSessionOperation)
   }
-  // These methods remain genuinely unimplemented in PO-3A regardless of View:
-  // no session listing and no config mutation.
+  // `session/list` remains genuinely unimplemented regardless of the View.
   app.onRequest(methods.agent.session.list, acceptAnyParams, rejectSessionOperation)
-  app.onRequest(methods.agent.session.setConfigOption, acceptAnyParams, rejectSessionOperation)
 
   if (access !== undefined && views !== undefined && view !== undefined) {
     // A `session/cancel` notification carries no response. PO-3B scopes it to

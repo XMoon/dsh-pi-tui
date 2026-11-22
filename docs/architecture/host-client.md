@@ -298,6 +298,19 @@ the kernel seat where one is required.
   Host that publishes a protocol or installed build other than its own is
   `HOST_BUILD_INCOMPATIBLE`; a mismatched authenticated identity is
   `HOST_IDENTITY_MISMATCH`; none replaces or kills the live Host.
+- **Native process identity uses the installed DSH Koffi owner.** The macOS
+  kernel identity bridge lazily loads Koffi from the current running DSH
+  installation: the verified DSH anchor resolves
+  `@deepseek-ai/dsh-subprocess-local` and that package's own declared `koffi`
+  dependency. A Direct CLI's own `argv[1]` installation identity takes
+  precedence over any inherited Split anchor; the environment anchor is used
+  only by the Split Host/Client entries themselves. Koffi is not a production
+  dependency or independently versioned runtime of this bundle. The bridge must not hard-code a Koffi version, select
+  by version number, or fall back to the TUI package, a Profile, a global module
+  path or an accidental hoist. The loaded `koffi` package's actual API/ABI is the
+  compatibility authority; an unavailable or incompatible addon remains
+  `NATIVE_UNAVAILABLE`/`ABI_UNSUPPORTED` and must never weaken process-identity
+  checks.
 - **Official carrier only.** The Host reuses the base `typert-gateway` row and
   mounts exactly one `dsh-client-connection` owner and one `dsh-api-remotes`
   forwarded-event source on the Host-only overlay. The Client installs the
@@ -1236,12 +1249,15 @@ resolver) BEFORE the Gateway's first generation; `complete()` then mounts the
 Jobs Client and awaits the official initial readiness. The M3 in-process path
 keeps the one-call `mountRemoteClientDomains()` wrapper. These functions never
 create or dispose the Context, Connection or Gateway. The official Client bundles and generated `/remote`
-descriptors are resolved from the installed DSH anchor. The Client shell also
-supplies the official web seed's platform static `@deepseek-ai/dsh-client-store`
-from the installed Harness family (its declared DSH peer); the browser-form
-`/client` bundles' `require` therefore resolves the SAME singleton the web shell
-shares, while `@deepseek-ai/cordis` resolves as a normal import. No source-tree
-descriptor may mix with that installation.
+descriptors are resolved from the installed DSH anchor. The Client Shell also
+carries the official platform Store engine (`@deepseek-ai/dsh-client-store`
+with its Zustand/Immer runtime closure) as build-time code: the Node Client
+supplies that ONE module namespace through `CLIENT_PLATFORM_MODULES`, so the
+browser-form `/client` bundles' `require` resolves the same singleton the web
+shell shares. This is a distribution/assembly fact, not a second Store or Host
+authority. `@deepseek-ai/cordis` and every other official DSH package still
+resolve from the installed DSH Runtime; no source-tree descriptor may mix with
+that installation.
 
 The Client mounts the generated `workspace` namespace and nothing beside it: no
 `ClientWorkspaceModel`, no Client Workspace store, no cached Workspace list and

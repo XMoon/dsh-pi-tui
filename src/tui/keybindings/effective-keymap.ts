@@ -608,8 +608,8 @@ export class EffectiveKeymap {
    * rules as keysFor/editorKeysFor/keyHint — a working user override
    * never leaves the replaced builtin advertised (review finding: the
    * snapshot used to iterate the raw top-trigger set, so /keybindings
-   * showed `Ctrl+X + Enter` for a working submit remap while /help was
-   * right). */
+   * showed `Ctrl+X + Enter` for a working submit remap while the effective
+   * key hint was right). */
   snapshot(): KeymapSnapshot {
     const actions = [...new Set(this.visibleRules.map(rule => rule.action))].sort()
     const bindings = actions.map(action => {

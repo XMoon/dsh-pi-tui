@@ -23,6 +23,10 @@ import type { KeybindingMutation, KeybindingMutationResult, KeybindingMutationRu
 import { ActionEditorPanel } from './action-editor.ts'
 import { KeyRecorder } from './recorder.ts'
 
+/** The ONE local view mode of the Keyboard shortcuts page. It is presentation
+ *  state only: switching it never writes settings or rebuilds the keymap. */
+export type KeybindingEditorFilter = 'all' | 'conflicts'
+
 export interface KeybindingEditorPanelOptions {
   readonly model: KeybindingEditorModel
   readonly runMutation: KeybindingMutationRunner
@@ -31,6 +35,8 @@ export interface KeybindingEditorPanelOptions {
   readonly onDispose?: () => void
   readonly requestRender?: () => void
   readonly maxRows?: () => number
+  /** The initial transient view. Omitted = All (the ordinary entry). */
+  readonly initialFilter?: KeybindingEditorFilter
 }
 
 type ListEntry =
@@ -173,11 +179,19 @@ function renderLeaderRow(model: KeybindingEditorModel, selected: boolean, width:
   return truncateToWidth(text, Math.max(1, width))
 }
 
+/** One half of the painted view-mode row: the complete hit span of one mode. */
+interface FilterSpan {
+  readonly mode: KeybindingEditorFilter
+  readonly startCol: number
+  readonly endCol: number
+}
+
 /** One physical row of the last painted panel frame (mouse hit-testing).
  * The map is built from the EXACT final rows render() returns, so a
  * click can only act on last-painted geometry. (Mouse parity.) */
 type KeybindingMouseHit =
   | { kind: 'search' }
+  | { kind: 'filter'; spans: readonly FilterSpan[] }
   | { kind: 'select'; index: number; id: string }
   | { kind: 'inert' }
 
@@ -228,6 +242,8 @@ export class KeybindingEditorPanel implements Component, Focusable {
   }
   private selectedId = 'leader'
   private selectedIndex = 0
+  /** The ONE local view mode (transient, never persisted). */
+  private filter: KeybindingEditorFilter
   private actionEditor: ActionEditorPanel | undefined
   private leaderRecorder: KeyRecorder | undefined
   private leaderEditing = false
@@ -251,6 +267,18 @@ export class KeybindingEditorPanel implements Component, Focusable {
   /** Undefined before the first frame: a direct panel harness may feed input
    *  before a paint, while a REAL surface always paints first. */
   private paintedSelectableIds: Set<string> | undefined
+  /** The complete spans of the LAST painted view-mode row; undefined when the
+   *  frame painted no switchable mode row (bar-only/short grants). */
+  private paintedFilterSpans: readonly FilterSpan[] | undefined
+  /** A pressed filter option (mouse parity): the exact mode, gesture identity
+   *  and painted width the press was admitted against. */
+  private mousePressedFilter: {
+    readonly spans: readonly FilterSpan[]
+    readonly mode: KeybindingEditorFilter
+    readonly grant: number | undefined
+    readonly view: string
+    readonly width: number
+  } | undefined
   /** A detail-mutation settlement that has not painted its frame yet. */
   private settlementAwaitingPaint = false
   /** The width the hit map was painted at; a stale-width event is rejected. */
@@ -269,6 +297,7 @@ export class KeybindingEditorPanel implements Component, Focusable {
     this.onDispose = options.onDispose ?? (() => {})
     this.requestRender = options.requestRender ?? (() => {})
     this.standaloneRows = options.maxRows ?? (() => 18)
+    this.filter = options.initialFilter ?? 'all'
     this.maxRows = () => Math.max(1, Math.min(
       this.standaloneRows(),
       this.parentContentRows ?? Number.POSITIVE_INFINITY,
@@ -309,7 +338,7 @@ export class KeybindingEditorPanel implements Component, Focusable {
   private viewKey(): string {
     if (this.actionEditor !== undefined) return `action:${this.actionEditor.actionId()}`
     if (this.leaderEditing) return 'leader'
-    return 'list'
+    return `list:${this.filter}`
   }
 
   render(width: number): string[] {
@@ -322,6 +351,7 @@ export class KeybindingEditorPanel implements Component, Focusable {
     // This frame is about to carry whatever the mounted detail settled with.
     this.settlementAwaitingPaint = false
     this.paintedEscapeSpanValue = undefined
+    this.paintedFilterSpans = undefined
     if (this.actionEditor !== undefined) {
       // The detail page owns its bar; this page renders it at full width (no
       // rail/inset), so the child's page-local span is already the physical one.
@@ -333,6 +363,11 @@ export class KeybindingEditorPanel implements Component, Focusable {
 
     const limit = Math.max(1, this.maxRows())
     const searchRow = this.searchRow(safeWidth)
+    const filterRow = this.filterRow(safeWidth)
+    const filterSwitchable = filterRow.spans.length > 0
+    // The mode row is only PAINTED from three content rows up; below that the
+    // bar must not advertise a mode switch the frame does not show.
+    const filterPainted = filterSwitchable && limit >= 3
     // The Esc verb follows the two-stage lifecycle: a non-empty query clears
     // first, an empty query returns to Settings. The sub-10-column fallback
     // keeps the historical hint and carries NO geometry: a half token is never
@@ -344,11 +379,14 @@ export class KeybindingEditorPanel implements Component, Focusable {
     // is advertised ONLY where it is accepted: an empty query means the search
     // Input does not own `←`; a non-empty one never claims the back verb.
     const back = this.query === '' ? ' · ← Back' : ''
+    const viewHint = filterPainted ? 'Tab view · ' : ''
     const hintWording = pickWording([
-      escapeWording(`Enter details · type search · ←→ edit · ↑↓ move${back}`, escVerb),
-      escapeWording(`Enter details · type search · ←→ edit${back}`, escVerb),
-      escapeWording(`Enter details · type search${back}`, escVerb),
-      escapeWording(`Enter details${back}`, escVerb),
+      escapeWording(`${viewHint}Enter details · type search · ←→ edit · ↑↓ move${back}`, escVerb),
+      escapeWording(`${viewHint}Enter details · type search · ←→ edit${back}`, escVerb),
+      escapeWording(`${viewHint}Enter details · type search${back}`, escVerb),
+      escapeWording(`${viewHint}Enter details${back}`, escVerb),
+      escapeWording(`${viewHint}Enter details`, escVerb),
+      escapeWording(`${viewHint}type search${back}`, escVerb),
       escapeWording('Enter details', escVerb),
       escapeWording('', escVerb),
     ], safeWidth, `Esc ${plainEscVerb}`)
@@ -356,11 +394,18 @@ export class KeybindingEditorPanel implements Component, Focusable {
     // admitted there; the 1-row grant paints ONLY the bar and admits only its
     // own back verbs, so it must never advertise the search it refuses.
     const passiveWording = pickWording([
+      escapeWording(`${viewHint}type search${back}`, escVerb),
       escapeWording(`type search${back}`, escVerb),
       ...(this.query === '' ? [escapeWording('← Back', escVerb)] : []),
       escapeWording('', escVerb),
     ], safeWidth, `Esc ${plainEscVerb}`)
     const barOnlyWording = pickWording([
+      ...(this.query === '' ? [escapeWording('← Back', escVerb)] : []),
+      escapeWording('', escVerb),
+    ], safeWidth, `Esc ${plainEscVerb}`)
+    const modeWording = pickWording([
+      escapeWording(`${viewHint}type search${back}`, escVerb),
+      escapeWording(`type search${back}`, escVerb),
       ...(this.query === '' ? [escapeWording('← Back', escVerb)] : []),
       escapeWording('', escVerb),
     ], safeWidth, `Esc ${plainEscVerb}`)
@@ -381,10 +426,17 @@ export class KeybindingEditorPanel implements Component, Focusable {
       return [searchRow, paintBarWording(passiveWording)]
     }
     if (limit === 3) {
-      this.hitMap = [{ kind: 'search' }, { kind: 'inert' }, { kind: 'inert' }]
+      // The mode row + search + Action Bar. There is deliberately no business
+      // row, so Enter details is not advertised or admitted.
+      this.hitMap = [
+        filterSwitchable ? { kind: 'filter', spans: filterRow.spans } : { kind: 'inert' },
+        { kind: 'search' },
+        { kind: 'inert' },
+      ]
       this.paintedSelectableIds = new Set()
-      this.paintedEscapeSpanValue = passiveWording.escape
-      return [searchRow, color.textDim(truncateToWidth(`Keymap: ${this.model.summary}`, safeWidth)), paintBarWording(passiveWording)]
+      this.paintedFilterSpans = filterPainted ? filterRow.spans : undefined
+      this.paintedEscapeSpanValue = modeWording.escape
+      return [filterRow.text, searchRow, paintBarWording(modeWording)]
     }
 
     const entries = this.displayEntries()
@@ -408,13 +460,14 @@ export class KeybindingEditorPanel implements Component, Focusable {
       hit: { kind: 'inert' },
       drop: 30,
     })
+    rows.push({
+      text: filterRow.text,
+      hit: filterSwitchable ? { kind: 'filter', spans: filterRow.spans } : { kind: 'inert' },
+    })
     rows.push({ text: searchRow, hit: { kind: 'search' } })
     // Rows reserved below the item window: the blank separator after the
     // search row, both scroll markers, and the trailing blank + hint. The
-    // status line takes one more when present. Reserving the same optional
-    // rows as before keeps the item window (and the whole ample-grant
-    // frame) byte-identical to the previous assembly; the trim below only
-    // removes what genuinely cannot fit.
+    // status line takes one more when present.
     const reservedTail = 5 + (this.message !== undefined ? 1 : 0)
     const listBudget = Math.max(1, Math.min(
       Math.max(1, entries.length),
@@ -427,11 +480,11 @@ export class KeybindingEditorPanel implements Component, Focusable {
     const end = Math.min(entries.length, start + listBudget)
     rows.push({ text: '', hit: { kind: 'inert' }, drop: 10 })
     if (entries.length === 0) {
-      rows.push({ text: color.textDim('No matching shortcuts.'), hit: { kind: 'inert' } })
+      rows.push({ text: color.textDim(truncateToWidth(this.emptyListText(), safeWidth)), hit: { kind: 'inert' } })
     } else {
       for (const entry of entries.slice(start, end)) {
         if (entry.kind === 'header') {
-          rows.push({ text: color.textStrong(entry.label), hit: { kind: 'inert' } })
+          rows.push({ text: color.textStrong(truncateToWidth(entry.label, safeWidth)), hit: { kind: 'inert' }, drop: 22 })
         } else {
           const selectableIndex = selectable.indexOf(entry)
           rows.push({
@@ -454,6 +507,9 @@ export class KeybindingEditorPanel implements Component, Focusable {
     // The hit map is built from the EXACT rows this render returns, so a
     // click can only act on last-painted geometry.
     this.hitMap = kept.map(row => row.hit)
+    this.paintedFilterSpans = filterSwitchable && kept.some(row => row.hit.kind === 'filter')
+      ? filterRow.spans
+      : undefined
     this.paintedSelectableIds = new Set(kept.flatMap(row =>
       row.hit.kind === 'select' ? [row.hit.id] : []))
     this.paintedEscapeSpanValue = hintWording.escape
@@ -464,6 +520,50 @@ export class KeybindingEditorPanel implements Component, Focusable {
       this.paintedEscapeSpanValue = passiveWording.escape
     }
     return kept.map(row => row.text)
+  }
+
+  /** The ONE local view-mode row: two complete painted spans when the whole
+   *  wording fits, otherwise a read-only statement of the active mode with no
+   *  hit geometry (a half token is never clickable). */
+  private filterRow(width: number): { readonly text: string; readonly spans: readonly FilterSpan[] } {
+    const allToken = this.filter === 'all' ? '[All]' : 'All'
+    const conflictsLabel = `Conflicts (${this.model.conflictCount} affected actions)`
+    const conflictsToken = this.filter === 'conflicts' ? `[${conflictsLabel}]` : conflictsLabel
+    const prefix = 'View: '
+    const plain = `${prefix}${allToken} · ${conflictsToken}`
+    if (visibleWidth(plain) <= width) {
+      const allStart = visibleWidth(prefix)
+      const allEnd = allStart + visibleWidth(allToken)
+      const conflictsStart = allEnd + visibleWidth(' · ')
+      const conflictsEnd = conflictsStart + visibleWidth(conflictsToken)
+      const painted = `${color.textDim(prefix)}${this.filter === 'all'
+        ? color.textStrong('[All]', 'primary')
+        : color.textDim('All')}${color.textDim(' · ')}${this.filter === 'conflicts'
+        ? color.textStrong(`[${conflictsLabel}]`, 'primary')
+        : color.textDim(conflictsLabel)}`
+      return {
+        text: painted,
+        spans: [
+          { mode: 'all', startCol: allStart, endCol: allEnd },
+          { mode: 'conflicts', startCol: conflictsStart, endCol: conflictsEnd },
+        ],
+      }
+    }
+    // Narrow grants keep the active mode visible but grant no mode switch.
+    const label = this.filter === 'all' ? 'All' : 'Conflicts'
+    return {
+      text: truncateToWidth(`${color.textDim(prefix)}${color.textStrong(`[${label}]`, 'primary')}`, Math.max(1, width)),
+      spans: [],
+    }
+  }
+
+  private emptyListText(): string {
+    if (this.filter !== 'conflicts') return 'No matching shortcuts.'
+    if (this.query.trim() !== '') return 'No conflicted shortcuts match your search.'
+    if (this.model.conflictCount === 0) {
+      return 'No conflicts in the current keymap.'
+    }
+    return 'No conflicted shortcuts match your search.'
   }
 
   /** The search row: the `Search: ` label combined with the shared
@@ -499,6 +599,7 @@ export class KeybindingEditorPanel implements Component, Focusable {
     if (matchesKey(data, 'escape')) {
       if (this.query !== '') {
         this.searchInput.setValue('')
+        this.mousePressedFilter = undefined
         this.selectedId = 'leader'
         this.selectedIndex = 0
         this.message = undefined
@@ -522,6 +623,14 @@ export class KeybindingEditorPanel implements Component, Focusable {
     // own ROOT back verbs (the real Esc, and `←` on the query-less root list)
     // already returned above.
     if (this.maxRows() < 2) return
+    // Tab/Shift+Tab switch the ONE local view mode only when the LAST frame
+    // really painted the complete switchable mode row; a hidden/truncated mode
+    // row makes both keys inert instead of changing an unseen filter.
+    if (matchesKey(data, 'tab') || matchesKey(data, 'shift+tab')) {
+      if (this.paintedFilterSpans === undefined) return
+      this.setFilter(this.filter === 'all' ? 'conflicts' : 'all')
+      return
+    }
     const selectable = this.selectableEntries(this.displayEntries())
     this.ensureSelection(selectable)
     // The parent owns ONLY the list/control keys; EVERY other key —
@@ -558,6 +667,7 @@ export class KeybindingEditorPanel implements Component, Focusable {
     this.searchInput.handleInput(data)
     if (this.searchInput.getValue() !== before) {
       // The query changed: filter again and reset the selection to the top.
+      this.mousePressedFilter = undefined
       this.selectedId = 'leader'
       this.selectedIndex = 0
       this.message = undefined
@@ -582,10 +692,12 @@ export class KeybindingEditorPanel implements Component, Focusable {
     const pressedId = this.mousePressedId
     const pressedGrant = this.mousePressedGrant
     const pressedView = this.mousePressedView
+    const pressedFilter = this.mousePressedFilter
     if (event.type === 'click' || event.type === 'wheel') {
       this.mousePressedId = undefined
       this.mousePressedGrant = undefined
       this.mousePressedView = undefined
+      this.mousePressedFilter = undefined
     }
     // The hit map is only valid for the last painted width: a resize
     // that has not been repainted must not dispatch against stale
@@ -595,6 +707,40 @@ export class KeybindingEditorPanel implements Component, Focusable {
     if (this.leaderEditing) return undefined
     const hit = this.hitMap[event.y]
     if (!hit) return undefined
+
+    if (hit.kind === 'filter') {
+      if (event.button !== 'left' || (event.type !== 'press' && event.type !== 'click')) return undefined
+      // The two mode spans are the ONLY clickable cells on this row: the
+      // separator between them and the leading `View:` label are inert.
+      const span = hit.spans.find(candidate => event.x >= candidate.startCol && event.x < candidate.endCol)
+      if (span === undefined) return undefined
+      if (event.type === 'press') {
+        this.mousePressedId = undefined
+        this.mousePressedGrant = undefined
+        this.mousePressedView = undefined
+        this.mousePressedFilter = {
+          spans: hit.spans,
+          mode: span.mode,
+          grant: this.parentContentRows,
+          view: this.gestureIdentity(),
+          width: this.lastRenderWidth,
+        }
+        return { handled: true, focus: true }
+      }
+      // click: the same option must have been pressed, and no resize, mode,
+      // query, model, grant or page identity may have moved under the
+      // gesture. The local copy guards the comparison (the latch was
+      // released at handler entry).
+      if (pressedFilter === undefined || pressedFilter.mode !== span.mode) return undefined
+      const pressedSpan = pressedFilter.spans.find(candidate => candidate.mode === pressedFilter.mode)
+      if (pressedSpan === undefined
+        || pressedSpan.startCol !== span.startCol
+        || pressedSpan.endCol !== span.endCol) return undefined
+      if (pressedFilter.grant !== this.parentContentRows || pressedFilter.width !== this.lastRenderWidth) return undefined
+      if (pressedFilter.view !== this.gestureIdentity()) return undefined
+      this.setFilter(span.mode)
+      return { handled: true }
+    }
 
     if (hit.kind === 'search') {
       if (event.type !== 'press') return undefined
@@ -618,6 +764,7 @@ export class KeybindingEditorPanel implements Component, Focusable {
         // identity first (a rejected stale press must not leave an old
         // ID that a later synthetic click could match).
         this.mousePressedId = undefined
+        this.mousePressedFilter = undefined
         // The hit map is last-painted geometry: resolve the CURRENT
         // selectable index by the stable action/leader ID (a query or
         // model change between paint and press may have reordered or
@@ -667,13 +814,23 @@ export class KeybindingEditorPanel implements Component, Focusable {
     return this.paintedEscapeSpanValue
   }
 
+  /** The Action detail's delegated non-Esc bar spans, when that sub-view is
+   *  mounted; the Settings root owns the physical row and forwards releases. */
+  paintedBarSpans(): readonly { readonly id: string; readonly startCol: number; readonly endCol: number }[] {
+    return this.actionEditor?.paintedBarSpans?.() ?? []
+  }
+
+  activateBarSpan(id: string): void {
+    this.actionEditor?.activateBarSpan?.(id)
+  }
+
   /** The page's own SEMANTIC identity for a pointer gesture: the sub-view
    *  (list / leader editor / action detail), the query stage and the pending
    *  leader write decide what its Esc really does. The Settings root stores it
    *  at press and re-proves it at the release. */
   gestureIdentity(): string {
     const detail = this.actionEditor === undefined ? '' : this.actionEditor.gestureIdentity()
-    return `${this.viewKey()}:${detail}:${this.query === '' ? 'empty' : 'query'}:${this.leaderPending ? 'pending' : 'idle'}`
+    return `${this.viewKey()}:${detail}:${this.query === '' ? 'empty' : `query:${this.query}`}:${this.leaderPending ? 'pending' : 'idle'}`
   }
 
   dispose(): void {
@@ -690,6 +847,7 @@ export class KeybindingEditorPanel implements Component, Focusable {
   }
 
   private displayEntries(): readonly ListEntry[] {
+    if (this.filter === 'conflicts') return this.displayConflictEntries()
     const matches = searchKeybindingRows(this.model.rows, this.query)
     const matchedRows = new Set(matches.map(match => match.row.id))
     const entries: ListEntry[] = []
@@ -703,17 +861,41 @@ export class KeybindingEditorPanel implements Component, Focusable {
     return entries
   }
 
+  /** The Conflicts view: only affected editable builtin actions. Every
+   *  production conflict record has a builtin/user participant, so the
+   *  action rows are the complete projection. */
+  private displayConflictEntries(): readonly ListEntry[] {
+    const entries: ListEntry[] = []
+    const matches = searchKeybindingRows(this.model.rows, this.query)
+    const matchedRows = new Set(matches.map(match => match.row.id))
+    const affected: ListEntry[] = []
+    for (const section of this.model.sections) {
+      const rows = section.rows.filter(row => row.conflict && matchedRows.has(row.id))
+      if (rows.length === 0) continue
+      affected.push({ kind: 'header', label: section.category })
+      for (const row of rows) affected.push({ kind: 'action', row })
+    }
+    if (affected.length > 0) {
+      entries.push({ kind: 'header', label: 'Affected actions' })
+      entries.push(...affected)
+    }
+    return entries
+  }
+
   private selectableEntries(entries: readonly ListEntry[]): readonly ListEntry[] {
     return entries.filter(entry => entry.kind !== 'header')
   }
 
   private isSelectedEntry(entry: ListEntry): boolean {
-    return entry.kind === 'leader' ? this.selectedId === 'leader' : entry.kind === 'action' && this.selectedId === entry.row.id
+    if (entry.kind === 'leader') return this.selectedId === 'leader'
+    if (entry.kind === 'action') return this.selectedId === entry.row.id
+    return false
   }
 
   private ensureSelection(selectable: readonly ListEntry[]): void {
     if (selectable.length === 0) {
       this.selectedIndex = 0
+      this.selectedId = ''
       return
     }
     const existing = selectable.findIndex(entry => this.isSelectedEntry(entry))
@@ -726,7 +908,9 @@ export class KeybindingEditorPanel implements Component, Focusable {
   }
 
   private entryId(entry: ListEntry): string {
-    return entry.kind === 'leader' ? 'leader' : entry.kind === 'action' ? entry.row.id : ''
+    if (entry.kind === 'leader') return 'leader'
+    if (entry.kind === 'action') return entry.row.id
+    return ''
   }
 
   private moveSelection(delta: number, selectable: readonly ListEntry[]): void {
@@ -775,6 +959,22 @@ export class KeybindingEditorPanel implements Component, Focusable {
       maxRows: this.maxRows,
     })
     this.actionEditor = detail
+    this.requestRender()
+  }
+
+  /** The ONE mode transition used by Tab/Shift+Tab and the painted spans.
+   *  Filtering is presentation-only: no mutation, no reload, no keymap write.
+   *  It preserves the query, cancels any mouse gesture and repositions a
+   *  selection that the new mode no longer contains. */
+  private setFilter(next: KeybindingEditorFilter): void {
+    if (this.filter === next) return
+    this.filter = next
+    this.mousePressedId = undefined
+    this.mousePressedGrant = undefined
+    this.mousePressedView = undefined
+    this.mousePressedFilter = undefined
+    this.message = undefined
+    this.ensureSelection(this.selectableEntries(this.displayEntries()))
     this.requestRender()
   }
 

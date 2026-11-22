@@ -990,6 +990,30 @@ test('the CLI startup entry opens the SAME Browser with its query and skips the 
   assert.deepEqual(h.switched, [], 'closing the Browser starts no Session and switches nothing')
 })
 
+test('a long search failure reaches the transient notice without pre-truncation', async (t) => {
+  const message = `${'A'.repeat(50)}MARK-A${'B'.repeat(30)}MARK-B${'C'.repeat(30)}MARK-C${'D'.repeat(40)}END`
+  const h = harness({
+    list: async () => [{ id: 'session-one', updatedAt: 20, cwd: '/ws', live: false }],
+    search: async () => { throw new Error(message) },
+    projectionBatch: async () => new Map(),
+    blank: () => undefined, measureContext: () => undefined,
+    turnOutline: () => undefined,
+    sessionStatus: () => undefined,
+  })
+  t.after(() => h.app.stop())
+
+  const opened = await h.openSessionBrowser({ scope: 'all', initialQuery: 'needle' })
+  assert.deepEqual(opened, { kind: 'success' }, 'the Browser opens before the Host search settles')
+  await waitUntil(() => h.notices.some(notice => notice.kind === 'error'))
+  const errors = h.notices.filter(notice => notice.kind === 'error')
+  assert.equal(errors.length, 1, `the first search failure emits exactly one notice: ${JSON.stringify(h.notices)}`)
+  assert.equal(errors[0]!.text, `Search failed: ${message}`, 'the notice carries the complete safe formatted text')
+  assert.ok(errors[0]!.text.includes('MARK-B') && errors[0]!.text.includes('MARK-C'),
+    'the notice keeps the distinguishing tail beyond the old 40-char cut')
+  await h.vt.waitForRender()
+  assert.ok(h.view().includes('Search all workspaces'), 'the live Browser stays mounted and visible after the failed search')
+})
+
 test('a bare CLI startup opens Browse All without the Workspace preflight', async (t) => {
   const rows = [
     { id: 'session-alpha', updatedAt: 20, cwd: '/ws', live: false },

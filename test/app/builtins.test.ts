@@ -19,7 +19,7 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
-import { Text } from '@xmoon76/pi-tui'
+import { Text, stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { apply as applyExtensionHost } from '../../src/extensions.ts'
 import type { PiTuiExtensionService } from '../../src/extensions.ts'
 import { apply as applyBuiltins } from '../../src/builtins.ts'
@@ -313,6 +313,47 @@ test('builtin todo dock summary returns after a >5-item full cycle', async () =>
     assertBuiltinTodoSummary(fixture, '8 active · todo item 1', 'full cycle')
     assert.ok(!view.includes('todo item 8'), `closed panel must hide the full-list row:\n${view}`)
     assert.ok(fixture.host.state().activity.todoSummary !== '', 'closing must republish the todo summary projection')
+  } finally {
+    await disposeBuiltinFixture(fixture, ctx)
+  }
+})
+
+test('the builtin todo dock keeps the full safe summary and follows the live surface width', async () => {
+  const ctx = new Context()
+  let fixture: LiveBuiltinApp | undefined
+  try {
+    fixture = await attachBuiltinApp(ctx, 80, 24)
+    const content = `${'A'.repeat(50)}MARK-A${'B'.repeat(30)}MARK-B${'C'.repeat(30)}MARK-C${'D'.repeat(40)}END`
+    fixture.app.setTodoSummary([{ content, status: 'in_progress' }])
+    await settleRender(fixture.app, fixture.vt)
+
+    // The extension snapshot carries the FULL safe display text; only the
+    // dock outlet's bake applies the current physical width.
+    assert.equal(fixture.host.state().activity.todoSummary, `1 active · ${content}`)
+    const narrow = fixture.host.dockText()
+    assert.ok(narrow.includes('MARK-A'), `the 80-column builtin dock must show past the old 40-char cut: ${narrow}`)
+    assert.ok(!narrow.includes('MARK-B'), `the 80-column builtin dock must honor its width: ${narrow}`)
+    assert.ok(visibleWidth(narrow) <= 80, 'the builtin dock never widens its 80-column surface')
+    assert.equal(narrow.split('\n').length, 1, 'the builtin dock bakes one physical row')
+
+    // Resize the real terminal: TuiApp re-submits the surface snapshot and
+    // re-bakes the width-budgeted dock outlet through the production path.
+    fixture.vt.resize(160, 24)
+    await settleRender(fixture.app, fixture.vt)
+    const wide = fixture.host.dockText()
+    assert.ok(wide.includes('MARK-B') && wide.includes('MARK-C'), `a wider surface must reveal farther summary text: ${wide}`)
+    assert.ok(!wide.includes('END'), 'the wider dock still truncates what does not fit')
+    assert.ok(visibleWidth(wide) > visibleWidth(narrow), 'the painted summary really grows with the surface width')
+    assert.ok(visibleWidth(wide) <= 160, 'the builtin dock never exceeds its surface width')
+    assert.equal((fixture.vt.getViewport().join('\n').match(/☑/g) ?? []).length, 1, 'the dock paints one summary, never a duplicate')
+
+    // Narrow again: the same full snapshot bakes down to one row with `…`.
+    fixture.vt.resize(44, 24)
+    await settleRender(fixture.app, fixture.vt)
+    const squeezed = fixture.host.dockText()
+    assert.equal(squeezed.split('\n').length, 1, 'the narrow builtin dock stays one physical row')
+    assert.ok(stripTerminalSequences(squeezed).endsWith('…'), `the narrow builtin dock marks truncation: ${squeezed}`)
+    assert.ok(visibleWidth(squeezed) <= 44, 'the narrow builtin dock never exceeds 44 cells')
   } finally {
     await disposeBuiltinFixture(fixture, ctx)
   }

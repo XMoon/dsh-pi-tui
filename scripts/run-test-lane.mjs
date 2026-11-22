@@ -47,6 +47,7 @@ import { resolveLane } from './test-discovery.mjs'
 import { LANES } from './test-lanes.mjs'
 import { groupStillAlive, stopOwnedGroup } from './lib/owned-process-group.mjs'
 import { createTestTempRoot } from './lib/test-temp-root.mjs'
+import { activateDarwinKoffiTestAnchor, prepareDarwinKoffiTestAnchor } from './lib/darwin-koffi-test-anchor.mjs'
 
 const ROOT = realpathSync(resolve(dirname(fileURLToPath(import.meta.url)), '..'))
 const TEST_ROOT = join(ROOT, 'test')
@@ -332,6 +333,10 @@ function main() {
     console.error(`unknown test lane: ${laneName}\nlanes: ${Object.keys(LANES).join(', ')}`)
     process.exit(2)
   }
+  // Prepare the tool-only anchor before spawning: a preparation failure must
+  // not leave a detached child running. It is activated only after spawn so the
+  // child keeps its caller-supplied environment.
+  prepareDarwinKoffiTestAnchor()
   // No discovered file path is passed through argv. The child resolves the
   // lane inside its own process and calls node:test.run({ files, shard }).
   // Keep the runner's temp root outside the checkout, even when its ambient
@@ -352,6 +357,10 @@ function main() {
     detached: ownsGroup,
     env: { ...sanitizeTestEnvironment(process.env), TMPDIR: root, TMP: root, TEMP: root },
   })
+  // Activate the tool-only anchor only AFTER the child inherited its environment:
+  // a real DSH Direct child must keep its own argv identity and never receive
+  // the wrapper's test fixture anchor.
+  activateDarwinKoffiTestAnchor()
 
   let childResult
   let resolveClosed

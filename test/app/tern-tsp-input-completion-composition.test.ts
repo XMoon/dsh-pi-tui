@@ -1174,7 +1174,7 @@ test('a provenance-screened catalog keeps Host, skill and extension rows, drops 
   assert.ok(shown.includes('glab'), `the live skill wrapper survives the screen: ${shown.join(', ')}`)
   assert.ok(shown.includes(CONTRIBUTION_NAME), `the extension contribution survives the screen: ${shown.join(', ')}`)
   assert.ok(shown.includes('model'), `a mounted Model presenter keeps /model: ${shown.join(', ')}`)
-  for (const unsupported of ['help', 'rewind', 'login', 'logout']) {
+  for (const unsupported of ['rewind', 'login', 'logout']) {
     assert.equal(shown.includes(unsupported), false, `/${unsupported} is not offered in the full catalog scan`)
     // A name-typed query is the DIRECT witness: had the screen kept that TUI
     // Client registration, the provider would have returned exactly it.

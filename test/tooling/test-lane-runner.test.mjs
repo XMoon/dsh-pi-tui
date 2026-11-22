@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep, win32 } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
@@ -17,6 +17,7 @@ import { orderWeightedProductFiles, parseConcurrency, sanitizeTestEnvironment } 
 import { resolveLane } from '../../scripts/test-discovery.mjs'
 import { LANES } from '../../scripts/test-lanes.mjs'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
+import { copyKoffiPackage } from '../support/darwin-koffi-fixture.ts'
 import {
   isExecuting, killStillExecuting, readPidRecords, startTimeOf, waitForNoExecuting,
 } from '../support/pid-records.ts'
@@ -144,6 +145,8 @@ function copyLaneRunnerSources(scripts) {
   }
   writeFileSync(join(scripts, 'lib', 'owned-process-group.mjs'),
     readFileSync(join(ROOT, 'scripts', 'lib', 'owned-process-group.mjs')))
+  writeFileSync(join(scripts, 'lib', 'darwin-koffi-test-anchor.mjs'),
+    readFileSync(join(ROOT, 'scripts', 'lib', 'darwin-koffi-test-anchor.mjs')))
   writeFileSync(join(scripts, 'lib', 'test-temp-root.mjs'),
     readFileSync(join(ROOT, 'scripts', 'lib', 'test-temp-root.mjs')))
   // The runner imports the shared kernel-identity seam for process-group
@@ -155,12 +158,26 @@ function copyLaneRunnerSources(scripts) {
   for (const name of ['identity.ts', 'darwin.ts']) {
     writeFileSync(join(nativeProcess, name), readFileSync(join(ROOT, 'src', 'runtime', 'native-process', name)))
   }
-  // The identity seam imports node-koffi LAZILY; the sanitized lane child has
-  // no NODE_PATH, so the copied repository must resolve the REAL devDependency
-  // itself (a koffi resolved from an ambient global path could be another
-  // version entirely). The symlink keeps the fixture hermetic.
-  mkdirSync(join(fixtureRoot, 'node_modules'), { recursive: true })
-  symlinkSync(join(ROOT, 'node_modules', 'koffi'), join(fixtureRoot, 'node_modules', 'koffi'), 'dir')
+  // The identity seam resolves node-koffi through the installed DSH anchor.
+  // A copied fixture repository is not a DSH installation, so give it an
+  // explicit test-owned anchor (the same package names and dependency edge the
+  // real installation has). The sanitized lane child has no NODE_PATH, and the
+  // copied package keeps the fixture hermetic.
+  const dshDir = join(fixtureRoot, 'node_modules', '@deepseek-ai', 'dsh')
+  mkdirSync(dshDir, { recursive: true })
+  writeFileSync(join(dshDir, 'package.json'), `${JSON.stringify({
+    name: '@deepseek-ai/dsh',
+    version: '0.2.2-rc.5',
+  })}\n`)
+  const koffiVersion = copyKoffiPackage(join(fixtureRoot, 'node_modules'))
+  const subprocessDir = join(fixtureRoot, 'node_modules', '@deepseek-ai', 'dsh-subprocess-local')
+  mkdirSync(subprocessDir, { recursive: true })
+  writeFileSync(join(subprocessDir, 'package.json'), `${JSON.stringify({
+    name: '@deepseek-ai/dsh-subprocess-local',
+    version: '0.2.2-rc.5',
+    dependencies: { koffi: koffiVersion },
+  })}\n`)
+  return join(dshDir, 'package.json')
 }
 
 
@@ -168,7 +185,7 @@ test('a checkout-local TMPDIR leaves the lane worker in an external owned root',
   const life = testLifecycle(t)
   const fixture = life.tempDir('dsh-lane-external-tmp-')
   const scripts = join(fixture, 'scripts')
-  copyLaneRunnerSources(scripts)
+  const dshAnchor = copyLaneRunnerSources(scripts)
   writeFileSync(join(scripts, 'test-lanes.mjs'), `export const LANES = {
   probe: { description: 'external temp root probe', patterns: ['probe/**'], suffixes: ['.test.mjs'] },
 }\n`)
@@ -193,6 +210,7 @@ test('worker uses one owned temp root for all temp variables', () => {
     encoding: 'utf8',
     timeout: 30_000,
     env: { ...process.env, TMPDIR: localTmp, TMP: localTmp, TEMP: localTmp,
+      SPLIT_PROCESS_DSH_ANCHOR: dshAnchor,
       PROBE_MARKER: marker, NODE_TEST_CONTEXT: undefined, DSH_TEST_KEEP_TMP: undefined },
   })
   assert.equal(result.status, 0, result.stderr ?? result.error?.message)
@@ -203,12 +221,52 @@ test('worker uses one owned temp root for all temp variables', () => {
   assert.equal(existsSync(childTmp), false, 'the lane runner removes its external root after a successful run')
 })
 
+test('the lane runner does not leak its own tool anchor into test workers', (t) => {
+  const life = testLifecycle(t)
+  const fixture = life.tempDir('dsh-lane-anchor-env-')
+  const scripts = join(fixture, 'scripts')
+  const dshAnchor = copyLaneRunnerSources(scripts)
+  writeFileSync(join(scripts, 'test-lanes.mjs'), `export const LANES = {
+  probe: { description: 'anchor environment probe', patterns: ['probe/**'], suffixes: ['.test.mjs'] },
+}\n`)
+  const probe = join(fixture, 'test', 'probe')
+  mkdirSync(probe, { recursive: true })
+  writeFileSync(join(probe, 'anchor.test.mjs'), `
+import test from 'node:test'
+import { writeFileSync } from 'node:fs'
+test('records the inherited anchor', () => {
+  writeFileSync(process.env.PROBE_MARKER, process.env.SPLIT_PROCESS_DSH_ANCHOR ?? '')
+})
+`)
+  const marker = join(fixture, 'anchor.txt')
+  const cleanEnv = { ...process.env, PROBE_MARKER: marker, NODE_TEST_CONTEXT: undefined, DSH_TEST_KEEP_TMP: undefined }
+  delete cleanEnv.SPLIT_PROCESS_DSH_ANCHOR
+  const clean = spawnSync(process.execPath, [join(scripts, 'run-test-lane.mjs'), 'probe'], {
+    cwd: fixture,
+    encoding: 'utf8',
+    timeout: 30_000,
+    env: cleanEnv,
+  })
+  assert.equal(clean.status, 0, clean.stderr ?? clean.error?.message)
+  assert.equal(readFileSync(marker, 'utf8'), '', 'the lane runner must not leak its own tool fixture anchor')
+
+  const explicit = { ...cleanEnv, SPLIT_PROCESS_DSH_ANCHOR: dshAnchor }
+  const preserved = spawnSync(process.execPath, [join(scripts, 'run-test-lane.mjs'), 'probe'], {
+    cwd: fixture,
+    encoding: 'utf8',
+    timeout: 30_000,
+    env: explicit,
+  })
+  assert.equal(preserved.status, 0, preserved.stderr ?? preserved.error?.message)
+  assert.equal(readFileSync(marker, 'utf8'), dshAnchor, 'the lane runner must preserve a caller-supplied anchor')
+})
+
 const WINDOWS_COMMAND_LINE_LIMIT = 32_767
 
 test('the real lane starts above the Windows argv budget with complete shard and reporter evidence', (t) => {
   const fixture = testLifecycle(t).tempDir('dsh-lane-argv-')
   const scripts = join(fixture, 'scripts')
-  copyLaneRunnerSources(scripts)
+  const dshAnchor = copyLaneRunnerSources(scripts)
   writeFileSync(join(scripts, 'test-lanes.mjs'), `export const LANES = {
   probe: { description: 'long argv probe', patterns: ['probe/**'], suffixes: ['.test.mjs'] },
 }\n`)
@@ -240,6 +298,7 @@ test('probe ${index}', () => {
     encoding: 'utf8',
     timeout: 30_000,
     env: { ...process.env, NODE_TEST_CONTEXT: undefined, DSH_TEST_JSONL: casesPath,
+      SPLIT_PROCESS_DSH_ANCHOR: dshAnchor,
       DSH_TEST_EFFECTIVE_JSON: effectivePath, PROBE_ROOT: fixture },
   })
   assert.equal(result.status, 0, result.stderr ?? result.error?.message)
@@ -269,6 +328,7 @@ test('failure propagation', () => { throw new Error('expected failure') })
     encoding: 'utf8',
     timeout: 30_000,
     env: { ...process.env, NODE_TEST_CONTEXT: undefined,
+      SPLIT_PROCESS_DSH_ANCHOR: dshAnchor,
       DSH_TEST_JSONL: undefined, DSH_TEST_EFFECTIVE_JSON: undefined },
   })
   assert.equal(failed.status, 1, failed.stderr ?? failed.error?.message)
@@ -408,7 +468,7 @@ test('the lane runner actually applies concurrency to real test workers', (t) =>
   // require roughly 1.6s serially and can overlap at concurrency 4.
   const fixture = testLifecycle(t).tempDir('dsh-lane-concurrency-')
   const scripts = join(fixture, 'scripts')
-  copyLaneRunnerSources(scripts)
+  const dshAnchor = copyLaneRunnerSources(scripts)
   writeFileSync(join(scripts, 'test-lanes.mjs'), `export const LANES = {
   probe: { description: 'concurrency probe', patterns: ['probe/**'], suffixes: ['.test.mjs'] },
 }\n`)
@@ -430,6 +490,7 @@ test('hold ${index}', async () => { await new Promise(resolve => setTimeout(reso
       encoding: 'utf8',
       timeout: 30_000,
       env: { ...process.env, NODE_TEST_CONTEXT: undefined,
+        SPLIT_PROCESS_DSH_ANCHOR: dshAnchor,
         DSH_TEST_JSONL: undefined, DSH_TEST_EFFECTIVE_JSON: undefined },
     })
     assert.equal(result.status, 0, result.stderr ?? result.error?.message)
@@ -462,7 +523,7 @@ async function assertSignalReachesWorkerTree(t, signal) {
   // exercises. The probe itself runs in a real `node --test` WORKER and starts
   // a descendant that ignores every forwarded signal.
   const scripts = join(fixture, 'scripts')
-  copyLaneRunnerSources(scripts)
+  const dshAnchor = copyLaneRunnerSources(scripts)
   writeFileSync(join(scripts, 'test-lanes.mjs'), `export const LANES = {
   probe: { description: 'the wrapper signal probe', patterns: ['probe/**'], suffixes: ['.test.mjs'] },
 }
@@ -487,6 +548,7 @@ test('holds a signal-ignoring descendant', async () => {
   const child = spawn(process.execPath, [join(scripts, 'run-test-lane.mjs'), 'probe'], {
     env: {
       ...process.env,
+      SPLIT_PROCESS_DSH_ANCHOR: dshAnchor,
       PROBE_MARKER: marker,
       PROBE_DESCENDANT: SIGNAL_TREE_DESCENDANT,
       // The OUTER run's lane context must not leak into the fixture lane: the
@@ -546,7 +608,7 @@ test('a lane whose leader handles SIGTERM and exits 0 still yields the interrupt
   const fixture = life.tempDir('dsh-lane-handled-')
   const marker = join(fixture, 'evidence.log')
   const scripts = join(fixture, 'scripts')
-  copyLaneRunnerSources(scripts)
+  const dshAnchor = copyLaneRunnerSources(scripts)
   writeFileSync(join(scripts, 'test-lanes.mjs'), `export const LANES = {
   probe: { description: 'the wrapper handled-signal probe', patterns: ['probe/**'], suffixes: ['.test.mjs'] },
 }
@@ -569,6 +631,7 @@ test('stays alive until the interruption', async () => {
   const child = spawn(process.execPath, [join(scripts, 'run-test-lane.mjs'), 'probe'], {
     env: {
       ...process.env,
+      SPLIT_PROCESS_DSH_ANCHOR: dshAnchor,
       PROBE_MARKER: marker,
       NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --require=${join(fixture, 'signal-hook.cjs')}`.trim(),
       DSH_TEST_JSONL: undefined,
@@ -604,7 +667,7 @@ test('a lane whose worker leaves a running descendant keeps its temp root', { sk
   // A fixture repository whose probe test starts a descendant and RETURNS:
   // `node --test` finishes normally while the descendant keeps the group alive.
   const scripts = join(fixture, 'scripts')
-  copyLaneRunnerSources(scripts)
+  const dshAnchor = copyLaneRunnerSources(scripts)
   writeFileSync(join(scripts, 'test-lanes.mjs'), `export const LANES = {
   probe: { description: 'the wrapper lingering probe', patterns: ['probe/**'], suffixes: ['.test.mjs'] },
 }
@@ -631,6 +694,7 @@ test('starts a descendant that outlives the worker', () => {
   const child = spawn(process.execPath, [join(scripts, 'run-test-lane.mjs'), 'probe'], {
     env: {
       ...process.env,
+      SPLIT_PROCESS_DSH_ANCHOR: dshAnchor,
       PROBE_MARKER: marker,
       PROBE_DESCENDANT: SIGNAL_TREE_DESCENDANT,
       DSH_TEST_JSONL: undefined,

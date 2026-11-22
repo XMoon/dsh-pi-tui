@@ -5130,7 +5130,7 @@ export function applyRunnerWithRuntime(
     }
     // Command registration is sessionless: it must run on BOTH startup
     // surfaces (resume path registers inside initLiveSession; the deferred
-    // path registers here so /exit /settings /help work before any message).
+    // path registers here so /exit /settings work before any message).
     // The pre-mount snapshot installs SYNCHRONOUSLY inside registration —
     // the first terminal input cannot arrive before this call stack unwinds.
     command.register({ snapshot: initialSnapshot, skills: initialSkills })

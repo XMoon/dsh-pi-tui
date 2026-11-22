@@ -51,9 +51,21 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import type { ContentBlock as AcpWireContentBlock, SessionUpdate, StopReason, ToolCallContent } from '@agentclientprotocol/sdk'
+import type {
+  ContentBlock as AcpWireContentBlock,
+  SessionConfigOption,
+  SessionUpdate,
+  StopReason,
+  ToolCallContent,
+} from '@agentclientprotocol/sdk'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { observeSettled, runDetached } from '../../runtime/process/tasks.ts'
+import {
+  AcpModelError,
+  type AcpModelCurrentness,
+  type AcpModelErrorCode,
+  type AcpModelOptionRequest,
+} from './local-acp-model-selection.ts'
 
 /** The exact live identity a borrowed Session View is allowed to believe. */
 export interface LiveAgentViewIdentity {
@@ -149,7 +161,24 @@ export interface HostAcpSessionAccess {
    * disposer removes exactly these listeners.
    */
   observePromptFacts(listener: AcpPromptFactListener): () => void
+  /** Read the complete standard config-option state of one exact attached Agent. */
+  modelOptions(agent: LiveAgentViewIdentity, session: object): Promise<SessionConfigOption[]>
+  /**
+   * Validate and commit ONE Session-only model/effort selection on the exact
+   * attached Agent. `stillCurrent` re-checks the owning View claim after every
+   * asynchronous Host validation and before the durable append.
+   */
+  selectModelOnly(
+    agent: LiveAgentViewIdentity,
+    session: object,
+    request: AcpModelOptionRequest,
+    signal: AbortSignal,
+    stillCurrent: () => AcpModelCurrentness,
+  ): Promise<SessionConfigOption[]>
 }
+
+/** One transient per-connection config-options notification callback. */
+export type AcpConfigOptionsNotifier = (sessionId: string, options: readonly SessionConfigOption[]) => Promise<void>
 
 /**
  * The stable View failure codes. They are the internal Host contract the
@@ -218,7 +247,7 @@ export type LocalAcpPromptErrorCode =
   | 'LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED'
 
 /** Every stable local ACP classification the View owner can raise. */
-export type LocalAcpSessionErrorCode = LocalAcpViewErrorCode | LocalAcpPromptErrorCode
+export type LocalAcpSessionErrorCode = LocalAcpViewErrorCode | LocalAcpPromptErrorCode | AcpModelErrorCode
 
 /**
  * One classified View rejection. `rpcCode` is the JSON-RPC error code the
@@ -259,6 +288,11 @@ export interface AcpResumeSessionParams {
   readonly cwd: string
   readonly additionalDirectories?: readonly string[]
   readonly mcpServers?: readonly unknown[]
+}
+
+/** The `session/set_config_option` request facts the View forwards to the Host model service. */
+export interface AcpSetConfigOptionParams extends AcpModelOptionRequest {
+  readonly sessionId: string
 }
 
 /** Raster MIME vocabulary shared by the ACP wire and official Host admission. */
@@ -462,6 +496,14 @@ interface ViewClaim {
    * claim then lives ONLY for that fact and is deleted when it settles.
    */
   detachedWithFence?: boolean
+  /**
+   * The ONE transient config-options notification callback of this claim's
+   * connection. It carries no model fact and dies with the claim; an absent
+   * callback (or a closed/replaced claim) means no config update is sent.
+   */
+  notifyConfigOptions?: AcpConfigOptionsNotifier
+  /** The ordered per-claim config-notification chain; later updates never overtake earlier ones. */
+  configNotifyTail?: Promise<void>
 }
 
 /** The maximum number of not-yet-written notifications ONE prompt flight may queue. */
@@ -598,6 +640,15 @@ function promptError(
   data: Readonly<Record<string, unknown>> = {},
 ): LocalAcpViewError {
   return new LocalAcpViewError(code, message, rpcCode, data)
+}
+
+/** The stable rejection when an attached View/Agent/Session identity changed mid-request. */
+function staleModelSelection(): LocalAcpViewError {
+  return new LocalAcpViewError(
+    'LOCAL_ACP_MODEL_STALE',
+    'the attached session changed during the model request',
+    -32042,
+  )
 }
 
 /** A stable code from a rejecting Host call, never its message or stack. */
@@ -738,6 +789,132 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   }
 
   /**
+   * The ONE attached claim this connection owns for a Session. An idle,
+   * closed, re-bound or foreign View holds no model capability.
+   */
+  private attachedClaim(state: ConnectionViewState, sessionId: string): ViewClaim {
+    const claim = this.claims.get(sessionId)
+    if (
+      state.phase !== 'attached'
+      || claim === undefined
+      || claim.connectionIdentity !== state
+      || claim.detachedWithFence
+      || claim.exactAgent === undefined
+      || claim.exactSession === undefined
+    ) {
+      throw new LocalAcpViewError(
+        'LOCAL_ACP_VIEW_NOT_OWNED',
+        'this ACP connection holds no view for that session',
+        JSONRPC_INVALID_PARAMS,
+      )
+    }
+    return claim
+  }
+
+  /** Whether this exact claim is still the live attached View of this connection. */
+  private isStillAttached(
+    state: ConnectionViewState,
+    claim: ViewClaim,
+    agent: LiveAgentViewIdentity,
+    session: object,
+  ): boolean {
+    return this.claims.get(claim.sessionId) === claim
+      && claim.connectionIdentity === state
+      && state.phase === 'attached'
+      && !claim.detachedWithFence
+      && claim.exactAgent === agent
+      && claim.exactSession === session
+  }
+
+  /** Map one typed Host model rejection onto the existing View error boundary. */
+  private async callModelAccess<T>(operation: () => Promise<T>): Promise<T> {
+    try {
+      return await operation()
+    } catch (error) {
+      if (error instanceof AcpModelError) {
+        throw new LocalAcpViewError(error.code, error.message, error.rpcCode, error.data)
+      }
+      throw error
+    }
+  }
+
+  /**
+   * Read the complete standard config-option state of the EXACT attached View.
+   * The async Host read is fenced against a close/re-bind/rebind before its
+   * result is returned to the connection.
+   */
+  async modelOptions(
+    state: ConnectionViewState,
+    access: HostAcpSessionAccess,
+    sessionId: string,
+  ): Promise<SessionConfigOption[]> {
+    const claim = this.attachedClaim(state, sessionId)
+    const agent = claim.exactAgent as LiveAgentViewIdentity
+    const session = claim.exactSession as object
+    try {
+      const options = await this.callModelAccess(() => access.modelOptions(agent, session))
+      if (!this.isStillAttached(state, claim, agent, session)) throw staleModelSelection()
+      return options
+    } catch (error) {
+      // Both a catalog success and a catalog rejection are fenced against the
+      // ORIGINAL claim. A detached/replaced View must never turn a catalog
+      // failure into a successful optional-display omission.
+      if (!this.isStillAttached(state, claim, agent, session)) throw staleModelSelection()
+      throw error
+    }
+  }
+
+  /**
+   * Commit ONE Session-only model/effort selection on the EXACT attached View.
+   * A View with any unsettled prompt obligation is refused before the Host
+   * service is reached; the Host service re-checks the exact Agent/Session
+   * identity and the View claim after every asynchronous validation step.
+   */
+  async setModelOption(
+    state: ConnectionViewState,
+    access: HostAcpSessionAccess,
+    request: AcpSetConfigOptionParams,
+    signal: AbortSignal,
+  ): Promise<SessionConfigOption[]> {
+    const claim = this.attachedClaim(state, request.sessionId)
+    if (claim.inflight !== undefined || claim.unclaimedHostObligation !== undefined) {
+      throw new LocalAcpViewError(
+        'LOCAL_ACP_MODEL_VIEW_BUSY',
+        'a prompt is already in flight for this session view',
+        -32046,
+      )
+    }
+    const agent = claim.exactAgent as LiveAgentViewIdentity
+    const session = claim.exactSession as object
+    const stillCurrent = (): AcpModelCurrentness => {
+      if (!this.isStillAttached(state, claim, agent, session)) return 'stale'
+      if (claim.inflight !== undefined || claim.unclaimedHostObligation !== undefined) return 'view-busy'
+      return 'current'
+    }
+    const options = await this.callModelAccess(() => access.selectModelOnly(
+      agent,
+      session,
+      {
+        configId: request.configId,
+        ...(request.type === undefined ? {} : { type: request.type }),
+        value: request.value,
+      },
+      signal,
+      stillCurrent,
+    ))
+    const currentness = stillCurrent()
+    if (currentness === 'view-busy') {
+      throw new LocalAcpViewError(
+        'LOCAL_ACP_MODEL_VIEW_BUSY',
+        'a prompt is already in flight for this session view',
+        -32046,
+      )
+    }
+    if (currentness !== 'current') throw staleModelSelection()
+    return options
+  }
+
+  /**
    * Attach a freshly created Host Session to this connection's View. `session/new`
    * creates ONE Host Workspace, then ONE Host Session, then borrows the official
    * live Agent. The failure category is decided by the HOST result: a definite
@@ -749,6 +926,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     state: ConnectionViewState,
     access: HostAcpSessionAccess,
     request: AcpNewSessionParams,
+    notifyConfigOptions?: AcpConfigOptionsNotifier,
   ): Promise<{ sessionId: string }> {
     const op = this.beginAttach(state)
     try {
@@ -814,7 +992,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     // resolveForView carries the authoritative { sessionId } on failure, so a
     // failed Agent borrow after a CONFIRMED create still preserves the identity.
     const agent = await this.resolveForView(access, state, op, claim)
-    this.commitAttached(state, op, claim, access, agent)
+    this.commitAttached(state, op, claim, access, agent, notifyConfigOptions)
     return { sessionId }
   }
 
@@ -827,6 +1005,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     state: ConnectionViewState,
     access: HostAcpSessionAccess,
     request: AcpResumeSessionParams,
+    notifyConfigOptions?: AcpConfigOptionsNotifier,
   ): Promise<Record<string, never>> {
     const op = this.beginAttach(state)
     try {
@@ -848,7 +1027,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     if (agent.session.header.cwd !== request.cwd) {
       this.diag.warn('local-acp.view.cwd-mismatch', { mismatch: true })
     }
-    this.commitAttached(state, op, claim, access, agent)
+    this.commitAttached(state, op, claim, access, agent, notifyConfigOptions)
     return {}
   }
 
@@ -991,6 +1170,8 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   /** Release one settled claim and record the idempotent close fact. */
   private finishClose(state: ConnectionViewState, sessionId: string, claim: ViewClaim): Record<string, never> {
     if (this.claims.get(sessionId) !== claim || claim.detachedWithFence || state.phase === 'closed') return {}
+    // A closed View owns no connection output any more.
+    claim.notifyConfigOptions = undefined
     // A transient terminal fact may still outlive the View: a retired-turn
     // approval fence (F2) or an unclaimed Host obligation (v1.1). The View
     // detaches, but the claim survives so a LATE approval of that exact
@@ -1485,6 +1666,13 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   onSessionEvent(session: object, event: AcpSessionEventLike): void {
     for (const claim of this.claims.values()) {
       if (claim.exactSession !== session) continue
+      // A committed model/selection record is the ONLY config-update trigger.
+      // It re-reads the Host authority asynchronously; the per-claim chain and
+      // the post-read identity checks keep a late result from replacing a
+      // newer View's state.
+      if (event.type === 'model/selection' && claim.notifyConfigOptions !== undefined) {
+        this.enqueueConfigNotification(claim, session)
+      }
       const data = event.data as { readonly turn?: unknown } | undefined
       // The retired-turn fence dies on its own terminal record even when no
       // flight is open any more (the flight settled before this turn/end).
@@ -1521,6 +1709,43 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
           break
       }
     }
+  }
+
+  /**
+   * Queue ONE full-option refresh on the claim's ordered notification chain.
+   * The chain is transient and per claim: a close/re-bind/teardown clears the
+   * callback, a late catalog read never reaches a newer View, and a delivery
+   * failure retires only this callback instead of becoming a Host failure.
+   */
+  private enqueueConfigNotification(claim: ViewClaim, session: object): void {
+    const notify = claim.notifyConfigOptions
+    const agent = claim.exactAgent
+    if (notify === undefined || agent === undefined) return
+    const previous = claim.configNotifyTail ?? Promise.resolve()
+    const next = previous.then(async () => {
+      if (claim.notifyConfigOptions !== notify) return
+      if (this.claims.get(claim.sessionId) !== claim || claim.exactSession !== session || claim.exactAgent !== agent) return
+      if (claim.connectionIdentity.phase !== 'attached' || claim.detachedWithFence) return
+      const access = this.access
+      if (access === undefined) return
+      let options: SessionConfigOption[]
+      try {
+        options = await access.modelOptions(agent, session)
+      } catch {
+        return
+      }
+      if (claim.notifyConfigOptions !== notify) return
+      if (this.claims.get(claim.sessionId) !== claim || claim.exactSession !== session || claim.exactAgent !== agent) return
+      if (claim.connectionIdentity.phase !== 'attached' || claim.detachedWithFence) return
+      try {
+        await notify(claim.sessionId, options)
+      } catch {
+        // A closed transport only ends this transient capability; the Host,
+        // Agent and Session keep their own lifecycle and authority.
+        claim.notifyConfigOptions = undefined
+      }
+    }).catch(() => {})
+    claim.configNotifyTail = next
   }
 
   /**
@@ -1746,6 +1971,9 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     state.op += 1
     for (const [sessionId, claim] of this.claims) {
       if (claim.connectionIdentity !== state) continue
+      // A physical teardown/Off/replacement ends this connection's notification
+      // capability immediately, even when the claim survives for a fence fact.
+      claim.notifyConfigOptions = undefined
       const flight = claim.inflight
       if (flight !== undefined) {
         const bound = access ?? this.access
@@ -1929,6 +2157,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     claim: ViewClaim,
     access: HostAcpSessionAccess,
     agent: LiveAgentViewIdentity,
+    notifyConfigOptions?: AcpConfigOptionsNotifier,
   ): void {
     if (state.op !== op || this.claims.get(claim.sessionId) !== claim || claim.connectionIdentity !== state) {
       // A newer op owns this connection or the claim was released; the late
@@ -1958,6 +2187,9 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     // committed event is checked against; never a sessionId lookup.
     claim.exactAgent = agent
     claim.exactSession = agent.session
+    // The transient notifier is bound at the SAME moment the View becomes
+    // attached, so no model/selection event can slip between attach and wiring.
+    claim.notifyConfigOptions = notifyConfigOptions
   }
 
   /**

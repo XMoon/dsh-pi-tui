@@ -7,11 +7,11 @@
 
 ## [Unreleased]
 
-## [0.5.7] - 2026-11-21
+## [0.5.8] - 2026-11-22
 
 ### 新增
 
-#### Daemon 模式（0.5.7 重大更新，Linux/macOS）
+#### Daemon 模式（0.5.8 重大更新，Linux/macOS）
 
 - **独立 Host、可断开的 TUI**：默认 Direct 模式不变；切换到 Daemon 后，Host 独立运行，退出当前终端不再结束 Agent 工作。
 - **多客户端共享 Session**：同一 Profile 下，多个 TUI、官方 Web 和本地 ACP 客户端可以连接同一 Host，访问同一 Agent Session，不必为每个界面重复开启会话。
@@ -36,6 +36,8 @@
 - **输入队列与 Host 工具**：`/queue` 可查看、修改或删除待发送输入，Dock 增加快捷入口；Daemon 客户端补齐 Host Shell、命令产生的文件和正式附件上传，Skills 列表可随 Host Workspace 文件变化刷新。
 - **转录阅读与图像**：新增更完整的 Full/Focus/Compact 阅读方式、`Ctrl+F` 当前视图搜索与 `Ctrl+Shift+F` 全文搜索；改善工具/工作流卡片展开、消息复制、SVG/图片预览和窄屏显示。可选 TSP 渲染器获得原生转录及任务卡片交互。
 - **macOS Computer Use 设置**：在 Settings → Tools 中查看 Computer Use 能力、系统授权和应用许可，并可执行相关授权与管理操作。
+- **ACP v1 会话内模型配置**：在已附着的 ACP Session View 中支持选择当前会话模型；当所选模型提供 Reasoning Effort 时，还支持 `thought_level`。`session/new` / `session/resume` 可返回配置选项，`session/set_config_option` 提交会话内选择并通过 `config_option_update` 通知当前 View；**不会修改 Profile 默认模型或 TUI 的“设为默认”设置**（#824）。
+- **快捷键冲突编辑**：`/keybindings conflicts` 直达 Settings 中同一个 Keyboard shortcuts 编辑器的 Conflicts 视图，查看冲突双方、范围与来源，并通过原设置事务修复；`All`/`Conflicts` 切换不会写入按键配置（#820）。
 
 ### 改进
 
@@ -43,6 +45,8 @@
 - **Plan、Goal 与任务反馈**：Plan Review 可以直接跳转查看对应计划内容后再决策；Goal Dock 会随终端宽度展示目标；任务、Subagent 和工具执行状态更容易在转录中定位。
 - **发送与交互体验**：输入草稿在 Host 接受后才清除；Compact 期间可以正常排队。完善全屏任务、历史、图片、设置和 Question 面板的鼠标点击、滚轮及返回操作。
 - **Direct/Daemon 功能一致性**：改进 Remote 端的 Provider/账号信息、授权状态、Web 设置、Host 命令补全、Session 恢复以及不同工作目录下的操作体验。
+- **Slash/Skill 发现入口**：输入 `/` 查看命令和 Skill 补全，`/keybindings` 查看快捷键；移除重复的 `/help` 页面，裸 `/skill` 改为用法提示，具名 `/skill <name> [args]` 和 `/<skill-name>` 仍可使用（#816）。
+- **文本随可用宽度展示**：Todo Dock、Session Browser 错误提示和 Footer 配置预览不再提前按 40/48 字符截断，终端加宽后可显示完整的安全文本（#823）。
 
 ### 修复
 
@@ -52,14 +56,18 @@
 - 修复终端更新屏幕外内容时可能闪烁、清空滚动历史，以及 Kitty 图片遮挡弹窗的问题。
 - 修复部分 Question 标题切换、任务/历史面板、鼠标滚轮、图片与设置页面的点击失效；Footer 临时提示不再挤动 Composer 布局。
 - 修复 Daemon 在 macOS 上的部分连接/启动竞态、跨版本 Host 管理和 Herdr 会话恢复问题。
+- **全新 DSH Profile 的 Client 缺包**：仅安装 TUI 时不再因缺少 `@deepseek-ai/dsh-client-store`、Zustand 或 Immer 而无法挂载 Daemon Client；Client Store 闭包已内嵌在构建产物中，无须用户手动预装（#821）。
+- **macOS 原生身份读取**：复用当前 DSH 安装自带的 Koffi，而非要求 TUI 单独安装一份；不按固定 Koffi 版本号拒绝兼容运行时，身份验证失败仍安全拒绝（#819）。
+- **Split Client 致命错误诊断**：缺少 Client 模块等启动错误现在会明确分类，并将受限、私有的诊断文件写到 `$DSH_HOME/logs/pi-tui-client/`；不再错误引导用户查看 Host 日志或重启健康 Host（#818）。
+- **无 Web 的 Host 就绪状态**：官方 Web 未开启时，不再把 Web-only 服务误认为普通 Host 的必需就绪条件（#815）。
 
 ### 安装与升级
 
-0.5.7 需要 **Node.js ≥24.9.0** 和 **DSH ≥0.2.2-rc.3**，推荐使用 **DSH 0.2.2-rc.5**：
+0.5.8 需要 **Node.js ≥24.9.0** 和 **DSH ≥0.2.2-rc.3**，推荐使用 **DSH 0.2.2-rc.5**：
 
 ~~~sh
 npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.5
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.7
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.8
 dsh --profile pi-tui
 ~~~
 
@@ -1787,8 +1795,8 @@ dsh --profile pi-tui
 - 全屏布局、Ctrl+F 搜索、主题系统。
 - 单包发布模型。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.7...HEAD
-[0.5.7]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.6...v0.5.7
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.8...HEAD
+[0.5.8]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.6...v0.5.8
 [0.5.6]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.5...v0.5.6
 [0.5.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.3...v0.5.4

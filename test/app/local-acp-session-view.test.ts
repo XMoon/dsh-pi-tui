@@ -15,7 +15,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import type { SessionUpdate } from '@agentclientprotocol/sdk'
+import type { SessionConfigOption, SessionUpdate } from '@agentclientprotocol/sdk'
 import type { Diag } from '../../src/runtime/process/diagnostics.ts'
 import {
   AcpSessionViewRegistry,
@@ -30,6 +30,7 @@ import {
   type HostAcpSessionAccess,
   type LiveAgentViewIdentity,
 } from '../../src/app/remote-process/local-acp-session-view.ts'
+import { AcpModelError, type AcpModelCurrentness, type AcpModelOptionRequest } from '../../src/app/remote-process/local-acp-model-selection.ts'
 import { createHostAcpSessionAccess } from '../../src/app/remote-process/local-host-entry.ts'
 
 const QUIET_DIAG: Diag = {
@@ -187,6 +188,42 @@ class FakeAccess implements HostAcpSessionAccess {
   async readOutputImage(ref: AcpStoredImageRef, signal: AbortSignal): Promise<AcpStoredImage> {
     this.imageReadCalls.push(ref)
     return await this.imageReadImpl(ref, signal)
+  }
+
+  /** Every config-option read the View performed, with its exact Agent/Session identity. */
+  readonly modelOptionCalls: Array<{ readonly agent: LiveAgentViewIdentity; readonly session: object }> = []
+  /** Every model write the View performed, with its exact request. */
+  readonly selectModelCalls: Array<{
+    readonly agent: LiveAgentViewIdentity
+    readonly session: object
+    readonly request: AcpModelOptionRequest
+  }> = []
+  /** The scripted full option state the fake Host returns. */
+  modelOptionsImpl: (agent: LiveAgentViewIdentity, session: object) => Promise<SessionConfigOption[]> =
+    async () => []
+  /** The scripted commit result; the default returns the same full option state. */
+  selectModelImpl: (
+    agent: LiveAgentViewIdentity,
+    session: object,
+    request: AcpModelOptionRequest,
+    signal: AbortSignal,
+    stillCurrent: () => AcpModelCurrentness,
+  ) => Promise<SessionConfigOption[]> = async () => []
+
+  async modelOptions(agent: LiveAgentViewIdentity, session: object): Promise<SessionConfigOption[]> {
+    this.modelOptionCalls.push({ agent, session })
+    return await this.modelOptionsImpl(agent, session)
+  }
+
+  async selectModelOnly(
+    agent: LiveAgentViewIdentity,
+    session: object,
+    request: AcpModelOptionRequest,
+    signal: AbortSignal,
+    stillCurrent: () => AcpModelCurrentness,
+  ): Promise<SessionConfigOption[]> {
+    this.selectModelCalls.push({ agent, session, request })
+    return await this.selectModelImpl(agent, session, request, signal, stillCurrent)
   }
 
   observePromptFacts(_listener: AcpPromptFactListener): () => void {
@@ -595,9 +632,11 @@ test('the production Host pending lookup reads both official inbox lists and rej
           create: async () => ({ sessionId: 'S' }),
           resolveAgent: async () => ({ agent }),
           prompt: async () => ({ accepted: true }),
+          modelCatalog: async () => ({ groups: [] }),
         }
         if (name === 'agents') return agents
         if (name === 'sessions') return sessions
+        if (name === 'llm') return { resolveModelInfo: async () => ({}) }
         return undefined
       },
     },
@@ -636,7 +675,10 @@ test('the Host image facade reads the default and exact live model routes and re
   const context = {
     reflect: { get(name: string) {
       if (name === 'workspaceController') return {}
-      if (name === 'sessionController') return { prompt: async (request: AcpSessionPromptRequest) => { dispatched.push(request); return { accepted: true } } }
+      if (name === 'sessionController') return {
+        prompt: async (request: AcpSessionPromptRequest) => { dispatched.push(request); return { accepted: true } },
+        modelCatalog: async () => ({ groups: [] }),
+      }
       if (name === 'agents') return { get: () => liveAgent }
       if (name === 'sessions') return { get: () => liveSession }
       if (name === 'attachments') return store
@@ -706,10 +748,12 @@ test('the production Host access classifier maps official errors to the right cr
           return {
             create: async () => await sessionImpl(),
             resolveAgent: async () => ({ error: { code: 'session/not-found', message: 'x' } }),
+            modelCatalog: async () => ({ groups: [] }),
           }
         }
         if (name === 'agents') return { get: () => undefined }
         if (name === 'sessions') return { get: () => undefined }
+        if (name === 'llm') return { resolveModelInfo: async () => ({}) }
         return undefined
       },
     },
@@ -1423,10 +1467,12 @@ test('the production Host access subscribes the prompt fact sink and disposes ex
             create: async () => ({ sessionId: 'S' }),
             resolveAgent: async () => ({ error: { code: 'session/not-found', message: 'x' } }),
             prompt: async () => ({ accepted: true }),
+            modelCatalog: async () => ({ groups: [] }),
           }
         }
         if (name === 'agents') return { get: () => undefined }
         if (name === 'sessions') return { get: () => undefined }
+        if (name === 'llm') return { resolveModelInfo: async () => ({}) }
         return undefined
       },
     },
@@ -3290,4 +3336,200 @@ test('PO-4C C-L1-06: the pending-update budget reserves image chunks before any 
     assert.equal(view.notifications.length, 64)
     assert.equal(view.notifications.every(update => updateKind(update) === 'agent_message_chunk'), true)
   }
+})
+
+function modelOptionsFor(currentValue: string): SessionConfigOption[] {
+  return [{
+    id: 'model',
+    name: 'Model',
+    category: 'model',
+    type: 'select',
+    currentValue,
+    options: [{ group: 'group:p1', name: 'Provider 1', options: [{ value: currentValue, name: currentValue }] }],
+  }]
+}
+
+test('config option reads and model selection require the exact attached claim and reject a closed View', async () => {
+  const access = new FakeAccess()
+  const agent = makeAgent('S-model', '/w')
+  access.seed(agent)
+  access.modelOptionsImpl = async () => modelOptionsFor('["p1","a"]')
+  access.selectModelImpl = async () => modelOptionsFor('["p1","b"]')
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  const conn = registry.createConnection()
+  const signal = new AbortController().signal
+
+  await assert.rejects(registry.modelOptions(conn, access, 'S-model'), isViewError('LOCAL_ACP_VIEW_NOT_OWNED'))
+  await assert.rejects(
+    registry.setModelOption(conn, access, { sessionId: 'S-model', configId: 'model', value: '["p1","b"]' }, signal),
+    isViewError('LOCAL_ACP_VIEW_NOT_OWNED'),
+  )
+  await registry.resumeSession(conn, access, { sessionId: 'S-model', cwd: '/w' })
+  assert.deepEqual(await registry.modelOptions(conn, access, 'S-model'), modelOptionsFor('["p1","a"]'))
+  assert.equal(access.modelOptionCalls.length, 1)
+  assert.equal(access.modelOptionCalls[0]?.agent, agent)
+  assert.equal(access.modelOptionCalls[0]?.session, agent.session)
+  await assert.rejects(registry.modelOptions(conn, access, 'other-session'), isViewError('LOCAL_ACP_VIEW_NOT_OWNED'))
+
+  const selected = await registry.setModelOption(
+    conn,
+    access,
+    { sessionId: 'S-model', configId: 'model', value: '["p1","b"]' },
+    signal,
+  )
+  assert.deepEqual(selected, modelOptionsFor('["p1","b"]'))
+  assert.equal(access.selectModelCalls.length, 1)
+  assert.deepEqual(access.selectModelCalls[0]?.request, { configId: 'model', value: '["p1","b"]' })
+
+  await registry.closeSession(conn, access, 'S-model')
+  await assert.rejects(registry.modelOptions(conn, access, 'S-model'), isViewError('LOCAL_ACP_VIEW_NOT_OWNED'))
+  await assert.rejects(
+    registry.setModelOption(conn, access, { sessionId: 'S-model', configId: 'model', value: '["p1","b"]' }, signal),
+    isViewError('LOCAL_ACP_VIEW_NOT_OWNED'),
+  )
+  assert.equal(access.selectModelCalls.length, 1, 'a closed View never reaches the Host model service')
+})
+
+test('a model change is refused as VIEW_BUSY while this View owns an unsettled prompt flight', async () => {
+  const view = promptView('S-model-busy')
+  await view.attach()
+  const attempt = view.start('busy prompt')
+  const request = view.access.promptCalls[0]!
+  await assert.rejects(
+    view.registry.setModelOption(
+      view.conn,
+      view.access,
+      { sessionId: 'S-model-busy', configId: 'model', value: '["p1","b"]' },
+      new AbortController().signal,
+    ),
+    isViewError('LOCAL_ACP_MODEL_VIEW_BUSY'),
+  )
+  assert.equal(view.access.selectModelCalls.length, 0)
+  // Settle the flight through its real facts so teardown stays clean.
+  view.insert(request.requestId, 'm-busy')
+  view.claim('m-busy', 1, request.requestId)
+  view.commit('assistant/message', assistantData(1, 'm-busy', [{ type: 'text', text: 'ok' }]))
+  view.commit('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.deepEqual(await attempt, { stopReason: 'end_turn' })
+})
+
+test('a prompt admitted while model validation is pending is rejected at the last View busy gate', async () => {
+  const view = promptView('S-model-race')
+  await view.attach()
+  const gate = deferred<void>()
+  let observed: AcpModelCurrentness | undefined
+  view.access.selectModelImpl = async (_agent, _session, _request, _signal, stillCurrent) => {
+    await gate.promise
+    observed = stillCurrent()
+    if (observed !== 'view-busy') throw new AcpModelError('LOCAL_ACP_MODEL_STALE', 'stale', -32042)
+    throw new AcpModelError('LOCAL_ACP_MODEL_VIEW_BUSY', 'view busy', -32046)
+  }
+  const selection = view.registry.setModelOption(
+    view.conn,
+    view.access,
+    { sessionId: 'S-model-race', configId: 'model', value: '["p1","b"]' },
+    new AbortController().signal,
+  )
+  // The prompt is admitted while the model service is still validating; this
+  // is the exact interleaving that must not append a Session model selection.
+  const attempt = view.start('race prompt')
+  const request = view.access.promptCalls[0]!
+  gate.resolve()
+  await assert.rejects(selection, isViewError('LOCAL_ACP_MODEL_VIEW_BUSY'))
+  assert.equal(observed, 'view-busy')
+  assert.equal(view.access.selectModelCalls.length, 1)
+  // Settle the prompt through its real facts; the View stays usable.
+  view.insert(request.requestId, 'm-race')
+  view.claim('m-race', 1, request.requestId)
+  view.commit('assistant/message', assistantData(1, 'm-race', [{ type: 'text', text: 'ok' }]))
+  view.commit('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.deepEqual(await attempt, { stopReason: 'end_turn' })
+})
+
+test('a model/selection event sends one full config_option_update to the exact attached claim only', async () => {
+  const access = new FakeAccess()
+  const agent = makeAgent('S-notify', '/w')
+  access.seed(agent)
+  access.modelOptionsImpl = async () => modelOptionsFor('["p1","b"]')
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  registry.bindAccess(access)
+  const conn = registry.createConnection()
+  const notifications: Array<{ readonly sessionId: string; readonly options: readonly SessionConfigOption[] }> = []
+  await registry.resumeSession(conn, access, { sessionId: 'S-notify', cwd: '/w' }, async (sessionId, options) => {
+    notifications.push({ sessionId, options })
+  })
+
+  registry.onSessionEvent({ id: 'other' }, { type: 'model/selection', data: { provider: 'p1', model: 'b' } })
+  registry.onSessionEvent(agent.session, { type: 'model/selection', data: { provider: 'p1', model: 'b' } })
+  await flushOutput()
+  assert.deepEqual(notifications, [{ sessionId: 'S-notify', options: modelOptionsFor('["p1","b"]') }])
+
+  await registry.closeSession(conn, access, 'S-notify')
+  registry.onSessionEvent(agent.session, { type: 'model/selection', data: { provider: 'p1', model: 'c' } })
+  await flushOutput()
+  assert.equal(notifications.length, 1, 'a closed claim receives no config update')
+})
+
+test('an async config read for an old claim never reaches a re-bound View', async () => {
+  const access = new FakeAccess()
+  const agent = makeAgent('S-lag', '/w')
+  access.seed(agent)
+  const gate = deferred<SessionConfigOption[]>()
+  let reads = 0
+  access.modelOptionsImpl = async () => {
+    reads += 1
+    return reads === 1 ? await gate.promise : modelOptionsFor('["p1","c"]')
+  }
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  registry.bindAccess(access)
+  const conn = registry.createConnection()
+  const oldNotifications: SessionConfigOption[][] = []
+  await registry.resumeSession(conn, access, { sessionId: 'S-lag', cwd: '/w' }, async (_sessionId, options) => {
+    oldNotifications.push([...options])
+  })
+  registry.onSessionEvent(agent.session, { type: 'model/selection', data: { provider: 'p1', model: 'b' } })
+  await Promise.resolve()
+  await registry.closeSession(conn, access, 'S-lag')
+
+  const conn2 = registry.createConnection()
+  const newNotifications: SessionConfigOption[][] = []
+  await registry.resumeSession(conn2, access, { sessionId: 'S-lag', cwd: '/w' }, async (_sessionId, options) => {
+    newNotifications.push([...options])
+  })
+  gate.resolve(modelOptionsFor('["p1","b"]'))
+  await flushOutput()
+  assert.deepEqual(oldNotifications, [], 'a closed claim cannot deliver its late catalog read')
+  assert.deepEqual(newNotifications, [], 'the new claim receives nothing for the old event')
+
+  registry.onSessionEvent(agent.session, { type: 'model/selection', data: { provider: 'p1', model: 'c' } })
+  await flushOutput()
+  assert.deepEqual(newNotifications, [modelOptionsFor('["p1","c"]')])
+})
+
+test('the per-claim notification chain keeps read order so a late old options read never overwrites the new one', async () => {
+  const access = new FakeAccess()
+  const agent = makeAgent('S-order', '/w')
+  access.seed(agent)
+  const first = deferred<SessionConfigOption[]>()
+  let reads = 0
+  access.modelOptionsImpl = async () => {
+    reads += 1
+    if (reads === 1) return await first.promise
+    return modelOptionsFor('["p1","c"]')
+  }
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  registry.bindAccess(access)
+  const conn = registry.createConnection()
+  const notifications: string[] = []
+  await registry.resumeSession(conn, access, { sessionId: 'S-order', cwd: '/w' }, async (_sessionId, options) => {
+    notifications.push((options[0] as { currentValue: string }).currentValue)
+  })
+
+  registry.onSessionEvent(agent.session, { type: 'model/selection', data: { provider: 'p1', model: 'b' } })
+  registry.onSessionEvent(agent.session, { type: 'model/selection', data: { provider: 'p1', model: 'c' } })
+  await Promise.resolve()
+  assert.equal(reads, 1, 'the second read waits for the first ordered notification')
+  first.resolve(modelOptionsFor('["p1","b"]'))
+  await flushOutput()
+  assert.deepEqual(notifications, ['["p1","b"]', '["p1","c"]'])
 })

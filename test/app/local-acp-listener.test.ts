@@ -20,6 +20,7 @@ import { closeSync, openSync } from 'node:fs'
 import { connect, createServer } from 'node:net'
 import { join } from 'node:path'
 import test, { type TestContext } from 'node:test'
+import type { SessionConfigOption } from '@agentclientprotocol/sdk'
 import type { Diag } from '../../src/runtime/process/diagnostics.ts'
 import { type LocalScope } from '../../src/app/remote-process/local-scope.ts'
 import {
@@ -42,6 +43,8 @@ import {
   type HostAcpSessionAccess,
   type LiveAgentViewIdentity,
 } from '../../src/app/remote-process/local-acp-session-view.ts'
+import type { AcpModelCurrentness, AcpModelOptionRequest } from '../../src/app/remote-process/local-acp-model-selection.ts'
+import { AcpModelError } from '../../src/app/remote-process/local-acp-model-selection.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 
 const QUIET_DIAG: Diag = {
@@ -1052,6 +1055,14 @@ function makeFakeAccess(options: {
   readonly imageLimits?: AcpImageLimits
   readonly supportsImagePrompts?: () => Promise<boolean>
   readonly readOutputImage?: (ref: AcpStoredImageRef, signal: AbortSignal) => Promise<AcpStoredImage>
+  readonly modelOptions?: (agent: LiveAgentViewIdentity, session: object) => Promise<SessionConfigOption[]>
+  readonly selectModelOnly?: (
+    agent: LiveAgentViewIdentity,
+    session: object,
+    request: AcpModelOptionRequest,
+    signal: AbortSignal,
+    stillCurrent: () => AcpModelCurrentness,
+  ) => Promise<SessionConfigOption[]>
 } = {}): {
   access: HostAcpSessionAccess
   seed: (id: string, cwd: string) => LiveAgentViewIdentity
@@ -1061,12 +1072,14 @@ function makeFakeAccess(options: {
   observeCalls: () => number
   removedMessageIds: string[]
   cancelledTurns: Array<{ readonly turn: number; readonly keepInbox: boolean }>
+  modelSelections: AcpModelOptionRequest[]
   turnFence: { openTurnStartSeq: number | null; lastTurn: number }
   staleCancel: { value: boolean }
   pendingInbox: Set<string>
 } {
   const agents = new Map<string, { id: string; session: { id: string; header: { cwd: string } } }>()
   const prompts: AcpSessionPromptRequest[] = []
+  const modelSelections: AcpModelOptionRequest[] = []
   const removedMessageIds: string[] = []
   const cancelledTurns: Array<{ readonly turn: number; readonly keepInbox: boolean }> = []
   const pendingInbox = new Set<string>()
@@ -1107,6 +1120,25 @@ function makeFakeAccess(options: {
       async readOutputImage(ref: AcpStoredImageRef, signal: AbortSignal) {
         if (options.readOutputImage === undefined) throw new Error('no attachment store')
         return await options.readOutputImage(ref, signal)
+      },
+      async modelOptions(agent: LiveAgentViewIdentity, session: object) {
+        // The real Host omits optional config options when its model catalog is
+        // unavailable; keep that default here so existing lifecycle assertions
+        // observe the same `{}` resume result.
+        if (options.modelOptions === undefined) throw new AcpModelError('LOCAL_ACP_MODEL_UNAVAILABLE', 'no model catalog', -32042)
+        return await options.modelOptions(agent, session)
+      },
+      async selectModelOnly(
+        agent: LiveAgentViewIdentity,
+        session: object,
+        request: AcpModelOptionRequest,
+        signal: AbortSignal,
+        stillCurrent: () => AcpModelCurrentness,
+      ) {
+        modelSelections.push(request)
+        return options.selectModelOnly === undefined
+          ? []
+          : await options.selectModelOnly(agent, session, request, signal, stillCurrent)
       },
       async prompt(request: AcpSessionPromptRequest) {
         prompts.push(request)
@@ -1171,6 +1203,7 @@ function makeFakeAccess(options: {
     },
     removedMessageIds,
     cancelledTurns,
+    modelSelections,
     pendingInbox,
     turnFence,
     staleCancel,
@@ -1297,6 +1330,12 @@ test('session/new carries the authoritative created session id in JSON-RPC error
     },
     async readOutputImage() {
       throw new Error('no attachment store')
+    },
+    async modelOptions() {
+      return []
+    },
+    async selectModelOnly() {
+      return []
     },
     async prompt() {
       return { accepted: true as const }
@@ -2631,5 +2670,235 @@ test('PO-4C C-L5-03: a slow reader is closed by the bounded chunked drain while 
   } finally {
     victim.close()
     healthy.close()
+  }
+})
+
+/** One full standard config-option state with an exact current model value. */
+function configOptionsFor(currentValue: string): SessionConfigOption[] {
+  return [{
+    id: 'model',
+    name: 'Model',
+    category: 'model',
+    type: 'select',
+    currentValue,
+    options: [{ group: 'group:p1', name: 'Provider 1', options: [{ value: currentValue, name: currentValue }] }],
+  }]
+}
+
+test('ACP v1 config options are served over the real socket for new/resume/set_config_option and TUI model events', async t => {
+  const { scope } = newScope(t)
+  const optionsA = configOptionsFor('["p1","a"]')
+  const optionsB = configOptionsFor('["p1","b"]')
+  const fake = makeFakeAccess({
+    modelOptions: async () => optionsA,
+    selectModelOnly: async (_agent, _session, request) => {
+      if (request.type === 'boolean' || request.configId !== 'model' || request.value !== '["p1","b"]') {
+        throw new AcpModelError('LOCAL_ACP_MODEL_INVALID_OPTION', 'invalid model option', -32602)
+      }
+      return optionsB
+    },
+  })
+  fake.seed('session-config', '/host/proj')
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: '/host/proj', mcpServers: [] } })
+    const created = (await client.next()) as {
+      result?: { sessionId?: string; configOptions?: SessionConfigOption[] }
+    }
+    const sessionId = created.result?.sessionId as string
+    assert.equal(typeof sessionId, 'string')
+    assert.deepEqual(created.result?.configOptions, optionsA, 'session/new returns the full current option state')
+
+    client.send({
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'session/set_config_option',
+      params: { sessionId, configId: 'model', value: '["p1","b"]' },
+    })
+    const selected = (await client.next()) as { id?: number; result?: { configOptions?: SessionConfigOption[] } }
+    assert.equal(selected.id, 3)
+    assert.deepEqual(selected.result?.configOptions, optionsB, 'set_config_option returns the full new option state')
+    assert.deepEqual(fake.modelSelections, [{ configId: 'model', value: '["p1","b"]' }])
+
+    const agent = fake.agentOf(sessionId)
+    const facts = fake.facts()
+    assert.ok(agent !== undefined && facts !== undefined)
+    facts.onSessionEvent(agent.session, { type: 'model/selection', data: { provider: 'p1', model: 'b' } })
+    const notification = (await client.next()) as {
+      method?: string
+      params?: { sessionId?: string; update?: { sessionUpdate?: string; configOptions?: SessionConfigOption[] } }
+    }
+    assert.equal(notification.method, 'session/update')
+    assert.equal(notification.params?.sessionId, sessionId)
+    assert.equal(notification.params?.update?.sessionUpdate, 'config_option_update')
+    assert.deepEqual(notification.params?.update?.configOptions, optionsA)
+
+    // Wrong Session and invalid option values stay fail-closed with no write.
+    client.send({
+      jsonrpc: '2.0',
+      id: 4,
+      method: 'session/set_config_option',
+      params: { sessionId: 'other-session', configId: 'model', value: '["p1","b"]' },
+    })
+    const wrongSession = (await client.next()) as { error?: { code: number; data?: { code?: string } } }
+    assert.equal(wrongSession.error?.code, -32602)
+    assert.equal(wrongSession.error?.data?.code, 'LOCAL_ACP_VIEW_NOT_OWNED')
+    client.send({
+      jsonrpc: '2.0',
+      id: 5,
+      method: 'session/set_config_option',
+      params: { sessionId, configId: 'other', value: 'x' },
+    })
+    const invalidConfig = (await client.next()) as { error?: { code: number; data?: { code?: string } } }
+    assert.equal(invalidConfig.error?.code, -32602)
+    assert.equal(invalidConfig.error?.data?.code, 'LOCAL_ACP_MODEL_INVALID_OPTION')
+    client.send({
+      jsonrpc: '2.0',
+      id: 6,
+      method: 'session/set_config_option',
+      params: { sessionId, configId: 'model', type: 'boolean', value: true },
+    })
+    const booleanConfig = (await client.next()) as { error?: { code: number; data?: { code?: string } } }
+    assert.equal(booleanConfig.error?.code, -32602)
+    assert.equal(booleanConfig.error?.data?.code, 'LOCAL_ACP_MODEL_INVALID_OPTION')
+    assert.equal(fake.modelSelections.length, 3, 'every well-formed request reaches the Host service, which rejects the invalid ones')
+
+    // `session/resume` returns the same complete current option state.
+    client.send({ jsonrpc: '2.0', id: 7, method: 'session/close', params: { sessionId } })
+    assert.deepEqual(((await client.next()) as { result?: unknown }).result, {})
+    client.send({ jsonrpc: '2.0', id: 8, method: 'session/resume', params: { sessionId, cwd: '/host/proj' } })
+    const resumed = (await client.next()) as { result?: { configOptions?: SessionConfigOption[] } }
+    assert.deepEqual(resumed.result?.configOptions, optionsA)
+
+    // After close the old View can no longer mutate the Session.
+    client.send({ jsonrpc: '2.0', id: 9, method: 'session/close', params: { sessionId } })
+    assert.deepEqual(((await client.next()) as { result?: unknown }).result, {})
+    client.send({ jsonrpc: '2.0', id: 10, method: 'session/set_config_option', params: { sessionId, configId: 'model', value: '["p1","b"]' } })
+    const closed = (await client.next()) as { error?: { code: number; data?: { code?: string } } }
+    assert.equal(closed.error?.code, -32602)
+    assert.equal(closed.error?.data?.code, 'LOCAL_ACP_VIEW_NOT_OWNED')
+  } finally {
+    client.close()
+  }
+})
+
+test('a concurrent close during resume config read propagates STALE instead of a false success', async t => {
+  const { scope } = newScope(t)
+  let catalogStarted!: () => void
+  const started = new Promise<void>(resolveStarted => { catalogStarted = resolveStarted })
+  let releaseCatalog!: () => void
+  const catalogGate = new Promise<void>(resolveCatalog => { releaseCatalog = resolveCatalog })
+  let reads = 0
+  const fake = makeFakeAccess({
+    modelOptions: async () => {
+      reads += 1
+      if (reads === 1) {
+        catalogStarted()
+        await catalogGate
+      }
+      return configOptionsFor('["p1","a"]')
+    },
+  })
+  fake.seed('session-close-race', '/host/proj')
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-close-race', cwd: '/host/proj' } })
+    await started
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/close', params: { sessionId: 'session-close-race' } })
+    const closed = (await client.next()) as { id?: number; result?: unknown }
+    assert.equal(closed.id, 3)
+    assert.deepEqual(closed.result, {})
+    releaseCatalog()
+    const stale = (await client.next()) as { id?: number; error?: { code: number; data?: { code?: string } } }
+    assert.equal(stale.id, 2)
+    assert.equal(stale.error?.code, -32042)
+    assert.equal(stale.error?.data?.code, 'LOCAL_ACP_MODEL_STALE',
+      'the old resume must not report a successful attachment after its View closed')
+
+    // The same connection may attach a NEW View; it reads the catalog cleanly.
+    client.send({ jsonrpc: '2.0', id: 4, method: 'session/resume', params: { sessionId: 'session-close-race', cwd: '/host/proj' } })
+    const resumed = (await client.next()) as { id?: number; result?: { configOptions?: SessionConfigOption[] } }
+    assert.equal(resumed.id, 4)
+    assert.deepEqual(resumed.result?.configOptions, configOptionsFor('["p1","a"]'))
+  } finally {
+    client.close()
+  }
+})
+
+test('a rejected optional catalog read after concurrent close propagates STALE, never a false attach', async t => {
+  const { scope } = newScope(t)
+  let catalogStarted!: () => void
+  const started = new Promise<void>(resolveStarted => { catalogStarted = resolveStarted })
+  let releaseCatalog!: () => void
+  const catalogGate = new Promise<void>(resolveCatalog => { releaseCatalog = resolveCatalog })
+  let reads = 0
+  const fake = makeFakeAccess({
+    modelOptions: async () => {
+      reads += 1
+      if (reads === 1) {
+        catalogStarted()
+        await catalogGate
+        throw new AcpModelError('LOCAL_ACP_MODEL_UNAVAILABLE', 'catalog unavailable', -32042)
+      }
+      return configOptionsFor('["p1","a"]')
+    },
+  })
+  fake.seed('session-reject-race', '/host/proj')
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-reject-race', cwd: '/host/proj' } })
+    await started
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/close', params: { sessionId: 'session-reject-race' } })
+    const closed = (await client.next()) as { id?: number; result?: unknown }
+    assert.equal(closed.id, 3)
+    assert.deepEqual(closed.result, {})
+    releaseCatalog()
+    const stale = (await client.next()) as { id?: number; error?: { code: number; data?: { code?: string } } }
+    assert.equal(stale.id, 2)
+    assert.equal(stale.error?.code, -32042)
+    assert.equal(stale.error?.data?.code, 'LOCAL_ACP_MODEL_STALE',
+      'a stale original View must win over the optional catalog-unavailable fallback')
+
+    client.send({ jsonrpc: '2.0', id: 4, method: 'session/resume', params: { sessionId: 'session-reject-race', cwd: '/host/proj' } })
+    const resumed = (await client.next()) as { id?: number; result?: { configOptions?: SessionConfigOption[] } }
+    assert.equal(resumed.id, 4)
+    assert.deepEqual(resumed.result?.configOptions, configOptionsFor('["p1","a"]'))
+  } finally {
+    client.close()
+  }
+})
+
+test('an unexpected optional-model-read error never becomes a successful attach', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess({
+    modelOptions: async () => { throw new Error('unexpected model projection failure') },
+  })
+  fake.seed('session-generic-error', '/host/proj')
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-generic-error', cwd: '/host/proj' } })
+    const response = (await client.next()) as { id?: number; result?: unknown; error?: { code?: number } }
+    assert.equal(response.id, 2)
+    assert.ok(response.error !== undefined, 'an unexpected Host read error must not be swallowed')
+    assert.equal(response.result, undefined, 'the Session must not be reported as successfully attached')
+  } finally {
+    client.close()
   }
 })

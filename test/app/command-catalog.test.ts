@@ -33,7 +33,6 @@ import { DirectCatalogPort } from '../../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
-import { visibleWidth, type SettingItem } from '@xmoon76/pi-tui'
 import { unconfiguredPolicyObservation, unconfiguredSessionPolicyPort } from '../support/session-policy-fake.ts'
 
 
@@ -872,7 +871,7 @@ test('a model-only skill is refused by the explicit /skill <name> path and never
   app.stop()
 })
 
-test('the /skill picker offers only human-invocable skills', async () => {
+test('bare /skill returns the fixed usage error without catalog, picker or skill write; explicit args still load', async () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -880,206 +879,40 @@ test('the /skill picker offers only human-invocable skills', async () => {
   startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
-  const agent = fakeAgent('session-a')
-  const human = { name: 'human-skill', description: 'Human invocable', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 't' }
-  const modelOnly = { name: 'model-only', description: 'Model only', invocation: { modelInvocable: true, userInvocable: false }, source: 'bundled', provider: 't' }
+  const delivered: { kind: 'steer' | 'followup' | 'inject'; text: string }[] = []
+  const writerCalls: { kind: 'prompt'; mode?: 'queue' | 'steer'; messages?: readonly unknown[] }[] = []
+  const agent = fakeAgent('session-a', delivered)
   ctx.provide('skills', {
-    list: async () => [human, modelOnly],
-    get: async () => undefined,
+    list: async () => [],
+    get: async (name: string) => ({ name, description: 'body', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 't' }),
   } as never)
-  const { defs } = services
-  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent }))
-  const skillDef = defs.find(def => def.name === 'skill')
-  assert.ok(skillDef?.handler !== undefined)
-  await (skillDef!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
-  await vt.waitForRender()
-  const view = vt.getViewport().join('\n')
-  assert.ok(view.includes('human-skill'), `the human skill must be offered:\n${view}`)
-  assert.ok(!view.includes('model-only'), `a model-only skill must not be offered:\n${view}`)
-  app.stop()
-})
-
-test('the /skill picker keeps two same-prefix long names distinguishable (PR #309 review)', async () => {
-  const ctx = new Context()
-  const vt = new VirtualTerminal(80, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  startedApps.add(app)
-  const services = fakeServices()
-  ctx.provide('commands', services.commands as never)
-  const agent = fakeAgent('session-a')
-  // Two names wider than the 36-cell label column, sharing their first 35
-  // characters, with NO description: the vendored list's head-keeping clip
-  // would paint both as the same prefix + `\u2026` while Enter still runs
-  // different ids. The rows keep the name's TAIL and expand the full name of
-  // the SELECTED row in its description; neither changes the row's identity.
-  const prefix = 'x'.repeat(35)
-  const first = { name: `${prefix}AA`, description: '', invocation: { modelInvocable: false, userInvocable: true }, source: 'bundled', provider: 't' }
-  const second = { name: `${prefix}BB`, description: '', invocation: { modelInvocable: false, userInvocable: true }, source: 'bundled', provider: 't' }
-  ctx.provide('skills', { list: async () => [first, second], get: async () => undefined } as never)
-  const { defs } = services
-  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent }))
-  // Capture the REAL rows the command hands to the overlay (the wrapper still
-  // opens the real overlay, so the painted frame below stays production output).
-  const originalOpenSettings = app.openSettings.bind(app)
-  let captured: { items: readonly SettingItem[] } | undefined
-  app.openSettings = ((items, onChange, onCancel, onHidden) => {
-    captured = { items }
-    return originalOpenSettings(items, onChange, onCancel, onHidden)
-  }) as typeof app.openSettings
-  const skillDef = defs.find(def => def.name === 'skill')
-  assert.ok(skillDef?.handler !== undefined)
-  await (skillDef!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
-  await vt.waitForRender()
-  const rows = vt.getViewport()
-  const view = rows.join('\n')
-  const firstRow = rows.find(line => line.includes('AA'))
-  const secondRow = rows.find(line => line.includes('BB'))
-  assert.ok(firstRow !== undefined && secondRow !== undefined, `both names must keep their distinguishing tail:\n${view}`)
-  assert.notEqual(firstRow, secondRow, `the two rows must not paint identically:\n${view}`)
-  assert.ok(view.includes(first.name), `the selected row's description must expand the FULL name:\n${view}`)
-  // Identity untouched: the delivered id is still the FULL name, and it is the
-  // row the user saw (its label carries this name's tail). The submit path
-  // itself is pinned by the /skill delivery tests above.
-  const items = captured?.items ?? []
-  assert.deepEqual(items.map(item => item.id), [first.name, second.name])
-  assert.ok(items[0]!.label.endsWith('AA') && items[1]!.label.endsWith('BB'),
-    `the labels must keep each name's tail: ${JSON.stringify(items.map(item => item.label))}`)
-  assert.ok(items.every(item => visibleWidth(item.label) <= 36), 'a label must fit the 36-cell column')
-  app.stop()
-})
-
-test('the /skill abbreviation also separates two names that share a SUFFIX (PR #309 review)', async () => {
-  // The symmetric counter-case the earlier tail-only form introduced: different
-  // prefixes, identical 35-cell suffixes. A head+tail abbreviation must differ,
-  // and an astral (emoji) name must not break the width budget.
-  const ctx = new Context()
-  const vt = new VirtualTerminal(80, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  startedApps.add(app)
-  const services = fakeServices()
-  ctx.provide('commands', services.commands as never)
-  const suffix = `${'y'.repeat(33)}ZZ`
-  const front = { name: `frontend-common-workflow-${suffix}`, description: '', invocation: { modelInvocable: false, userInvocable: true }, source: 'bundled', provider: 't' }
-  const back = { name: `backend--common-workflow-${suffix}`, description: '', invocation: { modelInvocable: false, userInvocable: true }, source: 'bundled', provider: 't' }
-  // Six astral characters at the END: the 34-cell budget (33 + the ellipsis) must
-  // keep them all WHOLE in the label. A loop that walked UTF-16 CODE UNITS would
-  // spend a unit per surrogate half and stop short of (or inside) the sixth
-  // rocket, so the count and the lone-surrogate check below are the witness.
-  const rockets = '\u{1F680}'.repeat(6)
-  const emoji = { name: `${'e'.repeat(30)}${rockets}`, description: '', invocation: { modelInvocable: false, userInvocable: true }, source: 'bundled', provider: 't' }
-  ctx.provide('skills', { list: async () => [front, back, emoji], get: async () => undefined } as never)
-  const { defs } = services
-  const originalOpenSettings = app.openSettings.bind(app)
-  let captured: { items: readonly SettingItem[] } | undefined
-  app.openSettings = ((items, onChange, onCancel, onHidden) => {
-    captured = { items }
-    return originalOpenSettings(items, onChange, onCancel, onHidden)
-  }) as typeof app.openSettings
-  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent: fakeAgent('session-a') }))
-  const skillDef = defs.find(def => def.name === 'skill')
-  assert.ok(skillDef?.handler !== undefined)
-  await (skillDef!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
-  await vt.waitForRender()
-  const rows = vt.getViewport()
-  const view = rows.join('\n')
-  const frontRow = rows.find(line => line.includes('frontend'))
-  const backRow = rows.find(line => line.includes('backend'))
-  assert.ok(frontRow !== undefined && backRow !== undefined, `both prefixes must stay visible:\n${view}`)
-  assert.notEqual(frontRow, backRow, `two same-suffix names must not paint identically:\n${view}`)
-  const emojiRow = rows.find(line => line.includes('eeee'))
-  assert.ok(emojiRow !== undefined, `an astral-character name must still paint:\n${view}`)
-  // Assert on the REAL row label, not on the terminal-bounded viewport line: the
-  // label must spend its 34 cells on whole code points.
-  const emojiItem = captured!.items.find(item => item.id === emoji.name)
-  assert.ok(emojiItem !== undefined, `the astral-name row must be handed to the overlay:\n${view}`)
-  const emojiLabel = emojiItem.label
-  assert.equal([...emojiLabel].filter(char => char === '\u{1F680}').length, 6,
-    `every astral character must survive whole: ${JSON.stringify(emojiLabel)}`)
-  assert.equal(visibleWidth(emojiLabel), 34, `the label must fill its budget: ${JSON.stringify(emojiLabel)}`)
-  assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(emojiLabel),
-    `no lone surrogate may reach the label: ${JSON.stringify(emojiLabel)}`)
-  app.stop()
-})
-
-test('the /skill tail survives the 44-column floor budget (PR #309 review)', async () => {
-  const ctx = new Context()
-  const vt = new VirtualTerminal(44, 20)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  startedApps.add(app)
-  const services = fakeServices()
-  ctx.provide('commands', services.commands as never)
-  ctx.provide('skills', {
-    list: async () => [
-      { name: `${'x'.repeat(35)}AA`, description: '', invocation: { modelInvocable: false, userInvocable: true }, source: 'bundled', provider: 't' },
-      { name: `${'x'.repeat(35)}BB`, description: '', invocation: { modelInvocable: false, userInvocable: true }, source: 'bundled', provider: 't' },
-    ],
-    get: async () => undefined,
-  } as never)
-  const { defs } = services
-  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent: fakeAgent('session-a') }))
-  const skillDef = defs.find(def => def.name === 'skill')
-  assert.ok(skillDef?.handler !== undefined)
-  await (skillDef!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
-  await vt.waitForRender()
-  const rows = vt.getViewport()
-  const view = rows.join('\n')
-  const firstRow = rows.find(line => line.includes('AA'))
-  const secondRow = rows.find(line => line.includes('BB'))
-  assert.ok(firstRow !== undefined && secondRow !== undefined,
-    `at 44 columns each row must still keep its own tail:\n${view}`)
-  assert.notEqual(firstRow, secondRow, `the two rows must not paint identically at 44 columns:\n${view}`)
-  app.stop()
-})
-
-test('the /skill search still finds a keyword the label abbreviation cut away (PR #309 review)', async () => {
-  // The label keeps both ends of an over-wide name so the column can hold it, so
-  // the list's search must read the row's COMPLETE name (fork X062) — otherwise a
-  // keyword from the middle answers an empty list (the external review's finding).
-  const ctx = new Context()
-  const vt = new VirtualTerminal(80, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  startedApps.add(app)
-  const services = fakeServices()
-  ctx.provide('commands', services.commands as never)
-  // 42 cells: the 34-cell label is the head's 17 + `…` + the tail's 16, so the
-  // keyword in the middle is gone from the label AND from the fuzzy subsequence
-  // (no `q` survives anywhere in it).
-  const long = {
-    name: `${'x'.repeat(18)}quasar${'y'.repeat(18)}`,
-    description: '',
-    invocation: { modelInvocable: false, userInvocable: true },
-    source: 'bundled',
-    provider: 't',
+  const runner = stubRunner(ctx, app, { agent, writerCalls })
+  let catalogReads = 0
+  const originalListScopedSkills = runner.listScopedSkills
+  runner.listScopedSkills = async (scope, signal) => {
+    catalogReads += 1
+    return originalListScopedSkills(scope, signal)
   }
-  ctx.provide('skills', { list: async () => [long], get: async () => undefined } as never)
+  let settingsOpened = 0
+  app.openSettings = (() => { settingsOpened += 1 }) as unknown as TuiApp['openSettings']
   const { defs } = services
-  const originalOpenSettings = app.openSettings.bind(app)
-  let captured: { items: readonly SettingItem[] } | undefined
-  app.openSettings = ((items, onChange, onCancel, onHidden) => {
-    captured = { items }
-    return originalOpenSettings(items, onChange, onCancel, onHidden)
-  }) as typeof app.openSettings
-  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent: fakeAgent('session-a') }))
+  registerTuiCommandsWithDirectSeams(runner)
   const skillDef = defs.find(def => def.name === 'skill')
   assert.ok(skillDef?.handler !== undefined)
-  await (skillDef!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
-  await vt.waitForRender()
-  const item = captured!.items[0]
-  assert.ok(item !== undefined, `the skill row must reach the overlay:\n${vt.getViewport().join('\n')}`)
-  assert.equal(item.id, long.name)
-  assert.equal(item.searchText, long.name, 'the COMPLETE name must stay the search basis')
-  assert.ok(!item.label.includes('quasar') && item.label.includes('\u2026'),
-    `the label is the abbreviation that cut the keyword: ${JSON.stringify(item.label)}`)
-  // The search goes through the REAL overlay input, not the row object.
-  vt.sendInput('quasar')
-  await vt.waitForRender()
-  const view = vt.getViewport().join('\n')
-  assert.ok(!view.includes('No matching settings'), `a middle keyword must still find the skill:\n${view}`)
-  assert.ok(view.includes(long.name), `the found row must carry the complete name:\n${view}`)
+  const handler = skillDef!.handler as (invocation: { rawInput: string }) => Promise<{ kind: string; text?: string }>
+  for (const rawInput of ['', '   ', '\t\n']) {
+    assert.deepEqual(await handler({ rawInput }), {
+      kind: 'error',
+      text: 'Usage: /skill <name> [args]. Type / to discover available skills.',
+    })
+  }
+  assert.equal(catalogReads, 0, 'the bare usage branch never reads the skill catalog')
+  assert.equal(settingsOpened, 0, 'the bare usage branch never opens a settings list')
+  assert.deepEqual(delivered, [], 'the bare usage branch never starts a Skill write')
+  assert.deepEqual(writerCalls, [], 'no session writer was reached')
+  const loaded = await handler({ rawInput: 'glab alpha beta' })
+  assert.equal(loaded.kind, 'success')
+  assert.equal((delivered as { text?: string }[])[0]?.text, '/glab alpha beta', 'the explicit path forwards the normalized line and args')
   app.stop()
 })
 
@@ -1602,158 +1435,6 @@ test('the transition fence does NOT refuse skill invocations when no transition 
   app.stop()
 })
 
-// ── review P2: the picker resolves the delivery mode at SELECTION time ─────
-
-test('the /skill picker resolves the delivery mode at SELECTION time, not at open time', async () => {
-  const ctx = new Context()
-  const vt = new VirtualTerminal(100, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  startedApps.add(app)
-  const services = fakeServices()
-  ctx.provide('commands', services.commands as never)
-  const delivered: { kind: 'steer' | 'followup' | 'inject'; text: string }[] = []
-  const agent = fakeAgent('session-a', delivered, 'running')
-  const summary = {
-    name: 'glab',
-    description: 'GitLab CLI',
-    content: 'body',
-    invocation: { modelInvocable: true, userInvocable: true },
-    source: 'bundled',
-    provider: 't',
-  }
-  ctx.provide('skills', {
-    list: async () => [summary],
-    get: async () => summary,
-  } as never)
-  // The host's dsh-tool-skill pre-step listener IS visible: the queue mode
-  // then really queues (without it loadSkill keeps its order-preserving
-  // steer, which would make this assertion mode-blind).
-  ctx.provide('tools', {
-    get: (name: string) => name === 'skill' ? { name: 'skill', execute: async () => ({}) } : undefined,
-  } as never)
-  const { defs } = services
-  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent }, undefined, { busyEnter: 'steer' }))
-  const skillDef = defs.find(def => def.name === 'skill')
-  assert.ok(skillDef?.handler !== undefined)
-  // The picker opens while the agent is RUNNING with busyEnter=steer: a mode
-  // frozen at open time would be 'steer'.
-  const opened = await (skillDef!.handler as (invocation: { rawInput: string }) => Promise<{ kind: string }>)({ rawInput: '' })
-  assert.equal(opened.kind, 'success')
-  await vt.waitForRender()
-  assert.ok(vt.getViewport().join('\n').includes('glab'), 'the picker must offer the skill')
-  // The agent finishes its turn while the modal is open: the selection is
-  // the delivery boundary — an idle plain-Enter selection queues.
-  ;(agent as unknown as { status: string }).status = 'idle'
-  vt.sendInput('\r') // toggle the selected row's value (fires onChange)
-  await vt.waitForRender()
-  for (let round = 0; round < 20 && delivered.length === 0; round += 1) {
-    await new Promise<void>(resolve => setImmediate(resolve))
-  }
-  assert.deepEqual(delivered.map(entry => entry.kind), ['followup'],
-    'an idle selection must queue — a mode frozen at picker-open time would steer')
-  assert.equal(delivered[0]?.text, '/glab', 'the queued line is the /name form')
-  app.stop()
-})
-
-// ── A3-2 P1: the skill catalog read and the picker selection are scope-bound ──
-
-test('a /skill picker whose catalog read settles after an owner swap never opens', async () => {
-  const ctx = new Context()
-  const vt = new VirtualTerminal(100, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  startedApps.add(app)
-  const services = fakeServices()
-  ctx.provide('commands', services.commands as never)
-  const delivered: { kind: 'steer' | 'followup' | 'inject'; text: string }[] = []
-  const state = { agent: fakeAgent('session-a', delivered, 'idle') }
-  let releaseCatalog!: () => void
-  const catalogGate = new Promise<void>(resolve => { releaseCatalog = resolve })
-  let catalogReadStarted!: () => void
-  const started = new Promise<void>(resolve => { catalogReadStarted = resolve })
-  const summary = {
-    name: 'glab',
-    description: 'GitLab CLI',
-    content: 'body',
-    invocation: { modelInvocable: true, userInvocable: true },
-    source: 'bundled',
-    provider: 't',
-  }
-  ctx.provide('skills', {
-    list: async () => {
-      catalogReadStarted()
-      await catalogGate
-      return [summary]
-    },
-    get: async () => {
-      await catalogGate
-      return summary
-    },
-  } as never)
-  const { defs } = services
-  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, state, undefined, { busyEnter: 'steer' }))
-  const skillDef = defs.find(def => def.name === 'skill')
-  assert.ok(skillDef?.handler !== undefined)
-  const pending = (skillDef!.handler as (invocation: {
-    rawInput: string
-  }) => Promise<{ kind: string; text?: string }>)({ rawInput: '' })
-  // Wait until the scope-bound catalog read is actually in flight, then replace
-  // the owner (a NEW agent object on the SAME session id) and let it settle.
-  await started
-  state.agent = fakeAgent('session-a', delivered, 'idle')
-  releaseCatalog()
-  const result = await pending
-  assert.equal(result.kind, 'error', 'a superseded catalog read must refuse the picker')
-  assert.match(String(result.text), /session changed/u, 'the refusal names the session change')
-  await vt.waitForRender()
-  assert.equal(vt.getViewport().join('\n').includes('glab'), false,
-    'the stale picker must never open on the replacement owner')
-})
-
-test('a /skill picker selection refuses when the owner changed while the picker was open', async () => {
-  const ctx = new Context()
-  const vt = new VirtualTerminal(100, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  startedApps.add(app)
-  const services = fakeServices()
-  ctx.provide('commands', services.commands as never)
-  const delivered: { kind: 'steer' | 'followup' | 'inject'; text: string }[] = []
-  const state = { agent: fakeAgent('session-a', delivered, 'running') }
-  const summary = {
-    name: 'glab',
-    description: 'GitLab CLI',
-    content: 'body',
-    invocation: { modelInvocable: true, userInvocable: true },
-    source: 'bundled',
-    provider: 't',
-  }
-  ctx.provide('skills', {
-    list: async () => [summary],
-    get: async () => summary,
-  } as never)
-  ctx.provide('tools', {
-    get: (name: string) => name === 'skill' ? { name: 'skill', execute: async () => ({}) } : undefined,
-  } as never)
-  const { defs } = services
-  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, state, undefined, { busyEnter: 'steer' }))
-  const skillDef = defs.find(def => def.name === 'skill')
-  assert.ok(skillDef?.handler !== undefined)
-  const opened = await (skillDef!.handler as (invocation: { rawInput: string }) => Promise<{ kind: string }>)({ rawInput: '' })
-  assert.equal(opened.kind, 'success')
-  await vt.waitForRender()
-  assert.ok(vt.getViewport().join('\n').includes('glab'), 'the picker must offer the skill')
-  // The owner changes while the modal is open (a NEW agent object on the SAME
-  // session id): the selection must refuse WITHOUT dispatching to the
-  // replacement owner and WITHOUT throwing out of the overlay callback.
-  state.agent = fakeAgent('session-a', delivered, 'idle')
-  vt.sendInput('\r')
-  await vt.waitForRender()
-  for (let round = 0; round < 20; round += 1) await new Promise<void>(resolve => setImmediate(resolve))
-  assert.deepEqual(delivered, [], 'a stale picker must not deliver to the replacement owner')
-})
-
 test('capability-truthful discovery copy is registered for the conditional commands', () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
@@ -1784,18 +1465,6 @@ test('capability-truthful discovery copy is registered for the conditional comma
     'Open Models to configure provider credentials or sign in to DeepSeek Account')
   assert.equal(descriptionOf('logout'),
     'Open Models to clear a stored provider credential or sign out of DeepSeek Account')
-  // The ! / !! help row is presentation-only copy on the same discovery
-  // surface: the gesture/card stays visible, execution is Host-owned.
-  let captured: Parameters<TuiApp['openSettings']>[0] | undefined
-  app.openSettings = ((items: Parameters<TuiApp['openSettings']>[0]) => { captured = items }) as unknown as TuiApp['openSettings']
-  const help = services.defs.find(candidate => candidate.name === 'help')
-  assert.ok(help?.handler !== undefined, '/help must be registered')
-  ;(help.handler as () => unknown)()
-  const bang = captured?.find(candidate => candidate.id === 'k-bang')
-  assert.ok(bang !== undefined, 'the ! cmd help row must exist')
-  assert.match(bang.description ?? '', /^Host user-shell execution is available only when the backend provides it;/)
-  assert.match(bang.description ?? '', /! submits the completed command and its output to the Session/)
-  assert.match(bang.description ?? '', /!! keeps the result presentation-only/)
   app.stop()
 })
 
@@ -1827,7 +1496,7 @@ test('the built-in command decomposition preserves the exact primary set and reg
     [
       'exit', 'reload-client', 'settings', 'web', 'acp', 'footer', 'display', 'focus', 'sessions', 'skill', 'reload', 'model',
       'new', 'tasks', 'queue', 'schedule', 'plugins', 'yolo', 'preset', 'search', 'title', 'copy', 'attach', 'view-image',
-      'export', 'transcript', 'deliverables', 'fork', 'rewind', 'login', 'logout', 'help', 'keybindings',
+      'export', 'transcript', 'deliverables', 'fork', 'rewind', 'login', 'logout', 'keybindings',
     ],
   )
   // The raw sequence: every alias registers immediately after its primary.
@@ -1853,7 +1522,6 @@ test('the built-in command decomposition preserves the exact primary set and reg
     'copy', 'attach', 'image', 'view-image', 'export', 'transcript', 'deliverables',
     'fork', 'rewind',
     'login', 'logout',
-    'help',
     'keybindings',
   ])
   // C5: `/status` is the real `/settings` alias, not a second handler.

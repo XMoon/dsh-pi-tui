@@ -816,7 +816,7 @@ test('every remaining PiTui-only builtin stays refused with the draft restored',
   // intake commands that the mounted composer can complete without any PiTui
   // chrome, so the capability gate admits them (their own case is below).
   const refused = [
-    '/settings', '/help', '/status', '/rewind', '/tasks', '/subagents', '/plugins', '/reload',
+    '/settings', '/status', '/rewind', '/tasks', '/subagents', '/plugins', '/reload',
     '/export', '/transcript',
     '/login', '/skill', '/display', '/focus', '/footer', '/statusline', '/keybindings',
   ]

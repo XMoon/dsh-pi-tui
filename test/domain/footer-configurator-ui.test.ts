@@ -1783,6 +1783,150 @@ test('a modified draft command never shows the old committed cache', async () =>
   app.stop()
 })
 
+test('a long custom command and definition name use the real panel width, including unknown ids', async () => {
+  const { vt, app } = startApp(140, 30)
+  const longName = `custom-command-${'N'.repeat(35)}-NAME-TAIL`
+  const longCommand = `echo ${'C'.repeat(60)}-CMD-TAIL`
+  const unknownId = `ext:missing/${'U'.repeat(60)}-TAIL-UNKNOWN`
+  const custom = [{ schemaVersion: 1 as const, id: `user:${longName}`, kind: 'command' as const, command: longCommand }]
+  const catalog = new FooterCustomItemCatalog(custom)
+  const registry = new FooterItemRegistry(app.getFooterItemRegistry())
+  registry.setCustomSource(catalog)
+  const model = new FooterConfiguratorModel(
+    { schemaVersion: 1, rows: [{ left: [{ id: `user:${longName}` }, { id: unknownId }], right: [] }] },
+    registry,
+    catalog,
+  )
+  const opened = openPage(vt, app, { model, registry, composer: new FooterComposer(registry) })
+  await vt.waitForRender()
+
+  vt.sendInput('\r') // Row Selector → Edit Row 1
+  vt.sendInput('\r') // first item → Item Editor
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  const wideHeader = stripTerminalSequences(opened.panel.paneHeader(140))
+  assert.ok(wideHeader.includes('NAME-TAIL'), `the full definition name must be painted at a wide panel width:\n${wideHeader}`)
+  assert.ok(view.includes('CMD-TAIL'), `the full command must be painted past the old 48-char cut:\n${view}`)
+  for (const line of vt.getViewport()) {
+    assert.ok(visibleWidth(line) <= 140, `a wide footer page row overflows: ${JSON.stringify(line)}`)
+  }
+
+  vt.resize(72, 30)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(stripTerminalSequences(opened.panel.paneHeader(72)).endsWith('…'),
+    'the page title clips at the real 72-column width')
+  assert.ok(view.split('\n').some(line => line.includes('Command') && line.trimEnd().endsWith('…')),
+    `the command row clips at the real 72-column width:\n${view}`)
+  for (const line of vt.getViewport()) {
+    assert.ok(visibleWidth(line) <= 72, `a 72-column footer page row overflows: ${JSON.stringify(line)}`)
+  }
+
+  vt.resize(44, 30)
+  await vt.waitForRender()
+  for (const line of vt.getViewport()) {
+    assert.ok(visibleWidth(line) <= 44, `a 44-column footer page row overflows: ${JSON.stringify(line)}`)
+  }
+
+  vt.resize(140, 30)
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('CMD-TAIL'), 'widening again recovers the full command')
+
+  vt.sendInput('\x1b') // Item Editor → Edit Row
+  vt.sendInput('\x1b[B') // second item (unknown id)
+  vt.sendInput('\r') // Item Editor for the unknown id
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('TAIL-UNKNOWN'), `an unknown definition id paints its full distinguishable tail:\n${view}`)
+  for (const line of vt.getViewport()) {
+    assert.ok(visibleWidth(line) <= 140, `an unknown-id row overflows: ${JSON.stringify(line)}`)
+  }
+})
+
+test('the create-refresh, create-timeout and create-tone pages show the full command at the panel width', async () => {
+  const { vt, app } = startApp(140, 30)
+  const longName = `create-command-${'N'.repeat(40)}`
+  const longCommand = `echo ${'C'.repeat(60)}-CMD-TAIL`
+  openWithCommand(vt, app, [])
+  await vt.waitForRender()
+  vt.sendInput('\r') // row
+  vt.sendInput('a') // Add
+  vt.sendInput('no-match')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B') // Create Custom Command
+  vt.sendInput('\r') // create-name
+  vt.sendInput(longName)
+  vt.sendInput('\r') // create-command
+  vt.sendInput(longCommand)
+  vt.sendInput('\r') // create-refresh
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Refresh'), `the create-refresh page must be reachable:\n${view}`)
+  assert.ok(view.includes('CMD-TAIL'), `create-refresh must show the command past the old 48-char cut:\n${view}`)
+
+  vt.sendInput('\r') // create-timeout
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Timeout'), `the create-timeout page must be reachable:\n${view}`)
+  assert.ok(view.includes('CMD-TAIL'), `create-timeout must show the command past the old 48-char cut:\n${view}`)
+
+  vt.sendInput('\r') // create-tone
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Tone'), `the create-tone page must be reachable:\n${view}`)
+  assert.ok(view.includes('CMD-TAIL'), `create-tone must show the command past the old 48-char cut:\n${view}`)
+
+  for (const [columns, rows] of [[72, 30], [44, 30]] as const) {
+    vt.resize(columns, rows)
+    await vt.waitForRender()
+    view = vt.getViewport().join('\n')
+    assert.ok(view.split('\n').some(line => line.includes('Command') && line.trimEnd().endsWith('…')),
+      `the ${columns}-column create page marks command truncation:\n${view}`)
+    for (const line of vt.getViewport()) {
+      assert.ok(visibleWidth(line) <= columns, `a ${columns}-column create page row overflows: ${JSON.stringify(line)}`)
+    }
+  }
+
+  vt.resize(140, 30)
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('CMD-TAIL'), 'widening again recovers the create-stage command')
+})
+
+test('a CJK/emoji preview keeps its cell width and a hostile prefix never becomes terminal control', async () => {
+  const { vt, app } = startApp(140, 30)
+  const longName = `cjk-name-${'名'.repeat(30)}`
+  const longText = `状态正常 🚀 ${'宽字符'.repeat(30)}`
+  const custom = [{ schemaVersion: 1 as const, id: `user:${longName}`, kind: 'text' as const, text: longText, tone: 'auto' as const }]
+  const catalog = new FooterCustomItemCatalog(custom)
+  const registry = new FooterItemRegistry(app.getFooterItemRegistry())
+  registry.setCustomSource(catalog)
+  const model = new FooterConfiguratorModel(
+    { schemaVersion: 1, rows: [{ left: [{ id: `user:${longName}`, prefix: '\x1b]0;PWNED\x07' }], right: [] }] },
+    registry,
+    catalog,
+  )
+  openPage(vt, app, { model, registry, composer: new FooterComposer(registry) })
+  await vt.waitForRender()
+  vt.sendInput('\r') // row
+  vt.sendInput('\r') // item page
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('状态正常') && view.includes('🚀'), `the CJK/emoji preview must paint:\n${view}`)
+  assert.ok(!vt.writes.join('').includes('\x1b]0;PWNED'),
+    'a hostile OSC prefix never reaches the terminal byte stream')
+  for (const line of vt.getViewport()) {
+    assert.ok(visibleWidth(line) <= 140, `a CJK footer row overflows 140 cells: ${JSON.stringify(line)}`)
+  }
+
+  vt.resize(44, 30)
+  await vt.waitForRender()
+  assert.ok(!vt.writes.join('').includes('\x1b]0;PWNED'),
+    'the hostile OSC prefix stays stripped at a narrow width')
+  for (const line of vt.getViewport()) {
+    assert.ok(visibleWidth(line) <= 44, `a CJK footer row overflows 44 cells: ${JSON.stringify(line)}`)
+  }
+})
+
 /** SGR press+release on a viewport row (1-based coordinates). */
 function mouseClick(vt: VirtualTerminal, row: number, leftBorder: number): void {
   vt.sendInput(`\x1b[<0;${leftBorder + 3};${row + 1}M`)

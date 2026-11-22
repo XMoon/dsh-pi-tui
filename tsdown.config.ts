@@ -56,7 +56,7 @@ const bundleConfig = defineConfig({
   clean: true,
   dts: true,
   deps: {
-    onlyBundle: ['@xmoon76/pi-tui'],
+    onlyBundle: ['@xmoon76/pi-tui', '@deepseek-ai/dsh-client-store', 'zustand', 'immer'],
   },
 })
 
@@ -75,7 +75,7 @@ const processEntryConfig = defineConfig({
   clean: false,
   dts: false,
   deps: {
-    onlyBundle: ['@xmoon76/pi-tui'],
+    onlyBundle: ['@xmoon76/pi-tui', '@deepseek-ai/dsh-client-store', 'zustand', 'immer'],
   },
 })
 

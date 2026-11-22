@@ -702,6 +702,72 @@ test('the dock strip shows the todo summary only while non-empty; tasks live in 
   assert.ok(!view.includes('goal ●'), `cleared goal line survived:\n${view}`)
 })
 
+test('the fallback todo dock keeps the full safe summary and reveals more at wider widths', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const content = `${'A'.repeat(50)}MARK-A${'B'.repeat(30)}MARK-B${'C'.repeat(30)}MARK-C${'D'.repeat(40)}END`
+  app.setTodoSummary([{ content, status: 'in_progress' }])
+  await vt.waitForRender()
+
+  const dockRows = (): string[] => vt.getViewport().filter(row => row.includes('☑'))
+  let line = dockRows()[0]
+  assert.ok(line !== undefined, `the todo dock row is missing:\n${vt.getViewport().join('\n')}`)
+  assert.ok(line.includes('MARK-A'), `the 80-column dock must show content past the old 40-char cut:\n${line}`)
+  assert.ok(!line.includes('MARK-B'), `the 80-column dock must still end at the live width:\n${line}`)
+  assert.ok(visibleWidth(line.trimEnd()) <= 80, `the dock row exceeded 80 cells:\n${line}`)
+
+  vt.resize(120, 24)
+  await vt.waitForRender()
+  line = dockRows()[0]!
+  assert.ok(line.includes('MARK-B'), `a wider terminal must reveal the next segment:\n${line}`)
+  assert.ok(!line.includes('MARK-C'), `the 120-column dock must not paint the 160-column tail:\n${line}`)
+  assert.ok(visibleWidth(line.trimEnd()) <= 120, `the dock row exceeded 120 cells:\n${line}`)
+
+  vt.resize(160, 24)
+  await vt.waitForRender()
+  line = dockRows()[0]!
+  assert.ok(line.includes('MARK-C'), `the 160-column terminal must reveal a farther tail:\n${line}`)
+  assert.ok(!line.includes('END'), `the 160-column dock still truncates its overflow:\n${line}`)
+  assert.ok(visibleWidth(line.trimEnd()) <= 160, `the dock row exceeded 160 cells:\n${line}`)
+
+  vt.resize(44, 24)
+  await vt.waitForRender()
+  line = dockRows()[0]!
+  assert.equal(dockRows().length, 1, `a narrow dock is exactly one physical row:\n${vt.getViewport().join('\n')}`)
+  assert.ok(line.includes('…'), `a narrow dock marks its truncation:\n${line}`)
+  assert.ok(visibleWidth(line.trimEnd()) <= 44, `the narrow dock exceeded 44 cells:\n${line}`)
+
+  vt.resize(160, 24)
+  await vt.waitForRender()
+  line = dockRows()[0]!
+  assert.ok(line.includes('MARK-C'), `widening again must recover the longer summary:\n${line}`)
+
+  // A tab/CR/LF-bearing, CJK+emoji summary folds onto ONE physical row.
+  app.setTodoSummary([{ content: '多行\t第一段\r\n第二段 🚀', status: 'in_progress' }])
+  await vt.waitForRender()
+  assert.equal(dockRows().length, 1, `a multiline summary must never become a second dock row:\n${vt.getViewport().join('\n')}`)
+  assert.ok(dockRows()[0]!.includes('第二段'), `the folded summary keeps its tail:\n${dockRows()[0]}`)
+  assert.ok(dockRows()[0]!.includes('🚀'), 'the emoji survives the single-row projection')
+
+  // Panel visibility and the empty/completed-only semantics stay unchanged.
+  app.toggleTodoPanel()
+  await vt.waitForRender()
+  assert.equal(dockRows().length, 0, 'an open todo panel hides the summary line')
+  app.toggleTodoPanel()
+  await vt.waitForRender()
+  assert.equal(dockRows().length, 1, 'closing the panel restores the summary line')
+  app.setTodoSummary([])
+  await vt.waitForRender()
+  assert.equal(dockRows().length, 0, 'an empty list paints no dock row')
+  app.setTodoSummary([
+    { content: 'done one', status: 'completed' },
+    { content: 'done two', status: 'completed' },
+  ])
+  await vt.waitForRender()
+  assert.ok(dockRows()[0]!.includes('2 todo done'), `completed-only keeps the count summary:\n${dockRows()[0]}`)
+  assert.ok(!dockRows()[0]!.includes('done one'), 'completed-only does not claim an active label')
+})
+
 test('the queue pane renders pending rows and hides when empty', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
@@ -3307,13 +3373,13 @@ test('a written occurrence whose row is beyond the recall window is not re-inlin
 })
 
 test('a sessionless occurrence another owner wrote never re-enters the new Session', async () => {
-  // F6: a deferred `/help` writes a SESSIONLESS row. The occurrence IS settled,
+  // F6: a deferred `/settings` writes a SESSIONLESS row. The occurrence IS settled,
   // but its row is not part of any Session's projection, so the reseed that
   // adopts the pool must not re-inline it.
   const { vt, app, submitted, settleAt } = startApp()
-  await submitThroughEditor(app, vt, '/help')          // the sessionless pool occurrence
+  await submitThroughEditor(app, vt, '/settings')          // the sessionless pool occurrence
   await submitThroughEditor(app, vt, 'first B prompt') // the occurrence that creates B
-  assert.deepEqual(submitted, ['/help', 'first B prompt'])
+  assert.deepEqual(submitted, ['/settings', 'first B prompt'])
   settleAt(0, undefined, 'written')                    // the row is sessionless
   app.beginInputHistoryScope('B')                      // the pool is adopted by B
   app.resetInputHistory([], 'B')
@@ -3537,15 +3603,15 @@ test('the first Session publication isolates the boot recall of the CWD history'
 })
 
 test('the first publication never re-seeds an occurrence another identity already wrote', async () => {
-  // A sessionless `/help` (its row is written with `sessionId: undefined`) followed
+  // A sessionless `/settings` (its row is written with `sessionId: undefined`) followed
   // by the prompt that creates Session B: the publication must NOT re-seed the
   // sessionless occurrence into B's temporary recall, while the accepted but still
   // unpersisted prompt stays.
   const { vt, app, submitted, settleAt } = startApp()
-  await submitThroughEditor(app, vt, '/help')
+  await submitThroughEditor(app, vt, '/settings')
   await submitThroughEditor(app, vt, 'first prompt')
-  assert.deepEqual(submitted, ['/help', 'first prompt'])
-  settleAt(0, undefined, 'written')       // /help wrote a SESSIONLESS row
+  assert.deepEqual(submitted, ['/settings', 'first prompt'])
+  settleAt(0, undefined, 'written')       // /settings wrote a SESSIONLESS row
   app.beginInputHistoryScope('B')         // the boot recall is dropped, B published
   app.setDraft('')
   vt.sendInput('\x1b[A')
@@ -3555,7 +3621,7 @@ test('the first publication never re-seeds an occurrence another identity alread
   vt.sendInput('\x1b[A')
   vt.sendInput('\x1b[A')
   await vt.waitForRender()
-  assert.notEqual(app.getDraft(), '/help',
+  assert.notEqual(app.getDraft(), '/settings',
     'a sessionless occurrence already written under another identity is not re-seeded')
   app.resetInputHistory([], 'B')
   assert.deepEqual(app.getInputHistory(), ['first prompt'],
@@ -3565,11 +3631,11 @@ test('the first publication never re-seeds an occurrence another identity alread
 
 test('a skipped sessionless occurrence is not re-seeded into the new Session either', async () => {
   // The sessionless identity decides cross-Session visibility, not whether a row
-  // happened to be written: `/help` skipped by the CWD-level dedupe is as foreign
+  // happened to be written: `/settings` skipped by the CWD-level dedupe is as foreign
   // as a written sessionless row, and must not appear in the new Session's recall
   // even before hydration replaces the mirror.
   const { vt, app, settleAt } = startApp()
-  await submitThroughEditor(app, vt, '/help')
+  await submitThroughEditor(app, vt, '/settings')
   await submitThroughEditor(app, vt, 'first prompt')
   settleAt(0, undefined, 'written')    // a sessionless row
   settleAt(0, undefined, 'skipped')    // (idempotent: the durable fact stays sessionless)

@@ -2965,6 +2965,24 @@ test('running + busyEnter=steer: an ordinary Enter presents a steering echo and 
   assert.equal(harness.host.followedUp.length, 0, 'never a queued followup')
 })
 
+test('running + steer: an argued line of a Host-reserved local name still steers', async (t) => {
+  // `/export` is in the static LOCAL_COMMANDS set, but a genuine Host
+  // execute-kind registration claims its BARE token only. The argued
+  // `/export foo` line is an ordinary submission and must keep the live
+  // busy-Enter preference.
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'steer',
+    status: 'running',
+    hostCommands: ['export'],
+  })
+  mounted.app.setDraft('/export foo')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'argued export')
+  assert.equal(harness.host.steered.length, 1, 'the ordinary argued line follows busyEnter=steer')
+  assert.equal(harness.host.followedUp.length, 0, 'it must not be queued as a local command')
+  assert.equal(harness.executed.length, 0, 'the Host execute-kind command never claims the argued line')
+})
+
 test('running + busyEnter=queue: the accelerated chord presents a steering echo and writes a steer', async (t) => {
   const { harness, mounted } = await bootCommandHarness(t, { busyEnter: 'queue', status: 'running' })
   mounted.app.setDraft('accelerated steer')

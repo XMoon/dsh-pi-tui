@@ -41,6 +41,14 @@ test('the root package has ONE lifecycle-free pack entry and no implicit hooks',
   assert.equal(scripts.prepare, undefined, 'the husky prepare lifecycle hook must not come back')
   assert.match(scripts['pack:artifact'], /^rm -f xmoon76-dsh-pi-tui-\*\.tgz && pnpm pack --config\.ignore-scripts=true --pack-destination \.$/u)
   assert.equal(scripts['smoke:release'], 'node scripts/qualify-tarball.mjs')
+  assert.equal(scripts['smoke:fresh-profile'], 'node scripts/fresh-profile-install-smoke.mjs')
+})
+
+test('the published dependency graph owns no Koffi copy', () => {
+  assert.equal(PACKAGE.dependencies.koffi, undefined, 'TUI production dependencies must not carry koffi')
+  assert.equal(PACKAGE.optionalDependencies?.koffi, undefined, 'koffi must not be an optional production dependency')
+  assert.equal(PACKAGE.peerDependencies.koffi, undefined, 'koffi must not be pushed to the Profile as a peer')
+  assert.equal(PACKAGE.devDependencies.koffi, '3.1.1', 'the dev/test copy must stay on the DSH-owned 3.1.1 line')
 })
 
 test('pack:release is the explicit full order and never delegates to a second builder', () => {
@@ -52,6 +60,7 @@ test('pack:release is the explicit full order and never delegates to a second bu
     'pnpm test:product',
     'pnpm pack:artifact',
     'pnpm smoke:release',
+    'pnpm smoke:fresh-profile',
   ])
 })
 

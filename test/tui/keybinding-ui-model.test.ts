@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { parseUserKeybindings } from '../../src/tui/keybindings/config.ts'
-import { HostKeybindingManager } from '../../src/tui/keybindings/manager.ts'
+import { HostKeybindingManager, normalizedKeyToKeyId } from '../../src/tui/keybindings/manager.ts'
+import { KeybindingRegistry } from '../../src/extension/internal/keybinding-registry.ts'
 import {
   buildKeybindingEditorModel,
   searchKeybindingRows,
@@ -166,6 +167,60 @@ test('the model lists question.toggleSelection as a fixed row with its Space def
     assert.equal(row.label, 'Toggle multi-select option')
     assert.deepEqual(row.effective, [{ kind: 'direct', key: 'space' }])
     assert.equal(manager.keysFor('question.toggleSelection').length, 0, 'focused-component actions never enter the host keymap')
+  } finally {
+    manager.dispose()
+  }
+})
+
+test('the real plugin registry rejects a second same-key binding before the Manager sees a snapshot', () => {
+  const registry = new KeybindingRegistry()
+  const first = registry.register({
+    id: 'plugin-a',
+    key: { key: 'y', ctrl: true, alt: true, shift: false, super: false },
+    action: 'open-search',
+  }, 'owner-a')
+  assert.throws(() => registry.register({
+    id: 'plugin-b',
+    key: { key: 'y', ctrl: true, alt: true, shift: false, super: false },
+    action: 'cancel-activity',
+  }, 'owner-b'), /duplicate keybinding/)
+  const snapshot = registry.snapshot()
+  assert.equal(snapshot.bindings.length, 1, 'the rejected registration never enters the snapshot')
+  assert.equal(snapshot.bindings[0]?.id, 'plugin-a')
+
+  // Mirror the one production sync seam in TuiApp.setPluginKeybindingRules:
+  // the real registry snapshot is normalized into Manager plugin rules.
+  const manager = new HostKeybindingManager()
+  manager.setPluginRules(snapshot.bindings.map(binding => ({
+    id: binding.id,
+    action: binding.action,
+    key: normalizedKeyToKeyId(binding.key),
+  })))
+  const parsed = parseUserKeybindings(undefined)
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  try {
+    assert.equal(model.conflictCount, 0, 'one accepted plugin binding cannot form a plugin-only conflict')
+    assert.equal(model.rows.filter(row => row.conflict).length, 0)
+  } finally {
+    manager.dispose()
+    first.dispose()
+  }
+})
+
+test('a lower-priority plugin rule is shadowed, never mislabeled as a runtime conflict', () => {
+  // The resolver priority table makes plugin rules (10) strictly lower than
+  // builtin (100) and user (200) rules, so a shared key is shadowed rather
+  // than a same-priority conflict. The projection must not invent a mixed
+  // record from the different-priority encounter.
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings({ 'app.input.submit': 'ctrl+alt+x' })
+  manager.setPluginRules([{ id: 'plugin-a', action: 'submit-draft', key: 'ctrl+alt+x' }])
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  try {
+    assert.equal(model.conflictCount, 0)
+    assert.equal(model.rows.filter(row => row.conflict).length, 0)
   } finally {
     manager.dispose()
   }

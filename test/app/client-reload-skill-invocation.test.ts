@@ -1,25 +1,25 @@
 /**
- * M4 PR4 RFL-006 regression — the skill picker selection is an accepted
- * semantic write that runs AFTER the `/skill` handler returned. The command
- * coordinator's `loadSkill` is the shared adoption point for the picker, the
- * typed `/skill <name>` gesture and every dynamic wrapper; the fix registers
- * the ONE controller-owned accepted-write lifetime at its synchronous entry
- * and releases it in `finally` at the REAL writer settlement.
+ * M4 PR4 RFL-006 regression — a typed explicit skill invocation is an accepted
+ * semantic write that runs until the real writer settlement. The command
+ * coordinator's `loadSkill` is the shared adoption point for the typed
+ * `/skill <name>` gesture and every dynamic wrapper; the accepted-write
+ * lifetime starts at its synchronous entry and is released in `finally` at the
+ * REAL writer settlement, so a manual Client reload can never cancel the
+ * preparation window.
  *
  * This drives the real surface:
  * - the REAL `registerTuiCommands` coordinator (real `/skill` + `/reload-client`
  *   definitions in the real ClientCommandRegistry),
- * - the REAL Skill Picker selection callback (`app.openSettings` captured),
  * - the REAL `loadSkill` preparation/Writer admission, held open,
  * - the REAL `SubmissionController` lifetime (the SAME `beginClientWrite`
  *   seam the composition root injects) and the REAL gate factory.
  *
- * It asserts the intermediate state (editor empty, lifetime open, reload
- * refused, no process request) and the final state (exactly one dispatch,
- * lifetime released, reload accepted), plus every terminal path
- * (stale, superseded, prepare error, prompt error, cancellation).
+ * It asserts the intermediate state (lifetime open, reload refused, no process
+ * request) and the final state (exactly one dispatch, lifetime released,
+ * reload accepted), plus every terminal path (stale, superseded, prepare
+ * error, prompt error, cancellation).
  *
- * @module @xmoon76/dsh-pi-tui/client-reload-skill-picker.test
+ * @module @xmoon76/dsh-pi-tui/client-reload-skill-invocation.test
  */
 
 import assert from 'node:assert/strict'
@@ -44,7 +44,6 @@ import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
 import { DraftFileStore } from '../../src/client/media/attachment/file-draft.ts'
 import { SessionScopeSupersededError } from '../../src/app/session/scope.ts'
 import type { TuiCommandRunner } from '../../src/commands.ts'
-import type { HumanSkillCatalog } from '../../src/domain/catalog/skill.ts'
 import { unconfiguredPolicyObservation, unconfiguredSessionPolicyPort } from '../support/session-policy-fake.ts'
 
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
@@ -58,7 +57,6 @@ interface Harness {
   readonly runner: TuiCommandRunner
   readonly reloadHandler: (invocation: { commandId: string; rawInput: string; signal: AbortSignal }) => unknown
   readonly skillHandler: (invocation: { commandId: string; rawInput: string; signal: AbortSignal }) => unknown
-  readonly picker: () => ((id: string) => void) | undefined
   readonly prompts: Array<{ readonly line: string; readonly mode: string }>
   readonly requests: number
   releasePrepare(): void
@@ -80,15 +78,13 @@ function setup(mode: Mode): Harness {
   const files = new DraftFileStore()
   const prompts: Array<{ line: string; mode: string }> = []
   let requests = 0
-  let capturedPicker: ((id: string) => void) | undefined
   let resolvePrepare!: () => void
   let rejectPrepareGate!: (error: unknown) => void
   const prepareGate = new Promise<void>((resolve, reject) => {
     resolvePrepare = resolve
     rejectPrepareGate = reject
   })
-  let prepareStarted!: () => void
-  const prepareEntered = new Promise<void>(resolve => { prepareStarted = resolve })
+  const prepareStarted = (): void => {}
   const abortController = new AbortController()
   let promptGate: Promise<void> = Promise.resolve()
   let stale = mode === 'stale'
@@ -100,17 +96,7 @@ function setup(mode: Mode): Harness {
   const skillSource = {
     resolveSkill: async () => ({ kind: 'found' as const, skill: { name: 'demo', description: 'Demo', content: 'body' } }),
     hostLoadsSkillBody: () => true,
-    listHumanSkills: async (): Promise<HumanSkillCatalog> => ({
-      skills: [{ name: 'demo', description: 'Demo' } as never],
-      complete: true,
-    }),
   }
-
-  // The real app SettingsList is the picker presentation; capture its
-  // selection callback (the production selection seam) without painting.
-  app.openSettings = ((_items: unknown, onChange: (id: string) => void) => {
-    capturedPicker = onChange
-  }) as unknown as typeof app.openSettings
 
   const runner: TuiCommandRunner = {
 
@@ -257,7 +243,6 @@ function setup(mode: Mode): Harness {
     runner,
     skillHandler: (invocation) => (skill.handler as unknown as (i: Invocation) => unknown)(invocation),
     reloadHandler: (invocation) => (reloadCommand.handler as unknown as (i: Invocation) => unknown)(invocation),
-    picker: () => capturedPicker,
     prompts,
     get requests() { return requests },
     releasePrepare: () => { resolvePrepare() },
@@ -287,16 +272,9 @@ async function waitFor(predicate: () => boolean, timeoutMs = 1000): Promise<void
   }
 }
 
-test('the skill picker selection holds the reload gate through LoadSkill preparation and releases at writer settlement', async () => {
+test('the typed explicit skill invocation holds the reload gate through LoadSkill preparation and releases at writer settlement', async () => {
   const harness = setup('held')
-  const opened = await harness.skillHandler({ commandId: 'cmd-skill', rawInput: '', signal: harness.runner.signal })
-  assert.deepEqual(opened, { kind: 'success' })
-  const picker = harness.picker()
-  assert.ok(picker !== undefined, 'the real /skill picker selection callback is captured')
-  assert.equal(harness.app.getDraft(), '', 'editor empty before the selection')
-  assert.equal(harness.controller.hasUnsettledClientWrite(), false, 'opening the picker is not an accepted write')
-
-  picker('demo')
+  const pending = harness.skillHandler({ commandId: 'cmd-skill', rawInput: 'demo', signal: harness.runner.signal })
   await waitFor(() => harness.controller.hasUnsettledClientWrite())
   assert.equal(harness.prompts.length, 0, 'the writer is not reached before the held preparation')
 
@@ -306,6 +284,8 @@ test('the skill picker selection holds the reload gate through LoadSkill prepara
   assert.equal(harness.requests, 0, 'the process request is never reached while the lifetime is open')
 
   harness.releasePrepare()
+  const settled = await pending as { kind: string; text?: string }
+  assert.deepEqual(settled, { kind: 'success', text: 'skill demo loaded' })
   await waitFor(() => harness.prompts.length === 1)
   await waitFor(() => !harness.controller.hasUnsettledClientWrite())
   assert.deepEqual(harness.prompts, [{ line: '/demo', mode: 'queue' }])
@@ -316,20 +296,20 @@ test('the skill picker selection holds the reload gate through LoadSkill prepara
   assert.equal(harness.controller.hasUnsettledClientWrite(), false, 'the /reload-client control command does not count itself')
 })
 
-test('every skill terminal path releases the accepted-write lifetime', async () => {
+test('every explicit skill terminal path releases the accepted-write lifetime', async () => {
   for (const mode of ['stale', 'superseded', 'prepare-error', 'prompt-error', 'abort'] as const) {
     const harness = setup(mode)
-    const opened = await harness.skillHandler({ commandId: `cmd-skill-${mode}`, rawInput: '', signal: harness.runner.signal })
-    assert.deepEqual(opened, { kind: 'success' }, `${mode}: picker opened`)
-    const picker = harness.picker()
-    assert.ok(picker !== undefined)
     if (mode === 'abort') harness.abort()
-    picker('demo')
+    const pending = harness.skillHandler({ commandId: `cmd-skill-${mode}`, rawInput: 'demo', signal: harness.runner.signal }) as Promise<{ kind: string; text?: string }>
     if (mode === 'prepare-error') {
+      await waitFor(() => harness.prompts.length === 0)
       harness.rejectPrepare(new Error('prepare failed'))
     } else {
       harness.releasePrepare()
     }
+    const settled = await pending.then(() => 'fulfilled' as const, () => 'rejected' as const)
+    assert.equal(settled, mode === 'prepare-error' || mode === 'prompt-error' || mode === 'abort' ? 'rejected' : 'fulfilled',
+      `${mode}: the handler settles its own outcome`)
     await harness.drain()
     await waitFor(() => !harness.controller.hasUnsettledClientWrite())
     const accepted = await harness.reload()

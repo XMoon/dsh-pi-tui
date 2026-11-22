@@ -137,6 +137,7 @@ lifecycle owner, IO authority, primary callers and forbidden dependencies. Read
 
 - `@xmoon76/pi-tui` is private and bundled into `@xmoon76/dsh-pi-tui`; it is never published independently.
 - Every published/runtime `@deepseek-ai/*` import/dependency resolves as a peer from the installed Harness. Dev/test dependencies may declare those packages; do not add duplicate runtime copies to the published package or tracked lockfile through `file:`, `link:`, or `workspace:` specs.
+- **Owner-approved narrow exception:** `@deepseek-ai/dsh-client-store` may be embedded by the TUI Client Shell as an exact development build input for the Node Client platform static module (`CLIENT_PLATFORM_MODULES`). It is NOT a runtime dependency, peer, Host authority or user-install prerequisite; the shell injects its ONE module namespace into the official `/client` bundles. Every other `@deepseek-ai/*` runtime import and peer remains owned by the installed Harness resolution.
 - Keep public entry-point types structural. Do not expose internal classes such as `TuiApp`, private registries, screens, terminal objects, or repository-private paths through public declarations.
 - `src/startup.ts` remains a zero-dependency compatibility island. Optional runtime/backend imports must not enter its static dependency graph.
 

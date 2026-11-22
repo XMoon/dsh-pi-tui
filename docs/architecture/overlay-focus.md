@@ -671,13 +671,23 @@ that grant instead of the whole terminal height.
     drops its blank spacer first, then the error detail, then the title.
 - Degenerate-grant rules, MAIN LIST ONLY (do not transfer them to the leader
   editor, the binding choice or the unavailable fallback): at one row only the
-  operation hint is drawn; at two rows the title joins it; at three the search
-  row joins them. Below the physical floor (a terminal too short for both
+  operation hint is drawn; at two rows the search row joins it; at three the
+  `View:` mode row joins the search row and the operation hint (no business row
+  is painted). Below the physical floor (a terminal too short for both
   frame borders plus a hint) the frame degrades by the existing compositor
   clamp, not by a second geometry authority. Optional rows (blank separators,
   scroll markers, the description line, the status line) are dropped
   lowest-priority-first; the status/error line outranks the optional
   description, and the list keeps at least one actionable row.
+- Keyboard shortcuts mode row (UX PR2): at a grant of four or more content rows
+  the local `View:` mode row is mandatory together with the search row, at
+  least one painted action/read-only record row when the current model has
+  one, and the ONE Action Bar; the `Keymap:` summary, category headers and
+  scroll markers are optional and yield first. At two rows the historical
+  search + Action Bar remains with no mode row painted or admitted. A mode row
+  that cannot fit both complete painted spans degrades to a read-only
+  `View: <active mode>` line with no pointer or `Tab` mode selection. Mode
+  switching is presentation-only and never a settings write.
 - Documented exception: the independent key-recorder view (`KeyRecorder`,
   reached from the leader editor or a binding choice) is NOT a budgeted
   assembly — it renders its fixed view regardless of the panel grant, so on a
@@ -685,7 +695,7 @@ that grant instead of the whole terminal height.
   degradation and adds no second scrollport; "every render branch fits the
   grant" holds for the panel's own assemblies, not for the recorder view.
 - `SettingsList` limits are retained deliberately for the independent consumers
-  (`/help`, `/skill`, `/preset`, `/keybindings conflicts`): the list keeps
+  (`/preset`, and `/web` / `/acp` on the Split backend): the list keeps
   `SettingsList(items, 6, …)` and `configuredMaxHeight = 28`, so its overlay
   frame grants at most 26 content rows on any terminal taller than 30 rows. This
   is a viewport/grant rule of that component, NOT the Settings Workspace:
@@ -1048,7 +1058,8 @@ owns only the lease, focus and write-lifecycle mechanics.
   complete settings editor and its compatibility bridge no longer exist: no
   Settings level hands the user off to another editor, so nothing can mount a
   `SettingsList` under or after this lease. The independent `SettingsList`
-  consumers (`/help`, `/skill`, `/preset`, `/keybindings conflicts`) are their
+  consumers (`/preset`, `/web` and `/acp` on the
+  Split backend) are their
   OWN overlays opened by their own commands, never a continuation of a Settings
   workspace.
 - **Read projection, not a second store.** The panel holds no ConfigPort and no

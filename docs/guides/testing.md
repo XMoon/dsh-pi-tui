@@ -439,6 +439,39 @@ It is not an inventory of every official Web UI feature and does not claim the
 real Tern GUI/TSP native gesture path, which remains `NOT_VERIFIED` under its
 separate owner.
 
+### Fresh single-package installation smoke
+
+`mise exec -- pnpm smoke:fresh-profile -- <absolute-candidate.tgz> [--dsh <qualified-target>]`
+is a DIFFERENT distribution proof from the preseed Split smoke above. The Split
+lane starts with a Profile that already declares the three Client platform
+packages and proves the Host/Client business lifecycle; the Fresh lane creates a
+brand-new isolated Profile that installs the candidate ONCE with
+`clientPlatformProvisioning: 'bundled'`, then proves:
+
+- the profile root dependencies contain only `@xmoon76/dsh-pi-tui` and the
+  profile does not install `@deepseek-ai/dsh-client-store`, `zustand` or
+  `immer` itself;
+- the packed Client chunk carries the Store implementation without a runtime
+  external import of those three packages;
+- the real Public `dsh --profile pi-tui` Direct surface paints and exits
+  cleanly, and `DSH_PI_TUI_BACKEND=daemon` reaches the Host-ready,
+  Client-authenticated, official-Domains-ready and painted-surface milestones
+  with exactly one Host identity and one Client process while the Host
+  survives the Client exit and is then explicitly stopped;
+- the Client process resolves no Store closure from the Profile or the source
+  checkout, and every official Client factory receives the same platform Store
+  namespace object.
+
+Passing an earlier published tarball with `--upgrade-old <path>` additionally
+runs the historical upgrade paths against the same candidate; this is
+qualification evidence, not a per-CI network download. The script and CI own
+the accepted `--dsh` target matrix and the platform rows; docs do not duplicate
+that live inventory. F0 is the pristine release gate and does not pre-seed
+`allowBuilds.koffi`; the report says `controlledKoffi: "NO"` and `pristine:
+true`. Historical F1/F2 upgrades may retain an old Profile's existing policy.
+`pack:release` runs this gate against the same single packed tarball after the
+eight public-package smokes.
+
 The Upgrade lane has its own strict selector over two genuinely different
 packaged builds pinned to the same exact DSH runtime (internal qualification
 samples, not a supported historical user release):

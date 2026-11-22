@@ -28,7 +28,7 @@ import type { SessionActivityFact } from '../../src/runtime/session-workspace-fa
 import type { DirectoryEntry, DirectoryListing } from '@deepseek-ai/dsh-host-directory-picker/types'
 import type { HostDirectoryBrowseOutcome } from '../../src/runtime/host-directory-browse-port.ts'
 import { SupersededReadError } from '../../src/runtime/read-error.ts'
-import { shortSessionId } from '../../src/tui/pickers/sessions.ts'
+import { sessionBrowserErrorNotice, shortSessionId } from '../../src/tui/pickers/sessions.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
@@ -651,6 +651,84 @@ test('a search fact that is also the app notice paints exactly once in the same 
     1,
     'the hasMore fact is painted once, never as status + notice',
   )
+})
+
+test('the session browser error status defers clipping to the live workspace width', async () => {
+  const errorMessage = `${'A'.repeat(50)}MARK-A${'B'.repeat(30)}MARK-B${'C'.repeat(30)}MARK-C${'D'.repeat(40)}END`
+  const h = harness({ columns: 80, rows: 24, initialMode: 'search' })
+  h.handle.setSnapshot(snapshot({
+    query: 'needle',
+    searchState: 'error',
+    searchError: errorMessage,
+    searchResults: [],
+  }), 'needle')
+  const fullNotice = sessionBrowserErrorNotice('search', errorMessage)
+  h.app.notify(fullNotice, 'error')
+  await h.paint()
+
+  const statusLine = (view: string): string => {
+    const line = view.split('\n').find(candidate => candidate.includes('Search failed:'))
+    assert.ok(line !== undefined, `the search error status line is missing:\n${view}`)
+    return line
+  }
+  let view = h.view()
+  let line = statusLine(view)
+  assert.ok(line.includes('MARK-A'), `the 80-column status must show content past the old 40-char cut:\n${line}`)
+  assert.ok(!line.includes('MARK-B'), `the 80-column status must end at its live width:\n${line}`)
+  assert.equal(
+    view.split('\n').filter(candidate => candidate.includes('Search failed:')).length,
+    1,
+    `the panel status and the same-fact app notice paint once:\n${view}`,
+  )
+  for (const painted of h.vt.getViewport()) {
+    assert.ok(visibleWidth(painted) <= 80, `a painted 80-column row overflows: ${JSON.stringify(painted)}`)
+  }
+
+  h.vt.resize(120, 24)
+  await h.paint()
+  line = statusLine(h.view())
+  assert.ok(line.includes('MARK-B'), `a wider workspace must reveal the next error segment:\n${line}`)
+  assert.ok(!line.includes('MARK-C'), `the 120-column status must not paint the 160-column tail:\n${line}`)
+  for (const painted of h.vt.getViewport()) {
+    assert.ok(visibleWidth(painted) <= 120, `a painted 120-column row overflows: ${JSON.stringify(painted)}`)
+  }
+
+  h.vt.resize(160, 24)
+  await h.paint()
+  line = statusLine(h.view())
+  assert.ok(line.includes('MARK-C'), `the 160-column workspace must reveal a farther tail:\n${line}`)
+  assert.ok(!line.includes('END'), `the 160-column status still truncates what does not fit:\n${line}`)
+
+  h.vt.resize(44, 24)
+  await h.paint()
+  line = statusLine(h.view())
+  assert.ok(line.trimEnd().endsWith('…'), `the compact status marks its truncation:\n${line}`)
+  assert.ok(visibleWidth(line.trimEnd()) <= 44, `the compact status never exceeds 44 cells:\n${line}`)
+
+  h.vt.resize(160, 24)
+  await h.paint()
+  assert.ok(statusLine(h.view()).includes('MARK-C'), 'widening again recovers the longer same-fact status')
+})
+
+test('a long projection error also clips at the painted workspace width', async () => {
+  const projectionError = `projection-${'X'.repeat(80)}-TAIL`
+  const h = harness({ columns: 80, rows: 24 })
+  h.handle.setSnapshot(snapshot({ projectionError }))
+  await h.paint()
+  let view = h.view()
+  const line = view.split('\n').find(candidate => candidate.includes('Session details unavailable:'))
+  assert.ok(line !== undefined, `the projection error status is missing:\n${view}`)
+  assert.ok(line.includes('projection-'), 'the readable projection error prefix paints')
+  assert.ok(!line.includes('TAIL'), 'the wide status still truncates what does not fit')
+  assert.ok(visibleWidth(line.trimEnd()) <= 80, `the projection status exceeds its width:\n${line}`)
+  h.vt.resize(44, 24)
+  await h.paint()
+  view = h.view()
+  const squeezed = view.split('\n').find(candidate => candidate.includes('Session details unavailable:'))
+  assert.ok(squeezed !== undefined && squeezed.trimEnd().endsWith('…'), `the compact projection status marks truncation:\n${view}`)
+  for (const painted of h.vt.getViewport()) {
+    assert.ok(visibleWidth(painted) <= 44, `a painted compact row overflows: ${JSON.stringify(painted)}`)
+  }
 })
 
 test('the frozen size matrix keeps the Esc row reachable and every painted cell inside the width', async () => {

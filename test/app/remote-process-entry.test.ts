@@ -13,7 +13,7 @@
 
 import assert from 'node:assert/strict'
 import test, { type TestContext } from 'node:test'
-import { mkdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -25,6 +25,7 @@ import { attachEntryControl, createControlDispatcher } from '../../src/app/remot
 import {
   assertHandoffRestored,
   assertHandoffSignalExclusivity,
+  clientFatalPrimaryWithCleanup,
   ClientReexecRefusal,
   createClientReexecChildEnvironment,
   createClientReexecRequestHandler,
@@ -33,6 +34,7 @@ import {
   handoffStartupFailureLine,
   inspectClientReexecTarget,
   prepareClientReexec,
+  reportStopClientFatal,
   resolveProfileInstalledClientTarget,
   routeReexecTermination,
   stopLocalClient,
@@ -41,6 +43,7 @@ import {
   type ReexecChildHandle,
 } from '../../src/app/remote-process/local-client-entry.ts'
 import { LOCAL_PROTOCOL, LocalScopeError } from '../../src/app/remote-process/local-scope.ts'
+import { clientFatalErrorDetails } from '../../src/app/remote-process/client-fatal-diagnostics.ts'
 import { collectHostEntryStatus } from '../../src/app/remote-process/host-bootstrap.ts'
 import { drainHmrTransactions, finishHostFailureCleanup, HOST_ONLY_PATCH } from '../../src/app/remote-process/local-host-entry.ts'
 import {
@@ -288,6 +291,44 @@ test('a successful Client dispose keeps the requested code and reports no failur
   const exitCode = await stopLocalClient({ dispose: async () => {} }, 0, record => { records.push(record) })
   assert.equal(exitCode, 0)
   assert.deepEqual(records, [])
+})
+
+test('the stop coordinator primary carries every nested cleanup cause and never mutates a frozen error', () => {
+  const failure = new Error('primary stop failure')
+  failure.cause = new Error('pre-existing cause')
+  const primary = clientFatalPrimaryWithCleanup(failure, [new Error('cleanup one'), new Error('cleanup two')])
+  const preview = clientFatalErrorDetails(primary, 'client-runtime')
+  assert.match(preview.text, /error\.message: primary stop failure/u)
+  assert.match(preview.text, /pre-existing cause/u)
+  assert.match(preview.text, /cleanup one/u)
+  assert.match(preview.text, /cleanup two/u)
+
+  const frozen = Object.freeze(new Error('frozen primary'))
+  const merged = clientFatalPrimaryWithCleanup(frozen, [new Error('frozen cleanup')])
+  assert.doesNotThrow(() => clientFatalPrimaryWithCleanup(frozen, [new Error('frozen cleanup')]))
+  const frozenPreview = clientFatalErrorDetails(merged, 'client-runtime')
+  assert.match(frozenPreview.text, /frozen primary/u)
+  assert.match(frozenPreview.text, /frozen cleanup/u)
+})
+
+test('the stop-coordinator report writes one file with the primary and every nested cleanup cause', t => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('stop-fatal-report-')
+  const failure = new Error('primary stop failure')
+  failure.cause = new Error('pre-existing cause')
+  const line = reportStopClientFatal(failure, 'pi-tui', 'client-runtime', false, { DSH_HOME: home }, [
+    new Error('cleanup one'),
+    new Error('cleanup two'),
+  ])
+  assert.match(line, /CLIENT_RUNTIME_FAILED/u)
+  assert.equal((line.match(/Client diagnostics:/gu) ?? []).length, 1)
+  const directory = join(home, 'logs', 'pi-tui-client')
+  const files = readdirSync(directory)
+  assert.equal(files.length, 1)
+  const text = readFileSync(join(directory, files[0]), 'utf8')
+  for (const expected of ['primary stop failure', 'pre-existing cause', 'cleanup one', 'cleanup two']) {
+    assert.ok(text.includes(expected), `missing ${expected}: ${text}`)
+  }
 })
 
 test('the real Client handle turns a rejecting root disposer into cleanup-failure + code 1', async () => {

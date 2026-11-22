@@ -306,9 +306,12 @@ test('the cross-build case owns the real old/new pair, reexec handoff and both l
   assert.match(source, /installSideBuild\(sideBuildDir, newArtifact\.path, env, targetDshVersion\)/u)
   const support = readFileSync(join(ROOT, 'scripts', 'lib', 'split-upgrade-support.mjs'), 'utf8')
   const sideBuild = support.slice(support.indexOf('export function installSideBuild'), support.indexOf('export function killProcessGroup'))
-  assert.match(sideBuild, /'@deepseek-ai\/dsh-client-store': targetDshVersion/u)
-  assert.match(sideBuild, /zustand: '4\.5\.7'/u)
-  assert.match(sideBuild, /immer: '10\.2\.0'/u)
+  assert.match(sideBuild, /\[EXPECTED_PACKAGE_NAME\]: `file:\$\{tarball\}`/u,
+    'the side-build package must depend only on the new candidate tarball')
+  assert.match(sideBuild, /legacyClientPeers = false/u,
+    'the old manual three-peer workaround must be opt-in only')
+  assert.match(sideBuild, /assertBundledClientClosure\(packageRoot/u,
+    'the new side-build must verify its bundled Client closure')
   assert.doesNotMatch(sideBuild, /@deepseek-ai\/cordis|'@deepseek-ai\/dsh':/u,
     'the side-build must not copy the DSH family or a second Cordis')
 

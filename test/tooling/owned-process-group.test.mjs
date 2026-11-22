@@ -13,7 +13,7 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import test from 'node:test'
+import test, { before } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import {
@@ -22,6 +22,11 @@ import {
 import { waitForFileLine } from '../support/wait-for-file.ts'
 import { groupStillAlive, stopOwnedGroup } from '../../scripts/lib/owned-process-group.mjs'
 import { listKernelGroupMembers, readKernelProcess, sameKernelProcess } from '../../src/runtime/native-process/identity.ts'
+import { installDarwinKoffiFixture } from '../support/darwin-koffi-fixture.ts'
+
+before(t => {
+  installDarwinKoffiFixture(t)
+})
 
 const HOLDER = fileURLToPath(new URL('../fixtures/signal-tree/holder.mjs', import.meta.url))
 const POSIX_ONLY = process.platform === 'win32' ? 'process groups are POSIX-only' : false

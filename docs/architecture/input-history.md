@@ -221,7 +221,7 @@ runner therefore writes an agent-facing submission's history row AFTER the
 session exists, with the FINAL session id — the first prompt of a deferred
 start (`dsh --profile …` without `--session`) creates the session, and a
 row written before creation would carry no sessionId and vanish from
-`Current session`. Sessionless submissions (`/help`, `/settings`,
+`Current session`. Sessionless submissions (`/settings`,
 `/sessions`, `!!` shells) persist with `sessionId: undefined` and stay
 visible in `Current directory` / `All directories`. The ordering contract
 lives in `src/app/submission/history-persist.ts` (`persistAfterSession`), pinned by

@@ -448,8 +448,20 @@ replaces the action's builtin default keys and adds its triggers;
 
 ## Diagnostics
 
-`/keybindings` shows the effective table (action, keys, scope, source)
-grouped by category; `/keybindings conflicts` lists only conflicts;
+`/keybindings` opens the ONE Keyboard shortcuts editor in the Settings workspace
+(the same page the `/settings` launcher mounts) in its `All` view;
+`/keybindings conflicts` takes the SAME typed deeplink into that same lease and
+page with the `Conflicts` view selected. The two view modes are transient UI
+filters: `Tab`/`Shift+Tab` or the painted mode spans switch them without writing
+settings, reloading, or touching the runtime keymap. The Conflicts view lists
+the editable built-in actions whose effective keys conflict as
+`N affected actions` (the EditorModel's conflict count). Plugin-only records
+are not producible through the production registration path, so the page has
+no pseudo-action or separate runtime-record list. When the settings document
+cannot be read or the typed page cannot be opened, the command returns a real
+error carrying the cause plus the CURRENT runtime conflict diagnostics — it
+never falls back to a second overlay and never reports a fake conflict-free
+success.
 `/keybindings reload` re-reads the settings document (fail-soft: a
 throwing read keeps the last-known-good keymap and reports an error);
 `/keybindings reset` clears the user overrides THROUGH the settings
@@ -461,8 +473,8 @@ read → construct the cleared doc → persist → apply the SAME local
 projection (no post-write re-read of the Host document — a Remote
 adapter's reset is write + local projection, never GET → PUT → GET; a
 post-write read that failed would fork the disk reset from the runtime).
-`/help` and the footer hints render through `keyHint`/`keysFor` — a user
-remap updates every hint automatically.
+The footer hints render through `keyHint`/`keysFor` — a user remap updates
+every hint automatically.
 
 ## Out of scope (first version)
 
@@ -536,8 +548,8 @@ leader collision or dedup.
 dedupes same-action canonical keys, deactivates same-priority conflicts,
 and shadows lower-priority overlapping rules. Only `effective` rules
 feed the resolver, the host reservation, the editor submit sync, the
-leader availability check and the read model — `runtime == /help ==
-/keybindings == footer` by construction. No fabricated builtin
+leader availability check and the read model — `runtime == /keybindings ==
+footer` by construction. No fabricated builtin
 fallback; a guard no-op stays host-owned; a genuinely declined host
 action (pasteMedia with no handler) falls through to the editor/plugin
 remainder exactly once.
@@ -653,8 +665,7 @@ CONDITIONAL top claim never permanently hides its context fallback.
 
 ## Keyboard Shortcuts Editor
 
-`/help` remains the key-first, read-only help surface. `/keybindings` is the
-separate action-first editor: it groups definitions into non-selectable
+`/keybindings` is the action-first editor: it groups definitions into non-selectable
 category sections, searches labels/descriptions/action IDs/categories/current
 keys/default keys, and marks `*` customized, `!` conflicts, `Unbound`,
 `Disabled`, fixed, and reserved actions. A standalone leader-key row also
@@ -684,8 +695,25 @@ Repeats and releases do not count, and there is no single-letter Escape
 shortcut. Physical Escape is never available to ordinary actions.
 Context-gated composition affordances are labeled separately from ordinary
 configured bindings (for example, `Down (conditional)` for the task browser).
+A conflicted Action's detail advertises `c details`: it opens a same-page
+read-only reader that wraps and scrolls the full conflict diagnostic (both
+participants, scopes and sources), so a short grant can still read the whole
+record without giving the read-only text an edit route. Write results stay
+pinned in the detail frame until they have actually painted.
 
 `/settings` contains one `Keyboard shortcuts` launcher whose submenu uses the
-same controller and editor component. The diagnostic verbs
-`/keybindings conflicts`, `/keybindings reload`, and `/keybindings reset` stay
+same controller and editor component. The ordinary launcher and bare
+`/keybindings` open its `All` view; `/keybindings conflicts` opens the same page
+in its `Conflicts` view. The local mode bar reads
+`View: [All] · Conflicts (N affected actions)` or
+`View: All · [Conflicts (N affected actions)]`, where `N` is always the
+affected editable built-in Action count. The production plugin registry rejects
+a second plugin registration for the same normalized key, so plugin-only and
+mixed builtin/plugin runtime records are not producible through the supported
+registration path; the page therefore exposes only the real builtin/user
+conflicts that the live Manager reports. A mode switch preserves the search
+query and never writes the settings document or rebuilds the keymap. When the
+grant cannot fit the complete two-mode row, the bar degrades to a read-only
+statement of the active mode and `Tab`/pointer mode selection is unavailable.
+The diagnostic verbs `/keybindings reload` and `/keybindings reset` stay
 available for inspection and recovery; no settings watch callback is used.

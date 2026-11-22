@@ -106,6 +106,13 @@ export const TSP_B2A_RESULT_NOTICE_COMMANDS: ReadonlySet<string> = new Set([
   // PR-Q: an unavailable queue sheet returns a real error result; on the
   // card-less route this set is its ONLY visible owner.
   'queue',
+  // UX PR1: the bare `/skill` usage error must reach the user on the card-less
+  // Remote PiTui command registry, which appends no result card. This only
+  // gives the existing error-result notice sink a visible owner for the bare
+  // client command; the explicit `/skill <name>` line is a skill invocation,
+  // so it never takes this Client-command error branch. This set is never a
+  // routing authority, and `skill` stays outside TSP_SUPPORTED_TUI_BUILTINS.
+  'skill',
 ])
 
 /**

@@ -7,7 +7,7 @@ English | [简体中文](README.md)
 
 **A terminal frontend for DeepSeek Harness. One Host, with TUI, Web and ACP clients accessing the same Agent Session.**
 
-**Direct** remains the default, ready-to-use mode. Starting in **0.5.7**, Linux/macOS users can explicitly choose a **Daemon**: an independent local Host retains sessions and ongoing work as terminal Clients disconnect and reconnect. Other TUIs, the official Web frontend and an opt-in local ACP client can access sessions belonging to that same Host.
+**Direct** remains the default, ready-to-use mode. Starting in **0.5.8**, Linux/macOS users can explicitly choose a **Daemon**: an independent local Host retains sessions and ongoing work as terminal Clients disconnect and reconnect. Other TUIs, the official Web frontend and an opt-in local ACP client can access sessions belonging to that same Host.
 
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) remains the authority for the Agent Loop, models, tools, persistence, permissions and concurrent writes. `dsh-pi-tui` is a third-party frontend, not a second Agent Runtime.
 
@@ -21,7 +21,7 @@ English | [简体中文](README.md)
 
 ### Stable / latest
 
-**0.5.7 is the current stable release (npm `@latest`).** The recommended DSH pairing is **0.2.2-rc.5**. Install DeepSeek Harness first, then the TUI bundle into the `pi-tui` profile:
+**0.5.8 is the current stable release (npm `@latest`).** The recommended DSH pairing is **0.2.2-rc.5**. Install DeepSeek Harness first, then the TUI bundle into the `pi-tui` profile:
 
 ~~~sh
 npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.5
@@ -29,22 +29,24 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
 dsh --profile pi-tui
 ~~~
 
-### Exact version pairing (0.5.7)
+### Exact version pairing (0.5.8)
 
-**0.5.7 requires Node.js ≥24.9.0 and DSH ≥0.2.2-rc.3. DSH 0.2.2-rc.5 is recommended** (the exact qualification target for this release). For a reproducible installation, pin both package versions:
+**0.5.8 requires Node.js ≥24.9.0 and DSH ≥0.2.2-rc.3. DSH 0.2.2-rc.5 is recommended** (the exact qualification target for this release). For a reproducible installation, pin both package versions:
 
 ~~~sh
 npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.5
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.7
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.8
 dsh --profile pi-tui
 ~~~
 
 | TUI | DSH | Status |
 |---|---|---|
-| `0.5.7` | `>=0.2.2-rc.3`; recommended `0.2.2-rc.5` | **Current latest** |
+| `0.5.8` | `>=0.2.2-rc.3`; recommended `0.2.2-rc.5` | **Current latest** |
 | `0.5.6` | `0.2.2-rc.1` | Previous release |
 
-**Upgrade precaution:** Before changing the DSH Runtime, finish in-flight Turns/Jobs, stop the previous Host and back up Profiles, Sessions and required data. Cross-DSH schema downgrade in place is not guaranteed. Do not pair 0.5.7 with rc.2 or earlier. See the [compatibility guide](docs/guides/dsh-compatibility.md) for historical pairs and recovery.
+**Fresh 0.5.8 install:** The DSH plugin command above installs the TUI without manually adding `@deepseek-ai/dsh-client-store`, `zustand` or `immer`. A failed Daemon Client startup reports its own `$DSH_HOME/logs/pi-tui-client/startup-*.log` file; `daemon logs` covers Host logs only.
+
+**Upgrade precaution:** Before changing the DSH Runtime, finish in-flight Turns/Jobs, stop the previous Host and back up Profiles, Sessions and required data. Cross-DSH schema downgrade in place is not guaranteed. Do not pair 0.5.8 with rc.2 or earlier. See the [compatibility guide](docs/guides/dsh-compatibility.md) for historical pairs and recovery.
 
 ### Next / npm line (validation)
 
@@ -60,7 +62,7 @@ dsh --profile pi-tui
 
 ### Two modes, one DSH Session authority
 
-| | Direct (default) | Daemon (opt-in from 0.5.7) |
+| | Direct (default) | Daemon (opt-in from 0.5.8) |
 |---|---|---|
 | Launch | `dsh --profile pi-tui` | `DSH_PI_TUI_BACKEND=daemon dsh --profile pi-tui` |
 | Process | TUI and Host in one process | Independent Host; TUI is a detachable Client |
@@ -95,7 +97,7 @@ You can also save `Daemon` under `/settings → General → Backend` for the **n
 | `Ctrl+C` · `Ctrl+D` | Cancel while busy, or follow idle exit confirmation |
 | `!` · `!!` | Host Shell with / without Session persistence |
 
-These are default mappings and common entries; `/help` and `/keybindings` show the **effective** keys after customizations. `/transcript` currently uses the official Direct Markdown export; `/export` creates a separate ZIP archive saved on the Client filesystem. `PI_IMAGE_PROTOCOL=none` disables pixel previews, not attachments.
+These are default mappings and common entries; `/keybindings` shows the **effective** keys after customizations. Type `/` to search and select commands and available Skills; use `/skill <name> [args]` to invoke a Skill explicitly (including when a same-named command would otherwise win), while bare `/skill` only prints its usage. `/transcript` currently uses the official Direct Markdown export; `/export` creates a separate ZIP archive saved on the Client filesystem. `PI_IMAGE_PROTOCOL=none` disables pixel previews, not attachments.
 
 ## Daemon quick start (Linux / macOS)
 
@@ -139,9 +141,9 @@ When launched inside [Herdr](https://github.com/herdrdev/herdr), the TUI can rep
 
 ## Settings, extensions and development
 
-`/settings` is the shared fullscreen Settings workspace; `/plugins`, `/footer` and `/keybindings` open its relevant pages. Host configuration writes use official authoritative readback; a package enabled in the Host is not necessarily an ACTIVE `./tui` extension in the current Client.
+`/settings` is the shared fullscreen Settings workspace; `/plugins`, `/footer` and `/keybindings` open its relevant pages. `/keybindings conflicts` opens the same Keyboard shortcuts page directly in its Conflicts view; when the settings document cannot be read or that page cannot open, the command returns an error carrying the current conflict diagnostics. Host configuration writes use official authoritative readback; a package enabled in the Host is not necessarily an ACTIVE `./tui` extension in the current Client.
 
-Public extensions have **Stable / Advanced / Unstable** tiers: see the [authoring guide](docs/extensions/authoring.md), [Stable API](docs/extensions/stable.md) and [tier contract](docs/extensions/tiers.md). Version 0.5.7 adds Client-local `./tui` loading and per-package persisted settings, but **does not deliver Forge or a Plugin Marketplace**.
+Public extensions have **Stable / Advanced / Unstable** tiers: see the [authoring guide](docs/extensions/authoring.md), [Stable API](docs/extensions/stable.md) and [tier contract](docs/extensions/tiers.md). Version 0.5.8 adds Client-local `./tui` loading and per-package persisted settings, but **does not deliver Forge or a Plugin Marketplace**.
 
 For development:
 
