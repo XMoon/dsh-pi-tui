@@ -82,7 +82,7 @@ export interface KeybindingEditorModel {
   readonly diagnostics: readonly string[]
   readonly customizedCount: number
   readonly disabledCount: number
-  /** Affected EDITABLE BUILTIN action rows — never the runtime record count. */
+  /** Affected editable builtin action rows. */
   readonly conflictCount: number
   readonly summary: string
 }
