@@ -84,8 +84,9 @@ test('one Client PID resolves the manual command from the Profile and the qualif
       // carries the qualification override. The Profile is the running build,
       // so the truthful result is already-current.
       let boundary = recordIndex(client)
+      let baselineFrame = await client.text()
       await client.submit('/reload-client')
-      await waitForReloadNotice(client, RELOAD_NOTICE.alreadyCurrent, 'manual Profile refusal', boundary)
+      await waitForReloadNotice(client, RELOAD_NOTICE.alreadyCurrent, 'manual Profile refusal', boundary, { baselineFrame })
       assertNoHandoffRequested(client, boundary, 'manual Profile refusal')
       assert.equal(await client.isAlive(), true, 'the manual refusal killed the source-isolation Client')
       await assertHostArtifactsKept(scene, host, artifactsBefore, 'manual Profile refusal')

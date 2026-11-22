@@ -164,20 +164,33 @@ export async function waitForVisibleTextGone(
   throw new Error(`${label}: text ${JSON.stringify(text)} stayed visible for ${String(timeoutMs)}ms`)
 }
 
+export interface ReloadNoticeWaitOptions {
+  /** The viewport captured immediately BEFORE this action. */
+  baselineFrame: string
+  timeoutMs?: number
+}
+
 export async function waitForReloadNotice(
   client: UpgradeClientHandle,
   expectedText: string,
   label: string,
   fromRecordIndex: number,
-  timeoutMs = 120_000,
+  options: ReloadNoticeWaitOptions,
 ): Promise<void> {
   const expected = diagnostics.reloadNoticeTypeForText(expectedText)
+  const baseline = diagnostics.classifyReloadNotices(options.baselineFrame.split('\n'))
+  const timeoutMs = options.timeoutMs ?? 120_000
   const started = Date.now()
   let lastFrame = ''
   for (;;) {
     lastFrame = await client.text().catch(() => '')
     const notices = diagnostics.classifyReloadNotices(lastFrame.split('\n'))
-    if (notices.includes(expected)) return
+    if (notices.includes(expected)) {
+      if (baseline.includes(expected)) {
+        throw new Error(`${label}: the expected notice was already visible before this action; a stale painted frame is not evidence`)
+      }
+      return
+    }
     const unexpected = notices.find(type => type !== expected)
     if (unexpected !== undefined) {
       throw new Error(`${label}: painted reload notice ${unexpected}, expected ${expected}; frame=${JSON.stringify(lastFrame.slice(-2000))}`)
@@ -190,7 +203,7 @@ export async function waitForReloadNotice(
     }
     if (Date.now() - started >= timeoutMs) {
       const tail = client.readRecords().slice(fromRecordIndex).slice(-12)
-      throw new Error(`${label}: no ${expected} reload notice within ${String(timeoutMs)}ms; last frame=${JSON.stringify(lastFrame.slice(-2000))}; records=${JSON.stringify(tail)}`)
+      throw new Error(`${label}: no ${String(expected)} reload notice within ${String(timeoutMs)}ms; last frame=${JSON.stringify(lastFrame.slice(-2000))}; records=${JSON.stringify(tail)}`)
     }
     await sleep(50)
   }
@@ -305,7 +318,13 @@ export function assertPeerSurfaceKept(
 ): void {
   const records = client.readRecords().slice(fromIndex)
   const statuses = records.filter(record => record.m4b2s === 'surface-status') as SurfaceStatus[]
-  for (const status of statuses) {
+  // The production status projection emits a surface-status only when the
+  // observable tuple changes. A zero-length post-boundary list therefore
+  // means the latest official status must still equal the boundary; the
+  // entire record window plus the live process is the authoritative witness.
+  const latest = latestSurfaceStatus(client)
+  assert(latest !== undefined, `${label}: the peer Client has no official surface-status`)
+  for (const status of statuses.length === 0 ? [latest] : statuses) {
     assert(status.pid === boundary.pid, `${label}: peer Client PID changed`)
     assert(status.rootFiberUid === boundary.rootFiberUid, `${label}: peer root fiber changed`)
     assert(status.generationId === boundary.generationId, `${label}: peer transport generation changed`)
@@ -518,10 +537,17 @@ export async function beginParallelAudit(
     'parallel audit: both files share a Host or Client PID')
   assert(pidAlive(Number(other.hostPid)) && pidAlive(Number(other.clientPid)),
     'parallel audit: the other Scene is not live at the rendezvous')
+  const ownStatus = await scene.hostStatus(host)
+  assert(Number(ownStatus.localHost?.hostPid) === Number(marker.hostPid),
+    'parallel audit: this Scene Host identity changed during the rendezvous')
+  assert(pidAlive(Number(marker.hostPid)) && pidAlive(Number(marker.clientPid)),
+    'parallel audit: this Scene is not live at the rendezvous')
+  const checkedMarker = { ...marker, checkedAt: new Date().toISOString() }
+  writeFileSync(markerPath, `${JSON.stringify(checkedMarker, null, 2)}\n`, { mode: 0o600 })
   return {
     markerPath,
     complete: () => {
-      const completed = { ...marker, activeEndedAt: new Date().toISOString() }
+      const completed = { ...checkedMarker, activeEndedAt: new Date().toISOString() }
       writeFileSync(markerPath, `${JSON.stringify(completed, null, 2)}\n`, { mode: 0o600 })
     },
   }

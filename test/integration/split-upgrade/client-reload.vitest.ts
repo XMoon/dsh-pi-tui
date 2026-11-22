@@ -90,8 +90,9 @@ test('the production /reload-client command keeps the peer Session and held Turn
 
       // The manually requested build is already the running build.
       let boundary = recordIndex(clientA)
+      let baselineFrame = await clientA.text()
       await clientA.submit('/reload-client')
-      await waitForReloadNotice(clientA, RELOAD_NOTICE.alreadyCurrent, 'Client A already-current refusal', boundary)
+      await waitForReloadNotice(clientA, RELOAD_NOTICE.alreadyCurrent, 'Client A already-current refusal', boundary, { baselineFrame })
       assertNoHandoffRequested(clientA, boundary, 'Client A already-current refusal')
       assert.equal(await clientA.isAlive(), true, 'the already-current refusal killed Client A')
       await assertHostArtifactsKept(current, host, artifactsBefore, 'already-current refusal')
@@ -105,8 +106,9 @@ test('the production /reload-client command keeps the peer Session and held Turn
       await clientA.terminal.write('\x7f'.repeat(200))
       await waitForClearedComposer(clientA, '[image #', 'Client A cleared the composer placeholder')
       boundary = recordIndex(clientA)
+      baselineFrame = await clientA.text()
       await clientA.submit('/reload-client')
-      await waitForReloadNotice(clientA, RELOAD_NOTICE.attachments, 'Client A attachment refusal', boundary)
+      await waitForReloadNotice(clientA, RELOAD_NOTICE.attachments, 'Client A attachment refusal', boundary, { baselineFrame })
       assertNoHandoffRequested(clientA, boundary, 'Client A attachment refusal')
       assert.equal(await clientA.isAlive(), true, 'the attachment refusal killed Client A')
       await assertHostArtifactsKept(current, host, artifactsBefore, 'attachment refusal')
@@ -178,6 +180,7 @@ test('the production /reload-client command keeps the peer Session and held Turn
       await waitForPidGone(replacement.pid, 'Client A2 replacement')
       await current.refreshClientBusinessPids(clientA2)
       assert.equal(await clientB.isAlive(), true, 'Client B died when Client A2 exited')
+      assertPeerSurfaceKept(clientB, peerIndex, peerBoundary, hostIdentity, 'Client B across the A2 exit')
       await assertHostArtifactsKept(current, host, artifactsBefore, 'Client A2 exit')
 
       const releaseBoundary = hostSessionEvents(current, sessionId)?.length ?? 0
@@ -233,8 +236,9 @@ test('the destructive target-invalid refusal keeps the live old Host, Session an
     await scene.removeProfilePackageForReloadRefusal(host)
     await assertHostArtifactsKept(scene, host, artifactsBefore, 'official profile removal')
     const boundary = recordIndex(client)
+    const baselineFrame = await client.text()
     await client.submit('/reload-client')
-    await waitForReloadNotice(client, RELOAD_NOTICE.targetInvalid, 'target-invalid refusal', boundary)
+    await waitForReloadNotice(client, RELOAD_NOTICE.targetInvalid, 'target-invalid refusal', boundary, { baselineFrame })
     assertNoHandoffRequested(client, boundary, 'target-invalid refusal')
     assert.equal(await client.isAlive(), true, 'the target-invalid refusal killed the live Client')
     assert.equal((await client.businessPid()), clientPid, 'the target-invalid refusal changed the Client PID')
