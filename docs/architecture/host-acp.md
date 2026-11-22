@@ -309,11 +309,15 @@ profile's independent `autoStart` preference enables it (see below).
     context during its true idle maintenance phase, so it is Agent-local: the
     same Agent's human TUI can call the tools, another Agent cannot see them,
     and this never writes Profile Settings or registers with the Host-global
-    MCP manager. Each activation is ordered: the Host waits for the first
-    connection and tool discovery, then reads the official Agent/global tool
-    definitions; any new tool name equal to an existing global or Agent tool,
-    or to an earlier server in this request, fails the whole admission closed
-    and disposes every created Fiber in reverse order. A partially failed
+    MCP manager. Each activation is ordered and bounded: one explicit startup
+    budget covers transport startup plus initial tool sync, and a
+    request/connection abort disposes the pending Fiber rather than leaving a
+    stale future. The Host waits for the first connection and tool discovery,
+    then reads the official Agent/global tool definitions; any new tool name
+    equal to an existing global or Agent tool, or to an earlier server in this
+    request, fails the whole admission closed and disposes every created Fiber
+    in reverse order INSIDE the same maintenance window, before the Agent can
+    wake queued TUI work. A partially failed
     request never leaves a published tool or an owned child behind; an
     unconfirmed cleanup keeps the exact claim fenced. If `session/new` already
     created its Host Session before the MCP start fails, the error carries that
