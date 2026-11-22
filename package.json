@@ -350,7 +350,7 @@
     "bench:smoke": "BENCH_SMOKE=1 node --expose-gc --import tsx/esm scripts/bench.mts",
     "test:fork": "node scripts/run-with-temp-root.mjs pnpm --dir packages/pi-tui test",
     "test:bundle": "pnpm test:product && pnpm test:tooling",
-    "test:s0:split": "vitest run --config vitest.s0.config.ts",
+    "test:split:vitest": "vitest run --config vitest.split.config.ts",
     "test:tmux": "node scripts/run-test-lane.mjs tmux",
     "test": "pnpm test:fork && pnpm test:product && pnpm test:tooling && pnpm test:tmux",
     "smoke": "node scripts/tarball-smoke.mjs",

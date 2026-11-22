@@ -11,8 +11,8 @@ test('two real Clients share one Host Session and a Ctrl+S-steered queued prompt
 
   const clientA = await scene.startClient('a')
   await clientA.waitForVisibleText('dsh-pi-tui', 'A painted the sessionless welcome')
-  await clientA.submit('s0-seed-a')
-  await clientA.waitForText('s0-seed-a', 'A painted its submitted prompt')
+  await clientA.submit('split-seed-a')
+  await clientA.waitForText('split-seed-a', 'A painted its submitted prompt')
 
   const sessionId = await scene.waitForNewSessionId(sessionsBefore, 'A created Session X')
   const held = await scene.waitForC1WorkEvent(
@@ -28,18 +28,18 @@ test('two real Clients share one Host Session and a Ctrl+S-steered queued prompt
   await clientB.waitForText('long-turn started', 'B saw the shared running Host stream')
 
   const queueBoundary = (await scene.sessionEvents(sessionId))?.length ?? 0
-  await clientB.submit('s0-b-queued')
-  await clientA.waitForText('s0-b-queued', "A saw B's Host-owned pending occurrence")
+  await clientB.submit('split-b-queued')
+  await clientA.waitForText('split-b-queued', "A saw B's Host-owned pending occurrence")
   const queueEvent = await scene.waitForSessionEvent(
     sessionId,
     queueBoundary,
     event => event.type === 'agent/inbox/spliced'
       && event.data?.target === 'next-turn'
-      && (event.data.inserted ?? []).some((message: Record<string, any>) => messageText(message) === 's0-b-queued'),
-    'B queued s0-b-queued in the shared Host inbox',
+      && (event.data.inserted ?? []).some((message: Record<string, any>) => messageText(message) === 'split-b-queued'),
+    'B queued split-b-queued in the shared Host inbox',
   )
   const queuedItem = (queueEvent.data?.inserted ?? [])
-    .find((message: Record<string, any>) => messageText(message) === 's0-b-queued')
+    .find((message: Record<string, any>) => messageText(message) === 'split-b-queued')
   assert.equal(typeof queuedItem?.id, 'string', 'the queued Host occurrence carries no identity')
   assert.notEqual(queuedItem.id, '', 'the queued Host occurrence identity is empty')
 
@@ -82,7 +82,7 @@ test('two real Clients share one Host Session and a Ctrl+S-steered queued prompt
     event => event.type === 'user/message' && event.data?.id === queuedItem.id,
     'the steered occurrence was claimed exactly once',
   )
-  assert.equal(messageText(claimed.data), 's0-b-queued', 'the steered occurrence changed content')
+  assert.equal(messageText(claimed.data), 'split-b-queued', 'the steered occurrence changed content')
   await scene.waitForSessionEvent(
     sessionId,
     steerBoundary,
@@ -94,8 +94,8 @@ test('two real Clients share one Host Session and a Ctrl+S-steered queued prompt
   const committed = events.filter(event => event.type === 'user/message' && event.data?.id === queuedItem.id)
   assert.equal(committed.length, 1, 'the steered occurrence was committed more than once')
   const userTexts = sessionsUserTexts(events)
-  assert.equal(userTexts.filter(text => text === 's0-b-queued').length, 1,
-    'the Host durable user input did not carry s0-b-queued exactly once')
+  assert.equal(userTexts.filter(text => text === 'split-b-queued').length, 1,
+    'the Host durable user input did not carry split-b-queued exactly once')
   const answers = events
     .slice(steerBoundary)
     .filter(event => event.type === 'assistant/message')
@@ -130,7 +130,7 @@ test('the first real Question answer settles once while the loser late option ke
   // An idle Session materializes lazily: its first durable write is what gives
   // the test its real Host Session identity. A user title write is metadata,
   // not a prompt, so the Session stays conversation-empty until B attaches.
-  await clientA.submit('/title s0-empty-session')
+  await clientA.submit('/title split-empty-session')
   const sessionId = await scene.waitForNewSessionId(sessionsBefore, 'A created empty Session X')
 
   const clientB = await scene.startClient('b', { sessionId })
@@ -143,7 +143,7 @@ test('the first real Question answer settles once while the loser late option ke
   )
 
   const triggerBoundary = beforeTrigger.length
-  await clientA.submit('s0-question-trigger')
+  await clientA.submit('split-question-trigger')
   const call = await scene.waitForSessionEvent(
     sessionId,
     triggerBoundary,
@@ -159,7 +159,7 @@ test('the first real Question answer settles once while the loser late option ke
   await clientA.waitForVisibleText('[1] Proceed', 'A saw the question option')
   await clientB.waitForVisibleText('[1] Proceed', 'B saw the question option')
 
-  if (process.env.S0_PROBE_WORKER_KILL_POINT === 'two-clients-ready') {
+  if (process.env.SPLIT_VITEST_WORKER_KILL_POINT === 'two-clients-ready') {
     const [clientAAlive, clientBAlive] = await Promise.all([clientA.isAlive(), clientB.isAlive()])
     assert.equal(clientAAlive, true, 'Client A is not alive at the worker-kill point')
     assert.equal(clientBAlive, true, 'Client B is not alive at the worker-kill point')
@@ -168,8 +168,8 @@ test('the first real Question answer settles once while the loser late option ke
     process.kill(process.pid, 'SIGKILL')
   }
 
-  if (process.env.S0_PROBE_FAIL_AFTER_TWO_CLIENTS === '1') {
-    throw new Error('S0_INTENTIONAL_FAILURE: injected while both Clients hold the unanswered Question')
+  if (process.env.SPLIT_VITEST_FAIL_AFTER_TWO_CLIENTS === '1') {
+    throw new Error('SPLIT_VITEST_INTENTIONAL_FAILURE: injected while both Clients hold the unanswered Question')
   }
 
   await clientA.press('1')
@@ -207,12 +207,12 @@ test('the first real Question answer settles once while the loser late option ke
   await scene.hostStatus(host)
 
   const afterExitBoundary = (await scene.sessionEvents(sessionId))?.length ?? 0
-  await clientA.submit('s0-a-after-b-exit')
-  await clientA.waitForText('s0-a-after-b-exit', 'A painted its post-exit prompt')
+  await clientA.submit('split-a-after-b-exit')
+  await clientA.waitForText('split-a-after-b-exit', 'A painted its post-exit prompt')
   await scene.waitForSessionEvent(
     sessionId,
     afterExitBoundary,
-    event => event.type === 'user/message' && sessionsUserTexts([event]).includes('s0-a-after-b-exit'),
+    event => event.type === 'user/message' && sessionsUserTexts([event]).includes('split-a-after-b-exit'),
     'A wrote Session X after B exited',
   )
   await scene.waitForSessionEvent(
@@ -244,8 +244,8 @@ test('the first real Question answer settles once while the loser late option ke
     false,
     'a late loser key produced Host tool activity',
   )
-  assert.equal(sessionsUserTexts(finalEvents).filter(text => text === 's0-question-trigger').length, 1,
+  assert.equal(sessionsUserTexts(finalEvents).filter(text => text === 'split-question-trigger').length, 1,
     'the question trigger was not committed exactly once')
-  assert.equal(sessionsUserTexts(finalEvents).filter(text => text === 's0-a-after-b-exit').length, 1,
+  assert.equal(sessionsUserTexts(finalEvents).filter(text => text === 'split-a-after-b-exit').length, 1,
     'the post-exit prompt was not committed exactly once')
 })

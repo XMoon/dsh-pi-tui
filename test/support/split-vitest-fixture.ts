@@ -102,7 +102,7 @@ interface ClientHandle {
   isAlive(): Promise<boolean>
 }
 
-export interface SplitS0Scene {
+export interface SplitVitestScene {
   readonly workDir: string
   readonly installation: SplitInstallation
   readonly candidate: CandidateFacts
@@ -163,17 +163,17 @@ function requireAbsoluteDirectory(name: string): string {
 }
 
 function requireCandidateTarball(): string {
-  const raw = process.env.S0_CANDIDATE_TGZ
+  const raw = process.env.SPLIT_VITEST_CANDIDATE_TGZ
   assert(typeof raw === 'string' && raw !== '' && isAbsolute(raw),
-    'INPUT_UNQUALIFIED: S0_CANDIDATE_TGZ must be an absolute path to the built candidate .tgz')
+    'INPUT_UNQUALIFIED: SPLIT_VITEST_CANDIDATE_TGZ must be an absolute path to the built candidate .tgz')
   let real: string
   try {
     real = realpathSync(raw)
   } catch (error) {
-    throw new Error(`INPUT_UNQUALIFIED: S0_CANDIDATE_TGZ is not readable: ${asError(error).message}`)
+    throw new Error(`INPUT_UNQUALIFIED: SPLIT_VITEST_CANDIDATE_TGZ is not readable: ${asError(error).message}`)
   }
-  assert(statSync(real).isFile(), `INPUT_UNQUALIFIED: S0_CANDIDATE_TGZ is not a file: ${real}`)
-  assert(real.endsWith('.tgz'), `INPUT_UNQUALIFIED: S0_CANDIDATE_TGZ must be a .tgz: ${real}`)
+  assert(statSync(real).isFile(), `INPUT_UNQUALIFIED: SPLIT_VITEST_CANDIDATE_TGZ is not a file: ${real}`)
+  assert(real.endsWith('.tgz'), `INPUT_UNQUALIFIED: SPLIT_VITEST_CANDIDATE_TGZ must be a .tgz: ${real}`)
   return real
 }
 
@@ -329,7 +329,7 @@ class SupervisorClient {
   }
 }
 
-class Scene implements SplitS0Scene {
+class Scene implements SplitVitestScene {
   readonly workDir: string
   readonly installation: SplitInstallation
   readonly candidate: CandidateFacts
@@ -358,7 +358,7 @@ class Scene implements SplitS0Scene {
     const payload = await this.#supervisor.request('START_HOST', { scenario, extraEnv }, {
       timeoutMs: 180_000,
       onProgress: message => {
-        if (message.event === 'HOST_SPAWNED' && process.env.S0_PROBE_WORKER_KILL_POINT === 'host-spawned-before-ack') {
+        if (message.event === 'HOST_SPAWNED' && process.env.SPLIT_VITEST_WORKER_KILL_POINT === 'host-spawned-before-ack') {
           // Leave one observation tick for the external probe to read the
           // already-written host-spawned receipt before this worker dies.
           setTimeout(() => process.kill(process.pid, 'SIGKILL'), 250)
@@ -402,7 +402,7 @@ class Scene implements SplitS0Scene {
     const sequence = ++this.#clientSequence
     const scratch = join(this.workDir, 'clients', `${label}-${String(sequence)}`)
     mkdirSync(scratch, { recursive: true, mode: 0o700 })
-    const terminal = TuiTest.ephemeral('split-s0', {
+    const terminal = TuiTest.ephemeral('split-vitest', {
       backend: 'xtermjs',
       trace: { mode: 'on-failure', directory: join(this.workDir, 'trace') },
       artifacts: { dir: join(this.workDir, 'artifacts'), onFailure: 'text' },
@@ -593,9 +593,9 @@ class Scene implements SplitS0Scene {
         errors.push(asError(error))
       }
     }
-    const leftoverSessions = (await openTuiSessions()).filter((session: string) => session.startsWith('split-s0-'))
+    const leftoverSessions = (await openTuiSessions()).filter((session: string) => session.startsWith('split-vitest-'))
     if (leftoverSessions.length > 0) {
-      errors.push(new Error(`S0 left native TUI sessions open: ${JSON.stringify(leftoverSessions)}`))
+      errors.push(new Error(`split-process Vitest left native TUI sessions open: ${JSON.stringify(leftoverSessions)}`))
     }
     const clientsClosed = errors.length === 0
     try {
@@ -612,7 +612,7 @@ class Scene implements SplitS0Scene {
       errors.push(asError(error))
     }
     if (errors.length > 0) {
-      throw new AggregateError(errors, `S0 scene cleanup failed with ${String(errors.length)} error(s); evidence root: ${this.workDir}`)
+      throw new AggregateError(errors, `split-process Vitest scene cleanup failed with ${String(errors.length)} error(s); evidence root: ${this.workDir}`)
     }
   }
 
@@ -645,7 +645,7 @@ class Scene implements SplitS0Scene {
 }
 
 async function createScene(): Promise<Scene> {
-  const tmpBase = requireAbsoluteDirectory('S0_TMP_BASE')
+  const tmpBase = requireAbsoluteDirectory('SPLIT_VITEST_TMP_BASE')
   const tarball = requireCandidateTarball()
   const supervisor = new SupervisorClient()
   try {
@@ -662,7 +662,7 @@ async function createScene(): Promise<Scene> {
   }
 }
 
-export const test = base.extend<{ candidateScene: SplitS0Scene }>({
+export const test = base.extend<{ candidateScene: SplitVitestScene }>({
   candidateScene: async ({}, use) => {
     const scene = await createScene()
     let testError: unknown
@@ -677,7 +677,7 @@ export const test = base.extend<{ candidateScene: SplitS0Scene }>({
       } catch (cleanupError) {
         if (testError !== undefined) {
           throw new AggregateError([testError, cleanupError],
-            'the S0 test failed and its scene cleanup also failed')
+            'the split-process Vitest test failed and its scene cleanup also failed')
         }
         throw cleanupError
       }

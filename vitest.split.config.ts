@@ -1,9 +1,9 @@
 import { defineConfig } from 'vitest/config'
 
 /**
- * S0-only Vitest discovery and isolation.
+ * Split-process Vitest discovery and isolation.
  *
- * This config exists for the test-framework technical validation; it does not
+ * This config exists for split-process Vitest E2E coverage; it does not
  * replace the repository's node:test lanes or add itself to any release gate.
  */
 export default defineConfig({

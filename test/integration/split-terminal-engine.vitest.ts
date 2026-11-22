@@ -10,11 +10,11 @@ import { TuiTest as Terminal } from '@microsoft/tui-test'
  * PTY, paint a frame, deliver a real Enter, and report a clean exit before any
  * Split business scenario relies on it.
  *
- * This is deliberately independent of the packaged candidate and the S0
+ * This is deliberately independent of the packaged candidate and the SPLIT
  * fixture; it validates only the terminal engine on this OS.
  */
 function prepareEngineRoot(): string {
-  const root = join(process.cwd(), 'temp', 's0-terminal-engine')
+  const root = join(process.cwd(), 'temp', 'split-terminal-engine')
   mkdirSync(join(root, 'trace'), { recursive: true })
   mkdirSync(join(root, 'artifacts'), { recursive: true })
   return root
@@ -29,9 +29,9 @@ test('the xtermjs engine paints a real PTY frame, accepts Enter, and reports a c
   })
   try {
     const program = [
-      "process.stdout.write('S0_ENGINE_READY\\n')",
+      "process.stdout.write('SPLIT_ENGINE_READY\\n')",
       "process.stdin.setEncoding('utf8')",
-      "process.stdin.on('data', chunk => { if (chunk.includes('s0-engine-ping')) { process.stdout.write('S0_ENGINE_PONG\\n'); process.exit(0) } })",
+      "process.stdin.on('data', chunk => { if (chunk.includes('split-engine-ping')) { process.stdout.write('SPLIT_ENGINE_PONG\\n'); process.exit(0) } })",
     ].join(';')
     await terminal.run(process.execPath, ['-e', program], {
       cwd: process.cwd(),
@@ -39,10 +39,10 @@ test('the xtermjs engine paints a real PTY frame, accepts Enter, and reports a c
       rows: 30,
       waitReady: false,
     })
-    await terminal.getByText('S0_ENGINE_READY').expect()
-    await terminal.type('s0-engine-ping')
+    await terminal.getByText('SPLIT_ENGINE_READY').expect()
+    await terminal.type('split-engine-ping')
     await terminal.press('Enter')
-    await terminal.getByText('S0_ENGINE_PONG').expect()
+    await terminal.getByText('SPLIT_ENGINE_PONG').expect()
     await terminal.waitExit()
     // For a `run()` session the native state carries the child's exit status;
     // getExitCode() only tracks shell-command execution.
@@ -61,7 +61,7 @@ test('a missing terminal locator rejects with a diagnosable expectation error', 
   })
   try {
     await terminal.run(process.execPath, ['-e', [
-      "process.stdout.write('S0_ENGINE_NEGATIVE_READY\\n')",
+      "process.stdout.write('SPLIT_ENGINE_NEGATIVE_READY\\n')",
       'setInterval(() => {}, 1000)',
     ].join(';')], {
       cwd: process.cwd(),
@@ -69,11 +69,11 @@ test('a missing terminal locator rejects with a diagnosable expectation error', 
       rows: 30,
       waitReady: false,
     })
-    await terminal.getByText('S0_ENGINE_NEGATIVE_READY').expect()
+    await terminal.getByText('SPLIT_ENGINE_NEGATIVE_READY').expect()
     await assert.rejects(
-      terminal.getByText('S0_NEVER_PAINTED').wait({ timeout: 500 }),
+      terminal.getByText('SPLIT_NEVER_PAINTED').wait({ timeout: 500 }),
       error => {
-        assert.match(String(error), /S0_NEVER_PAINTED/u)
+        assert.match(String(error), /SPLIT_NEVER_PAINTED/u)
         return true
       },
     )

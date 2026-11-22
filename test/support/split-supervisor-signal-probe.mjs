@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * S0 external signal/parent-death probe.
+ * Split-process external signal/parent-death probe.
  *
  * This file is deliberately outside the test body: it drives real vitest
  * processes and checks OS process state, so a passing Vitest assertion cannot
@@ -13,7 +13,7 @@
  *   --mode worker-kill --at two-clients-ready|host-spawned-before-ack
  *   --mode bootstrap-main-sigterm
  *
- * Required env: S0_TMP_BASE, S0_CANDIDATE_TGZ.
+ * Required env: SPLIT_VITEST_TMP_BASE, SPLIT_VITEST_CANDIDATE_TGZ.
  */
 
 import { execFileSync, spawn } from 'node:child_process'
@@ -27,7 +27,7 @@ function arg(name) {
 }
 
 function fail(message) {
-  console.error(`S0_SIGNAL_PROBE_FAIL: ${message}`)
+  console.error(`SPLIT_SUPERVISOR_SIGNAL_PROBE_FAIL: ${message}`)
   process.exitCode = 1
   throw new Error(message)
 }
@@ -86,7 +86,7 @@ async function waitChildExit(child, timeoutMs) {
 }
 
 function receipts(tmpBase, runId) {
-  const root = join(tmpBase, 's0-resources')
+  const root = join(tmpBase, 'split-resources')
   if (!existsSync(root)) return []
   return readdirSync(root)
     .filter(name => name.endsWith('.json'))
@@ -123,8 +123,8 @@ function checkNoLingeringPaths(tmpBase, receipt) {
   const lingering = commands.split('\n').filter(line => {
     const trimmed = line.trim()
     if (trimmed === '') return false
-    if (trimmed.includes('s0-supervisor-signal-probe.mjs')) return false
-    if (trimmed.includes('S0_TMP_BASE') || trimmed.includes('S0_CANDIDATE_TGZ')) return false
+    if (trimmed.includes('split-supervisor-signal-probe.mjs')) return false
+    if (trimmed.includes('SPLIT_VITEST_TMP_BASE') || trimmed.includes('SPLIT_VITEST_CANDIDATE_TGZ')) return false
     return needles.some(needle => trimmed.includes(needle))
   })
   if (lingering.length > 0) {
@@ -173,17 +173,17 @@ if (mode === 'worker-kill' && at !== 'two-clients-ready' && at !== 'host-spawned
   fail(`--mode worker-kill requires --at two-clients-ready or host-spawned-before-ack`)
 }
 
-const tmpBase = requireEnv('S0_TMP_BASE')
-const candidate = requireEnv('S0_CANDIDATE_TGZ')
-if (!existsSync(tmpBase) || !existsSync(candidate)) fail('S0_TMP_BASE or S0_CANDIDATE_TGZ does not exist')
-const runId = `s0-probe-${String(process.pid)}-${String(Date.now())}`
+const tmpBase = requireEnv('SPLIT_VITEST_TMP_BASE')
+const candidate = requireEnv('SPLIT_VITEST_CANDIDATE_TGZ')
+if (!existsSync(tmpBase) || !existsSync(candidate)) fail('SPLIT_VITEST_TMP_BASE or SPLIT_VITEST_CANDIDATE_TGZ does not exist')
+const runId = `split-vitest-probe-${String(process.pid)}-${String(Date.now())}`
 const env = {
   ...process.env,
-  S0_TMP_BASE: tmpBase,
-  S0_CANDIDATE_TGZ: candidate,
-  S0_RUN_ID: runId,
+  SPLIT_VITEST_TMP_BASE: tmpBase,
+  SPLIT_VITEST_CANDIDATE_TGZ: candidate,
+  SPLIT_VITEST_RUN_ID: runId,
 }
-if (mode === 'worker-kill') env.S0_PROBE_WORKER_KILL_POINT = at
+if (mode === 'worker-kill') env.SPLIT_VITEST_WORKER_KILL_POINT = at
 
 const sentinel = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
   detached: true,
@@ -196,7 +196,7 @@ const child = spawn(process.execPath, [
   'node_modules/vitest/vitest.mjs',
   'run',
   '--config',
-  'vitest.s0.config.ts',
+  'vitest.split.config.ts',
   'test/integration/split-multi-client.vitest.ts',
   '-t',
   'first real Question',
@@ -258,7 +258,7 @@ try {
   checkNoLingeringPaths(tmpBase, receipt)
   if (Date.now() > deadline) fail('probe exceeded its single fixed post-trigger deadline')
   if (!pidAlive(sentinel.pid)) fail(`external sentinel PID ${String(sentinel.pid)} died; the probe touched an unrelated process`)
-  console.log(`S0_SIGNAL_PROBE_FACTS ${JSON.stringify({
+  console.log(`SPLIT_SUPERVISOR_SIGNAL_PROBE_FACTS ${JSON.stringify({
     mode,
     at,
     signal: mode === 'main-signal' ? signal : undefined,
@@ -273,7 +273,7 @@ try {
     sceneRoot: receipt.sceneRoot,
     sentinelPid: sentinel.pid,
   })}`)
-  console.log(`S0_SIGNAL_PROBE_PASS mode=${mode}${at === undefined ? '' : ` at=${at}`}${mode === 'main-signal' ? ` signal=${signal}` : ''} vitest_exit=${JSON.stringify(exit)} supervisor_phase=${receipt.phase}`)
+  console.log(`SPLIT_SUPERVISOR_SIGNAL_PROBE_PASS mode=${mode}${at === undefined ? '' : ` at=${at}`}${mode === 'main-signal' ? ` signal=${signal}` : ''} vitest_exit=${JSON.stringify(exit)} supervisor_phase=${receipt.phase}`)
 } finally {
   if (!childExited && child.exitCode === null && child.signalCode === null) {
     try { child.kill('SIGKILL') } catch { /* already gone */ }

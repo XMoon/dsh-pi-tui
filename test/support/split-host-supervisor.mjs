@@ -1,7 +1,7 @@
 /**
- * S0 parent-death supervisor.
+ * Split-process parent-death supervisor.
  *
- * This process is the ONE lifecycle owner for the S0 scene root, the isolated
+ * This process is the ONE lifecycle owner for the split-process scene root, the isolated
  * profile installation, and the real Split Host. The Vitest worker owns only
  * the tui-test Clients and business assertions; it never receives a Host
  * ChildProcess handle and never kills a Host by PID/PGID.
@@ -23,7 +23,7 @@ const HOST_READY_TIMEOUT_MS = 180_000
 const HOST_SHUTDOWN_GRACE_MS = 30_000
 const TERM_GRACE_MS = 3_000
 const KILL_GRACE_MS = 3_000
-const RUN_ID = process.env.S0_RUN_ID ?? `supervisor-${String(process.pid)}-${String(Date.now())}`
+const RUN_ID = process.env.SPLIT_VITEST_RUN_ID ?? `supervisor-${String(process.pid)}-${String(Date.now())}`
 
 let scene = undefined
 let host = undefined
@@ -102,7 +102,7 @@ const modulesReady = Promise.all([
 
 function validateTmpBase(raw) {
   if (typeof raw !== 'string' || raw === '' || !isAbsolute(raw)) {
-    throw new Error('INPUT_UNQUALIFIED: S0_TMP_BASE must be an absolute path')
+    throw new Error('INPUT_UNQUALIFIED: SPLIT_VITEST_TMP_BASE must be an absolute path')
   }
   let real
   let stats
@@ -110,16 +110,16 @@ function validateTmpBase(raw) {
     real = realpathSync(raw)
     stats = statSync(real)
   } catch (error) {
-    throw new Error(`INPUT_UNQUALIFIED: S0_TMP_BASE is not a readable existing directory: ${boundedError(error)}`)
+    throw new Error(`INPUT_UNQUALIFIED: SPLIT_VITEST_TMP_BASE is not a readable existing directory: ${boundedError(error)}`)
   }
-  if (!stats.isDirectory()) throw new Error(`INPUT_UNQUALIFIED: S0_TMP_BASE is not a directory: ${real}`)
+  if (!stats.isDirectory()) throw new Error(`INPUT_UNQUALIFIED: SPLIT_VITEST_TMP_BASE is not a directory: ${real}`)
   if (typeof process.getuid === 'function' && stats.uid !== process.getuid()) {
-    throw new Error(`INPUT_UNQUALIFIED: S0_TMP_BASE is not owned by this user: ${real}`)
+    throw new Error(`INPUT_UNQUALIFIED: SPLIT_VITEST_TMP_BASE is not owned by this user: ${real}`)
   }
-  if ((stats.mode & 0o777) !== 0o700) throw new Error(`INPUT_UNQUALIFIED: S0_TMP_BASE must have mode 0700: ${real}`)
+  if ((stats.mode & 0o777) !== 0o700) throw new Error(`INPUT_UNQUALIFIED: SPLIT_VITEST_TMP_BASE must have mode 0700: ${real}`)
   const rel = relative(process.cwd(), real)
   if (rel !== '..' && !rel.startsWith(`..${sep}`)) {
-    throw new Error(`INPUT_UNQUALIFIED: S0_TMP_BASE must be outside the checkout: ${real}`)
+    throw new Error(`INPUT_UNQUALIFIED: SPLIT_VITEST_TMP_BASE must be outside the checkout: ${real}`)
   }
   return real
 }
@@ -143,7 +143,7 @@ function getPgrp() {
 }
 
 function evidenceRoot(tmpBase) {
-  const root = join(tmpBase, 's0-resources')
+  const root = join(tmpBase, 'split-resources')
   mkdirSync(root, { recursive: true, mode: 0o700 })
   return root
 }

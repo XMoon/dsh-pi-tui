@@ -52,7 +52,7 @@ function assertSafePrefix(prefix: string): void {
 
 /**
  * Create one test-owned temp directory without binding removal to a
- * node:test TestContext. External lifecycle owners (for example the S0
+ * node:test TestContext. External lifecycle owners (for example the split-process
  * Supervisor process) use this same validated creation seam and own removal
  * themselves.
  */

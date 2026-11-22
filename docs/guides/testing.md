@@ -632,6 +632,16 @@ The lane is never part of `mise run test`, `pack:release`, the Split smoke or a
 Linux CI lane. Its L0 input/opt-in guard is
 `test/tooling/macos-cua-parity.test.mjs`.
 
+### Split-process Vitest E2E
+
+`mise exec -- pnpm test:split:vitest` runs the opt-in split-process E2E files under
+`test/integration/*.vitest.ts` through Vitest and the real tui-test terminal
+backend. It is deliberately not part of `mise run test`, `mise run check`, or the
+release gate. It requires `SPLIT_VITEST_TMP_BASE` (a private 0700 directory outside
+this checkout) and `SPLIT_VITEST_CANDIDATE_TGZ` (the exact built candidate tarball).
+The accompanying Supervisor probe is run separately with
+`mise exec -- node test/support/split-supervisor-signal-probe.mjs`.
+
 ### Isolated single-file and probe runs
 
 Prefer a repository-owned lane; it already owns and removes its disposable
