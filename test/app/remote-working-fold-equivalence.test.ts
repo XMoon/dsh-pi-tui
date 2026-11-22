@@ -32,6 +32,8 @@ import test from 'node:test'
 import type { AssistantLiveInput } from '../../src/runtime/assistant-stream-port.ts'
 import type { PresentationReadSnapshot } from '../../src/runtime/presentation-read-port.ts'
 import { createSessionPresentation, type SessionPresentationEvent } from '../../src/app/surface/session-presentation.ts'
+import { createSessionStartupHelpers } from '../../src/app/bootstrap/session-startup.ts'
+import type { RemoteApplicationSources } from '../../src/app/application-runtime.ts'
 import { displaySeamStub } from '../support/display-seam-stub.ts'
 import { toolSummaryKeys } from '../../src/tui/transcript/tool-presentation.ts'
 import type { Diag } from '../../src/runtime/process/diagnostics.ts'
@@ -321,4 +323,166 @@ test('seed identity: a rollover AFTER the reader fence still leaves the outcome 
     false,
     'the carried token is now STALE — a cache seeded from it must MISS on the next read',
   )
+})
+
+// ── The startup helper's live Turn fold (F1/F4) ─────────────────────────────
+
+const SILENT_DIAG = {
+  info: () => {}, warn: () => {}, error: () => {}, debug: () => {}, dispose: () => {},
+} as unknown as Diag
+
+interface StartupHelperHarness {
+  readonly helpers: ReturnType<typeof createSessionStartupHelpers>
+  setSession(sessionId: string | undefined): void
+  bumpGeneration(): void
+  setRunning(running: boolean | undefined): void
+  rolloverTransport(): void
+  restoreTransport(): void
+  reads(): number
+  transportToken(): unknown
+}
+
+/** The REAL startup helpers over the narrow Remote readbacks the composition
+ *  root injects (the same seam bootstrap.ts calls). */
+function startupHelperHarness(): StartupHelperHarness {
+  let sessionId: string | undefined = 's'
+  let ownerGeneration = 1
+  let running: boolean | undefined
+  const transport = { generation: 1, binding: {} }
+  let liveTransport: unknown = transport
+  let reads = 0
+  const sources = {
+    presentationReader: {
+      read: async () => {
+        reads += 1
+        return undefined
+      },
+    },
+    sessionFacts: {
+      captureTransportToken: () => transport,
+      isTransportTokenCurrent: (_sessionId: string, token: unknown) => Object.is(token, liveTransport),
+      running: () => running,
+    },
+  } as unknown as RemoteApplicationSources
+  const helpers = createSessionStartupHelpers({
+    isRemote: true,
+    pendingPresetId: () => undefined,
+    launchPresetId: () => undefined,
+    resolvePresetRoster: () => undefined,
+    warn: () => {},
+    diag: SILENT_DIAG,
+    composeDirect: async () => { throw new Error('the Remote branch never composes a Direct agent') },
+    currentAgent: () => undefined,
+    composedPresetRoster: () => undefined,
+    recordedPresetOf: () => undefined,
+    currentSessionId: () => sessionId,
+    sessionPresetProjectionOf: () => undefined,
+    sessionBlankOf: () => undefined,
+    generation: () => ownerGeneration,
+    remoteSources: sources,
+  })
+  return {
+    helpers,
+    setSession: (next) => { sessionId = next },
+    bumpGeneration: () => { ownerGeneration += 1 },
+    setRunning: (next) => { running = next },
+    rolloverTransport: () => { liveTransport = { generation: 2, binding: {} } },
+    restoreTransport: () => { liveTransport = transport },
+    reads: () => reads,
+    transportToken: () => transport,
+  }
+}
+
+test('C1: the settle answer comes from the proven fold without any window read', async () => {
+  const h = startupHelperHarness()
+  h.helpers.seedWorkingFold({
+    generation: 1,
+    sessionId: 's',
+    transportToken: h.transportToken(),
+    fold: true,
+    proven: true,
+  })
+  assert.equal(h.helpers.currentWorkingFromLog(), true)
+  // Let every microtask/detached task the deleted background refresh used to
+  // schedule run: the settle path must not read the window at all.
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(h.reads(), 0, 'a matched compaction settle must not start a full-window read')
+})
+
+test('C1: a durable live turn boundary advances the proven fold synchronously', () => {
+  const h = startupHelperHarness()
+  h.helpers.seedWorkingFold({
+    generation: 1,
+    sessionId: 's',
+    transportToken: h.transportToken(),
+    fold: true,
+    proven: true,
+  })
+  h.setRunning(true)
+  h.helpers.observeWorkingTurnBoundary('s', { type: 'turn/end' })
+  assert.equal(h.helpers.currentWorkingFromLog(), false,
+    'the live turn boundary outranks the official running fallback (never a false Working)')
+  h.helpers.observeWorkingTurnBoundary('s', { type: 'turn/start' })
+  h.setRunning(false)
+  assert.equal(h.helpers.currentWorkingFromLog(), true,
+    'the later live start outranks a lagging official running read (never a false Idle)')
+})
+
+test('C1: non-turn events never touch the working fold', () => {
+  const h = startupHelperHarness()
+  h.helpers.seedWorkingFold({
+    generation: 1,
+    sessionId: 's',
+    transportToken: h.transportToken(),
+    fold: false,
+    proven: true,
+  })
+  h.setRunning(true)
+  h.helpers.observeWorkingTurnBoundary('s', { type: 'compaction/start' })
+  assert.equal(h.helpers.currentWorkingFromLog(), false, 'a non-turn event leaves the proven fold untouched')
+})
+
+test('C1: an unproven window keeps the official running fallback', () => {
+  const h = startupHelperHarness()
+  h.helpers.seedWorkingFold({
+    generation: 1,
+    sessionId: 's',
+    transportToken: h.transportToken(),
+    fold: true,
+    proven: false,
+  })
+  h.setRunning(false)
+  assert.equal(h.helpers.currentWorkingFromLog(), false)
+  h.setRunning(true)
+  assert.equal(h.helpers.currentWorkingFromLog(), true)
+  h.setRunning(undefined)
+  assert.equal(h.helpers.currentWorkingFromLog(), false, 'an unavailable running read degrades to false')
+})
+
+test('C1: live boundaries are fenced by session, owner generation and transport identity', () => {
+  const h = startupHelperHarness()
+  h.setRunning(false)
+  h.helpers.observeWorkingTurnBoundary('other', { type: 'turn/start' })
+  assert.equal(h.helpers.currentWorkingFromLog(), false, 'a foreign session boundary is ignored')
+
+  h.helpers.observeWorkingTurnBoundary('s', { type: 'turn/start' })
+  assert.equal(h.helpers.currentWorkingFromLog(), true, 'the current session boundary establishes proof')
+  h.bumpGeneration()
+  assert.equal(h.helpers.currentWorkingFromLog(), false,
+    'an owner generation bump voids the cached fold (fallback answers)')
+  h.setRunning(true)
+  assert.equal(h.helpers.currentWorkingFromLog(), true)
+
+  // A Connection/binding rollover: the captured token no longer matches, so a
+  // live boundary delivered under the lost identity must NOT be written as a
+  // proven fold — the running fallback stays the answer.
+  h.rolloverTransport()
+  h.helpers.observeWorkingTurnBoundary('s', { type: 'turn/end' })
+  assert.equal(h.helpers.currentWorkingFromLog(), true,
+    'a boundary observed under a rolled-over transport is not proven')
+  h.restoreTransport()
+  h.helpers.observeWorkingTurnBoundary('s', { type: 'turn/end' })
+  assert.equal(h.helpers.currentWorkingFromLog(), false,
+    'under a current transport identity the live boundary proves the fold again')
 })

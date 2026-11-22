@@ -11,8 +11,8 @@
  *
  * The one piece of state it does own is the Remote compaction working-fold
  * cache slot (the §13 composition read's proven-window memo), which the
- * composition root seeds from the cold hydrate and drops on a window
- * replacement — exactly as the inline cache was seeded/dropped before.
+ * composition root seeds from the cold hydrate, advances from later durable
+ * live turn boundaries, and drops on a window replacement.
  *
  * @module @xmoon76/dsh-pi-tui/app/bootstrap/session-startup
  */
@@ -20,7 +20,6 @@
 import type { DirectAgentComposition } from '../direct/composition.ts'
 import type { RemoteApplicationSources } from '../application-runtime.ts'
 import type { SessionHandle } from '../../runtime/session-lifecycle-port.ts'
-import { runDetached } from '../../runtime/process/tasks.ts'
 import { workingFromLog } from '../surface/compaction-presentation.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
@@ -53,6 +52,10 @@ export interface WorkingFoldEntry {
   sessionId: string
   transportToken: unknown
   fold: boolean
+  /** The current TAIL turn boundary is proven: a complete window proves it at
+   *  a hydrate/re-fold, and a durable `turn/start`/`turn/end` delivered
+   *  CONTINUOUSLY by the live ingress proves it from then on. A truncated
+   *  window alone does not. */
   proven: boolean
 }
 
@@ -86,6 +89,14 @@ export interface SessionStartupHelpers {
   sessionBlank(): boolean | undefined
   /** The compaction settle's log-end working read. */
   currentWorkingFromLog(): boolean
+  /**
+   * Advance the Discardable Remote turn-working fold from ONE durable live turn
+   * boundary (`turn/start`/`turn/end`; every other event is a no-op). The
+   * caller must pass only events the Remote ingress accepted for the current
+   * binding; this body re-checks the owner + transport fences before writing.
+   * It never commits display facts: the router's own event handling does that.
+   */
+  observeWorkingTurnBoundary(sessionId: string, event: { readonly type: string }): void
   /** Seed the Remote working-fold cache from a PROVEN cold hydrate. */
   seedWorkingFold(entry: WorkingFoldEntry): void
   /** Drop the proven-window memo (window replacement/reconnect). */
@@ -219,57 +230,56 @@ export function createSessionStartupHelpers(deps: SessionStartupDeps): SessionSt
   const currentWorkingFromLog = (): boolean => {
     const agent = currentAgent()
     if (agent !== undefined) return workingFromLog(agent.session.snapshotEvents())
-    // Remote branch: the working fact folds from the CURRENT official
-    // window; a bounded window that cannot prove a boundary falls back to
-    // the exact binding's official `running` bit (never a guess).
+    // Remote branch: the working fact is the CURRENT proven turn-boundary fold
+    // (cold hydrate, window re-fold or a later durable live boundary). A
+    // window that cannot prove a boundary falls back to the exact binding's
+    // official `running` bit (never a guess, never the rendered rows), and
+    // that fallback is presentation-only — never an Exit authority.
     if (remoteSources === undefined) return false
     const sessionId = currentSessionId()
     if (sessionId === undefined) return false
-    // The CURRENT official window is the working-fold authority; a window
-    // that cannot prove a boundary falls back to the exact binding's
-    // official `running` bit (never a guess, never the rendered rows).
-    // The refresh is detached (failure keeps the last-known fold; the
-    // synchronous `running` read below remains the immediate answer).
-    // The proof hierarchy matches the presentation owner's cold-hydrate
-    // contract (test/remote-working-fold-equivalence.test.ts): a COMPLETE
-    // window (hasMore=false, including the EMPTY window) ALWAYS prefers
-    // the fold - only a TRUNCATED window defers to the official running
-    // bit. The cache is keyed by ownership generation + session id, so a
-    // stale fold never crosses an owner change; the async refresh commits
-    // only while the same generation/session still owns the surface.
-    const ownerGeneration = generation()
-    const transportToken = remoteSources.sessionFacts.captureTransportToken(sessionId)
     const cached = remoteWorkingFoldFor
     // EVERY cache read validates BOTH identities: the owner (generation +
     // session) AND the transport token the entry was captured under (a
     // same-owner Connection/binding rollover voids the old window's proof).
-    const cacheValid = cached !== undefined
+    const cacheCurrent = cached !== undefined
+      && cached.generation === generation()
+      && cached.sessionId === sessionId
+      && remoteSources.sessionFacts.isTransportTokenCurrent(sessionId, cached.transportToken)
+    if (cacheCurrent && cached.proven) return cached.fold
+    return remoteSources.sessionFacts.running(sessionId) ?? false
+  }
+
+  /** Advance the discardable Remote turn-working fold from ONE durable live
+   *  boundary. The ingress owns the delivery sequence/binding fence; this body
+   *  only accepts a boundary for the CURRENT owner and a CURRENT official
+   *  transport identity. A lost binding never becomes a "proven" fold. */
+  const observeWorkingTurnBoundary = (sessionId: string, event: { readonly type: string }): void => {
+    if (event.type !== 'turn/start' && event.type !== 'turn/end') return
+    if (remoteSources === undefined) return
+    if (currentSessionId() !== sessionId) return
+    const ownerGeneration = generation()
+    const cached = remoteWorkingFoldFor
+    const cacheCurrent = cached !== undefined
       && cached.generation === ownerGeneration
       && cached.sessionId === sessionId
       && remoteSources.sessionFacts.isTransportTokenCurrent(sessionId, cached.transportToken)
-    const provenForThisOwner = cacheValid && cached!.proven
-    runDetached('remote working fold', async () => {
-      const snapshot = await remoteSources.presentationReader.read(sessionId)
-      if (snapshot === undefined) return
-      // Fence the cache commit: a settled read for a replaced owner must
-      // not mutate the shared slot. The fence covers BOTH identities: the
-      // ownership generation AND the Remote transport token (a
-      // Connection/binding rollover without a TUI owner commit invalidates
-      // the pending answer too).
-      if (generation() !== ownerGeneration || currentSessionId() !== sessionId) return
+    let transportToken: unknown
+    if (cacheCurrent) {
+      // A still-current cache keeps the token its proof was captured under;
+      // handing down a live boundary must not re-stamp it.
+      transportToken = cached.transportToken
+    } else {
+      transportToken = remoteSources.sessionFacts.captureTransportToken(sessionId)
       if (!remoteSources.sessionFacts.isTransportTokenCurrent(sessionId, transportToken)) return
-      remoteWorkingFoldFor = {
-        generation: ownerGeneration,
-        sessionId,
-        transportToken,
-        fold: !snapshot.hasMore
-          ? workingFromLog(snapshot.durableEvents)
-          : (remoteSources.sessionFacts.running(sessionId) ?? false),
-        proven: !snapshot.hasMore,
-      }
-    }, { diag, sessionId: () => sessionId })
-    if (provenForThisOwner) return cached!.fold
-    return remoteSources.sessionFacts.running(sessionId) ?? (cacheValid && cached!.proven ? cached!.fold : false)
+    }
+    remoteWorkingFoldFor = {
+      generation: ownerGeneration,
+      sessionId,
+      transportToken,
+      fold: event.type === 'turn/start',
+      proven: true,
+    }
   }
 
   return {
@@ -277,6 +287,7 @@ export function createSessionStartupHelpers(deps: SessionStartupDeps): SessionSt
     currentPreset,
     sessionBlank,
     currentWorkingFromLog,
+    observeWorkingTurnBoundary,
     seedWorkingFold: (entry) => { remoteWorkingFoldFor = entry },
     invalidateWorkingFold: () => { remoteWorkingFoldFor = undefined },
   }
