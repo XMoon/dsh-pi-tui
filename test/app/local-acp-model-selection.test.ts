@@ -64,29 +64,33 @@ class FakeAgent implements AcpModelAgent {
   maintenanceSignal: AbortSignal | undefined
   /** A test-only hook executing synchronously as the maintenance phase is claimed. */
   beforeMaintenance: (() => void) | undefined
-  private selection: AcpModelSelection | undefined
+  /** The effective route inherited from AgentOptions when no durable selection exists. */
+  private fallback: AcpModelSelection | undefined
+  /** The official durable model/selection, absent for a fallback-only Session. */
+  private recorded: AcpModelSelection | undefined
 
-  constructor(id: string, selection?: AcpModelSelection) {
+  constructor(id: string, selection?: AcpModelSelection, recorded = false) {
     this.id = id
-    this.selection = copySelection(selection)
+    this.fallback = copySelection(selection)
+    this.recorded = recorded ? copySelection(selection) : undefined
   }
 
   get model(): { current(): AcpModelSelection | undefined; select(selection: AcpModelSelection): void } {
     return {
-      current: () => copySelection(this.selection),
+      current: () => copySelection(this.recorded ?? this.fallback),
       select: selection => { this.select(selection) },
     }
   }
 
   currentSelection(): AcpModelSelection | undefined {
-    return copySelection(this.selection)
+    return copySelection(this.recorded ?? this.fallback)
   }
 
-  /** The same no-op-on-equal semantics as the official AgentModel.select. */
+  /** Official-style append: only a matching DURABLE selection is a no-op. */
   select(selection: AcpModelSelection): void {
     const detached = copySelection(selection)
-    if (sameSelection(this.selection, detached)) return
-    this.selection = detached
+    if (this.recorded !== undefined && sameSelection(this.recorded, detached)) return
+    this.recorded = detached
     this.appends.push(detached as AcpModelSelection)
   }
 
@@ -192,7 +196,7 @@ function catalogOf(...groups: Array<{
   }
 }
 
-function baseHost(selection: AcpModelSelection = { provider: 'p1', model: 'a' }): { host: FakeHost; agent: FakeAgent } {
+function baseHost(selection: AcpModelSelection = { provider: 'p1', model: 'a' }, recorded = false): { host: FakeHost; agent: FakeAgent } {
   const host = new FakeHost()
   host.catalog = catalogOf(
     { id: 'p1', name: 'Provider 1', models: [
@@ -206,7 +210,7 @@ function baseHost(selection: AcpModelSelection = { provider: 'p1', model: 'a' })
     ['p1', [{ id: 'a', name: 'Model A' }, { id: 'b', name: 'Model B' }]],
     ['p2', [{ id: 'c', name: 'Model C' }]],
   ])
-  const agent = new FakeAgent('S1', selection)
+  const agent = new FakeAgent('S1', selection, recorded)
   host.seed(agent)
   return { host, agent }
 }
@@ -561,8 +565,25 @@ test('a prompt flight admitted during validation rejects VIEW_BUSY at the last m
   assert.equal(host.defaultSaveCalls, 0)
 })
 
-test('selecting the same model keeps its explicit effort; an identical effort is a no-op', async () => {
-  const { host, agent } = baseHost({ provider: 'p1', model: 'a', reasoningEffort: 'high' })
+test('the first explicit selection of a fallback route creates a durable model selection', async () => {
+  const { host, agent } = baseHost({ provider: 'p1', model: 'a' })
+  const service = new AcpSessionModelService(host)
+  const session = host.sessions.get('S1') as object
+
+  await service.selectSessionOnly(
+    agent,
+    session,
+    request('model', modelValue('p1', 'a')),
+    OK_SIGNAL,
+    ALWAYS_CURRENT,
+  )
+  assert.deepEqual(agent.appends, [{ provider: 'p1', model: 'a' }],
+    'a fallback-only current route is not a durable recorded selection')
+  assert.equal(host.defaultSaveCalls, 0)
+})
+
+test('a recorded same model keeps its explicit effort; an identical effort is a no-op', async () => {
+  const { host, agent } = baseHost({ provider: 'p1', model: 'a', reasoningEffort: 'high' }, true)
   const service = new AcpSessionModelService(host)
   const session = host.sessions.get('S1') as object
 
