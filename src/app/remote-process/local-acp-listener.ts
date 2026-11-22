@@ -81,6 +81,14 @@ const MAX_PENDING_CONTROL_REQUESTS = 4
  * capacity policy, not an ACP v1 limit.
  */
 const MAX_ACP_VIEWS_PER_CONNECTION = 8
+/**
+ * `session/close` is terminal work, not an ordinary lifecycle control: a
+ * close must remain reachable while the new/resume/config lane is occupied by
+ * legitimate Host awaits. At most one close per View is useful; the bound is
+ * the number of View slots, and an excess close is refused without destroying
+ * unrelated Views.
+ */
+const MAX_PENDING_CLOSE_REQUESTS = MAX_ACP_VIEWS_PER_CONNECTION
 /** Bytes reserved per image block for JSON metadata around its encoded data. */
 const IMAGE_METADATA_BYTES = 65_536
 /** Bytes reserved for the JSON-RPC envelope and its trailing newline. */
@@ -309,6 +317,7 @@ interface ConnectionState {
   initialized: boolean
   pendingRequests: number
   pendingControlRequests: number
+  pendingCloseRequests: number
   closed: boolean
   /** Whether THIS connection negotiated inline image prompts during its initialize. */
   imageEnabled: boolean
@@ -664,34 +673,43 @@ function buildAgentApp(
   const app = agent({ name: AGENT_NAME })
   let initializeComplete = false
 
-  const beginRequest = (control = false): void => {
-    if (control) {
-      state.pendingControlRequests += 1
-      if (state.pendingControlRequests > MAX_PENDING_CONTROL_REQUESTS) {
-        state.pendingControlRequests -= 1
-        fail('LOCAL_ACP_TOO_MANY_PENDING_REQUESTS')
-        throw new RequestError(
-          -32044,
-          'too many outstanding ACP control requests on this connection',
-          { code: 'LOCAL_ACP_TOO_MANY_PENDING_REQUESTS' },
-        )
-      }
-      return
-    }
-    state.pendingRequests += 1
-    if (state.pendingRequests > MAX_PENDING_REQUESTS) {
-      state.pendingRequests -= 1
-      fail('LOCAL_ACP_TOO_MANY_PENDING_REQUESTS')
-      throw new RequestError(
-        -32044,
-        'too many outstanding ACP requests on this connection',
-        { code: 'LOCAL_ACP_TOO_MANY_PENDING_REQUESTS' },
-      )
-    }
+  type RequestAdmission = 'ordinary' | 'control' | 'close'
+  const beginRequest = (mode: RequestAdmission = 'ordinary'): void => {
+    const count = mode === 'close'
+      ? state.pendingCloseRequests
+      : mode === 'control'
+        ? state.pendingControlRequests
+        : state.pendingRequests
+    const limit = mode === 'close'
+      ? MAX_PENDING_CLOSE_REQUESTS
+      : mode === 'control'
+        ? MAX_PENDING_CONTROL_REQUESTS
+        : MAX_PENDING_REQUESTS
+    if (mode === 'close') state.pendingCloseRequests += 1
+    else if (mode === 'control') state.pendingControlRequests += 1
+    else state.pendingRequests += 1
+    if (count + 1 <= limit) return
+    // A control/close refusal is per-request backpressure. It must not destroy
+    // the socket or unrelated Views; only the ordinary prompt/input lane keeps
+    // the connection-wide abuse fail-closed.
+    if (mode === 'close') state.pendingCloseRequests -= 1
+    else if (mode === 'control') state.pendingControlRequests -= 1
+    else state.pendingRequests -= 1
+    if (mode === 'ordinary') fail('LOCAL_ACP_TOO_MANY_PENDING_REQUESTS')
+    throw new RequestError(
+      -32044,
+      mode === 'close'
+        ? 'too many outstanding ACP close requests on this connection'
+        : mode === 'control'
+          ? 'too many outstanding ACP control requests on this connection'
+          : 'too many outstanding ACP requests on this connection',
+      { code: 'LOCAL_ACP_TOO_MANY_PENDING_REQUESTS' },
+    )
   }
 
-  const endRequest = (control = false): void => {
-    if (control) state.pendingControlRequests -= 1
+  const endRequest = (mode: RequestAdmission = 'ordinary'): void => {
+    if (mode === 'close') state.pendingCloseRequests -= 1
+    else if (mode === 'control') state.pendingControlRequests -= 1
     else state.pendingRequests -= 1
   }
 
@@ -747,11 +765,11 @@ function buildAgentApp(
   })
 
   const rejectSessionOperation = (_request: { params: unknown }): never => {
-    beginRequest(true)
+    beginRequest('control')
     try {
       rejectSessionNotReady()
     } finally {
-      endRequest(true)
+      endRequest('control')
     }
   }
   // Register with a permissive params parser for the STILL-UNSUPPORTED methods:
@@ -821,7 +839,7 @@ function buildAgentApp(
         })
       }
     app.onRequest(methods.agent.session.new, async ({ params, client, signal }) => {
-      beginRequest(true)
+      beginRequest('control')
       let view: ConnectionViewState | undefined
       try {
         requireInitialized()
@@ -833,11 +851,11 @@ function buildAgentApp(
         throw asRequestError(error)
       } finally {
         if (view !== undefined) releaseIdleViewSlot(slots, views, view)
-        endRequest(true)
+        endRequest('control')
       }
     })
     app.onRequest(methods.agent.session.resume, async ({ params, client, signal }) => {
-      beginRequest(true)
+      beginRequest('control')
       let view: ConnectionViewState | undefined
       try {
         requireInitialized()
@@ -858,11 +876,11 @@ function buildAgentApp(
         throw asRequestError(error)
       } finally {
         if (view !== undefined) releaseIdleViewSlot(slots, views, view)
-        endRequest(true)
+        endRequest('control')
       }
     })
     app.onRequest(methods.agent.session.close, async ({ params }) => {
-      beginRequest(true)
+      beginRequest('close')
       try {
         requireInitialized()
         const view = routeOwnedView(slots, views, params.sessionId)
@@ -879,7 +897,7 @@ function buildAgentApp(
       } catch (error) {
         throw asRequestError(error)
       } finally {
-        endRequest(true)
+        endRequest('close')
       }
     })
     // PO-3B: ONE text prompt per attached View. The request's own SDK context
@@ -911,7 +929,7 @@ function buildAgentApp(
     // request against the pinned v1 schema); the View applies the exact-claim,
     // View-idle and Agent-idle admission before any Session write.
     app.onRequest(methods.agent.session.setConfigOption, async ({ params, signal }) => {
-      beginRequest(true)
+      beginRequest('control')
       try {
         requireInitialized()
         const view = routeOwnedView(slots, views, params.sessionId)
@@ -921,7 +939,7 @@ function buildAgentApp(
       } catch (error) {
         throw asRequestError(error)
       } finally {
-        endRequest(true)
+        endRequest('control')
       }
     })
   } else {
@@ -964,6 +982,7 @@ function serveConnection(socket: Socket, context: ListenerContext): void {
     initialized: false,
     pendingRequests: 0,
     pendingControlRequests: 0,
+    pendingCloseRequests: 0,
     closed: false,
     imageEnabled: false,
     inputBounds: TEXT_ONLY_BOUNDS,

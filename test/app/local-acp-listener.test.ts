@@ -1643,6 +1643,61 @@ test('eight open prompt flights keep legal close and ninth-View rejection reacha
   }
 })
 
+test('four slow lifecycle controls cannot make a legal close destroy the socket', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess()
+  fake.seed('session-close-a', '/host/close-a')
+  for (let index = 0; index < 4; index += 1) fake.seed(`held-${String(index)}`, `/host/held-${String(index)}`)
+  const gates = Array.from({ length: 4 }, () => Promise.withResolvers<void>())
+  let createIndex = 0
+  fake.access.createSession = async () => {
+    const index = createIndex
+    createIndex += 1
+    await gates[index]?.promise
+    return { kind: 'created' as const, sessionId: `held-${String(index)}` }
+  }
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-close-a', cwd: '/host/close-a' } })
+    assert.deepEqual(((await client.next()) as { result?: unknown }).result, {})
+    for (let index = 0; index < 4; index += 1) {
+      client.send({ jsonrpc: '2.0', id: 10 + index, method: 'session/new', params: { cwd: `/host/held-${String(index)}`, mcpServers: [] } })
+    }
+    await waitForFact(() => createIndex === 4 ? true : undefined, 'four held Host creates', 10_000)
+    client.send({ jsonrpc: '2.0', id: 30, method: 'session/new', params: { cwd: '/host/overload', mcpServers: [] } })
+    const overload = (await client.next()) as { id?: number; error?: { data?: { code?: string } } }
+    assert.equal(overload.id, 30)
+    assert.equal(overload.error?.data?.code, 'LOCAL_ACP_TOO_MANY_PENDING_REQUESTS')
+    assert.equal(createIndex, 4, 'the overload must not reach Host create')
+    client.send({ jsonrpc: '2.0', id: 20, method: 'session/close', params: { sessionId: 'session-close-a' } })
+    const closed = (await client.next()) as { id?: number; result?: unknown; error?: { data?: { code?: string } } }
+    assert.equal(closed.id, 20)
+    assert.deepEqual(closed.result, {}, `a legal close must not be blocked by four lifecycle controls: ${JSON.stringify(closed.error)}`)
+    client.send({ jsonrpc: '2.0', id: 21, method: 'session/close', params: { sessionId: 'unknown-close' } })
+    const unknown = (await client.next()) as { id?: number; result?: unknown; error?: unknown }
+    assert.equal(unknown.id, 21)
+    assert.deepEqual(unknown.result, {}, 'the physical socket remains alive after the held-control close')
+    for (const gate of gates) gate.resolve()
+    const created = new Map<number, string>()
+    for (let remaining = 4; remaining > 0;) {
+      const message = (await client.next()) as { id?: number; result?: { sessionId?: string }; error?: unknown }
+      if (message.id === undefined) continue
+      if (message.id >= 10 && message.id <= 13) {
+        assert.equal(typeof message.result?.sessionId, 'string')
+        created.set(message.id, message.result?.sessionId as string)
+        remaining -= 1
+      }
+    }
+    assert.deepEqual([...created.values()].sort(), ['held-0', 'held-1', 'held-2', 'held-3'])
+  } finally {
+    client.close()
+  }
+})
+
 test('Off releases every View slot on the shared registry and a new bind can resume them', async t => {
   const { scope } = newScope(t)
   const fake = makeFakeAccess()
