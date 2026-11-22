@@ -287,7 +287,27 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   owner's one debounced Host search generation. `Enter` in the editor only moves
   focus to the first real result; a second `Enter` from the results list is the
   ONE activation: it returns when that result is the Current Session and is the
-  guarded Resume otherwise. Results are never re-grouped by Activity.
+  guarded Resume otherwise. Results are never re-grouped by Activity. The ONE
+  fixed search context row keeps `Search all workspaces` on the left and states
+  the current search health on the right in this order: `Search failed` for a
+  real provider failure (`Metadata only` is the normal response to an
+  undefined capability and never claims that the user disabled an index),
+  `Searching content…` while the debounced Host page is pending, then
+  `Refine for more` when that page reports more, otherwise `Esc back`. Routine
+  loading, metadata-only and has-more health never inserts or removes a
+  physical row; only a real failure keeps its own sanitized reason row.
+- **Search facts are projected from the current snapshot.** A zero-result
+  search paints ONE inert line whose wording matches the current stage:
+  `Loading sessions…`, `Session list unavailable`, `No readable sessions`,
+  `Type to search sessions and messages`, `Searching message content…`,
+  `No metadata matches` for the metadata-only/error boundary, or
+  `No matching sessions` only after a completed page. That line is never a
+  result row and never carries a hit region. A Host excerpt outranks age and
+  cwd on a content hit, keeps the complete `Metadata`/`Content`/`Both` source
+  word and stays one physical row; the wide read-only preview of the typed
+  Search hit adds `Match: <source>` and, when present, up to three Host excerpt
+  lines. Excerpts are display-only: selecting a result never reads, opens,
+  retains or writes a Session.
 - **Current row Enter returns.** A listed, painted Current Session row's `Enter`
   (Browse, the Search-results second `Enter`, or Peek `Enter`) closes the Browser
   and returns to the Session that opened it: no Resume intent and no Session

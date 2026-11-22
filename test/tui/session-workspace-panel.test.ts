@@ -645,13 +645,12 @@ test('a search fact that is also the app notice paints exactly once in the same 
   )
 
   h.handle.setSnapshot(snapshot({ query: 'needle', searchState: 'ready', hasMore: true, searchResults: [] }))
-  h.app.notify('More content matches exist — refine the search.')
   await h.paint()
-  assert.equal(
-    h.view().split('\n').filter(line => line.includes('More content matches exist — refine the search.')).length,
-    1,
-    'the hasMore fact is painted once, never as status + notice',
-  )
+  const hasMoreView = h.view()
+  assert.ok(hasMoreView.includes('Refine for more'), `the hasMore fact lives in the fixed context row:\n${hasMoreView}`)
+  assert.ok(!hasMoreView.includes('More content matches exist — refine the search.'),
+    'the retired transient hasMore notice is gone')
+  assert.equal(hasMoreView.split('\n').filter(line => line.includes('Refine for more')).length, 1)
 })
 
 test('the session browser error status defers clipping to the live workspace width', async () => {
@@ -730,6 +729,163 @@ test('a long projection error also clips at the painted workspace width', async 
   for (const painted of h.vt.getViewport()) {
     assert.ok(visibleWidth(painted) <= 44, `a painted compact row overflows: ${JSON.stringify(painted)}`)
   }
+})
+
+test('routine search health repaints the fixed context row without moving the body', async () => {
+  const h = harness({ columns: 80, rows: 24, initialMode: 'search' })
+  const results = [
+    { row: row(CURRENT, 3_000, { title: 'Incident notes' }), source: 'Metadata' as const },
+    { row: row(OTHER, 2_000, { title: 'Incident analysis' }), source: 'Metadata' as const },
+  ]
+  h.handle.setSnapshot(snapshot({ query: 'incident', searchState: 'loading', searchResults: results }), 'incident')
+  await h.paint()
+  let frame = panelFrame(h)
+  const stableRows = {
+    input: lineIndexOf(frame, 'Search: incident'),
+    firstResult: lineIndexOf(frame, 'Incident notes'),
+    footer: lineIndexOf(frame, 'Back [Esc]'),
+  }
+  assert.ok(frame[1]!.includes('Searching content…'), `loading health lives in the context row:\n${frame.join('\n')}`)
+  assert.ok(!frame.some(line => line.includes('Searching sessions…')), 'no routine loading status row is added')
+
+  h.handle.setSnapshot(snapshot({ query: 'incident', searchState: 'unavailable', searchResults: results }))
+  await h.paint()
+  frame = panelFrame(h)
+  assert.ok(frame[1]!.includes('Metadata only'), `unavailable health lives in the context row:\n${frame.join('\n')}`)
+  assert.deepEqual({
+    input: lineIndexOf(frame, 'Search: incident'),
+    firstResult: lineIndexOf(frame, 'Incident notes'),
+    footer: lineIndexOf(frame, 'Back [Esc]'),
+  }, stableRows, 'a routine health update never moves the input, first result or footer')
+
+  h.handle.setSnapshot(snapshot({ query: 'incident', searchState: 'ready', searchResults: results }))
+  await h.paint()
+  frame = panelFrame(h)
+  assert.ok(frame[1]!.includes('Esc back'), `ready health returns the plain context row:\n${frame.join('\n')}`)
+  assert.deepEqual({
+    input: lineIndexOf(frame, 'Search: incident'),
+    firstResult: lineIndexOf(frame, 'Incident notes'),
+    footer: lineIndexOf(frame, 'Back [Esc]'),
+  }, stableRows, 'ready never reflows the result body')
+
+  // A REAL provider failure is the one legal extra physical row.
+  h.handle.setSnapshot(snapshot({ query: 'incident', searchState: 'error', searchError: 'boom', searchResults: results }))
+  await h.paint()
+  frame = panelFrame(h)
+  assert.ok(frame[1]!.includes('Search failed'), `the error is also stated in the context row:\n${frame.join('\n')}`)
+  assert.equal(lineIndexOf(frame, 'Incident notes'), stableRows.firstResult + 1,
+    'only the real diagnostic row moves the body')
+})
+
+test('an empty search paints one truthful inert placeholder for every stage', async () => {
+  const h = harness({ columns: 80, rows: 24, initialMode: 'search' })
+  const setEmpty = async (overrides: Partial<SessionBrowserReadSnapshot>): Promise<string> => {
+    h.handle.setSnapshot(snapshot({ query: 'needle', searchState: 'ready', searchResults: [], ...overrides }), 'needle')
+    await h.paint()
+    return h.view()
+  }
+
+  let view = await setEmpty({ searchState: 'loading' })
+  assert.ok(view.includes('Searching message content…'), `a pending content search never claims zero:\n${view}`)
+  assert.ok(!view.includes('No matching sessions'), 'a pending search never asserts a final no-match')
+
+  view = await setEmpty({ searchState: 'ready' })
+  assert.ok(view.includes('No matching sessions'), `a completed search states its bounded no-match:\n${view}`)
+  const emptyRow = lineIndexOf(panelFrame(h), 'No matching sessions')
+  await clickCell(h, 10, emptyRow)
+  assert.deepEqual(h.resumes, [], 'the empty state is inert, never a result target')
+  assert.equal(h.closes, 0)
+
+  view = await setEmpty({ searchState: 'unavailable' })
+  assert.ok(view.includes('No metadata matches'), `unavailable only claims the metadata boundary:\n${view}`)
+  assert.ok(!view.includes('No matching sessions'), 'unavailable never claims no Session message matched')
+
+  view = await setEmpty({ searchState: 'error', searchError: 'fts boom' })
+  assert.ok(view.includes('No metadata matches'), `an error still preserves the metadata-only result fact:\n${view}`)
+  assert.ok(view.includes('Search failed: fts boom'), 'the real error reason keeps its own row')
+
+  view = await setEmpty({ listState: 'loading', searchResults: [] })
+  assert.ok(view.includes('Loading sessions…'), `a loading roster never claims a completed search:\n${view}`)
+  assert.ok(!view.includes('No matching sessions'), 'a loading roster never claims zero Sessions')
+
+  view = await setEmpty({ listState: 'unavailable', searchResults: [] })
+  assert.ok(view.includes('Session list unavailable'), `an unavailable roster is stated as such:\n${view}`)
+  assert.ok(!view.includes('No matching sessions'), 'an unavailable roster never claims zero matches')
+
+  view = await setEmpty({ listState: 'empty', rows: [], searchResults: [] })
+  assert.ok(view.includes('No readable sessions'), `an empty roster states the readable-session fact:\n${view}`)
+
+  h.dispose()
+  const idle = harness({ columns: 80, rows: 24, initialMode: 'search' })
+  idle.handle.setSnapshot(snapshot({ query: '', searchState: 'idle', searchResults: [] }))
+  await idle.paint()
+  assert.ok(idle.view().includes('Type to search sessions and messages'),
+    `an unstarted query invites typing instead of claiming a result:\n${idle.view()}`)
+  idle.dispose()
+})
+
+test('content hits keep the full source and a readable snippet ahead of age and cwd', async () => {
+  const hostile = '\x1b]0;PWNED\x07\x1b[31m'
+  const h = harness({ columns: 200, rows: 50, initialMode: 'search' })
+  const cwd = '/very/long/secret/workspace/path'
+  const alpha = row(CURRENT, 3_000, { title: '发布 🚀 incident 记录', cwd })
+  const beta = row(OTHER, 2_000, { title: 'Other incident', cwd: '/other' })
+  h.handle.setSnapshot(snapshot({
+    rows: [alpha, beta],
+    query: 'incident',
+    searchState: 'ready',
+    searchResults: [
+      { row: alpha, source: 'Both', snippet: `${hostile}中文摘要🚀 first visible excerpt that is long enough to truncate safely` },
+      { row: beta, source: 'Content', snippet: 'another visible excerpt with its own words' },
+    ],
+  }), 'incident')
+  await h.paint()
+  for (const [columns, rows] of [[200, 50], [120, 40], [100, 40], [80, 24], [72, 24], [44, 20]] as const) {
+    h.vt.resize(columns, rows)
+    await h.paint()
+    const frame = panelFrame(h)
+    const resultLine = frame.find(line => line.includes(shortSessionId(CURRENT)) && line.includes('Both'))
+    assert.ok(resultLine !== undefined, `${columns}x${rows}: the content hit paints its full source:\n${frame.join('\n')}`)
+    assert.ok(resultLine.includes('…中文'), `${columns}x${rows}: a readable CJK excerpt prefix leads the row:\n${resultLine}`)
+    assert.ok(!resultLine.includes(cwd), `${columns}x${rows}: cwd yields to the Host excerpt:\n${resultLine}`)
+    assert.ok(!resultLine.includes('PWNED'), `${columns}x${rows}: hostile snippet payload never paints`)
+    assert.ok(visibleWidth(resultLine) <= columns, `${columns}x${rows}: the result row fits its width`)
+  }
+  assert.ok(!h.raw().includes('\x1b]0;PWNED'), 'the injected OSC never reaches the raw terminal stream')
+})
+
+test('wide search preview follows the selected hit with its source and Host excerpt', async () => {
+  const h = harness({ columns: 120, rows: 40, initialMode: 'search' })
+  const alpha = row(CURRENT, 3_000, { title: 'Alpha session' })
+  const beta = row(OTHER, 2_000, { title: 'Beta session' })
+  h.handle.setSnapshot(snapshot({
+    rows: [alpha, beta],
+    query: 'needle',
+    searchState: 'ready',
+    searchResults: [
+      { row: alpha, source: 'Content', snippet: 'alpha first sentence with enough words to wrap over more than one preview line and keep going' },
+      { row: beta, source: 'Both', snippet: 'beta different excerpt' },
+    ],
+  }), 'needle')
+  await h.paint()
+  let view = h.view()
+  assert.ok(view.includes('Match: Content'), `the wide preview states the selected hit source:\n${view}`)
+  assert.ok(view.includes('Excerpt:'), 'a real snippet paints its excerpt label')
+  assert.ok(view.includes('alpha first sentence'), 'the Host excerpt is readable in the preview')
+
+  h.vt.sendInput('\x1b[B')
+  await h.paint()
+  h.vt.sendInput('\x1b[B')
+  await h.paint()
+  view = h.view()
+  assert.ok(view.includes('Match: Both'), `the preview follows the newly selected hit:\n${view}`)
+  assert.ok(view.includes('beta different excerpt'), 'the second hit shows its own Host excerpt')
+  assert.ok(!view.includes('Match: Content'), 'the previous selection provenance is gone')
+
+  h.handle.setSnapshot(snapshot({ query: 'needle', searchState: 'ready', searchResults: [] }))
+  await h.paint()
+  assert.ok(h.view().includes('No result selected'), `an emptied result list clears the preview:\n${h.view()}`)
+  assert.deepEqual(h.resumes, [], 'preview selection never resumes a Session')
 })
 
 test('the frozen size matrix keeps the Esc row reachable and every painted cell inside the width', async () => {
@@ -865,7 +1021,8 @@ test('a long cwd or Host snippet never squeezes the Session identity out of a ro
   }), 'needle')
   await h.paint()
   const searchView = h.view()
-  assert.ok(searchView.includes('Alpha session'), `the search identity survives a long snippet:\n${searchView}`)
+  assert.ok(searchView.includes('current-  Alpha'), `the stable id and title prefix survive a long snippet:\n${searchView}`)
+  assert.ok(searchView.includes('Content · …a very l'), `the full source and excerpt prefix outrank age/cwd:\n${searchView}`)
   for (const line of h.vt.getViewport()) {
     assert.ok(visibleWidth(line) <= 44, `the search row fits 44 columns: ${JSON.stringify(line)}`)
   }

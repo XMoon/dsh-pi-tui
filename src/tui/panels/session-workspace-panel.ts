@@ -36,6 +36,7 @@ import {
   renderFakeCursor,
   truncateToWidth,
   visibleWidth,
+  wrapTextWithAnsi,
   type Component,
   type TuiMouseEvent,
   type TuiMouseEventResult,
@@ -1800,8 +1801,33 @@ export class SessionWorkspacePanel implements Component {
     return { line, regions }
   }
 
+  /** The fixed Search context row. Its right-hand status is the ONE place the
+   *  routine search health is stated, so a loading/unavailable/ready update
+   *  never inserts or removes a body row. `Metadata only` observes the CURRENT
+   *  UI capability (it is not proof that the user disabled an index, and a
+   *  normal Host disconnect can reach it); only a real provider failure is
+   *  `Search failed` and it still keeps its own diagnostic status line. */
   private renderSearchContext(width: number): string {
-    return withTrailing(color.textDim('Search all workspaces'), color.textMuted('Esc back'), width)
+    const snapshot = this.snapshot
+    let trailing: string
+    if (snapshot.searchState === 'error') {
+      trailing = color.error('Search failed')
+    } else if (snapshot.searchState === 'unavailable') {
+      trailing = color.textMuted('Metadata only')
+    } else if (snapshot.searchState === 'loading') {
+      trailing = color.textMuted('Searching content…')
+    } else if (snapshot.searchState === 'ready' && snapshot.hasMore) {
+      trailing = color.textMuted('Refine for more')
+    } else {
+      trailing = color.textMuted('Esc back')
+    }
+    const left = color.textDim('Search all workspaces')
+    // The status is a complete phrase, never a half word: when both regions
+    // cannot fit, keep the left identity and drop the right status entirely.
+    if (visibleWidth(left) + 1 + visibleWidth(trailing) > width) {
+      return truncateToWidth(left, width, '…', false)
+    }
+    return withTrailing(left, trailing, width)
   }
 
   /** Compose one body frame: single column, or the wide two-column layout. */
@@ -2276,7 +2302,32 @@ export class SessionWorkspacePanel implements Component {
     if (rowBudget <= 0) return { lines: lines.slice(0, budget), regions }
     this.lastPaintedListRows = Math.max(1, rowBudget)
     const rows = this.snapshot.searchResults
-    if (rows.length === 0) return { lines: lines.slice(0, budget), regions }
+    if (rows.length === 0) {
+      // ONE inert fact row, never a fake `result` target. It states exactly the
+      // current stage: roster pending/unavailable/empty, typing not started,
+      // content still pending, or the metadata-only/complete no-match result.
+      const listState = this.snapshot.listState
+      let emptyText: string
+      if (listState === 'loading') {
+        emptyText = 'Loading sessions…'
+      } else if (listState === 'error' || listState === 'unavailable') {
+        emptyText = 'Session list unavailable'
+      } else if (listState === 'empty') {
+        emptyText = 'No readable sessions'
+      } else if (this.searchInput.getValue().trim() === '') {
+        emptyText = 'Type to search sessions and messages'
+      } else if (this.snapshot.searchState === 'loading') {
+        emptyText = 'Searching message content…'
+      } else if (this.snapshot.searchState === 'unavailable' || this.snapshot.searchState === 'error') {
+        emptyText = 'No metadata matches'
+      } else if (this.snapshot.searchState === 'ready') {
+        emptyText = 'No matching sessions'
+      } else {
+        emptyText = 'Type to search sessions and messages'
+      }
+      lines.push(fit(truncateToWidth(sanitizedPhysicalLine(emptyText), width, '…', false), width))
+      return { lines: lines.slice(0, budget), regions }
+    }
     // The wheel viewport is the real RESULT list: the Search Input and status
     // rows are above it and are never a wheel sink.
     const resultsTop = lines.length
@@ -2297,12 +2348,31 @@ export class SessionWorkspacePanel implements Component {
   private renderPreviewPane(width: number, budget: number): PaneRender {
     const lines: string[] = []
     if (this.searchMode) {
-      const row = this.selectedSearchSessionId === undefined ? undefined : this.rowById(this.selectedSearchSessionId)
+      const result = this.selectedSearchSessionId === undefined
+        ? undefined
+        : this.snapshot.searchResults.find(candidate => candidate.row.id === this.selectedSearchSessionId)
+      const row = result?.row
       if (row === undefined) {
         lines.push(color.textMuted('No result selected'))
         return { lines: lines.slice(0, budget), regions: [] }
       }
-      return { lines: this.sessionPreviewLines(row, this.frameView().rowsById.get(row.id), width).slice(0, budget), regions: [] }
+      lines.push(...this.sessionPreviewLines(row, this.frameView().rowsById.get(row.id), width))
+      if (result !== undefined) {
+        // Read-only provenance of the SAME current search hit; no Host read is
+        // triggered by selecting it.
+        lines.push(`${color.textDim('Match: ')}${color.text(result.source)}`)
+        if (result.snippet !== undefined) {
+          lines.push(color.textDim('Excerpt:'))
+          const wrapped = wrapTextWithAnsi(sanitizedPhysicalLine(result.snippet), width)
+          for (let index = 0; index < Math.min(3, wrapped.length); index += 1) {
+            const excerptLine = index === 2 && wrapped.length > 3
+              ? `${truncateToWidth(wrapped[index]!, Math.max(0, width - 1), '', false)}…`
+              : truncateToWidth(wrapped[index]!, width, '…', false)
+            lines.push(color.text(excerptLine))
+          }
+        }
+      }
+      return { lines: lines.slice(0, budget), regions: [] }
     }
     const row = this.selectedBrowseRow()
     if (row === undefined) {
@@ -2588,19 +2658,63 @@ export class SessionWorkspacePanel implements Component {
     const currentMark = current ? color.success('● ') : ''
     const shortId = sanitizedPhysicalLine(shortSessionId(row.id))
     const title = row.title === undefined ? undefined : sanitizedPhysicalLine(row.title)
-    const source = result.source === 'Both' ? 'metadata+content' : result.source.toLowerCase()
-    const meta = [
-      color.textMuted(`${source} · ${formatSessionAge(row.updatedAt)}`),
-      color.textDim(workspaceKey(row.cwd)),
-    ].join(color.textMuted(' · '))
-    const snippet = result.snippet === undefined ? '' : ` · …${sanitizedPhysicalLine(result.snippet)}…`
-    const columns = rowColumns(identityWidth(shortId, title), width)
-    const label = truncateToWidth(identityText(shortId, title, selected), columns.identity, '…', false)
-    const secondary = columns.meta > 0 ? truncateToWidth(`${meta}${snippet}`, columns.meta, '…', false) : ''
-    return fit(
-      `${marker}${currentMark}${padColumn(label, columns.identity)}${secondary === '' ? '' : `  ${secondary}`}`,
-      width,
-    )
+    // The full source word is projected as-is: a metadata row never borrows a
+    // content tone, and a content/both row keeps the official `Content`/`Both`.
+    const source = result.source
+    if (result.snippet === undefined) {
+      const meta = [
+        color.textMuted(`${source} · ${formatSessionAge(row.updatedAt)}`),
+        color.textDim(workspaceKey(row.cwd)),
+      ].join(color.textMuted(' · '))
+      const columns = rowColumns(identityWidth(shortId, title), width)
+      const label = truncateToWidth(identityText(shortId, title, selected), columns.identity, '…', false)
+      const secondary = columns.meta > 0 ? truncateToWidth(meta, columns.meta, '…', false) : ''
+      return fit(
+        `${marker}${currentMark}${padColumn(label, columns.identity)}${secondary === '' ? '' : `  ${secondary}`}`,
+        width,
+      )
+    }
+
+    // A Host excerpt outranks age/cwd. Preserve the stable short id, a
+    // recognisable title prefix, the WHOLE source word, then as much of the
+    // terminal-cell-safe excerpt as the row can hold; a title tail is the only
+    // lower-priority claimant. A source that cannot fit whole is omitted whole.
+    const snippet = sanitizedPhysicalLine(result.snippet)
+    const contentWidth = Math.max(0, width - visibleWidth(marker) - visibleWidth(currentMark))
+    const idWidth = visibleWidth(shortId)
+    if (contentWidth <= idWidth) {
+      return fit(`${marker}${currentMark}${truncateToWidth(color.textDim(shortId), contentWidth, '', false)}`, width)
+    }
+    const titleWidth = title === undefined ? 0 : visibleWidth(title)
+    let titleCells = titleWidth === 0 ? 0 : Math.min(MIN_TITLE_CELLS, titleWidth, Math.max(1, contentWidth - idWidth - 2))
+    const paintTitle = (cells: number): string => {
+      if (cells <= 0 || title === undefined) return ''
+      const prefix = truncateToWidth(title, cells, '…', false)
+      return `  ${selected ? color.textStrong(prefix) : color.text(prefix)}`
+    }
+    let remaining = contentWidth - idWidth - (titleCells === 0 ? 0 : 2 + titleCells)
+    const sourceWidth = visibleWidth(source)
+    let sourceSegment = ''
+    let excerptCells = 0
+    if (remaining >= 2 + sourceWidth + 3 + 2 + 1) {
+      sourceSegment = `  ${color.textDim(source)}${color.textMuted(' · ')}`
+      remaining -= 2 + sourceWidth + 3
+      excerptCells = Math.max(0, remaining - 2)
+    } else if (remaining >= 2 + 2 + 1) {
+      sourceSegment = '  '
+      remaining -= 2
+      excerptCells = Math.max(0, remaining - 2)
+    }
+    if (excerptCells >= visibleWidth(snippet) && titleCells > 0 && titleWidth > titleCells) {
+      const extra = Math.min(excerptCells - visibleWidth(snippet), titleWidth - titleCells)
+      titleCells += extra
+      excerptCells -= extra
+    }
+    let line = `${marker}${currentMark}${color.textDim(shortId)}${paintTitle(titleCells)}${sourceSegment}`
+    if (excerptCells > 0) {
+      line += color.textMuted(`…${truncateToWidth(snippet, excerptCells, '', false)}…`)
+    }
+    return fit(line, width)
   }
 
   /** The ONE status projection shared by every mode. Never a fabricated
@@ -2639,15 +2753,10 @@ export class SessionWorkspacePanel implements Component {
       push(`Activity unavailable: ${sanitizedPhysicalLine(this.activityError)}`)
     }
     if (this.workspaceError !== undefined) push(this.workspaceError)
-    if (this.searchMode) {
-      if (snapshot.searchState === 'loading') {
-        push('Searching sessions…')
-      } else if (snapshot.searchState === 'unavailable') {
-        push('content search unavailable')
-      } else if (snapshot.searchState === 'error') {
-        push(sessionBrowserErrorNotice('search', snapshot.searchError ?? 'unknown error'), 'error')
-      }
-      if (snapshot.hasMore) push('More content matches exist — refine the search.')
+    if (this.searchMode && snapshot.searchState === 'error') {
+      // Routine loading/unavailable/hasMore health belongs to the fixed Search
+      // context row above the body; only a real failure keeps a diagnostic row.
+      push(sessionBrowserErrorNotice('search', snapshot.searchError ?? 'unknown error'), 'error')
     }
     if (snapshot.projectionError !== undefined) {
       push(sessionBrowserErrorNotice('projection', snapshot.projectionError))

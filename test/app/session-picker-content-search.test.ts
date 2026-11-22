@@ -285,22 +285,27 @@ test('/search foo opens the SAME Session Browser and runs a debounced content se
   assert.ok(h.view().includes('…needle in needle…'), 'the hit snippet must enrich the row description')
 })
 
-test('content search unavailable keeps the workspace open with local filtering and notices once', async (t) => {
+test('content search unavailable keeps metadata filtering live and states Metadata only without a notice', async (t) => {
   const h = harness({ rows: rows(), search: async () => undefined })
   t.after(() => h.app.stop())
   await h.runSearch('alpha')
   await waitUntil(() => h.view().includes('alpha'))
-  await waitUntil(() => h.notices.some(notice => notice.text === 'content search unavailable'))
-  assert.equal(h.notices.filter(notice => notice.text === 'content search unavailable').length, 1)
+  await waitUntil(() => h.view().includes('Metadata only'))
+  assert.ok(!h.notices.some(notice => notice.text === 'content search unavailable'),
+    'a normal capability boundary is not a transient alert')
+  assert.ok(!h.view().includes('content search unavailable'),
+    'the retired page-level warning is not painted as a status row')
   // The workspace stays open and the local metadata filter still works.
   const view = h.view()
   assert.ok(view.includes('Search all workspaces'), 'the workspace must stay open when content search is unavailable')
   assert.ok(!view.includes('beta'), 'local metadata filtering must keep working')
-  // A second query does not re-notice (once per workspace lifecycle).
+  // A second query still searches metadata and still has no false alert.
+  for (let index = 0; index < 5; index += 1) h.vt.sendInput('\x7f')
   h.vt.sendInput('beta')
   await h.vt.waitForRender()
-  await waitUntil(() => h.view().includes('beta'))
-  assert.equal(h.notices.filter(notice => notice.text === 'content search unavailable').length, 1)
+  await waitUntil(() => h.view().includes('Search: beta'))
+  assert.ok(h.view().includes('beta'), 'the second query still lists its metadata match')
+  assert.ok(!h.notices.some(notice => notice.text === 'content search unavailable'))
 })
 
 test('a content-only hit becomes visible through its snippet under the local filter', async (t) => {
@@ -547,7 +552,7 @@ test('a projection failure uses the same bounded notice projection at 44x20', as
   }
 })
 
-test('hasMore shows the refine hint', async (t) => {
+test('hasMore states Refine for more in the fixed context row without a notice or extra status row', async (t) => {
   const h = harness({
     rows: rows(),
     search: async () => ({ items: [{ sessionId: 'session-alpha', snippet: 'needle alpha' }], hasMore: true }),
@@ -555,10 +560,13 @@ test('hasMore shows the refine hint', async (t) => {
   t.after(() => h.app.stop())
   await h.runSearch('needle')
   await waitUntil(() => h.searchCalls.length === 1)
-  await waitUntil(() => h.notices.some(notice => notice.text === 'More content matches exist — refine the search.'))
-  await waitUntil(() => h.view().includes('More content matches exist — refine the search.'))
-  assert.ok(h.view().includes('More content matches exist — refine the search.'),
-    'the refine hint must be painted in the workspace')
+  await waitUntil(() => h.view().includes('Refine for more'))
+  const frame = h.view().split('\n')
+  assert.equal(frame.filter(line => line.includes('Refine for more')).length, 1,
+    'the hasMore fact is one context phrase, never a status row or notice')
+  assert.ok(!h.notices.some(notice => notice.text === 'More content matches exist — refine the search.'),
+    'routine hasMore health is not a transient alert')
+  assert.ok(frame.some(line => line.includes('needle alpha')), 'the enriched hit stays painted')
 })
 
 test('/resume with a unique match switches without starting a content search', async (t) => {
