@@ -437,3 +437,36 @@ test('unsafe WAL or SHM sidecars refuse the derived index', (t) => {
     (error: unknown) => error instanceof HistorySearchIndexUnavailableError,
   )
 })
+
+test('a fresh index materializes only private sidecars and refuses dangling symlinks', (t) => {
+  const dir = profileDir(t)
+  const first = HistorySearchIndex.open({ profileDir: dir })
+  try {
+    seed(first, 's1', [occurrence('m1', 'private sidecars', 1000, '/repo/a')])
+    const historyDir = join(dir, '.dsh-pi-tui', 'history-search')
+    for (const suffix of ['-wal', '-shm'] as const) {
+      const path = join(historyDir, `v1.sqlite${suffix}`)
+      if (!existsSync(path)) continue
+      assert.equal(lstatSync(path).mode & 0o077, 0,
+        `the materialized ${suffix} sidecar must stay private`)
+    }
+  } finally {
+    first.close()
+  }
+
+  // A DANGLING symlink at the main path or a sidecar path is an existing entry:
+  // `existsSync` would follow it and miss the refusal.
+  for (const name of ['v1.sqlite', 'v1.sqlite-wal'] as const) {
+    const second = profileDir(t)
+    const historyDir = join(second, '.dsh-pi-tui', 'history-search')
+    mkdirSync(historyDir, { recursive: true, mode: 0o700 })
+    chmodSync(join(second, '.dsh-pi-tui'), 0o700)
+    chmodSync(historyDir, 0o700)
+    symlinkSync(join(historyDir, 'missing-target'), join(historyDir, name))
+    assert.throws(
+      () => HistorySearchIndex.open({ profileDir: second }),
+      (error: unknown) => error instanceof HistorySearchIndexUnavailableError,
+      `a dangling ${name} symlink must refuse the index`,
+    )
+  }
+})

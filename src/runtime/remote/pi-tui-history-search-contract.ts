@@ -343,10 +343,18 @@ export function parseHistoryReadTextResponse(value: unknown): HistoryReadTextRes
     exactKeys(record, ['kind', 'chunk', 'nextOffset', 'contentLength'], READ_ANSWER_LABEL)
     if (typeof record.chunk !== 'string') throw new TypeError(`${READ_ANSWER_LABEL}: chunk must be a string`)
     // The producer may exceed the requested limit by ONE UTF-16 unit only when
-    // the requested cut would split a surrogate pair; a larger frame is a
-    // contract violation, never a legitimate chunk.
+    // the requested cut would split a surrogate pair. A larger frame, or a
+    // boundary +1 that does NOT complete a pair, is a contract violation.
     if (record.chunk.length > HISTORY_SEARCH_READ_TEXT_LIMIT_MAX + 1) {
       throw new TypeError(`${READ_ANSWER_LABEL}: chunk exceeds ${HISTORY_SEARCH_READ_TEXT_LIMIT_MAX + 1} UTF-16 code units`)
+    }
+    if (record.chunk.length === HISTORY_SEARCH_READ_TEXT_LIMIT_MAX + 1) {
+      const high = record.chunk.charCodeAt(HISTORY_SEARCH_READ_TEXT_LIMIT_MAX - 1)
+      const low = record.chunk.charCodeAt(HISTORY_SEARCH_READ_TEXT_LIMIT_MAX)
+      const completesPair = high >= 0xd800 && high <= 0xdbff && low >= 0xdc00 && low <= 0xdfff
+      if (!completesPair) {
+        throw new TypeError(`${READ_ANSWER_LABEL}: a chunk over ${HISTORY_SEARCH_READ_TEXT_LIMIT_MAX} code units must end with one complete surrogate pair`)
+      }
     }
     if (record.nextOffset !== null) nonNegativeInteger(record.nextOffset, `${READ_ANSWER_LABEL} nextOffset`)
     return {

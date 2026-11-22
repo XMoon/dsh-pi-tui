@@ -225,11 +225,20 @@ test('oversized response cursor and chunk frames fail the strict codec', () => {
     items: [item],
     nextCursor: 'x'.repeat(HISTORY_SEARCH_CURSOR_MAX_BYTES + 1),
   }), /nextCursor exceeds/u)
-  // A chunk may exceed the requested limit by exactly ONE UTF-16 unit for a
-  // non-splittable surrogate pair, never by more.
+  // A chunk may exceed the requested limit by exactly ONE UTF-16 unit, and
+  // only when that extra unit completes a surrogate pair at the boundary.
   assert.deepEqual(parseHistoryReadTextResponse({
-    kind: 'ready', chunk: 'a'.repeat(HISTORY_SEARCH_READ_TEXT_LIMIT_MAX + 1), nextOffset: 1, contentLength: 2,
+    kind: 'ready', chunk: 'a'.repeat(HISTORY_SEARCH_READ_TEXT_LIMIT_MAX), nextOffset: 1, contentLength: 2,
   }).kind, 'ready')
+  assert.deepEqual(parseHistoryReadTextResponse({
+    kind: 'ready',
+    chunk: `${'a'.repeat(HISTORY_SEARCH_READ_TEXT_LIMIT_MAX - 1)}😀`,
+    nextOffset: 1,
+    contentLength: 2,
+  }).kind, 'ready')
+  assert.throws(() => parseHistoryReadTextResponse({
+    kind: 'ready', chunk: 'a'.repeat(HISTORY_SEARCH_READ_TEXT_LIMIT_MAX + 1), nextOffset: 1, contentLength: 2,
+  }), /complete surrogate pair/u)
   assert.throws(() => parseHistoryReadTextResponse({
     kind: 'ready', chunk: 'a'.repeat(HISTORY_SEARCH_READ_TEXT_LIMIT_MAX + 2), nextOffset: 1, contentLength: 2,
   }), /chunk exceeds/u)

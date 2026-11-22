@@ -18,7 +18,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, lstatSync, mkdirSync, realpathSync, renameSync, statSync } from 'node:fs'
+import { chmodSync, lstatSync, mkdirSync, realpathSync, renameSync, statSync, type Stats } from 'node:fs'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
@@ -191,6 +191,20 @@ export function sessionHeaderHash(header: unknown): string {
   return createHash('sha256').update(stableJson(header), 'utf8').digest('hex')
 }
 
+/**
+ * `lstat` one path, treating only a real ENOENT as absence. `existsSync`
+ * follows symlinks, so a DANGLING symlink would look absent and could be
+ * followed by a later create; every private-file decision uses this probe.
+ */
+function lstatIfExists(path: string): Stats | undefined {
+  try {
+    return lstatSync(path)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw error
+  }
+}
+
 function assertOwnedDirectory(path: string, label: string): void {
   const stat = statSync(path)
   if (!stat.isDirectory()) throw new HistorySearchIndexUnavailableError(`${label} is not a directory`)
@@ -201,11 +215,11 @@ function assertOwnedDirectory(path: string, label: string): void {
 
 /** Create/verify one private directory below the real profile directory. */
 function ensurePrivateDirectory(path: string, label: string): void {
-  if (existsSync(path)) {
-    const link = lstatSync(path)
-    if (link.isSymbolicLink()) throw new HistorySearchIndexUnavailableError(`${label} is a symbolic link`)
+  const existing = lstatIfExists(path)
+  if (existing !== undefined) {
+    if (existing.isSymbolicLink()) throw new HistorySearchIndexUnavailableError(`${label} is a symbolic link`)
     assertOwnedDirectory(path, label)
-    const mode = statSync(path).mode & 0o777
+    const mode = existing.mode & 0o777
     if ((mode & 0o077) !== 0) throw new HistorySearchIndexUnavailableError(`${label} is not private`)
     return
   }
@@ -235,8 +249,8 @@ function assertPrivateDatabaseFile(path: string): void {
 function assertPrivateSidecars(dbPath: string): void {
   for (const suffix of ['-wal', '-shm'] as const) {
     const path = `${dbPath}${suffix}`
-    if (!existsSync(path)) continue
-    const link = lstatSync(path)
+    const link = lstatIfExists(path)
+    if (link === undefined) continue
     if (link.isSymbolicLink()) {
       throw new HistorySearchIndexUnavailableError(`the derived index ${suffix} file is a symbolic link`)
     }
@@ -350,7 +364,7 @@ function quarantineDatabaseFile(dbPath: string): void {
   const stamp = String(Date.now())
   for (const suffix of ['', '-wal', '-shm']) {
     const source = `${dbPath}${suffix}`
-    if (!existsSync(source)) continue
+    if (lstatIfExists(source) === undefined) continue
     renameSync(source, `${dbPath}.quarantine-${stamp}${suffix}`)
   }
 }
@@ -397,7 +411,7 @@ export class HistorySearchIndex {
     const historyDir = join(privateDir, HISTORY_DIRECTORY)
     ensurePrivateDirectory(historyDir, 'the history search directory')
     const dbPath = join(historyDir, DATABASE_FILE)
-    let created = !existsSync(dbPath)
+    let created = lstatIfExists(dbPath) === undefined
     if (!created) assertPrivateDatabaseFile(dbPath)
     assertPrivateSidecars(dbPath)
 
@@ -436,6 +450,10 @@ export class HistorySearchIndex {
     let db: DatabaseSync
     try {
       db = new DatabaseSync(dbPath)
+      // Secure the main file BEFORE WAL/schema writes: SQLite copies the main
+      // file's mode onto the materialized -wal/-shm sidecars, so a 0644 file
+      // here would create 0644 sidecars before any later chmod could help.
+      if (created) chmodSync(dbPath, 0o600)
     } catch (error) {
       if (isCorruptionError(error)) {
         quarantineDatabaseFile(dbPath)
@@ -496,7 +514,9 @@ export class HistorySearchIndex {
       }
       throw new HistorySearchIndexUnavailableError('the derived history index could not be initialized')
     }
-    if (created) chmodSync(dbPath, 0o600)
+    // Enabling WAL/schema creation may have materialized sidecars in this
+    // open; they are part of the private file set and must prove it here too.
+    assertPrivateSidecars(dbPath)
     options.signal?.throwIfAborted()
     return new HistorySearchIndex(dbPath, db)
   }
@@ -634,6 +654,10 @@ export class HistorySearchIndex {
         )
       }
     })
+    // SQLite materializes -wal/-shm on the first write. They inherit the main
+    // file's mode, but the policy is proven here, not assumed: an unsafe sidecar
+    // fails the batch (and therefore the authoritative answer) closed.
+    assertPrivateSidecars(this.path)
   }
 
   /** Update one Session's completeness markers without touching its rows. */
