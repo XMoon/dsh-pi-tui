@@ -1048,6 +1048,8 @@ test('the trusted-profile ACP stdio case is selectable-only, dual-platform and r
     newSessionViaHostWorkspace: true,
     cancelAndPermissionReachable: true,
     largePayloadDrained: true,
+    outputBackpressureObserved: true,
+    staleSocketFailClosed: true,
     hostMissingDisabledForeignAndMissingEntryFailClosed: true,
     runtimeOffDisconnectsOnlyAdapter: true,
     hostRestartObserved: true,

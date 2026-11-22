@@ -618,6 +618,8 @@ export function assertSelectedVerdict(caseId, result) {
       && result?.newSessionViaHostWorkspace === true
       && result?.cancelAndPermissionReachable === true
       && result?.largePayloadDrained === true
+      && result?.outputBackpressureObserved === true
+      && result?.staleSocketFailClosed === true
       && result?.hostMissingDisabledForeignAndMissingEntryFailClosed === true
       && result?.runtimeOffDisconnectsOnlyAdapter === true
       && result?.hostRestartObserved === true

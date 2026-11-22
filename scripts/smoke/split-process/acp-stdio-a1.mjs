@@ -19,6 +19,7 @@ import { spawn, execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
+import { createInterface } from 'node:readline'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Readable, Transform, Writable } from 'node:stream'
@@ -99,6 +100,50 @@ class CliProcess {
 
   rawStdout() {
     return Buffer.concat(this.rawChunks)
+  }
+
+  pauseHostStdout() {
+    this.child.stdout.pause()
+  }
+
+  resumeHostStdout() {
+    this.child.stdout.resume()
+  }
+
+  /** Start the raw NDJSON observer used by the pressure/shortness probes. */
+  startRaw() {
+    this.rawLines = []
+    this.rawPending = new Map()
+    this.rawSequence = 0
+    this.rawReader = createInterface({ input: this.tap })
+    this.rawReader.on('line', line => {
+      this.rawLines.push(line)
+      let value
+      try { value = JSON.parse(line) } catch { return }
+      if (typeof value?.id === 'number' && this.rawPending.has(value.id)) {
+        const pending = this.rawPending.get(value.id)
+        this.rawPending.delete(value.id)
+        clearTimeout(pending.timer)
+        pending.resolve(value)
+      }
+    })
+  }
+
+  rawBegin(method, params) {
+    const id = ++this.rawSequence
+    const promise = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.rawPending.delete(id)
+        reject(new Error(`raw ACP request ${method} did not answer`))
+      }, 180_000)
+      this.rawPending.set(id, { resolve, reject, timer })
+    })
+    this.child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`)
+    return { id, promise }
+  }
+
+  async rawRequest(method, params) {
+    return await this.rawBegin(method, params).promise
   }
 
   async initialize() {
@@ -447,20 +492,40 @@ export async function runAcpStdioA1(context) {
     await command.connection.agent.request(acp.methods.agent.session.close, { sessionId: cancelSession })
     writeFileSync(longTurnBarrier, 'release\n', { mode: 0o600 })
 
-    // A1-05: a large prompt is split across the OS stdin pipe; the Host emits
-    // the committed update set and the complete ordered stream drains normally.
-    await command.connection.agent.request(acp.methods.agent.session.resume, { sessionId: sessionA, cwd: hostCwd })
-    const largeUpdatesBefore = command.updates.length
-    const largePrompt = `a1 large payload ${'x'.repeat(200 * 1024)}`
-    const largeResponse = await command.connection.agent.request(acp.methods.agent.session.prompt, {
+    // A1-05: a large prompt is split across the OS stdin pipe while the
+    // downstream stdout sink is deliberately paused; the Host's bounded output
+    // must backpressure the child and drain without byte loss after resume.
+    const pressure = openCli()
+    pressure.startRaw()
+    const pressureInit = await pressure.rawRequest('initialize', {
+      protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {},
+    })
+    assert(pressureInit?.result?.protocolVersion === 1, 'A1-05: the raw ACP client must initialize')
+    await pressure.rawRequest('session/resume', { sessionId: sessionA, cwd: hostCwd })
+    const largeUpdatesBefore = pressure.rawLines.length
+    const largePrompt = `a1-pressure-output ${'x'.repeat(200 * 1024)}`
+    const largePromptRequest = pressure.rawBegin('session/prompt', {
       sessionId: sessionA, prompt: [{ type: 'text', text: largePrompt }],
     })
-    assert(largeResponse?.stopReason === 'end_turn',
+    pressure.pauseHostStdout()
+    await sleep(250)
+    assert(pressure.child.exitCode === null && pressure.child.signalCode === null,
+      `A1-05: a paused stdout sink must not terminate the Adapter child (exit=${String(pressure.child.exitCode)} signal=${String(pressure.child.signalCode)} stderr=${pressure.stderr.slice(0, 400)})`)
+    pressure.resumeHostStdout()
+    const largeResponse = await largePromptRequest.promise
+    assert(largeResponse?.result?.stopReason === 'end_turn',
       `A1-05: the large prompt must complete end_turn (got ${JSON.stringify(largeResponse)})`)
-    const largeUpdates = command.updates.length - largeUpdatesBefore
-    assert(largeUpdates >= 1, `A1-05: the Host must emit its committed update set (got ${String(largeUpdates)})`)
+    const largeUpdates = pressure.rawLines.slice(largeUpdatesBefore)
+      .map(line => { try { return JSON.parse(line) } catch { return undefined } })
+      .filter(message => message?.method === acp.methods.client.session.update
+        && message.params?.sessionId === sessionA)
+      .length
+    assert(largeUpdates >= 2, `A1-05: the Host must emit its complete committed update set (got ${String(largeUpdates)})`)
+    await pressure.rawRequest('session/close', { sessionId: sessionA })
+    const pressureExit = await pressure.close()
+    assert(pressureExit.code === 0, `A1-05: the normal Client EOF must exit 0 (got ${JSON.stringify(pressureExit)})`)
     const commandClose = await command.close()
-    assert(commandClose.code === 0, `A1-05: the normal Client EOF must exit 0 (got ${JSON.stringify(commandClose)})`)
+    assert(commandClose.code === 0, `A1-05: the original SDK Client must close cleanly (got ${JSON.stringify(commandClose)})`)
 
     // A1-06: no Host, disabled listener, foreign profile, missing installed
     // entry. Every failure is stdout-empty and uses the fixed classification.
@@ -487,6 +552,24 @@ export async function runAcpStdioA1(context) {
     } finally {
       renameSync(`${installedEntry}.a1-backup`, installedEntry)
     }
+
+    // A1-06 stale logical socket: the authenticated Host remains ready, but its
+    // public pathname is a non-socket stale entry. The live ACP status observation
+    // reports unavailable; the command must fail with zero stdout and never
+    // start a Host or spawn an Adapter.
+    const staleSaved = `${socketPath}.a1-saved-${String(process.pid)}`
+    renameSync(socketPath, staleSaved)
+    writeFileSync(socketPath, 'stale logical socket\n', { mode: 0o600 })
+    try {
+      const stale = await readCommands(['acp', 'stdio'], {}, 3, /ACP_STDIO_LISTENER_UNAVAILABLE/u)
+      assert(stale.stdout.length === 0, 'A1-06: a stale logical socket must produce zero stdout bytes and the unavailable classification')
+    } finally {
+      try { unlinkSync(socketPath) } catch { /* already removed */ }
+      try { unlinkSync(staleSaved) } catch { /* already removed */ }
+    }
+    assertAccess(await acpAccess(peer, 'A1-06 stale cleanup off', false), 'disabled', 'A1-06 stale cleanup off')
+    assertAccess(await acpAccess(peer, 'A1-06 stale cleanup on', true), 'enabled', 'A1-06 stale cleanup on')
+    await waitForSocket(socketPath, 'A1-06 stale cleanup socket')
 
     // A1-07: runtime ACP Off disconnects the stdio Adapter; the Host, TUI and
     // protected rows survive. A fresh command connects again after re-enable.
@@ -626,6 +709,8 @@ export async function runAcpStdioA1(context) {
       newSessionViaHostWorkspace: true,
       cancelAndPermissionReachable: true,
       largePayloadDrained: true,
+      outputBackpressureObserved: true,
+      staleSocketFailClosed: true,
       hostMissingDisabledForeignAndMissingEntryFailClosed: true,
       runtimeOffDisconnectsOnlyAdapter: true,
       hostRestartObserved: true,
