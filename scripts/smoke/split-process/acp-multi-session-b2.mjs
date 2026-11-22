@@ -500,6 +500,16 @@ export async function runAcpMultiSessionB2(context) {
       `B2-07: reverse requests must name exactly A and B: ${JSON.stringify(permissionRequests.map(request => request.sessionId))}`)
     assert(permissionRequests[0].toolCall?.toolCallId !== permissionRequests[1].toolCall?.toolCallId,
       'B2-07: each Session must receive its own toolCallId')
+    const approvalDecisionsA = eventsOf(sessionA).filter(event => event.type === 'approval/decided'
+      && event.data?.outcome === 'allowed-once')
+    const approvalDecisionsB = eventsOf(sessionB).filter(event => event.type === 'approval/decided'
+      && event.data?.outcome === 'rejected')
+    assert(approvalDecisionsA.length >= 1, 'B2-07: A must record its own allowed-once decision')
+    assert(approvalDecisionsB.length >= 1, 'B2-07: B must record its own rejected decision')
+    assert(eventsOf(sessionA).every(event => event.type !== 'approval/decided' || event.data?.outcome !== 'rejected'),
+      'B2-07: B rejection must never reach A')
+    assert(eventsOf(sessionB).every(event => event.type !== 'approval/decided' || event.data?.outcome !== 'allowed-once'),
+      'B2-07: A approval must never reach B')
 
     // B2-04: close A; B keeps running and can complete another turn. Repeated
     // and unknown closes are empty `{}` with no Host side effect.
@@ -595,7 +605,7 @@ export async function runAcpMultiSessionB2(context) {
       sessions: { A: sessionA, B: sessionB },
       socket: { path: acpEndpoint.path, initializedOnce: true, sameConnectionAandB: true },
       routing: { sameHostPid: true, distinctSessionIds: true, promptA: resultA.stopReason, promptB: resultB.stopReason },
-      permissions: { requests: permissionRequests.length, scoped: true },
+      permissions: { requests: permissionRequests.length, a: 'allowed-once', b: 'rejected', scoped: true },
       close: { a: '{}', repeatedA: '{}', unknown: '{}', bAfterA: plainB.stopReason },
       cancel: { b: cancelledB.stopReason, tuiA: 'end_turn' },
       mcp: { aTool: ECHO_TOOL, aResult: true, bUnknownTool: true, childPids },
