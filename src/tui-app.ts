@@ -23916,9 +23916,10 @@ export class TuiApp {
         // components. Rebuild from their raw state before chrome measurement
         // so fullscreen hit-testing and footer budgets see the new geometry.
         this.rebuildQueuePane(width)
-        // The goal line bakes its width-aware truncation at setText time too
-        // (the dock row budget is one physical line); re-project it at the
-        // new width on the same geometry pass.
+        // The goal line and the host-less dock fallback bake their width-aware
+        // truncation at setText time too (each is one physical row);
+        // re-project them at the new width on the same geometry pass.
+        this.renderDock()
         this.renderGoalLine()
       }
       if (widthChanged || heightChanged) {
@@ -24345,10 +24346,10 @@ export class TuiApp {
     const first = active[0]
     // The active todo's content is model output: the dock summary and the
     // extension snapshot are display strings, so project it here (the same
-    // display projection the todo panel rows use).
-    const label = first === undefined
-      ? ''
-      : sanitizedPhysicalLine(first.content.length > 40 ? `${first.content.slice(0, 40)}…` : first.content)
+    // display projection the todo panel rows use). The FULL safe text stays
+    // in the source/snapshot; the actual painted width owner performs the
+    // one visible truncation.
+    const label = first === undefined ? '' : sanitizedPhysicalLine(first.content)
     return [
       done > 0 ? `${done} todo done` : '',
       active.length > 0 ? `${active.length} active` : '',
@@ -25260,7 +25261,12 @@ export class TuiApp {
     // border rule is the single boundary.
     const extensionDock = this.extensionHost?.dockText() ?? ''
     const summary = this.todoSummaryText()
-    const hostLine = summary === '' ? '' : color.textDim(`☑  ${summary}`)
+    // The fallback paints the summary directly at the terminal sink, so THIS
+    // row is its width owner; the extension path is already budgeted by
+    // DockItemOutlet at the current surface width.
+    const hostLine = summary === ''
+      ? ''
+      : color.textDim(truncateToWidth(`☑  ${summary}`, this.terminal.columns, '…'))
     // The dock strip is ONE summary row zone (label + at most one detail
     // line): host-owned row budget (plan §19).
     this.extensionHost?.setDockMaxRows(2)
