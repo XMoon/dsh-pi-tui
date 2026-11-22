@@ -21,7 +21,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
@@ -454,10 +454,13 @@ export async function runHostHistorySearch(context) {
     await scene.awaitSceneSeatFree()
     const cwdProof = join(workDir, 'host-history-search-cwd-proof.jsonl')
     writeFileSync(cwdProof, '', { mode: 0o600 })
-    const cwdOne = join(workDir, 'history-cwd-one')
-    const cwdTwo = join(workDir, 'history-cwd-two')
-    mkdirSync(cwdOne, { recursive: true, mode: 0o700 })
-    mkdirSync(cwdTwo, { recursive: true, mode: 0o700 })
+    // The Host Workspace resolution realpaths a proposed directory (macOS
+    // `/var` -> `/private/var`), so the smoke addresses the SAME canonical
+    // spellings the durable events will carry.
+    mkdirSync(join(workDir, 'history-cwd-one'), { recursive: true, mode: 0o700 })
+    mkdirSync(join(workDir, 'history-cwd-two'), { recursive: true, mode: 0o700 })
+    const cwdOne = realpathSync(join(workDir, 'history-cwd-one'))
+    const cwdTwo = realpathSync(join(workDir, 'history-cwd-two'))
     const cwdHost = await scene.startC1Host('skills-standing', 'history cwd host', {
       HISTORY_SEARCH_EXTRA_PROOF: cwdProof,
       HISTORY_SEARCH_CWD_TARGET: cwdTwo,
