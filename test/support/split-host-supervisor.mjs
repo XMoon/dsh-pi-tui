@@ -746,7 +746,15 @@ async function assertSceneHostSeatFree(reason) {
   if (hosts.length === 0) return
   if (hosts.some(handle => !handle.exited)) return
   const scopeId = latestHostScopeId()
-  if (scopeId === undefined) throw new Error(`${reason}: no Host scope id is available to audit the Host seat`)
+  if (scopeId === undefined) {
+    // A Host killed before its ready record never published a scope identity
+    // (the Pilot host-spawned-before-ack barrier). Its own process group is
+    // already proven gone, so no seat can be named authoritatively; record the
+    // truthful skip instead of inventing a scope.
+    appendNote('host-seat-audit-skipped', { reason, detail: 'no Host generation published a scope identity' })
+    writeReceipt({})
+    return
+  }
   const seat = hostSeatDescriptor(scopeId)
   if (seat.kind === 'linux-abstract') {
     const free = await seatIsFree(seat.name)
