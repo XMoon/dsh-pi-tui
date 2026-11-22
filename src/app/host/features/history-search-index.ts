@@ -1,0 +1,693 @@
+/**
+ * The disposable SQLite projection behind `piTuiHistorySearch`.
+ *
+ * The official DSH Session log remains the ONLY durable authority. This module
+ * owns a profile-local SQLite file whose rows can be discarded and rebuilt
+ * from the official log at any time:
+ *
+ * ```text
+ * $PROFILE_DIR/.dsh-pi-tui/history-search/v1.sqlite
+ * ```
+ *
+ * It owns nothing else: path/schema/permission validation, atomic per-Session
+ * checkpoint + occurrence commits, the three keyset search scopes and the
+ * exact-text read. The Host service above it owns reconciliation, authorization
+ * and the wire.
+ *
+ * @module @xmoon76/dsh-pi-tui/app/host/features/history-search-index
+ */
+
+import { createHash } from 'node:crypto'
+import { chmodSync, existsSync, lstatSync, mkdirSync, realpathSync, renameSync, statSync } from 'node:fs'
+import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
+
+/** Fixed SQLite `application_id` (`PITH`). */
+export const HISTORY_SEARCH_SQLITE_APPLICATION_ID = 0x50495448
+
+/** Fixed schema version of the derived index. */
+export const HISTORY_SEARCH_SQLITE_USER_VERSION = 1
+
+const DATABASE_FILE = 'v1.sqlite'
+const PRIVATE_DIRECTORY = '.dsh-pi-tui'
+const HISTORY_DIRECTORY = 'history-search'
+
+const CREATE_SCHEMA_SQL = `
+CREATE TABLE history_sessions (
+  session_id TEXT PRIMARY KEY,
+  header_cwd TEXT,
+  inherited_cut INTEGER NOT NULL CHECK(inherited_cut >= 0),
+  next_seq INTEGER NOT NULL CHECK(next_seq >= 0),
+  effective_cwd TEXT,
+  last_event_hash TEXT,
+  header_hash TEXT NOT NULL,
+  source_state TEXT NOT NULL CHECK(source_state IN ('persisted','live')),
+  uncertain_sources INTEGER NOT NULL DEFAULT 0 CHECK(uncertain_sources >= 0),
+  dirty INTEGER NOT NULL DEFAULT 0 CHECK(dirty IN (0,1))
+);
+CREATE TABLE history_occurrences (
+  row_id INTEGER PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES history_sessions(session_id) ON DELETE CASCADE,
+  message_id TEXT NOT NULL,
+  first_seq INTEGER NOT NULL,
+  accepted_ms INTEGER NOT NULL,
+  effective_cwd TEXT,
+  content TEXT NOT NULL,
+  normalized_content TEXT NOT NULL,
+  content_sha256 TEXT NOT NULL,
+  has_non_text INTEGER NOT NULL CHECK(has_non_text IN (0,1)),
+  UNIQUE(session_id,message_id)
+);
+CREATE INDEX history_order_all ON history_occurrences(
+  accepted_ms DESC, session_id ASC, first_seq DESC, message_id ASC
+);
+CREATE INDEX history_order_session ON history_occurrences(
+  session_id, accepted_ms DESC, first_seq DESC, message_id ASC
+);
+CREATE INDEX history_order_directory ON history_occurrences(
+  effective_cwd, accepted_ms DESC, session_id ASC, first_seq DESC, message_id ASC
+);
+`
+
+const EXPECTED_TABLES = ['history_occurrences', 'history_sessions'] as const
+const EXPECTED_INDEXES = ['history_order_all', 'history_order_directory', 'history_order_session'] as const
+
+const SESSION_COLUMNS = [
+  'session_id', 'header_cwd', 'inherited_cut', 'next_seq', 'effective_cwd',
+  'last_event_hash', 'header_hash', 'source_state', 'uncertain_sources', 'dirty',
+] as const
+const OCCURRENCE_COLUMNS = [
+  'row_id', 'session_id', 'message_id', 'first_seq', 'accepted_ms', 'effective_cwd',
+  'content', 'normalized_content', 'content_sha256', 'has_non_text',
+] as const
+
+/** The index path cannot be opened or is not safe to use; the Host stays up. */
+export class HistorySearchIndexUnavailableError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'HistorySearchIndexUnavailableError'
+  }
+}
+
+/** One derived Session checkpoint. */
+export interface HistorySessionCheckpointRow {
+  readonly sessionId: string
+  readonly headerCwd: string | null
+  readonly inheritedCut: number
+  readonly nextSeq: number
+  readonly effectiveCwd: string | null
+  readonly lastEventHash: string | null
+  readonly headerHash: string
+  readonly sourceState: 'persisted' | 'live'
+  readonly uncertainSources: number
+  readonly dirty: boolean
+}
+
+/** One accepted occurrence to commit. */
+export interface HistoryOccurrenceInput {
+  readonly messageId: string
+  readonly firstEventSeq: number
+  readonly acceptedAt: number
+  readonly effectiveCwd: string | null
+  readonly content: string
+  readonly hasNonText: boolean
+}
+
+/** One transaction's Session checkpoint + first-acceptance rows. */
+export interface HistoryIndexCommitInput {
+  readonly sessionId: string
+  readonly headerHash: string
+  readonly inheritedCut: number
+  /** The caller's expected persisted next seq (0 for a new Session). */
+  readonly baseNextSeq: number
+  readonly nextSeq: number
+  readonly headerCwd: string | null
+  readonly effectiveCwd: string | null
+  readonly lastEventHash: string | null
+  readonly sourceState: 'persisted' | 'live'
+  readonly uncertainSourcesDelta: number
+  readonly occurrences: readonly HistoryOccurrenceInput[]
+}
+
+/** One stored occurrence row (the derived read model). */
+export interface HistoryOccurrenceRow {
+  readonly sessionId: string
+  readonly messageId: string
+  readonly firstEventSeq: number
+  readonly acceptedAt: number
+  readonly effectiveCwd: string | null
+  readonly content: string
+  readonly contentSha256: string
+  readonly hasNonText: boolean
+}
+
+/** One keyset search page. */
+export interface HistoryIndexSearchPage {
+  readonly rows: readonly HistoryOccurrenceRow[]
+  readonly hasMore: boolean
+}
+
+/** One keyset position. */
+export interface HistorySearchAfter {
+  readonly acceptedAt: number
+  readonly sessionId: string
+  readonly firstEventSeq: number
+  readonly messageId: string
+}
+
+export interface HistoryIndexSearchRequest {
+  readonly scope: 'all' | 'session' | 'directory'
+  readonly sessionId?: string
+  readonly cwd?: string
+  /** Empty string is an unfiltered browse. */
+  readonly query: string
+  readonly limit: number
+  readonly after?: HistorySearchAfter
+}
+
+/** SHA-256 of one stored text. */
+export function contentSha256(content: string): string {
+  return createHash('sha256').update(content, 'utf8').digest('hex')
+}
+
+/** Stable JSON for header/event hashing: object keys sorted recursively. */
+export function stableJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null'
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`
+  const record = value as Record<string, unknown>
+  const keys = Object.keys(record).sort()
+  return `{${keys.map(key => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(',')}}`
+}
+
+/** Hash one official Session event by its canonical `seq/type/time/data`. */
+export function sessionEventHash(event: { readonly seq: number; readonly type: string; readonly time: number; readonly data: unknown }): string {
+  return createHash('sha256')
+    .update(stableJson({ seq: event.seq, type: event.type, time: event.time, data: event.data }), 'utf8')
+    .digest('hex')
+}
+
+/** Hash one official Session header's immutable identity facts. */
+export function sessionHeaderHash(header: unknown): string {
+  return createHash('sha256').update(stableJson(header), 'utf8').digest('hex')
+}
+
+function assertOwnedDirectory(path: string, label: string): void {
+  const stat = statSync(path)
+  if (!stat.isDirectory()) throw new HistorySearchIndexUnavailableError(`${label} is not a directory`)
+  if (stat.uid !== process.getuid?.()) {
+    throw new HistorySearchIndexUnavailableError(`${label} is not owned by the current user`)
+  }
+}
+
+/** Create/verify one private directory below the real profile directory. */
+function ensurePrivateDirectory(path: string, label: string): void {
+  if (existsSync(path)) {
+    const link = lstatSync(path)
+    if (link.isSymbolicLink()) throw new HistorySearchIndexUnavailableError(`${label} is a symbolic link`)
+    assertOwnedDirectory(path, label)
+    const mode = statSync(path).mode & 0o777
+    if ((mode & 0o077) !== 0) throw new HistorySearchIndexUnavailableError(`${label} is not private`)
+    return
+  }
+  mkdirSync(path, { mode: 0o700 })
+  chmodSync(path, 0o700)
+}
+
+/** Verify the database file is a regular, owned, private file (never chmod foreign files). */
+function assertPrivateDatabaseFile(path: string): void {
+  const link = lstatSync(path)
+  if (link.isSymbolicLink()) throw new HistorySearchIndexUnavailableError('the derived index file is a symbolic link')
+  if (!link.isFile()) throw new HistorySearchIndexUnavailableError('the derived index path is not a regular file')
+  if (link.uid !== process.getuid?.()) {
+    throw new HistorySearchIndexUnavailableError('the derived index file is not owned by the current user')
+  }
+  if ((link.mode & 0o077) !== 0) {
+    throw new HistorySearchIndexUnavailableError('the derived index file is not private')
+  }
+}
+
+interface RawSessionRow {
+  readonly session_id: string
+  readonly header_cwd: string | null
+  readonly inherited_cut: number
+  readonly next_seq: number
+  readonly effective_cwd: string | null
+  readonly last_event_hash: string | null
+  readonly header_hash: string
+  readonly source_state: 'persisted' | 'live'
+  readonly uncertain_sources: number
+  readonly dirty: number
+}
+
+interface RawOccurrenceRow {
+  readonly session_id: string
+  readonly message_id: string
+  readonly first_seq: number
+  readonly accepted_ms: number
+  readonly effective_cwd: string | null
+  readonly content: string
+  readonly content_sha256: string
+  readonly has_non_text: number
+}
+
+function checkpointOfRaw(row: RawSessionRow): HistorySessionCheckpointRow {
+  return {
+    sessionId: row.session_id,
+    headerCwd: row.header_cwd,
+    inheritedCut: row.inherited_cut,
+    nextSeq: row.next_seq,
+    effectiveCwd: row.effective_cwd,
+    lastEventHash: row.last_event_hash,
+    headerHash: row.header_hash,
+    sourceState: row.source_state,
+    uncertainSources: row.uncertain_sources,
+    dirty: row.dirty === 1,
+  }
+}
+
+function occurrenceOfRaw(row: RawOccurrenceRow): HistoryOccurrenceRow {
+  return {
+    sessionId: row.session_id,
+    messageId: row.message_id,
+    firstEventSeq: row.first_seq,
+    acceptedAt: row.accepted_ms,
+    effectiveCwd: row.effective_cwd,
+    content: row.content,
+    contentSha256: row.content_sha256,
+    hasNonText: row.has_non_text === 1,
+  }
+}
+
+function schemaNames(db: DatabaseSync): { tables: string[]; indexes: string[] } {
+  const rows = db.prepare(
+    "SELECT name, type FROM sqlite_master WHERE type IN ('table','index') AND name NOT LIKE 'sqlite_%' ORDER BY name",
+  ).all() as Array<{ name: string; type: string }>
+  return {
+    tables: rows.filter(row => row.type === 'table').map(row => row.name),
+    indexes: rows.filter(row => row.type === 'index').map(row => row.name),
+  }
+}
+
+function tableColumns(db: DatabaseSync, table: string): string[] {
+  const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
+  return rows.map(row => row.name)
+}
+
+type SchemaState = 'fresh' | 'ok' | 'foreign' | 'corrupt'
+
+function inspectSchema(db: DatabaseSync): SchemaState {
+  const applicationId = (db.prepare('PRAGMA application_id').get() as { application_id: number }).application_id
+  const userVersion = (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version
+  const names = schemaNames(db)
+  const empty = names.tables.length === 0 && names.indexes.length === 0
+  if (empty) {
+    if (applicationId === 0 && userVersion === 0) return 'fresh'
+    return 'foreign'
+  }
+  if (applicationId !== HISTORY_SEARCH_SQLITE_APPLICATION_ID || userVersion !== HISTORY_SEARCH_SQLITE_USER_VERSION) {
+    return 'foreign'
+  }
+  if (names.tables.length !== EXPECTED_TABLES.length || names.indexes.length !== EXPECTED_INDEXES.length) return 'corrupt'
+  for (const table of EXPECTED_TABLES) {
+    if (!names.tables.includes(table)) return 'corrupt'
+  }
+  for (const index of EXPECTED_INDEXES) {
+    if (!names.indexes.includes(index)) return 'corrupt'
+  }
+  if (tableColumns(db, 'history_sessions').join(',') !== SESSION_COLUMNS.join(',')) return 'corrupt'
+  if (tableColumns(db, 'history_occurrences').join(',') !== OCCURRENCE_COLUMNS.join(',')) return 'corrupt'
+  return 'ok'
+}
+
+/** Quarantine one own-v1 file set under private names; never deletes data. */
+function quarantineDatabaseFile(dbPath: string): void {
+  const stamp = String(Date.now())
+  for (const suffix of ['', '-wal', '-shm']) {
+    const source = `${dbPath}${suffix}`
+    if (!existsSync(source)) continue
+    renameSync(source, `${dbPath}.quarantine-${stamp}${suffix}`)
+  }
+}
+
+/** Whether an open/validate failure is a corrupt own database rather than a foreign one. */
+function isCorruptionError(error: unknown): boolean {
+  // Node's SQLite binding carries the numeric SQLITE error code; 11 is
+  // SQLITE_CORRUPT and 26 is SQLITE_NOTADB. The generic `code` is only a
+  // binding-level class and is not specific enough on its own.
+  const errcode = (error as { errcode?: unknown } | undefined)?.errcode
+  if (errcode === 11 || errcode === 26) return true
+  const message = error instanceof Error ? error.message : ''
+  return /database disk image is malformed|file is not a database/iu.test(message)
+}
+
+/**
+ * The disposable derived index. ONE instance owns ONE database handle and is
+ * only used from the Host service's serial write/read paths.
+ */
+export class HistorySearchIndex {
+  readonly path: string
+  private readonly db: DatabaseSync
+  private closed = false
+
+  private constructor(path: string, db: DatabaseSync) {
+    this.path = path
+    this.db = db
+  }
+
+  /**
+   * Open (or initialize) the profile-local derived index.
+   *
+   * A foreign database, a non-private path or an unowned directory refuses the
+   * index (the Host stays Ready and reports `unavailable`). A known v1 file
+   * that fails schema validation or SQLite integrity is quarantined and
+   * rebuilt from an empty schema; the original bytes are preserved.
+   */
+  static open(options: { readonly profileDir: string; readonly signal?: AbortSignal }): HistorySearchIndex {
+    options.signal?.throwIfAborted()
+    const realProfile = realpathSync(options.profileDir)
+    assertOwnedDirectory(realProfile, 'the Host profile directory')
+    const privateDir = join(realProfile, PRIVATE_DIRECTORY)
+    ensurePrivateDirectory(privateDir, 'the private TUI directory')
+    const historyDir = join(privateDir, HISTORY_DIRECTORY)
+    ensurePrivateDirectory(historyDir, 'the history search directory')
+    const dbPath = join(historyDir, DATABASE_FILE)
+    let created = !existsSync(dbPath)
+    if (!created) assertPrivateDatabaseFile(dbPath)
+
+    // Inspect an existing file READ-ONLY first: a foreign database must be
+    // refused without any write (no journal-mode flag, no schema change).
+    if (!created) {
+      let probe: DatabaseSync | undefined
+      let state: SchemaState | undefined
+      try {
+        probe = new DatabaseSync(dbPath, { readOnly: true })
+        state = inspectSchema(probe)
+      } catch (error) {
+        // A WAL that needs recovery can refuse a read-only open; that is not a
+        // corruption verdict — fall through to the read-write validation below.
+        state = isCorruptionError(error) ? 'corrupt' : undefined
+      } finally {
+        probe?.close()
+      }
+      if (state === 'foreign') {
+        throw new HistorySearchIndexUnavailableError('the derived history index path holds a foreign database')
+      }
+      if (state === 'corrupt') {
+        quarantineDatabaseFile(dbPath)
+        created = true
+      }
+    }
+
+    let db: DatabaseSync
+    try {
+      db = new DatabaseSync(dbPath)
+    } catch (error) {
+      if (isCorruptionError(error)) {
+        quarantineDatabaseFile(dbPath)
+        db = new DatabaseSync(dbPath)
+        created = true
+      } else {
+        throw new HistorySearchIndexUnavailableError('the derived history index could not be opened')
+      }
+    }
+    try {
+      db.exec('PRAGMA journal_mode = WAL')
+      db.exec('PRAGMA synchronous = NORMAL')
+      db.exec('PRAGMA busy_timeout = 1000')
+      db.exec('PRAGMA foreign_keys = ON')
+      const schema = inspectSchema(db)
+      if (schema === 'foreign') {
+        db.close()
+        throw new HistorySearchIndexUnavailableError('the derived history index path holds a foreign database')
+      }
+      if (schema === 'corrupt' || (created && schema !== 'fresh')) {
+        db.close()
+        quarantineDatabaseFile(dbPath)
+        return HistorySearchIndex.open({ profileDir: realProfile, ...(options.signal === undefined ? {} : { signal: options.signal }) })
+      }
+      if (schema === 'fresh') {
+        db.exec('BEGIN IMMEDIATE')
+        try {
+          db.exec(CREATE_SCHEMA_SQL)
+          db.exec(`PRAGMA application_id = ${String(HISTORY_SEARCH_SQLITE_APPLICATION_ID)}`)
+          db.exec(`PRAGMA user_version = ${String(HISTORY_SEARCH_SQLITE_USER_VERSION)}`)
+          db.exec('COMMIT')
+        } catch (error) {
+          try {
+            db.exec('ROLLBACK')
+          } catch {
+            // The primary failure below is the only error that matters.
+          }
+          db.close()
+          throw error
+        }
+      }
+    } catch (error) {
+      if (error instanceof HistorySearchIndexUnavailableError) throw error
+      try {
+        db.close()
+      } catch {
+        // Already closed by a validation branch above.
+      }
+      if (isCorruptionError(error)) {
+        quarantineDatabaseFile(dbPath)
+        return HistorySearchIndex.open({ profileDir: realProfile, ...(options.signal === undefined ? {} : { signal: options.signal }) })
+      }
+      throw new HistorySearchIndexUnavailableError('the derived history index could not be initialized')
+    }
+    if (created) chmodSync(dbPath, 0o600)
+    options.signal?.throwIfAborted()
+    return new HistorySearchIndex(dbPath, db)
+  }
+
+  close(): void {
+    if (this.closed) return
+    this.closed = true
+    this.db.close()
+  }
+
+  private assertOpen(): void {
+    if (this.closed) throw new Error('history search index: the database is closed')
+  }
+
+  private transaction<T>(work: () => T): T {
+    this.assertOpen()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const result = work()
+      this.db.exec('COMMIT')
+      return result
+    } catch (error) {
+      try {
+        this.db.exec('ROLLBACK')
+      } catch {
+        // The primary failure below is the only error that matters.
+      }
+      throw error
+    }
+  }
+
+  listSessions(): HistorySessionCheckpointRow[] {
+    this.assertOpen()
+    const rows = this.db.prepare('SELECT * FROM history_sessions ORDER BY session_id').all() as unknown as RawSessionRow[]
+    return rows.map(checkpointOfRaw)
+  }
+
+  checkpointOf(sessionId: string): HistorySessionCheckpointRow | undefined {
+    this.assertOpen()
+    const row = this.db.prepare('SELECT * FROM history_sessions WHERE session_id = ?').get(sessionId) as unknown as RawSessionRow | undefined
+    return row === undefined ? undefined : checkpointOfRaw(row)
+  }
+
+  deleteSession(sessionId: string): void {
+    this.transaction(() => {
+      this.db.prepare('DELETE FROM history_occurrences WHERE session_id = ?').run(sessionId)
+      this.db.prepare('DELETE FROM history_sessions WHERE session_id = ?').run(sessionId)
+    })
+  }
+
+  /** Delete every derived Session not present in the authoritative set. */
+  deleteSessionsExcept(keep: ReadonlySet<string>): string[] {
+    const existing = this.listSessions().map(row => row.sessionId)
+    const removed = existing.filter(sessionId => !keep.has(sessionId))
+    for (const sessionId of removed) this.deleteSession(sessionId)
+    return removed
+  }
+
+  /** Drop one Session's derived rows before a full rebuild from its official log. */
+  resetSession(sessionId: string): void {
+    this.deleteSession(sessionId)
+  }
+
+  /**
+   * Commit ONE Session batch: first-acceptance occurrences plus the checkpoint.
+   * `baseNextSeq` must equal the persisted checkpoint so a stale/replaced
+   * writer cannot silently skip or duplicate events.
+   */
+  commitBatch(input: HistoryIndexCommitInput): void {
+    if (!Number.isSafeInteger(input.baseNextSeq) || input.baseNextSeq < 0) {
+      throw new Error('history search index: baseNextSeq must be a non-negative safe integer')
+    }
+    if (!Number.isSafeInteger(input.nextSeq) || input.nextSeq < input.baseNextSeq) {
+      throw new Error('history search index: nextSeq must be a non-negative safe integer >= baseNextSeq')
+    }
+    this.transaction(() => {
+      const existing = this.db.prepare('SELECT * FROM history_sessions WHERE session_id = ?')
+        .get(input.sessionId) as unknown as RawSessionRow | undefined
+      const persistedNext = existing?.next_seq ?? 0
+      if (persistedNext !== input.baseNextSeq) {
+        throw new Error('history search index: the persisted Session checkpoint moved underneath this batch')
+      }
+      if (existing === undefined) {
+        this.db.prepare(
+          `INSERT INTO history_sessions (
+            session_id, header_cwd, inherited_cut, next_seq, effective_cwd, last_event_hash,
+            header_hash, source_state, uncertain_sources, dirty
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+        ).run(
+          input.sessionId,
+          input.headerCwd,
+          input.inheritedCut,
+          input.nextSeq,
+          input.effectiveCwd,
+          input.lastEventHash,
+          input.headerHash,
+          input.sourceState,
+          input.uncertainSourcesDelta,
+        )
+      } else {
+        this.db.prepare(
+          `UPDATE history_sessions SET
+            header_cwd = ?, inherited_cut = ?, next_seq = ?, effective_cwd = ?, last_event_hash = ?,
+            header_hash = ?, source_state = ?, uncertain_sources = uncertain_sources + ?, dirty = 0
+          WHERE session_id = ?`,
+        ).run(
+          input.headerCwd,
+          input.inheritedCut,
+          input.nextSeq,
+          input.effectiveCwd,
+          input.lastEventHash,
+          input.headerHash,
+          input.sourceState,
+          input.uncertainSourcesDelta,
+          input.sessionId,
+        )
+      }
+      const insertOccurrence = this.db.prepare(
+        `INSERT OR IGNORE INTO history_occurrences (
+          session_id, message_id, first_seq, accepted_ms, effective_cwd,
+          content, normalized_content, content_sha256, has_non_text
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      for (const occurrence of input.occurrences) {
+        insertOccurrence.run(
+          input.sessionId,
+          occurrence.messageId,
+          occurrence.firstEventSeq,
+          occurrence.acceptedAt,
+          occurrence.effectiveCwd,
+          occurrence.content,
+          occurrence.content.toLowerCase(),
+          contentSha256(occurrence.content),
+          occurrence.hasNonText ? 1 : 0,
+        )
+      }
+    })
+  }
+
+  /** Update one Session's completeness markers without touching its rows. */
+  markSession(input: {
+    readonly sessionId: string
+    readonly dirty?: boolean
+    readonly sourceState?: 'persisted' | 'live'
+    readonly uncertainSources?: number
+  }): void {
+    this.transaction(() => {
+      if (input.dirty !== undefined) {
+        this.db.prepare('UPDATE history_sessions SET dirty = ? WHERE session_id = ?')
+          .run(input.dirty ? 1 : 0, input.sessionId)
+      }
+      if (input.sourceState !== undefined) {
+        this.db.prepare('UPDATE history_sessions SET source_state = ? WHERE session_id = ?')
+          .run(input.sourceState, input.sessionId)
+      }
+      if (input.uncertainSources !== undefined) {
+        this.db.prepare('UPDATE history_sessions SET uncertain_sources = ? WHERE session_id = ?')
+          .run(input.uncertainSources, input.sessionId)
+      }
+    })
+  }
+
+  search(request: HistoryIndexSearchRequest): HistoryIndexSearchPage {
+    this.assertOpen()
+    const conditions: string[] = []
+    const parameters: Array<string | number> = []
+    const needle = request.query.toLowerCase()
+    if (needle !== '') {
+      conditions.push('instr(normalized_content, ?) > 0')
+      parameters.push(needle)
+    }
+    if (request.scope === 'session') {
+      conditions.push('session_id = ?')
+      parameters.push(request.sessionId as string)
+    } else if (request.scope === 'directory') {
+      conditions.push('effective_cwd = ?')
+      parameters.push(request.cwd as string)
+    }
+    const after = request.after
+    if (after !== undefined) {
+      if (request.scope === 'session') {
+        conditions.push(`(
+          accepted_ms < ? OR (accepted_ms = ? AND (
+            first_seq < ? OR (first_seq = ? AND message_id > ?)
+          ))
+        )`)
+        parameters.push(after.acceptedAt, after.acceptedAt, after.firstEventSeq, after.firstEventSeq, after.messageId)
+      } else {
+        conditions.push(`(
+          accepted_ms < ? OR (accepted_ms = ? AND (
+            session_id > ? OR (session_id = ? AND (
+              first_seq < ? OR (first_seq = ? AND message_id > ?)
+            ))
+          ))
+        )`)
+        parameters.push(
+          after.acceptedAt, after.acceptedAt,
+          after.sessionId, after.sessionId,
+          after.firstEventSeq, after.firstEventSeq, after.messageId,
+        )
+      }
+    }
+    const where = conditions.length === 0 ? '' : `WHERE ${conditions.join(' AND ')}`
+    const rows = this.db.prepare(
+      `SELECT session_id, message_id, first_seq, accepted_ms, effective_cwd, content, content_sha256, has_non_text
+       FROM history_occurrences
+       ${where}
+       ORDER BY accepted_ms DESC, session_id ASC, first_seq DESC, message_id ASC
+       LIMIT ?`,
+    ).all(...parameters, request.limit + 1) as unknown as RawOccurrenceRow[]
+    return {
+      rows: rows.slice(0, request.limit).map(occurrenceOfRaw),
+      hasMore: rows.length > request.limit,
+    }
+  }
+
+  occurrence(sessionId: string, messageId: string): HistoryOccurrenceRow | undefined {
+    this.assertOpen()
+    const row = this.db.prepare(
+      `SELECT session_id, message_id, first_seq, accepted_ms, effective_cwd, content, content_sha256, has_non_text
+       FROM history_occurrences WHERE session_id = ? AND message_id = ?`,
+    ).get(sessionId, messageId) as unknown as RawOccurrenceRow | undefined
+    return row === undefined ? undefined : occurrenceOfRaw(row)
+  }
+
+  sessionCount(): number {
+    this.assertOpen()
+    return (this.db.prepare('SELECT COUNT(*) AS count FROM history_sessions').get() as { count: number }).count
+  }
+
+  occurrenceCount(): number {
+    this.assertOpen()
+    return (this.db.prepare('SELECT COUNT(*) AS count FROM history_occurrences').get() as { count: number }).count
+  }
+}

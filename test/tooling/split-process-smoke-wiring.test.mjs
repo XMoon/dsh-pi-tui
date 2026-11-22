@@ -535,6 +535,11 @@ test('every registry entry declares a conservative platform list and the audited
     // G-ACP1B/B3 adds only the packaged Host's v1 entry/capability conformance
     // over the same shared Split harness and platform-specific ACP endpoint.
     'acp.v1-conformance-b3',
+    // The Host accepted-input history search case drives only the shared Split
+    // harness (tmux PTY, authenticated Host, real official Session admission,
+    // two real Client PIDs and a clean Host restart); it uses no
+    // platform-specific process/seat primitive beyond that shared seam.
+    'surface.host-history-search-pr1',
   ]
   const cases = listSelectableCases()
   for (const entry of cases) {

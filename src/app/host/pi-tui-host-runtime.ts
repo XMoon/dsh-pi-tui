@@ -17,6 +17,7 @@
  * the private `piTuiCredentialRecords` Host service (stored record metadata)
  * the private `piTuiSessionPolicy` Host service (exact-Session policy)
  * the private `piTuiDefaultModel` Host service (sessionless default model)
+ * the private `piTuiHistorySearch` Host service (accepted-input history search)
  * ```
  *
  * The row publishes the data-free `piTuiHostReady` gate only after the
@@ -94,6 +95,13 @@ import {
 import { PI_TUI_SESSION_POLICY_NAMESPACE } from '../../runtime/remote/pi-tui-session-policy-contract.ts'
 import { PI_TUI_DEFAULT_MODEL_NAMESPACE } from '../../runtime/remote/pi-tui-default-model-contract.ts'
 import { PI_TUI_PROMPT_PRESENCE_NAMESPACE } from '../../runtime/remote/pi-tui-prompt-presence-contract.ts'
+import { PI_TUI_HISTORY_SEARCH_NAMESPACE } from '../../runtime/remote/pi-tui-history-search-contract.ts'
+import {
+  PiTuiHistorySearchHostService,
+  type HistorySearchPersistenceLike,
+  type HistorySearchProfileContextLike,
+  type HistorySearchQueryLike,
+} from './features/history-search.ts'
 
 /** Stable Cordis plugin name (the Loader row id in the Host-only overlay). */
 export const name = 'pi-tui-host-runtime'
@@ -334,6 +342,21 @@ export async function apply(ctx: Context, _config: TuiConfigValue): Promise<void
     })
     fibers.push(promptPresenceFiber)
     await promptPresenceFiber
+    // The Host accepted-input history search: ONE private child fiber inside
+    // the built-in runtime. Its index bootstrap is owned by the service and
+    // never blocks Host readiness; the exact binding is still asserted before
+    // piTuiHostReady is published. The official persistence/query/profile
+    // services are resolved PER CALL, so a Host without them still becomes
+    // Ready and reports the history index as a definite `unavailable`.
+    const historySearchFiber = ctx.inject(PiTuiHistorySearchHostService.inject, pluginCtx => {
+      new PiTuiHistorySearchHostService(pluginCtx, {
+        profileContext: () => ctx.reflect.get('profileContext') as HistorySearchProfileContextLike | undefined,
+        sessionPersistence: () => ctx.reflect.get('sessionPersistence') as HistorySearchPersistenceLike | undefined,
+        sessionQuery: () => ctx.reflect.get('sessionQuery') as HistorySearchQueryLike | undefined,
+      })
+    })
+    fibers.push(historySearchFiber)
+    await historySearchFiber
     assertPrivateBinding(ctx, 'piTuiFileReferences', PI_TUI_FILE_REFERENCES_NAMESPACE)
     assertPrivateBinding(ctx, 'piTuiTerminalProgress', PI_TUI_TERMINAL_PROGRESS_NAMESPACE)
     assertPrivateBinding(ctx, 'piTuiWebAccess', PI_TUI_WEB_ACCESS_NAMESPACE)
@@ -345,6 +368,7 @@ export async function apply(ctx: Context, _config: TuiConfigValue): Promise<void
     assertPrivateBinding(ctx, PI_TUI_SESSION_POLICY_NAMESPACE, PI_TUI_SESSION_POLICY_NAMESPACE)
     assertPrivateBinding(ctx, PI_TUI_DEFAULT_MODEL_NAMESPACE, PI_TUI_DEFAULT_MODEL_NAMESPACE)
     assertPrivateBinding(ctx, PI_TUI_PROMPT_PRESENCE_NAMESPACE, PI_TUI_PROMPT_PRESENCE_NAMESPACE)
+    assertPrivateBinding(ctx, PI_TUI_HISTORY_SEARCH_NAMESPACE, PI_TUI_HISTORY_SEARCH_NAMESPACE)
     // M6 PR-C C3: install the SAME per-Agent TUI prompt policy the Direct
     // branch installs, on every Host Agent (and every later one). The sampler
     // reads the presence service's current fold through the SAME canonical

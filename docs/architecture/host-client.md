@@ -1588,6 +1588,36 @@ Connection generation becomes `SupersededReadError`, never the new generation's
 definite outcome. The preview itself holds at most one 120-line page and reads no
 other file — see `transcript.md` for the panel's presentation rules.
 
+## Host accepted input history search (Host-owned)
+
+The Daemon Host derives a searchable projection of the Profile's accepted user
+input from the OFFICIAL Session log. This is a Host-owned read surface; it does
+not change the Client-local input-history format, the Direct JSONL recall path
+or the current Ctrl+R/↑↓ contract owned by
+[input-history.md](./input-history.md).
+
+| Fact | Authority |
+| --- | --- |
+| Accepted occurrence | the official durable `session/event`: an `agent/inbox/spliced.inserted[]` or `user/message` with `source.kind === 'user'` AND a non-empty `rpcId`; the FIRST event per `(sessionId, messageId)` is the one immutable occurrence |
+| Event-time directory | Session header `cwd` folded with each `working-directory/change` in seq order at first acceptance; a missing directory stays `null` (never the Client cwd) |
+| Fork inheritance | the official `inheritedEventCount` cut: prefix events fold cwd but never create a child occurrence |
+| Derived index | ONE disposable SQLite projection under the running Profile (`$PROFILE/.dsh-pi-tui/history-search/v1.sqlite`, private directory/file modes); it is rebuilt from official reads whenever the official log and the projection disagree and is never a persistence authority |
+| Completeness | the index publishes `loading`, `ready`, `incomplete` (`source-uncertain`, `reconciling`, `resource-limit`, `source-read-failed`) or `unavailable` (`index-unavailable`, `service-missing`); a partial or failing pass never answers an authoritative empty list |
+| Live growth | the official `session/event` plane feeds a bounded buffer; reaching the bound marks the affected Sessions dirty and re-reads the official source instead of dropping accepted rows |
+| Remote surface | the private `piTuiHistorySearch` namespace with exactly two Owner-only unary methods: `search` (three scopes, keyset cursor, bounded preview + immutable content hash) and `readText` (exact original text chunks by content hash) |
+| Direct | unchanged: the Direct Host never mounts this index and keeps its existing Client-local input history |
+
+The search is a literal Unicode lower-case substring match over the first
+accepted text. `all` addresses every accessible Session of the authenticated
+Profile, `session` one exact id, and `directory` the event-time effective
+directory (path-normalized; never a realpath or a Client fallback). The preview
+is bounded and explicitly not recoverable full text; full text is read only
+through `readText`, keyed by the stored content hash. A keyset cursor is bound to
+one Host service incarnation and index revision: any newer observed event makes
+it `stale` instead of silently re-ranking the caller's page. The Host refuses a
+non-Owner, an ended peer or an aborted invocation before any official read or
+index query.
+
 ## Currentness, operation ownership and request ids
 
 Capture the generation/identity before dispatch, re-check it after every await

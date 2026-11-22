@@ -56,6 +56,10 @@ import type { LocalInstanceRecord } from './local-discovery.ts'
 import type { LocalClientTransport } from './local-transport.ts'
 import type { ProfileDaemonAdmin } from './local-profile-daemon-admin.ts'
 import type { SplitClientInteractionDeliveryOwner } from './client-interaction-delivery.ts'
+import {
+  parseHistoryReadTextRequest,
+  parseHistorySearchRequest,
+} from '../../runtime/remote/pi-tui-history-search-contract.ts'
 
 export type {
   MountedRemoteClientDomainPrerequisites,
@@ -1585,6 +1589,65 @@ async function startSurfaceLocalClient(
           })
         }
       }, { diag: readAuthorityDiag })
+    })
+  }
+  // Host accepted-input history search qualification input: exercise the
+  // private `piTuiHistorySearch` methods on the REAL mounted Client namespace.
+  // The request is a small JSON operation file under the isolated qualification
+  // work root, and every answer is one structured telemetry record. This is an
+  // observation seam only: it creates no Client Context, mounts nothing and
+  // never reads a Host file directly.
+  const historySearchRequestPath = process.env.SPLIT_PROCESS_CLIENT_HISTORY_SEARCH_REQUEST
+  if (historySearchRequestPath !== undefined && historySearchRequestPath !== '') {
+    const historySearchDiag = composition.diag
+    if (historySearchDiag === undefined) {
+      throw new Error('local client entry: the history-search qualification requires the Client diagnostics sink')
+    }
+    process.on('SIGUSR2', () => {
+      runDetached('history-search qualification', async () => {
+        let nonce: unknown
+        const emit = (record: Record<string, unknown>): void => {
+          composition.onQualification?.({
+            op: 'history-search-proof',
+            ...(nonce === undefined ? {} : { nonce }),
+            ...record,
+          })
+        }
+        try {
+          const request = JSON.parse(readFileSync(historySearchRequestPath, 'utf8')) as Record<string, unknown>
+          nonce = request.nonce
+          const { nonce: _nonce, op, ...input } = request
+          if (op === 'search') {
+            const exact = parseHistorySearchRequest(input)
+            const result = await domains.remote.piTuiHistorySearch.search(exact)
+            if (!result.ok) {
+              emit({ phase: 'failed', errorCode: result.error.code, error: 'the Host refused the history-search request' })
+              return
+            }
+            emit({ phase: 'result', answer: result.value })
+            return
+          }
+          if (op === 'readText') {
+            const exact = parseHistoryReadTextRequest(input)
+            const result = await domains.remote.piTuiHistorySearch.readText(exact)
+            if (!result.ok) {
+              emit({ phase: 'failed', errorCode: result.error.code, error: 'the Host refused the history-read request' })
+              return
+            }
+            emit({ phase: 'result', answer: result.value })
+            return
+          }
+          throw new Error(`history-search probe: unsupported op ${JSON.stringify(op)}`)
+        } catch (error) {
+          emit({
+            phase: 'failed',
+            error: error instanceof Error ? error.message : String(error),
+            ...(typeof error === 'object' && error !== null && typeof (error as { code?: unknown }).code === 'string'
+              ? { errorCode: (error as { code: string }).code }
+              : {}),
+          })
+        }
+      }, { diag: historySearchDiag })
     })
   }
   // T34 qualification input: close the writer's pre-dispatch admission while

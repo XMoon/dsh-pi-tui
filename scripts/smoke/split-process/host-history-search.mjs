@@ -1,0 +1,607 @@
+/**
+ * PR1 Host accepted-input history search: the REAL installed Host → official
+ * durable Session event → private `piTuiHistorySearch` → authenticated Split
+ * Client path.
+ *
+ * The scene starts ONE real Host and TWO real PTY surface Clients (different
+ * OS PIDs, same isolated Host home). Client A submits unique prompts through
+ * the normal surface; the case first proves the official persisted event
+ * (`agent/inbox/spliced` / `user/message`) with the independent
+ * `hostSessionEvents` reader, THEN Client B reads the private namespace on its
+ * already-mounted `domains.remote.piTuiHistorySearch` through the
+ * qualification-only `SPLIT_PROCESS_CLIENT_HISTORY_SEARCH_REQUEST` input.
+ *
+ * Pinned here: cross-Client exact occurrence identity (id, cwd, seq, time,
+ * preview, content hash), exact-text recovery by chunks, both keyset pages and
+ * cursor staleness, same-text distinct occurrences, Session/directory/All
+ * scopes, official queue edit/remove/steer stability, real `/fork` inheritance,
+ * event-time cwd changes and a clean Host restart replay.
+ *
+ * @module split-process/host-history-search
+ */
+
+import { createHash } from 'node:crypto'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
+
+import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
+import { hostStatus } from '../../lib/split-smoke-processes.mjs'
+import { readC1WorkEvents, waitForC1WorkEvent } from '../../lib/split-smoke-fixtures.mjs'
+import {
+  hostSessionEvents,
+  waitForHostSessionEvent,
+  waitForHostSessionEventAfter,
+  waitForHostSessionHeader,
+} from '../../lib/split-smoke-sessions.mjs'
+import { createC1Scene } from './c1-scene.mjs'
+
+function assert(condition, message) {
+  if (!condition) throw new SplitSmokeAssertionError(message)
+}
+
+function textOfMessage(value) {
+  if (value === null || typeof value !== 'object') return ''
+  const content = value.content
+  if (!Array.isArray(content)) return ''
+  return content.filter(part => part?.type === 'text' && typeof part.text === 'string').map(part => part.text).join('\n')
+}
+
+/** Whether one durable message is a real user-rpc admission, never an injected notice. */
+function isUserRpcMessage(message) {
+  return message !== null && typeof message === 'object'
+    && typeof message.id === 'string' && message.id !== ''
+    && message.source?.kind === 'user'
+    && typeof message.source.rpcId === 'string' && message.source.rpcId !== ''
+}
+
+/** The first durable accepted message for `text` and the event that proved it. */
+function acceptedMessage(events, text) {
+  for (const event of events) {
+    if (event.type === 'agent/inbox/spliced' && Array.isArray(event.data?.inserted)) {
+      const message = event.data.inserted.find(candidate => textOfMessage(candidate) === text && isUserRpcMessage(candidate))
+      if (message !== undefined) return { event, message }
+    }
+    if (event.type === 'user/message' && textOfMessage(event.data) === text && isUserRpcMessage(event.data)) {
+      return { event, message: event.data }
+    }
+  }
+  return undefined
+}
+
+/** Find the first durable event whose accepted text is exactly `text`. */
+async function waitForAcceptedMessage(dshHome, sessionId, text, label, timeoutMs = 120_000) {
+  const started = Date.now()
+  while (Date.now() - started < timeoutMs) {
+    const events = hostSessionEvents(dshHome, sessionId)
+    const found = events === undefined ? undefined : acceptedMessage(events, text)
+    if (found !== undefined) return found
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+  throw new SplitSmokeAssertionError(`${label}: no durable accepted event for ${JSON.stringify(text)} in Session ${sessionId}`)
+}
+
+/** Send one prompt through the real Client surface; callers wait the durable event. */
+async function submitPrompt(client, text) {
+  client.send(`${text}\r`)
+}
+
+let probeSequence = 0
+
+/** One qualification-only history-search request on the already-mounted Client namespace. */
+async function probe(client, requestPath, request, label, timeoutMs = 120_000) {
+  const nonce = `hsp-${String(process.pid)}-${String(++probeSequence)}`
+  writeFileSync(requestPath, JSON.stringify({ nonce, ...request }), { mode: 0o600 })
+  client.signalBusiness('SIGUSR2')
+  const record = await client.waitFor(candidate => candidate.m4b2s === 'qualification'
+    && candidate.op === 'history-search-proof'
+    && candidate.nonce === nonce
+    && (candidate.phase === 'result' || candidate.phase === 'failed'),
+  `${label} history record`, timeoutMs)
+  assert(record.phase === 'result', `${label}: the Client history read failed: ${JSON.stringify(record)}`)
+  return record.answer
+}
+
+async function search(client, requestPath, request, label) {
+  return probe(client, requestPath, { op: 'search', ...request }, label)
+}
+
+async function readText(client, requestPath, request, label) {
+  return probe(client, requestPath, { op: 'readText', ...request }, label)
+}
+
+/** Poll the search until the asynchronous index leaves `loading`. */
+async function searchSettled(client, requestPath, request, label, timeoutMs = 120_000) {
+  const started = Date.now()
+  while (Date.now() - started < timeoutMs) {
+    const answer = await search(client, requestPath, request, label)
+    if (answer.kind !== 'loading') return answer
+    await new Promise(resolve => setTimeout(resolve, 100))
+  }
+  throw new SplitSmokeAssertionError(`${label}: history search stayed loading for ${String(timeoutMs)}ms`)
+}
+
+function assertReady(answer, label) {
+  assert(answer.kind === 'ready', `${label}: expected ready, got ${JSON.stringify(answer)}`)
+  return answer
+}
+
+function sha256(text) {
+  return createHash('sha256').update(text, 'utf8').digest('hex')
+}
+
+/** Read one occurrence's exact text through bounded chunks and prove identity. */
+async function readFullText(client, requestPath, item, label, chunkLimit = 5) {
+  const parts = []
+  let offset = 0
+  for (let pages = 0; pages < 10_000; pages += 1) {
+    const answer = await readText(client, requestPath, {
+      sessionId: item.sessionId,
+      messageId: item.messageId,
+      contentSha256: item.contentSha256,
+      offset,
+      limit: chunkLimit,
+    }, `${label} chunk ${String(offset)}`)
+    assert(answer.kind === 'ready', `${label}: readText at ${String(offset)} returned ${JSON.stringify(answer)}`)
+    assert(answer.contentLength === item.contentLength,
+      `${label}: readText contentLength ${String(answer.contentLength)} != item ${String(item.contentLength)}`)
+    parts.push(answer.chunk)
+    if (answer.nextOffset === null) break
+    assert(answer.nextOffset > offset, `${label}: readText did not advance (offset ${String(offset)} -> ${String(answer.nextOffset)})`)
+    offset = answer.nextOffset
+  }
+  return parts.join('')
+}
+
+/**
+ * One test-only Host plugin installed only into THIS smoke's isolated profile.
+ * It uses official Host services (workingDirectory/sessionController) to
+ * exercise event-time cwd changes and real queue edit/remove while a Turn is
+ * held; it writes bounded proof lines and never touches production code.
+ */
+const EXTRA_FIXTURE_SOURCE = [
+  "import { appendFileSync } from 'node:fs'",
+  "export const name = 'host-history-search-extra'",
+  "export const inject = ['agents', 'workingDirectory', 'sessionController']",
+  "const proof = process.env.HISTORY_SEARCH_EXTRA_PROOF",
+  "const record = (kind, fields = {}) => {",
+  "  if (proof !== undefined && proof !== '') appendFileSync(proof, JSON.stringify({ kind, ...fields, time: Date.now() }) + '\\n', { mode: 0o600 })",
+  "}",
+  "function textOf(value) {",
+  "  if (value === null || typeof value !== 'object' || !Array.isArray(value.content)) return ''",
+  "  return value.content.filter(part => part?.type === 'text' && typeof part.text === 'string').map(part => part.text).join('\\n')",
+  "}",
+  "export function apply(ctx) {",
+  "  record('plugin-loaded')",
+  "  ctx.on('session/event', (session, event) => {",
+  "    const cwdMarker = (event.type === 'user/message' && textOf(event.data) === 'hsp-cwd-switch')",
+  "      || (event.type === 'agent/inbox/spliced' && Array.isArray(event.data?.inserted) && event.data.inserted.some(message => textOf(message) === 'hsp-cwd-switch'))",
+  "    if (cwdMarker) {",
+  "      const agent = ctx.agents.get(String(session.id))",
+  "      const target = process.env.HISTORY_SEARCH_CWD_TARGET",
+  "      if (agent === undefined || target === undefined || target === '') { record('cwd-error', { sessionId: String(session.id) }); return }",
+  "      ctx.workingDirectory.set(agent, target).then(cwd => record('cwd-set', { sessionId: String(session.id), cwd })).catch(error => record('cwd-error', { sessionId: String(session.id), error: String(error) }))",
+  "    }",
+  "    if (event.type === 'agent/inbox/spliced' && Array.isArray(event.data?.inserted)) {",
+  "      const sessionId = String(session.id)",
+  "      const target = event.data.inserted.find(message => textOf(message) === 'hsp-queue-target')",
+  "      if (target !== undefined) {",
+  "        const itemId = String(target.id)",
+  "        const run = async () => {",
+  "          record('queue-inserted', { sessionId, itemId })",
+  "          await ctx.sessionController.updateQueue({ sessionId, itemId, action: { kind: 'edit', content: [{ type: 'text', text: 'hsp-queue-edited' }] } })",
+  "          record('queue-edited', { sessionId, itemId })",
+  "          await ctx.sessionController.updateQueue({ sessionId, itemId, action: { kind: 'remove' } })",
+  "          record('queue-removed', { sessionId, itemId })",
+  "        }",
+  "        setTimeout(() => run().catch(error => record('queue-error', { sessionId, itemId, error: String(error) })), 0)",
+  "      }",
+  "      const steer = event.data.inserted.find(message => textOf(message) === 'hsp-queue-steer')",
+  "      if (steer !== undefined) {",
+  "        const itemId = String(steer.id)",
+  "        const run = async () => {",
+  "          record('queue-steer-inserted', { sessionId, itemId })",
+  "          await ctx.sessionController.updateQueue({ sessionId, itemId, action: { kind: 'steer' } })",
+  "          record('queue-steered', { sessionId, itemId })",
+  "        }",
+  "        setTimeout(() => run().catch(error => record('queue-error', { sessionId, itemId, error: String(error) })), 0)",
+  "      }",
+  "    }",
+  "  }, { global: true })",
+  "}",
+].join('\n')
+
+/** Install the one test-only extra row into this scene's isolated patch. */
+function installExtraFixture(scene, workDir) {
+  const fixturePath = join(workDir, 'host-history-search-extra.mjs')
+  writeFileSync(fixturePath, EXTRA_FIXTURE_SOURCE, { mode: 0o600 })
+  appendFileSync(scene.c1Work.patchPath,
+    `\n- insert:\n    - id: host-history-search-extra\n      name: '${pathToFileURL(fixturePath).href}'\n      inject: [agents, workingDirectory, sessionController]\n`,
+    { mode: 0o600 })
+}
+
+function extraProofEvents(path) {
+  if (!existsSync(path)) return []
+  return readFileSync(path, 'utf8').split('\n').filter(Boolean).flatMap(line => {
+    try { return [JSON.parse(line)] } catch { return [] }
+  })
+}
+
+async function waitForExtraProof(path, kind, label, timeoutMs = 120_000) {
+  const started = Date.now()
+  while (Date.now() - started < timeoutMs) {
+    const event = extraProofEvents(path).find(candidate => candidate.kind === kind)
+    if (event !== undefined) return event
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+  throw new SplitSmokeAssertionError(`${label}: no extra Host proof ${kind}`)
+}
+
+/** The real installed Split accepted-input history search case. */
+export async function runHostHistorySearch(context) {
+  const { workDir, dshHome, trace } = context
+  const scene = createC1Scene(context)
+  installExtraFixture(scene, workDir)
+  const requestPath = join(workDir, 'host-history-search-request.json')
+  const unique = `hsp-a-unique-pr1-${String(process.pid)}-${Date.now().toString(36)}`
+  let sessionId
+  let clientA
+  let clientB
+  let host
+  let firstEvent
+  let firstMessage
+
+  try {
+    const firstHost = await scene.startC1Host('skills-standing', 'history host 1')
+    host = firstHost.host
+    const hostPid = firstHost.ready.pid
+    assert(Number.isInteger(hostPid), 'host history search: the Host did not publish a real PID')
+    const hostStatusBefore = await hostStatus(host)
+    assert(hostStatusBefore.localHost !== undefined, 'host history search: the Host has no local identity')
+
+    const clientAResult = await scene.startC1Client('history client A', {
+      SPLIT_PROCESS_CLIENT_HISTORY_SEARCH_REQUEST: requestPath,
+    })
+    clientA = clientAResult.client
+    sessionId = await scene.openC1Session(clientA, unique, 'history client A first prompt')
+    assert(typeof sessionId === 'string' && sessionId !== '', 'host history search: Client A did not open a Host Session')
+    const header = await waitForHostSessionHeader(dshHome, sessionId, 'host history search durable Session header')
+    assert(typeof header.cwd === 'string' && header.cwd !== '',
+      `host history search: the durable Session header has no cwd: ${JSON.stringify(header)}`)
+
+    // Oracle FIRST: the prompt is proven by the official durable Session log.
+    const accepted = await waitForAcceptedMessage(dshHome, sessionId, unique, 'host history search first accepted message')
+    firstEvent = accepted.event
+    firstMessage = accepted.message
+    assert(isUserRpcMessage(firstMessage),
+      `host history search: the accepted message is not a user-rpc admission: ${JSON.stringify(firstMessage)}`)
+    assert(firstEvent.type === 'agent/inbox/spliced' || firstEvent.type === 'user/message',
+      `host history search: unexpected acceptance event ${firstEvent.type}`)
+
+    const clientBResult = await scene.startC1Client('history client B', {
+      SPLIT_PROCESS_CLIENT_HISTORY_SEARCH_REQUEST: requestPath,
+    })
+    clientB = clientBResult.client
+    assert(clientAResult.ready.pid !== clientBResult.ready.pid,
+      'host history search: Client A and Client B must be two different real PIDs')
+    assert(clientAResult.ready.pid !== hostPid && clientBResult.ready.pid !== hostPid,
+      'host history search: the Clients and Host must be three different real PIDs')
+
+    // ── W01: Client B reads a message Client A submitted. ───────────────────
+    const firstAnswer = assertReady(await searchSettled(clientB, requestPath, {
+      scope: 'all', query: unique, limit: 25,
+    }, 'host history search W01'), 'W01')
+    assert(typeof firstAnswer.generation === 'string' && firstAnswer.generation !== '',
+      'W01: the ready answer carries no index generation')
+    assert(firstAnswer.items.length === 1, `W01: expected exactly one item, got ${JSON.stringify(firstAnswer.items)}`)
+    const firstItem = firstAnswer.items[0]
+    assert(firstItem.sessionId === sessionId, `W01: wrong Session id ${JSON.stringify(firstItem)}`)
+    assert(firstItem.messageId === firstMessage.id, `W01: wrong message id ${JSON.stringify(firstItem)}`)
+    assert(firstItem.preview === unique, `W01: wrong preview ${JSON.stringify(firstItem.preview)}`)
+    assert(firstItem.contentLength === unique.length, `W01: wrong contentLength ${String(firstItem.contentLength)}`)
+    assert(firstItem.contentSha256 === sha256(unique), 'W01: wrong immutable content hash')
+    assert(firstItem.effectiveCwd === header.cwd, `W01: wrong cwd ${JSON.stringify({ item: firstItem.effectiveCwd, header: header.cwd })}`)
+    assert(firstItem.firstEventSeq === firstEvent.seq,
+      `W01: firstEventSeq ${String(firstItem.firstEventSeq)} != durable event seq ${String(firstEvent.seq)}`)
+    assert(firstItem.acceptedAt === firstEvent.time,
+      `W01: acceptedAt ${String(firstItem.acceptedAt)} != durable event time ${String(firstEvent.time)}`)
+    assert(firstItem.hasNonText === false, 'W01: a pure-text prompt was marked hasNonText')
+    assert(firstAnswer.nextCursor === null, 'W01: a one-row answer must not claim a next page')
+
+    // W01b: the exact original text is recoverable through bounded chunks.
+    const fullText = await readFullText(clientB, requestPath, firstItem, 'W01b exact text')
+    assert(fullText === unique, `W01b: chunked readText changed the original text: ${JSON.stringify(fullText)}`)
+    const wrongHash = await readText(clientB, requestPath, {
+      sessionId: firstItem.sessionId,
+      messageId: firstItem.messageId,
+      contentSha256: sha256('not the accepted text'),
+      offset: 0,
+      limit: 16,
+    }, 'W01b stale content')
+    assert(wrongHash.kind === 'unavailable' && wrongHash.reason === 'stale-content',
+      `W01b: a wrong content hash did not fail closed: ${JSON.stringify(wrongHash)}`)
+    const unknownMessage = await readText(clientB, requestPath, {
+      sessionId: firstItem.sessionId,
+      messageId: 'hsp-unknown-message-id',
+      contentSha256: sha256(unique),
+      offset: 0,
+      limit: 16,
+    }, 'W01b unknown message')
+    assert(unknownMessage.kind === 'unavailable' && unknownMessage.reason === 'not-found',
+      `W01b: an unknown message did not report not-found: ${JSON.stringify(unknownMessage)}`)
+
+    // ── W02a: the same text submitted twice keeps two message ids. ───────────
+    const afterFirst = hostSessionEvents(dshHome, sessionId)?.length ?? 0
+    await submitPrompt(clientA, unique)
+    const secondAccepted = await waitForHostSessionEventAfter(
+      dshHome,
+      sessionId,
+      afterFirst,
+      event => (event.type === 'agent/inbox/spliced' && Array.isArray(event.data?.inserted)
+        && event.data.inserted.some(candidate => textOfMessage(candidate) === unique))
+        || (event.type === 'user/message' && textOfMessage(event.data) === unique),
+      'host history search second accepted message',
+    )
+    const secondMessage = secondAccepted.type === 'agent/inbox/spliced'
+      ? secondAccepted.data.inserted.find(candidate => textOfMessage(candidate) === unique && isUserRpcMessage(candidate))
+      : secondAccepted.data
+    assert(isUserRpcMessage(secondMessage) && secondMessage.id !== firstMessage.id,
+      `W02: the second submission did not produce a distinct user-rpc message id: ${JSON.stringify(secondMessage)}`)
+    const duplicateAnswer = assertReady(await searchSettled(clientB, requestPath, {
+      scope: 'all', query: unique, limit: 25,
+    }, 'host history search W02 duplicates'), 'W02 duplicates')
+    assert(duplicateAnswer.items.length === 2, `W02: expected two occurrences, got ${JSON.stringify(duplicateAnswer.items)}`)
+    assert(new Set(duplicateAnswer.items.map(item => item.messageId)).size === 2,
+      'W02: two same-text submissions collapsed to one message id')
+
+    // ── W02b: a consumed user/message does not create a second occurrence. ──
+    const consumed = await waitForHostSessionEvent(
+      dshHome,
+      sessionId,
+      event => event.type === 'user/message' && textOfMessage(event.data) === unique,
+      'host history search consumed user/message',
+    )
+    assert(consumed.type === 'user/message', 'W02: the consumed event is not user/message')
+    const afterConsume = assertReady(await searchSettled(clientB, requestPath, {
+      scope: 'all', query: unique, limit: 25,
+    }, 'host history search W02 consume'), 'W02 consume')
+    assert(afterConsume.items.length === 2, `W02: consume changed the occurrence count: ${JSON.stringify(afterConsume.items)}`)
+
+    // ── S01: two keyset pages, then a stale cursor after a new mutation. ─────
+    const firstPage = assertReady(await searchSettled(clientB, requestPath, {
+      scope: 'session', sessionId, query: unique, limit: 1,
+    }, 'host history search S01 first page'), 'S01 first page')
+    assert(firstPage.items.length === 1, 'S01: the first keyset page must hold one row')
+    assert(typeof firstPage.nextCursor === 'string' && firstPage.nextCursor !== '',
+      'S01: a non-final page must carry a cursor')
+    const secondPage = assertReady(await searchSettled(clientB, requestPath, {
+      scope: 'session', sessionId, query: unique, limit: 1, cursor: firstPage.nextCursor,
+    }, 'host history search S01 second page'), 'S01 second page')
+    assert(secondPage.items.length === 1, 'S01: the second keyset page must hold the other row')
+    assert(secondPage.items[0].messageId !== firstPage.items[0].messageId,
+      'S01: the two keyset pages returned the same occurrence')
+    assert(secondPage.nextCursor === null, 'S01: the final page must not carry a cursor')
+    const thirdText = `hsp-third-${String(Date.now().toString(36))}`
+    await submitPrompt(clientA, thirdText)
+    await waitForAcceptedMessage(dshHome, sessionId, thirdText, 'host history search S01 third accepted')
+    await searchSettled(clientB, requestPath, {
+      scope: 'session', sessionId, query: thirdText, limit: 25,
+    }, 'host history search S01 mutation observed')
+    const staleCursor = await search(clientB, requestPath, {
+      scope: 'session', sessionId, query: unique, limit: 1, cursor: firstPage.nextCursor,
+    }, 'host history search S01 stale cursor')
+    assert(staleCursor.kind === 'stale' && staleCursor.reason === 'cursor-stale',
+      `S01: a cursor from the previous index revision was not rejected: ${JSON.stringify(staleCursor)}`)
+
+    // ── W02c: the Session and directory scopes address the same facts. ───────
+    const sessionAnswer = assertReady(await searchSettled(clientB, requestPath, {
+      scope: 'session', sessionId, query: unique, limit: 25,
+    }, 'host history search W02 session scope'), 'W02 session')
+    assert(sessionAnswer.items.length === 2, `W02 session scope returned ${String(sessionAnswer.items.length)} items`)
+    const directoryAnswer = assertReady(await searchSettled(clientB, requestPath, {
+      scope: 'directory', cwd: header.cwd, query: unique, limit: 25,
+    }, 'host history search W02 directory scope'), 'W02 directory')
+    assert(directoryAnswer.items.length === 2, `W02 directory scope returned ${String(directoryAnswer.items.length)} items`)
+    const wrongDirectory = assertReady(await searchSettled(clientB, requestPath, {
+      scope: 'directory', cwd: join(workDir, 'wrong-directory'), query: unique, limit: 25,
+    }, 'host history search W02 wrong directory'), 'W02 wrong directory')
+    assert(wrongDirectory.items.length === 0, 'W02 wrong directory returned foreign entries')
+
+    const beforeIds = duplicateAnswer.items.map(item => item.messageId).sort()
+
+    // ── W03: clean Host restart replays the SAME occurrence identities. ─────
+    await scene.exitC1Client(clientB, 'history client B exit')
+    clientB = undefined
+    await scene.exitC1Client(clientA, 'history client A exit')
+    clientA = undefined
+    await scene.stopC1Host(host)
+    host = undefined
+
+    const restarted = await scene.startC1Host('skills-standing', 'history host 2')
+    host = restarted.host
+    assert(restarted.ready.pid !== hostPid,
+      `W03: the restarted Host reused the first Host PID ${String(restarted.ready.pid)}`)
+    assert(restarted.ready.localHost?.instanceId !== firstHost.ready.localHost?.instanceId,
+      'W03: the restarted Host reused the first Host instance identity')
+    const restartedClient = await scene.startC1Client('history client B restart', {
+      SPLIT_PROCESS_CLIENT_HISTORY_SEARCH_REQUEST: requestPath,
+    })
+    clientB = restartedClient.client
+    const restartAnswer = assertReady(await searchSettled(clientB, requestPath, {
+      scope: 'session', sessionId, query: unique, limit: 25,
+    }, 'host history search W03 restart'), 'W03 restart')
+    assert(restartAnswer.items.length === 2, `W03: restart returned ${String(restartAnswer.items.length)} occurrences`)
+    assert(JSON.stringify(restartAnswer.items.map(item => item.messageId).sort()) === JSON.stringify(beforeIds),
+      `W03: restart changed occurrence identities: ${JSON.stringify({
+        before: beforeIds,
+        after: restartAnswer.items.map(item => item.messageId).sort(),
+      })}`)
+    const expectedTimes = new Map([
+      [firstMessage.id, firstEvent.time],
+      [secondMessage.id, secondAccepted.time],
+    ])
+    assert(restartAnswer.items.every(item => item.preview === unique && item.effectiveCwd === header.cwd
+      && item.acceptedAt === expectedTimes.get(item.messageId)),
+    'W03: restart changed preview, event cwd or acceptedAt')
+    const restartText = await readFullText(clientB, requestPath, restartAnswer.items[0], 'W03 restart exact text')
+    assert(restartText === unique, 'W03: restart changed the recoverable original text')
+
+    // ── W02c: real working-directory/change H1→H2 on the same Host. ───────
+    await scene.exitC1Client(clientB, 'history cwd client B exit')
+    clientB = undefined
+    await scene.stopC1Host(host)
+    host = undefined
+    await scene.awaitSceneSeatFree()
+    const cwdProof = join(workDir, 'host-history-search-cwd-proof.jsonl')
+    writeFileSync(cwdProof, '', { mode: 0o600 })
+    const cwdOne = join(workDir, 'history-cwd-one')
+    const cwdTwo = join(workDir, 'history-cwd-two')
+    mkdirSync(cwdOne, { recursive: true, mode: 0o700 })
+    mkdirSync(cwdTwo, { recursive: true, mode: 0o700 })
+    const cwdHost = await scene.startC1Host('skills-standing', 'history cwd host', {
+      HISTORY_SEARCH_EXTRA_PROOF: cwdProof,
+      HISTORY_SEARCH_CWD_TARGET: cwdTwo,
+    })
+    host = cwdHost.host
+    const cwdClientResult = await scene.startC1Client('history cwd client', {
+      SPLIT_PROCESS_CLIENT_HISTORY_SEARCH_REQUEST: requestPath,
+    }, { cwd: cwdOne })
+    const cwdClient = cwdClientResult.client
+    const cwdSession = await scene.openC1Session(cwdClient, 'hsp-cwd-one', 'history cwd first prompt')
+    const cwdHeader = await waitForHostSessionHeader(dshHome, cwdSession, 'history cwd durable header')
+    await waitForHostSessionEvent(dshHome, cwdSession, event => event.type === 'turn/end', 'W02c first turn settled')
+    assert(cwdHeader.cwd === cwdOne, `W02c: initial cwd ${JSON.stringify(cwdHeader.cwd)} != ${cwdOne}`)
+    await submitPrompt(cwdClient, 'hsp-cwd-switch')
+    await waitForAcceptedMessage(dshHome, cwdSession, 'hsp-cwd-switch', 'W02c cwd switch accepted')
+    await waitForExtraProof(cwdProof, 'cwd-set', 'W02c official workingDirectory.set')
+    const beforeSecond = (hostSessionEvents(dshHome, cwdSession) ?? []).length
+    await submitPrompt(cwdClient, 'hsp-cwd-two')
+    await waitForAcceptedMessage(dshHome, cwdSession, 'hsp-cwd-two', 'W02c cwd second accepted')
+    await waitForHostSessionEventAfter(dshHome, cwdSession, beforeSecond, event => event.type === 'turn/end', 'W02c second turn settled')
+    const cwdAll = assertReady(await searchSettled(cwdClient, requestPath, {
+      scope: 'session', sessionId: cwdSession, query: 'hsp-cwd-', limit: 25,
+    }, 'host history search W02c cwd session'), 'W02c cwd session')
+    assert(cwdAll.items.length === 3, `W02c: expected three cwd occurrences (H1 prompt, H1 switch marker, H2 prompt), got ${JSON.stringify(cwdAll.items)}`)
+    const cwdH1 = assertReady(await searchSettled(cwdClient, requestPath, {
+      scope: 'directory', cwd: cwdOne, query: 'hsp-cwd-', limit: 25,
+    }, 'host history search W02c cwd H1'), 'W02c cwd H1')
+    const cwdH2 = assertReady(await searchSettled(cwdClient, requestPath, {
+      scope: 'directory', cwd: cwdTwo, query: 'hsp-cwd-', limit: 25,
+    }, 'host history search W02c cwd H2'), 'W02c cwd H2')
+    assert(cwdH1.items.length === 2 && cwdH1.items.some(item => item.preview === 'hsp-cwd-one') && cwdH1.items.some(item => item.preview === 'hsp-cwd-switch'), `W02c H1: ${JSON.stringify(cwdH1.items)}`)
+    assert(cwdH2.items.length === 1 && cwdH2.items[0].preview === 'hsp-cwd-two', `W02c H2: ${JSON.stringify(cwdH2.items)}`)
+
+    // ── W02d: real /fork child inherits no new occurrence for the parent prefix. ──
+    const forkBoundary = cwdClient.records.length
+    cwdClient.send('/fork\r')
+    const childStatus = await cwdClient.waitFor(record => cwdClient.records.indexOf(record) >= forkBoundary
+      && record.m4b2s === 'surface-status' && record.sessionOpen === true
+      && typeof record.openSessionId === 'string' && record.openSessionId !== cwdSession,
+    'W02d Client adopted forked child', 120_000)
+    const forkSession = childStatus.openSessionId
+    assert(typeof forkSession === 'string' && forkSession !== cwdSession, 'W02d: /fork did not open a child')
+    const childPromptText = 'hsp-fork-child-admission'
+    await submitPrompt(cwdClient, childPromptText)
+    await waitForAcceptedMessage(dshHome, forkSession, childPromptText, 'W02d child accepted message')
+    const forkChild = assertReady(await searchSettled(cwdClient, requestPath, {
+      scope: 'session', sessionId: forkSession, query: childPromptText, limit: 25,
+    }, 'host history search W02d fork child'), 'W02d fork child')
+    assert(forkChild.items.length === 1, `W02d: fork child occurrence ${JSON.stringify(forkChild.items)}`)
+    const forkParent = assertReady(await searchSettled(cwdClient, requestPath, {
+      scope: 'session', sessionId: cwdSession, query: 'hsp-cwd-', limit: 25,
+    }, 'host history search W02d fork parent'), 'W02d fork parent')
+    assert(forkParent.items.length === 3, `W02d: fork inherited prefix inflated parent occurrences: ${JSON.stringify(forkParent.items)}`)
+
+    // Stop the cwd/fork Host before the long-turn Host: the profile owns ONE Host seat.
+    await scene.exitC1Client(cwdClient, 'history cwd client exit')
+    await scene.stopC1Host(cwdHost.host)
+    await scene.awaitSceneSeatFree()
+
+    // ── W02e: real official queue edit/remove on a held Turn. ──────────────
+    const queueProof = join(workDir, 'host-history-search-queue-proof.jsonl')
+    const queueBarrier = join(workDir, 'host-history-search-queue-release')
+    writeFileSync(queueProof, '', { mode: 0o600 })
+    const queueHost = await scene.startC1Host('long-turn', 'history queue host', {
+      C1_HOLD_LONG_TURN: queueBarrier,
+      HISTORY_SEARCH_EXTRA_PROOF: queueProof,
+    })
+    host = queueHost.host
+    const queueClientResult = await scene.startC1Client('history queue client', {
+      SPLIT_PROCESS_CLIENT_HISTORY_SEARCH_REQUEST: requestPath,
+    })
+    const queueClient = queueClientResult.client
+    const queueSession = await scene.openC1Session(queueClient, 'hsp-queue-seed', 'history queue seed')
+    await waitForC1WorkEvent(queueHost.workRoot,
+      event => event.kind === 'long-turn-held' && event.sessionId === queueSession, 'W02e held Turn')
+    queueClient.send('hsp-queue-target\r')
+    await waitForExtraProof(queueProof, 'queue-removed', 'W02e official updateQueue edit+remove')
+    const queueAnswer = assertReady(await searchSettled(queueClient, requestPath, {
+      scope: 'session', sessionId: queueSession, query: 'hsp-queue-target', limit: 25,
+    }, 'host history search W02e queue original'), 'W02e queue original')
+    assert(queueAnswer.items.length === 1 && queueAnswer.items[0].preview === 'hsp-queue-target',
+      `W02e: queue edit/remove changed the accepted occurrence: ${JSON.stringify(queueAnswer.items)}`)
+    const editedAnswer = assertReady(await searchSettled(queueClient, requestPath, {
+      scope: 'session', sessionId: queueSession, query: 'hsp-queue-edited', limit: 25,
+    }, 'host history search W02e queue edited'), 'W02e queue edited')
+    assert(editedAnswer.items.length === 0, 'W02e: the edited body became a second occurrence')
+    queueClient.send('hsp-queue-steer\r')
+    const steerProof = await waitForExtraProof(queueProof, 'queue-steered', 'W02e official updateQueue steer')
+    await waitForHostSessionEvent(dshHome, queueSession,
+      event => event.type === 'agent/inbox/spliced' && event.data?.target === 'next-step'
+        && Array.isArray(event.data.inserted) && event.data.inserted.some(message => message?.id === steerProof.itemId),
+      'W02e official steer state')
+    const steerAnswer = assertReady(await searchSettled(queueClient, requestPath, {
+      scope: 'session', sessionId: queueSession, query: 'hsp-queue-steer', limit: 25,
+    }, 'host history search W02e queue steer'), 'W02e queue steer')
+    assert(steerAnswer.items.length === 1 && steerAnswer.items[0].preview === 'hsp-queue-steer',
+      `W02e: the steered occurrence is not exactly one original: ${JSON.stringify(steerAnswer.items)}`)
+    const beforeRelease = (hostSessionEvents(dshHome, queueSession) ?? []).length
+    writeFileSync(queueBarrier, 'release\n', { mode: 0o600 })
+    await waitForHostSessionEventAfter(dshHome, queueSession, beforeRelease,
+      event => event.type === 'user/message' && textOfMessage(event.data) === 'hsp-queue-steer',
+      'W02e steered message claimed after release', 120_000)
+    await waitForC1WorkEvent(queueHost.workRoot,
+      event => event.kind === 'long-turn-released' && event.sessionId === queueSession, 'W02e released Turn')
+    await scene.exitC1Client(queueClient, 'history queue client exit')
+    await scene.stopC1Host(queueHost.host)
+    await scene.awaitSceneSeatFree()
+    host = undefined
+
+    // W03: the derived SQLite index is a private, profile-local file.
+    const historyDir = join(context.installation.profileDir, '.dsh-pi-tui', 'history-search')
+    const dbPath = join(historyDir, 'v1.sqlite')
+    const dbStat = statSync(dbPath)
+    const dirStat = statSync(historyDir)
+    assert((dbStat.mode & 0o777) === 0o600,
+      `W03: the derived index file mode is ${(dbStat.mode & 0o777).toString(8)}, expected 600`)
+    assert((dirStat.mode & 0o077) === 0,
+      `W03: the derived index directory mode ${(dirStat.mode & 0o777).toString(8)} is not private`)
+    trace('host-history-search/pr1', {
+      status: 'PASS',
+      hostPid,
+      clientAPid: clientAResult.ready.pid,
+      clientBPid: clientBResult.ready.pid,
+      sessionId,
+      firstMessageId: firstMessage.id,
+      firstEventSeq: firstEvent.seq,
+      firstEventType: firstEvent.type,
+      firstEventTime: firstEvent.time,
+      cwd: header.cwd,
+      occurrences: 2,
+      restarted: true,
+      cwdChange: true,
+      forkChild: true,
+      queueEditRemove: true,
+      queueSteer: true,
+      keysetPages: true,
+      staleCursor: true,
+      exactTextChunks: true,
+      dbPath,
+    })
+    return { status: 'PASS' }
+  } finally {
+    if (clientA !== undefined) await clientA.dispose().catch(() => {})
+    if (clientB !== undefined) await clientB.dispose().catch(() => {})
+    await scene.dispose()
+  }
+}
