@@ -333,9 +333,9 @@ test('the official settings importer and the Host migration interleave without l
       }
     },
   })
-  // Always release a held importer on test failure/timeout before disposing
-  // the fixture; it must not retain a pending official write across tests.
-  t.after(() => allowImporter())
+  // The test lifecycle runs deferred disposers in reverse order. Release
+  // the importer before disposing its Host, including after a test failure.
+  life.defer(() => allowImporter())
   await importerAtEditor
   assert.equal(
     (descriptorByNs(plane.ctx, 'ui-settings-general')?.user as { welcomeNoticeVersion?: string } | undefined)?.welcomeNoticeVersion,
