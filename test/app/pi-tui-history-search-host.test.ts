@@ -1194,6 +1194,7 @@ test('a disposed Session without eventCount is not marked persisted without a du
   const disposeSession = (id: string) => (service as unknown as {
     observeDisposedSession(session: unknown): void
   }).observeDisposedSession({ id })
+  const verify = () => (service as unknown as { verifySources(): Promise<void> }).verifySources()
   try {
     await waitDirectReady(service)
     assert.equal(checkpoint()?.sourceState, 'live')
@@ -1216,6 +1217,25 @@ test('a disposed Session without eventCount is not marked persisted without a du
     assert.equal(answer?.kind, 'incomplete', JSON.stringify(answer))
     assert.equal(checkpoint()?.sourceState, 'live', 'the unproven rows must never be called persisted')
     assert.equal(checkpoint()?.dirty, true, 'the prefix proof failure must be retried')
+
+    // The SAME official source catches up to the full durable prefix and the
+    // Session is no longer live. The existing verification pass must settle the
+    // dirty checkpoint, not stay incomplete because the incremental replay
+    // finds no new tail events.
+    source.durableEventCount = undefined
+    source.live = false
+    source.revision += 1
+    await verify()
+    await waitDirectReady(service)
+    const recoveredFirst = await service.search({ scope: 'all', query: 'mutable first', limit: 25 }, new AbortController().signal)
+    const recoveredSecond = await service.search({ scope: 'all', query: 'mutable second', limit: 25 }, new AbortController().signal)
+    assert.equal(recoveredFirst.kind, 'ready', JSON.stringify(recoveredFirst))
+    assert.equal(recoveredSecond.kind, 'ready', JSON.stringify(recoveredSecond))
+    if (recoveredFirst.kind !== 'ready' || recoveredSecond.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(recoveredFirst.items.length, 1, 'the recovered prefix must retain the first accepted occurrence')
+    assert.equal(recoveredSecond.items.length, 1, 'the recovered prefix must retain the second accepted occurrence')
+    assert.equal(checkpoint()?.dirty, false)
+    assert.equal(checkpoint()?.sourceState, 'persisted')
   } finally {
     await service.dispose()
     await ctx.fiber.dispose()

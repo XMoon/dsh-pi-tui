@@ -1116,6 +1116,11 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       signal.throwIfAborted()
       const checkpoint = this.index.checkpointOf(sessionId)
       if (checkpoint === undefined || checkpoint.dirty || checkpoint.uncertainSources > 0) {
+        // A dirty/uncertain checkpoint cannot prove its whole prefix from the
+        // tail alone (a middle event may have been repaired), and an incremental
+        // replay that finds no new tail events would never call writeBatch(),
+        // leaving dirty set forever. Reconcile from official events instead.
+        if (checkpoint !== undefined) this.index.resetSession(sessionId)
         await this.replayOfficialSession(sessionId, record, persistence, query)
         this.rememberVerifiedRevision(sessionId, record, persistence)
         continue
