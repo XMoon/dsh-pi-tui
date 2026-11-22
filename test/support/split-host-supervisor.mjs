@@ -21,8 +21,8 @@
  *     process-group disappearance are proven.
  */
 
-import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { spawn, execFileSync } from 'node:child_process'
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, relative, sep } from 'node:path'
 import { createInterface } from 'node:readline'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -56,6 +56,7 @@ let inspectSplitUpgradePair
 let assertSplitUpgradePairStillQualified
 let installSideBuild
 let installPlugin
+let runDsh
 let readJson
 let productionBuildId
 let installedPayloadHash
@@ -141,6 +142,7 @@ const modulesReady = Promise.all([
   assertIdentityKept = upgradeSupport.assertIdentityKept
   EXPECTED_PACKAGE_NAME = upgradeSupport.EXPECTED_PACKAGE_NAME
   installPlugin = smokeHarness.installPlugin
+  runDsh = smokeHarness.runDsh
   readJson = smokeHarness.readJson
 })
 
@@ -359,10 +361,19 @@ async function assertHostGroupGone(handle, reason) {
 function readHostStarttime(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return undefined
   try {
-    return readProcessStarttime(pid)
+    const value = readProcessStarttime(pid)
+    if (value !== undefined) return value
   } catch {
-    return undefined
+    // Fall through to the Darwin kernel clock below.
   }
+  if (process.platform === 'darwin') {
+    try {
+      return execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8' }).trim() || undefined
+    } catch {
+      return undefined
+    }
+  }
+  return undefined
 }
 
 function publicHostFacts(handle) {
@@ -459,6 +470,72 @@ async function cleanupSceneRoot(reason) {
   if (existsSync(root)) throw new Error(`${reason}: scene root still exists after removal: ${root}`)
 }
 
+function assertOwnedRecordFile(recordFile, label) {
+  if (typeof recordFile !== 'string' || recordFile === '') {
+    throw new Error(`${label}: the Client receipt carries no recordFile`)
+  }
+  const real = realpathSync(recordFile)
+  const rel = relative(scene.workDir, real)
+  if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`)) {
+    throw new Error(`${label}: the recordFile is outside the Scene root: ${real}`)
+  }
+  return real
+}
+
+function readClientRecordLedger(recordFile, label) {
+  const text = readFileSync(recordFile, 'utf8')
+  if (text === '') throw new Error(`${label}: the official Client record file is empty`)
+  if (!text.endsWith('\n')) throw new Error(`${label}: the official Client record file has an incomplete trailing line`)
+  const pids = new Set()
+  const lines = text.slice(0, -1).split('\n')
+  for (const [index, line] of lines.entries()) {
+    let record
+    try {
+      record = JSON.parse(line)
+    } catch (error) {
+      throw new Error(`${label}: client record line ${String(index + 1)} is invalid JSON: ${boundedError(error)}`)
+    }
+    if (record?.m4a0 !== 'client-started' && record?.m4a0 !== 'ready') continue
+    if (!Number.isInteger(record.pid) || record.pid <= 0) {
+      throw new Error(`${label}: client record line ${String(index + 1)} carries no real business PID`)
+    }
+    pids.add(record.pid)
+  }
+  if (pids.size === 0) throw new Error(`${label}: the official Client record file carries no client-started/ready PID`)
+  return { pids: [...pids], records: lines.length }
+}
+
+function auditClientLedger(reason) {
+  if (scene?.kind !== 'upgrade') return
+  const problems = []
+  for (const client of receipt.clients ?? []) {
+    let ledger
+    try {
+      ledger = readClientRecordLedger(assertOwnedRecordFile(client.recordFile, client.label), client.label)
+    } catch (error) {
+      problems.push(boundedError(error))
+      continue
+    }
+    const reported = new Set(Array.isArray(client.businessPids) ? client.businessPids : [])
+    const facts = new Map((client.businessPidFacts ?? []).map(value => [value.pid, value.starttime]))
+    for (const pid of ledger.pids) {
+      if (!reported.has(pid)) problems.push(`${String(client.label)}: business PID ${String(pid)} exists only in the official record file`)
+      if (!pidAlive(pid)) continue
+      const expectedStarttime = facts.get(pid)
+      const actualStarttime = readHostStarttime(pid)
+      if (expectedStarttime === undefined || actualStarttime !== expectedStarttime) {
+        problems.push(`${String(client.label)}: live business PID ${String(pid)} has no matching reported OS starttime`)
+      } else {
+        problems.push(`${String(client.label)}: business PID ${String(pid)} is still alive`)
+      }
+    }
+    if (pidAlive(client.shellPid)) problems.push(`${String(client.label)}: tui-test shell PID ${String(client.shellPid)} is still alive`)
+  }
+  if (problems.length > 0) {
+    throw new Error(`${reason}: Client ledger audit failed: ${problems.join('; ')}`)
+  }
+}
+
 async function cleanup(reason) {
   if (finalized) return { clean: true }
   if (cleanupPromise !== undefined) return await cleanupPromise
@@ -476,8 +553,10 @@ async function cleanup(reason) {
       activeHost = undefined
       if (scene !== undefined) {
         // Only the supervisor owns the scene root. A worker crash may leave a
-        // tui-test Client behind; that fact is checked by the external probe,
-        // never assumed from the Supervisor receipt.
+        // tui-test Client behind; the official record files are re-read BEFORE
+        // the root is removed so a live replacement child can never be hidden
+        // by the Supervisor's own cleanup.
+        auditClientLedger(`cleanup:${reason}`)
         await cleanupSceneRoot(reason)
       }
       installInProgress = false
@@ -926,6 +1005,9 @@ async function handleStartHost(message) {
     SPLIT_PROCESS_EXTRA_PATCH: scene.c1Work.patchPath,
     C1_SCENARIO: message.scenario,
     C1_WORK_ROOT: workRoot,
+    ...(scene.kind === 'upgrade' && message.scenario === 'long-turn'
+      ? { C1_HOLD_LONG_TURN: join(workRoot, 'long-turn.release') }
+      : {}),
     DSH_PI_TUI_ENTRY_RECORDS: '1',
     SPLIT_PROCESS_DSH_ANCHOR: scene.installation.anchor,
     SPLIT_PROCESS_PROFILE: 'pi-tui',
@@ -958,6 +1040,7 @@ async function handleStartHost(message) {
     hostId,
     generation,
     source,
+    scenario: message.scenario,
     child,
     records,
     workRoot,
@@ -1050,6 +1133,7 @@ async function handleStartHost(message) {
     workRoot,
     source,
     buildId: handle.buildId,
+    pgid: hostPgid(handle),
     entryRealpath: handle.entryRealpath,
   }
 }
@@ -1076,6 +1160,69 @@ async function handleHostStatus(message) {
   const handle = activeHost
   if (handle === undefined || handle.hostId !== message.hostId) throw new Error('HOST_STATUS: unknown hostId')
   return await queryHostStatus(handle)
+}
+
+async function handleUpgradeReleaseHeldTurn(message) {
+  if (scene?.kind !== 'upgrade') throw new Error('UPGRADE_RELEASE_HELD_TURN: no upgrade scene')
+  const handle = activeHost
+  if (handle === undefined || handle.hostId !== message.hostId) throw new Error('UPGRADE_RELEASE_HELD_TURN: unknown hostId')
+  if (handle.exited || handle.child.exitCode !== null || handle.child.signalCode !== null) {
+    throw new Error('UPGRADE_RELEASE_HELD_TURN: Host already exited')
+  }
+  if (!pidAlive(handle.child.pid) || !processGroupAlive(hostPgid(handle))) {
+    throw new Error('UPGRADE_RELEASE_HELD_TURN: Host OS process or process group is not alive')
+  }
+  const releasePath = join(handle.workRoot, 'long-turn.release')
+  if (handle.scenario !== 'long-turn' || !existsSync(join(handle.workRoot, 'events.jsonl'))) {
+    throw new Error('UPGRADE_RELEASE_HELD_TURN: the active Host is not the long-turn generation')
+  }
+  const status = await queryHostStatus(handle)
+  const identity = safeIdentity(status.localHost)
+  writeFileSync(releasePath, 'release\n', { mode: 0o600, flag: 'wx' })
+  appendNote('long-turn-released', {
+    hostId: handle.hostId,
+    generation: handle.generation,
+    releasePath,
+    instanceId: identity.instanceId,
+  })
+  writeReceipt({ phase: 'LONG_TURN_RELEASED' })
+  return { hostId: handle.hostId, generation: handle.generation, releasePath }
+}
+
+async function handleUpgradeRemoveProfileForReloadRefusal(message) {
+  if (scene?.kind !== 'upgrade') throw new Error('UPGRADE_REMOVE_PROFILE_FOR_RELOAD_REFUSAL: no upgrade scene')
+  const handle = activeHost
+  if (handle === undefined || handle.hostId !== message.hostId) throw new Error('UPGRADE_REMOVE_PROFILE_FOR_RELOAD_REFUSAL: unknown hostId')
+  if (handle.source !== 'side-old' || scene.sideOld === undefined) {
+    throw new Error('UPGRADE_REMOVE_PROFILE_FOR_RELOAD_REFUSAL: the active Host must run from the side-old package root')
+  }
+  if (handle.exited || handle.child.exitCode !== null || handle.child.signalCode !== null
+    || !pidAlive(handle.child.pid) || !processGroupAlive(hostPgid(handle))) {
+    throw new Error('UPGRADE_REMOVE_PROFILE_FOR_RELOAD_REFUSAL: the active Host is not alive')
+  }
+  const statusBefore = await queryHostStatus(handle)
+  const identityBefore = safeIdentity(statusBefore.localHost)
+  const sideOldHashBefore = installedPayloadHash(scene.sideOld.packageRoot)
+  const profilePackageRoot = join(scene.installation.profileDir, 'node_modules', EXPECTED_PACKAGE_NAME)
+  if (!existsSync(profilePackageRoot)) {
+    throw new Error('UPGRADE_REMOVE_PROFILE_FOR_RELOAD_REFUSAL: the profile package is not installed before removal')
+  }
+  const result = runDsh(scene.installation.dshInvocation,
+    ['plugin', '--profile', 'pi-tui', 'remove', EXPECTED_PACKAGE_NAME],
+    scene.installation.harnessDir, scene.installation.env)
+  if (result.status !== 0) {
+    throw new Error(`UPGRADE_REMOVE_PROFILE_FOR_RELOAD_REFUSAL: the official DSH remove failed (status ${String(result.status)})`)
+  }
+  if (existsSync(profilePackageRoot)) {
+    throw new Error('UPGRADE_REMOVE_PROFILE_FOR_RELOAD_REFUSAL: the official removal left the profile package behind')
+  }
+  const statusAfter = await queryHostStatus(handle)
+  assertIdentityKept(safeIdentity(statusAfter.localHost), identityBefore, 'UPGRADE_REMOVE_PROFILE_FOR_RELOAD_REFUSAL')
+  if (installedPayloadHash(scene.sideOld.packageRoot) !== sideOldHashBefore) {
+    throw new Error('UPGRADE_REMOVE_PROFILE_FOR_RELOAD_REFUSAL: the official removal changed the live side-old payload')
+  }
+  writeReceipt({ phase: 'PROFILE_REMOVED_FOR_RELOAD_REFUSAL' })
+  return { removed: true, profilePackageRoot, hostStatus: statusAfter }
 }
 
 async function handleFinalize(message) {
@@ -1107,14 +1254,7 @@ async function handleFinalize(message) {
     writeReceipt({ phase: 'NOT_QUIESCED', errorName: 'FINALIZE_CLIENTS_NOT_CLOSED' })
     throw new Error('FINALIZE: worker did not confirm Clients closed')
   }
-  for (const client of receipt.clients ?? []) {
-    for (const pid of client.businessPids ?? []) {
-      if (pidAlive(pid)) {
-        writeReceipt({ phase: 'NOT_QUIESCED', errorName: 'FINALIZE_CLIENT_BUSINESS_PID_ALIVE', client: client.label, pid })
-        throw new Error(`FINALIZE: business Client PID ${String(pid)} is still alive (${String(client.label)})`)
-      }
-    }
-  }
+  auditClientLedger('FINALIZE')
   if (hostStopError !== undefined) throw hostStopError
   for (const handle of hosts) {
     if (handle.exitResult?.code !== 0 || handle.exitResult?.signal !== null) {
@@ -1131,23 +1271,57 @@ async function handleFinalize(message) {
 async function handleReport(message) {
   const detail = message.detail === undefined ? undefined : message.detail
   if (message.event === 'client-started' && detail !== undefined) {
+    if (receipt.clients?.some(client => client.label === detail.label)) {
+      throw new Error(`REPORT client-started: the Client label ${String(detail.label)} is already registered`)
+    }
     const businessPids = Array.isArray(detail.businessPids)
       ? detail.businessPids.filter(pid => Number.isInteger(pid) && pid > 0)
       : []
+    const recordFile = scene?.kind === 'upgrade'
+      ? assertOwnedRecordFile(detail.recordFile, 'REPORT client-started')
+      : (typeof detail.recordFile === 'string' ? detail.recordFile : undefined)
     receipt.clients = [...(receipt.clients ?? []), {
       label: detail.label,
       session: detail.session,
       shellPid: detail.shellPid ?? null,
-      recordFile: typeof detail.recordFile === 'string' ? detail.recordFile : undefined,
+      recordFile,
       businessPids,
+      ...(scene?.kind === 'upgrade'
+        ? { businessPidFacts: businessPids.map(pid => ({ pid, starttime: readHostStarttimeOrUndefined(pid) })) }
+        : {}),
       businessPid: businessPids.at(-1) ?? null,
       startedAt: now(),
     }]
     writeReceipt({})
-  } else {
-    receipt.notes = [...(receipt.notes ?? []), { event: message.event, detail, at: now() }]
-    writeReceipt({})
+    return
   }
+  if (message.event === 'client-pids' && detail !== undefined) {
+    if (scene?.kind !== 'upgrade') throw new Error('REPORT client-pids: only an upgrade scene has an official Client PID ledger')
+    const client = (receipt.clients ?? []).find(value => value.label === detail.label)
+    if (client === undefined) throw new Error(`REPORT client-pids: unknown Client label ${String(detail.label)}`)
+    if (client.recordFile !== assertOwnedRecordFile(detail.recordFile, 'REPORT client-pids')) {
+      throw new Error(`REPORT client-pids: ${String(detail.label)} does not match its registered recordFile`)
+    }
+    const merged = new Set(Array.isArray(client.businessPids) ? client.businessPids : [])
+    const facts = new Map((client.businessPidFacts ?? []).map(value => [value.pid, value.starttime]))
+    for (const pid of Array.isArray(detail.businessPids) ? detail.businessPids : []) {
+      if (!Number.isInteger(pid) || pid <= 0) continue
+      merged.add(pid)
+      if (!facts.has(pid)) facts.set(pid, readHostStarttimeOrUndefined(pid))
+    }
+    client.businessPids = [...merged]
+    client.businessPidFacts = [...facts].map(([pid, starttime]) => ({ pid, starttime }))
+    client.businessPid = client.businessPids.at(-1) ?? null
+    writeReceipt({})
+    return
+  }
+  receipt.notes = [...(receipt.notes ?? []), { event: message.event, detail, at: now() }]
+  writeReceipt({})
+}
+
+function readHostStarttimeOrUndefined(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return undefined
+  return readHostStarttime(pid)
 }
 
 async function dispatch(message) {
@@ -1197,6 +1371,16 @@ async function dispatch(message) {
       }
       case 'HOST_STATUS': {
         const payload = await handleHostStatus(message)
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'UPGRADE_RELEASE_HELD_TURN': {
+        const payload = await handleUpgradeReleaseHeldTurn(message)
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'UPGRADE_REMOVE_PROFILE_FOR_RELOAD_REFUSAL': {
+        const payload = await handleUpgradeRemoveProfileForReloadRefusal(message)
         if (requestId !== undefined) reply(requestId, payload)
         break
       }

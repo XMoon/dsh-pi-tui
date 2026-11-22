@@ -26,14 +26,14 @@
 
 import { execFileSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
 import { isBootstrapInstallInProgress, isSideNewInstallInProgress } from './split-upgrade-install-state.mjs'
 
 const PILOT_MODES = ['main-signal', 'foreground-group-sigint', 'worker-kill', 'bootstrap-main-sigterm']
-const UPGRADE_ATS = ['old-host-ready', 'between-host-generations', 'new-host-spawned-before-ack', 'side-build-install', 'bootstrap-install']
+const UPGRADE_ATS = ['old-host-ready', 'between-host-generations', 'new-host-spawned-before-ack', 'side-build-install', 'bootstrap-install', 'reload-child-active']
 const UPGRADE_MODES = ['upgrade-sequential-hosts', 'upgrade-live-profile-refusal', 'upgrade-live-host-exit', 'upgrade-worker-kill']
 
 function arg(name) {
@@ -335,7 +335,29 @@ if (sentinel.pid === undefined) fail('could not start the external sentinel proc
 
 let child
 let vitestPid
+let siblingChild
+let siblingRunId
+let siblingStopFile
 if (upgradeMode) {
+  if (mode === 'upgrade-worker-kill' && at === 'reload-child-active') {
+    siblingRunId = `${runId}-sibling`
+    siblingStopFile = join(tmpBase, `split-upgrade-sibling-stop-${String(process.pid)}.flag`)
+    siblingChild = spawn(process.execPath, [
+      '--import',
+      'tsx/esm',
+      'test/support/split-upgrade-probe-worker.mjs',
+      '--scenario',
+      'upgrade-sibling-live',
+    ], {
+      cwd: process.cwd(),
+      env: {
+        ...env,
+        SPLIT_VITEST_RUN_ID: siblingRunId,
+        SPLIT_UPGRADE_PROBE_SIBLING_STOP_FILE: siblingStopFile,
+      },
+      stdio: 'inherit',
+    })
+  }
   const scenario = mode === 'upgrade-worker-kill' ? `upgrade-worker-kill:${at}` : mode
   child = spawn(process.execPath, [
     '--import',
@@ -371,8 +393,20 @@ if (upgradeMode) {
 
 let childExited = false
 let killedWorkerPid
+let siblingReceipt
 try {
   let deadline
+  if (siblingChild !== undefined) {
+    siblingReceipt = await waitUntil(() => {
+      const current = latestUpgradeReceipt(tmpBase, siblingRunId)
+      const live = (current?.notes ?? []).some(note => note.event === 'sibling-live')
+      if (!live || !existsSync(current?.sceneRoot ?? '')) return undefined
+      return pidAlive(current?.host?.pid) && groupAlive(current?.host?.pgid)
+        && (current?.clients ?? []).every(client => pidAlive(client.shellPid)
+          && (client.businessPids ?? []).every(pid => pidAlive(pid)))
+        ? current : undefined
+    }, 'live sibling Upgrade Scene', 600_000)
+  }
   if (upgradeMode) {
     if (mode === 'upgrade-live-host-exit') {
       const exit = await waitChildExit(child, 600_000)
@@ -466,6 +500,17 @@ try {
         const barrierHit = (current?.notes ?? []).some(note => note.event === 'host-spawned-before-ack-barrier' && note.detail?.generation === 2)
         return barrierHit ? current : undefined
       }, 'second Host spawned before ACK', 600_000)
+    } else if (barrierPoint === 'reload-child-active') {
+      await waitUntil(() => {
+        const current = latestUpgradeReceipt(tmpBase, runId)
+        const hit = (current?.notes ?? []).some(note => note.event === 'worker-kill-point'
+          && note.detail?.point === 'reload-child-active')
+        const client = (current?.clients ?? []).find(value => value.label === 'reload-child-active-client')
+        const pids = client?.businessPids ?? []
+        return hit && pidAlive(current?.host?.pid) && groupAlive(current?.host?.pgid)
+          && pids.length >= 2 && pids.every(pid => pidAlive(pid))
+          ? current : undefined
+      }, 'reload replacement child active', 600_000)
     } else if (barrierPoint === 'old-host-ready') {
       await waitUntil(() => {
         const current = latestUpgradeReceipt(tmpBase, runId)
@@ -507,6 +552,37 @@ try {
     if (problems.length > 0) fail(problems.join('; '))
     if (Date.now() > deadline) fail('probe exceeded its single fixed post-trigger deadline')
     if (!pidAlive(sentinel.pid)) fail(`external sentinel PID ${String(sentinel.pid)} died; the probe touched an unrelated process`)
+    let siblingFinal
+    if (siblingChild !== undefined) {
+      const liveSibling = latestUpgradeReceipt(tmpBase, siblingRunId)
+      if (liveSibling === undefined || !existsSync(liveSibling.sceneRoot ?? '')
+        || !pidAlive(liveSibling.host?.pid) || !groupAlive(liveSibling.host?.pgid)
+        || (liveSibling.clients ?? []).some(client => !pidAlive(client.shellPid)
+          || (client.businessPids ?? []).some(pid => !pidAlive(pid)))) {
+        fail('the sibling Upgrade Scene was not live when the killed Scene was reclaimed')
+      }
+      writeFileSync(siblingStopFile, 'stop\n', { mode: 0o600 })
+      const siblingExit = await waitChildExit(siblingChild, 300_000)
+      if (siblingExit.code !== 0 || siblingExit.signal !== null) {
+        fail(`sibling Upgrade worker exited abnormally: ${JSON.stringify(siblingExit)}`)
+      }
+      siblingFinal = await waitUntil(() => {
+        const current = latestUpgradeReceipt(tmpBase, siblingRunId)
+        return current?.phase === 'FINALIZED' ? current : undefined
+      }, 'sibling Upgrade Scene FINALIZED', 120_000)
+      const siblingProblems = checkUpgradeReceiptResources(siblingFinal)
+      if (siblingProblems.length > 0) fail(`sibling Upgrade Scene: ${siblingProblems.join('; ')}`)
+      console.log(`SPLIT_SUPERVISOR_SIGNAL_PROBE_FACTS ${JSON.stringify({
+        mode,
+        at: 'sibling-live',
+        runId: siblingRunId,
+        workerPid: siblingFinal.worker.pid,
+        supervisorPhase: siblingFinal.phase,
+        hosts: siblingFinal.hosts,
+        clients: siblingFinal.clients,
+        sceneRoot: siblingFinal.sceneRoot,
+      })}`)
+    }
     console.log(`SPLIT_SUPERVISOR_SIGNAL_PROBE_FACTS ${JSON.stringify({
       mode,
       at,
@@ -518,6 +594,8 @@ try {
       hosts: terminalReceipt.hosts,
       clients: terminalReceipt.clients,
       sceneRoot: terminalReceipt.sceneRoot,
+      siblingRunId,
+      siblingFinalPhase: siblingFinal?.phase,
       sentinelPid: sentinel.pid,
     })}`)
     console.log(`SPLIT_SUPERVISOR_SIGNAL_PROBE_PASS mode=${mode} at=${String(at)} supervisor_phase=${terminalReceipt.phase} worker_exit=${JSON.stringify(exit)}`)
@@ -597,6 +675,12 @@ try {
 } finally {
   if (!childExited && child.exitCode === null && child.signalCode === null) {
     try { child.kill('SIGKILL') } catch { /* already gone */ }
+  }
+  if (siblingChild !== undefined && siblingChild.exitCode === null && siblingChild.signalCode === null) {
+    try { siblingChild.kill('SIGKILL') } catch { /* already gone */ }
+  }
+  if (siblingStopFile !== undefined) {
+    try { unlinkSync(siblingStopFile) } catch { /* not created */ }
   }
   try { process.kill(-sentinel.pid, 'SIGKILL') } catch {
     try { sentinel.kill('SIGKILL') } catch { /* already gone */ }
