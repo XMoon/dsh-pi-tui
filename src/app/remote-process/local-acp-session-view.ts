@@ -459,8 +459,6 @@ export type AcpRequestPermissionResponse = {
 /** One connection's transient protocol view state. */
 export interface ConnectionViewState {
   phase: 'idle' | 'attaching' | 'attached' | 'closed'
-  /** The last Session this connection closed, so a repeated close stays idempotent. */
-  lastClosedSessionId?: string
   /**
    * Monotonic attach-operation generation. `beginAttach` bumps it; every async
    * continuation may mutate `phase`/`claims` ONLY while its captured generation
@@ -822,6 +820,27 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   /** Whether a Session is currently reserved or attached by ANY connection. */
   hasClaim(sessionId: string): boolean {
     return this.claims.has(sessionId)
+  }
+
+  /**
+   * Whether this exact connection currently owns the Session's one ACP claim.
+   * The read is side-effect free and includes a pending, attached or
+   * detached-with-fence claim; it is never proof that Host work completed.
+   */
+  ownsClaim(state: ConnectionViewState, sessionId: string): boolean {
+    return this.claims.get(sessionId)?.connectionIdentity === state
+  }
+
+  /**
+   * Whether this exact connection owns ANY live claim. Used by the listener's
+   * bounded per-connection roster to retain slots that still carry a Host
+   * obligation or terminal fence.
+   */
+  hasClaimOwnedBy(state: ConnectionViewState): boolean {
+    for (const claim of this.claims.values()) {
+      if (claim.connectionIdentity === state) return true
+    }
+    return false
   }
 
   /** The current phase of one connection (qualification diagnosis only). */
@@ -1227,9 +1246,10 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
    * flight is still open, the close FIRST drives the same scoped cancellation
    * and waits for its real settlement (durable queued removal or the exact
    * running turn's terminal plus the output drain); only a proven settlement
-   * detaches the View. A repeated close awaits the SAME settlement; a close of
-   * a Session this connection never held is still refused. The Host Agent and
-   * Session always stay alive; no other connection's claim is touched.
+   * detaches the View. A repeated close awaits the SAME settlement; an
+   * unknown, inactive or foreign Session close is the standard idempotent `{}`
+   * and has no Host side effect. The Host Agent and Session always stay alive;
+   * no other connection's claim is touched.
    */
   async closeSession(
     state: ConnectionViewState,
@@ -1237,10 +1257,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     sessionId: string,
   ): Promise<Record<string, never>> {
     const claim = this.claims.get(sessionId)
-    if (claim === undefined || claim.connectionIdentity !== state) {
-      if (state.lastClosedSessionId === sessionId) return {}
-      throw new LocalAcpViewError('LOCAL_ACP_VIEW_NOT_OWNED', 'this ACP connection holds no view for that session', JSONRPC_INVALID_PARAMS)
-    }
+    if (claim === undefined || claim.connectionIdentity !== state) return {}
     // A detached claim observes Host settlement only; another Session may now
     // own this connection's attaching/attached View.
     if (claim.detachedWithFence) return {}
@@ -1251,7 +1268,6 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       claim.mcpMountAbort?.abort()
       claim.detachedWithFence = true
       state.phase = 'idle'
-      state.lastClosedSessionId = sessionId
       return {}
     }
     // Join only an attempt that is STILL in flight: a failed attempt is not a
@@ -1391,7 +1407,6 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     // This close also cancels any in-flight attach for this connection (same
     // generation semantics as PO-2); a superseded op can never re-commit.
     state.phase = 'idle'
-    state.lastClosedSessionId = sessionId
     return {}
   }
 
@@ -2022,16 +2037,14 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       // terminal fact settles an UNPROVEN cancellation (R701-05): a disposed
       // Agent can never execute the message the View could not remove.
       if (claim.unclaimedHostObligation !== undefined) this.dropUnclaimedObligation(claim)
-      // The disposed Agent's context already released its scoped MCP Fibers;
-      // the lease still reads that official closure and clears itself. The
-      // View is detached by the disposal and must release its claim once that
-      // exact lease is retired, so a later resume can attach the live Session
-      // instead of being blocked by a dead Agent's reservation.
+      // A disposed Agent can never serve this View again: mark the exact claim
+      // detached first, then release it once every real obligation/fence has
+      // ended. A scoped MCP lease/mount still owns its own retirement path.
+      claim.detachedWithFence = true
+      if (claim.connectionIdentity.phase !== 'closed') claim.connectionIdentity.phase = 'idle'
+      if (claim.mcpMountPending === true) claim.mcpRetireRequested = true
       claim.mcpMountAbort?.abort()
-      if (claim.mcpLease !== undefined) {
-        claim.detachedWithFence = true
-        if (this.access !== undefined) this.requestMcpRetire(claim, this.access)
-      }
+      if (claim.mcpLease !== undefined && this.access !== undefined) this.requestMcpRetire(claim, this.access)
       this.endRetiringFence(claim.sessionId, claim)
     }
   }
@@ -2315,7 +2328,6 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     }
     state.op += 1
     state.phase = 'attaching'
-    state.lastClosedSessionId = undefined
     return state.op
   }
 
