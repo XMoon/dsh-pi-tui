@@ -19,6 +19,7 @@ import { createHash } from 'node:crypto'
 import { realpathSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
 import type { Context, Fiber } from '@deepseek-ai/cordis'
+import type * as McpClientModule from '@deepseek-ai/dsh-mcp-client'
 
 /** The stable internal failure codes of the Host-only scoped MCP kernel. */
 export type AcpScopedMcpErrorCode =
@@ -116,6 +117,18 @@ const VALID_SERVER_NAME = /^[A-Za-z0-9_-]{1,32}$/u
 
 /** The explicit per-Session capacity policy of this phase. */
 export const MAX_ACP_MCP_SERVERS = 4
+
+/**
+ * The fixed official MCP resource-tool names. A first server in one Agent
+ * scope also activates these three shared read-only tools through the
+ * official `mcp-resources` service; they belong to the same mount lifecycle
+ * and are not part of any server's advertised `toolCount`.
+ */
+const MCP_RESOURCE_TOOL_NAMES = new Set([
+  'list_mcp_resources',
+  'list_mcp_resource_templates',
+  'read_mcp_resource',
+])
 
 /** Reproduce the official ACP server-name normalization exactly. */
 function normalizeServerName(name: string): string {
@@ -239,7 +252,7 @@ function toolNamesOf(lease: AcpScopedMcpLease): ReadonlySet<string> {
 }
 
 /** Check every exact Fiber's official cleanup result. */
-function unconfirmedFibers(mcp: typeof import('@deepseek-ai/dsh-mcp-client'), lease: AcpScopedMcpLease): Fiber[] {
+function unconfirmedFibers(mcp: typeof McpClientModule, lease: AcpScopedMcpLease): Fiber[] {
   const unconfirmed: Fiber[] = []
   for (const fiber of lease.fibers) {
     const closure = mcp.connectionStatusOf(fiber)?.closure()
@@ -252,7 +265,7 @@ function unconfirmedFibers(mcp: typeof import('@deepseek-ai/dsh-mcp-client'), le
 
 /** Dispose one created Fiber set in reverse mount order and classify the result. */
 async function rollbackFibers(
-  mcp: typeof import('@deepseek-ai/dsh-mcp-client'),
+  mcp: typeof McpClientModule,
   lease: AcpScopedMcpLease,
   original: unknown,
 ): Promise<never> {
@@ -368,11 +381,13 @@ export async function mountAcpScopedMcp(input: {
           changed.push(name)
         }
         const removed = [...previousNames].filter(name => !after.has(name))
-        if (removed.length > 0 || changed.length !== status.toolCount) {
+        const newResourceTools = changed.filter(name => MCP_RESOURCE_TOOL_NAMES.has(name))
+        if (removed.length > 0 || changed.length !== status.toolCount + newResourceTools.length) {
           // The official ToolService exposes visible definitions but no
-          // per-registration owner; an exact count/name diff is the only
-          // real-metadata proof available in this release. Any unprovable
-          // concurrent change fails closed instead of guessing ownership.
+          // per-registration owner; an exact count/name diff plus the fixed
+          // official MCP resource-tool set is the only real-metadata proof
+          // available in this release. Any unprovable concurrent change fails
+          // closed instead of guessing ownership.
           throw startFailed()
         }
         for (const name of changed) {

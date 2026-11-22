@@ -48,6 +48,10 @@ const SCENARIOS = new Set([
   // G-ACP1B/B0: one live Agent mounts an official Agent-scoped MCP client
   // through `agent.runMaintenance()` and a run-owned control file sequence.
   'acp-scoped-mcp-b0',
+  // G-ACP1B/B1: the production ACP stdio MCP path. The scripted model only
+  // selects the same harmless MCP tools; all admission/retirement is owned by
+  // the production View, not a test fixture.
+  'acp-scoped-mcp-b1',
   // PO-4A content admission: only this scenario declares the test route's image modality.
   'acp-po4a',
   // PO-4C committed output: the offline model emits standard assistant/tool
@@ -346,6 +350,30 @@ const B0_ECHO_TOOL = 'mcp__b0scope__echo'
 const B0_HOLD_TOOL = 'mcp__b0scope__hold'
 const B0_FAIL_TOOL = 'mcp__b0scope__fail'
 const B0_PROMPT_PATTERN = /\b(B0_(?:ECHO|HOLD|FAIL|PLAIN)_[AB])\b(?:\s+([A-Za-z0-9_-]+))?/u
+
+/** G-ACP1B/B1 prompt markers and the same harmless MCP public tool names. */
+const B1_ECHO_MARKER = 'B1_ECHO_A'
+const B1_HOLD_MARKER = 'B1_HOLD_A'
+const B1_FAIL_MARKER = 'B1_FAIL_A'
+const B1_PLAIN_MARKER = 'B1_PLAIN_A'
+const B1_ECHO_B_MARKER = 'B1_ECHO_B'
+const B1_ECHO_TOOL = 'mcp__b1scope__echo'
+const B1_HOLD_TOOL = 'mcp__b1scope__hold'
+const B1_FAIL_TOOL = 'mcp__b1scope__fail'
+const B1_PROMPT_PATTERN = /\b(B1_(?:ECHO|HOLD|FAIL|PLAIN)_[AB])\b(?:\s+([A-Za-z0-9_-]+))?/u
+
+/** The newest authored B1 prompt marker and its optional nonce. */
+function b1PromptOf(messages) {
+  for (const message of [...(messages ?? [])].reverse()) {
+    if (message?.role !== 'user') continue
+    const text = (message.content ?? [])
+      .map(part => (part?.type === 'text' && typeof part.text === 'string' ? part.text : ''))
+      .join('')
+    const match = text.match(B1_PROMPT_PATTERN)
+    if (match !== null) return { marker: match[1], nonce: match[2] }
+  }
+  return undefined
+}
 
 /** The newest authored B0 prompt marker and its optional nonce. */
 function b0PromptOf(messages) {
@@ -1082,6 +1110,98 @@ function createScopedMcpB0Workload(ctx, { root, record }) {
   }), 'b0-session-event-observer')
 
   return { state }
+}
+
+/**
+ * G-ACP1B/B1 test-owned Host control surface.
+ *
+ * It only performs the two facts a real qualification needs beyond the
+ * production MCP admission: a deliberately installed GLOBAL tool that must be
+ * rejected as a shadow, and an exact Agent/Session/tool-count probe used to
+ * prove an invalid request created nothing. No Session/Agent/MCP child is
+ * created or mounted here.
+ */
+function createScopedMcpB1Workload(ctx, { root, record }) {
+  const controlPath = process.env.C1_B1_CONTROL ?? join(root, 'b1-control.json')
+  if (typeof process.env.C1_B1_CONTROL !== 'string' || process.env.C1_B1_CONTROL === '') {
+    throw new Error('m4-c1-host-work: acp-scoped-mcp-b1 requires C1_B1_CONTROL')
+  }
+  let globalDispose
+  let timer
+  let current
+  const fact = (actionId, action, fields = {}) => {
+    record('b1-fact', { actionId, action, hostPid: process.pid, ...fields })
+  }
+  const sessionCounts = () => {
+    const sessions = ctx.reflect.get('sessions')
+    return { agentCount: ctx.agents.list().length, sessionCount: sessions?.list().length }
+  }
+  const handle = async request => {
+    if (request.action === 'probe') {
+      const counts = sessionCounts()
+      const agent = request.sessionId === undefined ? undefined : ctx.agents.get(request.sessionId)
+      const tools = agent === undefined ? [] : ctx.tools.schemas(agent).map(schema => schema.name)
+      fact(request.actionId, 'probe', { ok: true, sessionId: request.sessionId, agentId: agent?.id, ...counts, toolNames: tools })
+      return
+    }
+    if (request.action === 'global-shadow') {
+      if (globalDispose !== undefined) throw new Error('m4-c1-host-work: B1 global shadow is already installed')
+      globalDispose = ctx.tools.register(defineTool({
+        name: B1_ECHO_TOOL,
+        description: 'B1 GLOBAL_ONLY shadow tool',
+        parameters: {},
+        output: { schema: { type: 'string' }, render: () => [{ type: 'text', text: 'GLOBAL_ONLY' }] },
+        async execute() { return 'GLOBAL_ONLY' },
+      }))
+      const agent = request.sessionId === undefined ? undefined : ctx.agents.get(request.sessionId)
+      fact(request.actionId, 'global-shadow', {
+        ok: true,
+        sessionId: request.sessionId,
+        agentId: agent?.id,
+        toolNames: agent === undefined ? [] : ctx.tools.schemas(agent).map(schema => schema.name),
+        ...sessionCounts(),
+      })
+      return
+    }
+    if (request.action === 'clear-global-shadow') {
+      if (globalDispose === undefined) throw new Error('m4-c1-host-work: B1 global shadow is not installed')
+      globalDispose()
+      globalDispose = undefined
+      fact(request.actionId, 'clear-global-shadow', { ok: true, ...sessionCounts() })
+      return
+    }
+    throw new Error(`m4-c1-host-work: unknown B1 control action ${JSON.stringify(request.action)}`)
+  }
+  ctx.effect(() => {
+    timer = setInterval(() => {
+      if (current !== undefined || !existsSync(controlPath)) return
+      let request
+      try {
+        request = JSON.parse(readFileSync(controlPath, 'utf8'))
+      } catch (error) {
+        rmSync(controlPath, { force: true })
+        record('b1-control-invalid', { message: error instanceof Error ? error.message : String(error) })
+        return
+      }
+      rmSync(controlPath, { force: true })
+      current = handle(request)
+        .catch(error => {
+          fact(request?.actionId, request?.action ?? 'unknown', {
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        })
+        .finally(() => { current = undefined })
+    }, 25)
+    return async () => {
+      clearInterval(timer)
+      if (current !== undefined) await current
+      if (globalDispose !== undefined) {
+        globalDispose()
+        globalDispose = undefined
+      }
+    }
+  }, 'b1-workload-owner')
 }
 
 class C1Model extends LlmAdapter {
@@ -1873,6 +1993,63 @@ class C1Model extends LlmAdapter {
       return
     }
 
+    if (this.scenario === 'acp-scoped-mcp-b1') {
+      const prompt = b1PromptOf(options.messages ?? [])
+      const toolNames = Array.isArray(options.tools)
+        ? options.tools.map(tool => tool?.name).filter(name => typeof name === 'string').sort()
+        : []
+      if (prompt === undefined) {
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: `b1 plain ${token}` }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: `b1 plain ${token}` } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      this.record('b1-model-tools', {
+        sessionId,
+        marker: prompt.marker,
+        nonce: prompt.nonce,
+        toolNames,
+        hasEchoTool: toolNames.includes(B1_ECHO_TOOL),
+        hasHoldTool: toolNames.includes(B1_HOLD_TOOL),
+        hasFailTool: toolNames.includes(B1_FAIL_TOOL),
+        afterTool,
+      })
+      if (prompt.marker === B1_PLAIN_MARKER) {
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: `b1 plain settled ${prompt.nonce ?? ''} ${token}` }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: `b1 plain settled ${prompt.nonce ?? ''} ${token}` } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      if (afterTool) {
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: `b1 ${prompt.marker} settled ${prompt.nonce ?? ''} ${token}` }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: `b1 ${prompt.marker} settled ${prompt.nonce ?? ''} ${token}` } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      const toolName = prompt.marker === B1_HOLD_MARKER
+        ? B1_HOLD_TOOL
+        : prompt.marker === B1_FAIL_MARKER
+          ? B1_FAIL_TOOL
+          : B1_ECHO_TOOL
+      const callId = `b1-${prompt.marker.toLowerCase()}-${sessionId}-${prompt.nonce ?? '0'}`
+      yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+      yield {
+        type: 'block-end',
+        index: 0,
+        block: {
+          type: 'tool-call',
+          id: callId,
+          name: toolName,
+          arguments: JSON.stringify({ nonce: prompt.nonce ?? '' }),
+        },
+      }
+      yield { type: 'finish', reason: { kind: 'tool-calls' } }
+      return
+    }
+
     throw new Error(`m4-c1-host-work: unsupported scenario ${JSON.stringify(this.scenario)}`)
   }
 }
@@ -2007,6 +2184,10 @@ export async function apply(ctx) {
 
   if (scenario === 'acp-scoped-mcp-b0') {
     createScopedMcpB0Workload(ctx, { root, record })
+  }
+
+  if (scenario === 'acp-scoped-mcp-b1') {
+    createScopedMcpB1Workload(ctx, { root, record })
   }
 
   if (scenario === 'acp-po4c') {

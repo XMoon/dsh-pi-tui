@@ -66,6 +66,12 @@ import {
   type AcpModelErrorCode,
   type AcpModelOptionRequest,
 } from './local-acp-model-selection.ts'
+import {
+  AcpScopedMcpError,
+  parseAcpMcpServers,
+  type AcpScopedMcpCurrentness,
+  type AcpScopedMcpLease,
+} from './local-acp-scoped-mcp.ts'
 
 /** The exact live identity a borrowed Session View is allowed to believe. */
 export interface LiveAgentViewIdentity {
@@ -161,6 +167,19 @@ export interface HostAcpSessionAccess {
    * disposer removes exactly these listeners.
    */
   observePromptFacts(listener: AcpPromptFactListener): () => void
+  /**
+   * Mount one standard ACP stdio MCP declaration list on the exact Agent. The
+   * returned lease is owned by the caller; `stillCurrent` is re-checked after
+   * every asynchronous Host step.
+   */
+  mountScopedMcp(
+    agent: LiveAgentViewIdentity,
+    session: object,
+    servers: readonly unknown[],
+    stillCurrent: () => AcpScopedMcpCurrentness,
+  ): Promise<AcpScopedMcpLease | undefined>
+  /** Request the ONE singleflight retirement of an exact scoped MCP lease. */
+  requestRetireScopedMcp(lease: AcpScopedMcpLease): Promise<void>
   /** Read the complete standard config-option state of one exact attached Agent. */
   modelOptions(agent: LiveAgentViewIdentity, session: object): Promise<SessionConfigOption[]>
   /**
@@ -199,6 +218,18 @@ export type LocalAcpViewErrorCode =
   | 'LOCAL_ACP_VIEW_CREATE_INDETERMINATE'
   | 'LOCAL_ACP_VIEW_HOST_ERROR'
   | 'LOCAL_ACP_VIEW_CLOSED'
+  /** One standard ACP stdio MCP declaration was invalid before any Host create. */
+  | 'LOCAL_ACP_MCP_INVALID_DECLARATION'
+  /** The exact Agent was running or owned another maintenance window. */
+  | 'LOCAL_ACP_MCP_AGENT_BUSY'
+  /** An MCP tool name would shadow an existing global/Agent tool. */
+  | 'LOCAL_ACP_MCP_NAME_CONFLICT'
+  /** The MCP server child could not connect or complete its first tool sync. */
+  | 'LOCAL_ACP_MCP_START_FAILED'
+  /** The MCP Fiber cleanup could not be confirmed; the lease remains fenced. */
+  | 'LOCAL_ACP_MCP_CLEANUP_UNCONFIRMED'
+  /** The View admission changed while the MCP lease was being mounted. */
+  | 'LOCAL_ACP_MCP_STALE'
 
 /**
  * The stable prompt-flight failure codes. Each one names ONE Host fact the
@@ -496,6 +527,12 @@ interface ViewClaim {
    * claim then lives ONLY for that fact and is deleted when it settles.
    */
   detachedWithFence?: boolean
+  /** Set synchronously while an async MCP admission crosses this claim. */
+  mcpMountPending?: boolean
+  /** The ONE exact Agent-scoped MCP lease this claim owns. */
+  mcpLease?: AcpScopedMcpLease
+  /** Close/EOF/Off committed the retirement intent for `mcpLease`. */
+  mcpRetireRequested?: boolean
   /**
    * The ONE transient config-options notification callback of this claim's
    * connection. It carries no model fact and dies with the claim; an absent
@@ -754,6 +791,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       if (claim.inflight !== undefined && !claim.inflight.settledDone) return true
       if (claim.retiringTurn !== undefined) return true
       if (claim.unclaimedHostObligation !== undefined) return true
+      if (claim.mcpMountPending === true || claim.mcpLease !== undefined) return true
     }
     return false
   }
@@ -877,7 +915,8 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     signal: AbortSignal,
   ): Promise<SessionConfigOption[]> {
     const claim = this.attachedClaim(state, request.sessionId)
-    if (claim.inflight !== undefined || claim.unclaimedHostObligation !== undefined) {
+    if (claim.inflight !== undefined || claim.unclaimedHostObligation !== undefined
+      || claim.mcpMountPending === true || claim.mcpRetireRequested === true) {
       throw new LocalAcpViewError(
         'LOCAL_ACP_MODEL_VIEW_BUSY',
         'a prompt is already in flight for this session view',
@@ -888,7 +927,8 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     const session = claim.exactSession as object
     const stillCurrent = (): AcpModelCurrentness => {
       if (!this.isStillAttached(state, claim, agent, session)) return 'stale'
-      if (claim.inflight !== undefined || claim.unclaimedHostObligation !== undefined) return 'view-busy'
+      if (claim.inflight !== undefined || claim.unclaimedHostObligation !== undefined
+        || claim.mcpMountPending === true || claim.mcpRetireRequested === true) return 'view-busy'
       return 'current'
     }
     const options = await this.callModelAccess(() => access.selectModelOnly(
@@ -927,13 +967,14 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     access: HostAcpSessionAccess,
     request: AcpNewSessionParams,
     notifyConfigOptions?: AcpConfigOptionsNotifier,
+    requestSignal?: AbortSignal,
   ): Promise<{ sessionId: string }> {
     const op = this.beginAttach(state)
     try {
       this.validateNew(request)
     } catch (error) {
       this.resetIdleIfCurrent(state, op)
-      throw error
+      throw error instanceof AcpScopedMcpError ? mapScopedMcpError(error) : error
     }
 
     const workspace = await access.createWorkspace(request.cwd)
@@ -992,6 +1033,17 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     // resolveForView carries the authoritative { sessionId } on failure, so a
     // failed Agent borrow after a CONFIRMED create still preserves the identity.
     const agent = await this.resolveForView(access, state, op, claim)
+    claim.exactAgent = agent
+    claim.exactSession = agent.session
+    if (request.mcpServers.length > 0) {
+      try {
+        await this.installScopedMcp(state, op, claim, access, agent, request.mcpServers, requestSignal)
+      } catch (error) {
+        this.releaseReservation(state, claim)
+        this.resetIdleIfCurrent(state, op)
+        throw error
+      }
+    }
     this.commitAttached(state, op, claim, access, agent, notifyConfigOptions)
     return { sessionId }
   }
@@ -1006,13 +1058,14 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     access: HostAcpSessionAccess,
     request: AcpResumeSessionParams,
     notifyConfigOptions?: AcpConfigOptionsNotifier,
+    requestSignal?: AbortSignal,
   ): Promise<Record<string, never>> {
     const op = this.beginAttach(state)
     try {
       this.validateResume(request)
     } catch (error) {
       this.resetIdleIfCurrent(state, op)
-      throw error
+      throw error instanceof AcpScopedMcpError ? mapScopedMcpError(error) : error
     }
     const sessionId = request.sessionId
     if (this.claims.has(sessionId)) {
@@ -1027,8 +1080,132 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     if (agent.session.header.cwd !== request.cwd) {
       this.diag.warn('local-acp.view.cwd-mismatch', { mismatch: true })
     }
+    claim.exactAgent = agent
+    claim.exactSession = agent.session
+    if (request.mcpServers !== undefined && request.mcpServers.length > 0) {
+      try {
+        await this.installScopedMcp(state, op, claim, access, agent, request.mcpServers, requestSignal)
+      } catch (error) {
+        this.releaseReservation(state, claim)
+        this.resetIdleIfCurrent(state, op)
+        throw error
+      }
+    }
     this.commitAttached(state, op, claim, access, agent, notifyConfigOptions)
     return {}
+  }
+
+  /** Whether one MCP admission is still owned by the same live attach op. */
+  private isMcpAdmissionCurrent(
+    state: ConnectionViewState,
+    op: number,
+    claim: ViewClaim,
+    agent: LiveAgentViewIdentity,
+  ): boolean {
+    return state.op === op
+      && state.phase === 'attaching'
+      && this.claims.get(claim.sessionId) === claim
+      && claim.connectionIdentity === state
+      && !claim.detachedWithFence
+      && claim.exactAgent === agent
+      && claim.exactSession === agent.session
+  }
+
+  /**
+   * Mount one already-validated non-empty declaration list before the View is
+   * committed. The reservation (`mcpMountPending`) is committed BEFORE the
+   * async Host call; a close/EOF/Off during that window leaves the claim alive
+   * and commits the retirement intent, so a late success owns a lease that is
+   * immediately retired instead of becoming an orphan.
+   */
+  private async installScopedMcp(
+    state: ConnectionViewState,
+    op: number,
+    claim: ViewClaim,
+    access: HostAcpSessionAccess,
+    agent: LiveAgentViewIdentity,
+    servers: readonly unknown[],
+    signal: AbortSignal | undefined,
+  ): Promise<void> {
+    claim.mcpMountPending = true
+    let lease: AcpScopedMcpLease | undefined
+    try {
+      lease = await access.mountScopedMcp(agent, agent.session, servers, () => {
+        if (signal?.aborted === true) return 'stale'
+        return this.isMcpAdmissionCurrent(state, op, claim, agent) ? 'current' : 'stale'
+      })
+    } catch (error) {
+      claim.mcpMountPending = false
+      if (error instanceof AcpScopedMcpError) {
+        if (error.lease !== undefined) {
+          claim.mcpLease = error.lease
+          this.requestMcpRetire(claim, access)
+          claim.detachedWithFence = true
+        }
+        throw mapScopedMcpError(error, claim.sessionId)
+      }
+      throw new LocalAcpViewError(
+        'LOCAL_ACP_MCP_START_FAILED',
+        'the scoped MCP server could not be started',
+        JSONRPC_INTERNAL_ERROR,
+        { sessionId: claim.sessionId },
+      )
+    }
+    claim.mcpMountPending = false
+    if (lease === undefined) {
+      throw new LocalAcpViewError(
+        'LOCAL_ACP_MCP_START_FAILED',
+        'the scoped MCP server could not be started',
+        JSONRPC_INTERNAL_ERROR,
+        { sessionId: claim.sessionId },
+      )
+    }
+    claim.mcpLease = lease
+    if (claim.mcpRetireRequested === true || !this.isMcpAdmissionCurrent(state, op, claim, agent)) {
+      this.requestMcpRetire(claim, access)
+      throw new LocalAcpViewError(
+        'LOCAL_ACP_MCP_STALE',
+        'the ACP view changed while its MCP servers were mounted',
+        JSONRPC_INVALID_PARAMS,
+        { sessionId: claim.sessionId },
+      )
+    }
+  }
+
+  /**
+   * Start the ONE singleflight retirement of this claim's exact lease. The
+   * claim stays reserved/fenced until the official Fiber closure and tool
+   * absence are confirmed; a failed cleanup keeps the lease instead of
+   * allowing a second View to reuse the Session.
+   */
+  private requestMcpRetire(claim: ViewClaim, access: HostAcpSessionAccess): void {
+    const lease = claim.mcpLease
+    if (lease === undefined) return
+    if (claim.mcpRetireRequested === true && lease.retirePromise !== undefined) return
+    claim.mcpRetireRequested = true
+    runDetached('local acp: scoped MCP retirement', async () => {
+      try {
+        await access.requestRetireScopedMcp(lease)
+      } catch (error) {
+        const code = error instanceof AcpScopedMcpError ? error.code : 'CLEANUP_UNCONFIRMED'
+        this.diag.warn('local-acp.mcp-retire-unconfirmed', { code })
+        return
+      }
+      if (claim.mcpLease !== lease) return
+      claim.mcpLease = undefined
+      if (claim.mcpMountPending === true) return
+      if (this.claims.get(claim.sessionId) !== claim) return
+      // A still-attached View keeps its Session claim; only a detached View
+      // releases after the MCP responsibility is gone.
+      if (claim.connectionIdentity.phase === 'attached' && !claim.detachedWithFence) return
+      if (claim.inflight !== undefined || claim.retiringTurn !== undefined || claim.unclaimedHostObligation !== undefined) {
+        claim.detachedWithFence = true
+        this.notifyWorkSettled()
+        return
+      }
+      this.claims.delete(claim.sessionId)
+      this.notifyWorkSettled()
+    }, { diag: this.diag })
   }
 
   /**
@@ -1053,6 +1230,15 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     // A detached claim observes Host settlement only; another Session may now
     // own this connection's attaching/attached View.
     if (claim.detachedWithFence) return {}
+    // A close during the async MCP admission commits retirement intent; the
+    // late mount result must retire its own lease instead of attaching.
+    if (claim.mcpMountPending === true) {
+      claim.mcpRetireRequested = true
+      claim.detachedWithFence = true
+      state.phase = 'idle'
+      state.lastClosedSessionId = sessionId
+      return {}
+    }
     // Join only an attempt that is STILL in flight: a failed attempt is not a
     // settlement proof and must not lock the retry (v1.1 §5.B.3).
     const inFlightAttempt = claim.closing
@@ -1116,6 +1302,9 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         JSONRPC_INTERNAL_ERROR,
       )
     }
+    // The View is detached now; request the scoped MCP retirement so the
+    // claim stays fenced only until the official Fiber closure is confirmed.
+    if (claim.mcpLease !== undefined) this.requestMcpRetire(claim, access)
     return this.finishClose(state, sessionId, claim)
   }
 
@@ -1164,6 +1353,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     if (claim.inflight !== undefined) return
     if (claim.retiringTurn !== undefined) return
     if (claim.unclaimedHostObligation !== undefined) return
+    if (claim.mcpMountPending === true || claim.mcpLease !== undefined) return
     if (this.claims.get(claim.sessionId) === claim) this.claims.delete(claim.sessionId)
   }
 
@@ -1177,7 +1367,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     // detaches, but the claim survives so a LATE approval of that exact
     // ACP-owned turn can never be delegated to the TUI and a late insertion is
     // still observed. A claim with no such fact is released now.
-    if (claim.retiringTurn !== undefined) {
+    if (claim.retiringTurn !== undefined || claim.mcpMountPending === true || claim.mcpLease !== undefined) {
       claim.detachedWithFence = true
     } else if (this.claims.get(sessionId) === claim) {
       this.claims.delete(sessionId)
@@ -1817,6 +2007,9 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       // terminal fact settles an UNPROVEN cancellation (R701-05): a disposed
       // Agent can never execute the message the View could not remove.
       if (claim.unclaimedHostObligation !== undefined) this.dropUnclaimedObligation(claim)
+      // The disposed Agent's context already released its scoped MCP Fibers;
+      // the lease still reads that official closure and clears itself.
+      if (claim.mcpLease !== undefined && this.access !== undefined) this.requestMcpRetire(claim, this.access)
       this.endRetiringFence(claim.sessionId, claim)
     }
   }
@@ -1974,9 +2167,18 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       // A physical teardown/Off/replacement ends this connection's notification
       // capability immediately, even when the claim survives for a fence fact.
       claim.notifyConfigOptions = undefined
+      const bound = access ?? this.access
+      // An in-flight MCP admission is not cancellable synchronously; commit the
+      // retirement intent and keep the reservation until its late result owns
+      // and retires its exact lease.
+      if (claim.mcpMountPending === true) {
+        claim.mcpRetireRequested = true
+        claim.detachedWithFence = true
+        continue
+      }
+      if (claim.mcpLease !== undefined && bound !== undefined) this.requestMcpRetire(claim, bound)
       const flight = claim.inflight
       if (flight !== undefined) {
-        const bound = access ?? this.access
         if (bound === undefined) {
           // No Host access was ever bound (raw-socket contracts): keep the
           // PO-3A fail-closed release.
@@ -2002,7 +2204,8 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
           // fence (RFL-005) or left an unproven cancellation (R701-05): the
           // claim then survives for that terminal fact alone and dies at it,
           // never leaking the approval and never faking a settled detach.
-          if (claim.retiringTurn !== undefined || claim.unclaimedHostObligation !== undefined) {
+          if (claim.retiringTurn !== undefined || claim.unclaimedHostObligation !== undefined
+            || claim.mcpLease !== undefined || claim.mcpMountPending === true) {
             claim.detachedWithFence = true
             this.notifyWorkSettled()
             return
@@ -2017,7 +2220,6 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       // it may still drive ONE exact removal when the message is known — only
       // a real removal ends the obligation; anything else keeps the claim.
       const obligation = claim.unclaimedHostObligation
-      const bound = access ?? this.access
       if (
         obligation !== undefined && obligation.messageId !== undefined
         && claim.exactAgent !== undefined && claim.exactSession !== undefined && bound !== undefined
@@ -2026,7 +2228,8 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
           this.dropUnclaimedObligation(claim)
         }
       }
-      if (claim.retiringTurn !== undefined || claim.unclaimedHostObligation !== undefined) {
+      if (claim.retiringTurn !== undefined || claim.unclaimedHostObligation !== undefined
+        || claim.mcpLease !== undefined) {
         claim.detachedWithFence = true
         continue
       }
@@ -2053,7 +2256,8 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
    * retired-turn fence that must survive until its own facts end it.
    */
   private releaseClaimIfUnfenced(sessionId: string, claim: ViewClaim): void {
-    if (claim.retiringTurn !== undefined || claim.unclaimedHostObligation !== undefined) {
+    if (claim.retiringTurn !== undefined || claim.unclaimedHostObligation !== undefined
+      || claim.mcpLease !== undefined || claim.mcpMountPending === true) {
       // The fence/obligation survives for its own facts; the claim dies with it.
       claim.detachedWithFence = true
       return
@@ -2066,6 +2270,11 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
 
   /** Release one disconnect claim after its flight settled. */
   private releaseClaimAfterDisconnect(sessionId: string, claim: ViewClaim): void {
+    if (claim.mcpLease !== undefined || claim.mcpMountPending === true) {
+      claim.detachedWithFence = true
+      this.notifyWorkSettled()
+      return
+    }
     if (this.claims.get(sessionId) === claim) this.claims.delete(sessionId)
     this.notifyWorkSettled()
   }
@@ -2161,8 +2370,9 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   ): void {
     if (state.op !== op || this.claims.get(claim.sessionId) !== claim || claim.connectionIdentity !== state) {
       // A newer op owns this connection or the claim was released; the late
-      // result is inert and must not change the current transient state.
-      this.releaseReservation(state, claim)
+      // result is inert and must not change the current transient state. A
+      // successfully mounted lease is retired before its claim can release.
+      this.releaseClaimWithMcp(state, claim, access)
       throw new LocalAcpViewError(
         'LOCAL_ACP_VIEW_CLOSED',
         'the ACP view was released before it attached',
@@ -2173,7 +2383,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     const exact = Object.is(access.currentAgent(claim.sessionId), agent)
       && Object.is(access.currentSession(claim.sessionId), agent.session)
     if (!exact) {
-      this.releaseReservation(state, claim)
+      this.releaseClaimWithMcp(state, claim, access)
       this.resetIdleIfCurrent(state, op)
       throw new LocalAcpViewError(
         'LOCAL_ACP_VIEW_AGENT_UNAVAILABLE',
@@ -2199,10 +2409,26 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
    * a stale operation's late release must not delete the newer claim.
    */
   private releaseReservation(state: ConnectionViewState, claim: ViewClaim): void {
+    if (claim.mcpMountPending === true || claim.mcpLease !== undefined) {
+      claim.detachedWithFence = true
+      this.notifyWorkSettled()
+      return
+    }
     if (this.claims.get(claim.sessionId) === claim && claim.connectionIdentity === state) {
       this.claims.delete(claim.sessionId)
       this.notifyWorkSettled()
     }
+  }
+
+  /** Release a failed commit while preserving any exact MCP lease it owns. */
+  private releaseClaimWithMcp(state: ConnectionViewState, claim: ViewClaim, access: HostAcpSessionAccess): void {
+    if (claim.mcpLease !== undefined) {
+      claim.detachedWithFence = true
+      this.requestMcpRetire(claim, access)
+      this.notifyWorkSettled()
+      return
+    }
+    this.releaseReservation(state, claim)
   }
 
   /**
@@ -2634,9 +2860,9 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
 
   private validateNew(request: AcpNewSessionParams): void {
     validateCwd(request.cwd)
-    if (request.mcpServers.length !== 0) {
-      throw new LocalAcpViewError('LOCAL_ACP_VIEW_INVALID_REQUEST', 'ACP MCP servers are not supported by this Host', JSONRPC_INVALID_PARAMS)
-    }
+    // The complete stdio declaration list is validated BEFORE any Host
+    // Workspace/Session create or child process start.
+    parseAcpMcpServers(request.mcpServers)
     if (request.additionalDirectories !== undefined && request.additionalDirectories.length !== 0) {
       throw new LocalAcpViewError('LOCAL_ACP_VIEW_INVALID_REQUEST', 'ACP additional directories are not supported by this Host', JSONRPC_INVALID_PARAMS)
     }
@@ -2647,9 +2873,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       throw new LocalAcpViewError('LOCAL_ACP_VIEW_INVALID_REQUEST', 'a non-empty sessionId is required', JSONRPC_INVALID_PARAMS)
     }
     validateCwd(request.cwd)
-    if (request.mcpServers !== undefined && request.mcpServers.length !== 0) {
-      throw new LocalAcpViewError('LOCAL_ACP_VIEW_INVALID_REQUEST', 'ACP MCP servers are not supported by this Host', JSONRPC_INVALID_PARAMS)
-    }
+    parseAcpMcpServers(request.mcpServers ?? [])
     if (request.additionalDirectories !== undefined && request.additionalDirectories.length !== 0) {
       throw new LocalAcpViewError('LOCAL_ACP_VIEW_INVALID_REQUEST', 'ACP additional directories are not supported by this Host', JSONRPC_INVALID_PARAMS)
     }
@@ -2769,6 +2993,25 @@ function parseToolArguments(value: string): unknown {
     return JSON.parse(value) as unknown
   } catch {
     return value
+  }
+}
+
+/** Map one Host-only scoped-MCP failure onto a stable View rejection. */
+function mapScopedMcpError(error: AcpScopedMcpError, sessionId?: string): LocalAcpViewError {
+  const data = sessionId === undefined || sessionId === '' ? {} : { sessionId }
+  switch (error.code) {
+    case 'INVALID_DECLARATION':
+      return new LocalAcpViewError('LOCAL_ACP_MCP_INVALID_DECLARATION', 'the MCP server declaration is invalid', JSONRPC_INVALID_PARAMS, data)
+    case 'AGENT_BUSY':
+      return new LocalAcpViewError('LOCAL_ACP_MCP_AGENT_BUSY', 'the session agent is busy', -32045, data)
+    case 'NAME_CONFLICT':
+      return new LocalAcpViewError('LOCAL_ACP_MCP_NAME_CONFLICT', 'an MCP tool name collides with an existing tool', JSONRPC_INVALID_PARAMS, data)
+    case 'START_FAILED':
+      return new LocalAcpViewError('LOCAL_ACP_MCP_START_FAILED', 'the MCP server could not be started', JSONRPC_INTERNAL_ERROR, data)
+    case 'CLEANUP_UNCONFIRMED':
+      return new LocalAcpViewError('LOCAL_ACP_MCP_CLEANUP_UNCONFIRMED', 'the MCP server cleanup could not be confirmed', JSONRPC_INTERNAL_ERROR, data)
+    case 'STALE':
+      return new LocalAcpViewError('LOCAL_ACP_MCP_STALE', 'the ACP view changed during the MCP admission', JSONRPC_INVALID_PARAMS, data)
   }
 }
 

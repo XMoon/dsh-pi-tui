@@ -199,15 +199,26 @@ detach guarantees, see [Host/Client](../architecture/host-client.md),
 
 ## Local ACP v1 SDK client example
 
-This example uses the official `@agentclientprotocol/sdk@1.4.0` client and the authenticated local Host's ACP socket. ACP must first be enabled for the target Profile. Install the SDK in an **independent Node.js ≥24.9.0 project** and save the example as `acp-client.mjs`. Obtain the endpoint from `dsh --profile pi-tui daemon status`: the `acp-socket=` line is emitted only after the Host positively verifies the listener. Pass that exact value as `ACP_SOCKET`; do not derive a socket path from the profile directory. Run the example from a directory that the Host Workspace Controller will admit; an available model and credentials are also required.
+This example uses the official `@agentclientprotocol/sdk@1.4.0` client and the authenticated local Host's ACP socket. ACP must first be enabled for the target Profile; the listener remains **default OFF** and is enabled only through the explicit runtime control or the profile's next-launch `autoStart` preference. Install the SDK in an **independent Node.js ≥24.9.0 project** and save the example as `acp-client.mjs`. Obtain the endpoint from `dsh --profile pi-tui daemon status`: the `acp-socket=` line is emitted only after the Host positively verifies the listener. Pass that exact value as `ACP_SOCKET`; do not derive a socket path from the profile directory. Run the example from a directory that the Host Workspace Controller will admit; an available model and credentials are also required.
 
 ~~~sh
 npm install @agentclientprotocol/sdk@1.4.0
 dsh --profile pi-tui daemon status
-ACP_SOCKET=/path/to/verified/acp.sock node acp-client.mjs
+ACP_SOCKET=/path/to/verified/acp.sock \
+ACP_MCP_COMMAND=/absolute/path/to/a/trusted-stdio-mcp-server \
+node acp-client.mjs
 ~~~
 
 This is a **local** Unix socket, not a network listener.
+
+An ACP `session/new|resume.mcpServers` stdio declaration starts that absolute
+executable as the Host's own user for the Session. Treat it as running a local
+command: use only your own same-UID, explicitly enabled ACP socket and a server
+you trust. The Host accepts at most four stdio servers per Session, rejects
+relative commands, malformed arguments/environment and duplicate normalized
+names, and rejects HTTP/SSE transports. It never saves the declaration in the
+Profile or the Host-wide MCP settings. Omit `ACP_MCP_COMMAND` to create a
+Session with no MCP server.
 
 ```js
 // acp-client.mjs — run from an independent Node.js client project
@@ -234,8 +245,11 @@ try {
   await connection.agent.request(acp.methods.agent.initialize, {
     protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {},
   })
+  const mcpServers = process.env.ACP_MCP_COMMAND === undefined
+    ? []
+    : [{ name: 'local-tools', command: process.env.ACP_MCP_COMMAND, args: [], env: [] }]
   const { sessionId } = await connection.agent.request(acp.methods.agent.session.new, {
-    cwd: process.cwd(), mcpServers: [],
+    cwd: process.cwd(), mcpServers,
   })
   try {
     const result = await connection.agent.request(acp.methods.agent.session.prompt, {
@@ -251,4 +265,4 @@ try {
 }
 ```
 
-To borrow an existing Session, use `session.resume({ sessionId, cwd })` instead of `session.new`. An ACP connection may borrow one Session View, and an individual Session permits only one ACP View at a time; concurrent TUI views are unaffected. `session.close` detaches its view without deleting the shared Host Session. The Host's live ACP status and the next-launch auto-start preference are separate controls.
+To borrow an existing Session, use `session.resume({ sessionId, cwd, mcpServers })` instead of `session.new`; a resume always uses the Session's original Host cwd for any MCP child, and a different request cwd only produces a redacted diagnostic. An ACP connection may borrow one Session View, and an individual Session permits only one ACP View at a time; concurrent TUI views are unaffected. `session.close` detaches its view without deleting the shared Host Session. When a TUI turn is still using an MCP tool, the close returns `{}` after detaching only the ACP View: the Agent, Session and MCP child remain alive until their real Host terminal facts settle, then the Host retires the exact MCP lease. A second ACP View cannot attach that Session while an unconfirmed cleanup keeps the lease fenced. The Host's live ACP status and the next-launch auto-start preference are separate controls.

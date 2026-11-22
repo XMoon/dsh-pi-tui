@@ -51,7 +51,7 @@ if (process.env.B0_BOOT_FAIL === '1') {
   process.exit(23)
 }
 
-record('server-start', { argv: ['scoped-mcp-b0-server.mjs'] })
+record('server-start', { argv: ['scoped-mcp-b0-server.mjs'], cwd: process.cwd() })
 chmodSync(proofPath, 0o600)
 
 const TOOLS = [

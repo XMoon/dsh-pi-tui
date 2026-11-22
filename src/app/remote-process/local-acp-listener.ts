@@ -728,11 +728,11 @@ function buildAgentApp(
           update: { sessionUpdate: 'config_option_update', configOptions: [...configOptions] },
         })
       }
-    app.onRequest(methods.agent.session.new, async ({ params, client }) => {
+    app.onRequest(methods.agent.session.new, async ({ params, client, signal }) => {
       beginRequest()
       try {
         requireInitialized()
-        const result = await views.newSession(view, access, params, configNotifierFor(client))
+        const result = await views.newSession(view, access, params, configNotifierFor(client), signal)
         const configOptions = await readConfigOptionsOrLog(result.sessionId)
         return { ...result, ...(configOptions === undefined ? {} : { configOptions }) }
       } catch (error) {
@@ -741,11 +741,11 @@ function buildAgentApp(
         state.pendingRequests -= 1
       }
     })
-    app.onRequest(methods.agent.session.resume, async ({ params, client }) => {
+    app.onRequest(methods.agent.session.resume, async ({ params, client, signal }) => {
       beginRequest()
       try {
         requireInitialized()
-        const result = await views.resumeSession(view, access, params, configNotifierFor(client))
+        const result = await views.resumeSession(view, access, params, configNotifierFor(client), signal)
         const configOptions = await readConfigOptionsOrLog(params.sessionId)
         return { ...result, ...(configOptions === undefined ? {} : { configOptions }) }
       } catch (error) {

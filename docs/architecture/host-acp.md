@@ -289,6 +289,50 @@ profile's independent `autoStart` preference enables it (see below).
     `config_option_update` on the current View's connection only; a closed,
     detached or replaced View receives none. There is no general `mode`/`config`
     namespace and no client-supplied setup options.
+  - **Agent-scoped stdio MCP declarations.** `session/new` and `session/resume`
+    accept the standard ACP v1 `mcpServers` list only for the stdio transport;
+    `initialize` keeps `mcpCapabilities.http=false` and `sse=false`, and every
+    HTTP/SSE/ACP-transport declaration is rejected before any Host create or
+    child start. The trust boundary is the same-UID, explicitly enabled local
+    Host ACP Unix socket: the declaration is the local user's instruction to
+    start that command for this Session, never a Client-selected Host role.
+    The Host validates the complete list synchronously before any Workspace,
+    Session or process action: at most 4 servers per Session; non-empty
+    `name` normalized with the official ACP rule and duplicate normalized
+    names rejected; absolute `command` without NUL; string `args` without NUL;
+    ordered `{name,value}` environment entries with no empty/`=`/NUL name, no
+    NUL value and no duplicate name (the environment map never participates
+    in object-prototype lookup). `session/new` runs the child with the exact
+    Session's registered `header.cwd`; `session/resume` always keeps the old
+    Session cwd and treats a request cwd difference as a diagnostic only.
+    The MCP client is mounted on the EXACT borrowed Agent's official Cordis
+    context during its true idle maintenance phase, so it is Agent-local: the
+    same Agent's human TUI can call the tools, another Agent cannot see them,
+    and this never writes Profile Settings or registers with the Host-global
+    MCP manager. Each activation is ordered: the Host waits for the first
+    connection and tool discovery, then reads the official Agent/global tool
+    definitions; any new tool name equal to an existing global or Agent tool,
+    or to an earlier server in this request, fails the whole admission closed
+    and disposes every created Fiber in reverse order. A partially failed
+    request never leaves a published tool or an owned child behind; an
+    unconfirmed cleanup keeps the exact claim fenced. If `session/new` already
+    created its Host Session before the MCP start fails, the error carries that
+    authoritative `sessionId`; the Host never creates a second Session or
+    claims the first one does not exist. A busy Agent refuses the mount with a
+    stable `LOCAL_ACP_MCP_AGENT_BUSY` result without interrupting TUI work.
+  - **MCP lease ownership and terminal facts.** The View claim is the single
+    owner of its Agent-scoped MCP lease; there is no second registry or
+    manager. `session/close`, a physical socket end/error, runtime Off and
+    Agent disposal all commit the same retirement intent. While a TUI Tool or
+    Turn that can execute those tools is still live, `{}` means only that the
+    ACP View detached: the Session, Agent and MCP child remain alive and the
+    claim stays fenced until the exact Host terminal facts settle. Retirement
+    then waits for whole-Agent quiescence, regains the true idle maintenance
+    phase, disposes only its exact Fibers in reverse order and requires the
+    official `closeConfirmed` closure and tool-name absence before releasing
+    the claim. `close {}` never claims that a child process was killed at that
+    instant; an unconfirmed terminal keeps the fence and refuses a second View
+    on that Session instead of failing open.
   - `session/close` detaches ONLY this connection's View/reservation: it never
     disposes, flushes or resumes the Agent/Session, so a TUI referencing the
     same Session keeps working and a later connection may resume again. With an

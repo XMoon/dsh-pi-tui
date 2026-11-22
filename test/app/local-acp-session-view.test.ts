@@ -31,6 +31,7 @@ import {
   type LiveAgentViewIdentity,
 } from '../../src/app/remote-process/local-acp-session-view.ts'
 import { AcpModelError, type AcpModelCurrentness, type AcpModelOptionRequest } from '../../src/app/remote-process/local-acp-model-selection.ts'
+import { AcpScopedMcpError, type AcpScopedMcpCurrentness, type AcpScopedMcpLease } from '../../src/app/remote-process/local-acp-scoped-mcp.ts'
 import { createHostAcpSessionAccess } from '../../src/app/remote-process/local-host-entry.ts'
 
 const QUIET_DIAG: Diag = {
@@ -47,6 +48,11 @@ interface AgentLike extends LiveAgentViewIdentity {
 
 function makeAgent(id: string, cwd: string): AgentLike {
   return { id, session: { id, header: { cwd } } }
+}
+
+/** One test-only lease handle; the View never inspects its Fiber internals. */
+function makeScopedLease(agent: LiveAgentViewIdentity, session: object, serverName = 's1'): AcpScopedMcpLease {
+  return { agent: agent as never, session, serverNames: [serverName], fibers: [] }
 }
 
 interface Deferred<T> {
@@ -110,6 +116,18 @@ class FakeAccess implements HostAcpSessionAccess {
       return 'addressed'
     }
 
+  readonly mountScopedMcpCalls: Array<{ readonly sessionId: string; readonly servers: readonly unknown[] }> = []
+  readonly retireScopedMcpCalls: AcpScopedMcpLease[] = []
+  mountScopedMcpImpl: (
+    agent: LiveAgentViewIdentity,
+    session: object,
+    servers: readonly unknown[],
+    stillCurrent: () => AcpScopedMcpCurrentness,
+  ) => Promise<AcpScopedMcpLease | undefined> = async () => {
+    throw new Error('mountScopedMcp is not configured for this test')
+  }
+  retireScopedMcpImpl: (lease: AcpScopedMcpLease) => Promise<void> = async () => {}
+
   private readonly agents = new Map<string, AgentLike>()
 
   seed(agent: AgentLike): void { this.agents.set(agent.id, agent) }
@@ -138,6 +156,21 @@ class FakeAccess implements HostAcpSessionAccess {
 
   currentSession(sessionId: string): object | undefined {
     return this.agents.get(sessionId)?.session
+  }
+
+  async mountScopedMcp(
+    agent: LiveAgentViewIdentity,
+    session: object,
+    servers: readonly unknown[],
+    stillCurrent: () => AcpScopedMcpCurrentness,
+  ): Promise<AcpScopedMcpLease | undefined> {
+    this.mountScopedMcpCalls.push({ sessionId: agent.id, servers })
+    return await this.mountScopedMcpImpl(agent, session, servers, stillCurrent)
+  }
+
+  async requestRetireScopedMcp(lease: AcpScopedMcpLease): Promise<void> {
+    this.retireScopedMcpCalls.push(lease)
+    return await this.retireScopedMcpImpl(lease)
   }
 
   async prompt(request: AcpSessionPromptRequest, signal: AbortSignal): Promise<{ readonly accepted: true }> {
@@ -278,7 +311,7 @@ test('session/new rejects an invalid cwd and an unsupported MCP server before an
   )
   await assert.rejects(
     registry.newSession(conn, access, { cwd: '/ok', mcpServers: [{ type: 'stdio' }] }),
-    isViewError('LOCAL_ACP_VIEW_INVALID_REQUEST'),
+    isViewError('LOCAL_ACP_MCP_INVALID_DECLARATION'),
   )
   assert.deepEqual(access.createWorkspaceCalls, [], 'an invalid request must not reach the Host workspace')
   assert.equal(registry.phaseOf(conn), 'idle')
@@ -637,6 +670,7 @@ test('the production Host pending lookup reads both official inbox lists and rej
         if (name === 'agents') return agents
         if (name === 'sessions') return sessions
         if (name === 'llm') return { resolveModelInfo: async () => ({}) }
+        if (name === 'tools') return { definitions: () => [] }
         return undefined
       },
     },
@@ -684,6 +718,7 @@ test('the Host image facade reads the default and exact live model routes and re
       if (name === 'attachments') return store
       if (name === 'agentDefaultModel') return defaultModel
       if (name === 'llm') return llm
+      if (name === 'tools') return { definitions: () => [] }
       return undefined
     } },
   } as unknown as Parameters<typeof createHostAcpSessionAccess>[0]
@@ -754,6 +789,7 @@ test('the production Host access classifier maps official errors to the right cr
         if (name === 'agents') return { get: () => undefined }
         if (name === 'sessions') return { get: () => undefined }
         if (name === 'llm') return { resolveModelInfo: async () => ({}) }
+        if (name === 'tools') return { definitions: () => [] }
         return undefined
       },
     },
@@ -1473,6 +1509,7 @@ test('the production Host access subscribes the prompt fact sink and disposes ex
         if (name === 'agents') return { get: () => undefined }
         if (name === 'sessions') return { get: () => undefined }
         if (name === 'llm') return { resolveModelInfo: async () => ({}) }
+        if (name === 'tools') return { definitions: () => [] }
         return undefined
       },
     },
@@ -3532,4 +3569,150 @@ test('the per-claim notification chain keeps read order so a late old options re
   first.resolve(modelOptionsFor('["p1","b"]'))
   await flushOutput()
   assert.deepEqual(notifications, ['["p1","b"]', '["p1","c"]'])
+})
+
+test('session/new mounts one scoped MCP lease before attached and close releases the claim only after retirement', async () => {
+  const access = new FakeAccess()
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  const conn = registry.createConnection()
+  const agent = makeAgent('mcp-new', '/work/mcp')
+  access.seed(agent)
+  access.createSessionImpl = async () => ({ kind: 'created', sessionId: agent.id })
+  const retire = deferred<void>()
+  const lease = makeScopedLease(agent, agent.session)
+  access.mountScopedMcpImpl = async () => lease
+  access.retireScopedMcpImpl = async () => await retire.promise
+
+  assert.deepEqual(await registry.newSession(conn, access, { cwd: '/work/mcp', mcpServers: [{ name: 's1', command: '/bin/true', args: [], env: [] }] }), { sessionId: agent.id })
+  assert.equal(access.mountScopedMcpCalls.length, 1)
+  assert.equal(registry.phaseOf(conn), 'attached')
+
+  assert.deepEqual(await registry.closeSession(conn, access, agent.id), {})
+  assert.equal(access.retireScopedMcpCalls.length, 1)
+  assert.equal(registry.claimCount(), 1, 'the claim stays fenced while the exact lease is retiring')
+  retire.resolve()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(registry.claimCount(), 0)
+  assert.equal(registry.phaseOf(conn), 'idle')
+})
+
+test('session/new returns the authoritative created session id when its MCP mount fails after the Host create', async () => {
+  const access = new FakeAccess()
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  const conn = registry.createConnection()
+  const agent = makeAgent('mcp-fail', '/work/mcp')
+  access.seed(agent)
+  access.createSessionImpl = async () => ({ kind: 'created', sessionId: agent.id })
+  access.mountScopedMcpImpl = async () => { throw new AcpScopedMcpError('START_FAILED', 'start failed') }
+
+  await assert.rejects(
+    registry.newSession(conn, access, { cwd: '/work/mcp', mcpServers: [{ name: 's1', command: '/bin/true', args: [], env: [] }] }),
+    (error: unknown) => error instanceof LocalAcpViewError
+      && error.code === 'LOCAL_ACP_MCP_START_FAILED'
+      && error.data.sessionId === agent.id,
+  )
+  assert.equal(access.createSessionCalls.length, 1, 'a failed mount never retries the Host create')
+  assert.equal(registry.claimCount(), 0)
+  assert.equal(registry.phaseOf(conn), 'idle')
+})
+
+test('a busy MCP mount refuses session/resume without attaching, and the later retry succeeds on the same Agent', async () => {
+  const access = new FakeAccess()
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  const conn = registry.createConnection()
+  const agent = makeAgent('mcp-busy', '/work/mcp')
+  access.seed(agent)
+  const lease = makeScopedLease(agent, agent.session)
+  let attempt = 0
+  access.mountScopedMcpImpl = async () => {
+    attempt += 1
+    if (attempt === 1) throw new AcpScopedMcpError('AGENT_BUSY', 'busy')
+    return lease
+  }
+
+  await assert.rejects(
+    registry.resumeSession(conn, access, { sessionId: agent.id, cwd: '/work/mcp', mcpServers: [{ name: 's1', command: '/bin/true', args: [], env: [] }] }),
+    (error: unknown) => error instanceof LocalAcpViewError && error.code === 'LOCAL_ACP_MCP_AGENT_BUSY',
+  )
+  assert.equal(registry.claimCount(), 0)
+  assert.equal(registry.phaseOf(conn), 'idle')
+  assert.deepEqual(await registry.resumeSession(conn, access, {
+    sessionId: agent.id, cwd: '/work/mcp', mcpServers: [{ name: 's1', command: '/bin/true', args: [], env: [] }],
+  }), {})
+  assert.equal(registry.phaseOf(conn), 'attached')
+})
+
+test('a close during a pending MCP mount keeps the reservation and retires the late lease instead of attaching it', async () => {
+  const access = new FakeAccess()
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  const conn = registry.createConnection()
+  const agent = makeAgent('mcp-close-pending', '/work/mcp')
+  access.seed(agent)
+  access.createSessionImpl = async () => ({ kind: 'created', sessionId: agent.id })
+  const mounted = deferred<AcpScopedMcpLease>()
+  const retire = deferred<void>()
+  const lease = makeScopedLease(agent, agent.session)
+  access.mountScopedMcpImpl = async () => await mounted.promise
+  access.retireScopedMcpImpl = async () => await retire.promise
+
+  const attaching = registry.newSession(conn, access, { cwd: '/work/mcp', mcpServers: [{ name: 's1', command: '/bin/true', args: [], env: [] }] })
+  while (access.mountScopedMcpCalls.length === 0) await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(await registry.closeSession(conn, access, agent.id), {})
+  mounted.resolve(lease)
+  await assert.rejects(attaching, (error: unknown) => error instanceof LocalAcpViewError && error.code === 'LOCAL_ACP_MCP_STALE')
+  assert.equal(access.retireScopedMcpCalls.length, 1)
+  assert.equal(registry.claimCount(), 1)
+  retire.resolve()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(registry.claimCount(), 0)
+})
+
+test('a physical disconnect during a pending MCP mount retires the late lease and never resurrects the closed view', async () => {
+  const access = new FakeAccess()
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  const conn = registry.createConnection()
+  const agent = makeAgent('mcp-eof', '/work/mcp')
+  access.seed(agent)
+  access.createSessionImpl = async () => ({ kind: 'created', sessionId: agent.id })
+  const mounted = deferred<AcpScopedMcpLease>()
+  const retire = deferred<void>()
+  const lease = makeScopedLease(agent, agent.session)
+  access.mountScopedMcpImpl = async () => await mounted.promise
+  access.retireScopedMcpImpl = async () => await retire.promise
+
+  const attaching = registry.newSession(conn, access, { cwd: '/work/mcp', mcpServers: [{ name: 's1', command: '/bin/true', args: [], env: [] }] })
+  while (access.mountScopedMcpCalls.length === 0) await new Promise(resolve => setImmediate(resolve))
+  registry.releaseConnection(conn, access)
+  mounted.resolve(lease)
+  await assert.rejects(attaching, (error: unknown) => error instanceof LocalAcpViewError && error.code === 'LOCAL_ACP_MCP_STALE')
+  assert.equal(registry.phaseOf(conn), 'closed')
+  assert.equal(access.retireScopedMcpCalls.length, 1)
+  assert.equal(registry.claimCount(), 1)
+  retire.resolve()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(registry.claimCount(), 0)
+})
+
+test('an unconfirmed MCP cleanup keeps the exact claim fenced so a second connection cannot attach the Session', async () => {
+  const access = new FakeAccess()
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  const first = registry.createConnection()
+  const second = registry.createConnection()
+  const agent = makeAgent('mcp-fenced', '/work/mcp')
+  access.seed(agent)
+  access.createSessionImpl = async () => ({ kind: 'created', sessionId: agent.id })
+  const lease = makeScopedLease(agent, agent.session)
+  access.mountScopedMcpImpl = async () => lease
+  access.retireScopedMcpImpl = async () => {
+    throw new AcpScopedMcpError('CLEANUP_UNCONFIRMED', 'cleanup unconfirmed', lease)
+  }
+
+  await registry.newSession(first, access, { cwd: '/work/mcp', mcpServers: [{ name: 's1', command: '/bin/true', args: [], env: [] }] })
+  assert.deepEqual(await registry.closeSession(first, access, agent.id), {})
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(registry.claimCount(), 1, 'the unconfirmed cleanup must keep its exact claim')
+  await assert.rejects(
+    registry.resumeSession(second, access, { sessionId: agent.id, cwd: '/work/mcp' }),
+    (error: unknown) => error instanceof LocalAcpViewError && error.code === 'LOCAL_ACP_VIEW_ALREADY_ATTACHED',
+  )
 })

@@ -98,6 +98,13 @@ import {
   type AcpModelCatalog,
   type AcpModelSelection,
 } from './local-acp-model-selection.ts'
+import {
+  AcpScopedMcpError,
+  mountAcpScopedMcp,
+  retireAcpScopedMcp,
+  type AcpScopedMcpAgent,
+  type AcpScopedMcpToolAuthority,
+} from './local-acp-scoped-mcp.ts'
 
 /** The three Web roster rows whose official non-desktop values must stay fixed
  * at the Host-only layer, read from the ONE production roster
@@ -579,6 +586,9 @@ interface AgentRegistryLike {
 interface SessionRegistryLike {
   get(id: string): object | undefined
 }
+interface ToolsServiceLike {
+  definitions(scope?: object): readonly { readonly name: string }[]
+}
 
 /**
  * The synchronous cancel seam of one live Agent. PO-3B calls these two official
@@ -621,15 +631,17 @@ export function createHostAcpSessionAccess(context: import('@deepseek-ai/cordis'
   const attachments = context.reflect.get('attachments') as AttachmentServiceLike | undefined
   const llm = context.reflect.get('llm') as LlmServiceLike | undefined
   const agentDefaultModel = context.reflect.get('agentDefaultModel') as DefaultModelServiceLike | undefined
+  const tools = context.reflect.get('tools') as ToolsServiceLike | undefined
   if (
     workspaceController === undefined
     || sessionController === undefined
     || agents === undefined
     || sessions === undefined
     || llm === undefined
+    || tools === undefined
   ) {
     throw new Error(
-      'local host entry: the Host ACP Session View requires the live workspaceController, sessionController, agents, sessions and llm services',
+      'local host entry: the Host ACP Session View requires the live workspaceController, sessionController, agents, sessions, llm and tools services',
     )
   }
   const modelCatalog = (sessionController as { readonly modelCatalog?: unknown }).modelCatalog
@@ -693,6 +705,26 @@ export function createHostAcpSessionAccess(context: import('@deepseek-ai/cordis'
     resolveAgent: sessionId => sessionController.resolveAgent(sessionId),
     currentAgent: sessionId => agents.get(sessionId),
     currentSession: sessionId => sessions.get(sessionId),
+    mountScopedMcp: async (agent, session, servers, stillCurrent) => {
+      // The exact Host identities are re-verified synchronously before the
+      // Agent-scoped maintenance window can mount any child process.
+      const liveAgent = agents.get(agent.id)
+      const liveSession = sessions.get(agent.id)
+      if (liveAgent !== agent || liveSession !== session || agent.session !== session) {
+        throw new AcpScopedMcpError('STALE', 'the exact Host Agent/Session is no longer current')
+      }
+      const authority: AcpScopedMcpToolAuthority = {
+        definitions: (scope?: object) => scope === undefined ? tools.definitions() : tools.definitions(scope),
+      }
+      return await mountAcpScopedMcp({
+        agent: agent as unknown as AcpScopedMcpAgent,
+        session,
+        servers,
+        tools: authority,
+        stillCurrent,
+      })
+    },
+    requestRetireScopedMcp: async lease => await retireAcpScopedMcp(lease),
     // Session-only model capability: this narrow pair is the ONLY model write
     // surface the ACP View can reach. It never exposes the profile default.
     modelOptions: async (agent, session) => await modelService.readOptions(agent as unknown as AcpModelAgent, session),
