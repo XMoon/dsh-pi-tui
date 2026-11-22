@@ -25,9 +25,10 @@ import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import { installedPackageRootFromEntry, readInstalledDshVersion } from './local-scope.ts'
+import type { AcpStdioTarget } from './local-daemon-control.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { createEntryDiag } from './entry-control.ts'
-import type { TuiDaemonClientStartup, TuiDaemonControlStartup, TuiDaemonStartupValues, TuiWebControlStartup } from '../../startup.ts'
+import type { TuiAcpStdioStartup, TuiDaemonClientStartup, TuiDaemonControlStartup, TuiDaemonStartupValues, TuiWebControlStartup } from '../../startup.ts'
 
 /** Stable Loader row id / Cordis plugin name. */
 export const name = 'pi-tui-daemon-launcher'
@@ -37,6 +38,9 @@ export const inject = ['tuiDaemonStartup']
 
 /** The private v1 public-launch data channel (shared shape with the Client entry). */
 const CLIENT_LAUNCH_ENVELOPE_ENV = 'SPLIT_PROCESS_CLIENT_LAUNCH_V1'
+
+/** The private ACP stdio Adapter target channel. The Parent overwrites it. */
+export const ACP_STDIO_SOCKET_ENV = 'DSH_PI_TUI_ACP_STDIO_SOCKET_V1'
 
 /** The launcher-provided Profile facts the Coordinator needs (official shape). */
 interface ProfileContextLike {
@@ -58,24 +62,25 @@ export function encodeLaunchEnvelope(startup: TuiDaemonClientStartup): string {
 }
 
 /**
- * Resolve the installed Client entry from THIS package root and prove its real
- * target is a regular file. A shared npm package, a root-owned system install
- * and a legal entry symlink are normal installs; only a missing or non-regular
- * target is a hard failure — never a fallback to a source tree or `tsx`.
+ * Resolve one installed internal process entry from THIS package root and prove
+ * its real target is a regular file. A shared npm package, a root-owned system
+ * install and a legal entry symlink are normal installs; only a missing or
+ * non-regular target is a hard failure — never a fallback to a source tree or
+ * `tsx`.
  */
-export function resolveClientEntry(packageRoot: string): string {
-  // The NAMED entry path is what the Client child receives; it locates its
-  // package root from that invoked path, so a legal dist/entry symlink still
-  // resolves THIS package root.
-  const entry = join(packageRoot, 'dist', 'local-client.mjs')
+function resolveProcessEntry(packageRoot: string, fileName: string, label: string): string {
+  // The NAMED entry path is what the child receives; it locates its package
+  // root from that invoked path, so a legal dist/entry symlink still resolves
+  // THIS package root.
+  const entry = join(packageRoot, 'dist', fileName)
   let real: string
   try {
     real = realpathSync(entry)
   } catch (error) {
-    throw new Error(`pi-tui daemon launcher: the Client entry ${entry} is missing`, { cause: error })
+    throw new Error(`pi-tui daemon launcher: the ${label} entry ${entry} is missing`, { cause: error })
   }
   if (!lstatSync(real).isFile()) {
-    throw new Error(`pi-tui daemon launcher: the Client entry ${entry} must resolve to a regular file`)
+    throw new Error(`pi-tui daemon launcher: the ${label} entry ${entry} must resolve to a regular file`)
   }
   let expectedRoot: string
   try {
@@ -87,12 +92,22 @@ export function resolveClientEntry(packageRoot: string): string {
   try {
     entryRoot = installedPackageRootFromEntry(pathToFileURL(entry).href)
   } catch (error) {
-    throw new Error(`pi-tui daemon launcher: the Client entry ${entry} cannot locate its installed package root`, { cause: error })
+    throw new Error(`pi-tui daemon launcher: the ${label} entry ${entry} cannot locate its installed package root`, { cause: error })
   }
   if (entryRoot !== expectedRoot) {
-    throw new Error(`pi-tui daemon launcher: the Client entry ${entry} resolves a different installed package root`)
+    throw new Error(`pi-tui daemon launcher: the ${label} entry ${entry} resolves a different installed package root`)
   }
   return entry
+}
+
+export function resolveClientEntry(packageRoot: string): string {
+  return resolveProcessEntry(packageRoot, 'local-client.mjs', 'Client')
+}
+
+/** Resolve the internal ACP stdio Adapter entry with the same installed-package
+ *  proof as the Client entry. It is never a public bin or export. */
+export function resolveAcpStdioEntry(packageRoot: string): string {
+  return resolveProcessEntry(packageRoot, 'acp-stdio.mjs', 'ACP stdio')
 }
 
 /**
@@ -147,6 +162,29 @@ export function buildChildEnvironment(
   return env
 }
 
+/**
+ * Build the ACP stdio Adapter child environment at the ONE new-spawn boundary.
+ * The adapter is a pure Node stream relay: it receives the Parent-selected
+ * public UDS path and no Split Client/Host role, launch envelope, Cookie or
+ * token. Every inherited internal role fact is stripped before the one
+ * authoritative socket value is written.
+ */
+export function buildAcpStdioEnvironment(
+  socketPath: string,
+  source: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...source }
+  for (const key of Object.keys(env)) {
+    if (key.startsWith('SPLIT_PROCESS_')) delete env[key]
+  }
+  delete env.DSH_PI_TUI_ROLE
+  delete env.DSH_PI_TUI_HOST_ENTRY
+  delete env.DSH_PI_TUI_BACKEND
+  delete env[ACP_STDIO_SOCKET_ENV]
+  env[ACP_STDIO_SOCKET_ENV] = socketPath
+  return env
+}
+
 /** POSIX-safe single-argument quoting for the copy-paste fatal line. */
 function shellQuote(value: string): string {
   if (/^[A-Za-z0-9_@%+=:,./-]+$/u.test(value)) return value
@@ -182,6 +220,9 @@ export class DaemonCoordinator {
   /** A sanitized human line for the supervisor TTY when the Client cannot be
    *  spawned at all (never a JSON record, never a raw error/message/path). */
   private readonly reportFatal: (line: string) => void
+  /** Optional ACP-specific formatter; the default keeps the Client wording. */
+  private readonly failureLine: ((safeErrno: string) => string) | undefined
+  private readonly spawnFailureExitCode: number
   private readonly shutdownBudgetMs: number
   private child: ChildProcess | undefined
   private childExit: Promise<void> | undefined
@@ -199,6 +240,8 @@ export class DaemonCoordinator {
     appExit: (code: number) => void
     diag: Diag
     reportFatal?: (line: string) => void
+    failureLine?: (safeErrno: string) => string
+    spawnFailureExitCode?: number
     shutdownBudgetMs?: number
   }) {
     this.spawnImpl = options.spawnImpl
@@ -207,6 +250,8 @@ export class DaemonCoordinator {
     this.appExit = options.appExit
     this.diag = options.diag
     this.reportFatal = options.reportFatal ?? (() => {})
+    this.failureLine = options.failureLine
+    this.spawnFailureExitCode = options.spawnFailureExitCode ?? 1
     // A SINGLE budget strictly below the official ~5s parent shutdown deadline
     // (leaving margin for the other fibers): the whole SIGTERM→SIGKILL sequence
     // must fit inside it, never 4s + 1.5s = 5.5s.
@@ -226,7 +271,7 @@ export class DaemonCoordinator {
         env: this.env,
       })
     } catch (error) {
-      this.settle(1, error instanceof Error ? error : new Error(String(error)))
+      this.settle(this.spawnFailureExitCode, error instanceof Error ? error : new Error(String(error)))
       return
     }
     this.child = child
@@ -235,7 +280,7 @@ export class DaemonCoordinator {
       child.once('exit', () => resolve())
       child.once('error', () => resolve())
     })
-    child.once('error', (error: Error) => { this.settle(1, error) })
+    child.once('error', (error: Error) => { this.settle(this.spawnFailureExitCode, error) })
     child.once('exit', (code, signal) => { this.settle(exitCodeFor(code, signal), undefined) })
   }
 
@@ -243,13 +288,15 @@ export class DaemonCoordinator {
     if (this.settled) return
     this.settled = true
     if (error !== undefined) {
-      this.diag.warn('pi-tui daemon: client process failed', { error: error.message })
+      this.diag.warn('pi-tui daemon: child process failed', { error: error.message })
       // R2-01: the supervisor TTY must get ONE actionable, sanitized line — never
       // a bare nonzero exit, and never the raw error (which can carry a path). The
       // spawn errno code is safe to name; everything else is fixed text.
       const errno = (error as { code?: unknown }).code
       const safeErrno = typeof errno === 'string' && /^[A-Z][A-Z0-9_]{1,31}$/u.test(errno) ? ` (${errno})` : ''
-      this.reportFatal(`dsh-pi-tui: could not start the daemon Client process${safeErrno}; the Host was not started. Reinstall the profile and re-run: DSH_PI_TUI_BACKEND=daemon dsh --profile ${shellQuote(this.env.SPLIT_PROCESS_PROFILE!)}`)
+      this.reportFatal(this.failureLine !== undefined
+        ? this.failureLine(safeErrno)
+        : `dsh-pi-tui: could not start the daemon Client process${safeErrno}; the Host was not started. Reinstall the profile and re-run: DSH_PI_TUI_BACKEND=daemon dsh --profile ${shellQuote(this.env.SPLIT_PROCESS_PROFILE!)}`)
     }
     this.appExit(code)
   }
@@ -310,6 +357,149 @@ export class DaemonCoordinator {
       // stderr line plus the false return, not a claimed exit code.
       this.reportFatal('dsh-pi-tui: the daemon Client did not exit after SIGKILL within the shutdown budget; it may be left running')
       return false
+    })()
+    return this.disposePromise
+  }
+}
+
+/** The injected seams of one trusted-profile ACP stdio launch. */
+export interface AcpStdioRunnerOptions {
+  readonly profileName: string
+  readonly preflight: (signal: AbortSignal) => Promise<AcpStdioTarget>
+  readonly resolveEntry: () => string
+  readonly spawnImpl: SpawnImpl
+  readonly appExit: (code: number) => void
+  readonly diag: Diag
+  readonly writeStderr?: (line: string) => void
+  readonly shutdownBudgetMs?: number
+}
+
+/**
+ * The ONE trusted-profile ACP stdio launch lifecycle: one read-only target
+ * preflight followed by at most one internal Adapter child. The launch promise
+ * is created before the cold-ready callback can run, so a reentrant callback or
+ * a fiber disposal can never start a second launch. Disposal aborts the
+ * preflight, awaits its settlement, then disposes the one child.
+ */
+export class AcpStdioRunner {
+  private readonly options: AcpStdioRunnerOptions
+  private readonly controller = new AbortController()
+  private readonly startGate: Promise<void>
+  private releaseStartGate!: () => void
+  private launchPromise: Promise<void> | undefined
+  private coordinator: DaemonCoordinator | undefined
+  private started = false
+  private disposed = false
+  private settled = false
+  private disposePromise: Promise<boolean> | undefined
+
+  constructor(options: AcpStdioRunnerOptions) {
+    this.options = options
+    this.startGate = new Promise<void>(resolve => { this.releaseStartGate = resolve })
+  }
+
+  /** Create the ONE launch promise now; it waits for {@link start}. */
+  prepare(): Promise<void> {
+    if (this.launchPromise === undefined) {
+      this.launchPromise = this.startGate
+        .then(() => this.launch())
+        .catch(() => {
+          if (this.disposed) return
+          this.fail('ACP_STDIO_STATUS_UNAVAILABLE',
+            `check the Host state with dsh --profile ${shellQuote(this.options.profileName)} daemon status`, 3)
+        })
+    }
+    return this.launchPromise
+  }
+
+  /** Release the cold-ready gate exactly once. */
+  start(): void {
+    if (this.started || this.disposed) return
+    this.started = true
+    this.releaseStartGate()
+  }
+
+  private writeStderr(line: string): void {
+    try { (this.options.writeStderr ?? (text => { process.stderr.write(text) }))(line) } catch { /* best effort */ }
+  }
+
+  private report(code: string, hint: string): void {
+    this.writeStderr(`dsh-pi-tui acp stdio: ${code}${hint === '' ? '' : `: ${hint}`}\n`)
+  }
+
+  private finish(code: number): void {
+    if (this.settled || this.disposed) return
+    this.settled = true
+    this.options.appExit(code)
+  }
+
+  private fail(code: string, hint: string, exitCode: number): void {
+    this.report(code, hint)
+    this.finish(exitCode)
+  }
+
+  private async launch(): Promise<void> {
+    if (this.disposed) return
+    let target: AcpStdioTarget
+    try {
+      target = await this.options.preflight(this.controller.signal)
+    } catch {
+      if (this.disposed || this.controller.signal.aborted) return
+      this.fail('ACP_STDIO_STATUS_UNAVAILABLE',
+        `check the Host state with dsh --profile ${shellQuote(this.options.profileName)} daemon status`, 3)
+      return
+    }
+    if (this.disposed || this.controller.signal.aborted) return
+    switch (target.kind) {
+      case 'host-unavailable':
+        this.fail('ACP_STDIO_HOST_NOT_READY',
+          `start the Host explicitly with dsh --profile ${shellQuote(this.options.profileName)} daemon start`, 3)
+        return
+      case 'acp-disabled':
+        this.fail('ACP_STDIO_LISTENER_DISABLED', 'enable ACP from a connected TUI with /acp', 3)
+        return
+      case 'acp-unavailable':
+        this.fail('ACP_STDIO_LISTENER_UNAVAILABLE',
+          `check the Host state with dsh --profile ${shellQuote(this.options.profileName)} daemon status`, 3)
+        return
+      case 'ready':
+        break
+    }
+    let entry: string
+    try {
+      entry = this.options.resolveEntry()
+    } catch {
+      if (this.disposed) return
+      this.fail('ACP_STDIO_ENTRY_MISSING', 'reinstall the profile and re-run the command', 4)
+      return
+    }
+    if (this.disposed) return
+    const coordinator = new DaemonCoordinator({
+      spawnImpl: this.options.spawnImpl,
+      entry,
+      env: buildAcpStdioEnvironment(target.socketPath),
+      appExit: code => { this.finish(code) },
+      diag: this.options.diag,
+      reportFatal: line => { this.writeStderr(`${line}\n`) },
+      failureLine: () => 'dsh-pi-tui acp stdio: ACP_STDIO_SPAWN_FAILED',
+      spawnFailureExitCode: 4,
+      ...(this.options.shutdownBudgetMs === undefined ? {} : { shutdownBudgetMs: this.options.shutdownBudgetMs }),
+    })
+    this.coordinator = coordinator
+    coordinator.start()
+  }
+
+  /** Abort the preflight, await the ONE launch promise and dispose any child. */
+  dispose(): Promise<boolean> {
+    if (this.disposePromise !== undefined) return this.disposePromise
+    this.disposed = true
+    this.controller.abort()
+    this.releaseStartGate()
+    const launch = this.launchPromise
+    this.disposePromise = (async (): Promise<boolean> => {
+      if (launch !== undefined) await launch
+      const coordinator = this.coordinator
+      return coordinator === undefined ? true : await coordinator.dispose()
     })()
     return this.disposePromise
   }
@@ -499,6 +689,10 @@ export function apply(ctx: Context): void {
     applyWebControl(ctx, startup, profileContext, appExit)
     return
   }
+  if (startup.kind === 'acp-stdio') {
+    applyAcpStdio(ctx, startup, profileContext, appExit)
+    return
+  }
 
   const packageRoot = resolveProfilePackageRoot(profileContext.dir)
   const entry = resolveClientEntry(packageRoot)
@@ -554,6 +748,49 @@ export function apply(ctx: Context): void {
   // Client's real exit during shutdown (never exits the parent underneath a
   // still-cleaning child). Still the ONE stop owner — no second signal manager.
   ctx.effect(() => () => coordinator.dispose(), 'pi-tui-daemon-launcher child lifecycle')
+}
+
+/** Assemble the ONE trusted-profile ACP stdio launch for this official Profile.
+ *  No Client artifact, TUI, Host or Session is created by the parent; the
+ *  preflight is a read-only authenticated `readAcpStdioTarget` call. */
+function applyAcpStdio(
+  ctx: Context,
+  startup: TuiAcpStdioStartup,
+  profileContext: ProfileContextLike,
+  appExit: (code: number) => void,
+): void {
+  const profile = managementProfile(profileContext)
+  const runner = new AcpStdioRunner({
+    profileName: profile.name,
+    preflight: async signal => {
+      const { readAcpStdioTarget } = await import('./local-daemon-control.ts')
+      return await readAcpStdioTarget(profile, signal)
+    },
+    resolveEntry: () => resolveAcpStdioEntry(profile.packageRoot),
+    spawnImpl: spawn,
+    appExit,
+    diag: createEntryDiag('host', () => {}),
+  })
+  // The launch Promise exists BEFORE the cold-ready callback can run; the
+  // callback only releases its gate.
+  runner.prepare()
+  startup.markCoordinatorMounted?.()
+  const ready = ctx.get('appReady') as { onReady(listener: () => void): () => void } | undefined
+  if (ready === undefined) {
+    runner.start()
+  } else {
+    let registrationReturned = false
+    const cancel = ready.onReady(() => {
+      // A callback that ran INSIDE `onReady` means readiness was committed
+      // before this row existed (an HMR re-apply); this row witnessed no
+      // startup and must not spawn a child.
+      if (!registrationReturned) return
+      runner.start()
+    })
+    registrationReturned = true
+    ctx.effect(() => () => { cancel() }, 'pi-tui-acp-stdio readiness')
+  }
+  ctx.effect(() => () => runner.dispose(), 'pi-tui-acp-stdio lifecycle')
 }
 
 /** The official Profile facts the one-shot management runners need. */

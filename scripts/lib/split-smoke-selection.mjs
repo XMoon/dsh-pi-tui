@@ -74,6 +74,7 @@ import { runAcpPo1 } from '../smoke/split-process/acp-po1.mjs'
 import { runPublicDaemonEntry } from '../smoke/split-process/public-daemon-entry-m6-2a.mjs'
 import { runAcpPo1bOptInControl } from '../smoke/split-process/acp-po1b.mjs'
 import { runAcpPo2SessionView } from '../smoke/split-process/acp-po2-session-view.mjs'
+import { runAcpStdioA1 } from '../smoke/split-process/acp-stdio-a1.mjs'
 import {
   runManagedHostAuthFailureNegative,
   runManagedHostConcurrentColdStart,
@@ -492,6 +493,14 @@ const CASE_REGISTRY = Object.freeze([
     id: 'acp.po2-session-view',
     title: 'one live Host-owned ACP Session View shares a real TUI Session with one ACP connection, refuses a second attach, releases only its own View on close/teardown/Off, and creates a real Host Workspace Session',
     run: runAcpPo2SessionView,
+  }),
+  Object.freeze({
+    suite: 'acp',
+    defaultLane: false,
+    id: 'acp.stdio-bridge-a1',
+    title: 'the public trusted-profile acp stdio command relays an official ACP v1 client to the existing Host-owned Session View and fails closed without a ready enabled Host',
+    platforms: LINUX_DARWIN,
+    run: runAcpStdioA1,
   }),
   Object.freeze({
     suite: 'managed-host',

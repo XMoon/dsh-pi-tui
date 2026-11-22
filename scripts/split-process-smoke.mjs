@@ -605,6 +605,34 @@ export function assertSelectedVerdict(caseId, result) {
     `selected ${caseId}: the ACP shared Session View verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)
     return
   }
+  if (caseId === 'acp.stdio-bridge-a1') {
+    assert(result?.status === 'PASS'
+      && result?.scope === 'REAL_SPLIT_PROCESS_L6'
+      && result?.acpVersionFromInstalledDsh === true
+      && result?.publicCommandFromInstalledProfile === true
+      && result?.protocolOnlyStdout === true
+      && result?.singleAdapterChild === true
+      && result?.sameHostIdentity === true
+      && result?.tuiSessionShared === true
+      && result?.promptUpdateClose === true
+      && result?.newSessionViaHostWorkspace === true
+      && result?.cancelAndPermissionReachable === true
+      && result?.largePayloadDrained === true
+      && result?.hostMissingDisabledForeignAndMissingEntryFailClosed === true
+      && result?.runtimeOffDisconnectsOnlyAdapter === true
+      && result?.hostRestartObserved === true
+      && result?.commandFamilyStable === true
+      && result?.hostTuiKept === true
+      && result?.quiesced === true
+      && typeof result?.evidence?.candidateSha256 === 'string'
+      && /^[0-9a-f]{64}$/u.test(result.evidence.candidateSha256)
+      && typeof result?.evidence?.stdoutSha256 === 'string'
+      && /^[0-9a-f]{64}$/u.test(result.evidence.stdoutSha256)
+      && Number.isInteger(result?.evidence?.stdoutFrames)
+      && result.evidence.stdoutFrames > 0,
+    `selected ${caseId}: the trusted-profile ACP stdio verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)
+    return
+  }
   if (caseId === 'acp.po3a-turn-events') {
     assert(result?.status === 'PASS'
       && result?.scope === 'REAL_SPLIT_PROCESS_L6'

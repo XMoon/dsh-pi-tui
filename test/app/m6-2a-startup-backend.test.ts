@@ -508,6 +508,52 @@ test('web help and web status help exit 0 and publish no service', (t) => {
   }
 })
 
+test('acp stdio publishes only the ACP stdio intent and no TUI surface', (t) => {
+  const { ctx, exitCodes } = mount(t, ['acp', 'stdio'])
+  const startup = ctx.get(TUI_DAEMON_STARTUP_SERVICE) as { kind?: string } | undefined
+  assert.equal(startup?.kind, 'acp-stdio')
+  assert.equal(ctx.get(TUI_STARTUP_SERVICE), undefined)
+  assert.deepEqual(exitCodes, [])
+})
+
+test('acp grammar rejects no verb, an extra positional and a session flag; help stays successful', (t) => {
+  for (const args of [['acp'], ['acp', 'stdio', 'extra'], ['acp', 'stdio', '--session', 'x']]) {
+    const captured = captureStderr(() => mount(t, args))
+    assert.equal((captured.value.ctx.get(TUI_DAEMON_STARTUP_SERVICE) as { kind?: string } | undefined), undefined,
+      `${args.join(' ')} must not publish the ACP stdio intent`)
+    assert.deepEqual(captured.value.exitCodes, [2], `${args.join(' ')} must fail usage`)
+    assert.match(captured.text, /error:/u)
+  }
+  for (const args of [['acp', '--help'], ['acp', 'stdio', '--help']]) {
+    const { ctx, exitCodes } = mount(t, args)
+    assert.equal(ctx.get(TUI_DAEMON_STARTUP_SERVICE), undefined, `${args.join(' ')} must not publish a service`)
+    assert.deepEqual(exitCodes, [0], `${args.join(' ')} must be help-only`)
+  }
+})
+
+test('a Host-only process rejects the ACP stdio route without publishing a service', (t) => {
+  const hostEntry = join(testLifecycle(t).tempDir('m6acp-host-only-'), 'local-host.mjs')
+  writeFileSync(hostEntry, '')
+  const previousArgv = process.argv[1]
+  const previousRole = process.env.DSH_PI_TUI_ROLE
+  const previousEntry = process.env.DSH_PI_TUI_HOST_ENTRY
+  process.argv[1] = hostEntry
+  process.env.DSH_PI_TUI_ROLE = 'host'
+  process.env.DSH_PI_TUI_HOST_ENTRY = hostEntry
+  try {
+    const { ctx, exitCodes } = mount(t, ['acp', 'stdio'])
+    assert.equal(ctx.get(TUI_DAEMON_STARTUP_SERVICE), undefined,
+      'a Host-only process must not acquire the ACP stdio intent')
+    assert.deepEqual(exitCodes, [2])
+  } finally {
+    process.argv[1] = previousArgv
+    if (previousRole === undefined) delete process.env.DSH_PI_TUI_ROLE
+    else process.env.DSH_PI_TUI_ROLE = previousRole
+    if (previousEntry === undefined) delete process.env.DSH_PI_TUI_HOST_ENTRY
+    else process.env.DSH_PI_TUI_HOST_ENTRY = previousEntry
+  }
+})
+
 test('a Host-only process rejects the web route without publishing a service', (t) => {
   const hostEntry = join(testLifecycle(t).tempDir('m6web-host-only-'), 'local-host.mjs')
   writeFileSync(hostEntry, '')

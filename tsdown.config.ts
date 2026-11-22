@@ -69,6 +69,7 @@ const processEntryConfig = defineConfig({
   entry: {
     'local-host': './src/app/remote-process/local-host-entry.ts',
     'local-client': './src/app/remote-process/local-client-entry.ts',
+    'acp-stdio': './src/app/remote-process/acp-stdio-entry.ts',
   },
   format: ['esm'],
   outDir: 'dist',

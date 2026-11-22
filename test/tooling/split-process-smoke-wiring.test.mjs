@@ -528,6 +528,10 @@ test('every registry entry declares a conservative platform list and the audited
     // connection borrowing a TUI Session and creating a second Session; its
     // packed-candidate Darwin selected run passed before this platform flag.
     'acp.multi-session-b2',
+    // G-ACP1A/A1 drives the public installed `dsh --profile pi-tui acp stdio`
+    // command, the same per-platform scope/identity APIs and the shared ACP
+    // SDK against a real Host; both platform arms are required by its plan.
+    'acp.stdio-bridge-a1',
   ]
   const cases = listSelectableCases()
   for (const entry of cases) {
@@ -1024,6 +1028,42 @@ test('the ACP shared Session View selected verdict accepts only the complete rea
   // A NOT_VERIFIED status never becomes a selected PASS.
   assert.throws(() => assertSelectedVerdict('acp.po2-session-view', { ...complete, status: 'NOT_VERIFIED' }),
     /selected acp\.po2-session-view/u)
+})
+
+test('the trusted-profile ACP stdio case is selectable-only, dual-platform and rejects incomplete proof', () => {
+  const entry = listSelectableCases().find(candidate => candidate.id === 'acp.stdio-bridge-a1')
+  assert.ok(entry, 'the trusted-profile ACP stdio case must stay registered')
+  assert.equal(entry.defaultLane, false, 'the packed stdio case stays outside the default expensive lane')
+  assert.deepEqual(entry.platforms, ['linux', 'darwin'], 'the selected case must carry the two real platform arms')
+  const complete = {
+    status: 'PASS',
+    scope: 'REAL_SPLIT_PROCESS_L6',
+    acpVersionFromInstalledDsh: true,
+    publicCommandFromInstalledProfile: true,
+    protocolOnlyStdout: true,
+    singleAdapterChild: true,
+    sameHostIdentity: true,
+    tuiSessionShared: true,
+    promptUpdateClose: true,
+    newSessionViaHostWorkspace: true,
+    cancelAndPermissionReachable: true,
+    largePayloadDrained: true,
+    hostMissingDisabledForeignAndMissingEntryFailClosed: true,
+    runtimeOffDisconnectsOnlyAdapter: true,
+    hostRestartObserved: true,
+    commandFamilyStable: true,
+    hostTuiKept: true,
+    quiesced: true,
+    evidence: { candidateSha256: 'a'.repeat(64), stdoutSha256: 'b'.repeat(64), stdoutFrames: 1 },
+  }
+  assert.equal(assertSelectedVerdict('acp.stdio-bridge-a1', complete), undefined)
+  const missing = { ...complete }
+  delete missing.protocolOnlyStdout
+  assert.throws(() => assertSelectedVerdict('acp.stdio-bridge-a1', missing), /selected acp\.stdio-bridge-a1/u)
+  assert.throws(() => assertSelectedVerdict('acp.stdio-bridge-a1', { ...complete, runtimeOffDisconnectsOnlyAdapter: false }),
+    /selected acp\.stdio-bridge-a1/u)
+  assert.throws(() => assertSelectedVerdict('acp.stdio-bridge-a1', { ...complete, status: 'NOT_VERIFIED' }),
+    /selected acp\.stdio-bridge-a1/u)
 })
 test('the ACP prompt/turn/event selected verdict accepts only the complete real-L6 proof', () => {
   const complete = {

@@ -1185,6 +1185,11 @@ interface ObservedAcpFacts {
   readonly acpSocket?: string
 }
 
+/** The read-only ACP stdio launch target derived from the authenticated Host. */
+export type AcpStdioTarget =
+  | { readonly kind: 'ready'; readonly socketPath: string; readonly instanceId: string }
+  | { readonly kind: 'host-unavailable' | 'acp-disabled' | 'acp-unavailable' }
+
 /**
  * The public logical UDS endpoint of this profile scope (never the macOS private
  * bind name). The value is a single safe `key=value` line or it is omitted: a
@@ -1222,6 +1227,35 @@ async function observeAcpFacts(snapshot: Snapshot, deps: DaemonControlDeps): Pro
     case 'unavailable':
       return { acp: 'unavailable' }
   }
+}
+
+/**
+ * The ONE read-only target seam for the trusted-profile ACP stdio bridge. It
+ * runs the same scope inspection, authenticated snapshot and ACP listener
+ * observation as `daemon status`, then returns either the public logical UDS
+ * path plus the exact authenticated Host instance identity, or one fixed
+ * rejection category. It never starts a Host, changes listener state or
+ * persists a target.
+ */
+export async function readAcpStdioTarget(
+  profile: DaemonControlProfile,
+  signal?: AbortSignal,
+  deps: DaemonControlDeps = {},
+): Promise<AcpStdioTarget> {
+  signal?.throwIfAborted()
+  const effectiveDeps: DaemonControlDeps = signal === undefined ? deps : { ...deps, signal }
+  const scope = inspectScope(profile, effectiveDeps)
+  signal?.throwIfAborted()
+  const snapshot = await readSnapshot(profile, effectiveDeps, scope)
+  signal?.throwIfAborted()
+  if (snapshot.status.host !== 'ready' || snapshot.authenticated === undefined) {
+    return { kind: 'host-unavailable' }
+  }
+  const acp = await observeAcpFacts(snapshot, effectiveDeps)
+  signal?.throwIfAborted()
+  if (acp.acp === 'disabled') return { kind: 'acp-disabled' }
+  if (acp.acp !== 'enabled' || acp.acpSocket === undefined) return { kind: 'acp-unavailable' }
+  return { kind: 'ready', socketPath: acp.acpSocket, instanceId: snapshot.authenticated.identity.instanceId }
 }
 
 /** The `status` handler. */

@@ -16,10 +16,13 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { lstatSync, mkdirSync, readFileSync, realpathSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import {
+  AcpStdioRunner,
   DaemonControlRunner,
   DaemonCoordinator,
+  buildAcpStdioEnvironment,
   encodeLaunchEnvelope,
   buildChildEnvironment,
+  resolveAcpStdioEntry,
   resolveClientEntry,
   writeQualificationDump,
   createLoaderDumpScheduler,
@@ -101,6 +104,44 @@ test('resolveClientEntry keeps the named dist entry for legal shared-store and s
   const directory = life.tempDir('m62a-dir-')
   mkdirSync(join(directory, 'dist', 'local-client.mjs'), { recursive: true })
   assert.throws(() => resolveClientEntry(directory), /regular file/u)
+})
+
+test('resolveAcpStdioEntry resolves only the installed internal acp-stdio artifact', (t: TestContext) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('m62a-acp-pkg-')
+  mkdirSync(join(root, 'dist'), { recursive: true })
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ name: '@xmoon76/dsh-pi-tui', version: '0.5.8' }))
+  assert.throws(() => resolveAcpStdioEntry(root), /ACP stdio entry .* missing/u)
+  const entry = join(root, 'dist', 'acp-stdio.mjs')
+  writeFileSync(entry, 'export {}\n')
+  assert.equal(resolveAcpStdioEntry(root), entry)
+  unlinkSync(entry)
+  mkdirSync(entry)
+  assert.throws(() => resolveAcpStdioEntry(root), /regular file/u)
+})
+
+test('buildAcpStdioEnvironment strips every internal role fact and overwrites the socket target', () => {
+  const source: NodeJS.ProcessEnv = {
+    SPLIT_PROCESS_CLIENT_LAUNCH_V1: 'ENVELOPE',
+    SPLIT_PROCESS_DSH_ANCHOR: '/x/@deepseek-ai/dsh/package.json',
+    SPLIT_PROCESS_PROFILE: 'pi-tui',
+    DSH_PI_TUI_ROLE: 'host',
+    DSH_PI_TUI_HOST_ENTRY: '/x/local-host.mjs',
+    DSH_PI_TUI_BACKEND: 'daemon',
+    DSH_PI_TUI_ACP_STDIO_SOCKET_V1: '/foreign/acp.sock',
+    DSH_PI_TUI_PRESET: 'keep-me',
+    PATH: '/usr/bin',
+  }
+  const env = buildAcpStdioEnvironment('/profile/run/acp.sock', source)
+  assert.equal(env.SPLIT_PROCESS_CLIENT_LAUNCH_V1, undefined)
+  assert.equal(env.SPLIT_PROCESS_DSH_ANCHOR, undefined)
+  assert.equal(env.SPLIT_PROCESS_PROFILE, undefined)
+  assert.equal(env.DSH_PI_TUI_ROLE, undefined)
+  assert.equal(env.DSH_PI_TUI_HOST_ENTRY, undefined)
+  assert.equal(env.DSH_PI_TUI_BACKEND, undefined)
+  assert.equal(env.DSH_PI_TUI_PRESET, 'keep-me', 'ordinary ambient environment is preserved')
+  assert.equal(env.DSH_PI_TUI_ACP_STDIO_SOCKET_V1, '/profile/run/acp.sock', 'the Parent-supplied target wins')
+  assert.equal(env.PATH, '/usr/bin')
 })
 
 test('a real child process locates the package root from a symlinked dist invoked path', (t: TestContext) => {
@@ -451,6 +492,154 @@ test('the web-control runner uses its fixed WEB prefix for an unexpected throw',
   assert.deepEqual(exitCodes, [4])
   assert.match(stderr.join(''), /^dsh-pi-tui web: WEB_CLI_UNAVAILABLE: /u)
   assert.doesNotMatch(stderr.join(''), /daemon:|raw secret|\/home\/u/u)
+})
+
+// ── trusted-profile ACP stdio launch lifecycle ────────────────────────────
+
+function acpRunner(
+  children: FakeChild[],
+  exits: number[],
+  stderr: string[],
+  preflight: () => Promise<import('../../src/app/remote-process/local-daemon-control.ts').AcpStdioTarget>,
+  extra: Partial<ConstructorParameters<typeof AcpStdioRunner>[0]> = {},
+): AcpStdioRunner {
+  const { spawnImpl } = fakeSpawn()
+  return new AcpStdioRunner({
+    profileName: 'pi-tui',
+    preflight: async () => preflight(),
+    resolveEntry: () => '/x/pkg/dist/acp-stdio.mjs',
+    spawnImpl: extra.spawnImpl ?? spawnImpl,
+    appExit: code => { exits.push(code) },
+    diag: silentDiag,
+    writeStderr: line => { stderr.push(line) },
+    ...extra,
+  })
+}
+
+async function waitForCondition(predicate: () => boolean, label: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return
+    await sleep(10)
+  }
+  throw new Error(`timed out waiting for ${label}`)
+}
+
+test('AcpStdioRunner spawns exactly one ACP Adapter only after the cold-ready gate', async () => {
+  const { spawnImpl, children } = fakeSpawn()
+  const exits: number[] = []
+  const stderr: string[] = []
+  let preflightCalls = 0
+  const runner = acpRunner(children, exits, stderr, async () => {
+    preflightCalls += 1
+    return { kind: 'ready', socketPath: '/scope/acp.sock', instanceId: 'instance-1' }
+  }, { spawnImpl })
+  runner.prepare()
+  await sleep(30)
+  assert.equal(preflightCalls, 0, 'the read-only preflight must wait for the real cold-ready gate')
+  runner.start()
+  runner.start()
+  await waitForCondition(() => children.length === 1, 'the ONE ACP Adapter child')
+  assert.equal(preflightCalls, 1)
+  assert.equal(children.length, 1, 'a second start never spawns a second Adapter')
+  children[0].finish(0)
+  assert.deepEqual(exits, [0], 'the child exit maps to one appExit')
+})
+
+test('AcpStdioRunner dispose before readiness aborts the preflight and never spawns', async () => {
+  const { spawnImpl, children } = fakeSpawn()
+  const exits: number[] = []
+  const stderr: string[] = []
+  let preflightCalls = 0
+  const runner = acpRunner(children, exits, stderr, async () => {
+    preflightCalls += 1
+    return { kind: 'ready', socketPath: '/scope/acp.sock', instanceId: 'instance-1' }
+  }, { spawnImpl })
+  runner.prepare()
+  assert.equal(await runner.dispose(), true)
+  runner.start()
+  await sleep(30)
+  assert.equal(preflightCalls, 0, 'a disposed runner never starts the preflight')
+  assert.equal(children.length, 0, 'a disposed runner never spawns')
+  assert.deepEqual(exits, [])
+})
+
+test('AcpStdioRunner maps each read-only target rejection to a stderr-only exit 3', async () => {
+  const cases = [
+    ['host-unavailable', 'ACP_STDIO_HOST_NOT_READY'],
+    ['acp-disabled', 'ACP_STDIO_LISTENER_DISABLED'],
+    ['acp-unavailable', 'ACP_STDIO_LISTENER_UNAVAILABLE'],
+  ] as const
+  for (const [kind, code] of cases) {
+    const { spawnImpl, children } = fakeSpawn()
+    const exits: number[] = []
+    const stderr: string[] = []
+    const runner = acpRunner(children, exits, stderr, async () => ({ kind }), { spawnImpl })
+    runner.prepare()
+    runner.start()
+    await waitForCondition(() => exits.length === 1, `${kind} result`)
+    assert.deepEqual(exits, [3], `${kind} must exit 3`)
+    assert.equal(children.length, 0, `${kind} must not spawn a child`)
+    assert.equal(stderr.length, 1)
+    assert.match(stderr[0], new RegExp(`^dsh-pi-tui acp stdio: ${code}`, 'u'))
+    assert.ok(!stderr[0].includes('/scope'), 'no private path is printed')
+  }
+})
+
+test('AcpStdioRunner maps an unexpected preflight throw to ACP_STDIO_STATUS_UNAVAILABLE', async () => {
+  const { spawnImpl, children } = fakeSpawn()
+  const exits: number[] = []
+  const stderr: string[] = []
+  const runner = acpRunner(children, exits, stderr, async () => { throw new Error('raw secret at /home/private') }, { spawnImpl })
+  runner.prepare()
+  runner.start()
+  await waitForCondition(() => exits.length === 1, 'status-unavailable result')
+  assert.deepEqual(exits, [3])
+  assert.equal(children.length, 0)
+  assert.match(stderr.join(''), /ACP_STDIO_STATUS_UNAVAILABLE/u)
+  assert.doesNotMatch(stderr.join(''), /raw secret|\/home\/private/u)
+})
+
+test('AcpStdioRunner maps a missing installed Adapter entry to ACP_STDIO_ENTRY_MISSING exit 4', async () => {
+  const { spawnImpl, children } = fakeSpawn()
+  const exits: number[] = []
+  const stderr: string[] = []
+  const runner = acpRunner(children, exits, stderr, async () => ({ kind: 'ready', socketPath: '/scope/acp.sock', instanceId: 'i' }), {
+    spawnImpl,
+    resolveEntry: () => { throw new Error('missing at /private/package/dist/acp-stdio.mjs') },
+  })
+  runner.prepare()
+  runner.start()
+  await waitForCondition(() => exits.length === 1, 'missing entry result')
+  assert.deepEqual(exits, [4])
+  assert.equal(children.length, 0)
+  assert.match(stderr.join(''), /ACP_STDIO_ENTRY_MISSING/u)
+  assert.doesNotMatch(stderr.join(''), /private\/package/u)
+})
+
+test('AcpStdioRunner maps a spawn throw to ACP_STDIO_SPAWN_FAILED exit 4', async () => {
+  const exits: number[] = []
+  const stderr: string[] = []
+  const spawnImpl = (() => { throw Object.assign(new Error('spawn at /private/bin'), { code: 'ENOENT' }) }) as unknown as typeof import('node:child_process').spawn
+  const runner = acpRunner([], exits, stderr, async () => ({ kind: 'ready', socketPath: '/scope/acp.sock', instanceId: 'i' }), { spawnImpl })
+  runner.prepare()
+  runner.start()
+  await waitForCondition(() => exits.length === 1, 'spawn failure result')
+  assert.deepEqual(exits, [4])
+  assert.match(stderr.join(''), /ACP_STDIO_SPAWN_FAILED/u)
+  assert.doesNotMatch(stderr.join(''), /private\/bin|spawn at/u)
+})
+
+test('AcpStdioRunner disposal after a live child uses the ONE coordinator stop owner', async () => {
+  const { spawnImpl, children } = fakeSpawn()
+  const exits: number[] = []
+  const stderr: string[] = []
+  const runner = acpRunner(children, exits, stderr, async () => ({ kind: 'ready', socketPath: '/scope/acp.sock', instanceId: 'i' }), { spawnImpl })
+  runner.prepare()
+  runner.start()
+  await waitForCondition(() => children.length === 1, 'the live ACP child')
+  children[0].autoExitSignal = 'SIGTERM'
+  assert.equal(await runner.dispose(), true)
+  assert.deepEqual(children[0].kills, ['SIGTERM'], 'dispose asks the ONE child to stop once')
 })
 
 // ── B3: the budget deadline is a fallback, never a lingering referenced timer ──
