@@ -1125,7 +1125,7 @@ function makeFakeAccess(options: {
         // The real Host omits optional config options when its model catalog is
         // unavailable; keep that default here so existing lifecycle assertions
         // observe the same `{}` resume result.
-        if (options.modelOptions === undefined) throw new Error('no model catalog')
+        if (options.modelOptions === undefined) throw new AcpModelError('LOCAL_ACP_MODEL_UNAVAILABLE', 'no model catalog', -32042)
         return await options.modelOptions(agent, session)
       },
       async selectModelOnly(
@@ -2876,6 +2876,28 @@ test('a rejected optional catalog read after concurrent close propagates STALE, 
     const resumed = (await client.next()) as { id?: number; result?: { configOptions?: SessionConfigOption[] } }
     assert.equal(resumed.id, 4)
     assert.deepEqual(resumed.result?.configOptions, configOptionsFor('["p1","a"]'))
+  } finally {
+    client.close()
+  }
+})
+
+test('an unexpected optional-model-read error never becomes a successful attach', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess({
+    modelOptions: async () => { throw new Error('unexpected model projection failure') },
+  })
+  fake.seed('session-generic-error', '/host/proj')
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-generic-error', cwd: '/host/proj' } })
+    const response = (await client.next()) as { id?: number; result?: unknown; error?: { code?: number } }
+    assert.equal(response.id, 2)
+    assert.ok(response.error !== undefined, 'an unexpected Host read error must not be swallowed')
+    assert.equal(response.result, undefined, 'the Session must not be reported as successfully attached')
   } finally {
     client.close()
   }

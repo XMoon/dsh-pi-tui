@@ -1125,11 +1125,15 @@ class C1Model extends LlmAdapter {
     const modelSwitchContext = process.env.C1_MODEL_S1_ROUTE === model
       ? { context: { contextWindow: 200_000 } }
       : {}
+    const modelS1Reasoning = process.env.C1_MODEL_S1_ROUTE === model
+      ? { reasoning: { efforts: [{ id: 'low', name: 'low' }, { id: 'high', name: 'high' }], defaultEffort: 'low' } }
+      : {}
     return {
       provider,
       id: model,
       name: model,
       ...modelSwitchContext,
+      ...modelS1Reasoning,
       ...(po4a && model === 'c1' ? { inputModalities: ['text', 'image'] } : {}),
       ...(po4a && model === 'c1-text-only' ? { inputModalities: ['text'] } : {}),
     }

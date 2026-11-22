@@ -101,6 +101,11 @@ function modelConfigOption(configOptions) {
   return option
 }
 
+/** The optional `thought_level` config option of one ACP configOptions array. */
+function thoughtLevelOption(configOptions) {
+  return configOptions?.find(candidate => candidate.id === 'thought_level')
+}
+
 /** One raw NDJSON JSON-RPC client over a real UDS connection. */
 class AcpRawClient {
   constructor(socket) {
@@ -626,6 +631,8 @@ export async function runAcpPo2SessionView(context) {
       `Model-S1: set_config_option(model B) failed: ${JSON.stringify(setB?.error ?? setB?.result)}`)
     assert(modelConfigOption(setB.result?.configOptions).currentValue === modelValue(MODEL_B),
       'Model-S1: the success response must carry the complete new option state')
+    assert(thoughtLevelOption(setB.result?.configOptions)?.currentValue === JSON.stringify(['default']),
+      'Model-S1: model B must advertise the default thought_level option')
     // The committed model/selection event is also delivered as the standard
     // full-option update on this same attached View.
     const selfUpdate = await connModel.nextNotification(30_000)
@@ -637,6 +644,21 @@ export async function runAcpPo2SessionView(context) {
     await waitForHostSessionEventAfter(dshHome, sessionA, beforeModelSet,
       event => event.type === 'model/selection' && event.data?.provider === MODEL_PROVIDER && event.data?.model === MODEL_B,
       'Model-S1: durable model/selection B')
+
+    // ACP effort selection on the SAME route must persist the explicit effort
+    // through the real Host Agent, not just a fake selector.
+    const beforeEffortSet = (hostSessionEvents(dshHome, sessionA) ?? []).length
+    const setEffort = await sendRequest(connModel, 4, 'session/set_config_option', {
+      sessionId: sessionA, configId: 'thought_level', value: JSON.stringify(['effort', 'high']),
+    })
+    assert(setEffort?.error === undefined,
+      `Model-S1: set thought_level(high) failed: ${JSON.stringify(setEffort?.error ?? setEffort?.result)}`)
+    assert(thoughtLevelOption(setEffort.result?.configOptions)?.currentValue === JSON.stringify(['effort', 'high']),
+      'Model-S1: the effort response must carry the explicit high effort')
+    await waitForHostSessionEventAfter(dshHome, sessionA, beforeEffortSet,
+      event => event.type === 'model/selection' && event.data?.provider === MODEL_PROVIDER
+        && event.data?.model === MODEL_B && event.data?.reasoningEffort === 'high',
+      'Model-S1: durable model/selection B with effort high')
 
     // A real TUI turn on the SAME Session must route to B (durable header).
     const beforeModelTurn = (hostSessionEvents(dshHome, sessionA) ?? []).length
@@ -650,7 +672,7 @@ export async function runAcpPo2SessionView(context) {
       `Model-S1: the real TUI turn must route to B (got ${JSON.stringify(modelTurnHeader?.data?.header?.config ?? null)})`)
 
     // A repeated resume on a NEW connection reads the same durable Session value.
-    const closeModel = await sendRequest(connModel, 4, 'session/close', { sessionId: sessionA })
+    const closeModel = await sendRequest(connModel, 5, 'session/close', { sessionId: sessionA })
     assert(isObjectResult(closeModel), 'Model-S1: closing the ACP View must return {}')
     connModel.close()
     await connModel.closed
@@ -659,6 +681,8 @@ export async function runAcpPo2SessionView(context) {
     assert(isAttachResult(repeated), 'Model-S1: second resume must attach')
     assert(modelConfigOption(repeated.result?.configOptions).currentValue === modelValue(MODEL_B),
       'Model-S1: a new resume must read B from the durable Session, not the Profile default')
+    assert(thoughtLevelOption(repeated.result?.configOptions)?.currentValue === JSON.stringify(['effort', 'high']),
+      'Model-S1: a new resume must read the durable explicit effort high')
 
     // A brand-new Session C must still be created from the untouched Profile
     // default A; it also runs one real TUI turn so the route is durable.
@@ -670,6 +694,8 @@ export async function runAcpPo2SessionView(context) {
     assert(sessionC !== sessionA && sessionC !== sessionB, 'Model-S1: Session C must be distinct')
     assert(modelConfigOption(createdC.result?.configOptions).currentValue === modelValue(MODEL_A),
       'Model-S1: Session C must start from the original Profile default A')
+    assert(thoughtLevelOption(createdC.result?.configOptions) === undefined,
+      'Model-S1: the no-effort default route must not advertise thought_level')
     connC.close()
     await connC.closed
 
@@ -716,16 +742,33 @@ export async function runAcpPo2SessionView(context) {
     assert(hostAssistantHasText(busyTurnEvents.slice(beforeBusyTurn), 'long-turn answer'),
       'Model-S1: the held TUI turn must complete with its real answer')
 
+    // Switching to the no-effort model A must remove thought_level from the
+    // complete option state and persist the model change.
+    const beforeNoEffort = (hostSessionEvents(dshHome, sessionA) ?? []).length
+    const setNoEffort = await sendRequest(connModelResume, 31, 'session/set_config_option', {
+      sessionId: sessionA, configId: 'model', value: modelValue(MODEL_A),
+    })
+    assert(setNoEffort?.error === undefined,
+      `Model-S1: set model A failed: ${JSON.stringify(setNoEffort?.error ?? setNoEffort?.result)}`)
+    assert(thoughtLevelOption(setNoEffort.result?.configOptions) === undefined,
+      'Model-S1: the no-effort model A must remove thought_level')
+    const noEffortSelfUpdate = await connModelResume.nextNotification(30_000)
+    assert(modelConfigOption(noEffortSelfUpdate?.params?.update?.configOptions).currentValue === modelValue(MODEL_A),
+      'Model-S1: model A change must produce a full config update')
+    await waitForHostSessionEventAfter(dshHome, sessionA, beforeNoEffort,
+      event => event.type === 'model/selection' && event.data?.provider === MODEL_PROVIDER && event.data?.model === MODEL_A,
+      'Model-S1: durable model/selection A')
+
     // A real TUI `/model` change on Session A must reach the attached ACP View
     // as one full `config_option_update`.
-    await selectModelInTui(tuiModelA, MODEL_A, 'Model-S1 TUI model change A')
+    await selectModelInTui(tuiModelA, MODEL_B, 'Model-S1 TUI model change B')
     const configUpdate = (await connModelResume.nextNotification(30_000))
     assert(configUpdate?.method === 'session/update', 'Model-S1: the ACP connection must receive a config notification')
     assert(configUpdate?.params?.sessionId === sessionA, 'Model-S1: the config notification must be for Session A')
     assert(configUpdate?.params?.update?.sessionUpdate === 'config_option_update',
       'Model-S1: the notification must be config_option_update')
-    assert(modelConfigOption(configUpdate.params.update.configOptions).currentValue === modelValue(MODEL_A),
-      'Model-S1: the TUI change must be reflected as A')
+    assert(modelConfigOption(configUpdate.params.update.configOptions).currentValue === modelValue(MODEL_B),
+      'Model-S1: the TUI change must be reflected as B')
     tuiModelA.send('\x15')
     await exitC1Client(tuiModelA, 'Model-S1 tuiA')
     connModelResume.close()

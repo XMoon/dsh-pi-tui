@@ -707,12 +707,15 @@ function buildAgentApp(
       try {
         return await views.modelOptions(view, access, sessionId)
       } catch (error) {
-        if (error instanceof LocalAcpViewError && error.code !== 'LOCAL_ACP_MODEL_UNAVAILABLE') {
+        // Only the exact typed catalog-unavailable class may take the optional
+        // display fallback. Unexpected Host/projection errors must fail through
+        // the normal JSON-RPC boundary instead of becoming a false success.
+        if (!(error instanceof LocalAcpViewError && error.code === 'LOCAL_ACP_MODEL_UNAVAILABLE')) {
           throw error
         }
         context.diag.warn('local-acp.model-catalog-unavailable', {
           code: 'LOCAL_ACP_MODEL_CATALOG_UNAVAILABLE',
-          reason: error instanceof LocalAcpViewError ? error.code : 'LOCAL_ACP_MODEL_UNAVAILABLE',
+          reason: error.code,
         })
         return undefined
       }
