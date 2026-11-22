@@ -429,7 +429,14 @@ export class AcpSessionModelService {
       }
       await this.assertModelRoutable(choice.provider, choice.model, signal)
       this.assertCurrent(expectedAgent, expectedSession, signal, stillCurrent)
-      intended = { provider: choice.provider, model: choice.model }
+      intended = baseline !== undefined
+        && baseline.provider === choice.provider
+        && baseline.model === choice.model
+        // Re-selecting the SAME route is not a model switch: keep its explicit
+        // effort instead of silently dropping it. Choosing the model default is
+        // the separate `thought_level` selection.
+        ? copySelection(baseline) as AcpModelSelection
+        : { provider: choice.provider, model: choice.model }
     } else {
       const baselineSelection = baseline
       if (baselineSelection === undefined) {

@@ -532,8 +532,8 @@ test('the LLM capability validation rejects an effort the live adapter refuses',
   assert.equal(agent.appends.length, 0)
 })
 
-test('selecting the same model or effort is an explicit no-op with no duplicate Session event', async () => {
-  const { host, agent } = baseHost({ provider: 'p1', model: 'a' })
+test('selecting the same model keeps its explicit effort; an identical effort is a no-op', async () => {
+  const { host, agent } = baseHost({ provider: 'p1', model: 'a', reasoningEffort: 'high' })
   const service = new AcpSessionModelService(host)
   const session = host.sessions.get('S1') as object
 
@@ -545,8 +545,10 @@ test('selecting the same model or effort is an explicit no-op with no duplicate 
     ALWAYS_CURRENT,
   )
   assert.equal(agent.appends.length, 0, 'the official AgentModel.select no-ops on an identical model selection')
+  assert.deepEqual(agent.currentSelection(), { provider: 'p1', model: 'a', reasoningEffort: 'high' },
+    're-selecting the same route must not drop its explicit effort')
   assert.equal((modelOptions[0] as { currentValue: string }).currentValue, modelValue('p1', 'a'))
-  assert.equal((modelOptions[1] as { currentValue: string }).currentValue, JSON.stringify(['default']))
+  assert.equal((modelOptions[1] as { currentValue: string }).currentValue, JSON.stringify(['effort', 'high']))
 
   await service.selectSessionOnly(
     agent,
@@ -555,16 +557,7 @@ test('selecting the same model or effort is an explicit no-op with no duplicate 
     OK_SIGNAL,
     ALWAYS_CURRENT,
   )
-  assert.deepEqual(agent.appends, [{ provider: 'p1', model: 'a', reasoningEffort: 'high' }])
-
-  await service.selectSessionOnly(
-    agent,
-    session,
-    request('thought_level', JSON.stringify(['effort', 'high'])),
-    OK_SIGNAL,
-    ALWAYS_CURRENT,
-  )
-  assert.equal(agent.appends.length, 1, 'an identical effort selection adds no second Session event')
+  assert.equal(agent.appends.length, 0, 'an identical effort selection adds no second Session event')
   assert.equal(host.defaultSaveCalls, 0)
 })
 
