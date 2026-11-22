@@ -481,7 +481,7 @@ test('the B0 evidence path selects only the B0 case, never an earlier ACP case',
     'a case without evidence is not a B0 artifact')
 })
 
-test('every registry entry declares a conservative platform list and the ten shared cases are dual-platform', () => {
+test('every registry entry declares a conservative platform list and the audited shared cases are dual-platform', () => {
   const shared = [
     'surface.sessionless-host-file-f5b',
     'surface.generic-file-upload-f4',
@@ -524,6 +524,10 @@ test('every registry entry declares a conservative platform list and the ten sha
     // stdio-MCP admission/retirement path; its packed-candidate Linux CI run
     // and real Darwin selected run both passed.
     'acp.scoped-mcp-b1',
+    // G-ACP1B/B2 drives the same shared Split harness with one official SDK
+    // connection borrowing a TUI Session and creating a second Session; its
+    // packed-candidate Darwin selected run passed before this platform flag.
+    'acp.multi-session-b2',
   ]
   const cases = listSelectableCases()
   for (const entry of cases) {
@@ -1547,6 +1551,23 @@ test('the independent ACP SDK case is registered once as selectable-only and sta
   assert.deepEqual(listDefaultLaneCases(), listSelectableCases().filter(item => item.defaultLane !== false))
   assert.deepEqual(resolveSelection({ mode: 'case', id: SDK_INTEROP_CASE_ID }, 'linux').cases, [entry])
   assert.ok(resolveSelection({ mode: 'suite', suite: 'acp' }, 'linux').cases.includes(entry))
+})
+
+test('the same-connection multi-Session case is registered once as selectable-only on both qualified platforms', () => {
+  const caseId = 'acp.multi-session-b2'
+  const registered = listSelectableCases().filter(entry => entry.id === caseId)
+  assert.equal(registered.length, 1, 'the B2 multi-Session case must be registered exactly once')
+  const [entry] = registered
+  assert.equal(entry.suite, 'acp')
+  assert.equal(entry.defaultLane, false)
+  assert.equal(typeof entry.run, 'function')
+  assert.equal(typeof entry.title, 'string')
+  assert.ok(entry.title.length > 0)
+  assert.deepEqual(entry.platforms, ['linux', 'darwin'], 'the real Darwin selected run must be qualified')
+  assert.equal(listDefaultLaneCases().some(item => item.id === caseId), false,
+    'the default lane must not run the B2 multi-Session case')
+  assert.deepEqual(resolveSelection({ mode: 'case', id: caseId }, 'linux').cases, [entry])
+  assert.deepEqual(resolveSelection({ mode: 'case', id: caseId }, 'darwin').cases, [entry])
 })
 
 test('a selected result names the selectable scope AND the platform it qualified', () => {

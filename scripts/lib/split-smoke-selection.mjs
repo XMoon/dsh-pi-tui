@@ -90,6 +90,7 @@ import { runAcpPo4cContentOutput } from '../smoke/split-process/acp-po4c-content
 import { runAcpSdkContentInteroperability } from '../smoke/split-process/acp-sdk-content-interoperability.mjs'
 import { runAcpScopedMcpB0 } from '../smoke/split-process/acp-scoped-mcp-b0.mjs'
 import { runAcpScopedMcpB1 } from '../smoke/split-process/acp-scoped-mcp-b1.mjs'
+import { runAcpMultiSessionB2 } from '../smoke/split-process/acp-multi-session-b2.mjs'
 import {
   runDaemonControlConcurrentControls,
   runDaemonControlInflightStop,
@@ -638,6 +639,14 @@ const CASE_REGISTRY = Object.freeze([
     title: 'a standard ACP session/new|resume.mcpServers request mounts the official Agent-scoped MCP client, a real model turn executes its stdio tool, another Agent never sees it, and Close/EOF/Off retire the exact lease only after the live Host terminal settles',
     platforms: LINUX_DARWIN,
     run: runAcpScopedMcpB1,
+  }),
+  Object.freeze({
+    suite: 'acp',
+    defaultLane: false,
+    id: 'acp.multi-session-b2',
+    title: 'one official ACP SDK connection concurrently borrows a TUI Session and creates another, routes prompts/cancel/close/MCP per Session and survives Off/On with the one Host',
+    platforms: LINUX_DARWIN,
+    run: runAcpMultiSessionB2,
   }),
 ])
 
