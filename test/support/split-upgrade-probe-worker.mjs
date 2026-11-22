@@ -12,9 +12,18 @@
  * Usage: node --import tsx/esm test/support/split-upgrade-probe-worker.mjs --scenario <name>
  */
 
-import { statSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 
 import { createUpgradeScene } from './split-upgrade-fixture.ts'
+import {
+  recordIndex,
+  waitForAcceptedHandoff,
+  waitForC1Event,
+  waitForClientClosed,
+  waitForPaintedText,
+  waitForReplacement,
+  waitForSurfaceSession,
+} from '../integration/split-upgrade/reload-observation.ts'
 
 const SCENARIOS = new Set([
   'upgrade-sequential-hosts',
@@ -24,6 +33,9 @@ const SCENARIOS = new Set([
   'upgrade-worker-kill:new-host-spawned-before-ack',
   'upgrade-worker-kill:side-build-install',
   'upgrade-worker-kill:bootstrap-install',
+  'upgrade-worker-kill:reload-child-active',
+  'upgrade-worker-kill:reload-child-started-before-report',
+  'upgrade-sibling-live',
   'upgrade-live-host-exit',
 ])
 
@@ -140,6 +152,114 @@ async function runLiveProfileRefusal(scene) {
   })}`)
 }
 
+async function runReloadChildActive(scene, point = 'reload-child-active') {
+  const beforeReport = point === 'reload-child-started-before-report'
+  await scene.installOldProfile()
+  await scene.installOldSideBySide()
+  await scene.installNewSideBySide()
+  const host = await scene.startHost({ source: 'side-old', scenario: 'long-turn' })
+  const client = await scene.startClient({ source: 'side-old', label: 'reload-child-active-client' })
+  const oldPid = await client.businessPid()
+  if (!Number.isInteger(oldPid)) throw new Error('reload-child-active: the initial Client has no real business PID')
+  const holdPrompt = 'u1-kill-reload-hold'
+  await client.submit(holdPrompt)
+  await waitForPaintedText(client, holdPrompt, 'reload-child-active: painted the admitted prompt')
+  const sessionId = (await waitForSurfaceSession(client, 'reload-child-active: opened the Session')).openSessionId
+  await waitForC1Event(host.workRoot,
+    event => event.kind === 'long-turn-held' && event.sessionId === sessionId,
+    'reload-child-active: the Turn was held')
+  const newProfile = await scene.installNewProfileForReload()
+  const boundary = recordIndex(client)
+  await client.submit('/reload-client')
+  await waitForAcceptedHandoff(client, oldPid, `${point}: production reload`, boundary)
+  if (beforeReport) {
+    const started = await client.waitForRecord(
+      record => record.m4a0 === 'client-started' && record.pid !== oldPid,
+      `${point}: replacement client-started before PID REPORT`,
+      180_000,
+    )
+    const replacementPid = started.pid
+    if (!Number.isInteger(replacementPid) || replacementPid === oldPid || !pidAlive(replacementPid)) {
+      throw new Error(`${point}: the replacement has no live non-parent business PID`)
+    }
+    await scene.report('worker-kill-point', {
+      point,
+      workerPid: process.pid,
+      oldPid,
+      replacementPid,
+      businessPids: client.businessPids(),
+      sessionId,
+      newBuildId: newProfile.buildId,
+      hostPid: host.ready?.pid,
+      hostPgid: host.pgid,
+    })
+    await holdForExternalKill(point)
+    return
+  }
+  await waitForClientClosed(client, oldPid, 'reload-child-active: old Client closed')
+  const replacement = await waitForReplacement(client, oldPid, 'reload-child-active')
+  if (replacement.pid === oldPid) throw new Error('reload-child-active: the replacement reused the old PID')
+  await scene.refreshClientBusinessPids(client)
+  const businessPids = client.businessPids()
+  if (!businessPids.includes(oldPid) || !businessPids.includes(replacement.pid)) {
+    throw new Error(`reload-child-active: the official record ledger is missing a parent/child PID: ${JSON.stringify(businessPids)}`)
+  }
+  await scene.report('worker-kill-point', {
+    point: 'reload-child-active',
+    workerPid: process.pid,
+    oldPid,
+    replacementPid: replacement.pid,
+    businessPids,
+    sessionId,
+    newBuildId: newProfile.buildId,
+    hostPid: host.ready?.pid,
+    hostPgid: host.pgid,
+  })
+  await holdForExternalKill('reload-child-active')
+}
+
+async function runSiblingLive(scene) {
+  const stopFile = process.env.SPLIT_UPGRADE_PROBE_SIBLING_STOP_FILE
+  if (typeof stopFile !== 'string' || stopFile === '') {
+    throw new Error('upgrade-sibling-live: SPLIT_UPGRADE_PROBE_SIBLING_STOP_FILE must be set')
+  }
+  await scene.installOldProfile()
+  const host = await scene.startHost({ source: 'profile', scenario: 'long-turn' })
+  const client = await scene.startClient({ source: 'profile', label: 'sibling-live-client' })
+  const holdPrompt = 'u1-sibling-live-hold'
+  await client.submit(holdPrompt)
+  await waitForPaintedText(client, holdPrompt, 'upgrade-sibling-live: painted the admitted prompt')
+  const sessionId = (await waitForSurfaceSession(client, 'upgrade-sibling-live: opened the Session')).openSessionId
+  await waitForC1Event(host.workRoot,
+    event => event.kind === 'long-turn-held' && event.sessionId === sessionId,
+    'upgrade-sibling-live: the Turn was held')
+  await scene.report('sibling-live', {
+    hostPid: host.ready?.pid,
+    hostPgid: host.pgid,
+    clientPid: await client.businessPid(),
+    sessionId,
+    sceneRoot: scene.workRoot,
+  })
+  const started = Date.now()
+  while (!existsSync(stopFile)) {
+    if (Date.now() - started > 300_000) throw new Error('upgrade-sibling-live: stop file never appeared')
+    await new Promise(resolve => setTimeout(resolve, 100))
+  }
+  await scene.releaseHeldTurn(host)
+  await waitForC1Event(host.workRoot,
+    event => event.kind === 'long-turn-released' && event.sessionId === sessionId,
+    'upgrade-sibling-live: the Turn completed')
+  await client.close()
+  await scene.stopHost(host)
+  await scene.finish()
+  console.log(`UPGRADE_PROBE_WORKER_FACTS ${JSON.stringify({
+    scenario: 'upgrade-sibling-live',
+    hostPid: host.ready?.pid,
+    clientPid: await client.businessPid(),
+    sessionId,
+  })}`)
+}
+
 async function main() {
   const scenario = requireScenario()
   let scene
@@ -151,6 +271,15 @@ async function main() {
         return
       case 'upgrade-live-profile-refusal':
         await runLiveProfileRefusal(scene)
+        return
+      case 'upgrade-sibling-live':
+        await runSiblingLive(scene)
+        return
+      case 'upgrade-worker-kill:reload-child-active':
+        await runReloadChildActive(scene)
+        return
+      case 'upgrade-worker-kill:reload-child-started-before-report':
+        await runReloadChildActive(scene, 'reload-child-started-before-report')
         return
       case 'upgrade-worker-kill:old-host-ready': {
         await scene.installOldProfile()

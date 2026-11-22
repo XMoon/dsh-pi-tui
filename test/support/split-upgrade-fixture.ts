@@ -10,6 +10,7 @@
  * @module @xmoon76/dsh-pi-tui/test/support/split-upgrade-fixture
  */
 
+import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { isAbsolute, join, relative, sep } from 'node:path'
@@ -83,6 +84,7 @@ export interface OpaqueHostHandle {
   readonly ready: Record<string, any>
   readonly workRoot: string
   readonly buildId?: string
+  readonly pgid?: number
   exited: boolean
   exitResult?: HostExitFacts
 }
@@ -99,6 +101,8 @@ export interface UpgradeClientHandle {
   readonly sessionId: string
   readonly recordFile: string
   readonly terminal: TuiTest
+  readonly qualificationProbe?: boolean
+  closed?: boolean
   readRecords(): Record<string, any>[]
   waitForRecord(
     predicate: (record: Record<string, any>) => boolean,
@@ -133,6 +137,16 @@ export interface UpgradeScene {
   }): Promise<UpgradeClientHandle>
   installNewProfileForReload(): Promise<InstalledPackageFacts>
   activateNewProfileAfterOldStopped(): Promise<InstalledPackageFacts>
+  /** Read the live official Host identity from the Supervisor-owned generation. */
+  hostStatus(host: OpaqueHostHandle): Promise<Record<string, any>>
+  /** Ask the Supervisor that owns this Host generation to release its C1 barrier. */
+  releaseHeldTurn(host: OpaqueHostHandle): Promise<void>
+  /** Run the official profile remove transaction for the target-invalid negative. */
+  removeProfilePackageForReloadRefusal(host: OpaqueHostHandle): Promise<void>
+  /** Send SIGUSR2 only to this Scene's live qualification-probe business PID. */
+  signalClientForQualification(client: UpgradeClientHandle): Promise<number>
+  /** Merge the official JSONL business-PID ledger into the Supervisor receipt. */
+  refreshClientBusinessPids(client?: UpgradeClientHandle): Promise<void>
   /** Probe-only barrier reporting into the Supervisor receipt. */
   report(event: string, detail?: Record<string, unknown>): Promise<void>
   finish(): Promise<void>
@@ -147,6 +161,33 @@ function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error))
 }
 
+function pidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false
+    if ((error as NodeJS.ErrnoException).code === 'EPERM') return true
+    throw error
+  }
+}
+
+function processEnvironmentHas(pid: number, entry: string): boolean {
+  const procEnviron = `/proc/${String(pid)}/environ`
+  let environment: string
+  if (existsSync(procEnviron)) {
+    environment = readFileSync(procEnviron, 'utf8').split('\0').join('\n')
+  } else {
+    try {
+      environment = execFileSync('ps', ['eww', '-p', String(pid), '-o', 'command='], { encoding: 'utf8' })
+    } catch (error) {
+      throw new Error(`could not read the environment of business PID ${String(pid)}: ${asError(error).message}`)
+    }
+  }
+  return environment.split(/\s+/u).includes(entry)
+}
+
 function messageText(message: Record<string, any> | undefined): string {
   return (message?.content ?? [])
     .map((part: Record<string, any>) => (part?.type === 'text' && typeof part.text === 'string' ? part.text : ''))
@@ -158,13 +199,15 @@ class UpgradeClient implements UpgradeClientHandle {
   readonly sessionId: string
   readonly recordFile: string
   readonly terminal: TuiTest
+  readonly qualificationProbe: boolean
   closed = false
 
-  constructor(label: string, terminal: TuiTest, recordFile: string) {
+  constructor(label: string, terminal: TuiTest, recordFile: string, qualificationProbe: boolean) {
     this.label = label
     this.terminal = terminal
     this.sessionId = terminal.session
     this.recordFile = recordFile
+    this.qualificationProbe = qualificationProbe
   }
 
   readRecords(): Record<string, any>[] {
@@ -254,9 +297,9 @@ class UpgradeClient implements UpgradeClientHandle {
             break
           }
           if (!choiceTaken) {
-            const frame = await this.terminal.text().catch(() => '')
+            const frame = await this.terminal.text({ full: true }).catch(() => '')
             if (frame.includes('Disconnect from dsh-pi-tui')) {
-              await this.#waitForText('Keep working and disconnect', `${this.label} busy exit choice`, 15_000, false)
+              await this.#waitForText('Keep working and disconnect', `${this.label} busy exit choice`, 60_000, true)
               await this.terminal.press('Enter')
               choiceTaken = true
             }
@@ -359,6 +402,7 @@ class Scene implements UpgradeScene {
       ready: payload.ready,
       workRoot: String(payload.workRoot),
       ...(typeof payload.buildId === 'string' ? { buildId: payload.buildId } : {}),
+      ...(Number.isInteger(payload.pgid) ? { pgid: payload.pgid } : {}),
       exited: false,
     }
     this.#hosts.push(host)
@@ -426,7 +470,7 @@ class Scene implements UpgradeScene {
       trace: { mode: 'on-failure', directory: join(this.workRoot, 'trace') },
       artifacts: { dir: join(this.workRoot, 'artifacts'), onFailure: 'text' },
     })
-    const client = new UpgradeClient(options.label, terminal, recordFile)
+    const client = new UpgradeClient(options.label, terminal, recordFile, options.reexecTargetPackageRoot !== undefined)
     this.#ownedTuiSessions.add(terminal.session)
     this.#clients.set(options.label, client)
     const env: Record<string, string> = {
@@ -483,8 +527,64 @@ class Scene implements UpgradeScene {
     return await this.#supervisor.request('UPGRADE_ACTIVATE_NEW_PROFILE_AFTER_STOP', {}, { timeoutMs: 600_000 })
   }
 
+  async hostStatus(host: OpaqueHostHandle): Promise<Record<string, any>> {
+    this.#assertHost(host)
+    return await this.#supervisor.request('HOST_STATUS', { hostId: host.hostId }, { timeoutMs: 30_000 })
+  }
+
+  async releaseHeldTurn(host: OpaqueHostHandle): Promise<void> {
+    this.#assertHost(host)
+    await this.#supervisor.request('UPGRADE_RELEASE_HELD_TURN', { hostId: host.hostId }, { timeoutMs: 30_000 })
+  }
+
+  async removeProfilePackageForReloadRefusal(host: OpaqueHostHandle): Promise<void> {
+    this.#assertHost(host)
+    await this.#supervisor.request('UPGRADE_REMOVE_PROFILE_FOR_RELOAD_REFUSAL', { hostId: host.hostId }, { timeoutMs: 120_000 })
+  }
+
+  async signalClientForQualification(client: UpgradeClientHandle): Promise<number> {
+    assert(this.#clients.get(client.label) === client, `signalClientForQualification: ${client.label} is not this Scene's Client`)
+    assert(client.qualificationProbe, `signalClientForQualification: ${client.label} was not started with the reexec qualification probe`)
+    assert(!client.closed, `signalClientForQualification: ${client.label} is already closed`)
+    const pids = client.businessPids()
+    assert(pids.length === 1, `signalClientForQualification: ${client.label} has ${String(pids.length)} business PIDs; expected exactly one initial PID`)
+    const pid = pids[0]!
+    assert(pidAlive(pid), `signalClientForQualification: ${client.label} business PID ${String(pid)} is not alive`)
+    assert(processEnvironmentHas(pid, 'SPLIT_PROCESS_CLIENT_REEXEC_PROBE=1'),
+      `signalClientForQualification: business PID ${String(pid)} does not carry the reexec qualification probe environment`)
+    process.kill(pid, 'SIGUSR2')
+    await this.report('qualification-signal', {
+      label: client.label,
+      pid,
+      recordFile: client.recordFile,
+      session: client.sessionId,
+    })
+    return pid
+  }
+
+  async refreshClientBusinessPids(client?: UpgradeClientHandle): Promise<void> {
+    const targets = client === undefined ? [...this.#clients.values()] : [client]
+    for (const target of targets) {
+      assert(this.#clients.get(target.label) === target, `refreshClientBusinessPids: ${target.label} is not this Scene's Client`)
+      await this.#supervisor.request('REPORT', {
+        event: 'client-pids',
+        detail: {
+          label: target.label,
+          session: target.sessionId,
+          recordFile: target.recordFile,
+          businessPids: target.businessPids(),
+        },
+      }, { timeoutMs: 10_000 })
+    }
+  }
+
   async report(event: string, detail: Record<string, unknown> = {}): Promise<void> {
     await this.#supervisor.request('REPORT', { event, detail }, { timeoutMs: 10_000 })
+  }
+
+  #assertHost(host: OpaqueHostHandle): void {
+    assert(this.#hosts.includes(host), `Host ${host.hostId} is not owned by this Scene`)
+    assert(!host.exited, `Host ${host.hostId} is not alive`)
   }
 
   async finish(): Promise<void> {
@@ -497,6 +597,7 @@ class Scene implements UpgradeScene {
     const leftover = [...this.#ownedTuiSessions].filter(session => openSessions.has(session))
     if (leftover.length > 0) errors.push(new Error(`native TUI sessions are still open: ${JSON.stringify(leftover)}`))
     if (errors.length > 0) throw new AggregateError(errors, 'finish(): owned Clients are not closed')
+    await this.refreshClientBusinessPids()
     await this.#supervisor.request('FINALIZE', { clientsClosed: true }, { timeoutMs: 180_000 })
     const exit = await this.#supervisor.waitExit(30_000)
     assert(exit.code === 0 && exit.signal === null, `Supervisor FINALIZE exit was ${JSON.stringify(exit)}`)
@@ -513,6 +614,11 @@ class Scene implements UpgradeScene {
       } catch (error) {
         errors.push(asError(error))
       }
+    }
+    try {
+      await this.refreshClientBusinessPids()
+    } catch (error) {
+      errors.push(asError(error))
     }
     try {
       await this.#supervisor.close({ timeoutMs: 300_000, allowKill: false })
