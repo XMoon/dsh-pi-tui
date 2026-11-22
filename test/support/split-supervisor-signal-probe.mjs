@@ -174,14 +174,16 @@ function groupAlive(pgid) {
   }
 }
 
-function checkNoLingeringPaths(tmpBase, receipt) {
+function checkNoLingeringPaths(receipt) {
   let commands
   try {
     commands = execFileSync('ps', ['-axo', 'command='], { encoding: 'utf8' })
   } catch (error) {
     fail(`could not inspect OS process commands: ${error instanceof Error ? error.message : String(error)}`)
   }
-  const needles = [tmpBase, receipt.sceneRoot].filter(value => typeof value === 'string' && value !== '')
+  // Only THIS Scene's own root is evidence. The shared tmp base may contain
+  // other concurrently authorized probe Scenes and is never a leak by itself.
+  const needles = [receipt.sceneRoot].filter(value => typeof value === 'string' && value !== '')
   const lingering = commands.split('\n').filter(line => {
     const trimmed = line.trim()
     if (trimmed === '') return false
@@ -384,7 +386,7 @@ try {
       }
       const problems = checkUpgradeReceiptResources(terminalReceipt)
       if (problems.length > 0) fail(problems.join('; '))
-      checkNoLingeringPaths(tmpBase, terminalReceipt)
+      checkNoLingeringPaths(terminalReceipt)
       if (!pidAlive(sentinel.pid)) fail(`external sentinel PID ${String(sentinel.pid)} died; the probe touched an unrelated process`)
       console.log(`SPLIT_SUPERVISOR_SIGNAL_PROBE_FACTS ${JSON.stringify({
         mode,
@@ -427,7 +429,7 @@ try {
       }
       const problems = checkUpgradeReceiptResources(finalReceipt)
       if (problems.length > 0) fail(problems.join('; '))
-      checkNoLingeringPaths(tmpBase, finalReceipt)
+      checkNoLingeringPaths(finalReceipt)
       if (!pidAlive(sentinel.pid)) fail(`external sentinel PID ${String(sentinel.pid)} died; the probe touched an unrelated process`)
       console.log(`SPLIT_SUPERVISOR_SIGNAL_PROBE_FACTS ${JSON.stringify({
         mode,
@@ -564,7 +566,7 @@ try {
   await sleep(Math.min(300, Math.max(1, deadline - Date.now())))
   const problems = checkReceiptResources(receipt)
   if (problems.length > 0) fail(problems.join('; '))
-  checkNoLingeringPaths(tmpBase, receipt)
+  checkNoLingeringPaths(receipt)
   if (Date.now() > deadline) fail('probe exceeded its single fixed post-trigger deadline')
   if (!pidAlive(sentinel.pid)) fail(`external sentinel PID ${String(sentinel.pid)} died; the probe touched an unrelated process`)
   console.log(`SPLIT_SUPERVISOR_SIGNAL_PROBE_FACTS ${JSON.stringify({
