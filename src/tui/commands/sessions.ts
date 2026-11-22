@@ -241,20 +241,20 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
       let key: string
       let text: string
       let kind: 'info' | 'error' = 'info'
-      if (snapshot.searchState === 'unavailable') {
-        key = 'search-unavailable'
-        text = 'content search unavailable'
-      } else if (snapshot.searchState === 'error') {
+      // Routine search health (`Metadata only`, loading, hasMore) belongs to
+      // the panel's fixed context row; only a REAL failure reaches the app's
+      // transient notice, so a normal capability boundary is never an alert.
+      if (snapshot.searchState === 'error') {
         key = `search-error:${snapshot.searchError ?? ''}`
         text = sessionBrowserErrorNotice('search', snapshot.searchError ?? 'unknown error')
         kind = 'error'
-      } else if (snapshot.hasMore) {
-        key = `search-more:${snapshot.query}`
-        text = 'More content matches exist — refine the search.'
       } else if (snapshot.projectionError !== undefined) {
         key = 'projection-error'
         text = sessionBrowserErrorNotice('projection', snapshot.projectionError)
       } else {
+        // A healthy/normal snapshot must not leave an older fault key behind:
+        // the NEXT real occurrence of the same failure still has to notify.
+        open.lastNotice = undefined
         return
       }
       if (open.lastNotice === key) return

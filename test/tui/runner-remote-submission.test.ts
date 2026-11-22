@@ -1161,7 +1161,7 @@ test('a submit inside a session transition is refused, keeps the draft and dispa
   // the read owner has accepted a matching row).
   await waitFor('the target row is filtered', () => {
     const view = fixture.vt.getViewport().join('\n')
-    return view.includes('pr3-transition-b') && view.includes('metadata')
+    return view.includes('pr3-transition-b') && view.includes('Metadata')
   }, 15_000)
   fixture.vt.sendInput('\r')
   await fixture.vt.waitForRender()
