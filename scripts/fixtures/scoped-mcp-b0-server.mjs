@@ -51,7 +51,9 @@ if (process.env.B0_BOOT_FAIL === '1') {
   process.exit(23)
 }
 
-record('server-start', { argv: ['scoped-mcp-b0-server.mjs'] })
+record('server-start', { argv: ['scoped-mcp-b0-server.mjs'], cwd: process.cwd() })
+const hangStartup = process.env.B0_HANG_STARTUP === '1'
+if (hangStartup) record('startup-hang')
 chmodSync(proofPath, 0o600)
 
 const TOOLS = [
@@ -144,6 +146,7 @@ lines.on('line', line => {
   const { id, method, params } = message
   if (method === 'initialize') {
     record('initialize', { protocolVersion: params?.protocolVersion })
+    if (hangStartup) return
     result(id, {
       protocolVersion: params?.protocolVersion ?? '2025-06-18',
       capabilities: { tools: { listChanged: false } },

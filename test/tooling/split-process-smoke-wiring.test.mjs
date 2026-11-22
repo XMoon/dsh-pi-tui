@@ -520,6 +520,10 @@ test('every registry entry declares a conservative platform list and the ten sha
     // over the platform-specific scope endpoint (Linux fd alias / Darwin short
     // physical path); its packed-candidate Darwin selected run passed.
     'acp.scoped-mcp-b0',
+    // G-ACP1B/B1 drives the same shared Split harness plus the production ACP
+    // stdio-MCP admission/retirement path; its packed-candidate Linux CI run
+    // and real Darwin selected run both passed.
+    'acp.scoped-mcp-b1',
   ]
   const cases = listSelectableCases()
   for (const entry of cases) {

@@ -44,6 +44,7 @@ import {
   type LiveAgentViewIdentity,
 } from '../../src/app/remote-process/local-acp-session-view.ts'
 import type { AcpModelCurrentness, AcpModelOptionRequest } from '../../src/app/remote-process/local-acp-model-selection.ts'
+import type { AcpScopedMcpCurrentness, AcpScopedMcpLease } from '../../src/app/remote-process/local-acp-scoped-mcp.ts'
 import { AcpModelError } from '../../src/app/remote-process/local-acp-model-selection.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 
@@ -1063,6 +1064,14 @@ function makeFakeAccess(options: {
     signal: AbortSignal,
     stillCurrent: () => AcpModelCurrentness,
   ) => Promise<SessionConfigOption[]>
+  readonly mountScopedMcp?: (
+    agent: LiveAgentViewIdentity,
+    session: object,
+    servers: readonly unknown[],
+    stillCurrent: () => AcpScopedMcpCurrentness,
+    signal?: AbortSignal,
+  ) => Promise<AcpScopedMcpLease | undefined>
+  readonly requestRetireScopedMcp?: (lease: AcpScopedMcpLease) => Promise<void>
 } = {}): {
   access: HostAcpSessionAccess
   seed: (id: string, cwd: string) => LiveAgentViewIdentity
@@ -1110,6 +1119,14 @@ function makeFakeAccess(options: {
       },
       currentSession(sessionId: string) {
         return agents.get(sessionId)?.session
+      },
+      async mountScopedMcp(agent: LiveAgentViewIdentity, session: object, servers: readonly unknown[], stillCurrent: () => AcpScopedMcpCurrentness, signal?: AbortSignal) {
+        return options.mountScopedMcp === undefined
+          ? undefined
+          : await options.mountScopedMcp(agent, session, servers, stillCurrent, signal)
+      },
+      async requestRetireScopedMcp(lease: AcpScopedMcpLease) {
+        if (options.requestRetireScopedMcp !== undefined) await options.requestRetireScopedMcp(lease)
       },
       imageLimits() {
         return options.imageLimits
@@ -1280,7 +1297,7 @@ test('a second ACP connection cannot attach an already-held Session; invalid req
 
     a.send({ jsonrpc: '2.0', id: 3, method: 'session/new', params: { cwd: '/host/proj', mcpServers: [{ name: 'srv', command: 'x', args: [], env: [] }] } })
     const badMcp = (await a.next()) as { error?: { data?: { code?: string } } }
-    assert.equal(badMcp.error?.data?.code, 'LOCAL_ACP_VIEW_INVALID_REQUEST')
+    assert.equal(badMcp.error?.data?.code, 'LOCAL_ACP_MCP_INVALID_DECLARATION')
 
     a.send({ jsonrpc: '2.0', id: 4, method: 'session/resume', params: { sessionId: 'session-resume', cwd: '/host/proj' } })
     const ok = (await a.next()) as { result?: unknown }
@@ -1322,6 +1339,10 @@ test('session/new carries the authoritative created session id in JSON-RPC error
     currentSession() {
       return undefined
     },
+    async mountScopedMcp() {
+      return undefined
+    },
+    async requestRetireScopedMcp() {},
     imageLimits() {
       return undefined
     },
@@ -1370,6 +1391,55 @@ test('session/new carries the authoritative created session id in JSON-RPC error
     assert.equal(response.error?.data?.code, 'LOCAL_ACP_VIEW_CREATE_ATTACH_FAILED')
     assert.equal(response.error?.data?.sessionId, 'session-created-po2',
       'the JSON-RPC error data must preserve the created Session id')
+  } finally {
+    client.close()
+  }
+})
+
+test('session/new passes the standard stdio MCP declarations to the View and returns the Host Session id', async t => {
+  const { scope } = newScope(t)
+  const mounted: Array<{ readonly servers: readonly unknown[] }> = []
+  const { access } = makeFakeAccess({
+    async mountScopedMcp(agent, session, servers) {
+      mounted.push({ servers })
+      return { agent: agent as never, session, serverNames: ['mcp-one'], fibers: [] }
+    },
+  })
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    const mcpServers = [{ name: 'mcp one', command: '/bin/true', args: [], env: [{ name: 'SAFE', value: 'value' }] }]
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: '/host', mcpServers } })
+    const response = (await client.next()) as { result?: { sessionId?: string }; error?: unknown }
+    assert.equal(typeof response.result?.sessionId, 'string', JSON.stringify(response))
+    assert.equal(mounted.length, 1)
+    assert.deepEqual(mounted[0].servers, mcpServers)
+  } finally {
+    client.close()
+  }
+})
+
+test('session/new rejects an invalid stdio MCP declaration before any Host workspace or session create', async t => {
+  const { scope } = newScope(t)
+  const { access } = makeFakeAccess()
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    client.send({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'session/new',
+      params: { cwd: '/host', mcpServers: [{ name: 'bad', command: 'relative', args: [], env: [] }] },
+    })
+    const response = (await client.next()) as { error?: { code?: number; data?: { code?: string } } }
+    assert.equal(response.error?.code, -32602)
+    assert.equal(response.error?.data?.code, 'LOCAL_ACP_MCP_INVALID_DECLARATION')
   } finally {
     client.close()
   }

@@ -89,6 +89,7 @@ import { runAcpPo4aContentInput } from '../smoke/split-process/acp-po4a-content-
 import { runAcpPo4cContentOutput } from '../smoke/split-process/acp-po4c-content-output.mjs'
 import { runAcpSdkContentInteroperability } from '../smoke/split-process/acp-sdk-content-interoperability.mjs'
 import { runAcpScopedMcpB0 } from '../smoke/split-process/acp-scoped-mcp-b0.mjs'
+import { runAcpScopedMcpB1 } from '../smoke/split-process/acp-scoped-mcp-b1.mjs'
 import {
   runDaemonControlConcurrentControls,
   runDaemonControlInflightStop,
@@ -629,6 +630,14 @@ const CASE_REGISTRY = Object.freeze([
     title: 'one live Host Agent mounts the official Agent-scoped MCP client, a real model turn executes its stdio tool, another Agent never sees it, and a real ACP close defers retirement until the in-flight TUI result settles',
     platforms: LINUX_DARWIN,
     run: runAcpScopedMcpB0,
+  }),
+  Object.freeze({
+    suite: 'acp',
+    defaultLane: false,
+    id: 'acp.scoped-mcp-b1',
+    title: 'a standard ACP session/new|resume.mcpServers request mounts the official Agent-scoped MCP client, a real model turn executes its stdio tool, another Agent never sees it, and Close/EOF/Off retire the exact lease only after the live Host terminal settles',
+    platforms: LINUX_DARWIN,
+    run: runAcpScopedMcpB1,
   }),
 ])
 
