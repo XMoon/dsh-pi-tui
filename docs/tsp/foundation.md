@@ -460,13 +460,16 @@ does not become a second data surface.
 
 ### Native image projection (draft + transcript)
 
-A durable image block — in a **User** message, an **Assistant** message or a
-**Tool** result — is projected inside the row that already owns it, in that
-row's own block order: the text blocks stay text, and each image block becomes an
-identity line plus — when the pane negotiated the `image` kind and the `blobs`
-feature — one native image node. The flat text is not drawn again beside the
-block-wise body, and a tool card's own args, status, target and children are
-unchanged.
+A durable image block — in a **User** message, an **Assistant** message, a
+**Tool** result or an **image-bearing injected Context** (the `ptc-mode`
+producer described in [transcript.md](../architecture/transcript.md)) — is
+projected inside the row that already owns it, in that row's own block order:
+the text blocks stay text, and each image block becomes an identity line plus —
+when the pane negotiated the `image` kind and the `blobs` feature — one native
+image node. The flat text is not drawn again beside the block-wise body, and a
+tool card's own args, status, target and children are unchanged. A Context
+row's Working/Compact/Focus carriage and its disclosure ancestry are owned by
+transcript.md; this section owns only its media projection/reading contract.
 
 TSP native `ui.image` follows the same Client-local `PI_IMAGE_PROTOCOL` policy:
 it is enabled only for `auto`; an explicit value projects the text identity with
@@ -476,17 +479,19 @@ attachments or attachment persistence. See
 
 - The authority for WHICH attachment a row shows is that row's own structured
   content: User `content`, Assistant `displayBlocks` (while an opaque block is
-  open) or its settled `content`, Tool `resultBlocks`. A display name, the flat
-  text, the tool name and the args never imply an image.
+  open) or its settled `content`, Tool `resultBlocks`, or the image-bearing
+  `ptc-mode` Context's folded `content`. A display name, the flat text, the
+  tool name and the args never imply an image.
 - Assistant `displayBlocks` OUTRANKS the settled `content` — they are two views
   of one stream, never two bodies. An `open-opaque` block states its own type
   and that it is pending; it never fabricates a blob, a size or an image node.
-- One row's block keys are its own namespace (`body-b<index>` for a User or
-  Assistant body, `result-b<index>` for a tool result), so two rows under the
-  same parent can never collide, and an image inside a nested tool child keeps
-  the child's own ordering.
-- The SAME image state map feeds all three roles: one durable attachment of one
-  display subject has one render state, whichever row presents it.
+- One row's block keys are its own namespace (`body-b<index>` for a User,
+  Assistant or Context body, `result-b<index>` for a tool result), so two rows
+  under the same parent can never collide, and an image inside a nested tool
+  child keeps the child's own ordering.
+- The SAME image state map feeds all four supported row roles: one durable
+  attachment of one display subject has one render state, whichever row
+  presents it.
 - The authority for reading the bytes is unchanged: the existing attachment
   read port, under the existing immutable display-subject scope. The projection
   adds no attachment cache, no read port, no permission check and no
