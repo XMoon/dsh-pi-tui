@@ -1364,7 +1364,7 @@ export class FooterConfiguratorPanel implements Component {
           }
           if (entry.kind === 'custom-command') {
             const value = customItem?.kind === 'command' ? customItem.command : undefined
-            return this.menuRow(marker, 'Command', value === undefined ? undefined : color.text(clipText(value, 48)), active)
+            return this.menuRow(marker, 'Command', value === undefined ? undefined : color.text(value), active)
           }
           if (entry.kind === 'custom-refresh') {
             const value = customItem?.kind === 'command' ? formatRefreshMs(effectiveCustomCommandRefreshMs(customItem)) : undefined
@@ -1514,7 +1514,7 @@ export class FooterConfiguratorPanel implements Component {
       case 'create-refresh': {
         const lines = [
           this.menuRow(' ', 'Name', color.text(state.customName), false),
-          this.menuRow(' ', 'Command', color.text(clipText(stripControlChars(state.customCommand), 48)), false),
+          this.menuRow(' ', 'Command', color.text(stripControlChars(state.customCommand)), false),
           color.textStrong('Refresh'),
           ...CUSTOM_COMMAND_REFRESH_CHOICES_MS.map((ms, index) => {
             const active = index === state.pickerIndex
@@ -1539,7 +1539,7 @@ export class FooterConfiguratorPanel implements Component {
       case 'create-timeout': {
         const lines = [
           this.menuRow(' ', 'Name', color.text(state.customName), false),
-          this.menuRow(' ', 'Command', color.text(clipText(stripControlChars(state.customCommand), 48)), false),
+          this.menuRow(' ', 'Command', color.text(stripControlChars(state.customCommand)), false),
           color.textStrong('Timeout'),
           ...CUSTOM_COMMAND_TIMEOUT_CHOICES_MS.map((ms, index) => {
             const active = index === state.pickerIndex
@@ -1566,7 +1566,7 @@ export class FooterConfiguratorPanel implements Component {
         const content = state.customKind === 'command' ? state.customCommand : state.customText
         const lines = [
           this.menuRow(' ', 'Name', color.text(state.customName), false),
-          this.menuRow(' ', contentLabel, color.text(clipText(stripControlChars(content), 48)), false),
+          this.menuRow(' ', contentLabel, color.text(stripControlChars(content)), false),
           color.textStrong('Tone'),
           ...FOOTER_TONE_CHOICES.map((choice, index) => {
             const active = index === state.pickerIndex
@@ -1707,7 +1707,7 @@ export class FooterConfiguratorPanel implements Component {
    * applied (tone replaces every span's tone; prefix/suffix wrap). */
   private itemPreview(ref: FooterItemRef): string {
     const def = this.registry.get(ref.id)
-    if (def === undefined) return color.textMuted(clipText(stripControlChars(ref.id)))
+    if (def === undefined) return color.textMuted(stripControlChars(ref.id))
     try {
       const segment = def.render(this.snapshot(), ref, 'preferred', {
         taskBrowserAvailable: this.taskBrowserAvailable(),
@@ -1759,7 +1759,7 @@ export class FooterConfiguratorPanel implements Component {
   private itemLabel(rowIndex: number, flat: number): string {
     const ref = this.refAt(rowIndex, flat)
     if (ref === undefined) return '(no item)'
-    return clipText(this.refLabel(ref))
+    return this.refLabel(ref)
   }
 
   /** Count all layout references to a definition before a delete. */
@@ -1822,11 +1822,6 @@ function longestPasteStartSuffix(data: string): number {
 /** The item page keeps definition tone and placement tone visibly distinct. */
 function toneMenuLabel(kind: string): string {
   return kind === 'custom-tone' ? 'Default tone' : 'Tone'
-}
-
-/** Clip a title-part label (titles truncate ANSI-safely anyway). */
-function clipText(text: string, max = 40): string {
-  return text.length <= max ? text : `${text.slice(0, Math.max(0, max - 1))}…`
 }
 
 /** One whole Action Bar wording and, when its LAST segment is the real
