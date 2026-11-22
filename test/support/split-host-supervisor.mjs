@@ -424,6 +424,8 @@ function publicQualificationClientFacts(handle) {
     pgid: hostPgid(handle),
     starttime: handle.starttime,
     scratch: handle.scratch,
+    hostId: handle.hostId,
+    generation: handle.generation,
     startedAt: handle.startedAt,
     closedAt: handle.closedAt,
     exitCode: handle.exitResult?.code ?? null,
@@ -1345,6 +1347,10 @@ async function handleUpgradeProbeSideNewClientHostFoundation(message) {
     throw new Error('UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION: a qualification Client is already in progress')
   }
   const host = activeHost
+  // `activeHost` is the ONE live generation and its hostId carries that
+  // generation's PID/timestamp, so an earlier generation can never satisfy
+  // this request. The proof below is additionally bound to this generation's
+  // real PID/instance and recorded with its generation number.
   if (host === undefined || host.hostId !== message.hostId) {
     throw new Error('UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION: unknown hostId')
   }
@@ -1402,6 +1408,8 @@ async function handleUpgradeProbeSideNewClientHostFoundation(message) {
     child,
     pgid: child.pid ?? null,
     scratch,
+    hostId: host.hostId,
+    generation: host.generation,
     startedAt: now(),
     starttime: readHostStarttime(child.pid),
     records: [],
@@ -1435,6 +1443,7 @@ async function handleUpgradeProbeSideNewClientHostFoundation(message) {
     pgid: handle.pgid,
     starttime: handle.starttime,
     hostId: host.hostId,
+    generation: host.generation,
     hostBuildId: host.buildId,
     clientBuildId: sideNew.buildId,
   })

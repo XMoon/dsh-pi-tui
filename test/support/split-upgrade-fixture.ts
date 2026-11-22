@@ -102,8 +102,6 @@ export interface UpgradeClientHandle {
   readonly recordFile: string
   readonly terminal: TuiTest
   readonly qualificationProbe?: boolean
-  /** The Scene-owned side-new target this Client was started with before it existed. */
-  readonly plannedSideNewReexecTarget?: string
   closed?: boolean
   readRecords(): Record<string, any>[]
   waitForRecord(
@@ -257,7 +255,6 @@ function reexecTargetPresent(env: Record<string, string>): boolean {
 
 interface UpgradeClientOptions {
   readonly qualificationProbe: boolean
-  readonly plannedSideNewReexecTarget?: string
   /** The Client was started to observe a deterministic nonzero startup. */
   readonly expectedFailure: boolean
   /** The Client carries the replacement-child bootstrap fault. */
@@ -272,7 +269,6 @@ class UpgradeClient implements UpgradeClientHandle {
   readonly recordFile: string
   readonly terminal: TuiTest
   readonly qualificationProbe: boolean
-  readonly plannedSideNewReexecTarget: string | undefined
   closed = false
   readonly #expectedFailure: boolean
   readonly #replacementChildFault: boolean
@@ -284,7 +280,6 @@ class UpgradeClient implements UpgradeClientHandle {
     this.sessionId = terminal.session
     this.recordFile = recordFile
     this.qualificationProbe = options.qualificationProbe
-    this.plannedSideNewReexecTarget = options.plannedSideNewReexecTarget
     this.#expectedFailure = options.expectedFailure
     this.#replacementChildFault = options.replacementChildFault
     this.#refreshBusinessPids = options.refreshBusinessPids
@@ -471,6 +466,8 @@ class Scene implements UpgradeScene {
   readonly #c1Work: { patchPath: string }
   readonly #hosts: OpaqueHostHandle[] = []
   readonly #clients = new Map<string, UpgradeClient>()
+  /** The Scene-owned reexec target reserved for a Client started before install. */
+  readonly #plannedSideNewTargets = new Map<string, string>()
   readonly #ownedTuiSessions = new Set<string>()
   #clientSequence = 0
   #sideOld: InstalledPackageFacts | undefined
@@ -509,8 +506,8 @@ class Scene implements UpgradeScene {
     // A Client may already hold the reserved reexec target. Once the real
     // side-by-side install exists, that exact Scene-owned path must resolve to
     // the installed new package; a wrong target must fail before any SIGUSR2.
-    for (const client of this.#clients.values()) {
-      if (client.plannedSideNewReexecTarget !== undefined) this.#assertPlannedSideNewTarget(client)
+    for (const [label, target] of this.#plannedSideNewTargets) {
+      this.#assertPlannedSideNewTarget(label, target)
     }
     return facts
   }
@@ -635,13 +632,13 @@ class Scene implements UpgradeScene {
     })
     const client: UpgradeClient = new UpgradeClient(options.label, terminal, recordFile, {
       qualificationProbe: reexecTargetPresent(reexecEnv),
-      ...(reservedTarget === undefined ? {} : { plannedSideNewReexecTarget: reservedTarget }),
       expectedFailure: startupExpectation === 'expected-failure',
       replacementChildFault: options.reexecChildFailure !== undefined,
       refreshBusinessPids: () => this.refreshClientBusinessPids(client),
     })
     this.#ownedTuiSessions.add(terminal.session)
     this.#clients.set(options.label, client)
+    if (reservedTarget !== undefined) this.#plannedSideNewTargets.set(options.label, reservedTarget)
     const env: Record<string, string> = {
       ...this.installation.base.env,
       SPLIT_PROCESS_DSH_ANCHOR: this.installation.anchor,
@@ -723,7 +720,8 @@ class Scene implements UpgradeScene {
     assert(this.#clients.get(client.label) === client, `signalClientForQualification: ${client.label} is not this Scene's Client`)
     assert(client.qualificationProbe, `signalClientForQualification: ${client.label} was not started with the reexec qualification probe`)
     assert(!client.closed, `signalClientForQualification: ${client.label} is already closed`)
-    if (client.plannedSideNewReexecTarget !== undefined) this.#assertPlannedSideNewTarget(client)
+    const plannedTarget = this.#plannedSideNewTargets.get(client.label)
+    if (plannedTarget !== undefined) this.#assertPlannedSideNewTarget(client.label, plannedTarget)
     const pids = client.businessPids()
     assert(pids.length === 1, `signalClientForQualification: ${client.label} has ${String(pids.length)} business PIDs; expected exactly one initial PID`)
     const pid = pids[0]!
@@ -743,6 +741,15 @@ class Scene implements UpgradeScene {
   async probeSideNewClientHostFoundation(host: OpaqueHostHandle): Promise<SideNewClientHostFoundationProof> {
     this.#assertHost(host)
     assert(this.#sideNew !== undefined, 'probeSideNewClientHostFoundation: side-new has not been installed')
+    // Bind the proof to THIS exact Host generation, not merely to the live
+    // process: the requested handle's official ready record carries the real
+    // generation PID and instance the proof must name.
+    const expectedHostPid = Number(host.ready?.pid)
+    assert(Number.isInteger(expectedHostPid) && expectedHostPid > 0,
+      'probeSideNewClientHostFoundation: the requested Host generation has no real ready PID')
+    const expectedInstanceId = host.ready?.localHost?.instanceId
+    assert(typeof expectedInstanceId === 'string' && expectedInstanceId !== '',
+      'probeSideNewClientHostFoundation: the requested Host generation has no official instance identity')
     const proof = await this.#supervisor.request(
       'UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION',
       { hostId: host.hostId },
@@ -750,10 +757,10 @@ class Scene implements UpgradeScene {
     ) as SideNewClientHostFoundationProof
     assert(Number.isInteger(proof.clientPid) && proof.clientPid > 0,
       'probeSideNewClientHostFoundation: the proof carries no real Client PID')
-    assert(Number.isInteger(proof.hostPid) && proof.hostPid > 0,
-      'probeSideNewClientHostFoundation: the proof carries no real Host PID')
-    assert(typeof proof.hostInstanceId === 'string' && proof.hostInstanceId !== '',
-      'probeSideNewClientHostFoundation: the proof carries no Host instance id')
+    assert(proof.hostPid === expectedHostPid,
+      `probeSideNewClientHostFoundation: the proof names Host PID ${String(proof.hostPid)}, not the requested generation ${String(expectedHostPid)}`)
+    assert(proof.hostInstanceId === expectedInstanceId,
+      'probeSideNewClientHostFoundation: the proof names another Host instance than the requested generation')
     assert(proof.officialSessionList === true && proof.privateFileRpc === true
       && proof.terminalSnapshot === true && proof.cleaned === true && proof.exitCode === 0,
       'probeSideNewClientHostFoundation: the official/private RPC proof is incomplete')
@@ -785,16 +792,14 @@ class Scene implements UpgradeScene {
     assert(!host.exited, `Host ${host.hostId} is not alive`)
   }
 
-  #assertPlannedSideNewTarget(client: UpgradeClientHandle): void {
+  #assertPlannedSideNewTarget(label: string, target: string): void {
     const facts = this.#sideNew
     assert(facts !== undefined,
-      `signalClientForQualification: ${client.label} needs the side-new installation before its qualification target can be used`)
-    const target = client.plannedSideNewReexecTarget
-    assert(target !== undefined, `signalClientForQualification: ${client.label} has no planned side-new target`)
-    assert(existsSync(target), `signalClientForQualification: the reserved side-new target is not installed: ${target}`)
+      `${label}: the side-new installation is required before its reserved qualification target can be used`)
+    assert(existsSync(target), `${label}: the reserved side-new target is not installed: ${target}`)
     const resolved = realpathSync(target)
     assert(resolved === facts.packageRoot,
-      `signalClientForQualification: the reserved side-new target resolves to ${resolved}, not the installed ${facts.packageRoot}`)
+      `${label}: the reserved side-new target resolves to ${resolved}, not the installed ${facts.packageRoot}`)
   }
 
   async finish(): Promise<void> {
