@@ -328,7 +328,12 @@ test('a bound listener answers ACP v1 initialize with the installed bundle versi
     initialize(client, 1)
     const response = (await client.next()) as {
       id: number
-      result?: { protocolVersion: number; agentInfo: { name: string; version: string }; authMethods: unknown[]; agentCapabilities: { loadSession: boolean } }
+      result?: {
+        protocolVersion: number
+        agentInfo: { name: string; version: string }
+        authMethods: unknown[]
+        agentCapabilities: { loadSession: boolean; sessionCapabilities: Record<string, unknown> }
+      }
     }
     assert.equal(response.id, 1)
     assert.equal(response.result?.protocolVersion, 1)
@@ -336,6 +341,8 @@ test('a bound listener answers ACP v1 initialize with the installed bundle versi
     assert.equal(response.result?.agentInfo.version, '9.9.9-test')
     assert.deepEqual(response.result?.authMethods, [])
     assert.equal(response.result?.agentCapabilities.loadSession, false)
+    assert.deepEqual(response.result?.agentCapabilities.sessionCapabilities, {},
+      'a listener with no Host Session View must not advertise resume/close')
   } finally {
     client.close()
   }
@@ -385,25 +392,34 @@ test('unsupported Session methods fail closed with LOCAL_ACP_SESSION_NOT_READY b
   t.after(() => listener.close())
   const client = await RawClient.open(listener.socketPath)
   try {
-    // Before initialize: still a deterministic, non-success rejection.
-    client.send({ jsonrpc: '2.0', id: 10, method: 'session/prompt', params: { sessionId: 's', prompt: [{ type: 'text', text: 'hi' }] } })
-    const early = (await client.next()) as { id: number; error?: { code: number; data?: { code?: string } } }
-    assert.equal(early.error?.code, -32042)
-    assert.equal(early.error?.data?.code, 'LOCAL_ACP_SESSION_NOT_READY')
+    const cases = [
+      { id: 10, method: 'session/new', params: { cwd: '/tmp', mcpServers: [] } },
+      { id: 11, method: 'session/resume', params: { sessionId: 's', cwd: '/tmp' } },
+      { id: 12, method: 'session/close', params: { sessionId: 's' } },
+      { id: 13, method: 'session/prompt', params: { sessionId: 's', prompt: [{ type: 'text', text: 'hi' }] } },
+      { id: 14, method: 'session/list', params: {} },
+      { id: 15, method: 'session/set_config_option', params: { sessionId: 's', configId: 'c', value: 'v' } },
+    ]
+    // Before initialize every registered Session request is JSON-RPC Invalid
+    // Request, while the stable data code keeps the existing diagnosis.
+    for (const call of cases) {
+      client.send({ jsonrpc: '2.0', ...call })
+      const early = (await client.next()) as { id: number; error?: { code: number; data?: { code?: string } } }
+      assert.equal(early.id, call.id)
+      assert.equal(early.error?.code, -32600, `${call.method} must be invalid before initialize`)
+      assert.equal(early.error?.data?.code, 'LOCAL_ACP_SESSION_NOT_READY')
+    }
 
-    initialize(client, 1)
+    initialize(client, 20)
     await client.next()
 
-    const calls = [
-      { id: 21, method: 'session/list', params: {} },
-      { id: 23, method: 'session/set_config_option', params: { sessionId: 's', configId: 'c', value: 'v' } },
-      { id: 24, method: 'session/prompt', params: { sessionId: 's', prompt: [{ type: 'text', text: 'hi' }] } },
-    ]
-    for (const call of calls) {
-      client.send({ jsonrpc: '2.0', ...call })
+    // After the handshake the same raw fallback keeps its original -32042
+    // business classification; B3 only changed the pre-init protocol error.
+    for (const call of cases) {
+      client.send({ jsonrpc: '2.0', ...call, id: call.id + 100 })
       const response = (await client.next()) as { id: number; error?: { code: number; data?: { code?: string } } }
-      assert.equal(response.id, call.id)
-      assert.equal(response.error?.code, -32042, `${call.method} must fail closed`)
+      assert.equal(response.id, call.id + 100)
+      assert.equal(response.error?.code, -32042, `${call.method} must keep its post-init fail-closed code`)
       assert.equal(response.error?.data?.code, 'LOCAL_ACP_SESSION_NOT_READY')
     }
     // A session/cancel notification has no response and no side effect.
@@ -438,17 +454,66 @@ test('without a Host Session View the lifecycle methods stay fail-closed (raw so
   }
 })
 
-test('initialize rejects an unsupported protocol version with invalid params', async t => {
+test('initialize negotiates every valid v1-schema version to protocol 1 and keeps handshakes connection-scoped', async t => {
   const { scope } = newScope(t)
   const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG })
   t.after(() => listener.close())
-  const client = await RawClient.open(listener.socketPath)
+  const two = await RawClient.open(listener.socketPath)
+  const max = await RawClient.open(listener.socketPath)
+  const malformedType = await RawClient.open(listener.socketPath)
+  const malformedMissing = await RawClient.open(listener.socketPath)
+  type InitResponse = {
+    id: number
+    error?: { code: number; data?: { code?: string } }
+    result?: {
+      protocolVersion: number
+      agentInfo: { name: string; title?: string; version: string }
+      authMethods: unknown[]
+    }
+  }
   try {
-    initialize(client, 1, 2)
-    const response = (await client.next()) as { id: number; error?: { code: number } }
-    assert.equal(response.error?.code, -32602)
+    initialize(two, 1, 2)
+    initialize(max, 1, 65535)
+    const [responseTwo, responseMax] = await Promise.all([two.next(), max.next()]) as [InitResponse, InitResponse]
+    for (const response of [responseTwo, responseMax]) {
+      assert.equal(response.id, 1)
+      assert.equal(response.error, undefined, 'a valid non-v1 request version must not be an error')
+      assert.equal(response.result?.protocolVersion, 1)
+      assert.equal(response.result?.agentInfo.name, 'dsh-pi-tui')
+      assert.equal(response.result?.agentInfo.title, 'dsh-pi-tui')
+      assert.equal(response.result?.agentInfo.version, '9.9.9-test')
+      assert.deepEqual(response.result?.authMethods, [])
+    }
+
+    // A duplicate initialize on ONE connection is rejected while the sibling's
+    // handshake remains independent.
+    initialize(two, 2, 1)
+    const duplicate = (await two.next()) as InitResponse
+    assert.equal(duplicate.error?.code, -32043)
+    assert.equal(duplicate.error?.data?.code, 'LOCAL_ACP_ALREADY_INITIALIZED')
+
+    // The SDK schema remains the parser authority: a legal integer is handled
+    // by this listener, while a non-integer or missing protocolVersion is an
+    // invalid-params request before the handler runs.
+    malformedType.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '1', clientCapabilities: {} } })
+    const typeResponse = (await malformedType.next()) as InitResponse
+    assert.equal(typeResponse.error?.code, -32602)
+    malformedMissing.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientCapabilities: {} } })
+    const missingResponse = (await malformedMissing.next()) as InitResponse
+    assert.equal(missingResponse.error?.code, -32602)
+
+    two.close()
+    await two.closed
+    // The max-version connection is still live after its sibling disconnects.
+    max.send({ jsonrpc: '2.0', id: 2, method: 'session/list', params: {} })
+    const stillWorks = (await max.next()) as { id: number; error?: { code: number } }
+    assert.equal(stillWorks.id, 2)
+    assert.equal(stillWorks.error?.code, -32042)
   } finally {
-    client.close()
+    two.close()
+    max.close()
+    malformedType.close()
+    malformedMissing.close()
   }
 })
 
@@ -1237,7 +1302,8 @@ test('a Host Session View advertises resume/close and serves new/close over the 
   try {
     // Before initialize a lifecycle request is refused with the View code.
     client.send({ jsonrpc: '2.0', id: 1, method: 'session/new', params: { cwd: '/host/x', mcpServers: [] } })
-    const pre = (await client.next()) as { error?: { data?: { code?: string } } }
+    const pre = (await client.next()) as { error?: { code: number; data?: { code?: string } } }
+    assert.equal(pre.error?.code, -32600)
     assert.equal(pre.error?.data?.code, 'LOCAL_ACP_VIEW_NOT_INITIALIZED')
 
     initialize(client, 2)
@@ -1983,7 +2049,7 @@ test('session/prompt keeps uninitialized, unattached, invalid and in-flight requ
   try {
     client.send({ jsonrpc: '2.0', id: 1, method: 'session/prompt', params: { sessionId: 'session-resume', prompt: [{ type: 'text', text: 'x' }] } })
     const uninitialized = (await client.next()) as { error?: { code: number; data?: { code?: string } } }
-    assert.equal(uninitialized.error?.code, -32042)
+    assert.equal(uninitialized.error?.code, -32600)
     assert.equal(uninitialized.error?.data?.code, 'LOCAL_ACP_VIEW_NOT_INITIALIZED')
 
     initialize(client, 2)
@@ -2790,8 +2856,9 @@ test('pipelined Session operations stay uninitialized until asynchronous image c
     initialize(client, 1)
     await entered.promise
     client.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-pipeline', cwd: '/host/proj' } })
-    const preComplete = (await client.next()) as { id?: number; error?: { data?: { code?: string } } }
+    const preComplete = (await client.next()) as { id?: number; error?: { code: number; data?: { code?: string } } }
     assert.equal(preComplete.id, 2)
+    assert.equal(preComplete.error?.code, -32600)
     assert.equal(preComplete.error?.data?.code, 'LOCAL_ACP_VIEW_NOT_INITIALIZED',
       'session operations cannot race ahead of the initialize response')
     capability.resolve(true)

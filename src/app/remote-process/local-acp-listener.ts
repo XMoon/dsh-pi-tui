@@ -55,6 +55,8 @@ import {
 
 /** The ACP agent identity this front door advertises (never a copied brand). */
 const AGENT_NAME = 'dsh-pi-tui'
+/** JSON-RPC invalid-request code for a Session request before the handshake completes. */
+const JSONRPC_INVALID_REQUEST = -32600
 /** JSON-RPC invalid-params code used by connection-local View admission refusals. */
 const JSONRPC_INVALID_PARAMS = -32602
 
@@ -713,7 +715,7 @@ function buildAgentApp(
     else state.pendingRequests -= 1
   }
 
-  app.onRequest(methods.agent.initialize, async request => {
+  app.onRequest(methods.agent.initialize, async () => {
     beginRequest()
     try {
       if (state.initialized) {
@@ -723,13 +725,10 @@ function buildAgentApp(
           { code: 'LOCAL_ACP_ALREADY_INITIALIZED' },
         )
       }
-      const requested = request.params?.protocolVersion
-      if (requested !== PROTOCOL_VERSION) {
-        throw RequestError.invalidParams(
-          { code: 'LOCAL_ACP_PROTOCOL_UNSUPPORTED' },
-          `unsupported ACP protocol version ${String(requested)}; this endpoint supports ${String(PROTOCOL_VERSION)}`,
-        )
-      }
+      // ACP v1 version negotiation: this Host supports only v1, but a valid
+      // integer request for a different version is answered with v1 rather than
+      // rejected. The SDK schema remains the authority for the legal integer
+      // range; the client decides whether v1 is acceptable.
       // Commit the initialized state before the response leaves the handler so
       // a pipelined duplicate initialize is rejected deterministically. The
       // capability itself is resolved ONCE, before the response: the Host's own
@@ -767,6 +766,13 @@ function buildAgentApp(
   const rejectSessionOperation = (_request: { params: unknown }): never => {
     beginRequest('control')
     try {
+      if (!state.initialized || !initializeComplete) {
+        throw new RequestError(
+          JSONRPC_INVALID_REQUEST,
+          'ACP Session operations require a completed initialize',
+          { code: 'LOCAL_ACP_SESSION_NOT_READY' },
+        )
+      }
       rejectSessionNotReady()
     } finally {
       endRequest('control')
@@ -788,7 +794,7 @@ function buildAgentApp(
     const requireInitialized = (): void => {
       if (!state.initialized || !initializeComplete) {
         throw new RequestError(
-          -32042,
+          JSONRPC_INVALID_REQUEST,
           'ACP Session operations require a completed initialize',
           { code: 'LOCAL_ACP_VIEW_NOT_INITIALIZED' },
         )
