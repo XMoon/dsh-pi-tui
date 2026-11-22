@@ -2805,6 +2805,10 @@ export function applyRunnerWithRuntime(
       backend: {
         kind: selectedRuntime.kind,
         sessionReader: backend.sessionReader,
+        // Session Workspace PR2: the SAME selected backend's official
+        // committed-Markdown read port `/transcript` already consumes. The
+        // read-only Reader never wraps, caches or re-formats it here.
+        sessionMarkdown: backend.sessionMarkdown,
         // PR-5/MAC-09 v2: the official CUA access port and the official
         // Plugin Manager roster the Settings Computer Use page reuses.
         cuaAccess: backend.cuaAccess,

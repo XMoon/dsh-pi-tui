@@ -143,6 +143,7 @@ function setupSettings(options: { wheelScrollLines?: string } = {}) {
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
         ...sessionScopeFacts(() => undefined, () => 0),
         sessionPolicy: unconfiguredSessionPolicyPort(),
+        sessionMarkdown: { read: async () => ({ kind: 'unavailable' }) },
         policy: unconfiguredPolicyObservation(),
         currentSessionId: undefined,
     ensureSession: async () => {},

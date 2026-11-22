@@ -1465,6 +1465,7 @@ test('the Session Workspace uses the ONE lease latch: mutual exclusion, pre-empt
     subject,
     onQueryChange: () => {},
     onResume: () => {},
+    readMarkdown: async () => ({ kind: 'unavailable' }),
     onClose: () => { closes += 1 },
     initialMode: 'browse',
     initialBrowseScope: 'all',

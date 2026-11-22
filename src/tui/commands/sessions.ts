@@ -66,6 +66,7 @@ type SessionCommandRunner = Pick<
   | 'refreshStandingCatalog'
   | 'sessionCwd'
   | 'sessionReader'
+  | 'sessionMarkdown'
   | 'sessionWorkspaceFacts'
   | 'hostDirectoryBrowse'
   | 'sessionBrowserPresentation'
@@ -293,6 +294,25 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
             currentSessionId: subject.currentSessionId,
             source: 'enter',
           })
+        },
+        readMarkdown: async (sessionId, signal) => {
+          if (state.disposed || active !== state) {
+            throw new Error('the Session Workspace was released')
+          }
+          try {
+            return await runner.sessionMarkdown.read(
+              sessionId,
+              AbortSignal.any([signal, state.controller.signal, runner.signal]),
+            )
+          } catch (error) {
+            if (!isCancellation(error)) {
+              runner.diag.warn('session transcript read', {
+                sessionId,
+                error: safeErrorMessage(error),
+              })
+            }
+            throw error
+          }
         },
         onClose: () => {
           if (state.disposed) return

@@ -27,6 +27,7 @@ import type {
 import type { SessionActivityFact } from '../../src/runtime/session-workspace-facts-port.ts'
 import type { DirectoryEntry, DirectoryListing } from '@deepseek-ai/dsh-host-directory-picker/types'
 import type { HostDirectoryBrowseOutcome } from '../../src/runtime/host-directory-browse-port.ts'
+import type { SessionMarkdownReadResult } from '../../src/runtime/session-markdown-port.ts'
 import { SupersededReadError } from '../../src/runtime/read-error.ts'
 import { sessionBrowserErrorNotice, shortSessionId } from '../../src/tui/pickers/sessions.ts'
 import { color } from '../../src/tui/theme/runtime.ts'
@@ -66,6 +67,7 @@ interface Harness {
   readonly handle: SessionWorkspaceHandle
   readonly resumes: string[]
   readonly queries: string[]
+  readonly reads: Array<{ readonly sessionId: string; readonly signal: AbortSignal }>
   closes: number
   view(): string
   raw(): string
@@ -86,6 +88,7 @@ function harness(options: {
   readonly initialDirectoryPath?: string
   readonly onAddDirectory?: (path: string, settle: (outcome: import('../../src/app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void) => void
   readonly onListDirectory?: import('../../src/runtime/host-directory-browse-port.ts').HostDirectoryBrowsePort['list']
+  readonly readMarkdown?: (sessionId: string, signal: AbortSignal) => Promise<SessionMarkdownReadResult>
   readonly onNewSession?: (workspaceId: string, settle?: (outcome: import('../../src/app/command/session-browser-presentation.ts').SessionBrowserNewSessionSettlement) => void) => void
   readonly onUseDirectory?: (workspaceId: string, canonicalPath: string) => void
   readonly isCurrent?: () => boolean
@@ -98,6 +101,7 @@ function harness(options: {
   started.add(app)
   const resumes: string[] = []
   const queries: string[] = []
+  const reads: Array<{ readonly sessionId: string; readonly signal: AbortSignal }> = []
   const state = { closes: 0 }
   const currentSessionId = options.currentSessionId === null ? undefined : options.currentSessionId ?? CURRENT
   const subject: SessionBrowserSubject = {
@@ -109,6 +113,11 @@ function harness(options: {
     subject,
     onQueryChange: (raw) => { queries.push(raw) },
     onResume: (sessionId) => { resumes.push(sessionId) },
+    readMarkdown: (sessionId, signal) => {
+      reads.push({ sessionId, signal })
+      return options.readMarkdown?.(sessionId, signal)
+        ?? Promise.resolve({ kind: 'ready', markdown: `# Transcript ${sessionId}\n\nRead-only committed body.` })
+    },
     ...(options.onAddDirectory === undefined ? {} : { onAddDirectory: options.onAddDirectory }),
     ...(options.onListDirectory === undefined ? {} : { onListDirectory: options.onListDirectory }),
     ...(options.onNewSession === undefined ? {} : { onNewSession: options.onNewSession }),
@@ -127,6 +136,7 @@ function harness(options: {
     handle,
     resumes,
     queries,
+    reads,
     get closes() { return state.closes },
     view: () => vt.getViewport().map(stripTerminalSequences).join('\n'),
     raw: () => vt.writes.join(''),
@@ -1057,6 +1067,7 @@ test('a released handle is inert and cannot repaint or close a newer workspace',
     subject: { currentSessionId: CURRENT, currentCwd: '/ws/project', isCurrent: () => true },
     onQueryChange: () => {},
     onResume: () => {},
+    readMarkdown: async () => ({ kind: 'unavailable' }),
     onClose: () => {},
     initialMode: 'browse',
     initialBrowseScope: 'all',
@@ -1069,7 +1080,7 @@ test('a released handle is inert and cannot repaint or close a newer workspace',
   second.close()
 })
 
-// ── M5-U-D: groups, Peek, the full selector, the wide layout and the mouse ──
+// ── M5-U-D: groups, Reader, the full selector, the wide layout and the mouse ──
 
 function fact(sessionId: string, extra: Partial<SessionActivityFact> = {}): SessionActivityFact {
   return {
@@ -1273,7 +1284,7 @@ test('a folder keeps Needs, Working and Recent priority in its Session rows', as
   assert.ok(!view.includes('Pending · not actionable here'), 'a row behind the watermark does not inflate the activity list')
 })
 
-test('Space opens a read-only Peek: no Host write, Esc restores the browse selection, Enter resumes', async () => {
+test('Space opens a read-only Reader: no Host write, Esc restores the browse selection, list Enter resumes', async () => {
   const h = harness({ columns: 100, rows: 24 })
   h.handle.setSnapshot(snapshot({
     rows: [row(CURRENT, 3_000, { title: 'Current session' }), row(OTHER, 2_000, { title: 'Other session', preset: 'plan' })],
@@ -1291,26 +1302,256 @@ test('Space opens a read-only Peek: no Host write, Esc restores the browse selec
   await h.paint()
   h.vt.sendInput(' ')
   await h.paint()
-  const peek = h.view()
-  assert.ok(peek.includes('Peek · other-se'), `the Peek names the stable Session id:\n${peek}`)
-  assert.ok(peek.includes('Title:') && peek.includes('Other session'), 'the title is a read-only field')
-  assert.ok(peek.includes('Workspace: Unknown'), 'a missing baseline is Unknown, never Unassigned')
-  assert.ok(peek.includes('Preset: plan'), 'the projected preset is read-only detail')
-  assert.ok(peek.includes('Running: No'), 'the official running fact is stated')
-  assert.ok(peek.includes('Pending: Pending unverified'), 'no answerability proof is stated as unverified')
-  assert.ok(peek.includes('Back [Esc]'), 'the Peek advertises its own exit')
-  assert.ok(!/Allow|Deny|Reject|Answer/.test(peek), `Peek carries no answer form:\n${peek}`)
-  assert.deepEqual(h.resumes, [], 'opening Peek never resumes or writes anything')
-  assert.deepEqual(h.queries, [], 'opening Peek never edits the search')
+  const reader = h.view()
+  assert.ok(reader.includes('Transcript · other-se'), `the Reader names the stable Session id:\n${reader}`)
+  assert.ok(reader.includes('Transcript session-other-session'), 'the ready body is the official Markdown read')
+  assert.ok(reader.includes('Read-only committed body.'), 'the complete committed content is painted')
+  assert.ok(reader.includes('Back [Esc]'), 'the Reader advertises its own exit')
+  assert.ok(!/Allow|Deny|Reject|Answer/.test(reader), `Reader carries no answer form:\n${reader}`)
+  assert.deepEqual(h.reads.map(read => read.sessionId), [OTHER], 'Space starts exactly ONE official read for the painted target')
+  assert.deepEqual(h.resumes, [], 'opening Reader never resumes or writes anything')
+  assert.deepEqual(h.queries, [], 'opening Reader never edits the search')
 
   h.vt.sendInput('\x1b')
   await h.paint()
   const restored = h.view()
   assert.ok(restored.includes('Up/Down move'), 'Esc returns to the browse list')
-  assert.ok(/^> .*Other session/m.test(restored), `the Peek returns to the SAME selected row:\n${restored}`)
+  assert.ok(/^> .*Other session/m.test(restored), `the Reader returns to the SAME selected row:\n${restored}`)
   h.vt.sendInput('\r')
   await h.paint()
-  assert.deepEqual(h.resumes, [OTHER], 'Enter from Peek is the ONE re-proved resume intent')
+  assert.deepEqual(h.resumes, [OTHER], 'Enter after returning to the list is the ONE re-proved resume intent')
+})
+
+test('selection and Preview never read; Space starts one loading read and then shows the complete body', async () => {
+  let resolveRead!: (result: SessionMarkdownReadResult) => void
+  const calls: Array<{ readonly id: string; readonly signal: AbortSignal }> = []
+  const h = harness({
+    columns: 120,
+    rows: 24,
+    readMarkdown: (id, signal) => {
+      calls.push({ id, signal })
+      return new Promise(resolve => { resolveRead = resolve })
+    },
+  })
+  h.handle.setSnapshot(snapshot())
+  await h.paint()
+  h.vt.sendInput('\x1b[B')
+  await h.paint()
+  assert.equal(calls.length, 0, 'changing the typed selection and repainting the Preview never reads Markdown')
+  assert.ok(h.view().includes('Space to read committed transcript'), 'the Preview keeps the explicit Read cue')
+  h.vt.sendInput(' ')
+  await h.paint()
+  assert.equal(calls.length, 1, 'Space starts exactly ONE official read')
+  assert.equal(calls[0]!.id, OTHER, 'the read uses the typed full Session id')
+  assert.ok(h.view().includes('Reading committed transcript…'), 'the Reader first paints its honest loading state')
+  assert.deepEqual(h.resumes, [], 'opening the Reader never resumes')
+
+  resolveRead({ kind: 'ready', markdown: '# Title\n\nParagraph with **bold** text.\n\n```bash\nls\n```\n\n- one\n- two' })
+  await h.paint()
+  const ready = h.view()
+  for (const text of ['Title', 'Paragraph with', 'bold', 'ls', 'one', 'two']) {
+    assert.ok(ready.includes(text), `the full official Markdown body paints ${text}:\n${ready}`)
+  }
+  assert.ok(ready.includes('Transcript · other-se'), 'the Reader keeps its typed identity')
+  assert.ok(ready.includes('Up/Down scroll') && ready.includes('Back [Esc]'), 'ready content advertises its real navigation')
+  h.vt.sendInput('\x1b')
+  await h.paint()
+  assert.ok(calls[0]!.signal.aborted, 'closing the Reader aborts its one read')
+  assert.ok(h.view().includes('Up/Down move'), 'Esc returns to the list')
+})
+
+test('none, unavailable and a real rejection are distinct, inert states with a real Back', async () => {
+  const scenarios = [
+    {
+      name: 'none',
+      read: async (): Promise<SessionMarkdownReadResult> => ({ kind: 'none' }),
+      text: 'No committed transcript found for this Session.',
+    },
+    {
+      name: 'unavailable',
+      read: async (): Promise<SessionMarkdownReadResult> => ({ kind: 'unavailable' }),
+      text: 'Committed transcript unavailable.',
+    },
+    {
+      name: 'error',
+      read: async (): Promise<SessionMarkdownReadResult> => { throw new Error('permission denied') },
+      text: 'Transcript read failed: permission denied',
+    },
+  ] as const
+  for (const scenario of scenarios) {
+    const h = harness({ columns: 100, rows: 24, readMarkdown: scenario.read })
+    h.handle.setSnapshot(snapshot())
+    await h.paint()
+    h.vt.sendInput('\x1b[B')
+    await h.paint()
+    h.vt.sendInput(' ')
+    await h.paint()
+    const view = h.view()
+    assert.ok(view.includes(scenario.text), `${scenario.name} paints its own truthful state:\n${view}`)
+    assert.ok(!view.includes('Title:') && !view.includes('Read-only committed body.'), `${scenario.name} never invents transcript content`)
+    assert.ok(view.includes('Back [Esc]'), `${scenario.name} keeps the real Back`)
+    assert.equal(h.reads.length, 1, `${scenario.name} is one attempt, not an automatic retry`)
+    h.vt.sendInput('\x1b')
+    await h.paint()
+    assert.ok(!h.view().includes('Transcript · other-se'), `${scenario.name} Back returns to the list`)
+    assert.deepEqual(h.resumes, [], `${scenario.name} never resumes`)
+    h.dispose()
+  }
+})
+
+test('a late Reader result after close is inert and the captured signal is aborted', async () => {
+  let resolveRead!: (result: SessionMarkdownReadResult) => void
+  let signal: AbortSignal | undefined
+  const h = harness({
+    columns: 100,
+    rows: 24,
+    readMarkdown: (_id, inputSignal) => {
+      signal = inputSignal
+      return new Promise(resolve => { resolveRead = resolve })
+    },
+  })
+  h.handle.setSnapshot(snapshot())
+  await h.paint()
+  h.vt.sendInput('\x1b[B')
+  await h.paint()
+  h.vt.sendInput(' ')
+  await h.paint()
+  h.vt.sendInput('\x1b')
+  await h.paint()
+  assert.equal(signal?.aborted, true, 'closing the Reader aborts the captured signal')
+  resolveRead({ kind: 'ready', markdown: '# LATE\n\nmust never paint' })
+  await h.paint()
+  assert.ok(!h.view().includes('LATE'), `a late ready result never repaints the list:\n${h.view()}`)
+  assert.deepEqual(h.resumes, [], 'a late result never resumes')
+  assert.equal(h.closes, 0, 'a late result never closes the Browser')
+})
+
+test('closing the Sessions lease aborts an in-flight Reader read and releases the document', async () => {
+  let resolveRead!: (result: SessionMarkdownReadResult) => void
+  let signal: AbortSignal | undefined
+  const h = harness({
+    columns: 100,
+    rows: 24,
+    readMarkdown: (_id, inputSignal) => {
+      signal = inputSignal
+      return new Promise(resolve => { resolveRead = resolve })
+    },
+  })
+  h.handle.setSnapshot(snapshot())
+  await h.paint()
+  h.vt.sendInput(' ')
+  await h.paint()
+  h.handle.close()
+  assert.equal(signal?.aborted, true, 'the lease close aborts the Reader controller')
+  resolveRead({ kind: 'ready', markdown: '# LATE\n\nmust never paint' })
+  await h.paint()
+  assert.ok(!h.view().includes('LATE'), 'a result settling after lease close is inert')
+  assert.equal(h.handle.isDisposed(), true)
+})
+
+test('the Reader capacity cap never paints a truncated transcript', async () => {
+  const sourceTooLarge = harness({
+    columns: 44,
+    rows: 20,
+    readMarkdown: async () => ({ kind: 'ready', markdown: 'x'.repeat(4_194_305) }),
+  })
+  sourceTooLarge.handle.setSnapshot(snapshot())
+  await sourceTooLarge.paint()
+  sourceTooLarge.vt.sendInput('\x1b[B')
+  await sourceTooLarge.paint()
+  sourceTooLarge.vt.sendInput(' ')
+  await sourceTooLarge.paint()
+  assert.ok(sourceTooLarge.view().replace(/\s+/g, ' ').includes('Transcript too large to display here. No content was truncated.'),
+    `the 4 Mi source cap is stated whole even at 44 columns:\n${sourceTooLarge.view()}`)
+  assert.ok(!sourceTooLarge.view().includes('xxxxxxxxxx'), 'no prefix of the oversized source is painted')
+  assert.ok(sourceTooLarge.view().includes('Back [Esc]'), 'the too-large state is still escapable')
+  sourceTooLarge.dispose()
+
+  const rowsTooLarge = harness({
+    columns: 100,
+    rows: 24,
+    readMarkdown: async () => ({
+      kind: 'ready',
+      markdown: Array.from({ length: 100_001 }, (_, index) => `- line ${index}`).join('\n'),
+    }),
+  })
+  rowsTooLarge.handle.setSnapshot(snapshot())
+  await rowsTooLarge.paint()
+  rowsTooLarge.vt.sendInput('\x1b[B')
+  await rowsTooLarge.paint()
+  rowsTooLarge.vt.sendInput(' ')
+  await rowsTooLarge.paint()
+  assert.ok(rowsTooLarge.view().includes('Transcript too large to display here. No content was truncated.'),
+    `the 100,000-row cap is enforced after the real render:\n${rowsTooLarge.view()}`)
+  assert.ok(!rowsTooLarge.view().includes('line 0'), 'no rendered prefix is presented as the complete transcript')
+  rowsTooLarge.dispose()
+})
+
+test('Reader keeps whole-width content and the Back row across the frozen size matrix', async () => {
+  const markdown = `## 标题 🚀\n\n${'可读正文 '.repeat(120)}\n\n\`\`\`bash\nls\n\`\`\``
+  for (const [columns, rows] of [[200, 50], [120, 40], [100, 40], [80, 24], [80, 10], [72, 24], [44, 20]] as const) {
+    const h = harness({ columns, rows, readMarkdown: async () => ({ kind: 'ready', markdown }) })
+    h.handle.setSnapshot(snapshot())
+    await h.paint()
+    h.vt.sendInput(' ')
+    await h.paint()
+    const frame = panelFrame(h)
+    const view = frame.join('\n')
+    assert.ok(frame[0]!.includes('Sessions'), `${columns}x${rows} keeps the Sessions identity`)
+    assert.ok(!frame[0]!.includes('/ Search'), `${columns}x${rows} paints no Search target inside the Reader`)
+    assert.ok(view.includes('Transcript · curren'), `${columns}x${rows} keeps the Reader context`)
+    assert.ok(view.includes('Read-only'), `${columns}x${rows} keeps the whole read-only fact even when a trailing segment yields`)
+    assert.ok(view.includes('标题'), `${columns}x${rows} paints the official CJK content`)
+    assert.ok(frame[frame.length - 1]!.includes('Back [Esc]'), `${columns}x${rows} keeps the physical Back row`)
+    assert.ok(!view.includes('Space to read committed transcript'), `${columns}x${rows} paints no right Preview`)
+    for (const line of frame.concat(h.vt.getViewport())) {
+      assert.ok(visibleWidth(stripTerminalSequences(line)) <= columns,
+        `${columns}x${rows} keeps every painted Reader cell inside the width: ${JSON.stringify(line)}`)
+    }
+    h.dispose()
+  }
+})
+
+test('Reader content is sanitized while Markdown structure, controls and tables survive', async () => {
+  const markdown = '# Head\n\nhello \u001b[31mred\u001b]0;evil\u0007 world \u009b2J\n\n```ts\nconst x = 1\n```\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\n中文 🚀'
+  const h = harness({ columns: 100, rows: 30, readMarkdown: async () => ({ kind: 'ready', markdown }) })
+  h.handle.setSnapshot(snapshot())
+  await h.paint()
+  h.vt.sendInput('\x1b[B')
+  await h.paint()
+  h.vt.sendInput(' ')
+  await h.paint()
+  const view = h.view()
+  assert.ok(view.includes('hello red world'), `the visible prose is preserved without controls:\n${view}`)
+  assert.ok(view.includes('const x = 1') && view.includes('中文') && view.includes('🚀'), 'markdown/code/CJK/emoji survive projection')
+  assert.ok(!h.raw().includes('evil'), 'OSC payload bytes never reach the frame stream')
+  assert.ok(!h.raw().includes('\u009b2J'), 'C1 controls never reach the frame stream')
+})
+
+test('Search input space stays text; Search Results Space opens the Reader', async () => {
+  const h = harness({
+    columns: 100,
+    rows: 24,
+    initialMode: 'search',
+    readMarkdown: async () => ({ kind: 'ready', markdown: '# Search result\n\nbody' }),
+  })
+  h.handle.setSnapshot(snapshot({
+    query: 'needle',
+    searchState: 'ready',
+    searchResults: [{ row: row(OTHER, 2_000, { title: 'Other session' }), source: 'Content', snippet: 'needle' }],
+  }), 'needle')
+  await h.paint()
+  h.vt.sendInput(' ')
+  await h.paint()
+  assert.equal(h.reads.length, 0, 'a Space typed in the Search editor never reads a transcript')
+  assert.ok(h.queries.at(-1) === 'needle ', 'the Space is ordinary query text')
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.ok(h.view().includes('Open [Enter]') && h.view().includes('Read [Space]'), 'the real result owns the Read action')
+  h.vt.sendInput(' ')
+  await h.paint()
+  assert.deepEqual(h.reads.map(read => read.sessionId), [OTHER], 'Space in the results reads the typed hit')
+  assert.ok(h.view().includes('Transcript · other-se'), 'the Search Result Reader opens')
 })
 
 test('all official Workspace folders, including empty and Unassigned, stay in one browse tree', async () => {
@@ -1363,13 +1604,13 @@ test('the wide layout paints the read-only preview beside the list; a narrow one
   })
   await h.paint()
   const wide = panelFrame(h).join('\n')
-  assert.ok(wide.includes('Space for read-only details'), `the wide layout paints a preview pane:\n${wide}`)
+  assert.ok(wide.includes('Space to read committed transcript'), `the wide layout paints a preview pane:\n${wide}`)
   assert.ok(wide.includes('Sessions · 2'), 'the list pane stays beside the preview')
   h.vt.resize(80, 24)
   await h.paint()
-  assert.ok(!panelFrame(h).join('\n').includes('Space for read-only details'),
+  assert.ok(!panelFrame(h).join('\n').includes('Space to read committed transcript'),
     'a narrow terminal never splits into two columns')
-  // A short narrow frame still opens Peek and keeps its ONE Esc exit usable.
+  // A short narrow frame still opens Reader and keeps its ONE Esc exit usable.
   h.vt.resize(80, 10)
   await h.paint()
   h.vt.sendInput('\x1b[B')
@@ -1377,13 +1618,13 @@ test('the wide layout paints the read-only preview beside the list; a narrow one
   h.vt.sendInput(' ')
   await h.paint()
   const short = h.view()
-  assert.ok(short.includes('Peek ·'), `Peek opens on a short terminal:\n${short}`)
+  assert.ok(short.includes('Transcript ·'), `Reader opens on a short terminal:\n${short}`)
   const frame = panelFrame(h)
   assert.ok(frame[frame.length - 1]!.includes('Esc'), 'the Esc action stays the last physical row')
   h.vt.sendInput('\x1b')
   await h.paint()
-  assert.ok(h.view().includes('Sessions ·'), 'Esc leaves Peek even at 80x10')
-  assert.deepEqual(h.resumes, [], 'no invisible row was activated while Peek was open')
+  assert.ok(h.view().includes('Sessions ·'), 'Esc leaves Reader even at 80x10')
+  assert.deepEqual(h.resumes, [], 'no invisible row was activated while Reader was open')
 })
 
 test('a mouse click only SELECTS a painted row; a repaint between press and release drops the gesture', async () => {
@@ -1501,7 +1742,7 @@ test('an Activity sample applies immediately, including a revocation, and never 
   assert.ok(!revoked.includes('Pending unknown · Working'))
 })
 
-test('a Peek is pinned to its own Session and exits when that Session leaves the roster', async () => {
+test('a Reader is pinned to its own Session and exits when that Session leaves the roster', async () => {
   const h = harness({ columns: 100, rows: 24 })
   h.handle.setSnapshot(snapshot({
     rows: [row(CURRENT, 3_000, { title: 'Current session' }), row(OTHER, 2_000, { title: 'Other session' })],
@@ -1519,21 +1760,24 @@ test('a Peek is pinned to its own Session and exits when that Session leaves the
   await h.paint()
   h.vt.sendInput(' ')
   await h.paint()
-  assert.ok(h.view().includes('Peek · other-se'), 'the Peek names its own Session')
-  // The refresh drops the peeked Session and re-anchors the list selection: the
-  // Peek must exit instead of silently showing the next selected Session.
+  assert.ok(h.view().includes('Transcript · other-se'), 'the Reader names its own Session')
+  const readSignal = h.reads[0]?.signal
+  // The refresh drops the read Session and re-anchors the list selection: the
+  // Reader must exit and abort its one read instead of silently showing the
+  // next selected Session.
   h.handle.setSnapshot(snapshot({ rows: [row(CURRENT, 3_000, { title: 'Current session' })] }))
   await h.paint()
   const view = h.view()
-  assert.ok(!view.includes('Peek ·'), `the Peek exits when its target is gone:\n${view}`)
+  assert.ok(!view.includes('Transcript ·'), `the Reader exits when its target is gone:\n${view}`)
+  assert.equal(readSignal?.aborted, true, 'the removed target aborts the captured Markdown read')
   assert.ok(!view.includes('Other session'), 'the removed Session never paints')
   assert.ok(/^> .*Current session/m.test(view), 'the list selection re-anchored on a listed row')
   h.vt.sendInput('\r')
   await h.paint()
-  assert.deepEqual(h.resumes, [], 'the Peek exit never resumes any Session')
+  assert.deepEqual(h.resumes, [], 'the Reader exit never resumes any Session')
 })
 
-test('a Peek opened from search results also exits when its target leaves the results', async () => {
+test('a Reader opened from search results also exits when its target leaves the results', async () => {
   const h = harness({ columns: 100, rows: 24, initialMode: 'search' })
   h.handle.setSnapshot(snapshot({
     query: 'needle',
@@ -1545,10 +1789,10 @@ test('a Peek opened from search results also exits when its target leaves the re
   await h.paint()
   h.vt.sendInput(' ')
   await h.paint()
-  assert.ok(h.view().includes('Peek · other-se'))
+  assert.ok(h.view().includes('Transcript · other-se'), `the Search Reader opens:\n${h.view()}`)
   h.handle.setSnapshot(snapshot({ query: 'needle', searchState: 'ready', searchResults: [] }))
   await h.paint()
-  assert.ok(!h.view().includes('Peek ·'), `the Peek exits when the result is gone:\n${h.view()}`)
+  assert.ok(!h.view().includes('Transcript ·'), `the Reader exits when the result is gone:\n${h.view()}`)
   assert.ok(h.view().includes('Search all workspaces'), 'the search editor owns the keyboard again')
 })
 
@@ -1576,7 +1820,7 @@ test('the workspace header has no w hit target and Search retains its real hit t
   assert.ok(h.view().includes('Search all workspaces'), 'the Search target enters global search')
 })
 
-test('compact Working rows omit unknown pending spam while Peek preserves the source state', async () => {
+test('compact Working rows omit unknown pending spam', async () => {
   const h = harness({ columns: 100, rows: 24 })
   h.handle.setSnapshot(snapshot({
     rows: [
@@ -1599,16 +1843,9 @@ test('compact Working rows omit unknown pending spam while Peek preserves the so
   assert.equal(view.split('‣ Working').length - 1, 3, `all three running rows retain the Working summary:\n${view}`)
   assert.ok(!view.includes('Pending denied') && !view.includes('Pending unknown') && !view.includes('Pending unavailable'),
     `compact rows do not repeat unknown/unanswerable pending state:\n${view}`)
-  h.vt.sendInput('\x1b[B')
-  await h.paint()
-  h.vt.sendInput(' ')
-  await h.paint()
-  const peek = h.view()
-  assert.ok(peek.includes('Pending: Pending denied') || peek.includes('Pending: Pending unknown') || peek.includes('Pending: Pending unavailable'),
-    `read-only details preserve the authoritative pending source state:\n${peek}`)
 })
 
-test('the read-only Peek names the official Workspace title for a unique folder', async () => {
+test('the Reader opens the exact selected Session official Markdown', async () => {
   const h = harness({ columns: 120, rows: 24 })
   h.handle.setSnapshot(snapshot())
   h.handle.updateWorkspaces({
@@ -1633,10 +1870,11 @@ test('the read-only Peek names the official Workspace title for a unique folder'
   await h.paint()
   h.vt.sendInput(' ')
   await h.paint()
-  const peek = h.view()
-  assert.ok(peek.includes('Workspace: Beta'),
-    `the Peek keeps the official Workspace identity beside the Host title:\n${peek}`)
-  assert.ok(peek.includes('Running: Unknown'), 'a missing Activity sample is stated, not guessed')
+  const reader = h.view()
+  assert.ok(reader.includes('Transcript · other-se'), `the Reader is pinned to the selected Session:\n${reader}`)
+  assert.deepEqual(h.reads.map(read => read.sessionId), [OTHER], 'the official Port receives the full typed Session id')
+  assert.ok(reader.includes(`Transcript ${OTHER}`), 'the ready body is the official Markdown read')
+  assert.ok(reader.includes('Read-only committed body.'), 'the complete committed content is painted in the Reader')
 })
 
 test('Host titles that sanitize identically use distinct Host path-tail Folder labels', async () => {
@@ -1658,7 +1896,7 @@ test('Host titles that sanitize identically use distinct Host path-tail Folder l
     `a collision after sanitization carries a unique Host path tail:\n${options.join('\n')}`)
 })
 
-test('same-title Workspaces use unique Host path tails in Folder rows and Peek', async () => {
+test('same-title Workspaces use unique Host path tails in Folder rows and Preview', async () => {
   const h = harness({ columns: 160, rows: 30 })
   h.handle.setSnapshot(snapshot())
   h.handle.updateWorkspaces({
@@ -1676,11 +1914,10 @@ test('same-title Workspaces use unique Host path tails in Folder rows and Peek',
   const folderLines = panelFrame(h).map((line, index) => ({ line, index })).filter(item => item.line.includes('Shared (2)'))
   assert.equal(folderLines.length, 1)
   await clickCell(h, folderLines[0]!.line.indexOf('Shared (2)') + 1, folderLines[0]!.index)
-  h.vt.sendInput(' ')
-  await h.paint()
-  const peek = h.view()
-  assert.ok(peek.includes('Shared (2)'),
-    `the Peek retains the distinct official Workspace path tail:\n${peek}`)
+  const selected = h.view()
+  assert.ok(selected.includes('Path: /ws/2'),
+    `the read-only Preview resolves the selected duplicate to its own Host path:\n${selected}`)
+  assert.equal(h.reads.length, 0, 'a Folder selection never starts a Markdown read')
 })
 
 // ── PR2: Workspace tree UX ───────────────────────────────────────────────
@@ -1935,7 +2172,7 @@ test('chooser Right/Left and disclosure only browse; the label click is the choo
   assert.deepEqual(plainUsed, [], 'a plain Folder Enter never writes the choose intent')
 })
 
-test('the typed selection drives Preview, Enter and Space; Folder selection never keeps a stale Session Peek', async () => {
+test('the typed selection drives Preview, Enter and Space; Folder selection never keeps a stale Session Reader', async () => {
   const h = harness({ columns: 120, rows: 30, onNewSession: () => {} })
   h.handle.setSnapshot(snapshot())
   h.handle.updateWorkspaces({
@@ -1952,10 +2189,10 @@ test('the typed selection drives Preview, Enter and Space; Folder selection neve
   let view = h.view()
   assert.ok(/^> .*Beta/m.test(view), `the Folder click selects it:\n${view}`)
   assert.ok(view.includes('Sessions: 1'), 'the preview follows the Folder target')
-  assert.ok(!view.includes('Space for read-only details'), 'a Folder has no Session preview')
+  assert.ok(!view.includes('Space to read committed transcript'), 'a Folder has no Session preview')
   h.vt.sendInput(' ')
   await h.paint()
-  assert.ok(!h.view().includes('Peek ·'), 'Space on a Folder never opens a stale Session Peek')
+  assert.ok(!h.view().includes('Transcript ·'), 'Space on a Folder never opens a stale Session Reader')
   // Expand with Right, then click the Session row (the disclosure toggle has
   // its own chooser regression).
   h.vt.sendInput('\x1b[C')
@@ -1964,14 +2201,14 @@ test('the typed selection drives Preview, Enter and Space; Folder selection neve
   await clickCell(h, 8, otherLine)
   view = h.view()
   assert.ok(/^> .*Other session/m.test(view), 'a Session click selects only')
-  assert.ok(view.includes('Space for read-only details'), 'the preview follows the Session target')
+  assert.ok(view.includes('Space to read committed transcript'), 'the preview follows the Session target')
   assert.deepEqual(h.resumes, [], 'a Session click never resumes')
   h.vt.sendInput('\r')
   await h.paint()
   assert.deepEqual(h.resumes, [OTHER], 'Enter opens the selected Session')
   h.vt.sendInput(' ')
   await h.paint()
-  assert.ok(h.view().includes('Peek · other-se'), 'Space peeks the selected Session')
+  assert.ok(h.view().includes('Transcript · other-se'), 'Space reads the selected Session')
 })
 
 test('a New-row press is dropped when the official Folder disappears before the release', async () => {
@@ -2022,9 +2259,9 @@ test('one-line header, truthful Current/Next, and a Footer of the live typed ver
   assert.ok(/^[ >]*[▾▸] Alpha · 1 · Current/m.test(h.view()), 'a manually collapsed Folder still states Current')
   let lines = h.view().split('\n')
   assert.ok(lines[lines.length - 1]!.includes('Expand [Enter]'), 'the Footer advertises the current Enter verb')
-  assert.ok(!lines[lines.length - 1]!.includes('Peek [Space]'), 'a Folder advertises no Peek')
+  assert.ok(!lines[lines.length - 1]!.includes('Read [Space]'), 'a Folder advertises no Reader')
   assert.ok(lines[lines.length - 1]!.includes('Close [Esc]'), 'Esc is always the last segment')
-  // Select the Session row: Footer advertises Open + Peek; the row keeps ●.
+  // Select the Session row: Footer advertises Open + Reader; the row keeps ●.
   h.vt.sendInput('\r') // re-expand Alpha
   await h.paint()
   h.vt.sendInput('\x1b[B') // New session
@@ -2034,7 +2271,7 @@ test('one-line header, truthful Current/Next, and a Footer of the live typed ver
   lines = h.view().split('\n')
   assert.ok(!lines[lines.length - 1]!.includes('Open [Enter]'),
     'the opened Session never advertises the deliberate no-op Enter')
-  assert.ok(lines[lines.length - 1]!.includes('Peek [Space]'), 'the opened Session still advertises its Peek')
+  assert.ok(lines[lines.length - 1]!.includes('Read [Space]'), 'the opened Session still advertises its Reader')
   assert.ok(/^> {3}● current-/m.test(h.view()), 'Current is a row marker, not the selection')
   // A non-current Session advertises its real Open verb.
   h.vt.sendInput('\t') // Beta Folder
@@ -2046,8 +2283,8 @@ test('one-line header, truthful Current/Next, and a Footer of the live typed ver
   h.vt.sendInput('\x1b[B')
   await h.paint()
   lines = h.view().split('\n')
-  assert.ok(lines[lines.length - 1]!.includes('Open [Enter]') && lines[lines.length - 1]!.includes('Peek [Space]'),
-    'a non-current Session advertises Open and Peek')
+  assert.ok(lines[lines.length - 1]!.includes('Open [Enter]') && lines[lines.length - 1]!.includes('Read [Space]'),
+    'a non-current Session advertises Open and Reader')
   assert.ok(/^> .*Other session/m.test(h.view()))
   h.app.dispose()
   started.delete(h.app)
@@ -2092,7 +2329,7 @@ test('search saves and restores the typed tree target and expansion from any row
   assert.ok(!restored.includes('Search all workspaces'), 'the global-search context is gone')
 })
 
-test('Peek is pinned to a Session row, exposes its full identity, and refuses Folder targets', async () => {
+test('Reader is pinned to a Session row and refuses Folder targets', async () => {
   const h = harness({ columns: 120, rows: 30, onNewSession: () => {} })
   h.handle.setSnapshot(snapshot())
   h.handle.updateWorkspaces({
@@ -2103,13 +2340,14 @@ test('Peek is pinned to a Session row, exposes its full identity, and refuses Fo
     ],
   })
   await h.paint()
-  // Folders never open a Peek.
+  // Folders never open a Reader.
   h.vt.sendInput('\t')
   await h.paint()
   h.vt.sendInput(' ')
   await h.paint()
-  assert.ok(!h.view().includes('Peek ·'), 'Space on a Folder is a no-op')
-  // Open the Session Peek and read the full identity.
+  assert.ok(!h.view().includes('Transcript ·'), 'Space on a Folder is a no-op')
+  assert.equal(h.reads.length, 0, 'a Folder never starts a Markdown read')
+  // Open the Session Reader and read the full identity.
   h.vt.sendInput('\x1b[C')
   await h.paint()
   h.vt.sendInput('\x1b[B')
@@ -2118,13 +2356,10 @@ test('Peek is pinned to a Session row, exposes its full identity, and refuses Fo
   await h.paint()
   h.vt.sendInput(' ')
   await h.paint()
-  const peek = h.view()
-  assert.ok(peek.includes(`Session ID: ${OTHER}`), `Peek names the full sanitized Session id:\n${peek}`)
-  assert.ok(peek.includes('Workspace: Beta'), 'Peek keeps the official Workspace identity')
-  // The row's cwd is the immutable creation directory: it is labelled
-  // `Created in`, never presented as the current working directory.
-  assert.ok(peek.includes('Created in: /ws/project'), `Peek names the creation directory separately:\n${peek}`)
-  assert.ok(!peek.includes('cwd:'), 'Peek never labels the creation directory as the current cwd')
+  const reader = h.view()
+  assert.ok(reader.includes('Transcript · other-se'), `Reader opens for the selected Session row:\n${reader}`)
+  assert.deepEqual(h.reads.map(read => read.sessionId), [OTHER],
+    'the full typed Session id, not the short header label, is the Markdown read target')
 })
 
 test('the inline Add editor stays single-flight, keeps failures, and returns to the tree', async () => {
@@ -2236,7 +2471,7 @@ test('a short frame advertises only actions the painted body can really run', as
   let footer = panelFrame(painted)[2]!
   assert.ok(footer.includes('Return [Enter]') && !footer.includes('Open [Enter]'),
     `the current row advertises Return:\n${footer}`)
-  assert.ok(footer.includes('Peek [Space]'), `the current row still advertises Peek:\n${footer}`)
+  assert.ok(footer.includes('Read [Space]'), `the current row still advertises Reader:\n${footer}`)
   assert.ok(footer.includes('Close [Esc]'))
   painted.vt.sendInput('\x1b[B')
   await painted.paint()
@@ -2457,7 +2692,7 @@ test('a current Session search hit advertises Return and its second Enter return
   h.vt.sendInput('\r') // editor -> first (current) result
   await h.paint()
   let footer = panelFrame(h)[panelFrame(h).length - 1]!
-  assert.ok(footer.includes('Peek [Space]'), `the current result still advertises Peek:\n${footer}`)
+  assert.ok(footer.includes('Read [Space]'), `the current result still advertises Reader:\n${footer}`)
   assert.ok(footer.includes('Return [Enter]'), `the current result advertises its real Return:\n${footer}`)
   assert.ok(!footer.includes('Open [Enter]'), `the current result never advertises Open:\n${footer}`)
   h.vt.sendInput('\r')
@@ -2468,51 +2703,53 @@ test('a current Session search hit advertises Return and its second Enter return
   assert.equal(h.app.isFullscreen(), false)
 })
 
-test('the current Session Peek advertises Return and its Enter returns', async () => {
+test('the current Session Reader Enter is inert; Escape returns to the list Return', async () => {
   const h = harness({ columns: 120, rows: 30 })
   h.handle.setSnapshot(snapshot())
   await h.paint()
   h.vt.sendInput(' ')
   await h.paint()
   const view = h.view()
-  assert.ok(view.includes('Peek · curren'), `the current Session Peek opens:\n${view}`)
-  assert.ok(!view.includes('Open [Enter]') && !view.includes('Open: Enter'),
-    `neither the body hint nor the footer advertises Open:\n${view}`)
-  const footer = panelFrame(h)[panelFrame(h).length - 1]!
-  assert.ok(footer.includes('Return [Enter]'), `the current Peek advertises Return:\n${footer}`)
-  assert.ok(view.includes('Back [Esc]') && !view.includes('Space close'), 'the Peek Back stays on the ONE global bar')
+  assert.ok(view.includes('Transcript · curren'), `the current Session Reader opens:\n${view}`)
+  assert.ok(!view.includes('Open [Enter]') && !view.includes('Return [Enter]'),
+    `the Reader advertises no Session activation:\n${view}`)
+  assert.ok(view.includes('Back [Esc]'), 'the Reader Back stays on the ONE global bar')
   h.vt.sendInput('\r')
   await h.paint()
-  assert.deepEqual(h.resumes, [], 'Return on the current Peek never resumes')
-  assert.equal(h.closes, 1, 'Return on the current Peek closes the Browser once')
-  assert.equal(h.handle.isDisposed(), true)
-  assert.equal(h.app.isFullscreen(), false)
+  assert.deepEqual(h.resumes, [], 'Enter inside the current Reader never resumes')
+  assert.equal(h.closes, 0, 'Enter inside the Reader never closes the Browser')
+  assert.ok(h.view().includes('Transcript · curren'), 'Enter leaves the Reader on its exact Session')
+  h.vt.sendInput('\x1b')
+  await h.paint()
+  assert.ok(!h.view().includes('Transcript ·'), 'Esc closes only the Reader layer')
+  await clickBarAction(h, 'Return [Enter]')
+  assert.equal(h.closes, 1, 'the list Return remains the ONE explicit current-Session return')
 })
 
-test('current Peek Space and Esc back out without switching or closing', async () => {
+test('current Reader Space and Esc back out without switching or closing', async () => {
   const h = harness({ columns: 120, rows: 30 })
   h.handle.setSnapshot(snapshot())
   await h.paint()
   h.vt.sendInput(' ')
   await h.paint()
-  assert.ok(h.view().includes('Peek · curren'))
+  assert.ok(h.view().includes('Transcript · curren'))
   h.vt.sendInput(' ')
   await h.paint()
-  assert.ok(!h.view().includes('Peek ·'), 'Space still closes the Peek layer')
+  assert.ok(!h.view().includes('Transcript ·'), 'Space still closes the Reader layer')
   assert.ok(h.view().includes('Return [Enter]'), 'the browse Return is back')
-  assert.equal(h.closes, 0, 'Space on the Peek never closes the Browser')
+  assert.equal(h.closes, 0, 'Space on the Reader never closes the Browser')
   assert.deepEqual(h.resumes, [])
   h.vt.sendInput(' ')
   await h.paint()
-  assert.ok(h.view().includes('Peek · curren'))
+  assert.ok(h.view().includes('Transcript · curren'))
   h.vt.sendInput('\x1b')
   await h.paint()
-  assert.ok(!h.view().includes('Peek ·'), 'Esc still closes the Peek layer')
-  assert.equal(h.closes, 0, 'Esc on the Peek never closes the Browser')
+  assert.ok(!h.view().includes('Transcript ·'), 'Esc still closes the Reader layer')
+  assert.equal(h.closes, 0, 'Esc on the Reader never closes the Browser')
   assert.deepEqual(h.resumes, [])
 })
 
-test('a non-current Session Peek keeps Open and Enter emits its one Resume', async () => {
+test('a non-current Reader Enter is inert; return to the list keeps its one Resume', async () => {
   const h = harness({ columns: 120, rows: 30 })
   h.handle.setSnapshot(snapshot())
   await h.paint()
@@ -2521,15 +2758,20 @@ test('a non-current Session Peek keeps Open and Enter emits its one Resume', asy
   h.vt.sendInput(' ')
   await h.paint()
   const footer = panelFrame(h)[panelFrame(h).length - 1]!
-  assert.ok(footer.includes('Open [Enter]') && !footer.includes('Return [Enter]'),
-    `the non-current Peek keeps Open:\n${footer}`)
+  assert.ok(!footer.includes('Open [Enter]') && !footer.includes('Return [Enter]'),
+    `the non-current Reader advertises no Session activation:\n${footer}`)
   h.vt.sendInput('\r')
   await h.paint()
-  assert.deepEqual(h.resumes, [OTHER], 'the non-current Peek Enter is the pre-existing guarded Resume')
+  assert.deepEqual(h.resumes, [], 'Enter inside the Reader never resumes')
   assert.equal(h.closes, 0)
+  h.vt.sendInput('\x1b')
+  await h.paint()
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.deepEqual(h.resumes, [OTHER], 'the list Enter remains the ONE guarded Resume')
 })
 
-test('the painted Return segment really returns from Browse, Search results and Peek', async () => {
+test('painted Return leaves the two lists and the Reader Back stays local', async () => {
   const browse = harness()
   browse.handle.setSnapshot(snapshot())
   await browse.paint()
@@ -2558,16 +2800,19 @@ test('the painted Return segment really returns from Browse, Search results and 
   results.app.dispose()
   started.delete(results.app)
 
-  const peek = harness({ columns: 120, rows: 30 })
-  peek.handle.setSnapshot(snapshot())
-  await peek.paint()
-  peek.vt.sendInput(' ')
-  await peek.paint()
-  await clickBarAction(peek, 'Return [Enter]')
-  assert.equal(peek.closes, 1, 'the Peek Return press+release closes the Browser once')
-  assert.deepEqual(peek.resumes, [])
-  peek.app.dispose()
-  started.delete(peek.app)
+  const reader = harness({ columns: 120, rows: 30 })
+  reader.handle.setSnapshot(snapshot())
+  await reader.paint()
+  reader.vt.sendInput(' ')
+  await reader.paint()
+  await clickBarAction(reader, 'Back [Esc]')
+  assert.equal(reader.closes, 0, 'the Reader Back press+release closes only the Reader')
+  assert.ok(!reader.view().includes('Transcript ·'), 'the Reader layer is gone')
+  await clickBarAction(reader, 'Return [Enter]')
+  assert.equal(reader.closes, 1, 'the list Return still closes the Browser once')
+  assert.deepEqual(reader.resumes, [])
+  reader.app.dispose()
+  started.delete(reader.app)
 })
 
 test('a current Session row click only selects; the painted bar is the only Return', async () => {
@@ -2621,6 +2866,7 @@ test('an old Return click and its handle never close a newer Browser', async () 
     subject: { currentSessionId: CURRENT, currentCwd: '/ws/project', isCurrent: () => true },
     onQueryChange: () => {},
     onResume: () => {},
+    readMarkdown: async () => ({ kind: 'unavailable' }),
     onClose: () => { secondCloses += 1 },
     initialMode: 'browse',
     initialBrowseScope: 'all',
@@ -2724,6 +2970,7 @@ test('a late settlement from a disposed open is inert for the next open', async 
     subject: { currentSessionId: CURRENT, currentCwd: '/ws/project', isCurrent: () => true },
     onQueryChange: () => {},
     onResume: () => {},
+    readMarkdown: async () => ({ kind: 'unavailable' }),
     onNewSession: () => {},
     onClose: () => {},
     initialMode: 'browse',
@@ -2790,12 +3037,12 @@ test('the Footer suppresses session actions while a resume is pending', async ()
   await browse.paint()
   let footer = panelFrame(browse)[panelFrame(browse).length - 1]!
   assert.ok(browse.view().includes('Opening session…'), 'the pending fact is painted')
-  assert.ok(!footer.includes('Open [Enter]') && !footer.includes('Peek [Space]'),
+  assert.ok(!footer.includes('Open [Enter]') && !footer.includes('Read [Space]'),
     `no blocked session action is advertised while pending:\n${footer}`)
   browse.handle.setSnapshot(snapshot())
   await browse.paint()
   footer = panelFrame(browse)[panelFrame(browse).length - 1]!
-  assert.ok(footer.includes('Open [Enter]') && footer.includes('Peek [Space]'),
+  assert.ok(footer.includes('Open [Enter]') && footer.includes('Read [Space]'),
     'the actions return when the resume settles')
   browse.app.dispose()
   started.delete(browse.app)
@@ -2813,31 +3060,38 @@ test('the Footer suppresses session actions while a resume is pending', async ()
   results.handle.setSnapshot({ ...searchSnapshot, resumePending: true })
   await results.paint()
   footer = panelFrame(results)[panelFrame(results).length - 1]!
-  assert.ok(!footer.includes('Open [Enter]') && !footer.includes('Peek [Space]'),
+  assert.ok(!footer.includes('Open [Enter]') && !footer.includes('Read [Space]'),
     `search results advertise no blocked action while pending:\n${footer}`)
   results.handle.setSnapshot(searchSnapshot)
   await results.paint()
   footer = panelFrame(results)[panelFrame(results).length - 1]!
-  assert.ok(footer.includes('Open [Enter]') && footer.includes('Peek [Space]'), 'search actions return after settlement')
+  assert.ok(footer.includes('Open [Enter]') && footer.includes('Read [Space]'), 'search actions return after settlement')
   results.app.dispose()
   started.delete(results.app)
 
-  const peek = harness({ columns: 120, rows: 30 })
-  peek.handle.setSnapshot(snapshot())
-  await peek.paint()
-  peek.vt.sendInput('\x1b[B')
-  await peek.paint()
-  peek.vt.sendInput(' ')
-  await peek.paint()
-  peek.handle.setSnapshot(snapshot({ resumePending: true }))
-  await peek.paint()
-  footer = panelFrame(peek)[panelFrame(peek).length - 1]!
-  assert.ok(!footer.includes('Open [Enter]'), `Peek advertises no blocked Open while pending:\n${footer}`)
-  assert.ok(footer.includes('Back [Esc]') && !footer.includes('Space close'), 'the Peek exits stay on the ONE global bar')
-  peek.handle.setSnapshot(snapshot())
-  await peek.paint()
-  footer = panelFrame(peek)[panelFrame(peek).length - 1]!
-  assert.ok(footer.includes('Open [Enter]'), 'the Peek Open cue returns after settlement')
+  const reader = harness({ columns: 120, rows: 30 })
+  reader.handle.setSnapshot(snapshot())
+  await reader.paint()
+  reader.vt.sendInput('\x1b[B')
+  await reader.paint()
+  reader.vt.sendInput(' ')
+  await reader.paint()
+  reader.handle.setSnapshot(snapshot({ resumePending: true }))
+  await reader.paint()
+  footer = panelFrame(reader)[panelFrame(reader).length - 1]!
+  assert.ok(!footer.includes('Open [Enter]') && !footer.includes('Read [Space]'),
+    `Reader advertises no Session activation while a switch pends:\n${footer}`)
+  assert.ok(footer.includes('Back [Esc]'), 'the Reader back stays available while a switch pends')
+  reader.handle.setSnapshot(snapshot())
+  await reader.paint()
+  footer = panelFrame(reader)[panelFrame(reader).length - 1]!
+  assert.ok(!footer.includes('Open [Enter]') && !footer.includes('Read [Space]') && footer.includes('Back [Esc]'),
+    'a settled switch does not turn the Reader into a list action bar')
+  reader.vt.sendInput('\x1b')
+  await reader.paint()
+  footer = panelFrame(reader)[panelFrame(reader).length - 1]!
+  assert.ok(footer.includes('Open [Enter]') && footer.includes('Read [Space]'),
+    'returning to the list restores its settled actions')
 })
 
 test('an initial search open with the path editor keeps only the path editor', async () => {
@@ -2890,7 +3144,7 @@ test('missing optional capabilities paint no fake Add or New action', async () =
   await assertTree({ onNewSession: () => {} }, false, true)
 })
 
-test('Preview and Peek state the same pending admission as the Footer', async () => {
+test('Preview and Reader keep one truthful pending admission', async () => {
   const browse = harness({ columns: 120, rows: 30 })
   browse.handle.setSnapshot(snapshot())
   await browse.paint()
@@ -2899,33 +3153,33 @@ test('Preview and Peek state the same pending admission as the Footer', async ()
   browse.handle.setSnapshot(snapshot({ resumePending: true }))
   await browse.paint()
   let view = browse.view()
-  assert.ok(!view.includes('Space for read-only details'), `the Preview hides the blocked Peek cue:\n${view}`)
-  assert.ok(!view.includes('Open [Enter]') && !view.includes('Peek [Space]'), 'the Footer hides both blocked verbs')
+  assert.ok(!view.includes('Space to read committed transcript'), `the Preview hides the blocked Reader cue:\n${view}`)
+  assert.ok(!view.includes('Open [Enter]') && !view.includes('Read [Space]'), 'the Footer hides both blocked verbs')
   browse.handle.setSnapshot(snapshot())
   await browse.paint()
-  assert.ok(browse.view().includes('Space for read-only details'), 'the Preview cue returns after settlement')
+  assert.ok(browse.view().includes('Space to read committed transcript'), 'the Preview cue returns after settlement')
   browse.app.dispose()
   started.delete(browse.app)
 
-  const peek = harness({ columns: 120, rows: 30 })
-  peek.handle.setSnapshot(snapshot())
-  await peek.paint()
-  peek.vt.sendInput('\x1b[B')
-  await peek.paint()
-  peek.vt.sendInput(' ')
-  await peek.paint()
-  peek.handle.setSnapshot(snapshot({ resumePending: true }))
-  await peek.paint()
-  view = peek.view()
-  assert.ok(!view.includes('Open: Enter'), `the Peek body hides its blocked Open cue:\n${view}`)
-  assert.ok(!view.includes('Open [Enter]'), 'the Peek bar hides the blocked Open cue')
-  assert.ok(view.includes('Back [Esc]') && !view.includes('Space close'), 'the real exit stays on the ONE global bar')
-  peek.handle.setSnapshot(snapshot())
-  await peek.paint()
-  assert.ok(!peek.view().includes('Open: Enter') && peek.view().includes('Open [Enter]'),
-    'only the global bar carries the Peek Open cue after settlement')
-  peek.app.dispose()
-  started.delete(peek.app)
+  const reader = harness({ columns: 120, rows: 30 })
+  reader.handle.setSnapshot(snapshot())
+  await reader.paint()
+  reader.vt.sendInput('\x1b[B')
+  await reader.paint()
+  reader.vt.sendInput(' ')
+  await reader.paint()
+  reader.handle.setSnapshot(snapshot({ resumePending: true }))
+  await reader.paint()
+  view = reader.view()
+  assert.ok(!view.includes('Open [Enter]') && !view.includes('Read [Space]'),
+    `the Reader hides every blocked Session action:\n${view}`)
+  assert.ok(view.includes('Back [Esc]'), 'the real exit stays on the ONE global bar')
+  reader.handle.setSnapshot(snapshot())
+  await reader.paint()
+  assert.ok(!reader.view().includes('Open [Enter]') && !reader.view().includes('Read [Space]'),
+    'a settled switch does not expose list actions inside the Reader')
+  reader.app.dispose()
+  started.delete(reader.app)
 
   const settles: Array<(outcome: import('../../src/app/command/session-browser-presentation.ts').SessionBrowserNewSessionSettlement) => void> = []
   const create = harness({
@@ -3651,48 +3905,53 @@ test('a replaced prefix query settles stopped and a real edit recovers the next 
   assert.ok(h.view().includes('Host directory: /host/home/pr'), 'the raw edit value is unchanged')
 })
 
-test('the Peek bar is the only exit: the removed local row is inert and Open resumes once', async () => {
-  const h = harness({ columns: 100, rows: 8 })
+test('the painted Read bar opens the Reader; its body is inert and scrolls by the real viewport', async () => {
+  const markdown = [...Array.from({ length: 40 }, (_, index) => `- item ${String(index).padStart(2, '0')}`)].join('\n')
+  const h = harness({ columns: 100, rows: 8, readMarkdown: async () => ({ kind: 'ready', markdown }) })
   h.handle.setSnapshot(snapshot())
   await h.paint()
   h.vt.sendInput('\x1b[B')
   await h.paint()
   const browseBar = panelFrame(h)[panelFrame(h).length - 1]!
-  assert.ok(browseBar.includes('Peek [Space]') && browseBar.includes('Close [Esc]'),
+  assert.ok(browseBar.includes('Read [Space]') && browseBar.includes('Close [Esc]'),
     `the Browse bar is the ONE physical bar:\n${browseBar}`)
   assert.equal(visibleWidth(browseBar), 100, 'the painted bar keeps the historical full-row width')
-  await clickBarAction(h, 'Peek')
+  await clickBarAction(h, 'Read [Space]')
   let view = h.view()
-  assert.ok(view.includes('Peek · other-se'), `the bar Peek opens the read-only detail:\n${view}`)
+  assert.ok(view.includes('Transcript · other-se'), `the bar Read opens the committed body:\n${view}`)
+  assert.ok(view.includes('item 00'), 'the first official Markdown row is painted')
   assert.ok(!view.includes('Space close') && !view.includes('Esc back'),
-    'the Peek body carries no local action row')
+    'the Reader body carries no local action row')
   assert.ok(panelFrame(h)[panelFrame(h).length - 1]!.includes('Back [Esc]'),
-    'the ONE global bar owns the Peek Back')
-  // At this height the removed local action row occupied the fourth body row
-  // (physical row 5): it is now read-only content and must be inert.
+    'the ONE global bar owns the Reader Back')
+  // Body content is read-only: a click never closes the Reader or resumes.
   await clickCell(h, 2, 5)
-  assert.ok(h.view().includes('Peek · other-se'), 'a body click never closes the Peek')
+  assert.ok(h.view().includes('Transcript · other-se'), 'a body click never closes the Reader')
   assert.deepEqual(h.resumes, [], 'opening and clicking the body never resumes')
-  const peekBar = panelFrame(h)[panelFrame(h).length - 1]!
-  const separator = peekBar.indexOf(' · ')
-  assert.ok(separator >= 0, `the Peek bar separates its segments:\n${peekBar}`)
+  const readerBar = panelFrame(h)[panelFrame(h).length - 1]!
+  const separator = readerBar.indexOf(' · ')
+  assert.ok(separator >= 0, `the Reader bar separates its segments:\n${readerBar}`)
   await clickCell(h, separator + 1, panelFrame(h).length - 1)
-  assert.ok(h.view().includes('Peek · other-se'), 'the bar separator is decoration, never a target')
+  assert.ok(h.view().includes('Transcript · other-se'), 'the bar separator is decoration, never a target')
   assert.deepEqual(h.resumes, [], 'the separator cell never resumes')
-  // PageDown pages by the REAL painted row count (four rows), and neither the
-  // page key nor Down can scroll past the last full page.
+  // PageDown pages by the REAL painted body height (three rows), and repeated
+  // presses clamp at the last full page instead of inventing a blank tail.
   h.vt.sendInput('\x1b[6~')
   await h.paint()
-  assert.ok(h.view().includes('Created in:'), `PageDown lands on the next page without skipping rows:\n${h.view()}`)
-  for (let step = 0; step < 5; step += 1) {
-    h.vt.sendInput('\x1b[B')
+  assert.ok(!h.view().includes('item 00'), `PageDown advances a real page:\n${h.view()}`)
+  for (let step = 0; step < 20; step += 1) {
+    h.vt.sendInput('\x1b[6~')
     await h.paint()
   }
   view = h.view()
-  assert.ok(view.includes('Source:') && !view.includes('Peek · other-se'),
-    `the Peek scroll stops at the last full page:\n${view}`)
-  await clickBarAction(h, 'Open')
-  assert.deepEqual(h.resumes, [OTHER], 'the bar Open is the ONE re-proved resume intent')
+  assert.ok(view.includes('item 39'), `the Reader clamps at its last content row:\n${view}`)
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.deepEqual(h.resumes, [], 'Enter never resumes from the Reader')
+  assert.ok(h.view().includes('Transcript · other-se'), 'Enter leaves the Reader open on its Session')
+  h.vt.sendInput('\x1b')
+  await h.paint()
+  assert.ok(!h.view().includes('Transcript · other-se'), 'Esc returns to the browse list')
 })
 
 test('the Search bar Results verb only enters the result list and never resumes', async () => {
@@ -3749,15 +4008,15 @@ test('a bar gesture is dropped by any frame change between press and release', a
   h.vt.sendInput('\x1b[B')
   await h.paint()
   // Positive control: the exact same gesture on an UNCHANGED frame fires.
-  await clickBarAction(h, 'Peek')
-  assert.ok(h.view().includes('Peek · other-se'), 'control: an unchanged bar press/release opens the Peek')
+  await clickBarAction(h, 'Read [Space]')
+  assert.ok(h.view().includes('Transcript · other-se'), 'control: an unchanged bar press/release opens the Reader')
   h.vt.sendInput('\x1b')
   await h.paint()
-  assert.ok(!h.view().includes('Peek ·'), 'control: the keyboard Esc closes it again')
-  // Press Peek, move the tree selection, release on the old cell: inert.
+  assert.ok(!h.view().includes('Transcript ·'), 'control: the keyboard Esc closes it again')
+  // Press Read, move the tree selection, release on the old cell: inert.
   let frame = panelFrame(h)
   let bar = frame[frame.length - 1]!
-  let x = bar.indexOf('Peek') + 1
+  let x = bar.indexOf('Read [Space]') + 1
   let y = frame.length - 1
   h.vt.sendInput(`\x1b[<0;${x + 1};${y + 1}M`)
   await h.paint()
@@ -3765,7 +4024,7 @@ test('a bar gesture is dropped by any frame change between press and release', a
   await h.paint()
   h.vt.sendInput(`\x1b[<0;${x + 1};${y + 1}m`)
   await h.paint()
-  assert.ok(!h.view().includes('Peek ·'), 'a scroll between press and release drops the Peek gesture')
+  assert.ok(!h.view().includes('Transcript ·'), 'a scroll between press and release drops the Read gesture')
   // Press Open, resize, release on the old cell: inert.
   h.vt.sendInput('\x1b[B')
   await h.paint()
@@ -3849,6 +4108,7 @@ test('the bar gesture is pinned to the live terminal grant, not only the frame r
     notice: () => undefined,
     onQueryChange: () => {},
     onResume: (sessionId) => { resumes.push(sessionId) },
+    readMarkdown: async () => ({ kind: 'unavailable' }),
     onClose: () => { closes += 1 },
   }
   const options: SessionWorkspacePanelOptions = {
@@ -4691,7 +4951,7 @@ test('H08: the wide two-column list spends its own pane budget on history', asyn
     'an exhausted roster removes Show more')
 })
 
-test('H05: search, Peek, the Host editor and tiny frames never move the Browse watermark', async () => {
+test('H05: search, Reader, the Host editor and tiny frames never move the Browse watermark', async () => {
   const history = Array.from({ length: 30 }, (_, index) => row(`session-h05-${index}`, 900 - index, { title: `H05 ${index}` }))
   const h = harness({
     columns: 44,
@@ -4717,11 +4977,11 @@ test('H05: search, Peek, the Host editor and tiny frames never move the Browse w
   assert.equal(count(), browse, 'one search round trip never moves the watermark')
   h.vt.sendInput(' ')
   await h.paint()
-  assert.ok(h.view().includes('Peek ·'), `Space opens the read-only Peek:\n${h.view()}`)
+  assert.ok(h.view().includes('Transcript ·'), `Space opens the read-only Reader:\n${h.view()}`)
   h.vt.sendInput('\x1b')
   await h.paint()
-  assert.equal(count(), browse, 'Peek never moves the watermark')
-  assert.deepEqual(h.resumes, [], 'search and Peek never resume a Session')
+  assert.equal(count(), browse, 'Reader never moves the watermark')
+  assert.deepEqual(h.resumes, [], 'search and Reader never resume a Session')
   h.vt.sendInput('\x1b[H')
   await h.paint()
   h.vt.sendInput('\r')
@@ -4765,7 +5025,7 @@ test('H06: without an official Workspace baseline the roster stays flat and fabr
   assert.ok(degraded.includes('H06 0'))
 })
 
-// ── F2: Session Workspace wheel (Browse / Search Results / pinned Peek) ──
+// ── F2: Session Workspace wheel (Browse / Search Results / pinned Reader) ──
 
 test('F2/W01+W08: Browse wheel moves the typed selection by the fork delta, in the keyboard sign, and clamps', async () => {
   const history = Array.from({ length: 11 }, (_, index) => row(`session-wheel-browse-${index}`, 900 - index, { title: `Wheel row ${index}` }))
@@ -4890,7 +5150,7 @@ test('F2/W03: the wide left list takes the wheel while the right Preview and the
   ] })
   settleActivity(h)
   await h.paint()
-  assert.ok(h.view().includes('Space for read-only details'), 'the wide frame paints its read-only right Preview')
+  assert.ok(h.view().includes('Space to read committed transcript'), 'the wide frame paints its read-only right Preview')
   const top = bodyTopRow(h)
   await wheelCell(h, 5, top, 'down')
   assert.ok(/^> .*Other session/m.test(h.view()), `the left column wheel moves the tree selection:\n${h.view()}`)
@@ -5006,8 +5266,9 @@ test('F2/W05: a result page longer than the viewport scrolls with the wheel sele
     'the result viewport rebases back to the first page')
 })
 
-test('F2/W06+W07: Peek wheel scrolls only the pinned detail and the left column stays inert', async () => {
-  const h = harness({ columns: 120, rows: 12 })
+test('F2/W06+W07: Reader wheel scrolls only its real body; chrome and Preview stay inert', async () => {
+  const markdown = [...Array.from({ length: 40 }, (_, index) => `- item ${String(index).padStart(2, '0')}`)].join('\n')
+  const h = harness({ columns: 120, rows: 12, readMarkdown: async () => ({ kind: 'ready', markdown }) })
   h.handle.setSnapshot(snapshot())
   settleActivity(h)
   await h.paint()
@@ -5016,38 +5277,40 @@ test('F2/W06+W07: Peek wheel scrolls only the pinned detail and the left column 
   h.vt.sendInput(' ')
   await h.paint()
   const top = bodyTopRow(h)
-  assert.ok(h.view().includes('Peek · other-se'), `the wide Peek pins its own Session id:\n${h.view()}`)
+  assert.ok(h.view().includes('Transcript · other-se'), `the Reader pins its own Session id:\n${h.view()}`)
+  assert.ok(h.view().includes('item 00'), 'the Reader owns the full body with its official Markdown')
   assert.equal(h.view().split('\n').filter(line => line.includes('Back [Esc]')).length, 1,
-    'the Peek paints no local exit row: only the ONE global bar leaves it')
+    'the Reader paints no local exit row: only the ONE global bar leaves it')
 
   await wheelCell(h, 80, top + 1, 'down')
   const scrolled = h.view()
-  assert.ok(!scrolled.includes('Peek · other-se'), `the right pane wheel scrolls the pinned detail:\n${scrolled}`)
-  assert.ok(scrolled.includes('Title:') && scrolled.includes('Session ID:'), 'the next real detail rows are painted')
-  assert.deepEqual(h.resumes, [], 'scrolling a Peek never resumes or activates anything')
+  assert.ok(!scrolled.includes('item 00') && scrolled.includes('item 01'),
+    `the Reader body wheel advances the real content:\n${scrolled}`)
+  assert.ok(scrolled.includes('Transcript · other-se'), 'the fixed Reader context never scrolls away')
+  assert.deepEqual(h.resumes, [], 'scrolling a Reader never resumes or activates anything')
 
-  // While the LEFT pane still paints the Browse tree beside the Peek, its
-  // wheel is inert: no selection move and no Peek scroll.
-  const beforeLeft = h.view()
-  await wheelCell(h, 5, top, 'down')
-  assert.equal(h.view(), beforeLeft, 'the left column never scrolls the pinned Peek or moves Browse')
+  // The Reader header is inert: the leased screen consumes the wheel but never
+  // scrolls content from a non-body row.
+  const beforeHeader = h.view()
+  await wheelCell(h, 80, 0, 'down')
+  assert.equal(h.view(), beforeHeader, 'the Reader header is not a wheel target')
 
-  await wheelCell(h, 80, top, 'up')
-  assert.ok(h.view().includes('Peek · other-se'), 'wheel-up returns to the top of the same pinned detail')
+  await wheelCell(h, 80, top + 1, 'up')
+  assert.ok(h.view().includes('item 00'), 'wheel-up returns to the top of the same official body')
 
-  // Closing the Peek restores the ordinary read-only Preview, which is not a
+  // Closing the Reader restores the ordinary read-only Preview, which is not a
   // scroll sink either.
   h.vt.sendInput('\x1b')
   await h.paint()
   const browse = h.view()
-  assert.ok(browse.includes('Space for read-only details'), 'Esc restores the ordinary right Preview')
+  assert.ok(browse.includes('Space to read committed transcript'), 'Esc restores the ordinary Preview')
   await wheelCell(h, 80, top + 1, 'down')
-  assert.equal(h.view(), browse, 'the ordinary Preview never scrolls the closed Peek')
-  assert.ok(/^> .*Other session/m.test(h.view()), 'the typed Browse selection survives the Peek round trip')
+  assert.equal(h.view(), browse, 'the ordinary Preview never scrolls the closed Reader')
+  assert.ok(/^> .*Other session/m.test(h.view()), 'the typed Browse selection survives the Reader round trip')
   h.dispose()
 
-  // A narrow 80x9 Peek owns the whole body and scrolls its real detail rows.
-  const narrow = harness({ columns: 80, rows: 9 })
+  // A narrow 80x9 Reader owns the whole body and clamps at its real last row.
+  const narrow = harness({ columns: 80, rows: 9, readMarkdown: async () => ({ kind: 'ready', markdown }) })
   narrow.handle.setSnapshot(snapshot())
   settleActivity(narrow)
   await narrow.paint()
@@ -5056,18 +5319,18 @@ test('F2/W06+W07: Peek wheel scrolls only the pinned detail and the left column 
   narrow.vt.sendInput(' ')
   await narrow.paint()
   const narrowTop = bodyTopRow(narrow)
-  assert.ok(narrow.view().includes('Peek · other-se'))
+  assert.ok(narrow.view().includes('item 00'))
   await wheelCell(narrow, 5, narrowTop, 'down')
-  assert.ok(!narrow.view().includes('Peek · other-se'), `the narrow wheel scrolls its real body:\n${narrow.view()}`)
-  assert.ok(narrow.view().includes('Title: Other session'), 'the scrolled narrow rows are real detail rows')
-  for (let step = 0; step < 8; step += 1) await wheelCell(narrow, 5, narrowTop, 'down')
-  assert.ok(narrow.view().includes('Source:'), 'the short Peek clamps at its own last content row')
-  assert.deepEqual(narrow.resumes, [], 'a narrow Peek wheel never activates a Session')
+  assert.ok(!narrow.view().includes('item 00') && narrow.view().includes('item 01'),
+    `the narrow wheel scrolls its real body:\n${narrow.view()}`)
+  for (let step = 0; step < 60; step += 1) await wheelCell(narrow, 5, narrowTop, 'down')
+  assert.ok(narrow.view().includes('item 39'), `the short Reader clamps at its own last content row:\n${narrow.view()}`)
+  assert.deepEqual(narrow.resumes, [], 'a narrow Reader wheel never activates a Session')
 
-  // The ONE global Back click leaves the Peek without closing the Browser; the
+  // The ONE global Back click leaves the Reader without closing the Browser; the
   // typed selection and anchor survive.
   await clickBarAction(narrow, 'Back [Esc]')
-  assert.equal(narrow.closes, 0, 'the painted Back closes only the Peek')
+  assert.equal(narrow.closes, 0, 'the painted Back closes only the Reader')
   assert.ok(/^> .*Other session/m.test(narrow.view()), `Esc/Back returns to the same typed selection:\n${narrow.view()}`)
   narrow.vt.sendInput('\x1b')
   await narrow.paint()
@@ -5103,15 +5366,15 @@ test('F2/W09: a boundary wheel retires a painted bar press while an inert wheel 
 
   // An inert wheel (header) is consumed but keeps a legal bar press intact.
   // A DIFFERENT verb avoids the terminal's same-word double-click selection.
-  const peekX = bar.indexOf('Peek [Space]') + 1
-  assert.ok(peekX > 0 && bar.includes('Peek [Space]'), `the painted bar offers its own Peek:\n${bar}`)
+  const peekX = bar.indexOf('Read [Space]') + 1
+  assert.ok(peekX > 0 && bar.includes('Read [Space]'), `the painted bar offers its own Reader:\n${bar}`)
   h.vt.sendInput(`\x1b[<0;${peekX + 1};${y + 1}M`)
   await h.paint()
   await wheelCell(h, 5, 0, 'down')
   h.vt.sendInput(`\x1b[<0;${peekX + 1};${y + 1}m`)
   await h.paint()
-  assert.ok(h.view().includes('Peek · other-se'), 'an inert wheel never cancels a legal bar gesture')
-  assert.deepEqual(h.resumes, [], 'the kept bar press runs its own Peek verb, not a resume')
+  assert.ok(h.view().includes('Transcript · other-se'), 'an inert wheel never cancels a legal bar gesture')
+  assert.deepEqual(h.resumes, [], 'the kept bar press runs its own Reader verb, not a resume')
 })
 
 test('F2/W10+W11: inert cells consume the wheel without navigating and the chooser never chooses', async () => {
@@ -5184,7 +5447,7 @@ test('F2/W10+W11: inert cells consume the wheel without navigating and the choos
   assert.equal(chooser.closes, 1, 'the chooser returns only through its explicit choose')
 })
 
-test('F2/W12: an async Activity refresh keeps the wheel-selected Session and a vanished Peek target exits', async () => {
+test('F2/W12: an async Activity refresh keeps the wheel-selected Session and a vanished Reader target exits', async () => {
   const h = harness({ columns: 100, rows: 24 })
   h.handle.setSnapshot(snapshot({ rows: [row(CURRENT, 3_000, { title: 'Current session' }), row(OTHER, 2_000, { title: 'Other session' }), row(THIRD, 1_000, { title: 'Third session' })] }))
   settleActivity(h)
@@ -5207,11 +5470,11 @@ test('F2/W12: an async Activity refresh keeps the wheel-selected Session and a v
 
   h.vt.sendInput(' ')
   await h.paint()
-  assert.ok(h.view().includes('Peek · other-se'), 'the wheel-selected Session opens its own Peek')
+  assert.ok(h.view().includes('Transcript · other-se'), 'the wheel-selected Session opens its own Reader')
   h.handle.setSnapshot(snapshot({ rows: [row(CURRENT, 3_000, { title: 'Current session' }), row(THIRD, 1_000, { title: 'Third session' })] }))
   await h.paint()
-  assert.ok(!h.view().includes('Peek · other-se'), `the Peek exits when its pinned Session leaves the roster:\n${h.view()}`)
-  assert.ok(h.view().includes('Sessions · 2') && h.view().includes('Up/Down move'), 'the list stays usable after the Peek exits')
+  assert.ok(!h.view().includes('Transcript · other-se'), `the Reader exits when its pinned Session leaves the roster:\n${h.view()}`)
+  assert.ok(h.view().includes('Sessions · 2') && h.view().includes('Up/Down move'), 'the list stays usable after the Reader exits')
   await wheelCell(h, 5, bodyTopRow(h), 'up')
   assert.ok(/^> .*Third session/m.test(h.view()), `the wheel walks the new painted rows, never the removed target:\n${h.view()}`)
   assert.deepEqual(h.resumes, [])
@@ -5230,6 +5493,7 @@ test('F2/W13: a zero delta or a stale grant is consumed without acting; only a p
     notice: () => undefined,
     onQueryChange: () => {},
     onResume: () => {},
+    readMarkdown: async () => ({ kind: 'unavailable' }),
     onClose: () => { closes += 1 },
   }
   const panel = new SessionWorkspacePanel(host, { initialMode: 'browse', initialBrowseScope: 'all', currentSessionId: CURRENT })
@@ -5336,9 +5600,9 @@ test('F2/W13: wheel hit zones follow the 110/112 column threshold and tiny frame
   assert.ok(/^> .*Threshold 3/m.test(h.view()), `the grown round trip keeps the left column live:\n${h.view()}`)
   const frame = panelFrame(h)
   const bar = frame[frame.length - 1]!
-  const x = bar.indexOf('Peek [Space]') + 1
+  const x = bar.indexOf('Read [Space]') + 1
   const y = frame.length - 1
-  assert.ok(x > 0 && bar.includes('Peek [Space]'), `the wide bar paints its Peek:\n${bar}`)
+  assert.ok(x > 0 && bar.includes('Read [Space]'), `the wide bar paints its Reader:\n${bar}`)
   h.vt.sendInput(`\x1b[<0;${x + 1};${y + 1}M`)
   await h.paint()
   h.vt.resize(80, 10)
@@ -5347,7 +5611,7 @@ test('F2/W13: wheel hit zones follow the 110/112 column threshold and tiny frame
   await h.paint()
   h.vt.sendInput(`\x1b[<0;${x + 1};${y + 1}m`)
   await h.paint()
-  assert.ok(!h.view().includes('Peek ·'), 'a shrink/grow repaint never revives the old bar press')
+  assert.ok(!h.view().includes('Transcript ·'), 'a shrink/grow repaint never revives the old bar press')
   await clickBarAction(h, 'Open [Enter]')
   assert.deepEqual(h.resumes, ['session-wheel-threshold-3'], 'a fresh press on the repainted bar still acts')
   h.dispose()

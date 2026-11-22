@@ -111,6 +111,7 @@ function setup(mode: Mode): Harness {
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
     ...sessionScopeFacts(() => agent, () => 1, skillSource as never),
     sessionPolicy: unconfiguredSessionPolicyPort(),
+    sessionMarkdown: { read: async () => ({ kind: 'unavailable' }) },
     policy: unconfiguredPolicyObservation(),
     backendKind: 'remote',
     currentSessionId: 'session-a',

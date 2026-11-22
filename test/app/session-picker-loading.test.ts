@@ -125,6 +125,7 @@ function harness(
     get defaultIntentOutcome() { return undefined },
     ...sessionScopeFacts(() => state.agent, () => 1),
     sessionPolicy: unconfiguredSessionPolicyPort(),
+    sessionMarkdown: { read: async () => ({ kind: 'unavailable' }) },
     policy: unconfiguredPolicyObservation(),
     ...(nativePresentation === undefined ? {} : { sessionBrowserPresentation: nativePresentation }),
     get currentSessionId() { return state.agent?.session.id },

@@ -291,6 +291,7 @@ function stubRunner(options: {
       () => options.state?.generation ?? 0,
     ),
     sessionPolicy: unconfiguredSessionPolicyPort(),
+    sessionMarkdown: { read: async () => ({ kind: 'unavailable' }) },
     policy: unconfiguredPolicyObservation(),
     // The collision baseline reads the FAKE registry through the scoped-command
     // facade, exactly like the production provider.

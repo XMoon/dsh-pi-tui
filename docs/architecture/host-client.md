@@ -1448,7 +1448,7 @@ workspace/question/approval store and keeps no cross-session cache.
   scan. The native TSP Presenter keeps its historical single read, and a failed
   refresh keeps the last accepted roster with a nonfatal freshness status. An
   accepted roster also re-filters the presented search results to the Sessions
-  it still lists, so a removed Session is never selectable (or peekable) while
+  it still lists, so a removed Session is never selectable (or readable) while
   the refreshed Host search, a projection batch or an unavailable/error search
   state is still pending.
 
@@ -1953,15 +1953,16 @@ agent composition consumes the parsed values. Authority:
 ## Session artifact reads: archive vs official Markdown
 
 Two independent artifact capabilities share the ONE Client save workflow
-(`ArtifactSaveOwner`) and nothing else:
+(`ArtifactSaveOwner`); only the Markdown capability also has a pure read-only
+surface consumer. Neither is a Session writer or Session retain:
 
 - `SessionArchivePort` (`/export`) opens the official full Session-tree ZIP
   stream (root log, descendants, attachments). Its shape and ownership are
   unchanged.
-- `SessionMarkdownPort` (`/transcript`) is the read-only official complete
-  committed Session transcript selected by Session id. It never streams an
-  archive, never accepts a formatter choice, descendants, output path or Client
-  cwd, and never writes output.
+- `SessionMarkdownPort` (`/transcript` and the PiTUI Sessions `Space` Reader) is
+  the read-only official complete committed Session transcript selected by
+  Session id. It never streams an archive, never accepts a formatter choice,
+  descendants, output path or Client cwd, and never writes output.
 
 `SessionMarkdownPort.read(sessionId, signal)` answers `ready {markdown}` /
 `none` / `unavailable`, or rejects a real failure. The adapter mapping is:
@@ -1987,8 +1988,18 @@ Two independent artifact capabilities share the ONE Client save workflow
   transport failures reject. The Client never reconstructs the formatter and
   never reads a Remote `Session.snapshot*`.
 
-The captured command-origin Session id is the target: a later Session switch
-never redirects the save. The Client chooses the destination directory, applies
+The SAME `SessionMarkdownPort` has a second, pure read-only consumer: the PiTUI
+Sessions `Space` Reader. It reads the exact full Session id through the same
+Direct/Remote adapter and displays the returned official Markdown in-place. It
+has no save path, Agent writer, Session `open`/`retain`, descendant read or
+`FileSaveOwner`; its local display projection (`sanitizeDisplayText`) never
+changes the Port's raw Markdown or the `/transcript` save bytes. It adds no Host
+route, formatter, cache, polling or second transcript source. Its read is
+cancelled by the Reader, Sessions lease and runner signals, and a late result is
+inert after close, lease release or Session removal.
+
+The captured command-origin Session id is the target for `/transcript`: a later
+Session switch never redirects the save. The Client chooses the destination directory, applies
 collision/overwrite policy and commits atomically; a Host artifact path may
 appear verbatim INSIDE the Markdown (`Session file:`) but is never the Client
 save target. Business availability is decided by the port's answer at save
@@ -2001,7 +2012,9 @@ card semantics stay display-only).
 Proof: `test/runtime/direct/session-markdown-direct.test.ts`,
 `test/runtime/remote/remote-session-markdown.test.ts`,
 `test/app/remote-semantics-smoke.test.ts`, `test/app/export-command.test.ts`,
-`test/extension/runner-remote-command-plane.test.ts`.
+`test/extension/runner-remote-command-plane.test.ts`,
+`test/tui/session-workspace-panel.test.ts` and
+`test/app/session-workspace-lifecycle.test.ts`.
 
 ## Host Schedule management
 

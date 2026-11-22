@@ -4,7 +4,7 @@
  * ONE client-local component owns the whole Session Workspace surface: the
  * grouped browse list (`Needs attention` → `Working` → `Recent`), the complete
  * Workspace scope selector, the global content-search editor and its result
- * list, the read-only `Space` Peek, the responsive two-column layout, the
+ * list, the read-only `Space` Transcript Reader, the responsive two-column layout, the
  * per-open selection/scroll anchors, the focus ring and the last-painted mouse
  * hit-map. It is the layout ROOT of the temporary workspace lease
  * (`TuiApp.openSessionWorkspace`), so every key arrives on its own
@@ -32,6 +32,7 @@ import {
   CURSOR_MARKER,
   Input,
   Key,
+  Markdown,
   matchesKey,
   renderFakeCursor,
   truncateToWidth,
@@ -53,6 +54,9 @@ import type {
   SessionWorkspaceFact,
   WorkspaceFactsFrame,
 } from '../../runtime/session-workspace-facts-port.ts'
+import type { SessionMarkdownReadResult } from '../../runtime/session-markdown-port.ts'
+import { isCancellation } from '../../runtime/process/tasks.ts'
+import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import {
   ACTION_BAR_SEPARATOR,
   layoutActionBarRow,
@@ -61,11 +65,10 @@ import {
 } from '../presentation/action-bar.ts'
 import { paintActionSpan, type ActionInkRole } from '../presentation/action-ink.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
+import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import {
   buildSessionWorkspaceView,
   currentWorkspaceOf,
-  SESSION_PENDING_LABEL,
-  SESSION_SOURCE_LABEL,
   visibleWorkspaceBrowserRows,
   workspaceRowStatusLabel,
   type SessionWorkspacePriority,
@@ -79,7 +82,7 @@ import {
   type PiTuiWorkspaceTreeRow,
 } from '../presentation/session-workspace-tree.ts'
 import { SESSION_WORKSPACE_CHORDS } from '../keybindings/hints.ts'
-import { color } from '../theme/runtime.ts'
+import { color, HOST_MARKDOWN_OPTIONS, markdownTheme } from '../theme/runtime.ts'
 import { formatSessionAge, sessionBrowserErrorNotice, shortSessionId, workspaceKey } from '../pickers/sessions.ts'
 import type { HostDirectoryBrowsePort } from '../../runtime/host-directory-browse-port.ts'
 import { hostDirectoryQuery } from '../../domain/file-completion/host-directory-query.ts'
@@ -91,8 +94,8 @@ import {
 
 /** The logical focus of one Session Workspace frame. `search` is the raw
  * global query editor; `search-results` is the Host+metadata result list;
- * `peek` is the read-only `Space` detail of the selected row. */
-export type SessionWorkspaceFocus = 'search' | 'list' | 'search-results' | 'peek' | 'directory'
+ * `reader` is the full-width read-only committed-transcript Reader. */
+export type SessionWorkspaceFocus = 'search' | 'list' | 'search-results' | 'reader' | 'directory'
 
 /** What the ONE PiTUI Session Workspace Presentation needs from `TuiApp`.
  *  Everything is read live; the panel never receives the app object. */
@@ -107,6 +110,9 @@ export interface SessionWorkspacePanelHost {
   /** ONE logical resume intent for the selected listed non-current row. The
    *  read owner re-proves eligibility; the panel never switches a Session. */
   readonly onResume: (sessionId: string) => void
+  /** ONE explicit read of the official complete committed Markdown for an
+   *  already painted Session id. This is the Reader's only IO seam. */
+  readonly readMarkdown: (sessionId: string, signal: AbortSignal) => Promise<SessionMarkdownReadResult>
   readonly onUseDirectory?: (workspaceId: string, canonicalPath: string) => void
   readonly onNewSession?: (workspaceId: string, settle?: (outcome: SessionBrowserNewSessionSettlement) => void) => void
   readonly onAddDirectory?: (path: string, settle: (outcome: import('../../app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void) => void
@@ -168,6 +174,29 @@ const GROUP_LABEL: Record<SessionWorkspacePriority, string> = {
   needs: 'Needs attention',
   working: 'Working',
   recent: 'Recent',
+}
+
+/** One Reader's complete official Markdown source must stay bounded. This is
+ *  a UI retention policy, not a Host response limit. */
+const SESSION_READER_MAX_SOURCE_CODE_UNITS = 4_194_304
+/** One Reader's rendered physical-row budget at the current width. A larger
+ *  document is a truthful `too-large` result, never a truncated transcript. */
+const SESSION_READER_MAX_RENDERED_ROWS = 100_000
+
+/** ONE explicit Reader state object. Its identity is the only async currentness
+ *  token for the one official Markdown read it starts. */
+interface SessionTranscriptReader {
+  readonly sessionId: string
+  readonly returnFocus: 'list' | 'search-results'
+  readonly controller: AbortController
+  state:
+    | { readonly kind: 'loading' }
+    | { readonly kind: 'ready'; readonly document: Markdown }
+    | { readonly kind: 'none' }
+    | { readonly kind: 'unavailable' }
+    | { readonly kind: 'too-large' }
+    | { readonly kind: 'error'; readonly message: string }
+  scrollRow: number
 }
 
 /** Truncate one rendered line to the pane width and pad it with plain spaces. */
@@ -373,7 +402,7 @@ type SessionBarAction = 'close' | 'open' | 'peek' | 'results' | 'verify' | 'canc
 /** A wheel-only viewport row. It carries no id/action and is never a click
  *  target; the panel routes it to the EXISTING selection or scroll method of
  *  its pane. */
-type WheelZoneKind = 'wheel-browse' | 'wheel-results' | 'wheel-peek'
+type WheelZoneKind = 'wheel-browse' | 'wheel-results' | 'wheel-reader'
 
 /** One painted mouse target of the LAST frame. `xEnd` is inclusive and every
  *  range is the REAL painted cell range: a truncated/omitted target has none. */
@@ -388,7 +417,7 @@ interface HitRegion {
 
 /** Whether one painted region is a wheel-only viewport row (never a click). */
 function isWheelZone(kind: HitRegion['kind']): kind is WheelZoneKind {
-  return kind === 'wheel-browse' || kind === 'wheel-results' || kind === 'wheel-peek'
+  return kind === 'wheel-browse' || kind === 'wheel-results' || kind === 'wheel-reader'
 }
 
 /** One pane render: the painted lines plus the regions in pane coordinates. */
@@ -488,8 +517,8 @@ export class SessionWorkspacePanel implements Component {
   private directoryStatusError = false
   /** The transient result-list scroll of THIS search, never a stored anchor. */
   private resultScroll = 0
-  /** The read-only `Space` Peek of one painted row. */
-  private peek: { readonly sessionId: string; readonly returnFocus: 'list' | 'search-results'; scrollRow: number } | undefined
+  /** The ONE read-only `Space` Transcript Reader of a painted row. */
+  private reader: SessionTranscriptReader | undefined
   /** The per-open mouse gesture: one press identity, cleared by ANY content
    *  change of the last committed frame. */
   private pressed:
@@ -639,7 +668,7 @@ export class SessionWorkspacePanel implements Component {
   }
 
   /** A failed Activity sample: ONE visible nonfatal fact; the roster, the
-   *  search and Peek stay usable and every activity fact becomes Unknown. */
+   *  search and Reader stay usable and every activity fact becomes Unknown. */
   activityUnavailable(message: string): void {
     if (this.disposed) return
     this.activity = undefined
@@ -682,6 +711,9 @@ export class SessionWorkspacePanel implements Component {
 
   dispose(): void {
     this.disposed = true
+    const reader = this.reader
+    this.reader = undefined
+    reader?.controller.abort()
     this.pressed = undefined
     this.closeDirectoryChooser(false)
   }
@@ -837,14 +869,15 @@ export class SessionWorkspacePanel implements Component {
   private ensureSelection(): void {
     const view = this.view()
     const resultIds = this.snapshot.searchResults.map(result => result.row.id)
-    // A Peek pins its OWN Session id. If that Session is no longer listed (a
-    // roster refresh, a scope/search change or another Client removing it), the
-    // Peek exits to its previous focus; it must never silently show — or switch
-    // to — whatever row the selection re-anchored to.
-    if (this.peek !== undefined && !(this.searchMode ? resultIds : view.listIds).includes(this.peek.sessionId)) {
-      const returnFocus = this.peek.returnFocus
-      this.peek = undefined
-      if (this.focus === 'peek') this.focus = returnFocus
+    // A Reader pins its OWN Session id. If that Session is no longer listed (a
+    // roster refresh, a search change or another Client removing it), the
+    // Reader exits to its previous focus and aborts the one read; it must never
+    // silently show — or switch to — whatever row the selection re-anchored to.
+    if (this.reader !== undefined && !(this.searchMode ? resultIds : view.listIds).includes(this.reader.sessionId)) {
+      const returnFocus = this.reader.returnFocus
+      this.reader.controller.abort()
+      this.reader = undefined
+      if (this.focus === 'reader') this.focus = returnFocus
       this.host.requestRender()
     }
     if (this.searchMode) {
@@ -903,8 +936,8 @@ export class SessionWorkspacePanel implements Component {
       this.handleSearchInput(data)
       return
     }
-    if (this.focus === 'peek') {
-      this.handlePeekInput(data)
+    if (this.focus === 'reader') {
+      this.handleReaderInput(data)
       return
     }
     if (this.focus === 'search-results') {
@@ -916,8 +949,8 @@ export class SessionWorkspacePanel implements Component {
   }
 
   private handleEscape(): void {
-    if (this.focus === 'peek') {
-      this.closePeek()
+    if (this.focus === 'reader') {
+      this.closeReader()
       return
     }
     if (this.focus === 'search-results') {
@@ -932,56 +965,109 @@ export class SessionWorkspacePanel implements Component {
     this.host.onClose()
   }
 
-  /** `Space` opens the read-only Peek of the selected PAINTED Session row only. */
-  private openPeek(): void {
+  /** `Space` opens the ONE full-width Reader of the selected PAINTED Session row only. */
+  private openReader(): void {
     if (this.focus !== 'list' && this.focus !== 'search-results') return
     if (this.snapshot.resumePending) return
     const target = this.focus === 'search-results' ? this.selectedSearchSessionId : this.selectedBrowseSessionId()
     if (target === undefined) return
     const painted = this.focus === 'search-results' ? this.lastPaintedResultIds : this.lastPaintedBrowseIds
     if (!painted.includes(target)) return
-    this.peek = {
+    const reader: SessionTranscriptReader = {
       sessionId: target,
       returnFocus: this.focus === 'search-results' ? 'search-results' : 'list',
+      controller: new AbortController(),
+      state: { kind: 'loading' },
       scrollRow: 0,
     }
-    this.focus = 'peek'
+    this.reader = reader
+    this.focus = 'reader'
+    this.host.requestRender()
+    // A reentrant close during the paint request owns the newer state: the
+    // captured Reader is already invalid and must never start its read.
+    if (this.reader !== reader || reader.controller.signal.aborted || this.disposed) return
+    let pending: Promise<SessionMarkdownReadResult>
+    try {
+      pending = this.host.readMarkdown(reader.sessionId, reader.controller.signal)
+    } catch (error) {
+      this.failReader(reader, error)
+      return
+    }
+    pending.then(
+      result => this.settleReader(reader, result),
+      error => this.failReader(reader, error),
+    ).catch(error => this.failReader(reader, error))
+  }
+
+  private closeReader(requestRender = true): void {
+    const reader = this.reader
+    if (reader === undefined) return
+    this.reader = undefined
+    this.focus = reader.returnFocus
+    reader.controller.abort()
+    if (requestRender && !this.disposed) this.host.requestRender()
+  }
+
+  /** The ONE async currentness fence of the captured Reader object. */
+  private readerCurrent(reader: SessionTranscriptReader): boolean {
+    if (this.disposed || this.reader !== reader || reader.controller.signal.aborted) return false
+    const listed = this.searchMode
+      ? this.snapshot.searchResults.map(result => result.row.id)
+      : this.view().listIds
+    return listed.includes(reader.sessionId)
+  }
+
+  private settleReader(reader: SessionTranscriptReader, result: SessionMarkdownReadResult): void {
+    if (!this.readerCurrent(reader)) return
+    if (result.kind === 'ready') {
+      if (result.markdown.length > SESSION_READER_MAX_SOURCE_CODE_UNITS) {
+        reader.state = { kind: 'too-large' }
+        this.host.requestRender()
+        return
+      }
+      const safe = sanitizeDisplayText(result.markdown)
+      reader.state = {
+        kind: 'ready',
+        document: new Markdown(safe, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS),
+      }
+      reader.scrollRow = 0
+    } else {
+      reader.state = { kind: result.kind }
+    }
     this.host.requestRender()
   }
 
-  private closePeek(): void {
-    const peek = this.peek
-    this.focus = peek?.returnFocus ?? (this.searchMode ? 'search-results' : 'list')
-    this.peek = undefined
+  private failReader(reader: SessionTranscriptReader, error: unknown): void {
+    if (!this.readerCurrent(reader)) return
+    if (isCancellation(error)) return
+    reader.state = { kind: 'error', message: sanitizedPhysicalLine(safeErrorMessage(error)) }
     this.host.requestRender()
   }
 
-  private handlePeekInput(data: string): void {
-    const peek = this.peek
-    if (peek === undefined) return
-    if (matchesKey(data, Key.up)) return this.scrollPeek(-1)
-    if (matchesKey(data, Key.down)) return this.scrollPeek(1)
-    if (matchesKey(data, Key.pageUp)) return this.scrollPeek(-Math.max(1, this.lastPaintedListRows - 1))
-    if (matchesKey(data, Key.pageDown)) return this.scrollPeek(Math.max(1, this.lastPaintedListRows - 1))
+  private handleReaderInput(data: string): void {
+    const reader = this.reader
+    if (reader === undefined) return
+    if (matchesKey(data, Key.up)) return this.scrollReader(-1)
+    if (matchesKey(data, Key.down)) return this.scrollReader(1)
+    if (matchesKey(data, Key.pageUp)) return this.scrollReader(-Math.max(1, this.lastPaintedListRows - 1))
+    if (matchesKey(data, Key.pageDown)) return this.scrollReader(Math.max(1, this.lastPaintedListRows - 1))
     if (matchesKey(data, Key.home)) {
-      peek.scrollRow = 0
+      reader.scrollRow = 0
       return this.host.requestRender()
     }
     if (matchesKey(data, Key.end)) {
-      peek.scrollRow = Number.MAX_SAFE_INTEGER
+      reader.scrollRow = Number.MAX_SAFE_INTEGER
       return this.host.requestRender()
     }
-    if (data === ' ' || matchesKey(data, Key.space)) return this.closePeek()
-    if (matchesKey(data, Key.enter) || matchesKey(data, Key.return)) {
-      this.resumeSelected()
-      return
-    }
+    if (data === ' ' || matchesKey(data, Key.space)) return this.closeReader()
+    // Enter is deliberately inert: this surface never resumes, returns or
+    // changes the Session from inside the Reader.
   }
 
-  private scrollPeek(delta: number): void {
-    const peek = this.peek
-    if (peek === undefined) return
-    peek.scrollRow = Math.max(0, peek.scrollRow + delta)
+  private scrollReader(delta: number): void {
+    const reader = this.reader
+    if (reader === undefined) return
+    reader.scrollRow = Math.max(0, reader.scrollRow + delta)
     this.host.requestRender()
   }
 
@@ -1160,7 +1246,7 @@ export class SessionWorkspacePanel implements Component {
     if (matchesKey(data, Key.left)) return this.collapseOrParent()
     if (matchesKey(data, Key.enter) || matchesKey(data, Key.return)) return this.activateSelectedBrowseRow()
     if (data === ' ' || matchesKey(data, Key.space)) {
-      this.openPeek()
+      this.openReader()
       return
     }
     if (data === '/') {
@@ -1234,7 +1320,7 @@ export class SessionWorkspacePanel implements Component {
       return
     }
     if (data === ' ' || matchesKey(data, Key.space)) {
-      this.openPeek()
+      this.openReader()
       return
     }
     if (matchesKey(data, Key.backspace)) {
@@ -1423,25 +1509,19 @@ export class SessionWorkspacePanel implements Component {
   }
 
   private resumeSelected(): void {
+    // Reader Enter is inert. Only the two list surfaces can reach the guarded
+    // Open/Return admission, and only through a row this frame really painted.
+    if (this.focus !== 'list' && this.focus !== 'search-results') return
     if (this.snapshot.resumePending) return
-    // The Peek RESUMES ITS OWN pinned Session, never whatever row the list
-    // selection re-anchored to after a refresh. Outside Peek a scope/membership
-    // change can hide the previously selected row, and a short/status-squeezed
-    // frame can paint no rows at all: only the set this frame really painted may
-    // be opened.
-    const target = this.focus === 'peek'
-      ? this.peek?.sessionId
-      : this.searchMode
-        ? this.selectedSearchSessionId
-        : this.selectedBrowseSessionId()
+    const target = this.searchMode
+      ? this.selectedSearchSessionId
+      : this.selectedBrowseSessionId()
     if (target === undefined) return
     const listed = this.searchMode
       ? this.snapshot.searchResults.map(result => result.row.id)
       : this.view().listIds
     if (!listed.includes(target)) return
-    const painted = this.focus === 'peek'
-      ? [target]
-      : this.searchMode ? this.lastPaintedResultIds : this.lastPaintedBrowseIds
+    const painted = this.searchMode ? this.lastPaintedResultIds : this.lastPaintedBrowseIds
     if (!painted.includes(target)) return
     // Activating the Session this Browser was opened from returns to it: the
     // Browser closes and the Session, draft, turn and writer stay untouched.
@@ -1595,10 +1675,10 @@ export class SessionWorkspacePanel implements Component {
         this.focus = 'search-results'
         this.moveSelection(delta)
         return consumed
-      case 'wheel-peek':
-        if (this.focus !== 'peek' || this.peek === undefined) return consumed
+      case 'wheel-reader':
+        if (this.focus !== 'reader' || this.reader === undefined || this.reader.state.kind !== 'ready') return consumed
         this.pressed = undefined
-        this.scrollPeek(delta)
+        this.scrollReader(delta)
         return consumed
     }
   }
@@ -1646,7 +1726,7 @@ export class SessionWorkspacePanel implements Component {
         switch (region.action) {
           case 'close': return this.handleEscape()
           case 'open': return this.resumeSelected()
-          case 'peek': return this.openPeek()
+          case 'peek': return this.openReader()
           case 'results': return this.handleSearchInput('\r') // the keyboard Enter byte, same entry
           case 'verify': return this.handleDirectorySubmit()
           case 'cancel': return this.closeDirectoryChooser()
@@ -1755,11 +1835,32 @@ export class SessionWorkspacePanel implements Component {
       this.paintView = undefined
       return this.publishFrame([header.line, bodyLine, actionBar.line], regions)
     }
+    if (this.focus === 'reader' && height < 6) {
+      // A 4/5-row Reader keeps one real body row and the physical Back row. The
+      // context line is the first thing to yield so the body is never hidden.
+      const lines: string[] = [header.line]
+      if (height >= 5) lines.push(this.renderReaderContext(width))
+      lines.push(color.border('─'.repeat(Math.max(1, width))))
+      const bodyTop = lines.length
+      const bodyBudget = Math.max(0, height - lines.length - 1)
+      const body = this.renderBody(width, bodyBudget)
+      const actionBar = this.renderActionBar(width)
+      for (let index = 0; index < bodyBudget; index += 1) lines.push(fit(body.lines[index] ?? '', width))
+      const regions = body.regions
+        .filter(region => region.line < bodyBudget)
+        .map(region => ({ ...region, line: region.line + bodyTop }))
+      const barLine = lines.length
+      lines.push(actionBar.line)
+      regions.push(...actionBar.regions.map(region => ({ ...region, line: barLine })))
+      this.paintView = undefined
+      return this.publishFrame(lines.slice(0, height), regions)
+    }
     const lines: string[] = [header.line]
     const regions: HitRegion[] = [...header.regions]
     // The global search keeps its context line; a plain Browse frame has ONE
     // header and never repeats the Current Session or an All-workspaces scope.
-    if (this.searchMode) lines.push(this.renderSearchContext(width))
+    if (this.focus === 'reader') lines.push(this.renderReaderContext(width))
+    else if (this.searchMode) lines.push(this.renderSearchContext(width))
     lines.push(color.border('─'.repeat(Math.max(1, width))))
     // A 4/5-row terminal keeps ONE header line and ONE body row so the Esc row
     // never disappears; from 6 rows both rules fit.
@@ -1787,9 +1888,9 @@ export class SessionWorkspacePanel implements Component {
   private renderHeader(width: number): { readonly line: string; readonly regions: readonly HitRegion[] } {
     const title = this.chooserMode() ? 'Choose workspace' : 'Sessions'
     const left = `${color.textStrong(title)}${color.textMuted(` · ${this.snapshot.rows.length}`)}`
-    if (this.directoryEntryActive) {
-      // The inline path editor owns the keyboard: no visible or clickable
-      // / Search target may enter a search presentation behind it.
+    if (this.directoryEntryActive || this.focus === 'reader') {
+      // The inline path editor and the Reader each own the keyboard: no visible
+      // or clickable / Search target may enter another presentation behind them.
       return { line: fit(left, width), regions: [] }
     }
     const trailing = color.textMuted('/ Search')
@@ -1830,9 +1931,31 @@ export class SessionWorkspacePanel implements Component {
     return withTrailing(left, trailing, width)
   }
 
+  /** The Reader's fixed second line: identity, provenance and read-only scope.
+   *  A narrow frame drops WHOLE trailing facts before it slices a word. */
+  private renderReaderContext(width: number): string {
+    const reader = this.reader
+    const identity = sanitizedPhysicalLine(
+      reader === undefined ? 'Transcript' : `Transcript · ${shortSessionId(reader.sessionId)}`,
+    )
+    const full = `${identity} · Committed · Read-only`
+    const withReadOnly = `${identity} · Read-only`
+    const text = visibleWidth(full) <= width
+      ? full
+      : visibleWidth(withReadOnly) <= width
+        ? withReadOnly
+        : visibleWidth(identity) <= width
+          ? identity
+          : full
+    return fit(color.textDim(truncateToWidth(text, width, '…', false)), width)
+  }
+
   /** Compose one body frame: single column, or the wide two-column layout. */
   private renderBody(width: number, budget: number): PaneRender {
     if (budget <= 0) return { lines: [], regions: [] }
+    // The Reader occupies the WHOLE real body width in every layout. It has no
+    // Browse column, right Preview, Search editor or local action row.
+    if (this.focus === 'reader') return this.renderReaderPane(width, budget)
     if (this.host.rows() < WIDE_MIN_ROWS || width < WIDE_MIN_COLUMNS) {
       return this.renderSingleColumn(width, budget)
     }
@@ -1858,9 +1981,7 @@ export class SessionWorkspacePanel implements Component {
     const left = this.searchMode
       ? this.renderSearchPane(leftWidth, paneBudget, false)
       : this.renderListPane(leftWidth, paneBudget, false)
-    const right = this.focus === 'peek'
-      ? this.renderPeekPane(rightWidth, paneBudget)
-      : this.renderPreviewPane(rightWidth, paneBudget)
+    const right = this.renderPreviewPane(rightWidth, paneBudget)
     const lines: string[] = [...head]
     const regions: HitRegion[] = [...headRegions, ...left.regions].map(region => ({
       ...region,
@@ -1883,7 +2004,7 @@ export class SessionWorkspacePanel implements Component {
   }
 
   private renderSingleColumn(width: number, budget: number): PaneRender {
-    if (this.focus === 'peek') return this.renderPeekPane(width, budget)
+    if (this.focus === 'reader') return this.renderReaderPane(width, budget)
     return this.searchMode
       ? this.renderSearchPane(width, budget, true)
       : this.renderListPane(width, budget, true)
@@ -2005,7 +2126,7 @@ export class SessionWorkspacePanel implements Component {
     const view = this.frameView()
     // The ONE automatic watermark growth happens HERE, on the ORDINARY Browse
     // list, before this frame's rows are decided: the Sessionless Choose
-    // workspace chooser, Search, Peek and the Host editor never move it, and the
+    // workspace chooser, Search, Reader and the Host editor never move it, and the
     // wide layout already charged its global status lines against the pane
     // budget (so only the single column pays `chrome`).
     if (!this.searchMode && !this.chooserMode() && this.focus === 'list' && !this.directoryEntryActive && !this.disposed && this.workspaces.proven) {
@@ -2460,6 +2581,11 @@ export class SessionWorkspacePanel implements Component {
     }
   }
 
+  private rowById(sessionId: string): SessionBrowserRow | undefined {
+    return this.snapshot.rows.find(row => row.id === sessionId)
+      ?? this.snapshot.searchResults.find(result => result.row.id === sessionId)?.row
+  }
+
   /** The existing read-only Session preview (one typed Session row). */
   private sessionPreviewLines(
     row: SessionBrowserRow,
@@ -2474,71 +2600,71 @@ export class SessionWorkspacePanel implements Component {
       color.textDim(truncateToWidth(`Updated: ${formatSessionAge(row.updatedAt)}`, width, '…', false)),
       ...(this.snapshot.resumePending
         ? []
-        : [color.textMuted(truncateToWidth('Space for read-only details', width, '…', false))]),
+        : [color.textMuted(truncateToWidth('Space to read committed transcript', width, '…', false))]),
     ]
   }
 
-  /** The read-only Peek body: ONE scrollable plain-text column. The global
-   *  Action Bar is the ONLY exit affordance; the body owns no local action row,
-   *  so the whole budget belongs to the read-only facts. */
-  private renderPeekPane(width: number, budget: number): PaneRender {
-    const peek = this.peek
-    // The Peek body is pinned to its OWN Session id: a roster refresh that
-    // re-anchors the list selection must never swap the visible detail.
-    const row = peek === undefined ? undefined : this.rowById(peek.sessionId)
-    if (peek === undefined || row === undefined) {
-      return { lines: [color.textMuted('Peek closed')].slice(0, budget), regions: [] }
+  /** The Reader's ONE scrollable body. The global Action Bar is the only exit
+   *  affordance; the body owns no local action row. Only a `ready` document
+   *  registers a wheel target, and only for the physical rows it really paints. */
+  private renderReaderPane(width: number, budget: number): PaneRender {
+    if (budget <= 0) return { lines: [], regions: [] }
+    const reader = this.reader
+    if (reader === undefined) {
+      return { lines: [color.textMuted(fit('Transcript closed', width))].slice(0, budget), regions: [] }
     }
-    const fact = this.frameView().rowsById.get(row.id)
-    const all = this.peekLines(row, fact, width)
-    const viewport = Math.max(1, budget)
+    if (reader.state.kind !== 'ready') {
+      this.lastPaintedListRows = 1
+      return { lines: this.readerStatusLines(reader.state, width, budget), regions: [] }
+    }
+    let all: string[]
+    try {
+      all = reader.state.document.render(width)
+    } catch (error) {
+      reader.state = { kind: 'error', message: sanitizedPhysicalLine(safeErrorMessage(error)) }
+      return this.renderReaderPane(width, budget)
+    }
+    if (all.length > SESSION_READER_MAX_RENDERED_ROWS) {
+      reader.state = { kind: 'too-large' }
+      return this.renderReaderPane(width, budget)
+    }
+    const viewport = Math.max(1, Math.min(budget, Math.max(1, all.length)))
     const maxScroll = Math.max(0, all.length - viewport)
-    peek.scrollRow = Math.min(Math.max(0, peek.scrollRow), maxScroll)
-    const lines = all.slice(peek.scrollRow, peek.scrollRow + viewport)
-    // The page keys use the REAL painted row count: a short Peek never pages
-    // past its own content and a full one never skips a row.
+    reader.scrollRow = Math.min(Math.max(0, reader.scrollRow), maxScroll)
+    const lines = all.slice(reader.scrollRow, reader.scrollRow + viewport)
+    // Page keys and the wheel use the REAL painted body height: a short document
+    // never pages past its own last row and a full one never skips a row.
     this.lastPaintedListRows = Math.max(1, lines.length)
-    // Only the ACTUAL pinned-body rows accept the wheel; padding/status/bar
-    // cells stay inert.
     return {
       lines: lines.slice(0, budget),
-      regions: this.wheelZoneRegions('wheel-peek', 0, lines.length, width),
+      regions: this.wheelZoneRegions('wheel-reader', 0, lines.length, width),
     }
   }
 
-  private peekLines(
-    row: SessionBrowserRow,
-    fact: SessionWorkspaceRowFact | undefined,
+  private readerStatusLines(
+    state: Exclude<SessionTranscriptReader['state'], { readonly kind: 'ready' }>,
     width: number,
+    budget: number,
   ): string[] {
-    const line = (label: string, value: string, kind: 'text' | 'dim' | 'muted' = 'text'): string => {
-      const painted = `${color.textDim(`${label}:`)} ${kind === 'text' ? color.text(value) : kind === 'dim' ? color.textDim(value) : color.textMuted(value)}`
-      return fit(painted, width)
+    const wrap = (text: string, paint: (line: string) => string): string[] =>
+      wrapTextWithAnsi(sanitizedPhysicalLine(text), Math.max(1, width)).map(paint)
+    switch (state.kind) {
+      case 'loading':
+        return wrap('Reading committed transcript…', color.textDim).slice(0, budget)
+      case 'none':
+        return wrap('No committed transcript found for this Session.', color.textDim).slice(0, budget)
+      case 'unavailable':
+        return wrap('Committed transcript unavailable.', color.textDim).slice(0, budget)
+      case 'too-large':
+        return [
+          ...wrap('Transcript too large to display here. No content was truncated.', color.error),
+          ...(budget >= 2
+            ? wrap('Open the Session explicitly before using /transcript to save it.', color.textMuted)
+            : []),
+        ].slice(0, budget)
+      case 'error':
+        return wrap(`Transcript read failed: ${state.message}`, color.error).slice(0, budget)
     }
-    const lines: string[] = []
-    const title = row.title === undefined || row.title === '' ? '(untitled)' : sanitizedPhysicalLine(row.title)
-    lines.push(color.textStrong(truncateToWidth(`Peek · ${sanitizedPhysicalLine(shortSessionId(row.id))}`, width, '…', false)))
-    lines.push(line('Title', title))
-    lines.push(line('Session ID', sanitizedPhysicalLine(row.id), 'dim'))
-    lines.push(line('Workspace', this.membershipLabel(fact)))
-    // `row.cwd` is the immutable Session-header creation directory, NOT the
-    // Session's current working directory and NOT a Workspace identity.
-    lines.push(line('Created in', row.cwd === undefined ? 'Unknown' : sanitizedPhysicalLine(row.cwd), 'dim'))
-    lines.push(line('Preset', row.preset === undefined ? 'Unknown' : sanitizedPhysicalLine(row.preset)))
-    lines.push(line('Updated', formatSessionAge(row.updatedAt), 'dim'))
-    lines.push(line('Running', fact?.running === true ? 'Yes' : fact?.running === false ? 'No' : 'Unknown'))
-    lines.push(line('Pending', fact === undefined ? 'Unknown' : SESSION_PENDING_LABEL[fact.pending]))
-    lines.push(line('Source', fact === undefined ? 'unknown' : SESSION_SOURCE_LABEL[fact.source], 'dim'))
-    const snippet = this.searchMode
-      ? this.snapshot.searchResults.find(result => result.row.id === row.id)?.snippet
-      : undefined
-    if (snippet !== undefined) lines.push(line('Content hit', `…${sanitizedPhysicalLine(snippet)}…`, 'dim'))
-    return lines
-  }
-
-  private rowById(sessionId: string): SessionBrowserRow | undefined {
-    return this.snapshot.rows.find(row => row.id === sessionId)
-      ?? this.snapshot.searchResults.find(result => result.row.id === sessionId)?.row
   }
 
   /** The ONE truthful status text of one classified row. */
@@ -2557,8 +2683,8 @@ export class SessionWorkspacePanel implements Component {
         return `Ambiguous (${fact.membership.workspaceIds.map(id => sanitizedPhysicalLine(id)).join(', ')})`
       case 'assigned':
         // The official Workspace id is the authoritative identity; the Host
-        // title is display text that may repeat or be empty. Peek/preview keep
-        // the FULL sanitized id so the read-only identity is unambiguous.
+        // title is display text that may repeat or be empty. The read-only
+        // preview keeps the FULL sanitized id so identity is unambiguous.
         return fact.membership.workspaceIds
           .map(id => {
             const title = sanitizedPhysicalLine(this.workspaces.byId.get(id)?.title ?? '')
@@ -2570,7 +2696,7 @@ export class SessionWorkspacePanel implements Component {
 
   /** The compact row's fixed status group. `workspaceRowStatusLabel` stays the
    *  ONE wording authority; only the verbose `Pending · not actionable here`
-   *  phrase is shortened here, and Peek keeps the original detail. */
+   *  phrase is shortened here. */
   private browseStatusParts(fact: SessionWorkspaceRowFact): { readonly primary: string; readonly secondary?: string } | undefined {
     const label = this.statusLabel(fact)
     if (label === '') return undefined
@@ -2869,17 +2995,13 @@ export class SessionWorkspacePanel implements Component {
       segments.push({ text: 'Cancel [Esc]', priority: 9, short: 'Cancel', action: 'cancel', ink: 'secondary' })
       return segments
     }
-    if (this.focus === 'peek') {
-      // The Peek Enter is the one explicit resume of its PINNED Session. The
-      // action exists only when a pinned target really exists and no switch is
-      // pending; the current Session returns (closes) instead of resuming.
-      const hasTarget = this.peek?.sessionId !== undefined && !this.snapshot.resumePending
-      const current = this.peek?.sessionId === this.options.currentSessionId
-      const segments: SessionBarSegment[] = [{ text: 'Up/Down scroll', priority: 6, short: 'Scroll' }]
-      if (hasTarget) {
-        segments.push(current
-          ? { text: 'Return [Enter]', priority: 7, short: 'Return', action: 'open', ink: 'secondary' }
-          : { text: 'Open [Enter]', priority: 7, short: 'Open', action: 'open', ink: 'primary' })
+    if (this.focus === 'reader') {
+      // Reader Enter is not an action. Only ready content advertises its
+      // scroll keys; every Reader state keeps the ONE real Back verb.
+      const segments: SessionBarSegment[] = []
+      if (this.reader?.state.kind === 'ready') {
+        segments.push({ text: 'Up/Down scroll', priority: 6, short: 'Scroll' })
+        segments.push({ text: 'PgUp/PgDn page', priority: 5, short: 'Page' })
       }
       segments.push({ text: 'Back [Esc]', priority: 9, short: 'Esc', action: 'close', ink: 'secondary' })
       return segments
@@ -2897,7 +3019,7 @@ export class SessionWorkspacePanel implements Component {
         } else {
           segments.push({ text: 'Open [Enter]', priority: 7, short: 'Open', action: 'open', ink: 'primary' })
         }
-        segments.push({ text: 'Peek [Space]', priority: 4, short: 'Peek', action: 'peek', ink: 'secondary' })
+        segments.push({ text: 'Read [Space]', priority: 4, short: 'Read', action: 'peek', ink: 'secondary' })
       }
       segments.push({ text: 'Back [Esc]', priority: 9, short: 'Esc', action: 'close', ink: 'secondary' })
       return segments
@@ -2933,14 +3055,14 @@ export class SessionWorkspacePanel implements Component {
       && !(selected.kind === 'session' && this.snapshot.resumePending)) {
       if (selected.kind === 'session' && selected.sessionId === this.options.currentSessionId) {
         // Enter on the opened Session returns to it. The bar advertises that
-        // real action (secondary navigation ink) and keeps the read-only Peek.
+        // real action (secondary navigation ink) and keeps the read-only Reader.
         const enter = this.enterAction(selected)
         segments.push({ text: enter.text, priority: 7, short: enter.short, action: 'activate-row', ink: 'secondary' })
-        segments.push({ text: 'Peek [Space]', priority: 4, short: 'Peek', action: 'peek', ink: 'secondary' })
+        segments.push({ text: 'Read [Space]', priority: 4, short: 'Read', action: 'peek', ink: 'secondary' })
       } else if (selected.kind === 'folder' || selected.kind === 'session') {
         const enter = this.enterAction(selected)
         segments.push({ text: enter.text, priority: 7, short: enter.short, action: 'activate-row', ink: 'primary' })
-        if (selected.kind === 'session') segments.push({ text: 'Peek [Space]', priority: 4, short: 'Peek', action: 'peek', ink: 'secondary' })
+        if (selected.kind === 'session') segments.push({ text: 'Read [Space]', priority: 4, short: 'Read', action: 'peek', ink: 'secondary' })
       } else {
         // New / Add / More: the painted ROOT ROW already runs that explicit
         // action, so the bar keeps only its historical keyboard hint (key-first

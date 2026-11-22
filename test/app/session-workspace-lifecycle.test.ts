@@ -29,6 +29,7 @@ import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
 import type { SessionContentSearchPage, SessionReader, SessionSummary } from '../../src/runtime/session-reader-port.ts'
+import type { SessionMarkdownReadResult } from '../../src/runtime/session-markdown-port.ts'
 import type {
   SessionActivityFact,
   SessionWorkspaceFact,
@@ -232,6 +233,8 @@ interface Harness {
   readonly pickerCalls: number
   /** Every official roster read this open performed (initial + refreshes). */
   readonly listCalls: number
+  /** Every explicit Reader Markdown read, with the caller's composed signal. */
+  readonly markdownReads: Array<{ readonly sessionId: string; readonly signal: AbortSignal | undefined }>
   readonly notices: Array<{ readonly text: string; readonly kind: string }>
   /** Fire the Client-root eligibility invalidation the delivery owner emits. */
   notifyEligibility(): void
@@ -289,6 +292,8 @@ function harness(options: {
   readonly signal?: AbortSignal
   /** PR3: the ONE Host directory browse seam this harness composes. */
   readonly hostDirectoryBrowse?: TuiCommandRunner['hostDirectoryBrowse']
+  /** PR2: the controlled official Markdown read seam the Reader consumes. */
+  readonly readMarkdown?: (sessionId: string, signal: AbortSignal) => Promise<SessionMarkdownReadResult>
   /** The physical frame size this mount paints (default 100x30). */
   readonly frameColumns?: number
   readonly frameRows?: number
@@ -365,6 +370,7 @@ function harness(options: {
     row(THIRD, 1_000),
   ]
   const listCalls = { value: 0 }
+  const markdownReads: Array<{ readonly sessionId: string; readonly signal: AbortSignal | undefined }> = []
   const sessionReader: SessionReader = {
     list: options.list === undefined
       ? async () => { listCalls.value += 1; return rows.map(entry => ({ ...entry })) }
@@ -393,6 +399,13 @@ function harness(options: {
     openScheduleWorkspace: () => ({ kind: 'success' } as const),
     ...sessionScopeFacts(() => state.agent, () => 1),
     sessionPolicy: unconfiguredSessionPolicyPort(),
+    sessionMarkdown: {
+      read: (sessionId, signal) => {
+        markdownReads.push({ sessionId, signal })
+        return options.readMarkdown?.(sessionId, signal as AbortSignal)
+          ?? Promise.resolve({ kind: 'ready', markdown: `# Transcript ${sessionId}\n\nRead-only committed body.` })
+      },
+    },
     policy: unconfiguredPolicyObservation(),
     sessionWorkspaceFacts: facts.port,
     ...(options.hostDirectoryBrowse === undefined ? {} : { hostDirectoryBrowse: options.hostDirectoryBrowse }),
@@ -538,6 +551,7 @@ function harness(options: {
     switchCalls,
     get pickerCalls() { return picker.calls },
     get listCalls() { return listCalls.value },
+    markdownReads,
     notices,
     notifyEligibility: () => { for (const listener of [...eligibilityListeners]) listener() },
     settleSwitch: (outcome) => { assert.ok(pendingSwitch !== undefined, 'no accepted resume is pending'); pendingSwitch(outcome) },
@@ -560,6 +574,40 @@ function harness(options: {
 }
 
 const baseline = (...items: readonly SessionWorkspaceFact[]): WorkspaceFactsFrame => ({ type: 'baseline', items })
+
+test('R2-13: the real /sessions command, TuiApp lease, same backend Markdown Port and Reader sink stay connected', async () => {
+  const h = harness({
+    currentSessionId: CURRENT,
+    readMarkdown: async (sessionId) => ({
+      kind: 'ready',
+      markdown: `# Read ${sessionId}\n\nFirst paragraph.\n\n\`\`\`bash\nls\n\`\`\``,
+    }),
+  })
+  await h.runSessions('')
+  await waitUntil(() => h.view().includes('Current session'), 'the official roster paints')
+  h.vt.sendInput('\x1b[B')
+  await h.vt.waitForRender()
+  const listCallsBefore = h.listCalls
+  h.vt.sendInput(' ')
+  await waitUntil(() => h.view().includes('First paragraph.'), 'the official Markdown body paints through the real Reader')
+  const reader = h.view()
+  assert.ok(reader.includes('Transcript · other-se'), `the Reader is inside the SAME Sessions lease:\n${reader}`)
+  assert.ok(reader.includes(`Read ${OTHER}`), 'the exact backend Port result is painted')
+  assert.ok(reader.includes('ls'), 'the Markdown code body survives the complete command→lease→panel path')
+  assert.deepEqual(h.markdownReads.map(read => read.sessionId), [OTHER],
+    'the command runner forwards the exact selected full Session id to the ONE backend Port')
+  assert.equal(h.listCalls, listCallsBefore, 'the Reader never becomes a second roster reader')
+  const composedSignal = h.markdownReads[0]!.signal
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  assert.deepEqual(h.switchCalls, [], 'Reader Enter never reaches the Resume sink')
+  assert.ok(h.view().includes('First paragraph.'), 'Reader Enter leaves the same document open')
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('First paragraph.'), 'Esc returns to the Browse list')
+  assert.equal(composedSignal?.aborted, true, 'the command bridge composes the Reader/lease/runner cancellation signal')
+  h.close()
+})
 
 test('/sessions opens the ONE fullscreen lease and lists sibling official Workspace folders', async () => {
   let resolveList!: (rows: SessionSummary[]) => void
@@ -1205,7 +1253,8 @@ test('a roster refresh drops search results for removed Sessions before the next
   await h.vt.waitForRender()
   h.vt.sendInput(' ')
   await h.vt.waitForRender()
-  assert.ok(h.view().includes('Peek · other-se'), `the search Peek is open:\n${h.view()}`)
+  assert.ok(h.view().includes('Transcript · other-se'), `the search Reader is open:\n${h.view()}`)
+  assert.deepEqual(h.markdownReads.map(read => read.sessionId), [OTHER], 'Space performs exactly ONE explicit Markdown read')
 
   // Another Client removes that Session: the next accepted roster no longer
   // lists it, while the refreshed Host search is still pending.
@@ -1215,8 +1264,9 @@ test('a roster refresh drops search results for removed Sessions before the next
   await waitUntil(() => h.listCalls > listCalls, 'the refreshed roster was accepted')
   await h.vt.waitForRender()
   const view = h.view()
-  assert.ok(!view.includes('Peek ·'),
-    `a removed Session never stays peekable through the search refresh window:\n${view}`)
+  assert.ok(!view.includes('Transcript · other-se'),
+    `a removed Session never stays readable through the search refresh window:\n${view}`)
+  assert.equal(h.markdownReads[0]?.signal?.aborted, true, 'the removed target aborts the one in-flight Reader read')
   assert.ok(!view.includes('needle in other'),
     `the stale Host hit disappears with its roster row, before the next search:\n${view}`)
   assert.ok(view.includes('needle'), 'the user query is preserved')

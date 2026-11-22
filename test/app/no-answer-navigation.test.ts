@@ -63,6 +63,7 @@ function openWorkspace(app: TuiApp): void {
     subject: { currentSessionId: 'session-X', currentCwd: '/tmp', isCurrent: () => true },
     onQueryChange: () => {},
     onResume: () => {},
+    readMarkdown: async () => ({ kind: 'unavailable' }),
     onClose: () => {},
     initialMode: 'browse',
     initialBrowseScope: 'current',
