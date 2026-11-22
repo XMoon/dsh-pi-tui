@@ -1114,8 +1114,40 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     for (const sessionId of removed) this.verifiedRevisions.delete(sessionId)
     for (const [sessionId, record] of official) {
       signal.throwIfAborted()
-      const checkpoint = this.index.checkpointOf(sessionId)
-      if (checkpoint === undefined || checkpoint.dirty || checkpoint.uncertainSources > 0) {
+      let checkpoint = this.index.checkpointOf(sessionId)
+      if (
+        checkpoint !== undefined
+        && checkpoint.sourceState === 'live'
+        && !record.live
+        && (checkpoint.dirty || checkpoint.uncertainSources > 0)
+      ) {
+        // Disposed provisional rows: never reset before the official durable
+        // source proves the claimed prefix. A short source is append lag, not a
+        // rollback; truncating it into `ready` would silently drop accepted rows.
+        const proof = await this.proveDurablePrefix(sessionId, checkpoint, persistence)
+        signal.throwIfAborted()
+        if (proof === 'insufficient' || proof === 'unreadable') {
+          this.index.markSession({ sessionId, dirty: true })
+          this.state = {
+            kind: 'incomplete',
+            reason: proof === 'unreadable' ? 'source-read-failed' : 'reconciling',
+          }
+          continue
+        }
+        if (proof === 'rollback') {
+          // Header/cut/tail explicitly replaced: the official source is the
+          // authoritative rollback and a rebuild is safe.
+          this.index.resetSession(sessionId)
+          await this.replayOfficialSession(sessionId, record, persistence, query)
+          this.rememberVerifiedRevision(sessionId, record, persistence)
+          continue
+        }
+        // The claimed prefix is present: settle the provisional marker, then
+        // apply the normal revision rules below.
+        this.index.markSession({ sessionId, sourceState: 'persisted', dirty: false })
+        checkpoint = this.index.checkpointOf(sessionId)
+        if (checkpoint === undefined) continue
+      } else if (checkpoint === undefined || checkpoint.dirty || checkpoint.uncertainSources > 0) {
         // A dirty/uncertain checkpoint cannot prove its whole prefix from the
         // tail alone (a middle event may have been repaired), and an incremental
         // replay that finds no new tail events would never call writeBatch(),
@@ -1204,6 +1236,45 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     }
   }
 
+  /**
+   * Read-only proof that the official durable log contains the exact prefix a
+   * checkpoint claims. `insufficient` means the source is shorter/unreadable
+   * (not a rollback); `rollback` means the identity/cut/tail explicitly differs.
+   */
+  private async proveDurablePrefix(
+    sessionId: string,
+    checkpoint: HistorySessionCheckpointRow,
+    persistence: HistorySearchPersistenceLike,
+  ): Promise<'proven' | 'insufficient' | 'rollback' | 'unreadable'> {
+    const signal = this.lifecycle.signal
+    let handle: HistorySearchReadHandleLike
+    try {
+      handle = await persistence.open(sessionId, 'read', { signal })
+    } catch {
+      return 'unreadable'
+    }
+    try {
+      if (
+        sessionHeaderHash(handle.header) !== checkpoint.headerHash
+        || Number(handle.inheritedEventCount) !== checkpoint.inheritedCut
+      ) {
+        return 'rollback'
+      }
+      if (checkpoint.nextSeq === 0) return 'proven'
+      const tail = await handle.read(checkpoint.nextSeq - 1, 1, { signal })
+      const event = tail.events[0]
+      if (event === undefined) return 'insufficient'
+      if (event.seq !== checkpoint.nextSeq - 1 || sessionEventHash(event) !== checkpoint.lastEventHash) {
+        return 'rollback'
+      }
+      return 'proven'
+    } catch {
+      return 'unreadable'
+    } finally {
+      await handle.close()
+    }
+  }
+
   private async verifySessionAgainstPersistence(sessionId: string): Promise<void> {
     if (this.disposed || this.index === undefined) return
     const persistence = this.deps.sessionPersistence()
@@ -1233,39 +1304,19 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       return
     }
     // rc.5 JSONL `list()` does not always provide eventCount, so an absent
-    // count is NOT proof that the live rows are durable. Open the official
-    // source and prove the exact prefix this checkpoint claims before it may
-    // become `persisted`: same header, same fork cut, and the same tail event.
-    let durable = false
-    try {
-      const handle = await persistence.open(sessionId, 'read', { signal })
-      try {
-        const headerMatches = sessionHeaderHash(handle.header) === checkpoint.headerHash
-        const cutMatches = Number(handle.inheritedEventCount) === checkpoint.inheritedCut
-        if (headerMatches && cutMatches) {
-          if (checkpoint.nextSeq === 0) {
-            durable = true
-          } else {
-            const tail = await handle.read(checkpoint.nextSeq - 1, 1, { signal })
-            const event = tail.events[0]
-            durable = event !== undefined
-              && event.seq === checkpoint.nextSeq - 1
-              && sessionEventHash(event) === checkpoint.lastEventHash
-          }
-        }
-      } finally {
-        await handle.close()
-      }
-    } catch (error) {
-      if (this.lifecycle.signal.aborted || this.disposed) return
-      this.diag.warn('history search disposed-session proof failed', {
-        category: error instanceof Error ? error.name : 'unknown',
-      })
+    // count is NOT proof that the live rows are durable. Prove the exact prefix
+    // this checkpoint claims before it may become `persisted`.
+    const proof = await this.proveDurablePrefix(sessionId, checkpoint, persistence)
+    if (this.disposed || this.lifecycle.signal.aborted) return
+    if (proof === 'unreadable') {
+      this.diag.warn('history search disposed-session proof failed', { category: 'unreadable-source' })
       this.index.markSession({ sessionId, dirty: true })
       this.state = { kind: 'incomplete', reason: 'source-read-failed' }
       return
     }
-    if (!durable) {
+    if (proof !== 'proven') {
+      // Short/unreadable prefix is append lag, not a rollback: keep the rows
+      // and the provisional checkpoint and retry through the normal pass.
       this.index.markSession({ sessionId, dirty: true })
       this.state = { kind: 'incomplete', reason: 'reconciling' }
       return

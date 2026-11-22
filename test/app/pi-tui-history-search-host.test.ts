@@ -1195,6 +1195,9 @@ test('a disposed Session without eventCount is not marked persisted without a du
     observeDisposedSession(session: unknown): void
   }).observeDisposedSession({ id })
   const verify = () => (service as unknown as { verifySources(): Promise<void> }).verifySources()
+  const occurrences = () => (service as unknown as {
+    index: { occurrenceCount(): number }
+  }).index.occurrenceCount()
   try {
     await waitDirectReady(service)
     assert.equal(checkpoint()?.sourceState, 'live')
@@ -1218,12 +1221,22 @@ test('a disposed Session without eventCount is not marked persisted without a du
     assert.equal(checkpoint()?.sourceState, 'live', 'the unproven rows must never be called persisted')
     assert.equal(checkpoint()?.dirty, true, 'the prefix proof failure must be retried')
 
-    // The SAME official source catches up to the full durable prefix and the
-    // Session is no longer live. The existing verification pass must settle the
-    // dirty checkpoint, not stay incomplete because the incremental replay
-    // finds no new tail events.
-    source.durableEventCount = undefined
+    // The Session is no longer live, but the durable source is STILL short.
+    // The retry must preserve the accepted rows/checkpoint and stay incomplete;
+    // rebuilding the short prefix here would publish a false authoritative
+    // history and drop the second occurrence.
     source.live = false
+    source.revision += 1
+    await verify()
+    const stillShort = await service.search({ scope: 'all', query: 'mutable first', limit: 25 }, new AbortController().signal)
+    assert.equal(stillShort.kind, 'incomplete', JSON.stringify(stillShort))
+    assert.equal(checkpoint()?.sourceState, 'live')
+    assert.equal(checkpoint()?.dirty, true)
+    assert.equal(occurrences(), 2, 'a short durable prefix must not discard accepted rows')
+
+    // Only once the SAME official source exposes the full prefix may the
+    // existing verification pass settle the checkpoint and recover ready.
+    source.durableEventCount = undefined
     source.revision += 1
     await verify()
     await waitDirectReady(service)
