@@ -2008,8 +2008,14 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       // Agent can never execute the message the View could not remove.
       if (claim.unclaimedHostObligation !== undefined) this.dropUnclaimedObligation(claim)
       // The disposed Agent's context already released its scoped MCP Fibers;
-      // the lease still reads that official closure and clears itself.
-      if (claim.mcpLease !== undefined && this.access !== undefined) this.requestMcpRetire(claim, this.access)
+      // the lease still reads that official closure and clears itself. The
+      // View is detached by the disposal and must release its claim once that
+      // exact lease is retired, so a later resume can attach the live Session
+      // instead of being blocked by a dead Agent's reservation.
+      if (claim.mcpLease !== undefined) {
+        claim.detachedWithFence = true
+        if (this.access !== undefined) this.requestMcpRetire(claim, this.access)
+      }
       this.endRetiringFence(claim.sessionId, claim)
     }
   }

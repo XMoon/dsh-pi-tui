@@ -428,7 +428,7 @@ export async function mountAcpScopedMcp(input: {
  * @param lease - the exact lease returned by {@link mountAcpScopedMcp}.
  */
 export async function retireAcpScopedMcp(lease: AcpScopedMcpLease): Promise<void> {
-  lease.retirePromise ??= (async () => {
+  const active = lease.retirePromise ??= (async () => {
     const mcp = await import('@deepseek-ai/dsh-mcp-client')
     const tools = leaseToolAuthority.get(lease)
     const expectedNames = toolNamesOf(lease)
@@ -464,7 +464,15 @@ export async function retireAcpScopedMcp(lease: AcpScopedMcpLease): Promise<void
     if (unconfirmedFibers(mcp, lease).length > 0) throw cleanupUnconfirmed(lease)
     verifyToolAbsence(lease, tools, expectedNames)
   })()
-  return await lease.retirePromise
+  try {
+    return await active
+  } catch (error) {
+    // A rejected attempt is not a terminal responsibility. The exact claim
+    // keeps `mcpLease` fenced, and a later real terminal (Agent disposal or a
+    // later close/retry) starts ONE fresh singleflight attempt.
+    if (lease.retirePromise === active) lease.retirePromise = undefined
+    throw error
+  }
 }
 
 /** Confirm every tool name the lease published is absent from the exact Agent view. */

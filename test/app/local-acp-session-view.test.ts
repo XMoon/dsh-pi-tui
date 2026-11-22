@@ -170,7 +170,13 @@ class FakeAccess implements HostAcpSessionAccess {
 
   async requestRetireScopedMcp(lease: AcpScopedMcpLease): Promise<void> {
     this.retireScopedMcpCalls.push(lease)
-    return await this.retireScopedMcpImpl(lease)
+    const active = lease.retirePromise ??= this.retireScopedMcpImpl(lease)
+    try {
+      return await active
+    } catch (error) {
+      if (lease.retirePromise === active) lease.retirePromise = undefined
+      throw error
+    }
   }
 
   async prompt(request: AcpSessionPromptRequest, signal: AbortSignal): Promise<{ readonly accepted: true }> {
@@ -3715,4 +3721,52 @@ test('an unconfirmed MCP cleanup keeps the exact claim fenced so a second connec
     registry.resumeSession(second, access, { sessionId: agent.id, cwd: '/work/mcp' }),
     (error: unknown) => error instanceof LocalAcpViewError && error.code === 'LOCAL_ACP_VIEW_ALREADY_ATTACHED',
   )
+})
+
+test('an unconfirmed MCP retirement is retried on a later real terminal instead of fencing the Session forever', async () => {
+  const access = new FakeAccess()
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  registry.bindAccess(access)
+  const conn = registry.createConnection()
+  const agent = makeAgent('mcp-retry', '/work/mcp')
+  access.seed(agent)
+  access.createSessionImpl = async () => ({ kind: 'created', sessionId: agent.id })
+  const lease = makeScopedLease(agent, agent.session)
+  access.mountScopedMcpImpl = async () => lease
+  let attempts = 0
+  access.retireScopedMcpImpl = async () => {
+    attempts += 1
+    if (attempts === 1) throw new AcpScopedMcpError('CLEANUP_UNCONFIRMED', 'cleanup unconfirmed', lease)
+  }
+
+  await registry.newSession(conn, access, { cwd: '/work/mcp', mcpServers: [{ name: 's1', command: '/bin/true', args: [], env: [] }] })
+  assert.deepEqual(await registry.closeSession(conn, access, agent.id), {})
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(attempts, 1)
+  assert.equal(registry.claimCount(), 1, 'the failed attempt keeps the exact claim fenced')
+  // The Agent disposal is a new real terminal fact; the same lease must be
+  // retried instead of accepting the rejected retirePromise as final.
+  registry.onAgentDisposed(agent)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(attempts, 2)
+  assert.equal(registry.claimCount(), 0)
+})
+
+test('an Agent disposal releases an attached claim after its MCP lease retires', async () => {
+  const access = new FakeAccess()
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  registry.bindAccess(access)
+  const conn = registry.createConnection()
+  const agent = makeAgent('mcp-disposed', '/work/mcp')
+  access.seed(agent)
+  access.createSessionImpl = async () => ({ kind: 'created', sessionId: agent.id })
+  const lease = makeScopedLease(agent, agent.session)
+  access.mountScopedMcpImpl = async () => lease
+  access.retireScopedMcpImpl = async () => {}
+
+  await registry.newSession(conn, access, { cwd: '/work/mcp', mcpServers: [{ name: 's1', command: '/bin/true', args: [], env: [] }] })
+  assert.equal(registry.phaseOf(conn), 'attached')
+  registry.onAgentDisposed(agent)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(registry.claimCount(), 0, 'the disposed Agent claim must not block a later resume')
 })
