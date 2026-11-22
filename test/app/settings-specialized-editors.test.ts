@@ -714,8 +714,6 @@ test('/keybindings conflicts enters the SAME lease in its Conflicts view and rep
   assert.match(h.view(), /Settings · Input & Terminal · Keyboard shortcuts…/u)
   assert.match(h.view(), /View: All · \[Conflicts \(2 affected actions\)\]/u,
     'the initial view is Conflicts and counts affected ACTIONS')
-  assert.match(h.view(), /Affected actions · 1 runtime conflict records/u,
-    'the runtime RECORD count is stated separately from the affected Action count')
   assert.match(h.view(), /Submit draft/u)
   assert.match(h.view(), /Toggle todo/u)
   const lease = (h.app as unknown as { workspaceLease?: object }).workspaceLease
@@ -762,33 +760,6 @@ test('/keybindings conflicts enters the SAME lease in its Conflicts view and rep
     'the re-entry never replaces the Settings lease')
   h.app.dispose()
   startedApps.delete(h.app)
-})
-
-test('/keybindings conflicts keeps plugin-only runtime records readable without an editor route', async () => {
-  const h = setup({ fixture: createDirectSettingsFixture({ footer: 'default' }) })
-  h.app.keybindingsManager().setPluginRules([
-    { id: 'plugin-a', action: 'submit-draft', key: 'ctrl+alt+x' },
-    { id: 'plugin-b', action: 'open-search', key: 'ctrl+alt+x' },
-  ])
-  const result = await h.invoke('keybindings', 'conflicts')
-  assert.deepEqual(result, { kind: 'success' })
-  await frames(h.vt)
-  assert.match(h.view(), /View: All · \[Conflicts \(0 affected actions\)\]/u)
-  assert.match(h.view(), /Other runtime conflicts · 1 runtime conflict records/u)
-  assert.match(h.view(), /Key Ctrl\+Alt\+X · 2 actions/u)
-  await press(h.vt, '\r') // the only selectable row: the readonly record
-  assert.match(h.view(), /Runtime conflict record/u)
-  assert.match(h.view(), /submit-draft/u)
-  assert.match(h.view(), /open-search/u)
-  assert.match(h.view(), /Scope: global · Source: plugin/u)
-  const callsBefore = h.fixture!.calls.length
-  await press(h.vt, 'r')
-  await press(h.vt, '\r')
-  assert.equal(h.fixture!.calls.length, callsBefore, 'a readonly runtime record has no writer')
-  await press(h.vt, '\x1b')
-  assert.match(h.view(), /Other runtime conflicts/u, 'Esc returns to the filtered list, not out of Settings')
-  assert.match(h.view(), /Settings · Input & Terminal · Keyboard shortcuts…/u)
-  h.app.stop()
 })
 
 test('/keybindings conflicts degrades with the CURRENT runtime records when settings are absent', async () => {
@@ -1296,36 +1267,6 @@ test('/keybindings conflicts: pointer journey opens c details and returns throug
   await click(view[view.length - 1]!.indexOf('Back [Esc]'), view.length - 1)
   view = lines()
   assert.match(view.join('\n'), /View: All · \[Conflicts/u, 'the second Back returns to the conflicts list')
-  h.app.dispose()
-  startedApps.delete(h.app)
-})
-
-test('/keybindings conflicts: pointer-only readonly record detail → visible Back', async () => {
-  const h = setup({ columns: 120, rows: 40, fixture: createDirectSettingsFixture({ footer: 'default' }) })
-  h.app.keybindingsManager().setPluginRules([
-    { id: 'plugin-a', action: 'submit-draft', key: 'ctrl+alt+x' },
-    { id: 'plugin-b', action: 'open-search', key: 'ctrl+alt+x' },
-  ])
-  await h.invoke('keybindings', 'conflicts')
-  await frames(h.vt)
-  const lines = (): string[] => h.vt.getViewport().map(stripTerminalSequences)
-  const click = async (column: number, row: number): Promise<void> => {
-    h.vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
-    await frames(h.vt)
-    h.vt.sendInput(`\x1b[<0;${column + 1};${row + 1}m`)
-    await frames(h.vt)
-  }
-  let view = lines()
-  const recordRow = view.findIndex(line => line.includes('Key Ctrl+Alt+X · 2 actions'))
-  assert.ok(recordRow >= 0, `the readonly record row is painted:\n${view.join('\n')}`)
-  await click(view[recordRow]!.indexOf('Key Ctrl+Alt+X'), recordRow)
-  view = lines()
-  assert.match(view.join('\n'), /Runtime conflict record/u)
-  assert.match(view.join('\n'), /submit-draft/u)
-  await click(view[view.length - 1]!.indexOf('Back [Esc]'), view.length - 1)
-  view = lines()
-  assert.match(view.join('\n'), /Other runtime conflicts/u, 'the visible Back returned to the Conflicts list')
-  assert.match(view.join('\n'), /Settings · Input & Terminal · Keyboard shortcuts/u)
   h.app.dispose()
   startedApps.delete(h.app)
 })

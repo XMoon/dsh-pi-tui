@@ -3,7 +3,7 @@
  * the shared detail/editor child view.
  */
 
-import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type Focusable } from '@xmoon76/pi-tui'
+import { matchesKey, truncateToWidth, visibleWidth, type Component, type Focusable } from '@xmoon76/pi-tui'
 import { Input } from '@xmoon76/pi-tui'
 import { dispatchMouseEvent } from '@xmoon76/pi-tui'
 import type { TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-tui'
@@ -14,14 +14,12 @@ import { formatKeyId } from '../hints.ts'
 import type { KeyId } from '@xmoon76/pi-tui'
 import {
   formatEditorBindings,
-  isBuiltinKeybindingAction,
   searchKeybindingRows,
   searchMatchesLeader,
   type KeybindingEditorModel,
   type KeybindingEditorRow,
 } from './model.ts'
 import type { KeybindingMutation, KeybindingMutationResult, KeybindingMutationRunner } from './controller.ts'
-import type { KeybindingConflict } from '../types.ts'
 import { ActionEditorPanel } from './action-editor.ts'
 import { KeyRecorder } from './recorder.ts'
 
@@ -45,7 +43,6 @@ type ListEntry =
   | { readonly kind: 'header'; readonly label: string }
   | { readonly kind: 'leader'; readonly id: 'leader' }
   | { readonly kind: 'action'; readonly row: KeybindingEditorRow }
-  | { readonly kind: 'record'; readonly record: KeybindingConflict; readonly id: string }
 
 /** One assembled row of a budgeted panel frame. A `drop` value is the
  * removal priority of an OPTIONAL row (lowest first); a row without one is
@@ -182,28 +179,6 @@ function renderLeaderRow(model: KeybindingEditorModel, selected: boolean, width:
   return truncateToWidth(text, Math.max(1, width))
 }
 
-function recordSearchText(record: KeybindingConflict): string {
-  return [
-    record.key,
-    formatKeyId(record.key),
-    ...record.actions.flatMap(action => [action.action, action.scope, action.source]),
-  ].join(' ').toLowerCase()
-}
-
-function recordMatchesQuery(record: KeybindingConflict, query: string): boolean {
-  const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean)
-  if (terms.length === 0) return true
-  const text = recordSearchText(record)
-  return terms.every(term => text.includes(term))
-}
-
-function renderRecordRow(record: KeybindingConflict, selected: boolean, width: number): string {
-  const marker = selected ? color.primary('›') : ' '
-  const label = `Key ${formatKeyId(record.key)} · ${record.actions.length} action${record.actions.length === 1 ? '' : 's'}`
-  const text = `${marker} ${selected ? color.textStrong(label) : color.text(label)}`
-  return truncateToWidth(text, Math.max(1, width))
-}
-
 /** One half of the painted view-mode row: the complete hit span of one mode. */
 interface FilterSpan {
   readonly mode: KeybindingEditorFilter
@@ -269,10 +244,6 @@ export class KeybindingEditorPanel implements Component, Focusable {
   private selectedIndex = 0
   /** The ONE local view mode (transient, never persisted). */
   private filter: KeybindingEditorFilter
-  /** A read-only runtime conflict record detail, owned by this same panel. */
-  private selectedConflictRecord: { readonly id: string; readonly record: KeybindingConflict } | undefined
-  private recordScroll = 0
-  private recordDetailLineCount = 0
   private actionEditor: ActionEditorPanel | undefined
   private leaderRecorder: KeyRecorder | undefined
   private leaderEditing = false
@@ -359,7 +330,6 @@ export class KeybindingEditorPanel implements Component, Focusable {
   blocksParentNavigation(): boolean {
     return this.query !== ''
       || this.actionEditor !== undefined
-      || this.selectedConflictRecord !== undefined
       || this.leaderEditing
       || this.leaderPending
       || this.settlementAwaitingPaint
@@ -367,7 +337,6 @@ export class KeybindingEditorPanel implements Component, Focusable {
 
   private viewKey(): string {
     if (this.actionEditor !== undefined) return `action:${this.actionEditor.actionId()}`
-    if (this.selectedConflictRecord !== undefined) return `record:${this.selectedConflictRecord.id}`
     if (this.leaderEditing) return 'leader'
     return `list:${this.filter}`
   }
@@ -390,7 +359,6 @@ export class KeybindingEditorPanel implements Component, Focusable {
       this.paintedEscapeSpanValue = this.actionEditor.paintedEscapeSpan()
       return lines
     }
-    if (this.selectedConflictRecord !== undefined) return this.renderConflictRecordDetail(safeWidth)
     if (this.leaderEditing) return this.renderLeaderEditor(safeWidth)
 
     const limit = Math.max(1, this.maxRows())
@@ -522,9 +490,7 @@ export class KeybindingEditorPanel implements Component, Focusable {
           rows.push({
             text: entry.kind === 'leader'
               ? renderLeaderRow(this.model, this.selectedId === 'leader', safeWidth)
-              : entry.kind === 'record'
-                ? renderRecordRow(entry.record, this.selectedId === entry.id, safeWidth)
-                : renderActionRow(entry.row, this.selectedId === entry.row.id, safeWidth),
+              : renderActionRow(entry.row, this.selectedId === entry.row.id, safeWidth),
             hit: { kind: 'select', index: selectableIndex, id: this.entryId(entry) },
           })
         }
@@ -594,55 +560,10 @@ export class KeybindingEditorPanel implements Component, Focusable {
   private emptyListText(): string {
     if (this.filter !== 'conflicts') return 'No matching shortcuts.'
     if (this.query.trim() !== '') return 'No conflicted shortcuts match your search.'
-    if (this.model.conflictCount === 0 && this.model.runtimeConflictRecords.length === 0) {
+    if (this.model.conflictCount === 0) {
       return 'No conflicts in the current keymap.'
     }
     return 'No conflicted shortcuts match your search.'
-  }
-
-  private renderConflictRecordDetail(width: number): string[] {
-    const selection = this.selectedConflictRecord!
-    const record = selection.record
-    const limit = Math.max(1, this.maxRows())
-    const lines: string[] = [
-      color.textStrong('Runtime conflict record'),
-      '',
-      color.text(`Key: ${formatKeyId(record.key)}`),
-      color.textDim(`Actions: ${record.actions.length}`),
-      '',
-    ]
-    for (const action of record.actions) {
-      lines.push(color.text(`  ${action.action}`))
-      lines.push(color.textDim(`    Scope: ${action.scope} · Source: ${action.source}`))
-    }
-    const bar = escapeWording('', 'Back')
-    if (limit === 1) {
-      this.hitMap = [{ kind: 'inert' }]
-      this.paintedSelectableIds = new Set()
-      this.paintedEscapeSpanValue = bar.escape
-      return [paintBarWording(bar)]
-    }
-    // Wrap first, then scroll: a long key/action/scope/source field stays
-    // reachable at narrow widths instead of being silently clipped.
-    const wrapped = lines.flatMap(line => wrapTextWithAnsi(line, Math.max(1, width)))
-    this.recordDetailLineCount = wrapped.length
-    const bodyLimit = limit - 1
-    const maxStart = Math.max(0, wrapped.length - bodyLimit)
-    this.recordScroll = Math.min(Math.max(0, this.recordScroll), maxStart)
-    let body = wrapped.slice(this.recordScroll, this.recordScroll + bodyLimit)
-    // At a two-row body a scroll marker would consume one of the only two
-    // content rows, leaving the field text permanently unreachable; below
-    // three rows keep the real lines instead.
-    if (bodyLimit >= 3) {
-      if (this.recordScroll > 0) body = [color.textDim(`↑ ${this.recordScroll} more lines`), ...body.slice(1)]
-      const remaining = wrapped.length - (this.recordScroll + body.length)
-      if (remaining > 0) body = [...body.slice(0, -1), color.textDim(`↓ ${remaining} more lines`)]
-    }
-    const rendered = [...body, paintBarWording(bar)]
-    this.hitMap = rendered.map(() => ({ kind: 'inert' as const }))
-    this.paintedSelectableIds = new Set()
-    this.paintedEscapeSpanValue = bar.escape
-    return rendered.map(line => truncateToWidth(line, Math.max(1, width)))
   }
 
   /** The search row: the `Search: ` label combined with the shared
@@ -669,10 +590,6 @@ export class KeybindingEditorPanel implements Component, Focusable {
     if (this.disposed) return
     if (this.actionEditor !== undefined) {
       this.actionEditor.handleInput(data)
-      return
-    }
-    if (this.selectedConflictRecord !== undefined) {
-      this.handleRecordDetailInput(data)
       return
     }
     if (this.leaderEditing) {
@@ -787,13 +704,6 @@ export class KeybindingEditorPanel implements Component, Focusable {
     // geometry (last-painted geometry is authoritative).
     if (event.width !== this.lastRenderWidth) return undefined
     if (this.actionEditor !== undefined) return this.actionEditor.handleMouse?.(event)
-    if (this.selectedConflictRecord !== undefined) {
-      if (event.type === 'wheel' && event.wheelDelta) {
-        this.scrollRecordDetail(event.wheelDelta < 0 ? -1 : 1)
-        return { handled: true, render: true }
-      }
-      return undefined
-    }
     if (this.leaderEditing) return undefined
     const hit = this.hitMap[event.y]
     if (!hit) return undefined
@@ -931,7 +841,6 @@ export class KeybindingEditorPanel implements Component, Focusable {
     this.mutationGeneration += 1
     this.actionEditor?.dispose?.()
     this.actionEditor = undefined
-    this.selectedConflictRecord = undefined
     this.leaderRecorder?.dispose()
     this.leaderRecorder = undefined
     this.onDispose()
@@ -952,9 +861,9 @@ export class KeybindingEditorPanel implements Component, Focusable {
     return entries
   }
 
-  /** The Conflicts view: only affected editable builtin actions plus the
-   *  runtime records that have NO editable builtin counterpart. The record
-   *  rows are read-only diagnostics — never a KeybindingDefinition. */
+  /** The Conflicts view: only affected editable builtin actions. Every
+   *  production conflict record has a builtin/user participant, so the
+   *  action rows are the complete projection. */
   private displayConflictEntries(): readonly ListEntry[] {
     const entries: ListEntry[] = []
     const matches = searchKeybindingRows(this.model.rows, this.query)
@@ -967,32 +876,8 @@ export class KeybindingEditorPanel implements Component, Focusable {
       for (const row of rows) affected.push({ kind: 'action', row })
     }
     if (affected.length > 0) {
-      // The runtime RECORD count is stated beside the section that lists the
-      // affected ACTIONS: the two numbers are never conflated (the mode row's
-      // `N affected actions` is the builtin Action count).
-      entries.push({
-        kind: 'header',
-        label: this.model.runtimeConflictRecords.length === 0
-          ? 'Affected actions'
-          : `Affected actions · ${this.model.runtimeConflictRecords.length} runtime conflict records`,
-      })
+      entries.push({ kind: 'header', label: 'Affected actions' })
       entries.push(...affected)
-    }
-    // "Other" records have no action that maps to a built-in definition; a
-    // mixed record is fully represented by its affected action rows (and its
-    // counterpart is described inside that Action's detail).
-    const otherRecords = this.model.runtimeConflictRecords
-      .map((record, index) => ({ record, index }))
-      .filter(({ record }) => record.actions.every(action => !isBuiltinKeybindingAction(action.action)))
-      .filter(({ record }) => recordMatchesQuery(record, this.query))
-    if (otherRecords.length > 0) {
-      entries.push({
-        kind: 'header',
-        label: `Other runtime conflicts · ${this.model.runtimeConflictRecords.length} runtime conflict records`,
-      })
-      for (const { record, index } of otherRecords) {
-        entries.push({ kind: 'record', record, id: `record:${index}:${record.key}` })
-      }
     }
     return entries
   }
@@ -1004,7 +889,6 @@ export class KeybindingEditorPanel implements Component, Focusable {
   private isSelectedEntry(entry: ListEntry): boolean {
     if (entry.kind === 'leader') return this.selectedId === 'leader'
     if (entry.kind === 'action') return this.selectedId === entry.row.id
-    if (entry.kind === 'record') return this.selectedId === entry.id
     return false
   }
 
@@ -1026,7 +910,6 @@ export class KeybindingEditorPanel implements Component, Focusable {
   private entryId(entry: ListEntry): string {
     if (entry.kind === 'leader') return 'leader'
     if (entry.kind === 'action') return entry.row.id
-    if (entry.kind === 'record') return entry.id
     return ''
   }
 
@@ -1046,15 +929,6 @@ export class KeybindingEditorPanel implements Component, Focusable {
     if (selected === undefined) return
     if (selected.kind === 'leader') {
       this.leaderEditing = true
-      this.message = undefined
-      this.requestRender()
-      return
-    }
-    if (selected.kind === 'record') {
-      // A read-only runtime record: this stays a transient sub-view of THIS
-      // panel — no second Settings page, controller or ConfigPort.
-      this.selectedConflictRecord = { id: selected.id, record: selected.record }
-      this.recordScroll = 0
       this.message = undefined
       this.requestRender()
       return
@@ -1099,42 +973,8 @@ export class KeybindingEditorPanel implements Component, Focusable {
     this.mousePressedGrant = undefined
     this.mousePressedView = undefined
     this.mousePressedFilter = undefined
-    this.selectedConflictRecord = undefined
-    this.recordScroll = 0
     this.message = undefined
     this.ensureSelection(this.selectableEntries(this.displayEntries()))
-    this.requestRender()
-  }
-
-  private handleRecordDetailInput(data: string): void {
-    if (matchesKey(data, 'escape')) {
-      this.selectedConflictRecord = undefined
-      this.recordScroll = 0
-      this.requestRender()
-      return
-    }
-    if (matchesKey(data, 'up')) {
-      this.scrollRecordDetail(-1)
-      return
-    }
-    if (matchesKey(data, 'down')) {
-      this.scrollRecordDetail(1)
-      return
-    }
-    if (matchesKey(data, 'pageUp')) {
-      this.scrollRecordDetail(-Math.max(1, this.maxRows() - 2))
-      return
-    }
-    if (matchesKey(data, 'pageDown')) {
-      this.scrollRecordDetail(Math.max(1, this.maxRows() - 2))
-    }
-  }
-
-  private scrollRecordDetail(delta: number): void {
-    if (this.selectedConflictRecord === undefined) return
-    const bodyLimit = Math.max(1, this.maxRows() - 1)
-    const maxStart = Math.max(0, this.recordDetailLineCount - bodyLimit)
-    this.recordScroll = Math.min(maxStart, Math.max(0, this.recordScroll + delta))
     this.requestRender()
   }
 

@@ -1937,7 +1937,7 @@ test('the recorder publishes Cancel [Esc] for a real cancel, never for interrupt
   }
 })
 
-// ── UX PR2: All / Conflicts view modes and readonly runtime records ────────
+// ── UX PR2: All / Conflicts view modes ───────────────────────────────────
 
 function conflictPanel(options: { readonly initialFilter?: 'all' | 'conflicts' } = {}) {
   const manager = new HostKeybindingManager()
@@ -1985,47 +1985,6 @@ test('keybinding editor: Tab switches All ↔ Conflicts without a write and pres
   }
 })
 
-test('keybinding editor: plugin-only runtime conflicts stay read-only and readable', () => {
-  const manager = new HostKeybindingManager()
-  manager.setPluginRules([
-    { id: 'plugin-a', action: 'submit-draft', key: 'ctrl+alt+x' },
-    { id: 'plugin-b', action: 'open-search', key: 'ctrl+alt+x' },
-  ])
-  const parsed = parseUserKeybindings(undefined)
-  manager.setUserConfiguration(parsed)
-  const mutations: unknown[] = []
-  const panel = new KeybindingEditorPanel({
-    model: buildKeybindingEditorModel(manager, parsed),
-    initialFilter: 'conflicts',
-    onClose: () => {},
-    runMutation: mutation => { mutations.push(mutation) },
-    maxRows: () => 30,
-  })
-  try {
-    let view = plain(panel.render(88).join('\n'))
-    assert.match(view, /View: All · \[Conflicts \(0 affected actions\)\]/u)
-    assert.match(view, /Other runtime conflicts · 1 runtime conflict records/u)
-    assert.match(view, /Key Ctrl\+Alt\+X · 2 actions/u)
-    panel.handleInput('\r') // the only selectable row is the readonly record
-    view = plain(panel.render(88).join('\n'))
-    assert.match(view, /Runtime conflict record/u)
-    assert.match(view, /Key: Ctrl\+Alt\+X/u)
-    assert.match(view, /submit-draft/u)
-    assert.match(view, /open-search/u)
-    assert.match(view, /Scope: global · Source: plugin/u)
-    panel.handleInput('r')
-    panel.handleInput('\r')
-    assert.deepEqual(mutations, [], 'the readonly record detail has no writer route')
-    panel.handleInput('\x1b')
-    view = plain(panel.render(88).join('\n'))
-    assert.match(view, /Other runtime conflicts/u, 'Esc returns to the filtered list')
-    assert.match(view, /View: All · \[Conflicts/u)
-  } finally {
-    panel.dispose()
-    manager.dispose()
-  }
-})
-
 test('keybinding editor: zero conflicts opens the empty Conflicts page and leaves All reachable', () => {
   const { manager, panel } = makePanel(() => {})
   try {
@@ -2036,7 +1995,6 @@ test('keybinding editor: zero conflicts opens the empty Conflicts page and leave
     let view = plain(panel.render(88).join('\n'))
     assert.match(view, /View: All · \[Conflicts \(0 affected actions\)\]/u)
     assert.match(view, /No conflicts in the current keymap\./u)
-    assert.doesNotMatch(view, /Other runtime conflicts/u)
     panel.handleInput('\t')
     view = plain(panel.render(88).join('\n'))
     assert.match(view, /View: \[All\]/u)
@@ -2108,86 +2066,6 @@ test('keybinding editor: a narrow/absent mode row makes Tab and spans inert', ()
     assert.doesNotMatch(two, /Tab view/u, 'the two-row bar must not advertise the hidden mode switch')
     panel.handleInput('\t')
     assert.match(plain(panel.render(88).join('\n')), /^Search: /mu)
-  } finally {
-    panel.dispose()
-    manager.dispose()
-  }
-})
-
-test('action editor: a runtime record with a non-builtin counterpart is stated read-only', () => {
-  const manager = new HostKeybindingManager()
-  const parsed = parseUserKeybindings(undefined)
-  manager.setUserConfiguration(parsed)
-  const base = buildKeybindingEditorModel(manager, parsed)
-  // Display projection only: the current resolver priority table shadows a
-  // plugin rule below a builtin/user rule, so this record shape is not produced
-  // by the live manager today. The read-only projection must still never drop a
-  // non-builtin counterpart if one is present in the model.
-  const model = {
-    ...base,
-    runtimeConflictRecords: [{
-      key: 'ctrl+alt+x' as const,
-      actions: [
-        { action: 'app.input.submit', scope: 'editor' as const, source: 'user' as const, ruleId: 'builtin:user' },
-        { action: 'submit-draft', scope: 'global' as const, source: 'plugin' as const, ruleId: 'plugin:plugin-a' },
-      ],
-    }],
-  }
-  const row = model.rows.find(candidate => candidate.id === 'app.input.submit')!
-  const editor = new ActionEditorPanel({
-    model,
-    action: row,
-    runMutation: () => {},
-    onModelChange: () => {},
-    onBack: () => {},
-  })
-  try {
-    const view = plain(editor.render(88).join('\n'))
-    assert.match(view, /Related runtime conflicts/u)
-    assert.match(view, /Key Ctrl\+Alt\+X: app\.input\.submit \(editor, user\) vs submit-draft \(global, plugin\)/u)
-  } finally {
-    editor.dispose()
-    manager.dispose()
-  }
-})
-
-test('keybinding editor: a short-grant readonly record detail keeps every field reachable', () => {
-  const manager = new HostKeybindingManager()
-  manager.setPluginRules([
-    { id: 'plugin-a', action: 'submit-draft-with-a-very-long-action-name', key: 'ctrl+alt+x' },
-    { id: 'plugin-b', action: 'open-search-with-another-very-long-action-name', key: 'ctrl+alt+x' },
-  ])
-  const parsed = parseUserKeybindings(undefined)
-  manager.setUserConfiguration(parsed)
-  let rows = 30
-  const panel = new KeybindingEditorPanel({
-    model: buildKeybindingEditorModel(manager, parsed),
-    initialFilter: 'conflicts',
-    onClose: () => {},
-    runMutation: () => {},
-    maxRows: () => rows,
-  })
-  try {
-    panel.render(36)
-    panel.handleInput('\r') // open the readonly record at the full grant
-    rows = 3 // then exercise its short-grant scroll port
-    const seen: string[] = []
-    for (let step = 0; step < 12; step += 1) {
-      seen.push(plain(panel.render(36).join('\n')))
-      panel.handleInput('\x1b[6~') // PageDown
-    }
-    const bodies = seen.map(frame => frame.split('\n').slice(0, -1).join('')).join('\n')
-    assert.match(bodies, /submit-draft-with-a-very-long-action-name/u, 'the first long action is reachable across its wrapped lines')
-    assert.match(bodies, /open-search-with-another-very-long-action-name/u, 'the second long action is reachable across its wrapped lines')
-    assert.match(bodies, /Scope: global · Source: plugin/u, 'the scope/source line is reachable')
-    // The back row stays the ONE last row on every short frame.
-    for (const frame of seen) assert.match(frame.split('\n').at(-1)!, /Back \[Esc\]/u)
-    // Every short frame still contains at least one real content line, never
-    // two scroll markers with no field text.
-    for (const frame of seen) {
-      const body = frame.split('\n').slice(0, -1)
-      if (body.length > 0) assert.ok(body.some(line => !/^[↑↓] \d+ more lines$/u.test(line)), 'a marker must not consume the whole body')
-    }
   } finally {
     panel.dispose()
     manager.dispose()

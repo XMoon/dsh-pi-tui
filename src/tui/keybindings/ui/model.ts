@@ -12,7 +12,7 @@ import { formatKeyId, formatLeaderSequence } from '../hints.ts'
 import type { HostKeybindingManager } from '../manager.ts'
 import type { ParsedUserKeybindings } from '../config.ts'
 import type { KeyId } from '@xmoon76/pi-tui'
-import type { AppKeybindingDefinition, AppKeybindingId, KeybindingConflict, KeybindingSource } from '../types.ts'
+import type { AppKeybindingDefinition, AppKeybindingId, KeybindingSource } from '../types.ts'
 
 export type KeybindingEditorBindingKind = 'direct' | 'leader'
 
@@ -84,16 +84,7 @@ export interface KeybindingEditorModel {
   readonly disabledCount: number
   /** Affected EDITABLE BUILTIN action rows — never the runtime record count. */
   readonly conflictCount: number
-  /** The SAME `manager.snapshot()` conflict records, projected read-only.
-   * A record may name plugin-only actions that have no editable row. */
-  readonly runtimeConflictRecords: readonly KeybindingConflict[]
   readonly summary: string
-}
-
-/** Whether a runtime rule action id is one of the built-in editable
- * definitions. Plugin-only ids must stay read-only. */
-export function isBuiltinKeybindingAction(action: string): action is AppKeybindingId {
-  return Object.prototype.hasOwnProperty.call(APP_KEYBINDINGS, action)
 }
 
 const LABELS: Readonly<Partial<Record<AppKeybindingId, string>>> = {
@@ -333,7 +324,6 @@ export function buildKeybindingEditorModel(
     customizedCount,
     disabledCount,
     conflictCount,
-    runtimeConflictRecords: snapshot.conflicts,
     summary,
   }
 }
