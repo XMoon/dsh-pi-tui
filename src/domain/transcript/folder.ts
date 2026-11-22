@@ -5121,6 +5121,7 @@ export class TranscriptFolder {
           || (sourcePresentation.sourceKind === 'repeat-tool-reminder' && sourcePresentation.form === 'notice')
           || (sourcePresentation.sourceKind === 'ptc-mode'
             && sourcePresentation.form === undefined
+            && sourcePresentation.formDeclared !== true
             && blocks.some(block => block.type === 'image'))
         )
         if (sourcePresentation.sourceKind === 'user') {

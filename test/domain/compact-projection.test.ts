@@ -20,6 +20,7 @@ import {
 } from '../../src/tui/transcript/context-structure.ts'
 import { contextPresentation, isTranscriptContextForm } from '../../src/domain/transcript/context-semantics.ts'
 import { projectCompact } from '../../src/tui/transcript/compact-projection.ts'
+import { projectFocus } from '../../src/tui/transcript/focus-projection.ts'
 import { clusterByMemberOf, isWorkingAgentRelay, isWorkingPtcImageContext, isWorkingRepeatToolReminderNotice, isWorkingSubagentSettledNotice, isWorkingToolJobsNotice, projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
 import { formatWorkHeaderLine, compactWorkBody, CompactWorkComponent } from '../../src/tui/components/transcript/compact-work.ts'
 import { summarizeWorkSpan } from '../../src/tui/transcript/work-summary.ts'
@@ -95,31 +96,31 @@ function kindsOf(blocks: ReturnType<typeof projectCompact>): string[] {
 
 test('contextPresentation records the producer-declared form, kind and sender', () => {
   assert.deepEqual(contextPresentation({ kind: 'agent-instructions', form: 'instructions', changes: [{ path: 'AGENTS.md' }] }), {
-    form: 'instructions', sourceKind: 'agent-instructions', role: 'inject',
+    form: 'instructions', formDeclared: true, sourceKind: 'agent-instructions', role: 'inject',
   })
   assert.deepEqual(contextPresentation({ kind: 'skill-invocation', form: 'catalog', name: 'review-fix-loop' }), {
-    form: 'catalog', sourceKind: 'skill-invocation', role: 'inject',
+    form: 'catalog', formDeclared: true, sourceKind: 'skill-invocation', role: 'inject',
   })
   assert.deepEqual(contextPresentation({ kind: 'plugin', form: 'snapshot', plugin: 'runtime-context' }), {
-    form: 'snapshot', sourceKind: 'plugin', role: 'inject',
+    form: 'snapshot', formDeclared: true, sourceKind: 'plugin', role: 'inject',
   })
   assert.deepEqual(contextPresentation({ kind: 'subagent-settled', form: 'notice', summary: 'child settled', senderSessionId: 'child-1' }), {
-    form: 'notice', sourceKind: 'subagent-settled', senderSessionId: 'child-1', role: 'inject',
+    form: 'notice', formDeclared: true, sourceKind: 'subagent-settled', senderSessionId: 'child-1', role: 'inject',
   })
   assert.deepEqual(contextPresentation({ kind: 'agent-message', form: 'relay', senderSessionId: 'child-2' }), {
-    form: 'relay', sourceKind: 'agent-message', senderSessionId: 'child-2', role: 'inject',
+    form: 'relay', formDeclared: true, sourceKind: 'agent-message', senderSessionId: 'child-2', role: 'inject',
   })
   assert.deepEqual(contextPresentation({ kind: 'session-reference', form: 'recall', references: [{ label: 'prior work' }] }), {
-    form: 'recall', sourceKind: 'session-reference', role: 'recall',
+    form: 'recall', formDeclared: true, sourceKind: 'session-reference', role: 'recall',
   })
 })
 
-test('unknown, missing and future forms fail open with no declared form', () => {
+test('unknown, missing and future forms fail open without a semantic form', () => {
   assert.deepEqual(contextPresentation({ kind: 'plugin', plugin: 'legacy-injector' }), {
     sourceKind: 'plugin', role: 'inject',
   })
   assert.deepEqual(contextPresentation({ kind: 'plugin', form: 'future-form', plugin: 'p' }), {
-    sourceKind: 'plugin', role: 'inject',
+    formDeclared: true, sourceKind: 'plugin', role: 'inject',
   })
   assert.deepEqual(contextPresentation(undefined), { role: 'inject' })
   assert.equal(isTranscriptContextForm('future-form'), false)
@@ -129,7 +130,7 @@ test('unknown, missing and future forms fail open with no declared form', () => 
 test('the fold retains form-aware provenance on real injected sources', () => {
   const instructions = foldContext({ kind: 'agent-instructions', form: 'instructions', changes: [{ path: 'AGENTS.md' }] })
   assert.deepEqual(instructions.kind === 'system' ? instructions.contextPresentation : undefined, {
-    form: 'instructions', sourceKind: 'agent-instructions', role: 'inject',
+    form: 'instructions', formDeclared: true, sourceKind: 'agent-instructions', role: 'inject',
   })
   assert.equal(instructions.kind === 'system' ? instructions.label : undefined, 'AGENTS.md')
 
@@ -1541,6 +1542,42 @@ test('a PTC image Context never qualifies without the exact same-turn claim and 
   assert.ok(foreignRow !== undefined && foreignRow.kind === 'system')
   assert.equal(foreignRow.contextPresentation?.sameTurnNextStep, undefined,
     'only the ptc-mode producer may qualify by image content')
+})
+
+test('an unknown or non-string declared PTC form stays an independent Context even with image and claim', () => {
+  for (const [label, form] of [['unknown', 'future-custom'], ['non-string', 42]] as const) {
+    const message = {
+      id: MessageId(`declared-${label}-ptc-image`), role: 'user',
+      content: [{ type: 'image', attachment: PTC_IMAGE_ATTACHMENT }],
+      source: { kind: 'ptc-mode', form },
+    }
+    const folder = new TranscriptFolder()
+    apply(folder, [
+      eventAt('turn/start', { turn: 0 }, 1000, 0),
+      toolCallEvent(0, `declared-${label}-a`, 1),
+      toolResultEvent(0, `declared-${label}-a`, 2),
+      eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [message] }, 1003, 3),
+      eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 1003.1, 4),
+      eventAt('user/message', message, 1003.2, 5),
+      toolCallEvent(0, `declared-${label}-b`, 6),
+      toolResultEvent(0, `declared-${label}-b`, 7),
+    ])
+    const row = folder.messages().find(candidate => candidate.kind === 'system')
+    assert.ok(row !== undefined && row.kind === 'system', label)
+    assert.equal(row.contextPresentation?.form, undefined, `${label}: no semantic form is invented`)
+    assert.equal(row.contextPresentation?.formDeclared, true, `${label}: the raw declaration is retained`)
+    assert.equal(row.contextPresentation?.sameTurnNextStep, undefined,
+      `${label}: a declared form fails the formless-PTC carriage contract`)
+    assert.equal(isWorkingPtcImageContext(row), false, label)
+    assert.equal(row.content !== undefined, true, `${label}: structured media projection survives independently`)
+    assert.deepEqual(projectTranscriptStructure(folder.messages()).map(block => block.kind),
+      ['work', 'message', 'work'], `${label}: the malformed PTC row remains a boundary`)
+    const compact = projectCompact(folder.messages(), noOptions)
+    assert.deepEqual(kindsOf(compact), ['work', 'system', 'work'], `${label}: Compact keeps the Context standalone`)
+    const focus = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
+    assert.ok(focus.some(block => block.kind === 'message' && block.message === row),
+      `${label}: collapsed Focus keeps the independent Context visible`)
+  }
 })
 
 test('a proven PTC image Context without a real Process fails open and a later steer keeps it a boundary', () => {

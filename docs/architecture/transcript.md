@@ -406,9 +406,14 @@ flat text (which carries the same attachment markers) is never painted beside
 the blocks. The image occurrences belong to the Context message object and keep
 their source ordinals for the existing `/view-image`/native-image flows; a
 loader-less or image-incapable host paints the readable identity/marker and
-records a metadata-only occurrence instead of reading bytes. Text-only
-`ptc-mode` Spill/environment-reset Context keeps the ordinary generic Context
-body verbatim.
+records a metadata-only occurrence instead of reading bytes. This structured
+media projection is form-neutral even for a malformed/foreign PTC row that
+declares a form: the row remains an independent Context, and PiTui uses the
+generic labeled Context row (never a text-only specialized row) so the ordered
+image body and `/view-image` occurrence stay reachable; TSP likewise renders
+the same blocks through its Context body path. Text-only `ptc-mode`
+Spill/environment-reset Context keeps the ordinary generic Context body
+verbatim.
 
 ### Ambient clustering
 
@@ -502,10 +507,12 @@ narrow exception, never a generic notice/relay/context rule:
   source/form pair (`tool-jobs`/`notice`, `agent-message`/`relay`,
   `subagent-settled`/`notice` or `repeat-tool-reminder`/`notice`) or the
   structured `ptc-mode` + at least one real `image` ContentBlock fact
-  (`isPtcImageContext`) + NO declared `form` (the producer has none; a
-  `ptc-mode` row that declares any form is a malformed/foreign source and
-  fails open, and none is invented) + the fold's presentation-only
-  `contextPresentation.sameTurnNextStep` flag. That flag is derived by the
+  (`isPtcImageContext`) + NO declared `form` at all + the fold's
+  presentation-only `contextPresentation.sameTurnNextStep` flag. The fold
+  retains the raw presence (`contextPresentation.formDeclared`) separately
+  from the recognized semantic `form`, because an unknown or non-string form
+  must also fail open; a `ptc-mode` row that declares any form is a
+  malformed/foreign source and none is invented. That flag is derived by the
   `TranscriptFolder` from the durable `agent/inbox/spliced` insert/claim
   identity chain (the same message id inserted into `next-step`, claimed, then
   materialized as `user/message` in the SAME turn) — never from

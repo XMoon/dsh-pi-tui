@@ -262,6 +262,7 @@ export function isWorkingPtcImageContext(
   const presentation = message.contextPresentation
   return presentation !== undefined
     && presentation.form === undefined
+    && presentation.formDeclared !== true
     && presentation.sameTurnNextStep === true
 }
 

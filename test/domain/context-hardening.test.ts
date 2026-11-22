@@ -134,6 +134,23 @@ test('unknown, empty and future forms fail open to generic standalone Context', 
   assert.equal(clusterAdjacentAmbientContext([a, b]).clusters.length, 0, 'future forms never cluster')
 })
 
+test('a declared-but-unknown or non-string form preserves its raw presence', () => {
+  for (const [name, source] of [
+    ['unknown string', { kind: 'ptc-mode', form: 'future-custom' }],
+    ['non-string', { kind: 'ptc-mode', form: 42 }],
+  ] as const) {
+    const presentation = contextPresentation(source)
+    assert.equal(presentation.form, undefined, `${name}: not coerced into a known form`)
+    assert.equal(presentation.formDeclared, true, `${name}: raw presence is retained`)
+  }
+  const absent = contextPresentation({ kind: 'ptc-mode' })
+  assert.equal(absent.form, undefined)
+  assert.equal(absent.formDeclared, undefined, 'an omitted form is distinguishable from a declared unknown form')
+  const known = contextPresentation({ kind: 'ptc-mode', form: 'notice' })
+  assert.equal(known.form, 'notice')
+  assert.equal(known.formDeclared, true)
+})
+
 // --- 4.2 legacy recall fallback -------------------------------------------
 
 test('a legacy session-reference stays recall with a missing, matching or unknown form', () => {

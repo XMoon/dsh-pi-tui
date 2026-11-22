@@ -48,6 +48,14 @@ export type TranscriptContextForm =
 export interface TranscriptContextPresentation {
   /** The producer-declared form; undefined for unknown/legacy producers. */
   readonly form?: TranscriptContextForm
+  /**
+   * True when the logged source CONTAINED a `form` member, even when its value
+   * was unknown or non-string. `form` stays the recognized semantic value only;
+   * this presence fact lets a consumer distinguish "the producer omitted
+   * form" from "the producer declared something this version does not
+   * understand" without retaining raw foreign values. Presentation-only.
+   */
+  readonly formDeclared?: true
   /** The raw source `kind` (who produced it), when readable. */
   readonly sourceKind?: string
   /** The sending session for relay/notice forms, when present. */

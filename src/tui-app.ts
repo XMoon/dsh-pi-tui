@@ -21980,9 +21980,12 @@ export class TuiApp {
     if (message.kind === 'system') {
       // Form-aware surfaced Context: a known notice/relay/recall form owns a
       // standalone presentation (producer summary, Agent message, Session
-      // recall). Every other injected row — and every non-context system row —
-      // keeps the existing Context-injection / section-marker presentation.
-      if (isSurfacedContext(message)) {
+      // recall). An image-bearing PTC row is the exception: a foreign declared
+      // form must still keep its ordered structured media on the generic
+      // Context path (the specialized rows paint flat text only), and the
+      // malformed/form-bearing row stays independent because carriage already
+      // requires a genuinely absent form.
+      if (isSurfacedContext(message) && !isPtcImageContext(message)) {
         const kind = contextPresentationKind(message)
         const rowOptions = {
           message,

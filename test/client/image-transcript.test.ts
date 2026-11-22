@@ -315,10 +315,14 @@ test('a JPEG/WebP message keeps its ORIGINAL refs, block order and model-facing 
 
 /** One real PTC Context delivery: `user/message` with producer source
  * `ptc-mode` and the nested sub-call's image-bearing content blocks. */
-function ptcContextEvent(blocks: readonly unknown[], id = 'ptc-context-1'): never {
+function ptcContextEvent(
+  blocks: readonly unknown[],
+  id = 'ptc-context-1',
+  source: Record<string, unknown> = { kind: 'ptc-mode' },
+): never {
   return {
     type: 'user/message', seq: 1, time: 1,
-    data: { id, role: 'user', content: blocks, source: { kind: 'ptc-mode' } },
+    data: { id, role: 'user', content: blocks, source },
   } as never
 }
 
@@ -399,6 +403,42 @@ test('a text-only PTC context and every non-PTC Context keep no structured conte
   assert.equal(foreignRow.kind, 'system')
   if (foreignRow.kind === 'system') assert.equal(foreignRow.content, undefined,
     'only the ptc-mode producer gets the structured image projection')
+})
+
+test('a form-bearing PTC image keeps its structured media on the generic PiTui row', async () => {
+  const { vt, app } = startAppWithLoader()
+  const folder = new TranscriptFolder()
+  folder.apply([ptcContextEvent([
+    { type: 'text', text: 'foreign before ' },
+    { type: 'image', attachment: IMAGE_REF },
+    { type: 'text', text: ' foreign after' },
+  ], 'form-bearing-ptc', { kind: 'ptc-mode', form: 'notice', summary: 'foreign producer' })])
+  const row = folder.messages().find(message => message.kind === 'system')
+  assert.ok(row !== undefined && row.kind === 'system')
+  assert.equal(row.contextPresentation?.form, 'notice')
+  assert.equal(row.contextPresentation?.formDeclared, true)
+  assert.equal(row.contextPresentation?.sameTurnNextStep, undefined,
+    'a form-bearing PTC row stays independent (no carriage claim was present)')
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  await new Promise(resolve => setTimeout(resolve, 30))
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Context injection ptc-mode'), `the generic labeled row is painted:\n${view}`)
+  assert.ok(view.includes('🖼️ shot.png'), `the structured image is painted, not only flat text:\n${view}`)
+  assert.ok(view.includes('800×600'), `the image identity line is painted:\n${view}`)
+  assert.ok(view.includes('foreign before') && view.includes('foreign after'),
+    'the ordered text blocks stay around the image')
+  const internals = app as unknown as {
+    mountedImageOccurrences(): { imageIndex: number; ref: { name?: string } }[]
+  }
+  const occurrences = internals.mountedImageOccurrences()
+  assert.equal(occurrences.length, 1, 'the form-bearing PTC image is a real viewer occurrence')
+  assert.equal(occurrences[0]?.imageIndex, 0)
+  assert.equal(occurrences[0]?.ref.name, 'shot.png')
+  app.stop()
 })
 
 test('an expanded PTC context renders its image inside the row and is a mounted occurrence', async () => {
