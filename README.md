@@ -7,7 +7,7 @@
 
 **面向 DeepSeek Harness 的终端交互界面；一个 Host，让终端、Web 和 ACP 客户端访问同一个 Agent Session。**
 
-默认以 **Direct** 模式运行，开箱即用；从 **0.5.7** 起，可在 Linux/macOS 显式选择 **Daemon**：独立的本地 Host 持有 Session 和执行中的工作，终端 Client 可以断开、重新连接；其他 TUI、官方 Web 与本地 ACP 客户端也可以访问同一 Host 的会话。
+默认以 **Direct** 模式运行，开箱即用；从 **0.5.8** 起，可在 Linux/macOS 显式选择 **Daemon**：独立的本地 Host 持有 Session 和执行中的工作，终端 Client 可以断开、重新连接；其他 TUI、官方 Web 与本地 ACP 客户端也可以访问同一 Host 的会话。
 
 Agent Loop、模型、工具、持久化、权限和并发写入权威都属于 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)；`dsh-pi-tui` 是第三方前端，而不是另一套 Agent Runtime。
 
@@ -21,7 +21,7 @@ Agent Loop、模型、工具、持久化、权限和并发写入权威都属于 
 
 ### Stable / latest
 
-**0.5.7 是当前最新稳定版（npm `@latest`）**。推荐搭配 **DSH 0.2.2-rc.5**；先安装 DeepSeek Harness，再将 TUI 添加到 `pi-tui` Profile：
+**0.5.8 是当前最新稳定版（npm `@latest`）**。推荐搭配 **DSH 0.2.2-rc.5**；先安装 DeepSeek Harness，再将 TUI 添加到 `pi-tui` Profile：
 
 ~~~sh
 npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.5
@@ -29,22 +29,24 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
 dsh --profile pi-tui
 ~~~
 
-### 精确版本配对（0.5.7）
+### 精确版本配对（0.5.8）
 
-**0.5.7 要求 Node.js ≥24.9.0、DSH ≥0.2.2-rc.3，推荐使用 DSH 0.2.2-rc.5**（本版本的精确验证目标）。需要可复现安装时，固定两个包的版本：
+**0.5.8 要求 Node.js ≥24.9.0、DSH ≥0.2.2-rc.3，推荐使用 DSH 0.2.2-rc.5**（本版本的精确验证目标）。需要可复现安装时，固定两个包的版本：
 
 ~~~sh
 npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.5
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.7
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.8
 dsh --profile pi-tui
 ~~~
 
 | TUI | DSH | 状态 |
 |---|---|---|
-| `0.5.7` | `>=0.2.2-rc.3`；推荐 `0.2.2-rc.5` | **当前 latest** |
+| `0.5.8` | `>=0.2.2-rc.3`；推荐 `0.2.2-rc.5` | **当前 latest** |
 | `0.5.6` | `0.2.2-rc.1` | 上一版本 |
 
-**升级注意**：跨 DSH Runtime 升级必须先完成正在运行的 Turn/Job、停止旧 Host 并备份 Profile、Session 与所需数据；不保证跨 DSH 数据 Schema 的原地回退。不要将 0.5.7 配到 DSH rc.2 或更早版本。完整配对和恢复方法见[兼容性指南](docs/guides/dsh-compatibility.md)。
+**0.5.8 干净安装**：只需执行上面的 DSH 插件安装命令，不需要手动安装 `@deepseek-ai/dsh-client-store`、`zustand` 或 `immer`。Daemon Client 自身启动失败时会提供 `$DSH_HOME/logs/pi-tui-client/startup-*.log` 诊断文件位置；`daemon logs` 仅查看 Host 日志。
+
+**升级注意**：跨 DSH Runtime 升级必须先完成正在运行的 Turn/Job、停止旧 Host 并备份 Profile、Session 与所需数据；不保证跨 DSH 数据 Schema 的原地回退。不要将 0.5.8 配到 DSH rc.2 或更早版本。完整配对和恢复方法见[兼容性指南](docs/guides/dsh-compatibility.md)。
 
 ### Next / npm 线（验证）
 
@@ -60,7 +62,7 @@ dsh --profile pi-tui
 
 ### 两种运行方式，同一套 DSH 会话语义
 
-| | Direct（默认） | Daemon（0.5.7 起，可选） |
+| | Direct（默认） | Daemon（0.5.8 起，可选） |
 |---|---|---|
 | 启动 | `dsh --profile pi-tui` | `DSH_PI_TUI_BACKEND=daemon dsh --profile pi-tui` |
 | 进程 | TUI 与 Host 同进程 | Host 独立运行，TUI 是可断开的 Client |
@@ -141,7 +143,7 @@ dsh --profile pi-tui web status
 
 `/settings` 是统一的全屏设置入口；`/plugins`、`/footer`、`/keybindings` 是对应页面的快捷入口。`/keybindings conflicts` 直接进入同一个 Keyboard shortcuts 页面的 Conflicts 视图；设置文档不可读或该页面无法打开时，命令返回包含当前冲突诊断的错误。Host 配置写入会经过官方回读确认；当前 Client 的插件 `./tui` 激活状态与 Host 包是否启用是不同事实。
 
-扩展按 **Stable / Advanced / Unstable** 三层发布，详见 [扩展作者指南](docs/extensions/authoring.md)、[Stable API](docs/extensions/stable.md) 和 [兼容性分层](docs/extensions/tiers.md)。0.5.7 增加了 Client-local `./tui` 加载与按包持久设置，但**不代表 Forge 或 Plugin Marketplace 已交付**。
+扩展按 **Stable / Advanced / Unstable** 三层发布，详见 [扩展作者指南](docs/extensions/authoring.md)、[Stable API](docs/extensions/stable.md) 和 [兼容性分层](docs/extensions/tiers.md)。0.5.8 增加了 Client-local `./tui` 加载与按包持久设置，但**不代表 Forge 或 Plugin Marketplace 已交付**。
 
 从源码开发：
 

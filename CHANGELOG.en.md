@@ -7,11 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.5.7] - 2026-11-21
+## [0.5.8] - 2026-11-22
 
 ### Added
 
-#### Daemon mode (major 0.5.7 feature, Linux/macOS)
+#### Daemon mode (major 0.5.8 feature, Linux/macOS)
 
 - **Independent Host, detachable TUI.** Direct remains the default. Daemon runs the Host independently so disconnecting a terminal does not end ongoing Agent work.
 - **Shared Sessions across clients.** Multiple TUIs, the official Web frontend and local ACP clients can connect to one Host under the same Profile and access the same Agent Session.
@@ -36,6 +36,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Queue and Host tools.** Manage pending prompts with `/queue` and a Dock shortcut; Daemon clients gain Host Shell, command-generated file delivery and official file uploads. Host Skills lists refresh when Workspace skills change.
 - **Transcript reading and images.** More complete Full/Focus/Compact views, `Ctrl+F` visible-view search and `Ctrl+Shift+F` full-transcript search; improved tool/workflow disclosure, message copying, SVG/image previews and narrow layouts. The optional TSP renderer also gains native transcript and Task interactions.
 - **macOS Computer Use settings.** Settings → Tools exposes Computer Use capabilities, OS permissions and application grants, with relevant request and management actions.
+- **ACP v1 session-scoped model settings.** An attached ACP Session View can select the current Session model and, when the exact model supports reasoning efforts, its `thought_level`. `session/new` / `session/resume` can expose the options; `session/set_config_option` commits a Session-only selection and `config_option_update` notifies the current View. This **does not change the profile default model or TUI Save as Default** (#824).
+- **Keyboard conflicts.** `/keybindings conflicts` opens the existing Keyboard shortcuts editor's Conflicts filter in the same Settings workspace, showing participants, scopes and sources with normal repair/write behavior. Switching between All and Conflicts does not alter settings (#820).
 
 ### Changed
 
@@ -43,6 +45,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Plan, Goal and task feedback.** Plan Review can open the relevant plan content before deciding; Goal Dock adapts to terminal width; Task, Subagent and tool status is easier to locate in the transcript.
 - **Submission and interaction.** Drafts clear only after the Host accepts them, and input can be queued during Compact. Fullscreen Tasks, History, Images, Settings and Questions have more complete mouse, wheel and back-navigation controls.
 - **Direct/Daemon parity.** Better Remote Provider and account status, approvals, Web settings, Host command completion, Session resume and working-directory behavior.
+- **Slash/Skill discovery.** Use `/` completion to discover commands and Skills and `/keybindings` for effective shortcuts. The redundant `/help` page is retired; bare `/skill` prints usage while `/skill <name> [args]` and `/<skill-name>` still work (#816).
+- **Responsive text width.** Todo Dock summaries, Session Browser errors and Footer configuration previews now clip at their actual painted width rather than permanently losing text at fixed 40/48-character limits (#823).
 
 ### Fixed
 
@@ -52,14 +56,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed terminal flicker and erased scrollback when off-screen content updates, plus Kitty images painting over dialogs.
 - Fixed broken clicks and wheel paths in Question header tabs, Tasks, History, Images and Settings. Transient Footer notices no longer shift the Composer layout.
 - Fixed macOS Daemon connection/startup races, cross-build Host management and Herdr Session recovery issues.
+- **Fresh DSH Profile Client startup.** Installing only the TUI no longer leaves `@deepseek-ai/dsh-client-store`, Zustand or Immer missing when the Daemon Client mounts; the Client Store closure is bundled at build time and requires no manual profile peer installation (#821).
+- **macOS native process identity.** Reuse the Koffi owned by the running DSH installation instead of installing a separate TUI runtime copy; native identity checks still fail closed without a hard-coded Koffi version gate (#819).
+- **Split Client fatal diagnostics.** Missing Client modules and other startup errors now report a controlled classification and write a bounded private incident file under `$DSH_HOME/logs/pi-tui-client/`, without sending users to Host logs or suggesting a restart of a healthy Host (#818).
+- **Host readiness without Web.** Web-only services are no longer treated as mandatory prerequisites when the official Web composition is disabled (#815).
 
 ### Install and upgrade
 
-Version 0.5.7 requires **Node.js ≥24.9.0** and **DSH ≥0.2.2-rc.3**. The recommended pairing is **DSH 0.2.2-rc.5**:
+Version 0.5.8 requires **Node.js ≥24.9.0** and **DSH ≥0.2.2-rc.3**. The recommended pairing is **DSH 0.2.2-rc.5**:
 
 ~~~sh
 npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.2-rc.5
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.7
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.8
 dsh --profile pi-tui
 ~~~
 
@@ -2250,8 +2258,8 @@ Users who must keep DSH `0.1.1-rc.2` should use `@xmoon76/dsh-pi-tui@0.3`.
 - Fullscreen layout, Ctrl+F transcript search, theme system.
 - Single-package release model.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.7...HEAD
-[0.5.7]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.6...v0.5.7
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.8...HEAD
+[0.5.8]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.6...v0.5.8
 [0.5.6]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.5...v0.5.6
 [0.5.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.3...v0.5.4
