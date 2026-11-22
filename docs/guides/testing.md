@@ -639,8 +639,8 @@ Linux CI lane. Its L0 input/opt-in guard is
 backend. It is deliberately not part of `mise run test`, `mise run check`, or the
 release gate. It requires `SPLIT_VITEST_TMP_BASE` (a private 0700 directory outside
 this checkout) and `SPLIT_VITEST_CANDIDATE_TGZ` (the exact built candidate tarball).
-The accompanying Supervisor probe is run separately with
-`mise exec -- node test/support/split-supervisor-signal-probe.mjs`.
+The accompanying Supervisor probe is run separately with an explicit mode, for
+example `mise exec -- node test/support/split-supervisor-signal-probe.mjs --mode main-signal --signal SIGTERM`.
 
 ### Isolated single-file and probe runs
 
