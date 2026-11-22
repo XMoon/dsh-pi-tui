@@ -132,7 +132,12 @@ function harness(): Harness {
       },
     }),
     resetSearchPresentation: () => {}, resetTasks: () => {}, resetPendingPresentation: () => {},
-    applyResumedCompaction: () => {}, repaint: () => {},
+    applyResumedCompaction: (_id: string | undefined, active: boolean, _phase: string | undefined, baselineWorking: boolean) => {
+      // The hydrate/reconcile baseline (and an active bracket's override) now
+      // arrives through the ONE aggregated settle call.
+      busy = active || baselineWorking
+      working = active || baselineWorking
+    }, repaint: () => {},
     refreshPendingInput: () => {
       // Fires inside hydratePresentation — AFTER the reader fence passed.
       const hook = hydrateCommit

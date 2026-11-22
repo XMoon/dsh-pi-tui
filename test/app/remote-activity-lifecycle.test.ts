@@ -647,7 +647,10 @@ test('A: a live turn end followed by a standalone compaction settles Idle (no fa
     await drawn('the hydrated working row', () => harness.runSegment() !== undefined)
     assertActivity(harness, 'working', true, 'the complete window proves the open turn')
 
+    const beforeTurnEnd = harness.activityCommits().length
     harness.publish(turnEnd(1))
+    assert.deepEqual(harness.activityCommits().slice(beforeTurnEnd), [{ phase: 'idle', busy: false }],
+      'the turn end is ONE self-consistent activity snapshot')
     assertActivity(harness, 'idle', false, 'the live turn boundary settles the work')
     harness.setRunning(false)
 
@@ -655,7 +658,10 @@ test('A: a live turn end followed by a standalone compaction settles Idle (no fa
     assertActivity(harness, 'compacting', true, 'a standalone compaction arms busy')
     await drawn('the compacting row', () => harness.runSegment()?.includes('compact') === true)
 
+    const beforeSettle = harness.activityCommits().length
     harness.publish(compactionEnd('standalone'))
+    assert.deepEqual(harness.activityCommits().slice(beforeSettle), [{ phase: 'idle', busy: false }],
+      'the matched settle is ONE snapshot: no intermediate phase=idle,busy=true')
     assertActivity(harness, 'idle', false, 'the matched settle releases the false Working')
     await drawn('the run seg leaves the row', () => harness.runSegment() === undefined)
     assert.equal(harness.fixture.running(SESSION_A), false,
@@ -679,12 +685,18 @@ test('B: an in-turn compaction settles back to Working, and the real turn end th
     assertActivity(harness, 'applying-compaction', true, 'the matched summary advances the phase')
     await drawn('the applying row', () => harness.runSegment()?.includes('apply-compact') === true)
 
+    const beforeInTurnSettle = harness.activityCommits().length
     harness.publish(compactionEnd('in-turn'))
+    assert.deepEqual(harness.activityCommits().slice(beforeInTurnSettle), [{ phase: 'working', busy: true }],
+      'the settlement is ONE working snapshot, never a transient idle')
     assertActivity(harness, 'working', true,
       'the matched end must NOT clear a still-open turn (premature Idle direction)')
     await drawn('the work row', () => harness.runSegment()?.includes('work') === true)
 
+    const beforeTurnEnd = harness.activityCommits().length
     harness.publish(turnEnd(2))
+    assert.deepEqual(harness.activityCommits().slice(beforeTurnEnd), [{ phase: 'idle', busy: false }],
+      'the real turn end is ONE idle snapshot')
     assertActivity(harness, 'idle', false, 'the REAL turn end is the only idle transition')
     await drawn('the run seg leaves after the real turn end', () => harness.runSegment() === undefined)
   } finally {
@@ -701,12 +713,18 @@ test('C: a turn end inside an active compaction keeps busy until the matched end
     harness.publish(compactionStart('c-mid'))
     assertActivity(harness, 'compacting', true, 'the compaction owns the phase')
 
+    const beforeTurnEnd = harness.activityCommits().length
     harness.publish(turnEnd(2))
+    assert.deepEqual(harness.activityCommits().slice(beforeTurnEnd), [],
+      'the derived activity is already compacting/true: no inconsistent intermediate snapshot is published')
     assertActivity(harness, 'compacting', true,
       'the interrupted turn closes before its compaction settles: busy stays armed')
     await drawn('the compacting row survives', () => harness.runSegment()?.includes('compact') === true)
 
+    const beforeSettle = harness.activityCommits().length
     harness.publish(compactionEnd('c-mid'))
+    assert.deepEqual(harness.activityCommits().slice(beforeSettle), [{ phase: 'idle', busy: false }],
+      'the matched end is ONE idle snapshot')
     assertActivity(harness, 'idle', false, 'only the matched compaction end releases busy')
     await drawn('the settled row', () => harness.runSegment() === undefined)
   } finally {

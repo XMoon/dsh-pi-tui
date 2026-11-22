@@ -1428,8 +1428,15 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
    * Apply the resumed log's compaction bracket to the surface presentation
    * state (the cold-hydration path keeps the fold; the surface owns the
    * `compactingId` routing state and the phase/busy/working presentation).
+   * `baselineWorking` is the window-proven / official-running baseline the
+   * SAME event publishes; the active bracket overrides it in ONE commit.
    */
-  applyResumedCompaction(id: string | undefined, active: boolean, phase?: CompactionPhase): void
+  applyResumedCompaction(
+    id: string | undefined,
+    active: boolean,
+    phase: CompactionPhase | undefined,
+    baselineWorking: boolean,
+  ): void
   /**
    * A4-4 pending-input presentation refresh (plan §13.2): the semantic pending
    * read joined with the local submission echoes and the own-input viewport
@@ -3716,7 +3723,8 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     routeSettingsRefresh: (namespace) => eventRouting.routeSettingsRefresh(namespace),
     isCurrentAssistantAgent: (agent) => eventRouting.isCurrentAssistantAgent(agent),
     applyAssistantInput: (input) => eventRouting.applyAssistantInput(input),
-    applyResumedCompaction: (id, active, phase) => eventRouting.applyResumedCompaction(id, active, phase),
+    applyResumedCompaction: (id, active, phase, baselineWorking) =>
+      eventRouting.applyResumedCompaction(id, active, phase, baselineWorking),
     refreshPendingInput,
     attachQueueManager(controller) {
       queueManager = controller

@@ -95,6 +95,16 @@ interface Harness {
   snapshot(): StatusSnapshot
   readonly statusRuntime: ReturnType<typeof createStatusRuntime>
   readonly renderer: ReturnType<typeof mountTspRenderer>
+  /** Route ONE durable session event through the REAL application router. */
+  route(type: string, data?: Record<string, unknown>): void
+  /** The settle's log-end working fact the router reads. */
+  setWorkingFromLog(value: boolean): void
+  /** Every committed activity projection, in store order. */
+  activityCommits(): ReadonlyArray<{ readonly phase: string; readonly busy: boolean }>
+  /** Every display notify the router reached. */
+  notifications(): ReadonlyArray<{ readonly text: string; readonly kind: string }>
+  contextMeasures(): readonly string[]
+  contextDirty(): number
   setSessionStatus(status: SessionStatusProjection | undefined): void
   setChildViewer(viewer: { id: string; label: string } | undefined): void
   /**
@@ -110,6 +120,11 @@ interface Harness {
 async function mountActivityHarness(): Promise<Harness> {
   const pane = installTspPane({ kinds: ['col', 'card', 'section', 'md', 'code', 'badge', 'tool', 'status', 'seg'] })
   const session = await openOn(pane)
+  let workingFromLog = false
+  const activityCommits: Array<{ phase: string; busy: boolean }> = []
+  const notifications: Array<{ text: string; kind: string }> = []
+  const contextMeasures: string[] = []
+  let contextDirty = 0
   const folder = new TranscriptFolder()
   const controller = new TranscriptWindowController({ windowTurns: 20, stepTurns: 10 })
   const source: SurfaceEventRoutingSource<SessionEvent> = {
@@ -147,9 +162,9 @@ async function mountActivityHarness(): Promise<Harness> {
     markSubmitLatency: () => {},
     observeDurableSubmission: () => {},
     observeDirectPendingSubmissionEvent: () => false,
-    markContextDirty: () => {},
-    refreshContextMeasurement: () => {},
-    currentWorkingFromLog: () => false,
+    markContextDirty: () => { contextDirty += 1 },
+    refreshContextMeasurement: (reason: string) => { contextMeasures.push(reason) },
+    currentWorkingFromLog: () => workingFromLog,
     flushTurn: () => {},
     registeredAgentIs: () => false,
     isCurrentOwnerAgent: () => false,
@@ -219,6 +234,12 @@ async function mountActivityHarness(): Promise<Harness> {
       mounted = mountTspRenderer(session, { copyVisual: async () => false, requestExit: () => {} })
       mounted.bindStatusReader(statusReader)
       mounted.bindImages(binding)
+      // Record the ONE notify sink while forwarding the real call unchanged.
+      const originalNotify = mounted.display.notify
+      mounted.display.notify = (text, kind) => {
+        notifications.push({ text, kind: kind ?? 'info' })
+        originalNotify(text, kind)
+      }
       return mounted
     },
     releaseUnmounted: async () => { await mounted?.dispose() },
@@ -244,12 +265,23 @@ async function mountActivityHarness(): Promise<Harness> {
   })
   assert.ok(mounted !== undefined, 'the renderer mounted')
   const bound = mounted
+  surface.status.subscribe(snapshot => {
+    activityCommits.push({ phase: snapshot.activity.phase, busy: snapshot.activity.busy })
+  })
   return {
     surface,
     pane,
     renderer: bound,
     statusRuntime,
     snapshot: () => surface.status.snapshot(),
+    route(type, data = {}) {
+      surface.routeSessionEvent({ id: SESSION_ID }, { type, seq: 1, time: T0, data } as SessionEvent)
+    },
+    setWorkingFromLog(value) { workingFromLog = value },
+    activityCommits: () => activityCommits,
+    notifications: () => notifications,
+    contextMeasures: () => [...contextMeasures],
+    contextDirty: () => contextDirty,
     setSessionStatus(status) {
       if (status === undefined) return
       sessionStatuses.set(status.sessionId, status)
@@ -1215,5 +1247,71 @@ test('the interaction owner reports reload-blocking input for live approvals and
     assert.equal(owner.hasReloadBlockingInput(), false, 'settled approvals release the local input')
   } finally {
     owner.dispose()
+  }
+})
+
+// ── C2: one lifecycle event = one self-consistent activity snapshot ─────────
+
+test('C2: a matched compaction end publishes ONE activity snapshot and one measure', async () => {
+  const harness = await mountActivityHarness()
+  try {
+    await drawn('the initial dock frame', () => harness.pane.frames().length > 0)
+    harness.setWorkingFromLog(true)
+    harness.route('turn/start', { turn: 1 })
+    harness.route('compaction/start', { compactionId: 'c1' })
+    harness.route('compaction/summary', { compactionId: 'c1' })
+    assert.equal(harness.snapshot().activity.phase, 'applying-compaction')
+
+    const before = harness.activityCommits().length
+    harness.route('compaction/end', { compactionId: 'c1' })
+    assert.deepEqual(harness.activityCommits().slice(before), [{ phase: 'working', busy: true }],
+      'the settle is ONE snapshot: no intermediate `phase=idle,busy=true` ever reaches a subscriber')
+    assert.deepEqual(harness.contextMeasures(), ['compaction-end'], 'the context re-measure follows the commit, once')
+    assert.equal(harness.contextDirty(), 1)
+    await drawn('the turn state resumes on the wire', () => segText(harness.pane, 'status-r1-run')?.includes('work') === true)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('C2: a turn/end inside an active compaction publishes ONE compacting snapshot, and the matched end releases it', async () => {
+  const harness = await mountActivityHarness()
+  try {
+    await drawn('the initial dock frame', () => harness.pane.frames().length > 0)
+    harness.setWorkingFromLog(false)
+    harness.route('turn/start', { turn: 1 })
+    harness.route('compaction/start', { compactionId: 'c1' })
+
+    const beforeTurnEnd = harness.activityCommits().length
+    harness.route('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    assert.deepEqual(harness.activityCommits().slice(beforeTurnEnd), [],
+      'the derived activity stays compacting/true: no inconsistent intermediate snapshot is published')
+    assert.equal(harness.snapshot().activity.phase, 'compacting', 'the interrupted turn keeps the compaction phase')
+    assert.equal(harness.snapshot().activity.busy, true, 'the compaction cancel stays armed')
+    await drawn('the compacting row survives', () => segText(harness.pane, 'status-r1-run')?.includes('compact') === true)
+
+    const beforeSettle = harness.activityCommits().length
+    harness.route('compaction/end', { compactionId: 'c1' })
+    assert.deepEqual(harness.activityCommits().slice(beforeSettle), [{ phase: 'idle', busy: false }])
+    await drawn('the run seg leaves after the matched end', () => segText(harness.pane, 'status-r1-run') === undefined)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('C2 negative control: a stale or id-less compaction end publishes, measures and notifies nothing', async () => {
+  const harness = await mountActivityHarness()
+  try {
+    await drawn('the initial dock frame', () => harness.pane.frames().length > 0)
+    harness.route('compaction/start', { compactionId: 'c1' })
+    const before = harness.activityCommits().length
+    harness.route('compaction/end', { compactionId: 'foreign' })
+    harness.route('compaction/end', {})
+    assert.equal(harness.activityCommits().length, before, 'a stale end never republishes activity')
+    assert.deepEqual(harness.contextMeasures(), [], 'a stale end never re-measures the context')
+    assert.equal(harness.contextDirty(), 0)
+    assert.deepEqual(harness.notifications(), [], 'a stale end never notifies')
+  } finally {
+    await harness.dispose()
   }
 })
