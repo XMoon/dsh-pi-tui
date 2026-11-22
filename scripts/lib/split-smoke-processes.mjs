@@ -23,6 +23,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import xterm from '@xterm/headless'
 
 import { SplitSmokeAssertionError, SplitSmokeWaitError } from './split-smoke-diagnostics.mjs'
+import { readKernelProcess, sameKernelProcess } from '../../src/runtime/native-process/identity.ts'
 import { currentPtyScriptArgv } from './pty-script.mjs'
 import { createDarwinSurfacePtyScope, darwinKeyTokensOf, darwinHostSeatFileFree } from './split-smoke-darwin-pty.mjs'
 
@@ -941,14 +942,22 @@ export async function seatFree(name, timeoutMs = 5_000, options = {}) {
   })
 }
 
-/** Read a live process starttime and kill only the process that still matches it. */
-export function killTracked(pid, starttime, signal) {
-  if (starttime !== undefined && readStartIdentity(pid) !== starttime) return
+/**
+ * Kill one tracked process group only when the captured kernel identity still
+ * names the live process. A missing or unreadable identity never authorizes a
+ * signal: fail closed (the caller has its own positive cleanup).
+ */
+export function killTracked(pid, identity, signal) {
+  if (identity === undefined) return
+  if (typeof identity === 'string') {
+    if (readStartIdentity(pid) !== identity) return
+  } else {
+    const observed = readKernelProcess(pid)
+    if (observed.kind !== 'alive' || sameKernelProcess(identity, observed) !== 'same') return
+  }
   try {
     process.kill(-pid, signal)
-  } catch {
-    try { process.kill(pid, signal) } catch { /* already gone */ }
-  }
+  } catch { /* group already gone; never fall back to a bare pid */ }
 }
 
 /**

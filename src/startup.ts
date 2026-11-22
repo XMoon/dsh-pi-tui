@@ -409,8 +409,19 @@ export interface TuiWebControlStartup {
   markCoordinatorMounted?(): void
 }
 
+/** The trusted-profile ACP stdio arm: one internal stdio Adapter child, no TUI. */
+export interface TuiAcpStdioStartup {
+  readonly kind: 'acp-stdio'
+  /** Same one-shot cold-ready handshake as the client arm. */
+  markCoordinatorMounted?(): void
+}
+
 /** What the daemon-launcher row reads from {@link TUI_DAEMON_STARTUP_SERVICE}. */
-export type TuiDaemonStartupValues = TuiDaemonClientStartup | TuiDaemonControlStartup | TuiWebControlStartup
+export type TuiDaemonStartupValues =
+  | TuiDaemonClientStartup
+  | TuiDaemonControlStartup
+  | TuiWebControlStartup
+  | TuiAcpStdioStartup
 
 /**
  * The row's Profile Config: the persisted backend selector. `.volatile()`
@@ -546,7 +557,7 @@ function withUsageExitCode(command: Command): Command {
 /** Reject the public Session launch flags on a management invocation.
  *  Commander parses root options before the subcommand, so a flag placed before
  *  the verb reaches this action instead of being an unknown subcommand option. */
-function rejectSessionFlags(program: Command, command: Command, family: 'daemon' | 'web'): void {
+function rejectSessionFlags(program: Command, command: Command, family: 'daemon' | 'web' | 'acp'): void {
   const options = program.opts<{ session?: string | boolean; continue?: boolean; preset?: string }>()
   if (options.continue === true || options.session !== undefined || options.preset !== undefined) {
     command.error(`error: --session, --continue and --preset are only valid for a normal TUI launch, not with ${family} commands`)
@@ -647,6 +658,26 @@ Examples:
   dsh --profile pi-tui web open
 `)
 
+  // The trusted-profile ACP stdio bridge is nested under the same ONE command.
+  // It publishes one typed intent for the existing launcher row; it never
+  // selects the Direct/daemon backend and never opens a TUI/Client/Host.
+  const acp = withUsageExitCode(program.command('acp').description('Run the local ACP front door.'))
+  acp.action(() => {
+    acp.error('error: an acp command is required (stdio)')
+  })
+  const acpStdio = withUsageExitCode(acp.command('stdio').description('bridge ACP v1 bytes over stdio to the running Host listener'))
+  acpStdio.action(() => {
+    rejectSessionFlags(program, acpStdio, 'acp')
+    // A Host-only process already owns the Host business and must never acquire
+    // the public ACP stdio route.
+    if (isHostOnlyRole()) acpStdio.error('error: acp commands are not available in a Host-only process')
+    publishDaemonService(ctx, { kind: 'acp-stdio' })
+  })
+  acp.addHelpText('after', `
+Examples:
+  dsh --profile pi-tui acp stdio
+`)
+
   program.addHelpText('after', `
 Examples:
   dsh --profile pi-tui                       start the terminal UI
@@ -658,6 +689,7 @@ Examples:
   dsh --profile pi-tui daemon status         inspect the local daemon Host
   dsh --profile pi-tui web status            inspect the Host's Web frontend
   dsh --profile pi-tui web url               print the authenticated Web URL
+  dsh --profile pi-tui acp stdio             bridge an external ACP v1 client to the local Host
 `)
   return program
 }
@@ -974,6 +1006,12 @@ function webControlNotMountedMessage(profile: string): string {
   ].join('\n')
 }
 
+/** A committed ACP stdio startup whose launcher row never mounted must print
+ *  one stable code instead of silently looking like a successful command. */
+function acpStdioNotMountedMessage(): string {
+  return 'dsh-pi-tui acp stdio: ACP_STDIO_LAUNCHER_UNAVAILABLE'
+}
+
 /**
  * Publish the daemon startup service. The daemon-launcher row injects it,
  * spawns exactly ONE foreground Client OS process and waits for its real exit.
@@ -1004,7 +1042,9 @@ function publishDaemonService(ctx: Context, values: TuiDaemonStartupValues): voi
         ? controlNotMountedMessage()
         : values.kind === 'web-control'
           ? webControlNotMountedMessage(runningProfileName(ctx))
-          : coordinatorNotMountedMessage(runningProfileName(ctx))
+          : values.kind === 'acp-stdio'
+            ? acpStdioNotMountedMessage()
+            : coordinatorNotMountedMessage(runningProfileName(ctx))
       process.stderr.write(`\n${message}\n\n`)
       ctx.get('appExit')?.(1)
     })

@@ -192,6 +192,30 @@ From an attached Split Client, `/acp` can inspect or change the current
 listener state without creating a Session or updating the next-launch
 preference. The Direct backend refuses that runtime control.
 
+### External ACP client over stdio
+
+An ACP client can use the official stdio bridge instead of opening the local
+Unix socket itself. The bridge still targets the SAME running Host and existing
+Session View; it does not start a Host or enable the listener:
+
+~~~sh
+# The Host must already be ready and its ACP listener enabled.
+dsh --profile pi-tui daemon start
+dsh --profile pi-tui daemon status        # look for acp=enabled
+
+# Run your ACP client as a child process and speak ACP v1 over its stdio.
+dsh --profile pi-tui acp stdio
+~~~
+
+Start the bridge from an ACP client that owns its stdin/stdout; do not run it
+interactively expecting TUI output. It requires the default trusted Profile to
+keep stdout protocol-clean: a user-added profile plugin that writes to stdout
+during Profile Boot can contaminate the stream. If the Host is absent, the
+listener is disabled or the target is unavailable, the command exits without
+starting anything and writes a fixed `ACP_STDIO_*` diagnostic to stderr. The
+bridge never auto-starts the Host; run `dsh --profile pi-tui daemon start` and
+enable ACP from a connected TUI first.
+
 For contributor-level process, authentication, ACP admission and Client
 detach guarantees, see [Host/Client](../architecture/host-client.md),
 [daemon process ownership](../architecture/host-daemon.md) and

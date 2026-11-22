@@ -330,7 +330,8 @@ async function main(explicitPath) {
       // diagnostics collector; the runner adds the enclosing case scope.
       runStep: (name, operation) => diagnostics.runStep(name, operation),
       // Backstop only: the case kills its own detached processes first.
-      trackDetachedPid: (pid, starttime) => trackedProcesses.set(pid, starttime),
+      trackDetachedPid: (pid, identity) => trackedProcesses.set(pid, identity),
+      untrackDetachedPid: pid => trackedProcesses.delete(pid),
       // The case id a boundary report names (the full lane sets it per scene).
       currentCaseId: undefined,
       /** @see emitBoundaryNotVerified */
@@ -603,6 +604,43 @@ export function assertSelectedVerdict(caseId, result) {
       && result?.originalSplitClientIntact === true
       && result?.l6EvidenceRecorded === true,
     `selected ${caseId}: the ACP shared Session View verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)
+    return
+  }
+  if (caseId === 'acp.stdio-bridge-a1') {
+    assert(result?.status === 'PASS'
+      && result?.scope === 'REAL_SPLIT_PROCESS_L6'
+      && result?.acpVersionFromInstalledDsh === true
+      && result?.publicCommandFromInstalledProfile === true
+      && result?.protocolOnlyStdout === true
+      && result?.singleAdapterChild === true
+      && result?.sameHostIdentity === true
+      && result?.tuiSessionShared === true
+      && result?.promptUpdateClose === true
+      && result?.newSessionViaHostWorkspace === true
+      && result?.cancelAndPermissionReachable === true
+      && result?.largePayloadDrained === true
+      && result?.outputBackpressureObserved === true
+      && result?.staleSocketFailClosed === true
+      && result?.changingStateClassified === true
+      && result?.hostMissingDisabledForeignAndMissingEntryFailClosed === true
+      && result?.runtimeOffDisconnectsOnlyAdapter === true
+      && result?.hostRestartObserved === true
+      && result?.commandFamilyStable === true
+      && result?.hostTuiKept === true
+      && result?.quiesced === true
+      && typeof result?.evidence?.candidateSha256 === 'string'
+      && /^[0-9a-f]{64}$/u.test(result.evidence.candidateSha256)
+      && typeof result?.evidence?.stdoutSha256 === 'string'
+      && /^[0-9a-f]{64}$/u.test(result.evidence.stdoutSha256)
+      && Number.isInteger(result?.evidence?.pressurePayloadBytes)
+      && result.evidence.pressurePayloadBytes > 0
+      && typeof result?.evidence?.pressurePayloadSha256 === 'string'
+      && /^[0-9a-f]{64}$/u.test(result.evidence.pressurePayloadSha256)
+      && result.evidence.observedPayloadBytes === result.evidence.pressurePayloadBytes
+      && result.evidence.observedPayloadSha256 === result.evidence.pressurePayloadSha256
+      && Number.isInteger(result?.evidence?.stdoutFrames)
+      && result.evidence.stdoutFrames > 0,
+    `selected ${caseId}: the trusted-profile ACP stdio verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)
     return
   }
   if (caseId === 'acp.po3a-turn-events') {
@@ -1065,7 +1103,8 @@ async function runSelectedCases(selection) {
       // Same lifecycle owner as the full lane: one collector, nested scopes.
       runStep: (name, operation) => diagnostics.runStep(name, operation),
       // Backstop only: the case kills its own detached processes first.
-      trackDetachedPid: (pid, starttime) => trackedProcesses.set(pid, starttime),
+      trackDetachedPid: (pid, identity) => trackedProcesses.set(pid, identity),
+      untrackDetachedPid: pid => trackedProcesses.delete(pid),
       // The current selected case id + the shared boundary reporter: a selected
       // case must be able to publish the same NOT_VERIFIED line as a full-lane
       // scene, and the line has to name the case it belongs to.

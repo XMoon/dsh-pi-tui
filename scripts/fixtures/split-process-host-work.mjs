@@ -1428,6 +1428,21 @@ class C1Model extends LlmAdapter {
       return
     }
 
+    // G-ACP1A/A1 qualification only: a bounded output stream large enough to
+    // fill the real OS stdout pipe (2 committed blocks, each 64 KiB) without
+    // crossing the existing ACP pending-update capacity (64). The stdio case
+    // pauses its downstream sink, observes the child stay alive, then resumes
+    // and proves every byte drains. No other case sends this marker.
+    if (userText.includes('a1-pressure-output')) {
+      const payload = 'x'.repeat(64 * 1024)
+      for (let index = 0; index < 2; index += 1) {
+        yield { type: 'block-start', index, blockType: 'text' }
+        yield { type: 'block-end', index, block: { type: 'text', text: `a1-pressure-${String(index)}-${payload}` } }
+      }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
+
     // PO-3A qualification only: the ACP prompt marker asks for ONE committed
     // assistant message with more standard text blocks than the bounded ACP
     // output queue, so the real projection reaches its fixed cap. No other

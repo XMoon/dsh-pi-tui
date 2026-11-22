@@ -6,6 +6,47 @@ Agent, Session or Writer: their authority remains in
 [host-client.md](./host-client.md). Profile supervision belongs to
 [host-daemon.md](./host-daemon.md).
 
+## Trusted-profile ACP stdio bridge
+
+The public `dsh --profile pi-tui acp stdio` command is the external-client
+transport for the SAME Host-owned ACP front door. It is not a second Host,
+Client, Agent, Session, Writer or ACP server. It uses the existing
+`tuiDaemonStartup` launcher row and the same one-shot cold-ready lifecycle as
+the daemon and Web management commands; its parent performs one read-only
+authenticated Host observation and then spawns ONE internal Node process,
+`dist/acp-stdio.mjs`, with inherited stdin/stdout/stderr.
+
+- **Target authority.** The parent asks the existing authenticated snapshot /
+  ACP status owner (`readSnapshot`, `observeAcpFacts`) whether THIS Profile has
+  a ready Host with an enabled listener, then passes only that public logical
+  Unix-socket path in the private child environment. It never auto-starts a
+  Host, enables the listener, reads `daemon status` text, trusts `instance.json`
+  alone or derives an endpoint from the Client cwd.
+- **Pure byte relay.** The child imports Node builtins only and never imports
+  the ACP SDK, Cordis, a Host service or Session code. It connects to the
+  existing public UDS and pipes `stdin`/`stdout` bytes both ways; it performs
+  no JSON-RPC method special-casing, second decode/encode, retry or Session
+  cache. Linux uses the documented `/proc/self/fd/<scopeDirFd>/acp.sock`
+  short alias when the logical scope path exceeds `sun_path`; macOS uses the
+  Parent-provided short public path.
+- **Lifecycle and errors.** The parent owns the one child and its `appExit`
+  result. A missing/unready Host, disabled listener or unobservable status
+  exits before the child is spawned with a fixed stderr code; adapter connect,
+  socket and stdout errors stay confined to that child. Clean stdin EOF keeps
+  the Host read direction open until the Host stream drains and ends. The
+  Adapter never releases a Host Session/Agent/TUI; `session/close` remains a
+  View detach owned by the existing listener contract.
+- **Trusted Profile boundary.** The bridge does not sandbox or filter stdout
+  written by arbitrary profile plugins during Profile Boot. The default
+  trusted Profile bundle must remain protocol-clean; a user-added plugin that
+  writes to stdout can contaminate the stream. There is no stdout wrapper,
+  console interception, line filter or retry that would hide that configuration
+  responsibility.
+
+The public listener remains opt-in and default-OFF; the bridge is an explicit
+external-client path to an already running Host, not the Host's startup
+preference or an automatic Host service.
+
 ## Host-owned local ACP v1 front door (Unix socket)
 
 Alongside the authenticated loopback carrier, the one Host process can open ONE

@@ -44,6 +44,7 @@ import {
 import {
   formatDaemonStatus,
   journalctlArgs,
+  readAcpStdioTarget,
   runDaemonControl,
   sanitizeLogText,
   type DaemonControlDeps,
@@ -562,6 +563,86 @@ test('the status formatter keeps the pre-ACP bytes and prints the ACP fields onl
   assert.equal(
     formatDaemonStatus({ ...base, acp: 'enabled', acpSocket: '/home/user/.dsh/run/dsh-pi-tui/scope/acp.sock' }),
     'profile=pi-tui\nmanager=process\nuser-manager=not-checked\nhost=ready\nunit=none\nunit-state=not-found\ncompatibility=compatible\npid=4242\ninstance=abcdef12\nacp=enabled\nacp-socket=/home/user/.dsh/run/dsh-pi-tui/scope/acp.sock\n',
+  )
+})
+
+// ── ACP stdio target: the ONE authenticated read-only launch seam ──────────
+
+test('readAcpStdioTarget returns the enabled public socket and exact Host instance', async t => {
+  const fx = fixture(t)
+  const record = recordOf(fx.scope)
+  const observed: Array<{ readonly cookie: string; readonly instanceId: string }> = []
+  const target = await readAcpStdioTarget(fx.profile, undefined, depsOf(fx, {
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'signed-cookie', identity: record }),
+    observeAcpStatus: async verified => {
+      observed.push({ cookie: verified.cookie, instanceId: verified.identity.instanceId })
+      return { state: 'enabled' }
+    },
+  }))
+  assert.deepEqual(target, {
+    kind: 'ready',
+    socketPath: join(fx.scope.dir, 'acp.sock'),
+    instanceId: record.instanceId,
+  })
+  assert.deepEqual(observed, [{ cookie: 'signed-cookie', instanceId: record.instanceId }],
+    'the observation uses the SAME authenticated Host/cookie exactly once')
+})
+
+test('readAcpStdioTarget maps missing Host, disabled listener and unavailable listener', async t => {
+  const fx = fixture(t)
+  const record = recordOf(fx.scope)
+  const base = {
+    readRecord: () => record,
+    inspectProcess: () => 'alive' as const,
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+  }
+  const missingHost = await readAcpStdioTarget(fx.profile, undefined, depsOf(fx, {
+    readRecord: () => undefined,
+    inspectProcess: () => 'dead',
+  }))
+  assert.deepEqual(missingHost, { kind: 'host-unavailable' })
+  for (const [observation, expected] of [
+    [{ state: 'disabled' as const }, { kind: 'acp-disabled' }],
+    [{ state: 'changing' as const }, { kind: 'acp-unavailable' }],
+    [{ state: 'unavailable' as const, reason: 'closing' }, { kind: 'acp-unavailable' }],
+  ] as const) {
+    const target = await readAcpStdioTarget(fx.profile, undefined, depsOf(fx, {
+      ...base,
+      observeAcpStatus: async () => observation,
+    }))
+    assert.deepEqual(target, expected)
+  }
+})
+
+test('readAcpStdioTarget keeps a proven ready Host when the unrelated manager query fails', async t => {
+  const fx = fixture(t)
+  const record = recordOf(fx.scope)
+  const unit = writeOwnedUnit(fx)
+  const target = await readAcpStdioTarget(fx.profile, undefined, depsOf(fx, {
+    systemctl: async () => { throw new Error('user manager unavailable at /private/systemd') },
+    unitDir: fx.unitDir,
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    observeAcpStatus: async () => ({ state: 'enabled' }),
+  }))
+  assert.deepEqual(target, {
+    kind: 'ready',
+    socketPath: join(fx.scope.dir, 'acp.sock'),
+    instanceId: record.instanceId,
+  }, 'a manager status failure must not mask an independently authenticated ready Host')
+  assert.ok(unit.path.endsWith(fx.unitName))
+})
+
+test('readAcpStdioTarget rejects an already-aborted signal before any Host read', async t => {
+  const fx = fixture(t)
+  const controller = new AbortController()
+  controller.abort()
+  await assert.rejects(
+    () => readAcpStdioTarget(fx.profile, controller.signal),
+    error => (error as { name?: string }).name === 'AbortError',
   )
 })
 
