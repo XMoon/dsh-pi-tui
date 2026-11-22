@@ -635,6 +635,8 @@ export function assertSelectedVerdict(caseId, result) {
       && result.evidence.pressurePayloadBytes > 0
       && typeof result?.evidence?.pressurePayloadSha256 === 'string'
       && /^[0-9a-f]{64}$/u.test(result.evidence.pressurePayloadSha256)
+      && result.evidence.observedPayloadBytes === result.evidence.pressurePayloadBytes
+      && result.evidence.observedPayloadSha256 === result.evidence.pressurePayloadSha256
       && Number.isInteger(result?.evidence?.stdoutFrames)
       && result.evidence.stdoutFrames > 0,
     `selected ${caseId}: the trusted-profile ACP stdio verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)

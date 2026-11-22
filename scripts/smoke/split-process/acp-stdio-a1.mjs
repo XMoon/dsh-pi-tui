@@ -516,19 +516,28 @@ export async function runAcpStdioA1(context) {
     assert(largeResponse?.result?.stopReason === 'end_turn',
       `A1-05: the large prompt must complete end_turn (got ${JSON.stringify(largeResponse)})`)
     const pressurePayloads = [0, 1].map(index => `a1-pressure-${String(index)}-${'x'.repeat(64 * 1024)}`)
-    const pressureText = pressure.rawLines.slice(largeUpdatesBefore).join('\n')
-    for (const payload of pressurePayloads) {
-      assert(pressureText.includes(payload),
-        'A1-05: every full 64 KiB block payload must survive the paused/resumed stdout path')
-    }
-    const largeUpdates = pressure.rawLines.slice(largeUpdatesBefore)
+    const pressureUpdates = pressure.rawLines.slice(largeUpdatesBefore)
       .map(line => { try { return JSON.parse(line) } catch { return undefined } })
       .filter(message => message?.method === acp.methods.client.session.update
         && message.params?.sessionId === sessionA)
-      .length
-    assert(largeUpdates >= 2, `A1-05: the Host must emit its complete committed update set (got ${String(largeUpdates)})`)
-    const pressurePayloadSha256 = sha256(Buffer.from(pressurePayloads.join('')))
+    const observedPayloads = pressureUpdates
+      .map(message => message.params?.update)
+      .filter(update => update?.sessionUpdate === 'agent_message_chunk'
+        && update?.content?.type === 'text'
+        && typeof update?.content?.text === 'string'
+        && update.content.text.startsWith('a1-pressure-'))
+      .map(update => update.content.text)
+    assert(observedPayloads.length === pressurePayloads.length
+      && observedPayloads.every((payload, index) => payload === pressurePayloads[index]),
+    'A1-05: the paused/resumed stdout path must deliver each full 64 KiB block exactly once in order')
     const pressurePayloadBytes = Buffer.byteLength(pressurePayloads.join(''), 'utf8')
+    const pressurePayloadSha256 = sha256(Buffer.from(pressurePayloads.join('')))
+    const observedPayloadBytes = Buffer.byteLength(observedPayloads.join(''), 'utf8')
+    const observedPayloadSha256 = sha256(Buffer.from(observedPayloads.join('')))
+    assert(observedPayloadBytes === pressurePayloadBytes,
+      'A1-05: the observed committed payload byte count must equal the expected count')
+    assert(observedPayloadSha256 === pressurePayloadSha256,
+      'A1-05: the observed ordered payload hash must equal the expected hash')
     await pressure.rawRequest('session/close', { sessionId: sessionA })
     const pressureExit = await pressure.close()
     assert(pressureExit.code === 0, `A1-05: the normal Client EOF must exit 0 (got ${JSON.stringify(pressureExit)})`)
@@ -726,6 +735,8 @@ export async function runAcpStdioA1(context) {
       stdoutSha256: sha256(raw),
       pressurePayloadBytes,
       pressurePayloadSha256,
+      observedPayloadBytes,
+      observedPayloadSha256,
       adapterProcessCount: adapterProcesses(context).length,
       adapterProcessCountDuring: adapterCountDuring,
       updates: command.updates.length,
