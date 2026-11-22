@@ -820,3 +820,89 @@ test('a proven same-turn subagent settlement is ONE message object across Compac
   assert.equal(flattened.filter(message => message === settled).length, 1,
     'Full renders the settlement exactly once')
 })
+
+// --- A proven repeat-tool-reminder keeps one canonical Work owner -----------
+
+test('a proven same-turn repeat-tool-reminder is ONE canonical Work member across Compact, Focus and Full', () => {
+  const reminderMessage = {
+    id: MessageId('converge-reminder'), role: 'user',
+    content: [{ type: 'text', text: 'CONVERGE_REMINDER' }],
+    source: { kind: 'repeat-tool-reminder', form: 'notice', summary: 'read × 4' },
+  }
+  const event = (type: string, data: Record<string, unknown>, seq: number): SessionEvent =>
+    ({ type, seq: seq + 1, time: 1_700_000_000_000 + seq, data }) as SessionEvent
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: 'converge-reminder-c1', name: 'read', arguments: '{}' }, 1),
+    event('tool/result', {
+      turn: 0, step: 0,
+      message: { id: MessageId('converge-reminder-r1'), role: 'tool', toolCallId: 'converge-reminder-c1', content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: 'converge-reminder-c1' } },
+    }, 2),
+    event('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [reminderMessage] }, 3),
+    event('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 4),
+    event('user/message', reminderMessage, 5),
+    event('tool/call', { turn: 0, step: 1, callId: 'converge-reminder-c2', name: 'bash', arguments: '{}' }, 6),
+    event('tool/result', {
+      turn: 0, step: 1,
+      message: { id: MessageId('converge-reminder-r2'), role: 'tool', toolCallId: 'converge-reminder-c2', content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: 'converge-reminder-c2' } },
+    }, 7),
+    event('assistant/message', {
+      turn: 0, step: 2,
+      message: { id: MessageId('converge-reminder-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 8),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 9),
+  ])
+  const messages = folder.messages()
+  const reminder = messages.find(message => message.kind === 'system')
+  assert.ok(reminder !== undefined && reminder.kind === 'system')
+  assert.equal(reminder.contextPresentation?.sameTurnNextStep, true, 'fixture: durable same-turn claim')
+
+  const structure = projectTranscriptStructure(messages)
+  const spans = workSpansOf(structure)
+  assert.equal(spans.length, 1, 'Process -> reminder -> Process is one canonical Work')
+  assert.equal(spans[0]!.members.includes(reminder), true)
+
+  const compactSpans = projectCompact(messages, {
+    expandedWorkOwners: new Set(), expandedClusters: new Set(), forcedExpanded: new Set(),
+  }).flatMap(block => block.kind === 'work' ? [block.span] : [])
+  assertSameSpans(compactSpans, spans)
+  assert.equal(compactSpans[0]!.members.find(member => member === reminder), reminder,
+    'Compact carries the ORIGINAL reminder object, not a copy')
+
+  const activities = folder.turnActivities()
+  const focusWork = projectFocus(messages, activities, new Set([0]), true)
+    .flatMap(block => block.kind === 'work' ? [block.span] : [])
+  assert.deepEqual(focusWork, spans, 'expanded Focus materializes the same canonical span identity')
+  assert.equal(focusWork[0]!.members.find(member => member === reminder), reminder,
+    'expanded Focus carries the ORIGINAL reminder object inside the nested Work')
+
+  const flattened = flattenStructure(structure)
+  assert.equal(flattened.length, messages.length, 'Full stays a single flat chronology')
+  for (let index = 0; index < messages.length; index += 1) {
+    assert.equal(flattened[index], messages[index], `Full row ${index} keeps its exact identity and position`)
+  }
+
+  // Negative control: the same producer WITHOUT the durable claim splits Work.
+  const unqualified = new TranscriptFolder()
+  unqualified.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: 'converge-unqualified-c1', name: 'read', arguments: '{}' }, 1),
+    event('tool/result', {
+      turn: 0, step: 0,
+      message: { id: MessageId('converge-unqualified-r1'), role: 'tool', toolCallId: 'converge-unqualified-c1', content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: 'converge-unqualified-c1' } },
+    }, 2),
+    event('user/message', {
+      id: MessageId('converge-unqualified-reminder'), role: 'user',
+      content: [{ type: 'text', text: 'UNQUALIFIED' }],
+      source: { kind: 'repeat-tool-reminder', form: 'notice', summary: 'read × 4' },
+    }, 3),
+    event('tool/call', { turn: 0, step: 1, callId: 'converge-unqualified-c2', name: 'bash', arguments: '{}' }, 4),
+    event('tool/result', {
+      turn: 0, step: 1,
+      message: { id: MessageId('converge-unqualified-r2'), role: 'tool', toolCallId: 'converge-unqualified-c2', content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: 'converge-unqualified-c2' } },
+    }, 5),
+  ])
+  assert.deepEqual(projectTranscriptStructure(unqualified.messages()).map(block => block.kind),
+    ['work', 'message', 'work'], 'an unqualified reminder still splits the Work')
+})

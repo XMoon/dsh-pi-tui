@@ -20,7 +20,7 @@ import {
 } from '../../src/tui/transcript/context-structure.ts'
 import { contextPresentation, isTranscriptContextForm } from '../../src/domain/transcript/context-semantics.ts'
 import { projectCompact } from '../../src/tui/transcript/compact-projection.ts'
-import { clusterByMemberOf, isWorkingAgentRelay, isWorkingSubagentSettledNotice, isWorkingToolJobsNotice, projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
+import { clusterByMemberOf, isWorkingAgentRelay, isWorkingRepeatToolReminderNotice, isWorkingSubagentSettledNotice, isWorkingToolJobsNotice, projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
 import { formatWorkHeaderLine, compactWorkBody, CompactWorkComponent } from '../../src/tui/components/transcript/compact-work.ts'
 import { summarizeWorkSpan } from '../../src/tui/transcript/work-summary.ts'
 import { compactActionPresentation } from '../../src/tui/components/transcript/compact-process-preview.ts'
@@ -1185,6 +1185,160 @@ test('a next-turn wakeup relay stays independently visible in Compact', () => {
   assert.deepEqual(projectTranscriptStructure(messages).map(block => block.kind), ['message', 'work', 'message'])
   assert.deepEqual(kindsOf(projectCompact(messages, noOptions)), ['system', 'work', 'assistant'],
     'the wakeup relay is a standalone visible Context before the Work')
+})
+
+// --- Working same-turn repeat-tool-reminder Notice follows the same Work ----
+
+/** One durable Working repeat-tool-reminder delivery: next-step insert →
+ * same-turn claim → the folded `user/message` (the id is preserved). */
+function workingRepeatToolReminderEvents(id: string, text: string, time: number, seq: number): SessionEvent[] {
+  const message = {
+    id: MessageId(id), role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'repeat-tool-reminder', form: 'notice', summary: 'read × 4' },
+  }
+  return [
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [message] }, time, seq),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, time + 0.1, seq + 1),
+    eventAt('user/message', message, time + 0.2, seq + 2),
+  ]
+}
+
+test('a proven same-turn repeat-tool-reminder is carried by the same Work on the real fold', () => {
+  const events: SessionEvent[] = [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    toolCallEvent(0, 'reminder-a', 1),
+    toolResultEvent(0, 'reminder-a', 2),
+    ...workingRepeatToolReminderEvents('working-reminder', 'REMINDER_BODY', 1003, 3),
+    toolCallEvent(0, 'reminder-b', 6),
+    toolResultEvent(0, 'reminder-b', 7),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('reminder-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1008, 8),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1009, 9),
+  ]
+  const folder = new TranscriptFolder()
+  apply(folder, events)
+  const messages = folder.messages()
+  const reminder = messages.find(message => message.kind === 'system' && message.contextPresentation?.sourceKind === 'repeat-tool-reminder')
+  assert.ok(reminder !== undefined && reminder.kind === 'system')
+  assert.equal(reminder.contextPresentation?.form, 'notice')
+  assert.equal(reminder.contextPresentation?.sameTurnNextStep, true,
+    'the fold records the durable same-turn next-step provenance')
+  assert.equal(isWorkingRepeatToolReminderNotice(reminder), true)
+  assert.equal(reminder.text, 'REMINDER_BODY', 'the producer body is untouched')
+  const structure = projectTranscriptStructure(messages)
+  assert.deepEqual(structure.map(block => block.kind), ['work', 'message'])
+  const span = onlySpan(structure)
+  assert.deepEqual(span.members, [messages[0], reminder, messages[2]],
+    'Process A -> qualified reminder -> Process B is ONE Work in raw order')
+  assert.equal(summarizeWorkSpan(span).actionStats.total, 2, 'the reminder adds no Action')
+  assert.deepEqual(kindsOf(projectCompact(messages, noOptions)), ['work', 'assistant'],
+    'collapsed Compact hides the carried reminder under the Work header')
+  const expanded = projectCompact(messages, {
+    expandedWorkOwners: new Set([span.owner]), expandedClusters: new Set(), forcedExpanded: new Set(),
+  })
+  assert.deepEqual(kindsOf(expanded), ['work', 'tool', 'system', 'tool', 'assistant'],
+    'expanding the Work restores every raw member exactly once in raw order')
+  assert.equal(expanded.filter(block => block.kind === 'message' && block.message === reminder).length, 1)
+  // Full keeps the exact raw chronology: the carried row never moves.
+  const fullRows = structure.flatMap(block => block.kind === 'work' ? [...block.span.members]
+    : block.kind === 'message' ? [block.message] : [...block.cluster.members])
+  assert.deepEqual(fullRows, messages, 'Full flat Work order equals the raw window')
+  // Cold replay folds the SAME durable log to the same provenance.
+  const cold = new TranscriptFolder()
+  cold.hydrate(events)
+  const coldReminder = cold.messages().find(message => message.kind === 'system')
+  assert.ok(coldReminder !== undefined && coldReminder.kind === 'system')
+  assert.equal(coldReminder.contextPresentation?.sameTurnNextStep, true, 'rehydrate keeps the claim provenance')
+  assert.deepEqual(projectTranscriptStructure(cold.messages()).map(block => block.kind), ['work', 'message'])
+})
+
+test('a repeat-tool-reminder only qualifies through the exact same-turn source/form chain', () => {
+  // No splice/claim chain: the same producer shape stays an independent boundary.
+  const missing = new TranscriptFolder()
+  apply(missing, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    toolCallEvent(0, 'reminder-missing-a', 1),
+    toolResultEvent(0, 'reminder-missing-a', 2),
+    eventAt('user/message', {
+      id: MessageId('missing-reminder'), role: 'user',
+      content: [{ type: 'text', text: 'MISSING_REMINDER' }],
+      source: { kind: 'repeat-tool-reminder', form: 'notice', summary: 'read × 4' },
+    }, 1003, 3),
+    toolCallEvent(0, 'reminder-missing-b', 4),
+    toolResultEvent(0, 'reminder-missing-b', 5),
+  ])
+  const missingReminder = missing.messages().find(message => message.kind === 'system')
+  assert.ok(missingReminder !== undefined && missingReminder.kind === 'system')
+  assert.equal(missingReminder.contextPresentation?.sameTurnNextStep, undefined)
+  assert.equal(isWorkingRepeatToolReminderNotice(missingReminder), false)
+  assert.deepEqual(projectTranscriptStructure(missing.messages()).map(block => block.kind),
+    ['work', 'message', 'work'], 'an unqualified reminder still splits the Work')
+
+  // Same source, wrong form: never the Working pair.
+  const wrongFormMessage = {
+    id: MessageId('wrong-form-reminder'), role: 'user',
+    content: [{ type: 'text', text: 'WRONG_FORM_REMINDER' }],
+    source: { kind: 'repeat-tool-reminder', form: 'relay' },
+  }
+  const wrongForm = new TranscriptFolder()
+  apply(wrongForm, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [wrongFormMessage] }, 1001, 1),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 1002, 2),
+    eventAt('user/message', wrongFormMessage, 1003, 3),
+    toolCallEvent(0, 'wrong-form-reminder-a', 4),
+    toolResultEvent(0, 'wrong-form-reminder-a', 5),
+  ])
+  const wrongFormReminder = wrongForm.messages().find(message => message.kind === 'system')
+  assert.ok(wrongFormReminder !== undefined && wrongFormReminder.kind === 'system')
+  assert.equal(wrongFormReminder.contextPresentation?.sameTurnNextStep, undefined,
+    'the durable claim is not enough: the exact source/form pair decides')
+
+  // Cross-turn claim: inserted during turn 1, claimed in turn 2.
+  const crossMessage = {
+    id: MessageId('cross-reminder'), role: 'user',
+    content: [{ type: 'text', text: 'CROSS_REMINDER' }],
+    source: { kind: 'repeat-tool-reminder', form: 'notice' },
+  }
+  const cross = new TranscriptFolder()
+  apply(cross, [
+    eventAt('turn/start', { turn: 1 }, 1000, 0),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [crossMessage] }, 1001, 1),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, 1002, 2),
+    eventAt('turn/start', { turn: 2 }, 2000, 3),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 2001, 4),
+    eventAt('user/message', crossMessage, 2002, 5),
+    toolCallEvent(2, 'cross-reminder-a', 6),
+    toolResultEvent(2, 'cross-reminder-a', 7),
+  ])
+  const crossReminder = cross.messages().find(message => message.kind === 'system')
+  assert.ok(crossReminder !== undefined && crossReminder.kind === 'system')
+  assert.equal(crossReminder.contextPresentation?.sameTurnNextStep, undefined,
+    'a claim carried across turns is not a same-turn Working delivery')
+})
+
+test('a proven reminder without a real Process fails open and never mints an Activity', () => {
+  const folder = new TranscriptFolder()
+  apply(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    ...workingRepeatToolReminderEvents('reminder-no-process', 'NO_PROCESS_REMINDER', 1001, 1),
+    eventAt('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('reminder-no-process-final'), role: 'assistant', content: [{ type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1005, 4),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1006, 5),
+  ])
+  const messages = folder.messages()
+  const reminder = messages.find(message => message.kind === 'system')
+  assert.ok(reminder !== undefined && reminder.kind === 'system')
+  assert.equal(reminder.contextPresentation?.sameTurnNextStep, true)
+  assert.deepEqual(projectTranscriptStructure(messages).map(block => block.kind), ['message', 'message'],
+    'Context + Conversation without Process stays a flat sequence')
+  assert.deepEqual(kindsOf(projectCompact(messages, noOptions)), ['system', 'assistant'],
+    'fail-open: the reminder card is visible and no empty Work is minted')
 })
 
 

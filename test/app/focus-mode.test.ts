@@ -5582,3 +5582,110 @@ test('a claimed relay separated from an earlier Process by a hard boundary fails
   assert.equal(expanded.filter(block => block.kind === 'message' && block.message === relay).length, 1,
     'expanded Focus restores the relay exactly once in raw order')
 })
+
+// ── Working repeat-tool-reminder Notice follows the Thought ───────────────
+
+/** One durable Working repeat-tool-reminder delivery: next-step insert →
+ * same-turn claim → folded `user/message` (id preserved). */
+function workingRepeatReminderEvents(id: string, text: string, time: number, seq: number): SessionEvent[] {
+  const message = {
+    id: MessageId(id), role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'repeat-tool-reminder', form: 'notice', summary: 'read × 4' },
+  }
+  return [
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [message] }, time, seq),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, time + 0.1, seq + 1),
+    eventAt('user/message', message, time + 0.2, seq + 2),
+  ]
+}
+
+test('a proven Working repeat-tool-reminder follows the collapsed Thought and restores once when expanded', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 6300, 0),
+    eventAt('user/message', {
+      id: MessageId('reminder-prompt'), role: 'user',
+      content: [{ type: 'text', text: 'go' }],
+      source: { kind: 'user' },
+    }, 6301, 1),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'first' } }, 6302, 2),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('reminder-c1'), name: 'read', arguments: '{}' }, 6303, 3),
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('reminder-r1'), role: 'tool', toolCallId: ToolCallId('reminder-c1'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('reminder-c1') },
+      },
+    }, 6304, 4),
+    ...workingRepeatReminderEvents('working-reminder-focus', 'WORKING_REMINDER body', 6305, 5),
+    eventAt('tool/call', { turn: 0, step: 1, callId: ToolCallId('reminder-c2'), name: 'bash', arguments: '{}' }, 6308, 8),
+    eventAt('tool/result', {
+      turn: 0, step: 1,
+      message: {
+        id: MessageId('reminder-r2'), role: 'tool', toolCallId: ToolCallId('reminder-c2'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('reminder-c2') },
+      },
+    }, 6309, 9),
+    eventAt('assistant/message', {
+      turn: 0, step: 2,
+      message: { id: MessageId('reminder-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 6310, 10),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 6311, 11),
+  ])
+  const messages = folder.messages()
+  const reminder = messages.find(message => message.kind === 'system' && message.text === 'WORKING_REMINDER body')
+  assert.ok(reminder !== undefined && reminder.kind === 'system')
+  assert.equal(reminder.contextPresentation?.sameTurnNextStep, true, 'fixture: durable Working provenance')
+  const collapsed = projectTools(messages, folder.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(collapsed), ['user', 'activity', 'assistant'])
+  assert.ok(!collapsed.some(block => block.kind === 'message' && block.message === reminder),
+    'the Working reminder is not a persistent row outside the Thought')
+  const expanded = projectTools(messages, folder.turnActivities(), new Set([0]))
+  assert.equal(expanded.filter(block => block.kind === 'message' && block.message === reminder).length, 1,
+    'expanded Focus restores the reminder exactly once in raw order')
+  const reminderIndex = expanded.findIndex(block => block.kind === 'message' && block.message === reminder)
+  assert.ok(reminderIndex > 0 && reminderIndex < expanded.length - 1,
+    'the reminder keeps its chronology between the two Process rows')
+})
+
+test('an unqualified repeat-tool-reminder stays a visible post-Thought row', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 6400, 0),
+    eventAt('user/message', {
+      id: MessageId('unqualified-reminder-prompt'), role: 'user',
+      content: [{ type: 'text', text: 'go' }],
+      source: { kind: 'user' },
+    }, 6401, 1),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'first' } }, 6402, 2),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('unqualified-reminder-c1'), name: 'read', arguments: '{}' }, 6403, 3),
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('unqualified-reminder-r1'), role: 'tool', toolCallId: ToolCallId('unqualified-reminder-c1'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('unqualified-reminder-c1') },
+      },
+    }, 6404, 4),
+    eventAt('user/message', {
+      id: MessageId('unqualified-reminder'), role: 'user',
+      content: [{ type: 'text', text: 'UNQUALIFIED_REMINDER body' }],
+      source: { kind: 'repeat-tool-reminder', form: 'notice', summary: 'read × 4' },
+    }, 6405, 5),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('unqualified-reminder-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 6406, 6),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 6407, 7),
+  ])
+  const messages = folder.messages()
+  const reminder = messages.find(message => message.kind === 'system')
+  assert.ok(reminder !== undefined && reminder.kind === 'system')
+  assert.equal(reminder.contextPresentation?.sameTurnNextStep, undefined)
+  const collapsed = projectTools(messages, folder.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(collapsed), ['user', 'activity', 'system', 'assistant'],
+    'an unqualified mid-turn reminder stays visible AFTER the Thought')
+  const reminderIndex = collapsed.findIndex(block => block.kind === 'message' && block.message === reminder)
+  const thoughtIndex = collapsed.findIndex(block => block.kind === 'activity')
+  assert.ok(reminderIndex > thoughtIndex, 'the unqualified reminder is visible process feedback')
+})

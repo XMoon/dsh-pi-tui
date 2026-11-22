@@ -5100,15 +5100,15 @@ export class TranscriptFolder {
         const sourcePresentation = contextPresentation(event.data.source)
         // Narrow Working delivery provenance: a Context row claimed from the
         // SAME turn's next-step inbox is the one delivery the presentation may
-        // carry with that turn's Work, and only for the three exact Working
-        // pairs — a tool-jobs Notice, an Agent relay or a subagent settlement
-        // Notice. It is derived ONLY from the durable insert/claim identity
-        // chain above (no Agent.status sampling, no summary/wording
-        // inference); next-turn wakeups, foreign/legacy logs, crossed
-        // source/form pairs and every other producer stay absent and therefore
-        // fail open as independent Context. The settlement body stays an
-        // opaque producer payload: this branch never parses or synthesizes a
-        // stop reason.
+        // carry with that turn's Work, and only for the four exact Working
+        // pairs — a tool-jobs Notice, an Agent relay, a subagent settlement
+        // Notice or a repeat-tool-reminder Notice. It is derived ONLY from the
+        // durable insert/claim identity chain above (no Agent.status sampling,
+        // no summary/wording inference); next-turn wakeups, foreign/legacy
+        // logs, crossed source/form pairs and every other producer stay absent
+        // and therefore fail open as independent Context. The settlement body
+        // stays an opaque producer payload: this branch never parses or
+        // synthesizes a stop reason.
         const claimedInThisTurn = wasClaimedFromNextStep === true
           && claimedIdentity !== undefined
           && claimedIdentity.insertionTurn === this.currentTurn
@@ -5116,6 +5116,7 @@ export class TranscriptFolder {
           (sourcePresentation.sourceKind === 'tool-jobs' && sourcePresentation.form === 'notice')
           || (sourcePresentation.sourceKind === 'agent-message' && sourcePresentation.form === 'relay')
           || (sourcePresentation.sourceKind === 'subagent-settled' && sourcePresentation.form === 'notice')
+          || (sourcePresentation.sourceKind === 'repeat-tool-reminder' && sourcePresentation.form === 'notice')
         )
         if (sourcePresentation.sourceKind === 'user') {
           if (!userBlocksVisibleNow(blocks)) break

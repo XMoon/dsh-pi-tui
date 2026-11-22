@@ -2463,6 +2463,111 @@ test('search reveals a settlement folded inside a Focus Thought and dismissal re
   app.stop()
 })
 
+// --- A folded same-turn repeat-tool-reminder is searchable through its Work owner ---
+
+/** A real Compact transcript: Process -> qualified same-turn repeat-tool
+ * reminder -> Process, so the reminder is a Work member (never standalone). */
+function foldedReminderFolder(): { folder: TranscriptFolder; reminder: TranscriptMessage } {
+  const reminderMessage = {
+    id: MessageId('search-folded-reminder'), role: 'user',
+    content: [{ type: 'text', text: 'FOLDED_REMINDER_PAYLOAD with the needle inside' }],
+    source: { kind: 'repeat-tool-reminder', form: 'notice', summary: 'read × 4' },
+  }
+  const folder = new TranscriptFolder()
+  folder.apply([
+    relayEvent('turn/start', { turn: 0 }, 0),
+    relayEvent('tool/call', { turn: 0, step: 0, callId: ToolCallId('search-reminder-c1'), name: 'read', arguments: '{}' }, 1),
+    relayEvent('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('search-reminder-r1'), role: 'tool', toolCallId: ToolCallId('search-reminder-c1'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('search-reminder-c1') },
+      },
+    }, 2),
+    relayEvent('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [reminderMessage] }, 3),
+    relayEvent('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 4),
+    relayEvent('user/message', reminderMessage, 5),
+    relayEvent('tool/call', { turn: 0, step: 1, callId: ToolCallId('search-reminder-c2'), name: 'bash', arguments: '{}' }, 6),
+    relayEvent('tool/result', {
+      turn: 0, step: 1,
+      message: {
+        id: MessageId('search-reminder-r2'), role: 'tool', toolCallId: ToolCallId('search-reminder-c2'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('search-reminder-c2') },
+      },
+    }, 7),
+    relayEvent('assistant/message', {
+      turn: 0, step: 2,
+      message: { id: MessageId('search-reminder-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 8),
+    relayEvent('turn/end', { turn: 0, reason: { kind: 'completed' } }, 9),
+  ])
+  const reminder = folder.messages().find(message => message.kind === 'system' && message.text.includes('FOLDED_REMINDER_PAYLOAD'))
+  assert.ok(reminder !== undefined && reminder.kind === 'system')
+  assert.equal(reminder.contextPresentation?.sameTurnNextStep, true, 'fixture: the reminder is a proven Work member')
+  return { folder, reminder }
+}
+
+test('search reveals a folded same-turn repeat-tool-reminder through its Work owner and dismissal restores the fold', async () => {
+  const { folder, reminder } = foldedReminderFolder()
+  const { vt, app } = startCompactApp()
+  const view = (): string => vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  assert.ok(!view().includes('FOLDED_REMINDER_PAYLOAD'),
+    `precondition: the Work folds the reminder while collapsed:\n${view()}`)
+
+  app.setTranscriptSearchTarget({
+    query: 'FOLDED_REMINDER_PAYLOAD',
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: reminder,
+  })
+  assert.equal(app.transcriptSearchPresentationForTest()?.revealGranted, true,
+    'the folded reminder resolves a Work reveal')
+  app.scrollToSearchTarget()
+  await vt.waitForRender()
+  assert.ok(view().includes('FOLDED_REMINDER_PAYLOAD'),
+    `the reveal opens the owning Work and locates the reminder body:\n${view()}`)
+
+  app.finishTranscriptSearchPresentation(new Set())
+  await vt.waitForRender()
+  assert.ok(!view().includes('FOLDED_REMINDER_PAYLOAD'),
+    `dismissal restores the folded Work instead of permanently expanding the turn:\n${view()}`)
+  assert.ok(view().includes('Activity') || view().includes('Thought'),
+    'the Work/Activity header remains the collapsed presentation')
+  app.stop()
+})
+
+test('search reveals a repeat-tool-reminder folded inside a Focus Thought and dismissal restores the collapsed Thought', async () => {
+  const { folder, reminder } = foldedReminderFolder()
+  const vt = new VirtualTerminal(120, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    displayState: { preset: 'focus' },
+    deliveredFiles: deliveredFilesCapabilityStub,
+  })
+  app.start()
+  startedApps.add(app)
+  const view = (): string => vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  assert.ok(!view().includes('FOLDED_REMINDER_PAYLOAD'), `precondition: the Thought hides the reminder:\n${view()}`)
+  assert.equal(app.focusExpandedTurnsForTest().size, 0)
+
+  app.setTranscriptSearchTarget({
+    query: 'FOLDED_REMINDER_PAYLOAD',
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: reminder,
+  })
+  app.scrollToSearchTarget()
+  await vt.waitForRender()
+  assert.ok(view().includes('FOLDED_REMINDER_PAYLOAD'), `the reveal opens the Thought and locates the reminder:\n${view()}`)
+
+  app.finishTranscriptSearchPresentation(new Set())
+  await vt.waitForRender()
+  assert.ok(!view().includes('FOLDED_REMINDER_PAYLOAD'), `dismissal restores the collapsed Thought:\n${view()}`)
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'no permanent manual Thought expansion is left behind')
+  app.stop()
+})
+
 // ── PR-B: plain-text source-to-cell proof at real widths ───────────────────
 
 /** Every viewport cell where a visible `needle` starts and carries the strong

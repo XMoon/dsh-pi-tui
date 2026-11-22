@@ -17,11 +17,11 @@
  *
  * A Work span may CARRY a foldable Context row as a structural part without
  * making it Process: the row keeps its Context semantics, its source bytes and
- * its own disclosure, but no longer splits one turn's Activity/Thought. Four
+ * its own disclosure, but no longer splits one turn's Activity/Thought. Five
  * narrow forms qualify: a `form:'snapshot'` singleton / snapshot-only raw
- * cluster, a `tool-jobs` Notice, an `agent-message` relay and a
- * `subagent-settled` Notice, each of the last three with durable same-turn
- * `next-step` delivery evidence. A mixed
+ * cluster, a `tool-jobs` Notice, an `agent-message` relay, a
+ * `subagent-settled` Notice and a `repeat-tool-reminder` Notice, each of the
+ * last four with durable same-turn `next-step` delivery evidence. A mixed
  * `instructions`/`catalog`/`snapshot` cluster and every other Notice/relay form
  * stay independent Context boundaries.
  *
@@ -216,11 +216,38 @@ export function isWorkingSubagentSettledNotice(
 }
 
 /**
+ * Whether one row is a same-turn delivered repeat-tool-reminder Notice
+ * (`repeat-tool-reminder` + `notice`) with durable next-step delivery
+ * evidence.
+ *
+ * This is the narrow sibling of {@link isWorkingToolJobsNotice}: the
+ * producer-declared `sourceKind === 'repeat-tool-reminder'` AND
+ * `form === 'notice'` are both required, plus the fold's presentation-only
+ * `sameTurnNextStep` flag derived from the durable `agent/inbox/spliced`
+ * insert/claim identity chain. The reminder's text (gentle or detailed) and
+ * its `tool × count` summary are deliberately NOT inspected: wording is never
+ * an identity. A `next-turn` wakeup, a foreign/legacy log, a crossed
+ * source/form pair or a missing claim carries no flag and therefore stays an
+ * independent Context boundary.
+ */
+export function isWorkingRepeatToolReminderNotice(
+  message: TranscriptMessage,
+): message is Extract<TranscriptMessage, { kind: 'system' }> & { context: true } {
+  if (!isSurfacedContext(message)) return false
+  const presentation = message.contextPresentation
+  return presentation !== undefined
+    && presentation.sameTurnNextStep === true
+    && presentation.form === 'notice'
+    && presentation.sourceKind === 'repeat-tool-reminder'
+}
+
+/**
  * The complete narrow display-layer eligibility: may this Context row be
  * carried by the same-turn Work/Thought instead of ending it? Only a foldable
  * Snapshot, a proven Working `tool-jobs` Notice, a proven same-turn Agent
- * relay or a proven same-turn subagent settlement Notice qualifies; every
- * other surfaced Context remains a boundary.
+ * relay, a proven same-turn subagent settlement Notice or a proven same-turn
+ * repeat-tool-reminder Notice qualifies; every other surfaced Context remains
+ * a boundary.
  */
 export function isFoldableWorkContext(
   message: TranscriptMessage,
@@ -230,6 +257,7 @@ export function isFoldableWorkContext(
     || isWorkingToolJobsNotice(message)
     || isWorkingAgentRelay(message)
     || isWorkingSubagentSettledNotice(message)
+    || isWorkingRepeatToolReminderNotice(message)
 }
 
 /**

@@ -9,8 +9,9 @@
  * process rows (a committed pre-steer answer is the explicit exception) and
  * expanded turns restore raw chronology with the final assistant held back.
  * A foldable Context row (producer-declared Snapshot, a `tool-jobs` Notice, an
- * `agent-message` relay or a `subagent-settled` Notice with durable same-turn
- * next-step evidence) follows the same rule unless it shares a raw-adjacent
+ * `agent-message` relay, a `subagent-settled` Notice or a
+ * `repeat-tool-reminder` Notice with durable same-turn next-step evidence)
+ * follows the same rule unless it shares a raw-adjacent
  * cluster with `instructions`/`catalog`: it joins the Thought instead of
  * becoming turn foundation, while a mixed ambient cluster keeps its indivisible
  * foundation position.
@@ -35,6 +36,7 @@ import { clusterAdjacentAmbientContext, isNoticeContext, type ContextCluster } f
 import {
   isFoldableWorkContext,
   isWorkingAgentRelay,
+  isWorkingRepeatToolReminderNotice,
   isWorkingSubagentSettledNotice,
   projectTranscriptStructure,
   workByMemberOf,
@@ -225,8 +227,8 @@ function focusActionStatsByTurn(messages: readonly TranscriptMessage[]): Map<num
  * renders an UNQUALIFIED durable mid-turn `form:'notice'` AFTER the Thought
  * (visible process feedback, never inside the hidden Action candidate set),
  * and hides ordinary Process inside the collapsed root. A proven Working
- * `tool-jobs` Notice, same-turn Agent relay or subagent settlement Notice is
- * carried by that same Thought instead.
+ * `tool-jobs` Notice, same-turn Agent relay, subagent settlement Notice or
+ * repeat-tool-reminder Notice is carried by that same Thought instead.
  * Expanded Focus restores the exact raw chronology.
  */
 export function projectFocus(
@@ -532,9 +534,8 @@ function isFocusPersistentInputRow(message: TranscriptMessage): boolean {
 type CollapsedFocusRowDisposition = 'pre-thought' | 'post-thought' | 'hidden'
 
 /** The foldable Context rows (Snapshot / proven Working tool-jobs Notice,
- * Agent relay or subagent settlement Notice) a collapsed Thought may carry
- * instead of surfacing as turn
- * foundation.
+ * Agent relay, subagent settlement Notice or repeat-tool-reminder Notice) a
+ * collapsed Thought may carry instead of surfacing as turn foundation.
  * `thoughtOwned` is false where no Thought block will be emitted (a truncated
  * window without an activity) — the rows then fail open instead of disappearing.
  * `workByMember` is the same group's canonical Work membership, used by the
@@ -542,7 +543,9 @@ type CollapsedFocusRowDisposition = 'pre-thought' | 'post-thought' | 'hidden'
  * owns it, so an activity-only turn (no Process at all) fails open. Snapshot
  * and Working tool-jobs Notice keep their established activity-owner rule; a
  * settled subagent Notice follows the Agent-relay rule because its body is the
- * recoverable child result and must never be lost.
+ * recoverable child result and must never be lost, and a repeat-tool reminder
+ * follows that same rule because its payload is the only account of why the
+ * same call was repeated.
  * The Thought-lead boundary decides WHICH rows are foundation; anything at or
  * after it is Thought content. */
 interface CollapsedFoldableSnapshotScope {
@@ -561,11 +564,13 @@ function collapsedFocusRowDisposition(
   if (foldableSnapshots.thoughtOwned
     && index >= leadBoundary
     && isFoldableWorkContext(message, foldableSnapshots.clusterByMember)
-    // A claimed Agent relay or subagent settlement Notice additionally needs
-    // its REAL Work (Process) owner: an activity-only turn has no Process for
-    // the Context to be recovered through, so hiding it there would lose the
-    // original Context (and the child's reported result).
-    && (!(isWorkingAgentRelay(message) || isWorkingSubagentSettledNotice(message))
+    // A claimed Agent relay, subagent settlement Notice or repeat-tool
+    // reminder additionally needs its REAL Work (Process) owner: an
+    // activity-only turn has no Process for the Context to be recovered
+    // through, so hiding it there would lose the original Context (and the
+    // child's reported result / reminder body).
+    && (!(isWorkingAgentRelay(message) || isWorkingSubagentSettledNotice(message)
+      || isWorkingRepeatToolReminderNotice(message))
       || foldableSnapshots.workByMember.has(message))) return 'hidden'
   if (index >= leadBoundary && isNoticeContext(message)) return 'post-thought'
   return 'pre-thought'
