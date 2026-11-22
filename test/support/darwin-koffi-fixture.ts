@@ -14,7 +14,7 @@
  * @module @xmoon76/dsh-pi-tui/test/support/darwin-koffi-fixture
  */
 
-import { cpSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import type { TestContext } from 'node:test'
@@ -26,14 +26,17 @@ let fixtureRoot: string | undefined
  * platform prebuild) into a fixture `node_modules` directory. The production
  * resolver proves both live inside the fixture's module tree, so a symlink to
  * the checkout would not exercise the same path. */
-export function copyKoffiPackage(nodeModules: string): void {
+export function copyKoffiPackage(nodeModules: string): string {
   const requireFromTest = createRequire(import.meta.url)
   const koffiEntry = requireFromTest.resolve('koffi')
+  const koffiVersion = JSON.parse(readFileSync(join(dirname(koffiEntry), 'package.json'), 'utf8')).version as string
   cpSync(dirname(koffiEntry), join(nodeModules, 'koffi'), { recursive: true, dereference: true })
-  if (process.platform !== 'darwin') return
-  const platformName = `@koromix/koffi-darwin-${process.arch}`
-  const platformRoot = dirname(realpathSync(createRequire(koffiEntry).resolve(`${platformName}/package.json`)))
-  cpSync(platformRoot, join(nodeModules, '@koromix', `koffi-darwin-${process.arch}`), { recursive: true, dereference: true })
+  if (process.platform === 'darwin') {
+    const platformName = `@koromix/koffi-darwin-${process.arch}`
+    const platformRoot = dirname(realpathSync(createRequire(koffiEntry).resolve(`${platformName}/package.json`)))
+    cpSync(platformRoot, join(nodeModules, '@koromix', `koffi-darwin-${process.arch}`), { recursive: true, dereference: true })
+  }
+  return koffiVersion
 }
 
 /** Install (once per process) and activate the test-owned DSH anchor. Call it
@@ -50,15 +53,16 @@ export function installDarwinKoffiFixture(t: TestContext): string {
     name: '@deepseek-ai/dsh',
     version: '0.2.2-rc.5',
   }, null, 2)}\n`)
+  // Copy (dereference) rather than symlink: the production resolver proves the
+  // package lives inside the DSH module tree, and realpath() would leave a
+  // fixture that merely links to this checkout. The declaration follows the
+  // devDependency actually installed, not a hard-coded version.
+  const koffiVersion = copyKoffiPackage(join(root, 'node_modules'))
   writeFileSync(join(subprocessDir, 'package.json'), `${JSON.stringify({
     name: '@deepseek-ai/dsh-subprocess-local',
     version: '0.2.2-rc.5',
-    dependencies: { koffi: '3.1.1' },
+    dependencies: { koffi: koffiVersion },
   }, null, 2)}\n`)
-  // Copy (dereference) rather than symlink: the production resolver proves the
-  // package lives inside the DSH module tree, and realpath() would leave a
-  // fixture that merely links to this checkout.
-  copyKoffiPackage(join(root, 'node_modules'))
   process.env.SPLIT_PROCESS_DSH_ANCHOR = join(dshDir, 'package.json')
   fixtureRoot = root
   return root

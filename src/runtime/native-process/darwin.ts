@@ -202,8 +202,8 @@ function readManifestObject(path: string): Record<string, unknown> | undefined {
   }
 }
 
-/** Read one required dependency declaration from an owner manifest. */
-function declaredDependency(manifest: Record<string, unknown>, name: string, label: string): string {
+/** Require one dependency declaration from an owner manifest. */
+function assertDeclaredDependency(manifest: Record<string, unknown>, name: string, label: string): void {
   const dependencies = manifest.dependencies
   const declared = dependencies !== null && typeof dependencies === 'object' && !Array.isArray(dependencies)
     ? (dependencies as Record<string, unknown>)[name]
@@ -211,7 +211,6 @@ function declaredDependency(manifest: Record<string, unknown>, name: string, lab
   if (typeof declared !== 'string' || declared === '') {
     throw new Error(`native process identity: ${label} does not declare ${name}`)
   }
-  return declared
 }
 
 /**
@@ -219,6 +218,11 @@ function declaredDependency(manifest: Record<string, unknown>, name: string, lab
  * DSH anchor -> `@deepseek-ai/dsh-subprocess-local` manifest -> that package's
  * own `koffi` dependency. The TUI never resolves Koffi from its own package, a
  * profile, or an ambient module path.
+ *
+ * The owner's declared dependency selects the implementation; this code does
+ * not pin or compare a Koffi version, because the running DSH installation owns
+ * that choice and an upgrade must not be rejected only for a different version
+ * number. The ABI/struct-size checks in loadBridge decide actual compatibility.
  */
 export function resolveDshKoffi(anchor: string): string {
   const manifest = installedDshManifest(anchor)
@@ -235,12 +239,12 @@ export function resolveDshKoffi(anchor: string): string {
   if (subprocess?.name !== '@deepseek-ai/dsh-subprocess-local') {
     throw new Error('native process identity: the resolved subprocess manifest is not @deepseek-ai/dsh-subprocess-local')
   }
-  const declaredKoffi = declaredDependency(subprocess, 'koffi', '@deepseek-ai/dsh-subprocess-local')
+  assertDeclaredDependency(subprocess, 'koffi', '@deepseek-ai/dsh-subprocess-local')
   const koffiEntry = realpathSync(createRequire(subprocessManifest).resolve('koffi'))
   assertInstallClosure(subprocessDir, dirname(koffiEntry), 'koffi')
   const koffi = readManifestObject(join(dirname(koffiEntry), 'package.json'))
-  if (koffi?.name !== 'koffi' || typeof koffi.version !== 'string' || koffi.version !== declaredKoffi) {
-    throw new Error('native process identity: the resolved koffi does not match the owner declaration')
+  if (koffi?.name !== 'koffi') {
+    throw new Error('native process identity: the resolved koffi is not the koffi package')
   }
   return koffiEntry
 }

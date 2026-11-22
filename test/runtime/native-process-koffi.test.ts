@@ -16,6 +16,7 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { createRequire } from 'node:module'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import test, { type TestContext } from 'node:test'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
@@ -23,6 +24,7 @@ import { copyKoffiPackage } from '../support/darwin-koffi-fixture.ts'
 import { resolveDshKoffi } from '../../src/runtime/native-process/darwin.ts'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
+const KOFFI_VERSION = JSON.parse(readFileSync(join(dirname(createRequire(import.meta.url).resolve('koffi')), 'package.json'), 'utf8')).version as string
 const DARWIN_ONLY = process.platform !== 'darwin' ? 'Darwin kernel process identity requires macOS' : false
 
 interface Fixture {
@@ -36,11 +38,11 @@ function writeManifest(directory: string, manifest: Record<string, unknown>): vo
   writeFileSync(join(directory, 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`)
 }
 
-function writeKoffiOwner(directory: string): void {
+function writeKoffiOwner(directory: string, declaredVersion = KOFFI_VERSION): void {
   writeManifest(directory, {
     name: '@deepseek-ai/dsh-subprocess-local',
     version: '0.2.2-rc.5',
-    dependencies: { koffi: '3.1.1' },
+    dependencies: { koffi: declaredVersion },
   })
 }
 
@@ -54,7 +56,7 @@ function writeDsh(directory: string): void {
 function wrapFixtureKoffi(nodeModules: string, marker: string): void {
   const real = join(nodeModules, 'koffi-real')
   renameSync(join(nodeModules, 'koffi'), real)
-  writeManifest(join(nodeModules, 'koffi'), { name: 'koffi', version: '3.1.1', main: 'index.cjs' })
+  writeManifest(join(nodeModules, 'koffi'), { name: 'koffi', version: KOFFI_VERSION, main: 'index.cjs' })
   writeFileSync(join(nodeModules, 'koffi', 'index.cjs'), [
     "require('node:fs').writeFileSync(" + JSON.stringify(marker) + ", 'fixture-koffi-loaded\\n')",
     'module.exports = require(' + JSON.stringify(join(real, 'index.cjs')) + ')',
@@ -62,13 +64,13 @@ function wrapFixtureKoffi(nodeModules: string, marker: string): void {
   ].join('\n'))
 }
 
-function fixture(t: TestContext, options: { subprocess?: boolean; koffi?: boolean; wrapped?: boolean } = {}): Fixture {
-  const { subprocess = true, koffi = true, wrapped = false } = options
+function fixture(t: TestContext, options: { subprocess?: boolean; koffi?: boolean; wrapped?: boolean; declaredVersion?: string } = {}): Fixture {
+  const { subprocess = true, koffi = true, wrapped = false, declaredVersion = KOFFI_VERSION } = options
   const root = testLifecycle(t).tempDir('dsh-koffi-test-')
   const nodeModules = join(root, 'node_modules')
   const dshDir = join(nodeModules, '@deepseek-ai', 'dsh')
   writeDsh(dshDir)
-  if (subprocess) writeKoffiOwner(join(nodeModules, '@deepseek-ai', 'dsh-subprocess-local'))
+  if (subprocess) writeKoffiOwner(join(nodeModules, '@deepseek-ai', 'dsh-subprocess-local'), declaredVersion)
   if (subprocess && koffi) copyKoffiPackage(nodeModules)
   let marker: string | undefined
   if (wrapped) {
@@ -112,8 +114,8 @@ function pnpmFixture(t: TestContext): Fixture {
   return { root, anchor: join(dshDir, 'package.json') }
 }
 
-function koffiVersion(entry: string): string {
-  return JSON.parse(readFileSync(join(dirname(entry), 'package.json'), 'utf8')).version as string
+function koffiPackageName(entry: string): string {
+  return JSON.parse(readFileSync(join(dirname(entry), 'package.json'), 'utf8')).name as string
 }
 
 function runNativeRead(env: NodeJS.ProcessEnv): { status: number | null; stdout: string; stderr: string } {
@@ -131,8 +133,13 @@ function runNativeRead(env: NodeJS.ProcessEnv): { status: number | null; stdout:
 test('Koffi resolves from the DSH subprocess-local dependency', t => {
   const value = fixture(t)
   const entry = resolveDshKoffi(value.anchor)
-  assert.equal(koffiVersion(entry), '3.1.1')
+  assert.equal(koffiPackageName(entry), 'koffi')
   assert.equal(entry, realpathSync(join(value.root, 'node_modules', 'koffi', 'index.cjs')))
+})
+
+test('the owner version string is not a runtime Koffi version gate', t => {
+  const value = fixture(t, { declaredVersion: '^999.0.0' })
+  assert.equal(koffiPackageName(resolveDshKoffi(value.anchor)), 'koffi')
 })
 
 test('a non-DSH anchor cannot borrow Koffi from an ancestor node_modules', t => {
@@ -153,7 +160,7 @@ test('a DSH installation without the subprocess-local owner or Koffi fails close
 
 test('a nested DSH closure resolves its own dependency and rejects an outer hoist', t => {
   const nested = nestedFixture(t)
-  assert.equal(koffiVersion(resolveDshKoffi(nested.anchor)), '3.1.1')
+  assert.equal(koffiPackageName(resolveDshKoffi(nested.anchor)), 'koffi')
   const polluted = nestedFixture(t, { pollutedAncestor: true })
   assert.throws(() => resolveDshKoffi(polluted.anchor), /outside the installed DSH module tree|does not declare/u)
 })
@@ -161,7 +168,7 @@ test('a nested DSH closure resolves its own dependency and rejects an outer hois
 test('a pnpm virtual-store DSH closure resolves through its .mise store', t => {
   const value = pnpmFixture(t)
   const entry = resolveDshKoffi(value.anchor)
-  assert.equal(koffiVersion(entry), '3.1.1')
+  assert.equal(koffiPackageName(entry), 'koffi')
   assert.ok(realpathSync(entry).includes(`${join('node_modules', '.mise')}`))
 })
 

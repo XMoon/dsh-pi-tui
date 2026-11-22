@@ -169,14 +169,14 @@ function copyLaneRunnerSources(scripts) {
     name: '@deepseek-ai/dsh',
     version: '0.2.2-rc.5',
   })}\n`)
+  const koffiVersion = copyKoffiPackage(join(fixtureRoot, 'node_modules'))
   const subprocessDir = join(fixtureRoot, 'node_modules', '@deepseek-ai', 'dsh-subprocess-local')
   mkdirSync(subprocessDir, { recursive: true })
   writeFileSync(join(subprocessDir, 'package.json'), `${JSON.stringify({
     name: '@deepseek-ai/dsh-subprocess-local',
     version: '0.2.2-rc.5',
-    dependencies: { koffi: '3.1.1' },
+    dependencies: { koffi: koffiVersion },
   })}\n`)
-  copyKoffiPackage(join(fixtureRoot, 'node_modules'))
   return join(dshDir, 'package.json')
 }
 

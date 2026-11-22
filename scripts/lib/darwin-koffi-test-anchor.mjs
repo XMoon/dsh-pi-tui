@@ -16,7 +16,7 @@
  * @module scripts/lib/darwin-koffi-test-anchor
  */
 
-import { cpSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -45,13 +45,14 @@ export function prepareDarwinKoffiTestAnchor() {
     name: '@deepseek-ai/dsh',
     version: '0.2.2-rc.5',
   }, null, 2)}\n`)
+  const requireFromScript = createRequire(import.meta.url)
+  const koffiEntry = requireFromScript.resolve('koffi')
+  const koffiVersion = JSON.parse(readFileSync(join(dirname(koffiEntry), 'package.json'), 'utf8')).version
   writeFileSync(join(subprocessDir, 'package.json'), `${JSON.stringify({
     name: '@deepseek-ai/dsh-subprocess-local',
     version: '0.2.2-rc.5',
-    dependencies: { koffi: '3.1.1' },
+    dependencies: { koffi: koffiVersion },
   }, null, 2)}\n`)
-  const requireFromScript = createRequire(import.meta.url)
-  const koffiEntry = requireFromScript.resolve('koffi')
   cpSync(dirname(koffiEntry), join(root, 'node_modules', 'koffi'), { recursive: true, dereference: true })
   const platformName = `@koromix/koffi-darwin-${process.arch}`
   const platformRoot = dirname(realpathSync(createRequire(koffiEntry).resolve(`${platformName}/package.json`)))
