@@ -20,6 +20,14 @@ before editing. Read subsystem docs only when the task touches that subsystem.
   shared `/tmp/node_modules` links or other globally visible artifacts.
   The delegating agent must pass these constraints to every subagent.
   Clean up only resources owned by the current run.
+- **Reclaim retained failure artifacts after investigation.** Tests and smokes
+  may intentionally retain failure reports or isolated work roots for diagnosis.
+  After investigating a failure, the executing agent MUST remove its own
+  no-longer-needed artifacts and confirm cleanup in the final report, even if
+  the failure remains unresolved. Evidence still needed for handoff must be
+  reported with its exact path, purpose and cleanup owner. Never delete
+  operator-requested evidence, another run's files or resources used by live
+  processes; never sweep shared temp directories by prefix.
 - **Never push or force-push without explicit user approval.** Local commits are allowed when appropriate; remote changes are not.
 
 ## Repository documentation policy (hard gate)

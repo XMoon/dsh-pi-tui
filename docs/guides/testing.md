@@ -679,6 +679,27 @@ A longer private temporary path can break a UI test that assumes a short
 path: fix the test's path assumption instead of reusing the shared `/tmp`
 root.
 
+### Retained failure artifacts: investigate, then clean up
+
+A failing smoke may intentionally retain a diagnostic report (for example,
+`dsh-pi-tui-smoke-failure-*/failure.json`); documented keep settings can also
+preserve a temporary work root. These artifacts are for investigation, not
+indefinite storage. The executing agent is responsible for its runs, including
+probes it delegates:
+
+1. Record the exact retained paths from the run output and use them to diagnose
+   the failure.
+2. Once the investigation is complete, whether the failure was fixed, confirmed
+   as a baseline issue or left unresolved, remove this agent's artifacts that
+   are no longer needed. Confirm owned processes have stopped before deleting
+   their resources; never delete by a broad `/tmp` prefix or glob.
+3. Preserve artifacts needed for handoff and evidence explicitly requested by
+   the operator (for example, an `--out`, `--evidence` or documented evidence
+   destination). Do not remove another run's artifacts. For each handoff
+   artifact, identify its exact path, purpose and cleanup owner.
+4. In the final task report, confirm cleanup of the agent's failed-run artifacts
+   and enumerate any intentionally retained paths with their reasons.
+
 ## 3. Adding a test — the checklist
 
 1. Name the observable failure class and check existing tests and real
