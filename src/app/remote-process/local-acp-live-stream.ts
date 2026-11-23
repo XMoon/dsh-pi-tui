@@ -197,11 +197,16 @@ export class AcpAssistantStream {
   }
 
   /**
-   * Declare that this attempt's terminal frame can never be observed. The
-   * attempt keeps whatever it already delivered (append-only) but no durable
-   * message may ever be joined to it.
+   * Declare that this attempt's terminal frame can never be observed.
+   *
+   * The attempt is then PERMANENTLY closed: it keeps whatever it already
+   * delivered (ACP v1 output is append-only) and the join may still compare that
+   * preview, but no late chunk may be accepted and no late `end` may claim it.
+   * This is the intrinsic guarantee behind "a frame of an already-terminal turn
+   * is inert" — it must not depend on the surrounding output-tail ordering.
    */
   endWithoutTerminal(): void {
+    this.broken = true
     this.terminalWait.resolve(undefined)
   }
 

@@ -42,6 +42,7 @@ import {
   buildQuestionForm,
   type AcpQuestionSpec,
 } from '../../src/app/remote-process/local-acp-question-form.ts'
+import { AcpAssistantStream } from '../../src/app/remote-process/local-acp-live-stream.ts'
 import { AcpModelError, type AcpModelCurrentness, type AcpModelOptionRequest } from '../../src/app/remote-process/local-acp-model-selection.ts'
 import { AcpScopedMcpError, type AcpScopedMcpCurrentness, type AcpScopedMcpLease } from '../../src/app/remote-process/local-acp-scoped-mcp.ts'
 import { createHostAcpSessionAccess } from '../../src/app/remote-process/local-host-entry.ts'
@@ -4280,6 +4281,8 @@ test('G-ACP2-PR1 QU-01 negatives: no Form capability, a foreign turn, an invalid
       { label: 'an unknown key', response: { action: 'accept', content: { q9: 'x' } } },
       { label: 'a label outside the options', response: { action: 'accept', content: { q0: 'Z' } } },
       { label: 'a wrong primitive type', response: { action: 'accept', content: { q0: ['A'] } } },
+      { label: 'a JSON null single value', response: { action: 'accept', content: { q0: null } } },
+      { label: 'a JSON null multi value', response: { action: 'accept', content: { q1: null } } },
       { label: 'a duplicated multi selection', response: { action: 'accept', content: { q1: ['x', 'x'] } } },
       { label: 'an unknown action', response: { action: 'approve' } },
     ]
@@ -4589,4 +4592,71 @@ test('G-ACP2-PR1 QU-01: a question of a TUI-origin turn keeps its TUI responder 
   view.commit('assistant/message', assistantData(7, 'm-mixed-answer', [{ type: 'text', text: 'answer' }]))
   view.commit('turn/end', { turn: 7, reason: { kind: 'completed' } })
   await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_MIXED_TURN'))
+})
+
+test('G-ACP2-PR1 ST-03: an attempt whose terminal can never be observed is permanently closed and its late frames are inert', async () => {
+  // The stream's OWN state must be the guarantee, not the surrounding output fence.
+  const attempt = new AcpAssistantStream({ type: 'start', attemptId: 'a1', revision: 1, turn: 3, step: 1 }, 'acp-message-1')
+  assert.deepEqual(
+    attempt.acceptChunk({ type: 'chunk', attemptId: 'a1', revision: 2, index: 0, chunk: { type: 'text-delta', index: 0, text: 'hi' } }),
+    { kind: 'delta', delta: { kind: 'message', text: 'hi' } },
+  )
+  assert.equal(attempt.isOpen(), true)
+  attempt.endWithoutTerminal()
+  assert.equal(attempt.isOpen(), false, 'a lost terminal closes the attempt for good')
+  assert.equal(await attempt.terminalFact, undefined, 'the terminal fact stays unknowable')
+  assert.deepEqual(
+    attempt.acceptChunk({ type: 'chunk', attemptId: 'a1', revision: 3, index: 1, chunk: { type: 'text-delta', index: 0, text: 'late' } }),
+    { kind: 'broken' },
+    'a late chunk is rejected by the attempt itself',
+  )
+  assert.equal(
+    attempt.acceptEnd({ type: 'end', attemptId: 'a1', revision: 4, index: 2, outcome: { kind: 'committed', eventType: 'assistant/message', seq: 9 } }),
+    false,
+    'a late end frame cannot claim the closed attempt',
+  )
+  assert.deepEqual(attempt.streamedBlocks(), [{ kind: 'message', text: 'hi' }],
+    'the delivered preview stays available for the fail-closed join')
+  assert.equal(attempt.hasSent(), true)
+
+  // View-level: a frame of an already-terminal turn never reaches the connection.
+  {
+    const view = promptView()
+    await view.attach()
+    const settled = view.start()
+    const request = view.access.promptCalls[0]!
+    view.insert(request.requestId, 'm-terminal')
+    view.access.turnFence = { openTurnStartSeq: 920, lastTurn: 5 }
+    view.claim('m-terminal', 5, request.requestId)
+    view.stream({ type: 'start', attemptId: 'P1:late', revision: 1, turn: 5, step: 1 })
+    view.stream(streamFrame('P1:late', 2, 0, { type: 'text-delta', index: 0, text: 'partial' }))
+    view.commit('assistant/message', assistantData(5, 'm-terminal-durable', [{ type: 'text', text: 'partial' }]))
+    // Official turn terminal arrives with NO attempt `end` frame.
+    view.commit('turn/end', { turn: 5, reason: { kind: 'completed' } })
+    view.stream(streamFrame('P1:late', 3, 1, { type: 'text-delta', index: 0, text: ' LATE' }))
+    await assert.rejects(settled, isPromptError('LOCAL_ACP_PROMPT_STREAM_DIVERGENCE'))
+    await flushOutput()
+    assert.equal(view.notifications.length, 1, 'only the pre-terminal delta was delivered')
+    assert.equal(chunkOf(view.notifications[0]).text, 'partial')
+  }
+  {
+    // The same terminal loss WITHOUT a committed message still settles the turn
+    // and still never delivers the late frame.
+    const view = promptView()
+    await view.attach()
+    const settled = view.start()
+    const request = view.access.promptCalls[0]!
+    view.insert(request.requestId, 'm-terminal-silent')
+    view.access.turnFence = { openTurnStartSeq: 930, lastTurn: 6 }
+    view.claim('m-terminal-silent', 6, request.requestId)
+    view.stream({ type: 'start', attemptId: 'P1:late2', revision: 1, turn: 6, step: 1 })
+    view.stream(streamFrame('P1:late2', 2, 0, { type: 'text-delta', index: 0, text: 'kept' }))
+    await flushOutput()
+    view.commit('turn/end', { turn: 6, reason: { kind: 'completed' } })
+    view.stream(streamFrame('P1:late2', 3, 1, { type: 'text-delta', index: 0, text: ' LATE' }))
+    assert.deepEqual(await settled, { stopReason: 'end_turn' })
+    await flushOutput()
+    assert.equal(view.notifications.length, 1, 'the late frame was never delivered')
+    assert.equal(chunkOf(view.notifications[0]).text, 'kept')
+  }
 })

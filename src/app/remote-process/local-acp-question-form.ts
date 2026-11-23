@@ -206,14 +206,18 @@ function skipAll(form: AcpQuestionForm): readonly AcpQuestionAnswerItem[] {
 type FormValue = string | readonly string[] | undefined | 'wrong-type'
 
 /**
- * Read one own property without ever consulting the object prototype. An empty
- * string is "no value": both DSH's skip semantics and a rendered-but-unfilled
- * control express the same absence, and no default is invented from it.
+ * Read one own property without ever consulting the object prototype. An ABSENT
+ * property (or an empty string, which is how a rendered-but-unfilled control
+ * reports "no value") is DSH's documented skip; it never invents a default. A
+ * JSON `null` is NOT absence: the generated schema declares `string`/`array`
+ * for that key, so `null` is a wrong primitive type and must fail closed
+ * instead of silently becoming a skipped answer.
  */
 function readValue(content: Record<string, unknown>, key: string): FormValue {
   if (!Object.hasOwn(content, key)) return undefined
   const value = content[key]
-  if (value === undefined || value === null) return undefined
+  if (value === undefined) return undefined
+  if (value === null) return 'wrong-type'
   if (typeof value === 'string') return value === '' ? undefined : value
   if (!Array.isArray(value)) return 'wrong-type'
   const selected: string[] = []
