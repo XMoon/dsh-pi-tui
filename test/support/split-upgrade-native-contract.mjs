@@ -1292,6 +1292,18 @@ export function serializeKernelIdentity(identity) {
 }
 
 /**
+ * A Linux task in Z/X state has already exited. Its kernel identity remains
+ * readable, but its empty cmdline is not an unreadable live Client and it must
+ * never receive another signal. Darwin zombies are invisible to libproc and
+ * already read as gone.
+ */
+export function isTerminatedKernelIdentity(identity) {
+  if (identity === null || typeof identity !== 'object') return false
+  if (identity.platform !== 'linux') return false
+  return identity.state === 'Z' || identity.state === 'X' || identity.state === 'x'
+}
+
+/**
  * The ONE native Client ownership decision. A numeric PID alone never
  * authorizes a signal: the same uid, the SAME kernel birth identity, the
  * registered run-owned scratch and the registered Client entry must all agree.

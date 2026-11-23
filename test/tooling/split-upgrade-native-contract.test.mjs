@@ -38,6 +38,7 @@ import {
   executeNativeServiceReservation,
   isAcceptedCustomizedObservation,
   isNativeDaemonUnquiesced,
+  isTerminatedKernelIdentity,
   LAUNCHD_CUSTOMIZATION,
   loadNativeManagerAdapter,
   MANAGED_DAEMON_OUTPUT_LIMIT_BYTES,
@@ -1806,6 +1807,17 @@ test('a native Client is reclaimable only with the same uid, kernel birth, scrat
     sceneRoot: SCENE_ROOT,
     uid: 501,
   }), { owned: false, reason: 'REGISTERED_SCRATCH_FOREIGN' })
+})
+
+test('a same-birth Linux zombie is terminated instead of an unreadable live Client', () => {
+  for (const state of ['Z', 'X', 'x']) {
+    assert.equal(isTerminatedKernelIdentity({ platform: 'linux', state, startTicks: '777' }), true)
+  }
+  for (const state of ['R', 'S', 'D', 'T', 't', 'I']) {
+    assert.equal(isTerminatedKernelIdentity({ platform: 'linux', state, startTicks: '777' }), false)
+  }
+  assert.equal(isTerminatedKernelIdentity({ platform: 'darwin', state: 'Z' }), false)
+  assert.equal(isTerminatedKernelIdentity(null), false)
 })
 
 test('the tui-test shell is proven by uid, kernel birth and command without a Client scratch', () => {
