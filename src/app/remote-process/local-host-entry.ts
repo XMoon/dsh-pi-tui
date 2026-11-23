@@ -900,7 +900,11 @@ export function createHostAcpSessionAccess(context: import('@deepseek-ai/cordis'
         settled: new Set(state.questions.settled.map(question => question.callId)),
       }
     },
-    answerContinued: (sessionId, agent, session, callId, answer): AcpContinuedAnswerOutcome => {
+    answerContinued: (sessionId, agent, session, callId, answer, stillCurrent): AcpContinuedAnswerOutcome => {
+      // The VIEW ownership fence comes first and is read synchronously: a late
+      // answer of a closed/detached/re-bound View must never reach the shared
+      // Session even when the Agent/Session objects are still live.
+      if (!stillCurrent()) return { kind: 'stale' }
       const liveAgent = agents.get(sessionId)
       const liveSession = sessions.get(sessionId)
       if (liveAgent !== agent || liveSession !== session || agent.session !== session) return { kind: 'stale' }

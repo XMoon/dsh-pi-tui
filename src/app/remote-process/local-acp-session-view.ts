@@ -235,7 +235,10 @@ export interface HostAcpSessionAccess {
    * Submit ONE official late answer for a continued call. The official
    * `userQuestions.answer` result is preserved exactly: `queued` accepts the
    * reply into the inbox, `not-continued` is its `false`, and `rejected` keeps
-   * the official error code instead of becoming a fabricated success.
+   * the official error code instead of becoming a fabricated success. The
+   * SYNCHRONOUS `stillCurrent` fence is re-read immediately before the write so
+   * a View that lost ownership can never inject a late reply into the shared
+   * Session.
    */
   answerContinued(
     sessionId: string,
@@ -243,6 +246,7 @@ export interface HostAcpSessionAccess {
     session: object,
     callId: string,
     answer: AcpQuestionAnswer,
+    stillCurrent: () => boolean,
   ): AcpContinuedAnswerOutcome
 }
 
@@ -738,11 +742,14 @@ interface ViewClaim {
    */
   questionForms?: Set<QuestionFormAbort>
   /**
-   * The ONE continued timed question this connection may still answer after
-   * the original foreground waterfall ended. It holds a single already-received
-   * legal answer at most and never duplicates durable question state.
+   * The continued timed questions this connection may still answer after their
+   * original foreground waterfalls ended, keyed by their OFFICIAL tool-call id.
+   * The official projection allows several simultaneous continued calls, so a
+   * second timeout must never overwrite the first obligation: every answer is
+   * watched and applied under its own call identity and never becomes another
+   * call's answer.
    */
-  continuedQuestion?: ContinuedQuestionObligation
+  continuedQuestions?: Map<string, ContinuedQuestionObligation>
   /**
    * The continued calls this EXACT connection already offered as a Form. It is
    * a connection-local dedupe fact, never a durable answer/state store.
@@ -765,7 +772,6 @@ interface QuestionFormAbort {
 interface ContinuedQuestionObligation {
   readonly callId: string
   readonly form: AcpQuestionForm
-  readonly claim: ViewClaim
   /** Aborts the client-side Form when the obligation ends. */
   readonly abort: QuestionFormAbort
   /** The single legal answer already received, if any (applied at most once). */
@@ -817,6 +823,15 @@ interface InflightPrompt {
    * durable reconciliation, its flight settlement or a framing violation.
    */
   stream?: AcpAssistantStream
+  /**
+   * The attempt id of provisional bytes this flight delivered and can NEVER
+   * prove committed (an official retry/replacement/abandoned attempt, or an
+   * `end` that never arrived). ACP v1 output is append-only, so those bytes
+   * cannot be retracted: once set, no terminal of this flight may report
+   * success, because the client would keep an answer that no durable message
+   * owns. Set at most once and never cleared.
+   */
+  unprovenProvisional?: string
   pendingUpdates: number
   outputTail: Promise<void>
   readonly sendUpdate: (update: SessionUpdate) => Promise<void>
@@ -2187,7 +2202,13 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       // its durable message can then never be joined to the shown bytes.
       if (event.type === 'turn/end') {
         flight.ownTurnEnded = true
-        flight.stream?.endWithoutTerminal()
+        const open = flight.stream
+        if (open !== undefined) {
+          // Its `end` frame never arrived: whatever it already delivered can
+          // never be joined to a durable append.
+          if (!open.hasTerminal && open.hasSent()) flight.unprovenProvisional ??= open.attemptId
+          open.endWithoutTerminal()
+        }
       }
       if (flight.mixed) {
         // A mixed turn projects NOTHING further; it can only settle as a
@@ -2235,11 +2256,20 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       // A stream frame is attributable ONLY through the flight's official
       // claimed turn: nothing is inferred from Session status or the latest turn.
       if (flight.turn === undefined) continue
+      // A flight that already delivered bytes no durable message can own never
+      // accepts another attempt: streaming more would only stack more
+      // unretractable output in front of the failure this flight must report.
+      if (flight.unprovenProvisional !== undefined) continue
       if (parsed.type === 'start') {
         if (parsed.turn !== flight.turn) continue
         // A new attempt replaces a previous one whose terminal frame never
-        // arrived; the old attempt can then never join a durable message.
-        flight.stream?.endWithoutTerminal()
+        // arrived; the old attempt can then never join a durable message, so
+        // its delivered bytes poison this flight's success.
+        const previous = flight.stream
+        if (previous !== undefined) {
+          if (!previous.hasTerminal && previous.hasSent()) flight.unprovenProvisional ??= previous.attemptId
+          previous.endWithoutTerminal()
+        }
         flight.stream = new AcpAssistantStream(parsed, randomUUID())
         continue
       }
@@ -2255,6 +2285,13 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         continue
       }
       attempt.acceptEnd(parsed)
+      // A committed assistant ATTEMPT (the official retry: `assistant/attempt`)
+      // or an abandoned attempt never owns a durable message, so provisional
+      // bytes already delivered under it can never be reconciled.
+      if (attempt.hasSent()
+        && !(parsed.outcome.kind === 'committed' && parsed.outcome.eventType === 'assistant/message')) {
+        flight.unprovenProvisional ??= attempt.attemptId
+      }
     }
   }
 
@@ -2313,9 +2350,10 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     if (key !== 'userQuestions' && key !== 'inbox') return
     for (const claim of this.claims.values()) {
       if (claim.exactSession !== session) continue
-      const obligation = claim.continuedQuestion
-      if (obligation !== undefined && obligation.answer !== undefined && obligation.applied !== true) {
-        this.applyContinuedAnswer(claim, obligation)
+      for (const obligation of [...claim.continuedQuestions?.values() ?? []]) {
+        if (obligation.answer !== undefined && obligation.applied !== true) {
+          this.applyContinuedAnswer(claim, obligation)
+        }
       }
       for (const form of claim.questionForms ?? []) {
         if (form.kind !== 'continued' || form.callId === undefined) continue
@@ -2454,10 +2492,15 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         this.removeQuestionForm(claim, handle)
         throw questionAborted(raced.reason, signal)
       }
-      // The foreground wait expired. Hand the still-open Form to this claim's
-      // continued obligation and let the official `askTimed` answer `pending`.
-      claim.continuedQuestion = { callId, form, claim, abort: handle }
-      this.watchContinuedResponse(claim, pending)
+      // The foreground wait expired. Hand the still-open Form to its OWN
+      // continued obligation (keyed by the official call id) and let the
+      // official `askTimed` answer `pending`. Other timed questions of the same
+      // claim keep their own obligations untouched.
+      const obligation: ContinuedQuestionObligation = { callId, form, abort: handle }
+      const obligations = claim.continuedQuestions ?? new Map<string, ContinuedQuestionObligation>()
+      claim.continuedQuestions = obligations
+      obligations.set(callId, obligation)
+      this.watchContinuedResponse(claim, obligation, pending)
       throw raced.reason
     }
     this.removeQuestionForm(claim, handle)
@@ -2501,7 +2544,11 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
    * already settled, so the answer may only reach the official
    * `userQuestions.answer` once the projection proves the call is continued.
    */
-  private watchContinuedResponse(claim: ViewClaim, pending: Promise<AcpElicitationResponse>): void {
+  private watchContinuedResponse(
+    claim: ViewClaim,
+    obligation: ContinuedQuestionObligation,
+    pending: Promise<AcpElicitationResponse>,
+  ): void {
     runDetached('local acp: continued question response', async () => {
       let response: AcpElicitationResponse
       try {
@@ -2511,8 +2558,9 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         // obligation was already released by the same hook.
         return
       }
-      const obligation = claim.continuedQuestion
-      if (obligation === undefined || claim.connectionIdentity.phase === 'closed') return
+      // The response may have crossed a real await: only the claim that still
+      // owns this exact obligation on a LIVE attached View may act on it.
+      if (!this.continuedObligationCurrent(claim, obligation)) return
       this.removeQuestionForm(claim, obligation.abort)
       const outcome = answerQuestionForm(obligation.form, response)
       if (outcome.kind !== 'answered') {
@@ -2537,7 +2585,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
    */
   private applyContinuedAnswer(claim: ViewClaim, obligation: ContinuedQuestionObligation): void {
     if (obligation.answer === undefined || obligation.applied === true) return
-    if (claim.continuedQuestion !== obligation) return
+    if (!this.continuedObligationCurrent(claim, obligation)) return
     const access = this.access
     const agent = claim.exactAgent
     const session = claim.exactSession
@@ -2555,8 +2603,21 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       // committed yet: keep the single answer for the projection change.
       return
     }
+    // Nothing may await between this fence and the write: `answer()` is
+    // synchronous, so the claim that passed the fence is the one that writes.
+    if (!this.questionClaimCurrent(claim)) {
+      this.dropContinuedQuestion(claim, obligation)
+      return
+    }
     obligation.applied = true
-    const outcome = access.answerContinued(claim.sessionId, agent, session, obligation.callId, obligation.answer)
+    const outcome = access.answerContinued(
+      claim.sessionId,
+      agent,
+      session,
+      obligation.callId,
+      obligation.answer,
+      () => this.questionClaimCurrent(claim),
+    )
     this.reportContinuedOutcome(outcome)
     this.dropContinuedQuestion(claim, obligation)
   }
@@ -2568,10 +2629,29 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     this.diag.warn('local-acp.question', { code })
   }
 
+  /**
+   * The ONE ownership fence of every question write. It is re-read after each
+   * real await and immediately before the official submission: a View that was
+   * closed, detached, re-bound or disposed must never answer a shared-Session
+   * question, because its human is no longer the connection's human.
+   */
+  private questionClaimCurrent(claim: ViewClaim): boolean {
+    return this.claims.get(claim.sessionId) === claim
+      && claim.connectionIdentity.phase === 'attached'
+      && !claim.detachedWithFence
+      && this.access !== undefined
+  }
+
+  /** Whether this claim still owns THIS exact obligation on a live attached View. */
+  private continuedObligationCurrent(claim: ViewClaim, obligation: ContinuedQuestionObligation): boolean {
+    return claim.continuedQuestions?.get(obligation.callId) === obligation && this.questionClaimCurrent(claim)
+  }
+
   /** Release one continued obligation and its reverse Form. */
   private dropContinuedQuestion(claim: ViewClaim, obligation: ContinuedQuestionObligation): void {
     this.removeQuestionForm(claim, obligation.abort)
-    if (claim.continuedQuestion === obligation) claim.continuedQuestion = undefined
+    const obligations = claim.continuedQuestions
+    if (obligations?.get(obligation.callId) === obligation) obligations.delete(obligation.callId)
     this.notifyWorkSettled()
   }
 
@@ -2586,7 +2666,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     if (forms !== undefined) {
       for (const form of forms) form.abort()
     }
-    claim.continuedQuestion = undefined
+    claim.continuedQuestions = undefined
     claim.questionOfferTail = undefined
     claim.offeredQuestions = undefined
   }
@@ -2647,10 +2727,18 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     const agent = claim.exactAgent
     const session = claim.exactSession
     if (access === undefined || agent === undefined || session === undefined) return 'not-continued'
+    if (!this.questionClaimCurrent(claim)) return 'not-continued'
     const answerability = this.callAnswerability(claim, callId)
     if (answerability === 'settled') return 'not-continued'
     if (answerability === 'unknown') return 'wait'
-    const outcome = access.answerContinued(claim.sessionId, agent, session, callId, answer)
+    const outcome = access.answerContinued(
+      claim.sessionId,
+      agent,
+      session,
+      callId,
+      answer,
+      () => this.questionClaimCurrent(claim),
+    )
     this.reportContinuedOutcome(outcome)
     return outcome.kind === 'queued' ? 'submitted' : 'not-continued'
   }
@@ -3199,6 +3287,16 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   }
 
   /**
+   * Clear the CURRENT attempt slot only when it still holds this attempt. A
+   * slower reconciliation must never erase the attempt a later step already
+   * opened, and the reconciliation itself is owned by its own attempt + seq,
+   * not by whichever attempt happens to be current.
+   */
+  private releaseAttempt(flight: InflightPrompt, attempt: AcpAssistantStream): void {
+    if (flight.stream === attempt) flight.stream = undefined
+  }
+
+  /**
    * Validate ONE committed assistant message synchronously and reserve its
    * ordered output units on this flight's single tail. Shapes are checked here
    * (a malformed/unsupported event fails before anything is queued); the image
@@ -3233,13 +3331,17 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       return
     }
     const interrupted = (data as { readonly interrupted?: unknown }).interrupted === true
-    // Reserve an upper bound: a joined message still sends its durable images.
-    this.enqueueOutputTask(claim, flight, Math.max(1, content.entries.length), async () => {
-      if (flight.stream !== attempt) {
-        // A newer attempt replaced this one before its durable reconciliation:
-        // nothing can prove these bytes were already delivered.
-        throw streamDivergence()
-      }
+    // Reserve only what the join may ACTUALLY send. A streamed attempt already
+    // delivered its text/thought under its own ACP message id, so the residual
+    // entries are the never-streamed durable images; an attempt that delivered
+    // nothing still falls back to the whole committed projection.
+    const residual = attempt.hasSent()
+      ? content.entries.filter(entry => entry.kind === 'message-image').length
+      : content.entries.length
+    this.enqueueOutputTask(claim, flight, Math.max(1, residual), async () => {
+      // Delivered bytes that no durable append can own make every later
+      // outcome of this flight a failure, whatever this event proves.
+      if (flight.unprovenProvisional !== undefined) throw streamDivergence()
       const end = await attempt.terminalFact
       const joined = joinStreamedMessage(attempt.streamedBlocks(), content.text, {
         sent: attempt.hasSent(),
@@ -3249,7 +3351,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       if (joined.kind === 'unstreamed') {
         // Nothing provisional was delivered: the ordinary committed projection
         // is authoritative and must not be suppressed.
-        flight.stream = undefined
+        this.releaseAttempt(flight, attempt)
         return await this.committedUpdates(flight, messageId, content.entries)
       }
       // `joined` needs the official terminal fact of THIS attempt as well: the
@@ -3259,7 +3361,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         || end.eventType !== 'assistant/message' || end.seq !== event.seq) {
         throw streamDivergence()
       }
-      flight.stream = undefined
+      this.releaseAttempt(flight, attempt)
       // Text/thought blocks were already delivered under the attempt's ACP
       // message id; only durable blocks that were never streamed are added.
       return await this.committedUpdates(
@@ -3579,6 +3681,13 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
           JSONRPC_INTERNAL_ERROR,
           kind === undefined ? { reason: 'unknown' } : { reason: kind },
         ))
+        return
+      }
+      // A successful terminal is possible ONLY when every delivered provisional
+      // byte was proven committed: unretractable bytes of a retried, replaced,
+      // abandoned or lost attempt can never be reported as this success.
+      if (flight.unprovenProvisional !== undefined) {
+        this.failPrompt(claim, flight, streamDivergence())
         return
       }
       this.completePrompt(claim, flight, { stopReason: kind === 'completed' ? 'end_turn' : 'max_tokens' })

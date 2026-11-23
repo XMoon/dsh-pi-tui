@@ -312,7 +312,10 @@ class FakeAccess implements HostAcpSessionAccess {
     session: object,
     callId: string,
     answer: AcpQuestionAnswer,
+    _stillCurrent: () => boolean,
   ): AcpContinuedAnswerOutcome {
+    // A deliberately dumb recorder: the View's own ownership fence is what the
+    // QU-05 test proves, so this fake must never hide a missing View fence.
     this.answerContinuedCalls.push({ callId, answer })
     return this.answerContinuedImpl(sessionId, agent, session, callId, answer)
   }
@@ -4115,8 +4118,9 @@ test('G-ACP2-PR1 ST-03: a framing gap, a mismatched seq or a different attempt n
     await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_STREAM_DIVERGENCE'))
   }
   {
-    // A NEW attempt replaced the streaming one: its durable message is delivered
-    // as its own committed message (never joined to the previous attempt's bytes).
+    // A replacement attempt that never sent bytes must NOT turn an already
+    // delivered answer into a success: the client still shows the old bytes and
+    // ACP v1 output cannot be retracted.
     const view = promptView()
     await view.attach()
     const attempt = view.start()
@@ -4133,12 +4137,13 @@ test('G-ACP2-PR1 ST-03: a framing gap, a mismatched seq or a different attempt n
       type: 'end', attemptId: 'P1:6', revision: 4, index: 0,
       outcome: { kind: 'committed', eventType: 'assistant/message', seq: view.lastSeq() },
     })
-    await flushOutput()
-    assert.deepEqual(view.notifications.map(update => String((update as { messageId?: unknown }).messageId)),
-      [String((view.notifications[0] as { messageId?: unknown }).messageId), 'm-retry-durable'],
-      'the new attempt keeps its own committed message identity')
+    // The real terminal is the LAST fact: without it an implementation that
+    // accepted the replacement would merely hang instead of failing the test.
     view.commit('turn/end', { turn: 13, reason: { kind: 'completed' } })
-    assert.deepEqual(await attempt, { stopReason: 'end_turn' })
+    await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_STREAM_DIVERGENCE'))
+    await flushOutput()
+    assert.equal(view.notifications.length, 1, 'the replacement never adds a second answer over the unprovable one')
+    assert.equal(chunkOf(view.notifications[0]).text, 'retry')
   }
 })
 
@@ -4162,9 +4167,15 @@ test('G-ACP2-PR1 ST-03/GL-01: a foreign turn start, an abandoned attempt or a la
   view.stream({ type: 'end', attemptId: 'P1:8', revision: 5, index: 1, outcome: { kind: 'abandoned' } })
   await flushOutput()
   assert.equal(view.notifications.length, 1)
-  // The attempt end is NOT the prompt end: the request still awaits turn/end.
+  // The attempt end is NOT the prompt end: the request still awaits turn/end,
+  // and that completed terminal can never be reported as a success because the
+  // abandoned bytes have no durable message.
+  const settled = attempt.then(value => ({ value }), (error: unknown) => ({ error }))
+  await flushOutput()
+  assert.equal((await Promise.race([settled, Promise.resolve('pending')])), 'pending',
+    'an attempt end never settles the prompt')
   view.commit('turn/end', { turn: 21, reason: { kind: 'completed' } })
-  assert.deepEqual(await attempt, { stopReason: 'end_turn' })
+  await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_STREAM_DIVERGENCE'))
 
   // A later autonomous (Goal) turn has no flight of its own: nothing streams.
   view.stream({ type: 'start', attemptId: 'P1:9', revision: 6, turn: 23, step: 1 })
@@ -4662,11 +4673,240 @@ test('G-ACP2-PR1 ST-03: an attempt whose terminal can never be observed is perma
     view.stream({ type: 'start', attemptId: 'P1:late2', revision: 1, turn: 6, step: 1 })
     view.stream(streamFrame('P1:late2', 2, 0, { type: 'text-delta', index: 0, text: 'kept' }))
     await flushOutput()
+    // The attempt's `end` never arrived and no message committed, so the
+    // delivered bytes have no durable owner: the completed terminal must fail
+    // closed instead of reporting a success the client cannot reconcile.
     view.commit('turn/end', { turn: 6, reason: { kind: 'completed' } })
     view.stream(streamFrame('P1:late2', 3, 1, { type: 'text-delta', index: 0, text: ' LATE' }))
-    assert.deepEqual(await settled, { stopReason: 'end_turn' })
+    await assert.rejects(settled, isPromptError('LOCAL_ACP_PROMPT_STREAM_DIVERGENCE'))
     await flushOutput()
     assert.equal(view.notifications.length, 1, 'the late frame was never delivered')
     assert.equal(chunkOf(view.notifications[0]).text, 'kept')
+  }
+})
+
+test('G-ACP2-PR1 ST-04: an official retry poisons the flight and an unprovable later success never answers end_turn', async () => {
+  const view = promptView()
+  await view.attach()
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-retry-official')
+  view.access.turnFence = { openTurnStartSeq: 970, lastTurn: 41 }
+  view.claim('m-retry-official', 41, request.requestId)
+  view.stream({ type: 'start', attemptId: 'P1:r1', revision: 1, turn: 41, step: 1 })
+  view.stream(streamFrame('P1:r1', 2, 0, { type: 'text-delta', index: 0, text: 'retry' }))
+  await flushOutput()
+  assert.equal(view.notifications.length, 1)
+  // The provider retried: attempt A commits an official `assistant/attempt`,
+  // which owns NO durable message, so A's delivered bytes can never be joined.
+  view.commit('assistant/attempt', { turn: 41, step: 1, attempt: 1, reason: { kind: 'retry' } })
+  view.stream({
+    type: 'end', attemptId: 'P1:r1', revision: 3, index: 1,
+    outcome: { kind: 'committed', eventType: 'assistant/attempt', seq: view.lastSeq() },
+  })
+  // Attempt B streams nothing and commits its own message + matching end.
+  view.stream({ type: 'start', attemptId: 'P1:r2', revision: 4, turn: 41, step: 1 })
+  view.commit('assistant/message', assistantData(41, 'm-retry-final', [{ type: 'text', text: 'final' }]))
+  view.stream({
+    type: 'end', attemptId: 'P1:r2', revision: 5, index: 0,
+    outcome: { kind: 'committed', eventType: 'assistant/message', seq: view.lastSeq() },
+  })
+  // The real terminal is the LAST fact: an implementation that accepted the
+  // retried attempt would otherwise hang here instead of failing the test.
+  view.commit('turn/end', { turn: 41, reason: { kind: 'completed' } })
+  await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_STREAM_DIVERGENCE'))
+  await flushOutput()
+  assert.equal(view.notifications.length, 1, 'the stale retried answer is never joined by a second delivery')
+  assert.equal(chunkOf(view.notifications[0]).text, 'retry')
+})
+
+test('G-ACP2-PR1 ST-05: a slow output tail never misreports a legitimate adjacent attempt as a divergence', async () => {
+  const view = promptView()
+  await view.attach()
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-two-steps')
+  view.access.turnFence = { openTurnStartSeq: 980, lastTurn: 42 }
+  view.claim('m-two-steps', 42, request.requestId)
+  // The first delta is held in the transport, so attempt A's reconciliation is
+  // still queued when the SAME turn legally opens attempt B.
+  const gate = view.deferredSend()
+  view.stream({ type: 'start', attemptId: 'P1:s1', revision: 1, turn: 42, step: 1 })
+  view.stream(streamFrame('P1:s1', 2, 0, { type: 'text-delta', index: 0, text: 'first' }))
+  view.commit('assistant/message', assistantData(42, 'm-step-a', [{ type: 'text', text: 'first' }]))
+  view.stream({
+    type: 'end', attemptId: 'P1:s1', revision: 3, index: 1,
+    outcome: { kind: 'committed', eventType: 'assistant/message', seq: view.lastSeq() },
+  })
+  view.stream({ type: 'start', attemptId: 'P1:s2', revision: 4, turn: 42, step: 1 })
+  view.stream(streamFrame('P1:s2', 5, 0, { type: 'text-delta', index: 0, text: 'second' }))
+  view.commit('assistant/message', assistantData(42, 'm-step-b', [{ type: 'text', text: 'second' }]))
+  view.stream({
+    type: 'end', attemptId: 'P1:s2', revision: 6, index: 1,
+    outcome: { kind: 'committed', eventType: 'assistant/message', seq: view.lastSeq() },
+  })
+  gate.release()
+  await flushOutput()
+  view.commit('turn/end', { turn: 42, reason: { kind: 'completed' } })
+  assert.deepEqual(await attempt, { stopReason: 'end_turn' })
+  assert.deepEqual(view.notifications.map(update => chunkOf(update).text), ['first', 'second'],
+    'each step owns its own reconciliation and nothing is duplicated or lost')
+})
+
+test('G-ACP2-PR1 ST-06: joined blocks already streamed never charge the pending-update budget', async () => {
+  const view = promptView()
+  await view.attach()
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-many-streamed')
+  view.access.turnFence = { openTurnStartSeq: 990, lastTurn: 43 }
+  view.claim('m-many-streamed', 43, request.requestId)
+  const attemptId = 'P1:m1'
+  view.stream({ type: 'start', attemptId, revision: 1, turn: 43, step: 1 })
+  const blocks: Array<Record<string, unknown>> = []
+  let revision = 2
+  let index = 0
+  for (let block = 0; block < 65; block += 1) {
+    const text = `block-${String(block)}`
+    view.stream(streamFrame(attemptId, revision, index, { type: 'block-start', index: block, blockType: 'text' }))
+    revision += 1
+    index += 1
+    view.stream(streamFrame(attemptId, revision, index, { type: 'text-delta', index: block, text }))
+    revision += 1
+    index += 1
+    view.stream(streamFrame(attemptId, revision, index, { type: 'block-end', index: block, block: { type: 'text', text } }))
+    revision += 1
+    index += 1
+    await flushOutput()
+    blocks.push({ type: 'text', text })
+  }
+  assert.equal(view.notifications.length, 65, 'every delta was delivered exactly once')
+  // The durable message repeats those 65 blocks: the join sends nothing more,
+  // so the message must not reserve or charge 65 pending updates.
+  view.commit('assistant/message', assistantData(43, 'm-many-durable', blocks))
+  view.stream({
+    type: 'end', attemptId, revision, index,
+    outcome: { kind: 'committed', eventType: 'assistant/message', seq: view.lastSeq() },
+  })
+  await flushOutput()
+  assert.equal(view.notifications.length, 65, 'a fully streamed joined message adds nothing')
+  view.commit('turn/end', { turn: 43, reason: { kind: 'completed' } })
+  assert.deepEqual(await attempt, { stopReason: 'end_turn' })
+})
+
+test('G-ACP2-PR1 QU-04: two simultaneous continued commitments keep their own answers', async () => {
+  const channel = formChannel()
+  const view = promptView('P1', { channels: { requestElicitation: channel.requester } })
+  view.access.questionService = true
+  await view.attach()
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-two-timed')
+  view.access.turnFence = { openTurnStartSeq: 1000, lastTurn: 60 }
+  view.claim('m-two-timed', 60, request.requestId)
+  // The SAME option labels in both questions: an answer crossing the other
+  // obligation would still be schema-valid, so only the call identity can
+  // prevent it.
+  const qa: AcpQuestionSpec[] = [{ id: 'qa', question: 'A?', options: [{ label: 'yes' }, { label: 'no' }] }]
+  const qb: AcpQuestionSpec[] = [{ id: 'qb', question: 'B?', options: [{ label: 'yes' }, { label: 'no' }] }]
+  view.access.questionSnapshotImpl = () => ({
+    kind: 'current',
+    continued: [{ callId: 'call-A', questions: qa }, { callId: 'call-B', questions: qb }],
+    settled: new Set(),
+  })
+  const submitted: Array<{ callId: string; answer: AcpQuestionAnswer }> = []
+  view.access.answerContinuedImpl = (_sessionId, _agent, _session, callId, answer) => {
+    submitted.push({ callId, answer })
+    return { kind: 'queued' }
+  }
+  const timedOut = (label: string): Error => Object.assign(
+    new Error(`ask_user_question timed out (${label})`),
+    { name: 'UserQuestionError', code: 'ASK_TIMED_OUT' },
+  )
+  const deadlineA = new AbortController()
+  const askA = view.registry.onQuestionRequest(
+    { agent: view.agent, questions: qa, signal: deadlineA.signal, wait: { callId: 'call-A', timed: true } },
+    async () => ({ answers: [] }),
+  )
+  await flushOutput()
+  const deadlineB = new AbortController()
+  const askB = view.registry.onQuestionRequest(
+    { agent: view.agent, questions: qb, signal: deadlineB.signal, wait: { callId: 'call-B', timed: true } },
+    async () => ({ answers: [] }),
+  )
+  await flushOutput()
+  assert.equal(channel.forms.length, 2, 'each timed question owns its own Form')
+  deadlineA.abort(timedOut('A'))
+  await assert.rejects(askA, (error: unknown) => (error as { code?: string }).code === 'ASK_TIMED_OUT')
+  deadlineB.abort(timedOut('B'))
+  await assert.rejects(askB, (error: unknown) => (error as { code?: string }).code === 'ASK_TIMED_OUT')
+  assert.equal(channel.forms[0]!.signal.aborted, false, 'the first obligation is not revoked by the second deadline')
+  assert.equal(channel.forms[1]!.signal.aborted, false)
+  // Answer the FIRST (older) question while the newer obligation is still open:
+  // its answer may never be re-read through the newer call's form.
+  channel.forms[0]!.respond({ action: 'accept', content: { q0: 'yes' } })
+  await flushOutput()
+  channel.forms[1]!.respond({ action: 'accept', content: { q0: 'no' } })
+  await flushOutput()
+  view.registry.onQuestionProjection(view.agent.session, 'userQuestions')
+  await flushOutput()
+  assert.deepEqual(submitted, [
+    { callId: 'call-A', answer: { answers: [{ id: 'qa', selected: ['yes'] }] } },
+    { callId: 'call-B', answer: { answers: [{ id: 'qb', selected: ['no'] }] } },
+  ], 'no answer may ever become another call answer')
+  view.registry.onQuestionProjection(view.agent.session, 'userQuestions')
+  await flushOutput()
+  assert.equal(submitted.length, 2, 'each obligation submits exactly once')
+  view.commit('turn/end', { turn: 60, reason: { kind: 'completed' } })
+  assert.deepEqual(await attempt, { stopReason: 'end_turn' })
+})
+
+test('G-ACP2-PR1 QU-05: a View that lost ownership never writes a continued answer into the shared Session', async () => {
+  const qa: AcpQuestionSpec[] = [{ id: 'qa', question: 'A?', options: [{ label: 'a1' }, { label: 'a2' }] }]
+  {
+    // A late continued answer crosses a real await: the response resolves, then
+    // the physical connection is released before the continuation runs.
+    const channel = formChannel()
+    const view = promptView('P1', { channels: { requestElicitation: channel.requester } })
+    view.access.questionService = true
+    await view.attach()
+    const attempt = view.start()
+    const request = view.access.promptCalls[0]!
+    view.insert(request.requestId, 'm-release-race')
+    view.access.turnFence = { openTurnStartSeq: 1010, lastTurn: 61 }
+    view.claim('m-release-race', 61, request.requestId)
+    view.access.questionSnapshotImpl = () => continuedQuestions(qa, 'call-release')
+    const deadline = new AbortController()
+    const ask = view.registry.onQuestionRequest(
+      { agent: view.agent, questions: qa, signal: deadline.signal, wait: { callId: 'call-release', timed: true } },
+      async () => ({ answers: [] }),
+    )
+    await flushOutput()
+    deadline.abort(Object.assign(new Error('timeout'), { name: 'UserQuestionError', code: 'ASK_TIMED_OUT' }))
+    await assert.rejects(ask)
+    channel.forms[0]!.respond({ action: 'accept', content: { q0: 'a1' } })
+    view.registry.releaseConnection(view.conn, view.access)
+    await flushOutput()
+    assert.equal(view.access.answerContinuedCalls.length, 0,
+      'a released View never injects its late answer into the shared Session')
+    // The disconnect cancellation owns the flight's settlement (a fake Host
+    // cancellation may stay pending); the observation is the absent write.
+    attempt.catch(() => {})
+  }
+  {
+    // A resumed offer: the client answers, then the connection is released
+    // before the offer chain submits.
+    const channel = formChannel()
+    const view = promptView('P1', { channels: { requestElicitation: channel.requester } })
+    view.access.questionService = true
+    view.access.questionSnapshotImpl = () => continuedQuestions(qa, 'call-resumed')
+    await view.attach()
+    await flushOutput()
+    assert.equal(channel.forms.length, 1, 'the resumed connection offers the continued question')
+    channel.forms[0]!.respond({ action: 'accept', content: { q0: 'a1' } })
+    view.registry.releaseConnection(view.conn, view.access)
+    await flushOutput()
+    assert.equal(view.access.answerContinuedCalls.length, 0,
+      'a released offer never writes a new user message into the shared Session')
   }
 })

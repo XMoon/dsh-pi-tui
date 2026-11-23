@@ -266,6 +266,18 @@ profile's independent `autoStart` preference enables it (see below).
       match — fails closed with `LOCAL_ACP_PROMPT_STREAM_DIVERGENCE`. An `end` of
       `assistant/attempt` or an abandoned attempt closes the attempt and is never
       a turn terminal: the request still settles on the real `turn/end`.
+    - **Unretractable provisional bytes poison the flight.** ACP v1 output is
+      append-only, so bytes already shown cannot be withdrawn. The first attempt
+      of the flight that DELIVERED text/thought and can never be joined to a
+      durable message — an official retry (`assistant/attempt`), an abandoned
+      attempt, a replacement, or a lost `end` at the real terminal — therefore
+      ends this flight as `LOCAL_ACP_PROMPT_STREAM_DIVERGENCE`, even when a later
+      attempt would have completed successfully and even when that later attempt
+      streams nothing. No further attempt of a poisoned flight is streamed, and a
+      poisoned flight can never answer `end_turn`/`max_tokens`; the durable
+      message that a later attempt would have delivered is never reported. A
+      genuinely failed, cancelled or interrupted turn keeps its own real
+      classification instead of being rewritten as a divergence.
     - **Wire order and identity of a joined message.** One attempt's streamed
       text/thought chunks and the residual durable blocks added at the join
       share ONE stable opaque ACP message id (the durable message id is used only
@@ -599,12 +611,21 @@ profile's independent `autoStart` preference enables it (see below).
       `TimedQuestionWait`, so DSH's own `askTimed` deadline remains the only
       clock and no absent Client countdown can extend it. When that deadline
       aborts the foreground wait, the original waterfall settles immediately as
-      pending while the still-open Form becomes the current CLAIM's continued
-      obligation; any OTHER abort (turn cancellation, Agent disposal,
-      close/EOF/Off) revokes the Form. A late accepted answer is held until the
-      official `userQuestions` projection proves the call is `continued` and is
-      then submitted exactly once through the official
-      `userQuestions.answer(exactAgent, callId, batch)`. That call's own result
+      pending while the still-open Form becomes the claim's continued
+      obligation for THAT official `callId`; any OTHER abort (turn cancellation,
+      Agent disposal, close/EOF/Off) revokes the Form. The official projection
+      allows several continued calls at once, so the View keeps one obligation
+      per call and a second timeout never replaces the first: every answer is
+      watched, validated and applied under the exact call/form it came from, and
+      no answer can ever become another call's answer. A late accepted answer is
+      held until the official `userQuestions` projection proves the call is
+      `continued` and is then submitted exactly once through the official
+      `userQuestions.answer(exactAgent, callId, batch)`. Every write is gated by
+      the same View-ownership fence (exact claim still in this registry, same
+      connection attached, not detached) re-read after each await and again
+      inside the Host seam immediately before the synchronous official call, so
+      a Form that outlives its View can never inject a reply into the shared
+      Session. That call's own result
       keeps its meaning: `true` is a reply queued into the inbox (not "the model
       used it"), `false` means the call is no longer answerable, and
       `REPLY_QUEUED`/`BAD_ANSWER`/`CALLER_NOT_LIVE` keep their official code and
