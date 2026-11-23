@@ -78,6 +78,31 @@ test('human user messages project as user chunks while injections and question r
   }])
 })
 
+test('a durable agent-message replays as session_message only for a subagents-capable client', () => {
+  const event = userEvent(0, 'am1', { kind: 'agent-message', form: 'relay', senderSessionId: 'SENDER' }, [
+    { type: 'text', text: 'the child says hi' },
+    imageBlock('img-9'),
+  ])
+  assert.deepEqual(projectSessionHistory([event], NO_CAPABILITIES), [])
+  assert.deepEqual(projectSessionHistory([event], ALL_CAPABILITIES), [{
+    kind: 'session-message',
+    message: {
+      messageId: 'am1',
+      senderSessionId: 'SENDER',
+      content: [
+        { type: 'text', text: 'the child says hi' },
+        { type: 'image', ref: { attachmentId: 'img-9', mediaType: 'image/png', bytes: 3, width: 1, height: 1 } },
+      ],
+    },
+  }])
+  // The runtime's settlement account is never child-authored content.
+  assert.deepEqual(projectSessionHistory([
+    userEvent(1, 'settled', { kind: 'subagent-settled', form: 'notice', summary: 'done', senderSessionId: 'C' }, [
+      { type: 'text', text: 'runtime account' },
+    ]),
+  ], ALL_CAPABILITIES), [])
+})
+
 test('assistant messages keep committed block order, skip tool-call blocks and defer images to the Store', () => {
   const units = projectSessionHistory([
     assistantEvent(0, 'a1', [

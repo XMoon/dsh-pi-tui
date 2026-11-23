@@ -102,6 +102,18 @@ export type AcpHistoryUnit =
   | { readonly kind: 'update'; readonly update: SessionUpdate }
   | { readonly kind: 'image'; readonly image: AcpHistoryImage }
   | { readonly kind: 'tool-result'; readonly result: AcpHistoryToolResult }
+  | { readonly kind: 'session-message'; readonly message: AcpHistoryAgentMessage }
+
+/** One durable inter-agent message replayed as a standard `session_message`. */
+export interface AcpHistoryAgentMessage {
+  readonly messageId: string
+  /** The official durable author Session id. */
+  readonly senderSessionId: string
+  readonly content: readonly (
+    | { readonly type: 'text'; readonly text: string }
+    | { readonly type: 'image'; readonly ref: AcpStoredImageRef }
+  )[]
+}
 
 /** The stable projection classifications (mapped onto the View error boundary). */
 export type AcpProjectionErrorCode =
@@ -203,7 +215,7 @@ function projectHistoryEvent(
 ): void {
   switch (event.type) {
     case 'user/message':
-      projectUserMessage(event.data, units)
+      projectUserMessage(event.data, capabilities, units)
       return
     case 'assistant/message':
       projectAssistantMessage(event.data, units)
@@ -239,22 +251,62 @@ function projectHistoryEvent(
 
 /**
  * Project one durable `user/message`. Its event data IS the official message
- * (id/source/content). ONLY the official HUMAN discriminant is a user
- * utterance: every Host/plugin injection (`time-context`,
- * `skill-invocation`, …) is context and a `user-question-reply` is a continued
- * action, so neither becomes a brand-new user prompt.
+ * (id/source/content).
+ *
+ * - ONLY the official HUMAN discriminant is a user utterance: every Host/plugin
+ *   injection (`time-context`, `skill-invocation`, …) is context and a
+ *   `user-question-reply` is a continued action, so neither becomes a new user
+ *   prompt.
+ * - A durable `agent-message` is an inter-agent message: it replays as the
+ *   standard `session_message` with its real author, exactly like the live
+ *   projection, and only for a client that negotiated the `subagents`
+ *   capability. The runtime's `subagent-settled` account is never child words.
+ * - Every other source kind is Host-internal context and projects nothing.
  */
-function projectUserMessage(data: unknown, units: AcpHistoryUnit[]): void {
+function projectUserMessage(
+  data: unknown,
+  capabilities: AcpNegotiatedCapabilities,
+  units: AcpHistoryUnit[],
+): void {
   const message = bareMessageOf(data)
   if (message === undefined) throw unsupportedBlock()
-  if (message.source?.kind !== 'user') return
-  projectMessageBlocks(message, units, 'user_message_chunk', false)
+  if (message.source?.kind === 'user') {
+    projectMessageBlocks(message, units, 'user_message_chunk', false)
+    return
+  }
+  const senderSessionId = message.source?.senderSessionId
+  if (message.source?.kind !== 'agent-message' || typeof senderSessionId !== 'string') return
+  if (!capabilities.subagents) return
+  units.push({ kind: 'session-message', message: agentMessageOf(message, senderSessionId) })
+}
+
+/** The official `agent-message` facts of one durable user message. */
+function agentMessageOf(
+  message: { readonly id: string; readonly content: readonly unknown[] },
+  senderSessionId: string,
+): AcpHistoryAgentMessage {
+  const content: ({ readonly type: 'text'; readonly text: string } | { readonly type: 'image'; readonly ref: AcpStoredImageRef })[] = []
+  for (const block of message.content) {
+    const type = (block as { readonly type?: unknown } | null)?.type
+    if (type === 'text') {
+      const text = (block as { readonly text?: unknown } | null)?.text
+      if (typeof text !== 'string') throw unsupportedBlock()
+      if (text.length > 0) content.push({ type: 'text', text })
+      continue
+    }
+    if (type === 'image') {
+      content.push({ type: 'image', ref: imageRef(block) })
+      continue
+    }
+    throw unsupportedBlock()
+  }
+  return { messageId: message.id, senderSessionId, content }
 }
 
 /** The official message-shaped event data (`user/message` carries it directly). */
 function bareMessageOf(data: unknown): {
   readonly id: string
-  readonly source?: { readonly kind?: unknown }
+  readonly source?: { readonly kind?: unknown; readonly senderSessionId?: unknown }
   readonly content: readonly unknown[]
 } | undefined {
   if (data === null || typeof data !== 'object') return undefined

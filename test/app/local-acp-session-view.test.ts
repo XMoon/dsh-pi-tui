@@ -5454,6 +5454,93 @@ test('G-ACP2-PR2 PLAN-01: resume reads the CURRENT official plan once, and a nul
   assert.deepEqual(none.notifications, [], 'no todo write yet means no plan at all')
 })
 
+test('G-ACP2-PR2 MESSAGE-01: a loaded history replays its real agent-message as session_message', async () => {
+  const view = projectionView('H1', {
+    history: {
+      header: { sessionId: 'H1', cwd: '/w' },
+      events: [{
+        seq: 0,
+        type: 'user/message',
+        data: { id: 'am1', source: { kind: 'agent-message', form: 'relay', senderSessionId: 'SENDER' }, content: [{ type: 'text', text: 'from the child' }], role: 'user' },
+      }],
+    },
+  })
+  await view.load()
+  assert.deepEqual(view.notifications, [{
+    sessionUpdate: 'session_message',
+    messageId: 'am1',
+    senderSessionId: 'SENDER',
+    recipientSessionId: 'H1',
+    content: [{ type: 'text', text: 'from the child' }],
+  }])
+  // A baseline client never receives the supplemental frame.
+  const baseline = projectionView('H2', {
+    capabilities: PR2_BASELINE,
+    history: {
+      header: { sessionId: 'H2', cwd: '/w' },
+      events: [{
+        seq: 0,
+        type: 'user/message',
+        data: { id: 'am1', source: { kind: 'agent-message', form: 'relay', senderSessionId: 'SENDER' }, content: [{ type: 'text', text: 'from the child' }], role: 'user' },
+      }],
+    },
+  })
+  await baseline.load()
+  assert.deepEqual(baseline.notifications, [])
+})
+
+test('G-ACP2-PR2 LOAD-02: buffered live events join in seq order, once per seq, even when delivered out of order', async () => {
+  const view = projectionView('O1')
+  const readStarted = Promise.withResolvers<void>()
+  const readRelease = Promise.withResolvers<AcpSessionHistory>()
+  view.access.readSessionHistoryImpl = async () => {
+    readStarted.resolve()
+    return await readRelease.promise
+  }
+  const loading = view.load()
+  await readStarted.promise
+  // Delivered 3 → 2 → 2 (a duplicate) while the snapshot is read.
+  for (const title of ['third', 'second', 'second']) {
+    view.registry.onSessionEvent(view.agent.session, {
+      seq: title === 'third' ? 3 : 2,
+      type: 'session/title',
+      data: { title, messageSeqs: [], source: 'user' },
+    })
+  }
+  readRelease.resolve({ header: { sessionId: 'O1', cwd: '/w' }, events: [] })
+  await loading
+  assert.deepEqual(view.notifications.map(update => (update as { title?: string }).title), ['second', 'third'],
+    'the live window is projected in ascending seq order exactly once per seq')
+})
+
+test('G-ACP2-PR2 COMPACT-01: a duplicated compaction callback never re-projects the lifecycle', async () => {
+  const view = projectionView('C2')
+  await view.resume()
+  view.notifications.length = 0
+  const start = { compactionId: 'cp1', turn: null }
+  view.commit('compaction/start', start)
+  view.commit('compaction/start', start)
+  view.commit('compaction/summary', { compactionId: 'cp1', summary: [{ type: 'text', text: 'sum' }] })
+  view.commit('compaction/summary', { compactionId: 'cp1', summary: [{ type: 'text', text: 'sum' }] })
+  view.commit('compaction/end', { compactionId: 'cp1', turn: null })
+  view.commit('compaction/end', { compactionId: 'cp1', turn: null })
+  await waitUntil(() => view.notifications.length >= 3, 'the compaction lifecycle is projected')
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.deepEqual(view.notifications.map(update => (update as { status?: string }).status),
+    ['in_progress', 'in_progress', 'completed'])
+  assert.equal((view.notifications[1] as { summary?: unknown }).summary !== undefined, true)
+})
+
+test('G-ACP2-PR2 SUB-01 negative: an end edge whose start this View never projected announces nothing', async () => {
+  const view = projectionView('S9')
+  await view.resume()
+  view.notifications.length = 0
+  view.access.headerFacts = { sessionId: 'CHILD', parentSessionId: 'S9', origin: 'subagent', cwd: '/w' }
+  view.registry.onSubagentEnd({ runId: 'never-started', id: 'CHILD', parentSessionId: 'S9', local: true, stopReason: 'completed' })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.deepEqual(view.notifications, [], 'a lone idle snapshot is not a verified association')
+})
+
 test('G-ACP2-PR2 META-01: identical titles are not re-sent and another Session never receives this one projection', async () => {
   const view = projectionView('T1')
   await view.resume()

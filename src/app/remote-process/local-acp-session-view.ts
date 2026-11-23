@@ -919,6 +919,12 @@ interface ViewClaim {
    * the child's Agent was already disposed. It lives only with this claim.
    */
   subagentRuns?: Map<string, { readonly childId: string; readonly cwd?: string }>
+  /**
+   * The exact compacted lifecycles this View already projected, keyed by the
+   * durable `compactionId`: at most one start, one summary and one end per id,
+   * in order. A duplicated or out-of-order callback never re-projects it.
+   */
+  compactions?: Map<string, 'started' | 'summarized' | 'ended'>
 }
 
 /** The bounded load replay fence of one View. */
@@ -1691,7 +1697,13 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       // DRAIN: the buffered live events are committed to the tail in seq order
       // BEFORE the barrier closes, so an event arriving later can only queue
       // behind them. `seq <= cut` duplicates the snapshot and is dropped.
-      const live = replay.buffered.filter(event => event.seq > cut)
+      // The buffered live window joins by seq: ascending order and each seq
+      // exactly once, whatever order the observation callbacks arrived in.
+      const uniqueLive = new Map<number, AcpHistoryEvent>()
+      for (const event of replay.buffered) {
+        if (event.seq > cut && !uniqueLive.has(event.seq)) uniqueLive.set(event.seq, event)
+      }
+      const live = [...uniqueLive.values()].sort((left, right) => left.seq - right.seq)
       replay.buffered.length = 0
       claim.replay = undefined
       await this.enqueueProjectionTask(claim, async () => {
@@ -1825,9 +1837,11 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       }
       case 'compaction/start':
       case 'compaction/summary':
-      case 'compaction/end':
-        await this.sendProjection(claim, compactionUpdate({ seq: event.seq, type: event.type, data: event.data }))
+      case 'compaction/end': {
+        const update = compactionUpdate({ seq: event.seq, type: event.type, data: event.data })
+        if (this.acceptCompaction(claim, update)) await this.sendProjection(claim, update)
         return
+      }
       case 'session/title': {
         const update = sessionInfoUpdateOf(event.data, event.time)
         if (update === undefined) return
@@ -1984,6 +1998,31 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     await notify(claim.sessionId, update)
   }
 
+  /**
+   * The ONE per-claim compaction lifecycle gate. Each durable `compactionId`
+   * may contribute at most one start, one summary and one end, in that order;
+   * a duplicated or out-of-order callback is dropped instead of re-projecting
+   * a lifecycle the client already received.
+   */
+  private acceptCompaction(claim: ViewClaim, update: SessionUpdate): boolean {
+    if (update.sessionUpdate !== 'compaction_update') return true
+    const states = claim.compactions ??= new Map()
+    const current = states.get(update.compactionId)
+    if (update.status === 'in_progress' && update.summary === undefined) {
+      if (current !== undefined) return false
+      states.set(update.compactionId, 'started')
+      return true
+    }
+    if (update.status === 'in_progress') {
+      if (current !== 'started') return false
+      states.set(update.compactionId, 'summarized')
+      return true
+    }
+    if (current !== 'started' && current !== 'summarized') return false
+    states.set(update.compactionId, 'ended')
+    return true
+  }
+
   /** Record one live projection failure without failing a Host request. */
   private reportProjectionFailure(error: unknown): void {
     const code = error instanceof LocalAcpViewError
@@ -2003,6 +2042,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         throw new LocalAcpViewError('LOCAL_ACP_VIEW_CLOSED', 'the ACP view was released during its history replay', JSONRPC_INVALID_PARAMS)
       }
       if (unit.kind === 'update') {
+        if (!this.acceptCompaction(claim, unit.update)) continue
         await this.sendProjection(claim, unit.update)
         continue
       }
@@ -2011,6 +2051,25 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
           sessionUpdate: unit.image.sessionUpdate,
           messageId: unit.image.messageId,
           content: await this.readProjectionImage(replay, unit.image.ref),
+        })
+        continue
+      }
+      if (unit.kind === 'session-message') {
+        const blocks: AcpWireContentBlock[] = []
+        for (const part of unit.message.content) {
+          if (part.type === 'text') {
+            blocks.push({ type: 'text', text: part.text })
+            continue
+          }
+          blocks.push(await this.readProjectionImage(replay, part.ref))
+        }
+        if (blocks.length === 0) continue
+        await this.sendProjection(claim, {
+          sessionUpdate: 'session_message',
+          messageId: unit.message.messageId,
+          senderSessionId: unit.message.senderSessionId,
+          recipientSessionId: claim.sessionId,
+          content: blocks,
         })
         continue
       }
@@ -2071,8 +2130,14 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       if (access === undefined) continue
       // The official runId joins the end edge to the association the start
       // edge already verified: the child Agent is disposed before `end` is
-      // published, so a second lineage read would race that disposal.
+      // published, so a second lineage read would race that disposal. An end
+      // whose start this View never projected announces NOTHING — a lone idle
+      // snapshot would create an association this connection never observed.
       const known = edge === 'end' ? claim.subagentRuns?.get(info.runId) : undefined
+      if (edge === 'end' && (known === undefined || known.childId !== info.id)) {
+        this.diag.warn('local-acp.projection.subagent-unverified', { edge, reason: 'run-unknown' })
+        continue
+      }
       const task = this.enqueueProjectionTask(claim, async () => {
         const verified = known !== undefined && known.childId === info.id
           ? { childId: known.childId, ...(known.cwd === undefined ? {} : { cwd: known.cwd }) }

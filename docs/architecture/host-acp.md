@@ -760,9 +760,9 @@ The replay is fenced and ordered:
    block with no standard ACP v1 projection fails the whole load closed.
 4. The history is handed to the claim's single ordered output tail; every image
    is re-read and verified by the official Attachment Store inside that tail.
-5. Buffered live events are joined by their official `seq`: `seq <= cut` is a
-   duplicate of the snapshot and is dropped, `seq > cut` is projected once, in
-   order, after the history.
+5. Buffered live events are joined by their official `seq`: the window is
+   sorted ascending, a repeated seq is projected exactly once, `seq <= cut` is a
+   duplicate of the snapshot and is dropped, and `seq > cut` follows the history.
 6. The barrier closes atomically with that join, and the `session/load`
    response is sent ONLY after the ordered tail fully drained. A notification
    failure is a request error, never a swallowed success.
@@ -807,13 +807,23 @@ never becomes an answer to an ACP `session/prompt`.
 - **Compaction.** Only a client that declared `session.compaction` receives
   `compaction_update`: `start` → `in_progress`, `summary` → complete summary
   content replacement, `end` → `completed`, or `failed` with the official error.
-  No `compaction_summary_chunk` is produced (the Host has no streaming summary
+  Each durable `compactionId` contributes at most one start, one summary and one
+  end, in that order: a duplicated or out-of-order callback is dropped instead
+  of re-projecting a lifecycle this View already delivered. No
+  `compaction_summary_chunk` is produced (the Host has no streaming summary
   producer) and a cancelled compaction has no official state to report.
 - **Subagent child.** Only a client that declared `subagents` receives a
   `subagent_update` on the child's immediate parent Session, and only after the
   child header proves `origin:'subagent'` plus the exact durable creator. The
-  first announcement precedes any child traffic; child `capabilities` are
-  always omitted (no child mutation is offered).
+  official `runId` joins the lifecycle: the `end` edge announces the SAME
+  verified child as its `start`, and an `end` whose start this View never
+  announced sends nothing (a lone idle snapshot is not an observed
+  association). The first announcement precedes any child traffic; child
+  `capabilities` are always omitted (no child mutation is offered).
 - **Agent message.** Only a client that declared `subagents` receives a
-  `session_message` for a durable `agent-message` user message, with the real
-  `senderSessionId`, the exact recipient Session and the message's own content.
+  `session_message` for a durable `agent-message` user message — in the live
+  stream AND when that same durable message is replayed by `session/load` — with
+  the real `senderSessionId`, the exact recipient Session and the message's own
+  content. Other `user/message` source kinds are Host context, a continued
+  question reply or the runtime's settlement account, and none of them becomes
+  user or agent content.
